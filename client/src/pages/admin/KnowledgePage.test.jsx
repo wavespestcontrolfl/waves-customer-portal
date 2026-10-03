@@ -307,6 +307,36 @@ describe("KnowledgePage embedded navigation", () => {
       .toHaveAttribute("aria-current", "page");
   });
 
+  it("does not expose the owner-only Sources area (add / compile) to a technician", () => {
+    localStorage.setItem("waves_admin_user", JSON.stringify({ role: "technician" }));
+    renderWiki("/admin/knowledge?wikiTab=sources");
+
+    expect(screen.queryByRole("button", { name: "Sources" }))
+      .not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Articles" }))
+      .toHaveAttribute("aria-current", "page");
+    expect(fetch.mock.calls.some(([url]) => String(url).includes("/admin/knowledge/sources")))
+      .toBe(false);
+  });
+
+  it("lets a technician ask a question but not file the answer into the wiki", async () => {
+    localStorage.setItem("waves_admin_user", JSON.stringify({ role: "technician" }));
+    fetch.mockImplementation(async (url, options) => (
+      url.endsWith("/query") && options?.method === "POST"
+        ? response({ answer: "Technician answer", queryId: "query-1", articleTitles: [] })
+        : response({ articles: [] })
+    ));
+    renderWiki("/admin/knowledge");
+
+    fireEvent.click(screen.getByRole("button", { name: /ask a question/i }));
+    const question = screen.getByRole("textbox", { name: "Question" });
+    fireEvent.change(question, { target: { value: "Question from a technician" } });
+    fireEvent.submit(question.closest("form"));
+
+    expect(await screen.findByText("Technician answer")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "File into wiki" })).not.toBeInTheDocument();
+  });
+
   it.each(["compile", "add"])(
     "guards duplicate source %s requests and retries only a failed refresh",
     async (mutation) => {

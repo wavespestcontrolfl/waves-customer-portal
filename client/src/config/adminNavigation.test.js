@@ -305,6 +305,8 @@ describe("role scoping (adminOnly)", () => {
     expect(isPathAdminOnly("/admin/customers/duplicates")).toBe(true);
     expect(isPathAdminOnly("/admin/customers/gate-codes")).toBe(true);
     expect(isPathAdminOnly("/admin/settings/pest-pressure")).toBe(true);
+    // The turf-height OCR review queue reads and writes admin-only routes.
+    expect(isPathAdminOnly("/admin/turf-height")).toBe(true);
 
     expect(isPathAdminOnly("/admin")).toBe(false);
     // Dashboard's API is requireAdmin — owner-only despite being a mobile tab.

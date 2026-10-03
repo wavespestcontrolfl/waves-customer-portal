@@ -94,6 +94,32 @@ function invoiceAmountDue(invoice) {
   return Math.max(0, totalCents - creditCents) / 100;
 }
 
+// Estimate-deposit credit an invoice carries, in cents: the absolute amounts of
+// its ledger-backed `deposit_credit` line items (the application record
+// create() writes; voidInvoice's restore sums the same lines). Deposit credit
+// is prior payment, not a discount, and has no column of its own.
+function invoiceDepositCreditCents(invoice) {
+  let items = [];
+  try {
+    const raw = invoice && invoice.line_items;
+    const arr = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    items = Array.isArray(arr) ? arr : [];
+  } catch { items = []; }
+  return items
+    .filter((item) => item?.category === 'deposit_credit')
+    .reduce((sum, line) => sum + Math.abs(Math.round(Number(line.amount ?? line.unit_price ?? 0) * 100)), 0);
+}
+
+// What the invoice itself bills, in cents, before any card surcharge: the
+// expression InvoiceService.create() stores as `total` (and the draft-edit
+// recompute, calculateUpdateFinancials, repeats): max(0, subtotal - discount +
+// tax - applied deposit credit). A settled total can never honestly be lower.
+function invoicePrincipalCents(invoice) {
+  const netCents = Math.round(((Number(invoice && invoice.subtotal) || 0)
+    - (Number(invoice && invoice.discount_amount) || 0) + (Number(invoice && invoice.tax_amount) || 0)) * 100);
+  return Math.max(0, netCents - invoiceDepositCreditCents(invoice));
+}
+
 function isInvoiceCollectibleStatus(status) {
   return !INVOICE_UNCOLLECTIBLE_STATUSES.includes(invoiceStatusKey(status));
 }
@@ -203,6 +229,42 @@ function invoiceWithdrawnFromCustomer(invoice) {
   return !!invoice
     && typeof invoice === 'object'
     && PACKET_WITHDRAWN_SEND_ERROR.test(String(invoice.scheduled_send_error || ''));
+}
+
+/**
+ * Does the refunded Stripe payment still OWN this invoice? (B03 — the
+ * single-invoice twin of the combined refund path's codex r36 P1 guard.)
+ *
+ * A dispute-created reopen clears the invoice's PaymentIntent, and a
+ * REPLACEMENT payment can then pay it, leaving the invoice row pointing at the
+ * replacement. A full refund of the ORIGINAL (reinstated) charge must not
+ * terminalize that invoice, hand back credit the replacement still consumes,
+ * or cancel prepay coverage the replacement is paying for.
+ *
+ * The invoice row is the authority, and the CHARGE is the stronger pointer.
+ * When the invoice carries a stripe_charge_id and the refunded payment has a
+ * charge id, they must be equal: the reconcile route stamps
+ * invoices.stripe_charge_id for a charge-only payment and deliberately leaves
+ * any older PaymentIntent on the row, so a replacement charge can sit beside
+ * the ORIGINAL payment's stale PI — matching on that PI would hand the
+ * replacement-paid invoice back to the original. Every settle write restamps
+ * the charge pointer (to the new charge, or to null), so a non-null one is
+ * always the current owner. Only when the charges cannot be compared (the
+ * invoice has none yet — a refund arriving before settlement — or the payment
+ * has none) does the PaymentIntent decide. An invoice pointing at neither
+ * (including one whose pointers a dispute reopen cleared) is not owned by
+ * this payment. A payment with no Stripe identity at all has nothing to
+ * compare, so it keeps the legacy answer.
+ */
+function refundedPaymentOwnsInvoice(invoice, { paymentIntentId, chargeId } = {}) {
+  if (!invoice) return false;
+  const pi = paymentIntentId ? String(paymentIntentId) : null;
+  const charge = chargeId ? String(chargeId) : null;
+  if (!pi && !charge) return true;
+  const invoicePi = invoice.stripe_payment_intent_id ? String(invoice.stripe_payment_intent_id) : null;
+  const invoiceCharge = invoice.stripe_charge_id ? String(invoice.stripe_charge_id) : null;
+  if (charge && invoiceCharge) return invoiceCharge === charge;
+  return !!pi && invoicePi === pi;
 }
 
 // Codex round-23 P1: ONE definition of "a collectible invoice the HOMEOWNER owes" shared by the SMS context
@@ -376,12 +438,15 @@ module.exports = {
   assertInvoiceVoidable,
   isInvoiceCollectibleStatus,
   invoiceWithdrawnFromCustomer,
+  refundedPaymentOwnsInvoice,
   OWN_COLLECTIBLE_INVOICE_STATUSES,
   PARTIALLY_PAID_STATUS,
   isUncountedPartialDueInvoice,
   isCollectibleOwnInvoice,
   hasCollectibleAmountDue,
   invoiceAmountDue,
+  invoiceDepositCreditCents,
+  invoicePrincipalCents,
   formatCardLine,
   COLLECTION_PENDING_FENCE_CODES,
   isCollectionPendingFenceError,

@@ -13148,7 +13148,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // to invoice the first application — rewrite the payload with the
           // amount minted here, or staff would be told to invoice it by hand a
           // second time (GH codex P1 r7 on #3751).
-          if (shouldCreateStandardDraftInvoice && includesFirstApplicationLine && standardConversionResult?.perApplicationFeeNotification) {
+          // finalBody: the multi-program unpriced-series alert already says what it
+          // needs to and is not about the first application's invoice.
+          if (shouldCreateStandardDraftInvoice && includesFirstApplicationLine && standardConversionResult?.perApplicationFeeNotification
+            && !standardConversionResult.perApplicationFeeNotification.finalBody) {
             standardConversionResult.perApplicationFeeNotification.body = EstimateConverter.perApplicationFeeUnresolvedBody(estimate.id, standardFirstApplicationAmount);
           }
           // Disclosed rodent bait-station setup (owner 2026-08-29; codex

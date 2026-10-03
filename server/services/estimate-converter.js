@@ -2793,6 +2793,82 @@ function reservedAcceptPerVisitSplit({
   return { reserved: roundMoney(reserved), promoted: promoted.map(roundMoney) };
 }
 
+// Per-unit per-visit amounts for a NO-SLOT multi-program accept (B06/B17).
+// The plain auto-schedule loop leaves every unit's PARENT unpriced on purpose
+// (the combined first-application invoice covers each program's first visit —
+// stampCombinedFirstApplicationInvoiceCoverage verifies the members are
+// unpriced), but its seeded CHILDREN copied that NULL, so every later visit
+// completed on the customer-level fallback: the EXISTING per_application_fee
+// (an add-on bills the old plan's fee) or nothing at all (a new customer's
+// whole schedule completes unbilled). The authority is the accept route's
+// own firstApplicationRowAmounts — the per-service figures the customer was
+// shown, that the first-application invoice summed, and that the reserved
+// split already prices its children from. Returns Map<unit, amount> ONLY when
+// every unit resolves to a positive amount AND every route row is consumed by
+// exactly one unit (rows and units agree one-to-one); anything else returns
+// null and the units stay unpriced for the office alert — never a guess, never
+// an annual/visits reconstruction (a preference or plan credit would make it
+// disagree with what the customer saw).
+function autoScheduleUnitPerVisitAmounts({ units = [], rowAmounts = null } = {}) {
+  if (!Array.isArray(rowAmounts) || !rowAmounts.length || !Array.isArray(units) || !units.length) return null;
+  const routeRows = routeRowLineAmounts(rowAmounts);
+  if (!routeRows) return null;
+  const byUnit = new Map();
+  for (const unit of units) {
+    const lines = unit?.combo ? (unit.combo.combinedFrom || []) : [unit?.svc];
+    if (!lines.length) return null;
+    let total = 0;
+    for (const line of lines) {
+      const amount = line ? routeRows.amountFor(line) : 0;
+      if (!(amount > 0)) return null;
+      total += amount;
+    }
+    byUnit.set(unit, roundMoney(total));
+  }
+  if (!routeRows.allRowsConsumed()) return null;
+  return byUnit;
+}
+
+// Office alert payload for a multi-program accept whose auto-scheduled series
+// could not be priced per unit (B17: a new customer's schedule would complete
+// unbilled; B06: an existing per-application customer's add-on would bill the
+// old plan's fee). Composed with the canonical admin-alert helper so the row
+// carries the eight structured parts; dispatched post-commit by the same
+// callers that dispatch perApplicationFeeNotification (one bell per estimate —
+// the single-unit and multi-unit shapes are mutually exclusive).
+function unpricedMultiUnitAlertPayload({ estimateId, customerId, existingFee = null, scheduledServiceIds = [] } = {}) {
+  const hasExistingFee = Number(existingFee) > 0;
+  const spec = {
+    area: 'Billing',
+    action: hasExistingFee ? 'Added services have no price of their own' : 'New plan visits have no price set',
+    why: hasExistingFee
+      ? 'Their visits would bill the account\'s existing per-application fee, not what the estimate quoted.'
+      : 'No per-application price is on file, so these visits would finish without an invoice.',
+    severity: 'needs-you',
+    who: 'person',
+    subject: { type: 'estimate', id: String(estimateId) },
+    doneWhen: 'per_application_price_set',
+    link: `/admin/customers?customerId=${customerId}`,
+  };
+  const dedupeKey = `per-application-fee-unresolved:${estimateId}`;
+  const options = { link: spec.link, bell: true, dedupeKey, metadata: { estimateId, customerId, scheduledServiceIds } };
+  const body = `Estimate #${estimateId} was accepted with more than one recurring service and no price could be matched to each one. `
+    + (hasExistingFee
+      ? `Until each added service's visits are priced, they complete at the account's existing $${Number(existingFee).toFixed(2)} per-application fee — set each visit's price from the estimate before the first one.`
+      : 'Until each service\'s visits are priced (or a per-application fee is set), they complete with no invoice — set each visit\'s price from the estimate before the first one, and invoice any visit already done by hand.');
+  try {
+    const { composeAdminAlert } = require('./admin-alert-compose');
+    const composed = composeAdminAlert(spec);
+    options.metadata = { ...options.metadata, ...composed.metadata };
+    // why stays one sentence under the bell's length rule; the full steps ride
+    // in `detail` (notification-service moves an over-length body there).
+    return { type: 'billing', title: composed.headline, body: `${composed.why} ${body}`, finalBody: true, options };
+  } catch (err) {
+    logger.warn(`[estimate-converter] unpriced multi-unit alert compose failed (raw payload used): ${err.message}`);
+    return { type: 'billing', title: `Billing — ${spec.action}`, body, finalBody: true, options };
+  }
+}
+
 // FL nonresidential sales tax DEFAULT (6% state + 1% surtax). Used only as the
 // fallback when the customer's effective rate can't be resolved (e.g. the
 // pre-accept estimate display before the customer row exists). The actual
@@ -5698,6 +5774,12 @@ const EstimateConverter = {
     // Stays empty for a genuine single-program accept either way (nothing
     // to stamp as a pair).
     const combinedInvoiceMemberIds = [];
+    // Top-level parents the plain auto-schedule loop inserted for a
+    // multi-program accept WITHOUT a per-unit price (B06/B17) — their later
+    // visits complete on the customer-level fallback. Feeds the post-commit
+    // office alert below; empty for single-program accepts and whenever every
+    // unit was priced from the route's per-service amounts.
+    const unpricedAutoScheduledParentIds = [];
     const deferredFollowUpReminderRows = [];
     // Per-property duplicate-series scope (codex #3244 r1): an accept that
     // resolves to a customer who already runs a series would read that
@@ -7013,8 +7095,20 @@ const EstimateConverter = {
       const scheduleUnits = riderCtx
         ? lawnHostFirst(scheduleUnitsListed, (unit) => unit.svc, inferredFrequencyKey, acceptedPlanFrequency)
         : scheduleUnitsListed;
+      // B06/B17: price every unit's seeded follow-ups from the accept route's
+      // per-service amounts (see autoScheduleUnitPerVisitAmounts). Null when a
+      // single-program accept (nothing to split — its one row already carries
+      // the plan amount), when the route sent no rows, or when rows and units
+      // do not agree exactly — those units stay unpriced and alert below.
+      const autoSchedulePerVisit = recurringUnitCount > 1
+        ? autoScheduleUnitPerVisitAmounts({
+          units: scheduleUnits,
+          rowAmounts: Array.isArray(opts.firstApplicationRowAmounts) ? opts.firstApplicationRowAmounts : null,
+        })
+        : null;
       for (const unit of scheduleUnits) {
         const svc = unit.svc;
+        const unitPerVisit = autoSchedulePerVisit?.get(unit) ?? undefined;
         let combinedServiceId = null;
         let acceptedPestServiceName = null;
         if (unit.catalogServiceKey) {
@@ -7232,6 +7326,12 @@ const EstimateConverter = {
                 acceptedPlanFrequency,
                 registerReminders: registerSeededRowsInline,
                 riderCtx,
+                // Multi-program accept: the PARENT stays unpriced (the combined
+                // first-application invoice covers its first visit) while the
+                // follow-ups bill this unit's own quoted per-visit amount, the
+                // same split the reserved-slot path applies. undefined = the
+                // seeder's parent-copy price (single-program accepts).
+                estimatedPrice: unitPerVisit,
               });
             } catch (seedErr) {
               logger.error(`[estimate-converter] Failed to seed recurring follow-ups for estimate ${estimateId}: ${seedErr.message}`);
@@ -7252,6 +7352,9 @@ const EstimateConverter = {
               logger.warn(`[estimate-converter] duplicate-series skip note failed: ${noteErr.message}`);
             }
             continue;
+          }
+          if (outcome.insertedId && recurringUnitCount > 1 && unitPerVisit == null) {
+            unpricedAutoScheduledParentIds.push(outcome.insertedId);
           }
           if (outcome.insertedId && !firstScheduledServiceId) {
             firstScheduledServiceId = outcome.insertedId;
@@ -7296,6 +7399,28 @@ const EstimateConverter = {
       // (codex r15 P2). A mixed plan keeps its earliest real visit date;
       // if nothing inserted (duplicate-series keeps), the picked date stands.
       if (earliestScheduledUnitDate) termStartDate = earliestScheduledUnitDate;
+    }
+
+    // B06/B17 office alert: a multi-program accept whose auto-scheduled series
+    // could not be priced per unit. The single-unit park bell above needs
+    // recurringUnitCount === 1 and the route's completeness alert only reads
+    // reserved/adopted appointments, so this shape alerted nobody — a new
+    // customer's schedule completed unbilled and an existing per-application
+    // customer's add-on silently billed the old plan's fee. Rides the same
+    // deferred field every accept path already dispatches post-commit (a
+    // rolled-back accept never pages). Same eligibility as the single-unit
+    // bell: columns present, standard billing, not a monthly member whose dues
+    // cover the visits, no pinned dues-lane rodent plan.
+    if (unpricedAutoScheduledParentIds.length && !perApplicationFeeNotification
+      && billingModeColumnsExist && !suppressRecurringConversion && billingTerm !== 'prepay_annual'
+      && !pinnedLegacyRodentOnlyPlan && !preservesExistingMembership) {
+      logger.warn(`[estimate-converter] multi-program accept ${estimateId} (customer ${customerId}) scheduled ${unpricedAutoScheduledParentIds.length} unit(s) with no per-unit price — office alerted`);
+      perApplicationFeeNotification = unpricedMultiUnitAlertPayload({
+        estimateId,
+        customerId,
+        existingFee: effectiveCustomer.billing_mode === 'per_application' ? effectiveCustomer.per_application_fee : null,
+        scheduledServiceIds: unpricedAutoScheduledParentIds,
+      });
     }
 
     // 3. Log conversion in activity_log
@@ -7401,7 +7526,7 @@ const EstimateConverter = {
       // about to invoice itself (pre-push codex P1): with an explicit
       // first-application amount on the way, point them at LATER
       // applications only.
-      if (perApplicationFeeNotification && Number(standardFirstApplicationAmount) > 0) {
+      if (perApplicationFeeNotification && !perApplicationFeeNotification.finalBody && Number(standardFirstApplicationAmount) > 0) {
         perApplicationFeeNotification.body = perApplicationFeeUnresolvedBody(estimateId, standardFirstApplicationAmount);
       }
       const setupFeeApplies = billingTerm === 'standard'
@@ -8614,6 +8739,8 @@ async function buildSeriesAddressScope(database, estimate, customerId) {
 
 module.exports = EstimateConverter;
 module.exports.reservedAcceptPerVisitSplit = reservedAcceptPerVisitSplit;
+module.exports.autoScheduleUnitPerVisitAmounts = autoScheduleUnitPerVisitAmounts;
+module.exports.unpricedMultiUnitAlertPayload = unpricedMultiUnitAlertPayload;
 module.exports.isAutoScheduledCombinedInvoiceSibling = isAutoScheduledCombinedInvoiceSibling;
 module.exports.buildSeriesAddressScope = buildSeriesAddressScope;
 module.exports.visitCountAliasValues = visitCountAliasValues;
