@@ -14,7 +14,7 @@
 jest.mock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info: jest.fn() }));
 
 const {
-  freezeLawnVisitMemory, resolveVisitMemoryForRender, selectPriorVisit, storedVisitMemoryFor, recordPairedRecheck,
+  freezeLawnVisitMemory, resolveVisitMemoryForRender, selectPriorVisit, storedVisitMemoryFor, recordPairedRecheck, recordRetreatCheck, buildSinceLast, publicSinceLast,
 } = require('../services/service-report/lawn-visit-memory');
 
 const URL = process.env.LAWN_VISIT_MEMORY_TEST_DATABASE_URL || process.env.DATABASE_URL;
@@ -43,7 +43,7 @@ describeIfDb.each([['jsonb'], ['text']])('lawn visit memory freeze (postgres, st
       connection: URL,
       pool: { min: 0, max: 12, afterCreate: (conn, done) => conn.query(`SET search_path TO ${schema}`, (err) => done(err, conn)) },
     });
-    await knex.raw(`CREATE TABLE service_records (id text PRIMARY KEY, customer_id text, structured_notes ${columnType})`);
+    await knex.raw(`CREATE TABLE service_records (id text PRIMARY KEY, customer_id text, structured_notes ${columnType}, report_template_version text DEFAULT 'service_report_v1')`);
   });
   afterAll(async () => {
     if (!knex) return;
@@ -187,6 +187,93 @@ describeIfDb.each([['jsonb'], ['text']])('lawn visit memory freeze (postgres, st
       expect(results.every(Boolean)).toBe(true);
       const checks = (await notes()).lawnVisitMemory['as-C'].sinceLast.checks;
       expect(checks.map((c) => c.recheck && c.recheck.verdict)).toEqual(['better', 'worse']);
+    });
+  });
+
+  // P31: the rainfast retreat-check is written onto an ALREADY FROZEN entry by the
+  // same compare-and-set UPDATE. Real SQL, both column types.
+  describe('recordRetreatCheck (P31)', () => {
+    const item = (inches = 0.4) => ({
+      v: 1, kind: 'rainfast_breach', source: 'open_meteo', windowFrom: '2026-09-02T18:00:00.000Z',
+      breaches: [{ minutes: 180, inches, windowTo: '2026-09-02T21:00:00.000Z', products: ['Test Herbicide'] }],
+      recordedAt: '2026-09-03T00:00:00.000Z',
+    });
+
+    test('writes one item on the frozen entry; every other byte of the record is untouched', async () => {
+      const frozen = entry('as-C', 'This Visit', { checks: [{ key: 'weeds', status: 'watch' }] });
+      await freezeLawnVisitMemory('s1', frozen, knex);
+      await freezeLawnVisitMemory('s1', entry('as-Z', 'Other Visit'), knex);
+      await expect(recordRetreatCheck('s1', 'as-C', item(), knex)).resolves.toEqual(item());
+      const n = await notes();
+      expect(n.timeOnSiteAdjusted).toBe(true);
+      expect(n.lawnVisitMemory['as-Z']).toEqual(entry('as-Z', 'Other Visit'));
+      expect(n.lawnVisitMemory['as-C']).toEqual({ ...frozen, retreatCheck: item() });
+    });
+
+    test('first writer wins: a second item is refused and the stored one is handed back', async () => {
+      await freezeLawnVisitMemory('s1', entry('as-C', 'This Visit'), knex);
+      await recordRetreatCheck('s1', 'as-C', item(0.4), knex);
+      await expect(recordRetreatCheck('s1', 'as-C', item(0.9), knex)).resolves.toEqual(item(0.4));
+      expect((await notes()).lawnVisitMemory['as-C'].retreatCheck).toEqual(item(0.4));
+    });
+
+    test('a record that stopped being a readable report writes nothing: another template, or a suppressed typed report', async () => {
+      await freezeLawnVisitMemory('s1', entry('as-C', 'This Visit'), knex);
+      await knex('service_records').where({ id: 's1' }).update({ report_template_version: 'other_template' });
+      await expect(recordRetreatCheck('s1', 'as-C', item(), knex)).resolves.toBeNull();
+      expect((await notes()).lawnVisitMemory['as-C'].retreatCheck).toBeUndefined();
+      await knex('service_records').where({ id: 's1' }).update({ report_template_version: 'service_report_v1' });
+      const withDelivery = async (mode) => {
+        const n = await notes();
+        n.typedReportDelivery = mode;
+        await knex('service_records').where({ id: 's1' }).update({ structured_notes: JSON.stringify(n) });
+      };
+      await withDelivery('internal_only');
+      await expect(recordRetreatCheck('s1', 'as-C', item(), knex)).resolves.toBeNull();
+      await withDelivery('disabled');
+      await expect(recordRetreatCheck('s1', 'as-C', item(), knex)).resolves.toBeNull();
+      expect((await notes()).lawnVisitMemory['as-C'].retreatCheck).toBeUndefined();
+      // readable again (auto_send, an empty marker, or none) writes
+      await withDelivery('');
+      await expect(recordRetreatCheck('s1', 'as-C', item(), knex)).resolves.toEqual(item());
+    });
+
+    test('auto_send and an absent marker are readable', async () => {
+      await freezeLawnVisitMemory('s1', entry('as-C', 'This Visit'), knex);
+      const n = await notes();
+      n.typedReportDelivery = 'auto_send';
+      await knex('service_records').where({ id: 's1' }).update({ structured_notes: JSON.stringify(n) });
+      await expect(recordRetreatCheck('s1', 'as-C', item(), knex)).resolves.toEqual(item());
+    });
+
+    test('never creates an entry', async () => {
+      await expect(recordRetreatCheck('s1', 'as-C', item(), knex)).resolves.toBeNull();
+      expect((await notes()).lawnVisitMemory).toBeUndefined();
+    });
+
+    test('racing with a paired recheck on the same entry: both land', async () => {
+      const frozen = entry('as-C', 'This Visit', {
+        sinceLast: { v: 1, priorAssessmentId: 'as-P', priorDate: '2026-08-01', applied: [], checks: [{ key: 'weeds', status: 'watch' }] },
+      });
+      await freezeLawnVisitMemory('s1', frozen, knex);
+      const [a, b] = await Promise.all([
+        recordRetreatCheck('s1', 'as-C', item(), knex),
+        recordPairedRecheck('s1', 'as-C', { rechecks: { weeds: { verdict: 'better', source: 'photo_pair', whatChanged: [], pairs: [], promptVersion: 'p' } } }, knex),
+      ]);
+      expect(a).toEqual(item());
+      expect(b).toEqual({ written: ['weeds'], photoPairs: false });
+      const stored = (await notes()).lawnVisitMemory['as-C'];
+      expect(stored.retreatCheck).toEqual(item());
+      expect(stored.sinceLast.checks[0].recheck.verdict).toBe('better');
+    });
+
+    test('the next visit carries the item as engine input and the public block leaves it off', async () => {
+      await freezeLawnVisitMemory('s1', entry('as-P', 'Prior Visit', { checks: [{ key: 'weeds', status: 'watch' }] }), knex);
+      await recordRetreatCheck('s1', 'as-P', item(), knex);
+      const priorMemory = storedVisitMemoryFor(await notes(), 'as-P');
+      const sinceLast = buildSinceLast({ priorVisit: { assessmentId: 'as-P', date: '2026-09-02' }, priorMemory });
+      expect(sinceLast.retreatCheck).toEqual(item());
+      expect(publicSinceLast(sinceLast)).not.toHaveProperty('retreatCheck');
     });
   });
 });
