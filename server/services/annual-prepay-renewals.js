@@ -5506,10 +5506,29 @@ async function syncTermForRefundedPayment(payment, conn = db) {
   // metadata.invoice_id first, which a dispute-created reopen never clears.
   // When a REPLACEMENT payment has since paid the invoice, the invoice row
   // points at the replacement, and refunding the ORIGINAL charge must not
-  // claw back coverage the replacement is paying for. Covers both callers
-  // (the webhook's per-row loop, combined rows included, and the in-app
-  // refund). A payment with no Stripe identity to compare keeps the legacy
-  // claw-back (refundedPaymentOwnsInvoice).
+  // claw back coverage the replacement is paying for. A payment with no
+  // Stripe identity to compare keeps the legacy claw-back
+  // (refundedPaymentOwnsInvoice).
+  //
+  // What makes this unlocked read stable, per caller: the invoice is already
+  // terminalized to 'refunded' under its row lock BEFORE this runs, and every
+  // replacement-settlement path refuses a refunded invoice under that same
+  // lock, so ownership cannot change between this read and the term cancel.
+  //   - charge.refunded webhook: terminalized in the handler's own
+  //     transaction (returnAppliedCreditOnRefund, after the ownership check),
+  //     committed before this post-commit call.
+  //   - in-app StripeService.refund: terminalized by its credit-restore
+  //     block, which deliberately runs BEFORE this call (it finds the
+  //     invoice by the refunded PI, i.e. only an invoice that PI still owns).
+  // An invoice the payment does not own is never terminalized by either, so
+  // it is skipped here without a lock.
+  //
+  // Why the invoice row lock is NOT held across the transition: settlement
+  // and the pay-page paths lock customer THEN invoice (stripe.js settlement
+  // helpers, the webhook succeeded fallback), while dispute-created
+  // locks term, customer, THEN invoice, and the cancel below takes term then
+  // customer. Holding the invoice first would invert both orders for the
+  // same invoice and can deadlock a replacement payment or a dispute.
   const invoiceRow = await conn('invoices')
     .where({ id: invoiceId })
     .first('id', 'stripe_payment_intent_id', 'stripe_charge_id');
