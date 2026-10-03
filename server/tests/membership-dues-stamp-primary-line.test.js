@@ -6,6 +6,11 @@
  * "the month's dues". The Postgres suite covers the full mint.
  */
 jest.mock('../models/db', () => jest.fn());
+const mockRaise = jest.fn(async () => ({ id: 1 }));
+jest.mock('../services/admin-alert-compose', () => ({
+  ...jest.requireActual('../services/admin-alert-compose'),
+  raiseAdminAlert: (...args) => mockRaise(...args),
+}));
 const mockLogger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
 jest.mock('../services/logger', () => mockLogger);
 
@@ -94,5 +99,62 @@ describe('prepaid marker vs a newly minted dues invoice — selection and copy',
     expect(composed.headline.length).toBeLessThanOrEqual(60);
     expect(composed.metadata.subject).toEqual({ type: 'invoice', id: 'inv-1' });
     expect(composed.metadata.severity).toBe('needs-you');
+  });
+});
+
+// A refunded dues invoice restored by a bounced refund beside a replacement
+// dues invoice (or a collected month): the unpaid replacement is voided through
+// the canonical void; anything else is ONE needs-you alert, never an automatic refund.
+describe('reconcileMembershipDuesRestore', () => {
+  const db = require('../models/db');
+  const { composeAdminAlert } = jest.requireActual('../services/admin-alert-compose');
+  const ctx = (over = {}) => ({ invoiceId: 'inv-orig', invoiceNumber: 'WPC-1', customerId: 'cust-1', month: '2026-09',
+    replacement: { id: 'inv-repl', status: 'sent', invoice_number: 'WPC-2' }, collectedPaymentId: null, ...over });
+  let voidSpy;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.mockImplementation(() => ({ where: () => ({ first: async () => ({ first_name: 'Fixture', last_name: 'DuesMember' }) }) }));
+    voidSpy = jest.spyOn(InvoiceService, 'voidInvoice').mockResolvedValue({});
+  });
+  afterEach(() => voidSpy.mockRestore());
+
+  test('nothing beside the restored original: no void, no alert', async () => {
+    await InvoiceService.reconcileMembershipDuesRestore(null);
+    await InvoiceService.reconcileMembershipDuesRestore(ctx({ replacement: null }));
+    expect(voidSpy).not.toHaveBeenCalled();
+    expect(mockRaise).not.toHaveBeenCalled();
+  });
+
+  test('an UNPAID replacement is voided through the canonical void, with no alert', async () => {
+    await InvoiceService.reconcileMembershipDuesRestore(ctx());
+    expect(voidSpy).toHaveBeenCalledWith('inv-repl');
+    expect(mockRaise).not.toHaveBeenCalled();
+  });
+
+  test('a refused void raises ONE alert to void it by hand', async () => {
+    voidSpy.mockRejectedValueOnce(new Error('payment in flight'));
+    await InvoiceService.reconcileMembershipDuesRestore(ctx());
+    expect(mockRaise).toHaveBeenCalledTimes(1);
+    const [category, spec, opts] = mockRaise.mock.calls[0];
+    expect(category).toBe('billing');
+    expect(spec.action).toMatch(/void/);
+    expect(opts.dedupeKey).toBe('dues_restore_conflict:inv-orig:inv-repl');
+    expect(composeAdminAlert(spec).headline.length).toBeLessThanOrEqual(60);
+  });
+
+  test.each([['paid'], ['prepaid'], ['processing']])('a %s replacement is never voided: ONE "paid twice" alert, no automatic refund', async (status) => {
+    await InvoiceService.reconcileMembershipDuesRestore(ctx({ replacement: { id: 'inv-repl', status, invoice_number: 'WPC-2' } }));
+    expect(voidSpy).not.toHaveBeenCalled();
+    expect(mockRaise).toHaveBeenCalledTimes(1);
+    const [, spec] = mockRaise.mock.calls[0];
+    expect(spec.action).toMatch(/refund/);
+    expect(spec.why).toMatch(/paid twice/);
+    expect(() => composeAdminAlert(spec)).not.toThrow();
+  });
+
+  test('a month already collected by a payment (no replacement invoice) alerts once, keyed on the payment', async () => {
+    await InvoiceService.reconcileMembershipDuesRestore(ctx({ replacement: null, collectedPaymentId: 'pay-9' }));
+    expect(voidSpy).not.toHaveBeenCalled();
+    expect(mockRaise.mock.calls[0][2].dedupeKey).toBe('dues_restore_conflict:inv-orig:pay-9');
   });
 });

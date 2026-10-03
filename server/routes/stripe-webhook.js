@@ -4189,6 +4189,7 @@ async function handleRefundFailed(refund) {
       const rowPiId = piId || payment.stripe_payment_intent_id || null;
       let resettleFencedPiId = null;
       const restored = [];
+      const duesRestores = [];
       await db.transaction(async (trx) => {
         // Same per-charge lock as charge.refunded's combined branch (codex
         // r12 P1) — the two unwinds are strictly ordered, so the refunded
@@ -4303,6 +4304,13 @@ async function handleRefundFailed(refund) {
             metadata: JSON.stringify(nextMeta),
           });
           const invId = meta.invoice_id || null;
+          // Same hole as the single-payment restore: a stamped dues invoice
+          // coming back (reopened or paid) beside a replacement dues invoice.
+          // Found under the dues-month lock (TRY) before the flip, reconciled
+          // after the commit.
+          const duesRestore = invId
+            ? await require('../services/invoice').prepareMembershipDuesRestore(trx, invId, { exceptPaymentId: row.id })
+            : null;
           if (invId && debitAlreadyTerminal) {
             // Reopen like the failure path — the money never arrived.
             const termInvoice = await trx('invoices').where({ id: invId, status: 'refunded' }).first();
@@ -4319,6 +4327,7 @@ async function handleRefundFailed(refund) {
               // side effects (codex #3591 r47 local P0) — the reopened
               // invoice's own line is collectible again.
               if (reopened > 0) {
+                duesRestores.push(duesRestore);
                 await require('../services/invoice').retireRodentSetupObligationForReinstatedInvoice(trx, invId);
               }
             }
@@ -4342,6 +4351,7 @@ async function handleRefundFailed(refund) {
                   paid_at: meta.settled_event_at || new Date().toISOString(),
                   updated_at: new Date(),
                 });
+            if (flipped > 0) duesRestores.push(duesRestore);
             if (flipped > 0) {
               // Leaving 'refunded' (codex #3591 r47 local P0): the money
               // stood, so the restored setup stamp / draft re-bill would
@@ -4385,6 +4395,9 @@ async function handleRefundFailed(refund) {
       // the only re-sync. payment_pending terms reactivate through the
       // sanctioned state machine; refund-cancelled terms stay cancelled by
       // design (the notification above names the manual remediation).
+      for (const duesRestoreCtx of duesRestores) {
+        await require('../services/invoice').reconcileMembershipDuesRestore(duesRestoreCtx);
+      }
       for (const restoredId of restored) {
         try {
           await require('../services/annual-prepay-renewals').syncTermForInvoicePayment(restoredId);
@@ -4623,6 +4636,7 @@ async function handleRefundFailed(refund) {
   }
 
   let restoredInvoiceId = null;
+  let duesRestoreContext = null;
   await db.transaction(async (trx) => {
     if (feeUnwindLockKey) {
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [feeUnwindLockKey]);
@@ -4725,6 +4739,10 @@ async function handleRefundFailed(refund) {
     // the restore entirely.
     let invoiceRestored = null;
     if (linkedInvoice && nextRefundCents < rowPaidCents) {
+      // A stamped dues invoice coming back to life beside a replacement dues
+      // invoice (or a collected month): found under the dues-month lock (a TRY,
+      // THE LOCK RULE) BEFORE the flip; reconciled after the restore commits.
+      const duesRestore = await require('../services/invoice').prepareMembershipDuesRestore(trx, linkedInvoice.id, { exceptPaymentId: row.id });
       const flipped = await trx('invoices')
         .where({ id: linkedInvoice.id, status: 'refunded' })
         // paid_at restored with the status (codex r11 P1, same reasoning
@@ -4733,6 +4751,7 @@ async function handleRefundFailed(refund) {
         // every outstanding-balance surface.
         .update({ status: 'paid', paid_at: nextMeta.settled_event_at || new Date().toISOString(), updated_at: new Date() });
       if (flipped > 0) {
+        duesRestoreContext = duesRestore;
         invoiceRestored = linkedInvoice.invoice_number || linkedInvoice.id;
         restoredInvoiceId = linkedInvoice.id;
         // Leaving 'refunded' (codex #3591 r47 local P0): retire the
@@ -4769,6 +4788,9 @@ async function handleRefundFailed(refund) {
       logger.error(`[stripe-webhook] annual-prepay resync after refund bounce failed for invoice ${restoredInvoiceId}: ${err.message}`);
     }
   }
+  // A replacement dues invoice (or a collected month) that now sits beside the
+  // restored original: voided if unpaid, otherwise an office alert (best effort).
+  await require('../services/invoice').reconcileMembershipDuesRestore(duesRestoreContext);
 
   // Appointment-fee pre-settlement refund marker whose refund BOUNCED
   // (Codex #3153 r18 P1): Stripe kept the fee, but the acknowledged

@@ -990,7 +990,8 @@ function membershipDuesProvenanceHolds({ visit, customer, lineAmount }) {
 // confirmation; un-voiding, which takes its customer / visit / invoice rows
 // first and the month last; the full-refund transition of a stamped invoice,
 // which runs inside the webhook's / admin refund's transaction that already
-// holds the invoice row) or the bounded poll below (the mint), and a miss is
+// holds the invoice row; the refund-FAILED restore of a stamped invoice, which
+// runs inside the webhook's transaction that holds the payment row) or the bounded poll below (the mint), and a miss is
 // the same retryable refusal, never a wait. The void / cancelled-visit void
 // additionally TRY the customer collection claim right after the month lock
 // (month, then claim: the order the mint and un-void take them in), so a

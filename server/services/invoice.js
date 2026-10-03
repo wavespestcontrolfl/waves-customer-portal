@@ -2211,6 +2211,97 @@ async function alertIfMembershipDuesCoverageReleased(invoiceRow, { releasedBy = 
   }
 }
 
+// A refunded stamped dues invoice stops covering its month, so another visit can
+// mint a REPLACEMENT stamped invoice (or the cron can collect the month). If the
+// refund then BOUNCES, the webhook brings the original back to life beside it:
+// the month would be billed twice. The same situation as un-voiding
+// (assertStampedDuesMonthFreeToRestore), handled differently because the money is
+// real and the restore must happen: prepare (inside the webhook's transaction,
+// which already holds the payment row, so by THE LOCK RULE only a TRY of the
+// month lock; busy throws and Stripe redelivers) finds the replacement or
+// collected payment; reconcile (after the restore commits, best effort) voids an
+// UNPAID replacement through the canonical voidInvoice, and raises ONE needs-you
+// Billing alert when the replacement is paid / processing / already collected
+// (no automatic refund: a person decides) or when the void is refused. Returns
+// null for an invoice that is not a stamped dues invoice.
+async function prepareMembershipDuesRestore(trx, invoiceId, { exceptPaymentId = null } = {}) {
+  const inv = await trx("invoices").where({ id: invoiceId }).first("id", "invoice_number", "customer_id", "line_items");
+  const month = inv ? membershipDuesStampMonth(inv.line_items) : null;
+  if (!month || !inv.customer_id) return null;
+  if (!(await tryAcquireMembershipDuesMonthLock(trx, inv.customer_id, month))) {
+    throw Object.assign(
+      new Error(`Membership dues for ${month} are being billed or completed right now — the refund bounce is retried`),
+      { statusCode: 503, code: "MEMBERSHIP_DUES_MONTH_BUSY", isOperational: true },
+    );
+  }
+  const replacement = await findLiveStampedDuesInvoice(trx, inv.customer_id, month, { excludeInvoiceId: inv.id });
+  let collected = null;
+  if (!replacement) {
+    const payment = await findCollectedDuesPayment(trx, inv.customer_id, month);
+    if (payment && String(payment.id) !== String(exceptPaymentId)) collected = payment;
+  }
+  return {
+    invoiceId: inv.id,
+    invoiceNumber: inv.invoice_number || null,
+    customerId: inv.customer_id,
+    month,
+    replacement: replacement ? { id: replacement.id, status: replacement.status, invoice_number: replacement.invoice_number || null } : null,
+    collectedPaymentId: collected ? collected.id : null,
+  };
+}
+async function reconcileMembershipDuesRestore(ctx) {
+  if (!ctx || (!ctx.replacement && !ctx.collectedPaymentId)) return;
+  try {
+    const settled = !!ctx.collectedPaymentId
+      || ["paid", "prepaid", "processing"].includes(String(ctx.replacement?.status));
+    let voidFailed = false;
+    if (!settled) {
+      try {
+        // Canonical void: its own guards, credit restore and release alert apply
+        // (the restored original covers the month again, so no rebill alert).
+        await InvoiceService.voidInvoice(ctx.replacement.id);
+        return;
+      } catch (err) {
+        voidFailed = true;
+        logger.warn(`[invoice] replacement dues invoice ${ctx.replacement.id} could not be voided after refund bounce: ${err.message}`);
+      }
+    }
+    const { raiseAdminAlert } = require("./admin-alert-compose");
+    const { fitAction } = require("./admin-alert-names");
+    const customer = await db("customers").where({ id: ctx.customerId }).first("first_name", "last_name");
+    const name = `${customer?.first_name || ""} ${customer?.last_name || ""}`.trim() || "the customer";
+    const [y, m] = ctx.month.split("-").map(Number);
+    const monthName = new Date(Date.UTC(y, (m || 1) - 1, 1)).toLocaleString("en-US", { month: "long", timeZone: "UTC" });
+    const replacementLabel = ctx.replacement ? (ctx.replacement.invoice_number || ctx.replacement.id) : `payment ${ctx.collectedPaymentId}`;
+    const originalLabel = ctx.invoiceNumber || ctx.invoiceId;
+    const spec = voidFailed
+      ? {
+        action: fitAction("Billing", name, [(who) => `void ${who}'s extra ${monthName} dues invoice`, (who) => `void ${who}'s extra dues invoice`]),
+        why: `A refund bounced, so the original dues invoice is paid again; a replacement still bills ${monthName}.`,
+        doneWhen: "month_billed_once",
+      }
+      : {
+        action: fitAction("Billing", name, [(who) => `refund ${who}'s extra ${monthName} dues`, (who) => `refund ${who}'s extra dues`]),
+        why: `${monthName} dues are paid twice after a bank refund bounced.`,
+        doneWhen: "month_refunded_once",
+      };
+    await raiseAdminAlert("billing", {
+      area: "Billing",
+      ...spec,
+      severity: "needs-you",
+      link: `/admin/customers?customerId=${ctx.customerId}`,
+      subject: { type: "invoice", id: String(ctx.replacement?.id || ctx.invoiceId) },
+      who: "person",
+    }, {
+      detail: `A bank refund of invoice ${originalLabel} (the ${ctx.month} membership dues) failed, so it was restored to paid. ${ctx.replacement ? `Replacement dues invoice ${replacementLabel} (${ctx.replacement.status})` : `The month was also collected (${replacementLabel})`} bills the same month. ${voidFailed ? `The replacement could not be voided automatically; void it if the original stands.` : `Nothing was refunded automatically; refund the extra payment.`}`,
+      bell: true,
+      dedupeKey: `dues_restore_conflict:${ctx.invoiceId}:${ctx.replacement?.id || ctx.collectedPaymentId}`,
+    });
+  } catch (err) {
+    logger.warn(`[invoice] dues restore reconciliation failed for invoice ${ctx.invoiceId}: ${err.message}`);
+  }
+}
+
 // MARKER FIRST, DUES INVOICE LATER. A manual prepaid marker (cash / Zelle on a
 // plan visit) lives on the VISIT, not the payment ledger: a sibling visit's
 // stamped dues invoice minted afterwards bills the month and never sees it, so
@@ -13309,6 +13400,8 @@ InvoiceService.lineIsBaseApplication = lineIsBaseApplication;
 // Shared with the scheduled-invoice mint helper (Charge now's pre-mint).
 InvoiceService.stampMembershipDuesUnderLock = stampMembershipDuesUnderLock;
 InvoiceService.membershipDuesStampMonth = membershipDuesStampMonth;
+InvoiceService.prepareMembershipDuesRestore = prepareMembershipDuesRestore;
+InvoiceService.reconcileMembershipDuesRestore = reconcileMembershipDuesRestore;
 InvoiceService._prepaidDuesAlert = { prepaidVisitsToApplyToDuesInvoice, composePrepaidDuesAlertSpec };
 // Post-commit "rebill the month" alert, also raised by the full-refund transition (customer-credit).
 InvoiceService.alertIfMembershipDuesCoverageReleased = alertIfMembershipDuesCoverageReleased;

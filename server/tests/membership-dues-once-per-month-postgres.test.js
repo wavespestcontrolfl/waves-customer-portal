@@ -1349,6 +1349,8 @@ postgres('membership dues — prepaid marker, refund alert, payer, merge, copy (
   async function alertRows(invoiceId) {
     return mockPg('notifications').whereRaw('metadata::text LIKE ?', [`%dues_coverage_released:${invoiceId}%`]);
   }
+  const stampedOf = (inv) => (inv.line_items || []).find((li) => li.membership_dues_month);
+  const reload = (id) => mockPg('invoices').where({ id }).first();
 
   // ── Finding 1: a prepaid marker on a covered plan visit ──
   test('a second same-month plan visit is covered by the dues invoice: the prepaid pre-check names that invoice; the dues invoice\'s own visit, a priced NON-recurring visit, a callback and a month with no dues invoice are not; a priced RECURRING visit is', async () => {
@@ -1525,6 +1527,71 @@ postgres('membership dues — prepaid marker, refund alert, payer, merge, copy (
       await new Promise((r) => setTimeout(r, 800));
       expect(await prepaidAlerts(a.invoice.id, false)).toHaveLength(0);
     } finally { await cleanup(f); }
+  });
+
+  // ── A refunded dues invoice, a replacement dues mint, then the refund FAILS ──
+  describe('refund -> replacement mint -> refund.failed', () => {
+    const { _handleRefundFailed: handleRefundFailed } = require('../routes/stripe-webhook');
+    const conflictAlerts = (invoiceId) => mockPg('notifications').whereRaw('metadata::text LIKE ?', [`%dues_restore_conflict:${invoiceId}:%`]);
+
+    // A dues invoice A that was paid, then fully refunded (invoice 'refunded', payment row 'refunded'
+    // with the refund stamped), then a sibling visit's completion mints the replacement B.
+    async function refundedThenReplaced(f) {
+      const a = await mintDues(f, 'Lawn Care');
+      const chargeId = `ch_${randomUUID().slice(0, 10)}`;
+      const piId = `pi_${randomUUID().slice(0, 10)}`;
+      const refundId = `re_${randomUUID().slice(0, 10)}`;
+      await mockPg('invoices').where({ id: a.invoice.id }).update({ status: 'refunded', stripe_payment_intent_id: piId, stripe_charge_id: chargeId });
+      const paymentId = randomUUID();
+      await mockPg('payments').insert({ id: paymentId, customer_id: f.customerId, amount: 49, status: 'refunded', refund_amount: 49, refund_status: 'full',
+        stripe_refund_id: refundId, stripe_payment_intent_id: piId, stripe_charge_id: chargeId, payment_date: etDateString(),
+        description: 'Fixture dues payment', metadata: JSON.stringify({ invoice_id: a.invoice.id, stamped_refund_ids: [refundId] }) });
+      const b = await mintDues(f, 'Pest Control'); // the month is uncovered while A is refunded: B is minted and stamped
+      expect(stampedOf(b.invoice)).toBeTruthy();
+      return { a, b, paymentId, refund: { id: refundId, charge: chargeId, payment_intent: piId, amount: 4900, status: 'failed', failure_reason: 'fixture' } };
+    }
+
+    test('UNPAID replacement: the original is restored to paid and the replacement is voided through the canonical void; one live stamped invoice remains, no alert', async () => {
+      const f = await seedMember();
+      try {
+        const { a, b, refund } = await refundedThenReplaced(f);
+        await handleRefundFailed(refund);
+        expect((await reload(a.invoice.id)).status).toBe('paid');
+        expect((await reload(b.invoice.id)).status).toBe('void');
+        const live = (await liveInvoicesFor(f)).filter((r) => stampedOf(r));
+        expect(live.map((r) => r.id)).toEqual([a.invoice.id]);
+        expect(await conflictAlerts(a.invoice.id)).toHaveLength(0);
+      } finally { await cleanup(f); }
+    });
+
+    test('PAID replacement: the original is restored to paid, the replacement is left alone, and ONE needs-you alert says the month is paid twice (nothing refunded automatically)', async () => {
+      const f = await seedMember();
+      try {
+        const { a, b, refund } = await refundedThenReplaced(f);
+        await mockPg('invoices').where({ id: b.invoice.id }).update({ status: 'paid', paid_at: new Date() });
+        await handleRefundFailed(refund);
+        expect((await reload(a.invoice.id)).status).toBe('paid');
+        expect((await reload(b.invoice.id)).status).toBe('paid');
+        const rows = await conflictAlerts(a.invoice.id);
+        expect(rows).toHaveLength(1);
+        expect(JSON.stringify(rows[0])).toContain(b.invoice.invoice_number);
+        expect(await mockPg('payments').where({ customer_id: f.customerId, status: 'refunded' })).toHaveLength(0); // the bounced payment row went back to paid; no refund was made
+      } finally { await cleanup(f); }
+    });
+
+    test('a busy month lock (a completion is relying on the month) refuses the restore retryably: nothing is restored, so Stripe redelivers', async () => {
+      const f = await seedMember();
+      try {
+        const { a, refund } = await refundedThenReplaced(f);
+        const { acquireMembershipDuesMonthLock } = require('../services/billing-lane');
+        const hold = await mockPg.transaction();
+        try {
+          await acquireMembershipDuesMonthLock(hold, f.customerId, monthOf(etDateString()));
+          await expect(handleRefundFailed(refund)).rejects.toMatchObject({ code: 'MEMBERSHIP_DUES_MONTH_BUSY' });
+          expect((await reload(a.invoice.id)).status).toBe('refunded');
+        } finally { await hold.rollback().catch(() => {}); }
+      } finally { await cleanup(f); }
+    });
   });
 
   // ── Round 7: owner re-read, refund vs completion, void vs collector ──
