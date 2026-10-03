@@ -11102,7 +11102,8 @@ async function planComboTogetherMove(req, row, changes, shown) {
   const refuse = (status, message, code) => {
     throw Object.assign(httpError(status, `${message} Nothing was changed.`), code ? { code } : {});
   };
-  if (changes.intake.clearBoth) refuse(422, 'A shared stop keeps its time: set a start time, or choose Separate.', 'INVALID_APPOINTMENT_WINDOW');
+  // Only a real clear: a stop with no time posts empty bounds as an echo.
+  if (changes.intake.clearBoth && row.window_start) refuse(422, 'A shared stop keeps its time: set a start time, or choose Separate.', 'INVALID_APPOINTMENT_WINDOW');
   if (changes.length) {
     refuse(422, "Moving the whole stop keeps each service's length. Save the move first, or choose Separate to change this service's length.", 'COMBO_LENGTH_CHANGE');
   }

@@ -126,6 +126,12 @@ describe("comboMove 'together'", () => {
     expect(mockDispatch.planVisitMoveForStaff).toHaveBeenCalledWith(expect.objectContaining({ newDate: FUTURE, newWindow: { start: '11:00', end: '12:00' } }));
   });
 
+  test('a stop with no stored time moves to another date with its empty time fields echoed', async () => {
+    mockRow = { ...ROW, window_start: null, window_end: null };
+    await planComboEditMove(request({ scheduledDate: TARGET, windowStart: '', windowEnd: '', comboMove: 'together' }));
+    expect(mockDispatch.planVisitMoveForStaff).toHaveBeenCalledWith(expect.objectContaining({ newDate: TARGET, newWindow: undefined, keepSlot: false }));
+  });
+
   test('a stop with no stored time takes the start only', async () => {
     mockRow = { ...ROW, window_start: null, window_end: null };
     await planComboEditMove(request({ windowStart: '10:00', windowEnd: '11:00', comboMove: 'together' }));
