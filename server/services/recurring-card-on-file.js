@@ -1764,10 +1764,22 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
         // The year must still be live: a cancelled term (e.g. the prepay flag
         // removed) goes back to wait, and the release pass hands its held
         // visit to the office as cancelled_after_visit (pre-push audit P0).
-        const heldTerm = await db('annual_prepay_terms').where({ prepay_invoice_id: invoice.id }).first('id', 'status');
-        deferredHeldTermId = heldTerm && String(heldTerm.status || '') !== 'cancelled' ? heldTerm.id : null;
-        if (!deferredHeldTermId || !(await PafRelease.visitStillPerformed(job.released_for_visit_id, deferredHeldTermId))
-          || await PafRelease.planHasUnfinishedCompletion(row.id, invoice.customer_id)) {
+        // A failed read here leaves the job claimed for the lease to retry:
+        // never the generic handler's pay link before a qualifying visit
+        // (pre-push audit P1).
+        let deferredEligible;
+        try {
+          const heldTerm = await db('annual_prepay_terms').where({ prepay_invoice_id: invoice.id }).first('id', 'status');
+          const termLive = heldTerm && (String(heldTerm.status || '') !== 'cancelled' || await PafRelease.termStillCovered(heldTerm.id));
+          deferredHeldTermId = termLive ? heldTerm.id : null;
+          deferredEligible = !!deferredHeldTermId
+            && await PafRelease.visitStillPerformed(job.released_for_visit_id, deferredHeldTermId)
+            && !(await PafRelease.planHasUnfinishedCompletion(row.id, invoice.customer_id));
+        } catch (eligibilityErr) {
+          logger.warn(`[recurring-cof] prepay sweep deferring estimate ${row.id}: deferred eligibility read failed (${eligibilityErr.message})`);
+          continue;
+        }
+        if (!deferredEligible) {
           await requeueDeferred();
           continue;
         }
@@ -1890,6 +1902,12 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
           // the accurate reason so the deterministic pay-link fallback +
           // office alert carry it, never a silent re-enable or a
           // misleading guard error.
+          // A payer refusal goes through the payer recovery handler (reverse
+          // credit, stamp the payer, deliver to the payer), never the
+          // homeowner's pay link (pre-push audit P0).
+          if (recoveryEnrollment?.reason === 'payer_billed') {
+            throw Object.assign(new Error('enrollment refused during recovery: payer_billed'), { code: 'PAYER_BILLED_GUARD' });
+          }
           throw new Error(`enrollment refused during recovery: ${recoveryEnrollment?.reason || 'unknown'}`);
         }
       }
@@ -2125,7 +2143,15 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       let fallbackSettled = false;
       let fallbackCreditCovered = false;
       try {
-        const fencedDelivery = await withJobFence(async () => require('./invoice').sendViaSMSAndEmail(job.invoice_id));
+        // A deferred year's fallback pay link never auto-applies account
+        // credit: the bill may have been raised above what the customer
+        // approved, and a preflight read of it would race the edit (GitHub
+        // Codex #5656 r1). The credit stays on the account; the customer pays
+        // the bill as sent.
+        const fallbackOptions = deferredToFirstVisit ? { skipAccountCreditAutoApply: true } : null;
+        const fencedDelivery = fallbackOptions
+          ? await withJobFence(async () => require('./invoice').sendViaSMSAndEmail(job.invoice_id, fallbackOptions))
+          : await withJobFence(async () => require('./invoice').sendViaSMSAndEmail(job.invoice_id));
         if (fencedDelivery.ceded) {
           logger.warn(`[recurring-cof] prepay sweep ceding estimate ${row.id}: claim superseded before fallback delivery`);
           continue;
