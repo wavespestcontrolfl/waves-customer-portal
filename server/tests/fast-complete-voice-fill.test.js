@@ -1949,3 +1949,9 @@ describe('Codex #5698 round 10: "then" ends a shared lead-in', () => {
     expect(out.products[0].sameAsLast).toBe(false);
   });
 });
+
+test('"then" ends a product\'s own clause: a phrase after it belongs to the next product', () => {
+  const t = 'Used Taurus, then same mix as last time for Talstar.';
+  const row = (productId, heard) => ({ productId, amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard });
+  expect(validateFill(answer({ products: [row('p-taurus', 'Taurus, same mix as last time')] }), ctx, t).products.some((p) => p.productId === 'p-taurus' && p.sameAsLast)).toBe(false);
+});

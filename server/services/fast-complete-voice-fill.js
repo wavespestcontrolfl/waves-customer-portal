@@ -1196,7 +1196,8 @@ function governingWords(mention, world) {
   const firstName = Math.min(...inSentence.map((m) => m.start));
   const next = Math.min(to, ...inSentence.filter((m) => m.start > mention.start).map((m) => m.start));
   const own = world.tokens.slice(mention.start, next);
-  const cut = own.findIndex((token) => CONTRAST_WORDS.has(token));
+  // a contrast or "then" ends the mention's own clause too
+  const cut = own.findIndex(endsLeadIn);
   // the lead-in covers only the names on its own side of a contrast
   const crossed = world.tokens.slice(firstName, mention.start).some(endsLeadIn);
   const leadIn = crossed ? [] : world.tokens.slice(from, firstName);
