@@ -171,6 +171,14 @@ postgres('report blog search on Postgres', () => {
     expect(await pick()).toBe(post.astro_live_url);
   });
 
+  test('the deployed page\'s keyword is searched in real SQL; the database-first keyword column never is', async () => {
+    const merged = registryRow('Spring Yard Checklist', { metadata: { astro: { frontmatter: { primary_keyword: 'termite swarmers' } } } });
+    const astroOnly = registryRow('Garage Season Notes', { metadata: { frontmatter: { target_keyword: 'swarmers in the garage' } } });
+    const dbOnly = registryRow('Lanai Care Basics', { target_keyword: 'termite swarmers' });
+    await mockPg('content_registry').insert([merged, astroOnly, dbOnly]);
+    expect((await searchReportBlogPosts(mockPg, 'swarmers')).map((post) => post.id).sort()).toEqual([merged.id, astroOnly.id].sort());
+  });
+
   test('a registry post the post-publish check verified live is found and resolves; one in conflict never is', async () => {
     const fresh = registryRow('Ghost Ants After the First Rain', { live_status: 'live_visible' });
     const review = registryRow('Ghost Ant Baits That Work', { live_status: 'visibility_review' });

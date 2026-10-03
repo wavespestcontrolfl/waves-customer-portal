@@ -50,12 +50,25 @@ const REGISTRY_LIVE_STATUSES = ['live', 'live_visible'];
 // another source's than the checked page's; GitHub Codex P2 on 8c57183332),
 // nor any state the registry adds later.
 const REGISTRY_ATTRIBUTABLE_STATES = ['matched', 'astro_only', 'astro_changed_since_sync', 'db_changed_since_sync'];
-// The text a search reads, by where it sits: the title (and the headline) and
-// the summary under it (the article itself lives in the site's repository,
-// not here). These are the deployed page's own words; the registry's keyword
-// prefers the portal's database, which can be edited before the page is
-// republished, so it is never read (GitHub Codex P2 on 3d597eb15d).
-const REGISTRY_FIELDS = { title: ['title', 'h1'], summary: ['meta_description'] };
+// The deployed page's keyword: the frontmatter the registry keeps from the
+// site's source (an Astro-only row's own, or a merged row's Astro side), in the
+// registry's own order (content-registry.js astroSourceToItem). Never the
+// target_keyword column, which prefers the portal's database, editable before
+// the page is republished (GitHub Codex P2s on 3d597eb15d and ffab3fb66a).
+const KEYWORD_PATHS = [['frontmatter'], ['astro', 'frontmatter']]
+  .flatMap((base) => ['target_keyword', 'primary_keyword', 'keyword'].map((key) => [...base, key]));
+const DEPLOYED_KEYWORD_SQL = `COALESCE(${KEYWORD_PATHS.map((path) => `metadata #>> '{${path.join(',')}}'`).join(', ')})`;
+const deployedKeyword = (row) => {
+  for (const path of KEYWORD_PATHS) {
+    const value = path.reduce((node, key) => (node && typeof node === 'object' ? node[key] : undefined), row?.metadata);
+    if (value !== undefined && value !== null) return typeof value === 'string' ? value : JSON.stringify(value);
+  }
+  return '';
+};
+// The text a search reads, by where it sits: the title (and the headline), the
+// keyword, and the summary under it, all the deployed page's own (the article
+// itself lives in the site's repository, not here).
+const REGISTRY_FIELDS = { title: ['title', 'h1'], keyword: [DEPLOYED_KEYWORD_SQL], summary: ['meta_description'] };
 // An absolute URL, and one on the hub host, as Postgres patterns.
 const ABSOLUTE_URL_RE = '^https?://';
 const HUB_URL_RE = `^https?://(www\\.)?${SITE_HOST.replace(/\./g, '\\.')}(/|$)`;
@@ -123,6 +136,10 @@ const FILLER_WORDS = new Set([
   'where', 'which', 'who', 'whom', 'whose', 'there', 'their', 'they', 'them', 'these', 'those',
   'have', 'has', 'had', 'was', 'were', 'been', 'being', 'did', 'will', 'would', 'should', 'could',
   'come', 'comes', 'coming', 'going', 'goes',
+  // two-letter words: a search reads them ("UV", "AI", "FL"), but these name no
+  // topic (GitHub Codex P2 on ffab3fb66a)
+  'to', 'of', 'in', 'on', 'at', 'it', 'is', 'be', 'by', 'or', 'an', 'as', 'do', 'go', 'we', 'my', 'me',
+  'no', 'up', 'so', 'if', 'us', 'am', 'he', 'oh', 'ok',
 ]);
 // Plurals no suffix rule makes, as [singular, plural] (GitHub Codex P2 r2 on
 // #5652: "mice" never found a "mouse" post; r5: mosquito "larvae").
@@ -149,7 +166,7 @@ function formsOf(word) {
   return [...new Set([word, one, ...sesSingular, pluralOf(word), pluralOf(one), `${one}s`])];
 }
 
-// The words a search matches on: each word of three characters or more
+// The words a search matches on: each word of two characters or more
 // (any punctuation separates words, as it does in a title: "bed-bug" is bed
 // and bug, "ants/roaches" ants and roaches; GitHub Codex P2 on 6fda3eb2fb;
 // filler words left out), each with the forms a post may use for it, at most
@@ -158,7 +175,7 @@ function searchTerms(query) {
   const words = String(query || '')
     .toLowerCase()
     .split(/[^a-z0-9]+/)
-    .filter((word) => word.length >= 3 && !FILLER_WORDS.has(word));
+    .filter((word) => word.length >= 2 && !FILLER_WORDS.has(word));
   const terms = [];
   for (const word of words) {
     const forms = formsOf(word);
@@ -177,7 +194,7 @@ const jsPattern = (term) => new RegExp(`\\b(?:${term.forms.join('|')})\\b`, 'i')
 // those holding the most terms first, newest first among them, id last (a
 // total order), so a read that ever reached its guard keeps the best covered.
 function anyTermIn(query, fields, terms, newestColumn) {
-  const columns = [...fields.title, ...fields.summary];
+  const columns = [...fields.title, ...fields.keyword, ...fields.summary];
   const holds = `(${columns.map((column) => `COALESCE(${column}, '') ~* ?`).join(' OR ')})`;
   const holdsBindings = (term) => columns.map(() => sqlPattern(term));
   return query
@@ -214,12 +231,12 @@ function registryMatches(knex, terms) {
     ]);
 }
 // Which terms a post's text holds, and where (a title or headline over the
-// summary).
+// keyword over the summary).
 function matchOf(texts, terms) {
   let placed = 0;
   const held = terms.map((term) => {
     const pattern = jsPattern(term);
-    const where = [[texts.title, 3], [texts.summary, 1]].find(([text]) => pattern.test(String(text || '')));
+    const where = [[texts.title, 3], [texts.keyword, 2], [texts.summary, 1]].find(([text]) => pattern.test(String(text || '')));
     if (where) placed += where[1];
     return !!where;
   });
@@ -236,8 +253,8 @@ const pathKey = (url) => {
 /**
  * The site's live hub posts that answer a search, best first, at most eight:
  * those holding every word first, then those holding the rarest of the
- * words, a word in the title or headline before one only in the summary,
- * newest first among equals. No usable words, no results. Read from the
+ * words, a word in the title or headline before one only in the keyword or
+ * summary, newest first among equals. No usable words, no results. Read from the
  * content registry's verified-live posts (each URL once).
  */
 async function searchReportBlogPosts(knex, query) {
@@ -253,7 +270,7 @@ async function searchReportBlogPosts(knex, query) {
     found.set(key, { post, ...matchOf(texts, terms), when: when ? new Date(when).getTime() || 0 : 0 });
   };
   for (const row of registryFound) {
-    add(registryLink(row), { title: `${row.title || ''} ${row.h1 || ''}`, summary: row.meta_description }, row.published_at);
+    add(registryLink(row), { title: `${row.title || ''} ${row.h1 || ''}`, keyword: deployedKeyword(row), summary: row.meta_description }, row.published_at);
   }
   const entries = [...found.values()].filter((entry) => entry.held.some(Boolean));
   // A word few posts hold says more than one many hold ("tick" over

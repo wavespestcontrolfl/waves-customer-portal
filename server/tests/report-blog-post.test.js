@@ -316,10 +316,26 @@ describe('searchReportBlogPosts', () => {
   test('a registry row is read by the live page\'s own words, never the portal\'s unpublished keyword (GitHub Codex P2 on 3d597eb15d)', async () => {
     const knex = recordingKnex({ content_registry: [REGISTRY_LIVE] });
     await searchReportBlogPosts(knex, 'ghost ants');
-    expect(knex.calls.some(([name, sql]) => name.startsWith('content_registry') && String(sql).includes('target_keyword'))).toBe(false);
+    // The database-first target_keyword column is never matched; the deployed
+    // frontmatter keyword is (GitHub Codex P2 on ffab3fb66a).
+    const sqls = knex.calls.filter(([name]) => name.startsWith('content_registry')).map(([, sql]) => String(sql));
+    expect(sqls.some((sql) => sql.includes('COALESCE(target_keyword'))).toBe(false);
+    expect(sqls.some((sql) => sql.includes("metadata #>> '{astro,frontmatter,primary_keyword}'"))).toBe(true);
     // A row that holds the words only in its (database-first) keyword is not found.
     const keywordOnly = { ...registryRow('aaaaaaaa-0000-4000-8000-000000000061', 'Spring Yard Checklist'), target_keyword: 'ghost ant control' };
     expect(await searchReportBlogPosts(recordingKnex({ content_registry: [keywordOnly] }), 'ghost ants')).toEqual([]);
+    // One whose deployed page's keyword holds them is, ranked by that keyword.
+    for (const metadata of [{ frontmatter: { primary_keyword: 'ghost ant control' } }, { astro: { frontmatter: { target_keyword: 'ghost ant control' } } }]) {
+      const deployed = registryRow('aaaaaaaa-0000-4000-8000-000000000064', 'Spring Yard Checklist', { metadata });
+      expect((await searchReportBlogPosts(recordingKnex({ content_registry: [deployed] }), 'ghost ants')).map((post) => post.id)).toEqual([deployed.id]);
+    }
+  });
+
+  test('a two-letter topic is a search word ("UV", "AI"); two-letter filler is not (GitHub Codex P2 on ffab3fb66a)', async () => {
+    expect(searchTerms('UV').map((term) => term.word)).toEqual(['uv']);
+    expect(searchTerms('is it ok to use uv in fl').map((term) => term.word)).toEqual(['use', 'uv', 'fl']);
+    const uv = registryRow('aaaaaaaa-0000-4000-8000-000000000065', 'UV Lights and the Moths They Draw');
+    expect((await searchReportBlogPosts(recordingKnex({ content_registry: [uv] }), 'UV')).map((post) => post.id)).toEqual([uv.id]);
   });
 
   test('question words name no topic: "where are ants coming from" ranks the ant post over "Where Do Roaches Hide?" (GitHub Codex P2 on 3d597eb15d)', async () => {
