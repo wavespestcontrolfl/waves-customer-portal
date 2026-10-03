@@ -8,15 +8,17 @@ const ROW = {
   metadata: { vendorSku: 'SKU-1', vendorProductUrl: 'https://vendor.example/p/1' },
   first_name: 'Test', last_name: 'Customer', address_line1: '1 Example St', city: 'Sampletown',
   source: 'job_card', created_at: '2026-10-03T00:00:00Z',
+  order_status: 'placed', order_adapter: 'samplevendor', order_number: 'ORD-1', order_amount_cents: 1234,
 };
 
 jest.mock('../models/db', () => {
   const chain = {};
-  ['leftJoin', 'select', 'orderByRaw', 'orderBy', 'limit', 'where', 'whereIn'].forEach((m) => { chain[m] = jest.fn(() => chain); });
+  ['leftJoin', 'select', 'orderByRaw', 'orderBy', 'limit', 'where', 'whereIn', 'orWhereRaw'].forEach((m) => { chain[m] = jest.fn(() => chain); });
   chain.modify = jest.fn((fn) => { fn(chain); return chain; });
   chain.then = (resolve, reject) => Promise.resolve([global.__restockRow]).then(resolve, reject);
   const db = jest.fn(() => chain);
-  db.schema = { hasTable: jest.fn(async (t) => t === 'product_restock_requests') };
+  db.schema = { hasTable: jest.fn(async () => true) };
+  db.raw = jest.fn((sql) => sql);
   return db;
 });
 
@@ -33,6 +35,7 @@ describe('restock list office detail', () => {
       productName: 'Test Concentrate', status: 'open', requestedQuantity: 2,
       vendor: null, vendorSku: null, vendorProductUrl: null, customerName: null, address: null, city: null,
     });
+    expect(requests[0].order).toMatchObject({ status: 'placed', adapter: null, externalOrderNumber: null, amountCents: null });
   });
 
   test('the office list keeps them (default)', async () => {
@@ -41,5 +44,6 @@ describe('restock list office detail', () => {
       vendor: 'Sample Vendor', vendorSku: 'SKU-1', vendorProductUrl: 'https://vendor.example/p/1',
       customerName: 'Test Customer', address: '1 Example St', city: 'Sampletown',
     });
+    expect(requests[0].order).toMatchObject({ status: 'placed', adapter: 'samplevendor', externalOrderNumber: 'ORD-1' });
   });
 });

@@ -79,7 +79,7 @@ async function listRestockRequests({ status = 'active', limit = 100, showSpend =
         // Automatic order outcome (null = never dispatched): placing | placed
         // | failed | needs_review, with the vendor number, total and the
         // parked reason so the tab explains why a request still needs a hand.
-        order: hasOrders ? restockOrderView(row, showSpend) : null,
+        order: hasOrders ? restockOrderView(row, showSpend, officeDetail) : null,
         neededBy: row.needed_by,
         reason: row.reason,
         source: row.source,
@@ -95,12 +95,14 @@ async function listRestockRequests({ status = 'active', limit = 100, showSpend =
     };
 }
 
-function restockOrderView(row, showSpend) {
+function restockOrderView(row, showSpend, officeDetail = true) {
   if (!row.order_status) return null;
   return {
     status: row.order_status,
-    adapter: row.order_adapter,
-    externalOrderNumber: row.order_number || null,
+    // The adapter key names the vendor (siteone, …) and the order number is
+    // the vendor's: both are office detail (Codex #5847 r1).
+    adapter: officeDetail ? row.order_adapter : null,
+    externalOrderNumber: officeDetail ? (row.order_number || null) : null,
     amountCents: showSpend && row.order_amount_cents != null ? Number(row.order_amount_cents) : null,
     // The parked message can quote the total (cap wording): techs get the
     // reason code only.
