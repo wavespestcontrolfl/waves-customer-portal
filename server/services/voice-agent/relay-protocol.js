@@ -321,8 +321,12 @@ function endFrame(handoffData) {
 // can only make first-audio look EARLIER, never invent a late one).
 const AGENT_SPEAKER_RE = /agent[\s_-]?speak/i;
 const CALLER_SPEAKER_RE = /(?:client|caller|user)[\s_-]?speak/i;
-const START_RE = /\b(?:start|started|starting|begin|began|speaking|true)\b/i;
-const END_RE = /\b(?:stop|stopped|end|ended|finish|finished|silent|silence|false)\b/i;
+// `on` / `off`: the live payload is `{ type: 'info', name: 'clientSpeaking',
+// value: 'on' | 'off' }` (sandbox call 2026-09-30: 18 caller "starts", 0
+// ends — every `off` read as a start, so stop_to_first_audio never had a
+// caller-stop instant and agent start/end paired across turns).
+const START_RE = /\b(?:start|started|starting|begin|began|speaking|true|on)\b/i;
+const END_RE = /\b(?:stop|stopped|end|ended|finish|finished|silent|silence|false|off)\b/i;
 const PLAYED_KEY_RE = /^(?:[a-z]+\.)?(?:token|tokens|text|value|played|playedText|tokensPlayed|playedTokens)$/i;
 // Keys whose VALUE labels the event (Twilio's documented tokensPlayed
 // envelope is `{ type: 'info', name: 'tokensPlayed', value: '…' }` — the

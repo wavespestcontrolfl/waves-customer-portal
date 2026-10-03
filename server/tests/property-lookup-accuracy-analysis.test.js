@@ -35,7 +35,7 @@ test('interactive lookup still attempts vision and retrieves stories after a slo
   global.fetch = jest.fn(async (url) => {
     if (String(url).includes('/geocode/')) return {
       ok: true,
-      json: async () => ({ status: 'OK', results: [{ formatted_address: ADDRESS, geometry: { location: { lat: 27.4, lng: -82.4 }, location_type: 'ROOFTOP' } }] }),
+      json: async () => ({ status: 'OK', results: [{ formatted_address: ADDRESS, types: ['street_address'], geometry: { location: { lat: 27.4, lng: -82.4 }, location_type: 'ROOFTOP' } }] }),
     };
     return { ok: true, arrayBuffer: async () => Buffer.from('test-image'), headers: { get: () => 'image/png' } };
   });

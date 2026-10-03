@@ -35,7 +35,7 @@ const { getIo } = require('../sockets');
 const {
   parseETDateTime, etParts, etDateString, addETDays,
   addETMonthsByWeekday, etNthWeekdayOfMonth, sameDayWindowElapsed,
-  deriveWindowEnd, windowDurationMinutes,
+  deriveWindowEnd, windowDurationMinutes, dateOnlyString,
 } = require('../utils/datetime-et');
 
 // The window ONE series occurrence lands on, from ITS OWN stored window /
@@ -956,6 +956,10 @@ async function writePartnerCas(trx, partner, pUpdate) {
       window_end: partner.window_end ?? null,
       technician_id: partner.technician_id ?? null,
       visit_id: partner.visit_id,
+      // the scope its reschedule_log row freezes (Codex #5669 r2)
+      service_type: partner.service_type ?? null,
+      service_id: partner.service_id ?? null,
+      property_id: partner.property_id ?? null,
       ...((!pUpdate.window_end && process.env.REBOOKER_NULL_END_OCCUPANCY !== 'off')
         ? { estimated_duration_minutes: partner.estimated_duration_minutes ?? null }
         : {}),
@@ -2079,6 +2083,22 @@ class SmartRebooker {
         // operator lock/move is caught atomically here, not just by a prior read.
         // .where({}) is a no-op, so callers that omit it are unaffected.
         .where(options.expect || {})
+        // The reschedule_log row below freezes the moved occurrence's slot AND scope
+        // (service + property) from this pre-read, which is unlocked: an Edit
+        // Appointment save landing in between would record a slot/scope pair that
+        // never existed (Codex #5610 r3-r4). Pin the observed occurrence, as the call
+        // reschedule path does (call-reschedule-apply expect) — a raced edit misses
+        // and surfaces the concurrent-change 409 below.
+        .where({
+          scheduled_date: dateOnlyString(service.scheduled_date) ?? null,
+          window_start: service.window_start ?? null,
+          window_end: service.window_end ?? null,
+          service_type: service.service_type ?? null,
+          service_id: service.service_id ?? null,
+          property_id: service.property_id ?? null,
+          // the account the log row is filed under (a racing customer merge repoints it)
+          customer_id: service.customer_id ?? null,
+        })
         // Ungrouped at the pre-read ⇒ must still be ungrouped at the write
         // (knex renders null as IS NULL); see membershipFenced above.
         .where(membershipFenced ? { visit_id: null } : {})
@@ -2149,6 +2169,11 @@ class SmartRebooker {
         initiated_by: initiatedBy,
         original_window: service.window_start ? `${service.window_start}-${service.window_end}` : null,
         new_window: win.start ? `${win.start}-${win.end}` : null,
+        // the moved occurrence's own scope, frozen at the move (a later edit of the row never rewrites it)
+        // the slot above and this scope are one snapshot, pinned by the CAS
+        occurrence_service_type: service.service_type || null,
+        occurrence_service_id: service.service_id || null,
+        occurrence_property_id: service.property_id || null,
       });
     });
 
@@ -2619,6 +2644,8 @@ class SmartRebooker {
           // Locked membership recheck below (codex #3609 r26 P1) — read with
           // the authoritative sweep, never a second query.
           'visit_id', 'property_id',
+          // the occurrence scope the reschedule_log rows freeze (Codex #5669 r1)
+          'service_type', 'service_id',
           // Undo snapshot + exception handling (SERIES_MOVE_SNAPSHOT_COLUMNS).
           'route_order', 'time_window', 'window_display', 'track_token_expires_at', 'recurring_dispatch_due_date', 'updated_at',
           'date_exception', 'date_exception_source', 'date_exception_at', 'date_exception_cadence_date',
@@ -2740,7 +2767,7 @@ class SmartRebooker {
       const carry = { byVisit: new Map(), partnerIds: [], lockedKeys: new Set() };
       const CARRY_PARTNER_COLUMNS = [
         'id', 'status', 'scheduled_date', 'window_start', 'window_end', 'technician_id', 'visit_id',
-        'property_id', 'customer_id', 'is_recurring', 'estimated_duration_minutes', 'service_type',
+        'property_id', 'customer_id', 'is_recurring', 'estimated_duration_minutes', 'service_type', 'service_id',
         'route_order', 'time_window', 'window_display', 'track_token_expires_at', 'recurring_dispatch_due_date', 'updated_at',
         'date_exception', 'date_exception_source', 'date_exception_at', 'date_exception_cadence_date',
         'track_state', 'en_route_at', 'arrived_at', 'actual_start_time', 'check_in_time',
@@ -3369,6 +3396,8 @@ class SmartRebooker {
           id: partner.id,
           anchor: false,
           partner: true,
+          // the scope its reschedule_log row freezes (locked read; a move never changes it)
+          scope: { service_type: partner.service_type, service_id: partner.service_id, property_id: partner.property_id },
           ...carriedRef,
           exception: false,
           before: snapshotRow(partner),
@@ -3844,6 +3873,11 @@ class SmartRebooker {
                 ? { customer_confirmed: sib.customer_confirmed ?? null }
                 : {}),
               technician_id: sib.technician_id ?? null,
+              // the occurrence scope the reschedule_log freezes (Codex #5669 r2): an
+              // edit to service or address after the read must miss, not be logged stale
+              service_type: sib.service_type ?? null,
+              service_id: sib.service_id ?? null,
+              property_id: sib.property_id ?? null,
               // Reviewed proposals compare duration above, so their write
               // always pins it. Otherwise pin only when the occupancy probes
               // derived their span from it (null landing end + gate on): a
@@ -4032,21 +4066,33 @@ class SmartRebooker {
         result: JSON.stringify(committedResult),
       });
 
+      // Each logged occurrence's own scope (service + property), from the rows this
+      // sweep read under its locks — a series move never changes either, so it is
+      // the scope the occurrence had when it moved (Codex #5669 r1).
+      const partnerLogRows = moveRows.filter((r) => r.partner === true);
+      const scopeOf = (row) => ({
+        occurrence_service_type: (row && row.service_type) || null,
+        occurrence_service_id: (row && row.service_id) || null,
+        occurrence_property_id: (row && row.property_id) || null,
+      });
+      const lockedAnchor = siblings.find((r) => String(r.id) === String(serviceId)) || service;
+      // slot AND scope from the one locked anchor read (Codex #5669 r2 pre-push)
       await trx('reschedule_log').insert({
         scheduled_service_id: serviceId,
         customer_id: service.customer_id,
-        original_date: service.scheduled_date,
+        original_date: lockedAnchor.scheduled_date,
         new_date: newDate,
         reason_code: `${reason}_series`,
         initiated_by: initiatedBy,
-        original_window: service.window_start ? `${service.window_start}-${service.window_end}` : null,
+        original_window: lockedAnchor.window_start ? `${lockedAnchor.window_start}-${lockedAnchor.window_end}` : null,
         new_window: win.start ? `${win.start}-${win.end}` : null,
         series_move_id: seriesMoveId,
+        ...scopeOf(lockedAnchor),
       });
       // Each carried partner gets its own per-service move record too —
       // consumers that read a move from reschedule_log (e.g. the SMS
       // commitment fulfillment check) must see it.
-      for (const row of moveRows.filter((r) => r.partner === true)) {
+      for (const row of partnerLogRows) {
         await trx('reschedule_log').insert({
           scheduled_service_id: row.id,
           customer_id: service.customer_id,
@@ -4057,6 +4103,7 @@ class SmartRebooker {
           original_window: row.before.window_start ? `${row.before.window_start}-${row.before.window_end}` : null,
           new_window: row.after.window_start ? `${row.after.window_start}-${row.after.window_end}` : null,
           series_move_id: seriesMoveId,
+          ...scopeOf(row.scope),
         });
       }
 

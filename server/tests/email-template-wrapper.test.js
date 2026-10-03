@@ -4,7 +4,7 @@ const {
   wrapNewsletter,
   ensureLegalTextFooter,
 } = require('../services/email-template');
-const { WAVES_ADDRESS_LINE } = require('../constants/business');
+const { WAVES_ADDRESS_LINE, WAVES_FL_LICENSE_LINE, WAVES_OWNERSHIP_LINE } = require('../constants/business');
 
 describe('email template wrappers', () => {
   test('include the physical mailing address in customer-facing HTML footers', () => {
@@ -21,6 +21,18 @@ describe('email template wrappers', () => {
       body: '<p>Hi Taylor, here is the latest.</p>',
       unsubscribeUrl: 'https://portal.wavespestcontrol.com/unsubscribe/token',
     })).toContain(WAVES_ADDRESS_LINE);
+  });
+
+  test('every HTML footer carries the ownership line on its own row under the license', () => {
+    expect(WAVES_OWNERSHIP_LINE).toBe('Locally owned. Not private equity.');
+    const footers = [
+      wrapEmail({ heading: 'Your Waves update', intro: '<p>Hi Taylor.</p>' }),
+      wrapServiceEmail({ body: '<p>Hi Taylor.</p>' }),
+      wrapNewsletter({ body: '<p>Hi Taylor.</p>', unsubscribeUrl: 'https://portal.wavespestcontrol.com/unsubscribe/token' }),
+    ];
+    for (const html of footers) {
+      expect(html).toContain(`${WAVES_FL_LICENSE_LINE}<br/>${WAVES_OWNERSHIP_LINE}`);
+    }
   });
 
   test('renders the Google Preferred Sources line only when opted in', () => {

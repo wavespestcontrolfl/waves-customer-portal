@@ -3335,7 +3335,7 @@ postgres('visit summary recipient recovery', () => {
       // any of them must be known before a session belonging to another is
       // cancelled (a Stripe cancel does not roll back with the refusal).
       expect(fence).toHaveBeenCalledTimes(1);
-      expect(fence).toHaveBeenCalledWith(expect.anything(), expect.arrayContaining([String(fixture.customerId)]));
+      expect(fence).toHaveBeenCalledWith(expect.anything(), expect.arrayContaining([String(fixture.customerId)]), expect.objectContaining({ invalidateLinked: true }));
       expect(await mockPg('payers').where({ id: payer.id }).first()).toMatchObject({ active: false });
       fence.mockResolvedValue({ released: 0, inFlight: 0 });
       expect(await Payer.updatePayer(payer.id, { active: true })).toMatchObject({ payer: { active: true } });

@@ -92,8 +92,8 @@ describe('gate on', () => {
 
   test('prompt version is bumped, distinguishable, and fits the column', () => {
     // '_cf' = COMPANY FACTS, '_cfl' = + LABEL FACTS (PR #5416), '_cflv' = + VISIT STATUS & OPEN LOOPS (PR #5499), 'cflvp' = + PAYMENT FACTS (PR #5331), numeric token 5 = FREE RE-SERVICE (PR #5336) + a fresh identity above PR #5334's 3 (LIVE ETA) and #5416's 3_cfl (4 was the pre-contract claim checker, never merged): one suffix token per fact section.
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers5_cflvp');
-    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers5_cflvp');
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers6_cflvp');
+    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers6_cflvp');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers_cf');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers2');
@@ -102,6 +102,23 @@ describe('gate on', () => {
     expect(all.startsWith('house_voice_v12')).toBe(true);
     expect(all.startsWith(`${REAL_ANSWERS_PROMPT_VERSION}+`)).toBe(true);
     expect(all.length).toBeLessThanOrEqual(40);
+  });
+});
+
+describe('service knowledge (owner-approved 2026-10-03)', () => {
+  test('the five shipped lines are in the section, word for word', () => {
+    const section = renderCompanyFactsSection();
+    for (const line of [
+      'A standalone cockroach treatment (one that is not part of a recurring plan) is two visits for one price. The second visit is included. A German roach cleanout can take more visits, depending on how heavy it is.',
+      'There is no deposit. New recurring customers who pay by card save the card when they book and are charged after the first visit.',
+      'New residential lawn plans run 9 or 12 applications a year.',
+      'Arrival windows are two hours and start on the hour.',
+      'WaveGuard tiers (Bronze, Silver, Gold, Platinum) depend on how many qualifying recurring services a customer has.',
+    ]) expect(section).toContain(`\n- ${line}\n`);
+    expect(COMPANY_FACTS).toHaveLength(16);
+  });
+  test('the two termite lines stay out until the perk is bookable and the warranty wording is right (Codex #5723 r3)', () => {
+    expect(COMPANY_FACTS.join(' ')).not.toMatch(/termite|WDO|warranty|guarantee/i);
   });
 });
 

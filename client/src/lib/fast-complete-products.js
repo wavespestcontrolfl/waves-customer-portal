@@ -196,6 +196,30 @@ export function amountText(amount, unit) {
   return formatMeasuredAmount(amount, unit);
 }
 
+/**
+ * The usual amount on these visits as a number and a row unit ({ amount, unit }),
+ * or null when the sheet knows none: the same figure usualAmountText words, for
+ * "same as last time" said of a product the sheet has a usual amount for. A gel
+ * bait reads in grams, as the picker writes it.
+ */
+export function usualAmountFor(product, common) {
+  // The very reading the picker shows ("1½ tsp", "5 g", a legacy ml amount in
+  // its truck measure), as a number in that row unit: what the tech sees is what
+  // "same as last time" fills.
+  const reading = usualReading(product, common, productDimension(product, common));
+  if (!reading?.unit) return null;
+  const amount = readingAmount(reading.text);
+  return amount > 0 ? { amount, unit: reading.unit } : null;
+}
+
+// The number a reading starts with: "1½ tsp" → 1.5, "4 fl oz" → 4, "¼ tsp" → 0.25.
+const READING_FRACTIONS = { "⅛": 0.125, "¼": 0.25, "⅜": 0.375, "½": 0.5, "⅝": 0.625, "¾": 0.75, "⅞": 0.875 };
+function readingAmount(text) {
+  const match = String(text || "").match(/^(\d*\.?\d*)([⅛¼⅜½⅝¾⅞])?/);
+  if (!match) return 0;
+  return (Number(match[1]) || 0) + (READING_FRACTIONS[match[2]] || 0);
+}
+
 /** "5 g", "1½ tsp": the usual amount on these visits, in the product's measure. */
 export function usualAmountText(product, common) {
   return usualReading(product, common, productDimension(product, common))?.text ?? null;

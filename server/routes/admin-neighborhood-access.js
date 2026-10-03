@@ -154,15 +154,6 @@ async function liveCodeTaken(trx, neighborhoodId, code, exceptId) {
   return !!(await q.first('id'));
 }
 
-// Clearing a bell the change resolved is best-effort: it never fails the save.
-async function closeBellsBestEffort(entryId) {
-  try {
-    await require('../services/neighborhood-access').closeResolvedConflictBells();
-  } catch (err) {
-    logger.warn(`[admin-neighborhood-access] conflict bell close failed for entry ${entryId} (${(err && (err.code || err.name)) || 'error'})`);
-  }
-}
-
 router.get('/', async (req, res) => {
   try {
     const q = String(req.query.q || '').trim().slice(0, MAX_QUERY);
@@ -471,14 +462,13 @@ router.patch('/entries/:id', async (req, res) => {
         || (next.code || null) !== (row.code || null)
         || (next.instructions || null) !== (row.instructions || null);
       // The value is now the office's: it no longer comes from the customer
-      // who filed it (a later conflict bell must never open that customer).
+      // who filed it.
       const confirmation = valueChanged
         ? { status: 'active', last_confirmed_at: trx.fn.now(), source: 'office', source_customer_id: null }
         : {};
       await trx('neighborhood_access').where({ id }).update({ ...next, ...confirmation, updated_at: trx.fn.now() });
       return { status: 200, body: { id, status: valueChanged ? 'active' : row.status } };
     });
-    if (result.status === 200) await closeBellsBestEffort(id);
     return res.status(result.status).json(result.body);
   } catch (err) {
     if (err && err.code === '23505') return res.status(409).json({ error: 'That code is already on file for this neighborhood' });

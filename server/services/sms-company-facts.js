@@ -1,6 +1,6 @@
 'use strict';
 // Owner-approved company facts for the texting agent (owner rulings
-// 2026-09-29/30). Rendered as one COMPANY FACTS section in the per-draft
+// 2026-09-29/30; service knowledge added 2026-10-03). Rendered as one COMPANY FACTS section in the per-draft
 // facts block by sms-shadow-drafter.buildFactsBlock, ONLY while
 // GATE_SMS_REAL_ANSWERS is on (gate off: the facts block is byte-identical
 // to before). Because the verifier grounds a draft against that same block,
@@ -27,6 +27,21 @@ const COMPANY_FACTS = Object.freeze([
   'Lawn program: fertilizer, weed control and insect control only. No mowing. Treatments follow a seasonal rotation. Never name product brands.',
   'Watering advice you may give: follow the county\'s watering days, water early in the morning, and water deeply and less often.',
   `Paying: technicians accept cards at the visit, never cash. Checks are mailed to ${WAVES_BRAND_NAME}, ${WAVES_ADDRESS_LINE}.`,
+  // Service knowledge (owner-approved 2026-10-03; each line restates an earlier ruling).
+  // Scoped to what holds for EVERY customer the line could reach (Codex #5723 r1): the
+  // German roach cleanout runs 2-4 visits by severity; pay-after-first-visit is the
+  // recurring card rail only (invoice / commercial / one-time differ); 6x lawn plans
+  // still exist for older customers; only qualifying services count toward a tier.
+  'A standalone cockroach treatment (one that is not part of a recurring plan) is two visits for one price. The second visit is included. A German roach cleanout can take more visits, depending on how heavy it is.',
+  // Two termite lines the owner also approved are NOT here yet (Codex #5723 r3): the
+  // member's free annual termite inspection is not bookable (termite_inspection is
+  // inactive in the catalog, 20260928190000) and "free inspection" trips the
+  // re-service guard; and a pre-slab treatment includes a basic one-year warranty,
+  // so "a warranty is a separate purchase" would deny an included benefit.
+  'There is no deposit. New recurring customers who pay by card save the card when they book and are charged after the first visit.',
+  'New residential lawn plans run 9 or 12 applications a year.',
+  'Arrival windows are two hours and start on the hour.',
+  'WaveGuard tiers (Bronze, Silver, Gold, Platinum) depend on how many qualifying recurring services a customer has.',
 ]);
 
 // The static section: fixed owner-approved policy, identical on every draft

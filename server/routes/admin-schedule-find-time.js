@@ -29,7 +29,7 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const {
-  validateHintParams, markUnknownDetours, guardHintStarts, scorePickedHour, hintSearchPlan, buildHintSummary,
+  validateHintParams, markUnknownDetours, guardHintStarts, scorePickedHour, hintSearchPlan, buildHintSummary, loadSummaryDayFacts,
 } = require('../services/scheduling/find-time-hints');
 const { gateEnvValue } = require('../config/feature-gates');
 const { geocodeAddress, ensureCustomerGeocoded, buildAddress } = require('../services/geocoder');
@@ -343,6 +343,9 @@ router.post('/', async (req, res) => {
       // busy multi-tech range, past any fixed cap (Codex #4120 r1). topN
       // only changes the engine's final slice, never its work.
       topN: hint ? Number.POSITIVE_INFINITY : requestedTopN,
+      // A hint fires on every pick in every staff form; it must not spend
+      // the Google drive-time allowance customer booking depends on.
+      ...(hint ? { providerTravel: false } : {}),
       // undefined = the engine's own defaults ([] / exact-minute starts).
       excludeServiceIds,
       // Existing-visit staff hints share their route check with the edit
@@ -382,12 +385,15 @@ router.post('/', async (req, res) => {
     // only; they are not part of any response contract.
     const { rejections_by_date: rejectionsByDate, ...engineResult } = { ...result };
 
+    // Calendar labels for the strip's day pills (closed day, technician off).
+    const dayFacts = await loadSummaryDayFacts(plan, technicianId || null);
+
     res.json({
       ...engineResult,
       slots,
       ...(picked ? { picked } : {}),
       // undefined (dropped from the JSON) for everything but a summary plan.
-      summary: buildHintSummary(plan, every, { rejectionsByDate, startedAt }),
+      summary: buildHintSummary(plan, every, { rejectionsByDate, startedAt, ...dayFacts }),
       target,
       range: { dateFrom: plan.from, dateTo: plan.to },
     });

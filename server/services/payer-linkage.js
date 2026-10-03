@@ -57,7 +57,7 @@ function buildPayerLinkage(payerInvRows, { failed = false } = {}) {
 
 // Same query billing-v2 has always run (moved here unchanged). `failed` = the lookup errored: the caller must
 // treat payer ownership as UNKNOWN.
-async function loadPayerLinkage(customerId, dbh = db) {
+async function loadPayerLinkage(customerId, dbh = db, { propagateCancellation = false } = {}) {
   let failed = false;
   const payerInvRows = await dbh('invoices')
     .where({ customer_id: customerId })
@@ -69,7 +69,12 @@ async function loadPayerLinkage(customerId, dbh = db) {
       this.whereNotNull('payer_id').orWhereNotNull('payer_statement_id').orWhere('scheduled_send_error', 'like', 'payer_billed:%');
     })
     .select('id', 'stripe_payment_intent_id', 'stripe_charge_id', 'invoice_number')
-    .catch(() => { failed = true; return []; });
+    .catch((err) => {
+      if (propagateCancellation && (['PORTAL_CHAT_DEADLINE', 'ABORT_ERR', '57014'].includes(err?.code)
+        || ['AbortError', 'KnexTimeoutError'].includes(err?.name))) throw err;
+      failed = true;
+      return [];
+    });
   return buildPayerLinkage(payerInvRows, { failed });
 }
 

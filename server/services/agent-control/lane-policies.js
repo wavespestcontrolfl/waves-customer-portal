@@ -129,6 +129,7 @@ const LANE_RUNTIME = {
   contact_pass: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'audio', fallback_class: 'offline', eval_family: 'transcription_contact', ...CALL_PIPELINE },
   call_sentiment: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
   call_self_audit: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', workflow_id: 'call-self-audit', ...LONG_BATCH },
+  call_incidents: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', workflow_id: 'call-incidents-adjudicate', ...LONG_BATCH },
   lead_synopsis: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction' },
   // One FLAGSHIP pass per processed call, after finalization (dark behind GATE_CALL_COMMITMENTS);
   // no cross-provider answer — a miss records no commitment rows.
@@ -255,9 +256,6 @@ const LANE_RUNTIME = {
   // route (or a day with no eligible visits) makes no model call.
   // M3 (Codex r21): the generator writes body + provenance straight into scheduled_services.pre_service_brief; no approval boundary.
   previsit_brief: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'retrieval_qa', maturity: 'M3' },
-  // interactive: runs while the tech opens the drawer — bounded cross-provider
-  // fallback, then the deterministic template (Codex r8 on #3885).
-  job_card_paragraph: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'retrieval_qa', maturity: 'M1' },
   // GATE_FAST_COMPLETE_REPORT: reads where the technician treated and the
   // pests they named from their own note, each fact quoted word for word;
   // the sheet shows what was heard and the technician sends it with the

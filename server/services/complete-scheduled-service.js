@@ -99,10 +99,10 @@ const { buildNoActivityFinding } = require('../services/service-report/no-activi
 const { buildServiceRecordCompletionTimingFields } = require('../services/service-report/service-record-timing');
 const {
   MAX_COMPLETION_PHOTO_DATA_URL_BYTES,
-  cleanupUploadedServicePhotoObjects,
   decodeDataUrlPhoto,
   promoteStagedServicePhotos,
   uploadServicePhotoDataUrls,
+  withTrackedServicePhotoTransaction,
 } = require('../services/service-photos');
 const { hashBuffer } = require('../services/service-report/photo-chain');
 const {
@@ -565,6 +565,16 @@ function normalizeCustomerInteractionValue(value) {
   if (!value) return null;
   const text = String(value).trim();
   return CUSTOMER_INTERACTION_ALIASES[text] || text || null;
+}
+
+// The office note a completion may carry: a trimmed string capped at 800
+// characters, else nothing. Not gated here: only the voice-fill sheet sends the
+// field, the route is staff-authenticated and the note is staff-only, and a note
+// the tech can see on a sheet loaded before the gate went off must not vanish.
+const OFFICE_NOTE_MAX_CHARS = 800;
+function officeNoteForCompletion(value) {
+  if (typeof value !== 'string') return '';
+  return value.trim().slice(0, OFFICE_NOTE_MAX_CHARS);
 }
 
 function isWaveGuardLawnCompletion(svc) {
@@ -2616,6 +2626,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
       idempotencyKey: bodyIdempotencyKey,
       pricingReview = null,
       technicianNotes,
+      // Voice fill's office note (GATE_FAST_COMPLETE_VOICE_FILL): staff-only,
+      // appended to scheduled_services.internal_notes below; never the report.
+      officeNote,
       customerConcernText,
       customerRecap,
       visitOutcome = 'completed',
@@ -2707,7 +2720,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // against: its updated_at, or null for none — OPTIONAL. Undefined (every
       // other caller) skips the check. Re-checked under the visit row lock.
       traceSeen,
+      // false when the sheet judged a saved trace as one its report never
+      // shows (a typed visit that is not a spray visit, a lane the tracer is
+      // hidden for) — OPTIONAL. traceSeen still carries that trace's stamp
+      // for the changed-during-completion check; the record then freezes
+      // "no trace judged", so the trace neither shows on the report nor
+      // counts as an outside treatment zone (Codex P2 on #5633).
+      traceShown,
     } = completionInput.body;
+    const traceJudgedSeen = traceShown === false ? null : (traceSeen ?? null);
     // The field already exists for older clients; retain numeric-string input,
     // while rejecting booleans, fractions and invalid values before any write.
     // The rejection itself is deferred to the fresh-execution block below:
@@ -2921,6 +2942,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     let completionPhotoUploadResult = { uploaded: 0, failed: 0, errors: [] };
     let completionPhotosUploadedBeforeCommit = false;
     let preCommitCompletionPhotoRows = [];
+    const newlyUploadedObjects = packetRecords ? packetContext.uploadedPhotoRows : [];
     const promotedPhotoIds = new Set();
     let completionReviewDelayMinutes;
     let customerRequestedReview = null;
@@ -5742,6 +5764,23 @@ async function completeScheduledService(completionInput, packetContext = null) {
               throw Object.assign(new Error('trace changed during completion'), { code: 'trace_changed' });
             }
           }
+          // The sheet said the saved trace is one this report never shows
+          // (traceShown false). That verdict was read when the sheet opened
+          // and depends on the visit's add-ons, which can change before Send,
+          // so it is judged again here under the visit lock, with the live
+          // context's own rule. If the report would now show the trace, the
+          // record was written without checking it: refuse, as for a trace
+          // that changed (Codex P1 on #5745). A failed read refuses too.
+          if (traceShown === false && lockedSvcRow) {
+            let shownNow = true;
+            try {
+              shownNow = await trx.transaction((sp) => require('./pest-recap')
+                .traceOnReportForVisit(lockedSvcRow, completionProfile, sp));
+            } catch { shownNow = true; }
+            if (shownNow) {
+              throw Object.assign(new Error('trace visibility changed during completion'), { code: 'trace_changed' });
+            }
+          }
           // Invoice-issued closeout: the not-future decision (resolveVisit +
           // backfillCompletionPlan) read the UNLOCKED scheduled_date. A
           // reschedule that landed between that read and this lock would
@@ -6134,7 +6173,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // The trace the report flow judged this record against (its
             // updated_at, or null for none): the report shows only that one
             // (treatment-zone-maps.js traceJudgedAllows).
-            ...(traceSeen !== undefined ? { traceJudged: { seen: traceSeen ?? null } } : {}),
+            ...(traceSeen !== undefined ? { traceJudged: { seen: traceJudgedSeen } } : {}),
             visitOutcome,
             // Internal-only consultations never request a customer review —
             // freeze the opt-out so the Stripe paid-invoice webhook
@@ -6980,7 +7019,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               // A report-flow completion counts only the trace it judged
               // (traceSeen): one it never saw drives no exterior timer
               // (Codex #5538, treatment-zone-maps.js traceJudgedAllows).
-              const judged = traceSeen !== undefined ? { traceJudged: { seen: traceSeen ?? null } } : {};
+              const judged = traceSeen !== undefined ? { traceJudged: { seen: traceJudgedSeen } } : {};
               tracedExteriorZone = interiorOnlyVisit ? false : await trx.transaction(async (sp) => {
                 const row = await sp('treatment_zone_maps')
                   .where({ scheduled_service_id: svc.id })
@@ -7156,6 +7195,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
                   serviceRecordId: record.id,
                   photos: [gaugePhoto],
                   photoType: 'progress',
+                  newlyUploadedObjects,
                   knex: sp,
                 });
                 gaugePhotoId = gaugeUpload?.photos?.[0]?.id || null;
@@ -7653,6 +7693,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             serviceRecordId: record.id,
             photos: completionPhotos,
             photoType: 'after',
+            newlyUploadedObjects,
             knex: trx,
           });
           // Cumulative (concat, not assign) so an earlier-registered turf-height
@@ -7744,6 +7785,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
         if (Object.keys(scheduledServiceUpdate).length) {
           await trx('scheduled_services').where({ id: svc.id }).update(scheduledServiceUpdate);
         }
+        // The tech's office note (voice fill, dark gate): appended to the
+        // visit's staff-only internal_notes (dispatcher/tech context; never on
+        // the customer job-status payload, the report or a text), dated so a
+        // later note never reads as this visit's. Never part of
+        // technicianNotes, so the report writer and the code guard on
+        // customer-visible text never see it.
+        const officeNoteText = officeNoteForCompletion(officeNote);
+        if (officeNoteText) {
+          await trx('scheduled_services').where({ id: svc.id }).update({
+            internal_notes: trx.raw("concat_ws(E'\\n', nullif(internal_notes, ''), ?::text)", [`[Office note ${etDateString(completionEndedAt ? new Date(completionEndedAt) : new Date())}] ${officeNoteText}`]),
+          });
+        }
 
         // 5. Status flip via the canonical sole-writer.
         await transitionJobStatus({
@@ -7826,7 +7879,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // Pass the outer handle to the status/alert writers so their broadcasts
         // cannot escape if a later member rejects the closeout.
         if (packetRecords) await persistRecord(db);
-        else await db.transaction(persistRecord);
+        else await withTrackedServicePhotoTransaction({
+          knex: db,
+          newlyUploadedObjects,
+        }, persistRecord);
         if (packetRecords) {
           packetContext.uploadedPhotoRows.push(...preCommitCompletionPhotoRows.filter((photo) => !promotedPhotoIds.has(photo.id)));
           return { status: 202, body: { serviceRecordId: record.id } };
@@ -7866,10 +7922,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
         }
       }
       } catch (err) {
-        if (preCommitCompletionPhotoRows.length) {
-          await cleanupUploadedServicePhotoObjects(preCommitCompletionPhotoRows.filter((photo) => !promotedPhotoIds.has(photo.id)));
-          preCommitCompletionPhotoRows = [];
-        }
         if (err && err.message && err.message.includes('not in state')) {
           await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
           return ({ status: 409, body: {
@@ -13566,6 +13618,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
               // paid template; the post-block recovery restores the separate
               // receipt the claim stood down.
             }
+            // GATE_PAF_PREPAY (owner ruling 2026-10-03): the first visit of a
+            // year charged after that visit says so, neutrally (no amount, no
+            // "now"); a disabled / missing template falls to the regular one.
+            // A failed eligibility read throws like a missing template does:
+            // the text stays retryable instead of falling to "nothing due
+            // today" minutes before the year is charged (Codex #5640 r15).
+            if (!body && annualPrepayCovered
+              && !['inspection_only', 'customer_declined', 'incomplete'].includes(visitOutcome)
+              && await require('../services/paf-prepay-release').isFirstHeldVisitOfUnpaidYear(svc, db)) {
+              sentSmsType = 'service_complete_annual_prepay_after_first_visit';
+              body = await renderTemplate(sentSmsType, paidTemplateVars, paidTemplateContext);
+            }
             if (!body && annualPrepayCovered) {
               sentSmsType = 'service_complete_annual_prepay';
               body = await renderTemplate(sentSmsType, paidTemplateVars, paidTemplateContext);
@@ -14738,3 +14802,4 @@ module.exports.requiresLinearFtForReportApplication = requiresLinearFtForReportA
 module.exports.requiresSqftForReportApplication = requiresSqftForReportApplication;
 module.exports.isWaveGuardLawnCompletion = isWaveGuardLawnCompletion;
 module.exports.COMPLETION_ACCESS_CODE_RE = COMPLETION_ACCESS_CODE_RE;
+module.exports.officeNoteForCompletion = officeNoteForCompletion;

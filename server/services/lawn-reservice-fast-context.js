@@ -242,8 +242,8 @@ async function buildLawnReserviceFastContext(serviceId, knex = db) {
   const ineligibleReason = await lawnReserviceIneligibleReason(svc, profile, knex);
   if (ineligibleReason) return { ok: true, eligible: false, reason: ineligibleReason, service };
 
-  const catalog = await loadRecapCatalogProducts(knex);
-  // The shared loader turns a failed read into []. With no catalog the sheet
+  const catalog = await loadRecapCatalogProducts(knex).catch(() => []);
+  // A failed read leaves no usable catalog. With no catalog the sheet
   // has nothing to pick from, so the visit goes to the full form.
   if (!catalog.length) return { ok: true, eligible: false, reason: 'catalog_unavailable', service };
 

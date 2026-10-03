@@ -81,7 +81,7 @@ export default function CustomerDirectoryTable({ customers, onOpen, onEdit, onDe
                   }
                 }}>
                   {customer.phone && <>
-                    <Button variant="ghost" className="ui-menu-action" onClick={() => onCall(customer)}><Phone size={16} />Call via Waves</Button>
+                    {onCall && <Button variant="ghost" className="ui-menu-action" onClick={() => onCall(customer)}><Phone size={16} />Call via Waves</Button>}
                     <a href={`/admin/communications?phone=${encodeURIComponent(customer.phone)}`} className={buttonStyles({ variant: "ghost", density: "comfortable", className: "ui-menu-action" })}><MessageSquare size={16} />Messages</a>
                   </>}
                   {canEdit && <>

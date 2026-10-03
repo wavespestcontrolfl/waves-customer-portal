@@ -142,7 +142,7 @@ export default function ServiceRecapModal({
         // (codex P1 r13). Same for a failed service-record lookup (codex
         // P1 r15): "no record" reported over a transient error must not
         // authorize an empty replacement of a real completed visit.
-        if (data?.existingRecord?.productsLoadFailed || data?.existingRecordLoadFailed) {
+        if (data?.catalogLoadFailed || data?.existingRecord?.productsLoadFailed || data?.existingRecordLoadFailed) {
           selectionAuthoritative.current = false;
         }
         if (recorded.length && !Array.isArray(data?.products)) {
@@ -476,7 +476,7 @@ export default function ServiceRecapModal({
                     placeholder="Quick internal note — areas treated, what you found, anything for the next visit."
                   />
                 </Field>
-                <RecapProducts products={products} selected={selected} rates={rates} productById={productById} toggleProduct={toggleProduct} setRateValue={setRateValue} />
+                <RecapProducts products={products} catalogLoadFailed={ctx?.catalogLoadFailed} selected={selected} rates={rates} productById={productById} toggleProduct={toggleProduct} setRateValue={setRateValue} />
                 <RecapMissingSelections ids={draft.missingSelections} names={restoredNames} onRemove={toggleProduct} />
                 <RecapMessage
                   message={message} setMessage={setMessage} drafting={drafting} handleDraft={handleDraft}
@@ -508,7 +508,7 @@ export default function ServiceRecapModal({
   );
 }
 
-function RecapProducts({ products, selected, rates, productById, toggleProduct, setRateValue }) {
+function RecapProducts({ products, catalogLoadFailed, selected, rates, productById, toggleProduct, setRateValue }) {
   const rateRows = [...selected]
     .map((id) => ({ id, product: productById.get(id), entry: rates[id] }))
     .filter((row) => row.product && row.entry?.unit);
@@ -516,7 +516,9 @@ function RecapProducts({ products, selected, rates, productById, toggleProduct, 
     <>
       <h3 className="tech-visit-section-title">Products applied</h3>
       {products.length === 0 ? (
-        <p className="tech-visit-muted">No products in catalog.</p>
+        catalogLoadFailed
+          ? <ActionFeedback error className="tech-visit-feedback">Product list unavailable. Recorded usage will be kept. Reopen this recap to retry.</ActionFeedback>
+          : <p className="tech-visit-muted">No products in catalog.</p>
       ) : (
         <div className="tech-visit-products">
           {products.map((product) => (

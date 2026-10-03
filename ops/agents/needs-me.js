@@ -53,6 +53,10 @@ const cell = (text, width) => {
 
 (async () => {
   const result = await listNeedsMe({ who, area, limit, after });
+  if (process.argv.includes('--quality')) {
+    const { alertQuality } = require('./report-evidence');
+    result.quality = alertQuality(result);
+  }
   if (process.argv.includes('--json')) {
     console.log(JSON.stringify(result, null, 2));
     return;
@@ -71,6 +75,7 @@ const cell = (text, width) => {
   }
   console.log(`\n${result.items.length} shown: ${result.total} need you, ${result.unsortedTotal} unsorted. * = inferred from an older alert.`);
   if (result.next) console.log(`More: --after ${result.next}`);
+  if (result.quality) console.log(`\nAlert quality (page only): ${JSON.stringify(result.quality, null, 2)}`);
   for (const w of result.warnings) console.error(`warning: ${w.source}${w.generator ? ` (${w.generator})` : ''} ${w.error}`);
 })().catch((err) => {
   console.error(`needs-me failed: ${err.message}`);
