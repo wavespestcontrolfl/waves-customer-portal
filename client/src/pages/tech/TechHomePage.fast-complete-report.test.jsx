@@ -36,7 +36,8 @@ vi.mock('../../components/tech/FastCompleteSheet', () => ({
 vi.mock('../../components/tech/FastCompleteTreeShrubSheet', () => ({ default: () => <div data-testid="tree-sheet" /> }));
 vi.mock('../../components/tech/FastCompleteLawnReserviceSheet', () => ({ default: () => <div data-testid="lawn-sheet" /> }));
 import TechHomePage from './TechHomePage';
-import { addETDays, etDateString } from '../../lib/timezone';
+import { etDateString } from '../../lib/timezone';
+import { ROUTE_SNAPSHOT_KEY } from './routeSnapshot';
 
 const row = (id, overrides = {}) => ({
   id,
@@ -279,13 +280,42 @@ it('a visit with a saved retry the device cannot read now opens nothing (GitHub 
   expect(screen.queryByText(/Existing recap form/)).not.toBeInTheDocument();
 });
 
-it('a technician\'s device sweeps its own saved retries on the server\'s access cutoff, never another operator\'s (GitHub Codex P2 on 458cc517e5; pre-push P0s on 1dc0f16fb9 and f405ea3185)', async () => {
+it('keeps the store\'s own retention: /complete takes an overdue retry at any age, so nothing shorter sweeps (GitHub Codex P2 on b1ebfd50ce)', async () => {
   rows = [];
   mount();
   await screen.findByRole('button', { name: /Project Report/ });
-  expect(mocks.prune).toHaveBeenCalledWith(expect.any(Number), undefined, {
-    operatorId: 'tech-fixture', scheduledCutoff: etDateString(addETDays(new Date(), -7)),
-  });
-  // Every operator's rows keep the store's own sweep.
+  expect(mocks.prune).toHaveBeenCalledTimes(1);
   expect(mocks.prune).toHaveBeenCalledWith();
+});
+
+it('a route row whose saved retry another tab removed leaves the list on the tap (GitHub Codex P2 on b1ebfd50ce)', async () => {
+  mocks.attempts.set('svc-done', { body: { idempotencyKey: 'done-key', reportDraftBase: {} }, summary: 'Saved report' });
+  rows = [row('svc-done', { status: 'completed' })];
+  mount();
+  const recover = await screen.findByRole('button', { name: /Recover Completion/ });
+  mocks.getAttempt.mockImplementation(async () => ({ available: true, attempt: null }));
+  fireEvent.click(recover);
+  expect(await screen.findByRole('button', { name: /Project Report/ })).toBeDisabled();
+  expect(screen.queryByRole('button', { name: /Recover Completion/ })).not.toBeInTheDocument();
+});
+
+it('a recovery read failure shows with the offline route notice, not under it (GitHub Codex P2 on b1ebfd50ce)', async () => {
+  mocks.attempts.set('svc-live', { body: { idempotencyKey: 'live-key', reportDraftBase: {} }, summary: 'Saved report' });
+  localStorage.setItem(ROUTE_SNAPSHOT_KEY, JSON.stringify({
+    techId: 'tech-fixture', date: etDateString(), savedAt: new Date().toISOString(),
+    data: { services: [row('svc-live', { fastCompleteReportEnabled: true })] },
+  }));
+  vi.stubGlobal('fetch', vi.fn(async (path) => {
+    if (path.includes('/admin/schedule?')) throw new TypeError('Failed to fetch');
+    return { ok: true, status: 200, json: async () => ({}) };
+  }));
+  rows = [];
+  mount('/admin/today/tools', { fieldWorkspace: false });
+  await screen.findByText(/No connection/);
+  mocks.getAttempt.mockImplementation(async () => ({ available: false, attempt: null }));
+  // The legacy layout's tool keeps its own label; it routes the same way.
+  fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
+  expect((await screen.findAllByText(/Could not read the completion saved on this device/)).length).toBeGreaterThan(0);
+  expect(screen.getByText(/No connection/)).toBeInTheDocument();
+  expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
 });

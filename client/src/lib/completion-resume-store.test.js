@@ -202,40 +202,6 @@ describe("completion resume store (IndexedDB)", () => {
     expect(await getCompletionResumeBody("regular-completion")).toEqual(committedBody());
   });
 
-  it("a sweep scoped to one operator never touches another operator's attempts (pre-push P0 on 1dc0f16fb9)", async () => {
-    const eightDays = Date.now() - 8 * 24 * 60 * 60 * 1000;
-    const sevenDays = 7 * 24 * 60 * 60 * 1000;
-    await putFastCompletionAttempt("svc-tech-old", "tech-a", { body: committedBody(), summary: "tech old" }, eightDays);
-    await putFastCompletionAttempt("svc-tech-new", "tech-a", { body: committedBody(), summary: "tech new" });
-    await putFastCompletionAttempt("svc-owner-old", "owner-b", { body: committedBody(), summary: "owner old" }, eightDays);
-
-    expect(await pruneFastCompletionAttempts(Date.now(), sevenDays, { operatorId: "tech-a" })).toBe(1);
-    expect((await getFastCompletionAttempt("svc-tech-old", "tech-a")).attempt).toBeNull();
-    expect((await getFastCompletionAttempt("svc-tech-new", "tech-a")).attempt).not.toBeNull();
-    expect((await getFastCompletionAttempt("svc-owner-old", "owner-b")).attempt).not.toBeNull();
-  });
-
-  it("a sweep by the server's access cutoff never deletes a retry the server would still take (pre-push P0 on f405ea3185)", async () => {
-    const at = (iso) => new Date(iso).getTime();
-    const dated = (scheduledDate) => ({ ...committedBody(), expectedVisit: { customerId: "cust-1", scheduledDate } });
-    // Visit and save both before the cutoff: past it.
-    await putFastCompletionAttempt("svc-past", "tech-a", { body: dated("2026-09-24"), summary: "past" }, at("2026-09-24T15:00:00Z"));
-    // On the cutoff day, which the server still allows (>=): kept.
-    await putFastCompletionAttempt("svc-edge", "tech-a", { body: dated("2026-09-26"), summary: "edge" }, at("2026-09-26T15:00:00Z"));
-    // Saved after the cutoff for an earlier visit: the later day keeps it.
-    await putFastCompletionAttempt("svc-later", "tech-a", { body: dated("2026-09-20"), summary: "later" }, at("2026-09-28T15:00:00Z"));
-    // No visit date: left to the age sweep.
-    await putFastCompletionAttempt("svc-undated", "tech-a", { body: committedBody(), summary: "undated" }, at("2026-09-20T15:00:00Z"));
-    // Another operator's: never touched.
-    await putFastCompletionAttempt("svc-owner", "owner-b", { body: dated("2026-09-20"), summary: "owner" }, at("2026-09-20T15:00:00Z"));
-
-    expect(await pruneFastCompletionAttempts(Date.now(), undefined, { operatorId: "tech-a", scheduledCutoff: "2026-09-26" })).toBe(1);
-    expect((await getFastCompletionAttempt("svc-past", "tech-a")).attempt).toBeNull();
-    for (const [serviceId, operatorId] of [["svc-edge", "tech-a"], ["svc-later", "tech-a"], ["svc-undated", "tech-a"], ["svc-owner", "owner-b"]]) {
-      expect((await getFastCompletionAttempt(serviceId, operatorId)).attempt).not.toBeNull();
-    }
-  });
-
   it("atomically rechecks age so a second connection's refresh survives prune", async () => {
     const old = Date.now() - DRAFT_RETENTION_MS - 1000;
     const body = { ...committedBody(), idempotencyKey: "refresh-key" };

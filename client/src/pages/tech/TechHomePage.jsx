@@ -68,7 +68,7 @@ import FieldLeadModal from '../../components/tech/FieldLeadModal';
 import VisualNotesPanel from '../../components/tech/VisualNotesPanel';
 import { useFeatureFlag, useFeatureFlagReady } from '../../hooks/useFeatureFlag';
 import { clearStaffDeviceData, getAdminAuthToken, getAdminDisplayName, getAdminUser } from '../../lib/adminAuth';
-import { addETDays, etDateString } from '../../lib/timezone';
+import { etDateString } from '../../lib/timezone';
 import { resolveSpecialtyServiceKey } from '../../lib/service-completion-presets';
 import { STATION_TYPE_PROGRAM } from '../../lib/typed-findings-rules';
 import { ROUTE_FETCH_TIMEOUT_MS, loadRouteSnapshot, saveRouteSnapshot, savedRouteNotice, formatSnapshotTime } from './routeSnapshot';
@@ -248,14 +248,6 @@ function withoutRecoveryAttempt(scan, serviceId) {
   return { ...scan, attempts };
 }
 const RECOVERY_READ_NOTICE = 'Could not read the completion saved on this device. Tap to try again.';
-// A technician reaches a visit while its scheduled date is on or after today
-// (ET) less 7 days (techAccessCutoff, server/services/technician-visit-scope.js).
-// A technician's device lets its own saved retries go once their visit is past
-// that same cutoff, never sooner, and never another operator's on a shared
-// device; office roles, which the server does not limit, keep the store's own
-// retention (GitHub Codex P2 on 458cc517e5; pre-push P0s on 1dc0f16fb9 and
-// f405ea3185).
-const TECH_ACCESS_WINDOW_DAYS = 7;
 function fastCompletionRecoveryKind(attempt) {
   const body = attempt?.body;
   if (!body || typeof body !== 'object') return null;
@@ -610,13 +602,11 @@ export default function TechHomePage({ section = 'today' }) {
   // stays in this page never runs the admin schedule's full sweep.
   useEffect(() => {
     pruneRecapClipDrafts().catch(() => {});
+    // The store's own retention only: /complete takes an overdue visit's
+    // retry from its assigned technician at any age (no date cutoff;
+    // completionOwnershipError), so nothing shorter may drop one (GitHub
+    // Codex P2 on b1ebfd50ce).
     pruneFastCompletionAttempts().catch(() => {});
-    if (currentRole === 'technician' && staffIdForDevice) {
-      pruneFastCompletionAttempts(Date.now(), undefined, {
-        operatorId: staffIdForDevice,
-        scheduledCutoff: etDateString(addETDays(new Date(), -TECH_ACCESS_WINDOW_DAYS)),
-      }).catch(() => {});
-    }
   }, []);
 
   useEffect(() => {
@@ -1021,13 +1011,14 @@ export default function TechHomePage({ section = 'today' }) {
       setRecoveryReadNotice(RECOVERY_READ_NOTICE);
       return;
     }
-    if (service.fastCompletionRecoveryOnly) {
-      // The tap's own read found no saved attempt (another tab discarded or
-      // finished it): the stale entry leaves the list (GitHub Codex P2 on
-      // 102b99cb1b).
+    // The tap's own read found no saved attempt for a service the list held
+    // one for (another tab discarded or finished it): the stale entry leaves
+    // the list, for an off-route entry and a route row alike, before any
+    // routing (GitHub Codex P2s on 102b99cb1b and b1ebfd50ce).
+    if (result.available !== false && knownRecoveryIds.current.has(String(service.id))) {
       setFastRecoveryScan((scan) => withoutRecoveryAttempt(scan, service.id));
-      return;
     }
+    if (service.fastCompletionRecoveryOnly) return;
     if (fieldWorkspace && TERMINAL_STATUSES_VISIT.has(service.status) && !service.visitCloseoutPacket && !recordlessVisitNeedsCloseout(service)) return;
     if (usesDispatchCompletion(service)) openTypedVisit(service);
     else if (isPestControlService(service)) openPestCompletion(service);
@@ -1083,7 +1074,7 @@ export default function TechHomePage({ section = 'today' }) {
       {fieldWorkspace ? (
         <TechFieldHome
           section={section} stops={stops} nextStop={fieldNextStop}
-          loading={loading} refreshing={refreshing} error={scheduleError} notice={routeNotice || recoveryReadNotice} rainChance={rainChance}
+          loading={loading} refreshing={refreshing} error={scheduleError} notice={[routeNotice, recoveryReadNotice].filter(Boolean).join(' ')} rainChance={rainChance}
           onRetry={fetchSchedule} onOpen={openFieldVisit} busy={navigationBusy}
           tools={fieldTools}
           followThrough={<TechFollowThroughCards fieldWorkspace />}
@@ -1165,7 +1156,10 @@ export default function TechHomePage({ section = 'today' }) {
           background: '#f59e0b22', border: '1px solid #f59e0b', color: '#fbbf24',
           borderRadius: 10, padding: 12, marginBottom: 16, fontSize: 14,
         }}>
-          <div style={{ marginBottom: 8 }}>{routeNotice || recoveryReadNotice}</div>
+          {/* Both, when both stand: a blocked report says why under the route's
+              own notice (GitHub Codex P2 on b1ebfd50ce). */}
+          {routeNotice && <div style={{ marginBottom: 8 }}>{routeNotice}</div>}
+          {recoveryReadNotice && <div style={{ marginBottom: 8 }}>{recoveryReadNotice}</div>}
           <button type="button" onClick={fetchSchedule} disabled={refreshing} style={{
             border: '1px solid #f59e0b', background: 'transparent', color: '#fbbf24',
             borderRadius: 6, padding: '6px 10px', fontWeight: 700, cursor: refreshing ? 'default' : 'pointer', opacity: refreshing ? 0.6 : 1,

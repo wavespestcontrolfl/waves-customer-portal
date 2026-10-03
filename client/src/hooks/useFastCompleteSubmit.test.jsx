@@ -449,6 +449,9 @@ describe('a saved completion whose stored copy will not clear (GitHub Codex P2 o
     await release();
     expect(view.result.current.failure).toBe('terminal');
     expect(view.result.current.hasPendingBody()).toBe(false);
+    // Nothing is saved now: the saved-attempt view gives way (GitHub Codex
+    // P2 on b1ebfd50ce).
+    expect(view.result.current.restored).toBe(false);
     expect(view.result.current.storageWarning).toBe('');
     expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt).toBeNull();
   });

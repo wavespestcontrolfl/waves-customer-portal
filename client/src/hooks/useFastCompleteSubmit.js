@@ -221,6 +221,10 @@ export default function useFastCompleteSubmit({
     if (keptTerminal) {
       setRestored(true);
       setStorageWarning(KEPT_COPY_NOTICE);
+    } else if (outcome === 'terminal') {
+      // Its copy is gone: the saved-attempt view would say one is still here
+      // (GitHub Codex P2 on b1ebfd50ce).
+      setRestored(false);
     }
     if (outcome === 'correctable') {
       if (removed) persistedBodyRef.current = null;
