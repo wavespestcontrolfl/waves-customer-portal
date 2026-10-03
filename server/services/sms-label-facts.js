@@ -1103,7 +1103,10 @@ function languageTokens(text, { keepNames = false, dropNames = false } = {}) {
       if (STREET_WORDS.has(word)) {
         for (let k = i + 1; k <= j; k++) skip.add(k);
         // a street word that ends a sentence ("St." then "Kiedy psy?") ends the address: what follows is read as words (#5537 r1)
-        if (/[.!?]["\u201d\u2019')]*$/.test(raws[j])) break;
+        // ... unless the tail of the address follows an abbreviated suffix: a unit ("St. Apt 4") or a state code and zip ("Dr. FL 34250")
+        const tailFollows = j + 1 < raws.length && (/^(?:apt|unit|ste|suite|#)\.?$/i.test(raws[j + 1])
+          || (/^[A-Z]{2},?$/.test(raws[j + 1]) && j + 2 < raws.length && /^\d{5}(?:-\d{4})?[,.]?$/.test(raws[j + 2])));
+        if (/[.!?]["\u201d\u2019')]*$/.test(raws[j]) && !(/\.$/.test(raws[j]) && tailFollows)) break;
         // the address tail: a unit ("apt 102"), then a state code and zip directly after the street ("Dr FL 34000")
         let k = j + 1;
         if (k < raws.length && /^(?:apt|unit|ste|suite|#)\.?$/i.test(raws[k])) { skip.add(k); k += 1; if (k < raws.length && /^#?\d+\w?[,.]?$/.test(raws[k])) { skip.add(k); k += 1; } }

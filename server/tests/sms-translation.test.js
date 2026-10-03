@@ -627,6 +627,16 @@ describe('runTranslationTrial', () => {
     expect(await runTranslationTrial({ inboundMessage: 'Когда вы придёте?', customer, smsLogId: 's1' })).not.toBeNull();
   });
 
+  test('reactions do not use up the sample: English replies older than ten reactions still vote', async () => {
+    mockOutbound.mockResolvedValueOnce([{ message_body: 'On my way' }]);
+    mockEarlier.mockResolvedValueOnce([
+      ...Array.from({ length: 10 }, () => ({ message_body: 'Понравилось «On my way»' })),
+      { message_body: 'Ok thanks' }, { message_body: 'See you then' }, { message_body: '123 Main St. Apt 4' },
+    ]);
+    scriptModels({ inbound: { ...SPANISH_INBOUND, english: 'Thank you' } });
+    expect(await runTranslationTrial({ inboundMessage: 'Gracias', customer, smsLogId: 's1' })).toBeNull();
+  });
+
   test('only the address span is set aside: "123 Main St. Hasta luego" still votes foreign', async () => {
     mockEarlier.mockResolvedValueOnce([{ message_body: 'Ok thanks' }, { message_body: 'See you then' }, { message_body: 'Gracias' }, { message_body: '123 Main St. Hasta luego' }]);
     scriptModels({ inbound: SPANISH_INBOUND });

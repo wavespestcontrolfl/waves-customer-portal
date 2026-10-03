@@ -854,7 +854,7 @@ async function translateAndCheck({ englishReply, language, languageCode, context
  * insert failed) for logging/tests.
  */
 // Owner 2026-10-03: answer in the customer's USUAL language. A customer whose
-// earlier texts (up to their last 10, reactions left out) are mostly English
+// earlier texts (their last 10 that carry language: reactions and contact details left out) are mostly English
 // gets today's English handling for a one-off "Gracias" or "Perfecto, thanks!":
 // no trial. A first text, or one from a customer who mostly writes another
 // language, goes on. A read failure goes on too (the trial sends nothing).
@@ -878,7 +878,7 @@ async function usuallyWritesEnglish(customerId, smsLogId) {
   try {
     const trigger = db('sms_log').where({ id: smsLogId }).select('created_at');
     const rows = await db('sms_log').where({ customer_id: customerId, direction: 'inbound' }).whereNot({ id: smsLogId })
-      .where('created_at', '<', trigger).orderBy('created_at', 'desc').limit(10).select('message_body', 'created_at');
+      .where('created_at', '<', trigger).orderBy('created_at', 'desc').limit(60).select('message_body', 'created_at');
     if (!rows.length) return false;
     // each reply is matched only against our texts sent BEFORE it (a reaction quotes a text it has seen); the
     // window reaches 30 days before the oldest reply read, whatever the number of our texts in it
@@ -893,7 +893,7 @@ async function usuallyWritesEnglish(customerId, smsLogId) {
     // mid-sentence names do not vote (languageVote); a reply with no words left has no vote
     const votes = rows.filter((r) => typeof r.message_body === 'string' && r.message_body.trim()
         && !isSmsReaction(r.message_body) && !isReactionToOurText(r.message_body, sentBefore(r.created_at)))
-      .map((r) => languageVote(r.message_body)).filter(Boolean);
+      .map((r) => languageVote(r.message_body)).filter(Boolean).slice(0, 10); // the 10 newest that carry language
     const english = votes.filter((v) => v === 'english').length;
     return english > votes.length - english;
   } catch (err) {
