@@ -1794,3 +1794,27 @@ test.each(['Atticus Talak … Talstar P', 'Talstar P … Atticus Talak'])('a neg
   const out = validateFill(answer({ products: [{ productId: 'p-talak', amount: 0, unit: 'not_said', sameAsLast: false, method: '', heard }] }), ctx, t);
   expect(out.products.map((p) => p.productId)).toEqual(['p-talak']);
 });
+
+describe('Codex #5698 round 7: which mention a quote points at', () => {
+  const row = (heard, over = {}) => ({ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard, ...over });
+
+  test('a quote of the negated mention never carries same-as-last from the positive one', () => {
+    const t = 'Taurus was same as last time. Taurus was not used.';
+    const out = validateFill(answer({ products: [row('Taurus was not used')] }), ctx, t);
+    expect(out.products.some((p) => p.sameAsLast)).toBe(false);
+  });
+
+  test('the product-bearing piece of a stitched quote picks the mention ("Same mix as last time, Taurus")', () => {
+    const t = 'I used Taurus in the kitchen. Same mix as last time, Taurus outside.';
+    const out = validateFill(answer({ products: [row('Same mix as last time, Taurus')] }), ctx, t);
+    expect(out.products[0].sameAsLast).toBe(true);
+  });
+
+  test('words past the display cap are still grounded: a fabricated tail refuses the quote', () => {
+    const real = `Used Taurus ${'around the back of the house '.repeat(5)}today`.replace(/\s+/g, ' ').trim();
+    expect(real.length).toBeGreaterThan(CAPS.heard - 15);
+    const out = validateFill(answer({ products: [row(`${real} fabricatedlongword and more invented words`, { sameAsLast: false })] }), ctx, `${real}.`);
+    expect(out.products).toEqual([]);
+    expect(out.unclear.map((u) => u.reason)).toContain('not_heard');
+  });
+});

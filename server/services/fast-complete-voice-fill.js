@@ -909,18 +909,37 @@ function isNegatedMention(mention, world) {
   return false;
 }
 
+// The mentions of this product that the quote points at: those overlapped by ANY
+// piece of the (possibly stitched) quote where that piece was said, negated ones
+// included. "Same mix as last time, Taurus" points through its second piece; a
+// quote of a negated mention points at that negated mention.
+function quotedMentions(product, heard, world) {
+  const all = world.mentions.filter((m) => m.id === product.id);
+  const pieces = String(heard).split(HEARD_BREAKS).map(tokensOf).filter((piece) => piece.length);
+  const placed = pieces.map((piece) => world.tokens.map((_, i) => i)
+    .filter((i) => piece.every((t, k) => world.tokens[i + k] === t)).map((i) => ({ start: i, end: i + piece.length })));
+  const hit = all.filter((m) => placed.some((ranges) => ranges.some((r) => m.start < r.end && m.end > r.start)));
+  if (hit.length < 2) return hit;
+  // A short piece ("Taurus") can sit on several mentions: the one whose sentence
+  // holds the most of the quote's pieces is the one the quote is about.
+  const score = (m) => {
+    const { from, to } = sentenceSpan(m, world);
+    return placed.filter((ranges) => ranges.some((r) => r.start >= from && r.end <= to)).length;
+  };
+  const best = Math.max(...hit.map(score));
+  return hit.filter((m) => score(m) === best);
+}
+
 // The places in the transcript this product is named, as the heard words point
-// to them: the mentions that the heard's first contiguous piece overlaps; if it
-// overlaps none (or cannot be placed), every mention of the product. Mentions the
-// tech negated are left out whenever the product has a positive one.
+// to them: the POSITIVE mentions the quote overlaps; if it overlaps none (or
+// cannot be placed), every positive mention of the product. Mentions the tech
+// negated are left out whenever the product has a positive one.
 function productMentions(product, heard, world) {
   const all = world.mentions.filter((m) => m.id === product.id);
   const positive = all.filter((m) => !isNegatedMention(m, world));
   const mine = positive.length ? positive : all;
-  // the quote's first phrase (pieces break as in heardInTranscript) points at a mention
-  const piece = tokensOf(String(heard).split(HEARD_BREAKS)[0]);
-  const ranges = world.tokens.map((_, i) => i).filter((i) => piece.length && piece.every((t, k) => world.tokens[i + k] === t)).map((i) => ({ start: i, end: i + piece.length }));
-  const hit = mine.filter((m) => ranges.some((r) => m.start < r.end && m.end > r.start));
+  const quoted = quotedMentions(product, heard, world);
+  const hit = mine.filter((m) => quoted.includes(m));
   return hit.length ? hit : mine;
 }
 
@@ -994,9 +1013,9 @@ function mentionQuantities(mention, world) {
 
 // Why a product row cannot be applied at all, as { reason, text } (the words the
 // Check chip shows), or null. Checked in order; the first refusal wins.
-function productRefusal(raw, product, heard, normTranscript, seen, evidence, world, pieces = []) {
+function productRefusal(raw, product, heard, normTranscript, seen, evidence, world, pieces = [], said = heard) {
   if (!product) return { reason: 'not_on_sheet', text: heard || raw.productId };
-  if (!heardInTranscript(heard, normTranscript)) return { reason: 'not_heard', text: heard || product.name };
+  if (!heardInTranscript(said, normTranscript)) return { reason: 'not_heard', text: heard || product.name };
   if (seen.has(product.id)) return { reason: 'duplicate_product', text: heard };
   const reason = productEvidenceVerdict(product, evidence);
   if (reason) return { reason, text: heard };
@@ -1140,8 +1159,10 @@ function productSameAsLast(raw, amount, heard, transcript, unclear, product, wor
   // When the quote does not single out one mention ("Taurus" said twice), every
   // mention's sentence must carry the phrase: a later question about the product
   // never authorizes the flag for an earlier application.
+  const quoted = quotedMentions(product, heard, world);
+  const quotesANegation = quoted.length > 0 && quoted.every((m) => isNegatedMention(m, world));
   const mentions = productMentions(product, heard, world);
-  const ok = mentions.length > 0 && mentions.every((m) => SAME_AS_LAST_RE.test(mentionSentenceWords(m, world, { contrast: true }))
+  const ok = !quotesANegation && mentions.length > 0 && mentions.every((m) => SAME_AS_LAST_RE.test(mentionSentenceWords(m, world, { contrast: true }))
     && !NOT_SAME_AS_LAST_RE.test(mentionSentenceWords(m, world)));
   if (ok) return true;
   pushUnclear(unclear, heard, 'same_as_last_not_heard');
@@ -1154,11 +1175,13 @@ function validateProducts(rawProducts, ctx, normTranscript, unclear, transcript 
   const out = [];
   for (const raw of Array.isArray(rawProducts) ? rawProducts : []) {
     if (!raw || typeof raw !== 'object') continue;
+    // the whole quote is grounded; only the returned text is clipped
+    const said = cleanText(raw.heard, 4000);
     const heard = clipHeard(raw.heard);
     const product = byId.get(String(raw.productId ?? '').trim());
     const pieces = product ? productPieces(product, heard, ctx) : [];
     const evidence = product ? heardProducts(ctx, pieces[0] || '') : null;
-    const refusal = productRefusal(raw, product, heard, normTranscript, seen, evidence, world, pieces);
+    const refusal = productRefusal(raw, product, heard, normTranscript, seen, evidence, world, pieces, said);
     if (refusal) {
       pushUnclear(unclear, refusal.text, refusal.reason);
       continue;
@@ -1323,7 +1346,8 @@ const EMPTY_VISIT = Object.freeze({ pests: [], otherPest: '', areas: [], method:
 function validateVisit(rawVisit, ctx, normTranscript, unclear, transcript = '', world = transcriptWorld(ctx, transcript)) {
   const visit = rawVisit && typeof rawVisit === 'object' ? rawVisit : {};
   const heard = clipHeard(visit.heard);
-  const heardOk = heardInTranscript(heard, normTranscript);
+  // the whole quote is grounded; only the returned text is clipped
+  const heardOk = heardInTranscript(cleanText(visit.heard, 4000), normTranscript);
   const { pests, areas, method, activity, otherPest } = pickVisitFields(visit, ctx, heard, unclear, heardOk ? visitEvidence(world) : null);
   const feet = linearFeet(visit.linearFt, transcript);
   if (feet.reason) pushUnclear(unclear, heard, feet.reason);
