@@ -380,7 +380,10 @@ describe('the approved wording and the hooks', () => {
     expect(source.match(/await notifyContactsOfReport\(/g)).toHaveLength(3);
     // Only for a text: an App-channel completion notice queues none.
     expect(source).toMatch(/if \(smsResult\.channel !== 'push'\) await notifyContactsOfReport\(\);/);
-    expect(source).toMatch(/\} else if \(providerAccepted\) \{\s+if \(e\.providerOutcome\?\.provider !== 'push'\) await notifyContactsOfReport\(\);/);
+    // The recovery decides on the RESOLVED channel: the snapshot (a push that
+    // succeeded, then a local write that threw) or the accepted outcome.
+    expect(source).toMatch(/if \(e\.providerOutcome\?\.provider === 'push'\) snap\.channel = 'push';\s+(?:\/\/.*\s+)+if \(snap\.channel !== 'push'\) await notifyContactsOfReport\(\);/);
+    expect(source).toMatch(/if \(smsResult\.channel === 'push'\) \{\s+sentSmsChannel = 'push';\s+completionSmsAcceptedSnapshot\.channel = 'push';/);
   });
 
   test('the combined-stop summary queues it on sent (before its finalize write) and on a send-window hold', () => {

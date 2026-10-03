@@ -14156,12 +14156,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
           record.structured_notes = unverifiedNotes;
           logger.error(`[dispatch] Completion SMS delivery unverified for service_record ${record.id} — send claim held for review: ${e.message}`);
         } else if (providerAccepted) {
-          if (e.providerOutcome?.provider !== 'push') await notifyContactsOfReport();
           const snap = completionSmsAcceptedSnapshot || {};
           if (snap.fixedRecap && typeof e.sentBody === 'string' && e.sentBody) snap.body = e.sentBody;
           // The normal result never arrived to switch the snapshot to push:
           // the accepted outcome itself names the provider.
           if (e.providerOutcome?.provider === 'push') snap.channel = 'push';
+          // The resolved channel, from either source: a push that succeeded
+          // and then hit a failed local write carries no providerOutcome, and
+          // its channel is on the snapshot. Only a text queues contact texts.
+          if (snap.channel !== 'push') await notifyContactsOfReport();
           const acceptedDelta = {
             ...(snap.fixedRecap && snap.body ? { completionSmsBody: snap.body } : {}),
             completionSmsStatus: 'sent',
