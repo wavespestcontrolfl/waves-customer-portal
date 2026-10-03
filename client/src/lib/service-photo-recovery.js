@@ -180,14 +180,18 @@ function photoVisitChanged(expected, live) {
 }
 
 async function confirmPhotoDraft(photo, serviceId, deviceScope) {
-  if (!deviceScope) return;
+  if (!deviceScope) return true;
   const confirmed = await putServicePhotoDraftIfCurrent(
     serviceId,
     servicePhotoDraftRecord(photo, serviceId, deviceScope, 'confirmed'),
     deviceScope,
     photo.draftId,
   );
-  if (confirmed) await deleteServicePhotoDraftIfCurrent(serviceId, deviceScope, photo.draftId);
+  if (!confirmed) return false;
+  await deleteServicePhotoDraftIfCurrent(serviceId, deviceScope, photo.draftId);
+  // A failed delete still leaves a durable `confirmed` row. Restore removes
+  // that row without retrying the already accepted photo bytes.
+  return true;
 }
 
 function uploadFailureMessage(error, { saved = false } = {}) {
@@ -201,6 +205,9 @@ function uploadFailureMessage(error, { saved = false } = {}) {
     return 'Photo attached. The office now owns the remaining report updates. Dismiss this saved notice when you are ready.';
   }
   if (error.uploadStage === 'reconciliation_failed') return `${error.message}. Retry the saved photo to finish updating the completed visit.`;
+  if (error.uploadStage === 'receipt_unconfirmed') {
+    return 'Photo attached, but this device could not save its upload receipt. Keep this screen open and Retry; the photo will not be uploaded again.';
+  }
   if (error.uploadStage === 'failed') return error.message || 'Upload failed';
   return `${error.message || 'Upload interrupted'}. Upload not confirmed — retry the saved photo or discard it.`;
 }

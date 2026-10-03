@@ -4586,19 +4586,21 @@ router.get('/:serviceId/lawn-reservice/fast-context', async (req, res, next) => 
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/dispatch/:serviceId/fast-complete/voice-fill
-// body: { sheet: 'pest_reservice', transcript }
-// Fast Complete voice fill (dark behind GATE_FAST_COMPLETE_VOICE_FILL): maps what
+// POST /api/admin/dispatch/:serviceId/fast-complete/voice-fill/clip
+// multipart: audio (the recording), sheet: 'pest_reservice', duration_seconds
+// Fast Complete voice fill (dark behind GATE_FAST_COMPLETE_VOICE_FILL). Owner
+// ruling 2026-10-03 ("always our transcriber"): the sheet's mic records, and this
+// route transcribes the clip with the sheet's own product names, then maps what
 // the tech said onto the sheet's own choices through one structured model call
-// and answers the VALIDATED fill — products {productId, amount, unit,
+// and answers the VALIDATED fill: products {productId, amount, unit,
 // sameAsLast, method, heard}, visit fields, customerNote, officeNote and
 // `unclear` items (anything off-list, ambiguous or unspoken; each becomes a
 // Check chip on the sheet). It only suggests: nothing is saved or completed, and
-// the transcript is never stored or logged (the audit line carries ids and
-// counts only; the notes never reach the report writer from here). A visit whose
-// live completion profile is not pest_re_service is refused (409). A model
-// failure is 502 and the client keeps the typed sheet. See
-// services/fast-complete-voice-fill.js.
+// neither the audio nor the transcript is stored, logged or returned (the audit
+// line carries sizes and counts only; the notes never reach the report writer
+// from here). A visit whose live completion profile is not pest_re_service is
+// refused (409). A transcriber or model failure is 502 and the client keeps the
+// typed sheet. See services/fast-complete-voice-fill.js.
 // Paid model call: cap per staff bucket (same key as every other paid-LLM
 // limiter, rate-limit-key.js), like the dictation upload.
 const fastCompleteVoiceFillLimiter = require('express-rate-limit')({
@@ -4614,32 +4616,40 @@ const fastCompleteVoiceFillLimiter = require('express-rate-limit')({
 const fastCompleteVoiceFillGate = (req, res, next) => (
   require('../config/feature-gates').fastCompleteVoiceFillLive() ? next() : res.status(404).json({ enabled: false })
 );
-router.post('/:serviceId/fast-complete/voice-fill', fastCompleteVoiceFillGate, fastCompleteVoiceFillLimiter, async (req, res, next) => {
+// The audio policy (containers, 15 MB cap, multer handling) is field dictation's own: services/dictation-upload.js.
+const { dictationAudioUpload, dictationClipType } = require('../services/dictation-upload');
+const voiceFillClipParse = dictationAudioUpload({ error: 'Recording too large (15 MB max)', code: 'clip_too_large' });
+// Ownership before the body is read: a technician never uploads against a visit that is not theirs.
+const voiceFillClipOwner = async (req, res, next) => {
   try {
-    if (!require('../config/feature-gates').fastCompleteVoiceFillLive()) return res.status(404).json({ enabled: false });
-    if (!(await assertRecapOwnership(req, res))) return;
+    if (await assertRecapOwnership(req, res)) next();
+  } catch (err) { next(err); }
+};
+const VOICE_FILL_CLIP_UNAVAILABLE = new Set(['model_failed', 'catalog_unavailable', 'transcription_failed', 'transcription_unreliable']);
+router.post('/:serviceId/fast-complete/voice-fill/clip', fastCompleteVoiceFillGate, fastCompleteVoiceFillLimiter, voiceFillClipOwner, voiceFillClipParse, async (req, res, next) => {
+  try {
     const VoiceFill = require('../services/fast-complete-voice-fill');
-    const { sheet, transcript } = req.body || {};
-    if (sheet !== VoiceFill.SHEET) {
-      return res.status(400).json({ error: 'Unknown sheet', code: 'unknown_sheet' });
-    }
-    const trimmed = typeof transcript === 'string' ? transcript.trim() : '';
-    if (!trimmed || trimmed.length > VoiceFill.MAX_TRANSCRIPT_CHARS) {
-      return res.status(400).json({ error: `transcript must be 1-${VoiceFill.MAX_TRANSCRIPT_CHARS} characters`, code: 'bad_transcript' });
-    }
-    const result = await VoiceFill.voiceFill({ serviceId: req.params.serviceId, sheet, transcript: trimmed });
+    const sheet = req.body?.sheet;
+    if (sheet !== VoiceFill.SHEET) return res.status(400).json({ error: 'Unknown sheet', code: 'unknown_sheet' });
+    if (!req.file || !req.file.buffer?.length) return res.status(400).json({ error: 'No audio provided', code: 'no_audio' });
+    const { baseType, filename } = dictationClipType(req.file);
+    if (!filename) return res.status(415).json({ error: `Unsupported audio type: ${baseType || 'unknown'}`, code: 'bad_audio_type' });
+    const result = await VoiceFill.voiceFillFromClip({
+      serviceId: req.params.serviceId, sheet, audio: req.file.buffer, mimeType: baseType, filename,
+      durationSeconds: Number(req.body?.duration_seconds) || 0,
+    });
+    const size = `bytes=${req.file.buffer.length} type=${baseType}`;
     if (!result.ok) {
-      if (result.reason === 'model_failed' || result.reason === 'catalog_unavailable') {
-        logger.info(`[voice-fill] service=${req.params.serviceId} tech=${req.technicianId} sheet=${sheet} chars=${trimmed.length} ok=false`);
-        return res.status(502).json({ error: 'Voice fill is unavailable right now. Keep typing.' });
-      }
-      const status = result.reason === 'not_pest_re_service' || result.reason === 'not_eligible'
-        ? 409 : recapStatusForReason(result.reason);
+      logger.info(`[voice-fill] clip service=${req.params.serviceId} tech=${req.technicianId} sheet=${sheet} ${size} ok=false reason=${result.reason}`);
+      if (VOICE_FILL_CLIP_UNAVAILABLE.has(result.reason)) return res.status(502).json({ error: 'Voice fill is unavailable right now. Keep typing.' });
+      if (result.reason === 'clip_too_long') return res.status(413).json({ error: 'That was too long to fill at once. Say it in shorter pieces.', code: 'clip_too_long' });
+      // Nothing was said: an empty fill, so the sheet simply stays as it is.
+      if (result.reason === 'nothing_heard') return res.json({ enabled: true, heardNothing: true, products: [], visit: null, customerNote: '', officeNote: '', unclear: [] });
+      const status = result.reason === 'not_pest_re_service' || result.reason === 'not_eligible' ? 409 : recapStatusForReason(result.reason);
       return res.status(status).json({ error: result.reason, code: result.reason });
     }
     const counts = VoiceFill.fillCounts(result.fill);
-    // Audit line: who/what/size only — never the transcript or either note.
-    logger.info(`[voice-fill] service=${req.params.serviceId} tech=${req.technicianId} sheet=${sheet} chars=${trimmed.length} ok=true products=${counts.products} visitFields=${counts.visitFields} unclear=${counts.unclear} customerNote=${counts.hasCustomerNote} officeNote=${counts.hasOfficeNote}`);
+    logger.info(`[voice-fill] clip service=${req.params.serviceId} tech=${req.technicianId} sheet=${sheet} ${size} chars=${result.chars} ok=true products=${counts.products} visitFields=${counts.visitFields} unclear=${counts.unclear} customerNote=${counts.hasCustomerNote} officeNote=${counts.hasOfficeNote}`);
     return res.json({ enabled: true, ...result.fill });
   } catch (err) { next(err); }
 });
@@ -4660,7 +4670,7 @@ router.post('/:serviceId/tree-shrub/assess-preview', async (req, res) => {
     if (!(await assertRecapOwnership(req, res))) return;
     const svc = await db('scheduled_services')
       .where({ id: req.params.serviceId })
-      .first('id', 'service_type');
+      .first('id', 'service_type', 'scheduled_date');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
     if (detectServiceLine(svc.service_type) !== 'tree_shrub') {
       return res.status(409).json({ error: 'Not a tree & shrub service', code: 'not_tree_shrub' });
@@ -4675,6 +4685,12 @@ router.post('/:serviceId/tree-shrub/assess-preview', async (req, res) => {
     const { decodeDataUrlPhoto, MAX_COMPLETION_PHOTO_DATA_URL_BYTES } = require('../services/service-photos');
     const result = await previewTreeShrubAssessment({
       photos,
+      // GATE_TS_WATCH_LIST: the visit's month for the watch read, only when the
+      // caller asks for it (the Fast Complete sheet shows the list; the full
+      // form does not, so it never pays for or waits on the extra call).
+      month: req.body?.watchList === true
+        ? require('../services/tree-shrub-watch-items').visitWatchMonth(svc.scheduled_date)
+        : null,
       loadImage: (photo) => {
         try {
           const decoded = decodeDataUrlPhoto(photo?.data, { maxBytes: MAX_COMPLETION_PHOTO_DATA_URL_BYTES });

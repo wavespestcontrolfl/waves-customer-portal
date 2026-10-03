@@ -58,6 +58,19 @@ it("a live code nobody has confirmed yet says so but carries no Unconfirmed badg
   expect(screen.queryByText("Unconfirmed")).toBeNull();
 });
 
+it("shows who added a code on a visit and who reported one wrong", async () => {
+  const field = { total: 1, neighborhoods: [{ id: "n8", name: "Field Glen", county: "Manatee", propertyCount: 2, hasConflict: false,
+    entries: [
+      entry({ id: "e7", code: "7070", source: "tech", addedBy: "Synthetic Tech" }),
+      entry({ id: "e8", code: "8080", status: "needs_confirm", markedWrongAt: "2026-10-02T16:00:00.000Z", markedWrongBy: "Synthetic Tech" }),
+    ] }] };
+  rawAdminFetch.mockImplementation(() => response(field));
+  renderPage();
+  expect(await screen.findByText("Field Glen")).toBeInTheDocument();
+  expect(screen.getByText("Last confirmed Sep 1, 2026 · Added on a visit by Synthetic Tech")).toBeInTheDocument();
+  expect(screen.getByText("Reported wrong on a visit by Synthetic Tech, Oct 2, 2026")).toBeInTheDocument();
+});
+
 it("renders neighborhoods, entries and the stale / unconfirmed / conflict markers", async () => {
   rawAdminFetch.mockImplementation(() => response(ALL));
   renderPage();

@@ -190,6 +190,12 @@ const DEFAULTS = Object.freeze({
   // MODEL_CATALOG; dispatched through services/llm/call.js, which floors
   // max_tokens for always-thinking models and reads past thinking blocks.
   ADS_ADVISOR: 'claude-fable-5-1',
+  // SMS scheduling decide step (owner ruling 2026-10-02, "try one agent for
+  // now"): Claude Sonnet 5.5 reads the customer's reply to a recorded offer
+  // and names the slot they accepted, if any. Bake-off 09-29: Sonnet 5.5
+  // alone 10/13 right, 1 wrong; Opus 5.5 alone 10/13, 2 wrong. A route so a
+  // second model can be added later. Shadow only behind GATE_SMS_SCHEDULING_DECIDE.
+  SMS_SCHEDULING_DECIDE: 'claude-sonnet-5-5',
   GEMINI_VISION_BEST: 'gemini-3.8-flash',
   // App lawn + tree/shrub/palm Photo ID (owner 2026-10-02, "same as pest"):
   // the model for photoIdPlantV2's one Gemini read; set from the 27-photo eval.
@@ -317,6 +323,8 @@ const LAWN_ASSESSMENT_REFEREE = process.env.MODEL_LAWN_ASSESSMENT_REFEREE || DEF
 // Daily ads advisor (owner ruling 2026-10-01) — its own selector so the
 // advisor moves independently of FLAGSHIP / the highStakes policy.
 const ADS_ADVISOR          = process.env.MODEL_ADS_ADVISOR         || DEFAULTS.ADS_ADVISOR;
+// SMS scheduling decide step (owner ruling 2026-10-02) — its own selector.
+const SMS_SCHEDULING_DECIDE = process.env.MODEL_SMS_SCHEDULING_DECIDE || DEFAULTS.SMS_SCHEDULING_DECIDE;
 const GEMINI_VISION_BEST   = process.env.MODEL_GEMINI_VISION        || DEFAULTS.GEMINI_VISION_BEST;
 const GEMINI_PHOTO_ID_PLANT = process.env.MODEL_GEMINI_PHOTO_ID_PLANT || DEFAULTS.GEMINI_PHOTO_ID_PLANT;
 const GEMINI_PHOTO_ID_PEST = process.env.MODEL_GEMINI_PHOTO_ID_PEST || DEFAULTS.GEMINI_PHOTO_ID_PEST;
@@ -466,6 +474,10 @@ const ROUTES = Object.freeze({
   // than trying a third provider. `effort: 'high'` reaches only the
   // Anthropic leg (services/llm/call.js#dispatch).
   plantIdReferee:    Object.freeze({ provider: PROVIDER.ANTHROPIC, model: PLANT_ID_REFEREE, effort: 'high' }),
+  // SMS scheduling decide step (owner ruling 2026-10-02, sms-scheduling-decide.js):
+  // single leg, no automatic fallback — a miss records an error row and the
+  // text stays with staff, exactly as today. Shadow behind GATE_SMS_SCHEDULING_DECIDE.
+  smsSchedulingDecide: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: SMS_SCHEDULING_DECIDE, effort: 'high' }),
   // Lawn visit assessment name referee (owner ruling 2026-09-29,
   // lawn-visit-referee.js): single-leg, no automatic fallback — a referee
   // miss leaves Gemini's read exactly as it was.
@@ -602,6 +614,17 @@ const TEXT_POLICIES = Object.freeze({
     primary: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_PHOTO_ID_PLANT }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_PLANT_ID }),
   }),
+  treeShrubWatchSignals: Object.freeze({
+    name: 'treeShrubWatchSignals',
+    // The Tree & Shrub Fast Complete watch-signal read (tree-shrub-assessment.js
+    // readWatchSignals, GATE_TS_WATCH_LIST): one small Gemini read of one photo
+    // that returns only watch-list keys, tech-facing, never customer copy. The
+    // same legs as photoIdPlantV2 (the nearest one-read plant photo lane, the
+    // cheapest vision models already named here): Gemini answers; OpenAI stands
+    // in only when Gemini returns nothing usable. No Claude leg.
+    primary: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_PHOTO_ID_PLANT }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_PLANT_ID }),
+  }),
   plantIdVision: Object.freeze({
     name: 'plantIdVision',
     // Lawn/tree/shrub/palm photo ID (plant-engine.js). Owner ruling
@@ -697,6 +720,7 @@ module.exports = {
   PLANT_ID_REFEREE,
   LAWN_ASSESSMENT_REFEREE,
   ADS_ADVISOR,
+  SMS_SCHEDULING_DECIDE,
   TYPESAFE_JEV,
   CLOUDFLARE_CLEF,
   OPENAI_SMS_DRAFT,
@@ -733,6 +757,10 @@ module.exports = {
 //                                  default: gpt-4o-transcribe-diarize
 //   GEMINI_TRANSCRIPTION_MODEL     long-call verifier / transcription fallback
 //                                  default: gemini-2.5-flash
+//   OPENAI_VOICE_FILL_TRANSCRIBE_MODEL  Fast Complete voice fill speech-to-text
+//                                  (services/fast-complete-voice-fill.js; goes through
+//                                  call-recording-processor's transcribeWithOpenAI)
+//                                  default: gpt-transcribe (32-clip test 2026-10-03)
 //   OPENAI_TRANSCRIPT_LABEL_MODEL  post-transcription Agent/Caller relabeling
 //                                  default: gpt-5-mini (falls back to OPENAI_MODEL)
 //   CALL_EXTRACTION_PROVIDER /     V2 call-extraction route primary

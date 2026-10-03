@@ -29,6 +29,13 @@
 // two required findings (plant groups, landscape condition). The body never
 // carries treatments_completed (the server derives it from the products).
 //
+// GATE_TS_WATCH_LIST: when the context carries `watchList`, a "This month's
+// watch list" block follows the photo read's finding tiles. Items the read
+// flagged take Seen / Not seen; "Add from watch list" marks any other item
+// seen; a seen item takes an optional extent. All optional: nothing there ever
+// blocks Complete, and a refer-only item takes no extent. The choices ride the
+// body as treeShrubReview.watchItems (tech-facing storage only).
+//
 // Context, visit identity and the catalog come from GET
 // /admin/dispatch/:id/tree-shrub/fast-context (404 {enabled:false} when the
 // gate is off: this visit then needs the full form).
@@ -67,6 +74,47 @@ const BEES_ACTIVE = 'Blooming — bees active';
 // The server's own words for this block (tree-shrub-closeout.js).
 const BEES_ACTIVE_MESSAGE = 'Do not complete bee-sensitive insect/contact applications on blooming plants while bees are active.';
 const NP_BLACKOUT_TEXT = 'N/P blackout — can’t apply Jun 1–Sep 30';
+
+// The seasonal watch list (GATE_TS_WATCH_LIST). Extent values are the server's.
+const WATCH_TITLE = "This month's watch list";
+const WATCH_EXTENTS = [
+  { value: 'one_plant', label: 'One plant' },
+  { value: 'a_few', label: 'A few' },
+  { value: 'many', label: 'Many' },
+];
+const WATCH_REFER_LINE = 'Take a photo, add a note and call the office.';
+
+// The server's list for the visit month, or null when the gate is off (no key).
+function watchListFrom(data) {
+  if (!Array.isArray(data?.watchList)) return null;
+  return data.watchList
+    .filter((item) => item && typeof item.key === 'string' && typeof item.label === 'string')
+    .map((item) => ({
+      key: item.key,
+      label: item.label,
+      signal: typeof item.signal === 'string' && item.signal ? item.signal : item.label,
+      referOnly: item.referOnly === true,
+    }));
+}
+
+// The body's watchItems: what the tech decided. A read-flagged item may be
+// Seen or Not seen; any other item only goes as Seen (the tech added it).
+function watchItemsBody(list, choices, flagged) {
+  const out = [];
+  for (const item of list || []) {
+    const choice = choices[item.key];
+    if (!choice?.state) continue;
+    const fromRead = flagged.has(item.key);
+    if (choice.state === 'not_seen' && !fromRead) continue;
+    out.push({
+      key: item.key,
+      state: choice.state,
+      extent: choice.state === 'seen' && !item.referOnly ? choice.extent || null : null,
+      source: fromRead ? 'read' : 'tech',
+    });
+  }
+  return out;
+}
 
 // How a product went down. Foliar spray is the T&S default; the other two are
 // chips on an added product. None of them asks for a measured area.
@@ -254,11 +302,12 @@ function contextFrom(data, service) {
       .filter((warning) => warning.message),
     warningsUnavailable: data?.warningsUnavailable === true,
     visitIdentity: recapVisitIdentity(data?.service),
+    watchList: watchListFrom(data),
   };
 }
 
 const EMPTY_CONTEXT = {
-  loading: true, loadError: '', blockedReason: '', rows: [], products: [], warnings: [], warningsUnavailable: false,
+  loading: true, loadError: '', blockedReason: '', rows: [], products: [], warnings: [], warningsUnavailable: false, watchList: null,
   visitIdentity: null, visit: null, lastVisit: {}, lastVisitPhotos: {},
 };
 
@@ -343,12 +392,13 @@ function missingRequirement({ form, rows, slots, photoBusy, ctx, dictationPendin
 
 const inOptionOrder = (options, set) => options.filter((option) => set.has(option)).join(', ');
 
-function completionBody({ form, rows, photos, preview, previewCurrent, ctx, tipsAvailable }) {
+function completionBody({ form, rows, photos, preview, previewCurrent, ctx, tipsAvailable, watchChoices = {} }) {
   const active = rows.filter((row) => row.active);
   const applicationArea = inOptionOrder(AREA_OPTIONS, form.areas);
   const insect = active.some((row) => flagsOf(row.product).insectFamily);
   const irac = active.some((row) => flagsOf(row.product).needsIracFrac);
   const result = previewCurrent ? preview.result : null;
+  const watchItems = watchItemsBody(ctx.watchList, watchChoices, flaggedWatchKeys(ctx.watchList, result));
   return {
     visitOutcome: 'completed',
     ...(ctx.visitIdentity ? { expectedVisit: ctx.visitIdentity } : {}),
@@ -390,8 +440,9 @@ function completionBody({ form, rows, photos, preview, previewCurrent, ctx, tips
           action: preview.rejected.has(finding.key) ? 'hidden' : decisionAction(finding.defaultAction),
           detail: finding.detail,
         })),
+        ...(watchItems.length ? { watchItems } : {}),
       },
-    } : {}),
+    } : watchItems.length ? { treeShrubReview: { watchItems } } : {}),
     technicianNotes: form.note.trim(),
     techTips: techTipsOf(form, tipsAvailable),
     // Same as the full form (owner ruling): the completion text, the review
@@ -423,7 +474,9 @@ export default function FastCompleteTreeShrubSheet({ service, request, onClose, 
   // unknown or refused (it may have saved).
   const close = useCallback(() => {
     if (submitting) return;
-    if (done) onCompleted?.();
+    // The completion response rides along: admin Dispatch reads its invoice
+    // fields to stage the payment handoff (the technician page ignores it).
+    if (done) onCompleted?.(done.response || null);
     else onClose?.(ctx.blockedReason || submission.failure ? { refresh: true } : undefined);
   }, [submitting, done, ctx.blockedReason, submission.failure, onClose, onCompleted]);
   closeRef.current = close;
@@ -440,7 +493,7 @@ export default function FastCompleteTreeShrubSheet({ service, request, onClose, 
 }
 
 function SheetBody({ service, request, ctx, submission, locked, dictationPending, onDictationPending, onCompleted, onFullForm, isMobile }) {
-  if (submission.done) return <SavedView service={service} summary={submission.done.summary} onCompleted={onCompleted} />;
+  if (submission.done) return <SavedView service={service} summary={submission.done.summary} onCompleted={() => onCompleted?.(submission.done.response || null)} />;
   if (ctx.loading) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Loading…</ActionFeedback>;
   const stop = ctx.loadError || ctx.blockedReason;
   if (ctx.loadError) {
@@ -461,6 +514,8 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
   const base = `/admin/dispatch/${service?.id}`;
   const products = useProductRows(ctx);
   const { rows } = products;
+  // Watch-list choices by item key: { state: 'seen' | 'not_seen', extent }.
+  const [watchChoices, setWatchChoices] = useState({});
   const [form, setForm] = useState(() => ({
     note: '',
     // What the server says was serviced last time, kept to the form's own options.
@@ -475,7 +530,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
   }, []);
   const tips = useTipLibrary({ base, request });
   const tipsAvailable = !!tips;
-  const photos = usePhotoSlots({ base, request });
+  const photos = usePhotoSlots({ base, request, watchList: Array.isArray(ctx.watchList) && ctx.watchList.length > 0 });
   const picker = useProductPicker({
     products: ctx.products,
     commonProducts: [],
@@ -506,7 +561,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
     if (missingReason && !submission.hasPendingBody()) return;
     const names = rows.filter((row) => row.active).map((row) => row.name).join(', ');
     submission.submit(
-      () => completionBody({ form, rows, photos: photoList, preview: photos.preview, previewCurrent, ctx, tipsAvailable }),
+      () => completionBody({ form, rows, photos: photoList, preview: photos.preview, previewCurrent, ctx, tipsAvailable, watchChoices }),
       `${names || 'Inspection'} · ${inOptionOrder(PLANT_GROUP_OPTIONS, form.plantGroups)}`,
     );
   };
@@ -523,6 +578,17 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
         <fieldset className="tech-visit-form" disabled={locked}>
           <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked} />
           <PhotosSection photos={photos} lastPhotos={ctx.lastVisitPhotos} previewCurrent={previewCurrent} locked={locked || dictationPending} />
+          {ctx.watchList && ctx.watchList.length > 0 && (
+            <WatchListSection
+              list={ctx.watchList}
+              flagged={flaggedWatchKeys(ctx.watchList, previewCurrent ? photos.preview.result : null)}
+              analyzed={previewCurrent}
+              readComplete={previewCurrent && photos.preview.result?.watchSignalsComplete === true}
+              choices={watchChoices}
+              onChoices={setWatchChoices}
+              locked={locked || dictationPending}
+            />
+          )}
           <ProductsSection ctx={ctx} products={products} locked={locked} other={picker.button} popover={picker.popover} />
           {(insect || iracRows) && (
             <ComplianceSection form={form} setField={setField} insect={insect} iracRows={iracRows} manualIrac={needsManualIrac(rows, ctx)} locked={locked} />
@@ -575,7 +641,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
 // The five photo slots, the Analyze read, and what it flagged. `slots` is
 // slot key -> prepared photo; `list` is the photos in slot order, the order
 // the server scores and records them.
-function usePhotoSlots({ base, request }) {
+function usePhotoSlots({ base, request, watchList = false }) {
   const [slots, setSlots] = useState({});
   const [busyKeys, setBusyKeys] = useState(() => new Set());
   const [errors, setErrors] = useState({});
@@ -627,7 +693,8 @@ function usePhotoSlots({ base, request }) {
     try {
       const result = await request(`${base}/tree-shrub/assess-preview`, {
         method: 'POST',
-        body: JSON.stringify({ photos: analyzed.map((data) => ({ data })) }),
+        // watchList: ask for the watch read only when this sheet shows the list.
+        body: JSON.stringify({ photos: analyzed.map((data) => ({ data })), ...(watchList && { watchList: true }) }),
       });
       if (sequence !== readSequence.current) return;
       // Only a read that scored EVERY photo is reviewable: /complete trusts the
@@ -764,6 +831,133 @@ function PhotoSlot({ slot, photo, last, busy, error, locked, onFile, onClear }) 
         )}
       </div>
       {error && <p className="tech-visit-warning" role="alert">{error}</p>}
+    </div>
+  );
+}
+
+// The watch-list keys the current photo read flagged, kept to this month's list.
+function flaggedWatchKeys(list, result) {
+  const onList = new Set((list || []).map((item) => item.key));
+  return new Set((Array.isArray(result?.watchSignals) ? result.watchSignals : [])
+    .filter((key) => typeof key === 'string' && onList.has(key)));
+}
+
+// The seasonal watch list: what the read flagged (Seen / Not seen), anything
+// else the tech adds as seen, and an optional extent on a seen item.
+function WatchListSection({ list, flagged, analyzed, readComplete, choices, onChoices, locked }) {
+  const [adding, setAdding] = useState(false);
+  const flaggedItems = list.filter((item) => flagged.has(item.key));
+  const added = list.filter((item) => !flagged.has(item.key) && choices[item.key]?.state === 'seen');
+  const addable = list.filter((item) => !flagged.has(item.key) && choices[item.key]?.state !== 'seen');
+  // Tapping the chosen answer again goes back to undecided.
+  const setState = (key, state) => onChoices((prev) => {
+    const next = { ...prev };
+    if (prev[key]?.state === state) delete next[key];
+    else next[key] = { state, extent: state === 'seen' ? prev[key]?.extent || null : null };
+    return next;
+  });
+  const setExtent = (key, extent) => onChoices((prev) => ({
+    ...prev, [key]: { ...prev[key], extent: prev[key]?.extent === extent ? null : extent },
+  }));
+  const remove = (key) => onChoices((prev) => {
+    const next = { ...prev };
+    delete next[key];
+    return next;
+  });
+  return (
+    <section className="tech-visit-choice-section" aria-label={WATCH_TITLE}>
+      <div className="tech-visit-section-head">
+        <h3 className="tech-visit-section-title">{WATCH_TITLE}</h3>
+        <span className="tech-visit-muted">Optional</span>
+      </div>
+      {analyzed && readComplete && flaggedItems.length === 0 && (
+        <p className="tech-visit-muted" role="status">The photo read flagged nothing on this list.</p>
+      )}
+      {analyzed && !readComplete && (
+        <p className="tech-visit-muted" role="status">The photo read did not check this list. Add anything you saw.</p>
+      )}
+      <div className="tech-ts-findings">
+        {flaggedItems.map((item) => (
+          <WatchTile
+            key={item.key}
+            item={item}
+            title={item.signal}
+            choice={choices[item.key]}
+            locked={locked}
+            onState={(state) => setState(item.key, state)}
+            onExtent={(extent) => setExtent(item.key, extent)}
+          />
+        ))}
+        {added.map((item) => (
+          <WatchTile
+            key={item.key}
+            item={item}
+            title={item.label}
+            choice={choices[item.key]}
+            locked={locked}
+            onExtent={(extent) => setExtent(item.key, extent)}
+            onRemove={() => remove(item.key)}
+          />
+        ))}
+      </div>
+      {addable.length > 0 && (
+        <Button
+          type="button"
+          variant="secondary"
+          className="tech-visit-action tech-visit-wide"
+          aria-expanded={adding}
+          disabled={locked}
+          onClick={() => setAdding((open) => !open)}
+        >
+          Add from watch list
+        </Button>
+      )}
+      {adding && addable.length > 0 && (
+        <div className="tech-visit-tile-grid tech-visit-tile-grid--2">
+          {addable.map((item) => (
+            <Chip disabled={locked} key={item.key} label={item.label} onClick={() => setState(item.key, 'seen')} />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+// One watch item. A flagged item has Seen / Not seen; an added one has Remove.
+// A seen item takes an extent, except a refer-only one, which only says to call.
+function WatchTile({ item, title, choice, locked, onState, onExtent, onRemove }) {
+  const seen = choice?.state === 'seen';
+  return (
+    <div className={cn('tech-visit-card tech-ts-finding', choice?.state === 'not_seen' && 'tech-ts-finding--rejected')}>
+      <p className="tech-ts-finding-label">{title}</p>
+      {onState && (
+        <div className="tech-visit-tile-grid tech-visit-tile-grid--2">
+          <Button type="button" variant="secondary" className="tech-visit-action tech-visit-product" aria-pressed={seen} aria-label={`Seen: ${item.label}`} disabled={locked} onClick={() => onState('seen')}>Seen</Button>
+          <Button type="button" variant="secondary" className="tech-visit-action tech-visit-product" aria-pressed={choice?.state === 'not_seen'} aria-label={`Not seen: ${item.label}`} disabled={locked} onClick={() => onState('not_seen')}>Not seen</Button>
+        </div>
+      )}
+      {seen && item.referOnly && <p className="tech-ts-finding-label" role="status">{WATCH_REFER_LINE}</p>}
+      {seen && !item.referOnly && (
+        <div className="tech-visit-tile-grid tech-visit-tile-grid--3">
+          {WATCH_EXTENTS.map((extent) => (
+            <Button
+              key={extent.value}
+              type="button"
+              variant="secondary"
+              className="tech-visit-action tech-visit-product"
+              aria-pressed={choice.extent === extent.value}
+              aria-label={`${extent.label}: ${item.label}`}
+              disabled={locked}
+              onClick={() => onExtent(extent.value)}
+            >
+              {extent.label}
+            </Button>
+          ))}
+        </div>
+      )}
+      {onRemove && (
+        <Button type="button" variant="ghost" className="tech-visit-action" aria-label={`Remove ${item.label}`} disabled={locked} onClick={onRemove}>Remove</Button>
+      )}
     </div>
   );
 }
