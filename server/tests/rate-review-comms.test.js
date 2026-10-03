@@ -493,6 +493,29 @@ describe('sendBatch', () => {
     expect(notices()[0].sent_at).toBeNull();
   });
 
+  test('terms-neutral lanes are held from this letter: a rodent line, and a line whose ranking row carries the commercial exception', async () => {
+    mockDb.reset(book({ notices: [draft(1, { family_key: 'rodent' })] }));
+    let out = await comms.sendPreview(BATCH_KEY, { now: NOW });
+    expect(out.counts.letters).toBe(0);
+    expect(out.customers[0].suppressedLines[0].reason).toBe('terms_neutral_lane');
+    mockDb.reset(book());
+    mockDb.store.rate_review_snapshots[0].flags = JSON.stringify(['commercial']);
+    out = await comms.sendPreview(BATCH_KEY, { now: NOW });
+    expect(out.counts.letters).toBe(0);
+    expect(out.customers[0].suppressedLines[0].reason).toBe('terms_neutral_lane');
+    expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: out.digest, now: NOW })).toEqual({ ok: false, reason: 'nothing_to_send' });
+  });
+
+  test('the fan-out leaves one pooled connection free: with DB_POOL_MAX 2 letters are handed over one at a time', async () => {
+    mockDb.reset(book({ customers: [customer(1), customer(2), customer(3)], notices: [draft(1), draft(2), draft(3)] }));
+    const digest = await previewDigest();
+    mockDb.client = { pool: { max: 2 } };
+    let active = 0; let peak = 0;
+    emailLeg.mockImplementation(async () => { active += 1; peak = Math.max(peak, active); await new Promise((r) => setImmediate(r)); active -= 1; return { sent: true, attempted: true }; });
+    try { expect((await comms.sendBatch(BATCH_KEY, { expectedDigest: digest, now: NOW })).sent).toBe(3); } finally { delete mockDb.client; }
+    expect(peak).toBe(1);
+  });
+
   test('never handed to a provider: parks unreachable without words, and is sendable again', async () => {
     mockDb.reset(book());
     emailLeg.mockResolvedValue({ sent: false, attempted: false });

@@ -1517,7 +1517,10 @@ async function prepayNoticesByTerm(dbh, customerId) {
     }
     // Delivered with the 30-day lead the apply requires (applyNotice's
     // notice_too_recent rule): a notice the apply refuses guards nothing.
-    const told = wasDelivered(n) && daysBetweenYmd(etDateString(new Date(n.sent_at)), day) >= MIN_NOTICE_DAYS ? Number(n.noticed_new_cents ?? n.new_amount_cents) : 0;
+    // ...and a text-only notice whose text Twilio already reported failed (sms_log, or the
+    // kept early failure) told the customer nothing, even before its reconciliation lands.
+    const told = wasDelivered(n) && daysBetweenYmd(etDateString(new Date(n.sent_at)), day) >= MIN_NOTICE_DAYS && !(await smsDeliveryFailure(dbh, n))
+      ? Number(n.noticed_new_cents ?? n.new_amount_cents) : 0;
     if (told > 0) {
       familyByTerm.set(key, n.family_key);
       deliveredCents.set(key, { cents: told, day });
@@ -1693,7 +1696,7 @@ module.exports = {
   noticedRenewalAmountError,
   recordNoticedAmountOverride,
   _private: {
-    laneForRow, effectiveDateFor, nextBillingDayOnOrAfter, loadFamilySlices, sumSlices, cents, addDaysYmd, daysBetweenYmd, flatVisitRefusal, perApplicationStructuralRefusal, perApplicationTemplateRefusal, monthlyRefusal, prepayChecks, planHoldCovers, smsDeliveryFailure, holdFromGuard, HoldError,
+    laneForRow, effectiveDateFor, prepayNoticesByTerm, nextBillingDayOnOrAfter, loadFamilySlices, sumSlices, cents, addDaysYmd, daysBetweenYmd, flatVisitRefusal, perApplicationStructuralRefusal, perApplicationTemplateRefusal, monthlyRefusal, prepayChecks, planHoldCovers, smsDeliveryFailure, holdFromGuard, HoldError,
     loadLineOpenVisits, loadAccountPlanLineCount, loadCustomerOpenVisits, consumesPerApplicationFee, feeScopeRefusal, resolvePrepayTerm, successorTermExists, tryAnnualPrepayLock, resolveLiveLane, applyNotice, loadDueNotices, wasDelivered, cadenceLabelFor, termRenewalNoticed, moveMonthlySlice, scheduleRow,
   },
 };

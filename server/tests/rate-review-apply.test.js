@@ -887,6 +887,17 @@ describe('applyDueRateChanges — per_application', () => {
     const out = await runApply(book);
     expect(out.holds.map((h) => h.reason)).toEqual([reason]);
   });
+  test('renewal guard evidence: a delivered text-only prepaid notice counts as told; once Twilio reports the text failed it does not, even before its reconciliation', async () => {
+    const notice = {
+      customer_id: CUSTOMER(1), billing_lane: 'annual_prepay', family_key: 'pest_control', status: 'sent', sent_at: new Date('2027-03-01T15:00:00Z'), applied_at: null,
+      email_sent: false, sms_sent: true, noticed_new_cents: 48400, new_amount_cents: 48400, effective_date: '2027-05-15', metadata: { term_id: 'term-1', sms_sid: 'SM1', coverage_visits: 4 },
+    };
+    mockDb.reset({ price_change_notices: [notice], sms_log: [{ twilio_sid: 'SM1', customer_id: CUSTOMER(1), status: 'delivered' }], rate_review_sms_failures: [] });
+    expect((await apply._private.prepayNoticesByTerm(mockDb, CUSTOMER(1))).deliveredCents.get('term-1')).toMatchObject({ cents: 48400 });
+    mockDb.store.sms_log[0].status = 'undelivered';
+    expect((await apply._private.prepayNoticesByTerm(mockDb, CUSTOMER(1))).deliveredCents.has('term-1')).toBe(false);
+  });
+
   test('a text-only notice whose sid Twilio reports undelivered is held delivery_revoked, never applied (the status callback\'s sms_log bookkeeping is the durable evidence)', async () => {
     const book = sentBook({ notice: { email_sent: false, sms_sent: true, metadata: { ...fixture.noticeRow(1).metadata, sms_sid: 'SM1' } } });
     book.sms_log = [{ twilio_sid: 'SM1', customer_id: CUSTOMER(1), status: 'undelivered' }];

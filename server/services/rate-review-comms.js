@@ -74,6 +74,7 @@ const REASONS = Object.freeze({
   not_approved: 'Ranking row is no longer approved',
   too_late: `Effective date is under ${MIN_NOTICE_DAYS} days away (${MIN_NOTICE_DAYS + 2} for a prepaid renewal) — reschedule the notices`,
   invalid_amount: 'New rate is not above the current rate',
+  terms_neutral_lane: 'Rodent and commercial lines are not sent this letter: its callback and no-contract wording is for recurring residential plans only',
   unsupported_line: 'Service line has no letter wording',
   too_many_lines: `More than ${LINE_SLOTS} reviewed lines on one account`,
   no_contact: 'No email or phone on file',
@@ -518,6 +519,10 @@ const LINE_RULES = [
   // the line would be announced and then held, so it is held here instead.
   ['apply_hold', ({ notice, linesGone }) => linesGone.has(String(notice.id))],
   ['invalid_amount', ({ line }) => !(line.currentCents > 0 && line.newCents > line.currentCents)],
+  // The letter (and the notice page) promise free callbacks, no contract and cancel any
+  // time: recurring residential terms. Rodent and commercial stay terms-neutral, so they
+  // are held from this letter until they have wording of their own.
+  ['terms_neutral_lane', ({ notice, snapshot }) => notice.family_key === 'rodent' || flagList(snapshot && snapshot.flags).includes('commercial')],
   ['send_uncertain', ({ notice, now }) => sendOutcomeUncertain(notice, now)],
   ['in_flight', ({ notice, now }) => !claimable(notice, now)],
   // At least 30 days out from today, the delivery day; a prepaid renewal
@@ -649,9 +654,13 @@ async function sendPreview(batchKey, { dbh = db, now = new Date() } = {}) {
 // The active letter template's content hash: bound into the send digest
 // and handed to the email library, which refuses a send whose template
 // changed since the owner reviewed it. null = not installed.
-async function letterTemplateHash() {
+// conn + share: read on a provider handoff's own transaction under a row share lock, so a
+// publish (which takes the template row FOR UPDATE) waits until the request is done, and
+// no second pooled connection is taken inside the handoff.
+async function letterTemplateHash(conn = null, { share = false } = {}) {
   const EmailTemplateLibrary = require('./email-template-library');
-  const loaded = await EmailTemplateLibrary.loadTemplateByKey(TEMPLATE_KEY);
+  if (conn && share) await conn('email_templates').where({ template_key: TEMPLATE_KEY }).forShare().first();
+  const loaded = conn ? await EmailTemplateLibrary.loadTemplateByKey(TEMPLATE_KEY, conn) : await EmailTemplateLibrary.loadTemplateByKey(TEMPLATE_KEY);
   if (!loaded?.template || String(loaded.template.status) !== 'active' || !loaded.activeVersion) return null;
   return EmailTemplateLibrary.templateContentHash(loaded.template, loaded.activeVersion);
 }
@@ -1051,7 +1060,7 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
     if ((await loadCostBlock(conn, { share: conn !== dbh })) !== costBlock) return { ok: false, reason: 'cost_block_changed' };
     // ...and so must the letter template: the email leg refuses a changed template on its
     // own (expectedContentHash); this stops the text too, so neither provider proceeds.
-    if ((await letterTemplateHash()) !== templateHash) return { ok: false, reason: 'template_changed' };
+    if ((await letterTemplateHash(conn, { share: conn !== dbh })) !== templateHash) return { ok: false, reason: 'template_changed' };
     const at = clock();
     return revalidateClaimed(conn, entry, claimed, { today: etDateString(at), now: at });
   };
@@ -1335,8 +1344,13 @@ async function sendBatch(batchKey, { expectedDigest, actorId = null, dbh = db, n
   await renderLetter(letterPayload({ customer: sendable[0].customer, prefs: sendable[0].prefs, lines: sendable[0].lines, costBlock, noticeUrl: portalUrl('/') })); // template installed?
 
   const summary = { sent: 0, emailed: 0, texted: 0, unreachable: 0, uncertain: 0, failed: 0, inFlight: 0, stoppedByGate: 0, suppressed: entries.filter((e) => e.reason && e.lines.length).length };
-  for (let i = 0; i < sendable.length; i += SEND_CONCURRENCY) {
-    await Promise.all(sendable.slice(i, i + SEND_CONCURRENCY).map(async (entry) => {
+  // Each handoff holds one pooled connection for its transaction and takes a second,
+  // briefly, to commit its handoff record: the fan-out always leaves one connection free,
+  // so a small pool (DB_POOL_MAX 2 to 5) can never be held entirely by waiting handoffs.
+  const poolMax = Number(dbh && dbh.client && dbh.client.pool && dbh.client.pool.max) || 0;
+  const concurrency = poolMax > 0 ? Math.max(1, Math.min(SEND_CONCURRENCY, poolMax - 1)) : SEND_CONCURRENCY;
+  for (let i = 0; i < sendable.length; i += concurrency) {
+    await Promise.all(sendable.slice(i, i + concurrency).map(async (entry) => {
       if (!rateReviewLive()) { summary.stoppedByGate += 1; return; }
       const progress = {};
       try {
