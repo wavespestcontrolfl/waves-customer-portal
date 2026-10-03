@@ -34,8 +34,8 @@ vi.mock('../../components/tech/FastCompleteTreeShrubSheet', () => ({
 }));
 vi.mock('../../components/schedule/MobileDispatchList', () => ({ default: ({ services = [], onEdit }) => <div>
   {services.map((service) => <button key={service.id} aria-label={`Open mobile ${service.id}`} onClick={() => onEdit(service)}>Mobile visit</button>)}
-  {/* A week-view row: a visit that is not in the selected day's list. */}
-  <button aria-label="Open week-only visit" onClick={() => onEdit({ id: 'svc-ts-week', customerName: 'Fixture week', address: '200 Example Lane', serviceType: 'Tree & Shrub Program', status: 'on_site', scheduledDate: '2026-09-14', completionProfile: { category: 'lawn_care', findingsType: 'tree_shrub' }, treeShrubFastCompleteEnabled: true })}>Week visit</button>
+  {/* A visit that is not in the selected day's list. */}
+  <button aria-label="Open week-only visit" onClick={() => onEdit({ id: 'svc-ts-week', customerName: 'Fixture week', address: '200 Example Lane', serviceType: 'Tree & Shrub Program', status: 'on_site', scheduledDate: '2026-09-14', propertyId: 'prop-fixture', completionProfile: { category: 'lawn_care', findingsType: 'tree_shrub' }, treeShrubFastCompleteEnabled: true })}>Week visit</button>
 </div> }));
 vi.mock('../../components/schedule/MobilePaymentSheet', () => ({
   default: ({ invoiceId, service }) => <div>Payment sheet for {invoiceId} ({service?.id || 'no service'})</div>,
@@ -50,6 +50,7 @@ const visit = (id, overrides = {}) => ({
   serviceType: 'Tree & Shrub Program',
   status: 'on_site',
   scheduledDate: '2026-09-12',
+  propertyId: null,
   completionProfile: { category: 'lawn_care', findingsType: 'tree_shrub' },
   treeShrubFastCompleteEnabled: true,
   ...overrides,
@@ -134,7 +135,7 @@ describe('Dispatch completion routing for Tree & Shrub', () => {
     expect(screen.queryByText(/Tree and shrub sheet/)).not.toBeInTheDocument();
   });
 
-  it('hands off an unpaid invoice for a week-view visit outside the selected day', async () => {
+  it('hands off an unpaid invoice for a visit outside the selected day\'s list', async () => {
     mount([visit('svc-ts-today')]);
     fireEvent.click(await screen.findByRole('button', { name: 'Open week-only visit' }));
     await screen.findByText('Tree and shrub sheet for svc-ts-week');
@@ -164,6 +165,10 @@ describe('shouldOpenTreeShrubFastComplete', () => {
     expect(shouldOpenTreeShrubFastComplete(visit('a'))).toBe(true);
     expect(shouldOpenTreeShrubFastComplete(visit('a', { treeShrubFastCompleteEnabled: undefined }))).toBe(false);
     expect(shouldOpenTreeShrubFastComplete(visit('a', { status: 'cancelled' }))).toBe(false);
+  });
+  it('keeps the full form for a row that carries no premise (the mobile week list)', () => {
+    const { propertyId: _omit, ...weekRow } = visit('a');
+    expect(shouldOpenTreeShrubFastComplete(weekRow)).toBe(false);
   });
   it('keeps the full form for a visit returning from the payment flow', () => {
     expect(shouldOpenTreeShrubFastComplete(visit('a', { completionInvoiceAlreadySent: true }))).toBe(false);
