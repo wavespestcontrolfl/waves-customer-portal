@@ -16366,9 +16366,8 @@ function ChatWidget({ customer, onClose, initialQuestion, onNavigate }) {
   const sessionId = useRef(`chat-${Date.now()}`);
   const initialSentRef = useRef(false);
   // A network timeout is ambiguous: the server may have completed the turn.
-  // Keep its durable id with the text so the next Send reconciles that exact
-  // request instead of creating a second escalation or interleaved turn.
-  const retryTurnRef = useRef(null);
+  // Keep each unresolved text's durable id so later turns cannot discard it.
+  const retryTurnsRef = useRef(new Map());
 
   // Report an AI reply as inappropriate (Microsoft Store policy 11.16 —
   // users must be able to flag AI-generated content for review).
@@ -16410,8 +16409,9 @@ function ChatWidget({ customer, onClose, initialQuestion, onNavigate }) {
     const text = (typeof textOverride === 'string' ? textOverride : input).trim();
     if (!text || sending) return;
 
-    const retrying = retryTurnRef.current?.text === text;
-    const requestId = retrying ? retryTurnRef.current.requestId : newChatRequestId();
+    const retryRequestId = retryTurnsRef.current.get(text);
+    const retrying = Boolean(retryRequestId);
+    const requestId = retryRequestId || newChatRequestId();
 
     if (!retrying) setMessages(prev => [...prev, { role: 'user', content: text }]);
     setInput('');
@@ -16441,17 +16441,17 @@ function ChatWidget({ customer, onClose, initialQuestion, onNavigate }) {
       const data = await Promise.race([request, deadline]);
       setMessages(prev => [...prev, ...chatRowsFor(data)]);
       if (data.retryable) {
-        retryTurnRef.current = { text, requestId };
+        retryTurnsRef.current.set(text, requestId);
         // The input stays enabled while a turn is pending so the customer can
         // draft their next question. Restore the retry text only if they have
-        // not started one; the retry ref still preserves this original turn.
+        // not started one; the retry map still preserves this original turn.
         setInput(current => current.trim() ? current : text);
       } else {
-        retryTurnRef.current = null;
+        retryTurnsRef.current.delete(text);
       }
     } catch {
       setMessages(prev => [...prev, { role: 'assistant', content: "Connection issue — please try again or call us at (941) 297-5749." }]);
-      retryTurnRef.current = { text, requestId };
+      retryTurnsRef.current.set(text, requestId);
       setInput(current => current.trim() ? current : text);
     } finally {
       clearTimeout(timer);

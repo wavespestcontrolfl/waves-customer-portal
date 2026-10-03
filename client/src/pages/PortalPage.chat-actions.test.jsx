@@ -194,6 +194,49 @@ describe('AI response reports', () => {
 });
 
 describe('durable chat retry', () => {
+  it.each([
+    ['succeeds', (turn) => turn.resolve({ reply: 'B received.', escalated: false })],
+    ['fails ambiguously', (turn) => turn.reject(new Error('connection lost'))],
+  ])('retains unresolved A when later turn B %s', async (_label, settleB) => {
+    const turnA = deferred();
+    const turnB = deferred();
+    api.request
+      .mockReturnValueOnce(turnA.promise)
+      .mockReturnValueOnce(turnB.promise)
+      .mockResolvedValueOnce({ reply: 'A was already received.', escalated: false });
+    render(<ChatWidget
+      customer={customer}
+      initialQuestion="Please cancel my service"
+      onClose={() => {}}
+      onNavigate={() => {}}
+    />);
+    await settle();
+
+    fireEvent.change(screen.getByLabelText('Chat message'), { target: { value: 'Also treat the lanai' } });
+    await act(async () => {
+      turnA.reject(new Error('connection lost'));
+      await Promise.resolve();
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+    await act(async () => {
+      settleB(turnB);
+      await Promise.resolve();
+    });
+
+    fireEvent.change(screen.getByLabelText('Chat message'), { target: { value: 'Please cancel my service' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+    await settle();
+
+    const chatBodies = api.request.mock.calls
+      .filter(([path]) => path === '/ai/chat')
+      .map(([, options]) => JSON.parse(options.body));
+    expect(chatBodies).toHaveLength(3);
+    expect(chatBodies[2]).toEqual(chatBodies[0]);
+    expect(chatBodies[1].requestId).not.toBe(chatBodies[0].requestId);
+    expect(screen.getAllByText('Please cancel my service')).toHaveLength(1);
+    expect(screen.getByText('A was already received.')).toBeInTheDocument();
+  });
+
   it('preserves a new draft and reuses the request id and user bubble after an ambiguous transport failure', async () => {
     const pending = deferred();
     api.request
