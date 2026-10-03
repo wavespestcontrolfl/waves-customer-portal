@@ -228,7 +228,7 @@ describe('sendPreview', () => {
       const notice = draft(1, {
         billing_lane: 'annual_prepay', cadence_label: 'year', effective_date: eff,
         current_amount_cents: 46800, new_amount_cents: 48400, noticed_current_cents: 46800, noticed_new_cents: 48400,
-        metadata: { source: 'rate_review', batch_key: BATCH_KEY, term_id: 'term-1' },
+        metadata: { source: 'rate_review', batch_key: BATCH_KEY, term_id: 'term-1', coverage_visits: 4 },
       });
       const data = {
         notices: [notice], snapshots: new Map([[String(notice.id), fixture.snapshotRow(1)]]), customers: new Map([[CUSTOMER(1), customer(1)]]),
@@ -272,7 +272,7 @@ describe('sendPreview', () => {
     const prepay = draft(1, {
       billing_lane: 'annual_prepay', cadence_label: 'year', effective_date: '2027-05-15',
       current_amount_cents: 46800, new_amount_cents: 48400, noticed_current_cents: 46800, noticed_new_cents: 48400,
-      metadata: { source: 'rate_review', batch_key: BATCH_KEY, term_id: 'term-1', term_end: '2027-05-14' },
+      metadata: { source: 'rate_review', batch_key: BATCH_KEY, term_id: 'term-1', coverage_visits: 4, term_end: '2027-05-14' },
     });
     const b = book({ customers: [customer(1, { billing_mode: 'annual_prepay' })], notices: [prepay] });
     b.annual_prepay_terms = [{ id: 'term-1', customer_id: CUSTOMER(1), status: 'active', prepay_amount: '468.00', term_start: '2026-05-15', term_end: '2027-05-14', renewal_decision: null }];
@@ -280,6 +280,28 @@ describe('sendPreview', () => {
     expect((await comms.sendPreview(BATCH_KEY, { now: NOW })).counts.letters).toBe(1);
     mockDb.store.annual_prepay_terms[0].term_end = '2027-06-14';
     expect((await comms.sendPreview(BATCH_KEY, { now: NOW })).customers[0].suppressedLines[0].reason).toBe('rate_moved');
+  });
+
+  test.each([
+    ['the term\'s coverage visit count changed', (t) => { t.coverage_visit_count = 6; }],
+    ['a different next-term amount is already recorded', (t) => { t.next_term_prepay_amount = '500.00'; }],
+    ['the pinned term is no longer live (cancelled)', (t) => { t.status = 'cancelled'; }],
+    ['the term\'s amount moved', (t) => { t.prepay_amount = '480.00'; }],
+    ['the renewal reminder already went out for the term', (t) => { t.notice_30_sent_at = new Date().toISOString(); }],
+  ])('a prepaid line is held when %s — the apply\'s own prepaid checks decide (prepayChecks)', async (_label, mutate) => {
+    const prepay = draft(1, {
+      billing_lane: 'annual_prepay', cadence_label: 'year', effective_date: '2027-05-15',
+      current_amount_cents: 46800, new_amount_cents: 48400, noticed_current_cents: 46800, noticed_new_cents: 48400,
+      metadata: { source: 'rate_review', batch_key: BATCH_KEY, term_id: 'term-1', coverage_visits: 4, per_application_current_cents: 11700, term_end: '2027-05-14' },
+    });
+    const b = book({ customers: [customer(1, { billing_mode: 'annual_prepay' })], notices: [prepay] });
+    b.annual_prepay_terms = [{ id: 'term-1', customer_id: CUSTOMER(1), status: 'active', prepay_amount: '468.00', coverage_visit_count: 4, term_start: '2026-05-15', term_end: '2027-05-14', renewal_decision: null }];
+    mockDb.reset(b);
+    expect((await comms.sendPreview(BATCH_KEY, { now: NOW })).counts.letters).toBe(1);
+    mutate(mockDb.store.annual_prepay_terms[0]);
+    const out = await comms.sendPreview(BATCH_KEY, { now: NOW });
+    expect(out.counts.letters).toBe(0);
+    expect(out.customers[0].suppressedLines[0].reason).toMatch(/^(rate_moved|lane_changed|renewal_declined)$/);
   });
 
   test('a customer who turned texts off has no text channel; a last unreachable attempt is flagged', async () => {
@@ -436,7 +458,7 @@ describe('sendBatch', () => {
     const prepay = draft(1, {
       billing_lane: 'annual_prepay', cadence_label: 'year', effective_date: '2027-05-15',
       current_amount_cents: 46800, new_amount_cents: 48400, noticed_current_cents: 46800, noticed_new_cents: 48400,
-      metadata: { source: 'rate_review', batch_key: BATCH_KEY, term_id: 'term-1', term_end: '2027-05-14' },
+      metadata: { source: 'rate_review', batch_key: BATCH_KEY, term_id: 'term-1', coverage_visits: 4, term_end: '2027-05-14' },
     });
     const b = book({ notices: [prepay] });
     b.annual_prepay_terms = [{ id: 'term-1', status: 'active', renewal_decision: 'switch_plan' }];
@@ -798,7 +820,7 @@ describe('customer surfaces', () => {
     const prepay = draft(1, {
       billing_lane: 'annual_prepay', cadence_label: 'year', effective_date: '2027-05-15', status: 'sent', sent_at: NOW, applied_at: NOW,
       current_amount_cents: 46800, new_amount_cents: 48400, noticed_current_cents: 46800, noticed_new_cents: 48400,
-      metadata: { source: 'rate_review', batch_key: BATCH_KEY, term_id: 'term-1' },
+      metadata: { source: 'rate_review', batch_key: BATCH_KEY, term_id: 'term-1', coverage_visits: 4 },
     });
     const b = book({ customers: [customer(1, { billing_mode: 'annual_prepay' })], notices: [prepay] });
     b.annual_prepay_terms = [
@@ -924,7 +946,7 @@ describe('customer surfaces', () => {
     const prepay = draft(1, {
       billing_lane: 'annual_prepay', cadence_label: 'year', effective_date: '2027-05-15', status: 'sent', sent_at: NOW,
       current_amount_cents: 46800, new_amount_cents: 48400, noticed_current_cents: 46800, noticed_new_cents: 48400,
-      metadata: { source: 'rate_review', batch_key: BATCH_KEY, term_id: 'term-1' },
+      metadata: { source: 'rate_review', batch_key: BATCH_KEY, term_id: 'term-1', coverage_visits: 4 },
     });
     const b = book({ notices: [prepay] });
     b.annual_prepay_terms = [{ id: 'term-1', status: 'active', renewal_decision: 'cancel' }];

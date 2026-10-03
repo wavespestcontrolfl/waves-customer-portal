@@ -1139,44 +1139,55 @@ async function applyPerApplication(trx, ctx) {
   return { lane: LANE_PER_APPLICATION, appliesFromVisitId: first.id, visitIds: [...lockedIds], parentId, ...money };
 }
 
-async function applyPrepay(trx, ctx) {
-  const { notice, customer, today, metadata } = ctx;
-  if (notice.family_key === 'termite') throw hold('termite_program');
-  const found = await resolvePrepayTerm(trx, { customerId: customer.id, familyKey: notice.family_key, today, termId: metadata.term_id || null });
-  if (!found.term) throw hold(found.reason || 'prepay_term_not_found');
+// Every refusal applyPrepay raises from the rows alone, in its order; the
+// comms lane's send preflight asks the same question. Returns
+// { refusal: { reason, detail } | null, term } (term = the matched live term).
+async function prepayChecks(dbh, { notice, customer, today, metadata }) {
+  const refuse = (reason, detail) => ({ refusal: { reason, detail }, term: null });
+  if (notice.family_key === 'termite') return refuse('termite_program');
+  const found = await resolvePrepayTerm(dbh, { customerId: customer.id, familyKey: notice.family_key, today, termId: metadata.term_id || null });
+  if (!found.term) return refuse(found.reason || 'prepay_term_not_found');
   const term = found.term;
-  if (term.annual_plan_version) throw hold('termite_program', { termId: term.id });
-  if (term.renewal_decision) throw hold('term_not_live', { termId: term.id, decision: term.renewal_decision });
+  if (term.annual_plan_version) return refuse('termite_program', { termId: term.id });
+  if (term.renewal_decision) return refuse('term_not_live', { termId: term.id, decision: term.renewal_decision });
   // The notice named the renewal day (its effective_date = the term_end it
   // was scheduled from + 1). A term whose dates were edited since is a
   // different renewal window — the old notice (and its 30-day lead) never
   // carries over to it.
   if (addDaysYmd(ymd(term.term_end), 1) !== ymd(notice.effective_date)) {
-    throw hold('renewal_window_changed', { termId: term.id, termEnd: ymd(term.term_end), noticedEffectiveDate: ymd(notice.effective_date) });
+    return refuse('renewal_window_changed', { termId: term.id, termEnd: ymd(term.term_end), noticedEffectiveDate: ymd(notice.effective_date) });
   }
   // The notice carries the ANNUAL totals: the term's amount the customer
   // saw and the successor amount they were told — the renewal charges
   // exactly the latter.
-  if (cents(term.prepay_amount) !== Number(notice.noticed_current_cents)) throw hold('rate_moved_since_notice', { termAmountCents: cents(term.prepay_amount) });
+  if (cents(term.prepay_amount) !== Number(notice.noticed_current_cents)) return refuse('rate_moved_since_notice', { termAmountCents: cents(term.prepay_amount) });
   const visitsPerTerm = Number(term.coverage_visit_count) > 0 ? Number(term.coverage_visit_count) : Number(metadata.coverage_visits);
-  if (visitsPerTerm !== Number(metadata.coverage_visits)) throw hold('rate_moved_since_notice', { coverageVisits: visitsPerTerm });
+  if (visitsPerTerm !== Number(metadata.coverage_visits)) return refuse('rate_moved_since_notice', { coverageVisits: visitsPerTerm });
   // The per-application figure the letter quotes must still describe the
   // term (the ranking's own derivation, resolveCurrentRate, to the cent).
   if (metadata.per_application_current_cents != null
     && Math.round((Number(term.prepay_amount) / visitsPerTerm) * 100) !== Number(metadata.per_application_current_cents)) {
-    throw hold('rate_moved_since_notice', { perApplication: true });
+    return refuse('rate_moved_since_notice', { perApplication: true });
   }
   // "Notified amount is the charged amount": once the renewal reminder is
   // out (or a termite fee was frozen), the term's amount is spoken for.
-  if (termRenewalNoticed(term)) throw hold('renewal_notice_already_sent', { termId: term.id });
+  if (termRenewalNoticed(term)) return refuse('renewal_notice_already_sent', { termId: term.id });
   // A successor already on the books (a renewal recorded, at whatever
   // amount, or a termite successor minted) makes the predecessor's noticed
   // amount moot — never written after the fact.
-  if (await successorTermExists(trx, term, notice.family_key)) throw hold('successor_already_created', { termId: term.id });
+  if (await successorTermExists(dbh, term, notice.family_key)) return refuse('successor_already_created', { termId: term.id });
   const nextAmount = dollars(Number(notice.noticed_new_cents));
   if (term.next_term_prepay_amount != null && term.next_term_prepay_amount !== '' && roundMoney(term.next_term_prepay_amount) !== nextAmount) {
-    throw hold('rate_moved_since_notice', { nextTermPrepayAmount: Number(term.next_term_prepay_amount) });
+    return refuse('rate_moved_since_notice', { nextTermPrepayAmount: Number(term.next_term_prepay_amount) });
   }
+  return { refusal: null, term };
+}
+
+async function applyPrepay(trx, ctx) {
+  const { notice, customer, today, metadata } = ctx;
+  const { refusal, term } = await prepayChecks(trx, { notice, customer, today, metadata });
+  if (refusal) throw hold(refusal.reason, refusal.detail);
+  const nextAmount = dollars(Number(notice.noticed_new_cents));
   await trx('annual_prepay_terms').where({ id: term.id }).update({ next_term_prepay_amount: nextAmount, updated_at: new Date() });
   return {
     lane: LANE_PREPAY, termId: term.id,
@@ -1641,7 +1652,7 @@ module.exports = {
   noticedRenewalAmountError,
   recordNoticedAmountOverride,
   _private: {
-    laneForRow, effectiveDateFor, nextBillingDayOnOrAfter, loadFamilySlices, sumSlices, cents, addDaysYmd, daysBetweenYmd, flatVisitRefusal, perApplicationStructuralRefusal, perApplicationTemplateRefusal, monthlyRefusal, holdFromGuard, HoldError,
+    laneForRow, effectiveDateFor, nextBillingDayOnOrAfter, loadFamilySlices, sumSlices, cents, addDaysYmd, daysBetweenYmd, flatVisitRefusal, perApplicationStructuralRefusal, perApplicationTemplateRefusal, monthlyRefusal, prepayChecks, holdFromGuard, HoldError,
     loadLineOpenVisits, loadAccountPlanLineCount, loadCustomerOpenVisits, consumesPerApplicationFee, feeScopeRefusal, resolvePrepayTerm, successorTermExists, tryAnnualPrepayLock, resolveLiveLane, applyNotice, loadDueNotices, wasDelivered, cadenceLabelFor, termRenewalNoticed, moveMonthlySlice, scheduleRow,
   },
 };

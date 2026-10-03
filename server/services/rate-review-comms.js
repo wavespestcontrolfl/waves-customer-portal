@@ -260,18 +260,13 @@ async function ratesMovedFor(dbh, notices, { customers, visitById, today }) {
   for (const n of monthly) {
     if (!(await monthlyRefused(dbh, n, customerById.get(String(n.customer_id)), today))) ok.add(String(n.id));
   }
-  const termIds = notices.filter((n) => n.billing_lane === 'annual_prepay').map((n) => parseJson(n.metadata, {}).term_id).filter(Boolean);
-  const terms = new Map((termIds.length ? await dbh('annual_prepay_terms').whereIn('id', termIds).select('id', 'prepay_amount', 'term_end') : []).map((t) => [String(t.id), t]));
   for (const n of notices) {
     const meta = parseJson(n.metadata, {});
     if (n.billing_lane === 'monthly_membership' && !ok.has(String(n.id))) moved.add(String(n.id));
-    if (n.billing_lane === 'annual_prepay') {
-      const term = terms.get(String(meta.term_id || ''));
-      // ...and its renewal is still the day the notice names (term_end + 1;
-      // the apply's renewal_window_changed).
-      const renewalDay = term && ymd(term.term_end) ? new Date(Date.parse(`${ymd(term.term_end)}T00:00:00Z`) + DAY_MS).toISOString().slice(0, 10) : null;
-      if (!term || Math.round(Number(term.prepay_amount) * 100) !== noticedCurrent(n) || renewalDay !== ymd(n.effective_date)) moved.add(String(n.id));
-    }
+    // The pinned live term, the renewal day, the amounts and visit count the
+    // letter quoted, a recorded successor, a renewal reminder already out ...:
+    // the apply's own prepaid checks (rate-review-apply.js prepayChecks).
+    if (n.billing_lane === 'annual_prepay' && await prepayRefused(dbh, n, customerById.get(String(n.customer_id)), today)) moved.add(String(n.id));
     if (n.billing_lane === 'per_application') {
       const visit = visitById.get(String(meta.first_visit_id || ''));
       if (visit && ['pending', 'confirmed'].includes(String(visit.status)) && Math.round(Number(visit.estimated_price) * 100) !== noticedCurrent(n)) moved.add(String(n.id));
@@ -282,6 +277,18 @@ async function ratesMovedFor(dbh, notices, { customers, visitById, today }) {
 
 function noticedCurrent(n) {
   return Number(n.noticed_current_cents ?? n.current_amount_cents);
+}
+
+// True when applyPrepay would refuse this notice (see prepayChecks). Unreadable = refused.
+async function prepayRefused(dbh, notice, customer, today) {
+  if (!customer) return true;
+  const { prepayChecks } = require('./rate-review-apply')._private;
+  try {
+    return !!(await prepayChecks(dbh, { notice, customer, today, metadata: parseJson(notice.metadata, {}) })).refusal;
+  } catch (err) {
+    logger.warn(`[rate-review-comms] prepaid eligibility unreadable for notice ${notice.id}: ${err.message}`);
+    return true;
+  }
 }
 
 // True when applyMonthly would refuse this notice (the rate on file moved,
@@ -1070,7 +1077,10 @@ async function upcomingRateChanges(customerId, { dbh = db, now = new Date() } = 
   // the night after delivery and holds there (apply_hold_reason above).
   const applicable = new Set(monthly.map((n) => String(n.id)));
   const perApp = pending.filter((n) => n.billing_lane === 'per_application');
-  const moved = await ratesMovedFor(dbh, perApp, { customers: customer ? [customer] : [], visitById: await visitsById(dbh, perApp), today });
+  // A prepaid notice the nightly apply has not yet recorded is judged by the
+  // same checks; once recorded (applied_at) it stays upcoming until renewal.
+  const unappliedPrepay = pending.filter((n) => n.billing_lane === 'annual_prepay' && !n.applied_at);
+  const moved = await ratesMovedFor(dbh, [...perApp, ...unappliedPrepay], { customers: customer ? [customer] : [], visitById: await visitsById(dbh, perApp), today });
   for (const id of (await linesGoneFor(dbh, perApp, { snapshots, today })).keys()) moved.add(id);
   return pending.filter((n) => lanes.get(String(n.id)) === n.billing_lane
     && (n.billing_lane === 'monthly_membership' ? applicable.has(String(n.id)) : !moved.has(String(n.id)))).map((n) => ({
