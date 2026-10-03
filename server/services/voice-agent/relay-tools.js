@@ -1577,13 +1577,22 @@ async function executeTool(name, input = {}, ctx = {}) {
       let estimateQueued = null; // null = not requested; true/false = requested and (not) persisted
       if (estimateRequested && estimateMissing.length) {
         estimateQueued = false;
+        // A card an earlier capture on this call queued (complete then, from
+        // the account's address) must not keep details the caller has since
+        // replaced: revise it, and say what the call still lacks.
+        if (!leadCreated && leadResult && leadResult.customerId) {
+          const { surfaceEstimateRequestForCustomer } = require('../lead-from-extraction');
+          if (typeof surfaceEstimateRequestForCustomer === 'function') {
+            await surfaceEstimateRequestForCustomer(leadResult.customerId, { ...extracted, ...estimateFields }, { callSid: ctx.callSid || null, phone: callerPhone || null, spokenExpectation, stillMissing: estimateMissing });
+          }
+        }
       } else if (estimateRequested) {
         if (leadCreated) {
           estimateQueued = true;
         } else if (leadResult && leadResult.customerId) {
           const { surfaceEstimateRequestForCustomer } = require('../lead-from-extraction');
           const surfaced = typeof surfaceEstimateRequestForCustomer === 'function'
-            ? await surfaceEstimateRequestForCustomer(leadResult.customerId, { ...extracted, ...estimateFields }, { callSid: ctx.callSid || null, phone: callerPhone || null, spokenExpectation })
+            ? await surfaceEstimateRequestForCustomer(leadResult.customerId, { ...extracted, ...estimateFields }, { callSid: ctx.callSid || null, phone: callerPhone || null, spokenExpectation, locationFromAccount })
             : { persisted: false };
           estimateQueued = surfaced && surfaced.persisted === true;
         } else {
