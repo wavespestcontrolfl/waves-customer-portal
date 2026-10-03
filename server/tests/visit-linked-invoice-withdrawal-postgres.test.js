@@ -557,6 +557,41 @@ postgres('payer assignment withdraws visit-linked invoices with no packet', () =
     expect(await Packets.packetInvoiceSendInFlight({ scheduledServiceId: open.visitId }, mockPg, { pending: { visitPatch: { visitIds: [open.visitId], payer_id: payerId } } })).toBe(false);
   });
 
+  test('unvoid\'s ownership prelock takes the visit and the resolver\'s payer rows before it touches the invoice (committed fixture, second connection)', async () => {
+    const Linked = require('../services/visit-linked-invoice-withdrawal');
+    const customerId = randomUUID();
+    const visitId = randomUUID();
+    const recordId = randomUUID();
+    const invoiceId = randomUUID();
+    const date = etDateString();
+    const [payerRow] = await database('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+    await database('customers').insert({ id: customerId, first_name: 'Fixture', last_name: 'Unvoid', phone: '+12025550144', email: `${customerId}@example.invalid`, payer_id: payerRow.id });
+    await database('scheduled_services').insert({ id: visitId, customer_id: customerId, service_type: 'Fixture General Pest Control', scheduled_date: date, status: 'completed' });
+    await database('service_records').insert({ id: recordId, customer_id: customerId, scheduled_service_id: visitId, service_type: 'Fixture General Pest Control', service_date: date });
+    await database('invoices').insert({ id: invoiceId, customer_id: customerId, invoice_number: `FIX-${invoiceId.slice(0, 8)}`, token: randomUUID().replace(/-/g, ''), status: 'void', total: 50, service_record_id: recordId });
+    const writer = await database.transaction();
+    try {
+      await Linked.lockLinkedOwnershipRows(writer, await database('invoices').where({ id: invoiceId }).first());
+      for (const [table, id] of [['payers', payerRow.id], ['scheduled_services', visitId], ['customers', customerId]]) {
+        const contender = await database.transaction();
+        try {
+          // A payer writer (FOR UPDATE) or a Bill-To editor (NO KEY UPDATE) must wait behind the shared lock.
+          await expect(contender(table).where({ id }).forNoKeyUpdate().noWait().first('id')).rejects.toMatchObject({ code: '55P03' });
+        } finally { await contender.rollback(); }
+      }
+      // The invoice row itself is NOT held yet: ownership rows come first, the invoice after.
+      const free = await database.transaction();
+      try { expect(await free('invoices').where({ id: invoiceId }).forUpdate().noWait().first('id')).toBeTruthy(); } finally { await free.rollback(); }
+    } finally {
+      await writer.rollback();
+      await database('invoices').where({ id: invoiceId }).del();
+      await database('service_records').where({ id: recordId }).del();
+      await database('scheduled_services').where({ id: visitId }).del();
+      await database('customers').where({ id: customerId }).del();
+      await database('payers').where({ id: payerRow.id }).del();
+    }
+  });
+
   test('inside a writer transaction the fence holds the candidate invoice and ownership rows to commit (committed fixture, second connection)', async () => {
     // The fixture must be committed for a second connection to see and lock it.
     const customerId = randomUUID();

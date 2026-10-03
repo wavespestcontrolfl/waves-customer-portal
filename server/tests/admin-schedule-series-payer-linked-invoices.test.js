@@ -104,7 +104,12 @@ beforeAll((done) => {
 });
 afterAll((done) => { server.close(done); });
 
+const scheduledChains = [];
+let statusReads = 0;
+
 function setup(parentPayerId = null) {
+  scheduledChains.length = 0;
+  statusReads = 0;
   const parentRow = { ...parent, payer_id: parentPayerId };
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   db.fn = { now: jest.fn(() => 'now()') };
@@ -114,10 +119,14 @@ function setup(parentPayerId = null) {
     const c = chain(table === 'scheduled_services' ? { ...parentRow } : (table === 'customers' ? { id: 'cust-1' } : undefined));
     if (table === 'scheduled_services') {
       // Children of the series: one still pending, one already completed.
+      scheduledChains.push(c);
       c.pluck = jest.fn(async (col) => {
         if (col !== 'id') return [];
         const byStatus = c.whereIn.mock.calls.some(([column]) => column === 'status');
-        return byStatus ? ['child-pending'] : ['child-pending', 'child-completed'];
+        if (!byStatus) return ['child-pending', 'child-completed'];
+        // A later re-read of the pending/confirmed children would see one more (it flipped after the snapshot).
+        statusReads += 1;
+        return statusReads === 1 ? ['child-pending'] : ['child-pending', 'child-late'];
       });
       c.update = jest.fn(() => Object.assign(Promise.resolve(1), { returning: jest.fn(async () => [{ id: 'child-pending' }]) }));
     }
@@ -177,4 +186,31 @@ test('a PO-only series edit propagates the PO and runs no Bill-To pipeline for t
   expect(Linked.linkedInvoiceChargeInFlight).not.toHaveBeenCalled();
   expect(Linked.reconcileLinkedInvoices).not.toHaveBeenCalled();
   expect(Linked.withdrawLinkedInvoicesForOwner).not.toHaveBeenCalled();
+  // The PO still reaches the pinned (locked) children, by id.
+  const updateChain = scheduledChains.find((c) => c.update.mock.calls.some(([data]) => data && Object.keys(data).join() === 'po_number') && c.whereIn.mock.calls.some(([column]) => column === 'id'));
+  expect(updateChain.whereIn).toHaveBeenCalledWith('id', ['child-pending']);
+});
+
+test('the series propagation, fence, checkout release and withdrawal all use ONE locked, pinned child set', async () => {
+  const res = await fetch(`${baseUrl}/api/admin/schedule/svc-1/update-details`, {
+    method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ payerId: 7 }),
+  });
+  expect(res.status).toBe(200);
+  // The pending/confirmed children were read once, under FOR UPDATE...
+  const statusReadChains = scheduledChains.filter((c) => c.whereIn.mock.calls.some(([column]) => column === 'status'));
+  expect(statusReadChains).toHaveLength(1);
+  expect(statusReadChains[0].forUpdate).toHaveBeenCalled();
+  expect(statusReads).toBe(1);
+  // ...the UPDATE names those ids (a child that flipped to pending since is not rewritten)...
+  const updateChain = scheduledChains.find((c) => c.update.mock.calls.length && c.whereIn.mock.calls.some(([column]) => column === 'id'));
+  expect(updateChain.whereIn).toHaveBeenCalledWith('id', ['child-pending']);
+  expect(updateChain.whereIn.mock.calls.some(([column]) => column === 'status')).toBe(false);
+  // ...and the fence, the checkout release and the withdrawal see the same set, never 'child-late'.
+  const pinned = ['child-pending'];
+  expect(Linked.linkedInvoiceChargeInFlight).toHaveBeenCalledWith(expect.anything(), { scheduledServiceIds: pinned }, expect.anything());
+  expect(PayCombined.releaseUnconfirmedCombinedSessionsForScheduledServices).toHaveBeenCalledWith(
+    expect.anything(), expect.anything(), expect.objectContaining({ invalidateVisitIds: ['svc-1', ...pinned] }),
+  );
+  expect(Linked.withdrawLinkedInvoicesForOwner).toHaveBeenCalledWith(expect.anything(), { scheduledServiceIds: pinned });
+  expect(JSON.stringify(Linked.withdrawLinkedInvoicesForOwner.mock.calls)).not.toContain('child-late');
 });

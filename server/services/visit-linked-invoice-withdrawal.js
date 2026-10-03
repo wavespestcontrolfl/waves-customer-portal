@@ -177,8 +177,18 @@ async function ownerTransitions(database, scope = {}, { mode = 'post', pending =
 // for a writer with nothing to refuse at that point: the withdrawal after the write then acts on what
 // moved, not on every invoice that merely resolves to a payer now (an invoice with no remembered
 // owner is judged against what it records: self-pay, or the payer named by its stamp).
-async function recordOwnerPlan(trx, scope, pending = null) {
-  await ownerTransitions(trx, scope, { mode: 'pre', pending, stamped: 'unstamped' });
+async function recordOwnerPlan(trx, scope, pending = null, { lock = false } = {}) {
+  await ownerTransitions(trx, scope, { mode: 'pre', pending, lock, stamped: 'unstamped' });
+}
+
+// Take the ownership rows a later fence, withdrawal or release will read (customer, visit, then every
+// payer row, all FOR SHARE) for ONE invoice, without judging anything: a writer that is about to
+// update an invoice row (unvoid) takes them first, so it is never holding the invoice while waiting on a
+// payer row that a payer writer holds and wants the invoice for.
+async function lockLinkedOwnershipRows(trx, invoice) {
+  const visitId = await linkedVisitOf(invoice, trx);
+  if (!visitId) return;
+  await readOwnerState(trx, invoice, visitId, { lock: true, pending: null });
 }
 
 // The visits the fence, withdrawal and release will lock for these customers: the visit every
@@ -300,4 +310,4 @@ async function linkedInvoiceChargeInFlight(database, scope = {}, { pending = nul
   return false;
 }
 
-module.exports = { recordOwnerPlan, ownerTransitions, ownerOf, linkedSessionInvoiceIds, linkedVisitIdsForCustomers, withdrawLinkedInvoicesForOwner, reconcileLinkedInvoices, linkedInvoiceChargeInFlight };
+module.exports = { lockLinkedOwnershipRows, recordOwnerPlan, ownerTransitions, ownerOf, linkedSessionInvoiceIds, linkedVisitIdsForCustomers, withdrawLinkedInvoicesForOwner, reconcileLinkedInvoices, linkedInvoiceChargeInFlight };

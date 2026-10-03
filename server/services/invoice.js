@@ -10142,9 +10142,9 @@ const InvoiceService = {
       // live owner under them.
       if (!current.visit_completion_packet_id && current.customer_id
         && (current.scheduled_service_id || current.service_record_id)) {
-        await trx("customers").where({ id: current.customer_id }).forShare().first("id");
-        const linkedVisitId = await linkedScheduledServiceId(current, trx);
-        if (linkedVisitId) await trx("scheduled_services").where({ id: linkedVisitId }).forShare().first("id");
+        // customer -> visit -> every payer row the resolver reads (FOR SHARE), the order every Bill-To
+        // writer takes, BEFORE the invoice row below is updated.
+        await require("./visit-linked-invoice-withdrawal").lockLinkedOwnershipRows(trx, current);
       }
       // Statement re-check under lock (a concurrent close could finalize it
       // between the fast pre-check above and this write).

@@ -2442,8 +2442,10 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // Remember who owns each side's visit-linked invoices BEFORE the sweep moves the loser's under the
     // winner, so the withdrawal after the Bill-To lands acts on the invoices whose owner moved.
     const LinkedOwners = require('./visit-linked-invoice-withdrawal');
-    await LinkedOwners.recordOwnerPlan(trx, { customerId: loser.id });
-    await LinkedOwners.recordOwnerPlan(trx, { customerId: winnerId });
+    // It also takes both sides' visit and payer rows FOR SHARE now, before the sweep writes invoice rows:
+    // the withdrawal after the sweep reads them, and must not wait on a payer row while holding invoices.
+    await LinkedOwners.recordOwnerPlan(trx, { customerId: loser.id }, null, { lock: true });
+    await LinkedOwners.recordOwnerPlan(trx, { customerId: winnerId }, null, { lock: true });
     const fks = await customerFkColumns(trx);
     for (const { table_name: table, column_name: column } of fks) {
       // Capture the moving row keys BEFORE the update, in an own savepoint:
@@ -3959,6 +3961,10 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     const locked = await trx('customers').whereIn('id', [winnerId, loserId]).forUpdate().select('*');
     const winner = locked.find((r) => r.id === winnerId);
     const loserRow = locked.find((r) => r.id === loserId);
+    // The undo's reconciliation reads each customer's visit and payer rows; take them (FOR SHARE) now,
+    // after the customer rows and before any invoice row is written back.
+    await require('./visit-linked-invoice-withdrawal').recordOwnerPlan(trx, { customerId: winnerId }, null, { lock: true });
+    await require('./visit-linked-invoice-withdrawal').recordOwnerPlan(trx, { customerId: loserId }, null, { lock: true });
     if (!winner) refuse('The kept customer no longer exists');
     if (winner.deleted_at || winner.active === false) {
       refuse('The kept customer is inactive or deleted — reactivate it before undoing the merge');

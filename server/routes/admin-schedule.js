@@ -14393,17 +14393,22 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // edit rejected for an in-flight send must not already have destroyed
         // the customer's live pay-page session.
         const payerFieldsTouched = updates.payer_id !== undefined || updates.self_pay_override !== undefined;
-        // The children this edit's Bill-To propagation rewrites (pending / confirmed only), and the
-        // write itself, so every visit-linked invoice's owner BEFORE and AFTER is judged once
-        // (ownerTransitions) and every step below acts on the invoices that actually MOVE - whether
-        // the edit assigns a payer, or clears one and so reveals the next level's.
+        // The children this edit's Bill-To propagation rewrites (pending / confirmed only), PINNED: the
+        // visit and then its children are locked FOR UPDATE here, once, in the route's lock order (the
+        // customer rows are held above), and this id set - not a re-run of the status predicate - drives
+        // the fence, the checkout invalidation, the propagation UPDATE and the withdrawal. A child that
+        // becomes pending or is inserted afterwards is simply not part of this edit.
+        const seriesBillToTouched = payerFieldsTouched || updates.po_number !== undefined;
         let rewrittenChildIds = [];
         let ownerPending = null;
-        if (payerFieldsTouched) {
+        if (seriesBillToTouched) {
+          await trx('scheduled_services').where({ id: req.params.id }).forNoKeyUpdate().first('id');
           try {
             rewrittenChildIds = await trx('scheduled_services').where({ recurring_parent_id: req.params.id })
-              .whereIn('status', ['pending', 'confirmed']).pluck('id');
+              .whereIn('status', ['pending', 'confirmed']).orderBy('id').forUpdate().pluck('id');
           } catch { /* no children / column absent */ }
+        }
+        if (payerFieldsTouched) {
           ownerPending = {
             visitPatch: {
               visitIds: [req.params.id, ...rewrittenChildIds],
@@ -14411,9 +14416,8 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               ...(updates.self_pay_override !== undefined ? { self_pay_override: updates.self_pay_override === true } : {}),
             },
           };
-          // The combined advisory lock for this customer was taken above,
-          // before any ownership row — both Bill-To writers share that order.
-          await trx('scheduled_services').where({ id: req.params.id }).forNoKeyUpdate().first('id');
+          // (The combined advisory lock for this customer was taken above, before any ownership row,
+          // and the visit and its children were locked just before this - both Bill-To writers share that order.)
           if (await require('../services/visit-completion-packets').packetInvoiceSendInFlight({ scheduledServiceId: req.params.id }, trx, { pending: ownerPending })) {
             throw Object.assign(new Error('The combined-visit invoice for this service is being delivered. Retry the Bill-To change in a moment.'), {
               statusCode: 409, isOperational: true, code: 'invoice_send_in_flight',
@@ -14672,14 +14676,16 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               childPayerUpdates.self_pay_override = updates.self_pay_override === true;
             }
             if (Object.keys(childPayerUpdates).length > 0) {
-              const movedChildIds = await trx('scheduled_services')
-                .where({ recurring_parent_id: req.params.id })
-                .whereIn('status', ['pending', 'confirmed'])
-                .update(childPayerUpdates)
-                .returning('id');
+              // The pinned (locked) child set, not the status predicate again.
+              if (rewrittenChildIds.length) {
+                await trx('scheduled_services')
+                  .where({ recurring_parent_id: req.params.id })
+                  .whereIn('id', rewrittenChildIds)
+                  .update(childPayerUpdates);
+              }
               // The children took the Bill-To in the same write: their visit-linked invoices follow
               // it (withdrawn when a payer now owns them, released when it cleared).
-              const childVisitIds = movedChildIds.map((row) => (row && typeof row === 'object' ? row.id : row));
+              const childVisitIds = rewrittenChildIds;
               // Only an edit that touched the payer or the self-pay pin can move an invoice (a PO-only
               // edit propagates the PO and nothing else).
               if (childVisitIds.length && payerFieldsTouched) {
