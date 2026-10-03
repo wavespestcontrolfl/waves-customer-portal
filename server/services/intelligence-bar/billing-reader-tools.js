@@ -428,6 +428,16 @@ async function processingStatusOutcome(invoice, database, terminalError) {
 // visitRefusesSettlement applies under its lock, here on a plain read) and the LIVE payer lookup with that visit id.
 // memberCollectionPending's own payer lookup keys only on invoices.scheduled_service_id and re-reads the invoice row,
 // so a service-record-only invoice whose visit later got a payer needs this resolution.
+// The LIVE payer verdict through the canonical linkage: the visit the invoice links to (or none) and the customer
+// default. True when a payer now owns the invoice, whatever the invoice row itself says.
+async function livePayerOwns(invoice, database) {
+  const visitId = await require('../invoice').linkedScheduledServiceId(invoice, database);
+  const payer = await require('../payer').resolveForInvoice({
+    database, customerId: String(invoice.customer_id), ...(visitId ? { scheduledServiceId: String(visitId) } : {}), throwOnError: true,
+  });
+  return Boolean(payer && payer.payerId);
+}
+
 async function linkedVisitVerdict(invoice, database) {
   const visitId = await require('../invoice').linkedScheduledServiceId(invoice, database);
   if (!visitId) return null;
@@ -446,7 +456,11 @@ async function decideCollectibility(invoice, listed, database) {
   } catch (err) {
     // A saved-card ambiguity parks the invoice as `processing` (parkInvoiceForSavedCardReconciliation) and
     // leaves the attempt: ask the charge fence before accepting the terminal explanation.
-    if (status === 'processing') return processingStatusOutcome(invoice, database, err);
+    // Ownership first: a processing invoice whose live owner is a payer is payer-billed, never a customer bank or card payment.
+    if (status === 'processing') {
+      if (isPayerBilled(invoice) || await livePayerOwns(invoice, database)) return { ...held('not_collectible', MEMBER_REASONS.payer_billed), payer_billed: true };
+      return processingStatusOutcome(invoice, database, err);
+    }
     return held('not_collectible', fenceReason(err.message) || MEMBER_REASONS.not_collectible);
   }
   const member = await require('../pay-combined').memberCollectionPending(invoice, { database, customerId: listed.customer_id });

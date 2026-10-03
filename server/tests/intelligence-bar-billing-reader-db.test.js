@@ -9,18 +9,23 @@ const crypto = require('crypto');
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
+// ONE reference instant for the whole suite, captured at module load: every relative date is derived from it with the
+// repo's ET calendar-day helper (calendar days, never 24-hour multiples), and nothing below reads the clock again.
+const { etDateString, addETDays } = require('../utils/datetime-et');
+const REFERENCE = new Date();
+
 const databaseUrl = process.env.IB_TEST_DATABASE_URL;
 const suite = databaseUrl ? describe : describe.skip;
 
 suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
-  let db; let registry; let execute; let etDateString;
+  let db; let registry; let execute;
   const originalEnv = { ...process.env };
   const uid = () => crypto.randomUUID();
   const digits = () => String(Math.floor(Math.random() * 1e6)).padStart(6, '0');
-  const day = (offset) => etDateString(new Date(Date.now() + offset * 86400000));
+  const day = (offset) => etDateString(addETDays(REFERENCE, offset));
   const run = crypto.randomBytes(3).toString('hex');
   const SURNAME = `Quillfeather${run}`;
-  let A; let B; let H; let E; let G; let Z; let Y; let X; let D2; let W2; let V; let U; let U2; let L; let M; let N; let T; let R2; let TIED; let VISIT;
+  let A; let B; let H; let E; let G; let Z; let Y; let X; let D2; let W2; let CP; let V; let U; let U2; let L; let M; let N; let T; let R2; let TIED; let VISIT;
   const inv = {};
   const tokens = [];
 
@@ -67,14 +72,13 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     db = require('../models/db');
     registry = require('../services/intelligence-bar/action-registry');
     execute = (name, input, scope) => registry.execute(name, input, { role: scope.role, context: scope.context, actionContext: scope.actionContext });
-    ({ etDateString } = require('../utils/datetime-et'));
 
     A = await customer(`Thessaly${run}`, SURNAME, { account_credits: 25 });
     B = await customer(`Orville${run}`, SURNAME);
     H = await customer('Marguerite', `Holdout${run}`);
     // Terminal invoices: paid by a recorded manual payment (linked by the portal's description rule), and void.
-    const paid = await invoice('paid', A, { total: 120, status: 'paid', paid_at: new Date(), due_date: day(-30), payment_method: 'check',
-      payment_reference: 'CHK-1001', payment_recorded_by: 'Synthetic Operator', payment_recorded_at: new Date() });
+    const paid = await invoice('paid', A, { total: 120, status: 'paid', paid_at: REFERENCE, due_date: day(-30), payment_method: 'check',
+      payment_reference: 'CHK-1001', payment_recorded_by: 'Synthetic Operator', payment_recorded_at: REFERENCE });
     await db('payments').insert({ customer_id: A, payment_date: day(-29), amount: 120, status: 'paid', description: `Invoice ${paid.invoice_number} — check (CHK-1001)` });
     await invoice('voided', A, { total: 77, status: 'void' });
     await invoice('processing', A, { total: 55, status: 'processing', payment_method: 'us_bank_account' });
@@ -82,15 +86,15 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const credited = await invoice('credited', A, { total: 150, credit_applied: 50, due_date: day(15), service_date: day(-2) });
     await db('payment_plans').insert({ customer_id: A, invoice_id: credited.id, total_balance: 100, payment_amount: 25, payment_frequency: 'weekly', plan_start_date: day(0), next_payment_date: day(7) });
     await invoice('draft', A, { total: 40, status: 'draft', due_date: null });
-    await invoice('archived', A, { total: 33, archived_at: new Date() });
+    await invoice('archived', A, { total: 33, archived_at: REFERENCE });
     for (let n = 0; n < 4; n += 1) await invoice(`fill${n}`, A, { total: 10 + n, due_date: day(20 + n) });
     // A submitted saved-card attempt with no result: the fence holds the invoice (a payment plan rides on it).
     const open = await invoice('open', A, { total: 200, status: 'overdue', due_date: day(-12), stripe_payment_intent_id: `pi_open_${run}` });
-    await db('stripe_invoice_charge_attempts').insert({ invoice_id: open.id, stripe_payment_method_id: 'pm_synth', idempotency_key: `k-open-${run}`, status: 'claimed', amount: 200, submitted_at: new Date() });
+    await db('stripe_invoice_charge_attempts').insert({ invoice_id: open.id, stripe_payment_method_id: 'pm_synth', idempotency_key: `k-open-${run}`, status: 'claimed', amount: 200, submitted_at: REFERENCE });
     await db('payment_plans').insert({ customer_id: A, invoice_id: open.id, total_balance: 200, payment_amount: 50, payment_frequency: 'monthly', plan_start_date: day(0), next_payment_date: day(30) });
     // An ambiguous attempt, an unresolved orphan charge, and a failed row flagged ambiguous (the fence's three holds).
     const amb = await invoice('amb', A, { total: 45 });
-    await db('stripe_invoice_charge_attempts').insert({ invoice_id: amb.id, stripe_payment_method_id: 'pm_synth', idempotency_key: `k-amb-${run}`, status: 'ambiguous', amount: 45, submitted_at: new Date(),
+    await db('stripe_invoice_charge_attempts').insert({ invoice_id: amb.id, stripe_payment_method_id: 'pm_synth', idempotency_key: `k-amb-${run}`, status: 'ambiguous', amount: 45, submitted_at: REFERENCE,
       error_message: 'declined for synthetic.person@example.com' });
     const orphan = await invoice('orphan', A, { total: 60, due_date: day(5) });
     await db('stripe_orphan_charges').insert({ stripe_payment_intent_id: `pi_orphan_${run}`, customer_id: A, invoice_id: orphan.id, amount: 60, source: 'invoice_payment_webhook', original_db_error: 'synthetic ledger failure' });
@@ -106,7 +110,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     Y = await customer(`Parked${run}`, `Processing${run}`);
     await invoice('y_ach', Y, { total: 90, status: 'processing', payment_method: 'us_bank_account' });
     const parked = await invoice('y_parked', Y, { total: 35, status: 'processing' });
-    await db('stripe_invoice_charge_attempts').insert({ invoice_id: parked.id, stripe_payment_method_id: 'pm_synth', idempotency_key: `k-parked-${run}`, status: 'claimed', amount: 35, submitted_at: new Date() });
+    await db('stripe_invoice_charge_attempts').insert({ invoice_id: parked.id, stripe_payment_method_id: 'pm_synth', idempotency_key: `k-parked-${run}`, status: 'claimed', amount: 35, submitted_at: REFERENCE });
     // An ordinary ACH debit in flight: its attempt stays unresolved while the PaymentIntent is processing, and a
     // `processing` payments row records it. A received deposit not yet applied to its invoice (the third pay-path fence).
     X = await customer(`Bank${run}`, `Debit${run}`);
@@ -114,7 +118,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     for (const [key, status, extra, tender] of [['x_ach_sent', 'sent', {}, { payment_method: 'us_bank_account' }], ['x_ach_proc', 'processing', { payment_method: 'us_bank_account' }, {}]]) {
       const row = await invoice(key, X, { total: 60, status, stripe_payment_intent_id: `pi_ach_${key}_${run}`, ...extra });
       await db('stripe_invoice_charge_attempts').insert({ invoice_id: row.id, stripe_payment_method_id: 'pm_synth', idempotency_key: `k-${key}-${run}`, status: 'ambiguous', amount: 60,
-        stripe_payment_intent_id: `pi_ach_${key}_${run}`, submitted_at: new Date() });
+        stripe_payment_intent_id: `pi_ach_${key}_${run}`, submitted_at: REFERENCE });
       await db('payments').insert({ customer_id: X, payment_date: day(0), amount: 60, status: 'processing', processor: 'stripe', stripe_payment_intent_id: `pi_ach_${key}_${run}`,
         description: 'ACH in flight', metadata: json({ invoice_id: row.id, ...tender }) });
     }
@@ -124,14 +128,14 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     await invoice('v_unknown', V, { total: 26, status: 'processing' });
     const vSent = await invoice('v_sent_card', V, { total: 27, stripe_payment_intent_id: `pi_v_sent_${run}` });
     for (const [row, pi] of [[vCard, `pi_v_card_${run}`], [vSent, `pi_v_sent_${run}`]]) {
-      await db('stripe_invoice_charge_attempts').insert({ invoice_id: row.id, stripe_payment_method_id: 'pm_card_synth', idempotency_key: `k-${pi}`, status: 'ambiguous', amount: 25, stripe_payment_intent_id: pi, submitted_at: new Date() });
+      await db('stripe_invoice_charge_attempts').insert({ invoice_id: row.id, stripe_payment_method_id: 'pm_card_synth', idempotency_key: `k-${pi}`, status: 'ambiguous', amount: 25, stripe_payment_intent_id: pi, submitted_at: REFERENCE });
       await db('payments').insert({ customer_id: V, payment_date: day(0), amount: 25, status: 'processing', processor: 'stripe', payment_method_type: 'card', stripe_payment_intent_id: pi, description: 'Card intent incomplete', metadata: json({ invoice_id: row.id }) });
     }
     // Bank tender evidence from the attempt alone: its payment method is a us_bank_account; the processing row records no tender.
     U = await customer(`Attempt${run}`, `Tender${run}`);
     await db('payment_methods').insert({ customer_id: U, method_type: 'us_bank_account', stripe_payment_method_id: `pm_bank_${run}` });
     const uRow = await invoice('u_attempt_tender', U, { total: 33, stripe_payment_intent_id: `pi_u_${run}` });
-    await db('stripe_invoice_charge_attempts').insert({ invoice_id: uRow.id, stripe_payment_method_id: `pm_bank_${run}`, idempotency_key: `k-u-${run}`, status: 'ambiguous', amount: 33, stripe_payment_intent_id: `pi_u_${run}`, submitted_at: new Date() });
+    await db('stripe_invoice_charge_attempts').insert({ invoice_id: uRow.id, stripe_payment_method_id: `pm_bank_${run}`, idempotency_key: `k-u-${run}`, status: 'ambiguous', amount: 33, stripe_payment_intent_id: `pi_u_${run}`, submitted_at: REFERENCE });
     await db('payments').insert({ customer_id: U, payment_date: day(0), amount: 33, status: 'processing', processor: 'stripe', stripe_payment_intent_id: `pi_u_${run}`, description: 'In flight', metadata: json({ invoice_id: uRow.id }) });
     // An email and a PAN-like number in EVERY free-text column the readers select (each sized to its column).
     const LEAK = 'x@y.example 4111 1111 1111 1111'; const MID = 'a@b.co 4111111111111'; const TINY = 'a@b.co';
@@ -153,22 +157,22 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     await invoice('n_numeric', N, { id: '12345678-1234-4123-8123-123456789012', total: 12 });
     // An annual prepay invoice linked only from the term side (annual_prepay_terms.prepay_invoice_id; invoices.annual_prepay_term_id is NULL).
     T = await customer(`Prepay${run}`, `TermSide${run}`);
-    const prepayInvoice = await invoice('t_prepay', T, { total: 600, status: 'paid', paid_at: new Date() });
+    const prepayInvoice = await invoice('t_prepay', T, { total: 600, status: 'paid', paid_at: REFERENCE });
     const [term] = await db('annual_prepay_terms').insert({ customer_id: T, prepay_invoice_id: prepayInvoice.id, status: 'active', term_start: day(-30), term_end: day(335), prepay_amount: 600 }).returning('id');
     inv.prepayTermId = term.id || term;
     // Conflicting tender evidence: the invoice says bank, its processing payments row says card. And sibling rows that
     // would crowd this invoice's own payment out of a limited history.
     R2 = await customer(`Mixed${run}`, `Tender${run}`);
     const mixed = await invoice('r2_mixed', R2, { total: 44, payment_method: 'us_bank_account', stripe_payment_intent_id: `pi_r2_mixed_${run}` });
-    await db('stripe_invoice_charge_attempts').insert({ invoice_id: mixed.id, stripe_payment_method_id: 'pm_r2', idempotency_key: `k-r2-${run}`, status: 'ambiguous', amount: 44, stripe_payment_intent_id: `pi_r2_mixed_${run}`, submitted_at: new Date() });
+    await db('stripe_invoice_charge_attempts').insert({ invoice_id: mixed.id, stripe_payment_method_id: 'pm_r2', idempotency_key: `k-r2-${run}`, status: 'ambiguous', amount: 44, stripe_payment_intent_id: `pi_r2_mixed_${run}`, submitted_at: REFERENCE });
     await db('payments').insert({ customer_id: R2, payment_date: day(0), amount: 44, status: 'processing', processor: 'stripe', payment_method_type: 'card', stripe_payment_intent_id: `pi_r2_mixed_${run}`, description: 'Card row', metadata: json({ invoice_id: mixed.id }) });
-    const flood = await invoice('r2_flood', R2, { total: 15, status: 'paid', paid_at: new Date(), stripe_payment_intent_id: `pi_r2_flood_${run}` });
-    await db('payments').insert({ customer_id: R2, payment_date: day(-9), amount: 15, status: 'paid', processor: 'stripe', stripe_payment_intent_id: `pi_r2_flood_${run}`, description: 'Own payment', metadata: json({ invoice_id: flood.id }), created_at: new Date(Date.now() - 86400e3) });
+    const flood = await invoice('r2_flood', R2, { total: 15, status: 'paid', paid_at: REFERENCE, stripe_payment_intent_id: `pi_r2_flood_${run}` });
+    await db('payments').insert({ customer_id: R2, payment_date: day(-9), amount: 15, status: 'paid', processor: 'stripe', stripe_payment_intent_id: `pi_r2_flood_${run}`, description: 'Own payment', metadata: json({ invoice_id: flood.id }), created_at: addETDays(REFERENCE, -1) });
     await db.batchInsert('payments', Array.from({ length: 55 }, (_, n) => ({ customer_id: R2, payment_date: day(-1), amount: 1, status: 'paid', processor: 'stripe', stripe_payment_intent_id: `pi_r2_flood_${run}`,
       description: `Sibling share ${n}`, metadata: json({ invoice_id: uid() }) })), 55);
     // Invoices with identical dates and created_at (one transaction): tied rows must page deterministically.
     TIED = await customer(`Tied${run}`, `Rows${run}`);
-    const tiedAt = new Date(Date.now() - 3 * 86400e3);
+    const tiedAt = addETDays(REFERENCE, -3);
     for (let n = 0; n < 5; n += 1) await invoice(`tied${n}`, TIED, { total: 10 + n, service_date: day(-3), created_at: tiedAt, due_date: day(5) });
     // Invoices whose linked visit never ran: linked directly, linked only through the service record, and a live visit.
     VISIT = await customer(`Visit${run}`, `Never${run}`);
@@ -184,6 +188,10 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const [payerVisit] = await db('scheduled_services').insert({ customer_id: VISIT, scheduled_date: day(-1), service_type: 'Pest Control', status: 'completed', payer_id: visitPayer.id || visitPayer }).returning('id');
     const [payerRecord] = await db('service_records').insert({ customer_id: VISIT, service_date: day(-1), service_type: 'Pest Control', scheduled_service_id: idOf(payerVisit) }).returning('id');
     await invoice('vis_payer', VISIT, { total: 60, service_record_id: idOf(payerRecord) });
+    // A PROCESSING invoice whose live owner is a payer: only on its visit (service-record link), or only the customer default.
+    await invoice('vis_proc_payer', VISIT, { total: 61, status: 'processing', payment_method: 'us_bank_account', service_record_id: idOf(payerRecord) });
+    CP = await customer(`Default${run}`, `Payer${run}`, { payer_id: visitPayer.id || visitPayer });
+    await invoice('cp_proc_payer', CP, { total: 62, status: 'processing', payment_method: 'us_bank_account' });
     const [selfVisit] = await db('scheduled_services').insert({ customer_id: VISIT, scheduled_date: day(-1), service_type: 'Pest Control', status: 'completed' }).returning('id');
     const [selfRecord] = await db('service_records').insert({ customer_id: VISIT, service_date: day(-1), service_type: 'Pest Control', scheduled_service_id: idOf(selfVisit) }).returning('id');
     await invoice('vis_self_record', VISIT, { total: 70, service_record_id: idOf(selfRecord) });
@@ -195,10 +203,10 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     U2 = await customer(`Ach${run}`, `Alias${run}`);
     await db('payment_methods').insert({ customer_id: U2, method_type: 'ach', stripe_payment_method_id: `pm_ach_${run}` });
     const achAttempt = await invoice('u2_ach_attempt', U2, { total: 31, payment_method: 'us_bank_account', stripe_payment_intent_id: `pi_u2a_${run}` });
-    await db('stripe_invoice_charge_attempts').insert({ invoice_id: achAttempt.id, stripe_payment_method_id: `pm_ach_${run}`, idempotency_key: `k-u2a-${run}`, status: 'ambiguous', amount: 31, stripe_payment_intent_id: `pi_u2a_${run}`, submitted_at: new Date() });
+    await db('stripe_invoice_charge_attempts').insert({ invoice_id: achAttempt.id, stripe_payment_method_id: `pm_ach_${run}`, idempotency_key: `k-u2a-${run}`, status: 'ambiguous', amount: 31, stripe_payment_intent_id: `pi_u2a_${run}`, submitted_at: REFERENCE });
     await db('payments').insert({ customer_id: U2, payment_date: day(0), amount: 31, status: 'processing', processor: 'stripe', stripe_payment_intent_id: `pi_u2a_${run}`, description: 'In flight', metadata: json({ invoice_id: achAttempt.id }) });
     const achRow = await invoice('u2_ach_row', U2, { total: 32, stripe_payment_intent_id: `pi_u2r_${run}` });
-    await db('stripe_invoice_charge_attempts').insert({ invoice_id: achRow.id, stripe_payment_method_id: 'pm_unknown_synth', idempotency_key: `k-u2r-${run}`, status: 'ambiguous', amount: 32, stripe_payment_intent_id: `pi_u2r_${run}`, submitted_at: new Date() });
+    await db('stripe_invoice_charge_attempts').insert({ invoice_id: achRow.id, stripe_payment_method_id: 'pm_unknown_synth', idempotency_key: `k-u2r-${run}`, status: 'ambiguous', amount: 32, stripe_payment_intent_id: `pi_u2r_${run}`, submitted_at: REFERENCE });
     await db('payments').insert({ customer_id: U2, payment_date: day(0), amount: 32, status: 'processing', processor: 'stripe', payment_method_type: 'ach', stripe_payment_intent_id: `pi_u2r_${run}`, description: 'In flight', metadata: json({ invoice_id: achRow.id }) });
     // ACH evidence accounts for the attempt only: an unresolved orphan charge, or a failed row flagged ambiguous, still holds.
     W2 = await customer(`Mixed${run}`, `Holds${run}`);
@@ -206,7 +214,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
       const row = await invoice(key, W2, { total: 40, stripe_payment_intent_id: `pi_${key}_${run}` });
       await db('payments').insert({ customer_id: W2, payment_date: day(0), amount: 40, status: 'processing', processor: 'stripe', stripe_payment_intent_id: `pi_${key}_${run}`, description: 'ACH in flight', metadata: json({ invoice_id: row.id }) });
       if (key !== 'w2_dbfail') {
-        await db('stripe_invoice_charge_attempts').insert({ invoice_id: row.id, stripe_payment_method_id: 'pm_synth', idempotency_key: `k-${key}-${run}`, status: 'ambiguous', amount: 40, stripe_payment_intent_id: `pi_${key}_${run}`, submitted_at: new Date() });
+        await db('stripe_invoice_charge_attempts').insert({ invoice_id: row.id, stripe_payment_method_id: 'pm_synth', idempotency_key: `k-${key}-${run}`, status: 'ambiguous', amount: 40, stripe_payment_intent_id: `pi_${key}_${run}`, submitted_at: REFERENCE });
       }
     }
     await db('stripe_orphan_charges').insert([
@@ -243,7 +251,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     await invoice('z_plain', Z, { total: 15 });
     // Recorded payments listed beside a collectible invoice: payer-funded, dispute alias, waves alias, more than the read bound.
     G = await customer(`Listed${run}`, `Payments${run}`);
-    const gPayer = await invoice('g_payer', G, { total: 300, status: 'paid', paid_at: new Date() });
+    const gPayer = await invoice('g_payer', G, { total: 300, status: 'paid', paid_at: REFERENCE });
     await db('payments').insert({ customer_id: G, payer_id: payerId, payment_date: day(-1), amount: 300, status: 'paid', description: 'Synthetic payer settlement', metadata: json({ invoice_id: gPayer.id }) });
     const gAlias = await invoice('g_alias', G, { total: 150, status: 'overdue' });
     await db('payments').insert([
@@ -252,7 +260,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     ]);
     // The tender: live payment_methods join, then the payment's own snapshot, then metadata.payment_method, then the processor.
     const [liveMethod] = await db('payment_methods').insert({ customer_id: G, method_type: 'us_bank_account', card_brand: null, stripe_payment_method_id: `pm_live_${run}` }).returning('id');
-    const gMethod = await invoice('g_method', G, { total: 10, status: 'paid', paid_at: new Date() });
+    const gMethod = await invoice('g_method', G, { total: 10, status: 'paid', paid_at: REFERENCE });
     await db('payments').insert([
       { customer_id: G, payment_date: day(-6), amount: 1, status: 'paid', processor: 'stripe', payment_method_id: liveMethod.id || liveMethod, payment_method_type: 'card', description: 'live join', metadata: json({ invoice_id: gMethod.id, payment_method: 'check' }) },
       { customer_id: G, payment_date: day(-6), amount: 2, status: 'paid', processor: 'stripe', payment_method_type: 'ach_snapshot', description: 'snapshot', metadata: json({ invoice_id: gMethod.id, payment_method: 'check' }) },
@@ -260,7 +268,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
       { customer_id: G, payment_date: day(-6), amount: 4, status: 'paid', processor: 'stripe', description: 'processor only', metadata: json({ invoice_id: gMethod.id }) },
     ]);
     // Legacy / card-on-file rows carry no invoice metadata: linked by the invoice's PaymentIntent or charge id. A combined sibling's row (explicit other invoice_id, same PaymentIntent) is not this invoice's.
-    await invoice('g_legacy', G, { total: 70, status: 'paid', paid_at: new Date(), stripe_payment_intent_id: `pi_legacy_${run}`, stripe_charge_id: `ch_legacy_${run}` });
+    await invoice('g_legacy', G, { total: 70, status: 'paid', paid_at: REFERENCE, stripe_payment_intent_id: `pi_legacy_${run}`, stripe_charge_id: `ch_legacy_${run}` });
     await db('payments').insert([
       { customer_id: G, payment_date: day(-3), amount: 70, status: 'refunded', refund_amount: 20, refund_status: 'succeeded', processor: 'stripe', stripe_payment_intent_id: `pi_legacy_${run}`, description: 'Card on file', metadata: json({}) },
       { customer_id: G, payment_date: day(-3), amount: 5, status: 'paid', processor: 'stripe', stripe_charge_id: `ch_legacy_${run}`, description: 'Charge-linked', metadata: json({}) },
@@ -268,9 +276,9 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     ]);
     // A payer statement settles ONE payments row (customer_id NULL, statement_id) for every invoice on it.
     const [statement] = await db('payer_statements').insert({ payer_id: payerId, period_start: day(-30), period_end: day(-1), status: 'paid', terms_snapshot: 'net_30',
-      subtotal: 900, total: 900, invoice_count: 3, token: crypto.randomBytes(16).toString('hex'), paid_at: new Date() }).returning('id');
+      subtotal: 900, total: 900, invoice_count: 3, token: crypto.randomBytes(16).toString('hex'), paid_at: REFERENCE }).returning('id');
     inv.statementId = statement.id || statement;
-    await invoice('g_stmt', G, { total: 300, status: 'paid', paid_at: new Date(), payer_statement_id: inv.statementId });
+    await invoice('g_stmt', G, { total: 300, status: 'paid', paid_at: REFERENCE, payer_statement_id: inv.statementId });
     await db('payments').insert({ customer_id: null, payer_id: payerId, statement_id: inv.statementId, payment_date: day(-1), amount: 900, status: 'paid', processor: 'stripe', refund_amount: 250, refund_status: 'partial',
       description: `Payer statement S-${inv.statementId} settlement (ach)`, metadata: json({ statement_id: inv.statementId, payer_id: payerId, source: 'synthetic' }) });
     const gBulk = await invoice('g_bulk', G, { total: 90 });
@@ -739,6 +747,19 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     expect((await read('get_invoice_detail', { invoice_id: inv.vis_payer.id })).invoice).toMatchObject({ payer_billed: true, collectible: false });
   });
 
+  test('a processing invoice owned by a payer (visit or customer default) is payer-billed, never a customer bank or card payment', async () => {
+    const byVisit = by(await read('get_customer_invoices', { customer_id: VISIT, limit: 50 }), 'vis_proc_payer');
+    const byCustomer = by(await read('get_customer_invoices', { customer_id: CP }), 'cp_proc_payer');
+    for (const item of [byVisit, byCustomer]) {
+      expect(item).toMatchObject({ collectible: false, balance_due: null, payer_billed: true, bank_payment_processing: false, needs_reconciliation: false });
+      expect(item.reason).toMatch(/billed to a third-party payer/);
+      expect(item.reason).not.toMatch(/bank|card/i);
+    }
+    expect((await read('get_invoice_detail', { invoice_id: inv.cp_proc_payer.id })).invoice).toMatchObject({ payer_billed: true });
+    // A processing bank invoice with no payer anywhere is still a bank payment in flight.
+    expect(by(await read('get_customer_invoices', { customer_id: Y, limit: 50 }), 'y_ach')).toMatchObject({ bank_payment_processing: true, payer_billed: false });
+  });
+
   test('emails with internationalized local parts or address-literal domains are masked; ordinary @ mentions are not', async () => {
     const Q = await customer(`Intl${run}`, `Mail${run}`);
     const masked = ['用户@example.com', 'user@[192.0.2.1]', 'üser.name+tag@sub.例え.jp', 'x@[IPv6:2001:db8::1]'];
@@ -757,7 +778,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const original = comms.resolveCustomer;
     const spy = jest.spyOn(comms, 'resolveCustomer').mockImplementation(async (...args) => {
       const found = await original(...args);
-      await db('customers').where({ id: Q }).update({ deleted_at: new Date() });
+      await db('customers').where({ id: Q }).update({ deleted_at: REFERENCE });
       return found;
     });
     try {
