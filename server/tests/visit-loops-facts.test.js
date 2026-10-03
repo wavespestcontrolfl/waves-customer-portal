@@ -687,7 +687,8 @@ describe('missedVisit (logged customer no-shows)', () => {
 
   test('a TERMINAL logged row (dispatch no-show, skipped, cancelled, gone): an office-booked replacement clears it (owner 10-02, Codex #5610 r4)', async () => {
     const repl = (over = {}) => ({ service_id: null, service_type: 'Pest Control', status: 'confirmed', source_action: null, customer_confirmed: null, ...over });
-    for (const terminal of [{ status: 'no_show' }, { status: 'skipped' }, { status: 'cancelled' }, { status: 'rescheduled' }, { status: 'some_future_parking_status' }, { ss_status_present: false, status: null }]) {
+    for (const terminal of [{ status: 'no_show' }, { status: 'skipped' }, { status: 'cancelled' }, { status: 'rescheduled' }, { status: 'some_future_parking_status' }, { ss_status_present: false, status: null },
+      { status: 'confirmed', new_date: '2026-10-03', track_state: 'cancelled' }]) {
       expect((await run([noshow(terminal)], [repl()])).out.missedVisit).toBeNull();
       // no replacement: still open
       expect((await run([noshow(terminal)], [])).out.missedVisit).toMatchObject({ logId: 'rl-1' });

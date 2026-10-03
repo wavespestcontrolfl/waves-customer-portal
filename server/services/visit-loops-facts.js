@@ -477,7 +477,8 @@ async function noshowFollowedUp(conn, customerId, noshow) {
     };
   };
   const rowPresent = Boolean(noshow.scheduled_service_id && noshow.ss_status_present);
-  if (rowPresent && LIVE_OR_DONE.includes(noshow.status)) {
+  // live = a live/done status AND a tracker that is not cancelled (track_state leads a lagging status)
+  if (rowPresent && LIVE_OR_DONE.includes(noshow.status) && noshow.track_state !== 'cancelled') {
     if (isUnreviewedDispatchOwned({ source_action: noshow.ss_source_action, customer_confirmed: noshow.ss_customer_confirmed, status: noshow.status })
       && noshow.track_state !== 'complete' && noshow.recorded !== true) return false;
     const missedStart = hhmmToMinutes(missedWindowStart(noshow.original_window));
