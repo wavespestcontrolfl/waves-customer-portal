@@ -966,6 +966,11 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
   const undeliveredEarly = [];
   await dbh.transaction(async (trx) => {
     await lockCustomerComms(trx, entry.customerId);
+    // Twilio's verdict on this letter's text (its callback may already be in sms_log or
+    // kept by sid): read ONCE for the whole letter, consumed only after every line.
+    const smsSidVerdict = sms.sent && sms.sid
+      ? await require('./rate-review-apply')._private.smsDeliveryFailure(trx, { email_sent: false, sms_sent: true, metadata: { sms_sid: String(sms.sid) } })
+      : null;
     for (const l of entry.lines) {
       // Read under the fence: a bounce or failed text that arrived while the legs
       // were still running was recorded on this 'sending' row (early_failures);
@@ -978,11 +983,9 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
       const early = { ...earlyRecorded };
       // Twilio's verdict may already be in sms_log (its callback beat this stamp):
       // that is an early failure of the text too.
-      if (sms.sent && sms.sid && !early.sms) {
-        const verdict = await require('./rate-review-apply')._private.smsDeliveryFailure(trx, { email_sent: false, sms_sent: true, metadata: { sms_sid: String(sms.sid) } });
-        if (verdict) early.sms = { event: verdict, channel: 'sms', at: sentAt.toISOString(), reason: 'status callback before the stamp' };
-        await trx('rate_review_sms_failures').where({ twilio_sid: String(sms.sid) }).del(); // consumed
-      }
+      // One text serves every line of the letter: the shared verdict (read once, below)
+      // applies to each of them.
+      if (smsSidVerdict && !early.sms) early.sms = { event: smsSidVerdict, channel: 'sms', at: sentAt.toISOString(), reason: 'status callback before the stamp' };
       const emailOk = !!email.sent && !early.email;
       const smsOk = !!sms.sent && !early.sms;
       const base = { ...meta, ...(priorRevoked ? { delivery_revocations: [...(meta.delivery_revocations || []), priorRevoked] } : {}), ...dispatchMeta };
@@ -1013,6 +1016,7 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
         ...(snap ? { flags: JSON.stringify(flagList(snap.flags).filter((f) => f !== DELIVERY_BOUNCED_FLAG)) } : {}),
       });
     }
+    if (smsSidVerdict) await trx('rate_review_sms_failures').where({ twilio_sid: String(sms.sid) }).del(); // consumed by every line
     // Delivered, but the notice moved to another customer after the provider
     // took it (a merge undo): never reported sent and never left 'sending' —
     // held as send_uncertain with the words and the fact recorded, for the owner.

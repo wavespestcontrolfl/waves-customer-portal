@@ -1184,6 +1184,23 @@ describe('customer surfaces', () => {
       expect(mockDb.store.rate_review_sms_failures).toEqual([]); // consumed at the stamp
     });
 
+    test('an early text failure applies to EVERY line of a multi-line letter, and the sid row goes only after the last one', async () => {
+      const second = draft(2, { customer_id: CUSTOMER(1), rate_review_row_id: ROW(2), family_key: 'lawn_care', effective_date: '2026-12-20', noticed_current_cents: 6100, noticed_new_cents: 6400, current_amount_cents: 6100, new_amount_cents: 6400 });
+      const b = book({ customers: [customer(1, { email: null })], notices: [draft(1), second] });
+      b.rate_review_snapshots[0].customer_id = CUSTOMER(1);
+      mockDb.reset(b);
+      emailLeg.mockResolvedValue({ sent: false, attempted: false });
+      smsLeg.mockImplementation(async () => {
+        await comms.handleSmsDeliveryFailure({ sid: 'SM1', status: 'undelivered' }, { dbh: mockDb });
+        return { sent: true, attempted: true, sid: 'SM1' };
+      });
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      expect(notices().map((n) => n.status)).toEqual(['draft', 'draft']);
+      expect(notices().map((n) => n.sms_sent)).toEqual([false, false]);
+      expect(snapshots().map((r) => r.status)).toEqual(['approved', 'approved']);
+      expect(mockDb.store.rate_review_sms_failures).toEqual([]);
+    });
+
     test('a failure reconciled onto a delivered notice removes its sid row', async () => {
       mockDb.reset(book({ notices: [draft(1, { status: 'sent', sent_at: NOW, email_sent: false, sms_sent: true, metadata: { source: 'rate_review', batch_key: BATCH_KEY, series_root_id: fixture.VISIT(100), sms_sid: 'SM1' } })] }));
       mockDb.store.sms_log = [{ twilio_sid: 'SM1', customer_id: CUSTOMER(1), status: 'sent' }];
