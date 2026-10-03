@@ -14,7 +14,10 @@
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
-jest.mock('../services/lead-from-extraction', () => ({ createLeadFromExtraction: jest.fn() }));
+jest.mock('../services/lead-from-extraction', () => ({
+  createLeadFromExtraction: jest.fn(),
+  isLeadStage: jest.requireActual('../services/lead-from-extraction').isLeadStage,
+}));
 jest.mock('../services/conversations', () => ({ syncVoiceMessageForCall: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
 // The canonical identity column set + prior-call summary come FROM the call
@@ -525,6 +528,15 @@ describe('GATE ON — caller recognition', () => {
       expect(relayContext.isFullAttestation('No-TN-Validation')).toBe(false);
       expect(relayContext.isFullAttestation(null)).toBe(false);
     });
+  });
+
+  test('a caller still in the lead pipeline is known but not "already a customer": the block keeps the ordinary intake', () => {
+    const block = (stage) => relayContext.buildKnownCallerBlock({ customer: { id: 'c-1', first_name: 'Pat', pipeline_stage: stage }, services: [], tier: 'full' });
+    expect(block('active_customer')).toMatch(/They are already a customer[\s\S]*Do NOT ask for any of those/);
+    for (const stage of ['new_lead', 'estimate_sent']) {
+      expect(block(stage)).toContain('KNOWN CALLER');
+      expect(block(stage)).not.toMatch(/already a customer|Do NOT ask/);
+    }
   });
 
   test('matched caller → KNOWN CALLER block with name, since-year, services, appt, visit, balance, prior call', async () => {

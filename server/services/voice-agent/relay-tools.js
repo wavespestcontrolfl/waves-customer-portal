@@ -467,7 +467,8 @@ function formatSlots(slots, max = 4, rememberSlot = null, offerContext = null) {
  * when the caller states no location, so "do not ask a known customer for
  * their address" is something the tools make true rather than a prompt line
  * the next lookup contradicts. A recognised-only (secondary slot) or
- * looked-up caller gets nothing, and so does a soft-deleted account.
+ * looked-up caller gets nothing, and so does a soft-deleted account or one
+ * whose property is ambiguous (several on file, or one that cannot be resolved).
  * Fail-soft: a failed read is "not on file". A written estimate does NOT use
  * it: where to send one is confirmed on the call (capture_lead).
  */
@@ -477,7 +478,20 @@ async function accountContactFor(ctx = {}) {
     const db = require('../../models/db');
     const row = await db('customers').where({ id: ctx.customerId }).whereNull('deleted_at')
       .first('address_line1', 'city', 'zip');
-    return row || null;
+    if (!row) return null;
+    // ONE property, or the caller is asked which (request_booking's own guard,
+    // relay-booking): an account with several properties, or one property the
+    // linkage cannot resolve, is refused at booking, so offering times scored
+    // for the mirror address would offer times that cannot be requested.
+    const propertyCount = await db('customer_properties').where({ customer_id: ctx.customerId, active: true })
+      .count('* as count').first().then((r) => parseInt((r && r.count) || 0, 10));
+    if (propertyCount > 1) return null;
+    if (propertyCount === 1) {
+      const { resolveCallBookingPropertyLinkage } = require('../call-recording-processor');
+      const linkage = await resolveCallBookingPropertyLinkage(ctx.customerId, {}, db);
+      if (!(linkage && linkage.propertyId)) return null;
+    }
+    return row;
   } catch (err) {
     logger.warn(`[voice-relay] account contact read failed callSid=${ctx.callSid || 'n/a'}: ${err.message}`);
     return null;
