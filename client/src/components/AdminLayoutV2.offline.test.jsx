@@ -273,6 +273,27 @@ describe("AdminLayoutV2 field workspace offline fallback", () => {
     expect(screen.queryByText("Saved route content")).not.toBeInTheDocument();
   });
 
+  it("a two-step session that must change its password keeps its token for the signed-in change page", async () => {
+    const ADMIN = { id: "admin-1", name: "Owner", role: "admin", email: "owner@example.test", mustChangePassword: true, twoStep: { enabled: true, enrollmentRequired: false } };
+    localStorage.setItem("waves_admin_token", LIVE_TOKEN);
+    vi.stubGlobal("fetch", vi.fn(async () => response(200, ADMIN)));
+    render(
+      <TechNavigationLock>
+        <MemoryRouter initialEntries={["/admin/dashboard"]}>
+          <Routes>
+            <Route element={<AdminLayoutV2 />}>
+              <Route path="/admin/dashboard" element={<div>Admin dashboard content</div>} />
+            </Route>
+            <Route path="/admin/change-password" element={<div>Change password page</div>} />
+            <Route path="/admin/forgot-password" element={<div>Forgot password page</div>} />
+          </Routes>
+        </MemoryRouter>
+      </TechNavigationLock>,
+    );
+    expect(await screen.findByText("Change password page")).toBeInTheDocument();
+    expect(localStorage.getItem("waves_admin_token")).toBe(LIVE_TOKEN);
+  });
+
   it("enforcement switched on under an open admin page sends the session to two-step setup", async () => {
     const ADMIN = { id: "admin-1", name: "Owner", role: "admin" };
     localStorage.setItem("waves_admin_token", LIVE_TOKEN);

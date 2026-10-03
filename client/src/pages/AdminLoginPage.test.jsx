@@ -121,4 +121,24 @@ describe('AdminLoginPage two-step sign-in', () => {
     expect(await screen.findByText('Two-step setup')).toBeInTheDocument();
     expect(store.get('waves_admin_token')).toBe('jwt');
   });
+  it('a forced password change after a two-step sign-in keeps the session for the signed-in change page', async () => {
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(reply(200, { mfaRequired: true, challengeToken: 'challenge-1' }))
+      .mockResolvedValueOnce(reply(200, { token: 'jwt-mfa', user: { id: 'a', role: 'admin', mustChangePassword: true, email: 'owner@example.test' } })));
+    render(
+      <MemoryRouter initialEntries={['/admin/login']}>
+        <Routes>
+          <Route path="/admin/login" element={<AdminLoginPage />} />
+          <Route path="/admin/change-password" element={<div>Change password page</div>} />
+          <Route path="/admin/forgot-password" element={<div>Forgot password page</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await submitPassword();
+    fireEvent.click(await screen.findByRole('button', { name: 'Use a recovery code instead' }));
+    fireEvent.change(screen.getByLabelText('Recovery code'), { target: { value: 'AAAA-BBBB-CCCC-DDDD' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Verify' }));
+    expect(await screen.findByText('Change password page')).toBeInTheDocument();
+    expect(store.get('waves_admin_token')).toBe('jwt-mfa');
+  });
 });

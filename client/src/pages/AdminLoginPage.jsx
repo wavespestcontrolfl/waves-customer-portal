@@ -94,7 +94,7 @@ export default function AdminLoginPage() {
         throw new Error('Your sign-in expired. Enter your email and password again.');
       }
       if (!res.ok) throw new Error(data.error || 'That code did not work');
-      await completeSignIn(data);
+      await completeSignIn(data, { viaTwoStep: true });
     } catch (e) {
       setError(e.message);
     } finally {
@@ -108,8 +108,12 @@ export default function AdminLoginPage() {
     setError('');
   };
 
-  const completeSignIn = async (data) => {
-    if (data.user?.mustChangePassword) {
+  const completeSignIn = async (data, { viaTwoStep = false } = {}) => {
+    // A two-step sign-in (possibly with the last recovery code) keeps its
+    // session for the signed-in change-password page, which carries the
+    // recovery window over; the email reset would revoke it.
+    const keepForChange = viaTwoStep && Boolean(data.token);
+    if (data.user?.mustChangePassword && !keepForChange) {
       localStorage.removeItem('waves_admin_token');
       localStorage.removeItem('waves_admin_user');
       clearStaffDeviceData();
@@ -127,12 +131,17 @@ export default function AdminLoginPage() {
     }
     localStorage.setItem('waves_admin_token', data.token);
     localStorage.setItem('waves_admin_user', JSON.stringify(data.user));
-    if (data.user?.twoStep?.enrollmentRequired) {
-      // GATE_ADMIN_MFA_ENFORCE: an admin with no authenticator sets one up
-      // before anything else opens.
+    // A forced password change (kept two-step session) or, under
+    // GATE_ADMIN_MFA_ENFORCE, an admin with no authenticator: that page first.
+    const user = data.user || {};
+    const holdingPage = [
+      [user.mustChangePassword, '/admin/change-password'],
+      [user.twoStep && user.twoStep.enrollmentRequired, '/admin/two-step'],
+    ].find(([applies]) => applies)?.[1];
+    if (holdingPage) {
       clearStaffDeviceData();
       try { await refetchFlags(); } catch { /* flags fail closed */ }
-      navigate('/admin/two-step', { replace: true });
+      navigate(holdingPage, { replace: true });
       return;
     }
     // Flag cache is keyed by user_id on the server and session-cached in

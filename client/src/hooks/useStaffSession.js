@@ -90,7 +90,11 @@ export default function useStaffSession() {
           // The token stays for that flow, but the offline pass and route
           // snapshot go: a reopen with no signal before the rotation must not
           // unlock Today from a pass that predates it (Codex #5573 r22).
-          if (isFieldPath(locationRef.current.pathname)) {
+          // A two-step session (GATE_ADMIN_MFA; /me only answers an enrolled
+          // account's session that passed the code) also keeps its token for
+          // the signed-in change page: the email reset would revoke it and,
+          // after the last recovery code, leave no way back in.
+          if (isFieldPath(locationRef.current.pathname) || profile.twoStep?.enabled) {
             clearStaffDeviceData();
             navigate("/admin/change-password", { replace: true });
           } else endSession("/admin/forgot-password", { email: profile.email, resetRequired: true });
