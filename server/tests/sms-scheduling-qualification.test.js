@@ -188,6 +188,12 @@ test('one missed repeated accept misses that offer, and any wrong would-move fai
   expect(missedResult.status).toBe('not_qualified');
   expect(missedResult.epochs[0].trueAccepts).toMatchObject({ decisions: 2, caughtDecisions: 1, distinctOffers: 1, caughtDistinctOffers: 0, offerRecall: 0 });
 
+  const staffedMove = cohort(new Map([[0, { action: 'accept_slot', outcome: 'staff' }]]));
+  const staffedMoveResult = summarizeQualification(staffedMove.rows, { ...source, adjudications: staffedMove.adjudications }, staffedMove.bodies);
+  expect(staffedMoveResult.status).toBe('not_qualified');
+  expect(staffedMoveResult.epochs[0].trueAccepts)
+    .toMatchObject({ decisions: 2, caughtDecisions: 1, distinctOffers: 1, caughtDistinctOffers: 0, offerRecall: 0 });
+
   const wrong = cohort(new Map([[5, { action: 'accept_slot', outcome: 'would_move' }]]));
   const wrongResult = summarizeQualification(wrong.rows, { ...source, adjudications: wrong.adjudications }, wrong.bodies);
   expect(wrongResult.status).toBe('not_qualified');
@@ -199,7 +205,7 @@ test('one missed repeated accept misses that offer, and any wrong would-move fai
 
   const staleVisit = cohort(new Map([[0, { expectedOutcome: 'no_action' }]]));
   expect(summarizeQualification(staleVisit.rows, { ...source, adjudications: staleVisit.adjudications }, staleVisit.bodies)
-    .epochs[0]).toMatchObject({ wrongProposedMoves: 1, trueAccepts: { caughtDecisions: 2 } });
+    .epochs[0]).toMatchObject({ wrongProposedMoves: 1, trueAccepts: { caughtDecisions: 1, offerRecall: 0 } });
 
   // The first 40 decisions retain 40 distinct, correctly scored move offers.
   // A wrong would-move in a booking-family decision still blocks that lane.
@@ -210,6 +216,20 @@ test('one missed repeated accept misses that offer, and any wrong would-move fai
     distinctOffersScored: 40, proposedMoves: 2, wrongProposedMoves: 1,
     notEvaluated: { decisions: 1, distinctOffers: 1, byKind: { book_new: 1 } },
   });
+});
+
+test('unresolved move offers do not enter the distinct scored-offer denominator', () => {
+  const c = cohort();
+  for (let i = 1; i < 40; i += 1) {
+    if (i === 1) c.rows[i].decision_evidence.offers[0].scheduledServiceId = null;
+    else c.rows[i].decision_evidence.offers[0].slots = [];
+    c.rows[i].evidence_fingerprint = fingerprintEvidence(c.rows[i].decision_evidence);
+    c.adjudications[i].evidenceFingerprint = c.rows[i].evidence_fingerprint;
+  }
+  const result = summarizeQualification(c.rows, { ...source, adjudications: c.adjudications }, c.bodies);
+  expect(result.status).toBe('inconclusive');
+  expect(result.epochs[0]).toMatchObject({ distinctOffersReviewed: 40, distinctOffersScored: 1 });
+  expect(result.epochs[0].reasons).toContain('fewer_than_40_distinct_scored_offers');
 });
 
 test('partial review, changed source rows, and mixed epochs stay inconclusive', () => {

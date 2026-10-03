@@ -247,18 +247,31 @@ function adjudicatedRow(row, sourceValid, labels, conflicts, smsBodiesById) {
   return expected ? { found, expected } : { counter: 'invalidOrConflictingReviews' };
 }
 
-function acceptIsCorrect(row, expected) {
+function acceptTargetsExpectedSlot(row, expected) {
   if (expected.action !== 'accept_slot' || row.action !== 'accept_slot') return false;
   return String(row.sms_offer_id) === String(expected.offer.id) && row.slot_number === expected.slotNumber;
 }
 
-function moveIsCorrect(found, expected, correctAccept) {
-  if (!correctAccept || expected.outcome !== 'move') return false;
+function proposedMoveMatches(found, expected) {
+  if (expected.outcome !== 'move') return false;
   const proposed = found.evidence.decision.wouldHave;
   if (proposed?.kind !== 'move_visit') return false;
   return String(proposed.scheduled_service_id || '') === expected.move.scheduledServiceId
     && proposed.date === expected.move.date && proposed.start === expected.move.start
     && proposed.arrival_end === expected.move.arrivalEnd;
+}
+
+function acceptIsCorrect(row, expected, found) {
+  if (!acceptTargetsExpectedSlot(row, expected)) return false;
+  const requiredOutcome = expected.outcome === 'move' ? 'would_move'
+    : (expected.outcome === 'book' ? 'would_book' : expected.outcome);
+  return row.outcome === requiredOutcome && (expected.outcome !== 'move' || proposedMoveMatches(found, expected));
+}
+
+function actionableMoveOffer(offer) {
+  return isNonblankString(String(offer?.scheduledServiceId || ''))
+    && Array.isArray(offer.slots)
+    && offer.slots.some((slot) => ['date', 'start', 'end'].every((field) => isNonblankString(slot?.[field])));
 }
 
 function reviewedActionFamily(row, review) {
@@ -268,7 +281,7 @@ function reviewedActionFamily(row, review) {
   if (!['move_visit', 'book_estimate', 'book_new'].includes(kind)) return null;
   const offer = review.expected.action === 'accept_slot'
     ? review.expected.offer : review.found.offers.find((candidate) => String(candidate.id) === String(row.sms_offer_id));
-  return offer?.kind === kind ? { kind, offerId: String(offer.id) } : null;
+  return offer?.kind === kind ? { kind, offerId: String(offer.id), offer } : null;
 }
 
 function excludeUnevaluatedFamily(epoch, epochState, family) {
@@ -281,10 +294,10 @@ function excludeUnevaluatedFamily(epoch, epochState, family) {
 function scoreReviewedRow(epoch, epochState, row, review) {
   const { found, expected } = review;
   epoch.reviewed += 1;
-  const correctAccept = acceptIsCorrect(row, expected);
+  const correctAccept = acceptIsCorrect(row, expected, found);
   if (row.outcome === 'would_move') {
     epoch.proposedMoves += 1;
-    if (!moveIsCorrect(found, expected, correctAccept)) epoch.wrongProposedMoves += 1;
+    if (!correctAccept) epoch.wrongProposedMoves += 1;
   }
   const family = reviewedActionFamily(row, review);
   if (!family) { epoch.unknownOrMixedOfferKind += 1; return; }
@@ -292,6 +305,7 @@ function scoreReviewedRow(epoch, epochState, row, review) {
   epochState.reviewedOffers.add(family.offerId);
   if (expected.action === 'unsupported') { epoch.unsupported += 1; return; }
   if (expected.action === 'unclear') { epoch.unclear += 1; return; }
+  if (!actionableMoveOffer(family.offer)) return;
   epochState.scoredOffers.add(family.offerId);
   if (expected.action !== 'accept_slot') return;
   epoch.trueAccepts.decisions += 1;
