@@ -1598,7 +1598,9 @@ router.post('/sms', async (req, res) => {
     // SMS SCHEDULING DECIDE, SHADOW (GATE_SMS_SCHEDULING_DECIDE, dark): when
     // this phone holds an open offer of picker times (sms_offers), record what
     // the decide step concludes about this reply and what it WOULD have done.
-    // Moves, books and sends nothing. Runs after the reminder reply-1/2 handler
+    // Moves, books and sends nothing unless GATE_SMS_SCHEDULING_ACT_MOVE (dark)
+    // is on, when a would-move is carried out by sms-scheduling-act.js.
+    // Runs after the reminder reply-1/2 handler
     // and the lead-intake veto (both return above when they consume the text),
     // and regardless of the scheduling regex: "Tuesday works" may not match it.
     // `customer` may be null: a reply from another number on the customer's

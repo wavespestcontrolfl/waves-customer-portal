@@ -55,6 +55,9 @@ function printReport(since, until, f) {
       `    would-move then moved there <48h ${f.decisions.would_move_matched} of ${f.decisions.would_move_matured} matured (precision; logged moves only)`,
       `    real accepts it caught           ${f.decisions.recall.caught} of ${f.decisions.recall.real_accepts} (recall: offers whose visit moved into an offered time <48h)`,
     );
+    // The move executor's results (GATE_SMS_SCHEDULING_ACT_MOVE); a moved
+    // decision is left out of the precision line above.
+    if (Object.keys(f.decisions.executed || {}).length) lines.push(`    executor took                    ${fmt(f.decisions.executed)}`);
   }
   console.log(lines.join('\n'));
 }

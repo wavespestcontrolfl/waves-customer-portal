@@ -1221,6 +1221,13 @@ const gates = {
   // have done. Nothing moves, books or sends. Read at call time by
   // sms-scheduling-decide.js decideLive() — this entry is for logGateStatus only.
   smsSchedulingDecide: gateEnvValue('GATE_SMS_SCHEDULING_DECIDE'),
+  // SMS scheduling executor, MOVE (slice 3 of sms-booking-complete-scope
+  // 2026-10-02): a would-move the decide step recorded is carried out. The
+  // visit moves through the reschedule link's own checks and mover, and the
+  // customer gets the standard rescheduled text. Needs the decide gate on.
+  // Customer-visible when on. Read at call time by sms-scheduling-act.js
+  // actMoveLive() — this entry is for logGateStatus only.
+  smsSchedulingActMove: gateEnvValue('GATE_SMS_SCHEDULING_ACT_MOVE'),
 
   // Voice-Corpus Miner (brand-voice loop, Phase A) — nightly mining of
   // human-authored SMS replies + consent-gated call transcripts into

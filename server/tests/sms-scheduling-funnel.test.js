@@ -147,7 +147,19 @@ test('a would-move is scored only after its 48h, and only against a logged move 
     would_move_matured: 3,
     would_move_matched: 1,
     would_move_unmatched: 2,
+    executed: {},
   });
+});
+
+test('a would-move the executor carried out is counted as executed and left out of the staff comparison; a refused one is still scored', () => {
+  const { summarizeDecisions, AUTOMATIC_MOVE_INITIATORS } = require('../services/sms-scheduling-funnel');
+  const would = (id) => JSON.stringify({ kind: 'move_visit', scheduled_service_id: id, date: '2026-10-06', start: '10:00', arrival_end: '12:00' });
+  const row = (id, execution_status) => ({ action: 'accept_slot', outcome: 'would_move', refusals: '[]', would_have: would(id), created_at: '2026-10-01T15:00:00Z', execution_status });
+  const out = summarizeDecisions([row('v1', 'moved'), row('v2', 'refused'), row('v3', null)], new Map(), new Date('2026-10-05T00:00:00Z'));
+  expect(out.executed).toEqual({ moved: 1, refused: 1 });
+  expect(out).toMatchObject({ would_move_matured: 2, would_move_matched: 0, would_move_unmatched: 2 });
+  // The executor's own logged move never counts as a person's.
+  expect(AUTOMATIC_MOVE_INITIATORS).toContain(require('../services/sms-scheduling-act').INITIATED_BY);
 });
 
 test('recall counts real accepts (offers whose visit then moved into an offered time) and how many got that would-move', () => {

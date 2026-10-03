@@ -19,9 +19,10 @@
  *     answered.
  *
  * The model reads; the code decides. Nothing here moves a visit, books, or
- * sends a text — in this slice every row is shadow, so the decide step can be
- * scored against what staff actually did (scripts/sms-scheduling-funnel.js)
- * before any action is switched on. Never throws.
+ * sends a text: every row records what WOULD be done, so the decide step can
+ * be scored against what staff actually did (scripts/sms-scheduling-funnel.js).
+ * A would-move is handed to the move executor (sms-scheduling-act.js) only
+ * when GATE_SMS_SCHEDULING_ACT_MOVE is on. Never throws.
  *
  * PII: never logs message bodies or phone numbers.
  */
@@ -363,7 +364,7 @@ async function loadDecideContext(dbh, phone, inboundSmsLogId) {
       visitsBefore.set(o.scheduled_service_id, await dbh('scheduled_services').where({ id: o.scheduled_service_id }).first(VISIT_COLUMNS));
     }
   }
-  return { offers, thread, visitsBefore };
+  return { offers, thread, visitsBefore, repliedAt: inbound.created_at };
 }
 
 // Phase 2: the model's reading of the reply, against every standing offer.
@@ -449,7 +450,17 @@ async function runShadowDecision({ customer = null, inboundBody, inboundSmsLogId
         portalRequestOpen: fresh.portalRequestOpen, reminderOfferPending: fresh.reminderOfferPending,
       });
     }
-    return await recordDecision(dbh, { offer, inboundSmsLogId, who: facts.who, result, route, decision, verdict, visit: facts.visit });
+    const recorded = await recordDecision(dbh, { offer, inboundSmsLogId, who: facts.who, result, route, decision, verdict, visit: facts.visit });
+    // The move executor (GATE_SMS_SCHEDULING_ACT_MOVE, dark) carries out a
+    // recorded would-move; gate off, the row stays what it WOULD have done.
+    if (recorded.recorded && recorded.outcome === 'would_move') {
+      const act = require('./sms-scheduling-act');
+      if (act.actMoveLive()) {
+        const done = await act.executeMove({ decisionId: recorded.id, offer, slot, visit: facts.visit, repliedAt: ctx.repliedAt, now, dbh });
+        return { ...recorded, executed: done.executed === true };
+      }
+    }
+    return recorded;
   } catch (err) {
     // Code only, never the message: a Knex error embeds bound values.
     logger.warn(`[sms-scheduling-decide] not recorded: ${String(err?.code || err?.name || 'error').slice(0, 40)}`);

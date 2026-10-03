@@ -1115,6 +1115,9 @@ module.exports._internals = {
   pageEligibility,
   bookingRange,
   buildAvailabilityForService,
+  // The single-or-series split for a picked date (the SMS move executor
+  // commits through the same one, services/sms-scheduling-act.js).
+  shouldReanchor,
 };
 // Shared with the logged-in schedule payload (codex #3609 r25 P2): the same
 // grouped verdict that makes this page refuse, so the portal never advertises
