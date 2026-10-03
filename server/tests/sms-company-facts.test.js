@@ -92,8 +92,8 @@ describe('gate on', () => {
 
   test('prompt version is bumped, distinguishable, and fits the column', () => {
     // '_cf' = COMPANY FACTS, '_cfl' = + LABEL FACTS (PR #5416), '_cflv' = + VISIT STATUS & OPEN LOOPS (PR #5499), 'cflvp' = + PAYMENT FACTS (PR #5331), numeric token 5 = FREE RE-SERVICE (PR #5336) + a fresh identity above PR #5334's 3 (LIVE ETA) and #5416's 3_cfl (4 was the pre-contract claim checker, never merged): one suffix token per fact section.
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers5_cflvp');
-    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers5_cflvp');
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers6_cflvp');
+    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers6_cflvp');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers_cf');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers2');
@@ -102,6 +102,25 @@ describe('gate on', () => {
     expect(all.startsWith('house_voice_v12')).toBe(true);
     expect(all.startsWith(`${REAL_ANSWERS_PROMPT_VERSION}+`)).toBe(true);
     expect(all.length).toBeLessThanOrEqual(40);
+  });
+});
+
+describe('service knowledge (owner-approved 2026-10-03)', () => {
+  test('the seven approved lines are in the section, word for word', () => {
+    const section = renderCompanyFactsSection();
+    for (const line of [
+      'A cockroach treatment is two visits for one price. The second visit is included.',
+      'WaveGuard members get one free termite inspection a year. A WDO inspection for a real-estate sale is a separate paid service.',
+      'Termite work: never promise results or how long a treatment lasts. A termite bond or pre-slab warranty is a separate purchase.',
+      'New customers save a card when they book and are charged after the first visit. There is no deposit.',
+      'The lawn program runs 9 or 12 applications a year.',
+      'Arrival windows are two hours and start on the hour.',
+      'WaveGuard tiers (Bronze, Silver, Gold, Platinum) depend on how many recurring services a customer has.',
+    ]) expect(section).toContain(`\n- ${line}\n`);
+    expect(COMPANY_FACTS).toHaveLength(18);
+  });
+  test('the termite line never uses the banned word it rules out', () => {
+    expect(COMPANY_FACTS.join(' ')).not.toMatch(/guarantee/i);
   });
 });
 
