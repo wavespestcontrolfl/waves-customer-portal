@@ -785,6 +785,8 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
       proposeNote(customerA, `${note} replaced`);
       const overwrite = await api('/query', request(`Add a note for ${nameA}: ${note} replaced`, { session_id: crypto.randomUUID() }), ownerToken);
       expect(overwrite.body.pendingActions).toHaveLength(1);
+      // The card names the notes it deletes, hash-bound in the contract.
+      expect(JSON.stringify(overwrite.body.pendingActions[0].contract)).toContain(`REPLACES the existing notes — deletes \\"${note}\\"`);
       expect((await db('customers').where('id', customerA).first('crm_notes')).crm_notes).toBe(note);
       await db('ib_pending_actions').where('id', overwrite.body.pendingActions[0].id).update({ status: 'cancelled' });
 
@@ -798,16 +800,17 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
       expect(pair.body.pendingActions).toEqual([]);
       expect((await db('customers').where('id', customerA).first('lead_source')).lead_source).toBe('referral');
 
-      // Three same-tool edits in one model message: every one keeps its card
-      // (bulk cap, owner ruling 2026-10-02), and nothing is written.
+      // Three same-tool edits in one model message: refused as a set with a
+      // pointer to the bulk tool (bulk cap, owner ruling 2026-10-02) — no
+      // direct commit and no stray cards; nothing is written.
       mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'update customer fields' }, 'discover'))
         .mockResolvedValueOnce({ content: [source('google', 'a'), source('facebook', 'b'), source('yelp', 'c')], usage: {} })
-        .mockResolvedValueOnce(answer('Tap Confirm.'));
+        .mockResolvedValueOnce(answer('Use the bulk tool.'));
       const triple = await api('/query', request(`Change the lead source for ${nameA} three times`, { session_id: crypto.randomUUID() }), ownerToken);
-      expect(triple.body.pendingActions.length).toBeGreaterThanOrEqual(1);
+      expect(triple.body.pendingActions).toEqual([]);
+      expect(JSON.stringify(mockModel.mock.calls)).toContain('owner_direct_bulk_limit');
       expect((await db('customers').where('id', customerA).first('lead_source')).lead_source).toBe('referral');
-      expect(await db('ib_pending_actions').where('task_id', triple.body.taskId).whereNotNull('consumed_at').count('* as count').first()).toEqual({ count: '0' });
-      await db('ib_pending_actions').where('task_id', triple.body.taskId).where('status', 'pending').update({ status: 'cancelled' });
+      expect(await db('ib_pending_actions').where('task_id', triple.body.taskId).count('* as count').first()).toEqual({ count: '0' });
     } finally {
       delete process.env.IB_FULL_ACCESS_EMAILS;
       delete process.env.GATE_IB_OWNER_DIRECT;

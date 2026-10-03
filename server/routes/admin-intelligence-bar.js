@@ -1178,6 +1178,21 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
         },
       };
     }
+    if (toolUse.name === 'update_customer' && params.customer_id && params.updates
+      && Object.prototype.hasOwnProperty.call(params.updates, 'notes')) {
+      // `notes` REPLACES crm_notes (gate codes, access details), so the card
+      // shows what it deletes (Codex r1 on #5675). Read now and bound into
+      // the contract; the customer-version pin refuses a commit after a
+      // later edit. Fail closed: an unreadable current value is no card.
+      let current;
+      try {
+        current = await db('customers').where('id', params.customer_id).first('crm_notes');
+      } catch {
+        return { failed: true, modelResult: { error: 'Could not read this customer\'s current notes — nothing was proposed. Try again in a moment.' } };
+      }
+      const before = String(current?.crm_notes ?? '').trim();
+      preview = { ...preview, notes_replaced: { before: before || null } };
+    }
     if (toolUse.name === 'create_appointment' && params.customer_id) {
       // The visit's price (owner 2026-09-27: the Intelligence Bar books like
       // the Schedule screen): the stated price, else the catalog default the
@@ -2808,7 +2823,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     };
     const pendingProposals = []; // client-only payloads (carry the confirmation ids — never shown to the model)
     const directActionIds = []; // owner-direct commits this turn: no card, but their receipts join the thread like a card's
-    const directCallsByTool = new Map(); // owner-direct bulk cap: same-tool direct calls this turn (OwnerDirect.withinDirectCap)
+    // Owner-direct bulk cap: direct commits this task already made, by tool
+    // (seeded so a resumed task keeps its count; Codex r1 on #5675).
+    const directCommitsByTool = ownerDirectCommits ? await OwnerDirect.seedDirectCounts(activeTask) : new Map();
     let directOutcomeUncertain = false; // a direct commit whose outcome is unknown or whose receipt did not save
     let directOutcomePartial = false; // a direct commit that landed with a failed follow-on step (partially_completed)
     let writeFrontierBlocked = false;
@@ -2861,9 +2878,12 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       );
 
       const toolUses = response.content.filter(c => c.type === 'tool_use');
-      // Counted per model message before any call runs, so three parallel
-      // same-tool edits all keep their card instead of two landing first.
-      if (ownerDirectCommits) OwnerDirect.countDirectCalls(directCallsByTool, toolUses);
+      // This message's calls that could run direct, judged before any of them
+      // runs, so three parallel same-tool edits never land two first.
+      const directCapped = ownerDirectCommits
+        ? OwnerDirect.cappedTools(directCommitsByTool, OwnerDirect.messageDirectPlan(toolUses,
+          toolUse => !(platformEnabled && ActionRegistry.validateInput(toolUse.name, toolUse.input, actionScope))))
+        : new Set();
       const textBlocks = response.content.filter(c => c.type === 'text');
       if (activeTask) await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token });
 
@@ -2973,6 +2993,11 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
             result = { error: IB_WRITES_DISABLED_MESSAGE };
             failed = true;
             errorMessage = result.error;
+          } else if (directCapped.has(toolUse.name) && OwnerDirect.mayExecuteWithoutCard(toolUse.name, toolUse.input)) {
+            // Three or more same-tool edits: one bulk card, not a fan-out.
+            result = { ...OwnerDirect.BULK_LIMIT_RESULT };
+            failed = true;
+            errorMessage = result.error;
           } else {
           try {
             const proposed = await proposePendingWrite({
@@ -2987,9 +3012,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
             if (proposed.failed) {
               failed = true;
               errorMessage = result.error || 'proposal failed';
-            } else if (proposed.clientPayload && ownerDirectCommits && OwnerDirect.withinDirectCap(directCallsByTool, toolUse.name)
-              && OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input, proposed.modelResult)
-              && !(await OwnerDirect.notesWouldOverwrite(toolUse.name, toolUse.input))) {
+            } else if (proposed.clientPayload && ownerDirectCommits && OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input, proposed.modelResult)) {
               // Owner-direct internal edit: no card. The pending action just
               // minted is committed now through the same path a Confirm
               // click takes, so its pins, receipt and audit row are the same.
@@ -3002,7 +3025,10 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
                 cancel: id => PendingActions.cancelPendingAction(id, getAdminActorId(req)),
               });
               result = direct.result;
-              if (direct.actionId) directActionIds.push(direct.actionId);
+              if (direct.actionId) {
+                directActionIds.push(direct.actionId);
+                OwnerDirect.recordDirectCommit(directCommitsByTool, toolUse.name);
+              }
               if (direct.uncertain) writeFrontierBlocked = directOutcomeUncertain = true;
               // A partial outcome closes the frontier too (Codex r5): the task
               // store treats the partial receipt as unresolved, so a later

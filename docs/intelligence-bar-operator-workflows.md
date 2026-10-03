@@ -240,7 +240,7 @@ Generated from the registry, `write-gates.js` and `owner-direct.js` at `60655b1e
 | W2 | `get_conversation_thread` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
 | W2 | `get_open_commitments` | read | direct | direct | direct | direct | direct | scoped | refused (differs) |
 | W3 | `update_lead_contact` | two_step_card | direct | direct when lead_id alone (differs) | card | card | card | refused | refused |
-| W3 | `update_customer` | bare_write_card | direct | direct when only contact, address, lead source and note fields (differs) | card | card | card | refused | refused |
+| W3 | `update_customer` | bare_write_card | direct | direct when only contact, address, lead source and note fields (notes only over empty notes) (differs) | card | card | card | refused | refused |
 | W4 | `add_customer_property` | two_step_card | direct | direct when no label (differs) | card | card | card | refused | refused |
 | W4 | `update_customer_property` | two_step_card | direct | direct when no label (differs) | card | card | card | refused | refused |
 | W4 | `set_primary_property` | two_step_card | direct | direct | card | card | card | refused | refused |
