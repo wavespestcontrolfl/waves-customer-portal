@@ -17876,6 +17876,7 @@ export function CompletionPanel({
     setPhotoRetryError("");
     setPhotoRetryConflict(false);
     const failedPhotos = [];
+    let reconciliationNeeded = draft.reconcileOwed === true;
     let retryPermanentlyBlocked = false;
     try {
       const photos = draft.servicePhotos;
@@ -17892,6 +17893,7 @@ export function CompletionPanel({
             method: "POST", body: form,
             headers: { Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}` },
           });
+          reconciliationNeeded = true;
         } catch (error) {
           failedPhotos.push(photo);
           if (error?.code === "visit_identity_changed" || Number(error?.status) === 403) {
@@ -17929,7 +17931,15 @@ export function CompletionPanel({
           ...draft.pendingPhotoCompletion,
           completionPhotoUpload: { failed: failedPhotos.length },
         };
-        const remaining = { ...draft, servicePhotos: failedPhotos, reconcileOwed: false, pendingPhotoCompletion: result };
+        // A partially successful retry has already changed the visit's photo
+        // set. Keep that reconciliation obligation beside the failed local
+        // copies so discarding those copies cannot leave the report stale.
+        const remaining = {
+          ...draft,
+          servicePhotos: failedPhotos,
+          reconcileOwed: reconciliationNeeded,
+          pendingPhotoCompletion: result,
+        };
         draftSnapshotRef.current = remaining;
         await saveDraftSnapshot(remaining);
         if (!completionPanelClosedRef.current) {
@@ -17947,6 +17957,32 @@ export function CompletionPanel({
   }
 
   function discardRetainedCompletionPhotos() {
+    if (photoRetryLockRef.current) return;
+    const draft = draftSnapshotRef.current;
+    if (draft?.reconcileOwed) {
+      const result = {
+        ...draft.pendingPhotoCompletion,
+        completionPhotoUpload: { failed: 0, reconcileOwed: true },
+      };
+      // Mint a new photo revision before the asynchronous IndexedDB write.
+      // If the page dies, metadata for this revision cannot reattach the
+      // discarded photos from the older stored revision.
+      const owed = {
+        ...draft,
+        draftId: crypto.randomUUID(),
+        savedAt: new Date().toISOString(),
+        servicePhotos: [],
+        generationPhotoCount: 0,
+        reconcileOwed: true,
+        pendingPhotoCompletion: result,
+      };
+      draftSnapshotRef.current = owed;
+      void saveDraftSnapshot(owed);
+      setPhotoRetryConflict(false);
+      setPhotoRetryError("");
+      setCompletionResult(result);
+      return;
+    }
     clearSavedDraft();
     clearCompletionResumeOwed(service.id);
     sideEffectsCommittedRef.current = false;
@@ -19635,7 +19671,7 @@ export function CompletionPanel({
         </button>
       )}
       {!photoReconcileOwed && (
-        <button type="button" onClick={discardRetainedCompletionPhotos}
+        <button type="button" onClick={discardRetainedCompletionPhotos} disabled={photoRetrying}
           style={{ marginLeft: photoRetryConflict ? 0 : 8, padding: "12px 16px", borderRadius: 24, border: "none", background: "#111111", color: "#FFFFFF", fontSize: 14 }}>
           Discard retained photos
         </button>

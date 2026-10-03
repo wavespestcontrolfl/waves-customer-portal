@@ -306,6 +306,98 @@ describe('completion photos in an unsubmitted draft', () => {
     expect(reconciles).toHaveLength(0);
   });
 
+  it('does not discard recovery state while a photo retry is running', async () => {
+    await seed();
+    const completion = vi.fn().mockResolvedValue({ serviceRecordId: 'record-1', completionPhotoUpload: { failed: 1 } });
+    const view = await mount(completion);
+    fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
+    await act(async () => fireEvent.click(submitButton()));
+
+    const originalFetch = fetch.getMockImplementation();
+    let rejectUpload;
+    const uploadWait = new Promise((_resolve, reject) => { rejectUpload = reject; });
+    fetch.mockImplementation((url, options) => {
+      if (url === `/api/tech/services/${service.id}/photos`) return uploadWait;
+      return originalFetch(url, options);
+    });
+
+    const retry = await screen.findByRole('button', { name: 'Retry photo uploads' });
+    fireEvent.click(retry);
+    const discard = screen.getByRole('button', { name: 'Discard retained photos' });
+    await waitFor(() => expect(discard.disabled).toBe(true));
+    fireEvent.click(discard);
+    expect(completionResumeOwed(service.id)).toBe(true);
+    expect(await getCompletionDraft(service.id)).toMatchObject({ servicePhotos: [{ data: photos[0].data }] });
+
+    await act(async () => rejectUpload(new Error('offline')));
+    await waitFor(() => expect(discard.disabled).toBe(false));
+    view.unmount();
+  });
+
+  it('keeps report reconciliation owed when failed photos are discarded after a partial retry', async () => {
+    const secondPhoto = {
+      name: 'garage.jpg', data: 'data:image/jpeg;base64,BBBB',
+      capturedAt: '2099-01-01T12:01:00Z', caption: 'Garage treatment',
+    };
+    await seed();
+    const completion = vi.fn().mockResolvedValue({ serviceRecordId: 'record-1', completionPhotoUpload: { failed: 1 } });
+    const first = await mount(completion);
+    fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
+    await act(async () => fireEvent.click(submitButton()));
+    await screen.findByRole('button', { name: 'Retry photo uploads' });
+    first.unmount();
+
+    // Model two retained uploads directly in the durable recovery draft. The
+    // retry path is independent of closeout and must preserve reconciliation
+    // when only one of these two attachments lands.
+    const stored = await getCompletionDraft(service.id);
+    const retryDraft = {
+      ...stored,
+      savedAt: '2099-01-01T12:02:00Z',
+      servicePhotos: [...photos, secondPhoto],
+      generationPhotoCount: 2,
+      pendingPhotoCompletion: { ...stored.pendingPhotoCompletion, completionPhotoUpload: { failed: 2 } },
+    };
+    const { servicePhotos: _retryPhotos, ...metadata } = retryDraft;
+    localStorage.setItem(key, JSON.stringify(metadata));
+    await putCompletionDraft(service.id, retryDraft);
+
+    const originalFetch = fetch.getMockImplementation();
+    const uploads = [];
+    const reconciles = [];
+    fetch.mockImplementation(async (url, options) => {
+      if (url === `/api/tech/services/${service.id}/photos`) {
+        uploads.push(options);
+        if (uploads.length === 1) return { ok: true, json: async () => ({ photo: { id: 'photo-1' } }) };
+        throw new Error('offline');
+      }
+      if (url === `/api/tech/services/${service.id}/photos/reconcile`) {
+        reconciles.push(options);
+        return { ok: true, json: async () => ({ ok: true }) };
+      }
+      return originalFetch(url, options);
+    });
+
+    const view = await mount(vi.fn());
+    await act(async () => fireEvent.click(await screen.findByRole('button', { name: 'Retry photo uploads' })));
+    expect(uploads).toHaveLength(2);
+    expect(reconciles).toHaveLength(0);
+    expect(await getCompletionDraft(service.id)).toMatchObject({
+      servicePhotos: [{ data: secondPhoto.data }], reconcileOwed: true,
+    });
+
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Discard retained photos' })));
+    expect(await screen.findByRole('button', { name: 'Finish report update' })).toBeTruthy();
+    expect(completionResumeOwed(service.id)).toBe(true);
+    await waitFor(async () => expect(await getCompletionDraft(service.id)).toMatchObject({ servicePhotos: [], reconcileOwed: true }));
+
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Finish report update' })));
+    expect(reconciles).toHaveLength(1);
+    expect(completionResumeOwed(service.id)).toBe(false);
+    view.unmount();
+    expect(await getCompletionDraft(service.id)).toBeNull();
+  });
+
   it('keeps the autosaved photo revision when closeout reports failed uploads, so a lost IndexedDB write still reopens recovery (Codex r-63b2098 P1)', async () => {
     const draft = { serviceId: service.id, draftId: 'draft-one', savedAt: '2020-01-01T12:00:00Z',
       notes: 'Exterior inspected', generationPhotoCount: 1, servicePhotos: photos, sendSms: false };
