@@ -244,6 +244,8 @@ describe('visit not closed out card', () => {
     expect(screen.getByRole('button', { name: 'Open job' })).toBeTruthy();
     // a bare Resolve would close the card and record nothing
     expect(screen.queryByRole('button', { name: 'Resolve' })).toBeNull();
+    // Done is for a confirmed miss only
+    expect(screen.queryByRole('button', { name: 'Done' })).toBeNull();
   });
 
   it('posts the dispatcher\'s decision with the card', () => {
@@ -255,11 +257,15 @@ describe('visit not closed out card', () => {
     expect(screen.getByRole('button', { name: 'Saving…' })).toBeTruthy();
   });
 
-  it('a confirmed miss no longer offers "This was a miss" and tells the dispatcher to rebook', () => {
-    render(<AlertCard alert={card({ miss_confirmed: true })} onDecide={vi.fn()} onOpenJob={vi.fn()} />);
+  it('a confirmed miss no longer offers "This was a miss"; it offers Done once the customer is rebooked', () => {
+    const onDecide = vi.fn(() => new Promise(() => {}));
+    const alert = card({ miss_confirmed: true });
+    render(<AlertCard alert={alert} onDecide={onDecide} onOpenJob={vi.fn()} />);
     expect(screen.queryByRole('button', { name: 'This was a miss' })).toBeNull();
     expect(screen.getByRole('button', { name: 'Not a miss' })).toBeTruthy();
-    expect(screen.getByText('Marked as a miss. Open the job to rebook it.')).toBeTruthy();
+    expect(screen.getByText('Marked as a miss. Rebook the customer, then press Done.')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    expect(onDecide).toHaveBeenCalledWith(alert, 'done');
   });
 
   it('other card types keep their Resolve button', () => {

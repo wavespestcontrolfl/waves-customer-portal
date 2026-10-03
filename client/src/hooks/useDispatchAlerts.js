@@ -240,12 +240,13 @@ export function useDispatchAlerts() {
   }, [markResolved]);
 
   // The dispatcher's call on a "Visit not closed out" card: 'confirm_miss'
-  // ("This was a miss") or 'dismiss' ("Not a miss"). The server settles the
+  // ("This was a miss"), 'dismiss' ("Not a miss") or 'done' (a confirmed miss
+  // was dealt with). The server settles the
   // log row and closes this card (a confirmed miss comes back as a new card
   // over the socket); the card is dropped here on success either way.
   const decideNotClosedOut = useCallback(async (alert, action) => {
     const logId = alert?.payload?.log_id;
-    const path = { confirm_miss: 'confirm-miss', dismiss: 'dismiss' }[action];
+    const path = { confirm_miss: 'confirm-miss', dismiss: 'dismiss', done: 'done' }[action];
     if (!logId || !path) throw new Error('decideNotClosedOut: unknown card or action');
     const res = await fetch(
       `${API_BASE}/admin/dispatch/not-closed-out/${logId}/${path}`,

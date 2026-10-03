@@ -6416,8 +6416,9 @@ router.get('/alerts', requireAdmin, async (req, res, next) => {
 
 // POST /api/admin/dispatch/not-closed-out/:logId/confirm-miss — "This was a miss".
 // POST /api/admin/dispatch/not-closed-out/:logId/dismiss      — "Not a miss".
+// POST /api/admin/dispatch/not-closed-out/:logId/done         — "Done" (a confirmed miss was dealt with).
 //
-// The two person decisions on a "Visit not closed out" Action Queue card
+// The person decisions on a "Visit not closed out" Action Queue card
 // (services/not-closed-out.js; owner 2026-10-03). :logId is the reschedule_log
 // row the card's payload carries. Rebooking and closing the visit out go through
 // the existing job tools, which settle the row themselves. No customer contact.
@@ -6442,6 +6443,20 @@ router.post('/not-closed-out/:logId/dismiss', requireAdmin, async (req, res, nex
     res.json({ ok: true });
   } catch (err) {
     logger.error(`[dispatch/not-closed-out/dismiss] failed: ${err.message}`);
+    next(err);
+  }
+});
+router.post('/not-closed-out/:logId/done', requireAdmin, async (req, res, next) => {
+  try {
+    if (!NOT_CLOSED_OUT_LOG_ID_RE.test(String(req.params.logId || ''))) return res.status(404).json({ error: 'Not found' });
+    const result = await require('../services/not-closed-out').markHandled({ logId: req.params.logId, handledBy: req.technicianId });
+    if (!result.ok && result.reason === 'not_confirmed') {
+      return res.status(409).json({ error: 'Say whether this was a miss first.', code: 'NOT_CONFIRMED' });
+    }
+    if (!result.ok) return res.status(404).json({ error: 'This visit was already settled. Refresh the queue.' });
+    res.json({ ok: true });
+  } catch (err) {
+    logger.error(`[dispatch/not-closed-out/done] failed: ${err.message}`);
     next(err);
   }
 });

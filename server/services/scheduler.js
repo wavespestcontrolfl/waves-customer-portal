@@ -8073,6 +8073,9 @@ function initScheduledJobs() {
             logger.error(`Missed appointment onSkip failed for ${svc.id}: ${skipErr.message}`);
           }
         }
+        // An open flagged row whose card insert failed once has no other way back onto the office queue.
+        const { raised: cardsBackfilled } = await require('./not-closed-out').backfillMissingCards();
+        if (cardsBackfilled) logger.info(`Missed appointment check: ${cardsBackfilled} missing queue card(s) raised`);
         logger.info(`Missed appointment check done: ${candidates.length} candidate(s), ${flagged} flagged as no-show`);
       }
       });

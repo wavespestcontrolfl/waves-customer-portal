@@ -3,9 +3,10 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../models/db', () => jest.fn());
 
 const mockRaiseCard = jest.fn(async () => ({ raised: true }));
+let mockQueueOn = false;
 jest.mock('../services/not-closed-out', () => {
   const actual = jest.requireActual('../services/not-closed-out');
-  return { isSameNoShowOccurrence: actual.isSameNoShowOccurrence, RESOLUTION_BY_STATUS: actual.RESOLUTION_BY_STATUS, raiseCard: (...a) => mockRaiseCard(...a) };
+  return { isSameNoShowOccurrence: actual.isSameNoShowOccurrence, RESOLUTION_BY_STATUS: actual.RESOLUTION_BY_STATUS, raiseCard: (...a) => mockRaiseCard(...a), queueEnabled: () => mockQueueOn };
 });
 
 const db = require('../models/db');
@@ -107,6 +108,41 @@ describe('the office card for a flagged visit (not-closed-out.js)', () => {
     expect(inserts).toEqual([]);
     expect(mockRaiseCard).not.toHaveBeenCalled();
     expect(evaluate).not.toHaveBeenCalled();
+  });
+
+  test('queue on: the nightly row waits for a person before the repeated-miss outreach; a dispatch no-show does not wait', async () => {
+    mockQueueOn = true;
+    try {
+      const nightly = fakeConn({ ...visit, status: 'pending' });
+      const evaluate = jest.spyOn(MissedAppointment, 'evaluateThreshold').mockClear().mockResolvedValue({ action: 'reschedule_system', skips: 1 });
+      expect(await MissedAppointment.onSkip('visit-4', 'no_show', nightly.conn)).toEqual({ action: 'awaiting_confirmation' });
+      expect(nightly.inserts.find((i) => i.table === 'reschedule_log')).toBeTruthy();
+      expect(evaluate).not.toHaveBeenCalled();
+      const manual = fakeConn({ ...visit, status: 'no_show' });
+      await MissedAppointment.onSkip('visit-4', 'manual_no_show', manual.conn);
+      expect(evaluate).toHaveBeenCalledTimes(1);
+      evaluate.mockRestore();
+    } finally { mockQueueOn = false; }
+  });
+
+  test('queue on: the 90-day count takes person-marked misses only; queue off: every flagged row, as before', async () => {
+    const built = [];
+    const conn = (table) => {
+      const chain = {
+        where(arg) { if (typeof arg === 'function') { const b = { whereNotNull(c) { built.push(c); return b; }, orWhereNotNull(c) { built.push(c); return b; } }; arg.call(b); } return chain; },
+        select() { return chain; },
+        first: async () => (table === 'customers' ? { id: 'c1', first_name: 'Sam' } : { count: '1' }),
+      };
+      return chain;
+    };
+    conn.raw = (sql) => sql;
+    await MissedAppointment.evaluateThreshold('c1', 'no_show', conn);
+    expect(built).toEqual([]);
+    mockQueueOn = true;
+    try {
+      await MissedAppointment.evaluateThreshold('c1', 'confirmed_miss', conn);
+      expect(built).toEqual(['miss_confirmed_at', 'new_date']);
+    } finally { mockQueueOn = false; }
   });
 
   test('a candidate unchanged since the scan is flagged', async () => {

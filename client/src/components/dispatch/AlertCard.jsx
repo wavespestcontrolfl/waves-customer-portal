@@ -371,7 +371,7 @@ function NotClosedOutBody({ alert }) {
       </div>
       <p className="text-ink-secondary">
         {payload.miss_confirmed
-          ? 'Marked as a miss. Open the job to rebook it.'
+          ? 'Marked as a miss. Rebook the customer, then press Done.'
           : 'Open the job to rebook it or close it out, or say whether it was a miss.'}
       </p>
     </div>
@@ -406,7 +406,7 @@ export default function AlertCard({ alert, onResolve, onOpenJob, onDecide }) {
   const showOpenJob = !!(alert.job_id && onOpenJob);
   // A not-closed-out card is settled by a decision, never a bare Resolve (which
   // would close the card and record nothing): `onDecide(alert, 'confirm_miss' |
-  // 'dismiss')` posts the dispatcher's call; the card drops when it lands.
+  // 'dismiss' | 'done')` posts the dispatcher's call; the card drops when it lands.
   const isNotClosedOut = alert.type === NOT_CLOSED_OUT_TYPE;
   const canDecide = isNotClosedOut && !!onDecide && !!alert.payload?.log_id;
   const [deciding, setDeciding] = useState(null);
@@ -486,6 +486,16 @@ export default function AlertCard({ alert, onResolve, onOpenJob, onDecide }) {
               disabled={!!deciding}
             >
               {deciding === 'confirm_miss' ? 'Saving…' : 'This was a miss'}
+            </Button>
+          )}
+          {canDecide && alert.payload?.miss_confirmed && (
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => handleDecide('done')}
+              disabled={!!deciding}
+            >
+              {deciding === 'done' ? 'Saving…' : 'Done'}
             </Button>
           )}
           {canDecide && (

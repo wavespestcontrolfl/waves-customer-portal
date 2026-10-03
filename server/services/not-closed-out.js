@@ -14,6 +14,9 @@
  *   - the visit is completed                            → 'completed'
  *   - the visit is cancelled / skipped                  → 'dismissed'
  *   - a person says "Not a miss" on the card            → 'dismissed'
+ *   - a person presses "Done" on a confirmed miss       → 'handled'
+ *     (a no_show visit is terminal: it cannot be moved, so its rebooking is a
+ *     new appointment and only a person can say it was dealt with)
  * and separately a person may say "This was a miss" (miss_confirmed_at): the row
  * stays open — it still needs rebooking — but is now a CONFIRMED miss. Only a
  * confirmed, unresolved row may ever reach a customer-facing apology.
@@ -29,7 +32,7 @@ const { isEnabled } = require('../config/feature-gates');
 
 const ALERT_TYPE = 'visit_not_closed_out';
 const ALERT_SOURCE = 'missed_appointment_check';
-const RESOLUTIONS = Object.freeze(['rebooked', 'completed', 'dismissed']);
+const RESOLUTIONS = Object.freeze(['rebooked', 'completed', 'dismissed', 'handled']);
 // The status a visit moves TO → how its flagged rows settle. A person marking
 // no_show is a confirmed miss that still needs rebooking: not a resolution.
 const RESOLUTION_BY_STATUS = Object.freeze({ completed: 'completed', cancelled: 'dismissed', skipped: 'dismissed' });
@@ -174,7 +177,7 @@ async function lockLog(t, logId) {
   return t('reschedule_log')
     .where({ id: logId, reason_code: 'customer_noshow' })
     .forUpdate()
-    .first('id', 'scheduled_service_id', 'resolved_at', 'miss_confirmed_at', 'original_date', 'original_window');
+    .first('id', 'scheduled_service_id', 'customer_id', 'resolved_at', 'miss_confirmed_at', 'original_date', 'original_window');
 }
 
 // Every decision takes the VISIT's row lock before the log row's — the order a
@@ -214,13 +217,16 @@ function loggedSlot(log) {
  */
 async function confirmMiss({ logId, confirmedBy = null, reopen = false } = {}) {
   if (!logId) return { ok: false, reason: 'not_found' };
-  return db.transaction(async (t) => {
+  let newlyConfirmedFor = null;
+  const result = await db.transaction(async (t) => {
     const { visit, log } = await lockVisitThenLog(t, logId);
     if (!log) return { ok: false, reason: 'not_found' };
+    if (!log.miss_confirmed_at) newlyConfirmedFor = log.customer_id || null;
     if (log.resolved_at && !reopen) return { ok: false, reason: 'not_found' };
     const by = confirmedBy ? String(confirmedBy).slice(0, 80) : null;
     if (log.resolved_at) {
       if (!isSameNoShowOccurrence(visit, { date: log.original_date, window: log.original_window })) {
+        newlyConfirmedFor = null;
         return { ok: false, reason: 'visit_moved_on' };
       }
       await t('reschedule_log').where({ id: logId })
@@ -229,7 +235,9 @@ async function confirmMiss({ logId, confirmedBy = null, reopen = false } = {}) {
       await t('reschedule_log').where({ id: logId })
         .update({ miss_confirmed_at: t.fn.now(), miss_confirmed_by: by });
     }
-    if (log.scheduled_service_id && queueEnabled()) {
+    // The stale card is closed whether or not the queue gate is still on (a gate
+    // turned off must not strand a decision-only card); raiseCard itself is gated.
+    if (log.scheduled_service_id) {
       const service = await t('scheduled_services').where({ id: log.scheduled_service_id })
         .first('id', 'technician_id', 'scheduled_date', 'window_start', 'window_end', 'service_type');
       const stale = await t('dispatch_alerts').where({ type: ALERT_TYPE, job_id: log.scheduled_service_id }).whereNull('resolved_at').first('payload');
@@ -250,6 +258,50 @@ async function confirmMiss({ logId, confirmedBy = null, reopen = false } = {}) {
     }
     return { ok: true };
   });
+  // The repeated-miss outreach task counts person-confirmed misses only while the
+  // queue is on (missed-appointment.js evaluateThreshold), so a first confirmation
+  // is when it is evaluated. After the commit; never fails the decision.
+  if (result.ok && newlyConfirmedFor && queueEnabled()) {
+    try {
+      await require('./workflows/missed-appointment').evaluateThreshold(newlyConfirmedFor, 'confirmed_miss');
+    } catch (err) {
+      logger.warn(`[not-closed-out] outreach evaluation failed after a confirmed miss: ${err.message}`);
+    }
+  }
+  return result;
+}
+
+// A person settled one flagged row. Close the visit's card when no other flagged
+// row of the visit is still open; otherwise hand the card to the row still open.
+// Card cleanup runs whether or not the queue gate is on; raiseCard is gated.
+async function cardAfterSettle(t, log, settledBy) {
+  if (!log.scheduled_service_id) return;
+  const stillOpen = await t('reschedule_log')
+    .where({ scheduled_service_id: log.scheduled_service_id, reason_code: 'customer_noshow' })
+    .whereNull('resolved_at').orderBy('created_at', 'desc')
+    .first('id', 'miss_confirmed_at', 'original_date', 'original_window');
+  if (!stillOpen) {
+    await closeCards(t, log.scheduled_service_id, settledBy);
+    return;
+  }
+  // A card that pointed at the row just settled would come back on reload with
+  // buttons that only answer not_found: replace it with one for the row that
+  // still needs a call.
+  const open = await t('dispatch_alerts').where({ type: ALERT_TYPE, job_id: log.scheduled_service_id }).whereNull('resolved_at').first('payload');
+  const payload = open && typeof open.payload === 'string' ? JSON.parse(open.payload) : (open && open.payload) || {};
+  if (String(payload.log_id || '') === String(stillOpen.id)) return;
+  await closeCards(t, log.scheduled_service_id, settledBy);
+  const service = await t('scheduled_services').where({ id: log.scheduled_service_id })
+    .first('id', 'technician_id', 'scheduled_date', 'window_start', 'window_end', 'service_type');
+  if (!service) return;
+  const slot = loggedSlot(stillOpen);
+  await raiseCard({
+    logId: stillOpen.id,
+    service: slot.scheduled_date ? { ...service, ...slot } : service,
+    confirmed: !!stillOpen.miss_confirmed_at,
+    trx: t,
+    strict: true,
+  });
 }
 
 /**
@@ -268,38 +320,77 @@ async function dismiss({ logId, dismissedBy = null, note = null } = {}) {
       resolved_at: t.fn.now(), resolution: 'dismissed', resolved_by: by,
       ...(reason ? { notes: t.raw("left(concat_ws(' | ', NULLIF(notes, ''), ?::text), 500)", [`not a miss: ${reason}`]) } : {}),
     });
-    if (log.scheduled_service_id) {
-      const stillOpen = await t('reschedule_log')
-        .where({ scheduled_service_id: log.scheduled_service_id, reason_code: 'customer_noshow' })
-        .whereNull('resolved_at').orderBy('created_at', 'desc')
-        .first('id', 'miss_confirmed_at', 'original_date', 'original_window');
-      if (!stillOpen) {
-        await closeCards(t, log.scheduled_service_id, dismissedBy);
-      } else if (queueEnabled()) {
-        // Another flagged row of this visit is still open. A card that pointed at
-        // the row just settled would come back on reload with buttons that only
-        // answer not_found: replace it with one for the row that still needs a call.
-        const open = await t('dispatch_alerts').where({ type: ALERT_TYPE, job_id: log.scheduled_service_id }).whereNull('resolved_at').first('payload');
-        const payload = open && typeof open.payload === 'string' ? JSON.parse(open.payload) : (open && open.payload) || {};
-        if (String(payload.log_id || '') !== String(stillOpen.id)) {
-          await closeCards(t, log.scheduled_service_id, dismissedBy);
-          const service = await t('scheduled_services').where({ id: log.scheduled_service_id })
-            .first('id', 'technician_id', 'scheduled_date', 'window_start', 'window_end', 'service_type');
-          if (service) {
-            const slot = loggedSlot(stillOpen);
-            await raiseCard({
-              logId: stillOpen.id,
-              service: slot.scheduled_date ? { ...service, ...slot } : service,
-              confirmed: !!stillOpen.miss_confirmed_at,
-              trx: t,
-              strict: true,
-            });
-          }
-        }
-      }
-    }
+    await cardAfterSettle(t, log, dismissedBy);
     return { ok: true };
   });
+}
+
+/**
+ * "Done" on a CONFIRMED miss: the office dealt with it (the customer was rebooked
+ * on a new appointment, or declined). A no_show visit is terminal — it cannot be
+ * moved or completed — so nothing else can settle its row. An unconfirmed row is
+ * `not_confirmed`: it is settled by closing the visit out or by "Not a miss".
+ * @returns {Promise<{ok: boolean, reason?: string}>}
+ */
+async function markHandled({ logId, handledBy = null } = {}) {
+  if (!logId) return { ok: false, reason: 'not_found' };
+  return db.transaction(async (t) => {
+    const { log } = await lockVisitThenLog(t, logId);
+    if (!log || log.resolved_at) return { ok: false, reason: 'not_found' };
+    if (!log.miss_confirmed_at) return { ok: false, reason: 'not_confirmed' };
+    await t('reschedule_log').where({ id: logId }).whereNull('resolved_at').update({
+      resolved_at: t.fn.now(), resolution: 'handled', resolved_by: handledBy ? String(handledBy).slice(0, 80) : null,
+    });
+    await cardAfterSettle(t, log, handledBy);
+    return { ok: true };
+  });
+}
+
+/**
+ * Raise the card for every open flagged row that has none. A first card is
+ * best-effort (raiseCard never fails the nightly check or a status change), and
+ * the check skips an occurrence it already logged — so without this pass a card
+ * whose insert failed once would never appear. Run by the nightly check after its
+ * own flags. Each card is raised under the visit's lock, re-reading the row, so a
+ * visit settled in between gets none. Rows older than `days` are left alone.
+ * @returns {Promise<{raised: number}>}
+ */
+async function backfillMissingCards({ days = 7 } = {}) {
+  if (!queueEnabled()) return { raised: 0 };
+  let raised = 0;
+  try {
+    const open = await db('reschedule_log')
+      .where({ reason_code: 'customer_noshow' })
+      .whereNull('resolved_at')
+      .where('created_at', '>', db.raw("NOW() - (?::int * INTERVAL '1 day')", [days]))
+      .orderBy('created_at', 'desc')
+      .select('id', 'scheduled_service_id');
+    const seen = new Set();
+    for (const row of Array.isArray(open) ? open : []) {
+      const visitId = row.scheduled_service_id;
+      if (!visitId || seen.has(String(visitId))) continue;
+      seen.add(String(visitId));
+      const hasCard = await db('dispatch_alerts').where({ type: ALERT_TYPE, job_id: visitId }).whereNull('resolved_at').first('id');
+      if (hasCard) continue;
+      try {
+        const result = await db.transaction(async (t) => {
+          const { log } = await lockVisitThenLog(t, row.id);
+          if (!log || log.resolved_at) return { raised: false };
+          const service = await t('scheduled_services').where({ id: visitId })
+            .first('id', 'technician_id', 'scheduled_date', 'window_start', 'window_end', 'service_type');
+          if (!service) return { raised: false };
+          const slot = loggedSlot(log);
+          return raiseCard({ logId: log.id, service: slot.scheduled_date ? { ...service, ...slot } : service, confirmed: !!log.miss_confirmed_at, trx: t });
+        });
+        if (result && result.raised) raised += 1;
+      } catch (err) {
+        logger.warn(`[not-closed-out] missing card not raised for visit ${visitId}: ${err.message}`);
+      }
+    }
+  } catch (err) {
+    logger.warn(`[not-closed-out] missing-card pass failed: ${err.message}`);
+  }
+  return { raised };
 }
 
 module.exports = {
@@ -314,4 +405,7 @@ module.exports = {
   resolveOnTransition,
   confirmMiss,
   dismiss,
+  markHandled,
+  backfillMissingCards,
+  queueEnabled,
 };

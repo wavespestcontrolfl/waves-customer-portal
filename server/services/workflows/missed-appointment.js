@@ -45,7 +45,14 @@ class MissedAppointment {
     }
     const customerId = await this.logSkip(scheduledServiceId, reason, conn, { occurrence, scanned });
     if (customerId === STALE_CANDIDATE) return { action: 'stale_candidate' };
-    return customerId ? this.evaluateThreshold(customerId, reason, conn) : null;
+    if (!customerId) return null;
+    // With the office queue on, the nightly check's row is only "still open at
+    // 6 PM", not a miss: the repeated-miss outreach waits for a person to confirm
+    // it (not-closed-out.js confirmMiss evaluates then).
+    if (reason !== 'manual_no_show' && require('../not-closed-out').queueEnabled()) {
+      return { action: 'awaiting_confirmation' };
+    }
+    return this.evaluateThreshold(customerId, reason, conn);
   }
 
   // Write the flagged row (and raise its card). Returns the customer id, null when
@@ -128,9 +135,16 @@ class MissedAppointment {
     // because the window differs. Legacy rows with NULL slot fields
     // collapse per-service, matching the old per-row behavior closely
     // enough for the 90-day window.
+    // With the office queue on, only person-marked misses count: a row a person
+    // confirmed (card or dispatch no-show) or a no-show Quick Move (a person moved
+    // it: new_date is set). The nightly check's unconfirmed rows do not.
+    const personMarkedOnly = require('../not-closed-out').queueEnabled();
     const skipCount = await conn('reschedule_log')
       .where({ customer_id: customerId, reason_code: 'customer_noshow' })
       .where('created_at', '>', conn.raw("NOW() - INTERVAL '90 days'"))
+      .where(function personMarked() {
+        if (personMarkedOnly) this.whereNotNull('miss_confirmed_at').orWhereNotNull('new_date');
+      })
       .select(conn.raw("count(distinct (scheduled_service_id, coalesce(original_date, '1970-01-01'::date), coalesce(original_window, ''))) as count"))
       .first();
 
