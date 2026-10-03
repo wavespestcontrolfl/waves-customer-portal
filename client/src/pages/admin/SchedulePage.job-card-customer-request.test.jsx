@@ -41,8 +41,7 @@ describe('JobCardCustomerRequest', () => {
 describe('JobCardCustomerTexts', () => {
   it('quotes each text with its date', () => {
     render(<JobCardCustomerTexts D={D} texts={[{ date: '2026-09-02', text: 'Ants are back by the pool' }]} />);
-    // Neutral: a first visit shows the last 30 days, so no visit is named.
-    expect(screen.getByText('Recent customer texts')).toBeTruthy();
+    expect(screen.getByText('Customer texts (last 14 days)')).toBeTruthy();
     expect(screen.getByText('\u201CAnts are back by the pool\u201D')).toBeTruthy();
     expect(screen.getByText('2026-09-02:', { exact: false })).toBeTruthy();
   });

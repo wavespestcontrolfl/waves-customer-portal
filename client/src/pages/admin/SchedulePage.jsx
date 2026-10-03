@@ -7177,14 +7177,14 @@ export function JobCardCustomerRequest({ request, D }) {
   );
 }
 
-// The customer's own recent texts (same gate): since the last visit, or the
-// last 30 days on a first visit — so the heading names no visit. null = the
-// history could not be read — said so, never shown as "no texts".
+// The customer's own texts from the 14 days up to the visit's day (same
+// gate). null = the history could not be read — said so, never shown as
+// "no texts".
 export function JobCardCustomerTexts({ texts, D }) {
   if (texts === undefined || (Array.isArray(texts) && texts.length === 0)) return null;
   return (
     <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, padding: "10px 12px", margin: "0 0 14px", fontSize: 14, lineHeight: 1.5, color: D.text }}>
-      <div style={{ fontWeight: 500, marginBottom: 4 }}>Recent customer texts</div>
+      <div style={{ fontWeight: 500, marginBottom: 4 }}>Customer texts (last 14 days)</div>
       {texts === null
         ? <div style={{ color: D.muted }}>Text history unavailable right now.</div>
         : texts.map((t, i) => (

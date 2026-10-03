@@ -321,60 +321,27 @@ async function loadOpenIssues(dbh, customerId) {
  */
 // Calls between the previous visit and THIS visit's start: a historical
 // card must not show later conversations as its pre-visit context.
-// Where the texts stop. window_start only opens a two-hour arrival range,
-// so a text sent inside it (gate instructions at 9:30 for a 9–11 arrival)
-// still belongs on the card: the cutoff is the technician's arrival on the
-// CURRENT attempt, else now while the visit is today or still ahead. Which
-// stamps belong to the current attempt is track-transitions' own per-field
-// rule (staleLifecycleFieldClears): a rescheduled visit can keep an
-// abandoned attempt's stamp next to a fresh one, and the old one is never
-// the cutoff. With no current arrival, a finished visit or one on an
-// earlier day (whatever its status) stops at its nominal start, so an old
-// card never shows conversations that came after it.
-const ARRIVAL_STAMPS = ['arrived_at', 'actual_start_time', 'check_in_time'];
-const TEXTS_DONE_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show'];
-function textsCutoff(svc, visitStart, today = etDateString()) {
-  const stale = require('./track-transitions').staleLifecycleFieldClears(svc);
-  const stamps = ARRIVAL_STAMPS.filter((k) => !(k in stale))
-    .map((k) => (svc[k] ? new Date(svc[k]).getTime() : NaN)).filter(Number.isFinite);
-  if (stamps.length) return new Date(Math.min(...stamps));
-  if (!visitStart) return null;
-  const day = etCalendarDayOf(svc.scheduled_date);
-  if (TEXTS_DONE_STATUSES.includes(svc.status) || (day && day < today)) return visitStart;
-  return null;
+// The texts window (owner ruling 2026-10-03: "last 14 days"): the 14 ET
+// days up to and including the visit's day, never past now. Deliberately
+// independent of last-visit and arrival records — "since the last visit"
+// had a corner for every lifecycle state (Codex #5685 r2–r8).
+const TEXTS_WINDOW_DAYS = 14;
+function textsWindow(scheduledDate, now = new Date()) {
+  const day = etCalendarDayOf(scheduledDate) || etDateString(now);
+  const dayStart = parseETDateTime(`${day}T00:00`);
+  const dayEnd = parseETDateTime(`${etDateString(addETDays(parseETDateTime(`${day}T12:00`), 1))}T00:00`);
+  const since = parseETDateTime(`${etDateString(addETDays(parseETDateTime(`${day}T12:00`), -(TEXTS_WINDOW_DAYS - 1)))}T00:00`);
+  return { since: since < dayStart ? since : dayStart, until: dayEnd < now ? dayEnd : now };
 }
 
-// Where the texts start: the customer's most recent completed visit in
-// this line BEFORE this one. loadLastVisit only looks at earlier DAYS (the
-// paragraph's history), so an earlier visit the same day is found here, by
-// appointment identity, and wins when present. Throws when unreadable — the
-// caller shows the texts as unavailable, never a wider window.
-async function textsSinceInstant(dbh, svc, serviceLine, lastVisit, cutoff) {
-  const day = etCalendarDayOf(svc.scheduled_date);
-  if (!day) return lastVisit?.startedAt || null;
-  const sameDay = await dbh('service_records as sr')
-    .where({ 'sr.customer_id': svc.customer_id, 'sr.status': 'completed', 'sr.service_date': day })
-    .modify((qb) => { if (serviceLine) qb.where('sr.service_line', serviceLine); })
-    .where((q) => q.whereNull('sr.scheduled_service_id').orWhere('sr.scheduled_service_id', '<>', svc.id))
-    .whereNotNull('sr.started_at')
-    .where('sr.started_at', '<', cutoff || new Date())
-    .orderBy('sr.started_at', 'desc')
-    .first('sr.started_at');
-  return sameDay?.started_at || lastVisit?.startedAt || null;
-}
-
-// The customer's own recent texts — since the last visit (else the last 30 days),
-// up to the technician's arrival (textsCutoff). Inbound only; a
+// The customer's own recent texts inside textsWindow. Inbound only; a
 // tapback quotes a Waves text and is never their words; an unresolved
 // review-ask reservation is not a delivered message; recruiting rows are
-// owner-only. null = unreadable
-// (the card says so), never an empty history.
-const TEXTS_FALLBACK_DAYS = 30;
+// owner-only. null = unreadable (the card says so), never an empty history.
 const TEXTS_MAX = 3;
 const TEXTS_PAGE = 25;
-async function loadTextsSince(dbh, customerId, sinceInstant, untilInstant) {
-  const until = untilInstant ? new Date(untilInstant) : new Date();
-  const since = sinceInstant ? new Date(sinceInstant) : new Date(until.getTime() - TEXTS_FALLBACK_DAYS * 86400000);
+async function loadTextsSince(dbh, customerId, scheduledDate, now = new Date()) {
+  const { since, until } = textsWindow(scheduledDate, now);
   try {
     // Typed reactions are dropped in SQL; a tapback that only its body
     // gives away is dropped here, so pages are read until three real texts
@@ -391,7 +358,7 @@ async function loadTextsSince(dbh, customerId, sinceInstant, untilInstant) {
       const rows = await excludeUnresolvedSendReservations(excludeRecruitingSmsLog(dbh('sms_log').where({ customer_id: customerId })))
         .where('direction', 'inbound')
         .whereRaw("COALESCE(sms_log.message_type, '') <> 'sms_reaction'")
-        .where('created_at', '>', since)
+        .where('created_at', '>=', since)
         .where('created_at', '<', until)
         .select('id', 'created_at', 'message_body', 'message_type')
         .orderBy('created_at', 'desc')
@@ -412,20 +379,6 @@ async function loadTextsSince(dbh, customerId, sinceInstant, untilInstant) {
     logger.warn(`[job-card] texts unavailable for ${customerId}: ${err.code || err.name || 'error'}`);
     return null;
   }
-}
-
-// The card's texts: the window is (previous visit's start, this visit's
-// arrival). Either end unreadable = null, the card's "unavailable".
-async function loadVisitTexts(dbh, svc, serviceLine, lastVisit, visitStart) {
-  const cutoff = textsCutoff(svc, visitStart);
-  let since;
-  try {
-    since = await textsSinceInstant(dbh, svc, serviceLine, lastVisit, cutoff);
-  } catch (err) {
-    logger.warn(`[job-card] texts window unavailable for ${svc.id}: ${err.code || err.name || 'error'}`);
-    return null;
-  }
-  return loadTextsSince(dbh, svc.customer_id, since, cutoff);
 }
 
 // Photos the customer sent before the visit (GATE_VISIT_PREP_PHOTOS's own
@@ -582,7 +535,6 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}, { displayContext
       dbh.raw(`(${stampedDivergesSql('ss', 'c')}) as address_diverges`),
       'c.waveguard_tier',
       'ss.customer_request', 'ss.customer_request_source', 'ss.customer_request_pests',
-      'ss.arrived_at', 'ss.actual_start_time', 'ss.check_in_time',
     )
     .first();
   if (!svc) return null;
@@ -603,11 +555,7 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}, { displayContext
   const [calls, rain7d, texts, prepPhotos] = await Promise.all([
     loadCallsSince(svc.customer_id, lastVisit?.startedAt || null, deps, visitStart),
     serviceLine === 'lawn' ? loadRain7d(dbh, svc, etCalendarDayOf(svc.scheduled_date), deps) : Promise.resolve(null),
-    // An unreadable visit history gives no "since": the texts read as
-    // unavailable too, never the first-visit 30-day window.
-    customerContext
-      ? (lastVisit?.unavailable ? Promise.resolve(null) : loadVisitTexts(dbh, svc, serviceLine, lastVisit, visitStart))
-      : Promise.resolve(undefined),
+    customerContext ? loadTextsSince(dbh, svc.customer_id, svc.scheduled_date) : Promise.resolve(undefined),
     customerContext ? loadPrepPhotos(dbh, svc) : Promise.resolve(undefined),
   ]);
 
@@ -2113,5 +2061,5 @@ module.exports = {
   resolveVisitLines,
   PROMPT_VERSION,
   SYSTEM_PROMPT,
-  _test: { fieldGuideLineProduct, dispatchReadiness, accessCodes, petLine, loadRain7d, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, criticalFacts, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, clauseMismatch, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations },
+  _test: { fieldGuideLineProduct, dispatchReadiness, accessCodes, petLine, loadRain7d, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, criticalFacts, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, clauseMismatch, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations, textsWindow },
 };

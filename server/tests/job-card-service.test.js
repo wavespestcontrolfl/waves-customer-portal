@@ -1378,8 +1378,7 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
     });
 
     // factsDb's chain is not awaitable as a list; sms_log gets one that is.
-    // The tech is on site, so the window is the 30 days before that arrival.
-    const onSite = { status: 'on_site', arrived_at: '2026-09-04T13:00:00Z' };
+    const onSite = { status: 'on_site' };
     const smsReads = { count: 0, until: null, since: null, grouped: [] };
     beforeEach(() => { smsReads.count = 0; smsReads.until = null; smsReads.since = null; smsReads.grouped = []; });
     const withTexts = (row, texts) => {
@@ -1394,11 +1393,11 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
           // excludeRecruitingSmsLog's grouped predicate: record that it was applied.
           if (typeof args[0] === 'function') { smsReads.grouped.push(args[0].name); return chain; }
           if (args[0] === 'created_at' && args[1] === '<') { before = new Date(args[2]).getTime(); smsReads.until = new Date(args[2]); }
-          if (args[0] === 'created_at' && args[1] === '>') { after = new Date(args[2]).getTime(); smsReads.since = new Date(args[2]); }
+          if (args[0] === 'created_at' && args[1] === '>=') { after = new Date(args[2]).getTime(); smsReads.since = new Date(args[2]); }
           return chain;
         };
         chain.limit = (n) => { size = n; return chain; };
-        const page = () => texts.map((t, i) => ({ id: `sms-${i}`, ...t })).filter((t) => { const at = Date.parse(t.created_at); return at < before && at > after; }).slice(skip, skip + size);
+        const page = () => texts.map((t, i) => ({ id: `sms-${i}`, ...t })).filter((t) => { const at = Date.parse(t.created_at); return at < before && at >= after; }).slice(skip, skip + size);
         chain.then = (res, rej) => (texts instanceof Error ? Promise.reject(texts) : Promise.resolve(page())).then(res, rej);
         smsReads.count += 1;
         return chain;
@@ -1440,30 +1439,6 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       expect(out.notes.customerTexts).toEqual([{ date: '2026-09-03', text: 'Wasps by the lanai door' }]);
     });
 
-    test('texts stop at the recorded arrival, not the window start; none recorded = now (Codex r2)', async () => {
-      process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = 'true';
-      // 9:00 window, the customer texts gate instructions at 9:30, tech arrives 9:45 ET.
-      const texts = [{ created_at: '2026-09-04T13:30:00Z', message_body: 'Use the side entrance today', message_type: 'sms' }];
-      const arrived = await jobCard.loadJobCardFacts('svc1', withTexts({ window_start: '09:00', status: 'on_site', check_in_time: '2026-09-04T13:50:00Z', arrived_at: '2026-09-04T13:45:00Z' }, texts), deps);
-      expect(smsReads.until.toISOString()).toBe('2026-09-04T13:45:00.000Z');
-      expect(arrived.notes.customerTexts).toEqual([{ date: '2026-09-04', text: 'Use the side entrance today' }]);
-      // A rescheduled visit keeps an abandoned attempt's stamps next to today's arrival: the old ones never win (Codex r5).
-      await jobCard.loadJobCardFacts('svc1', withTexts({ window_start: '09:00', status: 'on_site', actual_start_time: '2026-08-20T14:00:00Z', check_in_time: '2026-08-20T14:05:00Z', arrived_at: '2026-09-04T13:45:00Z' }, texts), deps);
-      expect(smsReads.until.toISOString()).toBe('2026-09-04T13:45:00.000Z');
-      // Not arrived yet, visit today or ahead: everything up to this read.
-      const t0 = Date.now();
-      await jobCard.loadJobCardFacts('svc1', withTexts({ window_start: '09:00', status: 'confirmed', scheduled_date: '2099-01-05' }, texts), deps);
-      expect(smsReads.until.getTime()).toBeGreaterThanOrEqual(t0);
-      // An earlier day never closed out (still 'confirmed' / 'rescheduled'): its nominal start (Codex r3).
-      for (const status of ['confirmed', 'rescheduled']) {
-        await jobCard.loadJobCardFacts('svc1', withTexts({ window_start: '09:00', status }, texts), deps);
-        expect(smsReads.until.toISOString()).toBe('2026-09-04T13:00:00.000Z');
-      }
-      // Finished with no arrival stamp: the nominal start.
-      await jobCard.loadJobCardFacts('svc1', withTexts({ window_start: '09:00', status: 'completed' }, texts), deps);
-      expect(smsReads.until.toISOString()).toBe('2026-09-04T13:00:00.000Z');
-    });
-
     test('recruiting rows are excluded by the shared sms_log predicate (Codex r4)', async () => {
       process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = 'true';
       await jobCard.loadJobCardFacts('svc1', withTexts(onSite, []), deps);
@@ -1475,54 +1450,24 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       expect(sql).toContain('job');
     });
 
-    test('an unreadable visit history makes the texts unavailable, never the 30-day fallback (Codex r4)', async () => {
+    test('the texts window is the 14 ET days up to the visit day, never past now (owner 2026-10-03)', async () => {
+      const { textsWindow } = jobCard._test;
+      // A past visit: its own day closes the window.
+      const past = textsWindow('2026-09-04', new Date('2026-10-03T12:00:00Z'));
+      expect(past.since.toISOString()).toBe('2026-08-22T04:00:00.000Z');
+      expect(past.until.toISOString()).toBe('2026-09-05T04:00:00.000Z');
+      // Today's visit: up to this read, so a text sent inside the arrival window shows.
+      const now = new Date('2026-09-04T13:30:00Z');
+      expect(textsWindow('2026-09-04', now).until).toEqual(now);
+      // A future visit: still the 14 days before it, ending now.
+      const ahead = textsWindow('2026-09-10', now);
+      expect(ahead.since.toISOString()).toBe('2026-08-28T04:00:00.000Z');
+      expect(ahead.until).toEqual(now);
+      // The read uses exactly that window, whatever the visit's status or stamps.
       process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = 'true';
-      const base = withTexts(onSite, [{ created_at: '2026-09-02T15:00:00Z', message_body: 'Old and already handled', message_type: 'sms' }]);
-      const failing = Object.assign((table) => {
-        if (table !== 'service_records as sr') return base(table);
-        const chain = base(table);
-        chain.first = () => Promise.reject(new Error('down'));
-        return chain;
-      }, { raw: base.raw });
-      const out = await jobCard.loadJobCardFacts('svc1', failing, deps);
-      expect(out.facts.lastVisit).toEqual({ unavailable: true });
-      expect(out.notes.customerTexts).toBeNull();
-      expect(smsReads.count).toBe(0);
-    });
-
-    test('an earlier visit the same day starts the texts window (Codex r7)', async () => {
-      process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = 'true';
-      const texts = [
-        { created_at: '2026-09-04T16:00:00Z', message_body: 'They are back already', message_type: 'sms' },
-        { created_at: '2026-09-04T11:00:00Z', message_body: 'Handled this morning', message_type: 'sms' },
-      ];
-      const base = withTexts({ status: 'on_site', arrived_at: '2026-09-04T18:00:00Z' }, texts);
-      // loadLastVisit asks .first() with no args (no earlier DAY); the same-day lookup asks .first('sr.started_at').
-      const dbh = Object.assign((table) => {
-        const chain = base(table);
-        if (table !== 'service_records as sr') return chain;
-        const first = chain.first;
-        chain.first = (...cols) => (cols[0] === 'sr.started_at' ? Promise.resolve({ started_at: new Date('2026-09-04T13:00:00Z') }) : first());
-        return chain;
-      }, { raw: base.raw });
-      const out = await jobCard.loadJobCardFacts('svc1', dbh, deps);
-      expect(smsReads.since.toISOString()).toBe('2026-09-04T13:00:00.000Z');
-      expect(out.notes.customerTexts).toEqual([{ date: '2026-09-04', text: 'They are back already' }]);
-    });
-
-    test('an unreadable same-day lookup makes the texts unavailable (Codex r7)', async () => {
-      process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = 'true';
-      const base = withTexts(onSite, [{ created_at: '2026-09-02T15:00:00Z', message_body: 'Old', message_type: 'sms' }]);
-      const dbh = Object.assign((table) => {
-        const chain = base(table);
-        if (table !== 'service_records as sr') return chain;
-        const first = chain.first;
-        chain.first = (...cols) => (cols[0] === 'sr.started_at' ? Promise.reject(new Error('down')) : first());
-        return chain;
-      }, { raw: base.raw });
-      const out = await jobCard.loadJobCardFacts('svc1', dbh, deps);
-      expect(out.notes.customerTexts).toBeNull();
-      expect(smsReads.count).toBe(0);
+      await jobCard.loadJobCardFacts('svc1', withTexts({ status: 'rescheduled', actual_start_time: '2026-08-20T14:00:00Z' }, []), deps);
+      expect(smsReads.since.toISOString()).toBe('2026-08-22T04:00:00.000Z');
+      expect(smsReads.until.toISOString()).toBe('2026-09-05T04:00:00.000Z');
     });
 
     test('readiness builds never read texts or photos (Codex r1)', async () => {
