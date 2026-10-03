@@ -1198,6 +1198,14 @@ export function applicationPestFamily(app = {}) {
   return families.size === 1 ? families.values().next().value : null;
 }
 
+// A spray adjuvant (the surfactant in the tank mix), by name, category or
+// active ingredient. One test for the label and the technical details, so
+// the two never disagree (GitHub Codex P1 on 4cc22e648b).
+function isSprayAdjuvant(app = {}) {
+  const product = app.product || {};
+  return /surfactant|adjuvant|wetting/i.test(`${product.name || ''} ${product.category || ''} ${product.active_ingredient || ''}`);
+}
+
 export function applicationPurpose(app = {}, serviceLine = 'pest') {
   const method = String(app.method || '').toLowerCase();
   const product = String(app.product?.name || '').toLowerCase();
@@ -1217,6 +1225,11 @@ export function applicationPurpose(app = {}, serviceLine = 'pest') {
     if (method.includes('granular') || category.includes('fert')) return 'Lawn nutrient application';
     return 'Lawn treatment application';
   }
+  // A spray adjuvant (the surfactant in the tank mix) is no treatment of its
+  // own: never "Perimeter protection" (or a mosquito treatment) because of
+  // the mix it rode in (owner report review 2026-10-03). Tree & shrub's own
+  // branch below gives it the same label.
+  if (isSprayAdjuvant(app)) return 'Spray coverage aid';
   if (serviceLine === 'mosquito') return 'Mosquito pressure reduction';
   if (serviceLine === 'tree_shrub') {
     // Classify from name + category + ACTIVE ingredient — blank/Uncategorized
@@ -1383,7 +1396,14 @@ export function applicationPurposeCopy(app = {}, serviceLine = 'pest', context =
   if (purpose === 'Trunk injection') return 'Delivered directly into the trunk so the treatment moves with the tree’s own vascular flow.';
   if (purpose === 'Disease control application') return 'Applied to protect foliage where disease-like signals or seasonal conditions called for it.';
   if (purpose === 'Plant nutrition application') return 'Applied to feed the documented plants — supporting color, density, root development, and new growth within the plant health program.';
-  if (purpose === 'Spray coverage aid') return 'Added to the tank mix so the treatment spreads and holds on waxy leaves and stems instead of beading off.';
+  if (purpose === 'Spray coverage aid') {
+    // Tree & shrub keeps its leaf wording; on any other visit the additive
+    // rides an exterior spray, in the approved product wording (server
+    // report-product-copy.js, LESCO 90/10).
+    return serviceLine === 'tree_shrub'
+      ? 'Added to the tank mix so the treatment spreads and holds on waxy leaves and stems instead of beading off.'
+      : 'Added to the spray so it covers evenly and sticks to surfaces. It isn’t a pesticide on its own.';
+  }
   if (purpose === 'Plant health treatment') return 'Applied as part of the documented plant health program for this visit.';
   return 'Application recorded for this visit.';
 }
@@ -1427,6 +1447,15 @@ export function applicationTechnicalExplanation(app = {}, serviceLine = 'pest') 
       details.push(`${productName} was applied to the affected plants${active ? ` (active ingredient: ${active})` : ''} per its label directions, targeting the documented activity while minimizing impact on the surrounding landscape.`);
     }
     details.push('The application is tracked against this property’s plant inventory, photo history, and prior treatments so the next visit measures response rather than starting over.');
+    details.push(...productIdentifierDetails(app));
+    return details;
+  }
+
+  // A spray adjuvant is no residual application or bait of its own: it is
+  // described for what it does to the spray, as its label reads (GitHub
+  // Codex P1 on 4cc22e648b).
+  if (isSprayAdjuvant(app)) {
+    details.push(`${productName} is a spray adjuvant, not a pesticide. It is mixed into the spray so the treatment spreads evenly and sticks to the treated surfaces, improving the coverage of the products it is mixed with.`);
     details.push(...productIdentifierDetails(app));
     return details;
   }
