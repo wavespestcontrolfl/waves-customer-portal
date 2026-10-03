@@ -123,11 +123,14 @@ function openScheduleChanges(technicianId) {
     .whereIn('n.type', SCHEDULE_CHANGE_TYPES);
 }
 
-// `soon` in SQL: the card's new or previous day is today or tomorrow (ET);
-// a card written before the ISO days existed falls back to the visit's day.
-function soonSql() {
+// `soon` in SQL: the card's new or previous day is today or tomorrow (ET) as
+// of `asOf`; a card written before the ISO days existed falls back to the
+// visit's day. Clear-all passes the read's own as_of, so an ET midnight
+// between the read and the tap never clears a card the tech saw as its own
+// today/tomorrow card (pre-push audit P1).
+function soonSql(asOf) {
   const { etDateString, addETDays } = require('../utils/datetime-et');
-  const now = new Date();
+  const now = asOf;
   const days = [etDateString(now), etDateString(addETDays(now, 1))];
   return {
     sql: "COALESCE(n.payload->>'date' IN (?, ?) OR n.payload->>'previous_date' IN (?, ?)"
@@ -142,8 +145,8 @@ function soonSql() {
 // mid-read is neither shown nor cleared — the next read shows it.
 router.get('/schedule-changes', async (req, res, next) => {
   try {
-    const soon = soonSql();
     const asOf = new Date();
+    const soon = soonSql(asOf);
     const [rows, totals] = await Promise.all([
       openScheduleChanges(req.technicianId)
         .where('n.created_at', '<=', asOf)
@@ -168,7 +171,7 @@ router.post('/dismiss-batch', async (req, res, next) => {
   try {
     const asOf = new Date(req.body?.as_of);
     if (Number.isNaN(asOf.getTime())) return res.status(400).json({ error: 'as_of is required' });
-    const soon = soonSql();
+    const soon = soonSql(asOf);
     const ids = openScheduleChanges(req.technicianId)
       .where('n.created_at', '<=', asOf)
       .whereRaw(`NOT ${soon.sql}`, soon.bindings)
