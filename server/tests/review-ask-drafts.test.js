@@ -80,7 +80,7 @@ describe('listRecent', () => {
       id: 7, customerName: 'Marta R', step: 1, outcome: 'drafted', technicianName: 'Adam', serviceDate: '2026-10-01',
       sentences: [{ sentence: 'Hi.', greeting_only: true }], sentAt: new Date('2026-10-02T15:05:00Z'),
     });
-    expect(out.paymentHolds[0]).toMatchObject({ sequenceId: 'seq-2', customerName: 'Lee', reason: 'payment_hold', detail: { hold: 'overdue_invoice' } });
+    expect(out.paymentHolds[0]).toMatchObject({ sequenceId: 'seq-2', customerName: 'Lee', step: 1, reason: 'payment_hold', detail: { hold: 'overdue_invoice' } });
     expect(calls).toContainEqual(['review_sequences', 'whereRaw', "s.decision->>'reason' = ANY(?)", [['payment_hold', 'ask_dropped_payment_hold']]]);
   });
 });
@@ -121,4 +121,17 @@ describe('listRecent: whether THIS outcome went out', () => {
     expect(out.drafts.find((d) => d.id === 4).sentAt).toBeNull();
     expect((await listWith([draftRow({ id: 5, outcome: 'fallback', reason: 'x' })], [])).drafts[0].sentAt).toBeNull();
   });
+});
+
+test('a dropped payment hold names the step it held, not the step the cadence moved on to', async () => {
+  const database = jest.fn((table) => {
+    const name = String(table).split(' ')[0];
+    const q = {};
+    for (const m of ['leftJoin', 'where', 'whereIn', 'whereRaw', 'orWhereNotNull', 'whereNotNull', 'orderBy', 'limit']) q[m] = () => q;
+    q.select = async () => (name === 'review_sequences'
+      ? [{ id: 's-1', customer_id: 'c', status: 'completed', current_step: 1, updated_at: new Date(), decision: { reason: 'ask_dropped_payment_hold', detail: { step: 0, hold: 'overdue_invoice' } } }]
+      : []);
+    return q;
+  });
+  expect((await Drafts.listRecent({ database })).paymentHolds[0]).toMatchObject({ step: 0, reason: 'ask_dropped_payment_hold' });
 });

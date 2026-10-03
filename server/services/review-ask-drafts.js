@@ -132,7 +132,9 @@ async function listRecent({ days = 14, database = db } = {}) {
         customerId: h.customer_id,
         customerName: customerName(h),
         status: h.status,
-        step: h.current_step,
+        // The step the hold recorded: a dropped step has already advanced
+        // current_step past it.
+        step: Number.isInteger(decision.detail?.step) ? decision.detail.step : h.current_step,
         reason: decision.reason,
         detail: decision.detail || null,
         nextEvalAt: decision.nextEvalAt || null,
