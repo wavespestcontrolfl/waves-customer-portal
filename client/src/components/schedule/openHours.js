@@ -50,7 +50,8 @@ export function openHoursForDay(dateStr, services, { now = new Date() } = {}) {
   const open = [];
   for (let h = OPEN_HOURS_START; h < OPEN_HOURS_END; h += 1) {
     const from = h * 60;
-    if (from < nowMin) continue;
+    // An hour that has begun (10:00 itself included) is no longer open.
+    if (from <= nowMin) continue;
     if (!ranges.some(([s, e]) => s < from + 60 && e > from)) open.push(h);
   }
   return open;

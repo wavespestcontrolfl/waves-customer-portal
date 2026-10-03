@@ -32,6 +32,8 @@ describe('openHoursForDay', () => {
     const tenFifteenEt = new Date('2026-10-03T14:15:00Z');
     expect(openHoursForDay('2026-10-03', [], { now: tenFifteenEt })).toEqual([11, 12, 13, 14, 15, 16, 17, 18]);
     expect(openHoursForDay('2026-10-02', [], { now: tenFifteenEt })).toEqual([]);
+    // At 10:00 sharp the 10 AM hour has begun.
+    expect(openHoursForDay('2026-10-03', [], { now: new Date('2026-10-03T14:00:00Z') })[0]).toBe(11);
   });
 });
 

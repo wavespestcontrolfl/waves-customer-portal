@@ -7007,6 +7007,16 @@ router.get('/week', async (req, res, next) => {
       for (const day of days) day.rainChance = null;
     }
 
+    // Techs marked out per day, so the mobile week list offers no open hour
+    // the booking check would refuse. Unreadable = nothing hidden.
+    try {
+      const absent = await absentTechDays(db, { dateFrom: days[0].date, dateTo: days[days.length - 1].date });
+      for (const day of days) {
+        const suffix = `:${day.date}`;
+        day.outTechIds = [...absent].filter((k) => k.endsWith(suffix)).map((k) => k.slice(0, -suffix.length));
+      }
+    } catch { /* absences are optional here */ }
+
     res.json({ startDate, days, visitCloseout: visitCloseoutEnabled });
   } catch (err) { next(err); }
 });

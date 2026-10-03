@@ -435,12 +435,13 @@ function withOpenHours(sorted, openHours) {
   return rows;
 }
 
-function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh, onCreateSlot }) {
+function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh, onCreateSlot, outTechIds }) {
   const sorted = useMemo(() => sortByWindow(services || []), [services]);
   const now = useHourClock();
   // Techs marked out for the day can't take a booking; with the whole roster
-  // out there is no open hour to offer.
-  const working = (technicians || []).filter((t) => !t.outToday);
+  // out there is no open hour to offer. A week segment names its own day's
+  // absences (outTechIds); the day list's roster carries outToday.
+  const working = (technicians || []).filter((t) => (outTechIds ? !outTechIds.includes(t.id) : !t.outToday));
   const allOut = (technicians || []).length > 0 && working.length === 0;
   const openHours = useMemo(
     () => (onCreateSlot && !allOut ? openHoursForDay(dateStr, services || [], { now }) : []),
@@ -626,6 +627,7 @@ export default function MobileDispatchList({ mode, date, services, rainChance, r
           onRefresh={onRefresh}
           // A week still loading shows the previous week's rows: no booking from them.
           onCreateSlot={loading ? undefined : onCreateSlot}
+          outTechIds={d.outTechIds || []}
         />
       ))}
     </div>

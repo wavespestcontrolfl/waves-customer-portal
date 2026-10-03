@@ -303,3 +303,29 @@ describe('MobileDispatchList open hours', () => {
     });
   });
 });
+
+describe('MobileDispatchList week open hours', () => {
+  it("judges each week day by that day's own absences", async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-07-13T10:00:00Z')); // Mon 6:00 AM ET
+    fetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        days: [
+          { date: '2026-07-14', services: [], outTechIds: ['tech-1'] },
+          { date: '2026-07-15', services: [], outTechIds: [] },
+        ],
+      }),
+    });
+    render(
+      <MobileDispatchList
+        mode="week"
+        date="2026-07-14"
+        technicians={[{ id: 'tech-1', name: 'Alex Tech', outToday: false }]}
+        onCreateSlot={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(screen.getAllByRole('button', { name: /^Book open hour/ })).toHaveLength(12));
+    vi.useRealTimers();
+  });
+});
