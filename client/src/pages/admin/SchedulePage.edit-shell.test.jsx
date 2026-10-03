@@ -158,3 +158,17 @@ it('a verified route miss relabels both save paths as overrides', () => {
   expect(screen.getByRole('button', { name: 'Save & take payment anyway' })).toBeInTheDocument();
   expect(writes()).toHaveLength(0);
 });
+
+it('re-entering the stored time (HH:MM:SS vs HH:MM) is not an edit', () => {
+  bestTimesState.availability = {
+    pickedDate: '2035-01-02',
+    picked: { start: '08:00', fits: false, reason: 'arrival_window', detourMinutes: null },
+    days: [{ date: '2035-01-02', status: 'open', hours: [] }],
+  };
+  render(<EditServiceModal service={{ ...service, windowStart: '08:00:00', windowEnd: '09:00:00' }} technicians={[]} onClose={vi.fn()} onSaved={vi.fn()} />);
+  const dialog = screen.getByRole('dialog', { name: 'Edit appointment' });
+  const [start] = dialog.querySelectorAll('input[type="time"]');
+  fireEvent.change(start, { target: { value: '10:00' } });
+  fireEvent.change(start, { target: { value: '08:00' } });
+  expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument();
+});
