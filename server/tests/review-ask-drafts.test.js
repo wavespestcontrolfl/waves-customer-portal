@@ -68,7 +68,7 @@ describe('listRecent', () => {
         outcome: 'drafted', reason: null, body: 'Hi', evidence: { sentences: [{ sentence: 'Hi.', quotes: [], ask_only: false, greeting_only: true }] },
         technician_name: 'Adam', service_type: 'Pest', service_date: '2026-10-01', created_at: new Date('2026-10-02T15:00:00Z'),
       }],
-      review_requests: [{ sequence_id: 'seq-1', sequence_step: 1, channel: 'sms', sms_sent_at: new Date('2026-10-02T15:05:00Z'), sent_at: null }],
+      review_requests: [{ sequence_id: 'seq-1', sequence_step: 1, channel: 'sms', custom_body: 'Hi', template_key: 'friendly_ask_tech_voice', created_at: new Date('2026-10-02T15:01:00Z'), sms_sent_at: new Date('2026-10-02T15:05:00Z'), sent_at: null }],
       review_sequences: [{
         id: 'seq-2', customer_id: 'cust-2', first_name: 'Lee', last_name: null, status: 'active', current_step: 1, updated_at: new Date(),
         decision: { reason: 'payment_hold', nextEvalAt: '2026-10-03T14:00:00Z', detail: { hold: 'overdue_invoice', heldSince: '2026-10-02T14:00:00Z' } },
@@ -82,5 +82,43 @@ describe('listRecent', () => {
     });
     expect(out.paymentHolds[0]).toMatchObject({ sequenceId: 'seq-2', customerName: 'Lee', reason: 'payment_hold', detail: { hold: 'overdue_invoice' } });
     expect(calls).toContainEqual(['review_sequences', 'whereRaw', "s.decision->>'reason' = ANY(?)", [['payment_hold', 'ask_dropped_payment_hold']]]);
+  });
+});
+
+describe('listRecent: whether THIS outcome went out', () => {
+  const draftRow = (over) => ({
+    customer_id: 'c', sequence_id: 'seq-1', sequence_step: 1, channel: 'sms', evidence: null, created_at: new Date('2026-10-02T15:00:00Z'), ...over,
+  });
+  const listWith = (drafts, requests) => {
+    const database = jest.fn((table) => {
+      const name = String(table).split(' ')[0];
+      const q = {};
+      for (const m of ['leftJoin', 'where', 'whereIn', 'whereRaw', 'orWhereNotNull', 'whereNotNull', 'orderBy', 'limit']) {
+        q[m] = (...args) => { if (typeof args[0] === 'function') args[0](q); return q; };
+      }
+      q.select = async () => ({ review_ask_drafts: drafts, review_requests: requests, review_sequences: [] }[name] || []);
+      return q;
+    });
+    return Drafts.listRecent({ database });
+  };
+
+  test('a draft is sent only when the sent request carries its exact text; an earlier draft for the same step is not', async () => {
+    const out = await listWith([
+      draftRow({ id: 1, outcome: 'drafted', body: 'Monday draft' }),
+      draftRow({ id: 2, outcome: 'drafted', body: 'Tuesday draft', created_at: new Date('2026-10-03T15:00:00Z') }),
+    ], [{ sequence_id: 'seq-1', sequence_step: 1, channel: 'sms', custom_body: 'Tuesday draft', template_key: 'soft_reminder_tech_voice', created_at: new Date('2026-10-03T15:01:00Z'), sms_sent_at: new Date('2026-10-03T15:02:00Z') }]);
+    expect(out.drafts.find((d) => d.id === 1).sentAt).toBeNull();
+    expect(out.drafts.find((d) => d.id === 2).sentAt).toEqual(new Date('2026-10-03T15:02:00Z'));
+  });
+
+  test('a fallback is sent once a fixed-text request of its step goes out after it; a held repeat never is', async () => {
+    const requests = [{ sequence_id: 'seq-1', sequence_step: 1, channel: 'sms', custom_body: null, template_key: 'soft_reminder', created_at: new Date('2026-10-02T15:01:00Z'), sms_sent_at: new Date('2026-10-02T15:03:00Z') }];
+    const out = await listWith([
+      draftRow({ id: 3, outcome: 'fallback', reason: 'fact_check_unavailable', body: null }),
+      draftRow({ id: 4, outcome: 'held', reason: 'repeat', body: 'How are the ants?' }),
+    ], requests);
+    expect(out.drafts.find((d) => d.id === 3).sentAt).toEqual(new Date('2026-10-02T15:03:00Z'));
+    expect(out.drafts.find((d) => d.id === 4).sentAt).toBeNull();
+    expect((await listWith([draftRow({ id: 5, outcome: 'fallback', reason: 'x' })], [])).drafts[0].sentAt).toBeNull();
   });
 });

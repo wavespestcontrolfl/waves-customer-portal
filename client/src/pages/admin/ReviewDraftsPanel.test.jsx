@@ -47,7 +47,9 @@ describe("Tech-voice review texts panel", () => {
     expect(screen.getByText(/from the record: "Moisture under the sink"/)).toBeInTheDocument();
     expect(screen.getByText(/the review request/)).toBeInTheDocument();
     expect(screen.getByText(/repeats text 1: .How are the ants doing./)).toBeInTheDocument();
-    expect(screen.getByText(/The fixed text went out instead: the fact check could not be reached\./)).toBeInTheDocument();
+    expect(screen.getByText(/this step uses the fixed text: the fact check could not be reached\./)).toBeInTheDocument();
+    expect(screen.getByText(/Drafted .* · sent /)).toBeInTheDocument();
+    expect(screen.getAllByText(/not sent yet/)).toHaveLength(1);
     expect(screen.getByText("Held for payment")).toBeInTheDocument();
     expect(screen.getByText(/overdue bill since/)).toBeInTheDocument();
   });

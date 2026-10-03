@@ -42,7 +42,9 @@ async function recordDraft({ customer, sequenceId = null, sequenceStep = null, c
       service_date: dateOnly(serviceDate),
     });
   } catch (err) {
-    logger.warn(`[review-ask-drafts] record failed (customerId=${customer?.id} sequenceId=${sequenceId}): ${err.message}`);
+    // Never the error message: a query error can carry the insert's values
+    // (the draft, the customer's quoted words).
+    logger.warn(`[review-ask-drafts] record failed (customerId=${customer?.id} sequenceId=${sequenceId} code=${err?.code || 'none'} errType=${err?.name || 'Error'})`);
   }
 }
 
@@ -50,6 +52,22 @@ function parseJson(value) {
   if (!value) return null;
   if (typeof value === 'object') return value;
   try { return JSON.parse(value); } catch { return null; }
+}
+
+// When THIS outcome reached the customer, or null. A drafted text is the
+// sent request carrying exactly its body (a retry on a later day drafts
+// afresh, so the step alone would credit every draft). A fallback is the
+// first fixed-text request of its step sent after it. A held repeat sends
+// nothing.
+function sentAtFor(row, sent) {
+  if (row.outcome === 'held') return null;
+  const sameStep = sent.filter((r) => r.sequence_id === row.sequence_id && r.sequence_step === row.sequence_step && r.channel === row.channel);
+  const match = row.outcome === 'drafted'
+    ? sameStep.find((r) => r.custom_body === row.body)
+    : sameStep
+      .filter((r) => !/_tech_voice$/.test(String(r.template_key || '')) && new Date(r.created_at) >= new Date(row.created_at))
+      .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))[0];
+  return match ? (match.sms_sent_at || match.sent_at) : null;
 }
 
 function customerName(row) {
@@ -75,9 +93,8 @@ async function listRecent({ days = 14, database = db } = {}) {
     ? await database('review_requests')
       .whereIn('sequence_id', sequenceIds)
       .where((q) => q.whereNotNull('sms_sent_at').orWhereNotNull('sent_at'))
-      .select('sequence_id', 'sequence_step', 'channel', 'sms_sent_at', 'sent_at')
+      .select('sequence_id', 'sequence_step', 'channel', 'custom_body', 'template_key', 'created_at', 'sms_sent_at', 'sent_at')
     : [];
-  const sentAt = new Map(sent.map((r) => [`${r.sequence_id}:${r.sequence_step}:${r.channel}`, r.sms_sent_at || r.sent_at]));
   const holds = await database('review_sequences as s')
     .leftJoin('customers as c', 'c.id', 's.customer_id')
     .where('s.updated_at', '>', since)
@@ -105,7 +122,7 @@ async function listRecent({ days = 14, database = db } = {}) {
         serviceType: r.service_type,
         serviceDate: r.service_date ? dateOnly(r.service_date) : null,
         createdAt: r.created_at,
-        sentAt: sentAt.get(`${r.sequence_id}:${r.sequence_step}:${r.channel}`) || null,
+        sentAt: sentAtFor(r, sent),
       };
     }),
     paymentHolds: holds.map((h) => {

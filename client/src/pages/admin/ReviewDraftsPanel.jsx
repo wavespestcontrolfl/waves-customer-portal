@@ -96,7 +96,7 @@ function DraftCard({ d }) {
       )}
       {d.outcome === "fallback" && (
         <p className="text-ui-body text-zinc-700">
-          The fixed text went out instead: {FALLBACK_REASONS[d.reason] || String(d.reason || "no reason recorded").replace(/_/g, " ")}.
+          No draft passed, so this step uses the fixed text: {FALLBACK_REASONS[d.reason] || String(d.reason || "no reason recorded").replace(/_/g, " ")}.
         </p>
       )}
       {d.outcome === "held" && d.repeat && (
@@ -123,7 +123,7 @@ function DraftCard({ d }) {
       )}
       <p className="text-ui-caption text-zinc-500">
         Drafted {fmtET(d.createdAt)}
-        {d.outcome === "drafted" ? (d.sentAt ? ` · sent ${fmtET(d.sentAt)}` : " · not sent yet") : ""}
+        {d.outcome === "held" ? " · not sent" : d.sentAt ? ` · sent ${fmtET(d.sentAt)}` : " · not sent yet"}
       </p>
     </Card>
   );
