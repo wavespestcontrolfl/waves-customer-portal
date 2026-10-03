@@ -1049,6 +1049,16 @@ if (config.nodeEnv === 'production') {
   //
   // Add new sections here if a future surface needs its own PWA.
   const SECTIONS = [
+    // The technician field workspace inside the admin shell keeps the field
+    // PWA identity (first, so it wins over the /admin prefix below).
+    {
+      prefix: '/admin/today',
+      manifest: '/tech-manifest.json',
+      title: 'Waves Tech',
+      appleTitle: 'Waves Tech',
+      themeColor: '#111111',
+      htmlClass: 'admin-app',
+    },
     {
       prefix: '/admin',
       manifest: '/admin-manifest.json',

@@ -228,6 +228,24 @@ describe('tool definitions handed to the model', () => {
     }
   });
 
+  test('billing readers (W9) are handed to admin tokens only, never to a technician token', async () => {
+    const billing = ['get_customer_invoices', 'get_invoice_detail'];
+    scriptModelTurns([[{ type: 'text', text: 'OK' }]]);
+    await withServer(async (baseUrl) => { expect((await postQuery(baseUrl, { prompt: 'hello', context: 'customers' }, 'admin')).status).toBe(200); });
+    const adminTools = mockMessagesCreate.mock.calls[0][0].tools;
+    for (const name of billing) {
+      const tool = adminTools.find((t) => t.name === name);
+      expect(tool).toBeDefined();
+      expect(Object.keys(tool).filter((k) => k.startsWith('_'))).toEqual([]);
+      expect(tool.description).toMatch(/never call it paid|never say|not paid/i);
+    }
+    jest.clearAllMocks();
+    scriptModelTurns([[{ type: 'text', text: 'OK' }]]);
+    await withServer(async (baseUrl) => { expect((await postQuery(baseUrl, { prompt: 'hello', context: 'customers' }, 'tech')).status).toBe(200); });
+    const techNames = mockMessagesCreate.mock.calls[0][0].tools.map((t) => t.name);
+    for (const name of billing) expect(techNames).not.toContain(name);
+  });
+
   test('the contract metadata itself stays on the module definition (the gate still reads it)', () => {
     const { HISTORY_TOOLS } = require('../services/intelligence-bar/history-tools');
     expect(HISTORY_TOOLS.find((t) => t.name === 'search_ib_history')._contracts.tables).toContain('ib_thread_turns');

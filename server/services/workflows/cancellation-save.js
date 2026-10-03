@@ -34,7 +34,6 @@ async function sendCancellationSms(customer, body, metadata = {}, { conversation
     ...(conversationalContext ? { conversationalContext: true } : {}),
     metadata: {
       original_message_type: 'cancellation_save',
-      customerLocationId: customer.location_id,
       ...metadata,
     },
   });
@@ -47,11 +46,12 @@ async function sendCancellationSms(customer, body, metadata = {}, { conversation
     // the queued row durably owns delivery at 8:00 AM.
     if (result.code === 'QUIET_HOURS_HOLD' && result.deferred && result.nextAllowedAt) {
       try {
-        const TWILIO_NUMBERS = require('../../config/twilio-numbers');
         await db('sms_log').insert({
           customer_id: customer.id,
           direction: 'outbound',
-          from_phone: TWILIO_NUMBERS.getOutboundNumber(customer.location_id),
+          // The line the replay will send from (resolve_from_by_customer):
+          // the customer's home line under GATE_HOME_LINE.
+          from_phone: await TwilioService.deriveOutboundNumber({ customerId: customer.id }),
           to_phone: customer.phone,
           message_body: body,
           status: 'scheduled',

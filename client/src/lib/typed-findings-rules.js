@@ -3,6 +3,8 @@
 // mirrors a server rule (server/services/service-report/activity-indicators.js)
 // so a person gets the prompt before /complete refuses. Moved here from
 // SchedulePage.jsx unchanged, so the tech bundle never imports that module.
+import { formatMeasuredAmount } from "./mix-amount";
+import { isPerGallonUnit, tankOwnerRow } from "./product-rate-prefill";
 
 // Whether a typed findings field is required for the CURRENT values —
 // static `required` plus the schema's conditional `requiredUnless`
@@ -193,4 +195,51 @@ export function typedFieldLabel(schemaType, field, values = {}) {
     return "Traps set";
   }
   return field.label;
+}
+
+// The termite treatment record's state fields the visit itself gives (Fast
+// Complete step 5, owner mockup v8: "numbers come from the products and the
+// trace when they can"), each as { value, source }; a field nothing on the
+// visit gives is left out, for a person to fill:
+//  - products_used: the products' names, in the visit's order;
+//  - epa_registration: each product's EPA registration number from the
+//    catalog (named when more than one product carries one);
+//  - gallons_or_amount: the finished solution mixed (the shared tank, and a
+//    product mixed on its own), then the amount of any product not mixed by
+//    the gallon;
+//  - linear_feet_or_stations: the perimeter traced on the visit.
+export function termiteRecordFromVisit({ products = [], catalog = [], tracedFeet = null } = {}) {
+  const rows = (products || []).filter((row) => String(row?.name || "").trim());
+  const nameOf = (row) => String(row.name).trim();
+  const record = {};
+  if (rows.length) {
+    record.products_used = { value: [...new Set(rows.map(nameOf))].join(", "), source: "From the products" };
+  }
+  const epa = rows.map((row) => {
+    const number = String((catalog || []).find((entry) => String(entry?.id) === String(row.productId))?.epa_reg_number || "").trim();
+    return number ? { name: nameOf(row), number } : null;
+  }).filter(Boolean);
+  if (epa.length) {
+    record.epa_registration = epa.length > 1
+      ? { value: epa.map((entry) => `${entry.number} (${entry.name})`).join("; "), source: "From the products" }
+      : { value: epa[0].number, source: "From the product" };
+  }
+  // One tank of finished solution the per-gallon products share, plus any
+  // product mixed on its own (its own gallons, typed by hand).
+  const owner = tankOwnerRow(rows);
+  const ownMix = (row) => isPerGallonUnit(row.rateUnit) && row.carrierGallonsManual && Number(row.carrierGallons) > 0;
+  const tanks = [owner, ...rows.filter((row) => row !== owner && ownMix(row))].filter(Boolean);
+  // A product in no tank (not mixed by the gallon, or no gallons entered)
+  // gives the amount used.
+  const inTank = (row) => isPerGallonUnit(row.rateUnit) && (row.carrierGallonsManual ? ownMix(row) : !!owner);
+  const amounts = [
+    ...tanks.map((row) => `${Number(row.carrierGallons)} gal${tanks.length > 1 ? ` (${nameOf(row)})` : ""}`),
+    ...rows.filter((row) => !inTank(row) && Number(row.totalAmount) > 0)
+      .map((row) => `${formatMeasuredAmount(row.totalAmount, row.amountUnit)} ${nameOf(row)}`),
+  ];
+  if (amounts.length) record.gallons_or_amount = { value: amounts.join("; "), source: "From the products" };
+  if (Number(tracedFeet) > 0) {
+    record.linear_feet_or_stations = { value: `${Math.round(Number(tracedFeet))} ft`, source: "From the trace" };
+  }
+  return record;
 }

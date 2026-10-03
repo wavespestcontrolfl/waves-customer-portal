@@ -1,5 +1,5 @@
 /**
- * Typed voice fill (Fast Complete step 3, GATE_TYPED_VOICE_FILL): a typed
+ * Typed voice fill (Fast Complete steps 3 to 5, GATE_TYPED_VOICE_FILL): a typed
  * visit's own findings read from the technician's note
  * (services/visit-typed-facts.js), and the route the forms call
  * (POST /admin/dispatch/:serviceId/typed-facts).
@@ -61,7 +61,8 @@ jest.mock('../services/service-completion-profiles', () => ({
 
 const { dispatchWithFallback } = require('../services/llm/call');
 const {
-  readTypedFacts, validateTypedFacts, currentValuesFor, voiceFieldsFor, voiceTypeFor, scoreOf, typedSchema, typedSystemPrompt, VOICE_TYPES, NOT_SAID,
+  readTypedFacts, validateTypedFacts, currentValuesFor, voiceFieldsFor, voiceTypeFor, sheetTypeFor, scoreOf, typedSchema, typedSystemPrompt,
+  percentsStated, VOICE_TYPES, NOT_SAID,
 } = require('../services/visit-typed-facts');
 const { PROJECT_TYPES } = require('../services/project-types');
 const router = require('../routes/admin-dispatch');
@@ -70,10 +71,10 @@ const answer = (json) => ({ ok: true, json });
 const ROACH_NOTE = 'German roaches, heavy, behind the fridge and under the sink. Saw live ones and droppings.';
 // Every field of a type answered as the model answers "not said".
 const notSaid = (field) => {
-  if (field.type === 'count') return { said: false, value: 0, quote: '' };
+  if (field.type === 'count' || field.readAs === 'percent') return { said: false, value: 0, quote: '' };
   return field.type === 'select' ? { value: NOT_SAID, quote: '' } : [];
 };
-const nothingSaid = (type) => Object.fromEntries(voiceFieldsFor(type).map((field) => [field.key, notSaid(field)]));
+const nothingSaid = (type, options) => Object.fromEntries(voiceFieldsFor(type, options).map((field) => [field.key, notSaid(field)]));
 const fieldsOf = (type, fields) => ({ fields: { ...nothingSaid(type), ...fields } });
 
 beforeEach(() => {
@@ -83,10 +84,12 @@ beforeEach(() => {
 });
 
 describe('the forms, the schema and the prompt', () => {
-  test('every form read is a typed form the completion defines; step 4 adds the trap and station checks; termite work, tree and lawn forms are other steps', () => {
+  test('every form read is a typed form the completion defines; step 4 adds the trap and station checks, step 5 termite treatment and inspection; WDO, tree and lawn forms are never read here', () => {
     for (const type of Object.keys(VOICE_TYPES)) expect(PROJECT_TYPES[type]?.findingsFields?.length).toBeGreaterThan(0);
-    for (const type of ['rodent_trapping', 'rodent_bait_station', 'termite_bait_station']) expect(VOICE_TYPES).toHaveProperty(type);
-    for (const type of ['termite_treatment', 'wdo_inspection', 'tree_shrub', 'one_time_lawn_treatment', 'palm_injection']) {
+    for (const type of ['rodent_trapping', 'rodent_bait_station', 'termite_bait_station', 'termite_treatment', 'termite_inspection']) {
+      expect(VOICE_TYPES).toHaveProperty(type);
+    }
+    for (const type of ['wdo_inspection', 'tree_shrub', 'one_time_lawn_treatment', 'palm_injection']) {
       expect(VOICE_TYPES).not.toHaveProperty(type);
     }
   });
@@ -159,7 +162,7 @@ describe('the forms, the schema and the prompt', () => {
   test('the form is the profile\'s own findings type, only when this step reads it', () => {
     expect(voiceTypeFor({ findingsType: 'cockroach' })).toBe('cockroach');
     expect(voiceTypeFor({ findingsType: 'termite_bait_station' })).toBe('termite_bait_station');
-    expect(voiceTypeFor({ findingsType: 'termite_treatment' })).toBeNull();
+    expect(voiceTypeFor({ findingsType: 'tree_shrub' })).toBeNull();
     expect(voiceTypeFor({ serviceKey: 'fire_ant' })).toBeNull();
     expect(voiceTypeFor(null)).toBeNull();
   });
@@ -426,6 +429,118 @@ describe('counts and the technician\'s rating (step 4)', () => {
   });
 });
 
+describe('termite treatment and inspection (step 5)', () => {
+  const TRENCH_NOTE = 'Subterranean. Trenched the back wall and the patio edge, point zero six percent Termidor. Light activity at the patio corner.';
+  const TRENCH = voiceFieldsFor('termite_treatment', { serviceKey: 'termite_trenching' });
+  const trenchAnswer = (fields, score = { said: false, value: 0, quote: '' }) => ({
+    fields: { ...nothingSaid('termite_treatment', { serviceKey: 'termite_trenching' }), ...fields }, score,
+  });
+  const readTrench = (json, note = TRENCH_NOTE, current = {}) => validateTypedFacts('termite_treatment', json, note, current, { fields: TRENCH });
+
+  test('liquid, trenching, spot and foam are read; new-construction pre-treat never is; the sheet does not read them yet', () => {
+    for (const serviceKey of ['termite_liquid', 'termite_trenching', 'termite_spot_treatment', 'foam_drill', 'foam_recurring']) {
+      expect(voiceTypeFor({ serviceKey, findingsType: 'termite_treatment' })).toBe('termite_treatment');
+      expect(sheetTypeFor({ serviceKey, findingsType: 'termite_treatment' })).toBeNull();
+    }
+    expect(voiceTypeFor({ serviceKey: 'termite_inspection', findingsType: 'termite_inspection' })).toBe('termite_inspection');
+    expect(sheetTypeFor({ serviceKey: 'termite_inspection', findingsType: 'termite_inspection' })).toBeNull();
+    expect(voiceTypeFor({ serviceKey: 'termite_pretreatment', findingsType: 'termite_treatment' })).toBeNull();
+    expect(sheetTypeFor({ serviceKey: 'cockroach_control', findingsType: 'cockroach' })).toBe('cockroach');
+  });
+
+  test('the record\'s picks and its solution strength are read; the notice questions never are, nor the free text', () => {
+    expect(TRENCH.map((field) => field.key)).toEqual(['target_termite', 'termite_evidence', 'areas_treated', 'treatment_method', 'percent_solution']);
+    expect(TRENCH.find((field) => field.key === 'percent_solution')).toMatchObject({ readAs: 'percent' });
+    expect(voiceFieldsFor('termite_inspection', { serviceKey: 'termite_inspection' }).map((field) => field.key)).toEqual(['termite_type', 'activity_status']);
+    const schema = typedSchema(TRENCH, { scored: true });
+    expect(schema.properties.fields.properties.percent_solution.properties.value).toEqual({ type: 'number' });
+    expect(schema.properties.fields.properties).not.toHaveProperty('posted_notice');
+    const prompt = typedSystemPrompt('termite_treatment', TRENCH, { score: scoreOf('termite_treatment') });
+    expect(prompt).toContain('percent_solution (% solution; a percent)');
+    expect(prompt).toContain('A "percent" field');
+    expect(prompt).not.toContain('posted_notice');
+    expect(scoreOf('termite_inspection')).toBeNull();
+  });
+
+  test('the trenching note fills target, method and solution strength with their words; "Light activity" states no rating', () => {
+    const facts = readTrench(trenchAnswer({
+      target_termite: { value: 'Subterranean termites', quote: 'Subterranean. Trenched' },
+      treatment_method: { value: 'Trenching', quote: 'Trenched the back wall' },
+      percent_solution: { said: true, value: 0.06, quote: 'point zero six percent' },
+    }, { said: true, value: 1, quote: 'Light activity' }));
+    expect(facts.values).toEqual({ target_termite: 'Subterranean termites', treatment_method: 'Trenching', percent_solution: '0.06%' });
+    expect(facts.heard.percent_solution).toEqual([{ value: '0.06%', quote: 'point zero six percent' }]);
+    expect(facts).not.toHaveProperty('score');
+    expect(facts.scoreUnclear).toBe(true);
+  });
+
+  test.each([
+    ['in digits', 'Trenched at 0.06% Termidor.', { said: true, value: 0.06, quote: 'Trenched at 0.06% Termidor' }, '0.06%'],
+    ['a higher rate in words', 'Rodded the slab at point one two five percent.', { said: true, value: 0.125, quote: 'point one two five percent' }, '0.125%'],
+    ['a number the quote does not state', TRENCH_NOTE, { said: true, value: 0.6, quote: 'point zero six percent' }, null],
+    ['a number with no percent beside it', 'Mixed the Termidor at point zero six.', { said: true, value: 0.06, quote: 'Termidor at point zero six' }, null],
+    ['a quote not in the note', TRENCH_NOTE, { said: true, value: 0.06, quote: 'zero point zero six percent solution' }, null],
+    ['out of range', 'Mixed at 0 percent.', { said: true, value: 0, quote: 'Mixed at 0 percent' }, null],
+  ])('a solution strength stands only as the percent its quote states: %s', (_label, note, entry, expected) => {
+    const facts = readTrench(trenchAnswer({ percent_solution: entry }), note);
+    if (expected) expect(facts.values.percent_solution).toBe(expected);
+    else expect(facts.unclearFields).toContain('percent_solution');
+  });
+
+  test('the percents a quote states', () => {
+    expect(percentsStated('point zero six percent')).toEqual([0.06]);
+    expect(percentsStated('zero point oh six percent')).toEqual([0.06]);
+    expect(percentsStated('0.125% on the slab, 0.06 percent outside')).toEqual([0.125, 0.06]);
+    expect(percentsStated('point 06 per cent')).toEqual([0.06]);
+    expect(percentsStated('at point zero six')).toEqual([]);
+    expect(percentsStated('2.5 gallons')).toEqual([]);
+  });
+
+  test('a notice answer in the model\'s reply is never filled: always a tap', () => {
+    const facts = readTrench({
+      ...trenchAnswer({ treatment_method: { value: 'Trenching', quote: 'Trenched the back wall' } }),
+      fields: {
+        ...trenchAnswer({ treatment_method: { value: 'Trenching', quote: 'Trenched the back wall' } }).fields,
+        posted_notice: { value: 'Yes', quote: 'Trenched the back wall' },
+      },
+    });
+    expect(facts.values).toEqual({ treatment_method: 'Trenching' });
+    expect(facts.unclearFields).not.toContain('posted_notice');
+  });
+
+  test('preventive evidence beside live termites leaves both for a person', () => {
+    const note = 'Preventive treatment, no activity observed. Live termites observed at the patio corner.';
+    const facts = readTrench(trenchAnswer({
+      termite_evidence: [
+        { value: 'Preventive treatment — no activity observed', quote: 'Preventive treatment, no activity observed' },
+        { value: 'Live termites observed', quote: 'Live termites observed at the patio corner' },
+      ],
+      treatment_method: { value: 'Trenching', quote: 'Live termites observed' },
+    }), note);
+    expect(facts.values).not.toHaveProperty('termite_evidence');
+    expect(facts.unclearFields).toContain('termite_evidence');
+  });
+
+  test('a termite inspection fills what was found; the inspection notice is a tap', () => {
+    const note = 'Annual termite inspection, crawlspace and garage. No activity anywhere, no termites found.';
+    const fields = voiceFieldsFor('termite_inspection', { serviceKey: 'termite_inspection' });
+    const facts = validateTypedFacts('termite_inspection', {
+      fields: {
+        termite_type: { value: 'None observed', quote: 'no termites found' },
+        activity_status: { value: 'No activity', quote: 'No activity anywhere' },
+        inspection_notice_affixed: { value: 'Yes', quote: 'Annual termite inspection' },
+      },
+    }, note, {}, { fields });
+    expect(facts.values).toEqual({ termite_type: 'None observed', activity_status: 'No activity' });
+  });
+
+  test('a pre-treat visit is never read, even asked directly', async () => {
+    expect(await readTypedFacts({ note: TRENCH_NOTE, findingsType: 'termite_treatment', serviceKey: 'termite_pretreatment' }))
+      .toMatchObject({ status: 'no_type', values: {} });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+  });
+});
+
 describe('readTypedFacts', () => {
   test('reads the note through the fast structured lane with the form\'s own schema', async () => {
     dispatchWithFallback.mockResolvedValue(answer(fieldsOf('cockroach', { species: { value: 'German', quote: 'German roaches' } })));
@@ -433,13 +548,13 @@ describe('readTypedFacts', () => {
     expect(facts).toMatchObject({ status: 'read', type: 'cockroach', values: { species: 'German' }, unclearFields: [] });
     const [policy, payload, options] = dispatchWithFallback.mock.calls[0];
     expect(policy.name).toBe('fastStructured');
-    expect(payload).toMatchObject({ laneId: 'visit_typed_facts', promptVersion: 'visit-typed-facts-v2' });
+    expect(payload).toMatchObject({ laneId: 'visit_typed_facts', promptVersion: 'visit-typed-facts-v3' });
     expect(payload.jsonSchema.properties.fields.required).toEqual(voiceFieldsFor('cockroach').map((field) => field.key));
     expect(options).toEqual({ reserveFallbackBudget: true });
   });
 
   test('a form this step does not read, an empty note, or a note past the cap never calls the model', async () => {
-    expect(await readTypedFacts({ note: ROACH_NOTE, findingsType: 'termite_treatment' })).toMatchObject({ status: 'no_type', values: {} });
+    expect(await readTypedFacts({ note: ROACH_NOTE, findingsType: 'tree_shrub' })).toMatchObject({ status: 'no_type', values: {} });
     expect(await readTypedFacts({ note: ROACH_NOTE, findingsType: undefined })).toMatchObject({ status: 'no_type' });
     expect(await readTypedFacts({ note: '   ', findingsType: 'cockroach' })).toMatchObject({ status: 'empty_note' });
     const { MAX_NOTE_CHARS } = require('../services/visit-voice-facts');
@@ -567,7 +682,10 @@ describe('POST /:serviceId/typed-facts', () => {
     mockDbCurrent = serviceDb(SERVICE, []);
     mockProfile = { serviceKey: 'fire_ant', findingsType: null };
     expect((await invoke({ serviceId: 'svc-1' }, { note: ROACH_NOTE })).body).toEqual({ available: false });
-    mockProfile = { serviceKey: 'termite_liquid', findingsType: 'termite_treatment' };
+    mockProfile = { serviceKey: 'tree_shrub_program', findingsType: 'tree_shrub' };
+    expect((await invoke({ serviceId: 'svc-1' }, { note: ROACH_NOTE })).body).toEqual({ available: false });
+    // New-construction pre-treat shares the termite treatment form and is out.
+    mockProfile = { serviceKey: 'termite_pretreatment', findingsType: 'termite_treatment' };
     expect((await invoke({ serviceId: 'svc-1' }, { note: ROACH_NOTE })).body).toEqual({ available: false });
     expect(dispatchWithFallback).not.toHaveBeenCalled();
   });

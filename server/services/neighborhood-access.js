@@ -361,6 +361,14 @@ async function unfiledGateCodeCustomers(conn) {
       .orWhereRaw(`f.neighborhood_id IS DISTINCT FROM (
         SELECT CASE WHEN count(*) = 1 THEN (array_agg(p.neighborhood_id))[1] END
         FROM customer_properties p WHERE p.customer_id = pp.customer_id AND p.active)`))
+    // A single property the office explicitly cleared (no neighborhood, set
+    // by the office) is settled until the office links it again: filing has
+    // nowhere to go and the county lookup must not run, so it is not retried.
+    .whereRaw(`NOT EXISTS (SELECT 1 FROM customer_properties p
+      WHERE p.customer_id = pp.customer_id AND p.active
+        AND p.neighborhood_id IS NULL AND p.neighborhood_source = 'office'
+        AND NOT EXISTS (SELECT 1 FROM customer_properties p2
+          WHERE p2.customer_id = pp.customer_id AND p2.active AND p2.id <> p.id))`)
     .orderBy('pp.customer_id')
     .pluck('pp.customer_id');
 }
@@ -438,15 +446,18 @@ async function fileOneSavedCode(customerId, lookup) {
 const CONFLICT_KEY_PREFIX = 'neighborhood-gate-conflict:';
 
 // Two or more live codes in a neighborhood, at least one awaiting the office.
+// A switched-off neighborhood never conflicts: the directory hides it, so a
+// bell could not be resolved there (its open bell closes on the next pass).
 async function neighborhoodHasCodeConflict(conn, neighborhoodId) {
   const rows = await conn('neighborhood_access').where({ neighborhood_id: neighborhoodId })
+    .whereIn('neighborhood_id', conn('neighborhoods').where({ active: true }).select('id'))
     .whereNotNull('code').whereNot('status', 'retired').select('status');
   return rows.length > 1 && rows.some((r) => r.status === 'needs_confirm');
 }
 
 // ONE Customers bell per neighborhood with conflicting live codes (rings
 // again only after a fix and a comeback); the name is the community's, never
-// a code. Opens the customer whose update made the conflict.
+// a code. Opens that neighborhood in the directory, where the conflict is resolved.
 async function raiseConflictBell(neighborhoodId, customerId, firstName) {
   const n = await db('neighborhoods').where({ id: neighborhoodId }).first('name');
   const live = await db('neighborhood_access').where({ neighborhood_id: neighborhoodId })
@@ -472,7 +483,7 @@ async function raiseConflictBell(neighborhoodId, customerId, firstName) {
         action: 'confirm a neighborhood gate code',
         why,
         severity: 'needs-you',
-        link: `/admin/customers?customerId=${customerId}`,
+        link: `/admin/customers/gate-codes?neighborhood=${neighborhoodId}`,
         subject: { type: 'customer', id: String(customerId) },
         doneWhen: 'gate_code_confirmed',
         who: 'person',
@@ -500,6 +511,8 @@ async function raiseConflictBell(neighborhoodId, customerId, firstName) {
 // Every neighborhood that has a code conflict right now.
 async function conflictedNeighborhoods(conn) {
   return conn('neighborhood_access as a')
+    .join('neighborhoods as n', 'n.id', 'a.neighborhood_id')
+    .where('n.active', true)
     .whereNotNull('a.code').whereNot('a.status', 'retired')
     .groupBy('a.neighborhood_id')
     .havingRaw('count(*) > 1')
@@ -554,8 +567,12 @@ async function reconcileConflictBells(alreadyRaised) {
   const open = new Set(await openAdminAlertKeys(db, CONFLICT_KEY_PREFIX));
   let raised = 0;
   for (const neighborhoodId of await conflictedNeighborhoods(db)) {
-    if (alreadyRaised.has(neighborhoodId) || open.has(`${CONFLICT_KEY_PREFIX}${neighborhoodId}`)) continue;
-    if (await ringForConflict(neighborhoodId)) raised += 1;
+    if (alreadyRaised.has(neighborhoodId)) continue;
+    // A standing bell is refreshed quietly (refreshOnDedupe, ringOnRefresh
+    // false), so its link and wording follow the current code and a
+    // person's read stands; a missing one is raised.
+    const standing = open.has(`${CONFLICT_KEY_PREFIX}${neighborhoodId}`);
+    if (await ringForConflict(neighborhoodId) && !standing) raised += 1;
   }
   return raised;
 }
@@ -696,6 +713,8 @@ async function neighborhoodGateEntriesForVisits(conn, visits) {
   if (!visitNeighborhood.size) return out;
   const entries = await conn('neighborhood_access')
     .whereIn('neighborhood_id', [...new Set(visitNeighborhood.values())])
+    // A switched-off neighborhood's codes are not shown anywhere.
+    .whereIn('neighborhood_id', conn('neighborhoods').where({ active: true }).select('id'))
     .where((w) => w.where('status', 'active')
       .orWhere((q) => q.where('status', 'needs_confirm').where('access_type', 'keypad').whereNotNull('code')))
     .orderBy([{ column: 'status' }, { column: 'gate_label' }, { column: 'code' }])

@@ -405,9 +405,9 @@ function homeLineLocationId(customer = {}) {
 
 /**
  * homeLineLocationId without the default-office fallback: null when the
- * customer has no valid stored line and no address that identifies an office
- * (owner ruling 2026-10-02: a lead with no office is called from the main
- * line, not assigned Bradenton).
+ * customer has no valid stored line and no address that identifies an office.
+ * homeLineLocationId adds the Bradenton default (owner 2026-10-02: a
+ * customer with no usable address uses Bradenton for everything).
  */
 function homeLineOfficeId(customer = {}) {
   const stored = customer.home_line_location_id;

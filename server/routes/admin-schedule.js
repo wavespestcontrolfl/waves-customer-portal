@@ -5154,14 +5154,15 @@ async function loadProjectCompletionContextByServiceId(services) {
       typedVoiceFillEnabled: require('../config/feature-gates').typedVoiceFillLive()
         && require('../services/visit-typed-facts').voiceTypeFor(completionProfile) != null,
       // GATE_FAST_COMPLETE_REPORT with GATE_TYPED_VOICE_FILL: TechHomePage
-      // opens a typed visit the reader reads in the Fast Complete sheet's
-      // report flow, its record read from the note, in place of the typed
-      // form (fastCompleteReportEnabled above stays off for typed forms). Not
-      // a combined service: its companion sections are required at
-      // completion and the sheet has none.
+      // opens a typed visit the sheet reads (visit-typed-facts.js
+      // sheetTypeFor) in the Fast Complete sheet's report flow, its record
+      // read from the note, in place of the typed form
+      // (fastCompleteReportEnabled above stays off for typed forms). Not a
+      // combined service: its companion sections are required at completion
+      // and the sheet has none.
       typedReportFlowEnabled: require('../config/feature-gates').fastCompleteReportLive()
         && require('../config/feature-gates').typedVoiceFillLive()
-        && require('../services/visit-typed-facts').voiceTypeFor(completionProfile) != null
+        && require('../services/visit-typed-facts').sheetTypeFor(completionProfile) != null
         && !(completionProfile?.companions || []).length,
       // GATE_LAWN_RESERVICE_FAST_COMPLETE: TechHomePage opens the one-screen
       // lawn re-service sheet (instead of the typed Dispatch form) when on.
@@ -6040,6 +6041,13 @@ router.get('/', async (req, res, next) => {
     }
 
     // Enrich with property prefs and last service
+    // GATE_PAF_PREPAY: which customers have a deferred annual prepay at all
+    // (one query), so the billing card checks only their unstamped visits.
+    let deferredPrepayCustomerIds = null;
+    try {
+      deferredPrepayCustomerIds = await require('../services/annual-prepay-renewals')
+        .deferredPrepayHoldCustomerIds(db, services.map((s) => s.customer_id));
+    } catch { deferredPrepayCustomerIds = null; }
     const enriched = await Promise.all(services.map(async (s) => {
       const prefs = await db('property_preferences').where({ customer_id: s.customer_id }).first();
       // Any-line latest keeps the "Last:" card + new-customer detection
@@ -6114,17 +6122,15 @@ router.get('/', async (req, res, next) => {
       // authority completion uses; null = validation unavailable, the
       // prediction falls back to the stamp (Codex r3).
       let annualCoverageValidated = null;
-      if (s.prepaid_method === 'annual_prepay_invoice') {
-        // Validated for ANY lane carrying the stamp (GitHub r4 P2): a
-        // customer reclassified off annual_prepay keeps stale stamps from
-        // refunded/voided terms — leaving validation null would demote the
-        // prediction forever while completion's strict verdict validates
-        // and charges. Stamp present = validate, whatever the lane.
-        try {
-          const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
-          annualCoverageValidated = await AnnualPrepayRenewals.annualPrepayCoversVisit(s, db, { throwOnError: true });
-        } catch { annualCoverageValidated = null; }
-      }
+      // A stamped visit validates against its term (any lane, GitHub r4 P2); an
+      // unstamped visit held by a deferred annual prepay (GATE_PAF_PREPAY) reads
+      // as covered, as completion will treat it.
+      try {
+        const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+        annualCoverageValidated = await AnnualPrepayRenewals.annualCoverageVerdictForPrediction(s, db, {
+          deferredCustomerIds: deferredPrepayCustomerIds,
+        });
+      } catch { annualCoverageValidated = null; }
       // Present-tense money state for the sheet's billing card: what the
       // customer already owes (collectible invoices) and, for members,
       // whether this month's dues actually collected. Non-blocking — a
@@ -6672,6 +6678,13 @@ router.get('/week', async (req, res, next) => {
         }
       }
 
+      // GATE_PAF_PREPAY: which customers have a deferred annual prepay at all
+      // (one query), so the billing card checks only their unstamped visits.
+      let deferredPrepayCustomerIds = null;
+      try {
+        deferredPrepayCustomerIds = await require('../services/annual-prepay-renewals')
+          .deferredPrepayHoldCustomerIds(db, services.map((s) => s.customer_id));
+      } catch { deferredPrepayCustomerIds = null; }
       const servicePayloads = await Promise.all(services.map(async (s) => {
         const svcType = normalizeServiceType(s.service_type);
         const serviceAddons = addonsByServiceId.get(s.id) || [];
@@ -6713,17 +6726,15 @@ router.get('/week', async (req, res, next) => {
         // authority completion uses; null = validation unavailable, the
         // prediction falls back to the stamp (Codex r3).
         let annualCoverageValidated = null;
-        if (s.prepaid_method === 'annual_prepay_invoice') {
-        // Validated for ANY lane carrying the stamp (GitHub r4 P2): a
-        // customer reclassified off annual_prepay keeps stale stamps from
-        // refunded/voided terms — leaving validation null would demote the
-        // prediction forever while completion's strict verdict validates
-        // and charges. Stamp present = validate, whatever the lane.
-          try {
-            const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
-            annualCoverageValidated = await AnnualPrepayRenewals.annualPrepayCoversVisit(s, db, { throwOnError: true });
-          } catch { annualCoverageValidated = null; }
-        }
+        // A stamped visit validates against its term (any lane, GitHub r4 P2); an
+        // unstamped visit held by a deferred annual prepay (GATE_PAF_PREPAY) reads
+        // as covered, as completion will treat it.
+        try {
+          const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+          annualCoverageValidated = await AnnualPrepayRenewals.annualCoverageVerdictForPrediction(s, db, {
+            deferredCustomerIds: deferredPrepayCustomerIds,
+          });
+        } catch { annualCoverageValidated = null; }
         // Present-tense money state for the sheet's billing card: what the
         // customer already owes (collectible invoices) and, for members,
         // whether this month's dues actually collected. Non-blocking — a
@@ -17498,6 +17509,22 @@ router.post('/:id/invoice', async (req, res, next) => {
     // would double-bill at the door. Fail-closed (a stale/refunded stamp is NOT
     // covered and still bills). Charging add-ons on a covered visit is part of the
     // deferred annual-prepay settlement/split-billing follow-up.
+    // GATE_PAF_PREPAY: an unstamped visit held by a year whose charge waits for
+    // (or failed after) the first visit is covered too; read strictly — a
+    // failed read refuses (retryable), never mints a door invoice beside the
+    // year's charge.
+    if (!svc.prepaid_method) {
+      let deferredCovered = false;
+      try {
+        deferredCovered = await require('../services/annual-prepay-renewals').pafDeferredPrepayCoversVisit(svc, db, { throwOnError: true });
+      } catch (e) {
+        logger.warn(`[admin-schedule] deferred annual-prepay check failed on charge-now for service ${svc.id}: ${e.message}`);
+        return res.status(503).json({ error: 'Could not confirm whether this visit is covered by an annual prepay — try again in a moment.', code: 'deferred_prepay_lookup_failed' });
+      }
+      if (deferredCovered) {
+        return res.status(409).json({ error: 'Visit is covered by an active annual prepay — no charge is due at the door.' });
+      }
+    }
     if (await require('../services/annual-prepay-renewals').annualPrepayCoversVisit(svc)) {
       return res.status(409).json({ error: 'Visit is covered by an active annual prepay — no charge is due at the door.' });
     }

@@ -434,10 +434,13 @@ postgres('combined-booking check through the real conversion', () => {
       const lawnChild = (await rowsOf(trx, est.estimateId)).find((row) => row.recurring_parent_id && /lawn/i.test(row.service_type));
       await trx('scheduled_services').where({ id: lawnChild.id }).update({ technician_id: null });
       expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ problems: 1 });
-      const today = new Date().toISOString().slice(0, 10);
-      const later = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
+      // Eastern dates, as the check judges holds: a UTC date runs a day ahead
+      // from 8 PM to midnight Eastern, which left the resumed hold "future".
+      const { etDateString, addETDays } = require('../utils/datetime-et');
+      const today = etDateString(new Date());
+      const later = etDateString(addETDays(new Date(), 30));
       const [hold] = await trx('plan_holds').insert({ customer_id: est.customerId, family_key: 'lawn_care',
-        starts_on: new Date(Date.now() - 86400000).toISOString().slice(0, 10), resume_on: later, status: 'active' }).returning('id');
+        starts_on: etDateString(addETDays(new Date(), -1)), resume_on: later, status: 'active' }).returning('id');
       // Lawn on hold, pest clean: the lawn finding is kept (marked), not closed as fixed.
       expect(await runCombinedBookingCheck({ conn: trx })).toMatchObject({ problems: 1, closed: 0 });
       const [held] = await alertsOf(trx, est.estimateId);

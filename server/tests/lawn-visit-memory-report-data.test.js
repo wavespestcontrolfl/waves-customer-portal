@@ -517,7 +517,7 @@ describe('GATE_LAWN_VISIT_MEMORY progress block (P13)', () => {
     expect(progress.overall.direction).toBe('flat'); // the two visits carry the same scores
     const weed = progress.items.find((i) => i.rowId === 'herbicide_broadleaf');
     // 60 days after the herbicide with no gain in weed suppression: the window has closed.
-    expect(weed).toMatchObject({ kind: 'applied', metric: 'weed_suppression', state: 'behind', approved: false });
+    expect(weed).toMatchObject({ kind: 'applied', metric: 'weed_suppression', state: 'behind', approved: true });
     // The prior's "weeds" check was never rechecked by a technician: unclear, not_recorded.
     expect(progress.items.find((i) => i.kind === 'check')).toMatchObject({ key: 'weeds', state: 'unclear', recheck: 'not_recorded' });
   });
@@ -681,11 +681,12 @@ describe('GATE_LAWN_SINCE_LAST on the report payload', () => {
     live(...ALL);
     const data = await served(records(), PHOTOS);
     expect(data.reportV2.lead.sinceLast.priorDate).toBe('2026-08-01');
-    // Same scores on both visits: overall flat. The herbicide row is not owner
-    // approved, so its state ('behind') is withheld.
+    // Same scores on both visits: overall flat. The herbicide row is owner
+    // approved (2026-10-02), so its 'behind' state is spoken.
     expect(data.reportV2.lead.sinceLast.lines).toEqual([
       'Last visit we applied weed control.',
       'Your overall lawn score is holding steady.',
+      'Weed control is behind where we expected.',
     ]);
     const json = JSON.parse(JSON.stringify(data));
     expect(JSON.stringify(json)).not.toMatch(/sinceLastCopy|"progress"|engineVersion/);
