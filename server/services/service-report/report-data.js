@@ -5995,6 +5995,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             longitude: service.customer_longitude ?? service.longitude ?? service.lng,
             knex,
             fetchForecast: require('./application-conditions').fetchPropertyForecast,
+            fetchQuarterHours: require('./application-conditions').fetchPropertyRainQuarterHours,
           });
           if (watch) {
             Object.defineProperty(reportV2, 'rainfastWatch', { value: watch, enumerable: false, writable: true, configurable: true });

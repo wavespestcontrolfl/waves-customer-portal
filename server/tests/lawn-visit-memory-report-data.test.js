@@ -859,7 +859,7 @@ describe('GATE_LAWN_RAINFAST_WATCH on the report payload (P31)', () => {
     jest.clearAllMocks();
     // Completed 2026-09-30 14:40 ET; the 180-minute interval ended 17:40 ET. Look in at 22:00 ET.
     nowSpy = jest.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-01T02:00:00Z'));
-    fetchSpy = jest.spyOn(conditions, 'fetchPropertyForecast').mockResolvedValue({ status: 'ok', precipitationInTotal: 0.4, fetchedAt: '2026-10-01T02:00:00.000Z' });
+    fetchSpy = jest.spyOn(conditions, 'fetchPropertyForecast').mockResolvedValue({ status: 'ok', precipitationInTotalExact: 0.4, fetchedAt: '2026-10-01T02:00:00.000Z' });
   });
   afterEach(() => {
     nowSpy.mockRestore();
@@ -971,12 +971,12 @@ describe('GATE_LAWN_RAINFAST_WATCH on the report payload (P31)', () => {
     live('GATE_LAWN_RAINFAST_WATCH');
     const recs = records();
     await serve(recs, withProduct());
-    fetchSpy.mockResolvedValue({ status: 'ok', precipitationInTotal: 0.1 });
+    fetchSpy.mockResolvedValue({ status: 'ok', precipitationInTotalExact: 0.1 });
     expect((await serve(recs, withProduct())).data.reportV2.lead.watching).toBeUndefined();
     fetchSpy.mockResolvedValue({ status: 'unavailable', reason: 'timeout' });
     expect((await serve(recs, withProduct())).data.reportV2.lead.watching).toBeUndefined();
     expect(stored(recs).retreatCheck).toBeUndefined();
-    fetchSpy.mockResolvedValue({ status: 'ok', precipitationInTotal: 0.3 });
+    fetchSpy.mockResolvedValue({ status: 'ok', precipitationInTotalExact: 0.3 });
     expect((await serve(recs, withProduct())).data.reportV2.lead.watching).toBe(RAINFAST_WATCH_LINE);
   });
 

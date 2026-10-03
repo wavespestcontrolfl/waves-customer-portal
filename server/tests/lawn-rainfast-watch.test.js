@@ -7,7 +7,7 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const featureGates = require('../config/feature-gates');
-const { fetchPropertyForecast } = require('../services/service-report/application-conditions');
+const { fetchPropertyForecast, fetchPropertyRainQuarterHours } = require('../services/service-report/application-conditions');
 const {
   RAINFAST_WATCH_LINE, rainfastWindows, judgeRainfastBreach, validRetreatCheck, resolveRainfastWatch,
 } = require('../services/service-report/lawn-rainfast-watch');
@@ -67,6 +67,19 @@ function mockMeteo(rain, { dropHour = null } = {}) {
     json: async () => ({ hourly: { time: times, precipitation, temperature_2m: times.map(() => 80) } }),
   };
 }
+// A mocked Open-Meteo minutely_15 payload (value stamped at the END of its 15 minutes).
+function mockQuarters(rain, { dropSlot = null, nullSlot = null } = {}) {
+  const start = Date.parse('2026-09-09T00:00:00Z');
+  const times = [];
+  const precipitation = [];
+  for (let t = start; t <= start + 72 * HOUR; t += 15 * 60000) {
+    const iso = new Date(t).toISOString();
+    if (iso === dropSlot) continue;
+    times.push(t / 1000);
+    precipitation.push(iso === nullSlot ? null : (rain[iso] || 0));
+  }
+  return { ok: true, json: async () => ({ minutely_15: { time: times, precipitation } }) };
+}
 let lonSeed = 0;
 const coords = () => { lonSeed += 1; return { latitude: 27.3, longitude: -82.4 - lonSeed / 1000 }; };
 const NOW = new Date('2026-09-10T20:00:00Z'); // interval ended 17:20Z, 2 h 40 min ago
@@ -75,7 +88,7 @@ describe('judgeRainfastBreach with the real Open-Meteo hour math', () => {
   const realFetch = global.fetch;
   afterEach(() => { global.fetch = realFetch; });
   const judge = (over = {}) => judgeRainfastBreach({
-    products: [SPRAY], completedAt: COMPLETED, now: NOW, ...coords(), fetchForecast: fetchPropertyForecast, ...over,
+    products: [SPRAY], completedAt: COMPLETED, now: NOW, ...coords(), fetchForecast: fetchPropertyForecast, fetchQuarterHours: fetchPropertyRainQuarterHours, ...over,
   });
 
   test('0.25 inch or more inside the interval is a breach; only the whole hours inside the window count', async () => {
@@ -107,15 +120,69 @@ describe('judgeRainfastBreach with the real Open-Meteo hour math', () => {
     await expect(judge()).resolves.toBeNull();
   });
 
-  test('a 60-minute interval that starts off the hour has no whole hour inside it: never judged', async () => {
-    global.fetch = jest.fn(async () => mockMeteo({ '2026-09-10T15:00:00.000Z': 0.9, '2026-09-10T16:00:00.000Z': 0.9 }));
+  test('the 0.25 test is on the unrounded total: 0.246 inch is not a breach, exactly 0.25 inch is', async () => {
+    // two whole hours inside 10:20-13:20 ET: 0.123 + 0.123 = 0.246, which the rounded total reads as 0.25
+    global.fetch = jest.fn(async () => mockMeteo({ '2026-09-10T16:00:00.000Z': 0.123, '2026-09-10T17:00:00.000Z': 0.123 }));
+    const forecast = await fetchPropertyForecast({ ...coords(), from: new Date(COMPLETED), to: new Date('2026-09-10T17:20:00Z'), now: NOW });
+    expect(forecast.precipitationInTotal).toBe(0.25); // the rounded figure existing callers see
+    await expect(judge()).resolves.toBeNull();
+    global.fetch = jest.fn(async () => mockMeteo({ '2026-09-10T16:00:00.000Z': 0.15, '2026-09-10T17:00:00.000Z': 0.1 }));
+    await expect(judge()).resolves.toMatchObject({ breaches: [{ inches: 0.25 }] });
+  });
+
+  test('a reading finer than the hourly rounding is not rounded up to a breach', async () => {
+    // one hour of rain inside a 180-minute window that starts on the hour: 0.2496 stays under, 0.2504 is over
+    global.fetch = jest.fn(async () => mockMeteo({ '2026-09-10T15:00:00.000Z': 0.2496 }));
+    await expect(judge({ completedAt: '2026-09-10T14:00:00Z' })).resolves.toBeNull();
+    global.fetch = jest.fn(async () => mockMeteo({ '2026-09-10T15:00:00.000Z': 0.2504 }));
+    await expect(judge({ completedAt: '2026-09-10T14:00:00Z' })).resolves.toMatchObject({ breaches: [{ minutes: 180, inches: 0.25 }] });
+  });
+
+  test('existing callers of fetchPropertyForecast see no new key', async () => {
+    global.fetch = jest.fn(async () => mockMeteo({ '2026-09-10T16:00:00.000Z': 0.3 }));
+    const result = await fetchPropertyForecast({ ...coords(), from: new Date(COMPLETED), to: new Date('2026-09-10T17:20:00Z'), now: NOW });
+    expect(result).not.toHaveProperty('precipitationInTotalExact');
+    expect(JSON.stringify(result.hourly)).not.toMatch(/raw/);
+  });
+
+  test('a 60-minute interval that starts off the hour is read from the quarter-hour series', async () => {
+    // 10:20-11:20 ET = 14:20-15:20Z: the whole quarter-hours inside are stamped 14:45, 15:00 and 15:15Z
+    global.fetch = jest.fn(async () => mockQuarters({ '2026-09-10T14:45:00.000Z': 0.1, '2026-09-10T15:00:00.000Z': 0.1, '2026-09-10T15:15:00.000Z': 0.05 }));
+    const item = await judge({ products: [product('Test Iron', 60)] });
+    expect(item.breaches).toEqual([expect.objectContaining({ minutes: 60, inches: 0.25, products: ['Test Iron'] })]);
+    expect(String(global.fetch.mock.calls[0][0])).toMatch(/minutely_15=precipitation/);
+  });
+
+  test('quarter-hour series: 0.246 is not a breach; rain before completion or after the window is not counted', async () => {
+    global.fetch = jest.fn(async () => mockQuarters({ '2026-09-10T14:45:00.000Z': 0.123, '2026-09-10T15:00:00.000Z': 0.123 }));
+    await expect(judge({ products: [product('Test Iron', 60)] })).resolves.toBeNull();
+    global.fetch = jest.fn(async () => mockQuarters({
+      '2026-09-10T14:30:00.000Z': 0.5, // 14:15-14:30Z: straddles the 14:20Z completion
+      '2026-09-10T15:30:00.000Z': 0.5, // 15:15-15:30Z: runs past 15:20Z
+    }));
     await expect(judge({ products: [product('Test Iron', 60)] })).resolves.toBeNull();
   });
 
-  test('a 60-minute interval that starts on the hour is judged on the one hour inside it', async () => {
-    global.fetch = jest.fn(async () => mockMeteo({ '2026-09-10T15:00:00.000Z': 0.3 }));
-    const item = await judge({ completedAt: '2026-09-10T14:00:00Z', products: [product('Test Iron', 60)] });
-    expect(item.breaches).toEqual([expect.objectContaining({ minutes: 60, inches: 0.3 })]);
+  test('quarter-hour series: a missing slot, a null reading, a failed read or no fetcher is no item', async () => {
+    const rain = { '2026-09-10T14:45:00.000Z': 0.3 };
+    global.fetch = jest.fn(async () => mockQuarters(rain, { dropSlot: '2026-09-10T15:00:00.000Z' }));
+    await expect(judge({ products: [product('Test Iron', 60)] })).resolves.toBeNull();
+    global.fetch = jest.fn(async () => mockQuarters(rain, { nullSlot: '2026-09-10T15:15:00.000Z' }));
+    await expect(judge({ products: [product('Test Iron', 60)] })).resolves.toBeNull();
+    global.fetch = jest.fn(async () => ({ ok: false }));
+    await expect(judge({ products: [product('Test Iron', 60)] })).resolves.toBeNull();
+    global.fetch = jest.fn(async () => mockQuarters(rain));
+    await expect(judge({ products: [product('Test Iron', 60)], fetchQuarterHours: undefined })).resolves.toBeNull();
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('the quarter-hour read refuses bad coordinates and bad windows', async () => {
+    global.fetch = jest.fn();
+    const base = { from: new Date(COMPLETED), to: new Date('2026-09-10T15:20:00Z') };
+    expect((await fetchPropertyRainQuarterHours({ ...base, latitude: 0, longitude: 0 })).status).toBe('unavailable');
+    expect((await fetchPropertyRainQuarterHours({ ...base, ...coords(), to: new Date(COMPLETED) })).status).toBe('unavailable');
+    expect((await fetchPropertyRainQuarterHours({ ...base, ...coords(), to: new Date('2026-09-20T00:00:00Z') })).status).toBe('unavailable');
+    expect(global.fetch).not.toHaveBeenCalled();
   });
 
   test('a failed, slow or malformed weather read is no item', async () => {
@@ -203,7 +270,7 @@ describe('resolveRainfastWatch: judge once, record once, replay after', () => {
     structuredNotes: record.structured_notes, serviceRecordId: 'svc-1', assessmentId: 'la-1', products: [SPRAY],
     completedAt: COMPLETED, now: NOW, latitude: 27.3, longitude: -82.4, knex, fetchForecast: over.fetchForecast, ...over,
   });
-  const breachFetch = () => jest.fn(async () => ({ status: 'ok', precipitationInTotal: 0.4, fetchedAt: '2026-09-10T20:00:00.000Z' }));
+  const breachFetch = () => jest.fn(async () => ({ status: 'ok', precipitationInTotalExact: 0.4, fetchedAt: '2026-09-10T20:00:00.000Z' }));
 
   test('a measured breach is recorded on the entry and the sentence returned; the next view replays it with no weather call', async () => {
     const record = { structured_notes: { lawnVisitMemory: { 'la-1': ENTRY }, other: 'kept' } };
@@ -253,8 +320,8 @@ describe('resolveRainfastWatch: judge once, record once, replay after', () => {
   test('below the threshold or a missing hour: no item, no sentence, no write', async () => {
     const record = { structured_notes: { lawnVisitMemory: { 'la-1': ENTRY } } };
     const { knex, log } = memoryKnex(record);
-    await expect(run(record, knex, { fetchForecast: jest.fn(async () => ({ status: 'ok', precipitationInTotal: 0.24 })) })).resolves.toBeNull();
-    await expect(run(record, knex, { fetchForecast: jest.fn(async () => ({ status: 'ok', precipitationInTotal: null })) })).resolves.toBeNull();
+    await expect(run(record, knex, { fetchForecast: jest.fn(async () => ({ status: 'ok', precipitationInTotalExact: 0.24 })) })).resolves.toBeNull();
+    await expect(run(record, knex, { fetchForecast: jest.fn(async () => ({ status: 'ok', precipitationInTotalExact: null })) })).resolves.toBeNull();
     await expect(run(record, knex, { fetchForecast: jest.fn(async () => ({ status: 'unavailable', reason: 'timeout' })) })).resolves.toBeNull();
     await expect(run(record, knex, { fetchForecast: jest.fn(async () => { throw new Error('boom'); }) })).resolves.toBeNull();
     expect(log.updates).toBe(0);

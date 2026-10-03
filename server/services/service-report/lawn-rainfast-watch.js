@@ -20,11 +20,14 @@
 // on this lawn.
 //
 // Honesty rules, all fail closed (no item, no sentence):
-//   - the total is the rain in the whole-hour intervals lying wholly INSIDE
-//     [completion, completion + interval] (fetchPropertyForecast's own rule), a
-//     LOWER bound of the true rain in the window. A window with no whole hour
-//     inside it (a 60-minute interval that starts off the hour) therefore
-//     reads null and is never judged;
+//   - the total is the rain in the whole slots lying wholly INSIDE
+//     [completion, completion + interval], a LOWER bound of the true rain in
+//     the window: whole hours for an interval of 2 hours or more
+//     (fetchPropertyForecast), whole quarter-hours for a shorter one
+//     (fetchPropertyRainQuarterHours, same model, finer stamps). A window with
+//     no whole slot inside it reads null and is never judged;
+//   - the 0.25 inch test is on the UNROUNDED sum of the readings; the stored
+//     figure is rounded to hundredths only after the test;
 //   - any needed hour missing, a failed or slow fetch, no coordinates and no
 //     completion time all read null, never as "no rain" and never as rain;
 //   - nothing is judged until one hour after the interval ended (the last hour
@@ -36,6 +39,10 @@ const logger = require('../logger');
 
 const HOUR_MS = 3600000;
 const BREACH_INCHES = 0.25;
+// Float slack only (0.15 + 0.1 must read as 0.25); far below any reading step.
+const EPSILON = 1e-9;
+// Windows shorter than this are read from the quarter-hour series.
+const QUARTER_HOUR_BELOW_MINUTES = 120;
 const SETTLE_MS = HOUR_MS;
 const LOOKBACK_DAYS = 7;
 const MAX_INTERVAL_MINUTES = 48 * 60;
@@ -94,7 +101,9 @@ function rainfastWindows(products) {
  * @param {number|string} input.longitude
  * @param {Function} input.fetchForecast  application-conditions fetchPropertyForecast
  */
-async function judgeRainfastBreach({ products, completedAt, now, latitude, longitude, fetchForecast } = {}) {
+async function judgeRainfastBreach({
+  products, completedAt, now, latitude, longitude, fetchForecast, fetchQuarterHours,
+} = {}) {
   try {
     if (typeof fetchForecast !== 'function') return null;
     const fromMs = toMs(completedAt);
@@ -108,13 +117,18 @@ async function judgeRainfastBreach({ products, completedAt, now, latitude, longi
 
     const results = await Promise.all(ready.map(async (window) => {
       const toMsValue = fromMs + window.minutes * 60000;
-      const result = await fetchForecast({
-        latitude, longitude, from: new Date(fromMs), to: new Date(toMsValue), timeoutMs: FETCH_TIMEOUT_MS, now: new Date(nowMs),
-      }).catch(() => null);
+      // A short window (a 60-minute label) holds no whole hour when it starts
+      // off the hour, so it is read from the quarter-hour series; longer ones
+      // from the hourly series. Both return the UNROUNDED total.
+      const args = { latitude, longitude, from: new Date(fromMs), to: new Date(toMsValue), timeoutMs: FETCH_TIMEOUT_MS };
+      const result = window.minutes < QUARTER_HOUR_BELOW_MINUTES
+        ? (typeof fetchQuarterHours === 'function' ? await fetchQuarterHours(args).catch(() => null) : null)
+        : await fetchForecast({ ...args, now: new Date(nowMs), exactTotal: true }).catch(() => null);
       if (!result || result.status !== 'ok') return null;
-      const total = result.precipitationInTotal;
-      // null = a needed hour had no reading, or no whole hour lies inside.
-      if (typeof total !== 'number' || !Number.isFinite(total) || total < BREACH_INCHES) return null;
+      // Judged on the unrounded total: 0.246 inch is not 0.25 inch. null = a
+      // needed slot had no reading, or no whole slot lies inside.
+      const total = result.precipitationInTotalExact;
+      if (typeof total !== 'number' || !Number.isFinite(total) || total + EPSILON < BREACH_INCHES) return null;
       return {
         minutes: window.minutes,
         inches: round2(total),
@@ -156,7 +170,7 @@ function validRetreatCheck(item) {
  * @returns {Promise<{line: string}|null>}
  */
 async function resolveRainfastWatch({
-  structuredNotes, serviceRecordId, assessmentId, products, completedAt, latitude, longitude, now, knex, fetchForecast,
+  structuredNotes, serviceRecordId, assessmentId, products, completedAt, latitude, longitude, now, knex, fetchForecast, fetchQuarterHours,
 } = {}) {
   try {
     if (!serviceRecordId || !assessmentId || !knex) return null;
@@ -165,7 +179,9 @@ async function resolveRainfastWatch({
     if (!entry) return null;
     if (entry.retreatCheck != null) return validRetreatCheck(entry.retreatCheck) ? { line: RAINFAST_WATCH_LINE } : null;
 
-    const item = await judgeRainfastBreach({ products, completedAt, now, latitude, longitude, fetchForecast });
+    const item = await judgeRainfastBreach({
+      products, completedAt, now, latitude, longitude, fetchForecast, fetchQuarterHours,
+    });
     if (!item) return null;
     const stored = await recordRetreatCheck(serviceRecordId, assessmentId, item, knex);
     return validRetreatCheck(stored) ? { line: RAINFAST_WATCH_LINE } : null;

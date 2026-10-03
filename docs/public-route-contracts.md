@@ -2402,6 +2402,35 @@ is no prior visit, or when the prior visit froze no memory. The sentences are
 selected at render from the frozen memory and the two visits' scores, so a
 permanent token repeats them while those inputs stand; approving an expectation
 row later adds that row's line to reports already delivered.
+
+`GATE_LAWN_RAINFAST_WATCH` (dark; effective only while `GATE_LAWN_VISIT_MEMORY` is
+live, and the sentence prints only while `GATE_LAWN_REPORT_LEAD` is live; off
+leaves the lawn payload and render unchanged, key for key, with no weather read
+and no write) adds ONE fixed sentence to `reportV2.lead.watching` on LIVE views
+only (`mode: 'live'`): "Our weather data shows rain soon after your treatment,
+so we will re-check it at your next visit." It follows the writer's own
+Watching sentence when there is one, is the whole line when there is none, and
+is given up with the rest of Watching if the lead runs over its 250-word
+budget. PDF, static and queued builds never carry it, so PDF content and its
+cache signature are unchanged. No other payload key is added: the item below
+is internal and `reportV2.sinceLast` leaves it off. Only a product whose catalog
+row states a rainfast interval (`products_catalog.rainfast_minutes`, read from
+the facts frozen at completion) is judged; no interval means never judged. One
+hour after that interval ended, and for 7 days at most, a LIVE view reads the
+property's measured-by-model hourly rain from Open-Meteo (a weather-model
+analysis, not a gauge) for completion to completion plus the interval. Rain of
+at least 0.25 inch, judged on the unrounded total, writes ONE `retreatCheck`
+item onto the visit's frozen memory entry
+(`structured_notes.lawnVisitMemory[assessmentId].retreatCheck`: first writer
+wins, compare-and-set on that entry, never creates an entry, no row lock) and
+the sentence follows. Later views replay the stored item with no weather call.
+A missing hour, a failed or slow read, missing coordinates or a missing
+completion time writes nothing and says nothing; the next live view tries
+again. The next visit's frozen `sinceLast` carries the item as engine input
+only. The sentence is fixed, carries no number, product name or promise of a
+free visit, and nothing is sent to a customer. No token, eligibility, privacy or
+rate-limit change.
+
 A current watering snapshot can originate from
 Monday app publication independently of email delivery; `sent_at` remains an
 email outcome. Signed `plan` render pins bind to the stable publication time
