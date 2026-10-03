@@ -1551,7 +1551,14 @@ transaction on the locked row, after the eligibility checks, so a rejected
 accept changes nothing and a failed check fails the accept (retryable) rather
 than dropping the input. Customer resolution (phone match) runs on the
 pre-fill identity, so a submitted email never steers which profile the accept
-lands on; an authored proposal's `preparedFor` that matched the old name moves
+lands on - and an UNLINKED estimate whose phone matches a LONE customer that the
+estimate contradicts (the estimate carries an email AND an address, the profile
+carries an email AND a street line, and neither agrees: addresses by the canonical
+street comparison, so `Street`/`St`, unit formats and a trailing city/ZIP agree, a
+different street, house number, explicit unit, city or ZIP disagrees, and a missing
+unit/city/ZIP or no street number cannot disagree; checked in memory against the
+profile's own address only) is PARKED for the office instead of being matched, see the
+`ACCEPT_NEEDS_OFFICE_REVIEW` 409 below; an authored proposal's `preparedFor` that matched the old name moves
 with it (and `proposalDelivery` drops), as in the contact-fanout name sync; the
 new customer is created with the supplied values; an EXISTING matched, linked
 or grouped-sibling profile is filled only when the estimate's own first name
@@ -1687,11 +1694,98 @@ answers:
   invoice mode, or the cohort marker gone), and `afterVisitDeferred: true` when an after-visit
   cohort accept WILL defer its attached invoice but the tab attested no timing (a tab from before
   the sub-gate). The page shows the answered timing for that selection and refetches.
+- `409 { error, code: 'ACCEPT_NEEDS_OFFICE_REVIEW', reviewBeforeBooking: true, reason: 'contact_review' }`
+  when an unlinked estimate's phone matches a lone customer the estimate contradicts (above). ONE helper,
+  `estimatePublicBlockingState`, decides the estimate's public blocking state in precedence order - the
+  existing quote-required and termite-trenching-review states first, then `contact_review` from the park
+  verdict - and `GET /data`, the accept, both card-intent routes, slot browsing / find-slots / reserve /
+  extend (the extend recheck runs again on the locked row), the texting scheduler's slot gate and the
+  abandoned-payment-step reminder recheck all call it, so every surface reports the same blocking state
+  (an estimate that is already quote-required or trenching-review gets that refusal and no phone alert). The slot routes
+  answer EVERY state the helper reports, never "unblocked": a quote-required estimate whose phone is also contradicted
+  is refused as quote_required on `available-slots`, `find-slots` and `reserve` (and the locked reserve / extend rechecks) with
+  the intent routes' `409 { error: 'Estimate is no longer active' }`, no hold and no alert (the helper reports quote_required only
+  when a review state would otherwise apply, so a quote-required estimate alone behaves as it always did on those routes).
+  The accept decides it right after those refusals and BEFORE any contact fill, plan, card, hold, prepay
+  quote or write, from the request's one cached preflight verdict, so nothing is created, charged,
+  captured, reserved, texted or changed: no customer, no account, no status change, no conversion. The
+  `error` is the review-before-booking sentence the page already shows. A lone hit the estimate contradicts
+  is NO match for any reader of the matcher, so every payload, policy and billing-lane projection treats
+  the estimate as having no matched customer and nothing about the other customer can surface. The office
+  gets ONE Customers needs-you alert (`accept-phone-contradicted:<estimateId>`, a person acts: fix the
+  phone on the estimate or link it to the right customer), raised right after that decision on every
+  attempt and idempotent by its dedupe key. The same 409 comes from the accept transaction when its
+  authoritative match, or the locked re-read of a reused lone candidate (judged on the pre-fill identity
+  snapshot), finds the contradiction the preflight did not see; that transaction rolls back, the existing
+  retirement of a captured recurring card runs, and the alert is raised after the rollback. The preflight
+  park does the same with a `recurringCardSetupIntentId` the request submits (a stale tab that captured
+  before the record turned contradictory): it is retired (only if it belongs to this estimate) BEFORE the
+  409, a retirement Stripe cannot confirm answers the existing 503 `RECURRING_CARD_RETIRE_FAILED` (no
+  alert on that response; the retry parks again and raises it), and a request with no intent makes no
+  Stripe call. `GET /:token/data` answers such an estimate with `cta.reviewBeforeBooking: true`,
+  `cta.reviewReason: 'contact_review'` and `cta.canAccept: false` (the page's existing review state).
+  `POST /:token/card-hold-intent`, `/recurring-card-intent` and `/reserve` (and an `extend`) answer the same
+  409 without minting a SetupIntent or holding a slot - `/reserve` also re-judges the trenching and
+  `contact_review` states on the estimate row `reserveSlot` locks, through the same optional
+  `revalidateEstimate` callback `extendReservation` takes, before any hold is inserted (a refusal there
+  returns the same status and body as the route's own check; the system caller that reserves for its own
+  linked draft, one-tap purchase, omits it). That locked check (reserve and extend) reads the phone candidate on the
+  RESERVATION TRANSACTION FOR SHARE NOWAIT (held to commit, so a staff edit of the lone candidate cannot land before
+  the hold insert); NOWAIT because a customer edit's fan-out locks customer then estimate while this transaction
+  already holds the estimate row, so a row another writer holds right now answers the accept's existing retryable
+  `CUSTOMER_BUSY_RETRY` 409 instead of waiting (extend skips the recheck instead and carries on). The locked read runs inside a
+  SAVEPOINT: a NOWAIT failure (55P03) aborts the whole PostgreSQL transaction, so it is rolled back to the savepoint
+  before the refusal or skip, leaving the reservation transaction usable; a savepoint that succeeds is RELEASED and
+  keeps its share lock to the outer commit (real-Postgres suite `slot-park-lock-contention-postgres.test.js`). On the park path `POST /recurring-card-intent` also retires a
+  submitted `replaceSetupIntentId` (the intent a replace-payment-method request abandons) BEFORE the 409, with the
+  accept's own helper and the same 503 `RECURRING_CARD_RETIRE_FAILED` when Stripe cannot confirm;
+  `/card-hold-intent` has no such field. If the client's slot-hold release fails during the transition it retries
+  once and keeps the hold id in the page's pending-recovery ref; Every public WRITE path that refuses a parked estimate (the accept, both card-intent routes, `reserve`
+  and `extend`, including the locked-row refusals after their transaction) does so through ONE function: the deduped
+  office alert is filed (a stale tab that parks at a pre-accept step and then leaves booking still files it) and any
+  live uncommitted slot hold of the estimate is released server-side, so capacity returns as soon as ANY request
+  observes the park. `GET /data` runs the same two side effects for a customer view of a parked estimate (the page
+  tells the customer a specialist will follow up); staff previews, PDF render passes, slot reads, the texting
+  scheduler's gate and the reminder recheck do not. The `/data` composer is a PURE READ unless its caller passes the explicit
+  `runParkSideEffects` opt-in, which only the public customer `GET /:token/data` handler sets (not for a draft/staff
+  preview or a PDF/render pass): the Intelligence Bar's estimate projection shows the same review state and raises no alert and
+  deletes no hold. The alert text is true for every path that raises it ("The phone on their estimate is another
+  customer's, so self-booking is held"). The bulk hold release is judged on the estimate as it is NOW: one short transaction
+  locks the estimate row FOR UPDATE (the row, and the order - estimate row, then its holds - `reserveSlot` and
+  `extendReservation` take), re-reads it, re-runs the blocking-state helper fresh on that row (candidate FOR SHARE NOWAIT) and deletes
+  the holds only while it is still `contact_review`; an estimate staff corrected or linked meanwhile loses no hold, a busy
+  customer row deletes nothing, and the alert is filed outside that transaction. Both card-intent routes re-run the blocking state AFTER minting and before any client secret is returned, on the ESTIMATE
+  row RE-READ at that point (staff can edit its phone, email or address, or deactivate it, during the mint) with the
+  candidate cache bypassed; an estimate no longer active is withheld the same way: a recurring intent minted for a
+  just-parked estimate is retired with the accept's helper (503 `RECURRING_CARD_RETIRE_FAILED` if Stripe cannot
+  confirm) and a card-hold intent's secret is withheld (its pending row was never exposed and is reused by the next
+  mint); no client secret leaves the server for a parked estimate. On `extend` a briefly held customer row never
+  fails the extension (it skips the lock and extends: an extension adds no capacity claim and the accept stays the
+  gate), while `reserve` answers the retryable `CUSTOMER_BUSY_RETRY` 409, which the page treats as retryable with
+  the server's sentence and keeps the picked slot. `estimatePublicBlockingState` resolves the quote requirement
+  itself when a caller does not supply it, so quote-required outranks the park on every surface. The locked
+  reserve / extend read protects the candidate rows that exist; a customer created on that phone in the instant
+  before the hold insert is not seen there, and is bounded rather than fenced (no phone fence): the hold is not a
+  booking, the accept still refuses, and the next request that observes the park releases the hold; `available-slots` and `find-slots` answer an empty
+  review shape (`reviewBeforeBooking: true`, `reason: 'contact_review'`, no times); the reminder sweep skips
+  it. The legacy server-rendered estimate page is never served for such an estimate: `handleEstimateView` forces it to
+the React page (the `/estimate/` mount falls through to the SPA, the `/api/estimates/` mount redirects to the
+React URL, GrowthBook never reassigns it), the same way it forces a contact-gap estimate. A stale tab handles the
+409 from the accept, `reserve`, every `recurring-card-intent` caller (modal mint, replace-method, inline pre-mint)
+and the card-hold intent, the coded 409 from a hold `extend`, and the empty review shape from the slot reads (`available-slots`, `find-slots`, picked
+date), through one transition (drop the captured cards, release the slot hold, refetch `/data`). The review state is committed locally FIRST,
+from the 409 body (the page's `cta` becomes not-acceptable, review-before-booking, reason `contact_review`, with the server's
+sentence), so a failed refetch (best effort, caught at every call site, including the slot picker's) still lands on the review card. The estimate's own phone is left as staff typed
+  it, so its follow-up texts are unchanged until the office fixes the number. Several phone candidates, or
+  a lone candidate that agrees on email or address, behave as before. A one-time card-hold SetupIntent a
+  stale tab captured before the park stays unbound at Stripe (customerless until an accept commits); it
+  is not retired.
 - `409 { code: 'ACCEPT_BILLING_CHANGED' }` when the transaction's customer lock finds the moved
   cohort drifted: `billing_mode` moved into an ineligible lane, the pause or opt-out state changed,
   Auto Pay was turned on since the policy was resolved, the saved method a `saved_method_consented`
   policy chose is no longer that customer's consented chargeable card (it is row-locked until
-  commit), or the accept landed on another / no customer. Nothing is suppressed, charged or enrolled on the stale decision.
+  commit), the accept landed on another / no customer, the transaction's phone match differs from the preflight verdict, or
+  the reused lone candidate (re-read FOR UPDATE at the end of the transaction) was deleted or moved off the phone. Nothing is suppressed, charged or enrolled on the stale decision.
 
 On success the accept persists `estimate_data.acceptedRecurringCardConsent` `{ variant, version,
 tender, text }` (the exact authorization recorded as shown) beside the existing

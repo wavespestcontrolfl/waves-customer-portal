@@ -108,3 +108,59 @@ describe('EstimateViewPage review-before-booking (termite trenching)', () => {
     expect(screen.queryByText('Waves will confirm & schedule your trenching')).not.toBeInTheDocument();
   });
 });
+
+describe('EstimateViewPage parked accept (B18: the estimate\'s phone belongs to another customer)', () => {
+  function parkedPayload() {
+    const payload = trenchingReviewPayload();
+    payload.estimate.serviceCategory = 'pest_control';
+    payload.cta = { ...payload.cta, reviewReason: 'contact_review' };
+    return payload;
+  }
+
+  it('shows the page\'s existing generic review card (price visible, call CTA, no accept or card step) and none of the trenching wording', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(parkedPayload())));
+    render(<EstimateViewPage />);
+    await waitFor(() => {
+      expect(screen.getByText('Waves will confirm & schedule this service')).toBeInTheDocument();
+    });
+    expect(screen.getByText('A Waves specialist reviews this quote with you and schedules your visit — it can’t be self-booked online.')).toBeInTheDocument();
+    expect(screen.queryByText(/treatment plan, access, exact footage/i)).not.toBeInTheDocument();
+    expect(screen.queryByText('This estimate has expired.')).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /Call Waves to confirm/i })).toHaveAttribute('href', 'tel:+19412975749');
+    expect(screen.queryByRole('button', { name: /accept|confirm my|book/i })).not.toBeInTheDocument();
+  });
+
+  it('r5 P2: when the /data refetch FAILS after the slot read says "parked", the review card still replaces the stale booking UI (committed from the response, refetch best effort)', async () => {
+    const payload = parkedPayload();
+    payload.cta = { canAccept: true, terminalState: null, quoteRequired: false, quoteRequiredReason: null, reviewBeforeBooking: false, reviewReason: null };
+    let dataLoads = 0;
+    const fetchMock = vi.fn(async (url) => {
+      const u = String(url);
+      if (u.includes('/available-slots')) {
+        return jsonResponse({ primary: [], expander: [], availableSlots: [], summary: null, reviewBeforeBooking: true, reason: 'contact_review', message: 'parked' });
+      }
+      if (u.includes('/data')) {
+        dataLoads += 1;
+        if (dataLoads === 1) return jsonResponse(payload);
+        return { ok: false, status: 500, json: async () => ({}) };
+      }
+      return jsonResponse({});
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const unhandled = [];
+    const onUnhandled = (e) => unhandled.push(e);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      render(<EstimateViewPage />);
+      await waitFor(() => {
+        expect(screen.getByText('Waves will confirm & schedule this service')).toBeInTheDocument();
+      });
+      expect(dataLoads).toBeGreaterThanOrEqual(2); // the refetch ran, and failed
+      expect(screen.getByRole('link', { name: /Call Waves to confirm/i })).toBeInTheDocument();
+      await new Promise((r) => setTimeout(r, 20));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+});

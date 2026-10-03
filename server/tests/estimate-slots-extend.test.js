@@ -52,6 +52,11 @@ jest.mock('../routes/estimate-public', () => ({
   isStructuralOneTimeOnlyEstimate: jest.fn(() => false),
   isRodentGuaranteeOnlyEstimate: jest.fn(() => false),
   estimateTrenchingReviewRequired: jest.fn(() => false),
+  // B18 park: the one precedence helper (real behavior pinned in the phone-match / atomicity suites).
+  estimatePublicBlockingState: jest.fn(async () => null),
+  acceptOfficeReviewBody: jest.fn(() => ({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW', reviewBeforeBooking: true, reason: 'contact_review', error: 'parked' })),
+  ACCEPT_OFFICE_REVIEW_MESSAGE: 'parked',
+  refuseParkedWrite: jest.fn(async () => ({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW', reviewBeforeBooking: true, reason: 'contact_review', error: 'parked' })),
   verifyEstimateAskToken: jest.fn(() => true),
   handleEstimateAsk: jest.fn((req, res) => res.json({})),
 }));
@@ -373,6 +378,8 @@ describe('extend route mirrors the /reserve no-booking guards', () => {
     ['isCommercialAutoEstimate(row)', 'commercialManualScheduling: true'],
     ['isRodentGuaranteeOnlyEstimate(row, parseEstimateData(row))', 'invoiceOnlyAcceptance: true'],
     ['estimateTrenchingReviewRequired(parseEstimateData(row))', 'TRENCHING_REVIEW_409'],
+    // B18 park: judged on the LOCKED row too (same predicate), after the existing review refusals.
+    ['lockedContactReviewRefusal(row, trx, { skipOnBusy: true })', 'lockedContactReviewRefusal'],
   ])('%s is refused before the service call', (guard, body) => {
     expect(guardBlock).toContain(guard);
     expect(guardBlock).toContain(body);
@@ -386,7 +393,7 @@ describe('extend route mirrors the /reserve no-booking guards', () => {
   // while the txn waits on its locks, and these shapes live in estimate_data,
   // which the locked viewability check does not re-derive.
   test('the same predicate is handed to the service for the locked recheck', () => {
-    expect(guardBlock).toContain('const preTxnRefusal = noBookingRefusal(estimate);');
+    expect(guardBlock).toContain('const preTxnRefusal = await noBookingRefusal(estimate);');
     expect(route).toContain('revalidateEstimate: noBookingRefusal,');
     // Only one copy of each refusal body — the locked verdict reuses it.
     expect((route.match(/commercialManualScheduling: true/g) || [])).toHaveLength(1);
@@ -425,10 +432,10 @@ describe('extendReservation enforces the injected no-booking verdict under the l
 
   test('the hook runs on the LOCKED estimate row and throws ESTIMATE_NO_BOOKING', () => {
     expect(fn).toContain('revalidateEstimate = null');
-    expect(fn).toContain('const refusal = await revalidateEstimate(estimate);');
+    expect(fn).toContain('const refusal = await revalidateEstimate(estimate, trx);');
     expect(fn).toContain("err.code = 'ESTIMATE_NO_BOOKING';");
     // After the FOR UPDATE read of the estimate, not before it.
-    expect(fn.indexOf("const estimate = await trx('estimates')")).toBeLessThan(fn.indexOf('const refusal = await revalidateEstimate(estimate);'));
+    expect(fn.indexOf("const estimate = await trx('estimates')")).toBeLessThan(fn.indexOf('const refusal = await revalidateEstimate(estimate, trx);'));
   });
 
   test('no route policy leaks into the service', () => {
