@@ -22,6 +22,10 @@
  * The typed-decision answers (TypeSafe Jev, Cloudflare Clef) for the same
  * call and field are stored as signals only: they are unvalidated (M0).
  *
+ * Staff tags on the call tab are the other source (recordStaffTagCorrections):
+ * a person's tag that contradicts production's value for an audited field is
+ * a confirmed mistake in the same cells, with no model involved.
+ *
  * Gate GATE_CALL_INCIDENTS (dark; read live via callIncidentsLive(), needs
  * GATE_CALL_SELF_AUDIT). CALL_INCIDENT_BATCH=0 stops the nightly job.
  * Shadow data only: nothing reads ai_incidents at runtime and nothing
@@ -184,6 +188,31 @@ const safeJson = (t) => {
 };
 
 /**
+ * Insert one incident row. The evidence key makes it idempotent (a row that
+ * already exists is left alone: returns null). One confirmed row per (call,
+ * cell): further confirmed evidence about the same call and cell is kept as
+ * a `duplicate`, never counted twice. Returns the disposition stored.
+ */
+async function insertIncident(dbi, base, disposition, adjudication) {
+  try {
+    const inserted = await dbi('ai_incidents')
+      .insert({ ...base, disposition, adjudication: adjudication() })
+      .onConflict(['area', 'evidence_type', 'evidence_id'])
+      .ignore()
+      .returning('id');
+    return inserted.length ? disposition : null;
+  } catch (err) {
+    if (!(isUniqueViolation(err) && disposition === 'confirmed_mistake')) throw err;
+    const inserted = await dbi('ai_incidents')
+      .insert({ ...base, disposition: 'duplicate', adjudication: adjudication({ duplicate_of_confirmed: true }) })
+      .onConflict(['area', 'evidence_type', 'evidence_id'])
+      .ignore()
+      .returning('id');
+    return inserted.length ? 'duplicate' : null;
+  }
+}
+
+/**
  * One finding → one ai_incidents row. Returns the stored disposition, or
  * null when nothing was stored (no disagreement, or the second reader could
  * not be reached: retried next run).
@@ -243,19 +272,7 @@ async function adjudicateOne({ dbi, row, reader }) {
     typed_signals: signals,
     ...extra,
   });
-  let disposition = decision.disposition;
-  try {
-    await dbi('ai_incidents').insert({ ...base, disposition, adjudication: adjudication() });
-  } catch (err) {
-    // One confirmed row per (call, cell): a second finding about the same
-    // call and field is kept as a duplicate, never counted twice.
-    if (!(isUniqueViolation(err) && disposition === 'confirmed_mistake')) throw err;
-    disposition = 'duplicate';
-    await dbi('ai_incidents')
-      .insert({ ...base, disposition, adjudication: adjudication({ duplicate_of_confirmed: true }) })
-      .onConflict(['area', 'evidence_type', 'evidence_id'])
-      .ignore();
-  }
+  const disposition = await insertIncident(dbi, base, decision.disposition, adjudication);
   return disposition;
 }
 
@@ -313,6 +330,73 @@ async function adjudicateCallFindings({ dbi = db, now = new Date(), batchLimit =
   return summary;
 }
 
+// What a staff tag on the call tab says about the audited fields. A tag is a
+// person's reading of the call, so where production's extraction said the
+// opposite, that field is a confirmed mistake (owner ruling Q10, 2026-10-02:
+// call-tab edits count as corrections of the extraction via field diff).
+// Only facts the tag states outright: nothing here about voicemail or quotes.
+const STAFF_TAG_FACTS = Object.freeze({
+  new_lead_booked: Object.freeze({ is_lead: true, is_spam: false, appointment_agreed: true }),
+  new_lead_no_booking: Object.freeze({ is_lead: true, is_spam: false, appointment_agreed: false }),
+  existing_service_q: Object.freeze({ is_lead: false, is_spam: false }),
+  existing_complaint: Object.freeze({ is_lead: false, is_spam: false }),
+  spam: Object.freeze({ is_spam: true }),
+});
+const STAFF_TAG_EVIDENCE = 'call_tab_tag';
+
+/** The fields where a staff tag contradicts production: [{ field, production, staff }]. */
+function staffTagCorrections(tag, production) {
+  const facts = STAFF_TAG_FACTS[tag];
+  if (!facts) return [];
+  return Object.entries(facts)
+    .filter(([field, staff]) => typeof production[field] === 'boolean' && production[field] !== staff)
+    .map(([field, staff]) => ({ field, production: production[field], staff }));
+}
+
+/**
+ * A staff tag on the call tab → one confirmed ai_incidents row per field the
+ * tag contradicts (rule `staff_tag`; the same cells the self-audit uses, so a
+ * call the two-model rule already confirmed in that cell is stored as a
+ * duplicate, never counted twice). `call` is the call_log row as it stood
+ * BEFORE the tag was applied. Best-effort by contract: this runs inside a
+ * staff action, so it never throws and never blocks it; the gate off, or any
+ * failure, records nothing. The first tag per call and field stands (a later
+ * re-tag is a person correcting a person, not the extraction).
+ */
+async function recordStaffTagCorrections({ dbi = db, call, tag, by = null, now = new Date() } = {}) {
+  try {
+    const { callIncidentsLive } = require('../config/feature-gates');
+    if (!callIncidentsLive() || !call?.id) return { recorded: 0, skipped: 'gate_off' };
+    const { productionAnswers } = require('./call-self-audit');
+    const corrections = staffTagCorrections(tag, productionAnswers(call));
+    let recorded = 0;
+    for (const c of corrections) {
+      const base = {
+        area: AREA,
+        evidence_type: STAFF_TAG_EVIDENCE,
+        evidence_id: `${call.id}:${c.field}`,
+        incident_key: String(call.id),
+        surface: SURFACE,
+        failure_mode: failureModeFor(c.field, c.production),
+        intent: null,
+        prompt_version: null, // unversioned, as for audited findings (see adjudicateOne)
+        produced_at: call.created_at || null,
+        summary: `${c.field}: production said ${c.production}, staff tagged the call "${tag}".`,
+        model: null,
+        schema_version: SCHEMA_VERSION,
+        adjudicated_at: now,
+      };
+      const adjudication = (extra = {}) => JSON.stringify({ rule: 'staff_tag', field: c.field, production: c.production, staff: { value: c.staff, tag, by }, ...extra });
+      const stored = await insertIncident(dbi, base, 'confirmed_mistake', adjudication);
+      if (stored) recorded += 1;
+    }
+    return { recorded };
+  } catch (err) {
+    logger.warn(`[call-incidents] staff tag capture failed for call ${String(call?.id).slice(0, 8)}: ${err.message}`);
+    return { recorded: 0, error: true };
+  }
+}
+
 /**
  * Sunday: fix proposals for calls. Call incidents are unversioned (see
  * adjudicateOne), so the count is the unversioned cohort, made fresh by the
@@ -341,6 +425,9 @@ module.exports = {
   failureModeFor,
   excerptInTranscript,
   decideCallFinding,
+  STAFF_TAG_FACTS,
+  staffTagCorrections,
+  recordStaffTagCorrections,
   parseReaderJson,
   askSecondReader,
   adjudicateCallFindings,

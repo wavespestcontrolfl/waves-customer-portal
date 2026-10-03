@@ -61,6 +61,38 @@ describe('the two-model rule for a call finding', () => {
     expect(calls.FAILURE_MODES).toHaveLength(calls.FIELDS.length * 2);
   });
 
+  test('a staff tag is a correction only on the fields it states and production contradicts', () => {
+    const prod = { is_lead: false, is_spam: false, is_voicemail: true, appointment_agreed: false, quote_promised: true };
+    expect(calls.staffTagCorrections('new_lead_booked', prod)).toEqual([
+      { field: 'is_lead', production: false, staff: true },
+      { field: 'appointment_agreed', production: false, staff: true },
+    ]);
+    expect(calls.staffTagCorrections('new_lead_no_booking', { ...prod, is_lead: true })).toEqual([]);
+    expect(calls.staffTagCorrections('new_lead_no_booking', { ...prod, is_lead: true, appointment_agreed: true })).toEqual([{ field: 'appointment_agreed', production: true, staff: false }]);
+    expect(calls.staffTagCorrections('existing_complaint', { ...prod, is_lead: true, is_spam: true })).toEqual([
+      { field: 'is_lead', production: true, staff: false },
+      { field: 'is_spam', production: true, staff: false },
+    ]);
+    expect(calls.staffTagCorrections('spam', prod)).toEqual([{ field: 'is_spam', production: false, staff: true }]);
+    // A tag says nothing about voicemail or quotes; an unknown tag says nothing at all.
+    expect(calls.staffTagCorrections('spam', { ...prod, is_spam: true })).toEqual([]);
+    expect(calls.staffTagCorrections('something_else', prod)).toEqual([]);
+  });
+
+  test('staff tag capture never throws and records nothing with the gate off', async () => {
+    const saved = process.env.GATE_CALL_INCIDENTS;
+    delete process.env.GATE_CALL_INCIDENTS;
+    const never = () => { throw new Error('no writes with the gate off'); };
+    await expect(calls.recordStaffTagCorrections({ dbi: never, call: { id: 'c1' }, tag: 'spam' })).resolves.toMatchObject({ recorded: 0 });
+    process.env.GATE_CALL_INCIDENTS = 'true';
+    const savedAudit = process.env.GATE_CALL_SELF_AUDIT;
+    process.env.GATE_CALL_SELF_AUDIT = 'true';
+    // A broken database is swallowed: the staff action must go through.
+    await expect(calls.recordStaffTagCorrections({ dbi: never, call: { id: 'c1', ai_extraction: '{}' }, tag: 'spam' })).resolves.toMatchObject({ recorded: 0, error: true });
+    if (saved === undefined) delete process.env.GATE_CALL_INCIDENTS; else process.env.GATE_CALL_INCIDENTS = saved;
+    if (savedAudit === undefined) delete process.env.GATE_CALL_SELF_AUDIT; else process.env.GATE_CALL_SELF_AUDIT = savedAudit;
+  });
+
   test('the gate off reads nothing', async () => {
     const saved = process.env.GATE_CALL_INCIDENTS;
     delete process.env.GATE_CALL_INCIDENTS;
@@ -263,6 +295,32 @@ describe('the two-model rule for a call finding', () => {
     await finding(callId, { category: 'missed_lead' });
     expect(await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader: agreeing })).toMatchObject({ candidates: 0 });
     expect(agreeing).not.toHaveBeenCalled();
+  });
+
+  test('a staff tag records one confirmed incident per contradicted field, once, in the audit\'s own cells', async () => {
+    const row = { id: randomUUID(), created_at: new Date('2026-10-02T15:00:00Z'), processing_status: 'processed', ai_extraction: JSON.stringify({ is_lead: false, appointment_confirmed: false }) };
+    const out = await calls.recordStaffTagCorrections({ dbi: database, call: row, tag: 'new_lead_booked', by: 'tech-1', now: NOW });
+    expect(out).toEqual({ recorded: 2 });
+    const rows = await database('ai_incidents').where({ incident_key: row.id }).orderBy('failure_mode');
+    expect(rows.map((r) => [r.evidence_type, r.failure_mode, r.disposition, r.adjudication.rule])).toEqual([
+      ['call_tab_tag', 'appointment_agreed_missed', 'confirmed_mistake', 'staff_tag'],
+      ['call_tab_tag', 'is_lead_missed', 'confirmed_mistake', 'staff_tag'],
+    ]);
+    expect(rows[0]).toMatchObject({ area: 'calls', surface: 'call_extraction', prompt_version: null });
+    expect(rows[0].adjudication.staff).toEqual({ value: true, tag: 'new_lead_booked', by: 'tech-1' });
+    // A re-tag is a person correcting a person: the first tag per field stands.
+    expect(await calls.recordStaffTagCorrections({ dbi: database, call: row, tag: 'existing_complaint', now: NOW })).toEqual({ recorded: 0 });
+    expect(await database('ai_incidents').where({ incident_key: row.id }).count('* as n').first()).toEqual({ n: '2' });
+  });
+
+  test('a staff tag on a call the two models already confirmed in that cell is a duplicate, not a second count', async () => {
+    const callId = await call();
+    await finding(callId);
+    await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader: agreeing });
+    const row = { id: callId, created_at: new Date('2026-10-02T15:00:00Z'), processing_status: 'processed', ai_extraction: JSON.stringify({ is_lead: true, appointment_confirmed: false }) };
+    expect(await calls.recordStaffTagCorrections({ dbi: database, call: row, tag: 'new_lead_booked', now: NOW })).toEqual({ recorded: 1 });
+    const rows = await database('ai_incidents').where({ incident_key: callId, failure_mode: 'appointment_agreed_missed' }).orderBy('adjudicated_at');
+    expect(rows.map((r) => r.disposition).sort()).toEqual(['confirmed_mistake', 'duplicate']);
   });
 
   test('the Sunday proposer counts distinct confirmed calls in the unversioned cohort', async () => {

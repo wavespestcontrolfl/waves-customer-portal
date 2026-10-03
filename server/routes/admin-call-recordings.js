@@ -1066,6 +1066,10 @@ router.put('/calls/:id/disposition', requireAdmin, async (req, res, next) => {
         }).onConflict('number').ignore();
         logger.info(`[calls] Blocked spam number: ${call.from_phone}`);
       }
+      // Correction loop (GATE_CALL_INCIDENTS): a spam tag on a call the
+      // extraction did not read as spam is recorded BEFORE the row is deleted.
+      // Best-effort: it never throws and never blocks the tag.
+      await require('../services/call-incidents').recordStaffTagCorrections({ call, tag: disposition, by: req.technicianId || null });
       // Delete the call log entry. sms_log rows are deliberately KEPT: they are
       // the A2P/consent audit trail for every text we ever sent to that number
       // and must survive a block (the block itself stops future sends).
@@ -1074,6 +1078,10 @@ router.put('/calls/:id/disposition', requireAdmin, async (req, res, next) => {
     } else {
       // NON-SPAM: save disposition + attach to customer timeline
       await db('call_log').where({ id: call.id }).update({ disposition, updated_at: new Date() });
+      // Correction loop (GATE_CALL_INCIDENTS): where this tag contradicts what
+      // the extraction recorded (lead, spam, appointment), that is a staff
+      // correction. Best-effort: it never throws and never blocks the tag.
+      await require('../services/call-incidents').recordStaffTagCorrections({ call, tag: disposition, by: req.technicianId || null });
 
       // Attach to customer timeline if customer_id exists
       if (call.customer_id) {

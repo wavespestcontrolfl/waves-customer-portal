@@ -5,6 +5,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../config', () => ({ twilio: { accountSid: 'AC_test', authToken: 'auth_test' } }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/call-recording-processor', () => ({}));
+jest.mock('../services/call-incidents', () => ({ recordStaffTagCorrections: jest.fn(async () => ({ recorded: 0 })) }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, _res, next) => { req.technicianId = 'tech-1'; next(); },
   requireTechOrAdmin: (_req, _res, next) => next(),
@@ -14,6 +15,7 @@ jest.mock('../middleware/admin-auth', () => ({
 const express = require('express');
 const db = require('../models/db');
 const router = require('../routes/admin-call-recordings');
+const { recordStaffTagCorrections } = require('../services/call-incidents');
 
 function chain(result) {
   const q = {};
@@ -59,7 +61,47 @@ function setup({ call, linkedCustomer = null, phoneCustomer = null }) {
 const CALL = { id: 'call-1', direction: 'inbound', from_phone: '+19415551234', customer_id: null };
 
 describe('PUT /calls/:id/disposition spam guard', () => {
-  beforeEach(() => db.mockReset());
+  beforeEach(() => { db.mockReset(); recordStaffTagCorrections.mockClear(); });
+
+  // Correction loop: the tag is handed to the capture with the call as it
+  // stood BEFORE the tag, and a refused tag is never captured.
+  test('a tag is captured as a possible staff correction; a spam tag before the row is deleted; a refused tag never', async () => {
+    const tagged = { ...CALL, ai_extraction: { is_lead: false } };
+    let tables = setup({ call: tagged });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/calls/call-1/disposition`, {
+        method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ disposition: 'new_lead_booked' }),
+      });
+      expect(res.status).toBe(200);
+    });
+    expect(recordStaffTagCorrections).toHaveBeenCalledWith({ call: tagged, tag: 'new_lead_booked', by: 'tech-1' });
+
+    recordStaffTagCorrections.mockClear();
+    tables = setup({ call: CALL });
+    let deletedBeforeCapture = null;
+    recordStaffTagCorrections.mockImplementationOnce(async () => {
+      deletedBeforeCapture = tables.call_log.some((q) => q.del.mock.calls.length > 0);
+      return { recorded: 1 };
+    });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/calls/call-1/disposition`, {
+        method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ disposition: 'spam' }),
+      });
+      expect(res.status).toBe(200);
+    });
+    expect(recordStaffTagCorrections).toHaveBeenCalledWith({ call: CALL, tag: 'spam', by: 'tech-1' });
+    expect(deletedBeforeCapture).toBe(false);
+
+    recordStaffTagCorrections.mockClear();
+    setup({ call: { ...CALL, customer_id: 'cust-1' }, linkedCustomer: { id: 'cust-1', first_name: 'Pat', last_name: 'Lee' } });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/calls/call-1/disposition`, {
+        method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ disposition: 'spam' }),
+      });
+      expect(res.status).toBe(409);
+    });
+    expect(recordStaffTagCorrections).not.toHaveBeenCalled();
+  });
 
   test('refuses 409 when the call is linked to a live customer; nothing blocked or deleted', async () => {
     const tables = setup({ call: { ...CALL, customer_id: 'cust-1' }, linkedCustomer: { id: 'cust-1', first_name: 'Pat', last_name: 'Lee' } });
