@@ -16,6 +16,9 @@ vi.mock("../hooks/useIsMobile", () => ({ default: () => mobile.value }));
 vi.mock("../hooks/useFeatureFlag", () => ({
   refetchFlags: vi.fn(() => Promise.resolve()),
   useFeatureFlag: vi.fn(() => false),
+  // AdminLayoutV2 reads the field-workspace flag to decide whether the field
+  // shell replaces the mobile chrome on /admin/today.
+  useFeatureFlagReady: vi.fn(() => ({ enabled: false, ready: true })),
 }));
 vi.mock("../utils/admin-fetch", () => ({ adminFetch: vi.fn() }));
 vi.mock("./NotificationBell", () => ({ default: () => null }));

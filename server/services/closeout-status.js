@@ -516,10 +516,13 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
   }
   inputs.duesCollectedThisMonth = duesCollected;
   let annualCoverageValidated = null;
-  if (visit.prepaid_method === 'annual_prepay_invoice') {
+  {
+    // A stamped visit validates against its term; an unstamped visit held by
+    // a deferred annual prepay (GATE_PAF_PREPAY) reads as covered, as
+    // completion will treat it (annualCoverageVerdictForPrediction).
     const coverageProbe = await probe('annual prepay coverage', unavailable, () => {
       const AnnualPrepayRenewals = require('./annual-prepay-renewals');
-      return AnnualPrepayRenewals.annualPrepayCoversVisit(visit, knex, { throwOnError: true });
+      return AnnualPrepayRenewals.annualCoverageVerdictForPrediction(visit, knex);
     });
     annualCoverageValidated = coverageProbe.error ? null : coverageProbe.value;
     inputs.annualCoverageLookupFailed = Boolean(coverageProbe.error);

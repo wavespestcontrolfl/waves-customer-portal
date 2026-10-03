@@ -1279,19 +1279,32 @@ const CADENCE_SQL = `CASE WHEN sv.frequency LIKE 'seasonal%' OR s.recurring_patt
 // included follow-up. One rule for the book and the history loaders.
 const PLAN_ROW_SQL = `((s.is_recurring = true OR (s.is_recurring IS NULL AND s.recurring_parent_id IS NOT NULL))
   AND COALESCE(s.is_callback, false) = false AND COALESCE(s.followup_included, false) = false)`;
-// The rows that DATE a line (its anniversary): every completed application
-// of the family that is not an explicit booster, a callback or an included
-// follow-up — the recurring flag is not required. Prod read 2026-10-02: 14
-// completed "Quarterly Pest Control Service" / "Bi-Monthly Tree & Shrub"
-// rows (7 imported pre-April history, 7 admin-booked since) carry
-// is_recurring = false with no parent, so the October batch held 12 of its
-// 25 no_anniversary lines although the work was done. A customer's first
-// paid application dates the line whether or not the booking was flagged
-// recurring; revenue and $/hr keep PLAN_ROW_SQL (loadCompletedVisitRows).
-// IS FALSE, not = false: a legacy child (is_recurring NULL + parent) must
-// stay in — `NOT (NULL AND true)` is NULL and WHERE would drop it.
-const DATING_ROW_SQL = `(NOT (s.is_recurring IS FALSE AND s.recurring_parent_id IS NOT NULL)
-  AND COALESCE(s.is_callback, false) = false AND COALESCE(s.followup_included, false) = false)`;
+// The rows that DATE a line (its anniversary) — an allow-list, not an
+// exclusion list (Codex rounds 1–3 on #5662 each found another edge of
+// the latter): a purchased-plan row (PLAN_ROW_SQL), OR a standalone
+// booking of a recurring program that was saved without the recurring
+// flag (prod read 2026-10-02: 14 completed "Quarterly Pest Control
+// Service" / "Bi-Monthly Tree & Shrub" rows carry is_recurring = false
+// with no parent — 7 imported pre-April history, 7 admin-booked since —
+// so the October batch held 12 of its 25 no_anniversary lines although
+// the work was done). A standalone row counts only when nothing marks it
+// a one-time service AND something marks it recurring: not a parented
+// booster, callback or included follow-up; its catalog service is billed
+// `recurring`, or — no catalog row at all (imported history) — its name
+// carries a cadence (Quarterly / Bi-Monthly / Semiannual / Monthly /
+// Annual / Every N — spelled out: a `?` in a knex raw string is a binding);
+// and its name is not an inspection / assessment / WDO (a same-family one-time — a WDO
+// inspection sits in the termite family — must not date a termite
+// program or set the account's import baseline). Revenue and $/hr keep
+// PLAN_ROW_SQL (loadCompletedVisitRows).
+const DATING_ROW_SQL = `(${PLAN_ROW_SQL} OR (
+    s.is_recurring IS FALSE AND s.recurring_parent_id IS NULL
+    AND COALESCE(s.is_callback, false) = false AND COALESCE(s.followup_included, false) = false
+    AND (sv.billing_type = 'recurring'
+      OR (sv.id IS NULL AND COALESCE(s.service_type, '') ~* '(quarterly|bi-monthly|bimonthly|semi-annual|semiannual|monthly|annual|every [0-9]|recurring)'))
+    AND COALESCE(s.service_type, '') NOT ILIKE '%inspection%'
+    AND COALESCE(s.service_type, '') NOT ILIKE '%assessment%'
+    AND COALESCE(s.service_type, '') NOT ILIKE '%wdo%'))`;
 // Live upcoming rows = the same statuses the plan-count reconciler counts
 // (isCountingSourceStatus: NULL or COUNTING_SOURCE_STATUSES) — a
 // 'rescheduled' placeholder is not an application on the books.
