@@ -65,7 +65,14 @@ async function lockOwnershipRows(trx, invoice, visitId) {
   const customer = await trx('customers').where({ id: invoice.customer_id }).first('payer_id');
   const payerIds = [...new Set([visit?.payer_id, customer?.payer_id].filter(Boolean).map(String))];
   if (payerIds.length) await trx('payers').whereIn('id', payerIds).orderBy('id').forShare().select('id');
-  return visit;
+  return visit && { ...visit, customer_payer_id: customer?.payer_id ?? null };
+}
+
+// The same visit row without taking locks, for the read-only paths.
+async function visitForOwnerJudgement(database, invoice, visitId) {
+  const visit = await database('scheduled_services').where({ id: visitId }).first('id', 'payer_id', 'self_pay_override');
+  const customer = await database('customers').where({ id: invoice.customer_id }).first('payer_id');
+  return visit && { ...visit, customer_payer_id: customer?.payer_id ?? null };
 }
 
 // The live Bill-To decision, made under those rows. null = self-pay.
@@ -175,13 +182,18 @@ async function reconcileLinkedInvoices(trx, scope = {}) {
 
 // Can this Bill-To change move the invoice's effective owner? Decided from the visit row, since
 // the new payer is not written yet when the fence runs. A change to the visit's own Bill-To always
-// can; a change to the customer default (or to a payer a customer or visit references) cannot reach
-// a visit that names its own payer (unless it is the payer changing) or is pinned self-pay.
+// can; a change to the customer default cannot reach a visit that names its own payer or is pinned
+// self-pay; a payer activation reaches a visit that names that payer, or one inheriting a customer
+// default that IS that payer.
 function ownerCouldChange(scope, visit) {
   if (scope.scheduledServiceId || (scope.scheduledServiceIds && scope.scheduledServiceIds.length) || scope.invoiceId) return true;
   if (!visit) return false;
   if (visit.payer_id) return Boolean(scope.payerId) && String(visit.payer_id) === String(scope.payerId);
-  return visit.self_pay_override !== true;
+  if (visit.self_pay_override === true) return false;
+  // Inheriting the customer default: a payer activation reaches it only when that default IS the
+  // activating payer; a default-payer change always does.
+  if (scope.payerId) return visit.customer_payer_id != null && String(visit.customer_payer_id) === String(scope.payerId);
+  return true;
 }
 
 // The visit-linked invoices whose OWN checkout PaymentIntent this Bill-To change invalidates: the
@@ -194,11 +206,11 @@ async function linkedSessionInvoiceIds(database, scope = {}, ownerScope = scope)
   const candidates = await applyScope(database, visitLinkedBase(database, TERMINAL), scope)
     .whereNotNull('stripe_payment_intent_id')
     .where((q) => q.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'payer_billed:%'))
-    .select('id', 'scheduled_service_id', 'service_record_id');
+    .select('id', 'customer_id', 'scheduled_service_id', 'service_record_id');
   for (const candidate of candidates) {
     const visitId = await linkedVisitOf(candidate, database);
     if (!visitId) continue;
-    const visit = await database('scheduled_services').where({ id: visitId }).first('id', 'payer_id', 'self_pay_override');
+    const visit = await visitForOwnerJudgement(database, candidate, visitId);
     if (ownerCouldChange(ownerScope, visit)) ids.add(String(candidate.id));
   }
   return ids;
@@ -229,7 +241,7 @@ async function linkedInvoiceChargeInFlight(database, scope = {}) {
     if (!visitId) continue;
     const visit = locking
       ? await lockOwnershipRows(database, candidate, visitId)
-      : await database('scheduled_services').where({ id: visitId }).first('id', 'payer_id', 'self_pay_override');
+      : await visitForOwnerJudgement(database, candidate, visitId);
     if (!ownerCouldChange(scope, visit)) continue;
     // Re-read under the invoice row lock: this is the row the claims race for.
     const invoice = locking

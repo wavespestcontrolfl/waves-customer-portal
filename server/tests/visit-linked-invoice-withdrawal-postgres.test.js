@@ -196,7 +196,7 @@ postgres('payer assignment withdraws visit-linked invoices with no packet', () =
   test('the customer-default and payer-activation releases cancel single checkouts only where the owner would move', async () => {
     const PayCombined = require('../services/pay-combined');
     const payerId = await payer();
-    const unpinned = await fixture({ link: 'record', invoice: { stripe_payment_intent_id: 'pi_unpinned' } });
+    const unpinned = await fixture({ link: 'record', customerPayerId: payerId, invoice: { stripe_payment_intent_id: 'pi_unpinned' } });
     const pinned = await fixture({ link: 'record', selfPayOverride: true, invoice: { stripe_payment_intent_id: 'pi_pinned' } });
     const cancel = jest.spyOn(StripeService, 'cancelPaymentIntent').mockResolvedValue({});
     jest.spyOn(StripeService, 'retrievePaymentIntent').mockImplementation(async (id) => ({ id, status: 'requires_payment_method', metadata: {} }));
@@ -213,6 +213,22 @@ postgres('payer assignment withdraws visit-linked invoices with no packet', () =
     cancel.mockClear();
     expect(await PayCombined.releaseUnconfirmedCombinedSessionsForCustomer(mockPg, unpinned.customerId)).toEqual({ released: 0, inFlight: 0 });
     expect(cancel).not.toHaveBeenCalled();
+  });
+
+  test('payer activation cancels single checkouts only for visits that would really move to that payer', async () => {
+    const PayCombined = require('../services/pay-combined');
+    const activating = await payer();
+    const otherDefault = await payer();
+    // One customer whose default payer is somebody else; one visit names the activating payer, a sibling inherits the default.
+    const named = await fixture({ link: 'record', visitPayerId: activating, customerPayerId: otherDefault, invoice: { stripe_payment_intent_id: 'pi_named' } });
+    const sibling = await fixture({ link: 'record', customerPayerId: otherDefault, invoice: { stripe_payment_intent_id: 'pi_inherits_other' } });
+    const cancel = jest.spyOn(StripeService, 'cancelPaymentIntent').mockResolvedValue({});
+    jest.spyOn(StripeService, 'retrievePaymentIntent').mockImplementation(async (id) => ({ id, status: 'requires_payment_method', metadata: {} }));
+    expect(await PayCombined.releaseUnconfirmedCombinedSessionsForCustomers(mockPg, [named.customerId, sibling.customerId], { invalidateLinked: true, payerId: activating }))
+      .toEqual({ released: 1, inFlight: 0 });
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(cancel).toHaveBeenCalledWith('pi_named');
+    expect(await invoiceRow(sibling.invoiceId)).toMatchObject({ stripe_payment_intent_id: 'pi_inherits_other' });
   });
 
   test('a queued invoice returns to its own scheduled time, and to now only when that time has passed', async () => {
