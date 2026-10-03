@@ -166,7 +166,10 @@ const withFill = (rows, added, patches) => {
 // into taps and answers the rows as they then stand (the report is written from
 // those; `note` is the note that was read). Confirms and Checks hold Complete & send until the tech answers each.
 // `products` is the sheet's useProductRows; `ops` its row rules.
-export function useProductVoiceFill({ enabled, request, serviceId, products, ctx, ops }) {
+// `sprayFromNote` (a plain pest visit): a spray's way is the note's own read, so a
+// product's spoken spray way is not a tap. A specialty visit has no such read: its
+// rows take the way said for each.
+export function useProductVoiceFill({ enabled, request, serviceId, products, ctx, ops, sprayFromNote = true }) {
   const [checks, setChecks] = useState([]);
   const [confirms, setConfirms] = useState([]);
   const [heard, setHeard] = useState({ products: {}, visit: '' });
@@ -179,8 +182,8 @@ export function useProductVoiceFill({ enabled, request, serviceId, products, ctx
   // read of the same note does not bring it back.
   const addedByFill = useRef(new Map());
   const declined = useRef(new Map());
-  const latest = useRef({ products, ctx, ops });
-  latest.current = { products, ctx, ops };
+  const latest = useRef({ products, ctx, ops, sprayFromNote });
+  latest.current = { products, ctx, ops, sprayFromNote };
   const rowsRef = useRef(products.rows);
   rowsRef.current = products.rows;
   const on = enabled && !unavailable;
@@ -198,10 +201,10 @@ export function useProductVoiceFill({ enabled, request, serviceId, products, ctx
   const settle = useCallback((fill, sprayMethod, note) => {
     const rows = rowsRef.current;
     if (!fill || fill.status !== 'read') return rows;
-    const { products: sheetProducts, ctx: sheetCtx, ops: sheetOps } = latest.current;
+    const { products: sheetProducts, ctx: sheetCtx, ops: sheetOps, sprayFromNote: stripSprays } = latest.current;
     const plan = planVoiceFill({
       fill: {
-        products: (fill.products || []).filter(notDeclined(declined.current, note)).map((product) => withoutSprayWay(product, sheetOps)),
+        products: (fill.products || []).filter(notDeclined(declined.current, note)).map((product) => (stripSprays ? withoutSprayWay(product, sheetOps) : product)),
         unclear: fill.unclear,
       },
       rows,

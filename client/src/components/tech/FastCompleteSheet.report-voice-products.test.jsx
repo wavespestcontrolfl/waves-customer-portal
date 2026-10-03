@@ -255,6 +255,38 @@ describe('report flow, voice fill on: products from the note', () => {
   });
 });
 
+describe('report flow, voice fill on: a pest visit that opens with no product (a first cleanout)', () => {
+  const CLEANOUT = { ...REGULAR, serviceType: 'Initial Pest Cleanout', serviceKey: 'pest_initial_cleanout' };
+  async function openCleanout(request) {
+    request.mockImplementation(((base) => async (path, options) => (path.split('?')[0].endsWith('/pest-recap/context')
+      ? { ok: true, eligible: true, reportFlow: true, service: CLEANOUT, products: CATALOG }
+      : base(path, options)))(request.getMockImplementation()));
+    render(<FastCompleteSheet service={{ ...SERVICE, serviceType: 'Initial Pest Cleanout' }} request={request} onClose={() => {}} onCompleted={() => {}} voiceFillEnabled />);
+    await screen.findByRole('button', { name: 'Generate AI report' });
+  }
+
+  test('Generate reads the note for products first, then writes the report from them', async () => {
+    const request = makeRequest();
+    await openCleanout(request);
+    expect(screen.getByText('None selected')).toBeTruthy();
+    await generate();
+    const order = request.calls.map((call) => call.path).filter((path) => /voice-facts|voice-fill|generate-report/.test(path)).map((path) => path.split('/').pop());
+    expect(order).toEqual(['products', 'voice-facts', 'generate-report']);
+    expect(request.bodies('/generate-report')[0].productsApplied).toBe('Taurus SC');
+    expect(within(confirmList()).getByText(/Taurus SC — 6 fl oz/)).toBeTruthy();
+  });
+
+  test('a note that names no product is held on the visit, and no report is written', async () => {
+    const request = makeRequest({ fill: read([]) });
+    await openCleanout(request);
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: NOTE } });
+    fireEvent.click(screen.getByRole('button', { name: '3, moderate' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Generate AI report' }));
+    expect(await screen.findByText('Select at least one product.')).toBeTruthy();
+    expect(request.bodies('/generate-report')).toEqual([]);
+  });
+});
+
 describe('report flow, voice fill on: the note\'s mic', () => {
   test('the mic hands its clip to the sheet, which sends it to our transcriber and adds the words to the note', async () => {
     const request = makeRequest();
