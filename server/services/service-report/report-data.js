@@ -2617,7 +2617,11 @@ class PinnedAssessmentUnavailable extends Error {
 // payload and the stock "No additional observations" photoSummary now collapses
 // to null, so the photo strip (web) and the PDF no longer print that sentence.
 // Cached lawn PDFs and renders that carry it must re-key.
-const LAWN_RENDER_STRATEGY = 'p8-lawn-dead-fields-20261001';
+// p9: P16 (owner 2026-10-03): the seasonal-dip diagnosis card prints the
+// approved expectation row's sentence, and the cross-season notes lost their
+// "greens back up / recovers as it warms" promise. Lawn PDFs and renders that
+// carry the old sentences must re-key (lawn only: no fleet-wide PDF bust).
+const LAWN_RENDER_STRATEGY = 'p9-lawn-seasonal-timing-20261003';
 
 // ':wr=1' for a frozen visit; otherwise ':wr=1:<hash>' of the (product, rule)
 // pairs the render would use. Reads the record itself, so a partial row from a
