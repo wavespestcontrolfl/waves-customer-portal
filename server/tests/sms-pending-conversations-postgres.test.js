@@ -31,7 +31,7 @@ postgres('pending SMS conversation query (PostgreSQL)', () => {
   afterAll(async () => { await mockTrx?.rollback(); await database?.destroy(); });
 
   beforeEach(async () => {
-    await mockTrx.raw('TRUNCATE messages, conversations, customers, sms_log, blocked_numbers, message_drafts, messaging_audit_log, inbound_sms_optout_receipts');
+    await mockTrx.raw('TRUNCATE messages, conversations, customers, sms_log, call_log, blocked_numbers, message_drafts, messaging_audit_log, inbound_sms_optout_receipts');
     tick = new Date('2026-09-23T12:00:00.000Z');
     mockRawCalls.length = 0;
   });
@@ -192,6 +192,55 @@ postgres('pending SMS conversation query (PostgreSQL)', () => {
 
     await expect(countPendingSmsConversations()).resolves.toEqual({ conversations: 0, messages: 0 });
     await expect(loadPendingSmsConversations({ includeLegacyOnly: true })).resolves.toEqual([]);
+  });
+
+  async function seedCall({
+    phone = '+19415550100', ours = '+19415550190', direction = 'inbound', status = 'completed',
+    answeredBy = direction === 'inbound' ? 'human' : null, duration = 99,
+    bridged = direction === 'outbound',
+  } = {}) {
+    const createdAt = tick;
+    tick = new Date(tick.getTime() + 1000);
+    await mockTrx('call_log').insert({
+      id: randomUUID(), direction, status, answered_by: answeredBy, duration_seconds: duration,
+      from_phone: direction === 'inbound' ? phone : ours,
+      to_phone: direction === 'inbound' ? ours : phone,
+      bridged_at: bridged ? createdAt : null, created_at: createdAt,
+    });
+  }
+
+  test('a later call a person answered closes the text; a newer text reopens it', async () => {
+    await seed({ body: 'Is it 1pm today or can you come later?' });
+    await expect(countPendingSmsConversations()).resolves.toEqual({ conversations: 1, messages: 1 });
+    // The customer calls in on a different Waves line, written without +1.
+    await seedCall({ phone: '(941) 555-0100', ours: '+19415550191' });
+    await expect(countPendingSmsConversations()).resolves.toEqual({ conversations: 0, messages: 0 });
+    await expect(loadPendingSmsConversations({ includeLegacyOnly: true })).resolves.toEqual([]);
+    await seed({ body: 'Can you also check the nest over the door?' });
+    await expect(countPendingSmsConversations()).resolves.toEqual({ conversations: 1, messages: 1 });
+  });
+
+  test('an outbound call the customer picked up closes the text', async () => {
+    await seed({ body: 'Can you call me?' });
+    await seedCall({ direction: 'outbound', duration: 133 });
+    await expect(countPendingSmsConversations()).resolves.toEqual({ conversations: 0, messages: 0 });
+  });
+
+  test('calls where nobody spoke leave the text pending', async () => {
+    // Before the text: says nothing about it.
+    await seedCall();
+    await seed({ body: 'Can you call me?' });
+    await seedCall({ answeredBy: 'voicemail', duration: 26 });
+    await seedCall({ answeredBy: 'ai_agent', duration: 41 });
+    await seedCall({ status: 'no-answer', answeredBy: null, duration: 0 });
+    await seedCall({ answeredBy: null, duration: 1 });
+    await seedCall({ direction: 'outbound', answeredBy: 'voicemail', duration: 42 });
+    await seedCall({ direction: 'outbound', duration: 14, bridged: false });
+    await seedCall({ direction: 'outbound', duration: 21 });
+    await seedCall({ direction: 'outbound', status: 'initiated', duration: null });
+    // A real conversation with someone else.
+    await seedCall({ phone: '+19415550101' });
+    await expect(countPendingSmsConversations()).resolves.toEqual({ conversations: 1, messages: 1 });
   });
 
   test('legacy-only inbound work remains watcher-only', async () => {

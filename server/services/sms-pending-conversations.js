@@ -22,6 +22,11 @@ const NEEDS_REPLY_SINCE = '2026-09-28T09:25:00Z';
 // context (outbound_events joins on it).
 const REPLY_LOOKBACK = "INTERVAL '24 hours'";
 
+// An outbound call has no "a person answered" stamp until the recording is
+// processed, and a bridged leg that reached voicemail runs about 20 seconds.
+// Shorter than this is not counted as having spoken with the customer.
+const MIN_SPOKEN_OUTBOUND_SECONDS = 30;
+
 // Shared source for the Messages needs-response badge, filtered inbox, and
 // unanswered-text watcher. The watcher opts into legacy-only rows so a failed
 // canonical write cannot erase historical work; badge IDs remain canonical.
@@ -47,6 +52,7 @@ async function loadPendingSmsConversations({
   const eventPeer = phoneIdentitySql(projectedContactPhone);
   const eventEndpoint = phoneIdentitySql(projectedEndpoint);
   const blockedPeer = phoneIdentitySql('b.number');
+  const callPeer = phoneIdentitySql("(CASE WHEN spoken.direction = 'outbound' THEN spoken.to_phone ELSE spoken.from_phone END)");
   const customerPeer = phoneIdentitySql('candidate_customer.phone');
   const duplicateCustomerPeer = phoneIdentitySql('duplicate_customer.phone');
   // An uncertain historical STOP must never migrate to a customer's changed
@@ -202,6 +208,21 @@ async function loadPendingSmsConversations({
         AND (os.message_type <> ALL(CAST(:draftReplyTypes AS text[]))
           OR os.draft_reply_to_event_id = os.inbound_id)
         AND os.draft_intent IS DISTINCT FROM 'click_followup'
+    ), spoken_inbound AS MATERIALIZED (
+      -- Owner ruling 2026-10-03: a text is answered once a person at Waves
+      -- has SPOKEN with that number after it arrived — the customer who
+      -- texts and then calls in must not sit in the needs-reply list. Either
+      -- direction counts. Voicemail, the AI agent, a missed call and an
+      -- outbound leg nobody picked up are not a conversation.
+      SELECT DISTINCT li.id AS inbound_id
+      FROM enriched_inbound li
+      JOIN call_log spoken ON spoken.created_at > li.created_at
+        AND ${callPeer} = li.peer
+      WHERE spoken.status = 'completed'
+        AND ((spoken.direction = 'inbound' AND spoken.answered_by = 'human')
+          OR (spoken.direction = 'outbound' AND spoken.bridged_at IS NOT NULL
+            AND COALESCE(spoken.answered_by, '') NOT IN ('voicemail', 'ai_agent')
+            AND COALESCE(spoken.duration_seconds, 0) >= ${MIN_SPOKEN_OUTBOUND_SECONDS}))
     ), all_stop_events AS MATERIALIZED (
       SELECT ${stopPeer} AS peer,
              CASE WHEN stop_receipt.message_sid IS NOT NULL
@@ -268,6 +289,7 @@ async function loadPendingSmsConversations({
     LEFT JOIN prior_context ON prior_context.id = li.id
     LEFT JOIN answered_inbound answered ON answered.inbound_id = li.id
     LEFT JOIN latest_stop stop ON stop.peer = li.peer
+    LEFT JOIN spoken_inbound spoken ON spoken.inbound_id = li.id
     LEFT JOIN LATERAL (
       SELECT candidate_customer.id, candidate_customer.first_name, candidate_customer.last_name
       FROM customers candidate_customer
@@ -282,6 +304,7 @@ async function loadPendingSmsConversations({
       LIMIT 1
     ) customer_match ON true
     WHERE answered.inbound_id IS NULL
+      AND spoken.inbound_id IS NULL
       AND (stop.stopped_at IS NULL OR stop.stopped_at <= li.created_at)
       AND (CAST(:includeLegacyOnly AS boolean) OR li.source = 'canonical')
   `, {

@@ -16,6 +16,11 @@ async function createSmsResponseTables(trx) {
         id uuid PRIMARY KEY, customer_id uuid, direction varchar(12), from_phone varchar(32), to_phone varchar(32),
         message_body text, metadata jsonb, message_type varchar(30), status varchar(20), twilio_sid varchar(64), created_at timestamptz NOT NULL DEFAULT now()
       );
+      CREATE TABLE call_log (
+        id uuid PRIMARY KEY, customer_id uuid, direction varchar(12), from_phone varchar(32), to_phone varchar(32),
+        status varchar(20), answered_by varchar(20), duration_seconds integer, bridged_at timestamptz,
+        created_at timestamptz NOT NULL DEFAULT now()
+      );
       CREATE TABLE blocked_numbers (id uuid PRIMARY KEY, number varchar(32));
       CREATE TABLE message_drafts (id uuid PRIMARY KEY, sms_log_id uuid, customer_id uuid, flags jsonb, intent text, sent_at timestamptz);
       CREATE TABLE messaging_audit_log (
