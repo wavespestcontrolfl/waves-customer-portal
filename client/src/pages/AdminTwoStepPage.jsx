@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, Navigate, useNavigate } from 'react-router-dom';
 import QRCode from 'qrcode';
 import { clearStaffDeviceData } from '../lib/adminAuth';
@@ -279,11 +279,17 @@ export default function AdminTwoStepPage() {
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
 
+  const busyRef = useRef(false);
+  busyRef.current = busy;
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  const pendingExit = useRef(null);
   const setField = (key) => (value) => setForm((current) => ({ ...current, [key]: value }));
   const errorFor = (at) => (failure.at === at ? failure.message : '');
   const show = (next) => {
     setForm(EMPTY_FORM);
     setFailure({ at: '', message: '' });
+    viewRef.current = next;
     setView(next);
   };
 
@@ -335,14 +341,22 @@ export default function AdminTwoStepPage() {
   }, []);
 
   // Another tab signing out, or in as someone (or something) else, ends this
-  // page's session at once, like the staff shell's storage listener: the
-  // controls here never act on a session the device no longer holds.
+  // page's session, like the staff shell's storage listener: the controls
+  // here never act on a session the device no longer holds. While a request
+  // is in flight or the one-time recovery codes are on screen, the exit
+  // waits until Done, so codes from a change that already committed are
+  // never lost to another tab reacting to that same change.
   useEffect(() => {
     const onStorage = (event) => {
       if (event.key !== null && event.key !== 'waves_admin_token') return;
       const stored = localStorage.getItem('waves_admin_token');
       if (stored === token) return;
-      navigate(stored ? '/admin' : '/admin/login', { replace: true });
+      const target = stored ? '/admin' : '/admin/login';
+      if (busyRef.current || viewRef.current === 'codes') {
+        pendingExit.current = target;
+        return;
+      }
+      navigate(target, { replace: true });
     };
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage);
@@ -355,6 +369,7 @@ export default function AdminTwoStepPage() {
   const submit = (at, action) => async (event) => {
     event.preventDefault();
     setBusy(true);
+    busyRef.current = true;
     setFailure({ at: '', message: '' });
     try {
       await action();
@@ -362,6 +377,10 @@ export default function AdminTwoStepPage() {
       setFailure({ at, message: err.message });
     } finally {
       setBusy(false);
+      busyRef.current = false;
+      // Another tab ended the session while this ran; leave now unless the
+      // one-time codes are on screen (then Done leaves).
+      if (pendingExit.current && viewRef.current !== 'codes') navigate(pendingExit.current, { replace: true });
     }
   };
 
@@ -369,10 +388,18 @@ export default function AdminTwoStepPage() {
   // sign-in (the lost-phone path; the server allows it for a short window).
   const replaceNeedsCode = Boolean(status?.enabled && !status.replaceWithoutCode);
   const startSetup = submit('setup', async () => {
-    const data = await call('/totp/setup', {
-      method: 'POST',
-      body: { currentPassword: form.password, ...(replaceNeedsCode ? { code: form.code.trim() } : {}) },
-    });
+    let data;
+    try {
+      data = await call('/totp/setup', {
+        method: 'POST',
+        body: { currentPassword: form.password, ...(replaceNeedsCode ? { code: form.code.trim() } : {}) },
+      });
+    } catch (err) {
+      // The recovery-code window may have closed while the page sat open:
+      // re-read it so the current-code field comes back.
+      if (status.replaceWithoutCode && err.status === 400) await loadStatus();
+      throw err;
+    }
     setSetup(data);
     show('scan');
   });
@@ -437,6 +464,10 @@ export default function AdminTwoStepPage() {
   const finishCodes = async () => {
     setRecoveryCodes([]);
     setNotice('');
+    if (pendingExit.current) {
+      navigate(pendingExit.current, { replace: true });
+      return;
+    }
     if (signedInUser) {
       // A superseded confirmation goes to /admin, where the shell checks
       // whatever session the other tab left (or sends to sign in).

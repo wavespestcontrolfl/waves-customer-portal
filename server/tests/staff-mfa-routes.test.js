@@ -198,17 +198,23 @@ describe('POST /login/mfa', () => {
     ['an access token used as a challenge', () => jwt.sign({ technicianId: 'tech-1', type: 'access', tokenVersion: 3 }, SECRET)],
     ['a challenge signed with another secret', () => jwt.sign({ technicianId: 'tech-1', type: 'staff_mfa_challenge', tokenVersion: 3 }, 'other')],
     ['an expired challenge', () => jwt.sign({ technicianId: 'tech-1', type: 'staff_mfa_challenge', tokenVersion: 3, exp: Math.floor(Date.now() / 1000) - 1 }, SECRET)],
-  ])('refuses %s before checking any code', async (_label, make) => {
-    const res = await invoke(loginMfa, { body: { challengeToken: make(), code: '123456' } });
-    expect(res.statusCode).toBe(401);
-    expect(res.body.code).toBe('MFA_CHALLENGE_INVALID');
+    ['a malformed challenge', () => 'not-a-jwt'],
+  ])('refuses %s with the generic 404 before checking any code', async (_label, make) => {
+    const res = await invoke(loginMfa, { originalUrl: '/api/admin/auth/login/mfa', method: 'POST', body: { challengeToken: make(), code: '123456' } });
+    expect(res.statusCode).toBe(404);
+    expect(res.body.code).toBeUndefined();
     expect(staffMfa.verifySecondFactor).not.toHaveBeenCalled();
+  });
+
+  test('a missing code is the same generic 404', async () => {
+    const res = await invoke(loginMfa, { originalUrl: '/api/admin/auth/login/mfa', method: 'POST', body: { challengeToken: challenge() } });
+    expect(res.statusCode).toBe(404);
   });
 
   test('a password change since the challenge (token version moved) restarts sign-in', async () => {
     db.mockReturnValueOnce(builder({ first: staffRow({ mfa_enabled_at: new Date(), auth_token_version: 4 }) }));
-    const res = await invoke(loginMfa, { body: { challengeToken: challenge(), code: '123456' } });
-    expect(res.body.code).toBe('MFA_CHALLENGE_INVALID');
+    const res = await invoke(loginMfa, { originalUrl: '/api/admin/auth/login/mfa', method: 'POST', body: { challengeToken: challenge(), code: '123456' } });
+    expect(res.statusCode).toBe(404);
     expect(staffMfa.verifySecondFactor).not.toHaveBeenCalled();
   });
 
@@ -234,9 +240,8 @@ describe('POST /login/mfa', () => {
   test('a password change between the steps (fenced inside the code check) restarts sign-in', async () => {
     db.mockReturnValueOnce(builder({ first: staffRow({ mfa_enabled_at: new Date() }) }));
     staffMfa.verifySecondFactor.mockResolvedValue({ ok: false, reason: 'revoked' });
-    const res = await invoke(loginMfa, { body: { challengeToken: challenge(), code: 'AAAA-BBBB-CCCC-DDDD' } });
-    expect(res.statusCode).toBe(401);
-    expect(res.body.code).toBe('MFA_CHALLENGE_INVALID');
+    const res = await invoke(loginMfa, { originalUrl: '/api/admin/auth/login/mfa', method: 'POST', body: { challengeToken: challenge(), code: 'AAAA-BBBB-CCCC-DDDD' } });
+    expect(res.statusCode).toBe(404);
     expect(res.body.token).toBeUndefined();
   });
 });

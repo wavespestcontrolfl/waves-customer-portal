@@ -140,6 +140,40 @@ describe('AdminTwoStepPage', () => {
     expect(fetchMock.mock.calls[2][1].headers.Authorization).toBe('Bearer after-off-jwt');
   });
 
+  it('another tab signing out mid-enrollment still shows the one-time codes, then leaves on Done', async () => {
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(reply(200, { available: true, enabled: false, enrollmentRequired: false, enforced: false, recoveryCodesRemaining: 0 }))
+      .mockResolvedValueOnce(reply(200, { secret: 'JBSWY3DPEHPK3PXP', otpauthUrl: 'otpauth://totp/x', expiresInMinutes: 15 }))
+      .mockImplementationOnce(async () => {
+        // The other tab reacts to the committed change before this answer lands.
+        store.delete('waves_admin_token');
+        window.dispatchEvent(new StorageEvent('storage', { key: 'waves_admin_token' }));
+        return reply(200, { token: 'new-jwt', user: { id: 'a', role: 'admin' }, recoveryCodes: ['AAAA-BBBB-CCCC-DDDD'] });
+      }));
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Current password'), { target: { value: 'pw' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    fireEvent.change(await screen.findByLabelText('Code from the app'), { target: { value: '123456' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Turn on two-step sign-in' }));
+    expect(await screen.findByText('AAAA-BBBB-CCCC-DDDD')).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText('I saved these codes'));
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    expect(await screen.findByText('Sign in page')).toBeInTheDocument();
+  });
+
+  it('when the recovery-code window has closed, replacing asks for a code again', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(reply(200, { available: true, enabled: true, enrollmentRequired: false, enforced: true, recoveryCodesRemaining: 0, replaceWithoutCode: true }))
+      .mockResolvedValueOnce(reply(400, { error: 'Enter a code from your current authenticator app to replace it.' }))
+      .mockResolvedValueOnce(reply(200, { available: true, enabled: true, enrollmentRequired: false, enforced: true, recoveryCodesRemaining: 0, replaceWithoutCode: false }));
+    vi.stubGlobal('fetch', fetchMock);
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'Replace authenticator (new phone)' }));
+    fireEvent.change(screen.getByLabelText('Current password'), { target: { value: 'pw' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    expect(await screen.findByLabelText('Code from your current authenticator')).toBeInTheDocument();
+  });
+
   it('another tab signing out ends this page at once', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => reply(200, { available: true, enabled: true, enrollmentRequired: false, enforced: false, recoveryCodesRemaining: 9 })));
     renderPage();

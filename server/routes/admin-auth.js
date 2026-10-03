@@ -254,14 +254,21 @@ function mfaFailureResponse(res, result, invalidStatus = 401) {
   return res.status(invalidStatus).json({ error: 'That code did not work. Check your authenticator app and try again.', code: 'MFA_INVALID' });
 }
 
+const JWT_SHAPE_RE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
+
 // Step two of an enrolled staff member's sign-in: the challenge from /login
-// plus a 6-digit authenticator code or a recovery code.
+// plus a 6-digit authenticator code or a recovery code. A malformed body and
+// an unknown, expired, revoked or ineligible challenge all answer the same
+// generic 404 as the dark route (the public token-route baseline); the
+// sign-in page restarts at the password step on it. Only a wrong code for a
+// live challenge says so (401 MFA_INVALID).
 async function loginMfa(req, res, next) {
   try {
     const { challengeToken, code } = req.body || {};
-    const restart = () => res.status(401).json({ error: 'Your sign-in expired. Enter your email and password again.', code: 'MFA_CHALLENGE_INVALID' });
-    if (typeof challengeToken !== 'string' || typeof code !== 'string' || !code.trim() || code.length > 64) {
-      return res.status(400).json({ error: 'Enter the code from your authenticator app.' });
+    const restart = () => res.status(404).json(require('../middleware/errors').notFoundBody(req));
+    if (typeof challengeToken !== 'string' || challengeToken.length > 2048 || !JWT_SHAPE_RE.test(challengeToken)
+      || typeof code !== 'string' || !code.trim() || code.length > 64) {
+      return restart();
     }
     let claims;
     try {

@@ -86,9 +86,12 @@ export default function AdminLoginPage() {
         body: JSON.stringify({ challengeToken, code: code.trim() }),
       });
       const data = await res.json().catch(() => ({}));
-      if (data.code === 'MFA_CHALLENGE_INVALID') {
+      // An expired or no-longer-valid sign-in answers the generic 404: start
+      // again at the password step.
+      if (res.status === 404) {
         setChallengeToken('');
         setCode('');
+        throw new Error('Your sign-in expired. Enter your email and password again.');
       }
       if (!res.ok) throw new Error(data.error || 'That code did not work');
       await completeSignIn(data);

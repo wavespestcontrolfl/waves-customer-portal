@@ -103,7 +103,7 @@ describe('AdminLoginPage two-step sign-in', () => {
   it('an expired challenge sends the person back to the password step', async () => {
     vi.stubGlobal('fetch', vi.fn()
       .mockResolvedValueOnce(reply(200, { mfaRequired: true, challengeToken: 'challenge-1' }))
-      .mockResolvedValueOnce(reply(401, { error: 'Your sign-in expired. Enter your email and password again.', code: 'MFA_CHALLENGE_INVALID' })));
+      .mockResolvedValueOnce(reply(404, { error: 'Not found' })));
     renderPage();
     await submitPassword();
     fireEvent.change(await screen.findByLabelText('Authentication code'), { target: { value: '123456' } });

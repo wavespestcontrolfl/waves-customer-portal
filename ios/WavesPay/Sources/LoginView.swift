@@ -111,8 +111,13 @@ struct LoginView: View {
                     await app.validate(token: t)
                 }
             } catch API.APIError.unauthorized where challengeToken != nil {
-                // A wrong code and an expired challenge both answer 401 here.
-                self.error = "That code did not work. Try again, or go back and sign in again."
+                // A wrong code for a live sign-in answers 401.
+                self.error = "That code did not work. Try again."
+            } catch API.APIError.http(let status, _) where status == 404 && challengeToken != nil {
+                // An expired or no-longer-valid sign-in answers the generic 404.
+                challengeToken = nil
+                code = ""
+                self.error = "Your sign-in expired. Enter your email and password again."
             } catch {
                 self.error = error.localizedDescription
             }
