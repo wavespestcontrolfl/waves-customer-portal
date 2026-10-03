@@ -137,7 +137,7 @@ describe('GATE_SMS_REAL_ANSWERS off — byte-identical to v11', () => {
 
   test('PROMPT_VERSION export stays house_voice_v11 (the live/default cohort identity)', () => {
     expect(PROMPT_VERSION).toBe('house_voice_v11');
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers5_cflvp');
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers6_cflvp');
     expect(REAL_ANSWERS_PROMPT_VERSION).not.toBe(PROMPT_VERSION);
   });
 
@@ -309,7 +309,7 @@ describe('GATE_SMS_REAL_ANSWERS on — the rewritten prompt', () => {
     for (const g of CATEGORY_GATES) process.env[g] = 'true';
     const allFour = currentPromptVersion();
     expect(allFour).toBe(`${REAL_ANSWERS_PROMPT_VERSION}+bclm`);
-    expect(allFour.length).toBe(40); // '5_cflvp' + '+bclm' = PROMPT_VERSION_COLUMN_MAX
+    expect(allFour.length).toBe(40); // '6_cflvp' + '+bclm' = PROMPT_VERSION_COLUMN_MAX
     expect(allFour.length).toBeLessThanOrEqual(40);
   });
 
@@ -938,7 +938,7 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
     });
 
     expect(getAvailableSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'cust-1' });
-    expect(result.promptVersion).toBe('house_voice_v12_real_answers5_cflvp');
+    expect(result.promptVersion).toBe('house_voice_v12_real_answers6_cflvp');
     expect(result.factsBlock).toContain('OPEN TIMES (real, bookable slots, ET');
     // the 2-hour customer-facing arrival window, never the raw 1-hour slot
     expect(result.factsBlock).toContain('Tuesday, September 29: 9:00 AM - 11:00 AM');
@@ -1392,7 +1392,7 @@ describe('draftShadowReply — customer.city flows to OPEN TIMES; prompt_version
     const { insertedRows, getAvailableSlots } = await runDraft({ gateOn: true, city: 'Venice' });
     expect(getAvailableSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'customer-1' });
     expect(insertedRows).toHaveLength(1);
-    expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers5_cflvp');
+    expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers6_cflvp');
     expect(insertedRows[0].facts_block).toContain('OPEN TIMES (real, bookable slots, ET');
     expect(insertedRows[0].facts_block).toContain('Tuesday, September 29: 9:00 AM - 11:00 AM');
   });
@@ -1401,7 +1401,7 @@ describe('draftShadowReply — customer.city flows to OPEN TIMES; prompt_version
     const { insertedRows, getAvailableSlots } = await runDraft({ gateOn: true, schedulingIntent: false });
     expect(getAvailableSlots).not.toHaveBeenCalled();
     expect(insertedRows[0].facts_block).not.toContain('OPEN TIMES');
-    expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers5_cflvp'); // the prompt rewrite still applies; only the section is withheld
+    expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers6_cflvp'); // the prompt rewrite still applies; only the section is withheld
   });
 });
 
