@@ -8,9 +8,10 @@
 //     node ops/agents/correction-loop-report.js [--days=60] [--json]
 //   (`~/.claude/bin/correction-loop` is that command.)
 //
-// Sections: the live prompt version; the last 7 days of adjudicated
-// incidents by disposition and cell; open and recent fix proposals with their
-// PR and replay runs; recurrence per cell per prompt version over --days.
+// Sections: the live SMS prompt version; the last 7 days of adjudicated
+// incidents by area, disposition and cell (sms, calls, …); open and recent
+// fix proposals in every area with their PR and replay runs; SMS recurrence
+// per cell per prompt version over --days.
 //
 // Recurrence is attributed to the version and time the DRAFT was produced,
 // never when it was judged. Opportunities are every house-voice inbound
@@ -42,20 +43,19 @@ async function buildReport({ dbi, now = new Date(), days = 60, liveVersion = nul
   const since = new Date(now.getTime() - days * 86400 * 1000);
   const weekAgo = new Date(now.getTime() - 7 * 86400 * 1000);
 
+  // Every area (sms, calls, …): the week's incidents and its proposals.
   const week = await dbi('ai_incidents')
-    .where({ area: AREA })
     .where('adjudicated_at', '>=', weekAgo)
-    .groupBy('disposition', 'surface', 'failure_mode')
-    .select('disposition', 'surface', 'failure_mode')
+    .groupBy('area', 'disposition', 'surface', 'failure_mode')
+    .select('area', 'disposition', 'surface', 'failure_mode')
     .countDistinct('incident_key as n')
-    .orderBy([{ column: 'disposition' }, { column: 'n', order: 'desc' }]);
+    .orderBy([{ column: 'area' }, { column: 'disposition' }, { column: 'n', order: 'desc' }]);
 
   // Every open proposal, always (active work is never cut by a cap), then
   // up to 20 recently closed ones for history.
   const OPEN = ['pending', 'accepted', 'pr_open'];
-  const open = await dbi('ai_fix_proposals').where({ area: AREA }).whereIn('status', OPEN).orderBy('created_at', 'desc');
+  const open = await dbi('ai_fix_proposals').whereIn('status', OPEN).orderBy([{ column: 'area' }, { column: 'created_at', order: 'desc' }]);
   const recentClosed = await dbi('ai_fix_proposals')
-    .where({ area: AREA })
     .whereNotIn('status', OPEN)
     .where('updated_at', '>=', since)
     .orderBy('updated_at', 'desc')
@@ -119,9 +119,10 @@ async function buildReport({ dbi, now = new Date(), days = 60, liveVersion = nul
     generatedAt: now.toISOString(),
     liveVersion,
     windowDays: days,
-    week: week.map((r) => ({ disposition: r.disposition, cell: `${r.surface}/${r.failure_mode}`, n: Number(r.n) || 0 })),
+    week: week.map((r) => ({ area: r.area, disposition: r.disposition, cell: `${r.surface}/${r.failure_mode}`, n: Number(r.n) || 0 })),
     proposals: proposals.map((p) => ({
       id: String(p.id).slice(0, 8),
+      area: p.area,
       status: p.status,
       cell: `${p.surface}/${p.failure_mode}`,
       fixKind: p.fix_kind,
@@ -144,18 +145,18 @@ function formatRun(r) {
 
 function formatReport(report) {
   const out = [];
-  out.push(`Correction loop (sms) — ${report.generatedAt.slice(0, 16)}Z; live prompt version ${report.liveVersion || 'unknown'}`);
-  out.push('', 'Last 7 days, adjudicated (distinct drafts):');
+  out.push(`Correction loop — ${report.generatedAt.slice(0, 16)}Z; live sms prompt version ${report.liveVersion || 'unknown'}`);
+  out.push('', 'Last 7 days, adjudicated (distinct drafts or calls), by area:');
   if (!report.week.length) out.push('  nothing adjudicated');
-  for (const w of report.week) out.push(`  ${w.disposition.padEnd(18)} ${w.cell.padEnd(44)} ${w.n}`);
+  for (const w of report.week) out.push(`  ${w.area.padEnd(6)} ${w.disposition.padEnd(18)} ${w.cell.padEnd(44)} ${w.n}`);
   out.push('', 'Fix proposals (open, or changed in the window):');
   if (!report.proposals.length) out.push('  none — no cell has reached the threshold');
   for (const p of report.proposals) {
-    out.push(`  ${p.id} ${p.status.padEnd(12)} ${p.cell} fix=${p.fixKind} v=${p.version || '-'} n=${p.incidents} (${p.dev} dev / ${p.holdout} holdout)`
+    out.push(`  ${p.id} ${p.area.padEnd(6)} ${p.status.padEnd(12)} ${p.cell} fix=${p.fixKind} v=${p.version || '-'} n=${p.incidents} (${p.dev} dev / ${p.holdout} holdout)`
       + `${p.pr ? ` PR #${p.pr}` : ''}${p.shipped ? ` shipped ${p.shipped}` : ''}`);
     if (p.devRun || p.holdoutRun) out.push(`           dev run: ${formatRun(p.devRun)}; holdout run: ${formatRun(p.holdoutRun)}`);
   }
-  out.push('', `Recurrence by prompt version (drafts produced in the last ${report.windowDays} days; replays are subagent-judged, never the exact production model):`);
+  out.push('', `SMS recurrence by prompt version (drafts produced in the last ${report.windowDays} days; replays are subagent-judged, never the exact production model):`);
   if (!report.versions.length) out.push('  no drafts in the window');
   for (const v of report.versions) {
     out.push(`  ${v.version}: ${v.drafts} drafts, judged ${v.judgedShare}, human replied ${v.humanRepliedShare} — ${v.verdict}`);

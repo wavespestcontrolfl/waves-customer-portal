@@ -185,6 +185,24 @@ describe('StripeService.confirmInvoicePayment dispute guard', () => {
     expect(planUpdate).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed' }));
   });
 
+  test('the settle write the dispute reopen undoes: total = cash charged + applied credit, surcharge recorded on the payment row (B05)', async () => {
+    invoiceRow.credit_applied = 20;
+    lockedInvoiceRow.credit_applied = 20;
+    stripeClient.paymentIntents.retrieve.mockResolvedValue({ ...makePi(), amount: 9011, amount_received: 9011,
+      metadata: { ...makePi().metadata, base_amount: '87', card_surcharge: '3.11' } });
+    const StripeService = require('../services/stripe');
+    await StripeService.confirmInvoicePayment('inv_123', PI_ID);
+
+    // removeCardSurchargeFromReopenedInvoice (stripe-webhook.js) acts only when
+    // total === payments.amount + credit_applied, and takes surcharge_amount_cents off.
+    const { total } = invoiceUpdate.mock.calls[0][0];
+    const payment = paymentsInsert.mock.calls[0][0];
+    expect(payment).toMatchObject({ amount: 90.11, base_amount_cents: 8700, surcharge_amount_cents: 311 });
+    expect(total).toBe(payment.amount + 20);
+    // ...which lands exactly on the invoice's own $107.00 (amount due 87 + credit 20).
+    expect(Math.round(total * 100) - payment.surcharge_amount_cents).toBe(10700);
+  });
+
   test('an existing non-terminal row is updated through the terminal-status filter', async () => {
     existingPaymentRow = { id: 'pay_existing', status: 'processing' };
     const StripeService = require('../services/stripe');
