@@ -28,6 +28,8 @@ function mockTable(name) {
   const q = {
     where(cond) { rows = rows.filter((r) => Object.entries(cond).every(([k, v]) => r[k] === v)); return q; },
     whereNull(col) { rows = rows.filter((r) => r[col] == null); return q; },
+    whereIn(col, vals) { rows = rows.filter((r) => vals.includes(String(r[col]))); return q; },
+    orderBy() { return q; },
     forUpdate() { mockLocks.push(name); return q; },
     async update(patch) {
       for (const r of rows) for (const [k, v] of Object.entries(patch)) r[k] = v && v.__raw ? `raw:${v.__raw}` : v;
@@ -166,13 +168,6 @@ describe('the dispatcher\'s two decisions', () => {
     expect(mockResolveAlert).toHaveBeenCalledWith(expect.objectContaining({ id: 'alert-1' }));
   });
 
-  test('"Not a miss" on one row leaves the card up while another flagged row of the visit is open', async () => {
-    mockTables.reschedule_log = [logRow(), logRow({ id: 'log-2' })];
-    await notClosedOut.dismiss({ logId: 'log-1', dismissedBy: STAFF });
-    expect(mockTables.reschedule_log[1].resolved_at).toBeNull();
-    expect(mockResolveAlert).not.toHaveBeenCalled();
-  });
-
   test('both decisions read the row under a lock, so a settle that landed first wins', async () => {
     await notClosedOut.confirmMiss({ logId: 'log-1', confirmedBy: STAFF });
     await notClosedOut.dismiss({ logId: 'log-1', dismissedBy: STAFF });
@@ -180,13 +175,57 @@ describe('the dispatcher\'s two decisions', () => {
   });
 
   test('a dispatch no-show on an already-flagged visit confirms the existing row, reopening one settled earlier', async () => {
-    mockTables.reschedule_log = [logRow({ resolved_at: 'EARLIER', resolution: 'backlog', resolved_by: 'migration' })];
+    mockTables.reschedule_log = [logRow({ resolved_at: 'EARLIER', resolution: 'backlog', resolved_by: 'migration', original_date: '2026-09-29' })];
     mockTables.dispatch_alerts = [];
+    mockTables.scheduled_services = [{ ...service, status: 'no_show' }];
     // the card's own button never reopens a settled row
     expect(await notClosedOut.confirmMiss({ logId: 'log-1', confirmedBy: STAFF })).toEqual({ ok: false, reason: 'not_found' });
     expect(await notClosedOut.confirmMiss({ logId: 'log-1', confirmedBy: STAFF, reopen: true })).toEqual({ ok: true });
     expect(mockTables.reschedule_log[0]).toMatchObject({ resolved_at: null, resolution: null, resolved_by: null, miss_confirmed_at: 'NOW', miss_confirmed_by: STAFF });
     expect(mockCreateAlertOnce.mock.calls[0][0].payload).toMatchObject({ log_id: 'log-1', miss_confirmed: true });
+  });
+
+  test.each([
+    ['completed in between', { status: 'completed' }],
+    ['rebooked to another day in between', { status: 'no_show', scheduled_date: '2026-10-06' }],
+  ])('a reopen never undoes the settlement of a visit %s', async (_label, visitNow) => {
+    mockTables.reschedule_log = [logRow({ resolved_at: 'EARLIER', resolution: 'rebooked', resolved_by: 'admin', original_date: '2026-09-29' })];
+    mockTables.dispatch_alerts = [];
+    mockTables.scheduled_services = [{ ...service, ...visitNow }];
+    expect(await notClosedOut.confirmMiss({ logId: 'log-1', confirmedBy: STAFF, reopen: true })).toEqual({ ok: false, reason: 'visit_moved_on' });
+    expect(mockTables.reschedule_log[0]).toMatchObject({ resolved_at: 'EARLIER', resolution: 'rebooked', miss_confirmed_at: null });
+    expect(mockCreateAlertOnce).not.toHaveBeenCalled();
+    // the visit is locked before the log row, the order a status change takes them
+    expect(mockLocks).toEqual(['scheduled_services', 'reschedule_log']);
+  });
+
+  test('"Not a miss" on one of two open flagged rows hands the card to the row still open', async () => {
+    mockTables.reschedule_log = [
+      logRow(),
+      logRow({ id: 'log-2', original_date: '2026-09-22', original_window: '13:00:00-14:00:00', miss_confirmed_at: 'THEN' }),
+    ];
+    expect(await notClosedOut.dismiss({ logId: 'log-1', dismissedBy: STAFF })).toEqual({ ok: true });
+    expect(mockTables.reschedule_log[1].resolved_at).toBeNull();
+    expect(mockResolveAlert).toHaveBeenCalledWith(expect.objectContaining({ id: 'alert-1' }));
+    expect(mockCreateAlertOnce.mock.calls[0][0]).toMatchObject({
+      jobId: 'visit-1',
+      payload: { log_id: 'log-2', scheduled_date: '2026-09-22', window_start: '13:00:00', window_end: '14:00:00', miss_confirmed: true },
+    });
+  });
+
+  test('a card already on the row still open is left as it is', async () => {
+    mockTables.reschedule_log = [logRow(), logRow({ id: 'log-2' })];
+    mockTables.dispatch_alerts = [card({ payload: { log_id: 'log-2' } })];
+    expect(await notClosedOut.dismiss({ logId: 'log-1', dismissedBy: STAFF })).toEqual({ ok: true });
+    expect(mockResolveAlert).not.toHaveBeenCalled();
+    expect(mockCreateAlertOnce).not.toHaveBeenCalled();
+  });
+
+  test('a series move settles every moved visit that carries an open flagged row, and only those', async () => {
+    mockTables.reschedule_log = [logRow(), logRow({ id: 'log-2', scheduled_service_id: 'visit-2' }), logRow({ id: 'log-3', scheduled_service_id: 'visit-9' })];
+    expect(await notClosedOut.resolveForServices({ serviceIds: ['visit-1', 'visit-2', 'visit-2', 'visit-3'], resolution: 'rebooked', resolvedBy: 'admin' })).toEqual({ resolved: 2 });
+    expect(mockTables.reschedule_log.map((r) => r.resolution)).toEqual(['rebooked', 'rebooked', null]);
+    expect(await notClosedOut.resolveForServices({ serviceIds: [], resolution: 'rebooked' })).toEqual({ resolved: 0 });
   });
 
   test('a row that is already settled, or not a flagged visit, is not_found for both decisions', async () => {

@@ -114,6 +114,33 @@ async function resolveForService({ serviceId, resolution, resolvedBy = null, trx
   }
 }
 
+/**
+ * Settle the flagged rows of every visit a series move moved. One read finds the
+ * few (usually zero) moved visits that carry an open flagged row; only those are
+ * settled, each as resolveForService does.
+ * @returns {Promise<{resolved: number}>}
+ */
+async function resolveForServices({ serviceIds, resolution, resolvedBy = null, trx = null } = {}) {
+  const ids = [...new Set((serviceIds || []).filter(Boolean).map(String))];
+  if (!ids.length || !RESOLUTIONS.includes(resolution)) return { resolved: 0 };
+  let flagged = [];
+  try {
+    flagged = await isolated(trx, (t) => t('reschedule_log')
+      .whereIn('scheduled_service_id', ids)
+      .where({ reason_code: 'customer_noshow' })
+      .whereNull('resolved_at')
+      .select('scheduled_service_id'));
+  } catch (err) {
+    logger.warn(`[not-closed-out] flagged rows of a series move not read: ${err.message}`);
+    return { resolved: 0 };
+  }
+  let resolved = 0;
+  for (const serviceId of new Set((Array.isArray(flagged) ? flagged : []).map((r) => String(r.scheduled_service_id)))) {
+    resolved += (await resolveForService({ serviceId, resolution, resolvedBy, trx })).resolved;
+  }
+  return { resolved };
+}
+
 /** job-status hook: a visit's new status settles its flagged rows (or not). */
 async function resolveOnTransition({ jobId, toStatus, resolvedBy = null, trx = null } = {}) {
   const resolution = RESOLUTION_BY_STATUS[String(toStatus || '')];
@@ -128,7 +155,13 @@ async function lockLog(t, logId) {
   return t('reschedule_log')
     .where({ id: logId, reason_code: 'customer_noshow' })
     .forUpdate()
-    .first('id', 'scheduled_service_id', 'resolved_at', 'miss_confirmed_at');
+    .first('id', 'scheduled_service_id', 'resolved_at', 'miss_confirmed_at', 'original_date', 'original_window');
+}
+
+// The slot a flagged row recorded as missed ("HH:MM:SS-HH:MM:SS"), for its card.
+function loggedSlot(log) {
+  const [start, end] = String((log && log.original_window) || '').split('-');
+  return { scheduled_date: dateOnly(log && log.original_date), window_start: start || null, window_end: end || null };
 }
 
 /**
@@ -141,16 +174,31 @@ async function lockLog(t, logId) {
  * row). That person's call stands even on a row settled earlier — a "not a miss"
  * dismissal or the backlog clear — so the row is reopened as a confirmed miss.
  * The card's own button never reopens: a settled row is `not_found` there.
+ * A reopen runs after the no-show transition committed, so it holds only while the
+ * visit, read under its own lock, is still that no-show occurrence: one that was
+ * rebooked or completed in between keeps the settlement it got (`visit_moved_on`).
  * @returns {Promise<{ok: boolean, reason?: string}>}
  */
 async function confirmMiss({ logId, confirmedBy = null, reopen = false } = {}) {
   if (!logId) return { ok: false, reason: 'not_found' };
   return db.transaction(async (t) => {
+    // reopen locks the visit BEFORE the log row — the order a status change or a
+    // move takes them (visit lock, then its flagged rows)
+    let visit = null;
+    if (reopen) {
+      const ref = await t('reschedule_log').where({ id: logId, reason_code: 'customer_noshow' }).first('scheduled_service_id');
+      if (ref && ref.scheduled_service_id) {
+        visit = await t('scheduled_services').where({ id: ref.scheduled_service_id }).forUpdate().first('id', 'status', 'scheduled_date');
+      }
+    }
     const log = await lockLog(t, logId);
     if (!log) return { ok: false, reason: 'not_found' };
     if (log.resolved_at && !reopen) return { ok: false, reason: 'not_found' };
     const by = confirmedBy ? String(confirmedBy).slice(0, 80) : null;
     if (log.resolved_at) {
+      const sameOccurrence = visit && visit.status === 'no_show'
+        && (!log.original_date || dateOnly(log.original_date) === dateOnly(visit.scheduled_date));
+      if (!sameOccurrence) return { ok: false, reason: 'visit_moved_on' };
       await t('reschedule_log').where({ id: logId })
         .update({ resolved_at: null, resolution: null, resolved_by: null, miss_confirmed_at: t.fn.now(), miss_confirmed_by: by });
     } else if (!log.miss_confirmed_at) {
@@ -198,8 +246,31 @@ async function dismiss({ logId, dismissedBy = null, note = null } = {}) {
     if (log.scheduled_service_id) {
       const stillOpen = await t('reschedule_log')
         .where({ scheduled_service_id: log.scheduled_service_id, reason_code: 'customer_noshow' })
-        .whereNull('resolved_at').first('id');
-      if (!stillOpen) await closeCards(t, log.scheduled_service_id, dismissedBy);
+        .whereNull('resolved_at').orderBy('created_at', 'desc')
+        .first('id', 'miss_confirmed_at', 'original_date', 'original_window');
+      if (!stillOpen) {
+        await closeCards(t, log.scheduled_service_id, dismissedBy);
+      } else if (queueEnabled()) {
+        // Another flagged row of this visit is still open. A card that pointed at
+        // the row just settled would come back on reload with buttons that only
+        // answer not_found: replace it with one for the row that still needs a call.
+        const open = await t('dispatch_alerts').where({ type: ALERT_TYPE, job_id: log.scheduled_service_id }).whereNull('resolved_at').first('payload');
+        const payload = open && typeof open.payload === 'string' ? JSON.parse(open.payload) : (open && open.payload) || {};
+        if (String(payload.log_id || '') !== String(stillOpen.id)) {
+          await closeCards(t, log.scheduled_service_id, dismissedBy);
+          const service = await t('scheduled_services').where({ id: log.scheduled_service_id })
+            .first('id', 'technician_id', 'scheduled_date', 'window_start', 'window_end', 'service_type');
+          if (service) {
+            const slot = loggedSlot(stillOpen);
+            await raiseCard({
+              logId: stillOpen.id,
+              service: slot.scheduled_date ? { ...service, ...slot } : service,
+              confirmed: !!stillOpen.miss_confirmed_at,
+              trx: t,
+            });
+          }
+        }
+      }
     }
     return { ok: true };
   });
@@ -212,6 +283,7 @@ module.exports = {
   RESOLUTION_BY_STATUS,
   raiseCard,
   resolveForService,
+  resolveForServices,
   resolveOnTransition,
   confirmMiss,
   dismiss,

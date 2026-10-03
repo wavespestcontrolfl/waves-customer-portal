@@ -4113,12 +4113,12 @@ class SmartRebooker {
           ...scopeOf(row.scope),
         });
       }
-      // the anchor (and each carried partner) moved: any flagged row of theirs is rebooked
-      for (const id of [serviceId, ...partnerLogRows.map((r) => r.id)]) {
-        await require('./not-closed-out').resolveForService({
-          serviceId: id, resolution: 'rebooked', resolvedBy: initiatedBy, trx,
-        });
-      }
+      // Every occurrence this move wrote (anchor, recurring siblings, carried
+      // partners — moveRows; preserved and skipped rows are not in it) is rebooked:
+      // settle any flagged row of theirs.
+      await require('./not-closed-out').resolveForServices({
+        serviceIds: [serviceId, ...moveRows.map((r) => r.id)], resolution: 'rebooked', resolvedBy: initiatedBy, trx,
+      });
 
       return touched;
     }).catch(async (err) => {
