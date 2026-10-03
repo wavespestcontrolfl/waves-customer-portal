@@ -1144,8 +1144,13 @@ function languageVote(text) {
   if (/(?!\p{Script=Latin})\p{L}/u.test(plain)) return 'foreign';
   const tokens = languageTokens(plain, { dropNames: true });
   if (!tokens.length) return null;
-  if (!isEnglishInbound(plain)) return 'foreign';
-  return tokens.length <= 4 && tokens.some((w) => !englishKnown(w)) ? 'foreign' : 'english';
+  // judged on the same name-free words throughout: every word known English is English ("Thanks Nadia Petrova"),
+  // unless the text carries positive evidence of another language
+  if (looksNonEnglish(plain) || hasUnsupportedLanguage(plain)) return 'foreign';
+  const known = tokens.filter(englishKnown).length;
+  if (known === tokens.length) return 'english';
+  if (tokens.length <= 4) return 'foreign';
+  return known / tokens.length >= ENGLISH_SHARE ? 'english' : 'foreign';
 }
 
 function isUnverifiedLanguageInbound(inbound) {
