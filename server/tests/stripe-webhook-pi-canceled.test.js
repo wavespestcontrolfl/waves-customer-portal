@@ -110,6 +110,20 @@ beforeEach(() => {
   resolveFailedInvoiceSavedCardChargeAttempt.mockResolvedValue(true);
 });
 
+// B16: Charge now cancels the live intent of an autopay charge parked on card authentication before
+// it collects a replacement. The parked failed row (metadata.requires_action) is a debt that is still
+// owed, so the canceled event must not flip it to 'canceled' and drop it from the overdue balance.
+test('B16: the canceled update excludes a failed row parked on card authentication (still owed)', async () => {
+  await handleCanceled({ id: 'pi_sca_1', metadata: {} });
+  const update = paymentUpdates()[0];
+  expect(update.patch).toEqual({ status: 'canceled' });
+  const guard = update.wheres.find((w) => w.whereRaw);
+  expect(guard).toBeTruthy();
+  expect(guard.whereRaw[0]).toMatch(/NOT \(status = 'failed' AND COALESCE\(metadata->>'requires_action', ''\) = 'true'\)/);
+  // the paid / refunded / disputed exclusion is unchanged
+  expect(update.wheres).toContainEqual({ whereNotIn: ['status', ['paid', 'refunded', 'disputed']] });
+});
+
 test('single-invoice ACH PI canceled after processing: payment canceled, invoice reopened and unstamped', async () => {
   mockState.stampedInvoices = [{ ...STAMPED }];
   await handleCanceled({ id: 'pi_ach_1', metadata: {} });

@@ -279,6 +279,34 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
           };
         }
 
+        // B16: a parked 3D Secure autopay charge leaves its PaymentIntent live in Stripe. Collecting a
+        // replacement while it can still be completed would collect twice (its succeeded webhook would
+        // pay the original row too), so neutralize it FIRST, inside this lock: cancel a cancelable
+        // intent; refuse when the original is already processing/succeeded (it is being collected);
+        // fail closed when Stripe cannot confirm. Nothing is charged on a refusal.
+        const parkedFence = await require('../services/autopay-sca-parked')
+          .fenceParkedIntentsForReplacement(customerId, { monthKey, monthStart, monthEnd }, { conn: db })
+          .catch((fenceErr) => ({ ok: false, reason: 'payment_session_unverifiable', detail: fenceErr.message }));
+        if (!parkedFence.ok) {
+          const inFlight = parkedFence.reason === 'payment_in_flight';
+          logger.warn(`[admin-billing-health] charge-now for ${customerId} ${monthKey} refused: parked PaymentIntent ${parkedFence.piId || '(unknown)'} ${inFlight ? `is ${parkedFence.piStatus || 'in flight'}` : 'could not be verified or canceled'}`);
+          return {
+            response: {
+              status: 409,
+              body: inFlight
+                ? {
+                  error: `${monthKey}'s earlier card charge is already being collected (it is ${parkedFence.piStatus || 'in flight'} at Stripe). Wait for it to settle instead of charging again.`,
+                  already_collected: true,
+                  payment_in_flight: true,
+                }
+                : {
+                  error: `Could not confirm the earlier card charge for ${monthKey} is cancelled at Stripe, so nothing was charged (it could be collected twice). Try again in a moment.`,
+                  payment_session_unverifiable: true,
+                },
+            },
+          };
+        }
+
         // Attempt-scoped idempotency key (Codex round-1 P1): shared with
         // chargeMonthly()'s own key derivation (retry-collectibility.js)
         // so charge-now and the daily cron always agree on the SAME key
@@ -301,6 +329,14 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
           }, idempotencyKey, { operatorOverride: true, overrideTrail: chargeNowOverrideTrail(req) }); // staff-ordered: exempt from the collections dispute-hold guard
           return { payment: chargedPayment };
         } catch (err) {
+          // B16: charge() recorded this failed attempt as a failed row. Keep ONE canonical failed row
+          // per obligation month (failed-payments.js sums every unsuperseded failed row, so a parked or
+          // earlier failed row plus this attempt would double the debt): link them the way the retry
+          // ladder does. Orphan / ambiguous outcomes park their own rows and are left alone.
+          if (err.paymentRecord?.id && !['STRIPE_CHARGED_DB_FAILED', 'STRIPE_AMBIGUOUS_OUTCOME'].includes(err.code)) {
+            await require('../services/autopay-sca-parked')
+              .reconcileFailedManualAttempt(customerId, { monthKey, monthStart, monthEnd }, err.paymentRecord, { conn: db });
+          }
           return { response: await buildChargeFailureResponse(err, { customerId, chargeAmount, technicianId: req.technicianId }) };
         }
       }).catch((err) => {

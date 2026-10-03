@@ -23,6 +23,7 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/stripe', () => ({
   charge: jest.fn(), chargeOneTime: jest.fn(), chargeMonthly: jest.fn(),
+  retrievePaymentIntent: jest.fn(), cancelPaymentIntent: jest.fn(),
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(async () => ({ sent: true })),
@@ -31,7 +32,11 @@ jest.mock('../services/sms-template-renderer', () => ({
   renderRequiredSmsTemplate: jest.fn(async () => 'receipt body'),
 }));
 jest.mock('../services/autopay-log', () => ({ logAutopay: jest.fn(async () => undefined) }));
-jest.mock('../services/autopay-sca-parked', () => ({ settleParkedForPaidPayment: jest.fn(async () => []) }));
+jest.mock('../services/autopay-sca-parked', () => ({
+  settleParkedForPaidPayment: jest.fn(async () => []),
+  fenceParkedIntentsForReplacement: jest.fn(async () => ({ ok: true })),
+  reconcileFailedManualAttempt: jest.fn(async () => null),
+}));
 const mockCloseAdminAlertKeys = jest.fn(async () => 1);
 jest.mock('../services/admin-alert-episodes', () => ({ closeAdminAlertKeys: (...a) => mockCloseAdminAlertKeys(...a) }));
 // B10: staff-ordered charge-now passes the operator override (exempt from the
@@ -286,8 +291,10 @@ describe('charge-now already-collected guard', () => {
   // was collected (here: the alert close threw after the supersede committed) is retried by
   // pressing Charge now again, which now reconciles from the already-collected path.
   describe('B16: already-collected Charge now retries parked-row cleanup (real route + real shared step)', () => {
-    const { settleParkedForPaidPayment: mockedSettle } = require('../services/autopay-sca-parked');
-    const actualSettle = jest.requireActual('../services/autopay-sca-parked').settleParkedForPaidPayment;
+    const Mocked = require('../services/autopay-sca-parked');
+    const mockedSettle = Mocked.settleParkedForPaidPayment;
+    const Actual = jest.requireActual('../services/autopay-sca-parked');
+    const actualSettle = Actual.settleParkedForPaidPayment;
     const PARKED = { id: 'pay-sca-1', customer_id: 'cust-1', stripe_payment_intent_id: 'pi_sca_orig' };
     const PAID = { id: 'pay-new', customer_id: 'cust-1', status: 'paid', amount: '89.00', metadata: JSON.stringify({ billed_month: '2026-10' }) };
     let ledger;
@@ -297,20 +304,27 @@ describe('charge-now already-collected guard', () => {
     // returns them after that.
     function ledgerQB() {
       const qb = {};
-      ['where', 'whereIn', 'whereRaw', 'whereNull', 'whereNot', 'orWhere', 'andWhere', 'orderBy', 'limit'].forEach((m) => {
+      const tags = new Set();
+      ['where', 'whereIn', 'whereNull', 'whereNot', 'orWhere', 'andWhere', 'orderBy', 'limit'].forEach((m) => {
         qb[m] = jest.fn((...args) => { if (typeof args[0] === 'function') args[0].call(qb, qb); return qb; });
       });
-      qb.first = jest.fn(() => Promise.resolve(ledger.firstResult));
-      qb.update = jest.fn(() => { ledger.updated += 1; return qb; });
-      qb.returning = jest.fn(() => Promise.resolve(ledger.updated === 1 ? [PARKED] : []));
-      qb.select = jest.fn(() => qb);
+      qb.whereRaw = jest.fn((sql) => { if (/requires_action/.test(sql)) tags.add('fence'); return qb; });
+      qb.whereNotNull = jest.fn((col) => { if (col === 'next_retry_at') tags.add('armed'); return qb; });
+      qb.first = jest.fn(() => Promise.resolve(tags.has('armed') ? ledger.armedRow : ledger.firstResult));
+      qb.update = jest.fn((payload) => { ledger.updated += 1; ledger.updates.push(payload); return qb; });
+      qb.returning = jest.fn(() => Promise.resolve(ledger.updated === 1 ? (ledger.supersedeRows || [PARKED]) : []));
+      qb.select = jest.fn(() => { if (tags.has('fence')) return Promise.resolve(ledger.fenceRows || []); return qb; });
       qb.then = (resolve, reject) => Promise.resolve(ledger.updated >= 1 ? [PARKED] : []).then(resolve, reject);
       return qb;
     }
 
     beforeEach(() => {
-      ledger = { firstResult: null, updated: 0 };
+      ledger = { firstResult: null, armedRow: null, updated: 0, updates: [], fenceRows: [], supersedeRows: null };
       mockedSettle.mockImplementation(actualSettle);
+      Mocked.fenceParkedIntentsForReplacement.mockImplementation(Actual.fenceParkedIntentsForReplacement);
+      Mocked.reconcileFailedManualAttempt.mockImplementation(Actual.reconcileFailedManualAttempt);
+      StripeService.retrievePaymentIntent.mockReset();
+      StripeService.cancelPaymentIntent.mockReset();
       mockCloseAdminAlertKeys.mockReset();
       mockCloseAdminAlertKeys.mockResolvedValue(1);
       db.mockImplementation((table) => {
@@ -326,7 +340,11 @@ describe('charge-now already-collected guard', () => {
         throw new Error(`unexpected table ${table}`);
       });
     });
-    afterEach(() => { mockedSettle.mockImplementation(async () => []); });
+    afterEach(() => {
+      mockedSettle.mockImplementation(async () => []);
+      Mocked.fenceParkedIntentsForReplacement.mockImplementation(async () => ({ ok: true }));
+      Mocked.reconcileFailedManualAttempt.mockImplementation(async () => null);
+    });
 
     const post = (baseUrl) => fetch(`${baseUrl}/admin/customers/cust-1/charge-now`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
@@ -371,6 +389,85 @@ describe('charge-now already-collected guard', () => {
         const res = await post(baseUrl);
         expect(res.status).toBe(409);
         expect(await res.json()).toMatchObject({ already_collected: true, payment_id: 'pay-new' });
+      });
+    });
+
+    // ---- B16 finding 3: the live 3DS PaymentIntent must be neutralized BEFORE a replacement is charged ----
+    describe('live parked PaymentIntent fence (inside the billing lock, before the charge)', () => {
+      const SCA_ROW = { id: 'pay-sca-1', stripe_payment_intent_id: 'pi_sca_orig' };
+
+      test('a live requires_action intent is canceled first, then the replacement is charged', async () => {
+        ledger.fenceRows = [SCA_ROW];
+        StripeService.retrievePaymentIntent.mockResolvedValue({ id: 'pi_sca_orig', status: 'requires_action', next_action: { type: 'use_stripe_sdk' } });
+        StripeService.cancelPaymentIntent.mockResolvedValue({ status: 'canceled' });
+        chargeMock.mockResolvedValue(PAID);
+        await withServer(async (baseUrl) => { expect((await post(baseUrl)).status).toBe(200); });
+        expect(StripeService.cancelPaymentIntent).toHaveBeenCalledWith('pi_sca_orig', { cancellation_reason: 'abandoned' });
+        expect(StripeService.cancelPaymentIntent.mock.invocationCallOrder[0]).toBeLessThan(chargeMock.mock.invocationCallOrder[0]);
+      });
+
+      test('the original intent is already processing/succeeded: refused with the already-collected shape, NOTHING charged or canceled', async () => {
+        ledger.fenceRows = [SCA_ROW];
+        StripeService.retrievePaymentIntent.mockResolvedValue({ id: 'pi_sca_orig', status: 'processing' });
+        await withServer(async (baseUrl) => {
+          const res = await post(baseUrl);
+          expect(res.status).toBe(409);
+          expect(await res.json()).toMatchObject({ already_collected: true, payment_in_flight: true });
+        });
+        expect(chargeMock).not.toHaveBeenCalled();
+        expect(StripeService.cancelPaymentIntent).not.toHaveBeenCalled();
+      });
+
+      test('Stripe cannot confirm the intent (fails closed): 409, nothing charged', async () => {
+        ledger.fenceRows = [SCA_ROW];
+        StripeService.retrievePaymentIntent.mockRejectedValue(new Error('stripe unreachable'));
+        await withServer(async (baseUrl) => {
+          const res = await post(baseUrl);
+          expect(res.status).toBe(409);
+          expect(await res.json()).toMatchObject({ payment_session_unverifiable: true });
+        });
+        expect(chargeMock).not.toHaveBeenCalled();
+      });
+
+      test('a cancel that fails is also fail-closed', async () => {
+        ledger.fenceRows = [SCA_ROW];
+        StripeService.retrievePaymentIntent.mockResolvedValue({ id: 'pi_sca_orig', status: 'requires_payment_method' });
+        StripeService.cancelPaymentIntent.mockRejectedValue(new Error('cancel refused'));
+        await withServer(async (baseUrl) => { expect((await post(baseUrl)).status).toBe(409); });
+        expect(chargeMock).not.toHaveBeenCalled();
+      });
+
+      test('no parked intent for the month: no Stripe call at all', async () => {
+        chargeMock.mockResolvedValue(PAID);
+        await withServer(async (baseUrl) => { expect((await post(baseUrl)).status).toBe(200); });
+        expect(StripeService.retrievePaymentIntent).not.toHaveBeenCalled();
+      });
+    });
+
+    // ---- B16 finding 2: a FAILED Charge now keeps one canonical failed row per month ----
+    describe('failed Charge now attempt: one canonical failed row per obligation month', () => {
+      const failure = () => Object.assign(new Error('Customer authentication required'), {
+        code: 'STRIPE_REQUIRES_ACTION', paymentRecord: { id: 'pay-fail-new', amount: '89.00', stripe_payment_intent_id: 'pi_fail_new' },
+      });
+
+      test('older unarmed (parked) rows are superseded to the new failed attempt; nothing is closed (still owed)', async () => {
+        chargeMock.mockRejectedValue(failure());
+        await withServer(async (baseUrl) => { await post(baseUrl); });
+        expect(ledger.updates).toEqual([expect.objectContaining({ superseded_by_payment_id: 'pay-fail-new' })]);
+        expect(mockCloseAdminAlertKeys).not.toHaveBeenCalled();
+      });
+
+      test('an ARMED failed row for the month stays canonical (it carries the ladder): the new attempt row is superseded to it', async () => {
+        ledger.armedRow = { id: 'pay-armed-1' };
+        chargeMock.mockRejectedValue(failure());
+        await withServer(async (baseUrl) => { await post(baseUrl); });
+        expect(ledger.updates).toEqual([{ superseded_by_payment_id: 'pay-armed-1' }]);
+      });
+
+      test('an ambiguous outcome parks its own row: no canonical-row linking', async () => {
+        chargeMock.mockRejectedValue(Object.assign(new Error('ambiguous'), { code: 'STRIPE_AMBIGUOUS_OUTCOME', paymentRecord: { id: 'pay-amb' } }));
+        await withServer(async (baseUrl) => { await post(baseUrl); });
+        expect(ledger.updates.some((u) => u.superseded_by_payment_id === 'pay-fail-new')).toBe(false);
       });
     });
   });

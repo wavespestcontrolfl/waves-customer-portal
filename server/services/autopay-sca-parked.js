@@ -76,6 +76,12 @@ async function alertAutopayScaParked(customer, err, { amount, source, kind = 'mo
       doneWhen: alertKind === 'monthly' ? 'charge_collected' : 'collected_and_marked_done',
       who: 'person',
     }, {
+      // A needs-you money item must ring. With GATE_ADMIN_BELL_POLICY on, the policy silences any
+      // admin notification that neither carries the explicit site tag nor is on an allowlist (the
+      // category override is off by default for billing), and notifyAdmin then resolves a truthy
+      // { id: null, suppressed: true } sentinel with NO row. bell: true is the sanctioned site-level
+      // opt-in (docs/admin-notifications.md section 7; notification-bell-policy.js decision 1).
+      bell: true,
       detail: `Autopay for ${name} (${dollars || 'amount unknown'}) was declined for customer authentication (3D Secure): the cardholder's bank has to approve the charge, and an automatic charge cannot do that. It was not collected and no retry is scheduled, so it will not collect on its own. No message was sent to the customer. Reach the customer to approve it with their bank, or collect it another way. ${alertKind === 'one_time' ? 'This is a one-time charge: it closes by itself only if this charge\'s own payment settles. If you collect it with a different payment, mark this done. ' : ''}Stripe PaymentIntent ${paymentIntentId || 'unknown'}${attemptId ? `, payment record ${attemptId}` : ''}.`,
       dedupeKey: scaParkedAlertKey(customerId, paymentIntentId || attemptId || etDateString().slice(0, 7)),
       metadata: association,
@@ -83,7 +89,10 @@ async function alertAutopayScaParked(customer, err, { amount, source, kind = 'mo
   } catch (alertErr) {
     logger.error(`[autopay-sca] office alert threw for customer ${customerId}: ${alertErr.message}`);
   }
-  if (alert) return true;
+  // Filed = a notification row exists (new, or the standing row of this key). Policy suppression
+  // and the internal-test-customer gate resolve a truthy { id: null, suppressed: true } with no
+  // row, which is NOT a filed alert: it takes the same fallback path as a null.
+  if (alert && !alert.suppressed && alert.id != null) return true;
 
   logger.error(`[autopay-sca] office alert NOT filed for customer ${customerId} (PI ${paymentIntentId || 'none'}): the autopay charge is parked on card authentication with no retry — falling back to a customer health alert`);
   try {
@@ -182,26 +191,40 @@ async function closeScaParkedAlerts(rows, reason, { conn = db, resolution = null
 // therefore also cover every row already superseded by THIS collecting payment, so a replay
 // of the settlement (or a second Charge now) finishes a close that failed. Closing an
 // already-closed key is a no-op (closeAdminAlertKeys skips alerts already auto-cleared).
-async function resolveParkedMonthlyRows(customerId, { monthKey, monthStart, monthEnd }, collectedPaymentId, { conn = db } = {}) {
+// The obligation-month matcher shared by every reader of "this customer's failed rows for month M"
+// (the retry sweep's own shape: metadata.billed_month, else the payment_date window plus the
+// 'WaveGuard Monthly' marker for unstamped legacy rows).
+function monthScope({ monthKey, monthStart, monthEnd }) {
+  return function () {
+    this.whereRaw("metadata->>'billed_month' = ?", [monthKey])
+      .orWhere(function () {
+        this.whereRaw("(metadata IS NULL OR metadata->>'billed_month' IS NULL)")
+          .andWhere('payment_date', '>=', monthStart)
+          .andWhere('payment_date', '<=', monthEnd)
+          .andWhere('description', 'like', '%WaveGuard Monthly%');
+      });
+  };
+}
+
+// `collected: false` is the variant for a FAILED canonical attempt (Charge now declined again): the
+// older open rows are superseded to it so exactly one failed row carries the month, and nothing is
+// closed because the debt is still owed.
+async function resolveParkedMonthlyRows(customerId, period, collectedPaymentId, { conn = db, collected = true } = {}) {
+  const { monthKey } = period;
   const resolved = await conn('payments')
     .where({ customer_id: customerId, status: 'failed' })
     .whereNull('superseded_by_payment_id')
     .whereNull('next_retry_at')
     .whereNot({ id: collectedPaymentId })
-    .where(function () {
-      this.whereRaw("metadata->>'billed_month' = ?", [monthKey])
-        .orWhere(function () {
-          this.whereRaw("(metadata IS NULL OR metadata->>'billed_month' IS NULL)")
-            .andWhere('payment_date', '>=', monthStart)
-            .andWhere('payment_date', '<=', monthEnd)
-            .andWhere('description', 'like', '%WaveGuard Monthly%');
-        });
-    })
+    .where(monthScope(period))
     .update({
       superseded_by_payment_id: collectedPaymentId,
-      failure_reason: conn.raw("COALESCE(failure_reason, '') || ?", [` — resolved: ${monthKey} collected by payment ${collectedPaymentId}`]),
+      failure_reason: conn.raw("COALESCE(failure_reason, '') || ?", [collected
+        ? ` — resolved: ${monthKey} collected by payment ${collectedPaymentId}`
+        : ` — superseded by a newer failed attempt ${collectedPaymentId} for ${monthKey}`]),
     })
     .returning(['id', 'customer_id', 'stripe_payment_intent_id']);
+  if (!collected) return resolved || [];
   const mine = await conn('payments')
     .where({ customer_id: customerId, superseded_by_payment_id: collectedPaymentId })
     .whereNot({ id: collectedPaymentId })
@@ -211,6 +234,61 @@ async function resolveParkedMonthlyRows(customerId, { monthKey, monthStart, mont
     await closeScaParkedAlerts(toClose, 'charge_collected', { conn });
   }
   return resolved || [];
+}
+
+// Charge now (amount-less) FAILED for a month: keep exactly ONE canonical failed row per obligation
+// (failed-payments.js sums every unsuperseded failed row, so two would double the debt). Same
+// convention as the retry ladder: when an ARMED failed row for the month exists it stays canonical
+// (it carries the ladder) and the new attempt row is superseded to it; otherwise the older unarmed
+// rows (parked on 3DS, an exhausted ladder) are superseded to the new attempt row. Best-effort;
+// never throws. Returns the canonical row id, or null.
+async function reconcileFailedManualAttempt(customerId, period, attemptRow, { conn = db } = {}) {
+  try {
+    if (!attemptRow?.id) return null;
+    const armed = await conn('payments')
+      .where({ customer_id: customerId, status: 'failed' })
+      .whereNull('superseded_by_payment_id')
+      .whereNotNull('next_retry_at')
+      .whereNot({ id: attemptRow.id })
+      .where(monthScope(period))
+      .first('id');
+    if (armed?.id != null) {
+      await conn('payments').where({ id: attemptRow.id }).whereNull('superseded_by_payment_id')
+        .update({ superseded_by_payment_id: armed.id });
+      return armed.id;
+    }
+    await resolveParkedMonthlyRows(customerId, period, attemptRow.id, { conn, collected: false });
+    return attemptRow.id;
+  } catch (err) {
+    logger.error(`[autopay-sca] could not link failed manual attempt ${attemptRow?.id} to the month's canonical failed row: ${err.message}`);
+    return null;
+  }
+}
+
+// A card needing 3D Secure leaves its PaymentIntent LIVE in Stripe (stripe.js does not cancel it), so
+// collecting a replacement without neutralizing it can collect twice if the original is later completed
+// (its succeeded webhook would flip the original row to paid). Called by Charge now INSIDE the customer
+// billing lock, BEFORE the replacement charge: cancel the live intent of each of the customer's parked
+// (requires_action) failed rows for the month through the shared PI guard (prepaid-pi-guard.js:
+// cancels a cancelable intent, refuses when money is in flight, fails closed when unverifiable).
+//   { ok: true }                                  - nothing parked, or all neutralized: safe to charge
+//   { ok: false, reason: 'payment_in_flight' }    - the original is processing/succeeded: do NOT charge
+//   { ok: false, reason: 'payment_session_unverifiable' } - fail closed
+async function fenceParkedIntentsForReplacement(customerId, period, { conn = db } = {}) {
+  const rows = await conn('payments')
+    .where({ customer_id: customerId, status: 'failed' })
+    .whereNull('superseded_by_payment_id')
+    .whereNull('next_retry_at')
+    .whereNotNull('stripe_payment_intent_id')
+    .whereRaw("metadata->>'requires_action' = 'true'")
+    .where(monthScope(period))
+    .select('id', 'stripe_payment_intent_id');
+  const { neutralizeOpenPaymentIntent } = require('./prepaid-pi-guard');
+  for (const row of rows || []) {
+    const result = await neutralizeOpenPaymentIntent(row.stripe_payment_intent_id);
+    if (!result.ok) return { ...result, paymentId: row.id };
+  }
+  return { ok: true };
 }
 
 const parseMetadata = (raw) => {
@@ -253,6 +331,19 @@ async function settleParkedForPaidPayment(payment, { conn = db } = {}) {
   }
 }
 
+// Collected = this row is paid, or it was superseded by another payment that (following the supersede
+// chain) is itself PAID. Superseded by a FAILED attempt row is NOT collected: a failed Charge now
+// re-points the month's canonical row to the new failed attempt, and the debt is still owed.
+async function rowIsCollected(row, conn) {
+  let r = row;
+  for (let hop = 0; hop < 10 && r; hop += 1) {
+    if (String(r.status) === 'paid') return true;
+    if (r.superseded_by_payment_id == null || String(r.superseded_by_payment_id) === String(r.id)) return false;
+    r = await conn('payments').where({ id: r.superseded_by_payment_id }).first('id', 'status', 'superseded_by_payment_id');
+  }
+  return false;
+}
+
 // The durable closer. Every event-time close above (Charge now, the succeeded webhook, the
 // already-collected retry) is the fast path and stays best-effort, but each hangs off one event and
 // each can fail or never fire (a webhook redelivery is deduped, a customer can pay another way). This
@@ -260,7 +351,8 @@ async function settleParkedForPaidPayment(payment, { conn = db } = {}) {
 // daily retry sweep runs it, it reads only the OPEN alerts of this family (a small set found by the
 // dedupe-key prefix / source tag, never a payments scan), and for each decides from the alert's own
 // metadata whether the debt is still owed:
-//   - the parked payments row (by id or PI) is now paid, or superseded by another payment: collected;
+//   - the parked payments row (by id or PI) is now paid, or superseded (following the supersede chain)
+//     by a PAID payment: collected (superseded by a FAILED attempt row is still owed);
 //   - a MONTHLY alert and the customer has a paid payment stamped with that billed_month: collected,
 //     and the parked rows of that month are superseded to it (resolveParkedMonthlyRows) if still open;
 //   - otherwise still owed: left open. A one-time alert is judged on its own row only (no guessing
@@ -279,8 +371,7 @@ async function scaAlertIsCollected(item, conn) {
       })
       .select('id', 'status', 'superseded_by_payment_id');
     for (const r of rows || []) {
-      const supersededByOther = r.superseded_by_payment_id != null && String(r.superseded_by_payment_id) !== String(r.id);
-      if (String(r.status) === 'paid' || supersededByOther) return { collected: true };
+      if (await rowIsCollected(r, conn)) return { collected: true };
     }
   }
   if (kind === 'monthly' && /^\d{4}-\d{2}$/.test(String(billedMonth || ''))) {
@@ -348,4 +439,5 @@ async function reconcileScaParkedAlerts({ conn = db } = {}) {
   return summary;
 }
 
-module.exports = { KEY_PREFIX, scaParkedAlertKey, alertAutopayScaParked, closeScaParkedAlerts, resolveParkedMonthlyRows, settleParkedForPaidPayment, reconcileScaParkedAlerts };
+module.exports = { KEY_PREFIX, scaParkedAlertKey, alertAutopayScaParked, closeScaParkedAlerts, resolveParkedMonthlyRows, settleParkedForPaidPayment, reconcileScaParkedAlerts,
+  reconcileFailedManualAttempt, fenceParkedIntentsForReplacement };

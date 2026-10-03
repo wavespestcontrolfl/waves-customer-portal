@@ -111,6 +111,14 @@ const replacement = (over = {}) => ({
   description: 'Manual charge — WaveGuard Silver', metadata: JSON.stringify({ billed_month: '2026-10', payment_state: 'paid' }), ...over,
 });
 const openAlerts = () => mockS.notifications.filter((n) => !n.cleared);
+// parked row P already superseded by a newer FAILED attempt row (a failed Charge now)
+const S_failedAttempt = () => {
+  mockS.payments = [
+    parkedRow({ superseded_by_payment_id: 'pay-fail-new' }),
+    parkedRow({ id: 'pay-fail-new', stripe_payment_intent_id: 'pi_fail_new', description: 'Manual charge — WaveGuard Silver', payment_date: '2026-10-04' }),
+  ];
+};
+
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -200,6 +208,30 @@ describe('reconcileScaParkedAlerts', () => {
     mockS.payments[0].superseded_by_payment_id = 'pay-explicit';
     await Sca.reconcileScaParkedAlerts();
     expect(openAlerts()).toHaveLength(0);
+  });
+
+  // A failed Charge now re-points the month's canonical failed row to the NEW failed attempt (so the
+  // overdue balance carries the debt once). The parked row being "superseded" is then NOT collected.
+  test('parked row superseded by a FAILED attempt is still owed; it closes once that chain ends in a PAID payment', async () => {
+    S_failedAttempt();
+    await Sca.alertAutopayScaParked(CUSTOMER, scaErr(), { amount: 89, source: 'autopay', kind: 'monthly', billedMonth: '2026-10' });
+    await expect(Sca.reconcileScaParkedAlerts()).resolves.toMatchObject({ examined: 1, collected: 0 });
+    expect(openAlerts()).toHaveLength(1);
+
+    // the attempt is later superseded by a paid payment (chain: parked -> failed attempt -> paid)
+    mockS.payments.find((r) => r.id === 'pay-fail-new').superseded_by_payment_id = 'pay-new';
+    mockS.payments.push(replacement({ metadata: JSON.stringify({ payment_state: 'paid' }) })); // paid, but NO billed_month stamp
+    await expect(Sca.reconcileScaParkedAlerts()).resolves.toMatchObject({ collected: 1 });
+    expect(openAlerts()).toHaveLength(0);
+  });
+
+  test('a chain that ends in a failed row, or loops back on itself, is never collected (and terminates)', async () => {
+    mockS.payments = [parkedRow({ superseded_by_payment_id: 'pay-a' }),
+      { ...parkedRow({ id: 'pay-a', stripe_payment_intent_id: 'pi_a', superseded_by_payment_id: 'pay-b' }) },
+      { ...parkedRow({ id: 'pay-b', stripe_payment_intent_id: 'pi_b', superseded_by_payment_id: 'pay-a' }) }];
+    await Sca.alertAutopayScaParked(CUSTOMER, scaErr(), { amount: 89, source: 'autopay', kind: 'one_time' });
+    await expect(Sca.reconcileScaParkedAlerts()).resolves.toMatchObject({ collected: 0, failed: 0 });
+    expect(openAlerts()).toHaveLength(1);
   });
 
   test('still owed: an alert with no signal is left open and untouched; other customers\' payments do not count', async () => {

@@ -37,8 +37,10 @@ const PI_MONEY_IN_FLIGHT_STATUSES = ['processing', 'succeeded', 'requires_captur
 // collects twice, and no later guard can undo the transfer (pre-push P0).
 // Stripe REQUEST options (the SDK's third argument, not retrieve params): bound the read, no SDK retries.
 const INSPECT_REQUEST_OPTIONS = Object.freeze({ timeout: 5000, maxNetworkRetries: 0 });
-async function guardOpenPaymentIntentForPrepaid(invoice, { inspectOnly = false } = {}) {
-  const piId = invoice && invoice.stripe_payment_intent_id ? invoice.stripe_payment_intent_id : null;
+// The PaymentIntent-only half of the guard (no invoice): inspect the PI and cancel it when it is
+// safe to. Shared with the autopay-3DS replacement fence (autopay-sca-parked.js), which has no
+// invoice to unstamp. Returns { ok: true, piId[, piStatus] } or { ok: false, reason, piId, ... }.
+async function neutralizeOpenPaymentIntent(piId, { inspectOnly = false } = {}) {
   if (!piId) return { ok: true, piId: null };
   const StripeService = require('./stripe');
   let pi;
@@ -77,6 +79,14 @@ async function guardOpenPaymentIntentForPrepaid(invoice, { inspectOnly = false }
       return { ok: false, reason: 'payment_session_unverifiable', piId, detail: `cancel failed: ${e.message}` };
     }
   }
+  return { ok: true, piId };
+}
+
+async function guardOpenPaymentIntentForPrepaid(invoice, { inspectOnly = false } = {}) {
+  const piId = invoice && invoice.stripe_payment_intent_id ? invoice.stripe_payment_intent_id : null;
+  if (!piId) return { ok: true, piId: null };
+  const neutralized = await neutralizeOpenPaymentIntent(piId, { inspectOnly });
+  if (!neutralized.ok || inspectOnly) return neutralized;
   // A combined PI is stamped on its siblings too — unbind every collectible
   // row from the (now-)canceled intent, regardless of who canceled it
   // (codex #3427 r17 P2).
@@ -84,4 +94,4 @@ async function guardOpenPaymentIntentForPrepaid(invoice, { inspectOnly = false }
   return { ok: true, piId };
 }
 
-module.exports = { PI_MONEY_IN_FLIGHT_STATUSES, guardOpenPaymentIntentForPrepaid };
+module.exports = { PI_MONEY_IN_FLIGHT_STATUSES, guardOpenPaymentIntentForPrepaid, neutralizeOpenPaymentIntent };

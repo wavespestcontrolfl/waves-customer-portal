@@ -1922,6 +1922,29 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
         // 'disputed' is terminal here: a delayed/reclaimed succeeded
         // event arriving after charge.dispute.created must not flip a
         // chargeback back to paid (dispute resolution owns that row now).
+        // B16: this row was superseded by ANOTHER payment that is paid (or being paid) — the office
+        // collected a replacement for the same obligation (autopay parked on 3D Secure, then Charge
+        // now), and the original intent has now been completed too. Flipping the row to paid would
+        // record a second collection silently. Leave it superseded, queue the PI on the existing
+        // orphan / duplicate-charge list for a person to refund one, and stop (no auto-refund). The
+        // unresolved orphan also fences further charging of this customer until it is reconciled.
+        if (existingPayment.superseded_by_payment_id != null
+          && String(existingPayment.superseded_by_payment_id) !== String(existingPayment.id)) {
+          const replacement = await trx('payments')
+            .where({ id: existingPayment.superseded_by_payment_id })
+            .whereIn('status', ['paid', 'processing'])
+            .first('id', 'status');
+          if (replacement && !['paid', 'refunded', 'disputed'].includes(existingPayment.status)) {
+            logger.error(`[stripe-webhook] PI ${piId} succeeded but its payment ${existingPayment.id} was already superseded by ${replacement.status} payment ${replacement.id} — duplicate collection, queued for refund review`);
+            await recordOrphanSucceededPaymentIntent(
+              { ...paymentIntent, metadata: { ...paymentIntent.metadata, customer_id: existingPayment.customer_id } },
+              chargedTotal ?? centsToDollars(paymentIntent.amount),
+              `Duplicate collection: PI ${piId} succeeded after payment ${existingPayment.id} was superseded by ${replacement.status} payment ${replacement.id} for the same obligation. Refund one of the two.`,
+              { database: trx },
+            );
+            return QUARANTINED;
+          }
+        }
         if (!['paid', 'refunded', 'disputed'].includes(existingPayment.status)) {
           await trx('payments').where({ id: existingPayment.id }).update(paymentUpdates);
         } else if (existingPayment.status === 'paid' && eventCreated && !paymentSettledAt(existingPayment)) {
@@ -6775,6 +6798,11 @@ async function handlePaymentIntentCanceled(paymentIntent) {
   await db('payments')
     .where({ stripe_payment_intent_id: piId })
     .whereNotIn('status', ['paid', 'refunded', 'disputed'])
+    // B16: a failed row parked on card authentication (stripe.js stamps metadata.requires_action)
+    // is a debt that is still OWED; canceling its live intent (the replacement-collection fence)
+    // must not flip it to 'canceled' and drop it from the overdue balance. Its supersede link, not
+    // this status, is what takes it out of the balance when it is collected.
+    .whereRaw("NOT (status = 'failed' AND COALESCE(metadata->>'requires_action', '') = 'true')")
     .update({ status: 'canceled' });
 
   // PI canceled AFTER entering processing (codex r20 P2, a rare but

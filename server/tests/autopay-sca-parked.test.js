@@ -342,3 +342,37 @@ describe('health-alert fallback is resolved on collection', () => {
     expect(closeAdminAlertKeys).toHaveBeenCalledTimes(1);
   });
 });
+
+// GATE_ADMIN_BELL_POLICY: with the gate on and no owner override for the billing category, the policy
+// silences any admin notification without the explicit site tag, and notifyAdmin resolves a truthy
+// { id: null, suppressed: true } with NO row. That is not a filed alert.
+describe('bell policy: a needs-you money alert rings, and suppression is not "filed"', () => {
+  test('the raise opts the alert into the bell (bell: true), which the policy honors with no owner override', async () => {
+    await Sca.alertAutopayScaParked(CUSTOMER, SCA_ERR(), { amount: 89, source: 'autopay' });
+    const opts = NotificationService.notifyAdmin.mock.calls[0][3];
+    expect(opts.bell).toBe(true);
+
+    const { bellAllowed } = jest.requireActual('../services/notification-bell-policy');
+    // exactly what notifyAdmin hands the policy: category + the emitter's bell / bellDefault options
+    await expect(bellAllowed({ category: NotificationService.notifyAdmin.mock.calls[0][0], options: { bell: opts.bell, bellDefault: opts.bellDefault } })).resolves.toBe(true);
+    // the bug: without the tag the billing category is silenced by default
+    await expect(bellAllowed({ category: 'billing', options: {} })).resolves.toBe(false);
+  });
+
+  test.each([
+    ['policy suppression', { id: null, suppressed: true, reason: 'bell_policy' }],
+    ['internal-test-customer suppression', { id: null, suppressed: true }],
+    ['a result with no id', { id: null }],
+  ])('%s is NOT a filed alert: returns false, error log, health-alert fallback written', async (_label, sentinel) => {
+    NotificationService.notifyAdmin.mockResolvedValue(sentinel);
+    await expect(Sca.alertAutopayScaParked(CUSTOMER, SCA_ERR(), { amount: 89, source: 'autopay' })).resolves.toBe(false);
+    expect(logger.error.mock.calls.some((c) => /office alert NOT filed/.test(String(c[0])))).toBe(true);
+    expect(mockState.inserts).toHaveLength(1);
+  });
+
+  test('a standing row of the same key (deduped: has an id) IS filed', async () => {
+    NotificationService.notifyAdmin.mockResolvedValue({ id: 'n-9', deduped: true });
+    await expect(Sca.alertAutopayScaParked(CUSTOMER, SCA_ERR(), { amount: 89, source: 'autopay' })).resolves.toBe(true);
+    expect(mockState.inserts).toHaveLength(0);
+  });
+});

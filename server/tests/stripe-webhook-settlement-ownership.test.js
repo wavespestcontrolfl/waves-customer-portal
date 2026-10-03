@@ -100,6 +100,8 @@ function resetMockState() {
     settleReadThrows: false,
     // A payments row the fallback's FOR UPDATE read finds (null = none).
     fallbackPayment: null,
+    // The paid / processing payment a row was superseded by (null = none).
+    replacementPayment: null,
     updates: [],
   });
 }
@@ -134,6 +136,7 @@ function mockMakeBuilder(table, { inTrx } = {}) {
     // there is never a pre-existing row — that is the path under test.
     if (table === 'payments') {
       if (inTrx && b._forUpdate && mockState.fallbackPayment) return mockState.fallbackPayment;
+      if (inTrx && !b._forUpdate && mockState.replacementPayment) return mockState.replacementPayment;
       return (!inTrx && mockState.processingPaymentsUpdated > 0) ? { id: 'pay-processing' } : null;
     }
     return null;
@@ -344,5 +347,52 @@ describe('a paid row with no settlement stamp takes this event\'s settlement tim
     await handlePaymentIntentSucceeded(succeededPI(), EVENT_CREATED);
 
     expect(mockState.updates.find(settlementStamp)).toBeFalsy();
+  });
+});
+
+// B16: an autopay charge parked on 3D Secure left its PaymentIntent live; the office then collected a
+// replacement (the parked row was superseded by that PAID payment). If the original intent is later
+// completed, its succeeded event must NOT silently flip the superseded row to paid (a second
+// collection): it is queued on the orphan / duplicate-charge list for a person to refund one.
+describe('B16: a late success on a row already superseded by a collected replacement', () => {
+  const SUPERSEDED = { id: 'pay-sca-1', customer_id: 'cust-1', status: 'failed', superseded_by_payment_id: 'pay-new', metadata: { requires_action: true } };
+  const paymentsUpdates = () => mockState.updates.filter((u) => u.table === 'payments');
+
+  test('superseded by a PAID payment: not flipped to paid, queued as a duplicate collection with the customer id', async () => {
+    mockState.fallbackPayment = { ...SUPERSEDED };
+    mockState.replacementPayment = { id: 'pay-new', status: 'paid' };
+    await handlePaymentIntentSucceeded(succeededPI({ id: 'pi_sca_orig' }));
+
+    expect(paymentsUpdates()).toHaveLength(1); // only the status='processing' flip attempt (matched no row); no fallback flip to paid
+    const orphan = mockState.inserts.find((i) => i.table === 'stripe_orphan_charges');
+    expect(orphan).toBeTruthy();
+    expect(orphan.payload).toMatchObject({ stripe_payment_intent_id: 'pi_sca_orig', customer_id: 'cust-1' });
+    expect(orphan.payload.original_db_error).toMatch(/Duplicate collection/);
+    // nothing else settles: no invoice paid, no new payments row
+    expect(mockState.inserts.find((i) => i.table === 'payments')).toBeFalsy();
+  });
+
+  test('superseded by a PROCESSING (ACH in flight) replacement is also a duplicate', async () => {
+    mockState.fallbackPayment = { ...SUPERSEDED };
+    mockState.replacementPayment = { id: 'pay-new', status: 'processing' };
+    await handlePaymentIntentSucceeded(succeededPI({ id: 'pi_sca_orig' }));
+    expect(mockState.inserts.find((i) => i.table === 'stripe_orphan_charges')).toBeTruthy();
+    expect(paymentsUpdates()).toHaveLength(1);
+  });
+
+  test('control: a failed row superseded by nothing paid (a failed attempt) still flips to paid as before', async () => {
+    mockState.fallbackPayment = { ...SUPERSEDED };
+    mockState.replacementPayment = null; // the superseder is not paid/processing
+    await handlePaymentIntentSucceeded(succeededPI({ id: 'pi_sca_orig' }));
+    expect(mockState.inserts.find((i) => i.table === 'stripe_orphan_charges')).toBeFalsy();
+    expect(paymentsUpdates()).toHaveLength(2); // processing attempt + the fallback flip
+  });
+
+  test('control: an unsuperseded failed row still flips to paid (its own PI completing is a normal success)', async () => {
+    mockState.fallbackPayment = { ...SUPERSEDED, superseded_by_payment_id: null };
+    mockState.replacementPayment = { id: 'pay-new', status: 'paid' };
+    await handlePaymentIntentSucceeded(succeededPI({ id: 'pi_sca_orig' }));
+    expect(mockState.inserts.find((i) => i.table === 'stripe_orphan_charges')).toBeFalsy();
+    expect(paymentsUpdates()).toHaveLength(2);
   });
 });
