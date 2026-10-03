@@ -3684,7 +3684,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       let comboMoveWarnings = stopMove?.moved === true && Array.isArray(stopMove.warnings) ? stopMove.warnings : [];
       if (stopMove?.moved === true && notifyOnMove && stopMove.notificationSent === false) {
         comboMoveWarnings = [...comboMoveWarnings, stopMove.notificationSkipped === "already_at_target"
-          ? "The customer already has the text for this move, so no new one was sent."
+          ? "The stop was already at this time, so no new text was sent. If the customer has not been told about the move, text them."
           : `The customer was not texted about the move: ${stopMove.notificationError || "the text could not be sent"}.`];
       }
       if (notifyOnMove && result?.notificationSent === false) {

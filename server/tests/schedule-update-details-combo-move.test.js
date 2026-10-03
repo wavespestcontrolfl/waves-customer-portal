@@ -172,19 +172,6 @@ describe('the stop the operator was shown', () => {
   });
 });
 
-describe('a retried save whose move already committed', () => {
-  test("'together' with nothing left to change and a text requested still goes through the move, so an unsent text is recovered", async () => {
-    const req = request({ scheduledDate: FUTURE, windowStart: '09:00', windowEnd: '10:00', technicianId: 'tech-1', notifyCustomer: true, comboMove: 'together' });
-    const plan = await planComboEditMove(req);
-    expect(mockDispatch.planVisitMoveForStaff).toHaveBeenCalledWith(expect.objectContaining({ newDate: FUTURE, newWindow: undefined, notifyCustomer: true }));
-    expect(typeof plan.commit).toBe('function');
-    // No text requested: an ordinary edit.
-    jest.clearAllMocks();
-    expect(await planComboEditMove(request({ scheduledDate: FUTURE, windowStart: '09:00', notifyCustomer: false, comboMove: 'together' }))).toBe(null);
-    expect(mockDispatch.planVisitMoveForStaff).not.toHaveBeenCalled();
-  });
-});
-
 describe("comboMove 'separate'", () => {
   test('a length-only change (duration or window end) is split off too', async () => {
     for (const change of [{ estimatedDuration: '90' }, { windowStart: '09:00', windowEnd: '11:00' }]) {

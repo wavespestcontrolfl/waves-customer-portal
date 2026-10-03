@@ -27,23 +27,16 @@ jest.mock('../middleware/admin-auth', () => {
 let mockVisitRow = null;
 // Open members of the anchor's visit (visit-groups.openMembers → scheduled_services.select()); [] = none scripted.
 let mockOpenMembers = [];
-// The stop-wide notice row the message log holds for a move (null = none);
-// 'throw' = the log cannot be read.
-let mockNoticeOnRecord = null;
 jest.mock('../models/db', () => {
-  const chain = (table) => {
+  const chain = () => {
     const c = {};
-    for (const m of ['where', 'whereIn', 'whereRaw', 'whereNull', 'whereNotNull', 'whereNotIn', 'leftJoin', 'join', 'orderBy', 'limit', 'update', 'insert']) c[m] = () => c;
+    for (const m of ['where', 'whereIn', 'whereNull', 'whereNotNull', 'whereNotIn', 'leftJoin', 'join', 'orderBy', 'limit', 'update', 'insert']) c[m] = () => c;
     c.select = async () => mockOpenMembers;
-    c.first = async () => {
-      if (!String(table || '').startsWith('messaging_audit_log')) return mockVisitRow;
-      if (mockNoticeOnRecord === 'throw') throw new Error('log unavailable');
-      return mockNoticeOnRecord;
-    };
+    c.first = async () => mockVisitRow;
     c.then = (resolve) => Promise.resolve([]).then(resolve);
     return c;
   };
-  const proxy = (table) => chain(table);
+  const proxy = () => chain();
   proxy.transaction = async (cb) => cb(proxy);
   proxy.raw = () => ({});
   proxy.fn = { now: () => new Date() };
@@ -94,7 +87,7 @@ async function reschedule(body) {
 
 const TARGET = etDateString(addETDays(new Date(), 7));
 
-beforeEach(() => { jest.clearAllMocks(); mockVisitRow = null; mockOpenMembers = []; mockNoticeOnRecord = null; delete process.env.GATE_ADMIN_COLLECTIVE_MOVE; });
+beforeEach(() => { jest.clearAllMocks(); mockVisitRow = null; mockOpenMembers = []; delete process.env.GATE_ADMIN_COLLECTIVE_MOVE; });
 
 describe('collective disclosure contract (GATE_ADMIN_COLLECTIVE_MOVE)', () => {
   const recurringRow = () => ({ is_recurring: true, scheduled_date: etDateString(addETDays(new Date(), 2)), window_start: '09:00:00', window_end: '10:00:00', estimated_duration_minutes: 60 });
@@ -260,26 +253,12 @@ test('expectVisit (Edit appointment, "move all of them together") pins the stop 
   expect(SmartRebooker.reschedule.mock.calls[1][5].expectGroupedVisit).toBeUndefined();
 });
 
-test('a repeated expectVisit request that finds the stop already at the target texts again only when no text for that move is on record', async () => {
+test('an expectVisit request that finds the stop already at the target texts nobody; other callers are unchanged', async () => {
   const { sendRescheduleNoticeForVisit } = require('../routes/admin-schedule');
   const AppointmentReminders = require('../services/appointment-reminders');
   const shown = { id: 'visit-1', memberIds: ['00000000-0000-4000-8000-000000000001', 'sibling-1'], liveCount: 2 };
   const noop = { success: true, visitMove: { visitId: 'visit-1', moved: [], failed: [], alreadyAtTarget: true, unchanged: shown.memberIds } };
   SmartRebooker.reschedule.mockResolvedValue(noop);
-  // The first attempt moved the stop and died before the text: nothing is on
-  // record, so the repeat sends it.
-  const unsent = await reschedule({ newDate: TARGET, newWindow: '09:00-10:00', notifyCustomer: true, expectVisit: shown });
-  expect(unsent.body.notificationSent).toBe(true);
-  expect(sendRescheduleNoticeForVisit).toHaveBeenCalledTimes(1);
-  // A log that cannot be read sends nothing and says so.
-  mockNoticeOnRecord = 'throw';
-  const unreadable = await reschedule({ newDate: TARGET, newWindow: '09:00-10:00', notifyCustomer: true, expectVisit: shown });
-  expect(unreadable.body).toMatchObject({ notificationSent: false, notificationSkipped: 'record_unreadable' });
-  expect(sendRescheduleNoticeForVisit).toHaveBeenCalledTimes(1);
-  // The text for this move is on record: no second one.
-  mockNoticeOnRecord = { id: 'audit-1' };
-  sendRescheduleNoticeForVisit.mockClear();
-  AppointmentReminders.handleReschedule.mockClear();
   const repeated = await reschedule({ newDate: TARGET, newWindow: '09:00-10:00', notifyCustomer: true, expectVisit: shown });
   expect(repeated.status).toBe(200);
   expect(repeated.body).toMatchObject({ notificationSent: false, notificationSkipped: 'already_at_target' });

@@ -10932,8 +10932,8 @@ async function refuseCarriedStopInEditMove(ackedIds) {
 //   comboMove 'separate' — the service is split off its stop here, and the
 //     rest is the ordinary single-row edit.
 // No comboMove (every other caller), a row that is not on a shared stop, or
-// a request that changes nothing about the slot and asks for no text: null,
-// the handler is unchanged.
+// a request that changes nothing about the slot: null, the handler is
+// unchanged.
 // `comboVisit` is the stop the operator was shown ({ id, memberIds,
 // liveCount, liveMemberIds }); a stop whose live services differ from it is
 // refused before anything is saved.
@@ -11049,12 +11049,7 @@ async function planComboEditMove(req) {
   }
   const changes = comboEditChanges(body, row);
   if (!changes) return null;
-  const changesSlot = changes.date || changes.start || changes.technician || changes.length;
-  // 'together' with nothing left to change and a text requested is a
-  // retried save whose move already committed: it still goes through the
-  // move (a no-op there), which sends the text if none is on record.
-  const repeatForText = choice === 'together' && body.notifyCustomer === true;
-  if (!changesSlot && !repeatForText) return null;
+  if (!(changes.date || changes.start || changes.technician || changes.length)) return null;
   const live = await vg.visitSummaryForService(db, row.id);
   if (comboShownStopChanged(body.comboVisit, live)) throw comboStopChangedError();
 
@@ -11079,9 +11074,8 @@ async function planComboTogetherMove(req, row, changes, shown) {
   const newDate = validScheduleDate(changes.date ? body.scheduledDate : dateOnly(row.scheduled_date));
   if (!newDate) refuse(400, 'That date is not a current or future date.');
   const newWindow = comboMoveWindow(row, changes);
-  // A text is about a new date or time (or a repeat of one), never about a
-  // technician change alone.
-  const notifyCustomer = body.notifyCustomer === true && (changes.date || changes.start || !changes.technician);
+  // A text is about a new date or time, never a technician change alone.
+  const notifyCustomer = body.notifyCustomer === true && (changes.date || changes.start);
   const actor = { techRole: req.techRole, technicianId: req.technicianId };
   const { planVisitMoveForStaff, runPlannedVisitMove } = require('./admin-dispatch');
   const planned = await planVisitMoveForStaff({

@@ -250,7 +250,7 @@ it('a technician-only change on a combo asks too (owner ruling), and the request
   expect(body(0)).toMatchObject({ comboMove: 'together', technicianId: 'tech-2', scheduledDate: '2035-01-02' });
 });
 
-it('the text choice rides the same request; warnings and a text already on record are shown with the saved notice', async () => {
+it('the text choice rides the same request; warnings and a skipped text are shown with the saved notice', async () => {
   putAnswers(() => saved({ comboMove: { moved: true, warnings: ['Fixture overlap warning.'], notificationSent: false, notificationSkipped: 'already_at_target' } }));
   const dialog = openCombo();
   setDate(dialog, '2035-01-03');
@@ -260,18 +260,18 @@ it('the text choice rides the same request; warnings and a text already on recor
   await waitFor(() => expect(saveNotice.shown).toHaveLength(1));
   expect(body(0).notifyCustomer).toBe(true);
   expect(saveNotice.shown[0]).toContain('Fixture overlap warning.');
-  expect(saveNotice.shown[0]).toContain('The customer already has the text for this move, so no new one was sent.');
+  expect(saveNotice.shown[0]).toContain('The stop was already at this time, so no new text was sent.');
 });
 
 it('a text that could not be sent is said so', async () => {
-  putAnswers(() => saved({ comboMove: { moved: true, notificationSent: false, notificationSkipped: 'record_unreadable', notificationError: 'the message log could not be read, so no text was sent' } }));
+  putAnswers(() => saved({ comboMove: { moved: true, notificationSent: false, notificationError: 'the number is opted out' } }));
   const dialog = openCombo();
   setDate(dialog, '2035-01-03');
   const notify = [...dialog.querySelectorAll('select')].find((el) => [...el.options].some((o) => o.value === 'sms'));
   fireEvent.change(notify, { target: { value: 'sms' } });
   await clickSave();
   await waitFor(() => expect(saveNotice.shown).toHaveLength(1));
-  expect(saveNotice.shown[0]).toContain('The customer was not texted about the move: the message log could not be read, so no text was sent.');
+  expect(saveNotice.shown[0]).toContain('The customer was not texted about the move: the number is opted out.');
 });
 
 it('a move the server refused after saving the rest: the save counts (the details are saved) and the notice says the stop did not move', async () => {

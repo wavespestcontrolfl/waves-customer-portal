@@ -6032,35 +6032,15 @@ async function sendVisitMoveNotice({ result, serviceId, newDate, effectiveWindow
   return moveReply(200, { ...result, notificationSent: notice.sent, notificationError: notice.error });
 }
 
-// Effects: Edit appointment (expectVisit) repeats its move when a save is
-// retried, and the repeat finds the stop already at the target. Whether the
-// customer was told about that move is read from the message log, never
-// assumed: the stop-wide notice is recorded under the stop's event key with
-// the slot it quoted. On record = no second text. Not on record (the first
-// attempt died between the move and the send) = this request sends it. A log
-// that cannot be read sends nothing and says so, so staff text the customer.
-// Null = not a repeat: the ordinary notice applies.
-async function repeatedMoveNoticeVerdict({ result, expectVisit, newDate, effectiveWindow }) {
+// Effects: a request that names the stop it was shown (expectVisit, Edit
+// appointment) and finds it already at the target moved nothing this time,
+// so it sends no "your visit moved" text: the request that did move it owned
+// that text. The answer says so, and the form tells staff to text the
+// customer if they have not been told. Null = the ordinary notice applies.
+function repeatedMoveNoticeVerdict({ result, expectVisit }) {
   const visitMove = result?.visitMove;
   if (expectVisit == null || visitMove?.alreadyAtTarget !== true || (visitMove.moved || []).length) return null;
-  const dateStr = String(newDate).split('T')[0];
-  try {
-    const visit = await db('service_visits').where({ id: visitMove.visitId }).first('window_start');
-    const slots = [...new Set([parseRescheduleWindow(effectiveWindow).start, visit?.window_start].map(normalizeHHMM).filter(Boolean))]
-      .map((start) => parseETDateTime(`${dateStr}T${start}`).getTime())
-      .filter(Number.isFinite);
-    const onRecord = slots.length ? await db('messaging_audit_log as a')
-      .leftJoin('sms_log as s', 's.twilio_sid', 'a.provider_message_id')
-      .whereRaw("a.metadata->>'notificationEventKey' LIKE ?", [`visit:${visitMove.visitId}:${dateStr}:%`])
-      .whereRaw("a.metadata->>'rendered_slot_ms' = ANY(?::text[])", [slots.map(String)])
-      .whereNull('a.blocked_code').whereNull('a.provider_error')
-      .where(require('../services/no-show-detector').textActuallyWentOut)
-      .first('a.id') : null;
-    return onRecord ? { notificationSkipped: 'already_at_target' } : null;
-  } catch (err) {
-    logger.error(`[dispatch] repeated move notice check failed for visit ${visitMove.visitId}: ${err.message}`);
-    return { notificationSkipped: 'record_unreadable', notificationError: 'the message log could not be read, so no text was sent' };
-  }
+  return { notificationSkipped: 'already_at_target' };
 }
 
 // Stage 3 — everything AFTER the rebooker committed: series effects when the
@@ -6079,8 +6059,7 @@ async function applyVisitMoveEffects({ result, plan, serviceId, newDate, notifyC
   // stranded sweep owns the (corrected) text once the stop is whole.
   const partialVisitMove = (Array.isArray(result?.visitMove?.failed) && result.visitMove.failed.length > 0)
     || result?.visitMove?.parentRetargetFailed === true; // the parent still describes the old stop (codex r28 P1)
-  const repeatNotice = notifyCustomer !== false && !partialVisitMove
-    ? await repeatedMoveNoticeVerdict({ result, expectVisit, newDate, effectiveWindow }) : null;
+  const repeatNotice = notifyCustomer !== false && !partialVisitMove ? repeatedMoveNoticeVerdict({ result, expectVisit }) : null;
   const willNotify = notifyCustomer !== false && !partialVisitMove && !repeatNotice;
   await syncRescheduleReminder(serviceId, newDate, effectiveWindow, { willNotify, preserveMoveHold: partialVisitMove });
   await broadcastVisitMove({ result, serviceId, actor, qualityDates });
