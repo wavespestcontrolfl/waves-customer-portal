@@ -225,6 +225,23 @@ describe('visit access shadow: rules that need no database', () => {
     expect(new Set((await rows(visitId)).map((r) => r.provider))).toEqual(new Set(['typesafe', 'cloudflare']));
   });
 
+  test('a retried provider that differs from the stored one queues BOTH rows', async () => {
+    process.env.GATE_TYPED_DECISIONS_CLEF = 'true';
+    mockAsk.mockImplementation(async (_id, _state, opts) => (opts && opts.provider === 'cloudflare' ? { ok: false, reason: 'error' } : reply()));
+    const visitId = await visit();
+    await sweep();
+    mockAsk.mockResolvedValue(reply({ contact_before_arrival: yes }));
+    await sweep();
+    const pair = (await rows(visitId)).filter((r) => r.question_id === 'contact_before_arrival');
+    expect(pair).toHaveLength(2);
+    expect(pair[0].sampled_for).toBe(pair[1].sampled_for);
+    expect(['disagreement', 'random_audit']).toContain(pair[0].sampled_for);
+    // A question they agree on is not queued by the refresh.
+    const agreed = (await rows(visitId)).filter((r) => r.question_id === 'person_home_needs_notice');
+    expect(agreed[0].sampled_for).toBe(agreed[1].sampled_for);
+    expect(agreed[0].sampled_for).not.toBe('disagreement');
+  });
+
   test('the review route\'s rebuild matches the stored digest after the visit is completed', async () => {
     await text('Use the side gate please', '2026-10-04T15:00:00Z');
     const visitId = await visit();

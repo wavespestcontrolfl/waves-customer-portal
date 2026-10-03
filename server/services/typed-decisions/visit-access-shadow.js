@@ -239,6 +239,31 @@ async function shadowVisit(svc, { dbh, providers, out }) {
       logger.warn(`[typed-decisions] visit access (${leg.provider}) record failed: ${err.message}`);
     }
   }
+
+  // A retried leg's rows were written with the stored sibling's answers beside
+  // them; the stored sibling's own rows must land in the same cohort, or a
+  // case where the two differ would queue one side only. No model call: the
+  // cohort is recomputed from the answers on record, with the recorder's own
+  // rule and draw, onto unreviewed rows that are not held out.
+  if (legs.length && stored.length) {
+    const { sampleFor, stableDraw } = require('./shadow-recorder');
+    for (const sibling of stored) {
+      for (const id of questionIds) {
+        const answer = sibling.answers[id];
+        if (!answer) continue;
+        const key = { capability: pkg.capability, package_id: pkg.id, provider: sibling.provider, subject_type: SUBJECT_TYPE, subject_id: svc.id, question_id: id };
+        const others = legs.map((leg) => leg.answers[id]).filter(Boolean);
+        const cohort = sampleFor(answer, built.baselines[id], () => stableDraw(key), others);
+        try {
+          await dbh(TABLE).where(key).where({ subject_hash: built.subjectHash, label_status: 'unreviewed' })
+            .whereRaw(`sampled_for IS DISTINCT FROM 'heldout'`)
+            .update({ sampled_for: cohort });
+        } catch (err) {
+          logger.warn(`[typed-decisions] visit access (${sibling.provider}) cohort refresh failed: ${err.message}`);
+        }
+      }
+    }
+  }
 }
 
 /**
