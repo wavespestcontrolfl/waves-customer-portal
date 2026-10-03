@@ -555,6 +555,17 @@ async function isFirstHeldVisitOfUnpaidYear(svc, conn = db) {
   if (!svc?.paf_held_term_id || !svc.customer_id) return false;
   const term = await conn('annual_prepay_terms').where({ id: svc.paf_held_term_id }).first('id', 'status', 'source_estimate_id');
   if (!term || String(term.status || '') !== 'payment_pending' || !term.source_estimate_id) return false;
+  // The payment must still be waiting for the visit: a year settled, or with
+  // its ACH payment started, before the first visit keeps the regular text
+  // even while the term reads payment_pending (GitHub Codex #5640 r13).
+  const estimate = await conn('estimates').where({ id: term.source_estimate_id }).first('estimate_data');
+  const job = parseData(estimate?.estimate_data)?.prepayAutoChargeJob;
+  if (!job || job.deferred_to_first_visit !== true || ![AWAITING, 'pending'].includes(String(job.status || ''))) return false;
+  const invoice = job.invoice_id ? await conn('invoices').where({ id: job.invoice_id }).first('status') : null;
+  if (!invoice || ['paid', 'processing', 'void', 'refunded'].includes(String(invoice.status || ''))) return false;
+  // A visit that already claimed the text keeps it on a retry, even when
+  // another held visit finished in between (GitHub Codex #5640 r13).
+  if (String(job.first_visit_text_visit_id || '') === String(svc.id)) return true;
   const others = (await performedVisitCandidates(term.source_estimate_id, svc.customer_id))
     .filter((v) => String(v.id) !== String(svc.id) && String(v.paf_held_term_id || '') === String(term.id));
   if (others.length) return false;

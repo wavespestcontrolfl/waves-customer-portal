@@ -492,6 +492,27 @@ postgres('annual prepay charged after the first visit', () => {
       expect(await Release.isFirstHeldVisitOfUnpaidYear(parent, trx)).toBe(true);
     });
 
+    it('the claiming visit keeps the text on a retry after another held visit finished (GitHub Codex #5640 r13)', async () => {
+      const f = await deferredAccept();
+      await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: f.termId });
+      const Release = require('../services/paf-prepay-release');
+      const parent = await trx('scheduled_services').where({ id: f.parentId }).first();
+      expect(await Release.isFirstHeldVisitOfUnpaidYear(parent, trx)).toBe(true);
+      await perform(f.childId, f.customerId);
+      expect(await Release.isFirstHeldVisitOfUnpaidYear(parent, trx)).toBe(true);
+    });
+
+    it('a year already paid or in process before the first visit keeps the regular text (GitHub Codex #5640 r13)', async () => {
+      const Release = require('../services/paf-prepay-release');
+      for (const status of ['paid', 'processing']) {
+        const f = await deferredAccept();
+        await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: f.termId });
+        await trx('invoices').where({ id: f.invoiceId }).update({ status });
+        const visit = await trx('scheduled_services').where({ id: f.parentId }).first();
+        expect(await Release.isFirstHeldVisitOfUnpaidYear(visit, trx)).toBe(false);
+      }
+    });
+
     it('a disabled neutral template falls back to the regular annual-prepay text', async () => {
       const f = await deferredAccept();
       await trx('sms_templates').where({ template_key: 'service_complete_annual_prepay_after_first_visit' }).update({ is_active: false });
