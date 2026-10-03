@@ -3,7 +3,8 @@
 // the customer confirms it, and the office gets ONE bell with the address on
 // file and the new one; staff make the change. The model judges whether the
 // customer confirmed; the server verifies the address is one the customer
-// typed in this chat and that the assistant's last reply read it back.
+// typed in this chat, and sends only the exact address its own read-back
+// instruction carried in the previous turn and the assistant's reply showed.
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 process.env.ANTHROPIC_API_KEY = 'test-key';
 
@@ -45,6 +46,8 @@ let failMessages;
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // Also drops replies a test queued and never used.
+  mockCreate.mockReset();
   process.env[GATE] = 'true';
   chat = [];
   failMessages = false;
@@ -53,7 +56,8 @@ beforeEach(() => {
     if (q.sql.includes('from "agent_sessions"')) return [conversation];
     if (q.sql.includes('from "agent_messages"')) {
       if (failMessages && q.sql.includes('limit')) throw new Error('db down');
-      return chat;
+      // A copy per read: buildHistory reverses its rows in place.
+      return [...chat];
     }
     if (q.sql.includes('from "customers"')) return [customer];
     if (q.sql.includes('insert into "ai_escalations"')) return [{ id: 'esc-1' }];
@@ -68,12 +72,15 @@ const ask = (input) => ({ content: [{ type: 'tool_use', id: 't1', name: 'request
 const text = (words) => ({ content: [{ type: 'text', text: words }] });
 // What the model was told by the tool.
 const toolResult = () => JSON.parse(mockCreate.mock.calls[1][0].messages.at(-1).content[0].content);
+// The tool's own logged result for a read-back turn.
+const readBackRow = (address) => ({ role: 'tool_use', content: 'request_email_change', tool_results: JSON.stringify({ sent: false, read_back: address }) });
 // The customer gave the address, the assistant read it back, the customer answers.
-const afterReadBack = (answer, readBack = `I have ${NEW} as your new email. Is that right?`) => {
+const afterReadBack = (answer, reply = `I have ${NEW} as your new email. Is that right?`, { address = NEW, logged = readBackRow(address) } = {}) => {
   chat = [
     { role: 'user', content: answer },
-    { role: 'assistant', content: readBack },
-    { role: 'user', content: `Please change my email to ${NEW}.` },
+    { role: 'assistant', content: reply },
+    ...(logged ? [logged] : []),
+    { role: 'user', content: `Please change my email to ${address}.` },
   ];
   return answer;
 };
@@ -104,7 +111,8 @@ test('the tool sits before escalate, and the first call only reads the address b
   const prompt = mockCreate.mock.calls[0][0].system[0].text;
   expect(prompt).toMatch(/EMAIL CHANGE:/);
   expect(prompt).toMatch(/Changes to the account: phone, address/);
-  expect(toolResult()).toEqual(expect.objectContaining({ sent: false, read_back: NEW }));
+  // The address is passed through as given: nothing is stripped or re-cased.
+  expect(toolResult()).toEqual(expect.objectContaining({ sent: false, read_back: NEW.toLowerCase() }));
   // The address on file never reaches the model.
   expect(JSON.stringify(mockCreate.mock.calls[1][0].messages)).not.toMatch(/pat\.old/);
   expect(result.escalated).toBe(false);
@@ -156,9 +164,27 @@ test('when the bell does not ring the customer is not told the team has it', asy
   expect(result.reply).not.toMatch(/sent your new email/);
 });
 
+test('the address sent is the one read back, character for character (a leading underscore is part of it)', async () => {
+  const address = '_pat.new@example.com';
+  mockCreate.mockResolvedValueOnce(ask({ new_email: address, customer_confirmed: true }));
+
+  const result = await say(afterReadBack('Yes', `I have ${address} as your new email. Is that right?`, { address }));
+
+  expect(NotificationService.notifyAdmin.mock.calls[0][3].detail).toMatch(/portal chat: _pat\.new@example\.com\n/);
+  expect(result.reply).toMatch(/address, _pat\.new@example\.com, to our team/);
+});
+
 test.each([
-  ['the assistant\'s last reply did not read the address back', () => afterReadBack('Yes', 'What is the new address?')],
-  ['the last reply read back a different address', () => afterReadBack('Yes', 'I have pat.new@example.co. Is that right?')],
+  ['the assistant\'s last reply did not show the address', () => afterReadBack('Yes', 'What is the new address?')],
+  ['the last reply showed a longer address', () => afterReadBack('Yes', `I have x${NEW}. Is that right?`)],
+  ['the last reply showed it with an underscore in front', () => afterReadBack('Yes', `I have _${NEW}. Is that right?`)],
+  ['the read-back was for another address', () => afterReadBack('Yes', `I have _${NEW}. Is that right?`, { logged: readBackRow(`_${NEW}`) })],
+  ['no read-back was asked for last turn', () => afterReadBack('Yes', `I have ${NEW}. Is that right?`, { logged: null })],
+  ['the read-back was a turn before the last one', () => {
+    afterReadBack('Yes');
+    chat.splice(1, 0, { role: 'assistant', content: 'Your next visit is Friday.' }, { role: 'user', content: 'When is my next visit?' });
+    return 'Yes';
+  }],
   ['there is no earlier reply at all', () => { chat = [{ role: 'user', content: `Change it to ${NEW}, yes I am sure` }]; return chat[0].content; }],
 ])('claimed confirmed but %s: read back again, nothing sent', async (_name, arrange) => {
   const message = arrange();

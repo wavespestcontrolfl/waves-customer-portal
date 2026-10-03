@@ -656,9 +656,11 @@ async function offerReservice(customerId, input, actions, { secondaryProperty = 
 }
 
 // The model judges whether the customer confirmed; the code only verifies
-// what can be checked: the address is one the customer typed in this chat,
-// and the assistant's last reply read that same address back, so this turn's
-// message answers it. No list of confirmation wording lives here.
+// what can be checked. The address that reaches the office is, character for
+// character, the one this tool told the model to read back in the previous
+// turn (its own logged result, never a re-reading of the reply), and the
+// assistant's last reply shows that same address. No list of confirmation
+// wording lives here.
 const EMAIL_SHAPE = /^[^\s@<>()[\],;:"]+@[^\s@<>()[\],;:"]+\.[A-Za-z]{2,}$/;
 const EMAIL_MAX_CHARS = 254;
 // Messages of the chat read for the check, newest first.
@@ -669,7 +671,7 @@ const EMAIL_HAND_OFF = {
 };
 const EMAIL_NOT_AN_ADDRESS = {
   sent: false,
-  instruction: 'That is not a complete email address. Ask the customer to type their full new email address.',
+  instruction: 'That is not a complete email address. Pass only the address, exactly as the customer typed it, or ask the customer to type their full new email address.',
 };
 const EMAIL_NOT_TYPED = {
   sent: false,
@@ -682,51 +684,83 @@ const EMAIL_UNCHANGED = {
 const emailReadBack = (address) => ({
   sent: false,
   read_back: address,
-  instruction: `Nothing is sent yet. Read the address back to the customer exactly as ${address} and ask them to confirm it is right. Do not say it has been changed or sent. Call this tool again with customer_confirmed true only after their next message confirms it.`,
+  instruction: `Nothing is sent yet. Read the address back to the customer exactly as ${address}, as plain text with no quotes or formatting around it, and ask them to confirm it is right. Do not say it has been changed or sent. Call this tool again with customer_confirmed true only after their next message confirms it.`,
 });
-// The email-shaped words of a message, with the punctuation a sentence or
-// markdown puts around them removed.
-function emailsIn(text) {
-  return (String(text || '').match(/[^\s@<>()[\],;:"]+@[^\s@<>()[\],;:"]+/g) || [])
-    .map((word) => word.replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, ''));
-}
 const sameEmail = (a, b) => String(a).toLowerCase() === String(b).toLowerCase();
+// Whether `text` shows exactly this address: not as the tail or head of a
+// longer one (a character an address can hold on either side).
+function showsEmail(text, address) {
+  const hay = String(text || '').toLowerCase();
+  const needle = address.toLowerCase();
+  for (let at = hay.indexOf(needle); at !== -1; at = hay.indexOf(needle, at + 1)) {
+    const before = hay[at - 1] || ' ';
+    const after = hay.slice(at + needle.length);
+    if (!/[a-z0-9._%+@-]/.test(before) && !/^(?:[a-z0-9@-]|\.[a-z0-9])/.test(after)) return true;
+  }
+  return false;
+}
+// Whether the customer typed this address: one of their email-shaped words
+// ends with it, with nothing but punctuation in front (a quote, a bracket).
+// Lenient on purpose: it only stops an address nobody typed. What the
+// customer confirms is the read-back.
+function customerTyped(text, address) {
+  const needle = address.toLowerCase();
+  return (String(text || '').toLowerCase().match(/\S+@\S+/g) || []).some((word) => {
+    const trimmed = word.replace(/[^a-z0-9]+$/, '');
+    return trimmed.endsWith(needle) && !/[a-z0-9]/.test(trimmed.slice(0, -needle.length));
+  });
+}
+// The address this tool told the model to read back in the previous turn,
+// when the assistant's reply that turn shows it. `rows` are newest first.
+function pendingReadBack(rows) {
+  // This turn's own message is the newest row when its save landed.
+  const earlier = rows[0]?.role === 'user' ? rows.slice(1) : rows;
+  const next = earlier.findIndex((r) => r.role === 'user');
+  const lastTurn = next === -1 ? earlier : earlier.slice(0, next);
+  const asked = lastTurn.find((r) => r.role === 'tool_use' && r.content === 'request_email_change');
+  const reply = lastTurn.find((r) => r.role === 'assistant');
+  if (!asked || !reply) return null;
+  let result = asked.tool_results;
+  try { if (typeof result === 'string') result = JSON.parse(result); } catch { return null; }
+  const address = typeof result?.read_back === 'string' ? result.read_back : '';
+  return address && showsEmail(reply.content, address) ? address : null;
+}
 
 async function requestEmailChange(customerId, input, { emailChange = false, conversationId, customerMessage = '' } = {}) {
   // Only under its gate: the tool is not in any other lane's set.
   if (emailChange !== true) return { error: 'Unknown tool: request_email_change' };
   if (!customerId || !conversationId) return EMAIL_HAND_OFF;
-  const asked = emailsIn(input.new_email)[0] || '';
-  if (!asked || asked.length > EMAIL_MAX_CHARS || !EMAIL_SHAPE.test(asked)) return EMAIL_NOT_AN_ADDRESS;
+  // Taken as given: no character is stripped or corrected.
+  const asked = String(input.new_email || '').trim();
+  if (asked.length > EMAIL_MAX_CHARS || !EMAIL_SHAPE.test(asked)) return EMAIL_NOT_AN_ADDRESS;
   let rows;
   let customer;
   try {
     rows = await db('agent_messages')
       .where('conversation_id', conversationId)
-      .whereIn('role', ['user', 'assistant'])
+      .whereIn('role', ['user', 'assistant', 'tool_use'])
       .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
       .limit(EMAIL_CHANGE_MESSAGES)
-      .select('role', 'content');
+      .select('role', 'content', 'tool_results');
     customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('email');
   } catch (err) {
     logger.warn(`[ai-assistant] email change check failed for ${customerId}: ${err.message}`);
     return EMAIL_HAND_OFF;
   }
   if (!customer) return EMAIL_HAND_OFF;
-  // The address as the customer typed it (this turn's message first: its row
-  // is saved best-effort).
+  // This turn's message first: its row is saved best-effort.
   const typed = [customerMessage, ...rows.filter((r) => r.role === 'user').map((r) => r.content)]
-    .flatMap(emailsIn)
-    .find((address) => sameEmail(address, asked));
+    .some((text) => customerTyped(text, asked));
   if (!typed) return EMAIL_NOT_TYPED;
-  if (sameEmail(typed, String(customer.email || '').trim())) return EMAIL_UNCHANGED;
-  if (input.customer_confirmed !== true) return emailReadBack(typed);
-  // Confirmed means this turn's message answers a read-back: the assistant's
-  // last reply must carry this same address.
-  const lastReply = rows.find((r) => r.role === 'assistant');
-  if (!lastReply || !emailsIn(lastReply.content).some((address) => sameEmail(address, typed))) return emailReadBack(typed);
-  // Not a tool result the model sees: assistant.js hands off on it.
-  return { confirmed_email: typed };
+  if (sameEmail(asked, String(customer.email || '').trim())) return EMAIL_UNCHANGED;
+  if (input.customer_confirmed !== true) return emailReadBack(asked);
+  // Confirmed means this turn's message answers the read-back of this same
+  // address; anything else is read back (again) first.
+  const pending = pendingReadBack(rows);
+  if (!pending || !sameEmail(pending, asked)) return emailReadBack(asked);
+  // Not a tool result the model sees: assistant.js hands off on it. The
+  // address is the one the read-back showed.
+  return { confirmed_email: pending };
 }
 
 function openPortalSection(section, actions) {
