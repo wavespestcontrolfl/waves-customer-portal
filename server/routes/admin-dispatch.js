@@ -4548,6 +4548,15 @@ router.get('/:serviceId/lawn-reservice/fast-context', async (req, res, next) => 
 // status. Read-only; dark behind GATE_LAWN_FAST_COMPLETE. The lawn re-service
 // keeps its own sheet. An ineligible visit answers 200 `eligible: false` with a
 // reason. See services/lawn-fast-complete.js.
+// Every lawn-fast route: the dark gate first (a request reads nothing while it is
+// off), then the path id must be a uuid (scheduled_services.id), or a malformed id
+// would raise Postgres 22P02 (a 500) in the ownership lookup. A regex path has no
+// :serviceId param, so this runs before router.param('serviceId')'s own lookup.
+router.use(/^\/([^/]+)\/lawn-fast(?:\/|$)/, (req, res, next) => {
+  if (!lawnFastCompleteLive()) return res.status(404).json({ enabled: false });
+  if (!require('../services/lawn-fast-complete').isUuid(req.params[0])) return res.status(404).json({ error: 'Service not found', code: 'not_found' });
+  return next();
+});
 router.get('/:serviceId/lawn-fast/context', async (req, res, next) => {
   try {
     if (!lawnFastCompleteLive()) return res.status(404).json({ enabled: false });

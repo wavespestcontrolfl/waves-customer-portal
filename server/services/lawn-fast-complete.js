@@ -36,6 +36,19 @@ const RESERVICE_KEY = 'lawn_re_service';
 // (both schedule feeds hide it); /complete does not refuse it, so this does.
 const TERMINAL_STATUSES = new Set(['completed', 'cancelled', 'skipped', 'no_show', 'incomplete', 'rescheduled']);
 
+// FAIL-CLOSED RULE for every read in this file: a caught read failure is recorded
+// (a Set of read names, like the report's readFailures) and NEVER continues with
+// a value that is more permissive than a successful read could have produced.
+// Everything that depends on the failed read is withheld or reported unknown, and
+// the response names the failure so the sheet can say why. A read with no catch
+// throws (a 500), which also fails closed.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Every id taken from the client reaches a uuid column; a malformed value would
+// raise Postgres 22P02 (a 500), so it is checked first.
+const isUuid = (value) => typeof value === 'string' && UUID_RE.test(value);
+// The customer's billing lane could not be read: the visit type is unknown.
+const BILLING_MODE_UNKNOWN = Symbol('billing_mode_unknown');
+
 // Advisory photo floor, interim until the shared shot list lands: at least this
 // many usable photos, one wide shot and one close-up (the assessment prompt
 // needs both before confidence can exceed low). 'back' and 'side' are the
@@ -48,7 +61,8 @@ const PHOTO_FLOOR = Object.freeze({
 
 /**
  * Which kind of lawn visit this APPOINTMENT is: 'recurring' (a recurring lawn
- * program visit, the primary path), 'per_application', 'one_time', or 'other'.
+ * program visit, the primary path), 'per_application', 'one_time', 'other', or
+ * 'unknown' (the billing lane could not be read).
  * Informational for the eligibility rule (it never makes a visit ineligible) but
  * decisive for the program recipe: only a 'recurring' appointment gets planned
  * products. It is decided from the appointment itself, never the customer's plan
@@ -59,6 +73,9 @@ const PHOTO_FLOOR = Object.freeze({
  * 'per_application' whatever the visit's key, since those visits start blank.
  */
 function lawnFastVisitType(profile, billingMode, isCallback = false) {
+  // A failed billing read cannot assert any type (a per-application customer would
+  // read as recurring), so it is 'unknown' and gets no program defaults.
+  if (billingMode === BILLING_MODE_UNKNOWN) return 'unknown';
   if (billingMode === 'per_application') return 'per_application';
   const billingType = String(profile?.billingType || '').toLowerCase();
   if (billingType === 'one_time' || billingMode === 'one_time') return 'one_time';
@@ -93,35 +110,45 @@ function lawnFastIneligibleReason({ svc, profile, hasVisitGroup = false, visitGr
   return null;
 }
 
-async function loadBillingMode(svc, knex) {
+async function loadBillingMode(svc, knex, readFailures) {
   try {
     const row = await knex('customers').where({ id: svc.customer_id }).first('billing_mode');
     return row?.billing_mode || null;
   } catch (err) {
-    // billing_mode is informational here (visitType only); no driver message,
-    // it can echo SQL and bound values.
+    // No driver message: it can echo SQL and bound values.
     logger.warn(`[lawn-fast] billing mode unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
-    return null;
+    readFailures.add('billing_mode');
+    return BILLING_MODE_UNKNOWN;
   }
 }
 
 /**
  * Load the visit and decide eligibility. `{ ok: false, reason: 'not_found' }`
- * for a missing visit; otherwise `{ ok, svc, profile, reason, visitType }` with
- * `reason` null when eligible.
+ * for a missing visit (or a malformed id, which no visit can have); otherwise
+ * `{ ok, svc, profile, reason, visitType, readFailures }` with `reason` null when
+ * eligible. Eligibility reads no billing data, so a failed billing read changes
+ * only `visitType` (to 'unknown'), never the verdict. `withVisitType: false`
+ * skips that read (the submit preflight does not need the type).
  */
-async function resolveLawnFastEligibility(serviceId, knex = db, { allowStatuses = [] } = {}) {
+async function resolveLawnFastEligibility(serviceId, knex = db, { allowStatuses = [], withVisitType = true } = {}) {
+  if (!isUuid(serviceId)) return { ok: false, reason: 'not_found' };
   const base = await resolveEligibility(serviceId, knex);
   if (!base.ok) return { ok: false, reason: base.reason };
   const { svc, profile } = base;
+  const readFailures = new Set();
   let visitGroupStatus = null;
   if (svc.visit_id) {
+    // No catch: a failed read throws (a 500), never an eligible verdict.
     const visit = await knex('service_visits').where({ id: svc.visit_id }).first('status');
     visitGroupStatus = visit ? String(visit.status || '') : null;
   }
   const reason = lawnFastIneligibleReason({ svc, profile, hasVisitGroup: !!svc.visit_id, visitGroupStatus, allowStatuses });
-  const billingMode = reason === 'not_lawn' || reason === 'profile_unavailable' ? null : await loadBillingMode(svc, knex);
-  return { ok: true, svc, profile, reason, visitType: profile ? lawnFastVisitType(profile, billingMode, svc.is_callback === true) : null };
+  let visitType = null;
+  if (profile && withVisitType) {
+    const billingMode = reason === 'not_lawn' ? null : await loadBillingMode(svc, knex, readFailures);
+    visitType = lawnFastVisitType(profile, billingMode, svc.is_callback === true);
+  }
+  return { ok: true, svc, profile, reason, visitType, readFailures };
 }
 
 // ── watering rules ──────────────────────────────────────────────────────────
@@ -174,17 +201,35 @@ const MAX_PREVIEW_PRODUCTS = 20;
 //   - the week plan card the banner's plan sentence reads (GATE_IRRIGATION_WEEK_PLAN):
 //     the current week's snapshot, only when it binds to this premise, rendered by
 //     buildReportWeekPlan, the report's own builder.
-// A read that fails is listed in `omitted`; the part it feeds is left out of the
-// sentence rather than guessed.
-async function loadReportWateringContext(svc, assessment, knex) {
+// Validates what the client sent before any query: products_catalog.id and
+// scheduled_services.id are uuid columns, so a malformed value would raise 22P02.
+function parsePreviewRequest(serviceId, productIds) {
+  if (!Array.isArray(productIds) || productIds.some((id) => typeof id !== 'string' || !isUuid(id.trim()))) {
+    return { ok: false, reason: 'invalid_product_ids' };
+  }
+  const ids = [...new Set(productIds.map((id) => id.trim()))];
+  if (ids.length > MAX_PREVIEW_PRODUCTS) return { ok: false, reason: 'too_many_products' };
+  if (!isUuid(serviceId)) return { ok: false, reason: 'not_found' };
+  return { ok: true, ids };
+}
+
+// ANY failure of a read that feeds the move guard (preferences, turf profile,
+// the visit's assessment) or the week plan is listed in `omitted`, and the
+// preview then returns NO sentence: the report's move guard would withhold the
+// former home's sprinkler figures and its plan sentence is part of the wording,
+// so a sentence built from missing context could differ from (and be more
+// permissive than) the report's. Nothing rebuilds the instruction around it.
+async function loadReportWateringContext(svc, knex) {
   const reportData = require('./service-report/report-data');
   const omitted = [];
   const customerId = svc.customer_id;
   let turfProfile = null;
   let propertyPrefs = null;
+  let assessment = null;
   try {
     turfProfile = await knex('customer_turf_profiles').where({ customer_id: customerId, active: true }).first();
     propertyPrefs = await knex('property_preferences').where({ customer_id: customerId }).first();
+    assessment = await loadLatestAssessment(svc, knex);
   } catch (err) {
     logger.warn(`[lawn-fast] irrigation context unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
     omitted.push('irrigation_context');
@@ -216,7 +261,7 @@ async function loadReportWateringContext(svc, assessment, knex) {
       omitted.push('week_plan');
     }
   }
-  return { scheduleUnconfirmed, weekPlan, omitted };
+  return { scheduleUnconfirmed, weekPlan, assessment, omitted };
 }
 
 /**
@@ -237,19 +282,19 @@ async function loadReportWateringContext(svc, assessment, knex) {
  *     plan present then, so it may differ from a later render;
  *   - assessment: with no confirmed assessment the report has no banner at all
  *     yet; the preview shows what it will say once one is confirmed.
- * A part the sheet cannot know is left out of the sentence, never replaced by
- * different wording, and named in `omitted`.
+ * A context read that fails withholds the whole sentence (`sentence: null`,
+ * `lines: []`) and is named in `omitted`; the sheet never shows wording the
+ * report's own guards might withhold or word differently.
  * `{ ok: false, reason }` for a bad request.
  */
 async function buildLawnFastWateringPreview({ serviceId, productIds, knex = db, now = new Date() }) {
-  if (!Array.isArray(productIds) || productIds.some((id) => typeof id !== 'string' || !id.trim())) {
-    return { ok: false, reason: 'invalid_product_ids' };
-  }
-  const ids = [...new Set(productIds.map((id) => id.trim()))];
-  if (ids.length > MAX_PREVIEW_PRODUCTS) return { ok: false, reason: 'too_many_products' };
+  const request = parsePreviewRequest(serviceId, productIds);
+  if (!request.ok) return request;
+  const { ids } = request;
   const svc = await require('./pest-recap').loadServiceWithCustomer(serviceId, knex);
   if (!svc) return { ok: false, reason: 'not_found' };
 
+  // No catch on the catalog read: a failure throws (a 500), never a rule-less preview.
   const rows = await loadCatalogRows(ids, knex);
   const entries = ids.map((id) => productRuleEntry(id, rows.get(id) || null));
   const wateringRuleLive = featureGates.lawnWateringRuleLive();
@@ -268,9 +313,12 @@ async function buildLawnFastWateringPreview({ serviceId, productIds, knex = db, 
   if (!wateringRuleLive || !entries.length) return out;
 
   const reportData = require('./service-report/report-data');
-  const assessment = await loadLatestAssessment(svc, knex).catch(() => null);
-  const context = await loadReportWateringContext(svc, assessment, knex);
-  out.omitted.push(...context.omitted);
+  const context = await loadReportWateringContext(svc, knex);
+  const { assessment } = context;
+  if (context.omitted.length) {
+    out.omitted.push(...context.omitted);
+    return out;
+  }
   out.provisional.push('completionTime');
   if (context.weekPlan) out.provisional.push('weekPlanLine');
   if (assessment?.confirmed_by_tech !== true) out.provisional.push('assessment');
@@ -339,11 +387,15 @@ async function loadLatestAssessment(svc, knex) {
     .first();
 }
 
-async function loadAssessmentPhotos(assessmentId, knex) {
+// The advisory photo set. A failed read is recorded and reads as no photo status
+// (no warning to show, nothing refused): the floor is advisory, so withholding it
+// is neither more permissive nor blocking.
+async function loadAssessmentPhotos(assessmentId, knex, readFailures) {
   try {
     return await knex('lawn_assessment_photos').where({ assessment_id: assessmentId }).select('zone', 'quality_gate_passed');
   } catch (err) {
     logger.warn(`[lawn-fast] photo status unavailable: ${err?.code || err?.name || 'Error'}`);
+    readFailures.add('photo_status');
     return null;
   }
 }
@@ -351,26 +403,32 @@ async function loadAssessmentPhotos(assessmentId, knex) {
 // ── planned products ────────────────────────────────────────────────────────
 
 /**
- * The visit's planned products with each one's watering rule. Only a program
- * visit has a plan: with the completion-defaults gates off, or on a visit that is
- * not a recurring program appointment (one-time, per-application, callback), the list is empty and the sheet starts
- * blank. A failed plan read degrades to empty too (the tech adds what they
- * applied); nothing here may block opening the sheet.
+ * The visit's planned products with each one's watering rule: `{ source, items,
+ * unavailable }`. Only a recurring program appointment has a plan: with the
+ * completion-defaults gates off, or on a visit that is not one (one-time,
+ * per-application, callback, other), the list is empty and the sheet starts
+ * blank. An UNKNOWN visit type (billing read failed) and a failed plan or
+ * catalog read also give the empty list, with `unavailable` naming why, so the
+ * sheet can say the defaults could not be loaded. Empty is never more permissive
+ * than a loaded plan: the tech adds what they applied. Nothing here blocks
+ * opening the sheet.
  */
-async function loadPlannedProducts(svc, knex, visitType) {
-  const empty = { source: null, items: [] };
+async function loadPlannedProducts(svc, knex, visitType, readFailures) {
+  const empty = (unavailable = null) => ({ source: null, items: [], unavailable });
+  if (visitType === 'unknown') return empty('billing_mode_lookup_failed');
   // buildPlanForService keys the program off the CUSTOMER (tier / billing mode),
   // so it can return the seasonal recipe for a member's one-time or
   // per-application appointment. Only a recurring program appointment gets it.
-  if (visitType !== 'recurring') return empty;
+  if (visitType !== 'recurring') return empty();
   try {
-    if (!require('./lawn-completion-defaults').lawnCompletionDefaultsEnabled()) return empty;
+    if (!require('./lawn-completion-defaults').lawnCompletionDefaultsEnabled()) return empty();
     const plan = await require('./waveguard-plan-engine').buildPlanForService(svc.id, { db: knex, includeCompletionDefaults: true });
     const items = Array.isArray(plan?.completionDefaults?.items) ? plan.completionDefaults.items : [];
     const withProduct = items.filter((item) => item?.product?.id);
     const rows = await loadCatalogRows(withProduct.map((item) => String(item.product.id)), knex);
     return {
       source: 'plan',
+      unavailable: null,
       items: withProduct.map((item) => {
         const entry = productRuleEntry(String(item.product.id), rows.get(String(item.product.id)) || null);
         return {
@@ -388,15 +446,19 @@ async function loadPlannedProducts(svc, knex, visitType) {
     };
   } catch (err) {
     logger.warn(`[lawn-fast] planned products unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
-    return empty;
+    readFailures.add('planned_products');
+    return empty('planned_products_lookup_failed');
   }
 }
 
-async function loadTurfHeightCapture(technicianId, knex) {
+// The height-of-cut capture is optional: a failed flag read hides it (false), the
+// less permissive side, and is recorded.
+async function loadTurfHeightCapture(technicianId, knex, readFailures) {
   if (!technicianId) return false;
   try {
     return await require('./feature-flags').isUserFeatureEnabled(technicianId, 'turf-height-capture', false, knex);
   } catch {
+    readFailures.add('turf_height_flag');
     return false;
   }
 }
@@ -409,18 +471,28 @@ async function loadTurfHeightCapture(technicianId, knex) {
 async function buildLawnFastContext(serviceId, { knex = db, technicianId = null } = {}) {
   const base = await resolveLawnFastEligibility(serviceId, knex);
   if (!base.ok) return { ok: false, reason: base.reason };
-  const { svc, profile, reason, visitType } = base;
+  const { svc, profile, reason, visitType, readFailures } = base;
   // The technician rides the identity so a reassignment since the sheet opened is
   // caught at submit (recapVisitIdentityChanged compares it when sent).
   const service = { ...recapServiceIdentity(svc, profile), technicianId: svc.technician_id ?? null };
   if (reason) return { ok: true, eligible: false, reason, visitType, service };
 
-  const assessmentRow = await loadLatestAssessment(svc, knex).catch((err) => {
+  // A failed assessment read reads as "no confirmed assessment" (Complete stays
+  // disabled, and the submit preflight checks the database itself), never as
+  // confirmed.
+  let assessmentRow = null;
+  let assessmentReadFailed = false;
+  try {
+    assessmentRow = await loadLatestAssessment(svc, knex);
+  } catch (err) {
     logger.warn(`[lawn-fast] assessment unavailable for ${serviceId}: ${err?.code || err?.name || 'Error'}`);
-    return null;
-  });
-  const photos = assessmentRow ? await loadAssessmentPhotos(assessmentRow.id, knex) : null;
+    assessmentReadFailed = true;
+    readFailures.add('assessment');
+  }
+  const photos = assessmentRow ? await loadAssessmentPhotos(assessmentRow.id, knex, readFailures) : null;
   const typed = !!profile.findingsType;
+  const { unavailable: plannedProductsUnavailable, ...plannedProducts } = await loadPlannedProducts(svc, knex, visitType, readFailures);
+  const turfHeightCapture = typed ? false : await loadTurfHeightCapture(technicianId, knex, readFailures);
 
   return {
     ok: true,
@@ -431,21 +503,27 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null 
     visitDate: etCalendarDayOf(svc.scheduled_date),
     // The height-of-cut capture is a lawn-visit feature the typed lawn form
     // never renders (mirrors /complete's turfHeightApplicable).
-    turfHeightCapture: typed ? false : await loadTurfHeightCapture(technicianId, knex),
-    plannedProducts: await loadPlannedProducts(svc, knex, visitType),
+    turfHeightCapture,
+    plannedProducts,
+    // Why the planned list is empty when it is empty because a read failed
+    // (null otherwise), so the sheet can say defaults could not be loaded.
+    plannedProductsUnavailable: plannedProductsUnavailable || null,
     // The assessment must be CONFIRMED before the visit completes; the sheet
     // reads `confirmed` to enable Complete.
     assessment: {
       exists: !!assessmentRow,
       id: assessmentRow?.id ?? null,
       confirmed: assessmentRow?.confirmed_by_tech === true,
+      readFailed: assessmentReadFailed,
     },
     // Advisory only: a light photo set is a warning, never a refusal. null when
-    // there is no assessment yet (no photos analyzed).
+    // there is no assessment yet (no photos analyzed) or the read failed.
     photoStatus: photos ? evaluatePhotoFloor(photos) : null,
     // Same-spot pairing needs the previous visit's front photo; no shared
     // lookup for lawn photos exists yet, so the context carries none.
     previousFrontPhoto: null,
+    // Names of the reads that failed while building this context ([] when none).
+    readFailures: [...readFailures],
   };
 }
 
@@ -512,7 +590,7 @@ async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = 
       },
     };
   }
-  const verdict = await resolveLawnFastEligibility(svc.id, knex, { allowStatuses: ['completed'] });
+  const verdict = await resolveLawnFastEligibility(svc.id, knex, { allowStatuses: ['completed'], withVisitType: false });
   if (!verdict.ok) {
     return { status: 404, payload: { error: 'Service not found', code: 'lawn_fast_not_found' } };
   }
@@ -532,7 +610,9 @@ async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = 
       },
     };
   }
-  const assessment = lawnAssessmentId
+  // lawn_assessments.id is a uuid column: a malformed id is not this visit's
+  // assessment (and must not reach the query as a 22P02 500).
+  const assessment = isUuid(lawnAssessmentId)
     ? await knex('lawn_assessments')
       .where({ id: lawnAssessmentId, service_id: svc.id, customer_id: svc.customer_id })
       .first('id', 'confirmed_by_tech')
@@ -561,6 +641,8 @@ async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = 
 
 module.exports = {
   PHOTO_FLOOR,
+  isUuid,
+  BILLING_MODE_UNKNOWN,
   lawnFastVisitType,
   REQUIRED_IDENTITY_KEYS,
   lawnFastIneligibleReason,

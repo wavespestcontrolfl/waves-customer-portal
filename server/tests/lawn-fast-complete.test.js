@@ -26,13 +26,22 @@ const {
 const reportData = require('../services/service-report/report-data');
 const { resolveWateringRule } = require('../services/service-report/lawn-watering-rule');
 
+// Ids reach uuid columns, so every fixture id is a well-formed uuid.
+const uuid = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+const VISIT = uuid(1);
+const ASSESSMENT = uuid(2);
+const P_HERB = uuid(11);
+const P_GRAN = uuid(12);
+const P_UN = uuid(13);
+const P_MISSING = uuid(14);
+
 const PROFILE = (extra = {}) => ({
   category: 'lawn_care', serviceKey: 'lawn_care_monthly', billingType: 'recurring', findingsType: null,
   projectBacked: false, requiresProject: false, companions: [], ...extra,
 });
 
 const visit = (extra = {}) => ({
-  id: 'visit-1', customer_id: 'cust-1', property_id: 'prop-1', service_type: 'Lawn Care',
+  id: VISIT, customer_id: 'cust-1', property_id: 'prop-1', service_type: 'Lawn Care',
   service_id: 'cat-1', scheduled_date: '2026-10-05', status: 'confirmed', visit_id: null,
   cust_address_line1: '100 Example Court', cust_city: 'Bradenton', cust_state: 'FL', cust_zip: '34201',
   ...extra,
@@ -56,16 +65,16 @@ function fakeKnex(tables) {
 }
 
 const herbicide = {
-  id: 'p-herb', name: 'Test Weed Spray', category: 'herbicide', product_type: 'pesticide', formulation: 'WG',
+  id: P_HERB, name: 'Test Weed Spray', category: 'herbicide', product_type: 'pesticide', formulation: 'WG',
   epa_reg_number: '100-1', approved_for_service_report: true,
   post_application_watering: { mode: 'hold', hold_hours: 24, source: 'label' },
 };
 const granular = {
-  id: 'p-gran', name: 'Test Feed Granular', category: 'fertilizer', product_type: 'fertilizer', formulation: 'granular',
+  id: P_GRAN, name: 'Test Feed Granular', category: 'fertilizer', product_type: 'fertilizer', formulation: 'granular',
   approved_for_service_report: true,
   post_application_watering: { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, source: 'label' },
 };
-const unapproved = { id: 'p-un', name: 'Test Unapproved', category: 'fertilizer', formulation: 'granular', approved_for_service_report: false };
+const unapproved = { id: P_UN, name: 'Test Unapproved', category: 'fertilizer', formulation: 'granular', approved_for_service_report: false };
 
 describe('lawnFastIneligibleReason: one rule for every lawn visit type', () => {
   const reason = (profile, extra = {}) => lawnFastIneligibleReason({ svc: visit(), profile, ...extra });
@@ -172,8 +181,8 @@ describe('buildLawnFastContext', () => {
 
   test('an ineligible visit answers eligible:false with the reason and identity, and reads nothing heavier', async () => {
     resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE({ serviceKey: 'lawn_re_service' }));
-    const ctx = await buildLawnFastContext('visit-1', { knex: fakeKnex(tables()) });
-    expect(ctx).toMatchObject({ ok: true, eligible: false, reason: 'lawn_re_service', service: { id: 'visit-1', serviceKey: 'lawn_re_service' } });
+    const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables()) });
+    expect(ctx).toMatchObject({ ok: true, eligible: false, reason: 'lawn_re_service', service: { id: VISIT, serviceKey: 'lawn_re_service' } });
     expect(ctx.plannedProducts).toBeUndefined();
     expect(buildPlanForService).not.toHaveBeenCalled();
   });
@@ -184,7 +193,7 @@ describe('buildLawnFastContext', () => {
     ['one-time', PROFILE({ billingType: 'one_time', serviceKey: 'lawn_care_one_time' }), null, 'one_time'],
   ])('a %s lawn visit opens the sheet (no plan: empty planned products, never refused)', async (_label, profile, billingMode, visitType) => {
     resolveCompletionProfileForScheduledService.mockResolvedValue(profile);
-    const ctx = await buildLawnFastContext('visit-1', {
+    const ctx = await buildLawnFastContext(VISIT, {
       knex: fakeKnex(tables({ customers: { billing_mode: billingMode }, lawn_assessments: undefined })),
       technicianId: 'tech-1',
     });
@@ -199,16 +208,16 @@ describe('buildLawnFastContext', () => {
 
   test('a typed lawn visit hides the height capture the typed form never renders', async () => {
     resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE({ findingsType: 'one_time_lawn_treatment', billingType: 'one_time' }));
-    const ctx = await buildLawnFastContext('visit-1', { knex: fakeKnex(tables()), technicianId: 'tech-1' });
+    const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables()), technicianId: 'tech-1' });
     expect(ctx.turfHeightCapture).toBe(false);
   });
 
   test('turfHeightCapture follows the per-tech flag on an untyped lawn visit', async () => {
     isUserFeatureEnabled.mockResolvedValueOnce(true);
-    expect((await buildLawnFastContext('visit-1', { knex: fakeKnex(tables()), technicianId: 'tech-1' })).turfHeightCapture).toBe(true);
+    expect((await buildLawnFastContext(VISIT, { knex: fakeKnex(tables()), technicianId: 'tech-1' })).turfHeightCapture).toBe(true);
     expect(isUserFeatureEnabled).toHaveBeenCalledWith('tech-1', 'turf-height-capture', false, expect.anything());
     isUserFeatureEnabled.mockResolvedValueOnce(false);
-    expect((await buildLawnFastContext('visit-1', { knex: fakeKnex(tables()), technicianId: 'tech-1' })).turfHeightCapture).toBe(false);
+    expect((await buildLawnFastContext(VISIT, { knex: fakeKnex(tables()), technicianId: 'tech-1' })).turfHeightCapture).toBe(false);
   });
 
   test('a recurring program visit carries the planned products with each watering rule', async () => {
@@ -217,18 +226,18 @@ describe('buildLawnFastContext', () => {
     buildPlanForService.mockResolvedValue({
       completionDefaults: {
         items: [
-          { product: { id: 'p-herb', name: 'Test Weed Spray' }, applicationMethod: 'broadcast_spray', mix: { amount: 2, amountUnit: 'fl oz' } },
-          { product: { id: 'p-gran', name: 'Test Feed Granular' }, applicationMethod: 'granular_broadcast', mix: { amount: 20, amountUnit: 'lb' } },
-          { product: { id: 'p-un', name: 'Test Unapproved' }, applicationMethod: null, mix: {} },
+          { product: { id: P_HERB, name: 'Test Weed Spray' }, applicationMethod: 'broadcast_spray', mix: { amount: 2, amountUnit: 'fl oz' } },
+          { product: { id: P_GRAN, name: 'Test Feed Granular' }, applicationMethod: 'granular_broadcast', mix: { amount: 20, amountUnit: 'lb' } },
+          { product: { id: P_UN, name: 'Test Unapproved' }, applicationMethod: null, mix: {} },
         ],
       },
     });
-    const ctx = await buildLawnFastContext('visit-1', {
+    const ctx = await buildLawnFastContext(VISIT, {
       knex: fakeKnex(tables({ products_catalog: [herbicide, granular, unapproved] })),
     });
     expect(ctx.plannedProducts.source).toBe('plan');
     const [h, g, u] = ctx.plannedProducts.items;
-    expect(h).toMatchObject({ productId: 'p-herb', applicationMethod: 'broadcast_spray', amount: 2, amountUnit: 'fl oz', approvedForReport: true });
+    expect(h).toMatchObject({ productId: P_HERB, applicationMethod: 'broadcast_spray', amount: 2, amountUnit: 'fl oz', approvedForReport: true });
     expect(h.wateringRule).toEqual(resolveWateringRule(herbicide));
     expect(g.wateringRule).toEqual(resolveWateringRule(granular));
     expect(g.wateringRule.mode).toBe('water_in');
@@ -241,7 +250,7 @@ describe('buildLawnFastContext', () => {
   describe('program defaults only on a recurring program appointment', () => {
     const PLAN = {
       completionDefaults: {
-        items: [{ product: { id: 'p-herb', name: 'Test Weed Spray' }, applicationMethod: 'broadcast_spray', mix: { amount: 2, amountUnit: 'fl oz' } }],
+        items: [{ product: { id: P_HERB, name: 'Test Weed Spray' }, applicationMethod: 'broadcast_spray', mix: { amount: 2, amountUnit: 'fl oz' } }],
       },
     };
     beforeEach(() => {
@@ -252,7 +261,7 @@ describe('buildLawnFastContext', () => {
     });
     const ctxFor = (profile, billingMode, visitExtra = {}) => {
       resolveCompletionProfileForScheduledService.mockResolvedValue(profile);
-      return buildLawnFastContext('visit-1', {
+      return buildLawnFastContext(VISIT, {
         knex: fakeKnex(tables({ customers: { billing_mode: billingMode }, scheduled_services: visit(visitExtra), products_catalog: [herbicide] })),
       });
     };
@@ -281,7 +290,7 @@ describe('buildLawnFastContext', () => {
       const ctx = await ctxFor(PROFILE(), 'monthly_membership');
       expect(ctx.visitType).toBe('recurring');
       expect(ctx.plannedProducts.source).toBe('plan');
-      expect(ctx.plannedProducts.items.map((i) => i.productId)).toEqual(['p-herb']);
+      expect(ctx.plannedProducts.items.map((i) => i.productId)).toEqual([P_HERB]);
     });
 
     test('a non-member recurring visit gets whatever the existing defaults rule gives', async () => {
@@ -297,27 +306,27 @@ describe('buildLawnFastContext', () => {
     process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
     process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
     buildPlanForService.mockRejectedValue(new Error('plan down'));
-    const ctx = await buildLawnFastContext('visit-1', { knex: fakeKnex(tables()) });
+    const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables()) });
     expect(ctx).toMatchObject({ eligible: true, plannedProducts: { source: null, items: [] } });
   });
 
   test('an existing confirmed assessment, with the advisory photo status', async () => {
-    const ctx = await buildLawnFastContext('visit-1', {
+    const ctx = await buildLawnFastContext(VISIT, {
       knex: fakeKnex(tables({
-        lawn_assessments: { id: 'as-1', confirmed_by_tech: true },
+        lawn_assessments: { id: ASSESSMENT, confirmed_by_tech: true },
         lawn_assessment_photos: [{ zone: 'front' }, { zone: 'trouble' }],
       })),
     });
-    expect(ctx.assessment).toEqual({ exists: true, id: 'as-1', confirmed: true });
+    expect(ctx.assessment).toEqual({ exists: true, id: ASSESSMENT, confirmed: true, readFailed: false });
     expect(ctx.photoStatus).toMatchObject({ soft: true, count: 2, meetsFloor: false });
     expect(ctx.photoStatus.warning).toMatch(/can still finish/);
   });
 
   test('an unconfirmed assessment reads confirmed:false', async () => {
-    const ctx = await buildLawnFastContext('visit-1', {
-      knex: fakeKnex(tables({ lawn_assessments: { id: 'as-1', confirmed_by_tech: false }, lawn_assessment_photos: [] })),
+    const ctx = await buildLawnFastContext(VISIT, {
+      knex: fakeKnex(tables({ lawn_assessments: { id: ASSESSMENT, confirmed_by_tech: false }, lawn_assessment_photos: [] })),
     });
-    expect(ctx.assessment).toEqual({ exists: true, id: 'as-1', confirmed: false });
+    expect(ctx.assessment).toEqual({ exists: true, id: ASSESSMENT, confirmed: false, readFailed: false });
   });
 });
 
@@ -330,7 +339,7 @@ describe('buildLawnFastWateringPreview', () => {
     if (savedRule === undefined) delete process.env.GATE_LAWN_WATERING_RULE; else process.env.GATE_LAWN_WATERING_RULE = savedRule;
   });
   const knexFor = (rows, prefs = null) => fakeKnex({
-    scheduled_services: { id: 'visit-1', customer_id: 'cust-1' },
+    scheduled_services: { id: VISIT, customer_id: 'cust-1' },
     products_catalog: rows,
     property_preferences: prefs,
   });
@@ -347,7 +356,7 @@ describe('buildLawnFastWateringPreview', () => {
   test('a hold that reaches the water-in deadline makes no claim, as the report does', async () => {
     process.env.GATE_LAWN_WATERING_RULE = 'true';
     const rows = [herbicide, granular];
-    const preview = await buildLawnFastWateringPreview({ serviceId: 'visit-1', productIds: rows.map((r) => r.id), knex: knexFor(rows), now });
+    const preview = await buildLawnFastWateringPreview({ serviceId: VISIT, productIds: rows.map((r) => r.id), knex: knexFor(rows), now });
     expect(await reportBanner(rows, knexFor(rows))).toBeNull();
     expect(preview.sentence).toBeNull();
   });
@@ -355,7 +364,7 @@ describe('buildLawnFastWateringPreview', () => {
   test('a product with no rule on file makes no claim, as the report does', async () => {
     process.env.GATE_LAWN_WATERING_RULE = 'true';
     const rows = [herbicide, unapproved];
-    const preview = await buildLawnFastWateringPreview({ serviceId: 'visit-1', productIds: rows.map((r) => r.id), knex: knexFor(rows), now });
+    const preview = await buildLawnFastWateringPreview({ serviceId: VISIT, productIds: rows.map((r) => r.id), knex: knexFor(rows), now });
     const banner = await reportBanner(rows, knexFor(rows));
     expect(banner).toBeNull();
     expect(preview.lines).toEqual([]);
@@ -364,31 +373,31 @@ describe('buildLawnFastWateringPreview', () => {
 
   test('an unknown product id is an unknown rule, so no claim', async () => {
     process.env.GATE_LAWN_WATERING_RULE = 'true';
-    const preview = await buildLawnFastWateringPreview({ serviceId: 'visit-1', productIds: ['p-herb', 'p-missing'], knex: knexFor([herbicide]), now });
+    const preview = await buildLawnFastWateringPreview({ serviceId: VISIT, productIds: [P_HERB, P_MISSING], knex: knexFor([herbicide]), now });
     expect(preview.sentence).toBeNull();
-    expect(preview.products[1]).toMatchObject({ productId: 'p-missing', name: null, rule: null });
+    expect(preview.products[1]).toMatchObject({ productId: P_MISSING, name: null, rule: null });
   });
 
   test('with GATE_LAWN_WATERING_RULE off the report prints none, so the preview lists rules but no sentence', async () => {
     delete process.env.GATE_LAWN_WATERING_RULE;
-    const preview = await buildLawnFastWateringPreview({ serviceId: 'visit-1', productIds: ['p-herb'], knex: knexFor([herbicide]), now });
+    const preview = await buildLawnFastWateringPreview({ serviceId: VISIT, productIds: [P_HERB], knex: knexFor([herbicide]), now });
     expect(preview).toMatchObject({ ok: true, wateringRuleLive: false, lines: [], sentence: null });
     expect(preview.products[0].rule).toEqual(resolveWateringRule(herbicide));
   });
 
   test('the response never carries the frozen facts or catalog row', async () => {
     process.env.GATE_LAWN_WATERING_RULE = 'true';
-    const preview = await buildLawnFastWateringPreview({ serviceId: 'visit-1', productIds: ['p-herb'], knex: knexFor([herbicide]), now });
+    const preview = await buildLawnFastWateringPreview({ serviceId: VISIT, productIds: [P_HERB], knex: knexFor([herbicide]), now });
     expect(Object.keys(preview.products[0]).sort()).toEqual(['approvedForReport', 'mowHoldDays', 'name', 'productId', 'rule', 'ruleSummary']);
   });
 
   test('bad requests', async () => {
     const knex = knexFor([]);
-    expect(await buildLawnFastWateringPreview({ serviceId: 'visit-1', productIds: 'p-herb', knex })).toEqual({ ok: false, reason: 'invalid_product_ids' });
-    expect(await buildLawnFastWateringPreview({ serviceId: 'visit-1', productIds: [1], knex })).toEqual({ ok: false, reason: 'invalid_product_ids' });
-    expect(await buildLawnFastWateringPreview({ serviceId: 'visit-1', productIds: Array.from({ length: 21 }, (_, i) => `p${i}`), knex })).toEqual({ ok: false, reason: 'too_many_products' });
+    expect(await buildLawnFastWateringPreview({ serviceId: VISIT, productIds: P_HERB, knex })).toEqual({ ok: false, reason: 'invalid_product_ids' });
+    expect(await buildLawnFastWateringPreview({ serviceId: VISIT, productIds: [1], knex })).toEqual({ ok: false, reason: 'invalid_product_ids' });
+    expect(await buildLawnFastWateringPreview({ serviceId: VISIT, productIds: Array.from({ length: 21 }, (_, i) => uuid(100 + i)), knex })).toEqual({ ok: false, reason: 'too_many_products' });
     const noVisit = fakeKnex({ scheduled_services: undefined });
-    expect(await buildLawnFastWateringPreview({ serviceId: 'nope', productIds: ['a'], knex: noVisit })).toEqual({ ok: false, reason: 'not_found' });
+    expect(await buildLawnFastWateringPreview({ serviceId: uuid(99), productIds: [P_HERB], knex: noVisit })).toEqual({ ok: false, reason: 'not_found' });
   });
 });
 
@@ -411,8 +420,8 @@ describe('preflightLawnFastCompletion', () => {
   };
   const run = (tables, args = {}) => preflightLawnFastCompletion({
     knex: fakeKnex({ scheduled_services: visit(), customers: { billing_mode: null }, ...tables }),
-    svc: { id: 'visit-1', customer_id: 'cust-1' },
-    lawnAssessmentId: 'as-1',
+    svc: { id: VISIT, customer_id: 'cust-1' },
+    lawnAssessmentId: ASSESSMENT,
     expectedVisit: IDENTITY,
     ...args,
   });
@@ -437,8 +446,8 @@ describe('preflightLawnFastCompletion', () => {
   });
 
   test('an unconfirmed assessment: 400 lawn_assessment_unconfirmed', async () => {
-    expect(await run({ lawn_assessments: { id: 'as-1', confirmed_by_tech: false } }))
-      .toMatchObject({ status: 400, payload: { code: 'lawn_assessment_unconfirmed', lawnAssessmentId: 'as-1' } });
+    expect(await run({ lawn_assessments: { id: ASSESSMENT, confirmed_by_tech: false } }))
+      .toMatchObject({ status: 400, payload: { code: 'lawn_assessment_unconfirmed', lawnAssessmentId: ASSESSMENT } });
   });
 
   test.each([
@@ -446,13 +455,13 @@ describe('preflightLawnFastCompletion', () => {
     ['one-time', PROFILE({ billingType: 'one_time', serviceKey: 'lawn_care_one_time' })],
   ])('a confirmed assessment on a %s visit passes, even with no photos at all (advisory floor)', async (_label, profile) => {
     resolveCompletionProfileForScheduledService.mockResolvedValue(profile);
-    expect(await run({ lawn_assessments: { id: 'as-1', confirmed_by_tech: true }, lawn_assessment_photos: [] })).toBeNull();
+    expect(await run({ lawn_assessments: { id: ASSESSMENT, confirmed_by_tech: true }, lawn_assessment_photos: [] })).toBeNull();
   });
 
   // Every reason lawnFastIneligibleReason can return has a defined outcome at
   // submit. Terminal ones are 409 lawn_fast_not_eligible (the tech leaves).
   describe('reason by reason at submit', () => {
-    const CONFIRMED = { lawn_assessments: { id: 'as-1', confirmed_by_tech: true } };
+    const CONFIRMED = { lawn_assessments: { id: ASSESSMENT, confirmed_by_tech: true } };
 
     test.each([
       ['not_lawn', PROFILE({ category: 'pest_control', serviceKey: 'pest_general_quarterly' }), {}],
@@ -486,7 +495,7 @@ describe('preflightLawnFastCompletion', () => {
   });
 
   describe('the visit identity the sheet echoes back', () => {
-    const CONFIRMED = { lawn_assessments: { id: 'as-1', confirmed_by_tech: true } };
+    const CONFIRMED = { lawn_assessments: { id: ASSESSMENT, confirmed_by_tech: true } };
 
     test.each([
       ['none at all', null],
@@ -523,7 +532,7 @@ describe('preflightLawnFastCompletion', () => {
     });
 
     test("the context's service identity carries the keys the submit must echo, and /complete's compare catches a change", async () => {
-      const ctx = await buildLawnFastContext('visit-1', { knex: fakeKnex({ scheduled_services: visit({ technician_id: 'tech-1' }), customers: { billing_mode: null } }) });
+      const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex({ scheduled_services: visit({ technician_id: 'tech-1' }), customers: { billing_mode: null } }) });
       const expected = ctx.service;
       expect(expected).toMatchObject({ customerId: 'cust-1', propertyId: 'prop-1', technicianId: 'tech-1' });
       expect(expected.scheduledDate).toBeTruthy();

@@ -94,6 +94,7 @@ function makeKnex(fixtures) {
 }
 
 
+const SERVICE = '00000000-0000-4000-8000-0000000000aa';
 const COMPLETED = '2026-09-30T18:40:00Z';
 const NOW = new Date(COMPLETED);
 const ID = (n) => `11111111-2222-4333-8444-55555555555${n}`;
@@ -118,7 +119,7 @@ function fixtureFor(rows, prefs) {
   const factsById = Object.fromEntries(rows.map((row) => [row.id, approvedReportProductFacts(row)]));
   const snapshot = buildReportIdentitySnapshot({ visit: {}, productFacts: factsById });
   const service = {
-    id: 'svc-lawn-w1', scheduled_service_id: 'ss-current', customer_id: 'cust-lawn-w1', service_line: 'lawn',
+    id: 'svc-lawn-w1', scheduled_service_id: SERVICE, customer_id: 'cust-lawn-w1', service_line: 'lawn',
     service_type: 'Lawn Care Treatment Program', service_date: '2026-09-30', completed_at: COMPLETED,
     first_name: 'Test', last_name: 'Customer', areas_serviced: JSON.stringify(['Front Lawn']), structured_notes: '{}',
     service_data: JSON.stringify({ reportIdentitySnapshot: snapshot }),
@@ -128,10 +129,10 @@ function fixtureFor(rows, prefs) {
     property_geometries: [], property_zones: [], service_findings: [], service_photos: [], lawn_assessment_photos: [],
     lawn_water_intake_snapshots: [],
     // 'scheduled_services.id' is the key the preview's joined visit read filters on.
-    scheduled_services: [{ id: 'ss-current', 'scheduled_services.id': 'ss-current', customer_id: 'cust-lawn-w1', scheduled_date: '2026-09-30', status: 'completed', service_type: 'Lawn Care Treatment Program' }],
+    scheduled_services: [{ id: SERVICE, 'scheduled_services.id': SERVICE, customer_id: 'cust-lawn-w1', scheduled_date: '2026-09-30', status: 'completed', service_type: 'Lawn Care Treatment Program' }],
     property_preferences: prefs ? [prefs] : [],
     lawn_assessments: [{
-      id: 'la-w1', customer_id: 'cust-lawn-w1', service_id: 'ss-current', service_record_id: 'svc-lawn-w1', confirmed_by_tech: true,
+      id: 'la-w1', customer_id: 'cust-lawn-w1', service_id: SERVICE, service_record_id: 'svc-lawn-w1', confirmed_by_tech: true,
       service_date: '2026-09-30', created_at: '2026-09-30T14:00:00Z',
       turf_density: 78, weed_suppression: 82, color_health: 75, stress_damage: 30,
     }],
@@ -144,7 +145,7 @@ function fixtureFor(rows, prefs) {
 async function both(rows, prefs) {
   const { service, knex } = fixtureFor(rows, prefs);
   const data = await buildReportV1Data(service, 'token-w1', knex);
-  const preview = await buildLawnFastWateringPreview({ serviceId: 'ss-current', productIds: rows.map((r) => r.id), knex, now: NOW });
+  const preview = await buildLawnFastWateringPreview({ serviceId: SERVICE, productIds: rows.map((r) => r.id), knex, now: NOW });
   return { banner: data.reportV2.banner, preview };
 }
 
@@ -239,16 +240,14 @@ describe('watering preview equals the report banner (real buildReportV1Data)', (
       expect(result.banner.lines).not.toEqual(noPlan.banner.lines);
     });
 
-    test('a failed plan read leaves the plan sentence out, never different wording', async () => {
+    test('a failed plan read withholds the whole sentence: without the plan the wording could differ from the report\'s', async () => {
       weekPlanGate(true);
       loadCurrentWeekPlan.mockRejectedValue(new Error('plan store down'));
-      const { service, knex } = fixtureFor([HOLD_ROW], CONFIRMED_PREFS);
-      const preview = await buildLawnFastWateringPreview({ serviceId: 'ss-current', productIds: [HOLD_ROW.id], knex, now: NOW });
-      weekPlanGate(false);
-      loadCurrentWeekPlan.mockResolvedValue(null);
-      const data = await buildReportV1Data(service, 'token-w1', knex);
+      const { knex } = fixtureFor([WATER_IN_ROW], CONFIRMED_PREFS);
+      const preview = await buildLawnFastWateringPreview({ serviceId: SERVICE, productIds: [WATER_IN_ROW.id], knex, now: NOW });
       expect(preview.omitted).toEqual(['week_plan']);
-      expect(preview.lines).toEqual(data.reportV2.banner.lines);
+      expect(preview.sentence).toBeNull();
+      expect(preview.lines).toEqual([]);
     });
   });
 
@@ -261,10 +260,10 @@ describe('watering preview equals the report banner (real buildReportV1Data)', (
 
   test('without a confirmed assessment the assessment is provisional too', async () => {
     const bare = makeKnex({
-      scheduled_services: [{ id: 'ss-current', 'scheduled_services.id': 'ss-current', customer_id: 'cust-lawn-w1', scheduled_date: '2026-09-30' }],
+      scheduled_services: [{ id: SERVICE, 'scheduled_services.id': SERVICE, customer_id: 'cust-lawn-w1', scheduled_date: '2026-09-30' }],
       products_catalog: [HOLD_ROW], property_preferences: [CONFIRMED_PREFS], lawn_assessments: [],
     });
-    const preview = await buildLawnFastWateringPreview({ serviceId: 'ss-current', productIds: [HOLD_ROW.id], knex: bare, now: NOW });
+    const preview = await buildLawnFastWateringPreview({ serviceId: SERVICE, productIds: [HOLD_ROW.id], knex: bare, now: NOW });
     expect(preview.provisional).toEqual(['completionTime', 'assessment']);
     expect(preview.lines[0]).toBe('Skip your turf watering until Thu 3 PM.');
   });
@@ -279,7 +278,7 @@ describe('watering preview equals the report banner (real buildReportV1Data)', (
       return knex(table);
     };
     failing.raw = knex.raw;
-    const preview = await buildLawnFastWateringPreview({ serviceId: 'ss-current', productIds: [HOLD_ROW.id], knex: failing, now: NOW });
+    const preview = await buildLawnFastWateringPreview({ serviceId: SERVICE, productIds: [HOLD_ROW.id], knex: failing, now: NOW });
     expect(preview.sentence).toBeNull();
     expect(preview.lines).toEqual([]);
     expect(preview.omitted).toEqual(expect.arrayContaining(['irrigation_context']));

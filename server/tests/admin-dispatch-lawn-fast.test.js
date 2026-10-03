@@ -32,6 +32,7 @@ jest.mock('../services/job-costing', () => ({
 }));
 jest.mock('../services/time-tracking', () => ({ adminEditEntry: jest.fn(async () => ({})) }));
 jest.mock('../services/lawn-fast-complete', () => ({
+  isUuid: (value) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value)),
   buildLawnFastContext: jest.fn(),
   buildLawnFastWateringPreview: jest.fn(),
 }));
@@ -174,5 +175,48 @@ describe('POST lawn-fast/watering-preview', () => {
     const res = await invoke('post', PREVIEW, { params, body: { productIds: 'x' } });
     expect(res.statusCode).toBe(status);
     expect(res.body).toEqual({ error: reason, code: reason });
+  });
+});
+
+describe('lawn-fast path guard (runs before router.param\'s ownership lookup)', () => {
+  const savedGate = process.env.GATE_LAWN_FAST_COMPLETE;
+  afterEach(() => {
+    if (savedGate === undefined) delete process.env.GATE_LAWN_FAST_COMPLETE; else process.env.GATE_LAWN_FAST_COMPLETE = savedGate;
+  });
+  const guard = router.stack.find((l) => !l.route && l.keys.length === 1 && l.keys[0].name === 0 && l.regexp.test('/abc/lawn-fast/context'));
+  const GOOD = '00000000-0000-4000-8000-000000000001';
+  const run = (id) => {
+    const res = { statusCode: 200, body: null, status(c) { this.statusCode = c; return this; }, json(p) { this.body = p; return this; } };
+    let nexted = false;
+    guard.handle({ params: { 0: id } }, res, () => { nexted = true; });
+    return { res, nexted };
+  };
+
+  test('is registered, has no :serviceId param (so router.param does not run first), and matches only lawn-fast paths', () => {
+    expect(guard).toBeTruthy();
+    expect(guard.keys.map((k) => k.name)).toEqual([0]);
+    expect(guard.regexp.test('/abc/pest-recap/context')).toBe(false);
+    expect(guard.regexp.test('/abc/lawn-fastx')).toBe(false);
+  });
+
+  test('gate off: 404 {enabled:false} before anything is read', () => {
+    delete process.env.GATE_LAWN_FAST_COMPLETE;
+    const { res, nexted } = run(GOOD);
+    expect(res.statusCode).toBe(404);
+    expect(res.body).toEqual({ enabled: false });
+    expect(nexted).toBe(false);
+  });
+
+  test.each(['missing', 'visit-1', '123', `${GOOD}x`])('gate on, malformed id %p: 404, never reaches a uuid column', (id) => {
+    process.env.GATE_LAWN_FAST_COMPLETE = 'true';
+    const { res, nexted } = run(id);
+    expect(res.statusCode).toBe(404);
+    expect(res.body).toEqual({ error: 'Service not found', code: 'not_found' });
+    expect(nexted).toBe(false);
+  });
+
+  test('gate on, a uuid passes on to the routes', () => {
+    process.env.GATE_LAWN_FAST_COMPLETE = 'true';
+    expect(run(GOOD).nexted).toBe(true);
   });
 });
