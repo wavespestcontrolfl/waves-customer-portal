@@ -261,6 +261,15 @@ function leadWords(reportV2) {
   const parts = [];
   if (banner && Array.isArray(banner.lines)) parts.push(...banner.lines);
   if (banner && banner.mowHold) parts.push(banner.mowHold.line);
+  // GATE_LAWN_WATERING_FORECAST live-view lines (the payload only carries them
+  // on a live render of a water-in; PDF/static strip them before this runs).
+  // The page prints the measured-rain note when it exists, else the forecast
+  // sentence: count the one that will be displayed (LawnWateringBanner).
+  if (banner && banner.state !== 'hold' && banner.state !== 'hold_then_water_in') {
+    const live = banner.observedRain && typeof banner.observedRain.line === 'string' && banner.observedRain.line
+      ? banner.observedRain.line : banner.forecastLine;
+    if (typeof live === 'string' && live) parts.push(live);
+  }
   if (lead) for (const strings of Object.values(LEAD_FIELDS)) parts.push(...strings(lead));
   const dateWords = lead ? nextVisitDateWords(reportV2.snapshot && reportV2.snapshot.nextVisit) : 0;
   const labelWords = lead

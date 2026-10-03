@@ -320,6 +320,56 @@ async function markRecipientOptin(phone, status, { dbh = db } = {}) {
   }
 }
 
+// Phone keys an unconfirmed opt-in row holds, per customer: Map<customerId,
+// Set<last-10 key>>. Same rule as optinBlocksSend (any status but confirmed
+// holds; no row = legacy allowed; gate off = nothing held). A missing table
+// (42P01) fails open to the row-level consent layer, as in getRecipientOptin;
+// any other error throws so the caller holds.
+async function optinHeldPhoneKeys(customerIds = [], { dbh = db } = {}) {
+  const held = new Map();
+  const ids = [...new Set((customerIds || []).filter(Boolean).map(String))];
+  if (!ids.length || !isDoubleOptinEnabled()) return held;
+  let rows;
+  try {
+    rows = await dbh('recipient_optin').whereIn('customer_id', ids).whereNot({ status: 'confirmed' }).select('customer_id', 'phone_key');
+  } catch (err) {
+    if (err && err.code === '42P01' && !(dbh && dbh.isTransaction)) {
+      logger.warn('[recipient-optin] table missing — failing open to row-level consent');
+      return held;
+    }
+    throw err;
+  }
+  for (const row of rows || []) {
+    const id = String(row.customer_id);
+    if (!held.has(id)) held.set(id, new Set());
+    held.get(id).add(row.phone_key);
+  }
+  return held;
+}
+
+// The single SMS recipient for the visit-complete text and the review ask
+// (customer-contact.js getServiceContactSmsRecipient) with the opt-in hold
+// applied: a slot-1 contact who has not replied YES to their opt-in ask does
+// not get these texts either; the account holder gets them, as for an
+// unconsented contact. Fail-CLOSED like filterRecipientsByOptin: a lookup
+// error holds the contact. On a transaction handle the error is rethrown
+// (Postgres has already aborted that transaction).
+async function resolveServiceContactSmsRecipient(customer, { dbh = db } = {}) {
+  const { getServiceContactSmsRecipient, getPrimaryContact } = require('./customer-contact');
+  if (!customer || !recipientPhoneKey(customer.service_contact_phone) || !isDoubleOptinEnabled()) {
+    return getServiceContactSmsRecipient(customer);
+  }
+  let heldPhoneKeys;
+  try {
+    heldPhoneKeys = (await optinHeldPhoneKeys([customer.id], { dbh })).get(String(customer.id)) || null;
+  } catch (err) {
+    if (dbh && dbh.isTransaction) throw err;
+    logger.warn(`[recipient-optin] single-recipient lookup failed (${err.message}) — holding the service contact`);
+    return { ...getPrimaryContact(customer), role: 'primary' };
+  }
+  return getServiceContactSmsRecipient(customer, { heldPhoneKeys });
+}
+
 // Send-path filter shared by every fanout loop (appointment reminders +
 // the twilio.js en-route/arrived sends): drops service-contact recipients
 // whose recipient_optin row is not confirmed. Primary rows and phones with
@@ -878,6 +928,8 @@ module.exports = {
   getRecipientOptin,
   markRecipientOptin,
   filterRecipientsByOptin,
+  optinHeldPhoneKeys,
+  resolveServiceContactSmsRecipient,
   claimRecipientOptins,
   dispatchRecipientOptins,
   requestRecipientOptins,

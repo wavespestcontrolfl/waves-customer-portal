@@ -14,11 +14,20 @@
  */
 
 const logger = require('../logger');
+const featureGates = require('../../config/feature-gates');
+const { resolveWaterInForecast } = require('./lawn-watering-forecast');
 
 function parseJsonObject(value) {
   if (!value) return {};
   if (typeof value === 'object') return value;
   try { return JSON.parse(value) || {}; } catch { return {}; }
+}
+
+// Whether the record already carries a frozen watering snapshot (any shape):
+// the forecast sentence is only ever added to a NEW freeze.
+function hasFrozenWateringInstruction(record) {
+  const notes = parseJsonObject(record && record.structured_notes);
+  return !!(notes.lawnWateringFreeze || (notes.lawnReportV2 && notes.lawnReportV2.wateringInstruction));
 }
 
 /**
@@ -101,6 +110,21 @@ async function finalizeLawnReportSynthesis({ service, knex } = {}) {
     // a state-null visit is regenerated too, from the frozen product facts, so
     // it reads the same at every render.
     if (instructionOut.instruction && instructionOut.instruction.state && !instructionOut.productsLoadFailed) {
+      // GATE_LAWN_WATERING_FORECAST: a water-in whose property forecast reaches
+      // the label amount inside its window freezes ONE conditional sentence
+      // beside the instruction (never inside `lines`). Read once, here, before
+      // the first-writer-wins freeze: a record that is already frozen is never
+      // touched, so a replay is byte-identical. Off, or any miss: exactly the
+      // instruction as built.
+      if (featureGates.lawnWateringForecastLive() && !hasFrozenWateringInstruction(record)) {
+        const forecast = await resolveWaterInForecast({
+          instruction: instructionOut.instruction,
+          latitude: record.customer_latitude ?? record.latitude ?? record.lat,
+          longitude: record.customer_longitude ?? record.longitude ?? record.lng,
+          fetchForecast: require('./application-conditions').fetchPropertyForecast,
+        });
+        if (forecast) instructionOut.instruction = { ...instructionOut.instruction, forecast };
+      }
       await knex('service_records')
         .where({ id: service.id })
         .whereRaw("(structured_notes::jsonb -> 'lawnWateringFreeze') IS NULL")

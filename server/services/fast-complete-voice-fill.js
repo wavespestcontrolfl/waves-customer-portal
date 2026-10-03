@@ -27,10 +27,15 @@
  * negation, grounded notes, safety and company-name screens); how the tech
  * phrased something is settled by that confirm tap, not by more server rules.
  *
- * Only `pest_reservice` is built here. A sheet is one registry entry: its
- * completion-profile service key and a context loader that returns the choice
- * lists, so lawn_reservice / tree_shrub plug in later without touching the
- * schema, prompt or validator.
+ * Two readers share the product rules above. The pest re-service sheet's whole
+ * fill (`voiceFillFromClip`: products, visit taps and both notes from a clip),
+ * and the report flow's product read (`voiceProductsFromNote`: any untyped pest
+ * visit, a regular visit or a re-service; products only, read from the note the
+ * tech dictated, since that flow already reads where, pests and how through
+ * visit-voice-facts.js). `transcribeVisitClip` is the report flow's note mic:
+ * the same transcriber, primed with the same product names, answering the words
+ * for the note box. Both also take a lawn re-service (its own catalog and its own
+ * ways, loadLawnReserviceContext), whose sheet reads products from its note too.
  *
  * Privacy: the transcript and both notes are never logged or stored here; the
  * route's audit line carries counts only.
@@ -178,10 +183,14 @@ async function loadProductAliases(knex, productIds) {
   }
 }
 
-async function loadPestReserviceContext(serviceId, knex = db) {
+// `anyPestVisit`: the report flow's readers take every untyped pest visit the
+// sheet opens for (pest-recap's eligibility: a pest_control profile that is not
+// typed and not project-backed); the re-service sheet's fill takes only a pest
+// re-service.
+async function loadPestContext(serviceId, knex = db, { anyPestVisit = false } = {}) {
   const { ok, reason, svc, profile, eligible } = await resolveEligibility(serviceId, knex);
   if (!ok) return { ok: false, reason };
-  if (profile?.serviceKey !== 'pest_re_service') return { ok: false, reason: 'not_pest_re_service' };
+  if (!anyPestVisit && profile?.serviceKey !== 'pest_re_service') return { ok: false, reason: 'not_pest_re_service' };
   if (!eligible) return { ok: false, reason: 'not_eligible' };
   const catalog = (await loadRecapCatalogProducts(knex).catch(() => []))
     .filter((row) => row && row.id != null && String(row.name || '').trim() && !HIDDEN_CATEGORIES.has(categoryKey(row)));
@@ -213,6 +222,7 @@ async function loadPestReserviceContext(serviceId, knex = db) {
     ok: true,
     context: {
       sheet: 'pest_reservice',
+      label: profile?.serviceKey === 'pest_re_service' ? SHEET_LABEL : PEST_VISIT_LABEL,
       products,
       pests: [...PEST_SHEET_PESTS],
       areas: [...PEST_SHEET_AREAS],
@@ -221,6 +231,94 @@ async function loadPestReserviceContext(serviceId, knex = db) {
       productMethods: [...new Set([...PEST_SHEET_PRODUCT_METHODS, ...products.map((p) => p.catalogMethod).filter(Boolean)])],
     },
   };
+}
+
+const loadPestReserviceContext = (serviceId, knex = db) => loadPestContext(serviceId, knex);
+
+// ── The lawn re-service sheet's context ──────────────────────────────────
+// FastCompleteLawnReserviceSheet.jsx: the catalog and the ways that sheet offers
+// (services/lawn-reservice-fast-context.js, the same read its screen loads), while
+// its own gate is on. Only its products are read: a row there has no "follows How",
+// so every way the sheet offers is a product way (`anyProductMethod`). The visit
+// lists below only give the shared schema its enums; nothing is read from them.
+const LAWN_SHEET_LABEL = 'lawn re-service';
+// The lawn sheet's own evidence for a way, where the pest words or the derived
+// rule would be wrong on a lawn. It offers a liquid and a granular broadcast side
+// by side, so the bare word "broadcast" proves neither: a spray needs "spray"
+// beside it, granules need a granule word. Fog/ULV's words are too short for the
+// derived rule. The ways left to that rule read their own distinctive stem
+// (drench, foliar, injection); spot treatment keeps the shared "spot".
+const LAWN_METHOD_WORDS = Object.freeze({
+  broadcast_spray: /\bbroadcast\W+spray\w*|\bspray\w*\W+(?:\w+\W+){0,3}broadcast\b|\bblanket\W+spray\w*/,
+  granular_broadcast: /\b(granular|granules?|spread|spreader|spreading)\b/,
+  fog_ulv: /\b(fog|fogged|fogging|fogger|ulv|mist|misted|misting)\b/,
+  // The derived rule keeps a key's last word's stem, which here would read any
+  // "checked" as a station check and "stressed" or "street" as a pin stream.
+  station_check: /\bstations?\b/,
+  pin_stream: /\bpin\W?stream\w*/,
+  bait_placement: /\bbait(ed|s|ing)?\b/,
+});
+// The measure a lawn row offers units in, as the sheet decides it
+// (FastCompleteLawnReserviceSheet productRow): the product's own, unless the last
+// visit recorded an amount in a unit of another measure (a liquid logged in
+// pounds), which then is the row's.
+function lawnRowMeasure(row, last) {
+  const own = productMeasure(row);
+  if (!last || !(Number(last.totalAmount) > 0) || sheetUnit(last.amountUnit, own)) return own;
+  return unitMeasure(last.amountUnit) || own;
+}
+const LAWN_TRANSCRIBE_WORDS = 'broadcast, spot treatment, granular, spreader, soil drench, foliar, pounds, ounces, gallons, per thousand, square feet, front lawn, back lawn, side lawns, weeds, dollarweed, sedge, crabgrass, chinch bugs, sod webworms, fungus, fertilizer, pre-emergent, no wait, same as last time';
+async function loadLawnReserviceContext(serviceId, knex = db) {
+  if (!require('../config/feature-gates').lawnReserviceFastCompleteLive()) return { ok: false, reason: 'not_eligible' };
+  const lawn = await require('./lawn-reservice-fast-context').buildLawnReserviceFastContext(serviceId, knex);
+  if (!lawn.ok) return { ok: false, reason: lawn.reason === 'not_found' ? 'not_found' : 'not_eligible' };
+  if (!lawn.eligible) {
+    if (lawn.reason === 'catalog_unavailable') logger.warn(`[voice-fill] product catalog empty or unavailable for ${serviceId}`);
+    return { ok: false, reason: lawn.reason === 'catalog_unavailable' ? 'catalog_unavailable' : 'not_eligible' };
+  }
+  const catalog = lawn.products.filter((row) => row && row.id != null && String(row.name || '').trim() && !HIDDEN_CATEGORIES.has(categoryKey(row)));
+  if (!catalog.length) return { ok: false, reason: 'catalog_unavailable' };
+  const aliases = await loadProductAliases(knex, catalog.map((row) => row.id));
+  // What the property's last lawn visit recorded for each product: the tile opens
+  // in that unit's measure.
+  const lastById = new Map((lawn.lastVisit?.products || []).filter((p) => p?.productId != null).map((p) => [String(p.productId), p]));
+  const products = catalog.map((row) => {
+    const measure = lawnRowMeasure(row, lastById.get(String(row.id)));
+    return {
+      id: String(row.id),
+      name: String(row.display_name || row.name).trim(),
+      fullName: String(row.name).trim(),
+      aliases: (aliases.get(String(row.id)) || []).slice(0, 8),
+      measure,
+      units: [...UNITS_BY_MEASURE[measure]],
+      catalogMethod: '',
+    };
+  });
+  const methods = lawn.methods.map((choice) => choice.value);
+  return {
+    ok: true,
+    context: {
+      sheet: 'lawn_reservice',
+      label: LAWN_SHEET_LABEL,
+      products,
+      pests: [...PEST_SHEET_PESTS],
+      areas: [...PEST_SHEET_AREAS],
+      activity: [...PEST_SHEET_ACTIVITY],
+      visitMethods: methods,
+      productMethods: methods,
+      anyProductMethod: true,
+      methodWords: LAWN_METHOD_WORDS,
+      sheetWords: LAWN_TRANSCRIBE_WORDS,
+    },
+  };
+}
+
+// The visit a note read is for: any pest visit the report flow takes, else a lawn
+// re-service on its own sheet.
+async function loadNoteContext(serviceId, knex = db) {
+  const pest = await loadPestContext(serviceId, knex, { anyPestVisit: true });
+  if (pest.ok || pest.reason !== 'not_eligible') return pest;
+  return loadLawnReserviceContext(serviceId, knex);
 }
 
 // The method a product's row offers on the pest sheet, derived EXACTLY as the
@@ -263,6 +361,7 @@ function catalogMethodOf(row) {
 // and validator beside this one rather than a registry the first sheet doesn't need.
 const SHEET = 'pest_reservice';
 const SHEET_LABEL = 'pest re-service';
+const PEST_VISIT_LABEL = 'pest visit';
 
 // ── Structured-output schema ─────────────────────────────────────────────
 // No numeric minimum/maximum (Anthropic rejects them) and no nullable types:
@@ -349,7 +448,7 @@ function productLine(product) {
 
 function buildPrompt(ctx, transcript) {
   return [
-    `SHEET: ${SHEET_LABEL}`,
+    `SHEET: ${ctx.label || SHEET_LABEL}`,
     '',
     'PRODUCTS (id | name | units):',
     ...ctx.products.map(productLine),
@@ -1132,18 +1231,23 @@ const METHOD_LEXICON = {
 // "foliar_spray" → "foliar"), at its start ("drenched", "injected"); a context
 // noun ("soil", "trunk") proves nothing.
 const GENERIC_METHOD_WORDS = new Set(['spray', 'treatment', 'application', 'placement', 'and', 'the', 'of']);
-function methodLexicon(method) {
+function methodLexicon(method, ctx = null) {
+  if (ctx?.methodWords?.[method]) return ctx.methodWords[method];
   if (METHOD_LEXICON[method]) return METHOD_LEXICON[method];
   const action = method.split('_').filter((w) => w.length >= 4 && !GENERIC_METHOD_WORDS.has(w)).pop();
   return action ? new RegExp(`\\b${action.slice(0, Math.max(4, action.length - 3))}\\w*\\b`) : null;
 }
 
 function productMethod(raw, product, heard, transcript, ctx, world, unclear) {
-  const offered = PEST_SHEET_PRODUCT_METHODS.includes(raw.method) || (product.catalogMethod && raw.method === product.catalogMethod);
+  // The pest sheet: the four standard ways plus the product's own. A sheet whose
+  // rows each pick their own way (lawn): any way that sheet offers.
+  const offered = ctx.anyProductMethod
+    ? ctx.productMethods.includes(raw.method)
+    : PEST_SHEET_PRODUCT_METHODS.includes(raw.method) || (product.catalogMethod && raw.method === product.catalogMethod);
   if (!offered) return '';
   const mentions = productMentions(product, heard, world);
   const text = mentions.map((m) => positiveWords(world, mentionClause(m, world))).join(' . ');
-  if (methodLexicon(raw.method)?.test(text)) return raw.method;
+  if (methodLexicon(raw.method, ctx)?.test(text)) return raw.method;
   // Said in the product's sentence but beside another product ("did the perimeter
   // with Taurus, Talstar and surfactant"): the row simply follows the visit's How,
   // no Check. A method with no word for it anywhere near is a Check.
@@ -1151,12 +1255,12 @@ function productMethod(raw, product, heard, transcript, ctx, world, unclear) {
   // sprayed Talstar around the perimeter"): that spoken method was dropped, so Check.
   // (the standard ways and every catalog way the sheet offers)
   const ways = [...new Set([...Object.keys(METHOD_LEXICON), ...ctx.productMethods, product.catalogMethod].filter(Boolean))];
-  const ownOther = ways.some((method) => method !== raw.method && methodLexicon(method)?.test(text));
+  const ownOther = ways.some((method) => method !== raw.method && methodLexicon(method, ctx)?.test(text));
   // Shared only when the way is said in the sentence's lead-in, before the first
   // product name ("Did the perimeter with Taurus, Talstar and surfactant"): a way
   // said after another product's name ("...and sprayed Talstar around the
   // perimeter") is that product's.
-  const shared = mentions.length > 0 && mentions.every((m) => methodLexicon(raw.method)?.test(leadInWords(m, world)));
+  const shared = mentions.length > 0 && mentions.every((m) => methodLexicon(raw.method, ctx)?.test(leadInWords(m, world)));
   if (ownOther || !shared) pushUnclear(unclear, heard, 'method_not_heard');
   return '';
 }
@@ -1463,6 +1567,23 @@ function validateFill(raw, ctx, transcript) {
   };
 }
 
+// The report flow's product read: the same product rules, and only the model's
+// own Checks that are about a product. The visit fields and notes the model also
+// returns are not this reader's (the report flow reads them from the note itself).
+const PRODUCT_UNCLEAR_REASONS = new Set(['ambiguous_product', 'unknown_product', 'unclear_amount', 'unclear_unit']);
+function validateProductFill(raw, ctx, transcript) {
+  const input = raw && typeof raw === 'object' ? raw : {};
+  const normTranscript = norm(transcript);
+  const unclear = [];
+  const products = validateProducts(input.products, ctx, normTranscript, unclear, transcript, transcriptWorld(ctx, transcript));
+  for (const item of Array.isArray(input.unclear) ? input.unclear : []) {
+    if (item && typeof item === 'object' && PRODUCT_UNCLEAR_REASONS.has(item.reason) && heardInTranscript(item.heard, normTranscript)) {
+      pushUnclear(unclear, item.heard, item.reason);
+    }
+  }
+  return { products, unclear: unclear.slice(0, CAPS.unclear) };
+}
+
 // The customer/office split, enforced here rather than trusted to the model.
 // Every customer-note sentence must be the tech's own words: a whole clause of
 // the transcript, word for word ("Treated the kitchen for roaches" from "Treated
@@ -1622,11 +1743,12 @@ function fillCounts(fill) {
 }
 
 /**
- * The fill for words already in hand, against a loaded sheet context.
+ * The fill for words already in hand, against a loaded sheet context
+ * (`validate`: the whole sheet's fill, or the report flow's products only).
  * Returns { ok: true, fill } or { ok: false, reason: catalog_unavailable | model_failed }.
  * `call` is injectable for tests (defaults to the shared Anthropic adapter).
  */
-async function fillFromContext(context, text, call) {
+async function fillFromContext(context, text, call, validate = validateFill) {
   let result;
   try {
     result = await call({
@@ -1650,7 +1772,7 @@ async function fillFromContext(context, text, call) {
     logger.warn(`[voice-fill] model failed: ${result?.reason || 'no_json'}`);
     return { ok: false, reason: 'model_failed' };
   }
-  return { ok: true, fill: validateFill(result.json, context, text) };
+  return { ok: true, fill: validate(result.json, context, text) };
 }
 
 // ── Voice fill from a recorded clip ───────────────────────────────────────
@@ -1673,26 +1795,22 @@ function transcriptionPrompt(ctx) {
     if (list.length + name.length + 2 > TRANSCRIBE_PROMPT_MAX_CHARS) break;
     list += list ? `, ${name}` : name;
   }
-  return `A pest control technician describing a completed visit. Product names that may be said: ${list}. Other words that may be said: ${TRANSCRIBE_SHEET_WORDS}.`;
+  const trade = ctx.sheet === 'lawn_reservice' ? 'lawn care' : 'pest control';
+  return `A ${trade} technician describing a completed visit. Product names that may be said: ${list}. Other words that may be said: ${ctx.sheetWords || TRANSCRIBE_SHEET_WORDS}.`;
 }
 
 /**
- * Fill one sheet from a recorded clip.
- * Returns { ok: true, fill, chars } or { ok: false, reason }: the context and
- * model reasons, plus transcription_failed | transcription_unreliable | nothing_heard |
- * clip_too_long.
- * `transcribe` is injectable for tests (defaults to the shared OpenAI transcriber).
+ * A recorded clip as words, heard with the sheet's own product names.
+ * Returns { ok: true, text } or { ok: false, reason: transcription_failed |
+ * transcription_unreliable | nothing_heard }.
  */
-async function voiceFillFromClip({ serviceId, sheet, audio, mimeType, filename, durationSeconds = 0, knex = db, call = callAnthropic, transcribe = null }) {
-  if (sheet !== SHEET) return { ok: false, reason: 'unknown_sheet' };
-  const loaded = await loadPestReserviceContext(serviceId, knex);
-  if (!loaded.ok) return { ok: false, reason: loaded.reason };
+async function hearClip(context, { audio, mimeType, filename, durationSeconds = 0 }, transcribe) {
   const { transcribeWithOpenAI, isImplausibleTranscript } = require('./call-recording-processor');
   let heard;
   try {
     heard = await (transcribe || transcribeWithOpenAI)(audio, {
       model: process.env.OPENAI_VOICE_FILL_TRANSCRIBE_MODEL || VOICE_FILL_TRANSCRIBE_MODEL,
-      prompt: transcriptionPrompt(loaded.context),
+      prompt: transcriptionPrompt(context),
       mimeType,
       filename,
       // silence is an answer (nothing_heard), not a provider failure
@@ -1707,11 +1825,60 @@ async function voiceFillFromClip({ serviceId, sheet, audio, mimeType, filename, 
   // Same guard as field dictation: far more characters than the clip's seconds can
   // hold is a fabricated transcript. Unknown duration fails open.
   if (isImplausibleTranscript(text, Number(durationSeconds) || 0)) return { ok: false, reason: 'transcription_unreliable' };
-  if (!text) return { ok: false, reason: 'nothing_heard' };
+  return text ? { ok: true, text } : { ok: false, reason: 'nothing_heard' };
+}
+
+/**
+ * Fill one sheet from a recorded clip.
+ * Returns { ok: true, fill, chars } or { ok: false, reason }: the context and
+ * model reasons, plus transcription_failed | transcription_unreliable | nothing_heard |
+ * clip_too_long.
+ * `transcribe` is injectable for tests (defaults to the shared OpenAI transcriber).
+ */
+async function voiceFillFromClip({ serviceId, sheet, audio, mimeType, filename, durationSeconds = 0, knex = db, call = callAnthropic, transcribe = null }) {
+  if (sheet !== SHEET) return { ok: false, reason: 'unknown_sheet' };
+  const loaded = await loadPestReserviceContext(serviceId, knex);
+  if (!loaded.ok) return { ok: false, reason: loaded.reason };
+  const heard = await hearClip(loaded.context, { audio, mimeType, filename, durationSeconds }, transcribe);
+  if (!heard.ok) return heard;
   // Never cut: a correction near the end would be lost. Too long is refused, and
   // the tech says it in shorter pieces.
-  if (text.length > MAX_TRANSCRIPT_CHARS) return { ok: false, reason: 'clip_too_long' };
-  const result = await fillFromContext(loaded.context, text, call);
+  if (heard.text.length > MAX_TRANSCRIPT_CHARS) return { ok: false, reason: 'clip_too_long' };
+  const result = await fillFromContext(loaded.context, heard.text, call);
+  return result.ok ? { ...result, chars: heard.text.length } : result;
+}
+
+// ── The note readers (the report flow, and the lawn re-service sheet) ─────
+// Those sheets' note is the tech's own words, on the screen and editable, so the
+// mic answers the words (`transcribeVisitClip`) and the products are read from the
+// note (`voiceProductsFromNote`): when the report is written on the report flow,
+// on the tech's tap on the lawn sheet.
+
+/**
+ * The report flow's note mic: one clip as words for the note box.
+ * Returns { ok: true, text } or { ok: false, reason }: the context reasons plus
+ * transcription_failed | transcription_unreliable | nothing_heard.
+ */
+async function transcribeVisitClip({ serviceId, audio, mimeType, filename, durationSeconds = 0, knex = db, transcribe = null }) {
+  const loaded = await loadNoteContext(serviceId, knex);
+  if (!loaded.ok) return { ok: false, reason: loaded.reason };
+  return hearClip(loaded.context, { audio, mimeType, filename, durationSeconds }, transcribe);
+}
+
+/**
+ * The products a note names, as taps for the report flow's product rows.
+ * Returns { ok: true, fill: { products, unclear }, chars } or { ok: false, reason }:
+ * the context and model reasons, plus note_too_long. An empty note is an empty fill
+ * and no model call.
+ */
+async function voiceProductsFromNote({ serviceId, note, knex = db, call = callAnthropic }) {
+  const text = typeof note === 'string' ? note.trim() : '';
+  const loaded = await loadNoteContext(serviceId, knex);
+  if (!loaded.ok) return { ok: false, reason: loaded.reason };
+  if (!text) return { ok: true, fill: { products: [], unclear: [] }, chars: 0 };
+  // Never cut: a correction near the end would be lost.
+  if (text.length > MAX_TRANSCRIPT_CHARS) return { ok: false, reason: 'note_too_long' };
+  const result = await fillFromContext(loaded.context, text, call, validateProductFill);
   return result.ok ? { ...result, chars: text.length } : result;
 }
 
@@ -1730,10 +1897,15 @@ module.exports = {
   UNITS_BY_MEASURE,
   productMeasure,
   loadPestReserviceContext,
+  loadPestContext,
+  loadLawnReserviceContext,
   buildSchema,
   buildPrompt,
   validateFill,
+  validateProductFill,
   fillCounts,
   voiceFillFromClip,
+  transcribeVisitClip,
+  voiceProductsFromNote,
   transcriptionPrompt,
 };

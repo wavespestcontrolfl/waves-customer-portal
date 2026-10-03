@@ -117,7 +117,7 @@ const { scoreAndStoreTreeShrubAssessment, storeTreeShrubAssessmentFromReview, tr
 const { resolveCompletionProfileForScheduledService, resolveCompletionDeliveryPosture } = require('../services/service-completion-profiles');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
 const { technicianReportCustomerCopy, fourSectionReport } = require('../services/service-report/technician-report-copy');
-const { writerRulesRejection, groundedTimeframePhrases, draftDatePhrases } = require('../services/service-report/report-writer-rules');
+const { writerRulesRejection, groundedTimeframePhrases, draftDatePhrases, activeIngredientsMentioned } = require('../services/service-report/report-writer-rules');
 const CompanionCompletions = require('../services/service-report/companion-completions');
 
 // The follow-up override chain (German knockdown windows, two-treatment
@@ -2675,6 +2675,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
       backfill = false,             // backdated quiet completion of a stale past-dated visit — see backfillCompletionPlan
 
       lawnAssessmentId = null,
+      // Lawn Fast Complete (GATE_LAWN_FAST_COMPLETE): present only on the quick
+      // sheet's submit. Its presence asks for the lawn-fast preflight below
+      // (gate, eligible visit, confirmed assessment); nothing else in the
+      // completion changes and the block itself is not stored.
+      lawnFast = null,
       lawnProtocolCompletion = null,
       propertyServiceArea = null,
       treeShrubCompletion = null,
@@ -4435,6 +4440,27 @@ async function completeScheduledService(completionInput, packetContext = null) {
         );
         return ({ status: structuredObservationError.status, body: structuredObservationError.body });
       }
+      // Lawn Fast Complete: the quick sheet's own preflight runs first, so its
+      // refusals (disabled / not eligible / assessment required) are the ones the
+      // sheet's failure handling reads. The advisory photo floor never refuses.
+      if (lawnFast !== null && lawnFast !== undefined) {
+        const lawnFastBlock = await require('./lawn-fast-complete').preflightLawnFastCompletion({
+          knex: db,
+          svc,
+          lawnAssessmentId,
+          isIncompleteVisit,
+          expectedVisit,
+          lawnFast,
+        });
+        if (lawnFastBlock) {
+          await CompletionAttempts.markCompletionAttemptFailed(
+            completionAttempt,
+            new Error(lawnFastBlock.payload.code || 'lawn_fast_completion_blocked'),
+            db,
+          );
+          return ({ status: lawnFastBlock.status, body: lawnFastBlock.payload });
+        }
+      }
       // The lawn assessment confirmation is a FORM gate; an invoice-issued
       // closeout has no form behind it and renders no report (pre-push P1).
       if (canLinkLawnAssessmentRecord && !issuedInvoiceCloseout) {
@@ -5616,15 +5642,45 @@ async function completeScheduledService(completionInput, packetContext = null) {
                   ).productValues);
                 }
               }
+              // The four-section body is the writer-rules report: no
+              // product may be named, so an edit that adds an unselected
+              // catalog brand is caught by the same catalog-wide screen
+              // generation runs.
+              const writerRulesBody = technicianReportFourSection
+                && require('../config/feature-gates').reportWriterRulesLive();
               const screenTradeNames = await CompletionRecap.buildReportTradeNameScreen({
                 products: Array.isArray(products) ? products : [],
                 extraNames: typedGuardNames,
                 db,
+                wholeCatalog: writerRulesBody,
               });
+              // The whole body against this visit's actives as the catalog
+              // reads now: the edit heads-up skips unchanged sentences, and
+              // an active filled in since the draft was written must not
+              // ride out on one. A failed read throws and drops the copy.
+              // By id, and by name for a name-only product (a legacy or
+              // restored row has productId null), as generation reads them.
+              const bodyProducts = writerRulesBody && Array.isArray(products) ? products : [];
+              const bodyProductIds = bodyProducts.map((p) => p?.productId).filter(Boolean);
+              const bodyProductNames = [...new Set(bodyProducts.filter((p) => !p?.productId)
+                .map((p) => String(p?.name || p?.product_name || '').trim()).filter(Boolean))];
+              const bodyActives = bodyProductIds.length || bodyProductNames.length
+                ? (await savepointRead(db, (k) => k('products_catalog')
+                  .where((q) => {
+                    if (bodyProductIds.length) q.whereIn('id', bodyProductIds);
+                    if (bodyProductNames.length) q.orWhereIn('name', bodyProductNames);
+                  })
+                  .select('active_ingredient')))
+                  .map((row) => row?.active_ingredient).filter(Boolean)
+                : [];
               if (screenTradeNames(technicianReportBody)) {
                 logger.warn('[completion] technician AI report copy dropped (trade_name)');
                 technicianReportBody = null;
                 technicianReportBodyRejection = 'trade_name';
+              } else if (bodyActives.some((active) => activeIngredientsMentioned(technicianReportBody, active))) {
+                logger.warn('[completion] technician AI report copy dropped (active_ingredient)');
+                technicianReportBody = null;
+                technicianReportBodyRejection = 'active_ingredient';
               }
             } catch (err) {
               logger.warn(`[completion] technician AI report trade-name guard failed — dropping copy: ${err.message}`);
@@ -5726,7 +5782,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           const snapshotCustomerRow = await trx('customers')
             .where({ id: svc.customer_id })
             .forShare()
-            .first('first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude');
+            .first('first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude', ...(billingModeColumnsExist ? ['billing_mode'] : []));
           if (completionPricingPlan) {
             await require('../services/completion-pricing').lockCompletionPricingParent(trx, completionPricingPlan);
           }
@@ -5754,6 +5810,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
           if (expectedVisit && lockedSvcRow
             && require('./pest-recap').recapVisitIdentityChanged(expectedVisit, lockedSvcRow, snapshotCustomerRow)) {
             throw Object.assign(new Error('visit identity changed during completion'), { code: 'visit_identity_changed' });
+          }
+          // Lawn Fast Complete: the visit type the sheet opened with, re-judged on the LOCKED customer row (lawn-fast-complete.js).
+          if (lawnFast != null && !isIncompleteVisit) {
+            await require('./lawn-fast-complete').assertLawnFastVisitTypeUnderLock({ trx, lockedCustomer: snapshotCustomerRow, lockedSvc: lockedSvcRow, lawnFast });
           }
           // The trace the report flow judged (Codex #5538): a trace saved or
           // replaced since from another tab or device would publish a map the
@@ -7964,6 +8024,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
           return ({ status: 409, body: {
             error: 'This visit changed since it was opened. Close and reopen it to review the current property before completing.',
             code: 'visit_identity_changed',
+            ...(err.reason ? { reason: err.reason } : {}),
+          } });
+        }
+        if (err && err.code === 'lawn_fast_visit_type_unavailable') {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
+          return ({ status: 503, body: {
+            error: 'Could not verify the visit type for this service. Try again in a moment.',
+            code: 'lawn_fast_visit_type_unavailable',
           } });
         }
         if (err && err.code === 'trace_changed') {
@@ -13315,6 +13383,19 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // merge, an event insert) must never be reported as "not delivered"
       // (GitHub Codex r3 P1).
       let completionSmsProviderAccepted = false;
+      // On-location contacts get a plain report text when this completion
+      // text goes out (GATE_CONTACT_REPORT_TEXT, contact-report-text.js). Set
+      // only when the text carries a real report link. Called on every path
+      // that records the text as sent or queued, the accepted-send recovery
+      // included; a repeat for the same record queues nothing. Never throws.
+      let contactReportUrl = null;
+      const notifyContactsOfReport = async (notBefore = null) => {
+        if (!contactReportUrl) return;
+        await require('./contact-report-text').notifyContactsReportReady({
+          customerId: svc.customer_id, sourceKey: `record:${record.id}`, reportUrl: contactReportUrl,
+          scheduledServiceId: svc.id, notBefore, excludePhone: svc.cust_phone,
+        });
+      };
       // What the attempted text IS (body/type/channel/review/pay-link), taken
       // before the provider call so the catch can stamp the honest 'sent'
       // state when acceptance is known only from the thrown error
@@ -13760,6 +13841,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               smsMetadata.service_report_preview_asset_id = serviceReportPreviewAsset.id;
             }
           }
+          if (reportToken && smsMetadata.report_url) contactReportUrl = smsMetadata.report_url;
           const attemptedMms = Array.isArray(smsMetadata.mediaUrls) && smsMetadata.mediaUrls.length > 0;
           let sentSmsChannel = attemptedMms ? 'mms' : 'sms';
           let mmsFallbackToSms = false;
@@ -13964,6 +14046,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // above — only sync the in-memory snapshot here.
             record.structured_notes = { ...sendingNotes, ...smsNotesDelta };
             logger.info(`[dispatch] Completion SMS for customer ${svc.customer_id} held outside the 8AM-8PM ET send window — queued for ${smsResult.nextAllowedAt}`);
+            await notifyContactsOfReport(new Date(smsResult.nextAllowedAt));
           } else if (!smsResult.sent) {
             // A quiet-hours hold whose scheduled-SMS enqueue FAILED is not a
             // policy block even though the result still says blocked: the
@@ -14042,6 +14125,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
               }
             }
           } else {
+            // Before the route-local writes below: one that throws jumps to
+            // the accepted-send recovery, which calls this again. Only for a
+            // TEXT: an account holder on the App channel got no text, so the
+            // contacts get none (the stated trigger).
+            if (smsResult.channel !== 'push') await notifyContactsOfReport();
             Object.assign(smsNotesDelta, {
               completionSmsStatus: 'sent',
               completionSmsDeliveryUnverifiedAt: null,
@@ -14141,6 +14229,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // The normal result never arrived to switch the snapshot to push:
           // the accepted outcome itself names the provider.
           if (e.providerOutcome?.provider === 'push') snap.channel = 'push';
+          // The resolved channel, from either source: a push that succeeded
+          // and then hit a failed local write carries no providerOutcome, and
+          // its channel is on the snapshot. Only a text queues contact texts.
+          if (snap.channel !== 'push') await notifyContactsOfReport();
           const acceptedDelta = {
             ...(snap.fixedRecap && snap.body ? { completionSmsBody: snap.body } : {}),
             completionSmsStatus: 'sent',

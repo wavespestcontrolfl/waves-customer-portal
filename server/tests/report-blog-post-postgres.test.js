@@ -29,7 +29,7 @@ const postgres = connection ? describe : describe.skip;
 let mockPg;
 jest.setTimeout(60000);
 
-const { searchReportBlogPosts, resolveReportBlogPostPick } = require('../services/service-report/report-blog-post');
+const { searchReportBlogPosts, resolveReportBlogPostPick, wordsOnTheSite } = require('../services/service-report/report-blog-post');
 
 const HUB = 'https://www.wavespestcontrol.com';
 const DAY = 86400000;
@@ -120,7 +120,8 @@ postgres('report blog search on Postgres', () => {
     const rare = registryRow('Tick Season Guide for Florida Yards', { daysAgo: 2000 });
     await mockPg.batchInsert('content_registry', [...common, rare], 200);
     const posts = await searchReportBlogPosts(mockPg, 'tick control');
-    expect(posts[0]).toEqual({ id: rare.id, title: rare.title, url: rare.live_url });
+    // It holds "tick" but not "control": the closest post, not an exact one.
+    expect(posts[0]).toEqual({ id: rare.id, title: rare.title, url: rare.live_url, exact: false });
     expect(posts).toHaveLength(8);
     // Among equals, newest first.
     expect(posts.slice(1).map((post) => post.title)).toEqual(Array.from({ length: 7 }, (_, i) => `Weed Control Tips ${i}`));
@@ -177,6 +178,21 @@ postgres('report blog search on Postgres', () => {
     const dbOnly = registryRow('Lanai Care Basics', { target_keyword: 'termite swarmers' });
     await mockPg('content_registry').insert([merged, astroOnly, dbOnly]);
     expect((await searchReportBlogPosts(mockPg, 'swarmers')).map((post) => post.id).sort()).toEqual([merged.id, astroOnly.id].sort());
+  });
+
+  test('in real SQL, a suggestion\'s words are read against every live post (GitHub Codex P1 on 45144528b8)', async () => {
+    await mockPg('content_registry').insert([
+      registryRow('Standing Water and Mosquitoes'),
+      registryRow('Ghost Ant Trails', { metadata: { frontmatter: { description: 'Why ghost ants come in after rain.' } } }),
+      registryRow('John Deere Mower Care', { live_status: 'visibility_review' }),
+      // Live, but on a spoke only: the link rule refuses it, so it lends no word.
+      registryRow('Johnson Grass on the Spoke', { live_url: '/blog/johnson-grass/', canonical_url: '/blog/johnson-grass/', metadata: { frontmatter: { domains: ['bradentonfllawncare.com'] } } }),
+    ]);
+    expect((await wordsOnTheSite(mockPg, 'standing water')).known).toEqual([true, true]);
+    expect((await wordsOnTheSite(mockPg, 'ghost ants after rain')).known).toEqual([true, true, true, true]);
+    // A name no live post uses is unknown, even where a post not live holds it.
+    expect((await wordsOnTheSite(mockPg, 'ants for john')).known).toEqual([true, false]);
+    expect((await wordsOnTheSite(mockPg, 'ants for johnson')).known).toEqual([true, false]);
   });
 
   test('in real SQL, an empty keyword alias never hides a populated one, and the database copy a merged row falls back to is never read (GitHub Codex P2s on d527cd5de1)', async () => {

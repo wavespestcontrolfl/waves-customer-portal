@@ -307,7 +307,7 @@ test('another account change beside the confirmed email is carried too, and a ga
   await say(afterReadBack('Yes, and my gate code changed too'));
 
   expect(NotificationService.notifyAdmin.mock.calls[0][3].detail).toMatch(/The customer also asked about an account change: new gate code is needed on the account/);
-  expect(recordGap).toHaveBeenCalledWith(expect.objectContaining({ summary: 'new gate code is needed on the account' }));
+  expect(recordGap.mock.calls[0][0]).toEqual(expect.objectContaining({ summary: 'new gate code is needed on the account' }));
 });
 
 test('when the bell does not ring the customer is not told the team has it', async () => {
@@ -441,4 +441,35 @@ test.each(['PORTAL_CHAT_DEADLINE', 'ABORT_ERR', '57014', 'AbortError', 'KnexTime
       { emailChange: true, conversationId: 'conv-1', customerMessage: NEW }, turn);
   await expect(result).rejects.toBe(error);
   expect(turn.query).toHaveBeenCalledTimes(stage === 'email change customer' ? 2 : 1);
+});
+
+test('the coordinated turn path carries the same extras to the saved row, the bell and the gap', async () => {
+  const insertEscalation = jest.fn(() => ({ returning: async () => [{ id: 'esc-turn' }] }));
+  const trx = Object.assign(jest.fn((table) => {
+    if (table === 'customers') return { where: jest.fn().mockReturnThis(), whereNull: jest.fn().mockReturnThis(), first: async () => customer };
+    if (table === 'ai_escalations') return { where: () => ({ first: async () => null }), insert: insertEscalation };
+    return { where: jest.fn().mockReturnThis(), update: async () => 1, insert: () => ({ onConflict: () => ({ ignore: async () => [1] }) }) };
+  }), { transaction: async (work) => work(trx) });
+  const turn = {
+    requestRowId: 'request-row-email',
+    assertActive: jest.fn(),
+    fallbackExtras: () => ({}),
+    persistCommittedResult: jest.fn(async (_executor, result) => result),
+    rememberCommittedResult: jest.fn((result) => result),
+    transaction: async (_stage, work) => work(trx),
+  };
+  const notify = jest.spyOn(assistant, 'notifyTeamOfEscalation').mockResolvedValue(true);
+  const alsoAsked = { topic: 'add_service', reason: 'wants mosquito service quoted' };
+
+  await assistant.escalate({ id: 'conv-1', customer_id: 'cust-1', channel: 'portal_chat' }, 'Yes, and quote mosquito',
+    'Customer confirmed a new email address in portal chat', { gap: true, topic: 'account_change', newEmail: NEW, alsoAsked, turn });
+  await assistant.escalate({ id: 'conv-1', customer_id: 'cust-1', channel: 'portal_chat' }, 'quote mosquito, and my email',
+    'wants mosquito service quoted', { topic: 'add_service', emailUnchecked: true, turn });
+
+  expect(insertEscalation.mock.calls[0][0].summary).toContain('The customer also asked about adding a service: wants mosquito service quoted');
+  expect(notify.mock.calls[0][0]).toEqual(expect.objectContaining({ newEmail: NEW, alsoAsked }));
+  expect(recordGap.mock.calls[0][0]).toEqual(expect.objectContaining({ summary: 'wants mosquito service quoted' }));
+  expect(insertEscalation.mock.calls[1][0].summary).toContain('The customer also asked to change their email');
+  expect(notify.mock.calls[1][0]).toEqual(expect.objectContaining({ emailUnchecked: true }));
+  notify.mockRestore();
 });

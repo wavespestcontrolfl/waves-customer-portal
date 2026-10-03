@@ -28,7 +28,8 @@
 const { DEFAULTS } = require('../../config/models');
 const { applySeasonalAdjustment, getSeason } = require('../lawn-assessment');
 const { deriveLegacyScores, adjustAvailableScores } = require('../lawn-visit-scores');
-const { contextHash, normalizePhotoZone } = require('../lawn-visit-input');
+const { contextHash, normalizePhotoZone, promptFor, PROMPT_VERSION, SHOT_LIST_PROMPT_VERSION } = require('../lawn-visit-input');
+const { PHOTO_VOCABULARY, capturedUnderShotList, maxPerShot } = require('../lawn-photo-shots');
 const { SUMMARY_CAUSE_RE } = require('../lawn-diagnostic-report');
 const { CAUSE_PATTERNS } = require('./lawn-diagnostic-naming-gate');
 
@@ -107,6 +108,10 @@ function fixtureCase(row, photos = [], context = {}) {
   const submitted = parseJson(row.photos, []);
   const incompletePhotos = photos.some((photo) => photo && String(photo.s3_key || '').startsWith('pending/'))
     || (Array.isArray(submitted) && submitted.length > photos.filter(Boolean).length);
+  // The capture mode the route stored beside each photo (absent: gate off, or a
+  // row captured before the marker existed).
+  const photoVocabulary = Array.isArray(submitted) && submitted.some((meta) => meta?.photoVocabulary === PHOTO_VOCABULARY)
+    ? PHOTO_VOCABULARY : null;
   return {
     assessmentId: row.id,
     customerId: row.customer_id,
@@ -117,6 +122,7 @@ function fixtureCase(row, photos = [], context = {}) {
     confirmed: Object.fromEntries(SCORE_KEYS.map((key) => [key, numberOrNull(row[key])])),
     legacyAi: Object.fromEntries(SCORE_KEYS.map((key) => [key, numberOrNull(composite[key])])),
     incompletePhotos,
+    ...(photoVocabulary ? { photoVocabulary } : {}),
     photos: (incompletePhotos ? [] : photos)
       .filter((photo) => photo && photo.s3_key)
       .sort((a, b) => (a.photo_order ?? 0) - (b.photo_order ?? 0))
@@ -267,6 +273,8 @@ function scoreResult(testCase, analysis, { adjust = (scores, month) => applySeas
     costUsd: legsCostUsd(legs),
     unpricedLegs: unpricedLegCount(legs),
     contextHash: analysis.contextHash || null,
+    // The prompt variant this replay ran under (shot-list captures read their own).
+    ...(analysis.promptVersion ? { promptVersion: analysis.promptVersion } : {}),
   };
   if (analysis.status !== 'complete') {
     return { ...base, derived: null, adjusted: null, deltas: null, undeterminable: SCORE_KEYS.slice(), causeNamedBelowModerate: [], findings: [], severities: null, observations: analysis.observations || null };
@@ -297,6 +305,9 @@ function scoreResult(testCase, analysis, { adjust = (scores, month) => applySeas
       urgency: finding.urgency, photo_refs: finding.photo_refs, zone: finding.zone, can_determine: finding.can_determine,
       cannot_determine_reason: finding.cannot_determine_reason, observed_evidence: finding.observed_evidence, negative_evidence: finding.negative_evidence,
       confirmation_step: finding.confirmation_step,
+      // Set only on a shot-list replay (the server-side evidence rules).
+      ...(finding.localized !== undefined ? { localized: finding.localized } : {}),
+      ...(finding.confidence_cap ? { confidence_cap: finding.confidence_cap } : {}),
     })),
     severities: analysis.severities,
     grassType: analysis.grassType || null,
@@ -398,7 +409,8 @@ function provenanceLine({ promptVersion, promptDigest, propertyHistory } = {}) {
   const history = propertyHistory === true ? 'on' : propertyHistory === false ? 'off' : 'unknown';
   return `prompt ${promptVersion || 'unknown'} · digest ${promptDigest || 'unknown'} · fixture property history ${history}`;
 }
-function renderMarkdown(summary, results = [], { title = 'Lawn visit assessment eval', promptVersion, promptDigest, propertyHistory } = {}) {
+// `showVariant` (set when a run includes a shot-list replay) adds a prompt column to both row tables.
+function renderMarkdown(summary, results = [], { title = 'Lawn visit assessment eval', promptVersion, promptDigest, propertyHistory, showVariant = false } = {}) {
   const lines = [`## ${title}`, '', provenanceLine({ promptVersion, promptDigest, propertyHistory })];
   lines.push(`runs ${summary.runs} · cases ${summary.cases} · unavailable ${summary.unavailable} (${fmtRate(summary.unavailableRate)}) · findings/run ${fmtOptional(summary.findingsPerRun)} · cause named below moderate: ${summary.causeNamedBelowModerate}`);
   lines.push(`latency p50 ${fmtOptional(summary.latencyMs.p50)} ms · p95 ${fmtOptional(summary.latencyMs.p95)} ms · tokens in ${summary.tokens.input} / out ${summary.tokens.output} / reasoning ${summary.tokens.reasoning} · est. cost $${fmtOptional(summary.costUsd.total)} ($${fmtOptional(summary.costUsd.perRun)} per run, ${summary.costUsd.priced} priced${unpricedNote(summary)})`);
@@ -413,18 +425,49 @@ function renderMarkdown(summary, results = [], { title = 'Lawn visit assessment 
   if (summary.repeatVariance) {
     lines.push('', `repeat-run spread (mean per-case stddev): ${SCORE_KEYS.map((key) => `${key} ${fmtOptional(summary.repeatVariance[key])}`).join(' · ')}`);
   }
-  lines.push('', '| assessment | date | photos | status | answered by | ms | turf | weeds | color | fungus | thatch | stress | findings (label @ confidence) |', '|---|---|---|---|---|---|---|---|---|---|---|---|---|');
+  const variantHead = showVariant ? ' prompt |' : '';
+  const variantRule = showVariant ? '---|' : '';
+  const variantCell = (r) => (showVariant ? ` ${r.promptVersion || PROMPT_VERSION} |` : '');
+  lines.push('', `| assessment | date | photos | status | answered by | ms | turf | weeds | color | fungus | thatch | stress | findings (label @ confidence) |${variantHead}`, `|---|---|---|---|---|---|---|---|---|---|---|---|---|${variantRule}`);
   for (const r of results) {
     const cell = (key) => (r.status !== 'complete' ? '—' : r.derived[key] == null ? 'n/d' : `${r.adjusted[key]}${fmtDelta(r.deltas.vsConfirmed[key])}`);
     const findings = r.status === 'complete' ? r.findings.map((f) => `${f.label} @ ${f.confidence}${f.can_determine ? '' : ' (n/d)'}`).join('; ') : (r.unavailableReason || 'unavailable');
-    lines.push(`| ${String(r.assessmentId).slice(0, 8)} | ${r.visitDate} | ${r.photoCount} | ${r.status} | ${r.status === 'complete' ? `${r.provider}${r.fallbackUsed ? ' (fallback)' : ''}` : '—'} | ${r.latencyMs ?? ''} | ${cell('turf_density')} | ${cell('weed_suppression')} | ${cell('color_health')} | ${cell('fungus_control')} | ${cell('thatch_level')} | ${cell('stress_damage')} | ${findings} |`);
+    lines.push(`| ${String(r.assessmentId).slice(0, 8)} | ${r.visitDate} | ${r.photoCount} | ${r.status} | ${r.status === 'complete' ? `${r.provider}${r.fallbackUsed ? ' (fallback)' : ''}` : '—'} | ${r.latencyMs ?? ''} | ${cell('turf_density')} | ${cell('weed_suppression')} | ${cell('color_health')} | ${cell('fungus_control')} | ${cell('thatch_level')} | ${cell('stress_damage')} | ${findings} |${variantCell(r)}`);
   }
-  lines.push('', '| assessment | repeat | input hash | service context hash |', '|---|---|---|---|');
+  lines.push('', `| assessment | repeat | input hash | service context hash |${variantHead}`, `|---|---|---|---|${variantRule}`);
   for (const r of results) {
-    lines.push(`| ${r.assessmentId} | ${r.repeatIndex == null ? 'n/a' : r.repeatIndex + 1} | ${r.inputHash || 'unknown'} | ${r.contextHash || 'unknown'} |`);
+    lines.push(`| ${r.assessmentId} | ${r.repeatIndex == null ? 'n/a' : r.repeatIndex + 1} | ${r.inputHash || 'unknown'} | ${r.contextHash || 'unknown'} |${variantCell(r)}`);
   }
   lines.push('', 'Score cells: seasonally adjusted derived score, then its delta vs the confirmed score in parentheses; n/d = the model could not determine it. Confirmed scores carry technician corrections and, for same-day visits, a weather-driven seasonal factor the replay cannot reproduce.');
   return lines.join('\n');
+}
+
+// A replay can run under two prompts (a shot-list capture reads its own variant),
+// so a report is never one pooled experiment: results are grouped by the prompt
+// version each one actually ran under (a result without one is legacy), and each
+// group carries its own version, digest, summary and rows.
+const digestForVersion = (version) => promptFor({ shotList: version === SHOT_LIST_PROMPT_VERSION }).digest;
+function promptVariants(results = []) {
+  const groups = new Map();
+  for (const r of results) {
+    const version = r.promptVersion || PROMPT_VERSION;
+    if (!groups.has(version)) groups.set(version, []);
+    groups.get(version).push(r);
+  }
+  if (!groups.size) groups.set(PROMPT_VERSION, []);
+  return [...groups].map(([promptVersion, rows]) => ({ promptVersion, promptDigest: digestForVersion(promptVersion), results: rows, summary: summarize(rows) }));
+}
+// `titleSuffix` names what the replay varied (forced fallback, thinking level).
+// A legacy-only run renders exactly as renderMarkdown always has.
+function renderReport(results = [], { title = 'Lawn visit assessment eval', titleSuffix = '', propertyHistory } = {}) {
+  const variants = promptVariants(results);
+  const showVariant = variants.some((v) => v.promptVersion !== PROMPT_VERSION);
+  const sections = variants.map((v) => renderMarkdown(v.summary, v.results, {
+    title: `${title} — ${v.promptVersion}${titleSuffix}`, promptVersion: v.promptVersion, promptDigest: v.promptDigest, propertyHistory, showVariant,
+  }));
+  if (variants.length < 2) return sections[0];
+  const names = variants.map((v) => `${v.promptVersion} (${v.results.length} run${v.results.length === 1 ? '' : 's'})`).join(', ');
+  return [`## ${title} — MIXED prompt variants${titleSuffix}`, '', `This replay ran under ${variants.length} prompts: ${names}. They are different experiments, so each section below has its own summary and metrics; nothing is pooled.`, '', ...sections.flatMap((section, i) => (i ? ['', section] : [section]))].join('\n');
 }
 const fmtOptional = (value) => value ?? 'n/a';
 const fmtRate = (value) => (value == null ? 'n/a' : `${Math.round(value * 100)}%`);
@@ -447,14 +490,25 @@ async function runEval(cases, deps, { repeat = 1, concurrency = 2, thinkingLevel
       const testCase = queue.shift();
       if (testCase.incompletePhotos) { skipped.push({ assessmentId: testCase.assessmentId, reason: 'incomplete stored photo set' }); continue; }
       let photos;
+      // A replay uses the zone vocabulary the stored photos were captured under
+      // (derived from the stored zones, never the live gate): a shot-list capture
+      // keeps back/side/shade/hot_edge/blade_crown, an older one the three slots.
+      // The stored marker decides; only a case without one (captured before the
+      // marker, or with the gate off) falls back to inferring from the zones.
+      const shotListMode = testCase.photoVocabulary === PHOTO_VOCABULARY
+        || capturedUnderShotList(testCase.photos.map((photo) => photo.zone));
       try {
-        // Retired zones (back/side, pre 2026-09-24) and any Front after the
-        // first replay as unlabeled, so historical cases still validate
-        // instead of being skipped.
-        let frontSeen = false;
+        // Retired zones (back/side, pre 2026-09-24) and any repeat of a
+        // one-photo shot after the first replay as unlabeled, so historical
+        // cases still validate instead of being skipped.
+        const seen = new Map();
         photos = await Promise.all(testCase.photos.map(async (photo) => {
-          let zone = normalizePhotoZone(photo.zone);
-          if (zone === 'front') { if (frontSeen) zone = null; frontSeen = true; }
+          let zone = normalizePhotoZone(photo.zone, { shotList: shotListMode });
+          if (zone && (zone === 'front' || shotListMode)) {
+            const count = (seen.get(zone) || 0) + 1;
+            seen.set(zone, count);
+            if (count > (shotListMode ? maxPerShot(zone) : 1)) zone = null;
+          }
           return { ...(await deps.loadPhoto(photo.s3Key)), zone };
         }));
       } catch (err) {
@@ -463,18 +517,18 @@ async function runEval(cases, deps, { repeat = 1, concurrency = 2, thinkingLevel
         continue;
       }
       if (!photos.length) { skipped.push({ assessmentId: testCase.assessmentId, reason: 'no stored photos' }); continue; }
-      const photoZones = photos.map((photo) => normalizePhotoZone(photo.zone));
+      const photoZones = photos.map((photo) => normalizePhotoZone(photo.zone, { shotList: shotListMode }));
       const visionContext = contextFor(testCase);
       for (let i = 0; i < repeat; i += 1) {
         let analysis;
         try {
-          analysis = await deps.analyzeVisit({ photos, visionContext, thinkingLevel });
+          analysis = await deps.analyzeVisit({ photos, visionContext, thinkingLevel, ...(shotListMode ? { shotList: true } : {}) });
         } catch (err) {
           skipped.push({ assessmentId: testCase.assessmentId, repeatIndex: i, reason: `analysis failed: ${err.message}` });
           log(`skip ${testCase.assessmentId} run ${i + 1}/${repeat}: ${err.message}`);
           break;
         }
-        results.push({ ...scoreResult(testCase, analysis), repeatIndex: i, inputHash: contextHash({ photos, photoZones, visionContext }), contextOmitted: Array.isArray(testCase.context?.omitted) ? testCase.context.omitted : [] });
+        results.push({ ...scoreResult(testCase, analysis), repeatIndex: i, inputHash: contextHash({ photos, photoZones, visionContext, shotList: shotListMode }), contextOmitted: Array.isArray(testCase.context?.omitted) ? testCase.context.omitted : [] });
         log(`${testCase.assessmentId} run ${i + 1}/${repeat}: ${analysis.status}${analysis.status === 'complete' ? ` via ${analysis.provider}${analysis.fallbackUsed ? ' (fallback)' : ''}` : ` (${analysis.reason})`} ${analysis.latencyMs} ms`);
       }
     }
@@ -502,6 +556,8 @@ module.exports = {
   scoreResult,
   summarize,
   renderMarkdown,
+  renderReport,
+  promptVariants,
   runEval,
   percentile,
 };

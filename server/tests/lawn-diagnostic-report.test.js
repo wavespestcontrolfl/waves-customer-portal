@@ -8,6 +8,7 @@ const {
   scrubCustomerText,
   safeConditionLabel,
   safeCustomerSummary,
+  servedExpectation,
   residualDefinitiveClaim,
   lowerConfidence,
   MINIMAL_SAFE_SUMMARY,
@@ -913,6 +914,72 @@ describe('lawn diagnostic auto-release ladder', () => {
       findings: [{ name: 'Large patch fungal disease', confidence: 'moderate', severity: 'moderate' }],
     });
     expect(modFungus.expectations.fungus).toMatch(/disease treatments/i);
+  });
+
+  test('weed and insect expectations state no day or week count (P16, owner 2026-10-03)', () => {
+    const weeds = buildDiagnosticReportContract({
+      findings: [{ name: 'Weed pressure', confidence: 'moderate', severity: 'moderate' }],
+    });
+    const { PRODUCT_ROWS } = require('../config/lawn-expectations');
+    expect(weeds.expectations.weeds).toContain(PRODUCT_ROWS.herbicide_broadleaf.visibleChange);
+    expect(weeds.expectations.weeds).not.toMatch(/\d|days?|weeks?/i);
+    const insects = buildDiagnosticReportContract({
+      findings: [{ name: 'Chinch bug pressure', confidence: 'moderate', severity: 'moderate' }],
+    });
+    expect(insects.expectations.insects).toBeTruthy();
+    expect(insects.expectations.insects).not.toMatch(/\d|days?|weeks?|next week/i);
+  });
+
+  test('an unapproved weed row fails closed: no row text and no timing, on build and on egress (P16)', () => {
+    const { PRODUCT_ROWS } = require('../config/lawn-expectations');
+    const row = PRODUCT_ROWS.herbicide_broadleaf;
+    const was = row.approved;
+    row.approved = false;
+    try {
+      const weeds = buildDiagnosticReportContract({
+        findings: [{ name: 'Weed pressure', confidence: 'moderate', severity: 'moderate' }],
+      }).expectations.weeds;
+      expect(weeds).toBe('How fast weeds respond depends on the weed and the weather.');
+      expect(weeds).not.toContain(row.visibleChange);
+      expect(weeds).not.toMatch(/\d|days?|weeks?/i);
+      // Serve time: the stored string for weeds is never emitted, only today's line.
+      const row0 = PRODUCT_ROWS.herbicide_broadleaf;
+      expect(servedExpectation('weeds', 'Visible weed response often takes 10-14 days.')).toBe(weeds);
+      expect(servedExpectation('weeds', `${row0.visibleChange} ${row0.secondApp.line}`)).toBe(weeds);
+      expect(servedExpectation('weeds', null)).toBeNull();
+    } finally {
+      row.approved = was;
+    }
+  });
+
+  test('servedExpectation always emits the current weed and insect line when the key is stored (P16)', () => {
+    const { PRODUCT_ROWS } = require('../config/lawn-expectations');
+    const row = PRODUCT_ROWS.herbicide_broadleaf;
+    const current = `${row.visibleChange} ${row.secondApp.line}`;
+    expect(servedExpectation('weeds', 'Visible weed response often takes 10-14 days.')).toBe(current);
+    expect(servedExpectation('weeds', current)).toBe(current);
+    expect(servedExpectation('insects', 'The key sign is whether the damaged edge stops expanding over the next week.'))
+      .toBe('The key sign is whether the damaged edge stops expanding.');
+    // Other keys pass through as stored; a missing key stays missing.
+    expect(servedExpectation('fungus', 'Stored fungus line.')).toBe('Stored fungus line.');
+    expect(servedExpectation('turf_recovery', 'Stored.')).toBe('Stored.');
+    expect(servedExpectation('weeds', undefined)).toBeUndefined();
+  });
+
+  test('safeCustomerSummary drops only sentences that state result timing (P16 egress)', () => {
+    const summary = 'We saw thinning along the sunny edge. Visible weed response often takes 10-14 days. Keep an eye on any area that spreads.';
+    expect(safeCustomerSummary(summary, 'high')).toBe('We saw thinning along the sunny edge. Keep an eye on any area that spreads.');
+    expect(safeCustomerSummary('Color should return in 2-3 weeks and density in 60-90 days.', 'high'))
+      .toMatch(/^Your lawn shows an area worth keeping an eye on\./);
+    const clean = 'We saw thinning along the sunny edge and will keep an eye on it.';
+    expect(safeCustomerSummary(clean, 'high')).toBe(clean);
+  });
+
+  test('a result timeline phrased around watering or mowing is dropped too (no care-plan exemption)', () => {
+    expect(safeCustomerSummary('The front edge is dry. Color should return in 2-3 weeks once watering is corrected.', 'high'))
+      .toBe('The front edge is dry.');
+    expect(safeCustomerSummary('The lawn was cut low. It should thicken within 60 days at a higher mowing height.', 'high'))
+      .toBe('The lawn was cut low.');
   });
 
   test('lowerConfidence returns the more conservative value', () => {

@@ -10,7 +10,7 @@ const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../midd
 const logger = require('../services/logger');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled, discountStackingLive, reportPhotoContentLive, reportWriterRulesLive, visitPrepPhotosLive, tsFastCompleteLive } = require('../config/feature-gates');
-const { lawnReserviceFastCompleteLive, fastCompleteVoiceFillLive } = require('../config/feature-gates');
+const { lawnReserviceFastCompleteLive, lawnFastCompleteLive, fastCompleteVoiceFillLive } = require('../config/feature-gates');
 const { percentageDiscountDollars, stackGroupConflict: discountStackGroupConflict } = require('../services/discount-stack');
 const { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } = require('../../shared/legacy-visit-money-submission.cjs');
 const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');
@@ -130,6 +130,7 @@ const {
   uniqueServiceFamilies,
 } = require('../services/self-booking-plan-sync');
 const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
+const { fetchPropertyForecast, SERVICE_AREA_DEFAULT_LOCATION } = require('../services/service-report/application-conditions');
 
 // Office coordinates for office-level rain outlooks (matches the NWS point
 // used by feed.js / forecast-analyzer.js — Lakewood Ranch HQ area).
@@ -5173,6 +5174,10 @@ async function loadProjectCompletionContextByServiceId(services) {
       // lawn re-service sheet (instead of the typed Dispatch form) when on.
       // Read at call time; no per-tech flag.
       lawnReserviceFastCompleteEnabled: lawnReserviceFastCompleteLive(),
+      // GATE_LAWN_FAST_COMPLETE: the admin Dispatch/Schedule surfaces open the
+      // regular lawn Fast Complete sheet for an eligible lawn visit when on.
+      // Read at call time; the context route is the eligibility authority.
+      lawnFastCompleteEnabled: lawnFastCompleteLive(),
       // GATE_FAST_COMPLETE_VOICE_FILL: the pest re-service sheet shows its
       // "Tell me what you did" mic, Check chips and office note when on. Read
       // at call time; no per-tech flag.
@@ -6342,6 +6347,7 @@ router.get('/', async (req, res, next) => {
         reserviceFastCompleteEnabled: projectCompletionContext.reserviceFastCompleteEnabled === true,
         treeShrubFastCompleteEnabled: projectCompletionContext.treeShrubFastCompleteEnabled === true,
         lawnReserviceFastCompleteEnabled: projectCompletionContext.lawnReserviceFastCompleteEnabled === true,
+        lawnFastCompleteEnabled: projectCompletionContext.lawnFastCompleteEnabled === true,
         fastCompleteVoiceFillEnabled: projectCompletionContext.fastCompleteVoiceFillEnabled === true,
         // GATE_FAST_COMPLETE_RECAP — see loadProjectCompletionContextByServiceId.
         fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
@@ -6502,14 +6508,16 @@ router.get('/', async (req, res, next) => {
     // Fetch live weather for Lakewood Ranch area
     let weather = {};
     try {
-      const weatherRes = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=27.40&longitude=-82.40&current=temperature_2m,wind_speed_10m,precipitation_probability&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=America/New_York`);
-      if (weatherRes.ok) {
-        const wd = await weatherRes.json();
-        const current = wd.current || {};
+      const forecast = await fetchPropertyForecast({
+        latitude: SERVICE_AREA_DEFAULT_LOCATION.latitude,
+        longitude: SERVICE_AREA_DEFAULT_LOCATION.longitude,
+      });
+      if (forecast.status === 'ok' && forecast.current) {
+        const current = forecast.current;
         weather = {
-          temp: Math.round(current.temperature_2m || 0),
-          windSpeed: Math.round(current.wind_speed_10m || 0),
-          rainProbability: current.precipitation_probability || 0,
+          temp: Math.round(current.temperature_f || 0),
+          windSpeed: Math.round(current.wind_mph || 0),
+          rainProbability: current.precipitation_probability_pct || 0,
         };
       }
     } catch { /* weather is optional */ }
@@ -6952,6 +6960,7 @@ router.get('/week', async (req, res, next) => {
           reserviceFastCompleteEnabled: projectCompletionContext.reserviceFastCompleteEnabled === true,
           treeShrubFastCompleteEnabled: projectCompletionContext.treeShrubFastCompleteEnabled === true,
           lawnReserviceFastCompleteEnabled: projectCompletionContext.lawnReserviceFastCompleteEnabled === true,
+          lawnFastCompleteEnabled: projectCompletionContext.lawnFastCompleteEnabled === true,
           fastCompleteVoiceFillEnabled: projectCompletionContext.fastCompleteVoiceFillEnabled === true,
           fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
           fastCompleteReportEnabled: projectCompletionContext.fastCompleteReportEnabled === true,
@@ -22394,6 +22403,18 @@ router.get('/:id/series-summary', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/schedule/:id/visit-summary
+// The stop this service shares with others, read live: { visit: null } for
+// an ungrouped row, else the same summary the day feed attaches. Edit
+// appointment asks on open, so every screen that opens it (Day, 5-Day, Week,
+// List, the dispatch board) sees a combo the same way and with its full
+// membership, whatever its own feed carries.
+router.get('/:id/visit-summary', requireAdmin, async (req, res, next) => {
+  try {
+    res.json({ visit: await require('../services/visit-groups').visitSummaryForService(db, req.params.id) });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/schedule/:id/estimate-source
 router.get('/:id/estimate-source', async (req, res, next) => {
   try {
@@ -25909,7 +25930,9 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         : '')
       .digest('hex');
     const cached = fresh === true ? null : reportCopyCacheGet(cacheKey);
-    if (cached) return res.json({ report: cached, cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
+    // Under the writer rules a cached draft is screened again below before it
+    // is served.
+    if (cached && !writerRulesOn) return res.json({ report: cached, cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
 
     // Output guard for trade names from THIS visit's own product records —
     // selected products, the free-text productsApplied names, and any typed
@@ -25923,12 +25946,20 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     // retryable like the other grounding outages (codex r49).
     // Under the writer rules no product may be named, not only this
     // visit's: a catalog product the prompt itself mentions (a note saying
-    // "the customer asked about <product>") joins the trade-name screen.
+    // "the customer asked about <product>") joins the trade-name screen in
+    // full, and every other catalog product is screened by its brand word
+    // or its name as a phrase (wholeCatalog, in the shared builder), so a
+    // name the model brings from its own knowledge is caught without an
+    // ordinary word inside an unmentioned catalog name ("snap", "trap")
+    // rejecting plain copy.
+    let catalogRows = null;
     const mentionedCatalogNames = [];
     const mentionedCatalogActives = [];
     if (writerRulesOn) {
       try {
-        const catalogRows = await db('products_catalog').select('name', 'active_ingredient', 'category');
+        const readRows = await db('products_catalog').select('id', 'name', 'display_name', 'active_ingredient', 'category', 'manufacturer');
+        const aliasRows = await db('product_aliases').select('product_id', 'alias_name');
+        catalogRows = CompletionRecap.withCatalogAliases(readRows, aliasRows);
         const mentioned = catalogScreensForPrompt(catalogRows, fullUserMessage);
         mentionedCatalogNames.push(...mentioned.names);
         mentionedCatalogActives.push(...mentioned.actives);
@@ -25946,6 +25977,9 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         products: Array.isArray(products) ? products : [],
         extraNames: [...typedProductNameGuards, ...fallbackProductNames, ...mentionedCatalogNames],
         db,
+        wholeCatalog: writerRulesOn,
+        catalogRows,
+        mentionedText: fullUserMessage,
       });
     } catch (err) {
       logger.warn(`[generate-report] trade-name guard build failed — failing retryable: ${err.message}`);
@@ -25992,6 +26026,12 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         activeIngredients: visitActiveIngredients, allowedPhrases: writerAllowedPhrases, allowedDates: writerAllowedDates,
       })
       : null) || (lawnTimingOn && lawnResultTimingViolation(text) ? 'lawn_timing' : null);
+    // A cached draft is served only if it still passes both screens as they
+    // read now: a product, alias or active ingredient added since it was
+    // cached must not ride out on the cache.
+    if (cached && !screenTradeNames(cached) && !writerRulesScreen(cached)) {
+      return res.json({ report: cached, cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
+    }
     // The same wall-clock ceiling the provider chain keeps: the last-resort
     // copy's meaning check below is charged against it too.
     const reportChainDeadline = Date.now() + REPORT_CHAIN_BUDGET_MS;
@@ -27376,10 +27416,16 @@ function blackoutDateString(value) {
 function catalogScreensForPrompt(catalogRows, promptText) {
   const names = [];
   const actives = [];
+  const promptWritesAlias = CompletionRecap.promptAliasTest(promptText);
   for (const row of (Array.isArray(catalogRows) ? catalogRows : []).filter((r) => !CompletionRecap.isSupplyCategory(r?.category))) {
-    const named = Boolean(row?.name)
-      && CompletionRecap.containsProductName(promptText, [{ name: row.name }], { wholeWord: true });
-    if (named) names.push(row.name);
+    // By its name or its short display name. A registered alias the prompt
+    // writes out is screened in the shared builder (mentionedText): aliases
+    // are staff shorthand, matched whole.
+    const mentioned = [...new Set([row?.name, row?.display_name].filter(Boolean))]
+      .filter((label) => CompletionRecap.containsProductName(promptText, [{ name: label }], { wholeWord: true }));
+    // Its alias written out counts as naming it for its actives.
+    const named = mentioned.length > 0 || (row?.aliases || []).some(promptWritesAlias);
+    names.push(...mentioned);
     // Its actives too: a draft must not swap the named product for its
     // active ingredient; and an active the prompt names on its own
     // ("azoxystrobin" in a note) is screened even with no product name.
