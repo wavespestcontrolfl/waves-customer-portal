@@ -242,7 +242,7 @@ describe('capture_lead for a recognised contact (secondary slot)', () => {
     expect(notes).toEqual(expect.arrayContaining([
       'Prefers: email.',
       'Contact preference: “please stop calling me”.',
-      expect.stringMatching(/^Asked not to be contacted/),
+      expect.stringMatching(/^Asked for a contact restriction that is not a text opt-out/),
     ]));
   });
 
@@ -280,7 +280,7 @@ describe('capture_lead for a recognised contact (secondary slot)', () => {
       'Email: robin@example.com.',
       'Prefers: email.',
       'Contact preference: “email only, stop calling”.',
-      expect.stringMatching(/^Asked not to be contacted/),
+      expect.stringMatching(/^Asked for a contact restriction that is not a text opt-out/),
     ]));
     // A new number given later replaces the earlier one.
     await executeTool('capture_lead', { call_summary: 'Different number.', callback_phone: '+19415550188' }, ctx);
@@ -297,8 +297,26 @@ describe('capture_lead for a recognised contact (secondary slot)', () => {
     expect(second.notes).toEqual(expect.arrayContaining(['Later on the call: Added their email.']));
   });
 
+  test('a text-only opt-out with a requested callback keeps the follow-up — it is not a total no-contact', async () => {
+    const out = await executeTool('capture_lead', {
+      call_summary: 'Wants a call about today.', contact_preference: 'stop texting me, call me instead', do_not_contact_request: true,
+    }, recognised());
+    const arg = bell.mock.calls[0][0];
+    expect(arg.doNotContact).toBe(false);
+    expect(arg.notes).toEqual(expect.arrayContaining([expect.stringMatching(/^Asked for no text messages/)]));
+    expect(out).toMatch(/follow up with THEM/);
+    expect(out).not.toMatch(/asked NOT to be contacted/);
+  });
+
+  test('a bare do-not-contact flag with no words is noted for the office, never treated as total', async () => {
+    await executeTool('capture_lead', { call_summary: 'Something about contact.', do_not_contact_request: true }, recognised());
+    const arg = bell.mock.calls[0][0];
+    expect(arg.doNotContact).toBe(false);
+    expect(arg.notes).toEqual(expect.arrayContaining([expect.stringMatching(/^Asked for a contact restriction that is not a text opt-out/)]));
+  });
+
   test('a no-contact request is passed on for review — Sandy is never told to promise a follow-up', async () => {
-    const out = await executeTool('capture_lead', { call_summary: 'Do not contact me again.', do_not_contact_request: true }, recognised());
+    const out = await executeTool('capture_lead', { call_summary: 'Do not contact me again.', contact_preference: 'do not contact me again', do_not_contact_request: true }, recognised());
     expect(bell).toHaveBeenCalledWith(expect.objectContaining({ doNotContact: true }));
     expect(out).toMatch(/asked NOT to be contacted/);
     expect(out).toMatch(/Do NOT promise that anyone will call, text or email them/);

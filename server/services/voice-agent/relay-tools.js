@@ -1299,7 +1299,14 @@ async function executeTool(name, input = {}, ctx = {}) {
           method: extracted.preferred_contact_method || prior.method || null,
           preference: scrubbedField(extracted.contact_preference) || prior.preference || null,
           timing: extracted.preferred_date_time || prior.timing || null,
-          doNotContact: extracted.do_not_contact_request === true || prior.doNotContact === true,
+          // ⭐ A CHANNEL OPT-OUT IS NOT A TOTAL ONE. "Stop texting me, call me
+          // instead" withdraws texts and ASKS for a call: only the classifier's
+          // total withdrawal (totalStop) turns the follow-up into a review.
+          // A text-only stop and a bare flag with no words are noted for the
+          // office and leave the follow-up standing.
+          doNotContact: totalStop || prior.doNotContact === true,
+          noTexts: statedSmsStop || prior.noTexts === true,
+          contactUnclear: (input.do_not_contact_request === true && !smsOptOut) || prior.contactUnclear === true,
           textsStopped: smsSuppressionApplied || prior.textsStopped === true,
           estimateAsked: estimateRequested || prior.estimateAsked === true,
           // WHY they called is the FIRST capture's summary and stays: a later
@@ -1337,7 +1344,13 @@ async function executeTool(name, input = {}, ctx = {}) {
             followUp.method ? `Prefers: ${followUp.method}.` : null,
             followUp.preference ? `Contact preference: “${followUp.preference}”.` : null,
             followUp.doNotContact
-              ? `Asked not to be contacted — ${followUp.textsStopped ? 'texts to their number are already stopped; ' : ''}check before reaching out.`
+              ? `Asked not to be contacted at all — ${followUp.textsStopped ? 'texts to their number are already stopped; ' : ''}check before reaching out.`
+              : null,
+            !followUp.doNotContact && followUp.noTexts
+              ? `Asked for no text messages${followUp.textsStopped ? ' (already stopped)' : ''} — reach them another way.`
+              : null,
+            !followUp.doNotContact && followUp.contactUnclear
+              ? 'Asked for a contact restriction that is not a text opt-out (their words are above, if they gave any) — check before reaching out.'
               : null,
           ].filter(Boolean),
         });
