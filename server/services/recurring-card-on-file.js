@@ -1890,6 +1890,12 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
           // the accurate reason so the deterministic pay-link fallback +
           // office alert carry it, never a silent re-enable or a
           // misleading guard error.
+          // A payer refusal goes through the payer recovery handler (reverse
+          // credit, stamp the payer, deliver to the payer), never the
+          // homeowner's pay link (pre-push audit P0).
+          if (recoveryEnrollment?.reason === 'payer_billed') {
+            throw Object.assign(new Error('enrollment refused during recovery: payer_billed'), { code: 'PAYER_BILLED_GUARD' });
+          }
           throw new Error(`enrollment refused during recovery: ${recoveryEnrollment?.reason || 'unknown'}`);
         }
       }

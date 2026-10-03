@@ -881,6 +881,26 @@ postgres('annual prepay charged after the first visit', () => {
       expect(require('../services/invoice').sendViaSMSAndEmail).toHaveBeenCalledWith(f.invoiceId, { skipAccountCreditAutoApply: true });
     });
 
+    it('a payer refusal at recovery enrollment re-routes through the payer handler, never the homeowner pay link (pre-push audit P0)', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      expect(await release()).toMatchObject({ released: 1 });
+      const enrollment = require('../services/autopay-enrollment');
+      enrollment.enrollConsentedMethod.mockResolvedValueOnce({ enrolled: false, reason: 'payer_billed' });
+      const payer = require('../services/payer');
+      const credit = require('../services/customer-credit');
+      const stampSpy = jest.spyOn(credit, 'reverseCreditAndStampPayer').mockResolvedValue({ reversed: 0 });
+      payer.resolveForInvoice.mockImplementation(async ({ scheduledServiceId }) => ({ payerId: scheduledServiceId ? null : 7 }));
+      try {
+        await sweep();
+        expect(stampSpy).toHaveBeenCalledWith(expect.objectContaining({ invoiceId: f.invoiceId, payerId: 7 }));
+        expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+      } finally {
+        payer.resolveForInvoice.mockImplementation(async () => ({ payerId: null }));
+        stampSpy.mockRestore();
+      }
+    });
+
     it('a closeout that starts after the release holds the charge until it finishes (Codex r13)', async () => {
       const f = await deferredAccept();
       await perform(f.parentId, f.customerId);
