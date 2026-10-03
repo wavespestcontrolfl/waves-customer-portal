@@ -357,7 +357,7 @@ test("the 'following' sibling locks and refusals run before the Bill-To Stripe s
   const fs = require('fs');
   const src = fs.readFileSync(require.resolve('../routes/admin-schedule.js'), 'utf8');
   const earlyAt = src.indexOf('await lockAndGuardFollowingSiblings(trx, {');
-  const releaseAt = src.indexOf('.releaseUnconfirmedCombinedSessionsForScheduledServices(trx, fencedVisitIds);');
+  const releaseAt = src.indexOf('.releaseUnconfirmedCombinedSessionsForScheduledServices(trx, fencedVisitIds, {');
   const firstWriteAt = src.indexOf('if (addressPlan) addressUpdatedIds = await applyAppointmentAddress(trx, addressPlan, req.technicianId);');
   expect(earlyAt).toBeGreaterThan(-1);
   expect(earlyAt).toBeLessThan(firstWriteAt);

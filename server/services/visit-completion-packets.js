@@ -1140,7 +1140,10 @@ async function withdrawInvoiceFromCustomer(trx, { invoiceId, payerId, markQueued
   // without it the requeue would text the pay link a second time. (The packet release rebuilds its
   // marker from sms_sent_at and the summary record instead, so it never needed the tail.)
   const priorMarker = markQueued ? retryMarkerOf(prior?.scheduled_send_error) : null;
-  const stamp = `payer_billed:${payerId}${parked ? ':park' : ''}${queued ? ':queued' : ''}${priorMarker ? `:m=${priorMarker}` : ''}`;
+  // The operator-chosen send time rides the stamp too (`:at=<iso>`), so a release puts the invoice
+  // back at that time, not at "now".
+  const priorSendAt = queued && prior?.scheduled_send_at ? new Date(prior.scheduled_send_at).toISOString() : null;
+  const stamp = `payer_billed:${payerId}${parked ? ':park' : ''}${queued ? ':queued' : ''}${priorSendAt ? `:at=${priorSendAt}` : ''}${priorMarker ? `:m=${priorMarker}` : ''}`;
   const withdrawn = parked
     ? await trx('invoices').where({ id: invoiceId, status: 'scheduled' }).whereNull('payer_id').whereNull('scheduled_send_at')
       .update({ scheduled_send_error: stamp, updated_at: trx.fn.now() })

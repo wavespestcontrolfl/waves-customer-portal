@@ -274,7 +274,7 @@ async function updatePayer(id, body) {
         // does not roll back with this transaction, so an uninvolved
         // homeowner lost a live pay-page session for nothing. The batched
         // fence verifies every session before cancelling any.
-        const release = await PayCombined.releaseUnconfirmedCombinedSessionsForCustomers(trx, referencing);
+        const release = await PayCombined.releaseUnconfirmedCombinedSessionsForCustomers(trx, referencing, { invalidateLinked: true, payerId: pid });
         if (release.inFlight > 0) {
           return { error: 'A combined bank payment for a customer billed to this payer is still in flight; retry the activation after it settles or fails.',
             conflict: true, code: 'combined_payment_in_flight' };

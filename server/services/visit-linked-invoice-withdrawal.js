@@ -79,13 +79,14 @@ async function liveOwnerLocked(trx, invoice, visitId) {
 
 const linkedVisitOf = (invoice, trx) => require('./invoice').linkedScheduledServiceId(invoice, trx);
 
-// The visits the withdrawal above will lock for these customers (the visit each still-collectible
-// visit-linked invoice rides). A caller that takes a payer row FOR UPDATE before the withdrawal
+// The visits the fence, withdrawal and release will lock for these customers: the visit every
+// non-terminal visit-linked invoice rides (processing and already-stamped ones included, since the
+// fence judges the first and the release re-judges the second). A caller that takes a payer row FOR UPDATE before the withdrawal
 // (payer activation) locks them FOR SHARE first, so it never waits on a visit a Bill-To editor
 // already holds while that editor waits on the payer row.
 async function linkedVisitIdsForCustomers(trx, customerIds) {
   if (!customerIds.length) return [];
-  const base = () => visitLinkedBase(trx, NOT_WITHDRAWABLE).whereIn('customer_id', customerIds);
+  const base = () => visitLinkedBase(trx, TERMINAL).whereIn('customer_id', customerIds);
   const direct = await base().whereNotNull('scheduled_service_id').pluck('scheduled_service_id');
   const viaRecord = await trx('service_records').whereNotNull('scheduled_service_id')
     .whereIn('id', base().whereNull('scheduled_service_id').select('service_record_id')).pluck('scheduled_service_id');
@@ -139,12 +140,15 @@ async function reconcileLinkedInvoices(trx, scope = {}) {
     const visitId = await linkedVisitOf(invoice, trx);
     if (!visitId) continue;
     const live = await liveOwnerLocked(trx, invoice, visitId);
-    // `payer_billed:<id>[:park][:queued][:m=<marker>]` - the marker is the verbatim send-state marker
-    // the withdrawal replaced and may itself contain ':'.
+    // `payer_billed:<id>[:park][:queued][:at=<iso send time>][:m=<marker>]` - the marker is the
+    // verbatim send-state marker the withdrawal replaced and may itself contain ':'.
     const stamp = invoice.scheduled_send_error;
     const markerAt = stamp.indexOf(':m=');
     const priorMarker = markerAt >= 0 ? stamp.slice(markerAt + 3) : null;
-    const [, stampedPayer, ...flags] = (markerAt >= 0 ? stamp.slice(0, markerAt) : stamp).split(':');
+    const withoutMarker = markerAt >= 0 ? stamp.slice(0, markerAt) : stamp;
+    const sendAtAt = withoutMarker.indexOf(':at=');
+    const priorSendAt = sendAtAt >= 0 ? new Date(withoutMarker.slice(sendAtAt + 4)) : null;
+    const [, stampedPayer, ...flags] = (sendAtAt >= 0 ? withoutMarker.slice(0, sendAtAt) : withoutMarker).split(':');
     if (live) {
       if (String(live) !== stampedPayer) {
         await trx('invoices').where({ id: invoice.id, status: invoice.status, scheduled_send_error: stamp })
@@ -159,7 +163,8 @@ async function reconcileLinkedInvoices(trx, scope = {}) {
     const moved = await trx('invoices')
       .where({ id: invoice.id, status: invoice.status, scheduled_send_error: stamp }).whereNull('payer_id')
       .update(requeue
-        ? { status: 'scheduled', scheduled_send_at: trx.fn.now(), scheduled_send_attempts: 0, scheduled_send_error: restored, updated_at: trx.fn.now() }
+        // Back at the operator's own time; "now" only when that time has already passed.
+        ? { status: 'scheduled', scheduled_send_at: priorSendAt && priorSendAt > new Date() ? priorSendAt : trx.fn.now(), scheduled_send_attempts: 0, scheduled_send_error: restored, updated_at: trx.fn.now() }
         : { scheduled_send_error: restored, updated_at: trx.fn.now() });
     if (!moved) continue;
     await resumeDunningPausedByWithdrawal(trx, invoice.id);
@@ -177,6 +182,26 @@ function ownerCouldChange(scope, visit) {
   if (!visit) return false;
   if (visit.payer_id) return Boolean(scope.payerId) && String(visit.payer_id) === String(scope.payerId);
   return visit.self_pay_override !== true;
+}
+
+// The visit-linked invoices whose OWN checkout PaymentIntent this Bill-To change invalidates: the
+// owner can move (same rule as the fence) and the invoice is one the withdrawal will take. Their
+// client secrets must stop working, because a customer can confirm a pre-issued secret straight
+// with Stripe, past every pay-page check.
+async function linkedSessionInvoiceIds(database, scope = {}, ownerScope = scope) {
+  const ids = new Set();
+  if (scopeIsEmpty(scope)) return ids;
+  const candidates = await applyScope(database, visitLinkedBase(database, TERMINAL), scope)
+    .whereNotNull('stripe_payment_intent_id')
+    .where((q) => q.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'payer_billed:%'))
+    .select('id', 'scheduled_service_id', 'service_record_id');
+  for (const candidate of candidates) {
+    const visitId = await linkedVisitOf(candidate, database);
+    if (!visitId) continue;
+    const visit = await database('scheduled_services').where({ id: visitId }).first('id', 'payer_id', 'self_pay_override');
+    if (ownerCouldChange(ownerScope, visit)) ids.add(String(candidate.id));
+  }
+  return ids;
 }
 
 // The refusal fence, run BEFORE the writer's first Stripe cancel: a visit-linked invoice whose
@@ -225,4 +250,4 @@ async function linkedInvoiceChargeInFlight(database, scope = {}) {
   return false;
 }
 
-module.exports = { linkedVisitIdsForCustomers, withdrawLinkedInvoicesForOwner, reconcileLinkedInvoices, linkedInvoiceChargeInFlight };
+module.exports = { linkedSessionInvoiceIds, linkedVisitIdsForCustomers, withdrawLinkedInvoicesForOwner, reconcileLinkedInvoices, linkedInvoiceChargeInFlight };

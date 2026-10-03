@@ -14424,7 +14424,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             });
           }
           const visitRelease = await require('../services/pay-combined')
-            .releaseUnconfirmedCombinedSessionsForScheduledServices(trx, fencedVisitIds);
+            .releaseUnconfirmedCombinedSessionsForScheduledServices(trx, fencedVisitIds, {
+              // Only the visit being edited and the children the Bill-To propagation rewrites.
+              invalidateVisitIds: [req.params.id, ...rewrittenChildIds],
+            });
           // In-flight combined money DEFERS the payer edit (codex r30 P1,
           // same contract as the merge fence) — settlement never
           // re-resolves ownership.

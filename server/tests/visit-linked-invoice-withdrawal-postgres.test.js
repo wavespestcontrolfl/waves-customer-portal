@@ -155,6 +155,98 @@ postgres('payer assignment withdraws visit-linked invoices with no packet', () =
     expect(await invoiceRow(invoiceId)).toMatchObject({ stripe_payment_intent_id: null });
   });
 
+  test('the visit Bill-To release also cancels the ordinary single-invoice checkout of an affected invoice, and refuses when it is in flight', async () => {
+    const PayCombined = require('../services/pay-combined');
+    const payerId = await payer();
+    const open = await fixture({ link: 'record', invoice: { stripe_payment_intent_id: 'pi_single_open' } });
+    const payerOwned = await fixture({ link: 'record', invoice: { stripe_payment_intent_id: 'pi_payer_own', payer_id: payerId } });
+    const retrieve = jest.spyOn(StripeService, 'retrievePaymentIntent');
+    const cancel = jest.spyOn(StripeService, 'cancelPaymentIntent').mockResolvedValue({});
+    const piOf = (id, status) => ({ id, status, metadata: {} }); // ordinary checkout: no combined allocation
+
+    // Money already confirming: the change is refused, nothing is cancelled.
+    retrieve.mockImplementation(async (id) => piOf(id, 'processing'));
+    expect(await PayCombined.releaseUnconfirmedCombinedSessionsForScheduledServices(mockPg, [open.visitId])).toEqual({ released: 0, inFlight: 1 });
+    expect(cancel).not.toHaveBeenCalled();
+
+    // Unconfirmed: cancelled (Stripe) and unstamped, so the pre-issued client secret is dead.
+    retrieve.mockImplementation(async (id) => piOf(id, 'requires_payment_method'));
+    expect(await PayCombined.releaseUnconfirmedCombinedSessionsForScheduledServices(mockPg, [open.visitId])).toEqual({ released: 1, inFlight: 0 });
+    expect(cancel).toHaveBeenCalledWith('pi_single_open');
+    expect(await invoiceRow(open.invoiceId)).toMatchObject({ stripe_payment_intent_id: null });
+
+    // Already cancelled (a replay, or a cancel that raced us): only the stamp cleanup, no second Stripe call.
+    await mockPg('invoices').where({ id: open.invoiceId }).update({ stripe_payment_intent_id: 'pi_single_open' });
+    cancel.mockClear();
+    retrieve.mockImplementation(async (id) => piOf(id, 'canceled'));
+    expect(await PayCombined.releaseUnconfirmedCombinedSessionsForScheduledServices(mockPg, [open.visitId])).toEqual({ released: 1, inFlight: 0 });
+    expect(cancel).not.toHaveBeenCalled();
+
+    // A payer's own invoice keeps its checkout.
+    retrieve.mockImplementation(async (id) => piOf(id, 'requires_payment_method'));
+    expect(await PayCombined.releaseUnconfirmedCombinedSessionsForScheduledServices(mockPg, [payerOwned.visitId])).toEqual({ released: 0, inFlight: 0 });
+    expect(await invoiceRow(payerOwned.invoiceId)).toMatchObject({ stripe_payment_intent_id: 'pi_payer_own' });
+
+    // A failed Stripe cancel aborts the payer change rather than leaving a live secret.
+    await mockPg('invoices').where({ id: open.invoiceId }).update({ stripe_payment_intent_id: 'pi_single_open' });
+    cancel.mockRejectedValueOnce(new Error('payment_intent_unexpected_state'));
+    await expect(PayCombined.releaseUnconfirmedCombinedSessionsForScheduledServices(mockPg, [open.visitId])).rejects.toThrow(/payer NOT changed/);
+  });
+
+  test('the customer-default and payer-activation releases cancel single checkouts only where the owner would move', async () => {
+    const PayCombined = require('../services/pay-combined');
+    const payerId = await payer();
+    const unpinned = await fixture({ link: 'record', invoice: { stripe_payment_intent_id: 'pi_unpinned' } });
+    const pinned = await fixture({ link: 'record', selfPayOverride: true, invoice: { stripe_payment_intent_id: 'pi_pinned' } });
+    const cancel = jest.spyOn(StripeService, 'cancelPaymentIntent').mockResolvedValue({});
+    jest.spyOn(StripeService, 'retrievePaymentIntent').mockImplementation(async (id) => ({ id, status: 'requires_payment_method', metadata: {} }));
+
+    expect(await PayCombined.releaseUnconfirmedCombinedSessionsForCustomer(mockPg, pinned.customerId, { invalidateLinked: true })).toEqual({ released: 0, inFlight: 0 });
+    expect(await invoiceRow(pinned.invoiceId)).toMatchObject({ stripe_payment_intent_id: 'pi_pinned' });
+
+    expect(await PayCombined.releaseUnconfirmedCombinedSessionsForCustomers(mockPg, [unpinned.customerId], { invalidateLinked: true, payerId }))
+      .toEqual({ released: 1, inFlight: 0 });
+    expect(cancel).toHaveBeenCalledWith('pi_unpinned');
+    expect(await invoiceRow(unpinned.invoiceId)).toMatchObject({ stripe_payment_intent_id: null });
+    // Without the flag (merge and every other caller) a single checkout is left alone, as before.
+    await mockPg('invoices').where({ id: unpinned.invoiceId }).update({ stripe_payment_intent_id: 'pi_unpinned' });
+    cancel.mockClear();
+    expect(await PayCombined.releaseUnconfirmedCombinedSessionsForCustomer(mockPg, unpinned.customerId)).toEqual({ released: 0, inFlight: 0 });
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
+  test('a queued invoice returns to its own scheduled time, and to now only when that time has passed', async () => {
+    const payerId = await payer();
+    const future = new Date(Date.now() + 3 * 86400e3);
+    const past = new Date(Date.now() - 3600e3);
+    const later = await fixture({ link: 'record', status: 'scheduled', invoice: { scheduled_send_at: future } });
+    const overdue = await fixture({ link: 'record', status: 'scheduled', invoice: { scheduled_send_at: past } });
+    await assignJobPayer(later.visitId, payerId);
+    await assignJobPayer(overdue.visitId, payerId);
+    expect(await invoiceRow(later.invoiceId)).toMatchObject({ status: 'draft', scheduled_send_at: null, scheduled_send_error: `payer_billed:${payerId}:queued:at=${future.toISOString()}` });
+    await clearJobPayer(later.visitId);
+    await clearJobPayer(overdue.visitId);
+    const restored = await invoiceRow(later.invoiceId);
+    expect(restored).toMatchObject({ status: 'scheduled', scheduled_send_error: null });
+    expect(new Date(restored.scheduled_send_at).getTime()).toBe(future.getTime());
+    const sooner = await invoiceRow(overdue.invoiceId);
+    expect(sooner.status).toBe('scheduled');
+    expect(new Date(sooner.scheduled_send_at).getTime()).toBeGreaterThan(past.getTime());
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('the payer-activation prelock set covers every non-terminal linked invoice, processing and stamped included', async () => {
+    const Linked = require('../services/visit-linked-invoice-withdrawal');
+    const processing = await fixture({ link: 'record', status: 'processing' });
+    const stamped = await fixture({ link: 'visit', status: 'sent', invoice: { scheduled_send_error: 'payer_billed:1' } });
+    const paid = await fixture({ link: 'record', status: 'paid' });
+    const open = await fixture({ link: 'visit', status: 'sent' });
+    const ids = await Linked.linkedVisitIdsForCustomers(mockPg, [processing.customerId, stamped.customerId, paid.customerId, open.customerId]);
+    // The fence locks the processing invoice's visit and the release locks the stamped one's, both
+    // after the payer row would be taken FOR UPDATE: so both are locked before it. A paid one never is.
+    expect(ids.sort()).toEqual([processing.visitId, stamped.visitId, open.visitId].sort());
+  });
+
   test('a directly linked invoice is withdrawn the same way', async () => {
     const { visitId, invoiceId } = await fixture({ link: 'visit' });
     const payerId = await payer();
@@ -247,7 +339,7 @@ postgres('payer assignment withdraws visit-linked invoices with no packet', () =
 
     await Packets.withdrawPacketInvoicesForOwner(mockPg, { customerId: queued.customerId });
     await Packets.withdrawPacketInvoicesForOwner(mockPg, { customerId: draft.customerId });
-    expect(await invoiceRow(queued.invoiceId)).toMatchObject({ status: 'draft', scheduled_send_at: null, scheduled_send_error: `payer_billed:${payerId}:queued` });
+    expect(await invoiceRow(queued.invoiceId)).toMatchObject({ status: 'draft', scheduled_send_at: null, scheduled_send_error: expect.stringMatching(new RegExp(`^payer_billed:${payerId}:queued:at=\\d{4}-`)) });
     expect(await invoiceRow(draft.invoiceId)).toMatchObject({ status: 'draft', scheduled_send_error: `payer_billed:${payerId}` });
 
     for (const f of [queued, draft]) await mockPg('customers').where({ id: f.customerId }).update({ payer_id: null });
@@ -268,7 +360,7 @@ postgres('payer assignment withdraws visit-linked invoices with no packet', () =
       });
       const smsSentAt = (await invoiceRow(invoiceId)).sms_sent_at;
       await assignJobPayer(visitId, payerId);
-      expect(await invoiceRow(invoiceId)).toMatchObject({ status: 'draft', scheduled_send_error: `payer_billed:${payerId}:queued:m=${marker}` });
+      expect(await invoiceRow(invoiceId)).toMatchObject({ status: 'draft', scheduled_send_error: expect.stringMatching(new RegExp(`^payer_billed:${payerId}:queued:at=[^m]+:m=${marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`)) });
       await clearJobPayer(visitId);
       const back = await invoiceRow(invoiceId);
       expect(back).toMatchObject({ status: 'scheduled', scheduled_send_error: marker });
@@ -288,7 +380,7 @@ postgres('payer assignment withdraws visit-linked invoices with no packet', () =
     await assignJobPayer(visitId, first);
     await mockPg('scheduled_services').where({ id: visitId }).update({ payer_id: second });
     await Packets.reconcileWithdrawnPacketInvoices(mockPg, { scheduledServiceId: visitId });
-    expect(await invoiceRow(invoiceId)).toMatchObject({ scheduled_send_error: `payer_billed:${second}:queued:m=${BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED}` });
+    expect(await invoiceRow(invoiceId)).toMatchObject({ scheduled_send_error: expect.stringMatching(new RegExp(`^payer_billed:${second}:queued:at=[^m]+:m=${BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED}$`)) });
   });
 
   test('the Bill-To fence only counts invoices whose effective owner the change would move', async () => {
