@@ -763,8 +763,8 @@ async function reserveSlot({
   selectedFrequency = '',
   serviceCadences = null,
   // Optional caller-supplied no-booking revalidation, run on the LOCKED estimate row before any hold is
-  // minted - the SAME name and contract as extendReservation's: `(estimateRow) => null | { status, body }`
-  // (may be async). The public /reserve route passes it so a state that appeared after its pre-transaction
+  // minted - the SAME name and contract as extendReservation's: `(estimateRow, trx) => null | { status, body }`
+  // (may be async; `trx` is the reservation transaction, for reads that must be locked with it). The public /reserve route passes it so a state that appeared after its pre-transaction
   // read (trenching review, the contact_review park) cannot consume capacity. Staff / system callers that
   // reserve for an estimate that cannot be parked (one-tap-purchase's own linked draft) omit it.
   revalidateEstimate = null,
@@ -1045,7 +1045,7 @@ async function reserveSlot({
       // Caller-supplied no-booking revalidation on the LOCKED row, before the profile resolve, any capacity
       // check and the hold insert (see the parameter's comment). The route owns the predicate and the bodies.
       if (typeof revalidateEstimate === 'function') {
-        const refusal = await revalidateEstimate(estimate);
+        const refusal = await revalidateEstimate(estimate, trx);
         if (refusal) {
           const err = new Error('estimate cannot be self-booked');
           err.code = 'ESTIMATE_NO_BOOKING';
@@ -2426,7 +2426,7 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
       // viewability predicate above does not re-derive. The route owns the
       // predicate and the response bodies; this only enforces the verdict.
       if (typeof revalidateEstimate === 'function') {
-        const refusal = await revalidateEstimate(estimate);
+        const refusal = await revalidateEstimate(estimate, trx);
         if (refusal) {
           const err = new Error('estimate cannot be self-booked');
           err.code = 'ESTIMATE_NO_BOOKING';

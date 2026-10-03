@@ -1725,7 +1725,15 @@ answers:
   `contact_review` states on the estimate row `reserveSlot` locks, through the same optional
   `revalidateEstimate` callback `extendReservation` takes, before any hold is inserted (a refusal there
   returns the same status and body as the route's own check; the system caller that reserves for its own
-  linked draft, one-tap purchase, omits it); `available-slots` and `find-slots` answer an empty
+  linked draft, one-tap purchase, omits it). That locked check (reserve and extend) reads the phone candidate on the
+  RESERVATION TRANSACTION FOR SHARE NOWAIT (held to commit, so a staff edit of the lone candidate cannot land before
+  the hold insert); NOWAIT because a customer edit's fan-out locks customer then estimate while this transaction
+  already holds the estimate row, so a row another writer holds right now answers the accept's existing retryable
+  `CUSTOMER_BUSY_RETRY` 409 instead of waiting. On the park path `POST /recurring-card-intent` also retires a
+  submitted `replaceSetupIntentId` (the intent a replace-payment-method request abandons) BEFORE the 409, with the
+  accept's own helper and the same 503 `RECURRING_CARD_RETIRE_FAILED` when Stripe cannot confirm;
+  `/card-hold-intent` has no such field. If the client's slot-hold release fails during the transition it retries
+  once and keeps the hold id in the page's pending-recovery ref; `available-slots` and `find-slots` answer an empty
   review shape (`reviewBeforeBooking: true`, `reason: 'contact_review'`, no times); the reminder sweep skips
   it. The legacy server-rendered estimate page is never served for such an estimate: `handleEstimateView` forces it to
 the React page (the `/estimate/` mount falls through to the SPA, the `/api/estimates/` mount redirects to the

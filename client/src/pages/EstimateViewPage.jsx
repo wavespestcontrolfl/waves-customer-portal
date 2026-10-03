@@ -6516,7 +6516,12 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     setSelectedSlotId(null);
     setSelectedSlotMeta(null);
     setPaymentPreference(null);
-    await releaseHeldReservation(heldId);
+    // A release that fails (network / 5xx) leaves the hold live and its id otherwise lost: retry once, and if it
+    // still fails keep the id in the page's existing pending-recovery ref - the same one recoverFromDeadHold
+    // sets before its release and falls back to on a retry - rather than dropping it.
+    let released = await releaseHeldReservation(heldId);
+    if (!released) released = await releaseHeldReservation(heldId);
+    if (!released && heldId) pendingRecoveryHoldRef.current = heldId;
     await loadEstimate({ preserveSelection: true });
     return body?.error || 'A Waves specialist reviews this quote with you and schedules your visit.';
   };

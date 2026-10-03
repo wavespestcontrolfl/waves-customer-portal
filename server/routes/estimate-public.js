@@ -572,12 +572,17 @@ function acceptPhoneVerdictDrifted(estimate, fresh) {
 }
 
 // Read-only. Pass the accept transaction as `database` to keep the in-trx behavior identical.
-async function matchAcceptCustomerByPhone(estimate, database = db, { authoritative = false } = {}) {
+// `lockShare` (a transaction handle): the candidate rows are read FOR SHARE NOWAIT, held to that transaction's end -
+// a staff edit of the lone candidate's email / address waits for the transaction instead of slipping in after the
+// read, and a row another writer already holds fails fast (Postgres 55P03) instead of waiting, because the callers
+// (the slot reserve / extend revalidation) already hold the estimate row and a customer-edit fan-out locks customer
+// then estimate - a blocking take could cycle. Never cached.
+async function matchAcceptCustomerByPhone(estimate, database = db, { authoritative = false, lockShare = false } = {}) {
   if (!estimate?.customer_phone) return { match: null, candidateCount: 0 };
-  const cacheable = database === db && !authoritative && typeof estimate === 'object';
+  const cacheable = database === db && !authoritative && !lockShare && typeof estimate === 'object';
   if (cacheable && acceptPhoneVerdicts.has(estimate)) return acceptPhoneVerdicts.get(estimate);
   const matchDigits = phoneLast10(estimate.customer_phone);
-  const candidates = await database('customers')
+  let candidateQuery = database('customers')
     .where((q) => {
       q.where({ phone: estimate.customer_phone });
       if (matchDigits) {
@@ -587,6 +592,8 @@ async function matchAcceptCustomerByPhone(estimate, database = db, { authoritati
     .whereNull('deleted_at')
     .orderByRaw('(phone = ?) DESC NULLS LAST', [estimate.customer_phone])
     .orderBy('updated_at', 'desc');
+  if (lockShare) candidateQuery = candidateQuery.forShare().noWait();
+  const candidates = await candidateQuery;
   const contradicted = candidates.length === 1 && acceptLoneCandidateContradicted(candidates[0], estimate);
   const verdict = {
     match: pickAcceptCustomerMatch(candidates, estimate),
@@ -611,9 +618,9 @@ function acceptOfficeReviewBody() {
 
 // Preflight verdict for an UNLINKED, phone-bearing estimate (root handle, cached for this request): null, or
 // { rejectedCustomerId } when its lone phone candidate is contradicted. Throws on a failed lookup (callers decide).
-async function acceptPhoneParkedVerdict(estimate) {
+async function acceptPhoneParkedVerdict(estimate, { database = db, lock = false } = {}) {
   if (!estimate || estimate.customer_id || !estimate.customer_phone) return null;
-  const verdict = await matchAcceptCustomerByPhone(estimate);
+  const verdict = await matchAcceptCustomerByPhone(estimate, database, { lockShare: lock });
   return verdict.contradicted ? { rejectedCustomerId: verdict.rejectedCustomerId } : null;
 }
 
@@ -624,11 +631,12 @@ async function acceptPhoneParkedVerdict(estimate) {
 // park verdict. `quoteRequirement` is optional for callers that never resolve it (a surface that doesn't
 // refuse quote-required today keeps not refusing it). Returns null, or { state, ... } with state one of
 // 'quote_required' | 'termite_trenching_review' | 'contact_review' (the last carries rejectedCustomerId, for the
-// office alert only). Throws on a failed phone lookup, like acceptPhoneParkedVerdict (callers decide).
-async function estimatePublicBlockingState(estimate, { estData, quoteRequirement } = {}) {
+// office alert only). `database` + `lock` (a transaction handle, FOR SHARE NOWAIT) are for the slot reserve / extend
+// revalidation on the locked estimate row. Throws on a failed phone lookup, like acceptPhoneParkedVerdict (callers decide).
+async function estimatePublicBlockingState(estimate, { estData, quoteRequirement, database, lock } = {}) {
   if (quoteRequirement?.quoteRequired) return { state: 'quote_required' };
   if (estimateTrenchingReviewRequired(estData || parseEstimateDataSafe(estimate))) return { state: 'termite_trenching_review' };
-  const parked = await acceptPhoneParkedVerdict(estimate);
+  const parked = await acceptPhoneParkedVerdict(estimate, { database, lock });
   return parked ? { state: 'contact_review', rejectedCustomerId: parked.rejectedCustomerId } : null;
 }
 
@@ -30547,6 +30555,7 @@ module.exports.cleanStoredName = cleanStoredName;
 module.exports.matchAcceptCustomerByPhone = matchAcceptCustomerByPhone;
 module.exports.acceptPhoneParkedVerdict = acceptPhoneParkedVerdict;
 module.exports.estimatePublicBlockingState = estimatePublicBlockingState;
+module.exports.retireOrDenyDroppedCapture = retireOrDenyDroppedCapture;
 module.exports.ACCEPT_OFFICE_REVIEW_MESSAGE = ACCEPT_OFFICE_REVIEW_MESSAGE;
 module.exports.acceptOfficeReviewBody = acceptOfficeReviewBody;
 module.exports.acceptLoneCandidateContradicted = acceptLoneCandidateContradicted;

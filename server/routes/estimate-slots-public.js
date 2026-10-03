@@ -58,6 +58,7 @@ const {
   estimatePublicBlockingState,
   acceptOfficeReviewBody,
   ACCEPT_OFFICE_REVIEW_MESSAGE,
+  retireOrDenyDroppedCapture,
   isEstimateCustomerViewable,
   isRodentGuaranteeOnlyEstimate,
   isStructuralOneTimeOnlyEstimate,
@@ -241,6 +242,26 @@ const SLOT_ESTIMATE_COLUMNS = ['id', 'status', 'expires_at', 'archived_at', 'est
 // already makes come first). The same shapes the trenching refusals answer on each path.
 async function contactReviewHold(estimate, opts) {
   return (await estimatePublicBlockingState(estimate, opts))?.state === 'contact_review';
+}
+// The contact_review check on the LOCKED estimate row, inside the reservation transaction (reserve and extend): the
+// phone candidate is read on THAT transaction FOR SHARE NOWAIT, held to its end, so a staff edit of the lone
+// candidate cannot land between this read and the hold insert. NOWAIT, not a blocking lock: the transaction already
+// holds the estimate row and a customer edit's fan-out locks customer THEN estimate, so waiting could cycle; a row
+// someone else holds right now answers the accept's existing retryable refusal instead.
+const CUSTOMER_BUSY_REFUSAL = {
+  status: 409,
+  // The sentence and code the accept already answers a busy customer with (no new wording).
+  body: { error: 'This account is being updated right now \u2014 please retry your acceptance in a moment.', code: 'CUSTOMER_BUSY_RETRY' },
+};
+async function lockedContactReviewRefusal(row, trx) {
+  try {
+    return (await contactReviewHold(row, { database: trx, lock: !!trx }))
+      ? { status: 409, body: acceptOfficeReviewBody() }
+      : null;
+  } catch (err) {
+    if (err?.code === '55P03') return CUSTOMER_BUSY_REFUSAL;
+    throw err;
+  }
 }
 function parkedSlotBrowseBody() {
   return {
@@ -599,10 +620,9 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
         // The same blocking states the checks above refuse, re-judged on the LOCKED row inside the service
         // (an estimate that turned trenching-review or contact_review after the pre-transaction read must
         // not consume capacity).
-        revalidateEstimate: async (row) => {
+        revalidateEstimate: async (row, trx) => {
           if (estimateTrenchingReviewRequired(parseEstimateData(row))) return { status: 409, body: TRENCHING_REVIEW_409 };
-          if (await contactReviewHold(row)) return { status: 409, body: acceptOfficeReviewBody() };
-          return null;
+          return lockedContactReviewRefusal(row, trx);
         },
       });
       return res.status(201).json({
@@ -819,7 +839,20 @@ router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) =>
       return res.status(409).json(TRENCHING_REVIEW_409);
     }
     // B18 park: no card is captured for an estimate whose phone belongs to another customer (see card-hold-intent).
-    if (await contactReviewHold(estimate, { estData, quoteRequirement })) return res.status(409).json(acceptOfficeReviewBody());
+    if (await contactReviewHold(estimate, { estData, quoteRequirement })) {
+      // A replace-payment-method request names an already-succeeded capture (`replaceSetupIntentId`) the client drops
+      // on this 409: retire it here (main's own helper, the one the accept's park uses) BEFORE the 409, or the
+      // abandoned intent stays eligible for later recovery. Stripe unable to confirm = the existing 503.
+      const parkedReplaceId = typeof req.body?.replaceSetupIntentId === 'string' ? req.body.replaceSetupIntentId.trim() : '';
+      if (parkedReplaceId) {
+        try {
+          await retireOrDenyDroppedCapture(estimate, parkedReplaceId);
+        } catch (retireErr) {
+          return res.status(503).json({ error: retireErr.message, code: retireErr.code || 'RECURRING_CARD_RETIRE_FAILED' });
+        }
+      }
+      return res.status(409).json(acceptOfficeReviewBody());
+    }
 
     // The Auto Pay card only applies to the recurring lane — a one-time
     // request keeps its own card-hold intent endpoint.
@@ -997,7 +1030,7 @@ router.post('/:token/reserve/:scheduledServiceId/extend', reserveLimiter, async 
     // the service under the estimate's row lock (codex r6 P1) — the route's
     // read can go stale while the txn waits, and these shapes live in
     // estimate_data, which the locked viewability check does not re-derive.
-    const noBookingRefusal = async (row) => {
+    const noBookingRefusal = async (row, trx) => {
       // The suppression gate belongs in the locked recheck too (codex r8 P2):
       // staff can reshape an estimate into a Bermuda-suppression shape after
       // the pre-txn rejectIneligibleEstimate passed, and extending then
@@ -1037,8 +1070,7 @@ router.post('/:token/reserve/:scheduledServiceId/extend', reserveLimiter, async 
         return { status: 409, body: TRENCHING_REVIEW_409 };
       }
       // The locked row (the service re-runs this under the estimate's row lock) carries the phone columns too.
-      if (await contactReviewHold(row)) return { status: 409, body: acceptOfficeReviewBody() };
-      return null;
+      return lockedContactReviewRefusal(row, trx);
     };
     const preTxnRefusal = await noBookingRefusal(estimate);
     if (preTxnRefusal) return res.status(preTxnRefusal.status).json(preTxnRefusal.body);

@@ -360,7 +360,7 @@ describe('slot reservation helpers', () => {
         const scheduledBuilders = [makeLiveHoldsBuilder([]), makeConflictBuilder(null), makeGlobalProbeBuilder([]), insertBuilder];
         const trx = makeTrx({ estimateBuilder, technicianBuilder: makeTechnicianBuilder(), scheduledBuilders });
         db.transaction = jest.fn(async (callback) => callback(trx));
-        return { insertBuilder, estimateBuilder };
+        return { insertBuilder, estimateBuilder, trx };
       };
       const slotId = signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '09:00', techId: 'tech-1', durationMinutes: 90 });
       const refusal = { status: 409, body: { code: 'ACCEPT_NEEDS_OFFICE_REVIEW', reviewBeforeBooking: true, reason: 'contact_review' } };
@@ -372,7 +372,9 @@ describe('slot reservation helpers', () => {
         .rejects.toMatchObject({ code: 'ESTIMATE_NO_BOOKING', response: refusal });
       expect(refused.insertBuilder.insert).not.toHaveBeenCalled();
       // It was handed the LOCKED row (the one this transaction read FOR UPDATE), before the insert.
-      expect(revalidate).toHaveBeenCalledWith(expect.objectContaining({ id: 'estimate-456', customer_phone: '(941) 555-0123' }));
+      // ...plus the reservation TRANSACTION as the second argument, for reads that must be locked with it.
+      expect(revalidate).toHaveBeenCalledWith(expect.objectContaining({ id: 'estimate-456', customer_phone: '(941) 555-0123' }), expect.anything());
+      expect(revalidate.mock.calls[0][1]).toBe(refused.trx);
       expect(refused.estimateBuilder.forUpdate).toHaveBeenCalled();
 
       // A null verdict (and an absent callback, every other caller) reserves exactly as before.

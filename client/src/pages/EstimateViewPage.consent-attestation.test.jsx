@@ -109,9 +109,18 @@ describe('EstimateViewPage accept consent attestation', () => {
     expect(src).toMatch(/if \(body\.code === 'ACCEPT_NEEDS_OFFICE_REVIEW'\) \{[^}]*await enterContactReviewRef\.current\(body\);\s*return;\s*\}\s*const message = body\.error \|\| 'Unable to reserve this slot\.';/);
   });
 
+  it('B18: a failed hold release in the transition keeps the hold id in the existing pending-recovery ref (after one retry), never drops it', () => {
+    expect(src).toMatch(
+      /let released = await releaseHeldReservation\(heldId\);\s*if \(!released\) released = await releaseHeldReservation\(heldId\);\s*if \(!released && heldId\) pendingRecoveryHoldRef\.current = heldId;\s*await loadEstimate\(\{ preserveSelection: true \}\);/,
+    );
+    // The ref it uses is the recovery's own: set before recoverFromDeadHold's release and its retry fallback.
+    expect(src).toMatch(/pendingRecoveryHoldRef\.current = deadHoldId;/);
+    expect(src).toMatch(/reservationRef\.current\?\.scheduledServiceId\s*\|\| pendingRecoveryHoldRef\.current/);
+  });
+
   it('B18: the one transition drops every captured/minted card, releases the slot hold and refetches /data (the review state)', () => {
     expect(src).toMatch(
-      /enterContactReviewRef\.current = async \(body\) => \{\s*recurringCardSetupIntentIdRef\.current = null;\s*setInlineCardIntent\(null\);\s*recurringCardIntentOpenRef\.current = false;\s*setRecurringCardIntent\(null\);\s*cardHoldSetupIntentIdRef\.current = null;\s*setCardHoldIntent\(null\);[\s\S]{0,500}await releaseHeldReservation\(heldId\);\s*await loadEstimate\(\{ preserveSelection: true \}\);/,
+      /enterContactReviewRef\.current = async \(body\) => \{\s*recurringCardSetupIntentIdRef\.current = null;\s*setInlineCardIntent\(null\);\s*recurringCardIntentOpenRef\.current = false;\s*setRecurringCardIntent\(null\);\s*cardHoldSetupIntentIdRef\.current = null;\s*setCardHoldIntent\(null\);[\s\S]{0,900}await releaseHeldReservation\(heldId\);[\s\S]{0,400}await loadEstimate\(\{ preserveSelection: true \}\);/,
     );
   });
 

@@ -378,7 +378,7 @@ describe('extend route mirrors the /reserve no-booking guards', () => {
     ['isRodentGuaranteeOnlyEstimate(row, parseEstimateData(row))', 'invoiceOnlyAcceptance: true'],
     ['estimateTrenchingReviewRequired(parseEstimateData(row))', 'TRENCHING_REVIEW_409'],
     // B18 park: judged on the LOCKED row too (same predicate), after the existing review refusals.
-    ['contactReviewHold(row)', 'acceptOfficeReviewBody()'],
+    ['lockedContactReviewRefusal(row, trx)', 'lockedContactReviewRefusal'],
   ])('%s is refused before the service call', (guard, body) => {
     expect(guardBlock).toContain(guard);
     expect(guardBlock).toContain(body);
@@ -431,10 +431,10 @@ describe('extendReservation enforces the injected no-booking verdict under the l
 
   test('the hook runs on the LOCKED estimate row and throws ESTIMATE_NO_BOOKING', () => {
     expect(fn).toContain('revalidateEstimate = null');
-    expect(fn).toContain('const refusal = await revalidateEstimate(estimate);');
+    expect(fn).toContain('const refusal = await revalidateEstimate(estimate, trx);');
     expect(fn).toContain("err.code = 'ESTIMATE_NO_BOOKING';");
     // After the FOR UPDATE read of the estimate, not before it.
-    expect(fn.indexOf("const estimate = await trx('estimates')")).toBeLessThan(fn.indexOf('const refusal = await revalidateEstimate(estimate);'));
+    expect(fn.indexOf("const estimate = await trx('estimates')")).toBeLessThan(fn.indexOf('const refusal = await revalidateEstimate(estimate, trx);'));
   });
 
   test('no route policy leaks into the service', () => {

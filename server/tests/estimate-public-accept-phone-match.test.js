@@ -7,6 +7,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 // here; only the DB and unrelated services are faked.
 
 let mockDbFixtures = {};
+let mockChainCalls = [];
 jest.mock('../models/db', () => {
   // Chainable + thenable: the phone sweep awaits the chain itself, the policy's
   // live-row reads end in .first().
@@ -22,7 +23,9 @@ jest.mock('../models/db', () => {
       if (typeof arg === 'function') arg(c);
       return c;
     };
-    for (const m of ['orWhereRaw', 'whereRaw', 'whereNot', 'whereNotNull', 'whereNull', 'whereIn', 'orderBy', 'orderByRaw', 'forUpdate']) c[m] = () => c;
+    for (const m of ['orWhereRaw', 'whereRaw', 'whereNot', 'whereNotNull', 'whereNull', 'whereIn', 'orderBy', 'orderByRaw', 'forUpdate', 'forShare', 'noWait']) {
+      c[m] = () => { mockChainCalls.push(`${table}.${m}`); return c; };
+    }
     return c;
   };
   const mock = jest.fn((table) => chain(table));
@@ -82,6 +85,7 @@ function janeEstimate(overrides = {}) {
 beforeEach(() => {
   jest.clearAllMocks();
   mockDbFixtures = {};
+  mockChainCalls = [];
 });
 
 describe('matchAcceptCustomerByPhone: a lone phone hit the estimate contradicts', () => {
@@ -192,6 +196,27 @@ describe('several phone candidates (unchanged from before)', () => {
   it('the lone-candidate rule is not applied to several candidates, even when each would contradict alone', async () => {
     mockDbFixtures['customers:list'] = [LANDLORD, RENTAL];
     expect((await acceptPhoneParkedVerdict(janeEstimate()))).toBeNull();
+  });
+});
+
+describe('the locked read for the slot reserve / extend revalidation (B18)', () => {
+  it('lock:true reads the candidate rows on the GIVEN transaction FOR SHARE NOWAIT (never cached); without it there is no lock clause', async () => {
+    mockDbFixtures['customers:list'] = [BOB];
+    const dbMock = require('../models/db');
+    const trx = jest.fn((table) => { dbMock.mock.calls.push([`trx:${table}`]); return dbMock(table); });
+    const est = janeEstimate();
+    expect(await acceptPhoneParkedVerdict(est, { database: trx, lock: true })).toEqual({ rejectedCustomerId: 'cust-bob' });
+    expect(trx).toHaveBeenCalledWith('customers');
+    expect(mockChainCalls).toEqual(expect.arrayContaining(['customers.forShare', 'customers.noWait']));
+    // A second locked read is a fresh read (not the request's cached preflight verdict).
+    mockChainCalls = [];
+    mockDbFixtures['customers:list'] = [{ ...BOB, email: 'jane@example.com' }]; // edited to agree
+    expect(await acceptPhoneParkedVerdict(est, { database: trx, lock: true })).toBeNull();
+    expect(mockChainCalls).toEqual(expect.arrayContaining(['customers.forShare', 'customers.noWait']));
+    // The unlocked preflight read takes no lock.
+    mockChainCalls = [];
+    await acceptPhoneParkedVerdict(janeEstimate({ id: 'est-other' }));
+    expect(mockChainCalls).not.toContain('customers.forShare');
   });
 });
 

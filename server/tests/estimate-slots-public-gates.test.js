@@ -70,6 +70,7 @@ jest.mock('../routes/estimate-public', () => ({
   resolveEstimateQuoteRequirement: jest.fn(() => ({ quoteRequired: false })),
   estimatePublicBlockingState: jest.fn(async () => null),
   ACCEPT_OFFICE_REVIEW_MESSAGE: 'parked-message',
+  retireOrDenyDroppedCapture: jest.fn(async () => undefined),
   acceptOfficeReviewBody: jest.fn(() => ({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW', reviewBeforeBooking: true, reason: 'contact_review', error: 'parked' })),
   verifyEstimateAskToken: jest.fn(() => true),
   handleEstimateAsk: jest.fn((req, res) => res.json({})),
@@ -417,6 +418,71 @@ describe('B18 park: a parked estimate (its phone belongs to another customer) ca
     await expect(predicate({ ...PARKED_ESTIMATE, estimate_data: {} })).resolves.toBeNull();
     estimateTrenchingReviewRequired.mockReturnValueOnce(true);
     await expect(predicate({ ...PARKED_ESTIMATE, estimate_data: {} })).resolves.toMatchObject({ status: 409, body: { reason: 'termite_trenching_review' } });
+  });
+
+  describe('a replace-payment-method request on the park path retires the submitted intent first', () => {
+    const { retireOrDenyDroppedCapture } = require('../routes/estimate-public');
+    beforeEach(() => { retireOrDenyDroppedCapture.mockClear(); retireOrDenyDroppedCapture.mockResolvedValue(undefined); });
+
+    test('retires replaceSetupIntentId (trimmed, for THIS estimate) BEFORE the 409', async () => {
+      currentEstimate = PARKED_ESTIMATE;
+      estimatePublicBlockingState.mockResolvedValueOnce(PARKED);
+      const res = await post('recurring-card-intent', { replaceSetupIntentId: ' seti_old ' });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW' });
+      expect(retireOrDenyDroppedCapture).toHaveBeenCalledTimes(1);
+      expect(retireOrDenyDroppedCapture).toHaveBeenCalledWith(PARKED_ESTIMATE, 'seti_old');
+    });
+
+    test('Stripe cannot confirm: the existing 503, never the 409 (the client keeps nothing it cannot retry)', async () => {
+      currentEstimate = PARKED_ESTIMATE;
+      estimatePublicBlockingState.mockResolvedValueOnce(PARKED);
+      retireOrDenyDroppedCapture.mockRejectedValueOnce(Object.assign(new Error('We could not update your payment terms just now. Please try again in a moment.'), { code: 'RECURRING_CARD_RETIRE_FAILED' }));
+      const res = await post('recurring-card-intent', { replaceSetupIntentId: 'seti_old' });
+      expect(res.status).toBe(503);
+      expect(await res.json()).toMatchObject({ code: 'RECURRING_CARD_RETIRE_FAILED' });
+    });
+
+    test('no replace intent = no Stripe call; /card-hold-intent has no equivalent field, so it never retires one', async () => {
+      currentEstimate = PARKED_ESTIMATE;
+      estimatePublicBlockingState.mockResolvedValueOnce(PARKED);
+      expect((await post('recurring-card-intent', {})).status).toBe(409);
+      estimatePublicBlockingState.mockResolvedValueOnce(PARKED);
+      expect((await post('card-hold-intent', { replaceSetupIntentId: 'seti_old' })).status).toBe(409);
+      expect(retireOrDenyDroppedCapture).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('the reserve / extend locked callback reads the phone candidate on the reservation transaction, FOR SHARE NOWAIT', () => {
+    const TRX = { isTransaction: true };
+    const lockedRow = { ...PARKED_ESTIMATE, estimate_data: {} };
+    const capture = async () => {
+      let predicate;
+      currentEstimate = PARKED_ESTIMATE;
+      estimatePublicBlockingState.mockResolvedValueOnce(null);
+      slotReservation.reserveSlot.mockImplementationOnce(async (args) => { predicate = args.revalidateEstimate; return { scheduledServiceId: 'ss-1', expiresAt: null }; });
+      await post('reserve', { slotId: '2030-01-01_09-00_unassigned' });
+      return predicate;
+    };
+
+    test('the helper gets the reservation transaction and the lock flag; a candidate edited to contradict refuses', async () => {
+      const predicate = await capture();
+      estimatePublicBlockingState.mockClear();
+      estimatePublicBlockingState.mockResolvedValueOnce(PARKED);
+      await expect(predicate(lockedRow, TRX)).resolves.toMatchObject({ status: 409, body: { code: 'ACCEPT_NEEDS_OFFICE_REVIEW' } });
+      expect(estimatePublicBlockingState).toHaveBeenCalledWith(lockedRow, expect.objectContaining({ database: TRX, lock: true }));
+      estimatePublicBlockingState.mockResolvedValueOnce(null);
+      await expect(predicate(lockedRow, TRX)).resolves.toBeNull();
+    });
+
+    test('a customer row another writer holds right now (55P03) is the accept\'s existing retryable refusal, not a wait and not a pass', async () => {
+      const predicate = await capture();
+      estimatePublicBlockingState.mockRejectedValueOnce(Object.assign(new Error('could not obtain lock'), { code: '55P03' }));
+      await expect(predicate(lockedRow, TRX)).resolves.toMatchObject({ status: 409, body: { code: 'CUSTOMER_BUSY_RETRY' } });
+      // Any other failure still propagates (the route's own 500).
+      estimatePublicBlockingState.mockRejectedValueOnce(new Error('db down'));
+      await expect(predicate(lockedRow, TRX)).rejects.toThrow('db down');
+    });
   });
 
   test('available-slots answers the review shape (no times) and never reaches the slot service', async () => {
