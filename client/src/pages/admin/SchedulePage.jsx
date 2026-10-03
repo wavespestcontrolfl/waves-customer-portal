@@ -3516,6 +3516,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     let comboSeparatedThisSave = false;
     let comboDetailsSaved = false;
     let comboPartlyMoved = false;
+    let comboMoveUnknown = false;
     try {
       // Only manage add-on lines when there are any to send (or any existed
       // originally, so removals persist). Otherwise keep the legacy payload.
@@ -3738,6 +3739,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               ? { expectVisit: { id: comboVisit.id, memberIds: comboVisit.memberIds, liveCount: comboVisit.liveCount } }
               : {}),
           }),
+        }).catch((moveErr) => {
+          // Only a 4xx is a refusal (nothing moved). A lost response or a
+          // server error can come after the move committed.
+          if (!(moveErr.status >= 400 && moveErr.status < 500)) comboMoveUnknown = true;
+          throw moveErr;
         });
         // 200 with needsAttention = only part of the stop moved (a sibling
         // stayed behind, or the visit record was not retargeted). Not a
@@ -3922,7 +3928,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       // after it fails, say what already happened — every branch below — so
       // nobody re-does the move or closes on an unnoticed split.
       const committed = comboDetailsSaved
-        ? (comboPartlyMoved ? "The other changes were saved. " : "The other changes were saved, but the stop was not moved. ")
+        ? (comboPartlyMoved ? "The other changes were saved. "
+          : comboMoveUnknown ? "The other changes were saved. The move did not confirm, so the stop may or may not have moved: check the schedule, and save again if it is still at its old time (the customer is not texted twice). "
+            : "The other changes were saved, but the stop was not moved. ")
         : (comboSeparatedThisSave ? "This service was separated from the stop, but the other changes were not saved. " : "");
       const setSaveError = (message) => setSaveErrorState(committed + message);
       const ack = parseSeriesAckError(e);

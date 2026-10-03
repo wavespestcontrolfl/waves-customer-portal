@@ -508,3 +508,17 @@ it('a shared stop the form did not know about: the server refusal re-reads the s
   await waitFor(() => expect(writes()).toHaveLength(3));
   expect(writeUrls()).toEqual([PUT, PUT, MOVE]);
 });
+
+it('a move that did not confirm (lost response or server error) is never reported as "not moved"', async () => {
+  fetch.mockImplementation(async (url) => {
+    if (String(url).includes('/reschedule')) throw new TypeError('Failed to fetch');
+    return okJson(url);
+  });
+  const dialog = openCombo();
+  setDate(dialog, '2035-01-03');
+  await clickSave();
+  const alert = await screen.findByRole('alert');
+  expect(alert).toHaveTextContent('The other changes were saved. The move did not confirm, so the stop may or may not have moved: check the schedule');
+  expect(alert).not.toHaveTextContent('but the stop was not moved');
+});
+
