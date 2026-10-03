@@ -176,6 +176,9 @@ const LANE_RUNTIME = {
   // M3 (Codex r20): the public analyzer's fallback path converts analyzePhoto() into report findings it persists and teases without staff review.
   lawn_assess: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id', maturity: 'M3' },
   lawn_visit_assessment: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id', maturity: 'M2' },
+  // GATE_LAWN_PAIRED_RECHECK (dark, owner ruling 2026-09-29 round 3b): one background call per visit after the memory freezes;
+  // a closed-enum verdict is written into the frozen visit memory and read by the progress engine (no customer text); a miss writes nothing and never fails a render.
+  lawn_paired_recheck: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
   // GATE_TS_WATCH_LIST (dark): the T&S sheet's watch-signal read, keys only, shown to the technician and
   // never to a customer; Gemini -> OpenAI in-request with a hard 20 s bound, a miss shows the sheet no read.
   ts_watch_signals: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
@@ -264,10 +267,6 @@ const LANE_RUNTIME = {
   // sends it in the customer completion SMS with no approval step (Codex r15).
   completion_recap: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report', maturity: 'M3' },
   lawn_visit_narratives: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report' },
-  // event: the half-hourly sweep returns cached briefs unchanged, so a stable
-  // route (or a day with no eligible visits) makes no model call.
-  // M3 (Codex r21): the generator writes body + provenance straight into scheduled_services.pre_service_brief; no approval boundary.
-  previsit_brief: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'retrieval_qa', maturity: 'M3' },
   // GATE_FAST_COMPLETE_REPORT: reads where the technician treated and the
   // pests they named from their own note, each fact quoted word for word;
   // the sheet shows what was heard and the technician sends it with the

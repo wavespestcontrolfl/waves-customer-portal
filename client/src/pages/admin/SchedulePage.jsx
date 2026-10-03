@@ -1,4 +1,4 @@
-import LawnVisitReview, { createVisitReview, visitReviewPayload } from "../../components/lawn/LawnVisitReview";
+import LawnAssessmentCompletionBlock, { LAWN_ASSESSMENT_METRICS } from "../../components/lawn/LawnAssessmentCompletionBlock";
 import PropertyServiceAreas from "../../components/tech/PropertyServiceAreas";
 import lawnScores from '@lawn-scores';
 import { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } from '@legacy-visit-money-submission';
@@ -1342,6 +1342,7 @@ export const COMPLETION_RESUME_OWED_CODES = new Set([
   "setup_fee_claim_in_flight",           // another closeout of the series is billing its setup fee; the resume re-reads the claim
   "setup_fee_park_failed",               // the setup fee could not be parked for the office; the resume parks it
   "deferred_prepay_lookup_failed",       // the deferred annual-prepay hold could not be read; the resume re-reads it
+  "membership_dues_coverage_unverified", // the month's dues could not be checked / the dues mint was refused retryably (month busy, rate or lane moved); the resume re-reads coverage and mints
 ]);
 export function completionResumeOwedError(error) {
   // The 503 is part of the contract: a reused code on any other status is
@@ -1933,7 +1934,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   });
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
-  const [saveError, setSaveError] = useState("");
+  const [saveError, setSaveErrorState] = useState("");
+  const setSaveError = setSaveErrorState;
   const saveErrorRef = useRef(null);
   useEffect(() => { saveErrorRef.current?.focus(); }, [saveError]);
   // "Apply price & service change to" — series rows only, rendered only when
@@ -2166,6 +2168,78 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   ].join("|");
   const openedSlotKey = useRef(slotKey).current;
   const slotEdited = slotKey !== openedSlotKey;
+  // A stop shared by two or more services (lawn + pest). update-details
+  // writes ONE row, so the server refuses a date/time change on it. The
+  // operator chooses here (owner ruling 2026-10-03: a combo can be moved
+  // together or separated from this form):
+  // - together: the other changes are saved first, on the stop's current
+  //   slot; the schedule's whole-stop move runs LAST and sends the one
+  //   customer text, so the text describes the saved appointment and a
+  //   failed save has moved nothing.
+  // - separate: the service is split off, then saved as an ordinary edit.
+  // The stop is read live on open, so every screen that opens this form
+  // (Day, 5-Day, Week, List, the dispatch board) sees a combo the same way;
+  // `service.visit` (the Day feed) only fills the moment before the read.
+  // Not known to be a combo = today's behavior, server guard included.
+  const [comboVisitInfo, setComboVisitInfo] = useState(service.visit || null);
+  // Resolves to the live summary (null = not shared), or undefined when the
+  // read failed or answered without one. A failed read on open is not fatal:
+  // the server still refuses a slot change on a shared stop, and that
+  // refusal re-reads the stop and shows the choice (handleSave's catch).
+  const readComboVisit = () => adminFetch(`/admin/schedule/${service.id}/visit-summary`)
+    .then((r) => (r && Object.prototype.hasOwnProperty.call(r, "visit") ? (r.visit || null) : undefined))
+    .catch(() => undefined);
+  useEffect(() => {
+    let live = true;
+    readComboVisit().then((visit) => { if (live && visit !== undefined) setComboVisitInfo(visit); });
+    return () => { live = false; };
+  }, [service.id]);
+  // Counted by LIVE services: a stop whose other service is cancelled or
+  // done is an ordinary single visit (the server moves it as one row).
+  const comboCount = Number(comboVisitInfo?.liveCount ?? comboVisitInfo?.serviceCount);
+  const comboVisit = comboVisitInfo && comboVisitInfo.id && comboCount > 1 ? comboVisitInfo : null;
+  const [comboMove, setComboMove] = useState("together");
+  // What this modal already did, so a retried save never splits twice and
+  // never re-posts details it already saved (see handleSave).
+  const comboDoneRef = useRef({ separated: false, details: null });
+  // The slot and technician the form opened on: where the stop IS until the
+  // whole-stop move, the last write of a save, succeeds and the form closes.
+  const comboOpened = useRef({
+    date: form.scheduledDate,
+    start: String(form.windowStart || "").slice(0, 5),
+    end: String(form.windowEnd || "").slice(0, 5),
+    duration: slotCheckDuration,
+    technicianId: form.technicianId,
+    serviceType: form.serviceType,
+    serviceKey: form.serviceKey,
+  }).current;
+  const comboStart = String(form.windowStart || "").slice(0, 5);
+  const comboEnd = String(form.windowEnd || "").slice(0, 5);
+  const comboPlaceChanged = form.scheduledDate !== comboOpened.date || comboStart !== comboOpened.start;
+  const spanOf = (start, end) => {
+    const [h1, m1] = String(start).split(":").map(Number);
+    const [h2, m2] = String(end).split(":").map(Number);
+    return [h1, m1, h2, m2].every(Number.isFinite) ? h2 * 60 + m2 - (h1 * 60 + m1) : null;
+  };
+  // The whole-stop move keeps every service's own length.
+  // A stop that opened with no time has no span to keep: giving it a time
+  // (a suggested slot fills both bounds) is a move, not a length change.
+  const comboOpenedSpan = spanOf(comboOpened.start, comboOpened.end);
+  const comboLengthChanged = slotCheckDuration !== comboOpened.duration
+    || (comboOpenedSpan != null && spanOf(comboStart, comboEnd) !== comboOpenedSpan);
+  const comboSlotChanged = !!comboVisit && !comboDoneRef.current.separated && (comboPlaceChanged || comboLengthChanged);
+  // The whole-stop move re-dates THIS visit's stop only: the server never
+  // widens a grouped recurring visit to its series (admin-dispatch.js
+  // seriesPolicy 'single'), so no later visit moves and no series ack is
+  // owed. A technician change rides the same move: this visit only.
+  // Separate leaves an ordinary row, with the ordinary series rules.
+  const comboTogether = comboSlotChanged && comboMove === "together";
+  const comboTechChanged = form.technicianId !== comboOpened.technicianId;
+  // A different service or address can take this service off the shared stop
+  // (the server regroups by family and by property), which "together" cannot
+  // then honour.
+  const comboRegroupingEdit = form.serviceType !== comboOpened.serviceType
+    || form.serviceKey !== comboOpened.serviceKey || !!selectedPropertyId;
   // A VERIFIED miss only (never "could not check"): Save stays enabled —
   // the strip is advisory — but says what it is about to do.
   const routeMissVerdict = slotEdited && availabilityVerdict(availability, stripCurrent)?.tone === "miss";
@@ -3137,6 +3211,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     (form.scheduledDate !== initialScheduledDate ||
       (form.windowStart || "") !== initialWindowStart) &&
     !!form.windowStart;
+  const moveNotifyOffered = scheduleMoved;
 
   // See lineDiscountSaveBlocked's own comment for the compounding hazard
   // this guards against. Also the ONE condition (interaction between the
@@ -3315,6 +3390,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     recurringNth, recurringWeekday, recurringIntervalDays, skipWeekends, weekendShift,
     discountType, discountAmount, discountPresetId, storedDiscountCleared, createInvoice, assignmentScope,
     priceServiceScope, timeOnSiteMinutes, reentryExterior, reentryInterior,
+    // How a combo stop moves (together / separate) decides which write runs.
+    comboMove,
   };
   const saveInputsDrifted = (before) => {
     const after = saveInputsRef.current;
@@ -3335,6 +3412,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     savingRef.current = true;
     setSaveError("");
     setSaving(true);
+    const inputsAtSaveStart = saveInputsRef.current;
     // Revalidate right before POSTING money — the hook polls, but a gate
     // flip between the last probe and this click would still save under the
     // semantics the preview used. Codex pre-push audit P1 (round 4 on
@@ -3439,6 +3517,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         }
       }
     }
+    let comboSeparatedThisSave = false;
+    let comboDetailsSaved = false;
+    let comboPartlyMoved = false;
+    let comboMoveUnknown = false;
     try {
       // Only manage add-on lines when there are any to send (or any existed
       // originally, so removals persist). Otherwise keep the legacy payload.
@@ -3449,16 +3531,68 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       // payload's gross convention apart from MobileServiceEditModal's net
       // convention by the field's presence, never by guessing from the number.
       const primaryLinePriceValue = parseFinitePrice(form.price) ?? undefined;
-      const notifyOnMove = scheduleMoved && notificationType === "sms";
-      const result = await adminFetch(`/admin/schedule/${service.id}/update-details`, {
+      const notifyOnMove = moveNotifyOffered && notificationType === "sms";
+      // Separate: the split runs first, then the PUT is an ordinary edit of
+      // an ordinary row (it moves it, texts and carries the series ack).
+      if (comboSlotChanged && comboMove === "separate") {
+        try {
+          await adminFetch(`/admin/visits/${comboVisit.id}/split`, {
+            method: "POST", body: JSON.stringify({ serviceId: service.id }),
+          });
+        } catch (splitErr) {
+          // An earlier split whose response was lost has already taken this
+          // service off the stop; the repeat is refused ("not a member").
+          // Read the stop: no longer on it = separated, carry on.
+          const now = await readComboVisit();
+          const stillOnStop = now === undefined
+            || (now && String(now.id) === String(comboVisit.id) && Number(now.liveCount ?? now.serviceCount) > 1);
+          if (stillOnStop) throw splitErr;
+        }
+        comboDoneRef.current.separated = true;
+        comboSeparatedThisSave = true;
+        // A field edited while the split was in flight is not in this
+        // closure's payload: never post the stale values over it.
+        if (saveInputsDrifted(inputsAtSaveStart)) {
+          throw new Error("The form changed while that was saving. Review it and save again.");
+        }
+      }
+      if (comboTogether && comboLengthChanged) {
+        throw new Error("Moving the whole stop keeps each service's length. Save the move first, or choose Separate to change this service's length.");
+      }
+      if (comboTogether && comboRegroupingEdit) {
+        throw new Error("A different service or address can take this service off the shared stop. Save that change on its own first, or choose Separate.");
+      }
+      // Together: this PUT saves everything EXCEPT the move. It sends no
+      // date, window or technician at all (never a copy of what the form
+      // opened on, which another operator may have changed since), so it
+      // moves nothing, reassigns nothing, texts nobody and owes no series
+      // ack; the whole-stop move below does those.
+      const comboMoveAfter = comboTogether && comboPlaceChanged;
+      // A retry after the move was refused: the details this modal already
+      // saved are not posted again unless they changed (the operator may
+      // only have picked another time).
+      const detailsOf = (inputs) => {
+        const { form: f, comboMove: _move, notificationType: _notify, seriesPreviewValue: _series, assignmentScope: _scope, ...rest } = inputs;
+        const { scheduledDate: _d, windowStart: _s, windowEnd: _e, technicianId: _t, ...formRest } = f;
+        return { rest, form: JSON.stringify(formRest) };
+      };
+      const savedDetails = comboDoneRef.current.details;
+      const detailsAlreadySaved = comboMoveAfter && !!savedDetails && savedDetails.takePayment === takePayment && (() => {
+        const a = detailsOf(savedDetails.inputs);
+        const b = detailsOf(inputsAtSaveStart);
+        return a.form === b.form && Object.keys(a.rest).every((k) => Object.is(a.rest[k], b.rest[k]));
+      })();
+      comboDetailsSaved = detailsAlreadySaved;
+      const result = detailsAlreadySaved ? savedDetails.result : await adminFetch(`/admin/schedule/${service.id}/update-details`, {
         method: "PUT",
         body: JSON.stringify({
           ...form,
+          ...(comboMoveAfter ? { scheduledDate: undefined, windowStart: undefined, windowEnd: undefined, technicianId: undefined } : {}),
           ...(selectedPropertyId ? { propertyId: selectedPropertyId } : {}),
-          notifyCustomer: notifyOnMove || undefined,
+          notifyCustomer: (!comboMoveAfter && notifyOnMove) || undefined,
           // Collective-move ack — bound to the previewed occurrence set the
           // modal showed (empty when this save is not a collective move).
-          ...seriesAckPayload(seriesPreview.preview),
+          ...(comboMoveAfter ? {} : seriesAckPayload(seriesPreview.preview)),
           // Sent unconditionally (see primaryLinePriceValue's own comment) —
           // NOT only when sendAddons — so the server can tell this payload's
           // gross-Price convention apart from MobileServiceEditModal's net
@@ -3551,7 +3685,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           estimatedPrice: parseFinitePrice(form.price) ?? undefined,
           createInvoice: takePayment || createInvoice,
           assignmentScope:
-            form.technicianId !== (service.technicianId || "")
+            !comboMoveAfter && form.technicianId !== (service.technicianId || "")
               ? assignmentScope
               : undefined,
           priceServiceScope: priceServiceScopeActive
@@ -3583,6 +3717,61 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               : typeof appointmentTotal === "number" ? appointmentTotal : undefined,
         }),
       });
+      let comboMoveWarnings = [];
+      if (comboMoveAfter) {
+        comboDetailsSaved = true;
+        comboDoneRef.current.details = { inputs: inputsAtSaveStart, takePayment, result };
+        // A field edited while the details were saving is not in this
+        // closure's move: stop before moving the stop to a stale time.
+        if (saveInputsDrifted(inputsAtSaveStart)) {
+          throw new Error("The form changed while that was saving. Review it and save again.");
+        }
+        const moved = await adminFetch(`/admin/dispatch/${service.id}/reschedule`, {
+          method: "POST",
+          body: JSON.stringify({
+            newDate: form.scheduledDate,
+            // A stop that had no time takes the start only: each service's
+            // end is derived from its own length.
+            ...(comboStart ? { newWindow: { start: comboStart, end: (comboOpenedSpan != null && comboEnd) || undefined }, deriveWindowFromCurrentVisit: true } : {}),
+            notifyCustomer: notifyOnMove,
+            // A technician change rides the whole-stop move, so every
+            // service lands on the new technician; on the PUT it would
+            // reassign this row only and detach it from the stop.
+            ...(comboTechChanged ? { technicianId: form.technicianId || null } : {}),
+            // The stop the operator was shown. The server refuses the move
+            // if a service joined or left it since, and does not text again
+            // when a repeated request finds the stop already moved.
+            ...(Array.isArray(comboVisit.memberIds)
+              ? { expectVisit: { id: comboVisit.id, memberIds: comboVisit.memberIds, liveCount: comboVisit.liveCount, ...(Array.isArray(comboVisit.liveMemberIds) ? { liveMemberIds: comboVisit.liveMemberIds } : {}) } }
+              : {}),
+          }),
+        }).catch((moveErr) => {
+          // Only a 4xx is a refusal (nothing moved). A lost response or a
+          // server error can come after the move committed.
+          if (!(moveErr.status >= 400 && moveErr.status < 500)) comboMoveUnknown = true;
+          throw moveErr;
+        });
+        // 200 with needsAttention = only part of the stop moved (a sibling
+        // stayed behind, or the visit record was not retargeted). Not a
+        // completed move: say what the server says; the stop is repaired
+        // from the board, as its message tells.
+        if (moved?.needsAttention) {
+          comboPartlyMoved = true;
+          throw new Error(moved.needsAttention.message || "Only part of this stop finished moving. Fix it on the schedule before editing it here.");
+        }
+        if (Array.isArray(moved?.warnings)) comboMoveWarnings = moved.warnings;
+        // The form is frozen while saving (see the `inert` body); if an edit
+        // still landed during the move, it is not saved: say so, never close
+        // on it silently.
+        if (saveInputsDrifted(inputsAtSaveStart)) {
+          comboMoveWarnings = [...comboMoveWarnings, "The form was changed while the stop was moving. Those last changes were not saved: reopen the appointment to make them."];
+        }
+        if (notifyOnMove && moved?.notificationSent === false) {
+          comboMoveWarnings = [...comboMoveWarnings, moved.notificationSkipped === "already_at_target"
+            ? "The stop was already at this time, so no new text was sent. If the customer has not been told about the move, text them."
+            : `The customer was not texted about the move: ${moved.notificationError || "the text could not be sent"}.`];
+        }
+      }
       if (notifyOnMove && result?.notificationSent === false) {
         showScheduleSaveNotice(
           `Appointment saved, but SMS notification failed: ${result.notificationError || "customer was not notified"}`,
@@ -3591,8 +3780,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       // Advisory schedule-overlap notes: the save COMMITTED (conflicts no
       // longer block admin edits) — tell the operator what now stacks so
       // the double-booking is a choice, not a surprise.
-      if (Array.isArray(result?.warnings) && result.warnings.length) {
-        showScheduleSaveNotice(`Appointment saved.\n\n${result.warnings.join("\n\n")}`);
+      if (comboMoveWarnings.length || (Array.isArray(result?.warnings) && result.warnings.length)) {
+        showScheduleSaveNotice(`Appointment saved.\n\n${[...comboMoveWarnings, ...(result?.warnings || [])].join("\n\n")}`);
       }
       // A 'following' scope rewrites visits the operator can't see from this
       // modal — report what actually moved rather than closing silently.
@@ -3741,8 +3930,25 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       }
       onSaved?.();
     } catch (e) {
+      // A combo's move or split is its own committed action. When the edit
+      // after it fails, say what already happened — every branch below — so
+      // nobody re-does the move or closes on an unnoticed split.
+      const committed = comboDetailsSaved
+        ? (comboPartlyMoved ? "The other changes were saved. "
+          : comboMoveUnknown ? "The other changes were saved. The move did not confirm, so the stop may or may not have moved: check the schedule, and save again if it is still at its old time (the customer is not texted twice). "
+            : "The other changes were saved, but the stop was not moved. ")
+        : (comboSeparatedThisSave ? "This service was separated from the stop, but the other changes were not saved. " : "");
+      const setSaveError = (message) => setSaveErrorState(committed + message);
       const ack = parseSeriesAckError(e);
-      if (ack?.code === SERIES_ACK_REQUIRED) {
+      // The server refused a date/time change because the stop is shared and
+      // this form did not know it (the read on open was slow, failed, or the
+      // stop was grouped since). Nothing was changed. Read the stop now and
+      // show the choice.
+      const sharedStopNow = e.code === "VISIT_EDIT_SCHEDULE_UNSUPPORTED" && !comboVisit ? await readComboVisit() : null;
+      if (sharedStopNow && Number(sharedStopNow.liveCount ?? sharedStopNow.serviceCount) > 1) {
+        setComboVisitInfo(sharedStopNow);
+        setSaveError("This stop has more than one service. Choose how to move it below the date and time, then save again. Nothing was changed.");
+      } else if (ack?.code === SERIES_ACK_REQUIRED) {
         // Nothing saved, nothing moved — the server refused up front. Show
         // the refreshed recurring-plan line; the operator saves again.
         seriesPreview.replace(ack.preview);
@@ -3771,6 +3977,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         // field. Invalidate it and re-run the dry-run now.
         setPreviewNonce((n) => n + 1);
       } else {
+        // The stop already moved (its own committed action); say so, so the
+        // operator fixes the rest instead of re-doing the move.
         setSaveError("Save failed: " + e.message);
       }
     }
@@ -4729,6 +4937,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       {" "}
       <div
         onClick={(e) => e.stopPropagation()}
+        // Frozen for the whole save: a save is up to three writes, and a
+        // field changed between them would not be in any of them.
+        inert={saving ? "" : undefined}
+        data-testid="edit-appointment-body"
         style={{
           height: "100%",
           overflow: "auto",
@@ -5849,13 +6061,41 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   />{" "}
                 </div>{" "}
               </div>{" "}
-              <SeriesMoveNotice
-                tone="inline"
-                preview={seriesPreview.preview}
-                loading={seriesPreview.loading}
-                stale={seriesStale}
-                style={{ marginTop: -2, marginBottom: 14 }}
-              />{" "}
+              {comboSlotChanged && (
+                <div
+                  role="group"
+                  aria-label="How to move this stop"
+                  data-testid="combo-move-choice"
+                  style={{ marginTop: -2, marginBottom: 14, padding: "10px 12px", borderRadius: 6, background: "#F4F4F5", color: "#18181B", fontSize: 14, lineHeight: 1.5 }}
+                >
+                  <div style={{ fontWeight: 600 }}>
+                    This stop has {comboCount} services
+                    {Array.isArray(comboVisit.serviceTypes) && comboVisit.serviceTypes.length === comboCount ? ` (${comboVisit.serviceTypes.join(", ")})` : ""}.
+                  </div>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, minHeight: 44, cursor: "pointer" }}>
+                    <input type="radio" name="combo-move" checked={comboMove === "together"} onChange={() => setComboMove("together")} disabled={saving} />
+                    Move all of them together
+                  </label>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, minHeight: 44, cursor: "pointer" }}>
+                    <input type="radio" name="combo-move" checked={comboMove === "separate"} onChange={() => setComboMove("separate")} disabled={saving} />
+                    Separate: move only this service
+                  </label>
+                  {comboTogether && (service.isRecurring ?? service.is_recurring) ? (
+                    <div data-testid="combo-move-scope" style={{ color: "#52525B" }}>
+                      Only this visit moves{comboTechChanged ? " and changes technician" : ""}. Later visits in the plan stay where they are.
+                    </div>
+                  ) : null}
+                </div>
+              )}
+              {!comboTogether && (
+                <SeriesMoveNotice
+                  tone="inline"
+                  preview={seriesPreview.preview}
+                  loading={seriesPreview.loading}
+                  stale={seriesStale}
+                  style={{ marginTop: -2, marginBottom: 14 }}
+                />
+              )}{" "}
               <SlotConflictNotice
                 // The strip states the route problem itself; the
                 // double-booking notice (no `warning`) always stays.
@@ -6007,7 +6247,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   </div>{" "}
                 </div>
               )}{" "}
-              {scheduleMoved && (
+              {moveNotifyOffered && (
                 <div style={{ marginBottom: 14 }}>
                   {" "}
                   <label style={labelStyle}>Client booking notifications</label>{" "}
@@ -9906,143 +10146,6 @@ export function TypedFindingsSection({
   );
 }
 
-// The four scores the tech reviews/adjusts, matching the customer report's
-// consolidated diagnosis (Density / Weeds / Color / Stress-Damage). The AI still
-// assesses the underlying fungus/thatch/insect/drought/mechanical signals — those
-// stay on the assessment row for analytics + folding into stress_damage — but the
-// tech now corrects one "Stress" score directly instead of separate Fungus/Thatch.
-const LAWN_ASSESSMENT_METRICS = [
-  { key: "turf_density", label: "Density" },
-  { key: "weed_suppression", label: "Weed control" },
-  { key: "color_health", label: "Color" },
-  { key: "stress_damage", label: "Condition" },
-];
-
-// Owner ruling 2026-09-24: an optional per-photo slot label. All optional —
-// no count requirement, no blocking. 'front' is the only slot the report's
-// before/after slider pairs across visits (server/services/lawn-visit-input.js
-// PHOTO_ZONES); close_up/trouble are a different spot every visit and never
-// pair. Kept in parity with PHOTO_ZONE_LABELS in
-// client/src/components/lawn/LawnVisitReview.jsx.
-const LAWN_PHOTO_ZONES = [
-  { value: "front", label: "Front" },
-  { value: "close_up", label: "Close-up" },
-  { value: "trouble", label: "Trouble / watch area" },
-];
-
-// Stress flags and the "Protocol field checks" inputs (thatch, chinch pair,
-// nematode/large-patch pills, Soil K, protocol notes) were removed from this
-// sheet entirely (owner trim 2026-08-07) — nearly all were captured on every
-// visit and read by nothing, and the owner ruled the rest off too. The
-// completion capture is now photos, the gauge reading, and the four score
-// counters. The server endpoints still accept the retired keys from old
-// payloads. Soil K no longer has a client input anywhere, so the plan
-// engine's profile-completeness check no longer requires it; drought_stress
-// likewise no longer reaches the planner's drought-prep selection — both are
-// deliberate owner rulings, not oversights.
-
-function lawnScoreColor(value) {
-  const n = Number(value) || 0;
-  if (n >= 75) return D.green;
-  if (n >= 50) return D.amber;
-  return D.red;
-}
-
-function resizeLawnAssessmentImage(dataUrl, maxEdge = 1600, quality = 0.85) {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => {
-      const longEdge = Math.max(img.width, img.height);
-      if (longEdge <= maxEdge) return resolve(dataUrl);
-      const scale = maxEdge / longEdge;
-      const canvas = document.createElement("canvas");
-      canvas.width = Math.round(img.width * scale);
-      canvas.height = Math.round(img.height * scale);
-      canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
-      resolve(canvas.toDataURL("image/jpeg", quality));
-    };
-    img.onerror = () => resolve(dataUrl);
-    img.src = dataUrl;
-  });
-}
-
-function readLawnAssessmentPhoto(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = async () => {
-      const resized = await resizeLawnAssessmentImage(reader.result);
-      resolve({
-        data: resized,
-        preview: resized,
-        name: file.name,
-        mimeType: resized.match(/data:([^;]+)/)?.[1] || file.type || "image/jpeg",
-      });
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-}
-
-function parseAssessmentScores(row = {}) {
-  const turf_density = lawnScores.lawnScoreValue(row.turf_density ?? row.turfDensity);
-  const weed_suppression = lawnScores.lawnScoreValue(row.weed_suppression ?? row.weedSuppression);
-  const color_health = lawnScores.lawnScoreValue(row.color_health ?? row.colorHealth);
-  // Preserve known AI components. Missing components get explicit controls
-  // during confirmation so unknown values never become invented scores.
-  const fungus_control = lawnScores.lawnScoreValue(row.fungus_control ?? row.fungusControl);
-  const thatch_level = lawnScores.lawnScoreValue(row.thatch_level ?? row.thatchLevel);
-  // Legacy assessments (created before the stress_damage column) have a null
-  // stress_damage. Coercing that to 0 would make a plain re-confirm POST
-  // stress_damage: 0, which /confirm treats as an explicit "push Stress to 0"
-  // override and persists an artificially low score. Instead derive it exactly the
-  // way the server's confirm fallback does — min(fungus, thatch, AI-floor) with the
-  // legacy 95 floor — so posting the seeded chip value is a no-op, not an override.
-  const rawStress = lawnScores.lawnScoreValue(row.stress_damage ?? row.stressDamage);
-  const components = [fungus_control, thatch_level].filter((value) => value != null);
-  const stress_damage = rawStress != null
-    ? rawStress
-    : (components.length ? Math.min(...components, 95) : null);
-  return { turf_density, weed_suppression, color_health, fungus_control, thatch_level, stress_damage };
-}
-
-// The AI's own read — used ONLY to decide which metrics stay editable, never
-// what's displayed (that's techScores/scoreSource, which may already hold a
-// technician's earlier fill of a genuinely blank metric from a prior partial
-// save). Run-backed: the run's immutable scores_adjusted snapshot
-// (visitAssessment.aiScores from the server), which a save never touches —
-// so a metric a technician already filled correctly stays editable instead
-// of looking "AI-known" just because it now has a value (Codex P1
-// 2026-09-24). Legacy (no run, visitAssessment null): the assessment row's
-// own RAW columns, mirroring the server's legacy /confirm rule exactly —
-// including that stress_damage is read raw, never parseAssessmentScores's
-// derived worst-of-fungus/thatch guess, which could already be non-null
-// while the server still considers Stress unknown.
-// Locked metrics always show the AI's own read. A row adjusted before the
-// read-only ruling can still carry an old technician value in its columns;
-// only AI-blank metrics keep the saved technician fill.
-function withAiScores(scores, aiScores) {
-  const out = { ...(scores || {}) };
-  for (const [key, value] of Object.entries(aiScores || {})) {
-    if (lawnScores.lawnScoreValue(value) != null) out[key] = value;
-  }
-  return out;
-}
-
-function resolveAiScores(assessment = {}, visitAssessment, serverAiScores) {
-  if (visitAssessment?.aiScores) return visitAssessment.aiScores;
-  // Legacy rows: the reload route sends the server's own AI read.
-  if (serverAiScores) return serverAiScores;
-  const raw = (a, b) => lawnScores.lawnScoreValue(assessment[a] ?? assessment[b]);
-  return {
-    turf_density: raw("turf_density", "turfDensity"),
-    weed_suppression: raw("weed_suppression", "weedSuppression"),
-    color_health: raw("color_health", "colorHealth"),
-    fungus_control: raw("fungus_control", "fungusControl"),
-    thatch_level: raw("thatch_level", "thatchLevel"),
-    stress_damage: raw("stress_damage", "stressDamage"),
-  };
-}
-
 function LawnPreviousVisitCard({ service }) {
   const [state, setState] = useState({ loading: true, row: null, error: false });
   const customerId = service.customerId || service.customer_id;
@@ -10121,569 +10224,6 @@ function LawnVisitPlanSummary({ defaults, protocol, areaValue, onAreaChange, onR
             </>}
       </div>
     </section>
-  );
-}
-
-function LawnAssessmentCompletionBlock({
-  service,
-  disabled,
-  onConfirmed,
-  // Fires false while the existing-assessment lookup is in flight and true
-  // once it settles — the parent must not treat the pre-load null confirmed
-  // id as "retake pending".
-  onReady,
-  // Height measurement stays optional; separate lawn-length photo capture is retired.
-  showGaugeReading = false,
-  gaugeHeightIn = null,
-  onGaugeHeight,
-  // The tech's free-text visit notes (owned by CompletionPanel) — passed through
-  // so the AI photo analysis can factor them in alongside the images.
-  technicianNotes = "",
-}) {
-  const [photos, setPhotos] = useState([]);
-  const [result, setResult] = useState(null);
-  const [visitReview, setVisitReview] = useState(null);
-  const [techScores, setTechScores] = useState(null);
-  // Keys the technician actually typed this session. Only these are posted:
-  // the server ignores AI-known keys anyway, and resending a server-derived
-  // value (e.g. Stress) would read as an explicit entry and freeze it.
-  const [typedKeys, setTypedKeys] = useState(() => new Set());
-  const [confirmedId, setConfirmedId] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [analyzing, setAnalyzing] = useState(false);
-  const [confirming, setConfirming] = useState(false);
-  const [error, setError] = useState("");
-  const fileRef = useRef(null);
-  useEffect(() => {
-    let cancelled = false;
-    setPhotos([]);
-    setResult(null);
-    setVisitReview(null);
-    setTechScores(null);
-    setTypedKeys(new Set());
-    setConfirmedId(null);
-    setError("");
-    onConfirmed?.(null);
-    onReady?.(false);
-    if (!service?.id) {
-      onReady?.(true);
-      return () => { cancelled = true; };
-    }
-
-    setLoading(true);
-    adminFetch(`/admin/lawn-assessment/service/${service.id}`)
-      .then((data) => {
-        if (cancelled || !data?.assessment) return;
-        const assessment = data.assessment;
-        const scores = parseAssessmentScores(assessment);
-        setResult({
-          success: true,
-          visitAssessment: data.visitAssessment,
-          assessment,
-          adjustedScores: scores,
-          displayScores: scores,
-          aiScores: resolveAiScores(assessment, data.visitAssessment, data.aiScores),
-          observations: assessment.observations || "",
-        });
-        // A confirmed row shows exactly what was saved (and what the customer
-        // report uses); only a pending row shows the AI read for locked keys.
-        setTechScores(assessment.confirmed_by_tech ? scores : withAiScores(scores, resolveAiScores(assessment, data.visitAssessment, data.aiScores)));
-        setTypedKeys(new Set());
-        setVisitReview(createVisitReview(data.visitAssessment, assessment.observations));
-        if (assessment.confirmed_by_tech) {
-          setConfirmedId(assessment.id);
-          onConfirmed?.(assessment.id);
-        }
-      })
-      .then(() => {
-        if (!cancelled) onReady?.(true);
-      })
-      .catch(() => {
-        // The lookup learned NOTHING — report failed, never ready: the parent
-        // omits lawnAssessmentId so the server's visit-linked fallback (DB
-        // truth) still grounds any existing confirmed scores.
-        if (!cancelled) onReady?.("failed");
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [service?.id]);
-
-  async function addPhotos(event) {
-    const files = Array.from(event.target.files || []);
-    const remaining = Math.max(0, 3 - photos.length);
-    if (!files.length || remaining === 0) return;
-    setError("");
-    try {
-      const nextPhotos = await Promise.all(
-        files.slice(0, remaining).map(readLawnAssessmentPhoto),
-      );
-      setPhotos((prev) => [...prev, ...nextPhotos.map((photo) => ({ ...photo, zone: null }))].slice(0, 3));
-      setResult(null);
-      setTechScores(null);
-      setTypedKeys(new Set());
-      setConfirmedId(null);
-      onConfirmed?.(null);
-    } catch (err) {
-      setError(err.message || "Photo read failed");
-    } finally {
-      if (fileRef.current) fileRef.current.value = "";
-    }
-  }
-
-  // Only one photo may carry the "front" slot at a time — the before/after
-  // slider pairs on it, so picking Front on another photo clears the prior
-  // one. Picking the same slot again clears it (every slot, including none,
-  // is a valid choice).
-  function setPhotoZone(index, zone) {
-    setPhotos((prev) => {
-      const current = prev[index]?.zone || null;
-      const next = current === zone ? null : zone;
-      return prev.map((photo, i) => {
-        if (i === index) return { ...photo, zone: next };
-        if (next === "front" && photo.zone === "front") return { ...photo, zone: null };
-        return photo;
-      });
-    });
-  }
-
-  // Owner ruling 2026-09-24: lawn health scores are read-only from photos.
-  // The only manual entry allowed is filling a metric the AI left blank —
-  // this never touches a metric the AI already scored (the server enforces
-  // the same rule independently; this just keeps the tech from typing into
-  // a metric that won't take effect).
-  function fillScore(key, rawValue) {
-    setTypedKeys((prev) => new Set(prev).add(key));
-    setTechScores((prev) => {
-      if (!prev) return prev;
-      if (rawValue === "") return { ...prev, [key]: null };
-      const n = Number(rawValue);
-      if (!Number.isFinite(n)) return prev;
-      return { ...prev, [key]: Math.max(0, Math.min(100, Math.round(n))) };
-    });
-  }
-
-  async function analyze() {
-    if (!service?.customerId || photos.length === 0) return;
-    setAnalyzing(true);
-    // Same suspension as the confirmation POST: the vision analysis can run
-    // long, and a report generated mid-analysis would carry an explicit-null
-    // assessment state for scores that are about to be reviewed.
-    onReady?.(false);
-    setError("");
-    try {
-      const response = await adminFetch("/admin/lawn-assessment/assess", {
-        method: "POST",
-        body: JSON.stringify({
-          customerId: service.customerId,
-          serviceId: service.id,
-          photos: photos.map((photo) => ({
-            data: photo.data.split(",")[1],
-            mimeType: photo.mimeType || "image/jpeg",
-            ...(photo.zone ? { zone: photo.zone } : {}),
-          })),
-          // Extra context for the vision model (see buildVisionPrompt server-side).
-          turfHeightIn: gaugeHeightIn,
-          technicianNotes,
-        }),
-      });
-      if (response.success === false) {
-        setError(response.message || "Assessment failed. Retake photos and try again.");
-        return;
-      }
-      const scores = response.adjustedScores || response.displayScores || {};
-      setResult({ ...response, aiScores: resolveAiScores(response.assessment, response.visitAssessment) });
-      setVisitReview(createVisitReview(response.visitAssessment, response.assessment?.observations !== undefined ? response.assessment.observations : response.observations));
-      setTechScores({ ...scores });
-      setTypedKeys(new Set());
-      setConfirmedId(null);
-      onConfirmed?.(null);
-    } catch (err) {
-      setError(err.message || "Assessment failed");
-    } finally {
-      setAnalyzing(false);
-      // Settled either way: post-analysis the row is unconfirmed (or the
-      // analysis failed with photos pending) — explicit null IS the true
-      // "review outstanding" state.
-      onReady?.(true);
-    }
-  }
-
-  async function confirm() {
-    if (!result?.assessment?.id) return;
-    setConfirming(true);
-    // Readiness is suspended while the confirmation POST is in flight — the
-    // parent's id is stale until it lands, and generating meanwhile would
-    // send an explicit null that suppresses the assessment being confirmed.
-    onReady?.(false);
-    setError("");
-    try {
-      const { confirmed: confirmationComplete, assessment: savedAssessment, visitAssessment } = await adminFetch("/admin/lawn-assessment/confirm", {
-        method: "POST",
-        body: JSON.stringify({
-          assessmentId: result.assessment.id,
-          adjustedScores: Object.fromEntries([...typedKeys].map((key) => [key, techScores?.[key] ?? null])),
-          ...visitReviewPayload(visitReview),
-        }),
-      });
-      setResult((prev) => ({
-        ...prev,
-        assessment: savedAssessment || prev.assessment,
-        visitAssessment: visitAssessment ?? prev.visitAssessment,
-      }));
-      // Show what the server actually saved.
-      if (savedAssessment) {
-        const saved = parseAssessmentScores(savedAssessment);
-        setTechScores(savedAssessment.confirmed_by_tech ? saved : withAiScores(saved, result.aiScores));
-        setTypedKeys(new Set());
-      }
-      if (visitAssessment) {
-        setVisitReview(createVisitReview(visitAssessment, savedAssessment?.observations));
-      }
-      const assessmentId = confirmationComplete === false ? null : savedAssessment?.id || result.assessment.id;
-      setConfirmedId(assessmentId);
-      onConfirmed?.(assessmentId);
-      onReady?.(true);
-      setError(assessmentId ? "" : "Scores saved. Complete the missing scores before confirming.");
-    } catch (err) {
-      setError(err.message || "Confirm failed");
-      // A definitive 4xx rejection means the write did NOT commit — null is
-      // the true state (retake still pending), so readiness returns true and
-      // the explicit-null payload keeps any superseded row suppressed.
-      // Ambiguous failures (network, 5xx, lost response) report failed: the
-      // write may have committed, so the server grounds from DB truth.
-      const definitiveRejection =
-        Number(err?.status) >= 400 && Number(err?.status) < 500;
-      onReady?.(definitiveRejection ? true : "failed");
-    } finally {
-      setConfirming(false);
-    }
-  }
-
-  const scoreSource = techScores || result?.adjustedScores || result?.displayScores || null;
-  const hasResult = !!result?.assessment?.id;
-  const confirmed = !!confirmedId;
-  // Keep the usual four controls; expose underlying scores only when the
-  // saved assessment lacks them. Keep them editable until the save completes.
-  // Same rule as the aiValue check below: whether an underlying signal is
-  // AI-blank comes from result.aiScores (the immutable read), never the
-  // mutable assessment row — otherwise a prior save's fill of a genuinely
-  // blank Fungus/Thatch would hide the tile entirely on reload instead of
-  // keeping it open for correction (Codex P1 2026-09-24).
-  const metrics = [...LAWN_ASSESSMENT_METRICS, ...[
-    { key: "fungus_control", label: "Fungus control" },
-    { key: "thatch_level", label: "Thatch condition" },
-  ].filter((metric) => !confirmed && lawnScores.lawnScoreValue(result?.aiScores?.[metric.key]) == null)];
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      {loading && (
-        <div style={{ fontSize: 12, color: D.muted }}>Checking existing assessment...</div>
-      )}
-      {/* Capture row — always visible so the mowing-height reading can be
-          added even after the assessment is analyzed (Codex P1). "Add turf photos" +
-          "Analyze lawn" stay pre-analysis only. */}
-      <input
-        ref={fileRef}
-        type="file"
-        aria-label="Add turf photos"
-        accept="image/*"
-        multiple
-        onChange={addPhotos}
-        style={{ display: "none" }}
-      />
-      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-        {!hasResult && (
-          <>
-            <button
-              type="button"
-              onClick={() => fileRef.current?.click()}
-              disabled={disabled || photos.length >= 3 || analyzing}
-              style={{
-                height: 38,
-                padding: "0 14px",
-                borderRadius: 8,
-                border: `1px solid ${D.border}`,
-                background: D.white,
-                color: D.heading,
-                fontSize: 13,
-                fontWeight: 500,
-                cursor: disabled || photos.length >= 3 || analyzing ? "not-allowed" : "pointer",
-                opacity: disabled || photos.length >= 3 || analyzing ? 0.55 : 1,
-              }}
-            >
-              Add turf photos
-            </button>
-            <span style={{ fontSize: 12, color: D.muted }}>{photos.length}/3</span>
-          </>
-        )}
-            {showGaugeReading && (
-              <>
-                <span style={{ fontSize: 12, color: D.muted, fontWeight: 500 }}>Lawn length</span>
-                <input
-                  type="number"
-                  inputMode="decimal"
-                  step="0.25"
-                  min="0.5"
-                  max="8"
-                  value={gaugeHeightIn ?? ""}
-                  disabled={disabled || analyzing}
-                  placeholder="e.g. 4"
-                  onChange={(e) => onGaugeHeight?.(e.target.value === "" ? null : Number(e.target.value))}
-                  style={{
-                    width: 64,
-                    height: 38,
-                    padding: "0 10px",
-                    borderRadius: 8,
-                    border: `1px solid ${D.border}`,
-                    background: D.white,
-                    color: D.heading,
-                    fontSize: 13,
-                  }}
-                />
-                <span style={{ fontSize: 12, color: D.muted }}>inches</span>
-              </>
-            )}
-          </div>
-          {!hasResult && (
-            <>
-          {photos.length > 0 && (
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              {photos.map((photo, index) => (
-                <div key={`${photo.name}-${index}`} style={{ position: "relative", width: 96 }}>
-                  <img
-                    src={photo.preview}
-                    alt=""
-                    style={{
-                      display: "block",
-                      width: 96,
-                      height: 78,
-                      objectFit: "cover",
-                      borderRadius: 8,
-                      border: `1px solid ${D.border}`,
-                    }}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setPhotos((prev) => prev.filter((_, i) => i !== index))}
-                    aria-label="Remove assessment photo"
-                    style={{
-                      position: "absolute",
-                      top: -7,
-                      right: -7,
-                      width: 22,
-                      height: 22,
-                      borderRadius: "50%",
-                      border: "none",
-                      background: D.heading,
-                      color: "#fff",
-                      cursor: "pointer",
-                      lineHeight: 1,
-                    }}
-                  >
-                    x
-                  </button>
-                  {/* Optional slot label — all optional, no count requirement.
-                      Only one photo may hold "front" at a time (setPhotoZone). */}
-                  <select
-                    value={photo.zone || ""}
-                    disabled={disabled || analyzing}
-                    onChange={(e) => setPhotoZone(index, e.target.value || null)}
-                    aria-label={`Slot for photo ${index + 1}`}
-                    style={{
-                      display: "block",
-                      width: "100%",
-                      marginTop: 4,
-                      height: 34,
-                      borderRadius: 6,
-                      border: `1px solid ${D.border}`,
-                      background: D.white,
-                      color: D.heading,
-                      fontSize: 14,
-                      padding: "0 2px",
-                    }}
-                  >
-                    <option value="">No slot</option>
-                    {LAWN_PHOTO_ZONES.map((zone) => (
-                      <option key={zone.value} value={zone.value}>{zone.label}</option>
-                    ))}
-                  </select>
-                </div>
-              ))}
-            </div>
-          )}
-          {/* A soft hint, never a requirement (owner 2026-10-02): the report's
-              "since your last visit" score line needs 2+ usable photos on both
-              visits (lawn-progress.js COMPARABLE_LEVELS), so a 1-photo visit
-              can never show it. Analyze stays enabled at one photo. */}
-          {photos.length < 2 && (
-            <div data-testid="lawn-photo-nudge" style={{ fontSize: 14, color: D.muted, lineHeight: 1.4 }}>
-              2 or 3 photos work best: front, close-up and any trouble spot. With one photo, next visit&apos;s report can&apos;t show whether the lawn improved.
-            </div>
-          )}
-          <button
-            type="button"
-            onClick={analyze}
-            disabled={disabled || photos.length === 0 || analyzing}
-            style={{
-              height: 40,
-              borderRadius: 8,
-              border: "none",
-              background: D.green,
-              color: "#fff",
-              fontSize: 13,
-              fontWeight: 500,
-              cursor: disabled || photos.length === 0 || analyzing ? "not-allowed" : "pointer",
-              opacity: disabled || photos.length === 0 || analyzing ? 0.55 : 1,
-            }}
-          >
-            {analyzing ? "Analyzing..." : "Analyze lawn"}
-          </button>
-        </>
-      )}
-      {hasResult && (
-        <>
-          <div style={{ display: "grid", gridTemplateColumns: `repeat(${LAWN_ASSESSMENT_METRICS.length}, minmax(0, 1fr))`, gap: 6 }}>
-            {metrics.map((metric) => {
-              const value = lawnScores.lawnScoreValue(scoreSource?.[metric.key]);
-              // Whether the AI itself knew this metric — from result.aiScores
-              // (the run's immutable snapshot, or the assessment's raw
-              // columns for a legacy no-run row; see resolveAiScores), never
-              // from scoreSource or the mutable assessment row a reload
-              // reads back. A prior save's tech fill of a genuinely blank
-              // metric must not look "AI-known" just because it now has a
-              // value (Codex P1 2026-09-24) — and a fill-in input stays open
-              // (still editable, still shows what was typed) once the tech
-              // starts typing, instead of collapsing to read-only the moment
-              // it first has a value.
-              const aiValue = lawnScores.lawnScoreValue(result?.aiScores?.[metric.key]);
-              return (
-                <div
-                  key={metric.key}
-                  style={{
-                    border: `1px solid ${D.border}`,
-                    borderRadius: 8,
-                    padding: "8px 4px",
-                    textAlign: "center",
-                    background: D.white,
-                    minWidth: 0,
-                  }}
-                >
-                  <div style={{ fontSize: 15, fontWeight: 500, color: value == null ? D.muted : lawnScoreColor(value), lineHeight: 1.1 }}>
-                    {value == null ? "—" : `${value}/100`}
-                  </div>
-                  <div style={{ fontSize: 14, color: D.muted, marginTop: 3 }}>{metric.label}</div>
-                  {/* AI-known scores are read-only (owner ruling 2026-09-24).
-                      A metric the AI left blank (aiValue == null) is the one
-                      the tech can fill — the server enforces this too. */}
-                  {!confirmed && aiValue == null && (
-                    <input
-                      type="number"
-                      inputMode="numeric"
-                      min={0}
-                      max={100}
-                      value={techScores?.[metric.key] ?? ""}
-                      aria-label={`Enter ${metric.label}`}
-                      placeholder="0-100"
-                      onChange={(e) => fillScore(metric.key, e.target.value)}
-                      style={{
-                        width: "100%",
-                        marginTop: 6,
-                        height: 28,
-                        padding: "0 6px",
-                        borderRadius: 6,
-                        border: `1px solid ${D.border}`,
-                        background: D.white,
-                        color: D.heading,
-                        fontSize: 13,
-                        textAlign: "center",
-                        boxSizing: "border-box",
-                      }}
-                    />
-                  )}
-                </div>
-              );
-            })}
-          </div>
-          <LawnVisitReview
-            visitAssessment={result.visitAssessment}
-            value={visitReview}
-            onChange={setVisitReview}
-            disabled={disabled || confirming || analyzing || confirmed}
-          />
-          <div style={{ display: "flex", gap: 8 }}>
-            {confirmed ? (
-              <div
-                style={{
-                  flex: 1,
-                  padding: "10px 12px",
-                  borderRadius: 8,
-                  background: `${D.green}14`,
-                  color: D.green,
-                  fontSize: 13,
-                  fontWeight: 500,
-                  textAlign: "center",
-                }}
-              >
-                Assessment confirmed
-              </div>
-            ) : (
-              <button
-                type="button"
-                onClick={confirm}
-                disabled={disabled || confirming}
-                style={{
-                  flex: 1,
-                  height: 40,
-                  borderRadius: 8,
-                  border: "none",
-                  background: D.green,
-                  color: "#fff",
-                  fontSize: 13,
-                  fontWeight: 500,
-                  cursor: disabled || confirming ? "not-allowed" : "pointer",
-                  opacity: disabled || confirming ? 0.55 : 1,
-                }}
-              >
-                {confirming ? "Confirming..." : "Confirm assessment"}
-              </button>
-            )}
-            <button
-              type="button"
-              onClick={() => {
-                setPhotos([]);
-                setResult(null);
-                setTechScores(null);
-                setTypedKeys(new Set());
-                setConfirmedId(null);
-                setError("");
-                onConfirmed?.(null);
-              }}
-              disabled={disabled || analyzing || confirming}
-              style={{
-                height: 40,
-                padding: "0 14px",
-                borderRadius: 8,
-                border: `1px solid ${D.border}`,
-                background: D.white,
-                color: D.text,
-                fontSize: 13,
-                fontWeight: 500,
-                cursor: disabled || analyzing || confirming ? "not-allowed" : "pointer",
-                opacity: disabled || analyzing || confirming ? 0.55 : 1,
-              }}
-            >
-              Retake
-            </button>
-          </div>
-        </>
-      )}
-      {error && <div style={{ fontSize: 14, color: D.red, lineHeight: 1.45 }}>{error}</div>}
-    </div>
   );
 }
 
@@ -15185,6 +14725,12 @@ export function CompletionPanel({
   const blogPostShown = blogPostOffer === "yes" || blogPostKept;
   const searchBlogPosts = useCallback(
     (query) => adminFetch(`/admin/dispatch/${service.id}/blog-posts?q=${encodeURIComponent(query)}`),
+    [service.id],
+  );
+  // A search no post covers, suggested as a new post for the autonomous blog
+  // queue (GATE_BLOG_SEARCH_SUGGEST; the search answer says when it's taken).
+  const suggestBlogPost = useCallback(
+    (phrase) => adminFetch(`/admin/dispatch/${service.id}/blog-suggestions`, { method: "POST", body: JSON.stringify({ phrase }) }),
     [service.id],
   );
 
@@ -20324,6 +19870,7 @@ export function CompletionPanel({
             {isLawn && !quickComplete && (
               <Field label="Lawn assessment">
                 <LawnAssessmentCompletionBlock
+                  request={adminFetch}
                   service={service}
                   disabled={isIncompleteVisit || submitting || generating}
                   onConfirmed={handleLawnAssessmentConfirmed}
@@ -20703,6 +20250,7 @@ export function CompletionPanel({
               <Field label="Blog post for the customer">
                 <BlogPostPicker
                   search={searchBlogPosts}
+                  suggest={suggestBlogPost}
                   value={blogPost}
                   onChange={setBlogPost}
                   disabled={generating || submitting}
@@ -22706,6 +22254,7 @@ export function CompletionPanel({
               {" "}
               <label style={labelStyle}>Lawn Assessment</label>{" "}
               <LawnAssessmentCompletionBlock
+                  request={adminFetch}
                 service={service}
                 disabled={isIncompleteVisit || submitting || generating}
                 onConfirmed={handleLawnAssessmentConfirmed}
@@ -23191,6 +22740,7 @@ export function CompletionPanel({
                 <label style={labelStyle}>Blog post for the customer</label>{" "}
                 <BlogPostPicker
                   search={searchBlogPosts}
+                  suggest={suggestBlogPost}
                   value={blogPost}
                   onChange={setBlogPost}
                   disabled={generating || submitting}

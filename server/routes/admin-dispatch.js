@@ -51,7 +51,7 @@ const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-p
 const { customerHasPriorVisitOnLine } = require('../services/pest-pressure/first-visit');
 const { resolveLabel: resolvePestPressureLabel } = require('../services/pest-pressure/label');
 
-const { tipsForVisit } = require('../services/service-report/tip-library');
+const { tipsForVisit, registryLineFor, lawnFindingsFromAssessment, lawnFindingsFromRun } = require('../services/service-report/tip-library');
 
 const {
   IRRIGATION_SIZING_FIELDS,
@@ -73,7 +73,7 @@ const {
 } = require('../services/service-completion-profiles');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
 const { gateEnvValue, tsFastCompleteLive } = require('../config/feature-gates');
-const { lawnReserviceFastCompleteLive } = require('../config/feature-gates');
+const { lawnReserviceFastCompleteLive, lawnFastCompleteLive } = require('../config/feature-gates');
 const { addressKey } = require('../services/customer-properties');
 
 // The follow-up override chain (German knockdown windows, two-treatment
@@ -541,33 +541,90 @@ async function loadPreviousRecommendations({ customerId, serviceType, serviceId,
 // the completion's own rule), so any other visit answers { available: false }
 // too. Read-only; off = the answer is { available: false } with no database
 // read.
+// The visit a blog search or suggestion is for: a technician only their own
+// current visit, admins office-wide (the completion routes' rule), with
+// whether it carries a blog post at all (the completion's own rule for
+// keeping a pick, complete-scheduled-service). Null once an error answered.
+async function blogPostVisit(req, res) {
+  const svc = await db('scheduled_services')
+    .where({ id: req.params.serviceId })
+    .first('id', 'customer_id', 'technician_id', 'status', 'scheduled_date', 'service_type', 'service_id', 'service_key_snapshot', 'is_recurring');
+  if (!svc) {
+    res.status(404).json({ error: 'Service not found' });
+    return null;
+  }
+  const ownershipError = completionOwnershipError({
+    role: req.techRole,
+    actorTechnicianId: req.technicianId,
+    assignedTechnicianId: svc.technician_id,
+  });
+  if (ownershipError) {
+    res.status(ownershipError.status).json(ownershipError.payload);
+    return null;
+  }
+  if (!technicianVisitRowInScope(req, svc)) {
+    res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
+    return null;
+  }
+  const { blogPostAllowedFor } = require('../services/service-report/report-blog-post');
+  const profile = await resolveCompletionProfileForScheduledService(svc);
+  return { svc, allowed: blogPostAllowedFor({ serviceType: svc.service_type, profile }) };
+}
+
 router.get('/:serviceId/blog-posts', async (req, res, next) => {
   try {
-    if (!require('../config/feature-gates').reportBlogPostLive()) {
+    const gates = require('../config/feature-gates');
+    if (!gates.reportBlogPostLive()) {
       return res.json({ available: false, posts: [] });
     }
-    const svc = await db('scheduled_services')
-      .where({ id: req.params.serviceId })
-      .first('id', 'technician_id', 'status', 'scheduled_date', 'service_type', 'service_id', 'service_key_snapshot', 'is_recurring');
-    if (!svc) return res.status(404).json({ error: 'Service not found' });
-    // A technician searches only from their own current visit; admins keep
-    // office-wide reach (the completion routes' rule).
-    const ownershipError = completionOwnershipError({
-      role: req.techRole,
-      actorTechnicianId: req.technicianId,
-      assignedTechnicianId: svc.technician_id,
-    });
-    if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
-    if (!technicianVisitRowInScope(req, svc)) {
-      return res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
-    }
-    // The completion's own rule for keeping a pick (complete-scheduled-service).
-    const { blogPostAllowedFor, searchReportBlogPosts } = require('../services/service-report/report-blog-post');
-    const profile = await resolveCompletionProfileForScheduledService(svc);
-    if (!blogPostAllowedFor({ serviceType: svc.service_type, profile })) return res.json({ available: false, posts: [] });
+    const visit = await blogPostVisit(req, res);
+    if (!visit) return undefined;
+    if (!visit.allowed) return res.json({ available: false, posts: [] });
+    const { searchReportBlogPosts } = require('../services/service-report/report-blog-post');
     const posts = await searchReportBlogPosts(db, req.query?.q);
-    res.json({ available: true, posts });
+    // `suggest`: whether a search no post covers can be suggested as a new
+    // post (GATE_BLOG_SEARCH_SUGGEST): only to the office (an admin login),
+    // the one the suggestion route takes.
+    res.json({ available: true, posts, suggest: gates.blogSearchSuggestLive() && req.techRole === 'admin' });
   } catch (err) { next(err); }
+});
+
+// POST /api/admin/dispatch/:serviceId/blog-suggestions { phrase } — "Suggest
+// a post" from the completion forms' blog search (GATE_BLOG_SEARCH_SUGGEST
+// with GATE_REPORT_BLOG_POST; owner mockup approval 2026-10-03, straight into
+// the autonomous blog queue). The visit's reach and blog rule are the
+// search's own. Answers 201 { status: 'queued' }, 200 { status:
+// 'already_queued' }, 409 { status: 'covered' } when a live post now holds
+// every word, 409 { status: 'declined' } for a topic the chain tried and
+// skipped, 422 { error: 'not_a_topic' }, 429 { error:
+// 'too_many_suggestions' }, and 404 with suggestions off or 409 { error:
+// 'not_available' } for a visit that carries no post. Every refusal names
+// itself in `code`, so the form tells a final answer from a passing failure
+// (GitHub Codex P2 on 45144528b8). Never logs the phrase.
+// Admin only: suggestions belong to the office form (owner 2026-10-03: the
+// tech screen is going away and new work goes to the admin UI), and hiding
+// the button from a technician does not keep one from calling the route
+// (GitHub Codex P1 on e8a1e9e876).
+router.post('/:serviceId/blog-suggestions', requireAdmin, async (req, res, next) => {
+  try {
+    const gates = require('../config/feature-gates');
+    if (!gates.reportBlogPostLive() || !gates.blogSearchSuggestLive()) return res.status(404).json({ enabled: false, code: 'suggestions_off' });
+    const visit = await blogPostVisit(req, res);
+    if (!visit) return undefined;
+    if (!visit.allowed) return res.status(409).json({ error: 'not_available', code: 'not_available' });
+    const { suggestReportBlogPost } = require('../services/service-report/report-blog-suggestion');
+    const answer = await suggestReportBlogPost(db, {
+      phrase: req.body?.phrase,
+      actorId: req.technicianId || null,
+      scheduledServiceId: visit.svc.id,
+      customerId: visit.svc.customer_id || null,
+    });
+    if (answer.error === 'too_many_suggestions') return res.status(429).json({ ...answer, code: answer.error });
+    if (answer.error) return res.status(422).json({ ...answer, code: answer.error });
+    if (answer.status === 'covered' || answer.status === 'declined') return res.status(409).json({ ...answer, code: answer.status });
+    logger.info(`[blog-suggest] ${answer.status} from service ${visit.svc.id}`);
+    return res.status(answer.status === 'queued' ? 201 : 200).json(answer);
+  } catch (err) { return next(err); }
 });
 
 // GET /api/admin/dispatch/:serviceId/tech-tips — the completion screen's
@@ -661,10 +718,35 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
         .catch(() => null),
       addonServiceKeys(svc.id),
     ]);
+    const serviceLine = detectServiceLine(svc.service_type);
+    // A lawn visit's tips are ranked by what the tech has CONFIRMED on this
+    // visit's CURRENT assessment (nothing until they confirm; the sheet asks
+    // again once it does). The newest row is read whatever its state: after a
+    // retake the new row is unconfirmed, and an older confirmed row it
+    // superseded must not keep lifting tips (lawnFindingsFromAssessment
+    // answers nothing for an unconfirmed row). Ranking only; a failed read
+    // just loses the lift.
+    const lawnAssessment = registryLineFor(serviceLine) === 'lawn' && svc.customer_id
+      ? await db('lawn_assessments')
+        .where({ service_id: svc.id, customer_id: svc.customer_id })
+        .orderBy('created_at', 'desc')
+        .first('id', 'confirmed_by_tech', 'fungus_control', 'thatch_level', 'weed_suppression', 'stress_flags')
+        .catch(() => null)
+      : null;
+    // The named findings the technician kept on that same confirmed
+    // assessment's run (one run per assessment row, so a superseded row's run
+    // is never read). A failed read loses only these keys.
+    const lawnRun = lawnAssessment?.confirmed_by_tech === true && lawnAssessment.id
+      ? await db('lawn_assessment_runs')
+        .where({ assessment_id: lawnAssessment.id, customer_id: svc.customer_id })
+        .first('reviewed_findings', 'added_details')
+        .catch(() => null)
+      : null;
     const library = tipsForVisit({
-      serviceLine: detectServiceLine(svc.service_type),
+      serviceLine,
       serviceKey,
       serviceKeys: addonKeys,
+      findings: [...lawnFindingsFromAssessment(lawnAssessment), ...lawnFindingsFromRun(lawnRun)],
       date: /^\d{4}-\d{2}-\d{2}$/.test(visitDay || '') ? visitDay : new Date(),
     });
     // The 90-day window is ET calendar days: the database's own current
@@ -3287,6 +3369,14 @@ router.put('/:serviceId/status', async (req, res, next) => {
             });
           })
           .first('id');
+        if (alreadyFlagged) {
+          // The nightly check already flagged this occurrence, so no second row is
+          // logged — but a person has now called it a no-show: that confirms the
+          // existing row (reopening one settled earlier) and its card.
+          await require('../services/not-closed-out').confirmMiss({
+            logId: alreadyFlagged.id, confirmedBy: req.technicianId, reopen: true,
+          });
+        }
         if (!alreadyFlagged) {
           const missedAppointment = require('../services/workflows/missed-appointment');
           // the occurrence as it stood under the transition's row lock
@@ -4531,6 +4621,69 @@ router.get('/:serviceId/lawn-reservice/fast-context', async (req, res, next) => 
   } catch (err) { next(err); }
 });
 
+// Every lawn-fast route (the path param is NAMED :lawnFastServiceId, not :serviceId, so
+// router.param('serviceId') does not fire on it: that hook's lookup would raise Postgres
+// 22P02, a 500, on a malformed id before any handler ran). The handler runs the same
+// steps in this order: the dark gate (404 {enabled:false}, nothing read), the id must be
+// a uuid (404 not_found, scheduled_services.id is a uuid column), then the SAME ownership
+// assertion the sibling routes use (a technician only reaches their own visit, admins any;
+// assertRecapOwnership reads req.params.serviceId, set here after validation). Returns
+// the id, or null after answering. Behind the router-level adminAuthenticate +
+// requireTechOrAdmin above, like every route in this file.
+async function lawnFastRequestId(req, res) {
+  if (!lawnFastCompleteLive()) { res.status(404).json({ enabled: false }); return null; }
+  const id = req.params.lawnFastServiceId;
+  if (!require('../services/lawn-fast-complete').isUuid(id)) {
+    res.status(404).json({ error: 'Service not found', code: 'not_found' });
+    return null;
+  }
+  req.params.serviceId = id;
+  return (await assertRecapOwnership(req, res)) ? id : null;
+}
+
+// GET /api/admin/dispatch/:lawnFastServiceId/lawn-fast/context
+// What the regular lawn Fast Complete sheet opens with (owner 2026-10-03: every
+// lawn visit type is eligible, recurring program visits first): the eligibility
+// verdict with a reason, the visit identity (echoed back as `expectedVisit` on
+// /complete, with the `visitType` echoed in the `lawnFast` block), the planned
+// products each with its post-application watering rule, whether a CONFIRMED lawn
+// assessment exists, and the advisory photo status. Read-only; dark behind
+// GATE_LAWN_FAST_COMPLETE. The lawn re-service keeps its own sheet. An ineligible
+// visit answers 200 `eligible: false` with a reason. See services/lawn-fast-complete.js.
+router.get('/:lawnFastServiceId/lawn-fast/context', async (req, res, next) => {
+  try {
+    const serviceId = await lawnFastRequestId(req, res);
+    if (!serviceId) return;
+    const ctx = await require('../services/lawn-fast-complete').buildLawnFastContext(serviceId, { technicianId: req.technicianId });
+    if (!ctx.ok) return res.status(recapStatusForReason(ctx.reason)).json({ error: ctx.reason, code: ctx.reason });
+    const { ok, ...body } = ctx;
+    res.json({ enabled: true, ...body });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/dispatch/:lawnFastServiceId/lawn-fast/watering-preview
+// body: { productIds: [catalog product ids] }
+// Each chosen product's watering rule and the one watering instruction the
+// customer report would print for them, built by the report's own functions so
+// the sheet's sentence can never differ from the report's. Read-only; sends
+// nothing. Dark behind GATE_LAWN_FAST_COMPLETE.
+router.post('/:lawnFastServiceId/lawn-fast/watering-preview', async (req, res, next) => {
+  try {
+    const serviceId = await lawnFastRequestId(req, res);
+    if (!serviceId) return;
+    const result = await require('../services/lawn-fast-complete').buildLawnFastWateringPreview({
+      serviceId,
+      productIds: req.body?.productIds,
+    });
+    if (!result.ok) {
+      const status = result.reason === 'not_found' ? 404 : 400;
+      return res.status(status).json({ error: result.reason, code: result.reason });
+    }
+    const { ok, ...body } = result;
+    res.json({ enabled: true, ...body });
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/dispatch/:serviceId/fast-complete/voice-fill/clip
 // multipart: audio (the recording), sheet: 'pest_reservice', duration_seconds
 // Fast Complete voice fill (dark behind GATE_FAST_COMPLETE_VOICE_FILL). Owner
@@ -4596,6 +4749,81 @@ router.post('/:serviceId/fast-complete/voice-fill/clip', fastCompleteVoiceFillGa
     const counts = VoiceFill.fillCounts(result.fill);
     logger.info(`[voice-fill] clip service=${req.params.serviceId} tech=${req.technicianId} sheet=${sheet} ${size} chars=${result.chars} ok=true products=${counts.products} visitFields=${counts.visitFields} unclear=${counts.unclear} customerNote=${counts.hasCustomerNote} officeNote=${counts.hasOfficeNote}`);
     return res.json({ enabled: true, ...result.fill });
+  } catch (err) { next(err); }
+});
+
+// The note's two voice-fill reads: the report flow (any untyped pest visit, a
+// regular visit or a re-service) and the lawn re-service sheet (while its own gate
+// is on). Same gate GATE_FAST_COMPLETE_VOICE_FILL, same ownership fence.
+// Each is a paid call with its own staff bucket, so a long note dictated in pieces
+// never spends the product read's budget.
+const voiceFillBucket = (max, error) => require('express-rate-limit')({
+  windowMs: 15 * 60 * 1000,
+  max,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
+  message: { error },
+});
+const voiceFillDictationLimiter = voiceFillBucket(40, 'Too many dictation clips. Type your notes for now.');
+const voiceFillProductsLimiter = voiceFillBucket(30, 'Too many voice fills. Pick the products by hand for now.');
+// A refusal about the visit itself (gone, not a pest visit the sheet takes).
+const voiceFillVisitRefusal = (res, reason) => res
+  .status(reason === 'not_pest_re_service' || reason === 'not_eligible' ? 409 : recapStatusForReason(reason))
+  .json({ error: reason, code: reason });
+const VOICE_FILL_VISIT_REASONS = new Set(['not_found', 'not_pest_re_service', 'not_eligible']);
+
+// POST /api/admin/dispatch/:serviceId/fast-complete/voice-fill/dictation
+// multipart: audio (the recording), duration_seconds
+// The report flow's note mic (owner ruling 2026-10-03, "always our transcriber"):
+// the clip is transcribed with the sheet's own product names and the words come
+// back for the note box, where the tech reads and edits them. Nothing is stored;
+// the audit line carries sizes only. Silence answers { text: '' }.
+router.post('/:serviceId/fast-complete/voice-fill/dictation', fastCompleteVoiceFillGate, voiceFillDictationLimiter, voiceFillClipOwner, voiceFillClipParse, async (req, res, next) => {
+  try {
+    const VoiceFill = require('../services/fast-complete-voice-fill');
+    if (!req.file || !req.file.buffer?.length) return res.status(400).json({ error: 'No audio provided', code: 'no_audio' });
+    const { baseType, filename } = dictationClipType(req.file);
+    if (!filename) return res.status(415).json({ error: `Unsupported audio type: ${baseType || 'unknown'}`, code: 'bad_audio_type' });
+    const result = await VoiceFill.transcribeVisitClip({
+      serviceId: req.params.serviceId, audio: req.file.buffer, mimeType: baseType, filename,
+      durationSeconds: Number(req.body?.duration_seconds) || 0,
+    });
+    const size = `bytes=${req.file.buffer.length} type=${baseType}`;
+    if (!result.ok) {
+      logger.info(`[voice-fill] dictation service=${req.params.serviceId} tech=${req.technicianId} ${size} ok=false reason=${result.reason}`);
+      if (result.reason === 'nothing_heard') return res.json({ text: '' });
+      if (VOICE_FILL_VISIT_REASONS.has(result.reason)) return voiceFillVisitRefusal(res, result.reason);
+      return res.status(502).json({ error: 'Transcription unavailable. Type your notes instead.' });
+    }
+    logger.info(`[voice-fill] dictation service=${req.params.serviceId} tech=${req.technicianId} ${size} ok=true chars=${result.text.length}`);
+    return res.json({ text: result.text });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/dispatch/:serviceId/fast-complete/voice-fill/products
+// body: { note }
+// The report flow's product read: the products the note names, each with the
+// amount, unit and way the tech said for it and the words it stood on, checked by
+// the same rules as the re-service sheet's fill (services/fast-complete-voice-fill.js
+// voiceProductsFromNote). It only suggests: the sheet shows each as an unconfirmed
+// row the tech confirms, and writes nothing here. A failed read answers
+// { available: true, status: 'failed' }, never an error, so the sheet carries on
+// with the products picked by hand. The audit line carries counts only.
+router.post('/:serviceId/fast-complete/voice-fill/products', fastCompleteVoiceFillGate, voiceFillProductsLimiter, async (req, res, next) => {
+  try {
+    if (!(await assertRecapOwnership(req, res))) return;
+    const note = req.body?.note;
+    if (typeof note !== 'string') return res.status(400).json({ error: 'note must be text', code: 'bad_note' });
+    const VoiceFill = require('../services/fast-complete-voice-fill');
+    const result = await VoiceFill.voiceProductsFromNote({ serviceId: req.params.serviceId, note });
+    if (!result.ok) {
+      logger.info(`[voice-fill] products service=${req.params.serviceId} tech=${req.technicianId} chars=${note.trim().length} ok=false reason=${result.reason}`);
+      if (VOICE_FILL_VISIT_REASONS.has(result.reason)) return voiceFillVisitRefusal(res, result.reason);
+      return res.json({ enabled: true, available: true, status: 'failed', reason: result.reason, products: [], unclear: [] });
+    }
+    logger.info(`[voice-fill] products service=${req.params.serviceId} tech=${req.technicianId} chars=${result.chars} ok=true products=${result.fill.products.length} unclear=${result.fill.unclear.length}`);
+    return res.json({ enabled: true, available: true, status: 'read', products: result.fill.products, unclear: result.fill.unclear });
   } catch (err) { next(err); }
 });
 
@@ -5674,6 +5902,30 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     rescheduleOptions.sourceSurface = 'dispatch_board';
     rescheduleOptions.notifyRequested = notifyCustomer !== false;
     if (operationKey) rescheduleOptions.operationKey = operationKey;
+    // Edit appointment's "move all of them together" names the stop the
+    // operator was shown ({ id, memberIds, liveCount } from the schedule
+    // payload's visit summary). The unit mover checks it against the locked
+    // membership, and visit_id rides the CAS, so a service that joined, left
+    // or was separated since is refused instead of changing what moves.
+    const expectVisit = req.body.expectVisit;
+    if (expectVisit != null) {
+      const validExpectVisit = typeof expectVisit === 'object' && !Array.isArray(expectVisit)
+        && typeof expectVisit.id === 'string' && expectVisit.id
+        && Array.isArray(expectVisit.memberIds) && expectVisit.memberIds.length > 0
+        && expectVisit.memberIds.every((id) => typeof id === 'string' && id)
+        && (expectVisit.liveCount == null || Number.isInteger(expectVisit.liveCount))
+        && (expectVisit.liveMemberIds == null || (Array.isArray(expectVisit.liveMemberIds)
+          && expectVisit.liveMemberIds.every((id) => typeof id === 'string' && id)));
+      if (!validExpectVisit) return res.status(400).json({ error: 'expectVisit must be { id, memberIds, liveCount, liveMemberIds }' });
+      rescheduleOptions.expect = { ...(rescheduleOptions.expect || {}), visit_id: expectVisit.id };
+      rescheduleOptions.expectGroupedVisit = true;
+      rescheduleOptions.expectVisitMembership = {
+        id: expectVisit.id,
+        memberIds: expectVisit.memberIds,
+        liveCount: expectVisit.liveCount == null ? null : expectVisit.liveCount,
+        ...(Array.isArray(expectVisit.liveMemberIds) ? { liveMemberIds: expectVisit.liveMemberIds } : {}),
+      };
+    }
     // Disclosure contract (PR2 wires it): the collective choke point would
     // widen this singular move to the whole series. A surface that sent
     // `scope: 'this_only'` without `seriesAck: true` has not shown the
@@ -5803,7 +6055,12 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     // stranded sweep owns the (corrected) text once the stop is whole.
     const partialVisitMove = (Array.isArray(result?.visitMove?.failed) && result.visitMove.failed.length > 0)
       || result?.visitMove?.parentRetargetFailed === true; // the parent still describes the old stop (codex r28 P1)
-    const willNotify = notifyCustomer !== false && !partialVisitMove;
+    // Edit appointment (expectVisit) repeats this request when a save is
+    // retried. A stop already at the target moved nothing this time, so the
+    // "your visit moved" text is not sent again.
+    const repeatOfCommittedMove = expectVisit != null && result?.visitMove?.alreadyAtTarget === true
+      && !(result.visitMove.moved || []).length;
+    const willNotify = notifyCustomer !== false && !partialVisitMove && !repeatOfCommittedMove;
     await syncRescheduleReminder(req.params.serviceId, newDate, effectiveWindow, { willNotify, preserveMoveHold: partialVisitMove });
     try {
       // qualityDates: the same Set already passed to the rebooker above —
@@ -5847,6 +6104,9 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
           memberIds: stuck,
         },
       });
+    }
+    if (repeatOfCommittedMove) {
+      return res.json({ ...result, ...(notifyCustomer !== false ? { notificationSent: false, notificationSkipped: 'already_at_target' } : {}) });
     }
     if (notifyCustomer !== false) {
       // Shared notice path (recipient routing incl. appointment_notify_primary
@@ -6422,6 +6682,53 @@ router.get('/alerts', requireAdmin, async (req, res, next) => {
   }
 });
 
+// POST /api/admin/dispatch/not-closed-out/:logId/confirm-miss — "This was a miss".
+// POST /api/admin/dispatch/not-closed-out/:logId/dismiss      — "Not a miss".
+// POST /api/admin/dispatch/not-closed-out/:logId/done         — "Done" (a confirmed miss was dealt with).
+//
+// The person decisions on a "Visit not closed out" Action Queue card
+// (services/not-closed-out.js; owner 2026-10-03). :logId is the reschedule_log
+// row the card's payload carries. Rebooking and closing the visit out go through
+// the existing job tools, which settle the row themselves. No customer contact.
+const NOT_CLOSED_OUT_LOG_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+router.post('/not-closed-out/:logId/confirm-miss', requireAdmin, async (req, res, next) => {
+  try {
+    if (!NOT_CLOSED_OUT_LOG_ID_RE.test(String(req.params.logId || ''))) return res.status(404).json({ error: 'Not found' });
+    const result = await require('../services/not-closed-out').confirmMiss({ logId: req.params.logId, confirmedBy: req.technicianId });
+    if (!result.ok) return res.status(404).json({ error: 'This visit was already settled. Refresh the queue.' });
+    res.json({ ok: true });
+  } catch (err) {
+    logger.error(`[dispatch/not-closed-out/confirm-miss] failed: ${err.message}`);
+    next(err);
+  }
+});
+router.post('/not-closed-out/:logId/dismiss', requireAdmin, async (req, res, next) => {
+  try {
+    if (!NOT_CLOSED_OUT_LOG_ID_RE.test(String(req.params.logId || ''))) return res.status(404).json({ error: 'Not found' });
+    const note = typeof req.body?.note === 'string' ? req.body.note : null;
+    const result = await require('../services/not-closed-out').dismiss({ logId: req.params.logId, dismissedBy: req.technicianId, note });
+    if (!result.ok) return res.status(404).json({ error: 'This visit was already settled. Refresh the queue.' });
+    res.json({ ok: true });
+  } catch (err) {
+    logger.error(`[dispatch/not-closed-out/dismiss] failed: ${err.message}`);
+    next(err);
+  }
+});
+router.post('/not-closed-out/:logId/done', requireAdmin, async (req, res, next) => {
+  try {
+    if (!NOT_CLOSED_OUT_LOG_ID_RE.test(String(req.params.logId || ''))) return res.status(404).json({ error: 'Not found' });
+    const result = await require('../services/not-closed-out').markHandled({ logId: req.params.logId, handledBy: req.technicianId });
+    if (!result.ok && result.reason === 'not_confirmed') {
+      return res.status(409).json({ error: 'Say whether this was a miss first.', code: 'NOT_CONFIRMED' });
+    }
+    if (!result.ok) return res.status(404).json({ error: 'This visit was already settled. Refresh the queue.' });
+    res.json({ ok: true });
+  } catch (err) {
+    logger.error(`[dispatch/not-closed-out/done] failed: ${err.message}`);
+    next(err);
+  }
+});
+
 // POST /api/admin/dispatch/alerts/resolve-all — clear current Action Queue.
 //
 // Bulk version of PATCH /alerts/:id/resolve. It marks every unresolved
@@ -6538,7 +6845,13 @@ router.put('/jobs/:id/assign', requireAdmin, async (req, res, next) => {
 
 router.patch('/alerts/:id/resolve', requireAdmin, async (req, res, next) => {
   try {
-    const { resolveAlert } = require('../services/dispatch-alerts');
+    const { resolveAlert, DECISION_ONLY_ALERT_TYPES } = require('../services/dispatch-alerts');
+    // A decision-only card (a visit not closed out) is settled by its own
+    // decision routes; a bare resolve would close it and record nothing.
+    const target = await db('dispatch_alerts').where({ id: req.params.id }).first('type', 'resolved_at');
+    if (target && !target.resolved_at && DECISION_ONLY_ALERT_TYPES.includes(target.type)) {
+      return res.status(409).json({ error: 'This card needs a decision. Use "This was a miss" or "Not a miss".', code: 'DECISION_REQUIRED' });
+    }
     const row = await resolveAlert({
       id: req.params.id,
       resolvedBy: req.technicianId,

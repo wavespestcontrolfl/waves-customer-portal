@@ -362,3 +362,92 @@ export function planVoiceFill({ fill, rows, form, ctx, ops }) {
     confirms: plan.confirms,
   };
 }
+
+// ── The lawn re-service sheet ─────────────────────────────────────────────
+// Its rows differ from the pest sheet's: a suggestion tile is off until tapped,
+// every row picks its own way (none follows a How row), and an amount starts only
+// from what the last visit recorded (`fromLast`). The same rules apply: the fill
+// only turns on, adds or sets what the tech has not set; a value the tech set is
+// kept and the difference is a Check; everything the fill sets waits on a ✓.
+
+/** What a lawn row's confirm or Check watches: the tech changing any of it answers it. */
+export const lawnRowWatch = (row) => (row ? `${row.totalAmount ?? ''}|${row.amountUnit}|${row.active}|${row.method ?? ''}` : 'gone');
+
+function lawnAmountPatch(row, p, techsRow, checks, key) {
+  if (p.amount == null || !p.unit) {
+    // "Same as last time" is the amount the tile already shows from last time.
+    if (p.sameAsLast && !(hasAmount(row) && row.fromLast)) checks.push({ text: `Heard ${quoted(p.heard)} — enter the amount for ${row.name}.`, watch: key });
+    return {};
+  }
+  if (!offers(row, p.unit)) {
+    checks.push({ text: `Heard ${quoted(p.heard)} — enter the amount for ${row.name}.`, watch: key });
+    return {};
+  }
+  const want = { amount: p.amount, unit: p.unit };
+  if (hasAmount(row) && sameAmount(rowAmount(row), want)) return {};
+  // An amount on a row the tech turned on and typed is the tech's own.
+  if (techsRow && hasAmount(row) && !row.fromLast) {
+    checks.push({ text: `You entered ${textOf(rowAmount(row))}; heard ${textOf(want)} for ${row.name}.`, watch: key });
+    return {};
+  }
+  return { totalAmount: String(want.amount), amountUnit: want.unit, fromLast: false };
+}
+
+function lawnWayPatch(row, p, techsRow, methods, checks, key) {
+  if (!p.method || !methods.includes(p.method) || row.method === p.method) return {};
+  if (techsRow && row.method) {
+    checks.push({ text: `You picked ${words(row.method)}; heard ${words(p.method)} for ${row.name}.`, watch: key });
+    return {};
+  }
+  return { method: p.method };
+}
+
+/**
+ * The taps a products read makes on the lawn re-service sheet:
+ *   added     rows to add (a catalog product not yet on the sheet), each on
+ *   patches   { [productId]: patch } for rows already there (a tile turned on,
+ *             an amount, a way)
+ *   heard     { [productId]: words }
+ *   checks    [{ text, watch? }]   confirms  [{ text, heard, watch }]
+ * `watch` is a product id; the sheet's hook holds each against lawnRowWatch.
+ * `rows` are the sheet's rows now; `catalog` its products; `methods` the way
+ * values it offers; `makeRow(product)` builds a row the way "+ Other product" does.
+ */
+export function planLawnVoiceFill({ fill, rows, catalog, methods, makeRow }) {
+  const byKey = new Map(rows.map((row) => [String(row.productId), row]));
+  const products = new Map((catalog || []).map((product) => [String(product.id), product]));
+  const plan = { added: [], patches: {}, heard: {}, checks: [], confirms: [] };
+  for (const item of Array.isArray(fill?.unclear) ? fill.unclear : []) {
+    plan.checks.push({ text: `Heard ${quoted(item.heard || '…')} — ${plainReason(item.reason)}.` });
+  }
+  for (const p of Array.isArray(fill?.products) ? fill.products : []) {
+    const key = String(p.productId);
+    const existing = byKey.get(key);
+    const product = products.get(key);
+    if (!existing && !product) {
+      plan.checks.push({ text: `Heard ${quoted(p.heard)} — that product is not on this list.` });
+      continue;
+    }
+    const row = existing || makeRow(product);
+    // A row already on is the tech's: what it holds is kept.
+    const techsRow = !!existing && existing.active;
+    plan.heard[key] = p.heard;
+    const patch = {
+      ...lawnAmountPatch(row, p, techsRow, plan.checks, key),
+      ...lawnWayPatch(row, p, techsRow, methods, plan.checks, key),
+      ...(row.active ? {} : { active: true }),
+    };
+    // A row already on that the read leaves as it is needs nothing. A product
+    // not yet on the sheet is added even with nothing said for it: the sheet
+    // then asks for its amount and way.
+    if (existing && !Object.keys(patch).length) continue;
+    const filled = { ...row, ...patch };
+    if (existing) plan.patches[key] = patch;
+    else plan.added.push(filled);
+    byKey.set(key, filled);
+    const amount = hasAmount(filled) ? ` — ${textOf(rowAmount(filled))}` : '';
+    const way = patch.method ? ` · ${titled(patch.method)}` : '';
+    plan.confirms.push({ text: `${filled.name}${amount}${way}`, heard: p.heard, watch: key });
+  }
+  return plan;
+}

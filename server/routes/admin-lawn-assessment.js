@@ -14,6 +14,9 @@ const logger = require('../services/logger');
 const lawnAssessment = require('../services/lawn-assessment');
 const visitAssessment = require('../services/lawn-visit-assessment');
 const visitInput = require('../services/lawn-visit-input');
+const shotList = require('../services/lawn-photo-shots');
+const { decodedBase64Bytes } = require('../utils/request-photo-validation');
+const shotListLive = () => require('../config/feature-gates').gateEnvValue('GATE_LAWN_SHOT_LIST');
 const visitResult = require('../services/lawn-visit-result');
 const visitScores = require('../services/lawn-visit-scores');
 const visitRuns = require('../services/lawn-visit-runs');
@@ -487,6 +490,11 @@ router.post('/assess', async (req, res, next) => {
     // multimodal call over every photo of the visit in place of the per-photo
     // quality gate + parallel scorer below. Decided once per request.
     const visitAssessmentEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_VISIT_ASSESSMENT');
+    // GATE_LAWN_SHOT_LIST (services/lawn-photo-shots.js): the eight-shot photo
+    // contract (cap 8, shot keys as zones, per-shot maximum), the zone-weighted
+    // legacy merge and the front-first hero photo. Decided once per request;
+    // off = every line below behaves exactly as before.
+    const shotListEnabled = shotListLive();
 
     if (!customerId) return res.status(400).json({ error: 'customerId is required' });
     if (!photos || !photos.length) return res.status(400).json({ error: 'At least one photo is required' });
@@ -496,13 +504,23 @@ router.post('/assess', async (req, res, next) => {
     if (!(await technicianServicesCustomer(req, customerId))) return res.status(404).json({ error: 'Customer not found' });
     // Gate on: up to six photos, each optionally labeled with the zone the
     // technician shot (front / close_up / trouble) — the only source of a zone claim.
-    const visitPhotos = visitAssessmentEnabled ? visitInput.validateVisitPhotos(photos) : null;
+    const visitPhotos = visitAssessmentEnabled ? visitInput.validateVisitPhotos(photos, { shotList: shotListEnabled }) : null;
     if (visitPhotos?.error) return res.status(400).json({ error: visitPhotos.error });
     // Gate off still records a chosen slot (photoFieldsAt below), so the
     // one-Front rule is enforced on this path too.
     if (!visitAssessmentEnabled && Array.isArray(photos)
       && photos.filter((photo) => visitInput.normalizePhotoZone(photo?.zone) === 'front').length > 1) {
       return res.status(400).json({ error: 'Only one photo can be the Front photo' });
+    }
+    // Shot list on, visit assessment off: the per-photo path has no photo-count
+    // cap of its own, so the shot list brings the cap, the same raw-zone and
+    // per-shot checks as the visit path (shotList.validateZones), and the size rule.
+    if (shotListEnabled && !visitAssessmentEnabled && Array.isArray(photos)) {
+      if (photos.length > shotList.SHOT_CAP) return res.status(400).json({ error: `At most ${shotList.SHOT_CAP} photos per visit` });
+      const zoneCheck = shotList.validateZones(photos.map((photo) => photo?.zone));
+      const sizeError = shotList.photoSizeError(photos.map((photo) => (typeof photo?.data === 'string' ? decodedBase64Bytes(photo.data) : 0)));
+      const shotError = zoneCheck.error || sizeError;
+      if (shotError) return res.status(400).json({ error: shotError });
     }
 
     // Verify customer exists. The premise AND the move stamp are read in one
@@ -789,14 +807,20 @@ router.post('/assess', async (req, res, next) => {
     let mergedComposite;
     let displayScores;
     if (visitAssessmentEnabled) {
-      visitAnalysis = await visitAssessment.analyzeVisit({ photos, visionContext });
+      visitAnalysis = await visitAssessment.analyzeVisit({ photos, visionContext, shotList: shotListEnabled });
       let allPoor;
       ({ qualityResults, resultByPhotoIndex, allPoor } = visitResult.photoRowInputs(visitAnalysis));
       // The model answered but called every photo unusable: the legacy
       // retake hold, not an assessment scored off images it could not read.
       if (allPoor) return allPhotosFailed(qualityResults);
     } else {
-      mergedComposite = mergePhotoComposites(validResults);
+      // Shot list on: weight each photo's area scores by its recorded shot
+      // (detail shots count for nothing). Off: the plain mean, as before.
+      const resultZones = [];
+      photoResults.forEach((result, k) => {
+        if (result) resultZones.push(visitInput.normalizePhotoZone(photos[analyzedIndices[k]]?.zone, { shotList: true }));
+      });
+      mergedComposite = mergePhotoComposites(validResults, shotListEnabled ? { zones: resultZones } : undefined);
       // Convert to display scores
       displayScores = lawnAssessment.mapToDisplayScores(mergedComposite);
     }
@@ -865,6 +889,10 @@ router.post('/assess', async (req, res, next) => {
     const photoMeta = photos.map((p, i) => ({
       filename: `lawn_${customerId}_${Date.now()}_${i}.${(p.mimeType || 'image/jpeg').split('/')[1]}`,
       uploadedAt: new Date().toISOString(),
+      // Capture mode, stored at capture time (no schema change): the zones on the
+      // photo rows cannot say which vocabulary they were captured under. Absent,
+      // not false, with the gate off, so those rows are unchanged.
+      ...(shotListEnabled ? { photoVocabulary: shotList.PHOTO_VOCABULARY } : {}),
     }));
 
     // Save the assessment. Gate on: the raw output and provenance live on the
@@ -988,7 +1016,7 @@ router.post('/assess', async (req, res, next) => {
         // picker is ungated), so close-up/trouble photos stay out of the
         // report's pairing and fallback. Unlabeled photos keep the legacy
         // upload-order type.
-        const zone = visitInput.normalizePhotoZone(photos[i]?.zone);
+        const zone = visitInput.normalizePhotoZone(photos[i]?.zone, { shotList: shotListEnabled });
         if (zone) return { photo_type: visitInput.photoTypeForZone(zone), zone };
         return { photo_type: photos.length === 1 ? 'general' : (i === 0 ? 'front_yard' : i === 1 ? 'side_yard' : 'trouble_spot') };
       };
@@ -999,6 +1027,11 @@ router.post('/assess', async (req, res, next) => {
     const photoRowsByIndex = photos.map(() => null);
     let bestPhotoId = null;
     let bestQuality = -1;
+    // Shot list on: the report's lead photo prefers the front shot, then any
+    // other overview, over a macro close-up (lawn-photo-shots.js heroRank), and
+    // quality only breaks ties inside a tier. Off: the rank is 0 for every
+    // photo, so quality alone decides, exactly as before.
+    let bestHeroRank = 0;
 
     for (let i = 0; i < photos.length; i++) {
       const photo = photos[i];
@@ -1090,7 +1123,10 @@ router.post('/assess', async (req, res, next) => {
         // Best-photo selection considers quality-gated photos only.
         // A failed photo can never become is_best_photo regardless of
         // its computed quality_score.
-        if (qualityCheck.passed !== false && qualityScore > bestQuality) {
+        const heroRank = shotListEnabled ? shotList.heroRank(photoRecord.zone) : 0;
+        if (qualityCheck.passed !== false
+          && shotList.beatsHero({ rank: heroRank, quality: qualityScore }, { rank: bestHeroRank, quality: bestQuality })) {
+          bestHeroRank = heroRank;
           bestQuality = qualityScore;
           bestPhotoId = photoRecord.id;
         }
@@ -1444,7 +1480,7 @@ router.get('/service/:serviceId', async (req, res, next) => {
       db('lawn_assessments').where({ service_id: req.params.serviceId }),
     ).first();
 
-    if (!assessment) return res.json({ assessment: null });
+    if (!assessment) return res.json({ ...(shotListLive() ? { shotListEnabled: true } : {}), assessment: null });
 
     const visitRun = await visitRuns.loadRun(assessment.id, db);
     const photos = await db('lawn_assessment_photos')
@@ -1453,6 +1489,9 @@ router.get('/service/:serviceId', async (req, res, next) => {
       .catch(() => []);
 
     res.json({
+      // GATE_LAWN_SHOT_LIST: how the admin drawer learns the shot list is live
+      // (key absent when off, so the gate-off payload is unchanged).
+      ...(shotListLive() ? { shotListEnabled: true } : {}),
       assessment: {
         ...normalizeAssessmentRow(assessment),
         photo_records: photos,

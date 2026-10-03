@@ -17,6 +17,8 @@
 //     matches the prior implicit behavior so a 1-photo assessment
 //     produces an identical result.
 
+const { areaWeight } = require('./lawn-photo-shots');
+
 /**
  * Bounded-concurrency map. Runs `fn(item)` over `items` in batches
  * of size `limit`. Preserves input order in the returned array.
@@ -93,20 +95,49 @@ function worstSeverity(values, fallback = null) {
 // observation as a single voice (not a contradictory ' | ' join across photos),
 // and OR overwatering_signal so one photo seeing mushrooms/standing water/algae
 // still flags the whole assessment.
-function mergePhotoComposites(validResults = []) {
-  const results = Array.isArray(validResults) ? validResults.filter(Boolean) : [];
+//
+// Shot-list weighting (GATE_LAWN_SHOT_LIST, lawn report rebuild P18): when the
+// caller passes `zones` (parallel to validResults, the recorded shot key or
+// null per result), density, weeds and color become weighted means: front,
+// back, side and unlabeled photos count in full, shade and hot_edge count
+// half, and close_up, blade_crown and trouble count for nothing, so a trouble
+// spot no longer drags the whole-lawn score. If every photo is a detail shot
+// the plain mean is used (a score is better than none). Severities, the
+// overwatering OR and the votes below are unchanged. No `zones` = the plain
+// mean, byte-identical to before.
+function mergePhotoComposites(validResults = [], { zones } = {}) {
+  const raw = Array.isArray(validResults) ? validResults : [];
+  const kept = [];
+  const keptWeights = [];
+  raw.forEach((result, index) => {
+    if (!result) return;
+    kept.push(result);
+    keptWeights.push(Array.isArray(zones) ? areaWeight(zones[index]) : 1);
+  });
+  const results = kept;
   if (!results.length) return null;
   if (results.length === 1) return results[0].composite;
 
+  // Weights apply only when the caller recorded zones and at least one photo
+  // can speak for the area; otherwise every photo counts the same.
+  const weighted = Array.isArray(zones) && keptWeights.some((w) => w > 0);
+  const mean = (field, digits) => {
+    const pairs = results
+      .map((r, i) => [r.composite[field], weighted ? keptWeights[i] : 1])
+      .filter(([v, w]) => v != null && w > 0);
+    if (!pairs.length) return null;
+    if (!weighted) return pairs.reduce((a, [v]) => a + v, 0) / pairs.length;
+    const total = pairs.reduce((a, [, w]) => a + w, 0);
+    return pairs.reduce((a, [v, w]) => a + v * w, 0) / total;
+  };
+
   const merged = {};
   for (const field of ['turf_density', 'weed_coverage']) {
-    const vals = results.map(r => r.composite[field]).filter(v => v != null);
-    merged[field] = vals.length ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length) : 0;
+    const value = mean(field);
+    merged[field] = value != null ? Math.round(value) : 0;
   }
-  const colorVals = results.map(r => r.composite.color_health).filter(v => v != null);
-  merged.color_health = colorVals.length
-    ? Math.round(colorVals.reduce((a, b) => a + b, 0) / colorVals.length * 10) / 10
-    : 5;
+  const colorValue = mean('color_health');
+  merged.color_health = colorValue != null ? Math.round(colorValue * 10) / 10 : 5;
   merged.fungal_activity = majorityVote(
     results.map(r => r.composite.fungal_activity),
     results[0].composite.fungal_activity,

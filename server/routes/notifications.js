@@ -54,6 +54,14 @@ function serviceContactConsentUpdates(contacts = [], consentGiven = false) {
   };
 }
 
+// Whether the contact card mentions the report text: the gate alone. The
+// card's wording carries the condition itself ("when your own visit-complete
+// texts are on"), because whether that text goes out depends on the phone,
+// the per-property toggles and the delivery channel at each visit.
+function contactReportTextsOn() {
+  return require('../config/feature-gates').contactReportTextLive();
+}
+
 function serviceContactPayload(slot = {}) {
   const name = String(slot.name || '').trim();
   return {
@@ -676,6 +684,7 @@ async function savedPropertyPreferences(req) {
       }),
       serviceContacts: serviceContactsPayload(profile),
       maxServiceContacts: MAX_SERVICE_CONTACTS,
+      contactReportTexts: contactReportTextsOn(),
     };
   });
 }
@@ -735,6 +744,7 @@ router.get('/property-preferences', async (req, res, next) => {
         }),
         serviceContacts: serviceContactsPayload(p),
         maxServiceContacts: MAX_SERVICE_CONTACTS,
+        contactReportTexts: contactReportTextsOn(),
       })),
     });
   } catch (err) {

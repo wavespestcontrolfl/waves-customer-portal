@@ -146,6 +146,50 @@ function AutopayStateCard({ icon = 'card', tone = 'brand', title, message, actio
 // customer: the /me customer — its annualPrepay ({ termEnd, renewalDeclined,
 // awaitsInstallation, … }) drives the renewal copy, since billing_mode stays
 // 'annual_prepay' after the customer declines renewal.
+// Annual rate review (dark, GATE_RATE_REVIEW): a delivered rate change the
+// nightly apply has not written yet — the upcoming rate, the next charge at
+// it and the notice it came from. The server omits rate_changes when there
+// is none.
+function UpcomingRateChanges({ changes, formatDate }) {
+  if (!Array.isArray(changes) || !changes.length) return null;
+  return (
+    <div data-testid="rate-review-upcoming" data-glass="soft" style={{ margin: '12px 0', padding: '12px 14px', borderRadius: 10, border: `1px solid ${PORTAL_BILLING.borderStrong}`, background: PORTAL_BILLING.surface }}>
+      <div style={{ fontSize: 14, fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase', color: PORTAL_BILLING.muted, marginBottom: 6 }}>Upcoming rate</div>
+      {changes.map((change) => (
+        <div key={change.noticePath} style={{ padding: '4px 0' }}>
+          <div style={{ fontSize: 16, fontWeight: 700, color: PORTAL_BILLING.text, lineHeight: 1.4 }}>
+            {change.service ? `${change.service}: ` : ''}{change.next} per {change.unit} from {formatDate(change.effectiveDate)}
+          </div>
+          <div style={{ fontSize: 16, color: PORTAL_BILLING.muted, lineHeight: 1.45 }}>
+            Now {change.current} per {change.unit}.{' '}
+            {/* exact next charge for monthly dues only; else the start date */}
+            {rateChangeChargeLine(change, formatDate)}{' '}
+            <a href={change.noticePath} style={{ color: PORTAL_BILLING.text, fontWeight: 700 }}>View notice</a>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// The "next charge" sentence of the upcoming-rate line (annual rate review).
+// Only the monthly dues carry an exact next charge (amount and date, from
+// the server's surcharge authority); an application is charged after it
+// is done and may bill with other services, and a prepaid renewal is
+// recorded by the office — those state when the new rate starts.
+const RATE_STARTS = {
+  application: (when) => `The new rate applies from your first application on or after ${when}.`,
+  year: (when) => `The new rate starts when your prepaid plan renews on ${when}.`,
+  month: (when) => `The new rate starts ${when}.`,
+};
+
+function rateChangeChargeLine(change, formatDate) {
+  const charge = change.nextCharge;
+  if (!charge) return (RATE_STARTS[change.unit] || RATE_STARTS.month)(formatDate(change.effectiveDate));
+  const split = charge.surcharge > 0 ? ` ($${Number(charge.base).toFixed(2)} + $${Number(charge.surcharge).toFixed(2)} credit card surcharge)` : '';
+  return `Next charge at the new rate: $${Number(charge.total).toFixed(2)}${split} on ${formatDate(charge.date)}.`;
+}
+
 export default function AutopayCard({
   onStateChange, openRequest = null, onOpenRequestHandled, embedded = false, customer,
 }) {
@@ -547,6 +591,8 @@ export default function AutopayCard({
           )}
         </div>
       </div>
+
+      <UpcomingRateChanges changes={data.rate_changes} formatDate={formatDate} />
 
       {!modal && errorBanner}
 

@@ -230,6 +230,16 @@ describe('request tally script', () => {
     expect(s.failures).toEqual(failures);
   });
 
+  test('a failed tool lists the machine codes its refusals recorded, most frequent first', () => {
+    const failures = [
+      { tool: 'query_leads', events: 4, failures: 3, circuit_open: 0, codes: { invalid_input: 1, capability_not_loaded: 2 } },
+      { tool: 'query_stock', events: 5, failures: 0, circuit_open: 0, codes: {} },
+    ];
+    const text = tally.formatText({ days: 14, generated_at: '2026-10-03T00:00:00.000Z', summary: tally.summarize([], [], failures) });
+    expect(text).toContain('query_leads  [capability_not_loaded x2, invalid_input x1]');
+    expect(text).toMatch(/query_stock$/m);
+  });
+
   test('turns are kept per operator and day, including a day whose turns called no tool', () => {
     const turns = [
       { day: '2026-10-01', operator_id: 'op-1', turns: 3, turns_without_tools: 3 },

@@ -5,14 +5,15 @@
 //
 // Dark behind GATE_RATE_REVIEW: every /api/admin/rate-review route answers
 // 404 while the gate is off, the hub probes once (useRateReviewAvailable)
-// and never shows the area. Nothing here sends a customer anything: Approve
-// marks green rows 'approved' against a digest of the batch; the notices
-// themselves (and the letter preview) arrive with the comms lane. "Email me
-// this batch" is the owner digest (the ranking's POST …/digest), never a
-// customer send.
+// and never shows the area. Approve only records the decision: it marks green
+// rows 'approved' against a digest of the batch. Customers are written to
+// from the Send letters panel under the table (RateReviewSendPanel: prepare
+// notices, review who gets what, confirm, send). "Email me this batch" is the
+// owner digest (the ranking's POST …/digest), never a customer send.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { adminFetch } from "../../utils/admin-fetch";
+import RateReviewSendPanel from "../../components/admin/RateReviewSendPanel";
 import {
   ActionFeedback, Badge, Button, Card, CardBody, Checkbox, Dialog, DialogBody, DialogFooter, DialogHeader, DialogTitle,
   Field, Input, Select, Sheet, SheetBody, SheetHeader, Table, TBody, TD, TH, THead, TR, Textarea, UiSurface,
@@ -403,6 +404,9 @@ function RateReviewRow({ row, batchLocked, saving, busy, draft, onDraft, onCommi
       <TD data-label="Customer" className={NOWRAP}>
         <div className="font-medium text-zinc-900">{name}</div>
         <div className="text-ui-caption text-ink-tertiary">{row.city || "—"}</div>
+        {Array.isArray(row.flags) && row.flags.includes("delivery_bounced") && (
+          <Badge tone="warn" title="The letter bounced or was blocked. Fix the contact, then send again from Send letters.">Bounced — re-send</Badge>
+        )}
       </TD>
       <TD data-label="Line" className={NOWRAP}>{lineLabel(row.family_key)}</TD>
       <TD data-label="Cadence" className={NOWRAP}>{cadenceLabel(row.cadence)}</TD>
@@ -527,7 +531,7 @@ function ExceptionsCard({ rows, disabled, busyRow, onInclude, onSkip }) {
   );
 }
 
-function SettingsCard({ open, onToggle, draft, onDraft, saving, feedback, onSave, costBlockRef }) {
+function SettingsCard({ open, onToggle, draft, onDraft, saving, disabled = false, feedback, onSave, costBlockRef }) {
   return (
     <Card className="p-0 overflow-hidden">
       <button
@@ -561,11 +565,11 @@ function SettingsCard({ open, onToggle, draft, onDraft, saving, feedback, onSave
             label="Cost block text"
             help="Written once a year by you, with real figures — technician pay, two or three products by name, fuel, insurance, licensing. The letter prints it under what changed on our side this year. Plain text, nothing generated."
           >
-            <Textarea ref={costBlockRef} rows={6} disabled={saving} value={draft.cost_block} onChange={(e) => onDraft("cost_block", e.target.value)} />
+            <Textarea ref={costBlockRef} rows={6} disabled={saving || disabled} value={draft.cost_block} onChange={(e) => onDraft("cost_block", e.target.value)} />
           </Field>
           <div className="flex flex-wrap items-center gap-3">
-            <Button variant="secondary" onClick={onSave} loading={saving}>Save settings</Button>
-            <span className="text-ui-caption text-ink-secondary">Changes apply to the next build; rows already computed keep the values they were ranked with.</span>
+            <Button variant="secondary" onClick={onSave} loading={saving} disabled={disabled}>Save settings</Button>
+            <span className="text-ui-caption text-ink-secondary">Ranking settings apply to the next build; rows already computed keep the values they were ranked with. The cost block is read live: the current batch's letters use it as soon as it is saved.</span>
             {feedback && <ActionFeedback error={!feedback.ok}>{feedback.text}</ActionFeedback>}
           </div>
         </div>
@@ -588,7 +592,7 @@ function ApproveDialog({ open, onClose, batchKey, totals, earliest, approvalDige
           that account holds and shows up here. Exceptions stay untouched.
         </p>
         <p className="text-ink-secondary m-0">
-          In this build, approving records your decision on the green rows; the letters go out once the comms lane ships.
+          Approving only records your decision on the green rows. Nothing goes to a customer until you press Send in the Send letters panel below the table.
         </p>
       </DialogBody>
       <DialogFooter>
@@ -612,7 +616,7 @@ function LetterSheet({ letter, onClose, onRetry }) {
       </SheetHeader>
       <SheetBody className="flex flex-col min-h-0">
         {letter?.state === "loading" && <Loading>Loading letter…</Loading>}
-        {letter?.state === "pending" && <div className="text-ui-body text-ink-secondary py-10 text-center">Letter preview arrives with the comms PR.</div>}
+        {letter?.state === "pending" && <div className="text-ui-body text-ink-secondary py-10 text-center">No letter for this row yet. Approve the batch, then use Prepare notices in the Send letters panel below the table.</div>}
         {letter?.state === "error" && <ActionFeedback error onRetry={onRetry}>{letter.error}</ActionFeedback>}
         {letter?.state === "ready" && (
           <iframe title={`Letter preview for ${name}`} sandbox="" srcDoc={letter.html} className="w-full flex-1 min-h-[70vh] border-hairline border-zinc-200 rounded-sm bg-white" />
@@ -639,13 +643,15 @@ function BatchStage({ loadError, batches, onRetry }) {
 
 // The selected batch: its load error, its loading state, or the stat cards,
 // the table and the exceptions.
-function BatchBody({ batch, batchError, loadingBatch, onRetry, totals, tableRows, visibleRows, exceptionRows, unpricedCount, liveConfig, rowProps, exceptionProps }) {
+function BatchBody({ batch, batchError, loadingBatch, onRetry, totals, tableRows, visibleRows, exceptionRows, unpricedCount, liveConfig, rowProps, exceptionProps, sendProps }) {
   if (batchError) return <ActionFeedback error onRetry={onRetry}>{batchError}</ActionFeedback>;
   if (!batch) return loadingBatch ? <Loading>Loading batch…</Loading> : null;
   return (
     <>
       <StatCards totals={totals} />
       <BatchTable batch={batch} totals={totals} tableRows={tableRows} visibleRows={visibleRows} unpricedCount={unpricedCount} liveConfig={liveConfig} rowProps={rowProps} />
+      {/* Keyed by batch: switching batches remounts the panel so a preview never outlives its batch. */}
+      <RateReviewSendPanel key={batch.batchKey} batchKey={batch.batchKey} {...sendProps} />
       <ExceptionsCard rows={exceptionRows} {...exceptionProps} />
     </>
   );
@@ -656,6 +662,19 @@ function approveAction(totals, { ready, saving, batchLocked }) {
   if (batchLocked) return { label: "Batch sent", disabled: true };
   if (totals.green === 0) return { label: totals.approved > 0 ? "Batch approved" : "Approve batch · send 0 notices", disabled: true };
   return { label: `Approve batch · send ${noticeCount(totals.green)}`, disabled: !ready || saving };
+}
+
+const KNOBS_SAVED = "Settings saved. They apply to the next build; this batch keeps the values it was ranked with.";
+const COST_BLOCK_SAVED = "Cost block updated — the current batch's send preview and letters now use it.";
+
+// The ranking knobs and the cost block land differently: the knobs shape the
+// NEXT build, but the letter's cost block is read live, so the current batch's
+// send preview (and what goes out) changes the moment it is saved. Say which.
+function savedSettingsText(patch) {
+  const costBlock = Object.prototype.hasOwnProperty.call(patch, "cost_block");
+  const knobs = Object.keys(patch).some((key) => key !== "cost_block");
+  if (costBlock && knobs) return `${KNOBS_SAVED} ${COST_BLOCK_SAVED}`;
+  return costBlock ? COST_BLOCK_SAVED : KNOBS_SAVED;
 }
 
 // ── the page ────────────────────────────────────────────────────────────
@@ -682,6 +701,8 @@ export default function RateReviewPage({ embedded = false } = {}) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsDraft, setSettingsDraft] = useState(settingsDraftFrom(null));
   const [savingSettings, setSavingSettings] = useState(false);
+  const [sending, setSending] = useState(false); // the send panel has a request in flight
+  const [sendRev, setSendRev] = useState(0); // bumped by a write the send preview depends on (approval, cost block)
   const [settingsFeedback, setSettingsFeedback] = useState(null);
   const costBlockRef = useRef(null);
   const batchSeq = useRef(0);
@@ -767,7 +788,7 @@ export default function RateReviewPage({ embedded = false } = {}) {
   );
   const batchLocked = totals.sent > 0;
   const earliestAnniversary = useMemo(() => rows.filter(hasLetter).map(reviewDate).filter(Boolean).sort()[0] || null, [rows]);
-  const saving = busyRow != null;
+  const saving = busyRow != null || sending;
   const ready = !!batch && !loadingBatch;
   const primary = approveAction(totals, { ready, saving, batchLocked });
 
@@ -863,9 +884,10 @@ export default function RateReviewPage({ embedded = false } = {}) {
       return;
     }
     setApproveOpen(false);
+    setSendRev((n) => n + 1);
     try {
       if (!stillSelected(key)) return;
-      const text = `Batch approved: ${noticeCount(data.approved)} marked approved (${signedDollars(data.annual_delta_cents)} per year). Nothing has been sent — the comms lane sends approved rows.`;
+      const text = `Batch approved: ${noticeCount(data.approved)} marked approved (${signedDollars(data.annual_delta_cents)} per year). Nothing has been sent yet — use Send letters below the table.`;
       const reloaded = await reloadAfterWrite(key);
       if (stillSelected(key)) setFeedback({ ok: true, text: reloaded ? text : `${text} ${RELOAD_FAILED}` });
     } finally {
@@ -924,7 +946,8 @@ export default function RateReviewPage({ embedded = false } = {}) {
   };
 
   const saveSettings = async () => {
-    if (savingSettings) return;
+    // A send in flight reads the cost block once, before its first letter: no edit mid-send.
+    if (savingSettings || sending) return;
     const { patch, error } = settingsPatch(settingsDraft, config);
     if (error) {
       setSettingsFeedback({ ok: false, text: error });
@@ -940,7 +963,8 @@ export default function RateReviewPage({ embedded = false } = {}) {
       const data = await adminFetch("/admin/rate-review/config", { method: "PUT", body: JSON.stringify(patch) });
       setConfig(data.config);
       setSettingsDraft(settingsDraftFrom(data.config));
-      setSettingsFeedback({ ok: true, text: "Settings saved. They apply to the next build; this batch keeps the values it was ranked with." });
+      setSendRev((n) => n + 1);
+      setSettingsFeedback({ ok: true, text: savedSettingsText(patch) });
     } catch (e) {
       const detail = e.details && Array.isArray(e.details.errors) ? e.details.errors.join(" · ") : e.message;
       setSettingsFeedback({ ok: false, text: detail || "The settings were refused." });
@@ -960,6 +984,8 @@ export default function RateReviewPage({ embedded = false } = {}) {
     onLetter: openLetter,
   });
 
+  // The panel's prepare/send change row states (approved → sent): re-read the batch.
+  const reloadSelected = () => { if (selectedKeyRef.current) reloadAfterWrite(selectedKeyRef.current); };
   const closeApprove = () => { if (!approving) setApproveOpen(false); };
   const retryLetter = () => { if (letter) openLetter(letter.row); };
   const retryBatch = () => { if (selectedKey) loadBatch(selectedKey); };
@@ -1010,6 +1036,7 @@ export default function RateReviewPage({ embedded = false } = {}) {
         liveConfig={config}
         rowProps={rowProps}
         exceptionProps={{ disabled: batchLocked || saving, busyRow, onInclude: includeException, onSkip: skipException }}
+        sendProps={{ refreshKey: sendRev, disabled: busyRow != null || approving || savingSettings, onBusyChange: setSending, onChanged: reloadSelected }}
       />
 
       {/* Settings stand on their own: the knobs and the cost block are set before the first batch exists. */}
@@ -1020,6 +1047,7 @@ export default function RateReviewPage({ embedded = false } = {}) {
           draft={settingsDraft}
           onDraft={(key, value) => setSettingsDraft((prev) => ({ ...prev, [key]: value }))}
           saving={savingSettings}
+          disabled={sending}
           feedback={settingsFeedback}
           onSave={saveSettings}
           costBlockRef={costBlockRef}

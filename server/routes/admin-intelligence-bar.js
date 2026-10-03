@@ -546,6 +546,17 @@ const IB_WRITES_DISABLED_MESSAGE = 'Intelligence Bar writes are currently disabl
 // never touched by this — only this health-event copy.
 const REDACTED_TOOL_HEALTH_ERROR = '[redacted — PII or outside-write tool]';
 
+// The refusal's machine code (capability_not_loaded, invalid_input,
+// target_clarification_required, ...) stays on the health event even when its
+// text is redacted: without it a refused PII tool leaves no reason at all. Only
+// a code-shaped value is kept (snake_case, or the older UPPER_SNAKE such as
+// COLLECTIVE_MOVE_REQUIRED), so free text can never ride in through `code`.
+const TOOL_HEALTH_CODE_RE = /^(?:[a-z][a-z0-9_]{1,63}|[A-Z][A-Z0-9_]{1,63})$/;
+function toolHealthFailureCode(result) {
+  const code = result?.code;
+  return typeof code === 'string' && TOOL_HEALTH_CODE_RE.test(code) ? code : null;
+}
+
 // A search_field_intelligence result with no page, entry or operational
 // match. Open contradictions only ever attach to returned hits.
 const KNOWLEDGE_GAP_MAX = 300;
@@ -1223,7 +1234,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // (ADMIN-BUG-R12) gets no card. Fail closed on a read error.
       let booking;
       try {
-        booking = await ibBookingProposal(String(params.customer_id), params.service_type, params.price);
+        booking = await ibBookingProposal(String(params.customer_id), params.service_type, params.price, params.customer_request);
       } catch {
         return { failed: true, modelResult: { error: 'Could not work out this visit\'s price or how this customer is billed — try again in a moment. Nothing was changed.' } };
       }
@@ -1237,6 +1248,10 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // a preset swapped for one that happens to net the same dollars —
       // must refuse the same way a net-price mismatch already does, not
       // silently commit a visit the card never actually showed.
+      // The reason as it will be saved (trimmed, capped) is what the card
+      // shows and what the executor stamps; an empty one leaves the params.
+      if (booking.customerRequest) params.customer_request = booking.customerRequest;
+      else delete params.customer_request;
       params._booking_price = booking.price;
       params._booking_service_id = booking.serviceId;
       params._booking_list_price = booking.listPrice;
@@ -1314,7 +1329,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // pin the number that will actually receive it (codex r5 P1).
       const contactApi = require('../services/customer-contact');
       const smsTarget = toolUse.name === 'trigger_review_request'
-        ? contactApi.getServiceContactSmsRecipient(recipient)
+        ? await require('../services/recipient-optin').resolveServiceContactSmsRecipient(recipient)
         : null;
       const pinPhone = smsTarget ? smsTarget.phone : recipient.phone;
       // The resolver keeps role 'service_contact' even when it falls back to
@@ -3144,6 +3159,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
           errorMessage: (PII_TOOL_NAMES.has(toolUse.name) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(toolUse.name)) && errorMessage
             ? REDACTED_TOOL_HEALTH_ERROR
             : errorMessage,
+          ...(failed && toolHealthFailureCode(result) ? { metadata: { code: toolHealthFailureCode(result) } } : {}),
         });
         gapCollector?.toolResult(toolUse.name, result, failed);
 
@@ -3744,7 +3760,7 @@ async function commitPendingAction(req, { id, contractHash }) {
           : await resolveReviewRequestRecipient(execParams);
         const livePhone = !r || r.error ? null
           : (action.tool_name === 'trigger_review_request'
-            ? require('../services/customer-contact').getServiceContactSmsRecipient(r).phone
+            ? (await require('../services/recipient-optin').resolveServiceContactSmsRecipient(r)).phone
             : r.phone);
         drifted = !r || r.error || String(livePhone || '') !== String(pinnedPhone);
         // The card promised a NEW review request: any gate that closed

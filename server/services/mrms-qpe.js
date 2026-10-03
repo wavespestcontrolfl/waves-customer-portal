@@ -34,13 +34,20 @@ function round2(n) {
  * when the service is unreachable / the payload is unusable. `complete` is
  * true only when every requested day carries a finite value.
  */
-async function fetchMrmsDailyRain({ latitude, longitude, start, end } = {}) {
+async function fetchMrmsDailyRain({ latitude, longitude, start, end, signal } = {}) {
   const lat = Number(latitude);
   const lon = Number(longitude);
   if (!Number.isFinite(lat) || !Number.isFinite(lon) || !start || !end) return null;
   const url = `${IEMRE_BASE}/${start}/${end}/${lat.toFixed(4)}/${lon.toFixed(4)}/json`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  // Optional caller cancellation (a caller with its own shorter deadline).
+  // Absent = exactly the timeout-only behavior every other caller has.
+  const onCallerAbort = () => controller.abort();
+  if (signal) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener('abort', onCallerAbort, { once: true });
+  }
   try {
     const response = await fetch(url, { signal: controller.signal });
     if (!response.ok) return null;
@@ -73,6 +80,7 @@ async function fetchMrmsDailyRain({ latitude, longitude, start, end } = {}) {
     return null;
   } finally {
     clearTimeout(timeout);
+    if (signal) signal.removeEventListener('abort', onCallerAbort);
   }
 }
 

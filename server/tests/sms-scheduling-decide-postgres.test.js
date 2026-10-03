@@ -142,6 +142,24 @@ describeOrSkip('sms_offer_decisions on PostgreSQL', () => {
     expect(run.mock.calls.map((c) => c[0].inboundSmsLogId)).toEqual([inboundId]);
   }));
 
+  test('the sweep recovers a reply that arrived on a tracking line (stored as domain_lead or van_lead), and still skips a consumed one', async () => {
+    for (const type of ['domain_lead', 'van_lead']) {
+      await inTrx(async (trx) => {
+        const { offerId, inboundId } = await seed(trx);
+        await trx('sms_offers').where({ id: offerId }).update({ created_at: new Date('2040-03-01T13:00:01Z') });
+        await trx('sms_log').where({ id: inboundId }).update({ message_type: type });
+        const run = jest.fn(async () => ({ recorded: true }));
+        await decide.sweepUndecidedReplies({ now: new Date('2040-03-01T15:10:00Z'), dbh: trx, run });
+        expect(run.mock.calls.map((c) => c[0].inboundSmsLogId)).toEqual([inboundId]);
+        // Lead intake took it: the row was retyped, so it is not the sweep's.
+        await trx('sms_log').where({ id: inboundId }).update({ message_type: 'lead_intake' });
+        run.mockClear();
+        await decide.sweepUndecidedReplies({ now: new Date('2040-03-01T15:10:00Z'), dbh: trx, run });
+        expect(run).not.toHaveBeenCalled();
+      });
+    }
+  });
+
   test('one decision per text, even across two offers', () => inTrx(async (trx) => {
     const { customerId, offerId, inboundId } = await seed(trx);
     const [d2] = await trx('agent_decisions').insert({ workflow: 'sms_reply', agent_name: 'decide-test', decision_version: 'test', suggested_message: 'offer 2' }).returning('id');
@@ -194,6 +212,35 @@ describeOrSkip('sms_offer_decisions on PostgreSQL', () => {
       expect(result).toMatchObject({ recorded: true, outcome: 'would_move' });
       const row = await trx('sms_offer_decisions').where({ id: result.id }).first();
       expect(row.would_have).toMatchObject({ kind: 'move_visit', scheduled_service_id: visitId, date: '2040-03-06', start: '10:00', from: { date: VISIT_DATE, start: '08:00', end: '10:00' } });
+    }));
+
+    test('a would-move reaches the move executor only when its gate is on', () => inTrx(async (trx) => {
+      const act = require('../services/sms-scheduling-act');
+      const executeMove = jest.spyOn(act, 'executeMove').mockResolvedValue({ executed: true, status: 'moved' });
+      try {
+        const { visitId, inboundId, args } = await seedMove(trx);
+        const off = await decide.runShadowDecision({ ...args, slotRecheck: async () => ({ ok: true }) });
+        expect(off).toMatchObject({ recorded: true, outcome: 'would_move' });
+        expect(off.executed).toBeUndefined();
+        expect(executeMove).not.toHaveBeenCalled();
+
+        await trx('sms_offer_decisions').where({ id: off.id }).del();
+        process.env.GATE_SMS_SCHEDULING_ACT_MOVE = 'true';
+        const on = await decide.runShadowDecision({ ...args, slotRecheck: async () => ({ ok: true }) });
+        expect(on).toMatchObject({ recorded: true, outcome: 'would_move', executed: true });
+        expect(executeMove).toHaveBeenCalledTimes(1);
+        const call = executeMove.mock.calls[0][0];
+        expect(call).toMatchObject({ decisionId: on.id, inboundSmsLogId: inboundId, slot: { date: '2040-03-06', start: '10:00' }, dbh: trx });
+        // The executor reads its own clock: the decide step's is from before the model's wait.
+        expect(call.now).toBeUndefined();
+        expect(call.offer.scheduled_service_id).toBe(visitId);
+        expect(call.visit.id).toBe(visitId);
+        // The moment the customer's text arrived, not when it was decided.
+        expect(new Date(call.repliedAt).toISOString()).toBe((await trx('sms_log').where({ id: inboundId }).first('created_at')).created_at.toISOString());
+      } finally {
+        delete process.env.GATE_SMS_SCHEDULING_ACT_MOVE;
+        executeMove.mockRestore();
+      }
     }));
 
     test('an edit that lands after the last check is refused by the insert itself', () => inTrx(async (trx) => {

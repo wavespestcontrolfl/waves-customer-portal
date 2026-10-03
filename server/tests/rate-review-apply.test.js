@@ -846,6 +846,73 @@ describe('applyDueRateChanges — per_application', () => {
     expect(JSON.stringify({ v: visits(), c: mockDb.store.customers })).toBe(before);
     expect(mockDb.store.audit_log).toHaveLength(0);
   });
+  // The comms lane's pre-send preflight (rate-review-comms.js linesGoneFor) calls the
+  // apply's own pure predicate, so a letter is held for exactly the structures the
+  // apply refuses. Each case runs BOTH: the apply holds with the reason, and the
+  // comms preflight reports the same reason for the same rows.
+  test.each([
+    ['no open application left', (b) => { b.scheduled_services.forEach((v) => { if (v.status === 'pending') v.status = 'cancelled'; }); }, 'no_future_visit'],
+    ['a target repriced since the notice', (b) => { b.scheduled_services[2].estimated_price = '130.00'; }, 'rate_moved_since_notice'],
+    ['an unpriced visit', (b) => { b.scheduled_services[2].estimated_price = null; }, 'visit_unpriced'],
+    ['an add-on line', (b) => { b.scheduled_service_addons = [{ id: 'ad-1', scheduled_service_id: VISIT(102), estimated_price: '20.00' }]; }, 'visit_has_addons'],
+    ['an appointment discount', (b) => { b.scheduled_services[2].discount_type = 'percent'; b.scheduled_services[2].discount_amount = 10; b.scheduled_services[2].discount_dollars = '11.70'; }, 'visit_has_discount'],
+    ['a structured price that disagrees with the stamp', (b) => { b.scheduled_services[2].primary_line_price = '130.00'; }, 'visit_price_structure'],
+    ['a prepaid visit', (b) => { b.scheduled_services[2].prepaid_amount = '117.00'; }, 'visit_prepaid'],
+    ['a parked reschedule request', (b) => { b.scheduled_services[2].status = 'rescheduled'; }, 'visit_in_reschedule'],
+    ['a NULL-status visit', (b) => { b.scheduled_services.push({ ...b.scheduled_services[1], id: VISIT(510), scheduled_date: '2027-01-10', status: null }); }, 'visit_status_missing'],
+    ['a replaced series', (b) => {
+      const replacement = fixture.pestSeries(1, ['2026-12-12', '2027-03-12']);
+      replacement.all.forEach((v, i) => { v.id = `${VISIT(900 + i)}`; if (v.recurring_parent_id) v.recurring_parent_id = VISIT(900); });
+      b.scheduled_services = b.scheduled_services.map((v) => (v.status === 'pending' ? { ...v, status: 'cancelled' } : v));
+      b.scheduled_services.push(...replacement.all);
+    }, 'plan_replaced'],
+    ['a notice that never recorded its series', (b) => { const meta = { ...b.price_change_notices[0].metadata }; delete meta.series_root_id; b.price_change_notices[0] = { ...b.price_change_notices[0], metadata: meta }; }, 'notice_series_unrecorded'],
+    ['two series on one line', (b) => {
+      const second = fixture.pestSeries(1, ['2026-12-12']);
+      second.all.forEach((v, i) => { v.id = `${VISIT(900 + i)}`; if (v.recurring_parent_id) v.recurring_parent_id = VISIT(900); });
+      b.scheduled_services.push(...second.all);
+    }, 'multiple_series'],
+    ['a discount on the series parent (every future visit flat)', (b) => { b.scheduled_services[0].discount_type = 'percent'; b.scheduled_services[0].discount_amount = 10; }, 'series_template_complex'],
+    ['a recurring add-on on the series parent', (b) => { b.scheduled_service_addons = [{ id: 'ad-1', scheduled_service_id: VISIT(100), estimated_price: '20.00', recurring_pattern: 'quarterly' }]; b.scheduled_services[0].discount_type = 'fixed'; b.scheduled_services[0].discount_amount = 20; }, 'series_template_complex'],
+    ['an active plan hold with no return date', (b) => { b.plan_holds = [{ id: 'hold-1', customer_id: CUSTOMER(1), status: 'active', family_key: 'pest_control', resume_on: null }]; }, 'plan_on_hold'],
+    ['a delivery revoked after the notice went out (every channel bounced)', (b) => { b.price_change_notices[0] = { ...b.price_change_notices[0], metadata: { ...b.price_change_notices[0].metadata, delivery_revoked: { event: 'bounce', channel: 'email', at: '2026-11-03T00:00:00.000Z' } } }; }, 'delivery_revoked'],
+    ['the named first visit already under way', (b) => { b.price_change_notices[0] = { ...b.price_change_notices[0], metadata: { ...b.price_change_notices[0].metadata, first_visit_id: VISIT(101) } }; b.scheduled_services[1].status = 'en_route'; }, 'effective_visit_started'],
+  ])('comms preflight parity: %s (the apply holds it and the comms lane holds the same reason before sending)', async (_label, mutate, reason) => {
+    const book = sentBook();
+    mutate(book);
+    mockDb.reset(book);
+    const comms = require('../services/rate-review-comms');
+    const gone = await comms._private.linesGoneFor(mockDb, mockDb.store.price_change_notices, { snapshots: mockDb.store.rate_review_snapshots, today: '2026-11-02' });
+    expect([...gone.values()]).toEqual([reason]);
+    const out = await runApply(book);
+    expect(out.holds.map((h) => h.reason)).toEqual([reason]);
+  });
+  test('renewal guard evidence: a delivered text-only prepaid notice counts as told; once Twilio reports the text failed it does not, even before its reconciliation', async () => {
+    const notice = {
+      customer_id: CUSTOMER(1), billing_lane: 'annual_prepay', family_key: 'pest_control', status: 'sent', sent_at: new Date('2027-03-01T15:00:00Z'), applied_at: null,
+      email_sent: false, sms_sent: true, noticed_new_cents: 48400, new_amount_cents: 48400, effective_date: '2027-05-15', metadata: { term_id: 'term-1', sms_sid: 'SM1', coverage_visits: 4 },
+    };
+    mockDb.reset({ price_change_notices: [notice], sms_log: [{ twilio_sid: 'SM1', customer_id: CUSTOMER(1), status: 'delivered' }], rate_review_sms_failures: [] });
+    expect((await apply._private.prepayNoticesByTerm(mockDb, CUSTOMER(1))).deliveredCents.get('term-1')).toMatchObject({ cents: 48400 });
+    mockDb.store.sms_log[0].status = 'undelivered';
+    expect((await apply._private.prepayNoticesByTerm(mockDb, CUSTOMER(1))).deliveredCents.has('term-1')).toBe(false);
+  });
+
+  test('a text-only notice whose sid Twilio reports undelivered is held delivery_revoked, never applied (the status callback\'s sms_log bookkeeping is the durable evidence)', async () => {
+    const book = sentBook({ notice: { email_sent: false, sms_sent: true, metadata: { ...fixture.noticeRow(1).metadata, sms_sid: 'SM1' } } });
+    book.sms_log = [{ twilio_sid: 'SM1', customer_id: CUSTOMER(1), status: 'undelivered' }];
+    const out = await runApply(book);
+    expect(out.holds.map((h) => h.reason)).toEqual(['delivery_revoked']);
+    expect(visits()[1].estimated_price).toBe('117.00');
+    // the failure callback beat the send log (kept by sid in rate_review_sms_failures): the same hold
+    const early = sentBook({ notice: { email_sent: false, sms_sent: true, metadata: { ...fixture.noticeRow(1).metadata, sms_sid: 'SM1' } } });
+    early.rate_review_sms_failures = [{ twilio_sid: 'SM1', status: 'undelivered' }];
+    expect((await runApply(early)).holds.map((h) => h.reason)).toEqual(['delivery_revoked']);
+    // delivered (or no verdict yet): applied as usual
+    const ok = sentBook({ notice: { email_sent: false, sms_sent: true, metadata: { ...fixture.noticeRow(1).metadata, sms_sid: 'SM1' } } });
+    ok.sms_log = [{ twilio_sid: 'SM1', customer_id: CUSTOMER(1), status: 'delivered' }];
+    expect((await runApply(ok)).applied).toBe(1);
+  });
   test('a visit keeping only the audit LINK of a voided/refunded prepay (no live coverage, no prepaid money) is not prepaid — the reprice applies', async () => {
     const book = sentBook();
     book.annual_prepay_terms = [{ id: TERM(1), customer_id: CUSTOMER(1), status: 'refunded', prepay_amount: '400.00', coverage_visit_count: 4, coverage_service_type: 'Lawn Care Program', term_start: '2026-06-01', term_end: '2027-05-31' }];
@@ -1275,6 +1342,26 @@ describe('scheduling races', () => {
 });
 
 describe('retireDraftNotices and the rebuild guard', () => {
+  test('a definitively unsent (unreachable) notice is retired so it can be prepared again', async () => {
+    const book = pestBook();
+    await scheduleBook(book);
+    notices()[0].status = 'unreachable';
+    const out = await apply.retireDraftNotices(BATCH_KEY);
+    expect(out).toMatchObject({ ok: true, retired: 1 });
+    expect(snapshots()[0].notice_id).toBeNull();
+  });
+
+  test('a draft carrying a letter frozen by a send attempt is kept (it may already be in the inbox)', async () => {
+    const book = pestBook();
+    await scheduleBook(book);
+    const n = notices()[0];
+    n.metadata = { ...(typeof n.metadata === 'string' ? JSON.parse(n.metadata) : n.metadata), pending_letter: { key: 'k', payload: {}, letter: {} } };
+    const out = await apply.retireDraftNotices(BATCH_KEY);
+    expect(out).toMatchObject({ ok: true, retired: 0, keptDelivered: 1 });
+    expect(notices()).toHaveLength(1);
+    expect(snapshots()[0].notice_id).toBe(n.id);
+  });
+
   test('retires the batch\'s undelivered rows (a draft, and a draft the public page flipped to viewed on a preview) and unlinks their ranking rows; a delivered notice is kept', async () => {
     const book = pestBook();
     await scheduleBook(book);

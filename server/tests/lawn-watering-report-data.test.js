@@ -607,3 +607,124 @@ describe('label mow hold on the report payload (GATE_LAWN_WATERING_RULE)', () =>
     });
   });
 });
+
+// GATE_LAWN_WATERING_FORECAST (P30) through the real report builder: the frozen
+// forecast sentence reaches the LIVE banner only; everything the PDF, the text
+// and the assistant read stays as written.
+describe('GATE_LAWN_WATERING_FORECAST on the report payload', () => {
+  const { stripLiveOnlyScheduleFields, attachLawnWateringCloseOut } = require('../services/service-report/report-data');
+  const SAVED = { rule: process.env.GATE_LAWN_WATERING_RULE, fc: process.env.GATE_LAWN_WATERING_FORECAST };
+  afterEach(() => {
+    for (const [k, v] of [['GATE_LAWN_WATERING_RULE', SAVED.rule], ['GATE_LAWN_WATERING_FORECAST', SAVED.fc]]) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  });
+  const FORECAST = {
+    line: 'About 0.4 inch of rain is forecast by Thu 8 AM. If at least ¼ inch has fallen by then, it counts as watering in today’s treatment. If it has not, run the watering above right away.',
+    inches: 0.4, source: 'open_meteo', fetchedAt: '2026-09-30T18:41:00.000Z', windowFrom: '2026-09-30T18:40:00.000Z', windowTo: '2026-10-01T18:00:00.000Z',
+  };
+  async function frozenRender(rule, withForecast) {
+    process.env.GATE_LAWN_WATERING_RULE = 'true';
+    const service = serviceWith(rule);
+    const out = {};
+    await buildReportV1Data(service, 'token-w1', makeKnex(fixtures()), { wateringInstructionOut: out });
+    const instruction = JSON.parse(JSON.stringify(out.instruction));
+    if (withForecast) instruction.forecast = FORECAST;
+    return { ...service, structured_notes: JSON.stringify({ lawnWateringFreeze: { wateringInstruction: instruction } }) };
+  }
+  const pickPdfSurfaces = (data) => JSON.stringify({
+    lines: data.reportV2.banner.lines, aftercare: data.reportV2.aftercare, customerAction: data.reportV2.snapshot.customerAction,
+  });
+
+  test('gate on: the live banner carries the frozen sentence beside unchanged lines', async () => {
+    const frozen = await frozenRender(WATER_IN, true);
+    const plain = await frozenRender(WATER_IN, false);
+    process.env.GATE_LAWN_WATERING_FORECAST = 'true';
+    const data = await buildReportV1Data(frozen, 'token-w1', makeKnex(fixtures()));
+    expect(data.reportV2.banner.forecastLine).toBe(FORECAST.line);
+    expect(data.reportV2.banner.lines.join(' ')).not.toMatch(/forecast/i);
+    // Aftercare (the PDF's watering text), the hero task and the lines are exactly what they are without the sentence.
+    const baseline = await buildReportV1Data(plain, 'token-w1', makeKnex(fixtures()));
+    expect(pickPdfSurfaces(data)).toBe(pickPdfSurfaces(baseline));
+    expect(data.reportV2.aftercare.watering).not.toMatch(/forecast/i);
+  });
+
+  test('gate off: payload byte-identical with or without a frozen sentence', async () => {
+    const frozen = await frozenRender(WATER_IN, true);
+    const plain = await frozenRender(WATER_IN, false);
+    delete process.env.GATE_LAWN_WATERING_FORECAST;
+    const a = await buildReportV1Data(frozen, 'token-w1', makeKnex(fixtures()));
+    const b = await buildReportV1Data(plain, 'token-w1', makeKnex(fixtures()));
+    expect(a.reportV2.banner).not.toHaveProperty('forecastLine');
+    expect(JSON.stringify(a.reportV2)).toBe(JSON.stringify(b.reportV2));
+  });
+
+  test('a hold carrying a (stray) forecast block never shows it', async () => {
+    const frozen = await frozenRender(HOLD, true);
+    process.env.GATE_LAWN_WATERING_FORECAST = 'true';
+    const data = await buildReportV1Data(frozen, 'token-w1', makeKnex(fixtures()));
+    expect(data.reportV2.banner.state).toBe('hold');
+    expect(data.reportV2.banner).not.toHaveProperty('forecastLine');
+  });
+
+  test('PDF / static: the live-only strip removes both live additions, nothing else', async () => {
+    const frozen = await frozenRender(WATER_IN, true);
+    process.env.GATE_LAWN_WATERING_FORECAST = 'true';
+    const data = await buildReportV1Data(frozen, 'token-w1', makeKnex(fixtures()));
+    data.reportV2.banner.observedRain = { inches: 0.5, line: 'Radar measured about 0.5 inch of rain near your address since your visit.', source: 'mrms', days: [] };
+    const before = { ...data.reportV2.banner };
+    stripLiveOnlyScheduleFields(data);
+    expect(data.reportV2.banner).not.toHaveProperty('forecastLine');
+    expect(data.reportV2.banner).not.toHaveProperty('observedRain');
+    const { forecastLine, observedRain, ...rest } = before;
+    expect(forecastLine).toBe(FORECAST.line);
+    expect(observedRain).toBeTruthy();
+    expect(data.reportV2.banner).toEqual(rest);
+    expect(JSON.stringify(data)).not.toContain(FORECAST.line);
+  });
+
+  test('live close-out: radar-measured days inside a long window only; gate off, hold and unfrozen visits stay as they are', async () => {
+    const mrms = require('../services/mrms-qpe');
+    const spy = jest.spyOn(mrms, 'fetchMrmsDailyRain').mockResolvedValue({
+      days: [{ date: '2026-10-01', inches: 0.3 }, { date: '2026-10-02', inches: 0.2 }], complete: true,
+    });
+    const real = Date;
+    jest.useFakeTimers().setSystemTime(new real('2026-10-03T12:00:00Z'));
+    try {
+      const long = { ...WATER_IN, water_in_by_hours: 96 };
+      const frozen = await frozenRender(long, false);
+      frozen.customer_latitude = 27.5; frozen.customer_longitude = -82.5;
+      const make = async () => buildReportV1Data(frozen, 'token-w1', makeKnex(fixtures()));
+
+      delete process.env.GATE_LAWN_WATERING_FORECAST;
+      let data = await make();
+      await attachLawnWateringCloseOut(data, frozen);
+      expect(data.reportV2.banner).not.toHaveProperty('observedRain');
+      expect(spy).not.toHaveBeenCalled();
+
+      process.env.GATE_LAWN_WATERING_FORECAST = 'true';
+      data = await make();
+      await attachLawnWateringCloseOut(data, frozen);
+      expect(data.reportV2.banner.state).toBe('water_in');
+      expect(data.reportV2.banner.observedRain).toMatchObject({ inches: 0.5, source: 'mrms' });
+      expect(spy).toHaveBeenCalledWith({ latitude: 27.5, longitude: -82.5, start: '2026-10-01', end: '2026-10-02', signal: expect.any(AbortSignal) });
+
+      // Unfrozen visit: no window to measure.
+      spy.mockClear();
+      const unfrozen = { ...serviceWith(long), customer_latitude: 27.5, customer_longitude: -82.5 };
+      data = await buildReportV1Data(unfrozen, 'token-w1', makeKnex(fixtures()));
+      await attachLawnWateringCloseOut(data, unfrozen);
+      expect(spy).not.toHaveBeenCalled();
+
+      // Hold: never.
+      const hold = { ...(await frozenRender(HOLD, false)), customer_latitude: 27.5, customer_longitude: -82.5 };
+      data = await buildReportV1Data(hold, 'token-w1', makeKnex(fixtures()));
+      await attachLawnWateringCloseOut(data, hold);
+      expect(spy).not.toHaveBeenCalled();
+      expect(data.reportV2.banner).not.toHaveProperty('observedRain');
+    } finally {
+      jest.useRealTimers();
+      spy.mockRestore();
+    }
+  });
+});

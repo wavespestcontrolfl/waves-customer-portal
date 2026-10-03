@@ -192,7 +192,7 @@ html.admin-app *:not(.tech-field):not(.tech-field *):not(.tech-field-portal):not
   font-family: "Roboto", system-ui, sans-serif !important;
 }
 /* The field workspace (/admin/today, TechFieldShell) keeps its own type:
-   DM Sans base and Montserrat headings from tech-field.css, and the legacy
+   tech-field.css sets the admin face itself (no !important to fight), and the legacy
    field tools' inline font choices (Codex #5573 r6). Field dialogs portaled
    onto <body> from the workspace carry .tech-field-portal (FieldPortalClass
    context, components/tech/fieldPortal.js) and keep their own type too; admin

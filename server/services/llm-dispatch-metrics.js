@@ -82,6 +82,16 @@ const SILENT_CONSECUTIVE_DAYS = 3;
 // one of these suffixes on their policy name.
 const EPISODIC_LANE_RE = /:(?:sealed|backfill|replay)$/;
 
+// Policies whose provider call was removed on purpose. Their prior-week rows
+// stay in llm_dispatch_log until they age out, and "calls last week, none
+// now" is exactly the gone-silent shape — so they are excluded from absence
+// detection (failure/fallback exceptions on any remaining rows still
+// report). An entry can be deleted once its rows are older than the 7-day
+// window.
+//   visitBrief        pre-visit brief rewrite, removed 2026-10-03 (#5835)
+//   jobCardParagraph  job card paragraph rewrite, removed 2026-10-03 (#5752)
+const RETIRED_POLICIES = new Set(['visitBrief', 'jobCardParagraph']);
+
 // Synthetic policy used only by the write-path probe; inserted and deleted
 // within probeRecorder, and excluded from stats so a failed cleanup can never
 // masquerade as a real policy in the digest.
@@ -954,6 +964,7 @@ function detectExceptions(yesterdayStats, priorWeekStats, recorderIssue = null, 
   const yesterdayByPolicy = new Map(yesterdayStats.map((s) => [s.policy, s]));
   for (const w of (recorderIssue || !absenceJudgeable) ? [] : priorWeekStats) {
     if (EPISODIC_LANE_RE.test(w.policy)) continue; // one-shot lanes go quiet by design
+    if (RETIRED_POLICIES.has(w.policy)) continue; // call removed on purpose
     if (w.total < SILENT_MIN_WEEKLY || yesterdayByPolicy.has(w.policy)) continue;
     // Cadence split: near-daily policies (or legacy stats without activeDays)
     // alarm on one zero day; bursty ones need the whole recent window silent.
@@ -1177,6 +1188,7 @@ module.exports = {
   FALLBACK_MIN_VOLUME,
   SILENT_MIN_WEEKLY,
   DAILY_CADENCE_MIN_DAYS,
+  RETIRED_POLICIES,
   SILENT_CONSECUTIVE_DAYS,
   _private: { emailExceptions },
 };

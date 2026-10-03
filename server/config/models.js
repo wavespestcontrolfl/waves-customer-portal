@@ -585,6 +585,19 @@ const TEXT_POLICIES = Object.freeze({
     primary: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_VISION_BEST }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_LAWN_ASSESSMENT }),
   }),
+  lawnPairedRecheck: Object.freeze({
+    name: 'lawnPairedRecheck',
+    // The paired-photo recheck (services/lawn-paired-recheck.js,
+    // GATE_LAWN_PAIRED_RECHECK, lawn report rebuild P19b; owner ruling
+    // 2026-09-29 round 3b): one multimodal call per visit reads last visit's and
+    // today's same-spot overview photos as pairs and returns a closed
+    // better / same / worse / cannot_tell verdict. Same two legs as
+    // lawnVisitAssessment (the lawn photo lane's models; no Claude leg, no
+    // parallel providers): Gemini answers, OpenAI stands in only when it
+    // returns nothing usable.
+    primary: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_VISION_BEST }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_LAWN_ASSESSMENT }),
+  }),
   photoIdVision: Object.freeze({
     name: 'photoIdVision',
     // Photo ID (pest-identification.js: website funnel, SMS photo triage,
@@ -638,15 +651,6 @@ const TEXT_POLICIES = Object.freeze({
     // behind GATE_PLANT_ID_REFEREE — not part of this two-provider policy.
     primary: Object.freeze({ provider: PROVIDER.GEMINI, model: process.env.GEMINI_VISION_MODEL || GEMINI_VISION_BEST }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_PLANT_ID }),
-  }),
-  visitBrief: Object.freeze({
-    name: 'visitBrief',
-    // Per-visit pocket-reference brief (previsit-brief.js) — summarization
-    // over deterministic grounding, not analysis, so it rides the WORKHORSE
-    // tier rather than the WDO brief's deepAnalysis (scope ruling
-    // 2026-08-06: deepAnalysis is overkill per-visit).
-    primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: WORKHORSE }),
-    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }),
   }),
   deepAnalysis: Object.freeze({
     name: 'deepAnalysis',

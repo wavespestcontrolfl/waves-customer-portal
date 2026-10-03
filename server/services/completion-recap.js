@@ -349,6 +349,41 @@ const ORDINARY_NAME_WORDS = new Set([
   'while', 'until', 'upon', 'without', 'within', 'through', 'other', 'there',
   'here', 'what', 'both', 'even', 'back', 'around', 'along', 'across',
   'between', 'among', 'every', 'made', 'make', 'used', 'using', 'waves',
+  // Short words: a name whose long words are all plain falls back to its
+  // short ones ("Tim-bor Professional Insecticide and Fungicide"), so a plain
+  // short word there ("and") would match nearly every report.
+  'and', 'for', 'the', 'of', 'to', 'in', 'on', 'at', 'by', 'or', 'an', 'as',
+  'is', 'it', 'be', 'all', 'use', 'per', 'off', 'new', 'one', 'two', 'big',
+  'out', 'not', 'any', 'our', 'can', 'may', 'am', 'up', 'so', 'no', 'pre',
+]);
+
+// Report vocabulary inside catalog names, for the mention check only
+// (catalogScreensForPrompt, admin-schedule.js): a plain word in a note never
+// marks a catalog product named. Audit 2026-10-03 (prod, read-only): over the
+// 274 most recent pest AI reports, a note that read like its report marked a
+// catalog product "mentioned" by one of these words, and that product's full
+// screen then refused the report itself, for 135 of them (49%): "high" (LESCO
+// High Manganese Combo), "contact" (LESCO Manicure 6FL Contact Fungicide),
+// "plant growth regulator", "moisture" (LESCO Moisture Manager), "monitoring
+// … system" (HexPro), "foliage", "three-way". Reports write these lowercase,
+// as plain words; brands stay (Taurus, Talstar, Demand, Tenacity, Celsius,
+// Alpine, Manicure, HexPro). Then plain descriptors from the catalog's names.
+// The visit's own products, and a product the note does name, keep their full
+// screen (#5729).
+const REPORT_VOCABULARY_NAME_WORDS = new Set([
+  'high', 'contact', 'growth', 'plant', 'regulator', 'moisture', 'monitoring',
+  'system', 'foliage', 'three', 'selective', 'chelated', 'micronutrient',
+  'micronutrients', 'micro', 'micros', 'manganese', 'iron', 'soil', 'southern',
+  'emergent', 'post', 'clean', 'zone', 'storm', 'action', 'landscape',
+  'tropical', 'nutrition', 'green', 'snap', 'soluble', 'systemic', 'purpose',
+  'crabgrass', 'indicate', 'indicator', 'biological', 'select', 'organic',
+  'expanded', 'trigger', 'amendment', 'annual', 'baiting', 'bloom', 'board',
+  'glue', 'brand', 'cartridges', 'city', 'combo', 'compressed', 'tablets',
+  'double', 'fertilize', 'flowable', 'foam', 'generic', 'injectable', 'killer',
+  'manager', 'mini', 'mobile', 'ornamental', 'pack', 'professional', 'shrubs',
+  'trees', 'starter', 'total', 'turfgrass', 'tech', 'meal', 'urea', 'humic',
+  'kelp', 'alfalfa', 'vinegar', 'colorant', 'humectant', 'bactericide',
+  'acidifier', 'biostimulant',
 ]);
 
 async function generateRecap(input = {}) {
@@ -402,6 +437,249 @@ const REPORT_GENERIC_PRODUCT_TOKENS = new Set([
   'zone', 'zones', 'select', 'super', 'total', 'ultra', 'prime',
   'green', 'blue', 'red', 'black', 'white', 'gold', 'silver',
 ]);
+// Catalog-wide brand screen (writer rules: no product may be named, not only
+// this visit's). A catalog name that is NOT one of this visit's is matched
+// far more narrowly than the visit's own, because most words inside catalog
+// names are ordinary report vocabulary ("snap", "trap", "distance",
+// "southern"):
+//   - the name, its leading two tokens, or a hyphenated single-letter
+//     designation anywhere in it ("T-Rex"), as a phrase ("Demand CS",
+//     "T-Zone") or as one collapsed word ("BoraCare"), any case; and
+//   - its brand word alone (the first word, "Termidor", "Trapper", or the
+//     second when a maker's name comes first, "Talak" in "Atticus Talak")
+//     only where the text writes it capitalized in the middle of a sentence. A
+//     lowercase or sentence-opening use ("Suspend watering for 24 hours",
+//     "keep your distance") is ordinary wording and passes; and
+//   - two capitalized words side by side anywhere in it ("Green Flo"), as
+//     the catalog writes them.
+// In an all-capitals line every word is capitalized, so a brand word inside
+// it is caught and an ordinary use there ("PLEASE SUSPEND WATERING") is too.
+// A product the prompt itself names is the caller's to add to the visit's
+// own full screen (extraNames), as before this screen existed.
+// Known limit, accepted: a brand word the prompt never names that opens a
+// sentence, or is written lowercase, is not caught by this screen.
+const REPORT_SECTION_HEADINGS = new Set([
+  'WHAT WE FOUND', 'WHAT WE DID', 'WHAT WE DID AND WHY', 'WHAT TO EXPECT', 'WHATS NEXT',
+]);
+const screenTokens = (value) => String(value || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+const screenCasedWords = (value) => String(value || '').match(/[A-Za-z0-9]+/g) || [];
+// Punctuation-collapsed echoes are one word in the copy: "BoraCare" for
+// "Bora-Care", "TZone" for "T-Zone SE" (the visit screen's collapsedEcho
+// rule: four letters or more, or a digit).
+const screenCollapsible = (word) => word.length >= 4 || /\d/.test(word);
+// A label as the catalog cases it, or in all capitals; two words or more.
+function screenAsWritten(label) {
+  const cased = screenCasedWords(label).map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  if (cased.length < 2) return null;
+  const forms = [...new Set([cased, cased.map((word) => word.toUpperCase())].map((words) => words.join('[\\s-]+')))];
+  return new RegExp(`(?<![A-Za-z0-9])(?:${forms.join('|')})(?![A-Za-z0-9])`);
+}
+// Which words of a catalog name are plain report vocabulary.
+function catalogPlainTests(rows, genericTokens) {
+  const generic = new Set(genericTokens);
+  for (const row of rows) {
+    screenTokens(row?.active_ingredient).filter((tok) => tok.length >= 4).forEach((tok) => generic.add(tok));
+  }
+  const isPlain = (token) => generic.has(token) || GENERIC_NAME_TOKENS.has(token)
+    || COMMON_PRODUCT_NAME_WORDS.has(token) || /^\d+$/.test(token);
+  // A name made only of plain words ("Non-ionic Surfactant", where the pair
+  // collapses to the generic "nonionic"; "Advance Termite Bait Station") is
+  // ordinary copy in lowercase and a name only as the catalog writes it.
+  const whollyPlain = (tokens) => tokens.every((token, i) => isPlain(token)
+    || (i + 1 < tokens.length && isPlain(`${token}${tokens[i + 1]}`))
+    || (i > 0 && isPlain(`${tokens[i - 1]}${token}`)));
+  return { isPlain, whollyPlain };
+}
+const aliasLabel = (alias) => String(alias || '').split(':').pop().trim();
+// Returns a test: does the prompt write this alias out, in any case?
+function promptAliasTest(promptText) {
+  const promptHay = ` ${screenTokens(promptText).join(' ')} `;
+  return (alias) => {
+    const tokens = screenTokens(aliasLabel(alias));
+    return tokens.length > 0 && promptHay.includes(` ${tokens.join(' ')} `);
+  };
+}
+// Every label the catalog knows a product by.
+function catalogScreenLabels(rows) {
+  const named = [];
+  for (const row of rows) {
+    // Signs, stickers and stakes are not products.
+    if (isSupplyCategory(row?.category)) continue;
+    // The short display name is what a technician sees on the product card
+    // ("Arena 0.25G Granular" for the Nufarm row): it is a name of the same
+    // product and is screened as one.
+    const labels = new Set([row?.name, row?.display_name].filter(Boolean));
+    for (const label of labels) named.push({ name: row.name, label, alias: false });
+    // Registered aliases ("Talstar P" for Atticus Talak) name the product
+    // too. They are shorthand typed by staff or copied from a protocol
+    // ("Premium: Dispatch wetting agent", "Dismiss if sedge", "Organic
+    // acidifier"), so an alias is matched only as written, capitals and
+    // all, or by its brand word; a note before a colon is dropped.
+    for (const alias of new Set(Array.isArray(row?.aliases) ? row.aliases : [])) {
+      const label = aliasLabel(alias);
+      if (label && !labels.has(label)) named.push({ name: row.name, label, alias: true });
+    }
+  }
+  return named;
+}
+// Two capitalized words side by side anywhere in the name ("Green Flo" in
+// "LESCO Green Flo 6-0-0 10% Ca") are a name as the catalog writes them,
+// unless both are plain. Lowercase copy ("rat snap traps") passes.
+function capitalizedPairs(label, whollyPlain) {
+  const words = screenCasedWords(label);
+  const pairs = [];
+  for (let i = 0; i + 1 < words.length; i += 1) {
+    const pair = [words[i], words[i + 1]];
+    if (!pair.every((word) => /^[A-Z][A-Za-z]+$/.test(word))) continue;
+    if (!whollyPlain(pair.map((word) => word.toLowerCase()))) pairs.push(screenAsWritten(pair.join(' ')));
+  }
+  return pairs;
+}
+// The any-case phrases and collapsed words of a catalog name.
+function addNamePhrases(entry, label, tokens, { isPlain, whollyPlain }) {
+  const add = (parts) => {
+    entry.phrases.push(` ${parts.join(' ')} `);
+    if (screenCollapsible(parts.join(''))) entry.collapsed.push(parts.join(''));
+  };
+  if (tokens.length >= 2) add(tokens);
+  // The leading pair is a name only when it opens on the brand or a short
+  // designation ("T-Zone", "PGF Complete"); a pair that opens on a plain
+  // word ("termite protection", "yard sign") is ordinary copy.
+  if (tokens.length >= 2 && !isPlain(tokens[0])) add(tokens.slice(0, 2));
+  // A hyphenated designation anywhere in the name is an alias of its own
+  // ("T-Rex" in "Trapper T-Rex Rat Snap Trap", "G-4"): a single letter
+  // joined to a word is a coined term, never ordinary copy. Compounds of
+  // whole words ("pre-emergent", "three-way") are not.
+  for (const compound of String(label).match(/[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+/g) || []) {
+    const parts = screenTokens(compound);
+    if (parts.some((part) => /^[a-z]$/.test(part)) && !whollyPlain(parts)) add(parts);
+  }
+}
+// What one label is screened by, or null when nothing in it is a name.
+function catalogBrandEntry({ name, label, alias }, plain, promptHay) {
+  const tokens = screenTokens(label);
+  if (!tokens.length) return null;
+  const entry = { name, brands: [], phrases: [], collapsed: [], pairs: [], exact: null, stem: null };
+  const allPlain = plain.whollyPlain(tokens);
+  // An alias the prompt itself writes out is screened in any case: the copy
+  // was written from a note that names it.
+  if (alias && (tokens.length >= 2 || !allPlain) && promptHay.includes(` ${tokens.join(' ')} `)) {
+    entry.phrases.push(` ${tokens.join(' ')} `);
+    if (tokens.length >= 2 && screenCollapsible(tokens.join(''))) entry.collapsed.push(tokens.join(''));
+  }
+  if (allPlain) {
+    // The label as the catalog cases it ("Advance Termite Bait Station"),
+    // or its capitalized first word mid-sentence followed by another word
+    // of the name ("installed Advance bait stations"). Lowercase copy ("a
+    // non-ionic surfactant", "in advance of") passes.
+    entry.exact = screenAsWritten(label);
+    if (entry.exact) {
+      entry.stem = { lead: tokens[0], followers: tokens.slice(1).filter((tok) => tok.length >= 3 && !/^\d+$/.test(tok)) };
+    }
+    return entry.exact || entry.phrases.length ? entry : null;
+  }
+  // The brand word is the name's first word, or its second when a maker's
+  // name comes first ("Talak" in "Atticus Talak", "Polyzone" in "Suspend
+  // Polyzone"). An alias gives its first word only: what follows may be a
+  // protocol note ("Topchoice fall app", "Headway ONLY if severe").
+  entry.brands = tokens.slice(0, alias ? 1 : 2).filter((token) => token.length >= 4 && !plain.isPlain(token));
+  entry.pairs = capitalizedPairs(label, plain.whollyPlain);
+  if (alias) {
+    entry.exact = screenAsWritten(label);
+    return entry.exact || entry.brands.length || entry.pairs.length || entry.phrases.length ? entry : null;
+  }
+  addNamePhrases(entry, label, tokens, plain);
+  return entry;
+}
+// Whether the capitalized word at index opens its line, a sentence or a list
+// item (it then reads as an ordinary word), or sits in a section heading.
+function opensSentence(raw, index) {
+  const lineStart = raw.lastIndexOf('\n', index) + 1;
+  const lineEndAt = raw.indexOf('\n', index);
+  const line = raw.slice(lineStart, lineEndAt === -1 ? raw.length : lineEndAt);
+  // The report's own section headings are not sentences. Any other
+  // all-capitals line is copy and is read like the rest.
+  if (REPORT_SECTION_HEADINGS.has(line.replace(/[^A-Za-z ]+/g, '').trim().replace(/\s+/g, ' ').toUpperCase())) return true;
+  const before = raw.slice(lineStart, index).replace(/[\s"'“”‘’(\[*_•\-–—]+$/u, '');
+  return !before || /[.!?:;]$/.test(before) || /^\d+$/.test(before);
+}
+// One read of a text: its words, and the words it writes capitalized in the
+// middle of a sentence.
+function readScreenText(text) {
+  const raw = String(text || '');
+  const words = screenTokens(raw);
+  const midSentenceCapitalized = new Set();
+  // "<capitalized mid-sentence word> <the word after it>", both lowercased.
+  const midSentencePairs = new Set();
+  const wordRe = /[A-Za-z0-9]+/g;
+  let match;
+  while ((match = wordRe.exec(raw)) !== null) {
+    if (!/^[A-Z]/.test(match[0]) || opensSentence(raw, match.index)) continue;
+    midSentenceCapitalized.add(match[0].toLowerCase());
+    const next = /^[^A-Za-z0-9\n]*([A-Za-z0-9]+)/.exec(raw.slice(match.index + match[0].length));
+    if (next) midSentencePairs.add(`${match[0].toLowerCase()} ${next[1].toLowerCase()}`);
+  }
+  return {
+    raw, normHay: ` ${words.join(' ')} `, wordSet: new Set(words), midSentenceCapitalized, midSentencePairs,
+  };
+}
+function entryNamedIn(entry, read) {
+  if (entry.phrases.some((phrase) => read.normHay.includes(phrase))) return true;
+  if (entry.collapsed.some((word) => read.wordSet.has(word))) return true;
+  if (entry.brands.some((brand) => read.midSentenceCapitalized.has(brand))) return true;
+  if (entry.exact !== null && entry.exact.test(read.raw)) return true;
+  if (entry.pairs.some((pair) => pair.test(read.raw))) return true;
+  return entry.stem !== null && entry.stem.followers.some((tok) => read.midSentencePairs.has(`${entry.stem.lead} ${tok}`)
+    || read.midSentencePairs.has(`${entry.stem.lead} ${tok}s`));
+}
+// mentionedText is the prompt the copy was written from, when there is one.
+function buildCatalogBrandScreen(rows, genericTokens, mentionedText = '') {
+  const plain = catalogPlainTests(rows, genericTokens);
+  const promptHay = ` ${screenTokens(mentionedText).join(' ')} `;
+  const entries = catalogScreenLabels(rows)
+    .map((labelled) => catalogBrandEntry(labelled, plain, promptHay))
+    .filter(Boolean);
+  // The maker's name ("Syngenta", "BASF") is a brand too: capitalized
+  // mid-sentence, or in any case when the prompt itself writes it.
+  const makers = [...new Set(rows.flatMap((row) => screenTokens(row?.manufacturer)))]
+    .filter((token) => token.length >= 4 && !plain.isPlain(token));
+  if (makers.length) {
+    entries.push({
+      name: 'manufacturer',
+      brands: makers,
+      phrases: makers.filter((maker) => promptHay.includes(` ${maker} `)).map((maker) => ` ${maker} `),
+      collapsed: [], pairs: [], exact: null, stem: null,
+    });
+  }
+  return (text) => {
+    if (!text) return false;
+    const read = readScreenText(text);
+    return entries.some((entry) => entryNamedIn(entry, read));
+  };
+}
+
+// Catalog rows for the catalog-wide screen, each carrying its registered
+// product_aliases names as row.aliases.
+function withCatalogAliases(catalogRows, aliasRows) {
+  const byProduct = new Map();
+  for (const alias of Array.isArray(aliasRows) ? aliasRows : []) {
+    if (!alias?.product_id || !alias?.alias_name) continue;
+    const key = String(alias.product_id);
+    if (!byProduct.has(key)) byProduct.set(key, []);
+    byProduct.get(key).push(alias.alias_name);
+  }
+  return (Array.isArray(catalogRows) ? catalogRows : [])
+    .map((row) => ({ ...row, aliases: byProduct.get(String(row?.id)) || [] }));
+}
+
+async function readCatalogScreenRows(db) {
+  if (!db) throw new Error('catalog-wide trade-name screen needs a catalog read');
+  return withCatalogAliases(
+    await savepointRead(db, (k) => k('products_catalog').select('id', 'name', 'display_name', 'active_ingredient', 'category', 'manufacturer')),
+    await savepointRead(db, (k) => k('product_aliases').select('product_id', 'alias_name')),
+  );
+}
+
 // Builds a screen(text) predicate for THIS visit's recorded products.
 // Generic tokens widen with the visit's own recorded treatment targets and
 // (via db) catalog actives/formulations — active ingredients are permitted
@@ -412,7 +690,21 @@ const REPORT_GENERIC_PRODUCT_TOKENS = new Set([
 // The catalog's non-product rows (yard signs, stakes, stickers).
 const isSupplyCategory = (category) => String(category || '').trim().toLowerCase() === 'supplies';
 
-async function buildReportTradeNameScreen({ products = [], extraNames = [], db = null } = {}) {
+// wholeCatalog adds the catalog-wide brand screen above; catalogRows lets a
+// caller that already read the catalog pass it in (withCatalogAliases rows);
+// mentionedText is the prompt the copy was written from, so an alias the
+// prompt writes out is screened in any case. A failed catalog read
+// throws: the screen cannot run complete, so the caller fails closed.
+async function buildReportTradeNameScreen({ wholeCatalog = false, catalogRows = null, mentionedText = '', ...visit } = {}) {
+  const { visitScreen, genericTokens } = await buildVisitTradeNameScreen(visit);
+  if (!wholeCatalog) return visitScreen;
+  const rows = catalogRows || await readCatalogScreenRows(visit.db);
+  const catalogScreen = buildCatalogBrandScreen(rows, genericTokens, mentionedText);
+  return (text) => visitScreen(text) || catalogScreen(text);
+}
+
+// This visit's own products, screened in full.
+async function buildVisitTradeNameScreen({ products = [], extraNames = [], db = null } = {}) {
   const list = Array.isArray(products) ? products.filter(Boolean) : [];
   let hydrated = list;
   const genericTokens = new Set(REPORT_GENERIC_PRODUCT_TOKENS);
@@ -471,19 +763,24 @@ async function buildReportTradeNameScreen({ products = [], extraNames = [], db =
   });
   const chunks = [];
   for (let i = 0; i < guarded.length; i += 10) chunks.push(guarded.slice(i, i + 10));
-  return (text) => chunks.some((chunk) => containsProductName(text, chunk, { extraGenericTokens: genericTokens, wholeWord: true }));
+  const visitScreen = (text) => chunks.some((chunk) => containsProductName(text, chunk, { extraGenericTokens: genericTokens, wholeWord: true }));
+  return { visitScreen, genericTokens };
 }
 
 module.exports = {
   buildPrompt,
   buildReportTradeNameScreen,
   containsProductName,
+  REPORT_GENERIC_PRODUCT_TOKENS,
+  REPORT_VOCABULARY_NAME_WORDS,
   isSupplyCategory,
   composeCompletionSmsPreview,
   deterministicRecap,
   generateRecap,
   normalizeOutcome,
+  promptAliasTest,
   sanitizeRecap,
   smsRecap,
   SMS_RECAP_MAX_CHARS,
+  withCatalogAliases,
 };

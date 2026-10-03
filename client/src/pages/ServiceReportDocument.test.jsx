@@ -477,6 +477,90 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).not.toMatch(/hash-chained/);
   });
 
+  describe('lawn photo set (GATE_LAWN_REPORT_PHOTO_SET)', () => {
+    const SET = [
+      { url: 'https://cdn.example.com/set-front.jpg', shot: 'front', label: 'Front yard' },
+      { url: 'https://cdn.example.com/set-back.jpg', shot: 'back', label: 'Back yard' },
+      { url: 'https://cdn.example.com/set-close.jpg', shot: 'close_up', label: 'Close-up' },
+      { url: 'https://cdn.example.com/set-trouble.jpg', shot: 'trouble', label: 'Trouble spot' },
+    ];
+    // The gallery the server already builds for a lawn visit: a quality-ordered
+    // copy of the turf photos (lawn- ids), the V2 strip, and a real service photo.
+    const lawnData = (extra = {}) => ({
+      ...BASE_DATA,
+      serviceLine: 'lawn',
+      photos: [
+        { id: 'p1', url: 'https://cdn.example.com/service-photo.jpg', caption: 'Gate latch fixed' },
+        { id: 'lawn-1', url: 'https://cdn.example.com/other-trouble.jpg', caption: 'raw vision text' },
+        { id: 'lawn-2', url: 'https://cdn.example.com/other-front.jpg', caption: 'raw vision text' },
+      ],
+      reportV2: {
+        snapshot: { overallScore: 86, statusHeadline: 'Lawn looking strong' },
+        photos: [{ url: 'https://cdn.example.com/strip-front.jpg', label: 'Front yard' }],
+        ...extra,
+      },
+    });
+    const srcs = (container) => [...container.querySelectorAll('figure img')].map((img) => img.getAttribute('src'));
+
+    it('prints the set in shot order with its labels, in place of the lawn gallery copies', () => {
+      const { container } = render(<ServiceReportDocument data={lawnData({ photoSet: SET })} token="tok123" />);
+      expect(srcs(container)).toEqual(['https://cdn.example.com/service-photo.jpg', ...SET.map((p) => p.url)]);
+      for (const label of ['Front yard', 'Back yard', 'Close-up', 'Trouble spot']) expect(screen.getByText(label)).toBeInTheDocument();
+      expect(container.querySelector('a[href*="cdn.example.com"]')).toBeNull();
+      expect(screen.queryByText('raw vision text')).toBeNull();
+    });
+
+    it('without a photoSet the gallery is exactly as it was', () => {
+      const { container } = render(<ServiceReportDocument data={lawnData()} token="tok123" />);
+      expect(srcs(container)).toEqual([
+        'https://cdn.example.com/service-photo.jpg', 'https://cdn.example.com/other-trouble.jpg',
+        'https://cdn.example.com/other-front.jpg', 'https://cdn.example.com/strip-front.jpg',
+      ]);
+    });
+
+    describe('"What the photos showed"', () => {
+      const FINDINGS = [
+        { label: 'Weed pressure', photos: [{ url: SET[0].url, label: 'Front yard' }, { url: SET[2].url, label: 'Close-up' }] },
+        { label: 'General lawn stress', photos: [], confirm: 'The photos from this visit cannot confirm this. A blade close-up photo would let us confirm it.' },
+      ];
+
+      it('prints each finding, its thumbnails and its one fixed sentence, with no links', () => {
+        const { container } = render(<ServiceReportDocument data={lawnData({ photoSet: SET, photoFindings: FINDINGS })} token="tok123" />);
+        const block = container.querySelector('[data-testid="doc-photo-findings"]');
+        expect(block).not.toBeNull();
+        expect(block.textContent).toContain('What the photos showed');
+        expect(block.textContent).toContain('Weed pressure');
+        expect(block.textContent).toContain('General lawn stress');
+        expect(block.textContent).toContain('The photos from this visit cannot confirm this. A blade close-up photo would let us confirm it.');
+        expect([...block.querySelectorAll('img')].map((img) => img.getAttribute('src'))).toEqual([SET[0].url, SET[2].url]);
+        expect(block.querySelector('a')).toBeNull();
+      });
+
+      it('prints nothing for an empty list', () => {
+        const { container } = render(<ServiceReportDocument data={lawnData({ photoSet: SET, photoFindings: [] })} token="tok123" />);
+        expect(container.querySelector('[data-testid="doc-photo-findings"]')).toBeNull();
+      });
+
+      it('prints nothing without a set, and a thumbnail that fails to load drops itself', () => {
+        const noSet = render(<ServiceReportDocument data={lawnData({ photoFindings: FINDINGS })} token="tok123" />);
+        expect(noSet.container.querySelector('[data-testid="doc-photo-findings"]')).toBeNull();
+        noSet.unmount();
+        const { container } = render(<ServiceReportDocument data={lawnData({ photoSet: SET, photoFindings: FINDINGS })} token="tok123" />);
+        const thumb = container.querySelector(`[data-testid="doc-photo-findings"] img[src="${SET[0].url}"]`);
+        fireEvent.error(thumb);
+        expect(container.querySelector(`[data-testid="doc-photo-findings"] img[src="${SET[0].url}"]`)).toBeNull();
+        expect(window.__WAVES_PDF_IMAGE_FAILURES).toBeGreaterThan(0);
+      });
+    });
+
+    it('keeps approved moments and the gauge photo beside the set', () => {
+      const data = { ...lawnData({ photoSet: SET }), proofMoments: [{ id: 'm1', mediaUrl: 'https://cdn.example.com/moment.jpg', mediaType: 'image', customerCaption: 'Entry point sealed' }], mowingHeight: { heightIn: 3.5, photoUrl: 'https://cdn.example.com/gauge.jpg' } };
+      const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+      expect(srcs(container)).toEqual(expect.arrayContaining(['https://cdn.example.com/moment.jpg', 'https://cdn.example.com/gauge.jpg']));
+      expect(srcs(container).slice(1, 5)).toEqual(SET.map((p) => p.url));
+    });
+  });
+
   it('reads legacy weather aliases and canonical interaction outcomes', () => {
     const data = {
       ...BASE_DATA,

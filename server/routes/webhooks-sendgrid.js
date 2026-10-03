@@ -180,15 +180,21 @@ router.post('/events', express.raw({ type: '*/*' }), async (req, res) => {
   // SendGrid will retry the entire batch on non-2xx, so partial failures
   // would double-apply the good rows.
   let processed = 0;
+  let retryNeeded = false;
   for (const ev of events) {
     try {
       await handleEvent(ev);
       processed++;
     } catch (err) {
       logger.error(`[sendgrid-webhook] event ${ev.sg_event_id || '?'} (${ev.event}) failed: ${err.message}`);
+      // A rate review reconciliation that could not be recorded must be redelivered — and so
+      // must ANY failure to process a bounce / dropped / blocked event (a lookup that failed
+      // before the message was even classified would otherwise lose a failure the rate
+      // review letter's notice depends on). The event ledger dedupes what already committed.
+      if ((err && err.retryWebhook) || ['bounce', 'dropped', 'blocked'].includes(String(ev && ev.event || '').toLowerCase())) retryNeeded = true;
     }
   }
-  res.status(200).json({ received: events.length, processed });
+  res.status(retryNeeded ? 500 : 200).json({ received: events.length, processed });
 });
 
 async function handleEvent(ev) {
@@ -365,9 +371,35 @@ async function handleEvent(ev) {
   }
   if (emailMessage) {
     let attemptMatched = true;
-    const processedNew = await processWebhookEvent(ev, messageId, email, async (trx) => {
-      attemptMatched = await handleEmailMessageEvent(ev, emailMessage, trx);
-    });
+    // A rate review letter that did not reach the mailbox (bounce / dropped /
+    // blocked) is reconciled on the notice IN THIS EVENT'S TRANSACTION (the
+    // notice becomes undelivered, a staged prepaid amount is un-staged, the
+    // ranking row returns to approved), so a failure rolls back with the event
+    // ledger row instead of being lost. Any other message returns at once.
+    const rateReviewComms = require('../services/rate-review-comms');
+    let deliveryAlerts = [];
+    const isRateReview = rateReviewComms.isRateReviewMessage(emailMessage);
+    let processedNew;
+    try {
+      processedNew = await processWebhookEvent(ev, messageId, email, async (trx) => {
+        // The sender takes customer-comms BEFORE the address key; a rate review
+        // event takes them in that order too (handleEmailMessageEvent locks the
+        // address first), so a failure callback can never deadlock a send.
+        if (rateReviewComms.isRateReviewMessage(emailMessage) && emailMessage.recipient_id) {
+          await require('../utils/customer-comms-lock').lockCustomerComms(trx, emailMessage.recipient_id);
+        }
+        attemptMatched = await handleEmailMessageEvent(ev, emailMessage, trx);
+        if (attemptMatched) deliveryAlerts = await rateReviewComms.handleEmailDeliveryEvent(trx, emailMessage, ev);
+      });
+    } catch (err) {
+      // ANY failure of a rate review letter's event transaction (the locks, the
+      // event ledger, the message update, the reconciliation, the commit) rolls
+      // it back; /events answers non-2xx so SendGrid redelivers, and the ledger
+      // dedupes the events that did commit.
+      if (isRateReview && err && typeof err === 'object') err.retryWebhook = true;
+      throw err;
+    }
+    if (processedNew && deliveryAlerts.length) await rateReviewComms.raiseDeliveryAlerts(deliveryAlerts);
     // Bounce recovery runs AFTER the event transaction commits, only when the
     // event was newly processed (so a SendGrid redelivery can't re-trigger it).
     // It does a network re-send (sendgrid.sendOne), so dispatch it WITHOUT

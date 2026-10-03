@@ -48,6 +48,12 @@ const { parseETDateTime, TZ, etParts, etDateString } = require('../utils/datetim
 const { VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('./call-booking-source-actions');
 
 const GATE = 'GATE_TECH_VISIT_NOTIFICATIONS';
+// Auto-dispatch moves many visits in one nightly run. With this gate on, its
+// cards are still written one per visit, but their per-visit pushes are held
+// and the run sends ONE push per tech instead (owner ruling 2026-10-03: "yes
+// once is fine"). Read at call time; unset = one push per visit, as before.
+const SUMMARY_GATE = 'GATE_AUTO_DISPATCH_PUSH_SUMMARY';
+const AUTO_DISPATCH_ACTOR_TEXT = 'by auto-dispatch';
 
 const KINDS = Object.freeze(['assigned', 'unassigned', 'rescheduled', 'cancelled']);
 // Lifecycle states with nothing left to announce for an assignment/move card.
@@ -169,9 +175,11 @@ async function describeActor(actor, conn) {
   }
   // Text-reply movers first: reschedule-sms passes 'customer_sms', which the
   // generic customer branch below would otherwise claim as "online".
-  if (label === 'sms' || label === 'reschedule_sms' || label === 'customer_sms') return 'by the customer by text';
+  // 'sms_offer_ai': the customer accepted an offered time by text
+  // (sms-scheduling-act.js).
+  if (label === 'sms' || label === 'reschedule_sms' || label === 'customer_sms' || label === 'sms_offer_ai') return 'by the customer by text';
   if (label.startsWith('customer')) return 'by the customer online';
-  if (label === 'auto_dispatch') return 'by auto-dispatch';
+  if (label === 'auto_dispatch') return AUTO_DISPATCH_ACTOR_TEXT;
   if (label.startsWith('rain')) return 'by the rain-out sweep';
   return 'by the office';
 }
@@ -207,6 +215,12 @@ function composeCard({ kind, visit, actorText, previous, newTechnicianName, ende
   const service = visit.service_type || 'Service';
   const lines = [];
   let headline;
+  // formatWhen / dateOnly read a missing previous slot as null. Any kind may
+  // carry it: a move that also changes the tech arrives as an assignment
+  // pair, and the old day is what makes it a today/tomorrow change for the
+  // tech who loses it (Codex #5783 P2).
+  const prior = previous || {};
+  const previousDate = dateOnly(prior.date);
   if (kind === 'assigned') {
     headline = 'New visit on your route';
     lines.push(`${service} · ${when}`);
@@ -220,7 +234,7 @@ function composeCard({ kind, visit, actorText, previous, newTechnicianName, ende
     lines.push(`Reassigned ${actorText}`);
   } else if (kind === 'rescheduled') {
     headline = 'Visit moved';
-    const before = previous ? formatWhen(previous.date, previous.windowStart, previous.windowEnd) : null;
+    const before = formatWhen(prior.date, prior.windowStart, prior.windowEnd);
     lines.push(service);
     if (before) lines.push(`Was ${before}`);
     lines.push(`Now ${when}`);
@@ -239,6 +253,11 @@ function composeCard({ kind, visit, actorText, previous, newTechnicianName, ende
       customer_name: who,
       service_type: visit.service_type || null,
       when,
+      // ISO days beside the display text: the Today page keeps a change that
+      // touches today or tomorrow as its own card and folds the rest into one
+      // summary (routes/tech-notifications.js /schedule-changes).
+      date: dateOnly(visit.scheduled_date),
+      previous_date: previousDate,
       previous_when: kind === 'rescheduled' && previous
         ? formatWhen(previous.date, previous.windowStart, previous.windowEnd)
         : null,
@@ -383,7 +402,10 @@ async function writeCard(notice) {
       technician_id: notice.technicianId,
       type: notice.type,
       message: card.message,
-      payload: JSON.stringify(card.payload),
+      // An auto-dispatch card whose push is held (deliver) says so on the row
+      // itself, with its run: the summary claims it from the database, so a
+      // crash mid-run never loses it (Codex #5786 P2).
+      payload: JSON.stringify(notice.holdForRun ? { ...card.payload, push_held_run: notice.holdForRun } : card.payload),
     }).returning('id');
     // The inserted row's id: the push recheck asks whether a NEWER card for
     // the same tech and visit exists (pushStillCurrent).
@@ -456,13 +478,23 @@ async function pushCard(notice, { checkCurrent = null } = {}) {
   }
 }
 
+// The auto-dispatch run in progress in this process (runAutoDispatch →
+// beginAutoDispatchRun). A run and every move it makes (rebooker →
+// afterCommit → the per-visit queues) happen in one app instance, and runs are
+// serialized (runExclusive), so a held card names exactly its own run.
+let currentAutoDispatchRun = null;
+
 // Every card in the batch is persisted BEFORE any push is awaited: a push
 // can wait seconds per subscription, and two rapid reassignments (A→B,
 // B→C) must never let B's stale "new visit" land after its "moved off".
 async function deliver(notices) {
   const written = [];
   let dropped = 0;
-  for (const n of notices.filter((x) => x && x.ok)) {
+  // An auto-dispatch card's push is held for the run's one summary push; the
+  // decision is made once, before the write, and recorded on the row.
+  const holdRun = currentAutoDispatchRun && gateEnvValue(SUMMARY_GATE) ? currentAutoDispatchRun : null;
+  for (const raw of notices.filter((x) => x && x.ok)) {
+    const n = holdRun && raw.actorText === AUTO_DISPATCH_ACTOR_TEXT ? { ...raw, holdForRun: holdRun } : raw;
     try {
       const card = await writeCard(n);
       if (card) written.push({ ...n, cardId: card.id || null });
@@ -471,7 +503,10 @@ async function deliver(notices) {
       logger.error(`[tech-visit-notifications] ${n.kind} card not written for visit ${n.visitId} (${errorTag(err)})`);
     }
   }
-  for (const n of written) await pushCard(n, { checkCurrent: (conn) => pushStillCurrent(n, conn) });
+  for (const n of written) {
+    if (n.holdForRun) continue;
+    await pushCard(n, { checkCurrent: (conn) => pushStillCurrent(n, conn) });
+  }
   return { written: written.length, dropped };
 }
 
@@ -557,15 +592,15 @@ function afterCommit(trx, fn, visitId) {
  * new holder hears it arrived. Post-commit, best-effort. No-op when nothing
  * changed.
  */
-function notifyAssignmentChange({ visitId, fromTechId = null, toTechId = null, actorId = null, snapshot = null, trx = null } = {}) {
+function notifyAssignmentChange({ visitId, fromTechId = null, toTechId = null, actorId = null, snapshot = null, previous = null, trx = null } = {}) {
   const from = fromTechId || null;
   const to = toTechId || null;
   if (!visitId || from === to) return null;
   if (!enabled()) return null;
   return afterCommit(trx, async () => {
     const notices = [];
-    if (from) notices.push(await prepareNotice({ visitId, kind: 'unassigned', technicianId: from, actorId, snapshot }));
-    if (to) notices.push(await prepareNotice({ visitId, kind: 'assigned', technicianId: to, actorId, snapshot }));
+    if (from) notices.push(await prepareNotice({ visitId, kind: 'unassigned', technicianId: from, actorId, snapshot, previous }));
+    if (to) notices.push(await prepareNotice({ visitId, kind: 'assigned', technicianId: to, actorId, snapshot, previous }));
     await deliver(notices);
   }, visitId);
 }
@@ -595,6 +630,112 @@ function notifyVisitCancelled({ visitId, technicianId = null, actorId = null, sn
     if (!recipient) return;
     await runNotice({ visitId, kind: 'cancelled', technicianId: recipient, actorId, snapshot, previousStatus });
   }, visitId);
+}
+
+// A claim on held cards lasts this long: a summary that died between its
+// claim and the provider handoff leaves its rows recoverable after it.
+const HELD_CLAIM_LEASE_MS = 10 * 60 * 1000;
+
+// Claim the held cards (all of them, or one run's) in ONE update — so two
+// instances never push the same batch — and send each tech one push counting
+// theirs. The held marker stays until that tech's push is handed off; a failed
+// send releases the claim, and a crash leaves it to expire, so the next run's
+// start recovers the batch either way (Codex #5786 P2). A card the tech
+// already cleared is not counted: they saw it. The summary gate decided at
+// hold time; only the notifications kill switch stops a held batch.
+async function flushHeldAutoDispatchPushes({ runId = null, tag }) {
+  if (!enabled()) {
+    // The notifications kill switch DROPS held batches (no push now, none
+    // later when it comes back on) — the same outcome as a per-visit push
+    // under it (Codex #5786 P2).
+    await db('tech_notifications')
+      .whereIn('type', Object.values(TYPE_BY_KIND))
+      .whereRaw("payload->>'push_held_run' IS NOT NULL")
+      .modify((q) => { if (runId) q.whereRaw("payload->>'push_held_run' = ?", [String(runId)]); })
+      .update({ payload: db.raw("payload - 'push_held_run' - 'push_claimed_at'"), updated_at: new Date() });
+    return { pushed: 0 };
+  }
+  const now = new Date();
+  const claimed = await db('tech_notifications')
+    .whereIn('type', Object.values(TYPE_BY_KIND))
+    .whereNull('dismissed_at')
+    .whereRaw("payload->>'push_held_run' IS NOT NULL")
+    .modify((q) => { if (runId) q.whereRaw("payload->>'push_held_run' = ?", [String(runId)]); })
+    .whereRaw("(payload->>'push_claimed_at' IS NULL OR (payload->>'push_claimed_at')::timestamptz < ?)", [new Date(now.getTime() - HELD_CLAIM_LEASE_MS)])
+    .update({ payload: db.raw("payload || jsonb_build_object('push_claimed_at', ?::text)", [now.toISOString()]), updated_at: now })
+    .returning(['id', 'technician_id']);
+  const byTech = new Map();
+  for (const row of claimed) {
+    if (!row || !row.technician_id) continue;
+    const key = String(row.technician_id);
+    if (!byTech.has(key)) byTech.set(key, []);
+    byTech.get(key).push(row.id);
+  }
+  const PushService = require('./push-notifications');
+  let pushed = 0;
+  for (const [technicianId, ids] of byTech) {
+    const n = ids.length;
+    try {
+      const result = await PushService.sendToAdminUser(technicianId, {
+        title: `Auto-dispatch moved ${n} visit${n === 1 ? '' : 's'}`,
+        body: '',
+        url: '/admin/today',
+        tag,
+        priority: 'high',
+      });
+      // Delivered to a device, or the tech has none (a retry could never
+      // land): the batch is done. Every device failed: keep it for a retry
+      // (pre-push audit P1 — the sender reports provider failures, it does
+      // not throw them).
+      const total = Number(result?.subscriptions) || 0;
+      if (total > 0 && !(Number(result?.sent) > 0)) throw new Error(`no device accepted the push (${total} tried)`);
+      await db('tech_notifications').whereIn('id', ids)
+        .update({ payload: db.raw("payload - 'push_held_run' - 'push_claimed_at'"), updated_at: new Date() });
+      if (total > 0) pushed += 1;
+    } catch (err) {
+      logger.warn(`[tech-visit-notifications] auto-dispatch summary push failed for tech ${technicianId}: ${err.message}`);
+      await db('tech_notifications').whereIn('id', ids)
+        .update({ payload: db.raw("payload - 'push_claimed_at'"), updated_at: new Date() })
+        .catch((releaseErr) => logger.warn(`[tech-visit-notifications] held claim release failed (${errorTag(releaseErr)}); it expires on its own`));
+    }
+  }
+  return { pushed };
+}
+
+/**
+ * At an auto-dispatch run's start: cards an earlier run held but never
+ * summarized (the process died first) get their own push now, then this run's
+ * cards are held under its id. Best-effort; never throws.
+ */
+async function beginAutoDispatchRun(runId) {
+  currentAutoDispatchRun = runId ? String(runId) : null;
+  try {
+    return await flushHeldAutoDispatchPushes({ tag: `auto-dispatch-recovered-${runId || 'run'}` });
+  } catch (err) {
+    logger.warn(`[tech-visit-notifications] held auto-dispatch recovery failed (${errorTag(err)})`);
+    return { pushed: 0 };
+  }
+}
+
+/**
+ * After an auto-dispatch run: ONE push per tech for the cards that run held —
+ * "Auto-dispatch moved 12 visits" — in place of the per-visit pushes. The
+ * cards are written post-commit on the per-visit queues, so those drain
+ * first. Best-effort; never throws.
+ */
+async function pushAutoDispatchSummary({ runId } = {}) {
+  try {
+    for (let i = 0; i < 5 && visitQueues.size; i += 1) {
+      await Promise.allSettled([...visitQueues.values()]);
+    }
+    if (!runId) return { pushed: 0 };
+    return await flushHeldAutoDispatchPushes({ runId, tag: `auto-dispatch-${runId}` });
+  } catch (err) {
+    logger.warn(`[tech-visit-notifications] auto-dispatch summary failed (${errorTag(err)})`);
+    return { pushed: 0 };
+  } finally {
+    if (String(currentAutoDispatchRun) === String(runId)) currentAutoDispatchRun = null;
+  }
 }
 
 // Follow-through shares the staff notification and push paths. Its live
@@ -672,5 +813,8 @@ module.exports = {
   notifyAssignmentChange,
   notifyVisitRescheduled,
   notifyVisitCancelled,
-  _test: { formatWhen, composeCard, describeActor, visitQueues, pushStillCurrent, newerCardExists },
+  pushAutoDispatchSummary,
+  beginAutoDispatchRun,
+  SUMMARY_GATE,
+  _test: { setCurrentAutoDispatchRun: (id) => { currentAutoDispatchRun = id; }, formatWhen, composeCard, describeActor, visitQueues, pushStillCurrent, newerCardExists },
 };

@@ -1382,6 +1382,41 @@ describe('_composeBrief listicle_family rows keep the overlay even with listicle
   });
 });
 
+describe('_composeBrief: a suggested list topic keeps the listicle contract (GitHub Codex P2 on 322faf591d)', () => {
+  // A "Suggest a post" row shares the operator_intercept bucket but carries
+  // no human-authored outline, so the operator-pinned listicle exemption is
+  // not its. The row is built inside the isolated registry, after this
+  // gates mock: built outside, the miner it loads would pick up the stale
+  // gates mock an earlier test registered.
+  const compose = (makeOpportunity) => {
+    let brief;
+    jest.isolateModules(() => {
+      jest.doMock('../config/feature-gates', () => ({ isEnabled: (gate) => gate === 'listicleBriefs' }));
+      const { ContentBriefBuilder: Builder } = require('../services/content/content-brief-builder');
+      const opportunity = makeOpportunity(require('../services/service-report/report-blog-suggestion'));
+      brief = new Builder()._composeBrief({
+        opportunity,
+        signals: { customer_signal: null, serp_profile: null, conversion_feedback: null },
+        decision: { page_type: 'supporting-blog', action_type: 'new_supporting_blog', final_score: 79, score_breakdown: {} },
+        existingBriefVersions: 0,
+      });
+    });
+    return brief;
+  };
+  const numbered = (brief) => brief.required_sections.some((s) => /numbered H2 per item/i.test(s));
+
+  test('a list-shaped suggestion gets the numbered-list structure', () => {
+    expect(numbered(compose(({ suggestionRow }) => ({ id: 'opp-suggest', ...suggestionRow('signs of termite lawn damage', { actorId: 'admin-1' }) })))).toBe(true);
+  });
+
+  test('an operator-pinned row that is no suggestion keeps its exemption', () => {
+    expect(numbered(compose(() => ({
+      id: 'opp-pinned', bucket: 'operator_intercept', page_url: null, query: 'signs of termite lawn damage', city: null, service: 'termite',
+      signal_metadata: { operator_pinned: true },
+    })))).toBe(false);
+  });
+});
+
 describe('_composeBrief listicle_family provenance rides gsc_signal (Codex r5 on #3255)', () => {
   test('family_size / family_variants / family_avg_position carried; sum labeled by presence', () => {
     const brief = new ContentBriefBuilder()._composeBrief({

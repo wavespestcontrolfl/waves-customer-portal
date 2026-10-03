@@ -830,6 +830,9 @@ async function runAutoDispatch(opts = {}) {
   const totals = { evaluated: 0, skipped: 0, recommended: 0, changed: 0, failed: 0 };
 
   const runId = await audit.startRun(config, triggeredBy);
+  // Cards an earlier run held but never summarized get their own push; this
+  // run's cards are held under its id for its summary push.
+  await require('../tech-visit-notifications').beginAutoDispatchRun(runId);
   logger.info(`[auto-dispatch] run ${runId} mode=${config.mode} lock>${lockBoundary} lookahead<=${lookaheadEnd}`);
 
   let runStatus = 'completed';
@@ -900,7 +903,17 @@ async function runAutoDispatch(opts = {}) {
     if (runStatus === 'completed') runStatus = 'completed_with_errors';
     logger.error(`[auto-dispatch] unplaced visit escalation failed: ${err.message}`);
   }
-  await audit.completeRun(runId, { status: runStatus, totals, error: runError });
+  try {
+    await audit.completeRun(runId, { status: runStatus, totals, error: runError });
+  } finally {
+    // One push per tech for the whole run (GATE_AUTO_DISPATCH_PUSH_SUMMARY),
+    // after the per-visit cards it summarizes — sent even when the audit
+    // update fails, since the per-visit pushes were held (Codex #5786 P2).
+    // Best-effort; never throws.
+    if (config.mode !== 'dry_run' && totals.changed > 0) {
+      await require('../tech-visit-notifications').pushAutoDispatchSummary({ runId });
+    }
+  }
   logger.info(`[auto-dispatch] run ${runId} ${runStatus} evaluated=${totals.evaluated} skipped=${totals.skipped} recommended=${totals.recommended} changed=${totals.changed} failed=${totals.failed} geocoded=${run.geo.geocoded}/${run.geo.attempts}`);
   return { runId, status: runStatus, geocoded: run.geo.geocoded, geocode_attempts: run.geo.attempts, ...totals };
 }
