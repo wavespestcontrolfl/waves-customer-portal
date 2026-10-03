@@ -268,10 +268,15 @@ function winnerScore(row) {
 // never lose to an older shell, because executeMerge deliberately backfills
 // only contact fields and would retire the billed row's account state
 // (tier/rate/member_since) with it.
+// Final tie-breaker is the customer id: equal scores with identical
+// created_at (bulk imports) must not fall back to the input row order, or the
+// queue read and a later eligibility read (neither has an ORDER BY) can pick
+// different winners for the same unchanged group (Codex #5858 round 3 P2).
 function pickWinner(rows, extraScore = () => 0) {
   return [...rows].sort((a, b) =>
     ((winnerScore(b) + extraScore(b)) - (winnerScore(a) + extraScore(a)))
-    || (new Date(a.created_at) - new Date(b.created_at)))[0];
+    || (new Date(a.created_at) - new Date(b.created_at))
+    || String(a.id).localeCompare(String(b.id)))[0];
 }
 
 function pairKey(idA, idB) {

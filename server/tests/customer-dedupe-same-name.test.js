@@ -194,6 +194,17 @@ describe('winner choice reuses the existing logic', () => {
     const [group] = buildSameNameGroups({ customers: [stripeShell, withInvoices], blockersById });
     expect(group.winner.id).toBe(withInvoices.id);
   });
+
+  test('equal scores and identical created_at: the winner does not depend on row order', () => {
+    const a = cust({ created_at: '2026-04-06' });
+    const b = cust({ created_at: '2026-04-06' });
+    const blockersById = new Map([[a.id, []], [b.id, []]]);
+    const [forward] = buildSameNameGroups({ customers: [a, b], blockersById });
+    const [reversed] = buildSameNameGroups({ customers: [b, a], blockersById });
+    const expected = [a.id, b.id].sort((x, y) => String(x).localeCompare(String(y)))[0];
+    expect(forward.winner.id).toBe(expected);
+    expect(reversed.winner.id).toBe(expected);
+  });
 });
 
 describe('same-name tier is review-only, never green', () => {
