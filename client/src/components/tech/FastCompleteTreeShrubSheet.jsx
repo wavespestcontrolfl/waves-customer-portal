@@ -506,6 +506,16 @@ function SheetBody({ service, request, ctx, submission, locked, dictationPending
   return <TreeShrubForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={onDictationPending} onFullForm={onFullForm} isMobile={isMobile} />;
 }
 
+// The ids of the library tips written for a watch item the tech marked Seen,
+// in library order ([] when nothing is seen or the library never loaded).
+function seenWatchTipIds(library, choices) {
+  const seen = new Set(Object.keys(choices).filter((key) => choices[key]?.state === 'seen'));
+  if (!seen.size) return [];
+  return (library?.groups || []).flatMap((group) => group.tips || [])
+    .filter((tip) => Array.isArray(tip.watchKeys) && tip.watchKeys.some((key) => seen.has(key)))
+    .map((tip) => tip.id);
+}
+
 function TreeShrubForm({ service, request, ctx, submission, locked, dictationPending, onDictationPending, onFullForm, isMobile }) {
   const base = `/admin/dispatch/${service?.id}`;
   const products = useProductRows(ctx);
@@ -528,13 +538,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
   const tipsAvailable = !!tips;
   // Tips written for a watch item the tech marked Seen lead the picker (library
   // order, set by TipSection). Only the gated watch list yields Seen choices.
-  const priorityTipIds = useMemo(() => {
-    const seen = new Set(Object.keys(watchChoices).filter((key) => watchChoices[key]?.state === 'seen'));
-    if (!seen.size) return [];
-    return (tips?.groups || []).flatMap((group) => group.tips || [])
-      .filter((tip) => Array.isArray(tip.watchKeys) && tip.watchKeys.some((key) => seen.has(key)))
-      .map((tip) => tip.id);
-  }, [watchChoices, tips]);
+  const priorityTipIds = useMemo(() => seenWatchTipIds(tips, watchChoices), [watchChoices, tips]);
   const photos = usePhotoSlots({ base, request, watchList: Array.isArray(ctx.watchList) && ctx.watchList.length > 0 });
   const picker = useProductPicker({
     products: ctx.products,
