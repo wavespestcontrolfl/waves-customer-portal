@@ -22,6 +22,18 @@ const BY_KEY = new Map(SHOTS.map((shot) => [shot.key, shot]));
 // say which vocabulary a capture used. Absent (never false) when the gate was off.
 const PHOTO_VOCABULARY = 'shot_list_v1';
 
+// True when a visit's stored photo metadata (lawn_assessments.photos, an array
+// or its JSON text) carries the shot-list marker the assess route writes beside
+// each photo. Only the explicit marker counts: a zone that merely looks like a
+// shot key does not say which vocabulary the capture used. Unreadable = false.
+function carriesShotListMarker(stored) {
+  let meta = stored;
+  if (typeof meta === 'string') {
+    try { meta = JSON.parse(meta); } catch { return false; }
+  }
+  return Array.isArray(meta) && meta.some((entry) => entry && entry.photoVocabulary === PHOTO_VOCABULARY);
+}
+
 const keyOf = (zone) => String(zone == null ? '' : zone).trim().toLowerCase();
 const shotFor = (zone) => BY_KEY.get(keyOf(zone)) || null;
 
@@ -202,5 +214,5 @@ function missingShotsText(zones = [], definition = DEFINITION) {
 module.exports = {
   PHOTO_VOCABULARY, SHOTS, SHOT_KEYS, SHOT_CAP, SHOT_MINIMUM, MINIMUM_SLOTS, MAX_PHOTO_BYTES, MAX_TOTAL_BYTES,
   PAIRABLE_SHOT_ZONES, NON_PAIRABLE_SHOT_ZONES, RECHECK_PAIRABLE_SHOT_ZONES, SHOT_REPORT_LABELS,
-  normalizeShotZone, isDetailShot, supportsNamedCause, shotGuideText, missingShotsText, rawZoneError, validateZones, photoSizeError, capturedUnderShotList, maxPerShot, areaWeight, heroRank, beatsHero, shotCountError, missingMinimumSlots,
+  normalizeShotZone, isDetailShot, supportsNamedCause, shotGuideText, missingShotsText, rawZoneError, validateZones, photoSizeError, capturedUnderShotList, carriesShotListMarker, maxPerShot, areaWeight, heroRank, beatsHero, shotCountError, missingMinimumSlots,
 };

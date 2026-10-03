@@ -27,7 +27,7 @@ vi.mock('./DictationButton', () => ({
 }));
 
 import FastCompleteSheet from './FastCompleteSheet';
-import { NOTE_CLIP_ERROR, useNoteClip } from './FastCompleteVoiceFill';
+import { NOTE_CLIP_ERROR, PRODUCT_READ_FAILED, useNoteClip } from './FastCompleteVoiceFill';
 
 beforeEach(() => { vi.spyOn(window, 'scrollTo').mockImplementation(() => {}); mic.props = null; });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
@@ -232,11 +232,15 @@ describe('report flow, voice fill on: products from the note', () => {
   test.each([
     ['the read fails', () => ({ enabled: true, available: true, status: 'failed', reason: 'model_failed', products: [], unclear: [] })],
     ['the read is down', () => Object.assign(new Error('down'), { status: 502 })],
-  ])('%s: nothing is filled, nothing is held, and the report is still written', async (_name, fill) => {
+  ])('%s: nothing is filled, the report is still written, and the tech is told before the send', async (_name, fill) => {
     const request = makeRequest({ fill });
     await openSheet(request);
     await generate();
     expect(screen.queryByRole('region', { name: 'Confirm what I filled' })).toBeNull();
+    // a product said aloud is not on the record: one Check says so and holds the send
+    expect(within(screen.getByRole('region', { name: 'Check' })).getByText(PRODUCT_READ_FAILED)).toBeTruthy();
+    expect(completeButton().disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: '✓ Got it' }));
     expect(completeButton().disabled).toBe(false);
     fireEvent.click(completeButton());
     await screen.findByTestId('fast-complete-sent');
@@ -252,6 +256,80 @@ describe('report flow, voice fill on: products from the note', () => {
     await generate('Write it again');
     await waitFor(() => expect(request.bodies('/generate-report')).toHaveLength(2));
     expect(request.bodies('/voice-fill/products')).toHaveLength(1);
+    // voice fill is simply gone: that is not a failed read
+    expect(screen.queryByText(PRODUCT_READ_FAILED)).toBeNull();
+  });
+
+  test('a read that works after one that failed takes the failure Check away', async () => {
+    const request = makeRequest({ fill: () => Object.assign(new Error('down'), { status: 502 }) });
+    await openSheet(request);
+    await generate();
+    expect(screen.getByText(PRODUCT_READ_FAILED)).toBeTruthy();
+    request.fill = read([]);
+    fireEvent.click(screen.getByRole('button', { name: 'Back to the visit' }));
+    fireEvent.click(screen.getByRole('button', { name: '4, elevated' }));
+    await generate('Write it again');
+    await waitFor(() => expect(request.bodies('/voice-fill/products')).toHaveLength(2));
+    expect(screen.queryByText(PRODUCT_READ_FAILED)).toBeNull();
+    expect(completeButton().disabled).toBe(false);
+  });
+
+  test('a product named with no amount can be given one by saying it: the note is read again before the amount is asked for', async () => {
+    const request = makeRequest({ fill: read([{ ...GEL_FIVE, amount: null, unit: '', heard: 'the Advion gel' }]) });
+    await openSheet(request);
+    await generate();
+    expect(screen.getByText('Enter the amount for Advion Ant Bait Gel.')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Back to the visit' }));
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: `${NOTE} Five grams of the gel.` } });
+    request.fill = read([GEL_FIVE]);
+    // the missing amount does not hold a note that has not been read yet
+    await generate('Write it again');
+    await waitFor(() => expect(request.bodies('/generate-report')).toHaveLength(2));
+    expect(request.bodies('/voice-fill/products')).toHaveLength(2);
+    expect(within(confirmList()).getByText(/Advion Ant Bait Gel — 5 g/)).toBeTruthy();
+    expect(screen.queryByText('Enter the amount for Advion Ant Bait Gel.')).toBeNull();
+  });
+
+  test('the same note read again still asks for the amount: nothing new was said', async () => {
+    const request = makeRequest({ fill: read([{ ...GEL_FIVE, amount: null, unit: '', heard: 'the Advion gel' }]) });
+    await openSheet(request);
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Back to the visit' }));
+    fireEvent.click(screen.getByRole('button', { name: '4, elevated' }));
+    expect(screen.getByText('Enter the amount for Advion Ant Bait Gel.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Write it again' }).disabled).toBe(true);
+  });
+});
+
+describe('report flow, voice fill on: a pest visit that opens with no product (a first cleanout)', () => {
+  const CLEANOUT = { ...REGULAR, serviceType: 'Initial Pest Cleanout', serviceKey: 'pest_initial_cleanout' };
+  async function openCleanout(request) {
+    request.mockImplementation(((base) => async (path, options) => (path.split('?')[0].endsWith('/pest-recap/context')
+      ? { ok: true, eligible: true, reportFlow: true, service: CLEANOUT, products: CATALOG }
+      : base(path, options)))(request.getMockImplementation()));
+    render(<FastCompleteSheet service={{ ...SERVICE, serviceType: 'Initial Pest Cleanout' }} request={request} onClose={() => {}} onCompleted={() => {}} voiceFillEnabled />);
+    await screen.findByRole('button', { name: 'Generate AI report' });
+  }
+
+  test('Generate reads the note for products first, then writes the report from them', async () => {
+    const request = makeRequest();
+    await openCleanout(request);
+    expect(screen.getByText('None selected')).toBeTruthy();
+    await generate();
+    const order = request.calls.map((call) => call.path).filter((path) => /voice-facts|voice-fill|generate-report/.test(path)).map((path) => path.split('/').pop());
+    expect(order).toEqual(['products', 'voice-facts', 'generate-report']);
+    expect(request.bodies('/generate-report')[0].productsApplied).toBe('Taurus SC');
+    expect(within(confirmList()).getByText(/Taurus SC — 6 fl oz/)).toBeTruthy();
+  });
+
+  test('a note that names no product is held on the visit, and no report is written', async () => {
+    const request = makeRequest({ fill: read([]) });
+    await openCleanout(request);
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: NOTE } });
+    fireEvent.click(screen.getByRole('button', { name: '3, moderate' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Generate AI report' }));
+    expect(await screen.findByText('Select at least one product.')).toBeTruthy();
+    expect(request.bodies('/generate-report')).toEqual([]);
   });
 });
 

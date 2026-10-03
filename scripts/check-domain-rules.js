@@ -41,6 +41,14 @@
  *      once reached 197 KB, 171 KB of it per-gate env documentation that
  *      now lives in docs/gates-and-env.md and is read on demand.
  *
+ *   7. gate-index — docs/gate-index.md is exactly what
+ *      scripts/generate-gate-index.js writes from the code: one line per
+ *      GATE_* variable the code reads, with its reader files. A lookup by
+ *      name never comes back empty for a gate that exists, and never names
+ *      a reader that is gone. Fix: `npm run gates:index`. On Railway the
+ *      rule only warns: a PR that was green before the rule landed must not
+ *      block a production deploy.
+ *
  * Scope: the whole production server tree (server/) + client/src.
  * Tests, mocks, fixtures, migrations, seeds, contract-tests, one-off
  * scripts, and ops tooling are NOT scanned — they legitimately pin model
@@ -226,6 +234,39 @@ if (claudeMdBytes > CLAUDE_MD_BUDGET_BYTES) {
   console.error('CLAUDE.md  [claude-md-budget]');
   console.error(`    ${claudeMdBytes} bytes > ${CLAUDE_MD_BUDGET_BYTES}-byte budget (the file loads into every session).`);
   console.error('    Gate and env var documentation goes in docs/gates-and-env.md; procedures go in a skill.\n');
+}
+
+// =========================================================================
+// Gate index (rule 7) — docs/gate-index.md matches what the code implies.
+// =========================================================================
+const { INDEX_FILE: GATE_INDEX_FILE, expectedIndex, currentIndex } = require('./generate-gate-index');
+// Markers Railway injects into a deployment's build, never a credential a
+// developer exports (RAILWAY_TOKEN must not switch the rule off locally).
+const onRailway = Boolean(process.env.RAILWAY_DEPLOYMENT_ID || process.env.RAILWAY_GIT_COMMIT_SHA);
+const gateIndexProblems = [];
+try {
+  const expectedGateIndex = expectedIndex();
+  const currentGateIndex = currentIndex();
+  if (expectedGateIndex !== currentGateIndex) {
+    const expectedGateLines = expectedGateIndex.split('\n');
+    const currentGateLines = currentGateIndex.split('\n');
+    const expectedGateLineSet = new Set(expectedGateLines);
+    const currentGateLineSet = new Set(currentGateLines);
+    gateIndexProblems.push(
+      ...expectedGateLines.filter((line) => !currentGateLineSet.has(line)).map((line) => `missing or changed: ${line}`),
+      ...currentGateLines.filter((line) => !expectedGateLineSet.has(line)).map((line) => `no longer true: ${line}`),
+    );
+    if (!gateIndexProblems.length) gateIndexProblems.push('the lines are in a different order');
+  }
+} catch (err) {
+  gateIndexProblems.push(`the gate scan failed: ${err.message}`);
+}
+if (gateIndexProblems.length) {
+  console.error(`${GATE_INDEX_FILE}  [gate-index]${onRailway ? ' (warning only on Railway)' : ''}`);
+  for (const line of gateIndexProblems.slice(0, 10)) console.error(`    ${line.slice(0, 160)}`);
+  if (gateIndexProblems.length > 10) console.error(`    ... and ${gateIndexProblems.length - 10} more line(s).`);
+  console.error('    The index differs from the gates the code reads. Run `npm run gates:index` and commit the file.\n');
+  if (!onRailway) violations += 1;
 }
 
 if (violations) {

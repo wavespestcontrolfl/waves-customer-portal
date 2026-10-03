@@ -688,3 +688,24 @@ test('gate on: every draft refused for its wording, with nothing safe to fall ba
     error: expect.stringMatching(/did not pass the report’s wording checks/),
   }));
 });
+
+// Audit 2026-10-03 (prod, read-only): plain words inside catalog names
+// ("high", "contact", "monitoring", "moisture") marked those products
+// mentioned and their full screens refused about half of real pest reports.
+test('gate on: a note of plain words that sit inside catalog names keeps an ordinary draft on the first attempt (audit 2026-10-03)', async () => {
+  process.env.GATE_REPORT_WRITER_RULES = 'true';
+  mockCatalogRows = [
+    { id: 'c1', name: 'LESCO High Manganese Combo AM 1% Mg 5.75% S 3% Fe 4% Mn Chelated Micronutrient Liquid Fertilizer', category: 'fertilizer', active_ingredient: null },
+    { id: 'c2', name: 'LESCO Manicure 6FL Contact Fungicide', category: 'fungicide', active_ingredient: null },
+    { id: 'c3', name: 'HexPro Termite Monitoring Baiting System', category: 'termite monitoring', active_ingredient: null },
+    { id: 'c4', name: 'LESCO Moisture Manager', category: 'soil moisture management aid', active_ingredient: null },
+  ];
+  const ordinary = CLEAN_V2
+    .replace('Ghost ants were trailing', 'Activity was high, and ghost ants were trailing')
+    .replace("Let us know if the ants keep trailing along the slider track.", 'Contact us if the ants keep trailing; we will keep monitoring the moisture by the track.');
+  mockProvider.mockImplementation(async () => ({ ok: true, text: ordinary }));
+  const res = mkRes();
+  await handler(mkReq({ serviceNotes: 'Activity was high by the slider. Moisture at the track, keep monitoring. The customer may contact us (plain words case).' }), res);
+  expect(mockProvider).toHaveBeenCalledTimes(1);
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: ordinary }));
+});

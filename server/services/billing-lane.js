@@ -888,16 +888,187 @@ function attachedInvoiceAutoChargeLikely({
   return net <= anchor + 0.005;
 }
 
-// Has THIS ET month's membership dues payment been collected (paid or
-// processing)? Mirrors the monthly cron's already-charged check: the
-// metadata.billed_month stamp is authoritative (month-of-obligation
-// attribution — a July decline recovered Aug 1 counts for July, not
-// August); legacy rows without the stamp match on payment month + the
-// canonical "WaveGuard Monthly" description marker.
-async function monthlyDuesCollected(dbConn, customerId, now = new Date()) {
+// Line-item key the completion mint stamps on the PRIMARY line of a dues
+// invoice (an unpriced membership plan visit billed at customers.monthly_rate
+// because autopay could not collect): the value is the ET month key
+// (YYYY-MM) of the visit the obligation belongs to. It is the only durable
+// provenance of "this invoice is that month's dues" — the line description
+// is just the service type — so monthlyDuesCollected reads it. Invoices
+// minted before the stamp carry none and are never recognized (a guess from
+// amount + visit shape could silently skip a real bill). Editable line JSON
+// is provenance only: dropping it can only re-bill, never hide a bill.
+const MEMBERSHIP_DUES_LINE_KEY = 'membership_dues_month';
+
+// True when customers.monthly_rate is what put the number on this visit's
+// completion invoice: the same resolver, with and without the rate. A priced
+// visit (own stamp, authoritative $0), a callback, a per-application fee and
+// every explicit non-monthly lane all resolve identically either way, so
+// they are never a dues visit.
+function completionInvoiceIsMembershipDues(args) {
+  return completionInvoiceAmount(args) > 0
+    && completionInvoiceAmount({ ...args, monthlyRate: 0 }) === 0;
+}
+
+// The membership-dues lane, read off a customer row: an explicit
+// monthly_membership, or NULL mode with a real tier (the lane resolver's own
+// inference, minus the rate test).
+function isMembershipDuesLane(customer) {
+  return !!customer && (customer.billing_mode === 'monthly_membership'
+    || (!customer.billing_mode && isMembershipTier(customer.waveguard_tier)));
+}
+
+// VISIT side of "is this a dues visit": unpriced (no own price, no authoritative
+// $0) and not a callback — whatever the customer's rate is. Judged on the
+// locked visit row. A priced visit is a genuine reprice / non-dues visit.
+function isUnpricedPlanVisit(visit) {
+  return !!visit && completionInvoiceIsMembershipDues({
+    estimatedPrice: visit.estimated_price,
+    isCallback: !!visit.is_callback,
+    perApplicationBilling: false,
+    perApplicationFee: null,
+    monthlyRate: 1, // any positive rate: only the visit side is being asked
+    billingMode: 'monthly_membership',
+    primaryLinePrice: visit.primary_line_price ?? null,
+  });
+}
+
+// An invoice amount that IS a member's monthly dues for an unpriced plan
+// visit (member lane, unpriced non-callback visit, amount == monthly_rate):
+// what Charge now's pre-mint requests a dues stamp for.
+function isMembershipDuesShapedVisit({
+  estimatedPrice, primaryLinePrice = null, isCallback, monthlyRate, billingMode, waveguardTier, amount,
+}) {
+  return isMembershipDuesLane({ billing_mode: billingMode, waveguard_tier: waveguardTier })
+    && isUnpricedPlanVisit({ estimated_price: estimatedPrice, primary_line_price: primaryLinePrice, is_callback: isCallback })
+    && Number(monthlyRate) > 0
+    && Math.round(Number(amount) * 100) === Math.round(Number(monthlyRate) * 100);
+}
+
+// Does a dues invoice about to be written still earn its stamp? Judged by the
+// caller from the rows it holds LOCKED for THAT mint (the visit, the
+// customer) and the amount of the line actually being written — never from
+// the completion's earlier decision: a visit repriced between the decision
+// and the lock (the SCHEDULED_PRICE_MOVED retry re-mints at the new price)
+// is no longer a dues visit, and a stamp on it would hide the month's real
+// dues from every later plan visit. Same predicate as the decision
+// (completionInvoiceIsMembershipDues) plus the membership lane and "the
+// line IS monthly_rate".
+function membershipDuesProvenanceHolds({ visit, customer, lineAmount }) {
+  if (!visit || !customer) return false;
+  const member = customer.billing_mode === 'monthly_membership'
+    || (!customer.billing_mode && isMembershipTier(customer.waveguard_tier));
+  if (!member) return false;
+  const cents = (v) => Math.round(Number(v) * 100);
+  return completionInvoiceIsMembershipDues({
+    estimatedPrice: visit.estimated_price,
+    isCallback: !!visit.is_callback,
+    perApplicationBilling: false,
+    perApplicationFee: null,
+    monthlyRate: customer.monthly_rate,
+    billingMode: customer.billing_mode,
+    primaryLinePrice: visit.primary_line_price ?? null,
+  }) && cents(lineAmount) === cents(customer.monthly_rate);
+}
+
+// Serializes the "is this month's dues covered? then mint" decision per
+// customer + ET month. House pattern: transaction-scoped two-key advisory
+// lock, dotted namespace + id text, held to the end of the taking transaction.
+//
+// THE LOCK RULE (one rule for every taker; B08 pre-push audit, deadlock between
+// a mint and a credit-applied void). A transaction may WAIT (this blocking form)
+// on the dues-month lock only if it holds NO other lock yet: it is the FIRST
+// lock of the transaction. Takers: voidInvoice and the cancelled-visit void
+// (lockMembershipDuesMonthOfInvoice), the stamped-invoice edit, the
+// completion's early confirmation transaction, and the prepaid-marker POST
+// (recordPrepaidUnderDuesLock: month lock, coverage re-read, then the visit-row
+// UPDATE); each then goes on to take invoice / statement / customer / visit
+// rows while holding it. A
+// transaction that ALREADY holds a customer, visit, mint-advisory or invoice
+// lock must NEVER wait on it, because the holder may be queued behind that very
+// lock (a void holds the month, then wants the customer FOR UPDATE that a mint's
+// FOR SHARE blocks): it uses the try form (completion's commit-time
+// confirmation; un-voiding, which takes its customer / visit / invoice rows
+// first and the month last; the full-refund transition of a stamped invoice,
+// which runs inside the webhook's / admin refund's transaction that already
+// holds the invoice row; the refund-FAILED restore of a stamped invoice, which
+// runs inside the webhook's transaction that holds the payment row, and which
+// also TRIES the customer collection claim, month then claim, before reading
+// coverage) or the bounded poll below (the mint), and a miss is
+// the same retryable refusal, never a wait. The void / cancelled-visit void
+// additionally TRY the customer collection claim right after the month lock
+// (month, then claim: the order the mint and un-void take them in), so a
+// collector (the monthly cron, its retry sweep, charge-now) mid-collection is
+// never raced by a coverage-removing void. So the lock graph has no edge from
+// a row/advisory lock into a blocking month wait, and no cycle can close.
+async function acquireMembershipDuesMonthLock(trx, customerId, month) {
+  await trx.raw(
+    'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+    ['membership.dues_month', `${customerId}:${month}`],
+  );
+}
+
+// Non-blocking sibling for an OFFICE action that must not wait (un-voiding a
+// stamped dues invoice): true when this transaction now holds the lock.
+async function tryAcquireMembershipDuesMonthLock(trx, customerId, month) {
+  const res = await trx.raw(
+    'SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS acquired',
+    ['membership.dues_month', `${customerId}:${month}`],
+  );
+  return res?.rows?.[0]?.acquired === true;
+}
+
+// The mint's take (it holds the customer FOR SHARE, the visit row and the visit's
+// mint lock, so by THE LOCK RULE above it never waits): poll the try form for a
+// short, bounded time so two sibling mints still serialize in the normal case
+// (the first commits in milliseconds, the second then re-reads coverage), and
+// give up with false, never a wait, when a long holder (a void or edit queued
+// behind this mint's customer lock, a packet closeout) has it. The caller
+// refuses retryably on false, which rolls the mint back and frees its locks.
+const DUES_MONTH_MINT_WAIT_MS = 2000;
+const DUES_MONTH_MINT_POLL_MS = 40;
+async function acquireMembershipDuesMonthLockBounded(trx, customerId, month, {
+  timeoutMs = Number(process.env.MEMBERSHIP_DUES_MINT_WAIT_MS) || DUES_MONTH_MINT_WAIT_MS,
+  intervalMs = DUES_MONTH_MINT_POLL_MS,
+} = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await tryAcquireMembershipDuesMonthLock(trx, customerId, month)) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
+// Is THIS ET month's membership dues covered? Mirrors the monthly cron's
+// already-charged check: the metadata.billed_month stamp on a paid /
+// processing payment is authoritative (month-of-obligation attribution — a
+// July decline recovered Aug 1 counts for July, not August); legacy rows
+// without the stamp match on payment month + the canonical "WaveGuard
+// Monthly" description marker.
+//
+// Dues are owed ONCE per month, however many plan visits the month holds:
+// a dues invoice a completion already minted for the month
+// (MEMBERSHIP_DUES_LINE_KEY, keyed on the VISIT's month like the payment
+// stamp) covers every other visit that month while it is live — paid,
+// processing, or still open (an unpaid one is the month's bill; dunning
+// collects it). A void / refunded / canceled one covers nothing. Pass
+// `openInvoiceCovers: false` for a "was it actually paid" indicator.
+// `excludeScheduledServiceId`: the asking visit's OWN dues invoice never
+// covers that visit (completion resume, the visit's own preview/closeout).
+async function monthlyDuesCollected(dbConn, customerId, now = new Date(), {
+  excludeScheduledServiceId = null,
+  openInvoiceCovers = true,
+} = {}) {
   const { etDateString } = require('../utils/datetime-et');
   const monthKey = etDateString(now).slice(0, 7);
-  const row = await dbConn('payments')
+  if (await findCollectedDuesPayment(dbConn, customerId, monthKey)) return true;
+  return !!(await findLiveStampedDuesInvoice(dbConn, customerId, monthKey, { excludeScheduledServiceId, openInvoiceCovers }));
+}
+
+// The paid / processing payment the cron (or Charge now / a retry rung)
+// collected for this ET month — billed_month stamp first, payment month +
+// the canonical "WaveGuard Monthly" description as the legacy fallback.
+async function findCollectedDuesPayment(dbConn, customerId, monthKey) {
+  return (await dbConn('payments')
     .where({ customer_id: customerId })
     .whereIn('status', ['paid', 'processing'])
     .where(function billedThisMonth() {
@@ -908,8 +1079,45 @@ async function monthlyDuesCollected(dbConn, customerId, now = new Date()) {
             .andWhere('description', 'like', '%WaveGuard Monthly%');
         });
     })
-    .first('id');
-  return !!row;
+    .first('id')) || null;
+}
+
+// The live completion-minted dues invoice for a customer + ET month, or null
+// (row: id, status, scheduled_service_id, invoice_number). The ONE definition every collector
+// shares — completion, the monthly cron, the retry sweep's classifier — so a
+// month a stamped invoice already bills is never charged a second time.
+// `openInvoiceCovers: false` keeps only invoices that are paid / prepaid /
+// processing.
+async function findLiveStampedDuesInvoice(dbConn, customerId, monthKey, {
+  excludeScheduledServiceId = null,
+  excludeInvoiceId = null,
+  openInvoiceCovers = true,
+} = {}) {
+  // Lazy, like the status vocabulary below: invoice.js requires this module.
+  const { CANCELLED_SERVICE_RESOLVED_STATUSES } = require('./invoice');
+  const invoiceQuery = dbConn('invoices')
+    .where({ customer_id: customerId })
+    .whereRaw('line_items::jsonb @> ?::jsonb', [JSON.stringify([{ [MEMBERSHIP_DUES_LINE_KEY]: monthKey }])]);
+  // Raw status predicate (not whereNotIn/whereIn): the collectors' unit-test
+  // doubles model a thinner builder, and the vocabulary is a fixed literal.
+  const placeholders = (list) => list.map(() => '?').join(', ');
+  if (openInvoiceCovers) {
+    invoiceQuery.whereRaw(`status NOT IN (${placeholders(CANCELLED_SERVICE_RESOLVED_STATUSES)})`, CANCELLED_SERVICE_RESOLVED_STATUSES);
+  } else {
+    const paid = ['paid', 'prepaid', 'processing'];
+    invoiceQuery.whereRaw(`status IN (${placeholders(paid)})`, paid);
+  }
+  // A PAYER-billed invoice is a third party's obligation, never the customer's
+  // own monthly dues (the mint drops the stamp on one; this also ignores a row
+  // already stamped that way). Raw, like the status predicate, for thin test doubles.
+  invoiceQuery.whereRaw('payer_id IS NULL');
+  if (excludeScheduledServiceId) {
+    invoiceQuery.where(function otherVisits() {
+      this.whereNull('scheduled_service_id').orWhereNot('scheduled_service_id', excludeScheduledServiceId);
+    });
+  }
+  if (excludeInvoiceId) invoiceQuery.whereNot({ id: excludeInvoiceId });
+  return (await invoiceQuery.first('id', 'status', 'scheduled_service_id', 'invoice_number')) || null;
 }
 
 // Reasons a no_charge prediction is a MONEY GAP rather than a deliberately
@@ -1610,8 +1818,19 @@ module.exports = {
   resolveBillingLane,
   membershipDuesCoverVisit,
   completionInvoiceAmount,
+  completionInvoiceIsMembershipDues,
+  membershipDuesProvenanceHolds,
+  isMembershipDuesLane,
+  isUnpricedPlanVisit,
+  isMembershipDuesShapedVisit,
+  acquireMembershipDuesMonthLock,
+  MEMBERSHIP_DUES_LINE_KEY,
   predictCompletionBilling,
   monthlyDuesCollected,
+  findLiveStampedDuesInvoice,
+  findCollectedDuesPayment,
+  tryAcquireMembershipDuesMonthLock,
+  acquireMembershipDuesMonthLockBounded,
   siblingCoverageForSchedule,
   collectionStateForCoveredInvoice,
   siblingInvoiceCoverageVerdict,

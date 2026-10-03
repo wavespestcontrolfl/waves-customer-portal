@@ -48,11 +48,10 @@ const STATES_TABLE = 'visit_access_states';
 // Visits asked per pass; the rest wait for the next hourly pass. Visits whose
 // state is already answered cost reads only and never count against it.
 const MAX_ASKED_VISITS = 80;
-// A visit that already has its first provider's answer and only retries
-// another provider's failed leg draws on its own budget, so a provider that
-// is down never keeps later visits from their first answer.
+// A visit that already holds one provider's answer for its state and retries
+// another's failed leg draws on its own budget, so a provider that is down
+// never keeps later visits from their first answer.
 const MAX_RETRY_VISITS = 40;
-const PRIMARY_PROVIDER = 'typesafe';
 // The daily review item reads rows created in its last 14 days.
 const REVIEW_AGE_MS = 13 * 24 * 60 * 60 * 1000;
 const WORKERS = 2;
@@ -254,25 +253,33 @@ async function loadSavedFacts(svc, dbh, day) {
 // a legacy row without completed_at falls back to Eastern midnight of its
 // day). The last technician note comes from the shared same-line history
 // walk (utils/last-line-service.js), which pages until it finds the line.
-async function loadHistory(svc, dbh, day, serviceLine) {
+async function loadHistory(svc, dbh, day, serviceLine, cutoff) {
   const { detectServiceLine } = require('../service-report/service-line-configs');
   const { parseETDateTime } = require('../../utils/datetime-et');
   const { loadRecentLineServices } = require('../../utils/last-line-service');
+  // Earlier = a day before this one, or the same day and finished before this
+  // visit starts (a morning service ahead of an afternoon callback).
   const earlier = () => dbh('scheduled_services')
     .where({ customer_id: svc.customer_id, status: 'completed' })
     .whereNot({ id: svc.id })
-    .where('scheduled_date', '<', day);
+    .where((q) => q.where('scheduled_date', '<', day)
+      .orWhere((same) => same.where('scheduled_date', day).where('completed_at', '<', cutoff)));
   // Counted in the database, never from a capped read.
   const [{ count }] = await earlier().count('* as count');
   // The window's anchor can only lie inside the cap, so every completion in
   // that span is read (bounded by the cap, not by a row limit) and the line is
-  // matched in memory: no newer visit of another line can push it out.
+  // matched in memory: no newer visit of another line can push it out. Visits
+  // on one day are ordered by when they finished, so the later one anchors.
   const capDay = new Date(new Date(`${day}T12:00:00Z`).getTime() - (WINDOW_CAP_DAYS + 1) * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
   const recent = await earlier().where('scheduled_date', '>=', capDay)
-    .orderBy('scheduled_date', 'desc').orderBy('id', 'desc')
+    .orderBy('scheduled_date', 'desc').orderByRaw('completed_at DESC NULLS LAST').orderBy('id', 'desc')
     .select('service_type', 'scheduled_date', 'completed_at');
   const last = recent.find((r) => detectServiceLine(r.service_type) === serviceLine);
-  const { lineRecords: [lastRecord] } = await loadRecentLineServices(dbh, svc.customer_id, svc.service_type, { limit: 1, before: day });
+  // Records dated up to this visit's own day: before its start, a same-day
+  // record can only be an earlier visit's (this visit has none yet, and a
+  // started visit is never re-read).
+  const nextDay = new Date(new Date(`${day}T12:00:00Z`).getTime() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const { lineRecords: [lastRecord] } = await loadRecentLineServices(dbh, svc.customer_id, svc.service_type, { limit: 1, before: nextDay });
   return {
     count: Number(count) || 0,
     textsFrom: last ? (last.completed_at ? new Date(last.completed_at) : parseETDateTime(`${dayString(last.scheduled_date)}T00:00`)) : null,
@@ -361,7 +368,7 @@ async function buildVisitAccessState(svc, dbh) {
   const serviceLine = detectServiceLine(svc.service_type) || null;
   const cutoff = stateCutoff(svc);
   const saved = await loadSavedFacts(svc, dbh, day);
-  const history = await loadHistory(svc, dbh, day, serviceLine);
+  const history = await loadHistory(svc, dbh, day, serviceLine, cutoff);
   // The texts' window: from the last same-line visit's completion, capped,
   // up to this visit's start.
   const capFloor = new Date(cutoff.getTime() - WINDOW_CAP_DAYS * 24 * 60 * 60 * 1000);
@@ -410,21 +417,28 @@ async function shadowVisit(svc, { dbh, providers, out, now }) {
   const settled = (row) => row.subject_hash === built.subjectHash || row.label_status !== 'unreviewed' || row.sampled_for === 'heldout';
   const done = (provider) => questionIds.every((id) => existing.some((row) => row.provider === provider && row.question_id === id && settled(row)));
   const due = providers.filter((provider) => !done(provider));
+  // The state is kept before anyone is asked or any row is requeued, so every
+  // stored answer has the exact text it was judged on, whatever is edited
+  // later; an unchanged visit whose state was pruned gets it back here.
+  const keepState = () => dbh(STATES_TABLE).insert({ scheduled_service_id: svc.id, subject_hash: built.subjectHash, state: JSON.stringify(built.state) })
+    .onConflict(['scheduled_service_id', 'subject_hash']).ignore();
   if (!due.length) {
     out.unchanged += 1;
+    await keepState();
     // The refresh is idempotent and runs on unchanged passes too, so one
     // that failed after its rows were written is made good an hour later.
     await settleCohorts({ dbh, pkg, svc, built });
     return;
   }
-  const retryOnly = !due.includes(PRIMARY_PROVIDER);
-  const budget = retryOnly ? 'retryVisits' : 'askedVisits';
-  if (out[budget] >= (retryOnly ? MAX_RETRY_VISITS : MAX_ASKED_VISITS)) { out.deferred += 1; return; }
+  // First attempts and retries draw on separate budgets: a visit nobody has
+  // answered for this state is a first attempt; one that already holds any
+  // provider's answer for it is a retry, whichever provider is down. So an
+  // outage of either provider never keeps later visits from being asked.
+  const retry = existing.some((row) => row.subject_hash === built.subjectHash);
+  const budget = retry ? 'retryVisits' : 'askedVisits';
+  if (out[budget] >= (retry ? MAX_RETRY_VISITS : MAX_ASKED_VISITS)) { out.deferred += 1; return; }
   out[budget] += 1;
-  // The state is kept before anyone is asked, so every stored answer has the
-  // exact text it was judged on, whatever is edited later.
-  await dbh(STATES_TABLE).insert({ scheduled_service_id: svc.id, subject_hash: built.subjectHash, state: JSON.stringify(built.state) })
-    .onConflict(['scheduled_service_id', 'subject_hash']).ignore();
+  await keepState();
 
   const legs = (await Promise.all(due.map(async (provider) => {
     out.asked += 1;
