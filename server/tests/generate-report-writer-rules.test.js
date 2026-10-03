@@ -272,9 +272,9 @@ test('gate on: a catalog product the note mentions is screened even though it wa
 
 test('gate on: a catalog name the model brings on its own is screened though the prompt never mentions it', async () => {
   process.env.GATE_REPORT_WRITER_RULES = 'true';
-  mockCatalogRows = [{ name: 'Termidor SC', active_ingredient: 'Fipronil' }, { name: 'Mechanical snap trap', active_ingredient: 'Mechanical snap trap' }];
+  mockCatalogRows = [{ name: 'Termidor SC', active_ingredient: 'Fipronil' }, { name: 'Trapper T-Rex Rat Snap Trap', active_ingredient: null }];
   mockProvider
-    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2.replace('Ghost ants were trailing', 'We used Termidor. Ghost ants were trailing') }))
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2.replace('Ghost ants were trailing', 'We used Termidor here. Ghost ants were trailing') }))
     .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2 }));
   const res = mkRes();
   await handler(mkReq({ serviceNotes: 'Treated the thresholds (unprompted catalog name case).' }), res);
@@ -282,14 +282,40 @@ test('gate on: a catalog name the model brings on its own is screened though the
   expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN_V2 }));
 });
 
-test('gate on: screening the whole catalog leaves clean copy alone', async () => {
+test('gate on: an ordinary word inside a catalog name does not reject the copy', async () => {
   process.env.GATE_REPORT_WRITER_RULES = 'true';
-  mockCatalogRows = [{ name: 'Termidor SC', active_ingredient: 'Fipronil' }, { name: 'Mechanical snap trap', active_ingredient: 'Mechanical snap trap' }];
-  mockProvider.mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2 }));
+  mockCatalogRows = [{ name: 'Termidor SC', active_ingredient: 'Fipronil' }, { name: 'Trapper T-Rex Rat Snap Trap', active_ingredient: null }];
+  const withTraps = CLEAN_V2.replace('Ghost ants were trailing', 'We checked the snap traps in the garage. Ghost ants were trailing');
+  mockProvider.mockImplementationOnce(async () => ({ ok: true, text: withTraps }));
   const res = mkRes();
-  await handler(mkReq({ serviceNotes: 'Treated the thresholds (whole catalog clean case).' }), res);
+  await handler(mkReq({ serviceNotes: 'Treated the thresholds and checked the snap traps (ordinary word case).' }), res);
   expect(mockProvider).toHaveBeenCalledTimes(1);
-  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN_V2 }));
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: withTraps }));
+});
+
+test('gate on: a cached draft is screened again against the catalog as it is now', async () => {
+  process.env.GATE_REPORT_WRITER_RULES = 'true';
+  const named = CLEAN_V2.replace('Ghost ants were trailing', 'We used Termidor here. Ghost ants were trailing');
+  mockProvider
+    .mockImplementationOnce(async () => ({ ok: true, text: named }))
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2 }));
+  const body = { serviceNotes: 'Treated the thresholds (cached draft rescreen case).' };
+  // The product is not in the catalog yet: the draft passes and is cached.
+  const first = mkRes();
+  await handler(mkReq(body), first);
+  expect(first.json).toHaveBeenCalledWith(expect.objectContaining({ report: named }));
+  // Added to the catalog: the cached draft is not served.
+  mockCatalogRows = [{ name: 'Termidor SC', active_ingredient: 'Fipronil' }];
+  const second = mkRes();
+  await handler(mkReq(body), second);
+  expect(mockProvider).toHaveBeenCalledTimes(2);
+  expect(second.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN_V2 }));
+  expect(second.json.mock.calls[0][0]).not.toHaveProperty('cached');
+  // A clean cached draft is still served from the cache.
+  const third = mkRes();
+  await handler(mkReq(body), third);
+  expect(mockProvider).toHaveBeenCalledTimes(2);
+  expect(third.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN_V2, cached: true }));
 });
 
 test('gate on: the active ingredients of a mentioned catalog product are screened too', async () => {

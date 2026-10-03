@@ -386,6 +386,77 @@ const REPORT_GENERIC_PRODUCT_TOKENS = new Set([
   'zone', 'zones', 'select', 'super', 'total', 'ultra', 'prime',
   'green', 'blue', 'red', 'black', 'white', 'gold', 'silver',
 ]);
+// Catalog-wide brand screen (writer rules: no product may be named, not only
+// this visit's). A catalog name that is NOT one of this visit's is matched
+// far more narrowly than the visit's own, because most words inside catalog
+// names are ordinary report vocabulary ("snap", "trap", "distance",
+// "southern"):
+//   - the name, or its leading two tokens, as a phrase ("Demand CS",
+//     "T-Zone"), any case; and
+//   - its leading token alone (the brand word: "Termidor", "Trapper") only
+//     where the copy writes it capitalized in the middle of a sentence. A
+//     lowercase or sentence-opening use ("Suspend watering for 24 hours",
+//     "keep your distance") is ordinary wording and passes.
+// A brand word the prompt itself contains (mentionedText: a note saying "the
+// customer asked about <product>") is matched in any case, anywhere: the
+// model was handed the name, so an echo is the likely failure.
+// Known limit, accepted: a brand word the prompt never mentions that opens a
+// sentence, or is written lowercase, is not caught by this screen.
+function buildCatalogBrandScreen(rows, genericTokens, mentionedText = '') {
+  const tokensOf = (value) => String(value || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  const generic = new Set(genericTokens);
+  for (const row of rows) {
+    tokensOf(row?.active_ingredient).filter((tok) => tok.length >= 4).forEach((tok) => generic.add(tok));
+  }
+  // 'pesticide' joins its siblings (insecticide, herbicide, fungicide) here
+  // only: the catalog holds a "Pesticide application sign" row.
+  const isPlain = (token) => generic.has(token) || GENERIC_NAME_TOKENS.has(token)
+    || COMMON_PRODUCT_NAME_WORDS.has(token) || token === 'pesticide' || /^\d+$/.test(token);
+  const brandWords = new Set();
+  const phrases = new Set();
+  for (const row of rows) {
+    const tokens = tokensOf(row?.name);
+    if (!tokens.length) continue;
+    if (tokens[0].length >= 4 && !isPlain(tokens[0])) brandWords.add(tokens[0]);
+    if (tokens.length >= 2) {
+      phrases.add(` ${tokens.join(' ')} `);
+      // The leading pair is a name only when it opens on the brand or a
+      // short designation ("T-Zone", "PGF Complete"); a pair that opens on a
+      // plain word ("termite protection", "yard sign") is ordinary copy.
+      if (!isPlain(tokens[0])) phrases.add(` ${tokens[0]} ${tokens[1]} `);
+    }
+  }
+  const mentionedWords = new Set(tokensOf(mentionedText));
+  const mentionedBrands = [...brandWords].filter((word) => mentionedWords.has(word));
+  return (text) => {
+    const raw = String(text || '');
+    if (!raw) return false;
+    const hayWords = tokensOf(raw);
+    const normHay = ` ${hayWords.join(' ')} `;
+    for (const phrase of phrases) if (normHay.includes(phrase)) return true;
+    if (mentionedBrands.length) {
+      const wordSet = new Set(hayWords);
+      if (mentionedBrands.some((word) => wordSet.has(word))) return true;
+    }
+    const wordRe = /[A-Za-z0-9]+/g;
+    let match;
+    while ((match = wordRe.exec(raw)) !== null) {
+      const word = match[0];
+      if (!/^[A-Z]/.test(word) || !brandWords.has(word.toLowerCase())) continue;
+      const lineStart = raw.lastIndexOf('\n', match.index) + 1;
+      const lineEndAt = raw.indexOf('\n', match.index);
+      const line = raw.slice(lineStart, lineEndAt === -1 ? raw.length : lineEndAt);
+      // An all-capitals line is a section heading, not a sentence.
+      if (!/[a-z]/.test(line)) continue;
+      const before = raw.slice(lineStart, match.index).replace(/[\s"'“”‘’(\[*_•\-–—]+$/u, '');
+      // Opens the line, a sentence, or a list item: reads as an ordinary word.
+      if (!before || /[.!?:;]$/.test(before) || /^\d+$/.test(before)) continue;
+      return true;
+    }
+    return false;
+  };
+}
+
 // Builds a screen(text) predicate for THIS visit's recorded products.
 // Generic tokens widen with the visit's own recorded treatment targets and
 // (via db) catalog actives/formulations — active ingredients are permitted
@@ -393,7 +464,13 @@ const REPORT_GENERIC_PRODUCT_TOKENS = new Set([
 // only a productId are name-hydrated from the catalog so they are screened
 // too. Chunked by 10 so safeProducts' cap never leaves an entry
 // unscreened. Catalog lookup failure keeps the guard strict.
-async function buildReportTradeNameScreen({ products = [], extraNames = [], db = null } = {}) {
+// wholeCatalog adds the catalog-wide brand screen above; catalogRows lets a
+// caller that already read the catalog pass it in, and mentionedText is the
+// prompt the copy was written from. A failed catalog read
+// throws: the screen cannot run complete, so the caller fails closed.
+async function buildReportTradeNameScreen({
+  products = [], extraNames = [], db = null, wholeCatalog = false, catalogRows = null, mentionedText = '',
+} = {}) {
   const list = Array.isArray(products) ? products.filter(Boolean) : [];
   let hydrated = list;
   const genericTokens = new Set(REPORT_GENERIC_PRODUCT_TOKENS);
@@ -446,7 +523,15 @@ async function buildReportTradeNameScreen({ products = [], extraNames = [], db =
   });
   const chunks = [];
   for (let i = 0; i < guarded.length; i += 10) chunks.push(guarded.slice(i, i + 10));
-  return (text) => chunks.some((chunk) => containsProductName(text, chunk, { extraGenericTokens: genericTokens, wholeWord: true }));
+  const visitScreen = (text) => chunks.some((chunk) => containsProductName(text, chunk, { extraGenericTokens: genericTokens, wholeWord: true }));
+  if (!wholeCatalog) return visitScreen;
+  let rows = catalogRows;
+  if (!Array.isArray(rows)) {
+    if (!db) throw new Error('catalog-wide trade-name screen needs a catalog read');
+    rows = await savepointRead(db, (k) => k('products_catalog').select('name', 'active_ingredient'));
+  }
+  const brandScreen = buildCatalogBrandScreen(Array.isArray(rows) ? rows : [], genericTokens, mentionedText);
+  return (text) => visitScreen(text) || brandScreen(text);
 }
 
 module.exports = {

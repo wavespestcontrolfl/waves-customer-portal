@@ -5601,6 +5601,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
                 products: Array.isArray(products) ? products : [],
                 extraNames: typedGuardNames,
                 db,
+                // The four-section body is the writer-rules report: no
+                // product may be named, so an edit that adds an unselected
+                // catalog brand is caught by the same catalog-wide screen
+                // generation runs.
+                wholeCatalog: technicianReportFourSection
+                  && require('../config/feature-gates').reportWriterRulesLive(),
               });
               if (screenTradeNames(technicianReportBody)) {
                 logger.warn('[completion] technician AI report copy dropped (trade_name)');

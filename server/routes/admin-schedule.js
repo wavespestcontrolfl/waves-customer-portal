@@ -25820,7 +25820,11 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         : '')
       .digest('hex');
     const cached = fresh === true ? null : reportCopyCacheGet(cacheKey);
-    if (cached) return res.json({ report: cached, cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
+    // Under the writer rules a cached draft is screened again below before it
+    // is served: the catalog-wide brand screen reads the catalog as it is
+    // now, and a product added since the draft was cached must not ride out
+    // on the cache.
+    if (cached && !writerRulesOn) return res.json({ report: cached, cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
 
     // Output guard for trade names from THIS visit's own product records —
     // selected products, the free-text productsApplied names, and any typed
@@ -25833,16 +25837,19 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     // depends on it for its name — the guard cannot run complete, so fail
     // retryable like the other grounding outages (codex r49).
     // Under the writer rules no product may be named, not only this
-    // visit's: every catalog product name joins the trade-name screen, so a
-    // name the model brings from its own knowledge ("Termidor" for a generic
-    // termite record) is caught, not only one the prompt mentions.
-    const catalogScreenNames = [];
+    // visit's: every catalog product is screened by its brand word or its
+    // name as a phrase (wholeCatalog, in the shared builder), so a name the
+    // model brings from its own knowledge is caught, and a brand the prompt
+    // itself mentions (a note saying "the customer asked about <product>")
+    // is caught in any case, without an ordinary word inside a catalog name
+    // ("snap", "trap") rejecting plain copy.
+    let catalogRows = null;
     const mentionedCatalogActives = [];
     if (writerRulesOn) {
       try {
-        const catalogRows = await db('products_catalog').select('name', 'active_ingredient');
-        for (const row of Array.isArray(catalogRows) ? catalogRows : []) {
-          if (row?.name) catalogScreenNames.push(row.name);
+        const readRows = await db('products_catalog').select('name', 'active_ingredient');
+        catalogRows = Array.isArray(readRows) ? readRows : [];
+        for (const row of catalogRows) {
           const named = Boolean(row?.name)
             && CompletionRecap.containsProductName(fullUserMessage, [{ name: row.name }], { wholeWord: true });
           // Its actives too: a draft must not swap the named product for
@@ -25864,8 +25871,11 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     try {
       screenTradeNames = await CompletionRecap.buildReportTradeNameScreen({
         products: Array.isArray(products) ? products : [],
-        extraNames: [...typedProductNameGuards, ...fallbackProductNames, ...catalogScreenNames],
+        extraNames: [...typedProductNameGuards, ...fallbackProductNames],
         db,
+        wholeCatalog: writerRulesOn,
+        catalogRows,
+        mentionedText: fullUserMessage,
       });
     } catch (err) {
       logger.warn(`[generate-report] trade-name guard build failed — failing retryable: ${err.message}`);
@@ -25873,6 +25883,9 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         error: 'AI report generation is temporarily unavailable. Your existing service notes were not changed.',
         retryable: true,
       });
+    }
+    if (cached && !screenTradeNames(cached)) {
+      return res.json({ report: cached, cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
     }
     // Under the writer rules the copy may not name an active ingredient
     // either: this visit's catalog actives join the rules screen (fail-soft
