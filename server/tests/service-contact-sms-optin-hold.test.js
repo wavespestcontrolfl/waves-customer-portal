@@ -151,7 +151,10 @@ describe('send paths resolve the single recipient through the opt-in hold', () =
   test('the visit-complete text never reads the stamp-only resolver', () => {
     const source = read('services/visit-completion-summary.js');
     expect(source).not.toMatch(/getServiceContactSmsRecipient/);
-    expect(source.match(/resolveServiceContactSmsRecipient\(/g).length).toBe(5);
+    // Every site goes through summarySmsRecipient, which falls to the
+    // opt-in aware resolver whenever the contact is the recipient.
+    expect(source.match(/await summarySmsRecipient\(/g).length).toBe(5);
+    expect(source).toMatch(/return resolveServiceContactSmsRecipient\(customer, opts\);/);
   });
 
   test('the review ask uses the stamp-only resolver only to list where a past send could have gone', () => {

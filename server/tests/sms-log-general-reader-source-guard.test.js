@@ -62,6 +62,11 @@ const WINDOW_SPAN = 15;
 // apply. Default is ZERO — every OTHER unwrapped site fails.
 const ALLOWLIST = [
   {
+    file: 'services/contact-report-text.js',
+    snippet: "const existing = await trx('sms_log')",
+    reason: 'queueContactReportTexts: existence check for THIS report\'s own queued or sent contact text (message_type contact_report_ready + its contact_report_key), the one-text-per-contact-per-report dedupe under the customer row lock. A review-ask or reply reservation never carries that message type or key, and a row in any state (in flight included) must count as already queued.',
+  },
+  {
     file: 'services/sms-scheduling-act.js',
     snippet: "const newer = await trx('sms_log')",
     reason: 'buildMoveGuard newer-message fence: an existence check, under the move\'s locks, for ANY row on this phone-and-line conversation after the accepted reply. Nothing is presented as a message. A reply reservation in flight is Waves answering right now, which is exactly when the automatic move must stand down, so hiding reservations would weaken the fence; a placeholder can only refuse a move (staff handle it), never cause one.',
