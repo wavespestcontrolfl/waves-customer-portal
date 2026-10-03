@@ -1705,6 +1705,10 @@ answers:
   keep no inline trenching shortcut ahead of that call: quote_required outranks trenching review on `available-slots`, `find-slots`,
   `reserve` and `extend` and their locked rechecks, and a trenching-only estimate gets exactly the bodies it always did
   (a pricing failure while resolving the quote requirement still reports trenching). The slot routes
+  run that call FIRST: only true viewability refusals (not found, not customer-viewable, call-side block, terminal) stay ahead of it, and
+  every no-booking / alternative-payload shortcut (the Bermuda gate, commercial auto, guarantee-only renewal) runs after it, on
+  `available-slots`, `find-slots`, `reserve` and `extend` (pre-transaction and locked), so a parked commercial or guarantee-only
+  estimate still gets the park. Main's bodies for those shortcuts are unchanged when the helper reports no state. The slot routes
   answer EVERY state the helper reports, never "unblocked": a quote-required estimate whose phone is also contradicted
   is refused as quote_required on `available-slots`, `find-slots` and `reserve` (and the locked reserve / extend rechecks) with
   the intent routes' `409 { error: 'Estimate is no longer active' }`, no hold and no alert (the helper reports quote_required only
@@ -1759,7 +1763,9 @@ answers:
   locks the estimate row FOR UPDATE (the row, and the order - estimate row, then its holds - `reserveSlot` and
   `extendReservation` take), re-reads it, re-runs the blocking-state helper fresh on that row (candidate FOR SHARE NOWAIT) and deletes
   the holds only while it is still `contact_review`; an estimate staff corrected or linked meanwhile loses no hold, a busy
-  customer row deletes nothing, and the alert is filed outside that transaction. Both card-intent routes re-run the blocking state AFTER minting and before any client secret is returned, on the ESTIMATE
+  customer row deletes nothing, and the alert is filed outside that transaction. Every response of both card-intent routes that carries customer-derived content (the success body, and every exemption answer
+  such as saved method, Auto Pay, plan member or payer-billed) leaves through ONE exit that re-checks on the reloaded estimate
+  row immediately before sending (a source-level test fails on any other return). Both card-intent routes re-run the blocking state AFTER minting and before any client secret is returned, on the ESTIMATE
   row RE-READ at that point (staff can edit its phone, email or address, or deactivate it, during the mint) with the
   candidate cache bypassed; an estimate no longer active is withheld the same way: a recurring intent minted for a
   just-parked estimate is retired with the accept's helper (503 `RECURRING_CARD_RETIRE_FAILED` if Stripe cannot
@@ -1780,7 +1786,7 @@ React URL, GrowthBook never reassigns it), the same way it forces a contact-gap 
 and the card-hold intent, the coded 409 from a hold `extend`, and the empty review shape from the slot reads (`available-slots`, `find-slots`, picked
 date), through one transition (drop the captured cards, release the slot hold, refetch `/data`). The review state is committed locally FIRST,
 from the 409 body (the page's `cta` becomes not-acceptable, review-before-booking, reason `contact_review`, with the server's
-sentence), so a failed refetch (best effort, caught at every call site, including the slot picker's) still lands on the review card. The estimate's own phone is left as staff typed
+sentence), so a failed refetch (best effort, caught at every call site, including the slot picker's) still lands on the review card. For `contact_review` that card omits the trenching card's payment-timing sentence ("You pay on service day; no card or deposit now."), because a parked estimate can be an invoice-only renewal or a prepaying plan; every other sentence is unchanged. The estimate's own phone is left as staff typed
   it, so its follow-up texts are unchanged until the office fixes the number. Several phone candidates, or
   a lone candidate that agrees on email or address, behave as before. So does a customer-unlinked GROUPED estimate whose group
   already has an accepted customer: the accept resolves it through that accepted sibling BEFORE it ever matches by phone (a second

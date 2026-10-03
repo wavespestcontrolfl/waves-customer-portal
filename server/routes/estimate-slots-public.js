@@ -191,7 +191,9 @@ async function rejectCallSideBlockedEstimate(res, estimate = {}) {
   return null;
 }
 
-function rejectIneligibleEstimate(res, estimate = {}) {
+// `deferSuppressionGate`: the four slot routes judge the blocking state BEFORE any no-booking / alternative-payload
+// refusal (this Bermuda gate included), so they run the gate themselves right after it (see slotBrowseRefusal).
+function rejectIneligibleEstimate(res, estimate = {}, { deferSuppressionGate = false } = {}) {
   // Parity with GET /:token/data's exposure gate (isEstimateCustomerViewable,
   // estimate-public.js): archived, unpublished (draft/scheduled), send_failed,
   // and past-expiry estimates must not expose availability or take holds —
@@ -206,6 +208,7 @@ function rejectIneligibleEstimate(res, estimate = {}) {
   if (SLOT_BLOCKED_STATES.has(estimate.status)) {
     return res.status(409).json({ error: 'Estimate is no longer active' });
   }
+  if (deferSuppressionGate) return null;
   const gated = rejectGatedSuppressionEstimate(res, estimate);
   if (gated) return gated;
   return null;
@@ -281,6 +284,28 @@ async function postMintRefusal(estimate) {
   if (!row || !isEstimateAcceptActive(row)) return { status: 409, body: ESTIMATE_INACTIVE_409 };
   return slotBlockingRefusal(row, { fresh: true });
 }
+// The ONE exit of both card-intent routes for every response that carries customer-derived content (the success body with
+// its client secret, and every exemption answer - saved method, Auto Pay, plan member, payer-billed, ... - which can
+// reveal the matched profile's payment state). It re-checks on the reloaded estimate row (postMintRefusal) immediately
+// before sending, with or without a minted intent: a candidate that turned contradictory since the early cached check
+// gets the park (alert, hold release, review transition) instead. `retireSetupIntentId`: an intent this request minted
+// or was asked to replace is retired with the accept's own helper first (503 if Stripe cannot confirm); a card-hold
+// intent's pending row is never exposed and is simply withheld. No route may answer with such content any other way
+// (pinned by a source-level test).
+async function sendRecheckedIntentResponse(res, estimate, status, body, { retireSetupIntentId = null } = {}) {
+  const blocked = await postMintRefusal(estimate);
+  if (blocked) {
+    if (retireSetupIntentId) {
+      try {
+        await retireOrDenyDroppedCapture(estimate, retireSetupIntentId);
+      } catch (retireErr) {
+        return res.status(503).json({ error: retireErr.message, code: retireErr.code || 'RECURRING_CARD_RETIRE_FAILED' });
+      }
+    }
+    return respondNoBookingRefusal(res, estimate, blocked);
+  }
+  return res.status(status).json(body);
+}
 
 // The contact_review check on the LOCKED estimate row, inside the reservation transaction (reserve and extend): the
 // phone candidate is read on THAT transaction FOR SHARE NOWAIT, held to its end, so a staff edit of the lone
@@ -335,8 +360,18 @@ async function slotBrowseRefusal(estimate) {
   const sink = { status(status) { return { json(body) { refusal = { status, body }; return refusal; } }; } };
   // Fail closed: a helper that refuses without the status().json() chain the
   // sink captures still refuses (generic 404, never a browsable estimate).
-  if (await rejectCallSideBlockedEstimate(sink, estimate) || rejectIneligibleEstimate(sink, estimate)) {
+  if (await rejectCallSideBlockedEstimate(sink, estimate) || rejectIneligibleEstimate(sink, estimate, { deferSuppressionGate: true })) {
     return refusal || { status: 404, body: { error: 'Not found' } };
+  }
+  // ORDER (a class of review findings): only true viewability refusals (above: not found, not customer-viewable,
+  // terminal) stay ahead of the shared blocking-state check - a parked state must not leak to someone who cannot view the
+  // estimate. Every no-booking / alternative-payload shortcut below (Bermuda gate, commercial, guarantee-only) runs
+  // AFTER it, so a stale client of a parked commercial or guarantee-only estimate still gets the park (alert, hold
+  // release, review transition). The ONE call decides quote_required, trenching and contact_review.
+  const blockedState = await slotBlockingRefusal(estimate, {}, { browse: true });
+  if (blockedState) return blockedState;
+  if (rejectGatedSuppressionEstimate(sink, estimate)) {
+    return refusal || { status: 409, body: { error: 'Estimate is no longer active' } };
   }
   if (isCommercialAutoEstimate(estimate)) {
     return {
@@ -362,9 +397,7 @@ async function slotBrowseRefusal(estimate) {
       },
     };
   }
-  // Trenching review, quote_required and contact_review are ALL decided by the ONE blocking-state call (precedence:
-  // quote_required, then trenching, then contact_review), never by an inline shortcut ahead of it.
-  return slotBlockingRefusal(estimate, {}, { browse: true });
+  return null;
 }
 
 router.get('/:token/available-slots', async (req, res) => {
@@ -529,8 +562,15 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res) => {
     }
     const callBlocked = await rejectCallSideBlockedEstimate(res, estimate);
     if (callBlocked) return callBlocked;
-    const ineligible = rejectIneligibleEstimate(res, estimate);
+    const ineligible = rejectIneligibleEstimate(res, estimate, { deferSuppressionGate: true });
     if (ineligible) return ineligible;
+    {
+      // The shared blocking-state check FIRST (see slotBrowseRefusal): before the Bermuda gate and the no-booking shortcuts.
+      const blocked = await slotBlockingRefusal(estimate, {}, { browse: true });
+      if (blocked) return res.status(blocked.status).json(blocked.body);
+    }
+    const gatedFind = rejectGatedSuppressionEstimate(res, estimate);
+    if (gatedFind) return gatedFind;
     if (isCommercialAutoEstimate(estimate)) {
       return res.json({
         primary: [], expander: [], availableSlots: [], summary: null,
@@ -547,11 +587,6 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res) => {
         invoiceOnlyAcceptance: true,
         message: 'No appointment is needed — this renewal is accepted with an invoice.',
       });
-    }
-    {
-      // Trenching review included: the ONE blocking-state call decides (see slotBrowseRefusal).
-      const blocked = await slotBlockingRefusal(estimate, {}, { browse: true });
-      if (blocked) return res.status(blocked.status).json(blocked.body);
     }
     const serviceMode = resolveSlotServiceMode(estimate, req.body?.serviceMode);
     const selectedFrequency = typeof req.body?.selectedFrequency === 'string'
@@ -630,8 +665,15 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
     }
     const callBlocked = await rejectCallSideBlockedEstimate(res, estimate);
     if (callBlocked) return callBlocked;
-    const ineligible = rejectIneligibleEstimate(res, estimate);
+    const ineligible = rejectIneligibleEstimate(res, estimate, { deferSuppressionGate: true });
     if (ineligible) return ineligible;
+    {
+      // The shared blocking-state check FIRST (see slotBrowseRefusal): before the Bermuda gate and the no-booking shortcuts.
+      const blocked = await slotBlockingRefusal(estimate, {});
+      if (blocked) return respondNoBookingRefusal(res, estimate, blocked);
+    }
+    const gatedReserve = rejectGatedSuppressionEstimate(res, estimate);
+    if (gatedReserve) return gatedReserve;
     if (isCommercialAutoEstimate(estimate)) {
       return res.status(409).json({
         error: 'Commercial service is scheduled by our team — no self-booking.',
@@ -648,12 +690,6 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
         invoiceOnlyAcceptance: true,
       });
     }
-    {
-      // Trenching review included: the ONE blocking-state call decides (quote_required outranks it).
-      const blocked = await slotBlockingRefusal(estimate, {});
-      if (blocked) return respondNoBookingRefusal(res, estimate, blocked);
-    }
-
     slotOpts.serviceMode = resolveSlotServiceMode(estimate, requestedServiceMode);
 
     try {
@@ -799,7 +835,7 @@ router.post('/:token/card-hold-intent', depositLimiter, async (req, res) => {
       paymentMethodPreference: req.body?.paymentMethodPreference === 'prepay_annual' ? 'prepay_annual' : null,
     });
     if (!policy.required) {
-      return res.status(409).json({ error: 'No card hold is required for this estimate', exemptReason: policy.exemptReason || null });
+      return sendRecheckedIntentResponse(res, estimate, 409, { error: 'No card hold is required for this estimate', exemptReason: policy.exemptReason || null });
     }
 
     // Auto-satisfy (spec §3.2: existing customers with a saved card are
@@ -807,6 +843,7 @@ router.post('/:token/card-hold-intent', depositLimiter, async (req, res) => {
     // no capture modal — the 409 exemptReason makes the client fall through
     // to accept, where the gate resolves the same saved method. Lookup
     // failure mints normally (fail toward asking).
+    let savedMethodCovers = false;
     try {
       // Phone-only estimates: resolve the same unambiguous customer match
       // the accept gate + transaction use, or an existing customer's saved
@@ -819,30 +856,28 @@ router.post('/:token/card-hold-intent', depositLimiter, async (req, res) => {
       const savedCard = holdCustomerId
         ? await require('../services/payment-method-consents').findConsentedChargeableCard(holdCustomerId)
         : null;
-      if (savedCard?.stripe_payment_method_id) {
-        return res.status(409).json({ error: 'A saved card already covers this booking', exemptReason: 'saved_method' });
-      }
+      savedMethodCovers = !!savedCard?.stripe_payment_method_id;
     } catch (err) {
       logger.warn(`[estimate-slots-public:card-hold-intent] saved-method check failed — minting capture intent: ${err.message}`);
+    }
+    // Outside the try above: a failure of the exit's own re-check must not be read as "the saved-method lookup failed".
+    if (savedMethodCovers) {
+      return sendRecheckedIntentResponse(res, estimate, 409, { error: 'A saved card already covers this booking', exemptReason: 'saved_method' });
     }
 
     const intent = await createCardHoldSetupIntentForEstimate(estimate);
     if (!intent) {
       return res.status(503).json({ error: 'Payments are temporarily unavailable. Please call us to confirm your service.' });
     }
-    // B18: the park check above ran BEFORE the DB and Stripe work that minted this intent. Re-run it authoritatively
-    // (not the cached verdict) before a client secret leaves the server: a candidate edited in between parks the
-    // estimate, and no secret is returned. The pending hold row was never exposed (nothing can confirm it); main has
-    // no "abandoned" state for it and the next mint reuses it, so it is left as is.
-    {
-      const blocked = await postMintRefusal(estimate);
-      if (blocked) return respondNoBookingRefusal(res, estimate, blocked);
-    }
+    // B18: the park check above ran BEFORE the DB and Stripe work that minted this intent, and the response leaves
+    // through sendRecheckedIntentResponse, which re-judges the reloaded estimate row first: a candidate edited in
+    // between parks the estimate, and no secret is returned. The pending hold row was never exposed (nothing can
+    // confirm it); main has no "abandoned" state for it and the next mint reuses it, so it is left as is.
     // The customer reached the save-a-card step — the only local evidence of
     // it (the SetupIntent lives in Stripe). Non-throwing; feeds the
     // payment-step-abandoned follow-up stage.
     await recordCheckoutStepReached(estimate.id, CHECKOUT_KIND.CARD_HOLD, intent.setupIntentId);
-    return res.json({
+    return sendRecheckedIntentResponse(res, estimate, 200, {
       success: true,
       clientSecret: intent.clientSecret,
       setupIntentId: intent.setupIntentId,
@@ -909,6 +944,11 @@ router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) =>
       return res.status(409).json(await refuseParkedWrite(estimate, recurringParkState.rejectedCustomerId));
     }
 
+    // "Use a different payment method" names an already-succeeded capture to replace (handled after the policy checks); it
+    // is also what a late park retires (sendRecheckedIntentResponse).
+    const replaceSetupIntentId = typeof req.body?.replaceSetupIntentId === 'string'
+      ? req.body.replaceSetupIntentId.trim()
+      : '';
     // The Auto Pay card only applies to the recurring lane — a one-time
     // request keeps its own card-hold intent endpoint.
     const treatAsOneTime = req.body?.serviceMode === 'one_time'
@@ -935,7 +975,7 @@ router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) =>
         treatAsOneTime,
         billByInvoice: resolveEstimateInvoiceMode(estimate, estData),
       })) {
-        return res.status(409).json({ error: 'No card on file is required for this estimate', exemptReason: 'commercial_manual_billing' });
+        return sendRecheckedIntentResponse(res, estimate, 409, { error: 'No card on file is required for this estimate', exemptReason: 'commercial_manual_billing' }, { retireSetupIntentId: replaceSetupIntentId || null });
       }
     }
     const membership = await buildEstimateMembershipContext(estimate);
@@ -947,7 +987,7 @@ router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) =>
       paymentMethodPreference: req.body?.paymentMethodPreference === 'prepay_annual' ? 'prepay_annual' : null,
     });
     if (!policy.required) {
-      return res.status(409).json({ error: 'No card on file is required for this estimate', exemptReason: policy.exemptReason || null });
+      return sendRecheckedIntentResponse(res, estimate, 409, { error: 'No card on file is required for this estimate', exemptReason: policy.exemptReason || null }, { retireSetupIntentId: replaceSetupIntentId || null });
     }
 
     // "Use a different payment method": the customer already saved one on
@@ -956,9 +996,6 @@ router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) =>
     // (the accept gate refuses it from here on; the deterministic mint
     // follows it to the replacement). Fails closed on an id that is not
     // this estimate's own capture.
-    const replaceSetupIntentId = typeof req.body?.replaceSetupIntentId === 'string'
-      ? req.body.replaceSetupIntentId.trim()
-      : '';
     let intent = null;
     if (replaceSetupIntentId) {
       const replaced = await replaceRecurringCardIntent({ estimate, setupIntentId: replaceSetupIntentId });
@@ -997,26 +1034,15 @@ router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) =>
         return res.status(503).json({ error: 'Payments are temporarily unavailable. Please call us to confirm your service.' });
       }
     }
-    // B18: re-run the park authoritatively (not the cached verdict) before a client secret leaves the server - the
-    // check above ran before the DB and Stripe work that minted (or replaced) this intent. A candidate edited in
-    // between parks the estimate: the minted intent is retired with the accept's own helper (503 if Stripe cannot
-    // confirm) and no secret is returned.
-    {
-      const blocked = await postMintRefusal(estimate);
-      if (blocked) {
-        try {
-          await retireOrDenyDroppedCapture(estimate, intent.setupIntentId);
-        } catch (retireErr) {
-          return res.status(503).json({ error: retireErr.message, code: retireErr.code || 'RECURRING_CARD_RETIRE_FAILED' });
-        }
-        return respondNoBookingRefusal(res, estimate, blocked);
-      }
-    }
+    // B18: the response leaves through sendRecheckedIntentResponse, which re-judges the reloaded estimate row before a
+    // client secret leaves the server - the checks above ran before the DB and Stripe work that minted (or replaced) this
+    // intent. A candidate edited in between parks the estimate: the minted intent is retired with the accept's own
+    // helper (503 if Stripe cannot confirm) and no secret is returned.
     // The customer reached the save-a-card step — the only local evidence of
     // it (the SetupIntent lives in Stripe). Non-throwing; feeds the
     // payment-step-abandoned follow-up stage.
     await recordCheckoutStepReached(estimate.id, CHECKOUT_KIND.RECURRING_CARD, intent.setupIntentId);
-    return res.json({
+    return sendRecheckedIntentResponse(res, estimate, 200, {
       success: true,
       clientSecret: intent.clientSecret,
       setupIntentId: intent.setupIntentId,
@@ -1029,7 +1055,7 @@ router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) =>
       // Both estimate UIs bootstrap Stripe Elements from this response — the
       // public estimate pages have no other authenticated key source.
       publishableKey: require('../config/stripe-config').publishableKey,
-    });
+    }, { retireSetupIntentId: intent.setupIntentId });
   } catch (err) {
     logger.error(`[estimate-slots-public:recurring-card-intent] ${err.message}`, { stack: err.stack });
     return res.status(500).json({ error: 'Something went wrong' });
@@ -1093,7 +1119,8 @@ router.post('/:token/reserve/:scheduledServiceId/extend', reserveLimiter, async 
     }
     const callBlocked = await rejectCallSideBlockedEstimate(res, estimate);
     if (callBlocked) return callBlocked;
-    const ineligible = rejectIneligibleEstimate(res, estimate);
+    // (The Bermuda gate is in noBookingRefusal below, AFTER the blocking-state check, on the pre-txn and the locked read.)
+    const ineligible = rejectIneligibleEstimate(res, estimate, { deferSuppressionGate: true });
     if (ineligible) return ineligible;
     // The SAME specialized no-booking guards /reserve applies (codex r5 P1),
     // as ONE predicate used twice: here on the pre-txn read, and again inside
@@ -1101,6 +1128,11 @@ router.post('/:token/reserve/:scheduledServiceId/extend', reserveLimiter, async 
     // read can go stale while the txn waits, and these shapes live in
     // estimate_data, which the locked viewability check does not re-derive.
     const noBookingRefusal = async (row, trx) => {
+      // The shared blocking-state check FIRST (see slotBrowseRefusal), on the locked row inside the service as well:
+      // the locked read of the phone candidate is FOR SHARE NOWAIT in a savepoint, and a briefly held customer row
+      // skips it (`skipOnBusy`) rather than failing the extension.
+      const blockedRefusal = await lockedContactReviewRefusal(row, trx, { skipOnBusy: true });
+      if (blockedRefusal) return blockedRefusal;
       // The suppression gate belongs in the locked recheck too (codex r8 P2):
       // staff can reshape an estimate into a Bermuda-suppression shape after
       // the pre-txn rejectIneligibleEstimate passed, and extending then
@@ -1136,8 +1168,7 @@ router.post('/:token/reserve/:scheduledServiceId/extend', reserveLimiter, async 
           },
         };
       }
-      // The locked row (the service re-runs this under the estimate's row lock) carries the phone columns too.
-      return lockedContactReviewRefusal(row, trx, { skipOnBusy: true });
+      return null;
     };
     const preTxnRefusal = await noBookingRefusal(estimate);
     if (preTxnRefusal) return respondNoBookingRefusal(res, estimate, preTxnRefusal);

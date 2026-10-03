@@ -4604,7 +4604,11 @@ function ReviewBeforeBookingCard({ reason }) {
         Call Waves to confirm — {WAVES_PHONE_DISPLAY}
       </a>
       <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 12, lineHeight: 1.5 }}>
-        Prefer we reach out? We’ll follow up to confirm and schedule your visit. You pay on service day; no card or deposit now.
+        Prefer we reach out? We’ll follow up to confirm and schedule your visit.
+        {/* The payment-timing sentence stays for the trenching review only. A contact_review estimate (its phone belongs to
+            another customer) can be an invoice-only guarantee renewal or a recurring plan that may prepay, so "you pay on
+            service day" is not known to be true: that one sentence is simply not shown (no new wording). */}
+        {reason === 'contact_review' ? '' : ' You pay on service day; no card or deposit now.'}
       </div>
     </div>
   );

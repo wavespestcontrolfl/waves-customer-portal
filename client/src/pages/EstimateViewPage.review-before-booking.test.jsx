@@ -93,6 +93,15 @@ describe('EstimateViewPage review-before-booking (termite trenching)', () => {
     expect(screen.getByRole('link', { name: /Call Waves to confirm/i })).toHaveAttribute('href', 'tel:+19412975749');
   });
 
+  it('the trenching review card is unchanged: it keeps its payment-timing footer sentence', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(trenchingReviewPayload())));
+    render(<EstimateViewPage />);
+    await waitFor(() => {
+      expect(screen.getByText('Waves will confirm & schedule your trenching')).toBeInTheDocument();
+    });
+    expect(screen.getByText(/Prefer we reach out\? We’ll follow up to confirm and schedule your visit\. You pay on service day; no card or deposit now\./)).toBeInTheDocument();
+  });
+
   it('still renders the genuine terminal card when the estimate is expired', async () => {
     const payload = trenchingReviewPayload();
     // Server never advertises the review state on a terminal estimate, but the
@@ -125,6 +134,10 @@ describe('EstimateViewPage parked accept (B18: the estimate\'s phone belongs to 
     });
     expect(screen.getByText('A Waves specialist reviews this quote with you and schedules your visit — it can’t be self-booked online.')).toBeInTheDocument();
     expect(screen.queryByText(/treatment plan, access, exact footage/i)).not.toBeInTheDocument();
+    // r9 P2: no payment-timing sentence for a contact review (an invoice-only renewal / prepaying plan may not pay on service
+    // day); every other footer sentence is exactly as before.
+    expect(screen.queryByText(/You pay on service day/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/^Prefer we reach out\? We’ll follow up to confirm and schedule your visit\.\s*$/)).toBeInTheDocument();
     expect(screen.queryByText('This estimate has expired.')).not.toBeInTheDocument();
     expect(screen.getByRole('link', { name: /Call Waves to confirm/i })).toHaveAttribute('href', 'tel:+19412975749');
     expect(screen.queryByRole('button', { name: /accept|confirm my|book/i })).not.toBeInTheDocument();

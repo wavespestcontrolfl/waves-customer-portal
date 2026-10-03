@@ -377,7 +377,7 @@ describe('extend route mirrors the /reserve no-booking guards', () => {
   test.each([
     ['isCommercialAutoEstimate(row)', 'commercialManualScheduling: true'],
     ['isRodentGuaranteeOnlyEstimate(row, parseEstimateData(row))', 'invoiceOnlyAcceptance: true'],
-    // B18 park: judged on the LOCKED row too (same predicate), after the existing review refusals.
+    // B18 park: judged on the LOCKED row too (same predicate), BEFORE the existing no-booking shortcuts.
     ['lockedContactReviewRefusal(row, trx, { skipOnBusy: true })', 'lockedContactReviewRefusal'],
   ])('%s is refused before the service call', (guard, body) => {
     expect(guardBlock).toContain(guard);
@@ -387,7 +387,13 @@ describe('extend route mirrors the /reserve no-booking guards', () => {
   test('trenching review is decided by the ONE blocking-state call (no inline shortcut ahead of it: quote_required outranks it)', () => {
     expect(guardBlock).not.toContain('estimateTrenchingReviewRequired(');
     expect(guardBlock).not.toContain('TRENCHING_REVIEW_409');
-    expect(guardBlock.indexOf('isRodentGuaranteeOnlyEstimate(row')).toBeLessThan(guardBlock.indexOf('lockedContactReviewRefusal(row, trx'));
+    // ... and the shared check runs FIRST in the predicate: before the Bermuda gate, commercial and guarantee-only shortcuts.
+    const predicate = guardBlock.slice(guardBlock.indexOf('const noBookingRefusal ='));
+    const idx = (needle) => predicate.indexOf(needle);
+    expect(idx('lockedContactReviewRefusal(row, trx')).toBeGreaterThan(0);
+    expect(idx('lockedContactReviewRefusal(row, trx')).toBeLessThan(idx('estimateDataCarriesBermudaSuppression(row'));
+    expect(idx('lockedContactReviewRefusal(row, trx')).toBeLessThan(idx('isCommercialAutoEstimate(row)'));
+    expect(idx('lockedContactReviewRefusal(row, trx')).toBeLessThan(idx('isRodentGuaranteeOnlyEstimate(row'));
   });
 
   test('the guards run after the token/uuid gates and before any extend', () => {
