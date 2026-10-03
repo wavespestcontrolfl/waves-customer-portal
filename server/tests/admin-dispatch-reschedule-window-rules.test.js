@@ -278,6 +278,25 @@ test('an expectVisit request that finds the stop already at the target texts nob
   SmartRebooker.reschedule.mockResolvedValue({ success: true });
 });
 
+test('keepSlot (a technician-only change on a shared stop): the stored window is not re-validated and the reminder is not re-synced', async () => {
+  const { planVisitMoveForStaff, runPlannedVisitMove } = require('../routes/admin-dispatch');
+  const AppointmentReminders = require('../services/appointment-reminders');
+  // An existing off-hour stop: a date-only move through the route refuses it...
+  mockVisitRow = { id: 'svc-1', scheduled_date: TARGET, window_start: '06:30:00', window_end: '07:30:00', estimated_duration_minutes: 60, visit_id: 'visit-1', is_recurring: false, active: true };
+  expect((await reschedule({ newDate: TARGET })).status).toBe(422);
+  // ...but the reassignment keeps the slot as it is.
+  const actor = { techRole: 'admin', technicianId: 'staff-1' };
+  const planned = await planVisitMoveForStaff({ serviceId: 'svc-1', newDate: TARGET, notifyCustomer: false, body: { technicianId: 'tech-2' }, actor, sourceSurface: 'edit_modal', keepSlot: true });
+  expect(planned.plan).toMatchObject({ effectiveWindow: null, keepSlot: true });
+  expect(planned.plan.rescheduleOptions).toMatchObject({ adminWindowRules: false, technicianId: 'tech-2', sourceSurface: 'edit_modal' });
+  SmartRebooker.reschedule.mockResolvedValue({ success: true, visitMove: { visitId: 'visit-1', moved: ['svc-1', 'svc-2'], failed: [] } });
+  AppointmentReminders.handleReschedule.mockClear();
+  const out = await runPlannedVisitMove({ plan: planned.plan, serviceId: 'svc-1', newDate: TARGET, notifyCustomer: false, actor });
+  expect(out.status).toBe(200);
+  expect(AppointmentReminders.handleReschedule).not.toHaveBeenCalled();
+  SmartRebooker.reschedule.mockResolvedValue({ success: true });
+});
+
 describe('window resolved against the CURRENT visit row', () => {
   test("{ start } on a 2-hour visit derives and validates the REAL end: 19:00 → 19:00-21:00 is refused (never 19:00-11:00)", async () => {
     mockVisitRow = { window_start: '09:00:00', window_end: '11:00:00', estimated_duration_minutes: null };

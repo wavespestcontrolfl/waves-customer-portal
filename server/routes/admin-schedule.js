@@ -11016,8 +11016,12 @@ async function separateComboService(req, row) {
     // The split's own refusals (a frozen visit, a row that just left the
     // stop) are the operator's to read, not a 500. Nothing was changed.
     const known = err && (err.code === 'VISIT_SPLIT_REFUSED' || /not found|not a member/.test(String(err.message)));
-    if (!known) throw err;
-    throw Object.assign(httpError(409, `${err.message} Nothing was changed.`), { code: err.code || 'VISIT_CHANGED_RETRY' });
+    if (known) throw Object.assign(httpError(409, `${err.message} Nothing was changed.`), { code: err.code || 'VISIT_CHANGED_RETRY' });
+    // Any other failure can come after the split committed (a connection
+    // lost on the commit's acknowledgement). Read the row: off the stop =
+    // it did commit, so carry on as separated and let that be disclosed.
+    const now = await db('scheduled_services').where({ id: row.id }).first('visit_id').catch(() => undefined);
+    if (!now || String(now.visit_id || '') === String(row.visit_id)) throw err;
   }
   return { separated: true };
 }
@@ -11027,10 +11031,28 @@ const comboStopChangedError = () => Object.assign(
   { code: 'VISIT_MEMBERSHIP_CHANGED' },
 );
 
+// No choice in the request, and it changes the technician: on a shared stop
+// that would reassign this one row and split the stop without anyone having
+// chosen that (the caller did not know the stop is shared, or cannot ask).
+// Refused like a date or time change; the form then shows the choice.
+async function refuseUnchosenComboReassign(req) {
+  if (req.body.technicianId === undefined) return;
+  const row = await db('scheduled_services').where({ id: req.params.id }).first('visit_id', 'technician_id');
+  if (!row || !row.visit_id || (req.body.technicianId || null) === (row.technician_id || null)) return;
+  if ((await require('../services/visit-groups').openMembers(db, row.visit_id)).length < 2) return;
+  throw Object.assign(
+    httpError(409, 'This service is grouped with another at the same stop. Choose whether the technician changes for the whole stop or this service is separated, then save again. Nothing was changed.'),
+    { code: 'VISIT_EDIT_SCHEDULE_UNSUPPORTED' },
+  );
+}
+
 async function planComboEditMove(req) {
   const body = req.body || {};
   const choice = body.comboMove;
-  if (choice === undefined) return null;
+  if (choice === undefined) {
+    await refuseUnchosenComboReassign(req);
+    return null;
+  }
   if (choice !== 'together' && choice !== 'separate') {
     throw httpError(400, "comboMove must be 'together' or 'separate'");
   }
@@ -11089,6 +11111,8 @@ async function planComboTogetherMove(req, row, changes, shown) {
     },
     actor,
     sourceSurface: 'edit_modal',
+    // A technician-only change keeps the stop's date and window.
+    keepSlot: !(changes.date || changes.start),
   });
   if (!planned.plan) {
     throw Object.assign(httpError(planned.status, `${planned.body.error} Nothing was changed.`), planned.body.code ? { code: planned.body.code } : {});

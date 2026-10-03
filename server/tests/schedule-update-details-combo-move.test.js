@@ -75,6 +75,15 @@ describe('when the planner stays out of the way', () => {
     expect(req.body.windowStart).toBe('09:00');
   });
 
+  test('no choice + a changed technician on a shared stop is refused (nothing separates unchosen); an echo or an unshared row is not', async () => {
+    await expect(planComboEditMove(request({ technicianId: 'tech-2', notes: 'x' }))).rejects.toMatchObject({ statusCode: 409, code: 'VISIT_EDIT_SCHEDULE_UNSUPPORTED' });
+    expect(await planComboEditMove(request({ technicianId: 'tech-1', notes: 'x' }))).toBe(null);
+    mockVisitGroups.openMembers.mockResolvedValue([{ id: 'svc-a' }]);
+    expect(await planComboEditMove(request({ technicianId: 'tech-2' }))).toBe(null);
+    mockRow = { ...ROW, visit_id: null };
+    expect(await planComboEditMove(request({ technicianId: 'tech-2' }))).toBe(null);
+  });
+
   test('an unknown choice is a 400', async () => {
     await expect(planComboEditMove(request({ scheduledDate: TARGET, comboMove: 'both' }))).rejects.toMatchObject({ statusCode: 400 });
   });
@@ -92,6 +101,7 @@ describe("comboMove 'together'", () => {
       body: { technicianId: 'tech-2', expectVisit: SUMMARY },
       actor: { techRole: 'admin', technicianId: 'staff-1' },
       sourceSurface: 'edit_modal',
+      keepSlot: false,
     });
     // The per-row edit keeps the other fields and nothing that moves, reassigns or texts.
     expect(req.body).toEqual({ notes: 'gate code', comboMove: 'together' });
@@ -104,7 +114,7 @@ describe("comboMove 'together'", () => {
     const req = request({ scheduledDate: FUTURE, windowStart: '09:00', windowEnd: '10:00', technicianId: 'tech-2', notifyCustomer: true, comboMove: 'together' });
     await planComboEditMove(req);
     expect(mockDispatch.planVisitMoveForStaff).toHaveBeenCalledWith(expect.objectContaining({
-      newDate: FUTURE, newWindow: undefined, notifyCustomer: false,
+      newDate: FUTURE, newWindow: undefined, notifyCustomer: false, keepSlot: true,
       body: { technicianId: 'tech-2', expectVisit: SUMMARY },
     }));
   });
@@ -194,8 +204,12 @@ describe("comboMove 'separate'", () => {
     await expect(planComboEditMove(request({ scheduledDate: TARGET, comboMove: 'separate' }))).rejects.toMatchObject({ statusCode: 409, code: 'VISIT_SPLIT_REFUSED', message: 'frozen Nothing was changed.' });
     mockVisitGroups.splitChild.mockRejectedValue(new Error('row is not a member of this visit'));
     await expect(planComboEditMove(request({ scheduledDate: TARGET, comboMove: 'separate' }))).rejects.toMatchObject({ statusCode: 409, code: 'VISIT_CHANGED_RETRY' });
+    // An unknown failure with the row still on its stop: the split did not commit.
     mockVisitGroups.splitChild.mockRejectedValue(new Error('connection reset'));
     await expect(planComboEditMove(request({ scheduledDate: TARGET, comboMove: 'separate' }))).rejects.toThrow('connection reset');
+    // The same failure with the row already off the stop: it did commit, so the save carries on as separated.
+    mockVisitGroups.splitChild.mockImplementation(async () => { mockRow = { ...ROW, visit_id: null }; throw new Error('connection reset'); });
+    expect(await planComboEditMove(request({ scheduledDate: TARGET, comboMove: 'separate' }))).toEqual({ separated: true });
   });
 });
 

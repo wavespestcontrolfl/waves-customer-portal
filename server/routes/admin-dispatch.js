@@ -5859,7 +5859,12 @@ async function planCollectiveDisclosure({ serviceId, newDate, observedForMove, b
 // window the rebooker will persist with its CAS pins, the shown-stop fence
 // and the collective-move disclosure contract. Nothing is written. Answers a
 // refusal ({ status, body }) or the plan the move runs on.
-async function planVisitMoveForStaff({ serviceId, newDate, newWindow, notifyCustomer, operationKey, body, actor, sourceSurface = 'dispatch_board' }) {
+// `keepSlot` (Edit appointment's technician-only change on a shared stop):
+// the stop stays on its date and window and only changes technician, so the
+// stored window is not re-validated against today's creation rules (an
+// existing off-hour stop can still be reassigned, as a same-slot edit can)
+// and the reminder is not re-synced (the appointment time did not change).
+async function planVisitMoveForStaff({ serviceId, newDate, newWindow, notifyCustomer, operationKey, body, actor, sourceSurface = 'dispatch_board', keepSlot = false }) {
   // Staff-initiated reschedules may override live lifecycle states
   // (en_route / on_site) — rain starts mid-route, or the customer calls
   // to push the visit while the tech is already there. The rebooker
@@ -5880,7 +5885,7 @@ async function planVisitMoveForStaff({ serviceId, newDate, newWindow, notifyCust
   // gets its end derived from the row's own duration — which also covers
   // the RescheduleModal's deriveWindowFromCurrentVisit opt-in).
   const observedForMove = {};
-  const effectiveWindow = await resolveRescheduleWindow(serviceId, newWindow, observedForMove);
+  const effectiveWindow = keepSlot ? null : await resolveRescheduleWindow(serviceId, newWindow, observedForMove);
   await ensureObservedAnchor(serviceId, observedForMove);
   // Pin the fields that resolution derived from into the rebooker's CAS.
   const movePin = rescheduleExpectPredicate(observedForMove);
@@ -5901,7 +5906,7 @@ async function planVisitMoveForStaff({ serviceId, newDate, newWindow, notifyCust
   // Staff surface: occupancy clashes commit with a warning instead of
   // 409ing (owner ruling 2026-08-25 — see rebooker.overlapAdvisory).
   rescheduleOptions.overlapAdvisory = true;
-  rescheduleOptions.adminWindowRules = true;
+  rescheduleOptions.adminWindowRules = !keepSlot;
   rescheduleOptions.sourceSurface = sourceSurface;
   rescheduleOptions.notifyRequested = notifyCustomer !== false;
   if (operationKey) rescheduleOptions.operationKey = operationKey;
@@ -5910,7 +5915,7 @@ async function planVisitMoveForStaff({ serviceId, newDate, newWindow, notifyCust
   if (shownStopRefusal) return shownStopRefusal;
   const disclosureRefusal = await planCollectiveDisclosure({ serviceId, newDate, observedForMove, body, actor, rescheduleOptions });
   if (disclosureRefusal) return disclosureRefusal;
-  return { plan: { rescheduleOptions, effectiveWindow, expectVisit, qualityDates } };
+  return { plan: { rescheduleOptions, effectiveWindow, expectVisit, qualityDates, keepSlot } };
 }
 
 // Effects: the collective choke point widened this move to the series.
@@ -6047,7 +6052,7 @@ function repeatedMoveNoticeVerdict({ result, expectVisit }) {
 // collective choke point widened the move, reminder sync, board broadcasts,
 // the partial-move answer and the one customer notice.
 async function applyVisitMoveEffects({ result, plan, serviceId, newDate, notifyCustomer, reasonText, actor }) {
-  const { effectiveWindow, expectVisit, qualityDates } = plan;
+  const { effectiveWindow, expectVisit, qualityDates, keepSlot } = plan;
   if (result.seriesMoveId) {
     return applySeriesWidenedMoveEffects({ result, serviceId, newDate, effectiveWindow, notifyCustomer, reasonText, actor, qualityDates });
   }
@@ -6061,7 +6066,7 @@ async function applyVisitMoveEffects({ result, plan, serviceId, newDate, notifyC
     || result?.visitMove?.parentRetargetFailed === true; // the parent still describes the old stop (codex r28 P1)
   const repeatNotice = notifyCustomer !== false && !partialVisitMove ? repeatedMoveNoticeVerdict({ result, expectVisit }) : null;
   const willNotify = notifyCustomer !== false && !partialVisitMove && !repeatNotice;
-  await syncRescheduleReminder(serviceId, newDate, effectiveWindow, { willNotify, preserveMoveHold: partialVisitMove });
+  if (!keepSlot) await syncRescheduleReminder(serviceId, newDate, effectiveWindow, { willNotify, preserveMoveHold: partialVisitMove });
   await broadcastVisitMove({ result, serviceId, actor, qualityDates });
   if (partialVisitMove) return partialVisitMoveReply(result, serviceId);
   if (repeatNotice) return moveReply(200, { ...result, notificationSent: false, ...repeatNotice });
