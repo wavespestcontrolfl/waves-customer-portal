@@ -492,16 +492,18 @@ describe('voicemail triage evidence (voicemail.v1: every inbound voicemail besid
       VM({ id: 'vm-s', processing_status: 'spam' }),
       VM({ id: 'vm-x', processing_status: 'processed', ai_extraction: JSON.stringify({ is_voicemail: true, is_spam: true }) }),
       VM({ id: 'vm-vendor', v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ call_nature: 'vendor_or_partner' }) }),
+      VM({ id: 'vm-partner', v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ call_nature: 'vendor_or_partner', spam_verdict: { is_spam_content: false } }) }),
       VM({ id: 'vm-applicant', disposition: 'vendor_logged', v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ call_nature: 'job_applicant' }) }),
       VM({ id: 'vm-real' }),
       VM({ id: 'call-live', processing_status: 'processed', ai_extraction: JSON.stringify({ is_voicemail: false }) }),
     ] });
     await shadowVoicemails();
     const s = bySubject();
-    expect(Object.keys(s).sort()).toEqual(['vm-applicant', 'vm-real', 'vm-s', 'vm-vendor', 'vm-x']);
+    expect(Object.keys(s).sort()).toEqual(['vm-applicant', 'vm-partner', 'vm-real', 'vm-s', 'vm-vendor', 'vm-x']);
     for (const id of ['vm-s', 'vm-x', 'vm-vendor']) expect(s[id].baselines.is_vendor_or_spam).toEqual({ production: true });
     // a job applicant shares the vendor_logged disposition but is no vendor pitch
-    for (const id of ['vm-real', 'vm-applicant']) expect(s[id].baselines.is_vendor_or_spam).toEqual({ production: false });
+    // ...and a partner whose content V2 cleared is not a pitch either
+    for (const id of ['vm-real', 'vm-applicant', 'vm-partner']) expect(s[id].baselines.is_vendor_or_spam).toEqual({ production: false });
   });
 
   test('each enabled provider is asked until its own answer is recorded: a voicemail one provider answered re-asks only the other', async () => {

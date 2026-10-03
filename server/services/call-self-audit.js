@@ -143,8 +143,10 @@ function gateCheckBaselines(call, wavesPromiseCallIds) {
 //                       for it (a failed lead creation opens one)
 //   is_vendor_or_spam   production = spam status, the extraction's is_spam, or
 //                       a vendor call by the v2 extraction's call_nature
-//                       (vendor_or_partner; a job applicant shares the
-//                       vendor_logged disposition but is not a vendor)
+//                       (vendor_or_partner, unless V2's spam verdict cleared
+//                       the content: a property manager or referral partner;
+//                       a job applicant shares the vendor_logged disposition
+//                       but is not a vendor)
 //   needs_attention_today  no baseline: nothing decides urgency today
 // Idempotent over a 7-day lookback (Codex #5655 r1/r2): a voicemail is asked
 // once it is terminal, and each enabled provider only until that provider's
@@ -231,7 +233,9 @@ async function shadowVoicemails({ now = new Date() } = {}) {
       const v2 = call.v2_extraction_status === 'valid' ? safeParse(call.ai_extraction_enriched) : {};
       const baselines = {
         callback_requested: { production: Boolean(call.voicemail_callback_alerted_at) || leadSids.has(call.twilio_call_sid) || triaged.has(String(call.id)) },
-        is_vendor_or_spam: { production: call.processing_status === 'spam' || ex.is_spam === true || v2.call_nature === 'vendor_or_partner' },
+        // vendor_or_partner is a pitch only when V2's spam verdict did not clear
+        // the content (extraction-compat's rule): a cleared partner is not.
+        is_vendor_or_spam: { production: call.processing_status === 'spam' || ex.is_spam === true || (v2.call_nature === 'vendor_or_partner' && v2.spam_verdict?.is_spam_content !== false) },
       };
       const only = missingFor(call);
       const stored = storedAnswers.get(String(call.id)) || null;
