@@ -957,12 +957,18 @@ async function executeTool(name, input = {}, ctx = {}) {
         requested_service: nz(extracted.requested_service) || nz(priorEstimateFields.requested_service),
         pain_points: nz(extracted.pain_points) || nz(priorEstimateFields.pain_points),
       };
+      // ⭐ THE CALL REMEMBERS ONLY WHAT THE CALLER SAID. Noted BEFORE any
+      // account default is applied: the store only adds, so a name, email or
+      // address borrowed from the account and kept there would later pass for
+      // something the caller stated — and survive their correction.
+      if (typeof ctx.noteEstimateFields === 'function') {
+        ctx.noteEstimateFields({ ...estimateFields, ...(emailUnreadable && !estimateFields.email ? { email_unreadable: 'true' } : {}) });
+      }
       // A written estimate for a customer already on file needs nothing asked
-      // twice: whatever the caller did not give on this call comes from their
-      // own account (full tier only), so only what is genuinely absent there
-      // is reported missing below.
+      // twice: whatever the caller has not given on this call comes from their
+      // own account (full tier only), read fresh on every capture, so only
+      // what is genuinely absent there is reported missing below.
       const account = estimateRequested ? await accountContactFor(ctx) : null;
-      const LOCATION = ['address_line1', 'city', 'zip'];
       let locationFromAccount = false;
       if (account) {
         for (const k of ['first_name', 'last_name']) {
@@ -973,22 +979,12 @@ async function executeTool(name, input = {}, ctx = {}) {
         // part of a location was stated on this call, the estimate is for
         // THAT property and anything absent is asked for. Only a call with no
         // location at all takes the account's, whole.
+        const LOCATION = ['address_line1', 'city', 'zip'];
         if (!LOCATION.some((k) => estimateFields[k])) {
           for (const k of LOCATION) if (nz(account[k])) estimateFields[k] = nz(account[k]);
           locationFromAccount = true;
         }
         if (!estimateFields.email && !emailUnreadable && nz(account.email) && isValidEmail(nz(account.email))) estimateFields.email = nz(account.email);
-      }
-      // The account's location is a default read fresh on every capture, never
-      // remembered as something the caller said: the call's store only adds
-      // fields, so a borrowed street kept there would be mixed with a city the
-      // caller states later.
-      if (typeof ctx.noteEstimateFields === 'function') {
-        ctx.noteEstimateFields({
-          ...estimateFields,
-          ...(locationFromAccount ? { address_line1: null, city: null, zip: null } : {}),
-          ...(emailUnreadable && !estimateFields.email ? { email_unreadable: 'true' } : {}),
-        });
       }
       // The accumulated fields ALSO ride the lead write (hook P1): identity
       // resolution (email match) and fill-forward must see the name/email/
