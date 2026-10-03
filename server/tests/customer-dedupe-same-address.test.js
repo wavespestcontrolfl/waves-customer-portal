@@ -132,6 +132,55 @@ describe('same-address grouping', () => {
     expect(via).toEqual(['primary', 'property']);
   });
 
+  describe('a saved property only counts when it is where the customer lives', () => {
+    const owner = () => cust({ address_line1: '999 Elsewhere Rd', zip: '34202', first_name: 'Owner' });
+    const occupant = () => cust({ first_name: 'Occupant' });
+    const prop = (customer, extra = {}) => ({
+      customer_id: customer.id, address_line1: '100 Example Loop', city: 'Sarasota', zip: '34231', property_type: 'single_family', ...extra,
+    });
+
+    test.each([['rental_owned'], ['family_home'], ['managed_for_client']])('relationship %s does not pair its customer with the occupant', (relationship) => {
+      const o = owner();
+      const t = occupant();
+      expect(buildSameAddressGroups({ customers: [o, t], properties: [prop(o, { relationship })] })).toEqual([]);
+    });
+
+    test.each([['rental_investment'], ['family_occupied'], ['seasonal'], ['vacant'], ['commercial']])('occupancy %s does not pair', (occupancy_type) => {
+      const o = owner();
+      const t = occupant();
+      expect(buildSameAddressGroups({ customers: [o, t], properties: [prop(o, { occupancy_type })] })).toEqual([]);
+    });
+
+    test.each([
+      [{ relationship: 'own_home' }], [{ relationship: null }], [{ relationship: '' }],
+      [{ occupancy_type: 'owner_occupied' }], [{ occupancy_type: 'unknown' }], [{ occupancy_type: null }], [{}],
+    ])('own-home / owner-occupied / unrecorded %j still pairs', (extra) => {
+      const o = owner();
+      const t = occupant();
+      expect(buildSameAddressGroups({ customers: [o, t], properties: [prop(o, extra)] })).toHaveLength(1);
+    });
+
+    test('a customer-row (primary) address is unaffected by the property rules', () => {
+      const a = cust();
+      const b = cust();
+      expect(buildSameAddressGroups({ customers: [a, b], properties: [prop(a, { relationship: 'rental_owned' })] })).toHaveLength(1);
+    });
+  });
+
+  test('evidence names the address each side matched on, and whether it is a saved property', () => {
+    const owner = cust({ address_line1: '999 Elsewhere Rd', zip: '34202', first_name: 'Owner' });
+    const tenant = cust({ first_name: 'Tenant' });
+    const [group] = buildSameAddressGroups({
+      customers: [owner, tenant],
+      properties: [{ customer_id: owner.id, address_line1: '100 Example Loop', address_line2: null, city: 'Sarasota', zip: '34231', relationship: 'own_home' }],
+    });
+    const ev = group.candidates[0].evidence.matched_address;
+    const ownerSide = group.winner.id === owner.id ? ev.winner : ev.loser;
+    const tenantSide = group.winner.id === owner.id ? ev.loser : ev.winner;
+    expect(ownerSide).toEqual({ address_line1: '100 Example Loop', address_line2: null, city: 'Sarasota', zip: '34231', via: 'property' });
+    expect(tenantSide).toMatchObject({ address_line1: '100 Example Loop', via: 'primary' });
+  });
+
   test('a customer never pairs with its own property rows', () => {
     const a = cust();
     expect(buildSameAddressGroups({
@@ -273,7 +322,11 @@ describe('pairCustomersAtSameAddress (the one comparator, set-wide)', () => {
       row('b'), row('a'), row('a', { matchedVia: 'property' }),
       row('c', { address_line1: 'Example Loop' }), row('d', { address_line1: null }),
     ]);
-    expect(pairs).toEqual([{ a: 'a', b: 'b', via: { a: 'primary', b: 'primary' } }]);
+    const addr = { address_line1: '100 Example Loop', address_line2: null, city: 'Sarasota', zip: '34231' };
+    expect(pairs).toEqual([{
+      a: 'a', b: 'b', via: { a: 'primary', b: 'primary' },
+      matched: { a: { ...addr, via: 'primary' }, b: { ...addr, via: 'primary' } },
+    }]);
   });
 
   test('uses the unit-strict rule: one-sided unit is not a pair', () => {

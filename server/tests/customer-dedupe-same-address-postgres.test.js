@@ -113,6 +113,41 @@ maybeDescribe('findSameAddressGroups (TEMP tables)', () => {
     expect((await dedupe.duplicatePairEligibility(winnerId, loserId, conn)).code).toBe('not_in_queue');
   });
 
+  test('the merge-time recheck reads only the pair, not the building', async () => {
+    const a = await customer({ pipeline_stage: 'active_customer' });
+    const b = await customer();
+    for (let i = 0; i < 30; i += 1) await customer({ address_line1: '100 Example Loop', address_line2: `Unit ${i + 1}` });
+    const seen = [];
+    const spy = (q) => seen.push({ sql: q.sql, bindings: q.bindings });
+    conn.on('query', spy);
+    let verdict;
+    try { verdict = await dedupe.duplicatePairEligibility(a, b, conn, { kind: 'same_address' }); } finally { conn.removeListener('query', spy); }
+    expect(verdict.code).toBe('eligible');
+    const customerReads = seen.filter((q) => /from "customers" as "c"/.test(q.sql));
+    expect(customerReads.length).toBeGreaterThan(0);
+    for (const q of customerReads) {
+      expect(q.sql).toMatch(/"c"\."id" in \(/);
+      expect(q.bindings).toEqual(expect.arrayContaining([a, b]));
+    }
+    // A pair that stopped sharing a premise is refused from the same pair-scoped read.
+    await conn('customers').where({ id: b }).update({ address_line2: 'Apt 2' });
+    expect((await dedupe.duplicatePairEligibility(a, b, conn, { kind: 'same_address' })).code).toBe('not_in_queue');
+  });
+
+  test('a rental / family-home property does not pair; the evidence carries the matched address', async () => {
+    const owner = await customer({ address_line1: '5 Elsewhere Rd', zip: '34202' });
+    const tenant = await customer();
+    await conn('customer_properties').insert({ customer_id: owner, address_line1: '100 Example Loop', city: 'Sarasota', zip: '34231', active: true, relationship: 'rental_owned' });
+    expect(await dedupe.findSameAddressGroups(conn)).toEqual([]);
+    await conn('customer_properties').where({ customer_id: owner }).update({ relationship: 'own_home' });
+    const [group] = await dedupe.findSameAddressGroups(conn);
+    const ev = group.candidates[0].evidence.matched_address;
+    const sides = group.winner.id === owner ? [ev.winner, ev.loser] : [ev.loser, ev.winner];
+    expect(sides[0]).toMatchObject({ address_line1: '100 Example Loop', via: 'property' });
+    expect(sides[1]).toMatchObject({ address_line1: '100 Example Loop', via: 'primary' });
+    expect(pairsOf([group])).toEqual([pair(owner, tenant)]);
+  });
+
   test('one bounded read: a fixed handful of queries however many customers there are', async () => {
     for (let i = 0; i < 40; i += 1) await customer({ address_line1: `${200 + i} Sample Row`, zip: '34233' });
     await customer({ address_line1: '200 Sample Row', zip: '34233' });
@@ -215,27 +250,78 @@ maybeDescribe('same-address merge carries the phone, holds consent, and the undo
     expect(loserAfter.phone).toBe(loserPhone);
   });
 
-  test('undo refuses (409, nothing written) once the carried contact was edited, so its text hold is never lifted', async () => {
-    const { winnerId, loserId, loserPhone } = await pairAtNewAddress({
-      winnerExtra: {
-        service_contact_name: 'Pat', service_contact_phone: '+19415550177', service_contacts_consent_at: new Date(),
-        service_contacts_consent_source: 'call',
-      },
-      loserExtra: { service_contact_name: 'Quinn', service_contact_phone: '+19415550166' },
+  describe('undo after the carried phone was changed on the kept customer', () => {
+    const prefsOf = (row) => {
+      const raw = row.service_preferences;
+      return (typeof raw === 'string' ? JSON.parse(raw) : raw) || {};
+    };
+    async function mergedPair() {
+      const pair = await pairAtNewAddress();
+      const result = await mergeSameAddress(pair.winnerId, pair.loserId);
+      expect(result.phoneCarry).toMatchObject({ status: 'carried', slot: 1 });
+      return { ...pair, journalId: result.journalId };
+    }
+    const undo = (journalId) => dedupe.revertMerge({ journalId, performedBy: 'test:undo', performedById: null });
+
+    test('number kept but the contact edited: 409, nothing written, hold intact', async () => {
+      const { winnerId, loserId, loserPhone, journalId } = await mergedPair();
+      await db('customers').where({ id: winnerId }).update({ service_contact_name: 'Blake (edited)' });
+      const before = await db('customers').where({ id: winnerId }).first();
+      await expect(undo(journalId)).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/still saved on the kept customer/) });
+      const after = await db('customers').where({ id: winnerId }).first();
+      expect(after.service_contact_phone).toBe(loserPhone);
+      expect(prefsOf(after)).toEqual(prefsOf(before));
+      expect((await db('customers').where({ id: loserId }).first()).deleted_at).not.toBeNull();
     });
-    const result = await mergeSameAddress(winnerId, loserId);
-    // The winner already had a contact in slot 1 (so the existing slot-wise copy skips the loser's
-    // slot 1 and its stamp rule clears the winner's stamp): the new phone takes slot 2.
-    expect(result.phoneCarry).toMatchObject({ status: 'carried', slot: 2 });
-    await db('customers').where({ id: winnerId }).update({ service_contact2_name: 'Blake (edited)' });
-    const before = await db('customers').where({ id: winnerId }).first();
-    await expect(dedupe.revertMerge({ journalId: result.journalId, performedBy: 'test:undo', performedById: null }))
-      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/text hold/) });
-    const after = await db('customers').where({ id: winnerId }).first();
-    expect(after.service_contact2_phone).toBe(loserPhone);
-    expect(after.service_contacts_consent_at).toEqual(before.service_contacts_consent_at);
-    expect(after.service_preferences).toEqual(before.service_preferences);
-    expect((await db('customers').where({ id: loserId }).first()).deleted_at).not.toBeNull();
+
+    test('number moved to another slot: 409 (it is still on the customer)', async () => {
+      const { winnerId, loserPhone, journalId } = await mergedPair();
+      await db('customers').where({ id: winnerId }).update({
+        service_contact_name: null, service_contact_phone: null, service_contact_role: null,
+        service_contact2_name: 'Blake', service_contact2_phone: loserPhone,
+      });
+      await expect(undo(journalId)).rejects.toMatchObject({ statusCode: 409 });
+    });
+
+    test('number removed by the admin: the undo goes through, the emptied slot is left alone, the orphaned hold is dropped', async () => {
+      const { winnerId, loserId, loserPhone, journalId } = await mergedPair();
+      await db('customers').where({ id: winnerId }).update({ service_contact_name: null, service_contact_phone: null, service_contact_role: null });
+      const undone = await undo(journalId);
+      expect(undone.loserId).toBe(loserId);
+      const after = await db('customers').where({ id: winnerId }).first();
+      expect(after.service_contact_phone).toBeNull();
+      expect(prefsOf(after).unconsented_slot_phone_keys || []).not.toContain(loserPhone.slice(-10));
+      expect((await db('customers').where({ id: loserId }).first()).deleted_at).toBeNull();
+    });
+
+    test('number removed AND preferences edited since: the undo goes through and drops only the orphaned hold entry', async () => {
+      const { winnerId, loserPhone, journalId } = await mergedPair();
+      const current = prefsOf(await db('customers').where({ id: winnerId }).first());
+      await db('customers').where({ id: winnerId }).update({
+        service_contact_name: null, service_contact_phone: null, service_contact_role: null,
+        service_preferences: JSON.stringify({ ...current, unconsented_slot_phone_keys: [...current.unconsented_slot_phone_keys, '9415550188'], note: 'edited' }),
+      });
+      await undo(journalId);
+      const prefs = prefsOf(await db('customers').where({ id: winnerId }).first());
+      expect(prefs.unconsented_slot_phone_keys).toEqual(['9415550188']);
+      expect(prefs.note).toBe('edited');
+      expect(prefs.unconsented_slot_phone_keys).not.toContain(loserPhone.slice(-10));
+    });
+
+    test('slot now holds a different number: the undo goes through and that number is untouched', async () => {
+      const { winnerId, loserId, journalId } = await mergedPair();
+      await db('customers').where({ id: winnerId }).update({ service_contact_name: 'Someone', service_contact_phone: '+19415550155', service_contact_role: 'tenant' });
+      await undo(journalId);
+      const after = await db('customers').where({ id: winnerId }).first();
+      expect([after.service_contact_name, after.service_contact_phone, after.service_contact_role]).toEqual(['Someone', '+19415550155', 'tenant']);
+      expect((await db('customers').where({ id: loserId }).first()).deleted_at).toBeNull();
+    });
+
+    test('slot unchanged: the undo clears it (covered end to end above)', async () => {
+      const { winnerId, journalId } = await mergedPair();
+      await undo(journalId);
+      expect((await db('customers').where({ id: winnerId }).first()).service_contact_phone).toBeNull();
+    });
   });
 
   test('no free slot: the merge still succeeds, the phone is left, and the result says so', async () => {

@@ -38,6 +38,7 @@ const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { BILLING_DELIVERY_FIELDS, mergedBillingChannelUpdates } = require('./billing-delivery-channels');
 const { pairCustomersAtSameAddress } = require('./customer-address-match');
 const { normalizePropertyType } = require('./pricing-engine/commercial-helpers');
+const { isResidenceProperty } = require('./customer-properties');
 
 // ---------------------------------------------------------------------------
 // Normalization
@@ -538,7 +539,11 @@ function sameAddressEdges({ customers, properties = [], dismissed = new Set() })
     });
   }
   for (const prop of properties) {
-    if (!byId.has(String(prop.customer_id)) || isCommercialRow(prop)) continue;
+    // A saved property counts only when it can be where the customer LIVES
+    // (customer-properties' own residence rule): a rental, a family member's
+    // home or a client-managed address must not pair its owner with whoever
+    // actually lives there. The customer row's own address is unaffected.
+    if (!byId.has(String(prop.customer_id)) || isCommercialRow(prop) || !isResidenceProperty(prop)) continue;
     candidates.push({
       customerId: prop.customer_id, matchedVia: 'property',
       address_line1: prop.address_line1, address_line2: prop.address_line2, city: prop.city, zip: prop.zip,
@@ -555,7 +560,11 @@ function sameAddressEdges({ customers, properties = [], dismissed = new Set() })
     if (pa && pa === phone10(b.phone)) continue;
     const [lo, hi] = pairKey(a.id, b.id);
     if (dismissed.has(`${lo}:${hi}`)) continue;
-    edges.set(`${lo}:${hi}`, { ids: [lo, hi], via: { [pair.a]: pair.via.a, [pair.b]: pair.via.b } });
+    edges.set(`${lo}:${hi}`, {
+      ids: [lo, hi],
+      via: { [pair.a]: pair.via.a, [pair.b]: pair.via.b },
+      matched: { [pair.a]: pair.matched.a, [pair.b]: pair.matched.b },
+    });
   }
   return { byId, edges };
 }
@@ -578,9 +587,9 @@ function assembleSameAddressGroups({ byId, edges: allEdges }, { blockersById = n
       if (ids.includes(winner.id)) losers.push(byId.get(ids[0] === winner.id ? ids[1] : ids[0]));
     }
     const verdicts = new Map(losers.map((loser) => [loser.id, classifyPair(winner, loser, blockersById.get(loser.id) || [])]));
-    const viaOf = (loserId) => {
+    const edgeOf = (loserId) => {
       const [lo, hi] = pairKey(winner.id, loserId);
-      return edges.get(`${lo}:${hi}`).via;
+      return edges.get(`${lo}:${hi}`);
     };
     groups.push({
       kind: SAME_ADDRESS_KIND,
@@ -588,7 +597,7 @@ function assembleSameAddressGroups({ byId, edges: allEdges }, { blockersById = n
       winner: decorateSameAddress(sanitizeCustomer(winner), winner, upcomingVisits),
       candidates: losers.map((loser) => {
         const verdict = verdicts.get(loser.id);
-        const via = viaOf(loser.id);
+        const { via, matched } = edgeOf(loser.id);
         return {
           loser: decorateSameAddress(sanitizeCustomer(loser), loser, upcomingVisits),
           // Review-only by construction: green never leaves this function.
@@ -600,6 +609,9 @@ function assembleSameAddressGroups({ byId, edges: allEdges }, { blockersById = n
             names_compatible: verdict.namesOk,
             address: verdict.addrStatus,
             matched_via: { winner: via[winner.id], loser: via[loser.id] },
+            // The address each side matched on (a customer's own row or a saved
+            // property), so the page can show the premise the pair shares.
+            matched_address: { winner: matched[winner.id], loser: matched[loser.id] },
           },
         };
       }),
@@ -635,9 +647,12 @@ function decorateSameAddress(sanitized, row, upcomingVisits) {
 // pair, and one grouped upcoming-visit count. Cost is one scan of the live
 // customers table (the phone queue already does the same) plus an in-memory
 // bucket-by-house-number pairing, so it grows linearly with customers.
-async function findSameAddressGroups(database = db, { failClosedOnDismissals = false } = {}) {
+// The rows same-address detection reads. ids = null reads the whole live
+// table (the queue); an id list narrows every leg to those customers (the
+// merge-time pair recheck, which must not rescan the building under locks).
+async function readSameAddressRows(database, ids = null) {
   const customerColumns = [...DUPLICATE_GROUP_COLUMNS, 'property_type', 'waveguard_tier'].map((c) => `c.${c}`);
-  const customers = await database('customers as c')
+  const customerQuery = database('customers as c')
     .where((q) => q.where('c.active', true).orWhereNull('c.active'))
     .whereNull('c.deleted_at')
     .where((q) => q
@@ -647,22 +662,32 @@ async function findSameAddressGroups(database = db, { failClosedOnDismissals = f
           .whereRaw('p0.customer_id = c.id')
           .where('p0.active', true)
           .whereRaw("COALESCE(p0.address_line1, '') <> ''");
-      }))
-    .select(...customerColumns);
+      }));
+  if (ids) customerQuery.whereIn('c.id', ids);
+  const customers = await customerQuery.select(...customerColumns);
   let properties = [];
   try {
-    properties = await database('customer_properties as cp')
+    const propertyQuery = database('customer_properties as cp')
       .join('customers as c', 'cp.customer_id', 'c.id')
       .where('cp.active', true)
       .where((q) => q.where('c.active', true).orWhereNull('c.active'))
       .whereNull('c.deleted_at')
-      .whereRaw("COALESCE(cp.address_line1, '') <> ''")
-      .select('cp.customer_id', 'cp.address_line1', 'cp.address_line2', 'cp.city', 'cp.zip', 'cp.property_type');
+      .whereRaw("COALESCE(cp.address_line1, '') <> ''");
+    if (ids) propertyQuery.whereIn('c.id', ids);
+    // relationship / occupancy_type decide whether a saved property is where
+    // the customer lives (customer-properties' isResidenceProperty).
+    properties = await propertyQuery.select('cp.customer_id', 'cp.address_line1', 'cp.address_line2', 'cp.city', 'cp.zip',
+      'cp.property_type', 'cp.occupancy_type', 'cp.relationship');
   } catch (e) {
     // Best-effort like customer-address-match's property leg: without it only
     // customer-row addresses pair, which under-reports, never over-merges.
     logger.warn(`[customer-dedupe] same-address property leg skipped: ${e.message}`);
   }
+  return { customers, properties };
+}
+
+async function findSameAddressGroups(database = db, { failClosedOnDismissals = false } = {}) {
+  const { customers, properties } = await readSameAddressRows(database);
   const dismissed = await readDismissedPairKeys(database, { failClosedOnDismissals });
 
   // Detect first without blockers/visit counts, then fetch those for the
@@ -691,6 +716,45 @@ async function findSameAddressGroups(database = db, { failClosedOnDismissals = f
   return assembleSameAddressGroups(detected, { blockersById, upcomingVisits });
 }
 
+// The merge-time recheck for ONE same-address pair, scoped to that pair: its
+// two customers, their properties, their dismissal row and their blockers. It
+// runs under the merge's customer row locks, so it must never rescan the
+// building the way the queue read does. Same verdict shape as the phone
+// path's duplicatePairEligibility. The kept row must also still be the
+// stronger of the two by the queue's own pick (a billed row never loses to a
+// shell), the pair-level form of "the queue's winner".
+async function sameAddressPairEligibility(winnerId, loserId, database = db) {
+  const gone = { eligible: false, code: 'not_in_queue', reason: 'Pair is no longer in the duplicate queue', candidate: null };
+  const [a, b] = pairKey(winnerId, loserId);
+  let dismissals;
+  try {
+    dismissals = await database('customer_duplicate_dismissals').where({ customer_id_a: a, customer_id_b: b }).select('reason');
+  } catch (e) {
+    logger.warn(`[customer-dedupe] same-address pair recheck: dismissals unreadable, refusing: ${e.message}`);
+    return { eligible: false, code: 'dismissals_unreadable', reason: 'Operator dismissal verdicts could not be read — refusing to treat this pair as mergeable right now', candidate: null };
+  }
+  // An undo-merge sentinel does not hide the pair from a human (manual path).
+  if (dismissals.some((d) => d.reason !== UNDO_MERGE_DISMISSAL_REASON)) return gone;
+  const { customers, properties } = await readSameAddressRows(database, [winnerId, loserId]);
+  const detected = sameAddressEdges({ customers, properties });
+  if (!detected.edges.has(`${a}:${b}`)) return gone;
+  const winner = detected.byId.get(String(winnerId));
+  const loser = detected.byId.get(String(loserId));
+  const blockersById = await batchAutoBlockers(database, [winner, loser]);
+  const businessBoost = (r) => 16 * (blockersById.get(r.id) || [])
+    .filter((x) => x !== 'stripe_customer_id' && x !== 'portal_login').length;
+  if (pickWinner([winner, loser], businessBoost).id !== winner.id) return gone;
+  const verdict = classifyPair(winner, loser, blockersById.get(loser.id) || []);
+  const candidate = { tier: verdict.tier === 'red' ? 'red' : 'yellow', reasons: [SAME_ADDRESS_REASON, ...verdict.reasons] };
+  if (candidate.tier === 'red') {
+    return { eligible: false, code: 'red_pair', reason: 'This pair looks like two different people and cannot be merged from the queue', candidate };
+  }
+  if (candidate.reasons.some((r) => r.startsWith('address_'))) {
+    return { eligible: false, code: 'address_conflict', reason: "This duplicate has a different service address — use 'Merge + keep address' so the address isn't lost", candidate };
+  }
+  return { eligible: true, code: 'eligible', reason: null, candidate };
+}
+
 // Canonical duplicate-eligibility recheck — the SINGLE place that answers
 // "is this exact (winnerId, loserId) pair still a live, mergeable duplicate
 // candidate right now?" Originally inlined in admin-customer-duplicates.js
@@ -713,13 +777,12 @@ async function findSameAddressGroups(database = db, { failClosedOnDismissals = f
 // automatic sweep's under-lock recheck is lockedPairAutoEligibility, which
 // refuses on that sentinel and never rebuilds the queue.
 async function duplicatePairEligibility(winnerId, loserId, database = db, { kind = 'phone' } = {}) {
+  // kind 'same_address' (admin route, gate on) answers from the pair-scoped
+  // same-address recheck; every other caller keeps the phone queue.
+  if (kind === SAME_ADDRESS_KIND) return sameAddressPairEligibility(winnerId, loserId, database);
   let groups;
   try {
-    // kind 'same_address' (admin route, gate on) reads the same-address queue
-    // instead of the phone queue; every other caller keeps the phone queue.
-    groups = kind === SAME_ADDRESS_KIND
-      ? await findSameAddressGroups(database, { failClosedOnDismissals: true })
-      : await findDuplicateGroups(database, { failClosedOnDismissals: true });
+    groups = await findDuplicateGroups(database, { failClosedOnDismissals: true });
   } catch (e) {
     logger.warn(`[customer-dedupe] duplicatePairEligibility: dismissals unreadable, refusing: ${e.message}`);
     return { eligible: false, code: 'dismissals_unreadable', reason: 'Operator dismissal verdicts could not be read — refusing to treat this pair as mergeable right now', candidate: null };
@@ -5375,14 +5438,25 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     }
     // A merged-away person's phone this merge carried into a contact slot is
     // held out of texting by the winner's service_preferences / consent-stamp
-    // state. If that slot was edited since the merge the undo would keep the
-    // slot (frozen above) yet still restore the winner's old stamp and
-    // preferences blob — lifting the hold from a phone that stays on the
-    // customer. Refuse that partial restore (409, zero writes) instead.
+    // state. If the number is STILL on the kept customer in a contact that
+    // changed since the merge (edited name/role, or copied to another slot),
+    // the undo would keep that contact (frozen above) yet still restore the
+    // winner's old stamp and preferences blob — lifting the hold from a phone
+    // that stays on the customer: refuse that partial restore (409, zero
+    // writes). If the number is gone (slot emptied, or now another number)
+    // there is nothing to protect: the undo proceeds and leaves that slot
+    // alone, and the number's now-orphaned hold entry is dropped below.
     const phoneCarry = recorded.loser_phone_carry;
-    if (phoneCarry && phoneCarry.status === 'carried' && phoneCarry.slot >= 1 && phoneCarry.slot <= 3
-      && ATOMIC_FIELD_GROUPS[phoneCarry.slot].fields.some((f) => frozenGroupFields.has(f))) {
-      refuse("The merged-in phone's contact slot on the kept customer was edited since the merge — undoing now would lift its text hold from a phone that stays on that customer; restore or remove that contact first, then revert");
+    const carryActive = !!(phoneCarry && phoneCarry.status === 'carried' && phoneCarry.phone_key
+      && phoneCarry.slot >= 1 && phoneCarry.slot <= 3);
+    const carriedSlotFrozen = carryActive
+      && ATOMIC_FIELD_GROUPS[phoneCarry.slot].fields.some((f) => frozenGroupFields.has(f));
+    const carriedNumberOnWinner = (onlySlot) => carryActive && [1, 2, 3].some((n) =>
+      (onlySlot === undefined || n === onlySlot)
+      && phone10(winner[ATOMIC_FIELD_GROUPS[n].fields[1]]) === phoneCarry.phone_key);
+    if (carryActive && ((carriedSlotFrozen && carriedNumberOnWinner())
+      || [1, 2, 3].some((n) => n !== phoneCarry.slot && carriedNumberOnWinner(n)))) {
+      refuse("The merged-in phone number is still saved on the kept customer in a contact that was edited since the merge (or in another contact slot), and undoing now would lift its text hold. Remove that number from the kept customer's contacts, then revert");
     }
     for (const [field, value] of Object.entries(backfills)) {
       if (REVERT_BACKFILL_CLEAR_EXCLUDED.has(field)) continue;
@@ -5549,6 +5623,20 @@ async function revertMerge({ journalId, performedBy, performedById }) {
         winnerPatch[field] = prior;
       } else {
         skipped.push({ key: `customers.${field}`, reason: 'winner_value_changed_since_merge' });
+      }
+    }
+    // Carried number gone from the kept customer (slot emptied or reused for a
+    // different number): drop its hold entry so it does not linger pointing at
+    // nothing — unless the restore above already rewrote the blob wholesale.
+    if (carriedSlotFrozen && !carriedNumberOnWinner()
+      && !Object.prototype.hasOwnProperty.call(winnerPatch, 'service_preferences')) {
+      let currentPrefs = winner.service_preferences;
+      if (typeof currentPrefs === 'string') {
+        try { currentPrefs = JSON.parse(currentPrefs); } catch { currentPrefs = null; }
+      }
+      const heldKeys = currentPrefs && Array.isArray(currentPrefs.unconsented_slot_phone_keys) ? currentPrefs.unconsented_slot_phone_keys : [];
+      if (heldKeys.includes(phoneCarry.phone_key)) {
+        winnerPatch.service_preferences = { ...currentPrefs, unconsented_slot_phone_keys: heldKeys.filter((k) => k !== phoneCarry.phone_key) };
       }
     }
     // Inherited ADDRESS clears/restores guard their unstamped visits (r16):

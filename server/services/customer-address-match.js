@@ -26,7 +26,7 @@
 // best-effort (environments without the table skip it); the primary leg's
 // errors propagate so callers choose fail-soft or fail-loud.
 const logger = require('./logger');
-const { sameStreetAddress, canonicalizeLeadingUnit } = require('./estimator-engine/address-compare');
+const { sameStreetAddress, addressPremiseKey, canonicalizeLeadingUnit } = require('./estimator-engine/address-compare');
 
 const PER_LEG_LIMIT = 50;
 
@@ -105,19 +105,32 @@ async function findCustomersAtAddress(database, address, { excludeCustomerId = n
  * Pure. `candidates` = [{ customerId, matchedVia, address_line1, address_line2,
  * city, zip }] — one row per address a customer is known at. Returns one entry
  * per unordered CUSTOMER pair with at least one address at the same premise:
- * `{ a, b, via: { a: matchedVia, b: matchedVia } }` (a < b as strings). Rows
- * with no street line or no leading house number never pair. No I/O.
+ * `{ a, b, via: { a, b }, matched: { a: {...address, via}, b: {...} } }` (a < b
+ * as strings; `matched` is the address row each side matched on). Rows with no
+ * street line never pair. No I/O.
+ *
+ * Linear in the rows: candidates are bucketed by the comparator's own premise
+ * key (house number + normalized street + unit, `addressPremiseKey`, from the
+ * same parse `sameStreetAddress` uses), so a 300-unit building is 300 buckets
+ * of one, not 45,000 comparisons. Only rows sharing a key are confirmed
+ * pairwise with the comparator (which still decides ZIP and city).
  */
 function pairCustomersAtSameAddress(candidates) {
   const buckets = new Map();
   for (const c of candidates) {
     if (!c || !c.customerId || !c.address_line1) continue;
     const text = candidateAddressString(c);
-    const houseNumber = houseNumberOf(text);
-    if (!houseNumber) continue;
-    const key = houseNumber.toLowerCase();
+    // No leading house number = no parseable street address (PO boxes, bare
+    // street names): never a household candidate.
+    const key = houseNumberOf(text) ? addressPremiseKey(text) : null;
+    if (!key) continue;
     if (!buckets.has(key)) buckets.set(key, []);
-    buckets.get(key).push({ customerId: String(c.customerId), matchedVia: c.matchedVia || 'primary', text });
+    buckets.get(key).push({
+      customerId: String(c.customerId),
+      matchedVia: c.matchedVia || 'primary',
+      text,
+      address: { address_line1: c.address_line1, address_line2: c.address_line2 || null, city: c.city || null, zip: c.zip || null },
+    });
   }
   const pairs = new Map();
   for (const bucket of buckets.values()) {
@@ -130,7 +143,12 @@ function pairCustomersAtSameAddress(candidates) {
         const pairId = `${lo.customerId}:${hi.customerId}`;
         if (pairs.has(pairId)) continue;
         if (!sameStreetAddress(x.text, y.text, { requireExactUnit: true })) continue;
-        pairs.set(pairId, { a: lo.customerId, b: hi.customerId, via: { a: lo.matchedVia, b: hi.matchedVia } });
+        pairs.set(pairId, {
+          a: lo.customerId,
+          b: hi.customerId,
+          via: { a: lo.matchedVia, b: hi.matchedVia },
+          matched: { a: { ...lo.address, via: lo.matchedVia }, b: { ...hi.address, via: hi.matchedVia } },
+        });
       }
     }
   }

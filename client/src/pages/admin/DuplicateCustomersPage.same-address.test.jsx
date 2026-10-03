@@ -132,3 +132,66 @@ it("a failed same-address read shows its own error and leaves the phone groups",
   expect(await screen.findByText("Could not load same-address duplicates")).toBeInTheDocument();
   expect(screen.getByText("Shared phone")).toBeInTheDocument();
 });
+
+const propertyMatch = {
+  sameAddressGroups: [{
+    kind: "same_address",
+    winner: {
+      id: "owner", first_name: "Owner", last_name: "Example", phone: "+19415550101",
+      address_line1: "999 Elsewhere Rd", city: "Bradenton", zip: "34202",
+    },
+    candidates: [{
+      customer: {
+        id: "tenant", first_name: "Tenant", last_name: "Sample", phone: "+19415550102",
+        address_line1: "100 Example Loop", city: "Sarasota", zip: "34231",
+      },
+      tier: "red",
+      reasons: ["same_address_different_phone", "address_conflict"],
+      evidence: {
+        kind: "same_address",
+        matched_address: {
+          winner: { address_line1: "100 Example Loop", address_line2: null, city: "Sarasota", zip: "34231", via: "property" },
+          loser: { address_line1: "100 Example Loop", address_line2: null, city: "Sarasota", zip: "34231", via: "primary" },
+        },
+      },
+    }],
+  }],
+};
+
+it("a pair matched through a saved property shows that matched address under Same address and labels the primary address", async () => {
+  mockApi({ list: { groups: [], ...propertyMatch } });
+  renderPage();
+  const label = await screen.findByText("Same address");
+  expect(label.parentElement).toHaveTextContent("Same address100 Example Loop, Sarasota, 34231");
+  expect(screen.queryByText("999 Elsewhere Rd, Bradenton, 34202", { selector: "span" })).toBeNull();
+  expect(screen.getByText("Matched at 100 Example Loop, Sarasota, 34231 (saved property)")).toBeInTheDocument();
+  expect(screen.getByText(/Primary address:\s*999 Elsewhere Rd, Bradenton, 34202/)).toBeInTheDocument();
+  // The occupant matched on its own address: no property wording on that line.
+  expect(screen.getAllByText(/Matched at/)).toHaveLength(1);
+});
+
+it("a candidate the kept customer matched at a different address says so", async () => {
+  const list = JSON.parse(JSON.stringify(propertyMatch));
+  list.sameAddressGroups[0].candidates.push({
+    customer: { id: "third", first_name: "Third", last_name: "Example", phone: "+19415550103", address_line1: "5 Other Ct", city: "Sarasota", zip: "34231" },
+    tier: "yellow",
+    reasons: ["same_address_different_phone"],
+    evidence: {
+      matched_address: {
+        winner: { address_line1: "5 Other Ct", address_line2: null, city: "Sarasota", zip: "34231", via: "primary" },
+        loser: { address_line1: "5 Other Ct", address_line2: null, city: "Sarasota", zip: "34231", via: "primary" },
+      },
+    },
+  });
+  mockApi({ list: { groups: [], ...list } });
+  renderPage();
+  expect(await screen.findByText(/Kept customer matched this one at 5 Other Ct, Sarasota, 34231/)).toBeInTheDocument();
+});
+
+it("phone-group cards render exactly as before (no matched-address wording)", async () => {
+  mockApi({ list: phoneOnly });
+  renderPage();
+  await screen.findByText("Shared phone");
+  expect(screen.queryByText(/Matched at/)).toBeNull();
+  expect(screen.queryByText(/Primary address/)).toBeNull();
+});

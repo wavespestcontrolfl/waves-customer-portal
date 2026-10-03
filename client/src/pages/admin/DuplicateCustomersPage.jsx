@@ -78,7 +78,14 @@ function phoneCarryResult(carry, customer) {
   return { toast: "Merged" };
 }
 
-function CustomerLine({ customer, isWinner, showPhone = false }) {
+function fmtAddress(addr) {
+  return [addr?.address_line1, addr?.address_line2, addr?.city, addr?.zip].filter(Boolean).join(", ");
+}
+
+// matched (same-address cards only): the address this customer matched on —
+// their own row or a saved property. A saved-property match leads with that
+// address and labels the primary address as such.
+function CustomerLine({ customer, isWinner, showPhone = false, matched = null }) {
   return (
     <div className="min-w-0">
       <div className="flex flex-wrap items-center gap-2">
@@ -97,7 +104,13 @@ function CustomerLine({ customer, isWinner, showPhone = false }) {
           {[fmtPhone(customer.phone) || "No phone", visitsText(customer.upcoming_visits)].filter(Boolean).join(" · ")}
         </div>
       )}
+      {matched && matched.via === "property" && (
+        <div className="break-words text-ui-body text-zinc-900">
+          Matched at {fmtAddress(matched)} (saved property)
+        </div>
+      )}
       <div className="break-words text-ui-body text-ink-secondary">
+        {matched && matched.via === "property" ? "Primary address: " : ""}
         {[customer.address_line1, customer.city, customer.zip].filter(Boolean).join(", ") || "No address on file"}
       </div>
       <div className="break-words text-ui-body text-ink-secondary">
@@ -173,14 +186,17 @@ export default function DuplicateCustomersPage() {
 
   const pendingCount = [...groups, ...sameAddressGroups].reduce((n, g) => n + g.candidates.length, 0);
 
-    const renderGroupCard = (group, sameAddress = false) => (
+    const renderGroupCard = (group, sameAddress = false) => {
+      // Same-address cards: the premise the pair matched on, per member.
+      const keptMatched = sameAddress ? (group.candidates[0]?.evidence?.matched_address?.winner || null) : null;
+      return (
       <Card key={sameAddress ? `same-address:${group.winner.id}` : group.winner.id}>
         <CardBody>
           {sameAddress ? (
             <div className="mb-2 flex items-center gap-2">
               <span className="text-ui-caption font-medium text-ink-secondary">Same address</span>
               <span className="break-words text-ui-body font-medium text-zinc-900">
-                {[group.winner.address_line1, group.winner.address_line2, group.winner.city, group.winner.zip].filter(Boolean).join(", ") || "Address on a saved property"}
+                {(keptMatched ? fmtAddress(keptMatched) : [group.winner.address_line1, group.winner.address_line2, group.winner.city, group.winner.zip].filter(Boolean).join(", ")) || "Address on a saved property"}
               </span>
             </div>
           ) : (
@@ -193,11 +209,13 @@ export default function DuplicateCustomersPage() {
           )}
 
           <div className="mb-3 rounded-sm border-hairline border-zinc-200 bg-zinc-50 px-3 py-2">
-            <CustomerLine customer={group.winner} isWinner showPhone={sameAddress} />
+            <CustomerLine customer={group.winner} isWinner showPhone={sameAddress} matched={keptMatched} />
           </div>
 
           <div className="grid gap-2">
-            {group.candidates.map(({ customer, tier, reasons }) => {
+            {group.candidates.map(({ customer, tier, reasons, evidence }) => {
+              const matchedAddress = sameAddress ? (evidence?.matched_address?.loser || null) : null;
+              const keptHere = sameAddress ? (evidence?.matched_address?.winner || null) : null;
               const acting = actionKey.startsWith(`${customer.id}:`);
               // Every positive address disagreement (street, unit, ZIP,
               // city) is a potential second property worth preserving.
@@ -212,7 +230,13 @@ export default function DuplicateCustomersPage() {
                       this column to slivers; md:basis-auto restores the
                       side-by-side row once there is width for both */}
                   <div className="min-w-0 basis-full flex-1 md:basis-auto">
-                    <CustomerLine customer={customer} showPhone={sameAddress} />
+                    <CustomerLine customer={customer} showPhone={sameAddress} matched={matchedAddress} />
+                    {keptHere && keptMatched && fmtAddress(keptHere) !== fmtAddress(keptMatched) && (
+                      <div className="break-words text-ui-body text-ink-secondary">
+                        Kept customer matched this one at {fmtAddress(keptHere)}
+                        {keptHere.via === "property" ? " (saved property)" : ""}
+                      </div>
+                    )}
                     <div className="mt-1 flex flex-wrap items-center gap-1.5">
                       <Badge tone={TIER_TONE[tier] || "neutral"}>{TIER_LABEL[tier] || tier}</Badge>
                       {reasons.map((reason) => (
@@ -297,7 +321,8 @@ export default function DuplicateCustomersPage() {
           </div>
         </CardBody>
       </Card>
-    );
+      );
+    };
 
   return (
     <UiSurface density="comfortable" className="mx-auto max-w-[1300px]">
