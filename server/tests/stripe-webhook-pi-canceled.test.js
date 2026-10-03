@@ -110,6 +110,24 @@ beforeEach(() => {
   resolveFailedInvoiceSavedCardChargeAttempt.mockResolvedValue(true);
 });
 
+// B16: billing-cron cancels the live intent of an autopay charge parked on card authentication.
+// The parked failed row (stripe.js stamps metadata.requires_action) is a debt still owed, so the
+// canceled event must leave it 'failed' (failed-payments.js counts only failed rows); every other
+// non-terminal row is flipped to 'canceled' exactly as before.
+test('B16: the canceled update skips a failed row parked on card authentication and keeps the ordinary flip', async () => {
+  await handleCanceled({ id: 'pi_sca_1', metadata: {} });
+  expect(paymentUpdates()).toHaveLength(1);
+  const update = paymentUpdates()[0];
+  expect(update.patch).toEqual({ status: 'canceled' });
+  const guard = update.wheres.find((w) => w.whereRaw);
+  expect(guard.whereRaw[0]).toMatch(/NOT \(status = 'failed' AND COALESCE\(metadata->>'requires_action', ''\) = 'true'\)/);
+  // the existing exclusions and the PI scope are unchanged
+  expect(update.wheres).toContainEqual({ whereNotIn: ['status', ['paid', 'refunded', 'disputed']] });
+  expect(update.wheres).toContainEqual({ stripe_payment_intent_id: 'pi_sca_1' });
+  // an invoice-less autopay row has nothing else to revert
+  expect(invoiceReverts()).toHaveLength(0);
+});
+
 test('single-invoice ACH PI canceled after processing: payment canceled, invoice reopened and unstamped', async () => {
   mockState.stampedInvoices = [{ ...STAMPED }];
   await handleCanceled({ id: 'pi_ach_1', metadata: {} });

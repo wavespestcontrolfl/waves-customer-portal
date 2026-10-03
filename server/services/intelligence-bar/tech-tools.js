@@ -15,6 +15,7 @@ const { formatAddress } = require('../../utils/address-normalizer');
 const { getProtocol: readProtocol } = require('../protocol-reader');
 const { openInvoiceFacts } = require('../visit-context/balance');
 const { baseQuantityUnit, normalizeInventoryUnit } = require('../inventory-units');
+const { loadActiveAliasRows, activeProductsForAlias } = require('../purchase-receipts/product-matcher');
 
 const TECH_TOOLS = [
   {
@@ -58,7 +59,8 @@ Use for: "what products did we use on the Henderson property last time?", "servi
   {
     name: 'get_product_info',
     description: `Look up product information: active ingredient, MOA group, label rate, mixing instructions, target pests, safety notes.
-Use for: "what's the label rate for Demand CS?", "mixing ratio for Bifen IT", "what MOA group is Celsius?"`,
+Use for: "what's the label rate for Demand CS?", "mixing ratio for Bifen IT", "what MOA group is Celsius?"
+If it returns candidates, ask which product is meant. If it returns rate_note, give no rate.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -419,9 +421,56 @@ async function getServiceHistory(input, techId = null) {
 // A unit whose base is mL ("ml", "ml/gal", "ml/inch dbh").
 const isMlUnit = (unit) => normalizeInventoryUnit(baseQuantityUnit(unit)) === 'ml';
 
+// Several catalog rows can share a name fragment ("Alpine", "Advion"), and
+// retired rows stay in the table, so the first ILIKE hit could be the wrong
+// product or a retired one with no rate. An exact name wins; one active match
+// is used; several come back as candidates for the model to ask about, never
+// a guess.
+const MAX_PRODUCT_CANDIDATES = 8;
+
+function pickProduct(rows, productName, aliasProducts = []) {
+  const target = String(productName || '').trim().toLowerCase();
+  const active = rows.filter((row) => row.active !== false);
+  const exact = active.find((row) => String(row.name || '').trim().toLowerCase() === target);
+  if (exact) return { product: exact };
+  // A retired name kept as an alias ("Demand CS Insecticide") resolves to
+  // its active keeper before any name-fragment guess or retired fallback.
+  if (aliasProducts.length === 1) return { product: aliasProducts[0] };
+  const pool = aliasProducts.length > 1 ? aliasProducts : active;
+  if (pool.length === 1) return { product: pool[0] };
+  if (pool.length > 1) {
+    return {
+      result: {
+        ambiguous: true,
+        message: `Several products match "${productName}". Ask which one before giving any rate or mix.`,
+        candidates: pool.slice(0, MAX_PRODUCT_CANDIDATES).map((row) => row.name),
+        more_matches: pool.length > MAX_PRODUCT_CANDIDATES ? pool.length - MAX_PRODUCT_CANDIDATES : undefined,
+      },
+    };
+  }
+  if (rows.length) {
+    return {
+      result: {
+        error: `"${productName}" is not in the active product catalog. Check the current label before applying.`,
+        retired_matches: rows.slice(0, MAX_PRODUCT_CANDIDATES).map((row) => row.name),
+      },
+    };
+  }
+  return { result: { error: `Product "${productName}" not found` } };
+}
+
+const isPresent = (value) => value != null && value !== '';
+
 async function getProductInfo(productName, { forTech = false } = {}) {
-  const product = await db('products_catalog').whereILike('name', `%${productName}%`).first();
-  if (!product) return { error: `Product "${productName}" not found` };
+  // Every match is read: an exact name or a second active match beyond a
+  // row cap would otherwise be missed. Only the candidate list is capped.
+  const rows = await db('products_catalog')
+    .whereILike('name', `%${productName}%`)
+    .orderBy('name');
+  // Aliases resolve through the purchase matcher's own rule.
+  const aliasProducts = activeProductsForAlias(productName, await loadActiveAliasRows(db));
+  const { product, result } = pickProduct(rows || [], productName, aliasProducts);
+  if (!product) return result;
 
   // Label/SDS-derived safety fields so the model states grounded PPE / re-entry
   // instead of recalling them from training memory. Null fields are omitted so
@@ -453,11 +502,12 @@ async function getProductInfo(productName, { forTech = false } = {}) {
     sds_url: product.sds_url || undefined,
   };
 
-  // For a technician, a label rate the catalog keeps in mL is left out, so
-  // the tech is sent to the label (owner ruling: nothing a tech reads is in
-  // mL; the completion forms leave the same rates blank). Every other rate,
-  // and every rate for an admin workflow, reads as stored.
-  const mlLabelRate = forTech && isMlUnit(product.default_unit);
+  // For a technician, a label rate is left out when the catalog keeps it in
+  // mL (owner ruling: nothing a tech reads is in mL; the completion forms
+  // leave the same rates blank) or when the label is not verified (the job
+  // card's contract), so the tech is sent to the label. Every rate for an
+  // admin workflow reads as stored.
+  const withheldRate = forTech && (isMlUnit(product.default_unit) || !product.label_verified_at);
 
   return {
     name: product.name,
@@ -466,8 +516,14 @@ async function getProductInfo(productName, { forTech = false } = {}) {
     moa_group: product.moa_group,
     formulation: product.formulation,
     container_size: product.container_size,
-    default_rate: mlLabelRate ? null : product.default_rate,
-    default_unit: mlLabelRate ? null : product.default_unit,
+    default_rate: withheldRate ? null : product.default_rate,
+    default_unit: withheldRate ? null : product.default_unit,
+    // A blank rate must never invite a number from memory. Per-1,000 sq ft
+    // catalog rates are not returned here: some are planning figures, and
+    // their verification stamp does not prove a label source.
+    rate_note: withheldRate || !isPresent(product.default_rate)
+      ? 'No rate available here. Check the current label before mixing.'
+      : undefined,
     sku: product.sku,
     safety,
   };

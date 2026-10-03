@@ -45,6 +45,17 @@ function printReport(since, until, f) {
       `    with a slot that did not resolve ${f.offers.with_unresolved_slot}`,
     );
   }
+  if (f.decisions) {
+    const fmt = (o) => Object.keys(o).sort().map((k) => `${k} ${o[k]}`).join(', ') || 'none';
+    lines.push(
+      `  Decide step (shadow) decisions     ${f.decisions.total} texts`,
+      `    distinct visit-move offers       ${f.decisions.move_offers_decided} (the exit bar's sample: 40 needed)`,
+      `    by outcome                       ${fmt(f.decisions.by_outcome)}`,
+      `    refused because                  ${fmt(f.decisions.refusals)}`,
+      `    would-move then moved there <48h ${f.decisions.would_move_matched} of ${f.decisions.would_move_matured} matured (precision; logged moves only)`,
+      `    real accepts it caught           ${f.decisions.recall.caught} of ${f.decisions.recall.real_accepts} (recall: offers whose visit moved into an offered time <48h)`,
+    );
+  }
   console.log(lines.join('\n'));
 }
 

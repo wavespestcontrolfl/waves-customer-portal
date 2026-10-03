@@ -102,6 +102,12 @@ test('the scheduled-service scan covers every invoice in the edited member\'s pa
       q.select = jest.fn(() => 'PACKET_ITEMS_SUBQUERY');
       return q;
     }
+    if (table === 'service_records') {
+      const q = {};
+      q.whereIn = jest.fn(() => q);
+      q.select = jest.fn(() => 'RECORD_VISIT_SUBQUERY');
+      return q;
+    }
     const q = {};
     ['where', 'whereIn', 'whereNotIn', 'whereNotNull', 'orderBy'].forEach((m) => {
       q[m] = jest.fn((...args) => { seen.push([m, args]); return q; });
@@ -118,8 +124,15 @@ test('the scheduled-service scan covers every invoice in the edited member\'s pa
   // combined invoice anchored to another member of the same packet.
   const grouped = seen.find(([m, args]) => m === 'where' && typeof args[0] === 'function');
   expect(grouped).toBeDefined();
-  const sub = { whereIn: jest.fn(() => sub), orWhereIn: jest.fn(() => sub) };
+  const recordLeg = { whereNull: jest.fn(() => recordLeg), whereIn: jest.fn(() => recordLeg) };
+  const sub = {
+    whereIn: jest.fn(() => sub), orWhereIn: jest.fn(() => sub),
+    orWhere: jest.fn((build) => { build(recordLeg); return sub; }),
+  };
   grouped[1][0](sub);
   expect(sub.whereIn).toHaveBeenCalledWith('scheduled_service_id', ['svc-1']);
   expect(sub.orWhereIn).toHaveBeenCalledWith('visit_completion_packet_id', 'PACKET_ITEMS_SUBQUERY');
+  // …and the invoice minted from the service record alone (no visit link of its own).
+  expect(recordLeg.whereNull).toHaveBeenCalledWith('scheduled_service_id');
+  expect(recordLeg.whereIn).toHaveBeenCalledWith('service_record_id', 'RECORD_VISIT_SUBQUERY');
 });

@@ -70,11 +70,19 @@ const TECHNICIAN_ALLOW_LIST = [
   // the router's.
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/admin\/intelligence-bar(\/.*)?$/ },
   { bucket: 'own-visits', methods: READ, pattern: /^\/api\/admin\/(services|technicians|discounts)$/ },
+  // Whether multi-discount stacking is live: a global feature-flag read (no
+  // customer data) that the checkout and appointment discount pickers boot
+  // from; it fails closed to single-discount behaviour on a 403.
+  { bucket: 'own-visits', methods: READ, pattern: /^\/api\/admin\/discounts\/stacking$/ },
   // Not on the list: estimate reads (schedule-source returns lead PII and
   // pricing with no visit to scope by) and the estimator (its /verify persists
   // field overrides; the Field Estimator UI is admin-only). Codex #5568 r3.
   { bucket: 'own-visits', methods: READ, pattern: /^\/api\/admin\/protocols(\/.*)?$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/admin\/protocols\/job-card(\/.*)?$/ },
+  // Neighborhood gate codes from a visit (owner 2026-10-03): add a code that
+  // worked, or report one wrong. The router pins both to a visit on the
+  // technician's own route; the directory itself stays admin-only.
+  { bucket: 'own-visits', methods: ['POST'], pattern: /^\/api\/admin\/neighborhood-access\/visits\/[^/]+\/entries(\/[^/]+\/wrong)?$/ },
   // Pay at the visit (owner: card on file, pay after the first visit).
   { bucket: 'own-visits', methods: READ, pattern: /^\/api\/admin\/invoices\/[^/]+$/ },
   { bucket: 'own-visits', methods: ['POST'], pattern: /^\/api\/admin\/invoices\/[^/]+\/(charge-card|charge-card-quote|void)$/ },
@@ -103,6 +111,9 @@ const TECHNICIAN_ALLOW_LIST = [
   { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/communications\/(log|unread-count|link-library|ai-auto-reply-status|customer-link|agent-draft)$/ },
   { bucket: 'own-texts', methods: ['POST'], pattern: /^\/api\/admin\/communications\/(sms|messages\/read|reschedule-link|reservice-link|send-prep|rewrite-sms|ai-draft|customer-link)$/ },
   { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/communications\/blocked-numbers$/ },
+  // The line a text to this number leaves from (the composer's server-chosen
+  // sender); it returns one of the business's own lines, never customer data.
+  { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/communications\/sender$/ },
   // The single-draft read the SMS tab uses (the router scopes it to the
   // technician's customers); list and stats are admin-only in the router.
   { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/drafts\/[^/]+$/ },
@@ -138,6 +149,14 @@ const TECHNICIAN_ALLOW_LIST = [
   // Equipment and inventory: read only.
   { bucket: 'equipment-read', methods: READ, pattern: /^\/api\/admin\/equipment(-systems|-maintenance)?(\/.*)?$/ },
   { bucket: 'equipment-read', methods: READ, pattern: /^\/api\/admin\/inventory(\/.*)?$/ },
+  // Two field writes a technician keeps (owner 2026-10-03). The job card's
+  // "Order more" files a restock REQUEST: the route records the requesting
+  // technician (created_by), dedupes against a live request and never moves
+  // stock. Receiving, marking ordered, cancelling and stock adjustments stay
+  // admin-only.
+  { bucket: 'own-visits', methods: ['POST'], pattern: /^\/api\/admin\/inventory\/waveguard-forecast\/[^/]+\/restock-request$/ },
+  // Sprayer calibration stays admin-only for now (owner 2026-10-03: not set
+  // up yet; revisit when it is).
 ];
 
 function normalizePath(req) {

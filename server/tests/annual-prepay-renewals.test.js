@@ -8382,6 +8382,176 @@ describe('restampUnstampedActiveTerms — the nightly leg for active terms a fai
       expect(alert[2]).toMatch(/2026-06-15, 2026-09-15/);
     });
 
+    describe('B09: a refresh of an ACTIVATED term never seeds a past-dated visit (default floor = today)', () => {
+      // Quarterly term, linked visits at Dec 15 only: the Jun 15 and Sep 15
+      // slots were cancelled on their day and never rebooked; Mar 15 is the
+      // future slot with no visit. Checked on 2027-01-10 by a caller that
+      // passes NO floor — a schedule edit, the recurring-alerts page, a
+      // notice, a prepay-invoice sync: the cancelled past slots used to come
+      // back as pending visits dated in the past, stamped prepaid.
+      const pinToday = (iso) => jest.useFakeTimers({
+        now: new Date(iso),
+        doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval', 'queueMicrotask', 'hrtime', 'performance'],
+      });
+      const TODAY = '2027-01-10T17:00:00Z';
+      afterEach(() => { jest.useRealTimers(); });
+      const PAST_SLOT_ALERT = (calls) => calls.filter((c) => c[3]?.metadata?.reason === 'restamp_past_slot_unscheduled');
+      const refreshQueues = ({ marchInsert, alreadyAlerted = false }) => ({
+        scheduled_services: [
+          query({ columnInfo: SS_COLS }),
+          query({ rows: [other('dec', '2026-12-15')] }),
+          query({ first: { id: 'linked-earlier' } }),
+          ...(marchInsert ? [marchInsert] : []),
+          // detach / attach / stamp / snapshot reads.
+          ...Array.from({ length: 8 }, () => query({ rows: [other('dec', '2026-12-15')] })),
+        ],
+        annual_prepay_terms: [query({ returning: [{ ...SEED_TERM, status: 'active' }] })],
+        notifications: [query({ first: alreadyAlerted ? { id: 'standing-alert' } : undefined })],
+      });
+
+      test('ensureCoverageRowsForTerm with no floor given: past slots are reported, never inserted; the future slot still is', async () => {
+        pinToday(TODAY);
+        const marchInsert = inserted('svc-mar', '2027-03-15');
+        setDbQueues({
+          scheduled_services: [
+            query({ columnInfo: SS_COLS }),
+            query({ rows: [other('dec', '2026-12-15')] }),
+            query({ first: { id: 'linked-earlier' } }),
+            marchInsert,
+          ],
+        });
+
+        const result = await _private.ensureCoverageRowsForTerm({ ...SEED_TERM });
+
+        expect(result.unseededPastDates).toEqual(['2026-06-15', '2026-09-15']);
+        expect(result.createdCount).toBe(1);
+        expect(marchInsert.insert).toHaveBeenCalledTimes(1);
+        expect(marchInsert.insert).toHaveBeenCalledWith(expect.objectContaining({ scheduled_date: '2027-03-15' }));
+      });
+
+      test('a plain refreshTermSnapshot (no options) seeds no past visit and files ONE office alert naming the slots', async () => {
+        pinToday(TODAY);
+        const { notifyAdmin } = require('../services/notification-service');
+        notifyAdmin.mockClear();
+        const marchInsert = inserted('svc-mar', '2027-03-15');
+        setDbQueues(refreshQueues({ marchInsert }));
+
+        await AnnualPrepayRenewals.refreshTermSnapshot({ ...SEED_TERM, status: 'active' }, db);
+
+        // Only the future slot was inserted; no insert was dated before today.
+        expect(marchInsert.insert).toHaveBeenCalledTimes(1);
+        expect(marchInsert.insert).toHaveBeenCalledWith(expect.objectContaining({ scheduled_date: '2027-03-15' }));
+        const alerts = PAST_SLOT_ALERT(notifyAdmin.mock.calls);
+        expect(alerts).toHaveLength(1);
+        expect(alerts[0][2]).toMatch(/2026-06-15, 2026-09-15/);
+        expect(alerts[0][2]).toMatch(/book a replacement|book replacements/);
+      });
+
+      test('the schedule-edit path (refreshActiveTermsForCustomer) is floored the same way', async () => {
+        pinToday(TODAY);
+        const { notifyAdmin } = require('../services/notification-service');
+        notifyAdmin.mockClear();
+        const marchInsert = inserted('svc-mar', '2027-03-15');
+        const queues = refreshQueues({ marchInsert });
+        // The cancel_disposition column probe, then the customer's live terms.
+        queues.annual_prepay_terms.unshift(query({ columnInfo: {} }), query({ rows: [{ ...SEED_TERM, status: 'active' }] }));
+        setDbQueues(queues);
+
+        await AnnualPrepayRenewals.refreshActiveTermsForCustomer('customer-1', db);
+
+        expect(marchInsert.insert).toHaveBeenCalledTimes(1);
+        expect(marchInsert.insert).toHaveBeenCalledWith(expect.objectContaining({ scheduled_date: '2027-03-15' }));
+        expect(PAST_SLOT_ALERT(notifyAdmin.mock.calls)).toHaveLength(1);
+      });
+
+      test('a repeat refresh files nothing new: the standing alert dedupes it and no past visit appears', async () => {
+        pinToday(TODAY);
+        const { notifyAdmin } = require('../services/notification-service');
+        notifyAdmin.mockClear();
+        // Second page open: March already seeded, the alert is already open.
+        const second = refreshQueues({ alreadyAlerted: true });
+        second.scheduled_services[1] = query({ rows: [other('dec', '2026-12-15'), other('mar', '2027-03-15')] });
+        setDbQueues(second);
+
+        await AnnualPrepayRenewals.refreshTermSnapshot({ ...SEED_TERM, status: 'active' }, db);
+
+        expect(PAST_SLOT_ALERT(notifyAdmin.mock.calls)).toHaveLength(0);
+        // And nothing was inserted: every scheduled_services query handed out
+        // was a read, so no `insert` was ever invoked on any of them.
+        const inserts = db.mock.results
+          .map((r) => r.value)
+          .filter((q) => q && q.insert && q.insert.mock && q.insert.mock.calls.length);
+        expect(inserts).toHaveLength(0);
+      });
+
+      test('the term shows its real shortfall: the slots the floor skipped are not counted as covered', async () => {
+        pinToday(TODAY);
+        setDbQueues({
+          scheduled_services: [
+            query({ columnInfo: SS_COLS }),
+            query({ rows: [other('jun', '2026-06-15'), other('dec', '2026-12-15'), other('mar', '2027-03-15')] }),
+            query({ first: { id: 'linked-earlier' } }),
+          ],
+        });
+
+        const result = await _private.ensureCoverageRowsForTerm({ ...SEED_TERM });
+
+        // 3 live visits of 4 sold: the cancelled Sep slot is reported, not
+        // replaced by a phantom — the rows linked to the term stay at 3 of 4.
+        expect(result.createdCount).toBe(0);
+        expect(result.existingCount).toBe(3);
+        expect(result.unseededPastDates).toEqual(['2026-09-15']);
+      });
+
+      test('first activation of a late-paid term is unchanged: today-floored anchor + window slide, nothing skipped as past', async () => {
+        // No visit EVER linked to the term (first activation), paid on
+        // 2026-12-30 against a term minted 2026-07-30: the series starts at
+        // today, the window slides, and all four sold visits are seeded —
+        // same setup as the slide test below, now with the default floor in
+        // place (a first activation needs none: its anchor is the floor).
+        const SLIDE_COLS = {
+          scheduled_date: {}, service_type: {}, annual_prepay_term_id: {}, window_start: {}, window_end: {},
+          time_window: {}, technician_id: {}, estimated_duration_minutes: {}, notes: {},
+        };
+        setDbQueues({
+          scheduled_services: [query({ columnInfo: SLIDE_COLS }), query({ rows: [] }), query({ first: undefined }), query({ rows: [] }),
+            query({ returning: [{ id: 'a' }] }), query({ returning: [{ id: 'b' }] }), query({ returning: [{ id: 'c' }] }), query({ returning: [{ id: 'd' }] })],
+          annual_prepay_terms: [query({ columnInfo: { term_end: {}, first_visit_date: {} } }), query({ first: undefined }), query({}), query({})],
+          activity_log: [query({ first: undefined }), query({})],
+        });
+
+        const result = await _private.ensureCoverageRowsForTerm({
+          id: 'term-s', customer_id: 'customer-s', term_start: '2026-07-30', term_end: '2027-07-30',
+          coverage_service_type: 'Quarterly Pest Control', coverage_visit_count: 4, coverage_cadence: 'quarterly',
+        }, undefined, { today: '2026-12-30' });
+
+        expect(result.unseededPastDates).toEqual([]);
+        expect(result.createdCount).toBe(4);
+        expect(result.targetDates).toEqual(['2026-12-30', '2027-03-30', '2027-06-30', '2027-09-30']);
+        expect(result.effectiveTermEnd).toBe('2027-12-30');
+      });
+
+      test('the re-stamp sweep floor is unchanged: an explicit seedNotBefore still wins over the default', async () => {
+        pinToday(TODAY);
+        const marchInsert = inserted('svc-mar', '2027-03-15');
+        setDbQueues({
+          scheduled_services: [
+            query({ columnInfo: SS_COLS }),
+            query({ rows: [other('dec', '2026-12-15')] }),
+            query({ first: { id: 'linked-earlier' } }),
+            marchInsert,
+          ],
+        });
+
+        // Sweep-style floor one day AFTER today: Jan 10's own slots (none here)
+        // and everything earlier are skipped, exactly as before this change.
+        const result = await _private.ensureCoverageRowsForTerm({ ...SEED_TERM }, undefined, { seedNotBefore: '2027-02-01' });
+
+        expect(result.unseededPastDates).toEqual(['2026-06-15', '2026-09-15']);
+        expect(marchInsert.insert).toHaveBeenCalledWith(expect.objectContaining({ scheduled_date: '2027-03-15' }));
+      });
+    });
+
     test('a concurrent refresh already filled every sold slot: nothing is inserted', async () => {
       const fill = [other('b1', '2026-06-15'), other('b2', '2026-09-15'), other('b3', '2026-12-15'), other('b4', '2027-03-15')];
       setDbQueues({

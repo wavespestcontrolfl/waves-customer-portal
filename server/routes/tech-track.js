@@ -1342,12 +1342,19 @@ router.put('/:id/photo-marks', async (req, res, next) => {
     const validation = validateMarks(req.body?.marks, { serviceKey });
     if (!validation.ok) return res.status(400).json({ error: validation.error });
 
-    const saved = await saveMarksForPhoto({
-      scheduledServiceId: svc.id,
-      s3Key,
-      marks: validation.marks,
-      technicianId: req.technicianId || null,
-    });
+    let saved;
+    try {
+      saved = await saveMarksForPhoto({
+        scheduledServiceId: svc.id,
+        s3Key,
+        marks: validation.marks,
+        technicianId: req.technicianId || null,
+      });
+    } catch (err) {
+      // The photo was removed between the check above and the save's lock.
+      if (err?.code === 'photo_not_found') return res.status(404).json({ error: 'Photo not found on this service' });
+      throw err;
+    }
     logger.info(
       `[tech-track] photo marks saved service=${svc.id} tech=${req.technicianId} count=${saved.length}`
     );
@@ -1743,16 +1750,9 @@ router.get('/:id/treatment-zone', async (req, res, next) => {
 // Nothing is persisted — no row, no S3 object, no comms. Raw technician notes
 // never reach a customer-facing model (AGENTS.md egress rule): this is
 // transcription only, no extraction.
-const DICTATION_AUDIO_TYPES = new Map([
-  ['audio/webm', 'clip.webm'],
-  ['audio/mp4', 'clip.mp4'],
-  ['audio/x-m4a', 'clip.m4a'],
-  ['audio/m4a', 'clip.m4a'],
-  ['audio/mpeg', 'clip.mp3'],
-  ['audio/ogg', 'clip.ogg'],
-  ['audio/wav', 'clip.wav'],
-]);
-const DICTATION_MAX_BYTES = 15 * 1024 * 1024;
+// The accepted containers, the size cap and the multer handling are shared with
+// Fast Complete voice fill (services/dictation-upload.js).
+const { dictationAudioUpload, dictationClipType } = require('../services/dictation-upload');
 // Paid transcription: cap clips per staff bucket (same key as every other
 // paid-LLM limiter — rate-limit-key.js) so a stuck retry loop cannot bill
 // unbounded. 40 clips / 15 min is far above one tech's honest cadence.
@@ -1765,16 +1765,9 @@ const dictationLimiter = require('express-rate-limit')({
   message: { error: 'Too many dictation clips — type your notes for now' },
 });
 const DICTATION_TRANSCRIPTION_PROMPT = `Transcribe a pest control technician's dictated field notes for Waves Pest Control (Southwest Florida): areas treated, pests found, products and application rates, follow-up recommendations. Keep product names, numbers, and units exactly as spoken. Do not summarize or add commentary.`;
-const dictationUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: DICTATION_MAX_BYTES } });
 
 function dictationUploadGateOn() {
   return typeof featureGates.gateEnvValue === 'function' && featureGates.gateEnvValue('GATE_TECH_DICTATION_UPLOAD') === true;
-}
-
-// Mime type as the browser reports it, stripped of codec parameters
-// ("audio/webm;codecs=opus" → "audio/webm").
-function dictationBaseType(mimetype) {
-  return String(mimetype || '').split(';')[0].trim().toLowerCase();
 }
 
 router.get('/:id/dictation/availability', async (req, res, next) => {
@@ -1793,17 +1786,10 @@ router.post('/:id/dictation', async (req, res, next) => {
     if (!(await loadOwnedServiceOr403(req, res))) return undefined;
     return next();
   } catch (err) { return next(err); }
-}, dictationLimiter, (req, res, next) => {
-  dictationUpload.single('audio')(req, res, (err) => {
-    if (!err) return next();
-    if (err.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'Recording too large (15 MB max)' });
-    return next(err);
-  });
-}, async (req, res, next) => {
+}, dictationLimiter, dictationAudioUpload(), async (req, res, next) => {
   try {
     if (!req.file || !req.file.buffer?.length) return res.status(400).json({ error: 'No audio provided' });
-    const baseType = dictationBaseType(req.file.mimetype);
-    const filename = DICTATION_AUDIO_TYPES.get(baseType);
+    const { baseType, filename } = dictationClipType(req.file);
     if (!filename) {
       return res.status(415).json({ error: `Unsupported audio type: ${baseType || 'unknown'}` });
     }

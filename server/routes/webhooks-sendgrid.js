@@ -905,6 +905,12 @@ async function handleEmailMessageEvent(ev, message, client = db) {
       await require('../services/billing-email-reservation')
         .markBillingEmailReservationDelivered({ ...message, ...updates }, client);
     }
+    // A block that lands after the customer's email was corrected hits a row the correction stamped
+    // (never scheduled): settle it through the same path the correction uses, so its reservation
+    // reopens and a previsit claim is freed instead of the row reading as accepted.
+    if (updates && providerRetry.isProviderBlockedEvent(ev)) {
+      await providerRetry.settleLateBlockOfReplacedRecipient(message, client, now);
+    }
     await reconcileSummaryForEmailEvent(ev, message, updates, client);
   }
   // Address-level provider signals remain valid even when this event lost the

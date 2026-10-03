@@ -43,6 +43,7 @@ function KnowledgeEntryDetail({
   isMobile,
   busy,
   actionError,
+  canEdit = true,
 }) {
   const tags = parseArray(selected.tags);
 
@@ -128,7 +129,10 @@ function KnowledgeEntryDetail({
 
       {/* Always rendered, editing included: the pre-migration panel kept
           Verify / Flag / Delete beside the editor. */}
-      <CardFooter className="ui-record-actions">
+      {/* Read-only for a technician: edit, verify, flag and delete hit
+          admin-only routes (staff allow-list, 2026-10-02). */}
+      {canEdit && (
+        <CardFooter className="ui-record-actions">
           <Button
             onClick={() => {
               setEditing(true);
@@ -157,12 +161,13 @@ function KnowledgeEntryDetail({
           >
             Delete
           </Button>
-      </CardFooter>
+        </CardFooter>
+      )}
     </Card>
   );
 }
 
-export default function BrowseTab({ showFeedback, onRefresh, isMobile }) {
+export default function BrowseTab({ showFeedback, onRefresh, isMobile, canEdit = true }) {
   const [entries, setEntries] = useState([]);
   const [total, setTotal] = useState(0);
   const [searchQuery, setSearchQuery] = useState("");
@@ -316,6 +321,7 @@ export default function BrowseTab({ showFeedback, onRefresh, isMobile }) {
     isMobile,
     busy,
     actionError: errorForEntry(actionError, selected.id),
+    canEdit,
   } : null;
 
   if (isMobile && selected) {

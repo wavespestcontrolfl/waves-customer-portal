@@ -186,6 +186,7 @@ async function updatePayer(id, body) {
   // commit and is then refused while the homeowner send it would redirect is
   // in flight (the same 409 the payer_id writers raise).
   if (Object.prototype.hasOwnProperty.call(dbUpdates, 'active')) {
+    let applySessionRelease = null;
     return db.transaction(async (trx) => {
       // OWNERSHIP ROWS FIRST (Codex #4311 r27 P2): the withdrawal below
       // (withdrawPacketInvoicesForOwner → resolvePacketOwnershipLocked) takes
@@ -203,13 +204,20 @@ async function updatePayer(id, body) {
       // the two writers deadlock. The set is re-checked under the payer lock
       // below; a reference that appears after this point refuses rather than
       // proceeding on a partial prelock.
+      // ARCHIVED customers (deleted_at) are included everywhere in this pipeline - the prelock, the in-flight
+      // fence, the session/checkout release, the withdrawal and the re-judge below all read this same customer
+      // set: the withdrawal acts on them (it scans by payer), so their issued checkout must be cancelled too.
       const referencingCustomerIds = [...new Set([
-        ...await trx('customers').where({ payer_id: pid }).whereNull('deleted_at').pluck('id'),
+        ...await trx('customers').where({ payer_id: pid }).pluck('id'),
         ...await trx('scheduled_services').where({ payer_id: pid }).whereNotNull('customer_id').pluck('customer_id'),
       ].map(String))].sort();
+      let prelockedVisitIds = [];
       if (referencingCustomerIds.length) {
         await require('./pay-combined').lockCombinedCustomers(trx, referencingCustomerIds);
         await trx('customers').whereIn('id', referencingCustomerIds).orderBy('id').forShare().select('id');
+        // Visits that invoices with no packet ride: the withdrawal below locks them too.
+        const linkedVisitIds = await require('./visit-linked-invoice-withdrawal').linkedVisitIdsForCustomers(trx, referencingCustomerIds);
+        prelockedVisitIds = linkedVisitIds;
         // EVERY member of a packet this payer reaches, not only the members
         // that name it (Codex #4311 r29 P2): the withdrawal resolves
         // ownership per packet and takes ALL its billed members, so a member
@@ -228,7 +236,8 @@ async function updatePayer(id, body) {
                 .join('invoices', 'invoices.visit_completion_packet_id', 'owned.packet_id')
                 .whereIn('invoices.customer_id', referencingCustomerIds)
                 .select('owned.packet_id'))
-              .select('scheduled_service_id')))
+              .select('scheduled_service_id'))
+            .orWhereIn('id', linkedVisitIds))
           .orderBy('id').forShare().select('id');
       }
       const current = await trx('payers').where({ id: pid }).forUpdate().first();
@@ -240,7 +249,7 @@ async function updatePayer(id, body) {
       // A grown set refuses rather than proceeding on a partial prelock; the
       // caller retries and the new reference is prelocked from the start.
       const referencesUnderLock = [...new Set([
-        ...await trx('customers').where({ payer_id: pid }).whereNull('deleted_at').pluck('id'),
+        ...await trx('customers').where({ payer_id: pid }).pluck('id'),
         ...await trx('scheduled_services').where({ payer_id: pid }).whereNotNull('customer_id').pluck('customer_id'),
       ].map(String))].sort();
       if (dbUpdates.active === true && current.active !== true
@@ -248,8 +257,19 @@ async function updatePayer(id, body) {
         return { error: 'A Bill-To change landed while this payer was being activated — try again.',
           conflict: true, code: 'payer_references_changed' };
       }
+      // …and the VISIT set the same way: a non-terminal linked invoice that committed for an
+      // already-referencing customer after the prelock is a visit a job Bill-To editor can hold
+      // while it waits on this payer row, and the fence and withdrawal below would wait on it.
+      if (dbUpdates.active === true && current.active !== true) {
+        const visitsUnderLock = await require('./visit-linked-invoice-withdrawal')
+          .linkedVisitIdsForCustomers(trx, [...new Set([...referencingCustomerIds, ...referencesUnderLock])].sort());
+        if (visitsUnderLock.some((visitId) => !prelockedVisitIds.includes(visitId))) {
+          return { error: 'A Bill-To change landed while this payer was being activated — try again.',
+            conflict: true, code: 'payer_references_changed' };
+        }
+      }
       const activating = dbUpdates.active === true && current.active !== true;
-      if (activating && await require('./visit-completion-packets').packetInvoiceSendInFlight({ payerId: pid }, trx)) {
+      if (activating && await require('./visit-completion-packets').packetInvoiceSendInFlight({ payerId: pid }, trx, { pending: { payerPatch: { id: pid, active: true } } })) {
         return { error: 'A combined-visit invoice for a customer or job billed to this payer is being sent; try again in a moment.',
           conflict: true, code: 'invoice_send_in_flight' };
       }
@@ -260,7 +280,7 @@ async function updatePayer(id, body) {
       // the activation (its settlement never re-resolves ownership).
       if (activating) {
         const referencing = [...new Set([
-          ...await trx('customers').where({ payer_id: pid }).whereNull('deleted_at').pluck('id'),
+          ...await trx('customers').where({ payer_id: pid }).pluck('id'),
           ...await trx('scheduled_services').where({ payer_id: pid }).whereNotNull('customer_id').pluck('customer_id'),
         ].map(String))];
         const PayCombined = require('./pay-combined');
@@ -271,7 +291,8 @@ async function updatePayer(id, body) {
         // does not roll back with this transaction, so an uninvolved
         // homeowner lost a live pay-page session for nothing. The batched
         // fence verifies every session before cancelling any.
-        const release = await PayCombined.releaseUnconfirmedCombinedSessionsForCustomers(trx, referencing);
+        const release = await PayCombined.releaseUnconfirmedCombinedSessionsForCustomers(trx, referencing, { invalidateLinked: true, pending: { payerPatch: { id: pid, active: true } }, deferApply: true });
+        applySessionRelease = release.apply || null;
         if (release.inFlight > 0) {
           return { error: 'A combined bank payment for a customer billed to this payer is still in flight; retry the activation after it settles or fails.',
             conflict: true, code: 'combined_payment_in_flight' };
@@ -292,7 +313,7 @@ async function updatePayer(id, body) {
         // filtering on this payer would skip exactly the stamps that name
         // another.
         for (const customerId of [...new Set([
-          ...await trx('customers').where({ payer_id: pid }).whereNull('deleted_at').pluck('id'),
+          ...await trx('customers').where({ payer_id: pid }).pluck('id'),
           ...await trx('scheduled_services').where({ payer_id: pid }).whereNotNull('customer_id').pluck('customer_id'),
         ].map(String))].sort()) {
           await Packets.reconcileWithdrawnPacketInvoices(trx, { customerId });
@@ -306,6 +327,9 @@ async function updatePayer(id, body) {
       if (dbUpdates.active === false && current.active !== false) {
         await require('./visit-completion-packets').reconcileWithdrawnPacketInvoices(trx, { payerId: pid });
       }
+      // Every refusal (the withdrawal's credit reversal included) has passed: only now do the planned
+      // session cancels, which are external and cannot roll back, run.
+      if (applySessionRelease) await applySessionRelease();
       return { payer: row };
     });
   }

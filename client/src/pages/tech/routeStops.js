@@ -72,13 +72,21 @@ export function stopWindow(stop) {
  */
 export function stopPropertyAlerts(stop) {
   if (!stop) return [];
-  const seen = new Set();
+  const seen = new Map();
   const out = [];
   stop.services.forEach((s) => {
     (Array.isArray(s.propertyAlerts) ? s.propertyAlerts : []).forEach((a) => {
       const text = typeof a === 'string' ? a : a && a.text;
-      if (!text || seen.has(text)) return;
-      seen.add(text);
+      if (!text) return;
+      if (seen.has(text)) {
+        // A neighborhood gate line is tagged with its directory entry only on
+        // a member that can act on it (a skipped sibling carries the same
+        // text untagged): the tagged copy wins, in the first one's place.
+        const at = seen.get(text);
+        if (a?.neighborhoodEntryId && !out[at]?.neighborhoodEntryId) out[at] = a;
+        return;
+      }
+      seen.set(text, out.length);
       out.push(a);
     });
   });

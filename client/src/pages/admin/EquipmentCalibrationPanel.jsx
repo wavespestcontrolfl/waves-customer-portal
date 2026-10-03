@@ -39,7 +39,9 @@ function calibrationStatusLabel(status) {
   }
   return status || "Unspecified";
 }
-export default function EquipmentCalibrationPanel() {
+// readOnly: technicians see calibrations but cannot record or verify them
+// (owner 2026-10-03: calibration is not set up yet; skipped for now).
+export default function EquipmentCalibrationPanel({ readOnly = false } = {}) {
   const actionRef = useRef(false);
   const [actionError, setActionError] = useState("");
   const [systems, setSystems] = useState([]);
@@ -365,14 +367,14 @@ export default function EquipmentCalibrationPanel() {
                   {activeCalibration.verified_test_area_sqft ? ` over ${activeCalibration.verified_test_area_sqft} sqft` : ""}
                   {activeCalibration.verified_captured_gallons ? ` using ${activeCalibration.verified_captured_gallons} gal` : ""}
                 </div>}
-              {activeCalibration.calibration_status !== "field_verified" && <div style={{
+              {!readOnly && activeCalibration.calibration_status !== "field_verified" && <div style={{
           marginTop: 10
         }}>
                   <Button type="button" onClick={() => setVerifyOpen(v => !v)} variant="primary" className="min-w-11" disabled={busy}>
                     {verifyOpen ? "Close verification" : "Verify Calibration"}
                   </Button>
                 </div>}
-              {verifyOpen && <Card style={{
+              {!readOnly && verifyOpen && <Card style={{
           marginTop: 10,
           padding: 10
         }}>
@@ -450,7 +452,7 @@ export default function EquipmentCalibrationPanel() {
             </div>)}
       </Card>
       {/* Calibration form */}
-      <Card style={{
+      {!readOnly && (<Card style={{
       marginBottom: 16
     }} className="p-4 mb-3">
         {" "}
@@ -547,7 +549,7 @@ export default function EquipmentCalibrationPanel() {
           second: "2-digit"
         })}
           </div>}
-      </Card>{" "}
+      </Card>)}{" "}
       <ReconciliationPanel report={reconciliation} loading={reconciliationLoading} />
     </div>;
 }

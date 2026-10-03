@@ -36,6 +36,11 @@
  *      pre-push audit and the @codex bot. The file once reached 114 KB with
  *      70% never loaded.
  *
+ *   6. claude-md-budget — CLAUDE.md stays under 24 KB. It loads whole into
+ *      every Claude Code session, so each byte is paid by every lane. It
+ *      once reached 197 KB, 171 KB of it per-gate env documentation that
+ *      now lives in docs/gates-and-env.md and is read on demand.
+ *
  * Scope: the whole production server tree (server/) + client/src.
  * Tests, mocks, fixtures, migrations, seeds, contract-tests, one-off
  * scripts, and ops tooling are NOT scanned — they legitimately pin model
@@ -208,6 +213,19 @@ if (agentsMdBytes > AGENTS_MD_BUDGET_BYTES) {
   console.error('AGENTS.md  [agents-md-budget]');
   console.error(`    ${agentsMdBytes} bytes > ${AGENTS_MD_BUDGET_BYTES}-byte budget (Codex truncates at 32 KiB).`);
   console.error('    Sharpen an existing rule instead of adding one, or move prose to a skill / docs/public-route-contracts.md.\n');
+}
+
+// =========================================================================
+// CLAUDE.md budget (rule 6) — a byte check, not a source scan.
+// =========================================================================
+const CLAUDE_MD = path.join(ROOT, 'CLAUDE.md');
+const CLAUDE_MD_BUDGET_BYTES = 24 * 1024;
+const claudeMdBytes = fs.statSync(CLAUDE_MD).size;
+if (claudeMdBytes > CLAUDE_MD_BUDGET_BYTES) {
+  violations += 1;
+  console.error('CLAUDE.md  [claude-md-budget]');
+  console.error(`    ${claudeMdBytes} bytes > ${CLAUDE_MD_BUDGET_BYTES}-byte budget (the file loads into every session).`);
+  console.error('    Gate and env var documentation goes in docs/gates-and-env.md; procedures go in a skill.\n');
 }
 
 if (violations) {

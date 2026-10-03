@@ -288,6 +288,14 @@ app.use('/api/booking/preferred-time', ...require('./routes/booking').preferredT
 // <img> loads need no CORS headers, so this route sets none.
 app.use('/api/public/map-image', require('./routes/public-map-image'));
 
+// Typed-decision labeler token (X-Labeler-Token): its own router, mounted ABOVE
+// the global cors() (an allowed-origin OPTIONS would answer 204), the global
+// `/api/` limiter and the body parsers (Codex #5677 r1–r2). A request without
+// the header falls straight through to the admin router below; one with it is
+// answered here (generic 404, or the label write behind its own limiter and
+// parser). See docs/public-route-contracts.md "Typed-decision labeler token".
+app.use('/api/admin/typed-decisions', require('./routes/typed-decisions-labeler'));
+
 // CORS — allow frontend dev server and production domain
 const { allowedOrigins } = require('./config/cors-origins');
 app.use(cors({

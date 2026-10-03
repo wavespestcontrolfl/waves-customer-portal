@@ -1,8 +1,7 @@
 /**
  * Job card service (GATE_JOB_CARD) — the pure builders behind the drawer's
- * Job card tab: template paragraph, model-output validator + fallback,
- * spray-check verdicts, tank mix math, and the paragraph cache's
- * "template is not a permanent hit" rule.
+ * Job card tab: template paragraph, spray-check verdicts, tank mix math and
+ * the customer-context boxes.
  */
 
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
@@ -96,174 +95,6 @@ describe('buildTemplateParagraph', () => {
       .toBe('First visit on record. No irrigation on file — ask the customer.');
     // Pest lines never mention irrigation.
     expect(jobCard.buildTemplateParagraph(withIrrigation, { isLawn: false })).toBe('First visit on record.');
-  });
-});
-
-describe('validateParagraph', () => {
-  const grounding = 'Pets: dog, property gate code on file, tap to show. Last visit 2026-08-12: Chinch bugs east side.';
-  const codes = [{ label: 'Property gate', code: '4545#' }];
-
-  test('a grounded number moved to another fact is rejected; rephrased in place it passes (PR r3 P2)', () => {
-    const lawn = 'Pets: dog. First visit on record. Irrigation Mon/Thu, 20 min, 1.2" rain in the last 7 days.';
-    expect(jobCard.validateParagraph('There are 20 dogs. Irrigation runs Mon and Thu.', lawn, [])).toBe('ungrounded_clause');
-    expect(jobCard.validateParagraph('One dog. Irrigation Mon and Thu, 20 min, 1.2" of rain in the last 7 days.', lawn, [])).toBeNull();
-  });
-
-  test('a sentence the grounding never mentions is rejected, even without numbers (Codex r10 P1)', () => {
-    expect(jobCard.validateParagraph('No pets are present.', 'First visit on record.', [])).toBe('ungrounded_clause');
-    expect(jobCard.validateParagraph('First visit here. The side gate is unlocked.', 'First visit on record.', [])).toBe('ungrounded_clause');
-    // An instruction lifted from a visit note is not in the grounding either.
-    expect(jobCard.validateParagraph('Skip the back yard today.', 'Pets: dog. First visit on record.', [])).toBe('ungrounded_clause');
-    expect(jobCard.validateParagraph('This is the first visit on record.', 'First visit on record.', [])).toBeNull();
-    expect(jobCard.validateParagraph('There are 2 dogs.', 'Pets: 2 dogs.', [])).toBeNull();
-    // A shared word never carries an invented one (hook P1 ×2): "dog" is grounded, a securing plan or an entry instruction is not — even as a single word.
-    expect(jobCard.validateParagraph('The dog is secured, so enter the yard. First visit on record.', 'Pets: dog. First visit on record.', [], ['dog'])).toBe('ungrounded_clause');
-    expect(jobCard.validateParagraph('Dog secured. First visit on record.', 'Pets: dog. First visit on record.', [], ['dog'])).toBe('ungrounded_clause');
-    expect(jobCard.validateParagraph('A dog is here. First visit on record.', 'Pets: dog. First visit on record.', [], ['dog'])).toBeNull();
-  });
-
-  test('accepts a faithful 1–3 sentence rewrite', () => {
-    expect(jobCard.validateParagraph('There is a dog and a gate code on file, tap to show. Last visit 2026-08-12: chinch bugs on the east side.', grounding, codes)).toBeNull();
-    // Grounded words recombined into a new association are not a rephrase (Codex r14 P1): the dog is not at the gate.
-    expect(jobCard.validateParagraph('Dog at side gate, crated in garage.', 'Pets: dog (crated in garage), side gate.', [], ['dog', 'crated in garage'])).toBe('ungrounded_clause');
-    expect(jobCard.validateParagraph('Dog, crated in garage. Side gate.', 'Pets: dog (crated in garage), side gate.', [], ['dog', 'crated in garage'])).toBeNull();
-  });
-
-  test.each([
-    ['four sentences', 'One. Two. Three. Four.', 'sentence_count'],
-    ['emoji', 'Dog on site 🐶. Gate code on file.', 'emoji'],
-    ['bullet markup', '- dog\n- gate', 'markup'],
-    ['leaked code', 'Gate code is 4545#. Dog on site.', 'code_leak'],
-    ['invented number', 'Two dogs and 3 cats are on site.', 'ungrounded_clause'],
-    ['empty', '   ', 'empty'],
-  ])('rejects %s', (_label, text, reason) => {
-    expect(jobCard.validateParagraph(text, grounding, codes)).toBe(reason);
-  });
-
-  test('rejects more than 60 words', () => {
-    const long = `${Array.from({ length: 61 }, () => 'word').join(' ')}.`;
-    expect(jobCard.validateParagraph(long, grounding, codes)).toBe('too_long');
-  });
-});
-
-describe('writeParagraph', () => {
-  const template = 'Pets: dog. First visit on record.';
-  beforeEach(() => { process.env.GATE_JOB_CARD_LLM = 'true'; });
-  afterEach(() => { delete process.env.GATE_JOB_CARD_LLM; });
-
-  test('GATE_JOB_CARD_LLM off → template with no provider call', async () => {
-    for (const value of [undefined, 'false', '1', 'TRUE']) {
-      if (value === undefined) delete process.env.GATE_JOB_CARD_LLM; else process.env.GATE_JOB_CARD_LLM = value;
-      const callModel = jest.fn(async () => ({ ok: true, text: 'A dog is here and this is the first visit on record.' }));
-      expect(await jobCard.writeParagraph(template, [], { callModel })).toEqual({ text: template, source: 'template' });
-      expect(callModel).not.toHaveBeenCalled();
-    }
-  });
-
-  test('model text that passes validation is returned as source=model', async () => {
-    const callModel = jest.fn(async () => ({ ok: true, text: 'A dog is here and this is the first visit on record.' }));
-    const out = await jobCard.writeParagraph(template, [], { callModel });
-    expect(out).toEqual({ text: 'A dog is here and this is the first visit on record.', source: 'model' });
-    // The grounding sent to the model is the template — never a code.
-    expect(callModel.mock.calls[0][0].text).toContain(template);
-  });
-
-  test('dispatcher miss → template', async () => {
-    const callModel = jest.fn(async () => ({ ok: false, reason: 'timeout' }));
-    expect(await jobCard.writeParagraph(template, [], { callModel })).toEqual({ text: template, source: 'template' });
-  });
-
-  test('injected path returning invalid text → template (defense in depth)', async () => {
-    const callModel = jest.fn(async () => ({ ok: true, text: 'Dog. Gate 4545#. Ok.' }));
-    expect(await jobCard.writeParagraph(template, [{ label: 'Gate', code: '4545#' }], { callModel })).toEqual({ text: template, source: 'template' });
-  });
-
-  test('thrown error → template', async () => {
-    const callModel = jest.fn(async () => { throw new Error('boom'); });
-    expect(await jobCard.writeParagraph(template, [], { callModel })).toEqual({ text: template, source: 'template' });
-  });
-});
-
-describe('paragraphForVisit cache', () => {
-  beforeEach(() => { process.env.GATE_JOB_CARD_LLM = 'true'; });
-  afterEach(() => { delete process.env.GATE_JOB_CARD_LLM; });
-  const makeDb = () => {
-    const update = jest.fn(async () => 1);
-    const chain = { where() { return this; }, update };
-    const dbh = jest.fn(() => chain);
-    return { dbh, update };
-  };
-  const facts = (stored) => ({
-    serviceId: 'svc-1', isLawn: false,
-    facts: baseFacts(),
-    access: { codes: [] },
-    cache: { stored, generatedAt: stored ? '2026-09-01T00:00:00Z' : null },
-  });
-
-  test('cached model paragraph with the same grounding hash skips the model', async () => {
-    const template = jobCard.buildTemplateParagraph(baseFacts());
-    const hash = jobCard._test.groundingHash(template);
-    const { dbh, update } = makeDb();
-    const callModel = jest.fn();
-    const out = await jobCard.paragraphForVisit(facts({ grounding_hash: hash, source: 'model', text: 'Cached text.' }), { dbh, deps: { callModel } });
-    expect(out).toEqual({ text: 'Cached text.', source: 'model', cached: true });
-    expect(callModel).not.toHaveBeenCalled();
-    expect(update).not.toHaveBeenCalled();
-  });
-
-  test('a cached TEMPLATE is retried and the fresh model text is stored', async () => {
-    const template = jobCard.buildTemplateParagraph(baseFacts());
-    const hash = jobCard._test.groundingHash(template);
-    const { dbh, update } = makeDb();
-    const callModel = jest.fn(async () => ({ ok: true, text: 'This is the first visit on record.' }));
-    const out = await jobCard.paragraphForVisit(facts({ grounding_hash: hash, source: 'template', text: template }), { dbh, deps: { callModel } });
-    expect(out.source).toBe('model');
-    expect(callModel).toHaveBeenCalledTimes(1);
-    const written = JSON.parse(update.mock.calls[0][0].job_card);
-    expect(written).toMatchObject({ version: jobCard.PROMPT_VERSION, grounding_hash: hash, source: 'model' });
-  });
-
-  describe('GATE_JOB_CARD_LLM off (the template is the paragraph)', () => {
-    beforeEach(() => { delete process.env.GATE_JOB_CARD_LLM; });
-
-    test('no cache → template stored, no provider call', async () => {
-      const template = jobCard.buildTemplateParagraph(baseFacts());
-      const hash = jobCard._test.groundingHash(template);
-      const { dbh, update } = makeDb();
-      const callModel = jest.fn();
-      const out = await jobCard.paragraphForVisit(facts(null), { dbh, deps: { callModel } });
-      expect(out).toEqual({ text: template, source: 'template', cached: false });
-      expect(callModel).not.toHaveBeenCalled();
-      expect(JSON.parse(update.mock.calls[0][0].job_card)).toEqual({ version: jobCard.PROMPT_VERSION, grounding_hash: hash, text: template, source: 'template' });
-    });
-
-    test('a cached MODEL paragraph for the same grounding is replaced by the template', async () => {
-      const template = jobCard.buildTemplateParagraph(baseFacts());
-      const hash = jobCard._test.groundingHash(template);
-      const { dbh, update } = makeDb();
-      const callModel = jest.fn();
-      const out = await jobCard.paragraphForVisit(facts({ grounding_hash: hash, source: 'model', text: 'Cached text.' }), { dbh, deps: { callModel } });
-      expect(out).toEqual({ text: template, source: 'template', cached: false });
-      expect(callModel).not.toHaveBeenCalled();
-      expect(JSON.parse(update.mock.calls[0][0].job_card)).toMatchObject({ grounding_hash: hash, source: 'template', text: template });
-    });
-
-    test('a cached template for the same grounding is a hit with no write', async () => {
-      const template = jobCard.buildTemplateParagraph(baseFacts());
-      const hash = jobCard._test.groundingHash(template);
-      const { dbh, update } = makeDb();
-      const out = await jobCard.paragraphForVisit(facts({ grounding_hash: hash, source: 'template', text: template }), { dbh, deps: { callModel: jest.fn() } });
-      expect(out).toEqual({ text: template, source: 'template', cached: true });
-      expect(update).not.toHaveBeenCalled();
-    });
-
-    test('a cached template for older facts is rewritten with the current template', async () => {
-      const template = jobCard.buildTemplateParagraph(baseFacts());
-      const { dbh, update } = makeDb();
-      const out = await jobCard.paragraphForVisit(facts({ grounding_hash: 'stale', source: 'template', text: 'Old facts.' }), { dbh, deps: { callModel: jest.fn() } });
-      expect(out).toEqual({ text: template, source: 'template', cached: false });
-      expect(update).toHaveBeenCalledTimes(1);
-    });
   });
 });
 
@@ -492,27 +323,6 @@ describe('the Tank section\'s rig list and rig pick', () => {
   });
 });
 
-describe('safety-critical facts survive the rewrite (PR r1 P1)', () => {
-  test('criticalFacts lists sensitivity, pet plan, urgent issues; a rewrite that drops one falls back', () => {
-    const facts = { chemicalSensitivity: 'asthma, no pyrethroids', petsSecured: 'dog crated in garage', issues: [{ urgent: true, text: 'wasps at the front door' }, { urgent: false, text: 'ants' }] };
-    const critical = jobCard._test.criticalFacts(facts);
-    expect(critical).toEqual(['asthma, no pyrethroids', 'dog crated in garage', 'wasps at the front door']);
-    const grounding = 'Chemical sensitivity: asthma, no pyrethroids, pets: dog crated in garage. Open: URGENT wasps at the front door.';
-    expect(jobCard.validateParagraph('Customer has asthma, no pyrethroids; dog crated in garage. Urgent: wasps at the front door.', grounding, [], critical)).toBeNull();
-    expect(jobCard.validateParagraph('Customer has a chemical sensitivity; dog crated in garage.', grounding, [], critical)).toBe('critical_fact_dropped');
-    // A critical fact restated under a negation is reversed, not kept (hook P1).
-    expect(jobCard.validateParagraph('No chemical sensitivity. First visit on record.', 'Chemical sensitivity. First visit on record.', [], ['sensitiv'])).toBe('polarity_flip');
-    expect(jobCard.validateParagraph('The dog isn\'t crated in garage today.', 'Pets: dog (crated in garage).', [], ['crated in garage'])).toBe('polarity_flip');
-    // Polarity holds for EVERY clause, not only critical facts (Codex r12 P1).
-    expect(jobCard.validateParagraph('No side gate. First visit on record.', 'Side gate. First visit on record.', [])).toBe('polarity_flip');
-    expect(jobCard.validateParagraph('Irrigation on file. First visit on record.', 'No irrigation on file — ask the customer. First visit on record.', [])).toBe('polarity_flip');
-    expect(jobCard.validateParagraph('No irrigation on file, ask the customer. First visit on record.', 'No irrigation on file — ask the customer. First visit on record.', [])).toBeNull();
-    // The fact's own "no" (asthma, no pyrethroids) is not a negation of the fact.
-    expect(jobCard.validateParagraph('Customer has asthma, no pyrethroids; dog crated in garage. Urgent: wasps at the front door.', grounding, [], critical)).toBeNull();
-    expect(jobCard._test.criticalFacts({ chemicalSensitivity: 'yes', issues: [] })).toEqual(['sensitiv']);
-  });
-});
-
 describe('non-lawn protocol text resolves products without lineMeta (PR r1 P2)', () => {
   test('T&S label holds stay unselected even when the old product appeared in primary', () => {
     const catalog = [{ id: 't', name: 'Talus IGR' }, { id: 'm', name: 'Mn Combo' }, { id: 'd', name: 'Distance IGR' }];
@@ -655,20 +465,17 @@ describe('loadLastVisit picks the most severe finding, not the alphabetically la
   });
 });
 
-describe('access codes never enter the model-safe facts', () => {
+describe('access codes never enter the paragraph facts', () => {
   test('accessCodes keeps raw codes; clean() redacts a code typed into a note', () => {
     const prefs = { property_gate_code: '4545#', access_notes: 'Side gate, code 4545#' };
     expect(jobCard._test.accessCodes(prefs)).toEqual([{ label: 'Property gate', code: '4545#' }]);
     // A code typed into a free-text note is masked by the loader's clean()
-    // before it can reach the template (= the model grounding).
+    // before it can reach the template.
     expect(jobCard._test.petLine({ pet_details: 'Dog; gate code 4545#' })).not.toContain('4545');
-    // And the validator refuses model text that prints a known code.
-    expect(jobCard.validateParagraph('Gate code 4545# on file.', 'gate code on file', [{ label: 'Property gate', code: '4545#' }])).toBe('code_leak');
     // The bare form of a stored code is the code too (Codex r11 P1): the
-    // scrub and the leak check both catch "4545" for "4545#", as a whole token.
+    // scrub catches "4545" for "4545#", as a whole token.
     expect(jobCard._test.scrubKnownCodes({ notes: 'Try 4545 first, then 4545#' }, [{ code: '4545#' }])).toEqual({ notes: 'Try [code] first, then [code]' });
     expect(jobCard._test.scrubKnownCodes('Visit 2026-09-04 at 14545 Main', [{ code: '4545#' }])).toBe('Visit 2026-09-04 at 14545 Main');
-    expect(jobCard.validateParagraph('Gate code 4545 on file.', 'gate code on file', [{ label: 'Property gate', code: '4545#' }])).toBe('code_leak');
   });
   test('a known code value pasted bare into any fact string is scrubbed before grounding (Codex r6 P1)', () => {
     const facts = { entry: '4545#', issues: [{ text: 'Use 4545# at the side gate' }], lastVisit: { summary: 'Fine' }, rain7d: 0.5 };
@@ -681,7 +488,6 @@ describe('access codes never enter the model-safe facts', () => {
     expect(jobCard._test.scrubKnownCodes({ entry: 'code 12, last visit 2026-08-12, box A1' }, [{ code: '12' }, { code: 'A1' }])).toEqual({ entry: 'code [code], last visit 2026-08-12, box [code]' });
     // Case-insensitive: BLUE on file, blue in the note (PR r1 P1).
     expect(jobCard._test.scrubKnownCodes({ entry: 'say blue at the gate' }, [{ code: 'BLUE' }])).toEqual({ entry: 'say [code] at the gate' });
-    expect(jobCard.validateParagraph('Say blue at the gate.', 'say blue at the gate', [{ code: 'BLUE' }])).toBe('code_leak');
     // Nothing known → the object is untouched.
     expect(jobCard._test.scrubKnownCodes(facts, [])).toBe(facts);
   });
@@ -1071,7 +877,6 @@ describe('PR review r4', () => {
     };
     const text = jobCard.buildTemplateParagraph(facts, { isLawn: true });
     expect(text.split(/\s+/).length).toBeLessThanOrEqual(60);
-    expect(jobCard.validateParagraph(text, text, [], jobCard._test.criticalFacts(facts))).toBeNull();
     expect(text).toContain('Pets: two dogs (crated in garage)');
     expect(text).toContain('chemical sensitivity: asthma');
     expect(text).toContain('open: URGENT Ants in kitchen');
@@ -1211,11 +1016,9 @@ describe('PR review r6', () => {
     expect(ok.order.quantity).toBe(1);
   });
 
-  test('a current away date is a critical fact the rewrite may not drop (P2)', () => {
+  test('a current away date is always in the paragraph (P2)', () => {
     const facts = { ...baseFacts(), awayUntil: '2026-09-10' };
-    expect(jobCard._test.criticalFacts(facts)).toContain('2026-09-10');
-    const template = jobCard.buildTemplateParagraph(facts);
-    expect(jobCard.validateParagraph('First visit on record.', template, [], jobCard._test.criticalFacts(facts))).toBe('critical_fact_dropped');
+    expect(jobCard.buildTemplateParagraph(facts)).toContain('ustomer away until 2026-09-10');
   });
 });
 
@@ -1304,7 +1107,6 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
     const instructions = 'Enter through the side gate, knock first, keep the pool cage door closed, spray the lanai screens only from outside, and do not treat the vegetable garden by the shed — gate 4545#';
     const sensitivity = 'Asthma — no pyrethroids anywhere on the property, no fogging, and please text before arriving so the windows can be closed; the daughter reacts to strong fragrances too';
     const base = factsDb({ 'scheduled_services as ss': visit(false), property_preferences: { ...prefs, special_instructions: instructions, chemical_sensitivities: true, chemical_sensitivity_details: sensitivity } });
-    // The paragraph cache write is the one mutation on this path.
     const dbh = Object.assign((table) => Object.assign(base(table), { update: () => ({ catch: async () => null }) }), { raw: base.raw });
     const card = await jobCard.buildJobCard('svc1', { dbh, deps, now: new Date('2026-09-04T12:00:00Z') });
     // Complete (the grounding copy is bounded to 120 chars) and code-scrubbed.
@@ -1377,26 +1179,170 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       expect((await load({ customer_request: 'Ants by the pool', customer_request_source: 'email' })).notes.customerRequest).toEqual({ text: 'Ants by the pool', source: null, pests: [] });
     });
 
+    // factsDb's chain is not awaitable as a list; sms_log gets one that is.
+    const onSite = { status: 'on_site' };
+    const smsReads = { count: 0, until: null, since: null, grouped: [] };
+    beforeEach(() => { smsReads.count = 0; smsReads.until = null; smsReads.since = null; smsReads.grouped = []; });
+    const withTexts = (row, texts) => {
+      const base = factsDb({ 'scheduled_services as ss': { ...visit(false), ...row }, property_preferences: prefs });
+      return Object.assign((table) => {
+        if (table !== 'sms_log') return base(table);
+        const chain = {};
+        for (const m of ['whereRaw', 'select', 'orderBy']) chain[m] = () => chain;
+        let size = Infinity; let skip = 0; let before = Infinity; let after = -Infinity;
+        chain.offset = (n) => { skip = n; return chain; };
+        chain.where = (...args) => {
+          // excludeRecruitingSmsLog's grouped predicate: record that it was applied.
+          if (typeof args[0] === 'function') { smsReads.grouped.push(args[0].name); return chain; }
+          if (args[0] === 'created_at' && args[1] === '<') { before = new Date(args[2]).getTime(); smsReads.until = new Date(args[2]); }
+          if (args[0] === 'created_at' && args[1] === '>=') { after = new Date(args[2]).getTime(); smsReads.since = new Date(args[2]); }
+          return chain;
+        };
+        chain.limit = (n) => { size = n; return chain; };
+        const page = () => texts.map((t, i) => ({ id: `sms-${i}`, ...t })).filter((t) => { const at = Date.parse(t.created_at); return at < before && at >= after; }).slice(skip, skip + size);
+        chain.then = (res, rej) => (texts instanceof Error ? Promise.reject(texts) : Promise.resolve(page())).then(res, rej);
+        smsReads.count += 1;
+        return chain;
+      }, { raw: base.raw });
+    };
+
+    test('on → the customer\'s texts, newest three, tapbacks dropped, codes scrubbed', async () => {
+      process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = 'true';
+      const texts = [
+        { created_at: '2026-09-03T15:00:00Z', message_body: 'Liked "Your visit is confirmed"', message_type: 'sms' },
+        { created_at: '2026-09-02T15:00:00Z', message_body: 'Ants are back by the pool, gate is 4545#', message_type: 'sms' },
+        { created_at: '2026-09-01T15:00:00Z', message_body: 'Thanks', message_type: 'sms_reaction' },
+        { created_at: '2026-08-30T15:00:00Z', message_body: 'Also wasps by the lanai', message_type: 'sms' },
+        { created_at: '2026-08-29T15:00:00Z', message_body: 'See you Thursday', message_type: 'sms' },
+        { created_at: '2026-08-28T15:00:00Z', message_body: 'Fourth one', message_type: 'sms' },
+      ];
+      const out = await jobCard.loadJobCardFacts('svc1', withTexts(onSite, texts), deps);
+      expect(out.notes.customerTexts.map((t) => t.date)).toEqual(['2026-09-02', '2026-08-30', '2026-08-29']);
+      expect(out.notes.customerTexts[0].text).toMatch(/^Ants are back by the pool/);
+      expect(out.notes.customerTexts[0].text).not.toContain('4545');
+      // Texts stay display-only: the paragraph never reads them.
+      expect(JSON.stringify(out.facts)).not.toContain('pool');
+    });
+
+    test('on → a long run of tapbacks never hides the real text before it (Codex r1)', async () => {
+      process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = 'true';
+      // 300 tapbacks only their body gives away: more than any fixed page cap (Codex r2).
+      const tapbacks = Array.from({ length: 300 }, (_, i) => ({ created_at: new Date(Date.parse('2026-09-03T15:00:00Z') - i * 60000).toISOString(), message_body: 'Liked "Your visit is confirmed"', message_type: 'sms' }));
+      const out = await jobCard.loadJobCardFacts('svc1', withTexts(onSite, [...tapbacks, { created_at: '2026-09-01T15:00:00Z', message_body: 'Ants are back by the pool', message_type: 'sms' }]), deps);
+      expect(out.notes.customerTexts).toEqual([{ date: '2026-09-01', text: 'Ants are back by the pool' }]);
+    });
+
+    test('rows sharing one timestamp across a page edge are never skipped (Codex r6)', async () => {
+      process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = 'true';
+      // 30 rows at the SAME instant: 29 tapbacks, then the real text — past the first page of 25.
+      const same = '2026-09-03T15:00:00Z';
+      const rows = [...Array.from({ length: 29 }, () => ({ created_at: same, message_body: 'Liked "Your visit is confirmed"', message_type: 'sms' })), { created_at: same, message_body: 'Wasps by the lanai door', message_type: 'sms' }];
+      const out = await jobCard.loadJobCardFacts('svc1', withTexts(onSite, rows), deps);
+      expect(out.notes.customerTexts).toEqual([{ date: '2026-09-03', text: 'Wasps by the lanai door' }]);
+    });
+
+    test('recruiting rows are excluded by the shared sms_log predicate (Codex r4)', async () => {
+      process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = 'true';
+      await jobCard.loadJobCardFacts('svc1', withTexts(onSite, []), deps);
+      expect(smsReads.grouped).toContain('recruitingSmsLogFilter');
+      // The real predicate drops job_* rows and keeps the rest.
+      const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
+      const sql = excludeRecruitingSmsLog(require('knex')({ client: 'pg' })('sms_log')).toString();
+      expect(sql).toContain('"message_type" is null or "sms_log"."message_type" not like');
+      expect(sql).toContain('job');
+    });
+
+    test('the texts window is the 14 ET days up to the visit day, never past now (owner 2026-10-03)', async () => {
+      const { textsWindow } = jobCard._test;
+      // A past visit: its own day closes the window.
+      const past = textsWindow('2026-09-04', new Date('2026-10-03T12:00:00Z'));
+      expect(past.since.toISOString()).toBe('2026-08-22T04:00:00.000Z');
+      expect(past.until.toISOString()).toBe('2026-09-05T04:00:00.000Z');
+      // Today's visit: up to this read, so a text sent inside the arrival window shows.
+      const now = new Date('2026-09-04T13:30:00Z');
+      expect(textsWindow('2026-09-04', now).until).toEqual(now);
+      // A future visit: still the 14 days before it, ending now.
+      const ahead = textsWindow('2026-09-10', now);
+      expect(ahead.since.toISOString()).toBe('2026-08-28T04:00:00.000Z');
+      expect(ahead.until).toEqual(now);
+      // The read uses exactly that window, whatever the visit's status or stamps.
+      process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = 'true';
+      await jobCard.loadJobCardFacts('svc1', withTexts({ status: 'rescheduled', actual_start_time: '2026-08-20T14:00:00Z' }, []), deps);
+      expect(smsReads.since.toISOString()).toBe('2026-08-22T04:00:00.000Z');
+      expect(smsReads.until.toISOString()).toBe('2026-09-05T04:00:00.000Z');
+    });
+
+    test('readiness builds never read texts or photos (Codex r1)', async () => {
+      process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = 'true';
+      process.env.GATE_VISIT_PREP_PHOTOS = 'true';
+      const spy = jest.spyOn(require('../services/visit-prep'), 'customerFlaggedFacts').mockResolvedValue(null);
+      try {
+        await jobCard.buildJobCard('svc1', { dbh: withTexts({}, []), readinessOnly: true, deps: { ...deps, protocols: {} }, now: new Date('2026-09-04T12:00:00Z') });
+        expect(smsReads.count).toBe(0);
+        expect(spy).not.toHaveBeenCalled();
+      } finally { spy.mockRestore(); delete process.env.GATE_VISIT_PREP_PHOTOS; }
+    });
+
+    test('on → an unreadable text history is null, not an empty list', async () => {
+      process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = 'true';
+      const out = await jobCard.loadJobCardFacts('svc1', withTexts({}, new Error('down')), deps);
+      expect(out.notes.customerTexts).toBeNull();
+    });
+
+    test('photos: only with GATE_VISIT_PREP_PHOTOS too, from the Visit Brief reader; ids and dates never scrubbed', async () => {
+      process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = 'true';
+      const visitPrep = require('../services/visit-prep');
+      const flagged = [{ id: 'sub1', sentAt: '2026-09-03T12:00:00.000Z', topic: 'pest', locationOnProperty: 'back_yard', note: 'Nest by gate 4545#', photoIds: ['aaaa-4545-bbbb'] }];
+      const spy = jest.spyOn(visitPrep, 'customerFlaggedFacts').mockResolvedValue(flagged);
+      try {
+        expect((await load({})).notes).not.toHaveProperty('prepPhotos');
+        expect(spy).not.toHaveBeenCalled();
+        process.env.GATE_VISIT_PREP_PHOTOS = 'true';
+        const out = await load({});
+        expect(out.notes.prepPhotos).toEqual([{ sentAt: '2026-09-03T12:00:00.000Z', topic: 'pest', locationOnProperty: 'back_yard', note: expect.not.stringContaining('4545'), photoIds: ['aaaa-4545-bbbb'] }]);
+        spy.mockRejectedValueOnce(new Error('down'));
+        expect((await load({})).notes).not.toHaveProperty('prepPhotos');
+        spy.mockResolvedValueOnce(null);
+        expect((await load({})).notes.prepPhotos).toBeNull();
+      } finally {
+        spy.mockRestore();
+        delete process.env.GATE_VISIT_PREP_PHOTOS;
+      }
+    });
+
     test('only exactly "true" turns it on', async () => {
       for (const v of ['1', 'TRUE', 'yes']) {
         process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = v;
-        expect((await load(booked)).notes).not.toHaveProperty('customerRequest');
+        const notes = (await load(booked)).notes;
+        expect(notes).not.toHaveProperty('customerRequest');
+        expect(notes).not.toHaveProperty('customerTexts');
       }
     });
   });
 
-  test('schedule readiness uses the resolver without generating or caching a paragraph, or returning private facts', async () => {
-    const callModel = jest.fn();
+  test('the full card is the template paragraph and writes nothing (model rewrite and cache removed 2026-10-03)', async () => {
+    const update = jest.fn();
+    const base = factsDb({ 'scheduled_services as ss': { ...visit(false), job_card: JSON.stringify({ source: 'model', text: 'An old cached model paragraph.' }) }, property_preferences: prefs });
+    const dbh = Object.assign(table => Object.assign(base(table), { update }), { raw: base.raw });
+    const card = await jobCard.buildJobCard('svc1', { dbh, deps: { getRecentCalls: async () => [], getHourly: async () => null, protocols: { programs: [] } }, now: new Date('2026-09-04T12:00:00Z') });
+    expect(card.paragraph.source).toBe('template');
+    expect(card.paragraph.text).toMatch(/^Pets: dog \(crated in garage\)/);
+    expect(card.paragraph.text).not.toContain('old cached');
+    expect(update).not.toHaveBeenCalled();
+    expect(jobCard).not.toHaveProperty('writeParagraph');
+    expect(jobCard).not.toHaveProperty('validateParagraph');
+  });
+
+  test('schedule readiness uses the resolver without building a paragraph, or returning private facts', async () => {
     const update = jest.fn();
     const base = factsDb({ 'scheduled_services as ss': visit(false), property_preferences: prefs });
     const dbh = Object.assign(table => Object.assign(base(table), { update }), { raw: base.raw });
     const result = await jobCard.buildJobCard('svc1', {
       dbh, readinessOnly: true,
-      deps: { callModel, getRecentCalls: async () => [], getHourly: async () => null, protocols: {} },
+      deps: { getRecentCalls: async () => [], getHourly: async () => null, protocols: {} },
       now: new Date('2026-09-04T12:00:00Z'),
     });
     expect(result).toEqual({ serviceId: 'svc1', checkedAt: '2026-09-04T12:00:00.000Z', issues: [{ kind: 'protocol', status: 'unknown', label: 'No products resolved' }] });
-    expect(callModel).not.toHaveBeenCalled();
     expect(update).not.toHaveBeenCalled();
   });
 
@@ -1412,10 +1358,8 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
     expect(await jobCard._test.loadRain7d(null, {}, '2026-06-20', { getAreaRainfall })).toBeNull();
   });
 
-  test('pet presence is a critical fact even without a securing plan (P1)', () => {
-    const facts = { ...baseFacts(), pets: 'dog' };
-    expect(jobCard._test.criticalFacts(facts)).toContain('dog');
-    expect(jobCard.validateParagraph('First visit on record.', jobCard.buildTemplateParagraph(facts), [], jobCard._test.criticalFacts(facts))).toBe('critical_fact_dropped');
+  test('pet presence is in the paragraph even without a securing plan (P1)', () => {
+    expect(jobCard.buildTemplateParagraph({ ...baseFacts(), pets: 'dog' })).toContain('Pets: dog');
   });
 });
 

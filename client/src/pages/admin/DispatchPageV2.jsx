@@ -91,9 +91,13 @@ import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
 import VisitCloseoutSheet from '../../components/admin/VisitCloseoutSheet';
 import {
   mergePostPaymentService,
+  shouldOpenTreeShrubFastComplete,
   shouldReopenCompletionAfterPayment,
   TERMINAL_VISIT_STATUSES,
 } from "../../lib/dispatchCompletionRouting";
+import FastCompleteTreeShrubSheet from "../../components/tech/FastCompleteTreeShrubSheet";
+import { shortAddress } from "../tech/visitBrief";
+import { serviceWindowLabel } from "../tech/routeStops";
 import { requestDispatchSync } from "../../lib/dispatchSync";
 
 const TechMatchPanel = lazy(
@@ -436,6 +440,9 @@ export default function DispatchPageV2({
   const [error, setError] = useState(null);
   const [products, setProducts] = useState([]);
   const [completingService, setCompletingService] = useState(null);
+  // Tree & Shrub Fast Complete (GATE_TS_FAST_COMPLETE): the one-screen sheet
+  // an eligible visit opens instead of CompletionPanel.
+  const [treeShrubFastService, setTreeShrubFastService] = useState(null);
   const [closingVisitId, setClosingVisitId] = useState(null);
   const [projectService, setProjectService] = useState(null);
   // In-place project editor (owner ask 2026-07-13): a project-backed visit's
@@ -604,7 +611,7 @@ export default function DispatchPageV2({
   const [treatmentPlanService, setTreatmentPlanService] = useState(null);
   const [auditContext, setAuditContext] = useState(null);
   const [selectedScheduleService, setSelectedScheduleService] = useState(null);
-  const ibSelectedService = detailService || selectedScheduleService || editingService || rescheduleService || completingService || continueProjectService;
+  const ibSelectedService = detailService || selectedScheduleService || editingService || rescheduleService || completingService || treeShrubFastService || continueProjectService;
   usePublishIntelligenceBarPageData({
     viewed_date: date,
     appointment_id: ibSelectedService?.id,
@@ -854,7 +861,10 @@ export default function DispatchPageV2({
     });
   }, []);
 
-  const handleComplete = useCallback((service) => {
+  // `fullForm` skips the Tree & Shrub sheet: the ?completeService deep link is
+  // where TechHomePage's own sheet sends its "Full form" escape, and the sheet
+  // mounted here uses it for the same escape.
+  const handleComplete = useCallback((service, { fullForm = false } = {}) => {
     // A durable resume marker means CompletionPanel already committed this
     // closeout and owes a replay — it bypasses the project-backed guard (a
     // cut-over typed visit can still carry a leftover linked project, and
@@ -876,6 +886,10 @@ export default function DispatchPageV2({
         return;
       }
       setProjectService(service);
+      return;
+    }
+    if (!fullForm && shouldOpenTreeShrubFastComplete(service)) {
+      setTreeShrubFastService(service);
       return;
     }
     setCompletingService(service);
@@ -903,7 +917,7 @@ export default function DispatchPageV2({
       // idempotency machinery replays it instead of double-submitting.
       alert(`That visit is already ${svc.status} — nothing to complete.`);
     } else {
-      handleComplete(svc);
+      handleComplete(svc, { fullForm: true });
     }
   }, [data, handleComplete]);
 
@@ -929,7 +943,10 @@ export default function DispatchPageV2({
   // (onCompletionResult, codex P1 #3187 r11) — both must flip the status,
   // invalidate the mobile week cache, and stage the payment handoff.
   const applyCompletionResult = useCallback(
-    (serviceId, r, body) => {
+    // `fallbackService`: the visit a caller other than CompletionPanel
+    // completed (the Tree & Shrub sheet), for a week-view row that is not in
+    // the selected day's list.
+    (serviceId, r, body, fallbackService = null) => {
       handleStatusChange(serviceId, "completed");
       // The mobile week list serves rows from its own cached /week payload —
       // completion was the one terminal transition that never invalidated
@@ -955,6 +972,7 @@ export default function DispatchPageV2({
       ) {
         const completedService =
           (data?.services || []).find((s) => s.id === serviceId) ||
+          fallbackService ||
           completingService;
         const handoff = {
           service: completedService,
@@ -1181,11 +1199,12 @@ export default function DispatchPageV2({
 
   return (
     <div className="min-h-full bg-surface-page font-sans text-zinc-900">
-      {/* "↻ Sync AI Data" — right-aligned, only visible on non-board sub-tabs.
+      {/* "↻ Sync AI Data" — right-aligned, only visible on non-board sub-tabs,
+          and only to an admin (POST /dispatch/sync is owner-only).
           The Schedule h1 + "+ Add Appointment" pill that used to share this
           row are now lifted into AdminDispatchPage so they sit above the
           centered top-level tab pill. */}
-      {activeTab !== "board" && viewMode === "day" && (
+      {activeTab !== "board" && viewMode === "day" && getAdminUser()?.role === "admin" && (
         <div className="hidden md:flex justify-end mb-4">
           {" "}
           <Button
@@ -1862,6 +1881,46 @@ export default function DispatchPageV2({
                 }
               : undefined
           }
+        />
+      )}
+      {treeShrubFastService && (
+        <FastCompleteTreeShrubSheet
+          key={treeShrubFastService.id}
+          service={{
+            id: treeShrubFastService.id,
+            customerName: treeShrubFastService.customer_name || treeShrubFastService.customerName,
+            serviceType: treeShrubFastService.service_type || treeShrubFastService.serviceType,
+            address: shortAddress(treeShrubFastService.address) || treeShrubFastService.address || "",
+            timeLabel: serviceWindowLabel(treeShrubFastService) || "",
+            // The visit the user opened, checked against the live context
+            // (same fields TechHomePage routes the sheet with).
+            routedCustomerId: treeShrubFastService.customerId || treeShrubFastService.customer_id || null,
+            routedScheduledDate: treeShrubFastService.scheduledDate || treeShrubFastService.scheduled_date || null,
+            routedPropertyId: "propertyId" in treeShrubFastService ? treeShrubFastService.propertyId : undefined,
+            routedAddress: typeof treeShrubFastService.address === "string" ? treeShrubFastService.address : null,
+          }}
+          request={adminFetch}
+          onClose={(options) => {
+            setTreeShrubFastService(null);
+            if (options?.refresh) {
+              setScheduleRefreshKey((k) => k + 1);
+              void fetchSchedule(date, { silent: true });
+            }
+          }}
+          onCompleted={(response) => {
+            // Same bookkeeping a CompletionPanel completion runs: flip the
+            // row to completed, invalidate the mobile week cache, stage the
+            // payment handoff for an unpaid invoice, refetch.
+            const service = treeShrubFastService;
+            setTreeShrubFastService(null);
+            applyCompletionResult(service.id, response, null, service);
+            void fetchSchedule(date, { silent: true });
+          }}
+          onFullForm={() => {
+            const service = treeShrubFastService;
+            setTreeShrubFastService(null);
+            handleComplete(service, { fullForm: true });
+          }}
         />
       )}
       {projectService && (

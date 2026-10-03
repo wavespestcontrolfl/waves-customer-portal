@@ -206,7 +206,8 @@ const APP_FIRST_TYPES = new Set([
   ...APPOINTMENT_UPDATE_TYPES, 'tech_en_route',
   'reminder_72h', 'appointment_reminder',
   'tech_arrived', 'service_complete', 'service_complete_with_invoice',
-  'service_complete_paid_receipt', 'service_complete_annual_prepay', 'service_complete_prepaid',
+  'service_complete_paid_receipt', 'service_complete_annual_prepay',
+  'service_complete_annual_prepay_after_first_visit', 'service_complete_prepaid',
   'service_report_v1', 'service_report_v1_with_invoice', 'receipt', 'deposit_receipt',
   'lawn_watering_instruction',
 ]);

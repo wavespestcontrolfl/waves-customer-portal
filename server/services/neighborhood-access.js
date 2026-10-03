@@ -16,6 +16,7 @@
 const db = require('../models/db');
 const { lookupCountyParcelByPoint, subdivisionBaseName } = require('./property-lookup/county-parcel-gis');
 const { SERVICE_AREA_COUNTY_ZIPS } = require('../config/county-zips');
+const { TECH_DEAD_ASSIGNMENT_STATUSES } = require('./technician-visit-scope');
 
 // The county module's subdivisionBaseName gives the estimator's base PLAT
 // (cut at PH/PHASE/UNIT/SEC/SECTION/PB) — deliberately narrow, because its
@@ -325,8 +326,8 @@ function sameStreetLine(a, b) {
 // text, Intelligence Bar — and any added later, with no hook in each; it needs
 // no time watermark, so a save that commits mid-pass is simply seen next pass,
 // and an unrelated preference edit never re-files a code the office retired.
-// A new code that differs from the one on file flags both and rings ONE
-// Customers bell per neighborhood.
+// A new code that differs from the one on file flags both for the office
+// (needs_confirm); the difference is logged on the Gate codes page, no bell.
 const SOURCE = 'profile';
 const UNCONFIRMED_MARK = 'is unconfirmed: confirm on site';
 const FINAL_OUTCOMES = new Set(['filed', 'duplicate', 'filed_conflict']);
@@ -395,7 +396,7 @@ async function fileOneSavedCode(customerId, lookup) {
   return db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customerId)]);
     const customer = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate()
-      .first('id', 'first_name');
+      .first('id');
     if (!customer) return { status: 'customer_gone' };
     const active = await trx('customer_properties').where({ customer_id: customerId, active: true }).forUpdate()
       .select('id', 'neighborhood_id');
@@ -439,15 +440,18 @@ async function fileOneSavedCode(customerId, lookup) {
           neighborhood_id = EXCLUDED.neighborhood_id, outcome = EXCLUDED.outcome, filed_at = now()`,
       [neighborhoodId, filed.status, customerId]);
     }
-    return { ...filed, neighborhoodId, firstName: customer.first_name || null };
+    return { ...filed, neighborhoodId };
   });
 }
 
+// Differing codes in one neighborhood are LOGGED, never rung (owner ruling
+// 2026-10-03): the entries carry needs_confirm, the Gate codes page lists
+// them under Needs confirm with the "Conflicting codes" marker, and the day
+// feed tags them "confirm on site". No admin bell is raised for them.
 const CONFLICT_KEY_PREFIX = 'neighborhood-gate-conflict:';
 
 // Two or more live codes in a neighborhood, at least one awaiting the office.
-// A switched-off neighborhood never conflicts: the directory hides it, so a
-// bell could not be resolved there (its open bell closes on the next pass).
+// A switched-off neighborhood never conflicts (the directory hides it).
 async function neighborhoodHasCodeConflict(conn, neighborhoodId) {
   const rows = await conn('neighborhood_access').where({ neighborhood_id: neighborhoodId })
     .whereIn('neighborhood_id', conn('neighborhoods').where({ active: true }).select('id'))
@@ -455,173 +459,36 @@ async function neighborhoodHasCodeConflict(conn, neighborhoodId) {
   return rows.length > 1 && rows.some((r) => r.status === 'needs_confirm');
 }
 
-// ONE Customers bell per neighborhood with conflicting live codes (rings
-// again only after a fix and a comeback); the name is the community's, never
-// a code. Opens that neighborhood in the directory, where the conflict is resolved.
-async function raiseConflictBell(neighborhoodId, customerId, firstName) {
-  const n = await db('neighborhoods').where({ id: neighborhoodId }).first('name');
-  const live = await db('neighborhood_access').where({ neighborhood_id: neighborhoodId })
-    .whereNotNull('code').whereNot('status', 'retired').count('* as n').first();
-  // At most 40 characters, cut at a word boundary.
-  const fullName = String(n?.name || 'A neighborhood');
-  const name = fullName.length <= 40 ? fullName : fullName.slice(0, 41).replace(/\s+\S*$/, '');
-  const who = firstName ? `${String(firstName).slice(0, 20)}'s update` : 'the latest update';
-  const { composeAdminAlert } = require('./admin-alert-compose');
-  const { raiseAdminAlertWithReopen } = require('./admin-alert-episodes');
-  const count = Number(live?.n) || 2;
-  const base = `${name} now has ${count} different gate codes on file`;
-  // The composer's why limit is 110; a long name drops the "after …" clause.
-  // A name the composer rejects (initials read as a second sentence, a
-  // bracket, an exclamation point) never costs the bell: drop the customer's
-  // name, then the community's.
-  const whys = [`${base} after ${who}.`, `${base}.`, `A neighborhood now has ${count} different gate codes on file.`];
-  let composed;
-  for (const why of whys) {
-    try {
-      composed = composeAdminAlert({
-        area: 'Customers',
-        action: 'confirm a neighborhood gate code',
-        why,
-        severity: 'needs-you',
-        link: `/admin/customers/gate-codes?neighborhood=${neighborhoodId}`,
-        subject: { type: 'customer', id: String(customerId) },
-        doneWhen: 'gate_code_confirmed',
-        who: 'person',
-      });
-      break;
-    } catch (err) {
-      if (err.code !== 'ADMIN_ALERT_RULE' || why === whys[whys.length - 1]) throw err;
-    }
-  }
-  return raiseAdminAlertWithReopen('customer', composed.headline, composed.why, {
-    dedupeKey: `${CONFLICT_KEY_PREFIX}${neighborhoodId}`,
-    dedupeVersion: 'v1',
-    refreshOnDedupe: true,
-    // A standing conflict's refresh (a third code, a newer customer) never
-    // re-rings a bell a person read; a real comeback after the conflict was
-    // resolved still rings (raiseAdminAlertWithReopen overrides this).
-    ringOnRefresh: () => false,
-    bellDefault: true,
-    link: composed.link,
-    // customerId top-level: the central internal-test-customer suppression reads it.
-    metadata: { ...composed.metadata, customerId: String(customerId), neighborhoodId },
-  });
-}
-
-// Every neighborhood that has a code conflict right now.
-async function conflictedNeighborhoods(conn) {
-  return conn('neighborhood_access as a')
-    .join('neighborhoods as n', 'n.id', 'a.neighborhood_id')
-    .where('n.active', true)
-    .whereNotNull('a.code').whereNot('a.status', 'retired')
-    .groupBy('a.neighborhood_id')
-    .havingRaw('count(*) > 1')
-    .havingRaw("bool_or(a.status = 'needs_confirm')")
-    .pluck('a.neighborhood_id');
-}
-
-// The customer the conflict bell opens: of the customers whose CURRENT code is
-// filed in this neighborhood and matches one of its unconfirmed codes, the one
-// whose code was filed last (filed_at moves only when the code itself changes:
-// the reset trigger clears the row on a change, a re-filing rewrites it — an
-// unrelated preference edit never does). Else the newest unconfirmed row's own
-// source customer. Internal test accounts are skipped: the bell's central
-// suppression would silence a conflict a real customer is part of. Null when
-// no customer record backs the conflict (the office tab, PR 3, lists it).
-async function conflictCustomer(conn, neighborhoodId) {
-  const { isInternalTestCustomerId } = require('./internal-test-customers');
-  const filed = (await conn.raw(`SELECT f.customer_id, c.first_name
-    FROM neighborhood_access_filings f
-    JOIN property_preferences pp ON pp.customer_id = f.customer_id
-    JOIN customers c ON c.id = f.customer_id AND c.deleted_at IS NULL
-    WHERE f.neighborhood_id = ? AND f.value_hash = ${VALUE_HASH_SQL}
-      AND EXISTS (SELECT 1 FROM neighborhood_access a
-        WHERE a.neighborhood_id = f.neighborhood_id AND a.status = 'needs_confirm'
-          AND a.code IS NOT NULL AND lower(a.code) = lower(${CANONICAL_VALUE_SQL}))
-    ORDER BY f.filed_at DESC, f.customer_id`, [neighborhoodId])).rows;
-  const sources = await conn('neighborhood_access as a')
-    .join('customers as c', 'c.id', 'a.source_customer_id')
-    .whereNull('c.deleted_at')
-    .where({ 'a.neighborhood_id': neighborhoodId, 'a.status': 'needs_confirm' })
-    .whereNotNull('a.code')
-    .orderBy('a.updated_at', 'desc')
-    .select('a.source_customer_id as customer_id', 'c.first_name');
-  const pick = [...filed, ...sources].find((r) => !isInternalTestCustomerId(r.customer_id));
-  return pick ? { customerId: pick.customer_id, firstName: pick.first_name || null } : null;
-}
-
-// Ring (or refresh) the bell for one conflicted neighborhood; false when no
-// customer backs it.
-async function ringForConflict(neighborhoodId) {
-  const who = await conflictCustomer(db, neighborhoodId);
-  if (!who) return false;
-  await raiseConflictBell(neighborhoodId, who.customerId, who.firstName);
-  return true;
-}
-
-// Raise the bell for a standing conflict that has none open (the raise after
-// filing failed, or the process stopped between the two). A bell a person
-// dismissed is still open by key and is left alone.
-async function reconcileConflictBells(alreadyRaised) {
-  const { openAdminAlertKeys } = require('./admin-alert-episodes');
-  const open = new Set(await openAdminAlertKeys(db, CONFLICT_KEY_PREFIX));
-  let raised = 0;
-  for (const neighborhoodId of await conflictedNeighborhoods(db)) {
-    if (alreadyRaised.has(neighborhoodId)) continue;
-    // A standing bell is refreshed quietly (refreshOnDedupe, ringOnRefresh
-    // false), so its link and wording follow the current code and a
-    // person's read stands; a missing one is raised.
-    const standing = open.has(`${CONFLICT_KEY_PREFIX}${neighborhoodId}`);
-    if (await ringForConflict(neighborhoodId) && !standing) raised += 1;
-  }
-  return raised;
-}
-
-// The emitter clears its own bells: a neighborhood whose codes no longer
-// conflict (the office confirmed or retired one) has its bell closed done.
-async function closeResolvedConflictBells() {
+// Bells raised before the ruling are closed: every open conflict bell,
+// whatever its neighborhood's codes look like now.
+async function retireConflictBells() {
   const { openAdminAlertKeys, closeAdminAlertKeys } = require('./admin-alert-episodes');
   const keys = await openAdminAlertKeys(db, CONFLICT_KEY_PREFIX);
-  const resolved = [];
-  for (const key of keys) {
-    if (!(await neighborhoodHasCodeConflict(db, key.slice(CONFLICT_KEY_PREFIX.length)))) resolved.push(key);
-  }
-  return closeAdminAlertKeys(db, resolved, 'gate_code_confirmed', {
-    // Not "one code again": two confirmed codes can be two real gates.
-    resolution: "Cleared: the neighborhood's gate codes no longer conflict",
+  if (!keys.length) return 0;
+  return closeAdminAlertKeys(db, keys, 'gate_code_confirmed', {
+    resolution: 'Cleared: gate code differences are logged on the Gate codes page, not rung',
   });
 }
 
-// The bell side of a pass: ring for the neighborhoods this pass touched that
-// now conflict, raise any standing conflict whose bell never landed, and close
-// the resolved ones. Returns how many touched neighborhoods conflict, and how
-// many bell steps failed so the pass reports them to job health.
-async function settleConflictBells(touched, logger) {
-  const raisedNow = new Set();
+// After a pass: how many touched neighborhoods now hold conflicting codes
+// (for the pass's log line), and any older conflict bell retired. Returns how
+// many steps failed so the pass reports them to job health.
+async function settleConflicts(touched, logger) {
   let failed = 0;
   let conflicts = 0;
   for (const neighborhoodId of touched) {
     try {
-      if (!(await neighborhoodHasCodeConflict(db, neighborhoodId))) continue;
-      conflicts += 1;
-      if (await ringForConflict(neighborhoodId)) raisedNow.add(neighborhoodId);
+      if (await neighborhoodHasCodeConflict(db, neighborhoodId)) conflicts += 1;
     } catch (err) {
       failed += 1;
-      logger.warn(`[neighborhood-access] conflict bell failed for neighborhood ${neighborhoodId} (${err.code || err.name || 'error'})`);
+      logger.warn(`[neighborhood-access] conflict check failed for neighborhood ${neighborhoodId} (${err.code || err.name || 'error'})`);
     }
   }
-  // A conflict filed earlier whose bell never landed is raised now.
   try {
-    await reconcileConflictBells(raisedNow);
+    await retireConflictBells();
   } catch (err) {
     failed += 1;
-    logger.warn(`[neighborhood-access] conflict bell reconcile failed (${err.code || err.name || 'error'})`);
-  }
-  try {
-    await closeResolvedConflictBells();
-  } catch (err) {
-    failed += 1;
-    logger.warn(`[neighborhood-access] conflict bell close failed (${err.code || err.name || 'error'})`);
+    logger.warn(`[neighborhood-access] conflict bell retire failed (${err.code || err.name || 'error'})`);
   }
   return { failed, conflicts };
 }
@@ -655,25 +522,17 @@ async function sweepSavedGateCodes({ lookup = lookupCountyParcelByPoint } = {}) 
       logger.warn(`[neighborhood-access] filing failed for customer ${customerId} (${err.code || err.name || 'error'})`);
     }
   }
-  const bells = await settleConflictBells(touched, logger);
+  const bells = await settleConflicts(touched, logger);
   return { customers: customerIds.length, tally, failed, bellsFailed: bells.failed, conflicts: bells.conflicts };
 }
 
-// ---- admin day-feed fallback (gate-code directory PR 3a) ---------------------
-// The neighborhood's gate entries for each visit, keyed by visit id, so the
-// office's day feed can show "Gate: …" for a customer with no gate code of
-// their own. The visit's own property (scheduled_services.property_id), else
-// the customer's ONE active property — and then only when the visit carries no
-// stamped service address, or one on that property's street and ZIP (a visit
-// can be stamped at another address with no property link); none or several
-// = no fallback. Shown:
-// confirmed entries (a code or instructions), and unconfirmed KEYPAD codes
-// (a conflict shows every code, flagged) — never an unconfirmed instruction,
-// which may be meant for one house only. Raw codes: staff surfaces only, never
-// an LLM prompt or a customer page.
-async function neighborhoodGateEntriesForVisits(conn, visits) {
-  const out = new Map();
-  if (!visits?.length) return out;
+// Visit id → the neighborhood its stop is in: the visit's own property, or
+// for a visit with no property the customer's ONLY active property when the
+// visit carries no stamped address or the same street and ZIP. A visit that
+// resolves to none is absent.
+async function visitNeighborhoodIds(conn, visits) {
+  const visitNeighborhood = new Map();
+  if (!visits?.length) return visitNeighborhood;
   const withProperty = visits.filter((v) => v.property_id);
   const withoutProperty = visits.filter((v) => !v.property_id && v.customer_id);
   const propertyNeighborhood = new Map();
@@ -696,7 +555,6 @@ async function neighborhoodGateEntriesForVisits(conn, visits) {
   // A real five-digit ZIP or nothing: two blank or malformed ZIPs never
   // "match" (the street alone does not establish the town).
   const zip5 = (z) => { const m = /^(\d{5})(?:-?\d{4})?$/.exec(String(z || '').trim()); return m ? m[1] : null; };
-  const visitNeighborhood = new Map();
   for (const v of visits) {
     let n = null;
     if (v.property_id) n = propertyNeighborhood.get(v.property_id);
@@ -710,6 +568,38 @@ async function neighborhoodGateEntriesForVisits(conn, visits) {
     }
     if (n) visitNeighborhood.set(v.id, n);
   }
+  return visitNeighborhood;
+}
+
+// The visits whose stop is in an ACTIVE neighborhood: where a gate code can
+// be added or marked wrong from the visit (routes/admin-neighborhood-access.js
+// lockVisitNeighborhood applies the same two tests).
+// A cancelled, skipped or no-show row never counts: the routes refuse it for
+// a technician (lockOwnedLiveVisit), so the screen must not offer it.
+async function gateActionVisitIds(conn, visits) {
+  const live = (visits || []).filter((v) => !TECH_DEAD_ASSIGNMENT_STATUSES.includes(v.status));
+  const visitNeighborhood = await visitNeighborhoodIds(conn, live);
+  if (!visitNeighborhood.size) return new Set();
+  const active = new Set(await conn('neighborhoods')
+    .whereIn('id', [...new Set(visitNeighborhood.values())]).where({ active: true }).pluck('id'));
+  return new Set([...visitNeighborhood].filter(([, n]) => active.has(n)).map(([visitId]) => visitId));
+}
+
+// ---- admin day-feed fallback (gate-code directory PR 3a) ---------------------
+// The neighborhood's gate entries for each visit, keyed by visit id, so the
+// office's day feed can show "Gate: …" for a customer with no gate code of
+// their own. The visit's own property (scheduled_services.property_id), else
+// the customer's ONE active property — and then only when the visit carries no
+// stamped service address, or one on that property's street and ZIP (a visit
+// can be stamped at another address with no property link); none or several
+// = no fallback. Shown:
+// confirmed entries (a code or instructions), and unconfirmed KEYPAD codes
+// (a conflict shows every code, flagged) — never an unconfirmed instruction,
+// which may be meant for one house only. Raw codes: staff surfaces only, never
+// an LLM prompt or a customer page.
+async function neighborhoodGateEntriesForVisits(conn, visits) {
+  const out = new Map();
+  const visitNeighborhood = await visitNeighborhoodIds(conn, visits);
   if (!visitNeighborhood.size) return out;
   const entries = await conn('neighborhood_access')
     .whereIn('neighborhood_id', [...new Set(visitNeighborhood.values())])
@@ -718,7 +608,7 @@ async function neighborhoodGateEntriesForVisits(conn, visits) {
     .where((w) => w.where('status', 'active')
       .orWhere((q) => q.where('status', 'needs_confirm').where('access_type', 'keypad').whereNotNull('code')))
     .orderBy([{ column: 'status' }, { column: 'gate_label' }, { column: 'code' }])
-    .select('neighborhood_id', 'gate_label', 'access_type', 'code', 'instructions', 'status');
+    .select('id', 'neighborhood_id', 'gate_label', 'access_type', 'code', 'instructions', 'status', 'flagged_wrong_at');
   const byNeighborhood = new Map();
   for (const e of entries) byNeighborhood.set(e.neighborhood_id, [...(byNeighborhood.get(e.neighborhood_id) || []), e]);
   for (const [visitId, n] of visitNeighborhood) {
@@ -738,8 +628,9 @@ module.exports = {
   parcelMatchesProperty,
   resolvePropertyNeighborhood,
   fileNeighborhoodCode,
-  closeResolvedConflictBells,
   countyHint,
   VALUE_HASH_SQL,
   neighborhoodGateEntriesForVisits,
+  visitNeighborhoodIds,
+  gateActionVisitIds,
 };

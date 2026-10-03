@@ -4,11 +4,10 @@
  * One read assembles what a tech needs in the driveway:
  *   strip      name / program line / phone, plus the access codes the strip
  *              renders tap-to-reveal (raw codes live ONLY here — never in
- *              the paragraph or the model payload)
- *   paragraph  the deterministic template from portal facts. A FAST-tier
- *              model rewrite over that template sits behind its own dark
- *              gate (GATE_JOB_CARD_LLM); cached per visit on
- *              scheduled_services.job_card by grounding hash
+ *              the paragraph)
+ *   paragraph  1–3 plain sentences, the deterministic template of portal
+ *              facts (the model rewrite was removed 2026-10-03: its
+ *              grounding validator rejected every attempt)
  *   sprayCheck per-product verdict against NWS hourly at the property
  *   products   the visit's protocol products as cards (verdict, short,
  *              planned amount, precautions, label/SDS, rotation, order)
@@ -16,18 +15,15 @@
  *              active rig (equipment_systems) with its tank volume for a
  *              full-tank dose on that rig
  *
- * Read-only apart from the paragraph cache. No comms of any kind.
+ * Read-only. No comms of any kind.
  */
 
-const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
-const MODELS = require('../config/models');
 const { gateEnvValue } = require('../config/feature-gates');
 const { treeShrubFieldGuide } = require('./tree-shrub-field-guide');
 const { resolveCatalogProductForName } = require('./completion-product-defaults');
 const { reviewedWeather, checkReviewedWeatherSources } = require('./product-label-weather');
-const { dispatchWithFallback } = require('./llm/call');
 const { getHourlyRainOutlook } = require('./weather-forecast');
 // The classifier that stamps service_records.service_line — a callback
 // visit is 'pest' there, so the history filter must agree.
@@ -44,12 +40,14 @@ const {
   itemHasNitrogen, itemHasPhosphorus, parseProtocolLines,
 } = require('./waveguard-plan-engine');
 const { stampedDivergesSql } = require('./stamped-address');
+const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
+const { isSmsReaction } = require('./sms-intent');
+const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
 const { convertInventoryQuantity, normalizeInventoryUnit } = require('./inventory-units');
 const { parsePackSize } = require('./product-costing');
 const { getAreaRainfall } = require('./lawn-water-area');
 const { latestComparableGroupApplication, evaluateWaveGuardManagerApprovals } = require('./waveguard-approval-engine');
 
-const PROMPT_VERSION = 'job_card_paragraph_v1';
 // Office fallback when a property has no coordinates — the same point the
 // day feed's current-conditions call uses (routes/admin-schedule.js).
 const SPRAY_WINDOW_HOURS = 4;
@@ -58,15 +56,6 @@ const MAX_PARAGRAPH_WORDS = 60;
 
 function jobCardEnabled() {
   return gateEnvValue('GATE_JOB_CARD');
-}
-
-// The paragraph's model rewrite is a SEPARATE dark gate from the card
-// (owner decision 2026-10-02, same call as GATE_PREVISIT_BRIEF_LLM): the
-// grounding validator rejected every attempt on both providers, so off
-// means no provider call and the template IS the paragraph. Read at call
-// time, exact 'true'.
-function paragraphLlmEnabled() {
-  return process.env.GATE_JOB_CARD_LLM === 'true';
 }
 
 // What the customer told us about THIS visit, on the card (owner "ok go"
@@ -110,7 +99,7 @@ function clean(value, max = 240) {
   const text = String(value || '').replace(/\s+/g, ' ').trim();
   if (!text) return '';
   // The same redactor the customer-assistant grounding uses: a code typed
-  // into a free-text note must not ride into the paragraph or the model.
+  // into a free-text note must not ride into the paragraph.
   return redactAccessCodes(text).slice(0, max);
 }
 /**
@@ -318,6 +307,89 @@ async function loadOpenIssues(dbh, customerId) {
  */
 // Calls between the previous visit and THIS visit's start: a historical
 // card must not show later conversations as its pre-visit context.
+// The texts window (owner ruling 2026-10-03: "last 14 days"): the 14 ET
+// days up to and including the visit's day, never past now. Deliberately
+// independent of last-visit and arrival records — "since the last visit"
+// had a corner for every lifecycle state (Codex #5685 r2–r8).
+const TEXTS_WINDOW_DAYS = 14;
+function textsWindow(scheduledDate, now = new Date()) {
+  const day = etCalendarDayOf(scheduledDate) || etDateString(now);
+  const dayStart = parseETDateTime(`${day}T00:00`);
+  const dayEnd = parseETDateTime(`${etDateString(addETDays(parseETDateTime(`${day}T12:00`), 1))}T00:00`);
+  const since = parseETDateTime(`${etDateString(addETDays(parseETDateTime(`${day}T12:00`), -(TEXTS_WINDOW_DAYS - 1)))}T00:00`);
+  return { since: since < dayStart ? since : dayStart, until: dayEnd < now ? dayEnd : now };
+}
+
+// The customer's own recent texts inside textsWindow. Inbound only; a
+// tapback quotes a Waves text and is never their words; an unresolved
+// review-ask reservation is not a delivered message; recruiting rows are
+// owner-only. null = unreadable (the card says so), never an empty history.
+const TEXTS_MAX = 3;
+const TEXTS_PAGE = 25;
+async function loadTextsSince(dbh, customerId, scheduledDate, now = new Date()) {
+  const { since, until } = textsWindow(scheduledDate, now);
+  try {
+    // Typed reactions are dropped in SQL; a tapback that only its body
+    // gives away is dropped here, so pages are read until three real texts
+    // are kept or the window itself runs out — no run of reactions hides
+    // the text before it. Pages step by position over a total order
+    // (created_at, then the unique id), so rows sharing a timestamp at a
+    // page edge are never skipped; a text landing mid-read can only repeat
+    // a row, which the id check drops.
+    const kept = [];
+    const seen = new Set();
+    for (let offset = 0; ; offset += TEXTS_PAGE) {
+      // The customer timeline's own exclusions: recruiting rows (an applicant
+      // who is also a customer; owner-only) and unresolved send reservations.
+      const rows = await excludeUnresolvedSendReservations(excludeRecruitingSmsLog(dbh('sms_log').where({ customer_id: customerId })))
+        .where('direction', 'inbound')
+        .whereRaw("COALESCE(sms_log.message_type, '') <> 'sms_reaction'")
+        .where('created_at', '>=', since)
+        .where('created_at', '<', until)
+        .select('id', 'created_at', 'message_body', 'message_type')
+        .orderBy('created_at', 'desc')
+        .orderBy('id', 'desc')
+        .limit(TEXTS_PAGE)
+        .offset(offset);
+      for (const r of rows) {
+        if (seen.has(r.id)) continue;
+        seen.add(r.id);
+        if (r.message_type === 'sms_reaction' || isSmsReaction(r.message_body)) continue;
+        const text = clean(r.message_body, 300);
+        if (text) kept.push({ date: etDateString(new Date(r.created_at)), text });
+        if (kept.length >= TEXTS_MAX) return kept;
+      }
+      if (rows.length < TEXTS_PAGE) return kept;
+    }
+  } catch (err) {
+    logger.warn(`[job-card] texts unavailable for ${customerId}: ${err.code || err.name || 'error'}`);
+    return null;
+  }
+}
+
+// Photos the customer sent before the visit (GATE_VISIT_PREP_PHOTOS's own
+// hardened reader — the Visit Brief's "Customer flagged"): topic, where,
+// their note and how many photos. The thumbnails come from
+// GET /admin/schedule/:id/visit-prep-photos, which owns the signing and
+// the reassignment recheck. Gate off or unreadable = no key.
+async function loadPrepPhotos(dbh, svc) {
+  if (!require('../config/feature-gates').visitPrepPhotosLive()) return undefined;
+  try {
+    const flagged = await require('./visit-prep').customerFlaggedFacts(svc, dbh);
+    if (!flagged?.length) return null;
+    return flagged.map((f) => ({
+      sentAt: f.sentAt,
+      topic: f.topic,
+      locationOnProperty: f.locationOnProperty,
+      note: clean(f.note, 500) || null,
+      photoIds: f.photoIds,
+    }));
+  } catch (err) {
+    logger.warn(`[job-card] prep photos unavailable for ${svc.id}: ${err.code || err.name || 'error'}`);
+    return undefined;
+  }
+}
+
 async function loadCallsSince(customerId, sinceInstant, deps = {}, untilInstant = null) {
   const read = deps.getRecentCalls || ((id, opts) => contextAggregator.getRecentCalls(id, opts));
   const rows = await read(customerId, { sentinelOnError: true });
@@ -427,7 +499,7 @@ function unavailable(message, cause) {
   return err;
 }
 
-async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
+async function loadJobCardFacts(serviceId, dbh = db, deps = {}, { displayContext = true } = {}) {
   const svc = await dbh('scheduled_services as ss')
     .join('customers as c', 'ss.customer_id', 'c.id')
     .leftJoin('services as s', 'ss.service_id', 's.id')
@@ -438,7 +510,7 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
       // row); null on legacy rows booked before the catalog link existed.
       dbh.raw('COALESCE(ss.service_category_snapshot, s.category) as service_category'),
       dbh.raw('COALESCE(ss.service_key_snapshot, s.service_key) as service_key'),
-      'ss.job_card', 'ss.job_card_generated_at', 'ss.assigned_equipment_system_id', 'ss.assigned_calibration_id', 'ss.window_start',
+      'ss.assigned_equipment_system_id', 'ss.assigned_calibration_id', 'ss.window_start',
       'c.first_name', 'c.last_name', 'c.phone', 'c.lawn_water_area_id',
       dbh.raw(`${visitPinSql('lat', 'latitude')} as latitude`),
       dbh.raw(`${visitPinSql('lng', 'longitude')} as longitude`),
@@ -462,16 +534,22 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
     loadOpenIssues(dbh, svc.customer_id),
     loadAddons(dbh, svc.id),
   ]);
-  const [calls, rain7d] = await Promise.all([
-    loadCallsSince(svc.customer_id, lastVisit?.startedAt || null, deps, svc.scheduled_date ? serviceStartInstant(etCalendarDayOf(svc.scheduled_date), svc.window_start) : null),
+  const visitStart = svc.scheduled_date ? serviceStartInstant(etCalendarDayOf(svc.scheduled_date), svc.window_start) : null;
+  // Display-only context is for the full card: the dispatch board's
+  // readiness poll (every visit, every minute) never reads it.
+  const customerContext = displayContext && customerContextEnabled();
+  const [calls, rain7d, texts, prepPhotos] = await Promise.all([
+    loadCallsSince(svc.customer_id, lastVisit?.startedAt || null, deps, visitStart),
     serviceLine === 'lawn' ? loadRain7d(dbh, svc, etCalendarDayOf(svc.scheduled_date), deps) : Promise.resolve(null),
+    customerContext ? loadTextsSince(dbh, svc.customer_id, svc.scheduled_date) : Promise.resolve(undefined),
+    customerContext ? loadPrepPhotos(dbh, svc) : Promise.resolve(undefined),
   ]);
 
   const alternateAddress = Boolean(svc.address_diverges);
   const propertyPrefs = alternateAddress ? null : prefs;
-  // Every code on file is scrubbed from the grounding and checked in the
-  // model output even when none is shown: a primary-home code pasted into a
-  // visit note must not surface on an alternate-address card.
+  // Every code on file is scrubbed from the facts even when none is shown:
+  // a primary-home code pasted into a visit note must not surface on an
+  // alternate-address card.
   const knownCodes = accessCodes(prefs);
   const codes = alternateAddress ? [] : knownCodes;
   const lastVisitFact = lastVisit ? (({ startedAt, ...rest }) => rest)(lastVisit) : null;
@@ -494,22 +572,30 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
     windowStart: svc.window_start || null,
     access: { codes },
     // Display copies of the notes, complete and code-scrubbed: the facts
-    // below are bounded for the model grounding and may lose a restriction
-    // stated later in the text.
-    notes: scrubKnownCodes({
-      instructions: clean(propertyPrefs?.special_instructions, 2000) || null,
-      visitNotes: clean(svc.notes, 2000) || null,
-      chemicalSensitivity: propertyPrefs?.chemical_sensitivities ? (clean(propertyPrefs.chemical_sensitivity_details, 2000) || 'yes') : null,
-      petsSecured: clean(propertyPrefs?.pets_secured_plan, 2000) || null,
-      // Only with the gate on, so the payload is byte-identical off.
-      ...(customerContextEnabled() ? { customerRequest: customerRequestNote(svc) } : {}),
-    }, knownCodes),
+    // below are bounded for the paragraph and may lose a restriction stated
+    // later in the text.
+    notes: {
+      ...scrubKnownCodes({
+        instructions: clean(propertyPrefs?.special_instructions, 2000) || null,
+        visitNotes: clean(svc.notes, 2000) || null,
+        chemicalSensitivity: propertyPrefs?.chemical_sensitivities ? (clean(propertyPrefs.chemical_sensitivity_details, 2000) || 'yes') : null,
+        petsSecured: clean(propertyPrefs?.pets_secured_plan, 2000) || null,
+        // Only with the gate on, so the payload is byte-identical off.
+        ...(customerContext ? { customerRequest: customerRequestNote(svc) } : {}),
+      }, knownCodes),
+      // Texts and photos carry dates and photo ids; only their words are
+      // scrubbed, so a code that happens to be digits never mangles an id.
+      ...(customerContext ? {
+        customerTexts: texts && texts.map((t) => ({ ...t, text: scrubKnownCodes(t.text, knownCodes) })),
+        ...(prepPhotos !== undefined ? { prepPhotos: prepPhotos && prepPhotos.map((p) => ({ ...p, note: scrubKnownCodes(p.note, knownCodes) })) } : {}),
+      } : {}),
+    },
     knownCodes,
     // No pin (none stored, or the stamped address diverges from the primary
     // one) → no forecast at all: an office forecast would judge a property
     // elsewhere in the service area, and a verdict is acted on.
     coords: coords ? { ...coords, source: 'property' } : { lat: null, lng: null, source: 'none' },
-    // Model-safe facts. Nothing below carries a code or a phone number:
+    // The paragraph's facts. Nothing below carries a code or a phone number:
     // keyword redaction in clean(), then the known code values themselves.
     facts: scrubKnownCodes({
       // Pets are the primary home's too: unknown at an alternate address.
@@ -533,22 +619,18 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
       irrigation: serviceLine === 'lawn' ? wateringLine(propertyPrefs) : null,
       rain7d: alternateAddress ? null : rain7d,
     }, knownCodes),
-    cache: { stored: parseJson(svc.job_card), generatedAt: svc.job_card_generated_at || null },
   };
 }
 
 // ── Paragraph ───────────────────────────────────────────────────────────────
 
 /**
- * Deterministic 1–3 sentences from the facts, bounded to MAX_PARAGRAPH_WORDS
- * the same way the validator bounds model output: when populated records run
- * long, the lowest-value parts go first (drop rank, highest first; a part
+ * Deterministic 1–3 sentences from the facts, bounded to MAX_PARAGRAPH_WORDS:
+ * when populated records run long, the lowest-value parts go first (drop rank, highest first; a part
  * with an `alt` shrinks to it before it goes). Pets, the pet plan, codes on
  * file, chemical sensitivity, away mode, urgent requests, the visit-history
  * line and the lawn irrigation line are never dropped — if those alone
- * exceed the limit the paragraph runs long rather than lose one. Used
- * verbatim when the model leg misses and as the grounding the model may
- * rephrase.
+ * exceed the limit the paragraph runs long rather than lose one.
  */
 function buildTemplateParagraph(facts, { isLawn = false } = {}) {
   const parts = [];
@@ -606,179 +688,17 @@ function buildTemplateParagraph(facts, { isLawn = false } = {}) {
   return text;
 }
 
-// The validator's own count (whitespace tokens of the trimmed text).
+// Whitespace tokens of the trimmed text.
 function wordCount(text) {
   const body = String(text || '').trim();
   return body ? body.split(/\s+/).length : 0;
 }
 
-const SYSTEM_PROMPT = [
-  'You rewrite a technician\'s pre-visit notes into one short paragraph of one to three plain sentences.',
-  'Keep every fact that is given. Add nothing. No emojis, no bullet points, no headings, no greetings.',
-  'Never invent numbers, names, dates or codes. If a line says a code is on file, say it is on file and can be shown — never print a code.',
-  'Write for a technician standing in the driveway: direct, present tense, at most 60 words.',
-  'Answer with the paragraph only.',
-].join(' ');
-
-const EMOJI_RE = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u;
-const NEGATION_RE = /\b(?:no|not|never|none|nothing|without|free of)\b|n't\b/;
-
-/**
- * Model output is accepted only when it is 1–3 sentences, ≤ 60 words, carries
- * no emoji, no bullet/heading markup, no code-looking token, every critical
- * fact, and every clause inside one grounding clause with its polarity.
- */
-function validateParagraph(text, grounding, codes = [], critical = []) {
-  // Raw text on purpose: the code check below must see a code as written.
-  // (The context-aggregator redactor is NOT run on model output — it masks
-  // every token near the words "gate code", which the paragraph legitimately
-  // says; the known-code + grounded-number checks are the leak guard here.)
-  const body = cleanRaw(text, 600);
-  if (!body) return 'empty';
-  if (/^[-*#>]/m.test(body) || /\n/.test(String(text || '').trim())) return 'markup';
-  if (EMOJI_RE.test(body)) return 'emoji';
-  const sentences = body.split(/(?<=[.!?])\s+/).filter(Boolean);
-  if (sentences.length < 1 || sentences.length > 3) return 'sentence_count';
-  if (wordCount(body) > MAX_PARAGRAPH_WORDS) return 'too_long';
-  const lower = body.toLowerCase();
-  const codeRe = knownCodePattern(codes);
-  if (codeRe && codeRe.test(body)) return 'code_leak';
-  // A rewrite that drops a safety-critical fact is not a rewrite.
-  if (critical.some((fact) => fact && !lower.includes(String(fact).toLowerCase()))) return 'critical_fact_dropped';
-  // Clause by clause against the grounding (see clauseMismatch).
-  return clauseMismatch(body, grounding);
-}
-
-/**
- * Facts the model may rephrase but never omit: chemical sensitivity, the
- * pet-securing plan, urgent open requests. Each must appear verbatim
- * (case-insensitive) in the accepted paragraph.
- */
-function criticalFacts(facts) {
-  const out = [];
-  if (facts.chemicalSensitivity) out.push(facts.chemicalSensitivity === 'yes' ? 'sensitiv' : facts.chemicalSensitivity);
-  if (facts.petsSecured) out.push(facts.petsSecured);
-  for (const issue of facts.issues || []) if (issue.urgent && issue.text) out.push(issue.text);
-  // Current away mode: the paragraph is the only place the card says it.
-  if (facts.awayUntil) out.push(facts.awayUntil);
-  // Pet presence: the only pet warning when no securing plan is recorded.
-  if (facts.pets) out.push(facts.pets);
-  return out;
-}
-
-const CONTEXT_STOPWORDS = new Set(['a', 'an', 'the', 'on', 'of', 'and', 'is', 'are', 'in', 'at', 'to', 'with', 'for', 'has', 'have', 'was', 'were', 'from', 'by', 'that', 'this', 'it', 'its', 'or', 'as', 'be', 'about', 'per', 'last', 'next', 'no', 'not', 'there', 'you', 'your', 'can', 'will', 'any', 'all', 'so', 'if', 'but', 'also', 'then', 'they', 'them', 'their', 'one',
-  // Function words a rewrite adds freely; never a fact on their own.
-  'over', 'under', 'here', 'into', 'onto', 'after', 'before', 'during', 'while', 'when', 'where', 'which', 'who', 'what', 'how', 'than', 'still', 'just', 'now', 'only', 'very', 'much', 'more', 'most', 'some', 'such', 'each', 'every', 'other', 'same', 'both', 'too', 'again', 'ever', 'already', 'yet', 'once', 'out', 'up', 'down', 'off', 'back', 'please', 'today', 'customer', 'we', 'our', 'he', 'she', 'his', 'her', 'i', 'my', 'do', 'does', 'did', 'done', 'been', 'being', 'am', 'may', 'might', 'should', 'would', 'could', 'must', 'shall',
-  "isn't", "aren't", "wasn't", "weren't", "don't", "doesn't", "didn't", "hasn't", "haven't", "won't", "can't", "cannot"]);
-// Loose stem so "dogs" grounds "dog" and "sprayed" grounds "spray".
-const stem = (w) => (w.length > 3 && w.endsWith('s') ? w.slice(0, -1) : w).slice(0, 6);
-function contextWords(text) {
-  // "Mon/Thu" is two words.
-  return String(text || '').toLowerCase().split(/[\s/]+/).map((w) => w.replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '')).filter(Boolean);
-}
-// Clauses: the template's facts are comma / colon / dash separated inside
-// one sentence, and "and" joins whole clauses — so that is the grain a
-// rewrite is checked at. A parenthetical stays with its fact ("dog (crated
-// in garage)" is one clause).
-function clauses(text) {
-  return String(text || '').split(/[,;:.!?]|\s[—–-]\s|\band\b/).map((c) => c.replace(/[()]/g, ' ').trim().toLowerCase()).filter(Boolean);
-}
-function contentStems(text) {
-  return contextWords(text).filter((w) => !CONTEXT_STOPWORDS.has(w)).map(stem);
-}
-// Every rewritten clause must sit inside ONE grounding clause — all of its
-// content words (numbers included), with the same polarity. Words from two
-// facts recombined into one clause ("Dog at side gate" over "Pets: dog,
-// side gate"), an invented word ("Dog secured."), a moved number ("20
-// dogs") or a reversed instruction ("No side gate.") are not rephrases.
-function clauseMismatch(body, grounding) {
-  const src = clauses(grounding).map((c) => ({ negated: NEGATION_RE.test(c), stems: new Set(contentStems(c)) }));
-  for (const c of clauses(body)) {
-    const stems = contentStems(c);
-    if (!stems.length) continue;
-    const within = src.filter((g) => stems.every((w) => g.stems.has(w)));
-    if (!within.length) return 'ungrounded_clause';
-    const negated = NEGATION_RE.test(c);
-    if (!within.some((g) => g.negated === negated)) return 'polarity_flip';
-  }
-  return null;
-}
-
-function groundingHash(template) {
-  return crypto.createHash('sha256').update(`${PROMPT_VERSION}|${template}`).digest('hex');
-}
-
-/**
- * Model-written paragraph over the template grounding. Returns
- * { text, source: 'model' | 'template' }. Never throws.
- */
-async function writeParagraph(template, codes = [], deps = {}, critical = []) {
-  const fallback = { text: template, source: 'template' };
-  if (!template) return fallback;
-  if (!paragraphLlmEnabled()) return fallback;
-  if (!deps.callModel && !process.env.ANTHROPIC_API_KEY && !process.env.OPENAI_API_KEY) return fallback;
-  const validate = (result) => validateParagraph(result?.text, template, codes, critical);
-  const callModel = deps.callModel
-    || ((payload, opts) => dispatchWithFallback(MODELS.TEXT_POLICIES.jobCardParagraph, {
-      laneId: 'job_card_paragraph',
-      promptVersion: PROMPT_VERSION,
-      jsonMode: false,
-      maxTokens: 300,
-      reasoningEffort: 'none',
-      timeoutMs: 12000,
-      ...payload,
-    }, opts));
-  try {
-    const resp = await callModel({ system: SYSTEM_PROMPT, text: `Notes:\n${template}` }, { validate });
-    if (!resp?.ok || !resp.text) {
-      logger.warn(`[job-card] paragraph miss (${resp?.reason || 'no text'}); using template`);
-      return fallback;
-    }
-    // Defense in depth for injected call paths that skip the dispatcher's
-    // per-leg validate hook.
-    if (validateParagraph(resp.text, template, codes, critical)) return fallback;
-    return { text: cleanRaw(resp.text, 600), source: 'model' };
-  } catch (err) {
-    logger.warn(`[job-card] paragraph failed: ${err.message}; using template`);
-    return fallback;
-  }
-}
-
-/**
- * Paragraph for one visit with the per-visit cache. A cached model
- * paragraph whose grounding hash matches is returned as-is; a cached
- * template is retried (a miss must not pin the template forever). The
- * write is compare-and-swap on job_card_generated_at so a concurrent
- * regeneration with fresher facts is never overwritten.
- */
-async function paragraphForVisit(facts, { dbh = db, deps = {} } = {}) {
-  const template = buildTemplateParagraph(facts.facts, { isLawn: facts.isLawn });
-  const hash = groundingHash(template);
-  const stored = facts.cache.stored;
-  if (!paragraphLlmEnabled()) {
-    // Gate off: the template is the paragraph. A stored template for the
-    // same grounding is a hit (no write per read); anything else — a cached
-    // model paragraph included — is replaced by the template below.
-    if (stored?.grounding_hash === hash && stored.source === 'template' && stored.text === template) {
-      return { text: template, source: 'template', cached: true };
-    }
-  } else if (stored?.grounding_hash === hash && stored.source === 'model' && stored.text) {
-    return { text: stored.text, source: 'model', cached: true };
-  }
-  const written = await writeParagraph(template, facts.knownCodes || facts.access.codes, deps, criticalFacts(facts.facts));
-  const row = { version: PROMPT_VERSION, grounding_hash: hash, text: written.text, source: written.source };
-  const prior = facts.cache.generatedAt;
-  await dbh('scheduled_services')
-    .where({ id: facts.serviceId })
-    .where(function sameGeneration() {
-      if (prior) this.where('job_card_generated_at', prior);
-      else this.whereNull('job_card_generated_at');
-    })
-    .update({ job_card: JSON.stringify(row), job_card_generated_at: new Date() })
-    // Knex error messages carry the SQL with its bindings — the paragraph
-    // itself. Log the visit and the driver code only, never the message.
-    .catch((err) => logger.warn(`[job-card] cache write skipped for ${facts.serviceId}: ${err.code || err.name || 'error'}`));
-  return { ...written, cached: false };
+// The card's paragraph: the template, built fresh on every read. Nothing is
+// stored — scheduled_services.job_card (the old model-paragraph cache) is
+// no longer read or written.
+function paragraphForVisit(facts) {
+  return { text: buildTemplateParagraph(facts.facts, { isLawn: facts.isLawn }), source: 'template' };
 }
 
 // ── Spray check ─────────────────────────────────────────────────────────────
@@ -1598,14 +1518,14 @@ function dispatchReadiness({ facts, lines, blocks, sprayCheck, tank, isToday, no
 }
 
 async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), includePricing = false, readinessOnly = false } = {}) {
-  const facts = await loadJobCardFacts(serviceId, dbh, deps);
+  const facts = await loadJobCardFacts(serviceId, dbh, deps, { displayContext: !readinessOnly });
   if (!facts) return null;
   const protocols = deps.protocols || require('../config/protocols.json');
 
   // The spray-check limits are judged from the appointment start.
   const serviceInstant = serviceDayInstant(facts.scheduledDate, now, facts.windowStart);
   const [paragraph, catalog, calibrations, systems, { isToday, hourly }] = await Promise.all([
-    readinessOnly ? null : paragraphForVisit(facts, { dbh, deps }),
+    readinessOnly ? null : paragraphForVisit(facts),
     loadCatalog(dbh),
     loadRigCalibrations(dbh),
     loadRigSystems(dbh),
@@ -1943,23 +1863,38 @@ function fieldGuideLineProduct(name, products) {
   return byId.size === 1 ? [...byId.values()][0] : null;
 }
 
+// The standard order for one product, computed here rather than taken from a
+// client: the same pack-size rule the job card's "Order more" shows (one pack
+// in the inventory unit). Used to bound a technician's restock request
+// (codex #5733 r3). null when the product is unknown or inactive;
+// { unavailable: true } when the job card itself would withhold ordering.
+async function standardOrderFor(productId, { dbh = db } = {}) {
+  const product = await dbh('products_catalog').where({ id: productId })
+    .where(function activeProducts() { this.where({ active: true }).orWhereNull('active'); })
+    .first('id', 'name', 'inventory_unit', 'rate_unit', 'best_price_amount_cached');
+  if (!product) return null;
+  const packSizes = await loadPackSizes(dbh, [product.id]);
+  // The job card withholds ordering when the pack lookup fails or a verified
+  // pack cannot be read or converted: so does this (no one-unit guess). With
+  // no pack mapping at all, orderFor's own rule is one unit (codex #5733 r4).
+  const order = packSizes ? orderFor(product, packSizes[product.id], null, { includePricing: false }) : null;
+  if (!order || !(order.quantity > 0)) return { name: product.name, unavailable: true };
+  return { name: product.name, quantity: order.quantity, unit: order.unit || product.inventory_unit || product.rate_unit || null };
+}
+
 module.exports = {
+  standardOrderFor,
   jobCardEnabled,
-  paragraphLlmEnabled,
   customerContextEnabled,
   buildJobCard,
   mixForProduct,
   loadJobCardFacts,
   buildTemplateParagraph,
-  validateParagraph,
-  writeParagraph,
   paragraphForVisit,
   buildSprayCheck,
   buildMixAmount,
   tankFromCalibrations,
   resolveVisitProducts,
   resolveVisitLines,
-  PROMPT_VERSION,
-  SYSTEM_PROMPT,
-  _test: { fieldGuideLineProduct, dispatchReadiness, accessCodes, petLine, loadRain7d, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, criticalFacts, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, clauseMismatch, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations },
+  _test: { fieldGuideLineProduct, dispatchReadiness, accessCodes, petLine, loadRain7d, wateringLine, precautionText, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations, textsWindow },
 };
