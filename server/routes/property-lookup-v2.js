@@ -1364,6 +1364,8 @@ function parseGeocodeResult(result) {
   };
 }
 
+const GEOCODE_AREA_ONLY_TYPES = new Set(['country', 'administrative_area_level_1', 'administrative_area_level_2', 'political']);
+
 async function geocodeAddress(address, timeoutMs = DEFAULT_MAPS_TIMEOUT_MS) {
   const mapsKey = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY;
   if (!mapsKey) throw new Error('No GOOGLE_MAPS_API_KEY or GOOGLE_API_KEY configured');
@@ -1374,6 +1376,15 @@ async function geocodeAddress(address, timeoutMs = DEFAULT_MAPS_TIMEOUT_MS) {
     const data = await resp.json();
     if (data.status !== 'OK' || !data.results?.length) {
       throw new Error(`Geocode failed: ${data.status}`);
+    }
+    // The FL components filter does not refuse an out-of-state address: it
+    // falls back to the filter area itself ("Florida, USA", APPROXIMATE,
+    // partial — live 10-02 for an Illinois address), a state-center point the
+    // lookup would otherwise treat as the property. A state/county/country-
+    // only answer is a failed geocode, never a location.
+    const resultTypes = data.results[0].types || [];
+    if (resultTypes.length && resultTypes.every((t) => GEOCODE_AREA_ONLY_TYPES.has(t))) {
+      throw new Error('Geocode failed: OUTSIDE_SERVICE_STATE');
     }
     const geo = parseGeocodeResult(data.results[0]);
     if (!geo) throw new Error('Geocode failed: result missing geometry');

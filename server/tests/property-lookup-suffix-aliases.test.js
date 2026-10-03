@@ -185,3 +185,27 @@ describe('typed house-number override', () => {
     expect(audit).toMatchObject({ houseNumber: 14386, hasExactMatch: false });
   });
 });
+
+describe('round-2 hard-address fixes', () => {
+  const { routeSpellingVariants } = require('../services/property-lookup/route-spellings');
+  test('a street named "Avenue <letter>" also searches the spelled-out roll form', () => {
+    expect(routeSpellingVariants('100 AVE B')).toEqual(['100 AVE B', '100 AVENUE B']);
+    expect(routeSpellingVariants('AVE B')).toEqual(['AVE B', 'AVENUE B']);
+    // An ordinary street ending in AVE is untouched.
+    expect(routeSpellingVariants('EXAMPLE AVE')).toEqual(['EXAMPLE AVE']);
+  });
+
+  test('Charlotte situs queries never read the mailing ZIP', async () => {
+    const { queryStreetSitusAddresses } = require('../services/property-lookup/county-parcel-gis');
+    const realFetch = global.fetch;
+    global.fetch = jest.fn().mockResolvedValue({ ok: true, json: async () => ({ features: [{ attributes: { FullPropertyAddress: '100       EXAMPLE TER', propertyaddress: 'EXAMPLE TER', zipcode: '34000' } }] }) });
+    try {
+      const r = await queryStreetSitusAddresses('Charlotte', 'EXAMPLE TER');
+      const outFields = new URL(global.fetch.mock.calls[0][0]).searchParams.get('outFields');
+      expect(outFields).not.toMatch(/zipcode/i);
+      expect(r.zips).toEqual([null]);
+    } finally {
+      global.fetch = realFetch;
+    }
+  });
+});

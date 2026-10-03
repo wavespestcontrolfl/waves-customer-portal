@@ -802,7 +802,11 @@ const SITUS_ONLY_LAYER_URLS = {
 const SITUS_ZIP_FIELDS = {
   Manatee: 'SITUS_POSTAL_ZIP',
   Sarasota: 'loczip',
-  Charlotte: 'zipcode',
+  // Charlotte: none. The layer's `zipcode` belongs to the MAILING address
+  // group (mailingaddress / mailingaddress2 / city / zipcode — live 10-02),
+  // so an absentee owner's home ZIP was read as the parcel's and a real
+  // number was flagged "only in ZIP <owner's>". No situs ZIP field exists;
+  // unknown = in scope (the audit's fail-open rule).
   Hillsborough: 'SiteZip',
 };
 

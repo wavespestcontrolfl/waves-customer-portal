@@ -62,6 +62,35 @@ describe('geocodeAddress (property lookup)', () => {
     await expect(geocodeAddress('100 Example Creek Way')).rejects.toThrow('Geocode failed: ZERO_RESULTS');
   });
 
+  test('an out-of-state address the filter falls back to "Florida, USA" is a failure, not a state-center point', async () => {
+    mockGeocode({
+      status: 'OK',
+      results: [{
+        formatted_address: 'Florida, USA',
+        types: ['administrative_area_level_1', 'political'],
+        partial_match: true,
+        geometry: { location: { lat: 27.66, lng: -81.51 }, location_type: 'APPROXIMATE' },
+        address_components: [],
+      }],
+    });
+
+    await expect(geocodeAddress('100 Example Rd, Exampleville, IL 60000')).rejects.toThrow('Geocode failed: OUTSIDE_SERVICE_STATE');
+  });
+
+  test('a street-level result with types still geocodes', async () => {
+    mockGeocode({
+      status: 'OK',
+      results: [{
+        formatted_address: '100 Example Creek Way, Parrish, FL 34219, USA',
+        types: ['street_address'],
+        geometry: { location: { lat: 27.5, lng: -82.4 }, location_type: 'ROOFTOP' },
+        address_components: [],
+      }],
+    });
+
+    await expect(geocodeAddress('100 Example Creek Way')).resolves.toMatchObject({ lat: 27.5 });
+  });
+
   test('a missing key still fails before any request', async () => {
     delete process.env.GOOGLE_MAPS_API_KEY;
     delete process.env.GOOGLE_API_KEY;
