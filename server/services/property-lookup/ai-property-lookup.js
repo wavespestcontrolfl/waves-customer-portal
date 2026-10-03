@@ -3050,12 +3050,16 @@ function extractTrailingCountyCity(normalizedText) {
 const COUNTY_STREET_SUFFIXES = [...CANONICAL_STREET_SUFFIX_SET]
   .sort((x, y) => y.length - x.length || (x < y ? -1 : 1))
   .join('|');
-// "…ends with a street suffix" — canonical forms plus every spelled-out or
-// variant form in the USPS table, because extractTrailingCountyCity runs
-// BEFORE the suffix replacements in normalizeCountyStreetLine.
+// "…ends with a street suffix", for the directional-city ambiguity only
+// ("45th St West Bradenton": is WEST the street's or the city's?). This stays
+// on the HISTORICAL suffix set on purpose: with every USPS word here, a name
+// word that is also a suffix ("Harbor Island West Bradenton") would hand the
+// city's WEST to the street and the real "100 HARBOR ISLAND" would never be
+// searched (codex #5661 r3). Runs BEFORE the suffix replacements, so the
+// spelled-out forms are listed.
 const PRE_DIRECTION_STREET_SUFFIX_RE = new RegExp(
-  `\\b(?:${COUNTY_STREET_SUFFIXES}|${Object.keys({ ...USPS_STREET_SUFFIXES, ...STREET_SUFFIX_SUPPLEMENTAL_ALIASES })
-    .sort((x, y) => y.length - x.length || (x < y ? -1 : 1)).join('|')})$`,
+  '\\b(?:AVE|BLVD|BND|CIR|CT|CV|DR|GLN|HWY|LN|LOOP|PASS|PATH|PKWY|PL|PLZ|PT|RD|RUN|SQ|ST|TER|TRCE|TRL|WALK|WAY|XING'
+  + '|AVENUE|BEND|BOULEVARD|CIRCLE|COURT|COVE|CROSSING|DRIVE|GLEN|HIGHWAY|LANE|PARKWAY|PLACE|PLAZA|POINT|POINTE|ROAD|SQUARE|STREET|TERRACE|TRACE|TRAIL)$',
 );
 // The two "digit-led token after a suffix is a unit" heuristics stay on the
 // historical suffix set on purpose: a number after one of the newer USPS words

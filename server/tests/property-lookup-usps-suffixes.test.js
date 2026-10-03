@@ -278,3 +278,11 @@ describe('codex r2: spelled-out keys and Charlotte situs locality', () => {
     expect(parsed._situsZip).not.toBe('10001');
   });
 });
+
+describe('codex r3: directional city vs the wider suffix set', () => {
+  test('a name word that is also a USPS suffix does not take the city\'s WEST', () => {
+    expect(norm('100 Harbor Island West Bradenton FL 34209')).toBe('100 HARBOR ISLAND');
+    // The historical suffixes keep the street's direction, as before.
+    expect(norm('4506 45th Street West Bradenton FL 34209')).toBe('4506 45TH ST W');
+  });
+});
