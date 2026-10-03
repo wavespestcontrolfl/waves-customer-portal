@@ -191,15 +191,26 @@ function cardLines(holds) {
   });
 }
 
-// One card per visit per ET day per arrival time. The read-side check also
-// honors a card a dispatcher already resolved (a re-run must not bring it
-// back); a card superseded because the visit's time moved is for the OLD
-// window, so the new window gets its own check. The advisory lock (a lock key,
-// never a visit row) closes the race between two writers.
+// Dedupe rule: one card per visit, ET day and booked window. A prior card
+// BLOCKS a new one only when it is
+//   (a) still OPEN (resolved_at IS NULL), or
+//   (b) resolved BY A PERSON: a dispatcher's Resolve or the queue's Clear. A
+//       person's resolve writes resolved_at/resolved_by and nothing else,
+//       while every system close (resolveAlert({ auto: true }): the status
+//       hook, the queue-read guard, this sweep's stale cleanup) also stamps
+//       payload.superseded_at. resolved_by is NOT the marker: the status hook
+//       passes the transitioning actor as resolvedBy on an auto close.
+// A card the system superseded does NOT block: the visit moved away and back,
+// or a transient predicate failure closed it, and no person ever dismissed it.
+// It is recreated only when cardStillValid is true again (the publish step
+// re-reads the visit) AND the spray check still says hold; an unchanged
+// visit has its open card, so a repeat run writes nothing. The advisory lock
+// (a lock key, never a visit row) serializes two writers.
 async function alreadyCarded(dbh, jobId, day, windowStart) {
   const row = await dbh('dispatch_alerts')
     .where({ type: TYPE, job_id: jobId })
     .whereRaw("payload->>'for_date' = ? AND payload->>'window_start' IS NOT DISTINCT FROM ?", [day, windowStart ?? null])
+    .whereRaw("(resolved_at IS NULL OR payload->>'superseded_at' IS NULL)")
     .first('id');
   return Boolean(row);
 }

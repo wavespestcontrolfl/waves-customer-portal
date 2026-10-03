@@ -51,6 +51,7 @@ const ctxFor = (lines, over = {}) => ({
 });
 const baseLine = (product, over = {}) => ({ raw: 'Broadleaf step', role: 'base', selected: true, product, ...over });
 
+let txQueue = Promise.resolve();
 // A tiny knex stand-in: the visits query, the dedupe read, and a transaction.
 function fakeDb({ visits = [{ id: 'visit-1', service_type: 'Lawn Care Visit', window_start: '09:00:00' }], alerts = [], visitState = {} } = {}) {
   const store = alerts;
@@ -67,19 +68,27 @@ function fakeDb({ visits = [{ id: 'visit-1', service_type: 'Lawn Care Visit', wi
       join: () => c, whereNull: () => c, orderBy: () => c,
       whereIn: (col, vals) => { dbh.whereInCalls.push([col, vals]); return c; },
       where: (arg) => { if (arg && typeof arg === 'object') Object.assign(state.where, arg); return c; },
-      whereRaw: (sql, b) => { state.bindings = b; return c; },
+      whereRaw: (sql, b) => { if (b) state.bindings = b; return c; },
       // leftJoin/limit/orderBy are the stale-card read: read-only, no forUpdate on the fake.
       leftJoin: () => c, limit: () => c,
       select: async () => (String(table).startsWith('dispatch_alerts') ? openCards() : visits),
       first: async () => (table === 'scheduled_services' ? stateOf(state.where.id) : store.find((a) => a.job_id === state.where.job_id && a.type === state.where.type
-        && a.payload.for_date === state.bindings[0] && (a.payload.window_start ?? null) === state.bindings[1])),
+        && a.payload.for_date === state.bindings[0] && (a.payload.window_start ?? null) === state.bindings[1]
+        // Mirrors the dedupe SQL: an open card, or one a PERSON resolved (no superseded_at stamp).
+        && (!a.resolved_at || !a.payload.superseded_at))),
     };
     return c;
   };
   const dbh = (table) => chain(table);
   dbh.whereInCalls = [];
   dbh.raw = jest.fn(async () => ({}));
-  dbh.transaction = async (fn) => { const trx = (t) => chain(t); trx.raw = dbh.raw; return fn(trx); };
+  // The per-visit advisory lock: transactions run one at a time (shared across db instances).
+  dbh.transaction = (fn) => {
+    const trx = (t) => chain(t); trx.raw = dbh.raw;
+    const run = txQueue.then(() => fn(trx));
+    txQueue = run.catch(() => {});
+    return run;
+  };
   return dbh;
 }
 
@@ -89,7 +98,7 @@ function deps({ ctx, fc, alerts }) {
     loadContext: jest.fn(async () => ctx),
     fetchForecast: jest.fn(async () => fc),
     createAlert: jest.fn(async ({ type, severity, jobId, payload }) => { const row = { id: `alert-${alerts.length + 1}`, type, severity, job_id: jobId, payload, resolved_at: null }; alerts.push(row); return row; }),
-    resolveAlert: jest.fn(async ({ id }) => { const a = alerts.find((x) => x.id === id); a.resolved_at = 'NOW'; a.auto = true; return a; }),
+    resolveAlert: jest.fn(async ({ id, auto }) => { const a = alerts.find((x) => x.id === id); a.resolved_at = 'NOW'; a.auto = true; if (auto) a.payload = { ...a.payload, superseded_at: 'NOW' }; return a; }),
   };
 }
 
@@ -551,6 +560,108 @@ describe('one arrival drives the check, the forecast request, the card text and 
     const d = deps({ ctx: ctxFor([baseLine(herbicide)], { windowStart: '13:00:00', arrival: now, arrivalSource: 'now' }), fc: forecast({ rain: { 2: 0.3 }, prob: 80, base }), alerts });
     await Sweep.runSweep({ dbh: fakeDb({ alerts, visits: [{ id: 'visit-1', service_type: 'Lawn Care Visit', window_start: '13:00:00' }] }), now, deps: d });
     expect(alerts[0].payload.lines[0]).toMatch(/0\.3 in of rain forecast in the 6 h from now/);
+  });
+});
+
+describe('dedupe: only an open card or a person\'s resolve blocks a new one', () => {
+  beforeEach(() => { process.env.GATE_LAWN_PREDAY_SPRAY_CHECK = 'true'; jest.clearAllMocks(); });
+  afterEach(() => { delete process.env.GATE_LAWN_PREDAY_SPRAY_CHECK; });
+
+  const live = () => ({ id: 'visit-1', status: 'confirmed', scheduled_date: DAY, window_start: '09:00:00' });
+  const visits = [{ id: 'visit-1', service_type: 'Lawn Care Visit', window_start: '09:00:00' }];
+  const sweep = (alerts, visitState, d, { today = true } = {}) =>
+    Sweep.runSweep({ dbh: fakeDb({ alerts, visits: today ? visits : [], visitState }), now: NOW, deps: d });
+  const open = (alerts) => alerts.filter((a) => !a.resolved_at);
+
+  test('moved away and back to the same day and window: recarded once (the auto-superseded card does not block)', async () => {
+    const alerts = [];
+    const state = { 'visit-1': live() };
+    const d = deps({ ctx: ctxFor([baseLine(herbicide)]), fc: forecast({ wind: 30 }), alerts });
+    expect(await sweep(alerts, state, d)).toMatchObject({ carded: 1 });
+    Object.assign(state['visit-1'], { scheduled_date: '2026-10-09' });          // moved away
+    expect(await sweep(alerts, state, d, { today: false })).toMatchObject({ superseded: 1, carded: 0 });
+    expect(open(alerts)).toHaveLength(0);
+    expect(alerts[0].payload.superseded_at).toBeTruthy();
+    Object.assign(state['visit-1'], { scheduled_date: DAY });                    // and back
+    expect(await sweep(alerts, state, d)).toMatchObject({ carded: 1, duplicate: 0 });
+    expect(open(alerts)).toHaveLength(1);
+    expect(alerts).toHaveLength(2);
+  });
+
+  test('a card a person resolved is never recarded for that date and window, across any number of runs', async () => {
+    const alerts = [];
+    const state = { 'visit-1': live() };
+    const d = deps({ ctx: ctxFor([baseLine(herbicide)]), fc: forecast({ wind: 30 }), alerts });
+    await sweep(alerts, state, d);
+    Object.assign(alerts[0], { resolved_at: '2026-10-03T12:00:00Z', resolved_by: 'tech-1' }); // a dispatcher's Resolve: no superseded_at
+    for (let i = 0; i < 3; i += 1) expect(await sweep(alerts, state, d)).toMatchObject({ carded: 0, duplicate: 1 });
+    expect(alerts).toHaveLength(1);
+  });
+
+  test('a system close that carries a resolved_by (the status hook passes the actor) is still an auto close', async () => {
+    const alerts = [];
+    const state = { 'visit-1': live() };
+    const d = deps({ ctx: ctxFor([baseLine(herbicide)]), fc: forecast({ wind: 30 }), alerts });
+    await sweep(alerts, state, d);
+    Object.assign(alerts[0], { resolved_at: 'NOW', resolved_by: 'tech-1', payload: { ...alerts[0].payload, superseded_at: 'NOW' } });
+    expect(await sweep(alerts, state, d)).toMatchObject({ carded: 1 });
+  });
+
+  test('auto-superseded and the visit is still invalid: nothing is written (no flapping)', async () => {
+    const alerts = [];
+    const state = { 'visit-1': live() };
+    const d = deps({ ctx: ctxFor([baseLine(herbicide)]), fc: forecast({ wind: 30 }), alerts });
+    await sweep(alerts, state, d);
+    state['visit-1'].status = 'on_site';                                          // went on site by mistake
+    await sweep(alerts, state, d, { today: false });
+    expect(open(alerts)).toHaveLength(0);
+    // Still invalid when a run reaches the publish step (the visit query saw it earlier): the re-read refuses.
+    const out = await sweep(alerts, state, d);
+    expect(out).toMatchObject({ stale: 1, carded: 0 });
+    expect(open(alerts)).toHaveLength(0);
+    // Set back to confirmed: recarded.
+    state['visit-1'].status = 'confirmed';
+    expect(await sweep(alerts, state, d)).toMatchObject({ carded: 1 });
+  });
+
+  test('the spray check must still say hold: a recreated card needs a current hold', async () => {
+    const alerts = [];
+    const state = { 'visit-1': live() };
+    await sweep(alerts, state, deps({ ctx: ctxFor([baseLine(herbicide)]), fc: forecast({ wind: 30 }), alerts }));
+    Object.assign(state['visit-1'], { scheduled_date: '2026-10-09' });
+    await sweep(alerts, state, deps({ ctx: ctxFor([baseLine(herbicide)]), fc: forecast({ wind: 30 }), alerts }), { today: false });
+    Object.assign(state['visit-1'], { scheduled_date: DAY });
+    const calm = deps({ ctx: ctxFor([baseLine(herbicide)]), fc: forecast({ wind: 5 }), alerts });
+    expect(await sweep(alerts, state, calm)).toMatchObject({ held: 0, carded: 0 });
+    expect(open(alerts)).toHaveLength(0);
+  });
+
+  test('three runs with nothing changed write exactly one card', async () => {
+    const alerts = [];
+    const state = { 'visit-1': live() };
+    const d = deps({ ctx: ctxFor([baseLine(herbicide)]), fc: forecast({ wind: 30 }), alerts });
+    const outs = [];
+    for (let i = 0; i < 3; i += 1) outs.push(await sweep(alerts, state, d));
+    expect(outs.map((o) => o.carded)).toEqual([1, 0, 0]);
+    expect(outs.map((o) => o.superseded)).toEqual([0, 0, 0]);
+    expect(alerts).toHaveLength(1);
+    expect(d.createAlert).toHaveBeenCalledTimes(1);
+  });
+
+  test('two runs at once under the advisory lock write one card', async () => {
+    const alerts = [];
+    const state = { 'visit-1': live() };
+    const d = deps({ ctx: ctxFor([baseLine(herbicide)]), fc: forecast({ wind: 30 }), alerts });
+    const [a, b] = await Promise.all([sweep(alerts, state, d), sweep(alerts, state, d)]);
+    expect(a.carded + b.carded).toBe(1);
+    expect(a.duplicate + b.duplicate).toBe(1);
+    expect(alerts).toHaveLength(1);
+  });
+
+  test('the dedupe SQL reads open-or-person-resolved, keyed on date and window', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/lawn-preday-spray-check.js'), 'utf8');
+    expect(src).toContain('"(resolved_at IS NULL OR payload->>\'superseded_at\' IS NULL)"');
+    expect(src).toContain("payload->>'for_date' = ? AND payload->>'window_start' IS NOT DISTINCT FROM ?");
   });
 });
 
