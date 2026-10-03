@@ -452,6 +452,22 @@ function isTermiteService(serviceType) {
   return TERMITE_RE.test(String(serviceType || ""));
 }
 
+// The closeout's customer-interaction choice is stored as a code
+// (complete-scheduled-service.js CUSTOMER_INTERACTION_CHOICES). The writer
+// and the fact check read it as plain words, so "good talking with you" or
+// "sorry I missed you" has a report line that backs it (replay 2026-10-03:
+// drafts citing the bare code were refused as unsupported).
+const INTERACTION_TEXT = {
+  tech_home_spoke_with_them: "The customer was home. I talked with them in person; we spoke during the visit.",
+  not_home_full_access: "The customer was not home, so I missed them. I had full access to the property.",
+  not_home_partial_access: "The customer was not home, so I missed them. I had only partial access to the property.",
+  customer_specific_concern: "The customer was home and raised a specific concern with me.",
+};
+function interactionText(value) {
+  const code = String(value || "").trim();
+  return INTERACTION_TEXT[code] || code.replace(/_/g, " ");
+}
+
 function reportValueText(value) {
   if (value == null || value === "") return "";
   if (Array.isArray(value)) return value.map(reportValueText).filter(Boolean).join(", ");
@@ -467,7 +483,7 @@ async function serviceReportFacts(serviceRecordId) {
     if (typeof notes === "string") notes = JSON.parse(notes);
     if (!notes || typeof notes !== "object") return [];
     return REPORT_FIELDS
-      .map(([key, label]) => ({ label, text: redactAccessCodes(reportValueText(notes[key])).slice(0, 800) }))
+      .map(([key, label]) => ({ label, text: redactAccessCodes(key === "customerInteraction" && typeof notes[key] === "string" ? interactionText(notes[key]) : reportValueText(notes[key])).slice(0, 800) }))
       .filter((f) => f.text.trim());
   } catch (err) {
     logger.warn(`[review-drafter] tech voice: service report read failed (serviceRecordId=${serviceRecordId} errType=${err?.name || "Error"})`);
@@ -632,7 +648,7 @@ function buildTechVoiceFacts({ firstName, serviceType, techName, serviceDaysAgo,
       if (c.call_summary) lines.push(`- Call ${i + 1} (${c.direction || "inbound"}, ${stampTag(c.created_at)}): ${String(c.call_summary).slice(0, 600)}`);
     });
     const withTranscript = ctx.calls.find((c) => c.transcript);
-    if (withTranscript) lines.push("", `NEWEST CALL TRANSCRIPT (${stampTag(withTranscript.created_at)}, excerpt):`, String(withTranscript.transcript).slice(0, MAX_TRANSCRIPT_CHARS));
+    if (withTranscript) lines.push("", `NEWEST CALL TRANSCRIPT (${/^inbound/i.test(String(withTranscript.direction || "")) ? "inbound" : "outbound"}, ${stampTag(withTranscript.created_at)}, excerpt):`, String(withTranscript.transcript).slice(0, MAX_TRANSCRIPT_CHARS));
   }
   if (ctx.sms.length) {
     lines.push("", "TEXT THREAD (oldest first):");
@@ -689,6 +705,36 @@ function emailWhen(serviceDaysAgo) {
   return serviceDaysAgo != null ? `sent ${serviceDaysAgo} days after the visit` : "sent after the visit";
 }
 
+// The places a detail may come from: exactly what detailsReject accepts
+// (customerOwnWords). The writer still sees everything else, to understand
+// the visit, but a detail built on it is refused; said here so the first
+// draft cites a real source (replay 2026-10-03: 13 of 16 first texts fell
+// back, almost all for a quote from a call summary, a Waves text or a header
+// line).
+const TECH_VOICE_SOURCES = `SOURCES (mandatory): every specific detail in your text must come from one of these places, and its source_quote must be copied from there exactly:
+- the SERVICE REPORT lines (the words after the label, never the label itself);
+- texts marked [customer] in the TEXT THREAD (the words after the bracket);
+- EMAILS FROM THE CUSTOMER;
+- lines that start with "Caller:" in a call transcript marked inbound.
+Everything else is BACKGROUND, there so you understand the visit: the lines at the top (names, service, today), the PHONE CALLS summaries, texts marked [waves], "Agent:" lines, any transcript marked outbound, and review messages already sent. Never build a detail on background and never quote it. If a personal moment appears only in background, leave it out and use something from a source.`;
+
+// What the writer is told when a draft is refused: the rule it broke, not
+// only its name.
+const REDRAFT_HINT = {
+  ungrounded_detail: "a source_quote was not copied exactly from a SOURCE (see SOURCES): quote only the service report, [customer] texts, the customer's emails or Caller lines of an inbound call, word for word, and drop any detail that has no such quote",
+  detail_not_supported: "a source_quote did not back the detail it was listed for: each detail needs the SOURCE words that state it",
+  detail_not_in_body: "a detail's text was not in the body: each detail's text must be copied exactly from your body",
+  no_details: "no details were listed: list each specific detail with its source_quote",
+  area_list: "it listed treated areas: name at most one place",
+  result_claim: "it claimed a result or a repair: say what you saw or did, never how it turned out",
+  unsupported_sentence: "a sentence said something the SOURCES do not state: keep only what they state",
+};
+function redraftNote(reject) {
+  const reason = String(reject || "").replace(/_/g, " ");
+  const hint = REDRAFT_HINT[reject];
+  return `YOUR PREVIOUS DRAFT WAS REJECTED (${reason}${hint ? `: ${hint}` : ""}). Write a new one that follows every rule.`;
+}
+
 function buildTechVoiceSystemPrompt(stepKind, serviceDaysAgo) {
   const sms = stepKind !== "email";
   const step = (TECH_VOICE_STEP[stepKind] || TECH_VOICE_STEP.followup).replace("{WHEN}", emailWhen(serviceDaysAgo));
@@ -711,7 +757,9 @@ ${sms ? `- At most 300 characters including the literal placeholder {review_url}
 - Never use the words: safe, safely, non-toxic, chemical-free, EPA, guarantee, minute, minutes, hour, hours, until, dry, re-entry. No drying times, re-entry times, clock times, or instructions about pets, kids or lawn access.
 - Never mention call recordings, transcripts or "our records".
 
-Return ONLY JSON: {"body": "<the ${sms ? "text" : "paragraph"}>", "details": [{"text": "<a specific detail exactly as it appears in your body>", "source_quote": "<the exact words from the data it came from>"}]}. List every specific detail you used; at least one.`;
+${TECH_VOICE_SOURCES}
+
+Return ONLY JSON: {"body": "<the ${sms ? "text" : "paragraph"}>", "details": [{"text": "<a specific detail exactly as it appears in your body>", "source_quote": "<the exact words it came from, copied from a SOURCE>"}]}. List every specific detail you used; at least one. Do not list the customer's name, your own name or the service name as details.`;
 }
 
 function parseTechVoiceJson(text) {
@@ -1033,7 +1081,11 @@ function isGreetingOnlySentence(sentence, names, techNames = names) {
   if (!words.length || !words.every((w) => GREETING_WORDS.has(w) || names.has(w))) return false;
   if (!words.some((w) => SELF_INTRO_WORDS.has(w))) return true;
   // The customer's name greets ("Hi Marta!"); only the technician's introduces.
-  const intro = INTRO_RE.exec(String(sentence).trim());
+  // A leading greeting to the customer by name ("Kevin, it's Adam.", "Hi
+  // Kevin, it's Adam.") is cut first: what is left must be the introduction.
+  const lead = /^(?:(?:hi|hey|hello)\s+)?([a-z'-]+)\s*[,!]\s*/i.exec(String(sentence).trim());
+  const greeted = lead && names.has(lead[1].toLowerCase()) && !techNames.has(lead[1].toLowerCase());
+  const intro = INTRO_RE.exec(String(sentence).trim().slice(greeted ? lead[0].length : 0));
   return !!intro && (String(intro[1]).toLowerCase().match(/[a-z']+/g) || []).every((w) => techNames.has(w));
 }
 
@@ -1422,7 +1474,7 @@ async function techVoiceOutcome({ customer, recipientFirstName, recipientName, s
         return { outcome: "fallback", reason: reject };
       }
       logger.info(`[review-drafter] tech voice rejected (customerId=${customer.id} step=${sequenceStep ?? 0} attempt=${attempt} reason=${reject})`);
-      note = `YOUR PREVIOUS DRAFT WAS REJECTED (${reject.replace(/_/g, " ")}). Write a new one that follows every rule.`;
+      note = redraftNote(reject);
       if (attempt === 2) return { outcome: "fallback", reason: reject };
     }
     return { outcome: "fallback", reason: "no_draft" };
@@ -1571,7 +1623,7 @@ const ReviewAskDrafter = {
   verifyEmailIntro,
   verifyTechVoiceDraft,
   etCalendarDayOf,
-  __private: { normalizeSmsPunctuation, etCalendarDaysBetween, etCalendarDayOf, resolveStepKind, personFirstName, unknownProperNoun, ungroundedTerm, detailSupportedByQuote, factCheckTechVoice, repeatCheckTechVoice, isAskOnlySentence, isGreetingOnlySentence, legCapture, quoteSharesContent, sentenceClauses, callerTurns, notTechVoice, timingUnsupported, listsTreatedAreas, techVoiceSentences, buildTechVoiceFacts, customerOwnWords },
+  __private: { redraftNote, buildTechVoiceSystemPrompt, normalizeSmsPunctuation, etCalendarDaysBetween, etCalendarDayOf, resolveStepKind, personFirstName, unknownProperNoun, ungroundedTerm, detailSupportedByQuote, factCheckTechVoice, repeatCheckTechVoice, isAskOnlySentence, isGreetingOnlySentence, legCapture, quoteSharesContent, sentenceClauses, callerTurns, notTechVoice, timingUnsupported, listsTreatedAreas, techVoiceSentences, buildTechVoiceFacts, customerOwnWords },
 };
 
 module.exports = ReviewAskDrafter;
