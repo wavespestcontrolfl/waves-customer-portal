@@ -30,8 +30,8 @@
  * request (`clefBodyOverhead(state, questions)`); `callWorkersAIDecision`
  * re-checks the serialized body before it fetches.
  *
- * Result: `{ ok:true, images:[{ dataUrl, bytes, width, height, sha256 }] }` (askPackage
- * takes these records or bare data-URL strings; index-aligned
+ * Result: `{ ok:true, images:[{ dataUrl, bytes, width, height, sha256 }] }` (frozen
+ * records; askPackage accepts ONLY these, never bare strings; index-aligned
  * with the input; `bytes` is the JPEG byte length, `sha256` is over the bytes
  * sent) or `{ ok:false, reason, images:[], ... }` with reason `invalid_input`,
  * `too_many_images`, `undecodable_image` or `over_budget`. Never throws.
@@ -103,14 +103,25 @@ function clefBodyOverhead(state, questions) {
 // Each image's data URL is a JSON string in the body: quotes and a comma.
 const framedLength = (items) => totalLength(items) + items.length * 3;
 
+// Every record this fitter returns is frozen and remembered here: askPackage
+// sends ONLY these (isFittedImage), so whatever reaches Clef was decoded and
+// re-encoded by sharp in this module, never caller-supplied bytes that merely
+// start with an image signature (Codex #5666 r3).
+const FITTED = new WeakSet();
+const isFittedImage = (record) => record !== null && typeof record === 'object' && FITTED.has(record);
+
 function finish(items) {
-  return items.map(({ buffer, width, height }) => ({
-    dataUrl: `${DATA_URL_PREFIX}${buffer.toString('base64')}`,
-    bytes: buffer.length,
-    width,
-    height,
-    sha256: sha256Of(buffer),
-  }));
+  return items.map(({ buffer, width, height }) => {
+    const record = Object.freeze({
+      dataUrl: `${DATA_URL_PREFIX}${buffer.toString('base64')}`,
+      bytes: buffer.length,
+      width,
+      height,
+      sha256: sha256Of(buffer),
+    });
+    FITTED.add(record);
+    return record;
+  });
 }
 
 async function fitImagesForClef(buffers, { budgetBytes = DEFAULT_BUDGET_BYTES, maxImages = DEFAULT_MAX_IMAGES, reserveBytes = 0 } = {}) {
@@ -145,4 +156,4 @@ async function fitImagesForClef(buffers, { budgetBytes = DEFAULT_BUDGET_BYTES, m
   return { ok: false, reason: 'over_budget', images: [], budgetBytes: budget, bestBytes: bestLength };
 }
 
-module.exports = { fitImagesForClef, clefBodyOverhead, MAX_INPUT_PIXELS, LADDER, DEFAULT_BUDGET_BYTES, DEFAULT_MAX_IMAGES };
+module.exports = { fitImagesForClef, isFittedImage, clefBodyOverhead, MAX_INPUT_PIXELS, LADDER, DEFAULT_BUDGET_BYTES, DEFAULT_MAX_IMAGES };

@@ -8,7 +8,7 @@ jest.mock('../services/typed-decisions/packages', () => {
   const actual = jest.requireActual('../services/typed-decisions/packages');
   const pkg = actual.PACKAGES['sms_courtesy.v1'];
   const withSlots = (slots) => Object.freeze({ ...pkg, id: `photo_check_${slots}.v1`, imageSlots: slots });
-  const extra = { 'photo_check_2.v1': withSlots(2), 'photo_check_0.v1': withSlots(0), 'photo_check_x.v1': Object.freeze({ ...pkg, id: 'photo_check_x.v1', imageSlots: '2' }) };
+  const extra = { 'photo_check_2.v1': withSlots(2), 'photo_check_0.v1': withSlots(0), 'photo_check_5.v1': withSlots(5), 'photo_check_x.v1': Object.freeze({ ...pkg, id: 'photo_check_x.v1', imageSlots: '2' }) };
   return { ...actual, packageFor: (id) => extra[id] || actual.packageFor(id) };
 });
 
@@ -18,7 +18,15 @@ const { ROUTES } = require('../config/models');
 const fixtureHashes = require('../fixtures/typed-decisions/package-hashes.json');
 
 const STATE = { previous_waves_text: null, customer_text: 'synthetic text' };
-const IMG = 'data:image/jpeg;base64,AAAA';
+const sharp = require('sharp');
+const { fitImagesForClef } = require('../services/typed-decisions/image-budget');
+const BARE = 'data:image/jpeg;base64,AAAA';
+let IMG; // a record fitImagesForClef returned
+beforeAll(async () => {
+  const jpeg = await sharp({ create: { width: 64, height: 48, channels: 3, background: '#4a7' } }).jpeg().toBuffer();
+  const fit = await fitImagesForClef([jpeg]);
+  [IMG] = fit.images;
+});
 const OK = { ok: true, json: { is_courtesy_only: { type: 'noul', noul: 0.1 } }, servedModel: 'clef-flash' };
 
 describe('askPackage images', () => {
@@ -54,14 +62,24 @@ describe('askPackage images', () => {
   test('Clef with a package that declares slots passes the images through the Clef route', async () => {
     const result = await askPackage('photo_check_2.v1', STATE, { provider: 'cloudflare', images: [IMG, IMG] });
     expect(result.ok).toBe(true);
-    expect(mockDispatch).toHaveBeenCalledWith(ROUTES.typedDecisionClef, expect.objectContaining({ images: [IMG, IMG], laneId: 'typed_decisions_clef' }));
+    expect(mockDispatch).toHaveBeenCalledWith(ROUTES.typedDecisionClef, expect.objectContaining({ images: [IMG.dataUrl, IMG.dataUrl], laneId: 'typed_decisions_clef' }));
   });
 
-  test('fitImagesForClef records ({ dataUrl, ... }) are accepted and sent as data-URL strings', async () => {
-    const record = { dataUrl: IMG, bytes: 3, width: 1, height: 1, sha256: 'x' };
-    const result = await askPackage('photo_check_2.v1', STATE, { provider: 'cloudflare', images: [record] });
-    expect(result.ok).toBe(true);
-    expect(mockDispatch).toHaveBeenCalledWith(ROUTES.typedDecisionClef, expect.objectContaining({ images: [IMG] }));
+  test('only records fitImagesForClef returned are sent: bare strings and look-alike objects are refused', async () => {
+    const lookalike = { ...IMG };
+    for (const images of [[BARE], [lookalike], [IMG, BARE]]) {
+      expect(await askPackage('photo_check_2.v1', STATE, { provider: 'cloudflare', images })).toMatchObject({ ok: false, reason: 'images_not_allowed' });
+    }
+    expect(mockDispatch).not.toHaveBeenCalled();
+    expect(Object.isFrozen(IMG)).toBe(true);
+  });
+
+  test('a package can never declare more image slots than Clef takes (4)', async () => {
+    expect(await askPackage('photo_check_5.v1', STATE, { provider: 'cloudflare', images: [IMG] })).toMatchObject({ ok: false, reason: 'images_not_allowed' });
+    const { validImageSlots, MAX_IMAGE_SLOTS } = jest.requireActual('../services/typed-decisions/packages');
+    expect(MAX_IMAGE_SLOTS).toBe(4);
+    expect([1, 4].every(validImageSlots)).toBe(true);
+    expect([0, 5, 2.5, '2'].some(validImageSlots)).toBe(false);
   });
 
   test('without images the dispatch payload has no images key at all (existing callers unchanged)', async () => {
