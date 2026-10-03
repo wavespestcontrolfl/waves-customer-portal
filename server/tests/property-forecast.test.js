@@ -125,7 +125,9 @@ describe('fetchPropertyForecast', () => {
   });
 
   test('a window outside the standard span is fetched by date range', async () => {
-    global.fetch = okFetch({ hourly: { time: ['2026-09-01T00:00'], precipitation: [0.3] } });
+    // A full day of hourly readings, so the total over the day can be stated.
+    const time = Array.from({ length: 24 }, (_, h) => `2026-09-01T${String(h).padStart(2, '0')}:00`);
+    global.fetch = okFetch({ hourly: { time, precipitation: time.map((_, h) => (h === 0 ? 0.3 : 0)) } });
     const { fetchPropertyForecast } = load();
     const f = await fetchPropertyForecast({ latitude: 27.1, longitude: -82.5, from: '2026-09-01T00:00', to: '2026-09-02T00:00', now: NOW });
     const url = new URL(String(global.fetch.mock.calls[0][0]));
