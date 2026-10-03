@@ -200,6 +200,12 @@ describe('searchTerms', () => {
     expect(searchTerms('pest')[0].forms).toEqual(expect.arrayContaining(['pest', 'pests']));
   });
 
+  test('a plural in -ses finds its s-ending singular; words sharing a form are one (GitHub Codex P2 r3 on #5652)', () => {
+    expect(searchTerms('viruses')[0].forms).toEqual(expect.arrayContaining(['viruses', 'virus']));
+    expect(searchTerms('mantises')[0].forms).toEqual(expect.arrayContaining(['mantises', 'mantis']));
+    expect(searchTerms('virus viruses')).toHaveLength(1);
+  });
+
   test('an irregular plural finds its singular and back: mice and mouse (GitHub Codex P2 r2 on #5652)', () => {
     expect(searchTerms('mice')).toEqual([{ word: 'mouse', forms: ['mouse', 'mice'] }]);
     expect(searchTerms('mouse')).toEqual([{ word: 'mouse', forms: ['mouse', 'mice'] }]);

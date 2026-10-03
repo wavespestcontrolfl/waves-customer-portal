@@ -127,8 +127,10 @@ function formsOf(word) {
   if (IRREGULAR_FORMS.has(word)) return [...IRREGULAR_FORMS.get(word)];
   const one = singularOf(word);
   // The plural of the word as typed too: a singular that ends in s ("virus",
-  // "mantis") keeps its own plural (GitHub Codex P2 on #5652).
-  return [...new Set([word, one, pluralOf(word), pluralOf(one), `${one}s`])];
+  // "mantis") keeps its own plural (GitHub Codex P2 on #5652), and a plural
+  // in -ses its s-ending singular ("viruses" -> virus; r3).
+  const sesSingular = word.length > 4 && word.endsWith('ses') ? [word.slice(0, -2)] : [];
+  return [...new Set([word, one, ...sesSingular, pluralOf(word), pluralOf(one), `${one}s`])];
 }
 
 // The words a search matches on: each word of three characters or more
@@ -141,13 +143,13 @@ function searchTerms(query) {
     .split(/\s+/)
     .map((word) => word.replace(/[^a-z0-9'-]/g, '').replace(/^['-]+|['-]+$/g, ''))
     .filter((word) => word.length >= 3 && !FILLER_WORDS.has(word));
-  const seen = new Set();
   const terms = [];
   for (const word of words) {
-    const one = singularOf(word);
-    if (seen.has(one)) continue;
-    seen.add(one);
-    terms.push({ word: one, forms: formsOf(word) });
+    const forms = formsOf(word);
+    // Two words that share a form are one word ("roach roaches", "virus
+    // viruses").
+    if (terms.some((term) => term.forms.some((form) => forms.includes(form)))) continue;
+    terms.push({ word: singularOf(word), forms });
   }
   return terms.slice(0, MAX_TERMS);
 }
