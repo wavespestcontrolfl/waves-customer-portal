@@ -451,6 +451,29 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     };
   }, [listening]);
 
+  // Clip mode: a recording never keeps running behind a hidden or closing page
+  // (a locked phone, another tab), where it would capture whatever is said next.
+  // Stopping ends the clip there and hands over what was recorded.
+  useEffect(() => {
+    if (!clipMode || !listening || typeof document === "undefined") return undefined;
+    const stopRecording = () => {
+      try {
+        recorderRef.current?.stop();
+      } catch {
+        /* already stopped */
+      }
+    };
+    const onHidden = () => {
+      if (document.visibilityState === "hidden") stopRecording();
+    };
+    document.addEventListener("visibilitychange", onHidden);
+    window.addEventListener("pagehide", stopRecording);
+    return () => {
+      document.removeEventListener("visibilitychange", onHidden);
+      window.removeEventListener("pagehide", stopRecording);
+    };
+  }, [clipMode, listening]);
+
   // Stop an in-progress session if the consumer unmounts (e.g. the completion
   // modal closes mid-dictation) so the mic isn't left recording and stale
   // callbacks can't fire against an unmounted notes setter.

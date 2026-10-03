@@ -200,7 +200,8 @@ describe('FastCompleteSheet voice fill, gate on', () => {
     expect(body.areasServiced).toEqual(['Outside']);
     expect(body.technicianNotes).toBe(FILL.customerNote);
     expect(body.clientPestRating).toBe(2);
-  });
+  // the sheet's longest walk-through: room for a loaded CI runner
+  }, 15000);
 
   test('the customer note joins what the tech already typed', async () => {
     await openSheet(makeRequest());

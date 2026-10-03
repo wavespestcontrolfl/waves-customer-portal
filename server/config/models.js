@@ -741,6 +741,10 @@ module.exports = {
 //                                  default: gpt-4o-transcribe-diarize
 //   GEMINI_TRANSCRIPTION_MODEL     long-call verifier / transcription fallback
 //                                  default: gemini-2.5-flash
+//   OPENAI_VOICE_FILL_TRANSCRIBE_MODEL  Fast Complete voice fill speech-to-text
+//                                  (services/fast-complete-voice-fill.js; goes through
+//                                  call-recording-processor's transcribeWithOpenAI)
+//                                  default: gpt-transcribe (32-clip test 2026-10-03)
 //   OPENAI_TRANSCRIPT_LABEL_MODEL  post-transcription Agent/Caller relabeling
 //                                  default: gpt-5-mini (falls back to OPENAI_MODEL)
 //   CALL_EXTRACTION_PROVIDER /     V2 call-extraction route primary

@@ -247,6 +247,28 @@ describe("useSpeechDictation upload fallback", () => {
       await waitFor(() => expect(result.current.uploading).toBe(false));
     });
 
+    it("stops recording when the page is hidden, and hands over what was recorded", async () => {
+      const clipHandler = vi.fn(async () => {});
+      const { result } = renderHook(() => useSpeechDictation(null, { clipHandler }));
+      await act(async () => { result.current.toggle(); });
+      await waitFor(() => expect(result.current.listening).toBe(true));
+      Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
+      await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+      await waitFor(() => expect(clipHandler).toHaveBeenCalledTimes(1));
+      expect(result.current.listening).toBe(false);
+      expect(track.stop).toHaveBeenCalled();
+      Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
+    });
+
+    it("stops recording on pagehide", async () => {
+      const clipHandler = vi.fn(async () => {});
+      const { result } = renderHook(() => useSpeechDictation(null, { clipHandler }));
+      await act(async () => { result.current.toggle(); });
+      await waitFor(() => expect(result.current.listening).toBe(true));
+      await act(async () => { window.dispatchEvent(new Event("pagehide")); });
+      await waitFor(() => expect(result.current.listening).toBe(false));
+    });
+
     it("is unsupported where the browser cannot record", () => {
       delete window.MediaRecorder;
       const { result } = renderHook(() => useSpeechDictation(null, { clipHandler: vi.fn() }));

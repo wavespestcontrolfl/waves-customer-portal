@@ -1510,6 +1510,8 @@ async function voiceFill({ serviceId, sheet, transcript, knex = db, call = callA
 // device. Measured on 32 recorded visits: the browser's speech recognition
 // filled 6 forms perfectly, an unprimed transcriber 9, this route's setup 19-20.
 // The words exist only inside this call: never logged, stored or returned.
+// Registered as lane voice_fill_transcription (model-switchboard.js) and listed
+// with the other transcription selectors in config/models.js. Read at call time.
 const VOICE_FILL_TRANSCRIBE_MODEL = 'gpt-transcribe';
 const TRANSCRIBE_SHEET_WORDS = 'perimeter, foundation, spot treatment, bait placement, granules, lanai, linear feet, re-service, no wait, same as last time';
 const TRANSCRIBE_PROMPT_MAX_CHARS = 1800;

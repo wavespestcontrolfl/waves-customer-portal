@@ -4596,19 +4596,9 @@ router.post('/:serviceId/fast-complete/voice-fill', fastCompleteVoiceFillGate, f
 // returns the same validated fill as the transcript route above. Same gate, same
 // limiter, same ownership fence. Nothing is stored; the audit line carries counts
 // only: never the audio, the transcript or either note.
-const VOICE_FILL_AUDIO_TYPES = new Map([
-  ['audio/webm', 'clip.webm'], ['audio/mp4', 'clip.mp4'], ['audio/x-m4a', 'clip.m4a'], ['audio/m4a', 'clip.m4a'],
-  ['audio/mpeg', 'clip.mp3'], ['audio/ogg', 'clip.ogg'], ['audio/wav', 'clip.wav'],
-]);
-const VOICE_FILL_CLIP_MAX_BYTES = 15 * 1024 * 1024;
-const voiceFillClipUpload = require('multer')({ storage: require('multer').memoryStorage(), limits: { fileSize: VOICE_FILL_CLIP_MAX_BYTES } });
-const voiceFillClipParse = (req, res, next) => {
-  voiceFillClipUpload.single('audio')(req, res, (err) => {
-    if (!err) return next();
-    if (err.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'Recording too large (15 MB max)', code: 'clip_too_large' });
-    return next(err);
-  });
-};
+// The audio policy (containers, 15 MB cap, multer handling) is field dictation's own: services/dictation-upload.js.
+const { dictationAudioUpload, dictationClipType } = require('../services/dictation-upload');
+const voiceFillClipParse = dictationAudioUpload({ error: 'Recording too large (15 MB max)', code: 'clip_too_large' });
 // Ownership before the body is read: a technician never uploads against a visit that is not theirs.
 const voiceFillClipOwner = async (req, res, next) => {
   try {
@@ -4622,8 +4612,7 @@ router.post('/:serviceId/fast-complete/voice-fill/clip', fastCompleteVoiceFillGa
     const sheet = req.body?.sheet;
     if (sheet !== VoiceFill.SHEET) return res.status(400).json({ error: 'Unknown sheet', code: 'unknown_sheet' });
     if (!req.file || !req.file.buffer?.length) return res.status(400).json({ error: 'No audio provided', code: 'no_audio' });
-    const baseType = String(req.file.mimetype || '').split(';')[0].trim().toLowerCase();
-    const filename = VOICE_FILL_AUDIO_TYPES.get(baseType);
+    const { baseType, filename } = dictationClipType(req.file);
     if (!filename) return res.status(415).json({ error: `Unsupported audio type: ${baseType || 'unknown'}`, code: 'bad_audio_type' });
     const result = await VoiceFill.voiceFillFromClip({
       serviceId: req.params.serviceId, sheet, audio: req.file.buffer, mimeType: baseType, filename,
