@@ -51,10 +51,13 @@ const ITEM_VERSION = 1;
 const ITEM_KIND = 'rainfast_breach';
 const UNREAD = Symbol('window could not be read');
 
-// The one customer sentence. Says what the source supports (weather data, soon
-// after), promises no action beyond looking at the next visit, no probability,
-// no free re-treatment, no product name, no number.
-const RAINFAST_WATCH_LINE = 'Our weather data shows rain soon after your treatment, so we will re-check it at your next visit.';
+// The one customer sentence (20 words, pinned against the lead's Watching cap in
+// the tests). Says what the source supports (weather data, soon after) and
+// invites the customer to speak up. It commits Waves to NO action: no re-check,
+// no visit, no re-treatment, no probability, no product name, no number. So it
+// stays true whatever the technician path does, and needs nothing but the memory
+// it is recorded on.
+const RAINFAST_WATCH_LINE = 'Our weather data shows rain soon after your treatment, which can reduce its effect. Tell us if results look weak.';
 
 function toMs(value) {
   if (value == null || value === '') return NaN;
@@ -172,7 +175,8 @@ const RECHECK_MAX_NAMES = 3;
  * The fixed technician line for the NEXT lawn visit, from the prior visit's
  * stored retreat-check, or null (unknown shape = no line). Names come from the
  * stored item (the products that were inside their rainfast interval), at most
- * three. This is the consumer that keeps the customer sentence's promise.
+ * three. An extra for the technician: the customer sentence promises nothing, so
+ * nothing depends on this line being shown.
  */
 function reCheckLine(item) {
   if (!validRetreatCheck(item)) return null;

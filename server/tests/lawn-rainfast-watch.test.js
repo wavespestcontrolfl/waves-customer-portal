@@ -11,7 +11,7 @@ const { fetchPropertyForecast, fetchPropertyRainQuarterHours } = require('../ser
 const {
   RAINFAST_WATCH_LINE, rainfastWindows, judgeRainfastBreach, validRetreatCheck, resolveRainfastWatch,
 } = require('../services/service-report/lawn-rainfast-watch');
-const { deriveLawnLead, LEAD_WORD_BUDGET, leadWords } = require('../services/service-report/lawn-report-lead');
+const { deriveLawnLead, LEAD_WORD_BUDGET, leadWords, FIELD_WORD_CAPS } = require('../services/service-report/lawn-report-lead');
 const {
   buildSinceLast, publicSinceLast, hasTreatmentMemory, storedVisitMemoryFor, recordRetreatCheck,
 } = require('../services/service-report/lawn-visit-memory');
@@ -44,10 +44,12 @@ describe('rainfastWindows: only a stated interval is judged', () => {
 });
 
 describe('the customer sentence', () => {
-  test('is fixed, short, and claims no more than the source: no number, no product, no promise of a free visit', () => {
-    expect(RAINFAST_WATCH_LINE).toBe('Our weather data shows rain soon after your treatment, so we will re-check it at your next visit.');
-    expect(RAINFAST_WATCH_LINE.split(/\s+/).length).toBeLessThanOrEqual(20);
-    expect(RAINFAST_WATCH_LINE).not.toMatch(/\d|%|percent|chance|free|guarantee|no charge|redo|re-?treat|on your lawn|washed/i);
+  test('is fixed, fits the Watching cap alone, and claims no more than the source: no number, no product, no commitment', () => {
+    expect(RAINFAST_WATCH_LINE).toBe('Our weather data shows rain soon after your treatment, which can reduce its effect. Tell us if results look weak.');
+    // pinned against the cap constant: a copy edit that outgrows the field fails here, not silently in production
+    expect(RAINFAST_WATCH_LINE.trim().split(/\s+/).length).toBeLessThanOrEqual(FIELD_WORD_CAPS.watching);
+    expect(RAINFAST_WATCH_LINE.trim().split(/\s+/).length).toBe(20);
+    expect(RAINFAST_WATCH_LINE).not.toMatch(/\d|%|percent|chance|free|guarantee|no charge|redo|re-?treat|re-?check|next visit|we will|on your lawn|washed/i);
   });
 });
 
@@ -451,8 +453,15 @@ describe('the Watching line on the lead', () => {
     const copyV6 = { headline: null, whatWeDid: 'We applied a weed control treatment.', whatToExpect: null, watching: null };
     expect(deriveLawnLead(reportV2(), { copyV6, rainfastWatch: { line: RAINFAST_WATCH_LINE } }).watching).toBe(RAINFAST_WATCH_LINE);
     expect(deriveLawnLead(reportV2(), { rainfastWatch: { line: RAINFAST_WATCH_LINE } }).watching).toBe(RAINFAST_WATCH_LINE);
-    const both = deriveLawnLead(reportV2(), { copyV6: { ...copyV6, watching: 'We are also keeping an eye on weed pressure.' }, rainfastWatch: { line: RAINFAST_WATCH_LINE } });
-    expect(both.watching).toBe(`We are also keeping an eye on weed pressure. ${RAINFAST_WATCH_LINE}`);
+  });
+
+  test('the Watching field never passes its word cap: a writer sentence that does not fit beside the rainfast sentence is replaced by it', () => {
+    const copyV6 = { headline: null, whatWeDid: 'We applied a weed control treatment.', whatToExpect: null, watching: 'We are also keeping an eye on weed pressure.' };
+    const lead = deriveLawnLead(reportV2(), { copyV6, rainfastWatch: { line: RAINFAST_WATCH_LINE } });
+    expect(lead.watching).toBe(RAINFAST_WATCH_LINE);
+    expect(lead.watching.trim().split(/\s+/).length).toBeLessThanOrEqual(FIELD_WORD_CAPS.watching);
+    // without the rainfast sentence the writer's own line is untouched
+    expect(deriveLawnLead(reportV2(), { copyV6 }).watching).toBe(copyV6.watching);
   });
 
   test('only the exact module sentence is accepted; any other text is ignored', () => {

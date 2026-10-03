@@ -233,11 +233,15 @@ function deriveLawnLead(reportV2, { sinceLast = null, copyV6 = null, rainfastWat
   // GATE_LAWN_RAINFAST_WATCH (P31, live view only): the one fixed sentence joins
   // the Watching line, after the writer's own sentence. Only the exact module
   // sentence is accepted. It gives no watering advice, so the banner-ownership
-  // wording test (which would reject its "rain") does not apply. The budget
-  // loop below still governs it: Watching is given up whole when the region
-  // runs over.
-  if (rainfastWatch && rainfastWatch.line === RAINFAST_WATCH_LINE) {
-    lead.watching = lead.watching ? `${lead.watching} ${RAINFAST_WATCH_LINE}` : RAINFAST_WATCH_LINE;
+  // wording test (which would reject its "rain") does not apply. The combined
+  // field is held to the Watching word cap too: when the two do not fit, the
+  // rainfast sentence REPLACES the writer's (it is the more specific fact, and
+  // it fits alone). The budget loop below still governs the whole region:
+  // Watching is given up whole when the region runs over.
+  if (rainfastWatch && rainfastWatch.line === RAINFAST_WATCH_LINE
+    && countWords(RAINFAST_WATCH_LINE) <= FIELD_WORD_CAPS.watching) {
+    const combined = lead.watching ? `${lead.watching} ${RAINFAST_WATCH_LINE}` : RAINFAST_WATCH_LINE;
+    lead.watching = countWords(combined) <= FIELD_WORD_CAPS.watching ? combined : RAINFAST_WATCH_LINE;
   }
   for (const field of BUDGET_DROP_ORDER) {
     if (leadWords({ ...reportV2, lead }) <= LEAD_WORD_BUDGET) break;

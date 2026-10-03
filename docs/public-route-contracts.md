@@ -2408,10 +2408,12 @@ live, and the sentence prints only while `GATE_LAWN_REPORT_LEAD` is live; off
 leaves the lawn payload and render unchanged, key for key, with no weather read
 and no write) adds ONE fixed sentence to `reportV2.lead.watching` on LIVE views
 only (`mode: 'live'`): "Our weather data shows rain soon after your treatment,
-so we will re-check it at your next visit." It follows the writer's own
-Watching sentence when there is one, is the whole line when there is none, and
-is given up with the rest of Watching if the lead runs over its 250-word
-budget. PDF, static and queued builds never carry it, so PDF content and its
+which can reduce its effect. Tell us if results look weak." (20 words; it
+commits Waves to no action.) It is the whole Watching line when there is no
+writer sentence, follows the writer's own sentence when the two fit the
+20-word Watching cap together, and REPLACES the writer's sentence when they
+do not (it fits alone); it is given up with the rest of Watching if the lead
+runs over its 250-word budget. PDF, static and queued builds never carry it, so PDF content and its
 cache signature are unchanged. No other payload key is added: the item below
 is internal and `reportV2.sinceLast` leaves it off. Only a product whose catalog
 row states a rainfast interval (`products_catalog.rainfast_minutes`, read from
@@ -2435,13 +2437,12 @@ again; one interval that cannot be read holds back the whole verdict, and so doe
 visit's frozen `sinceLast` carries the item as engine input only, even when the
 visit had no applied list or watched topics (a support-product-only visit): that
 internal block is not served, the progress engine and the since-last copy treat
-it as no block, and `reportV2.sinceLast` stays absent for such a visit. The sentence is fixed, carries no number, product name or promise of a
-free visit, and nothing is sent to a customer. The sentence's "re-check at your next
-visit" is kept by the technician sheet, not by this route: the next lawn visit's
-Fast Complete context (an admin route, `GET /admin/dispatch/:serviceId/lawn-fast/context`)
-carries one fixed line read from the prior visit's stored item at the same
-property. No token, eligibility, privacy or
-rate-limit change.
+it as no block, and `reportV2.sinceLast` stays absent for such a visit. The sentence is fixed, carries no number, product name or commitment (no
+re-check, no visit, no free re-treatment), and nothing is sent to a customer.
+As a helpful extra that nothing depends on, the next lawn visit's Fast Complete
+context (an admin route, `GET /admin/dispatch/:serviceId/lawn-fast/context`)
+carries one fixed technician line read from the prior visit's stored item at
+the same property. No token, eligibility, privacy or rate-limit change.
 
 A current watering snapshot can originate from
 Monday app publication independently of email delivery; `sent_at` remains an

@@ -579,10 +579,11 @@ async function loadAssessmentState(svc, knex, readFailures) {
   return { assessmentRow, assessmentReadFailed, assessmentUnusable };
 }
 
-// GATE_LAWN_RAINFAST_WATCH (P31): the consumer that keeps the report's promise
-// ("we will re-check it at your next visit"). When the PRIOR lawn visit at this
-// property recorded a rainfast retreat-check, the technician sees one fixed
-// line on the sheet. The prior visit comes from the property-scoped history
+// GATE_LAWN_RAINFAST_WATCH (P31): a helpful extra for the technician. When the
+// PRIOR lawn visit at this property recorded a rainfast retreat-check, the
+// technician sees one fixed line on the sheet. The customer sentence promises
+// nothing, so nothing depends on this line being shown (it is absent when the
+// property-history gate is off, by design). The prior visit comes from the property-scoped history
 // (the same resolver the completion defaults and the report copy use; it needs
 // GATE_LAWN_PROPERTY_HISTORY, as the visit memory's own prior does), and its
 // memory is read from THAT visit's record for THIS customer. Advisory and fail
