@@ -390,6 +390,9 @@ postgres('annual prepay charged after the first visit', () => {
     await trx('services').insert({ id: catalogId, name: 'Quarterly Pest Control', service_key: `synthetic_${catalogId}`, is_active: true });
     await trx('scheduled_services').where({ id: f.parentId })
       .update({ technician_id: techId, service_id: catalogId, create_invoice_on_complete: true, estimated_duration_minutes: 60, scheduled_date: day(-3) });
+    // The backfilled visit sits inside the waiting year's window.
+    await trx('annual_prepay_terms').where({ id: f.termId }).update({ term_start: day(-10) });
+    expect(await covers(f.parentId)).toBe(true);
     const { completeScheduledService } = require('../services/complete-scheduled-service');
     await completeScheduledService({ serviceId: f.parentId, idempotencyKey: randomUUID(),
       actor: { techRole: 'admin', technicianId: techId, technician: null },
@@ -399,6 +402,8 @@ postgres('annual prepay charged after the first visit', () => {
     expect(notes.backfill).toBe(true);
     expect(spy).not.toHaveBeenCalled();
     expect((await trx('scheduled_services').where({ id: f.parentId }).first('paf_held_term_id')).paf_held_term_id).toBeNull();
+    // …and it keeps its normal open review invoice (pre-push audit).
+    expect(await trx('invoices').where({ scheduled_service_id: f.parentId })).toHaveLength(1);
     spy.mockRestore();
   });
 

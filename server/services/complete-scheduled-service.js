@@ -9515,7 +9515,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       }
     }
     const annualPrepayCovered = !visitIsPayerBilled
-      && (deferredPrepayCovered || await AnnualPrepayRenewals.annualPrepayCoversVisit(svc, db));
+      && (deferredPrepayCovered || await AnnualPrepayRenewals.annualPrepayCoversVisit(svc, db, { skipDeferredHold: isBackfillCompletion }));
     const prepaidCovered = annualPrepayCovered
       || (!visitIsPayerBilled
         && svc.prepaid_method !== AnnualPrepayRenewals.ANNUAL_PREPAY_PREPAID_METHOD
