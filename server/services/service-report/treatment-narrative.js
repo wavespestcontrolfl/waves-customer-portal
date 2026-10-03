@@ -14,7 +14,7 @@ const db = require('../../models/db');
 const MODELS = require('../../config/models');
 const { dispatchWithFallback } = require('../llm/call');
 const { buildTreatmentSummary, METHOD_PHRASES } = require('./treatment-summary');
-const { checkTimingLanguage } = require('./lawn-copy-guards');
+const { lawnResultTimingViolation } = require('./report-writer-rules');
 const { findBannedCustomerCopy } = require('./activity-indicators');
 
 // v4: active-ingredient tokens exempt from the trade_name echo check (v3's
@@ -27,10 +27,6 @@ const PROMPT_VERSION = 'treatment_narrative_v5';
 // to expect" sentences (owner rulings 2026-10-01 / 10-02). Its own version so
 // pest and tree & shrub rows are untouched, and gate off reads v5 as before.
 const LAWN_NO_TIMING_PROMPT_VERSION = 'treatment_narrative_v6_lawn_no_timing';
-
-// Every timing phrase the no-timing prompt names is checked, including the
-// ones outside the P11 closed world ("over time"); the list is the prompt's.
-const PROMPT_NAMED_TIMING_RE = /\bover\s+time\b|\bover\s+the\s+coming\b/i;
 
 function lawnNoTiming(serviceLine) {
   return serviceLine === 'lawn' && require('../../config/feature-gates').lawnReportCopyV6Live();
@@ -92,7 +88,7 @@ function productFactLines(products = []) {
 function buildTreatmentNarrativePrompt({ serviceLine, products, findingsText, photoSummary }) {
   const noTiming = lawnNoTiming(serviceLine);
   const benefit = noTiming
-    ? '- The BENEFIT the customer should expect: what should improve and what they might still see in the meantime. Do NOT say when: no days, weeks, months, "soon", "over the coming weeks" or "over time". The report states timing elsewhere in approved words.'
+    ? '- The BENEFIT the customer should expect: what should improve and what they might still see in the meantime. Do NOT say when a result will show: no number of days, weeks or months, "within", "over the coming weeks", "soon" or "over time". The report states timing elsewhere in approved words.'
     : '- The BENEFIT the customer should expect and roughly when — what should improve over the coming weeks, and what they might still see in the meantime.';
   const lineNoun = serviceLine === 'lawn' ? 'lawn' : serviceLine === 'tree_shrub' ? 'landscape plants (trees, shrubs, palms, and beds)' : 'property';
   return `You are writing the "What we applied today" section of a customer-facing service report for Waves Pest Control in Southwest Florida. The reader is the homeowner; the subject is their ${lineNoun}.
@@ -135,10 +131,10 @@ function validateNarrative(text, productNames = [], activeIngredients = [], { no
   if (!t) return 'empty';
   if (t.length > 1200) return 'too_long';
   if (FORBIDDEN.some((re) => re.test(t))) return 'forbidden_copy';
-  // Lawn under GATE_LAWN_REPORT_COPY_V6: any time language (the P11 closed
-  // world: days, weeks, within, soon, next...) fails, and the deterministic
-  // summary is served instead. The prompt asks for none; this is the backstop.
-  if (noTiming && (checkTimingLanguage(t).length || PROMPT_NAMED_TIMING_RE.test(t))) return 'lawn_timing';
+  // Lawn under GATE_LAWN_REPORT_COPY_V6: any forward result timing fails (the
+  // writer-rules timeframe screen; "today", "peak season" and past windows
+  // pass), and the timing-free deterministic summary is served instead.
+  if (noTiming && lawnResultTimingViolation(t)) return 'lawn_timing';
   // Brand-name echo check: any distinctive token of a recorded product name
   // appearing in the copy fails the actives-only contract (codex P3).
   // The prompt REQUIRES actives language, and many catalog names embed the
@@ -189,7 +185,9 @@ async function buildTreatmentNarrative({
   photoSummary = '',
   knex = db,
 } = {}) {
-  const fallback = buildTreatmentSummary(treatment);
+  // The fallback is served while generation is pending and when it fails, so
+  // it follows the same no-timing rule.
+  const fallback = buildTreatmentSummary(treatment, { noTiming: lawnNoTiming(serviceLine) });
   if (!fallback) return null;
   const products = (treatment?.products || []);
   if (!serviceRecordId) return { text: fallback, signature: null };
@@ -294,7 +292,11 @@ async function treatmentNarrativePdfSignature(serviceRecordId, knex = db) {
     if (!serviceRecordId) return '';
     const row = await knex('service_report_ai_summaries')
       .where({ service_record_id: serviceRecordId })
-      .whereIn('prompt_version', [PROMPT_VERSION, LAWN_NO_TIMING_PROMPT_VERSION])
+      // Only versions a render can read now: gate off, every line reads v5
+      // (a newer lawn no-timing row is inactive and must not key the PDF).
+      .whereIn('prompt_version', require('../../config/feature-gates').lawnReportCopyV6Live()
+        ? [PROMPT_VERSION, LAWN_NO_TIMING_PROMPT_VERSION]
+        : [PROMPT_VERSION])
       .orderBy('generated_at', 'desc')
       .first('status', 'generated_at');
     // Sentinel, not '': a cached pre-narrative PDF must MISS so the render

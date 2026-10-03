@@ -341,6 +341,17 @@ const DURATION_PHRASE_RE = new RegExp(
   + `|\\b(?:(?:over|in|during|for|within)\\s+)?the\\s+(?:coming|next|upcoming)\\s+(?:few\\s+|several\\s+|couple\\s+(?:of\\s+)?)?${DURATION_UNIT}(?:\\s+or\\s+(?:two|three|so|more))?\\b`,
   'gi',
 );
+// Lawn model copy under GATE_LAWN_REPORT_COPY_V6 (P15) states NO result
+// timing: the report's "What to expect" carries it in owner-approved words.
+// The same forward-timeframe screen as the writer rules (a past window, "today"
+// or "peak season" passes), plus the no-number timing words the lawn prompts
+// name.
+const LAWN_NAMED_TIMING_RE = /\bover\s+time\b|\b(?:soon|shortly|eventually)\b|\bwithin\s+(?:days|weeks|months)\b/i;
+function lawnResultTimingViolation(text) {
+  const copy = String(text || '');
+  return TIMEFRAME_RE.test(copy) || LAWN_NAMED_TIMING_RE.test(copy);
+}
+
 function groundedTimeframePhrases(lines) {
   return [...new Set((Array.isArray(lines) ? lines : [])
     .flatMap((line) => String(line || '').match(DURATION_PHRASE_RE) || [])
@@ -620,6 +631,7 @@ module.exports = {
   COMMON_ACTIVE_INGREDIENTS,
   activeIngredientsMentioned,
   groundedTimeframePhrases,
+  lawnResultTimingViolation,
   draftDatePhrases,
   writerRulesRejection,
 };

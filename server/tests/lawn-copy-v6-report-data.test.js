@@ -223,7 +223,7 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
     // Fixed sentences from this visit's facts; today's expectation table has no
     // approved row, so whatToExpect is null.
     expect(frozen.fields.headline).toBe(data.reportV2.snapshot.statusHeadline);
-    expect(frozen.fields.whatWeDid).toBe(buildTreatmentSummary(data.reportV2.treatment));
+    expect(frozen.fields.whatWeDid).toBe(buildTreatmentSummary(data.reportV2.treatment, { noTiming: true }));
     expect(frozen.fields.whatWeDid).toBeTruthy();
     expect(frozen.fields.whatToExpect).toBeNull();
     expect(frozen.copyVersion).toBe('lawn_report_v6_fixed_1');

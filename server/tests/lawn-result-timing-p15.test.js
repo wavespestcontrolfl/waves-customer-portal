@@ -27,7 +27,7 @@ describe('lawn technician writer: RESULT TIMING rule', () => {
     live();
     const on = selectReportCopyPrompt(SHARED, 'Lawn Care', LAWN);
     expect(on).toBe(`${off}\n\n${LAWN_RESULT_TIMING_RULE}`);
-    expect(on).toMatch(/quoting an EXPECTATIONS sentence word for word/);
+    expect(on).toMatch(/never say when a result will show/);
   });
 
   test('gate live never touches another writer', () => {
@@ -61,13 +61,36 @@ describe('lawn treatment paragraph: no timing', () => {
     expect(validateNarrative(clean, [], [], { noTiming: true })).toBeNull();
     expect(validateNarrative(timed)).toBeNull();
     // Every phrase the prompt names is caught, "over time" included.
-    for (const phrase of ['over time', 'over the coming weeks', 'soon', 'in a few days', 'within weeks', 'next month']) {
+    for (const phrase of ['over time', 'over the coming weeks', 'soon', 'in a few days', 'within weeks', 'next month', 'within 2 weeks']) {
       expect(validateNarrative(`The treated weeds should fade ${phrase}.`, [], [], { noTiming: true })).toBe('lawn_timing');
+    }
+    // Result timing only: the section's own "today", "peak season" protection
+    // framing and a past window pass (the prompt asks for them).
+    for (const ok of [
+      'Today we applied a selective weed control to the broadleaf weeds.',
+      'An insect control was applied to protect against chinch bugs during their peak season.',
+      'Rain fell in the seven days before the visit, so the granular feed was watered in.',
+    ]) {
+      expect(validateNarrative(ok, [], [], { noTiming: true })).toBeNull();
     }
   });
 
-  test('its own prompt version, and the PDF signature reads rows of either version', async () => {
+  test('its own prompt version, and the PDF signature reads only the versions a render can read', async () => {
     expect(LAWN_NO_TIMING_PROMPT_VERSION).not.toBe(PROMPT_VERSION);
+    const sigCalls = async () => {
+      const seen = [];
+      const c = {
+        where() { return c; },
+        whereIn(col, vals) { seen.push([col, vals]); return c; },
+        orderBy() { return c; },
+        first: async () => ({ status: 'ready', generated_at: '2026-10-02T12:00:00Z' }),
+      };
+      await treatmentNarrativePdfSignature('svc-1', () => c);
+      return seen;
+    };
+    // Gate off: a newer lawn no-timing row is inactive, so only v5 keys the PDF.
+    expect(await sigCalls()).toEqual([['prompt_version', [PROMPT_VERSION]]]);
+    live();
     const calls = [];
     const chain = {
       where(w) { calls.push(['where', w]); return chain; },
@@ -78,6 +101,25 @@ describe('lawn treatment paragraph: no timing', () => {
     const sig = await treatmentNarrativePdfSignature('svc-1', () => chain);
     expect(sig).toMatch(/^-tnready\d+$/);
     expect(calls).toContainEqual(['whereIn', 'prompt_version', [PROMPT_VERSION, LAWN_NO_TIMING_PROMPT_VERSION]]);
+  });
+});
+
+describe('the fallback (pending or failed generation) is timing-free for lawn too', () => {
+  test('gate live: the systemic clause drops "for several weeks"; gate off keeps it', async () => {
+    const { buildTreatmentSummary } = require('../services/service-report/treatment-summary');
+    const treatment = { products: [{ name: 'Test Systemic C', kind: 'systemic', activeIngredient: 'Testacloprid' }] };
+    expect(buildTreatmentSummary(treatment)).toMatch(/for several weeks after the visit/);
+    const quiet = buildTreatmentSummary(treatment, { noTiming: true });
+    expect(quiet).toMatch(/keep working after the visit\./);
+    expect(validateNarrative(quiet, [], [], { noTiming: true })).toBeNull();
+  });
+});
+
+describe('generate-report screens lawn drafts that carried the RESULT TIMING rule', () => {
+  test('the route applies lawnResultTimingViolation exactly when the prompt holds the rule', () => {
+    const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+    expect(source).toMatch(/const lawnTimingOn = String\(effectiveSystemPrompt \|\| ''\)\.includes\(LAWN_RESULT_TIMING_RULE\)/);
+    expect(source).toMatch(/lawnTimingOn && lawnResultTimingViolation\(text\) \? 'lawn_timing' : null/);
   });
 });
 

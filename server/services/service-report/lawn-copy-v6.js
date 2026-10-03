@@ -8,8 +8,9 @@
  *
  *   field        source
  *   headline     snapshot.statusHeadline (the lawn's status and its top issue)
- *   whatWeDid    buildTreatmentSummary over the recorded products (never the
- *                AI treatment narrative that later overwrites the snapshot's copy)
+ *   whatWeDid    buildTreatmentSummary over the recorded products, with no
+ *                timing clause (never the AI treatment narrative that later
+ *                overwrites the snapshot's copy)
  *   whatToExpect owner-approved expectation rows matched to today's products,
  *                each row's visible-change sentence printed word for word (at most
  *                2 rows, 42 words). No by-next-visit timing: that needs the next
@@ -100,16 +101,13 @@ function buildWatching(reportV2) {
 
 // Approved rows for today's products, in the engine's order; each row's own
 // visible-change sentence, printed word for word. A row without one is
-// skipped; a sentence that would pass the cap is skipped whole. The ONE rule
-// for "approved expectation sentences": the v6 lead copy and the technician
-// draft's grounding (report-copy-context.js) both read it.
-// `products`: [{ name, targets? }] by exact catalog name.
-function approvedExpectationSentences(products, ctx = {}, deps = {}) {
-  const list = (Array.isArray(products) ? products : []).filter((p) => p && p.name);
-  if (!list.length) return { text: null, sentences: [], rows: [] };
+// skipped; a sentence that would pass the cap is skipped whole.
+function buildWhatToExpect(reportV2, ctx, deps) {
+  const products = productsOf(reportV2);
+  if (!products.length) return { text: null, rows: [] };
   const build = deps.buildExpectations || buildLawnExpectations;
   const built = build({
-    applications: list.map((p) => ({ name: p.name, targets: Array.isArray(p.targets) ? p.targets : [] })),
+    applications: products.map((p) => ({ name: p.name, targets: Array.isArray(p.targets) ? p.targets : [] })),
     issues: [],
     visitDate: ctx.visitDate || null,
     // Not tracked for the report yet: the cap makes a Celsius row print its
@@ -119,7 +117,7 @@ function approvedExpectationSentences(products, ctx = {}, deps = {}) {
   });
   const rows = (Array.isArray(built && built.rows) ? built.rows : [])
     .filter((row) => row && row.approved === true && typeof row.id === 'string' && Array.isArray(row.sentences));
-  const sentences = [];
+  const pieces = [];
   const picked = [];
   let words = 0;
   for (const row of rows) {
@@ -129,15 +127,10 @@ function approvedExpectationSentences(products, ctx = {}, deps = {}) {
     const w = countWords(sentence.text);
     if (words + w > FIELD_CAPS.whatToExpect) continue;
     words += w;
-    sentences.push(sentence.text.trim());
+    pieces.push(sentence.text.trim());
     picked.push({ id: row.id, keys: [sentence.key] });
   }
-  return { text: sentences.length ? sentences.join(' ') : null, sentences, rows: picked };
-}
-
-function buildWhatToExpect(reportV2, ctx, deps) {
-  const out = approvedExpectationSentences(productsOf(reportV2), ctx, deps);
-  return { text: out.text, rows: out.rows };
+  return { text: pieces.length ? pieces.join(' ') : null, rows: picked };
 }
 
 /**
@@ -152,7 +145,7 @@ function buildLawnCopyV6(reportV2, ctx = {}, deps = {}) {
   const fields = emptyFields();
   if (!reportV2 || typeof reportV2 !== 'object') return { fields, expectRows: [] };
   fields.headline = clean(reportV2.snapshot && reportV2.snapshot.statusHeadline);
-  fields.whatWeDid = clean(buildTreatmentSummary(reportV2.treatment));
+  fields.whatWeDid = clean(buildTreatmentSummary(reportV2.treatment, { noTiming: true }));
   fields.watching = buildWatching(reportV2);
   let expectRows = [];
   try {
@@ -265,7 +258,6 @@ module.exports = {
   FREEZE_VERSION,
   FIELD_CAPS,
   buildLawnCopyV6,
-  approvedExpectationSentences,
   resolveLawnCopyV6ForRender,
   storedLawnCopyV6For,
   freezeLawnCopyV6,

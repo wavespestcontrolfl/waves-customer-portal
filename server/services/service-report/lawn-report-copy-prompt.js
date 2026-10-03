@@ -140,10 +140,11 @@ The title WHAT WE FOUND does not authorize inventing a finding. When findings ar
 The application already appends selected next-step copy. When that instruction is present, do not repeat or paraphrase it as your closing line. Spend the available space explaining the recorded work and what remains to be assessed.`;
 
 // Lawn result timing (P15, only while GATE_LAWN_REPORT_COPY_V6 is live, so the
-// gate-off prompt is byte-identical): timing reaches the customer only as an
-// owner-approved sentence, which report-copy-context.js supplies as EXPECTATIONS
-// (owner rulings 2026-10-01 / 10-02).
-const LAWN_RESULT_TIMING_RULE = `RESULT TIMING (this rule wins over "realistic response expectation" above): say when a result will show only by quoting an EXPECTATIONS sentence word for word. When EXPECTATIONS has no sentence, describe the expected response with no timeframe at all: no days, weeks, months, "soon" or "over time".`;
+// gate-off prompt is byte-identical): the writer states no result timing; the
+// report's "What to expect" carries it in owner-approved words, built from the
+// final products (owner rulings 2026-10-01 / 10-02). generate-report screens
+// the output with report-writer-rules lawnResultTimingViolation.
+const LAWN_RESULT_TIMING_RULE = `RESULT TIMING (this rule wins over "realistic response expectation" above): never say when a result will show. No number of days, weeks or months, no "within", "over the coming weeks", "soon" or "over time". Describe the expected response without any timeframe; the report states timing elsewhere in approved words.`;
 
 // Canonical catalog identities take precedence over loose display names.
 // Older calls without a catalog identity retain the three established

@@ -2256,11 +2256,11 @@ under this gate, so a later assessment correction cannot make the PDF and the
 live report disagree; without it, the same `statusHeadline`) and `whatToExpect`
 as a "What to expect" line (the insights it already lists cover `watching`),
 and its cache signature carries a `:copyv6=1` stamp while the gate is live. The same gate keeps model-written lawn copy from stating result timing
-(P15): the technician report writer gets today's approved sentences as its only
-timing source (quoted word for word, none approved = no timing), and the lawn
-"What we applied today" paragraph (`treatment-narrative.js`, its own prompt
-version) states none, any time language failing it to the deterministic
-summary.
+(P15), so "What to expect" is its only source: the technician report writer
+gets a RESULT TIMING rule and generate-report rejects any forward timeframe in
+its output, and the lawn "What we applied today" paragraph
+(`treatment-narrative.js`, its own prompt version) and its deterministic
+fallback carry none, any forward timing failing the paragraph to that fallback.
 `GATE_LAWN_SINCE_LAST` (dark; effective only while `GATE_LAWN_VISIT_MEMORY` and
 `GATE_LAWN_REPORT_LEAD` are also live; off leaves the lawn payload and render
 unchanged, key for key) adds an optional `reportV2.lead.sinceLast`
