@@ -689,6 +689,10 @@ function availabilityResultToText(res, ctx = {}) {
  */
 async function accountDetailsForEstimate(ctx = {}, stated = {}) {
   if (!ctx.customerId || ctx.callerVerified !== true || matchedCallerTier(ctx) !== 'full') return null;
+  // The caller-context kill switch is read at execution time, like every
+  // other account read: a call already in progress stops reading the moment
+  // it is turned off, whatever tool list the session cached.
+  if (!require('./relay-context').isContextEnabled()) return null;
   try {
     const db = require('../../models/db');
     const row = await db('customers').where({ id: ctx.customerId }).whereNull('deleted_at')
@@ -1109,7 +1113,11 @@ async function executeTool(name, input = {}, ctx = {}) {
       // reconnect (the store only adds).
       const statedFields = { ...estimateFields };
       const estimateCallbackPhone = (input.callback_phone ? callerPhone : (nz(priorEstimateFields.callback_phone) || callerPhone)) || null;
-      const accountConfirmed = input.use_account_details === true || priorEstimateFields.account_details_confirmed === 'true';
+      // A yes only counts as the answer to a question the TOOL offered on an
+      // earlier capture of this call: the flag on its own (set eagerly, or
+      // for some other "yes") confirms nothing.
+      const yesToOffer = input.use_account_details === true && priorEstimateFields.account_question_offered === 'true';
+      const accountConfirmed = yesToOffer || priorEstimateFields.account_details_confirmed === 'true';
       const accountDetails = estimateRequested && REQUIRED.some((k) => !estimateFields[k])
         ? await accountDetailsForEstimate(ctx, statedFields) : null;
       const detailsFromAccount = [];
@@ -1124,7 +1132,10 @@ async function executeTool(name, input = {}, ctx = {}) {
         // the caller stated no part of a location and it is a full address.
         const acctLocation = !LOCATION.some((k) => estimateFields[k]) && nz(accountDetails.address_line1) && (nz(accountDetails.city) || nz(accountDetails.zip))
           ? Object.fromEntries(LOCATION.map((k) => [k, nz(accountDetails[k])])) : null;
-        accountCouldFill = ['first_name', 'last_name', 'email'].some((k) => !estimateFields[k] && acct[k]) || Boolean(acctLocation);
+        // The question is about the email and the service address, so it is
+        // worth asking only when the account would supply one of those. (A
+        // yes also takes the account holder's own name for a missing one.)
+        accountCouldFill = Boolean(!estimateFields.email && acct.email) || Boolean(acctLocation);
         if (accountConfirmed) {
           for (const k of ['first_name', 'last_name']) if (!estimateFields[k] && acct[k]) { estimateFields[k] = acct[k]; if (!detailsFromAccount.includes('name')) detailsFromAccount.push('name'); }
           if (!estimateFields.email && acct.email) { estimateFields.email = acct.email; detailsFromAccount.push('email'); }
@@ -1145,7 +1156,7 @@ async function executeTool(name, input = {}, ctx = {}) {
           // capture that omits it must not put the inbound number back on
           // the office card.
           ...(input.callback_phone && isLikelyE164(callerPhone) ? { callback_phone: callerPhone } : {}),
-          ...(input.use_account_details === true && accountDetails ? { account_details_confirmed: 'true' } : {}),
+          ...(yesToOffer && accountDetails ? { account_details_confirmed: 'true' } : {}),
         });
       }
       // The accumulated fields ALSO ride the lead write (hook P1): identity
@@ -1827,8 +1838,14 @@ async function executeTool(name, input = {}, ctx = {}) {
                   + 'estimate_requested: true and use_account_details: true. On a no, ask for the ones they want. '
                   + 'Never read the account\'s details aloud.'
                 : '')
-            : ' IMPORTANT: the estimate request could NOT be queued — do NOT promise a written estimate. Say a '
-              + 'Waves team member will follow up, nothing stronger.')
+            : (promiseStands
+              // The estimate was already promised on this call and its card
+              // stands; only this correction failed to save.
+              ? ' IMPORTANT: the estimate already promised on this call is still owed, but these corrected details '
+                + 'could NOT be saved to the office queue. Do not repeat the promise with the new details: tell the '
+                + 'caller a Waves team member will call you back to confirm where to send it.'
+              : ' IMPORTANT: the estimate request could NOT be queued — do NOT promise a written estimate. Say a '
+                + 'Waves team member will follow up, nothing stronger.'))
           : '');
       logger.info(
         `[voice-relay] capture_lead ${leadCreated ? 'saved' : 'recorded with NO lead (existing customer)'} `

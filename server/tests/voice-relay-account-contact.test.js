@@ -211,15 +211,20 @@ describe('a written estimate for an established customer: ONE yes/no question (o
   // calls the writer, revise-only (stillMissing), which files nothing new.
   const filedCards = () => surfaceEstimateRequestForCustomer.mock.calls.filter((c) => !((c[2] || {}).stillMissing || []).length);
   // The call's real store (relay-conversation): it only ADDS non-empty fields.
-  const callStore = () => {
-    let bag = {};
+  // `offered`: the tool already offered the question on an earlier capture,
+  // so a yes on the next one is an answer to it.
+  const callStore = ({ offered = true } = {}) => {
+    let bag = offered ? { account_question_offered: 'true' } : {};
     return {
       bag: () => bag,
       getEstimateFields: () => ({ ...bag }),
       noteEstimateFields: (f) => { bag = { ...bag, ...Object.fromEntries(Object.entries(f).filter(([, v]) => v != null && String(v).trim() !== '')) }; },
     };
   };
-  const estimateCtx = (over = {}) => fullTier({ markCaptured: jest.fn(), ...over });
+  const estimateCtx = (over = {}) => fullTier({ markCaptured: jest.fn(), ...callStore(), ...over });
+  let savedGate;
+  beforeEach(() => { savedGate = process.env.VOICE_RELAY_CONTEXT_ENABLED; process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true'; });
+  afterEach(() => { if (savedGate === undefined) delete process.env.VOICE_RELAY_CONTEXT_ENABLED; else process.env.VOICE_RELAY_CONTEXT_ENABLED = savedGate; });
   const ask = (input = {}, ctx = estimateCtx()) => executeTool('capture_lead', { call_summary: 'Wants a written estimate for lawn care.', estimate_requested: true, ...input }, ctx);
   beforeEach(() => {
     holder = { ...HOLDER };
@@ -234,7 +239,7 @@ describe('a written estimate for an established customer: ONE yes/no question (o
   });
 
   test('without the yes nothing is taken from the account: the details are missing, and the result offers the one question', async () => {
-    const out = await ask();
+    const out = await ask({}, estimateCtx(callStore({ offered: false })));
     expect(out).toMatch(/still missing: first_name, last_name, email, address_line1/);
     expect(out).toMatch(/ask ONE question — "Should it go to the email and service address on your account\?"/);
     expect(out).toMatch(/use_account_details: true/);
@@ -252,7 +257,7 @@ describe('a written estimate for an established customer: ONE yes/no question (o
     expect(details).toMatchObject({ first_name: 'Dana', last_name: 'Sample', email: 'dana@example.com', address_line1: '12 Test Street', city: 'Bradenton', zip: '34205' });
     expect(opts.accountDetailsConfirmed).toEqual(['name', 'email', 'address']);
     // Nothing of the account's is remembered as something the caller said.
-    expect(store.bag()).toEqual({ account_details_confirmed: 'true' });
+    expect(store.bag()).toEqual({ account_question_offered: 'true', account_details_confirmed: 'true' });
   });
 
   test('the yes carries to later captures on the call without the flag being passed again', async () => {
@@ -275,7 +280,7 @@ describe('a written estimate for an established customer: ONE yes/no question (o
     expect(await ask({ email: 'dana at work dot' }, ctx)).toMatch(/still missing: email, address_line1/);
     expect(await ask({}, ctx)).toMatch(/still missing: email, address_line1/); // neither comes back
     expect(filedCards()).toEqual([]);
-    expect(store.bag()).toEqual({ city: 'Venice', account_details_confirmed: 'true', email_unreadable: 'true' });
+    expect(store.bag()).toEqual({ city: 'Venice', account_question_offered: 'true', account_details_confirmed: 'true', email_unreadable: 'true' });
     // The same after a reconnect, which restores the call's fields by merging them: there is nothing to un-delete.
     const resumed = callStore();
     resumed.noteEstimateFields(store.bag());
@@ -340,7 +345,7 @@ describe('a written estimate for an established customer: ONE yes/no question (o
   });
 
   test('a capture that failed never showed the offer, so its retry still makes it', async () => {
-    const ctx = estimateCtx(callStore());
+    const ctx = estimateCtx(callStore({ offered: false }));
     createLeadFromExtraction.mockRejectedValueOnce(new Error('db down'));
     const failed = await ask({}, ctx);
     expect(failed).not.toMatch(/ONE question/);
@@ -348,7 +353,7 @@ describe('a written estimate for an established customer: ONE yes/no question (o
   });
 
   test('ONE question means asked once: after the offer, a caller giving their own details is not asked again', async () => {
-    const ctx = estimateCtx(callStore());
+    const ctx = estimateCtx(callStore({ offered: false }));
     expect(await ask({}, ctx)).toMatch(/ONE question/);
     const next = await ask({ email: 'own@example.com' }, ctx); // they said no and gave their own email
     expect(next).toMatch(/still missing: first_name, last_name, address_line1/);
@@ -411,6 +416,41 @@ describe('a written estimate for an established customer: ONE yes/no question (o
     expect(filedCards()[1][2].phone).toBe('+19415550177'); // not the inbound number
     await ask({ callback_phone: '941-555-0188' }, ctx);
     expect(filedCards()[2][2].phone).toBe('+19415550188');
+  });
+
+  test('a yes counts only as the answer to a question the tool offered: the flag on a first capture confirms nothing', async () => {
+    const ctx = estimateCtx(callStore({ offered: false }));
+    const eager = await ask({ use_account_details: true }, ctx);
+    expect(eager).toMatch(/still missing: first_name, last_name, email, address_line1/);
+    expect(eager).toMatch(/ONE question/); // the offer is made now
+    expect(filedCards()).toEqual([]);
+    expect(await ask({ use_account_details: true }, ctx)).toMatch(/IS on the office queue/); // the yes to it
+  });
+
+  test('the question is offered only when the account would supply the email or the address, not for a name alone', async () => {
+    const ctx = estimateCtx(callStore({ offered: false }));
+    const out = await ask({ email: 'own@example.com', address_line1: '9 Rental Rd', city: 'Venice' }, ctx);
+    expect(out).toMatch(/still missing: first_name, last_name/);
+    expect(out).not.toMatch(/ONE question/);
+  });
+
+  test('the caller-context kill switch is read at execution time: off, the account is not read even with the flag', async () => {
+    delete process.env.VOICE_RELAY_CONTEXT_ENABLED;
+    customerReads = 0;
+    const out = await ask({ use_account_details: true });
+    expect(out).toMatch(/still missing: first_name, last_name, email, address_line1/);
+    expect(out).not.toMatch(/ONE question/);
+    expect(customerReads).toBe(0);
+  });
+
+  test('a complete correction whose card write fails keeps the promise and does not repeat it with the new details', async () => {
+    const ctx = estimateCtx({ getPromise: () => ({ verdict: true, expectation: 'about_15_minutes' }), notePromise: jest.fn() });
+    surfaceEstimateRequestForCustomer.mockResolvedValueOnce({ persisted: false, suppressed: false });
+    const out = await ask({ first_name: 'Dana', last_name: 'Sample', email: 'new@example.com', address_line1: '9 Rental Rd' }, ctx);
+    expect(out).toMatch(/already promised on this call is still owed, but these corrected details\s+could NOT be saved/);
+    expect(out).toMatch(/will call you back to confirm where to send it/);
+    expect(out).not.toMatch(/could NOT be queued — do NOT promise/);
+    expect(ctx.notePromise).not.toHaveBeenCalled();
   });
 
   test('use_account_details is a capture_lead input only while the caller-context lane is on', () => {
