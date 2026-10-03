@@ -657,7 +657,8 @@ function pushUnclear(unclear, heard, reason) {
 // time, but Talstar was new"): the phrase is looked for there, while a
 // contradiction is looked for in the whole sentence ("... but a different rate").
 function sentenceOf(transcript, heard, { contrast = false } = {}) {
-  const first = norm(String(heard).split(/\.{3}|…/)[0]);
+  // the quote's first phrase (a quote may stitch phrases with an ellipsis or a comma)
+  const first = norm(String(heard).split(/\.{3}|…|(?<=[.!?;,:])\s+/)[0]);
   if (!first) return '';
   const split = contrast ? /(?<=[.!?])\s+|\b(?:but|except|however|whereas)\b/i : /(?<=[.!?])\s+/;
   return String(transcript || '').split(split).find((part) => part && ` ${norm(part)} `.includes(` ${first} `)) || '';
@@ -1075,16 +1076,21 @@ function productMethod(raw, product, heard, transcript, ctx, world, unclear) {
   // Said in the product's sentence but beside another product ("did the perimeter
   // with Taurus, Talstar and surfactant"): the row simply follows the visit's How,
   // no Check. A method with no word for it anywhere near is a Check.
+  // ...unless its own clause names a DIFFERENT way ("Spot treated with Taurus and
+  // sprayed Talstar around the perimeter"): that spoken method was dropped, so Check.
+  const ownOther = Object.keys(METHOD_LEXICON).some((method) => method !== raw.method && METHOD_LEXICON[method].test(text));
   const sentences = mentions.map((m) => positiveWords(world, sentenceSpan(m, world))).join(' . ');
-  if (!methodLexicon(raw.method)?.test(sentences)) pushUnclear(unclear, heard, 'method_not_heard');
+  if (ownOther || !methodLexicon(raw.method)?.test(sentences)) pushUnclear(unclear, heard, 'method_not_heard');
   return '';
 }
 
 function productSameAsLast(raw, amount, heard, transcript, unclear) {
   // a spoken number wins over the flag
   if (raw.sameAsLast !== true || amount !== null) return false;
-  const said = `${heard} . ${sentenceOf(transcript, heard, { contrast: true })}`;
-  const whole = `${heard} . ${sentenceOf(transcript, heard)}`;
+  // Read from the transcript's own sentence, never from the quote: a stitched quote
+  // ("Taurus, same as last time") could borrow the phrase from another product's sentence.
+  const said = sentenceOf(transcript, heard, { contrast: true });
+  const whole = sentenceOf(transcript, heard);
   if (SAME_AS_LAST_RE.test(said) && !NOT_SAME_AS_LAST_RE.test(whole)) return true;
   pushUnclear(unclear, heard, 'same_as_last_not_heard');
   return false;

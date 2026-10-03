@@ -1665,3 +1665,20 @@ test('a visit quote that joins two separate phrases with a comma is grounded phr
   const made = validateFill(answer({ visit: visit({ pests: ['Spiders'], heard: 'Taurus four ounces on the perimeter, Spiders everywhere.' }) }), ctx, t);
   expect(made.visit.pests).toEqual([]);
 });
+
+describe('Codex #5698 round 1', () => {
+  test('a different method in the product\'s own clause keeps the Check', () => {
+    const t = 'Spot treated with Taurus and sprayed Talstar around the perimeter.';
+    const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: false, method: 'perimeter_spray', heard: 'Spot treated with Taurus' }] }), ctx, t);
+    expect(out.products[0].method).toBe('');
+    expect(out.unclear.map((u) => u.reason)).toContain('method_not_heard');
+  });
+
+  test('a stitched quote cannot borrow "same as last time" from another product\'s sentence', () => {
+    const t = 'Used Taurus today. Talstar was same as last time.';
+    const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard: 'Taurus, same as last time' }] }), ctx, t);
+    expect(out.products[0].sameAsLast).toBe(false);
+    const own = validateFill(answer({ products: [{ productId: 'p-talak', amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard: 'Talstar was same as last time' }] }), ctx, t);
+    expect(own.products[0].sameAsLast).toBe(true);
+  });
+});
