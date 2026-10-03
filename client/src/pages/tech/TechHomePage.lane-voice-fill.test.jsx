@@ -114,12 +114,25 @@ it('a lane visit filed under pest control still opens as its lane, outline trace
   expect(screen.queryByText(/Existing recap form/)).not.toBeInTheDocument();
 });
 
+it('a lane visit filed under pest control keeps its existing path when the linked-project lookup failed', async () => {
+  rows = [row('svc-tick-pest', {
+    serviceType: 'Tick Control', serviceTypeRaw: 'Tick Control',
+    completionProfile: { category: 'pest_control', serviceKey: 'tick_control' },
+    linkedProjectLookupFailed: true,
+  })];
+  mount();
+  await openFromTools();
+  expect(await screen.findByText(/Existing recap form/)).toBeInTheDocument();
+  expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
+});
+
 it.each([
   ['the lane switch off', { laneVoiceFillEnabled: false }],
   ['the switch absent (an older payload)', { laneVoiceFillEnabled: undefined }],
   ['the report flow off', { fastCompleteReportEnabled: false }],
   ['a project-backed profile', { completionProfile: { category: 'specialty', serviceKey: 'fire_ant', projectBacked: true, requiresProject: true } }],
   ['a profile that could not be read', { completionProfileLookupFailed: true }],
+  ['a linked-project lookup that failed (a project may exist)', { linkedProjectLookupFailed: true }],
 ])('%s: the project editor, as before', async (_label, overrides) => {
   rows = [row('svc-old-path', overrides)];
   mount();
