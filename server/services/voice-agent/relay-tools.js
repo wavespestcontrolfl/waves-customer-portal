@@ -461,64 +461,6 @@ function formatSlots(slots, max = 4, rememberSlot = null, offerContext = null) {
 }
 
 /**
- * ⭐ WHAT IS ALREADY ON FILE IS NOT ASKED FOR AGAIN. The service address on
- * the matched account, for a FULL-tier caller only (a verified call from the
- * account's own customers.phone). The read-only availability lookups use it
- * when the caller states no location, so "do not ask a known customer for
- * their address" is something the tools make true rather than a prompt line
- * the next lookup contradicts. A recognised-only (secondary slot) or
- * looked-up caller gets nothing, and so does a soft-deleted account or one
- * whose property is ambiguous (several on file, or one that cannot be resolved).
- * Fail-soft: a failed read is "not on file". A written estimate does NOT use
- * it: where to send one is confirmed on the call (capture_lead).
- */
-async function accountContactFor(ctx = {}) {
-  if (!ctx.customerId || ctx.callerVerified !== true || matchedCallerTier(ctx) !== 'full') return null;
-  try {
-    const db = require('../../models/db');
-    const row = await db('customers').where({ id: ctx.customerId }).whereNull('deleted_at')
-      .first('address_line1', 'city', 'zip');
-    if (!row) return null;
-    // ONE property, or the caller is asked which (request_booking's own guard,
-    // relay-booking): an account with several properties, or one property the
-    // linkage cannot resolve, is refused at booking, so offering times scored
-    // for the mirror address would offer times that cannot be requested.
-    const propertyCount = await db('customer_properties').where({ customer_id: ctx.customerId, active: true })
-      .count('* as count').first().then((r) => parseInt((r && r.count) || 0, 10));
-    if (propertyCount > 1) return null;
-    if (propertyCount === 1) {
-      const { resolveCallBookingPropertyLinkage } = require('../call-recording-processor');
-      const linkage = await resolveCallBookingPropertyLinkage(ctx.customerId, {}, db);
-      if (!(linkage && linkage.propertyId)) return null;
-    }
-    return row;
-  } catch (err) {
-    logger.warn(`[voice-relay] account contact read failed callSid=${ctx.callSid || 'n/a'}: ${err.message}`);
-    return null;
-  }
-}
-
-/** The caller's stated location, else the service address on their own account. */
-async function availabilityLocation(input = {}, ctx = {}) {
-  const stated = { address_line1: input.address_line1, city: input.city, zip: input.zip };
-  if ([stated.address_line1, stated.city, stated.zip].some((v) => v != null && String(v).trim() !== '')) return { ...stated, fromAccount: false };
-  const account = await accountContactFor(ctx);
-  // A street plus a city or ZIP, or it is not an address to offer times for:
-  // a row holding only a city would be scored as a city and never asked about.
-  const has = (v) => v != null && String(v).trim() !== '';
-  if (!account || !has(account.address_line1) || !(has(account.city) || has(account.zip))) return { ...stated, fromAccount: false };
-  return { address_line1: account.address_line1, city: account.city, zip: account.zip, fromAccount: true };
-}
-
-// The address itself is never put in the result — the agent must not recite it.
-// A different property is a person's to book: request_booking always books the
-// account's own property, so times scored for another address must not be
-// offered against it.
-const ACCOUNT_LOCATION_NOTE = ' These times are for the service address on the caller\'s account. If the visit is '
-  + 'for a different property, do NOT offer or book these times: capture the lead with that property\'s address and '
-  + 'their preferred time, and tell the caller a Waves team member will call to confirm.';
-
-/**
  * Shared read-only availability lookup. `when` (optional) routes through the
  * natural-language parser (find_slots); omit it for the soonest-windows path
  * (get_availability). Returns a status the executor turns into model-facing text.
@@ -1664,16 +1606,14 @@ async function executeTool(name, input = {}, ctx = {}) {
     }
 
     if (name === 'get_availability') {
-      const { fromAccount, ...where } = await availabilityLocation(input, ctx);
-      const res = await resolveAvailability(where);
-      return availabilityResultToText(res, ctx) + (fromAccount && res.status !== 'unavailable' && res.status !== 'need_location' ? ACCOUNT_LOCATION_NOTE : '');
+      const res = await resolveAvailability({ address_line1: input.address_line1, city: input.city, zip: input.zip });
+      return availabilityResultToText(res, ctx);
     }
 
     if (name === 'find_slots') {
       if (!input.when) return 'Ask the caller what day or timeframe they prefer, then call find_slots with that.';
-      const { fromAccount, ...where } = await availabilityLocation(input, ctx);
-      const res = await resolveAvailability({ when: input.when, ...where });
-      return availabilityResultToText(res, ctx) + (fromAccount && res.status !== 'unavailable' && res.status !== 'need_location' ? ACCOUNT_LOCATION_NOTE : '');
+      const res = await resolveAvailability({ when: input.when, address_line1: input.address_line1, city: input.city, zip: input.zip });
+      return availabilityResultToText(res, ctx);
     }
 
     // The name is MODEL-supplied; bound and flatten it rather than echoing an
