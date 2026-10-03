@@ -90,6 +90,7 @@ function normalizeFawnConditions(snapshot = {}, { capturedAt = new Date() } = {}
 // is visible at the call site rather than defaulted inside the module.
 const SERVICE_AREA_DEFAULT_LOCATION = Object.freeze({ latitude: 27.40, longitude: -82.40 });
 
+const HOUR_MS = 3600000;
 const FORECAST_TIMEOUT_MS = 3500;
 const FORECAST_CACHE_TTL_MS = 10 * 60 * 1000;
 const FORECAST_CACHE_MAX = 300;
@@ -207,14 +208,19 @@ function planForecastFetch(nowMs, fromMs, toMs) {
   const nowDate = new Date(nowMs);
   const stdFrom = parseETDateTime(`${etDateString(addETDays(nowDate, -1))}T00:00`).getTime();
   const stdTo = parseETDateTime(`${etDateString(addETDays(nowDate, 7))}T00:00`).getTime();
-  const standard = fromMs >= stdFrom && toMs <= stdTo;
+  // Precipitation is stamped at the END of its hour, so a window's rain total
+  // needs the slot stamped exactly `toMs`. `firstSlot`/`lastSlot` are the first
+  // and last hour stamps a fetch of this shape returns; a window is served from
+  // it only when [fromMs, toMs] sits inside them (otherwise the total would be
+  // short, so the window goes to a date-range fetch instead).
+  const standard = fromMs >= stdFrom && toMs <= stdTo - HOUR_MS;
   const startDate = etDateString(new Date(fromMs));
-  const endDate = etDateString(new Date(toMs - 1));
+  const endDate = etDateString(new Date(toMs));
   const coverage = standard
-    ? { from: stdFrom, to: stdTo }
+    ? { firstSlot: stdFrom, lastSlot: stdTo - HOUR_MS }
     : {
-      from: parseETDateTime(`${startDate}T00:00`).getTime(),
-      to: parseETDateTime(`${etDateString(addETDays(new Date(toMs - 1), 1))}T00:00`).getTime(),
+      firstSlot: parseETDateTime(`${startDate}T00:00`).getTime(),
+      lastSlot: parseETDateTime(`${etDateString(addETDays(new Date(toMs), 1))}T00:00`).getTime() - HOUR_MS,
     };
   return { standard, startDate, endDate, coverage };
 }
@@ -245,18 +251,23 @@ function usablePropertyPoint(lat, lon) {
 }
 
 function sliceForecast(entry, cached, { fromMs, toMs, keyLat, keyLon }) {
+  // Instantaneous readings (temperature, humidity, wind) are the hour stamps in [from, to).
   const rows = entry.hourly.filter((r) => r.ms >= fromMs && r.ms < toMs);
-  // A total is only stated when EVERY hour slot in the window has a reading:
-  // a provider payload that stops short of the window, or skips hours, would
-  // otherwise read as a smaller (or zero) rain total. Hour slots are whole
-  // hours in UTC, which ET hours always align to.
-  const HOUR_MS = 3600000;
-  const byMs = new Map(rows.map((r) => [r.ms, r]));
+  // Open-Meteo's hourly `precipitation` is "sum of the preceding hour": the value
+  // stamped 13:00 is the rain that fell 12:00-13:00. The intervals that lie
+  // INSIDE [from, to] are therefore the slots stamped in (from, to]. A total is
+  // only stated when EVERY one of those slots has a reading: a payload that
+  // stops short of the window (including the final slot at `to`), or skips
+  // hours, would otherwise read as a smaller (or zero) rain total. Slots are
+  // whole hours in UTC, which ET hours always align to; a window edge that is
+  // not on the hour covers only the whole-hour intervals inside it.
+  const byMs = new Map(entry.hourly.map((r) => [r.ms, r]));
   let total = 0;
-  let complete = rows.length > 0;
-  for (let slot = Math.ceil(fromMs / HOUR_MS) * HOUR_MS; slot < toMs; slot += HOUR_MS) {
+  let complete = false;
+  for (let slot = Math.floor(fromMs / HOUR_MS) * HOUR_MS + HOUR_MS; slot <= toMs; slot += HOUR_MS) {
     const r = byMs.get(slot);
     if (!r || r.precipitation_in == null) { complete = false; break; }
+    complete = true;
     total += r.precipitation_in;
   }
   return {
@@ -275,12 +286,16 @@ function sliceForecast(entry, cached, { fromMs, toMs, keyLat, keyLon }) {
 
 // Property forecast. Returns
 //   { status: 'ok', source: 'open_meteo', fetchedAt, cached, latitude, longitude,
-//     window: { from, to },                       // ISO instants, [from, to)
+//     window: { from, to },                       // ISO instants
 //     current: { time, at, temperature_f, humidity_pct, wind_mph, wind_gust_mph,
 //                precipitation_probability_pct, weather_code } | null,
 //     hourly: [{ time, at, precipitation_in, precipitation_probability_pct,
 //                temperature_f, humidity_pct, wind_mph, wind_gust_mph }],
-//     precipitationInTotal }                      // inches over the window; null if any hour is missing
+//             // rows are the hour stamps in [from, to). precipitation_in is the rain
+//             // in the hour ENDING at that stamp (Open-Meteo "sum of the preceding
+//             // hour"); the other fields are readings AT the stamp.
+//     precipitationInTotal }                      // inches that fell INSIDE the window = the slots
+//                                                 // stamped in (from, to]; null unless every one is present
 //   { status: 'unavailable', reason, source: 'open_meteo', checkedAt }
 // `from`/`to` are Dates, epoch ms, or ISO strings (a zone-less string is ET);
 // the default window is the current hour through the next 24 h. `timeoutMs` is
@@ -312,7 +327,7 @@ async function fetchPropertyForecast({
 
     const hit = _forecastCache.get(key);
     if (hit && maxAgeMs > 0 && nowMs - hit.fetchedAtMs < maxAgeMs && nowMs >= hit.fetchedAtMs
-      && hit.coverage.from <= fromMs && toMs <= hit.coverage.to) {
+      && hit.coverage.firstSlot <= fromMs && toMs <= hit.coverage.lastSlot) {
       return slice(hit, true);
     }
 

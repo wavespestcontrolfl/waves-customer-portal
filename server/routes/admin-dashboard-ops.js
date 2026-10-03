@@ -274,7 +274,15 @@ router.get('/weather', async (req, res, next) => {
         const temp = maxOf('temperature_f');
         const humidity = maxOf('humidity_pct');
         const wind = maxOf('wind_mph');
-        const rain = forecast.precipitationInTotal;
+        // Day rain = the sum of the day's hour stamps 00:00-23:00, which is exactly how
+        // Open-Meteo's own daily precipitation_sum (the value this tile showed before)
+        // is built ("simple 24 hour aggregation from hourly values"). It is NOT the
+        // module's interval total (stamps 01:00-24:00), which would differ by the
+        // one hour of rain that straddles midnight. Null unless every hour is present.
+        const rainRows = forecast.hourly.map((h) => h.precipitation_in);
+        const rain = rainRows.every((v) => v != null)
+          ? Math.round(rainRows.reduce((sum, v) => sum + v, 0) * 1000) / 1000
+          : null;
         if (rain > 0.5) alerts.push({ level: 'red', text: `Rain: ${rain}"` });
         if (wind > 15) alerts.push({ level: 'amber', text: `Wind: ${wind} mph` });
         if (temp > 95) alerts.push({ level: 'amber', text: `Heat: ${temp}°F` });

@@ -84,3 +84,19 @@ test('an unparseable date skips the provider and falls through to the seasonal a
   expect(res.status).toBe(200);
   expect((await res.json()).source).toBe('seasonal-average');
 });
+
+test('day rain is the daily-API convention (hour stamps 00:00-23:00 of that date), as the tile showed before', async () => {
+  const date = '2026-08-20';
+  global.fetch = jest.fn(async (url, opts) => {
+    if (String(url).startsWith('http://127.0.0.1')) return realFetch(url, opts);
+    const payload = dayPayload(date);
+    payload.hourly.precipitation = payload.hourly.precipitation.map(() => 0);
+    payload.hourly.precipitation[0] = 0.25; // stamped 00:00 on the date
+    payload.hourly.time.push('2026-08-21T00:00'); // next day's first stamp is not part of this date
+    payload.hourly.precipitation.push(0.9);
+    ['temperature_2m', 'relative_humidity_2m', 'wind_speed_10m'].forEach((k) => payload.hourly[k].push(60));
+    return { ok: true, json: async () => payload };
+  });
+  const body = await (await weather(date)).json();
+  expect(body.rainfall).toBe(0.25);
+});

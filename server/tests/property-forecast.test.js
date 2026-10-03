@@ -64,8 +64,8 @@ describe('fetchPropertyForecast', () => {
     expect(gap.hourly.map((r) => r.time)).toEqual(['2026-10-03T12:00', '2026-10-03T14:00']);
     expect(gap.precipitationInTotal).toBeNull();
 
-    // A payload that ends before the window does.
-    global.fetch = okFetch(drop(hourlyPayload({ rainAt: RAIN }), ['2026-10-03T14:00']));
+    // The final slot is the one stamped exactly at `to` (the rain of the last hour in the window).
+    global.fetch = okFetch(drop(hourlyPayload({ rainAt: RAIN }), ['2026-10-03T15:00']));
     ({ fetchPropertyForecast } = load());
     const short = await fetchPropertyForecast({
       latitude: 27.1234, longitude: -82.5678, from: '2026-10-03T12:00', to: '2026-10-03T15:00', now: NOW,
@@ -88,7 +88,9 @@ describe('fetchPropertyForecast', () => {
       time: '2026-10-03T12:00', at: '2026-10-03T16:00:00.000Z', precipitation_in: 0.12, temperature_f: 76, humidity_pct: 72,
       precipitation_probability_pct: 80,
     });
-    expect(f.precipitationInTotal).toBe(0.17);
+    // precipitation is stamped at the END of its hour: 12:00-15:00 holds the slots 13:00, 14:00, 15:00,
+    // so the 0.12 stamped 12:00 (rain from 11:00-12:00) is not in it.
+    expect(f.precipitationInTotal).toBe(0.05);
     expect(f.current).toMatchObject({ temperature_f: 81.4, humidity_pct: 72, wind_mph: 6.2, wind_gust_mph: 11, precipitation_probability_pct: 35 });
   });
 
@@ -116,7 +118,7 @@ describe('fetchPropertyForecast', () => {
 
   test('a window with a missing hour reports a null total rather than a partial one', async () => {
     const payload = hourlyPayload({ rainAt: RAIN });
-    payload.hourly.precipitation[24 + 12] = null; // 2026-10-03T12:00
+    payload.hourly.precipitation[24 + 13] = null; // 2026-10-03T13:00 (a slot inside 12:00-14:00)
     global.fetch = okFetch(payload);
     const { fetchPropertyForecast } = load();
     const f = await fetchPropertyForecast({ latitude: 27.1, longitude: -82.5, from: '2026-10-03T12:00', to: '2026-10-03T14:00', now: NOW });
@@ -124,17 +126,59 @@ describe('fetchPropertyForecast', () => {
     expect(f.precipitationInTotal).toBeNull();
   });
 
+  test('rain stamped exactly at `from` is excluded and rain stamped exactly at `to` is included', async () => {
+    // 0.12 fell 11:00-12:00 (stamped 12:00); 0.07 fell 14:00-15:00 (stamped 15:00).
+    global.fetch = okFetch(hourlyPayload({ rainAt: { '2026-10-03T12:00': 0.12, '2026-10-03T15:00': 0.07 } }));
+    const { fetchPropertyForecast } = load();
+    const f = await fetchPropertyForecast({
+      latitude: 27.1, longitude: -82.5, from: '2026-10-03T12:00', to: '2026-10-03T15:00', now: NOW,
+    });
+    expect(f.precipitationInTotal).toBe(0.07);
+    // instantaneous readings keep [from, to): 12:00 is returned, 15:00 is not
+    expect(f.hourly.map((r) => r.time)).toEqual(['2026-10-03T12:00', '2026-10-03T13:00', '2026-10-03T14:00']);
+  });
+
+  test('a calendar-day window totals stamps 01:00 through the next day 00:00', async () => {
+    const { etDayWindow, fetchPropertyForecast } = load();
+    global.fetch = okFetch(hourlyPayload({
+      rainAt: { '2026-10-04T00:00': 0.4, '2026-10-04T01:00': 0.3, '2026-10-05T00:00': 0.2, '2026-10-05T01:00': 0.9 },
+    }));
+    const f = await fetchPropertyForecast({ latitude: 27.1, longitude: -82.5, ...etDayWindow('2026-10-04'), now: NOW });
+    // 0.4 fell on the 3rd (23:00-24:00), 0.2 fell 23:00-24:00 on the 4th, 0.9 fell on the 5th
+    expect(f.precipitationInTotal).toBe(0.5);
+    expect(f.hourly).toHaveLength(24);
+  });
+
+  test('a window ending at the last standard slot is fetched by date range so its final slot exists', async () => {
+    const { etDayWindow, fetchPropertyForecast } = load();
+    const day = etDayWindow('2026-10-09'); // ends at 2026-10-10 00:00, past the last standard stamp (10-09 23:00)
+    const stamps = (date) => Array.from({ length: 24 }, (_, h) => `${date}T${String(h).padStart(2, '0')}:00`);
+    const time = [...stamps('2026-10-09'), ...stamps('2026-10-10')];
+    global.fetch = okFetch({ hourly: { time, precipitation: time.map((t) => (t === '2026-10-10T00:00' ? 0.25 : 0)) } });
+    const f = await fetchPropertyForecast({ latitude: 27.1, longitude: -82.5, ...day, now: NOW });
+    const url = new URL(String(global.fetch.mock.calls[0][0]));
+    expect(url.searchParams.get('start_date')).toBe('2026-10-09');
+    expect(url.searchParams.get('end_date')).toBe('2026-10-10');
+    expect(f.precipitationInTotal).toBe(0.25);
+    // and if the provider still withholds that slot, the total is null, never short
+    global.fetch = okFetch({ hourly: { time: stamps('2026-10-09'), precipitation: stamps('2026-10-09').map(() => 0) } });
+    const short = await load().fetchPropertyForecast({ latitude: 27.1, longitude: -82.5, ...day, now: NOW });
+    expect(short.status).toBe('ok');
+    expect(short.precipitationInTotal).toBeNull();
+  });
+
   test('a window outside the standard span is fetched by date range', async () => {
-    // A full day of hourly readings, so the total over the day can be stated.
-    const time = Array.from({ length: 24 }, (_, h) => `2026-09-01T${String(h).padStart(2, '0')}:00`);
-    global.fetch = okFetch({ hourly: { time, precipitation: time.map((_, h) => (h === 0 ? 0.3 : 0)) } });
+    // The day's 24 stamps plus the slot stamped at the window's end (next day 00:00).
+    const stamps = (date) => Array.from({ length: 24 }, (_, h) => `${date}T${String(h).padStart(2, '0')}:00`);
+    const time = [...stamps('2026-09-01'), ...stamps('2026-09-02')];
+    global.fetch = okFetch({ hourly: { time, precipitation: time.map((t) => (t === '2026-09-01T00:00' ? 0.3 : t === '2026-09-02T00:00' ? 0.2 : 0)) } });
     const { fetchPropertyForecast } = load();
     const f = await fetchPropertyForecast({ latitude: 27.1, longitude: -82.5, from: '2026-09-01T00:00', to: '2026-09-02T00:00', now: NOW });
     const url = new URL(String(global.fetch.mock.calls[0][0]));
     expect(url.searchParams.get('start_date')).toBe('2026-09-01');
-    expect(url.searchParams.get('end_date')).toBe('2026-09-01');
+    expect(url.searchParams.get('end_date')).toBe('2026-09-02');
     expect(url.searchParams.get('past_days')).toBeNull();
-    expect(f.precipitationInTotal).toBe(0.3);
+    expect(f.precipitationInTotal).toBe(0.2); // the 0.3 stamped 09-01 00:00 fell on 08-31
   });
 
   describe('fail-open: always a typed unavailable result, never a throw or a hang', () => {
@@ -215,7 +259,7 @@ describe('fetchPropertyForecast', () => {
       // The provider answers per point: rain depends on the latitude it is asked about.
       global.fetch = jest.fn(async (url) => {
         const lat = Number(new URL(String(url)).searchParams.get('latitude'));
-        return { ok: true, json: async () => hourlyPayload({ rainAt: lat < 27.1235 ? { '2026-10-03T12:00': 0.5 } : {} }) };
+        return { ok: true, json: async () => hourlyPayload({ rainAt: lat < 27.1235 ? { '2026-10-03T13:00': 0.5 } : {} }) };
       });
       const { fetchPropertyForecast } = load();
       const win = { from: '2026-10-03T12:00', to: '2026-10-03T13:00', now: NOW };
