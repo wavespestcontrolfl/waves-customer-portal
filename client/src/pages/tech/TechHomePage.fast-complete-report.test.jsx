@@ -11,9 +11,15 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
-const mocks = vi.hoisted(() => ({ navigationBusy: vi.fn() }));
+const mocks = vi.hoisted(() => ({ navigationBusy: vi.fn(), attempts: new Map(), getAttempt: vi.fn() }));
 vi.mock('socket.io-client', () => ({ io: () => ({ on: vi.fn(), off: vi.fn(), disconnect: vi.fn() }) }));
 vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: () => false, useFeatureFlagReady: () => ({ enabled: false, ready: true }) }));
+vi.mock('../../lib/completion-resume-store', () => ({
+  getFastCompletionAttempt: mocks.getAttempt,
+  listFastCompletionAttempts: async (operatorId) => ({ available: true, attempts: operatorId === 'tech-fixture' ? [...mocks.attempts].map(([serviceId, attempt]) => ({ ...attempt, serviceId })) : [] }),
+  pruneFastCompletionAttempts: () => Promise.resolve(0),
+  pruneRecapClipDrafts: () => Promise.resolve(0),
+}));
 vi.mock('../../components/tech/TechIntelligenceBar', () => ({ default: () => <div>Field assistant</div> }));
 vi.mock('../../components/tech/GeofenceArrivalPrompt', () => ({ default: () => null }));
 vi.mock('../../components/tech/CreateProjectModal', () => ({ default: () => null, wdoFeeSeedFromVisit: () => null }));
@@ -27,6 +33,8 @@ vi.mock('../../components/tech/FastCompleteSheet', () => ({
     <div data-testid="sheet" data-service={JSON.stringify(service)}>Fast Complete sheet for {service.id}</div>
   ),
 }));
+vi.mock('../../components/tech/FastCompleteTreeShrubSheet', () => ({ default: () => <div data-testid="tree-sheet" /> }));
+vi.mock('../../components/tech/FastCompleteLawnReserviceSheet', () => ({ default: () => <div data-testid="lawn-sheet" /> }));
 import TechHomePage from './TechHomePage';
 
 const row = (id, overrides = {}) => ({
@@ -61,6 +69,12 @@ function mount(path = '/admin/today/tools', { fieldWorkspace = true } = {}) {
 
 beforeEach(() => {
   mocks.navigationBusy.mockClear();
+  mocks.attempts.clear();
+  mocks.getAttempt.mockReset();
+  mocks.getAttempt.mockImplementation(async (serviceId, operatorId) => ({
+    available: true,
+    attempt: operatorId === 'tech-fixture' ? mocks.attempts.get(String(serviceId)) || null : null,
+  }));
   vi.stubGlobal('fetch', vi.fn(async (path) => {
     if (path.includes('/admin/schedule?')) return { ok: true, status: 200, json: async () => ({ services: rows }) };
     return { ok: true, status: 200, json: async () => ({}) };
@@ -145,4 +159,28 @@ it('keeps a completed pest visit on the recap editor with the switch on', async 
   await openFromTools();
   expect(await screen.findByText('Existing recap form for svc-done')).toBeInTheDocument();
   expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
+});
+
+it.each([
+  ['report', { reportDraftBase: {}, structuredFindings: { type: 'tree_shrub' } }, {}, 'sheet', true],
+  ['pest', { products: [] }, {}, 'sheet', false],
+  ['lawn', { structuredFindings: { type: 'one_time_lawn_treatment' } }, { completionProfile: { category: 'lawn_care', serviceKey: 'lawn_re_service', findingsType: 'one_time_lawn_treatment' } }, 'lawn-sheet', null],
+  ['tree', { structuredFindings: { type: 'tree_shrub' } }, { completionProfile: { category: 'lawn_care', findingsType: 'tree_shrub' } }, 'tree-sheet', null],
+])('recovers a completed %s attempt in the sheet that prepared its body', async (kind, body, overrides, testId, reportFlow) => {
+  const serviceId = `svc-recover-${kind}`;
+  mocks.attempts.set(serviceId, { body: { idempotencyKey: `${kind}-key`, ...body }, summary: 'Original summary' });
+  rows = [row(serviceId, { status: 'completed', ...overrides })];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Recover Completion/ }));
+  const sheet = await screen.findByTestId(testId);
+  if (reportFlow !== null) expect(JSON.parse(sheet.getAttribute('data-service')).reportFlow).toBe(reportFlow);
+  expect(screen.queryByText(/Existing recap form/)).not.toBeInTheDocument();
+});
+
+it('keeps an earlier completion reachable when it is absent from today’s route', async () => {
+  mocks.attempts.set('prior-day', { body: { idempotencyKey: 'prior-key', reportDraftBase: {}, expectedVisit: { scheduledDate: '2020-01-01' } }, summary: 'Earlier report' });
+  rows = [];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Recover Completion/ }));
+  expect(await sheetService()).toMatchObject({ id: 'prior-day', reportFlow: true });
 });
