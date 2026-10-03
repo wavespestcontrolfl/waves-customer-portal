@@ -268,7 +268,7 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
             onDiscard={discard}
           />
           {errorMsg && <ActionFeedback error className="tech-visit-feedback">{errorMsg}</ActionFeedback>}
-          {statusMsg && !errorMsg && <ActionFeedback className="tech-visit-feedback">{statusMsg}</ActionFeedback>}
+          {statusMsg && !errorMsg && <p role="status" className="tech-visit-muted">{statusMsg}</p>}
           <h3 className="tech-visit-section-title">Attached{!photoListLoading && !loadError ? ` (${photos.length})` : ''}</h3>
           {photoListLoading ? <ActionFeedback className="tech-visit-feedback">Loading…</ActionFeedback> : loadError ? <>
             <ActionFeedback error className="tech-visit-feedback">{loadError}</ActionFeedback>
