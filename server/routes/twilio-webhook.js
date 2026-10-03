@@ -1581,10 +1581,12 @@ router.post('/sms', async (req, res) => {
     // Moves, books and sends nothing. Runs after the reminder reply-1/2 handler
     // and the lead-intake veto (both return above when they consume the text),
     // and regardless of the scheduling regex: "Tuesday works" may not match it.
-    if (Body && customer && !smsReaction && !isAiNumber && numberConfig.type === 'location'
+    // `customer` may be null: a reply from another number on the customer's
+    // file resolves through the offer's own customer, then the on-file check.
+    if (Body && !smsReaction && !isAiNumber && numberConfig.type === 'location'
       && require('../config/feature-gates').gateEnvValue('GATE_SMS_SCHEDULING_DECIDE')) {
       void require('../services/sms-scheduling-decide').runShadowDecision({
-        customer,
+        customer: customer || null,
         inboundBody: Body,
         inboundSmsLogId: smsLogEntry?.id || null,
         fromPhone: From,

@@ -98,22 +98,33 @@ function summarizeOffers(offers, { moveTimes, bookingTimes, now, observedAt }) {
 
 /**
  * The shadow decide step's rows (sms_offer_decisions) and how its would-move
- * calls compare with what actually happened: `visitsNow` maps a visit id to
- * its CURRENT { date, start } — a would-move counts as matched when the visit
- * now sits in the slot the decision named (whoever moved it), as unmatched
- * when it does not. That pair is the shadow exit bar's evidence.
+ * calls compare with what actually happened. A would-move is scored only once
+ * its 48h window has closed (by `observedAt`), and only against a logged move
+ * of that visit INTO the named time inside that window (`movesByVisit`:
+ * visit id → reschedule_log rows { created_at, new_date, new_window }), so a
+ * past report never changes as the calendar moves on. A move made in the
+ * admin Edit form logs nothing and counts as unmatched (the report says so).
  */
-function summarizeDecisions(decisions, visitsNow = new Map()) {
-  const out = { total: decisions.length, by_outcome: {}, by_action: {}, refusals: {}, would_move_matched: 0, would_move_unmatched: 0 };
+function summarizeDecisions(decisions, movesByVisit = new Map(), observedAt = new Date()) {
+  const observedMs = new Date(observedAt).getTime();
+  const out = { total: decisions.length, by_outcome: {}, by_action: {}, refusals: {}, would_move_matured: 0, would_move_matched: 0, would_move_unmatched: 0 };
   for (const d of decisions) {
     out.by_outcome[d.outcome] = (out.by_outcome[d.outcome] || 0) + 1;
     if (d.action) out.by_action[d.action] = (out.by_action[d.action] || 0) + 1;
     const refusals = typeof d.refusals === 'string' ? JSON.parse(d.refusals) : (d.refusals || []);
     for (const r of refusals) out.refusals[r] = (out.refusals[r] || 0) + 1;
     if (d.outcome !== 'would_move') continue;
+    const t0 = new Date(d.created_at).getTime();
+    if (t0 + FOLLOW_WINDOW_MS > observedMs) continue;
+    out.would_move_matured += 1;
     const would = typeof d.would_have === 'string' ? JSON.parse(d.would_have) : (d.would_have || {});
-    const now = visitsNow.get(String(would.scheduled_service_id || ''));
-    if (now && now.date === would.date && now.start === would.start) out.would_move_matched += 1;
+    const moved = (movesByVisit.get(String(would.scheduled_service_id || '')) || []).some((m) => {
+      const t = new Date(m.created_at).getTime();
+      const start = String(m.new_window || '').split('-')[0].slice(0, 5).padStart(5, '0');
+      const date = m.new_date instanceof Date ? m.new_date.toISOString().slice(0, 10) : String(m.new_date || '').slice(0, 10);
+      return t >= t0 && t <= t0 + FOLLOW_WINDOW_MS && date === would.date && start === would.start;
+    });
+    if (moved) out.would_move_matched += 1;
     else out.would_move_unmatched += 1;
   }
   return out;
@@ -133,7 +144,7 @@ function summarizeDecisions(decisions, visitsNow = new Map()) {
  *                 the change rate is over matured texts, so a text from the
  *                 last two days never counts as not followed before it could be.
  */
-function summarizeFunnel({ inbound = [], moves = [], cancels = [], bookings = [], offers = null, decisions = null, visitsNow = new Map(), now = new Date(), observedAt = now } = {}) {
+function summarizeFunnel({ inbound = [], moves = [], cancels = [], bookings = [], offers = null, decisions = null, movesByVisit = new Map(), now = new Date(), observedAt = now } = {}) {
   const observedMs = new Date(observedAt).getTime();
   const flagged = inbound.filter((r) => r.customer_id && isSchedulingText(r.body));
   const moveTimes = byCustomer(moves, 'created_at');
@@ -168,7 +179,7 @@ function summarizeFunnel({ inbound = [], moves = [], cancels = [], bookings = []
     per_week: perWeek,
     followed_within_48h: followed,
     offers: offerSummary,
-    decisions: decisions ? summarizeDecisions(decisions, visitsNow) : null,
+    decisions: decisions ? summarizeDecisions(decisions, movesByVisit, observedAt) : null,
   };
 }
 
@@ -194,18 +205,23 @@ function parseReportInstant(value, fallback, now = new Date()) {
   return parsed;
 }
 
-// The current date and window start of every visit a would-move named.
-async function loadVisitsNow(dbh, decisions) {
+// The logged moves of every visit a would-move named, from its decision on.
+async function loadMovesForDecisions(dbh, decisions) {
   const ids = [...new Set(decisions.filter((d) => d.outcome === 'would_move').map((d) => {
     const would = typeof d.would_have === 'string' ? JSON.parse(d.would_have) : (d.would_have || {});
     return would.scheduled_service_id;
   }).filter(Boolean))];
   if (!ids.length) return new Map();
-  const rows = await dbh('scheduled_services').whereIn('id', ids).select('id', 'scheduled_date', 'window_start');
-  return new Map(rows.map((r) => [String(r.id), {
-    date: r.scheduled_date instanceof Date ? r.scheduled_date.toISOString().slice(0, 10) : String(r.scheduled_date || '').slice(0, 10),
-    start: r.window_start ? String(r.window_start).slice(0, 5).padStart(5, '0') : null,
-  }]));
+  const first = decisions.reduce((min, d) => Math.min(min, new Date(d.created_at).getTime()), Infinity);
+  const rows = await dbh('reschedule_log').whereIn('scheduled_service_id', ids)
+    .where('created_at', '>=', new Date(first)).select('scheduled_service_id', 'created_at', 'new_date', 'new_window');
+  const map = new Map();
+  for (const r of rows) {
+    const key = String(r.scheduled_service_id);
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(r);
+  }
+  return map;
 }
 
 /** Read the rows for [since, until) and summarise them. `dbh` is a knex handle. */
@@ -222,9 +238,9 @@ async function loadFunnel({ since, until = new Date(), dbh = require('../models/
   const hasDecisions = await dbh.schema.hasTable('sms_offer_decisions');
   const decisions = hasDecisions
     ? await dbh('sms_offer_decisions').where('created_at', '>=', from).where('created_at', '<', to)
-      .select('action', 'outcome', 'refusals', 'would_have')
+      .select('action', 'outcome', 'refusals', 'would_have', 'created_at')
     : null;
-  const visitsNow = await loadVisitsNow(dbh, decisions || []);
+  const movesByVisit = await loadMovesForDecisions(dbh, decisions || []);
   const hasOffers = await dbh.schema.hasTable('sms_offers');
   const offers = hasOffers
     ? await dbh('sms_offers').where('sent_at', '>=', from).where('sent_at', '<', to)
@@ -234,7 +250,7 @@ async function loadFunnel({ since, until = new Date(), dbh = require('../models/
     ...inbound.filter((r) => isSchedulingText(r.body)).map((r) => r.customer_id),
     ...(offers || []).map((o) => o.customer_id).filter(Boolean),
   ])];
-  if (!customerIds.length) return summarizeFunnel({ inbound, offers, decisions, visitsNow, now: to, observedAt });
+  if (!customerIds.length) return summarizeFunnel({ inbound, offers, decisions, movesByVisit, now: to, observedAt });
   const [moves, cancels, bookings] = await Promise.all([
     dbh('reschedule_log').whereIn('customer_id', customerIds).whereNot('initiated_by', 'system')
       .where('created_at', '>=', from).where('created_at', '<=', followTo).select('customer_id', 'created_at'),
@@ -245,7 +261,7 @@ async function loadFunnel({ since, until = new Date(), dbh = require('../models/
     dbh('scheduled_services').whereIn('customer_id', customerIds)
       .where('created_at', '>=', from).where('created_at', '<=', followTo).select('customer_id', 'created_at'),
   ]);
-  return summarizeFunnel({ inbound, moves, cancels, bookings, offers, decisions, visitsNow, now: to, observedAt });
+  return summarizeFunnel({ inbound, moves, cancels, bookings, offers, decisions, movesByVisit, now: to, observedAt });
 }
 
 module.exports = { loadFunnel, summarizeFunnel, summarizeDecisions, parseReportInstant, formatReportDate, isSchedulingText, weekOf, FOLLOW_WINDOW_MS };

@@ -20,16 +20,23 @@ const SLOTS = [
 const OFFER = {
   id: 'offer-1', kind: 'move_visit', customer_id: 'cust-1', scheduled_service_id: VISIT_ID,
   estimate_id: null, service_key: null, slots: SLOTS, sent_at: new Date('2026-10-02T13:00:00Z'),
+  // The visit as it stood when the offer went out (taken a second after the send).
+  visit_snapshot: { date: '2026-10-05', start: '08:00', end: '10:00', status: 'confirmed', taken_at: '2026-10-02T13:00:01Z' },
 };
 const VISIT = {
   id: VISIT_ID, customer_id: 'cust-1', status: 'confirmed', scheduled_date: '2026-10-05',
   window_start: '08:00:00', window_end: '10:00:00', visit_id: null, source_action: null, customer_confirmed: true,
 };
 const accept = (n = 1, quote = 'Tuesday works', confidence = 'high') => ({ action: 'accept_slot', slot_number: n, customer_quote: quote, confidence });
-const evaluate = (over = {}) => decide.evaluateDecision({
-  offer: OFFER, decision: accept(), inboundBody: 'Tuesday works for us, thanks!', customer: CUSTOMER,
-  fromPhone: '+19415550100', visit: VISIT, movedSinceOffer: false, now: NOW, ...over,
-});
+const evaluate = (over = {}) => {
+  const offer = over.offer || OFFER;
+  const decision = over.decision || accept();
+  const pick = decide.resolvePick([offer], decision);
+  return decide.evaluateDecision({
+    offer, slot: pick?.slot || null, decision, inboundBody: 'Tuesday works for us, thanks!', customer: CUSTOMER,
+    fromPhone: '+19415550100', visit: VISIT, visitAfter: VISIT, movedSinceOffer: false, now: NOW, ...over,
+  });
+};
 
 afterEach(() => { delete process.env[GATE]; });
 
@@ -49,7 +56,7 @@ describe('evaluateDecision', () => {
       outcome: 'would_move',
       refusals: [],
       would_have: {
-        kind: 'move_visit', scheduled_service_id: VISIT_ID, date: '2026-10-06', start: '10:00', end: '12:00',
+        kind: 'move_visit', scheduled_service_id: VISIT_ID, date: '2026-10-06', start: '10:00', arrival_end: '12:00',
         from: { date: '2026-10-05', start: '08:00', end: '10:00' },
       },
     });
@@ -57,13 +64,21 @@ describe('evaluateDecision', () => {
 
   test('accepting the slot the calendar already shows is confirm-only (no write)', () => {
     const visit = { ...VISIT, scheduled_date: '2026-10-06', window_start: '10:00:00', window_end: '12:00:00' };
-    expect(evaluate({ visit }).outcome).toBe('confirm_only');
+    const offer = { ...OFFER, visit_snapshot: { ...OFFER.visit_snapshot, date: '2026-10-06', start: '10:00', end: '12:00' } };
+    expect(evaluate({ offer, visit, visitAfter: visit }).outcome).toBe('confirm_only');
   });
 
-  test('decline and asks-other-time take no action; unclear goes to staff', () => {
-    expect(evaluate({ decision: { ...accept(0, 'none of those work'), action: 'decline' } }).outcome).toBe('no_action');
-    expect(evaluate({ decision: { ...accept(0, 'how about Friday'), action: 'asks_other_time' } }).outcome).toBe('no_action');
+  test('a grounded decline or asks-other-time takes no action; unclear goes to staff', () => {
+    expect(evaluate({ inboundBody: 'Sorry, none of those work', decision: { ...accept(0, 'none of those work'), action: 'decline' } }).outcome).toBe('no_action');
+    expect(evaluate({ inboundBody: 'How about Friday instead?', decision: { ...accept(0, 'how about Friday'), action: 'asks_other_time' } }).outcome).toBe('no_action');
     expect(evaluate({ decision: { ...accept(0, ''), action: 'unclear' } })).toMatchObject({ outcome: 'staff', refusals: ['unclear'] });
+  });
+
+  test('a decline is grounded like an accept: invented words, low confidence or a stranger refuse it to staff', () => {
+    const decline = (quote, confidence = 'high') => ({ ...accept(0, quote, confidence), action: 'decline' });
+    expect(evaluate({ decision: decline('none work') })).toMatchObject({ outcome: 'staff', refusals: ['quote_not_in_text'] });
+    expect(evaluate({ inboundBody: 'none work', decision: decline('none work', 'low') }).refusals).toContain('not_high_confidence');
+    expect(evaluate({ inboundBody: 'none work', decision: decline('none work'), fromPhone: '+19415550199' }).refusals).toContain('phone_not_on_file');
   });
 
   test('a malformed or missing answer is an error row', () => {
@@ -81,6 +96,13 @@ describe('evaluateDecision', () => {
     ['visit_not_movable', { visit: { ...VISIT, status: 'completed' } }],
     ['grouped_visit', { visit: { ...VISIT, visit_id: 'group-1' } }],
     ['moved_since_offer', { movedSinceOffer: true }],
+    ['slot_no_longer_open', { slotStillOpen: { ok: false, reason: 'open_times_no_longer_offered' } }],
+    ['visit_changed_since_offer', { offer: { ...OFFER, visit_snapshot: { ...OFFER.visit_snapshot, date: '2026-10-04' } } }],
+    ['visit_changed_since_offer', { offer: { ...OFFER, visit_snapshot: { ...OFFER.visit_snapshot, status: 'pending' } } }],
+    ['no_visit_snapshot', { offer: { ...OFFER, visit_snapshot: null } }],
+    ['visit_snapshot_late', { offer: { ...OFFER, visit_snapshot: { ...OFFER.visit_snapshot, taken_at: '2026-10-02T14:00:00Z' } } }],
+    ['visit_changed_during_decide', { visitAfter: { ...VISIT, scheduled_date: '2026-10-09' } }],
+    ['visit_changed_during_decide', { visitAfter: null }],
   ])('%s refuses the accept to staff', (reason, over) => {
     const verdict = evaluate(over);
     expect(verdict.outcome).toBe('staff');
@@ -107,20 +129,30 @@ describe('evaluateDecision', () => {
     const book = { ...OFFER, kind: 'book_new', scheduled_service_id: null, service_key: 'pest_control' };
     expect(evaluate({ offer: book, visit: null })).toEqual({
       outcome: 'would_book', refusals: [],
-      would_have: { kind: 'book_new', estimate_id: null, service_key: 'pest_control', date: '2026-10-06', start: '10:00', end: '12:00' },
+      would_have: { kind: 'book_new', estimate_id: null, service_key: 'pest_control', date: '2026-10-06', start: '10:00', arrival_end: '12:00' },
     });
     expect(evaluate({ offer: { ...OFFER, kind: 'unknown' }, visit: null }).refusals).toContain('offer_kind_not_actionable');
   });
 });
 
-describe('buildDecideText', () => {
-  test('numbers the offered times as sent and puts the latest message last', () => {
+describe('several open offers', () => {
+  const BOOK = { ...OFFER, id: 'offer-2', kind: 'book_new', scheduled_service_id: null, service_key: 'pest_control', visit_snapshot: null,
+    slots: [{ date_label: 'Friday, October 9', window_label: '1:00 PM - 3:00 PM', date: '2026-10-09', start: '13:00', end: '15:00' }] };
+
+  test('slots are numbered across every open offer and a pick maps back to its own offer', () => {
+    const offers = [BOOK, OFFER];
+    expect(decide.resolvePick(offers, accept(1)).offer.id).toBe('offer-2');
+    expect(decide.resolvePick(offers, accept(3))).toMatchObject({ offer: { id: 'offer-1' }, index: 1 });
+    expect(decide.resolvePick(offers, accept(4))).toBeNull();
+  });
+
+  test('the text lists every offered time with what it is for, and puts the latest message last', () => {
     const text = decide.buildDecideText({
-      offer: OFFER, slots: SLOTS, inboundBody: 'Tuesday works',
+      offers: [BOOK, OFFER], inboundBody: 'Tuesday works',
       thread: [{ direction: 'outbound', message_body: 'We can do Tuesday or Wednesday.' }, { direction: 'inbound', message_body: 'Need to move it' }],
     });
-    expect(text).toContain('1. Tuesday, October 6, 10:00 AM - 12:00 PM');
-    expect(text).toContain('2. Wednesday, October 7, 2:00 PM - 4:00 PM');
+    expect(text).toContain('1. Friday, October 9, 1:00 PM - 3:00 PM (to book a new visit;');
+    expect(text).toContain('2. Tuesday, October 6, 10:00 AM - 12:00 PM (to move their upcoming visit;');
     expect(text).toContain('[Waves] We can do Tuesday or Wednesday.');
     expect(text.trim().endsWith('LATEST CUSTOMER MESSAGE:\nTuesday works')).toBe(true);
   });
@@ -138,7 +170,7 @@ describe('runShadowDecision', () => {
 
   test('gate on: a phone with no open offer costs one read and no model call', async () => {
     process.env[GATE] = 'true';
-    const builder = { where: () => builder, orderBy: () => builder, first: async () => undefined };
+    const builder = { where: () => builder, orderBy: () => Promise.resolve([]) };
     const dbh = jest.fn(() => builder);
     const llm = { dispatch: jest.fn() };
     await expect(decide.runShadowDecision({ customer: CUSTOMER, inboundBody: 'Tuesday works', inboundSmsLogId: 'in-1', fromPhone: '+19415550100', now: NOW, dbh, llm }))

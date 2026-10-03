@@ -117,21 +117,34 @@ test('report dates print as the Eastern day, also after 8 PM Eastern', () => {
   expect(formatReportDate(new Date('2026-10-02T01:30:00Z'))).toBe('2026-10-01');
 });
 
-test('decide-step decisions are counted, and a would-move is matched only when the visit now sits in that slot', () => {
+test('a would-move is scored only after its 48h, and only against a logged move into that time inside it', () => {
   const { summarizeDecisions } = require('../services/sms-scheduling-funnel');
-  const would = (id, date, start) => JSON.stringify({ kind: 'move_visit', scheduled_service_id: id, date, start, end: null });
-  const out = summarizeDecisions([
-    { action: 'accept_slot', outcome: 'would_move', refusals: '[]', would_have: would('v1', '2026-10-06', '10:00') },
-    { action: 'accept_slot', outcome: 'would_move', refusals: '[]', would_have: would('v2', '2026-10-07', '14:00') },
-    { action: 'accept_slot', outcome: 'staff', refusals: '["quote_not_in_text"]', would_have: null },
-    { action: 'decline', outcome: 'no_action', refusals: [], would_have: null },
-  ], new Map([['v1', { date: '2026-10-06', start: '10:00' }], ['v2', { date: '2026-10-05', start: '08:00' }]]));
+  const would = (id) => JSON.stringify({ kind: 'move_visit', scheduled_service_id: id, date: '2026-10-06', start: '10:00', arrival_end: '12:00' });
+  const decided = '2026-10-01T15:00:00Z';
+  const decisions = [
+    { action: 'accept_slot', outcome: 'would_move', refusals: '[]', would_have: would('v1'), created_at: decided },
+    { action: 'accept_slot', outcome: 'would_move', refusals: '[]', would_have: would('v2'), created_at: decided },
+    { action: 'accept_slot', outcome: 'would_move', refusals: '[]', would_have: would('v3'), created_at: decided },
+    { action: 'accept_slot', outcome: 'would_move', refusals: '[]', would_have: would('v4'), created_at: '2026-10-04T15:00:00Z' },
+    { action: 'accept_slot', outcome: 'staff', refusals: '["quote_not_in_text"]', would_have: null, created_at: decided },
+    { action: 'decline', outcome: 'no_action', refusals: [], would_have: null, created_at: decided },
+  ];
+  const moves = new Map([
+    ['v1', [{ created_at: '2026-10-01T18:00:00Z', new_date: '2026-10-06', new_window: '10:00-11:00' }]],
+    // moved, but to another time
+    ['v2', [{ created_at: '2026-10-01T18:00:00Z', new_date: '2026-10-07', new_window: '10:00-11:00' }]],
+    // moved there, but days later: outside the window
+    ['v3', [{ created_at: '2026-10-05T18:00:00Z', new_date: '2026-10-06', new_window: '10:00-11:00' }]],
+  ]);
+  const out = summarizeDecisions(decisions, moves, new Date('2026-10-05T00:00:00Z'));
   expect(out).toEqual({
-    total: 4,
-    by_outcome: { would_move: 2, staff: 1, no_action: 1 },
-    by_action: { accept_slot: 3, decline: 1 },
+    total: 6,
+    by_outcome: { would_move: 4, staff: 1, no_action: 1 },
+    by_action: { accept_slot: 5, decline: 1 },
     refusals: { quote_not_in_text: 1 },
+    // v4 was decided 9h before the report end: not scored yet
+    would_move_matured: 3,
     would_move_matched: 1,
-    would_move_unmatched: 1,
+    would_move_unmatched: 2,
   });
 });

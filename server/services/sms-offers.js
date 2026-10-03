@@ -190,6 +190,19 @@ async function relinkOfferChain(trx, phone, kind) {
   return { demoted, openId: last ? last.id : null };
 }
 
+function hhmmOf(value) {
+  const m = value == null ? null : String(value).match(/^(\d{1,2}):(\d{2})/);
+  return m ? `${String(Number(m[1])).padStart(2, '0')}:${m[2]}` : null;
+}
+
+/** The visit's date, window and status now; null fields when it is gone. */
+async function visitSnapshot(dbh, scheduledServiceId) {
+  const v = await dbh('scheduled_services').where({ id: scheduledServiceId })
+    .first('scheduled_date', 'window_start', 'window_end', 'status');
+  const date = v?.scheduled_date instanceof Date ? v.scheduled_date.toISOString().slice(0, 10) : (v?.scheduled_date ? String(v.scheduled_date).slice(0, 10) : null);
+  return { date, start: hhmmOf(v?.window_start), end: hhmmOf(v?.window_end), status: v?.status || null, taken_at: new Date().toISOString() };
+}
+
 /**
  * Record the offer an accepted send carried. Idempotent per decision; a newer
  * offer to the same phone for the same kind supersedes the open one. Returns
@@ -205,6 +218,11 @@ async function recordOfferForSend({ agentDecisionId, outgoingBody, providerMessa
     const built = buildOfferRow({ decision, outgoingBody, providerMessageId, to, sentAt, ignoreLinks });
     if (built.skip) return { recorded: false, reason: built.skip };
     const { row } = built;
+    // A visit-move offer keeps the visit as it stood now, so the decide step
+    // can tell whether it moved or changed status after the offer went out.
+    if (row.kind === 'move_visit' && row.scheduled_service_id) {
+      row.visit_snapshot = JSON.stringify(await visitSnapshot(dbh, row.scheduled_service_id));
+    }
     return await dbh.transaction(async (trx) => {
       // Offers to one phone are serialised so "one open offer per phone and
       // kind" holds without a failed insert.
@@ -311,6 +329,7 @@ module.exports = {
   windowForLabel,
   phoneLast10,
   withoutLinks,
+  visitSnapshot,
   OFFER_TTL_HOURS,
   KIND_BY_SOURCE,
 };

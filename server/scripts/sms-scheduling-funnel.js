@@ -51,7 +51,7 @@ function printReport(since, until, f) {
       `  Decide step (shadow) decisions     ${f.decisions.total}`,
       `    by outcome                       ${fmt(f.decisions.by_outcome)}`,
       `    refused because                  ${fmt(f.decisions.refusals)}`,
-      `    would-move now in that slot      ${f.decisions.would_move_matched} of ${f.decisions.would_move_matched + f.decisions.would_move_unmatched}`,
+      `    would-move then moved there <48h ${f.decisions.would_move_matched} of ${f.decisions.would_move_matured} matured (logged moves only)`,
     );
   }
   console.log(lines.join('\n'));
