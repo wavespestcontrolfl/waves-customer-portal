@@ -1197,9 +1197,10 @@ describe('engine replay guards', () => {
     // positive recurring evidence: the catalog says recurring, or (no catalog row) the name carries a cadence —
     // a service_id-less "One-Time Pest Control" row passes neither
     expect(P.DATING_ROW_SQL).toMatch(/sv\.billing_type = 'recurring'/);
-    expect(P.DATING_ROW_SQL).toMatch(/sv\.id IS NULL AND COALESCE\(s\.service_type, ''\) ~\* '\(quarterly\|bi-\?monthly\|semi-\?annual\|monthly\|annual\|every \[0-9\]\|recurring\)'/);
+    expect(P.DATING_ROW_SQL).toMatch(/sv\.id IS NULL AND COALESCE\(s\.service_type, ''\) ~\* '\(quarterly\|bi-monthly\|bimonthly\|semi-annual\|semiannual\|monthly\|annual\|every \[0-9\]\|recurring\)'/);
+    expect(P.DATING_ROW_SQL).not.toMatch(/\?/); // a `?` in knex raw SQL is a binding placeholder
     expect(P.DATING_ROW_SQL).not.toMatch(/<> 'one_time'/);
-    const cadence = /(quarterly|bi-?monthly|semi-?annual|monthly|annual|every [0-9]|recurring)/i;
+    const cadence = /(quarterly|bi-monthly|bimonthly|semi-annual|semiannual|monthly|annual|every [0-9]|recurring)/i;
     for (const name of ['Quarterly Pest Control Service', 'Bi-Monthly Tree & Shrub Care Service', 'Semiannual Pest Control Service', 'Bi-Monthly Pest Control']) expect(cadence.test(name)).toBe(true);
     for (const name of ['One-Time Pest Control', 'Termite Control Service', 'WDO Inspection', 'Waves Assessment']) expect(cadence.test(name)).toBe(false);
     for (const word of ['inspection', 'assessment', 'wdo']) expect(P.DATING_ROW_SQL).toMatch(new RegExp(`NOT ILIKE '%${word}%'`));
