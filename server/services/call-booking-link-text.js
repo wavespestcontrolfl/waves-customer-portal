@@ -484,6 +484,20 @@ async function outboundStagingReason(conn, call) {
   return (await outboundPriorContactMissing(conn, call)) ? 'outbound_without_prior_contact' : null;
 }
 
+// A call the office is HOLDING at an existing customer's address (GATE_CALL_HOUSEHOLD_HOLD: an open
+// or claimed household_address_match card) is never chased with the self-service inspection link:
+// the caller may belong to that household, and a link they can book from would recreate the
+// duplicate / double booking the hold exists to stop. Only an OPEN or CLAIMED card blocks; a
+// resolved (retired, or settled by the office) or dismissed card means there is no hold. Read on the
+// connection it is given, so the send-time recheck judges it on the locked handoff's own connection.
+async function householdHoldOpen(conn, call) {
+  const card = await conn('triage_items')
+    .where({ call_log_id: call.id, reason_code: 'household_address_match' })
+    .whereIn('status', ['open', 'in_progress'])
+    .first('id');
+  return !!card;
+}
+
 // This lane deliberately does NOT use call-commitments.js's callEndedAt for
 // the call's end. That function adds duration on top of created_at for
 // EVERY inbound row, including a post-call one (a status-callback or
@@ -896,7 +910,8 @@ async function stageOne(conn, call, now, boundary = null) {
   }
   const leadId = linkage.leadId;
   const extraction = extractionOf(call);
-  const reason = stagingIneligibleReason(call, extraction, leadId) || (await outboundStagingReason(conn, call));
+  const reason = stagingIneligibleReason(call, extraction, leadId) || (await outboundStagingReason(conn, call))
+    || ((await householdHoldOpen(conn, call)) ? 'household_hold' : null);
   if (reason) {
     await claimMetadata(conn, call, { status: 'skipped', reason, staged_at });
     return 'skipped';
@@ -1302,6 +1317,7 @@ const DISPATCH_CHECKS = [
   ({ lead }) => (lead.is_commercial === true ? 'commercial_lead' : null),
   ({ lead }) => (!lead.phone || !isUsPhone(lead.phone) ? 'lead_phone_unusable' : null),
   async ({ conn, call }) => ((await outboundPriorContactMissing(conn, call)) ? 'outbound_without_prior_contact' : null),
+  async ({ conn, call }) => ((await householdHoldOpen(conn, call)) ? 'household_hold' : null),
   async ({ conn, call, lead }) => {
     const callStart = callStartedAt(call) || new Date(call.created_at);
     return (await bookedSinceCall(conn, lead.customer_id, callStart, lead.phone)) ? 'booked_since_call' : null;
@@ -1422,6 +1438,9 @@ const NEVER_SEND_RECHECK_STEPS = [
     ctx.lead = await ctx.dbi('leads').where({ id: ctx.leadId }).whereNull('deleted_at').forUpdate().first();
     return (!ctx.lead || !isOpenLeadRow(ctx.lead)) ? { code: 'lead_no_longer_open' } : null;
   },
+  // An open household hold, re-read on the locked handoff's own connection (the office may have
+  // opened one, or a reprocess may have filed it, after the dispatch-time check).
+  async (ctx) => ((await householdHoldOpen(ctx.dbi, ctx.call)) ? { code: 'household_hold' } : null),
   (ctx) => (ctx.lead.estimate_id ? { code: 'estimate_linked' } : null),
   // codex #5018 P2: the FK alone misses a quote-wizard draft the lead
   // never opened (see leadHasOpenEstimateMirror's own doc comment) —

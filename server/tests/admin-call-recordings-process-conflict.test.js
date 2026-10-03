@@ -424,7 +424,7 @@ describe('claim ceiling is derived from the provider budgets', () => {
     const checkpoint = source.slice(start, end);
     expect(checkpoint).toContain("const checkpointRows = await db('call_log')");
     expect(checkpoint).toContain(".where('processing_token', procToken)");
-    expect(checkpoint).toContain("if (!checkpointRows) return abandonToPeer(");
+    expect(checkpoint).toContain("if (!checkpointRows.length) return abandonToPeer(");
   });
 
   test('the synopsis write is token-fenced, not check-then-write', () => {

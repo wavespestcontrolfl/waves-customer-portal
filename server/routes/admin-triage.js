@@ -201,6 +201,9 @@ async function upsertFeedback({ callLogId, triageItemId = null, decisionKind, ve
   });
 }
 
+// Cards a technician login never sees (list rows AND the per-status counts): admin-territory evidence.
+const TECH_HIDDEN_REASONS = ['property_role_confirm', 'household_address_match'];
+
 // GET /api/admin/triage?status=open  → list items + per-status counts
 router.get('/', async (req, res) => {
   try {
@@ -253,8 +256,10 @@ router.get('/', async (req, res) => {
       // property_role_confirm payloads embed the customer's OTHER property
       // addresses — the same data admin-customers gates behind requireAdmin —
       // and only an admin can apply them; hide the cards from tech users.
+      // …and household-hold cards (GATE_CALL_HOUSEHOLD_HOLD): the caller's number, heard name, exact
+      // address and the matched customer's id are admin-only operational evidence.
       .modify((q) => {
-        if (req.techRole !== 'admin') q.whereNot('triage_items.reason_code', 'property_role_confirm');
+        if (req.techRole !== 'admin') q.whereNotIn('triage_items.reason_code', TECH_HIDDEN_REASONS);
       })
       .orderBy('triage_items.created_at', 'desc')
       .limit(limit)
@@ -295,7 +300,7 @@ router.get('/', async (req, res) => {
       .select('status')
       .count('* as n')
       .modify((q) => {
-        if (req.techRole !== 'admin') q.whereNot('reason_code', 'property_role_confirm');
+        if (req.techRole !== 'admin') q.whereNotIn('reason_code', TECH_HIDDEN_REASONS);
       })
       .groupBy('status');
     const counts = { open: 0, in_progress: 0, resolved: 0, dismissed: 0 };
@@ -1898,6 +1903,7 @@ router.post('/:id/verdict', async (req, res) => {
     // A household hold (GATE_CALL_HOUSEHOLD_HOLD) asks the office to decide who this caller is —
     // book on the existing account, link the call, or dismiss — not to judge a routing decision.
     if (item.reason_code === 'household_address_match') {
+      if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
       return res.status(400).json({ error: 'This card holds a call at an existing customer\'s address, not a call verdict — open the customer, book or link the call, then use Resolve or Dismiss.' });
     }
     // A street-level address hold is settled by its visit, not by a verdict.

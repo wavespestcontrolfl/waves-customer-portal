@@ -11,6 +11,7 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/twilio-numbers', () => ({ isInternalNumber: () => false, isOwnedNumber: () => false }));
+jest.mock('../services/conversations', () => ({ syncVoiceMessageForCall: jest.fn(async () => null) }));
 const fs = require('fs');
 const knex = require('knex');
 const { randomUUID } = require('crypto');
@@ -379,6 +380,44 @@ const SKIP = !process.env.DATABASE_URL;
     expect((await trx('call_log').where({ id: call.id }).first('review_status')).review_status).toBe('open');
   });
 
+  test('call-log-relink never links a call a pass is working (live token or processing status); an idle one links as before', async () => {
+    const { relinkUnattributedCalls } = require('../services/call-log-relink');
+    const owner = await newCustomer({ phone: '+19415550999' });
+    const mkCall = (over) => trx('call_log').insert({
+      twilio_call_sid: null, direction: 'inbound', from_phone: '+19415550999', to_phone: '+19415550100', created_at: new Date(), ...over,
+    }).returning('id').then(([r]) => r.id);
+    const working = await mkCall({ processing_token: 'tok-9', processing_status: 'processing' });
+    const tokenOnly = await mkCall({ processing_token: 'tok-8', processing_status: null });
+    const statusOnly = await mkCall({ processing_token: null, processing_status: 'processing' });
+    const idle = await mkCall({ processing_token: null, processing_status: 'processed' });
+    const result = await relinkUnattributedCalls({ conn: trx });
+    expect(result.linked).toBe(1);
+    const linkOf = async (id) => (await trx('call_log').where({ id }).first('customer_id')).customer_id;
+    expect(await linkOf(idle)).toBe(owner.id);
+    for (const id of [working, tokenOnly, statusOnly]) expect(await linkOf(id)).toBeNull();
+    // the pass finishes (token cleared): the next hourly run links it
+    await trx('call_log').where({ id: working }).update({ processing_token: null, processing_status: 'processed' });
+    expect((await relinkUnattributedCalls({ conn: trx })).linked).toBe(1);
+    expect(await linkOf(working)).toBe(owner.id);
+  });
+
+  test('interleaving: a link committed after the hold was decided survives the pass\'s checkpoint write (COALESCE keeps it, an override still wins)', async () => {
+    const expr = "CASE WHEN jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'customer_link_override')"
+      + " THEN NULLIF(metadata -> 'customer_link_override' ->> 'customer_id', '')::uuid ELSE COALESCE(?::uuid, customer_id) END";
+    expect(source).toContain("(householdHoldActive ? 'COALESCE(?::uuid, customer_id)' : '?::uuid')");
+    const linked = await newCustomer();
+    const [call] = await trx('call_log').insert({ twilio_call_sid: `CA${'8'.repeat(30)}h3`, direction: 'inbound', processing_token: 'tok-1', customer_id: linked.id }).returning('id');
+    // the held pass resolved no customer; the linker's link stays, and the checkpoint reports it back
+    const rows = await trx('call_log').where({ id: call.id }).update({ customer_id: trx.raw(expr, [null]) }).returning('customer_id');
+    expect(rows[0].customer_id).toBe(linked.id);
+    // an unlinked call stays unlinked (nothing to keep)
+    await trx('call_log').where({ id: call.id }).update({ customer_id: null });
+    expect((await trx('call_log').where({ id: call.id }).update({ customer_id: trx.raw(expr, [null]) }).returning('customer_id'))[0].customer_id).toBeNull();
+    // an operator UNLINK override still wins over everything
+    await trx('call_log').where({ id: call.id }).update({ customer_id: linked.id, metadata: JSON.stringify({ customer_link_override: { customer_id: null } }) });
+    expect((await trx('call_log').where({ id: call.id }).update({ customer_id: trx.raw(expr, [null]) }).returning('customer_id'))[0].customer_id).toBeNull();
+  });
+
   test('the finalization recheck: only an open / claimed card keeps the reason counting toward review_status', async () => {
     const callLogId = randomUUID();
     await fileHouseholdHoldCard(trx, { callLogId, customerId: randomUUID(), phone: '+19415550999', extracted: {} });
@@ -455,6 +494,22 @@ describe('wiring in processRecording (structural pin)', () => {
     expect(step3).toContain('if (!householdHoldActive && !householdLinkedCustomerId && !householdPrelinked) await retireStandingHouseholdCard();');
     expect(step3).toContain("bridgeNeedsConfirmation.splice(at, 1)");
     expect(step3).toContain('household hold is switched off');
+  });
+
+  test('the checkpoint write reports back a link that landed after the hold and the pass continues on that customer, retiring the card', () => {
+    const at = source.indexOf('const checkpointRows = await db(\'call_log\')');
+    const block = source.slice(at, at + 4600);
+    expect(block).toContain(".returning('customer_id');");
+    expect(block).toContain('if (householdHoldActive && checkpointRows[0].customer_id) {');
+    expect(block).toContain('customerId = checkpointRows[0].customer_id;');
+    expect(block).toContain('householdHoldActive = false;');
+    expect(block).toContain('await retireStandingHouseholdCard(');
+  });
+
+  test('the filer locks the call_log row FOR UPDATE after the per-call triage lock, in one transaction (the fileSkippedBookingCard order)', () => {
+    const filer = source.slice(source.indexOf('async function fileHouseholdHoldCard'), source.indexOf('async function retireHouseholdHoldCard'));
+    expect(filer.indexOf('lockTriageCall(trx, callLogId)')).toBeLessThan(filer.indexOf(".forUpdate().first('processing_token', 'customer_id')"));
+    expect(filer.indexOf(".forUpdate().first('processing_token', 'customer_id')")).toBeLessThan(filer.indexOf("trx('triage_items')"));
   });
 
   test('ONE open-card helper serves the first-name and household reasons', () => {
@@ -548,7 +603,7 @@ describe('the sweep and the verdict route leave the card to a person', () => {
 
   test('admin-triage: /verdict 400, bulk verdict sweeps exclude it, non-admin Resolve AND Dismiss are 403', () => {
     const route = fs.readFileSync(require.resolve('../routes/admin-triage'), 'utf8');
-    expect(route).toMatch(/if \(item\.reason_code === 'household_address_match'\) \{\s+return res\.status\(400\)/);
+    expect(route).toMatch(/if \(item\.reason_code === 'household_address_match'\) \{\s+if \(req\.techRole !== 'admin'\) return res\.status\(403\)[^\n]*\n\s+return res\.status\(400\)/);
     expect(route).toMatch(/'missing_first_name', 'household_address_match',/);
     expect(route).toMatch(/guarded\.reason_code === 'household_address_match'\) \{\s+return res\.status\(403\)/);
   });

@@ -51,6 +51,7 @@ const UNCHECKED_AFTER_MS = 60 * 60 * 1000;
 // else falls back to the reason with underscores as spaces.
 const REASON_LABELS = {
   existing_customer: 'existing customer',
+  household_hold: 'held for the office',
   no_lead_linkage: 'no lead',
   not_new_lead_call: 'not a new lead',
   not_residential: 'not a home',

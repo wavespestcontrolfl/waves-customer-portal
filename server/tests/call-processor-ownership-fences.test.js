@@ -84,7 +84,7 @@ describe('processRecording call_log writes are ownership-fenced', () => {
   test('the customer checkpoint honours the LATEST operator link, read inside the write', () => {
     // A relink made while the pass runs must not be overwritten by the
     // pass's snapshot of the override taken at claim time.
-    const at = body.indexOf("'customer_link_override')\"\n        + \" THEN NULLIF(metadata -> 'customer_link_override' ->> 'customer_id', '')::uuid ELSE ?::uuid END\"");
+    const at = body.indexOf("'customer_link_override')\"\n        + \" THEN NULLIF(metadata -> 'customer_link_override' ->> 'customer_id', '')::uuid ELSE \"");
     expect(at).toBeGreaterThan(-1);
     expect(body.slice(at - 400, at + 200)).toContain("jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'customer_link_override')");
     // The phantom-customer unlink never clears a person's link either.

@@ -977,7 +977,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
             </div>
           ) : (
             <div className="divide-y divide-zinc-200">
-              {items.map((item) => {
+              {items.filter((item) => isAdmin || item.reason_code !== "household_address_match").map((item) => {
                 const synopsis = item.lead_synopsis || item.call_summary || item.summary || "No summary available.";
                 const recId = item.recording_sid || item.call_log_id;
                 const busyKey = isTriage ? item.id : item.call_log_id;
@@ -1070,7 +1070,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
                           back to accept — the verdict badge shows current state. */}
                       {(isOpenView || !isTriage) && (
                         <div className="flex items-center gap-2 flex-wrap sm:shrink-0">
-                          {isOpenView && !(isHouseholdCard && !isAdmin) && (
+                          {isOpenView && (
                             <Button
                               size="sm"
                               variant="secondary"
@@ -1190,11 +1190,6 @@ export default function TriageInboxTabV2({ isAdmin }) {
                     <p className="text-13 text-ink-secondary mt-2 whitespace-pre-wrap line-clamp-6">{synopsis}</p>
 
                     {isTriage && <ConfirmEvidence payload={item.payload} reasonCode={item.reason_code} openCustomerIds={item.owed_customer_open_ids} suggestedOpenId={item.suggested_customer_open_id} />}
-                    {isHouseholdCard && isOpenView && !isAdmin && (
-                      <div className="mt-2 text-12 text-ink-tertiary">
-                        Deciding on this call needs an admin.
-                      </div>
-                    )}
                     {isPropertyRoleCard && <PropertyRoleEvidence payload={item.payload} />}
                     {isEmailDisagreementCard && isOpenView && !isAdmin && (
                       <div className="mt-2 text-12 text-ink-tertiary">

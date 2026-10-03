@@ -474,6 +474,18 @@ describe('a household_address_match card (GATE_CALL_HOUSEHOLD_HOLD) is an operat
     expect(tables.triage_items[0].status).toBe('open');
   });
 
+  test('a technician cannot reach the card through /verdict either (403), and an admin gets the plain 400', async () => {
+    const { conn, tables } = seed();
+    wireDb(db, { conn });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/triage/${CARD_ID}/verdict`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'x-test-role': 'technician' }, body: JSON.stringify({ verdict: 'accept' }),
+      });
+      expect(res.status).toBe(403);
+    });
+    expect(tables.triage_items[0].status).toBe('open');
+  });
+
   test('a call-level verdict on a DIFFERENT card of the same call never sweeps the hold card up', async () => {
     const other = 'card-2';
     const f = seed();

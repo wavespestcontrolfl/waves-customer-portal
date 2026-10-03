@@ -78,7 +78,7 @@ const schema = `call_booking_link_${randomUUID().replaceAll('-', '')}`;
 // customer_accounts (codex #5196 P1-A): ensureCustomerAccount's own account
 // row — needed once the quick-add lock-fence test below drives that real
 // function, not merely a `customers` insert.
-const TABLES = ['customers', 'customer_accounts', 'leads', 'call_log', 'system_settings', 'scheduled_services', 'short_codes', 'sms_log', 'activity_log', 'call_booking_link_text_handoffs', 'consultation_link_send_attempts', 'estimates'];
+const TABLES = ['customers', 'customer_accounts', 'leads', 'call_log', 'system_settings', 'scheduled_services', 'short_codes', 'sms_log', 'activity_log', 'call_booking_link_text_handoffs', 'consultation_link_send_attempts', 'estimates', 'triage_items'];
 let admin;
 let mockPg;
 jest.setTimeout(30000);
@@ -279,6 +279,46 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     expect(result).toEqual({ staged: 0, ineligible: 1 });
     const row = await mockPg('call_log').where({ id: callId }).first('metadata');
     expect(row.metadata.call_booking_link_text).toMatchObject({ status: 'skipped', reason: 'ambiguous_lead_linkage' });
+  });
+
+  test('a call HELD at an existing customer\'s address (open or claimed household_address_match card) is never staged or re-checked for the link text; a resolved or dismissed card is no hold', async () => {
+    await mockPg('system_settings').insert({ key: callBookingLinkText.ACTIVATION_SETTINGS_KEY, value: new Date('2020-01-01').toISOString(), category: 'call_booking_link_text' });
+    const card = (callId, status) => mockPg('triage_items').insert({
+      call_log_id: callId, category: 'customer_field_conflict', severity: 'blocking', reason_code: 'household_address_match', status, summary: 's',
+    });
+    const mk = async (status) => {
+      const leadId = await insertLead(mockPg);
+      const callId = await insertCall(mockPg, {
+        metadata: { lead_id: leadId },
+        created_at: new Date('2027-01-15T15:55:00.000Z'),
+        updated_at: new Date('2027-01-15T15:55:00.000Z'),
+      });
+      if (status) await card(callId, status);
+      return callId;
+    };
+    const held = await mk('open');
+    const claimed = await mk('in_progress');
+    const resolved = await mk('resolved');
+    const dismissed = await mk('dismissed');
+    const plain = await mk(null);
+
+    const result = await callBookingLinkText.stage(mockPg, { now: NOW });
+    expect(result).toEqual({ staged: 3, ineligible: 2 });
+    const state = async (id) => (await mockPg('call_log').where({ id }).first('metadata')).metadata.call_booking_link_text;
+    expect(await state(held)).toMatchObject({ status: 'skipped', reason: 'household_hold' });
+    expect(await state(claimed)).toMatchObject({ status: 'skipped', reason: 'household_hold' });
+    for (const id of [resolved, dismissed, plain]) expect(await state(id)).toMatchObject({ status: 'pending' });
+
+    // the dispatch-time recheck, on the locked handoff's own connection: a card filed AFTER staging still stops the send
+    const lateLead = await insertLead(mockPg);
+    const late = await insertCall(mockPg, { metadata: { lead_id: lateLead } });
+    const row = async () => mockPg('call_log').where({ id: late }).first();
+    const recheck = async () => callBookingLinkText.neverSendRecheck(await row(), lateLead, '+15555550111')({ dbi: mockPg });
+    expect(await recheck()).not.toMatchObject({ code: 'household_hold' });
+    await card(late, 'open');
+    expect(await recheck()).toMatchObject({ ok: false, code: 'household_hold' });
+    await mockPg('triage_items').where({ call_log_id: late }).update({ status: 'resolved' });
+    expect(await recheck()).not.toMatchObject({ code: 'household_hold' });
   });
 
   test('claimForDispatch atomically claims a pending row exactly once, preserving a sibling metadata key', async () => {

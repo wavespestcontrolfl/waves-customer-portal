@@ -354,14 +354,15 @@ describe('household hold card (GATE_CALL_HOUSEHOLD_HOLD)', () => {
     expect(within(el).getByRole('link', { name: 'Open customer' })).toHaveAttribute('href', `/admin/customers?customerId=${SURVIVOR}`);
   });
 
-  it('a non-admin gets neither Resolve nor Dismiss (the server 403s both)', async () => {
-    load();
+  it('a non-admin sees nothing of the card at all (the server hides it too)', async () => {
+    adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
+      ? { items: [card, { ...ordinary, id: 'o2', first_name: 'Visible', last_name: 'Other' }], counts: { open: 2, resolved: 0, dismissed: 0 } } : { ok: true }));
     render(<TriageInboxTabV2 isAdmin={false} />);
-    const el = await cardEl();
-    expect(within(el).queryByRole('button', { name: /^resolve$/i })).toBeNull();
-    expect(within(el).queryByRole('button', { name: /dismiss/i })).toBeNull();
-    expect(within(el).queryByRole('button', { name: /accept|deny/i })).toBeNull();
-    expect(within(el).getByText(/needs an admin/i)).toBeInTheDocument();
+    expect(await screen.findByText('Visible Other')).toBeInTheDocument();
+    expect(screen.queryByText(/19415550123/)).toBeNull();
+    expect(screen.queryByText(/Sample Caller/)).toBeNull();
+    expect(screen.queryByText(/100 Example Loop/)).toBeNull();
+    expect(screen.queryByRole('link', { name: 'Open customer' })).toBeNull();
   });
 
   it('Resolve closes the card only: PUT /resolve with its version, never a /verdict', async () => {

@@ -194,9 +194,15 @@ async function relinkUnattributedCalls({ now = new Date(), conn = db } = {}) {
     // processor may have rejected the voicemail and deliberately cleared
     // the link in the gap — re-linking a sentinel row would undo that
     // unlink, so the sentinel predicate repeats here.
+    // A call a processing pass is working RIGHT NOW is left for the next hourly run, exactly as the
+    // operator link route refuses a processing call (admin-call-recordings.js `already_processing`):
+    // the pass decides its customer (a household hold, a create, a phone match) from the state it
+    // read, and a link landing mid-pass would be overwritten or contradicted by its checkpoint.
     const updated = await whereNotSandboxCall(conn('call_log')
       .whereIn('id', callIds)
-      .whereNull('customer_id'))
+      .whereNull('customer_id')
+      .whereNull('processing_token'))
+      .whereRaw("processing_status IS DISTINCT FROM 'processing'")
       .whereRaw('transcription IS DISTINCT FROM ?', [TRANSCRIPTION_REJECTED_SENTINEL])
       .whereRaw(NOT_EXPLICITLY_UNLINKED_SQL)
       .update({ customer_id: customer.id, updated_at: new Date() });

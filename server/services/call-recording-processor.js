@@ -4033,7 +4033,9 @@ async function fileHouseholdHoldCard(conn, { callLogId, procToken = null, custom
     if (procToken) {
       // ONE locked read says which way the call moved, never re-derived later (a concurrent
       // linker such as call-log-relink.js does not exclude a processing call).
-      const row = await trx('call_log').where({ id: callLogId }).first('processing_token', 'customer_id');
+      // forUpdate: the same claim-check-and-write atomicity fileSkippedBookingCard uses (lockTriageCall
+      // first, then the call_log row), so a linker that commits after this read waits for the card.
+      const row = await trx('call_log').where({ id: callLogId }).forUpdate().first('processing_token', 'customer_id');
       if (!row || row.processing_token !== procToken) return 'claim_lost';
       if (row.customer_id) return { state: 'linked', customerId: row.customer_id };
     }
@@ -12376,12 +12378,12 @@ const CallRecordingProcessor = {
     // customer, the number is now on an account, the gate is off, the office unlinked it ...): a
     // standing open / claimed card is RETIRED (resolved by the system, never dismissed) so the office
     // is not left with a stale hold after the call proceeds, and its review reason is dropped.
-    const retireStandingHouseholdCard = async () => {
+    const retireStandingHouseholdCard = async (linkedNote = null) => {
       const retired = await retireHouseholdHoldCard(db, {
         callLogId: call.id,
-        note: require('../config/feature-gates').callHouseholdHoldLive()
+        note: linkedNote || (require('../config/feature-gates').callHouseholdHoldLive()
           ? 'Auto-resolved: the reprocessed call no longer matches one existing customer, so it is no longer held.'
-          : 'Auto-resolved: the household hold is switched off, so this call is processed without it.',
+          : 'Auto-resolved: the household hold is switched off, so this call is processed without it.'),
       }).catch((retireErr) => {
         // Code/name only. A card we could not retire is a stale card, never a reason to stop the call.
         logger.warn(`[call-proc] household hold card retire failed for ${maskSid(callSid)}: ${retireErr.code || retireErr.name || 'db_error'}`);
@@ -14410,7 +14412,10 @@ const CallRecordingProcessor = {
       // `?` as a binding).
       customer_id: db.raw(
         "CASE WHEN jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'customer_link_override')"
-        + " THEN NULLIF(metadata -> 'customer_link_override' ->> 'customer_id', '')::uuid ELSE ?::uuid END",
+        + " THEN NULLIF(metadata -> 'customer_link_override' ->> 'customer_id', '')::uuid ELSE "
+        // A household-held pass resolved NO customer: a link a linker committed after the hold was
+        // decided is kept, never overwritten with NULL (GATE_CALL_HOUSEHOLD_HOLD).
+        + (householdHoldActive ? 'COALESCE(?::uuid, customer_id)' : '?::uuid') + ' END',
         [customerId || call.customer_id || null],
       ),
       // Call-creation provenance rides the SAME durable write that links
@@ -14430,8 +14435,16 @@ const CallRecordingProcessor = {
       sentiment: extracted.sentiment || null,
       lead_quality: extracted.lead_quality || null,
       updated_at: new Date(),
-    });
-    if (!checkpointRows) return abandonToPeer('the customer checkpoint write');
+    }).returning('customer_id');
+    if (!checkpointRows.length) return abandonToPeer('the customer checkpoint write');
+    if (householdHoldActive && checkpointRows[0].customer_id) {
+      // A link landed after the hold was decided: the hold is moot. Continue this pass on the linked
+      // customer (booking proceeds on that account) and retire the card that was filed.
+      customerId = checkpointRows[0].customer_id;
+      householdHoldActive = false;
+      logger.info(`[call-proc] ${maskSid(callSid)} was linked to a customer after the household hold was decided — continuing on it`);
+      await retireStandingHouseholdCard('Auto-resolved: the call was linked to a customer after it was held, so it is no longer held.');
+    }
 
     const v2ExtractionForAudit = v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)
       ? v2Result.extraction
@@ -14931,7 +14944,10 @@ const CallRecordingProcessor = {
         // contact is confirmed — outboundReturnMessagesEligible is false
         // whenever the gate is off, so this stays exactly
         // `!isOutboundCall(call)` off-gate.
-        if (leadId && !voicemailLeadPath && !extracted.is_voicemail && !extracted.is_spam
+        // A call held at an existing customer's address (GATE_CALL_HOUSEHOLD_HOLD) is never texted by the
+        // dropped-call lane (belt and braces: a hold needs a validated street address, which this lane's
+        // detector requires to be missing).
+        if (leadId && !voicemailLeadPath && !extracted.is_voicemail && !extracted.is_spam && !householdHoldActive
           && (!isOutboundCall(call) || outboundReturnMessagesEligible) && transcription) {
           try {
             const DroppedCallSmsDetect = require('./dropped-call-sms');
