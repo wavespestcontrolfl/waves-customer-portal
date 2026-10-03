@@ -379,12 +379,14 @@ async function replayRow(row, deps, opts = {}) {
   const identity = rowIdentity(row);
   const geo = buildGeoContext(row, opts);
   const audit = await auditStep(identity.address, geo, deps);
-  // The audit's county is evidence only when the street was FOUND there: a
-  // negative audit reports counties[0] as a placeholder, and hinting the
-  // point query with it would skip the county the point is really in
-  // (a Sarasota-side Longboat Key row with a typo would read Manatee).
-  const countyUsed = row.county || (audit.streetExists ? audit.county : null);
-  const point = await pointStep(identity.address, geo, countyUsed, deps);
+  // The point query is hinted ONLY by the stored county; with none it
+  // searches every serviced county, exactly like the live lookup. The
+  // audit's county is diagnostic evidence, never a hint: a negative audit
+  // reports counties[0] as a placeholder, and even a street-only hit can be
+  // a same-named street in another county, so hinting with it would hide the
+  // parcel the point is really in.
+  const point = await pointStep(identity.address, geo, row.county || null, deps);
+  const countyUsed = row.county || point.county || (audit.streetExists ? audit.county : null);
   return { ...identity, countyUsed, audit, point };
 }
 

@@ -264,6 +264,14 @@ describe('replayRow', () => {
     expect(deps.lookupCountyParcelByPoint.mock.calls[0][2].county).toBeUndefined();
   });
 
+  test('a street-only audit hit (number missing) does not pick the point-query county either', async () => {
+    const deps = makeDeps({
+      auditAddressHouseNumber: jest.fn().mockResolvedValue({ county: 'Manatee', streetExists: true, hasExactMatch: false, nearestNumbers: [100] }),
+    });
+    await replay.replayRow({ ...row, county: null }, deps, {});
+    expect(deps.lookupCountyParcelByPoint.mock.calls[0][2].county).toBeUndefined();
+  });
+
   test('plaza-storefront shape: roll has the number elsewhere, the point parcel is a different situs and is dropped', async () => {
     const deps = makeDeps();
     const r = replay.finalizeResult(await replay.replayRow(row, deps, {}));
@@ -271,8 +279,9 @@ describe('replayRow', () => {
     // the stored point rides on the result so a DB row can become a --cases entry
     expect(r).toMatchObject({ lat: 27.4, lng: -82.4 });
     expect(r.point).toMatchObject({ status: 'dropped', dropReason: 'situs_house_number_mismatch', parcelId: '500000001', situs: '6000 SAMPLE RD' });
-    // county for the point query comes from the audit when the row has none
-    expect(deps.lookupCountyParcelByPoint).toHaveBeenCalledWith(27.40000, -82.40000, expect.objectContaining({ county: 'Manatee' }));
+    // no stored county → the point query searches every serviced county,
+    // like the live lookup (the audit's county is never a hint)
+    expect(deps.lookupCountyParcelByPoint).toHaveBeenCalledWith(27.40000, -82.40000, expect.objectContaining({ county: undefined }));
     // the audit sees the typed address and the stored point
     expect(deps.auditAddressHouseNumber).toHaveBeenCalledWith(row.normalized_address, expect.objectContaining({ lat: 27.40000, locationType: 'ROOFTOP', state: 'FL' }), expect.objectContaining({ typedAddress: row.normalized_address }));
   });
