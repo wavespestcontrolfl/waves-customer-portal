@@ -25,17 +25,17 @@ const mockListPayments = jest.fn(async () => ({ payments: [] }));
 jest.mock('../services/portal-payment-history', () => ({ listPortalPayments: (...a) => mockListPayments(...a) }));
 const mockListVisits = jest.fn(async () => ({ services: [], total: 0 }));
 jest.mock('../services/portal-service-history', () => ({ listPortalServiceHistory: (...a) => mockListVisits(...a) }));
-const mockLaneState = jest.fn(async () => ({ eligible: ['pest'], open: {}, bookable: ['pest'], verified: true, hasRecurringPlan: true }));
 jest.mock('../services/reservice-scheduler', () => {
   const actual = jest.requireActual('../services/reservice-scheduler');
   return {
     reportedReserviceLanes: actual.reportedReserviceLanes,
     reportedReserviceExcludedSpecialty: actual.reportedReserviceExcludedSpecialty,
     reserviceSelfServeEnabled: () => true,
-    loadReserviceLaneAvailability: (...a) => mockLaneState(...a),
   };
 });
-jest.mock('../routes/reservice-public', () => ({ _internals: { loadLaneCatalog: async () => ({ pest: { serviceKey: 'pest_re_service' }, lawn: { serviceKey: 'lawn_re_service' } }) } }));
+// The /reservice page's own verdict: pest bookable for cust-1.
+const mockPageState = jest.fn(async () => ({ customer: { id: 'cust-1' }, laneCatalog: {}, lanes: [{ key: 'pest', alreadyBooked: null }], bookableLanes: ['pest'] }));
+jest.mock('../routes/reservice-public', () => ({ _internals: { pageLaneState: (...a) => mockPageState(...a), reserviceLocationReviewRequired: async () => false } }));
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({ messages: { create: mockCreate } })));
 
 const db = require('../models/db');
@@ -266,7 +266,9 @@ describe('GATE_PORTAL_CHAT_RESERVICE', () => {
     expect(toolNames(first)).toEqual(['get_upcoming_services', 'get_pest_advice', 'offer_reschedule_link', 'open_portal_section', 'offer_reservice', 'escalate']);
     expect(first.system[0].text).toMatch(/PESTS BACK BETWEEN VISITS:/);
     expect(first.system[0].text).toMatch(/\(offer_reservice\)/);
-    expect(mockLaneState).toHaveBeenCalledWith('cust-1');
+    expect(mockPageState).toHaveBeenCalledWith('tok_rs');
+    // The one plan fact this lane may state is the tool's.
+    expect(first.system[0].text).toMatch(/plan details \(apart from what offer_reservice tells you\)/);
     expect(result.actions).toEqual([{ type: 'link', label: 'Book your free re-service', href: '/reservice/tok_rs' }]);
     const toolResult = mockCreate.mock.calls[1][0].messages.at(-1).content[0].content;
     expect(toolResult).not.toMatch(/tok_rs/);
@@ -278,7 +280,7 @@ describe('GATE_PORTAL_CHAT_RESERVICE', () => {
   ])('%s gets no button', async (_label, extra) => {
     const result = await pestTurn(extra);
 
-    expect(mockLaneState).not.toHaveBeenCalled();
+    expect(mockPageState).not.toHaveBeenCalled();
     expect(result).not.toHaveProperty('actions');
   });
 
@@ -289,7 +291,7 @@ describe('GATE_PORTAL_CHAT_RESERVICE', () => {
 
     const result = await assistant.processMessage({ message: 'The rats are back in the attic', channel: 'portal_chat', channelIdentifier: 'sess-1', customerId: 'cust-1', secondaryProperty: false });
 
-    expect(mockLaneState).not.toHaveBeenCalled();
+    expect(mockPageState).not.toHaveBeenCalled();
     expect(result).not.toHaveProperty('actions');
     expect(mockCreate.mock.calls[1][0].messages.at(-1).content[0].content).toMatch(/separately priced/);
   });

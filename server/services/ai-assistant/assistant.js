@@ -281,6 +281,9 @@ WHAT YOU MUST ESCALATE (use the escalate tool):`);
 // visits go to offer_reservice, which alone decides whether a visit is free.
 function withReservice(prompt) {
   return prompt
+    // The one plan fact this lane is given: whether offer_reservice found a
+    // free re-service covered.
+    .replace('plan details', 'plan details (apart from what offer_reservice tells you)')
     .replace(VISIT_PROBLEM_ESCALATION, 'If the customer says something was missed at the visit, or reports damage, escalate. Pests or a lawn problem back since the visit follow PESTS BACK BETWEEN VISITS below.')
     .replace('- Hand the conversation to the Waves team (escalate)', '- Offer a free re-service when pests or a lawn problem come back between visits (offer_reservice)\n- Hand the conversation to the Waves team (escalate)')
     .replace('WHAT YOU MUST ESCALATE (use the escalate tool):', `PESTS BACK BETWEEN VISITS:

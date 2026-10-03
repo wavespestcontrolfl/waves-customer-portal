@@ -525,34 +525,25 @@ async function offerReservice(customerId, serviceLine, actions, { secondaryPrope
   if (!reserviceSurfaceOpen({ secondaryProperty })) return RESERVICE_HAND_OFF;
   const refusal = reportRefusal(customerWords, line);
   if (refusal) return refusal;
-  // The page's own availability read: plan coverage minus lanes that already
-  // hold an open re-service. Any failure resolves to nothing bookable.
-  const state = await require('../reservice-scheduler').loadReserviceLaneAvailability(customerId);
-  if (state.open?.[line]) return bookedReserviceResult(customerId, line, state.open[line], actions);
-  if (state.verified && state.hasRecurringPlan === false) {
-    return {
-      offered: false,
-      on_plan: false,
-      instruction: 'This customer has no recurring plan, so no free re-service applies. Do not offer or imply a free visit. Acknowledge what they are seeing and use the escalate tool with topic pest_problem so the team can set up a visit.',
-    };
-  }
-  if (!state.verified || !state.bookable.includes(line)) return RESERVICE_HAND_OFF;
-  return bookableReserviceResult(customerId, line, actions);
-}
-
-// A lane the plan covers with no open re-service: the booking button, once
-// the page's own catalog has the lane and the customer's token is link-safe.
-async function bookableReserviceResult(customerId, line, actions) {
-  // The page drops a lane whose catalog row is missing (a partial seed) and
-  // renders not_eligible, so the lane must be in the page's own catalog read.
-  const catalog = await require('../../routes/reservice-public')._internals.loadLaneCatalog().catch((err) => {
-    logger.warn(`[ai-assistant] re-service catalog read failed, no button: ${err.message}`);
-    return null;
-  });
-  if (!catalog?.[line]) return RESERVICE_HAND_OFF;
   const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('reservice_token');
   const token = String(customer?.reservice_token || '');
   if (!/^[A-Za-z0-9_-]+$/.test(token)) return RESERVICE_HAND_OFF;
+  // The /reservice page's own verdict for this token (its customer load, lane
+  // catalog, coverage and open re-services), so the chat offers exactly what
+  // the page would show. Any failure hands off.
+  const page = require('../../routes/reservice-public')._internals;
+  const state = await page.pageLaneState(token).catch((err) => {
+    logger.warn(`[ai-assistant] re-service page state failed, no button: ${err.message}`);
+    return null;
+  });
+  if (!state || String(state.customer.id) !== String(customerId)) return RESERVICE_HAND_OFF;
+  const booked = state.lanes.find((l) => l.key === line)?.alreadyBooked;
+  if (booked) return bookedReserviceResult(customerId, line, booked, actions);
+  if (!state.bookableLanes.includes(line)) return RESERVICE_HAND_OFF;
+  // An address held for staff review shows no times on the page, only
+  // instructions to text or call: hand off rather than promise a time.
+  const reviewHold = await page.reserviceLocationReviewRequired(state.customer).catch(() => true);
+  if (reviewHold) return RESERVICE_HAND_OFF;
   // One label for both lines: the page lets the customer pick the line, and a
   // second call for the other line shares this href (one button).
   addAction(actions, { type: 'link', label: 'Book your free re-service', href: `/reservice/${token}` });
