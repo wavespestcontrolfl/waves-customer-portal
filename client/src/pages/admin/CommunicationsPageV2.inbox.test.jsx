@@ -712,6 +712,39 @@ it("drops an unverifiable recovered agent selection while retaining the editable
 });
 
 
+it("shows the translation of a text in another language and sends the suggested reply as an ordinary staff message", async () => {
+  const owner = "translation-assist-owner";
+  saveDraft(owner, { msgBody: "", fromNumber: line });
+  window.history.replaceState({}, "", "/?phone=9415550100");
+  const translation = { trialId: 7, language: "Spanish", inboundOriginal: "¿A qué hora vienen el martes?", inboundEnglish: "What time are you coming on Tuesday?", replyEnglish: "Your visit is Tuesday, Oct 6, 1:00 PM - 3:00 PM.", replyTranslated: "Su visita es el martes 6 de oct, 13:00 - 15:00.", heldReason: null };
+  const originalFetch = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, options) => String(url).includes("/communications/agent-draft?")
+    ? response({ draft: null, translation }) : originalFetch(url, options));
+  setupWithOwner(owner); await tick();
+  expect(screen.getByText("Customer wrote in Spanish")).toBeInTheDocument();
+  expect(screen.getByText("What time are you coming on Tuesday?")).toBeInTheDocument();
+  expect(screen.getByText("Your visit is Tuesday, Oct 6, 1:00 PM - 3:00 PM.")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Use Reply" }));
+  expect(screen.getByRole("textbox", { name: "Text message" })).toHaveValue(translation.replyTranslated);
+  fireEvent.click(screen.getByRole("button", { name: "Send", exact: true })); await tick();
+  const request = fetch.mock.calls.find(([url]) => String(url).endsWith("/communications/sms"));
+  expect(JSON.parse(request[1].body)).toMatchObject({ body: translation.replyTranslated, messageType: "manual" });
+  expect(JSON.parse(request[1].body)).not.toHaveProperty("agentDecisionId");
+});
+
+it("a held translation shows the English and the reason, with no reply to use", async () => {
+  const owner = "translation-held-owner";
+  window.history.replaceState({}, "", "/?phone=9415550100");
+  const translation = { trialId: 8, language: "Portuguese", inboundOriginal: "Quero cancelar meu plano.", inboundEnglish: "I want to cancel my plan.", replyEnglish: null, replyTranslated: null, heldReason: "The translated reply did not read back the same as the English." };
+  const originalFetch = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, options) => String(url).includes("/communications/agent-draft?")
+    ? response({ draft: null, translation }) : originalFetch(url, options));
+  setupWithOwner(owner); await tick();
+  expect(screen.getByText("I want to cancel my plan.")).toBeInTheDocument();
+  expect(screen.getByText(/No suggested reply\. The translated reply did not read back/)).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Use Reply" })).not.toBeInTheDocument();
+});
+
 it("discards an Agent Review selection before sending a fresh message", async () => {
   const owner = "discard-agent-draft-owner";
   const selectedAgentDraft = { decisionId: "decision-a", suggestedMessage: "Agent suggestion" };

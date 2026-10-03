@@ -35,6 +35,12 @@ function trialEnabled() {
   return gateEnvValue('GATE_SMS_ANY_LANGUAGE_TRIAL');
 }
 
+// Inbox assist (owner 2026-10-03): staff see the trial's translation and its checked reply in the Communications
+// composer and press Send themselves. Its own gate; off = the composer gets nothing from this module.
+function inboxAssistEnabled() {
+  return gateEnvValue('GATE_SMS_ANY_LANGUAGE_INBOX');
+}
+
 // Cheap pre-filter: only texts the English checks already refuse to read are
 // worth a model call (the 2026-10-01 sweep: 4 of 905 inbound texts).
 function needsTranslation(inbound) {
@@ -939,8 +945,63 @@ async function runTranslationTrial({ inboundMessage, fromPhone, customer, smsLog
   }
 }
 
+// What staff read beside a held trial, in plain words; anything not listed reads as the generic line.
+const HOLD_WORDS = [
+  [/^figures_changed_in_inbound|^meaning_changed_in_inbound|^inbound_/, 'The translation of the customer\'s text could not be confirmed.'],
+  [/^figures_changed_in_translation|^duration_changed|^date_name_changed/, 'A number, time, date or link changed in the translated reply.'],
+  [/^meaning_changed_in_translation|^meaning_check_failed/, 'The translated reply did not read back the same as the English.'],
+  [/^open_loop_thanks_to_person/, 'Something is still open with this customer, so the reply needs a person.'],
+  [/^live_eta_expired/, 'The arrival time in the reply went out of date.'],
+  [/^reply_failed_comms_lint|^back_translation_failed_comms_lint|^back_translation_banned_copy/, 'The reply broke a copy rule.'],
+  [/^english_checks_not_passed|^reply_has_|^draft_unparseable/, 'The English reply did not pass its own checks.'],
+];
+const INBOUND_UNCONFIRMED_RE = /^(?:inbound_|figures_changed_in_inbound|meaning_changed_in_inbound|error$|trigger_row_unread)/;
+const INBOX_REPLY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Inbox assist for one customer: the trial row of their LATEST text, when that text is still the last message
+ * in the thread (nobody has answered and they have not written again). null when the gate is off, there is no
+ * such row, or the read fails. The translated reply is offered only for a 'ready' row under 24 hours old (it may
+ * quote a visit time); the English of the customer's text is shown only when its translation passed its checks.
+ * Read-only: staff send through the ordinary composer.
+ */
+async function inboxAssistFor(customerId, now = new Date()) {
+  try {
+    if (!customerId || !inboxAssistEnabled()) return null;
+    const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
+    // (a placeholder for a send still in flight is not a message: left out, as every general reader of sms_log does)
+    const last = await excludeUnresolvedSendReservations(db('sms_log').where({ customer_id: customerId }))
+      .orderBy('created_at', 'desc').limit(1).first('id', 'direction', 'created_at');
+    if (!last || last.direction !== 'inbound') return null;
+    const row = await db(TRIAL_TABLE).where({ sms_log_id: last.id, customer_id: customerId }).first();
+    if (!row || row.verdict === 'skipped') return null;
+    const inboundConfirmed = Boolean(row.inbound_english) && !INBOUND_UNCONFIRMED_RE.test(row.hold_reason || '');
+    const ageMs = now.getTime() - new Date(row.created_at).getTime();
+    const ready = row.verdict === 'ready' && Boolean(row.reply_translated) && ageMs >= 0 && ageMs <= INBOX_REPLY_MAX_AGE_MS;
+    if (!inboundConfirmed && !ready) return null;
+    const held = row.verdict === 'held' ? (HOLD_WORDS.find(([re]) => re.test(row.hold_reason || '')) || [null, 'The reply did not pass every check.'])[1] : null;
+    return {
+      trialId: row.id,
+      smsLogId: row.sms_log_id,
+      language: row.language || null,
+      inboundOriginal: row.inbound_original,
+      inboundEnglish: inboundConfirmed ? row.inbound_english : null,
+      replyEnglish: ready ? row.reply_english : null,
+      replyTranslated: ready ? row.reply_translated : null,
+      heldReason: ready ? null : (held || (row.verdict === 'ready' ? 'The suggested reply is more than a day old.' : null)),
+      createdAt: row.created_at,
+    };
+  } catch (err) {
+    // never err.message: knex puts the bound values in it
+    logger.warn(`[sms-translation] inbox assist not read: ${err.code || err.name || 'error'}`);
+    return null;
+  }
+}
+
 module.exports = {
   runTranslationTrial,
+  inboxAssistFor,
+  inboxAssistEnabled,
   needsTranslation,
   trialEnabled,
   translateInbound,

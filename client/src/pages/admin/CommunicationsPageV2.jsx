@@ -1211,6 +1211,9 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   const [rewritingSms, setRewritingSms] = useState(false);
   const [agentDraft, setAgentDraft] = useState(null);
   const [agentDraftLoading, setAgentDraftLoading] = useState(false);
+  // Inbox assist for a text in another language: its English translation and the
+  // checked reply in the customer's language (null when off or nothing to show).
+  const [translationAssist, setTranslationAssist] = useState(null);
   // MMS attachments: [{ url, key, fileName, size, mimeType, previewUrl }, ...]
   const [uploading, setUploading] = useState(false);
   // Purely a label distinction — `uploading` gates the controls for the whole
@@ -1639,6 +1642,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       setAgentDraft(null);
       setAgentDraftLoading(false);
       setSelectedAgentDraft(null);
+      setTranslationAssist(null);
       return;
     }
 
@@ -1653,12 +1657,14 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
           if (!cancelled) {
             setAgentDraft(d?.draft || null);
             setSelectedAgentDraft((current) => current?.decisionId === d?.draft?.decisionId ? current : null);
+            setTranslationAssist(d?.translation || null);
           }
         })
         .catch(() => {
           if (!cancelled) {
             setAgentDraft(null);
             setSelectedAgentDraft(null);
+            setTranslationAssist(null);
           }
         })
         .finally(() => {
@@ -3382,6 +3388,58 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
           })()}
         </>}
         <fieldset disabled={!toNumber.trim()} className="m-0 min-w-0 border-0 p-0">
+        {translationAssist && (
+          <div className="mb-3 px-3 py-2.5 bg-white border-hairline border-zinc-300 rounded-sm" data-testid="translation-assist">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="flex items-center justify-center h-7 w-7 rounded-full bg-zinc-100 text-zinc-900">
+                <Bot size={15} strokeWidth={2} />
+              </span>
+              <div className="flex-1 min-w-0">
+                <div className="text-ui-body md:text-ui-caption font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary">
+                  {translationAssist.language ? `Customer wrote in ${translationAssist.language}` : "Customer wrote in another language"}
+                </div>
+              </div>
+              {translationAssist.replyTranslated && (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => {
+                    setMsgBody(translationAssist.replyTranslated);
+                    // a translated reply is not the Agent Review draft: it is sent as an ordinary staff message
+                    setSelectedAgentDraft(null);
+                  }}
+                >
+                  Use Reply
+                </Button>
+              )}
+            </div>
+            {translationAssist.inboundEnglish && (
+              <div className="text-16 md:text-ui-body text-zinc-900 leading-normal whitespace-pre-wrap">
+                <span className="text-ink-tertiary">In English: </span>
+                {translationAssist.inboundEnglish}
+              </div>
+            )}
+            {translationAssist.replyTranslated && (
+              <div className="mt-2 pt-2 border-t border-hairline border-zinc-200">
+                <div className="text-ui-label md:text-ui-caption font-medium text-zinc-900">Suggested reply</div>
+                <div className="text-16 md:text-ui-body text-zinc-900 leading-normal whitespace-pre-wrap">
+                  {translationAssist.replyTranslated}
+                </div>
+                {translationAssist.replyEnglish && (
+                  <div className="mt-1 text-ui-label md:text-ui-caption text-ink-secondary whitespace-pre-wrap">
+                    <span className="text-ink-tertiary">In English: </span>
+                    {translationAssist.replyEnglish}
+                  </div>
+                )}
+              </div>
+            )}
+            {translationAssist.heldReason && (
+              <div className="mt-2 pt-2 border-t border-hairline border-zinc-200 text-ui-label md:text-ui-caption text-ink-secondary">
+                No suggested reply. {translationAssist.heldReason}
+              </div>
+            )}
+          </div>
+        )}
         {(agentDraft || agentDraftLoading) && (
           <div className="mb-3 px-3 py-2.5 bg-white border-hairline border-zinc-300 rounded-sm">
             <div className="flex items-center gap-2 mb-2">

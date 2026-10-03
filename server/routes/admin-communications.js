@@ -2350,10 +2350,20 @@ router.get('/agent-draft', async (req, res, next) => {
     }
 
     const row = await q.first();
-    if (!row) return res.json({ draft: null });
+    // Inbox assist for a text in another language (GATE_SMS_ANY_LANGUAGE_INBOX, read inside; null when off): the
+    // translation and the checked reply staff may send through this composer. Same customer guard as the draft.
+    // It can never break the draft card: any failure reads as no translation.
+    let translation = null;
+    try {
+      translation = customerId ? await require('../services/sms-translation').inboxAssistFor(customerId) : null;
+    } catch (err) {
+      logger.warn(`[communications] translation assist skipped: ${err.code || err.name || 'error'}`);
+    }
+    if (!row) return res.json({ draft: null, translation });
 
     const input = parseJson(row.input_snapshot, {});
     res.json({
+      translation,
       draft: {
         decisionId: row.id,
         workflow: row.workflow,
