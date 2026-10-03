@@ -10,7 +10,8 @@ jest.mock('../utils/scheduled-cron', () => ({
   schedule: jest.fn(), scheduleTimeout: jest.fn(), scheduleInterval: jest.fn(),
 }));
 jest.mock('../models/db', () => {
-  const db = jest.fn(() => ({ where() { return this; }, del: jest.fn().mockResolvedValue(0) }));
+  // select: the boot pass of the deploy-kill retry reads job_health (no rows here).
+  const db = jest.fn(() => ({ where() { return this; }, del: jest.fn().mockResolvedValue(0), select: jest.fn().mockResolvedValue([]) }));
   db.raw = jest.fn().mockResolvedValue({ rows: [] });
   db.fn = { now: jest.fn() };
   return db;

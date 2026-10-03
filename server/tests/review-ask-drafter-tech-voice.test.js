@@ -6,6 +6,8 @@
 const mockDispatch = jest.fn();
 const mockFactCheck = jest.fn();
 const mockRepeatCheck = jest.fn();
+const mockRecordDraft = jest.fn(async () => {});
+jest.mock('../services/review-ask-drafts', () => ({ recordDraft: (...a) => mockRecordDraft(...a) }));
 const mockGates = { reviewAskTechVoice: true, reviewAskPersonalized: false };
 const mockGetRecentCalls = jest.fn(async () => []);
 const mockTables = {};
@@ -75,6 +77,7 @@ beforeEach(() => {
   mockDispatch.mockReset();
   mockRejectCall.mockReset();
   mockFactCheck.mockReset().mockImplementation(async (_p, req) => approveAll(req));
+  mockRecordDraft.mockReset().mockResolvedValue(undefined);
   mockRepeatCheck.mockReset().mockResolvedValue({ ok: true, json: { repeats: false, sentence: '', earlier_quote: '' } });
   mockGetRecentCalls.mockReset().mockResolvedValue([]);
   mockGates.reviewAskTechVoice = true;
@@ -173,6 +176,26 @@ describe('draftTechVoice', () => {
     mockDispatch.mockResolvedValueOnce(reply(GOOD));
     expect(await Drafter.draftTechVoice({ ...INPUT, sequenceStep: 1 })).toBeNull();
     expect(mockRepeatCheck).not.toHaveBeenCalled();
+  });
+
+  test('every outcome is recorded for the review page: the draft with the record lines cited per sentence, a held repeat, a fallback with its reason', async () => {
+    mockDispatch.mockResolvedValueOnce(reply(GOOD));
+    expect(await Drafter.draftTechVoice(INPUT)).toBe(GOOD.body);
+    const [args, drafted] = mockRecordDraft.mock.calls[0];
+    expect(args).toMatchObject({ sequenceId: 'seq-1', sequenceStep: 0, channel: 'sms' });
+    expect(drafted).toMatchObject({ outcome: 'drafted', body: GOOD.body });
+    expect(drafted.sentences.find((x) => /sink/.test(x.sentence)).quotes).toEqual(['Moisture under the kitchen sink']);
+    expect(drafted.sentences.find((x) => /Google review/.test(x.sentence))).toMatchObject({ ask_only: true });
+
+    mockTables.review_requests = [{ sequence_step: 0, channel: 'sms', custom_body: 'Hi Marta, I flagged moisture under the kitchen sink. A Google review helps: {review_url}', template_key: 'day0_ask_tech_voice' }];
+    mockRepeatCheck.mockResolvedValueOnce({ ok: true, json: { repeats: true, sentence: 'I flagged moisture under the kitchen sink for your property group.', earlier_quote: 'I flagged moisture under the kitchen sink' } });
+    mockDispatch.mockResolvedValueOnce(reply(GOOD));
+    await expect(Drafter.draftTechVoice({ ...INPUT, sequenceStep: 1 })).rejects.toBeInstanceOf(Drafter.HeldTouch);
+    expect(mockRecordDraft.mock.calls[1][1]).toMatchObject({ outcome: 'held', body: GOOD.body, repeat: { earlierStep: 0 } });
+
+    mockDispatch.mockResolvedValueOnce({ ok: false, failures: [] });
+    expect(await Drafter.draftTechVoice({ ...INPUT, sequenceStep: 1 })).toBeNull();
+    expect(mockRecordDraft.mock.calls[2][1]).toEqual({ outcome: 'fallback', reason: 'provider_unavailable' });
   });
 
   test('the first touch has nothing to repeat: no repeat check is asked', async () => {
