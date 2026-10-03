@@ -89,7 +89,10 @@ describe('execution-mode matrix on main', () => {
     expect(exec('update_lead_contact', { lead_id: 'lead-x', first_name: 'A' })).toBe(true);
     expect(exec('update_lead_contact', { lead_name: 'A', first_name: 'A' })).toBe(false);
     expect(exec('update_lead_contact', { lead_id: 'lead-x', lead_name: 'A', first_name: 'A' })).toBe(false);
-    for (const field of ownerDirect.DIRECT_CUSTOMER_FIELDS) expect(exec('update_customer', { updates: { [field]: 'x' } })).toBe(true);
+    const emptyNotes = { notes_replaced: { before: null } };
+    for (const field of ownerDirect.DIRECT_CUSTOMER_FIELDS) expect(exec('update_customer', { updates: { [field]: 'x' } }, emptyNotes)).toBe(true);
+    expect(exec('update_customer', { updates: { notes: 'x' } }, { notes_replaced: { before: 'existing' } })).toBe(false);
+    expect(exec('update_customer', { updates: { notes: 'x' } })).toBe(false);
     for (const field of ['email', 'waveguard_tier', 'monthly_rate', 'active', 'pipeline_stage']) expect(exec('update_customer', { updates: { [field]: 'x' } })).toBe(false);
     expect(exec('update_customer', { updates: { phone: 'x', email: 'y' } })).toBe(false);
     for (const tool of ['add_customer_property', 'update_customer_property']) {
