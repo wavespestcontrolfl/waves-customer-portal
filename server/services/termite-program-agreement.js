@@ -102,6 +102,37 @@ function agreementAuthorizesInitialCharge(contractText) {
   return normalizeAgreementWhitespace(contractText).includes(ANNUAL_INITIAL_CHARGE_AUTHORIZATION);
 }
 
+// Owner ruling 2026-09-30 (pay after the first visit, throughout; clause
+// approved 2026-10-03): an agreement whose BILLING clause carries THIS
+// phrase is not charged at signing. Its setup + first annual fee are charged
+// once the station installation visit is completed
+// (termite-annual-signature-charge.js chargeAnnualInvoiceAfterInstallation).
+// Decided per SIGNED text, like the phrase above: an agreement signed on the
+// at-signing wording keeps the charge at signing.
+const ANNUAL_AFTER_INSTALL_CHARGE_AUTHORIZATION = 'Waves charges them to the payment method on file after the station installation is completed';
+
+function agreementAuthorizesAfterInstallCharge(contractText) {
+  return normalizeAgreementWhitespace(contractText).includes(ANNUAL_AFTER_INSTALL_CHARGE_AUTHORIZATION);
+}
+
+// For the estimate page's "sign your agreement" step: will the agreement
+// this customer is about to be sent charge after installation? True only
+// when the gate is on AND the ACTIVE annual version carries that wording.
+// Any failure reads false (the page then says nothing about charge timing).
+async function annualAgreementChargesAfterInstallation(conn = db) {
+  try {
+    if (!require('../config/feature-gates').pafTermiteLive()) return false;
+    const active = await conn('document_templates as dt')
+      .join('document_template_versions as dtv', 'dtv.id', 'dt.active_version_id')
+      .where({ 'dt.template_key': ANNUAL_TEMPLATE_KEY, 'dt.status': 'active' })
+      .first('dtv.body');
+    return !!active && agreementAuthorizesAfterInstallCharge(active.body);
+  } catch (err) {
+    logger.warn(`[termite-agreement] charge-timing read failed: ${err.message}`);
+    return false;
+  }
+}
+
 // Recent-bell existence check — the single source of exactly-once bell
 // semantics: every path (accept-time, superseded pass, main sweep) rings
 // IFF no matching bell landed within the window. A lost bell self-heals on
@@ -1174,12 +1205,21 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       // the generic template_missing branch below, which today is
       // unreachable defensive code for the always-active quarterly
       // templates) so this EXPECTED park gets its own log line and bell.
-      const annualTemplateActive = await db('document_templates')
-        .where({ template_key: ANNUAL_TEMPLATE_KEY, status: 'active' })
-        .whereNotNull('active_version_id')
-        .first('id');
-      if (!annualTemplateActive) {
-        logger.warn(`[termite-agreement] annual plan accepted for estimate ${estimate.id}, but the v3 agreement template has no active version yet — parking for manual prep.`);
+      const annualTemplateActive = await db('document_templates as dt')
+        .join('document_template_versions as dtv', 'dtv.id', 'dt.active_version_id')
+        .where({ 'dt.template_key': ANNUAL_TEMPLATE_KEY, 'dt.status': 'active' })
+        .first('dt.id', 'dtv.body');
+      // GATE_PAF_TERMITE: the charge-after-installation wording is only
+      // ISSUED while its gate is on. An agreement already signed on it is
+      // charged by its own text whatever the gate reads later, so the gate
+      // must stand before a customer can be handed that text.
+      const afterInstallWordingGateOff = !!annualTemplateActive
+        && agreementAuthorizesAfterInstallCharge(annualTemplateActive.body)
+        && !require('../config/feature-gates').pafTermiteLive();
+      if (!annualTemplateActive || afterInstallWordingGateOff) {
+        logger.warn(afterInstallWordingGateOff
+          ? `[termite-agreement] annual plan accepted for estimate ${estimate.id}, but the active v3 agreement charges after installation and GATE_PAF_TERMITE is off — parking for manual prep.`
+          : `[termite-agreement] annual plan accepted for estimate ${estimate.id}, but the v3 agreement template has no active version yet — parking for manual prep.`);
         let annualReplacementKept = false;
         let annualRetireFailed = false;
         try {
@@ -1230,6 +1270,15 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       ? await db('document_template_versions').where({ id: template.active_version_id }).first()
       : null;
     if (!template || !version) return { ok: false, skipped: 'template_missing' };
+    // The version actually rendered is this one: re-apply the
+    // GATE_PAF_TERMITE issue fence to it, for a publish that landed between
+    // the parked check above and this read (the next accept or sweep parks
+    // it with the bell).
+    if (prepared.templateKey === ANNUAL_TEMPLATE_KEY
+      && agreementAuthorizesAfterInstallCharge(version.body)
+      && !require('../config/feature-gates').pafTermiteLive()) {
+      return { ok: false, skipped: 'annual_template_not_active' };
+    }
 
     const context = buildCustomerDocumentContext(customer, prepared.values);
     // The agreement covers the ACCEPTED property, which may legitimately
@@ -2070,6 +2119,9 @@ module.exports = {
   ANNUAL_TEMPLATE_KEY,
   ANNUAL_SERVICE_NAME,
   ANNUAL_INITIAL_CHARGE_AUTHORIZATION,
+  ANNUAL_AFTER_INSTALL_CHARGE_AUTHORIZATION,
+  agreementAuthorizesAfterInstallCharge,
+  annualAgreementChargesAfterInstallation,
   agreementAuthorizesInitialCharge,
   PROGRAM_TEMPLATE_KEYS,
   START_DATE_FALLBACK,

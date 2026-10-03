@@ -15820,6 +15820,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       prepayCoveredByCredit: prepayAutoCharge?.coveredByCredit === true,
       setupFeeAfterFirstVisit: txResult.setupFeeDeferredToFirstVisit === true,
       }),
+      // GATE_PAF_TERMITE: the agreement this customer is about to sign
+      // charges after the station installation, not at signing. Present only
+      // when true (gate-off payload byte-identical).
+      ...(invoiceKind === 'annual_prepay_deferred'
+        && await require('../services/termite-program-agreement').annualAgreementChargesAfterInstallation()
+        ? { annualChargeAfterInstallation: true } : {}),
     });
   } catch (err) {
     // Translate user-visible 4xx errors thrown from inside the transaction
@@ -21028,6 +21034,9 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
         : (prepayAwaitingFirstVisit ? 'after_first_visit' : null)),
       prepayCoveredByCredit: retryPrepayCoveredByCredit,
     }),
+    ...(invoiceKind === 'annual_prepay_deferred'
+      && await require('../services/termite-program-agreement').annualAgreementChargesAfterInstallation()
+      ? { annualChargeAfterInstallation: true } : {}),
     alreadyAccepted: true,
   };
 }

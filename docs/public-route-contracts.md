@@ -1805,6 +1805,15 @@ confirm step, sends `prepayChargeConsentVariant` back, and shows the `after_firs
 copy. In-lane prepay is React-only (the legacy page redirects), so the legacy renderer is
 unchanged.
 
+**Termite annual plan charged after installation** (PR-F, `GATE_PAF_TERMITE` plus the master
+gate, dark): the PUT `/api/estimates/:token/accept` success payload (first accept and the
+already-accepted retry) carries `annualChargeAfterInstallation: true` (present only when true)
+when `nextStep` is `sign_agreement` AND the gate is on AND the ACTIVE annual agreement version
+carries the after-installation BILLING wording. The React success card then adds: "Nothing is
+charged when you sign. Your payment method on file is charged after your station installation is
+completed." Gate off, template draft, or at-signing wording: the field is absent and the card is
+byte-identical to before. No message is sent because of this field.
+
 GET `/api/estimates/:token/data` narrows to match (2026-09-24): a saved
 estimate's `pricing.frequencies` tree & shrub ladder omits any 4x/Light (and
 12x/Premium) entry, so only Standard 6x / Enhanced 9x cards render. What the

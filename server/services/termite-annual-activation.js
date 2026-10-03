@@ -586,6 +586,8 @@ async function collectOrDeliverAnnualInvoice({
 //      that never went out
 //   3. anchorInstalledTerms — re-anchors coverage to the completed
 //      installation (codex round 4)
+//      then chargeInstalledTerms — charges an agreement that bills after
+//      installation, once that installation is completed
 //   4. retryInstallHandoffs — re-rings a scheduling handoff that never
 //      durably landed (codex round 4)
 //   5. remindExpiredSignatureLinks — slice 3b: nudges staff once per
@@ -597,6 +599,7 @@ async function reconcileTermiteAnnualActivations({ conn = db, limit = 200 } = {}
     scanned: 0, activated: 0, skipped: 0, failed: 0,
     deliveryScanned: 0, delivered: 0, deliveryFailed: 0, charged: 0, collectionHeld: 0,
     anchorScanned: 0, anchored: 0, anchorFailed: 0,
+    installChargeScanned: 0, installCharged: 0, installPayLinked: 0, installChargeHeld: 0, neverInstalledAlerted: 0,
     handoffScanned: 0, handedOff: 0, handoffFailed: 0,
     countersignScanned: 0, countersignReminded: 0,
     signatureNudgeScanned: 0, signatureNudged: 0,
@@ -608,6 +611,9 @@ async function reconcileTermiteAnnualActivations({ conn = db, limit = 200 } = {}
   // Anchor BEFORE the handoff retry: a term whose installation already
   // happened needs no "schedule the installation" bell.
   await anchorInstalledTerms({ conn, limit, counts });
+  // Agreements that charge after installation: collect the ones whose
+  // installation is completed; alert once on the ones never installed.
+  await chargeInstalledTerms({ conn, limit, counts });
   // After anchoring: portal-declined terms whose station retrieval is due.
   await retryDeclineRetrievalTasks({ counts });
   await retryInstallHandoffs({ conn, limit, counts });
@@ -1210,6 +1216,114 @@ async function anchorInstalledTerms({ conn, limit, counts }) {
   }
 }
 
+// ---- charge after installation (owner ruling 2026-09-30) ----------------
+// An agreement signed on the charge-after-installation wording records
+// 'awaiting_installation' at signing (termite-annual-signature-charge.js):
+// no charge, no pay link. This pass collects it once the plan's
+// installation visit is COMPLETED — the same completed-visit rule the anchor
+// uses (whereInstallationVisitForPlan), read by the same daily sweep for the
+// same reason (every completion writer is covered by one reader). The charge
+// is at most a day behind the installation.
+//
+// Only an unpaid, undecided ORIGINAL term with a still-collectable invoice:
+// a plan cancelled before installation (term cancelled / invoice void) is
+// never a candidate, so it is never charged.
+//
+// Second half (owner ruling R8): a plan still waiting NEVER_INSTALLED_ALERT_DAYS
+// after signing, with no completed installation, raises ONE office alert.
+function awaitingInstallationRows(conn) {
+  const { AWAITING_INSTALLATION } = require('./termite-annual-signature-charge');
+  return conn('estimates as e')
+    .join('annual_prepay_terms as apt', conn.raw('apt.source_estimate_id = e.id'))
+    .join('invoices as inv', conn.raw('inv.id = apt.prepay_invoice_id'))
+    .where('e.annual_plan_activation_status', 'activated')
+    .whereRaw("e.annual_plan_signature_charge ->> 'status' = ?", [AWAITING_INSTALLATION])
+    .whereNull('apt.renewed_from_term_id')
+    .whereNull('apt.renewal_decision')
+    .where('apt.status', 'payment_pending')
+    .whereNotIn('inv.status', INVOICE_UNCOLLECTIBLE_STATUSES);
+}
+
+function completedInstallationForRow(conn) {
+  return function completedInstallation() {
+    whereInstallationVisitForPlan(
+      this.select(conn.raw('1')).from('scheduled_services as ss').where('ss.status', 'completed'),
+      {
+        customerId: conn.ref('apt.customer_id'),
+        estimateId: conn.ref('e.id'),
+        estimatePropertyId: conn.ref('e.property_id'),
+        termId: conn.ref('apt.id'),
+        floor: conn.raw("LEAST(apt.term_start, (apt.created_at AT TIME ZONE 'America/New_York')::date)"),
+      },
+    );
+  };
+}
+
+async function chargeInstalledTerms({ conn, limit, counts }) {
+  const SignatureCharge = require('./termite-annual-signature-charge');
+  try {
+    const installed = await awaitingInstallationRows(conn)
+      .whereExists(completedInstallationForRow(conn))
+      // Same rotation as the delivery pass: least-recently-attempted first.
+      .orderBy('inv.annual_delivery_attempted_at', 'asc', 'first')
+      .orderBy('inv.created_at', 'asc')
+      .select('e.id as estimate_id', 'apt.id as term_id', 'inv.id as invoice_id')
+      .limit(limit);
+    counts.installChargeScanned = installed.length;
+    for (const row of installed) {
+      try {
+        try {
+          await conn('invoices').where({ id: row.invoice_id }).update({ annual_delivery_attempted_at: new Date() });
+        } catch (stampErr) {
+          logger.warn(`[termite-annual-activation] attempt stamp failed for invoice ${row.invoice_id}: ${stampErr.message}`);
+        }
+        const charge = await SignatureCharge.chargeAnnualInvoiceAfterInstallation({
+          estimateId: row.estimate_id, invoiceId: row.invoice_id, conn,
+        });
+        if (charge.status === 'paid' || charge.status === 'processing') counts.installCharged += 1;
+        else if (charge.deliverPayLink) {
+          const delivery = await deliverAnnualInvoiceOrBell({
+            estimateId: row.estimate_id, invoiceId: row.invoice_id, termId: row.term_id, conn,
+          });
+          if (delivery.ok) counts.installPayLinked += 1;
+          else counts.installChargeHeld += 1;
+        } else counts.installChargeHeld += 1;
+      } catch (err) {
+        counts.installChargeHeld += 1;
+        logger.error(`[termite-annual-activation] after-installation charge errored for estimate ${row.estimate_id}: ${err.message}`);
+      }
+    }
+  } catch (err) {
+    logger.error(`[termite-annual-activation] after-installation charge scan failed: ${err.message}`);
+    counts.installChargeScanError = err.message;
+  }
+
+  try {
+    const stale = await awaitingInstallationRows(conn)
+      .whereNotExists(completedInstallationForRow(conn))
+      .whereRaw("e.annual_plan_signature_charge ->> 'never_installed_alerted_at' IS NULL")
+      // CASE, not two ANDed predicates: the cast must never run on a value
+      // the shape check has not passed.
+      .whereRaw(`(CASE WHEN (e.annual_plan_signature_charge ->> 'deferred_at') ~ '${CASTABLE_ISO_INSTANT}'
+        THEN (e.annual_plan_signature_charge ->> 'deferred_at')::timestamptz END)
+        < now() - interval '${SignatureCharge.NEVER_INSTALLED_ALERT_DAYS} days'`)
+      .orderBy('inv.created_at', 'asc')
+      .select('e.id as estimate_id', 'inv.id as invoice_id')
+      .limit(limit);
+    for (const row of stale) {
+      try {
+        if (await SignatureCharge.alertNeverInstalled({ estimateId: row.estimate_id, invoiceId: row.invoice_id, conn })) {
+          counts.neverInstalledAlerted += 1;
+        }
+      } catch (err) {
+        logger.error(`[termite-annual-activation] never-installed alert failed for estimate ${row.estimate_id}: ${err.message}`);
+      }
+    }
+  } catch (err) {
+    logger.error(`[termite-annual-activation] never-installed scan failed: ${err.message}`);
+  }
+}
+
 // Codex #4940 r9: the station retrieval of a term the customer declined
 // online is evaluated HERE, once it is due (its paid-through term_end has
 // passed, or its prepay was refunded) — see annual-prepay-renewals.js
@@ -1605,6 +1719,7 @@ module.exports = {
   anchorTermToInstallation,
   reconcileTermiteAnnualActivations,
   whereTermHasCompletedInstallation,
+  earliestCompletedInstallation,
   installationTermWindowForTerm,
   ANNUAL_TEMPLATE_KEY,
   ANNUAL_SIGNATURE_ABANDON_DAYS,
