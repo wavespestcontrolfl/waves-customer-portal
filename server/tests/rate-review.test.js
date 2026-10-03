@@ -798,6 +798,21 @@ describe('anniversary and tenure', () => {
     expect(P.resolveAnniversary({ firstCompletedVisit: '2026-05-20', acceptedAt: null, memberSince: null })).toMatchObject({ date: '2026-05-20', source: 'first_visit' });
     expect(P.resolveAnniversary({ firstCompletedVisit: null, acceptedAt: null, memberSince: null })).toMatchObject({ date: null, source: null });
   });
+  test('imported account, only program, no history: member_since dates the line (Fix B, owner 2026-10-02)', () => {
+    const imported = { firstCompletedVisit: null, acceptedAt: null, memberSince: '2025-06-06', accountCreatedAt: '2026-04-06T14:00:00Z' };
+    expect(P.resolveAnniversary({ ...imported, onlyActiveFamily: true })).toMatchObject({ date: '2025-06-06', source: 'member_since_import', conflict: false });
+    // a second active program on the account: the undated one may be a later add — held
+    expect(P.resolveAnniversary({ ...imported, onlyActiveFamily: false })).toMatchObject({ date: null, source: null });
+    // an account opened in the portal (membership on/near created_at): an admin-booked program can be days old — held
+    expect(P.resolveAnniversary({ ...imported, memberSince: '2026-04-01', onlyActiveFamily: true })).toMatchObject({ date: null, source: null });
+    expect(P.resolveAnniversary({ ...imported, accountCreatedAt: null, onlyActiveFamily: true })).toMatchObject({ date: null, source: null });
+    // any completed visit on the account takes the ordinary rules (not the import exception)
+    expect(P.resolveAnniversary({ ...imported, onlyActiveFamily: true, accountFirstVisit: '2026-05-01' })).toMatchObject({ date: null, source: null });
+    expect(P.isImportedAccount('2025-06-06', '2026-04-06')).toBe(true);
+    expect(P.isImportedAccount('2026-03-10', '2026-04-06')).toBe(false); // 27 days < IMPORTED_ACCOUNT_LEAD_DAYS
+    expect(P.isImportedAccount('2026-03-07', '2026-04-06')).toBe(true); // exactly 30
+    expect(P.informationalFlags({ anniversarySource: 'member_since_import', unknownInteractionVisits: 0, capturedConversationVisits: 0, duesAttributedVisits: 0, compositeVisits: 0 })).toContain('anniversary_from_membership');
+  });
   test('a portal-sold line on an account that predates it by > 90 days is flagged, not held', () => {
     const out = P.resolveAnniversary({ firstCompletedVisit: '2026-09-05', acceptedAt: '2026-09-01T15:00:00Z', memberSince: '2024-05-11' });
     expect(out).toMatchObject({ date: '2026-09-05', source: 'first_visit', conflict: true });

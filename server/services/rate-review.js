@@ -680,6 +680,8 @@ const INFO_FLAG_RULES = Object.freeze([
   ['list_from_cadence_mode', (l) => l.listRateSource === 'cadence_mode'],
   ['list_cadence_mismatch', (l) => !!l.listCadenceMismatch],
   ['anniversary_predates_portal', (l) => !!l.anniversaryConflict],
+  // imported account, only program, no loaded history: dated by membership
+  ['anniversary_from_membership', (l) => l.anniversarySource === 'member_since_import'],
   ['stamped_zero_free', (l) => !!l.stampedZeroFree],
   ['carried_forward', (l) => !!l.carriedFrom],
   // a legacy NULL billing_mode resolved through the canonical lane rule
@@ -802,10 +804,18 @@ function computeSnapshot(line, config = DEFAULT_CONFIG) {
 // seen later was added since, whatever the admin booked it without, and
 // starts at its first visit.
 const IMPORT_PRESENCE_DAYS = 90;
+// An account whose membership predates its portal record by this much came
+// in by import (the April 2026 load created 657 accounts with member_since
+// back to 2024-05); an account opened in the portal has member_since on or
+// about its created_at.
+const IMPORTED_ACCOUNT_LEAD_DAYS = 30;
 function presenceWindowFor(visitsPerYear) {
   return visitsPerYear > 0 ? Math.round(365 / visitsPerYear) + 30 : IMPORT_PRESENCE_DAYS;
 }
-function resolveAnniversary({ firstCompletedVisit, acceptedAt, memberSince, accountFirstVisit = null, presenceWindowDays = IMPORT_PRESENCE_DAYS }) {
+function isImportedAccount(member, accountCreatedDay) {
+  return !!(member && accountCreatedDay) && (ymdToUtcMs(accountCreatedDay) - ymdToUtcMs(member)) / DAY_MS >= IMPORTED_ACCOUNT_LEAD_DAYS;
+}
+function resolveAnniversary({ firstCompletedVisit, acceptedAt, memberSince, accountFirstVisit = null, presenceWindowDays = IMPORT_PRESENCE_DAYS, accountCreatedAt = null, onlyActiveFamily = false }) {
   const firstVisit = dateColumn(firstCompletedVisit);
   const accepted = etDay(acceptedAt);
   const member = dateColumn(memberSince);
@@ -821,7 +831,13 @@ function resolveAnniversary({ firstCompletedVisit, acceptedAt, memberSince, acco
   // No accepted estimate and no completed visit yet: the line's age is
   // unknown — never the account's membership (an admin-booked program can
   // be days old) — and the row is held (no_anniversary) until its first
-  // application dates it.
+  // application dates it. One exception (owner ruling 2026-10-02, Fix B):
+  // an IMPORTED account (membership ≥ 30 days older than its portal
+  // record) whose ONLY active program this is came in with that program —
+  // its history simply was not loaded — so member_since dates the line.
+  // A second program on the account, or any completed visit, takes the
+  // rules above.
+  else if (member && !accountFirst && onlyActiveFamily && isImportedAccount(member, etDay(accountCreatedAt))) { date = member; source = 'member_since_import'; }
   let conflict = false;
   if (date && member && source !== 'member_since') {
     conflict = (ymdToUtcMs(date) - ymdToUtcMs(member)) / DAY_MS > 90;
@@ -2174,6 +2190,9 @@ function reviewOccurrence(entry, latest, { from, to, carryFloor }) {
 function selectReviewEntries(book, { from, to, now, latestByLine, firstVisits = null }) {
   const carryFloor = daysAgoYmd(now, CARRY_FORWARD_MAX_DAYS_PAST);
   const accountFirst = accountFirstVisits(firstVisits, book);
+  // active families per account (the book is one entry per customer × family)
+  const familiesPerAccount = new Map();
+  for (const entry of book) familiesPerAccount.set(entry.customer.id, (familiesPerAccount.get(entry.customer.id) || 0) + 1);
   const selected = [];
   for (const entry of book) {
     entry.anniversary = resolveAnniversary({
@@ -2183,6 +2202,8 @@ function selectReviewEntries(book, { from, to, now, latestByLine, firstVisits = 
       memberSince: dateColumn(entry.customer.member_since) || etDay(entry.customer.created_at),
       accountFirstVisit: accountFirst.get(entry.customer.id) || null,
       presenceWindowDays: presenceWindowFor(entry.visitsPerYear),
+      accountCreatedAt: entry.customer.created_at,
+      onlyActiveFamily: familiesPerAccount.get(entry.customer.id) === 1,
     });
     const occurrence = reviewOccurrence(entry, latestByLine.get(`${entry.customer.id}|${entry.familyKey}`), { from, to, carryFloor });
     if (!occurrence) continue;
@@ -3117,7 +3138,7 @@ module.exports = {
     isMultiProgramLine,
     trimmedMedian, median, quartiles, modeCents, monthsBetween, monthsAgoYmd, monthKeyMinus, anniversaryInWindow, reviewWindowFor, dateColumn, etDay,
     isBatchKey, assertBatchKey, assertYmd, firstCompletedVisitFor, selectReviewEntries, loadLatestSnapshots, engineItemLowConfidence, windowLabel, syncPricingConstants, daysAgoYmd, qualifyingKeyForLine,
-    PLAN_ROW_SQL, DATING_ROW_SQL, LIVE_STATUS_SQL,
+    PLAN_ROW_SQL, DATING_ROW_SQL, LIVE_STATUS_SQL, isImportedAccount, IMPORTED_ACCOUNT_LEAD_DAYS, informationalFlags,
     CARRY_FORWARD_STATUSES, CARRY_FORWARD_MAX_DAYS_PAST, REVIEW_WINDOW_FROM_DAYS, REVIEW_WINDOW_TO_DAYS, CALLBACK_LANE_FOR_FAMILY,
     visitsPerYearFor,
     conversationMinutesFor, interactionFor, wallMinutesFor, treatmentMinutesFor, computeLineAllowances, allowanceFor, lineDurationStats, visitRevenueCents,
