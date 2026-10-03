@@ -4,7 +4,8 @@ const { deriveIrrigationInchesPerWeek } = require('@waves/irrigation-runtime');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { pairBeforeAfterPhotos, photoZoneLabel } = require('../lawn-visit-input');
-const { SHOT_CAP: LAWN_SHOT_LIST_CAP } = require('../lawn-photo-shots');
+const { SHOT_CAP: LAWN_SHOT_LIST_CAP, carriesShotListMarker } = require('../lawn-photo-shots');
+const { buildLawnPhotoSet } = require('./lawn-photo-set');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isProductApplicationRow, isTermiteNoReentryServiceType } = require('./service-line-configs');
 const { isTermiteBaitServiceName, termiteBaitSnapshotOf, recordStage, isMonitoringServiceKey, TERMITE_BAIT_TYPED_TYPE } = require('./termite-report-v2');
@@ -2602,6 +2603,11 @@ async function loadApprovedLawnRecommendationCards({ customerId, snapshotId }, k
     .filter(Boolean);
 }
 
+// Read at call time; a partial feature-gates mock (or a missing export) means off.
+function lawnReportPhotoSetLive() {
+  return typeof featureGates.lawnReportPhotoSetLive === 'function' && featureGates.lawnReportPhotoSetLive();
+}
+
 async function lawnPhotoUrl(photo) {
   if (!photo?.s3_key || String(photo.s3_key).startsWith('pending/') || !PhotoService) return null;
   try {
@@ -2808,6 +2814,13 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   if (featureGates.gateEnvValue('GATE_LAWN_SHOT_LIST')) irrigationStamp += ':shots=1';
 
   const assessment = await loadLinkedLawnAssessment(service, knex, { failClosed: true, propertyHistoryEnabled });
+  // The lawn report photo set (GATE_LAWN_REPORT_PHOTO_SET) swaps the photo
+  // gallery for a labeled set in shot order, so the same rule: a PDF cached
+  // before a flip is never served after it. The stamp rides only while the gate
+  // is live AND this visit's assessment carries the shot-list marker, the one
+  // case where the payload (and so the document) changes; a legacy visit keeps
+  // its key. An unreadable marker means no stamp.
+  if (lawnReportPhotoSetLive() && carriesShotListMarker(assessment?.photos)) irrigationStamp += ':photoset=1';
   const lawnHistory = propertyHistoryEnabled
     ? await require('../lawn-assessment-history').historyForReport(service, { assessment }, knex)
     : null;
@@ -3324,14 +3337,23 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   // payload photo gains its customer-facing zoneLabel. Off = the 5-photo limit
   // and the payload shape this report has always had.
   const shotListLive = featureGates.gateEnvValue('GATE_LAWN_SHOT_LIST');
+  // GATE_LAWN_REPORT_PHOTO_SET (P23): a visit captured under the shot list (the
+  // stored marker) can hold up to eight photos, so the set reads with the
+  // eight-photo cap whenever the set gate is live, even if the capture gate
+  // (GATE_LAWN_SHOT_LIST) is off or was rolled back. Any other visit keeps the
+  // limit it always had.
+  const photoSetEligible = lawnReportPhotoSetLive() && carriesShotListMarker(assessment.photos);
+  // A failed photo READ is not an empty photo set: it is counted below (for an
+  // eligible visit only) so no PDF is cached from a view that lost its set.
+  let photoReadFailed = false;
   const latestPhotos = await knex('lawn_assessment_photos')
     .where({ assessment_id: assessment.id, customer_visible: true })
     .orderBy('is_best_photo', 'desc')
     .orderBy('quality_score', 'desc')
     .orderBy('photo_order', 'asc')
-    .limit(shotListLive ? LAWN_SHOT_LIST_CAP : 5)
+    .limit(shotListLive || photoSetEligible ? LAWN_SHOT_LIST_CAP : 5)
     // read-failure-exempt: gallery photos only; no insight or memory entry reads them
-    .catch(() => []);
+    .catch(() => { photoReadFailed = true; return []; });
   const photos = await Promise.all(latestPhotos.map(async (photo) => ({
     id: photo.id,
     url: await lawnPhotoUrl(photo),
@@ -3350,6 +3372,22 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     observations: photo.observations || '',
     takenAt: photo.taken_at || photo.created_at || null,
   })));
+  // GATE_LAWN_REPORT_PHOTO_SET (P23): a visit captured under the shot list
+  // (the marker stored beside its photos; a visit without it keeps the strip)
+  // shows its photos as a labeled set in shot order. Built from the same
+  // signed URLs as `photos` above, so it is minted fresh on every view and
+  // never stored. No gate, no marker or no resolvable photo = no key at all.
+  // ALL OR NOTHING: if any photo of the set would not sign, the set is not sent
+  // at all (the old strip and gallery rules apply, as with the gate off), and the
+  // count rides out on a non-enumerable `photoSetUnresolved` so the report counts
+  // it as an image-resolution failure and no PDF of this view is cached. A
+  // partial set would hide the one photo whose second signing may succeed in the
+  // gallery copy the document suppresses.
+  const photoSetRows = photoSetEligible
+    ? latestPhotos.map((photo, index) => ({ url: photos[index].url, zone: photo.zone, photoOrder: photo.photo_order }))
+    : [];
+  const photoSetUnresolved = photoSetRows.filter((row) => !row.url).length + (photoSetEligible && photoReadFailed ? 1 : 0);
+  const photoSet = photoSetUnresolved ? [] : buildLawnPhotoSet(photoSetRows);
   // GATE_LAWN_VISIT_MEMORY (P13): the progress engine's score inputs, handed
   // out through the same internal out-param (never the payload). The prior is
   // the property-scoped history row selectPriorVisit chose; confidence is read
@@ -3718,7 +3756,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   // The week's rain / ET₀ (water insights) could not be fetched or frozen.
   if (readFailures && weekWeatherUnfrozen) readFailures.add('week_weather');
   const droughtStress = parseJsonObject(assessment.composite_scores).drought_stress;
-  return {
+  const lawnAssessmentPayload = {
     assessmentId: assessment.id,
     serviceRecordId: assessment.service_record_id || null,
     serviceId: assessment.service_id || null,
@@ -3727,6 +3765,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     initialScores: initialScore,
     trend,
     photos,
+    ...(photoSet.length ? { photoSet } : {}),
     beforeAfter,
     recommendations: parseJsonObject(assessment.recommendations),
     observations: singleVoiceObservation(assessment.observations),
@@ -3792,6 +3831,10 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     customerSummary: snapshot?.summary || defaultCustomerSummary,
     trendSummary: defaultCustomerSummary,
   };
+  if (photoSetUnresolved) {
+    Object.defineProperty(lawnAssessmentPayload, 'photoSetUnresolved', { value: photoSetUnresolved, enumerable: false });
+  }
+  return lawnAssessmentPayload;
 }
 
 // GATE_LAWN_WATERING_RULE: the visit's one watering instruction, built from
@@ -4379,6 +4422,10 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     ...(visitMemoryLive ? { visitMemoryOut } : {}),
     readFailures,
   });
+  // A photo-set photo that would not sign (the set was withheld, all or nothing):
+  // the document cannot see the photo it lost, so count it where the PDF store
+  // paths already refuse to cache on image-resolution failures.
+  imageResolutionFailures += Number(lawnAssessment?.photoSetUnresolved) || 0;
   // Render-time treatment reconciliation (codex P1 r19): the completion SMS
   // links this report immediately — a customer can open it BEFORE the
   // grounded regen or stored-copy sanitize lands, and nothing shown can be
@@ -7351,6 +7398,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // moments load long before this return. Videos are excluded — the
     // document never renders them.
     imageResolutionFailures: imageResolutionFailures
+      // The photo set was built for this visit but did not reach the report
+      // (the V2 build failed soft, or any later step dropped the key): the
+      // document would print the fallback gallery under the set's cache key.
+      + (Array.isArray(lawnAssessment?.photoSet) && lawnAssessment.photoSet.length
+        && !(Array.isArray(reportV2?.photoSet) && reportV2.photoSet.length) ? 1 : 0)
       + (Array.isArray(approvedVisualMoments) ? approvedVisualMoments : [])
         .filter((m) => m && m.mediaType !== 'video' && !m.mediaUrl).length,
     legacy: {
