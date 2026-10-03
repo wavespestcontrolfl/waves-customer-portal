@@ -59,6 +59,30 @@ describe('useFastCompleteSubmit durable attempts', () => {
     expect(view.result.current.done.summary).toBe('Legacy caller');
   });
 
+  it('clears a rejected row after storage recovers before sending corrected input', async () => {
+    const deviceDatabase = globalThis.indexedDB;
+    const request = vi.fn().mockImplementationOnce(async () => {
+      globalThis.indexedDB = undefined;
+      throw Object.assign(new Error('Correct the report.'), { status: 422 });
+    }).mockResolvedValue({ success: true });
+    const view = renderHook(() => useFastCompleteSubmit({ ...scope, request }));
+    await waitFor(() => expect(view.result.current.recovering).toBe(false));
+    await act(async () => { await view.result.current.submit(() => photoBody, 'Original'); });
+    const original = JSON.parse(request.mock.calls[0][1].body);
+    const corrected = { ...photoBody, technicianNotes: 'Corrected report' };
+    await act(async () => { await view.result.current.submit(() => corrected, 'Corrected'); });
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(view.result.current.error).toContain('Could not clear');
+    globalThis.indexedDB = deviceDatabase;
+    await act(async () => { await view.result.current.submit(() => corrected, 'Corrected'); });
+    expect(request).toHaveBeenCalledTimes(2);
+    const sent = JSON.parse(request.mock.calls[1][1].body);
+    expect(sent).toMatchObject(corrected);
+    expect(sent.idempotencyKey).not.toBe(original.idempotencyKey);
+    expect(view.result.current.done.summary).toBe('Corrected');
+    expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt).toBeNull();
+  });
+
   it('restores an uncertain photo completion without auto-submit, then retries the exact body, key, and summary', async () => {
     const uncertain = Object.assign(new Error('Connection dropped.'), { status: undefined });
     const firstRequest = vi.fn().mockRejectedValue(uncertain);

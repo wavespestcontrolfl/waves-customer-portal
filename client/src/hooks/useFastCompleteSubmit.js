@@ -60,6 +60,7 @@ export default function useFastCompleteSubmit({
   const keyRef = useRef(genIdempotencyKey());
   const pendingBodyRef = useRef(null);
   const pendingSummaryRef = useRef('');
+  const rejectedKeyRef = useRef(null);
   const inFlight = useRef(false);
   const scopeRef = useRef(scopeOf(serviceId, operatorId, 0));
   const storageWarningSeenRef = useRef(false);
@@ -78,6 +79,7 @@ export default function useFastCompleteSubmit({
     const scope = scopeOf(serviceId, operatorId, scopeRef.current.epoch + 1);
     scopeRef.current = scope;
     keyRef.current = genIdempotencyKey();
+    rejectedKeyRef.current = null;
     pendingBodyRef.current = null;
     pendingSummaryRef.current = '';
     inFlight.current = false;
@@ -169,8 +171,9 @@ export default function useFastCompleteSubmit({
 
   const settleFailure = useCallback(async (err, scope, body, summary) => {
     const outcome = completionFailureOutcome(err, { confirmable });
-    if (DEFINITIVE_OUTCOMES.has(outcome)) await clearStored(scope, body.idempotencyKey);
+    const removed = DEFINITIVE_OUTCOMES.has(outcome) ? await clearStored(scope, body.idempotencyKey) : true;
     if (!sameScope(scopeRef.current, scope)) return;
+    if (outcome === 'correctable' && !removed) rejectedKeyRef.current = body.idempotencyKey;
     pendingBodyRef.current = outcome === 'retry' || outcome === 'confirm' ? body : null;
     pendingSummaryRef.current = pendingBodyRef.current ? summary : '';
     if (outcome === 'correctable') {
@@ -204,18 +207,24 @@ export default function useFastCompleteSubmit({
     setError('');
     setPrompt(null);
 
-    // The body in memory and the body on disk are the same object shape sent
-    // below, including inline Tree & Shrub photos and the idempotency key.
-    const persistence = await persistPrepared(scope, body, heldSummary);
-    if (persistence !== 'send') {
-      if (persistence !== 'stale') {
-        setSubmitting(false);
-        inFlight.current = false;
-      }
-      return;
-    }
-
     try {
+      if (rejectedKeyRef.current) {
+        const rejectedKey = rejectedKeyRef.current;
+        const removed = await clearStored(scope, rejectedKey);
+        if (!sameScope(scopeRef.current, scope)) return;
+        if (!removed) {
+          const current = await getFastCompletionAttempt(scope.serviceId, scope.operatorId);
+          if (!sameScope(scopeRef.current, scope)) return;
+          if (!current.available || current.attempt?.body.idempotencyKey === rejectedKey) {
+            setError('Could not clear the rejected completion on this device. Try sending again when device storage is available.');
+            return;
+          }
+        }
+        rejectedKeyRef.current = null;
+      }
+      // Persist the exact held body, including photos, before network.
+      const persistence = await persistPrepared(scope, body, heldSummary);
+      if (persistence !== 'send') return;
       const result = await request(`${base}/complete`, { method: 'POST', body: JSON.stringify(body) });
       await clearStored(scope, body.idempotencyKey);
       if (!sameScope(scopeRef.current, scope)) return;
