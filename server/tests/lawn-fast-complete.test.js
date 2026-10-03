@@ -63,10 +63,6 @@ const granular = {
   approved_for_service_report: true,
   post_application_watering: { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, source: 'label' },
 };
-const lateGranular = {
-  ...granular, id: 'p-gran-late', name: 'Test Feed Granular Late',
-  post_application_watering: { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 72, source: 'label' },
-};
 const unapproved = { id: 'p-un', name: 'Test Unapproved', category: 'fertilizer', formulation: 'granular', approved_for_service_report: false };
 
 describe('lawnFastIneligibleReason: one rule for every lawn visit type', () => {
@@ -261,7 +257,9 @@ describe('buildLawnFastContext', () => {
   });
 });
 
-describe('buildLawnFastWateringPreview equals the report', () => {
+// Equality with the report's real entry point lives in lawn-fast-watering-preview-report.test.js;
+// these cover the preview's own no-claim, gate and request handling.
+describe('buildLawnFastWateringPreview', () => {
   const savedRule = process.env.GATE_LAWN_WATERING_RULE;
   const now = new Date('2026-10-05T14:00:00Z');
   afterEach(() => {
@@ -281,25 +279,6 @@ describe('buildLawnFastWateringPreview equals the report', () => {
     });
     return reportData.buildWateringBanner(instruction, null);
   }
-
-  test.each([
-    ['a hold', [herbicide]],
-    ['a water-in', [granular]],
-    ['a hold then water-in', [herbicide, lateGranular]],
-  ])('%s: lines and sentence are the report banner', async (_label, rows) => {
-    process.env.GATE_LAWN_WATERING_RULE = 'true';
-    const prefs = { irrigation_run_minutes: 20, watering_days: ['Mon'], irrigation_system_type: ['spray'] };
-    const knex = knexFor(rows, prefs);
-    const preview = await buildLawnFastWateringPreview({ serviceId: 'visit-1', productIds: rows.map((r) => r.id), knex, now });
-    const banner = await reportBanner(rows, knexFor(rows, prefs));
-    expect(banner).toBeTruthy();
-    expect(preview.ok).toBe(true);
-    expect(preview.lines).toEqual(banner.lines);
-    expect(preview.sentence).toBe(banner.lines.join(' '));
-    expect(preview.state).toBe(banner.state);
-    expect(preview.lines.length).toBeGreaterThan(0);
-    expect(preview.products.map((p) => p.rule)).toEqual(rows.map((r) => resolveWateringRule(r)));
-  });
 
   test('a hold that reaches the water-in deadline makes no claim, as the report does', async () => {
     process.env.GATE_LAWN_WATERING_RULE = 'true';

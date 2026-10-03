@@ -155,13 +155,79 @@ const publicRuleEntry = ({ facts, ...entry }) => entry;
 
 const MAX_PREVIEW_PRODUCTS = 20;
 
+// The report-side context the watering instruction and banner are built from,
+// loaded the way buildLawnAssessmentReportData loads it, for THIS visit:
+//   - scheduleUnconfirmed (a moved home withholds the irrigation entries):
+//     reportScheduleUnconfirmed over the property preferences, the active turf
+//     profile and the visit's assessment;
+//   - the week plan card the banner's plan sentence reads (GATE_IRRIGATION_WEEK_PLAN):
+//     the current week's snapshot, only when it binds to this premise, rendered by
+//     buildReportWeekPlan, the report's own builder.
+// A read that fails is listed in `omitted`; the part it feeds is left out of the
+// sentence rather than guessed.
+async function loadReportWateringContext(svc, assessment, knex) {
+  const reportData = require('./service-report/report-data');
+  const omitted = [];
+  const customerId = svc.customer_id;
+  let turfProfile = null;
+  let propertyPrefs = null;
+  try {
+    turfProfile = await knex('customer_turf_profiles').where({ customer_id: customerId, active: true }).first();
+    propertyPrefs = await knex('property_preferences').where({ customer_id: customerId }).first();
+  } catch (err) {
+    logger.warn(`[lawn-fast] irrigation context unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
+    omitted.push('irrigation_context');
+  }
+  const scheduleUnconfirmed = reportData.reportScheduleUnconfirmed({ propertyPrefs, turfProfile, assessment });
+
+  let weekPlan = null;
+  if (featureGates.isEnabled('irrigationWeekPlan')) {
+    try {
+      const { loadCurrentWeekPlan, planBindsToService } = require('./irrigation-week-plan');
+      const { resolveVisitAddress } = require('./service-report/report-identity-snapshot');
+      const snapshot = await loadCurrentWeekPlan(customerId, { strict: true });
+      const address = resolveVisitAddress({
+        visit: svc,
+        customer: {
+          address_line1: svc.cust_address_line1,
+          address_line2: svc.cust_address_line2,
+          city: svc.cust_city,
+          state: svc.cust_state,
+          zip: svc.cust_zip,
+        },
+      });
+      const premise = { address_line1: address.line1, address_line2: address.line2, city: address.city, zip: address.zip };
+      if (snapshot?.plan && planBindsToService(snapshot, premise)) {
+        weekPlan = reportData.buildReportWeekPlan(snapshot, assessment?.service_date || etCalendarDayOf(svc.scheduled_date));
+      }
+    } catch (err) {
+      logger.warn(`[lawn-fast] week plan unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
+      omitted.push('week_plan');
+    }
+  }
+  return { scheduleUnconfirmed, weekPlan, omitted };
+}
+
 /**
  * The watering preview for the chosen products: each product's rule, and the
- * one customer-facing watering instruction the REPORT would print, produced by
- * the report's own functions (buildReportWateringInstruction, then
- * buildWateringBanner) from the same frozen-fact shape, so the sheet's sentence
- * can never differ from the report's. With GATE_LAWN_WATERING_RULE off the
- * report prints none, so neither does this (rules are still listed).
+ * one customer-facing watering instruction the REPORT would print, built by the
+ * report's own functions (buildReportWateringInstruction, then
+ * buildWateringBanner) from the same frozen-fact shape AND the same visit
+ * context (property irrigation entries, move guard, this week's plan), so the
+ * sheet's sentence can never differ from the report's. With
+ * GATE_LAWN_WATERING_RULE off the report prints none, so neither does this
+ * (rules are still listed).
+ *
+ * Provisional inputs (the report uses what exists at completion / render time):
+ *   - completionTime: the report anchors its "until Thu 3 PM" labels to the
+ *     visit's completion time; before completion it is `asOf` (now), so the
+ *     response says the times hold "if completed now";
+ *   - weekPlanLine: the plan sentence is composed on every report render from the
+ *     plan present then, so it may differ from a later render;
+ *   - assessment: with no confirmed assessment the report has no banner at all
+ *     yet; the preview shows what it will say once one is confirmed.
+ * A part the sheet cannot know is left out of the sentence, never replaced by
+ * different wording, and named in `omitted`.
  * `{ ok: false, reason }` for a bad request.
  */
 async function buildLawnFastWateringPreview({ serviceId, productIds, knex = db, now = new Date() }) {
@@ -170,7 +236,7 @@ async function buildLawnFastWateringPreview({ serviceId, productIds, knex = db, 
   }
   const ids = [...new Set(productIds.map((id) => id.trim()))];
   if (ids.length > MAX_PREVIEW_PRODUCTS) return { ok: false, reason: 'too_many_products' };
-  const svc = await knex('scheduled_services').where({ id: serviceId }).first('id', 'customer_id');
+  const svc = await require('./pest-recap').loadServiceWithCustomer(serviceId, knex);
   if (!svc) return { ok: false, reason: 'not_found' };
 
   const rows = await loadCatalogRows(ids, knex);
@@ -179,6 +245,9 @@ async function buildLawnFastWateringPreview({ serviceId, productIds, knex = db, 
   const out = {
     ok: true,
     wateringRuleLive,
+    asOf: now.toISOString(),
+    provisional: [],
+    omitted: [],
     products: entries.map(publicRuleEntry),
     state: null,
     lines: [],
@@ -187,17 +256,32 @@ async function buildLawnFastWateringPreview({ serviceId, productIds, knex = db, 
   };
   if (!wateringRuleLive || !entries.length) return out;
 
-  const { buildReportWateringInstruction, buildWateringBanner } = require('./service-report/report-data');
-  // A product the catalog does not have is an unknown rule, exactly as a report
-  // product with no frozen facts: no claim.
-  const instruction = await buildReportWateringInstruction({
-    products: entries.map((entry) => ({ product_name: entry.name, approved_report_product_facts: entry.facts })),
-    service: { customer_id: svc.customer_id },
-    completionTime: now,
-    lawnAssessment: null,
-    knex,
-  });
-  const banner = buildWateringBanner(instruction, null);
+  const reportData = require('./service-report/report-data');
+  const assessment = await loadLatestAssessment(svc, knex).catch(() => null);
+  const context = await loadReportWateringContext(svc, assessment, knex);
+  out.omitted.push(...context.omitted);
+  out.provisional.push('completionTime');
+  if (context.weekPlan) out.provisional.push('weekPlanLine');
+  if (assessment?.confirmed_by_tech !== true) out.provisional.push('assessment');
+
+  let instruction;
+  try {
+    // A product the catalog does not have is an unknown rule, exactly as a report
+    // product with no frozen facts: no claim.
+    instruction = await reportData.buildReportWateringInstruction({
+      products: entries.map((entry) => ({ product_name: entry.name, approved_report_product_facts: entry.facts })),
+      service: { customer_id: svc.customer_id },
+      completionTime: now,
+      lawnAssessment: { waterContext: { scheduleUnconfirmed: context.scheduleUnconfirmed } },
+      knex,
+    });
+  } catch (err) {
+    // The report builds no instruction when its irrigation inputs cannot be read.
+    logger.warn(`[lawn-fast] watering inputs unavailable for ${serviceId}: ${err?.code || err?.name || 'Error'}`);
+    out.omitted.push('irrigation_inputs');
+    return out;
+  }
+  const banner = reportData.buildWateringBanner(instruction, context.weekPlan);
   if (banner) {
     out.state = banner.state;
     out.lines = banner.lines;
@@ -241,7 +325,7 @@ async function loadLatestAssessment(svc, knex) {
     .where({ service_id: svc.id, customer_id: svc.customer_id })
     .orderBy('created_at', 'desc')
     .orderBy('updated_at', 'desc')
-    .first('id', 'confirmed_by_tech');
+    .first();
 }
 
 async function loadAssessmentPhotos(assessmentId, knex) {

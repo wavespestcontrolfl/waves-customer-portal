@@ -1718,6 +1718,7 @@ async function submitRecap({
 module.exports = {
   PEST_CONTROL_CATEGORY,
   resolveEligibility,
+  loadServiceWithCustomer,
   buildRecapContext,
   traceOnReportForVisit,
   draftRecapMessage,

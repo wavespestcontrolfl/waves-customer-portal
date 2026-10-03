@@ -610,6 +610,32 @@ function reportScheduleUnconfirmed({ propertyPrefs, turfProfile, assessment }) {
   });
 }
 
+// The week-plan card the report renders from the current week's snapshot: ONE
+// builder for the report and the Fast Complete watering preview, so the plan
+// sentence on the banner is decided the same way in both. Returns null when the
+// plan renders no card.
+function buildReportWeekPlan(snapshot, assessmentServiceDate) {
+  // Compare against the runtime Monday's decision saw, never today's prefs.
+  const rendered = renderWeekPlanReport(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null, restriction: snapshot.restriction || null });
+  // The card credits a REQUIRED watering-in against the plan only when
+  // this visit sits inside the plan week — a reopened older report
+  // loads the current week's snapshot and must not count a treatment
+  // watered in weeks ago as one of this week's runs.
+  // prescribesRun: a hold plan (zero runs) never has a run for a
+  // treatment watering-in to cover — the card keeps treatment-first but
+  // must not claim a nonexistent run was covered (codex gh-r16).
+  // afterTreatment: the plan reduced by a credited watering-in (the card
+  // shows it INSTEAD of the unreduced plan under the credit note).
+  // afterHold (GATE_LAWN_WATERING_RULE): the same plan with a "not before
+  // {holdUntil}" sentence, used while a product watering hold is in
+  // force. The literal token is filled (or the key dropped) by
+  // applyAfterHoldOverlay once the visit's instruction is known.
+  const afterHold = featureGates.lawnWateringRuleLive()
+    ? renderWeekPlanNotBefore(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null, restriction: snapshot.restriction || null })
+    : null;
+  return rendered ? { ...rendered, visitInPlanWeek: visitInPlanWeek(snapshot, assessmentServiceDate), prescribesRun: snapshot.plan.action !== 'hold' && (snapshot.plan.events ?? 1) >= 1, afterTreatment: renderWeekPlanAfterTreatment(snapshot.plan, { restriction: snapshot.restriction || null }), ...(afterHold ? { afterHold } : {}), ...(featureGates.lawnWateringRuleLive() ? { depthInches: snapshot.plan.depthInches ?? null } : {}) } : null;
+}
+
 function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPrefs = null, fawnSnapshot = {}, serviceDate = null, completionRainfallInchesToday = null, completionRainfall7dInches = null, completionEt0Inches = null, completionDailyRain = null, completionRainConfidence = null, completionRainSource = null, scheduleUnconfirmed = false } = {}) {
   // Sprinkler settings follow the home: after a move every source — portal,
   // turf profile, assessment — is withheld until re-saved, so the card
@@ -3642,25 +3668,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     // plan-present key (codex gh-r18).
     if (servicedElsewhere && typeof pinnedWeekPlanAvailableAt === 'string') throw new PinnedWeekPlanUnavailable('premise_diverged');
     if (snapshot?.plan && !servicedElsewhere) {
-      // Compare against the runtime Monday's decision saw, never today's prefs.
-      const rendered = renderWeekPlanReport(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null, restriction: snapshot.restriction || null });
-      // The card credits a REQUIRED watering-in against the plan only when
-      // this visit sits inside the plan week — a reopened older report
-      // loads the current week's snapshot and must not count a treatment
-      // watered in weeks ago as one of this week's runs.
-      // prescribesRun: a hold plan (zero runs) never has a run for a
-      // treatment watering-in to cover — the card keeps treatment-first but
-      // must not claim a nonexistent run was covered (codex gh-r16).
-      // afterTreatment: the plan reduced by a credited watering-in (the card
-      // shows it INSTEAD of the unreduced plan under the credit note).
-      // afterHold (GATE_LAWN_WATERING_RULE): the same plan with a "not before
-      // {holdUntil}" sentence, used while a product watering hold is in
-      // force. The literal token is filled (or the key dropped) by
-      // applyAfterHoldOverlay once the visit's instruction is known.
-      const afterHold = featureGates.lawnWateringRuleLive()
-        ? renderWeekPlanNotBefore(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null, restriction: snapshot.restriction || null })
-        : null;
-      waterContext.weekPlan = rendered ? { ...rendered, visitInPlanWeek: visitInPlanWeek(snapshot, assessment.service_date), prescribesRun: snapshot.plan.action !== 'hold' && (snapshot.plan.events ?? 1) >= 1, afterTreatment: renderWeekPlanAfterTreatment(snapshot.plan, { restriction: snapshot.restriction || null }), ...(afterHold ? { afterHold } : {}), ...(featureGates.lawnWateringRuleLive() ? { depthInches: snapshot.plan.depthInches ?? null } : {}) } : null;
+      waterContext.weekPlan = buildReportWeekPlan(snapshot, assessment.service_date);
     }
   }
 
@@ -7345,6 +7353,7 @@ module.exports = {
   resolveCanonicalLawnRender,
   loadServicePremise,
   reportScheduleUnconfirmed,
+  buildReportWeekPlan,
   freezeLawnWeekWeather,
   frozenWeekMatches,
   storedWeekFor,
