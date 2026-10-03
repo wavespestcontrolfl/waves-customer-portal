@@ -394,6 +394,13 @@ describe('searchReportBlogPosts', () => {
     expect((await searchReportBlogPosts(recordingKnex({ blog_posts: [LIVE] }), 'ghost ants')).map((post) => post.id)).toEqual([LIVE.id]);
   });
 
+  test('a swept portal post is found by its registry row\'s current text, never the portal\'s stale title (GitHub Codex P2 on 8117bdc9dc)', async () => {
+    const retitled = { ...REGISTRY_LIVE, id: '44444444-4444-4444-8444-000000000003', db_blog_id: LIVE.id, title: 'Sugar Ant Season Checklist', h1: 'Sugar Ant Season Checklist', live_url: LIVE.astro_live_url, canonical_url: LIVE.astro_live_url };
+    // The portal row still reads "Ghost Ants" and the registry row (current) does not.
+    const knex = recordingKnex({ blog_posts: [LIVE], 'content_registry:swept': [retitled] });
+    expect(await searchReportBlogPosts(knex, 'ghost ants')).toEqual([]);
+  });
+
   test('at most eight', async () => {
     const rows = Array.from({ length: 12 }, (_, i) => registryRow(`aaaaaaaa-0000-4000-8000-0000000001${String(i).padStart(2, '0')}`, `Termite Season Note ${i}`));
     expect(await searchReportBlogPosts(recordingKnex({ content_registry: rows }), 'termites')).toHaveLength(8);

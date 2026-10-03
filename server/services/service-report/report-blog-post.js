@@ -282,9 +282,14 @@ async function searchReportBlogPosts(knex, query) {
   for (const { row, post } of registryFound) {
     add(post, { title: `${row.title || ''} ${row.h1 || ''}`, keyword: row.target_keyword, summary: row.meta_description }, row.published_at);
   }
+  // A portal post the sweep keeps a registry row for is the registry's to
+  // find, by its current text (GitHub Codex P2 on 8117bdc9dc: a retitled post
+  // must not match on the portal's stale title); the portal adds only posts
+  // the sweep has not seen yet, under its own rule.
   const sweptPortal = await registryRowsForPortal(knex, portalRows.map((row) => row.id).filter(Boolean));
   for (const row of portalRows) {
-    add(portalLink(row, sweptPortal.get(String(row.id)) || []), { title: row.title, keyword: row.keyword, summary: row.meta_description }, row.astro_published_at);
+    if (sweptPortal.has(String(row.id))) continue;
+    add(reportBlogLink(row), { title: row.title, keyword: row.keyword, summary: row.meta_description }, row.astro_published_at);
   }
   const entries = [...found.values()].filter((entry) => entry.held.some(Boolean));
   // A word few posts hold says more than one many hold ("tick" over
