@@ -127,9 +127,9 @@ postgres('report blog search on Postgres', () => {
   });
 
   test('a post holding every word outranks the rare word alone; the title outranks the summary', async () => {
-    const both = registryRow('Weed Control Around the Lanai', { daysAgo: 300, meta_description: 'Keeping ticks off the lanai too.' });
+    const both = registryRow('Weed Control Around the Lanai', { daysAgo: 300, metadata: { frontmatter: { meta_description: 'Keeping ticks off the lanai too.' } } });
     const tick = registryRow('Tick Season Guide', { daysAgo: 1 });
-    const inSummary = registryRow('Spring Yard Checklist', { daysAgo: 0, meta_description: 'When tick season starts.' });
+    const inSummary = registryRow('Spring Yard Checklist', { daysAgo: 0, metadata: { astro: { frontmatter: { description: 'When tick season starts.' } } } });
     await mockPg('content_registry').insert([both, tick, inSummary]);
     expect((await searchReportBlogPosts(mockPg, 'tick control')).map((post) => post.id)).toEqual([both.id, tick.id, inSummary.id]);
   });
@@ -177,6 +177,16 @@ postgres('report blog search on Postgres', () => {
     const dbOnly = registryRow('Lanai Care Basics', { target_keyword: 'termite swarmers' });
     await mockPg('content_registry').insert([merged, astroOnly, dbOnly]);
     expect((await searchReportBlogPosts(mockPg, 'swarmers')).map((post) => post.id).sort()).toEqual([merged.id, astroOnly.id].sort());
+  });
+
+  test('in real SQL, an empty keyword alias never hides a populated one, and the database copy a merged row falls back to is never read (GitHub Codex P2s on d527cd5de1)', async () => {
+    const emptyAlias = registryRow('Spring Yard Checklist', { metadata: { frontmatter: { target_keyword: '', primary_keyword: 'termite swarmers' } } });
+    const dbCopy = registryRow('Lanai Care Basics', { title: 'Termite Swarmers (draft)', meta_description: 'Swarmers in spring.', metadata: { astro: { frontmatter: {} } } });
+    const described = registryRow('Window Sill Notes', { metadata: { astro: { frontmatter: { description: 'Swarmers at the window sill.' } } } });
+    await mockPg('content_registry').insert([emptyAlias, dbCopy, described]);
+    const posts = await searchReportBlogPosts(mockPg, 'swarmers');
+    expect(posts.map((post) => post.id).sort()).toEqual([emptyAlias.id, described.id].sort());
+    expect(posts.find((post) => post.id === emptyAlias.id).title).toBe('Spring Yard Checklist');
   });
 
   test('a registry post the post-publish check verified live is found and resolves; one in conflict never is', async () => {
