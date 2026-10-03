@@ -965,14 +965,17 @@ export function StepFooter({ reason, warn, label, onAction, busy, disabled, cove
 
 // A confirmable completion prompt (the edited-report heads-up, a promise
 // that changed after the report was written): the server's own words, then
-// send as is or go back.
-export function ConfirmPrompt({ prompt, onConfirm, onBack, busy }) {
+// send as is or go back. A Go back that could not discard the attempt saved
+// on this device keeps the prompt open, so its error shows here, as on the
+// recovered-completion view.
+export function ConfirmPrompt({ prompt, error, onConfirm, onBack, busy }) {
   return (
     <div className={cn('tech-visit-card', 'tech-report-confirm')} role="alertdialog" aria-label="Before this goes out">
       <p className="tech-visit-section-title">Before this goes out</p>
       {String(prompt.message || '').split('\n').filter(Boolean).map((line) => (
         <p key={line} className="tech-visit-muted">{line}</p>
       ))}
+      {error && <ActionFeedback error className="tech-visit-feedback">{error}</ActionFeedback>}
       <div className="tech-visit-tile-grid">
         <Chip label="Go back" disabled={busy} onClick={onBack} />
         <Chip label="Send as is" disabled={busy} onClick={onConfirm} />

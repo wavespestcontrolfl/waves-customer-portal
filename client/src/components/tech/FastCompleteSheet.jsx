@@ -1665,7 +1665,7 @@ function ReportStep({
   if (submission.prompt) {
     footer = (
       <footer className="tech-visit-footer tech-visit-footer--stacked">
-        <ConfirmPrompt prompt={submission.prompt} busy={submission.submitting} onBack={onBackFromPrompt} onConfirm={onConfirm} />
+        <ConfirmPrompt prompt={submission.prompt} error={submission.error} busy={submission.submitting} onBack={onBackFromPrompt} onConfirm={onConfirm} />
       </footer>
     );
   } else if (action) {

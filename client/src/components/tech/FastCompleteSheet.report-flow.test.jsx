@@ -8,6 +8,7 @@
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { IDBFactory } from 'fake-indexeddb';
 
 vi.mock('./TechTreatmentZoneModal', () => ({
   default: ({ onSaved, onClose, expectedPropertyId, openVisitOnly }) => (
@@ -27,6 +28,7 @@ vi.mock('./TechServicePhotosModal', () => ({
 
 import FastCompleteSheet from './FastCompleteSheet';
 import { perimeterFeetOf, reportParts } from './FastCompleteReport';
+import { getFastCompletionAttempt } from '../../lib/completion-resume-store';
 
 beforeEach(() => { vi.spyOn(window, 'scrollTo').mockImplementation(() => {}); });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
@@ -955,6 +957,34 @@ describe('complete and send', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Go back' }));
     expect((await screen.findByRole('button', { name: 'Complete & send' })).disabled).toBe(false);
     expect(request.bodies('/complete')).toHaveLength(1);
+  });
+
+  describe('with this device keeping the attempt', () => {
+    let factory;
+    beforeEach(() => { factory = globalThis.indexedDB; globalThis.indexedDB = new IDBFactory(); });
+    afterEach(() => { globalThis.indexedDB = factory; });
+
+    test('a Go back that cannot discard the saved attempt says so on the heads-up (pre-push P1 on 5f95bc558d)', async () => {
+      const request = makeRequest({ complete: [conflict('report_rules_review', 'Refused words: "safe"'), { success: true }] });
+      render(<FastCompleteSheet service={SERVICE} operatorId="tech-a" request={request} onClose={() => {}} onCompleted={() => {}} />);
+      await screen.findByText(/Taurus SC 4 fl oz/);
+      await generate();
+      fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+      const back = await screen.findByRole('button', { name: 'Go back' });
+      const [sent] = request.bodies('/complete');
+      expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt.body).toEqual(sent);
+      const store = globalThis.indexedDB;
+      globalThis.indexedDB = undefined;
+      try {
+        fireEvent.click(back);
+        expect(await within(screen.getByRole('alertdialog')).findByText(/Could not discard the saved completion/)).toBeTruthy();
+      } finally { globalThis.indexedDB = store; }
+      expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt.body).toEqual(sent);
+      fireEvent.click(back);
+      expect((await screen.findByRole('button', { name: 'Complete & send' })).disabled).toBe(false);
+      await waitFor(async () => expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt).toBeNull());
+      expect(request.bodies('/complete')).toHaveLength(1);
+    });
   });
 });
 
