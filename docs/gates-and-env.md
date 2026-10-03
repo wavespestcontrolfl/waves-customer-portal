@@ -1,6 +1,6 @@
 # Gates and environment variables (Railway)
 
-One entry per `GATE_*` flag or env var family: its default, where it is read, what on and off do, and how to kill it. Moved out of `CLAUDE.md` so it is read on demand instead of loading into every session.
+One entry per documented `GATE_*` flag or env var family (not exhaustive: a variable with no entry here may still exist in the code, so check `server/config/feature-gates.js` before concluding it does not): its default, where it is read, what on and off do, and how to kill it. Moved out of `CLAUDE.md` so it is read on demand instead of loading into every session.
 
 Look a variable up by name (`grep -n 'GATE_NAME' docs/gates-and-env.md`); each entry is one paragraph on one line. Add or change an entry in the same PR that adds or changes the variable.
 

@@ -106,7 +106,7 @@ Everything else — architecture, the context→tools mapping, design decisions,
 
 ## Environment Variables (Railway)
 
-The catalogue of every `GATE_*` flag and env var (default, where it is read, what on and off do, kill behavior) is `docs/gates-and-env.md`. It is not loaded into sessions:
+The catalogue of documented `GATE_*` flags and env vars (default, where it is read, what on and off do, kill behavior) is `docs/gates-and-env.md`. It is not exhaustive: a variable with no entry there may still exist, so check `server/config/feature-gates.js` and grep the code before concluding it does not. It is not loaded into sessions:
 
 - Look a variable up by name: `grep -n 'GATE_NAME' docs/gates-and-env.md`. Each entry is one paragraph on one line; never read the whole file.
 - Document a new or changed variable there, in the same PR. Not here.
