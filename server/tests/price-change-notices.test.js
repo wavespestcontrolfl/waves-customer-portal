@@ -505,6 +505,10 @@ describe('sendNoticeEmail definite-non-send classification', () => {
     sendTemplate.mockRejectedValue(err);
     expect(await sendNoticeEmail(args)).toEqual({ sent: false, attempted: true, definiteNonSend: true });
   });
+  it('an explicit pre-dispatch abort from the library ({ sent: false, aborted: true }) is a certain non-send', async () => {
+    sendTemplate.mockResolvedValue({ sent: false, aborted: true, reason: 'aborted_before_dispatch' });
+    expect(await sendNoticeEmail(args)).toEqual({ sent: false, attempted: true, definiteNonSend: true });
+  });
   it.each([
     ['a 5xx the provider may have processed', Object.assign(new Error('boom'), { status: 502 })],
     ['a network failure', new Error('socket hang up')],

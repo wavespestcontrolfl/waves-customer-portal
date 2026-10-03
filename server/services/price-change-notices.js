@@ -248,6 +248,9 @@ async function sendNoticeEmail({ customer, idempotencyKeyBase, vars, templateKey
       },
     });
     if (result?.blocked) return { sent: false, attempted: false };
+    // The library's explicit pre-dispatch abort (its handoff failed or refused before any
+    // provider request, e.g. a lock error): a certain non-send, retryable.
+    if (result?.aborted && !result?.sent) return { sent: false, attempted: true, definiteNonSend: true };
     // The ledger row this send created (the SendGrid event webhook resolves a
     // bounce to it): callers that must reconcile a later failure persist it.
     return { sent: !!result?.sent, attempted, ...(result?.message?.id ? { messageId: String(result.message.id) } : {}) };
