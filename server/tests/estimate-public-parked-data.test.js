@@ -60,14 +60,23 @@ function chainFor(result) {
   };
   return chain;
 }
+// A grouped estimate's accepted sibling (the accept's - and the shared owner resolver's - lookup: same group, another
+// estimate, customer_id set). null = no accepted sibling.
+let siblingEstimate = null;
 db.mockImplementation((table) => {
   if (table === 'customers') {
     // The phone sweep awaits the chain itself (a list); other customers reads end in .first().
-    const c = chainFor(null);
+    const c = chainFor(siblingEstimate ? { id: siblingEstimate.customer_id } : null);
     c.then = (resolve, reject) => Promise.resolve(phoneCandidates).then(resolve, reject);
     return c;
   }
-  return chainFor(table === 'estimates' ? estimateRow : undefined);
+  const chain = chainFor(table === 'estimates' ? estimateRow : undefined);
+  if (table === 'estimates') {
+    // `.whereNot(...)` marks the sibling lookup (the estimate's own reads never use it).
+    chain.whereNot = jest.fn(() => { chain.first = jest.fn().mockResolvedValue(siblingEstimate); return chain; });
+    chain.whereNotNull = jest.fn(() => chain);
+  }
+  return chain;
 });
 
 db.transaction = jest.fn(async (fn) => fn(db)); // the hold release's short locked transaction
@@ -110,7 +119,7 @@ async function getData(estimate, { headers = {}, query = '' } = {}) {
 }
 const ctaOf = (r) => JSON.parse(r.text).cta;
 
-beforeEach(() => { phoneCandidates = []; mockRaiseAdminAlert.mockClear(); mockReleaseEstimateHolds.mockClear(); });
+beforeEach(() => { phoneCandidates = []; siblingEstimate = null; mockRaiseAdminAlert.mockClear(); mockReleaseEstimateHolds.mockClear(); });
 
 test('a contradicted lone phone candidate: the page gets the existing review state (no accept, no card step) and no word about the other customer', async () => {
   phoneCandidates = [BOB];
@@ -208,6 +217,66 @@ describe('GET /data on a parked estimate runs the park side effects (the page pr
     const res = await getData(makeEstimate());
     expect(res.status).toBe(200);
     expect(ctaOf(res)).toMatchObject({ reviewBeforeBooking: true, reviewReason: 'contact_review' });
+  });
+});
+
+describe('grouped sibling (r8): an unlinked estimate whose group already has an accepted customer is never parked', () => {
+  const { estimatePublicBlockingState } = estimatePublicRouter;
+  const GROUP = 'grp-1';
+  const SIBLING = { id: 'est-sib', estimate_group_id: GROUP, customer_id: 'cust-bob', accepted_at: '2026-09-01T00:00:00.000Z' };
+  // The second property: unlinked, a different email AND address from the group's customer, who alone holds the phone.
+  const grouped = () => makeEstimate({ estimate_group_id: GROUP });
+
+  test('/data keeps the accept available, files no alert and releases no hold; and the matcher shows what main showed (the lone candidate)', async () => {
+    phoneCandidates = [BOB];
+    siblingEstimate = SIBLING;
+    const est = grouped();
+    const res = await getData(est);
+    expect(ctaOf(res)).toMatchObject({ canAccept: true, reviewBeforeBooking: false, reviewReason: null });
+    expect(mockRaiseAdminAlert).not.toHaveBeenCalled();
+    expect(mockReleaseEstimateHolds).not.toHaveBeenCalled();
+    // Every reader of the matcher (billing / card policy) sees main's match, not the neutral null a park gives.
+    await expect(estimatePublicRouter.matchAcceptCustomerByPhone(grouped())).resolves.toMatchObject({ match: { id: 'cust-bob' }, candidateCount: 1 });
+  });
+
+  test('the shared blocking-state helper (every surface: intent routes, slot routes, accept preflight, reminder) reports nothing, fresh or cached', async () => {
+    phoneCandidates = [BOB];
+    siblingEstimate = SIBLING;
+    expect(await estimatePublicBlockingState(grouped())).toBeNull();
+    expect(await estimatePublicBlockingState(grouped(), { fresh: true })).toBeNull();
+  });
+
+  test('the accept transaction\'s own phone match (it runs only after its sibling lookup found no owner) is NOT exempted', async () => {
+    phoneCandidates = [BOB];
+    siblingEstimate = SIBLING;
+    const verdict = await estimatePublicRouter.matchAcceptCustomerByPhone(grouped(), db, { authoritative: true, afterSiblingResolution: true });
+    expect(verdict).toMatchObject({ match: null, contradicted: true, rejectedCustomerId: 'cust-bob' });
+  });
+
+  test('control: the same estimate with no accepted sibling is parked', async () => {
+    phoneCandidates = [BOB];
+    const est = grouped();
+    expect(await estimatePublicBlockingState(est)).toMatchObject({ state: 'contact_review', rejectedCustomerId: 'cust-bob' });
+    const res = await getData(grouped());
+    expect(ctaOf(res)).toMatchObject({ canAccept: false, reviewBeforeBooking: true, reviewReason: 'contact_review' });
+  });
+
+  test('control: a sibling accepted for a DIFFERENT group does not exempt it (the owner lookup is scoped to this group)', async () => {
+    phoneCandidates = [BOB];
+    siblingEstimate = null; // the lookup is `where estimate_group_id = <this group>`: another group\'s sibling is simply not found
+    expect(await estimatePublicBlockingState(makeEstimate({ estimate_group_id: 'grp-2' }))).toMatchObject({ state: 'contact_review' });
+  });
+
+  test('an unreadable owner lookup is not guessed: the matcher throws (callers decide; /data does not park, the intent routes 500)', async () => {
+    phoneCandidates = [BOB];
+    const original = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      if (table === 'estimates') return { where: () => ({ whereNot: () => { throw new Error('estimates read failed'); } }), first: jest.fn() };
+      return original(table);
+    });
+    try {
+      await expect(estimatePublicRouter.matchAcceptCustomerByPhone(grouped())).rejects.toThrow('estimates read failed');
+    } finally { db.mockImplementation(original); }
   });
 });
 

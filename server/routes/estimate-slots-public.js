@@ -236,7 +236,8 @@ function isCommercialAutoEstimate(estimate = {}) {
 
 // The estimate columns the page's slot gate reads (slotBrowseRefusal).
 // The estimate columns the park verdict (contact_review) reads: an unlinked estimate's phone / email / address.
-const ESTIMATE_PARK_COLUMNS = ['customer_id', 'customer_name', 'customer_phone', 'customer_email', 'address'];
+// (+ estimate_group_id: a grouped sibling the accept resolves through its accepted sibling is never parked.)
+const ESTIMATE_PARK_COLUMNS = ['customer_id', 'customer_name', 'customer_phone', 'customer_email', 'address', 'estimate_group_id'];
 const SLOT_ESTIMATE_COLUMNS = ['id', 'status', 'expires_at', 'archived_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest', ...ESTIMATE_PARK_COLUMNS];
 
 // B18 park: the estimate's phone belongs to another customer, so it cannot self-book (contact_review, decided by

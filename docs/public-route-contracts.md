@@ -1782,7 +1782,13 @@ date), through one transition (drop the captured cards, release the slot hold, r
 from the 409 body (the page's `cta` becomes not-acceptable, review-before-booking, reason `contact_review`, with the server's
 sentence), so a failed refetch (best effort, caught at every call site, including the slot picker's) still lands on the review card. The estimate's own phone is left as staff typed
   it, so its follow-up texts are unchanged until the office fixes the number. Several phone candidates, or
-  a lone candidate that agrees on email or address, behave as before. A one-time card-hold SetupIntent a
+  a lone candidate that agrees on email or address, behave as before. So does a customer-unlinked GROUPED estimate whose group
+  already has an accepted customer: the accept resolves it through that accepted sibling BEFORE it ever matches by phone (a second
+  property's address naturally differs), so the contradiction rule - which guards the phone match - never applies to it: it is not
+  parked on any surface, and every reader of the phone match sees the lone candidate exactly as before. The exemption uses the shared
+  read-only owner resolver (`resolveGroupedEstimateOwnerId`, the accept's sibling query minus its advisory lock; an unreadable owner
+  throws rather than being guessed); the accept transaction's own phone match, which runs only after its sibling lookup found no
+  owner, is never exempted. A one-time card-hold SetupIntent a
   stale tab captured before the park stays unbound at Stripe (customerless until an accept commits); it
   is not retired.
 - `409 { code: 'ACCEPT_BILLING_CHANGED' }` when the transaction's customer lock finds the moved

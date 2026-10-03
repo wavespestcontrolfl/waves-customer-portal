@@ -775,6 +775,17 @@ describe('B18 park: a parked estimate (its phone belongs to another customer) ca
     });
   });
 
+  test('every slot-route estimate read selects estimate_group_id (the park verdict exempts a grouped sibling the accept resolves through its accepted sibling)', async () => {
+    currentEstimate = PARKED_ESTIMATE;
+    estimatePublicBlockingState.mockResolvedValue(null);
+    await fetch(`${base}/${TOKEN}/available-slots`);
+    await post('reserve', { slotId: '2030-01-01_09-00_unassigned' });
+    await fetch(`${base}/${TOKEN}/reserve/11111111-1111-4111-8111-111111111111/extend`, { method: 'POST' });
+    const estimateReads = firstArgsHistory.filter((cols) => cols.includes('estimate_data'));
+    expect(estimateReads.length).toBeGreaterThanOrEqual(3);
+    for (const cols of estimateReads) expect(cols).toContain('estimate_group_id');
+  });
+
   test('available-slots answers the review shape (no times) and never reaches the slot service', async () => {
     currentEstimate = PARKED_ESTIMATE;
     estimatePublicBlockingState.mockResolvedValueOnce(PARKED);

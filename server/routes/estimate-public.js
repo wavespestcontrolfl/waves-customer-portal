@@ -577,7 +577,7 @@ function acceptPhoneVerdictDrifted(estimate, fresh) {
 // read, and a row another writer already holds fails fast (Postgres 55P03) instead of waiting, because the callers
 // (the slot reserve / extend revalidation) already hold the estimate row and a customer-edit fan-out locks customer
 // then estimate - a blocking take could cycle. Never cached.
-async function matchAcceptCustomerByPhone(estimate, database = db, { authoritative = false, lockShare = false } = {}) {
+async function matchAcceptCustomerByPhone(estimate, database = db, { authoritative = false, lockShare = false, afterSiblingResolution = false } = {}) {
   if (!estimate?.customer_phone) return { match: null, candidateCount: 0 };
   const cacheable = database === db && !authoritative && !lockShare && typeof estimate === 'object';
   if (cacheable && acceptPhoneVerdicts.has(estimate)) return acceptPhoneVerdicts.get(estimate);
@@ -594,9 +594,20 @@ async function matchAcceptCustomerByPhone(estimate, database = db, { authoritati
     .orderBy('updated_at', 'desc');
   if (lockShare) candidateQuery = candidateQuery.forShare().noWait();
   const candidates = await candidateQuery;
-  const contradicted = candidates.length === 1 && acceptLoneCandidateContradicted(candidates[0], estimate);
+  let contradicted = candidates.length === 1 && acceptLoneCandidateContradicted(candidates[0], estimate);
+  // The accept resolves a customer-unlinked GROUPED estimate through its accepted sibling BEFORE it ever matches by
+  // phone (the sibling is the deterministic owner; a second property's address naturally differs), so that estimate
+  // never reaches the phone match this contradiction rule guards: it is not parked, and every reader of the matcher
+  // sees what main showed (the lone candidate). `afterSiblingResolution` is set only by the accept transaction's own
+  // phone match, which runs after its sibling lookup already found no owner. The lookup is the shared read-only
+  // owner resolver (RecurringCards.resolveGroupedEstimateOwnerId, the accept's sibling query minus its advisory
+  // lock) and it throws on an unreadable owner: an unknown owner is not guessed either way (callers decide).
+  if (contradicted && !afterSiblingResolution && estimate.estimate_group_id
+    && await require('../services/recurring-card-on-file').resolveGroupedEstimateOwnerId(estimate, database, { throwOnError: true })) {
+    contradicted = false;
+  }
   const verdict = {
-    match: pickAcceptCustomerMatch(candidates, estimate),
+    match: candidates.length === 1 && !contradicted ? candidates[0] : pickAcceptCustomerMatch(candidates, estimate),
     candidateCount: candidates.length,
     ...(contradicted ? { contradicted: true, rejectedCustomerId: candidates[0].id } : {}),
   };
@@ -12106,7 +12117,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // estimate off the existing account. pickAcceptCustomerMatch needs the
         // full set to judge ambiguity.
         acceptedPhoneIdentity = { customer_phone: estimate.customer_phone, customer_email: estimate.customer_email, address: estimate.address };
-        const { match: existing, candidateCount, contradicted: phoneContradicted, rejectedCustomerId: phoneRejectedCustomerId } = await matchAcceptCustomerByPhone(acceptedPhoneIdentity, trx, { authoritative: true });
+        const { match: existing, candidateCount, contradicted: phoneContradicted, rejectedCustomerId: phoneRejectedCustomerId } = await matchAcceptCustomerByPhone(acceptedPhoneIdentity, trx, { authoritative: true, afterSiblingResolution: true });
         // B18: the card policy, hold auto-satisfy and prepay quote were decided on the PREFLIGHT identity. A
         // contradiction here the preflight did not see (the candidate or the phone's candidate set moved in
         // between) parks the accept after all; any other identity difference aborts for a reload. Either way

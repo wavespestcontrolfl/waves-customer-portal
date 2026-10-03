@@ -103,7 +103,12 @@ jest.mock('../models/db', () => {
     b.whereNull = (col) => { ctx.nullCols.push(col); return b; };
     b.whereNotNull = (col) => { ctx.notNullCols.push(col); return b; };
     b.whereNotIn = (col, arr) => { ctx.notIn.push([col, arr]); return b; };
-    b.whereNot = (col, val) => { ctx.notEq.push([col, val]); return b; };
+    b.whereNot = (col, val) => {
+      // `.whereNot({ id })` (the accepted-sibling lookup's form) as well as `.whereNot('id', value)`.
+      if (col && typeof col === 'object') for (const [k, v] of Object.entries(col)) ctx.notEq.push([k, v]);
+      else ctx.notEq.push([col, val]);
+      return b;
+    };
     b.whereIn = (col, arr) => { ctx.eqFilters.push(...[]); ctx.whereIn = [col, arr]; return b; };
     b.orderBy = () => b;
     b.orderByRaw = () => b;
@@ -4210,6 +4215,54 @@ describe('B18 - an accept whose phone belongs to another customer is parked for 
     expect(parkedAlertKeys().size).toBe(1);
     expect(filed.size).toBe(1);
     notifyAdmin.mockImplementation(async () => ({}));
+  });
+
+  // r8 P1: a customer-unlinked GROUPED estimate is resolved by the accept through its accepted SIBLING before any phone
+  // matching, so the contradiction rule (which guards the phone match) never applies to it.
+  describe('grouped sibling: the accept lands on the group\'s accepted customer, never parked', () => {
+    const siblingRow = (overrides = {}) => ({
+      id: 'est-sib', estimate_group_id: 'grp-1', customer_id: 'cust-bob', status: 'accepted', accepted_at: '2026-09-01T00:00:00.000Z',
+      token: 'tok-sib-x0123456789', ...overrides,
+    });
+    const groupedEstimate = (id) => recurringPestEstimate({ id, token: `tok-${id}-x0123456789`, estimate_group_id: 'grp-1' });
+    // The second property: different email AND address than the group's customer (who alone holds the phone).
+
+    test('different email and address, the accepted sibling\'s customer holds the phone alone -> 409 never, the accept resolves to the sibling\'s customer and converts for it', async () => {
+      resetStore(groupedEstimate('est-grp-1'));
+      db.__state.tables.estimates.push(siblingRow());
+      db.__state.tables.customers.push(sharedPhoneRow());
+      db.__state.tables.customer_accounts = [{ id: 'acct-bob' }];
+      conversionFor('cust-bob');
+      const res = await putAccept('tok-est-grp-1-x0123456789');
+      expect(res.status).toBe(200);
+      expect(res.data.code).toBeUndefined();
+      expect(parkedAlertCalls()).toHaveLength(0);
+      // Landed on the sibling's customer, exactly as on main: the estimate was linked to it and converted for it.
+      expect(storedEstimate().customer_id).toBe('cust-bob');
+      expect(EstimateConverter.convertEstimate).toHaveBeenCalledTimes(1);
+      expect(EstimateConverter.convertEstimate.mock.calls[0][0]).toBe('est-grp-1');
+    });
+
+    test('control: the same estimate with NO accepted sibling in its group is parked', async () => {
+      resetStore(groupedEstimate('est-grp-2'));
+      db.__state.tables.customers.push(sharedPhoneRow());
+      db.__state.tables.customer_accounts = [{ id: 'acct-bob' }];
+      const res = await putAccept('tok-est-grp-2-x0123456789');
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('ACCEPT_NEEDS_OFFICE_REVIEW');
+      expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    });
+
+    test('control: a sibling accepted for a DIFFERENT group does not exempt it - parked', async () => {
+      resetStore(groupedEstimate('est-grp-3'));
+      db.__state.tables.estimates.push(siblingRow({ estimate_group_id: 'grp-OTHER' }));
+      db.__state.tables.customers.push(sharedPhoneRow());
+      db.__state.tables.customer_accounts = [{ id: 'acct-bob' }];
+      const res = await putAccept('tok-est-grp-3-x0123456789');
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('ACCEPT_NEEDS_OFFICE_REVIEW');
+      expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    });
   });
 
   describe('a stale tab\'s captured recurring intent at the preflight park', () => {
