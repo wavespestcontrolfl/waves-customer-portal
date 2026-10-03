@@ -720,11 +720,15 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
     ]);
     const serviceLine = detectServiceLine(svc.service_type);
     // A lawn visit's tips are ranked by what the tech has CONFIRMED on this
-    // visit's assessment (nothing until they confirm; the sheet asks again
-    // once it does). Ranking only; a failed read just loses the lift.
+    // visit's CURRENT assessment (nothing until they confirm; the sheet asks
+    // again once it does). The newest row is read whatever its state: after a
+    // retake the new row is unconfirmed, and an older confirmed row it
+    // superseded must not keep lifting tips (lawnFindingsFromAssessment
+    // answers nothing for an unconfirmed row). Ranking only; a failed read
+    // just loses the lift.
     const lawnAssessment = registryLineFor(serviceLine) === 'lawn' && svc.customer_id
       ? await db('lawn_assessments')
-        .where({ service_id: svc.id, customer_id: svc.customer_id, confirmed_by_tech: true })
+        .where({ service_id: svc.id, customer_id: svc.customer_id })
         .orderBy('created_at', 'desc')
         .first('confirmed_by_tech', 'fungus_control', 'thatch_level', 'weed_suppression', 'stress_flags')
         .catch(() => null)

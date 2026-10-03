@@ -302,6 +302,19 @@ describe('GET /:serviceId/tech-tips', () => {
     expect(lawnIds(ranked)[0]).toBe('lawn_thatch_half_inch');
     expect([...lawnIds(ranked)].sort()).toEqual([...lawnIds(plain)].sort());
 
+    // Codex r2: after a retake the newest row is unconfirmed; it gives no
+    // lift, and the read must not skip it for an older confirmed row.
+    mockDbCurrent = scriptedDb({
+      service: lawn, calls: [],
+      lawnAssessment: { confirmed_by_tech: false, fungus_control: 95, thatch_level: 40, weed_suppression: 99, stress_flags: {} },
+    });
+    const retake = await invoke({ serviceId: 'svc-1' });
+    expect(lawnIds(retake)).toEqual(lawnIds(plain));
+    const routeSource = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+    const read = routeSource.slice(routeSource.indexOf("? await db('lawn_assessments')"), routeSource.indexOf('findings: lawnFindingsFromAssessment(lawnAssessment)'));
+    expect(read).toContain(".orderBy('created_at', 'desc')");
+    expect(read).not.toMatch(/where\([^)]*confirmed_by_tech/);
+
     const calls = [];
     mockDbCurrent = scriptedDb({ service: SERVICE, calls });
     await invoke({ serviceId: 'svc-1' });
