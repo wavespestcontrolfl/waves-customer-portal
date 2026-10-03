@@ -12,6 +12,7 @@ jest.mock('../utils/datetime-et', () => ({
 }));
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(),
+  isSendRefusal: jest.fn((err) => !!err && err.preDispatchRefusal === true),
 }));
 jest.mock('../services/sms-template-renderer', () => ({
   renderSmsTemplate: jest.fn(),
@@ -495,6 +496,7 @@ describe('sendNoticeEmail definite-non-send classification', () => {
   it.each([
     ['unconfigured sender', Object.assign(new Error('not configured'), { code: 'SENDGRID_NOT_CONFIGURED' })],
     ['a provider status that conclusively rejects the payload', Object.assign(new Error('bad request'), { status: 400 })],
+    ['a pre-dispatch refusal (the reviewed template changed before dispatch)', Object.assign(new Error('The reviewed email content changed.'), { preDispatchRefusal: true })],
   ])('%s: a certain non-send', async (_label, err) => {
     sendTemplate.mockRejectedValue(err);
     expect(await sendNoticeEmail(args)).toEqual({ sent: false, attempted: true, definiteNonSend: true });

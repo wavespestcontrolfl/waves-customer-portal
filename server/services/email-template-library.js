@@ -1193,6 +1193,13 @@ function sendRefusal(err, audit = {}) {
   return err;
 }
 
+// True for a deterministic pre-dispatch refusal (template missing/disabled,
+// the reviewed content changed, missing or placeholder payload): the provider
+// was never called, so callers may treat the send as definitely not made.
+function isSendRefusal(err) {
+  return !!(err && err[SEND_REFUSAL]);
+}
+
 async function auditSendRefusal(err, context = {}) {
   const refusal = err && err[SEND_REFUSAL];
   if (!refusal || !refusal.eventType) return;
@@ -2003,6 +2010,7 @@ async function sendTemplate({
 }
 
 module.exports = {
+  isSendRefusal,
   asArray,
   asObject,
   normalizeBlocks,

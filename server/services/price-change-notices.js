@@ -247,8 +247,14 @@ async function sendNoticeEmail({ customer, idempotencyKeyBase, vars, templateKey
     // provider status that conclusively rejects the payload) rides along: a
     // caller that keeps send-once claims can tell a certain non-send from an
     // ambiguous one. Absent = ambiguous.
+    // The library's pre-dispatch refusals (a changed template, a missing
+    // payload value) never reached the provider either.
     let definiteNonSend = false;
-    try { definiteNonSend = err?.code === 'SENDGRID_NOT_CONFIGURED' || require('./sendgrid-mail').isDefiniteRejection(err); } catch { /* ambiguous */ }
+    try {
+      const library = require('./email-template-library');
+      definiteNonSend = err?.code === 'SENDGRID_NOT_CONFIGURED' || require('./sendgrid-mail').isDefiniteRejection(err)
+        || (typeof library.isSendRefusal === 'function' && library.isSendRefusal(err));
+    } catch { /* ambiguous */ }
     return { sent: false, attempted, ...(definiteNonSend ? { definiteNonSend: true } : {}) };
   }
 }
