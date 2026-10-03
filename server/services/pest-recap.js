@@ -528,6 +528,16 @@ const sameIdentityKey = (a, b) => String(a ?? '') === String(b ?? '');
 // serializes a driver Date as ISO, the lock reads the same driver value.
 const dateIdentity = (v) => (v == null ? '' : (v instanceof Date ? v.toISOString() : String(v)).slice(0, 10));
 
+// The identity keys recapVisitIdentityChanged compares (each only when the client
+// sent it). They are all fields recapServiceIdentity returns, so a sheet that
+// echoes the identity object it was given sends every one. A caller that must
+// not accept a partial identity (lawn Fast Complete) requires this whole list;
+// a drift test pins that each key is returned by recapServiceIdentity and moves
+// the verdict.
+const RECAP_COMPARED_IDENTITY_KEYS = Object.freeze([
+  'propertyId', 'customerId', 'catalogServiceId', 'serviceType', 'scheduledDate', 'isCallback', 'address',
+]);
+
 // True when the client's expected ownership identity no longer matches the
 // locked visit row. Only keys the client sent are compared (ownership,
 // catalog service, service type, calendar day); the address is
@@ -1721,6 +1731,7 @@ module.exports = {
   PEST_CONTROL_CATEGORY,
   resolveEligibility,
   loadServiceWithCustomer,
+  RECAP_COMPARED_IDENTITY_KEYS,
   buildRecapContext,
   traceOnReportForVisit,
   draftRecapMessage,

@@ -24,7 +24,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const featureGates = require('../config/feature-gates');
-const { resolveEligibility, recapServiceIdentity } = require('./pest-recap');
+const { resolveEligibility, recapServiceIdentity, RECAP_COMPARED_IDENTITY_KEYS } = require('./pest-recap');
 const { etCalendarDayOf } = require('../utils/datetime-et');
 const { ASSESSMENT_EXPERIENCE_KEYS } = require('../config/completion-lane-registry');
 
@@ -47,15 +47,23 @@ const PHOTO_FLOOR = Object.freeze({
 });
 
 /**
- * Which kind of lawn visit this is: 'recurring' (a recurring program visit, the
- * primary path), 'per_application', 'one_time', or 'other'. Informational: it
- * never makes a visit ineligible. `billingMode` is the customer's billing lane.
+ * Which kind of lawn visit this APPOINTMENT is: 'recurring' (a recurring lawn
+ * program visit, the primary path), 'per_application', 'one_time', or 'other'.
+ * Informational for the eligibility rule (it never makes a visit ineligible) but
+ * decisive for the program recipe: only a 'recurring' appointment gets planned
+ * products. It is decided from the appointment itself, never the customer's plan
+ * or tier (a WaveGuard member's one-time job is not a program visit), by the
+ * report's own rule (lawn-program-line.resolveProgramVisit): not a callback, a
+ * real (not synthesized) completion profile whose billing type is recurring and
+ * whose key is a recurring lawn plan key. A customer billed per application is
+ * 'per_application' whatever the visit's key, since those visits start blank.
  */
-function lawnFastVisitType(profile, billingMode) {
+function lawnFastVisitType(profile, billingMode, isCallback = false) {
   if (billingMode === 'per_application') return 'per_application';
   const billingType = String(profile?.billingType || '').toLowerCase();
   if (billingType === 'one_time' || billingMode === 'one_time') return 'one_time';
-  if (billingType === 'recurring') return 'recurring';
+  if (isCallback === true || !profile || profile.synthesized) return 'other';
+  if (billingType === 'recurring' && require('./service-report/lawn-program-line').isRecurringLawnPlanKey(profile.serviceKey)) return 'recurring';
   return 'other';
 }
 
@@ -113,7 +121,7 @@ async function resolveLawnFastEligibility(serviceId, knex = db, { allowStatuses 
   }
   const reason = lawnFastIneligibleReason({ svc, profile, hasVisitGroup: !!svc.visit_id, visitGroupStatus, allowStatuses });
   const billingMode = reason === 'not_lawn' || reason === 'profile_unavailable' ? null : await loadBillingMode(svc, knex);
-  return { ok: true, svc, profile, reason, visitType: profile ? lawnFastVisitType(profile, billingMode) : null };
+  return { ok: true, svc, profile, reason, visitType: profile ? lawnFastVisitType(profile, billingMode, svc.is_callback === true) : null };
 }
 
 // ── watering rules ──────────────────────────────────────────────────────────
@@ -344,13 +352,17 @@ async function loadAssessmentPhotos(assessmentId, knex) {
 
 /**
  * The visit's planned products with each one's watering rule. Only a program
- * visit has a plan: with the completion-defaults gates off, or no program plan
- * (a one-time or per-application visit), the list is empty and the sheet starts
+ * visit has a plan: with the completion-defaults gates off, or on a visit that is
+ * not a recurring program appointment (one-time, per-application, callback), the list is empty and the sheet starts
  * blank. A failed plan read degrades to empty too (the tech adds what they
  * applied); nothing here may block opening the sheet.
  */
-async function loadPlannedProducts(svc, knex) {
+async function loadPlannedProducts(svc, knex, visitType) {
   const empty = { source: null, items: [] };
+  // buildPlanForService keys the program off the CUSTOMER (tier / billing mode),
+  // so it can return the seasonal recipe for a member's one-time or
+  // per-application appointment. Only a recurring program appointment gets it.
+  if (visitType !== 'recurring') return empty;
   try {
     if (!require('./lawn-completion-defaults').lawnCompletionDefaultsEnabled()) return empty;
     const plan = await require('./waveguard-plan-engine').buildPlanForService(svc.id, { db: knex, includeCompletionDefaults: true });
@@ -420,7 +432,7 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null 
     // The height-of-cut capture is a lawn-visit feature the typed lawn form
     // never renders (mirrors /complete's turfHeightApplicable).
     turfHeightCapture: typed ? false : await loadTurfHeightCapture(technicianId, knex),
-    plannedProducts: await loadPlannedProducts(svc, knex),
+    plannedProducts: await loadPlannedProducts(svc, knex, visitType),
     // The assessment must be CONFIRMED before the visit completes; the sheet
     // reads `confirmed` to enable Complete.
     assessment: {
@@ -439,15 +451,17 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null 
 
 // ── completion preflight ────────────────────────────────────────────────────
 
-// The visit identity a lawn Fast Complete submit must echo back (the `service`
-// object of the context): /complete compares it to the locked row
+// The visit identity a lawn Fast Complete submit must echo back: the `service`
+// object of the context. /complete compares it to the locked row
 // (recapVisitIdentityChanged) and refuses 409 visit_identity_changed when the
 // customer, property, catalog service, type, date, address, callback flag or
-// technician changed since the sheet opened. The comparison only checks keys the
-// client sent, so the lawn-fast submit must send the identity keys at all.
-const REQUIRED_IDENTITY_KEYS = ['customerId', 'propertyId', 'scheduledDate', 'technicianId'];
+// technician changed since the sheet opened. That comparison only checks keys the
+// client sent, so the submit must send EVERY key it compares: pest-recap's list
+// plus the technician. A key that is null in the context is echoed as null; the
+// KEY is required, not a truthy value.
+const REQUIRED_IDENTITY_KEYS = Object.freeze([...RECAP_COMPARED_IDENTITY_KEYS, 'technicianId']);
 const expectedVisitIncomplete = (expectedVisit) => !expectedVisit || typeof expectedVisit !== 'object'
-  || REQUIRED_IDENTITY_KEYS.some((key) => !(key in expectedVisit));
+  || Array.isArray(expectedVisit) || REQUIRED_IDENTITY_KEYS.some((key) => !(key in expectedVisit));
 
 /**
  * Preflight for a /complete body carrying a `lawnFast` block. Returns
@@ -548,6 +562,7 @@ async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = 
 module.exports = {
   PHOTO_FLOOR,
   lawnFastVisitType,
+  REQUIRED_IDENTITY_KEYS,
   lawnFastIneligibleReason,
   resolveLawnFastEligibility,
   evaluatePhotoFloor,

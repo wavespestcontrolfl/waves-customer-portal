@@ -13,10 +13,11 @@ jest.mock('../services/waveguard-plan-engine', () => ({ buildPlanForService: jes
 const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
 const { isUserFeatureEnabled } = require('../services/feature-flags');
 const { buildPlanForService } = require('../services/waveguard-plan-engine');
-const { recapVisitIdentityChanged } = require('../services/pest-recap');
+const { recapVisitIdentityChanged, recapServiceIdentity, RECAP_COMPARED_IDENTITY_KEYS } = require('../services/pest-recap');
 const {
   lawnFastIneligibleReason,
   lawnFastVisitType,
+  REQUIRED_IDENTITY_KEYS,
   evaluatePhotoFloor,
   buildLawnFastContext,
   buildLawnFastWateringPreview,
@@ -104,17 +105,23 @@ describe('lawnFastIneligibleReason: one rule for every lawn visit type', () => {
   });
 });
 
-describe('lawnFastVisitType', () => {
+describe('lawnFastVisitType: decided from the appointment, never the customer plan', () => {
   test.each([
-    [PROFILE(), null, 'recurring'],
-    [PROFILE(), 'monthly_membership', 'recurring'],
-    [PROFILE(), 'per_visit', 'recurring'],
-    [PROFILE(), 'per_application', 'per_application'],
-    [PROFILE({ billingType: 'one_time' }), null, 'one_time'],
-    [PROFILE(), 'one_time', 'one_time'],
-    [PROFILE({ billingType: null }), null, 'other'],
-  ])('%#', (profile, mode, expected) => {
-    expect(lawnFastVisitType(profile, mode)).toBe(expected);
+    [PROFILE(), null, false, 'recurring'],
+    [PROFILE({ serviceKey: 'lawn_care_recurring' }), 'monthly_membership', false, 'recurring'],
+    [PROFILE(), 'per_visit', false, 'recurring'],
+    [PROFILE(), 'per_application', false, 'per_application'],
+    [PROFILE({ billingType: 'one_time', serviceKey: 'lawn_care_one_time' }), null, false, 'one_time'],
+    [PROFILE(), 'one_time', false, 'one_time'],
+    [PROFILE({ billingType: null }), null, false, 'other'],
+    // A recurring-billed profile whose key is not a recurring lawn plan key is not a program visit.
+    [PROFILE({ serviceKey: 'lawn_fertilization' }), null, false, 'other'],
+    [PROFILE({ serviceKey: 'lawn_care_one_time' }), null, false, 'other'],
+    // A callback is not part of the program; a synthesized profile proves nothing.
+    [PROFILE(), null, true, 'other'],
+    [PROFILE({ synthesized: true }), null, false, 'other'],
+  ])('%#', (profile, mode, callback, expected) => {
+    expect(lawnFastVisitType(profile, mode, callback)).toBe(expected);
   });
 });
 
@@ -231,6 +238,61 @@ describe('buildLawnFastContext', () => {
     expect(JSON.stringify(ctx)).not.toMatch(/epa_reg|post_application_watering/);
   });
 
+  describe('program defaults only on a recurring program appointment', () => {
+    const PLAN = {
+      completionDefaults: {
+        items: [{ product: { id: 'p-herb', name: 'Test Weed Spray' }, applicationMethod: 'broadcast_spray', mix: { amount: 2, amountUnit: 'fl oz' } }],
+      },
+    };
+    beforeEach(() => {
+      process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
+      process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
+      // The planner keys the program off the customer, so it returns the recipe for every appointment of a member.
+      buildPlanForService.mockResolvedValue(PLAN);
+    });
+    const ctxFor = (profile, billingMode, visitExtra = {}) => {
+      resolveCompletionProfileForScheduledService.mockResolvedValue(profile);
+      return buildLawnFastContext('visit-1', {
+        knex: fakeKnex(tables({ customers: { billing_mode: billingMode }, scheduled_services: visit(visitExtra), products_catalog: [herbicide] })),
+      });
+    };
+
+    test('a member\'s one-time appointment starts blank', async () => {
+      const ctx = await ctxFor(PROFILE({ billingType: 'one_time', serviceKey: 'lawn_care_one_time' }), 'monthly_membership');
+      expect(ctx.visitType).toBe('one_time');
+      expect(ctx.plannedProducts).toEqual({ source: null, items: [] });
+      expect(buildPlanForService).not.toHaveBeenCalled();
+    });
+
+    test('a per-application visit starts blank', async () => {
+      const ctx = await ctxFor(PROFILE(), 'per_application');
+      expect(ctx.visitType).toBe('per_application');
+      expect(ctx.plannedProducts).toEqual({ source: null, items: [] });
+      expect(buildPlanForService).not.toHaveBeenCalled();
+    });
+
+    test('a member\'s extra visit under a non-program key, and a callback, start blank', async () => {
+      expect((await ctxFor(PROFILE({ serviceKey: 'lawn_fertilization' }), 'monthly_membership')).plannedProducts.items).toEqual([]);
+      expect((await ctxFor(PROFILE(), 'monthly_membership', { is_callback: true })).plannedProducts.items).toEqual([]);
+      expect(buildPlanForService).not.toHaveBeenCalled();
+    });
+
+    test('a member\'s recurring program visit gets the planned items', async () => {
+      const ctx = await ctxFor(PROFILE(), 'monthly_membership');
+      expect(ctx.visitType).toBe('recurring');
+      expect(ctx.plannedProducts.source).toBe('plan');
+      expect(ctx.plannedProducts.items.map((i) => i.productId)).toEqual(['p-herb']);
+    });
+
+    test('a non-member recurring visit gets whatever the existing defaults rule gives', async () => {
+      buildPlanForService.mockResolvedValue({ completionDefaults: { enabled: false } });
+      const ctx = await ctxFor(PROFILE(), null);
+      expect(ctx.visitType).toBe('recurring');
+      expect(buildPlanForService).toHaveBeenCalledTimes(1);
+      expect(ctx.plannedProducts).toEqual({ source: 'plan', items: [] });
+    });
+  });
+
   test('a failed plan read degrades to an empty list, never blocks opening', async () => {
     process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
     process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
@@ -340,7 +402,13 @@ describe('preflightLawnFastCompletion', () => {
     if (savedGate === undefined) delete process.env.GATE_LAWN_FAST_COMPLETE; else process.env.GATE_LAWN_FAST_COMPLETE = savedGate;
   });
 
-  const IDENTITY = { customerId: 'cust-1', propertyId: 'prop-1', scheduledDate: '2026-10-05', technicianId: null };
+  // The full identity the context returns (every compared key; nulls echoed as null).
+  const IDENTITY = {
+    propertyId: 'prop-1', customerId: 'cust-1', catalogServiceId: 'cat-1', serviceType: 'Lawn Care',
+    scheduledDate: '2026-10-05', isCallback: false,
+    address: { line1: '100 Example Court', line2: null, city: 'Bradenton', state: 'FL', zip: '34201' },
+    technicianId: null,
+  };
   const run = (tables, args = {}) => preflightLawnFastCompletion({
     knex: fakeKnex({ scheduled_services: visit(), customers: { billing_mode: null }, ...tables }),
     svc: { id: 'visit-1', customer_id: 'cust-1' },
@@ -424,9 +492,34 @@ describe('preflightLawnFastCompletion', () => {
       ['none at all', null],
       ['an empty object', {}],
       ['a partial identity', { customerId: 'cust-1' }],
-      ['one missing the technician', { customerId: 'cust-1', propertyId: 'prop-1', scheduledDate: '2026-10-05' }],
+      ['an array', []],
     ])('%s is refused 400 lawn_fast_expected_visit_required', async (_label, expectedVisit) => {
       expect(await run(CONFIRMED, { expectedVisit })).toMatchObject({ status: 400, payload: { code: 'lawn_fast_expected_visit_required' } });
+    });
+
+    test('the required keys are everything the locked-row compare uses, plus the technician', () => {
+      expect([...REQUIRED_IDENTITY_KEYS].sort()).toEqual([...RECAP_COMPARED_IDENTITY_KEYS, 'technicianId'].sort());
+      expect(REQUIRED_IDENTITY_KEYS).toEqual(expect.arrayContaining(['catalogServiceId', 'serviceType', 'isCallback', 'address', 'scheduledDate', 'customerId', 'propertyId', 'technicianId']));
+    });
+
+    test.each(REQUIRED_IDENTITY_KEYS)('omitting %s is refused 400 lawn_fast_expected_visit_required', async (key) => {
+      const { [key]: _omitted, ...rest } = IDENTITY;
+      expect(await run(CONFIRMED, { expectedVisit: rest })).toMatchObject({ status: 400, payload: { code: 'lawn_fast_expected_visit_required' } });
+    });
+
+    test('every key present, with nulls where the context has none, is accepted', async () => {
+      const nulls = { ...IDENTITY, propertyId: null, catalogServiceId: null, technicianId: null, address: null };
+      expect(await run(CONFIRMED, { expectedVisit: nulls })).toBeNull();
+    });
+
+    test('a key present but undefined (dropped by JSON) is not an echo', async () => {
+      const body = JSON.parse(JSON.stringify({ ...IDENTITY, catalogServiceId: undefined }));
+      expect(await run(CONFIRMED, { expectedVisit: body })).toMatchObject({ status: 400, payload: { code: 'lawn_fast_expected_visit_required' } });
+    });
+
+    test('every compared key is one recapServiceIdentity returns, so the lists cannot drift', () => {
+      const returned = recapServiceIdentity(visit({ is_callback: false }), PROFILE());
+      for (const key of RECAP_COMPARED_IDENTITY_KEYS) expect(Object.keys(returned)).toContain(key);
     });
 
     test("the context's service identity carries the keys the submit must echo, and /complete's compare catches a change", async () => {
@@ -434,6 +527,7 @@ describe('preflightLawnFastCompletion', () => {
       const expected = ctx.service;
       expect(expected).toMatchObject({ customerId: 'cust-1', propertyId: 'prop-1', technicianId: 'tech-1' });
       expect(expected.scheduledDate).toBeTruthy();
+      for (const key of REQUIRED_IDENTITY_KEYS) expect(key in expected).toBe(true);
       const locked = { customer_id: 'cust-1', property_id: 'prop-1', service_id: 'cat-1', service_type: 'Lawn Care', technician_id: 'tech-1', scheduled_date: '2026-10-05', is_callback: false };
       const customerRow = { address_line1: '100 Example Court', city: 'Bradenton', state: 'FL', zip: '34201' };
       expect(recapVisitIdentityChanged(expected, locked, customerRow)).toBe(false);
@@ -441,6 +535,12 @@ describe('preflightLawnFastCompletion', () => {
       expect(recapVisitIdentityChanged(expected, { ...locked, customer_id: 'cust-2' }, customerRow)).toBe(true);
       expect(recapVisitIdentityChanged(expected, { ...locked, technician_id: 'tech-2' }, customerRow)).toBe(true);
       expect(recapVisitIdentityChanged(expected, { ...locked, property_id: 'prop-2' }, customerRow)).toBe(true);
+      // The fields a partial echo used to leave unchecked.
+      expect(recapVisitIdentityChanged(expected, { ...locked, service_id: 'cat-2' }, customerRow)).toBe(true);
+      expect(recapVisitIdentityChanged(expected, { ...locked, service_type: 'Lawn Care Treatment' }, customerRow)).toBe(true);
+      expect(recapVisitIdentityChanged(expected, { ...locked, is_callback: true }, customerRow)).toBe(true);
+      expect(recapVisitIdentityChanged(expected, locked, { ...customerRow, address_line1: '200 Example Court' })).toBe(true);
+      expect(recapVisitIdentityChanged(expected, { ...locked, service_address_line1: '300 Example Court' }, customerRow)).toBe(true);
     });
   });
 
