@@ -1029,6 +1029,9 @@ async function guardRecurrenceDestination(trx, { lockedDates, date, row, exclude
     windowEnd: block.end,
     excludeServiceIds,
     excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+    // Second technician (GATE_MULTI_TECH_CONFIRM + capacity, dark): the
+    // series row's own technician plus unassigned rows; gate off = tech-blind.
+    technicianId: row.technician_id || null,
   });
   if (clash.length) {
     logger.warn(`[schedule] occupancy overlap on ${date} allowed (advisory — admin writes never block on conflicts)`);
@@ -8811,6 +8814,11 @@ router.post('/', requireAdmin, async (req, res, next) => {
           windowStart: insertData.window_start,
           windowEnd: insertData.window_end,
           excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+          // Second technician (GATE_MULTI_TECH_CONFIRM + capacity, dark):
+          // the booked technician's route plus unassigned rows, as the
+          // picker's strip and the edit save's route check score it. Gate
+          // off or no technician = tech-blind, byte for byte.
+          technicianId: insertData.technician_id || null,
         });
         if (adminCreateClash.length) {
           bookingWarnings.push(slotOverlapWarning(dateOnly(scheduledDate)));
@@ -8976,6 +8984,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
             windowStart: childData.window_start,
             windowEnd: childData.window_end,
             excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+            technicianId: childData.technician_id || null, // see the parent probe
           });
           if (childClash.length) {
             bookingWarnings.push(slotOverlapWarning(nextDateStr));
@@ -9067,6 +9076,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
               windowStart: boosterData.window_start,
               windowEnd: boosterData.window_end,
               excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+              technicianId: boosterData.technician_id || null, // see the parent probe
             });
             if (boosterClash.length) {
               bookingWarnings.push(slotOverlapWarning(boosterDate));

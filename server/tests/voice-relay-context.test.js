@@ -1071,6 +1071,29 @@ describe('GATE ON — disclosure tiers (enforced in tool output, not prompt lang
     // The system block itself drops the amount and the arrival window.
     expect(ctx.block).not.toContain('$231.75');
     expect(ctx.block).toMatch(/NOT as that account holder's own/i);
+    // Sandy P1: the account holder's name never reaches a recognised-only
+    // session — a model that never sees it cannot say it to a spouse or tenant.
+    expect(ctx.block).not.toMatch(/First name/);
+    expect(ctx.block).not.toContain(CONTACT_SLOT_CUSTOMER.first_name);
+  });
+
+  // …and not through the free-text history either: a prior-call gist or a
+  // recent text can read "Hi Pat, …", which no scrubber removes. Even a
+  // carrier-attested contact-slot caller gets neither; they are not fetched.
+  test('an ATTESTED contact-slot caller gets no prior-call gist and no recent-texts turn', async () => {
+    primeDb({ customers: [CONTACT_SLOT_CUSTOMER], callLog: [VERIFIED_CALL_ROW] });
+    loadOwnedRecurringServiceKeys.mockResolvedValue([]);
+    summarizePriorCall.mockResolvedValue({ hoursAgo: 2, summary: 'Pat asked about ants', captured: {} });
+    const history = require('../services/voice-agent/relay-history');
+    const texts = jest.spyOn(history, 'buildRecentTextsBlock').mockResolvedValue('RECENT TEXTS: Hi Pat, your tech is on the way');
+    const ctx = await relayContext.resolveCallerContext(FROM, { callSid: CALL_SID });
+    expect(ctx.tier).toBe('redacted');
+    expect(ctx.attested).toBe(true);
+    expect(summarizePriorCall).not.toHaveBeenCalled();
+    expect(texts).not.toHaveBeenCalled();
+    expect(ctx.dataTurn).toBeNull();
+    expect(ctx.block).not.toContain('Pat');
+    texts.mockRestore();
   });
 
   test('a contact-slot ANI cannot reach a full-tier surface', async () => {

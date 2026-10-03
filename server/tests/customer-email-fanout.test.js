@@ -9,6 +9,10 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/newsletter-confirm', () => ({ sendConfirmationEmail: jest.fn().mockResolvedValue(true) }));
 
+const mockStopRetries = jest.fn();
+jest.mock('../services/transactional-email-provider-retry', () => ({
+  stopRetriesForReplacedEmail: (...a) => mockStopRetries(...a),
+}));
 const mockResume = jest.fn();
 const mockRepenMerged = jest.fn();
 const mockDnc = jest.fn();
@@ -52,6 +56,7 @@ jest.mock('../services/lead-first-touch-resume', () => ({
   },
 }));
 beforeEach(() => {
+  mockStopRetries.mockReset().mockResolvedValue(0);
   mockResume.mockReset().mockResolvedValue({ resumed: false, enrolled: false, newsletterResume: null });
   mockRepenMerged.mockReset().mockResolvedValue(undefined);
   mockDnc.mockReset().mockResolvedValue(false);
@@ -184,6 +189,33 @@ const HOLD_BEFORE = { id: 'cust-1', email: 'sam.typo@example.com' };
 const HOLD_AFTER = { id: 'cust-1', email: 'samtypo@example.com' };
 
 describe('propagateCustomerEmailChange', () => {
+  // B15: provider-block retries re-send the stored copy to its recipient
+  // snapshot; the rail stops the ones still addressed to the replaced address.
+  test('stops pending provider-block retries to the replaced address on the same connection', async () => {
+    mockStopRetries.mockResolvedValue(2);
+    const conn = makeConn({
+      email_template_automation_intents: { updateCount: 0 },
+    });
+    const counts = await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
+    expect(mockStopRetries).toHaveBeenCalledTimes(1);
+    expect(mockStopRetries).toHaveBeenCalledWith(conn, expect.objectContaining({
+      customerId: 'cust-1', oldEmail: 'chris.w.sample@example.com',
+    }));
+    expect(counts.emailRetries).toBe(2);
+  });
+
+  test('stops nothing when the email was removed or did not change', async () => {
+    await propagateCustomerEmailChange({ before: BEFORE, after: { id: 'cust-1', email: '' } }, makeConn());
+    await propagateCustomerEmailChange({ before: BEFORE, after: { id: 'cust-1', email: 'CHRIS.W.SAMPLE@example.com' } }, makeConn());
+    expect(mockStopRetries).not.toHaveBeenCalled();
+  });
+
+  test('a failed retry stop rolls the correction back instead of leaving it half-synced', async () => {
+    mockStopRetries.mockRejectedValue(new Error('retry rail down'));
+    await expect(propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, makeConn()))
+      .rejects.toThrow('retry rail down');
+  });
+
   test('syncs lead, estimate, and newsletter copies and resolves the email review card', async () => {
     const conn = makeConn({
       newsletter_subscribers: { firstQueue: [{ id: 739 }, { id: 739, email: 'chris.w.sample@example.com' }, null] },
@@ -198,7 +230,7 @@ describe('propagateCustomerEmailChange', () => {
     // automations: 3 — the enrollment sweep runs before AND after the hold
     // retargets (Codex #3084 r26) plus the final ownership-scoped retarget
     // after the marker merges (r37); the stub counts each idempotent pass.
-    expect(counts).toEqual({ leads: 1, estimates: 2, newsletter: 1, newsletterDeliveries: 1, automations: 3, templateRuns: 1, promoters: 1, billingPrefs: 1, contracts: 1, bookingIntents: 1, reviewCards: 1, heldDripResumed: 0 });
+    expect(counts).toEqual({ leads: 1, estimates: 2, newsletter: 1, newsletterDeliveries: 1, automations: 3, templateRuns: 1, promoters: 1, billingPrefs: 1, contracts: 1, bookingIntents: 1, emailRetries: 0, reviewCards: 1, heldDripResumed: 0 });
 
     expect(conn.__updates('leads')[0].arg.email).toBe('chriswsample@example.com');
     expect(conn.__updates('estimates')[0].arg.customer_email).toBe('chriswsample@example.com');
@@ -274,7 +306,7 @@ describe('propagateCustomerEmailChange', () => {
       before: { id: 'cust-1', email: 'Chriswsample@Example.com' },
       after: AFTER,
     }, conn);
-    expect(counts).toEqual({ leads: 0, estimates: 0, newsletter: 0, newsletterDeliveries: 0, automations: 0, templateRuns: 0, promoters: 0, billingPrefs: 0, contracts: 0, bookingIntents: 0, reviewCards: 0, heldDripResumed: 0 });
+    expect(counts).toEqual({ leads: 0, estimates: 0, newsletter: 0, newsletterDeliveries: 0, automations: 0, templateRuns: 0, promoters: 0, billingPrefs: 0, contracts: 0, bookingIntents: 0, emailRetries: 0, reviewCards: 0, heldDripResumed: 0 });
     expect(conn.__calls).toHaveLength(0);
   });
 
@@ -284,7 +316,7 @@ describe('propagateCustomerEmailChange', () => {
       before: BEFORE,
       after: { id: 'cust-1', email: null },
     }, conn);
-    expect(counts).toEqual({ leads: 0, estimates: 0, newsletter: 0, newsletterDeliveries: 0, automations: 0, templateRuns: 0, promoters: 0, billingPrefs: 0, contracts: 0, bookingIntents: 0, reviewCards: 0, heldDripResumed: 0 });
+    expect(counts).toEqual({ leads: 0, estimates: 0, newsletter: 0, newsletterDeliveries: 0, automations: 0, templateRuns: 0, promoters: 0, billingPrefs: 0, contracts: 0, bookingIntents: 0, emailRetries: 0, reviewCards: 0, heldDripResumed: 0 });
     expect(conn.__calls).toHaveLength(0);
   });
 
@@ -623,7 +655,7 @@ describe('propagateCustomerEmailChange', () => {
       before: BEFORE,
       after: { id: 'cust-1', email: 'foo@bar' },
     }, conn);
-    expect(counts).toEqual({ leads: 0, estimates: 0, newsletter: 0, newsletterDeliveries: 0, automations: 0, templateRuns: 0, promoters: 0, billingPrefs: 0, contracts: 0, bookingIntents: 0, reviewCards: 0, heldDripResumed: 0 });
+    expect(counts).toEqual({ leads: 0, estimates: 0, newsletter: 0, newsletterDeliveries: 0, automations: 0, templateRuns: 0, promoters: 0, billingPrefs: 0, contracts: 0, bookingIntents: 0, emailRetries: 0, reviewCards: 0, heldDripResumed: 0 });
     expect(conn.__calls).toHaveLength(0);
   });
 

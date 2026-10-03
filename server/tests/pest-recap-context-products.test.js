@@ -168,9 +168,13 @@ test('a failed common-products query is [] with one warn that carries no driver 
   expect(message).not.toMatch(/Example Customer|Example Court|canceling statement/);
 });
 
-test('a catalog load failure still returns an empty catalog, not an error', async () => {
+test('a catalog load failure is distinguishable from an authoritative empty catalog', async () => {
   const { knex } = contextDb({ catalogError: new Error('catalog down') });
   const result = await buildRecapContext(visit.id, knex);
   expect(result.ok).toBe(true);
   expect(result.products).toEqual([]);
+  expect(result.catalogLoadFailed).toBe(true);
+  const empty = await buildRecapContext(visit.id, contextDb({ catalog: [] }).knex);
+  expect(empty.products).toEqual([]);
+  expect(empty.catalogLoadFailed).toBe(false);
 });

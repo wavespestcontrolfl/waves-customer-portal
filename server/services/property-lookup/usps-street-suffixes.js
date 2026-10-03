@@ -1,0 +1,170 @@
+'use strict';
+
+/**
+ * USPS street-suffix table: every primary street suffix name and every
+ * "commonly used" variant mapped to the Postal Service standard abbreviation.
+ *
+ * Source: USPS Publication 28, Postal Addressing Standards, Appendix C1
+ * "Street Suffix Abbreviations":
+ *   https://pe.usps.com/text/pub28/28apc_002.htm
+ * Fetched 2026-10-02 and transcribed mechanically from the page's table
+ * (502 rows, 206 primary names, 202 standard abbreviations; columns are
+ * Primary Street Suffix Name / Commonly Used Street Suffix or Abbreviation /
+ * Postal Service Standard Suffix Abbreviation). A primary name the table does
+ * not also list as its own variant (e.g. PLACE) is included as a key, and
+ * every standard abbreviation maps to itself, so a lookup needs no special
+ * cases. The one clash in the published table: MDW is both the standard for
+ * MEADOW and a listed variant of MEADOWS (standard MDWS); here MDW maps to MDW.
+ *
+ * DATA ONLY - the USPS table as published. Where the county rolls spell a word
+ * differently from the USPS standard, or a suffix word collides with
+ * something else the matcher reads, the policy lives in ai-property-lookup.js
+ * (STREET_SUFFIX_CANON_OVERRIDES / STREET_SUFFIX_NEVER_CANONICALIZED), not here.
+ * Refresh by re-reading the URL above; USPS revises the table rarely.
+ */
+const USPS_STREET_SUFFIXES = {
+  ALLEE: 'ALY', ALLEY: 'ALY', ALLY: 'ALY', ALY: 'ALY', ANEX: 'ANX', ANNEX: 'ANX', ANNX: 'ANX',
+  ANX: 'ANX', ARC: 'ARC', ARCADE: 'ARC', AV: 'AVE', AVE: 'AVE', AVEN: 'AVE', AVENU: 'AVE',
+  AVENUE: 'AVE', AVN: 'AVE', AVNUE: 'AVE', BAYOO: 'BYU', BAYOU: 'BYU', BCH: 'BCH', BEACH: 'BCH',
+  BEND: 'BND', BG: 'BG', BGS: 'BGS', BLF: 'BLF', BLFS: 'BLFS', BLUF: 'BLF', BLUFF: 'BLF',
+  BLUFFS: 'BLFS', BLVD: 'BLVD', BND: 'BND', BOT: 'BTM', BOTTM: 'BTM', BOTTOM: 'BTM', BOUL: 'BLVD',
+  BOULEVARD: 'BLVD', BOULV: 'BLVD', BR: 'BR', BRANCH: 'BR', BRDGE: 'BRG', BRG: 'BRG',
+  BRIDGE: 'BRG', BRK: 'BRK', BRKS: 'BRKS', BRNCH: 'BR', BROOK: 'BRK', BROOKS: 'BRKS', BTM: 'BTM',
+  BURG: 'BG', BURGS: 'BGS', BYP: 'BYP', BYPA: 'BYP', BYPAS: 'BYP', BYPASS: 'BYP', BYPS: 'BYP',
+  BYU: 'BYU', CAMP: 'CP', CANYN: 'CYN', CANYON: 'CYN', CAPE: 'CPE', CAUSEWAY: 'CSWY',
+  CAUSWA: 'CSWY', CEN: 'CTR', CENT: 'CTR', CENTER: 'CTR', CENTERS: 'CTRS', CENTR: 'CTR',
+  CENTRE: 'CTR', CIR: 'CIR', CIRC: 'CIR', CIRCL: 'CIR', CIRCLE: 'CIR', CIRCLES: 'CIRS',
+  CIRS: 'CIRS', CLB: 'CLB', CLF: 'CLF', CLFS: 'CLFS', CLIFF: 'CLF', CLIFFS: 'CLFS', CLUB: 'CLB',
+  CMN: 'CMN', CMNS: 'CMNS', CMP: 'CP', CNTER: 'CTR', CNTR: 'CTR', CNYN: 'CYN', COMMON: 'CMN',
+  COMMONS: 'CMNS', COR: 'COR', CORNER: 'COR', CORNERS: 'CORS', CORS: 'CORS', COURSE: 'CRSE',
+  COURT: 'CT', COURTS: 'CTS', COVE: 'CV', COVES: 'CVS', CP: 'CP', CPE: 'CPE', CRCL: 'CIR',
+  CRCLE: 'CIR', CREEK: 'CRK', CRES: 'CRES', CRESCENT: 'CRES', CREST: 'CRST', CRK: 'CRK',
+  CROSSING: 'XING', CROSSROAD: 'XRD', CROSSROADS: 'XRDS', CRSE: 'CRSE', CRSENT: 'CRES',
+  CRSNT: 'CRES', CRSSNG: 'XING', CRST: 'CRST', CSWY: 'CSWY', CT: 'CT', CTR: 'CTR', CTRS: 'CTRS',
+  CTS: 'CTS', CURV: 'CURV', CURVE: 'CURV', CV: 'CV', CVS: 'CVS', CYN: 'CYN', DALE: 'DL', DAM: 'DM',
+  DIV: 'DV', DIVIDE: 'DV', DL: 'DL', DM: 'DM', DR: 'DR', DRIV: 'DR', DRIVE: 'DR', DRIVES: 'DRS',
+  DRS: 'DRS', DRV: 'DR', DV: 'DV', DVD: 'DV', EST: 'EST', ESTATE: 'EST', ESTATES: 'ESTS',
+  ESTS: 'ESTS', EXP: 'EXPY', EXPR: 'EXPY', EXPRESS: 'EXPY', EXPRESSWAY: 'EXPY', EXPW: 'EXPY',
+  EXPY: 'EXPY', EXT: 'EXT', EXTENSION: 'EXT', EXTENSIONS: 'EXTS', EXTN: 'EXT', EXTNSN: 'EXT',
+  EXTS: 'EXTS', FALL: 'FALL', FALLS: 'FLS', FERRY: 'FRY', FIELD: 'FLD', FIELDS: 'FLDS',
+  FLAT: 'FLT', FLATS: 'FLTS', FLD: 'FLD', FLDS: 'FLDS', FLS: 'FLS', FLT: 'FLT', FLTS: 'FLTS',
+  FORD: 'FRD', FORDS: 'FRDS', FOREST: 'FRST', FORESTS: 'FRST', FORG: 'FRG', FORGE: 'FRG',
+  FORGES: 'FRGS', FORK: 'FRK', FORKS: 'FRKS', FORT: 'FT', FRD: 'FRD', FRDS: 'FRDS', FREEWAY: 'FWY',
+  FREEWY: 'FWY', FRG: 'FRG', FRGS: 'FRGS', FRK: 'FRK', FRKS: 'FRKS', FRRY: 'FRY', FRST: 'FRST',
+  FRT: 'FT', FRWAY: 'FWY', FRWY: 'FWY', FRY: 'FRY', FT: 'FT', FWY: 'FWY', GARDEN: 'GDN',
+  GARDENS: 'GDNS', GARDN: 'GDN', GATEWAY: 'GTWY', GATEWY: 'GTWY', GATWAY: 'GTWY', GDN: 'GDN',
+  GDNS: 'GDNS', GLEN: 'GLN', GLENS: 'GLNS', GLN: 'GLN', GLNS: 'GLNS', GRDEN: 'GDN', GRDN: 'GDN',
+  GRDNS: 'GDNS', GREEN: 'GRN', GREENS: 'GRNS', GRN: 'GRN', GRNS: 'GRNS', GROV: 'GRV', GROVE: 'GRV',
+  GROVES: 'GRVS', GRV: 'GRV', GRVS: 'GRVS', GTWAY: 'GTWY', GTWY: 'GTWY', HARB: 'HBR',
+  HARBOR: 'HBR', HARBORS: 'HBRS', HARBR: 'HBR', HAVEN: 'HVN', HBR: 'HBR', HBRS: 'HBRS',
+  HEIGHTS: 'HTS', HIGHWAY: 'HWY', HIGHWY: 'HWY', HILL: 'HL', HILLS: 'HLS', HIWAY: 'HWY',
+  HIWY: 'HWY', HL: 'HL', HLLW: 'HOLW', HLS: 'HLS', HOLLOW: 'HOLW', HOLLOWS: 'HOLW', HOLW: 'HOLW',
+  HOLWS: 'HOLW', HRBOR: 'HBR', HT: 'HTS', HTS: 'HTS', HVN: 'HVN', HWAY: 'HWY', HWY: 'HWY',
+  INLET: 'INLT', INLT: 'INLT', IS: 'IS', ISLAND: 'IS', ISLANDS: 'ISS', ISLE: 'ISLE', ISLES: 'ISLE',
+  ISLND: 'IS', ISLNDS: 'ISS', ISS: 'ISS', JCT: 'JCT', JCTION: 'JCT', JCTN: 'JCT', JCTNS: 'JCTS',
+  JCTS: 'JCTS', JUNCTION: 'JCT', JUNCTIONS: 'JCTS', JUNCTN: 'JCT', JUNCTON: 'JCT', KEY: 'KY',
+  KEYS: 'KYS', KNL: 'KNL', KNLS: 'KNLS', KNOL: 'KNL', KNOLL: 'KNL', KNOLLS: 'KNLS', KY: 'KY',
+  KYS: 'KYS', LAKE: 'LK', LAKES: 'LKS', LAND: 'LAND', LANDING: 'LNDG', LANE: 'LN', LCK: 'LCK',
+  LCKS: 'LCKS', LDG: 'LDG', LDGE: 'LDG', LF: 'LF', LGT: 'LGT', LGTS: 'LGTS', LIGHT: 'LGT',
+  LIGHTS: 'LGTS', LK: 'LK', LKS: 'LKS', LN: 'LN', LNDG: 'LNDG', LNDNG: 'LNDG', LOAF: 'LF',
+  LOCK: 'LCK', LOCKS: 'LCKS', LODG: 'LDG', LODGE: 'LDG', LOOP: 'LOOP', LOOPS: 'LOOP', MALL: 'MALL',
+  MANOR: 'MNR', MANORS: 'MNRS', MDW: 'MDW', MDWS: 'MDWS', MEADOW: 'MDW', MEADOWS: 'MDWS',
+  MEDOWS: 'MDWS', MEWS: 'MEWS', MILL: 'ML', MILLS: 'MLS', MISSION: 'MSN', MISSN: 'MSN', ML: 'ML',
+  MLS: 'MLS', MNR: 'MNR', MNRS: 'MNRS', MNT: 'MT', MNTAIN: 'MTN', MNTN: 'MTN', MNTNS: 'MTNS',
+  MOTORWAY: 'MTWY', MOUNT: 'MT', MOUNTAIN: 'MTN', MOUNTAINS: 'MTNS', MOUNTIN: 'MTN', MSN: 'MSN',
+  MSSN: 'MSN', MT: 'MT', MTIN: 'MTN', MTN: 'MTN', MTNS: 'MTNS', MTWY: 'MTWY', NCK: 'NCK',
+  NECK: 'NCK', OPAS: 'OPAS', ORCH: 'ORCH', ORCHARD: 'ORCH', ORCHRD: 'ORCH', OVAL: 'OVAL',
+  OVERPASS: 'OPAS', OVL: 'OVAL', PARK: 'PARK', PARKS: 'PARK', PARKWAY: 'PKWY', PARKWAYS: 'PKWY',
+  PARKWY: 'PKWY', PASS: 'PASS', PASSAGE: 'PSGE', PATH: 'PATH', PATHS: 'PATH', PIKE: 'PIKE',
+  PIKES: 'PIKE', PINE: 'PNE', PINES: 'PNES', PKWAY: 'PKWY', PKWY: 'PKWY', PKWYS: 'PKWY',
+  PKY: 'PKWY', PL: 'PL', PLACE: 'PL', PLAIN: 'PLN', PLAINS: 'PLNS', PLAZA: 'PLZ', PLN: 'PLN',
+  PLNS: 'PLNS', PLZ: 'PLZ', PLZA: 'PLZ', PNE: 'PNE', PNES: 'PNES', POINT: 'PT', POINTS: 'PTS',
+  PORT: 'PRT', PORTS: 'PRTS', PR: 'PR', PRAIRIE: 'PR', PRK: 'PARK', PRR: 'PR', PRT: 'PRT',
+  PRTS: 'PRTS', PSGE: 'PSGE', PT: 'PT', PTS: 'PTS', RAD: 'RADL', RADIAL: 'RADL', RADIEL: 'RADL',
+  RADL: 'RADL', RAMP: 'RAMP', RANCH: 'RNCH', RANCHES: 'RNCH', RAPID: 'RPD', RAPIDS: 'RPDS',
+  RD: 'RD', RDG: 'RDG', RDGE: 'RDG', RDGS: 'RDGS', RDS: 'RDS', REST: 'RST', RIDGE: 'RDG',
+  RIDGES: 'RDGS', RIV: 'RIV', RIVER: 'RIV', RIVR: 'RIV', RNCH: 'RNCH', RNCHS: 'RNCH', ROAD: 'RD',
+  ROADS: 'RDS', ROUTE: 'RTE', ROW: 'ROW', RPD: 'RPD', RPDS: 'RPDS', RST: 'RST', RTE: 'RTE',
+  RUE: 'RUE', RUN: 'RUN', RVR: 'RIV', SHL: 'SHL', SHLS: 'SHLS', SHOAL: 'SHL', SHOALS: 'SHLS',
+  SHOAR: 'SHR', SHOARS: 'SHRS', SHORE: 'SHR', SHORES: 'SHRS', SHR: 'SHR', SHRS: 'SHRS',
+  SKWY: 'SKWY', SKYWAY: 'SKWY', SMT: 'SMT', SPG: 'SPG', SPGS: 'SPGS', SPNG: 'SPG', SPNGS: 'SPGS',
+  SPRING: 'SPG', SPRINGS: 'SPGS', SPRNG: 'SPG', SPRNGS: 'SPGS', SPUR: 'SPUR', SPURS: 'SPUR',
+  SQ: 'SQ', SQR: 'SQ', SQRE: 'SQ', SQRS: 'SQS', SQS: 'SQS', SQU: 'SQ', SQUARE: 'SQ',
+  SQUARES: 'SQS', ST: 'ST', STA: 'STA', STATION: 'STA', STATN: 'STA', STN: 'STA', STR: 'ST',
+  STRA: 'STRA', STRAV: 'STRA', STRAVEN: 'STRA', STRAVENUE: 'STRA', STRAVN: 'STRA', STREAM: 'STRM',
+  STREET: 'ST', STREETS: 'STS', STREME: 'STRM', STRM: 'STRM', STRT: 'ST', STRVN: 'STRA',
+  STRVNUE: 'STRA', STS: 'STS', SUMIT: 'SMT', SUMITT: 'SMT', SUMMIT: 'SMT', TER: 'TER', TERR: 'TER',
+  TERRACE: 'TER', THROUGHWAY: 'TRWY', TPKE: 'TPKE', TRACE: 'TRCE', TRACES: 'TRCE', TRACK: 'TRAK',
+  TRACKS: 'TRAK', TRAFFICWAY: 'TRFY', TRAIL: 'TRL', TRAILER: 'TRLR', TRAILS: 'TRL', TRAK: 'TRAK',
+  TRCE: 'TRCE', TRFY: 'TRFY', TRK: 'TRAK', TRKS: 'TRAK', TRL: 'TRL', TRLR: 'TRLR', TRLRS: 'TRLR',
+  TRLS: 'TRL', TRNPK: 'TPKE', TRWY: 'TRWY', TUNEL: 'TUNL', TUNL: 'TUNL', TUNLS: 'TUNL',
+  TUNNEL: 'TUNL', TUNNELS: 'TUNL', TUNNL: 'TUNL', TURNPIKE: 'TPKE', TURNPK: 'TPKE', UN: 'UN',
+  UNDERPASS: 'UPAS', UNION: 'UN', UNIONS: 'UNS', UNS: 'UNS', UPAS: 'UPAS', VALLEY: 'VLY',
+  VALLEYS: 'VLYS', VALLY: 'VLY', VDCT: 'VIA', VIA: 'VIA', VIADCT: 'VIA', VIADUCT: 'VIA',
+  VIEW: 'VW', VIEWS: 'VWS', VILL: 'VLG', VILLAG: 'VLG', VILLAGE: 'VLG', VILLAGES: 'VLGS',
+  VILLE: 'VL', VILLG: 'VLG', VILLIAGE: 'VLG', VIS: 'VIS', VIST: 'VIS', VISTA: 'VIS', VL: 'VL',
+  VLG: 'VLG', VLGS: 'VLGS', VLLY: 'VLY', VLY: 'VLY', VLYS: 'VLYS', VST: 'VIS', VSTA: 'VIS',
+  VW: 'VW', VWS: 'VWS', WALK: 'WALK', WALKS: 'WALK', WALL: 'WALL', WAY: 'WAY', WAYS: 'WAYS',
+  WELL: 'WL', WELLS: 'WLS', WL: 'WL', WLS: 'WLS', WY: 'WAY', XING: 'XING', XRD: 'XRD',
+  XRDS: 'XRDS',
+};
+
+
+// Standard abbreviation → the table's PRIMARY street suffix name (column 1
+// of C1). Used to expand an abbreviation back to its real word; the longest
+// listed variant is not safe for that (VLG's longest variant is the listed
+// misspelling "VILLIAGE").
+const USPS_PRIMARY_BY_STANDARD = {
+  ALY: 'ALLEY', ANX: 'ANEX', ARC: 'ARCADE', AVE: 'AVENUE', BCH: 'BEACH', BG: 'BURG', BGS: 'BURGS',
+  BLF: 'BLUFF', BLFS: 'BLUFFS', BLVD: 'BOULEVARD', BND: 'BEND', BR: 'BRANCH', BRG: 'BRIDGE',
+  BRK: 'BROOK', BRKS: 'BROOKS', BTM: 'BOTTOM', BYP: 'BYPASS', BYU: 'BAYOU', CIR: 'CIRCLE',
+  CIRS: 'CIRCLES', CLB: 'CLUB', CLF: 'CLIFF', CLFS: 'CLIFFS', CMN: 'COMMON', CMNS: 'COMMONS',
+  COR: 'CORNER', CORS: 'CORNERS', CP: 'CAMP', CPE: 'CAPE', CRES: 'CRESCENT', CRK: 'CREEK',
+  CRSE: 'COURSE', CRST: 'CREST', CSWY: 'CAUSEWAY', CT: 'COURT', CTR: 'CENTER', CTRS: 'CENTERS',
+  CTS: 'COURTS', CURV: 'CURVE', CV: 'COVE', CVS: 'COVES', CYN: 'CANYON', DL: 'DALE', DM: 'DAM',
+  DR: 'DRIVE', DRS: 'DRIVES', DV: 'DIVIDE', EST: 'ESTATE', ESTS: 'ESTATES', EXPY: 'EXPRESSWAY',
+  EXT: 'EXTENSION', EXTS: 'EXTENSIONS', FALL: 'FALL', FLD: 'FIELD', FLDS: 'FIELDS', FLS: 'FALLS',
+  FLT: 'FLAT', FLTS: 'FLATS', FRD: 'FORD', FRDS: 'FORDS', FRG: 'FORGE', FRGS: 'FORGES',
+  FRK: 'FORK', FRKS: 'FORKS', FRST: 'FOREST', FRY: 'FERRY', FT: 'FORT', FWY: 'FREEWAY',
+  GDN: 'GARDEN', GDNS: 'GARDENS', GLN: 'GLEN', GLNS: 'GLENS', GRN: 'GREEN', GRNS: 'GREENS',
+  GRV: 'GROVE', GRVS: 'GROVES', GTWY: 'GATEWAY', HBR: 'HARBOR', HBRS: 'HARBORS', HL: 'HILL',
+  HLS: 'HILLS', HOLW: 'HOLLOW', HTS: 'HEIGHTS', HVN: 'HAVEN', HWY: 'HIGHWAY', INLT: 'INLET',
+  IS: 'ISLAND', ISLE: 'ISLE', ISS: 'ISLANDS', JCT: 'JUNCTION', JCTS: 'JUNCTIONS', KNL: 'KNOLL',
+  KNLS: 'KNOLLS', KY: 'KEY', KYS: 'KEYS', LAND: 'LAND', LCK: 'LOCK', LCKS: 'LOCKS', LDG: 'LODGE',
+  LF: 'LOAF', LGT: 'LIGHT', LGTS: 'LIGHTS', LK: 'LAKE', LKS: 'LAKES', LN: 'LANE', LNDG: 'LANDING',
+  LOOP: 'LOOP', MALL: 'MALL', MDW: 'MEADOW', MDWS: 'MEADOWS', MEWS: 'MEWS', ML: 'MILL',
+  MLS: 'MILLS', MNR: 'MANOR', MNRS: 'MANORS', MSN: 'MISSION', MT: 'MOUNT', MTN: 'MOUNTAIN',
+  MTNS: 'MOUNTAINS', MTWY: 'MOTORWAY', NCK: 'NECK', OPAS: 'OVERPASS', ORCH: 'ORCHARD',
+  OVAL: 'OVAL', PARK: 'PARK', PASS: 'PASS', PATH: 'PATH', PIKE: 'PIKE', PKWY: 'PARKWAY',
+  PL: 'PLACE', PLN: 'PLAIN', PLNS: 'PLAINS', PLZ: 'PLAZA', PNE: 'PINE', PNES: 'PINES',
+  PR: 'PRAIRIE', PRT: 'PORT', PRTS: 'PORTS', PSGE: 'PASSAGE', PT: 'POINT', PTS: 'POINTS',
+  RADL: 'RADIAL', RAMP: 'RAMP', RD: 'ROAD', RDG: 'RIDGE', RDGS: 'RIDGES', RDS: 'ROADS',
+  RIV: 'RIVER', RNCH: 'RANCH', ROW: 'ROW', RPD: 'RAPID', RPDS: 'RAPIDS', RST: 'REST', RTE: 'ROUTE',
+  RUE: 'RUE', RUN: 'RUN', SHL: 'SHOAL', SHLS: 'SHOALS', SHR: 'SHORE', SHRS: 'SHORES',
+  SKWY: 'SKYWAY', SMT: 'SUMMIT', SPG: 'SPRING', SPGS: 'SPRINGS', SPUR: 'SPUR', SQ: 'SQUARE',
+  SQS: 'SQUARES', ST: 'STREET', STA: 'STATION', STRA: 'STRAVENUE', STRM: 'STREAM', STS: 'STREETS',
+  TER: 'TERRACE', TPKE: 'TURNPIKE', TRAK: 'TRACK', TRCE: 'TRACE', TRFY: 'TRAFFICWAY', TRL: 'TRAIL',
+  TRLR: 'TRAILER', TRWY: 'THROUGHWAY', TUNL: 'TUNNEL', UN: 'UNION', UNS: 'UNIONS',
+  UPAS: 'UNDERPASS', VIA: 'VIADUCT', VIS: 'VISTA', VL: 'VILLE', VLG: 'VILLAGE', VLGS: 'VILLAGES',
+  VLY: 'VALLEY', VLYS: 'VALLEYS', VW: 'VIEW', VWS: 'VIEWS', WALK: 'WALK', WALL: 'WALL', WAY: 'WAY',
+  WAYS: 'WAYS', WL: 'WELL', WLS: 'WELLS', XING: 'CROSSING', XRD: 'CROSSROAD', XRDS: 'CROSSROADS',
+};
+
+// Where this codebase's canonical key deliberately differs from the USPS
+// standard (live roll evidence in ai-property-lookup.js: the rolls spell
+// these out). Standard abbreviation → the key used. Shared by the normalizer
+// and the roll-query spelling variants.
+const STREET_SUFFIX_CANON_OVERRIDES = {
+  CRK: 'CREEK',
+  HOLW: 'HOLLOW',
+  IS: 'ISLAND',
+  KY: 'KEY',
+  MDWS: 'MDW',
+  VIS: 'VISTA',
+};
+
+// USPS's own C1 table lists "ANEX" in its primary-name column for ANX; the
+// word a roll (or a person) writes is ANNEX.
+USPS_PRIMARY_BY_STANDARD.ANX = 'ANNEX';
+
+module.exports = { USPS_STREET_SUFFIXES, USPS_PRIMARY_BY_STANDARD, STREET_SUFFIX_CANON_OVERRIDES };

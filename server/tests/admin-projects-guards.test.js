@@ -521,6 +521,18 @@ describe('resolveOrCreateProjectInvoice mint serialization (source contract)', (
     expect(completion).toMatch(/const project = await trx\('projects'\)\.where\(\{ id: projectId \}\)\.forUpdate\(\)\.first\(\);/);
   });
 
+  test('project completion promotes staged photos before releasing its visit transaction', () => {
+    const completion = fs.readFileSync(require.resolve('../services/project-completion.js'), 'utf8');
+    const completeAt = completion.indexOf('async function completeProjectBackedService');
+    const promotionAt = completion.indexOf('await promoteStagedServicePhotos({', completeAt);
+    const transitionAt = completion.indexOf("if (scheduledService.status !== 'completed') {", promotionAt);
+    expect(promotionAt).toBeGreaterThan(completion.indexOf('serviceRecord = refreshed;', completeAt));
+    expect(transitionAt).toBeGreaterThan(promotionAt);
+    expect(completion.slice(promotionAt, transitionAt)).toContain('scheduledServiceId: scheduledService.id');
+    expect(completion.slice(promotionAt, transitionAt)).toContain('serviceRecordId: serviceRecord.id');
+    expect(completion.slice(promotionAt, transitionAt)).toContain('knex: trx');
+  });
+
   // Every termite service (WDO inspection, pre-treat, trenching, liquid)
   // completes through this path, so the per-completion consumables hook
   // must run here too — after the commit, with the profile's projectType so

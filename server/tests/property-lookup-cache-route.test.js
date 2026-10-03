@@ -81,6 +81,7 @@ beforeEach(() => {
           status: 'OK',
           results: [{
             formatted_address: '2965 Rock Creek Dr, Port Charlotte, FL 33948, USA',
+            types: ['street_address'],
             geometry: { location: { lat: 26.9897, lng: -82.139 }, location_type: 'ROOFTOP' },
             address_components: [],
           }],

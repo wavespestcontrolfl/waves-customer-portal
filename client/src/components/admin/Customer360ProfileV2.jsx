@@ -5406,14 +5406,17 @@ function CustomerWorkspaceHeader({
       <div className="c360-workspace-contact" aria-label="Contact details">
         {c.phone && (
           <div>
-            <Button
-              variant="secondary"
-              className="c360-contact-action"
-              onClick={() => callViaBridge(c.phone, name, undefined, c.id)}
-            >
-              <Phone size={16} />
-              Call
-            </Button>
+            {/* The call bridge is owner-only: a technician only reads the number. */}
+            {isAdmin && (
+              <Button
+                variant="secondary"
+                className="c360-contact-action"
+                onClick={() => callViaBridge(c.phone, name, undefined, c.id)}
+              >
+                <Phone size={16} />
+                Call
+              </Button>
+            )}
             <span>{c.phone}</span>
           </div>
         )}
@@ -5748,20 +5751,22 @@ function CustomerOverlayHeader({
                 >
                   Text
                 </a>{" "}
-                <button data-ui-text-action
-                  type="button"
-                  onClick={() =>
-                    callViaBridge(
-                      c.phone,
-                      `${c.firstName || ""} ${c.lastName || ""}`.trim(),
-                      undefined,
-                      c.id,
-                    )
-                  }
-                  className="inline-flex items-center h-8 px-3.5 text-ui-caption ui-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
-                >
-                  Call
-                </button>{" "}
+                {isAdmin && (
+                  <button data-ui-text-action
+                    type="button"
+                    onClick={() =>
+                      callViaBridge(
+                        c.phone,
+                        `${c.firstName || ""} ${c.lastName || ""}`.trim(),
+                        undefined,
+                        c.id,
+                      )
+                    }
+                    className="inline-flex items-center h-8 px-3.5 text-ui-caption ui-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
+                  >
+                    Call
+                  </button>
+                )}{" "}
               </>
             )}
             <a
@@ -6010,7 +6015,9 @@ function CustomerProfileOverview({
         />
       )}
       {addressReview}
-      <CustomerRequestsPanel customerId={customerId} />
+      {/* GET/PATCH /admin/requests are owner-only: a technician would only
+          see a 403 here. */}
+      {isAdmin && <CustomerRequestsPanel customerId={customerId} />}
       {/* both customer-scoped zone endpoints are requireAdmin — a
                   technician session would only 403 on expand */}
       {!embedded && isAdmin && <PropertyZonesPanel customerId={customerId} />}
