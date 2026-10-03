@@ -911,6 +911,18 @@ describeOrSkip('termite annual charge after installation — real Postgres', () 
     expect((await sweep()).neverInstalledAlerted).toBe(1);
   });
 
+  test('a leap-day signature still reaches the alert (the shape check caps February at 28; the wait time stands in)', async () => {
+    const { atSigning, sweep, db } = load();
+    await atSigning();
+    await db('estimates').where({ id: ids.estimateId }).update({
+      annual_plan_signature_charge: db.raw('annual_plan_signature_charge || ?::jsonb', [JSON.stringify({
+        signed_at: '2028-02-29T15:00:00.000Z', deferred_at: new Date(Date.now() - 15 * 86400e3).toISOString(),
+      })]),
+    });
+
+    expect((await sweep()).neverInstalledAlerted).toBe(1);
+  });
+
   test('an installation visit closed as inspection only still counts as never installed for the alert', async () => {
     const { atSigning, sweep, db } = load();
     await atSigning();

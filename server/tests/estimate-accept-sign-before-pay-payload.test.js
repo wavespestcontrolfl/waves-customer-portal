@@ -153,6 +153,19 @@ describe('estimate accept — sign-before-pay payloads', () => {
       expect(payload.prepayChargeStatus).toBe('after_installation');
     });
 
+    test.each([
+      ['held for the office (a cancelled agreement)', { status: 'deferred', reason: 'agreement_no_longer_signed', trigger: 'installation_complete' }],
+      ['possibly through', { status: 'ambiguous', trigger: 'installation_complete' }],
+      ['an at-signing charge in flight', { status: 'claimed', trigger: 'signature' }],
+    ])('%s: no pay link, the neutral confirming copy', async (_label, charge) => {
+      const payload = await retry(charge);
+
+      expect(payload.invoicePayUrl).toBeNull();
+      expect(payload.invoiceMode).toBe(false);
+      expect(payload.nextStep).toBe('confirmed');
+      expect(payload.prepayChargeStatus).toBe('ambiguous');
+    });
+
     test('a declined after-installation charge: the pay link is back', async () => {
       const payload = await retry({ status: 'declined', trigger: 'installation_complete' });
 

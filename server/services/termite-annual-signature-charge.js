@@ -291,17 +291,21 @@ function classifyVerifiedCharge(freshInvoice, chargeResult) {
   return { status: 'declined', reason: `post-charge status ${freshInvoice?.status || 'unknown'}` };
 }
 
-// Everything between a won claim and the Stripe call. Returns an outcome to
-// record, or { release: true } when nothing was attempted and the claim
-// should be handed back for a later retry.
-async function runClaimedCharge({ conn, ctx, trigger, installation = null }) {
+// The claimed charge runs in three steps; each of the first two either ends
+// the attempt with an outcome to record ({ outcome }) or hands the next step
+// what it verified. An outcome of { release: true } means nothing was
+// attempted and the claim goes back for a later retry.
+//
+// Step 1 — is this invoice ours to charge, for the amount the customer
+// signed, with a saved method?
+async function preflightClaimedCharge({ conn, ctx, trigger }) {
   const RecurringCards = require('./recurring-card-on-file');
 
   const invoice = await conn('invoices').where({ id: ctx.invoiceId })
     .first('id', 'customer_id', 'payer_id', 'payer_statement_id', 'status', 'subtotal', 'discount_amount', 'tax_amount', 'total');
-  if (!invoice) return { status: 'skipped', reason: 'invoice_missing' };
-  if (invoice.payer_statement_id) return { status: 'payer_routed', reason: 'payer_statement' };
-  if (invoice.payer_id) return { status: 'skipped', reason: 'payer_billed' };
+  if (!invoice) return { outcome: { status: 'skipped', reason: 'invoice_missing' } };
+  if (invoice.payer_statement_id) return { outcome: { status: 'payer_routed', reason: 'payer_statement' } };
+  if (invoice.payer_id) return { outcome: { status: 'skipped', reason: 'payer_billed' } };
 
   // Automatic (sweep) charges honor an active collections dispute hold
   // (B10); the signature-time charge answers the customer's own signing and
@@ -318,7 +322,7 @@ async function runClaimedCharge({ conn, ctx, trigger, installation = null }) {
     }
     if (held) {
       await ringBell('charge_deferred', { ...ctx, reason: 'the customer has an active collections billing hold (or it could not be checked); the daily sweep will retry once the office releases it' });
-      return { release: true, reason: 'collection_hold' };
+      return { outcome: { release: true, reason: 'collection_hold' } };
     }
   }
 
@@ -328,7 +332,7 @@ async function runClaimedCharge({ conn, ctx, trigger, installation = null }) {
     frozen = require('./estimate-converter').frozenTermiteAnnualFinancialsFor(estimate);
   } catch {
     await ringBell('no_accepted_amount', ctx);
-    return { status: 'skipped', reason: 'no_accepted_amount' };
+    return { outcome: { status: 'skipped', reason: 'no_accepted_amount' } };
   }
   const frozenTotalCents = Math.round(frozen.total * 100);
 
@@ -339,17 +343,22 @@ async function runClaimedCharge({ conn, ctx, trigger, installation = null }) {
   const drift = invoiceBaseDrift(invoice, frozen);
   if (drift) {
     await ringBell('invoice_base_drift', { ...ctx, reason: drift });
-    return { status: 'deferred', reason: 'invoice_base_drift', detail: drift, belled: true };
+    return { outcome: { status: 'deferred', reason: 'invoice_base_drift', detail: drift, belled: true } };
   }
 
-  if (!RecurringCards.isPrepayCardAndChargeEnabled()) return { status: 'skipped', reason: 'gate_off' };
+  if (!RecurringCards.isPrepayCardAndChargeEnabled()) return { outcome: { status: 'skipped', reason: 'gate_off' } };
 
   const method = await RecurringCards.resolvePrepayChargeMethod({
     policy: { exemptReason: 'autopay_already_active' },
     customerId: invoice.customer_id,
   });
-  if (!method?.paymentMethodRowId) return { status: 'skipped', reason: 'no_enrolled_method' };
+  if (!method?.paymentMethodRowId) return { outcome: { status: 'skipped', reason: 'no_enrolled_method' } };
+  return { invoice, frozenTotalCents, method };
+}
 
+// Step 2 — do the SIGNED agreement's own words authorize this charge at this
+// moment, within the signed total, and is that authorization on record?
+async function authorizeClaimedCharge({ conn, ctx, trigger, invoice, frozenTotalCents, method }) {
   let contract;
   try {
     contract = await signedAnnualContractFor(conn, ctx.estimateId, ctx.contractId);
@@ -357,7 +366,7 @@ async function runClaimedCharge({ conn, ctx, trigger, installation = null }) {
   } catch (err) {
     logger.warn(`[termite-annual-charge] signed agreement read failed for estimate ${ctx.estimateId} — releasing for retry: ${err.message}`);
     await ringBell('charge_deferred', { ...ctx, reason: 'the signed agreement could not be read yet; the daily sweep will retry' });
-    return { release: true };
+    return { outcome: { release: true } };
   }
   // Only the agreement's own signed words authorize this charge — never an
   // Auto Pay enrollment on its own.
@@ -366,7 +375,7 @@ async function runClaimedCharge({ conn, ctx, trigger, installation = null }) {
   const { agreementAuthorizesInitialCharge, agreementAuthorizesAfterInstallCharge } = require('./termite-program-agreement');
   const authorizes = trigger === INSTALLATION_TRIGGER ? agreementAuthorizesAfterInstallCharge : agreementAuthorizesInitialCharge;
   if (!authorizes(contract.contract_text_snapshot)) {
-    return { status: 'skipped', reason: 'no_initial_charge_authorization' };
+    return { outcome: { status: 'skipped', reason: 'no_initial_charge_authorization' } };
   }
 
   // The agreement's prices are total maximums: a credit-card surcharge
@@ -380,7 +389,7 @@ async function runClaimedCharge({ conn, ctx, trigger, installation = null }) {
     const quote = await StripeService.quoteInvoiceSavedCardCharge(ctx.invoiceId, method.paymentMethodRowId);
     if (Math.round(Number(quote?.total) * 100) > frozenTotalCents) {
       await ringBell('surcharge_not_authorized', ctx);
-      return { status: 'skipped', reason: 'surcharge_exceeds_accepted_total' };
+      return { outcome: { status: 'skipped', reason: 'surcharge_exceeds_accepted_total' } };
     }
   } catch (err) {
     logger.warn(`[termite-annual-charge] pre-charge quote failed for invoice ${ctx.invoiceId} — relying on the charge ceiling: ${err.message}`);
@@ -393,9 +402,15 @@ async function runClaimedCharge({ conn, ctx, trigger, installation = null }) {
   } catch (err) {
     logger.warn(`[termite-annual-charge] consent record failed for estimate ${ctx.estimateId} — releasing for retry: ${err.message}`);
     await ringBell('charge_deferred', { ...ctx, reason: 'the signing authorization could not be recorded yet; the daily sweep will retry' });
-    return { release: true };
+    return { outcome: { release: true } };
   }
+  return { contract };
+}
 
+// Step 3 — the charge itself, with every eligibility read above bound again
+// inside the charge transaction, and its outcome classified.
+async function submitClaimedCharge({ conn, ctx, trigger, installation, invoice, frozenTotalCents, method, contract }) {
+  const StripeService = require('./stripe');
   let chargeResult;
   try {
     chargeResult = await StripeService.chargeInvoiceWithSavedCard(ctx.invoiceId, method.paymentMethodRowId, {
@@ -463,6 +478,19 @@ async function runClaimedCharge({ conn, ctx, trigger, installation = null }) {
     logger.error(`[termite-annual-charge] post-charge invoice read failed for ${ctx.invoiceId}: ${err.message}`);
     return { status: 'ambiguous', reason: 'post_charge_status_unverified' };
   }
+}
+
+// Everything between a won claim and the Stripe call. Returns an outcome to
+// record, or { release: true } when nothing was attempted and the claim
+// should be handed back for a later retry.
+async function runClaimedCharge({ conn, ctx, trigger, installation = null }) {
+  const preflight = await preflightClaimedCharge({ conn, ctx, trigger });
+  if (preflight.outcome) return preflight.outcome;
+  const authorization = await authorizeClaimedCharge({ conn, ctx, trigger, ...preflight });
+  if (authorization.outcome) return authorization.outcome;
+  return submitClaimedCharge({
+    conn, ctx, trigger, installation, ...preflight, contract: authorization.contract,
+  });
 }
 
 /**

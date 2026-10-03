@@ -1483,9 +1483,15 @@ async function chargeInstalledTerms({ conn, limit, counts }) {
       // the shape check has not passed.
       // The clock starts at the signature (signed_at); a record without one
       // falls back to when the wait was recorded.
-      .whereRaw(`(CASE WHEN COALESCE(e.annual_plan_signature_charge ->> 'signed_at', e.annual_plan_signature_charge ->> 'deferred_at') ~ '${CASTABLE_ISO_INSTANT}'
-        THEN COALESCE(e.annual_plan_signature_charge ->> 'signed_at', e.annual_plan_signature_charge ->> 'deferred_at')::timestamptz END)
-        < now() - interval '${SignatureCharge.NEVER_INSTALLED_ALERT_DAYS} days'`)
+      // Each timestamp is shape-checked on its own, so one the check does
+      // not accept (it caps February at 28: a leap-day signature) falls back
+      // to the other instead of dropping the plan from the alert.
+      .whereRaw(`COALESCE(
+          CASE WHEN (e.annual_plan_signature_charge ->> 'signed_at') ~ '${CASTABLE_ISO_INSTANT}'
+            THEN (e.annual_plan_signature_charge ->> 'signed_at')::timestamptz END,
+          CASE WHEN (e.annual_plan_signature_charge ->> 'deferred_at') ~ '${CASTABLE_ISO_INSTANT}'
+            THEN (e.annual_plan_signature_charge ->> 'deferred_at')::timestamptz END
+        ) < now() - interval '${SignatureCharge.NEVER_INSTALLED_ALERT_DAYS} days'`)
       .orderBy('inv.created_at', 'asc')
       .select('e.id as estimate_id', 'inv.id as invoice_id')
       .limit(limit);

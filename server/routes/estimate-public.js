@@ -20947,6 +20947,15 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
   const termiteAwaitingInstallation = !!prepayTerm && !!invoice && !!termiteChargeState
     && (termiteChargeState.status === 'awaiting_installation'
       || (termiteChargeState.status === 'claimed' && termiteChargeState.trigger === 'installation_complete'));
+  // Every OTHER state of that record that is not a pay-link outcome is
+  // staff-owned or still moving, and termite-annual-signature-charge.js sends
+  // no pay link for it: a charge in flight (claimed), one that may have gone
+  // through (ambiguous), one held for the office (deferred — an edited
+  // invoice, a cancelled agreement). The retry must not hand the customer the
+  // pay rail the charge path withheld (GitHub Codex #5816 r5). Only
+  // 'declined' and 'skipped' return to the pay link.
+  const termiteChargeStaffOwned = !!prepayTerm && !!invoice && !!termiteChargeState && !termiteAwaitingInstallation
+    && ['claimed', 'ambiguous', 'deferred'].includes(String(termiteChargeState.status || ''));
   // Never hand the homeowner a payer's bearer /pay token — nor ANY /pay token
   // for a settled invoice (nothing is owed), nor a pay-now link for a
   // card-lane accept whose invoice completion will auto-charge.
@@ -20956,7 +20965,7 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
   const prepayFallbackOwed = !!prepayTerm && !!invoice && prepayJobStamp?.deferred_to_first_visit === true
     && String(prepayJobStamp?.status || '') === 'delivered_fallback';
   const invoicePayUrl = invoice && !invoiceSettled && !payerBilled && (!recurringCardLaneRetry || prepayFallbackOwed) && !prepaySweepPending
-    && !prepayAwaitingFirstVisit && !termiteAwaitingInstallation && invoice.token
+    && !prepayAwaitingFirstVisit && !termiteAwaitingInstallation && !termiteChargeStaffOwned && invoice.token
     ? `/pay/${invoice.token}`
     : null;
   const invoiceNotes = String(invoice?.notes || '');
@@ -21021,7 +21030,7 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
       // route the customer to a pay step for it. Card-lane retries likewise
       // stay out of the pay step (see recurringCardLaneRetry above).
       invoiceMode: !!invoice && !invoiceSettled && !recurringCardLaneRetry && !prepaySweepPending && !prepayAwaitingFirstVisit
-        && !termiteAwaitingInstallation,
+        && !termiteAwaitingInstallation && !termiteChargeStaffOwned,
       invoiceLinkDelivered: !!(invoice?.sent_at || invoice?.sms_sent_at),
       invoiceId: invoice?.id || null,
       invoiceAmount,
@@ -21048,10 +21057,14 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
       // deferral released the claim) → 'deferred' copy; a 'claimed' stamp
       // may have an executor mid-charge → tender-neutral 'ambiguous'
       // "we're confirming your payment" copy (Codex r26 P2).
-      invoiceSettled: invoiceSettled || prepaySweepPending || prepayAwaitingFirstVisit || termiteAwaitingInstallation,
+      invoiceSettled: invoiceSettled || prepaySweepPending || prepayAwaitingFirstVisit || termiteAwaitingInstallation || termiteChargeStaffOwned,
       prepayChargeStatus: retryPrepayChargeStatus || (prepaySweepPending
         ? (String(prepayJobStamp?.status || '') === 'pending' ? 'deferred' : 'ambiguous')
-        : (prepayAwaitingFirstVisit ? 'after_first_visit' : (termiteAwaitingInstallation ? 'after_installation' : null))),
+        : (prepayAwaitingFirstVisit
+          ? 'after_first_visit'
+          // Staff-owned: the tender-neutral "we're confirming" copy, which
+          // asserts neither a charge nor its absence.
+          : (termiteAwaitingInstallation ? 'after_installation' : (termiteChargeStaffOwned ? 'ambiguous' : null)))),
       prepayCoveredByCredit: retryPrepayCoveredByCredit,
     }),
     ...(invoiceKind === 'annual_prepay_deferred'
