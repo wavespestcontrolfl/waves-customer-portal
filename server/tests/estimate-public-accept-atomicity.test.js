@@ -4209,6 +4209,61 @@ describe('B18 - an accept whose phone belongs to another customer is parked for 
     notifyAdmin.mockImplementation(async () => ({}));
   });
 
+  describe('a stale tab\'s captured recurring intent at the preflight park', () => {
+    const RecurringCards = require('../services/recurring-card-on-file');
+    let retireSpy;
+    beforeEach(() => { retireSpy = jest.spyOn(RecurringCards, 'retireOrphanedCaptureIntent').mockResolvedValue({ ok: true, retired: true }); });
+    afterEach(() => retireSpy.mockRestore());
+    const parkedSetup = (id) => {
+      resetStore(recurringPestEstimate({ id, token: `tok-${id}-x0123456789` }));
+      db.__state.tables.customers.push(sharedPhoneRow());
+      db.__state.tables.customer_accounts = [{ id: 'acct-bob' }];
+    };
+
+    test('the submitted recurring intent is retired (main\'s helper, for THIS estimate) BEFORE the 409, then the alert is raised', async () => {
+      parkedSetup('est-park-10');
+      const order = [];
+      retireSpy.mockImplementation(async () => { order.push('retire'); return { ok: true, retired: true }; });
+      require('../services/notification-service').notifyAdmin.mockImplementation(async (c, h, w, opts) => {
+        if (String(opts?.dedupeKey || '').startsWith('accept-phone-contradicted:')) order.push('alert');
+        return { id: 'n' };
+      });
+      const res = await putAccept('tok-est-park-10-x0123456789', { recurringCardSetupIntentId: ' seti_stale ' });
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('ACCEPT_NEEDS_OFFICE_REVIEW');
+      expect(retireSpy).toHaveBeenCalledTimes(1);
+      expect(retireSpy).toHaveBeenCalledWith({ estimate: expect.objectContaining({ id: 'est-park-10' }), setupIntentId: 'seti_stale' });
+      expect(order).toEqual(['retire', 'alert']);
+      require('../services/notification-service').notifyAdmin.mockImplementation(async () => ({}));
+    });
+
+    test('Stripe cannot confirm the retirement: the existing 503, nothing written, the alert NOT raised on this response (the retry parks again and raises it)', async () => {
+      parkedSetup('est-park-11');
+      retireSpy.mockResolvedValue({ ok: false, reason: 'verification_failed' });
+      const before = JSON.stringify(db.__state.tables);
+      const res = await putAccept('tok-est-park-11-x0123456789', { recurringCardSetupIntentId: 'seti_stale' });
+      expect(res.status).toBe(503);
+      expect(res.data.code).toBe('RECURRING_CARD_RETIRE_FAILED');
+      expect(JSON.stringify(db.__state.tables)).toBe(before);
+      expect(parkedAlertCalls()).toHaveLength(0);
+      // The retry (Stripe back) parks again: retirement lands, the alert is raised, the 409 answers.
+      retireSpy.mockResolvedValue({ ok: true, retired: true });
+      const retry = await putAccept('tok-est-park-11-x0123456789', { recurringCardSetupIntentId: 'seti_stale' });
+      expect(retry.status).toBe(409);
+      expect(parkedAlertKeys().size).toBe(1);
+    });
+
+    test('no submitted intent means no Stripe call', async () => {
+      parkedSetup('est-park-12');
+      const res = await putAccept('tok-est-park-12-x0123456789', {});
+      expect(res.status).toBe(409);
+      expect(retireSpy).not.toHaveBeenCalled();
+      const blank = await putAccept('tok-est-park-12-x0123456789', { recurringCardSetupIntentId: '   ' });
+      expect(blank.status).toBe(409);
+      expect(retireSpy).not.toHaveBeenCalled();
+    });
+  });
+
   test('control: a lone candidate that agrees on email, or on address, is reused exactly as before (no park, no alert)', async () => {
     for (const [id, overrides] of [['est-park-2', { email: 'pat@example.com' }], ['est-park-3', { address_line1: '123 Palm Ave' }]]) {
       jest.clearAllMocks();

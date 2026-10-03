@@ -1704,7 +1704,11 @@ answers:
   every attempt and idempotent by its dedupe key. The same 409 comes from the accept transaction when its
   authoritative match, or the locked re-read of a reused lone candidate (judged on the pre-fill identity
   snapshot), finds the contradiction the preflight did not see; that transaction rolls back, the existing
-  retirement of a captured recurring card runs, and the alert is raised after the rollback. `GET /:token/data`
+  retirement of a captured recurring card runs, and the alert is raised after the rollback. The preflight park does
+  the same with a `recurringCardSetupIntentId` the request submits (a stale tab that captured before the record
+  turned contradictory): it is retired (only if it belongs to this estimate) BEFORE the 409, a retirement Stripe
+  cannot confirm answers the existing 503 `RECURRING_CARD_RETIRE_FAILED` (no alert on that response; the retry
+  parks again and raises it), and a request with no intent makes no Stripe call. `GET /:token/data`
   answers such an estimate with `cta.reviewBeforeBooking: true`, `cta.reviewReason: 'contact_review'` and
   `cta.canAccept: false` (the page's existing review state; nothing about the other customer), and
   `POST /:token/card-hold-intent` and `/recurring-card-intent` answer the same 409 without minting a

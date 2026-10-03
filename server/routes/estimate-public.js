@@ -9788,6 +9788,22 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       let parked = null;
       try { parked = await acceptPhoneParkedVerdict(estimate); } catch { /* the authoritative in-transaction match decides */ }
       if (parked) {
+        // A stale tab can have captured a recurring SetupIntent before the customer record turned
+        // contradictory. Retire the one this request submits with main's own helper - the same one the
+        // in-transaction park runs after its rollback (it touches only an intent that belongs to THIS
+        // estimate) - BEFORE the 409, since the client drops the id on this 409 and an unbound intent would
+        // stay eligible for later recovery. Stripe unable to confirm = the existing 503 and the tab keeps its
+        // intent; the alert is then NOT raised on this response (the retry parks again and raises it), exactly
+        // like the in-transaction path. No submitted intent = no Stripe call.
+        const parkedSetupIntentId = typeof req.body?.recurringCardSetupIntentId === 'string'
+          ? req.body.recurringCardSetupIntentId.trim() : '';
+        if (parkedSetupIntentId) {
+          try {
+            await retireOrDenyDroppedCapture(estimate, parkedSetupIntentId);
+          } catch (retireErr) {
+            return res.status(503).json({ error: retireErr.message, code: retireErr.code || 'RECURRING_CARD_RETIRE_FAILED' });
+          }
+        }
         await raiseAcceptParkedAlert({ estimate, rejectedCustomerId: parked.rejectedCustomerId });
         return res.status(409).json(acceptOfficeReviewBody());
       }
