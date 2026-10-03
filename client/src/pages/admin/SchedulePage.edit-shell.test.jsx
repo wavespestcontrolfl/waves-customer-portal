@@ -225,6 +225,8 @@ it('moving a combo together is ONE request that carries the choice and the new s
   await waitFor(() => expect(writes()).toHaveLength(1));
   expect(writeUrls()).toEqual([PUT]);
   expect(body(0)).toMatchObject({ comboMove: 'together', scheduledDate: '2035-01-03', windowStart: '08:00', windowEnd: '09:00' });
+  // The stop this form showed rides along, so the server can refuse a changed one.
+  expect(body(0).comboVisit).toEqual({ id: 'fixture-stop', memberIds: ['fixture-visit', 'fixture-lawn'], liveCount: 2, liveMemberIds: ['fixture-visit', 'fixture-lawn'] });
   // The whole-stop move owes no series ack.
   expect(body(0).seriesAck).toBeUndefined();
 });

@@ -3533,6 +3533,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           ...form,
           // A shared stop: the server runs the choice in this one request.
           comboMove: comboSlotChanged ? comboMove : undefined,
+          // The stop this form showed; the server refuses if it changed.
+          comboVisit: comboSlotChanged && Array.isArray(comboVisit.liveMemberIds)
+            ? { id: comboVisit.id, memberIds: comboVisit.memberIds, liveCount: comboVisit.liveCount, liveMemberIds: comboVisit.liveMemberIds }
+            : undefined,
           ...(selectedPropertyId ? { propertyId: selectedPropertyId } : {}),
           notifyCustomer: notifyOnMove || undefined,
           // Collective-move ack — bound to the previewed occurrence set the

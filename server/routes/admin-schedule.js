@@ -10932,7 +10932,11 @@ async function refuseCarriedStopInEditMove(ackedIds) {
 //   comboMove 'separate' — the service is split off its stop here, and the
 //     rest is the ordinary single-row edit.
 // No comboMove (every other caller), a row that is not on a shared stop, or
-// a request that changes none of the three: null, the handler is unchanged.
+// a request that changes nothing about the slot and asks for no text: null,
+// the handler is unchanged.
+// `comboVisit` is the stop the operator was shown ({ id, memberIds,
+// liveCount, liveMemberIds }); a stop whose live services differ from it is
+// refused before anything is saved.
 function comboEditChanges(body, row) {
   const b = body || {};
   let intake;
@@ -10945,6 +10949,7 @@ function comboEditChanges(body, row) {
   const start = intake.clearBoth ? null : (intake.windowStart !== undefined ? normalizeHHMM(intake.windowStart) : undefined);
   return {
     intake,
+    length: comboLengthChange(b, row, intake),
     date: !!dateTarget && dateTarget !== dateOnly(row.scheduled_date),
     start: intake.clearBoth
       ? !!row.window_start
@@ -10977,6 +10982,35 @@ function comboMoveWindow(row, changes) {
   return { start: normalizeHHMM(changes.intake.windowStart), ...(end ? { end } : {}) };
 }
 
+// The stop the operator was shown against the stop as it is now. Null = the
+// same live services (or nothing was shown: an older client).
+function comboShownStopChanged(shown, live) {
+  if (shown == null) return false;
+  const ids = (v) => (Array.isArray(v) ? v.map(String).sort().join(',') : null);
+  return typeof shown !== 'object' || String(shown.id) !== String(live.id)
+    || ids(shown.liveMemberIds) !== ids(live.liveMemberIds);
+}
+
+// 'separate': the service leaves its stop here; the handler then runs the
+// ordinary single-row edit.
+async function separateComboService(req, row) {
+  const vg = require('../services/visit-groups');
+  try {
+    await vg.splitChild({
+      visitId: row.visit_id,
+      scheduledServiceId: row.id,
+      createdBy: `admin:${req.technicianId || 'unknown'}`,
+    });
+  } catch (err) {
+    // The split's own refusals (a frozen visit, a row that just left the
+    // stop) are the operator's to read, not a 500. Nothing was changed.
+    const known = err && (err.code === 'VISIT_SPLIT_REFUSED' || /not found|not a member/.test(String(err.message)));
+    if (!known) throw err;
+    throw Object.assign(httpError(409, `${err.message} Nothing was changed.`), { code: err.code || 'VISIT_CHANGED_RETRY' });
+  }
+  return { separated: true };
+}
+
 async function planComboEditMove(req) {
   const body = req.body || {};
   const choice = body.comboMove;
@@ -10990,36 +11024,33 @@ async function planComboEditMove(req) {
   const vg = require('../services/visit-groups');
   if ((await vg.openMembers(db, row.visit_id)).length < 2) return null;
   const changes = comboEditChanges(body, row);
-  if (!changes || !(changes.date || changes.start || changes.technician)) return null;
-
-  if (choice === 'separate') {
-    try {
-      await vg.splitChild({
-        visitId: row.visit_id,
-        scheduledServiceId: row.id,
-        createdBy: `admin:${req.technicianId || 'unknown'}`,
-      });
-    } catch (err) {
-      // The split's own refusals (a frozen visit, a row that just left the
-      // stop) are the operator's to read, not a 500. Nothing was changed.
-      const known = err && (err.code === 'VISIT_SPLIT_REFUSED' || /not found|not a member/.test(String(err.message)));
-      if (!known) throw err;
-      throw Object.assign(httpError(409, `${err.message} Nothing was changed.`), { code: err.code || 'VISIT_CHANGED_RETRY' });
-    }
-    return { separated: true };
+  if (!changes) return null;
+  const changesSlot = changes.date || changes.start || changes.technician || changes.length;
+  // 'together' with nothing left to change and a text requested is a
+  // retried save whose move already committed: it still goes through the
+  // move (a no-op there), which sends the text if none is on record.
+  const repeatForText = choice === 'together' && body.notifyCustomer === true;
+  if (!changesSlot && !repeatForText) return null;
+  const live = await vg.visitSummaryForService(db, row.id);
+  if (comboShownStopChanged(body.comboVisit, live)) {
+    throw Object.assign(
+      httpError(409, 'This stop changed since it was opened: a service was added, separated or closed. Reload and try again. Nothing was changed.'),
+      { code: 'VISIT_MEMBERSHIP_CHANGED' },
+    );
   }
-  return planComboTogetherMove(req, row, changes);
+
+  if (choice === 'separate') return separateComboService(req, row);
+  return planComboTogetherMove(req, row, changes, live);
 }
 
 // 'together': every refusal comes before any write.
-async function planComboTogetherMove(req, row, changes) {
+async function planComboTogetherMove(req, row, changes, shown) {
   const body = req.body;
-  const vg = require('../services/visit-groups');
   const refuse = (status, message, code) => {
     throw Object.assign(httpError(status, `${message} Nothing was changed.`), code ? { code } : {});
   };
   if (changes.intake.clearBoth) refuse(422, 'A shared stop keeps its time: set a start time, or choose Separate.', 'INVALID_APPOINTMENT_WINDOW');
-  if (comboLengthChange(body, row, changes.intake)) {
+  if (changes.length) {
     refuse(422, "Moving the whole stop keeps each service's length. Save the move first, or choose Separate to change this service's length.", 'COMBO_LENGTH_CHANGE');
   }
   if (body.propertyId !== undefined) {
@@ -11028,9 +11059,10 @@ async function planComboTogetherMove(req, row, changes) {
   const newDate = validScheduleDate(changes.date ? body.scheduledDate : row.scheduled_date);
   if (!newDate) refuse(400, 'That date is not a current or future date.');
   const newWindow = comboMoveWindow(row, changes);
-  const notifyCustomer = body.notifyCustomer === true && (changes.date || changes.start);
+  // A text is about a new date or time (or a repeat of one), never about a
+  // technician change alone.
+  const notifyCustomer = body.notifyCustomer === true && (changes.date || changes.start || !changes.technician);
   const actor = { techRole: req.techRole, technicianId: req.technicianId };
-  const shown = await vg.visitSummaryForService(db, row.id);
   const { planVisitMoveForStaff, runPlannedVisitMove } = require('./admin-dispatch');
   const planned = await planVisitMoveForStaff({
     serviceId: row.id,

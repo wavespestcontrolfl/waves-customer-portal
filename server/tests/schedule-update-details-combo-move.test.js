@@ -133,7 +133,49 @@ describe("comboMove 'together'", () => {
   });
 });
 
+describe('the stop the operator was shown', () => {
+  test('a stop whose live services differ from the shown ones is refused before anything is saved, for either choice', async () => {
+    const shown = { id: 'v1', memberIds: ['svc-a', 'svc-b'], liveCount: 2, liveMemberIds: ['svc-a', 'svc-b'] };
+    mockVisitGroups.visitSummaryForService.mockResolvedValue({ id: 'v1', memberIds: ['svc-a', 'svc-b', 'svc-c'], liveCount: 3, liveMemberIds: ['svc-a', 'svc-b', 'svc-c'] });
+    for (const comboMove of ['together', 'separate']) {
+      const req = request({ scheduledDate: TARGET, comboMove, comboVisit: shown });
+      await expect(planComboEditMove(req)).rejects.toMatchObject({ statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED' });
+      expect(req.body.scheduledDate).toBe(TARGET);
+    }
+    // Same count, a different live service.
+    mockVisitGroups.visitSummaryForService.mockResolvedValue({ id: 'v1', memberIds: ['svc-a', 'svc-b', 'svc-c'], liveCount: 2, liveMemberIds: ['svc-a', 'svc-c'] });
+    await expect(planComboEditMove(request({ scheduledDate: TARGET, comboMove: 'together', comboVisit: shown }))).rejects.toMatchObject({ code: 'VISIT_MEMBERSHIP_CHANGED' });
+    expect(mockVisitGroups.splitChild).not.toHaveBeenCalled();
+    expect(mockDispatch.planVisitMoveForStaff).not.toHaveBeenCalled();
+    // The same stop: the move is planned on it.
+    mockVisitGroups.visitSummaryForService.mockResolvedValue(SUMMARY);
+    await planComboEditMove(request({ scheduledDate: TARGET, comboMove: 'together', comboVisit: shown }));
+    expect(mockDispatch.planVisitMoveForStaff).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('a retried save whose move already committed', () => {
+  test("'together' with nothing left to change and a text requested still goes through the move, so an unsent text is recovered", async () => {
+    const req = request({ scheduledDate: FUTURE, windowStart: '09:00', windowEnd: '10:00', technicianId: 'tech-1', notifyCustomer: true, comboMove: 'together' });
+    const plan = await planComboEditMove(req);
+    expect(mockDispatch.planVisitMoveForStaff).toHaveBeenCalledWith(expect.objectContaining({ newDate: FUTURE, newWindow: undefined, notifyCustomer: true }));
+    expect(typeof plan.commit).toBe('function');
+    // No text requested: an ordinary edit.
+    jest.clearAllMocks();
+    expect(await planComboEditMove(request({ scheduledDate: FUTURE, windowStart: '09:00', notifyCustomer: false, comboMove: 'together' }))).toBe(null);
+    expect(mockDispatch.planVisitMoveForStaff).not.toHaveBeenCalled();
+  });
+});
+
 describe("comboMove 'separate'", () => {
+  test('a length-only change (duration or window end) is split off too', async () => {
+    for (const change of [{ estimatedDuration: '90' }, { windowStart: '09:00', windowEnd: '11:00' }]) {
+      mockVisitGroups.splitChild.mockClear();
+      expect(await planComboEditMove(request({ ...change, comboMove: 'separate' }))).toEqual({ separated: true });
+      expect(mockVisitGroups.splitChild).toHaveBeenCalledTimes(1);
+    }
+  });
+
   test('splits the service off its stop and leaves the body for the ordinary edit', async () => {
     const req = request({ scheduledDate: TARGET, notifyCustomer: true, comboMove: 'separate' });
     expect(await planComboEditMove(req)).toEqual({ separated: true });
@@ -173,6 +215,7 @@ describe('what counts as a change', () => {
     expect(comboEditChanges({ technicianId: '' }, ROW)).toMatchObject({ technician: true });
     expect(comboEditChanges({ technicianId: null }, { ...ROW, technician_id: null })).toMatchObject({ technician: false });
     expect(comboLengthChange({ estimatedDuration: '60' }, ROW, { windowStart: '11:00', windowEnd: '12:00' })).toBe(false);
+    expect(comboEditChanges({ estimatedDuration: '90' }, ROW)).toMatchObject({ length: true, date: false, start: false });
   });
 });
 
