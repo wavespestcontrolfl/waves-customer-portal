@@ -1427,6 +1427,21 @@ async function loadLatestSnapshots(dbh, customerIds, { batchKey }) {
 // Historical rows survive their retirement inside the lookback: composite
 // in the completed-visit evidence, withheld in the current-rate decomposition.
 const RETIRED_COMBINED_CATALOG_KEYS = Object.freeze(['pest_termite_bait_quarterly', 'lawn_tree_shrub_combo']);
+// A catalog key that is TWO programs in one row, derived rather than
+// listed: the retired combined identities, any key naming two distinct
+// families (pest_rodent_quarterly — combined_service_cutover 20260612, its
+// retirement left scheduled rows in place), or a "combo". The import
+// exception's only-program test rejects these.
+const KEY_FAMILY_TOKENS = Object.freeze([
+  ['pest', /pest/], ['rodent', /rodent/], ['termite', /termite|wdo/], ['mosquito', /mosquito/],
+  ['lawn', /lawn|turf/], ['tree_shrub', /tree|shrub/], ['palm', /palm/],
+]);
+function isCompositeCatalogKey(key) {
+  const k = String(key || '').toLowerCase();
+  if (!k) return false;
+  if (RETIRED_COMBINED_CATALOG_KEYS.includes(k) || /combo|combined/.test(k)) return true;
+  return KEY_FAMILY_TOKENS.filter(([, re]) => re.test(k)).length >= 2;
+}
 const COMBINED_CATALOG_SQL = `COALESCE(s.service_key_snapshot, sv.service_key) IN (${RETIRED_COMBINED_CATALOG_KEYS.map((k) => `'${k}'`).join(', ')})`;
 
 // A partial refund's refund_amount carries the prorated card surcharge
@@ -2237,7 +2252,7 @@ function selectReviewEntries(book, { from, to, now, latestByLine, firstVisits = 
   const onlyProgramFor = (entry) => {
     if (Number(entry.planLine && entry.planLine.account_lines) !== 1) return false;
     const keys = (entry.serviceKeys || []).map((k) => String(k || '').toLowerCase());
-    if (keys.length > 1 || keys.some((k) => RETIRED_COMBINED_CATALOG_KEYS.includes(k))) return false;
+    if (keys.length > 1 || keys.some(isCompositeCatalogKey)) return false;
     return linePrograms({ familyKey: entry.familyKey, serviceKeys: entry.serviceKeys }).length === 1;
   };
   const selected = [];
@@ -3186,7 +3201,7 @@ module.exports = {
     isMultiProgramLine,
     trimmedMedian, median, quartiles, modeCents, monthsBetween, monthsAgoYmd, monthKeyMinus, anniversaryInWindow, reviewWindowFor, dateColumn, etDay,
     isBatchKey, assertBatchKey, assertYmd, firstCompletedVisitFor, selectReviewEntries, loadLatestSnapshots, engineItemLowConfidence, windowLabel, syncPricingConstants, daysAgoYmd, qualifyingKeyForLine,
-    PLAN_ROW_SQL, DATING_ROW_SQL, LIVE_STATUS_SQL, isImportedAccount, IMPORTED_ACCOUNT_LEAD_DAYS, informationalFlags, loadAccountActivity, reviewOccurrence,
+    PLAN_ROW_SQL, DATING_ROW_SQL, LIVE_STATUS_SQL, isImportedAccount, IMPORTED_ACCOUNT_LEAD_DAYS, informationalFlags, loadAccountActivity, reviewOccurrence, isCompositeCatalogKey,
     CARRY_FORWARD_STATUSES, CARRY_FORWARD_MAX_DAYS_PAST, REVIEW_WINDOW_FROM_DAYS, REVIEW_WINDOW_TO_DAYS, CALLBACK_LANE_FOR_FAMILY,
     visitsPerYearFor,
     conversationMinutesFor, interactionFor, wallMinutesFor, treatmentMinutesFor, computeLineAllowances, allowanceFor, lineDurationStats, visitRevenueCents,

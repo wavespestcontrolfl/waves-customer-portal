@@ -839,7 +839,9 @@ describe('anniversary and tenure', () => {
     P.selectReviewEntries([twoLines], win);
     expect(twoLines.anniversary).toMatchObject({ date: null });
     // single-key composites are two programs in one row; a keyless tree_shrub line is of unknown composition
-    for (const keys of [['pest_termite_bait_quarterly'], ['lawn_tree_shrub_combo'], []]) {
+    for (const key of ['pest_termite_bait_quarterly', 'lawn_tree_shrub_combo', 'pest_rodent_quarterly', 'lawn_mosquito_combo', 'pest_mosquito_bundle']) expect(P.isCompositeCatalogKey(key)).toBe(true);
+    for (const key of ['quarterly_pest_control', 'palm_injection', 'tree_shrub_bimonthly', 'rodent_bait_quarterly', 'lawn_care_9x', '', null]) expect(P.isCompositeCatalogKey(key)).toBe(false);
+    for (const keys of [['pest_termite_bait_quarterly'], ['lawn_tree_shrub_combo'], ['pest_rodent_quarterly'], []]) {
       const composite = mk({ account_lines: 1 }, keys);
       P.selectReviewEntries([composite], win);
       expect(composite.anniversary).toMatchObject({ date: null });
