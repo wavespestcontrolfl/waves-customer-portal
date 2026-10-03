@@ -515,20 +515,22 @@ function acceptAddressMatchesCandidate(estAddr, candidate) {
 // email AND a street line, and neither agrees. Agreeing on either one (an
 // existing customer adding a second property, or using a new email) keeps the
 // match; missing data on either side cannot contradict, so it stays reused.
-function pickAcceptCustomerMatch(candidates, estimate) {
-  if (!candidates.length) return null;
+function acceptLoneCandidateContradicted(candidate, estimate) {
   const email = String(estimate.customer_email || '').trim().toLowerCase();
   const estAddr = normalizeAddressForMatch(estimate.address);
+  const candEmail = String(candidate.email || '').trim().toLowerCase();
+  const candHasStreet = normalizeAddressForMatch(candidate.address_line1).length >= 5;
+  return !!(email && estAddr && candEmail && candHasStreet
+    && candEmail !== email && !acceptAddressMatchesCandidate(estAddr, candidate));
+}
+
+function pickAcceptCustomerMatch(candidates, estimate) {
+  if (!candidates.length) return null;
   if (candidates.length === 1) {
-    const only = candidates[0];
-    const candEmail = String(only.email || '').trim().toLowerCase();
-    const candHasStreet = normalizeAddressForMatch(only.address_line1).length >= 5;
-    if (email && estAddr && candEmail && candHasStreet
-      && candEmail !== email && !acceptAddressMatchesCandidate(estAddr, only)) {
-      return null;
-    }
-    return only;
+    return acceptLoneCandidateContradicted(candidates[0], estimate) ? null : candidates[0];
   }
+  const email = String(estimate.customer_email || '').trim().toLowerCase();
+  const estAddr = normalizeAddressForMatch(estimate.address);
   let pool = candidates;
   if (email) {
     const byEmail = pool.filter((c) => String(c.email || '').trim().toLowerCase() === email);
@@ -561,7 +563,21 @@ async function matchAcceptCustomerByPhone(estimate, database = db) {
     .whereNull('deleted_at')
     .orderByRaw('(phone = ?) DESC NULLS LAST', [estimate.customer_phone])
     .orderBy('updated_at', 'desc');
-  return { match: pickAcceptCustomerMatch(candidates, estimate), candidateCount: candidates.length };
+  const match = pickAcceptCustomerMatch(candidates, estimate);
+  // WHY there is no match, for the one case where "no match" must not fall
+  // back to the phone: a lone candidate the estimate contradicts. The accept's
+  // new-profile branch must then also keep the new profile OFF that
+  // customer's account (ensureCustomerAccount phone-matches again and would
+  // attach it, exposing the unrelated customer across the shared account).
+  // Multi-candidate no-match (landlord + rental) is NOT flagged: it keeps
+  // sharing the account as before. Existing callers read only match /
+  // candidateCount.
+  const contradicted = candidates.length === 1 && !match;
+  return {
+    match,
+    candidateCount: candidates.length,
+    ...(contradicted ? { contradicted: true, rejectedCustomerId: candidates[0].id, rejectedAccountId: candidates[0].account_id || null } : {}),
+  };
 }
 
 // Tiny cookie-header parser — avoids pulling in cookie-parser for one read.
@@ -11879,7 +11895,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // profile whose email/address uniquely matches — splitting the
         // estimate off the existing account. pickAcceptCustomerMatch needs the
         // full set to judge ambiguity.
-        const { match: existing, candidateCount } = await matchAcceptCustomerByPhone(estimate, trx);
+        const { match: existing, candidateCount, contradicted: phoneContradicted } = await matchAcceptCustomerByPhone(estimate, trx);
+        if (phoneContradicted) {
+          logger.warn(`[estimate-accept] phone on estimate ${estimate.id} belongs to a customer whose email and address both disagree with the estimate — creating a new profile on its own account`);
+        }
         if (!existing && candidateCount > 1) {
           logger.warn(`[estimate-accept] ${candidateCount} live customers share phone for estimate ${estimate.id}; no unique email/address match — creating a new profile`);
         }
@@ -11924,6 +11943,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             lastName: contactFillLastName || acceptContactSurname || nameParts.slice(1).join(' ') || 'Customer',
             phone: estimate.customer_phone,
             email: newProfileEmail,
+            // B18: a contradicted lone phone hit is somebody else's line —
+            // mint a separate account instead of phone-matching onto theirs.
+            // forceNewAccount skips every phone/email match (the unattended
+            // accept sets matchEmail off anyway) and ignorePhoneMatch keeps it
+            // from raising the admin-only PHONE_MATCH_CONFIRM at the customer.
+            ...(phoneContradicted ? { forceNewAccount: true, ignorePhoneMatch: true } : {}),
           });
           // Structured address when the free-text snapshot parses ("street,
           // city, ST zip" — the Places shape the builder stores); the legacy

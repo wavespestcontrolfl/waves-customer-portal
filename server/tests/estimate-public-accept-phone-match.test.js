@@ -105,6 +105,9 @@ describe('matchAcceptCustomerByPhone: a lone phone hit the estimate contradicts'
     const res = await matchAcceptCustomerByPhone(janeEstimate());
     expect(res.match).toBeNull();
     expect(res.candidateCount).toBe(1);
+    // The reason is exposed so the accept keeps the new profile off Bob's account.
+    expect(res.contradicted).toBe(true);
+    expect(res.rejectedCustomerId).toBe('cust-bob');
   });
 
   it('(a) email compare is case/space-insensitive, address compare keeps the token boundary', async () => {
@@ -121,6 +124,7 @@ describe('matchAcceptCustomerByPhone: a lone phone hit the estimate contradicts'
     mockDbFixtures['customers:list'] = [BOB];
     const res = await matchAcceptCustomerByPhone(janeEstimate({ customer_email: ' BOB@Example.COM ' }));
     expect(res.match).toBe(BOB);
+    expect(res.contradicted).toBeUndefined();
   });
 
   it('(c) address agrees, email differs: still matches (new email, same home)', async () => {
@@ -184,7 +188,10 @@ describe('matchAcceptCustomerByPhone: several phone candidates (unchanged)', () 
 
   it('(e) neither email nor address is unique: no match (fresh profile)', async () => {
     mockDbFixtures['customers:list'] = [LANDLORD, RENTAL];
-    expect((await matchAcceptCustomerByPhone(janeEstimate())).match).toBeNull();
+    const res = await matchAcceptCustomerByPhone(janeEstimate());
+    expect(res.match).toBeNull();
+    // Not a contradiction: the shared-phone case keeps sharing the account.
+    expect(res.contradicted).toBeUndefined();
     expect((await matchAcceptCustomerByPhone(janeEstimate({ customer_email: 'owner@example.com' }))).match).toBeNull();
   });
 

@@ -4122,3 +4122,99 @@ describe('PAF prepay — annual prepay charged after the first visit', () => {
     expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
   });
 });
+
+describe('B18 — a contradicted phone match never lands the new profile on the rejected customer\'s account', () => {
+  // A lone phone hit whose email AND address both disagree with the estimate is
+  // somebody else's line (estimate-public pickAcceptCustomerMatch). The accept
+  // mints a fresh profile, and ensureCustomerAccount must not phone-match it
+  // back onto the rejected customer's account (account-wide property listing /
+  // switching would expose the unrelated customer). The multi-candidate
+  // no-match case (landlord + rental on one phone) deliberately keeps sharing.
+  beforeEach(() => EstimateConverter.convertEstimate.mockReset());
+  let nameFanoutSpy;
+  beforeEach(() => {
+    nameFanoutSpy = jest.spyOn(require('../services/customer-contact-fanout'), 'propagateCustomerNameChange').mockResolvedValue({});
+  });
+  afterEach(() => nameFanoutSpy.mockRestore());
+
+  function conversionOk() {
+    EstimateConverter.convertEstimate.mockResolvedValueOnce({
+      customerId: 'cust-new',
+      tier: 'Bronze',
+      monthlyRate: 60,
+      firstScheduledServiceId: null,
+      recurringConversionSkipped: false,
+      welcomeSms: null,
+      membershipEmail: null,
+      deferredFollowUpReminderRows: [],
+    });
+  }
+
+  const sharedPhoneRow = (overrides) => ({
+    id: 'cust-bob',
+    account_id: 'acct-bob',
+    first_name: 'Bob',
+    last_name: 'Example',
+    phone: '(941) 555-0123',
+    email: 'bob@example.com',
+    address_line1: '9 Other St',
+    deleted_at: null,
+    ...overrides,
+  });
+
+  test('contradicted lone candidate: new profile is created on a DIFFERENT account, the rejected customer is untouched', async () => {
+    resetStore(recurringPestEstimate({ id: 'est-b18-1', token: 'tok-b18-1-x0123456789' }));
+    db.__state.tables.customers.push(sharedPhoneRow());
+    db.__state.tables.customer_accounts = [{ id: 'acct-bob' }];
+    conversionOk();
+
+    const res = await putAccept('tok-b18-1-x0123456789');
+    expect(res.status).toBe(200);
+
+    const newId = storedEstimate().customer_id;
+    expect(newId).toBeTruthy();
+    expect(newId).not.toBe('cust-bob');
+    const created = db.__state.tables.customers.find((c) => c.id === newId);
+    expect(created.email).toBe('pat@example.com');
+    expect(created.account_id).toBeTruthy();
+    expect(created.account_id).not.toBe('acct-bob');
+    expect(created.is_primary_profile).toBe(true);
+    expect(created.profile_label).toBe('Primary');
+    // A second account row was minted; the rejected customer still sits alone on his.
+    expect(db.__state.tables.customer_accounts).toHaveLength(2);
+    expect(db.__state.tables.customers.find((c) => c.id === 'cust-bob')).toMatchObject({ account_id: 'acct-bob', email: 'bob@example.com' });
+  });
+
+  test('control: several profiles share the phone and none is unique — the new profile still joins the shared account', async () => {
+    resetStore(recurringPestEstimate({ id: 'est-b18-2', token: 'tok-b18-2-x0123456789' }));
+    db.__state.tables.customers.push(
+      sharedPhoneRow({ id: 'cust-landlord', account_id: 'acct-shared', email: 'owner@example.com', address_line1: '10 Oak Ln' }),
+      sharedPhoneRow({ id: 'cust-rental', account_id: 'acct-shared', email: 'owner@example.com', address_line1: '55 Pine Ct' }),
+    );
+    db.__state.tables.customer_accounts = [{ id: 'acct-shared' }];
+    conversionOk();
+
+    const res = await putAccept('tok-b18-2-x0123456789');
+    expect(res.status).toBe(200);
+
+    const newId = storedEstimate().customer_id;
+    expect(['cust-landlord', 'cust-rental']).not.toContain(newId);
+    const created = db.__state.tables.customers.find((c) => c.id === newId);
+    expect(created.account_id).toBe('acct-shared');
+    expect(created.profile_label).toBe('Additional property');
+    expect(db.__state.tables.customer_accounts).toHaveLength(1);
+  });
+
+  test('control: a lone candidate whose email agrees is still reused (no new profile, no new account)', async () => {
+    resetStore(recurringPestEstimate({ id: 'est-b18-3', token: 'tok-b18-3-x0123456789' }));
+    db.__state.tables.customers.push(sharedPhoneRow({ email: 'pat@example.com' }));
+    db.__state.tables.customer_accounts = [{ id: 'acct-bob' }];
+    conversionOk();
+
+    const res = await putAccept('tok-b18-3-x0123456789');
+    expect(res.status).toBe(200);
+    expect(storedEstimate().customer_id).toBe('cust-bob');
+    expect(db.__state.tables.customers).toHaveLength(1);
+    expect(db.__state.tables.customer_accounts).toHaveLength(1);
+  });
+});
