@@ -25,6 +25,7 @@ const uuid = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const VISIT = uuid(1);
 const ASSESSMENT = uuid(2);
 const CATALOG = uuid(3);
+const CUSTOMER = uuid(30);
 const TECH = uuid(5);
 const P_HERB = uuid(11);
 const P_UNKNOWN = uuid(14);
@@ -36,7 +37,7 @@ const PROFILE_ROW = (extra = {}) => ({
   completion_mode: 'service_report', project_type: null, companion_types: null, active: true, ...extra,
 });
 const visit = (extra = {}) => ({
-  id: VISIT, customer_id: 'cust-1', property_id: 'prop-1', service_type: 'Lawn Care', service_id: CATALOG,
+  id: VISIT, customer_id: CUSTOMER, property_id: 'prop-1', service_type: 'Lawn Care', service_id: CATALOG,
   scheduled_date: '2026-10-05', status: 'confirmed', visit_id: null, technician_id: 'tech-1',
   cust_address_line1: '100 Example Court', cust_city: 'Bradenton', cust_state: 'FL', cust_zip: '34201', ...extra,
 });
@@ -46,7 +47,7 @@ const herbicide = {
   post_application_watering: { mode: 'hold', hold_hours: 24, source: 'label' },
 };
 const PREFS = {
-  customer_id: 'cust-1', irrigation_system: true, irrigation_system_type: ['rotor'], irrigation_run_minutes: 30,
+  customer_id: CUSTOMER, irrigation_system: true, irrigation_system_type: ['rotor'], irrigation_run_minutes: 30,
   watering_days: ['Mon', 'Thu'], irrigation_confirmed_fields: ['irrigation_system_type', 'irrigation_run_minutes', 'watering_days'],
 };
 
@@ -119,11 +120,11 @@ const baseTables = (extra = {}) => ({
   // What the property-history resolver reads (the visit's installed assessment, joined; the
   // customer's properties; any recorded move and baseline reset).
   'lawn_assessments as la': [{
-    id: ASSESSMENT, customer_id: 'cust-1', service_id: VISIT, confirmed_by_tech: true, property_id: 'prop-1',
-    history_visit_id: VISIT, history_visit_customer_id: 'cust-1', history_visit_property_id: 'prop-1',
+    id: ASSESSMENT, customer_id: CUSTOMER, service_id: VISIT, confirmed_by_tech: true, property_id: 'prop-1',
+    history_visit_id: VISIT, history_visit_customer_id: CUSTOMER, history_visit_property_id: 'prop-1',
     history_visit_date: '2026-10-05', service_date: '2026-10-05', created_at: '2026-10-05T12:00:00Z',
   }],
-  customer_properties: [{ id: 'prop-1', customer_id: 'cust-1', active: true, is_primary: true, address_line1: '100 Example Court' }],
+  customer_properties: [{ id: 'prop-1', customer_id: CUSTOMER, active: true, is_primary: true, address_line1: '100 Example Court' }],
   lawn_baseline_resets: [],
   lawn_assessment_photos: [{ zone: 'front' }, { zone: 'close_up' }, { zone: 'trouble' }],
   products_catalog: [herbicide],
@@ -263,11 +264,11 @@ describe('buildLawnFastContext: every read, made to throw', () => {
 
     test('the submit preflight: the same probe failure is a 503 retry, never an approval', async () => {
       const expectedVisit = {
-        propertyId: 'prop-1', customerId: 'cust-1', catalogServiceId: CATALOG, serviceType: 'Lawn Care', scheduledDate: '2026-10-05',
+        propertyId: 'prop-1', customerId: CUSTOMER, catalogServiceId: CATALOG, serviceType: 'Lawn Care', scheduledDate: '2026-10-05',
         isCallback: false, address: {}, technicianId: 'tech-1',
       };
       const run = (options, tables = {}) => preflightLawnFastCompletion({
-        knex: fakeKnex(baseTables(tables), options), svc: { id: VISIT, customer_id: 'cust-1' }, lawnAssessmentId: ASSESSMENT, expectedVisit,
+        knex: fakeKnex(baseTables(tables), options), svc: { id: VISIT, customer_id: CUSTOMER }, lawnAssessmentId: ASSESSMENT, expectedVisit, lawnFast: { visitType: 'recurring' },
       });
       expect(await run({ hasTableFails: true }, PROJECT_BACKED)).toMatchObject({ status: 503, payload: { code: 'completion_profile_lookup_failed' } });
       expect(await run({}, PROJECT_BACKED)).toMatchObject({ status: 409, payload: { reason: 'project_backed' } });
@@ -307,7 +308,7 @@ describe('buildLawnFastWateringPreview: any move-guard or plan read failure with
   });
 
   test('the turf profile read fails once and everything later succeeds: still no sentence', async () => {
-    expectWithheld(await preview({ customer_turf_profiles: { customer_id: 'cust-1' } }, { failFirst: { customer_turf_profiles: 1 } }), 'irrigation_context');
+    expectWithheld(await preview({ customer_turf_profiles: { customer_id: CUSTOMER } }, { failFirst: { customer_turf_profiles: 1 } }), 'irrigation_context');
   });
 
   test('week plan read fails (gate on): no sentence', async () => {
@@ -380,10 +381,10 @@ describe('client-supplied ids are checked before they reach a uuid column (22P02
     const calls = [];
     const knex = uuidStrictKnex(baseTables(), calls);
     const expectedVisit = {
-      propertyId: 'prop-1', customerId: 'cust-1', catalogServiceId: CATALOG, serviceType: 'Lawn Care', scheduledDate: '2026-10-05',
+      propertyId: 'prop-1', customerId: CUSTOMER, catalogServiceId: CATALOG, serviceType: 'Lawn Care', scheduledDate: '2026-10-05',
       isCallback: false, address: {}, technicianId: 'tech-1',
     };
-    const result = await preflightLawnFastCompletion({ knex, svc: { id: VISIT, customer_id: 'cust-1' }, lawnAssessmentId: 'not-a-uuid', expectedVisit });
+    const result = await preflightLawnFastCompletion({ knex, svc: { id: VISIT, customer_id: CUSTOMER }, lawnAssessmentId: 'not-a-uuid', expectedVisit, lawnFast: { visitType: 'recurring' } });
     expect(result).toMatchObject({ status: 400, payload: { code: 'lawn_fast_assessment_required' } });
     expect(calls).not.toContain('lawn_assessments');
   });

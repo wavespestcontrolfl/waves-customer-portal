@@ -436,6 +436,7 @@ describe('preflightLawnFastCompletion', () => {
     svc: { id: VISIT, customer_id: 'cust-1' },
     lawnAssessmentId: ASSESSMENT,
     expectedVisit: IDENTITY,
+    lawnFast: { visitType: 'recurring' },
     ...args,
   });
 
@@ -466,9 +467,64 @@ describe('preflightLawnFastCompletion', () => {
   test.each([
     ['recurring', PROFILE()],
     ['one-time', PROFILE({ billingType: 'one_time', serviceKey: 'lawn_care_one_time' })],
-  ])('a confirmed assessment on a %s visit passes, even with no photos at all (advisory floor)', async (_label, profile) => {
+  ])('a confirmed assessment on a %s visit passes, even with no photos at all (advisory floor)', async (label, profile) => {
     resolveCompletionProfileForScheduledService.mockResolvedValue(profile);
-    expect(await run({ lawn_assessments: { id: ASSESSMENT, confirmed_by_tech: true }, lawn_assessment_photos: [] })).toBeNull();
+    expect(await run({ lawn_assessments: { id: ASSESSMENT, confirmed_by_tech: true }, lawn_assessment_photos: [] }, { lawnFast: { visitType: label === 'one-time' ? 'one_time' : 'recurring' } })).toBeNull();
+  });
+
+  // The visit type the sheet opened with, echoed in the lawnFast block and recomputed with
+  // the same strict reads. Fixtures: the profile is recurring, the customer's lane is `mode`.
+  describe('the visit type the sheet opened with', () => {
+    const CONFIRMED = { lawn_assessments: { id: ASSESSMENT, confirmed_by_tech: true } };
+    const withLane = (mode) => ({ ...CONFIRMED, customers: { billing_mode: mode } });
+
+    test('unchanged recurring is accepted; unchanged one_time is accepted', async () => {
+      expect(await run(withLane(null), { lawnFast: { visitType: 'recurring' } })).toBeNull();
+      resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE({ billingType: 'one_time', serviceKey: 'lawn_care_one_time' }));
+      expect(await run(withLane(null), { lawnFast: { visitType: 'one_time' } })).toBeNull();
+      expect(await run(withLane('per_application'), { lawnFast: { visitType: 'per_application' } })).toBeNull();
+    });
+
+    test('the customer moved to per_application after the sheet opened as recurring: refused as a changed visit (terminal)', async () => {
+      expect(await run(withLane('per_application'), { lawnFast: { visitType: 'recurring' } }))
+        .toMatchObject({ status: 409, payload: { code: 'visit_identity_changed', reason: 'visit_type_changed' } });
+    });
+
+    test("the profile's billing type changed after open: refused", async () => {
+      resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE({ billingType: 'one_time', serviceKey: 'lawn_care_one_time' }));
+      expect(await run(withLane(null), { lawnFast: { visitType: 'recurring' } }))
+        .toMatchObject({ status: 409, payload: { code: 'visit_identity_changed', reason: 'visit_type_changed' } });
+    });
+
+    test('a sheet that opened with an unknown type is refused: its recipe is never accepted as recurring', async () => {
+      expect(await run(withLane(null), { lawnFast: { visitType: 'unknown' } }))
+        .toMatchObject({ status: 409, payload: { code: 'visit_identity_changed', reason: 'visit_type_changed' } });
+    });
+
+    test('the billing lane cannot be read at submit: 503 retry, never accepted (even if the echo says recurring or unknown)', async () => {
+      for (const visitType of ['recurring', 'unknown']) {
+        expect(await run({ ...CONFIRMED, customers: new Error('connection lost') }, { lawnFast: { visitType } }))
+          .toMatchObject({ status: 503, payload: { code: 'lawn_fast_visit_type_unavailable' } });
+      }
+    });
+
+    test.each([
+      ['no lawnFast object', null],
+      ['an empty lawnFast object', {}],
+      ['an array', []],
+      ['visitType undefined (dropped by JSON)', JSON.parse(JSON.stringify({ visitType: undefined }))],
+    ])('%s: 400 lawn_fast_expected_visit_required (correctable)', async (_label, lawnFast) => {
+      expect(await run(CONFIRMED, { lawnFast })).toMatchObject({ status: 400, payload: { code: 'lawn_fast_expected_visit_required' } });
+    });
+
+    test('a null visitType key is present but never equals a computed type: refused as changed', async () => {
+      expect(await run(withLane(null), { lawnFast: { visitType: null } })).toMatchObject({ status: 409, payload: { reason: 'visit_type_changed' } });
+    });
+
+    test('the context returns the visitType the sheet must echo', async () => {
+      const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex({ scheduled_services: visit(), customers: { billing_mode: 'per_application' } }) });
+      expect(ctx.visitType).toBe('per_application');
+    });
   });
 
   // Every reason lawnFastIneligibleReason can return has a defined outcome at
@@ -592,6 +648,7 @@ describe('the preflight reasons are ones the shared client hook classifies', () 
     [{ status: 503, code: 'completion_profile_lookup_failed' }, 'retry'],
     [{ status: 400, code: 'lawn_fast_expected_visit_required' }, 'correctable'],
     [{ status: 409, code: 'visit_identity_changed' }, 'terminal'],
+    [{ status: 503, code: 'lawn_fast_visit_type_unavailable' }, 'retry'],
     [{ status: 409, code: 'service_reassigned' }, 'terminal'],
     [{ status: 400, code: 'lawn_fast_assessment_required' }, 'correctable'],
     [{ status: 400, code: 'lawn_assessment_unconfirmed' }, 'correctable'],

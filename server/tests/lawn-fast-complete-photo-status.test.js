@@ -172,7 +172,7 @@ describe('advisory only', () => {
       propertyId: null, customerId: CUSTOMER, catalogServiceId: CATALOG, serviceType: 'Lawn Care', scheduledDate: '2026-10-05',
       isCallback: false, address: {}, technicianId: null,
     };
-    expect(await preflightLawnFastCompletion({ knex, svc: { id: VISIT, customer_id: CUSTOMER }, lawnAssessmentId: ASSESSMENT, expectedVisit })).toBeNull();
+    expect(await preflightLawnFastCompletion({ knex, svc: { id: VISIT, customer_id: CUSTOMER }, lawnAssessmentId: ASSESSMENT, expectedVisit, lawnFast: { visitType: 'recurring' } })).toBeNull();
     delete process.env.GATE_LAWN_FAST_COMPLETE;
   });
 });

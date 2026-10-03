@@ -91,6 +91,10 @@ describe('/complete wiring', () => {
     expect(src).toMatch(/recapVisitIdentityChanged\(expectedVisit, lockedSvcRow, snapshotCustomerRow\)/);
   });
 
+  test('the lawnFast block itself reaches the preflight (it carries the visitType the sheet opened with)', () => {
+    expect(src).toMatch(/preflightLawnFastCompletion\(\{[^}]*lawnFast,[^}]*\}\)/s);
+  });
+
   test('only a body that carries the block is judged', () => {
     expect(src).toMatch(/^\s+lawnFast = null,$/m);
     expect(src).toMatch(/if \(lawnFast !== null && lawnFast !== undefined\)/);

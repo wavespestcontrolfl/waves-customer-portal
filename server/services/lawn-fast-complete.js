@@ -639,6 +639,30 @@ const REQUIRED_IDENTITY_KEYS = Object.freeze([...RECAP_COMPARED_IDENTITY_KEYS, '
 const expectedVisitIncomplete = (expectedVisit) => !expectedVisit || typeof expectedVisit !== 'object'
   || Array.isArray(expectedVisit) || REQUIRED_IDENTITY_KEYS.some((key) => !(key in expectedVisit));
 
+const lawnFastEchoMissing = (lawnFast) => !lawnFast || typeof lawnFast !== 'object' || Array.isArray(lawnFast) || !('visitType' in lawnFast);
+
+// The refusal for a visit type that cannot be confirmed or has changed since the sheet
+// opened (see preflightLawnFastCompletion), or null.
+function visitTypeRefusal(verdict, lawnFast) {
+  if (verdict.readFailures.has('billing_mode')) {
+    return {
+      status: 503,
+      payload: { error: 'Could not verify the visit type for this service. Try again in a moment.', code: 'lawn_fast_visit_type_unavailable' },
+    };
+  }
+  if (lawnFast.visitType !== verdict.visitType) {
+    return {
+      status: 409,
+      payload: {
+        error: 'This visit changed since it was opened. Close and reopen it to review the current plan before completing.',
+        code: 'visit_identity_changed',
+        reason: 'visit_type_changed',
+      },
+    };
+  }
+  return null;
+}
+
 /**
  * Preflight for a /complete body carrying a `lawnFast` block. Returns
  * `{ status, payload }` (the shape preflightLawnAssessmentCompletion returns) to
@@ -652,6 +676,15 @@ const expectedVisitIncomplete = (expectedVisit) => !expectedVisit || typeof expe
  * idempotency key never reaches it. A visit whose status is already 'completed'
  * is still let through (a fresh key on a completed visit is the main flow's
  * to answer: service_already_completed), the only status allowed.
+ *
+ * The submit's `lawnFast` block must echo the context's `visitType` (the sheet must
+ * send `lawnFast: { visitType }` from the context it opened with): the preflight
+ * recomputes it with the same strict reads and compares.
+ *   block or visitType key missing                400 lawn_fast_expected_visit_required (correctable)
+ *   billing read failed at submit                  503 lawn_fast_visit_type_unavailable (retry, same key)
+ *   type changed since open (or echoed 'unknown')  409 visit_identity_changed, reason
+ *                                                  visit_type_changed (terminal: the main flow's own
+ *                                                  changed-visit code, so the hook treats it the same)
  *
  * Outcome of every reason lawnFastIneligibleReason can return at submit:
  *   profile_unavailable                          503 (retry, same key; a transient lookup failure)
@@ -671,7 +704,7 @@ const expectedVisitIncomplete = (expectedVisit) => !expectedVisit || typeof expe
  * An incomplete visit OUTCOME is not judged (nothing to confirm; the quick sheet
  * only submits completed), like the lawn assessment preflight.
  */
-async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = null, isIncompleteVisit = false, expectedVisit = null } = {}) {
+async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = null, isIncompleteVisit = false, expectedVisit = null, lawnFast = null } = {}) {
   if (isIncompleteVisit) return null;
   if (!featureGates.lawnFastCompleteLive()) {
     return {
@@ -688,7 +721,18 @@ async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = 
       },
     };
   }
-  const verdict = await resolveLawnFastEligibility(svc.id, knex, { allowStatuses: ['completed'], withVisitType: false });
+  // The visit type the sheet opened with must be echoed too (the key, like the identity
+  // keys): the planned recipe it preselected belongs to that type.
+  if (lawnFastEchoMissing(lawnFast)) {
+    return {
+      status: 400,
+      payload: {
+        error: 'Reopen this visit from the schedule so the sheet can confirm it is still the same visit.',
+        code: 'lawn_fast_expected_visit_required',
+      },
+    };
+  }
+  const verdict = await resolveLawnFastEligibility(svc.id, knex, { allowStatuses: ['completed'] });
   if (!verdict.ok) {
     return { status: 404, payload: { error: 'Service not found', code: 'lawn_fast_not_found' } };
   }
@@ -708,6 +752,15 @@ async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = 
       },
     };
   }
+  // The visit type is recomputed with the SAME function and the SAME strict reads the
+  // context used (billing lane + strict profile). If the billing read failed the type
+  // cannot be known now, so nothing is accepted (503, retry). Otherwise the echoed type
+  // must equal it: the office may have moved the customer to per-application billing, or
+  // changed the profile's billing type, while the sheet was open, and the recipe it
+  // preselected then no longer applies. An echoed 'unknown' (the context could not tell)
+  // can never equal a successful recompute, so it is refused as changed too.
+  const typeRefusal = visitTypeRefusal(verdict, lawnFast);
+  if (typeRefusal) return typeRefusal;
   // lawn_assessments.id is a uuid column: a malformed id is not this visit's
   // assessment (and must not reach the query as a 22P02 500).
   const assessment = isUuid(lawnAssessmentId)

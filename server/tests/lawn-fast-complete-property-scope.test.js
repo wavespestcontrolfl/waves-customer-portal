@@ -75,7 +75,7 @@ const EXPECTED_VISIT = {
   propertyId: NEW_PROPERTY, customerId: CUSTOMER, catalogServiceId: CATALOG, serviceType: 'Lawn Care',
   scheduledDate: '2026-10-05', isCallback: false, address: {}, technicianId: null,
 };
-const preflight = (knex) => preflightLawnFastCompletion({ knex, svc: { id: VISIT, customer_id: CUSTOMER }, lawnAssessmentId: ASSESSMENT, expectedVisit: EXPECTED_VISIT });
+const preflight = (knex) => preflightLawnFastCompletion({ knex, svc: { id: VISIT, customer_id: CUSTOMER }, lawnAssessmentId: ASSESSMENT, expectedVisit: EXPECTED_VISIT, lawnFast: { visitType: 'recurring' } });
 const context = (knex) => buildLawnFastContext(VISIT, { knex });
 
 const saved = process.env.GATE_LAWN_PROPERTY_HISTORY;
