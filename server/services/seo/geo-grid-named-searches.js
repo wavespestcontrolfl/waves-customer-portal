@@ -12,6 +12,7 @@
 
 const db = require('../../models/db');
 const GeoGrid = require('./geo-grid-tracker');
+const { etDateString, addETDays } = require('../../utils/datetime-et');
 
 // office_id is the WAVES_LOCATIONS key. The 'bradenton' office's GBP is branded
 // Lakewood Ranch, but the priority city it stands for is Bradenton.
@@ -91,7 +92,8 @@ function summarizeNamedSearches(runs, liveKeywords = []) {
 
 async function getNamedSearches() {
   const keywords = NAMED_SEARCH_KEYWORDS.map((k) => k.keyword);
-  const since = new Date(Date.now() - LOOKBACK_DAYS * 86400000).toISOString().slice(0, 10);
+  // scan_date is an Eastern calendar date (etDateString), so the cutoff is too.
+  const since = etDateString(addETDays(new Date(), -LOOKBACK_DAYS));
   // Complete runs only, judged against the run's own grid_size² (same rule as
   // the heat map), so a partial scan never reads as a ranking drop.
   const runs = await db('geo_grid_ranks')

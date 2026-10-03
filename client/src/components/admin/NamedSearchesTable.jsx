@@ -39,23 +39,27 @@ export function describeChange(search) {
 }
 
 function positionText(search) {
-  const { current, tracked, keyword } = search;
-  if (!current)
-    return tracked
-      ? "Not scanned yet"
-      : `Not tracked: add "${keyword}" under Edit keywords`;
+  const { current } = search;
+  if (!current) return "—";
   if (current.position == null) return "Not in the pack";
   return String(current.position);
+}
+
+// Each row carries its own scan date: a manual scan covers one office and
+// keyword, so the eight rows can be different ages. A keyword that has left
+// the scan list keeps its old numbers but says they will not update.
+export function scannedText(search) {
+  const { current, tracked, keyword } = search;
+  const untracked = `add "${keyword}" under Edit keywords`;
+  if (!current) return tracked ? "Not scanned yet" : `Not tracked: ${untracked}`;
+  const date = shortDate(current.scanDate);
+  return tracked ? date : `${date}, no longer tracked: ${untracked}`;
 }
 
 export default function NamedSearchesTable({ data }) {
   const searches = data?.searches || [];
   if (!searches.length) return null;
-  const lastScan = searches
-    .map((s) => s.current?.scanDate)
-    .filter(Boolean)
-    .sort()
-    .pop();
+  const anyScan = searches.some((s) => s.current);
   return (
     <UiCard className="p-6 [margin-bottom:16px]">
       <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:4px]">
@@ -64,10 +68,12 @@ export default function NamedSearchesTable({ data }) {
       <div className="text-ui-body text-ink-secondary [margin-bottom:12px]">
         Average map position across the points around each office where we
         show up. Lower is better.{" "}
-        {lastScan
-          ? `Last scan ${shortDate(lastScan)}.`
-          : data?.gated
-            ? "The weekly scan is off (GATE_GEO_GRID), so there is nothing to show yet."
+        {data?.gated
+          ? anyScan
+            ? "The weekly scan is off (GATE_GEO_GRID), so these numbers will not update."
+            : "The weekly scan is off (GATE_GEO_GRID), so there is nothing to show yet."
+          : anyScan
+            ? ""
             : "No scan has finished yet."}
       </div>
       <div className="overflow-x-auto">
@@ -78,6 +84,7 @@ export default function NamedSearchesTable({ data }) {
               <TH className="text-right u-nums">Position</TH>
               <TH className="text-right u-nums">In top 3</TH>
               <TH>Change since last month</TH>
+              <TH>Scanned</TH>
             </TR>
           </THead>
           <TBody>
@@ -101,6 +108,9 @@ export default function NamedSearchesTable({ data }) {
                       : "—"}
                   </TD>
                   <TD style={{ color: change.color }}>{change.text}</TD>
+                  <TD className={s.tracked && s.current ? "u-nums" : "text-ink-secondary"}>
+                    {scannedText(s)}
+                  </TD>
                 </TR>
               );
             })}

@@ -3,7 +3,7 @@ import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
-import NamedSearchesTable, { describeChange } from "./NamedSearchesTable";
+import NamedSearchesTable, { describeChange, scannedText } from "./NamedSearchesTable";
 
 function search(overrides = {}) {
   return {
@@ -34,7 +34,8 @@ describe("NamedSearchesTable", () => {
     expect(screen.getByText("3.2")).toBeInTheDocument();
     expect(screen.getByText("60% of 25 points")).toBeInTheDocument();
     expect(screen.getByText("Up 2.3 since 9/6 (was 5.5)")).toBeInTheDocument();
-    expect(screen.getByText(/Last scan 10\/4\./)).toBeInTheDocument();
+    expect(screen.getByText("10/4")).toBeInTheDocument();
+    expect(screen.queryByText(/weekly scan is off/)).not.toBeInTheDocument();
   });
 
   it("says the scan is off when nothing has been scanned and the gate is off", () => {
@@ -70,5 +71,33 @@ describe("describeChange", () => {
     expect(describeChange(search({ baseline: none, positionChange: null })).text).toBe("New in the pack since 9/6");
     expect(describeChange(search({ current: now(null), positionChange: null })).text).toBe("Dropped out of the pack since 9/6");
     expect(describeChange(search({ current: now(null), baseline: none, positionChange: null })).text).toBe("Still not in the pack since 9/6");
+  });
+});
+
+describe("stale rows", () => {
+  afterEach(cleanup);
+
+  it("each row shows its own scan date, not one date for the table", () => {
+    const older = search({
+      officeId: "venice",
+      label: "Pest control in Venice",
+      current: { scanDate: "2026-09-20", gridSize: 5, pins: 25, found: 25, position: 6, top3Pct: 8 },
+    });
+    render(<NamedSearchesTable data={{ searches: [search(), older], gated: false }} />);
+    expect(screen.getByText("10/4")).toBeInTheDocument();
+    expect(screen.getByText("9/20")).toBeInTheDocument();
+  });
+
+  it("a keyword removed from the scan keeps its numbers and says they will not update", () => {
+    const row = search({ keyword: "lawn care", tracked: false });
+    expect(scannedText(row)).toBe('10/4, no longer tracked: add "lawn care" under Edit keywords');
+    render(<NamedSearchesTable data={{ searches: [row], gated: false }} />);
+    expect(screen.getByText("3.2")).toBeInTheDocument();
+    expect(screen.getByText(/no longer tracked/)).toBeInTheDocument();
+  });
+
+  it("says the scan is off even when earlier scans are on the page", () => {
+    render(<NamedSearchesTable data={{ searches: [search()], gated: true }} />);
+    expect(screen.getByText(/weekly scan is off \(GATE_GEO_GRID\), so these numbers will not update/)).toBeInTheDocument();
   });
 });
