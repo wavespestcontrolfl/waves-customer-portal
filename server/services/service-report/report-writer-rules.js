@@ -357,15 +357,27 @@ const PAST_BEFORE_RE = /\b(?:last|past|previous|prior|preceding)\s+(?:\S+\s+){0,
 const FREQUENCY_BEFORE_RE = /\b(?:once|twice|times|every|each|per)\s+(?:\S+\s+){0,2}$/i;
 const LAWN_WEEKDAY_RE = /\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\b/i;
 const LAWN_MONTH_DAY_RE = /\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+\d{1,2}(?:st|nd|rd|th)?\b/i;
+const LAWN_NUMERIC_DATE_RE = /\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/;
+// A result tied to the next visit ("should fade by your next visit"); a plan
+// at it ("we will recheck at your next visit") passes.
+const LAWN_BY_NEXT_VISIT_RE = /\b(?:by|until|before)\s+(?:your|the|our)\s+next\s+(?:visit|treatment|application|service|appointment)\b/i;
+// A frequency is the schedule of the work, never of a result: the exemption
+// needs a work word in the same sentence ("we apply it once a week" passes,
+// "the lawn should look greener every week" fails).
+const LAWN_WORK_WORD_RE = /\b(?:appl(?:y|ies|ied|ication|ications)|treat(?:s|ed|ing|ment|ments)?|visits?|services?|feed(?:s|ing|ings)?|mow(?:s|ed|ing)?|checks?|spray(?:s|ed|ing)?)\b/i;
 const LAWN_NAMED_TIMING_RE = /\bover\s+time\b|\b(?:soon|shortly|eventually|later|tomorrow|tonight|overnight)\b/i;
 function lawnResultTimingViolation(text) {
   const copy = String(text || '');
-  if (TIMEFRAME_RE.test(copy) || LAWN_NAMED_TIMING_RE.test(copy)
-    || LAWN_WEEKDAY_RE.test(copy) || LAWN_MONTH_DAY_RE.test(copy)) return true;
-  for (const m of copy.matchAll(LAWN_TIME_UNIT_RE)) {
-    const after = copy.slice(m.index + m[0].length, m.index + m[0].length + 20);
-    const before = copy.slice(Math.max(0, m.index - 30), m.index);
-    if (!PAST_AFTER_RE.test(after) && !PAST_BEFORE_RE.test(before) && !FREQUENCY_BEFORE_RE.test(before)) return true;
+  if (TIMEFRAME_RE.test(copy) || LAWN_NAMED_TIMING_RE.test(copy) || LAWN_BY_NEXT_VISIT_RE.test(copy)
+    || LAWN_WEEKDAY_RE.test(copy) || LAWN_MONTH_DAY_RE.test(copy) || LAWN_NUMERIC_DATE_RE.test(copy)) return true;
+  for (const sentence of copy.split(/(?<=[.!?])\s+|\n+/)) {
+    for (const m of sentence.matchAll(LAWN_TIME_UNIT_RE)) {
+      const after = sentence.slice(m.index + m[0].length, m.index + m[0].length + 20);
+      const before = sentence.slice(Math.max(0, m.index - 30), m.index);
+      if (PAST_AFTER_RE.test(after) || PAST_BEFORE_RE.test(before)) continue;
+      if (FREQUENCY_BEFORE_RE.test(before) && LAWN_WORK_WORD_RE.test(sentence)) continue;
+      return true;
+    }
   }
   return false;
 }

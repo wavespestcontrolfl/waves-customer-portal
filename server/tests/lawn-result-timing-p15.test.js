@@ -142,6 +142,9 @@ describe('lawnResultTimingViolation: a closed world on durations', () => {
     'Color should return by October 10.',
     'You will see it this weekend.',
     'Expect greener turf in a month or two.',
+    'The weeds should fade by your next visit.',
+    'The lawn should look greener every week.',
+    'Visible improvement should arrive by 10/10.',
   ])('any forward duration or calendar deadline fails: %s', (text) => {
     expect(lawnResultTimingViolation(text)).toBe(true);
   });
