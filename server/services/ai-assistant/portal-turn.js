@@ -349,6 +349,9 @@ async function claimRequest(row, attemptId, root) {
       // scope lock. Its own retry replays the response; a later request can
       // continue without waiting for an otherwise idle lease to expire.
       const activeResponse = parseJson(active?.response);
+      if (activeResponse && String(active.id) === String(row.id)) {
+        return { kind: 'completed', response: activeResponse };
+      }
       if (activeResponse) {
         await root.queryOnConnection(
           trx('portal_chat_requests').where({ id: active.id, state: 'processing' })
@@ -361,7 +364,6 @@ async function claimRequest(row, attemptId, root) {
             }),
           connection, 'completed turn release',
         );
-        if (String(active.id) === String(row.id)) return { kind: 'completed', response: activeResponse };
         active = null;
       }
       if (active?.lease_expired) {
