@@ -1085,6 +1085,23 @@ describe('customer surfaces', () => {
       expect(await comms.handleSmsDeliveryFailure({ sid: 'SM1', status: 'failed' }, { dbh })).toEqual([]);
     });
 
+    test('an email that no provider took (blocked / suppressed) gets a NEW attempt identity once the cause is cleared; an uncertain send keeps its identity', async () => {
+      mockDb.reset(book());
+      emailLeg.mockResolvedValue({ sent: false, attempted: false });
+      smsLeg.mockResolvedValue({ sent: false, attempted: false });
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      expect(notices()[0].status).toBe('unreachable');
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW }); // suppression cleared, send again
+      expect(emailLeg.mock.calls[1][0].idempotencyKeyBase).not.toBe(emailLeg.mock.calls[0][0].idempotencyKeyBase);
+      // uncertain: parked, never re-sent, nothing advances
+      mockDb.reset(book());
+      emailLeg.mockClear();
+      emailLeg.mockResolvedValue({ sent: false, attempted: true });
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      expect(notices()[0].status).toBe('send_uncertain');
+      expect(meta().send_attempts).toBeUndefined();
+    });
+
     test('an authorized re-send after a bounce is a NEW attempt: the email idempotency key changes, so the library does not dedupe it against the bounced message', async () => {
       await sendEmailOnly();
       const first = emailLeg.mock.calls[0][0].idempotencyKeyBase;
@@ -1092,13 +1109,6 @@ describe('customer surfaces', () => {
       await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
       const second = emailLeg.mock.calls[1][0].idempotencyKeyBase;
       expect(second).not.toBe(first);
-      // ...while a plain retry with no bounce in between keeps its identity
-      mockDb.reset(book());
-      emailLeg.mockClear();
-      emailLeg.mockResolvedValue({ sent: false, attempted: true, definiteNonSend: true });
-      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
-      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
-      expect(emailLeg.mock.calls[1][0].idempotencyKeyBase).toBe(emailLeg.mock.calls[0][0].idempotencyKeyBase);
     });
 
     test('a prepaid amount already staged is un-staged and the notice returns to unapplied', async () => {

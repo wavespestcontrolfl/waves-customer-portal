@@ -180,15 +180,18 @@ router.post('/events', express.raw({ type: '*/*' }), async (req, res) => {
   // SendGrid will retry the entire batch on non-2xx, so partial failures
   // would double-apply the good rows.
   let processed = 0;
+  let retryNeeded = false;
   for (const ev of events) {
     try {
       await handleEvent(ev);
       processed++;
     } catch (err) {
       logger.error(`[sendgrid-webhook] event ${ev.sg_event_id || '?'} (${ev.event}) failed: ${err.message}`);
+      // A rate review reconciliation that could not be recorded must be redelivered.
+      if (err && err.retryWebhook) retryNeeded = true;
     }
   }
-  res.status(200).json({ received: events.length, processed });
+  res.status(retryNeeded ? 500 : 200).json({ received: events.length, processed });
 });
 
 async function handleEvent(ev) {
@@ -380,7 +383,16 @@ async function handleEvent(ev) {
         await require('../utils/customer-comms-lock').lockCustomerComms(trx, emailMessage.recipient_id);
       }
       attemptMatched = await handleEmailMessageEvent(ev, emailMessage, trx);
-      if (attemptMatched) deliveryAlerts = await rateReviewComms.handleEmailDeliveryEvent(trx, emailMessage, ev);
+      if (attemptMatched) {
+        try {
+          deliveryAlerts = await rateReviewComms.handleEmailDeliveryEvent(trx, emailMessage, ev);
+        } catch (err) {
+          // The transaction (and this event's ledger row) rolls back; /events
+          // answers non-2xx so SendGrid redelivers, and the ledger dedupes the
+          // events that did commit.
+          throw Object.assign(err, { retryWebhook: true });
+        }
+      }
     });
     if (processedNew && deliveryAlerts.length) await rateReviewComms.raiseDeliveryAlerts(deliveryAlerts);
     // Bounce recovery runs AFTER the event transaction commits, only when the

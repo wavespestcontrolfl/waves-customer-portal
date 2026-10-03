@@ -652,8 +652,17 @@ function claimKeyFor(noticeIds, attempt = 0) {
 function priorAttempts(lines) {
   return Math.max(0, ...lines.map((l) => {
     const m = parseJson(l.notice.metadata, {});
-    return (Array.isArray(m.delivery_revocations) ? m.delivery_revocations.length : 0) + (m.delivery_revoked ? 1 : 0);
+    return (Array.isArray(m.delivery_revocations) ? m.delivery_revocations.length : 0) + (m.delivery_revoked ? 1 : 0) + (Number(m.send_attempts) || 0);
   }));
+}
+
+// A send that no provider took (every leg blocked, suppressed, no contact, or a
+// definite rejection) is over: the next authorized send is a NEW attempt, so the
+// email library does not dedupe it against the blocked message once the cause
+// (a cleared suppression, a fixed address) is gone. Uncertain sends never reach
+// this: they stay parked under their own key.
+function noSendAttemptMeta(lines) {
+  return { send_attempts: Math.max(0, ...lines.map((l) => Number(parseJson(l.notice.metadata, {}).send_attempts) || 0)) + 1 };
 }
 
 async function claimLines(dbh, entry) {
@@ -931,10 +940,10 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
     // with the named reason (the preview recomputes who it belongs to) —
     // never parked unreachable.
     if (holdReason && !attempted) {
-      await settleLines(dbh, entry, { status: 'draft', keepFrozen: false, frozen, hold: holdReason, extra: dispatchMeta });
+      await settleLines(dbh, entry, { status: 'draft', keepFrozen: false, frozen, hold: holdReason, extra: { ...dispatchMeta, ...noSendAttemptMeta(entry.lines) } });
       return { outcome: emailRejected || smsNotPrepared ? 'rejected' : 'in_flight', holdReason };
     }
-    await settleLines(dbh, entry, { status: attempted ? UNCERTAIN : 'unreachable', keepFrozen: attempted, frozen, hold: holdReason, extra: dispatchMeta });
+    await settleLines(dbh, entry, { status: attempted ? UNCERTAIN : 'unreachable', keepFrozen: attempted, frozen, hold: holdReason, extra: attempted ? dispatchMeta : { ...dispatchMeta, ...noSendAttemptMeta(entry.lines) } });
     return { outcome: attempted ? 'uncertain' : 'unreachable' };
   }
   const sentAt = clock();

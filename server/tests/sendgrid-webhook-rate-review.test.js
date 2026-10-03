@@ -47,7 +47,18 @@ jest.mock('../models/db', () => {
     db.isTransaction = inTx;
     db.raw = jest.fn(async (sql, bindings) => { if (inTx) mockState.raw.push(String(bindings && bindings[0])); return { rows: [] }; });
     db.fn = { now: () => new Date() };
-    db.transaction = async (fn) => { mockState.txOpen += 1; const r = await fn(make(true)); mockState.txDone += 1; return r; };
+    db.transaction = async (fn) => {
+      mockState.txOpen += 1;
+      const before = new Set(mockState.ledger);
+      try {
+        const r = await fn(make(true));
+        mockState.txDone += 1;
+        return r;
+      } catch (err) {
+        mockState.ledger = before; // a rolled-back transaction takes its ledger row with it
+        throw err;
+      }
+    };
     return db;
   };
   return make(false);
@@ -105,6 +116,17 @@ describe('SendGrid event webhook → rate review letter reconciliation', () => {
     expect(message).toMatchObject({ id: 'em-1', template_key: 'billing.rate_review_notice' });
     expect(passed).toMatchObject({ event: 'bounce', sg_message_id: 'smsg1.filter' });
     expect(mockRaise).toHaveBeenCalledWith(alerts);
+  });
+
+  test('a reconciliation that cannot be recorded answers non-2xx so SendGrid redelivers; the rolled-back event then reconciles on the redelivery', async () => {
+    mockHandle.mockRejectedValueOnce(new Error('db down'));
+    const ev = event({ sg_event_id: 'evt-retry' });
+    expect((await post([ev])).status).toBe(500);
+    expect(mockState.ledger.has('evt-retry')).toBe(false); // rolled back with the event ledger row
+    mockHandle.mockResolvedValue([{ noticeId: 'n1', customerId: 'c1' }]);
+    expect((await post([ev])).status).toBe(200);
+    expect(mockHandle).toHaveBeenCalledTimes(2);
+    expect(mockRaise).toHaveBeenCalledTimes(1);
   });
 
   test('lock order: a rate review event takes customer-comms BEFORE the address key (the sender\'s order); another message takes no customer-comms lock', async () => {
