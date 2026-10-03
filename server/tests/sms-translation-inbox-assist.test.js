@@ -5,6 +5,8 @@ const mockLast = jest.fn();
 const mockTrial = jest.fn();
 const mockLater = jest.fn();
 const mockClaim = jest.fn();
+const mockLiveAnswer = jest.fn();
+jest.mock('../services/sms-suggest-mode', () => ({ threadHasLiveAnswer: (...a) => mockLiveAnswer(...a) }));
 
 jest.mock('../models/db', () => Object.assign(jest.fn((table) => {
   // sms_log is read twice: the latest inbound (.first) and the outbound rows after it (.select)
@@ -31,6 +33,7 @@ beforeEach(() => {
   mockGateOn = true;
   mockLast.mockReset(); mockTrial.mockReset(); mockLater.mockReset(); mockClaim.mockReset();
   mockClaim.mockResolvedValue(1);
+  mockLiveAnswer.mockReset(); mockLiveAnswer.mockResolvedValue(null);
   mockLater.mockResolvedValue([]);
   mockLast.mockResolvedValue({ id: 's1', from_phone: '+19415550100', created_at: new Date('2026-10-03T14:00:00Z') });
   mockTrial.mockResolvedValue(READY);
@@ -83,6 +86,13 @@ describe('inboxAssistFor', () => {
     expect(mockClaim).not.toHaveBeenCalled();
     mockTrial.mockResolvedValue(READY);
     mockClaim.mockClear(); mockClaim.mockResolvedValue(1);
+    // the suggest lane's guard under the thread lock: a staff reply still with the provider, or a newer text
+    mockLiveAnswer.mockResolvedValueOnce('reply_in_flight');
+    expect(await claim()).toBe('claimed');
+    mockLiveAnswer.mockResolvedValueOnce('newer_inbound');
+    expect(await claim()).toBe('stale');
+    expect(mockLiveAnswer).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ threadLast10: '9415550100', customerId: 'c1', inboundSmsLogId: 's1' }));
+    expect(mockClaim).not.toHaveBeenCalled();
     expect(await claim({ trialId: 6 })).toBe('stale'); // another text's trial
     expect(await claim({ to: '+19415550177' })).toBe('stale'); // another number
     expect(await claim({ customerId: null })).toBe('stale');

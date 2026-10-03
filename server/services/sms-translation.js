@@ -979,6 +979,11 @@ async function claimTranslationReplyForSend({ trialId, customerId, to, now = new
     if (!assist || assist.pending || String(assist.trialId) !== String(trialId)) return 'stale';
     if (assist.replyUsed) return 'claimed';
     if (!assist.replyTranslated) return 'stale';
+    // The suggest lane's own guard, under the same thread lock: a human answer, a staff reply queued or still
+    // with the provider (which the card's read leaves out), or a newer text all refuse the send.
+    const threadLast10 = String(to || '').replace(/\D/g, '').slice(-10) || null;
+    const blocker = await require('./sms-suggest-mode').threadHasLiveAnswer(dbi, { threadLast10, customerId, inboundCreatedAt: assist.createdAt, inboundSmsLogId: assist.smsLogId });
+    if (blocker) return blocker === 'reply_in_flight' ? 'claimed' : 'stale';
     const claimed = await dbi(TRIAL_TABLE).where({ id: assist.trialId, customer_id: customerId, verdict: 'ready' })
       .whereRaw("checks->>'send_claimed_at' IS NULL")
       .update({ checks: db.raw("jsonb_set(COALESCE(checks, '{}'::jsonb), '{send_claimed_at}', to_jsonb(?::text))", [now.toISOString()]) });
