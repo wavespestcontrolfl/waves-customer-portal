@@ -445,6 +445,63 @@ function mailToReplacedAddress(database, customerId, replaced) {
     .where((template) => template.whereNull('template_key').orWhereNot('template_key', 'service.visit_summary'));
 }
 
+// The one settlement for a row addressed to a replaced email, shared by the
+// correction (stopRetriesForReplacedEmail) and by a block verdict that arrives
+// after it (settleLateBlockOfReplacedRecipient): terminalize the row as failed
+// with its handoff evidence kept, then settle a billing replay's reservation.
+// `row` is read FOR UPDATE by the caller. Returns the settled row, or null when
+// the row is a sender-rendered notice (own settlement) or another worker moved
+// it first.
+async function settleReplacedRecipientRow(database, row, now) {
+  if (isSenderRenderedEmail(row)) return null;
+  const replay = billingReplay.isBillingEmailProviderReplay(row);
+  const requote = replay && billingReservation.isPrevisitReissue(row);
+  // A block event re-arms the row it blocked with the acceptance-time `sent_at` still on it. When the
+  // row carries positive evidence that its current attempt was rejected and no delivery evidence, the
+  // stamp describes an attempt that never reached a mailbox: clear it, as a claim does, so no repair
+  // reads the stopped row as accepted and re-stamps the reservation delivered. Delivery evidence
+  // (delivered, opened, clicked) is never cleared, and keeps the reservation closed.
+  const rejected = row.provider_handoff_phase === HANDOFF_PHASE_REJECTED && !!row.send_attempt_token
+    && row.provider_handoff_attempt_token === row.send_attempt_token
+    && !row.delivered_at && !row.opened_at && !row.clicked_at;
+  const [updated] = await database('email_messages')
+    .where({ id: row.id, send_attempt_token: row.send_attempt_token, status: row.status })
+    .update({
+      status: 'failed',
+      ...(rejected ? { sent_at: null } : {}),
+      error_message: requote ? `${billingReservation.BILLING_EMAIL_REQUOTE_REFUSAL_PREFIX}${EMAIL_REPLACED_REASON}` : EMAIL_REPLACED_REASON,
+      provider_retry_next_at: null,
+      provider_retry_exhausted_at: now,
+      updated_at: now,
+    })
+    .returning('*');
+  if (!updated) return null;
+  if (requote) await billingReservation.releaseBillingEmailReservationForRequote(updated, database);
+  else if (replay) await billingReservation.reopenBillingEmailReservationForReissue(updated, database);
+  return updated;
+}
+
+// A provider-block verdict for a row the correction already stamped: the stamp
+// keeps the webhook from scheduling a retry, but the block still leaves the
+// acceptance-time `sent_at` and the sender's `delivered` stamp on a row that
+// never reached a mailbox. The webhook calls this in its own event transaction
+// after writing the block, on the row read FOR UPDATE here (fresh categories,
+// not the pre-transaction read, so a stamp committed in between is seen), and
+// it settles through the same function the correction uses. Lock order, both
+// sides: address key, then the email row, then its ledger reservation, then
+// (previsit only) the appointment row behind a non-blocking cron lease try.
+// An unstamped row is left exactly as the webhook wrote it.
+async function settleLateBlockOfReplacedRecipient(message, database, now = new Date()) {
+  if (!message?.id || message.template_key === 'service.visit_summary') return null;
+  const query = database('email_messages').where({ id: message.id });
+  if (message.send_attempt_token == null) query.whereNull('send_attempt_token');
+  else query.where({ send_attempt_token: message.send_attempt_token });
+  const current = await query.forUpdate().first();
+  if (!current || current.status !== 'failed'
+    || !asArray(current.categories).includes(REPLACED_RECIPIENT_CATEGORY)) return null;
+  return settleReplacedRecipientRow(database, current, now);
+}
+
 // A correction of the customer's email retires every provider-block retry
 // addressed to the address it replaced (customer-email-fanout calls this
 // inside its own transaction): the stored copy would otherwise go on to the
@@ -484,32 +541,7 @@ async function stopRetriesForReplacedEmail(database, { customerId, oldEmail, now
     .select('*');
   let stopped = 0;
   for (const row of rows) {
-    if (isSenderRenderedEmail(row)) continue;
-    const replay = billingReplay.isBillingEmailProviderReplay(row);
-    const requote = replay && billingReservation.isPrevisitReissue(row);
-    // A block event re-arms the row it blocked with the acceptance-time `sent_at` still on it. When the
-    // row carries positive evidence that its current attempt was rejected and no delivery evidence, the
-    // stamp describes an attempt that never reached a mailbox: clear it, as a claim does, so no repair
-    // reads the stopped row as accepted and re-stamps the reservation delivered. Delivery evidence
-    // (delivered, opened, clicked) is never cleared, and keeps the reservation closed.
-    const rejected = row.provider_handoff_phase === HANDOFF_PHASE_REJECTED && !!row.send_attempt_token
-      && row.provider_handoff_attempt_token === row.send_attempt_token
-      && !row.delivered_at && !row.opened_at && !row.clicked_at;
-    const [updated] = await database('email_messages')
-      .where({ id: row.id, send_attempt_token: row.send_attempt_token, status: row.status })
-      .update({
-        status: 'failed',
-        ...(rejected ? { sent_at: null } : {}),
-        error_message: requote ? `${billingReservation.BILLING_EMAIL_REQUOTE_REFUSAL_PREFIX}${EMAIL_REPLACED_REASON}` : EMAIL_REPLACED_REASON,
-        provider_retry_next_at: null,
-        provider_retry_exhausted_at: now,
-        updated_at: now,
-      })
-      .returning('*');
-    if (!updated) continue;
-    stopped += 1;
-    if (requote) await billingReservation.releaseBillingEmailReservationForRequote(updated, database);
-    else if (replay) await billingReservation.reopenBillingEmailReservationForReissue(updated, database);
+    if (await settleReplacedRecipientRow(database, row, now)) stopped += 1;
   }
   await mailToReplacedAddress(database, customerId, replaced)
     .whereIn('status', ['queued', 'sent', 'failed'])
@@ -949,6 +981,7 @@ module.exports = {
   markRetryHeld,
   REPLACED_RECIPIENT_CATEGORY,
   stopRetriesForReplacedEmail,
+  settleLateBlockOfReplacedRecipient,
   retryClaimAtProviderBoundary,
   retryOne,
   runDueRetries,
