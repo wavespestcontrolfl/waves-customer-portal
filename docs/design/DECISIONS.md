@@ -3158,3 +3158,12 @@ dark forms inside `.tf-existing` keep their palette until their own slice.
 Visual only: same data, same actions. On a computer the Today page splits
 into two columns (up next + route; follow-through). The flag-off legacy page
 is unchanged.
+
+## 2026-10-03 — Schedule changes live inside the Today page; the time clock moves to Today
+
+Owner rulings 2026-10-03: in the field workspace, schedule changes
+(`visit_*` cards) render inside the Today overview instead of floating over
+it: a change touching today or tomorrow keeps its own card, the rest fold
+into one summary with Review and Clear all. Tools, More and an open visit
+keep the floating cards (they do not render the inline feed). The time clock
+moves from More to Today (`TechTimeTrackingCard variant="field"`).

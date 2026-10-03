@@ -70,7 +70,16 @@ describe('visitInPlanWeek (codex gh-r14: no historical watering-in credit)', () 
   });
   test('report-data stamps the rendered plan with visitInPlanWeek for the assessment date', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'service-report', 'report-data.js'), 'utf8');
-    expect(src).toMatch(/visitInPlanWeek: visitInPlanWeek\(snapshot, assessment\.service_date\)/);
+    // Two halves, one contract. The card builder (shared with the Fast Complete watering
+    // preview, so both stamp it the same way) stamps visitInPlanWeek from the DATE ARGUMENT it is
+    // given, never from "today"...
+    const builder = src.slice(src.indexOf('function buildReportWeekPlan('), src.indexOf('function buildLawnWaterContext('));
+    expect(builder).toMatch(/function buildReportWeekPlan\(snapshot, assessmentServiceDate\) \{/);
+    expect(builder).toMatch(/visitInPlanWeek: visitInPlanWeek\(snapshot, assessmentServiceDate\)/);
+    expect(builder).not.toMatch(/new Date\(|Date\.now\(|etDateString\(\)/);
+    // ...and the report's call site passes the ASSESSMENT's service date, and is the only caller there.
+    expect(src).toMatch(/waterContext\.weekPlan = buildReportWeekPlan\(snapshot, assessment\.service_date\);/);
+    expect(src.match(/buildReportWeekPlan\(/g)).toHaveLength(2); // the definition and that one call
   });
 });
 

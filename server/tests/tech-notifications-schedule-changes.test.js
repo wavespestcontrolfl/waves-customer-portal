@@ -73,6 +73,8 @@ describe('GET /schedule-changes', () => {
       expect(q.on[2].sql).toMatch(/CASE WHEN n\.payload->>'visit_id' ~\* '.+' THEN \(n\.payload->>'visit_id'\)::uuid END/);
     }
     expect(soonQ.whereRaw[0][0]).toMatch(/^COALESCE\(/);
+    // An old assignment card that never recorded the slot it left stays its own card.
+    expect(soonQ.whereRaw[0][0]).toContain("n.payload->>'prior_day_unknown' = 'true'");
     expect(soonQ.whereRaw[0][1]).toEqual([today, tomorrow, today, tomorrow, today, tomorrow]);
     expect(laterQ.whereRaw[0][0]).toMatch(/^NOT COALESCE\(/);
     expect(countQ.whereRaw[0][0]).toMatch(/^NOT COALESCE\(/);

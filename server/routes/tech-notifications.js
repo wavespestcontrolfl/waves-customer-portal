@@ -133,8 +133,11 @@ function soonSql(asOf) {
   const now = asOf;
   const days = [etDateString(now), etDateString(addETDays(now, 1))];
   return {
+    // prior_day_unknown: an old assignment card that never recorded the slot
+    // it left (backfill 20261003150000) — kept as its own card.
     sql: "COALESCE(n.payload->>'date' IN (?, ?) OR n.payload->>'previous_date' IN (?, ?)"
-      + " OR (n.payload->>'date' IS NULL AND to_char(s.scheduled_date, 'YYYY-MM-DD') IN (?, ?)), false)",
+      + " OR (n.payload->>'date' IS NULL AND to_char(s.scheduled_date, 'YYYY-MM-DD') IN (?, ?))"
+      + " OR n.payload->>'prior_day_unknown' = 'true', false)",
     bindings: [...days, ...days, ...days],
   };
 }
