@@ -135,8 +135,8 @@ function withDraft(serviceId, scope, operation) {
 // can finish after a newer draft has taken the same technician/visit key; the
 // draft id check keeps that late result from overwriting or deleting the new
 // work. The read and mutation share one IndexedDB readwrite transaction.
-function mutateDraftRow(serviceId, scope, mutate) {
-  return withDraft(serviceId, scope, (key) => openDb(DRAFT_DB_NAME).then((db) => {
+function mutateDraftRow(key, mutate) {
+  return withDraftKey(key, (key) => openDb(DRAFT_DB_NAME).then((db) => {
     if (!db) return false;
     return new Promise((resolve) => {
       let settled = false;
@@ -260,7 +260,7 @@ export function putServicePhotoDraftIfCurrent(serviceId, record, operatorScope, 
   if (!serviceId || !record || !operatorScope || !draftId) return Promise.resolve(false);
   const scope = servicePhotoDraftScope(operatorScope);
   const row = { draft: record, storedAt: now, serviceId: String(serviceId), scope };
-  return mutateDraftRow(serviceId, scope, (current) => {
+  return mutateDraftRow(completionDraftScopeKey(serviceId, scope), (current) => {
     const currentId = current?.draft?.draftId;
     if (currentId ? currentId !== draftId : !allowMissing) return null;
     return { value: row };
@@ -278,7 +278,7 @@ export function deleteServicePhotoDraft(serviceId, operatorScope) {
 export function deleteServicePhotoDraftIfCurrent(serviceId, operatorScope, draftId) {
   if (!serviceId || !operatorScope || !draftId) return Promise.resolve(false);
   const scope = servicePhotoDraftScope(operatorScope);
-  return mutateDraftRow(serviceId, scope, (current) => (
+  return mutateDraftRow(completionDraftScopeKey(serviceId, scope), (current) => (
     current?.draft?.draftId === draftId ? { delete: true } : null
   ));
 }
@@ -287,21 +287,22 @@ export function pruneServicePhotoDrafts(now = Date.now(), maxAgeMs = DRAFT_RETEN
   return pruneCompletionDrafts(now, maxAgeMs, "service-photo:");
 }
 
-// Deletes every draft row older than `maxAgeMs` across all scopes and
-// resolves the [{ serviceId, scope }] it removed so the caller can drop the
-// matching localStorage metadata. Each row's age check and delete are
-// ordered behind that draft's in-flight writes, so a panel refreshing an
-// old draft right now is re-read after its refresh and kept.
+// Deletes aged draft rows and returns the identities actually removed. The
+// age read and delete share one readwrite transaction: another tab cannot
+// refresh a row between the check and deletion. The per-key queue additionally
+// preserves the write ordering of panels in this tab.
 export function pruneCompletionDrafts(now = Date.now(), maxAgeMs = DRAFT_RETENTION_MS, keyPrefix = "") {
   return withStore(DRAFT_DB_NAME, "readonly", [], (store) => store.getAllKeys())
     .then((keys) => Promise.all(
-      (Array.isArray(keys) ? keys : []).filter((key) => String(key).startsWith(keyPrefix)).map((key) => withDraftKey(String(key), (k) => (
-        withStore(DRAFT_DB_NAME, "readonly", null, (store) => store.get(k)).then((row) => {
+      (Array.isArray(keys) ? keys : []).filter((key) => String(key).startsWith(keyPrefix)).map(async (key) => {
+        let removed = null;
+        const deleted = await mutateDraftRow(String(key), (row) => {
           if (!row || now - Number(row.storedAt || 0) < maxAgeMs) return null;
-          return withStore(DRAFT_DB_NAME, "readwrite", false, (store) => store.delete(k))
-            .then((result) => (result === false ? null : { serviceId: row.serviceId, scope: row.scope }));
-        })
-      ))),
+          removed = { serviceId: row.serviceId, scope: row.scope };
+          return { delete: true };
+        });
+        return deleted ? removed : null;
+      }),
     ))
     .then((results) => results.filter(Boolean));
 }

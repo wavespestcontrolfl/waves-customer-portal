@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import 'fake-indexeddb/auto';
-import { IDBFactory } from 'fake-indexeddb';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { IDBFactory, IDBObjectStore } from 'fake-indexeddb';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   DRAFT_RETENTION_MS,
@@ -20,6 +20,49 @@ beforeEach(() => {
 });
 
 describe('service photo drafts', () => {
+  it('does not delete a refresh committed by another tab during the stale-row check', async () => {
+    const now = Date.now();
+    const key = 'service-photo:tech-a:visit-1';
+    await putServicePhotoDraft('visit-1', { draftId: 'draft-a', stage: 'failed' }, 'tech-a', now - DRAFT_RETENTION_MS - 1);
+    const otherTab = await new Promise((resolve, reject) => {
+      const request = indexedDB.open('waves-completion-drafts', 1);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    let refresh;
+    let intercepted = false;
+    const originalGet = IDBObjectStore.prototype.get;
+    const spy = vi.spyOn(IDBObjectStore.prototype, 'get').mockImplementation(function readWithConcurrentRefresh(readKey) {
+      const request = originalGet.call(this, readKey);
+      if (readKey === key && !intercepted) {
+        intercepted = true;
+        request.addEventListener('success', () => {
+          // A separate connection has no access to this module's in-memory
+          // queue. It queues its write while the pruning read is still open.
+          const tx = otherTab.transaction('bodies', 'readwrite');
+          tx.objectStore('bodies').put({
+            draft: { draftId: 'draft-a', stage: 'uploading' },
+            storedAt: now, serviceId: 'visit-1', scope: 'service-photo:tech-a',
+          }, key);
+          refresh = new Promise((resolve, reject) => {
+            tx.oncomplete = resolve;
+            tx.onerror = () => reject(tx.error);
+          });
+        }, { once: true });
+      }
+      return request;
+    });
+    try {
+      await pruneServicePhotoDrafts(now);
+      await refresh;
+      expect(intercepted).toBe(true);
+      expect(await getServicePhotoDraft('visit-1', 'tech-a')).toMatchObject({ stage: 'uploading' });
+    } finally {
+      spy.mockRestore();
+      otherTab.close();
+    }
+  });
+
   it('keeps the same visit separate for each signed-in technician', async () => {
     const file = new File(['photo-a'], 'yard.jpg', { type: 'image/jpeg' });
     await putServicePhotoDraft('visit-1', { serviceId: 'visit-1', technicianId: 'tech-a', file, stage: 'uploading' }, 'tech-a');
