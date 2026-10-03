@@ -740,7 +740,9 @@ const PRICE_LINE_CONTEXT = [
   '  closed, say it goes out when the office opens and follow the callback rules. If the tool says',
   '  it could not be queued, or the caller declines to give a missing detail, call capture_lead',
   '  again WITHOUT estimate_requested, do not promise an estimate — say a team member will follow',
-  '  up — and end normally.',
+  '  up — and end normally. The one exception: when the tool result says an estimate already',
+  '  promised on this call is still owed, follow that result instead — the estimate stays',
+  '  promised, and a team member calls back to confirm where to send it.',
 ].join('\n');
 
 function agentDisplayName() {
@@ -2831,7 +2833,7 @@ class RelayConversation {
         language: this.language || null,
         // A location part the caller replaced is stored as a marker, not a fact.
         factsCollected: Object.fromEntries(Object.entries(convo._estimateFields || {})
-          .filter(([, v]) => v !== require('./relay-tools').ESTIMATE_FIELD_REPLACED)),
+          .filter(([, v]) => v !== require('./relay-estimate-details').ESTIMATE_FIELD_REPLACED)),
         tools: this._toolOutcomes.slice(),
         commitments: [...this._promises.entries()].map(([kind, v]) => ({ kind, verdict: v.verdict === true, expectation: v.expectation || null })),
         turnCount: this._userTurns.length,

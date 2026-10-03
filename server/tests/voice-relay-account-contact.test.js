@@ -520,6 +520,8 @@ describe('the exception lives at system priority, only when the caller-context l
     expect(buildBasePrompt(true)).toMatch(/When the result does not offer it, ask for what is missing/);
     // …and the pricing rule defers to that sequence for a known customer, so the prompt has one order.
     expect(buildBasePrompt(true)).toMatch(/already a customer, do\s+not collect those first: call capture_lead with what they have told you/);
+    // …and its decline rule yields to a promise the tool says is still owed.
+    expect(buildBasePrompt(true)).toMatch(/when the tool result says an estimate already\s+promised on this call is still owed, follow that result instead/);
     expect(buildBasePrompt(false)).not.toMatch(/KNOWN CALLER/);
   });
 });
