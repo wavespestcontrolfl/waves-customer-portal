@@ -1196,6 +1196,13 @@ const gates = {
   // at call time by sms-suggest-mode.js schedulingSuggestLive() — this entry
   // is for logGateStatus only.
   smsSchedulingSuggest: gateEnvValue('GATE_SMS_SCHEDULING_SUGGEST'),
+  // SMS scheduling decide step, SHADOW (slice 2 of sms-booking-complete-scope
+  // 2026-10-02): when a customer texts from a phone with an open sms_offers
+  // row, one model (ROUTES.smsSchedulingDecide) reads the reply and code checks
+  // its answer; the result is recorded in sms_offer_decisions as what it WOULD
+  // have done. Nothing moves, books or sends. Read at call time by
+  // sms-scheduling-decide.js decideLive() — this entry is for logGateStatus only.
+  smsSchedulingDecide: gateEnvValue('GATE_SMS_SCHEDULING_DECIDE'),
 
   // Voice-Corpus Miner (brand-voice loop, Phase A) — nightly mining of
   // human-authored SMS replies + consent-gated call transcripts into
