@@ -28,7 +28,7 @@ const { getInvoiceEmailRecipients } = require('./customer-contact');
 const { portalUrl } = require('../utils/portal-url');
 const { formatDisplayDate } = require('../utils/date-only');
 const { etDateString, addETDays } = require('../utils/datetime-et');
-const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+const { customerPhoneDisplay } = require('./home-line');
 
 const SERVICE_EMAIL = 'contact@wavespestcontrol.com';
 const NOTICE_LOCATIONS = new Set(['bradenton', 'parrish', 'sarasota', 'venice']);
@@ -228,7 +228,7 @@ async function sendNoticeEmail({ customer, idempotencyKeyBase, vars }) {
       payload: {
         ...vars,
         first_name: firstName,
-        company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
+        company_phone: customerPhoneDisplay(customer),
         company_email: SERVICE_EMAIL,
       },
     });
@@ -296,7 +296,11 @@ async function createAndSendBatch({ locationId = null, increase, effectiveDate, 
 
   const excludeCustomerIds = await annualPrepayExcludedIds();
   const customers = await targetsQuery({ locationId: loc, excludeCustomerIds })
-    .select('id', 'first_name', 'last_name', 'email', 'phone', 'monthly_rate')
+    .select(
+      'id', 'first_name', 'last_name', 'email', 'phone', 'monthly_rate',
+      'address_line1', 'address_line2', 'city', 'zip', 'latitude', 'longitude',
+      'home_line_location_id', 'home_line_address_key',
+    )
     .orderBy('id', 'asc');
 
   if (customers.length !== Number(expectedCount)) {

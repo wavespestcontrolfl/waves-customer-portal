@@ -5,7 +5,7 @@ const { getInvoiceEmailRecipients } = require('./customer-contact');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { formatDisplayDate, dateOnlyString } = require('../utils/date-only');
 const { currency } = require('./email-template');
-const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+const { customerPhoneDisplay } = require('./home-line');
 const { invoiceAmountDue } = require('./invoice-helpers');
 const { billingChannelAllowed, explicitBillingChannels } = require('./billing-delivery-channels');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
@@ -128,7 +128,11 @@ async function loadCustomer(customerId) {
   if (!customerId) return null;
   return db('customers')
     .where({ id: customerId })
-    .select('id', 'first_name', 'last_name', 'company_name', 'email', 'phone')
+    .select(
+      'id', 'first_name', 'last_name', 'company_name', 'email', 'phone',
+      'address_line1', 'address_line2', 'city', 'zip', 'latitude', 'longitude',
+      'home_line_location_id', 'home_line_address_key',
+    )
     .first();
 }
 
@@ -281,7 +285,7 @@ async function sendLifecycleTemplate({
     first_name: firstName,
     customer_name: customerName,
     customer_portal_url: portalBillingUrl(),
-    company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
+    company_phone: customerPhoneDisplay(customer),
     company_email: CONTACT_EMAIL,
     ...payload,
   };

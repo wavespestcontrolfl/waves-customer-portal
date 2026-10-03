@@ -16,6 +16,7 @@ const crypto = require('crypto');
 const EmailTemplateLibrary = require('./email-template-library');
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
+const { customerPhoneDisplay } = require('./home-line');
 
 const TYPE_LABELS = {
   lawn: 'Lawn Assessment',
@@ -32,9 +33,10 @@ const TYPE_LABELS = {
  * @param {Date|string|null} opts.expiresAt
  * @param {string|null} opts.recipientType 'lead' | 'customer' | null
  * @param {string|null} opts.recipientId
+ * @param {object|null} [opts.customer]  the customers row, when the report is for a customer (footer phone = their home line; omitted = main line)
  * @returns {{ok: boolean, blocked?: boolean, error?: string, messageId?: string|null}}
  */
-async function sendAssessmentReportEmail({ type, assessmentId, to, firstName, reportUrl, expiresAt, recipientType, recipientId }) {
+async function sendAssessmentReportEmail({ type, assessmentId, to, firstName, reportUrl, expiresAt, recipientType, recipientId, customer = null }) {
   if (!sendgrid.isConfigured()) {
     return { ok: false, error: 'Email is not configured — copy the report link instead.' };
   }
@@ -54,7 +56,7 @@ async function sendAssessmentReportEmail({ type, assessmentId, to, firstName, re
         expires_note: expiresNote,
         // Shared template variables — the seeded copy renders
         // "call {{company_phone}}"; omitting them would ship a broken line.
-        company_phone: '(941) 297-5749',
+        company_phone: customerPhoneDisplay(customer),
         company_email: 'contact@wavespestcontrol.com',
       },
       recipientType: recipientType || null,

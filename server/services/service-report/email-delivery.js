@@ -18,6 +18,7 @@ const { getServiceReportEmailRecipients, serviceReportEmailOptedOut, prefsUnavai
 const { inspectionCreditReportNote } = require('../inspection-credit');
 const { publicPortalUrl } = require('../../utils/portal-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../../constants/business');
+const { customerPhoneDisplay } = require('../home-line');
 const { legacyTemplateFallbackAllowed } = require('../email-fallback-gate');
 const { isFirstServiceVisit } = require('../customer-visit-history');
 const { stampedLine2Sql } = require('../stamped-address');
@@ -97,7 +98,7 @@ function countLabel(count, singular, plural = `${singular}s`) {
   return `${count} ${count === 1 ? singular : plural}`;
 }
 
-function serviceReportTemplatePayload({ recipient, data, reportUrl, serviceLabel, pdf, inspectionCreditNote = '', firstReport = false }) {
+function serviceReportTemplatePayload({ recipient, data, reportUrl, serviceLabel, pdf, inspectionCreditNote = '', firstReport = false, companyPhone = WAVES_SUPPORT_PHONE_DISPLAY }) {
   const findings = customerActionFindings(Array.isArray(data?.findings) ? data.findings : []);
   const applications = Array.isArray(data?.applications) ? data.applications : [];
   const dynamicContext = data?.dynamicContext || {};
@@ -149,7 +150,7 @@ function serviceReportTemplatePayload({ recipient, data, reportUrl, serviceLabel
     pdf_note: pdf
       ? 'Your PDF service report is attached.'
       : 'A downloadable PDF will be available shortly.',
-    company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
+    company_phone: companyPhone,
   };
 }
 
@@ -334,7 +335,7 @@ async function sendLegacyServiceReportEmail({
   }
 }
 
-function buildServiceReportV1Email({ data, reportUrl, pdfAttached = false, inspectionCreditNote = '' } = {}) {
+function buildServiceReportV1Email({ data, reportUrl, pdfAttached = false, inspectionCreditNote = '', companyPhone = WAVES_SUPPORT_PHONE_DISPLAY } = {}) {
   const serviceLine = serviceDisplayName(data);
   const serviceDate = formatDate(data?.serviceDate);
   const first = data?.customerName ? data.customerName.split(/\s+/)[0] : 'there';
@@ -411,9 +412,10 @@ function buildServiceReportV1Email({ data, reportUrl, pdfAttached = false, inspe
     lines,
     ctaHref: reportUrl,
     ctaLabel: 'View full report',
+    phone: companyPhone,
     footerNote: pdfAttached
-      ? `Your PDF service report is attached. Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY} with any questions.`
-      : `Your full report is ready at the link above. A downloadable PDF will be available shortly. Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY} with any questions.`,
+      ? `Your PDF service report is attached. Reply to this email or call ${companyPhone} with any questions.`
+      : `Your full report is ready at the link above. A downloadable PDF will be available shortly. Reply to this email or call ${companyPhone} with any questions.`,
   });
   const text = plainText([
     `Hi ${first},`,
@@ -437,7 +439,7 @@ function buildServiceReportV1Email({ data, reportUrl, pdfAttached = false, inspe
     '',
     pdfAttached ? 'The PDF service report is attached.' : 'A downloadable PDF will be available shortly.',
     '',
-    `Questions? Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.`,
+    `Questions? Reply to this email or call ${companyPhone}.`,
     'Waves Pest Control',
   ]);
 
@@ -482,6 +484,16 @@ async function loadServiceRecord(recordId) {
       'customers.last_name',
       'customers.email as customer_email',
       'customers.phone as customer_phone',
+      // The customer's own address + home-line stamp (not the visit's stamped
+      // address above) so the footer/body phone is their one number.
+      'customers.address_line1 as customer_address_line1',
+      'customers.address_line2 as customer_address_line2',
+      'customers.city as customer_city',
+      'customers.zip as customer_zip',
+      'customers.latitude as customer_latitude',
+      'customers.longitude as customer_longitude',
+      'customers.home_line_location_id as customer_home_line_location_id',
+      'customers.home_line_address_key as customer_home_line_address_key',
       ...SERVICE_CONTACT_COLUMNS.map((column) => `customers.${column}`),
       // The email's "completed ... at City, ST" line names the visit's
       // stamped city when present — a rental visit in another town must not
@@ -724,6 +736,17 @@ async function sendServiceReportV1Email(recordId, {
   }
 
   const serviceLabel = serviceDisplayName(data);
+  // The customer's home line (their own address, not the visit's stamped one).
+  const companyPhone = customerPhoneDisplay({
+    address_line1: service.customer_address_line1,
+    address_line2: service.customer_address_line2,
+    city: service.customer_city,
+    zip: service.customer_zip,
+    latitude: service.customer_latitude,
+    longitude: service.customer_longitude,
+    home_line_location_id: service.customer_home_line_location_id,
+    home_line_address_key: service.customer_home_line_address_key,
+  });
   const templateOutcomes = await Promise.allSettled(
     recipients.map((recipient) => EmailTemplateLibrary.sendTemplate({
         templateKey: 'service.report_ready',
@@ -736,6 +759,7 @@ async function sendServiceReportV1Email(recordId, {
           pdf,
           inspectionCreditNote,
           firstReport,
+          companyPhone,
         }),
         recipientType: 'customer',
         recipientId: service.customer_id || null,
@@ -829,6 +853,7 @@ async function sendServiceReportV1Email(recordId, {
       reportUrl: fullReportUrl,
       pdfAttached: !!pdf,
       inspectionCreditNote,
+      companyPhone,
     });
     return sendLegacyServiceReportEmail({
       recordId,

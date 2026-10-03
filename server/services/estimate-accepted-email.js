@@ -33,7 +33,7 @@ const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
 const { TZ, parseETDateTime, etDateString, formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
 const { portalUrl } = require('../utils/portal-url');
-const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+const { customerPhoneDisplay } = require('./home-line');
 const { withAccountPrimaryContact } = require('./customer-contact');
 const {
   BASE_TEMPLATE_KEY, SIGNUP_TEMPLATE_KEY, SHORT_TEMPLATE_KEY, SIGNUP_FULL_CATEGORY, SIGNUP_SHORT_CATEGORY,
@@ -294,13 +294,22 @@ function renderedCarriesAcceptanceCopy(result) {
 // address always wins. null when there is no usable address anywhere.
 async function resolveRecipient({ customerId, estimateId }) {
   const customer = customerId
-    ? await db('customers').where({ id: customerId }).first('id', 'first_name', 'last_name', 'email', 'account_id', 'is_primary_profile')
+    ? await db('customers').where({ id: customerId }).first(
+      'id', 'first_name', 'last_name', 'email', 'account_id', 'is_primary_profile',
+      'address_line1', 'address_line2', 'city', 'zip', 'latitude', 'longitude',
+      'home_line_location_id', 'home_line_address_key',
+    )
     : null;
   const own = usableEmail(customer?.email) ? null : await db('estimates').where({ id: estimateId }).first('customer_name', 'customer_email');
   let email = clean(own ? own.customer_email : customer?.email);
   if (!usableEmail(email) && customer) email = clean((await withAccountPrimaryContact({ ...customer, email: '' })).email);
   if (!usableEmail(email)) return null;
-  return { email, firstName: clean(customer?.first_name || greetingFirstToken({ customerName: own?.customer_name, customer })) || 'there' };
+  return {
+    email,
+    firstName: clean(customer?.first_name || greetingFirstToken({ customerName: own?.customer_name, customer })) || 'there',
+    // No linked customer row (an estimate-only contact) reads the main line.
+    companyPhone: customerPhoneDisplay(customer),
+  };
 }
 
 // One send of the onboarding email: the combined signup variant when given,
@@ -318,7 +327,7 @@ async function sendOnboardingTemplate(ctx, variant) {
       appointment_line: appointmentLineFor(ctx.appointment),
       acceptance_note: ctx.acceptanceNote,
       customer_portal_url: portalUrl('/login'),
-      company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
+      company_phone: ctx.recipient.companyPhone,
       ...v?.variables,
     },
     recipientType: 'customer',

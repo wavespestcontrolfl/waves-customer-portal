@@ -43,7 +43,7 @@ const { portalUrl } = require('../utils/portal-url');
 const { formatDisplayDate } = require('../utils/date-only');
 const { etDateString } = require('../utils/datetime-et');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
-const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+const { customerPhoneDisplay } = require('./home-line');
 const { currentRestrictionPolicy, resolveRestrictionCounty } = require('../config/irrigation-restrictions');
 const { countyConfirmedAfterMove, parseConfirmedFields } = require('./irrigation-schedule-confirmation');
 const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
@@ -662,7 +662,7 @@ async function sendPrepEmail({ customer, recipient, firstName, config, visit, pr
           first_name: firstName,
           watering_block: wateringBlock,
           customer_portal_url: portalUrl('/?tab=property'),
-          company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
+          company_phone: customerPhoneDisplay(customer),
           company_email: CONTACT_EMAIL,
         },
       });
@@ -704,7 +704,7 @@ async function sendPrepEmail({ customer, recipient, firstName, config, visit, pr
         customer_portal_url: portalVisitsUrl,
         // No visit to hang the page on → the portal's visits tab.
         prep_url: prepUrl || portalVisitsUrl,
-        company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
+        company_phone: customerPhoneDisplay(customer),
         company_email: CONTACT_EMAIL,
       },
     });

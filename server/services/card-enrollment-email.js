@@ -29,7 +29,7 @@ const {
   NON_ENROLLMENT_CONSENT_SOURCES,
 } = require('./payment-method-consents');
 const { portalUrl } = require('../utils/portal-url');
-const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+const { customerPhoneDisplay } = require('./home-line');
 
 const BILLING_EMAIL = 'billing@wavespestcontrol.com';
 
@@ -67,7 +67,11 @@ function cardLineFor(pm) {
 async function loadCustomerEmail(customerId) {
   const customer = await db('customers')
     .where({ id: customerId })
-    .first('id', 'first_name', 'email');
+    .first(
+      'id', 'first_name', 'email',
+      'address_line1', 'address_line2', 'city', 'zip', 'latitude', 'longitude',
+      'home_line_location_id', 'home_line_address_key',
+    );
   const email = clean(customer?.email);
   if (!email || !email.includes('@')) return { customer: null, email: null };
   return { customer, email };
@@ -202,7 +206,7 @@ async function sendAutopayEnrollmentConfirmation({ customerId, paymentMethodRowI
           : { card_line: cardLineFor(pm), charge_timing_line: timingLine }),
         authorization_text: clean(consentRow.consent_text_snapshot),
         customer_portal_url: portalUrl('/login'),
-        company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
+        company_phone: customerPhoneDisplay(customer),
         company_email: BILLING_EMAIL,
       },
       recipientType: 'customer',
@@ -326,7 +330,7 @@ async function sendAutopaySetupInvitation({ customerId, scheduledServiceId, serv
         charge_timing_line: timingLine,
         cancel_fee_line: cancelFeeSentence,
         customer_portal_url: portalUrl('/login'),
-        company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
+        company_phone: customerPhoneDisplay(customer),
         company_email: BILLING_EMAIL,
       },
       recipientType: 'customer',
@@ -395,7 +399,7 @@ async function sendCardHoldConfirmation({ estimateId, customerId } = {}) {
         // terms (Codex r3) — the customer's copy must carry the same term.
         surcharge_line: CARD_SURCHARGE_LINE,
         customer_portal_url: portalUrl('/login'),
-        company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
+        company_phone: customerPhoneDisplay(customer),
         company_email: BILLING_EMAIL,
       },
       recipientType: 'customer',

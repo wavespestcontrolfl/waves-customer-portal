@@ -355,7 +355,18 @@ function socialRowHtml() {
   return `<div style="margin:14px 0 0 0;text-align:center;">${SOCIALS.map(([slug, url, name]) => `<a href="${url}" style="display:inline-block;margin:0 3px;padding:4px;text-decoration:none;border:0;"><img src="https://portal.wavespestcontrol.com/app-email/social/${slug}.png" alt="${name}" width="20" height="20" style="width:20px;height:20px;border:0;vertical-align:middle;opacity:0.9;" /></a>`).join('')}</div>`;
 }
 
-function glassFinePrint(T, extra = '') {
+// The phone shown in the footer: the recipient's home line when the sender
+// passes it (home-line PR 4, owner 2026-10-02), else the main support line.
+// Accepts a display string like "(941) 297-2817"; the tel: link is built from
+// its digits. Anything that is not a 10-digit US number falls back to main.
+function footerPhone(phone) {
+  const digits = String(phone || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
+  if (digits.length !== 10) return { display: WAVES_SUPPORT_PHONE_DISPLAY, e164: WAVES_SUPPORT_PHONE_E164 };
+  return { display: `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`, e164: `+1${digits}` };
+}
+
+function glassFinePrint(T, extra = '', phone = null) {
+  const { display: phoneDisplay, e164: phoneE164 } = footerPhone(phone);
   // Balanced, centered stack: business+address / site·email·phone /
   // license — then socials and the logo (owner footer spec 07-06).
   // Every fine-print item stacks on its own line (owner calls 2026-07-17:
@@ -364,7 +375,7 @@ function glassFinePrint(T, extra = '') {
   // so the stack applies everywhere — centered, it reads intentional on
   // desktop too).
   return `${extra}<div class="dm-muted" style="font-family:${T.font};font-size:14px;letter-spacing:0.01em;color:${T.muted};line-height:1.65;text-align:center;">
-            ${WAVES_BUSINESS_NAME}<br/>${WAVES_ADDRESS_LINE}<br/><a href="${WAVES_WEBSITE_URL}" style="color:${T.muted};text-decoration:none;">${WAVES_WEBSITE_HOST}</a><br/><a href="mailto:contact@wavespestcontrol.com" style="color:${T.muted};text-decoration:none;">contact@wavespestcontrol.com</a><br/><a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.muted};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a><br/>${WAVES_FL_LICENSE_LINE}
+            ${WAVES_BUSINESS_NAME}<br/>${WAVES_ADDRESS_LINE}<br/><a href="${WAVES_WEBSITE_URL}" style="color:${T.muted};text-decoration:none;">${WAVES_WEBSITE_HOST}</a><br/><a href="mailto:contact@wavespestcontrol.com" style="color:${T.muted};text-decoration:none;">contact@wavespestcontrol.com</a><br/><a href="tel:${phoneE164}" style="color:${T.muted};text-decoration:none;">${phoneDisplay}</a><br/>${WAVES_FL_LICENSE_LINE}
           </div>
           ${socialRowHtml()}
           <div style="margin:12px 0 0 0;text-align:center;"><img src="${GLASS_LOGO_IMG}" alt="${WAVES_BUSINESS_NAME}" width="44" height="44" style="width:44px;height:44px;border:0;" /></div>`;
@@ -372,12 +383,12 @@ function glassFinePrint(T, extra = '') {
 
 // The complete universal Waves footer. Wrappers call this helper instead of
 // independently composing app links, company details, social links, and logo.
-function universalWavesFooterHtml(T, { appPromo = true } = {}) {
+function universalWavesFooterHtml(T, { appPromo = true, phone = null } = {}) {
   // appPromo:false → the newsletter lane. The customer-app pitch has no
   // relevance to a general local-newsletter subscriber (owner-accepted
   // critique 2026-07-29); it stays in the transactional/service wrappers,
   // where every recipient is a customer.
-  return glassFinePrint(T, appPromo ? appFooterHtml(T) : '');
+  return glassFinePrint(T, appPromo ? appFooterHtml(T) : '', phone);
 }
 
 // Web-page variant for server-rendered customer pages (newsletter confirm /
@@ -472,7 +483,7 @@ function glassPage(T, { preheader, title, contentHtml, msoWidth = 640 }) {
 </html>`;
 }
 
-function glassEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, footerNote }) {
+function glassEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, footerNote, phone = null }) {
   const T = GLASS_THEME;
   const linesHtml = (lines || []).map(([label, value, emphasis]) => `
     <tr>
@@ -504,7 +515,7 @@ function glassEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, foote
           </div>
         </td></tr>` : ''}
         <tr><td align="center" style="padding:20px 4px 0 4px;">
-          ${universalWavesFooterHtml(T)}
+          ${universalWavesFooterHtml(T, { phone })}
         </td></tr>
       </table>`;
 
@@ -514,7 +525,7 @@ function glassEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, foote
   return glassPage(T, { preheader, contentHtml, msoWidth: 560 });
 }
 
-function glassServiceEmail({ preheader, body, footerNote, darkAwareBody = false } = {}) {
+function glassServiceEmail({ preheader, body, footerNote, darkAwareBody = false, phone = null } = {}) {
   const T = GLASS_THEME;
   const contentHtml = `${glassPillHeader(T)}
       <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width:620px;">
@@ -528,7 +539,7 @@ function glassServiceEmail({ preheader, body, footerNote, darkAwareBody = false 
           </div>
         </td></tr>` : ''}
         <tr><td align="center" style="padding:18px 4px 0 4px;">
-          ${universalWavesFooterHtml(T)}
+          ${universalWavesFooterHtml(T, { phone })}
         </td></tr>
       </table>`;
   return glassPage(T, { preheader, contentHtml, msoWidth: 620 });
@@ -596,8 +607,8 @@ function glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, preferre
  *   footerNote?: string,
  * }} opts
  */
-function wrapEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, footerNote }) {
-  return glassEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, footerNote });
+function wrapEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, footerNote, phone }) {
+  return glassEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, footerNote, phone });
 }
 
 function plainText(lines) {
@@ -617,8 +628,8 @@ function plainText(lines) {
  *   footerNote?: string,
  * }} opts
  */
-function wrapServiceEmail({ preheader, body, footerNote, darkAwareBody } = {}) {
-  return glassServiceEmail({ preheader, body, footerNote, darkAwareBody });
+function wrapServiceEmail({ preheader, body, footerNote, darkAwareBody, phone } = {}) {
+  return glassServiceEmail({ preheader, body, footerNote, darkAwareBody, phone });
 }
 
 /**

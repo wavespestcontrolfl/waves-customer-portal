@@ -31,6 +31,7 @@ jest.mock('../services/sms-template-renderer', () => ({
   renderSmsTemplate: jest.fn(async () => 'Taylor, we could not process your payment.'),
 }));
 jest.mock('../config/twilio-numbers', () => ({
+  ...jest.requireActual('../config/twilio-numbers'),
   getOutboundNumber: jest.fn(() => '+19415550199'),
 }));
 jest.mock('../utils/customer-comms-lock', () => ({
@@ -39,6 +40,7 @@ jest.mock('../utils/customer-comms-lock', () => ({
 let mockChangeEmailsGate = true;
 jest.mock('../config/feature-gates', () => ({
   isEnabled: (name) => (name === 'paymentMethodChangeEmails' ? mockChangeEmailsGate : false),
+  homeLineLive: () => false,
   gates: {},
 }));
 

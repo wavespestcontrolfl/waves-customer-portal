@@ -24,7 +24,7 @@ const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
 const { getPrimaryContact, getAppointmentContacts, getServiceContactSlots, SERVICE_CONTACT_COLUMNS, PREFS_UNAVAILABLE, withAccountPrimaryContact } = require('./customer-contact');
 const { portalUrl: buildPortalUrl } = require('../utils/portal-url');
-const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+const { customerPhoneDisplay } = require('./home-line');
 const { propertyDisplayLabel } = require('../utils/property-display');
 const { formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
 
@@ -96,6 +96,10 @@ async function loadCustomer(customerId) {
       'city',
       'state',
       'zip',
+      'latitude',
+      'longitude',
+      'home_line_location_id',
+      'home_line_address_key',
       'profile_label',
       // Service-contact slots so the email fallback can reach the same recipients
       // the appointment SMS targets (getAppointmentContacts reads these).
@@ -322,7 +326,7 @@ async function sendTemplate({ customerId, templateKey, eventType, payload = {}, 
       first_name: firstName,
       customer_name: fullName(customer),
       customer_portal_url: portalTabUrl('visits'),
-      company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
+      company_phone: customerPhoneDisplay(customer),
       company_email: CONTACT_EMAIL,
       property_label: propertyLabel(customer),
       ...payload,

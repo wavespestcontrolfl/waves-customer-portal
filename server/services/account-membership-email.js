@@ -10,7 +10,7 @@ const { portalUrl: buildPortalUrl } = require('../utils/portal-url');
 const { formatDisplayDate } = require('../utils/date-only');
 const { propertyDisplayLabel } = require('../utils/property-display');
 const { currency } = require('./email-template');
-const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+const { customerPhoneDisplay } = require('./home-line');
 
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
 const TRANSACTIONAL_GROUP = 'transactional_required';
@@ -84,6 +84,10 @@ async function loadCustomer(customerId) {
       'city',
       'state',
       'zip',
+      'latitude',
+      'longitude',
+      'home_line_location_id',
+      'home_line_address_key',
       'profile_label',
       'waveguard_tier',
       'monthly_rate',
@@ -233,7 +237,7 @@ async function sendTemplate({
     first_name: firstName,
     customer_name: fullName(recipientCustomer),
     customer_portal_url: portalTabUrl('dashboard'),
-    company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
+    company_phone: customerPhoneDisplay(recipientCustomer),
     company_email: CONTACT_EMAIL,
     property_label: targetCustomer ? propertyLabel(targetCustomer) : '',
     ...payload,

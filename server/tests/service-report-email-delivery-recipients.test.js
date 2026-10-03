@@ -171,6 +171,75 @@ describe('service report email recipient delivery', () => {
     expect(result.attachedPdf).toBe(true);
   });
 
+  describe('home line (GATE_HOME_LINE)', () => {
+    const PARRISH = '(941) 297-2817';
+    const MAIN = '(941) 297-5749';
+    let savedGate;
+
+    beforeEach(() => {
+      savedGate = process.env.GATE_HOME_LINE;
+      // The customer's own (synthetic) address, apart from the visit's stamped one.
+      const base = db.getMockImplementation();
+      db.mockImplementation((table) => {
+        const chain = base(table);
+        if (table !== 'service_records') return chain;
+        const first = chain.first;
+        chain.first = jest.fn(async () => ({
+          ...(await first()),
+          customer_address_line1: '100 Example Way',
+          customer_city: 'Parrish',
+          customer_zip: '34219',
+        }));
+        return chain;
+      });
+    });
+
+    afterEach(() => {
+      if (savedGate === undefined) delete process.env.GATE_HOME_LINE;
+      else process.env.GATE_HOME_LINE = savedGate;
+    });
+
+    test('gate on: the template payload carries the customer home line, not the main line', async () => {
+      process.env.GATE_HOME_LINE = 'true';
+      const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
+      EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true, message: { provider_message_id: 'fixture-message' } });
+      const result = await sendServiceReportV1Email('record-1', { token: 'token-1' });
+      expect(result.ok).toBe(true);
+      expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalled();
+      for (const [args] of EmailTemplateLibrary.sendTemplate.mock.calls) {
+        expect(args.payload.company_phone).toBe(PARRISH);
+      }
+    });
+
+    test('gate on: the legacy fallback html and text print the home line, not the main line', async () => {
+      process.env.GATE_HOME_LINE = 'true';
+      const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
+      EmailTemplateLibrary.sendTemplate.mockRejectedValue(new Error('active template not found'));
+      sendgrid.sendOne.mockResolvedValue({ messageId: 'legacy-1' });
+      await sendServiceReportV1Email('record-1', {
+        token: 'token-1',
+        reportUrl: 'https://portal.wavespestcontrol.com/report/token-1',
+      });
+      expect(sendgrid.sendOne).toHaveBeenCalled();
+      for (const [mail] of sendgrid.sendOne.mock.calls) {
+        expect(mail.html).toContain(PARRISH);
+        expect(mail.html).not.toContain(MAIN);
+        expect(mail.text).toContain(PARRISH);
+        expect(mail.text).not.toContain(MAIN);
+      }
+    });
+
+    test('gate off: the same customer still reads the main line', async () => {
+      delete process.env.GATE_HOME_LINE;
+      const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
+      EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true, message: { provider_message_id: 'fixture-message' } });
+      await sendServiceReportV1Email('record-1', { token: 'token-1' });
+      for (const [args] of EmailTemplateLibrary.sendTemplate.mock.calls) {
+        expect(args.payload.company_phone).toBe(MAIN);
+      }
+    });
+  });
+
   test('a failed history read still delivers the report PDF without introduction', async () => {
     const { isFirstServiceVisit } = require('../services/customer-visit-history');
     const realHistory = jest.requireActual('../services/customer-visit-history');

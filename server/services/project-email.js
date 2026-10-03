@@ -13,7 +13,7 @@ const {
 const { portalUrl } = require('../utils/portal-url');
 const { formatDisplayDate } = require('../utils/date-only');
 const { invoiceAmountDue } = require('./invoice-helpers');
-const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+const { customerPhoneDisplay } = require('./home-line');
 
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
 const SERVICE_GROUP = 'service_operational';
@@ -179,7 +179,7 @@ function buildProjectPayload({
     prepared_date: displayDate(new Date()),
     property_address: propertyAddress(customer, project),
     technician_name: clean(project.tech_name || project.technician_name),
-    company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
+    company_phone: customerPhoneDisplay(customer),
     company_email: CONTACT_EMAIL,
   };
 }

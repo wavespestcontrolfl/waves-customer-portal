@@ -50,6 +50,7 @@ const { CUSTOMER_STAGES } = require('./customer-stages');
 const { etDateString, addETDays, etParts, lastCompletedWeekEndingET } = require('../utils/datetime-et');
 const { portalUrl: buildPortalUrl } = require('../utils/portal-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+const { customerPhoneDisplay } = require('./home-line');
 const {
   deriveIrrigationInchesPerWeek,
   describeRuntimeBasis,
@@ -1059,6 +1060,8 @@ async function findEligibleCustomers({ now = new Date(), customerId = null, incl
       'np.email_enabled',
       'c.latitude',
       'c.longitude',
+      'c.home_line_location_id',
+      'c.home_line_address_key',
       'pp.irrigation_inches_per_week',
       'pp.irrigation_system',
       // Rain sensor drives only the derived schedule_note disclosure — the
@@ -1394,7 +1397,9 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
             return await EmailTemplateLibrary.sendTemplate({
         templateKey: decision.templateKey,
         to: String(customer.email).trim(),
-        payload: decision.payload,
+        // The decision is pure (and hashed / replayed), so it carries the
+        // main line; the footer phone is the customer's home line, set here.
+        payload: { ...decision.payload, company_phone: customerPhoneDisplay(customer) },
         recipientType: 'customer',
         recipientId: customer.id,
         triggerEventId,

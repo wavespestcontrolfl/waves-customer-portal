@@ -47,6 +47,7 @@ jest.mock('../services/payer', () => ({
 }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
+  homeLineLive: () => process.env.GATE_HOME_LINE === 'true',
   gates: {},
 }));
 jest.mock('../services/open-balance', () => ({
@@ -88,11 +89,11 @@ function invoiceRow(overrides = {}) {
   };
 }
 
-function mockDb(invoice) {
+function mockDb(invoice, customerOverrides = {}) {
   db.mockImplementation((table) => {
     if (table === 'invoices') return chain({ first: invoice });
     if (table === 'customers') {
-      return chain({ first: { id: 'cust-1', first_name: 'Pat', email: 'customer@example.com' } });
+      return chain({ first: { id: 'cust-1', first_name: 'Pat', email: 'customer@example.com', ...customerOverrides } });
     }
     if (table === 'notification_prefs') return chain({ first: null });
     if (table === 'invoice_attachments') return chain({ first: { count: 0 } });
@@ -123,6 +124,35 @@ describe('sendInvoiceEmail previous-balance note', () => {
     );
     // Nothing is folded into this bill — the CTA amount stays this invoice's own.
     expect(args.payload.amount_due).toBe('$150.00');
+  });
+
+  describe('home line (GATE_HOME_LINE)', () => {
+    let savedGate;
+    beforeEach(() => { savedGate = process.env.GATE_HOME_LINE; });
+    afterEach(() => {
+      if (savedGate === undefined) delete process.env.GATE_HOME_LINE;
+      else process.env.GATE_HOME_LINE = savedGate;
+    });
+
+    test('gate on: the invoice template payload carries the customer home line, not the main line', async () => {
+      process.env.GATE_HOME_LINE = 'true';
+      mockDb(invoiceRow(), { city: 'Parrish', zip: '34219' });
+
+      await sendInvoiceEmail('inv-1');
+
+      const args = EmailTemplates.sendTemplate.mock.calls[0][0];
+      expect(args.payload.company_phone).toBe('(941) 297-2817');
+      expect(JSON.stringify(args.payload)).not.toContain('(941) 297-5749');
+    });
+
+    test('gate off: the same customer reads the main line', async () => {
+      delete process.env.GATE_HOME_LINE;
+      mockDb(invoiceRow(), { city: 'Parrish', zip: '34219' });
+
+      await sendInvoiceEmail('inv-1');
+
+      expect(EmailTemplates.sendTemplate.mock.calls[0][0].payload.company_phone).toBe('(941) 297-5749');
+    });
   });
 
   test('gate off: payload byte-identical to today, no balance lookup', async () => {

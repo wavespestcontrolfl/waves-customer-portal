@@ -19,7 +19,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
-const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+const { customerPhoneDisplay } = require('./home-line');
 
 // Matches BOTH naming generations: legacy "…Termite Bond Service…" and the
 // live admin-schedule catalog's "Termite Bond (Billed Quarterly | N-Year
@@ -259,6 +259,14 @@ async function runBondRenewalSweep() {
       'termite_bonds.*',
       'customers.first_name',
       'customers.email',
+      'customers.address_line1 as customer_address_line1',
+      'customers.address_line2 as customer_address_line2',
+      'customers.city as customer_city',
+      'customers.zip as customer_zip',
+      'customers.latitude as customer_latitude',
+      'customers.longitude as customer_longitude',
+      'customers.home_line_location_id as customer_home_line_location_id',
+      'customers.home_line_address_key as customer_home_line_address_key',
     );
 
   let sent = 0;
@@ -285,7 +293,16 @@ async function runBondRenewalSweep() {
             ? `${FALLBACK_PORTAL_HOME_URL}/?tab=documents`
             : `${FALLBACK_PORTAL_HOME_URL}/login`,
           customer_portal_url: `${FALLBACK_PORTAL_HOME_URL}/login`,
-          company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
+          company_phone: customerPhoneDisplay({
+            address_line1: bond.customer_address_line1,
+            address_line2: bond.customer_address_line2,
+            city: bond.customer_city,
+            zip: bond.customer_zip,
+            latitude: bond.customer_latitude,
+            longitude: bond.customer_longitude,
+            home_line_location_id: bond.customer_home_line_location_id,
+            home_line_address_key: bond.customer_home_line_address_key,
+          }),
         },
         recipientType: 'customer',
         recipientId: bond.customer_id,

@@ -11,7 +11,7 @@ const logger = require('./logger');
 const sendgrid = require('./sendgrid-mail');
 const { wrapEmail, plainText } = require('./email-template');
 const { buildContractPDFBuffer } = require('./pdf/contract-pdf');
-const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+const { customerPhoneDisplay } = require('./home-line');
 
 function escapeHtml(value) {
   return String(value == null ? '' : value)
@@ -49,6 +49,7 @@ async function buildSignedCopyEmail(contract, customer = {}) {
   const signedBy = contract.signed_name || customer.first_name || '—';
 
   const pdf = await buildContractPDFBuffer(contract, customer, { signed: true });
+  const companyPhone = customerPhoneDisplay(customer);
 
   const html = wrapEmail({
     preheader: `Your signed copy of ${escapeHtml(title)}`,
@@ -59,6 +60,7 @@ async function buildSignedCopyEmail(contract, customer = {}) {
       ['Signed by', escapeHtml(signedBy)],
       ['Signed on', escapeHtml(signedOn), true],
     ],
+    phone: companyPhone,
   });
 
   const text = plainText([
@@ -70,7 +72,7 @@ async function buildSignedCopyEmail(contract, customer = {}) {
     `Signed by: ${signedBy}`,
     `Signed on: ${signedOn}`,
     '',
-    `Questions? Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.`,
+    `Questions? Reply to this email or call ${companyPhone}.`,
   ]);
 
   return {
@@ -100,7 +102,11 @@ async function sendSignedContractCopy(contractId) {
 
   const customer = await db('customers')
     .where({ id: contract.customer_id })
-    .first('first_name', 'last_name', 'company_name', 'email');
+    .first(
+      'first_name', 'last_name', 'company_name', 'email',
+      'address_line1', 'address_line2', 'city', 'zip', 'latitude', 'longitude',
+      'home_line_location_id', 'home_line_address_key',
+    );
 
   const to = contract.recipient_email || customer?.email;
   if (!to) return { ok: false, skipped: 'no_recipient_email' };

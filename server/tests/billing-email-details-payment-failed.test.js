@@ -32,6 +32,7 @@ jest.mock('../utils/customer-comms-lock', () => ({ withCustomerCommsLock: jest.f
 let mockDetailsLive = false;
 jest.mock('../config/feature-gates', () => ({
   isEnabled: () => false,
+  homeLineLive: () => false,
   gates: {},
   billingEmailDetailsLive: () => mockDetailsLive,
 }));

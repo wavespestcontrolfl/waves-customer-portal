@@ -9,7 +9,7 @@ const { publicPortalUrl } = require("../../utils/portal-url");
 const EmailTemplateLibrary = require("../email-template-library");
 const { currency } = require("../email-template");
 const { dateOnlyString, formatDateOnly } = require("../../utils/date-only");
-const { WAVES_SUPPORT_PHONE_DISPLAY } = require("../../constants/business");
+const { customerPhoneDisplay } = require("../home-line");
 const { collectionsChannelPermitted } = require("../collections/rail-guard");
 const ContactLedger = require("../collections/contact-ledger");
 const { billingChannelAllowed, explicitBillingChannels } = require('../billing-delivery-channels');
@@ -107,7 +107,7 @@ function latePaymentPayload({ customer, invoice, balance, invoiceTitle, serviceD
     due_date: formatDateOnly(fallbackDueDate, { fallback: "" }),
     invoice_number: invoice.invoice_number || "",
     customer_portal_url: `${publicPortalUrl()}/?tab=billing`,
-    company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
+    company_phone: customerPhoneDisplay(customer),
     company_email: CONTACT_EMAIL,
   };
 }

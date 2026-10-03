@@ -131,4 +131,15 @@ async function staffTextSender({ phone, customerId = null, database = db, now = 
   return { fromNumber, reason: fromNumber === TWILIO_NUMBERS.mainLine.number ? 'main' : 'home_line' };
 }
 
-module.exports = { stampHomeLines, homeLineCallerId, staffTextSender, CONVERSATION_WINDOW_DAYS };
+/**
+ * The phone number a customer-facing email, page or document shows this
+ * customer (home-line PR 4, owner 2026-10-02): the same line their calls and
+ * texts come from — homeLineCallerId — as a display string "(941) 297-2817".
+ * No customer, or GATE_HOME_LINE off → the main line.
+ */
+function customerPhoneDisplay(customer) {
+  const TWILIO_NUMBERS = require('../config/twilio-numbers');
+  return TWILIO_NUMBERS.findByNumber(homeLineCallerId(customer))?.formatted || TWILIO_NUMBERS.mainLine.formatted;
+}
+
+module.exports = { stampHomeLines, homeLineCallerId, staffTextSender, customerPhoneDisplay, CONVERSATION_WINDOW_DAYS };

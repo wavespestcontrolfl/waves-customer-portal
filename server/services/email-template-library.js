@@ -807,7 +807,9 @@ function renderTemplate({ template, version, payload: rawPayload = {}, unsubscri
   const darkAwareBody = bodyIsDarkAware(bodyHtml);
   const html = mode === 'marketing'
     ? wrapNewsletter({ body: bodyHtml, unsubscribeUrl, preheader: previewText || undefined, darkAwareBody })
-    : wrapServiceEmail({ body: bodyHtml, preheader: previewText || undefined, footerNote, darkAwareBody });
+    // The footer phone follows the template's company_phone — the
+    // recipient's home line when the sender resolved one (home-line PR 4).
+    : wrapServiceEmail({ body: bodyHtml, preheader: previewText || undefined, footerNote, darkAwareBody, phone: payload.company_phone });
   const textBody = version.text_body
     ? [renderInline(version.text_body, payload, { html: false }), defaultCta.bodyText].filter(Boolean).join('\n\n')
     : bodyText;

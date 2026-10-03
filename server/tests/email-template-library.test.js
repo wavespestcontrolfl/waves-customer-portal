@@ -132,6 +132,21 @@ describe('email template library rendering', () => {
     });
   });
 
+  test('home-line PR 4: the service footer shows the payload company_phone (the recipient home line)', () => {
+    const rendered = EmailTemplates.renderTemplate({
+      template: serviceTemplate(),
+      version: version(),
+      payload: {
+        first_name: 'Taylor',
+        expires_at: 'June 12',
+        estimate_url: 'https://portal.wavespestcontrol.com/estimate/sample',
+        company_phone: '(941) 297-2817',
+      },
+    });
+    expect(rendered.html).toContain('href="tel:+19412972817"');
+    expect(rendered.html).not.toContain('href="tel:+19412975749"');
+  });
+
   test('renders service templates through the professional service wrapper', () => {
     const rendered = EmailTemplates.renderTemplate({
       template: serviceTemplate(),

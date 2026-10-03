@@ -18,7 +18,7 @@ const { wrapEmail, ctaButton, currency, formatDate, plainText, colors, stripeFoo
 const EmailTemplateLibrary = require('./email-template-library');
 const sendgrid = require('./sendgrid-mail');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
-const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+const { customerPhoneDisplay } = require('./home-line');
 const { formatDateOnly } = require('../utils/date-only');
 const { getInvoiceEmailRecipients, getReceiptEmailRecipients } = require('./customer-contact');
 const PayerService = require('./payer');
@@ -144,7 +144,7 @@ function invoiceRecipientFor(customer, prefs, recipientOverride) {
 // fold, billing-text-verdict.js), so they cannot drift apart.
 async function loadInvoiceEmailContext(invoice, options = {}) {
   const customer = await db('customers').where({ id: invoice.customer_id })
-    .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'property_type', 'company_name')
+    .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude', 'home_line_location_id', 'home_line_address_key', 'property_type', 'company_name')
     .first();
   if (!customer) return { refusal: { ok: false, error: 'Customer not found' } };
   let prefsLookupFailed = false;
@@ -298,6 +298,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   const extraAttachmentCount = Number(attachmentCountRow?.count || 0);
 
   const first = recipient.name || customer.first_name || 'there';
+  const companyPhone = customerPhoneDisplay(customer);
   // Phrase the service as "your <type> service" so a concrete type reads
   // naturally ("take care of your Quarterly Pest Control service", not
   // "take care of Quarterly Pest Control"); the no-type fallback already
@@ -370,12 +371,13 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
     preheader: `Invoice ${invoice.invoice_number} — ${currency(amountDue)} due.`,
     heading,
     intro: introWithSummary,
+    phone: companyPhone,
     lines,
     ctaHref: payUrl,
     ctaLabel: `Pay ${currency(amountDue)}`,
     footerNote: (extraAttachmentCount > 0
-      ? `Your PDF invoice is attached. Additional invoice attachments are available from the payment link. Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY} with any questions.`
-      : `Your PDF invoice is attached. Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY} with any questions.`)
+      ? `Your PDF invoice is attached. Additional invoice attachments are available from the payment link. Reply to this email or call ${companyPhone} with any questions.`
+      : `Your PDF invoice is attached. Reply to this email or call ${companyPhone} with any questions.`)
       + stripeFooterLine(),
   });
   const text = plainText([
@@ -394,7 +396,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
     `Pay online: ${payUrl}`,
     extraAttachmentCount > 0 ? `${extraAttachmentCount} additional invoice attachment${extraAttachmentCount === 1 ? ' is' : 's are'} available from that link.` : null,
     '',
-    `Questions? Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.`,
+    `Questions? Reply to this email or call ${companyPhone}.`,
     '— Waves Pest Control',
   ]);
 
@@ -532,6 +534,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
         to: recipient.email,
         payload: {
           first_name: first,
+          company_phone: companyPhone,
           invoice_url: payUrl,
           invoice_number: invoice.invoice_number,
           amount_due: currency(amountDue),
@@ -714,7 +717,7 @@ function routedReceiptRefusal(block, { atHandoff = false } = {}) {
 // answers with ({ ok: false, error, code? }).
 async function resolveReceiptEmailRecipient(invoice, { billingDeliveryCategory = null } = {}) {
   const customer = await db('customers').where({ id: invoice.customer_id })
-    .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'property_type', 'company_name')
+    .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude', 'home_line_location_id', 'home_line_address_key', 'property_type', 'company_name')
     .first();
   // A routed receipt (the receipt delivery queue, the no-show fee) is billing
   // mail: its recipient, the customer's receipt channel choice and the
@@ -841,6 +844,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
   }
 
   const first = recipient.name || customer.first_name || 'there';
+  const companyPhone = customerPhoneDisplay(customer);
   const heading = 'Payment received — thank you';
   const memoEscaped = memo
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -865,6 +869,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
     preheader: `Receipt for ${invoice.invoice_number} — ${currency(amountDue)} paid.`,
     heading,
     intro: introWithMemo,
+    phone: companyPhone,
     lines,
     ctaHref: receiptUrl,
     ctaLabel: 'View receipt online',
@@ -895,6 +900,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
         to: recipient.email,
         payload: {
           first_name: first,
+          company_phone: companyPhone,
           receipt_url: receiptUrl,
           invoice_number: invoice.invoice_number,
           amount_paid: currency(amountDue),
