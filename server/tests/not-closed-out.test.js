@@ -19,10 +19,10 @@ jest.mock('../services/dispatch-alerts', () => ({
 }));
 
 const mockEvaluateThreshold = jest.fn(async () => null);
-const mockWithdrawOutreachFor = jest.fn(async () => ({ withdrawn: 0 }));
+const mockWithdrawOutreach = jest.fn(async () => ({ withdrawn: 0 }));
 jest.mock('../services/workflows/missed-appointment', () => ({
   evaluateThreshold: (...a) => mockEvaluateThreshold(...a),
-  withdrawOutreachFor: (...a) => mockWithdrawOutreachFor(...a),
+  withdrawOutreachIfBelowThreshold: (...a) => mockWithdrawOutreach(...a),
 }));
 
 // A tiny in-memory knex: tables are arrays of rows; where/whereNull filter them;
@@ -76,7 +76,7 @@ beforeEach(() => {
   mockCreateAlertOnce.mockClear();
   mockResolveAlert.mockClear();
   mockEvaluateThreshold.mockClear();
-  mockWithdrawOutreachFor.mockClear();
+  mockWithdrawOutreach.mockClear();
   mockTables.reschedule_log = [logRow()];
   mockTables.dispatch_alerts = [card()];
   mockTables.scheduled_services = [{ ...service }];
@@ -261,12 +261,13 @@ describe('the dispatcher\'s two decisions', () => {
   });
 
   test('"Not a miss" after "This was a miss" withdraws the confirmation, so the row is not a person-marked miss', async () => {
+    mockTables.reschedule_log = [logRow({ customer_id: 'cust-1' })];
     await notClosedOut.confirmMiss({ logId: 'log-1', confirmedBy: STAFF });
     expect(mockTables.reschedule_log[0].miss_confirmed_at).toBe('NOW');
     expect(await notClosedOut.dismiss({ logId: 'log-1', dismissedBy: STAFF })).toEqual({ ok: true });
     expect(mockTables.reschedule_log[0]).toMatchObject({ resolution: 'dismissed', miss_confirmed_at: null, miss_confirmed_by: null });
-    // and the outreach task that confirmation raised is withdrawn with it
-    expect(mockWithdrawOutreachFor).toHaveBeenCalledWith('log-1', expect.anything());
+    // and the customer's outreach task is re-checked against the misses that remain
+    expect(mockWithdrawOutreach).toHaveBeenCalledWith('cust-1', expect.anything());
     // "Done" keeps it: a handled miss was still a miss
     mockTables.reschedule_log = [logRow({ miss_confirmed_at: 'THEN', miss_confirmed_by: STAFF })];
     await notClosedOut.markHandled({ logId: 'log-1', handledBy: STAFF });

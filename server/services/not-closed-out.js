@@ -331,9 +331,10 @@ async function dismiss({ logId, dismissedBy = null, note = null } = {}) {
       miss_confirmed_at: null, miss_confirmed_by: null,
       ...(reason ? { notes: t.raw("left(concat_ws(' | ', NULLIF(notes, ''), ?::text), 500)", [`not a miss: ${reason}`]) } : {}),
     });
-    // the outreach task this row's confirmation raised goes with the confirmation
-    if (log.miss_confirmed_at) {
-      await require('./workflows/missed-appointment').withdrawOutreachFor(logId, t);
+    // one confirmed miss fewer: a pending outreach task that no longer has its
+    // two misses goes with it
+    if (log.miss_confirmed_at && log.customer_id) {
+      await require('./workflows/missed-appointment').withdrawOutreachIfBelowThreshold(log.customer_id, t);
     }
     await cardAfterSettle(t, log, dismissedBy);
     return { ok: true };

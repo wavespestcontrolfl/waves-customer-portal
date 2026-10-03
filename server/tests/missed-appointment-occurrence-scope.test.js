@@ -208,24 +208,36 @@ describe('the repeated-miss outreach task follows the confirmation that raised i
     expect(JSON.parse(inserts[0].row.metadata)).toEqual({ source: 'missed_appointment_threshold', log_id: 'log-9' });
   });
 
-  test('withdrawOutreachFor cancels only that row\'s pending task, in a savepoint, and never throws', async () => {
+  // Misses A and B raised a task (linked to B). "Not a miss" on EITHER leaves one miss: the task goes.
+  test.each([
+    ['one miss left: the pending task is cancelled', '1', 1],
+    ['two misses still stand: the task stays', '2', 0],
+  ])('withdrawOutreachIfBelowThreshold — %s', async (_label, count, withdrawn) => {
     const calls = [];
     const sp = (table) => {
       const chain = {
-        where(c) { calls.push(['where', table, c]); return chain; },
-        whereRaw(sql, b) { calls.push(['whereRaw', sql, b]); return chain; },
+        where(c) { if (typeof c === 'object') calls.push(['where', table, c]); return chain; },
+        whereRaw(sql) { calls.push(['whereRaw', sql]); return chain; },
+        select() { return chain; },
+        first: async () => ({ count }),
         update: async (patch) => { calls.push(['update', patch.status]); return 1; },
       };
       return chain;
     };
     sp.raw = (sql) => sql;
-    expect(await MissedAppointment.withdrawOutreachFor('log-9', { transaction: (fn) => fn(sp) })).toEqual({ withdrawn: 1 });
-    expect(calls).toEqual(expect.arrayContaining([
-      ['where', 'customer_interactions', { interaction_type: 'task', status: 'pending' }],
-      ['whereRaw', "metadata->>'log_id' = ?", ['log-9']],
-      ['update', 'cancelled'],
-    ]));
-    expect(await MissedAppointment.withdrawOutreachFor('log-9', { transaction: async () => { throw new Error('db down'); } })).toEqual({ withdrawn: 0 });
+    expect(await MissedAppointment.withdrawOutreachIfBelowThreshold('c1', { transaction: (fn) => fn(sp) })).toEqual({ withdrawn });
+    const cancelled = calls.some((c) => c[0] === 'update' && c[1] === 'cancelled');
+    expect(cancelled).toBe(withdrawn === 1);
+    if (withdrawn) {
+      // every pending threshold task of the customer, whichever miss it was raised from
+      expect(calls).toEqual(expect.arrayContaining([
+        ['where', 'customer_interactions', { customer_id: 'c1', interaction_type: 'task', status: 'pending' }],
+        ['whereRaw', "metadata->>'source' = 'missed_appointment_threshold'"],
+      ]));
+    }
+  });
+
+  test('a database failure never reaches the dismissal', async () => {
+    expect(await MissedAppointment.withdrawOutreachIfBelowThreshold('c1', { transaction: async () => { throw new Error('db down'); } })).toEqual({ withdrawn: 0 });
   });
 });
-

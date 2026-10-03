@@ -137,8 +137,22 @@ class MissedAppointment {
    * customer_noshow through the rebooker — can run the threshold without
    * inserting the occurrence a second time (codex r2 on #3110).
    */
-  // `logId`: the flagged row whose confirmation triggered this evaluation; kept on
-  // the task so a withdrawn confirmation can withdraw its task (withdrawOutreachFor).
+  // The customer's distinct missed occurrences in the last 90 days (see evaluateThreshold).
+  async countMisses(customerId, conn = db) {
+    const personMarkedOnly = require('../not-closed-out').queueEnabled();
+    const skipCount = await conn('reschedule_log')
+      .where({ customer_id: customerId, reason_code: 'customer_noshow' })
+      .where('created_at', '>', conn.raw("NOW() - INTERVAL '90 days'"))
+      .where(function personMarked() {
+        if (personMarkedOnly) this.whereNotNull('miss_confirmed_at').orWhereNotNull('new_date');
+      })
+      .select(conn.raw("count(distinct (scheduled_service_id, coalesce(original_date, '1970-01-01'::date), coalesce(original_window, ''))) as count"))
+      .first();
+    return parseInt(skipCount.count, 10);
+  }
+
+  // `logId`: the flagged row whose confirmation triggered this evaluation, kept on
+  // the task for the record.
   async evaluateThreshold(customerId, reason = 'no_show', conn = db, { logId = null } = {}) {
     const customer = await conn('customers').where({ id: customerId }).first();
     if (!customer) return null;
@@ -153,17 +167,7 @@ class MissedAppointment {
     // With the office queue on, only person-marked misses count: a row a person
     // confirmed (card or dispatch no-show) or a no-show Quick Move (a person moved
     // it: new_date is set). The nightly check's unconfirmed rows do not.
-    const personMarkedOnly = require('../not-closed-out').queueEnabled();
-    const skipCount = await conn('reschedule_log')
-      .where({ customer_id: customerId, reason_code: 'customer_noshow' })
-      .where('created_at', '>', conn.raw("NOW() - INTERVAL '90 days'"))
-      .where(function personMarked() {
-        if (personMarkedOnly) this.whereNotNull('miss_confirmed_at').orWhereNotNull('new_date');
-      })
-      .select(conn.raw("count(distinct (scheduled_service_id, coalesce(original_date, '1970-01-01'::date), coalesce(original_window, ''))) as count"))
-      .first();
-
-    const totalSkips = parseInt(skipCount.count, 10);
+    const totalSkips = await this.countMisses(customerId, conn);
 
     if (totalSkips <= 1) {
       logger.info(`First skip for customer ${customerId} — handled by reschedule system`);
@@ -188,32 +192,36 @@ class MissedAppointment {
         `Recommend a phone call or reviewing/sending the SMS below.\n\n` +
         `Suggested SMS:\n${suggestedSms}`,
       status: 'pending',
-      ...(logId ? { metadata: JSON.stringify({ source: 'missed_appointment_threshold', log_id: String(logId) }) } : {}),
+      metadata: JSON.stringify({ source: 'missed_appointment_threshold', ...(logId ? { log_id: String(logId) } : {}) }),
     });
 
     return { action: 'recommendation_created', skips: totalSkips };
   }
 
   /**
-   * A person confirmed a miss, the outreach task was raised from it, and the
-   * person then said "Not a miss": the still-pending task is cancelled, with the
-   * reason on it. Runs in the dismissal's transaction, in a savepoint, and never
-   * fails it.
+   * A person withdrew a confirmed miss ("Not a miss" after "This was a miss"). The
+   * customer's misses are counted again; below the threshold, every still-pending
+   * outreach task this workflow raised for the customer is cancelled, with the
+   * reason on it — whichever of the customer's misses the task was raised from.
+   * Runs in the dismissal's transaction (after the confirmation is cleared), in a
+   * savepoint, and never fails it.
    */
-  async withdrawOutreachFor(logId, trx) {
-    if (!logId || !trx) return { withdrawn: 0 };
+  async withdrawOutreachIfBelowThreshold(customerId, trx) {
+    if (!customerId || !trx) return { withdrawn: 0 };
     try {
-      const withdrawn = await trx.transaction((sp) => sp('customer_interactions')
-        .where({ interaction_type: 'task', status: 'pending' })
-        .whereRaw("metadata->>'source' = 'missed_appointment_threshold'")
-        .whereRaw("metadata->>'log_id' = ?", [String(logId)])
-        .update({
-          status: 'cancelled',
-          body: sp.raw("concat('Withdrawn: the office marked this visit as not a miss.', E'\\n\\n', body)"),
-        }));
+      const withdrawn = await trx.transaction(async (sp) => {
+        if ((await this.countMisses(customerId, sp)) >= 2) return 0;
+        return sp('customer_interactions')
+          .where({ customer_id: customerId, interaction_type: 'task', status: 'pending' })
+          .whereRaw("metadata->>'source' = 'missed_appointment_threshold'")
+          .update({
+            status: 'cancelled',
+            body: sp.raw("concat('Withdrawn: the office marked a visit as not a miss; fewer than 2 misses remain.', E'\\n\\n', body)"),
+          });
+      });
       return { withdrawn: Number(withdrawn) || 0 };
     } catch (err) {
-      logger.warn(`MissedAppointment: outreach task for flagged row ${logId} not withdrawn: ${err.message}`);
+      logger.warn(`MissedAppointment: outreach task for customer ${customerId} not withdrawn: ${err.message}`);
       return { withdrawn: 0 };
     }
   }
