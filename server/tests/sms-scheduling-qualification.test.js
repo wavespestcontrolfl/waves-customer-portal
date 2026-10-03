@@ -251,6 +251,18 @@ test('duplicate or blank offer ids cannot identify one linked selected offer', (
     .toMatchObject({ status: 'inconclusive', epochs: [{ incompleteEvidence: 1 }] });
 });
 
+test.each([
+  ['offer id', (c) => { c.rows[1].decision_evidence.offers[0].id = ['offer-1']; }],
+  ['selected offer id', (c) => { c.rows[1].decision_evidence.selectedOfferId = ['offer-1']; }],
+  ['persisted offer id', (c) => { c.rows[1].sms_offer_id = ['offer-1']; }],
+])('an array-valued %s cannot match through string coercion', (_label, mutate) => {
+  const c = cohort();
+  mutate(c);
+  reseal(c, 1);
+  expect(summarizeQualification(c.rows, { ...source, adjudications: c.adjudications }, c.bodies))
+    .toMatchObject({ status: 'inconclusive', epochs: [{ incompleteEvidence: 1 }] });
+});
+
 test('adjudications without matching decisions make the whole cohort inconclusive', () => {
   const c = cohort();
   c.rows.pop();
@@ -421,6 +433,33 @@ test.each([
     .toMatchObject({ status: 'inconclusive', epochs: [{ incompleteEvidence: 1 }] });
 });
 
+test.each([
+  ['before snapshot', 1, 'before'],
+  ['after snapshot', 0, 'after'],
+])('a year-zero %s timestamp is incomplete evidence', (_label, index, phase) => {
+  const c = cohort();
+  c.rows[index].decision_evidence[phase].observedAt = '0000-01-01T00:00:00Z';
+  reseal(c, index);
+  expect(summarizeQualification(c.rows, { ...source, adjudications: c.adjudications }, c.bodies))
+    .toMatchObject({ status: 'inconclusive', epochs: [{ incompleteEvidence: 1 }] });
+});
+
+test('an after snapshot cannot predate its before snapshot', () => {
+  const c = cohort();
+  c.rows[0].decision_evidence.after.observedAt = '2026-10-02T09:59:59Z';
+  reseal(c, 0);
+  expect(summarizeQualification(c.rows, { ...source, adjudications: c.adjudications }, c.bodies))
+    .toMatchObject({ status: 'inconclusive', epochs: [{ incompleteEvidence: 1 }] });
+});
+
+test('equal before and after instants remain valid at coarse timestamp precision', () => {
+  const c = cohort();
+  c.rows[0].decision_evidence.after.observedAt = c.rows[0].decision_evidence.before.observedAt;
+  reseal(c, 0);
+  expect(summarizeQualification(c.rows, { ...source, adjudications: c.adjudications }, c.bodies).epochs[0])
+    .toMatchObject({ incompleteEvidence: 0 });
+});
+
 test('duplicate decision ids cannot reuse or ambiguously bind review evidence', () => {
   const c = cohort();
   c.rows[1].id = c.rows[0].id;
@@ -492,8 +531,16 @@ test('unresolved move offers do not enter the distinct scored-offer denominator'
   }
   const result = summarizeQualification(c.rows, { ...source, adjudications: c.adjudications }, c.bodies);
   expect(result.status).toBe('inconclusive');
-  expect(result.epochs[0]).toMatchObject({ distinctOffersReviewed: 40, distinctOffersScored: 1 });
+  expect(result.epochs[0]).toMatchObject({ incompleteEvidence: 1, distinctOffersReviewed: 39, distinctOffersScored: 1 });
   expect(result.epochs[0].reasons).toContain('fewer_than_40_distinct_scored_offers');
+});
+
+test.each([123, {}, []])('a non-string scheduled-service id %p is incomplete evidence', (scheduledServiceId) => {
+  const c = cohort();
+  c.rows[1].decision_evidence.offers[0].scheduledServiceId = scheduledServiceId;
+  reseal(c, 1);
+  expect(summarizeQualification(c.rows, { ...source, adjudications: c.adjudications }, c.bodies))
+    .toMatchObject({ status: 'inconclusive', epochs: [{ incompleteEvidence: 1 }] });
 });
 
 test('partial review, changed source rows, and mixed epochs stay inconclusive', () => {
@@ -518,4 +565,13 @@ test('partial review, changed source rows, and mixed epochs stay inconclusive', 
   const collision = cohort(collisionOverrides);
   expect(summarizeQualification(collision.rows, { ...source, adjudications: collision.adjudications }, collision.bodies))
     .toMatchObject({ status: 'inconclusive', reasons: ['multiple_model_or_prompt_epochs_not_pooled'] });
+
+  const yearZero = cohort();
+  expect(summarizeQualification(yearZero.rows, {
+    ...source,
+    source: { ...source.source, reviewedAt: '0000-01-01T00:00:00Z' },
+    adjudications: yearZero.adjudications,
+  }, yearZero.bodies)).toMatchObject({
+    status: 'inconclusive', reasons: expect.arrayContaining(['missing_or_invalid_operator_adjudication_provenance']),
+  });
 });

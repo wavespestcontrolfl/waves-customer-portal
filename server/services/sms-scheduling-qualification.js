@@ -78,7 +78,7 @@ function validOffsetDate(value) {
   const day = Number(parts[3]);
   const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
   const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-  return month >= 1 && month <= 12 && day >= 1 && day <= days[month - 1]
+  return year >= 1 && month >= 1 && month <= 12 && day >= 1 && day <= days[month - 1]
     && Number.isFinite(Date.parse(value));
 }
 
@@ -159,10 +159,11 @@ function linkedOffers(evidence, row, smsBodiesById) {
   const offers = Array.isArray(evidence.offers) ? evidence.offers : [];
   if (!offers.length) return null;
   if (offers.some((offer) => !currentBodyMatches(offer?.outbound, smsBodiesById))) return null;
-  const ids = offers.map((offer) => String(offer?.id || '').trim());
+  const ids = offers.map((offer) => (isNonblankString(offer?.id) ? offer.id.trim() : null));
   if (ids.some((id) => !id) || new Set(ids).size !== ids.length) return null;
-  const selectedId = String(evidence.selectedOfferId || '').trim();
-  const rowOfferId = String(row.sms_offer_id || '').trim();
+  if (!isNonblankString(evidence.selectedOfferId) || !isNonblankString(row.sms_offer_id)) return null;
+  const selectedId = evidence.selectedOfferId.trim();
+  const rowOfferId = row.sms_offer_id.trim();
   if (!selectedId || selectedId !== rowOfferId) return null;
   const selectedIndex = ids.indexOf(rowOfferId);
   return selectedIndex >= 0 ? { offers, selected: offers[selectedIndex] } : null;
@@ -182,6 +183,7 @@ function validSnapshot(snapshot) {
 
 function completeDecisionFacts(evidence, outcome) {
   if (!validSnapshot(evidence.before) || !validSnapshot(evidence.after) || !evidence.before.observed) return false;
+  if (evidence.after.observed && Date.parse(evidence.after.observedAt) < Date.parse(evidence.before.observedAt)) return false;
   if (outcome !== 'would_move') return true;
   return evidence.after.observed && completeVisit(evidence.before.visit) && completeVisit(evidence.after.visit);
 }
@@ -195,7 +197,8 @@ function evidenceFor(row, smsBodiesById) {
   if (!currentBodyMatches(evidence.reply, smsBodiesById)) return null;
   const linked = linkedOffers(evidence, row, smsBodiesById);
   if (!linked || !completeDecisionFacts(evidence, row.outcome)) return null;
-  if (linked.selected.kind === 'move_visit' && !completeVisit(evidence.before.visit)) return null;
+  if (linked.selected.kind === 'move_visit'
+    && (!isNonblankString(linked.selected.scheduledServiceId) || !completeVisit(evidence.before.visit))) return null;
   if (!decisionMatchesRow(evidence.decision, row, linked)) return null;
   return { evidence, offers: linked.offers };
 }
@@ -215,7 +218,7 @@ function exactExpectedMove(expected, pick) {
   if (!isNonblankString(move.date) || !isNonblankString(move.start) || !isNonblankString(move.arrivalEnd)) return null;
   if (!completeSlot(pick.slot)) return null;
   if (pick.offer.kind !== 'move_visit') return null;
-  if (move.scheduledServiceId !== String(pick.offer.scheduledServiceId || '')) return null;
+  if (!isNonblankString(pick.offer.scheduledServiceId) || move.scheduledServiceId !== pick.offer.scheduledServiceId) return null;
   if (move.date !== pick.slot.date || move.start !== pick.slot.start || move.arrivalEnd !== pick.slot.end) return null;
   return move;
 }
@@ -334,7 +337,7 @@ function proposedMoveMatches(found, expected) {
   if (expected.outcome !== 'move') return false;
   const proposed = found.evidence.decision.wouldHave;
   if (proposed?.kind !== 'move_visit') return false;
-  return String(proposed.scheduled_service_id || '') === expected.move.scheduledServiceId
+  return isNonblankString(proposed.scheduled_service_id) && proposed.scheduled_service_id === expected.move.scheduledServiceId
     && proposed.date === expected.move.date && proposed.start === expected.move.start
     && proposed.arrival_end === expected.move.arrivalEnd;
 }
@@ -351,7 +354,7 @@ function completeSlot(slot) {
 }
 
 function actionableMoveOffer(offer, expected) {
-  return isNonblankString(String(offer?.scheduledServiceId || ''))
+  return isNonblankString(offer?.scheduledServiceId)
     && Array.isArray(offer.slots)
     && (expected.action === 'accept_slot' ? completeSlot(expected.slot) : offer.slots.some(completeSlot));
 }
