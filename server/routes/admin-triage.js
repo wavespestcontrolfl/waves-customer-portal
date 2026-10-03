@@ -519,9 +519,18 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
     // open card). Judged HERE, under the per-call lock the card filer also holds — the same
     // "pass is still working this call" refusal the operator link route gives.
     if (item.reason_code === 'household_address_match' && ['resolved', 'dismissed'].includes(nextStatus) && item.call_log_id) {
+      // The call_log row lock (triage lock first, the filer's order) makes the claim check, the stale
+      // revocation and the card write atomic against a pass resuming or reclaiming.
+      const claim = await trx('call_log').where({ id: item.call_log_id }).forUpdate().first('processing_token');
       const working = await trx('call_log').where({ id: item.call_log_id })
         .whereRaw(require('../utils/call-claim').ACTIVE_CLAIM_SQL).first('id');
       if (working) return { outcome: 'call_still_processing' };
+      // A claim that has gone stale is reclaimable but still OWNED: its token would let a stalled
+      // worker that resumes keep holding the call after the card closes (no booking, no open task).
+      // Revoke it here, so any later write of that worker fails its token fence and it abandons.
+      if (claim?.processing_token) {
+        await trx('call_log').where({ id: item.call_log_id, processing_token: claim.processing_token }).update({ processing_token: null });
+      }
     }
     // A street-level address hold settles with its visit, never by Resolve /
     // Dismiss. Checked HERE, under the per-call lock and inside the

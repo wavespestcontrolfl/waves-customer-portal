@@ -498,9 +498,11 @@ describe('a household_address_match card (GATE_CALL_HOUSEHOLD_HOLD) is an operat
         expect(lockTriageCall).toHaveBeenCalledTimes(1); // judged under the lock the filer takes
         expect(f.tables.triage_items[0].status).toBe('open');
       }
-      // a crashed pass stops beating: the claim is reclaimable, so it no longer blocks
+      // a crashed pass stops beating: the claim is reclaimable, so it no longer blocks — and its token is
+      // REVOKED in the same transaction, so a stalled worker that resumes fails its fence and abandons
       f.tables.call_log[0].claim_stale = true;
       expect((await put(baseUrl, `/${CARD_ID}/dismiss`, { expected_updated_at: CARD_VERSION })).status).toBe(200);
+      expect(f.tables.call_log[0].processing_token).toBeNull();
     });
     expect(f.tables.triage_items[0].status).toBe('dismissed');
     // a finished pass

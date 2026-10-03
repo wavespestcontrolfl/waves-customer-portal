@@ -686,6 +686,15 @@ describe('the sweep and the verdict route leave the card to a person', () => {
     expect(src).not.toMatch(/ADVISORY_AGE_CODES = new Set\(\[[^\]]*household_address_match/);
   });
 
+  test('admin-triage: a STALE claim is revoked under the call_log row lock before the card closes, so a resumed stalled worker abandons', () => {
+    const route = fs.readFileSync(require.resolve('../routes/admin-triage'), 'utf8');
+    const at = route.indexOf("await trx('call_log').where({ id: item.call_log_id }).forUpdate().first('processing_token')");
+    expect(at).toBeGreaterThan(route.indexOf('await lockTriageCall(trx, item.call_log_id);'));
+    const block = route.slice(at, at + 1400);
+    expect(block.indexOf('ACTIVE_CLAIM_SQL')).toBeLessThan(block.indexOf('update({ processing_token: null })'));
+    expect(block).toContain("where({ id: item.call_log_id, processing_token: claim.processing_token })");
+  });
+
   test('admin-triage: /verdict 400, bulk verdict sweeps exclude it, non-admin Resolve AND Dismiss are 403', () => {
     const route = fs.readFileSync(require.resolve('../routes/admin-triage'), 'utf8');
     expect(route).toMatch(/if \(item\.reason_code === 'household_address_match'\) \{\s+if \(req\.techRole !== 'admin'\) return res\.status\(403\)[^\n]*\n\s+return res\.status\(400\)/);
