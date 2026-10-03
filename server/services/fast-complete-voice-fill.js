@@ -1317,6 +1317,7 @@ const SENTENCE_SPLIT_RE = /(?<=[.!?])\s+|\n+/;
 // "PIN is four four one two", "combination is one two three four": a code spoken
 // as words is still a code (COMPLETION_ACCESS_CODE_RE's bare form needs digits)
 const SPOKEN_DIGIT = '(?:zero|oh|one|two|three|four|five|six|seven|eight|nine|\\d)';
+const SPOKEN_DIGIT_WORDS = new Set(['zero', 'oh', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine']);
 const SPOKEN_CODE_RE = new RegExp(`\\b(?:pin|code|combo|combination|passcode)\\b[^.!?\\n]{0,15}?(?:${SPOKEN_DIGIT}[\\s,-]+){2,}${SPOKEN_DIGIT}\\b`, 'i');
 const isOfficeSentence = (sentence, accessCodeRe) => OFFICE_ADDRESSED_RE.test(sentence) || INTERNAL_MATTER_RE.test(sentence)
   || accessCodeRe.test(sentence) || SPOKEN_CODE_RE.test(sentence);
@@ -1328,12 +1329,14 @@ function spokenClauseScope(sentence, spoken) {
   const words = tokensOf(sentence);
   if (!words.length) return null;
   let scope = null;
-  for (const { tokens, breaks, office, afterOffice } of spoken) {
+  // any number taken from a sentence that names a code is that code: office only
+  const numberish = words.some((w) => /\d/.test(w)) || words.filter((w) => SPOKEN_DIGIT_WORDS.has(w)).length >= 2;
+  for (const { tokens, breaks, office, coded, afterOffice } of spoken) {
     for (let i = 0; i + words.length <= tokens.length; i += 1) {
       const atStart = i === 0 || breaks[i];
       const atEnd = i + words.length === tokens.length || breaks[i + words.length];
       if (!atStart || !atEnd || !words.every((w, k) => tokens[i + k] === w)) continue;
-      if (office) return 'office';
+      if (office || (coded && numberish)) return 'office';
       scope = afterOffice && scope !== 'customer' ? 'unclear' : 'customer';
     }
   }
@@ -1357,7 +1360,7 @@ function splitNotes(customerRaw, officeRaw, transcript = '', unclear = []) {
     // Only a sentence ADDRESSED to the office makes every clause of it office-only;
     // an internal topic or entry code in one clause ("...; gate code is 1234") is
     // judged on that clause's own words by the caller.
-    const entry = { ...tokenize(t), office: OFFICE_ADDRESSED_RE.test(t), afterOffice };
+    const entry = { ...tokenize(t), office: OFFICE_ADDRESSED_RE.test(t), coded: COMPLETION_ACCESS_CODE_RE.test(t) || SPOKEN_CODE_RE.test(t), afterOffice };
     if (OFFICE_ADDRESSED_RE.test(t)) afterOffice = true;
     return entry;
   });

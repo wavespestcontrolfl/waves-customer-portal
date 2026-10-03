@@ -1620,3 +1620,12 @@ describe('a code never loses its label on the way to the office', () => {
     }
   });
 });
+
+test.each([
+  ['Gate code: 1234.', '1234.'],
+  ['Gate code: four four one two.', 'four four one two.'],
+  ['Treated outside, gate code, 1, 2, 3, 4.', '1, 2, 3, 4.'],
+])('transcript "%s": the bare code "%s" as customer note goes to the office', (t, note) => {
+  const out = validateFill(answer({ customerNote: note }), ctx, t);
+  expect(out.customerNote).toBe('');
+});
