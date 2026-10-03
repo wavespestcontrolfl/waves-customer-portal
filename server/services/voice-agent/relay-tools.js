@@ -957,13 +957,32 @@ async function executeTool(name, input = {}, ctx = {}) {
       // own account (full tier only), so only what is genuinely absent there
       // is reported missing below.
       const account = estimateRequested ? await accountContactFor(ctx) : null;
+      const LOCATION = ['address_line1', 'city', 'zip'];
+      let locationFromAccount = false;
       if (account) {
-        for (const k of ['first_name', 'last_name', 'address_line1', 'city', 'zip']) {
+        for (const k of ['first_name', 'last_name']) {
           if (!estimateFields[k] && nz(account[k])) estimateFields[k] = nz(account[k]);
+        }
+        // ⭐ AN ADDRESS IS ONE THING. A street the caller gave is never
+        // completed with the account's city or ZIP (or the reverse): if any
+        // part of a location was stated on this call, the estimate is for
+        // THAT property and anything absent is asked for. Only a call with no
+        // location at all takes the account's, whole.
+        if (!LOCATION.some((k) => estimateFields[k])) {
+          for (const k of LOCATION) if (nz(account[k])) estimateFields[k] = nz(account[k]);
+          locationFromAccount = true;
         }
         if (!estimateFields.email && nz(account.email) && isValidEmail(nz(account.email))) estimateFields.email = nz(account.email);
       }
-      if (typeof ctx.noteEstimateFields === 'function') ctx.noteEstimateFields(estimateFields);
+      // The account's location is a default read fresh on every capture, never
+      // remembered as something the caller said: the call's store only adds
+      // fields, so a borrowed street kept there would be mixed with a city the
+      // caller states later.
+      if (typeof ctx.noteEstimateFields === 'function') {
+        ctx.noteEstimateFields(locationFromAccount
+          ? { ...estimateFields, address_line1: null, city: null, zip: null }
+          : estimateFields);
+      }
       // The accumulated fields ALSO ride the lead write (hook P1): identity
       // resolution (email match) and fill-forward must see the name/email/
       // address the FIRST capture gave, not just this retry's new piece.
