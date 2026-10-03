@@ -5,6 +5,8 @@
 // chats escalated, 49 escalation rows never claimed).
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+const mockWikiQuery = jest.fn();
+jest.mock('../services/knowledge/wiki-qa', () => ({ query: mockWikiQuery }));
 jest.mock('../routes/reschedule-public', () => ({
   _internals: { loadById: jest.fn(async (id) => ({ id })), pageEligibility: jest.fn() },
 }));
@@ -108,6 +110,38 @@ describe('portal tools', () => {
     expect(result.available).toBe(true);
   });
 
+  test('a failed eligibility transaction rolls back before checking the next visit', async () => {
+    mockUpcoming([
+      { id: 1, scheduled_date: '2026-10-10', service_type: 'Pest Control', window_start: '10:00', reschedule_token: 'tok_1' },
+      { id: 2, scheduled_date: '2026-10-11', service_type: 'Pest Control', window_start: '10:00', reschedule_token: 'tok_2' },
+    ]);
+    loadById.mockImplementation(async (id, database) => {
+      if (id === 1) {
+        database.aborted = true;
+        throw new Error('lookup failed');
+      }
+      return { id };
+    });
+    pageEligibility.mockResolvedValue({ ok: true });
+    const actions = [];
+    const turn = {
+      query: jest.fn(async (query) => query),
+      transaction: jest.fn(async (_stage, read) => {
+        const database = { aborted: false };
+        const result = await read(database);
+        if (database.aborted) throw Object.assign(new Error('transaction is aborted'), { code: '25P02' });
+        return result;
+      }),
+      assertActive: jest.fn(),
+    };
+
+    const result = await executeToolCall('offer_reschedule_link', {}, 'cust-1', actions, null, {}, turn);
+
+    expect(turn.transaction).toHaveBeenCalledTimes(2);
+    expect(actions).toEqual([{ type: 'link', label: 'Reschedule Pest Control, Oct 11', href: '/reschedule/tok_2' }]);
+    expect(result.available).toBe(true);
+  });
+
   test('visits at more than one property carry the street on the button', async () => {
     mockUpcoming([
       { id: 1, scheduled_date: '2026-10-09', service_type: 'Pest Control', window_start: '10:00', reschedule_token: 'tok_one' },
@@ -174,6 +208,29 @@ describe('portal tools', () => {
   test('a channel that cannot render buttons gets none', async () => {
     expect((await executeToolCall('open_portal_section', { section: 'billing' }, 'cust-1')).shown).toBe(false);
     expect((await executeToolCall('offer_reschedule_link', {}, 'cust-1')).available).toBe(false);
+  });
+
+  test.each([
+    ['portal deadline', { code: 'PORTAL_CHAT_DEADLINE' }],
+    ['abort code', { code: 'ABORT_ERR' }],
+    ['database cancellation', { code: '57014' }],
+    ['abort name', { name: 'AbortError' }],
+    ['Knex timeout', { name: 'KnexTimeoutError' }],
+  ])('the top-level dispatcher propagates a %s without adding a late action', async (_label, identity) => {
+    const cancelled = Object.assign(new Error('cancelled'), identity);
+    const query = mockUpcoming([]);
+    query.offset.mockRejectedValue(cancelled);
+    const actions = [];
+
+    await expect(executeToolCall('offer_reschedule_link', {}, 'cust-1', actions)).rejects.toBe(cancelled);
+    expect(actions).toEqual([]);
+  });
+
+  test('the knowledge fallback does not swallow a recognized cancellation', async () => {
+    const cancelled = Object.assign(new Error('cancelled'), { code: 'ABORT_ERR' });
+    mockWikiQuery.mockRejectedValue(cancelled);
+
+    await expect(executeToolCall('get_pest_advice', { topic: 'ants' }, 'cust-1')).rejects.toBe(cancelled);
   });
 });
 

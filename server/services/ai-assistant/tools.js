@@ -12,6 +12,7 @@ const { arrivalWindowRange } = require('../../utils/sms-time-format');
 const { RESCHEDULABLE_STATUSES } = require('../reschedule-eligibility');
 const { listPortalPayments } = require('../portal-payment-history');
 const { listPortalServiceHistory } = require('../portal-service-history');
+const runQuery = (query, turn, stage) => turn ? turn.query(query, stage) : query;
 
 // Tool definitions in Anthropic format
 const TOOLS = [
@@ -211,6 +212,25 @@ function portalToolsFor({ payments = false, visits = false, reservice = false, r
 const PORTAL_FACTS_TOOLS = portalToolsFor({ payments: true });
 
 const CUSTOMER_SCOPED_TOOLS = new Set(['get_upcoming_services', 'offer_reschedule_link', 'show_recent_payments', 'get_recent_visits', 'offer_reservice', 'request_email_change']);
+const TOOL_CANCELLATION_CODES = new Set(['PORTAL_CHAT_DEADLINE', 'ABORT_ERR', '57014']);
+const TOOL_CANCELLATION_NAMES = new Set(['AbortError', 'KnexTimeoutError']);
+
+function isToolCancellation(err) {
+  return TOOL_CANCELLATION_CODES.has(err?.code) || TOOL_CANCELLATION_NAMES.has(err?.name);
+}
+
+const TOOL_EXECUTORS = new Map([
+  ['get_upcoming_services', ({ customerId, turn }) => getUpcomingServices(customerId, turn)],
+  ['get_pest_advice', ({ input, turn }) => getPestAdvice(input.topic, turn)],
+  ['offer_reschedule_link', ({ customerId, actions, turn }) => offerRescheduleLink(customerId, actions, turn)],
+  ['open_portal_section', ({ input, actions, turn }) => openPortalSection(input.section, actions, turn)],
+  ['show_recent_payments', ({ customerId, actions, cards, turn }) => showRecentPayments(customerId, actions, cards, turn)],
+  ['get_recent_visits', ({ customerId, actions, cards, turn }) => getRecentVisits(customerId, actions, cards, turn)],
+  ['offer_reservice', ({ customerId, input, actions, context, turn }) => offerReservice(customerId, input, actions, context, turn)],
+  ['request_email_change', ({ customerId, input, context, turn }) => requestEmailChange(customerId, input, context, turn)],
+  // Handled in assistant.js before reaching here.
+  ['escalate', ({ input }) => ({ escalated: true, reason: input.reason })],
+]);
 
 // One button per target. No count cap is needed, and none may refuse a
 // button a tool then reports as shown: the distinct targets are the portal
@@ -229,7 +249,10 @@ function addAction(actions, action) {
 // `context.customerMessage`: the customer's message this turn;
 // `context.emailChange` / `context.conversationId`: the email-change lane is
 // live, and the chat whose messages it checks.
-async function executeToolCall(toolName, input, contextCustomerId, actions = null, cards = null, context = {}) {
+// `turn` belongs to authenticated portal chat. SMS uses this same dispatcher
+// without the portal coordinator and keeps its existing execution policy.
+// The portal caller is wired in the separate coordinator activation slice.
+async function executeToolCall(toolName, input, contextCustomerId, actions = null, cards = null, context = {}, turn = null) {
   try {
     input = input && typeof input === 'object' ? input : {};
 
@@ -245,38 +268,19 @@ async function executeToolCall(toolName, input, contextCustomerId, actions = nul
       }
     }
 
-    switch (toolName) {
-      case 'get_upcoming_services':
-        return await getUpcomingServices(contextCustomerId);
-      case 'get_pest_advice':
-        return await getPestAdvice(input.topic);
-      case 'offer_reschedule_link':
-        return await offerRescheduleLink(contextCustomerId, actions);
-      case 'open_portal_section':
-        return openPortalSection(input.section, actions);
-      case 'show_recent_payments':
-        return await showRecentPayments(contextCustomerId, actions, cards);
-      case 'get_recent_visits':
-        return await getRecentVisits(contextCustomerId, actions, cards);
-      case 'offer_reservice':
-        return await offerReservice(contextCustomerId, input, actions, context);
-      case 'request_email_change':
-        return await requestEmailChange(contextCustomerId, input, context);
-      case 'escalate':
-        // Handled in assistant.js before reaching here
-        return { escalated: true, reason: input.reason };
-      default:
-        return { error: `Unknown tool: ${toolName}` };
-    }
+    const execute = TOOL_EXECUTORS.get(toolName);
+    if (!execute) return { error: `Unknown tool: ${toolName}` };
+    return await execute({ input, customerId: contextCustomerId, actions, cards, context, turn });
   } catch (err) {
+    if (isToolCancellation(err)) throw err;
     logger.error(`Tool ${toolName} failed: ${err.message}`);
     return { error: `Tool failed: ${err.message}` };
   }
 }
 
-async function getUpcomingServices(customerId) {
+async function getUpcomingServices(customerId, turn) {
   if (!customerId) return { services: [] };
-  const services = await db('scheduled_services')
+  const query = db('scheduled_services')
     .where('customer_id', customerId)
     .where('scheduled_date', '>=', etDateString())
     .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
@@ -284,6 +288,7 @@ async function getUpcomingServices(customerId) {
       'scheduled_services.window_start', 'scheduled_services.status')
     .orderBy('scheduled_date')
     .limit(5);
+  const services = await runQuery(query, turn, 'upcoming services');
 
   return {
     services: services.map(s => ({
@@ -310,18 +315,16 @@ function shortDateLabel(dateKey) {
 }
 
 // The visit as the reschedule page loads it, when that page's own GET verdict
-// would let the customer move it; null otherwise. Any failure fails closed.
-async function movableVisit(id) {
+// would let the customer move it; null otherwise. The caller fails closed
+// after the bounded transaction has rolled back.
+async function movableVisit(id, database = db) {
   const { loadById, pageEligibility } = require('../../routes/reschedule-public')._internals;
-  const svc = await loadById(id).catch(() => null);
-  const verdict = svc && await pageEligibility(svc).catch((err) => {
-    logger.warn(`[ai-assistant] reschedule eligibility failed for visit ${id}, no button: ${err.message}`);
-    return null;
-  });
+  const svc = await loadById(id, database);
+  const verdict = svc && await pageEligibility(svc, new Date(), database);
   return verdict?.ok ? svc : null;
 }
 
-async function offerRescheduleLink(customerId, actions) {
+async function offerRescheduleLink(customerId, actions, turn) {
   const NO_LINK = {
     available: false,
     instruction: 'No visit of this customer can be moved online right now. Use the escalate tool so the team moves it.',
@@ -336,7 +339,7 @@ async function offerRescheduleLink(customerId, actions) {
   // none are left: the button cap applies to movable visits, so no run of
   // visits the page refuses can hide a later one it accepts.
   for (let offset = 0; movable.length < MAX_RESCHEDULE_BUTTONS; offset += RESCHEDULE_PAGE) {
-    const rows = await db('scheduled_services')
+    const query = db('scheduled_services')
       .where('customer_id', customerId)
       .where('scheduled_date', '>=', etDateString())
       // The reschedule page's own status set (a 'rescheduled' visit is still
@@ -348,9 +351,19 @@ async function offerRescheduleLink(customerId, actions) {
       .orderBy('id')
       .limit(RESCHEDULE_PAGE)
       .offset(offset);
+    const rows = await runQuery(query, turn, 'reschedule visits');
     for (const row of rows) {
       if (movable.length >= MAX_RESCHEDULE_BUTTONS) break;
-      const svc = await movableVisit(row.id);
+      let svc;
+      try {
+        svc = turn
+          ? await turn.transaction('reschedule eligibility', (database) => movableVisit(row.id, database))
+          : await movableVisit(row.id);
+      } catch (err) {
+        if (isToolCancellation(err)) throw err;
+        logger.warn(`[ai-assistant] reschedule eligibility failed for visit ${row.id}, no button: ${err.message}`);
+        svc = null;
+      }
       if (svc) movable.push({ row, property: String(svc.address_line1 || '').trim() });
     }
     if (rows.length < RESCHEDULE_PAGE) break;
@@ -362,6 +375,7 @@ async function offerRescheduleLink(customerId, actions) {
   // goes on the server-built label only: the tool result below is sent to
   // the model, which is given no account data.
   const multiProperty = new Set(movable.map((m) => m.property)).size > 1;
+  turn?.assertActive('reschedule buttons');
   const visits = movable.map(({ row, property }) => {
     const dateKey = dateKeyOf(row.scheduled_date);
     const type = String(row.service_type || 'visit');
@@ -395,23 +409,26 @@ const methodLabel = (p) => {
   return `${brand} ending in ${p.lastFour}`;
 };
 
-async function showRecentPayments(customerId, actions, cards) {
+async function showRecentPayments(customerId, actions, cards, turn) {
   const NOT_SHOWN = { shown: false, instruction: 'The payment card could not be shown. Offer the Billing page and, for a question about a specific charge, use the escalate tool.' };
   if (!customerId || !Array.isArray(cards)) return NOT_SHOWN;
-  // Every read starts clean: a card from an earlier call in this turn never
-  // outlives a later read that says it must not be shown.
   const prior = cards.findIndex((c) => c.type === 'payments');
-  if (prior !== -1) cards.splice(prior, 1);
-  // The Billing page is the fallback on every exit below, so the button goes
-  // on first: the model is not allowed to write a link itself.
-  addAction(actions, { type: 'tab', label: 'Open Billing', tab: 'billing' });
   let page;
   try {
-    page = await listPortalPayments(customerId, { limit: RECENT_PAYMENTS_SHOWN });
+    page = turn
+      ? await turn.transaction('payment history', (database) => listPortalPayments(customerId, { limit: RECENT_PAYMENTS_SHOWN, database }))
+      : await listPortalPayments(customerId, { limit: RECENT_PAYMENTS_SHOWN });
   } catch (err) {
+    if (isToolCancellation(err)) throw err;
     logger.warn(`[ai-assistant] recent payments read failed for ${customerId}: ${err.message}`);
+    turn?.assertActive('payment card fallback');
+    if (prior !== -1) cards.splice(prior, 1);
+    addAction(actions, { type: 'tab', label: 'Open Billing', tab: 'billing' });
     return NOT_SHOWN;
   }
+  turn?.assertActive('payment card');
+  if (prior !== -1) cards.splice(prior, 1);
+  addAction(actions, { type: 'tab', label: 'Open Billing', tab: 'billing' });
   // Any payment the card cannot label means no card at all: a card that
   // skipped the newest (say, disputed) payment would present an older one
   // as the latest, and the model would confirm a payment that did not land.
@@ -453,21 +470,28 @@ async function showRecentPayments(customerId, actions, cards) {
   };
 }
 
-async function getRecentVisits(customerId, actions, cards) {
+async function getRecentVisits(customerId, actions, cards, turn) {
   const UNAVAILABLE = { visits: null, instruction: 'The visit history could not be read. Tell the customer the Completed visits page has it and, for a question about a specific visit, use the escalate tool.' };
   if (!customerId || !Array.isArray(actions) || !Array.isArray(cards)) return UNAVAILABLE;
-  // Every read starts clean, and the page that lists every completed visit
-  // is the fallback on every exit.
   const prior = cards.findIndex((c) => c.type === 'visits');
-  if (prior !== -1) cards.splice(prior, 1);
-  addAction(actions, { type: 'tab', label: PORTAL_SECTIONS.service_reports.label, tab: PORTAL_SECTIONS.service_reports.tab });
   let page;
   try {
-    page = await listPortalServiceHistory(customerId, { limit: RECENT_VISITS_READ, completedOnly: true });
+    page = turn
+      ? await turn.transaction('service history', (database) => listPortalServiceHistory(customerId, {
+        limit: RECENT_VISITS_READ, completedOnly: true, database,
+      }))
+      : await listPortalServiceHistory(customerId, { limit: RECENT_VISITS_READ, completedOnly: true });
   } catch (err) {
+    if (isToolCancellation(err)) throw err;
     logger.warn(`[ai-assistant] recent visits read failed for ${customerId}: ${err.message}`);
+    turn?.assertActive('visit card fallback');
+    if (prior !== -1) cards.splice(prior, 1);
+    addAction(actions, { type: 'tab', label: PORTAL_SECTIONS.service_reports.label, tab: PORTAL_SECTIONS.service_reports.tab });
     return UNAVAILABLE;
   }
+  turn?.assertActive('visit card');
+  if (prior !== -1) cards.splice(prior, 1);
+  addAction(actions, { type: 'tab', label: PORTAL_SECTIONS.service_reports.label, tab: PORTAL_SECTIONS.service_reports.tab });
   if (!page.services.length) {
     return {
       visits: [],
@@ -538,25 +562,22 @@ function reservicePageSwitchesOn() {
 
 // A re-service already open in the line: its date and window for the model,
 // and a button to move it only when the reschedule page would accept it.
-async function bookedReserviceResult(customerId, line, booked, actions) {
+async function bookedReserviceResult(customerId, line, booked, database = db) {
   // The reschedule route's own token format: any other token is a 404 there.
   const token = /^\/reschedule\/([^/]+)$/.exec(String(booked.rescheduleUrl || ''))?.[1];
   const { TOKEN_RE: RESCHEDULE_TOKEN_RE } = require('../../routes/reschedule-public')._internals;
-  if (token && !RESCHEDULE_TOKEN_RE.test(token)) return bookedReserviceFacts(line, booked, false);
+  if (token && !RESCHEDULE_TOKEN_RE.test(token)) return { result: bookedReserviceFacts(line, booked, false) };
   // The button is optional: a failed lookup keeps the booked visit's facts.
-  const row = token && await db('scheduled_services').where({ customer_id: customerId, reschedule_token: token }).first('id').catch((err) => {
-    logger.warn(`[ai-assistant] booked re-service lookup failed, no button: ${err.message}`);
-    return null;
-  });
-  const movable = Boolean(row && await movableVisit(row.id));
-  if (movable) {
-    addAction(actions, {
+  const row = token && await database('scheduled_services').where({ customer_id: customerId, reschedule_token: token }).first('id');
+  const movable = Boolean(row && await movableVisit(row.id, database));
+  return {
+    result: bookedReserviceFacts(line, booked, movable),
+    action: movable ? {
       type: 'link',
       label: `Reschedule ${booked.serviceType}, ${shortDateLabel(booked.date)}`.slice(0, 80),
       href: booked.rescheduleUrl,
-    });
-  }
-  return bookedReserviceFacts(line, booked, movable);
+    } : null,
+  };
 }
 
 function bookedReserviceFacts(line, booked, movable) {
@@ -611,47 +632,69 @@ function reserviceLineOf(input, lawn) {
   return (lawn ? ['pest', 'lawn'] : ['pest']).includes(input.service_line) ? input.service_line : null;
 }
 
-async function offerReservice(customerId, input, actions, { secondaryProperty = true, customerMessage = '', lawn = false } = {}) {
+async function offerReservice(customerId, input, actions, { secondaryProperty = true, customerMessage = '', lawn = false } = {}, turn = null) {
   const line = reserviceLineOf(input, lawn);
   if (!customerId || !line || !Array.isArray(actions)) return RESERVICE_HAND_OFF;
   if (!reserviceSurfaceOpen({ secondaryProperty })) return RESERVICE_HAND_OFF;
   const refusal = reportRefusal(customerMessage, line, input);
   if (refusal) return refusal;
+  const read = (database) => offerReserviceResult(customerId, line, database);
+  let decision;
+  try {
+    decision = turn
+      ? await turn.transaction('re-service offer', read)
+      : await read(db);
+  } catch (err) {
+    if (isToolCancellation(err)) throw err;
+    logger.warn(`[ai-assistant] re-service read failed, no button: ${err.message}`);
+    return RESERVICE_HAND_OFF;
+  }
+  if (decision.booked) {
+    try {
+      decision = turn
+        ? await turn.transaction('booked re-service move', (database) => bookedReserviceResult(customerId, line, decision.booked, database))
+        : await bookedReserviceResult(customerId, line, decision.booked);
+    } catch (err) {
+      if (isToolCancellation(err)) throw err;
+      logger.warn(`[ai-assistant] booked re-service move read failed, no button: ${err.message}`);
+      decision = { result: bookedReserviceFacts(line, decision.booked, false) };
+    }
+  }
+  if (decision.action) {
+    turn?.assertActive('re-service button');
+    addAction(actions, decision.action);
+  }
+  return decision.result;
+}
+
+async function offerReserviceResult(customerId, line, database = db) {
   // An open re-service in the line is read on its own, as the page does: a
   // visit booked while the plan covered the line stays on the schedule after
   // coverage changes, and the customer is told about it.
-  const open = await require('../reservice-scheduler').openReserviceCallbacks(customerId).catch((err) => {
-    logger.warn(`[ai-assistant] open re-service read failed, no button: ${err.message}`);
-    return null;
-  });
-  if (!open) return RESERVICE_HAND_OFF;
-  if (open[line]) return bookedReserviceResult(customerId, line, open[line], actions);
-  const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('reservice_token').catch((err) => {
-    logger.warn(`[ai-assistant] re-service token read failed, no button: ${err.message}`);
-    return null;
-  });
+  const open = await require('../reservice-scheduler').openReserviceCallbacks(customerId, database);
+  if (open[line]) return { booked: open[line] };
+  const customer = await database('customers').where({ id: customerId }).whereNull('deleted_at').first('reservice_token');
   const token = String(customer?.reservice_token || '');
   // The /reservice page's own token format and verdict for this token (its
   // customer load, lane catalog, coverage and open re-services), so the chat
   // offers exactly what the page would show. Any failure hands off.
   const page = require('../../routes/reservice-public')._internals;
-  if (!page.TOKEN_RE.test(token)) return RESERVICE_HAND_OFF;
-  const state = await page.pageLaneState(token).catch((err) => {
-    logger.warn(`[ai-assistant] re-service page state failed, no button: ${err.message}`);
-    return null;
-  });
-  if (!state || String(state.customer.id) !== String(customerId)) return RESERVICE_HAND_OFF;
-  if (!state.bookableLanes.includes(line)) return RESERVICE_HAND_OFF;
+  if (!page.TOKEN_RE.test(token)) return { result: RESERVICE_HAND_OFF };
+  const state = await page.pageLaneState(token, database);
+  if (!state || String(state.customer.id) !== String(customerId)) return { result: RESERVICE_HAND_OFF };
+  if (!state.bookableLanes.includes(line)) return { result: RESERVICE_HAND_OFF };
   // An address held for staff review shows no times on the page, only
   // instructions to text or call: hand off rather than promise a time.
-  const reviewHold = await page.reserviceLocationReviewRequired(state.customer).catch(() => true);
-  if (reviewHold) return RESERVICE_HAND_OFF;
+  const reviewHold = await page.reserviceLocationReviewRequired(state.customer, database);
+  if (reviewHold) return { result: RESERVICE_HAND_OFF };
   // One label for both lines: the page lets the customer pick the line, and a
   // second call for the other line shares this href (one button).
-  addAction(actions, { type: 'link', label: 'Book your free re-service', href: `/reservice/${token}` });
   return {
-    offered: true,
-    instruction: `The customer's plan covers a free ${RESERVICE_LINE_WORDS[line]} re-service, and a button that opens its booking page is now shown under your reply. Acknowledge what they are seeing, tell them the visit is free under their plan, and tell them to tap the button to book it. Do not say whether times are open or promise a time: the page shows what is open, and says how to reach the team when nothing is. The free visit covers ${RESERVICE_COVERS[line]} only: never say it covers rodents, termites, mosquitoes or a tree and shrub problem.`,
+    action: { type: 'link', label: 'Book your free re-service', href: `/reservice/${token}` },
+    result: {
+      offered: true,
+      instruction: `The customer's plan covers a free ${RESERVICE_LINE_WORDS[line]} re-service, and a button that opens its booking page is now shown under your reply. Acknowledge what they are seeing, tell them the visit is free under their plan, and tell them to tap the button to book it. Do not say whether times are open or promise a time: the page shows what is open, and says how to reach the team when nothing is. The free visit covers ${RESERVICE_COVERS[line]} only: never say it covers rodents, termites, mosquitoes or a tree and shrub problem.`,
+    },
   };
 }
 
@@ -743,16 +786,19 @@ function pendingReadBack(rows, customerMessage) {
 // hand-off the keyword match forces before the model sees the message (so
 // nobody judged whether it was confirmed). null when there is none or the
 // read fails.
-async function emailReadBackAwaitingAnswer(conversationId, customerMessage) {
+async function emailReadBackAwaitingAnswer(conversationId, customerMessage, turn = null) {
   try {
-    return pendingReadBack(await emailChangeRows(conversationId), customerMessage);
+    const query = emailChangeRows(conversationId);
+    const rows = await runQuery(query, turn, 'email read-back');
+    return pendingReadBack(rows, customerMessage);
   } catch (err) {
+    if (isToolCancellation(err)) throw err;
     logger.warn(`[ai-assistant] pending email read-back read failed: ${err.message}`);
     return null;
   }
 }
 
-async function requestEmailChange(customerId, input, { emailChange = false, conversationId, customerMessage = '' } = {}) {
+async function requestEmailChange(customerId, input, { emailChange = false, conversationId, customerMessage = '' } = {}, turn = null) {
   // Only under its gate: the tool is not in any other lane's set.
   if (emailChange !== true) return { error: 'Unknown tool: request_email_change' };
   if (!customerId || !conversationId) return EMAIL_HAND_OFF;
@@ -762,9 +808,12 @@ async function requestEmailChange(customerId, input, { emailChange = false, conv
   let rows;
   let customer;
   try {
-    rows = await emailChangeRows(conversationId);
-    customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('email');
+    const historyQuery = emailChangeRows(conversationId);
+    rows = await runQuery(historyQuery, turn, 'email change history');
+    const customerQuery = db('customers').where({ id: customerId }).whereNull('deleted_at').first('email');
+    customer = await runQuery(customerQuery, turn, 'email change customer');
   } catch (err) {
+    if (isToolCancellation(err)) throw err;
     logger.warn(`[ai-assistant] email change check failed for ${customerId}: ${err.message}`);
     return EMAIL_HAND_OFF;
   }
@@ -784,19 +833,28 @@ async function requestEmailChange(customerId, input, { emailChange = false, conv
   return { confirmed_email: pending };
 }
 
-function openPortalSection(section, actions) {
+function openPortalSection(section, actions, turn) {
   const target = Object.prototype.hasOwnProperty.call(PORTAL_SECTIONS, section) ? PORTAL_SECTIONS[section] : null;
   if (!target || !Array.isArray(actions)) return { shown: false, error: 'Unknown section' };
+  turn?.assertActive('portal button');
   addAction(actions, { type: 'tab', label: target.label, tab: target.tab });
   return { shown: true, instruction: `An "${target.label}" button is now shown under your reply. Tell the customer to tap it.` };
 }
 
-async function getPestAdvice(topic) {
+async function getPestAdvice(topic, turn) {
   try {
     const WikiQA = require('../knowledge/wiki-qa');
-    const result = await WikiQA.query(topic, { source: 'ai_assistant' });
+    const read = () => WikiQA.query(topic, { source: 'ai_assistant' }, turn ? {
+      signal: turn.signal,
+      remainingMs: turn.remainingMs,
+      assertActive: turn.assertActive,
+      read: (query, stage) => turn.query(query, stage),
+      write: (work, stage) => turn.transaction(stage, work),
+    } : undefined);
+    const result = turn ? await turn.waitFor(read, 'knowledge answer') : await read();
     return { answer: result.answer, sources: result.articlesUsed };
-  } catch {
+  } catch (err) {
+    if (isToolCancellation(err)) throw err;
     return { answer: 'Knowledge base unavailable. General SWFL advice: contact your technician for specific pest identification and treatment recommendations.' };
   }
 }

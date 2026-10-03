@@ -31,7 +31,7 @@ jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({ messa
 const db = require('../models/db');
 const NotificationService = require('../services/notification-service');
 const assistant = require('../services/ai-assistant/assistant');
-const { portalToolsFor, executeToolCall } = require('../services/ai-assistant/tools');
+const { portalToolsFor, executeToolCall, emailReadBackAwaitingAnswer } = require('../services/ai-assistant/tools');
 
 const GATE = 'GATE_PORTAL_CHAT_EMAIL_CHANGE';
 const NEW = 'Pat.New@Example.com';
@@ -343,4 +343,31 @@ test('an address the customer types is not read as asking for the owner', async 
   expect(assistant.matchedEscalationTrigger('use pat.new@example.com/cancel my service', 'portal_chat')).toBe('cancel');
   delete process.env[GATE];
   expect(assistant.matchedEscalationTrigger(message, 'portal_chat')).toBe('owner');
+});
+
+
+test('coordinated email checks use bounded history and customer reads', async () => {
+  const turn = { query: jest.fn((query) => query) };
+  const context = { emailChange: true, conversationId: 'conv-1', customerMessage: NEW };
+  await expect(executeToolCall('request_email_change', { new_email: NEW }, 'cust-1', [], [], context, turn))
+    .resolves.toMatchObject({ read_back: NEW });
+  await emailReadBackAwaitingAnswer('conv-1', 'yes', turn);
+  expect(turn.query.mock.calls.map((call) => call[1]))
+    .toEqual(['email change history', 'email change customer', 'email read-back']);
+});
+
+test.each(['PORTAL_CHAT_DEADLINE', 'ABORT_ERR', '57014', 'AbortError', 'KnexTimeoutError']
+  .flatMap((identity) => ['email change history', 'email change customer', 'email read-back'].map((stage) => [identity, stage])))
+('email cancellation %s at %s stops without another read', async (identity, stage) => {
+  const error = Object.assign(new Error('cancelled'), { code: identity, name: identity });
+  const turn = { query: jest.fn((query, label) => {
+    if (label === stage) throw error;
+    return query;
+  }) };
+  const result = stage === 'email read-back'
+    ? emailReadBackAwaitingAnswer('conv-1', 'yes', turn)
+    : executeToolCall('request_email_change', { new_email: NEW }, 'cust-1', [], [],
+      { emailChange: true, conversationId: 'conv-1', customerMessage: NEW }, turn);
+  await expect(result).rejects.toBe(error);
+  expect(turn.query).toHaveBeenCalledTimes(stage === 'email change customer' ? 2 : 1);
 });
