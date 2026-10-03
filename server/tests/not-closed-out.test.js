@@ -255,6 +255,17 @@ describe('the dispatcher\'s two decisions', () => {
     expect(await notClosedOut.markHandled({ logId: 'log-1', handledBy: STAFF })).toEqual({ ok: false, reason: 'not_found' });
   });
 
+  test('"Not a miss" after "This was a miss" withdraws the confirmation, so the row is not a person-marked miss', async () => {
+    await notClosedOut.confirmMiss({ logId: 'log-1', confirmedBy: STAFF });
+    expect(mockTables.reschedule_log[0].miss_confirmed_at).toBe('NOW');
+    expect(await notClosedOut.dismiss({ logId: 'log-1', dismissedBy: STAFF })).toEqual({ ok: true });
+    expect(mockTables.reschedule_log[0]).toMatchObject({ resolution: 'dismissed', miss_confirmed_at: null, miss_confirmed_by: null });
+    // "Done" keeps it: a handled miss was still a miss
+    mockTables.reschedule_log = [logRow({ miss_confirmed_at: 'THEN', miss_confirmed_by: STAFF })];
+    await notClosedOut.markHandled({ logId: 'log-1', handledBy: STAFF });
+    expect(mockTables.reschedule_log[0]).toMatchObject({ resolution: 'handled', miss_confirmed_at: 'THEN' });
+  });
+
   test('gate turned off with a card still up: a decision still closes it, and raises no new one', async () => {
     mockGateOn = false;
     expect(await notClosedOut.confirmMiss({ logId: 'log-1', confirmedBy: STAFF })).toEqual({ ok: true });

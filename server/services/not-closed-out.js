@@ -306,7 +306,9 @@ async function cardAfterSettle(t, log, settledBy) {
 
 /**
  * "Not a miss": settle this one row as dismissed and close the visit's card when
- * no other flagged row of the visit is still open.
+ * no other flagged row of the visit is still open. It also withdraws an earlier
+ * "This was a miss" on the row: a person's later call wins, and the row no longer
+ * counts as a person-marked miss (the repeated-miss outreach count).
  * @returns {Promise<{ok: boolean, reason?: string}>}
  */
 async function dismiss({ logId, dismissedBy = null, note = null } = {}) {
@@ -318,6 +320,7 @@ async function dismiss({ logId, dismissedBy = null, note = null } = {}) {
     const reason = String(note || '').trim().slice(0, 200);
     await t('reschedule_log').where({ id: logId }).whereNull('resolved_at').update({
       resolved_at: t.fn.now(), resolution: 'dismissed', resolved_by: by,
+      miss_confirmed_at: null, miss_confirmed_by: null,
       ...(reason ? { notes: t.raw("left(concat_ws(' | ', NULLIF(notes, ''), ?::text), 500)", [`not a miss: ${reason}`]) } : {}),
     });
     await cardAfterSettle(t, log, dismissedBy);
