@@ -1041,11 +1041,15 @@ const REACTION_RE = /^\s*(?:(?:liked|loved|disliked|laughed\s+at|emphasi[sz]ed|q
 function hasUnknownShortWord(text, { namesExempt = false, maxWords = 4 } = {}) {
   const c = canonText(text);
   if (isPureReaction(c)) return false;
-  const words = [...stripMarks(c).matchAll(/\p{L}+/gu)].map((m) => m[0]);
+  const plain = stripMarks(c);
+  const matches = [...plain.matchAll(/\p{L}+/gu)];
+  const words = matches.map((m) => m[0]);
   if (!words.length || words.length > maxWords) return false;
+  // 'mid-sentence': only a capitalized word that does not start a sentence is a name ("Thanks Nadia"); a word
+  // after a full stop or at the start ("Ok. Perfecto", "Perfecto") is capitalized because it leads
+  const leads = (i) => /(?:^|[.!?\u3002\uFF01\uFF1F])[^\p{L}]*$/u.test(plain.slice(0, matches[i].index));
   return words.some((raw, i) => {
-    // 'after-first': only a capitalized word after the first is a name (a sentence's first word is always capitalized)
-    if (namesExempt && /^\p{Lu}/u.test(raw) && (namesExempt !== 'after-first' || i > 0)) return false;
+    if (namesExempt && /^\p{Lu}/u.test(raw) && (namesExempt !== 'mid-sentence' || !leads(i))) return false;
     const w = raw.toLowerCase();
     return !/^[a-z]+$/.test(w) || (w.length > 1 && !englishKnown(w));
   });

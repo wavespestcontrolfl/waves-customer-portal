@@ -585,6 +585,22 @@ describe('runTranslationTrial', () => {
     expect(await runTranslationTrial({ inboundMessage: `Не подходит «${quoted}»`, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'held', hold_reason: 'meaning_changed_in_inbound_translation' });
   });
 
+  test('a reaction to a short text of ours, and contact-detail replies, do not vote', async () => {
+    mockOutbound.mockResolvedValueOnce([{ message_body: 'On my way' }]);
+    mockEarlier.mockResolvedValueOnce([
+      { message_body: 'Понравилось «On my way»' }, { message_body: 'Понравилось «On my way»' },
+      { message_body: 'ana@gmail.com' }, { message_body: '123 Bayshore Dr' }, { message_body: 'Ok see you then' },
+    ]);
+    scriptModels({ inbound: { ...SPANISH_INBOUND, english: 'Thank you' } });
+    expect(await runTranslationTrial({ inboundMessage: 'Gracias', customer, smsLogId: 's1' })).toBeNull();
+  });
+
+  test('"Ok. Perfecto" counts as foreign: a word after a full stop is not a name', async () => {
+    mockEarlier.mockResolvedValueOnce([{ message_body: 'Ok. Perfecto' }, { message_body: 'Ok. Vale' }, { message_body: 'Ok thanks' }]);
+    scriptModels({ inbound: SPANISH_INBOUND });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'ready' });
+  });
+
   test('an ordinary reply with a short quote is not a reaction; it still votes', async () => {
     mockOutbound.mockResolvedValueOnce([{ message_body: 'Which day works: Thursday or Friday?' }]);
     mockEarlier.mockResolvedValueOnce([{ message_body: 'Dije “jueves”' }, { message_body: 'Vale' }, { message_body: 'Ok thanks' }]);
@@ -594,7 +610,7 @@ describe('runTranslationTrial', () => {
 
   test('a translated reaction keeping German or Japanese quote marks is still a reaction', async () => {
     const quoted = 'Hi Nadia, we moved your service to Wednesday.';
-    scriptModels({ inbound: { is_english: false, language: 'German', language_code: 'de', english: `Liked „${quoted}"` } });
+    scriptModels({ inbound: { is_english: false, language: 'German', language_code: 'de', english: `Liked „${quoted}“` } });
     expect(await runTranslationTrial({ inboundMessage: `Gefällt mir „${quoted}"`, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'skipped', hold_reason: 'reaction' });
     scriptModels({ inbound: { is_english: false, language: 'Japanese', language_code: 'ja', english: `Liked 「${quoted}」` } });
     expect(await runTranslationTrial({ inboundMessage: `「${quoted}」にいいねしました`, customer, smsLogId: 's2' })).toMatchObject({ verdict: 'skipped', hold_reason: 'reaction' });

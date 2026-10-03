@@ -770,7 +770,9 @@ async function draftInEnglish({ inboundMessage, fromPhone, customer, smsLogId })
   // English (the webhook's reaction check is English-only), and only after the translation passed both checks
   // above. A quiet one is not answered, as an English one is not.
   // (every quote pair a translation may keep - «…», „…", 「…」 - read as English curly quotes)
-  const asEnglishReaction = inbound.english.replace(/[\u00ab\u201e\u300c]/g, '\u201c').replace(/[\u00bb\u300d]/g, '\u201d');
+  // (German closes „…“ with U+201C, which is an English opener: that pair is read first)
+  const asEnglishReaction = inbound.english.replace(/\u201e([^\u201c\u201d"]*)\u201c/g, '\u201c$1\u201d')
+    .replace(/[\u00ab\u201e\u300c]/g, '\u201c').replace(/[\u00bb\u300d]/g, '\u201d');
   if (require('./sms-intent').isQuietSmsReaction(asEnglishReaction)) return { skip: 'reaction', fields, checks: { inbound_parity: inboundParity } };
 
   const thread = await translateThread(liveContext, inboundMessage, inbound.english, customer.id);
@@ -856,11 +858,11 @@ async function translateAndCheck({ englishReply, language, languageCode, context
 // gets today's English handling for a one-off "Gracias" or "Perfecto, thanks!":
 // no trial. A first text, or one from a customer who mostly writes another
 // language, goes on. A read failure goes on too (the trial sends nothing).
-// A phone's reaction in any language: a quote of at least 20 characters that is the START of one of our own
-// texts to this customer (a reaction quotes the message it reacts to, from its first word), with only a short
-// verb phrase around it - before ("Понравилось «…»") or after ("「…」にいいねしました"), 30 characters at most.
-// "I said “Thursday”" is an ordinary reply: its quote is too short and is not the start of our text.
-const REACTION_QUOTE_RE = /[\u00ab\u201c\u201e"\u300c]([\s\S]{20,})[\u00bb\u201d\u201c"\u300d]/u;
+// A phone's reaction in any language: a quote that is the START of one of our own texts to this customer (a
+// reaction quotes the message it reacts to, from its first word; "On my way" counts), with only a short verb
+// phrase around it - before ("Понравилось «…»") or after ("「…」にいいねしました"), 30 characters at most.
+// "I said “Thursday”" is an ordinary reply: none of our texts starts with "Thursday".
+const REACTION_QUOTE_RE = /[\u00ab\u201c\u201e"\u300c]([\s\S]{2,})[\u00bb\u201d\u201c"\u300d]/u;
 const squash = (t) => String(t || '').replace(/\s+/g, ' ').trim().replace(/(?:\.{3}|\u2026)$/, '').trim();
 function isReactionToOurText(body, outbound) {
   const text = String(body || '').trim();
@@ -882,10 +884,15 @@ async function usuallyWritesEnglish(customerId, smsLogId) {
     const { isSmsReaction } = require('./sms-intent');
     const { isEnglishInbound, hasUnknownShortWord } = require('./sms-label-facts');
     // a reaction in any phone language ("Liked “…”", "Понравилось «…»", "Le gustó “…”") quotes our text: not a vote
-    const bodies = rows.map((r) => r.message_body).filter((b) => typeof b === 'string' && b.trim() && !isSmsReaction(b) && !isReactionToOurText(b, outbound));
+    // contact details are not language: an email or link is set aside, and an address reply ("123 Bayshore Dr") or
+    // a reply with nothing left does not vote
+    const bodies = rows.map((r) => r.message_body)
+      .filter((b) => typeof b === 'string' && b.trim() && !isSmsReaction(b) && !isReactionToOurText(b, outbound))
+      .map((b) => b.replace(/\S*(?:@|:\/\/|\p{L}\.\p{L})\S*/gu, ' ').trim())
+      .filter((b) => /\p{L}/u.test(b) && !/^\d{1,6}\s+\p{L}/u.test(b));
     // a short foreign reply ("Perfecto", "Vale") reads as English to the majority check: the short-word signal counts it foreign
-    // (a capitalized word after the first is a name - "Thanks Nadia" stays English; a leading "Perfecto" does not)
-    const english = bodies.filter((b) => isEnglishInbound(b) && !hasUnknownShortWord(b, { namesExempt: 'after-first' })).length;
+    // (a capitalized word mid-sentence is a name - "Thanks Nadia" stays English; "Perfecto" or "Ok. Perfecto" does not)
+    const english = bodies.filter((b) => isEnglishInbound(b) && !hasUnknownShortWord(b, { namesExempt: 'mid-sentence' })).length;
     return english > bodies.length - english;
   } catch (err) {
     logger.warn(`[sms-translation] earlier texts not read: ${err.code || err.name || 'error'}`);
