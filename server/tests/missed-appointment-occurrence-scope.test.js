@@ -44,3 +44,20 @@ test('an unlinked visit stores null scope, never a guess', async () => {
   const log = inserts.find((i) => i.table === 'reschedule_log').row;
   expect(log).toMatchObject({ occurrence_service_type: null, occurrence_service_id: null, occurrence_property_id: null });
 });
+
+test('a caller snapshot (dispatch no-show) wins over a later edit of the live row (Codex #5669 r1)', async () => {
+  const { conn, inserts } = fakeConn({
+    id: 'visit-3', customer_id: 'c1', scheduled_date: '2026-09-29', window_start: '13:00:00', window_end: '14:00:00',
+    service_type: 'Lawn Care', service_id: 'svc-lawn', property_id: 'prop-2', // edited after the no-show was marked
+  });
+  jest.spyOn(MissedAppointment, 'evaluateThreshold').mockResolvedValueOnce(null);
+  await MissedAppointment.onSkip('visit-3', 'manual_no_show', conn, { occurrence: {
+    id: 'visit-3', scheduled_date: '2026-09-29', window_start: '09:00:00', window_end: '10:00:00',
+    service_type: 'Pest Control', service_id: 'svc-pest', property_id: 'prop-1',
+  } });
+  const log = inserts.find((i) => i.table === 'reschedule_log').row;
+  expect(log).toMatchObject({
+    customer_id: 'c1', original_window: '09:00:00-10:00:00',
+    occurrence_service_type: 'Pest Control', occurrence_service_id: 'svc-pest', occurrence_property_id: 'prop-1',
+  });
+});

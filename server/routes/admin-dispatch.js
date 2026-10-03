@@ -3228,7 +3228,8 @@ router.put('/:serviceId/status', async (req, res, next) => {
           .first('id');
         if (!alreadyFlagged) {
           const missedAppointment = require('../services/workflows/missed-appointment');
-          await missedAppointment.onSkip(svc.id, 'manual_no_show');
+          // the occurrence as it was when marked no-show (svc is the transition's read)
+          await missedAppointment.onSkip(svc.id, 'manual_no_show', undefined, { occurrence: svc });
         }
       } catch (e) { logger.error(`[admin-dispatch] no-show reschedule_log record failed: ${e.message}`); }
     }
