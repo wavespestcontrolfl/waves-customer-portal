@@ -2012,7 +2012,11 @@ function parentParcelContext(parcel, { address, gisPrecision, point }) {
   if (TYPED_DWELLING_UNIT_RE.test(String(address || ''))) return null;
   const major = parseInt(dorMajorCategory(parcel.dorUseCode), 10);
   if (!Number.isFinite(major) || major < PARENT_PARCEL_DOR_MIN || major > PARENT_PARCEL_DOR_MAX) return null;
-  const { pointToPolygonEdgeMeters } = require('./parcel-gis');
+  const { pointToPolygonEdgeMeters, _private: { polygonContainsPoint } } = require('./parcel-gis');
+  // Inside first: the county layer can hand back a nearby parcel that does
+  // not contain the point, and the edge distance alone is unsigned — 20 m
+  // OUTSIDE the line would read the same as 20 m inside it.
+  if (!polygonContainsPoint(parcel.polygon, Number(point?.lng), Number(point?.lat))) return null;
   const edgeM = pointToPolygonEdgeMeters(parcel.polygon, Number(point?.lng), Number(point?.lat));
   if (edgeM === null || edgeM < PARENT_PARCEL_MIN_EDGE_M) return null;
   return {

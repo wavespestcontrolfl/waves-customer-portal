@@ -151,6 +151,11 @@ describe('the situs guard and the parent parcel', () => {
       expect(out.parentParcel).toBeNull();
     });
 
+    test('a point 20 m OUTSIDE the parcel line is not inside it: nothing kept', () => {
+      const out = guard(plazaParcel(), { point: { lat: LAT + HALF + (20 / 111320), lng: LNG } });
+      expect(out.parentParcel).toBeNull();
+    });
+
     test('a parcel with no polygon cannot prove the point is inside it: nothing kept', () => {
       expect(guard(plazaParcel({ polygon: null })).parentParcel).toBeNull();
     });
@@ -223,7 +228,14 @@ describe('who sees the parent parcel', () => {
   const { _private: route } = require('../routes/property-lookup-v2');
   const result = () => ({ propertyRecord: { squareFootage: 0, _parentParcel: { parcelId: 'EXAMPLE-PARCEL' } }, enriched: {}, meta: {} });
 
+  test('with the identity gate off, even an opted-in caller gets the record without a cached parent parcel', () => {
+    const shared = result();
+    const view = route.withoutParentParcelUnlessOptedIn(shared, { commercialSuiteSizing: true });
+    expect(view.propertyRecord).not.toHaveProperty('_parentParcel');
+  });
+
   test('an opted-in caller keeps it; every other caller gets a copy of the record without it', () => {
+    process.env.GATE_LOOKUP_BUSINESS_IDENTITY = 'true';
     const shared = result();
     expect(route.withoutParentParcelUnlessOptedIn(shared, { commercialSuiteSizing: true })).toBe(shared);
     const publicView = route.withoutParentParcelUnlessOptedIn(shared, {});

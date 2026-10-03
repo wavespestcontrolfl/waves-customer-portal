@@ -374,7 +374,9 @@ async function performPropertyLookup(address, options = {}) {
 // it. Everyone else's response carries the record without it — a copy, so
 // the coalesced result other callers share is not touched.
 function withoutParentParcelUnlessOptedIn(result, options) {
-  if (options.commercialSuiteSizing === true || !result) return result;
+  // Opted in AND the gate live: with the gate off a cached row may still hold
+  // the context, and off means the response is what it was before the gate.
+  if ((options.commercialSuiteSizing === true && lookupBusinessIdentityLive()) || !result) return result;
   // The same record rides the result under two names (propertyRecord and
   // the legacy `rentcast` alias); both are replaced.
   const strip = (record) => {
@@ -1985,7 +1987,7 @@ function resolveBusinessScopeForProfile(rc, ai, lookupAddress, options) {
       // commercial parcel whose situs is another address) says the business
       // is one part of a larger property — the same kind of evidence, and
       // like it only a SUGGESTION for staff.
-      countyPartBuildingEvidence: countyPartBuildingEvidenceOf(rc) || Boolean(rc?._parentParcel?.parcelId),
+      countyPartBuildingEvidence: countyPartBuildingEvidenceOf(rc) || (lookupBusinessIdentityLive() && Boolean(rc?._parentParcel?.parcelId)),
       countyRecordPresent: hasCountyEvidence(rc),
       ownUnitFolio: isOwnUnitFolioRecord(rc),
       association: isAssociationCommercialJob({ commercialSubtype: baseSubtype }),
