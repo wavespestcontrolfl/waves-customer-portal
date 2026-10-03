@@ -1363,6 +1363,7 @@ function initScheduledJobs() {
     // scraping) and then skip it there. Each step keeps its own try so a
     // failure in one never skips the other.
     await runExclusive('permit-sync', async () => {
+      const failures = [];
       try {
         const res = await require('./property-lookup/manatee-permit-sync').syncPermits();
         if (res && !res.skipped) {
@@ -1371,6 +1372,7 @@ function initScheduledJobs() {
         }
       } catch (err) {
         logger.error(`Permit sync failed: ${err.message}`);
+        failures.push(`report sync: ${err.message}`);
       }
       // Permit detail collection (building facts off each new-home permit's
       // ACA record page → construction_permit_records). Runs AFTER the
@@ -1382,7 +1384,11 @@ function initScheduledJobs() {
         await require('./property-lookup/manatee-permit-detail').syncPermitDetails();
       } catch (err) {
         logger.error(`Permit detail sync failed: ${err.message}`);
+        failures.push(`detail sync: ${err.message}`);
       }
+      // Both steps ran; a failure in either still reaches the lease so job
+      // health records it (a swallowed error would read as success).
+      if (failures.length) throw new Error(failures.join(' | '));
     }).catch((err) => logger.error(`Permit sync lease failed: ${err.message}`));
   }, { timezone: 'America/New_York' });
 
