@@ -1,8 +1,11 @@
 /**
- * Migration 20261003100000: the subject-type CHECK is widened in one cut, and
- * the rollback refuses while a row of a new type exists.
+ * Migrations 20261003100000 + 20261003101000: the subject-type CHECK ends as
+ * call_log, sms_log and social_post (the first cut widened it further and is
+ * frozen; the second narrows it), and rolling the first back refuses while a
+ * row of a new type exists.
  */
 const migration = require('../models/migrations/20261003100000_decision_reviews_subject_types');
+const narrow = require('../models/migrations/20261003101000_decision_reviews_subject_types_social_post_only');
 
 function stubKnex({ hasTable = true, otherRow = null } = {}) {
   const raw = [];
@@ -24,12 +27,25 @@ describe('decision_reviews subject types migration', () => {
     ]);
   });
 
-  test('every subject the recorder writes is allowed by the CHECK', () => {
+  test('the second cut leaves exactly the subjects the recorder writes', async () => {
+    const { knex, raw } = stubKnex();
+    await narrow.up(knex);
+    expect(raw).toEqual([
+      'ALTER TABLE decision_reviews DROP CONSTRAINT IF EXISTS decision_reviews_subject_type_check',
+      "ALTER TABLE decision_reviews ADD CONSTRAINT decision_reviews_subject_type_check CHECK (subject_type IN ('call_log', 'sms_log', 'social_post'))",
+    ]);
     // Read from the source: loading the recorder would open the database.
     const source = require('fs').readFileSync(require.resolve('../services/typed-decisions/shadow-recorder'), 'utf8');
     const recorded = JSON.parse(source.match(/const SUBJECT_TYPES = (\[[^\]]+\]);/)[1].replace(/'/g, '"'));
-    expect(recorded).toContain('social_post');
-    for (const type of recorded) expect(migration.SUBJECT_TYPES).toContain(type);
+    expect(recorded).toEqual(narrow.SUBJECT_TYPES);
+  });
+
+  test('rolling the second cut back restores exactly what the first cut left', async () => {
+    const first = stubKnex();
+    await migration.up(first.knex);
+    const second = stubKnex();
+    await narrow.down(second.knex);
+    expect(second.raw).toEqual(first.raw);
   });
 
   test('down locks the table, then restores the original CHECK when no row uses a new type', async () => {
@@ -53,6 +69,8 @@ describe('decision_reviews subject types migration', () => {
     const { knex, raw } = stubKnex({ hasTable: false });
     await migration.up(knex);
     await migration.down(knex);
+    await narrow.up(knex);
+    await narrow.down(knex);
     expect(raw).toEqual([]);
   });
 });

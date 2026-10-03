@@ -31,9 +31,9 @@ const crypto = require('crypto');
 const { packageHash, DECISION_PROVIDERS } = require('./packages');
 
 const TABLE = 'decision_reviews';
-// The subjects code records today. The table's CHECK (migration
-// 20261003100000) allows more; a type joins this list with the code that
-// reads it back for the reviewer (routes/admin-typed-decisions.js).
+// The subjects code records, mirrored by the table's CHECK (migration
+// 20261003101000). A type joins both, by a new migration, together with the
+// code that reads it back for the reviewer (routes/admin-typed-decisions.js).
 const SUBJECT_TYPES = ['call_log', 'sms_log', 'social_post'];
 // One row per provider per subject and question (migration 20261002010000):
 // a second provider answering the same case keeps its own row.
