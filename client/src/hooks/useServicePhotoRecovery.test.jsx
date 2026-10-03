@@ -336,10 +336,10 @@ describe('service photo recovery controller', () => {
     await waitFor(() => expect(result.current.restoring).toBe(false));
   });
 
-  it.each([false, true])('finishes a delayed discard without clearing a newer photo (latest save unavailable: %s)', async (unavailable) => {
+  it.each([[false, false], [true, false], [false, true]])('finishes a delayed discard (latest save unavailable: %s; empty next visit: %s)', async (unavailable, emptyVisit) => {
     const deletion = deferred();
     store.getDraft
-      .mockResolvedValue({ draftId: 'saved-b', stage: 'failed' })
+      .mockResolvedValue(emptyVisit ? null : { draftId: 'saved-b', stage: 'failed' })
       .mockResolvedValueOnce({ draftId: 'saved-a', stage: 'failed' });
     recovery.restore.mockImplementation(record => ({
       draftId: record.draftId, draftStored: true, file: new File([record.draftId], `${record.draftId}.jpg`),
@@ -365,12 +365,17 @@ describe('service photo recovery controller', () => {
     props = { ...props, serviceId: 'visit-b', visitSnapshot: { ...visit, revision: 'revision-b' } };
     rerender();
     await waitFor(() => expect(result.current.restoring).toBe(false));
-    expect(result.current.pendingPhoto?.draftId).toBe(unavailable ? 'saved-a' : 'saved-b');
+    expect(result.current.pendingPhoto?.draftId).toBe(unavailable ? 'saved-a' : emptyVisit ? undefined : 'saved-b');
+    expect(result.current.selectPhoto(new File(['new'], 'new.jpg'), { photoType: 'after', caption: '' })).toBe(false);
     await act(async () => {
       deletion.resolve(true);
       expect(await discardPromise).toBe(unavailable);
     });
     expect(store.deleteIfCurrent).toHaveBeenCalledWith('visit-a', 'tech-a', 'saved-a');
-    await waitFor(() => expect(result.current.pendingPhoto?.draftId).toBe('saved-b'));
+    await waitFor(() => expect(result.current.pendingPhoto?.draftId).toBe(emptyVisit ? undefined : 'saved-b'));
+    if (emptyVisit) {
+      act(() => expect(result.current.selectPhoto(new File(['new'], 'new.jpg'), { photoType: 'after', caption: '' })).toBe(true));
+      await waitFor(() => expect(recovery.postPhoto).toHaveBeenCalledTimes(1));
+    }
   });
 });

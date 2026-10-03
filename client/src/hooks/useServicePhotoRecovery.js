@@ -198,7 +198,7 @@ export default function useServicePhotoRecovery({
   }, [deviceIdentity.token, deviceScope, deviceSaveState, onFreshPhotos, onUploadFailed, onUploaded, refreshPhotos]);
 
   const selectPhoto = useCallback((file, { photoType, caption }) => {
-    if (!file || !activeServiceId || restoring || uploadInFlight.current || pendingPhotoRef.current || !visitReadReady) return false;
+    if (!file || !activeServiceId || restoring || uploadInFlight.current || discardInFlight.current || pendingPhotoRef.current || !visitReadReady) return false;
     const photo = {
       draftId: newDraftId(),
       draftStored: false,
