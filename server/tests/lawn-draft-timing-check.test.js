@@ -62,6 +62,29 @@ describe('lawnDraftTimingRejection', () => {
     expect(await lawnDraftTimingRejection(DRAFT, answering([{ index: 1, states_result_timing: 'true' }]))).toBeNull();
   });
 
+  test('an unusable answer (empty, partial or out-of-range verdicts) is accepted AND logged', async () => {
+    const logger = require('../services/logger');
+    logger.warn.mockClear();
+    expect(await lawnDraftTimingRejection(DRAFT, answering([]))).toBeNull();
+    expect(await lawnDraftTimingRejection(DRAFT, answering([{ index: 9, states_result_timing: true }]))).toBeNull();
+    expect(await lawnDraftTimingRejection(DRAFT, answering([{ index: 0, states_result_timing: false }]))).toBeNull();
+    expect(logger.warn.mock.calls.filter(([line]) => /unusable answer/.test(line))).toHaveLength(3);
+    logger.warn.mockClear();
+    await lawnDraftTimingRejection(DRAFT, answering([0, 1, 2].map((index) => ({ index, states_result_timing: false }))));
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  test('the check never outlives the caller\'s deadline: its timeout is capped, and no budget means no call', async () => {
+    const deps = answering([0, 1, 2].map((index) => ({ index, states_result_timing: false })));
+    await lawnDraftTimingRejection(DRAFT, { ...deps, remainingMs: 3000 });
+    expect(deps.dispatch.mock.calls[0][1].timeoutMs).toBe(3000);
+    await lawnDraftTimingRejection(DRAFT, { ...deps, remainingMs: 60000 });
+    expect(deps.dispatch.mock.calls[1][1].timeoutMs).toBe(8000);
+    const none = answering([{ index: 1, states_result_timing: true }]);
+    expect(await lawnDraftTimingRejection(DRAFT, { ...none, remainingMs: 400 })).toBeNull();
+    expect(none.dispatch).not.toHaveBeenCalled();
+  });
+
   test('an empty draft asks no model', async () => {
     const deps = answering([]);
     expect(await lawnDraftTimingRejection('WHAT WE DID\n', deps)).toBeNull();
@@ -90,7 +113,10 @@ describe('lawnDraftTimingCheckLive', () => {
 describe('generate-report runs the check on lawn drafts that carried the timing rule', () => {
   test('the route awaits the hook and gates it on the rule, the kill switch and the pattern screen passing first', () => {
     const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-schedule.js'), 'utf8');
-    expect(source).toMatch(/typeof extraRejection === 'function' \? await extraRejection\(report\) : null/);
-    expect(source).toMatch(/\|\| writerRulesScreen\(text\)\s+\|\| \(lawnTimingOn && lawnDraftTimingCheckLive\(\) \? lawnDraftTimingRejection\(text\) : null\)/);
+    expect(source).toMatch(/await extraRejection\(report, \{ remainingMs: deadline - Date\.now\(\) \}\)/);
+    expect(source).toMatch(/\|\| writerRulesScreen\(text\)\s+\|\| \(lawnTimingOn && lawnDraftTimingCheckLive\(\) \? lawnDraftTimingRejection\(text, \{ remainingMs \}\) : null\)/);
+    // The last-resort deterministic copy is checked too.
+    expect(source).toMatch(/const fallbackTiming = report && lawnTimingOn && lawnDraftTimingCheckLive\(\)\s+\? await lawnDraftTimingRejection\(report\)/);
+    expect(source).toMatch(/writerRulesScreen\(report\) \|\| fallbackTiming\) \? null : report/);
   });
 });

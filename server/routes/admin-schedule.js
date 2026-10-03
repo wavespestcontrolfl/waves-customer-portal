@@ -24387,8 +24387,9 @@ async function generateReportCopyWithFallback({
       const parsed = technicianReportCustomerCopy(report);
       const rejection = reportCopyRejection(report)
         || (parsed?.body && (!requireSections || parsed.sections) ? null : 'malformed_shape')
-        // May be async: the lawn draft's result-timing check asks a model.
-        || (typeof extraRejection === 'function' ? await extraRejection(report) : null);
+        // May be async: the lawn draft's result-timing check asks a model, and
+        // is told what is left of this chain's budget so it never outlives it.
+        || (typeof extraRejection === 'function' ? await extraRejection(report, { remainingMs: deadline - Date.now() }) : null);
       if (!rejection) {
         return { ok: true, report, provider: provider.name, model: provider.model, failures };
       }
@@ -25914,9 +25915,9 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       // Lawn drafts that pass the pattern screen get one meaning check (owner
       // 2026-10-03): the pattern screen exempts watering / mowing clauses, so
       // a result promise phrased around watering needs a reader. Fails open.
-      extraRejection: async (text) => (screenTradeNames(text) ? 'trade_name' : null)
+      extraRejection: async (text, { remainingMs } = {}) => (screenTradeNames(text) ? 'trade_name' : null)
         || writerRulesScreen(text)
-        || (lawnTimingOn && lawnDraftTimingCheckLive() ? lawnDraftTimingRejection(text) : null),
+        || (lawnTimingOn && lawnDraftTimingCheckLive() ? lawnDraftTimingRejection(text, { remainingMs }) : null),
       ...(writerRulesOn ? { maxTokens: 2000, requireSections: true } : {}),
     });
     if (!generated.ok) {
@@ -25966,7 +25967,13 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       // typed free text ("Reapply Termidor HE next visit") can carry names
       // into the fallback's recommendations. Degrade to no-report -> 503
       // rather than publish them.
-      const fallbackReport = report && (screenTradeNames(report) || writerRulesScreen(report)) ? null : report;
+      // The lawn meaning check reads the last-resort copy too: it echoes the
+      // technician's own structured observations, which can carry a result
+      // promise the pattern screen exempts (codex #5734 r1). Fails open.
+      const fallbackTiming = report && lawnTimingOn && lawnDraftTimingCheckLive()
+        ? await lawnDraftTimingRejection(report)
+        : null;
+      const fallbackReport = report && (screenTradeNames(report) || writerRulesScreen(report) || fallbackTiming) ? null : report;
       if (!fallbackReport) {
         logger.warn('[generate-report] both AI providers missed and no safe structured fallback facts were available', {
           failures: generated.failures,
