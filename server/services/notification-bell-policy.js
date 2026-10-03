@@ -103,7 +103,9 @@ const CATEGORY_BELL_ALLOWLIST = new Set([
 // llm_cost: the daily "check AI spend" item (services/llm-cost.js), raised only
 // when a lane's estimated spend spikes. Same treatment as typed_decisions: the
 // dark GATE_LLM_COST_TRACKING is the switch, and the owner can silence it here.
-const DEFAULT_ON_CATEGORIES = new Set(['estimate_change_request', 'customer_landline_from_call', 'visit_prep_photos', 'typed_decisions', 'llm_cost']);
+// review_low_rating: a new 1-4 star Google review (services/review-low-rating-alert.js,
+// owner CW-D4 2026-10-02). The dark GATE_REVIEW_ALERT is the switch; same treatment.
+const DEFAULT_ON_CATEGORIES = new Set(['estimate_change_request', 'customer_landline_from_call', 'visit_prep_photos', 'typed_decisions', 'llm_cost', 'review_low_rating']);
 
 const OVERRIDABLE_CATEGORIES = [
   // Owner ruling 2026-08-28: customer communication only. These no longer
@@ -151,6 +153,7 @@ const OVERRIDABLE_CATEGORIES = [
   'email_rescue_review',
   'typed_decisions',
   'llm_cost',
+  'review_low_rating',
 ];
 const OVERRIDABLE_CATEGORY_SET = new Set(OVERRIDABLE_CATEGORIES);
 

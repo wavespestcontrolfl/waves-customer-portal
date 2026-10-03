@@ -29,6 +29,7 @@
  * loop) is a different surface and stays in the agent files.
  */
 
+const crypto = require('crypto');
 const logger = require('../logger');
 const { PROVIDER, MODEL_CATALOG } = require('../../config/models');
 const { anthropicMaxTokens, anthropicEffortFor } = require('./anthropic-wire');
@@ -47,6 +48,22 @@ const TYPESAFE_SYSTEMONE_API = 'https://api.typesafe.ai/v1/systemone';
 const TYPESAFE_PINNED_MODEL_RE = /^jev-\d+\.\d+\.\d+$/;
 // Cloudflare Workers AI REST: POST <base>/<account id>/ai/run/@cf/cloudflare/<model>.
 const WORKERS_AI_ACCOUNTS_API = 'https://api.cloudflare.com/client/v4/accounts';
+// Clef takes up to four embedded images beside `state` and `questions`; a
+// request over ~150 KB is refused by the provider (HTTP 413, measured
+// 2026-10-02). The budget is the whole serialized body (images + state +
+// questions); typed-decisions/image-budget.js fits photos under the same
+// number, minus clefBodyOverhead(state, questions).
+const CLEF_MAX_IMAGES = 4;
+const CLEF_IMAGES_BUDGET_BYTES = 150 * 1024;
+// Clef takes embedded JPEG, PNG or WebP only (Cloudflare's Clef schema); the
+// decoded bytes must carry that format's signature, so a GIF, SVG, HEIC or
+// arbitrary bytes behind an image MIME are refused before the network.
+const CLEF_DATA_URL_RE = /^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/]+={0,2})$/;
+const CLEF_IMAGE_SIGNATURES = {
+  jpeg: (b) => b.length > 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff,
+  png: (b) => b.length > 8 && b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
+  webp: (b) => b.length > 12 && b.toString('latin1', 0, 4) === 'RIFF' && b.toString('latin1', 8, 12) === 'WEBP',
+};
 // A Workers AI decision model is one the catalog registers as Cloudflare's
 // with the 'decision' cap (config/models.js is the one place ids live).
 function workersAiDecisionModel(model) {
@@ -332,10 +349,16 @@ function settleLeg(base, served, out, jsonMode, extras) {
 }
 
 // fetch's abort signal for a budgeted call (both REST adapters).
-function abortAfter(timeoutMs) {
-  return timeoutMs && typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
-    ? { signal: AbortSignal.timeout(timeoutMs) }
-    : {};
+function abortAfter(timeoutMs, externalSignal) {
+  const timeoutSignal = timeoutMs && typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+    ? AbortSignal.timeout(timeoutMs)
+    : null;
+  const signals = [externalSignal, timeoutSignal].filter(Boolean);
+  if (!signals.length) return {};
+  if (signals.length === 1) return { signal: signals[0] };
+  return typeof AbortSignal.any === 'function'
+    ? { signal: AbortSignal.any(signals) }
+    : { signal: externalSignal || timeoutSignal };
 }
 
 // A provider's non-success status as a ledger code: `<provider>_<status>`
@@ -397,7 +420,7 @@ function openAIVerdict(data, out) {
   return null;
 }
 
-async function callOpenAI({ model, system, text, images = [], documents = [], jsonMode = true, jsonSchema, maxTokens, timeoutMs = DEFAULT_TIMEOUT_MS, reasoningEffort = 'low', laneId, promptVersion, policyLabel } = {}) {
+async function callOpenAI({ model, system, text, images = [], documents = [], jsonMode = true, jsonSchema, maxTokens, timeoutMs = DEFAULT_TIMEOUT_MS, signal, reasoningEffort = 'low', laneId, promptVersion, policyLabel } = {}) {
   if (!process.env.OPENAI_API_KEY) return { ok: false, reason: 'no_key' };
   const base = { provider: 'openai', requestedModel: model, laneId, promptVersion, policyLabel, system, text };
   const t0 = nowMs();
@@ -406,7 +429,7 @@ async function callOpenAI({ model, system, text, images = [], documents = [], js
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
       body: JSON.stringify(openAIRequest({ model, system, text, images, documents, jsonMode, jsonSchema, maxTokens, reasoningEffort })),
-      ...abortAfter(timeoutMs),
+      ...abortAfter(timeoutMs, signal),
     });
     if (!resp.ok) {
       logger.warn(`[llm] OpenAI ${resp.status}`);
@@ -488,6 +511,41 @@ async function callTypeSafe({ model, state, questions, timeoutMs = 15000, laneId
   }
 }
 
+// What callWorkersAIDecision does with `images`: `present` (any to send),
+// `bad` (an entry that is not a canonical base64 image data URL), `bytes` (the
+// decoded images, for the ledger hashes) and `note` (the ledger stand-in: a
+// count and the sha256 of each image, never the bytes).
+function clefImagesPlan(images) {
+  if (images == null || (Array.isArray(images) && !images.length)) return { present: false, bad: false, note: null };
+  const list = Array.isArray(images) ? images : [];
+  const hashes = [];
+  let bad = !Array.isArray(images);
+  for (const image of list) {
+    const match = typeof image === 'string' ? CLEF_DATA_URL_RE.exec(image) : null;
+    const decoded = match && match[2].length % 4 === 0 ? Buffer.from(match[2], 'base64') : null;
+    // Buffer.from silently truncates malformed base64 ("A", "AA="): only a
+    // payload that round-trips byte-for-byte is the image we hash and send,
+    // and only when its bytes are the format its MIME names.
+    if (!decoded || decoded.toString('base64') !== match[2] || !CLEF_IMAGE_SIGNATURES[match[1]](decoded)) { bad = true; break; }
+    hashes.push(crypto.createHash('sha256').update(decoded).digest('hex'));
+  }
+  return { present: true, bad, note: `[images: ${list.length}${hashes.length ? `, sha256 ${hashes.join(',')}` : ''}]` };
+}
+// The ledger text for the call (state, then the image stand-in) and the wire
+// body (`images` only when there are some, so an image-free body is unchanged).
+const clefLedgerText = (stateText, plan) => (plan.note ? `${stateText ?? ''}\n${plan.note}` : stateText);
+const clefBody = (plan, images, state, questions) => (plan.present ? { images, state, questions } : { state, questions });
+// The refusal for an image request, checked before any network call: a bad
+// entry, more than four images, or a SERIALIZED body (images + state +
+// questions) over the provider's measured limit, in UTF-8 bytes (what goes
+// on the wire; accented transcript text is two bytes a character).
+function clefImagesRefusal(plan, bodyText, images) {
+  if (!plan.present) return null;
+  if (plan.bad) return 'cloudflare_bad_images';
+  if (images.length > CLEF_MAX_IMAGES || Buffer.byteLength(bodyText, 'utf8') > CLEF_IMAGES_BUDGET_BYTES) return 'cloudflare_images_too_large';
+  return null;
+}
+
 // ── Cloudflare Clef (typed decisions on Workers AI) ───────────────────
 /**
  * Clef / Clef-flash: decision-only models served by Workers AI, taking the
@@ -500,25 +558,37 @@ async function callTypeSafe({ model, state, questions, timeoutMs = 15000, laneId
  * `cloudflare_unknown_model`, `cloudflare_<status>`, `cloudflare_unsuccessful`,
  * `cloudflare_timeout`, `error`, `empty_json`); on success `json` is the
  * `answers` map and `servedModel` is what the provider reports. Never retries.
+ * `images` (optional, <= 4 data-URL strings) ride the body as
+ * `{ images, state, questions }`; with none the body is `{ state, questions }`
+ * exactly. More than 4, a non-data-URL or non-canonical base64 entry
+ * (`cloudflare_bad_images`) or a serialized body over 150 KB
+ * (`cloudflare_images_too_large`) fails the leg BEFORE any
+ * network call. The ledger text never holds image bytes: it carries
+ * `[images: n, sha256 <hex>,...]` (sha256 of each decoded image) after the state.
  * Credentials: CF_WORKERS_AI_TOKEN (a least-privilege "Workers AI - Read"
  * token) or, when unset, the existing CF_API_TOKEN; plus CF_ACCOUNT_ID.
  */
-async function callWorkersAIDecision({ model, state, questions, timeoutMs = 15000, laneId, promptVersion, policyLabel } = {}) {
+async function callWorkersAIDecision({ model, state, questions, images, timeoutMs = 15000, laneId, promptVersion, policyLabel } = {}) {
   let stateText;
   try { stateText = typeof state === 'string' ? state : JSON.stringify(state); } catch { stateText = undefined; }
-  const base = { provider: 'cloudflare', requestedModel: model, laneId, promptVersion, policyLabel, text: stateText };
+  const plan = clefImagesPlan(images);
+  const base = { provider: 'cloudflare', requestedModel: model, laneId, promptVersion, policyLabel, text: clefLedgerText(stateText, plan) };
   const token = process.env.CF_WORKERS_AI_TOKEN || process.env.CF_API_TOKEN;
   const account = process.env.CF_ACCOUNT_ID;
   // Like callTypeSafe, a missing credential or an unknown model files a failed
   // ledger row: this lane is dark, so the ledger is where a dead key shows.
   if (!token || !account) return failedLeg(base, { latencyMs: 0 }, 'no_key');
   if (!workersAiDecisionModel(model)) return failedLeg(base, { latencyMs: 0 }, 'cloudflare_unknown_model');
+  let bodyText;
+  try { bodyText = JSON.stringify(clefBody(plan, images, state, questions)); } catch { return failedLeg(base, { latencyMs: 0 }, 'error'); }
+  const refusal = clefImagesRefusal(plan, bodyText, images);
+  if (refusal) return failedLeg(base, { latencyMs: 0 }, refusal);
   const t0 = nowMs();
   try {
     const resp = await fetch(`${WORKERS_AI_ACCOUNTS_API}/${encodeURIComponent(account)}/ai/run/@cf/cloudflare/${model}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ state, questions }),
+      body: bodyText,
       ...abortAfter(timeoutMs),
     });
     if (!resp.ok) {
@@ -605,7 +675,7 @@ function geminiVerdict(data, candidate, maxTokens) {
   return code;
 }
 
-async function callGemini({ model, system, text, images = [], jsonMode = true, jsonSchema, maxTokens = 2048, temperature = 0.2, thinkingLevel, timeoutMs, laneId, promptVersion, policyLabel } = {}) {
+async function callGemini({ model, system, text, images = [], jsonMode = true, jsonSchema, maxTokens = 2048, temperature = 0.2, thinkingLevel, timeoutMs, signal, laneId, promptVersion, policyLabel } = {}) {
   const key = geminiKey();
   if (!key) return { ok: false, reason: 'no_key' };
   const base = { provider: 'gemini', requestedModel: model, laneId, promptVersion, policyLabel, system, text };
@@ -615,7 +685,7 @@ async function callGemini({ model, system, text, images = [], jsonMode = true, j
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(geminiRequest({ system, text, images, jsonMode, jsonSchema, maxTokens, temperature, thinkingLevel })),
-      ...abortAfter(timeoutMs),
+      ...abortAfter(timeoutMs, signal),
     });
     if (!resp.ok) {
       logger.warn(`[llm] Gemini ${resp.status}`);
@@ -706,7 +776,7 @@ function anthropicVerdict(resp, maxTokens) {
   return 'anthropic_incomplete';
 }
 
-async function callAnthropic({ model, system, text, images = [], documents = [], tools, jsonMode = true, jsonSchema, maxTokens = 1024, timeoutMs, anthropicClient, laneId, promptVersion, policyLabel, effort } = {}) {
+async function callAnthropic({ model, system, text, images = [], documents = [], tools, jsonMode = true, jsonSchema, maxTokens = 1024, timeoutMs, signal, anthropicClient, laneId, promptVersion, policyLabel, effort } = {}) {
   if (!anthropicClient && (!Anthropic || !process.env.ANTHROPIC_API_KEY)) return { ok: false, reason: 'no_key' };
   const base = { provider: 'anthropic', requestedModel: model, laneId, promptVersion, policyLabel, system, text };
   // Ledger latency. With no budget the SDK keeps its default retries, so one
@@ -723,8 +793,11 @@ async function callAnthropic({ model, system, text, images = [], documents = [],
     // (e.g. the fact-check publish lock, dispatchWithFallback's shared
     // deadline) need it to be a true wall-clock ceiling; the pre-failover
     // fact-check client was constructed with maxRetries:0 for the same reason.
-    const resp = (timeoutMs
-      ? await client.messages.create(req, { timeout: timeoutMs, maxRetries: 0 })
+    const resp = (timeoutMs || signal
+      ? await client.messages.create(req, {
+        ...(timeoutMs ? { timeout: timeoutMs, maxRetries: 0 } : {}),
+        ...(signal ? { signal } : {}),
+      })
       : await client.messages.create(req)) || {};
     const out = anthropicText(resp);
     const served = { servedModel: resp.model, providerRef: resp.id, usage: usageOf('anthropic', resp), latencyMs: elapsedMs(t0), response: out };
@@ -775,6 +848,8 @@ async function dispatch(route, payload = {}) {
     // no TEXT_POLICIES entry may carry this provider.
     case PROVIDER.TYPESAFE:
       if (!args.questions || typeof args.questions !== 'object') return { ok: false, reason: 'typesafe_requires_questions' };
+      // Images are a Clef-only input: Jev never receives them.
+      if (Array.isArray(args.images) && args.images.length) return { ok: false, reason: 'typesafe_no_images' };
       return callTypeSafe(args);
     // Same rule for the Cloudflare decision models: questions or nothing, and
     // never a TEXT_POLICIES leg.
@@ -871,6 +946,7 @@ async function runFallbackChain(policy, payload, { validate, reserveFallbackBudg
   const attemptCapMs = Number.isFinite(maxAttemptMs) && maxAttemptMs > 0 ? maxAttemptMs : Infinity;
   const deadline = Date.now() + timeoutBudgetMs;
   for (let index = 0; index < routes.length; index += 1) {
+    if (payload.signal?.aborted) break;
     const route = routes[index];
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) {
@@ -967,6 +1043,8 @@ module.exports = {
   TYPESAFE_SYSTEMONE_API,
   TYPESAFE_PINNED_MODEL_RE,
   WORKERS_AI_ACCOUNTS_API,
+  CLEF_MAX_IMAGES,
+  CLEF_IMAGES_BUDGET_BYTES,
   workersAiDecisionModel,
   geminiUrl,
 };

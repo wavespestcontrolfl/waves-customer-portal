@@ -171,6 +171,13 @@ async function stillHeldVisit(estimateId, invoiceId, visitId) {
   return (await firstPerformedVisit(estimateId, term.customer_id, term.id))?.id || null;
 }
 
+// A term that still carries paid coverage by the canonical rules (a paid year
+// cancelled to end at term rides out its window; a refund or void does not).
+async function termStillCovered(termId, conn = db) {
+  if (!termId) return false;
+  return !!(await require('./annual-prepay-renewals').coveredTermsAsOf(conn).where('t.id', termId).first('t.id'));
+}
+
 async function releaseOne(row, now) {
   const job = parseData(row.estimate_data)?.prepayAutoChargeJob;
   if (!job || job.status !== AWAITING || !job.invoice_id) return null;
@@ -179,7 +186,12 @@ async function releaseOne(row, now) {
   const term = invoice
     ? await db('annual_prepay_terms').where({ prepay_invoice_id: invoice.id }).first('id', 'status')
     : null;
-  const dead = !invoice || DEAD_INVOICE_STATUSES.includes(invStatus) || String(term?.status || '') === 'cancelled';
+  // A cancelled term is dead unless it still carries paid coverage by the
+  // canonical rules (coveredTermsAsOf: a decided end-at-term lapse riding out
+  // a paid window). A void / full refund cancellation is dead (GitHub Codex
+  // #5656 r1).
+  const dead = !invoice || DEAD_INVOICE_STATUSES.includes(invStatus)
+    || (String(term?.status || '') === 'cancelled' && !(await termStillCovered(term.id)));
   // Settled before any visit = paid, or a BANK debit already initiated. A card
   // intent parked 'processing' is incomplete (the sweep treats it so): it
   // never releases the job before the first visit.
@@ -234,9 +246,10 @@ async function releaseOne(row, now) {
     // work reaches the office), never be released into a charge that skips.
     return db.transaction(async (trx) => {
       const locked = await trx('invoices').where({ id: invoice.id }).forUpdate().first('status', 'payment_method');
-      const lockedTerm = await trx('annual_prepay_terms').where({ prepay_invoice_id: invoice.id }).first('status');
+      const lockedTerm = await trx('annual_prepay_terms').where({ prepay_invoice_id: invoice.id }).first('id', 'status');
       const lockedStatus = String(locked?.status || '').toLowerCase();
-      if (!locked || DEAD_INVOICE_STATUSES.includes(lockedStatus) || String(lockedTerm?.status || '') === 'cancelled') return null;
+      if (!locked || DEAD_INVOICE_STATUSES.includes(lockedStatus)
+        || (String(lockedTerm?.status || '') === 'cancelled' && !(await termStillCovered(lockedTerm.id, trx)))) return null;
       // Settlement as the LOCKED row shows it: a bank debit returned since
       // the first read is no longer settled, and then only a performed visit
       // may release the charge.
@@ -534,9 +547,60 @@ async function releaseDeferredPrepayCharges({ pageSize = 200, now = new Date() }
   return summary;
 }
 
+// The first-visit completion text (owner ruling 2026-10-03, neutral wording):
+// this visit is the FIRST performed visit held by a year that is still unpaid.
+// Completion stamped it (paf_held_term_id) just before the text; any earlier
+// performed visit stamped by the same year already had its first visit.
+async function isFirstHeldVisitOfUnpaidYear(svc, conn = db) {
+  if (!svc?.paf_held_term_id || !svc.customer_id) return false;
+  const term = await conn('annual_prepay_terms').where({ id: svc.paf_held_term_id }).first('id', 'status', 'source_estimate_id');
+  if (!term || String(term.status || '') !== 'payment_pending' || !term.source_estimate_id) return false;
+  // The payment must still be waiting for the visit: a year settled, or with
+  // its ACH payment started, before the first visit keeps the regular text
+  // even while the term reads payment_pending (GitHub Codex #5640 r13).
+  const estimate = await conn('estimates').where({ id: term.source_estimate_id }).first('estimate_data');
+  const job = parseData(estimate?.estimate_data)?.prepayAutoChargeJob;
+  if (!job || job.deferred_to_first_visit !== true || ![AWAITING, 'pending'].includes(String(job.status || ''))) return false;
+  const invoice = job.invoice_id ? await conn('invoices').where({ id: job.invoice_id }).first('status') : null;
+  const invStatus = String(invoice?.status || '');
+  if (!invoice || ['processing', 'paid', 'prepaid'].includes(invStatus) || DEAD_INVOICE_STATUSES.includes(invStatus)) return false;
+  // A visit that already claimed the text keeps it on a retry, even when
+  // another held visit finished in between (GitHub Codex #5640 r13).
+  if (String(job.first_visit_text_visit_id || '') === String(svc.id)) return true;
+  const others = (await performedVisitCandidates(term.source_estimate_id, svc.customer_id))
+    .filter((v) => String(v.id) !== String(svc.id) && String(v.paf_held_term_id || '') === String(term.id));
+  if (others.length) return false;
+  // Two held visits closing at once both see no other performed visit; one
+  // atomic claim on the year's job picks exactly one (a retry of the same
+  // visit keeps it). GitHub Codex #5640 r12.
+  const claimed = await conn('estimates')
+    .where({ id: term.source_estimate_id })
+    .whereRaw(`${JOB} ->> 'deferred_to_first_visit' = 'true'`)
+    .whereRaw(`coalesce(${JOB} ->> 'first_visit_text_visit_id', ?) = ?`, [String(svc.id), String(svc.id)])
+    // Rechecked in the claim itself: a payment or cancellation that lands
+    // between the reads above and this write loses the text (Codex r15).
+    .whereRaw(`${JOB} ->> 'status' in (?, 'pending')`, [AWAITING])
+    .whereExists(function termStillPending() {
+      this.select(conn.raw('1')).from('annual_prepay_terms').where({ id: term.id, status: 'payment_pending' });
+    })
+    .whereExists(function invoiceStillOwed() {
+      this.select(conn.raw('1')).from('invoices').where({ id: job.invoice_id })
+        .whereNotIn('status', ['processing', 'paid', 'prepaid', ...DEAD_INVOICE_STATUSES]);
+    })
+    .update({
+      estimate_data: conn.raw(
+        "jsonb_set(estimate_data, '{prepayAutoChargeJob}', (estimate_data -> 'prepayAutoChargeJob') || ?::jsonb)",
+        [JSON.stringify({ first_visit_text_visit_id: String(svc.id) })],
+      ),
+    });
+  return claimed === 1;
+}
+
 module.exports = {
+  isFirstHeldVisitOfUnpaidYear,
   AWAITING,
   planHasUnfinishedCompletion,
+  termStillCovered,
   visitStillPerformed,
   STALE_DAYS,
   releaseDeferredPrepayCharges,

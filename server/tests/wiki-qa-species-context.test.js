@@ -90,6 +90,18 @@ test('hybrid off falls back to the catalog name match', async () => {
   expect(result.articlesUsed).toEqual(['species:ghost-ant']);
 });
 
+test.each([
+  ['signal', () => ({ signal: new AbortController().signal })],
+  ['deadline', () => ({ remainingMs: () => 1000 })],
+])('%s-bound knowledge keeps named catalog facts without starting unbounded hybrid work', async (_name, execution) => {
+  routeTo([]);
+  const result = await WikiQA.query('ghost ants in the kitchen', { source: 'ai_assistant' }, execution());
+  expect(hybridKnowledgeSearch).not.toHaveBeenCalled();
+  expect(result.articlesUsed).toEqual(['species:ghost-ant']);
+  expect(answerCall().text).toContain(catalog.getEntry('ghost-ant').copy.what_it_means);
+  expect(answerCall().text).not.toContain(techNotes);
+});
+
 test('unapproved and unknown slugs are never used', async () => {
   const approval = require('../services/species-catalog-approval');
   const spy = jest.spyOn(approval, 'isApproved').mockImplementation((e) => e.slug !== SLUG);

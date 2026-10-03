@@ -10,7 +10,7 @@ const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../midd
 const logger = require('../services/logger');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled, discountStackingLive, reportPhotoContentLive, reportWriterRulesLive, visitPrepPhotosLive, tsFastCompleteLive } = require('../config/feature-gates');
-const { lawnReserviceFastCompleteLive } = require('../config/feature-gates');
+const { lawnReserviceFastCompleteLive, fastCompleteVoiceFillLive } = require('../config/feature-gates');
 const { percentageDiscountDollars, stackGroupConflict: discountStackGroupConflict } = require('../services/discount-stack');
 const { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } = require('../../shared/legacy-visit-money-submission.cjs');
 const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');
@@ -79,7 +79,7 @@ const { redactAccessCodes } = require('../services/context-aggregator');
 const { technicianReportCustomerCopy, containsReportAccessCode } = require('../services/service-report/technician-report-copy');
 const {
   TECHNICIAN_NOTE_HEADER, CUSTOMER_WORDS_HEADER, withheldProductsLine, writerRulesRejection,
-  activeIngredientsMentioned, bookedReasonBlock,
+  activeIngredientsMentioned, bookedReasonBlock, lawnResultTimingViolation,
 } = require('../services/service-report/report-writer-rules');
 const CompletionRecap = require('../services/completion-recap');
 const {
@@ -1029,6 +1029,9 @@ async function guardRecurrenceDestination(trx, { lockedDates, date, row, exclude
     windowEnd: block.end,
     excludeServiceIds,
     excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+    // Second technician (GATE_MULTI_TECH_CONFIRM + capacity, dark): the
+    // series row's own technician plus unassigned rows; gate off = tech-blind.
+    technicianId: row.technician_id || null,
   });
   if (clash.length) {
     logger.warn(`[schedule] occupancy overlap on ${date} allowed (advisory — admin writes never block on conflicts)`);
@@ -5079,6 +5082,7 @@ function mapLinkedProject(row) {
   };
 }
 
+// Null when the query fails: a lookup that could not run is not "no project".
 async function loadLinkedProjectsByServiceId(serviceIds) {
   const ids = (serviceIds || []).filter(Boolean);
   if (!ids.length) return new Map();
@@ -5102,7 +5106,7 @@ async function loadLinkedProjectsByServiceId(serviceIds) {
     return map;
   } catch (e) {
     logger.warn(`[schedule] Linked project lookup failed: ${e.message}`);
-    return new Map();
+    return null;
   }
 }
 
@@ -5112,6 +5116,7 @@ async function loadProjectCompletionContextByServiceId(services) {
   // sheet (owner 2026-10-01, no per-tech flag).
   const treeShrubFastCompleteEnabled = tsFastCompleteLive();
   const linkedProjectsByServiceId = await loadLinkedProjectsByServiceId(rows.map((s) => s.id));
+  const linkedProjectLookupFailed = linkedProjectsByServiceId === null;
   const entries = await Promise.all(rows.map(async (service) => {
     let completionProfileLookupFailed = false;
     const completionProfile = await resolveCompletionProfileForScheduledService(service)
@@ -5168,6 +5173,10 @@ async function loadProjectCompletionContextByServiceId(services) {
       // lawn re-service sheet (instead of the typed Dispatch form) when on.
       // Read at call time; no per-tech flag.
       lawnReserviceFastCompleteEnabled: lawnReserviceFastCompleteLive(),
+      // GATE_FAST_COMPLETE_VOICE_FILL: the pest re-service sheet shows its
+      // "Tell me what you did" mic, Check chips and office note when on. Read
+      // at call time; no per-tech flag.
+      fastCompleteVoiceFillEnabled: fastCompleteVoiceFillLive(),
       // GATE_FAST_COMPLETE_RECAP — the same schedule-payload ride: with it on,
       // the Fast Complete sheet sends the customer completion text instead
       // of pinning the send flags off. Only read while the gate above is on.
@@ -5219,7 +5228,10 @@ async function loadProjectCompletionContextByServiceId(services) {
           })
           .filter(Boolean)
         : null,
-      linkedProject: linkedProjectsByServiceId.get(service.id) || null,
+      linkedProject: linkedProjectsByServiceId?.get(service.id) || null,
+      // An OUTAGE is not "no linked project": a visit with a project must not
+      // look project-free and complete on its own record.
+      linkedProjectLookupFailed,
     }];
   }));
   return new Map(entries);
@@ -6322,6 +6334,7 @@ router.get('/', async (req, res, next) => {
         reserviceFastCompleteEnabled: projectCompletionContext.reserviceFastCompleteEnabled === true,
         treeShrubFastCompleteEnabled: projectCompletionContext.treeShrubFastCompleteEnabled === true,
         lawnReserviceFastCompleteEnabled: projectCompletionContext.lawnReserviceFastCompleteEnabled === true,
+        fastCompleteVoiceFillEnabled: projectCompletionContext.fastCompleteVoiceFillEnabled === true,
         // GATE_FAST_COMPLETE_RECAP — see loadProjectCompletionContextByServiceId.
         fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
         // GATE_FAST_COMPLETE_REPORT — see loadProjectCompletionContextByServiceId.
@@ -6338,6 +6351,7 @@ router.get('/', async (req, res, next) => {
         findingsSchema: projectCompletionContext.findingsSchema || null,
         companionSchemas: projectCompletionContext.companionSchemas || null,
         linkedProject: projectCompletionContext.linkedProject || null,
+        linkedProjectLookupFailed: projectCompletionContext.linkedProjectLookupFailed === true,
         autopayActive,
         autopayEnabled: s.autopay_enabled !== false,
         customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim() || null,
@@ -6926,6 +6940,7 @@ router.get('/week', async (req, res, next) => {
           reserviceFastCompleteEnabled: projectCompletionContext.reserviceFastCompleteEnabled === true,
           treeShrubFastCompleteEnabled: projectCompletionContext.treeShrubFastCompleteEnabled === true,
           lawnReserviceFastCompleteEnabled: projectCompletionContext.lawnReserviceFastCompleteEnabled === true,
+          fastCompleteVoiceFillEnabled: projectCompletionContext.fastCompleteVoiceFillEnabled === true,
           fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
           fastCompleteReportEnabled: projectCompletionContext.fastCompleteReportEnabled === true,
           noteBoxPhotosEnabled: projectCompletionContext.noteBoxPhotosEnabled === true,
@@ -6937,6 +6952,7 @@ router.get('/week', async (req, res, next) => {
           findingsSchema: projectCompletionContext.findingsSchema || null,
           companionSchemas: projectCompletionContext.companionSchemas || null,
           linkedProject: projectCompletionContext.linkedProject || null,
+          linkedProjectLookupFailed: projectCompletionContext.linkedProjectLookupFailed === true,
           technicianId: s.technician_id,
           technicianName: s.tech_name,
           isRecurring: s.is_recurring,
@@ -8798,6 +8814,11 @@ router.post('/', requireAdmin, async (req, res, next) => {
           windowStart: insertData.window_start,
           windowEnd: insertData.window_end,
           excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+          // Second technician (GATE_MULTI_TECH_CONFIRM + capacity, dark):
+          // the booked technician's route plus unassigned rows, as the
+          // picker's strip and the edit save's route check score it. Gate
+          // off or no technician = tech-blind, byte for byte.
+          technicianId: insertData.technician_id || null,
         });
         if (adminCreateClash.length) {
           bookingWarnings.push(slotOverlapWarning(dateOnly(scheduledDate)));
@@ -8963,6 +8984,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
             windowStart: childData.window_start,
             windowEnd: childData.window_end,
             excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+            technicianId: childData.technician_id || null, // see the parent probe
           });
           if (childClash.length) {
             bookingWarnings.push(slotOverlapWarning(nextDateStr));
@@ -9054,6 +9076,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
               windowStart: boosterData.window_start,
               windowEnd: boosterData.window_end,
               excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+              technicianId: boosterData.technician_id || null, // see the parent probe
             });
             if (boosterClash.length) {
               bookingWarnings.push(slotOverlapWarning(boosterDate));
@@ -13534,6 +13557,8 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       }
     }
     let addressUpdatedIds = [];
+    // The Stripe cancels of a planned Bill-To session release, run as the transaction's last step.
+    let applySessionRelease = null;
     await db.transaction(async (trx) => {
       // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): this trx can
       // spawn recurring children (scheduled_services inserts) — lock
@@ -14403,26 +14428,68 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // and a Stripe cancel does not roll back with this transaction — so an
         // edit rejected for an in-flight send must not already have destroyed
         // the customer's live pay-page session.
-        if (updates.payer_id !== undefined || updates.self_pay_override !== undefined) {
-          // The combined advisory lock for this customer was taken above,
-          // before any ownership row — both Bill-To writers share that order.
+        const payerFieldsTouched = updates.payer_id !== undefined || updates.self_pay_override !== undefined;
+        // The children this edit's Bill-To propagation rewrites (pending / confirmed only), PINNED: the
+        // visit and then its children are locked FOR UPDATE here, once, in the route's lock order (the
+        // customer rows are held above), and this id set - not a re-run of the status predicate - drives
+        // the fence, the checkout invalidation, the propagation UPDATE and the withdrawal. A child that
+        // becomes pending or is inserted afterwards is simply not part of this edit.
+        const seriesBillToTouched = payerFieldsTouched || updates.po_number !== undefined;
+        let rewrittenChildIds = [];
+        let ownerPending = null;
+        // Did who pays for this visit (or a child) move TO A PAYER? One answer, from the pending write
+        // laid over the resolver's own order (visit payer, self-pay pin, customer default, active flag),
+        // drives the packet pipeline AND the visit-linked one - not which fields were submitted. It covers
+        // a cleared visit payer that reveals the customer default as much as an assignment.
+        let movedToPayer = false;
+        let movedVisitIds = [];
+        if (seriesBillToTouched) {
           await trx('scheduled_services').where({ id: req.params.id }).forNoKeyUpdate().first('id');
-          if (await require('../services/visit-completion-packets').packetInvoiceSendInFlight({ scheduledServiceId: req.params.id }, trx)) {
+          try {
+            rewrittenChildIds = await trx('scheduled_services').where({ recurring_parent_id: req.params.id })
+              .whereIn('status', ['pending', 'confirmed']).orderBy('id').forUpdate().pluck('id');
+          } catch { /* no children / column absent */ }
+        }
+        if (payerFieldsTouched) {
+          ownerPending = {
+            visitPatch: {
+              visitIds: [req.params.id, ...rewrittenChildIds],
+              ...(updates.payer_id !== undefined ? { payer_id: updates.payer_id } : {}),
+              ...(updates.self_pay_override !== undefined ? { self_pay_override: updates.self_pay_override === true } : {}),
+            },
+          };
+          // The visits (the parent and the pinned children, no others) whose effective owner moves TO a payer.
+          movedVisitIds = (await require('../services/visit-linked-invoice-withdrawal')
+            .visitOwnerTransitions(trx, [req.params.id, ...rewrittenChildIds], { pending: ownerPending, lock: true }))
+            .filter((move) => move.moved && move.afterOwner).map((move) => move.visitId);
+          movedToPayer = movedVisitIds.length > 0;
+          // (The combined advisory lock for this customer was taken above, before any ownership row,
+          // and the visit and its children were locked just before this - both Bill-To writers share that order.)
+          if (await require('../services/visit-completion-packets').packetInvoiceSendInFlight({ scheduledServiceId: req.params.id }, trx, { pending: ownerPending })) {
             throw Object.assign(new Error('The combined-visit invoice for this service is being delivered. Retry the Bill-To change in a moment.'), {
               statusCode: 409, isOperational: true, code: 'invoice_send_in_flight',
             });
           }
+          // The children's visit-linked invoices change hands with the payer propagation below,
+          // so a send or charge in flight on one that MOVES is refused here, before the first Stripe cancel.
+          if (rewrittenChildIds.length
+            && await require('../services/visit-linked-invoice-withdrawal').linkedInvoiceChargeInFlight(trx, { scheduledServiceIds: rewrittenChildIds }, { pending: ownerPending })) {
+            throw Object.assign(new Error('An invoice for a later visit in this series is being delivered or charged. Retry the Bill-To change in a moment.'), {
+              statusCode: 409, isOperational: true, code: 'invoice_send_in_flight',
+            });
+          }
         }
-        const activatesPayer = (Object.prototype.hasOwnProperty.call(updates, 'payer_id') && updates.payer_id)
-          || (Object.prototype.hasOwnProperty.call(updates, 'self_pay_override') && !updates.self_pay_override);
-        if (activatesPayer) {
-          const fencedVisitIds = [req.params.id];
-          try {
-            const childIds = await trx('scheduled_services').where({ recurring_parent_id: req.params.id }).pluck('id');
-            fencedVisitIds.push(...childIds);
-          } catch { /* no children / column absent */ }
+        if (movedToPayer) {
+          // Only the visits whose owner moves: a completed or cancelled child that is not rewritten, or a
+          // pinned child whose owner is unchanged, is neither cancelled nor a reason to refuse.
           const visitRelease = await require('../services/pay-combined')
-            .releaseUnconfirmedCombinedSessionsForScheduledServices(trx, fencedVisitIds);
+            .releaseUnconfirmedCombinedSessionsForScheduledServices(trx, movedVisitIds, {
+              invalidateVisitIds: movedVisitIds,
+              pending: ownerPending,
+              // Planned and refused here; the Stripe cancels run as the LAST step of this transaction, after
+              // every later validation that can still reject the edit (they cannot roll back).
+              deferApply: true,
+            });
           // In-flight combined money DEFERS the payer edit (codex r30 P1,
           // same contract as the merge fence) — settlement never
           // re-resolves ownership.
@@ -14432,6 +14499,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               { isValidation: true },
             );
           }
+          applySessionRelease = visitRelease.apply || null;
         }
         // Locked before-image for the price/service series-scope blocks
         // below: group changes are detected value-by-value against this
@@ -14576,7 +14644,8 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           // The opposite transition (a job payer assigned, an override
           // cleared) withdraws the self-pay combined-visit invoice this job
           // now owes to AP, including one already with the homeowner.
-          if (activatesPayer) await Packets.withdrawPacketInvoicesForOwner(trx, { scheduledServiceId: req.params.id });
+          // The packet withdrawal (and the visit-linked one it runs) follows the same moved-to-a-payer answer.
+          if (movedToPayer) await Packets.withdrawPacketInvoicesForOwner(trx, { scheduledServiceId: req.params.id });
         }
         // A row ACTIVATED to recurring becomes a series root NOW (codex
         // #3591 r88 P1): a phone-booked catalog bait visit (the call
@@ -14646,10 +14715,23 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               childPayerUpdates.self_pay_override = updates.self_pay_override === true;
             }
             if (Object.keys(childPayerUpdates).length > 0) {
-              await trx('scheduled_services')
-                .where({ recurring_parent_id: req.params.id })
-                .whereIn('status', ['pending', 'confirmed'])
-                .update(childPayerUpdates);
+              // The pinned (locked) child set, not the status predicate again.
+              if (rewrittenChildIds.length) {
+                await trx('scheduled_services')
+                  .where({ recurring_parent_id: req.params.id })
+                  .whereIn('id', rewrittenChildIds)
+                  .update(childPayerUpdates);
+              }
+              // The children took the Bill-To in the same write: their visit-linked invoices follow
+              // it (withdrawn when a payer now owns them, released when it cleared).
+              const childVisitIds = rewrittenChildIds;
+              // Only an edit that touched the payer or the self-pay pin can move an invoice (a PO-only
+              // edit propagates the PO and nothing else).
+              if (childVisitIds.length && payerFieldsTouched) {
+                const Linked = require('../services/visit-linked-invoice-withdrawal');
+                await Linked.reconcileLinkedInvoices(trx, { scheduledServiceIds: childVisitIds });
+                await Linked.withdrawLinkedInvoicesForOwner(trx, { scheduledServiceIds: childVisitIds });
+              }
             }
           }
         }
@@ -15911,6 +15993,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           }
         }
       }
+      // Every refusal in this handler has passed: only now do the Stripe cancels of the planned session
+      // release run (they are external and cannot roll back with a rejected edit).
+      if (applySessionRelease) await applySessionRelease();
     });
 
     // Tech-facing notice for a same-tech date/time move (a tech change in the
@@ -25883,11 +25968,16 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         }
       }
     }
+    // Lawn under GATE_LAWN_REPORT_COPY_V6 (P15): the prompt carried the
+    // RESULT TIMING rule, so the copy is screened for it too; any forward
+    // result timing is rejected (the report's "What to expect" owns timing).
+    const { LAWN_RESULT_TIMING_RULE } = require('../services/service-report/lawn-report-copy-prompt');
+    const lawnTimingOn = String(effectiveSystemPrompt || '').includes(LAWN_RESULT_TIMING_RULE);
     const writerRulesScreen = (text) => (writerRulesOn
       ? writerRulesRejection(text, {
         activeIngredients: visitActiveIngredients, allowedPhrases: writerAllowedPhrases, allowedDates: writerAllowedDates,
       })
-      : null);
+      : null) || (lawnTimingOn && lawnResultTimingViolation(text) ? 'lawn_timing' : null);
     const generated = await generateReportCopyWithFallback({
       systemPrompt: effectiveSystemPrompt,
       userMessage: fullUserMessage,

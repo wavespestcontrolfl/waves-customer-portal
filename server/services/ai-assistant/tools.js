@@ -68,7 +68,7 @@ const MAX_RESCHEDULE_BUTTONS = 3;
 const RESCHEDULE_PAGE = 12;
 // What a portal hand-off is about, named by the model (or by the keyword that
 // forced the hand-off) and worded for the office in assistant.js.
-const ESCALATION_TOPICS = ['cancellation', 'schedule_change', 'billing', 'complaint', 'account_change', 'add_service', 'manager', 'other'];
+const ESCALATION_TOPICS = ['cancellation', 'schedule_change', 'billing', 'complaint', 'account_change', 'add_service', 'pest_problem', 'manager', 'other'];
 
 const PORTAL_TOOLS = [
   TOOLS[0],
@@ -96,7 +96,7 @@ const PORTAL_TOOLS = [
       properties: {
         ...TOOLS[2].input_schema.properties,
         // What the office bell says the customer asked about. Never shown to the customer.
-        topic: { type: 'string', enum: ESCALATION_TOPICS, description: 'What the customer needs. account_change: email, phone, address, gate code, pets. add_service: adding or quoting a service. other: none of the rest.' },
+        topic: { type: 'string', enum: ESCALATION_TOPICS, description: 'What the customer needs. account_change: email, phone, address, gate code, pets. add_service: adding or quoting a service. pest_problem: pests or a lawn problem back between visits. other: none of the rest.' },
       },
       required: ['reason', 'topic'],
     },
@@ -146,19 +146,53 @@ const GET_RECENT_VISITS_TOOL = {
   description: 'Get the customer\'s most recent completed visits (date, service, the technician\'s first name, the kinds of product applied) and show the customer a card with each visit\'s reviewed summary and report link. Use for any question about what was done at a visit, when the last visit was, or where a service report is.',
   input_schema: { type: 'object', properties: {}, additionalProperties: false },
 };
+// GATE_PORTAL_CHAT_RESERVICE: pests (or a lawn problem) back between visits.
+// The free re-service is offered only through a button the server builds
+// from the /reservice page's own eligibility read, for the one service line
+// the customer named; the model is never the one deciding a visit is free.
+const OFFER_RESERVICE_TOOL = {
+  name: 'offer_reservice',
+  description: 'For a customer reporting household pests back between scheduled visits: checks whether their plan covers a free pest re-service and, when it does, shows a button that opens its booking page. If one is already booked, shows a button to move it instead. You are told which case applies. Not for lawn problems.',
+  input_schema: {
+    type: 'object',
+    // Pest only for now (owner ruling 2026-10-02): the lawn check ships in its own PR.
+    properties: { service_line: { type: 'string', enum: ['pest'], description: 'pest: household insects and spiders. The server checks the customer\'s own words; rodents, termites, mosquitoes and tree or shrub problems are separate services and are never a free re-service.' } },
+    required: ['service_line'],
+    additionalProperties: false,
+  },
+};
+// GATE_PORTAL_CHAT_RESERVICE_LAWN: the same tool with the lawn line. Whether
+// the customer is reporting a current lawn problem is the model's judgement
+// (owner ruling 2026-10-03: the AI judges and quotes the customer, the code
+// only verifies; no lawn word list). Pest stays on the server's own classifier.
+const OFFER_RESERVICE_LAWN_TOOL = {
+  name: 'offer_reservice',
+  description: 'For a customer reporting household pests, or a lawn problem, back between scheduled visits: checks whether their plan covers a free re-service for that service line and, when it does, shows a button that opens its booking page. If one is already booked, shows a button to move it instead. You are told which case applies.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      service_line: { type: 'string', enum: ['pest', 'lawn'], description: 'pest: household insects and spiders (the server checks the customer\'s own words). lawn: weeds, turf insects, brown, thin or dying grass. Rodents, termites, mosquitoes and tree or shrub problems are separate services and are never a free re-service.' },
+      current_problem: { type: 'boolean', description: 'lawn only. true ONLY when the customer says, in this message, that the lawn problem is happening now. false for a question about lawn care, a what-if, a problem in the past, or one they say is fixed.' },
+      customer_quote: { type: 'string', description: 'lawn only. The customer\'s exact words from this message that describe the lawn problem, copied word for word.' },
+    },
+    required: ['service_line'],
+    additionalProperties: false,
+  },
+};
 // The portal tool set for the gates that are live: the four base tools, the
-// fact tools, then escalate last.
-function portalToolsFor({ payments = false, visits = false } = {}) {
+// fact and action tools, then escalate last.
+function portalToolsFor({ payments = false, visits = false, reservice = false, reserviceLawn = false } = {}) {
   return [
     ...PORTAL_TOOLS.slice(0, 4),
     ...(payments ? [SHOW_RECENT_PAYMENTS_TOOL] : []),
     ...(visits ? [GET_RECENT_VISITS_TOOL] : []),
+    ...(reservice ? [reserviceLawn ? OFFER_RESERVICE_LAWN_TOOL : OFFER_RESERVICE_TOOL] : []),
     PORTAL_TOOLS[4],
   ];
 }
 const PORTAL_FACTS_TOOLS = portalToolsFor({ payments: true });
 
-const CUSTOMER_SCOPED_TOOLS = new Set(['get_upcoming_services', 'offer_reschedule_link', 'show_recent_payments', 'get_recent_visits']);
+const CUSTOMER_SCOPED_TOOLS = new Set(['get_upcoming_services', 'offer_reschedule_link', 'show_recent_payments', 'get_recent_visits', 'offer_reservice']);
 
 // One button per target. No count cap is needed, and none may refuse a
 // button a tool then reports as shown: the distinct targets are the portal
@@ -172,8 +206,10 @@ function addAction(actions, action) {
 
 // Tool execution. `actions` collects the buttons a portal tool wants shown
 // under the reply and `cards` the fact cards; callers that cannot render
-// them leave both out.
-async function executeToolCall(toolName, input, contextCustomerId, actions = null, cards = null) {
+// them leave both out. `context.secondaryProperty`: the portal session is
+// scoped to a non-primary saved property (or its scope could not be read);
+// `context.customerMessage`: the customer's message this turn.
+async function executeToolCall(toolName, input, contextCustomerId, actions = null, cards = null, context = {}) {
   try {
     input = input && typeof input === 'object' ? input : {};
 
@@ -202,6 +238,8 @@ async function executeToolCall(toolName, input, contextCustomerId, actions = nul
         return await showRecentPayments(contextCustomerId, actions, cards);
       case 'get_recent_visits':
         return await getRecentVisits(contextCustomerId, actions, cards);
+      case 'offer_reservice':
+        return await offerReservice(contextCustomerId, input, actions, context);
       case 'escalate':
         // Handled in assistant.js before reaching here
         return { escalated: true, reason: input.reason };
@@ -249,6 +287,18 @@ function shortDateLabel(dateKey) {
   return Number.isNaN(d.getTime()) ? '' : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
 }
 
+// The visit as the reschedule page loads it, when that page's own GET verdict
+// would let the customer move it; null otherwise. Any failure fails closed.
+async function movableVisit(id) {
+  const { loadById, pageEligibility } = require('../../routes/reschedule-public')._internals;
+  const svc = await loadById(id).catch(() => null);
+  const verdict = svc && await pageEligibility(svc).catch((err) => {
+    logger.warn(`[ai-assistant] reschedule eligibility failed for visit ${id}, no button: ${err.message}`);
+    return null;
+  });
+  return verdict?.ok ? svc : null;
+}
+
 async function offerRescheduleLink(customerId, actions) {
   const NO_LINK = {
     available: false,
@@ -259,7 +309,6 @@ async function offerRescheduleLink(customerId, actions) {
   // loader and GET verdict (account state, status, dispatch review, grouped or
   // frozen visit, the self-serve move notice window), never a mirror of it.
   // Any failure fails closed — no button.
-  const { loadById, pageEligibility } = require('../../routes/reschedule-public')._internals;
   const movable = [];
   // Upcoming visits are read a page at a time until three are movable or
   // none are left: the button cap applies to movable visits, so no run of
@@ -279,12 +328,8 @@ async function offerRescheduleLink(customerId, actions) {
       .offset(offset);
     for (const row of rows) {
       if (movable.length >= MAX_RESCHEDULE_BUTTONS) break;
-      const svc = await loadById(row.id).catch(() => null);
-      const verdict = svc && await pageEligibility(svc).catch((err) => {
-        logger.warn(`[ai-assistant] reschedule eligibility failed for visit ${row.id}, no button: ${err.message}`);
-        return null;
-      });
-      if (verdict?.ok) movable.push({ row, property: String(svc.address_line1 || '').trim() });
+      const svc = await movableVisit(row.id);
+      if (svc) movable.push({ row, property: String(svc.address_line1 || '').trim() });
     }
     if (rows.length < RESCHEDULE_PAGE) break;
   }
@@ -442,6 +487,152 @@ async function getRecentVisits(customerId, actions, cards) {
   };
 }
 
+// Pest only for now (owner ruling 2026-10-02); lawn reports hand off.
+const RESERVICE_LINE_WORDS = { pest: 'pest control', lawn: 'lawn care' };
+const RESERVICE_COVERS = { pest: 'general pest control', lawn: 'lawn care' };
+const RESERVICE_SPECIALTY = {
+  offered: false,
+  instruction: 'What the customer describes includes a separately priced service (such as rodents, termites, mosquitoes or a tree and shrub problem), which a free re-service does not cover. Do not offer or imply a free visit. Acknowledge what they are seeing and use the escalate tool with topic pest_problem so the team follows up.',
+};
+const RESERVICE_HAND_OFF = {
+  offered: false,
+  instruction: 'A free re-service cannot be offered online for this right now. Do not offer or imply a free visit. Acknowledge what the customer is seeing and use the escalate tool with topic pest_problem so the team follows up.',
+};
+
+// Whether the /reservice page could take this customer at all from this
+// session: the page books at the account's PRIMARY address, so a session
+// looking at another property gets no button (the Schedule tab's own rule),
+// and the same two switches the Schedule tab's hand-off to the page reads.
+function reserviceSurfaceOpen({ secondaryProperty }) {
+  return !secondaryProperty && reservicePageSwitchesOn();
+}
+// The two switches the /reservice page and the Schedule tab's hand-off to it
+// need. POST /api/ai/chat reads them too, so it never resolves the property
+// scope (which can write) for a tool that would refuse anyway.
+function reservicePageSwitchesOn() {
+  const { isEnabled } = require('../../config/feature-gates');
+  return isEnabled('reserviceStreamline') && require('../reservice-scheduler').reserviceSelfServeEnabled();
+}
+
+// A re-service already open in the line: its date and window for the model,
+// and a button to move it only when the reschedule page would accept it.
+async function bookedReserviceResult(customerId, line, booked, actions) {
+  // The reschedule route's own token format: any other token is a 404 there.
+  const token = /^\/reschedule\/([^/]+)$/.exec(String(booked.rescheduleUrl || ''))?.[1];
+  const { TOKEN_RE: RESCHEDULE_TOKEN_RE } = require('../../routes/reschedule-public')._internals;
+  if (token && !RESCHEDULE_TOKEN_RE.test(token)) return bookedReserviceFacts(line, booked, false);
+  // The button is optional: a failed lookup keeps the booked visit's facts.
+  const row = token && await db('scheduled_services').where({ customer_id: customerId, reschedule_token: token }).first('id').catch((err) => {
+    logger.warn(`[ai-assistant] booked re-service lookup failed, no button: ${err.message}`);
+    return null;
+  });
+  const movable = Boolean(row && await movableVisit(row.id));
+  if (movable) {
+    addAction(actions, {
+      type: 'link',
+      label: `Reschedule ${booked.serviceType}, ${shortDateLabel(booked.date)}`.slice(0, 80),
+      href: booked.rescheduleUrl,
+    });
+  }
+  return bookedReserviceFacts(line, booked, movable);
+}
+
+function bookedReserviceFacts(line, booked, movable) {
+  return {
+    offered: false,
+    already_booked: { date: longDateLabel(booked.date), window: arrivalWindowRange(String(booked.windowStart || '')) || 'TBD' },
+    instruction: `A free ${RESERVICE_LINE_WORDS[line]} re-service is already on the schedule (date and window above). Do not offer another one or a paid visit. Acknowledge what the customer is seeing and refer to that visit${movable ? '; a button to move it is shown under your reply' : ''}.`,
+  };
+}
+
+// What is covered is read from the customer's own message THIS turn with the
+// texting AI's classifier, never from the line the model picked and never
+// carried forward from an earlier message (a later "they're gone now" must
+// not leave an old report standing). A separately priced specialty in it
+// means no free offer, and so does anything short of an active pest report
+// (isActivePestReport, the SMS flow's own predicate) in the pest line:
+// "Do you cover ants?" names a pest but reports nothing.
+function reportRefusal(customerMessage, line, input) {
+  const { reportedReserviceLanes, reportedReserviceExcludedSpecialty, isActivePestReport } = require('../reservice-scheduler');
+  const text = String(customerMessage || '');
+  if (reportedReserviceExcludedSpecialty(text)) return RESERVICE_SPECIALTY;
+  if (line === 'lawn') return lawnReportRefusal(text, input);
+  return isActivePestReport(text) && reportedReserviceLanes(text).includes(line) ? null : RESERVICE_HAND_OFF;
+}
+
+// Lawn (owner ruling 2026-10-03): the model judges whether the customer is
+// reporting a current lawn problem and quotes them; the code only verifies
+// that the quote is word for word in this turn's message and names a lawn
+// subject. No list of lawn-problem wording lives here: do not grow one.
+const RESERVICE_NOT_CURRENT = {
+  offered: false,
+  instruction: 'This was not marked as a lawn problem happening now, so no free re-service applies. Answer the customer\'s question; do not offer or imply a free visit.',
+};
+const RESERVICE_QUOTE_UNVERIFIED = {
+  offered: false,
+  instruction: 'The quote is not the customer\'s own words about their lawn from this message, so no free re-service can be offered on it. Do not offer or imply a free visit. If the customer did report a lawn problem happening now in this message, call again with their exact words; otherwise answer them, or use the escalate tool with topic pest_problem.',
+};
+const LAWN_QUOTE_MIN_CHARS = 8;
+const foldQuoteText = (v) => String(v || '').toLowerCase().replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/\s+/g, ' ').trim();
+function lawnReportRefusal(customerMessage, input) {
+  if (input.current_problem !== true) return RESERVICE_NOT_CURRENT;
+  const quote = foldQuoteText(input.customer_quote);
+  if (quote.length < LAWN_QUOTE_MIN_CHARS || !foldQuoteText(customerMessage).includes(quote)) return RESERVICE_QUOTE_UNVERIFIED;
+  // The lawn copy's own service words (reservice-scheduler) plus the turf itself.
+  const { RESERVICE_LAWN_SERVICE_WORDS } = require('../reservice-scheduler');
+  const lawnSubject = new RegExp(`\\b(?:${RESERVICE_LAWN_SERVICE_WORDS}|grass|yard)\\b`, 'i');
+  return lawnSubject.test(quote) ? null : RESERVICE_QUOTE_UNVERIFIED;
+}
+
+// The service line asked for; the lawn line exists only under its own gate.
+function reserviceLineOf(input, lawn) {
+  return (lawn ? ['pest', 'lawn'] : ['pest']).includes(input.service_line) ? input.service_line : null;
+}
+
+async function offerReservice(customerId, input, actions, { secondaryProperty = true, customerMessage = '', lawn = false } = {}) {
+  const line = reserviceLineOf(input, lawn);
+  if (!customerId || !line || !Array.isArray(actions)) return RESERVICE_HAND_OFF;
+  if (!reserviceSurfaceOpen({ secondaryProperty })) return RESERVICE_HAND_OFF;
+  const refusal = reportRefusal(customerMessage, line, input);
+  if (refusal) return refusal;
+  // An open re-service in the line is read on its own, as the page does: a
+  // visit booked while the plan covered the line stays on the schedule after
+  // coverage changes, and the customer is told about it.
+  const open = await require('../reservice-scheduler').openReserviceCallbacks(customerId).catch((err) => {
+    logger.warn(`[ai-assistant] open re-service read failed, no button: ${err.message}`);
+    return null;
+  });
+  if (!open) return RESERVICE_HAND_OFF;
+  if (open[line]) return bookedReserviceResult(customerId, line, open[line], actions);
+  const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('reservice_token').catch((err) => {
+    logger.warn(`[ai-assistant] re-service token read failed, no button: ${err.message}`);
+    return null;
+  });
+  const token = String(customer?.reservice_token || '');
+  // The /reservice page's own token format and verdict for this token (its
+  // customer load, lane catalog, coverage and open re-services), so the chat
+  // offers exactly what the page would show. Any failure hands off.
+  const page = require('../../routes/reservice-public')._internals;
+  if (!page.TOKEN_RE.test(token)) return RESERVICE_HAND_OFF;
+  const state = await page.pageLaneState(token).catch((err) => {
+    logger.warn(`[ai-assistant] re-service page state failed, no button: ${err.message}`);
+    return null;
+  });
+  if (!state || String(state.customer.id) !== String(customerId)) return RESERVICE_HAND_OFF;
+  if (!state.bookableLanes.includes(line)) return RESERVICE_HAND_OFF;
+  // An address held for staff review shows no times on the page, only
+  // instructions to text or call: hand off rather than promise a time.
+  const reviewHold = await page.reserviceLocationReviewRequired(state.customer).catch(() => true);
+  if (reviewHold) return RESERVICE_HAND_OFF;
+  // One label for both lines: the page lets the customer pick the line, and a
+  // second call for the other line shares this href (one button).
+  addAction(actions, { type: 'link', label: 'Book your free re-service', href: `/reservice/${token}` });
+  return {
+    offered: true,
+    instruction: `The customer's plan covers a free ${RESERVICE_LINE_WORDS[line]} re-service, and a button that opens its booking page is now shown under your reply. Acknowledge what they are seeing, tell them the visit is free under their plan, and tell them to tap the button to book it. Do not say whether times are open or promise a time: the page shows what is open, and says how to reach the team when nothing is. The free visit covers ${RESERVICE_COVERS[line]} only: never say it covers rodents, termites, mosquitoes or a tree and shrub problem.`,
+  };
+}
+
 function openPortalSection(section, actions) {
   const target = Object.prototype.hasOwnProperty.call(PORTAL_SECTIONS, section) ? PORTAL_SECTIONS[section] : null;
   if (!target || !Array.isArray(actions)) return { shown: false, error: 'Unknown section' };
@@ -459,4 +650,4 @@ async function getPestAdvice(topic) {
   }
 }
 
-module.exports = { TOOLS, PORTAL_TOOLS, PORTAL_FACTS_TOOLS, PORTAL_SECTIONS, portalToolsFor, executeToolCall };
+module.exports = { TOOLS, PORTAL_TOOLS, PORTAL_FACTS_TOOLS, PORTAL_SECTIONS, portalToolsFor, executeToolCall, reservicePageSwitchesOn };

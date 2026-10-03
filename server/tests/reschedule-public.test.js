@@ -743,6 +743,64 @@ describe('grouped visits are refused before slot selection (codex #3609 r4)', ()
     mockDb.mockImplementation(() => api);
     expect(await eligibilityAsync({ status: 'confirmed', scheduled_date: '2026-07-10', visit_id: 'v1' }, NOW)).toEqual({ ok: false, reason: 'not_available' });
   });
+  test.each([
+    { code: 'PORTAL_CHAT_DEADLINE' }, { code: 'ABORT_ERR' },
+    { code: '57014' }, { name: 'AbortError' }, { name: 'KnexTimeoutError' },
+  ])('a cancelled scoped membership read propagates instead of refusing reschedule: %j', async (identity) => {
+    const cancelled = Object.assign(new Error('cancelled'), identity);
+    const api = { where: () => api, whereNotIn: () => api, count: () => api, first: async () => { throw cancelled; } };
+    const scopedDatabase = () => api;
+    await expect(eligibilityAsync({ status: 'confirmed', scheduled_date: '2026-07-10', visit_id: 'v1' }, NOW, scopedDatabase))
+      .rejects.toBe(cancelled);
+  });
+  test.each([{ code: '57014' }, { name: 'KnexTimeoutError' }])('default database timeouts keep membership fail-closed: %j', async (identity) => {
+    const failure = Object.assign(new Error('database timeout'), identity);
+    const api = { where: () => api, whereNotIn: () => api, count: () => api, first: async () => { throw failure; } };
+    mockDb.mockImplementation(() => api);
+    expect(await eligibilityAsync({ status: 'confirmed', scheduled_date: '2026-07-10', visit_id: 'v1' }, NOW))
+      .toEqual({ ok: false, reason: 'not_available' });
+  });
+  test.each([{ code: '57014' }, { name: 'KnexTimeoutError' }])('default frozen-visit timeouts keep self-service blocked: %j', async (identity) => {
+    const failure = Object.assign(new Error('database timeout'), identity);
+    mockDb.mockImplementation((table) => {
+      const api = { where: () => api, whereNotIn: () => api, count: () => api,
+        first: async () => { if (table === 'scheduled_services') return { n: '1' }; throw failure; } };
+      return api;
+    });
+    expect(await eligibilityAsync({ status: 'confirmed', scheduled_date: '2026-07-10', visit_id: 'v1' }, NOW))
+      .toEqual({ ok: false, reason: 'grouped' });
+  });
+  test('cancellation inside the frozen-visit reader also propagates', async () => {
+    const cancelled = Object.assign(new Error('deadline'), { code: 'PORTAL_CHAT_DEADLINE' });
+    const scopedDatabase = (table) => {
+      const api = {
+        where: () => api, whereNotIn: () => api, count: () => api,
+        first: async () => { if (table === 'scheduled_services') return { n: '1' }; throw cancelled; },
+      };
+      return api;
+    };
+    await expect(eligibilityAsync({ status: 'confirmed', scheduled_date: '2026-07-10', visit_id: 'v1' }, NOW, scopedDatabase))
+      .rejects.toBe(cancelled);
+  });
+  test.each(['service_records', 'invoices'])('scoped cancellation in nested %s reads cannot become missing activity', async (failedTable) => {
+    const cancelled = Object.assign(new Error('nested read timed out'), { name: 'KnexTimeoutError' });
+    const scopedDatabase = jest.fn((table) => {
+      const api = {
+        where: () => api, whereNot: () => api, whereIn: () => api, whereNotIn: () => api, count: () => api,
+        first: async () => {
+          if (table === failedTable) throw cancelled;
+          if (table === 'scheduled_services') return { n: '1' };
+          if (table === 'service_visits') return { id: 'v1', status: 'open' };
+          return null;
+        },
+        select: async () => table === 'scheduled_services' ? [{ id: 's1' }] : [],
+      };
+      return api;
+    });
+    await expect(eligibilityAsync({ status: 'confirmed', scheduled_date: '2026-07-10', visit_id: 'v1' }, NOW, scopedDatabase))
+      .rejects.toBe(cancelled);
+    expect(scopedDatabase).not.toHaveBeenCalledWith('service_completion_attempts');
+  });
   test('terminal verdicts win without a membership query', async () => {
     mockDb.mockClear();
     expect(await eligibilityAsync({ status: 'completed', scheduled_date: '2026-07-10', visit_id: 'v1' }, NOW)).toEqual({ ok: false, reason: 'completed' });

@@ -5,6 +5,7 @@
 // (data-only fallback tier); Phase 2 fills it with the tech's tagged clips.
 const db = require('../../models/db');
 const { buildReportV1Data } = require('./report-data');
+const { reportGreetingFirstToken } = require('../../utils/greeting-first-name');
 const { buildServiceReportDynamicContext } = require('./dynamic-context');
 const { buildPestReportV2 } = require('./pest-report-v2');
 const { loadServiceRecordForPdf, ensureReportToken } = require('./pdf-queue');
@@ -90,7 +91,7 @@ async function buildRecapPayload(scheduledServiceId, { knex = db } = {}) {
   });
   if (!pestReportV2) return null;
 
-  const firstName = String(data.customerName || service.first_name || 'there').trim().split(/\s+/)[0] || 'there';
+  const firstName = reportGreetingFirstToken(data, service) || 'there';
   // Tech-captured clips (presigned GET srcs) fill the composition's media slots;
   // empty = the data-only fallback tier. Best-effort — never blocks the render.
   const media = await getMediaForRecap(scheduledServiceId, knex).catch(() => []);

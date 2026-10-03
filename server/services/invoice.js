@@ -30,6 +30,7 @@ const {
   SEND_FINALIZABLE_STATUSES,
   isStaleClaimReviewHold,
   staleClaimReviewHoldError,
+  invoiceDepositCreditCents,
 } = require("./invoice-helpers");
 
 // Customer-facing presign TTL: photo URLs mint per page-load, so the TTL must
@@ -4433,15 +4434,7 @@ async function assertInvoiceGenuinelyUnsettledLocked(trx, id) {
 // pinned JSON number compare equal.
 function cancelVoidInvoiceAmounts(row) {
   const cents = (v) => Math.round(Number(v || 0) * 100);
-  let items = [];
-  try {
-    const raw = row?.line_items;
-    const arr = typeof raw === "string" ? JSON.parse(raw) : raw;
-    items = Array.isArray(arr) ? arr : [];
-  } catch { items = []; }
-  const depositCents = items
-    .filter((item) => item?.category === "deposit_credit")
-    .reduce((sum, line) => sum + Math.abs(cents(line.amount ?? line.unit_price ?? 0)), 0);
+  const depositCents = invoiceDepositCreditCents(row);
   return {
     total: row?.total != null ? cents(row.total) / 100 : null,
     credit_applied: cents(row?.credit_applied) / 100,
@@ -4770,6 +4763,18 @@ const InvoiceService = {
     // would fall back to the customer default (or self-pay) and bill the wrong
     // party. Reuse the same link resolved for the mint lock above; the row's own
     // scheduled_service_id linkage below is unchanged.
+    // A visit-linked create inside a transaction takes the payer rows its Bill-To resolves through (the
+    // visit's own and the customer default, active or not) FOR SHARE BEFORE it reads their active flag, and
+    // holds them through the insert below. A payer activation (payer row FOR UPDATE) then waits for this
+    // insert to commit, so its withdrawal scan finds the new invoice instead of missing a row committed
+    // after the scan; and a create that waited reads the payer as the activation left it (stamped, not
+    // self-pay). Order: customer and visit are already held by the mint chain above, then payers, then the
+    // invoice insert last - the order every Bill-To writer takes.
+    if (linkedScheduledServiceId && database?.isTransaction === true) {
+      const visitPayer = await database("scheduled_services").where({ id: linkedScheduledServiceId, customer_id: customerId }).first("payer_id");
+      const payerIdsToHold = [...new Set([visitPayer?.payer_id, customer.payer_id].filter(Boolean).map(String))].sort();
+      if (payerIdsToHold.length) await database("payers").whereIn("id", payerIdsToHold).orderBy("id").forShare().select("id");
+    }
     const {
       payerId: resolvedPayerId,
       poNumber: resolvedPoNumber,
@@ -8963,19 +8968,23 @@ const InvoiceService = {
     from,
     to,
     sort = "newest",
+    // Optional connection (a read-only snapshot transaction a reader holds); defaults to the pool.
+    database = db,
+    // Optional: end the ordering with invoices.id so tied rows page deterministically (default off).
+    stableOrder = false,
   } = {}) {
     const today = etDateString();
     const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 100);
     const safeOffset = Math.max(parseInt(offset, 10) || 0, 0);
     const dateColumn =
       "COALESCE(invoices.service_date, invoices.created_at::date)";
-    const invoiceDate = db.raw(dateColumn);
+    const invoiceDate = database.raw(dateColumn);
     const validDate = (value) =>
       typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
     const normalizedStatus = String(status || "")
       .trim()
       .toLowerCase();
-    const hasAnnualPrepayTerms = await annualPrepayInvoiceTableExists();
+    const hasAnnualPrepayTerms = await annualPrepayInvoiceTableExists(database);
     const directStatuses = new Set([
       "draft",
       "scheduled",
@@ -9023,8 +9032,8 @@ const InvoiceService = {
           // govern.
           .andWhere(function () {
             this.whereNotNull("invoices.payer_id").orWhereNotExists(
-              db("notification_prefs")
-                .select(db.raw("1"))
+              database("notification_prefs")
+                .select(database.raw("1"))
                 .whereRaw(
                   "notification_prefs.customer_id = invoices.customer_id",
                 )
@@ -9058,7 +9067,7 @@ const InvoiceService = {
       return q;
     };
 
-    const listBase = db("invoices").leftJoin(
+    const listBase = database("invoices").leftJoin(
       "customers",
       "invoices.customer_id",
       "customers.id",
@@ -9082,13 +9091,13 @@ const InvoiceService = {
       // (not the rate stored on the invoice) so its tax preview matches the
       // server retotal when a customer's type changed after invoice creation.
       "customers.property_type",
-      db.raw(`(
+      database.raw(`(
           SELECT json_build_object('brand', card_brand, 'last_four', last_four)
           FROM payment_methods
           WHERE customer_id = invoices.customer_id AND is_default = true
           LIMIT 1
         ) AS card_on_file`),
-      db.raw(`(
+      database.raw(`(
           SELECT json_build_object(
             'id', pp.id,
             'payment_amount', pp.payment_amount,
@@ -9134,9 +9143,10 @@ const InvoiceService = {
         .orderBy("invoices.created_at", "desc");
     }
 
+    if (stableOrder) query.orderBy("invoices.id", "asc");
     const invoices = await query.limit(safeLimit).offset(safeOffset);
     const [{ count }] = await applyFilters(
-      db("invoices").leftJoin(
+      database("invoices").leftJoin(
         "customers",
         "invoices.customer_id",
         "customers.id",
@@ -10128,14 +10138,28 @@ const InvoiceService = {
       // which every Bill-To writer takes before the invoice. Taking them here
       // puts this restore on that same order; the reconciliation below is
       // then re-entrant on rows this transaction already holds.
-      if (current.visit_completion_packet_id && current.customer_id) {
-        await trx("customers").where({ id: current.customer_id }).forShare().first("id");
+      // The invoice's ownership links are re-read HERE (a plain read, no lock): the outer `current` can predate
+      // a customer merge that moved the invoice and its visit, and locking that stale customer would take the
+      // winner's lock only later, while holding the invoice. The chain below is built from the fresh row.
+      const own = await trx("invoices").where({ id }).first("customer_id", "scheduled_service_id", "service_record_id", "visit_completion_packet_id");
+      if (!own) throw new Error("Invoice not found — re-check and retry");
+      if (own.visit_completion_packet_id && own.customer_id) {
+        await trx("customers").where({ id: own.customer_id }).forShare().first("id");
         const billedMembers = await trx("visit_completion_packet_items")
-          .where({ packet_id: current.visit_completion_packet_id })
+          .where({ packet_id: own.visit_completion_packet_id })
           .pluck("scheduled_service_id");
         if (billedMembers.length) {
           await trx("scheduled_services").whereIn("id", billedMembers.filter(Boolean)).orderBy("id").forShare().select("id");
         }
+      }
+      // A restored invoice that rides a visit WITHOUT a packet (a service-record or direct
+      // visit link) takes the same rows in the same order: the withdrawal below resolves its
+      // live owner under them.
+      if (!own.visit_completion_packet_id && own.customer_id
+        && (own.scheduled_service_id || own.service_record_id)) {
+        // customer -> visit -> every payer row the resolver reads (FOR SHARE), the order every Bill-To
+        // writer takes, BEFORE the invoice row below is updated.
+        await require("./visit-linked-invoice-withdrawal").lockLinkedOwnershipRows(trx, own);
       }
       // Statement re-check under lock (a concurrent close could finalize it
       // between the fast pre-check above and this write).
@@ -10171,6 +10195,11 @@ const InvoiceService = {
       if (!updated) {
         throw new Error("Invoice status changed while unvoiding — re-check and retry");
       }
+      // The customer is judged again once the invoice itself is held: a merge that committed between the
+      // fresh read above and this lock moved the invoice to another customer, whose rows were never taken.
+      if (String(updated.customer_id) !== String(own.customer_id)) {
+        throw new Error("Invoice ownership changed while unvoiding — re-check and retry");
+      }
       // The preserved withdrawal stamp is re-judged against LIVE ownership
       // (Codex #4311 r30 P1): a withdrawn invoice that was voided is skipped
       // by the Bill-To reconciliation (void is terminal), so a payer cleared
@@ -10190,10 +10219,16 @@ const InvoiceService = {
       if (updated.visit_completion_packet_id) {
         const Packets = require("./visit-completion-packets");
         // A stamp that outlived the void is re-pointed or released…
-        await Packets.reconcileWithdrawnPacketInvoices(trx, { customerId: updated.customer_id });
+        await Packets.reconcileWithdrawnPacketInvoices(trx, { customerId: updated.customer_id, includeLinked: false });
         // …and a restored row whose live owner is a payer is withdrawn before
         // it can ever be collected.
-        await Packets.withdrawPacketInvoicesForOwner(trx, { customerId: updated.customer_id });
+        await Packets.withdrawPacketInvoicesForOwner(trx, { customerId: updated.customer_id, includeLinked: false });
+      } else if (updated.customer_id && (updated.scheduled_service_id || updated.service_record_id)) {
+        // The same re-judgement for a restored invoice with no packet: a payer assigned to its
+        // visit while it sat void must not hand the homeowner a collectible link on restore.
+        const Linked = require("./visit-linked-invoice-withdrawal");
+        await Linked.reconcileLinkedInvoices(trx, { invoiceId: id }, { requeue: false });
+        await Linked.withdrawLinkedInvoicesForOwner(trx, { invoiceId: id });
       }
       // Term-link TOCTOU re-check on the FRESH row under the lock (Codex
       // #3493 r2): a concurrent /annual-prepay can create the term and
@@ -12605,6 +12640,7 @@ InvoiceService.rodentSetupRebillMarker = rodentSetupRebillMarker;
 InvoiceService.withDeferredInvoiceProviderHandoff = withDeferredInvoiceProviderHandoff;
 InvoiceService.checkDeferredInvoiceEmailDelivery = checkDeferredInvoiceEmailDelivery;
 module.exports = InvoiceService;
+module.exports.linkedScheduledServiceId = linkedScheduledServiceId;
 module.exports.prepaySwitchSupersededByMarker = prepaySwitchSupersededByMarker;
 module.exports.prepayReplacedCharges = prepayReplacedCharges;
 module.exports.prepaySwitchRestoreMarker = prepaySwitchRestoreMarker;
@@ -12638,6 +12674,8 @@ module.exports._zeroDueDirectSendOutcome = zeroDueDirectSendOutcome;
 module.exports._zeroDueWrapperOutcome = zeroDueWrapperOutcome;
 module.exports.claimPacketInvoiceForSend = claimPacketInvoiceForSend;
 module.exports.claimInvoiceForSend = claimInvoiceForSend;
+module.exports.linkedScheduledServiceId = linkedScheduledServiceId;
+module.exports.alreadyDeliveredForFirstSend = alreadyDeliveredForFirstSend;
 // Test-only seam (#4131 slice 5): the ONE chokepoint for giving a send claim
 // back, exercised directly by the ported Postgres adoption-restore cases
 // (invoice-claim-ownership-postgres.test.js) so a genuine restore failure can

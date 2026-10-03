@@ -1696,9 +1696,10 @@ const StripeService = {
       // PaymentIntents can land in `requires_action` when the cardholder's
       // bank demands 3DS — Stripe surfaces it as code/decline_code
       // 'authentication_required' on the thrown error and the PI exists in
-      // requires_action state. The customer SMS path is already wired via
-      // payment_intent.requires_action in the webhook handler; the cron
-      // just needs to NOT schedule a retry against the same wall.
+      // requires_action state. No customer text goes out for a card (the
+      // payment_intent.requires_action webhook only notices ACH micro-deposit
+      // steps); the cron must NOT schedule a retry against the same wall, and
+      // instead cancels the PI and alerts the office (autopay-sca-parked.js).
       const authCode = err.code || err.raw?.code || err.decline_code || err.raw?.decline_code;
       const requiresAction = authCode === 'authentication_required';
       const piIdFromErr = err.payment_intent?.id || err.raw?.payment_intent?.id || null;
@@ -3243,19 +3244,19 @@ const StripeService = {
   /**
    * Get payment history with payment method details (both processors)
    */
-  async getPaymentHistory(customerId, limit = 20, offset = 0) {
-    let q = db('payments')
+  async getPaymentHistory(customerId, limit = 20, offset = 0, database = db) {
+    let q = database('payments')
       .where({ 'payments.customer_id': customerId })
       .leftJoin('payment_methods', 'payments.payment_method_id', 'payment_methods.id')
       .select(
         'payments.*',
         // A removed method nulls payment_method_id (ON DELETE SET NULL) —
         // fall back to the brand/last-four snapshot taken at charge time.
-        db.raw('COALESCE(payment_methods.card_brand, payments.card_brand) as card_brand'),
-        db.raw('COALESCE(payment_methods.last_four, payments.card_last_four) as last_four'),
+        database.raw('COALESCE(payment_methods.card_brand, payments.card_brand) as card_brand'),
+        database.raw('COALESCE(payment_methods.last_four, payments.card_last_four) as last_four'),
         'payment_methods.processor as pm_processor',
-        db.raw('COALESCE(payment_methods.method_type, payments.payment_method_type) as method_type'),
-        db.raw('COALESCE(payment_methods.bank_name, payments.bank_name) as bank_name')
+        database.raw('COALESCE(payment_methods.method_type, payments.payment_method_type) as method_type'),
+        database.raw('COALESCE(payment_methods.bank_name, payments.bank_name) as bank_name')
       )
       .orderBy('payments.payment_date', 'desc')
       // payment_date is a DATE: a failed attempt and its same-day retry need
@@ -3701,11 +3702,6 @@ const StripeService = {
     // Side effects past this point never mask the successful refund as
     // "Refund processing failed" — each degrades on its own.
     if (isFullRefund) {
-      try {
-        await require('./annual-prepay-renewals').syncTermForRefundedPayment(payment);
-      } catch (syncErr) {
-        logger.error(`[annual-prepay] refund sync failed for payment ${paymentId}: ${syncErr.message}`);
-      }
       // Return any applied account credit to the customer's balance — a full
       // refund gives back the cash, so the credit they used must return too
       // (else it stays consumed). Idempotent vs the charge.refunded webhook.
@@ -3722,6 +3718,21 @@ const StripeService = {
         }
       } catch (creditErr) {
         logger.error(`[stripe] refund credit-restore failed for payment ${paymentId}: ${creditErr.message}`);
+      }
+      // Annual-prepay claw-back, AFTER the credit restore on purpose (B03):
+      // that restore terminalizes the invoice this PI owns to 'refunded'
+      // under its row lock, and a refunded invoice is refused by every
+      // replacement-settlement path — so the ownership read
+      // syncTermForRefundedPayment makes next cannot be flipped by a
+      // replacement payment before the term is cancelled. (The restore finds
+      // the invoice by this payment's PI, i.e. only an invoice it still
+      // owns.) A restore that throws is logged above and never skips this:
+      // the sync runs regardless, as it always has, just on a read that is
+      // then not pinned by the terminal status.
+      try {
+        await require('./annual-prepay-renewals').syncTermForRefundedPayment(payment);
+      } catch (syncErr) {
+        logger.error(`[annual-prepay] refund sync failed for payment ${paymentId}: ${syncErr.message}`);
       }
     }
 
