@@ -4708,6 +4708,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
           const dueMonth = serviceDateOnly(svc.scheduled_date).slice(0, 7);
           duesCollectedThisMonth = await db.transaction(async (trx) => {
             await acquireMembershipDuesMonthLock(trx, svc.customer_id, dueMonth);
+            // The month came from the pre-lock snapshot: a visit moved to
+            // another month since is not covered by THIS month's invoice. Not
+            // covered here → the mint path re-decides (and refuses a moved
+            // month before stamping, releasing for resume on fresh data).
+            const liveVisit = await trx('scheduled_services').where({ id: svc.id }).first('scheduled_date');
+            if (!liveVisit || serviceDateOnly(liveVisit.scheduled_date).slice(0, 7) !== dueMonth) return false;
             return monthlyDuesCollected(trx, svc.customer_id, new Date(`${dueMonth}-15T12:00:00Z`), { excludeScheduledServiceId: svc.id });
           });
         } catch (e) {

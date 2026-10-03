@@ -9606,16 +9606,18 @@ const InvoiceService = {
       }
     }
 
-    // The dues stamp survives an edit only on the stored stamped line, unchanged
-    // in month, category and amount (see sanitizeMembershipDuesMarkers).
-    let duesStripMonth = null;
-    if (updates.line_items) {
-      updates = { ...updates, line_items: sanitizeMembershipDuesMarkers(existing, updates.line_items) };
-      // An edit that REMOVES the stored stamp removes the month's coverage: it
-      // commits under the dues-month lock (taken first in runEdit).
-      const storedMonth = membershipDuesStampMonth(existing.line_items);
-      if (storedMonth && membershipDuesStampMonth(updates.line_items) !== storedMonth) duesStripMonth = storedMonth;
-    }
+    // Dues-stamp handling decides NOTHING before its lock. Whether this edit
+    // touches a dues stamp is read from either side (the pre-read stored row or
+    // the incoming lines) only to choose WHICH month's lock to take first —
+    // the stored month wins (an incoming marker naming another month is
+    // forged/stale and never holds a second lock). The keep-or-strip itself is
+    // judged inside runEdit against the LOCKED row. Stamps exist only from the
+    // mint's insert and can only be removed afterwards, so a pre-read with no
+    // marker anywhere cannot meet a stamped locked row; runEdit still refuses
+    // that case instead of proceeding unlocked.
+    const duesStoredMonth = membershipDuesStampMonth(existing.line_items);
+    const duesIncomingMonth = updates.line_items ? membershipDuesStampMonth(updates.line_items) : null;
+    const duesLockMonth = duesStoredMonth || duesIncomingMonth;
     const allowed = INVOICE_UPDATE_ALLOWED_FIELDS;
     const data = { updated_at: new Date() };
     for (const key of allowed) {
@@ -9814,7 +9816,9 @@ const InvoiceService = {
     };
 
     const runEdit = async (client) => {
-      if (duesStripMonth) await acquireMembershipDuesMonthLock(client, existing.customer_id, duesStripMonth);
+      // The dues-month lock is the FIRST lock of the edit (before the invoice
+      // row lock) whenever either side carries a marker.
+      if (duesLockMonth) await acquireMembershipDuesMonthLock(client, existing.customer_id, duesLockMonth);
       // Serialize against in-flight dun sends: lock the invoice row FIRST.
       // fireStep's claim transaction locks this same row before stamping
       // touch_claimed_at, so one of the two strictly precedes the other —
@@ -9828,6 +9832,23 @@ const InvoiceService = {
       if (!lockedRow) {
         throw new Error(
           "Only unpaid invoices can be edited — its status or payment state changed while you were editing",
+        );
+      }
+      // The locked row is the only authority for the dues stamp. A stamp whose
+      // month this edit did not lock (never expected: see above) is a stale
+      // edit, refused rather than run unlocked.
+      const lockedDuesMonth = membershipDuesStampMonth(lockedRow.line_items);
+      if (lockedDuesMonth && lockedDuesMonth !== duesLockMonth) {
+        throw new Error(
+          "Only unpaid invoices can be edited — its status or payment state changed while you were editing",
+        );
+      }
+      // Keep a marker only where the LOCKED row still carries that stamp and
+      // its dues set is unchanged against it; an edit can never restore one
+      // that another edit stripped meanwhile.
+      if (data.line_items !== undefined) {
+        data.line_items = JSON.stringify(
+          sanitizeMembershipDuesMarkers(lockedRow, parseInvoiceLineItems(data.line_items)),
         );
       }
       const inFlightNow = await client("invoice_followup_sequences")

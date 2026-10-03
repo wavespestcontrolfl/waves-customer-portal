@@ -793,6 +793,75 @@ postgres('membership dues — serialization, reconciled shape, locked month (B08
     } finally { await cleanup(f); }
   });
 
+  // The stamp decision is made from the LOCKED row, never the pre-read: an edit
+  // that read stamped A, paused, and resumes after another edit stripped A and
+  // a completion billed the month on B must not put the stamp back.
+  test('a preserving edit paused before its transaction cannot restore a stamp another edit stripped (stripping edit → replacement B → preserving edit resumes)', async () => {
+    const f = await seedMember();
+    // Pause the NEXT BEGIN (the preserving edit's transaction); every other BEGIN passes.
+    const driver = Object.getPrototypeOf(mockPg.client);
+    const originalQuery = driver._query;
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    let armed = false;
+    let paused = false;
+    driver._query = function patched(connection, obj) {
+      if (armed && /^\s*begin/i.test(String(obj?.sql || ''))) {
+        armed = false;
+        paused = true;
+        return gate.then(() => originalQuery.call(this, connection, obj));
+      }
+      return originalQuery.call(this, connection, obj);
+    };
+    try {
+      const a = await mintDues(f, 'Lawn Care');
+      const renamed = a.invoice.line_items.map((li) => (li.membership_dues_month ? { ...li, description: 'Lawn Care (renamed)' } : li));
+      armed = true;
+      const preserving = InvoiceService.update(a.invoice.id, { line_items: renamed });
+      for (let i = 0; i < 40 && !paused; i += 1) await sleep(50);
+      expect(paused).toBe(true);
+      // Meanwhile: another edit strips A's stamp, and a completion bills the month on B.
+      const stripped = a.invoice.line_items.map((li) => (li.membership_dues_month ? { ...li, unit_price: 60, amount: 60 } : li));
+      await InvoiceService.update(a.invoice.id, { line_items: stripped });
+      expect(stampedOf(await reload(a.invoice.id))).toBeUndefined();
+      const b = await mintDues(f, 'Pest Control');
+      expect(stampedOf(b.invoice)).toBeDefined();
+      // The preserving edit resumes against the locked, now-unstamped A.
+      release();
+      await preserving;
+      expect(stampedOf(await reload(a.invoice.id))).toBeUndefined();
+      const stamped = (await liveInvoicesFor(f)).filter((r) => stampedOf(r));
+      expect(stamped.map((r) => r.id)).toEqual([b.invoice.id]);
+    } finally { release(); driver._query = originalQuery; await cleanup(f); }
+  });
+
+  test('a forged marker naming ANOTHER month is stripped and the edit locks only the stored month', async () => {
+    const f = await seedMember();
+    try {
+      const a = await mintDues(f, 'Lawn Care');
+      // Hold the forged month's lock: an edit that (wrongly) took it would block.
+      const hold = await mockPg.transaction();
+      holds.push(hold);
+      await acquireMembershipDuesMonthLock(hold, f.customerId, '2099-01');
+      const forged = a.invoice.line_items.map((li) => (li.membership_dues_month ? { ...li, membership_dues_month: '2099-01' } : li));
+      const edit = InvoiceService.update(a.invoice.id, { line_items: forged });
+      expect(await settled(edit)).toBe('done');
+      expect(stampedOf(await reload(a.invoice.id))).toBeUndefined();
+    } finally { await cleanup(f); }
+  });
+
+  test('a preserving edit with no interference keeps the stamp, and a stamped invoice\'s notes-only edit still works', async () => {
+    const f = await seedMember();
+    try {
+      const a = await mintDues(f, 'Lawn Care');
+      const renamed = a.invoice.line_items.map((li) => (li.membership_dues_month ? { ...li, description: 'Lawn Care (renamed)' } : li));
+      await InvoiceService.update(a.invoice.id, { line_items: renamed });
+      expect(stampedOf(await reload(a.invoice.id))).toMatchObject({ description: 'Lawn Care (renamed)' });
+      await InvoiceService.update(a.invoice.id, { notes: 'office note' });
+      expect(stampedOf(await reload(a.invoice.id))).toBeDefined();
+    } finally { await cleanup(f); }
+  });
+
   // ── Finding 2: the reconciled dues set ───────────────────────────────────
   test.each([
     ['a stale positive primary line price below the rate (a top-up line reaches the rate)', 30],
