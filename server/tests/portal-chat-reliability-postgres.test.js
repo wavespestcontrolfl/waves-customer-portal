@@ -176,6 +176,31 @@ postgres('portal chat durable turns (PostgreSQL)', () => {
     expect(mockApp.client.pool.numPendingAcquires()).toBe(0);
   });
 
+  test('method-style transaction builders use the current turn deadline', async () => {
+    const requestId = randomUUID();
+    let firstTimeout;
+    let secondTimeout;
+    let cancelOnTimeout;
+    const response = await runPortalTurn(args(requestId, async (turn) => {
+      await turn.transaction('method-style bounded query', async (trx) => {
+        const first = trx.select(mockApp.raw('1 AS value'));
+        firstTimeout = first._timeout;
+        cancelOnTimeout = first._cancelOnTimeout;
+        await first;
+        await pause(150);
+        const second = trx.select(mockApp.raw('2 AS value'));
+        secondTimeout = second._timeout;
+        await second;
+      });
+      return { reply: 'bounded', escalated: false };
+    }, { budgetMs: 2_500 }));
+
+    expect(response).toMatchObject({ reply: 'bounded', requestId });
+    expect(firstTimeout).toBeGreaterThan(0);
+    expect(secondTimeout).toBeLessThan(firstTimeout);
+    expect(cancelOnTimeout).toBe(true);
+  });
+
   test('a card completed before the next model round hangs rides the timeout reply', async () => {
     let cardBuilt = false;
     const response = await runPortalTurn(args(randomUUID(), async (turn) => {
@@ -285,6 +310,49 @@ postgres('portal chat durable turns (PostgreSQL)', () => {
     } finally {
       await mockApp.raw('DROP TRIGGER IF EXISTS reject_portal_reply_checkpoint_trigger ON portal_chat_requests');
       await mockApp.raw('DROP FUNCTION IF EXISTS reject_portal_reply_checkpoint()');
+    }
+  });
+
+  test('a reclaimed attempt cannot publish its unfenced local result', async () => {
+    const requestId = randomUUID();
+    let processCalls = 0;
+    await mockApp.raw(`
+      CREATE FUNCTION delay_stale_portal_reply_checkpoint() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.response->>'reply' = 'stale local answer' THEN
+          PERFORM pg_sleep(2);
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql
+    `);
+    await mockApp.raw(`
+      CREATE TRIGGER delay_stale_portal_reply_checkpoint_trigger
+      BEFORE UPDATE ON portal_chat_requests
+      FOR EACH ROW EXECUTE FUNCTION delay_stale_portal_reply_checkpoint()
+    `);
+
+    try {
+      const firstPromise = runPortalTurn(args(requestId, async () => {
+        processCalls += 1;
+        return { reply: 'stale local answer', escalated: false, generated: true };
+      }, { budgetMs: 1_000 }));
+      await pause(1_050);
+      const retryPromise = runPortalTurn(args(requestId, async () => {
+        processCalls += 1;
+        return { reply: 'authoritative retry', escalated: false, generated: true };
+      }, { budgetMs: 2_500 }));
+
+      const [first, retry] = await Promise.all([firstPromise, retryPromise]);
+      expect(first).toMatchObject({ retryable: true, requestId });
+      expect(first.reply).not.toBe('stale local answer');
+      expect(retry).toMatchObject({ reply: 'authoritative retry', requestId });
+      expect(processCalls).toBe(2);
+      expect(await mockApp('portal_chat_requests').where({ request_id: requestId }).first())
+        .toMatchObject({ state: 'completed', response: expect.objectContaining({ reply: 'authoritative retry' }) });
+    } finally {
+      await mockApp.raw('DROP TRIGGER IF EXISTS delay_stale_portal_reply_checkpoint_trigger ON portal_chat_requests');
+      await mockApp.raw('DROP FUNCTION IF EXISTS delay_stale_portal_reply_checkpoint()');
     }
   });
 
