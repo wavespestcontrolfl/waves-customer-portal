@@ -633,6 +633,18 @@ postgres('annual prepay charged after the first visit', () => {
       expect(await facts(f.childId)).toMatchObject({ amount: '$480.00' });
     });
 
+    it('a holder whose text outcome is unknown keeps the reservation (GitHub Codex #5640 r8)', async () => {
+      const f = await deferredAccept();
+      const facts = async (id) => require('../services/paf-prepay-release')
+        .firstChargeCompletionFacts(await trx('scheduled_services').where({ id }).first(), trx);
+      await perform(f.parentId, f.customerId);
+      expect(await facts(f.parentId)).toMatchObject({ amount: '$480.00' });
+      await trx('service_records').where({ scheduled_service_id: f.parentId })
+        .update({ structured_notes: JSON.stringify({ visitOutcome: 'completed', completionSmsStatus: 'failed', completionSmsDeliveryUnverifiedAt: new Date().toISOString() }) });
+      await trx('scheduled_services').where({ id: f.childId }).update({ paf_held_term_id: f.termId });
+      expect(await facts(f.childId)).toBeNull();
+    });
+
     it('a year bill retotaled since the approval makes the amount a ceiling (GitHub Codex #5640 r2)', async () => {
       const f = await deferredAccept();
       await trx('scheduled_services').where({ id: f.parentId }).update({ paf_held_term_id: f.termId });

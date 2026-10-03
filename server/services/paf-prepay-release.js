@@ -542,7 +542,11 @@ async function reservationStands(visitId, termId) {
   // nothing: its reservation passes on (GitHub Codex #5640 r6).
   const record = await db('service_records').where({ scheduled_service_id: visitId })
     .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }]).first('structured_notes');
-  if (String(parseData(record?.structured_notes)?.completionSmsStatus || '') === 'failed') return false;
+  // An unknown-outcome send (failed + completionSmsDeliveryUnverifiedAt) may
+  // have reached the customer: that one keeps its reservation (GitHub Codex
+  // #5640 r8).
+  const recordNotes = parseData(record?.structured_notes) || {};
+  if (String(recordNotes.completionSmsStatus || '') === 'failed' && !recordNotes.completionSmsDeliveryUnverifiedAt) return false;
   if (await visitStillPerformed(visitId, termId)) return true;
   const visit = await db('scheduled_services').where({ id: visitId }).first('paf_held_term_id');
   if (String(visit?.paf_held_term_id || '') !== String(termId)) return false;
