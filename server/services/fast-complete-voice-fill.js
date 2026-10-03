@@ -889,6 +889,8 @@ const POST_NEGATION_WINDOW = 4;
 
 // A negation word shortly before the name, in the same clause.
 function negatedBefore(mention, world) {
+  // a clause break right before the name: nothing earlier governs it
+  if (world.breaks[mention.start]) return false;
   for (let j = mention.start - 1; j >= 0 && mention.start - j <= NEGATION_WINDOW; j -= 1) {
     if (isNegationAt(world.tokens, j)) return true;
     if (world.breaks[j]) return false;

@@ -1876,3 +1876,12 @@ describe('Codex #5698 round 8', () => {
     expect(out.unclear.map((u) => u.reason)).toContain('method_not_heard');
   });
 });
+
+test('a negation in the sentence before does not reach a product that opens the next one', () => {
+  const t = 'Did not use Talstar. Taurus four ounces outside.';
+  const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 4, unit: 'fl_oz', sameAsLast: false, method: '', heard: 'Taurus four ounces outside' }] }), ctx, t);
+  expect(out.products[0]).toMatchObject({ productId: 'p-taurus', amount: 4 });
+  const comma = 'Skipped the Talstar, Taurus four ounces outside.';
+  const out2 = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 4, unit: 'fl_oz', sameAsLast: false, method: '', heard: 'Taurus four ounces outside' }] }), ctx, comma);
+  expect(out2.products[0]).toMatchObject({ productId: 'p-taurus', amount: 4 });
+});
