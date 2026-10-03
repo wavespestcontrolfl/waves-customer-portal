@@ -28,6 +28,9 @@ const {
   TECH_FINDING_LABELS, PALM_CROWN_PROMPT_RULE, techFindingsCopyLive, normalizeTechFindings, editText,
   hideFrozenFindingsInScores, loadFrozenTechFindingsByRecord, withholdScores,
 } = require('./service-report/tree-shrub-tech-findings');
+const {
+  validMonth: validWatchMonth, normalizeWatchSignals, watchListPromptBlock,
+} = require('../config/tree-shrub-watch-list');
 
 // Order-independent content hash of a set of photo data URLs (each hashed, then
 // hashed together) so the review signature can be bound to the EXACT photos scored —
@@ -354,13 +357,38 @@ function suggestLandscapeCondition(overallScore) {
 // GATE_TS_TECH_FINDINGS_COPY (owner 2026-10-01): photos are ground level, so the
 // read may only describe what a whole-palm or oldest-fronds shot shows. Gate off
 // = VISION_PROMPT exactly as before.
-function visionPromptText() {
-  if (!techFindingsCopyLive()) return VISION_PROMPT;
-  const rule = `${PALM_CROWN_PROMPT_RULE} In "observations", never call a palm's crown, spear leaf or newest fronds healthy, fine or normal; if only the crown is in view, say it is not clearly visible.`;
+function visionPromptText(watchMonth = null) {
+  let prompt = VISION_PROMPT;
   const marker = 'Return this exact JSON structure';
-  return VISION_PROMPT.replace(marker, `${rule}\n\n${marker}`);
+  if (techFindingsCopyLive()) {
+    const rule = `${PALM_CROWN_PROMPT_RULE} In "observations", never call a palm's crown, spear leaf or newest fronds healthy, fine or normal; if only the crown is in view, say it is not clearly visible.`;
+    prompt = prompt.replace(marker, `${rule}\n\n${marker}`);
+  }
+  // GATE_TS_WATCH_LIST: this month's watch list, and the optional watch_signals
+  // field it asks for. Gate off, or no valid visit month = the prompt as above,
+  // byte for byte. The field is not part of VISION_RESULT_SCHEMA, so it can
+  // never make an otherwise valid read fail validation.
+  const watchBlock = watchListLive() ? watchListPromptBlock(watchMonth) : '';
+  if (watchBlock) {
+    prompt = prompt.replace(marker, () => `${watchBlock}\n\n${marker}`);
+    if (prompt.endsWith(VISION_JSON_SHAPE)) {
+      prompt = `${prompt.slice(0, -2)},\n  "watch_signals": ["<watch-list key>"]\n}`;
+    }
+  }
+  return prompt;
 }
-async function callClaudeVision(base64Image, mimeType) {
+
+// GATE_TS_WATCH_LIST read at call time (strict opt-in, dark by default).
+function watchListLive() {
+  const gates = require('../config/feature-gates');
+  return typeof gates.tsWatchListLive === 'function' && gates.tsWatchListLive() === true;
+}
+// The visit month the watch list applies to: the gate on and a valid 1-12
+// month, else null (every watch-list path then stays off).
+function activeWatchMonth(month) {
+  return watchListLive() ? validWatchMonth(month) : null;
+}
+async function callClaudeVision(base64Image, mimeType, watchMonth = null) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
   try {
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -372,7 +400,7 @@ async function callClaudeVision(base64Image, mimeType) {
         role: 'user',
         content: [
           { type: 'image', source: { type: 'base64', media_type: mimeType, data: base64Image } },
-          { type: 'text', text: visionPromptText() },
+          { type: 'text', text: visionPromptText(watchMonth) },
         ],
       }],
     });
@@ -391,13 +419,13 @@ async function callClaudeVision(base64Image, mimeType) {
   }
 }
 
-async function geminiVisionAttempt(model, base64Image, mimeType) {
+async function geminiVisionAttempt(model, base64Image, mimeType, watchMonth = null) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_KEY}`;
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      contents: [{ parts: [{ inline_data: { mime_type: mimeType, data: base64Image } }, { text: visionPromptText() }] }],
+      contents: [{ parts: [{ inline_data: { mime_type: mimeType, data: base64Image } }, { text: visionPromptText(watchMonth) }] }],
       generationConfig: { temperature: 0.2, maxOutputTokens: 2048 }, // thinking spend counts against this ceiling (Gemini 3.x)
     }),
   });
@@ -417,14 +445,14 @@ async function geminiVisionAttempt(model, base64Image, mimeType) {
   return parsed;
 }
 
-async function callGeminiVision(base64Image, mimeType) {
+async function callGeminiVision(base64Image, mimeType, watchMonth = null) {
   if (!GEMINI_KEY) return null;
   const models = GEMINI_VISION_FALLBACK_MODEL && GEMINI_VISION_FALLBACK_MODEL !== GEMINI_VISION_MODEL
     ? [GEMINI_VISION_MODEL, GEMINI_VISION_FALLBACK_MODEL]
     : [GEMINI_VISION_MODEL];
   for (const model of models) {
     try {
-      const parsed = await geminiVisionAttempt(model, base64Image, mimeType);
+      const parsed = await geminiVisionAttempt(model, base64Image, mimeType, watchMonth);
       if (parsed) return parsed;
     } catch (err) {
       logger.error(`Tree-shrub assessment Gemini vision failed (${model}): ${err.message}`);
@@ -503,14 +531,24 @@ function isCompleteVisionResult(result) {
  * Analyze one photo with Gemini vision — Gemini-only per owner ruling
  * 2026-09-24 (no more Claude+Gemini averaging/fan-out). Claude runs ONLY as a
  * fallback when Gemini returns nothing (empty/error/schema-invalid).
- * @returns {Promise<{claude, gemini, composite, divergenceFlags}|null>}
+ * GATE_TS_WATCH_LIST: an optional third argument { month } (the visit's month,
+ * 1-12, America/New_York) adds this month's watch list to the prompt and a
+ * `watchSignals` array (known keys on that month's list, list order) to the
+ * result. Gate off, or no valid month = the call and the result as before.
+ * @returns {Promise<{claude, gemini, composite, divergenceFlags, watchSignals?}|null>}
  */
-async function analyzePhoto(base64Image, mimeType = 'image/jpeg') {
-  const gemini = await callGeminiVision(base64Image, mimeType);
-  const claude = gemini ? null : await callClaudeVision(base64Image, mimeType);
+async function analyzePhoto(base64Image, mimeType = 'image/jpeg', options = {}) {
+  const watchMonth = activeWatchMonth(options && options.month);
+  const gemini = await callGeminiVision(base64Image, mimeType, watchMonth);
+  const claude = gemini ? null : await callClaudeVision(base64Image, mimeType, watchMonth);
   if (!claude && !gemini) return null;
   const { composite, divergenceFlags } = averageScores(claude, gemini);
-  return { claude, gemini, composite, divergenceFlags };
+  if (!watchMonth) return { claude, gemini, composite, divergenceFlags };
+  // The raw field comes off the reads so it never rides into a stored composite.
+  const read = gemini || claude;
+  const watchSignals = normalizeWatchSignals(read.watch_signals, watchMonth);
+  delete read.watch_signals;
+  return { claude, gemini, composite, divergenceFlags, watchSignals };
 }
 
 // ── Tech-facing findings (exception-based closeout) ─────────────────────────────
@@ -876,16 +914,24 @@ async function storeTreeShrubAssessmentFromReview({
  *
  * @returns {Promise<{ scores, aiSummary, suggestedCustomerAction, findings }|null>}
  */
-async function previewTreeShrubAssessment({ photos = [], loadImage, analyze = analyzePhoto } = {}) {
+async function previewTreeShrubAssessment({
+  photos = [], loadImage, analyze = analyzePhoto, month = null,
+} = {}) {
   if (!Array.isArray(photos) || !photos.length || typeof loadImage !== 'function') return null;
-  const composites = (await Promise.all(photos.map(async (photo) => {
+  // GATE_TS_WATCH_LIST: the visit's month. Off or invalid = analyze is called
+  // with exactly the two arguments it always was.
+  const watchMonth = activeWatchMonth(month);
+  const reads = (await Promise.all(photos.map(async (photo) => {
     try {
       const img = await loadImage(photo);
       if (!img || !img.base64) return null;
-      const result = await analyze(img.base64, img.mimeType || 'image/jpeg');
-      return result && result.composite ? result.composite : null;
+      const result = watchMonth
+        ? await analyze(img.base64, img.mimeType || 'image/jpeg', { month: watchMonth })
+        : await analyze(img.base64, img.mimeType || 'image/jpeg');
+      return result && result.composite ? { composite: result.composite, watchSignals: result.watchSignals } : null;
     } catch { return null; }
   }))).filter(Boolean);
+  const composites = reads.map((read) => read.composite);
   if (!composites.length) return null;
   const mergedRaw = mergePhotoComposites(composites);
   const scores = toCategoryScores(mergedRaw);
@@ -898,6 +944,9 @@ async function previewTreeShrubAssessment({ photos = [], loadImage, analyze = an
     scoredCount: composites.length,
     photoCount: photos.length,
     ...buildTreeShrubTechFindings({ scores, observations: mergedRaw.observations }),
+    // GATE_TS_WATCH_LIST: the signals any photo showed, in list order. Carried
+    // for the sheet only; no score reads it.
+    ...(watchMonth ? { watchSignals: normalizeWatchSignals(reads.flatMap((read) => read.watchSignals || []), watchMonth) } : {}),
   };
 }
 
@@ -1044,6 +1093,7 @@ async function buildTreeShrubAssessmentReportData(service, serviceLine, knex = d
 
 module.exports = {
   VISION_PROMPT,
+  visionPromptText,
   SEVERITY_DISPLAY,
   VISION_RESULT_SCHEMA,
   SCHEMA_PROMPT_SHAPES,
