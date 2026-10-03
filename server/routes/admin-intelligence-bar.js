@@ -3055,10 +3055,10 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
                 cancel: id => PendingActions.cancelPendingAction(id, getAdminActorId(req)),
               });
               result = direct.result;
-              if (direct.actionId) {
-                directActionIds.push(direct.actionId);
-                OwnerDirect.recordDirectCommit(directCommitsByTool, toolUse.name);
-              }
+              if (direct.actionId) directActionIds.push(direct.actionId);
+              // A known failure changed nothing and does not count toward the
+              // bulk cap; an unknown outcome may have, and does (Codex r5).
+              if (direct.actionId && direct.result.executed !== false) OwnerDirect.recordDirectCommit(directCommitsByTool, toolUse.name);
               if (direct.uncertain) writeFrontierBlocked = directOutcomeUncertain = true;
               // A partial outcome closes the frontier too (Codex r5): the task
               // store treats the partial receipt as unresolved, so a later

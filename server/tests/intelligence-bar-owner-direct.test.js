@@ -410,13 +410,19 @@ describe('owner-direct limits (owner ruling 2026-10-02)', () => {
   });
 
   const seedDb = (rows, { fail = false } = {}) => () => {
-    const q = { where: () => q, whereNotNull: () => q, whereIn: () => q, whereRaw: () => q, groupBy: () => q, select: () => q,
-      count: async () => { if (fail) throw new Error('db down'); return rows; } };
+    const q = { where: () => q, whereNotNull: () => q, whereIn: () => q, whereRaw: () => q,
+      select: async () => { if (fail) throw new Error('db down'); return rows; } };
     return q;
   };
 
   test('a resumed task keeps its count; a failed seed read counts as the cap reached; no task starts at zero', async () => {
-    const seeded = await OwnerDirect.seedDirectCounts({ id: 'task-1' }, seedDb([{ tool_name: 'update_lead_status', n: '2' }]));
+    const done = { tool_name: 'update_lead_status', result: { success: true } };
+    const seeded = await OwnerDirect.seedDirectCounts({ id: 'task-1' }, seedDb([done, done]));
+    // A known failure changed nothing and is not counted; an unknown outcome is.
+    const mixed = await OwnerDirect.seedDirectCounts({ id: 'task-1' }, seedDb([done, { tool_name: 'update_lead_status', result: { success: false, error: 'stale' } },
+      { tool_name: 'update_lead_status', result: JSON.stringify({ blocked: true }) }, { tool_name: 'update_customer', result: null }]));
+    expect(mixed.get('update_lead_status')).toBe(1);
+    expect(mixed.get('update_customer')).toBe(1);
     expect(OwnerDirect.cappedTools(seeded, OwnerDirect.messageDirectPlan([lead(LEAD)])).has('update_lead_status')).toBe(true);
     const failed = await OwnerDirect.seedDirectCounts({ id: 'task-1' }, seedDb([], { fail: true }));
     expect(OwnerDirect.cappedTools(failed, OwnerDirect.messageDirectPlan([call('update_customer', { customer_id: A, updates: { phone: '+19415550100' } })])).has('update_customer')).toBe(true);

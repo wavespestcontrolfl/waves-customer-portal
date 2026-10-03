@@ -34,6 +34,7 @@
  */
 const { gateEnvValue } = require('../../config/feature-gates');
 const { ibFullAccess } = require('./ib-access');
+const { executionOutcome } = require('./outcomes');
 
 // Internal single-record edits that execute without a card. A tool is added
 // here deliberately; anything new keeps its card until someone lists it.
@@ -157,6 +158,7 @@ function executesWithoutCard(toolName, input = {}, preview = null) {
 // stop) still reaches its card (Codex r2). A preview-dependent call counts
 // in the message plan, so the cap errs toward the bulk card.
 const DIRECT_CAP = 3;
+const DID_NOT_RUN = new Set(['failed', 'blocked', 'awaiting_approval']);
 const SEED_FAILED = Symbol('seed_failed');
 
 // The preview-free half of executesWithoutCard: could this call run direct?
@@ -188,8 +190,13 @@ async function seedDirectCounts(task, dbh = null) {
     // counts too, so the cap cannot restart on resume.
     const rows = await knex('ib_pending_actions').where({ task_id: task.id, status: 'confirmed' }).whereNotNull('consumed_at')
       .whereIn('tool_name', [...OWNER_DIRECT_TOOL_NAMES])
-      .whereRaw("coalesce(params->>'_ib_owner_direct', 'unmarked') <> 'false'").groupBy('tool_name').select('tool_name').count('* as n');
-    for (const row of rows) counts.set(row.tool_name, Number(row.n) || 0);
+      .whereRaw("coalesce(params->>'_ib_owner_direct', 'unmarked') <> 'false'").select('tool_name', 'result');
+    // A known failure changed nothing and does not count (Codex r5); an
+    // unknown outcome may have, and does.
+    for (const row of rows) {
+      const result = typeof row.result === 'string' ? JSON.parse(row.result) : row.result;
+      if (!DID_NOT_RUN.has(executionOutcome(result))) counts.set(row.tool_name, (counts.get(row.tool_name) || 0) + 1);
+    }
   } catch {
     counts.set(SEED_FAILED, true);
   }
