@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { getAdminAuthToken } from '../../lib/adminAuth';
 
@@ -102,12 +102,18 @@ function summaryOf(changes, total = changes.length) {
   const counts = { EARLIER: 0, LATER: 0 };
   for (const c of changes) { const d = direction(c); if (d in counts) counts[d] += 1; }
   const parts = [];
-  if (n > 1 && services.size === 1) parts.push(`All ${[...services][0]}`);
-  if (days.length) parts.push(days[0] === days[days.length - 1] ? shortDay(days[0]) : `${shortDay(days[0])} – ${shortDay(days[days.length - 1])}`);
-  const moved = [counts.EARLIER && `${counts.EARLIER} earlier`, counts.LATER && `${counts.LATER} later`].filter(Boolean).join(', ');
-  if (moved) parts.push(moved);
+  // Service, day range and earlier/later describe the whole set only when it
+  // is all on hand; a capped sample says so instead (Codex #5786 P2).
+  if (complete) {
+    if (n > 1 && services.size === 1) parts.push(`All ${[...services][0]}`);
+    if (days.length) parts.push(days[0] === days[days.length - 1] ? shortDay(days[0]) : `${shortDay(days[0])} – ${shortDay(days[days.length - 1])}`);
+    const moved = [counts.EARLIER && `${counts.EARLIER} earlier`, counts.LATER && `${counts.LATER} later`].filter(Boolean).join(', ');
+    if (moved) parts.push(moved);
+  } else if (changes.length) {
+    parts.push(`Newest ${changes.length} shown`);
+  }
   const allMoves = complete && changes.every((c) => c.type === 'visit_rescheduled');
-  return { title, detail: parts.join(' · '), counts, total: n, reviewLabel: allMoves ? 'Review moves' : 'Review changes' };
+  return { title, detail: parts.join(' · '), counts, complete, total: n, reviewLabel: allMoves ? 'Review moves' : 'Review changes' };
 }
 
 const FILTERS = [['ALL', 'All'], ['EARLIER', 'Earlier'], ['LATER', 'Later']];
@@ -125,7 +131,7 @@ function ReviewList({ changes, summary, onClearAll, onBack, busy, canOpenDispatc
       </div>
       <div className="tf-card-main">
         {summary.detail && <p className="tf-muted">{summary.detail}</p>}
-        {(count.EARLIER > 0 || count.LATER > 0) && (
+        {summary.complete && (count.EARLIER > 0 || count.LATER > 0) && (
           <div className="tf-chips" role="group" aria-label="Filter moves">
             {FILTERS.filter(([key]) => key === 'ALL' || count[key] > 0).map(([key, label]) => (
               <button key={key} type="button" className="tf-chip" aria-pressed={filter === key} onClick={() => setFilter(key)}>
@@ -177,13 +183,23 @@ export default function TechScheduleChanges({ canOpenDispatch = false, onReady =
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
 
+  // Only the newest read of a still-mounted list may report: an older or
+  // unmounted request finishing late never marks the feed ready (Codex #5786).
+  const mounted = useRef(true);
+  const latest = useRef(0);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const load = useCallback(async () => {
+    const mine = latest.current + 1;
+    latest.current = mine;
+    const current = () => mounted.current && latest.current === mine;
     try {
       const data = await api('/schedule-changes');
+      if (!current()) return;
       setChanges(Array.isArray(data.changes) ? data.changes : []);
       setFeed({ laterTotal: Number(data.later_total) || 0, asOf: data.as_of || null });
       onReady?.(true);
     } catch {
+      if (!current()) return;
       // A failed poll keeps what is on screen and hands schedule changes back
       // to the floating cards until a read succeeds again (Codex #5786 P2).
       onReady?.(false);

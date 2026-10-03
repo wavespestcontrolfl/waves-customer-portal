@@ -91,10 +91,16 @@ describe('TechScheduleChanges', () => {
     stubApi([FAR_A, FAR_B], 412);
     await renderChanges();
     // A capped sample never names the whole backlog after auto-dispatch (Codex #5786 P2).
-    expect(await screen.findByTestId('schedule-changes-summary')).toHaveTextContent('412 schedule changes');
+    const summary = await screen.findByTestId('schedule-changes-summary');
+    expect(summary).toHaveTextContent('412 schedule changes');
+    // The sample's service / day range / earlier-later never speak for the backlog.
+    expect(summary).toHaveTextContent('Newest 2 shown');
+    expect(summary).not.toHaveTextContent('All ');
+    expect(summary).not.toHaveTextContent('earlier');
     fireEvent.click(screen.getByRole('button', { name: 'Review changes' }));
     expect(screen.getByText('410 more not shown. Clear all covers them too.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Got it, clear all 412' })).toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: 'Filter moves' })).not.toBeInTheDocument();
   });
 
   it('Clear all dismisses only the folded changes in one call; the today/tomorrow card stays', async () => {
@@ -212,6 +218,20 @@ describe('TechScheduleChanges', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('a request still in flight when the list unmounts never marks the feed ready later', async () => {
+    let resolveSlow;
+    vi.stubGlobal('fetch', vi.fn(() => new Promise((r) => { resolveSlow = r; })));
+    const onReady = vi.fn();
+    await renderChanges({ onReady });
+    cleanup();
+    expect(onReady).toHaveBeenLastCalledWith(false);
+    await act(async () => {
+      resolveSlow({ ok: true, json: async () => ({ changes: [], later_total: 0, as_of: AS_OF }) });
+      await Promise.resolve(); await Promise.resolve();
+    });
+    expect(onReady).not.toHaveBeenCalledWith(true);
   });
 
   it('renders nothing when there are no schedule changes', async () => {

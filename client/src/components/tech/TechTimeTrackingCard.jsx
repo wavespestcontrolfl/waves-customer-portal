@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { getAdminAuthToken } from '../../lib/adminAuth';
+import { TIME_TRACKING_CHANGED } from './timeTrackingEvents';
 
 const API = import.meta.env.VITE_API_URL || '';
 const D = {
@@ -61,10 +62,10 @@ function actionStyle(color, disabled, field = false) {
       border: '0.5px solid var(--border-strong, #d6d3d1)',
       background: 'transparent',
       color: disabled ? 'var(--text-quaternary, #a8a29e)' : FIELD.text,
-      fontSize: 11,
+      // The live admin action style (ui-workspace .ui-action): 14px, sentence
+      // case — the 14px readability floor on a tech's phone (Codex #5786).
+      fontSize: 14,
       fontWeight: 500,
-      letterSpacing: '0.06em',
-      textTransform: 'uppercase',
       cursor: disabled ? 'not-allowed' : 'pointer',
     };
   }
@@ -113,6 +114,12 @@ export default function TechTimeTrackingCard({ nextStop, variant = 'legacy' }) {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+  // A timer started or undone elsewhere on the page (the geofence prompt's
+  // Start Timer / Undo): reload so the controls match (Codex #5786 P2).
+  useEffect(() => {
+    window.addEventListener(TIME_TRACKING_CHANGED, load);
+    return () => window.removeEventListener(TIME_TRACKING_CHANGED, load);
+  }, [load]);
 
   const act = async (key, path, { location = false } = {}) => {
     if (busy) return;

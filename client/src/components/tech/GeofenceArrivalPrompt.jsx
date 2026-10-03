@@ -42,6 +42,7 @@
  *   timer events also drive mileage. Confirm a stop here doesn't
  *   double-write the mileage record.
  */
+import { TIME_TRACKING_CHANGED } from './timeTrackingEvents';
 import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
 import { getAdminAuthToken } from '../../lib/adminAuth';
 import { formatETDateOnly } from '../../lib/timezone';
@@ -274,6 +275,8 @@ export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleCha
     try {
       await apiPost(`/api/tech/notifications/${n.id}/confirm-start`, body);
       removeCard(n.id, { silent: true });
+      // The Today page's time clock reloads (TechTimeTrackingCard).
+      window.dispatchEvent(new Event(TIME_TRACKING_CHANGED));
     } catch (err) {
       alert('Could not start timer: ' + String(err).slice(0, 140));
     }
@@ -283,6 +286,7 @@ export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleCha
     try {
       await apiPost(`/api/tech/notifications/${n.id}/undo-stop`);
       removeCard(n.id, { silent: true });
+      window.dispatchEvent(new Event(TIME_TRACKING_CHANGED));
     } catch (err) {
       alert('Undo failed: ' + String(err).slice(0, 140));
     }

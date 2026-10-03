@@ -1,7 +1,8 @@
 /* The field workspace (/admin/today) in the Waves Admin look (owner-approved
    mockup 2026-10-03; docs/design/waves-portal-ui-redesign-spec.md):
    monochrome surfaces from the admin shell's theme tokens, weights 400/500,
-   UPPERCASE 11px button and section labels, hairline borders, 4px/6px radii,
+   14px sentence-case actions like the live admin .ui-action (the 14px
+   readability floor), UPPERCASE 11px section labels, hairline borders, 4px/6px radii,
    one dark primary button per view, red only for a genuine error. */
 .tech-field {
   --tf-ink: var(--text-primary, #1c1917);
@@ -55,7 +56,7 @@
 .tf-error { background: #fcebeb; color: #a32d2d; }
 .tf-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .tf-actions > * { flex: 1 1 auto; }
-.tf-button { display: inline-flex; justify-content: center; align-items: center; gap: 6px; min-height: 44px; padding: 6px 12px; border: 0.5px solid var(--tf-line-strong); border-radius: 4px; background: transparent; color: var(--tf-ink); font-family: inherit; font-size: 11px; font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; cursor: pointer; text-decoration: none; }
+.tf-button { display: inline-flex; justify-content: center; align-items: center; gap: 6px; min-height: 44px; padding: 6px 12px; border: 0.5px solid var(--tf-line-strong); border-radius: 4px; background: transparent; color: var(--tf-ink); font-family: inherit; font-size: 14px; font-weight: 500; cursor: pointer; text-decoration: none; }
 .tf-button svg { width: 16px; height: 16px; flex-shrink: 0; }
 .tf-button:hover:not(:disabled) { background: var(--tf-subtle); }
 .tf-button:disabled, .tf-tool:disabled, .tf-stop:disabled { opacity: .5; cursor: not-allowed; }
@@ -96,14 +97,14 @@
 .tf-review-top { justify-content: space-between; }
 .tf-review-top .tf-button { padding: 4px 8px; }
 .tf-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 4px; }
-.tf-chip { min-height: 44px; padding: 4px 10px; border: 0.5px solid var(--tf-line-strong); border-radius: 4px; background: transparent; color: var(--tf-muted); font: inherit; font-size: 11px; font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; cursor: pointer; }
+.tf-chip { min-height: 44px; padding: 4px 12px; border: 0.5px solid var(--tf-line-strong); border-radius: 4px; background: transparent; color: var(--tf-muted); font: inherit; font-size: 14px; font-weight: 500; cursor: pointer; }
 .tf-chip[aria-pressed="true"] { background: var(--tf-ink); border-color: var(--tf-ink); color: #ffffff; }
 .tf-change-list { list-style: none; margin: 8px 0 0; padding: 0; border: 0.5px solid var(--tf-line); border-radius: 6px; max-height: 60vh; overflow-y: auto; }
 .tf-change-row { padding: 10px 12px; border-bottom: 0.5px solid var(--tf-line); display: grid; gap: 2px; }
 .tf-change-row:last-child { border-bottom: 0; }
 .tf-change-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
 .tf-change-head strong, .tf-change-when strong { font-weight: 500; }
-.tf-dir { font-size: 11px; font-weight: 500; letter-spacing: 0.06em; padding: 1px 6px; border-radius: 3px; background: var(--tf-subtle); color: var(--tf-ink); white-space: nowrap; }
+.tf-dir { font-size: 14px; font-weight: 500; padding: 1px 6px; border-radius: 3px; background: var(--tf-subtle); color: var(--tf-ink); white-space: nowrap; }
 
 /* Existing field forms retain their own palette until their integration slice. */
 .tf-existing { background: #0f1923; color: #e2e8f0; border-radius: 6px; padding: 16px; margin-top: 16px; }

@@ -176,4 +176,21 @@ describe('GeofenceArrivalPrompt — visit cards', () => {
     expect(screen.queryByTestId('visit-notice')).not.toBeInTheDocument();
     expect(screen.queryByText(/more notice/)).not.toBeInTheDocument();
   });
+
+  it('a confirmed Start Timer tells the time clock to reload', async () => {
+    vi.stubGlobal('navigator', { ...navigator, geolocation: undefined });
+    const prompt = { ...notification('geofence_arrival_reminder', { customer_name: 'Okafor' }, 'n-prompt'), created_at: new Date().toISOString() };
+    stubFeed([prompt]);
+    const heard = vi.fn();
+    window.addEventListener('waves:time-tracking-changed', heard);
+    try {
+      render(<GeofenceArrivalPrompt />);
+      await act(async () => { await Promise.resolve(); });
+      fireEvent.click(await screen.findByRole('button', { name: 'Start Timer' }));
+      await act(async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); });
+      expect(heard).toHaveBeenCalledTimes(1);
+    } finally {
+      window.removeEventListener('waves:time-tracking-changed', heard);
+    }
+  });
 });

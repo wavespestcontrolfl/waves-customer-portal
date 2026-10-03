@@ -27,13 +27,33 @@ const transactions = [];
 db.transaction = (fn) => { transactions.push(fn); return fn(db); };
 db.raw = jest.fn((sql) => sql);
 let cardSeq = 0;
+// Every written card, as stored, so the summary's claim (an UPDATE … RETURNING
+// over held cards) runs against what deliver() wrote.
+const cardRows = [];
 function cardsTable() {
+  let runFilter = null;
+  const claim = {
+    whereIn: jest.fn(() => claim),
+    whereNull: jest.fn(() => claim),
+    whereRaw: jest.fn((sql, bindings) => { if (bindings) runFilter = String(bindings[0]); return claim; }),
+    modify: jest.fn((fn) => { fn(claim); return claim; }),
+    update: jest.fn(() => ({
+      returning: jest.fn(async () => {
+        const held = cardRows.filter((r) => r.payload.push_held_run && (!runFilter || r.payload.push_held_run === runFilter));
+        for (const r of held) delete r.payload.push_held_run;
+        return held.map((r) => ({ technician_id: r.technician_id }));
+      }),
+    })),
+  };
   return {
+    ...claim,
     insert: jest.fn((row) => ({
       returning: jest.fn(async () => {
-        const ok = await mockWriteCard(row.technician_id, { ...row, payload: JSON.parse(row.payload) });
+        const stored = { ...row, payload: JSON.parse(row.payload) };
+        const ok = await mockWriteCard(row.technician_id, stored);
         if (ok === false) throw new Error('insert failed');
         cardSeq += 1;
+        cardRows.push(stored);
         return [{ id: `card-${cardSeq}` }];
       }),
     })),
@@ -402,7 +422,8 @@ describe('auto-dispatch: one push per run (GATE_AUTO_DISPATCH_PUSH_SUMMARY, owne
     jest.clearAllMocks();
     process.env.GATE_TECH_VISIT_NOTIFICATIONS = 'true';
     process.env.GATE_AUTO_DISPATCH_PUSH_SUMMARY = 'true';
-    notices._test.heldAutoDispatchCards.clear();
+    cardRows.length = 0;
+    notices._test.setCurrentAutoDispatchRun(null);
     prime();
   });
   afterAll(() => {
@@ -429,23 +450,28 @@ describe('auto-dispatch: one push per run (GATE_AUTO_DISPATCH_PUSH_SUMMARY, owne
     ]);
   });
 
-  test('gate on: an auto-dispatch move still writes its card but holds its own push; any other mover still pushes', async () => {
+  test('gate on, inside a run: an auto-dispatch move writes its card marked with the run and holds its push; any other mover still pushes', async () => {
+    notices._test.setCurrentAutoDispatchRun('run-1');
     await move('auto_dispatch');
     expect(mockWriteCard).toHaveBeenCalledTimes(1);
-    expect(mockWriteCard.mock.calls[0][1].payload.actor).toBe('by auto-dispatch');
+    expect(mockWriteCard.mock.calls[0][1].payload).toMatchObject({ actor: 'by auto-dispatch', push_held_run: 'run-1' });
     expect(mockSendToAdminUser).not.toHaveBeenCalled();
 
     await move('customer_self_serve');
+    expect(mockWriteCard.mock.calls[1][1].payload).not.toHaveProperty('push_held_run');
     expect(mockSendToAdminUser).toHaveBeenCalledTimes(1);
   });
 
-  test('gate off: an auto-dispatch move pushes per visit, as before', async () => {
+  test('gate off: an auto-dispatch move pushes per visit, as before, and is never marked held', async () => {
+    notices._test.setCurrentAutoDispatchRun('run-1');
     delete process.env.GATE_AUTO_DISPATCH_PUSH_SUMMARY;
     await move('auto_dispatch');
+    expect(mockWriteCard.mock.calls[0][1].payload).not.toHaveProperty('push_held_run');
     expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: 'A visit on your route moved' }));
   });
 
   test('the run sends ONE push per tech for exactly the cards it held, opening /admin/today; a second run starts from zero', async () => {
+    notices._test.setCurrentAutoDispatchRun('run-9');
     const visitFor = (id, tech) => ({ ...VISIT, id, technician_id: tech });
     for (const [id, tech] of [['v-1', 'tech-1'], ['v-2', 'tech-1'], ['v-3', 'tech-2']]) {
       prime({ techs: { 'tech-1': TECH, 'tech-2': { ...TECH, id: 'tech-2' }, [ADAM_ID]: ADAM }, visit: visitFor(id, tech) });
@@ -465,43 +491,45 @@ describe('auto-dispatch: one push per run (GATE_AUTO_DISPATCH_PUSH_SUMMARY, owne
     expect(mockSendToAdminUser).not.toHaveBeenCalled();
   });
 
-  test('a summary gate turned off mid-run still sends the summary for cards it held (their own push never went out); a later run never inherits them', async () => {
+  test('a summary gate turned off mid-run still sends the summary for cards it held (their own push never went out)', async () => {
+    notices._test.setCurrentAutoDispatchRun('r1');
     await move('auto_dispatch');
     delete process.env.GATE_AUTO_DISPATCH_PUSH_SUMMARY;
     expect(await notices.pushAutoDispatchSummary({ runId: 'r1' })).toEqual({ pushed: 1 });
     expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: 'Auto-dispatch moved 1 visit' }));
-    mockSendToAdminUser.mockClear();
-    process.env.GATE_AUTO_DISPATCH_PUSH_SUMMARY = 'true';
-    expect(await notices.pushAutoDispatchSummary({ runId: 'r2' })).toEqual({ pushed: 0 });
-    expect(mockSendToAdminUser).not.toHaveBeenCalled();
   });
 
   test('the notifications kill switch off drops the held summary', async () => {
+    notices._test.setCurrentAutoDispatchRun('r');
     await move('auto_dispatch');
     delete process.env.GATE_TECH_VISIT_NOTIFICATIONS;
     expect(await notices.pushAutoDispatchSummary({ runId: 'r' })).toEqual({ pushed: 0 });
     expect(mockSendToAdminUser).not.toHaveBeenCalled();
   });
 
-  test('discardHeldAutoDispatchCards (each run\'s start) drops a crashed run\'s held cards', async () => {
+  test('held cards survive a crash: the next run\'s start pushes them on their own, and its summary counts only its own (Codex #5786 P2)', async () => {
+    notices._test.setCurrentAutoDispatchRun('crashed-run');
     await move('auto_dispatch');
-    notices.discardHeldAutoDispatchCards();
-    expect(await notices.pushAutoDispatchSummary({ runId: 'next' })).toEqual({ pushed: 0 });
+    // The process dies here — no summary. The marks are on the rows.
+    expect(await notices.beginAutoDispatchRun('next-run')).toEqual({ pushed: 1 });
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: 'Auto-dispatch moved 1 visit', tag: 'auto-dispatch-recovered-next-run' }));
+    mockSendToAdminUser.mockClear();
+    expect(await notices.pushAutoDispatchSummary({ runId: 'next-run' })).toEqual({ pushed: 0 });
+    expect(mockSendToAdminUser).not.toHaveBeenCalled();
   });
 
   test('a dropped (stale) card is never counted', async () => {
+    notices._test.setCurrentAutoDispatchRun('r');
     prime({ visit: { ...VISIT, technician_id: ADAM_ID } });
     await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'rescheduled', technicianId: 'tech-1', actorId: 'auto_dispatch' });
     expect(mockWriteCard).not.toHaveBeenCalled();
     expect(await notices.pushAutoDispatchSummary({ runId: 'r' })).toEqual({ pushed: 0 });
   });
 
-  test('summary gate off for the whole run → no summary push (each move already pushed on its own)', async () => {
-    delete process.env.GATE_AUTO_DISPATCH_PUSH_SUMMARY;
+  test('outside a run nothing is held (a late card after the summary pushes on its own)', async () => {
+    notices._test.setCurrentAutoDispatchRun(null);
     await move('auto_dispatch');
-    mockSendToAdminUser.mockClear();
-    expect(await notices.pushAutoDispatchSummary({ runId: 'r' })).toEqual({ pushed: 0 });
-    expect(mockSendToAdminUser).not.toHaveBeenCalled();
+    expect(mockSendToAdminUser).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -3,6 +3,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import TechTimeTrackingCard from './TechTimeTrackingCard';
+import { TIME_TRACKING_CHANGED } from './timeTrackingEvents';
 
 function response(status, body) {
   return {
@@ -52,5 +53,16 @@ describe('TechTimeTrackingCard', () => {
       <TechTimeTrackingCard nextStop={{ id: 'visit-1', status: 'on_site', customerName: 'River Home' }} />,
     );
     expect(screen.getByRole('button', { name: 'Start job · River Home' })).toBeEnabled();
+  });
+
+  it('reloads its status when a timer changes elsewhere on the page (the geofence prompt\'s Start Timer)', async () => {
+    let clockedIn = false;
+    const fetchMock = vi.fn(async () => response(200, { clockedIn, onBreak: false, currentJob: null, todaySummary: { shiftMinutes: 0, jobCount: 0 } }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(<TechTimeTrackingCard variant="field" nextStop={{ id: 'visit-1', status: 'on_site' }} />);
+    expect(await screen.findByRole('button', { name: 'Clock in' })).toBeInTheDocument();
+    clockedIn = true;
+    window.dispatchEvent(new Event(TIME_TRACKING_CHANGED));
+    expect(await screen.findByRole('button', { name: 'Clock out' })).toBeInTheDocument();
   });
 });

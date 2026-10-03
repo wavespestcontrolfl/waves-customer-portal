@@ -25,7 +25,7 @@ jest.mock('../services/auto-dispatch/audit', () => ({
 
 jest.mock('../services/tech-visit-notifications', () => ({
   pushAutoDispatchSummary: jest.fn(async () => ({ pushed: 1 })),
-  discardHeldAutoDispatchCards: jest.fn(),
+  beginAutoDispatchRun: jest.fn(async () => ({ pushed: 0 })),
 }));
 
 const db = require('../models/db');
@@ -110,8 +110,9 @@ test('a run that moved visits sends the one summary push after the run is record
     expect(techNotices.pushAutoDispatchSummary).toHaveBeenCalledWith({ runId: 'run1' });
     expect(audit.completeRun.mock.invocationCallOrder[0])
       .toBeLessThan(techNotices.pushAutoDispatchSummary.mock.invocationCallOrder[0]);
-    // Each run starts from an empty batch (a crashed run's held cards are not counted).
-    expect(techNotices.discardHeldAutoDispatchCards.mock.invocationCallOrder[0])
+    // Each run starts by pushing what a crashed run held, then holds its own under its id.
+    expect(techNotices.beginAutoDispatchRun).toHaveBeenCalledWith('run1');
+    expect(techNotices.beginAutoDispatchRun.mock.invocationCallOrder[0])
       .toBeLessThan(apply.applyAutoDispatchMove.mock.invocationCallOrder[0]);
 
     techNotices.pushAutoDispatchSummary.mockClear();
