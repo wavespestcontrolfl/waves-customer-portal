@@ -7,7 +7,7 @@ const SEGMENT_SEPARATOR = '\n\n[Reconnected]\n';
 const MAX_SEGMENT_TEXT_CHARS = require('./relay-transcript').MAX_TRANSCRIPT_CHARS;
 
 /** One socket's close record — played text only (buildTranscriptText reads played text). */
-function buildSegment({ generation, sessionKey, reason, text, turns, latency, versions, model = null, leadCaptured, leadId = null, reserviceFiled, noLeadCreated, promises = [], holdOpen, estimateFields = null, startedAt = null, lookupsUsed = 0, lookupRefs = [], lookupResults = [], slotRefs = [], modelFailures = 0, toolFailures = 0, turnCounts = null, turnStats = null }) {
+function buildSegment({ generation, sessionKey, reason, text, turns, latency, versions, model = null, leadCaptured, leadId = null, reserviceFiled, noLeadCreated, promises = [], holdOpen, estimateFields = null, startedAt = null, lookupsUsed = 0, lookupRefs = [], lookupResults = [], slotRefs = [], modelFailures = 0, toolFailures = 0, turnCounts = null, turnStats = null, contactFollowUp = null }) {
   return {
     ...Object.fromEntries(Object.entries({ model_failures: modelFailures, tool_failures: toolFailures,
       lookups_used: lookupsUsed, generation, turns }).map(([key, value]) => [key, Number(value) || 0])),
@@ -25,6 +25,10 @@ function buildSegment({ generation, sessionKey, reason, text, turns, latency, ve
     // given — both restored on the resumed leg (codex r2 P1).
     hold_open: holdOpen === true,
     estimate_fields: nonEmptyFields(estimateFields),
+    // What a recognised contact said about how to reach them on this leg
+    // (capture_lead's office-bell path) — restored on a resumed leg so a
+    // later capture cannot drop an earlier callback number or restriction.
+    contact_followup: contactFollowUpFields(contactFollowUp),
     // This leg's capture state: a filed re-service deliberately creates NO
     // lead, and the resumed leg must not route it through lead capture again.
     reservice_filed: reserviceFiled === true,
@@ -52,6 +56,26 @@ function nonEmptyFields(fields) {
   if (!fields || typeof fields !== 'object') return null;
   const kept = Object.fromEntries(Object.entries(fields).filter(([, v]) => v != null && String(v).trim() !== '').map(([k, v]) => [k, String(v).trim()]));
   return Object.keys(kept).length ? kept : null;
+}
+
+const CONTACT_FOLLOWUP_TEXT = ['callbackPhone', 'method', 'preference', 'timing', 'request', 'later'];
+const CONTACT_FOLLOWUP_MAX_CHARS = 600;
+const CONTACT_FOLLOWUP_FLAGS = ['restricted', 'textsStopped', 'estimateAsked'];
+
+/** The contact follow-up bag in its stored shape: known keys only, or null when empty. */
+function contactFollowUpFields(fields) {
+  if (!fields || typeof fields !== 'object') return null;
+  const kept = {};
+  for (const k of CONTACT_FOLLOWUP_TEXT) if (fields[k] != null && String(fields[k]).trim() !== '') kept[k] = String(fields[k]).trim().slice(0, CONTACT_FOLLOWUP_MAX_CHARS);
+  for (const k of CONTACT_FOLLOWUP_FLAGS) if (fields[k] === true) kept[k] = true;
+  return Object.keys(kept).length ? kept : null;
+}
+
+/** Earlier-to-later merge: text keeps the latest value given; a flag, once set, stays. */
+function mergeContactFollowUp(...bags) {
+  const out = {};
+  for (const bag of bags.map(contactFollowUpFields).filter(Boolean)) Object.assign(out, bag);
+  return contactFollowUpFields(out);
 }
 
 /** Match the claim's generation/nonce total order (nonce tokens are ASCII). */
@@ -373,5 +397,5 @@ function latestPromises(segments) {
 
 module.exports = {
   summarizeSegments, hasCompleteSegments, compareSegments, appendSegment, registerSegmentSession, sealSegmentsForExtraction, scrubStoredSegments, closeFenceSql, latestPromises, SEGMENT_SEPARATOR, buildSegment, nonEmptyFields, appendSegmentSql,
-  appendSegmentPatch, composeSegmentsSql, segmentsText, callerTurnsFromText,
+  appendSegmentPatch, composeSegmentsSql, segmentsText, callerTurnsFromText, contactFollowUpFields, mergeContactFollowUp,
 };

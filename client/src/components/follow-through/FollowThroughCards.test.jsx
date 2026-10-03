@@ -19,14 +19,18 @@ afterEach(cleanup);
 describe('callback cards', () => {
   // Owner 2026-10-02: a technician gets no customer calls, so the tech cards
   // pass openCall={false}; the promise itself stays visible.
-  it('offers "Open call" by default and omits it when openCall is false', async () => {
+  it('offers "Open call" and the Call button by default and omits both when openCall is false', async () => {
     const first = render(<FollowThroughCards ui={ui} />);
     await screen.findByText(row.description);
     expect(screen.getByRole('link', { name: 'Open call' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Call' })).toBeInTheDocument();
     first.unmount();
     render(<FollowThroughCards ui={ui} openCall={false} />);
     await screen.findByText(row.description);
     expect(screen.queryByRole('link', { name: 'Open call' })).not.toBeInTheDocument();
+    // The call bridge is an owner-only route: a technician never sees the button.
+    expect(screen.queryByRole('button', { name: 'Call' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Done' })).toBeInTheDocument();
   });
   it('reads open callback cards Waves owes from the commitments ledger', async () => {
     render(<FollowThroughCards ui={ui} />);

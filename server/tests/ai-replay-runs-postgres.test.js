@@ -345,9 +345,18 @@ test('export refuses a directory inside the repository, however it is spelled', 
     await record();
     // Another producer's unversioned draft is not a house-voice opportunity.
     await database('message_drafts').insert({ id: randomUUID(), inbound_message: 'x', draft_response: 'y', prompt_version: null, created_at: new Date('2026-10-01T15:00:00Z') });
+    // A calls incident shows in the week, under its own area, and never in SMS recurrence.
+    await database('ai_incidents').insert({
+      area: 'calls', evidence_type: 'call_audit_finding', evidence_id: randomUUID(), incident_key: randomUUID(), disposition: 'confirmed_mistake',
+      surface: 'call_extraction', failure_mode: 'appointment_agreed_missed', prompt_version: 'v2-x', produced_at: new Date('2026-10-01T15:00:00Z'),
+      adjudicated_at: new Date('2026-10-03T08:10:00Z'),
+    });
     const r = await report.buildReport({ dbi: database, now: new Date('2026-10-05T12:00:00Z'), days: 30, liveVersion: V12 });
-    expect(r.week).toEqual([{ disposition: 'confirmed_mistake', cell: `${CELL.surface}/${CELL.failure_mode}`, n: 12 }]);
-    expect(r.proposals[0]).toMatchObject({ status: 'pending', incidents: 12, dev: 10, holdout: 2, devRun: expect.objectContaining({ status: 'passed' }) });
+    expect(r.week).toEqual([
+      { area: 'calls', disposition: 'confirmed_mistake', cell: 'call_extraction/appointment_agreed_missed', n: 1 },
+      { area: 'sms', disposition: 'confirmed_mistake', cell: `${CELL.surface}/${CELL.failure_mode}`, n: 12 },
+    ]);
+    expect(r.proposals[0]).toMatchObject({ area: 'sms', status: 'pending', incidents: 12, dev: 10, holdout: 2, devRun: expect.objectContaining({ status: 'passed' }) });
     // 12 drafts is under the 20-draft floor: the rate is printed but labelled inconclusive.
     expect(r.versions).toEqual([expect.objectContaining({ version: V12, drafts: 12, judgedShare: '100%', verdict: expect.stringMatching(/^inconclusive/) })]);
     expect(r.versions[0].cells).toEqual([{ cell: `${CELL.surface}/${CELL.failure_mode}`, confirmed: 12, per100: 100 }]);

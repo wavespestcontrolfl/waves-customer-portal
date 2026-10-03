@@ -57,7 +57,7 @@ beforeEach(() => {
         ok: true,
         json: async () => ({
           status: 'OK',
-          results: [{ formatted_address: ADDRESS, geometry: { location: { lat: 27.5, lng: -82.45 }, location_type: 'ROOFTOP' } }],
+          results: [{ formatted_address: ADDRESS, types: ['street_address'], geometry: { location: { lat: 27.5, lng: -82.45 }, location_type: 'ROOFTOP' } }],
         }),
       };
     }

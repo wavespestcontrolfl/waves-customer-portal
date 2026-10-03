@@ -12,9 +12,12 @@ const {
   pestPressureConfigAllowsTechnicianRating,
   completionOwnershipError,
   techTipsGateOn,
+  backfillCompletionPlan,
 } = require('../services/complete-scheduled-service');
 const express = require('express');
 const crypto = require('crypto');
+// The occurrence fields a manual no-show's reschedule_log freezes (missed-appointment onSkip).
+const NO_SHOW_OCCURRENCE_FIELDS = ['scheduled_date', 'window_start', 'window_end', 'service_type', 'service_id', 'property_id'];
 const router = express.Router();
 const db = require('../models/db');
 const { applyAssignable } = require('../services/technician-eligibility');
@@ -836,6 +839,57 @@ router.post('/:serviceId/lane-facts', async (req, res, next) => {
     const facts = await readLaneFacts({ note, laneKey });
     res.json({ available: true, ...facts });
   } catch (err) { next(err); }
+});
+
+// POST /api/admin/dispatch/:serviceId/standard-wording { values, activityScore, backfill, products }
+// — the standard sentences a typed visit's customer report keeps when its
+// record says nothing was found (GATE_STANDARD_WORDING_PREVIEW; owner mockup
+// approval 2026-10-03), for the office form to show where it greys out
+// Generate AI report. Built as /complete builds the report, from the visit's
+// own form (its completion profile, never the client's) and the form's own
+// fields only (visit-typed-facts.js currentValuesFor), dated as /complete
+// dates it (today, or the scheduled day for a backdated closeout); answers
+// { available: true, headline, body } only when the report keeps its standard
+// wording, else { available: false }. A technician reads only their own
+// current visit; admins office-wide (the completion routes' rule). Read-only.
+router.post('/:serviceId/standard-wording', async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').standardWordingPreviewLive()) return res.json({ available: false });
+    const raw = req.body?.values;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return res.status(400).json({ error: 'values must be an object' });
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.serviceId })
+      .first('id', 'technician_id', 'customer_id', 'status', 'scheduled_date', 'service_type', 'service_id', 'service_key_snapshot', 'is_recurring');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    const ownershipError = completionOwnershipError({
+      role: req.techRole,
+      actorTechnicianId: req.technicianId,
+      assignedTechnicianId: svc.technician_id,
+    });
+    if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
+    if (!technicianVisitRowInScope(req, svc)) {
+      return res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
+    }
+    const profile = await resolveCompletionProfileForScheduledService(svc);
+    if (!profile?.findingsType) return res.json({ available: false });
+    const { currentValuesFor } = require('../services/visit-typed-facts');
+    const { standardWordingPreview } = require('../services/service-report/standard-wording-preview');
+    const score = req.body?.activityScore;
+    const backfillPlan = backfillCompletionPlan({
+      backfill: req.body?.backfill === true,
+      scheduledDate: svc.scheduled_date,
+      role: req.techRole,
+    });
+    const wording = await standardWordingPreview(db, {
+      svc,
+      serviceDate: backfillPlan.active ? backfillPlan.serviceDate : etDateString(),
+      profile,
+      values: currentValuesFor(profile.findingsType, raw),
+      techScore: Number.isInteger(score) ? score : null,
+      products: req.body?.products,
+    });
+    return res.json(wording ? { available: true, ...wording } : { available: false });
+  } catch (err) { return next(err); }
 });
 
 // POST /api/admin/dispatch/:serviceId/typed-facts — typed voice fill (Fast
@@ -2809,6 +2863,10 @@ router.put('/:serviceId/status', async (req, res, next) => {
     // The transition's committed payload — the voice-confirm card below
     // must name the holder as WRITTEN, not as read.
     let transition = null;
+    // A manual no-show's reschedule_log freezes the occurrence as it stood when the
+    // status flipped — read under THIS transaction's row lock, never the
+    // pre-transaction `svc` snapshot an edit could have raced (Codex #5669 r1).
+    let noShowOccurrence = null;
     try {
       await db.transaction(async (trx) => {
         // ⭐ OWNERSHIP IS PROVEN UNDER THE ROW LOCK, NOT THE SNAPSHOT. The
@@ -2834,7 +2892,7 @@ router.put('/:serviceId/status', async (req, res, next) => {
         // fail it too, not just a technician_id compare) before
         // transitionJobStatus ever runs — the SAME check the field-confirm
         // path below reuses instead of re-verifying itself.
-        const lockedRow = await lockOwnedLiveVisit(trx, req, svc.id, ['technician_id', 'customer_confirmed', 'status'], {
+        const lockedRow = await lockOwnedLiveVisit(trx, req, svc.id, ['technician_id', 'customer_confirmed', 'status', ...NO_SHOW_OCCURRENCE_FIELDS], {
           // A same-status resend of an already-TERMINAL row (cancelled/
           // skipped — job-status.js's own ONE_WAY_FROM_STATUSES; 'completed'
           // can't reach here, it's refused earlier as USE_COMPLETION_FLOW,
@@ -2850,6 +2908,7 @@ router.put('/:serviceId/status', async (req, res, next) => {
           // live-status resend bypass the 7-day window too.
           allowTerminal: toStatus === fromStatus && ['cancelled', 'skipped'].includes(fromStatus),
         });
+        if (toStatus === 'no_show' && lockedRow) noShowOccurrence = { id: svc.id, ...lockedRow };
         // The same guard again UNDER the row lock: a concurrent call pass may promote this booking to a
         // hold after the pre-check above; the promoter takes the same lock and re-reads eligibility.
         if (holdGuardApplies) await require('../services/street-level-hold').assertNotLiveHoldUnderLock(trx, svc.id);
@@ -3208,10 +3267,12 @@ router.put('/:serviceId/status', async (req, res, next) => {
         // a rebook LATER THE SAME DAY, which only the window distinguishes
         // (codex r2). Match only rows recorded for the current slot; NULL
         // slot fields match legacy rows to preserve their old per-row dedup.
-        const missedDateStr = svc.scheduled_date
-          ? String(svc.scheduled_date instanceof Date ? svc.scheduled_date.toISOString() : svc.scheduled_date).slice(0, 10)
+        // the occurrence locked by the transition, never the pre-transaction read (Codex #5669 r3)
+        const missedOcc = noShowOccurrence || svc;
+        const missedDateStr = missedOcc.scheduled_date
+          ? String(missedOcc.scheduled_date instanceof Date ? missedOcc.scheduled_date.toISOString() : missedOcc.scheduled_date).slice(0, 10)
           : null;
-        const missedWindowStr = svc.window_start ? `${svc.window_start}-${svc.window_end}` : null;
+        const missedWindowStr = missedOcc.window_start ? `${missedOcc.window_start}-${missedOcc.window_end}` : null;
         const alreadyFlagged = await db('reschedule_log')
           .where({ scheduled_service_id: svc.id, reason_code: 'customer_noshow' })
           .where(function occurrenceMatch() {
@@ -3228,7 +3289,8 @@ router.put('/:serviceId/status', async (req, res, next) => {
           .first('id');
         if (!alreadyFlagged) {
           const missedAppointment = require('../services/workflows/missed-appointment');
-          await missedAppointment.onSkip(svc.id, 'manual_no_show');
+          // the occurrence as it stood under the transition's row lock
+          await missedAppointment.onSkip(svc.id, 'manual_no_show', undefined, { occurrence: noShowOccurrence });
         }
       } catch (e) { logger.error(`[admin-dispatch] no-show reschedule_log record failed: ${e.message}`); }
     }
@@ -6535,7 +6597,12 @@ router.post('/:serviceId/recap-video/approve', async (req, res, next) => {
     if (process.env.PEST_RECAP !== 'true') return res.status(409).json({ error: 'recap is disabled' });
     if (!(await recapOwnerOk(req, res))) return undefined;
     const result = await recapPipeline.approveRecap(req.params.serviceId, { approvedBy: recapVideoActor(req) });
-    if (!result.ok) return res.status(409).json({ error: result.error });
+    if (!result.ok) {
+      const error = result.error === 'rerendering_greeting'
+        ? 'This recap is being re-rendered with an updated greeting. Approve it again when it is ready.'
+        : result.error;
+      return res.status(409).json({ error, code: result.error });
+    }
     // Approval sends the customer the watch-recap link (best-effort, idempotent).
     // sendRecap is idempotent + retryable, so a failed send leaves the recap
     // approved-but-unsent and the client surfaces a retry (sent:false).

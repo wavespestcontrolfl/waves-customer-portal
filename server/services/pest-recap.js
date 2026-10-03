@@ -38,6 +38,7 @@ const { loadActiveConfig: loadPestPressureConfig } = require('./pest-pressure/st
 const { pestPressureConfigAllowsTechnicianRating } = require('./pest-pressure/technician-rating-gate');
 const { isValidRateUnit } = require('./inventory-units');
 const { completionSuppliesOwedMarker } = require('./supplies-consumption');
+const { promoteStagedServicePhotos } = require('./service-photos');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 
 const PEST_CONTROL_CATEGORY = 'pest_control';
@@ -262,8 +263,8 @@ function recapServiceIdentity(svc, profile) {
 /**
  * The active catalog list the Fast Complete product picker and the recap modal
  * share. `extraColumns` lets another sheet (Tree & Shrub Fast Complete) add
- * classifier inputs to the same row shape. Never rejects: a failed read is an
- * empty list, as it always was here.
+ * classifier inputs to the same row shape. A failed read rejects so callers
+ * can distinguish an unavailable catalog from an authoritative empty list.
  */
 function loadRecapCatalogProducts(knex = db, { extraColumns = [] } = {}) {
   return knex('products_catalog')
@@ -292,8 +293,7 @@ function loadRecapCatalogProducts(knex = db, { extraColumns = [] } = {}) {
       'display_name', 'inventory_unit', 'inventory_on_hand', 'formulation',
       ...extraColumns,
     )
-    .then((rows) => rows.map((row) => ({ ...row, inventory_on_hand: numberOrNull(row.inventory_on_hand) })))
-    .catch(() => []);
+    .then((rows) => rows.map((row) => ({ ...row, inventory_on_hand: numberOrNull(row.inventory_on_hand) })));
 }
 
 /**
@@ -358,7 +358,11 @@ async function buildRecapContext(serviceId, knex = db, { includeCommonProducts =
     .select('from_status', 'to_status', 'transitioned_at')
     .catch(() => []);
 
-  const products = await loadRecapCatalogProducts(knex);
+  let catalogLoadFailed = false;
+  const products = await loadRecapCatalogProducts(knex).catch(() => {
+    catalogLoadFailed = true;
+    return [];
+  });
 
   // A FAILED lookup is not "no record" (codex P1 r15): reporting null on
   // a transient error would let the modal treat a real completed visit as
@@ -425,6 +429,7 @@ async function buildRecapContext(serviceId, knex = db, { includeCommonProducts =
     followupBooking: require('../config/feature-gates').typedVoiceFillLive(),
     lane,
     existingRecordLoadFailed,
+    catalogLoadFailed,
     service: recapServiceIdentity(svc, profile),
     timeline,
     products,
@@ -1085,6 +1090,14 @@ async function submitRecap({
       recordId = inserted[0]?.id || inserted[0];
       createdRecord = true;
     }
+
+    // Attach photos captured before closeout while the visit lock is still
+    // held, so durable uploads cannot remain indefinitely in staging.
+    await promoteStagedServicePhotos({
+      scheduledServiceId: serviceId,
+      serviceRecordId: recordId,
+      knex: trx,
+    });
 
     // 3. service_products for the chemicals the tech selected. The rate is
     // TECHNICIAN-CONFIRMED: the recap modal collects it in an editable field

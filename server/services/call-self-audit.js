@@ -33,6 +33,7 @@ const AUDIT_PROMPT = `You are auditing one phone-call analysis for Waves Pest Co
 {"is_lead": boolean, "is_spam": boolean, "is_voicemail": boolean, "appointment_agreed": boolean, "quote_promised": boolean, "complaint": boolean, "excerpt": "<=25 words supporting your most important judgment"}
 Rules: a two-party conversation (both speakers 3+ turns) is never a voicemail; a caller with a service request/address/quoted price is never spam; an existing customer coordinating a visit is not a new lead. Each transcript is preceded by a CALL DIRECTION line — read it, since it can warn that the printed speaker labels are unreliable and tell you to judge by what each party says instead.`;
 
+
 const OUTBOUND_DIRECTION_SQL = "COALESCE(direction, '') LIKE 'outbound%'";
 const INBOUND_DIRECTION_SQL = "COALESCE(direction, '') NOT LIKE 'outbound%'";
 
@@ -74,6 +75,23 @@ function compactDirection(direction) {
 // audit's own findings or counters; it only tallies into `tally`
 // ({ asked, recorded, failed } counts calls, not rows; `tally.clef` holds the
 // second leg's own counts and exists only while that gate is on).
+// What the auditor is shown for one call: the direction instruction and the
+// first 5,000 characters of the transcript. One builder, so the audit and
+// any later second reading render exactly the same text.
+const AUDIT_TRANSCRIPT_CHARS = 5000;
+function auditUserContent(call) {
+  return `${callDirectionBlock(call.direction)}\nTranscript:\n${String(call.transcription || '').slice(0, AUDIT_TRANSCRIPT_CHARS)}`;
+}
+
+// Identity of the COMPLETE input one audit ran on (system prompt + rendered
+// user content), stored on every finding. A second reading is valid only
+// while the same input can be rendered again: a changed prompt, direction
+// instruction, direction or transcript (re-transcription, a replaced
+// recording) all change this hash.
+function auditInputHash(call) {
+  return require('crypto').createHash('sha256').update(`${AUDIT_PROMPT}\n\u0000\n${auditUserContent(call)}`).digest('hex').slice(0, 24);
+}
+
 const JEV_SHARED_FIELDS = ['is_lead', 'is_spam', 'is_voicemail', 'appointment_agreed', 'quote_promised'];
 async function shadowJevJudge(call, prod, verdict, tally, gateBaselines = {}) {
   if (!typedDecisionsLive()) return;
@@ -132,6 +150,196 @@ function gateCheckBaselines(call, wavesPromiseCallIds) {
   return out;
 }
 
+// Voicemail triage evidence (voicemail.v1, Clef second wave idea 6): every
+// INBOUND voicemail (not a sample: ~44 a month), put to the same providers
+// once it has finished processing and recorded beside what production decided:
+//   callback_requested  production = production put it in front of a person:
+//                       the callback alert's durable claim
+//                       (call_log.voicemail_callback_alerted_at, stamped before
+//                       delivery, so a push-only or bell-silenced alert counts),
+//                       a lead minted from the call, or a triage item opened
+//                       for it (a failed lead creation opens one)
+//   is_vendor_or_spam   production = spam status, the extraction's is_spam, or
+//                       a vendor call by the v2 extraction's call_nature
+//                       (vendor_or_partner, unless V2's spam verdict cleared
+//                       the content: a property manager or referral partner;
+//                       a job applicant shares the vendor_logged disposition
+//                       but is not a vendor)
+//   needs_attention_today  no baseline: nothing decides urgency today
+// Two idempotent steps over every terminal, quiet voicemail whose row changed
+// in the last 7 days (Codex #5655 r1-r6):
+//   ASK      each enabled provider until its answer on the CURRENT transcript
+//            is recorded: a missed run, a failed leg or a new transcript is
+//            picked up next time, and nothing is asked twice;
+//   REFRESH  (no model call) every unreviewed answer's production baseline and
+//            review cohort, recomputed from what production shows NOW, so a
+//            baseline is never frozen at the moment a question was asked: a
+//            retry, a reprocess or a late callback claim all show up on the
+//            next pass, and a cohort inherited from an old transcript's row is
+//            replaced. A voicemail longer than the span the models and reviewer see is
+// counted, never asked (as for the gate checks). Never throws; evidence only.
+const VOICEMAIL_STATUSES = ['voicemail', 'processed', 'spam', 'lead_creation_failed', 'extraction_failed'];
+const VOICEMAIL_LOOKBACK_DAYS = 7;
+// The processor commits a terminal status before its post-terminal side
+// effects (the callback alert's claim comes later in the same pass), so a
+// voicemail is read only once its row has been quiet this long and nobody
+// holds its processing claim (Codex #5655 r5).
+const VOICEMAIL_QUIET_MINUTES = 30;
+
+// Phase 1: terminal, quiet inbound voicemails with usable words. The window
+// follows the row's last change (updated_at), not its creation, so a voicemail
+// that settles late is still read; created_at only bounds how far back.
+const VOICEMAIL_MAX_AGE_DAYS = 30;
+async function loadVoicemailCandidates(now) {
+  const ago = (ms) => new Date(now.getTime() - ms);
+  const DAY = 24 * 60 * 60 * 1000;
+  const rows = await db('call_log')
+    .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb))
+    .whereRaw(INBOUND_DIRECTION_SQL)
+    .whereIn('processing_status', VOICEMAIL_STATUSES)
+    .where('created_at', '>', ago(VOICEMAIL_MAX_AGE_DAYS * DAY))
+    .where('updated_at', '>', ago(VOICEMAIL_LOOKBACK_DAYS * DAY))
+    .where('updated_at', '<', ago(VOICEMAIL_QUIET_MINUTES * 60 * 1000))
+    .whereNull('processing_token')
+    .whereRaw("LENGTH(TRIM(COALESCE(transcription, ''))) > 0")
+    // A rejected transcription stores an internal sentinel, not the caller's
+    // words (Codex #5655 r4): never evidence.
+    .where((q) => q.whereNull('transcription_status').orWhereNot('transcription_status', 'rejected'))
+    .orderBy('created_at', 'asc')
+    .select('id', 'twilio_call_sid', 'direction', 'processing_status', 'answered_by', 'call_outcome',
+      'voicemail_callback_alerted_at', 'transcription', 'ai_extraction', 'ai_extraction_enriched', 'v2_extraction_status', 'duration_seconds');
+  return rows.filter(isVoicemailRow);
+}
+
+// A lead-path voicemail ends 'processed' (or 'lead_creation_failed'); only the
+// extraction says it was a voicemail. A failed extraction has none to say so,
+// so the voice webhook's durable channel fields decide. Whether an
+// extraction_failed row will still be retried is NOT judged here: a retry that
+// changes the outcome is picked up by the next pass's REFRESH (and a new
+// transcript by ASK).
+function isVoicemailRow(c) {
+  if (c.processing_status === 'voicemail' || safeParse(c.ai_extraction).is_voicemail === true) return true;
+  return c.processing_status === 'extraction_failed' && (c.answered_by === 'voicemail' || c.call_outcome === 'voicemail');
+}
+
+// Phase 2: which enabled providers are done with each voicemail. Done = an
+// answer on the CURRENT transcript (subject_hash), or rows that can no longer
+// be re-answered (labeled or held out). Also the current answers, the siblings
+// a retried leg is compared with.
+async function loadProviderState(candidates, currentHash) {
+  const rows = await db('decision_reviews').where({ capability: 'voicemail', subject_type: 'call_log' })
+    .whereIn('subject_id', candidates.map((c) => c.id))
+    .select('subject_id', 'provider', 'question_id', 'jev_answer', 'subject_hash', 'label_status', 'sampled_for');
+  const done = new Map();
+  const stale = new Map();
+  const storedAnswers = new Map();
+  const add = (map, key, value) => { if (!map.has(key)) map.set(key, new Set()); map.get(key).add(value); };
+  for (const r of rows) {
+    const key = String(r.subject_id);
+    const current = Boolean(r.subject_hash) && r.subject_hash === currentHash.get(key);
+    if (!current && r.label_status === 'unreviewed' && r.sampled_for !== 'heldout') { add(stale, key, r.provider); continue; }
+    add(done, key, r.provider);
+    if (!current) continue;
+    if (!storedAnswers.has(key)) storedAnswers.set(key, {});
+    const byQuestion = storedAnswers.get(key);
+    (byQuestion[r.question_id] = byQuestion[r.question_id] || []).push(safeParse(r.jev_answer));
+  }
+  // A provider with any stale, re-answerable row is not done.
+  for (const [key, providers] of stale) for (const p of providers) done.get(key)?.delete(p);
+  return { done, storedAnswers };
+}
+
+// Phase 3: what production decided, read once for the voicemails to ask.
+async function loadReachedPerson(voicemails) {
+  const sids = voicemails.map((c) => c.twilio_call_sid).filter(Boolean);
+  const [leads, triage] = await Promise.all([
+    sids.length ? db('leads').whereIn('twilio_call_sid', sids).select('twilio_call_sid') : [],
+    db('triage_items').whereIn('call_log_id', voicemails.map((c) => c.id)).distinct('call_log_id'),
+  ]);
+  return { leadSids: new Set(leads.map((r) => r.twilio_call_sid)), triaged: new Set(triage.map((r) => String(r.call_log_id))) };
+}
+
+// The production baselines for one voicemail (see the header).
+function voicemailBaselines(call, { leadSids, triaged }) {
+  const ex = safeParse(call.ai_extraction);
+  const v2 = call.v2_extraction_status === 'valid' ? safeParse(call.ai_extraction_enriched) : {};
+  // vendor_or_partner is a pitch only when V2's spam verdict did not clear the
+  // content (extraction-compat's rule): a cleared partner is not.
+  const vendorPitch = v2.call_nature === 'vendor_or_partner' && v2.spam_verdict?.is_spam_content !== false;
+  return {
+    callback_requested: { production: Boolean(call.voicemail_callback_alerted_at) || leadSids.has(call.twilio_call_sid) || triaged.has(String(call.id)) },
+    is_vendor_or_spam: { production: call.processing_status === 'spam' || ex.is_spam === true || vendorPitch },
+  };
+}
+
+// Counts one voicemail's asked legs: Jev on the main tally, Clef under .clef.
+function tallyLegs(tally, only, outcome) {
+  for (const provider of only) {
+    const t = provider === 'typesafe' ? tally : (tally.clef = tally.clef || { asked: 0, recorded: 0, failed: 0 });
+    t.asked++;
+    if (outcome[provider] === 'recorded') t.recorded++; else t.failed++;
+  }
+}
+
+async function shadowVoicemails({ now = new Date() } = {}) {
+  const tally = { asked: 0, recorded: 0, failed: 0, skippedLong: 0 };
+  if (!typedDecisionsLive()) return tally;
+  try {
+    const candidates = await loadVoicemailCandidates(now);
+    if (!candidates.length) return tally;
+    const { callSubjectHash } = require('./typed-decisions/subject-hash');
+    const currentHash = new Map(candidates.map((c) => [String(c.id), callSubjectHash(c.transcription)]));
+    const { done, storedAnswers } = await loadProviderState(candidates, currentHash);
+    const clef = typedDecisionsClefLive();
+    const enabled = clef ? ['typesafe', 'cloudflare'] : ['typesafe'];
+    const missingFor = (call) => enabled.filter((p) => !(done.get(String(call.id)) || new Set()).has(p));
+    const toAsk = candidates.filter((c) => missingFor(c).length > 0);
+    const reached = await loadReachedPerson(candidates);
+    for (const call of toAsk) {
+      if (String(call.transcription || '').length > CALL_TRANSCRIPT_CHARS) { tally.skippedLong++; continue; }
+      const only = missingFor(call);
+      const outcome = await askAndRecord(call, {
+        packageId: 'voicemail.v1', baselines: voicemailBaselines(call, reached), only, storedSiblings: storedAnswers.get(String(call.id)) || null,
+      }, clef);
+      tallyLegs(tally, only, outcome);
+    }
+    for (const call of candidates) {
+      await refreshVoicemailEvidence(call, voicemailBaselines(call, reached), currentHash.get(String(call.id)));
+    }
+  } catch (err) {
+    logger.warn(`[self-audit] voicemail shadow failed: ${err.message}`);
+  }
+  return tally;
+}
+
+// REFRESH (no model call): for one voicemail's answers on the current
+// transcript, rewrite the production baseline from what production shows now
+// and recompute the review cohort with the recorder's own rule (sampleFor: the
+// subject-keyed audit draw first, then a disagreement with a baseline or with
+// another provider's current answer). Only unreviewed rows that are not held
+// out are written; labeled answers still count as siblings. Idempotent.
+async function refreshVoicemailEvidence(call, baselines, subjectHash) {
+  try {
+    const { sampleFor, stableDraw } = require('./typed-decisions/shadow-recorder');
+    const rows = await db('decision_reviews')
+      .where({ capability: 'voicemail', subject_type: 'call_log', subject_id: call.id, subject_hash: subjectHash })
+      .select('id', 'capability', 'package_id', 'subject_type', 'subject_id', 'question_id', 'provider', 'jev_answer', 'baseline_answers', 'sampled_for', 'label_status');
+    for (const row of rows) {
+      if (row.label_status !== 'unreviewed' || row.sampled_for === 'heldout') continue;
+      const baseline = baselines[row.question_id] || null;
+      const siblings = rows.filter((r) => r.question_id === row.question_id && r.provider !== row.provider).map((r) => safeParse(r.jev_answer));
+      const cohort = sampleFor(safeParse(row.jev_answer), baseline, () => stableDraw(row), siblings);
+      const sameBaseline = JSON.stringify(safeParseOrNull(row.baseline_answers)) === JSON.stringify(baseline);
+      if (sameBaseline && (row.sampled_for || null) === cohort) continue;
+      await db('decision_reviews').where({ id: row.id, label_status: 'unreviewed' }).whereRaw("sampled_for IS DISTINCT FROM 'heldout'")
+        .update({ baseline_answers: baseline ? JSON.stringify(baseline) : null, sampled_for: cohort });
+    }
+  } catch (err) {
+    logger.warn(`[self-audit] voicemail evidence refresh failed for ${call.id}: ${err.message}`);
+  }
+}
+const safeParseOrNull = (v) => { if (v == null) return null; if (typeof v === 'object') return v; try { return JSON.parse(v); } catch { return null; } };
+
 // The sampled calls that carry a live AI-extracted Waves promise. null when
 // commitments are off (no reading, so no baseline). Never throws.
 async function loadWavesPromiseCallIds(calls) {
@@ -169,8 +377,12 @@ function productionAnswers(call) {
 // One call to every live provider, then one record per provider that
 // answered, each handed the others' answers. Returns { typesafe, cloudflare }
 // as 'recorded' | 'failed' (cloudflare only when asked).
-async function askAndRecord(call, { packageId, baselines }, clef = false) {
-  const outcome = { typesafe: 'failed', ...(clef ? { cloudflare: 'failed' } : {}) };
+async function askAndRecord(call, { packageId, baselines, only = null, storedSiblings = null }, clef = false) {
+  // `only`: ask just these providers (a voicemail one provider already answered).
+  // `storedSiblings`: { questionId: [answer] } recorded earlier by the providers
+  // not asked now, handed to each new row like this run's own siblings.
+  const providers = (clef ? ['typesafe', 'cloudflare'] : ['typesafe']).filter((p) => !only || only.includes(p));
+  const outcome = Object.fromEntries(providers.map((p) => [p, 'failed']));
   try {
     const { askPackage } = require('./typed-decisions/jev');
     const { packageFor } = require('./typed-decisions/packages');
@@ -181,7 +393,6 @@ async function askAndRecord(call, { packageId, baselines }, clef = false) {
       duration_seconds: call.duration_seconds ?? null,
       transcript: callTranscriptSpan(call.transcription),
     };
-    const providers = clef ? ['typesafe', 'cloudflare'] : ['typesafe'];
     const legs = await Promise.all(providers.map(async (provider) => {
       try {
         const result = provider === 'typesafe' ? await askPackage(packageId, state) : await askPackage(packageId, state, { provider });
@@ -198,6 +409,9 @@ async function askAndRecord(call, { packageId, baselines }, clef = false) {
     await Promise.all(answered.map(async ({ provider, result }) => {
       try {
         const siblingAnswers = {};
+        for (const [questionId, list] of Object.entries(storedSiblings || {})) {
+          siblingAnswers[questionId] = [...list];
+        }
         for (const other of answered) {
           if (other.provider === provider) continue;
           for (const [questionId, answer] of Object.entries(other.result.answers || {})) {
@@ -230,12 +444,17 @@ function stratifySample({ inbound = [], outbound = [], size = SAMPLE_SIZE } = {}
 }
 
 async function runSelfAudit(depsIn = {}) {
-  if (!isEnabled('callSelfAudit')) return { skipped: 'gate_off' };
+  // Every voicemail of the day FIRST: the pass has its own gate
+  // (GATE_TYPED_DECISIONS), needs no Anthropic client and no call sample, so
+  // none of this function's own exits may skip it (Codex #5655 r7). Gate off =
+  // an all-zero tally and no read.
+  const voicemails = await shadowVoicemails();
+  if (!isEnabled('callSelfAudit')) return { skipped: 'gate_off', voicemails };
   // createDeepMessage's contract is (client, params) — the caller owns the
   // Anthropic client (per llm/deep.js). Injectable for tests.
   const deps = { ...depsIn };
   if (!deps.createMessage) {
-    if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return { skipped: 'no_anthropic_client' };
+    if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return { skipped: 'no_anthropic_client', voicemails };
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, timeout: MODEL_TIMEOUT_MS, maxRetries: 1 });
     // effort: 'medium' — a bounded per-call yes/no/field-diff audit, not deep
     // reasoning; caps Opus 5.5 spend on a short structured verdict.
@@ -263,8 +482,7 @@ async function runSelfAudit(depsIn = {}) {
     sampleDirection(OUTBOUND_DIRECTION_SQL),
   ]);
   const calls = stratifySample({ inbound: inboundRows, outbound: outboundRows, size: SAMPLE_SIZE });
-
-  if (!calls.length) return { sampled: 0 };
+  if (!calls.length) return { sampled: 0, voicemails };
 
   let disagreements = 0; let checkedFields = 0; let spamFalsePositives = 0; let dispositionMismatches = 0; let audited = 0;
   const jev = { asked: 0, recorded: 0, failed: 0 };
@@ -272,14 +490,24 @@ async function runSelfAudit(depsIn = {}) {
   for (const call of calls) {
     const gateBaselines = gateCheckBaselines(call, wavesPromiseCallIds);
     let verdict;
+    // The model that actually answered (createDeepMessage can fall back to
+    // another provider): the call-incident adjudicator needs it to pick a
+    // second reader on a DIFFERENT provider.
+    let auditorModel = null;
+    let auditorProvider = null;
     try {
       // Blind audit: the model sees ONLY the transcript. Leaking production's
       // status would bias the auditor toward the very label being audited.
       const res = await deps.createMessage({
         max_tokens: 4096,
         system: AUDIT_PROMPT,
-        messages: [{ role: 'user', content: `${callDirectionBlock(call.direction)}\nTranscript:\n${call.transcription.slice(0, 5000)}` }],
+        messages: [{ role: 'user', content: auditUserContent(call) }],
       });
+      auditorModel = res?.model || null;
+      // createDeepMessage's OpenAI backup returns a message with no id; an
+      // Anthropic message always carries one. Recorded at audit time, so the
+      // adjudicator never has to guess the provider from a model id.
+      auditorProvider = res ? (res.id ? 'anthropic' : 'openai') : null;
       const text = (res?.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
       verdict = JSON.parse((text.match(/\{[\s\S]*\}/) || ['{}'])[0]);
     } catch (err) {
@@ -318,7 +546,9 @@ async function runSelfAudit(depsIn = {}) {
           old_value: String(prod[f]),
           new_value: String(Boolean(verdict[f])),
           transcript_excerpt: String(verdict.excerpt || '').slice(0, 300),
-          detail: JSON.stringify({ diffs, verdict, disposition: call.disposition }),
+          // The exact input this audit ran on, and who answered: a second
+          // reading is compared only on the same input, on another provider.
+          detail: JSON.stringify({ diffs, verdict, disposition: call.disposition, auditor_model: auditorModel, auditor_provider: auditorProvider, audit_input_hash: auditInputHash(call) }),
         })
         .onConflict(['call_log_id', 'audit_source', 'category', 'field'])
         .merge(['old_value', 'new_value', 'transcript_excerpt', 'detail'])
@@ -355,9 +585,9 @@ async function runSelfAudit(depsIn = {}) {
   } else {
     logger.info(`[self-audit] healthy: ${audited} calls, field rate ${(fieldRate * 100).toFixed(1)}%, 0 spam FPs`);
   }
-  return { sampled: calls.length, audited, fieldRate, spamFalsePositives, dispositionRate, breaches, jev };
+  return { sampled: calls.length, audited, fieldRate, spamFalsePositives, dispositionRate, breaches, jev, voicemails };
 }
 
 function safeParse(v) { if (!v) return {}; if (typeof v === 'object') return v; try { return JSON.parse(v); } catch { return {}; } }
 
-module.exports = { runSelfAudit, stratifySample, OUTBOUND_DIRECTION_SQL, INBOUND_DIRECTION_SQL, callDirectionBlock, gateCheckBaselines };
+module.exports = { runSelfAudit, stratifySample, OUTBOUND_DIRECTION_SQL, INBOUND_DIRECTION_SQL, callDirectionBlock, gateCheckBaselines, shadowVoicemails, AUDIT_PROMPT, AUDIT_TRANSCRIPT_CHARS, auditUserContent, auditInputHash, productionAnswers };

@@ -171,6 +171,13 @@ async function stillHeldVisit(estimateId, invoiceId, visitId) {
   return (await firstPerformedVisit(estimateId, term.customer_id, term.id))?.id || null;
 }
 
+// A term that still carries paid coverage by the canonical rules (a paid year
+// cancelled to end at term rides out its window; a refund or void does not).
+async function termStillCovered(termId, conn = db) {
+  if (!termId) return false;
+  return !!(await require('./annual-prepay-renewals').coveredTermsAsOf(conn).where('t.id', termId).first('t.id'));
+}
+
 async function releaseOne(row, now) {
   const job = parseData(row.estimate_data)?.prepayAutoChargeJob;
   if (!job || job.status !== AWAITING || !job.invoice_id) return null;
@@ -179,7 +186,12 @@ async function releaseOne(row, now) {
   const term = invoice
     ? await db('annual_prepay_terms').where({ prepay_invoice_id: invoice.id }).first('id', 'status')
     : null;
-  const dead = !invoice || DEAD_INVOICE_STATUSES.includes(invStatus) || String(term?.status || '') === 'cancelled';
+  // A cancelled term is dead unless it still carries paid coverage by the
+  // canonical rules (coveredTermsAsOf: a decided end-at-term lapse riding out
+  // a paid window). A void / full refund cancellation is dead (GitHub Codex
+  // #5656 r1).
+  const dead = !invoice || DEAD_INVOICE_STATUSES.includes(invStatus)
+    || (String(term?.status || '') === 'cancelled' && !(await termStillCovered(term.id)));
   // Settled before any visit = paid, or a BANK debit already initiated. A card
   // intent parked 'processing' is incomplete (the sweep treats it so): it
   // never releases the job before the first visit.
@@ -234,9 +246,10 @@ async function releaseOne(row, now) {
     // work reaches the office), never be released into a charge that skips.
     return db.transaction(async (trx) => {
       const locked = await trx('invoices').where({ id: invoice.id }).forUpdate().first('status', 'payment_method');
-      const lockedTerm = await trx('annual_prepay_terms').where({ prepay_invoice_id: invoice.id }).first('status');
+      const lockedTerm = await trx('annual_prepay_terms').where({ prepay_invoice_id: invoice.id }).first('id', 'status');
       const lockedStatus = String(locked?.status || '').toLowerCase();
-      if (!locked || DEAD_INVOICE_STATUSES.includes(lockedStatus) || String(lockedTerm?.status || '') === 'cancelled') return null;
+      if (!locked || DEAD_INVOICE_STATUSES.includes(lockedStatus)
+        || (String(lockedTerm?.status || '') === 'cancelled' && !(await termStillCovered(lockedTerm.id, trx)))) return null;
       // Settlement as the LOCKED row shows it: a bank debit returned since
       // the first read is no longer settled, and then only a performed visit
       // may release the charge.
@@ -537,6 +550,7 @@ async function releaseDeferredPrepayCharges({ pageSize = 200, now = new Date() }
 module.exports = {
   AWAITING,
   planHasUnfinishedCompletion,
+  termStillCovered,
   visitStillPerformed,
   STALE_DAYS,
   releaseDeferredPrepayCharges,

@@ -49,6 +49,11 @@ describe('composeTechNote', () => {
     expect(composeTechNote({ tips: TIPS, customerName: '', seed: 5 }).greeting).toBe('Hey there,');
   });
 
+  it('greets by the payload\'s own first name; a blank first name gets the neutral greeting, not the surname', () => {
+    expect(composeTechNote({ tips: TIPS, customerName: 'Example', firstName: '', seed: 5 }).greeting).toBe('Hey there,');
+    expect(composeTechNote({ tips: TIPS, customerName: 'Sample Example', firstName: 'Sample', seed: 0 }).greeting).toBe('Hey Sample,');
+  });
+
   it('seeds deterministically from the record id', () => {
     expect(techNoteSeed('rec-123')).toBe(techNoteSeed('rec-123'));
     expect(techNoteSeed('rec-123')).not.toBe(techNoteSeed('rec-124'));
@@ -66,6 +71,12 @@ describe('TechNoteCard', () => {
     expect(screen.getByRole('link', { name: 'My Property' })).toHaveAttribute('href', '/portal?tab=property');
     expect(document.body.textContent).not.toMatch(/Adam B\.|Waves Pest Control|—\s*Adam/);
     expect(document.querySelector('#tech-note')).toHaveAttribute('data-glass', 'card');
+  });
+
+  it('a blank-first-name customer is greeted "Hey there," (customerName is only the surname)', () => {
+    render(<TechNoteCard data={payload({ customerName: 'Example', customerFirstName: null })} mode="live" />);
+    expect(screen.getByText('Hey there,')).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain('Example');
   });
 
   it('is stable across renders of the same report', () => {
