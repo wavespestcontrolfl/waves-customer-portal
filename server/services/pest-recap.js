@@ -38,6 +38,7 @@ const { loadActiveConfig: loadPestPressureConfig } = require('./pest-pressure/st
 const { pestPressureConfigAllowsTechnicianRating } = require('./pest-pressure/technician-rating-gate');
 const { isValidRateUnit } = require('./inventory-units');
 const { completionSuppliesOwedMarker } = require('./supplies-consumption');
+const { promoteStagedServicePhotos } = require('./service-photos');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 
 const PEST_CONTROL_CATEGORY = 'pest_control';
@@ -1085,6 +1086,14 @@ async function submitRecap({
       recordId = inserted[0]?.id || inserted[0];
       createdRecord = true;
     }
+
+    // Attach photos captured before closeout while the visit lock is still
+    // held, so durable uploads cannot remain indefinitely in staging.
+    await promoteStagedServicePhotos({
+      scheduledServiceId: serviceId,
+      serviceRecordId: recordId,
+      knex: trx,
+    });
 
     // 3. service_products for the chemicals the tech selected. The rate is
     // TECHNICIAN-CONFIRMED: the recap modal collects it in an editable field

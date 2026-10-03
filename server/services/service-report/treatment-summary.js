@@ -27,7 +27,7 @@ function isSupportProduct(p = {}) {
     .test(`${p.name || ''} ${p.activeIngredient || ''} ${p.kind || ''}`);
 }
 
-function buildTreatmentSummary(treatment) {
+function buildTreatmentSummary(treatment, { noTiming = false } = {}) {
   const products = (treatment && Array.isArray(treatment.products)) ? treatment.products : [];
   if (!products.length) return null;
   const support = products.filter(isSupportProduct);
@@ -88,7 +88,11 @@ function buildTreatmentSummary(treatment) {
     ? ', with a surfactant added so the treatment coats the foliage evenly.'
     : '.';
   if (main.some((p) => p.kind === 'systemic')) {
-    out += ' The systemic products are absorbed by the plants and keep working for several weeks after the visit.';
+    // noTiming (lawn under GATE_LAWN_REPORT_COPY_V6): result timing reaches
+    // the customer only as an owner-approved "What to expect" sentence.
+    out += noTiming
+      ? ' The systemic products are absorbed by the plants and keep working after the visit.'
+      : ' The systemic products are absorbed by the plants and keep working for several weeks after the visit.';
   }
   return out;
 }

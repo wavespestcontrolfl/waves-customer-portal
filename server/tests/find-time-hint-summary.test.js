@@ -203,6 +203,13 @@ test('a gap ending at an after-hours stop lists no hour past the day close', asy
   expect(body.picked).toEqual({ start: '17:00', fits: null, reason: 'not_checkable' });
 });
 
+test('a hint search spends no Google drive-time; the ranged button keeps it', async () => {
+  await post({ ...BASE, summary: true });
+  expect(findAvailableSlots.mock.calls[0][0].providerTravel).toBe(false);
+  await post({ ...BASE, hint: undefined });
+  expect(findAvailableSlots.mock.calls[1][0]).not.toHaveProperty('providerTravel');
+});
+
 test('summary is a hint-mode construct: ignored without the hint flag', async () => {
   process.env.GATE_RESCHEDULE_AVAILABILITY = 'true';
   const body = await (await post({ ...BASE, hint: undefined, summary: true })).json();
