@@ -285,7 +285,7 @@ async function loginMfa(req, res, next) {
     if (!tech || Number(tech.auth_token_version) !== claims.tokenVersion || !staffMfa.mfaEnabled(tech)) return restart();
 
     const result = await staffMfa.verifySecondFactor(tech.id, code, { expectedTokenVersion: claims.tokenVersion });
-    if (!result.ok && result.reason === 'revoked') return restart();
+    if (result.reason === 'revoked') return restart();
     if (!result.ok) return mfaFailureResponse(res, result);
 
     const { token, refreshToken } = mintStaffTokens(tech, {
