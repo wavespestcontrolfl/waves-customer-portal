@@ -216,6 +216,8 @@ export default function useFastCompleteSubmit({
           const current = await getFastCompletionAttempt(scope.serviceId, scope.operatorId);
           if (!sameScope(scopeRef.current, scope)) return;
           if (!current.available || current.attempt?.body.idempotencyKey === rejectedKey) {
+            pendingBodyRef.current = null;
+            pendingSummaryRef.current = '';
             setError('Could not clear the rejected completion on this device. Try sending again when device storage is available.');
             return;
           }

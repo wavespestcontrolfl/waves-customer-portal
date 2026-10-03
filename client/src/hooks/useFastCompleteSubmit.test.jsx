@@ -74,6 +74,7 @@ describe('useFastCompleteSubmit durable attempts', () => {
     expect(request).toHaveBeenCalledTimes(1);
     expect(view.result.current.error).toContain('Could not clear');
     globalThis.indexedDB = deviceDatabase;
+    corrected.technicianNotes = 'Further correction after blocked send';
     await act(async () => { await view.result.current.submit(() => corrected, 'Corrected'); });
     expect(request).toHaveBeenCalledTimes(2);
     const sent = JSON.parse(request.mock.calls[1][1].body);
