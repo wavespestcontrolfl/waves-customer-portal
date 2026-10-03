@@ -311,7 +311,7 @@ function validateVisitPhotos(photos, { shotList: shotListOn = false } = {}) {
   if (shotListOn) {
     // The slider pairs against one photo per same-spot zone, so the API
     // enforces what the drawer's picker does.
-    const countError = shotList.shotCountError(zones);
+    const countError = shotList.shotCountError(zones) || shotList.photoSizeError(photos.map((photo) => decodedBase64Bytes(photo.data)));
     return countError ? { error: countError, zones: [] } : { error: null, zones };
   }
   // The slider pairs against one Front photo, so the API enforces what the
@@ -323,13 +323,15 @@ function validateVisitPhotos(photos, { shotList: shotListOn = false } = {}) {
 // The first problem with one request photo, or null.
 function visitPhotoError(photo, shotListOn) {
   if (!photo || typeof photo.data !== 'string' || !photo.data) return 'Every photo needs base64 image data';
-  if (decodedBase64Bytes(photo.data) > MAX_PHOTO_BYTES) return 'Each photo must be 5 MB or smaller';
+  // Shot list on: the size rule runs over the whole set (it names the photo), after this loop.
+  if (!shotListOn && decodedBase64Bytes(photo.data) > MAX_PHOTO_BYTES) return 'Each photo must be 5 MB or smaller';
   if (!isValidBase64(photo.data)) return 'Every photo needs valid raw base64 image data';
   if (!['image/jpeg', 'image/png', 'image/webp'].includes(photo.mimeType ?? 'image/jpeg')) {
     return 'Photos must be JPEG, PNG, or WebP images';
   }
-  if (photo.zone != null && photo.zone !== '' && !normalizePhotoZone(photo.zone, { shotList: shotListOn })) {
-    return `photo zone must be one of: ${(shotListOn ? shotList.SHOT_KEYS : PHOTO_ZONES).join(', ')}`;
+  if (shotListOn) return shotList.rawZoneError(photo.zone);
+  if (photo.zone != null && photo.zone !== '' && !normalizePhotoZone(photo.zone)) {
+    return `photo zone must be one of: ${PHOTO_ZONES.join(', ')}`;
   }
   return null;
 }

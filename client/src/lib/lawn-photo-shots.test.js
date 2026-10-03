@@ -3,7 +3,7 @@
 // admin drawer builds on.
 import { describe, expect, it } from "vitest";
 import DEFINITION from "../../../shared/lawn-photo-shots.json";
-import { SHOTS, SHOT_CAP, SHOT_MINIMUM, assignShotZone, missingMinimumSlots, shotIsFull, shotLabel, shotListHint } from "./lawn-photo-shots";
+import { MAX_PHOTO_BYTES, MAX_TOTAL_BYTES, SHOTS, SHOT_CAP, SHOT_MINIMUM, appendTaggedPhotos, assignShotZone, decodedBytes, fitPhotosToSizeLimit, missingMinimumSlots, shotIsFull, shotLabel, shotListHint } from "./lawn-photo-shots";
 
 const photos = (...zones) => zones.map((zone, i) => ({ name: `p${i}`, zone }));
 const zonesOf = (list) => list.map((p) => p.zone);
@@ -63,5 +63,54 @@ describe("shotIsFull", () => {
     expect(shotIsFull(photos("front"), "back")).toBe(false);
     expect(shotIsFull(photos("trouble"), "trouble")).toBe(false);
     expect(shotIsFull(photos("trouble", "trouble"), "trouble")).toBe(true);
+  });
+});
+
+describe("appendTaggedPhotos", () => {
+  it("tags the first new photo with the tapped shot when that shot has room", () => {
+    const next = appendTaggedPhotos(photos("front"), [{ name: "n" }], "back", 8);
+    expect(zonesOf(next)).toEqual(["front", "back"]);
+  });
+
+  it("leaves the new photo untagged when the shot filled up while it was being read", () => {
+    const next = appendTaggedPhotos(photos("back"), [{ name: "n" }], "back", 8);
+    expect(zonesOf(next)).toEqual(["back", null]);
+    // A problem area still has room for a second photo.
+    expect(zonesOf(appendTaggedPhotos(photos("trouble"), [{ name: "n" }], "trouble", 8))).toEqual(["trouble", "trouble"]);
+  });
+
+  it("never exceeds the cap, and no tag means no tag", () => {
+    expect(appendTaggedPhotos(photos(null, null), [{}, {}, {}], null, 3)).toHaveLength(3);
+    expect(zonesOf(appendTaggedPhotos(photos(), [{}], null, 8))).toEqual([null]);
+  });
+});
+
+describe("size rule", () => {
+  const photo = (mb, name) => ({ name, data: `data:image/jpeg;base64,${Buffer.alloc(Math.floor(mb * 1048576)).toString("base64")}` });
+
+  it("uses the shared numbers: 5 MiB each, 30 MiB together, and a full base64 set leaves 8 MiB under the 50 MiB body limit", () => {
+    expect(MAX_PHOTO_BYTES).toBe(DEFINITION.maxPhotoBytes);
+    expect(MAX_TOTAL_BYTES).toBe(DEFINITION.maxTotalBytes);
+    expect(50 * 1048576 - Math.ceil(MAX_TOTAL_BYTES / 3) * 4).toBeGreaterThanOrEqual(8 * 1048576);
+  });
+
+  it("measures decoded bytes from a data URL", () => {
+    expect(decodedBytes("data:image/jpeg;base64,cGhvdG8=")).toBe(5);
+    expect(decodedBytes("")).toBe(0);
+  });
+
+  it("keeps photos that fit and names every one that does not", () => {
+    const held = [photo(4.5, "h1"), photo(4.5, "h2"), photo(4.5, "h3"), photo(4.5, "h4"), photo(4.5, "h5"), photo(4.5, "h6")];
+    const fit = fitPhotosToSizeLimit(held, [photo(1, "ok"), photo(4.5, "late"), photo(6, "huge")]);
+    expect(fit.accepted.map((p) => p.name)).toEqual(["ok"]);
+    expect(fit.message).toMatch(/late \(4\.5 MB\) was not added/);
+    expect(fit.message).toMatch(/huge is 6\.0 MB; each photo must be 5\.0 MB or smaller/);
+    expect(fitPhotosToSizeLimit([], [photo(1, "a")])).toEqual({ accepted: expect.any(Array), message: "" });
+  });
+
+  it("enforces the size rule inside the append when asked", () => {
+    const held = Array.from({ length: 6 }, (_, i) => ({ ...photo(4.5, `h${i}`), zone: null }));
+    const next = appendTaggedPhotos(held, [photo(4.5, "late")], "back", 8, { enforceSize: true });
+    expect(next).toHaveLength(6);
   });
 });

@@ -9,6 +9,8 @@ import DEFINITION from "../../../shared/lawn-photo-shots.json";
 export const SHOTS = DEFINITION.shots;
 export const SHOT_CAP = DEFINITION.cap;
 export const SHOT_MINIMUM = DEFINITION.minimum;
+export const MAX_PHOTO_BYTES = DEFINITION.maxPhotoBytes;
+export const MAX_TOTAL_BYTES = DEFINITION.maxTotalBytes;
 const MINIMUM_SLOTS = DEFINITION.minimumSlots;
 const BY_KEY = new Map(SHOTS.map((shot) => [shot.key, shot]));
 
@@ -60,4 +62,49 @@ export function assignShotZone(photos, index, zone) {
 // Whether the photos already hold every photo `key` allows.
 export function shotIsFull(photos, key) {
   return photos.filter((photo) => photo.zone === key).length >= maxFor(key);
+}
+
+// Append freshly read photos to the list. The first one carries `zone` (the shot
+// whose Add button was tapped) only if it is kept and that shot still has room
+// in `prev`, so a race between two reads can never leave two photos on a
+// one-photo shot. `enforceSize` also drops photos that no longer fit the size
+// rule against what `prev` holds now.
+export function appendTaggedPhotos(prev, incoming, zone, cap, { enforceSize = false } = {}) {
+  const kept = enforceSize ? fitPhotosToSizeLimit(prev, incoming).accepted : incoming;
+  const next = [...prev];
+  kept.forEach((photo) => {
+    const tag = photo === incoming[0] && zone && !shotIsFull(next, zone) ? zone : null;
+    next.push({ ...photo, zone: tag });
+  });
+  return next.slice(0, cap);
+}
+
+const mb = (bytes) => `${(bytes / 1048576).toFixed(1)} MB`;
+export function decodedBytes(dataUrl) {
+  const base64 = String(dataUrl || "").split(",")[1] || "";
+  const padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
+  return Math.floor((base64.length * 3) / 4) - padding;
+}
+
+// Which of the freshly read photos fit the size rule (each within the per-photo
+// limit, all of them together within the total), and a message naming every
+// photo that was left out so the technician can retake or remove it. `held` are
+// the photos already in the list.
+export function fitPhotosToSizeLimit(held, incoming) {
+  let total = held.reduce((sum, photo) => sum + decodedBytes(photo.data), 0);
+  const accepted = [];
+  const problems = [];
+  for (const photo of incoming) {
+    const bytes = decodedBytes(photo.data);
+    const name = photo.name || "A photo";
+    if (bytes > MAX_PHOTO_BYTES) {
+      problems.push(`${name} is ${mb(bytes)}; each photo must be ${mb(MAX_PHOTO_BYTES)} or smaller. Retake it or choose a smaller one.`);
+    } else if (total + bytes > MAX_TOTAL_BYTES) {
+      problems.push(`${name} (${mb(bytes)}) was not added: one visit can carry ${mb(MAX_TOTAL_BYTES)} of photos and these already total ${mb(total)}. Remove a large photo or retake it smaller.`);
+    } else {
+      accepted.push(photo);
+      total += bytes;
+    }
+  }
+  return { accepted, message: problems.join(" ") };
 }

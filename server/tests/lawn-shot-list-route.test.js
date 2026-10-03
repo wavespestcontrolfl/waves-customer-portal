@@ -39,7 +39,7 @@ const photo = (zone) => ({ data: 'YQ==', mimeType: 'image/jpeg', ...(zone ? { zo
 
 function withServer(fn) {
   const app = express();
-  app.use(express.json());
+  app.use(express.json({ limit: '100mb' }));
   app.use('/api/admin/lawn-assessment', router);
   app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: err.message }));
   const server = app.listen(0);
@@ -105,6 +105,29 @@ describe('POST /assess photo contract, visit assessment off (per-photo path)', (
     expect(twoCloseUps.body.error).toMatch(/only one photo can be the canopy close-up/i);
     const ok = await assess([photo('close_up'), photo('trouble'), photo('trouble')]);
     expect(ok.status).toBe(500);
+  });
+
+  test('shot list on: a non-empty invalid tag is refused (same words as the visit path), never stored unlabeled', async () => {
+    mockGates = { GATE_LAWN_SHOT_LIST: true };
+    const garage = await assess([photo('front'), photo('garage')]);
+    expect(garage.status).toBe(400);
+    expect(garage.body.error).toMatch(/photo zone must be one of: front, back, side, close_up, blade_crown, hot_edge, shade, trouble/);
+    mockGates = { GATE_LAWN_SHOT_LIST: true, GATE_LAWN_VISIT_ASSESSMENT: true };
+    const visitPath = await assess([photo('front'), photo('garage')]);
+    expect(visitPath.body.error).toBe(garage.body.error);
+  });
+
+  test('shot list on: the size rule refuses a set that cannot fit the request body, naming the photo', async () => {
+    mockGates = { GATE_LAWN_SHOT_LIST: true };
+    const big = (mb) => ({ data: Buffer.alloc(Math.floor(mb * 1048576)).toString('base64'), mimeType: 'image/jpeg' });
+    const total = await assess(Array.from({ length: 7 }, () => big(4.5)));
+    expect(total.status).toBe(400);
+    expect(total.body.error).toMatch(/total 31\.5 MB; one visit can carry 30\.0 MB/);
+    const single = await assess([photo('front'), big(5.5)]);
+    expect(single.body.error).toMatch(/^Photo 2 is 5\.5 MB; each photo must be 5\.0 MB or smaller/);
+    mockGates = {};
+    const off = await assess([photo('front'), big(5.5)]);
+    expect(off.status).toBe(500); // gate off: no size rule on this path, as before
   });
 });
 

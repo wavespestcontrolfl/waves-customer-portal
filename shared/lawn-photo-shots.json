@@ -2,6 +2,9 @@
   "_comment": "Lawn visit photo shot list (lawn report rebuild P18, GATE_LAWN_SHOT_LIST). The one definition shared by the server (server/services/lawn-photo-shots.js) and the admin client (client/src/lib/lawn-photo-shots.js). Order is the order the technician sees. key is the value stored in lawn_assessment_photos.zone (a free string, no enum). areaWeight is the weight a photo carries in a legacy area-score merge (0 = detail shot, never moves an area score); an unlabeled photo counts as 1. heroRank orders the report's lead photo (higher wins, then photo quality). pairable shots are the same spot every visit and may pair across visits for the before/after slider. max is how many photos one visit may carry for that shot.",
   "cap": 8,
   "minimum": 4,
+  "maxPhotoBytes": 5242880,
+  "maxTotalBytes": 31457280,
+  "sizeNote": "maxPhotoBytes is the per-photo limit (decoded bytes, 5 MiB, same as the request validator). maxTotalBytes caps one visit's photos together (decoded, 30 MiB): 30 MiB of photos is 40 MiB as base64, which leaves 10 MiB under the 50 MiB /api/admin JSON body limit for the rest of the request, so a contract-valid set of 8 never meets a parser-level 413. A resized 1600 px JPEG is about 0.3 to 0.5 MiB, so a normal set uses well under a fifth of this.",
   "minimumSlots": [["front"], ["back", "side"], ["close_up"], ["blade_crown"]],
   "shots": [
     {

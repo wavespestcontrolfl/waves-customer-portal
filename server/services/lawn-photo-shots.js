@@ -12,6 +12,8 @@ const SHOTS = Object.freeze(DEFINITION.shots.map((shot) => Object.freeze({ ...sh
 const SHOT_KEYS = Object.freeze(SHOTS.map((shot) => shot.key));
 const SHOT_CAP = DEFINITION.cap;
 const SHOT_MINIMUM = DEFINITION.minimum;
+const MAX_PHOTO_BYTES = DEFINITION.maxPhotoBytes;
+const MAX_TOTAL_BYTES = DEFINITION.maxTotalBytes;
 const MINIMUM_SLOTS = Object.freeze(DEFINITION.minimumSlots.map((slot) => Object.freeze([...slot])));
 const BY_KEY = new Map(SHOTS.map((shot) => [shot.key, shot]));
 
@@ -77,6 +79,52 @@ function shotCountError(zones = []) {
   return null;
 }
 
+// The error for one RAW zone value from a request: an empty zone is fine
+// (unlabeled); anything else must be one of the shot keys. Checked before the
+// value is normalized or counted, so a bad tag is refused, never stored as
+// unlabeled. Shared by both /assess paths.
+function rawZoneError(zone) {
+  if (zone == null || zone === '') return null;
+  return normalizeShotZone(zone) ? null : `photo zone must be one of: ${SHOT_KEYS.join(', ')}`;
+}
+
+// Validate a request's RAW zones end to end: every non-empty zone is a shot
+// key, then the per-shot maximum. Returns { error, zones } with normalized zones.
+function validateZones(rawZones = []) {
+  for (const zone of rawZones) {
+    const error = rawZoneError(zone);
+    if (error) return { error, zones: [] };
+  }
+  const zones = rawZones.map(normalizeShotZone);
+  const error = shotCountError(zones);
+  return error ? { error, zones: [] } : { error: null, zones };
+}
+
+const mib = (bytes) => `${(bytes / 1048576).toFixed(1)} MB`;
+
+// Size rule for a visit's photos, in decoded bytes, one entry per photo.
+// Each photo within the per-photo limit, and all together within the total, so
+// a valid set of 8 always fits under the request body ceiling. The message
+// names the photo to retake or remove (1-based, as the technician counts).
+function photoSizeError(byteSizes = []) {
+  const tooBig = byteSizes.findIndex((bytes) => bytes > MAX_PHOTO_BYTES);
+  if (tooBig >= 0) return `Photo ${tooBig + 1} is ${mib(byteSizes[tooBig])}; each photo must be ${mib(MAX_PHOTO_BYTES)} or smaller. Retake it or remove it.`;
+  const total = byteSizes.reduce((sum, bytes) => sum + bytes, 0);
+  if (total <= MAX_TOTAL_BYTES) return null;
+  const largest = byteSizes.indexOf(Math.max(...byteSizes));
+  return `These photos total ${mib(total)}; one visit can carry ${mib(MAX_TOTAL_BYTES)}. Photo ${largest + 1} is the largest (${mib(byteSizes[largest])}); retake it smaller or remove it.`;
+}
+
+// Whether a replayed capture used the shot-list zone vocabulary. Zones are the
+// only record of the capture mode: shade, hot_edge and blade_crown exist only
+// there. back/side alone are ambiguous (retired 2026-09-24, same words) and a
+// set larger than the old 6-photo cap with none of these zones is
+// indistinguishable from a bad legacy case; both replay as legacy.
+const SHOT_LIST_ONLY_ZONES = new Set(['shade', 'hot_edge', 'blade_crown']);
+function capturedUnderShotList(zones = []) {
+  return zones.some((zone) => SHOT_LIST_ONLY_ZONES.has(keyOf(zone)));
+}
+
 // Which of the minimum slots the visit's zones do not cover yet, as the
 // label(s) a technician can act on ("Back overview or Side overview").
 function missingMinimumSlots(zones = []) {
@@ -87,7 +135,7 @@ function missingMinimumSlots(zones = []) {
 }
 
 module.exports = {
-  SHOTS, SHOT_KEYS, SHOT_CAP, SHOT_MINIMUM, MINIMUM_SLOTS,
+  SHOTS, SHOT_KEYS, SHOT_CAP, SHOT_MINIMUM, MINIMUM_SLOTS, MAX_PHOTO_BYTES, MAX_TOTAL_BYTES,
   PAIRABLE_SHOT_ZONES, NON_PAIRABLE_SHOT_ZONES, SHOT_REPORT_LABELS,
-  normalizeShotZone, maxPerShot, areaWeight, heroRank, beatsHero, shotCountError, missingMinimumSlots,
+  normalizeShotZone, rawZoneError, validateZones, photoSizeError, capturedUnderShotList, maxPerShot, areaWeight, heroRank, beatsHero, shotCountError, missingMinimumSlots,
 };

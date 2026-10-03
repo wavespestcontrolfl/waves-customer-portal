@@ -225,3 +225,67 @@ describe('zone-weighted legacy merge', () => {
     expect(merged.turf_density).toBe(90);
   });
 });
+
+describe('raw zone validation shared by both /assess paths', () => {
+  test('a non-empty invalid tag is refused, never normalized to unlabeled', () => {
+    expect(shots.rawZoneError('garage')).toMatch(/must be one of: front, back, side/);
+    expect(shots.rawZoneError('')).toBeNull();
+    expect(shots.rawZoneError(null)).toBeNull();
+    expect(shots.rawZoneError('Hot_Edge')).toBeNull();
+    expect(shots.validateZones(['front', 'garage']).error).toMatch(/must be one of/);
+    expect(shots.validateZones(['front', 'back', null])).toEqual({ error: null, zones: ['front', 'back', null] });
+    expect(shots.validateZones(['back', 'back']).error).toMatch(/only one photo can be the back overview/i);
+  });
+});
+
+describe('size rule: eight valid photos always fit under the request body ceiling', () => {
+  const MIB = 1024 * 1024;
+  const PARSER_CEILING = 50 * MIB; // server/index.js LARGE_BODY_LIMIT for /api/admin
+
+  test('numbers live in the shared definition and agree with the request validator', () => {
+    const { MAX_PHOTO_BYTES } = require('../utils/request-photo-validation');
+    expect(definition.maxPhotoBytes).toBe(MAX_PHOTO_BYTES);
+    expect(shots.MAX_TOTAL_BYTES).toBe(definition.maxTotalBytes);
+    expect(shots.MAX_TOTAL_BYTES).toBeLessThanOrEqual(8 * shots.MAX_PHOTO_BYTES);
+  });
+
+  test('the largest valid set, as base64, leaves at least 8 MiB of margin', () => {
+    const base64Bytes = Math.ceil(shots.MAX_TOTAL_BYTES / 3) * 4;
+    expect(PARSER_CEILING - base64Bytes).toBeGreaterThanOrEqual(8 * MIB);
+  });
+
+  test('a photo over the per-photo limit is named', () => {
+    expect(shots.photoSizeError([MIB, 6 * MIB, MIB])).toBe('Photo 2 is 6.0 MB; each photo must be 5.0 MB or smaller. Retake it or remove it.');
+  });
+
+  test('a set over the total names the largest photo', () => {
+    const sizes = [4.5, 4.9, 4.8, 4.7, 4.6, 4.4, 4.3, 1].map((m) => Math.floor(m * MIB));
+    const message = shots.photoSizeError(sizes);
+    expect(message).toMatch(/total 33\.\d MB; one visit can carry 30\.0 MB/);
+    expect(message).toMatch(/Photo 2 is the largest \(4\.9 MB\)/);
+    expect(shots.photoSizeError([5 * MIB, 5 * MIB, 5 * MIB, 5 * MIB, 5 * MIB, 5 * MIB])).toBeNull();
+    expect(shots.photoSizeError(Array(8).fill(Math.floor(3.5 * MIB)))).toBeNull();
+  });
+
+  test('validateVisitPhotos refuses an over-total set with the same message, only with the shot list on', () => {
+    const big = (n) => ({ data: Buffer.alloc(n).toString('base64'), mimeType: 'image/jpeg' });
+    const set = Array.from({ length: 7 }, () => big(4.5 * MIB));
+    const on = visit.validateVisitPhotos(set, { shotList: true });
+    expect(on.error).toMatch(/total 31\.5 MB; one visit can carry 30\.0 MB/);
+    expect(visit.validateVisitPhotos([big(5 * MIB + 3)], { shotList: true }).error).toMatch(/^Photo 1 is 5\.0 MB; each photo/);
+    // Off: the old per-photo rule and no total (six photos is the old cap).
+    expect(visit.validateVisitPhotos(set.slice(0, 6)).error).toBeNull();
+    expect(visit.validateVisitPhotos([big(5 * MIB + 3)]).error).toBe('Each photo must be 5 MB or smaller');
+  });
+});
+
+describe('replay vocabulary', () => {
+  test('only shot-list evidence selects the shot-list vocabulary', () => {
+    expect(shots.capturedUnderShotList(['front', 'close_up', 'trouble'])).toBe(false);
+    expect(shots.capturedUnderShotList(['front', 'back', 'front'])).toBe(false);
+    expect(shots.capturedUnderShotList(['front', 'shade'])).toBe(true);
+    expect(shots.capturedUnderShotList(['hot_edge'])).toBe(true);
+    expect(shots.capturedUnderShotList([null, 'blade_crown'])).toBe(true);
+    expect(shots.capturedUnderShotList(Array(7).fill(null))).toBe(false); // stays a legacy case (and is skipped by the cap, as before)
+  });
+});

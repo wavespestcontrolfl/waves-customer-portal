@@ -159,7 +159,7 @@ import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
 import { shouldResetCompletionIdempotencyKey } from "../../lib/completion-idempotency";
 import { rankTechTips, techTipSubtext, techTipSentLabel } from "../../lib/tech-tips";
 import { LAWN_TARGET_SUGGESTIONS, NUTRITION_TARGET_SUGGESTIONS, productControlsTargets, productTargetsNutrition } from "../../lib/lawn-targets";
-import { SHOTS as LAWN_SHOTS, SHOT_CAP as LAWN_SHOT_CAP, assignShotZone, shotIsFull, shotListHint } from "../../lib/lawn-photo-shots";
+import { SHOTS as LAWN_SHOTS, SHOT_CAP as LAWN_SHOT_CAP, appendTaggedPhotos, assignShotZone, fitPhotosToSizeLimit, shotIsFull, shotListHint } from "../../lib/lawn-photo-shots";
 // Round 14 P2 (:2494): sentinel <option> value for the row's own stored appointment discount.
 const STORED_APPOINTMENT_DISCOUNT_OPTION = "__stored_appointment_discount";
 const { TERMITE_PERIMETER_METHODS } = termiteTreatmentMethods;
@@ -10142,11 +10142,17 @@ function LawnAssessmentCompletionBlock({
   technicianNotes = "",
 }) {
   const [photos, setPhotos] = useState([]);
+  // The latest list, for async reads that finish after a re-render.
+  const photosRef = useRef(photos);
+  photosRef.current = photos;
   // GATE_LAWN_SHOT_LIST (lawn report rebuild P18): the server says so in the
   // existing-assessment lookup below. Off (the default, and on any lookup
   // failure) the step keeps its three optional slots and 3-photo cap.
   const [shotList, setShotList] = useState(false);
   const pendingShotRef = useRef(null);
+  // Shots whose photo is still being read: held so a second tap on the same
+  // one-photo shot cannot queue a duplicate while the first decode is in flight.
+  const [readingShots, setReadingShots] = useState([]);
   const photoCap = shotList ? LAWN_SHOT_CAP : 3;
   const [result, setResult] = useState(null);
   const [visitReview, setVisitReview] = useState(null);
@@ -10166,6 +10172,7 @@ function LawnAssessmentCompletionBlock({
     setPhotos([]);
     setShotList(false);
     pendingShotRef.current = null;
+    setReadingShots([]);
     setResult(null);
     setVisitReview(null);
     setTechScores(null);
@@ -10232,11 +10239,23 @@ function LawnAssessmentCompletionBlock({
     pendingShotRef.current = null;
     if (!files.length || remaining === 0) return;
     setError("");
+    if (pendingZone) setReadingShots((prev) => [...prev, pendingZone]);
     try {
-      const nextPhotos = await Promise.all(
+      let nextPhotos = await Promise.all(
         files.slice(0, remaining).map(readLawnAssessmentPhoto),
       );
-      setPhotos((prev) => [...prev, ...nextPhotos.map((photo, k) => ({ ...photo, zone: k === 0 ? pendingZone : null }))].slice(0, photoCap));
+      if (shotList) {
+        // Eight photos must fit one request: each within the per-photo limit and
+        // all together within the total (shared/lawn-photo-shots.json). A photo
+        // that does not fit is named so it can be retaken or removed.
+        const fit = fitPhotosToSizeLimit(photosRef.current, nextPhotos);
+        nextPhotos = fit.accepted;
+        if (fit.message) setError(fit.message);
+        if (!nextPhotos.length) return;
+      }
+      // The per-shot maximum is enforced inside the update itself, so two reads
+      // landing together can never leave a duplicate tag.
+      setPhotos((prev) => appendTaggedPhotos(prev, nextPhotos, pendingZone, photoCap, { enforceSize: shotList }));
       setResult(null);
       setTechScores(null);
       setTypedKeys(new Set());
@@ -10245,6 +10264,7 @@ function LawnAssessmentCompletionBlock({
     } catch (err) {
       setError(err.message || "Photo read failed");
     } finally {
+      if (pendingZone) setReadingShots((prev) => { const at = prev.indexOf(pendingZone); return at < 0 ? prev : prev.filter((_, i) => i !== at); });
       if (fileRef.current) fileRef.current.value = "";
     }
   }
@@ -10487,7 +10507,7 @@ function LawnAssessmentCompletionBlock({
                   <button
                     type="button"
                     aria-label={`Add photo for ${shot.label}`}
-                    disabled={disabled || analyzing || photos.length >= photoCap || shotIsFull(photos, shot.key)}
+                    disabled={disabled || analyzing || photos.length >= photoCap || shotIsFull(photos, shot.key) || readingShots.includes(shot.key)}
                     onClick={() => { pendingShotRef.current = shot.key; fileRef.current?.click(); }}
                     style={{ height: 34, padding: "0 12px", borderRadius: 8, border: `1px solid ${D.border}`, background: D.white, color: D.heading, fontSize: 14, cursor: "pointer" }}
                   >

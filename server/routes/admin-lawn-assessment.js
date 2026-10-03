@@ -15,6 +15,7 @@ const lawnAssessment = require('../services/lawn-assessment');
 const visitAssessment = require('../services/lawn-visit-assessment');
 const visitInput = require('../services/lawn-visit-input');
 const shotList = require('../services/lawn-photo-shots');
+const { decodedBase64Bytes } = require('../utils/request-photo-validation');
 const shotListLive = () => require('../config/feature-gates').gateEnvValue('GATE_LAWN_SHOT_LIST');
 const visitResult = require('../services/lawn-visit-result');
 const visitScores = require('../services/lawn-visit-scores');
@@ -512,11 +513,14 @@ router.post('/assess', async (req, res, next) => {
       return res.status(400).json({ error: 'Only one photo can be the Front photo' });
     }
     // Shot list on, visit assessment off: the per-photo path has no photo-count
-    // cap of its own, so the shot list brings the cap and the per-shot maximum.
+    // cap of its own, so the shot list brings the cap, the same raw-zone and
+    // per-shot checks as the visit path (shotList.validateZones), and the size rule.
     if (shotListEnabled && !visitAssessmentEnabled && Array.isArray(photos)) {
       if (photos.length > shotList.SHOT_CAP) return res.status(400).json({ error: `At most ${shotList.SHOT_CAP} photos per visit` });
-      const countError = shotList.shotCountError(photos.map((photo) => visitInput.normalizePhotoZone(photo?.zone, { shotList: true })));
-      if (countError) return res.status(400).json({ error: countError });
+      const zoneCheck = shotList.validateZones(photos.map((photo) => photo?.zone));
+      const sizeError = shotList.photoSizeError(photos.map((photo) => (typeof photo?.data === 'string' ? decodedBase64Bytes(photo.data) : 0)));
+      const shotError = zoneCheck.error || sizeError;
+      if (shotError) return res.status(400).json({ error: shotError });
     }
 
     // Verify customer exists. The premise AND the move stamp are read in one

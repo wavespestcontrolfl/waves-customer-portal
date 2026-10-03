@@ -24,11 +24,14 @@ const service = {
 
 let assessRequests;
 let shotListEnabled;
+let holdRead;
+let readResult;
 
 class FixtureFileReader {
   readAsDataURL() {
-    this.result = 'data:image/jpeg;base64,cGhvdG8=';
-    this.onload({ target: { result: this.result } });
+    this.result = readResult || 'data:image/jpeg;base64,cGhvdG8=';
+    const done = () => this.onload({ target: { result: this.result } });
+    if (holdRead) holdRead.then(done); else done();
   }
 }
 class FixtureImage {
@@ -41,6 +44,8 @@ class FixtureImage {
 
 beforeEach(async () => {
   assessRequests = [];
+  holdRead = null;
+  readResult = null;
   localStorage.clear();
   localStorage.setItem('waves_admin_token', 'test-token');
   localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
@@ -194,6 +199,61 @@ describe('gate on', () => {
       { data: 'cGhvdG8=', mimeType: 'image/jpeg', zone: 'shade' },
       { data: 'cGhvdG8=', mimeType: 'image/jpeg' },
     ]);
+  });
+  it('holds a shot while its photo is still being read, so a second tap cannot queue a duplicate', async () => {
+    let release;
+    holdRead = new Promise((resolve) => { release = resolve; });
+    mount();
+    const addBack = await screen.findByRole('button', { name: 'Add photo for Back overview' });
+    const input = screen.getByLabelText('Add turf photos');
+    vi.spyOn(input, 'click').mockImplementation(() => {});
+    fireEvent.click(addBack);
+    fireEvent.change(input, { target: { files: [file('a')] } });
+    // Read still in flight: that shot is reserved, the others stay open.
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add photo for Back overview' }).disabled).toBe(true));
+    expect(screen.getByRole('button', { name: 'Add photo for Side overview' }).disabled).toBe(false);
+    release();
+    const select = await screen.findByLabelText('Slot for photo 1');
+    expect(select.value).toBe('back');
+    expect(screen.queryByLabelText('Slot for photo 2')).toBeNull();
+  });
+
+  it('a second pick on a reserved shot adds its photo untagged: one back tag, never two', async () => {
+    mount();
+    const input = await screen.findByLabelText('Add turf photos');
+    vi.spyOn(input, 'click').mockImplementation(() => {});
+    const addBack = screen.getByRole('button', { name: 'Add photo for Back overview' });
+    // Two reads before either lands; the reserved button ignores the second tap (the append-time race itself is pinned in lawn-photo-shots.test.js).
+    let release;
+    holdRead = new Promise((resolve) => { release = resolve; });
+    fireEvent.click(addBack);
+    fireEvent.change(input, { target: { files: [file('a')] } });
+    fireEvent.click(addBack);
+    fireEvent.change(input, { target: { files: [file('b')] } });
+    release();
+    await screen.findByLabelText('Slot for photo 2');
+    const tags = [1, 2].map((n) => screen.getByLabelText(`Slot for photo ${n}`).value);
+    expect(tags.filter((tag) => tag === 'back')).toHaveLength(1);
+  });
+
+  it('names the photo to retake when one is over the per-photo size limit, and adds nothing', async () => {
+    readResult = `data:image/jpeg;base64,${Buffer.alloc(6 * 1048576).toString('base64')}`;
+    mount();
+    await addFiles(['huge']);
+    const alert = await screen.findByText(/huge\.jpg is 6\.0 MB; each photo must be 5\.0 MB or smaller\. Retake it or choose a smaller one\./);
+    expect(alert).toBeTruthy();
+    expect(screen.queryByLabelText('Slot for photo 1')).toBeNull();
+    expect(screen.getByText('0/8')).toBeTruthy();
+  });
+
+  it('refuses a photo that would push the visit past the total, naming it', async () => {
+    readResult = `data:image/jpeg;base64,${Buffer.alloc(4.5 * 1048576).toString('base64')}`;
+    mount();
+    await addFiles(['p1', 'p2', 'p3', 'p4', 'p5', 'p6']);
+    await screen.findByLabelText('Slot for photo 6');
+    await addFiles(['p7']);
+    await screen.findByText(/p7\.jpg \(4\.5 MB\) was not added: one visit can carry 30\.0 MB of photos and these already total 27\.0 MB/);
+    expect(screen.queryByLabelText('Slot for photo 7')).toBeNull();
   });
 });
 

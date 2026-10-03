@@ -532,6 +532,48 @@ describe('runner', () => {
     expect(seen[0]).toEqual(['front', null, null]);
   });
 
+  test('a shot-list capture replays under the shot-list vocabulary: zones kept, shotList passed, hash over the kept zones', async () => {
+    const { contextHash } = require('../services/lawn-visit-input');
+    const captured = evalLib.fixtureCase(row({ id: 'shots' }), [
+      { id: 's1', s3_key: 'k1', photo_order: 0, zone: 'front' },
+      { id: 's2', s3_key: 'k2', photo_order: 1, zone: 'back' },
+      { id: 's3', s3_key: 'k3', photo_order: 2, zone: 'blade_crown' },
+      { id: 's4', s3_key: 'k4', photo_order: 3, zone: 'hot_edge' },
+      { id: 's5', s3_key: 'k5', photo_order: 4, zone: 'shade' },
+      { id: 's6', s3_key: 'k6', photo_order: 5, zone: 'trouble' },
+      { id: 's7', s3_key: 'k7', photo_order: 6, zone: 'trouble' },
+      { id: 's8', s3_key: 'k8', photo_order: 7, zone: 'trouble' },
+    ], {});
+    const calls = [];
+    const out = await evalLib.runEval([captured], {
+      analyzeVisit: async (input) => { calls.push(input); return { status: 'unavailable', reason: 'mock' }; },
+      loadPhoto: async () => ({ data: 'YQ==', mimeType: 'image/jpeg' }),
+    });
+    expect(out.skipped).toEqual([]);
+    expect(calls[0].shotList).toBe(true);
+    // The third problem-area photo exceeds that shot's maximum of two and replays unlabeled.
+    expect(calls[0].photos.map((p) => p.zone)).toEqual(['front', 'back', 'blade_crown', 'hot_edge', 'shade', 'trouble', 'trouble', null]);
+    expect(out.results[0].inputHash).toBe(contextHash({
+      photos: calls[0].photos,
+      photoZones: ['front', 'back', 'blade_crown', 'hot_edge', 'shade', 'trouble', 'trouble', null],
+      visionContext: calls[0].visionContext,
+    }));
+  });
+
+  test('an older capture replays exactly as before: no shotList key, three-slot vocabulary', async () => {
+    const old = evalLib.fixtureCase(row({ id: 'old' }), [
+      { id: 'o1', s3_key: 'k1', photo_order: 0, zone: 'front' },
+      { id: 'o2', s3_key: 'k2', photo_order: 1, zone: 'close_up' },
+    ], {});
+    const calls = [];
+    await evalLib.runEval([old], {
+      analyzeVisit: async (input) => { calls.push(input); return { status: 'unavailable' }; },
+      loadPhoto: async () => ({ data: 'YQ==', mimeType: 'image/jpeg' }),
+    });
+    expect(Object.keys(calls[0])).not.toContain('shotList');
+    expect(calls[0].photos.map((p) => p.zone)).toEqual(['front', 'close_up']);
+  });
+
   const cases = [
     evalLib.fixtureCase(row({ id: 'a1' }), photos, {}),
     evalLib.fixtureCase(row({ id: 'a2', scheduled_date: '2026-07-01' }), [{ id: 'p9', s3_key: 'broken', photo_order: 0 }], {}),
