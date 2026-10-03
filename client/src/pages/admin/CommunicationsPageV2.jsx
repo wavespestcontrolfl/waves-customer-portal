@@ -3457,6 +3457,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
                     setSelectedAgentDraft({ translationTrialId: translationAssist.trialId, suggestedMessage: translationAssist.replyTranslated });
                     // it is sent now or not at all (the server refuses to schedule it)
                     setSendTiming("now");
+                    // and it answers the customer's text, never a retained "Text back" target (a job applicant row on a shared phone)
+                    setReplyContext(null);
                   }}
                 >
                   Use Reply

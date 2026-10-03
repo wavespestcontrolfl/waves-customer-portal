@@ -579,6 +579,11 @@ router.post('/sms', async (req, res, next) => {
     // ordinary path (Codex r16 P1).
     const recruitingContext = await recruitingReplyContext(replyToMessageId, to);
     if (recruitingContext || (!trustedCustomerId && await isRecruitingPhone(to, undefined, { activeOnly: true }))) {
+      // A translation card's reply is a customer-service reply: the applicant rail sends without its
+      // freshness, fact and claim checks, so it never goes out there.
+      if (translationTrialId) {
+        return res.status(409).json({ error: 'This suggested reply is for the customer thread and cannot go out on a job applicant thread. Clear the message box and write the reply yourself.' });
+      }
       // Codex #4709 r3 P1: a consultation link never goes out on the
       // applicant rail — that path skips the gate/expiry/lead checks and the
       // lead audit. Refuse rather than divert.

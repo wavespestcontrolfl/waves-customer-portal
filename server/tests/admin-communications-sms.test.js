@@ -479,6 +479,27 @@ describe('admin communications SMS route', () => {
     });
   });
 
+  test('a suggested reply never goes out on the applicant rail (which runs none of its checks)', async () => {
+    const { isRecruitingPhone } = require('../utils/recruiting-thread-scope');
+    isRecruitingPhone.mockResolvedValue(true);
+    mockTranslationFacts.mockClear(); mockTranslationClaim.mockClear();
+    try {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+          method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to: '+15551234567', body: 'Su visita es el martes.', messageType: 'manual', translationTrialId: 7 }),
+        });
+        expect(res.status).toBe(409);
+        expect((await res.json()).error).toMatch(/job applicant thread/);
+        expect(mockTranslationFacts).not.toHaveBeenCalled();
+        expect(mockTranslationClaim).not.toHaveBeenCalled();
+        expect(sendCustomerMessage).not.toHaveBeenCalled();
+      });
+    } finally {
+      isRecruitingPhone.mockResolvedValue(false);
+    }
+  });
+
   test('a suggested reply is never also an Agent Review draft, and is never scheduled', async () => {
     await withServer(async (baseUrl) => {
       const post = (path, body) => fetch(`${baseUrl}/admin/communications/${path}`, {
