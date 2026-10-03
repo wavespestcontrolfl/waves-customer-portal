@@ -113,13 +113,32 @@ async function deleteUploadedObject(key) {
   }
 }
 
-async function cleanupUploadedServicePhotoObjects(photos = []) {
+async function cleanupUploadedServicePhotoObjects(photos = [], { verifyAbsentWith = null } = {}) {
   const seen = new Set();
   let deleted = 0;
   for (const photo of photos || []) {
     const key = photo?.s3_key || photo?.storage_key;
     if (!key || seen.has(key)) continue;
     seen.add(key);
+    if (verifyAbsentWith) {
+      try {
+        // Keep both reads in one PostgreSQL snapshot. Separate queries can
+        // straddle promotion from staging to the gallery and both miss.
+        const referenced = await verifyAbsentWith.raw(`
+          SELECT EXISTS (
+            SELECT 1 FROM service_photos WHERE s3_key = ?
+            UNION ALL
+            SELECT 1 FROM scheduled_service_photo_staging WHERE s3_key = ?
+          ) AS referenced
+        `, [key, key]);
+        if (referenced.rows?.[0]?.referenced === true) continue;
+      } catch (err) {
+        // Retaining an orphan is recoverable. Deleting an object when its
+        // database outcome cannot be established is not.
+        logger.warn(`[service-photos] commit cleanup verification failed key=${key}: ${err.message}`);
+        continue;
+      }
+    }
     await deleteUploadedObject(key);
     deleted += 1;
   }
@@ -138,6 +157,31 @@ function uniqueServicePhotoCount(photos = []) {
 async function withPhotoDbTransaction(knex, handler) {
   if (knex?.isTransaction) return handler(knex);
   return knex.transaction(handler);
+}
+
+async function withTrackedServicePhotoTransaction({
+  knex = db,
+  newlyUploadedObjects = [],
+} = {}, handler) {
+  const ownsTransaction = !knex?.isTransaction;
+  let transactionBodyCompleted = false;
+  try {
+    if (!ownsTransaction) return await handler(knex);
+    return await knex.transaction(async (trx) => {
+      const result = await handler(trx);
+      transactionBodyCompleted = true;
+      return result;
+    });
+  } catch (err) {
+    if ((!ownsTransaction || transactionBodyCompleted) && newlyUploadedObjects.length) {
+      logger.warn('[service-photos] retaining uploaded objects after an uncertain transaction outcome');
+      throw err;
+    }
+    // Knex rejects an owned transaction only after a handler failure has
+    // rolled back. Verify absence in one fresh snapshot before deleting.
+    await cleanupUploadedServicePhotoObjects(newlyUploadedObjects, { verifyAbsentWith: knex });
+    throw err;
+  }
 }
 
 async function uploadServicePhotoBuffer({
@@ -159,6 +203,7 @@ async function uploadServicePhotoBuffer({
   appVersion,
   aiTags,
   annotation,
+  newlyUploadedObjects,
   knex = db,
 }) {
   if (!serviceRecordId) {
@@ -285,6 +330,7 @@ async function uploadServicePhotoBuffer({
   }
 
   if (reusedExisting) await deleteUploadedObject(key);
+  else if (Array.isArray(newlyUploadedObjects)) newlyUploadedObjects.push({ s3_key: key });
   return row;
 }
 
@@ -300,6 +346,7 @@ async function uploadStagedServicePhotoBuffer({
   gpsLat,
   gpsLng,
   capturedAt,
+  newlyUploadedObjects,
   knex = db,
 }) {
   if (!scheduledServiceId || !technicianId) {
@@ -356,6 +403,7 @@ async function uploadStagedServicePhotoBuffer({
       captured_at: dateOrNow(capturedAt),
       image_sha256: imageHash,
     }).returning('*');
+    if (Array.isArray(newlyUploadedObjects)) newlyUploadedObjects.push({ s3_key: key });
     return row;
   } catch (err) {
     await deleteUploadedObject(key);
@@ -497,6 +545,17 @@ async function deleteStagedServicePhoto({ scheduledServiceId, photoId, actor, kn
     const locked = await lockStagedPhotoForChange(trx, { scheduledServiceId, photoId, actor });
     if (locked.error) return locked;
     await trx('scheduled_service_photo_staging').where({ id: photoId }).del();
+    // Treated-point marks are keyed by the photo's file, with no link to its
+    // row, so they go with it here: left behind they stay in the visit's
+    // marks for good (Codex P2 on #5624). In a savepoint, so an environment
+    // without the marks table still deletes the photo.
+    if (locked.photo.s3_key) {
+      await trx.transaction((sp) => sp('service_photo_marks')
+        .where({ scheduled_service_id: scheduledServiceId, s3_key: locked.photo.s3_key })
+        .del()).catch((err) => {
+        if (err?.code !== '42P01' && err?.code !== '42703') throw err;
+      });
+    }
     return { photo: locked.photo };
   });
   // The file goes once its row is gone for good: a failed delete leaves an
@@ -521,6 +580,7 @@ async function uploadServicePhotoDataUrls({
   photos = [],
   photoType = 'after',
   maxBytes = MAX_COMPLETION_PHOTO_DATA_URL_BYTES,
+  newlyUploadedObjects,
   knex = db,
 }) {
   const rows = [];
@@ -545,6 +605,7 @@ async function uploadServicePhotoDataUrls({
         appVersion: photo.appVersion,
         aiTags: withPhotoSlot(photo.aiTags, photo.slot),
         annotation: photo.annotation,
+        newlyUploadedObjects,
         knex,
       });
       rows.push(row);
@@ -578,6 +639,7 @@ module.exports = {
   sanitizeCustomerFacingPhotoCaption,
   safePhotoName,
   uniqueServicePhotoCount,
+  withTrackedServicePhotoTransaction,
   uploadServicePhotoBuffer,
   uploadServicePhotoDataUrls,
   uploadStagedServicePhotoBuffer,

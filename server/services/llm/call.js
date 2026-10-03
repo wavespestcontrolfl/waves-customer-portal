@@ -349,10 +349,16 @@ function settleLeg(base, served, out, jsonMode, extras) {
 }
 
 // fetch's abort signal for a budgeted call (both REST adapters).
-function abortAfter(timeoutMs) {
-  return timeoutMs && typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
-    ? { signal: AbortSignal.timeout(timeoutMs) }
-    : {};
+function abortAfter(timeoutMs, externalSignal) {
+  const timeoutSignal = timeoutMs && typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+    ? AbortSignal.timeout(timeoutMs)
+    : null;
+  const signals = [externalSignal, timeoutSignal].filter(Boolean);
+  if (!signals.length) return {};
+  if (signals.length === 1) return { signal: signals[0] };
+  return typeof AbortSignal.any === 'function'
+    ? { signal: AbortSignal.any(signals) }
+    : { signal: externalSignal || timeoutSignal };
 }
 
 // A provider's non-success status as a ledger code: `<provider>_<status>`
@@ -414,7 +420,7 @@ function openAIVerdict(data, out) {
   return null;
 }
 
-async function callOpenAI({ model, system, text, images = [], documents = [], jsonMode = true, jsonSchema, maxTokens, timeoutMs = DEFAULT_TIMEOUT_MS, reasoningEffort = 'low', laneId, promptVersion, policyLabel } = {}) {
+async function callOpenAI({ model, system, text, images = [], documents = [], jsonMode = true, jsonSchema, maxTokens, timeoutMs = DEFAULT_TIMEOUT_MS, signal, reasoningEffort = 'low', laneId, promptVersion, policyLabel } = {}) {
   if (!process.env.OPENAI_API_KEY) return { ok: false, reason: 'no_key' };
   const base = { provider: 'openai', requestedModel: model, laneId, promptVersion, policyLabel, system, text };
   const t0 = nowMs();
@@ -423,7 +429,7 @@ async function callOpenAI({ model, system, text, images = [], documents = [], js
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
       body: JSON.stringify(openAIRequest({ model, system, text, images, documents, jsonMode, jsonSchema, maxTokens, reasoningEffort })),
-      ...abortAfter(timeoutMs),
+      ...abortAfter(timeoutMs, signal),
     });
     if (!resp.ok) {
       logger.warn(`[llm] OpenAI ${resp.status}`);
@@ -669,7 +675,7 @@ function geminiVerdict(data, candidate, maxTokens) {
   return code;
 }
 
-async function callGemini({ model, system, text, images = [], jsonMode = true, jsonSchema, maxTokens = 2048, temperature = 0.2, thinkingLevel, timeoutMs, laneId, promptVersion, policyLabel } = {}) {
+async function callGemini({ model, system, text, images = [], jsonMode = true, jsonSchema, maxTokens = 2048, temperature = 0.2, thinkingLevel, timeoutMs, signal, laneId, promptVersion, policyLabel } = {}) {
   const key = geminiKey();
   if (!key) return { ok: false, reason: 'no_key' };
   const base = { provider: 'gemini', requestedModel: model, laneId, promptVersion, policyLabel, system, text };
@@ -679,7 +685,7 @@ async function callGemini({ model, system, text, images = [], jsonMode = true, j
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(geminiRequest({ system, text, images, jsonMode, jsonSchema, maxTokens, temperature, thinkingLevel })),
-      ...abortAfter(timeoutMs),
+      ...abortAfter(timeoutMs, signal),
     });
     if (!resp.ok) {
       logger.warn(`[llm] Gemini ${resp.status}`);
@@ -770,7 +776,7 @@ function anthropicVerdict(resp, maxTokens) {
   return 'anthropic_incomplete';
 }
 
-async function callAnthropic({ model, system, text, images = [], documents = [], tools, jsonMode = true, jsonSchema, maxTokens = 1024, timeoutMs, anthropicClient, laneId, promptVersion, policyLabel, effort } = {}) {
+async function callAnthropic({ model, system, text, images = [], documents = [], tools, jsonMode = true, jsonSchema, maxTokens = 1024, timeoutMs, signal, anthropicClient, laneId, promptVersion, policyLabel, effort } = {}) {
   if (!anthropicClient && (!Anthropic || !process.env.ANTHROPIC_API_KEY)) return { ok: false, reason: 'no_key' };
   const base = { provider: 'anthropic', requestedModel: model, laneId, promptVersion, policyLabel, system, text };
   // Ledger latency. With no budget the SDK keeps its default retries, so one
@@ -787,8 +793,11 @@ async function callAnthropic({ model, system, text, images = [], documents = [],
     // (e.g. the fact-check publish lock, dispatchWithFallback's shared
     // deadline) need it to be a true wall-clock ceiling; the pre-failover
     // fact-check client was constructed with maxRetries:0 for the same reason.
-    const resp = (timeoutMs
-      ? await client.messages.create(req, { timeout: timeoutMs, maxRetries: 0 })
+    const resp = (timeoutMs || signal
+      ? await client.messages.create(req, {
+        ...(timeoutMs ? { timeout: timeoutMs, maxRetries: 0 } : {}),
+        ...(signal ? { signal } : {}),
+      })
       : await client.messages.create(req)) || {};
     const out = anthropicText(resp);
     const served = { servedModel: resp.model, providerRef: resp.id, usage: usageOf('anthropic', resp), latencyMs: elapsedMs(t0), response: out };
@@ -937,6 +946,7 @@ async function runFallbackChain(policy, payload, { validate, reserveFallbackBudg
   const attemptCapMs = Number.isFinite(maxAttemptMs) && maxAttemptMs > 0 ? maxAttemptMs : Infinity;
   const deadline = Date.now() + timeoutBudgetMs;
   for (let index = 0; index < routes.length; index += 1) {
+    if (payload.signal?.aborted) break;
     const route = routes[index];
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) {
