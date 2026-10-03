@@ -52,11 +52,19 @@ describe('catalog-wide brand screen', () => {
     expect(screen('We set snap stations in the garage.')).toBe(true);
   });
 
-  test('a brand the prompt mentions is caught in any case and position', async () => {
-    const screen = await build({ mentionedText: 'Customer asked about termidor. Treated the thresholds.' });
-    expect(screen('Termidor was discussed at the door.')).toBe(true);
-    expect(screen('You asked about termidor.')).toBe(true);
-    // An unmentioned brand keeps the narrow rule.
+  test('a product the prompt names joins the full screen, other aliases included', async () => {
+    const termidor = await build({ mentionedText: 'Customer asked about Termidor. Treated the thresholds.' });
+    expect(termidor('Termidor was discussed at the door.')).toBe(true);
+    expect(termidor('You asked about termidor.')).toBe(true);
+    const trapper = await build({ mentionedText: 'Set a Trapper T-Rex Rat Snap Trap in the attic.' });
+    expect(trapper('We set T-Rex traps in the attic.')).toBe(true);
+    // Not named in the prompt: the narrow rule alone.
+    expect((await build())('We set T-Rex traps in the attic.')).toBe(false);
+  });
+
+  test("a note using a brand's word in its ordinary sense names nothing", async () => {
+    const screen = await build({ mentionedText: 'Customer asked us to suspend treatment in the nursery. Suspend the back yard too.' });
+    expect(screen('You asked us to suspend treatment in the nursery, so we skipped that room.')).toBe(false);
     expect(screen('Suspend watering for 24 hours after the visit.')).toBe(false);
   });
 
