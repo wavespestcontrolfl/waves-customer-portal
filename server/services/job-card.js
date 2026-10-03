@@ -320,30 +320,42 @@ async function loadOpenIssues(dbh, customerId) {
  */
 // Calls between the previous visit and THIS visit's start: a historical
 // card must not show later conversations as its pre-visit context.
-// The customer's own texts since the last visit (else the last 30 days),
+// The customer's own recent texts — since the last visit (else the last 30 days),
 // up to the visit's start — the calls line's window. Inbound only; a
 // tapback quotes a Waves text and is never their words; an unresolved
 // review-ask reservation is not a delivered message. null = unreadable
 // (the card says so), never an empty history.
 const TEXTS_FALLBACK_DAYS = 30;
 const TEXTS_MAX = 3;
+const TEXTS_PAGE = 25;
+const TEXTS_MAX_PAGES = 8;
 async function loadTextsSince(dbh, customerId, sinceInstant, untilInstant) {
   const until = untilInstant ? new Date(untilInstant) : new Date();
   const since = sinceInstant ? new Date(sinceInstant) : new Date(until.getTime() - TEXTS_FALLBACK_DAYS * 86400000);
   try {
-    const rows = await excludeUnresolvedSendReservations(dbh('sms_log').where({ customer_id: customerId }))
-      .where('direction', 'inbound')
-      .where('created_at', '>', since)
-      .where('created_at', '<', until)
-      .select('created_at', 'message_body', 'message_type')
-      .orderBy('created_at', 'desc')
-      // Over-fetch: tapbacks are dropped before three are kept.
-      .limit(12);
-    return rows
-      .filter((r) => r.message_type !== 'sms_reaction' && !isSmsReaction(r.message_body))
-      .map((r) => ({ date: etDateString(new Date(r.created_at)), text: clean(r.message_body, 300) }))
-      .filter((r) => r.text)
-      .slice(0, TEXTS_MAX);
+    // Tapbacks are filtered here, not in SQL, so pages are read until three
+    // real texts are kept or the window runs out — a run of reactions
+    // never hides the text they followed.
+    const kept = [];
+    for (let page = 0; page < TEXTS_MAX_PAGES && kept.length < TEXTS_MAX; page += 1) {
+      const rows = await excludeUnresolvedSendReservations(dbh('sms_log').where({ customer_id: customerId }))
+        .where('direction', 'inbound')
+        .where('created_at', '>', since)
+        .where('created_at', '<', until)
+        .select('created_at', 'message_body', 'message_type')
+        .orderBy('created_at', 'desc')
+        .orderBy('id', 'desc')
+        .limit(TEXTS_PAGE)
+        .offset(page * TEXTS_PAGE);
+      for (const r of rows) {
+        if (r.message_type === 'sms_reaction' || isSmsReaction(r.message_body)) continue;
+        const text = clean(r.message_body, 300);
+        if (text) kept.push({ date: etDateString(new Date(r.created_at)), text });
+        if (kept.length >= TEXTS_MAX) break;
+      }
+      if (rows.length < TEXTS_PAGE) break;
+    }
+    return kept;
   } catch (err) {
     logger.warn(`[job-card] texts unavailable for ${customerId}: ${err.code || err.name || 'error'}`);
     return null;
@@ -482,7 +494,7 @@ function unavailable(message, cause) {
   return err;
 }
 
-async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
+async function loadJobCardFacts(serviceId, dbh = db, deps = {}, { displayContext = true } = {}) {
   const svc = await dbh('scheduled_services as ss')
     .join('customers as c', 'ss.customer_id', 'c.id')
     .leftJoin('services as s', 'ss.service_id', 's.id')
@@ -518,7 +530,9 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
     loadAddons(dbh, svc.id),
   ]);
   const visitStart = svc.scheduled_date ? serviceStartInstant(etCalendarDayOf(svc.scheduled_date), svc.window_start) : null;
-  const customerContext = customerContextEnabled();
+  // Display-only context is for the full card: the dispatch board's
+  // readiness poll (every visit, every minute) never reads it.
+  const customerContext = displayContext && customerContextEnabled();
   const [calls, rain7d, texts, prepPhotos] = await Promise.all([
     loadCallsSince(svc.customer_id, lastVisit?.startedAt || null, deps, visitStart),
     serviceLine === 'lawn' ? loadRain7d(dbh, svc, etCalendarDayOf(svc.scheduled_date), deps) : Promise.resolve(null),
@@ -1665,7 +1679,7 @@ function dispatchReadiness({ facts, lines, blocks, sprayCheck, tank, isToday, no
 }
 
 async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), includePricing = false, readinessOnly = false } = {}) {
-  const facts = await loadJobCardFacts(serviceId, dbh, deps);
+  const facts = await loadJobCardFacts(serviceId, dbh, deps, { displayContext: !readinessOnly });
   if (!facts) return null;
   const protocols = deps.protocols || require('../config/protocols.json');
 

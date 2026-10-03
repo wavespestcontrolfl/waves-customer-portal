@@ -3,7 +3,7 @@
 // Job card "Why they booked" box (GATE_JOB_CARD_CUSTOMER_CONTEXT, owner
 // "ok go" 2026-10-03). Typed and texted words are quoted; a call's AI
 // summary and the office's wording are not; nothing recorded renders nothing.
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { JobCardCustomerRequest, JobCardCustomerTexts, JobCardPrepPhotos } from './SchedulePage';
 
@@ -41,7 +41,8 @@ describe('JobCardCustomerRequest', () => {
 describe('JobCardCustomerTexts', () => {
   it('quotes each text with its date', () => {
     render(<JobCardCustomerTexts D={D} texts={[{ date: '2026-09-02', text: 'Ants are back by the pool' }]} />);
-    expect(screen.getByText('Texts since last visit')).toBeTruthy();
+    // Neutral: a first visit shows the last 30 days, so no visit is named.
+    expect(screen.getByText('Recent customer texts')).toBeTruthy();
     expect(screen.getByText('\u201CAnts are back by the pool\u201D')).toBeTruthy();
     expect(screen.getByText('2026-09-02:', { exact: false })).toBeTruthy();
   });
@@ -73,8 +74,14 @@ describe('JobCardPrepPhotos', () => {
   it('a failed photo fetch still shows the note; nothing sent renders nothing', async () => {
     const request = vi.fn(async () => { throw new Error('404'); });
     render(<JobCardPrepPhotos D={D} serviceId="svc-1" submissions={submissions} request={request} />);
-    await waitFor(() => expect(request).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByText('Photos unavailable right now.', { exact: false })).toBeTruthy());
     expect(screen.getByText('\u201CNest by the lanai\u201D')).toBeTruthy();
+    expect(screen.getByLabelText('Customer photo 1 unavailable')).toBeTruthy();
+    // Retry fetches again at once; a success clears the notice.
+    request.mockImplementationOnce(async () => ({ photos: [{ id: 'p1', url: 'https://example.test/p1.jpg' }] }));
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(screen.getByAltText('Customer photo 1')).toBeTruthy());
+    expect(screen.queryByText('Photos unavailable right now.', { exact: false })).toBeNull();
     cleanup();
     const none = vi.fn();
     expect(render(<JobCardPrepPhotos D={D} serviceId="svc-1" submissions={null} request={none} />).container.textContent).toBe('');

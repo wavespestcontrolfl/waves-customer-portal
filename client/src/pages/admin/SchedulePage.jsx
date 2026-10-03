@@ -7176,13 +7176,14 @@ export function JobCardCustomerRequest({ request, D }) {
   );
 }
 
-// The customer's own texts since the last visit (same gate). null = the
+// The customer's own recent texts (same gate): since the last visit, or the
+// last 30 days on a first visit — so the heading names no visit. null = the
 // history could not be read — said so, never shown as "no texts".
 export function JobCardCustomerTexts({ texts, D }) {
   if (texts === undefined || (Array.isArray(texts) && texts.length === 0)) return null;
   return (
     <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, padding: "10px 12px", margin: "0 0 14px", fontSize: 14, lineHeight: 1.5, color: D.text }}>
-      <div style={{ fontWeight: 500, marginBottom: 4 }}>Texts since last visit</div>
+      <div style={{ fontWeight: 500, marginBottom: 4 }}>Recent customer texts</div>
       {texts === null
         ? <div style={{ color: D.muted }}>Text history unavailable right now.</div>
         : texts.map((t, i) => (
@@ -7199,32 +7200,53 @@ const JOB_CARD_PREP_LOCATIONS = {
 };
 // Signed for one hour server-side (visit-prep.js); re-fetched before then.
 const JOB_CARD_PREP_URL_REFRESH_MS = 50 * 60 * 1000;
+const JOB_CARD_PREP_RETRY_MS = 15 * 1000;
 
 // Photos the customer sent before the visit. Thumbnails come from the
 // ownership-scoped GET /admin/schedule/:id/visit-prep-photos; a failed
 // fetch leaves the topic, place and note, never an error over them.
 export function JobCardPrepPhotos({ serviceId, submissions, D, request = adminFetch }) {
   const [urls, setUrls] = useState({});
+  const [failed, setFailed] = useState(false);
   const [tick, setTick] = useState(0);
+  const autoRetriesRef = useRef(0);
   const photoSignature = (submissions || []).flatMap((s) => s.photoIds || []).join(",");
   useEffect(() => {
     if (!serviceId || !photoSignature) return undefined;
     let cancelled = false;
+    let retry = null;
     request(`/admin/schedule/${serviceId}/visit-prep-photos`)
       .then((data) => {
         if (cancelled) return;
         const next = {};
         for (const p of data?.photos || []) { if (p?.id && p?.url) next[p.id] = p.url; }
         setUrls(next);
+        setFailed(false);
+        autoRetriesRef.current = 0;
       })
-      .catch(() => {});
+      // Said on the card, with a Retry and ONE short automatic retry —
+      // never a silent "loading" until the 50-minute refresh.
+      .catch(() => {
+        if (cancelled) return;
+        setFailed(true);
+        if (autoRetriesRef.current < 1) {
+          autoRetriesRef.current += 1;
+          retry = setTimeout(() => setTick((n) => n + 1), JOB_CARD_PREP_RETRY_MS);
+        }
+      });
     const refresh = setTimeout(() => setTick((n) => n + 1), JOB_CARD_PREP_URL_REFRESH_MS);
-    return () => { cancelled = true; clearTimeout(refresh); };
+    return () => { cancelled = true; clearTimeout(refresh); clearTimeout(retry); };
   }, [serviceId, photoSignature, request, tick]);
   if (!submissions?.length) return null;
   return (
     <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, padding: "10px 12px", margin: "0 0 14px", fontSize: 14, lineHeight: 1.5, color: D.text }}>
       <div style={{ fontWeight: 500, marginBottom: 4 }}>Photos the customer sent</div>
+      {failed && (
+        <div style={{ color: D.muted, marginBottom: 6 }}>
+          Photos unavailable right now.{" "}
+          <button type="button" onClick={() => setTick((n) => n + 1)} style={{ background: "none", border: "none", padding: 0, color: D.text, textDecoration: "underline", cursor: "pointer", fontSize: 14 }}>Retry</button>
+        </div>
+      )}
       {submissions.map((s, i) => {
         const where = [JOB_CARD_PREP_LOCATIONS[s.locationOnProperty], JOB_CARD_PREP_TOPICS[s.topic]].filter(Boolean).join(" · ");
         return (
@@ -7235,7 +7257,7 @@ export function JobCardPrepPhotos({ serviceId, submissions, D, request = adminFe
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 4 }}>
                 {s.photoIds.map((id, n) => (urls[id]
                   ? <a key={id} href={urls[id]} target="_blank" rel="noopener noreferrer"><img src={urls[id]} alt={`Customer photo ${n + 1}`} style={{ width: 64, height: 64, objectFit: "cover", borderRadius: 2, border: `1px solid ${D.border}` }} /></a>
-                  : <div key={id} aria-label={`Customer photo ${n + 1} loading`} style={{ width: 64, height: 64, borderRadius: 2, border: `1px solid ${D.border}` }} />))}
+                  : <div key={id} aria-label={`Customer photo ${n + 1} ${failed ? "unavailable" : "loading"}`} style={{ width: 64, height: 64, borderRadius: 2, border: `1px solid ${D.border}` }} />))}
               </div>
             )}
           </div>

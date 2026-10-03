@@ -1378,13 +1378,19 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
     });
 
     // factsDb's chain is not awaitable as a list; sms_log gets one that is.
+    const smsReads = { count: 0 };
+    beforeEach(() => { smsReads.count = 0; });
     const withTexts = (row, texts) => {
       const base = factsDb({ 'scheduled_services as ss': { ...visit(false), ...row }, property_preferences: prefs });
       return Object.assign((table) => {
         if (table !== 'sms_log') return base(table);
         const chain = {};
-        for (const m of ['where', 'whereRaw', 'select', 'orderBy', 'limit']) chain[m] = () => chain;
-        chain.then = (res, rej) => (texts instanceof Error ? Promise.reject(texts) : Promise.resolve(texts)).then(res, rej);
+        for (const m of ['where', 'whereRaw', 'select', 'orderBy']) chain[m] = () => chain;
+        let size = Infinity; let skip = 0;
+        chain.limit = (n) => { size = n; return chain; };
+        chain.offset = (n) => { skip = n; return chain; };
+        chain.then = (res, rej) => (texts instanceof Error ? Promise.reject(texts) : Promise.resolve(texts.slice(skip, skip + size))).then(res, rej);
+        smsReads.count += 1;
         return chain;
       }, { raw: base.raw });
     };
@@ -1405,6 +1411,24 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       expect(out.notes.customerTexts[0].text).not.toContain('4545');
       // Texts stay display-only: the paragraph never reads them.
       expect(JSON.stringify(out.facts)).not.toContain('pool');
+    });
+
+    test('on → a long run of tapbacks never hides the real text before it (Codex r1)', async () => {
+      process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = 'true';
+      const tapbacks = Array.from({ length: 40 }, (_, i) => ({ created_at: new Date(Date.parse('2026-09-03T15:00:00Z') - i * 60000).toISOString(), message_body: 'ok', message_type: 'sms_reaction' }));
+      const out = await jobCard.loadJobCardFacts('svc1', withTexts({}, [...tapbacks, { created_at: '2026-09-01T15:00:00Z', message_body: 'Ants are back by the pool', message_type: 'sms' }]), deps);
+      expect(out.notes.customerTexts).toEqual([{ date: '2026-09-01', text: 'Ants are back by the pool' }]);
+    });
+
+    test('readiness builds never read texts or photos (Codex r1)', async () => {
+      process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = 'true';
+      process.env.GATE_VISIT_PREP_PHOTOS = 'true';
+      const spy = jest.spyOn(require('../services/visit-prep'), 'customerFlaggedFacts').mockResolvedValue(null);
+      try {
+        await jobCard.buildJobCard('svc1', { dbh: withTexts({}, []), readinessOnly: true, deps: { ...deps, protocols: {} }, now: new Date('2026-09-04T12:00:00Z') });
+        expect(smsReads.count).toBe(0);
+        expect(spy).not.toHaveBeenCalled();
+      } finally { spy.mockRestore(); delete process.env.GATE_VISIT_PREP_PHOTOS; }
     });
 
     test('on → an unreadable text history is null, not an empty list', async () => {
