@@ -251,6 +251,15 @@ describe('buildBusinessIdentity', () => {
     expect(buildBusinessIdentity({ address: '100 Example Plaza Dr Ste 999, Examplecity, FL 00000', places }).ambiguous).toBe(true);
   });
 
+  test('one tenant at the number, in a DIFFERENT suite than the one typed, is not the customer\'s business', () => {
+    const places = [place({ id: 'places/EXAMPLE1', subpremise: '101' })];
+    const identity = buildBusinessIdentity({ address: '100 Example Plaza Dr Ste 102, Examplecity, FL 00000', places });
+    expect(identity.matched).toBeNull();
+    // A place with no suite of its own cannot conflict and still matches.
+    const noSuite = buildBusinessIdentity({ address: '100 Example Plaza Dr Ste 102, Examplecity, FL 00000', places: [place({ id: 'places/EXAMPLE3' })] });
+    expect(noSuite.matched).toMatchObject({ placeId: 'places/EXAMPLE3' });
+  });
+
   test('an address with no street number has no identity', () => {
     expect(buildBusinessIdentity({ address: 'Example Plaza Dr, Examplecity, FL', places: [place()] })).toBeNull();
   });

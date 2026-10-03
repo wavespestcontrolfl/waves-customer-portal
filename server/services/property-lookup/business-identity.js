@@ -217,10 +217,17 @@ function placeIsAtStreetNumber(p, typed) {
 // The distinct operational businesses at the typed street number, narrowed
 // to one place by the typed unit when several share the number.
 function pickMatched(atNumber, typedUnit) {
-  if (atNumber.length === 1) return { matched: atNumber[0], ambiguous: false };
-  if (atNumber.length > 1 && typedUnit) {
-    const token = unitToken(typedUnit);
-    const byUnit = token ? atNumber.filter((p) => unitToken(p.subpremise) === token) : [];
+  const token = unitToken(typedUnit);
+  // A place that names a DIFFERENT suite than the one typed is the
+  // neighbor, never the customer's business — even when it is the only
+  // result at the number (its type would drive classification and the suite
+  // default). A place with no subpremise of its own cannot conflict.
+  const compatible = token
+    ? atNumber.filter((p) => !unitToken(p.subpremise) || unitToken(p.subpremise) === token)
+    : atNumber;
+  if (compatible.length === 1) return { matched: compatible[0], ambiguous: false };
+  if (compatible.length > 1 && token) {
+    const byUnit = compatible.filter((p) => unitToken(p.subpremise) === token);
     if (byUnit.length === 1) return { matched: byUnit[0], ambiguous: false };
   }
   return { matched: null, ambiguous: atNumber.length > 1 };
