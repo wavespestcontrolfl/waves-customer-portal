@@ -492,7 +492,11 @@ function reserviceSurfaceOpen({ secondaryProperty }) {
 // and a button to move it only when the reschedule page would accept it.
 async function bookedReserviceResult(customerId, line, booked, actions) {
   const token = /^\/reschedule\/([A-Za-z0-9_-]+)$/.exec(String(booked.rescheduleUrl || ''))?.[1];
-  const row = token && await db('scheduled_services').where({ customer_id: customerId, reschedule_token: token }).first('id');
+  // The button is optional: a failed lookup keeps the booked visit's facts.
+  const row = token && await db('scheduled_services').where({ customer_id: customerId, reschedule_token: token }).first('id').catch((err) => {
+    logger.warn(`[ai-assistant] booked re-service lookup failed, no button: ${err.message}`);
+    return null;
+  });
   const movable = Boolean(row && await movableVisit(row.id));
   if (movable) {
     addAction(actions, {
@@ -510,12 +514,14 @@ async function bookedReserviceResult(customerId, line, booked, actions) {
 
 // What is covered is read from the customer's own words with the texting
 // AI's classifier, never from the line the model picked: a separately priced
-// specialty anywhere in them, or no report in this line, means no free offer.
+// specialty anywhere in them means no free offer, and so does anything short
+// of an active report (isActivePestReport, the SMS flow's own predicate) in
+// this line: "Do you cover ants?" names a line but reports nothing.
 function reportRefusal(customerWords, line) {
-  const { reportedReserviceLanes, reportedReserviceExcludedSpecialty } = require('../reservice-scheduler');
+  const { reportedReserviceLanes, reportedReserviceExcludedSpecialty, isActivePestReport } = require('../reservice-scheduler');
   const words = (Array.isArray(customerWords) ? customerWords : []).map((w) => String(w || '')).filter(Boolean);
   if (words.some((w) => reportedReserviceExcludedSpecialty(w))) return RESERVICE_SPECIALTY;
-  if (!words.some((w) => reportedReserviceLanes(w).includes(line))) return RESERVICE_HAND_OFF;
+  if (!words.some((w) => isActivePestReport(w) && reportedReserviceLanes(w).includes(line))) return RESERVICE_HAND_OFF;
   return null;
 }
 

@@ -30,6 +30,7 @@ jest.mock('../services/reservice-scheduler', () => {
   return {
     reportedReserviceLanes: actual.reportedReserviceLanes,
     reportedReserviceExcludedSpecialty: actual.reportedReserviceExcludedSpecialty,
+    isActivePestReport: actual.isActivePestReport,
     reserviceSelfServeEnabled: () => true,
   };
 });
@@ -329,6 +330,21 @@ describe('GATE_PORTAL_CHAT_RESERVICE', () => {
     const sent = mockCreate.mock.calls[0][0].messages;
     expect(sent[0]).toEqual(expect.objectContaining({ role: 'user', content: 'The ants are back in the kitchen' }));
     expect(sent).toHaveLength(3);
+  });
+
+  test('a turn that offers the re-service and then hands off drops the booking button, keeping the others', async () => {
+    const escalate = jest.spyOn(assistant, 'escalate').mockResolvedValue({ reply: 'sent', escalated: true, teamNotified: true });
+    mockCreate.mockResolvedValueOnce({ content: [
+      { type: 'tool_use', id: 't1', name: 'offer_reservice', input: { service_line: 'pest' } },
+      { type: 'tool_use', id: 't2', name: 'open_portal_section', input: { section: 'service_reports' } },
+      { type: 'tool_use', id: 't3', name: 'escalate', input: { reason: 'Treatment did not work', topic: 'complaint' } },
+    ] });
+
+    const result = await assistant.processMessage({ message: 'The ants are back in the kitchen and your treatment did nothing', channel: 'portal_chat', channelIdentifier: 'sess-1', customerId: 'cust-1', secondaryProperty: false });
+
+    expect(result.escalated).toBe(true);
+    expect(result.actions).toEqual([{ type: 'tab', label: 'Open completed visits and reports', tab: 'services' }]);
+    escalate.mockRestore();
   });
 
   test('SMS keeps the original oldest-first history read', async () => {

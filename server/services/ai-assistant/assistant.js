@@ -492,7 +492,9 @@ class WavesAssistant {
             { gap: toolUse.input.not_supported === true, topic: toolUse.input.topic });
           // A card or button an earlier tool in this turn produced still shows
           // under the hand-off reply (a charge question shows the card AND
-          // hands off the "why").
+          // hands off the "why"), except a free re-service booking button: a
+          // turn that hands off is one the team decides.
+          if (lane.actions) lane.actions.splice(0, lane.actions.length, ...lane.actions.filter((a) => !String(a.href || '').startsWith('/reservice/')));
           return { ...escResult, ...laneExtras(lane) };
         }
 

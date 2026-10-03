@@ -19,6 +19,7 @@ jest.mock('../services/reservice-scheduler', () => {
   return {
     reportedReserviceLanes: actual.reportedReserviceLanes,
     reportedReserviceExcludedSpecialty: actual.reportedReserviceExcludedSpecialty,
+    isActivePestReport: actual.isActivePestReport,
     reserviceSelfServeEnabled: (...a) => mockSelfServe(...a),
   };
 });
@@ -84,7 +85,7 @@ test('a lane the page would book: a booking button the server built, and the mod
   expect(JSON.stringify(result)).not.toMatch(/tok_rs_1/);
 });
 
-test('pest and lawn both offered in one turn share one button', async () => {
+test('a second offer call in one turn adds no second button', async () => {
   const actions = [];
   const context = { secondaryProperty: false, customerWords: ['The ants are back and weeds are coming back all over the lawn'] };
 
@@ -136,6 +137,7 @@ test.each([
   ['the eligibility read fails', () => { reschedulePage.pageEligibility.mockRejectedValue(new Error('db down')); }],
   ['the token names no visit of this customer', () => { bookedRow = undefined; }],
   ['the booked visit has no reschedule link', () => { mockPage.pageLaneState.mockResolvedValue(pageState({ pest: { ...BOOKED_PEST, rescheduleUrl: null } })); }],
+  ['the booked visit lookup fails', () => { bookedRow = Promise.reject(new Error('db down')); bookedRow.catch(() => {}); }],
 ])('a booked re-service the page would not move: its date, but no button: %s', async (_label, arrange) => {
   mockPage.pageLaneState.mockResolvedValue(pageState({ pest: BOOKED_PEST }));
   arrange();
@@ -186,6 +188,17 @@ describe('the customer\'s own words decide what is covered, not the line the mod
   test('a report in the other line is not this line: weeds never open a free pest visit', async () => {
     const { result, actions } = await offer('pest', { secondaryProperty: false, customerWords: WEEDS });
 
+    expect(actions).toEqual([]);
+    expect(result.offered).toBe(false);
+  });
+
+  test.each([
+    ['a coverage question', 'Do you cover ants?'],
+    ['a general lawn question', 'Tell me about lawn care'],
+  ])('%s names a line but reports nothing: no offer', async (_label, text) => {
+    const { result, actions } = await offer(text.includes('lawn') ? 'lawn' : 'pest', { secondaryProperty: false, customerWords: [text] });
+
+    expect(mockPage.pageLaneState).not.toHaveBeenCalled();
     expect(actions).toEqual([]);
     expect(result.offered).toBe(false);
   });
