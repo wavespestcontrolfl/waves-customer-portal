@@ -80,6 +80,13 @@ describe('inboxAssistFor', () => {
       inboundEnglish: READY.inbound_english, replyEnglish: null, replyTranslated: null, replyExpiresAt: null,
       heldReason: 'The reply quotes a live arrival time, so it needs a person.', customerId: 'c1',
     });
+    // a bare figure, when the facts it was drafted from carried a live arrival line
+    const bare = { ...READY, reply_english: '20 minutes.', reply_translated: '20 minutos.', created_at: new Date('2026-10-03T14:59:00Z') };
+    mockTrial.mockResolvedValue({ ...bare, facts_block: 'LIVE STATUS: en route\nLIVE ETA: about 20 minutes (GPS, as of 10:59 AM)' });
+    expect(await inboxAssistFor('c1', NOW)).toMatchObject({ replyTranslated: null, heldReason: 'The reply quotes a live arrival time, so it needs a person.' });
+    // the same words with no live arrival fact behind them are an ordinary reply
+    mockTrial.mockResolvedValue({ ...bare, facts_block: 'VISIT: Tuesday' });
+    expect(await inboxAssistFor('c1', NOW)).toMatchObject({ replyTranslated: '20 minutos.', heldReason: null });
   });
 
   test('only into the thread the text came in on: another To number gets nothing', async () => {

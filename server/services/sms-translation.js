@@ -959,6 +959,13 @@ const INBOUND_UNCONFIRMED_RE = /^(?:inbound_|figures_changed_in_inbound|meaning_
 const INBOX_REPLY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const INBOX_PENDING_WINDOW_MS = 3 * 60 * 1000;
 
+function quotesLiveEta(replyEnglish, factsBlock) {
+  const drafter = require('./sms-shadow-drafter');
+  const text = require('./sms-track-links').stripTrackLinks(replyEnglish || '');
+  if (drafter.findEtaMinutesClaims(text).length) return true;
+  return /LIVE ETA:/.test(String(factsBlock || '')) && drafter.findGroundedMinutesFigures(text).length > 0;
+}
+
 /**
  * Inbox assist for one customer: the trial row of their LATEST text, when that text is still the last message
  * in the thread (nobody has answered and they have not written again). null when the gate is off, there is no
@@ -990,7 +997,9 @@ async function inboxAssistFor(customerId, now = new Date(), phoneLast10 = null) 
     // A reply that states an arrival time in minutes ("about 9 minutes away") is never offered: once Use Reply
     // copies it into the message box nothing re-checks the figure, and the box can be sent or scheduled much
     // later. Staff see the translation of the text and answer with the live time themselves.
-    const quotesEta = fresh && require('./sms-shadow-drafter').findEtaMinutesClaims(row.reply_english || '').length > 0;
+    // Same two detectors as the trial's own live-ETA hold: a worded claim anywhere, and, when the facts the
+    // reply was drafted from carried a LIVE ETA line, any bare minutes figure ("20 minutes.").
+    const quotesEta = fresh && quotesLiveEta(row.reply_english, row.facts_block);
     const ready = fresh && !quotesEta;
     if (!inboundConfirmed && !ready) return null;
     const held = row.verdict === 'held' ? (HOLD_WORDS.find(([re]) => re.test(row.hold_reason || '')) || [null, 'The reply did not pass every check.'])[1] : null;
