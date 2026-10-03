@@ -788,12 +788,13 @@ const BillingCron = {
         }
 
         // STRIPE_REQUIRES_ACTION — cardholder bank requires 3DS / step-up
-        // auth. The PI lands in requires_action state and Stripe fires
-        // payment_intent.requires_action, which the webhook handler
-        // already turns into a customer SMS asking them to log in and
-        // authenticate. Do NOT schedule a retry — the next cron tick
-        // would hit the exact same SCA wall and burn the retry slot
-        // without ever reaching a card-update path.
+        // auth. The PI lands in requires_action state. The requires_action
+        // webhook sends the customer NOTHING for a card (its only notice is
+        // the ACH micro-deposit one), so this branch is where the office
+        // hears of it: the stuck PI is cancelled and one office alert is
+        // raised (autopay-sca-parked.js). Do NOT schedule a retry — the next
+        // cron tick would hit the exact same SCA wall. The failed row stays
+        // 'failed' with no retry armed, so it is already parked.
         if (err.code === 'STRIPE_REQUIRES_ACTION') {
           await logAutopay(customer.id, 'sca_required', {
             amountCents: Math.round(parseFloat(customer.monthly_rate) * 100),
@@ -801,7 +802,8 @@ const BillingCron = {
             paymentId: err.paymentRecord?.id || null,
             details: { source: 'autopay', stripe_payment_intent_id: err.stripePaymentIntentId },
           }).catch(() => {});
-          logger.warn(`[billing-cron] SCA required for customer id=${customer.id} — webhook handles SMS, skipping retry`);
+          await require('./autopay-sca-parked').parkScaChargeForOffice(customer, err, { amount: customer.monthly_rate, source: 'autopay' });
+          logger.warn(`[billing-cron] SCA required for customer id=${customer.id} — parked, no retry`);
           continue;
         }
 
@@ -1455,36 +1457,48 @@ const BillingCron = {
         }
 
         // STRIPE_REQUIRES_ACTION — the bank demands 3DS step-up. The
-        // requires_action webhook already texts the customer a link to
-        // authenticate; burning the remaining retry slots against the
-        // same SCA wall only generates repeat "payment failed" SMS.
-        // Park the ladder; collection resumes through the customer's
-        // authenticated payment.
+        // requires_action webhook sends the customer nothing for a card, and
+        // burning the remaining retry slots against the same SCA wall only
+        // generates repeat "payment failed" SMS. Park the ladder, then cancel
+        // the stuck PI and tell the office (autopay-sca-parked.js) — but ONLY
+        // once the park is confirmed: if the update failed or matched no row
+        // the row is still armed, so the next sweep runs this branch again
+        // and no cancel or alert goes out now.
         if (err.code === 'STRIPE_REQUIRES_ACTION') {
-          await db('payments')
-            .where({ id: payment.id })
-            .update({
-              retry_count: payment.retry_count + 1,
-              next_retry_at: null,
-              // charge() already inserted a fresh REQUIRES AUTH failed
-              // row for the retry PI; that row is the one collectible
-              // representation of this obligation (the webhook flips it
-              // to paid once the customer authenticates). Supersede the
-              // original so the same amount isn't shown as owed twice —
-              // and doesn't remain payable after authentication. Guard
-              // against the replay-dedupe case where the failure record
-              // IS this row: self-superseding would hide real debt.
-              superseded_by_payment_id: (err.paymentRecord?.id && err.paymentRecord.id !== payment.id)
-                ? err.paymentRecord.id
-                : null,
-              failure_reason: 'Customer authentication required (3DS) — webhook prompted customer',
-            }).catch(() => {});
+          let parkedRows = 0;
+          try {
+            parkedRows = await db('payments')
+              .where({ id: payment.id })
+              .update({
+                retry_count: payment.retry_count + 1,
+                next_retry_at: null,
+                // charge() already inserted a fresh REQUIRES AUTH row for the
+                // retry PI; that row is the one collectible representation of
+                // this obligation. Supersede the original so the same amount
+                // isn't shown as owed twice. Guard against the replay-dedupe
+                // case where the failure record IS this row: self-superseding
+                // would hide real debt.
+                superseded_by_payment_id: (err.paymentRecord?.id && err.paymentRecord.id !== payment.id)
+                  ? err.paymentRecord.id
+                  : null,
+                // isCustomerInitiatedPaymentIntent (stripe-webhook.js) matches
+                // on this prefix — keep it exactly.
+                failure_reason: 'Customer authentication required (3DS) — parked, no retry scheduled',
+              });
+          } catch (parkErr) {
+            logger.error(`[billing-cron] Could not park payment ${payment.id} after 3DS demand: ${parkErr.message}`);
+          }
+          if (!parkedRows) {
+            logger.error(`[billing-cron] SCA park update for payment ${payment.id} did not apply — row left armed, no sca_required event, PI not cancelled, no office alert; the next sweep retries this branch`);
+            continue;
+          }
           await logAutopay(payment.customer_id, 'sca_required', {
             amountCents: Math.round(parseFloat(payment.amount) * 100),
             paymentId: payment.id,
             details: { source: 'autopay_retry', stripe_payment_intent_id: err.stripePaymentIntentId },
           }).catch(() => {});
-          logger.warn(`[billing-cron] SCA required on retry for customer id=${customer.id} — ladder parked, webhook handles customer SMS`);
+          await require('./autopay-sca-parked').parkScaChargeForOffice(customer, err, { amount: payment.amount, source: 'autopay_retry' });
+          logger.warn(`[billing-cron] SCA required on retry for customer id=${customer.id} — ladder parked`);
           continue;
         }
 
