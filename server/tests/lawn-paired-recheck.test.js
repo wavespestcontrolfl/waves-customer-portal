@@ -14,17 +14,18 @@ jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
 const logger = require('../services/logger');
 const { dispatchWithFallback } = require('../services/llm/call');
 const MODELS = require('../config/models');
+const featureGates = require('../config/feature-gates');
 const shotList = require('../services/lawn-photo-shots');
 const recheck = require('../services/lawn-paired-recheck');
 const { buildLawnProgress } = require('../services/service-report/lawn-progress');
 const { storedVisitMemoryFor, publicSinceLast } = require('../services/service-report/lawn-visit-memory');
 
-const GATES = ['GATE_LAWN_PAIRED_RECHECK', 'GATE_LAWN_VISIT_MEMORY'];
+const GATES = ['GATE_LAWN_PAIRED_RECHECK', 'GATE_LAWN_VISIT_MEMORY', 'GATE_LAWN_PROPERTY_HISTORY'];
 const saved = {};
 beforeAll(() => GATES.forEach((g) => { saved[g] = process.env[g]; }));
 afterAll(() => GATES.forEach((g) => { if (saved[g] === undefined) delete process.env[g]; else process.env[g] = saved[g]; }));
-const gateOn = () => { process.env.GATE_LAWN_PAIRED_RECHECK = 'true'; process.env.GATE_LAWN_VISIT_MEMORY = 'true'; };
-const gateOff = () => { delete process.env.GATE_LAWN_PAIRED_RECHECK; process.env.GATE_LAWN_VISIT_MEMORY = 'true'; };
+const gateOn = () => { process.env.GATE_LAWN_PAIRED_RECHECK = 'true'; process.env.GATE_LAWN_VISIT_MEMORY = 'true'; process.env.GATE_LAWN_PROPERTY_HISTORY = 'true'; };
+const gateOff = () => { delete process.env.GATE_LAWN_PAIRED_RECHECK; process.env.GATE_LAWN_VISIT_MEMORY = 'true'; process.env.GATE_LAWN_PROPERTY_HISTORY = 'true'; };
 
 const SHOT_LIST_META = [{ filename: 'a.jpg', photoVocabulary: shotList.PHOTO_VOCABULARY }];
 const assessment = (id, over = {}) => ({ id, customer_id: 'cust-1', property_id: 'prop-1', photos: JSON.stringify(SHOT_LIST_META), ...over });
@@ -42,10 +43,10 @@ const fullWorld = () => ({
 });
 
 describe('pair formation', () => {
-  test('same premises, same shot: front, back and side pair; close-up and problem-area never do', () => {
+  test('same premises, same shot: front and back pair; side (no recorded side of the property), close-up and problem-area never do', () => {
     const pairs = recheck.formPairs(fullWorld());
-    expect(pairs.map((p) => p.zone)).toEqual(['front', 'back', 'side']);
-    expect(pairs.map((p) => p.label)).toEqual(['Front overview', 'Back overview', 'Side overview']);
+    expect(pairs.map((p) => p.zone)).toEqual(['front', 'back']);
+    expect(pairs.map((p) => p.label)).toEqual(['Front overview', 'Back overview']);
     for (const p of pairs) {
       expect(p.before.assessment_id).toBe(PRIOR);
       expect(p.after.assessment_id).toBe(CUR);
@@ -69,7 +70,25 @@ describe('pair formation', () => {
     expect(recheck.formPairs({ ...fullWorld(), prior: assessment(CUR) })).toEqual([]);
   });
 
-  test('back and side pair only when BOTH visits were captured under the shot list; front always', () => {
+  test('side is excluded by data: the recheck-pairable shots come from the shared JSON flag, front and back only; the slider\'s pairable set is untouched', () => {
+    expect([...shotList.RECHECK_PAIRABLE_SHOT_ZONES].sort()).toEqual(['back', 'front']);
+    const definition = require('../../shared/lawn-photo-shots.json');
+    expect(definition.shots.filter((s) => s.recheckPairable === true).map((s) => s.key)).toEqual(['front', 'back']);
+    expect(definition.shots.find((s) => s.key === 'side').recheckPairable).toBe(false);
+    // the existing flag and everything that reads it are exactly what they were
+    expect([...shotList.PAIRABLE_SHOT_ZONES].sort()).toEqual(['back', 'front', 'side']);
+    expect([...shotList.NON_PAIRABLE_SHOT_ZONES].sort()).toEqual(['blade_crown', 'close_up', 'hot_edge', 'shade', 'trouble']);
+    const { pairBeforeAfterPhotos } = require('../services/lawn-visit-input');
+    const slider = pairBeforeAfterPhotos([{ zone: 'side', id: 'b' }], [{ zone: 'side', id: 'a' }]);
+    expect(slider).toEqual({ before: { zone: 'side', id: 'b' }, after: { zone: 'side', id: 'a' } });
+  });
+
+  test('a visit pair with only side photos on both visits forms no pair', () => {
+    const world = { ...fullWorld(), currentPhotos: [photo(CUR, 'side')], priorPhotos: [photo(PRIOR, 'side')] };
+    expect(recheck.formPairs(world)).toEqual([]);
+  });
+
+  test('back pairs only when BOTH visits were captured under the shot list; front always', () => {
     const noMarker = (id) => assessment(id, { photos: JSON.stringify([{ filename: 'a.jpg' }]) });
     for (const world of [
       { ...fullWorld(), prior: noMarker(PRIOR) },
@@ -105,8 +124,9 @@ describe('pair formation', () => {
     expect(recheck.formPairs(dup)[0].after.id).toBe('hi');
   });
 
-  test('the pair cap holds and matches the pairable shots', () => {
-    expect(recheck.MAX_PAIRS).toBe(shotList.PAIRABLE_SHOT_ZONES.length);
+  test('the pair cap holds and matches the recheck-pairable shots (2)', () => {
+    expect(recheck.MAX_PAIRS).toBe(2);
+    expect(recheck.MAX_PAIRS).toBe(shotList.RECHECK_PAIRABLE_SHOT_ZONES.length);
     expect(recheck.formPairs(fullWorld()).length).toBeLessThanOrEqual(recheck.MAX_PAIRS);
   });
 });
@@ -337,7 +357,6 @@ const goodJson = () => ({
   pairs: [
     { pair: 1, verdict: 'better', what_changed: ['color'] },
     { pair: 2, verdict: 'same', what_changed: [] },
-    { pair: 3, verdict: 'cannot_tell', what_changed: [] },
   ],
   items: [
     { item: 'weeds', verdict: 'better', what_changed: ['patch_size'], pairs: [1, 2] },
@@ -362,11 +381,32 @@ describe('gate off', () => {
     expect(w.log.updates).toEqual([]);
   });
 
-  test('the gate needs the visit memory it writes onto', async () => {
-    process.env.GATE_LAWN_VISIT_MEMORY = 'false';
+  test.each([
+    ['GATE_LAWN_PAIRED_RECHECK'], ['GATE_LAWN_VISIT_MEMORY'], ['GATE_LAWN_PROPERTY_HISTORY'],
+  ])('each prerequisite is required: with %s off the gate is not live, the hook is null and nothing runs', async (off) => {
+    expect(featureGates.lawnPairedRecheckLive()).toBe(true); // all three on (beforeEach)
+    process.env[off] = 'false';
+    expect(featureGates.lawnPairedRecheckLive()).toBe(false);
     const w = makeWorld();
     expect(await recheck.runPairedRecheck(ctxOf(w), { knex: w.knex, dispatch: dispatchWithFallback })).toEqual({ status: 'off' });
+    expect(recheck.scheduleAfterFreeze(ctxOf(w), { knex: w.knex })).toBeNull();
     expect(dispatchWithFallback).not.toHaveBeenCalled();
+    expect(w.log.tables).toEqual([]);
+  });
+
+  test('every combination of the three gates: live only when all three are on', () => {
+    const names = ['GATE_LAWN_PAIRED_RECHECK', 'GATE_LAWN_VISIT_MEMORY', 'GATE_LAWN_PROPERTY_HISTORY'];
+    for (let mask = 0; mask < 8; mask += 1) {
+      names.forEach((name, i) => { if (mask & (1 << i)) process.env[name] = 'true'; else delete process.env[name]; });
+      expect([mask, featureGates.lawnPairedRecheckLive()]).toEqual([mask, mask === 7]);
+    }
+  });
+
+  test('the hook does not schedule an entry that can never carry a recheck (no prior, or no watch topic left)', () => {
+    for (const sinceLast of [null, { v: 1, priorAssessmentId: PRIOR, applied: [], checks: [] }, { v: 1, priorAssessmentId: PRIOR, applied: [], checks: [{ key: 'mowing', status: 'watch' }] }]) {
+      const w = makeWorld({ sinceLast });
+      expect(recheck.scheduleAfterFreeze(ctxOf(w), { knex: w.knex })).toBeNull();
+    }
   });
 });
 
@@ -380,7 +420,7 @@ describe('the job', () => {
     expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
     const [policy, payload, options] = dispatchWithFallback.mock.calls[0];
     expect(policy).toBe(MODELS.TEXT_POLICIES.lawnPairedRecheck);
-    expect(payload.images).toHaveLength(6);
+    expect(payload.images).toHaveLength(4);
     expect(payload.laneId).toBe('lawn_paired_recheck');
     expect(options.validate({ json: goodJson() })).toBeNull();
     expect(options.validate({ json: { nope: true } })).toBe('schema_invalid');
@@ -424,7 +464,7 @@ describe('the job', () => {
       },
     });
     dispatchWithFallback.mockResolvedValue(okAnswer({
-      pairs: [{ pair: 1, verdict: 'better', what_changed: ['color'] }, { pair: 2, verdict: 'better', what_changed: ['color'] }, { pair: 3, verdict: 'better', what_changed: ['color'] }],
+      pairs: [{ pair: 1, verdict: 'better', what_changed: ['color'] }, { pair: 2, verdict: 'better', what_changed: ['color'] }],
       items: [{ item: 'water', verdict: 'better', what_changed: ['color'], pairs: [1] }],
     }));
     await recheck.runPairedRecheck(ctxOf(w), { knex: w.knex, photoService: photoService(), dispatch: dispatchWithFallback });
@@ -484,21 +524,31 @@ describe('the job', () => {
   test('a pair with an unreadable photo is dropped; the rest still go in the one call', async () => {
     const w = makeWorld();
     dispatchWithFallback.mockResolvedValue(okAnswer({
-      pairs: [{ pair: 1, verdict: 'worse', what_changed: ['edge'] }, { pair: 2, verdict: 'same', what_changed: [] }],
+      pairs: [{ pair: 1, verdict: 'worse', what_changed: ['edge'] }],
       items: [{ item: 'weeds', verdict: 'worse', what_changed: ['edge'], pairs: [1] }, { item: 'water', verdict: 'cannot_tell', what_changed: [], pairs: [] }],
     }));
     const ps = { getPhotoBase64: jest.fn(async (key) => { if (key.includes('front')) throw new Error('NoSuchKey'); return { data: 'QQ==', mimeType: 'image/jpeg' }; }) };
     const out = await recheck.runPairedRecheck(ctxOf(w), { knex: w.knex, photoService: ps, dispatch: dispatchWithFallback });
     expect(out.status).toBe('stored');
     expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
-    expect(dispatchWithFallback.mock.calls[0][1].images).toHaveLength(4);
+    expect(dispatchWithFallback.mock.calls[0][1].images).toHaveLength(2);
     expect(storedVisitMemoryFor(w.records['svc-cur'].structured_notes, CUR).sinceLast.checks[0].recheck).toMatchObject({ verdict: 'worse', pairs: ['back'] });
+  });
+
+  test('side photos only on both visits: no pair, no photo read, no call, no write', async () => {
+    const w = makeWorld({ world: { ...fullWorld(), currentPhotos: [photo(CUR, 'side')], priorPhotos: [photo(PRIOR, 'side')] } });
+    const ps = photoService();
+    const out = await recheck.runPairedRecheck(ctxOf(w), { knex: w.knex, photoService: ps, dispatch: dispatchWithFallback });
+    expect(out.status).toBe('no_pairs');
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+    expect(ps.getPhotoBase64).not.toHaveBeenCalled();
+    expect(w.log.updates).toEqual([]);
   });
 
   test('all cannot_tell: nothing written', async () => {
     const w = makeWorld();
     dispatchWithFallback.mockResolvedValue(okAnswer({
-      pairs: [1, 2, 3].map((pair) => ({ pair, verdict: 'cannot_tell', what_changed: [] })),
+      pairs: [1, 2].map((pair) => ({ pair, verdict: 'cannot_tell', what_changed: [] })),
       items: [{ item: 'weeds', verdict: 'cannot_tell', what_changed: [], pairs: [] }, { item: 'water', verdict: 'cannot_tell', what_changed: [], pairs: [] }],
     }));
     const out = await recheck.runPairedRecheck(ctxOf(w), { knex: w.knex, photoService: photoService(), dispatch: dispatchWithFallback });
@@ -521,8 +571,8 @@ describe('fail-open: a miss writes nothing, is logged, and never throws', () => 
     ['garbage string', async () => okAnswer('not json')],
     ['invalid enum', async () => okAnswer({ pairs: [{ pair: 1, verdict: 'amazing', what_changed: [] }], items: [] })],
     ['empty arrays', async () => okAnswer({ pairs: [], items: [] })],
-    ['only unknown item keys', async () => okAnswer({ pairs: [1, 2, 3].map((pair) => ({ pair, verdict: 'better', what_changed: ['color'] })), items: [{ item: 'mowing', verdict: 'better', what_changed: ['color'], pairs: [1] }] })],
-    ['a missing item', async () => okAnswer({ pairs: [1, 2, 3].map((pair) => ({ pair, verdict: 'better', what_changed: ['color'] })), items: [{ item: 'weeds', verdict: 'better', what_changed: ['color'], pairs: [1] }] })],
+    ['only unknown item keys', async () => okAnswer({ pairs: [1, 2].map((pair) => ({ pair, verdict: 'better', what_changed: ['color'] })), items: [{ item: 'mowing', verdict: 'better', what_changed: ['color'], pairs: [1] }] })],
+    ['a missing item', async () => okAnswer({ pairs: [1, 2].map((pair) => ({ pair, verdict: 'better', what_changed: ['color'] })), items: [{ item: 'weeds', verdict: 'better', what_changed: ['color'], pairs: [1] }] })],
     ['null result', async () => null],
   ])('%s', async (_name, dispatch) => {
     const { w, out } = await run(dispatch);

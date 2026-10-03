@@ -18,7 +18,7 @@ const photo = (assessmentId, zone) => ({
 });
 
 const complete = () => ({
-  pairs: [1, 2, 3].map((pair) => ({ pair, verdict: 'better', what_changed: ['color'] })),
+  pairs: [1, 2].map((pair) => ({ pair, verdict: 'better', what_changed: ['color'] })),
   items: [
     { item: 'weeds', verdict: 'better', what_changed: ['color'], pairs: [1] },
     { item: 'water', verdict: 'cannot_tell', what_changed: [], pairs: [] },
@@ -64,15 +64,15 @@ const openaiBody = (json) => ({ ok: true, json: async () => ({ output_text: JSON
 describe('an incomplete answer fails its leg and the fallback provider runs', () => {
   let originalFetch; let saved; let calls;
   beforeEach(() => {
-    saved = { g: process.env.GEMINI_API_KEY, o: process.env.OPENAI_API_KEY, gate: process.env.GATE_LAWN_PAIRED_RECHECK, mem: process.env.GATE_LAWN_VISIT_MEMORY };
+    saved = { g: process.env.GEMINI_API_KEY, o: process.env.OPENAI_API_KEY, gate: process.env.GATE_LAWN_PAIRED_RECHECK, mem: process.env.GATE_LAWN_VISIT_MEMORY, ph: process.env.GATE_LAWN_PROPERTY_HISTORY };
     process.env.GEMINI_API_KEY = 'test'; process.env.OPENAI_API_KEY = 'test';
-    process.env.GATE_LAWN_PAIRED_RECHECK = 'true'; process.env.GATE_LAWN_VISIT_MEMORY = 'true';
+    process.env.GATE_LAWN_PAIRED_RECHECK = 'true'; process.env.GATE_LAWN_VISIT_MEMORY = 'true'; process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
     originalFetch = global.fetch;
     calls = [];
   });
   afterEach(() => {
     global.fetch = originalFetch;
-    for (const [k, v] of [['GEMINI_API_KEY', saved.g], ['OPENAI_API_KEY', saved.o], ['GATE_LAWN_PAIRED_RECHECK', saved.gate], ['GATE_LAWN_VISIT_MEMORY', saved.mem]]) {
+    for (const [k, v] of [['GEMINI_API_KEY', saved.g], ['OPENAI_API_KEY', saved.o], ['GATE_LAWN_PAIRED_RECHECK', saved.gate], ['GATE_LAWN_VISIT_MEMORY', saved.mem], ['GATE_LAWN_PROPERTY_HISTORY', saved.ph]]) {
       if (v === undefined) delete process.env[k]; else process.env[k] = v;
     }
   });
@@ -91,8 +91,8 @@ describe('an incomplete answer fails its leg and the fallback provider runs', ()
   const p = (n) => ({ pair: n, verdict: 'better', what_changed: ['color'] });
   const it = (item) => ({ item, verdict: 'better', what_changed: ['color'], pairs: [1] });
   const incomplete = {
-    'a missing pair': { ...complete(), pairs: [p(1), p(2)] },
-    'an extra pair': { ...complete(), pairs: [p(1), p(2), p(3), p(4)] },
+    'a missing pair': { ...complete(), pairs: [p(1)] },
+    'an extra pair': { ...complete(), pairs: [p(1), p(2), p(3)] },
     'a duplicate pair': { ...complete(), pairs: [p(1), p(2), p(2)] },
     'a missing item': { ...complete(), items: [it('weeds')] },
     'an unknown item': { ...complete(), items: [it('weeds'), it('water'), it('mowing')] },

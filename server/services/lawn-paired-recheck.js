@@ -23,10 +23,15 @@
  *   - the prior visit is the FROZEN sinceLast.priorAssessmentId, never a live
  *     "latest" lookup, and both assessments must be the same customer AND the
  *     same recorded property;
- *   - only the pairable shots pair (front, back, side: same fixed spot every
- *     visit; lawn-photo-shots.js). back and side count only when BOTH visits were
- *     captured under the shot list (the photoVocabulary marker), because those
- *     words meant something else before 2026-09-24;
+ *   - only the shots flagged recheckPairable in shared/lawn-photo-shots.json
+ *     pair: front (mailbox or driveway apron) and back (the capture guide fixes
+ *     it to the back door or lanai edge, so it is the same spot every visit).
+ *     side is NOT one: it records no side of the property, so two visits can show
+ *     opposite sides; it stays out until a stable side identity is captured.
+ *     (The report's before/after slider keeps its own, wider `pairable` set.)
+ *     back counts only when BOTH visits were captured under the shot list (the
+ *     photoVocabulary marker), because that word meant something else before
+ *     2026-09-24;
  *   - problem-area (trouble) and the other detail shots are a different spot each
  *     time and nothing in a stored photo identifies a watch item, so they never
  *     pair: no guess;
@@ -52,10 +57,10 @@ const WRITABLE_VERDICTS = new Set(['better', 'same', 'worse']);
 // What may be said changed: a closed set, never prose (it can sit next to a
 // customer report one day, so nothing the model wrote reaches storage).
 const CHANGE_DIMENSIONS = ['patch_size', 'color', 'edge', 'density'];
-// One pair per pairable shot and each shot carries one photo per visit, so the
-// natural ceiling is the pairable shot count; stated as a constant so a future
-// shot list cannot silently widen the request.
-const MAX_PAIRS = 3;
+// One pair per recheck-pairable shot and each shot carries one photo per visit,
+// so the natural ceiling is that shot count (front, back = 2); stated as a
+// constant so a future shot list cannot silently widen the request.
+const MAX_PAIRS = shotList.RECHECK_PAIRABLE_SHOT_ZONES.length;
 const MAX_OUTPUT_TOKENS = 4096;
 // A background job: generous, but bounded so a stalled provider cannot pile up.
 const MAX_MS = 60 * 1000;
@@ -159,9 +164,9 @@ function formPairs({ current, prior, currentPhotos, priorPhotos } = {}) {
   if (!sameId(current.property_id, prior.property_id)) return [];
   const bothShotList = capturedUnderShotListMarker(current) && capturedUnderShotListMarker(prior);
   const pairs = [];
-  for (const zone of shotList.PAIRABLE_SHOT_ZONES) {
-    // front was always the one fixed-spot shot; back and side are a same-spot
-    // claim only when both visits were shot under the shot list.
+  for (const zone of shotList.RECHECK_PAIRABLE_SHOT_ZONES) {
+    // front was always the one fixed-spot shot; back is a same-spot claim only
+    // when both visits were shot under the shot list.
     if (zone !== 'front' && !bothShotList) continue;
     const before = bestPhotoFor(priorPhotos, zone);
     const after = bestPhotoFor(currentPhotos, zone);
@@ -434,6 +439,9 @@ async function runPairedRecheck(ctx = {}, deps = {}) {
  */
 function scheduleAfterFreeze(ctx, deps = {}) {
   if (!lawnPairedRecheckLive()) return null;
+  // An entry that froze with no prior, or with no watch topic left to speak to,
+  // can never carry a recheck, so there is nothing to schedule.
+  if (preflight(ctx).done) return null;
   return setImmediate(() => {
     runPairedRecheck(ctx, deps).catch((err) => logger.warn(`[lawn-paired-recheck] job failed: ${err.message}`));
   });

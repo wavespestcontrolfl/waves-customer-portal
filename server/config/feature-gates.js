@@ -4028,9 +4028,9 @@ const gates = {
   // Lawn paired-photo recheck (lawn report rebuild P19b, owner ruling 2026-09-29
   // round 3b): one model read of last visit's and today's SAME-SPOT overview
   // photos as pairs, written once onto the frozen visit memory's watched topics
-  // (check.recheck, source 'photo_pair'). Ships DARK. This entry is for
-  // logGateStatus only: the job reads GATE_LAWN_PAIRED_RECHECK at call time via
-  // lawnPairedRecheckLive().
+  // (check.recheck, source 'photo_pair'). Ships DARK. Needs GATE_LAWN_VISIT_MEMORY
+  // AND GATE_LAWN_PROPERTY_HISTORY too. This entry is for logGateStatus only: the
+  // job reads GATE_LAWN_PAIRED_RECHECK at call time via lawnPairedRecheckLive().
   lawnPairedRecheck: gateEnvValue('GATE_LAWN_PAIRED_RECHECK'),
 
   // Lawn report v6 copy (lawn report rebuild P14): fixed sentences from the
@@ -4764,11 +4764,15 @@ function lawnVisitMemoryLive() {
 
 // GATE_LAWN_PAIRED_RECHECK read at CALL time (same 1/true/on convention as
 // gateEnvValue). The one canonical reader for the paired-photo recheck
-// (services/lawn-paired-recheck.js). It writes onto the visit memory's frozen
-// entry, so it is false unless GATE_LAWN_VISIT_MEMORY is live too. Off = no
-// extra model call, no photo read, no stored field, byte-identical payload.
+// (services/lawn-paired-recheck.js). THREE prerequisites, all required:
+// GATE_LAWN_VISIT_MEMORY (it writes onto that store's frozen entry) and
+// GATE_LAWN_PROPERTY_HISTORY (the prior visit exists only from the
+// property-scoped history; without it the first render freezes sinceLast: null
+// and the one chance this visit has to be rechecked would be spent for good).
+// With any of them off it reports off: no hook, no extra model call, no photo
+// read, no stored field, byte-identical payload.
 function lawnPairedRecheckLive() {
-  return gateEnvValue('GATE_LAWN_PAIRED_RECHECK') && lawnVisitMemoryLive();
+  return gateEnvValue('GATE_LAWN_PAIRED_RECHECK') && lawnVisitMemoryLive() && gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
 }
 
 // GATE_LAWN_REPORT_COPY_V6 read at CALL time (same 1/true/on convention as
