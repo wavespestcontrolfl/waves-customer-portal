@@ -219,6 +219,12 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
       const handedOff = await reconcile(technicianToken, false);
       expect(handedOff.status).toBe(409);
       expect((await handedOff.json()).code).toBe('photo_reconciliation_handed_off');
+      const concurrentRetries = await Promise.all(
+        Array.from({ length: 6 }, () => reconcile(technicianToken, false)),
+      );
+      expect(concurrentRetries.map((response) => response.status)).toEqual(Array(6).fill(409));
+      expect(await Promise.all(concurrentRetries.map((response) => response.json())))
+        .toEqual(Array(6).fill(expect.objectContaining({ code: 'photo_reconciliation_handed_off' })));
       expect(await db('dispatch_alerts').where({
         type: 'service_photo_reconciliation_required', job_id: completedVisitId, resolved_at: null,
       })).toHaveLength(1);
