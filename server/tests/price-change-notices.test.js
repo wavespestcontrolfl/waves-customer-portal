@@ -33,7 +33,7 @@ const { getActivelyCoveredCustomerIds, getPaymentPendingCustomerIds } = require(
 const { sendTemplate } = require('../services/email-template-library');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
-const { previewPriceChange, createAndSendBatch } = require('../services/price-change-notices');
+const { previewPriceChange, createAndSendBatch, sendNoticeSms } = require('../services/price-change-notices');
 
 let customerRows;
 let noticeInserts;
@@ -455,5 +455,30 @@ describe('createAndSendBatch delivery', () => {
     const out = await createAndSendBatch({ ...GOOD_ARGS, expectedCount: 2, expectedDigest: digest });
     expect(out).toMatchObject({ ok: false, created: 1, failed: 1 });
     expect(activityInserts).toHaveLength(1);
+  });
+});
+
+describe('sendNoticeSms delivery evidence', () => {
+  const args = { customer: CUSTOMER, vars: { effective_date: 'December 10, 2026', price_change_url: 'waves.test/p/abc' }, hasEmailLeg: false };
+  it('legacy callers keep counting a sent answer as sent', async () => {
+    sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'not_sent' });
+    expect(await sendNoticeSms(args)).toEqual({ sent: true, attempted: true });
+  });
+  it.each([
+    [{ sent: true, deliveryOutcome: 'accepted' }, { sent: true, attempted: true }],
+    // SMS gate off / owner silence answer sent:true but nothing left: definitively unsent
+    [{ sent: true, deliveryOutcome: 'not_sent' }, { sent: false, attempted: false }],
+    // unknown whether it left: held by the caller, never stamped delivered
+    [{ sent: true, deliveryOutcome: 'uncertain' }, { sent: false, attempted: true }],
+    [{ sent: true }, { sent: false, attempted: true }],
+  ])('requireAccepted: %j', async (answer, expected) => {
+    sendCustomerMessage.mockResolvedValue(answer);
+    expect(await sendNoticeSms({ ...args, requireAccepted: true })).toEqual(expected);
+  });
+  it('surfaces a caller hook refusal code and merges caller metadata without losing the base', async () => {
+    sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, code: 'NOTICE_REPOINTED' });
+    const res = await sendNoticeSms({ ...args, sendOptions: { metadata: { rate_review_letter: true } } });
+    expect(res).toEqual({ sent: false, attempted: false, blockedCode: 'NOTICE_REPOINTED' });
+    expect(sendCustomerMessage.mock.calls.at(-1)[0].metadata).toMatchObject({ original_message_type: 'price_change_notice', rate_review_letter: true });
   });
 });

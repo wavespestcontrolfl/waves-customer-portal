@@ -598,6 +598,12 @@ describe('customer surfaces', () => {
     expect(JSON.parse(notices()[0].metadata).send_hold).toMatchObject({ reason: 'recipient_changed' });
   });
 
+  test('send: the text pointer counts as delivered only on provider acceptance', async () => {
+    mockDb.reset(book());
+    await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+    expect(smsLeg.mock.calls[0][0].requireAccepted).toBe(true);
+  });
+
   test('send: the locked text handoff dispatches inside the fence when clear, and refuses a number changed since the claim', async () => {
     mockDb.reset(book());
     const dispatch = jest.fn(async () => ({ ok: true }));
@@ -709,6 +715,23 @@ describe('customer surfaces', () => {
     mockDb.reset(bk);
     const out = await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW });
     expect(out.map((c) => c.chargeCents)).toEqual([10800, 10800]);
+  });
+
+  test('portal: a monthly family whose account line moved to prepaid does not add to the other family\'s next charge', async () => {
+    const mk = (n) => draft(n, {
+      customer_id: CUSTOMER(1), rate_review_row_id: ROW(n), billing_lane: 'monthly_membership', cadence_label: 'month', effective_date: '2026-12-15', status: 'sent', sent_at: NOW,
+      current_amount_cents: 4000, new_amount_cents: 4400, noticed_current_cents: 4000, noticed_new_cents: 4400,
+      family_key: n === 1 ? 'pest_control' : 'lawn_care', metadata: { source: 'rate_review', batch_key: BATCH_KEY, current_rate_source: 'ledger_slice' },
+    });
+    const bk = book({ customers: [customer(1, { monthly_rate: '100.00', billing_mode: 'monthly_membership' })], notices: [mk(1), mk(2)] });
+    bk.customer_plan_rates = [{ customer_id: CUSTOMER(1), family_key: 'pest_control', monthly_rate: '40.00' }, { customer_id: CUSTOMER(1), family_key: 'lawn_care', monthly_rate: '40.00' }, { customer_id: CUSTOMER(1), family_key: 'mosquito', monthly_rate: '20.00' }];
+    mockDb.reset(bk);
+    expect((await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).map((c) => c.chargeCents)).toEqual([10800, 10800]);
+    // the lawn line is now covered by a prepaid term: the apply rejects its notice (billing_lane_changed)
+    mockDb.store.annual_prepay_terms.push({ id: 'term-9', customer_id: CUSTOMER(1), status: 'active', renewal_decision: null, term_start: '2026-06-01', term_end: '2027-05-31', prepay_amount: '480.00', coverage_service_type: 'Lawn Care' });
+    const out = await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW });
+    expect(out.map((c) => c.service)).toEqual(['Pest control']);
+    expect(out[0].chargeCents).toBe(10400); // only its own +$4, not the hidden family's
   });
 
   test('portal: a declined prepaid renewal is not upcoming', async () => {

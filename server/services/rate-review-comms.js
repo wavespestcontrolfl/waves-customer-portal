@@ -725,6 +725,11 @@ async function sendEntry(dbh, entry, { batchKey, costBlock, templateHash, actorI
   const smsPhone = String(customer.phone || '').trim();
   const sms = await PriceChangeNotices.sendNoticeSms({
     customer,
+    // Delivery evidence is provider acceptance only: a sender that answers
+    // sent with deliveryOutcome not_sent (SMS gate off, owner silence) or
+    // uncertain must not stamp sent_at — the nightly apply reads that as
+    // the customer having been told.
+    requireAccepted: true,
     vars: { effective_date: payload.effective_date, price_change_url: payload.notice_url },
     actorId,
     hasEmailLeg: email.sent,
@@ -944,15 +949,17 @@ async function upcomingRateChanges(customerId, { dbh = db, now = new Date() } = 
   // guaranteed rate — not shown until it applies or the hold clears.
   const pending = rows.filter((n) => !n.apply_hold_reason && (!n.applied_at || n.billing_lane === 'annual_prepay')
     && !declinedTerms.has(String(parseJson(n.metadata, {}).term_id || '')));
-  const monthly = await applicableMonthly(dbh, pending, customer);
+  // Every lane: the account's live billing lane must still be the notice's
+  // (the apply's billing_lane_changed). Read first, so a notice the apply
+  // would reject never counts toward another family's cumulative charge.
+  const lanes = await liveLanesFor(dbh, pending, { snapshots: [], customers: customer ? [customer] : [], today, includeSent: true });
+  const laneEligible = pending.filter((n) => lanes.get(String(n.id)) === n.billing_lane);
+  const monthly = await applicableMonthly(dbh, laneEligible, customer);
   // A change the apply would refuse is not upcoming at all: monthly (rate
   // moved, or delivered too late); per application (its first visit's
   // stamped price moved). A prepaid term's amount is checked by the apply
   // the night after delivery and holds there (apply_hold_reason above).
   const applicable = new Set(monthly.map((n) => String(n.id)));
-  // ...and every lane: the account's live billing lane must still be the
-  // notice's (the apply's billing_lane_changed).
-  const lanes = await liveLanesFor(dbh, pending, { snapshots: [], customers: customer ? [customer] : [], today, includeSent: true });
   const perApp = pending.filter((n) => n.billing_lane === 'per_application');
   const moved = await ratesMovedFor(dbh, perApp, { customers: customer ? [customer] : [], visitById: await visitsById(dbh, perApp) });
   for (const id of await linesGoneFor(dbh, perApp, { snapshots: [] })) moved.add(id);

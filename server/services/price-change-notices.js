@@ -249,7 +249,7 @@ async function sendNoticeEmail({ customer, idempotencyKeyBase, vars, templateKey
 
 // Same { sent, attempted } contract as the email leg — a phone on file
 // with a template/provider failure is retryable, no phone is not.
-async function sendNoticeSms({ customer, vars, actorId, hasEmailLeg, operatorInitiated = false, sendOptions }) {
+async function sendNoticeSms({ customer, vars, actorId, hasEmailLeg, operatorInitiated = false, sendOptions, requireAccepted = false }) {
   let attempted = false;
   try {
     const { renderSmsTemplate } = require('./sms-template-renderer');
@@ -297,6 +297,11 @@ async function sendNoticeSms({ customer, vars, actorId, hasEmailLeg, operatorIni
     // blockedCode names a caller-hook refusal (the rate review letter's
     // NOTICE_REPOINTED / RECIPIENT_PHONE_CHANGED) for the caller's own hold.
     if (res.blocked) return { sent: false, attempted: false, blockedCode: res.code || null };
+    if (requireAccepted && res.sent && res.deliveryOutcome !== 'accepted') {
+      // sent:true without provider acceptance: 'not_sent' is definitively
+      // unsent; anything else may still have left (held by the caller).
+      return { sent: false, attempted: res.deliveryOutcome !== 'not_sent' };
+    }
     return { sent: !!res.sent, attempted };
   } catch (err) {
     logger.error(`[price-change] SMS failed for customer ${customer.id}: ${err.message}`);
