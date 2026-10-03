@@ -33,10 +33,18 @@
 //   address_text_miss            the street is not on the roll under the typed spelling
 //   number_not_on_roll           the street exists, the typed house number does not
 //   point_parcel_dropped:<why>   a parcel sits at the point but a guard dropped it
-//   county_unknown               no county on the row or from the audit, and none of the serviced
-//                                counties has a parcel at the point (or no coordinates)
-//   no_parcel_at_point           county known, no parcel at the stored point
+//   no_coordinates               the row stores no lat/lng, so no point query was made: inconclusive
+//                                (the roll audit above still ranks first when it speaks)
 //   point_lookup_unsupported     county has no point layer (Hillsborough): inconclusive
+//   county_unknown               no county on the row or from the audit, and none of the serviced
+//                                counties has a parcel at the point
+//   no_parcel_at_point           county known, no parcel at the stored point
+//
+// Regression flag (--status=sample-clean): `true` = the live lookup resolved the row and the replay
+// no longer keeps the same parcel; `false` = it still does (or the row never resolved); `n/a` = not
+// comparable, because the replay does not run what produced the stored parcel: the FDOR statewide
+// fallback (the row's stored provider list names fdor_cadastral), a county with no point layer, a
+// row with no coordinates, or a county query that failed. Those never count as regressions.
 //
 // The stored lat/lng is the geocode point but its location_type is not
 // stored; the replay assumes ROOFTOP (`--precision=interpolated` replays the
@@ -64,7 +72,9 @@
 // Flags:
 //   --since=90d        rows whose last attempt (else creation) is this recent (Nd or Nh)
 //   --status=          no_parcel (default) | all-failed (parcel_id null) | sample-clean=N
-//                      (N random resolved rows — the no-regression side)
+//                      (N random resolved rows — the no-regression side). The two failure modes
+//                      leave out rows whose stored payload predates the failed attempt (a failed
+//                      refresh keeps the earlier success's parcel, coordinates and snapshot).
 //   --address-like=    ILIKE pattern on the stored address (wrapped in % when none given)
 //   --limit=           row cap for no_parcel / all-failed (default 500)
 //   --cases=<json>     fixed cases instead of the DB: [{ name, address, lat, lng,
@@ -84,6 +94,11 @@ const DEFAULT_LIMIT = 500;
 const MAX_CONCURRENCY = 3;
 const DEFAULT_CONCURRENCY = 2;
 const DEFAULT_DELAY_MS = 250;
+// A payload written by the attempt that stamped the row sits within that
+// attempt's own duration of the stamp (data_saved_at = lookup start,
+// last_attempt_at = its finish, lookup_ms = the duration); this much covers the
+// stamp's own write latency.
+const PAYLOAD_SLACK_SECONDS = 60;
 
 // Gates the replayed parcel guards read at call time (feature-gates.js
 // condoUnitFolioLive: on only when exactly 'true'). A new gate a guard starts
@@ -174,8 +189,17 @@ function buildSelectionQuery(args) {
   const interval = args.sinceHours != null ? `${args.sinceHours} hours` : `${args.sinceDays ?? DEFAULT_SINCE_DAYS} days`;
   where.push(`COALESCE(last_attempt_at, created_at) >= NOW() - ${bind(interval)}::interval`);
 
+  // A failed refresh stamps last_attempt_status/at but keeps the previous
+  // success's parcel, coordinates, record and snapshot (saveLookup, and so
+  // data_saved_at, never ran for it). Only a payload saved by the stamped
+  // attempt itself, or no payload at all (a stub), may stand for a failure; a
+  // cache hit is not a refresh, so it keeps the payload it served.
+  const currentPayload = `(last_attempt_at IS NULL OR last_attempt_status = 'cache_hit'
+    OR (data_saved_at IS NULL AND property_record IS NULL)
+    OR last_attempt_at - data_saved_at <= (COALESCE(lookup_ms, 0)::float8 / 1000 + ${PAYLOAD_SLACK_SECONDS}) * interval '1 second')`;
+
   if (args.status === 'no_parcel') {
-    where.push(`last_attempt_status = ${bind('no_parcel')}`);
+    where.push(`last_attempt_status = ${bind('no_parcel')}`, currentPayload);
   } else if (args.status === 'all-failed') {
     // parcel_id is filled only from a GIS parcel; a lookup the PAO address
     // search resolved keeps it null but carries the parcel on the record —
@@ -184,6 +208,7 @@ function buildSelectionQuery(args) {
       'parcel_id IS NULL',
       "COALESCE(property_record->'_raw'->>'parcelId', '') = ''",
       "COALESCE(last_attempt_status, '') <> 'resolved'",
+      currentPayload,
     );
   } else if (args.status === 'sample-clean') {
     // Resolved = a parcel on the row AND a stored record (stub rows have none).
@@ -207,7 +232,8 @@ function buildSelectionQuery(args) {
     'commercialDetectionSource', enriched_snapshot->'commercialDetectionSource',
     'unitScopedLookup', enriched_snapshot->'unitScopedLookup',
     'addressAudit', enriched_snapshot->'addressAudit',
-    'fieldVerifyFlags', enriched_snapshot->'fieldVerifyFlags'
+    'fieldVerifyFlags', enriched_snapshot->'fieldVerifyFlags',
+    'storedProviders', providers
   ) AS snapshot
 FROM property_lookups
 WHERE ${where.join('\n  AND ')}
@@ -405,6 +431,7 @@ const STOP_RULES = [
   { stop: 'address_text_miss', when: (r) => auditRan(r) && !r.audit.streetExists },
   { stop: 'number_not_on_roll', when: (r) => auditRan(r) && r.audit.streetExists && !r.audit.hasExactMatch },
   { stop: 'point_parcel_dropped', detail: (r) => r.point.dropReason, when: pointDropped },
+  { stop: 'no_coordinates', when: (r) => r.point.reason === 'no_coordinates' },
   { stop: 'point_lookup_unsupported', when: (r) => r.point.reason === 'point_lookup_unsupported_county' },
   { stop: 'county_unknown', when: (r) => !r.countyUsed },
   { stop: 'no_parcel_at_point', when: () => true },
@@ -419,25 +446,35 @@ function normalizeParcelId(id) {
   return String(id ?? '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
 }
 
+// The replay runs the county roll only. A stored parcel it cannot reproduce by
+// construction is not comparable: the live FDOR statewide fallback (its record
+// is the one that names `fdor_cadastral` among the stored providers), a point
+// that was never queried (no coordinates, a county with no point layer), or a
+// county query that failed.
+const POINT_NOT_REPLAYED = new Set(['no_coordinates', 'point_lookup_unsupported_county']);
+const notComparable = (r) => POINT_NOT_REPLAYED.has(r.point?.reason)
+  || r.point?.status === 'error'
+  || (Array.isArray(r.snapshot?.storedProviders) && r.snapshot.storedProviders.includes('fdor_cadastral'));
+
 function finalizeResult(r) {
   const stop = classifyReplay(r);
-  const parcelRecovered = !r.storedParcelId
-    && (stop === 'matched_now' || stop === 'commercial_no_suite_path');
-  const storedResolved = Boolean(r.storedParcelId);
   const matched = stop === 'matched_now' || stop === 'commercial_no_suite_path';
-  const expectOk = r.expect ? (stop === r.expect || stop.startsWith(`${r.expect}:`)) : null;
+  const parcelRecovered = !r.storedParcelId && matched;
+  // Same parcel, not just "some match": a guard or geometry change that keeps
+  // a DIFFERENT parcel, or an audit hit with no point parcel, is a regression
+  // on the clean side.
+  const sameParcel = matched && r.point?.status === 'kept'
+    && normalizeParcelId(r.point.parcelId) === normalizeParcelId(r.storedParcelId);
+  // A row the live lookup resolved that the replay can no longer match: the
+  // no-regression signal for sample-clean runs; null = not comparable.
+  let regression = false;
+  if (r.storedParcelId) regression = notComparable(r) ? null : !sameParcel;
   return {
     ...r,
     stop,
     parcelRecovered,
-    // A row the live lookup resolved that the replay can no longer match: the
-    // no-regression signal for sample-clean runs.
-    // Same parcel, not just "some match": a guard or geometry change that
-    // keeps a DIFFERENT parcel, or an audit hit with no point parcel, is a
-    // regression on the clean side.
-    regression: storedResolved && !(matched && r.point?.status === 'kept'
-      && normalizeParcelId(r.point.parcelId) === normalizeParcelId(r.storedParcelId)),
-    expectOk,
+    regression,
+    expectOk: r.expect ? (stop === r.expect || stop.startsWith(`${r.expect}:`)) : null,
   };
 }
 
@@ -487,7 +524,8 @@ function summarizeResults(results) {
     total: results.length,
     commercial: results.filter((r) => r.snapshot?.isCommercial === true).length,
     table,
-    regressions: results.filter((r) => r.regression).length,
+    regressions: results.filter((r) => r.regression === true).length,
+    notComparable: results.filter((r) => r.regression === null).length,
     recovered: results.filter((r) => r.parcelRecovered).length,
     expectFailures: results.filter((r) => r.expectOk === false),
   };
@@ -507,6 +545,7 @@ function formatSummary(summary) {
   lines.push('');
   lines.push(`parcel recovered (stored row had none): ${summary.recovered}`);
   lines.push(`regressions (stored row resolved, replay no longer matches): ${summary.regressions}`);
+  lines.push(`not comparable (stored parcel from a source the replay does not run): ${summary.notComparable}`);
   if (summary.expectFailures.length) {
     lines.push(`expectation failures: ${summary.expectFailures.length}`);
     for (const f of summary.expectFailures) {
@@ -545,7 +584,7 @@ function resultToTsvRow(r) {
     lng: r.lng,
     stop: r.stop,
     parcel_recovered: r.parcelRecovered,
-    regression: r.regression,
+    regression: r.regression === null ? 'n/a' : r.regression,
     stored_status: r.storedStatus,
     stored_parcel_id: r.storedParcelId,
     county_used: r.countyUsed,

@@ -63,7 +63,7 @@ describe('buildSelectionQuery', () => {
   test('never selects raw jsonb blobs, names, phones or emails', () => {
     const { text } = replay.buildSelectionQuery(replay.parseArgs([]));
     // property_record carries owner names, so it is never read into the result set.
-    expect(text).not.toMatch(/property_record(?! IS NOT NULL)/);
+    expect(text).not.toMatch(/property_record(?! IS (NOT )?NULL)/);
     expect(text).not.toMatch(/owner|phone|email|customer/i);
     expect(text).not.toMatch(/\bSELECT \*/);
   });
@@ -74,8 +74,29 @@ describe('buildSelectionQuery', () => {
     // Address-search successes carry the parcel on the record, not the column.
     expect(text).toMatch(/property_record->'_raw'->>'parcelId'/);
     expect(text).toMatch(/<> 'resolved'/);
-    expect(text).not.toMatch(/last_attempt_status =/);
+    expect(text).not.toMatch(/last_attempt_status = \$/);
     expect(values).toEqual(['90 days', 7]);
+  });
+
+  test('failure modes drop rows whose payload predates the failed attempt; sample-clean is unaffected', () => {
+    // A failed refresh stamps last_attempt_* but keeps the earlier success's
+    // parcel, coordinates and snapshot. The payload is current only when
+    // data_saved_at (lookup start) is within the attempt's own lookup_ms (plus
+    // slack) of last_attempt_at, or when there is no payload at all.
+    for (const flags of [[], ['--status=all-failed']]) {
+      const { text } = replay.buildSelectionQuery(replay.parseArgs(flags));
+      expect(text).toMatch(/last_attempt_at - data_saved_at <= \(COALESCE\(lookup_ms, 0\)::float8 \/ 1000 \+ 60\) \* interval '1 second'/);
+      expect(text).toMatch(/data_saved_at IS NULL AND property_record IS NULL/);
+      // a cache hit is not a refresh: it keeps the payload it served
+      expect(text).toMatch(/last_attempt_status = 'cache_hit'/);
+    }
+    const clean = replay.buildSelectionQuery(replay.parseArgs(['--status=sample-clean=5']));
+    expect(clean.text).not.toMatch(/data_saved_at/);
+  });
+
+  test('selects the stored provider list (no contact columns) for the FDOR provenance check', () => {
+    const { text } = replay.buildSelectionQuery(replay.parseArgs(['--status=sample-clean=5']));
+    expect(text).toMatch(/'storedProviders', providers/);
   });
 
   test('sample-clean takes N random resolved rows', () => {
@@ -167,6 +188,18 @@ describe('classifyReplay', () => {
     expect(replay.classifyReplay(base({ audit: noSignal, countyUsed: null, point: { status: 'skipped', errors: [] } }))).toBe('county_unknown');
   });
 
+  test('no coordinates is its own inconclusive stop, ranked after the roll audit and before the fallbacks', () => {
+    const noSignal = { status: 'no_signal', errors: [] };
+    const skipped = { status: 'skipped', reason: 'no_coordinates', errors: [] };
+    // with or without a county on the row, never a parcel miss or an unknown county
+    expect(replay.classifyReplay(base({ audit: noSignal, point: skipped }))).toBe('no_coordinates');
+    expect(replay.classifyReplay(base({ audit: noSignal, point: skipped, countyUsed: null }))).toBe('no_coordinates');
+    // the address roll still speaks for a row with no point
+    expect(replay.classifyReplay(base({ audit: ran({ streetExists: false }), point: skipped }))).toBe('address_text_miss');
+    expect(replay.classifyReplay(base({ audit: ran(), point: skipped }))).toBe('number_not_on_roll');
+    expect(replay.classifyReplay(base({ audit: ran({ hasExactMatch: true }), point: skipped }))).toBe('matched_now');
+  });
+
   test('county failures are gis_error, not a roll verdict', () => {
     const err = [{ county: 'Manatee', error: 'boom' }];
     expect(replay.classifyReplay(base({ audit: { status: 'error', errors: err } }))).toBe('gis_error');
@@ -206,6 +239,23 @@ describe('unsupported point-lookup county', () => {
     expect(r.stop).toBe('point_lookup_unsupported');
   });
 
+  test('a row with no lat/lng makes no point query and reads no_coordinates', async () => {
+    const deps = {
+      auditAddressHouseNumber: jest.fn().mockResolvedValue(null),
+      lookupCountyParcelByPoint: jest.fn(),
+      parcelGisPrecision: () => null,
+      applyGisParcelGuards: jest.fn(),
+      ...countyDeps,
+    };
+    for (const county of [null, 'Manatee']) {
+      const row = { normalized_address: '100 EXAMPLE ST, BRADENTON, FL 34203', lat: null, lng: null, county, parcel_id: null, last_attempt_status: 'geocode_failed', snapshot: {} };
+      const r = replay.finalizeResult(await replay.replayRow(row, deps, {}));
+      expect(r.point).toMatchObject({ status: 'skipped', reason: 'no_coordinates' });
+      expect(r.stop).toBe('no_coordinates');
+    }
+    expect(deps.lookupCountyParcelByPoint).not.toHaveBeenCalled();
+  });
+
   test('county name variants of a supported county still run the point query', async () => {
     for (const county of ['MANATEE', 'Manatee County', 'manatee']) {
       const deps = {
@@ -241,6 +291,51 @@ describe('finalizeResult', () => {
     expect(prefix.expectOk).toBe(true);
     const wrong = replay.finalizeResult({ storedParcelId: null, countyUsed: 'Manatee', snapshot: {}, audit, point: none, expect: 'matched_now' });
     expect(wrong.expectOk).toBe(false);
+  });
+});
+
+describe('regression flag: not comparable when the replay does not run the stored source', () => {
+  const audit = { status: 'no_signal', errors: [] };
+  const none = { status: 'none', errors: [] };
+  const resolved = (over) => replay.finalizeResult({ storedParcelId: '123', countyUsed: 'Manatee', snapshot: {}, audit, point: none, ...over });
+
+  test('a county-GIS stored parcel that the replay loses is still a regression', () => {
+    expect(resolved({ snapshot: { storedProviders: ['manatee_gis', 'manatee_pao'] } }).regression).toBe(true);
+    expect(resolved({ snapshot: {} }).regression).toBe(true);
+  });
+
+  test('a parcel the live FDOR statewide fallback supplied is not comparable', () => {
+    const fdor = { storedProviders: ['fdor_cadastral', 'manatee_pao'] };
+    expect(resolved({ snapshot: fdor }).regression).toBeNull();
+    // even when the replay happens to keep a different parcel there
+    expect(resolved({ snapshot: fdor, point: { status: 'kept', parcelId: '999', errors: [] } }).regression).toBeNull();
+    // and a null provider list (row written before the column existed) is not a guess
+    expect(resolved({ snapshot: { storedProviders: null } }).regression).toBe(true);
+  });
+
+  test('a county with no point layer, no coordinates, or a failed query is not a regression', () => {
+    expect(resolved({ countyUsed: 'Hillsborough', point: { status: 'skipped', reason: 'point_lookup_unsupported_county', errors: [] } }).regression).toBeNull();
+    // even when the address roll alone made the match, an unqueried point proves nothing
+    const rollOnly = { status: 'ran', streetExists: true, hasExactMatch: true, errors: [] };
+    const unsupported = resolved({ audit: rollOnly, point: { status: 'skipped', reason: 'point_lookup_unsupported_county', errors: [] } });
+    expect(unsupported).toMatchObject({ stop: 'matched_now', regression: null });
+    expect(resolved({ point: { status: 'skipped', reason: 'no_coordinates', errors: [] } })).toMatchObject({ stop: 'no_coordinates', regression: null });
+    expect(resolved({ point: { status: 'error', errors: [{ error: 'timeout' }] } })).toMatchObject({ stop: 'gis_error', regression: null });
+  });
+
+  test('a row that never resolved is false, and the summary and TSV report the not-comparable count', () => {
+    expect(resolved({ storedParcelId: null }).regression).toBe(false);
+    const rows = [
+      resolved({}),
+      resolved({ snapshot: { storedProviders: ['fdor_cadastral'] } }),
+      resolved({ point: { status: 'skipped', reason: 'no_coordinates', errors: [] } }),
+    ];
+    const summary = replay.summarizeResults(rows);
+    expect(summary).toMatchObject({ regressions: 1, notComparable: 2 });
+    expect(replay.formatSummary(summary)).toMatch(/not comparable \(stored parcel from a source the replay does not run\): 2/);
+    const header = replay.TSV_COLUMNS;
+    const cell = (r) => replay.formatTsv([r]).trim().split('\n')[1].split('\t')[header.indexOf('regression')];
+    expect(rows.map(cell)).toEqual(['true', 'n/a', 'n/a']);
   });
 });
 
