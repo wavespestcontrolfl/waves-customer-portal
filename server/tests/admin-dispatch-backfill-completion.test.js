@@ -2991,7 +2991,7 @@ describe('backfill keeps the pest recap quiet (Codex P2, PR #2897 fix round 6)',
     return { knex, updates };
   }
 
-  const APPROVED_RECAP = { id: 'recap-1', status: 'approved', sent_at: null, send_attempt_at: null };
+  const APPROVED_RECAP = { id: 'recap-1', status: 'approved', sent_at: null, send_attempt_at: null, greeting_version: 1 }; // rendered under the current greeting rule
   const SERVICE_ROW = {
     id: 'rec-1',
     customer_id: 'cust-1',
