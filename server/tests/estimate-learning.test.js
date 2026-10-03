@@ -243,6 +243,12 @@ describe('computeEditSummary', () => {
     expect(same('123 Main St, Bradenton, FL', '123 Oak St, Bradenton, FL')).toBe(true);
     expect(same('123 Main St, Bradenton, FL 34205', '123 Main St, Parrish, FL 34219')).toBe(true);
     expect(same('34205 Main St, Bradenton, FL 34205', '34205 Main St, Parrish, FL 34219')).toBe(true);
+    // Streets that share a house number and a first word are still two streets.
+    expect(same('123 East Oak St, Bradenton, FL', '123 East Pine St, Bradenton, FL 34205')).toBe(true);
+    expect(same('123 East Oak St, Bradenton, FL', '123 E Oak Street Bradenton FL 34205')).toBeUndefined();
+    expect(same('123 Oak St, Bradenton, FL', '123 Oak Ave, Bradenton, FL')).toBe(true);
+    // A unit added to the street line is the same property.
+    expect(same('123 Main St, Bradenton, FL', '123 Main St Apt 4, Bradenton, FL 34205')).toBeUndefined();
     // An address with no house number is compared as written.
     expect(same('Main St, Bradenton', 'Main St, Parrish')).toBe(true);
     expect(same(null, '123 Main St')).toBe(true);

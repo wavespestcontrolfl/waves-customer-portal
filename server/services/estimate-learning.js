@@ -129,29 +129,53 @@ function serviceKeysFrom(data) {
 
 // The same property written two ways is not an edit. The engine draft holds
 // the address as the caller gave it; the builder's save replaces it with the
-// autocomplete form (unit, city, state, ZIP, country added or reordered).
-// An address counts as changed only when the house number, the first word of
-// the street name, or (when both sides carry one) the ZIP differs.
+// autocomplete form (suffix spelled out, unit, city, state, ZIP, country
+// added, commas dropped). Two addresses are the same property when the
+// street line of one (the part before its first comma; the whole text when
+// it has no comma) is the start of the other, word for word after suffix
+// and direction words are abbreviated, and the ZIPs agree when both sides
+// carry one. A different house number, any different street word or a
+// different ZIP is a change.
+const STREET_WORDS = Object.freeze({
+  street: 'st', avenue: 'ave', av: 'ave', road: 'rd', drive: 'dr', boulevard: 'blvd', lane: 'ln',
+  court: 'ct', circle: 'cir', place: 'pl', terrace: 'ter', terr: 'ter', trail: 'trl', parkway: 'pkwy',
+  highway: 'hwy', way: 'way', north: 'n', south: 's', east: 'e', west: 'w',
+  northeast: 'ne', northwest: 'nw', southeast: 'se', southwest: 'sw',
+});
+
+function addressTokens(text) {
+  return text.replace(/[^a-z0-9 ]/g, ' ').split(' ').filter(Boolean).map((t) => STREET_WORDS[t] || t);
+}
+
 function addressParts(value) {
-  const text = norm(value).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
-  const tokens = text ? text.split(' ') : [];
-  const zips = text.match(/\b\d{5}\b/g) || [];
+  const text = norm(value);
+  const all = addressTokens(text);
+  const comma = text.indexOf(',');
+  const zips = all.filter((t) => /^\d{5}$/.test(t));
   return {
-    text,
-    number: tokens[0] || '',
-    street: tokens[1] || '',
-    // The last 5-digit group: a 5-digit house number comes first.
-    zip: zips.length && (zips.length > 1 || tokens[0] !== zips[0]) ? zips[zips.length - 1] : '',
+    all,
+    line: comma === -1 ? all : addressTokens(text.slice(0, comma)),
+    hasComma: comma !== -1,
+    // The last 5-digit group; a lone one in first place is the house number.
+    zip: zips.length && (zips.length > 1 || all[0] !== zips[0]) ? zips[zips.length - 1] : '',
   };
 }
+
+const startsWithTokens = (tokens, prefix) => prefix.length <= tokens.length && prefix.every((t, i) => tokens[i] === t);
 
 function sameProperty(a, b) {
   const x = addressParts(a);
   const y = addressParts(b);
-  if (x.text === y.text) return true;
-  if (!x.text || !y.text) return false;
-  if (!/\d/.test(x.number) || x.number !== y.number || x.street !== y.street) return false;
-  return !(x.zip && y.zip && x.zip !== y.zip);
+  if (x.all.join(' ') === y.all.join(' ')) return true;
+  if (!x.all.length || !y.all.length) return false;
+  if (x.zip && y.zip && x.zip !== y.zip) return false;
+  // A street line is a house number plus at least one street word.
+  const usable = (p) => p.line.length >= 2 && /\d/.test(p.line[0]);
+  if (!usable(x) || !usable(y)) return false;
+  if (x.hasComma && y.hasComma) return startsWithTokens(x.line, y.line) || startsWithTokens(y.line, x.line);
+  if (x.hasComma) return startsWithTokens(y.all, x.line);
+  if (y.hasComma) return startsWithTokens(x.all, y.line);
+  return startsWithTokens(x.all, y.all) || startsWithTokens(y.all, x.all);
 }
 
 // The WaveGuard setup fee is not an edit either. The builder's save folds
