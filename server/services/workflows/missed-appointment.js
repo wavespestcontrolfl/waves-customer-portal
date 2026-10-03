@@ -9,6 +9,16 @@ function pickOccurrence(row) {
   return out;
 }
 
+const STALE_CANDIDATE = Symbol('stale_candidate');
+const dateOnly = (v) => (v instanceof Date ? v.toISOString().slice(0, 10) : (v ? String(v).slice(0, 10) : null));
+// The nightly check's candidate, re-read under the visit lock: still open, same slot?
+function stillScannedCandidate(current, scanned) {
+  return ['pending', 'confirmed'].includes(current.status)
+    && dateOnly(current.scheduled_date) === dateOnly(scanned.scheduled_date)
+    && (current.window_start || null) === (scanned.window_start || null)
+    && (current.window_end || null) === (scanned.window_end || null);
+}
+
 class MissedAppointment {
   /**
    * Handle a skipped/missed appointment. First skip is handled by reschedule
@@ -20,7 +30,11 @@ class MissedAppointment {
   // `occurrence`: the row as the caller saw it when it marked the miss (dispatch's
   // no-show transition). Its slot and scope are what the log freezes — a fresh read
   // here could capture an edit committed after the transition (Codex #5669 r1).
-  async onSkip(scheduledServiceId, reason = 'no_show', conn = db, { occurrence = null } = {}) {
+  // `scanned`: the nightly check's candidate as its scan read it. The check calls
+  // this under the visit's row lock (runUnlessLiveHold); a visit completed, cancelled
+  // or moved since the scan is no longer a candidate, and nothing is logged
+  // ({ action: 'stale_candidate' }).
+  async onSkip(scheduledServiceId, reason = 'no_show', conn = db, { occurrence = null, scanned = null } = {}) {
     // A dispatch-marked no-show is recorded AFTER its status change committed, so a
     // rebook or a completion can land in between. Its log row and card are written
     // in one transaction that holds the visit's row lock and rechecks the occurrence
@@ -29,13 +43,14 @@ class MissedAppointment {
       const customerId = await db.transaction((t) => this.logSkip(scheduledServiceId, reason, t, { occurrence, lockVisit: true }));
       return customerId ? this.evaluateThreshold(customerId, reason, db) : null;
     }
-    const customerId = await this.logSkip(scheduledServiceId, reason, conn, { occurrence });
+    const customerId = await this.logSkip(scheduledServiceId, reason, conn, { occurrence, scanned });
+    if (customerId === STALE_CANDIDATE) return { action: 'stale_candidate' };
     return customerId ? this.evaluateThreshold(customerId, reason, conn) : null;
   }
 
-  // Write the flagged row (and raise its card). Returns the customer id, or null
-  // when the visit or its customer is gone.
-  async logSkip(scheduledServiceId, reason, conn, { occurrence = null, lockVisit = false } = {}) {
+  // Write the flagged row (and raise its card). Returns the customer id, null when
+  // the visit or its customer is gone, or STALE_CANDIDATE (nothing written).
+  async logSkip(scheduledServiceId, reason, conn, { occurrence = null, lockVisit = false, scanned = null } = {}) {
     const currentQuery = conn('scheduled_services').where({ id: scheduledServiceId });
     if (lockVisit) currentQuery.forUpdate();
     const current = await currentQuery.first();
@@ -47,6 +62,8 @@ class MissedAppointment {
       logger.error(`MissedAppointment: scheduled service ${scheduledServiceId} not found`);
       return null;
     }
+
+    if (scanned && !stillScannedCandidate(current, scanned)) return STALE_CANDIDATE;
 
     const customerId = service.customer_id;
     const customer = await conn('customers').where({ id: customerId }).first();

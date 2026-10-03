@@ -61,8 +61,11 @@ function isolated(trx, fn) {
 /**
  * Raise the card for a freshly logged flagged visit. `confirmed`: a person
  * marked the no-show (dispatch), so it is a confirmed miss from the start.
+ * `strict`: the card REPLACES one the caller just closed in the same transaction
+ * (a decision). A failure is thrown so that transaction rolls back and the old
+ * card stays — never an open flagged row with no card.
  */
-async function raiseCard({ logId, service, confirmed = false, trx = null } = {}) {
+async function raiseCard({ logId, service, confirmed = false, trx = null, strict = false } = {}) {
   if (!queueEnabled() || !logId || !service || !service.id) return { raised: false };
   try {
     const { createAlertOnce } = require('./dispatch-alerts');
@@ -91,6 +94,7 @@ async function raiseCard({ logId, service, confirmed = false, trx = null } = {})
     return { raised: created === true };
   } catch (err) {
     logger.warn(`[not-closed-out] card not raised for visit ${service.id}: ${err.message}`);
+    if (strict) throw err;
     return { raised: false };
   }
 }
@@ -234,6 +238,7 @@ async function confirmMiss({ logId, confirmedBy = null, reopen = false } = {}) {
             service: { ...service, scheduled_date: payload.scheduled_date || service.scheduled_date, window_start: payload.window_start ?? service.window_start, window_end: payload.window_end ?? service.window_end, service_type: payload.service_type || service.service_type },
             confirmed: true,
             trx: t,
+            strict: true,
           });
         }
       }
@@ -282,6 +287,7 @@ async function dismiss({ logId, dismissedBy = null, note = null } = {}) {
               service: slot.scheduled_date ? { ...service, ...slot } : service,
               confirmed: !!stillOpen.miss_confirmed_at,
               trx: t,
+              strict: true,
             });
           }
         }

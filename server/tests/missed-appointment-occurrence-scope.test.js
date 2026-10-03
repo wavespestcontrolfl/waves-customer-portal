@@ -96,6 +96,26 @@ describe('the office card for a flagged visit (not-closed-out.js)', () => {
     expect(mockRaiseCard).toHaveBeenCalledWith(expect.objectContaining({ confirmed: true }));
   });
 
+  test.each([
+    ['completed', { status: 'completed' }],
+    ['moved to another day', { status: 'pending', scheduled_date: '2026-10-06' }],
+    ['moved to a later window', { status: 'confirmed', window_start: '15:00:00', window_end: '16:00:00' }],
+  ])('the nightly check does not flag a candidate %s since its scan', async (_label, change) => {
+    const { conn, inserts } = fakeConn({ ...visit, status: 'pending', ...change });
+    const evaluate = jest.spyOn(MissedAppointment, 'evaluateThreshold').mockClear();
+    expect(await MissedAppointment.onSkip('visit-4', 'no_show', conn, { scanned: { ...visit, status: 'pending' } })).toEqual({ action: 'stale_candidate' });
+    expect(inserts).toEqual([]);
+    expect(mockRaiseCard).not.toHaveBeenCalled();
+    expect(evaluate).not.toHaveBeenCalled();
+  });
+
+  test('a candidate unchanged since the scan is flagged', async () => {
+    const { conn, inserts } = fakeConn({ ...visit, status: 'confirmed' });
+    jest.spyOn(MissedAppointment, 'evaluateThreshold').mockResolvedValueOnce({ action: 'reschedule_system', skips: 1 });
+    await MissedAppointment.onSkip('visit-4', 'no_show', conn, { scanned: { ...visit, status: 'pending' } });
+    expect(inserts.find((i) => i.table === 'reschedule_log')).toBeTruthy();
+  });
+
   // Dispatch calls onSkip on the shared pool, after its status change committed.
   describe('a dispatch no-show is logged under the visit lock', () => {
     const occurrence = { id: 'visit-4', scheduled_date: '2026-09-29', window_start: '09:00:00', window_end: '10:00:00' };

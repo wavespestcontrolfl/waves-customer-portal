@@ -62,7 +62,7 @@ describe('finding 3: an uncleared street-level hold is not a missed visit, a no-
     expect(ns.indexOf('isStreetLevelHoldVisit(card.id, trx)')).toBeGreaterThan(ns.indexOf('await lockedStop(trx, card.id'));
     expect(ns.indexOf('isStreetLevelHoldVisit(card.id, trx)')).toBeLessThan(ns.indexOf('recordTrackingNotice(trx'));
     expect(sweep.slice(0, sweep.indexOf('Missed appointment check done')))
-      .toContain("runUnlessLiveHold(svc.id, (trx) => missedAppointment.onSkip(svc.id, 'no_show', trx))");
+      .toContain("runUnlessLiveHold(svc.id, (trx) => missedAppointment.onSkip(svc.id, 'no_show', trx, { scanned: svc }))");
     expect(read('../services/tech-late-detector.js')).toContain('runUnlessLiveHold(row.job_id, (trx) => createAlert({');
 
     const late = read('../services/tech-late-detector.js');

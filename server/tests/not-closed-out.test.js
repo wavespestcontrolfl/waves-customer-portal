@@ -229,6 +229,17 @@ describe('the dispatcher\'s two decisions', () => {
     expect(await notClosedOut.resolveForServices({ serviceIds: [], resolution: 'rebooked' })).toEqual({ resolved: 0 });
   });
 
+  test('a replacement card that cannot be saved fails the decision, so its transaction rolls back and the old card stays', async () => {
+    mockCreateAlertOnce.mockRejectedValueOnce(new Error('insert failed'));
+    await expect(notClosedOut.confirmMiss({ logId: 'log-1', confirmedBy: STAFF })).rejects.toThrow('insert failed');
+    mockTables.reschedule_log = [logRow(), logRow({ id: 'log-2' })];
+    mockCreateAlertOnce.mockRejectedValueOnce(new Error('insert failed'));
+    await expect(notClosedOut.dismiss({ logId: 'log-1', dismissedBy: STAFF })).rejects.toThrow('insert failed');
+    // a first card for a freshly flagged visit stays best-effort
+    mockCreateAlertOnce.mockRejectedValueOnce(new Error('insert failed'));
+    expect(await notClosedOut.raiseCard({ logId: 'log-1', service })).toEqual({ raised: false });
+  });
+
   test('a row that is already settled, or not a flagged visit, is not_found for both decisions', async () => {
     mockTables.reschedule_log = [logRow({ resolved_at: 'EARLIER' })];
     expect(await notClosedOut.confirmMiss({ logId: 'log-1' })).toEqual({ ok: false, reason: 'not_found' });
