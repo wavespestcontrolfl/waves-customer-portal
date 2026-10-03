@@ -503,13 +503,20 @@ async function availabilityLocation(input = {}, ctx = {}) {
   const stated = { address_line1: input.address_line1, city: input.city, zip: input.zip };
   if ([stated.address_line1, stated.city, stated.zip].some((v) => v != null && String(v).trim() !== '')) return { ...stated, fromAccount: false };
   const account = await accountContactFor(ctx);
-  if (!account || ![account.address_line1, account.city, account.zip].some((v) => v != null && String(v).trim() !== '')) return { ...stated, fromAccount: false };
+  // A street plus a city or ZIP, or it is not an address to offer times for:
+  // a row holding only a city would be scored as a city and never asked about.
+  const has = (v) => v != null && String(v).trim() !== '';
+  if (!account || !has(account.address_line1) || !(has(account.city) || has(account.zip))) return { ...stated, fromAccount: false };
   return { address_line1: account.address_line1, city: account.city, zip: account.zip, fromAccount: true };
 }
 
 // The address itself is never put in the result — the agent must not recite it.
-const ACCOUNT_LOCATION_NOTE = ' These times are for the service address on the caller\'s account; if the visit is '
-  + 'for a different property, ask for that address and call this tool again.';
+// A different property is a person's to book: request_booking always books the
+// account's own property, so times scored for another address must not be
+// offered against it.
+const ACCOUNT_LOCATION_NOTE = ' These times are for the service address on the caller\'s account. If the visit is '
+  + 'for a different property, do NOT offer or book these times: capture the lead with that property\'s address and '
+  + 'their preferred time, and tell the caller a Waves team member will call to confirm.';
 
 /**
  * Shared read-only availability lookup. `when` (optional) routes through the

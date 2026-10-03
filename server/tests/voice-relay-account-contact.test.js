@@ -59,6 +59,8 @@ describe('availability uses the service address on a full-tier caller\'s account
     expect(booking.resolveBookingCoords).toHaveBeenCalledWith({ address: '12 Test Street, Bradenton, 34205, FL', city: 'Bradenton' });
     expect(out).toMatch(/Open times/);
     expect(out).toMatch(/These times are for the service address on the caller's account/);
+    // A different property goes to a person: booking always books the account's own property.
+    expect(out).toMatch(/different property, do NOT offer or book these times: capture the lead/);
     expect(out).not.toMatch(/12 Test Street|34205/); // the agent must not have it to read out
     expect(customerFilter).toEqual({ id: 'c-1', deleted_at: null }); // a soft-deleted account is "not on file"
   });
@@ -88,6 +90,17 @@ describe('availability uses the service address on a full-tier caller\'s account
     expect(await executeTool('find_slots', { when: 'next week' }, fullTier())).toMatch(/Ask the caller for their street address or ZIP/);
     db.mockImplementation(() => ({ where: () => ({ whereNull: () => ({ first: async () => { throw new Error('db down'); } }) }) }));
     expect(await executeTool('find_slots', { when: 'next week' }, fullTier())).toMatch(/Ask the caller for their street address or ZIP/);
+  });
+
+  test('a partial address on the account (a city alone, or a street with nothing else) is not an address: the caller is asked', async () => {
+    for (const partial of [{ city: 'Bradenton' }, { address_line1: '12 Test Street' }, { city: 'Bradenton', zip: '34205' }]) {
+      booking.resolveBookingCoords.mockClear();
+      booking.resolveBookingCoords.mockResolvedValue({});
+      db.mockImplementation((table) => (table === 'customer_properties' ? propertiesTable() : { where: () => ({ whereNull: () => ({ first: async () => partial }) }) }));
+      const out = await executeTool('find_slots', { when: 'next week' }, fullTier());
+      expect(booking.resolveBookingCoords).toHaveBeenCalledWith({ address: null, city: null });
+      expect(out).toMatch(/Ask the caller for their street address or ZIP/);
+    }
   });
 
   test('an ambiguous property asks instead of offering times booking would refuse: several properties, or one the linkage cannot resolve', async () => {
