@@ -1650,7 +1650,9 @@ export default function TimeGridDay({
                     onToggleSelect={toggleSelection}
                     accent={techAccent(idx)}
                     showNowLine={date === todayIso}
-                    openHours={onCreateSlot ? openHoursForDay(date, byTech[tech.id] || []) : []}
+                    // An unassigned booking holds its hour in every column:
+                    // any tech may end up taking it.
+                    openHours={onCreateSlot ? openHoursForDay(date, [...(byTech[tech.id] || []), ...unassignedInRail]) : []}
                   />
                 ))}
               </div>

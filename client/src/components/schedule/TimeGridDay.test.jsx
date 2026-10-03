@@ -365,4 +365,24 @@ describe('TimeGridDay open hours', () => {
     expect(screen.getByText('Open · 9–10 AM')).toBeInTheDocument();
     expect(screen.getAllByText(/^Open · /)).toHaveLength(7);
   });
+
+  it('counts an unassigned booking as filling its hour', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-07-15T10:00:00Z')); // 6:00 AM ET
+    render(
+      <TimeGridDay
+        date="2026-07-15"
+        services={[...SERVICES, {
+          id: 'svc-unassigned', customerName: 'Unassigned Customer', status: 'confirmed',
+          windowStart: '09:00', windowEnd: '10:00', windowDisplay: '9–10 AM', technicianId: null,
+        }]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+        onChange={vi.fn()}
+        onCreateSlot={vi.fn()}
+      />,
+    );
+    vi.useRealTimers();
+    expect(screen.queryByText('Open · 9–10 AM')).toBeNull();
+    expect(screen.getAllByText(/^Open · /)).toHaveLength(6);
+  });
 });
