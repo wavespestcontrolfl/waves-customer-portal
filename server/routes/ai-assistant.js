@@ -1,5 +1,5 @@
 const express = require('express');
-const { gateEnvValue } = require('../config/feature-gates');
+const { gateEnvValue, portalChatReserviceLive, portalChatSelfServeLive } = require('../config/feature-gates');
 const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
@@ -8,6 +8,8 @@ const { authenticate } = require('../middleware/auth');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const WavesAssistant = require('../services/ai-assistant/assistant');
 const logger = require('../services/logger');
+const { resolveSessionScope, isSecondarySelection } = require('../services/account-properties');
+const assistantTools = require('../services/ai-assistant/tools');
 const { sendManualCustomerSms } = require('../services/messaging/send-manual-customer-sms');
 const { preferredRouteDecisionForFeedback } = require('../services/call-route-decisions');
 const { withLockedRouteDecisions, innerJoinRouteFeedback, resolveDisplayedRouteDecision, STALE_ROUTE_DECISION, ROUTE_DECISION_REVISION_SQL } = require('../services/call-routing-gates');
@@ -104,12 +106,27 @@ router.post('/chat', authenticate, async (req, res, next) => {
     const customerId = req.customerId;
     const customerPhone = req.customer.phone || null;
 
+    // The free re-service button books at the account's primary address, so
+    // it is withheld when the session is looking at another saved property
+    // (the Schedule tab's rule). Only read when that tool can run (the chat's
+    // master switch, its own gate and the re-service page's two switches); a
+    // failed read withholds it.
+    let secondaryProperty = true;
+    if (portalChatSelfServeLive() && portalChatReserviceLive() && assistantTools.reservicePageSwitchesOn()) {
+      try {
+        secondaryProperty = isSecondarySelection(await resolveSessionScope(req));
+      } catch (err) {
+        logger.warn(`[ai-assistant] property scope read failed for ${customerId}, no re-service button: ${err.message}`);
+      }
+    }
+
     const result = await WavesAssistant.processMessage({
       message,
       channel: 'portal_chat',
       channelIdentifier: sessionId || customerId,
       customerId,
       customerPhone,
+      secondaryProperty,
     });
 
     // Only true model output is reportable — canned fallbacks and the

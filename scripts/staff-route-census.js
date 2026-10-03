@@ -4,6 +4,13 @@
 // writes docs/technician-reachable-routes.md. `--check` exits 1 when the
 // committed file is stale, so a review always sees the reach a change grants.
 //
+// The file holds only the routes a technician reaches today, with no totals,
+// so that two PRs merged side by side still add up to exactly what this
+// script writes. The admin-only routes (most of the app) and the totals used
+// to be in it: any new admin route, on any PR, then made the file stale on
+// main and failed the gates job for every open PR (2026-10-03). `--all`
+// prints the admin-only table to the terminal instead.
+//
 // Static, read-only: parses server/index.js for app.use('<mount>', <router>)
 // and each router file for router.<method>('<path>', ...). "Today" reach is an
 // approximation (router-wide or per-route requireAdmin); inline techRole
@@ -181,7 +188,6 @@ function census() {
 function render(rows) {
   const allowed = rows.filter((r) => r.after);
   const newlyDenied = rows.filter((r) => r.today && !r.after);
-  const alreadyAdmin = rows.filter((r) => !r.today);
   const line = (r) => `| ${r.method} | \`${r.path}\` | ${r.file}${r.exemptionGate ? ' (router exemption gate: admin-only unless its named staff exemption applies)' : ''} |`;
   const table = (list) => ['| Method | Path | Router |', '|---|---|---|', ...list.map(line)].join('\n');
   return [
@@ -191,7 +197,7 @@ function render(rows) {
     '',
     'Owner ruling 2026-10-02: a technician-role login reaches only its own schedule and visits, own timesheet and mileage, texts with customers on its own visits, promises and proposals, protocols, documents, pay and growth, the knowledge base read-only, and equipment/inventory read-only. Everything else is admin-only.',
     '',
-    `With GATE_STAFF_DEFAULT_DENY on, a technician reaches the ${allowed.length} routes in the first table. The ${newlyDenied.length} routes in the second table are open to a technician today and close at the flip. The ${alreadyAdmin.length} routes in the third table are admin-only already.`,
+    'With GATE_STAFF_DEFAULT_DENY on, a technician reaches the routes in the first table. The routes in the second table are open to a technician today and close at the flip. Every other staff route is admin-only already and is not listed here (`node scripts/staff-route-census.js --all` prints them).',
     '',
     'A route being listed as reachable means a technician may call it; routers still scope records to the assigned technician where they did before (schedule, customers, visits, timetracking).',
     '',
@@ -207,11 +213,13 @@ function render(rows) {
     '',
     table(newlyDenied),
     '',
-    '## Admin-only already (unchanged)',
-    '',
-    table(alreadyAdmin),
-    '',
   ].join('\n');
+}
+
+function renderAdminOnly(rows) {
+  const list = rows.filter((r) => !r.today);
+  return ['## Admin-only already (unchanged)', '', '| Method | Path | Router |', '|---|---|---|',
+    ...list.map((r) => `| ${r.method} | \`${r.path}\` | ${r.file} |`), ''].join('\n');
 }
 
 function main() {
@@ -219,6 +227,10 @@ function main() {
   const rows = census();
   const md = render(rows);
   const counts = { allowed: rows.filter((r) => r.after).length, newlyDenied: rows.filter((r) => r.today && !r.after).length, adminOnly: rows.filter((r) => !r.today).length };
+  if (process.argv.includes('--all')) {
+    process.stdout.write(renderAdminOnly(rows));
+    return;
+  }
   if (check) {
     const current = fs.existsSync(OUT) ? fs.readFileSync(OUT, 'utf8') : '';
     if (current !== md) {
@@ -233,4 +245,4 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { census, render, readIndexMounts, parseRouter };
+module.exports = { census, render, renderAdminOnly, readIndexMounts, parseRouter };
