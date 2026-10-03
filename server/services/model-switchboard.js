@@ -359,6 +359,7 @@ const LANES = [
   L('parse_when', 'Scheduling "when" parse', 'scheduling/parse-when.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('social_judge', 'Social compliance judge', 'social-compliance-judge.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback')),
   L('job_screen', 'Job application screening', 'job-application-screen.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
+  L('fast_complete_voice_fill', 'Fast Complete voice fill', 'fast-complete-voice-fill.js', 'fastText', T('FAST'), null, { inbound: true, note: 'GATE_FAST_COMPLETE_VOICE_FILL; technician speech mapped onto sheet choices, validated in code' }),
   L('footprint_claim', 'Service-footprint claim classifier', 'content/footprint-claim-classifier.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback')),
   L('business_name_confirm', 'Competitor business-name confirmation', 'content/business-name-confirmer.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback')),
   L('photo_subject_confirm', 'Blog brief single-subject photo confirmation', 'content/photo-subject-confirmer.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback')),
@@ -772,6 +773,7 @@ const LANE_AREA = {
   tax_advisor: 'office',
   inventory_research: 'office',
   job_screen: 'office',
+  fast_complete_voice_fill: 'office',
 };
 // One line a person reads to know what the lane does.
 const LANE_DESCRIBE = {
@@ -932,6 +934,7 @@ const LANE_DESCRIBE = {
   tax_advisor: 'Weekly tax advice',
   inventory_research: 'Matches vendors and researches prices',
   job_screen: 'Screens job applications',
+  fast_complete_voice_fill: 'Maps what a tech said onto the Fast Complete sheet',
 };
 // Continuity = what catches a regression after a model switch.
 //   judged    an LLM judge / replay eval scores output against human truth
@@ -942,7 +945,7 @@ const LANE_DESCRIBE = {
 const JUDGED_LANES = new Set(["blog_draft", "call_extraction", "call_extraction_v1", "call_research", "estimate_followup", "response_drafter", "response_drafter_high_stakes", "sealed_eval", "sms_draft", "sms_save_sale", "sms_tone", "social_copy"]);
 // fact_check_gate is NOT verified: fact-check-gate.js accepts any truthy JSON
 // and treats a missing findings array as "no findings", so `{}` passes.
-const VERIFIED_LANES = new Set(["commercial_proposal", "completion_recap", "compliance_gate", "image_screen", "intent_composer", "lawn_visit_narratives", "photo_scoring", "project_report", "report_copy", "rodent_narrative", "transcription", "treatment_narrative", "turf_ocr"]);
+const VERIFIED_LANES = new Set(["commercial_proposal", "completion_recap", "compliance_gate", "fast_complete_voice_fill", "image_screen", "intent_composer", "lawn_visit_narratives", "photo_scoring", "project_report", "report_copy", "rodent_narrative", "transcription", "treatment_narrative", "turf_ocr"]);
 
 // ── Resolution ────────────────────────────────────────────────────────
 function firstSetEnv(names) {
