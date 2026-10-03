@@ -1754,3 +1754,23 @@ test('a stitched quote with shorthand then the full name is the full name\'s pro
   const short = validateFill(answer({ products: [{ productId: 'p-alp-wsg', amount: 0, unit: 'not_said', sameAsLast: false, method: '', heard: 'Used the Alpine' }] }), alpines, 'Used the Alpine in the kitchen.');
   expect(short.products).toEqual([]);
 });
+
+describe('Codex #5698 round 5', () => {
+  test('the naming piece must sit on a use: a negated full name is not rescued by shared shorthand', () => {
+    const alpines = { ...ctx, products: [...ctx.products,
+      { id: 'p-alp-wsg', name: 'Alpine WSG', fullName: 'Alpine WSG', aliases: [], measure: 'weight', units: ['g', 'oz', 'lb'] },
+      { id: 'p-alp-pt', name: 'Alpine PT', fullName: 'Alpine PT', aliases: [], measure: 'weight', units: ['g', 'oz', 'lb'] }] };
+    const t = 'Used Alpine PT. Alpine WSG was not used.';
+    const out = validateFill(answer({ products: [{ productId: 'p-alp-wsg', amount: 0, unit: 'not_said', sameAsLast: false, method: '', heard: 'Alpine, Alpine WSG' }] }), alpines, t);
+    expect(out.products).toEqual([]);
+    expect(out.unclear.map((u) => u.reason)).toContain('negated_product');
+  });
+
+  test('another product\'s catalog method in this product\'s clause is a competing method', () => {
+    const withDrench = { ...ctx, productMethods: [...ctx.productMethods, 'soil_drench'], products: [...ctx.products, { id: 'p-dom', name: 'Dominion 2L', fullName: 'Dominion 2L', aliases: [], measure: 'liquid', units: ['tsp', 'fl_oz', 'gal'], catalogMethod: 'soil_drench' }] };
+    const t = 'Drenched Taurus and sprayed Dominion around the perimeter.';
+    const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: false, method: 'perimeter_spray', heard: 'Drenched Taurus' }] }), withDrench, t);
+    expect(out.products[0].method).toBe('');
+    expect(out.unclear.map((u) => u.reason)).toContain('method_not_heard');
+  });
+});

@@ -992,7 +992,7 @@ function mentionQuantities(mention, world) {
 
 // Why a product row cannot be applied at all, as { reason, text } (the words the
 // Check chip shows), or null. Checked in order; the first refusal wins.
-function productRefusal(raw, product, heard, normTranscript, seen, evidence, world) {
+function productRefusal(raw, product, heard, normTranscript, seen, evidence, world, piece = '') {
   if (!product) return { reason: 'not_on_sheet', text: heard || raw.productId };
   if (!heardInTranscript(heard, normTranscript)) return { reason: 'not_heard', text: heard || product.name };
   if (seen.has(product.id)) return { reason: 'duplicate_product', text: heard };
@@ -1001,7 +1001,17 @@ function productRefusal(raw, product, heard, normTranscript, seen, evidence, wor
   const mentions = world.mentions.filter((m) => m.id === product.id);
   // Named only by a lone ordinary word with no application wording near it.
   if (!mentions.length) return { reason: 'product_not_heard', text: heard };
-  return mentions.every((m) => isNegatedMention(m, world)) ? { reason: 'negated_product', text: heard } : null;
+  if (mentions.every((m) => isNegatedMention(m, world))) return { reason: 'negated_product', text: heard };
+  // The quote piece that names the product must sit on a use of it: when every
+  // place those words were said is negated ("Used Alpine PT. Alpine WSG was not
+  // used."), a positive mention elsewhere (the shared "Alpine") does not rescue it.
+  // (only the NAME words of the piece: "Taurus" said again positively still counts)
+  const pieceTokens = tokensOf(piece);
+  const nameRun = nameEvidence(product, pieceTokens).runs[0];
+  const words = nameRun ? pieceTokens.slice(nameRun.start, nameRun.end) : [];
+  const named = !words.length ? [] : mentions.filter((m) => world.tokens.some((_, i) => words.every((w, k) => world.tokens[i + k] === w)
+    && m.start < i + words.length && m.end > i));
+  return named.length && named.every((m) => isNegatedMention(m, world)) ? { reason: 'negated_product', text: heard } : null;
 }
 
 // Why a spoken unit word does not back the model's unit (null when it does).
@@ -1093,8 +1103,8 @@ function productMethod(raw, product, heard, transcript, ctx, world, unclear) {
   // no Check. A method with no word for it anywhere near is a Check.
   // ...unless its own clause names a DIFFERENT way ("Spot treated with Taurus and
   // sprayed Talstar around the perimeter"): that spoken method was dropped, so Check.
-  // (the standard ways and the product's own catalog way)
-  const ways = [...new Set([...Object.keys(METHOD_LEXICON), product.catalogMethod].filter(Boolean))];
+  // (the standard ways and every catalog way the sheet offers)
+  const ways = [...new Set([...Object.keys(METHOD_LEXICON), ...ctx.productMethods, product.catalogMethod].filter(Boolean))];
   const ownOther = ways.some((method) => method !== raw.method && methodLexicon(method)?.test(text));
   const sentences = mentions.map((m) => positiveWords(world, sentenceSpan(m, world))).join(' . ');
   if (ownOther || !methodLexicon(raw.method)?.test(sentences)) pushUnclear(unclear, heard, 'method_not_heard');
@@ -1138,8 +1148,9 @@ function validateProducts(rawProducts, ctx, normTranscript, unclear, transcript 
     if (!raw || typeof raw !== 'object') continue;
     const heard = clipHeard(raw.heard);
     const product = byId.get(String(raw.productId ?? '').trim());
-    const evidence = product ? heardProducts(ctx, productPiece(product, heard, ctx)) : null;
-    const refusal = productRefusal(raw, product, heard, normTranscript, seen, evidence, world);
+    const piece = product ? productPiece(product, heard, ctx) : '';
+    const evidence = product ? heardProducts(ctx, piece) : null;
+    const refusal = productRefusal(raw, product, heard, normTranscript, seen, evidence, world, piece);
     if (refusal) {
       pushUnclear(unclear, refusal.text, refusal.reason);
       continue;
