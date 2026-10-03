@@ -1916,8 +1916,12 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
           ...(deferredToFirstVisit ? {} : { expectedTotal: Number(job.authorized_total_cents) / 100 }),
           // …but the locked pre-credit bill never above what was approved, so
           // credit can't mask an increase (GitHub Codex #5567 r18).
-          ...(deferredToFirstVisit && Number.isInteger(job.authorized_subtotal_cents)
-            ? { maxAuthorizedSubtotal: job.authorized_subtotal_cents / 100 } : {}),
+          ...(deferredToFirstVisit && Number.isInteger(job.authorized_invoice_total_cents)
+            ? { maxAuthorizedInvoiceTotalCents: job.authorized_invoice_total_cents } : {}),
+          // The year is the account's bill: a visit-level Bill-To edit after
+          // the held closeout never routes it to that visit's payer (GitHub
+          // Codex #5567 r19).
+          ...(deferredToFirstVisit ? { selfPayAccountScope: true } : {}),
           maxAuthorizedTotalCents: Number(job.authorized_total_cents),
           requireAutopayForCustomerId: invoice.customer_id,
           // Live payer re-resolve IN the charge lock (Codex r9): the

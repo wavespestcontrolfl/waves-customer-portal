@@ -2138,7 +2138,7 @@ const StripeService = {
   // 2026-08-29). Default false = machine ('admin_card_on_file' rails:
   // completion/balance sweeps, admin card-on-file, no-show, recurring) —
   // fenced to the 8AM-8PM window like every other schedule-driven send.
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requirePerformedVisit = false, requireHeldTermId = null, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, operatorOverride = false, overrideTrail = null, requireVisitCompletionPacketId = null, assertBeforeMoneyMoves = null } = {}) {
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requirePerformedVisit = false, requireHeldTermId = null, selfPayAccountScope = false, maxAuthorizedInvoiceTotalCents = null, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, operatorOverride = false, overrideTrail = null, requireVisitCompletionPacketId = null, assertBeforeMoneyMoves = null } = {}) {
     // The performed-visit gate runs under the visit lock; asking for it
     // without naming the visit would silently skip it.
     if (requireCompletedVisit && requireSelfPayScheduledServiceId == null) {
@@ -2263,6 +2263,13 @@ const StripeService = {
           if (lockedSubtotalCents - lockedDiscountCents > Math.round(Number(maxAuthorizedSubtotal) * 100)) {
             throw new Error('Invoice exceeds the customer-accepted amount. Review before charging.');
           }
+        }
+        // Pre-credit invoice total ceiling (opt-in, the deferred annual prepay):
+        // the locked bill, tax and raw-total edits included, never above the
+        // approved amount, before any account credit can mask an increase.
+        if (maxAuthorizedInvoiceTotalCents != null
+          && Math.round(Number(lockedInvoice.total || 0) * 100) > Math.round(Number(maxAuthorizedInvoiceTotalCents))) {
+          throw new Error('Invoice exceeds the customer-accepted amount. Review before charging.');
         }
         // Full charge-base ceiling against the LOCKED row (balance-sweep
         // pre-push r2 P0): the subtotal cap above cannot see a retotal that
@@ -2519,10 +2526,13 @@ const StripeService = {
             && String(lockedInvoice.scheduled_service_id || '') !== String(requireSelfPayScheduledServiceId)) {
             throw new Error('The invoice is no longer bound to this appointment. Review before charging.');
           }
+          // selfPayAccountScope (opt-in, the deferred annual prepay): the bill is
+          // the account's, so only an account payer re-routes it — a Bill-To
+          // edit on the locked visit never sends the whole year there.
           const resolvedPayer = await require('./payer').resolveForInvoice({
             database: trx,
             customerId: String(lockedSvc.customer_id),
-            scheduledServiceId: String(lockedSvc.id),
+            scheduledServiceId: selfPayAccountScope ? null : String(lockedSvc.id),
             throwOnError: true,
           });
           if (resolvedPayer?.payerId) {
