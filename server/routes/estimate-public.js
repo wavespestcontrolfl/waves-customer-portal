@@ -659,9 +659,28 @@ async function estimatePublicBlockingState(estimate, { estData, quoteRequirement
 // never what the customer is promised against, and /data accompanies every page load).
 async function parkSideEffects(estimate, rejectedCustomerId) {
   try { await raiseAcceptParkedAlert({ estimate, rejectedCustomerId }); } catch { /* never throws; logged inside */ }
-  try { await require('../services/slot-reservation').releaseEstimateHolds({ estimateId: estimate.id }); } catch (e) {
+  try { await releaseHoldsIfStillParked(estimate); } catch (e) {
     logger.warn(`[estimate-accept] parked-estimate hold release failed for estimate ${estimate.id}: ${e.message}`);
   }
+}
+// The bulk hold release, judged on the estimate as it is NOW. Staff can fix or link the estimate between the unlocked
+// read that said "parked" and this delete, and a concurrent tab's hold taken against the corrected estimate is valid.
+// So it runs in one short transaction that locks the estimate row FOR UPDATE first - the same row, and the same
+// order (estimate row, then its holds), that reserveSlot and extendReservation take - so a reserve either committed
+// before (and its hold is judged here) or waits for this transaction and then re-validates on the corrected row;
+// re-reads the estimate; re-runs the blocking-state helper fresh on that row (the phone candidate FOR SHARE NOWAIT on
+// this transaction, like the reserve recheck: a busy customer row throws, deletes nothing, and the next observer of
+// the park retries); and deletes the holds only while the estimate is still contact_review. Anything else deletes
+// nothing. The office alert is filed OUTSIDE this transaction (parkSideEffects).
+async function releaseHoldsIfStillParked(estimate) {
+  const slotReservation = require('../services/slot-reservation');
+  return db.transaction(async (trx) => {
+    const row = await trx('estimates').where({ id: estimate.id }).forUpdate().first();
+    if (!row) return { released: 0 };
+    const state = await estimatePublicBlockingState(row, { database: trx, lock: true, fresh: true });
+    if (state?.state !== 'contact_review') return { released: 0 };
+    return slotReservation.releaseEstimateHolds({ estimateId: estimate.id, database: trx });
+  });
 }
 async function refuseParkedWrite(estimate, rejectedCustomerId) {
   await parkSideEffects(estimate, rejectedCustomerId);
@@ -684,7 +703,7 @@ async function raiseAcceptParkedAlert({ estimate, rejectedCustomerId }) {
           (n) => `fix ${n}'s estimate phone`,
           (n) => `fix ${n}'s phone`,
         ]),
-        why: 'The phone on their estimate is another customer\u2019s, so they could not accept yet.',
+        why: 'The phone on their estimate is another customer\u2019s, so self-booking is held.',
         severity: 'needs-you',
         link: `/admin/estimates?estimateId=${encodeURIComponent(estimate.id)}`,
         subject: { type: 'estimate', id: String(estimate.id) },
@@ -694,8 +713,8 @@ async function raiseAcceptParkedAlert({ estimate, rejectedCustomerId }) {
         bell: true,
         dedupeKey: `accept-phone-contradicted:${estimate.id}`,
         dedupeVersion: 'v1',
-        detail: `The person tried to accept, but the phone number on this estimate belongs to ${rejectedName} (customer id ${rejectedCustomerId}), `
-          + 'whose email and address do not match the estimate. The accept was not completed: no customer was created or changed and no card was taken. '
+        detail: `The phone number on this estimate belongs to ${rejectedName} (customer id ${rejectedCustomerId}), `
+          + 'whose email and address do not match the estimate, so online accepting and booking are held for the office: no customer was created or changed, no card was taken and no time is held. '
           + 'Fix the phone on the estimate, or link the estimate to the right customer, and then they can accept.',
         metadata: { estimateId: String(estimate.id), rejectedCustomerId: String(rejectedCustomerId) },
       });
@@ -28969,6 +28988,11 @@ async function composeEstimateDataPayload(estimate, {
   // ?refresh=1 re-fetch (the client keeps the first load's offer) and never
   // a non-page projection such as the Intelligence Bar's estimate detail.
   includeConsultationOffer = false,
+  // The composer is a PURE READ unless a caller opts in here: the park side effects (office alert + hold release for
+  // a parked estimate) belong to the customer's own page load only, so ONLY the public GET /:token/data handler sets
+  // this, after deciding it is a real customer view (not a draft/staff preview, not a PDF/render pass). The
+  // Intelligence Bar's estimate projection and every other caller leave it false and get no side effect.
+  runParkSideEffects = false,
   // Internal: the served-evidence result of a document render pass whose
   // composition was restarted from the row that pass found frozen under it
   // (set only by the restart below — never recurses twice).
@@ -28997,7 +29021,7 @@ async function composeEstimateDataPayload(estimate, {
       const evidence = await require('../services/estimate-proposal-billing').ensureRateReviewTermsEvidenceBeforeRender(estimate);
       if (evidence.estimate !== estimate) {
         return composeEstimateDataPayload(evidence.estimate, {
-          adminDraftPreview, isPdfRenderPass, docRenderPin, verifiedStaffPreview, currentViewRecorded, isInternalRefresh, includeConsultationOffer,
+          adminDraftPreview, isPdfRenderPass, docRenderPin, verifiedStaffPreview, currentViewRecorded, isInternalRefresh, includeConsultationOffer, runParkSideEffects,
           customerView, documentEvidence: evidence,
         });
       }
@@ -29109,7 +29133,7 @@ async function composeEstimateDataPayload(estimate, {
         phoneReviewHold = blockingState?.state === 'contact_review';
         // The page is about to tell the customer a specialist will follow up: file the (deduped) alert and return any
         // live hold's capacity. Not for a staff preview or a PDF render pass, which are not a customer view.
-        if (phoneReviewHold && !verifiedStaffPreview && !isPdfRenderPass) await parkSideEffects(estimate, blockingState.rejectedCustomerId);
+        if (phoneReviewHold && runParkSideEffects) await parkSideEffects(estimate, blockingState.rejectedCustomerId);
       } catch (parkErr) {
         logger.warn(`[estimate-data] phone-contradiction lookup failed for estimate ${estimate.id}: ${parkErr.message}`);
       }
@@ -30204,6 +30228,8 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       isInternalRefresh,
       customerView: customerViewEligible,
       includeConsultationOffer: true,
+      // A real customer view only: never a draft/staff preview or a PDF/render pass.
+      runParkSideEffects: !adminDraftPreview && !verifiedStaffPreview && !isPdfRenderPass,
     })));
   } catch (err) { next(err); }
 });

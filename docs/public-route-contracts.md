@@ -1746,7 +1746,15 @@ answers:
   live uncommitted slot hold of the estimate is released server-side, so capacity returns as soon as ANY request
   observes the park. `GET /data` runs the same two side effects for a customer view of a parked estimate (the page
   tells the customer a specialist will follow up); staff previews, PDF render passes, slot reads, the texting
-  scheduler's gate and the reminder recheck do not. Both card-intent routes re-run the blocking state AFTER minting and before any client secret is returned, on the ESTIMATE
+  scheduler's gate and the reminder recheck do not. The `/data` composer is a PURE READ unless its caller passes the explicit
+  `runParkSideEffects` opt-in, which only the public customer `GET /:token/data` handler sets (not for a draft/staff
+  preview or a PDF/render pass): the Intelligence Bar's estimate projection shows the same review state and raises no alert and
+  deletes no hold. The alert text is true for every path that raises it ("The phone on their estimate is another
+  customer's, so self-booking is held"). The bulk hold release is judged on the estimate as it is NOW: one short transaction
+  locks the estimate row FOR UPDATE (the row, and the order - estimate row, then its holds - `reserveSlot` and
+  `extendReservation` take), re-reads it, re-runs the blocking-state helper fresh on that row (candidate FOR SHARE NOWAIT) and deletes
+  the holds only while it is still `contact_review`; an estimate staff corrected or linked meanwhile loses no hold, a busy
+  customer row deletes nothing, and the alert is filed outside that transaction. Both card-intent routes re-run the blocking state AFTER minting and before any client secret is returned, on the ESTIMATE
   row RE-READ at that point (staff can edit its phone, email or address, or deactivate it, during the mint) with the
   candidate cache bypassed; an estimate no longer active is withheld the same way: a recurring intent minted for a
   just-parked estimate is retired with the accept's helper (503 `RECURRING_CARD_RETIRE_FAILED` if Stripe cannot
@@ -1764,7 +1772,7 @@ answers:
 the React page (the `/estimate/` mount falls through to the SPA, the `/api/estimates/` mount redirects to the
 React URL, GrowthBook never reassigns it), the same way it forces a contact-gap estimate. A stale tab handles the
 409 from the accept, `reserve`, every `recurring-card-intent` caller (modal mint, replace-method, inline pre-mint)
-and the card-hold intent, and the empty review shape from the slot reads (`available-slots`, `find-slots`, picked
+and the card-hold intent, the coded 409 from a hold `extend`, and the empty review shape from the slot reads (`available-slots`, `find-slots`, picked
 date), through one transition (drop the captured cards, release the slot hold, refetch `/data`). The review state is committed locally FIRST,
 from the 409 body (the page's `cta` becomes not-acceptable, review-before-booking, reason `contact_review`, with the server's
 sentence), so a failed refetch (best effort, caught at every call site, including the slot picker's) still lands on the review card. The estimate's own phone is left as staff typed

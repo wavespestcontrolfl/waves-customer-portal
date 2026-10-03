@@ -6439,6 +6439,14 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           return 'limit_reached';
         }
         if (r.status === 409 && body.code === 'SLOT_UNAVAILABLE') return 'slot_unavailable';
+        // B18: the phone turned contradictory while the hold was being extended - the route answers the coded
+        // office-review 409 and has released the hold. The ONE transition (like every other park call site) commits
+        // the review state locally from this body, then refreshes best effort; it never rejects. The callers' own
+        // guards stop on the cleared reservation, so no generic dead-hold recovery runs over it.
+        if (r.status === 409 && body.code === 'ACCEPT_NEEDS_OFFICE_REVIEW') {
+          await enterContactReviewRef.current(body);
+          return 'contact_review';
+        }
         // The route's specialized no-booking bodies (codex r7 P2): staff can
         // reshape an estimate mid-checkout into a commercial-manual,
         // guarantee-only or trenching-review contract, and /extend preserves

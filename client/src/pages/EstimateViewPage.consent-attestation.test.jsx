@@ -87,11 +87,13 @@ describe('EstimateViewPage accept consent attestation', () => {
     expect(count(src, endpoint('card-hold-intent'))).toBe(1);
     expect(count(src, endpoint('recurring-card-intent'))).toBe(3); // modal mint, replace-payment-method, inline pre-mint
     expect(count(src, endpoint('reserve'))).toBe(1);
-    // ...and each one handles the code through the ONE transition: accept + card-hold + 3 recurring + reserve.
-    expect(count(src, /code === 'ACCEPT_NEEDS_OFFICE_REVIEW'/g)).toBe(6);
+    // ...and each one handles the code through the ONE transition: accept + card-hold + 3 recurring + reserve + extend.
+    expect(count(src, /code === 'ACCEPT_NEEDS_OFFICE_REVIEW'/g)).toBe(7);
     // (+1: the SlotPicker's onContactReview callback, asserted below.)
-    expect(count(src, /enterContactReviewRef\.current\(body\)/g)).toBe(7);
-    // The hold-extend call is covered by the existing no-booking recovery (release the hold, refetch /data -> review state).
+    expect(count(src, /enterContactReviewRef\.current\(body\)/g)).toBe(8);
+    // The hold-extend call takes the code through the ONE transition too (not the generic no-booking recovery, which
+    // discards the body): recognised BEFORE the generic reviewBeforeBooking branch below.
+    expect(src).toMatch(/body\.code === 'SLOT_UNAVAILABLE'\) return 'slot_unavailable';[\s\S]{0,900}r\.status === 409 && body\.code === 'ACCEPT_NEEDS_OFFICE_REVIEW'\) \{\s*await enterContactReviewRef\.current\(body\);\s*return 'contact_review';\s*\}[\s\S]{0,1400}body\.reviewBeforeBooking/);
     expect(count(src, /\/reserve\/\$\{encodeURIComponent\(scheduledServiceId\)\}\/extend`/g)).toBe(1);
     expect(src).toMatch(/body\.reviewBeforeBooking[\s\S]{0,400}return 'no_booking';/);
     // The slot reads live in SlotPicker (3 fetches: default window, AI find, picked date), each hands the review shape up.

@@ -4193,12 +4193,15 @@ describe('B18 - an accept whose phone belongs to another customer is parked for 
     const [category, headline, why, opts] = parkedAlertCalls()[0];
     expect(category).toBe('estimate');
     expect(headline).toBe("Customers — fix Pat Tester's estimate phone");
-    expect(why).toBe('The phone on their estimate is another customer’s, so they could not accept yet.');
+    expect(why).toBe('The phone on their estimate is another customer’s, so self-booking is held.');
     expect(opts).toMatchObject({ bell: true, dedupeKey: 'accept-phone-contradicted:est-park-1', link: '/admin/estimates?estimateId=est-park-1' });
     expect(opts.metadata).toMatchObject({ area: 'Customers', severity: 'needs-you', who: 'person', doneWhen: 'phone_corrected', subject: { type: 'estimate', id: 'est-park-1' }, rejectedCustomerId: 'cust-bob' });
     expect(opts.detail).toContain('Bob Example');
     expect(opts.detail).toContain('customer id cust-bob');
     expect(opts.detail).toMatch(/no card was taken/);
+    // True for every path that raises it (a page view, a slot or card step, the accept): no "tried to accept" claim.
+    expect(opts.detail).not.toMatch(/tried to accept/i);
+    expect(why).not.toMatch(/accept/i);
 
     const second = await repeatedAccept('est-park-1');
     expect(second.status).toBe(409);

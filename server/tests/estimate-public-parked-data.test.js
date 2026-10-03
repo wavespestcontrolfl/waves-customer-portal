@@ -54,6 +54,7 @@ function chainFor(result) {
     andWhere: jest.fn(() => chain), orWhere: jest.fn(() => chain), orWhereRaw: jest.fn(() => chain), leftJoin: jest.fn(() => chain),
     select: jest.fn(() => chain), orderBy: jest.fn(() => chain), orderByRaw: jest.fn(() => chain),
     first: jest.fn().mockResolvedValue(result),
+    forUpdate: jest.fn(() => chain), forShare: jest.fn(() => chain), noWait: jest.fn(() => chain),
     update: jest.fn().mockResolvedValue(1),
     insert: jest.fn().mockResolvedValue([1]),
   };
@@ -68,6 +69,8 @@ db.mockImplementation((table) => {
   }
   return chainFor(table === 'estimates' ? estimateRow : undefined);
 });
+
+db.transaction = jest.fn(async (fn) => fn(db)); // the hold release's short locked transaction
 
 const BOB = { id: 'cust-bob', first_name: 'Bob', last_name: 'Example', phone: '(941) 555-0123', email: 'bob@example.com', address_line1: '9 Other St' };
 let tokenSeq = 0;
@@ -188,7 +191,7 @@ describe('GET /data on a parked estimate runs the park side effects (the page pr
     expect(mockRaiseAdminAlert).toHaveBeenCalledTimes(1);
     expect(mockRaiseAdminAlert.mock.calls[0][1]).toMatchObject({ area: 'Customers', severity: 'needs-you', subject: { type: 'estimate', id: est.id } });
     expect(mockRaiseAdminAlert.mock.calls[0][2]).toMatchObject({ dedupeKey: `accept-phone-contradicted:${est.id}` });
-    expect(mockReleaseEstimateHolds).toHaveBeenCalledWith({ estimateId: est.id });
+    expect(mockReleaseEstimateHolds).toHaveBeenCalledWith(expect.objectContaining({ estimateId: est.id }));
     mockRaiseAdminAlert.mockClear(); mockReleaseEstimateHolds.mockClear();
     phoneCandidates = [];
     await getData(makeEstimate());
@@ -205,6 +208,79 @@ describe('GET /data on a parked estimate runs the park side effects (the page pr
     const res = await getData(makeEstimate());
     expect(res.status).toBe(200);
     expect(ctaOf(res)).toMatchObject({ reviewBeforeBooking: true, reviewReason: 'contact_review' });
+  });
+});
+
+describe('the composer is a pure read unless a caller opts in (the Intelligence Bar projection must not alert or delete a hold)', () => {
+  const { composeEstimateDataPayload } = estimatePublicRouter;
+  test('an IB-style projection of a parked estimate shows the review state but raises NO alert and releases NO hold; the customer /data does both once', async () => {
+    phoneCandidates = [BOB];
+    db.transaction.mockClear();
+    const est = makeEstimate();
+    estimateRow = est;
+    // Exactly the Intelligence Bar's call (services/intelligence-bar/estimate-detail.js pageProjection).
+    const payload = await composeEstimateDataPayload(est, { adminDraftPreview: false, isPdfRenderPass: false, docRenderPin: null });
+    expect(payload.cta).toMatchObject({ reviewBeforeBooking: true, reviewReason: 'contact_review' });
+    expect(mockRaiseAdminAlert).not.toHaveBeenCalled();
+    expect(mockReleaseEstimateHolds).not.toHaveBeenCalled();
+    expect(db.transaction).not.toHaveBeenCalled();
+    // The public customer GET /data (the one opt-in) does both, once.
+    await getData(makeEstimate());
+    expect(mockRaiseAdminAlert).toHaveBeenCalledTimes(1);
+    expect(mockReleaseEstimateHolds).toHaveBeenCalledTimes(1);
+    // The explicit opt-in is what does it.
+    mockRaiseAdminAlert.mockClear(); mockReleaseEstimateHolds.mockClear();
+    await composeEstimateDataPayload(est, { runParkSideEffects: true });
+    expect(mockRaiseAdminAlert).toHaveBeenCalledTimes(1);
+    expect(mockReleaseEstimateHolds).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('the bulk hold release is judged on the estimate as it is now, under the estimate row lock (r6 P2)', () => {
+  const { refuseParkedWrite } = estimatePublicRouter;
+  const estimateChains = () => db.mock.results.map((r, i) => ({ table: db.mock.calls[i][0], chain: r.value })).filter((c) => c.table === 'estimates');
+  beforeEach(() => { db.transaction.mockClear(); db.mockClear?.(); });
+
+  test('still parked: one short transaction locks the estimate row FOR UPDATE first, re-judges fresh on the locked row, and deletes the holds on that transaction', async () => {
+    phoneCandidates = [BOB];
+    const est = makeEstimate();
+    estimateRow = est;
+    await refuseParkedWrite(est, 'cust-bob');
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(estimateChains().some((c) => c.chain.forUpdate.mock.calls.length > 0)).toBe(true);
+    expect(mockReleaseEstimateHolds).toHaveBeenCalledTimes(1);
+    expect(mockReleaseEstimateHolds).toHaveBeenCalledWith({ estimateId: est.id, database: db });
+    // The alert is filed outside that transaction (a failing release never blocks it, and vice versa).
+    expect(mockRaiseAdminAlert).toHaveBeenCalledTimes(1);
+  });
+
+  test('the estimate was corrected after the unlocked read said parked (phone fixed): NO hold is deleted', async () => {
+    const stale = makeEstimate();
+    estimateRow = { ...stale, customer_phone: '(941) 555-0999' }; // staff fixed the phone; the locked re-read sees it
+    phoneCandidates = []; // ... and nobody else owns that number
+    await refuseParkedWrite(stale, 'cust-bob');
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(mockReleaseEstimateHolds).not.toHaveBeenCalled();
+  });
+
+  test('the estimate was linked to a customer after the unlocked read: NO hold is deleted', async () => {
+    phoneCandidates = [BOB];
+    const stale = makeEstimate();
+    estimateRow = { ...stale, customer_id: 'cust-9' };
+    await refuseParkedWrite(stale, 'cust-bob');
+    expect(mockReleaseEstimateHolds).not.toHaveBeenCalled();
+  });
+
+  test('the estimate row is gone, or the customer row is busy (55P03): nothing is deleted and nothing throws', async () => {
+    const est = makeEstimate();
+    estimateRow = null;
+    await expect(refuseParkedWrite(est, 'cust-bob')).resolves.toMatchObject({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW' });
+    expect(mockReleaseEstimateHolds).not.toHaveBeenCalled();
+    estimateRow = est;
+    phoneCandidates = [BOB];
+    db.transaction.mockImplementationOnce(async () => { throw Object.assign(new Error('could not obtain lock'), { code: '55P03' }); });
+    await expect(refuseParkedWrite(est, 'cust-bob')).resolves.toMatchObject({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW' });
+    expect(mockReleaseEstimateHolds).not.toHaveBeenCalled();
   });
 });
 
@@ -232,7 +308,7 @@ describe('refuseParkedWrite (what every public write path answers a parked estim
     const est = makeEstimate();
     expect(await refuseParkedWrite(est, 'cust-bob')).toMatchObject({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW', reviewBeforeBooking: true, reason: 'contact_review' });
     expect(mockRaiseAdminAlert).toHaveBeenCalledTimes(1);
-    expect(mockReleaseEstimateHolds).toHaveBeenCalledWith({ estimateId: est.id });
+    expect(mockReleaseEstimateHolds).toHaveBeenCalledWith(expect.objectContaining({ estimateId: est.id }));
     mockRaiseAdminAlert.mockRejectedValueOnce(new Error('alerts down'));
     mockReleaseEstimateHolds.mockRejectedValueOnce(new Error('db down'));
     await expect(refuseParkedWrite(est, 'cust-bob')).resolves.toMatchObject({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW' });

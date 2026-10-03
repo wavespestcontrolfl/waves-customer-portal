@@ -869,6 +869,14 @@ describe('slot reservation helpers', () => {
     await expect(slotReservation.releaseEstimateHolds({})).resolves.toEqual({ released: 0 });
   });
 
+  test('releaseEstimateHolds runs on a caller\'s transaction when given one (the park release deletes under the estimate row lock)', async () => {
+    const builder = { where: jest.fn(() => builder), whereNull: jest.fn(() => builder), whereNotNull: jest.fn(() => builder), del: jest.fn(async () => 1) };
+    const trx = jest.fn(() => builder);
+    db.mockImplementation(() => { throw new Error('the root handle must not be used'); });
+    await expect(slotReservation.releaseEstimateHolds({ estimateId: 'estimate-9', database: trx })).resolves.toEqual({ released: 1 });
+    expect(trx).toHaveBeenCalledWith('scheduled_services');
+  });
+
   test('releaseReservation scopes deletes by source_estimate_id', async () => {
     const chain = {
       where: jest.fn().mockReturnThis(),

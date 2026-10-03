@@ -2165,9 +2165,9 @@ async function releaseReservation({ scheduledServiceId, estimateId }) {
 // reservation timestamp, this estimate's source link). Used when an estimate is observed parked for the office
 // (routes/estimate-public.js parkSideEffects), so a hold that slipped in just before the park does not keep
 // capacity until it expires. A committed visit is never touched.
-async function releaseEstimateHolds({ estimateId }) {
+async function releaseEstimateHolds({ estimateId, database = null }) {
   if (!estimateId) return { released: 0 };
-  const count = await uncommittedHoldQuery(db, { estimateId }).del();
+  const count = await uncommittedHoldQuery(database || db, { estimateId }).del();
   return { released: count };
 }
 
