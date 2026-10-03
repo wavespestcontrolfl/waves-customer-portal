@@ -273,9 +273,13 @@ async function reconcileLinkedInvoices(trx, scope = {}, { requeue: mayRequeue = 
     const priorSendAt = sendAtAt >= 0 ? new Date(withoutMarker.slice(sendAtAt + 4)) : null;
     const [, stampedPayer, ...flags] = (sendAtAt >= 0 ? withoutMarker.slice(0, sendAtAt) : withoutMarker).split(':');
     if (t.afterOwner) {
-      if (t.afterOwner !== stampedPayer) {
+      // The stamp follows the payer that owns the visit now. `mayRequeue` false (unvoid) also DROPS the
+      // queued/send-time metadata durably, so a later payer removal can never schedule the restored draft.
+      const keep = flags.filter((flag) => mayRequeue || flag !== 'queued');
+      const rebuilt = `payer_billed:${t.afterOwner}${keep.map((flag) => `:${flag}`).join('')}${mayRequeue && sendAtAt >= 0 ? withoutMarker.slice(sendAtAt) : ''}${priorMarker ? `:m=${priorMarker}` : ''}`;
+      if (rebuilt !== stamp) {
         await trx('invoices').where({ id: t.invoiceId, status: t.status, scheduled_send_error: stamp })
-          .update({ scheduled_send_error: stamp.replace(/^payer_billed:[^:]+/, `payer_billed:${t.afterOwner}`), updated_at: trx.fn.now() });
+          .update({ scheduled_send_error: rebuilt, updated_at: trx.fn.now() });
       }
       continue;
     }

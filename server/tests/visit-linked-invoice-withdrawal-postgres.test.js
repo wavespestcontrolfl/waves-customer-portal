@@ -729,6 +729,22 @@ postgres('payer assignment withdraws visit-linked invoices with no packet', () =
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test('an unvoid that restores a queued, withdrawn invoice while its payer remains drops the queue metadata, so a later payer removal cannot schedule it', async () => {
+    const Linked = require('../services/visit-linked-invoice-withdrawal');
+    const payerId = await payer();
+    const f = await fixture({ link: 'record', status: 'scheduled', invoice: { scheduled_send_at: new Date(Date.now() + 3600e3) } });
+    await assignJobPayer(f.visitId, payerId);
+    expect(await invoiceRow(f.invoiceId)).toMatchObject({ scheduled_send_error: expect.stringMatching(/:queued:at=/) });
+    await mockPg('invoices').where({ id: f.invoiceId }).update({ status: 'draft' }); // void then unvoid
+    // Unvoid runs with the payer still owning the visit: the stamp stays, minus the queue metadata.
+    await Linked.reconcileLinkedInvoices(mockPg, { invoiceId: f.invoiceId }, { requeue: false });
+    expect(await invoiceRow(f.invoiceId)).toMatchObject({ status: 'draft', scheduled_send_error: `payer_billed:${payerId}` });
+    // The payer is removed later: the ordinary release finds nothing to requeue.
+    await clearJobPayer(f.visitId);
+    expect(await invoiceRow(f.invoiceId)).toMatchObject({ status: 'draft', scheduled_send_error: null, scheduled_send_at: null });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
   test('moving the visit to a different payer re-points the stamp instead of releasing it', async () => {
     const { visitId, invoiceId } = await fixture({ link: 'record' });
     const first = await payer();
