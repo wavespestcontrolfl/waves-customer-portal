@@ -617,6 +617,18 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
         customer_properties: [{ id: 'prop-2', address_line1: address, city: 'Bradenton', zip: '34201' }],
       })).then((r) => r.signature);
       expect(await linked('100 Test Palm Way')).not.toBe(await linked('200 Sample Oak Ln'));
+      // The same address after an A -> B -> A edit: a new property revision moves the key.
+      const linkedAt = (updatedAt) => resolveCanonicalLawnRender({ ...svc, scheduled_service_id: 'ss-cur' }, makeKnex({
+        ...fixtures(),
+        service_records: [],
+        scheduled_services: [
+          { id: 'ss-cur', customer_id: CUSTOMER, scheduled_date: '2026-09-30', status: 'completed', service_type: 'Lawn Care Treatment Program', service_address_line1: '100 Test Palm Way', service_address_city: 'Bradenton', service_address_zip: '34201' },
+          { id: 'ss-next', customer_id: CUSTOMER, scheduled_date: '2026-11-11', status: 'confirmed', service_type: 'Lawn Care Treatment Program', property_id: 'prop-2' },
+        ],
+        customer_properties: [{ id: 'prop-2', address_line1: '100 Test Palm Way', city: 'Bradenton', zip: '34201', updated_at: updatedAt }],
+      })).then((r) => r.signature);
+      expect(await linkedAt('2026-10-02T15:00:00Z')).not.toBe(await linkedAt('2026-10-02T15:05:00Z'));
+      expect(await linkedAt('2026-10-02T15:00:00Z')).toBe(await linkedAt('2026-10-02T15:00:00Z'));
       // No booking: the plan-cadence estimate keys the PDF, and so does its passing.
       const cadenceSvc = { ...svc, scheduled_service_id: 'ss-cur', service_type: 'Lawn Care every 6 weeks' };
       const cadenceSig = () => resolveCanonicalLawnRender(cadenceSvc, makeKnex({

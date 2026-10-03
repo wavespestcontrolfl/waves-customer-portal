@@ -2699,6 +2699,25 @@ async function lawnUpcomingVisitsStamp(service, knex) {
         const revision = row.updated_at ? new Date(row.updated_at).toISOString() : '';
         return `${row.id || ''}:${iso}@${PROPERTY_SCOPE_COLUMNS.map((column) => row[column] ?? '').join('~')}@${revision}`;
       });
+    // The property and estimate records those bookings (and this report's own
+    // visit) resolve their address through, with each record's revision: an
+    // address edited A -> B -> A during a render ends on the same address but
+    // not the same updated_at.
+    const reportRow = service.scheduled_service_id
+      ? await knex('scheduled_services').where({ id: service.scheduled_service_id }).first('property_id', 'source_estimate_id', 'updated_at')
+      : null;
+    const linked = [...(Array.isArray(rows) ? rows : []), ...(reportRow ? [reportRow] : [])];
+    const propertyIds = [...new Set(linked.map((row) => row.property_id).filter(Boolean))].sort();
+    const estimateIds = [...new Set(linked.map((row) => row.source_estimate_id).filter(Boolean))].sort();
+    const revisionsOf = async (table, ids) => (ids.length
+      ? (await knex(table).whereIn('id', ids).select('id', 'updated_at'))
+        .map((row) => `${row.id}@${row.updated_at ? new Date(row.updated_at).toISOString() : ''}`).sort()
+      : []);
+    days.push(
+      `report@${reportRow?.updated_at ? new Date(reportRow.updated_at).toISOString() : ''}`,
+      ...await revisionsOf('customer_properties', propertyIds),
+      ...await revisionsOf('estimates', estimateIds),
+    );
     // ... and the visit the render's own resolver picks for this report, so a
     // corrected address behind a linked property (same ids, same dates) moves
     // the key too. A failed lookup inside it is unknown: non-reusable.
