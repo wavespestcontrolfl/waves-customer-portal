@@ -83,8 +83,10 @@ function SoonCard({ change, onDismiss, busy }) {
   );
 }
 
-function summaryOf(changes) {
-  const n = changes.length;
+// `total` is every open folded change (the server counts past the rows it
+// returns); the breakdown reads the rows on hand.
+function summaryOf(changes, total = changes.length) {
+  const n = Math.max(total, changes.length);
   const allAuto = changes.every((c) => c.type === 'visit_rescheduled' && c.payload?.actor === AUTO_DISPATCH);
   const title = allAuto ? `Auto-dispatch moved ${plural(n, 'visit')}` : plural(n, 'schedule change');
   const services = new Set(changes.map((c) => c.payload?.service_type).filter(Boolean));
@@ -97,7 +99,7 @@ function summaryOf(changes) {
   const moved = [counts.EARLIER && `${counts.EARLIER} earlier`, counts.LATER && `${counts.LATER} later`].filter(Boolean).join(', ');
   if (moved) parts.push(moved);
   const allMoves = changes.every((c) => c.type === 'visit_rescheduled');
-  return { title, detail: parts.join(' · '), counts, reviewLabel: allMoves ? 'Review moves' : 'Review changes' };
+  return { title, detail: parts.join(' · '), counts, total: n, reviewLabel: allMoves ? 'Review moves' : 'Review changes' };
 }
 
 const FILTERS = [['ALL', 'All'], ['EARLIER', 'Earlier'], ['LATER', 'Later']];
@@ -139,10 +141,11 @@ function ReviewList({ changes, summary, onClearAll, onBack, busy, canOpenDispatc
             );
           })}
         </ul>
+        {summary.total > changes.length && <p className="tf-muted">{summary.total - changes.length} more not shown. Clear all covers them too.</p>}
         <div className="tf-actions">
           {canOpenDispatch && <Link className="tf-button" to="/admin/dispatch?tab=schedule">Open in Dispatch</Link>}
           <button type="button" className="tf-button tf-primary" onClick={onClearAll} disabled={busy}>
-            {busy ? 'Clearing…' : `Got it, clear all ${changes.length}`}
+            {busy ? 'Clearing…' : `Got it, clear all ${summary.total}`}
           </button>
         </div>
       </div>
@@ -152,6 +155,7 @@ function ReviewList({ changes, summary, onClearAll, onBack, busy, canOpenDispatc
 
 export default function TechScheduleChanges({ canOpenDispatch = false }) {
   const [changes, setChanges] = useState([]);
+  const [feed, setFeed] = useState({ laterTotal: 0, asOf: null });
   const [reviewing, setReviewing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
@@ -160,6 +164,7 @@ export default function TechScheduleChanges({ canOpenDispatch = false }) {
     try {
       const data = await api('/schedule-changes');
       setChanges(Array.isArray(data.changes) ? data.changes : []);
+      setFeed({ laterTotal: Number(data.later_total) || 0, asOf: data.as_of || null });
     } catch {
       // A failed poll keeps what is on screen; the next one retries.
     }
@@ -174,7 +179,7 @@ export default function TechScheduleChanges({ canOpenDispatch = false }) {
 
   const soon = changes.filter((c) => c.soon);
   const later = changes.filter((c) => !c.soon);
-  const summary = useMemo(() => summaryOf(later), [later]);
+  const summary = useMemo(() => summaryOf(later, feed.laterTotal), [later, feed.laterTotal]);
 
   const dismissOne = async (change) => {
     setBusy(true);
@@ -193,9 +198,10 @@ export default function TechScheduleChanges({ canOpenDispatch = false }) {
     setBusy(true);
     setError(null);
     try {
-      const ids = later.map((c) => c.id);
-      await api('/dismiss-batch', { method: 'POST', body: JSON.stringify({ ids }) });
-      setChanges((prev) => prev.filter((c) => !ids.includes(c.id)));
+      // The server clears every folded change up to the read on screen.
+      await api('/dismiss-batch', { method: 'POST', body: JSON.stringify({ as_of: feed.asOf }) });
+      setChanges((prev) => prev.filter((c) => c.soon));
+      setFeed((prev) => ({ ...prev, laterTotal: 0 }));
       setReviewing(false);
     } catch {
       setError('Could not clear the schedule changes. Try again.');
