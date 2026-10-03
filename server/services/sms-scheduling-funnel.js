@@ -71,13 +71,15 @@ function firstWithin(times, from, to) {
 function summarizeOffers(offers, { moveTimes, bookingTimes, now, observedAt }) {
   const nowMs = new Date(now).getTime();
   const observedMs = new Date(observedAt).getTime();
-  const out = { sent: offers.length, by_kind: {}, open: 0, expired: 0, superseded: 0, other: 0, with_unresolved_slot: 0, matured: 0, followed_by_change_48h: 0 };
+  const out = { sent: offers.length, by_kind: {}, open: 0, expired: 0, superseded: 0, accepted: 0, other: 0, with_unresolved_slot: 0, matured: 0, followed_by_change_48h: 0 };
   // State as of the report's end: a supersede that happened after it (a
   // later offer) must not rewrite a past report.
   const stateOf = (o) => {
     if (o.status === 'superseded' && (!o.closed_at || new Date(o.closed_at).getTime() <= nowMs)) return 'superseded';
     if (o.status === 'superseded') return new Date(o.expires_at).getTime() <= nowMs ? 'expired' : 'open';
-    if (o.status !== 'open') return 'other';
+    // Accepted by the move executor: as of the report's end, like a supersede.
+    if (o.status === 'accepted' && (!o.closed_at || new Date(o.closed_at).getTime() <= nowMs)) return 'accepted';
+    if (o.status !== 'open' && o.status !== 'accepted') return 'other';
     return new Date(o.expires_at).getTime() <= nowMs ? 'expired' : 'open';
   };
   for (const o of offers) {

@@ -169,7 +169,9 @@ async function describeActor(actor, conn) {
   }
   // Text-reply movers first: reschedule-sms passes 'customer_sms', which the
   // generic customer branch below would otherwise claim as "online".
-  if (label === 'sms' || label === 'reschedule_sms' || label === 'customer_sms') return 'by the customer by text';
+  // 'sms_offer_ai': the customer accepted an offered time by text
+  // (sms-scheduling-act.js).
+  if (label === 'sms' || label === 'reschedule_sms' || label === 'customer_sms' || label === 'sms_offer_ai') return 'by the customer by text';
   if (label.startsWith('customer')) return 'by the customer online';
   if (label === 'auto_dispatch') return 'by auto-dispatch';
   if (label.startsWith('rain')) return 'by the rain-out sweep';

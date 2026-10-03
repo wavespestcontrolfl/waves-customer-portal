@@ -57,7 +57,7 @@ test('offers are counted by kind and state, and an unresolved slot is called out
     ],
   });
   expect(summary.offers).toEqual({
-    sent: 3, by_kind: { move_visit: 2, book_new: 1 }, open: 1, expired: 1, superseded: 1, other: 0,
+    sent: 3, by_kind: { move_visit: 2, book_new: 1 }, open: 1, expired: 1, superseded: 1, accepted: 0, other: 0,
     with_unresolved_slot: 1, matured: 3, followed_by_change_48h: 1,
   });
 });
@@ -91,6 +91,10 @@ test('a supersede after the report end does not rewrite the past report', () => 
   expect(asOf('2026-09-30T10:00:00Z', '2026-09-30T12:00:00Z')).toMatchObject({ superseded: 1, open: 0 });
   expect(asOf('2026-10-05T10:00:00Z', '2026-09-30T12:00:00Z')).toMatchObject({ superseded: 0, open: 1 });
   expect(asOf('2026-10-05T10:00:00Z', '2026-10-02T12:00:00Z')).toMatchObject({ superseded: 0, expired: 1 });
+  // An offer the move executor accepted is counted the same way: as of the report's end.
+  const acceptedAsOf = (closedAt, now) => summarizeFunnel({ offers: [{ ...offer(closedAt), status: 'accepted' }], now: new Date(now) }).offers;
+  expect(acceptedAsOf('2026-09-30T10:00:00Z', '2026-09-30T12:00:00Z')).toMatchObject({ accepted: 1, open: 0, other: 0 });
+  expect(acceptedAsOf('2026-10-05T10:00:00Z', '2026-09-30T12:00:00Z')).toMatchObject({ accepted: 0, open: 1, other: 0 });
 });
 
 test('a text whose 48h window has not closed is left out of the change rate', () => {

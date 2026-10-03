@@ -121,14 +121,82 @@ function buildMoveGuard({ decisionId, offer, visitId, customerId, now, target, e
   };
 }
 
+const stampEffects = (dbh, key) => dbh.raw("COALESCE(execution, '{}'::jsonb) || jsonb_build_object(?::text, to_jsonb(now()))", [key]);
+
+/**
+ * A single move's customer notice and reminder sync, taken once. The claim
+ * (effects_started_at on the decision) is written before the send, so a
+ * process that died between the move's commit and this point leaves a moved
+ * decision with no claim, which finishMoveEffects picks up; one that died
+ * mid-send is never sent twice. The sync is pinned to the slot this move
+ * committed, so it never overwrites a newer move's reminder state.
+ */
+async function notifySingleMove({ dbh, decisionId, visitId, date, start, deps = {} }) {
+  const claimed = await dbh('sms_offer_decisions')
+    .where({ id: decisionId, execution_status: 'moved' })
+    .whereRaw("execution->>'effects_started_at' IS NULL")
+    .update({ execution: stampEffects(dbh, 'effects_started_at') })
+    .returning('id');
+  if (!claimed.length) return false;
+  try {
+    // Re-arms the reminders and sends the standard rescheduled text. After
+    // hours the text is held and the confirmation sweep sends it at 8 AM.
+    await (deps.reminders || require('./appointment-reminders')).handleReschedule(visitId, `${date}T${start}`, { expectSchedule: { date, windowStart: start } });
+    await dbh('sms_offer_decisions').where({ id: decisionId }).update({ execution: stampEffects(dbh, 'effects_done_at') });
+  } catch (err) {
+    logger.error(`[sms-scheduling-act] reminder sync failed for ${visitId}: ${errorCode(err)}`);
+  }
+  return true;
+}
+
+const EFFECTS_MIN_AGE_MS = 2 * 60000;
+const EFFECTS_LOOKBACK_MS = 24 * 3600000;
+
+/**
+ * Single moves whose notice never started (the process exited right after the
+ * move committed): finish them. Runs on the offer-ledger cron, gate on or off,
+ * so a kill switch never strands a customer who was already moved. A series
+ * move is the series reconciler's. Never throws.
+ */
+async function finishMoveEffects({ now = new Date(), dbh = db, deps = {} } = {}) {
+  let finished = 0;
+  try {
+    const nowMs = new Date(now).getTime();
+    const rows = await dbh('sms_offer_decisions as d')
+      .join('sms_offers as o', 'o.id', 'd.sms_offer_id')
+      .where('d.execution_status', 'moved')
+      .where('d.executed_at', '>=', new Date(nowMs - EFFECTS_LOOKBACK_MS))
+      .where('d.executed_at', '<=', new Date(nowMs - EFFECTS_MIN_AGE_MS))
+      .whereRaw("d.execution->>'effects_started_at' IS NULL")
+      .whereRaw("COALESCE(d.execution->>'series', 'false') <> 'true'")
+      .limit(20)
+      .select('d.id', 'd.execution', 'o.scheduled_service_id');
+    for (const row of rows) {
+      const target = typeof row.execution === 'string' ? JSON.parse(row.execution) : (row.execution || {});
+      if (!row.scheduled_service_id || !target.date || !target.start) continue;
+      if (await notifySingleMove({ dbh, decisionId: row.id, visitId: row.scheduled_service_id, date: target.date, start: target.start, deps })) finished += 1;
+    }
+    return { finished };
+  } catch (err) {
+    logger.warn(`[sms-scheduling-act] effects sweep failed: ${errorCode(err)}`);
+    return { finished, error: true };
+  }
+}
+
 // After the commit, each effect on its own: a failed sync must not read as a
 // failed move.
-async function afterMove({ dbh, svc, date, window, technicianId, result, deps }) {
+async function afterMove({ dbh, decisionId, svc, date, window, technicianId, result, deps }) {
   if (svc.self_booking_id) {
     try {
-      await dbh('self_booked_appointments').where({ id: svc.self_booking_id }).update({
-        date, start_time: window.start, end_time: window.end, technician_id: technicianId || null, updated_at: dbh.fn.now(),
-      });
+      // Only while the visit still holds this move's time: a newer move owns
+      // the snapshot after that.
+      await dbh('self_booked_appointments').where({ id: svc.self_booking_id })
+        .whereExists(function stillAtTarget() {
+          this.select(dbh.raw('1')).from('scheduled_services').where('scheduled_services.id', svc.id)
+            .whereRaw('scheduled_services.scheduled_date = ?::date', [date])
+            .whereRaw("to_char(scheduled_services.window_start, 'HH24:MI') = ?", [window.start]);
+        })
+        .update({ date, start_time: window.start, end_time: window.end, technician_id: technicianId || null, updated_at: dbh.fn.now() });
     } catch (err) {
       logger.warn(`[sms-scheduling-act] self-booking sync failed for ${svc.id}: ${errorCode(err)}`);
     }
@@ -145,12 +213,7 @@ async function afterMove({ dbh, svc, date, window, technicianId, result, deps })
     }
     return;
   }
-  try {
-    // Re-arms the reminders and sends the standard rescheduled text.
-    await (deps.reminders || require('./appointment-reminders')).handleReschedule(svc.id, `${date}T${window.start}`);
-  } catch (err) {
-    logger.error(`[sms-scheduling-act] reminder sync failed for ${svc.id}: ${errorCode(err)}`);
-  }
+  await notifySingleMove({ dbh, decisionId, visitId: svc.id, date, start: window.start, deps });
   try {
     await (deps.emitDispatchJobUpdate || require('./dispatch-assignment').emitDispatchJobUpdate)({ jobId: svc.id, actorId: null });
   } catch (err) {
@@ -180,11 +243,11 @@ async function moveVisit({ dbh, decisionId, offer, slot, visit, inboundSmsLogId,
   if (!open) return refusal('slot_gone');
 
   const window = { start: hhmm(open.start_time), end: hhmm(open.end_time) };
-  const target = { date: slot.date, start: window.start, end: window.end };
+  const series = page.shouldReanchor(svc, slot.date);
+  const target = { date: slot.date, start: window.start, end: window.end, series };
   // The link's own split: a recurring visit's date move shifts the later
   // visits with it (owner rulings 2026-07-13 and 2026-07-30); anything else
   // moves this one visit and keeps the picker's route placement.
-  const series = page.shouldReanchor(svc, slot.date);
   // The link's notice rules again under the mover's locks, on the clock as it
   // reads then: a request that waited across the cutoff is refused, as the
   // link refuses it. A missed visit is being rebooked; its own start is past.
@@ -231,7 +294,7 @@ async function moveVisit({ dbh, decisionId, offer, slot, visit, inboundSmsLogId,
   // no text is sent on an unchecked result.
   const marked = await dbh('sms_offer_decisions').where({ id: decisionId, execution_status: 'moved' }).first('id');
   if (!marked) return refusal('guard_not_run');
-  await afterMove({ dbh, svc, date: slot.date, window, technicianId: open.technician_id, result, deps });
+  await afterMove({ dbh, decisionId, svc, date: slot.date, window, technicianId: open.technician_id, result, deps });
   return { executed: true, status: 'moved', ...target, seriesMoveId: result?.seriesMoveId || null };
 }
 
@@ -264,4 +327,4 @@ async function executeMove({ decisionId, offer, slot, visit, inboundSmsLogId, re
   }
 }
 
-module.exports = { actMoveLive, executeMove, buildMoveGuard, INITIATED_BY, MAX_REPLY_AGE_MS };
+module.exports = { actMoveLive, executeMove, finishMoveEffects, buildMoveGuard, INITIATED_BY, MAX_REPLY_AGE_MS };

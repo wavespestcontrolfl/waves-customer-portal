@@ -25,6 +25,7 @@ function fakeDb({ claim = true, marked = true } = {}) {
     const q = {
       where: () => q,
       whereNull: () => q,
+      whereRaw: () => q,
       // The read-back of the guard's "moved" mark after the mover returns.
       first: async () => (marked ? { id: 'dec-1' } : undefined),
       update: (values) => { writes.push(values); q.updated = values; return q; },
@@ -34,6 +35,7 @@ function fakeDb({ claim = true, marked = true } = {}) {
     return q;
   });
   dbh.fn = { now: () => 'now()' };
+  dbh.raw = (sql) => ({ raw: sql });
   return { dbh, writes };
 }
 
@@ -84,7 +86,8 @@ describe('gate on', () => {
     });
     expect(typeof options.moveGuard).toBe('function');
     expect(deps.rebooker.rescheduleSeries).not.toHaveBeenCalled();
-    expect(deps.reminders.handleReschedule).toHaveBeenCalledWith(VISIT_ID, '2026-10-06T10:00');
+    // Pinned to the slot this move committed: a newer move's reminder state is never overwritten.
+    expect(deps.reminders.handleReschedule).toHaveBeenCalledWith(VISIT_ID, '2026-10-06T10:00', { expectSchedule: { date: '2026-10-06', windowStart: '10:00' } });
     expect(deps.emitDispatchJobUpdate).toHaveBeenCalledTimes(1);
   });
 
