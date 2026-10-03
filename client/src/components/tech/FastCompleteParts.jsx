@@ -445,13 +445,15 @@ export function VisitNote({ note, onChange, onDictated, onDictationPending, serv
 // failed read never holds the sheet. null until it arrives, and when the
 // read fails or the tips gate is off. `refreshKey` reads it again when it
 // changes (the lawn sheet passes its confirmed assessment, which re-ranks the
-// list); a re-read that fails or says unavailable keeps the tips on screen.
+// list). A re-read that FAILS keeps the tips on screen; one that answers
+// unavailable (the tips gate went off) clears them, since the server would drop
+// the pick.
 export function useTipLibrary({ base, request, refreshKey = null }) {
   const [library, setLibrary] = useState(null);
   useEffect(() => {
     let active = true;
     request(`${base}/tech-tips`)
-      .then((data) => { if (active) setLibrary((prev) => (data?.available === true ? data : prev)); })
+      .then((data) => { if (active) setLibrary(data?.available === true ? data : null); })
       .catch(() => {});
     return () => { active = false; };
   }, [base, request, refreshKey]);

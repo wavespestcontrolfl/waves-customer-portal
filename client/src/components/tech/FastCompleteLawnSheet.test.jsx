@@ -104,7 +104,7 @@ function makeRequest({ ctx = context(), contextError = null } = {}) {
       if (answer instanceof Error) throw answer;
       return answer;
     }
-    if (path.endsWith('/tech-tips')) return tips;
+    if (path.endsWith('/tech-tips')) { if (tips instanceof Error) throw tips; return tips; }
     if (path === '/admin/dispatch/products/catalog') return catalogAnswer;
     if (path.includes('/lawn-assessment/service/')) {
       if (lookup instanceof Error) throw lookup;
@@ -958,10 +958,22 @@ describe('tips from your technician', () => {
     tips = lib(['Mow high']);
     await openSheet();
     await screen.findByRole('button', { name: /Mow high/ });
-    tips = { available: false, groups: [] };
+    tips = new Error('network');
     await confirmAssessment();
     await waitFor(() => expect(requests.filter((r) => tipRead(r.path))).toHaveLength(2));
     expect(screen.getByRole('button', { name: /Mow high/ })).toBeTruthy();
+  });
+
+  // Codex r1 P1: the server drops a pick when the tips gate is off, so an
+  // explicit "unavailable" answer must take the picker away.
+  test('a re-read that answers unavailable clears the tips', async () => {
+    tips = lib(['Mow high']);
+    await openSheet();
+    await screen.findByRole('button', { name: /Mow high/ });
+    tips = { available: false, groups: [] };
+    await confirmAssessment();
+    await waitFor(() => expect(requests.filter((r) => tipRead(r.path))).toHaveLength(2));
+    await waitFor(() => expect(screen.queryByRole('button', { name: /Mow high/ })).toBeNull());
   });
 });
 
