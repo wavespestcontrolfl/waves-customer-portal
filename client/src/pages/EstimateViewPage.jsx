@@ -61,7 +61,7 @@ import { FIRST_INVOICE_AT_CONFIRM_COPY, captureTimingProps, resolvePaymentTiming
 import CustomerReviews from '../components/estimate/CustomerReviews';
 import AppShowcaseCard, { AppStoreBadge, GooglePlayBadge, StoreBadge, APP_STORE_URL, PLAY_STORE_URL } from '../components/estimate/AppShowcaseCard';
 import { isNativeApp } from '../native/platform';
-import { WAVES_PRODUCTS_SAFETY_URL } from '../constants/business';
+import { WAVES_FL_LICENSE_LINE, WAVES_OWNERSHIP_LINE, WAVES_PRODUCTS_SAFETY_URL } from '../constants/business';
 import useIsMobile from '../hooks/useIsMobile';
 import DocumentActionBar from '../components/DocumentActionBar';
 import EstimateGlassTheme, { fireGlassConfetti } from '../components/estimate/glass/EstimateGlassTheme';
@@ -4107,6 +4107,13 @@ export function ReviewPhase({ website = false, slotId, slotMeta = null, existing
             style={submitting ? { ...estimateSecondaryCtaStyle, opacity: 0.65, cursor: 'default' } : estimateSecondaryCtaStyle}
           >Go back</button>
         ) : null}
+        {/* Ownership line (owner 2026-10-02) — one quiet line at the foot
+            of the confirm step; below the payment disclosures so it never
+            sits between the button and what the tap commits to. */}
+        <div data-testid="estimate-ownership-line" style={{ fontSize: 14, color: ESTIMATE_MUTED, lineHeight: 1.5, textAlign: 'center' }}>
+          <span style={{ whiteSpace: 'nowrap' }}>{WAVES_OWNERSHIP_LINE}</span>{' '}
+          <span style={{ whiteSpace: 'nowrap' }}>{WAVES_FL_LICENSE_LINE}</span>
+        </div>
       </div>
     </div>
   );

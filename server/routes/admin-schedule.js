@@ -10,7 +10,7 @@ const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../midd
 const logger = require('../services/logger');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled, discountStackingLive, reportPhotoContentLive, reportWriterRulesLive, visitPrepPhotosLive, tsFastCompleteLive } = require('../config/feature-gates');
-const { lawnReserviceFastCompleteLive } = require('../config/feature-gates');
+const { lawnReserviceFastCompleteLive, fastCompleteVoiceFillLive } = require('../config/feature-gates');
 const { percentageDiscountDollars, stackGroupConflict: discountStackGroupConflict } = require('../services/discount-stack');
 const { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } = require('../../shared/legacy-visit-money-submission.cjs');
 const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');
@@ -79,7 +79,7 @@ const { redactAccessCodes } = require('../services/context-aggregator');
 const { technicianReportCustomerCopy, containsReportAccessCode } = require('../services/service-report/technician-report-copy');
 const {
   TECHNICIAN_NOTE_HEADER, CUSTOMER_WORDS_HEADER, withheldProductsLine, writerRulesRejection,
-  activeIngredientsMentioned, bookedReasonBlock,
+  activeIngredientsMentioned, bookedReasonBlock, lawnResultTimingViolation,
 } = require('../services/service-report/report-writer-rules');
 const CompletionRecap = require('../services/completion-recap');
 const {
@@ -5168,6 +5168,10 @@ async function loadProjectCompletionContextByServiceId(services) {
       // lawn re-service sheet (instead of the typed Dispatch form) when on.
       // Read at call time; no per-tech flag.
       lawnReserviceFastCompleteEnabled: lawnReserviceFastCompleteLive(),
+      // GATE_FAST_COMPLETE_VOICE_FILL: the pest re-service sheet shows its
+      // "Tell me what you did" mic, Check chips and office note when on. Read
+      // at call time; no per-tech flag.
+      fastCompleteVoiceFillEnabled: fastCompleteVoiceFillLive(),
       // GATE_FAST_COMPLETE_RECAP — the same schedule-payload ride: with it on,
       // the Fast Complete sheet sends the customer completion text instead
       // of pinning the send flags off. Only read while the gate above is on.
@@ -6322,6 +6326,7 @@ router.get('/', async (req, res, next) => {
         reserviceFastCompleteEnabled: projectCompletionContext.reserviceFastCompleteEnabled === true,
         treeShrubFastCompleteEnabled: projectCompletionContext.treeShrubFastCompleteEnabled === true,
         lawnReserviceFastCompleteEnabled: projectCompletionContext.lawnReserviceFastCompleteEnabled === true,
+        fastCompleteVoiceFillEnabled: projectCompletionContext.fastCompleteVoiceFillEnabled === true,
         // GATE_FAST_COMPLETE_RECAP — see loadProjectCompletionContextByServiceId.
         fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
         // GATE_FAST_COMPLETE_REPORT — see loadProjectCompletionContextByServiceId.
@@ -6926,6 +6931,7 @@ router.get('/week', async (req, res, next) => {
           reserviceFastCompleteEnabled: projectCompletionContext.reserviceFastCompleteEnabled === true,
           treeShrubFastCompleteEnabled: projectCompletionContext.treeShrubFastCompleteEnabled === true,
           lawnReserviceFastCompleteEnabled: projectCompletionContext.lawnReserviceFastCompleteEnabled === true,
+          fastCompleteVoiceFillEnabled: projectCompletionContext.fastCompleteVoiceFillEnabled === true,
           fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
           fastCompleteReportEnabled: projectCompletionContext.fastCompleteReportEnabled === true,
           noteBoxPhotosEnabled: projectCompletionContext.noteBoxPhotosEnabled === true,
@@ -25883,11 +25889,16 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         }
       }
     }
+    // Lawn under GATE_LAWN_REPORT_COPY_V6 (P15): the prompt carried the
+    // RESULT TIMING rule, so the copy is screened for it too; any forward
+    // result timing is rejected (the report's "What to expect" owns timing).
+    const { LAWN_RESULT_TIMING_RULE } = require('../services/service-report/lawn-report-copy-prompt');
+    const lawnTimingOn = String(effectiveSystemPrompt || '').includes(LAWN_RESULT_TIMING_RULE);
     const writerRulesScreen = (text) => (writerRulesOn
       ? writerRulesRejection(text, {
         activeIngredients: visitActiveIngredients, allowedPhrases: writerAllowedPhrases, allowedDates: writerAllowedDates,
       })
-      : null);
+      : null) || (lawnTimingOn && lawnResultTimingViolation(text) ? 'lawn_timing' : null);
     const generated = await generateReportCopyWithFallback({
       systemPrompt: effectiveSystemPrompt,
       userMessage: fullUserMessage,

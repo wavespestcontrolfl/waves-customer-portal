@@ -146,7 +146,10 @@ describe('the lane record on the sheet', () => {
     expect(body.products).toEqual([expect.objectContaining({ productId: 'temprid', targets: [], applicationMethod: 'spot_treatment' })]);
     expect(body.products[0]).not.toHaveProperty('applicationArea');
     expect(body.products[0]).not.toHaveProperty('areaValue');
-  });
+    // The file's first full flow pays the sheet's cold start: under CI load
+    // it ran past the 5 s default (PR #5690's client job), as the sibling
+    // FastCompleteSheet.test.jsx's first full flow does.
+  }, 15000);
 
   test('one place goes on every product as its application area', async () => {
     const request = makeRequest({ laneFacts: { ...READ, areas: [READ.areas[0]] } });

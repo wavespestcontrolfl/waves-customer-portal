@@ -25,6 +25,19 @@ const mockListPayments = jest.fn(async () => ({ payments: [] }));
 jest.mock('../services/portal-payment-history', () => ({ listPortalPayments: (...a) => mockListPayments(...a) }));
 const mockListVisits = jest.fn(async () => ({ services: [], total: 0 }));
 jest.mock('../services/portal-service-history', () => ({ listPortalServiceHistory: (...a) => mockListVisits(...a) }));
+jest.mock('../services/reservice-scheduler', () => {
+  const actual = jest.requireActual('../services/reservice-scheduler');
+  return {
+    reportedReserviceLanes: actual.reportedReserviceLanes,
+    reportedReserviceExcludedSpecialty: actual.reportedReserviceExcludedSpecialty,
+    isActivePestReport: actual.isActivePestReport,
+    reserviceSelfServeEnabled: () => true,
+    openReserviceCallbacks: async () => ({}),
+  };
+});
+// The /reservice page's own verdict: pest bookable for cust-1.
+const mockPageState = jest.fn(async () => ({ customer: { id: 'cust-1' }, laneCatalog: {}, lanes: [{ key: 'pest', alreadyBooked: null }], bookableLanes: ['pest'] }));
+jest.mock('../routes/reservice-public', () => ({ _internals: { TOKEN_RE: /^[a-f0-9]{64}$/, pageLaneState: (...a) => mockPageState(...a), reserviceLocationReviewRequired: async () => false } }));
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({ messages: { create: mockCreate } })));
 
 const db = require('../models/db');
@@ -50,8 +63,13 @@ beforeEach(() => {
   delete process.env[ENV];
   delete process.env.GATE_PORTAL_CHAT_FACTS;
   delete process.env.GATE_PORTAL_CHAT_VISIT_FACTS;
+  delete process.env.GATE_PORTAL_CHAT_RESERVICE;
 });
-afterAll(() => { delete process.env[ENV]; delete process.env.GATE_PORTAL_CHAT_FACTS; });
+afterAll(() => {
+  delete process.env[ENV];
+  delete process.env.GATE_PORTAL_CHAT_FACTS;
+  delete process.env.GATE_PORTAL_CHAT_RESERVICE;
+});
 
 test('a billing ask in the portal returns the reply with an Open Billing button', async () => {
   wire('portal_chat');
@@ -217,6 +235,156 @@ test('visits gate alone: a billing keyword hand-off shows no payment card (the p
   escalate.mockRestore();
 });
 
+describe('GATE_PORTAL_CHAT_RESERVICE', () => {
+  const gates = require('../config/feature-gates');
+  let isEnabled;
+  beforeEach(() => {
+    process.env.GATE_PORTAL_CHAT_RESERVICE = 'true';
+    isEnabled = jest.spyOn(gates, 'isEnabled').mockImplementation((name) => name === 'reserviceStreamline');
+    wire('portal_chat', 'cust-1');
+    db.__rows = (q) => {
+      if (q.sql.includes('from "agent_sessions"')) return [conversationFor('portal_chat', 'cust-1')];
+      if (q.sql.includes('"reservice_token" from "customers"')) return [{ reservice_token: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' }];
+      if (q.sql.includes('from "agent_messages"')) return mockRecentWords(q);
+      return [];
+    };
+  });
+  afterEach(() => isEnabled.mockRestore());
+  // Newest first, as the read orders them; by default only the turn's own message.
+  let mockRecentWords;
+  beforeEach(() => { mockRecentWords = () => []; });
+
+  const pestTurn = (extra = {}) => {
+    mockCreate
+      .mockResolvedValueOnce({ content: [{ type: 'tool_use', id: 't1', name: 'offer_reservice', input: { service_line: 'pest' } }] })
+      .mockResolvedValueOnce({ content: [{ type: 'text', text: 'Sorry about the ants. Your plan covers a free visit; tap below to book it.' }] });
+    return assistant.processMessage({ message: 'The ants are back in the kitchen', channel: 'portal_chat', channelIdentifier: 'sess-1', customerId: 'cust-1', ...extra });
+  };
+
+  test('the tool and the prompt section join the lane, and a primary-property session gets the booking button', async () => {
+    const result = await pestTurn({ secondaryProperty: false });
+
+    const first = mockCreate.mock.calls[0][0];
+    expect(toolNames(first)).toEqual(['get_upcoming_services', 'get_pest_advice', 'offer_reschedule_link', 'open_portal_section', 'offer_reservice', 'escalate']);
+    expect(first.system[0].text).toMatch(/PESTS BACK BETWEEN VISITS:/);
+    expect(first.system[0].text).toMatch(/\(offer_reservice\)/);
+    expect(mockPageState).toHaveBeenCalledWith('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
+    // The one plan fact this lane may state is the tool's.
+    expect(first.system[0].text).toMatch(/plan details \(apart from what offer_reservice tells you\)/);
+    expect(result.actions).toEqual([{ type: 'link', label: 'Book your free re-service', href: '/reservice/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' }]);
+    const toolResult = mockCreate.mock.calls[1][0].messages.at(-1).content[0].content;
+    expect(toolResult).not.toMatch(/bbbbbbbb/);
+  });
+
+  test.each([
+    ['a secondary saved-property session', { secondaryProperty: true }],
+    ['a caller that names no property scope', {}],
+  ])('%s gets no button', async (_label, extra) => {
+    const result = await pestTurn(extra);
+
+    expect(mockPageState).not.toHaveBeenCalled();
+    expect(result).not.toHaveProperty('actions');
+  });
+
+  test('the customer\'s message reaches the tool: a rodent report gets no free offer even when the model picks pest', async () => {
+    mockCreate
+      .mockResolvedValueOnce({ content: [{ type: 'tool_use', id: 't1', name: 'offer_reservice', input: { service_line: 'pest' } }] })
+      .mockResolvedValueOnce({ content: [{ type: 'text', text: 'Sorry about that, I am passing this to the team.' }] });
+
+    const result = await assistant.processMessage({ message: 'The rats are back in the attic', channel: 'portal_chat', channelIdentifier: 'sess-1', customerId: 'cust-1', secondaryProperty: false });
+
+    expect(mockPageState).not.toHaveBeenCalled();
+    expect(result).not.toHaveProperty('actions');
+    expect(mockCreate.mock.calls[1][0].messages.at(-1).content[0].content).toMatch(/separately priced/);
+  });
+
+  test('portal history is read newest-first, and only this turn\'s message is classified', async () => {
+    let sql;
+    mockRecentWords = (q) => { sql = q.sql; return [{ role: 'user', content: 'yes please' }, { role: 'assistant', content: 'Sorry to hear that. Want me to check your plan?' }, { role: 'user', content: 'The ants are back in the kitchen' }]; };
+    mockCreate
+      .mockResolvedValueOnce({ content: [{ type: 'tool_use', id: 't1', name: 'offer_reservice', input: { service_line: 'pest' } }] })
+      .mockResolvedValueOnce({ content: [{ type: 'text', text: 'Let me pass that to the team.' }] });
+
+    const result = await assistant.processMessage({ message: 'yes please', channel: 'portal_chat', channelIdentifier: 'sess-1', customerId: 'cust-1', secondaryProperty: false });
+
+    expect(sql).toMatch(/order by "created_at" desc, "id" desc limit \$\d/);
+    // Put back in order: the model's last message is the customer's newest.
+    const sent = mockCreate.mock.calls[0][0].messages;
+    const textOf = (m) => (typeof m.content === 'string' ? m.content : m.content.map((b) => b.text).join(''));
+    expect(sent.map(textOf)).toEqual(['The ants are back in the kitchen', 'Sorry to hear that. Want me to check your plan?', 'yes please']);
+    // "yes please" reports nothing: the earlier report is not carried forward.
+    expect(mockPageState).not.toHaveBeenCalled();
+    expect(result).not.toHaveProperty('actions');
+  });
+
+  test('a newest-20 window that opens on an assistant row starts at the customer turn after it', async () => {
+    mockRecentWords = () => [
+      { role: 'user', content: 'yes please' },
+      { role: 'assistant', content: 'Want me to check your plan?' },
+      { role: 'user', content: 'The ants are back in the kitchen' },
+      { role: 'assistant', content: 'Hi Pat, how can I help?' },
+    ];
+    mockCreate
+      .mockResolvedValueOnce({ content: [{ type: 'tool_use', id: 't1', name: 'offer_reservice', input: { service_line: 'pest' } }] })
+      .mockResolvedValueOnce({ content: [{ type: 'text', text: 'Tap below.' }] });
+
+    await assistant.processMessage({ message: 'yes please', channel: 'portal_chat', channelIdentifier: 'sess-1', customerId: 'cust-1', secondaryProperty: false });
+
+    const sent = mockCreate.mock.calls[0][0].messages;
+    expect(sent[0]).toEqual(expect.objectContaining({ role: 'user', content: 'The ants are back in the kitchen' }));
+    expect(sent).toHaveLength(3);
+  });
+
+  test('a turn that offers the re-service and then hands off drops the booking button, keeping the others', async () => {
+    const escalate = jest.spyOn(assistant, 'escalate').mockResolvedValue({ reply: 'sent', escalated: true, teamNotified: true });
+    mockCreate.mockResolvedValueOnce({ content: [
+      { type: 'tool_use', id: 't1', name: 'offer_reservice', input: { service_line: 'pest' } },
+      { type: 'tool_use', id: 't2', name: 'open_portal_section', input: { section: 'service_reports' } },
+      { type: 'tool_use', id: 't3', name: 'escalate', input: { reason: 'Treatment did not work', topic: 'complaint' } },
+    ] });
+
+    const result = await assistant.processMessage({ message: 'The ants are back in the kitchen and your treatment did nothing', channel: 'portal_chat', channelIdentifier: 'sess-1', customerId: 'cust-1', secondaryProperty: false });
+
+    expect(result.escalated).toBe(true);
+    expect(result.actions).toEqual([{ type: 'tab', label: 'Open completed visits and reports', tab: 'services' }]);
+    escalate.mockRestore();
+  });
+
+  test('SMS keeps the original oldest-first history read', async () => {
+    let sql;
+    mockRecentWords = (q) => { sql = q.sql; return []; };
+    mockCreate.mockResolvedValueOnce({ content: [{ type: 'text', text: 'Hi.' }] });
+
+    await assistant.processMessage({ message: 'Hi', channel: 'sms', channelIdentifier: '+15550100', customerPhone: '+15550100' });
+
+    expect(sql).toMatch(/order by "created_at" asc limit \$\d/);
+  });
+
+  test('with visit facts on too, a problem since the visit goes to the re-service rule, not a blanket hand-off', async () => {
+    process.env.GATE_PORTAL_CHAT_VISIT_FACTS = 'true';
+    mockCreate.mockResolvedValueOnce({ content: [{ type: 'text', text: 'Hi.' }] });
+
+    await assistant.processMessage({ message: 'Hi', channel: 'portal_chat', channelIdentifier: 'sess-1', customerId: 'cust-1' });
+
+    const text = mockCreate.mock.calls[0][0].system[0].text;
+    expect(text).not.toMatch(/reports a problem since the visit or says something was missed, escalate/);
+    expect(text).toMatch(/Pests back since the visit follow PESTS BACK BETWEEN VISITS/);
+    expect(text).toMatch(/A lawn problem \(weeds, brown or thin grass\) is not this tool's: escalate it with topic pest_problem/);
+  });
+
+  test('the gates compose: every portal section in one prompt', async () => {
+    process.env.GATE_PORTAL_CHAT_FACTS = 'true';
+    process.env.GATE_PORTAL_CHAT_VISIT_FACTS = 'true';
+    mockCreate.mockResolvedValueOnce({ content: [{ type: 'text', text: 'Hi.' }] });
+
+    await assistant.processMessage({ message: 'Hi', channel: 'portal_chat', channelIdentifier: 'sess-1', customerId: 'cust-1' });
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(toolNames(call)).toEqual(expect.arrayContaining(['show_recent_payments', 'get_recent_visits', 'offer_reservice']));
+    expect(call.system[0].text).toMatch(/CHARGES AND PAYMENTS:[\s\S]*PAST VISITS:[\s\S]*PESTS BACK BETWEEN VISITS:[\s\S]*WHAT YOU MUST ESCALATE/);
+  });
+});
+
 test('gate off: the portal prompt has no payment card tool', async () => {
   wire('portal_chat');
   mockCreate.mockResolvedValue({ content: [{ type: 'text', text: 'Hi.' }] });
@@ -225,7 +393,8 @@ test('gate off: the portal prompt has no payment card tool', async () => {
   expect(toolNames(call)).not.toContain('show_recent_payments');
   expect(toolNames(call)).not.toContain('get_recent_visits');
   expect(call.system[0].text).toMatch(/BILLING, PLAN, REPORTS/);
-  expect(call.system[0].text).not.toMatch(/PAST VISITS:|COMPANY FACTS/);
+  expect(call.system[0].text).not.toMatch(/PAST VISITS:|COMPANY FACTS|PESTS BACK BETWEEN VISITS/);
+  expect(toolNames(call)).not.toContain('offer_reservice');
 });
 
 test('a portal reply with no button tool carries no actions field', async () => {
