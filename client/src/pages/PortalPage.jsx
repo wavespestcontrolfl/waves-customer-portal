@@ -16441,14 +16441,17 @@ function ChatWidget({ customer, onClose, initialQuestion, onNavigate }) {
       setMessages(prev => [...prev, ...chatRowsFor(data)]);
       if (data.retryable) {
         retryTurnRef.current = { text, requestId };
-        setInput(text);
+        // The input stays enabled while a turn is pending so the customer can
+        // draft their next question. Restore the retry text only if they have
+        // not started one; the retry ref still preserves this original turn.
+        setInput(current => current.trim() ? current : text);
       } else {
         retryTurnRef.current = null;
       }
     } catch {
       setMessages(prev => [...prev, { role: 'assistant', content: "Connection issue — please try again or call us at (941) 297-5749." }]);
       retryTurnRef.current = { text, requestId };
-      setInput(text);
+      setInput(current => current.trim() ? current : text);
     } finally {
       clearTimeout(timer);
       setSending(false);

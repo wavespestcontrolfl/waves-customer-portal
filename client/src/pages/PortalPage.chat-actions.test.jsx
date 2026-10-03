@@ -30,6 +30,12 @@ import { ChatWidget } from './PortalPage';
 const customer = { id: 'cust-1', firstName: 'Pat' };
 const NOTIFIED_LINE = 'A team member has been notified and will follow up shortly.';
 const settle = () => act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -161,9 +167,10 @@ describe('hand-off notice', () => {
 });
 
 describe('durable chat retry', () => {
-  it('reuses the request id and user bubble after an ambiguous transport failure', async () => {
+  it('preserves a new draft and reuses the request id and user bubble after an ambiguous transport failure', async () => {
+    const pending = deferred();
     api.request
-      .mockRejectedValueOnce(new Error('connection lost'))
+      .mockReturnValueOnce(pending.promise)
       .mockResolvedValueOnce({ reply: 'Your request was already received.', escalated: false });
     render(<ChatWidget
       customer={customer}
@@ -173,7 +180,14 @@ describe('durable chat retry', () => {
     />);
     await settle();
 
-    expect(screen.getByLabelText('Chat message')).toHaveValue('Please cancel my service');
+    fireEvent.change(screen.getByLabelText('Chat message'), { target: { value: 'Also, what about the lanai?' } });
+    await act(async () => {
+      pending.reject(new Error('connection lost'));
+      await Promise.resolve();
+    });
+    expect(screen.getByLabelText('Chat message')).toHaveValue('Also, what about the lanai?');
+
+    fireEvent.change(screen.getByLabelText('Chat message'), { target: { value: 'Please cancel my service' } });
     fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
     await settle();
 
@@ -187,9 +201,10 @@ describe('durable chat retry', () => {
     expect(screen.getByText('Your request was already received.')).toBeInTheDocument();
   });
 
-  it('reuses the request id when the coordinator asks the client to retry', async () => {
+  it('preserves a new draft and reuses the request id when the coordinator asks the client to retry', async () => {
+    const pending = deferred();
     api.request
-      .mockResolvedValueOnce({ reply: 'Still working on that request.', retryable: true })
+      .mockReturnValueOnce(pending.promise)
       .mockResolvedValueOnce({ reply: 'Your request was already received.', escalated: false });
     render(<ChatWidget
       customer={customer}
@@ -199,7 +214,14 @@ describe('durable chat retry', () => {
     />);
     await settle();
 
-    expect(screen.getByLabelText('Chat message')).toHaveValue('Please cancel my service');
+    fireEvent.change(screen.getByLabelText('Chat message'), { target: { value: 'Also, what about the lanai?' } });
+    await act(async () => {
+      pending.resolve({ reply: 'Still working on that request.', retryable: true });
+      await Promise.resolve();
+    });
+    expect(screen.getByLabelText('Chat message')).toHaveValue('Also, what about the lanai?');
+
+    fireEvent.change(screen.getByLabelText('Chat message'), { target: { value: 'Please cancel my service' } });
     fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
     await settle();
 

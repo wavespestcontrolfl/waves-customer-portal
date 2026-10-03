@@ -157,6 +157,49 @@ describe('POST /ai/chat/report', () => {
     });
   });
 
+  test('the authenticated property claim scopes the conversation lookup', async () => {
+    process.env.GATE_APP_PROPERTY_SCOPE = 'true';
+    const { propertyQuery, sessionQuery, escalationInsert } = mockReportTables({
+      customer: { id: 'cust-1', account_id: 'account-1', active: true },
+      property: { id: 'prop-1', customer_id: 'cust-1', active: true },
+      session: { id: 'conv-property-1', customer_id: 'cust-1' },
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/ai/chat/report`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${customerToken('cust-1', {
+            accountId: 'account-1',
+            propertyId: 'prop-1',
+          })}`,
+        },
+        body: JSON.stringify({
+          sessionId: 'shared-session',
+          propertyId: 'prop-other',
+          messageContent: 'Bad AI reply',
+        }),
+      });
+      expect(res.status).toBe(200);
+    });
+
+    expect(propertyQuery.where).toHaveBeenCalledWith({
+      id: 'prop-1',
+      customer_id: 'cust-1',
+      active: true,
+    });
+    expect(sessionQuery.where).toHaveBeenCalledWith({
+      channel: 'portal_chat',
+      channel_identifier: 'property:prop-1:shared-session',
+      customer_id: 'cust-1',
+    });
+    expect(escalationInsert).toHaveBeenCalledWith(expect.objectContaining({
+      conversation_id: 'conv-property-1',
+      customer_id: 'cust-1',
+    }));
+  });
+
   test('rejects unauthenticated reports outright', async () => {
     const { escalationInsert } = mockReportTables();
 
