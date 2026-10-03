@@ -391,7 +391,8 @@ const REPORT_GENERIC_PRODUCT_TOKENS = new Set([
 // far more narrowly than the visit's own, because most words inside catalog
 // names are ordinary report vocabulary ("snap", "trap", "distance",
 // "southern"):
-//   - the name, or its leading two tokens, as a phrase ("Demand CS",
+//   - the name, its leading two tokens, or a hyphenated single-letter
+//     designation anywhere in it ("T-Rex"), as a phrase ("Demand CS",
 //     "T-Zone") or as one collapsed word ("BoraCare"), any case; and
 //   - its leading token alone (the brand word: "Termidor", "Trapper") only
 //     where the text writes it capitalized in the middle of a sentence. A
@@ -451,6 +452,16 @@ function buildCatalogBrandScreen(rows, genericTokens, mentionedText = '') {
         entry.phrases.push(` ${tokens[0]} ${tokens[1]} `);
         if (collapsible(`${tokens[0]}${tokens[1]}`)) entry.collapsed.push(`${tokens[0]}${tokens[1]}`);
       }
+    }
+    // A hyphenated designation anywhere in the name is an alias of its own
+    // ("T-Rex" in "Trapper T-Rex Rat Snap Trap", "G-4"): a single letter
+    // joined to a word is a coined term, never ordinary copy. Compounds of
+    // whole words ("pre-emergent", "three-way") are not.
+    for (const compound of String(label).match(/[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+/g) || []) {
+      const parts = tokensOf(compound);
+      if (!parts.some((part) => /^[a-z]$/.test(part)) || whollyPlain(parts)) continue;
+      entry.phrases.push(` ${parts.join(' ')} `);
+      if (collapsible(parts.join(''))) entry.collapsed.push(parts.join(''));
     }
     entries.push(entry);
   }

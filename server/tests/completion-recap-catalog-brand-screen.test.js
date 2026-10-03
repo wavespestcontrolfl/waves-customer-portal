@@ -14,6 +14,7 @@ const CATALOG = [
   { name: 'Pesticide application sign 4x5 (yard sign card)', active_ingredient: null },
   { name: 'Termite protection notice sticker 5.5x4', active_ingredient: null },
   { name: 'Permethrin SFR', active_ingredient: 'Permethrin' },
+  { name: 'Prodiamine 65 WDG Pre-Emergent Herbicide', active_ingredient: 'Prodiamine' },
   { name: 'Non-ionic Surfactant', active_ingredient: null },
   { name: 'Nufarm Arena 0.25G Clothianidin 0.25 Systemic Granular Insecticide', display_name: 'Arena 0.25G Granular', active_ingredient: 'Clothianidin' },
 ];
@@ -27,6 +28,8 @@ describe('catalog-wide brand screen', () => {
     'We applied Demand CS around the foundation.',
     'The weeds got a T-Zone application.',
     'We applied BoraCare to the sill plate.',
+    'We set T-Rex traps in the attic.',
+    'We set trex traps in the attic.',
     'We applied Arena 0.25G to the beds.',
     'WE APPLIED TERMIDOR AROUND THE FOUNDATION.',
     'The weeds got a tzone application.',
@@ -42,6 +45,7 @@ describe('catalog-wide brand screen', () => {
     'We saw southern chinch bug damage along the driveway.',
     'A pesticide application sign was posted and termite protection was discussed.',
     'We added a non-ionic surfactant to the tank.',
+    'A pre-emergent treatment is planned for spring.',
     'WHAT WE DID AND WHY\nWe treated the thresholds.',
     'WHAT WE FOUND\nGhost ants were trailing along the kitchen threshold.',
     '- Exterior perimeter treatment\n- Granular ant bait in the lawn',
@@ -64,8 +68,9 @@ describe('catalog-wide brand screen', () => {
     expect(termidor('You asked about termidor.')).toBe(true);
     const trapper = await build({ mentionedText: 'Set a Trapper T-Rex Rat Snap Trap in the attic.' });
     expect(trapper('We set T-Rex traps in the attic.')).toBe(true);
+    expect(trapper('We set snap stations in the attic.')).toBe(true);
     // Not named in the prompt: the narrow rule alone.
-    expect((await build())('We set T-Rex traps in the attic.')).toBe(false);
+    expect((await build())('We set snap stations in the attic.')).toBe(false);
   });
 
   test("a note using a brand's word in its ordinary sense names nothing", async () => {
