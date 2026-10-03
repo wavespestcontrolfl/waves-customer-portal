@@ -1916,3 +1916,13 @@ describe('Codex #5698 round 9', () => {
     expect(out.products.some((p) => p.productId === 'p-taurus' && p.amount === 2)).toBe(false);
   });
 });
+
+test('a number in the sentence before does not turn "No two ounces of Taurus were used" into a correction', () => {
+  const t = 'Used four ounces of Talstar. No two ounces of Taurus were used.';
+  const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 2, unit: 'fl_oz', sameAsLast: false, method: '', heard: 'two ounces of Taurus' }] }), ctx, t);
+  expect(out.products.some((p) => p.productId === 'p-taurus' && p.amount === 2)).toBe(false);
+  // the cross-sentence correction still works
+  const fix = 'Used Taurus, four ounces. No, it was five ounces.';
+  const run = (amount) => validateFill(answer({ products: [{ productId: 'p-taurus', amount, unit: 'fl_oz', sameAsLast: false, method: '', heard: 'Used Taurus' }] }), ctx, fix).products[0].amount;
+  expect(run(4)).toBeNull();
+});

@@ -593,7 +593,12 @@ function isCorrectingNo(tokens, j) {
   if (!before) return false;
   let k = j + 1;
   while (k <= j + 3 && CORRECTION_FILLERS.has(tokens[k])) k += 1;
-  return Boolean(readSpokenNumber(tokens, k));
+  const number = readSpokenNumber(tokens, k);
+  if (!number) return false;
+  // a replacement is a bare amount ("no, five ounces"); "no two ounces OF Taurus"
+  // names what was not used
+  const unit = readUnitAfter(tokens, number.next);
+  return tokens[number.next + unit.skipped + unit.length] !== 'of';
 }
 function isRetracted(tokens, breaks, start, end, stops = []) {
   for (let j = start - 1; j >= 0 && start - j <= RETRACT_BEFORE; j -= 1) {
