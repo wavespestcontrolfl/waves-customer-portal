@@ -26,6 +26,8 @@ const logger = require('./logger');
 const featureGates = require('../config/feature-gates');
 const { resolveEligibility, recapServiceIdentity, RECAP_COMPARED_IDENTITY_KEYS } = require('./pest-recap');
 const { etCalendarDayOf } = require('../utils/datetime-et');
+const { sodLaidLabel, buildNewSodBanner } = require('./service-report/lawn-new-sod');
+const { resolveNewSodVerdict } = require('./service-report/lawn-new-sod-visit');
 const { ASSESSMENT_EXPERIENCE_KEYS } = require('../config/completion-lane-registry');
 const shotList = require('./lawn-photo-shots');
 
@@ -274,6 +276,24 @@ async function loadReportWateringContext(svc, knex) {
 }
 
 /**
+ * GATE_LAWN_NEW_SOD_MODE (P35): is this visit inside the property's new-sod
+ * window? `{ laidOn, note }` ("New sod laid Oct 1") or null. Gate off: null with
+ * no read. The same customer-level preference row, and the same visit-day rule,
+ * the lawn report uses, so the note on the sheet and the report always agree.
+ * Advisory: an unreadable preference is null (the technician simply sees no
+ * note; the report decides for itself).
+ */
+async function loadNewSodNote(svc, knex) {
+  if (typeof featureGates.lawnNewSodModeLive !== 'function' || !featureGates.lawnNewSodModeLive()) return null;
+  // The shared verdict (lawn-new-sod-visit.js): the appointment's day and its
+  // property, so a visit at another property, or one whose address cannot be
+  // judged, shows no note. A failed read is no note too.
+  const verdict = await resolveNewSodVerdict(knex, { customerId: svc.customer_id, scheduledServiceId: svc.id });
+  if (verdict.reason === 'read_failed') logger.warn(`[lawn-fast] new-sod note unavailable for ${svc.id}`);
+  return verdict.active ? { laidOn: verdict.laidOn, note: sodLaidLabel(verdict.laidOn) } : null;
+}
+
+/**
  * The watering preview for the chosen products: each product's rule, and the
  * one customer-facing watering instruction the REPORT would print, built by the
  * report's own functions (buildReportWateringInstruction, then
@@ -319,6 +339,18 @@ async function buildLawnFastWateringPreview({ serviceId, productIds, knex = db, 
     sentence: null,
     mowHold: null,
   };
+  // New-sod mode: the report prints its fixed new-sod banner whatever the watering
+  // rule gate says, so the preview shows the lines the report ALWAYS prints for
+  // such a visit, and never the engine's own instruction.
+  const newSod = await loadNewSodNote(svc, knex);
+  if (newSod) {
+    const banner = buildNewSodBanner();
+    out.state = banner.state;
+    out.lines = banner.lines;
+    out.sentence = banner.lines.join(' ');
+    out.newSod = newSod;
+    return out;
+  }
   if (!wateringRuleLive || !entries.length) return out;
 
   const reportData = require('./service-report/report-data');
@@ -598,6 +630,7 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null 
   const typed = !!profile.findingsType;
   const { unavailable: plannedProductsUnavailable, ...plannedProducts } = await loadPlannedProducts(svc, knex, visitType, readFailures);
   const turfHeightCapture = typed ? false : await loadTurfHeightCapture(technicianId, knex, readFailures);
+  const newSodNote = await loadNewSodNote(svc, knex);
 
   return {
     ok: true,
@@ -606,6 +639,9 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null 
     visitType,
     service,
     visitDate: etCalendarDayOf(svc.scheduled_date),
+    // GATE_LAWN_NEW_SOD_MODE: a short "New sod laid <date>" note inside the new-sod
+    // window. The key exists only then (gate off = the context is unchanged).
+    ...(newSodNote ? { newSod: newSodNote } : {}),
     // The completion profile's typed findings form (null when it has none). A one-time lawn
     // visit carries 'one_time_lawn_treatment', and /complete then requires lawn_condition.
     findingsType: profile.findingsType || null,

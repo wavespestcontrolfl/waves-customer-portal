@@ -6677,8 +6677,9 @@ function CustomerProfileServices({
 // ─── Access & Preferences (property_preferences) — view + admin edit ─────
 // Field list mirrors server/services/property-preferences-schema.js
 // (PREFS_FIELD_SCHEMAS / ALLOWED_FIELDS) plus the two staff-only fields
-// (chemicalSensitivities/chemicalSensitivityDetails) that route also
-// accepts. Keep ACCESS_PREFS_FIELDS in sync if a field is added there.
+// (chemicalSensitivities/chemicalSensitivityDetails) and the staff-only sod date
+// (sodLaidOn) that route also accepts. Keep ACCESS_PREFS_FIELDS in sync if a
+// field is added there.
 const ACCESS_PREFS_PREFERRED_DAY_OPTIONS = [
   ["no_preference", "No preference"],
   ["monday", "Monday"],
@@ -6785,6 +6786,7 @@ const ACCESS_PREFS_FIELDS = {
   mowingDays: "days",
   mowingTimeOfDay: "text",
   mowingNotes: "text",
+  sodLaidOn: "date",
   hoaName: "text",
   hoaCompany: "text",
   hoaPhone: "text",
@@ -7092,6 +7094,7 @@ function AccessPrefsReadView({ p, isAdmin, onEdit }) {
         value={accessPrefsOptionLabel(ACCESS_PREFS_MOWING_TIME_OPTIONS, p.mowing_time_of_day)}
       />
       <AccessPrefRow label="Mowing Notes" value={p.mowing_notes} />
+      <AccessPrefRow label="New Sod Laid" value={dateInputValue(p.sod_laid_on) || null} />
 
       {hasHoa && (
         <>
@@ -7217,6 +7220,13 @@ function AccessPrefsEditForm({ d, set, setDraft, fieldErrors, hasStructuredPets 
       <AccessPrefsPills {...f} label="Mowing Days" field="mowingDays" options={DAY_KEYS} />
       <AccessPrefsSelect {...f} label="Mowing Time" field="mowingTimeOfDay" options={ACCESS_PREFS_MOWING_TIME_OPTIONS} />
       <AccessPrefsTextInput {...f} multiline label="Mowing Notes" field="mowingNotes" />
+      {/* Sod someone else laid (Waves does not install sod). While the lawn
+          report's visit falls in the first weeks after this day, the report
+          shows new-sod care instead of the usual watering plan. Clear to end it. */}
+      <AccessPrefsTextInput {...f} label="New Sod Laid On" field="sodLaidOn" type="date" max={todayDateInput()} />
+      <div className="text-ui-caption text-ink-secondary">
+        Sod someone else laid. For the first 21 days the lawn report shows daily light watering, no mowing and no weed control. Leave blank for none.
+      </div>
 
       <AccessPrefsSubheading>HOA</AccessPrefsSubheading>
       <div className="grid grid-cols-2 gap-2">

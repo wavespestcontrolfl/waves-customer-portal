@@ -28,6 +28,7 @@ const {
   normalizeLawnAftercare,
   wateringRestrictionAction,
 } = require('./lawn-aftercare');
+const { NEW_SOD_COPY } = require('./lawn-new-sod');
 
 // Classify an applied product into a customer-facing purpose. Prefers the catalog's
 // approved report summary; falls back to category/active-ingredient heuristics so a
@@ -551,17 +552,28 @@ const ISSUE_TOPIC = {
  *   snapshot history, capped at this visit's date
  * @param {object} [input.mowingTrendFallback]  { trend, band } history when THIS visit
  *   has no gauge reading (same shape subset as mowingHeight)
+ * @param {boolean} [input.newSod]  GATE_LAWN_NEW_SOD_MODE (lawn-new-sod.js): an active
+ *   new-sod visit. The water story is withheld (no water status, water explanation,
+ *   water/coverage finding cards or mowing gauge) and the seasonal note is the
+ *   fixed new-sod expectation line; the banner and week plan are set by the caller.
  * @param {object} [input.wateringInstruction]  buildWateringInstruction(...) result
  *   (GATE_LAWN_WATERING_RULE); null = the legacy fail-closed aftercare
  * @returns {object|null} { snapshot, diagnosis, insights, water, mowing, trends } | null
  */
-function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications = [], actions = [], customerConcern = '', waterSnapshot = null, waterGapHistory = [], mowingTrendFallback = null, wateringInstruction = null, nitrogenApplied = null, programVisit = false, photoLimit = 6 } = {}) {
+function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications = [], actions = [], customerConcern = '', waterSnapshot = null, waterGapHistory = [], mowingTrendFallback = null, wateringInstruction = null, nitrogenApplied = null, programVisit = false, photoLimit = 6, newSod = false } = {}) {
   if (!lawnAssessment) return null;
   const scores = lawnAssessment.scores || {};
   const grassLabel = grassLabelFor(lawnAssessment.turfProfile?.grassType);
   const advice = lawnAssessment.waterContext?.irrigationAdvice || {};
 
   const water = mapWater(lawnAssessment.waterContext, waterSnapshot);
+  if (newSod && water) {
+    // The balance pill and the legacy balance prose ("easing back on irrigation")
+    // would contradict the daily-watering plan on the card; the fixed week plan
+    // owns the watering story for this visit.
+    water.status = 'unknown';
+    water.explanation = null;
+  }
   // Unify the water status the diagnosis + insights reason about with the water
   // card mapWater just produced. Priority must match mapWater EXACTLY or the card
   // and the Water/Coverage diagnosis can contradict each other:
@@ -580,8 +592,11 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   const usingSnapshot = !clientRainKnown && !movedSnapshot && !!(waterSnapshot && waterSnapshot.status && waterSnapshot.status !== 'unknown'
     && waterSnapshot.interpretation !== 'rain_unknown');
   const SNAP_TO_ADVICE = { high: 'surplus', low: 'deficit', balanced: 'balanced' };
-  const effectiveWaterStatus = usingSnapshot ? SNAP_TO_ADVICE[waterSnapshot.status] : (advice.status || null);
-  const overwatering = !!lawnAssessment.overwateringSignal || (usingSnapshot && waterSnapshot.interpretation === 'wet_condition_watch');
+  const effectiveWaterStatus = newSod ? null : (usingSnapshot ? SNAP_TO_ADVICE[waterSnapshot.status] : (advice.status || null));
+  // New-sod mode: the water balance is not judged for a freshly laid lawn (the
+  // daily light watering is the plan), so no surplus / overwatering / dry read
+  // can reach a finding card or the root cause.
+  const overwatering = !newSod && (!!lawnAssessment.overwateringSignal || (usingSnapshot && waterSnapshot.interpretation === 'wet_condition_watch'));
 
   const categories = buildVisualDiagnosisCategories({
     scores,
@@ -626,10 +641,10 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // precedence over the photo severity. Prose, other stress scores, and old
   // assessments without either signal cannot establish a watering problem.
   const technicianDrought = scores.stressFlags?.drought_stress;
-  const drySignal = typeof technicianDrought === 'boolean'
+  const drySignal = newSod ? null : (typeof technicianDrought === 'boolean'
     ? technicianDrought
     : ['none', 'minor', 'moderate', 'severe'].includes(lawnAssessment.droughtStress)
-      ? lawnAssessment.droughtStress !== 'none' : null;
+      ? lawnAssessment.droughtStress !== 'none' : null);
   // The Water/Coverage score is derived from fungus/over-water signals and ignores
   // drought — so a dry/uneven photo read must downgrade it regardless of the weekly
   // amount (this is the "95 Strong vs photo says drought" contradiction).
@@ -648,15 +663,19 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     water.droughtSignal = drySignal;
   }
 
-  const mowing = mapMowing(mowingHeight, grassLabel);
+  // New-sod mode: no mowing until the sod has rooted, so no cut-height gauge or
+  // "lower the mower" card for the visit.
+  const mowing = newSod ? null : mapMowing(mowingHeight, grassLabel);
   const treatment = buildTreatment({ applications, actions });
 
   // Aftercare is computed early enough for the insight builder to reconcile
   // its damp-area advice with a label-required watering-in (codex P1 r32).
   const aftercare = buildAftercare(applications, { instruction: wateringInstruction, weekPlan: water ? water.weekPlan : null });
   const aftercareWaterAction = wateringRestrictionAction(aftercare, water ? water.weekPlan : null);
-  if (water && aftercareWaterAction) water.explanation = aftercareWaterAction;
-  const insights = buildLawnInsightCards({
+  // New-sod mode keeps the card's explanation empty: the fixed week plan owns the watering
+  // story. The product's own aftercare note is not lost: it stays in `aftercare` below.
+  if (water && aftercareWaterAction && !newSod) water.explanation = aftercareWaterAction;
+  const allInsights = buildLawnInsightCards({
     categories,
     water: water ? {
       ...water,
@@ -673,6 +692,9 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     treatmentKinds: treatment ? treatment.kinds : [],
     aftercare,
   });
+  // New-sod mode: every water / coverage card (ease back, let it dry out, check
+  // the sprinklers) would contradict the daily-watering plan, so none is shown.
+  const insights = newSod ? allInsights.filter((card) => !card || card.category !== 'water') : allInsights;
 
   // Field photos for the horizontal strip (best photo first), plus ONE consolidated
   // analysis across all photos (the composite single-voice observation / customer
@@ -723,7 +745,9 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // noActionNeeded, or the SMS summary derived from it below (codex P2 r10).
   // An uncredited required water-in keeps its own line as the task through
   // the shared resolver (aftercareCustomerTask).
-  const aftercareTask = aftercareCustomerTask(aftercare, water ? water.weekPlan : null);
+  // New-sod mode: the "Your next step" task is never the product's watering task: the banner
+  // owns the watering instruction, and the product's own note stays in the aftercare block.
+  const aftercareTask = newSod ? null : aftercareCustomerTask(aftercare, water ? water.weekPlan : null);
   // A credited water-in the water/damp cards phrase generically ("as
   // directed") already carries this same task in different words — the
   // literal-instruction `includes` check below misses that semantic
@@ -750,7 +774,11 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   const programLine = typeof featureGates.lawnExpectationsLive === 'function' && featureGates.lawnExpectationsLive()
     ? buildProgramLine({ grassType: lawnAssessment.turfProfile?.grassType, month: assessMonth, applications, nitrogenApplied, programVisit })
     : null;
-  const seasonalNote = programLine || buildSeasonalNote(lawnAssessment, grassLabel);
+  // New-sod mode: the expectation line is the fixed new-sod sentence, never the
+  // month's program line (which can name a weed-barrier step the mode holds) and
+  // never the generic season note. No seasonalNoteSource, so the lead layout's
+  // "This time of year" card does not print it; the lead carries it instead.
+  const seasonalNote = newSod ? NEW_SOD_COPY.expect : (programLine || buildSeasonalNote(lawnAssessment, grassLabel));
 
   const snapshot = {
     overallScore,
@@ -759,7 +787,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     scoreExplanation,
     rootCause,
     seasonalNote,
-    ...(programLine ? { seasonalNoteSource: 'program' } : {}),
+    ...(programLine && !newSod ? { seasonalNoteSource: 'program' } : {}),
     todaysFocus: treatment ? treatment.focus : [],
     // Plain-language applied-solutions sentence for the hero card (owner
     // 2026-07-21 — the summary must say what was applied, not just tags).

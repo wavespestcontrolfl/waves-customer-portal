@@ -13,6 +13,7 @@ const { stageLifecycleStamps } = require('../services/customer-stages');
 const LifecycleGuard = require('../services/customer-lifecycle-guard');
 const { summarizeLedgerRows } = require('../services/nutrient-ledger');
 const { etDateString } = require('../utils/datetime-et');
+const { validateSodLaidOn } = require('../services/service-report/lawn-new-sod');
 const { invoiceOverdueSql } = require('../services/collections/account-anchor');
 const { openBalanceSummary } = require('../services/open-balance');
 const { formatAddress, normalizeUnitLine } = require('../utils/address-normalizer');
@@ -4682,11 +4683,20 @@ router.put('/:id/notification-prefs', requireAdmin, async (req, res, next) => {
 //     confirmation stamped for whatever number used to be there.
 //   - Field names only in the log/audit trail, never gate/lockbox/garage
 //     code VALUES in the clear.
+// sodLaidOn (lawn report rebuild P35): the day sod someone else laid went down.
+// Staff-only like the sensitivities: the office sets it from a call or a
+// technician's note, the customer portal never accepts it. A real calendar day,
+// not in the future, not older than a year; null / '' clears it. A plain
+// YYYY-MM-DD string, never a Joi date (a Date would bind as a timestamp).
 const ADMIN_ONLY_PREFS_FIELD_SCHEMAS = {
   chemicalSensitivities: Joi.boolean(),
   chemicalSensitivityDetails: prefsLongText,
+  sodLaidOn: Joi.string().trim().allow('', null).empty('').default(null).custom((value, helpers) => {
+    const checked = validateSodLaidOn(value);
+    return checked.ok ? checked.value : helpers.message(checked.message);
+  }),
 };
-const ADMIN_ONLY_PREFS_ALLOWED_FIELDS = ['chemical_sensitivities', 'chemical_sensitivity_details'];
+const ADMIN_ONLY_PREFS_ALLOWED_FIELDS = ['chemical_sensitivities', 'chemical_sensitivity_details', 'sod_laid_on'];
 const ADMIN_PREFS_FIELD_SCHEMAS = { ...PREFS_FIELD_SCHEMAS, ...ADMIN_ONLY_PREFS_FIELD_SCHEMAS };
 const ADMIN_PREFS_ALLOWED_FIELDS = [...PREFS_ALLOWED_FIELDS, ...ADMIN_ONLY_PREFS_ALLOWED_FIELDS];
 

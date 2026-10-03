@@ -43,6 +43,10 @@ const { fetchServiceWeekWeather, toCoordinate } = require('./application-conditi
 const { resolveWateringRule } = require('./lawn-watering-rule');
 const { buildWateringInstruction, composeBannerLines, normalizeMowHoldDays, isValidMowHold } = require('./lawn-watering-instruction');
 const { frozenForecastLine, attachLiveCloseOut } = require('./lawn-watering-forecast');
+const {
+  buildNewSodBanner, buildNewSodWeekPlan, ymdOrNull: sodDayOrNull, NEW_SOD_COPY,
+} = require('./lawn-new-sod');
+const { resolveNewSodVerdict } = require('./lawn-new-sod-visit');
 const { pestReportExpectationsGateOn } = require('./pest-report-expectations');
 const { reportProductCopyGateOn, reportProductCopyForApplicationProduct } = require('./report-product-copy');
 const { validatePhotoChainRows } = require('./photo-chain');
@@ -2767,6 +2771,13 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
     // without touching updated_at, and a cached PDF keyed before it would
     // keep serving the former home's irrigation rows.
     irrigationStamp = `${portalIrrigationInches(prefs) ?? ''}:${prefs?.irrigation_system === false ? 'off' : 'on'}:${prefs?.updated_at ? new Date(prefs.updated_at).toISOString() : ''}:moved=${prefs?.irrigation_home_changed_at ? new Date(prefs.irrigation_home_changed_at).toISOString() : ''}:conf=${typeof prefs?.irrigation_confirmed_fields === 'string' ? prefs.irrigation_confirmed_fields : JSON.stringify(prefs?.irrigation_confirmed_fields || [])}`;
+    // GATE_LAWN_NEW_SOD_MODE (P35): while the gate is live and the property has a
+    // sod date, the report may be the fixed new-sod report, so the date rides the
+    // PDF key (a date edit also moves updated_at above; the gate flip itself is
+    // only visible here). Gate off = nothing appended, every key unchanged. The
+    // stamp is the date, not the verdict: a visit outside the window re-renders
+    // once with identical content, which is harmless.
+    if (typeof featureGates.lawnNewSodModeLive === 'function' && featureGates.lawnNewSodModeLive() && prefs?.sod_laid_on) irrigationStamp += `:sod=${sodDayOrNull(prefs.sod_laid_on) || 'err'}`;
     // The week plan is a render input too: a new Monday snapshot, a restriction
     // policy change/expiry, or the gate itself must re-render a cached PDF.
   } catch {
@@ -3753,6 +3764,31 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     }
   }
 
+  // GATE_LAWN_NEW_SOD_MODE (P35): a visit inside the property's new-sod window
+  // (sod_laid_on through day 21, judged on the VISIT's ET day) carries the fixed
+  // new-sod week plan in place of whatever plan the engine decided: the Monday
+  // snapshot may say to skip a run after rain, which is wrong for new sod. Gate
+  // off = no read, no change. A failed prefs read is the normal report (fail
+  // closed; it already marks the render uncacheable via prefsReadFailed).
+  // The verdict comes from the ONE shared resolver (lawn-new-sod-visit.js): the
+  // VISIT's day (service record date, never the assessment's capture date, so a
+  // redo or GATE_LAWN_PROPERTY_HISTORY cannot move it) and the visit's property
+  // (a stamped address that diverges from the primary home, or one that cannot be
+  // judged, is the normal report). A query that throws is the normal report AND an
+  // uncacheable, delivery-deferring render (newSodReadFailed below).
+  let newSodState = NEW_SOD_INACTIVE;
+  let newSodReadFailed = false;
+  if (typeof featureGates.lawnNewSodModeLive === 'function' && featureGates.lawnNewSodModeLive() && !prefsReadFailed) {
+    const verdict = await resolveNewSodVerdict(knex, { customerId: service.customer_id, prefs: propertyPrefs, serviceRecordId: service.id });
+    if (verdict.reason === 'read_failed') {
+      newSodReadFailed = true;
+      if (readFailures) readFailures.add('new_sod_identity');
+    } else if (verdict.active) {
+      newSodState = { active: true, laidOn: verdict.laidOn, dayNumber: verdict.dayNumber };
+      waterContext.weekPlan = buildNewSodWeekPlan();
+    }
+  }
+
   // The week's rain / ET₀ (water insights) could not be fetched or frozen.
   if (readFailures && weekWeatherUnfrozen) readFailures.add('week_weather');
   const droughtStress = parseJsonObject(assessment.composite_scores).drought_stress;
@@ -3793,12 +3829,12 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     // from an independent, possibly-successful prefs read) stamps that state
     // — caching the mismatch would serve the wrong water balance until the
     // customer's next prefs edit.
-    weekWeatherUncacheable: weekWeatherUnfrozen || !!weekWeatherPendingReason || prefsReadFailed,
+    weekWeatherUncacheable: weekWeatherUnfrozen || !!weekWeatherPendingReason || prefsReadFailed || newSodReadFailed,
     // Dedicated flag for DELIVERY: a pinned (emailed) render must not ship a
     // payload that fell back to tech values because the prefs read blipped —
     // unlike a pending weather week, a retry can fix this, so pdf-queue
     // throws retryable on it instead of serving the bytes.
-    portalPrefsReadFailed: prefsReadFailed,
+    portalPrefsReadFailed: prefsReadFailed || newSodReadFailed,
     snapshot,
     recommendationCards,
     turfProfile: turfProfile ? {
@@ -3831,6 +3867,9 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     customerSummary: snapshot?.summary || defaultCustomerSummary,
     trendSummary: defaultCustomerSummary,
   };
+  // The new-sod verdict rides the in-process object only (non-enumerable, so
+  // the public lawnAssessment gains no key); buildReportV1Data reads it.
+  Object.defineProperty(lawnAssessmentPayload, 'newSod', { value: newSodState, enumerable: false, writable: true, configurable: true });
   if (photoSetUnresolved) {
     Object.defineProperty(lawnAssessmentPayload, 'photoSetUnresolved', { value: photoSetUnresolved, enumerable: false });
   }
@@ -3953,6 +3992,9 @@ function buildWateringBanner(instruction, weekPlan = null) {
     ...bannerForecastExtras(instruction),
   };
 }
+
+// New-sod mode is off (or not in its window): the verdict every normal report carries.
+const NEW_SOD_INACTIVE = Object.freeze({ active: false, laidOn: null, dayNumber: null });
 
 // The v6 copy carrier for a render with no copy (GATE_LAWN_REPORT_COPY_V6).
 const LAWN_COPY_V6_EMPTY = Object.freeze({ headline: null, whatWeDid: null, whatToExpect: null, watching: null, whatToExpectStatic: null });
@@ -5588,11 +5630,17 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         }
       } catch { readFailures.add('water_gap_history'); /* snapshots table optional — trend simply doesn't render */ }
 
+      // GATE_LAWN_NEW_SOD_MODE (P35): an active new-sod visit builds NO watering
+      // instruction (and so freezes none, forecasts none and texts none): its
+      // banner, plan and expectation lines are the fixed new-sod sentences below.
+      // lawnAssessment.newSod is set by buildLawnAssessmentReportData only with
+      // the gate on, so gate off is a plain `false` here.
+      const newSodActive = lawnAssessment.newSod && lawnAssessment.newSod.active === true;
       // GATE_LAWN_WATERING_RULE. Off = none of this runs and the payload is
       // byte-identical to before.
       let wateringInstruction = null;
       let wateringInputsFailed = false;
-      if (featureGates.lawnWateringRuleLive()) {
+      if (featureGates.lawnWateringRuleLive() && !newSodActive) {
         // Rules are UNKNOWN (not absent) when either catalog read failed: the
         // live rule lookup, or the base enrichment (which a product that
         // already carries its category does not surface as productsLoadFailed).
@@ -5669,8 +5717,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         mowingTrendFallback,
         // GATE_LAWN_SHOT_LIST: a visit can carry 8 photos, so the strip does too (6 off).
         ...(featureGates.gateEnvValue('GATE_LAWN_SHOT_LIST') ? { photoLimit: LAWN_SHOT_LIST_CAP } : {}),
+        ...(newSodActive ? { newSod: true } : {}),
       });
-      if (reportV2 && wateringInstruction) {
+      if (reportV2 && newSodActive) {
+        reportV2.banner = buildNewSodBanner();
+      } else if (reportV2 && wateringInstruction) {
         const banner = buildWateringBanner(wateringInstruction, lawnAssessment.waterContext?.weekPlan);
         if (banner) reportV2.banner = banner;
       }
@@ -5893,7 +5944,30 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         }
       }
 
-      if (reportV2 && featureGates.lawnReportCopyV6Live()) {
+      if (reportV2 && newSodActive && featureGates.lawnReportCopyV6Live()) {
+        // GATE_LAWN_NEW_SOD_MODE: while new-sod mode is ACTIVE for this visit the v6 durable
+        // freeze is neither written nor replayed. A freeze made now would hold copy derived
+        // from the new-sod report for ever (first writer wins, and it would replay after the
+        // gate goes off); an older normal freeze may carry watering-derived headline / watching /
+        // expectation copy. The lead's three fields for this render are computed in memory
+        // from fixed sentences: what we applied (the same deterministic treatment sentence the
+        // writer uses), the fixed expectation line, and no headline override or "watching" line
+        // (the lead falls back to the snapshot's own status headline). Nothing here touches
+        // structured_notes.lawnCopyV6, so the normal freeze path is untouched for every other
+        // render (gate off, or mode inactive).
+        const { buildTreatmentSummary: summarizeTreatment } = require('./treatment-summary');
+        const applied = summarizeTreatment(reportV2.treatment, { noTiming: true });
+        Object.defineProperty(reportV2, 'copyV6', {
+          value: {
+            headline: null,
+            whatWeDid: typeof applied === 'string' && applied.trim() ? applied.trim() : null,
+            whatToExpect: NEW_SOD_COPY.expect,
+            watching: null,
+            whatToExpectStatic: NEW_SOD_COPY.expect,
+          },
+          enumerable: false, writable: true, configurable: true,
+        });
+      } else if (reportV2 && featureGates.lawnReportCopyV6Live()) {
         // GATE_LAWN_REPORT_COPY_V6 (P14): the structural writer replaces the
         // old narrative overlay below (env LAWN_REPORT_V2_NARRATIVE is not
         // read while this is live). Fixed sentences from this visit's facts, no
@@ -5946,7 +6020,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           lawnAssessment.weekWeatherUncacheable = true;
           lawnAssessment.lawnCopyV6Unfrozen = true;
         }
-      } else if (reportV2 && process.env.LAWN_REPORT_V2_NARRATIVE === 'true') {
+      } else if (reportV2 && process.env.LAWN_REPORT_V2_NARRATIVE === 'true' && !newSodActive) {
         // The overlay rewrites customer-facing prose and validates only
         // banned-copy + rain-window rules — it can reintroduce advice that
         // contradicts today's applications (codex P1 r28). Skip it entirely

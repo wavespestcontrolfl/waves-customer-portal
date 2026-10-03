@@ -2194,6 +2194,52 @@ email, the watering text (`lines` only), the hero task and Ask Waves are unchang
 When present on a live payload the displayed one (the note, else the forecast
 sentence) counts toward `reportV2.lead`'s 250-word budget (`leadWords`). No new
 route, query parameter or customer message.
+`GATE_LAWN_NEW_SOD_MODE` (dark, 1/true/on, read at call time; gate off leaves the
+payload, the lawn PDF cache key and every text unchanged, key for key, even when the
+date is set) changes `/api/reports/:token/data` for a LAWN visit only, and only when
+`property_preferences.sod_laid_on` is set and the visit's America/New_York calendar day
+is from that day through day 21 inclusive. The visit's own day is the judge: the
+service record's `service_date` (America/New_York), never the assessment's capture date
+(a redo, or `GATE_LAWN_PROPERTY_HISTORY` off, cannot move it) and never the clock, so a
+reopened report reads the same. The sod date belongs to the customer's primary home, so the visit must be PROVEN at
+that home (the unit-aware visit-property-scope chain: stamp, else property link, else
+source estimate, matched to the primary address; a visit with none counts only on a
+proven single-premises account); a visit at another property, or one that cannot be
+proven, gets the normal report; a move of the primary home (address edit or removal,
+primary-property promotion) clears the sod date in the same transaction, so the next
+visit at the new home is the normal report (the different-homes customer merge never copies the
+loser's date onto the winner and leaves the winner's own date, because the winner's home
+did not move; when the loser's whole preferences row moves to a winner with none, the
+date is cleared on it and journaled, and the merge undo restores it); a failed read of the visit gives the normal report
+too, uncacheable, with an emailed PDF deferred. One resolver
+(`lawn-new-sod-visit.js`) serves the report, the Fast Complete sheet, the job card and
+the watering text. It adds no key; it replaces the content of
+existing ones with FIXED sentences (no model, no number the business has not stated, no
+"21 days"): `reportV2.banner` becomes `{ state: 'new_sod', lines, holdUntil: null,
+waterInBy: null, expiresAt: null, ruleSource: 'new_sod' }` with `lines` = "Water your
+new sod lightly every day." / "Please hold off on mowing until the sod has rooted." (two
+lines, always; the mode makes no claim about weed control; no `mowHold`, `forecastLine`
+or `observedRain` key is ever present); `reportV2.water.weekPlan` and
+`lawnAssessment.waterContext.weekPlan` become `{ title: 'New sod: water lightly every
+day', detail: 'Keep the sod moist with a light watering each day until it has rooted.',
+action: 'new_sod', visitInPlanWeek: true, prescribesRun: false }` (no `afterHold`,
+`afterTreatment` or `depthInches`); `reportV2.water.status` is `'unknown'`,
+`reportV2.water.explanation` is `null` (also for a product whose label needs watering in; that
+note stays in `reportV2.aftercare`) and `water.coverageWatch` is `false`;
+`reportV2.snapshot.customerAction` is never the product's watering task (the product's note stays in `reportV2.aftercare`); `reportV2.snapshot.seasonalNote` is "Once the sod has rooted, you can start mowing and we
+can begin your regular lawn care." (no `seasonalNoteSource`), and under the v6 copy gate
+`reportV2.lead.whatToExpect` carries the same sentence, while the v6 durable freeze
+(`structured_notes.lawnCopyV6`) is neither written nor replayed for an active visit (the
+lead's `applied` is the deterministic treatment sentence, `watching` is absent and no
+headline override applies; computed in memory only, so an older normal freeze is left
+untouched and replays again when the mode ends or the gate is off); the water/coverage finding cards
+(`insights[].category === 'water'`) and `reportV2.mowing` (null) are withheld for the
+visit. The watering instruction the engine would build is not built, so
+`reportV2.aftercare` is the legacy product-label note, nothing is frozen under
+`structured_notes.lawnWateringFreeze` for the visit, and `GATE_LAWN_WATERING_SMS` /
+`GATE_LAWN_WATERING_FORECAST` produce nothing for it. The lawn PDF cache key gains
+`:sod=<date>` while the gate is on and the date is set. No new route, query parameter
+or customer message.
 `GATE_LAWN_REPORT_LEAD` (dark; gate off leaves the lawn payload unchanged, key for
 key) adds `reportV2.lead` `{ headline, why, applied, yourPart, next }` (plus the
 optional `sinceLast` described under `GATE_LAWN_SINCE_LAST` below) to

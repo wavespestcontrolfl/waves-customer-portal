@@ -384,6 +384,22 @@ describe('LawnWateringBanner', () => {
     expect(screen.queryByTestId('lawn-watering-banner-ended')).toBeNull();
   });
 
+  it('new_sod: its own eyebrow, the fixed lines, no ended note, and no forecast or rain line even if sent', () => {
+    renderBanner({
+      state: 'new_sod',
+      lines: ['Water your new sod lightly every day.', 'Please hold off on mowing until the sod has rooted.'],
+      holdUntil: null, waterInBy: null, expiresAt: null, ruleSource: 'new_sod',
+      forecastLine: 'About 0.4 inch of rain is forecast.', observedRain: { line: 'Radar measured rain.' },
+    });
+    const banner = screen.getByTestId('lawn-watering-banner');
+    expect(banner).toHaveAttribute('data-state', 'new_sod');
+    expect(banner).toHaveTextContent('Caring for your new sod');
+    expect(banner).not.toHaveTextContent('Watering after today’s visit');
+    expect(screen.getByTestId('lawn-watering-banner-heading')).toHaveTextContent('Water your new sod lightly every day.');
+    expect(banner).toHaveTextContent('Please hold off on mowing until the sod has rooted.');
+    expect(screen.queryByTestId('lawn-watering-banner-ended')).toBeNull();
+  });
+
   it('the lawn section no longer renders it (the page mounts it once, under the status card)', () => {
     render(<LawnReportV2Section data={{ snapshot: SNAPSHOT, banner: BANNERS.hold }} />);
     expect(screen.queryByTestId('lawn-watering-banner')).toBeNull();

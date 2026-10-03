@@ -547,6 +547,24 @@ describe('mergeSingletonPrefRow', () => {
     expect(state.deleted).toBe(true);
   });
 
+  describe('property_preferences.sod_laid_on (new-sod date, P35)', () => {
+    const prefs = (customer_id, sod_laid_on, extra = {}) => ({ id: `p-${customer_id}`, customer_id, sod_laid_on, pet_details: null, created_at: 'x', updated_at: 'x', ...extra });
+
+    it('the loser\'s date is never copied onto a winner that has none (it describes the loser\'s home)', async () => {
+      const { trx, state } = stubTrx({ winnerRow: prefs('W', null), loserRow: prefs('L', '2026-10-01', { pet_details: 'one dog' }) });
+      await mergeSingletonPrefRow(trx, 'property_preferences', 'customer_id', 'W', 'L');
+      expect(state.updated.pet_details).toBe('one dog'); // ordinary fields still fill
+      expect(state.updated).not.toHaveProperty('sod_laid_on');
+      expect(state.deleted).toBe(true);
+    });
+
+    it('the winner\'s own date stands, whatever the loser holds (the winner\'s home did not move)', async () => {
+      const { trx, state } = stubTrx({ winnerRow: prefs('W', '2026-09-28'), loserRow: prefs('L', '2026-10-01', { pet_details: 'one dog' }) });
+      await mergeSingletonPrefRow(trx, 'property_preferences', 'customer_id', 'W', 'L');
+      expect(state.updated).not.toHaveProperty('sod_laid_on');
+    });
+  });
+
   it('notification_prefs: a duplicate\'s payment_receipt=false never carries onto the kept profile', async () => {
     const { trx, state } = stubTrx({
       winnerRow: { id: 'p1', customer_id: 'W', sms_enabled: true, payment_receipt: true, created_at: 'x', updated_at: 'x' },
@@ -1531,6 +1549,51 @@ describe('executeMerge', () => {
     expect(moved.result.repointed['property_preferences.irrigation_home_changed_at']).toBe(1);
     const same = await run({ address_line1: '100 MAIN ST', city: 'bradenton', zip: '34205' });
     expect(same.stamps).toEqual([]);
+  });
+
+  // The loser's whole preferences row moves to a winner that has none (a plain, row-level-journaled
+  // repoint). Its new-sod date (P35) describes the LOSER's home: cleared when the homes differ, with the
+  // original journaled for the undo (customer-dedupe-undo.test.js restores it); kept for the same home.
+  describe('the new-sod date on a preferences row that moves whole to a winner with none (P35)', () => {
+    async function merge(loserAddr, { hasDate = true } = {}) {
+      const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', address_line1: '100 Main St', city: 'Bradenton', zip: '34205' };
+      const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', ...loserAddr };
+      const { trx, state } = buildTrx({ winner, loser, fkRows: [{ table_name: 'property_preferences', column_name: 'customer_id' }] });
+      const base = trx.getMockImplementation();
+      const prefUpdates = [];
+      trx.mockImplementation((table) => (table !== 'property_preferences' ? base(table) : makeChain(table, (q) => {
+        if (q.called('first')) return { id: 'pp-1', sod_laid_on: hasDate ? new Date('2026-10-01T00:00:00Z') : null };
+        if (q.called('select')) return [{ id: 'pp-1' }];
+        if (q.called('update')) { prefUpdates.push([q.args('where')[0], q.args('update')[0]]); return 1; }
+        return [];
+      })));
+      db.transaction.mockImplementation(async (fn) => fn(trx));
+      const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+      return { prefUpdates, result, recorded: JSON.parse(state.journal.repointed_ids) };
+    }
+
+    it('different homes: the moved row\'s date is cleared on the winner and the original is journaled for the undo', async () => {
+      const { prefUpdates, result, recorded } = await merge({ address_line1: '200 Oak Ave', city: 'Sarasota', zip: '34236' });
+      expect(recorded.tables['property_preferences.customer_id']).toEqual(['pp-1']);
+      expect(prefUpdates).toContainEqual([{ id: 'pp-1' }, { sod_laid_on: null }]);
+      expect(recorded.moved_pref_sod_laid_on).toEqual({ row_id: 'pp-1', before: '2026-10-01' });
+      expect(result.repointed['property_preferences.sod_laid_on_cleared']).toBe(1);
+      // The stamp itself still never clears the date (it has no before-image of its own).
+      const stamp = prefUpdates.find(([, payload]) => payload.irrigation_home_changed_at);
+      expect(stamp[1]).not.toHaveProperty('sod_laid_on');
+    });
+
+    it('same home: the date stays on the moved row and nothing is journaled', async () => {
+      const { prefUpdates, recorded } = await merge({ address_line1: '100 MAIN ST', city: 'bradenton', zip: '34205' });
+      expect(prefUpdates.some(([, payload]) => 'sod_laid_on' in payload)).toBe(false);
+      expect(recorded.moved_pref_sod_laid_on).toBe(null);
+    });
+
+    it('different homes but the moved row carries no date: nothing to clear, nothing journaled', async () => {
+      const { prefUpdates, recorded } = await merge({ address_line1: '200 Oak Ave', city: 'Sarasota', zip: '34236' }, { hasDate: false });
+      expect(prefUpdates.some(([, payload]) => 'sod_laid_on' in payload)).toBe(false);
+      expect(recorded.moved_pref_sod_laid_on).toBe(null);
+    });
   });
 
   it('an addressless surviving shell inherits the loser\'s home — no move stamp (codex gh-r25)', async () => {
