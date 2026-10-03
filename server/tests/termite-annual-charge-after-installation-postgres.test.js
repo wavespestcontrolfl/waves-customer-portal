@@ -554,6 +554,25 @@ describeOrSkip('termite annual charge after installation — real Postgres', () 
       expect(await chargeState(db)).toBeNull();
     });
 
+    test('billing previews agree with the closeout: the batch prefilter includes the plan\'s customer, and the verdict is covered before and after the stamp', async () => {
+      const { atSigning, db } = load();
+      const other = randomUUID();
+
+      expect([...await Renewals().deferredPrepayHoldCustomerIds(db, [ids.customerId, other])]).toEqual([]);
+      await atSigning();
+      const prefilter = await Renewals().deferredPrepayHoldCustomerIds(db, [ids.customerId, other]);
+      expect([...prefilter]).toEqual([ids.customerId]);
+
+      const booked = await addInstall(db, { status: 'confirmed' });
+      const row = async (visit) => db('scheduled_services').where({ id: visit.id }).first();
+      expect(await Renewals().annualCoverageVerdictForPrediction(await row(booked), db, { deferredCustomerIds: prefilter })).toBe(true);
+
+      await db('scheduled_services').where({ id: booked.id }).update({ status: 'completed' });
+      await db('service_records').insert({ scheduled_service_id: booked.id, status: 'completed', structured_notes: JSON.stringify({}) });
+      await closeoutStamp(db, booked);
+      expect(await Renewals().annualCoverageVerdictForPrediction(await row(booked), db, { deferredCustomerIds: prefilter })).toBe(true);
+    });
+
     test('one installation per plan: a later bait/station job is not stamped and bills normally', async () => {
       const { atSigning, sweep, db } = load();
       await atSigning();

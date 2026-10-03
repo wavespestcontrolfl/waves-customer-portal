@@ -4301,7 +4301,14 @@ async function deferredPrepayHoldCustomerIds(conn, customerIds) {
     // stamped keeps its coverage after the year is paid and activated, and a
     // paid year cancelled to end at term still covers it (coveredTermsAsOf);
     // the per-visit check decides.
-    .whereRaw("(e.estimate_data)::jsonb -> 'prepayAutoChargeJob' ->> 'deferred_to_first_visit' = 'true'")
+    .where(function anyAfterVisitPlan() {
+      this.whereRaw("(e.estimate_data)::jsonb -> 'prepayAutoChargeJob' ->> 'deferred_to_first_visit' = 'true'")
+        // GATE_PAF_TERMITE: a termite annual plan deferred to its installation
+        // holds that visit through the same stamp (deferredInstallHoldingTerm),
+        // so its customers must reach the per-visit check too. to_jsonb(e): a
+        // database without the column simply has no such plan.
+        .orWhereRaw("(to_jsonb(e) -> 'annual_plan_signature_charge' ->> 'deferred_at') IS NOT NULL");
+    })
     .distinct('t.customer_id');
   return new Set(rows.map((r) => String(r.customer_id)));
 }
