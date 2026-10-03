@@ -436,5 +436,23 @@ describe('FastCompleteSheet voice fill, gate on', () => {
     });
     expect(screen.getByRole('button', { name: 'Full form' }).disabled).toBe(false);
   });
+
+  test('while the voice mic is live the other controls wait; the mic itself stays tappable', async () => {
+    await openSheet(makeRequest());
+    expect(screen.getByRole('button', { name: 'Ants' }).disabled).toBe(false);
+    React.act(() => {
+      dictation.perSlot[0] = { listening: true };
+      dictation.slots.forEach((slot) => slot?.rerender());
+    });
+    expect(screen.getByRole('button', { name: 'Ants' }).disabled).toBe(true);
+    expect(screen.getByRole('button', { name: 'Outside' }).disabled).toBe(true);
+    expect(screen.getByLabelText('Tell me about the visit').disabled).toBe(true);
+    expect(screen.getByRole('button', { name: 'Tap when you are done' }).disabled).toBe(false);
+    React.act(() => {
+      dictation.perSlot[0] = { listening: false };
+      dictation.slots.forEach((slot) => slot?.rerender());
+    });
+    expect(screen.getByRole('button', { name: 'Ants' }).disabled).toBe(false);
+  });
 });
 

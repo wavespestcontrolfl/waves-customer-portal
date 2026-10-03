@@ -711,6 +711,9 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
     onVoiceBusy?.(voiceBusy);
   }, [voiceBusy, onVoiceBusy]);
   useEffect(() => () => onVoiceBusy?.(false), [onVoiceBusy]);
+  // While the voice mic is live every other control waits: the browser's speech
+  // session drops the words still in flight on any other tap or keystroke.
+  const formLocked = locked || voiceMicPending;
   // The house mix is always on the sheet, so "Used most" lists the rest.
   const pickerCommonProducts = useMemo(() => {
     const mixIds = new Set(ctx.rows.map((row) => String(row.productId)));
@@ -756,32 +759,32 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
       <div className="tech-visit-body" {...picker.coverProps}>
         <fieldset className="tech-visit-form" disabled={locked}>
           <VoiceFillTop voice={voice} serviceId={service?.id} locked={locked} onPendingChange={setVoiceMicPending} />
-          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked} />
-          <OfficeNote voice={voice} locked={locked} />
+          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={formLocked} />
+          <OfficeNote voice={voice} locked={formLocked} />
           {/* A clip being recorded keeps recording behind the photo manager, so
               photos wait until the dictation is finished. */}
-          <PhotosSection serviceId={service?.id} request={request} photos={photos} locked={locked || busy} />
+          <PhotosSection serviceId={service?.id} request={request} photos={photos} locked={formLocked || busy} />
           <ProductsSection
             products={products}
             heardLines={<ProductHeardLines voice={voice} rows={rows} />}
             method={form.method}
             editAmounts={editAmounts}
-            locked={locked}
+            locked={formLocked}
             onToggleEdit={() => setEditAmounts((on) => !on)}
             other={picker.button}
             popover={picker.popover}
           />
-          <PestsSection form={form} setField={setField} locked={locked} />
+          <PestsSection form={form} setField={setField} locked={formLocked} />
           <ChoiceSection title="Where" columns={3}>
             {AREA_CHIPS.map((label) => (
-              <Chip disabled={locked} key={label} label={label} pressed={form.areas.has(label)} onClick={() => setField('areas', toggleInSet(form.areas, label))} />
+              <Chip disabled={formLocked} key={label} label={label} pressed={form.areas.has(label)} onClick={() => setField('areas', toggleInSet(form.areas, label))} />
             ))}
           </ChoiceSection>
-          <MethodSection form={form} rows={rows} setField={setField} chooseMethod={pickMethod} locked={locked} />
+          <MethodSection form={form} rows={rows} setField={setField} chooseMethod={pickMethod} locked={formLocked} />
           {ctx.rating.allowed && (
             <ChoiceSection title="Activity seen" columns={4}>
               {ACTIVITY_LEVELS.map((level) => (
-                <Chip disabled={locked} key={level.value} label={ctx.rating.scaleLabels?.[level.rating] || level.label} pressed={form.activity === level.value} onClick={() => setField('activity', level.value)} />
+                <Chip disabled={formLocked} key={level.value} label={ctx.rating.scaleLabels?.[level.rating] || level.label} pressed={form.activity === level.value} onClick={() => setField('activity', level.value)} />
               ))}
             </ChoiceSection>
           )}
@@ -791,7 +794,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
               library={tips}
               tipId={form.tipId}
               customTip={form.customTip}
-              locked={locked}
+              locked={formLocked}
               onPick={(id) => setForm((prev) => ({ ...prev, tipId: prev.tipId === id ? '' : id, customTip: '' }))}
               onCustom={(value) => setForm((prev) => ({ ...prev, customTip: value, tipId: value.trim() ? '' : prev.tipId }))}
             />

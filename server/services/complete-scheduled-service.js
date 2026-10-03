@@ -567,11 +567,12 @@ function normalizeCustomerInteractionValue(value) {
   return CUSTOMER_INTERACTION_ALIASES[text] || text || null;
 }
 
-// The office note a completion may carry: only while the voice-fill gate is
-// live, a trimmed string capped at 800 characters, else nothing.
+// The office note a completion may carry: a trimmed string capped at 800
+// characters, else nothing. Not gated here: only the voice-fill sheet sends the
+// field, the route is staff-authenticated and the note is staff-only, and a note
+// the tech can see on a sheet loaded before the gate went off must not vanish.
 const OFFICE_NOTE_MAX_CHARS = 800;
 function officeNoteForCompletion(value) {
-  if (!require('../config/feature-gates').fastCompleteVoiceFillLive()) return '';
   if (typeof value !== 'string') return '';
   return value.trim().slice(0, OFFICE_NOTE_MAX_CHARS);
 }

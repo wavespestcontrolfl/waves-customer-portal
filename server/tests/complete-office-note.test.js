@@ -1,5 +1,5 @@
 // The office note a completion may carry (voice fill, GATE_FAST_COMPLETE_VOICE_FILL):
-// honored only while the gate is live, trimmed, capped, strings only.
+// trimmed, capped, strings only; kept whether or not the gate is still live.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
 const { officeNoteForCompletion } = require('../services/complete-scheduled-service');
@@ -11,11 +11,11 @@ describe('officeNoteForCompletion', () => {
     else process.env.GATE_FAST_COMPLETE_VOICE_FILL = prev;
   });
 
-  test('gate off: nothing is kept, whatever the body says', () => {
+  test('gate off: a note already on the sheet is still kept (the gate may flip after the sheet loaded)', () => {
     delete process.env.GATE_FAST_COMPLETE_VOICE_FILL;
-    expect(officeNoteForCompletion('Gate code changed')).toBe('');
-    process.env.GATE_FAST_COMPLETE_VOICE_FILL = 'TRUE';
-    expect(officeNoteForCompletion('Gate code changed')).toBe('');
+    expect(officeNoteForCompletion('  Gate code changed  ')).toBe('Gate code changed');
+    expect(officeNoteForCompletion('x'.repeat(900))).toHaveLength(800);
+    expect(officeNoteForCompletion(42)).toBe('');
   });
 
   test('gate on: a trimmed string, capped at 800 characters', () => {
