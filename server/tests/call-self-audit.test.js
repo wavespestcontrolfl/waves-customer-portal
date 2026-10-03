@@ -548,6 +548,8 @@ describe('voicemail triage evidence (voicemail.v1: every inbound voicemail besid
       VM({ id: 'call-ef', processing_status: 'extraction_failed', extraction_attempts: 3, ai_extraction: null, answered_by: 'human' }),
       // still being retried: a later attempt can still create the lead or alert the baselines read
       VM({ id: 'vm-retrying', processing_status: 'extraction_failed', extraction_attempts: 1, ai_extraction: null, answered_by: 'voicemail' }),
+      // ...even one whose partial extraction already says voicemail
+      VM({ id: 'vm-retrying-extracted', processing_status: 'extraction_failed', extraction_attempts: 2, ai_extraction: JSON.stringify({ is_voicemail: true }) }),
     ] });
     await shadowVoicemails();
     expect(Object.keys(bySubject()).sort()).toEqual(['vm-ef', 'vm-ef2']);

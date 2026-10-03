@@ -180,8 +180,13 @@ async function shadowVoicemails({ now = new Date() } = {}) {
     // verdict the baselines read.
     const { CALL_EXTRACTION_MAX_ATTEMPTS } = require('../config/call-extraction-retry');
     const extractionExhausted = (c) => Number(c.extraction_attempts) >= CALL_EXTRACTION_MAX_ATTEMPTS;
-    const isVoicemail = (c) => c.processing_status === 'voicemail' || safeParse(c.ai_extraction).is_voicemail === true
-      || (c.processing_status === 'extraction_failed' && extractionExhausted(c) && (c.answered_by === 'voicemail' || c.call_outcome === 'voicemail'));
+    // Any extraction_failed row still inside its budget is skipped FIRST, even
+    // one carrying a partial extraction that says voicemail (pre-push audit P1).
+    const isVoicemail = (c) => {
+      if (c.processing_status === 'extraction_failed' && !extractionExhausted(c)) return false;
+      return c.processing_status === 'voicemail' || safeParse(c.ai_extraction).is_voicemail === true
+        || (c.processing_status === 'extraction_failed' && (c.answered_by === 'voicemail' || c.call_outcome === 'voicemail'));
+    };
     const candidates = rows.filter(isVoicemail);
     if (!candidates.length) return tally;
     const { callSubjectHash } = require('./typed-decisions/subject-hash');
