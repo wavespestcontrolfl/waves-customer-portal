@@ -15187,6 +15187,12 @@ export function CompletionPanel({
     (query) => adminFetch(`/admin/dispatch/${service.id}/blog-posts?q=${encodeURIComponent(query)}`),
     [service.id],
   );
+  // A search no post covers, suggested as a new post for the autonomous blog
+  // queue (GATE_BLOG_SEARCH_SUGGEST; the search answer says when it's taken).
+  const suggestBlogPost = useCallback(
+    (phrase) => adminFetch(`/admin/dispatch/${service.id}/blog-suggestions`, { method: "POST", body: JSON.stringify({ phrase }) }),
+    [service.id],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -20703,6 +20709,7 @@ export function CompletionPanel({
               <Field label="Blog post for the customer">
                 <BlogPostPicker
                   search={searchBlogPosts}
+                  suggest={suggestBlogPost}
                   value={blogPost}
                   onChange={setBlogPost}
                   disabled={generating || submitting}
@@ -23191,6 +23198,7 @@ export function CompletionPanel({
                 <label style={labelStyle}>Blog post for the customer</label>{" "}
                 <BlogPostPicker
                   search={searchBlogPosts}
+                  suggest={suggestBlogPost}
                   value={blogPost}
                   onChange={setBlogPost}
                   disabled={generating || submitting}
