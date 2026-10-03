@@ -548,7 +548,8 @@ async function buildServiceReportV1ResponseData(service, token, {
   const data = await buildReportV1Data(service, token, db, {
     pestPressureConfig, staffViewer, mode, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt,
     propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, expectationFactsOut, planSummary, upcomingVisitsCard,
-    nearYou, lawnRainfastWatch,
+    nearYou,
+    lawnRainfastWatch,
     // pest week-weather is opt-in (codex P2 round 4, tightened by codex P2
     // #5137 deferred finding a): only a caller that opts into
     // pestExpectationsWeather above — the /data live render and the direct

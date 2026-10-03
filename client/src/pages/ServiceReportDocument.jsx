@@ -429,11 +429,24 @@ export default function ServiceReportDocument({ data, token }) {
   // those blurbs — they over-diagnose — in favour of ONE consolidated,
   // guarded summary, so the document must not print them either (codex P1).
   const suppressPhotoCaption = (photo) => Boolean(data.reportV2) && String(photo.id || '').startsWith('lawn-');
-  const galleryPhotos = (data.photos || []).filter((photo) => photo && photo.url);
+  // GATE_LAWN_REPORT_PHOTO_SET (P23): a lawn visit with a photo set prints its
+  // photos as the labeled set, in the shot order and with the fixed customer
+  // labels the server sent, instead of the quality-ordered gallery. The set
+  // REPLACES the lawn turf photos in the gallery (`lawn-` ids, and the V2 strip
+  // copies of them below) so no photo prints twice; service photos, approved
+  // moments and the gauge shot stay. No photoSet = the gallery as it always was.
+  const photoSetPhotos = (Array.isArray(data.reportV2?.photoSet) ? data.reportV2.photoSet : [])
+    .filter((photo) => photo && photo.url)
+    .map((photo, i) => ({ id: `set-${i}`, url: photo.url, caption: photo.label || '', isMoment: true }));
+  const hasPhotoSet = photoSetPhotos.length > 0;
+  const galleryPhotos = (data.photos || [])
+    .filter((photo) => photo && photo.url)
+    .filter((photo) => !(hasPhotoSet && String(photo.id || '').startsWith('lawn-')));
   // Tree/shrub evidence is captured in tree_shrub_assessment_photos, exposed
   // as reportV2.photos — never in data.photos — so the gallery was empty on
   // those visits (codex P1 r3). De-duped by url against the main gallery.
   const v2AssessmentPhotos = (Array.isArray(data.reportV2?.photos) ? data.reportV2.photos : [])
+    .filter(() => !hasPhotoSet)
     .filter((photo) => photo && (photo.url || photo.imageUrl))
     .map((photo) => ({
       id: photo.id ? `v2-${photo.id}` : `v2-${photo.url || photo.imageUrl}`,
@@ -468,7 +481,7 @@ export default function ServiceReportDocument({ data, token }) {
   // is permanently gone. Instead the frame stays with an explicit
   // unavailable note pointing at the online report, so the artifact is honest
   // and always available.
-  const photos = [...galleryPhotos, ...v2AssessmentPhotos, ...momentPhotos, ...gaugePhoto]
+  const photos = [...galleryPhotos, ...photoSetPhotos, ...v2AssessmentPhotos, ...momentPhotos, ...gaugePhoto]
     .filter((photo, i, all) => all.findIndex((other) => other.url === photo.url) === i)
     .map((photo) => (failedImages.has(photo.url) ? { ...photo, unavailable: true } : photo));
   const tracedMapRaw = data.treatmentMap?.traced?.snapshotUrl || null;

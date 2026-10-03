@@ -322,11 +322,29 @@ describe('llm-dispatch-metrics', () => {
       expect(out[0].detail).toMatch(/silent for \d\+ days/);
       // Near-daily cadence keeps the immediate one-day alarm even when the
       // recent window still shows earlier-in-window activity.
-      const daily = [{ policy: 'visitBrief', total: 700, activeDays: DAILY_CADENCE_MIN_DAYS }];
-      const outDaily = detectExceptions(live, daily, null, true, new Set(['visitBrief']));
+      const daily = [{ policy: 'customerCopy', total: 700, activeDays: DAILY_CADENCE_MIN_DAYS }];
+      const outDaily = detectExceptions(live, daily, null, true, new Set(['customerCopy']));
       expect(outDaily).toHaveLength(1);
-      expect(outDaily[0]).toMatchObject({ policy: 'visitBrief', kind: 'gone_silent' });
+      expect(outDaily[0]).toMatchObject({ policy: 'customerCopy', kind: 'gone_silent' });
       expect(outDaily[0].detail).toMatch(/ZERO calls yesterday/);
+    });
+
+    it('never flags a retired policy as gone silent — its provider call was removed on purpose', () => {
+      const { detectExceptions, RETIRED_POLICIES, DAILY_CADENCE_MIN_DAYS } = load();
+      expect([...RETIRED_POLICIES]).toEqual(expect.arrayContaining(['visitBrief', 'jobCardParagraph']));
+      const live = [{ policy: 'report', total: 30, fallbacks: 0, failed: 0 }];
+      // Near-daily cadence (one zero day alarms) and bursty cadence (silent
+      // for the whole recent window) are both excluded.
+      const priorWeek = [
+        { policy: 'visitBrief', total: 700, activeDays: DAILY_CADENCE_MIN_DAYS },
+        { policy: 'jobCardParagraph', total: 13, activeDays: 2 },
+        { policy: 'report', total: 200, activeDays: 7 },
+      ];
+      expect(detectExceptions(live, priorWeek, null, true, new Set(['report']))).toEqual([]);
+      // A retired policy's failures on rows that DO exist still report.
+      const failing = [...live, { policy: 'visitBrief', total: 4, fallbacks: 0, failed: 4 }];
+      expect(detectExceptions(failing, priorWeek, null, true, new Set(['report', 'visitBrief'])))
+        .toEqual([expect.objectContaining({ policy: 'visitBrief', kind: 'all_providers_failed' })]);
     });
 
     it('never flags episodic lanes (:sealed/:backfill/:replay) as gone silent — they burst then quiet by design', () => {

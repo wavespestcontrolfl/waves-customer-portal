@@ -190,3 +190,31 @@ describe('ibBookingProposal — the card and the commit agree on the reason', ()
     expect(result.error).toMatch(/saved only on a Pest Control Re-Service or Lawn Care Re-Service/);
   });
 });
+
+describe('create_appointment — a re-service carries the callback marker', () => {
+  test.each([
+    ['pest', PEST_RE_SERVICE],
+    ['lawn', LAWN_RE_SERVICE],
+  ])('a %s re-service is stamped is_callback, with or without a reason', async (_lane, row) => {
+    const insertChain = wireBooking([row, QUARTERLY_PEST]);
+    const result = await book(row);
+    expect(result.success).toBe(true);
+    expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ service_id: row.id, is_callback: true });
+  });
+
+  test('a plan visit is stamped is_callback false', async () => {
+    const insertChain = wireBooking([PEST_RE_SERVICE, QUARTERLY_PEST]);
+    const result = await book(QUARTERLY_PEST);
+    expect(result.success).toBe(true);
+    expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ service_id: 'svc-qp', is_callback: false });
+  });
+
+  test('a re-service booked by name with no catalog row is still a callback', async () => {
+    const insertChain = wireBooking([QUARTERLY_PEST]);
+    const result = await executeTool('create_appointment', {
+      customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: 'Pest Control Re-Service', time_window: '9:00 AM',
+    });
+    expect(result.success).toBe(true);
+    expect(insertChain.insert.mock.calls[0][0].is_callback).toBe(true);
+  });
+});

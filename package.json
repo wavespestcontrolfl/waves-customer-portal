@@ -17,6 +17,7 @@
     "build": "cd client && npm run build",
     "check:portal-brand": "node scripts/check-portal-brand.js",
     "check:domain-rules": "node scripts/check-domain-rules.js",
+    "gates:index": "node scripts/generate-gate-index.js",
     "check:ib-coverage": "node scripts/check-ib-coverage.js",
     "check:technician-routes": "node scripts/staff-route-census.js --check",
     "prestart": "npm run verify:blog-schema && npm run verify:affiliate-registry",

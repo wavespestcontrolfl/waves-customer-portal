@@ -45,7 +45,7 @@ const {
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
-const { resolveBillingLane, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, isSiblingCoverageEligibleVisit, sameTripFirstApplicationBreakdown, collectionStateForCoveredInvoice } = require('../services/billing-lane');
+const { resolveBillingLane, isMembershipDuesShapedVisit, membershipDuesCoverVisit, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, isSiblingCoverageEligibleVisit, sameTripFirstApplicationBreakdown, collectionStateForCoveredInvoice } = require('../services/billing-lane');
 const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
 const DiscountEngine = require('../services/discount-engine');
 const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
@@ -6173,10 +6173,10 @@ router.get('/', async (req, res, next) => {
       // predict as not-collected (never widen coverage).
       let visitMonthDuesCollected = false;
       if (lane.mode === 'monthly_membership') {
-        try { duesPaidThisMonth = await monthlyDuesCollected(db, s.customer_id); } catch { duesPaidThisMonth = null; }
+        try { duesPaidThisMonth = await monthlyDuesCollected(db, s.customer_id, new Date(), { openInvoiceCovers: false }); } catch { duesPaidThisMonth = null; }
         if (!autopayActive) {
           try {
-            visitMonthDuesCollected = await monthlyDuesCollected(db, s.customer_id, new Date(`${date}T12:00:00Z`));
+            visitMonthDuesCollected = await monthlyDuesCollected(db, s.customer_id, new Date(`${date}T12:00:00Z`), { excludeScheduledServiceId: s.id });
           } catch { visitMonthDuesCollected = false; }
         }
       }
@@ -6782,10 +6782,10 @@ router.get('/week', async (req, res, next) => {
         // Visit-month dues for the prediction (see day view).
         let visitMonthDuesCollected = false;
         if (lane.mode === 'monthly_membership') {
-          try { duesPaidThisMonth = await monthlyDuesCollected(db, s.customer_id); } catch { duesPaidThisMonth = null; }
+          try { duesPaidThisMonth = await monthlyDuesCollected(db, s.customer_id, new Date(), { openInvoiceCovers: false }); } catch { duesPaidThisMonth = null; }
           if (!autopayActive) {
             try {
-              visitMonthDuesCollected = await monthlyDuesCollected(db, s.customer_id, new Date(`${dateStr}T12:00:00Z`));
+              visitMonthDuesCollected = await monthlyDuesCollected(db, s.customer_id, new Date(`${dateStr}T12:00:00Z`), { excludeScheduledServiceId: s.id });
             } catch { visitMonthDuesCollected = false; }
           }
         }
@@ -17083,6 +17083,121 @@ const { loadActiveConfig: loadPestPressureActiveConfig } = require('../services/
 // generatePrepaidReceiptForService already reports through `receipt.reason`
 // for every other refusal here, so the Mark-prepaid modal explains it the
 // same way instead of the caller crashing on an unexpected object.
+// A Charge-now / prepaid-receipt pre-mint whose amount IS a member's monthly dues
+// for an unpriced plan visit asks the mint for the dues stamp + coverage check
+// (the completion mint's own), so that invoice is visible to the month's dedupe.
+function membershipDuesMintRequest(svc, amount) {
+  if (!isMembershipDuesShapedVisit({
+    estimatedPrice: svc.estimated_price,
+    primaryLinePrice: svc.primary_line_price ?? null,
+    isCallback: svc.is_callback,
+    monthlyRate: svc.cust_monthly_rate,
+    billingMode: svc.cust_billing_mode || null,
+    waveguardTier: svc.cust_waveguard_tier,
+    amount,
+  })) return null;
+  return { month: String(svc.scheduled_date instanceof Date ? svc.scheduled_date.toISOString() : svc.scheduled_date).slice(0, 7), amount };
+}
+
+// The (customer, month) a prepayment on this visit would interact with, from an
+// UNLOCKED read of the visit and customer, or null when the month's dues would
+// not cover this visit. "Covered" is decided by THE coverage predicate
+// completion itself uses (billing-lane membershipDuesCoverVisit, with the dues
+// as the cover), not a hand-rolled price test: an unpriced plan visit AND a
+// priced RECURRING plan visit are both covered (both complete without an invoice
+// once a dues invoice bills the month), while a callback, a non-recurring priced
+// visit and a payer-billed visit are not. The caller re-verifies customer and
+// month after it holds the visit row.
+const visitMonthOf = (d) => String(d instanceof Date ? d.toISOString() : d).slice(0, 7);
+async function planVisitDuesScope(serviceId) {
+  const svc = await db('scheduled_services')
+    .where('scheduled_services.id', serviceId)
+    .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+    .select(
+      'scheduled_services.*',
+      'customers.monthly_rate as cust_monthly_rate',
+      'customers.waveguard_tier as cust_waveguard_tier',
+      'customers.billing_mode as cust_billing_mode',
+    )
+    .first();
+  if (!svc || svc.is_callback) return null;
+  let payerBilled = false;
+  try {
+    const resolved = await require('../services/payer').resolveForInvoice({ customerId: svc.customer_id, scheduledServiceId: svc.id });
+    payerBilled = !!resolved?.payerId;
+  } catch (e) {
+    logger.warn(`[schedule] prepaid dues-scope payer resolve failed for service ${svc.id}: ${e.message}`);
+  }
+  if (!membershipDuesCoverVisit({
+    visitIsPayerBilled: payerBilled,
+    perApplicationBilling: svc.cust_billing_mode === 'per_application',
+    annualPrepayBilling: svc.cust_billing_mode === 'annual_prepay',
+    customerAutopayActive: false,
+    duesCollectedThisMonth: true,
+    hasVisitPrice: Number(svc.estimated_price) >= 0.01,
+    isRecurring: svc.is_recurring,
+    waveguardTier: svc.cust_waveguard_tier,
+    monthlyRate: svc.cust_monthly_rate,
+    billingMode: svc.cust_billing_mode || null,
+  })) return null;
+  return { serviceId: svc.id, customerId: String(svc.customer_id), month: visitMonthOf(svc.scheduled_date) };
+}
+
+// The live stamped dues invoice that already bills this plan visit's month, or
+// null. A prepayment marked on such a visit has nowhere to land: the visit mints
+// no invoice of its own (the month's dues are the covering invoice), so cash or
+// Zelle recorded on the visit would sit off the payment ledger while that
+// invoice keeps dunning. Read-only (the prepaid POST itself decides under the
+// month lock, recordPrepaidUnderDuesLock).
+async function duesInvoiceCoveringPlanVisit(serviceId, conn = db) {
+  const scope = await planVisitDuesScope(serviceId);
+  if (!scope) return null;
+  const { findLiveStampedDuesInvoice } = require('../services/billing-lane');
+  return findLiveStampedDuesInvoice(conn, scope.customerId, scope.month, { excludeScheduledServiceId: scope.serviceId });
+}
+
+// Records the prepaid marker ATOMICALLY with the dues-coverage decision. For a
+// dues-shaped plan visit the whole thing is one transaction whose FIRST lock is
+// the dues-month lock (THE LOCK RULE, billing-lane.js: it holds nothing yet, so
+// it may wait): coverage is re-read under it, and only an uncovered month takes
+// the marker (the visit-row UPDATE comes after the lock, so a completion holding
+// the visit row only TRIES the month lock and a mint holding it only polls the
+// month lock: neither can wait on this transaction in a cycle). A sibling dues
+// invoice that commits first is seen by the re-read (refused); one that mints
+// after this commits is the reverse order described at the POST route. The
+// scope came from an unlocked read of the visit, so after the UPDATE the visit's
+// month and customer are re-verified (rescheduled / merged since: retryable).
+// `writeStamp(conn)` is the caller's marker UPDATE (all its row predicates).
+async function recordPrepaidUnderDuesLock(serviceId, { amount, writeStamp }) {
+  const scope = amount > 0 ? await planVisitDuesScope(serviceId) : null;
+  if (!scope) return { updated: await writeStamp(db) };
+  const { acquireMembershipDuesMonthLock, findLiveStampedDuesInvoice } = require('../services/billing-lane');
+  return db.transaction(async (trx) => {
+    await acquireMembershipDuesMonthLock(trx, scope.customerId, scope.month);
+    const covering = await findLiveStampedDuesInvoice(trx, scope.customerId, scope.month, { excludeScheduledServiceId: serviceId });
+    if (covering) return { covering };
+    const updated = await writeStamp(trx);
+    if (updated.length) {
+      const now = await trx('scheduled_services').where({ id: serviceId }).first('customer_id', 'scheduled_date');
+      if (!now || String(now.customer_id) !== scope.customerId || visitMonthOf(now.scheduled_date) !== scope.month) {
+        const err = new Error('This visit moved to another month or customer while its prepayment was being recorded — nothing was saved; retry.');
+        err.status = 409;
+        throw err;
+      }
+    }
+    return { updated };
+  });
+}
+function duesCoversPrepaidRefusal(duesInvoice) {
+  const label = duesInvoice.invoice_number || duesInvoice.id;
+  return {
+    error: `This month's membership dues are already billed on invoice ${label}, so this visit has no invoice of its own to take the payment. Record the payment on invoice ${label} instead of marking this visit prepaid.`,
+    code: 'membership_dues_invoice_covers',
+    invoice_id: duesInvoice.id,
+    invoice_number: duesInvoice.invoice_number || null,
+  };
+}
+
 async function mintOrReuseScheduledServiceInvoice(svc) {
   const InvoiceService = require('../services/invoice');
   // ONE canonical per-visit collection verdict, resolved BEFORE this visit's
@@ -17120,9 +17235,12 @@ async function mintOrReuseScheduledServiceInvoice(svc) {
     fallbackAmount: amount,
     fallbackDescription: svc.service_type || 'Service visit',
   });
-  return mintScheduledServiceInvoiceWithDeposit({
+  const duesRequest = membershipDuesMintRequest(svc, amount);
+  try {
+  return await mintScheduledServiceInvoiceWithDeposit({
     svc,
     recheckInTrx: siblingCoverageRecheckInTrx(svc),
+    ...(duesRequest ? { membershipDues: duesRequest } : {}),
     buildCreateParams: () => ({
       customerId: svc.customer_id,
       scheduledServiceId: svc.id,
@@ -17139,6 +17257,15 @@ async function mintOrReuseScheduledServiceInvoice(svc) {
       dueDate: etDateString(),
     }),
   });
+  } catch (err) {
+    // The dues stamp's own refusals read as the receipt flow's usual {reason}
+    // shape instead of an exception the Mark-prepaid modal never expects.
+    if (err?.code === 'MEMBERSHIP_DUES_COVERED') return { invoice: null, reason: 'membership_dues_covered' };
+    if (err?.code === 'MEMBERSHIP_DUES_COVERAGE_UNVERIFIED' || err?.code === 'SCHEDULED_BILLING_SOURCE_MOVED') {
+      return { invoice: null, reason: 'membership_dues_unverified' };
+    }
+    throw err;
+  }
 }
 
 // Send the branded paid receipt (email + SMS) for a fully-paid invoice, exactly
@@ -17432,6 +17559,13 @@ router.post('/:id/prepaid', async (req, res, next) => {
       );
       return res.json({ success: true, ...result });
     }
+    // A plan visit whose month a stamped dues invoice already bills takes no
+    // prepaid marker (the covered visit mints no invoice to apply the payment
+    // to): the coverage check and the marker write are ONE transaction under the
+    // dues-month lock (recordPrepaidUnderDuesLock), so a sibling dues invoice can
+    // neither slip in between them nor be missed when no receipt is requested.
+    // A refusal names the invoice the payment belongs on. A zero amount records
+    // no money and is never refused.
     // Terminal rows never take a stamp (same set the series fan-out
     // skips): a visit cancelled between the ownership read and this write
     // — including by a concurrent series cancel — must not end up holding
@@ -17440,18 +17574,22 @@ router.post('/:id/prepaid', async (req, res, next) => {
     // manual writer next to the series fan-out and the bulk action, and a
     // manual method replacing the annual one would hide paid coverage from
     // the completion billing gate (Codex #4030 r7 P1).
-    const updated = await db('scheduled_services')
-      .where({ id: req.params.id })
-      .whereNotIn('status', PREPAID_STAMP_REFUSED_STATUSES)
-      .modify(withoutAnnualCoverage)
-      .modify((q) => technicianLiveVisitFilter(req, q))
-      .update({
-        prepaid_amount: amt,
-        prepaid_method: method || null,
-        prepaid_note: note || null,
-        prepaid_at: db.fn.now(),
-      })
-      .returning(['id', 'prepaid_amount', 'prepaid_method', 'prepaid_note', 'prepaid_at']);
+    const { updated, covering: coveringDues } = await recordPrepaidUnderDuesLock(req.params.id, {
+      amount: amt,
+      writeStamp: (conn) => conn('scheduled_services')
+        .where({ id: req.params.id })
+        .whereNotIn('status', PREPAID_STAMP_REFUSED_STATUSES)
+        .modify(withoutAnnualCoverage)
+        .modify((q) => technicianLiveVisitFilter(req, q))
+        .update({
+          prepaid_amount: amt,
+          prepaid_method: method || null,
+          prepaid_note: note || null,
+          prepaid_at: db.fn.now(),
+        })
+        .returning(['id', 'prepaid_amount', 'prepaid_method', 'prepaid_note', 'prepaid_at']),
+    });
+    if (coveringDues) return res.status(409).json(duesCoversPrepaidRefusal(coveringDues));
     if (!updated.length) {
       const current = await db('scheduled_services').where({ id: req.params.id })
         .first('status', 'annual_prepay_term_id', 'prepaid_method');
@@ -17482,6 +17620,37 @@ router.post('/:id/prepaid', async (req, res, next) => {
     } else if (emailReceipt === true) {
       // Operator asked for a receipt but we won't send one — surface why.
       receipt = { sent: false, reason: decision.reason };
+    }
+    // REVERSE ORDER, receipt requested: the marker was written under the month
+    // lock while the month was uncovered, and a sibling visit's dues invoice
+    // then committed before THIS request's receipt mint (which the dues stamp
+    // refuses as already covered). The marker has nowhere to land, so it is
+    // undone here (only if it is still the one we wrote) and refused with the
+    // same message. Not dead code: the lock cannot hold across the receipt mint
+    // (it takes its own locks and may call out), and a sibling mint never looks
+    // at the marker.
+    // MARKER FIRST, a sibling's dues mint after (no receipt request): nothing
+    // re-checks here, and billing is deliberately left as it is. The prepaid plan
+    // visit mints no invoice of its own at completion (its prepaid amount covers
+    // the dues amount) and the sibling's completion mints the month's stamped dues
+    // invoice, so the month is billed ONCE but the cash on the visit is not
+    // applied to it. The MINT raises one office alert per (dues invoice, visit)
+    // asking a person to apply that cash (alertPrepaidVisitsToApplyToDuesInvoice
+    // in invoice.js, after the mint commits); no payment row or invoice change is
+    // made automatically.
+    if (receipt && receipt.reason === 'membership_dues_covered') {
+      // prepaid_at is written by now() (microseconds) but comes back as a JS
+      // Date (milliseconds): compare at millisecond precision, or the guard
+      // matches no row and the refused marker stays.
+      const undone = await db('scheduled_services')
+        .where({ id: req.params.id })
+        .whereRaw("date_trunc('milliseconds', prepaid_at) = date_trunc('milliseconds', ?::timestamptz)", [updated[0].prepaid_at])
+        .update({ prepaid_amount: null, prepaid_method: null, prepaid_note: null, prepaid_at: null });
+      if (!undone) logger.warn(`[schedule] prepaid marker on ${req.params.id} was not undone after a covered receipt mint (the marker changed since it was written)`);
+      const covering = await duesInvoiceCoveringPlanVisit(req.params.id);
+      return res.status(409).json(covering
+        ? duesCoversPrepaidRefusal(covering)
+        : { error: 'This month\'s membership dues are already billed on another invoice — record the payment there instead of marking this visit prepaid.', code: 'membership_dues_invoice_covers' });
     }
     res.json({ success: true, ...updated[0], receipt });
   } catch (err) {
@@ -17966,9 +18135,11 @@ router.post('/:id/invoice', async (req, res, next) => {
     // roll-forward — completion reuses this pre-minted invoice, so skipping the
     // credit here would strand the customer's paid deposit and collect full
     // price on top of it.
+    const duesRequest = membershipDuesMintRequest(svc, amount);
     const minted = await mintScheduledServiceInvoiceWithDeposit({
       svc,
       recheckInTrx: siblingCoverageRecheckInTrx(svc),
+      ...(duesRequest ? { membershipDues: duesRequest } : {}),
       // In-lock ownership recheck: substantial async work happens between
       // the authorized SELECT at the top of this route and the mint
       // transaction — re-verify (row-locked) that the visit is still this
@@ -25930,7 +26101,9 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         : '')
       .digest('hex');
     const cached = fresh === true ? null : reportCopyCacheGet(cacheKey);
-    if (cached) return res.json({ report: cached, cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
+    // Under the writer rules a cached draft is screened again below before it
+    // is served.
+    if (cached && !writerRulesOn) return res.json({ report: cached, cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
 
     // Output guard for trade names from THIS visit's own product records —
     // selected products, the free-text productsApplied names, and any typed
@@ -25944,12 +26117,20 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     // retryable like the other grounding outages (codex r49).
     // Under the writer rules no product may be named, not only this
     // visit's: a catalog product the prompt itself mentions (a note saying
-    // "the customer asked about <product>") joins the trade-name screen.
+    // "the customer asked about <product>") joins the trade-name screen in
+    // full, and every other catalog product is screened by its brand word
+    // or its name as a phrase (wholeCatalog, in the shared builder), so a
+    // name the model brings from its own knowledge is caught without an
+    // ordinary word inside an unmentioned catalog name ("snap", "trap")
+    // rejecting plain copy.
+    let catalogRows = null;
     const mentionedCatalogNames = [];
     const mentionedCatalogActives = [];
     if (writerRulesOn) {
       try {
-        const catalogRows = await db('products_catalog').select('name', 'active_ingredient', 'category');
+        const readRows = await db('products_catalog').select('id', 'name', 'display_name', 'active_ingredient', 'category', 'manufacturer');
+        const aliasRows = await db('product_aliases').select('product_id', 'alias_name');
+        catalogRows = CompletionRecap.withCatalogAliases(readRows, aliasRows);
         const mentioned = catalogScreensForPrompt(catalogRows, fullUserMessage);
         mentionedCatalogNames.push(...mentioned.names);
         mentionedCatalogActives.push(...mentioned.actives);
@@ -25967,6 +26148,9 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         products: Array.isArray(products) ? products : [],
         extraNames: [...typedProductNameGuards, ...fallbackProductNames, ...mentionedCatalogNames],
         db,
+        wholeCatalog: writerRulesOn,
+        catalogRows,
+        mentionedText: fullUserMessage,
       });
     } catch (err) {
       logger.warn(`[generate-report] trade-name guard build failed — failing retryable: ${err.message}`);
@@ -26013,6 +26197,12 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         activeIngredients: visitActiveIngredients, allowedPhrases: writerAllowedPhrases, allowedDates: writerAllowedDates,
       })
       : null) || (lawnTimingOn && lawnResultTimingViolation(text) ? 'lawn_timing' : null);
+    // A cached draft is served only if it still passes both screens as they
+    // read now: a product, alias or active ingredient added since it was
+    // cached must not ride out on the cache.
+    if (cached && !screenTradeNames(cached) && !writerRulesScreen(cached)) {
+      return res.json({ report: cached, cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
+    }
     // The same wall-clock ceiling the provider chain keeps: the last-resort
     // copy's meaning check below is charged against it too.
     const reportChainDeadline = Date.now() + REPORT_CHAIN_BUDGET_MS;
@@ -27394,13 +27584,25 @@ function blackoutDateString(value) {
 // are no products a report could name: their ordinary words ("yard sign",
 // "Serviced by Waves") once banned "yard" and "Waves" from every draft of a
 // visit whose notes said "yard" (prod 2026-10-02).
+const MENTION_GENERIC_TOKENS = new Set([...CompletionRecap.REPORT_GENERIC_PRODUCT_TOKENS, ...CompletionRecap.REPORT_VOCABULARY_NAME_WORDS]);
 function catalogScreensForPrompt(catalogRows, promptText) {
   const names = [];
   const actives = [];
+  const promptWritesAlias = CompletionRecap.promptAliasTest(promptText);
   for (const row of (Array.isArray(catalogRows) ? catalogRows : []).filter((r) => !CompletionRecap.isSupplyCategory(r?.category))) {
-    const named = Boolean(row?.name)
-      && CompletionRecap.containsProductName(promptText, [{ name: row.name }], { wholeWord: true });
-    if (named) names.push(row.name);
+    // By its name or its short display name. A registered alias the prompt
+    // writes out is screened in the shared builder (mentionedText): aliases
+    // are staff shorthand, matched whole.
+    // Neither the report screen's own generic words (the pests, "station",
+    // "trap", "yard", "care") nor the plain report words inside catalog names
+    // ("high", "contact", "monitoring") mark a product named: a note that says
+    // "cockroach" or "keep monitoring" names no "Advion Cockroach Gel Bait"
+    // or "HexPro Termite Monitoring Baiting System" (audit 2026-10-03).
+    const mentioned = [...new Set([row?.name, row?.display_name].filter(Boolean))]
+      .filter((label) => CompletionRecap.containsProductName(promptText, [{ name: label }], { wholeWord: true, extraGenericTokens: MENTION_GENERIC_TOKENS }));
+    // Its alias written out counts as naming it for its actives.
+    const named = mentioned.length > 0 || (row?.aliases || []).some(promptWritesAlias);
+    names.push(...mentioned);
     // Its actives too: a draft must not swap the named product for its
     // active ingredient; and an active the prompt names on its own
     // ("azoxystrobin" in a note) is screened even with no product name.
@@ -27543,6 +27745,9 @@ router._test = {
   planSeriesExtendDates,
   seriesExtendAnchor,
   mintOrReuseScheduledServiceInvoice,
+  duesInvoiceCoveringPlanVisit,
+  recordPrepaidUnderDuesLock,
+  duesCoversPrepaidRefusal,
   mintScheduledServiceInvoiceWithDeposit,
   runRecurringSeriesMaintenance,
   runRecurringAlertAction,
