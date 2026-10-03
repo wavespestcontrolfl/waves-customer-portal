@@ -228,6 +228,10 @@ function isWithin7d(row, now) {
  */
 async function lastOverdueReminderWithin7d(customerId, {
   now = new Date(), excludeLedgerIds = [], excludeIdempotencyKey = null, excludeEventKey = null, database,
+  // An ENFORCING caller (the review-ask payment hold) counts only reminders
+  // a provider accepted (markDelivered), never this shadow rule's
+  // conservative ambiguous rows (recorded before the provider call).
+  requireDelivered = false,
 } = {}) {
   if (!customerId || !database) return null;
   const windowStart = new Date(now.getTime() - SPACING_MS);
@@ -251,6 +255,7 @@ async function lastOverdueReminderWithin7d(customerId, {
     // double or a future query change must not silently widen this.
     if (!isOverdueReminderRow(row)) return false;
     if (!countsAsSent(row)) return false;
+    if (requireDelivered && metadataOf(row).delivered !== true) return false;
     return isWithin7d(row, now);
   }) || null;
 }

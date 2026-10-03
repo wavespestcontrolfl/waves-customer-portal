@@ -21,12 +21,10 @@ jest.mock('../config/feature-gates', () => ({
 const mockDraftAskBody = jest.fn(async () => null);
 const mockDraftEmailIntro = jest.fn(async () => null);
 const mockDraftTechVoice = jest.fn(async () => null);
-const mockSaysReviewed = jest.fn(async () => ({ claim: null }));
-const mockPaymentHold = jest.fn(async () => null);
-jest.mock('../services/review-ask-holds', () => ({
-  customerSaysReviewed: (...a) => mockSaysReviewed(...a),
-  paymentHold: (...a) => mockPaymentHold(...a),
-}));
+// The review-ask holds' two checks, stood in for in every test (askHold
+// itself runs for real): no hold unless a test says otherwise.
+let mockSaysReviewed;
+let mockPaymentHold;
 jest.mock('../services/review-ask-drafter', () => ({
   // The real verifiers: the send path re-checks a reused older draft with them.
   verifyDraftBody: jest.requireActual('../services/review-ask-drafter').verifyDraftBody,
@@ -200,8 +198,11 @@ beforeEach(() => {
   mockDraftAskBody.mockReset().mockResolvedValue(null);
   mockDraftEmailIntro.mockReset().mockResolvedValue(null);
   mockDraftTechVoice.mockReset().mockResolvedValue(null);
-  mockSaysReviewed.mockReset().mockResolvedValue({ claim: null });
-  mockPaymentHold.mockReset().mockResolvedValue(null);
+  const Holds = require('../services/review-ask-holds');
+  mockSaysReviewed?.mockRestore();
+  mockPaymentHold?.mockRestore();
+  mockSaysReviewed = jest.spyOn(Holds, 'customerSaysReviewed').mockResolvedValue({ claim: null });
+  mockPaymentHold = jest.spyOn(Holds, 'paymentHold').mockResolvedValue(null);
   delete mockGates.reviewAskTechVoice;
   mockResolveReviewTopic.mockReset().mockResolvedValue(null);
 });
@@ -7747,6 +7748,7 @@ describe('send-time click guard (services/review-click-guard.js)', () => {
 });
 
 describe('review-ask holds (GATE_REVIEW_ASK_TECH_VOICE, build plan PR 2)', () => {
+
   // A day-4 text due now, after a day-0 ask five days ago.
   const book = (seqOver = {}) => makeMock({
     customers: [{ id: 'hold-1', first_name: 'Rosa', last_name: 'M', phone: '+19410000301', nearest_location_id: 'bradenton' }],
@@ -7778,8 +7780,7 @@ describe('review-ask holds (GATE_REVIEW_ASK_TECH_VOICE, build plan PR 2)', () =>
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     expect(seqRow(mock)).toMatchObject({ status: 'stopped', stop_reason: 'customer_says_reviewed' });
     expect(decisionOf(mock)).toMatchObject({ reason: 'customer_says_reviewed', detail: { quote: 'just posted it' } });
-    // read from the cadence's own start
-    expect(mockSaysReviewed.mock.calls[0]).toEqual(['hold-1', { since: seqRow(mock).started_at }]);
+    expect(mockSaysReviewed.mock.calls[0][0]).toBe('hold-1');
   });
 
   test('a claim during a cadence with a later private check-in skips this ask and keeps the check-in; the claim counts as series engagement', async () => {

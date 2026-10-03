@@ -69,11 +69,6 @@ const { resolveReviewTopicForEnrollment, isRecurringAskPlan } = require("./revie
 const ASK_TOUCH_SQL = OUTREACH.ASK_TOUCH_SQL;
 const ASK_HISTORY = require("./review-ask-history");
 const { ASK_SPACING_MS, deliveredAskRows, lastDeliveredAskAt } = ASK_HISTORY;
-const DAY_MS = 24 * 60 * 60 * 1000;
-// A payment-held ask waits at most this long from when its step was first
-// held, then the step is dropped (owner ruling 2026-10-01: "the ask waits
-// for the hold to clear, inside its normal window, or is dropped").
-const PAYMENT_HOLD_MAX_WAIT_MS = 3 * DAY_MS;
 const REVIEW_RETRY_PERSISTENCE_FAILED = "review_retry_persistence_failed";
 // codex #4331 P1 (structural pass, finding 1): a reservation-write failure
 // on the FRESH-CREATE immediate-send path (sendSMS's freshCreate flag) has
@@ -5733,6 +5728,47 @@ const ReviewService = {
    * { stopped, outstanding }; a thrown failure or stopped:false means the caller
    * keeps the customer on the rate page.
    */
+  /**
+   * How the step runner applies each review-ask hold askHold returns
+   * (review-ask-holds.js), by kind. Called under review-send:<customer>.
+   */
+  _applyAskHold: {
+    reviewed(seq, held, skipStep) { return this._applyReviewedClaim(seq, held, skipStep); },
+    drop(seq, held, skipStep) { return skipStep("ask_dropped_payment_hold", held.detail); },
+    async wait(seq, held) {
+      await db("review_sequences").where({ id: seq.id, status: "active" }).update({
+        next_run_at: held.retryAt, payment_hold_step: seq.current_step, payment_hold_since: held.heldSince,
+        decision: sequenceDecision({ reason: "payment_hold", nextEvalAt: held.retryAt, detail: held.detail }), updated_at: new Date(),
+      });
+      return { ran: false, deferred: true, reason: "payment_hold", retryAt: held.retryAt };
+    },
+  },
+
+  /**
+   * A confirmed "I already left a review" (review-ask-holds.js askHold),
+   * applied by the step runner under review-send:<customer>. A fresh claim is
+   * stored on every open or parked-resumable cadence of the customer
+   * (reviewed_claim: later asks and the series-final guard read it), then
+   * the same customer-wide stop a tracked click takes runs: ask-only cadences
+   * stop, one with a later private check-in stays open and skips this ask.
+   */
+  async _applyReviewedClaim(seq, held, skipStep) {
+    const detail = { quote: held.claim.quote, at: held.claim.at };
+    if (held.fresh) {
+      const Summary = require("./visit-completion-summary");
+      const stamp = { reviewed_claim: JSON.stringify(detail), updated_at: new Date() };
+      await db("review_sequences").where({ customer_id: seq.customer_id }).whereIn("status", ["active", "deferred"]).update(stamp);
+      await db("review_sequences").where({ customer_id: seq.customer_id, status: "stopped", stop_reason: Summary.PARKED_REVIEW_REASON }).update(stamp);
+      await this._stopFutureAsksLocked(seq.customer_id, { reason: "customer_says_reviewed" });
+    } else if (this._clickDisposition(seq) === "stop") {
+      await this.stopReviewSequence(seq.id, "customer_says_reviewed");
+    }
+    const after = await db("review_sequences").where({ id: seq.id }).first("status");
+    if (after?.status === "active") return skipStep("ask_skipped_customer_says_reviewed", detail);
+    await db("review_sequences").where({ id: seq.id }).update({ decision: sequenceDecision({ reason: "customer_says_reviewed", detail }) });
+    return { ran: false, stopped: true, reason: "customer_says_reviewed" };
+  },
+
   async stopFutureAsks(customerId, { reason = "clicked", lockWaitMs = 2000 } = {}) {
     // The stop runs under the SAME per-customer lock every dispatcher takes
     // around a provider handoff (processScheduled, the sequence step runner,
@@ -6964,67 +7000,12 @@ const ReviewService = {
       return { ran: false, deferred: true, reason: "spacing", retryAt: spacedAt };
     }
     // Review-ask holds (GATE_REVIEW_ASK_TECH_VOICE, owner rulings
-    // 2026-10-01), read for an ask after every other check. Every hold is
+    // 2026-10-01), read for an ask after every other check
+    // (review-ask-holds.js askHold decides; this applies it). Every hold is
     // recorded with its reason (the review page shows it).
     if (stepIsAsk && require("../config/feature-gates").isEnabled("reviewAskTechVoice")) {
-      const Holds = require("./review-ask-holds");
-      // The customer said they already left a review: no more asks, through
-      // the same customer-wide stop a tracked click takes (this caller holds
-      // review-send:<customer>). A cadence with a later private check-in
-      // stays active for it and skips this ask.
-      // A claim already confirmed is on the row (reviewed_claim): every open
-      // cadence of the customer gets it, so a later ask or the series-final
-      // guard reads it without asking the model again.
-      let claim = parseDecision(seq.reviewed_claim);
-      if (!claim) {
-        const said = await Holds.customerSaysReviewed(seq.customer_id, { since: seq.started_at || seq.created_at });
-        if (said.claim) {
-          claim = { quote: said.claim.quote, at: said.claim.at };
-          // Open ones, and ones parked behind their visit summary (resumable:
-          // the recovery reactivates them with their remaining asks).
-          const Summary = require("./visit-completion-summary");
-          const stamp = { reviewed_claim: JSON.stringify(claim), updated_at: new Date() };
-          await db("review_sequences").where({ customer_id: seq.customer_id }).whereIn("status", ["active", "deferred"]).update(stamp);
-          await db("review_sequences").where({ customer_id: seq.customer_id, status: "stopped", stop_reason: Summary.PARKED_REVIEW_REASON }).update(stamp);
-          await this._stopFutureAsksLocked(seq.customer_id, { reason: "customer_says_reviewed" });
-        }
-      }
-      if (claim) {
-        const detail = { quote: claim.quote, at: claim.at };
-        const after = await db("review_sequences").where({ id: seq.id }).first("status");
-        if (after?.status === "active") return skipStep("ask_skipped_customer_says_reviewed", detail);
-        await db("review_sequences").where({ id: seq.id }).update({ decision: sequenceDecision({ reason: "customer_says_reviewed", detail }) });
-        return { ran: false, stopped: true, reason: "customer_says_reviewed" };
-      }
-      // An overdue bill, or an overdue-payment reminder in the last 3 days:
-      // the ask waits for it to clear, for up to PAYMENT_HOLD_MAX_WAIT_MS
-      // from when this step was first held (payment_hold_step / _since,
-      // which no other deferral rewrites), then the step is dropped, even if
-      // the hold cleared in between: past its window it would go out late.
-      const payment = await Holds.paymentHold(seq.customer_id);
-      const heldBefore = seq.payment_hold_step === seq.current_step && seq.payment_hold_since ? new Date(seq.payment_hold_since) : null;
-      const heldSince = heldBefore || (payment ? new Date() : null);
-      if (heldSince) {
-        const dropAt = new Date(heldSince.getTime() + PAYMENT_HOLD_MAX_WAIT_MS);
-        const detail = { step: seq.current_step, hold: payment ? payment.reason : "cleared_after_window", heldSince: heldSince.toISOString(), ...(payment?.invoiceId ? { invoiceId: payment.invoiceId } : {}) };
-        if (Date.now() >= dropAt.getTime()) return skipStep("ask_dropped_payment_hold", detail);
-        if (payment) {
-          let retryAt = payment.until ? new Date(payment.until)
-            : new Date(Date.now() + (payment.reason === "payment_lookup_unavailable" ? 30 * 60 * 1000 : DAY_MS));
-          if (stepForSpacing.weekdaysOnly) retryAt = shiftToWeekdayMorning(retryAt);
-          if (retryAt > dropAt) retryAt = dropAt;
-          await db("review_sequences")
-            .where({ id: seq.id, status: "active" })
-            .update({
-              next_run_at: retryAt,
-              payment_hold_step: seq.current_step,
-              payment_hold_since: heldSince,
-              decision: sequenceDecision({ reason: "payment_hold", nextEvalAt: retryAt, detail }),
-              updated_at: new Date(),
-            });
-          return { ran: false, deferred: true, reason: "payment_hold", retryAt };
-        }
-      }
+      const held = await require("./review-ask-holds").askHold(seq, { shiftRetry: stepForSpacing.weekdaysOnly ? shiftToWeekdayMorning : null });
+      if (held) return this._applyAskHold[held.kind].call(this, seq, held, skipStep);
     }
 
     const step = plan[seq.current_step] || {};
