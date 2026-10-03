@@ -13,7 +13,7 @@ const VERIFIED = '2026-07-01T00:00:00Z';
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => {
   const fn = jest.fn((table) => (String(table).startsWith('product_aliases')
-    ? { join: () => ({ where: () => ({ whereILike: () => ({ select: () => Promise.resolve(mockAliasRows || []) }) }) }) }
+    ? { join: () => ({ where: () => ({ select: () => Promise.resolve(mockAliasRows || []) }) }) }
     : { whereILike: () => ({ orderBy: () => Promise.resolve(mockRows || (mockRow ? [mockRow] : [])) }) }));
   return fn;
 });
@@ -259,7 +259,12 @@ describe('get_product_info product match', () => {
 
   test('a retired name kept as an alias resolves to its active product', async () => {
     mockRows = [{ id: 'old', name: 'Demand CS Insecticide', active: false }];
-    mockAliasRows = [{ id: 'keep', alias_name: 'Demand CS  insecticide', name: 'Demand CS', active: true, default_rate: '0.2-0.8', default_unit: 'fl_oz/gal', label_verified_at: VERIFIED }];
+    // The whole alias table comes back; spacing and punctuation differ from
+    // what was asked, and unrelated aliases must not match.
+    mockAliasRows = [
+      { id: 'other', alias_name: 'Taurus SC 78 oz', name: 'Taurus SC', active: true },
+      { id: 'keep', alias_name: 'Demand-CS  insecticide', name: 'Demand CS', active: true, default_rate: '0.2-0.8', default_unit: 'fl_oz/gal', label_verified_at: VERIFIED },
+    ];
     const result = await ask('Demand CS Insecticide');
     expect(result.name).toBe('Demand CS');
     expect(result.error).toBeUndefined();

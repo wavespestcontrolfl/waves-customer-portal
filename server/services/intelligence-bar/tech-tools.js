@@ -460,14 +460,15 @@ function pickProduct(rows, productName, aliasProducts = []) {
 }
 
 // Active products an alias names exactly (product_aliases, the same table
-// and normalisation the purchase matcher reads), one row per product.
+// and normalisation the purchase matcher reads), one row per product. Every
+// alias is read and compared normalised: a raw SQL text filter would drop an
+// alias that differs only in spacing or punctuation.
 async function activeProductsForAlias(productName) {
   const wanted = normalizeForMatch(productName);
   if (!wanted) return [];
   const rows = await db('product_aliases as pa')
     .join('products_catalog as pc', 'pc.id', 'pa.product_id')
     .where('pc.active', true)
-    .whereILike('pa.alias_name', `%${productName}%`)
     .select('pa.alias_name', 'pc.*');
   const byId = new Map();
   for (const row of rows || []) {
