@@ -370,4 +370,51 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     const partialCard = await db('triage_items').where({ id: partial.cardId }).first();
     expect(partialCard.status).toBe('open');
   });
+  test('household_address_match closes ONLY when the call is linked to the suggested customer or its live merge survivor — never by age, a different link, or no link', async () => {
+    const mk = async (tag) => (await seedCustomer(`hh${tag}`)).customerId;
+    const [suggested, survivor, otherCustomer, loser] = [await mk('a'), await mk('b'), await mk('c'), await mk('d')];
+    // `loser` was merged into `survivor`: a card suggesting it must be settled by a link to the survivor.
+    await db('customers').where({ id: loser }).update({ deleted_at: new Date() });
+    await db('customer_merge_journal').insert({ winner_customer_id: survivor, loser_customer_id: loser, loser_snapshot: '{}', tier: 'test', performed_by: 'test' });
+    const made = [];
+    try {
+      const mkCard = async (tag, { linkedTo, suggestedId, ageDays = 40 }) => {
+        const sid = SID.replace(/e2$/, tag);
+        const [call] = await db('call_log').insert({
+          twilio_call_sid: sid, direction: 'inbound', from_phone: '+15555550177', to_phone: '+15555550100',
+          status: 'completed', duration_seconds: 120, processing_status: 'processed',
+          customer_id: linkedTo, review_status: 'open', created_at: new Date(Date.now() - (ageDays * 86400000 + 300000)),
+        }).returning('id');
+        ids.calls.push(call.id);
+        const at = new Date(Date.now() - ageDays * 86400000);
+        const [card] = await db('triage_items').insert({
+          call_log_id: call.id, category: 'customer_field_conflict', severity: 'blocking', reason_code: 'household_address_match',
+          status: 'open', summary: 'fixture', created_at: at, updated_at: at,
+          payload: JSON.stringify({ flag: 'household_address_match', suggested_customer_id: suggestedId }),
+        }).returning('id');
+        made.push(card.id);
+        return card.id;
+      };
+      const linkedToSuggested = await mkCard('f1', { linkedTo: suggested, suggestedId: suggested });
+      const linkedToSurvivor = await mkCard('f2', { linkedTo: survivor, suggestedId: loser });
+      const linkedElsewhere = await mkCard('f3', { linkedTo: otherCustomer, suggestedId: suggested });
+      const unlinkedOld = await mkCard('f4', { linkedTo: null, suggestedId: suggested });
+      const badId = await mkCard('f5', { linkedTo: suggested, suggestedId: 'not-a-uuid' });
+
+      await sweep.runTriageAutoResolve({ now: new Date() });
+
+      for (const id of [linkedToSuggested, linkedToSurvivor]) {
+        const row = await db('triage_items').where({ id }).first();
+        expect(row.status).toBe('resolved');
+        expect(row.resolution_source).toBe('auto');
+        expect(row.resolution_rule).toBe('household_linked');
+        expect(row.resolution_note).toBe(sweep.RULE_NOTES.household_linked);
+      }
+      for (const id of [linkedElsewhere, unlinkedOld, badId]) {
+        expect((await db('triage_items').where({ id }).first()).status).toBe('open');
+      }
+    } finally {
+      await db('customer_merge_journal').where({ loser_customer_id: loser }).del();
+    }
+  });
 });

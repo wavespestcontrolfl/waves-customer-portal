@@ -356,6 +356,20 @@ router.get('/', async (req, res) => {
       }
     }
 
+    // A household-hold card's "Open customer" link must reach an editable record too: a suggested
+    // customer merged away since filing opens the survivor of its merge chain (same resolution).
+    const householdCards = items.filter((i) => i.reason_code === 'household_address_match');
+    if (householdCards.length) {
+      const { suggestedCustomerOpenTarget } = require('../utils/missing-first-name-card');
+      for (const item of householdCards) {
+        try {
+          item.suggested_customer_open_id = (await suggestedCustomerOpenTarget(db, item.payload))?.open_id || null;
+        } catch (linkErr) {
+          logger.warn(`[admin-triage] household link target read failed: ${linkErr.code || linkErr.name || 'error'}`);
+        }
+      }
+    }
+
     res.json({ items, counts });
   } catch (err) {
     logger.error(`[admin-triage] list failed: ${err.message}`);
@@ -771,6 +785,12 @@ async function transition(req, res, nextStatus) {
     // A missing first name is settled on the customer record, which only an admin edits:
     // Resolve is admin-only (Dismiss stays open to the office).
     if (guarded && guarded.reason_code === 'missing_first_name' && nextStatus === 'resolved') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    // A household-hold card (GATE_CALL_HOUSEHOLD_HOLD) points at an existing customer's account and
+    // is settled by booking on it or linking the call, both admin work: Resolve AND Dismiss are
+    // admin-only.
+    if (guarded && guarded.reason_code === 'household_address_match') {
       return res.status(403).json({ error: 'Admin access required' });
     }
   }
@@ -1873,6 +1893,11 @@ router.post('/:id/verdict', async (req, res) => {
     if (item.reason_code === 'missing_first_name') {
       return res.status(400).json({ error: 'This card is an owed first-name capture, not a call verdict — enter the first name on the customer record, then use Resolve or Dismiss.' });
     }
+    // A household hold (GATE_CALL_HOUSEHOLD_HOLD) asks the office to decide who this caller is —
+    // book on the existing account, link the call, or dismiss — not to judge a routing decision.
+    if (item.reason_code === 'household_address_match') {
+      return res.status(400).json({ error: 'This card holds a call at an existing customer\'s address, not a call verdict — open the customer, book or link the call, then use Resolve or Dismiss.' });
+    }
     // A street-level address hold is settled by its visit, not by a verdict.
     if (await streetLevelHoldStillPending(db, item)) {
       return res.status(409).json({ error: STREET_LEVEL_HOLD_MESSAGE, code: 'STREET_LEVEL_HOLD_PENDING' });
@@ -2113,7 +2138,7 @@ router.post('/:id/verdict', async (req, res) => {
         // it in would resolve (and release the hold of) evidence the
         // operator never saw. It survives for its own click instead.
         .whereNotIn('reason_code', [
-          'email_bounce_reverify', 'property_role_confirm', 'reschedule_link_promise', 'attached_booking_followup_unbooked', 'missing_first_name',
+          'email_bounce_reverify', 'property_role_confirm', 'reschedule_link_promise', 'attached_booking_followup_unbooked', 'missing_first_name', 'household_address_match',
           ...(item.reason_code !== 'auto_booking_skipped_after_approval' ? ['auto_booking_skipped_after_approval'] : []),
           ...(emailReviewCard ? [] : EMAIL_REVIEW_REASON_CODES),
         ])

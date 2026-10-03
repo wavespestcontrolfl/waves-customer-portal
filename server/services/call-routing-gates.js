@@ -1025,6 +1025,10 @@ function buildTriageItem({
     // Booked on a last name alone (GATE_CALL_FIRST_NAME_ADVISORY) — the office
     // collects the first name; never holds the booking.
     missing_first_name: 'name_review',
+    // A caller from a number not on file at the address of exactly ONE existing customer
+    // (GATE_CALL_HOUSEHOLD_HOLD): the call is HELD — no customer created, nothing booked —
+    // until the office books on that account, links the call, or dismisses the card.
+    household_address_match: 'customer_field_conflict',
     rental_or_tenant_occupied: 'customer_field_conflict',
     second_service_address: 'address_review',
     // Call-classified property roles (occupancy contradiction / primary-
@@ -1110,6 +1114,9 @@ const SUPERSEDE_KEPT_REASON_CODES = Object.freeze([
   // An owed first-name capture on the call's linked customer: replacing the recording does
   // not supply the name, and a superseded (terminal) card would block re-filing it.
   'missing_first_name',
+  // A household hold is decided by a person, not by a transcript: replacing the recording does
+  // not say who the caller is (a reprocess dedups against the standing card).
+  'household_address_match',
 ]);
 
 // Owner ruling 2026-09-30: a street-level address hold's review card (the
@@ -1124,7 +1131,7 @@ const SUPERSEDE_KEPT_REASON_CODES = Object.freeze([
 // An owed first-name card belongs to the call's linked CUSTOMER, not to the transcript:
 // no transcript cleanup (swap, adopt, or an implausible-transcript rejection) closes it,
 // because a terminal card blocks re-filing it (codex #5559 r13).
-const SUPERSEDE_KEPT_CARD_SQL = "NOT ((reason_code = 'outbound_booking_review' AND COALESCE(payload->>'street_level_address', '') = 'true') OR (reason_code = 'attached_booking_followup_unbooked' AND COALESCE(payload->>'skipped_reason', '') = 'street_level_address_confirmed_follow_up_unbooked') OR reason_code = 'missing_first_name')";
+const SUPERSEDE_KEPT_CARD_SQL = "NOT ((reason_code = 'outbound_booking_review' AND COALESCE(payload->>'street_level_address', '') = 'true') OR (reason_code = 'attached_booking_followup_unbooked' AND COALESCE(payload->>'skipped_reason', '') = 'street_level_address_confirmed_follow_up_unbooked') OR reason_code = 'household_address_match' OR reason_code = 'missing_first_name')";
 
 module.exports = {
   SUPERSEDE_KEPT_CARD_SQL,

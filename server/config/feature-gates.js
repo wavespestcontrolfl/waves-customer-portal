@@ -128,6 +128,7 @@
  *   GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT=true (call routing: a call with a confirmed on-the-hour time and a trusted address is no longer held only because the service is unclear — ambiguous_pest_or_service fails open so the Waves Assessment fallback books it; needs GATE_CALL_FAIL_OPEN_BOOKING; the office still gets the advisory card; off = byte-identical today)
  *   GATE_CALL_WHOLE_STRUCTURE_NO_UNIT=true (call booker: a WDO inspection or termite pre-treat on a unit-less duplex/building address is not held for the missing unit; condo/apartment interior work still is)
  *   GATE_CALL_FIRST_NAME_ADVISORY=true (call booker: a new caller who gave a last name but no first name still becomes a customer and books; the missing first name files an advisory office card instead of holding the booking; strict opt-in, read at call time)
+ *   GATE_CALL_HOUSEHOLD_HOLD=true (call booker: a caller from a number not on file whose validated service address belongs to exactly ONE existing residential customer is HELD for the office — no new customer, no auto-booking, one office card; nothing is written to any customer; strict opt-in, read at call time)
  *   GATE_TECH_DICTATION_UPLOAD=true (tech completion notes: when the browser has no SpeechRecognition — iOS home-screen PWA, Firefox — the mic records with MediaRecorder and POSTs the clip to /api/tech/services/:id/dictation for server transcription; off = today's behavior, mic hidden without SpeechRecognition)
  *   GATE_ESTIMATE_LAWN_CALENDAR=true ("Your program" block under the lawn price card — annual application count + four plain season rows behind a toggle; count from the scheduling catalog on /data; dev-open, prod dark)
  *   GATE_ESTIMATE_SUCCESS_REFERRAL=true (referral share card on accepted / just-accepted estimate screens + POST /:token/referral-link; enrolls on the tap only; dev-open, prod dark)
@@ -1848,6 +1849,12 @@ const gates = {
   // Ships DARK: off unless exactly 'true'. This entry is for logGateStatus only —
   // the canonical CALL-TIME reader is callFirstNameAdvisoryLive() below.
   callFirstNameAdvisory: process.env.GATE_CALL_FIRST_NAME_ADVISORY === 'true',
+  // A caller from a number NOT on file whose validated service address belongs to
+  // exactly ONE existing live residential customer is HELD for the office: no new
+  // customer, no auto-booking, ONE office card. Writes nothing to any customer.
+  // Ships DARK: off unless exactly 'true'. This entry is for logGateStatus only —
+  // the canonical CALL-TIME reader is callHouseholdHoldLive() below.
+  callHouseholdHold: process.env.GATE_CALL_HOUSEHOLD_HOLD === 'true',
   // Implied consent for INBOUND bookings: a caller who called us and agreed to
   // a time has implied consent for the transactional confirmation SMS
   // (established business relationship). do-not-contact always overrides.
@@ -4856,6 +4863,17 @@ function callFirstNameAdvisoryLive() {
   return process.env.GATE_CALL_FIRST_NAME_ADVISORY === 'true';
 }
 
+// GATE_CALL_HOUSEHOLD_HOLD read at CALL time — strict `=== 'true'`, dark by default.
+// The canonical reader for call-recording-processor.js's Step 3: when no customer
+// matched the caller's number but the call's validated service address belongs to
+// exactly one live residential customer, the call is HELD for the office (no new
+// customer, no auto-booking, one household_address_match card). Nothing is written to
+// any customer. Off, byte-identical to before. The `callHouseholdHold` gates-map entry
+// above is for logGateStatus only.
+function callHouseholdHoldLive() {
+  return process.env.GATE_CALL_HOUSEHOLD_HOLD === 'true';
+}
+
 // GATE_SIGNUP_SINGLE_EMAIL read at CALL time — strict `=== 'true'`, dark by
 // default in every environment (owner-approved 2026-09-29; the owner flips it
 // after previewing the template). The canonical reader for the one-signup-email
@@ -5090,6 +5108,7 @@ module.exports.leadEmailLinksLive = leadEmailLinksLive;
 module.exports.plantIdRefereeLive = plantIdRefereeLive;
 module.exports.callCommercialDictatedBookingLive = callCommercialDictatedBookingLive;
 module.exports.callFirstNameAdvisoryLive = callFirstNameAdvisoryLive;
+module.exports.callHouseholdHoldLive = callHouseholdHoldLive;
 module.exports.callLeadFormAddressStreetLevelLive = callLeadFormAddressStreetLevelLive;
 module.exports.bookPreferredTimeLive = bookPreferredTimeLive;
 module.exports.lawnWateringRuleLive = lawnWateringRuleLive;

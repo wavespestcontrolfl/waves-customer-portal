@@ -449,3 +449,70 @@ describe('POST /admin/triage/:id/verdict', () => {
     expect(tables.outbox_messages[0].status).toBe('review');
   });
 });
+
+describe('a household_address_match card (GATE_CALL_HOUSEHOLD_HOLD) is an operational card, not a call verdict', () => {
+  const SUGGESTED = '44444444-4444-4444-8444-444444444444';
+  const seed = (extra = {}) => {
+    const f = fixture(extra);
+    f.tables.triage_items[0].reason_code = 'household_address_match';
+    f.tables.triage_items[0].category = 'customer_field_conflict';
+    f.tables.triage_items[0].severity = 'blocking';
+    f.tables.triage_items[0].payload = { suggested_customer_id: SUGGESTED, heard_name_v1: { first_name: 'Sample', last_name: 'Caller' }, caller_phone: '+19415550123', address: '100 Example Loop, Sarasota, 34240' };
+    return f;
+  };
+
+  test('/verdict is refused (400, plain message) and nothing closes', async () => {
+    const { conn, tables } = seed();
+    wireDb(db, { conn });
+    await withServer(async (baseUrl) => {
+      for (const verdict of ['accept', 'deny']) {
+        const res = await post(baseUrl, `/${CARD_ID}/verdict`, { verdict });
+        expect(res.status).toBe(400);
+        expect((await res.json()).error).toMatch(/not a call verdict/);
+      }
+    });
+    expect(tables.triage_items[0].status).toBe('open');
+  });
+
+  test('a call-level verdict on a DIFFERENT card of the same call never sweeps the hold card up', async () => {
+    const other = 'card-2';
+    const f = seed();
+    f.tables.triage_items.push({ id: other, call_log_id: CALL_ID, reason_code: 'address_unverified', status: 'open', category: 'address', severity: 'blocking' });
+    wireDb(db, { conn: f.conn });
+    await withServer(async (baseUrl) => {
+      expect((await post(baseUrl, `/${other}/verdict`, { verdict: 'accept' })).status).toBe(200);
+    });
+    expect(f.tables.triage_items.find((c) => c.id === other).status).toBe('resolved');
+    expect(f.tables.triage_items.find((c) => c.id === CARD_ID).status).toBe('open');
+  });
+
+  test('a non-admin Resolve AND Dismiss are refused (403) and the card stays open', async () => {
+    const { conn, tables } = seed();
+    wireDb(db, { conn });
+    await withServer(async (baseUrl) => {
+      for (const action of ['resolve', 'dismiss']) {
+        const res = await put(baseUrl, `/${CARD_ID}/${action}`, { expected_updated_at: CARD_VERSION }, { 'x-test-role': 'technician' });
+        expect(res.status).toBe(403);
+      }
+    });
+    expect(tables.triage_items[0].status).toBe('open');
+  });
+
+  test('an admin can Resolve it, or Dismiss it', async () => {
+    for (const [action, status] of [['resolve', 'resolved'], ['dismiss', 'dismissed']]) {
+      const { conn, tables } = seed();
+      wireDb(db, { conn });
+      await withServer(async (baseUrl) => {
+        expect((await put(baseUrl, `/${CARD_ID}/${action}`, { expected_updated_at: CARD_VERSION })).status).toBe(200);
+      });
+      expect(tables.triage_items[0].status).toBe(status);
+    }
+  });
+
+  test('wiring: the list resolves the suggested customer to its live merge survivor for the Open customer link', () => {
+    const src = require('fs').readFileSync(require.resolve('../routes/admin-triage'), 'utf8');
+    expect(src).toContain("i.reason_code === 'household_address_match'");
+    expect(src).toContain('suggestedCustomerOpenTarget(db, item.payload)');
+    expect(src).toContain('item.suggested_customer_open_id =');
+  });
+});

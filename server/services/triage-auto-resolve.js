@@ -17,6 +17,8 @@
  *   - missing_last_name → a trusted, pre-existing, live customer record has
  *     a surname the call did not itself supply, for a caller whose first
  *     name agrees with that record
+ *   - household_address_match → the office LINKED the call to the suggested customer
+ *     (or the live record its merge chain ends at); no other event closes it
  *   (Scheduling-doubt cards get NO booking-based auto-resolution from call
  *   linkage alone: linkage timestamps can't distinguish a current routing
  *   outcome from a stale pre-reprocess booking. The evidence rule below
@@ -145,6 +147,7 @@ const RULE_NOTES = {
   address_moot: 'Auto-resolved: customer record now has a service address on file (street + zip); address flag is moot.',
   name_moot: 'Auto-resolved: customer record now has a last name; flag is moot.',
   first_name_moot: 'Auto-resolved: customer record now has a first name (the card was filed while it was blank); flag is moot.',
+  household_linked: "Auto-resolved: the call is now linked to the customer at this address (or the record it was merged into); the household hold is settled.",
   // Evidence rules (GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE) — each proves the
   // owed action was PERFORMED after the card was filed.
   quote_fulfilled: 'Auto-resolved: an estimate linked to this call was delivered after the call; the promised quote went out.',
@@ -1031,6 +1034,15 @@ const CLASSIFY_RULES = [
     when: (item) => item.reason_code === 'missing_first_name'
       && Number(item.owed_total) > 0
       && Number(item.owed_named) === Number(item.owed_total) },
+  // GATE_CALL_HOUSEHOLD_HOLD's household_address_match card holds a call at ONE existing
+  // customer's address. It closes ONLY when the office has linked the call
+  // (call_log.customer_id) to that suggested customer — or to the live record its active merge
+  // chain ends at. Nothing else settles it: not a booking elsewhere, not age, not a moot customer
+  // field. A link to any other customer, or no link, keeps the card.
+  { rule: 'household_linked', action: 'resolve',
+    when: (item) => item.reason_code === 'household_address_match'
+      && !!item.call_customer_id
+      && [item.household_suggested_id, item.household_open_id].filter(Boolean).map(String).includes(String(item.call_customer_id)) },
   // Evidence rules: each flag is true only when the proof postdates the
   // CARD — see loadEvidence for the exact predicates.
   { rule: 'quote_fulfilled', action: 'resolve', when: (item, ev) => item.reason_code === 'quote_promised' && ev?.estimate_direct === true },
@@ -1132,8 +1144,17 @@ function loadCandidateItems(conn, itemIds = null) {
              else '[]'::jsonb end) as ids(id)
       where t.reason_code = 'missing_first_name'
     ) fnc on true`)
+    // The household-hold card's ONE suggested customer (UUID-guarded) and the live record its active
+    // merge chain ends at (the shared liveSurvivorSql) — the rule above compares the call's link to both.
+    .joinRaw(`left join lateral (
+      select t.payload->>'suggested_customer_id' as suggested_id,
+        ${require('../utils/missing-first-name-card').liveSurvivorSql("t.payload->>'suggested_customer_id'")} as open_id
+      where t.reason_code = 'household_address_match'
+        and t.payload->>'suggested_customer_id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    ) hh on true`)
     .where('t.status', 'open')
     .select(
+      'hh.suggested_id as household_suggested_id', 'hh.open_id as household_open_id',
       't.id', 't.call_log_id', 't.reason_code', 't.status', 't.severity',
       't.created_at', 't.payload',
       'cl.created_at as call_created_at',
