@@ -432,6 +432,19 @@ describe('a saved outline or perimeter needs a place outside on the record (code
     expect(await screen.findByText(HOLD)).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
   });
+
+  test('an "Interior spray too" trace still carries the perimeter: it holds while the record lists only a place inside', async () => {
+    const request = makeRequest({
+      visit: TICK_VISIT, lane: 'tick_control',
+      trace: { enabled: true, treatmentZone: { capture_mode: 'interior', linear_ft: 150, updated_at: '2026-10-02T14:00:00Z' } },
+      laneFacts: tickRead([{ area: 'Interior pet areas', quote: 'the pet areas inside' }]),
+    });
+    await openSheet(request, TICK_SERVICE);
+    addProduct('Temprid FX', '1', 'Perimeter spray');
+    await generate('Sprayed around the house and the pet areas inside.');
+    expect(await screen.findByText(HOLD)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
+  });
 });
 
 describe('a saved trace the report never shows (codex local r5 on #5629)', () => {

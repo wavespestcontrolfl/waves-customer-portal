@@ -1014,11 +1014,11 @@ function laneSendHolds({ active, draft, writing, perimeterFeet, traceRead, lane,
   // map, so the record must list a place inside (the pest sheet asks the
   // note for Inside; codex local r4 on #5629).
   const interiorUnbacked = draft && shownTrace && traceMode === 'interior' && !laneAreas.some((area) => AREA_SCOPES.interior.includes(area));
-  // Any other trace (an outline or a perimeter) draws the outside of the house
-  // and sets the outdoor re-entry wait, so the record must list a place
-  // outside; a broadcast spray picked beside an inside-only record is not
-  // enough.
-  const exteriorUnbacked = draft && shownTrace && traceMode !== 'interior' && !laneAreas.some((area) => AREA_SCOPES.exterior.includes(area));
+  // Every shown trace (an outline, a perimeter, and "Interior spray too",
+  // which still carries the perimeter) draws the outside of the house and
+  // sets the outdoor re-entry wait, so the record must list a place outside;
+  // a broadcast spray picked beside an inside-only record is not enough.
+  const exteriorUnbacked = draft && shownTrace && !laneAreas.some((area) => AREA_SCOPES.exterior.includes(area));
   return [
     ...ready.report,
     // The record's places are the visit's treated side on the report: with

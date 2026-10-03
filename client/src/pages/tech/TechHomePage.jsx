@@ -130,6 +130,10 @@ function isFastCompleteReportEligible(service) {
     // yard treatment such as tick control, under trace eligibility) keeps its
     // existing path, whose tracer draws that outline (codex local r15).
     && service?.traceVariant !== 'outline'
+    // A linked-project lookup that failed is not "no project": the visit
+    // keeps its existing path (a lane visit filed under pest control would
+    // otherwise fall through to here and complete on its own record).
+    && service?.linkedProjectLookupFailed !== true
     // A closed visit stays on the recap editor, which updates the existing
     // record (/complete would answer service_already_completed).
     && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));
