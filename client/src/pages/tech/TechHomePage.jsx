@@ -475,7 +475,7 @@ export default function TechHomePage({ section = 'today' }) {
   const [fastCompleteService, setFastCompleteService] = useState(null);
   const [treeShrubFastService, setTreeShrubFastService] = useState(null);
   const [lawnReserviceFastService, setLawnReserviceFastService] = useState(null);
-  const [fastRecoveryScan, setFastRecoveryScan] = useState(() => ({ schedule: null, attempts: new Map() }));
+  const [fastRecoveryScan, setFastRecoveryScan] = useState(() => ({ operatorId: null, attempts: new Map() }));
   const reportRouteSeq = useRef(0);
   const [enRouteState, setEnRouteState] = useState({ pendingId: null, message: '', isError: false });
   const [onSiteState, setOnSiteState] = useState({ pendingId: null, message: '', isError: false });
@@ -704,13 +704,18 @@ export default function TechHomePage({ section = 'today' }) {
   useEffect(() => {
     let active = true;
     listFastCompletionAttempts(staffIdForDevice).then((result) => {
-      if (active) setFastRecoveryScan({ schedule, operatorId: staffIdForDevice,
+      if (active) setFastRecoveryScan({ operatorId: staffIdForDevice,
         attempts: new Map(result.attempts.map((attempt) => [attempt.serviceId, attempt])) });
     });
     return () => { active = false; };
   }, [schedule, staffIdForDevice, fastCompleteService, treeShrubFastService, lawnReserviceFastService]);
-  const recoveryScanCurrent = fastRecoveryScan.schedule === schedule
-    && fastRecoveryScan.operatorId === staffIdForDevice;
+  // Once this operator's device has been scanned, its attempts stand while a
+  // later route refresh or sheet close re-scans: keying the scan to the
+  // schedule object made every refresh disable the completion buttons for a
+  // moment, dropping a tap. A tap re-reads its visit's attempt anyway
+  // (openServiceReport), so a list a re-scan is about to replace never
+  // misroutes.
+  const recoveryScanCurrent = fastRecoveryScan.operatorId === staffIdForDevice;
   const fastRecoveryAttempts = recoveryScanCurrent ? fastRecoveryScan.attempts : new Map();
   const fastRecoveryServiceIds = new Set(fastRecoveryAttempts.keys());
   const fastRecoveryCheckPending = !!staffIdForDevice && !recoveryScanCurrent;

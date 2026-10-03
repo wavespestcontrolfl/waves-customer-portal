@@ -341,3 +341,50 @@ describe('useFastCompleteSubmit durable attempts', () => {
     expect(view.result.current.done?.summary).toBe('Inspection · Palms');
   });
 });
+
+describe('a late response after leaving and reopening the same visit (handoff P1 on 463069ad05)', () => {
+  const confirmError = () => Object.assign(new Error('The report changed.'), { status: 409, code: 'report_rules_review' });
+
+  async function reopenWithNewerAttempt(lateOutcome) {
+    const original = { idempotencyKey: 'late-key', ...photoBody };
+    await putFastCompletionAttempt('svc-1', 'tech-a', { body: original, summary: 'Late report' });
+    let settleFirst;
+    const request = vi.fn()
+      .mockImplementationOnce(() => new Promise((resolve, reject) => { settleFirst = { resolve, reject }; }))
+      .mockRejectedValueOnce(confirmError())
+      .mockImplementationOnce(() => new Promise(() => {}));
+    const view = renderHook(
+      ({ serviceId }) => useFastCompleteSubmit({ base: `/admin/dispatch/${serviceId}`, serviceId, operatorId: 'tech-a', request, confirmable: true }),
+      { initialProps: { serviceId: 'svc-1' } },
+    );
+    await waitFor(() => expect(view.result.current.restored).toBe(true));
+    // The first send waits on the network...
+    let firstSend;
+    act(() => { firstSend = view.result.current.retry(); });
+    await waitFor(() => expect(request).toHaveBeenCalledTimes(1));
+    // ...while the tech leaves and reopens the same visit,
+    view.rerender({ serviceId: 'svc-2' });
+    await waitFor(() => expect(view.result.current.recovering).toBe(false));
+    view.rerender({ serviceId: 'svc-1' });
+    await waitFor(() => expect(view.result.current.restored).toBe(true));
+    // ...and confirms a newer revision of the attempt, which is saved before its send.
+    await act(async () => { await view.result.current.retry(); });
+    expect(view.result.current.prompt?.code).toBe('report_rules_review');
+    act(() => { view.result.current.confirm(); });
+    await waitFor(() => expect(request).toHaveBeenCalledTimes(3));
+    const newer = { ...original, reportRulesConfirmed: true };
+    expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt.body).toEqual(newer);
+    // The first send's response arrives late.
+    await act(async () => {
+      if (lateOutcome === 'success') settleFirst.resolve({ success: true, receiptId: 'late' });
+      else settleFirst.reject(Object.assign(new Error('Invalid input'), { status: 400, code: 'invalid_input' }));
+      await firstSend;
+    });
+    return { newer };
+  }
+
+  it.each(['success', 'rejection'])('a late %s cleans up only its own row, never the newer attempt', async (lateOutcome) => {
+    const { newer } = await reopenWithNewerAttempt(lateOutcome);
+    expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt?.body).toEqual(newer);
+  });
+});

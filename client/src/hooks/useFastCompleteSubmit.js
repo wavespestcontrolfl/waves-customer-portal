@@ -124,9 +124,13 @@ export default function useFastCompleteSubmit({
     return () => { active = false; };
   }, [serviceId, operatorId]);
 
-  const clearStored = useCallback(async (scope, body) => {
-    if (scope.serviceId && scope.operatorId && body) {
-      return deleteFastCompletionAttempt(scope.serviceId, scope.operatorId, persistedBodyRef.current || body);
+  // Removes exactly the row a send or discard stood on, captured before its
+  // network call or storage read: never whatever row is current when a late
+  // response arrives (a tech who left and reopened the visit may have saved a
+  // newer attempt by then; handoff P1 on 463069ad05).
+  const clearStored = useCallback(async (scope, storedBody) => {
+    if (scope.serviceId && scope.operatorId && storedBody) {
+      return deleteFastCompletionAttempt(scope.serviceId, scope.operatorId, storedBody);
     }
     return true;
   }, []);
@@ -175,9 +179,9 @@ export default function useFastCompleteSubmit({
     return 'warned';
   }, [failure]);
 
-  const settleFailure = useCallback(async (err, scope, body, summary) => {
+  const settleFailure = useCallback(async (err, scope, body, summary, storedBody) => {
     const outcome = completionFailureOutcome(err, { confirmable });
-    const removed = DEFINITIVE_OUTCOMES.has(outcome) ? await clearStored(scope, body) : true;
+    const removed = DEFINITIVE_OUTCOMES.has(outcome) ? await clearStored(scope, storedBody) : true;
     if (!sameScope(scopeRef.current, scope)) return;
     if (outcome === 'correctable' && !removed && persistedBodyRef.current) {
       rejectedBodyRef.current = persistedBodyRef.current;
@@ -215,6 +219,9 @@ export default function useFastCompleteSubmit({
     setSubmitting(true);
     setError('');
     setPrompt(null);
+    // The row this send stands on (none when nothing was persisted): fixed
+    // again once its body is persisted.
+    let storedBody = persistedBodyRef.current;
 
     try {
       if (rejectedBodyRef.current) {
@@ -237,15 +244,16 @@ export default function useFastCompleteSubmit({
       // Persist the exact held body, including photos, before network.
       const persistence = await persistPrepared(scope, body, heldSummary);
       if (persistence !== 'send') return;
+      storedBody = persistedBodyRef.current;
       const result = await request(`${base}/complete`, { method: 'POST', body: JSON.stringify(body) });
-      await clearStored(scope, body);
+      await clearStored(scope, storedBody);
       if (!sameScope(scopeRef.current, scope)) return;
       pendingBodyRef.current = null;
       pendingSummaryRef.current = '';
       setFailure(null);
       setDone({ summary: heldSummary, customerText: result?.customerText || null, response: result || null });
     } catch (err) {
-      await settleFailure(err, scope, body, heldSummary);
+      await settleFailure(err, scope, body, heldSummary, storedBody);
     } finally {
       if (sameScope(scopeRef.current, scope)) {
         setSubmitting(false);
@@ -276,15 +284,16 @@ export default function useFastCompleteSubmit({
     if (inFlight.current) return;
     const scope = scopeRef.current;
     const body = pendingBodyRef.current;
+    const storedBody = persistedBodyRef.current || body;
     inFlight.current = true;
     setSubmitting(true);
     try {
-      const removed = await clearStored(scope, body);
+      const removed = await clearStored(scope, storedBody);
       if (!sameScope(scopeRef.current, scope)) return;
       if (!removed && persistedBodyRef.current) {
         const current = await getFastCompletionAttempt(scope.serviceId, scope.operatorId);
         if (!sameScope(scopeRef.current, scope)) return;
-        if (!current.available || JSON.stringify(current.attempt?.body) === JSON.stringify(persistedBodyRef.current || body)) {
+        if (!current.available || JSON.stringify(current.attempt?.body) === JSON.stringify(storedBody)) {
           setError('Could not discard the saved completion on this device. Keep it open and try Discard again.');
           return;
         }
