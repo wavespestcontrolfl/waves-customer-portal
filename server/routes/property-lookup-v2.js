@@ -1962,7 +1962,11 @@ function resolveBusinessScopeForProfile(rc, ai, lookupAddress, options) {
     occupancyAnswer: options.occupancyAnswer || null,
     scopeSignals: identity ? {
       typedSubpremise: addressNamesSuiteUnit(lookupAddress),
-      countyPartBuildingEvidence: countyPartBuildingEvidenceOf(rc),
+      // A parent parcel (address-match PR 6: the point sits well inside a
+      // commercial parcel whose situs is another address) says the business
+      // is one part of a larger property — the same kind of evidence, and
+      // like it only a SUGGESTION for staff.
+      countyPartBuildingEvidence: countyPartBuildingEvidenceOf(rc) || Boolean(rc?._parentParcel?.parcelId),
       countyRecordPresent: hasCountyEvidence(rc),
       ownUnitFolio: isOwnUnitFolioRecord(rc),
       association: isAssociationCommercialJob({ commercialSubtype: baseSubtype }),

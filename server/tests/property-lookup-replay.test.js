@@ -560,7 +560,7 @@ describe('applyGisParcelGuards (extracted from lookupPropertyFromAITrio)', () =>
   const ctx = (over = {}) => ({ searchAddress: '9117 SR 99, BRADENTON, FL 34203', address: '9117 SR 99, BRADENTON, FL 34203', gisPrecision: 'rooftop', ...over });
 
   test('no parcel in, nothing out', () => {
-    expect(applyGisParcelGuards(null, ctx())).toEqual({ parcel: null, parkParcelSignal: null, dropReason: null });
+    expect(applyGisParcelGuards(null, ctx())).toEqual({ parcel: null, parkParcelSignal: null, dropReason: null, parentParcel: null });
   });
 
   test('situs house number that disagrees drops the parcel (the plaza / Luxe Ave guard)', () => {

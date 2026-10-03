@@ -143,6 +143,33 @@ function pointInRing(ring, x, y) {
   return inside;
 }
 
+// Shortest distance in meters from a point to the polygon's boundary (any
+// ring), on the same equirectangular projection the area math uses. Null
+// when the rings carry no usable segment. Says how far INSIDE a parcel a
+// geocode point sits — a point hugging the line may belong to the neighbor.
+function pointToPolygonEdgeMeters(rings, lng, lat) {
+  if (!Array.isArray(rings) || !Number.isFinite(lng) || !Number.isFinite(lat)) return null;
+  const kx = METERS_PER_DEGREE_LAT * Math.cos(lat * Math.PI / 180);
+  const ky = METERS_PER_DEGREE_LAT;
+  let best = null;
+  for (const ring of rings) {
+    if (!Array.isArray(ring)) continue;
+    for (let i = 0; i < ring.length - 1; i += 1) {
+      const [x1, y1] = ring[i] || [];
+      const [x2, y2] = ring[i + 1] || [];
+      if (![x1, y1, x2, y2].every(Number.isFinite)) continue;
+      const ax = (x1 - lng) * kx; const ay = (y1 - lat) * ky;
+      const bx = (x2 - lng) * kx; const by = (y2 - lat) * ky;
+      const dx = bx - ax; const dy = by - ay;
+      const len2 = dx * dx + dy * dy;
+      const t = len2 > 0 ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / len2)) : 0;
+      const d = Math.hypot(ax + t * dx, ay + t * dy);
+      if (best === null || d < best) best = d;
+    }
+  }
+  return best;
+}
+
 function polygonContainsPoint(rings, lng, lat) {
   return Array.isArray(rings) && rings.some((ring) => pointInRing(ring, lng, lat));
 }
@@ -313,6 +340,7 @@ module.exports = {
   normalizeParcelIdForPao,
   outerRing,
   polygonAreaSqft,
+  pointToPolygonEdgeMeters,
   simplifyRing,
   isParcelGisDisabled,
   parcelGisTimeoutMs,
