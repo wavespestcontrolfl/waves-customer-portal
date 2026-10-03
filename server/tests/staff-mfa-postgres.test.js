@@ -249,4 +249,16 @@ postgres('staff two-step sign-in on migrated PostgreSQL', () => {
       process.env.GATE_ADMIN_MFA = 'true';
     }
   });
+  test('enforce: an admin still owed enrollment gets no staff push until enrolled', async () => {
+    const PushService = require('../services/push-notifications');
+    await mockDatabase('push_subscriptions').insert({ admin_user_id: techId, subscription_data: '{"endpoint":"https://push.example.test/c"}', active: true, staff_token_version: 1, staff_mfa: false });
+    const lookup = () => PushService.sendToAdminUsers([techId], () => ({ title: 't', body: 'b' }), { beforeDispatch: async () => false });
+    expect((await lookup()).subscriptions).toBe(1);
+    process.env.GATE_ADMIN_MFA_ENFORCE = 'true';
+    try {
+      expect((await lookup()).subscriptions).toBe(0);
+    } finally {
+      delete process.env.GATE_ADMIN_MFA_ENFORCE;
+    }
+  });
 });

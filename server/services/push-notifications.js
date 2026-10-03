@@ -4,7 +4,7 @@ const logger = require('./logger');
 const apns = require('./apns');
 const fcm = require('./fcm');
 const { accountPropertyIds, resolvePrimaryProfileId, appPropertyScopeEnabled } = require('./account-properties');
-const { gateEnvValue, adminMfaLive } = require('../config/feature-gates');
+const { gateEnvValue, adminMfaLive, adminMfaEnforceLive } = require('../config/feature-gates');
 const { qualifyNotificationLink } = require('./notification-links');
 
 const PUSH_HEARTBEAT_HOURS = 72;
@@ -378,13 +378,16 @@ class PushNotificationService {
   }
 }
 
-// Two-step sign-in (GATE_ADMIN_MFA, read at call time): an enrolled
-// account's device registered by a session that never passed the code gets
-// no staff push, the same rule adminAuthenticate applies to its requests.
+// Two-step sign-in (GATE_ADMIN_MFA, read at call time): the same rule
+// adminAuthenticate applies to requests — an enrolled account's device
+// registered by a session that never passed the code gets no staff push, and
+// under GATE_ADMIN_MFA_ENFORCE neither does an admin still owed enrollment.
 // Gate off = the query is unchanged.
 function staffMfaPushFilter(query) {
   if (!adminMfaLive()) return query;
-  return query.whereRaw('(t.mfa_enabled_at IS NULL OR ps.staff_mfa = true)');
+  const scoped = query.whereRaw('(t.mfa_enabled_at IS NULL OR ps.staff_mfa = true)');
+  if (!adminMfaEnforceLive()) return scoped;
+  return scoped.whereRaw("NOT (t.role = 'admin' AND t.mfa_enabled_at IS NULL)");
 }
 
 function summarize(results, subscriptions) {
