@@ -539,14 +539,20 @@ const WHICH_PROPERTY_TEXT = 'A city or ZIP alone does not say which property the
   + 'up. If the visit is for the service address on this caller\'s account, call this tool again with NO address. If '
   + 'it is for a different property, call it again with that property\'s street address.';
 
-/** The tool text for a known caller whose location is not the account's, else null. */
-function knownCallerRefusal(account, ctx = {}) {
-  if (!account || account.kind === 'account') return null;
-  if (account.kind === 'which_property') return WHICH_PROPERTY_TEXT;
-  // Times already offered for the account's property are no longer this
-  // visit's: without this an earlier slot_ref would still book it there.
-  if (typeof ctx.revokeAccountSlots === 'function') ctx.revokeAccountSlots();
-  return OTHER_PROPERTY_TEXT;
+/**
+ * The tool text for a known caller whose location is not the account's, else
+ * null. ⭐ A STATED LOCATION NOT PROVEN TO BE THE ACCOUNT'S REVOKES EARLIER
+ * ACCOUNT OFFERS — a different property, a city or ZIP that does not say
+ * which, and a lookup that could not answer (a failed read, an account a
+ * person must sort out) alike. Without it an earlier slot_ref would still
+ * book the account's address for a visit the caller placed somewhere else.
+ */
+function knownCallerRefusal(account, input = {}, ctx = {}) {
+  if (account && account.kind === 'account') return null;
+  const statedAny = [input.address_line1, input.city, input.zip].some((v) => v != null && String(v).trim() !== '');
+  if (statedAny && typeof ctx.revokeAccountSlots === 'function') ctx.revokeAccountSlots();
+  if (!account) return null;
+  return account.kind === 'which_property' ? WHICH_PROPERTY_TEXT : OTHER_PROPERTY_TEXT;
 }
 
 async function resolveAvailability({ address_line1, city, zip, when, account = null }) {
@@ -1696,7 +1702,7 @@ async function executeTool(name, input = {}, ctx = {}) {
 
     if (name === 'get_availability') {
       const account = await knownCallerAvailabilityLocation(input, ctx);
-      const refusal = knownCallerRefusal(account, ctx);
+      const refusal = knownCallerRefusal(account, input, ctx);
       if (refusal) return refusal;
       const res = await resolveAvailability({ address_line1: input.address_line1, city: input.city, zip: input.zip, account });
       return availabilityResultToText(res, ctx) + (account && res.status === 'ok' ? ACCOUNT_LOCATION_NOTE : '');
@@ -1705,7 +1711,7 @@ async function executeTool(name, input = {}, ctx = {}) {
     if (name === 'find_slots') {
       if (!input.when) return 'Ask the caller what day or timeframe they prefer, then call find_slots with that.';
       const account = await knownCallerAvailabilityLocation(input, ctx);
-      const refusal = knownCallerRefusal(account, ctx);
+      const refusal = knownCallerRefusal(account, input, ctx);
       if (refusal) return refusal;
       const res = await resolveAvailability({ when: input.when, address_line1: input.address_line1, city: input.city, zip: input.zip, account });
       return availabilityResultToText(res, ctx) + (account && res.status === 'ok' ? ACCOUNT_LOCATION_NOTE : '');

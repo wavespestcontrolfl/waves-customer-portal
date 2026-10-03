@@ -119,6 +119,17 @@ describe('a known customer\'s open times are for the property on their account',
     expect(ctx.resolveSlotRef(stated)).toBeTruthy();
   });
 
+  test('an address the lookup could not check against the account (a failed read) also revokes earlier account offers', async () => {
+    const revokeAccountSlots = jest.fn();
+    db.mockImplementation(() => ({ where: () => ({ whereNull: () => ({ first: async () => { throw new Error('db down'); } }) }) }));
+    const out = await executeTool('find_slots', { when: 'next week', address_line1: '9 Rental Road', city: 'Venice' }, fullTier({ revokeAccountSlots }));
+    expect(out).toMatch(/Open times/); // the ordinary path, for the stated address
+    expect(revokeAccountSlots).toHaveBeenCalledTimes(1);
+    // No address stated: nothing says the visit moved, so nothing is revoked.
+    await executeTool('find_slots', { when: 'next week' }, fullTier({ revokeAccountSlots }));
+    expect(revokeAccountSlots).toHaveBeenCalledTimes(1);
+  });
+
   test('the scheduling kill switch answers before any account read', async () => {
     isEnabled.mockReturnValue(false);
     expect(await executeTool('find_slots', { when: 'next week' }, fullTier())).toMatch(/Live scheduling is not available/);
