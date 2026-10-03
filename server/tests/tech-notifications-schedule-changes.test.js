@@ -112,6 +112,9 @@ describe('POST /dismiss-batch', () => {
   test.each([
     ['no as_of', {}],
     ['an unparseable as_of', { as_of: 'yesterday-ish' }],
+    ['a null as_of (new Date(null) is 1970)', { as_of: null }],
+    ['a numeric as_of', { as_of: 0 }],
+    ['an empty as_of', { as_of: '  ' }],
   ])('%s → 400, nothing written', async (_label, body) => {
     db.mockReset();
     const res = { json: jest.fn(), status: jest.fn().mockReturnThis() };

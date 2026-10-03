@@ -181,8 +181,11 @@ router.get('/schedule-changes', async (req, res, next) => {
 // (the read the tech was looking at). Soon cards keep their own Got it.
 router.post('/dismiss-batch', async (req, res, next) => {
   try {
-    const asOf = new Date(req.body?.as_of);
-    if (Number.isNaN(asOf.getTime())) return res.status(400).json({ error: 'as_of is required' });
+    // A non-empty timestamp string only: new Date(null) is a valid 1970
+    // instant that would clear nothing yet report success (Codex #5783 P2).
+    const raw = req.body?.as_of;
+    const asOf = typeof raw === 'string' && raw.trim() ? new Date(raw) : null;
+    if (!asOf || Number.isNaN(asOf.getTime())) return res.status(400).json({ error: 'as_of is required' });
     const soon = soonSql(asOf);
     const ids = openScheduleChanges(req.technicianId)
       .where('n.created_at', '<=', asOf)
