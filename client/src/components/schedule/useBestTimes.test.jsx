@@ -211,6 +211,10 @@ it('a re-check for the same visit holds the last summary as stale instead of cle
   await waitFor(() => expect(result.current.availability).not.toBeNull());
   expect(result.current.availability.stale).toBeUndefined();
   rerender({ ...props, pickedStart: '15:00' });
+  // Stale from the very render that carries the new input, before the
+  // debounce or any request: the old verdict never paints as current.
+  expect(result.current.availability).toMatchObject({ stale: true });
+  expect(fetch).toHaveBeenCalledTimes(1);
   await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
   expect(result.current.availability).toMatchObject({ stale: true });
   release();
