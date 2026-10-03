@@ -412,11 +412,11 @@ describe('sendBatch', () => {
     expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: preview.digest, now: NOW })).toEqual({ ok: false, reason: 'nothing_to_send' });
     expect(emailLeg).toHaveBeenCalledTimes(1);
     expect(snapshots()[0].status).toBe('approved');
-    // the link that email may carry renders the frozen words
-    expect(comms.publicReview(n)).toMatchObject({ costBlock: COST_BLOCK, delivered: false, lines: [{ current: '$117', next: '$121' }] });
+    // not stamped delivered: the public page shows nothing, whatever the email may carry
+    expect(comms.publicReview(n)).toEqual({ unavailable: true });
   });
 
-  test('a claim still running its pre-dispatch checks exposes nothing on the public page; the frozen words are served only once a provider handoff is recorded', async () => {
+  test('the public page shows a letter only once it is stamped delivered: nothing during a claim, at the provider request, or for a parked send', async () => {
     mockDb.reset(book());
     const seen = [];
     emailLeg.mockImplementation(async (args) => {
@@ -426,11 +426,13 @@ describe('sendBatch', () => {
     });
     await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
     expect(seen[0]).toEqual({ unavailable: true }); // preparation: nothing handed over yet
-    expect(seen[1]).toMatchObject({ delivered: false, lines: [{ current: '$117', next: '$121' }] }); // at the provider request: the link works
+    expect(seen[1]).toEqual({ unavailable: true }); // at the provider request: still nothing
+    expect(comms.publicReview(notices()[0])).toMatchObject({ delivered: true, lines: [{ current: '$117', next: '$121' }] }); // stamped delivered
     const claimed = { rate_review_row_id: 'r', status: 'sending', sent_at: null };
     const letter = { lines: [{ service: 'Pest control', current_cents: 11700, new_cents: 12100 }] };
     expect(comms.publicReview({ ...claimed, metadata: { pending_letter: { key: 'k', letter } } })).toEqual({ unavailable: true });
-    expect(comms.publicReview({ ...claimed, metadata: { pending_letter: { key: 'k', letter, handoff_at: NOW.toISOString() } } }).lines).toHaveLength(1);
+    expect(comms.publicReview({ ...claimed, metadata: { pending_letter: { key: 'k', letter, handoff_at: NOW.toISOString() } } })).toEqual({ unavailable: true });
+    expect(comms.publicReview({ ...claimed, status: 'send_uncertain', metadata: { pending_letter: { key: 'k', letter, handoff_at: NOW.toISOString() } } })).toEqual({ unavailable: true });
     expect(comms.publicReview({ ...claimed, status: 'draft', metadata: { pending_letter: { key: 'k', letter, handoff_at: NOW.toISOString() } } })).toEqual({ unavailable: true });
   });
 
@@ -1319,7 +1321,7 @@ describe('customer surfaces', () => {
     expect(parked.pending_letter).toBeTruthy();
     // the identity a later bounce needs is kept, and the link the email carries works
     expect(parked).toMatchObject({ email_message_id: 'em-1', uncertain_channels: { email: true }, uncertain_claim_key: parked.pending_letter.key });
-    expect(comms.publicReview(notices()[0]).lines).toBeTruthy();
+    expect(comms.publicReview(notices()[0])).toEqual({ unavailable: true }); // parked: not shown until settled
     // that bounce settles it: no channel left unknown, back to a re-sendable draft
     await comms.handleEmailDeliveryEvent(mockDb, { id: 'em-1', template_key: comms.TEMPLATE_KEY, recipient_type: 'customer', recipient_id: CUSTOMER(1) }, { event: 'bounce', timestamp: 1790000000 });
     expect(notices()[0].status).toBe('draft');
@@ -1806,7 +1808,7 @@ describe('customer surfaces', () => {
       await comms.handleSmsDeliveryFailure({ sid: 'SM1', status: 'undelivered' }, { dbh: mockDb });
       expect(notices()[0]).toMatchObject({ status: 'send_uncertain', sent_at: null });
       expect(meta().delivery_revoked).toMatchObject({ channel: 'sms' });
-      expect(comms.publicReview(notices()[0]).lines).toBeTruthy(); // the link the email may carry still works
+      expect(comms.publicReview(notices()[0])).toEqual({ unavailable: true }); // parked: not shown until settled
       expect(JSON.parse(snapshots()[0].flags || '[]')).not.toContain('delivery_bounced');
     });
 

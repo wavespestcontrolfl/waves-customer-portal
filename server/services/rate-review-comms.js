@@ -1472,14 +1472,12 @@ function publicLines(letter) {
 function publicReview(notice) {
   if (!notice?.rate_review_row_id) return null;
   const meta = parseJson(notice.metadata, {});
-  // Delivered: the letter frozen at send. Not stamped but handed to a
-  // provider (send_uncertain or a claim mid-send, with its handoff recorded):
-  // the words frozen before the provider call — only a delivered message
-  // carries this token, so the link the customer holds keeps working. A claim
-  // still running its pre-dispatch checks has handed nothing over: a 404,
-  // like anything else.
-  const handedOff = [UNCERTAIN, 'sending'].includes(String(notice.status)) && !!meta.pending_letter?.handoff_at;
-  const letter = notice.sent_at ? meta.letter : (handedOff ? meta.pending_letter?.letter : null);
+  // Only a notice stamped delivered renders, from the letter frozen at that stamp. A claim
+  // in flight or a send of uncertain outcome (send_uncertain) is the contract's generic
+  // 404, whatever handoff it recorded: no record written before a provider request can
+  // prove the request was made, so the page never relies on one. The cost is that a
+  // letter parked as uncertain shows "not found" until the owner settles it.
+  const letter = notice.sent_at ? meta.letter : null;
   if (!notice.sent_at && !letter) return { unavailable: true };
   // Delivered without a frozen letter (a notice stamped by another
   // sender): the plain notice page, never a 404 for a received link.

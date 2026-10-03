@@ -2756,10 +2756,9 @@ the price change only — no address/email/PII; view counted for the
 delivery record; an annual rate review notice adds `review` — the
 letter frozen at send: service line name, old/new rate per application
 or per prepaid year, effective date, the per-line reason from stored
-ranking facts and the owner's cost block, still no address/email/PII —
-also served, from the words frozen before the provider call, for a
-send whose outcome was uncertain (counted, never flipped to viewed);
-a rate-review notice no send touched is a generic 404, never counted
+ranking facts and the owner's cost block, still no address/email/PII;
+a rate-review notice not stamped delivered (a draft, a send in flight,
+or a send whose outcome is uncertain) is a generic 404, never counted
 or flipped to viewed),
 `/api/public/products` (read-only export; returns only active +
 customer_visibility=public + content_status=approved_for_public products;
