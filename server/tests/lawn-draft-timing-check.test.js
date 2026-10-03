@@ -98,6 +98,21 @@ describe('lawnDraftTimingRejection', () => {
     expect(deps.dispatch.mock.calls[0][2]).toEqual({ hardDeadline: true, reserveFallbackBudget: true });
   });
 
+  test('onUnchecked fires for every accepted-without-a-verdict path, and never for a judged draft', async () => {
+    const run = async (deps) => { const onUnchecked = jest.fn(); await lawnDraftTimingRejection(DRAFT, { ...deps, onUnchecked }); return onUnchecked.mock.calls.length; };
+    expect(await run({ dispatch: async () => ({ ok: false, reason: 'timeout' }) })).toBe(1);
+    expect(await run({ dispatch: async () => { throw new Error('boom'); } })).toBe(1);
+    expect(await run(answering([]))).toBe(1);
+    expect(await run({ ...answering([]), remainingMs: 400 })).toBe(1);
+    expect(await run(answering([0, 1, 2].map((index) => ({ index, states_result_timing: false }))))).toBe(0);
+    expect(await run(answering([{ index: 1, states_result_timing: true }]))).toBe(0);
+  });
+
+  test('the prompt has the checker read sentences in context (a promise split across two sentences)', () => {
+    expect(_test.SYSTEM).toMatch(/Read each sentence IN CONTEXT/);
+    expect(_test.SYSTEM).not.toMatch(/Judge only the sentence's own words/);
+  });
+
   test('an empty draft asks no model', async () => {
     const deps = answering([]);
     expect(await lawnDraftTimingRejection('WHAT WE DID\n', deps)).toBeNull();
@@ -127,10 +142,14 @@ describe('generate-report runs the check on lawn drafts that carried the timing 
   test('the route awaits the hook and gates it on the rule, the kill switch and the pattern screen passing first', () => {
     const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-schedule.js'), 'utf8');
     expect(source).toMatch(/await extraRejection\(report, \{ remainingMs: deadline - Date\.now\(\) \}\)/);
-    expect(source).toMatch(/\|\| writerRulesScreen\(text\)\s+\|\| \(lawnTimingOn && lawnDraftTimingCheckLive\(\) \? lawnDraftTimingRejection\(text, \{ remainingMs \}\) : null\)/);
-    // The last-resort deterministic copy is checked too.
+    // Cheap screens first; then the check, told the chain's remaining budget.
+    expect(source).toMatch(/if \(cheap \|\| !lawnTimingCheckOn\) return cheap;/);
+    expect(source).toMatch(/lawnDraftTimingRejection\(text, \{ remainingMs, onUnchecked: \(\) => \{ lawnTimingUnchecked = true; \} \}\)/);
     // The last-resort copy: cheap screens first, then the check, inside the chain's deadline.
     expect(source).toMatch(/const fallbackScreened = report && \(screenTradeNames\(report\) \|\| writerRulesScreen\(report\)\);/);
-    expect(source).toMatch(/const fallbackTiming = report && !fallbackScreened && lawnTimingOn && lawnDraftTimingCheckLive\(\)\s+\? await lawnDraftTimingRejection\(report, \{ remainingMs: reportChainDeadline - Date\.now\(\) \}\)/);
+    expect(source).toMatch(/const fallbackTiming = report && !fallbackScreened && lawnTimingCheckOn\s+\? await lawnDraftTimingRejection\(report, \{ remainingMs: reportChainDeadline - Date\.now\(\) \}\)/);
+    // The check's state is part of the cache identity, and an unjudged draft is never cached.
+    expect(source).toMatch(/\.update\(lawnTimingCheckOn \? '\|lawn-timing-check:1' : ''\)/);
+    expect(source).toMatch(/if \(!lawnTimingUnchecked\) reportCopyCacheSet\(cacheKey, report\);/);
   });
 });
