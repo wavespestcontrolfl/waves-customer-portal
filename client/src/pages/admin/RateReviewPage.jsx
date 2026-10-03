@@ -566,7 +566,7 @@ function SettingsCard({ open, onToggle, draft, onDraft, saving, feedback, onSave
           </Field>
           <div className="flex flex-wrap items-center gap-3">
             <Button variant="secondary" onClick={onSave} loading={saving}>Save settings</Button>
-            <span className="text-ui-caption text-ink-secondary">Changes apply to the next build; rows already computed keep the values they were ranked with.</span>
+            <span className="text-ui-caption text-ink-secondary">Ranking settings apply to the next build; rows already computed keep the values they were ranked with. The cost block is read live: the current batch's letters use it as soon as it is saved.</span>
             {feedback && <ActionFeedback error={!feedback.ok}>{feedback.text}</ActionFeedback>}
           </div>
         </div>
@@ -659,6 +659,19 @@ function approveAction(totals, { ready, saving, batchLocked }) {
   if (batchLocked) return { label: "Batch sent", disabled: true };
   if (totals.green === 0) return { label: totals.approved > 0 ? "Batch approved" : "Approve batch · send 0 notices", disabled: true };
   return { label: `Approve batch · send ${noticeCount(totals.green)}`, disabled: !ready || saving };
+}
+
+const KNOBS_SAVED = "Settings saved. They apply to the next build; this batch keeps the values it was ranked with.";
+const COST_BLOCK_SAVED = "Cost block updated — the current batch's send preview and letters now use it.";
+
+// The ranking knobs and the cost block land differently: the knobs shape the
+// NEXT build, but the letter's cost block is read live, so the current batch's
+// send preview (and what goes out) changes the moment it is saved. Say which.
+function savedSettingsText(patch) {
+  const costBlock = Object.prototype.hasOwnProperty.call(patch, "cost_block");
+  const knobs = Object.keys(patch).some((key) => key !== "cost_block");
+  if (costBlock && knobs) return `${KNOBS_SAVED} ${COST_BLOCK_SAVED}`;
+  return costBlock ? COST_BLOCK_SAVED : KNOBS_SAVED;
 }
 
 // ── the page ────────────────────────────────────────────────────────────
@@ -947,7 +960,7 @@ export default function RateReviewPage({ embedded = false } = {}) {
       setConfig(data.config);
       setSettingsDraft(settingsDraftFrom(data.config));
       setSendRev((n) => n + 1);
-      setSettingsFeedback({ ok: true, text: "Settings saved. They apply to the next build; this batch keeps the values it was ranked with." });
+      setSettingsFeedback({ ok: true, text: savedSettingsText(patch) });
     } catch (e) {
       const detail = e.details && Array.isArray(e.details.errors) ? e.details.errors.join(" · ") : e.message;
       setSettingsFeedback({ ok: false, text: detail || "The settings were refused." });

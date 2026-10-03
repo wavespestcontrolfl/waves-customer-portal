@@ -641,10 +641,23 @@ describe("RateReviewPage", () => {
     fireEvent.change(screen.getByLabelText("Cost block text"), { target: { value: "Technician pay is up 6% since last January." } });
     fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
 
-    await screen.findByText("Settings saved. They apply to the next build; this batch keeps the values it was ranked with.");
+    await screen.findByText("Settings saved. They apply to the next build; this batch keeps the values it was ranked with. Cost block updated — the current batch's send preview and letters now use it.");
     const put = calls.find((c) => c.method === "PUT" && /\/config$/.test(c.path));
     expect(put.body).toEqual({ cap_cents: 2000, cost_block: "Technician pay is up 6% since last January." });
     expect(screen.getByRole("button", { name: "Cost block" })).toHaveTextContent("Set Oct 28 by Owner · Edit");
+  });
+
+  it("settings feedback says a cost block change is live for the current batch, and a knob change waits for the next build", async () => {
+    await renderLoaded();
+    fireEvent.click(screen.getByRole("button", { name: "Cost block" }));
+    fireEvent.change(screen.getByLabelText("Cost block text"), { target: { value: "Costs went up 6%." } });
+    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+    await screen.findByText("Cost block updated — the current batch's send preview and letters now use it.");
+    expect(screen.queryByText(/^Settings saved\./)).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Cap ($ per application)"), { target: { value: "20" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+    await screen.findByText("Settings saved. They apply to the next build; this batch keeps the values it was ranked with.");
+    expect(screen.queryByText(/Cost block updated/)).not.toBeInTheDocument();
   });
 
   it("the ops-email deep link picks the batch from ?batch= and a bad key falls back to the newest", async () => {
