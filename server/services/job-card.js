@@ -323,13 +323,18 @@ async function loadOpenIssues(dbh, customerId) {
 // Where the texts stop. window_start only opens a two-hour arrival range,
 // so a text sent inside it (gate instructions at 9:30 for a 9–11 arrival)
 // still belongs on the card: the cutoff is the technician's recorded
-// arrival, else now while the visit is still ahead. A finished visit with
-// no arrival stamp falls back to its nominal start.
+// arrival, else now while the visit is today or still ahead. With no
+// arrival stamp, a finished visit or one on an earlier day (whatever its
+// status — rescheduled, never closed out) stops at its nominal start, so an
+// old card never shows conversations that came after it.
 const ARRIVAL_STAMPS = ['arrived_at', 'actual_start_time', 'check_in_time'];
-function textsCutoff(svc, visitStart) {
+const TEXTS_DONE_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show'];
+function textsCutoff(svc, visitStart, today = etDateString()) {
   const stamps = ARRIVAL_STAMPS.map((k) => (svc[k] ? new Date(svc[k]).getTime() : NaN)).filter(Number.isFinite);
   if (stamps.length) return new Date(Math.min(...stamps));
-  if (['completed', 'cancelled', 'skipped', 'no_show'].includes(svc.status) && visitStart) return visitStart;
+  if (!visitStart) return null;
+  const day = etCalendarDayOf(svc.scheduled_date);
+  if (TEXTS_DONE_STATUSES.includes(svc.status) || (day && day < today)) return visitStart;
   return null;
 }
 

@@ -1435,10 +1435,15 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       const arrived = await jobCard.loadJobCardFacts('svc1', withTexts({ window_start: '09:00', status: 'on_site', check_in_time: '2026-09-04T13:50:00Z', arrived_at: '2026-09-04T13:45:00Z' }, texts), deps);
       expect(smsReads.until.toISOString()).toBe('2026-09-04T13:45:00.000Z');
       expect(arrived.notes.customerTexts).toEqual([{ date: '2026-09-04', text: 'Use the side entrance today' }]);
-      // Not arrived yet: everything up to this read.
+      // Not arrived yet, visit today or ahead: everything up to this read.
       const t0 = Date.now();
-      await jobCard.loadJobCardFacts('svc1', withTexts({ window_start: '09:00', status: 'confirmed' }, texts), deps);
+      await jobCard.loadJobCardFacts('svc1', withTexts({ window_start: '09:00', status: 'confirmed', scheduled_date: '2099-01-05' }, texts), deps);
       expect(smsReads.until.getTime()).toBeGreaterThanOrEqual(t0);
+      // An earlier day never closed out (still 'confirmed' / 'rescheduled'): its nominal start (Codex r3).
+      for (const status of ['confirmed', 'rescheduled']) {
+        await jobCard.loadJobCardFacts('svc1', withTexts({ window_start: '09:00', status }, texts), deps);
+        expect(smsReads.until.toISOString()).toBe('2026-09-04T13:00:00.000Z');
+      }
       // Finished with no arrival stamp: the nominal start.
       await jobCard.loadJobCardFacts('svc1', withTexts({ window_start: '09:00', status: 'completed' }, texts), deps);
       expect(smsReads.until.toISOString()).toBe('2026-09-04T13:00:00.000Z');
