@@ -2808,6 +2808,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     };
     const pendingProposals = []; // client-only payloads (carry the confirmation ids — never shown to the model)
     const directActionIds = []; // owner-direct commits this turn: no card, but their receipts join the thread like a card's
+    const directCallsByTool = new Map(); // owner-direct bulk cap: same-tool direct calls this turn (OwnerDirect.withinDirectCap)
     let directOutcomeUncertain = false; // a direct commit whose outcome is unknown or whose receipt did not save
     let directOutcomePartial = false; // a direct commit that landed with a failed follow-on step (partially_completed)
     let writeFrontierBlocked = false;
@@ -2860,6 +2861,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       );
 
       const toolUses = response.content.filter(c => c.type === 'tool_use');
+      // Counted per model message before any call runs, so three parallel
+      // same-tool edits all keep their card instead of two landing first.
+      if (ownerDirectCommits) OwnerDirect.countDirectCalls(directCallsByTool, toolUses);
       const textBlocks = response.content.filter(c => c.type === 'text');
       if (activeTask) await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token });
 
@@ -2983,7 +2987,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
             if (proposed.failed) {
               failed = true;
               errorMessage = result.error || 'proposal failed';
-            } else if (proposed.clientPayload && ownerDirectCommits && OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input, proposed.modelResult)) {
+            } else if (proposed.clientPayload && ownerDirectCommits && OwnerDirect.withinDirectCap(directCallsByTool, toolUse.name)
+              && OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input, proposed.modelResult)
+              && !(await OwnerDirect.notesWouldOverwrite(toolUse.name, toolUse.input))) {
               // Owner-direct internal edit: no card. The pending action just
               // minted is committed now through the same path a Confirm
               // click takes, so its pins, receipt and audit row are the same.

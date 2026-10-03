@@ -25,7 +25,11 @@ step 3 is skipped; step 4 runs server-side through `commitPendingAction` (the
 `/confirm-action` body) via `OwnerDirect.runDirectCommit`, so pins, receipt,
 audit row and `IB_WRITES_DISABLED` are unchanged. A new write tool is NOT
 direct unless deliberately added to that list — customer messages, money,
-bulk, grouped-visit and customer-facing-copy writes never are.
+bulk, grouped-visit and customer-facing-copy writes never are. Two runtime
+limits (owner ruling 2026-10-02): a third same-tool direct edit in one request
+keeps its card (`countDirectCalls` / `withinDirectCap`, counted per model
+message before any call runs), and an `update_customer` `notes` edit over
+existing `crm_notes` keeps its card (`notesWouldOverwrite`; notes replace).
 
 ## Adding a new write tool — checklist
 

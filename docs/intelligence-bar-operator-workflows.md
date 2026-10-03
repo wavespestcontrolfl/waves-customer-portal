@@ -134,7 +134,7 @@ Binding rulings are cited by memory-file name. "Mode" is the execution mode on t
 ### W3 Lead first name and customer contact details
 
 - **Tools:** `update_lead_contact`, `update_customer`.
-- **Mode:** owner with the gate on: lead edits by `lead_id` alone and customer edits made only of name, phone, address, lead source and note fields execute without a card; email, tier, rate, active and pipeline stage keep the card (an email change re-sends the opt-in confirmation). Everyone else: card.
+- **Mode:** owner with the gate on: lead edits by `lead_id` alone and customer edits made only of name, phone, address, lead source and note fields execute without a card (a notes edit only when the customer has no notes yet, since notes replace; and at most two same-tool direct edits per request, owner ruling 2026-10-02); email, tier, rate, active and pipeline stage keep the card (an email change re-sends the opt-in confirmation). Everyone else: card.
 - **Rulings:** `ib-owner-direct-ruling`, `ib-gap-2-lead-contact-lane`.
 - **Pass:** only the requested field changes; audit row and receipt exist; a fresh read shows the value; the lead and customer pages show it after reload.
 - **Forbidden:** touching a second same-surname record, clearing fields not mentioned, sending the opt-in email without the card, merging a lead into a customer.

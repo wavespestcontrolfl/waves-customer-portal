@@ -745,7 +745,7 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     expect(await db('ib_pending_actions').where('task_id', result.body.taskId).count('* as count').first()).toEqual({ count: '1' });
   }, 30000);
 
-  test('owner-direct: the owner login commits an internal edit in the same turn with no card; a non-owner admin keeps the card; two direct edits in one turn both commit', async () => {
+  test('owner-direct: the owner login commits an internal edit in the same turn with no card; a non-owner admin keeps the card; notes over existing notes keep the card; two direct edits in one turn commit, a third same-tool edit cards', async () => {
     // A second admin whose email is on the full-access list for this run only.
     const owner = crypto.randomUUID();
     const ownerEmail = `owner-${owner.slice(0, 8)}@synthetic.test`;
@@ -755,6 +755,8 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     process.env.GATE_IB_OWNER_DIRECT = 'true';
     try {
       const note = `Owner-direct fixture ${owner.slice(0, 8)}`;
+      // A direct notes edit needs nothing to overwrite (owner-direct limits, 2026-10-02).
+      await db('customers').where('id', customerA).update({ crm_notes: null });
       proposeNote(customerA, note);
       const direct = await api('/query', request(`Add a note for ${nameA}: ${note}`, { session_id: crypto.randomUUID() }), ownerToken);
       expect(direct.status).toBe(200);
@@ -778,16 +780,34 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
       expect((await db('customers').where('id', customerA).first('crm_notes')).crm_notes).toBe(note);
       await db('ib_pending_actions').where('id', carded.body.pendingActions[0].id).update({ status: 'cancelled' });
 
+      // The owner's notes edit over existing notes keeps its card: notes
+      // replace crm_notes (gate codes, access details).
+      proposeNote(customerA, `${note} replaced`);
+      const overwrite = await api('/query', request(`Add a note for ${nameA}: ${note} replaced`, { session_id: crypto.randomUUID() }), ownerToken);
+      expect(overwrite.body.pendingActions).toHaveLength(1);
+      expect((await db('customers').where('id', customerA).first('crm_notes')).crm_notes).toBe(note);
+      await db('ib_pending_actions').where('id', overwrite.body.pendingActions[0].id).update({ status: 'cancelled' });
+
       // Two direct writes in one model turn: each commits with its own
       // receipt (the frontier closes only after an unknown outcome).
-      const first = { type: 'tool_use', name: 'update_customer', input: { customer_id: customerA, updates: { notes: `${note} 2` } }, id: 'first' };
-      const second = { type: 'tool_use', name: 'update_customer', input: { customer_id: customerA, updates: { notes: `${note} 3` } }, id: 'second' };
+      const source = (value, id) => ({ type: 'tool_use', name: 'update_customer', input: { customer_id: customerA, updates: { lead_source: value } }, id });
       mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'update customer fields' }, 'discover'))
-        .mockResolvedValueOnce({ content: [first, second], usage: {} })
+        .mockResolvedValueOnce({ content: [source('google', 'first'), source('referral', 'second')], usage: {} })
         .mockResolvedValueOnce(answer('Done.'));
-      const pair = await api('/query', request(`Add two notes for ${nameA}`, { session_id: crypto.randomUUID() }), ownerToken);
+      const pair = await api('/query', request(`Fix the lead source for ${nameA}`, { session_id: crypto.randomUUID() }), ownerToken);
       expect(pair.body.pendingActions).toEqual([]);
-      expect((await db('customers').where('id', customerA).first('crm_notes')).crm_notes).toBe(`${note} 3`);
+      expect((await db('customers').where('id', customerA).first('lead_source')).lead_source).toBe('referral');
+
+      // Three same-tool edits in one model message: every one keeps its card
+      // (bulk cap, owner ruling 2026-10-02), and nothing is written.
+      mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'update customer fields' }, 'discover'))
+        .mockResolvedValueOnce({ content: [source('google', 'a'), source('facebook', 'b'), source('yelp', 'c')], usage: {} })
+        .mockResolvedValueOnce(answer('Tap Confirm.'));
+      const triple = await api('/query', request(`Change the lead source for ${nameA} three times`, { session_id: crypto.randomUUID() }), ownerToken);
+      expect(triple.body.pendingActions.length).toBeGreaterThanOrEqual(1);
+      expect((await db('customers').where('id', customerA).first('lead_source')).lead_source).toBe('referral');
+      expect(await db('ib_pending_actions').where('task_id', triple.body.taskId).whereNotNull('consumed_at').count('* as count').first()).toEqual({ count: '0' });
+      await db('ib_pending_actions').where('task_id', triple.body.taskId).where('status', 'pending').update({ status: 'cancelled' });
     } finally {
       delete process.env.IB_FULL_ACCESS_EMAILS;
       delete process.env.GATE_IB_OWNER_DIRECT;

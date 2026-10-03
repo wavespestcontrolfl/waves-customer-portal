@@ -379,3 +379,45 @@ describe('reads for the owner login', () => {
       .toMatchObject({ code: 'invalid_target' });
   });
 });
+
+describe('owner-direct limits (owner ruling 2026-10-02)', () => {
+  const calls = (...names) => names.map(name => ({ type: 'tool_use', name, input: {} }));
+
+  test('two same-tool direct edits in one request are direct; a third keeps the card', () => {
+    const counts = new Map();
+    OwnerDirect.countDirectCalls(counts, calls('update_lead_status', 'update_lead_status'));
+    expect(OwnerDirect.withinDirectCap(counts, 'update_lead_status')).toBe(true);
+    OwnerDirect.countDirectCalls(counts, calls('update_lead_status'));
+    expect(OwnerDirect.withinDirectCap(counts, 'update_lead_status')).toBe(false);
+  });
+
+  test('three parallel calls in one message all keep the card; other tools are counted apart', () => {
+    const counts = OwnerDirect.countDirectCalls(new Map(), calls('update_customer', 'update_customer', 'update_customer', 'update_lead_contact', 'send_sms'));
+    expect(OwnerDirect.withinDirectCap(counts, 'update_customer')).toBe(false);
+    expect(OwnerDirect.withinDirectCap(counts, 'update_lead_contact')).toBe(true);
+    expect(counts.has('send_sms')).toBe(false); // not on the list: it always cards anyway
+    expect(OwnerDirect.DIRECT_CAP).toBe(3);
+  });
+
+  const notesDb = (crmNotes, { fail = false } = {}) => () => ({
+    where: () => ({ first: async () => { if (fail) throw new Error('db down'); return crmNotes === undefined ? undefined : { crm_notes: crmNotes }; } }),
+  });
+
+  test('a notes edit over existing notes keeps the card; empty notes stay direct', async () => {
+    const input = { customer_id: A, updates: { notes: 'Dog in back yard' } };
+    expect(await OwnerDirect.notesWouldOverwrite('update_customer', input, notesDb('Gate 1234, call ahead'))).toBe(true);
+    expect(await OwnerDirect.notesWouldOverwrite('update_customer', input, notesDb(null))).toBe(false);
+    expect(await OwnerDirect.notesWouldOverwrite('update_customer', input, notesDb('   '))).toBe(false);
+  });
+
+  test('a failed read keeps the card; edits without notes and other tools are untouched', async () => {
+    expect(await OwnerDirect.notesWouldOverwrite('update_customer', { customer_id: A, updates: { notes: 'x' } }, notesDb('', { fail: true }))).toBe(true);
+    expect(await OwnerDirect.notesWouldOverwrite('update_customer', { customer_id: A, updates: { phone: '+19415550100' } }, notesDb('old'))).toBe(false);
+    expect(await OwnerDirect.notesWouldOverwrite('update_lead_contact', { lead_id: LEAD, notes: 'x' }, notesDb('old'))).toBe(false);
+  });
+
+  test('the owner prompt states both limits', () => {
+    expect(OwnerDirect.OWNER_DIRECT_PROMPT).toMatch(/notes REPLACE the existing notes/);
+    expect(OwnerDirect.OWNER_DIRECT_PROMPT).toMatch(/third edit with the same tool in one request shows a card/);
+  });
+});

@@ -90,7 +90,9 @@ max_tokens for field speed.
   `services/intelligence-bar/owner-direct.js` in the same turn, with no
   card — still proposed as a pending action and committed through the same
   `commitPendingAction` path as a click (pins, receipt, audit row), never a
-  bare executor call. Every other login, context, and tool keeps the card.
+  bare executor call. Every other login, context, and tool keeps the card;
+  a third same-tool edit in one request and a notes edit over existing
+  notes keep it too (owner ruling 2026-10-02).
 - **Admin contexts use `GlobalCommandPalette`.** `AdminLayoutV2` mounts
   the palette; update the palette's route context mapping instead of adding another
   page-level embed. The former admin embeds were retired. The dedicated

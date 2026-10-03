@@ -139,6 +139,46 @@ function executesWithoutCard(toolName, input = {}, preview = null) {
   return true;
 }
 
+// Bulk cap (owner ruling 2026-10-02): one request may make at most two
+// direct edits with the same tool. A third and every later one keeps its
+// card, so "mark these leads lost" cannot fan a bulk change out into
+// card-free single calls. The route counts each model message's calls before
+// any of them runs (countDirectCalls), so three parallel calls in one message
+// all card; calls already committed by an earlier message stay committed.
+const DIRECT_CAP = 3;
+
+function countDirectCalls(counts, toolUses) {
+  for (const toolUse of toolUses || []) {
+    if (OWNER_DIRECT_TOOL_NAMES.has(toolUse?.name)) counts.set(toolUse.name, (counts.get(toolUse.name) || 0) + 1);
+  }
+  return counts;
+}
+
+function withinDirectCap(counts, toolName) {
+  return (counts.get(toolName) || 0) < DIRECT_CAP;
+}
+
+// update_customer's `notes` REPLACES crm_notes, which carries gate codes and
+// access details. A direct notes edit is only safe when there is nothing to
+// overwrite; over existing notes the card shows the replacement first
+// (owner-direct local test, 2026-10-02). Read at proposal time; the
+// task's customer-version pin refuses a commit if the row changes after.
+async function notesWouldOverwrite(toolName, input, dbh = null) {
+  if (toolName !== 'update_customer') return false;
+  const updates = input?.updates;
+  if (!updates || typeof updates !== 'object' || !Object.prototype.hasOwnProperty.call(updates, 'notes')) return false;
+  if (!input.customer_id) return true;
+  const knex = dbh || require('../../models/db');
+  // A failed read keeps the card: never a reason to skip it, and never an
+  // error that would strand the pending action this proposal just minted.
+  try {
+    const row = await knex('customers').where('id', input.customer_id).first('crm_notes');
+    return Boolean(row && String(row.crm_notes ?? '').trim());
+  } catch {
+    return true;
+  }
+}
+
 // The proposal-to-receipt step for one direct edit, kept out of the query
 // loop (Codex r2 P2 on runQuery's size). `commit` runs the one commit path;
 // `cancel` releases an approval that was never consumed, so no pending row
@@ -199,7 +239,7 @@ const OWNER_DIRECT_PROMPT = `
 
 OWNER MODE (overrides the sections above where they differ):
 You are talking to the owner. Do what they ask.
-- Internal edits execute the moment you call the tool — no confirmation card: ${[...OWNER_DIRECT_TOOL_NAMES].join(', ')}. (update_customer executes directly for name, phone, address, lead source and notes; an email, tier, rate, active or pipeline-stage change still shows a card. Lead edits execute directly when you pass lead_id alone — never lead_id with lead_name. A property add or edit executes directly unless it sets a label. assign_technician executes directly for one ungrouped stop when technician_name is the technician's full name; reschedule_appointment for one ungrouped stop; grouped visits, several stops and a partial name show a card.) When the result says executed: true, say what changed in one short line. Never tell the owner to confirm these.
+- Internal edits execute the moment you call the tool — no confirmation card: ${[...OWNER_DIRECT_TOOL_NAMES].join(', ')}. (update_customer executes directly for name, phone, address, lead source, and notes when the customer has none yet — notes REPLACE the existing notes, so over existing notes it shows a card: include the existing text if the owner asked to add a line; an email, tier, rate, active or pipeline-stage change still shows a card. Lead edits execute directly when you pass lead_id alone — never lead_id with lead_name. A property add or edit executes directly unless it sets a label. assign_technician executes directly for one ungrouped stop when technician_name is the technician's full name; reschedule_appointment for one ungrouped stop; grouped visits, several stops and a partial name show a card. A third edit with the same tool in one request shows a card: for three or more records use the bulk tool.) When the result says executed: true, say what changed in one short line. Never tell the owner to confirm these.
 - Customer messages, money and bulk changes still show a one-tap card. Prepare it and say "tap Confirm" — nothing more.
 - Pick the record yourself from fresh lookups and pass its id: "the Murphy lead that came in today" is the Murphy lead created today. Use the phone, email, date, status or page record the owner gave to choose. Only when two records fit equally, ask ONE short question that lists the choices in a few words each.
 - A second name in a request (a technician, a spouse, a neighbor) is context, not a second target.
@@ -221,4 +261,4 @@ You are talking to the owner. Do what they ask.
 - Never send the owner to another screen, never explain limitations, never apologize. If something truly cannot be done from here, say so in one sentence and offer the closest thing you can do.
 - Replies: 1–3 short lines. No preamble, no recap of the request, no "anything else?". Lists and numbers only when the owner asked for data.`;
 
-module.exports = { OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, ownerDirectLive, executesWithoutCard, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT };
+module.exports = { OWNER_DIRECT_TOOL_NAMES, DIRECT_CUSTOMER_FIELDS, DIRECT_CAP, ownerDirectLive, executesWithoutCard, countDirectCalls, withinDirectCap, notesWouldOverwrite, directModelResult, runDirectCommit, OWNER_DIRECT_PROMPT, OWNER_DIRECT_CARDED_PROMPT };
