@@ -43,6 +43,9 @@ postgres('permit detail collector on PostgreSQL', () => {
   let conn;
   const now = Date.now();
   const ago = (days) => new Date(now - days * DAY);
+  // CO dates derive from the same clock, so the read-before/after-CO
+  // relationships hold on any run date (fixed dates drift past ago(n)).
+  const dateAgo = (days) => new Date(now - days * DAY).toISOString().slice(0, 10);
 
   beforeAll(async () => {
     admin = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 1 } });
@@ -111,11 +114,11 @@ postgres('permit detail collector on PostgreSQL', () => {
     // Already read, no CO yet: done.
     await insert('BLD9802-0010', { detail_status: 'ok', detail_fetched_at: ago(60), conditioned_sqft: 2000 });
     // Read before the CO existed: CO appeared since -> first in line.
-    await insert('BLD9802-0011', { detail_status: 'ok', detail_fetched_at: ago(60), conditioned_sqft: 2000, co_date: '2026-09-01', issued_date: '2025-01-01' });
+    await insert('BLD9802-0011', { detail_status: 'ok', detail_fetched_at: ago(60), conditioned_sqft: 2000, co_date: dateAgo(30), issued_date: '2025-01-01' });
     // Read after seeing this CO date: done.
-    await insert('BLD9802-0012', { detail_status: 'ok', detail_fetched_at: ago(5), conditioned_sqft: 2000, co_date: '2026-09-01', detail_co_date: '2026-09-01' });
+    await insert('BLD9802-0012', { detail_status: 'ok', detail_fetched_at: ago(5), conditioned_sqft: 2000, co_date: dateAgo(30), detail_co_date: dateAgo(30) });
     // CO date moved since the last read: re-read.
-    await insert('BLD9802-0013', { detail_status: 'ok', detail_fetched_at: ago(5), conditioned_sqft: 2000, co_date: '2026-09-09', detail_co_date: '2026-09-01', issued_date: '2025-02-01' });
+    await insert('BLD9802-0013', { detail_status: 'ok', detail_fetched_at: ago(5), conditioned_sqft: 2000, co_date: dateAgo(22), detail_co_date: dateAgo(30), issued_date: '2025-02-01' });
     // Retry windows: error 1 d, not_found 14 d, no_fields 30 d.
     await insert('BLD9802-0020', { detail_status: 'error', detail_fetched_at: ago(0.1) });
     await insert('BLD9802-0021', { detail_status: 'error', detail_fetched_at: ago(2), issued_date: '2026-02-01' });
@@ -124,7 +127,7 @@ postgres('permit detail collector on PostgreSQL', () => {
     await insert('BLD9802-0024', { detail_status: 'no_fields', detail_fetched_at: ago(10) });
     await insert('BLD9802-0025', { detail_status: 'no_fields', detail_fetched_at: ago(40), issued_date: '2026-02-03' });
     // A no_fields row whose CO appeared since: read again regardless of the window.
-    await insert('BLD9802-0026', { detail_status: 'no_fields', detail_fetched_at: ago(2), co_date: '2026-09-05', issued_date: '2025-03-01' });
+    await insert('BLD9802-0026', { detail_status: 'no_fields', detail_fetched_at: ago(2), co_date: dateAgo(26), issued_date: '2025-03-01' });
 
     const rows = await selectCandidates(50, now);
     expect(rows.map((r) => r.permit_no)).toEqual([
@@ -141,7 +144,7 @@ postgres('permit detail collector on PostgreSQL', () => {
   });
 
   test('a failed CO re-read keeps the facts, backs off, then queues behind fresh work', async () => {
-    await insert('BLD9805-0001', { detail_status: 'ok', detail_fetched_at: ago(60), conditioned_sqft: 2000, co_date: '2026-09-01', issued_date: '2024-01-01' });
+    await insert('BLD9805-0001', { detail_status: 'ok', detail_fetched_at: ago(60), conditioned_sqft: 2000, co_date: dateAgo(30), issued_date: '2024-01-01' });
     await insert('BLD9805-0002', { issued_date: '2026-07-01' });
     let [first] = await selectCandidates(10, now);
     expect(first.permit_no).toBe('BLD9805-0001');
@@ -158,7 +161,7 @@ postgres('permit detail collector on PostgreSQL', () => {
   test('candidate order and cap', async () => {
     await insert('BLD9803-0001', { issued_date: '2026-05-01' });
     await insert('BLD9803-0002', { issued_date: '2026-07-01' });
-    await insert('BLD9803-0003', { detail_status: 'ok', detail_fetched_at: ago(60), conditioned_sqft: 2000, co_date: '2026-09-01', issued_date: '2024-01-01' });
+    await insert('BLD9803-0003', { detail_status: 'ok', detail_fetched_at: ago(60), conditioned_sqft: 2000, co_date: dateAgo(30), issued_date: '2024-01-01' });
     await insert('BLD9803-0004', { detail_status: 'error', detail_fetched_at: ago(3), issued_date: '2026-08-01' });
     expect((await selectCandidates(50, now)).map((r) => r.permit_no)).toEqual([
       'BLD9803-0003', // CO re-read first
