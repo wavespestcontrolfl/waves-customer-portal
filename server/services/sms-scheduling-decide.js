@@ -414,6 +414,7 @@ const AI_NUMBER_DIGITS = ['18559260203', '8559260203'];
 const SWEEP_MIN_AGE_MS = 2 * 60000;
 const SWEEP_LOOKBACK_MS = 48 * 3600000;
 const SWEEP_BATCH = 20;
+const SWEEP_MAX_PAGES = 10;
 
 /**
  * Replies the webhook could not decide because their offer was not recorded
@@ -424,44 +425,64 @@ const SWEEP_BATCH = 20;
  * through runShadowDecision, which is idempotent per text. Runs right after
  * the offer backfill on its cron. Never throws.
  */
-async function sweepUndecidedReplies({ now = new Date(), dbh = db, run = runShadowDecision } = {}) {
+async function sweepUndecidedReplies({ now = new Date(), dbh = db, run = runShadowDecision, batchSize = SWEEP_BATCH, maxPages = SWEEP_MAX_PAGES } = {}) {
   if (!decideLive()) return { scanned: 0, recorded: 0, reason: 'gate_off' };
-  let rows;
-  try {
-    const nowMs = new Date(now).getTime();
-    rows = await dbh('sms_log as sl')
-      .where('sl.direction', 'inbound')
-      .where('sl.status', 'received')
-      .where('sl.created_at', '>=', new Date(nowMs - SWEEP_LOOKBACK_MS))
-      .where('sl.created_at', '<=', new Date(nowMs - SWEEP_MIN_AGE_MS))
-      .whereRaw("sl.metadata->>'source' = 'location'")
-      .whereRaw(`REGEXP_REPLACE(COALESCE(sl.to_phone, ''), '[^0-9]', '', 'g') NOT IN (${AI_NUMBER_DIGITS.map(() => '?').join(', ')})`, AI_NUMBER_DIGITS)
-      .whereNotExists(function decided() {
-        this.select(dbh.raw('1')).from('sms_offer_decisions as d').whereRaw('d.inbound_sms_log_id = sl.id');
-      })
-      .whereExists(function offered() {
-        this.select(dbh.raw('1')).from('sms_offers as o')
-          .whereRaw("o.phone_last10 = RIGHT(REGEXP_REPLACE(COALESCE(sl.from_phone, ''), '[^0-9]', '', 'g'), 10)")
-          .whereRaw('o.sent_at <= sl.created_at AND o.expires_at > sl.created_at')
-          .whereRaw("(o.status = 'open' OR (o.status = 'superseded' AND o.closed_at > sl.created_at))");
-      })
-      .orderBy('sl.created_at', 'asc')
-      .limit(SWEEP_BATCH)
-      .select('sl.id', 'sl.from_phone', 'sl.message_body');
-  } catch (err) {
-    logger.warn(`[sms-scheduling-decide] reply sweep scan failed: ${String(err?.code || err?.name || 'error').slice(0, 40)}`);
-    return { scanned: 0, recorded: 0, errors: 1, reason: 'error' };
-  }
   const { isSmsReaction } = require('./sms-intent');
+  const nowMs = new Date(now).getTime();
+  let scanned = 0;
   let recorded = 0;
   let errors = 0;
-  for (const r of rows) {
-    if (!String(r.message_body || '').trim() || isSmsReaction(r.message_body)) continue;
-    const result = await run({ customer: null, inboundBody: r.message_body, inboundSmsLogId: r.id, fromPhone: r.from_phone, now, dbh });
-    if (result?.recorded) recorded += 1;
-    else if (result?.reason === 'error') errors += 1;
+  let decided = 0;
+  // Keyset pages over (created_at, id): a reply skipped here for good (a
+  // tapback the type column did not mark) stays undecided, so each run walks
+  // past it instead of re-reading the same oldest batch.
+  let cursor = null;
+  for (let page = 0; page < maxPages && decided < batchSize; page += 1) {
+    let rows;
+    try {
+      const query = dbh('sms_log as sl')
+        .where('sl.direction', 'inbound')
+        .where('sl.status', 'received')
+        // The webhook decides only texts no other handler consumed: a
+        // consumer retypes the row (reschedule_reply, lead_intake,
+        // sms_reaction, opt_out, ...), so only plain inbound texts qualify.
+        .where('sl.message_type', 'inbound')
+        .whereRaw("NULLIF(TRIM(sl.message_body), '') IS NOT NULL")
+        .where('sl.created_at', '>=', new Date(nowMs - SWEEP_LOOKBACK_MS))
+        .where('sl.created_at', '<=', new Date(nowMs - SWEEP_MIN_AGE_MS))
+        .whereRaw("sl.metadata->>'source' = 'location'")
+        .whereRaw(`REGEXP_REPLACE(COALESCE(sl.to_phone, ''), '[^0-9]', '', 'g') NOT IN (${AI_NUMBER_DIGITS.map(() => '?').join(', ')})`, AI_NUMBER_DIGITS)
+        .whereNotExists(function decidedAlready() {
+          this.select(dbh.raw('1')).from('sms_offer_decisions as d').whereRaw('d.inbound_sms_log_id = sl.id');
+        })
+        .whereExists(function offered() {
+          this.select(dbh.raw('1')).from('sms_offers as o')
+            .whereRaw("o.phone_last10 = RIGHT(REGEXP_REPLACE(COALESCE(sl.from_phone, ''), '[^0-9]', '', 'g'), 10)")
+            .whereRaw('o.sent_at <= sl.created_at AND o.expires_at > sl.created_at')
+            .whereRaw("(o.status = 'open' OR (o.status = 'superseded' AND o.closed_at > sl.created_at))");
+        });
+      if (cursor) query.whereRaw('(sl.created_at, sl.id) > (?, ?)', [cursor.created_at, cursor.id]);
+      rows = await query
+        .orderBy([{ column: 'sl.created_at', order: 'asc' }, { column: 'sl.id', order: 'asc' }])
+        .limit(batchSize)
+        .select('sl.id', 'sl.from_phone', 'sl.message_body', 'sl.created_at');
+    } catch (err) {
+      logger.warn(`[sms-scheduling-decide] reply sweep scan failed: ${String(err?.code || err?.name || 'error').slice(0, 40)}`);
+      return { scanned, recorded, errors: errors + 1, reason: 'error' };
+    }
+    scanned += rows.length;
+    for (const r of rows) {
+      if (decided >= batchSize) break;
+      if (isSmsReaction(r.message_body)) continue;
+      decided += 1;
+      const result = await run({ customer: null, inboundBody: r.message_body, inboundSmsLogId: r.id, fromPhone: r.from_phone, now, dbh });
+      if (result?.recorded) recorded += 1;
+      else if (result?.reason === 'error') errors += 1;
+    }
+    if (rows.length < batchSize) break;
+    cursor = rows[rows.length - 1];
   }
-  return { scanned: rows.length, recorded, errors };
+  return { scanned, recorded, errors };
 }
 
 module.exports = {

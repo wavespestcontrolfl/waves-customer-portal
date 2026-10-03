@@ -211,7 +211,7 @@ describe('sweepUndecidedReplies', () => {
     const dbh = jest.fn(() => builder);
     dbh.raw = jest.fn();
     const run = jest.fn(async ({ inboundSmsLogId }) => (inboundSmsLogId === 'in-3' ? { recorded: false, reason: 'error' } : { recorded: true }));
-    await expect(decide.sweepUndecidedReplies({ dbh, run, now: NOW })).resolves.toEqual({ scanned: 3, recorded: 1, errors: 1 });
+    await expect(decide.sweepUndecidedReplies({ dbh, run, now: NOW, maxPages: 1 })).resolves.toEqual({ scanned: 3, recorded: 1, errors: 1 });
     expect(run.mock.calls.map((c) => c[0].inboundSmsLogId)).toEqual(['in-1', 'in-3']);
     expect(run.mock.calls[0][0]).toMatchObject({ customer: null, inboundBody: 'Tuesday works', fromPhone: '+19415550100' });
   });

@@ -49,7 +49,7 @@ describeOrSkip('sms_offer_decisions on PostgreSQL', () => {
     const [inbound] = await trx('sms_log').insert({
       customer_id: customerId, direction: 'inbound', from_phone: PHONE, to_phone: '+19415550199',
       message_body: 'Tuesday works', status: 'received', created_at: new Date('2040-03-01T14:59:00Z'),
-      metadata: JSON.stringify({ source: 'location' }),
+      message_type: 'inbound', metadata: JSON.stringify({ source: 'location' }),
     }).returning('id');
     return { customerId, offerId: offer.id || offer, inboundId: inbound.id || inbound };
   }
@@ -118,6 +118,18 @@ describeOrSkip('sms_offer_decisions on PostgreSQL', () => {
     expect(first).toMatchObject({ recorded: 1, errors: 0 });
     expect(await trx('sms_offer_decisions').where({ inbound_sms_log_id: inboundId }).count('* as n').first()).toMatchObject({ n: '1' });
     expect(await decide.sweepUndecidedReplies({ now: later, dbh: trx, run })).toMatchObject({ scanned: 0 });
+  }));
+
+  test('the sweep skips a reply another handler consumed, and pages past tapbacks to the real reply', () => inTrx(async (trx) => {
+    const { customerId, inboundId } = await seed(trx);
+    // A reminder "1" the reply-1/2 handler took, and two loud tapbacks, all before the real reply.
+    const at = (m) => new Date(Date.parse('2040-03-01T14:50:00Z') + m * 60000);
+    const extra = (body, type, m) => ({ customer_id: customerId, direction: 'inbound', from_phone: PHONE, to_phone: '+19415550199',
+      message_body: body, status: 'received', message_type: type, created_at: at(m), metadata: JSON.stringify({ source: 'location' }) });
+    await trx('sms_log').insert([extra('1', 'reschedule_reply', 0), extra('Liked \u201cWe can do Tuesday\u201d', 'inbound', 1), extra('Loved \u201cok\u201d', 'inbound', 2)]);
+    const run = jest.fn(async () => ({ recorded: true }));
+    await decide.sweepUndecidedReplies({ now: new Date('2040-03-01T15:10:00Z'), dbh: trx, run, batchSize: 1 });
+    expect(run.mock.calls.map((c) => c[0].inboundSmsLogId)).toEqual([inboundId]);
   }));
 
   test('a failed model call records an error row and moves nothing', () => inTrx(async (trx) => {
