@@ -568,6 +568,17 @@ describe('moveVisitAsUnit', () => {
     expect(plain.reschedule.mock.calls.find((c) => c[0] === 'a')[5].beforeMove).toBeUndefined();
   });
 
+  test('a technician-only change (same date and window) still runs every member through the rebooker, and keepStatus rides to each one', async () => {
+    db.__script = script({ members: [member('a', { status: 'pending' }), member('b')], landed: [member('a', { technician_id: 't9' }), member('b', { technician_id: 't9' })] });
+    const rebooker = fakeRebooker();
+    await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-08-30', options: { technicianId: 't9', keepStatus: true, adminWindowRules: false } });
+    expect(rebooker.reschedule).toHaveBeenCalledTimes(2);
+    for (const call of rebooker.reschedule.mock.calls) {
+      expect(call[1]).toBe('2026-08-30');
+      expect(call[5]).toMatchObject({ keepStatus: true, adminWindowRules: false });
+    }
+  });
+
   test('a reassignment detaches a late joiner still on another technician instead of keeping a split-tech visit', async () => {
     db.__script = script({ members: [member('a'), member('b')], landed: [
       { id: 'a', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't2' },

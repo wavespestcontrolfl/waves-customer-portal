@@ -178,15 +178,17 @@ it('re-entering the stored time (HH:MM:SS vs HH:MM) is not an edit', () => {
   expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument();
 });
 
-// ---- a stop shared by two services (owner ruling 2026-10-03) ----
-// Together: the other changes are saved first (on the stop's current slot),
-// the whole-stop move runs last and sends the one customer text.
-const combo = { ...service, visit: { id: 'fixture-stop', serviceCount: 2, liveCount: 2, memberIds: ['fixture-visit', 'fixture-lawn'], serviceTypes: ['Lawn Care', 'Pest Control'] } };
+// ---- a stop shared by two services (owner rulings 2026-10-03) ----
+// One request: the save carries the choice (`comboMove`) and the server does
+// the edit, the whole-stop move and the text.
+const combo = { ...service, visit: { id: 'fixture-stop', serviceCount: 2, liveCount: 2, memberIds: ['fixture-visit', 'fixture-lawn'], liveMemberIds: ['fixture-visit', 'fixture-lawn'], serviceTypes: ['Lawn Care', 'Pest Control'] } };
 const writeUrls = () => writes().map(([url, options]) => `${options.method} ${String(url).replace(/^.*\/api/, '')}`);
 const okJson = (url) => ({ ok: true, json: async () => (String(url).endsWith('/admin/discounts') ? [] : {}) });
 const isPut = (url, options) => String(url).includes('/update-details') && !String(url).includes('/preview') && options?.method === 'PUT';
 const PUT = 'PUT /admin/schedule/fixture-visit/update-details';
-const MOVE = 'POST /admin/dispatch/fixture-visit/reschedule';
+// The PUT answers `answer`; everything else answers as usual.
+const putAnswers = (answer) => fetch.mockImplementation(async (url, options) => (isPut(url, options) ? answer(url, options) : okJson(url)));
+const saved = (body) => ({ ok: true, json: async () => ({ success: true, ...body }) });
 const openModal = (svc = combo, technicians = []) => {
   if (!fetch.getMockImplementation()) fetch.mockImplementation(async (url) => okJson(url));
   render(<EditServiceModal service={svc} technicians={technicians} onClose={vi.fn()} onSaved={vi.fn()} />);
@@ -194,6 +196,8 @@ const openModal = (svc = combo, technicians = []) => {
 };
 const openCombo = () => openModal();
 const setDate = (dialog, value) => fireEvent.change(dialog.querySelector('input[type="date"]'), { target: { value } });
+const techSelectOf = (dialog) => [...dialog.querySelectorAll('select')].find((el) => [...el.options].some((o) => o.value === 'tech-2'));
+const TECHS = [{ id: 'tech-1', name: 'Tech One' }, { id: 'tech-2', name: 'Tech Two' }];
 // Save enables once the debounced money preview lands (see the save test above).
 const clickSave = async () => {
   const save = screen.getByRole('button', { name: 'Save', exact: true });
@@ -202,100 +206,138 @@ const clickSave = async () => {
 };
 const body = (index) => JSON.parse(writes()[index][1].body);
 
-it('a combo edited without touching its date or time saves as one ordinary edit', async () => {
+it('a combo edited without touching its date, time or technician saves as one ordinary edit', async () => {
   openCombo();
   expect(screen.queryByTestId('combo-move-choice')).not.toBeInTheDocument();
   await clickSave();
   await waitFor(() => expect(writes()).toHaveLength(1));
   expect(writeUrls()).toEqual([PUT]);
+  expect(body(0)).not.toHaveProperty('comboMove');
 });
 
-it('moving a combo saves the other changes on the current slot first, then moves the whole stop', async () => {
+it('moving a combo together is ONE request that carries the choice and the new slot', async () => {
   const dialog = openCombo();
   setDate(dialog, '2035-01-03');
   const choice = screen.getByTestId('combo-move-choice');
   expect(choice).toHaveTextContent('This stop has 2 services (Lawn Care, Pest Control).');
   expect(within(choice).getByLabelText('Move all of them together')).toBeChecked();
   await clickSave();
-  await waitFor(() => expect(writes()).toHaveLength(2));
-  expect(writeUrls()).toEqual([PUT, MOVE]);
-  // The edit carries no date, window or technician at all: it moves
-  // nothing, reassigns nothing, texts nobody and acks nothing.
-  for (const key of ['scheduledDate', 'windowStart', 'windowEnd', 'technicianId']) expect(body(0)).not.toHaveProperty(key);
-  expect(body(0).notifyCustomer).toBeUndefined();
+  await waitFor(() => expect(writes()).toHaveLength(1));
+  expect(writeUrls()).toEqual([PUT]);
+  expect(body(0)).toMatchObject({ comboMove: 'together', scheduledDate: '2035-01-03', windowStart: '08:00', windowEnd: '09:00' });
+  // The stop this form showed rides along, so the server can refuse a changed one.
+  expect(body(0).comboVisit).toEqual({ id: 'fixture-stop', memberIds: ['fixture-visit', 'fixture-lawn'], liveCount: 2, liveMemberIds: ['fixture-visit', 'fixture-lawn'] });
+  // The whole-stop move owes no series ack.
   expect(body(0).seriesAck).toBeUndefined();
-  expect(body(1)).toMatchObject({
-    newDate: '2035-01-03', newWindow: { start: '08:00', end: '09:00' }, deriveWindowFromCurrentVisit: true, notifyCustomer: false,
-    expectVisit: { id: 'fixture-stop', memberIds: ['fixture-visit', 'fixture-lawn'], liveCount: 2 },
-  });
-  expect(body(1)).not.toHaveProperty('technicianId');
 });
 
-it('choosing Separate splits this service off, then saves it on its own', async () => {
+it('choosing Separate is the same one request with that choice', async () => {
   const dialog = openCombo();
   setDate(dialog, '2035-01-03');
   fireEvent.click(screen.getByLabelText('Separate: move only this service'));
   await clickSave();
-  await waitFor(() => expect(writes()).toHaveLength(2));
-  expect(writeUrls()).toEqual(['POST /admin/visits/fixture-stop/split', PUT]);
-  expect(body(0)).toEqual({ serviceId: 'fixture-visit' });
-  expect(body(1).scheduledDate).toBe('2035-01-03');
+  await waitFor(() => expect(writes()).toHaveLength(1));
+  expect(body(0)).toMatchObject({ comboMove: 'separate', scheduledDate: '2035-01-03' });
 });
 
-it('a failed edit moves nothing; a refused move says the other changes were saved, and the retry posts only the move', async () => {
-  let putFails = true;
-  let moveFails = true;
-  fetch.mockImplementation(async (url, options) => {
-    if (isPut(url, options) && putFails) return { ok: false, status: 500, json: async () => ({ error: 'boom' }) };
-    if (String(url).includes('/reschedule') && moveFails) return { ok: false, status: 409, json: async () => ({ error: 'That window is past the end of the workday' }) };
-    return okJson(url);
-  });
+it('a technician-only change on a combo asks too (owner ruling), and the request carries the choice and the technician', async () => {
+  const dialog = openModal({ ...combo, technicianId: 'tech-1' }, TECHS);
+  expect(screen.queryByTestId('combo-move-choice')).not.toBeInTheDocument();
+  fireEvent.change(techSelectOf(dialog), { target: { value: 'tech-2' } });
+  expect(within(screen.getByTestId('combo-move-choice')).getByLabelText('Move all of them together')).toBeChecked();
+  await clickSave();
+  await waitFor(() => expect(writes()).toHaveLength(1));
+  expect(body(0)).toMatchObject({ comboMove: 'together', technicianId: 'tech-2', scheduledDate: '2035-01-02' });
+});
+
+it('the text choice rides the same request; warnings and a skipped text are shown with the saved notice', async () => {
+  putAnswers(() => saved({ comboMove: { moved: true, warnings: ['Fixture overlap warning.'], notificationSent: false, notificationSkipped: 'already_at_target' } }));
+  const dialog = openCombo();
+  setDate(dialog, '2035-01-03');
+  const notify = [...dialog.querySelectorAll('select')].find((el) => [...el.options].some((o) => o.value === 'sms'));
+  fireEvent.change(notify, { target: { value: 'sms' } });
+  await clickSave();
+  await waitFor(() => expect(saveNotice.shown).toHaveLength(1));
+  expect(body(0).notifyCustomer).toBe(true);
+  expect(saveNotice.shown[0]).toContain('Fixture overlap warning.');
+  expect(saveNotice.shown[0]).toContain('The stop was already at this time, so no new text was sent.');
+});
+
+it('a text that could not be sent is said so', async () => {
+  putAnswers(() => saved({ comboMove: { moved: true, notificationSent: false, notificationError: 'the number is opted out' } }));
+  const dialog = openCombo();
+  setDate(dialog, '2035-01-03');
+  const notify = [...dialog.querySelectorAll('select')].find((el) => [...el.options].some((o) => o.value === 'sms'));
+  fireEvent.change(notify, { target: { value: 'sms' } });
+  await clickSave();
+  await waitFor(() => expect(saveNotice.shown).toHaveLength(1));
+  expect(saveNotice.shown[0]).toContain('The customer was not texted about the move: the number is opted out.');
+});
+
+it('a move the server refused after saving the rest: the save counts (the details are saved) and the notice says the stop did not move', async () => {
+  putAnswers(() => saved({ comboMove: { moved: false, error: 'That window is past the end of the workday.', code: 'INVALID_APPOINTMENT_WINDOW' } }));
+  const onSaved = vi.fn();
+  render(<EditServiceModal service={combo} technicians={[]} onClose={vi.fn()} onSaved={onSaved} />);
+  setDate(screen.getByRole('dialog', { name: 'Edit appointment' }), '2035-01-03');
+  await clickSave();
+  await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
+  expect(saveNotice.shown).toEqual(['The other changes were saved, but the stop was not moved: That window is past the end of the workday. Reopen the appointment to move it.']);
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+});
+
+it('a partly finished move and a move that did not confirm are each reported as such, never as "not moved"', async () => {
+  let answer = { moved: false, needsAttention: { code: 'VISIT_MOVE_INCOMPLETE', message: 'Only part of this stop finished moving: fixture repair text.' } };
+  putAnswers(() => saved({ comboMove: answer }));
+  const first = openCombo();
+  setDate(first, '2035-01-03');
+  await clickSave();
+  await waitFor(() => expect(saveNotice.shown).toHaveLength(1));
+  expect(saveNotice.shown[0]).toBe('The other changes were saved. Only part of this stop finished moving: fixture repair text.');
+  cleanup();
+  answer = { moved: null, error: 'connection reset' };
+  const second = openCombo();
+  setDate(second, '2035-01-03');
+  await clickSave();
+  await waitFor(() => expect(saveNotice.shown).toHaveLength(2));
+  expect(saveNotice.shown[1]).toContain('The move did not confirm, so the stop may or may not have moved: check the schedule.');
+  expect(saveNotice.shown[1]).not.toContain('was not moved');
+});
+
+it('a refusal before anything was written is shown as the server said it', async () => {
+  putAnswers(() => ({ ok: false, status: 409, json: async () => ({ error: 'This stop changed since it was opened. Nothing was changed.', code: 'VISIT_MEMBERSHIP_CHANGED' }) }));
   const dialog = openCombo();
   setDate(dialog, '2035-01-03');
   await clickSave();
-  expect(await screen.findByRole('alert')).toHaveTextContent('Save failed: boom');
-  expect(screen.getByRole('alert')).not.toHaveTextContent('other changes were saved');
-  expect(writeUrls()).toEqual([PUT]);
-  putFails = false;
-  await clickSave();
-  await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('The other changes were saved, but the stop was not moved. Save failed: That window is past the end of the workday'));
-  expect(writeUrls()).toEqual([PUT, PUT, MOVE]);
-  // The operator picks another day; the saved details are not posted again.
-  moveFails = false;
-  setDate(dialog, '2035-01-04');
-  await clickSave();
-  await waitFor(() => expect(writes()).toHaveLength(4));
-  expect(writeUrls()[3]).toBe(MOVE);
-  expect(body(3).newDate).toBe('2035-01-04');
+  const alert = await screen.findByRole('alert');
+  expect(alert).toHaveTextContent('Save failed: This stop changed since it was opened. Nothing was changed.');
+  expect(alert).not.toHaveTextContent('other changes were saved');
 });
 
-it('after a refused move, a changed detail is saved again before the move', async () => {
-  let moveFails = true;
-  fetch.mockImplementation(async (url) => (String(url).includes('/reschedule') && moveFails
-    ? { ok: false, status: 409, json: async () => ({ error: 'refused' }) } : okJson(url)));
+it('a length change with "together" is refused before the request; Separate may change it', async () => {
   const dialog = openCombo();
+  const [, end] = dialog.querySelectorAll('input[type="time"]');
   setDate(dialog, '2035-01-03');
+  fireEvent.change(end, { target: { value: '10:00' } });
   await clickSave();
-  await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('The other changes were saved'));
-  moveFails = false;
-  fireEvent.change(dialog.querySelector('textarea'), { target: { value: 'A new note' } });
+  expect(await screen.findByRole('alert')).toHaveTextContent("Moving the whole stop keeps each service's length.");
+  expect(writes()).toHaveLength(0);
+  fireEvent.click(screen.getByLabelText('Separate: move only this service'));
   await clickSave();
-  await waitFor(() => expect(writes()).toHaveLength(4));
-  expect(writeUrls()).toEqual([PUT, MOVE, PUT, MOVE]);
+  await waitFor(() => expect(writes()).toHaveLength(1));
+  expect(body(0)).toMatchObject({ comboMove: 'separate', windowEnd: '10:00' });
 });
 
-it('a partly finished whole-stop move is reported as such, never as "not moved"', async () => {
-  fetch.mockImplementation(async (url) => (String(url).includes('/reschedule')
-    ? { ok: true, json: async () => ({ needsAttention: { code: 'VISIT_MOVE_INCOMPLETE', message: 'Only part of this stop finished moving: fixture repair text.' } }) }
-    : okJson(url)));
-  const dialog = openCombo();
-  setDate(dialog, '2035-01-03');
+it('a combo with no set time can be given one: a filled start and end is a move, not a length change', async () => {
+  const dialog = openModal({ ...combo, windowStart: '', windowEnd: '' });
+  const [start, end] = dialog.querySelectorAll('input[type="time"]');
+  fireEvent.change(start, { target: { value: '10:00' } });
+  fireEvent.change(end, { target: { value: '11:00' } });
   await clickSave();
-  expect(await screen.findByRole('alert')).toHaveTextContent('The other changes were saved. Save failed: Only part of this stop finished moving: fixture repair text.');
-  expect(screen.getByRole('alert')).not.toHaveTextContent('the stop was not moved');
+  await waitFor(() => expect(writes()).toHaveLength(1));
+  expect(body(0)).toMatchObject({ comboMove: 'together', windowStart: '10:00', windowEnd: '11:00' });
 });
 
-it('a recurring combo moved together moves this visit only: no "later visits" line, no series ack, no recurrence change', async () => {
+it('a recurring combo moved together moves this visit only: no "later visits" line, no series ack', async () => {
   const preview = {
     enabled: true, collective: true, deltaDays: 1, movableCount: 2, occurrenceIds: ['occ-1', 'occ-2'],
     skippedCount: 0, exceptionCount: 0, conflictCount: 0, firstAffectedDate: '2035-01-16', lastAffectedDate: '2035-01-30',
@@ -313,90 +355,22 @@ it('a recurring combo moved together moves this visit only: no "later visits" li
   fireEvent.click(screen.getByLabelText('Move all of them together'));
   expect(screen.queryByTestId('series-move-notice')).not.toBeInTheDocument();
   await clickSave();
-  await waitFor(() => expect(writes()).toHaveLength(2));
-  for (const [, options] of writes()) {
-    const sent = JSON.parse(options.body);
-    expect(sent.seriesAck).toBeUndefined();
-    expect(sent.seriesAckIds).toBeUndefined();
-  }
-  // The edit runs before the move and sends no date: the plan stays
-  // anchored to the stored one.
-  expect(body(0)).not.toHaveProperty('scheduledDate');
+  await waitFor(() => expect(writes()).toHaveLength(1));
+  expect(body(0).seriesAck).toBeUndefined();
+  expect(body(0).seriesAckIds).toBeUndefined();
 });
 
-it('a separation that committed is disclosed when the edit after it fails, and a retry never splits twice', async () => {
-  fetch.mockImplementation(async (url, options) => (isPut(url, options)
-    ? { ok: false, status: 500, json: async () => ({ error: 'boom' }) } : okJson(url)));
-  const dialog = openCombo();
-  setDate(dialog, '2035-01-03');
-  fireEvent.click(screen.getByLabelText('Separate: move only this service'));
-  await clickSave();
-  expect(await screen.findByRole('alert')).toHaveTextContent('This service was separated from the stop, but the other changes were not saved. Save failed: boom');
-  await clickSave();
-  await waitFor(() => expect(writes()).toHaveLength(3));
-  expect(writeUrls().filter((u) => u.includes('/split'))).toHaveLength(1);
-});
-
-it('the move choice is frozen while a save is in flight', async () => {
+it('the whole form is frozen while a save is in flight', async () => {
   let release;
-  fetch.mockImplementation(async (url, options) => (isPut(url, options)
-    ? new Promise((resolve) => { release = () => resolve({ ok: true, json: async () => ({}) }); })
-    : okJson(url)));
+  putAnswers(() => new Promise((resolve) => { release = () => resolve(saved({})); }));
   const dialog = openCombo();
+  expect(screen.getByTestId('edit-appointment-body')).not.toHaveAttribute('inert');
   setDate(dialog, '2035-01-03');
   await clickSave();
   await waitFor(() => expect(writes()).toHaveLength(1));
   expect(screen.getByLabelText('Separate: move only this service')).toBeDisabled();
-  expect(screen.getByLabelText('Move all of them together')).toBeDisabled();
-  // The whole form is frozen for the save, not only the choice.
   expect(screen.getByTestId('edit-appointment-body')).toHaveAttribute('inert');
   await act(async () => release());
-  await waitFor(() => expect(writes()).toHaveLength(2));
-  expect(writeUrls()).toEqual([PUT, MOVE]);
-});
-
-it('a field edited while the details are saving stops the save before the stop is moved to a stale time', async () => {
-  let release;
-  fetch.mockImplementation(async (url, options) => (isPut(url, options)
-    ? new Promise((resolve) => { release = () => resolve({ ok: true, json: async () => ({}) }); })
-    : okJson(url)));
-  const dialog = openCombo();
-  setDate(dialog, '2035-01-03');
-  await clickSave();
-  await waitFor(() => expect(writes()).toHaveLength(1));
-  setDate(dialog, '2035-01-04');
-  await act(async () => release());
-  expect(await screen.findByRole('alert')).toHaveTextContent('The other changes were saved, but the stop was not moved. Save failed: The form changed while that was saving. Review it and save again.');
-  expect(writeUrls()).toEqual([PUT]);
-});
-
-it('a technician change rides the whole-stop move; the edit keeps the technician the stop is on', async () => {
-  const dialog = openModal({ ...combo, technicianId: 'tech-1' }, [{ id: 'tech-1', name: 'Tech One' }, { id: 'tech-2', name: 'Tech Two' }]);
-  setDate(dialog, '2035-01-03');
-  const techSelect = [...dialog.querySelectorAll('select')].find((el) => [...el.options].some((o) => o.value === 'tech-2'));
-  fireEvent.change(techSelect, { target: { value: 'tech-2' } });
-  await clickSave();
-  await waitFor(() => expect(writes()).toHaveLength(2));
-  expect(body(0)).not.toHaveProperty('technicianId');
-  expect(body(0).assignmentScope).toBeUndefined();
-  expect(body(1).technicianId).toBe('tech-2');
-});
-
-it('the customer text is asked of the move, never of the edit; a repeated move that finds the stop already there says no new text went out', async () => {
-  fetch.mockImplementation(async (url) => (String(url).includes('/reschedule')
-    ? { ok: true, json: async () => ({ notificationSent: false, notificationSkipped: 'already_at_target', warnings: ['Fixture overlap warning.'] }) }
-    : okJson(url)));
-  const dialog = openCombo();
-  setDate(dialog, '2035-01-03');
-  const notify = [...dialog.querySelectorAll('select')].find((el) => [...el.options].some((o) => o.value === 'sms'));
-  fireEvent.change(notify, { target: { value: 'sms' } });
-  await clickSave();
-  await waitFor(() => expect(writes()).toHaveLength(2));
-  expect(body(0).notifyCustomer).toBeUndefined();
-  expect(body(1).notifyCustomer).toBe(true);
-  await waitFor(() => expect(saveNotice.shown).toHaveLength(1));
-  expect(saveNotice.shown[0]).toContain('Fixture overlap warning.');
-  expect(saveNotice.shown[0]).toContain('The stop was already at this time, so no new text was sent.');
 });
 
 it('the stop is read live on open: a row opened without a visit summary (Week, List, dispatch board) still gets the choice', async () => {
@@ -416,71 +390,16 @@ it('the live read wins over a stale summary: a stop that is no longer shared is 
   await waitFor(() => expect(screen.queryByTestId('combo-move-choice')).not.toBeInTheDocument());
   await clickSave();
   await waitFor(() => expect(writes()).toHaveLength(1));
-  expect(writeUrls()).toEqual([PUT]);
+  expect(body(0)).not.toHaveProperty('comboMove');
 });
 
-it('a stop with one live service left (the other cancelled) is an ordinary visit: no choice, one ordinary save', async () => {
+it('a stop with one live service left (the other cancelled) is an ordinary visit: no choice', async () => {
   const dialog = openModal({ ...combo, visit: { ...combo.visit, liveCount: 1 } });
   setDate(dialog, '2035-01-03');
   expect(screen.queryByTestId('combo-move-choice')).not.toBeInTheDocument();
   await clickSave();
   await waitFor(() => expect(writes()).toHaveLength(1));
-  expect(writeUrls()).toEqual([PUT]);
-});
-
-// ---- GitHub Codex round 4 on #5759 ----
-it('the form is not frozen when no save is in flight', () => {
-  openCombo();
-  expect(screen.getByTestId('edit-appointment-body')).not.toHaveAttribute('inert');
-});
-
-it('an edit that still lands while the stop is moving is disclosed, never dropped silently', async () => {
-  let release;
-  fetch.mockImplementation(async (url) => (String(url).includes('/reschedule')
-    ? new Promise((resolve) => { release = () => resolve({ ok: true, json: async () => ({}) }); })
-    : okJson(url)));
-  const dialog = openCombo();
-  setDate(dialog, '2035-01-03');
-  await clickSave();
-  await waitFor(() => expect(writes()).toHaveLength(2));
-  fireEvent.change(dialog.querySelector('textarea'), { target: { value: 'Typed during the move' } });
-  await act(async () => release());
-  await waitFor(() => expect(saveNotice.shown).toHaveLength(1));
-  expect(saveNotice.shown[0]).toContain('The form was changed while the stop was moving. Those last changes were not saved');
-});
-
-it('a split whose response was lost is not repeated into a dead end: the stop is re-read and the edit is saved', async () => {
-  let summaryReads = 0;
-  fetch.mockImplementation(async (url) => {
-    if (String(url).includes('/visit-summary')) {
-      summaryReads += 1;
-      // On open the stop is shared; after the lost split it no longer is.
-      return { ok: true, json: async () => ({ visit: summaryReads === 1 ? combo.visit : null }) };
-    }
-    if (String(url).includes('/split')) return { ok: false, status: 404, json: async () => ({ error: 'row is not a member of this visit' }) };
-    return okJson(url);
-  });
-  const dialog = openCombo();
-  setDate(dialog, '2035-01-03');
-  fireEvent.click(await screen.findByLabelText('Separate: move only this service'));
-  await clickSave();
-  await waitFor(() => expect(writes()).toHaveLength(2));
-  expect(writeUrls()).toEqual(['POST /admin/visits/fixture-stop/split', PUT]);
-  expect(body(1).scheduledDate).toBe('2035-01-03');
-});
-
-it('a split refused while the service is still on the stop saves nothing', async () => {
-  fetch.mockImplementation(async (url) => {
-    if (String(url).includes('/visit-summary')) return { ok: true, json: async () => ({ visit: combo.visit }) };
-    if (String(url).includes('/split')) return { ok: false, status: 409, json: async () => ({ error: 'This visit is frozen' }) };
-    return okJson(url);
-  });
-  const dialog = openCombo();
-  setDate(dialog, '2035-01-03');
-  fireEvent.click(await screen.findByLabelText('Separate: move only this service'));
-  await clickSave();
-  expect(await screen.findByRole('alert')).toHaveTextContent('Save failed: This visit is frozen');
-  expect(writeUrls()).toEqual(['POST /admin/visits/fixture-stop/split']);
+  expect(body(0)).not.toHaveProperty('comboMove');
 });
 
 it('a shared stop the form did not know about: the server refusal re-reads the stop and shows the choice', async () => {
@@ -505,34 +424,27 @@ it('a shared stop the form did not know about: the server refusal re-reads the s
   expect(screen.getByTestId('combo-move-choice')).toBeInTheDocument();
   refuse = false;
   await clickSave();
-  await waitFor(() => expect(writes()).toHaveLength(3));
-  expect(writeUrls()).toEqual([PUT, PUT, MOVE]);
+  await waitFor(() => expect(writes()).toHaveLength(2));
+  expect(body(0)).not.toHaveProperty('comboMove');
+  expect(body(1).comboMove).toBe('together');
 });
 
-it('a move that did not confirm (lost response or server error) is never reported as "not moved"', async () => {
-  fetch.mockImplementation(async (url) => {
-    if (String(url).includes('/reschedule')) throw new TypeError('Failed to fetch');
-    return okJson(url);
-  });
+it('a shared-stop save whose answer never arrives is not called a plain failed save', async () => {
+  putAnswers(() => { throw new TypeError('Failed to fetch'); });
   const dialog = openCombo();
   setDate(dialog, '2035-01-03');
   await clickSave();
   const alert = await screen.findByRole('alert');
-  expect(alert).toHaveTextContent('The other changes were saved. The move did not confirm, so the stop may or may not have moved: check the schedule');
-  expect(alert).not.toHaveTextContent('but the stop was not moved');
+  expect(alert).toHaveTextContent('The save did not confirm, so it may or may not have gone through, including the move and any customer text. Close this and check the schedule before you save again.');
+  expect(alert).not.toHaveTextContent('Save failed');
 });
 
-// ---- GitHub Codex round 6 on #5759 (owner 2026-10-03: merge with known limits) ----
-it('a combo with no set time can be given one: a filled start and end is a move, and only the start is sent', async () => {
-  const dialog = openModal({ ...combo, windowStart: '', windowEnd: '', visit: { ...combo.visit, liveMemberIds: ['fixture-visit', 'fixture-lawn'] } });
-  const [start, end] = dialog.querySelectorAll('input[type="time"]');
-  fireEvent.change(start, { target: { value: '10:00' } });
-  fireEvent.change(end, { target: { value: '11:00' } });
-  expect(screen.getByTestId('combo-move-choice')).toBeInTheDocument();
-  await clickSave();
-  await waitFor(() => expect(writes()).toHaveLength(2));
-  expect(writeUrls()).toEqual([PUT, MOVE]);
-  expect(body(1).newWindow).toEqual({ start: '10:00' });
-  expect(body(1).expectVisit.liveMemberIds).toEqual(['fixture-visit', 'fixture-lawn']);
+it('the money preview is told when the whole stop moves together, so it plans on the same date as the save', async () => {
+  const dialog = openCombo();
+  const previews = () => fetch.mock.calls.filter(([url]) => String(url).includes('/update-details/preview')).map(([, options]) => JSON.parse(options.body));
+  setDate(dialog, '2035-01-03');
+  await waitFor(() => expect(previews().some((b) => b.comboMove === 'together' && b.scheduledDate === '2035-01-03')).toBe(true), { timeout: 3000 });
+  fireEvent.click(screen.getByLabelText('Separate: move only this service'));
+  await waitFor(() => expect(previews().at(-1)).not.toHaveProperty('comboMove'), { timeout: 3000 });
 });
 
