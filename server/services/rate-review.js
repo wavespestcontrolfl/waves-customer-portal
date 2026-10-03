@@ -1269,7 +1269,9 @@ const PLAN_ROW_SQL = `((s.is_recurring = true OR (s.is_recurring IS NULL AND s.r
 // 25 no_anniversary lines although the work was done. A customer's first
 // paid application dates the line whether or not the booking was flagged
 // recurring; revenue and $/hr keep PLAN_ROW_SQL (loadCompletedVisitRows).
-const DATING_ROW_SQL = `(NOT (s.is_recurring = false AND s.recurring_parent_id IS NOT NULL)
+// IS FALSE, not = false: a legacy child (is_recurring NULL + parent) must
+// stay in — `NOT (NULL AND true)` is NULL and WHERE would drop it.
+const DATING_ROW_SQL = `(NOT (s.is_recurring IS FALSE AND s.recurring_parent_id IS NOT NULL)
   AND COALESCE(s.is_callback, false) = false AND COALESCE(s.followup_included, false) = false)`;
 // Live upcoming rows = the same statuses the plan-count reconciler counts
 // (isCountingSourceStatus: NULL or COUNTING_SOURCE_STATUSES) — a

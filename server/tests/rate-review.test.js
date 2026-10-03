@@ -1188,7 +1188,9 @@ describe('engine replay guards', () => {
     expect(bodyOf('loadCompletedVisitRows')).toMatch(/\$\{PLAN_ROW_SQL\}/);
     expect(bodyOf('loadFirstCompletedVisits')).toMatch(/\$\{DATING_ROW_SQL\}/);
     expect(bodyOf('loadFirstCompletedVisits')).not.toMatch(/\$\{PLAN_ROW_SQL\}/);
-    expect(P.DATING_ROW_SQL).toMatch(/NOT \(s\.is_recurring = false AND s\.recurring_parent_id IS NOT NULL\)/);
+    // null-safe booster test: a legacy child (is_recurring NULL + parent) must not fall out of the NOT (...)
+    expect(P.DATING_ROW_SQL).toMatch(/NOT \(s\.is_recurring IS FALSE AND s\.recurring_parent_id IS NOT NULL\)/);
+    expect(P.DATING_ROW_SQL).not.toMatch(/is_recurring = false/);
     expect(P.DATING_ROW_SQL).not.toMatch(/s\.is_recurring = true/);
     expect(P.DATING_ROW_SQL).toMatch(/COALESCE\(s\.is_callback, false\) = false/);
     expect(P.DATING_ROW_SQL).toMatch(/COALESCE\(s\.followup_included, false\) = false/);
