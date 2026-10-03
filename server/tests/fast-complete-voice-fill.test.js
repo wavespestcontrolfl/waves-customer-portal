@@ -1695,3 +1695,12 @@ test('"Taurus isn\'t the same as last time" is no same-as-last flag', () => {
   const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard: 'Taurus' }] }), ctx, t);
   expect(out.products[0].sameAsLast).toBe(false);
 });
+
+test('a product\'s own catalog method in its clause is a competing method too', () => {
+  const withDrench = { ...ctx, products: ctx.products.map((p) => (p.id === 'p-taurus' ? { ...p, catalogMethod: 'soil_drench' } : p)) };
+  withDrench.productMethods = [...ctx.productMethods, 'soil_drench'];
+  const t = 'Drenched the soil with Taurus and sprayed Talstar around the perimeter.';
+  const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: false, method: 'perimeter_spray', heard: 'Drenched the soil with Taurus' }] }), withDrench, t);
+  expect(out.products[0].method).toBe('');
+  expect(out.unclear.map((u) => u.reason)).toContain('method_not_heard');
+});

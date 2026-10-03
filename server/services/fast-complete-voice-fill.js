@@ -1078,7 +1078,9 @@ function productMethod(raw, product, heard, transcript, ctx, world, unclear) {
   // no Check. A method with no word for it anywhere near is a Check.
   // ...unless its own clause names a DIFFERENT way ("Spot treated with Taurus and
   // sprayed Talstar around the perimeter"): that spoken method was dropped, so Check.
-  const ownOther = Object.keys(METHOD_LEXICON).some((method) => method !== raw.method && METHOD_LEXICON[method].test(text));
+  // (the standard ways and the product's own catalog way)
+  const ways = [...new Set([...Object.keys(METHOD_LEXICON), product.catalogMethod].filter(Boolean))];
+  const ownOther = ways.some((method) => method !== raw.method && methodLexicon(method)?.test(text));
   const sentences = mentions.map((m) => positiveWords(world, sentenceSpan(m, world))).join(' . ');
   if (ownOther || !methodLexicon(raw.method)?.test(sentences)) pushUnclear(unclear, heard, 'method_not_heard');
   return '';
