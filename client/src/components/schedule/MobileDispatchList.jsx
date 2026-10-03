@@ -413,7 +413,7 @@ function OpenHourRow({ hour, onBook }) {
           {formatOpenHour(hour)}
         </span>
         <span className="text-ink-tertiary" style={{ fontSize: 14 }}>Open</span>
-        <span className="ml-auto font-medium text-ink-secondary" style={{ fontSize: 13 }}>+ Book</span>
+        <span className="ml-auto font-medium text-ink-secondary" style={{ fontSize: 14 }}>+ Book</span>
       </button>
     </div>
   );
