@@ -288,4 +288,5 @@ module.exports = {
   appliedNitrogen,
   resolveNitrogenApplied,
   resolveProgramVisit,
+  isRecurringLawnPlanKey,
 };

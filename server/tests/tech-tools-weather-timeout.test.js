@@ -6,7 +6,13 @@
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
-const { executeTechTool } = require('../services/intelligence-bar/tech-tools');
+// Fresh module per test: the shared property-forecast client caches by point,
+// and these cases must not read each other's forecast.
+let executeTechTool;
+beforeEach(() => {
+  jest.resetModules();
+  ({ executeTechTool } = require('../services/intelligence-bar/tech-tools'));
+});
 
 describe('get_weather_conditions timeout budget', () => {
   const realFetch = global.fetch;
@@ -40,5 +46,24 @@ describe('get_weather_conditions timeout budget', () => {
     const out = await executeTechTool('get_weather_conditions', {}, {});
     expect(out.spray_conditions).toBe('good');
     expect(out.temperature).toBe(88);
+  });
+
+  test('reports on the named service-area point through the shared property-forecast client', async () => {
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      json: async () => ({ current: { temperature_2m: 91, wind_speed_10m: 18.4, wind_gusts_10m: 25, precipitation_probability: 10 } }),
+    }));
+    const out = await executeTechTool('get_weather_conditions', {}, {});
+    const url = new URL(String(global.fetch.mock.calls[0][0]));
+    expect(url.searchParams.get('latitude')).toBe('27.4');
+    expect(url.searchParams.get('longitude')).toBe('-82.4');
+    expect(out).toMatchObject({ spray_conditions: 'too_windy', wind_speed: 18, wind_gusts: 25, rain_probability: 10 });
+  });
+
+  test('provider failure keeps the tool\'s own error shapes', async () => {
+    global.fetch = jest.fn(async () => ({ ok: false, status: 503 }));
+    expect(await executeTechTool('get_weather_conditions', {}, {})).toEqual({ error: 'Weather API unavailable' });
+    global.fetch = jest.fn(async () => { throw new Error('ECONNRESET'); });
+    expect(await executeTechTool('get_weather_conditions', {}, {})).toEqual({ error: 'Could not fetch weather' });
   });
 });

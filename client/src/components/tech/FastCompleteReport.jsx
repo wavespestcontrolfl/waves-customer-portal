@@ -337,6 +337,9 @@ function BlogPostOption({ post, pressed = false, locked, onPick }) {
 // links. It goes at the bottom of their report as "From the Waves blog".
 // Optional; the server checks the pick is still live when the visit completes.
 export function BlogPostSection({ search, value, locked, onChange }) {
+  // The search's coverage and "Suggest a post" belong to the office form only
+  // (owner 2026-10-03: the tech screen is going away and new work goes to the
+  // admin UI), so this sheet keeps the plain list it had.
   const { query, setQuery, results, status } = useBlogPostSearch(search);
   return (
     <section className="tech-visit-choice-section" aria-label="Blog post for the customer">

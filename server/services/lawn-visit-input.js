@@ -3,9 +3,14 @@ const crypto = require('crypto');
 const { CURATED_REFERENCE, FALSE_PRECISION_RULE } = require('./lawn-diagnostic-prompt');
 const { isValidBase64 } = require('../utils/base64-validate');
 const { decodedBase64Bytes, MAX_PHOTO_BYTES } = require('../utils/request-photo-validation');
+const shotList = require('./lawn-photo-shots');
 
 const GATE = 'GATE_LAWN_VISIT_ASSESSMENT';
 const PROMPT_VERSION = 'lawn-visit-v1';
+// The variant a shot-list capture (GATE_LAWN_SHOT_LIST) is read under: the same
+// prompt plus the shot guide and the shot-key zone enum. Its own version so a
+// replay never mixes the two modes (lawn report rebuild P19a).
+const SHOT_LIST_PROMPT_VERSION = `${PROMPT_VERSION}-shot-list`;
 const MAX_VISIT_PHOTOS = 6;
 const MAX_OUTPUT_TOKENS = 16384;
 // Owner ruling 2026-09-24: three named slots, all optional (no photo-count
@@ -204,8 +209,11 @@ function contextLines(context = {}) {
   return lines;
 }
 
-function buildUserText(photoCount, context = {}) {
-  const head = `Assess the lawn in the ${photoCount} numbered photo${photoCount === 1 ? '' : 's'} of this visit.`;
+// `shotList: true` (a shot-list capture) adds which minimum shots the set lacks,
+// from the photos' shot keys (`zones`, null = untagged). Off: exactly as before.
+function buildUserText(photoCount, context = {}, { shotList: shotListOn = false, zones = [] } = {}) {
+  const base = `Assess the lawn in the ${photoCount} numbered photo${photoCount === 1 ? '' : 's'} of this visit.`;
+  const head = shotListOn ? `${base}\n\n${shotList.missingShotsText(zones)}` : base;
   const lines = contextLines(context);
   if (!lines.length) return head;
   return `${head}
@@ -215,7 +223,11 @@ ${lines.join('\n')}`;
 }
 
 // ── Photos ────────────────────────────────────────────────────────────
-function normalizePhotoZone(zone) {
+// `shotList: true` (GATE_LAWN_SHOT_LIST, decided by the caller) widens the
+// vocabulary from the three owner-ruled slots to the eight-shot list; off it is
+// exactly the three-slot vocabulary it has always been.
+function normalizePhotoZone(zone, { shotList: shotListOn = false } = {}) {
+  if (shotListOn) return shotList.normalizeShotZone(zone);
   const key = String(zone == null ? '' : zone).trim().toLowerCase();
   return PHOTO_ZONES.includes(key) ? key : null;
 }
@@ -241,16 +253,20 @@ function photoLabel(index, zone) {
 // already read by ReportViewPage's label map. The recorded `zone` column
 // (not photo_type) is the location claim the report pairs before/after
 // photos on.
-const PHOTO_TYPE_BY_ZONE = { front: 'front_yard', close_up: 'close_up', trouble: 'trouble_spot' };
+// back/side/shade/hot_edge/blade_crown only ever arrive with GATE_LAWN_SHOT_LIST.
+const PHOTO_TYPE_BY_ZONE = {
+  front: 'front_yard', close_up: 'close_up', trouble: 'trouble_spot',
+  back: 'back_yard', side: 'side_yard', shade: 'shade_area', hot_edge: 'hot_edge', blade_crown: 'blade_crown',
+};
 function photoTypeForZone(zone) {
   return PHOTO_TYPE_BY_ZONE[zone] || 'general';
 }
 
 // Customer-facing label for a stored photo zone (current slots plus the
 // retired back/side values), matching the legacy report's wording.
-const PHOTO_ZONE_LABELS = Object.freeze({
-  front: 'Front yard', close_up: 'Close-up', trouble: 'Trouble spot', back: 'Back yard', side: 'Side yard',
-});
+// The wording lives in shared/lawn-photo-shots.json (reportLabel) beside the
+// shot list; the first five are the labels this report has always used.
+const PHOTO_ZONE_LABELS = shotList.SHOT_REPORT_LABELS;
 function photoZoneLabel(zone) {
   const key = String(zone || '').trim().toLowerCase();
   return key ? (PHOTO_ZONE_LABELS[key] || null) : null;
@@ -258,14 +274,16 @@ function photoZoneLabel(zone) {
 
 // Before/after photo pair for the progress slider (report + customer portal).
 // Candidates arrive best-first. Only a same-spot zone pairs: 'front', plus
-// legacy 'back'/'side' rows from before the 2026-09-24 rename. 'close_up' and
-// 'trouble' are a different spot every visit, so they never pair and never
-// fill the best-vs-best fallback either. Zones recorded on both sides but
+// 'back'/'side' (legacy rows from before the 2026-09-24 rename, and new
+// ones when GATE_LAWN_SHOT_LIST is live). 'close_up', 'trouble' and the
+// shot-list detail shots (shade, hot_edge, blade_crown) are a different spot
+// every visit, so they never pair and never fill the best-vs-best fallback
+// either. The sets come from shared/lawn-photo-shots.json. Zones recorded on both sides but
 // disjoint → no honest pair (after is null). photo_type is not a location
 // claim (the gate-off path synthesizes it from upload order), so only `zone`
 // counts.
-const PAIRABLE_ZONES = new Set(['front', 'back', 'side']);
-const NON_PAIRABLE_ZONES = new Set(['close_up', 'trouble']);
+const PAIRABLE_ZONES = new Set(shotList.PAIRABLE_SHOT_ZONES);
+const NON_PAIRABLE_ZONES = new Set(shotList.NON_PAIRABLE_SHOT_ZONES);
 function pairBeforeAfterPhotos(beforeCandidates = [], afterCandidates = []) {
   const rawZone = (p) => String(p?.zone || '').trim().toLowerCase();
   const zoneKey = (p) => (PAIRABLE_ZONES.has(rawZone(p)) ? rawZone(p) : '');
@@ -284,21 +302,24 @@ function pairBeforeAfterPhotos(beforeCandidates = [], afterCandidates = []) {
 
 // The gate-on request contract for /assess photos: at most MAX_VISIT_PHOTOS,
 // each with base64 data and an optional technician zone label.
-function validateVisitPhotos(photos) {
+// `shotList: true` (GATE_LAWN_SHOT_LIST, decided by the caller) swaps in the
+// eight-shot contract: up to SHOT_CAP photos, any shot key as a zone, and the
+// per-shot maximum (one each, two problem-area photos). Off, nothing changes.
+function validateVisitPhotos(photos, { shotList: shotListOn = false } = {}) {
+  const maxPhotos = shotListOn ? shotList.SHOT_CAP : MAX_VISIT_PHOTOS;
   if (!Array.isArray(photos) || !photos.length) return { error: 'At least one photo is required', zones: [] };
-  if (photos.length > MAX_VISIT_PHOTOS) return { error: `At most ${MAX_VISIT_PHOTOS} photos per visit`, zones: [] };
+  if (photos.length > maxPhotos) return { error: `At most ${maxPhotos} photos per visit`, zones: [] };
   const zones = [];
   for (const photo of photos) {
-    if (!photo || typeof photo.data !== 'string' || !photo.data) return { error: 'Every photo needs base64 image data', zones: [] };
-    if (decodedBase64Bytes(photo.data) > MAX_PHOTO_BYTES) return { error: 'Each photo must be 5 MB or smaller', zones: [] };
-    if (!isValidBase64(photo.data)) return { error: 'Every photo needs valid raw base64 image data', zones: [] };
-    if (!['image/jpeg', 'image/png', 'image/webp'].includes(photo.mimeType ?? 'image/jpeg')) {
-      return { error: 'Photos must be JPEG, PNG, or WebP images', zones: [] };
-    }
-    if (photo.zone != null && photo.zone !== '' && !normalizePhotoZone(photo.zone)) {
-      return { error: `photo zone must be one of: ${PHOTO_ZONES.join(', ')}`, zones: [] };
-    }
-    zones.push(normalizePhotoZone(photo.zone));
+    const error = visitPhotoError(photo, shotListOn);
+    if (error) return { error, zones: [] };
+    zones.push(normalizePhotoZone(photo.zone, { shotList: shotListOn }));
+  }
+  if (shotListOn) {
+    // The slider pairs against one photo per same-spot zone, so the API
+    // enforces what the drawer's picker does.
+    const countError = shotList.shotCountError(zones) || shotList.photoSizeError(photos.map((photo) => decodedBase64Bytes(photo.data)));
+    return countError ? { error: countError, zones: [] } : { error: null, zones };
   }
   // The slider pairs against one Front photo, so the API enforces what the
   // drawer's picker does.
@@ -306,25 +327,67 @@ function validateVisitPhotos(photos) {
   return { error: null, zones };
 }
 
-// The composed system prompt and the response schema, digested once. The
-// prompt embeds rubric blocks this module does not own (CURATED_REFERENCE,
+// The first problem with one request photo, or null.
+function visitPhotoError(photo, shotListOn) {
+  if (!photo || typeof photo.data !== 'string' || !photo.data) return 'Every photo needs base64 image data';
+  // Shot list on: the size rule runs over the whole set (it names the photo), after this loop.
+  if (!shotListOn && decodedBase64Bytes(photo.data) > MAX_PHOTO_BYTES) return 'Each photo must be 5 MB or smaller';
+  if (!isValidBase64(photo.data)) return 'Every photo needs valid raw base64 image data';
+  if (!['image/jpeg', 'image/png', 'image/webp'].includes(photo.mimeType ?? 'image/jpeg')) {
+    return 'Photos must be JPEG, PNG, or WebP images';
+  }
+  if (shotListOn) return shotList.rawZoneError(photo.zone);
+  if (photo.zone != null && photo.zone !== '' && !normalizePhotoZone(photo.zone)) {
+    return `photo zone must be one of: ${PHOTO_ZONES.join(', ')}`;
+  }
+  return null;
+}
+
+// The shot-list variant of the prompt and schema (shot-list captures only):
+// the zone sentence points at the guide, the guide follows the photos section,
+// and a finding's zone enum is the shot keys. The legacy SYSTEM_PROMPT and
+// RESPONSE_SCHEMA above are untouched, so gate-off reads stay byte-identical.
+const ZONE_SENTENCE = '(front / close_up / trouble)';
+const FINDINGS_HEADING = '\n# FINDINGS (evidence-first)';
+if (!SYSTEM_PROMPT.includes(ZONE_SENTENCE) || SYSTEM_PROMPT.split(FINDINGS_HEADING).length !== 2) {
+  throw new Error('lawn-visit-input: shot-list prompt anchors moved');
+}
+const SHOT_LIST_SYSTEM_PROMPT = SYSTEM_PROMPT
+  .replace(ZONE_SENTENCE, '(see the SHOT GUIDE)')
+  .replace(FINDINGS_HEADING, () => `\n${shotList.shotGuideText()}\n${FINDINGS_HEADING}`);
+const SHOT_LIST_RESPONSE_SCHEMA = JSON.parse(JSON.stringify(RESPONSE_SCHEMA));
+SHOT_LIST_RESPONSE_SCHEMA.properties.findings.items.properties.zone = enumOf([...shotList.SHOT_KEYS, 'unknown']);
+
+// The composed system prompt and the response schema, digested once per mode.
+// The prompt embeds rubric blocks this module does not own (CURATED_REFERENCE,
 // FALSE_PRECISION_RULE): editing one changes what the
 // model sees without a PROMPT_VERSION bump here, so the context hash seeds
 // with what was actually sent, not only the version label.
-const PROMPT_DIGEST = crypto.createHash('sha256').update(SYSTEM_PROMPT).update('\n').update(JSON.stringify(RESPONSE_SCHEMA)).digest('hex');
+const digestOf = (system, schema) => crypto.createHash('sha256').update(system).update('\n').update(JSON.stringify(schema)).digest('hex');
+const PROMPT_DIGEST = digestOf(SYSTEM_PROMPT, RESPONSE_SCHEMA);
+const SHOT_LIST_PROMPT_DIGEST = digestOf(SHOT_LIST_SYSTEM_PROMPT, SHOT_LIST_RESPONSE_SCHEMA);
+
+// Everything a call needs that differs by capture mode: the version label, the
+// system prompt, the schema and the digest the context hash seeds with.
+function promptFor({ shotList: shotListOn = false } = {}) {
+  return shotListOn
+    ? { version: SHOT_LIST_PROMPT_VERSION, system: SHOT_LIST_SYSTEM_PROMPT, schema: SHOT_LIST_RESPONSE_SCHEMA, digest: SHOT_LIST_PROMPT_DIGEST }
+    : { version: PROMPT_VERSION, system: SYSTEM_PROMPT, schema: RESPONSE_SCHEMA, digest: PROMPT_DIGEST };
+}
 
 // sha256 of everything the model saw: prompt version, the composed prompt
 // and schema (PROMPT_DIGEST), the context lines' inputs, and each photo's
 // bytes with its position, zone and media type. The eval replays by
 // assessment id and compares hashes to prove it rebuilt the same input.
-function contextHash({ photos = [], photoZones = [], visionContext = {} } = {}) {
+function contextHash({ photos = [], photoZones = [], visionContext = {}, shotList: shotListOn = false } = {}) {
   const c = visionContext || {};
+  const prompt = promptFor({ shotList: shotListOn });
   const hash = crypto.createHash('sha256');
-  hash.update(PROMPT_VERSION).update('\n').update(PROMPT_DIGEST).update('\n');
+  hash.update(prompt.version).update('\n').update(prompt.digest).update('\n');
   // The rendered user text too: its safety instructions and context
   // formatting change what the model sees without a version bump, and the
   // context values alone would not tell.
-  hash.update(crypto.createHash('sha256').update(buildUserText(photos.length, c)).digest('hex')).update('\n');
+  hash.update(crypto.createHash('sha256').update(buildUserText(photos.length, c, shotListOn ? { shotList: true, zones: photoZones } : undefined)).digest('hex')).update('\n');
   hash.update(JSON.stringify({
     season: c.season ?? null, month: c.month ?? null, region: c.region ?? null, grassType: c.grassType ?? null,
     turfHeightIn: c.turfHeightIn ?? null, irrigation: c.irrigation ?? null,
@@ -338,5 +401,5 @@ function contextHash({ photos = [], photoZones = [], visionContext = {} } = {}) 
 }
 
 module.exports = {
-  GATE, PROMPT_VERSION, MAX_VISIT_PHOTOS, MAX_OUTPUT_TOKENS, PHOTO_ZONES, LEGACY_PHOTO_ZONES, PHOTO_QUALITY, CONFIDENCE, SEVERITY_LEVELS, THATCH_LEVELS, SIGNAL_LEVELS, GRASS_TYPES, RESPONSE_SCHEMA, SYSTEM_PROMPT, PROMPT_DIGEST, buildUserText, normalizePhotoZone, normalizeDetailZone, photoLabel, photoTypeForZone, photoZoneLabel, pairBeforeAfterPhotos, validateVisitPhotos, contextHash
+  GATE, PROMPT_VERSION, SHOT_LIST_PROMPT_VERSION, MAX_VISIT_PHOTOS, MAX_OUTPUT_TOKENS, PHOTO_ZONES, LEGACY_PHOTO_ZONES, PHOTO_QUALITY, CONFIDENCE, SEVERITY_LEVELS, THATCH_LEVELS, SIGNAL_LEVELS, GRASS_TYPES, RESPONSE_SCHEMA, SYSTEM_PROMPT, SHOT_LIST_SYSTEM_PROMPT, SHOT_LIST_RESPONSE_SCHEMA, PROMPT_DIGEST, SHOT_LIST_PROMPT_DIGEST, promptFor, buildUserText, normalizePhotoZone, normalizeDetailZone, photoLabel, photoTypeForZone, photoZoneLabel, pairBeforeAfterPhotos, validateVisitPhotos, contextHash
 };

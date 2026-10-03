@@ -176,6 +176,45 @@ jest.mock('../services/service-report/application-conditions', () => ({ fetchRec
     expect(photoRows.map((row) => row.photo_type)).toEqual(['front_yard', 'close_up', 'trouble_spot']);
   });
 
+  test('shot list on: the capture mode is stored beside every photo and zones round-trip; the eval case reads it back', async () => {
+    const evalLib = require('../services/eval/lawn-visit-assessment-eval');
+    const shotPhotos = [photo('YQ==', 'front'), photo('Yg==', 'back'), photo('Yw==', 'close_up')];
+    process.env.GATE_LAWN_SHOT_LIST = 'true';
+    try {
+      dispatch.mockResolvedValue({ ok: true, json: { ...complete(), photo_quality: shotPhotos.map((_, i) => ({ photo: i + 1, quality: 'adequate', issue: '' })) }, provider: 'gemini', model: 'fixture-model', usage: {}, failures: [] });
+      const { body } = await request({ customerId: await customer(), photos: shotPhotos });
+      const stored = await mockKnex('lawn_assessments').where({ id: body.assessment.id }).first();
+      expect(stored.photos.map((meta) => meta.photoVocabulary)).toEqual(['shot_list_v1', 'shot_list_v1', 'shot_list_v1']);
+      const rows = await mockKnex('lawn_assessment_photos').where({ assessment_id: stored.id }).orderBy('photo_order');
+      expect(rows.map((row) => row.zone)).toEqual(['front', 'back', 'close_up']);
+      // This harness has no S3, so the route stored `pending/...` keys, which the
+      // eval (rightly) treats as an incomplete photo set and skips. Give the rows
+      // the keys a captured visit has, as the exporter would see them.
+      expect(rows.every((row) => row.s3_key.startsWith('pending/'))).toBe(true);
+      const testCase = evalLib.fixtureCase(stored, rows.map((row) => ({ ...row, s3_key: `lawn/${row.id}.jpg` })), {});
+      expect(testCase.incompletePhotos).toBe(false);
+      expect(testCase.photoVocabulary).toBe('shot_list_v1');
+      const seen = [];
+      const out = await evalLib.runEval([testCase], { analyzeVisit: async (input) => { seen.push(input); return { status: 'unavailable' }; }, loadPhoto: async () => ({ data: 'YQ==', mimeType: 'image/jpeg' }) });
+      expect(out.skipped).toEqual([]);
+      expect(seen).toHaveLength(1);
+      expect(seen[0].shotList).toBe(true);
+      expect(seen[0].photos.map((p) => p.zone)).toEqual(['front', 'back', 'close_up']);
+    } finally {
+      delete process.env.GATE_LAWN_SHOT_LIST;
+    }
+  });
+
+  test('shot list off: nothing new is stored beside the photos, and the replay is the legacy one', async () => {
+    const evalLib = require('../services/eval/lawn-visit-assessment-eval');
+    const { body } = await request({ customerId: await customer(), photos });
+    const stored = await mockKnex('lawn_assessments').where({ id: body.assessment.id }).first();
+    for (const meta of stored.photos) expect(Object.keys(meta).sort()).toEqual(['filename', 'uploadedAt']);
+    const rows = await mockKnex('lawn_assessment_photos').where({ assessment_id: stored.id }).orderBy('photo_order');
+    const testCase = evalLib.fixtureCase(stored, rows, {});
+    expect(Object.keys(testCase)).not.toContain('photoVocabulary');
+  });
+
   test('gate off still rejects two Front photos', async () => {
     const customerId = await customer();
     process.env.GATE_LAWN_VISIT_ASSESSMENT = 'false';

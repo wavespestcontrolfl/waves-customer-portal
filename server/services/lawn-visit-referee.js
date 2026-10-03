@@ -321,10 +321,11 @@ async function refereeVisit({ policy, payload, geminiJson, visit }) {
     const solRoute = policy?.fallback;
     if (!solRoute || !solRoute.provider || !solRoute.model) return { json: geminiJson, referee: skipped('no_second_opinion_route', { secondOpinion: { called: false, reasons, model: null, ok: false } }) };
 
+    const version = payload.promptVersion || PROMPT_VERSION;
     // Same system prompt, images, schema; Gemini-only knobs dropped.
     const solPayload = { ...payload };
     delete solPayload.thinkingLevel;
-    const solResult = await boundedDispatch(solRoute, { ...solPayload, promptVersion: `${PROMPT_VERSION}:second-opinion` }, SECOND_OPINION_MAX_MS);
+    const solResult = await boundedDispatch(solRoute, { ...solPayload, promptVersion: `${version}:second-opinion` }, SECOND_OPINION_MAX_MS);
     const solInfo = { called: true, reasons, ...legInfo(solResult, solRoute) };
     const solValid = solResult.ok && validateAssessmentJson(solResult, visit.photoCount) === null;
     if (solResult.ok && !solValid) {
@@ -349,7 +350,7 @@ async function refereeVisit({ policy, payload, geminiJson, visit }) {
       jsonSchema: REFEREE_SCHEMA,
       maxTokens: REFEREE_MAX_TOKENS,
       laneId: 'lawn_assessment_referee',
-      promptVersion: `${PROMPT_VERSION}:referee`,
+      promptVersion: `${version}:referee`,
     }, REFEREE_MAX_MS);
     const picks = result.ok ? usablePicks(result.json, disputes) : null;
     if (result.ok && !picks) rejectCall(result, 'schema_invalid:referee');
