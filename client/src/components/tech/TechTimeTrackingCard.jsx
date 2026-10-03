@@ -117,8 +117,13 @@ export default function TechTimeTrackingCard({ nextStop, variant = 'legacy' }) {
   // A timer started or undone elsewhere on the page (the geofence prompt's
   // Start Timer / Undo): reload so the controls match (Codex #5786 P2).
   useEffect(() => {
+    // Window focus too: the clock is a long-lived card on the Today page.
     window.addEventListener(TIME_TRACKING_CHANGED, load);
-    return () => window.removeEventListener(TIME_TRACKING_CHANGED, load);
+    window.addEventListener('focus', load);
+    return () => {
+      window.removeEventListener(TIME_TRACKING_CHANGED, load);
+      window.removeEventListener('focus', load);
+    };
   }, [load]);
 
   const act = async (key, path, { location = false } = {}) => {

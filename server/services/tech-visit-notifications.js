@@ -630,28 +630,39 @@ function notifyVisitCancelled({ visitId, technicianId = null, actorId = null, sn
   }, visitId);
 }
 
+// A claim on held cards lasts this long: a summary that died between its
+// claim and the provider handoff leaves its rows recoverable after it.
+const HELD_CLAIM_LEASE_MS = 10 * 60 * 1000;
+
 // Claim the held cards (all of them, or one run's) in ONE update — so two
-// instances can never push the same batch — and send each tech one push
-// counting theirs. A card the tech already cleared is not counted: they saw
-// it. The summary gate decided at hold time; only the notifications kill
-// switch stops a held batch (Codex #5786 P2).
+// instances never push the same batch — and send each tech one push counting
+// theirs. The held marker stays until that tech's push is handed off; a failed
+// send releases the claim, and a crash leaves it to expire, so the next run's
+// start recovers the batch either way (Codex #5786 P2). A card the tech
+// already cleared is not counted: they saw it. The summary gate decided at
+// hold time; only the notifications kill switch stops a held batch.
 async function flushHeldAutoDispatchPushes({ runId = null, tag }) {
+  if (!enabled()) return { pushed: 0 };
+  const now = new Date();
   const claimed = await db('tech_notifications')
     .whereIn('type', Object.values(TYPE_BY_KIND))
     .whereNull('dismissed_at')
     .whereRaw("payload->>'push_held_run' IS NOT NULL")
     .modify((q) => { if (runId) q.whereRaw("payload->>'push_held_run' = ?", [String(runId)]); })
-    .update({ payload: db.raw("payload - 'push_held_run'"), updated_at: new Date() })
-    .returning('technician_id');
-  if (!enabled()) return { pushed: 0 };
-  const counts = new Map();
+    .whereRaw("(payload->>'push_claimed_at' IS NULL OR (payload->>'push_claimed_at')::timestamptz < ?)", [new Date(now.getTime() - HELD_CLAIM_LEASE_MS)])
+    .update({ payload: db.raw("payload || jsonb_build_object('push_claimed_at', ?::text)", [now.toISOString()]), updated_at: now })
+    .returning(['id', 'technician_id']);
+  const byTech = new Map();
   for (const row of claimed) {
-    const id = row && typeof row === 'object' ? row.technician_id : row;
-    if (id) counts.set(String(id), (counts.get(String(id)) || 0) + 1);
+    if (!row || !row.technician_id) continue;
+    const key = String(row.technician_id);
+    if (!byTech.has(key)) byTech.set(key, []);
+    byTech.get(key).push(row.id);
   }
   const PushService = require('./push-notifications');
   let pushed = 0;
-  for (const [technicianId, n] of counts) {
+  for (const [technicianId, ids] of byTech) {
+    const n = ids.length;
     try {
       await PushService.sendToAdminUser(technicianId, {
         title: `Auto-dispatch moved ${n} visit${n === 1 ? '' : 's'}`,
@@ -660,9 +671,14 @@ async function flushHeldAutoDispatchPushes({ runId = null, tag }) {
         tag,
         priority: 'high',
       });
+      await db('tech_notifications').whereIn('id', ids)
+        .update({ payload: db.raw("payload - 'push_held_run' - 'push_claimed_at'"), updated_at: new Date() });
       pushed += 1;
     } catch (err) {
       logger.warn(`[tech-visit-notifications] auto-dispatch summary push failed for tech ${technicianId}: ${err.message}`);
+      await db('tech_notifications').whereIn('id', ids)
+        .update({ payload: db.raw("payload - 'push_claimed_at'"), updated_at: new Date() })
+        .catch((releaseErr) => logger.warn(`[tech-visit-notifications] held claim release failed (${errorTag(releaseErr)}); it expires on its own`));
     }
   }
   return { pushed };

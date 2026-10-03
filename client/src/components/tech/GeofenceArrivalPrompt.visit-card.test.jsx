@@ -193,4 +193,18 @@ describe('GeofenceArrivalPrompt — visit cards', () => {
       window.removeEventListener('waves:time-tracking-changed', heard);
     }
   });
+
+  it('an automatic-mode timer notice (geofence_timer_started) also tells the time clock to reload', async () => {
+    const started = { ...notification('geofence_timer_started', { customer_name: 'Okafor' }, 'n-started'), created_at: new Date().toISOString() };
+    stubFeed([started]);
+    const heard = vi.fn();
+    window.addEventListener('waves:time-tracking-changed', heard);
+    try {
+      render(<GeofenceArrivalPrompt />);
+      await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+      expect(heard).toHaveBeenCalledTimes(1);
+    } finally {
+      window.removeEventListener('waves:time-tracking-changed', heard);
+    }
+  });
 });

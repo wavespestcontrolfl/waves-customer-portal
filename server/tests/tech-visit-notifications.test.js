@@ -32,33 +32,50 @@ let cardSeq = 0;
 const cardRows = [];
 function cardsTable() {
   let runFilter = null;
-  const claim = {
-    whereIn: jest.fn(() => claim),
-    whereNull: jest.fn(() => claim),
-    whereRaw: jest.fn((sql, bindings) => { if (bindings) runFilter = String(bindings[0]); return claim; }),
-    modify: jest.fn((fn) => { fn(claim); return claim; }),
-    update: jest.fn(() => ({
-      returning: jest.fn(async () => {
-        const held = cardRows.filter((r) => r.payload.push_held_run && (!runFilter || r.payload.push_held_run === runFilter));
-        for (const r of held) delete r.payload.push_held_run;
-        return held.map((r) => ({ technician_id: r.technician_id }));
-      }),
-    })),
+  let idFilter = null;
+  const chain = {
+    whereIn: jest.fn((col, vals) => { if (col === 'id') idFilter = vals.map(String); return chain; }),
+    whereNull: jest.fn(() => chain),
+    whereRaw: jest.fn((sql, bindings) => { if (/push_held_run' = \?/.test(sql)) runFilter = String(bindings[0]); return chain; }),
+    modify: jest.fn((fn) => { fn(chain); return chain; }),
+    // The summary's three writes, told apart by their payload expression:
+    // claim (stamp push_claimed_at, RETURNING), confirm (drop both marks) and
+    // release (drop the claim). db.raw returns its SQL text here.
+    update: jest.fn(({ payload }) => {
+      const sql = String(payload);
+      const apply = () => {
+        if (sql.includes("jsonb_build_object('push_claimed_at'")) {
+          const held = cardRows.filter((r) => r.payload.push_held_run && !r.payload.push_claimed_at
+            && (!runFilter || r.payload.push_held_run === runFilter));
+          for (const r of held) r.payload.push_claimed_at = 'now';
+          return held.map((r) => ({ id: r.id, technician_id: r.technician_id }));
+        }
+        const rows = cardRows.filter((r) => idFilter && idFilter.includes(String(r.id)));
+        for (const r of rows) {
+          delete r.payload.push_claimed_at;
+          if (sql.includes("- 'push_held_run'")) delete r.payload.push_held_run;
+        }
+        return rows.length;
+      };
+      return { returning: jest.fn(async () => apply()), then: (res, rej) => Promise.resolve().then(apply).then(res, rej), catch: (fn) => Promise.resolve().then(apply).catch(fn) };
+    }),
   };
   return {
-    ...claim,
+    ...chain,
     insert: jest.fn((row) => ({
       returning: jest.fn(async () => {
         const stored = { ...row, payload: JSON.parse(row.payload) };
         const ok = await mockWriteCard(row.technician_id, stored);
         if (ok === false) throw new Error('insert failed');
         cardSeq += 1;
+        stored.id = `card-${cardSeq}`;
         cardRows.push(stored);
-        return [{ id: `card-${cardSeq}` }];
+        return [{ id: stored.id }];
       }),
     })),
   };
 }
+
 // The push recheck's "is there a NEWER card for this tech + visit?" query,
 // answered by newerCard (null = this notice's card is still the newest).
 let newerCard = null;
@@ -516,6 +533,29 @@ describe('auto-dispatch: one push per run (GATE_AUTO_DISPATCH_PUSH_SUMMARY, owne
     mockSendToAdminUser.mockClear();
     expect(await notices.pushAutoDispatchSummary({ runId: 'next-run' })).toEqual({ pushed: 0 });
     expect(mockSendToAdminUser).not.toHaveBeenCalled();
+  });
+
+  test('a failed summary send releases the claim: the held cards stay recoverable for the next run (Codex #5786 P2)', async () => {
+    notices._test.setCurrentAutoDispatchRun('r1');
+    await move('auto_dispatch');
+    mockSendToAdminUser.mockRejectedValueOnce(new Error('provider down'));
+    expect(await notices.pushAutoDispatchSummary({ runId: 'r1' })).toEqual({ pushed: 0 });
+    expect(cardRows[0].payload).toMatchObject({ push_held_run: 'r1' });
+    expect(cardRows[0].payload).not.toHaveProperty('push_claimed_at');
+    expect(await notices.beginAutoDispatchRun('r2')).toEqual({ pushed: 1 });
+    expect(cardRows[0].payload).not.toHaveProperty('push_held_run');
+  });
+
+  test('the held mark is removed only after the push is handed off', async () => {
+    notices._test.setCurrentAutoDispatchRun('r1');
+    await move('auto_dispatch');
+    mockSendToAdminUser.mockImplementationOnce(async () => {
+      // mid-handoff: still held, claimed
+      expect(cardRows[0].payload).toMatchObject({ push_held_run: 'r1', push_claimed_at: expect.anything() });
+      return { sent: 1 };
+    });
+    expect(await notices.pushAutoDispatchSummary({ runId: 'r1' })).toEqual({ pushed: 1 });
+    expect(cardRows[0].payload).not.toHaveProperty('push_held_run');
   });
 
   test('a dropped (stale) card is never counted', async () => {

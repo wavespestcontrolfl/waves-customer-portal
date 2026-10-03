@@ -137,6 +137,11 @@ export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleCha
       const { notifications = [] } = await apiGet('/api/tech/notifications');
       const fresh = notifications.filter((n) => !seenIds.current.has(n.id));
       fresh.forEach((n) => seenIds.current.add(n.id));
+      // Automatic geofence mode starts and stops job timers server-side and
+      // only posts these notices: the time clock reloads on them too (Codex #5786).
+      if (fresh.some((n) => n.type === 'geofence_timer_started' || n.type === 'geofence_timer_stopped')) {
+        window.dispatchEvent(new Event(TIME_TRACKING_CHANGED));
+      }
       // Visit cards never auto-dismiss, so the server feed is their only
       // source of truth: one the feed no longer lists (tapped "Got it" on
       // the tech's other device, or pushed out of the feed window by a
