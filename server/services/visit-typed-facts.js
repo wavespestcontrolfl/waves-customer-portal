@@ -1,22 +1,25 @@
 /**
- * Typed voice fill (Fast Complete steps 3 and 4, GATE_TYPED_VOICE_FILL, dark;
+ * Typed voice fill (Fast Complete steps 3 to 5, GATE_TYPED_VOICE_FILL, dark;
  * owner "ok go" 2026-10-02 on the Fast Complete mockup v8): a typed visit's
  * own findings (cockroach, the German and palmetto knockdowns, flea, pest
  * inspection, mosquito event, wildlife trapping, rodent exclusion,
  * sanitation and inspection; step 4: rodent trap checks, rodent bait
- * stations and termite bait stations) read from the technician's note. Each
- * pick field gets the values the note says, from that field's own options,
- * each count the whole number the note gives, and a form whose activity
+ * stations and termite bait stations; step 5: termite liquid, trenching,
+ * spot and foam treatments and termite inspections) read from the
+ * technician's note. Each pick field gets the values the note says, from
+ * that field's own options, each count the whole number the note gives, a
+ * solution strength the percent the note gives, and a form whose activity
  * score the technician sets gets the rating the note states, each with the
- * note's own words.
+ * note's own words. The state's notice questions are never read: always a
+ * tap.
  *
  * The model judges what the note means; this module keeps only an option the
  * typed form offers (the form as served for the visit's service key,
  * activity-indicators.js findingsSchemaForType, the list /complete validates
  * against), a count or score its quote states as a whole number (in digits,
  * or in words by the call reader's closed-set evaluator), standing on
- * words the note holds word for word, and never a combination the
- * completion refuses: the completion's own validator (validateTypedFindings,
+ * words the note holds word for word (a percent its quote states as that
+ * percent), and never a combination the completion refuses: the completion's own validator (validateTypedFindings,
  * requirements off) judges the filled values, and every field in a clash is
  * left for a person to pick. Free-text fields and fields filled from the
  * products (autoFilled) are never read. It writes nothing: a person confirms
@@ -39,16 +42,16 @@ const { validateTypedFindings, findingsSchemaForType } = require('./service-repo
 const { groundingTools: { spokenNumbersIn } } = require('./call-reschedule-agreement');
 
 // Bump on any prompt or schema change.
-const TYPED_FACTS_VERSION = 'visit-typed-facts-v2';
+const TYPED_FACTS_VERSION = 'visit-typed-facts-v3';
 const TYPED_FACTS_TIMEOUT_MS = 10 * 1000;
 const NOT_SAID = 'not_said';
 // The largest count the completion takes (validateTypedFindings: 1 to 4
 // digits).
 const MAX_COUNT = 9999;
 
-// The typed forms the reader reads (mockup v8, steps 3 and 4), and what the
-// prompt calls each visit. Termite work is step 5; tree, shrub and lawn
-// belong to another lane of work.
+// The typed forms the reader reads (mockup v8, steps 3 to 5), and what the
+// prompt calls each visit. Tree, shrub and lawn belong to another lane of
+// work.
 const VOICE_TYPES = {
   cockroach: 'cockroach treatment',
   german_roach_knockdown: 'German cockroach knockdown',
@@ -63,28 +66,63 @@ const VOICE_TYPES = {
   rodent_trapping: 'rodent trap check',
   rodent_bait_station: 'rodent bait station service',
   termite_bait_station: 'termite bait station check',
+  termite_treatment: 'termite treatment',
+  termite_inspection: 'termite inspection',
 };
 
+// Step 5's forms are read on the office's completion form for now: the
+// tech's Fast Complete sheet has no free-text rows, notice taps or trace for
+// them yet, so their visits keep the full form on the phone (sheetTypeFor).
+const SHEET_PENDING_TYPES = new Set(['termite_treatment', 'termite_inspection']);
+
+// Services never read although their form is one the reader reads:
+// new-construction termite pre-treat shares the termite treatment form and
+// is out of Fast Complete, with WDO and the slab certificate (owner, mockup
+// v8 calls).
+const NOT_READ_SERVICE_KEYS = new Set(['termite_pretreatment']);
+
+// Text fields read as the percent the note gives for them: the termite
+// treatment record's solution strength ("point zero six percent").
+const PERCENT_FIELDS = {
+  termite_treatment: ['percent_solution'],
+};
+const MAX_PERCENT = 100;
+
 // The typed form a visit's findings are read for: its completion profile's
-// own (the form /complete validates), when this reader reads it; else null.
-// The typed-facts route and the schedule payload's typedVoiceFillEnabled both
-// ask here.
+// own (the form /complete validates), when this reader reads it and the
+// service is not one it never reads; else null. The typed-facts route and
+// the schedule payload's typedVoiceFillEnabled both ask here.
 function voiceTypeFor(profile) {
   const type = profile?.findingsType;
-  return type && Object.prototype.hasOwnProperty.call(VOICE_TYPES, type) ? type : null;
+  if (!type || !Object.prototype.hasOwnProperty.call(VOICE_TYPES, type)) return null;
+  return NOT_READ_SERVICE_KEYS.has(profile?.serviceKey) ? null : type;
+}
+
+// The typed form the tech's Fast Complete sheet reads for a visit: one the
+// reader reads whose sheet is built (the schedule payload's
+// typedReportFlowEnabled and the sheet's context ask here).
+function sheetTypeFor(profile) {
+  const type = voiceTypeFor(profile);
+  return type && !SHEET_PENDING_TYPES.has(type) ? type : null;
 }
 
 // The fields a note fills, as the form is served for the visit's service key
 // (a combined rodent service's module fields only where its key shows them):
 // a pick from the form's own options (a select takes one value, chips
-// several) or a count, never free text, a field filled from the products, a
-// pesticide compliance field or a companion's.
+// several), a count or a percent field (readAs 'percent'), never other free
+// text, a field filled from the products, a pesticide compliance field, a
+// companion's, or one of the state's notice questions (tapOnly in
+// project-types.js; owner, mockup v8: always a tap, since a wrong answer
+// there is a state compliance problem).
 function voiceFieldsFor(type, { serviceKey = null } = {}) {
+  const percents = PERCENT_FIELDS[type] || [];
   return (findingsSchemaForType(type, { serviceKey })?.fields || []).filter((field) => (
     (((field.type === 'select' || field.type === 'chips') && Array.isArray(field.options) && field.options.length > 0)
-      || field.type === 'count')
+      || field.type === 'count'
+      || (field.type === 'text' && percents.includes(field.key)))
+    && !field.tapOnly
     && !field.autoFilled && !field.pesticideOnly && !field.companionOnly
-  ));
+  )).map((field) => (percents.includes(field.key) ? { ...field, readAs: 'percent' } : field));
 }
 
 // The activity score a form reads from the note: only the technician's own
@@ -103,13 +141,15 @@ function typedSchema(fields, { scored = false } = {}) {
   });
   // A number the note gives or not (every key required, nothing nullable);
   // its bounds are checked in code, since a fallback provider may drop them.
-  const said = () => ({
+  // A percent may be a decimal (0.06).
+  const said = (valueType = 'integer') => ({
     type: 'object',
-    properties: { said: { type: 'boolean' }, value: { type: 'integer' }, quote: { type: 'string' } },
+    properties: { said: { type: 'boolean' }, value: { type: valueType }, quote: { type: 'string' } },
     required: ['said', 'value', 'quote'],
     additionalProperties: false,
   });
   const entryFor = (field) => {
+    if (field.readAs === 'percent') return said('number');
     if (field.type === 'count') return said();
     return field.type === 'select' ? pick([...field.options, NOT_SAID]) : { type: 'array', items: pick(field.options) };
   };
@@ -130,12 +170,15 @@ function typedSchema(fields, { scored = false } = {}) {
 }
 
 function typedSystemPrompt(type, fields, { score = null } = {}) {
-  const kind = (field) => ({ select: 'one value', chips: 'a list', count: 'a count' })[field.type];
+  const kind = (field) => (field.readAs === 'percent' ? 'a percent' : ({ select: 'one value', chips: 'a list', count: 'a count' })[field.type]);
   const lines = fields
-    .map((field) => `- ${field.key} (${field.label}; ${kind(field)})${field.type === 'count' ? '' : `: ${field.options.join('; ')}`}`)
+    .map((field) => `- ${field.key} (${field.label}; ${kind(field)})${Array.isArray(field.options) ? `: ${field.options.join('; ')}` : ''}`)
     .join('\n');
   const counts = fields.some((field) => field.type === 'count')
     ? `\n- A "count" field: said true, the whole number the note gives for it, and the quote that states that number. When the note gives no number for it, said false, 0 and an empty quote.`
+    : '';
+  const percents = fields.some((field) => field.readAs === 'percent')
+    ? `\n- A "percent" field: said true, the percent the note gives for it as a number (0.06 for "point zero six percent" or "0.06%"), and the quote that states it with the word percent or the % sign. When the note gives no percent for it, said false, 0 and an empty quote.`
     : '';
   const rating = score
     ? `\n\nAlso the score: the technician's own ${score.label.toLowerCase()} rating, 0 (none) to 5 (severe). Said true only when the note itself gives the rating as a number ("I'd call it a 2"), with the quote that states it; otherwise said false, 0 and an empty quote. Never rate it yourself.`
@@ -144,7 +187,7 @@ function typedSystemPrompt(type, fields, { score = null } = {}) {
 
 For each field below, give what the note says, from that field's options only, each with a quote: the exact words from the note that say it, copied character for character and at least four characters long. When those words are shorter (a bare "low", "yes" or "rat"), copy the words around them as well ("low activity in the kitchen").
 - A "one value" field: the one value the note says. When the note does not say, give "${NOT_SAID}" and an empty quote.
-- A "list" field: every value the note says, each with its own quote. When the note says none, give an empty list.${counts}
+- A "list" field: every value the note says, each with its own quote. When the note says none, give an empty list.${counts}${percents}
 A value the note denies is not that value (a note that says none were found never gives a value that says they were found). Never guess.
 ${lines}${rating}
 
@@ -184,6 +227,44 @@ function heardNumber(entry, max, grounding) {
   const quote = Number.isInteger(n) && n >= 0 && n <= max && groundedQuote(entry.quote, grounding);
   return quote && statesNumber(quote, n) ? { value: n, quote } : false;
 }
+
+// The percents a quote states, each with the word percent or the % sign: in
+// digits as written ("0.06%", ".06 percent", "point 06 percent") or a decimal said in words, its
+// digits one by one after "point" ("point zero six percent", "zero point oh
+// six percent", "one point five percent"). A number with no percent beside
+// it states none.
+const DIGIT_WORDS = { zero: 0, oh: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9 };
+function percentsStated(text) {
+  const plain = String(text || '').toLowerCase().replace(/[-\u2010-\u2015]/g, ' ');
+  // Digits said after "point" ("point 06 percent") are the decimal's.
+  const digits = [...plain.matchAll(/(?<![\d.])(point\s+)?(\d+(?:\.\d+)?|\.\d+)\s*(?:%|percent\b|per\s+cent\b)/g)]
+    .map(([, point, number]) => Number(point && /^\d+$/.test(number) ? `0.${number}` : number));
+  const words = plain.match(/[a-z]+/g) || [];
+  const spoken = [];
+  words.forEach((word, i) => {
+    const end = word === 'percent' ? i : (word === 'cent' && words[i - 1] === 'per' ? i - 1 : -1);
+    if (end < 0) return;
+    let j = end - 1;
+    const decimals = [];
+    while (j >= 0 && Object.hasOwn(DIGIT_WORDS, words[j])) { decimals.unshift(DIGIT_WORDS[words[j]]); j -= 1; }
+    if (!decimals.length || words[j] !== 'point') return;
+    const whole = j > 0 && Object.hasOwn(DIGIT_WORDS, words[j - 1]) ? DIGIT_WORDS[words[j - 1]] : 0;
+    spoken.push(Number(`${whole}.${decimals.join('')}`));
+  });
+  return [...digits, ...spoken];
+}
+
+// A percent the note gives: kept when it is in range, its quote is in the
+// note word for word and states that percent; null when the note gives none;
+// false when what was heard does not stand (left for a person).
+function heardPercent(entry, grounding) {
+  if (entry?.said !== true) return null;
+  const n = entry.value;
+  const quote = Number.isFinite(n) && n > 0 && n <= MAX_PERCENT && groundedQuote(entry.quote, grounding);
+  return quote && percentsStated(quote).some((stated) => Math.abs(stated - n) < 1e-9) ? { value: n, quote } : false;
+}
+// A percent as the record writes it ("0.06%").
+const percentText = (n) => `${Number(n.toFixed(4))}%`;
 
 // What the completion refuses in these values (its contradiction rules, and
 // a value waiting on another, such as an initial setup's trap count;
@@ -241,8 +322,15 @@ function clashesWithPresent(type, current, key, value) {
 // What the note gives for one field, in the form's own encoding (a select's
 // option; chips joined ", " in the form's option order; a count's digits),
 // with the words it stands on: { value, heard }; false when what was heard
-// does not stand (left for a person); null when the note says nothing.
+// does not stand (left for a person); null when the note says nothing. A
+// percent field writes the percent ("0.06%").
 function heardField(field, entry, grounding) {
+  if (field.readAs === 'percent') {
+    const percent = heardPercent(entry, grounding);
+    if (!percent) return percent;
+    const value = percentText(percent.value);
+    return { value, heard: [{ value, quote: percent.quote }] };
+  }
   if (field.type === 'count') {
     const number = heardNumber(entry, MAX_COUNT, grounding);
     if (!number) return number;
@@ -333,7 +421,8 @@ async function readTypedFacts({ note, findingsType, current = {}, serviceKey = n
   const empty = (status) => ({
     status, type: findingsType || null, values: {}, heard: {}, unclearFields: [], version: TYPED_FACTS_VERSION,
   });
-  const fields = Object.prototype.hasOwnProperty.call(VOICE_TYPES, findingsType || '') ? voiceFieldsFor(findingsType, { serviceKey }) : [];
+  const fields = Object.prototype.hasOwnProperty.call(VOICE_TYPES, findingsType || '') && !NOT_READ_SERVICE_KEYS.has(serviceKey)
+    ? voiceFieldsFor(findingsType, { serviceKey }) : [];
   if (!fields.length) return empty('no_type');
   const score = scoreOf(findingsType);
   // Access codes never reach a provider; quotes are checked against what the
@@ -376,11 +465,15 @@ module.exports = {
   validateTypedFacts,
   currentValuesFor,
   voiceTypeFor,
+  sheetTypeFor,
   voiceFieldsFor,
   scoreOf,
   typedSchema,
   typedSystemPrompt,
+  percentsStated,
   VOICE_TYPES,
+  SHEET_PENDING_TYPES,
+  NOT_READ_SERVICE_KEYS,
   TYPED_FACTS_VERSION,
   NOT_SAID,
 };

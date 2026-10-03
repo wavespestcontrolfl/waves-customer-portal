@@ -4229,6 +4229,9 @@ function findingsSchemaForType(projectType, { serviceKey = null, companion = fal
           ...(COMPANION_EDITABLE_FINDINGS_FIELDS[projectType] || []),
         ].includes(f.key)),
         pesticideOnly: !!f.pesticideOnly,
+        // The state's notice questions: always a tap, never filled from the
+        // technician's notes (typed voice fill, visit-typed-facts.js).
+        tapOnly: !!f.tapOnly,
       })),
     photoCategories: config.photoCategories || [],
     requiredFields: requiredFindingsFieldsFor(projectType, { companion }),
