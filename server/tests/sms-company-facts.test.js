@@ -109,11 +109,11 @@ describe('service knowledge (owner-approved 2026-10-03)', () => {
   test('the seven approved lines are in the section, word for word', () => {
     const section = renderCompanyFactsSection();
     for (const line of [
-      'A standard cockroach treatment is two visits for one price. The second visit is included. A German roach cleanout can take more visits, depending on how heavy it is.',
+      'A standalone cockroach treatment (one that is not part of a recurring plan) is two visits for one price. The second visit is included. A German roach cleanout can take more visits, depending on how heavy it is.',
       'WaveGuard members get one free termite inspection a year. A WDO inspection for a real-estate sale is a separate paid service.',
       'Termite work: never promise results or how long a treatment lasts. A termite bond or pre-slab warranty is a separate purchase.',
       'There is no deposit. New recurring customers who pay by card save the card when they book and are charged after the first visit.',
-      'New lawn plans run 9 or 12 applications a year.',
+      'New residential lawn plans run 9 or 12 applications a year.',
       'Arrival windows are two hours and start on the hour.',
       'WaveGuard tiers (Bronze, Silver, Gold, Platinum) depend on how many qualifying recurring services a customer has.',
     ]) expect(section).toContain(`\n- ${line}\n`);

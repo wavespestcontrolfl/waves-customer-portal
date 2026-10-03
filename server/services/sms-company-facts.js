@@ -32,12 +32,12 @@ const COMPANY_FACTS = Object.freeze([
   // German roach cleanout runs 2-4 visits by severity; pay-after-first-visit is the
   // recurring card rail only (invoice / commercial / one-time differ); 6x lawn plans
   // still exist for older customers; only qualifying services count toward a tier.
-  'A standard cockroach treatment is two visits for one price. The second visit is included. A German roach cleanout can take more visits, depending on how heavy it is.',
+  'A standalone cockroach treatment (one that is not part of a recurring plan) is two visits for one price. The second visit is included. A German roach cleanout can take more visits, depending on how heavy it is.',
   'WaveGuard members get one free termite inspection a year. A WDO inspection for a real-estate sale is a separate paid service.',
   // "guarantee" is a banned customer-copy word (hasBannedCustomerCopy), so the no-guarantee ruling is worded without it.
   'Termite work: never promise results or how long a treatment lasts. A termite bond or pre-slab warranty is a separate purchase.',
   'There is no deposit. New recurring customers who pay by card save the card when they book and are charged after the first visit.',
-  'New lawn plans run 9 or 12 applications a year.',
+  'New residential lawn plans run 9 or 12 applications a year.',
   'Arrival windows are two hours and start on the hour.',
   'WaveGuard tiers (Bronze, Silver, Gold, Platinum) depend on how many qualifying recurring services a customer has.',
 ]);
