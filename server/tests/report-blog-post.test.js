@@ -54,7 +54,7 @@ jest.mock('../services/service-completion-profiles', () => ({
 const fs = require('fs');
 const path = require('path');
 const {
-  blogPostAllowedFor, searchReportBlogPosts, resolveReportBlogPostPick, frozenBlogPost, searchTerms, registryLink,
+  blogPostAllowedFor, searchReportBlogPosts, resolveReportBlogPostPick, frozenBlogPost, searchTerms, registryLink, wordsOnTheSite,
 } = require('../services/service-report/report-blog-post');
 const router = require('../routes/admin-dispatch');
 
@@ -337,6 +337,30 @@ describe('searchReportBlogPosts', () => {
     for (const metadata of [{ frontmatter: { primary_keyword: 'ghost ant control' } }, { astro: { frontmatter: { target_keyword: 'ghost ant control' } } }]) {
       const deployed = registryRow('aaaaaaaa-0000-4000-8000-000000000064', 'Spring Yard Checklist', { metadata });
       expect((await searchReportBlogPosts(recordingKnex({ content_registry: [deployed] }), 'ghost ants')).map((post) => post.id)).toEqual([deployed.id]);
+    }
+  });
+
+  test('a post is exact only when it holds every word of the search, past the first four (GitHub Codex P2 on 45144528b8)', async () => {
+    expect(searchTerms('small black ants kitchen heavy rain').map((term) => term.word)).toEqual(['small', 'black', 'ant', 'kitchen']);
+    expect(searchTerms('small black ants kitchen heavy rain', Infinity)).toHaveLength(6);
+    const four = registryRow('aaaaaaaa-0000-4000-8000-000000000071', 'Small Black Ants in the Kitchen');
+    const six = registryRow('aaaaaaaa-0000-4000-8000-000000000072', 'Small Black Ants in the Kitchen After Heavy Rain');
+    const posts = await searchReportBlogPosts(recordingKnex({ content_registry: [four, six] }), 'small black ants kitchen heavy rain');
+    expect(Object.fromEntries(posts.map((post) => [post.id, post.exact]))).toEqual({ [four.id]: false, [six.id]: true });
+  });
+
+  test('which words of a phrase the live posts use: every word, in one read (GitHub Codex P1 on 45144528b8)', async () => {
+    const knex = recordingKnex({ content_registry: [{ t0: true, t1: false }] });
+    expect((await wordsOnTheSite(knex, 'ants for john')).known).toEqual([true, false]);
+    const [, raw] = knex.calls.find(([name]) => name === 'content_registry select');
+    expect(raw.sql).toMatch(/^bool_or\(.+\) AS t0, bool_or\(.+\) AS t1$/);
+    expect(raw.bindings).toHaveLength(8);
+    expect(knex.calls).toEqual(expect.arrayContaining([['content_registry whereIn', 'live_status', ['live', 'live_visible']]]));
+    // No words, or more than twelve, knows none and reads nothing.
+    for (const phrase of ['how to', Array.from({ length: 13 }, (_, i) => `word${i}`).join(' ')]) {
+      const quiet = recordingKnex({ content_registry: [] });
+      expect((await wordsOnTheSite(quiet, phrase)).known.some(Boolean)).toBe(false);
+      expect(quiet.calls).toEqual([]);
     }
   });
 

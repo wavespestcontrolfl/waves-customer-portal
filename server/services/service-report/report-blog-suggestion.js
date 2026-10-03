@@ -53,27 +53,22 @@ function dedupeKeyFor(phrase) {
   return `techsuggest:v1:${slug}`;
 }
 
-// Why a phrase cannot be a topic, or null. `typed` is the phrase as the
-// person typed it, for the personal-data check.
-function phraseProblem(phrase, typed = phrase) {
+// Why a phrase cannot be a topic, or null.
+function phraseProblem(phrase) {
   const { searchTerms } = require('./report-blog-post');
   if (phrase.length < MIN_CHARS || phrase.length > MAX_CHARS || !searchTerms(phrase).length) return 'not_a_topic';
   const { isTransactionalQuery } = require('../content/scoring-config');
   if (isTransactionalQuery(phrase)) return 'not_a_topic';
   const { geoBlockReason } = require('../content/topic-targeting-gate');
   if (geoBlockReason(phrase, { allowStatewide: true })) return 'not_a_topic';
-  // Personal data, read in the words as typed as well as normalized:
-  // lowercasing hides a capitalized name from the redactor ("ants at John
-  // Smith home"), and a phrase it is unsure of (confidence below high) is
-  // refused too. A capitalized topic ("Standing Water") can read as a name
-  // and is refused with it: the redactor's own rule is that a false name costs
-  // far less than a real one reaching a published post (pre-push P1 on
-  // 1aaeaa36ab).
+  // Personal data the redactor finds (a phone, an email, an address), or a
+  // phrase it is unsure of (confidence below high; pre-push P1 on
+  // 1aaeaa36ab). A name is the site-words rule's to refuse (see
+  // suggestReportBlogPost): the redactor finds names by their capitals, so it
+  // misses a lowercase one and reads a capitalized topic as one.
   const { redact } = require('../content/pii-redactor');
-  for (const text of new Set([String(typed || ''), phrase])) {
-    const { findings = [], confidence } = redact(text);
-    if (findings.length || confidence !== 'high') return 'not_a_topic';
-  }
+  const { findings = [], confidence } = redact(phrase);
+  if (findings.length || confidence !== 'high') return 'not_a_topic';
   return null;
 }
 
@@ -111,10 +106,19 @@ function suggestionRow(phrase, { actorId = null, scheduledServiceId = null, now 
  * over the day's limit.
  */
 async function suggestReportBlogPost(knex, { phrase: raw, actorId = null, scheduledServiceId = null }) {
+  // Only text is a phrase: an object or a list would read as "[object
+  // Object]" or a comma list (GitHub Codex P2 on 45144528b8).
+  if (typeof raw !== 'string') return { error: 'not_a_topic' };
   const phrase = normalizePhrase(raw);
-  const problem = phraseProblem(phrase, raw);
+  const problem = phraseProblem(phrase);
   if (problem) return { error: problem };
-  const { searchReportBlogPosts } = require('./report-blog-post');
+  const { searchReportBlogPosts, wordsOnTheSite } = require('./report-blog-post');
+  // Every word must be one the site's live posts already use, so a name (in
+  // any case: "ants for John", "ants at john smith home") or a stray word
+  // never becomes a published topic, and a capitalized topic ("Standing
+  // Water") is not mistaken for a name (GitHub Codex P1 on 45144528b8).
+  const { known } = await wordsOnTheSite(knex, phrase);
+  if (!known.length || !known.every(Boolean)) return { error: 'not_a_topic' };
   if ((await searchReportBlogPosts(knex, phrase)).some((post) => post.exact)) return { status: 'covered' };
   // One suggestion at a time per person, so the day's cap holds when taps
   // race: the count, the held check and the write share one transaction
@@ -123,8 +127,16 @@ async function suggestReportBlogPost(knex, { phrase: raw, actorId = null, schedu
 }
 
 async function writeSuggestion(trx, phrase, { actorId, scheduledServiceId }) {
+  if (actorId) await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`report-blog-suggestion:${actorId}`]);
+  // A topic held already writes nothing, so it answers already_queued even
+  // past the day's cap (GitHub Codex P2 on 45144528b8).
+  const held = await trx('opportunity_queue')
+    .where({ action_type: 'new_supporting_blog' })
+    .whereRaw('lower(query) = ?', [phrase])
+    .whereIn('status', HELD_STATUSES)
+    .first('id');
+  if (held) return { status: 'already_queued' };
   if (actorId) {
-    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`report-blog-suggestion:${actorId}`]);
     const sent = await trx('opportunity_queue')
       .whereRaw("signal_metadata->>'source' = ?", [SOURCE])
       .whereRaw("signal_metadata->>'suggested_by' = ?", [String(actorId)])
@@ -133,12 +145,6 @@ async function writeSuggestion(trx, phrase, { actorId, scheduledServiceId }) {
       .first();
     if (Number(sent?.n) >= MAX_PER_DAY) return { error: 'too_many_suggestions' };
   }
-  const held = await trx('opportunity_queue')
-    .where({ action_type: 'new_supporting_blog' })
-    .whereRaw('lower(query) = ?', [phrase])
-    .whereIn('status', HELD_STATUSES)
-    .first('id');
-  if (held) return { status: 'already_queued' };
   const row = suggestionRow(phrase, { actorId: actorId == null ? null : String(actorId), scheduledServiceId });
   const columns = Object.keys(row);
   const values = columns.map((column) => (column === 'score_breakdown' || column === 'signal_metadata' ? JSON.stringify(row[column]) : row[column]));

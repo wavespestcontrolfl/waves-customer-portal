@@ -66,10 +66,24 @@ export function useBlogPostSearch(search) {
   return { query, setQuery, results, status, covered: exact.length > 0, shown: exact.length ? exact : results, canSuggest };
 }
 
+// The server's final answer to a suggestion, by its status and code:
+// refused (422), limit (429, the day's cap), unavailable (404 with
+// suggestions off, or 409 not_available), covered (409, a live post now holds
+// every word). Anything else may pass and can be sent again (GitHub Codex P2
+// on 45144528b8).
+function suggestionAnswer(err) {
+  if (err?.status === 422) return "refused";
+  if (err?.status === 429) return "limit";
+  if (err?.status === 404 || err?.code === "not_available") return "unavailable";
+  if (err?.status === 409) return "covered";
+  return "failed";
+}
+// Answers a new tap cannot change: only a new search starts over.
+const FINAL_ANSWERS = new Set(["refused", "limit", "unavailable", "covered"]);
+
 // One tap suggests the search as a new post. The answer stands while the
 // search text stays the same: idle, sending, queued, already (someone
-// suggested it before), refused (the server will not take the phrase) or
-// failed.
+// suggested it before), a final refusal (above) or failed.
 export function useBlogSuggestion(suggest, query) {
   const phrase = String(query || "").trim();
   const [state, setState] = useState({ phrase: null, status: "idle" });
@@ -80,7 +94,7 @@ export function useBlogSuggestion(suggest, query) {
     Promise.resolve()
       .then(() => suggest(phrase))
       .then((data) => settle(data?.status === "queued" ? "queued" : data?.status === "already_queued" ? "already" : "failed"))
-      .catch((err) => settle(err?.status === 422 ? "refused" : "failed"));
+      .catch((err) => settle(suggestionAnswer(err)));
   }, [suggest, phrase]);
   return { status: state.phrase === phrase ? state.status : "idle", send };
 }
@@ -92,7 +106,10 @@ export const SUGGESTION_COPY = {
   queued: { button: (phrase) => `Suggested: “${phrase}”`, note: "In the blog queue. It will be written and published automatically." },
   already: { button: () => "Already in the blog queue", note: "Someone suggested it already. It will be written and published automatically." },
   failed: { button: (phrase) => `Suggest a post about “${phrase}”`, note: "That didn’t go through. Try again." },
-  refused: { button: () => "Can’t suggest this one", note: "Name the topic only, with no names, addresses or phone numbers." },
+  refused: { button: () => "Can’t suggest this one", note: "Use plain topic words, with no names, addresses or phone numbers." },
+  limit: { button: () => "Today’s limit reached", note: "Suggest more tomorrow." },
+  unavailable: { button: () => "Can’t suggest right now", note: "Suggestions aren’t open for this visit." },
+  covered: { button: () => "A post covers this now", note: "Search again to see it." },
 };
 
 // The search's status lines: searching, failed, nothing found, or (no post
@@ -107,7 +124,7 @@ function SearchStatusLines({ status, results, uncovered, phrase, ink, muted }) {
     <>
       {line(`No post covers “${phrase}” yet.`, ink)}
       {results.length > 0 && (
-        <p style={{ margin: "8px 0 0", fontSize: 12, letterSpacing: "0.04em", textTransform: "uppercase", color: muted }}>Closest posts</p>
+        <p style={{ margin: "8px 0 0", fontSize: 14, letterSpacing: "0.04em", textTransform: "uppercase", color: muted }}>Closest posts</p>
       )}
     </>
   );
@@ -116,8 +133,7 @@ function SearchStatusLines({ status, results, uncovered, phrase, ink, muted }) {
 // "Suggest a post about …" and, after the tap, what became of it.
 function SuggestBlock({ phrase, suggestion, disabled, buttonStyle, muted }) {
   const done = suggestion.status === "queued" || suggestion.status === "already";
-  // A refused phrase is refused again: only a new search starts over.
-  const settled = done || suggestion.status === "refused";
+  const settled = done || FINAL_ANSWERS.has(suggestion.status);
   const copy = SUGGESTION_COPY[suggestion.status];
   return (
     <>
@@ -128,8 +144,8 @@ function SuggestBlock({ phrase, suggestion, disabled, buttonStyle, muted }) {
         aria-live="polite"
         style={{
           ...buttonStyle, marginTop: 8, borderStyle: done ? "solid" : "dashed", fontWeight: 500, cursor: disabled || settled ? "default" : "pointer",
-          // A refused phrase reads as inactive at a glance, not as a live button.
-          ...(suggestion.status === "refused" ? { color: muted } : {}),
+          // A final refusal reads as inactive at a glance, not as a live button.
+          ...(FINAL_ANSWERS.has(suggestion.status) ? { color: muted } : {}),
         }}
       >
         {copy.button(phrase)}

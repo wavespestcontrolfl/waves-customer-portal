@@ -96,7 +96,7 @@ describe('BlogPostPicker', () => {
       render(<Harness search={search} suggest={suggest} />);
       await searchFor('Standing water');
       expect(await screen.findByText('No post covers “Standing water” yet.')).toBeTruthy();
-      expect(screen.getByText('Closest posts')).toBeTruthy();
+      expect(screen.getByText('Closest posts').style.fontSize).toBe('14px');
       expect(screen.getByRole('button', { name: /Dollarweed/ })).toBeTruthy();
       expect(screen.getByText('It goes straight into the blog queue and is written and published automatically.')).toBeTruthy();
       fireEvent.click(screen.getByRole('button', { name: 'Suggest a post about “Standing water”' }));
@@ -133,10 +133,26 @@ describe('BlogPostPicker', () => {
       await searchFor('ants at John Smith home');
       fireEvent.click(await screen.findByRole('button', { name: 'Suggest a post about “ants at John Smith home”' }));
       expect(await screen.findByRole('button', { name: 'Can’t suggest this one' })).toBeDisabled();
-      expect(screen.getByText('Name the topic only, with no names, addresses or phone numbers.')).toBeTruthy();
+      expect(screen.getByText('Use plain topic words, with no names, addresses or phone numbers.')).toBeTruthy();
       expect(suggest).toHaveBeenCalledTimes(1);
       await searchFor('ghost ants');
       expect(await screen.findByRole('button', { name: 'Suggest a post about “ghost ants”' })).not.toBeDisabled();
+    });
+
+    test.each([
+      ['a live post now covers it', { status: 409, code: 'covered' }, 'A post covers this now', 'Search again to see it.'],
+      ['the day\'s limit', { status: 429, code: 'too_many_suggestions' }, 'Today’s limit reached', 'Suggest more tomorrow.'],
+      ['suggestions off', { status: 404, code: 'suggestions_off' }, 'Can’t suggest right now', 'Suggestions aren’t open for this visit.'],
+      ['a visit that carries no post', { status: 409, code: 'not_available' }, 'Can’t suggest right now', 'Suggestions aren’t open for this visit.'],
+    ])('%s is a final answer, never a try-again (GitHub Codex P2 on 45144528b8)', async (_label, fields, button, note) => {
+      const search = vi.fn(async () => ({ posts: [], suggest: true }));
+      const suggest = vi.fn().mockRejectedValue(Object.assign(new Error('refused'), fields));
+      render(<Harness search={search} suggest={suggest} />);
+      await searchFor('standing water');
+      fireEvent.click(await screen.findByRole('button', { name: 'Suggest a post about “standing water”' }));
+      expect(await screen.findByRole('button', { name: button })).toBeDisabled();
+      expect(screen.getByText(note)).toBeTruthy();
+      expect(screen.queryByText('That didn’t go through. Try again.')).toBeNull();
     });
 
     test('a new search starts a new suggestion', async () => {

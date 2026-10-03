@@ -43,6 +43,18 @@ jest.mock('../services/service-completion-profiles', () => ({
 const {
   suggestReportBlogPost, suggestionRow, phraseProblem, normalizePhrase, dedupeKeyFor, MAX_PER_DAY,
 } = require('../services/service-report/report-blog-suggestion');
+const reportBlogPost = require('../services/service-report/report-blog-post');
+// The site's words, as the live registry answers them: every word one a live
+// post uses, but these (GitHub Codex P1 on 45144528b8).
+const NOT_SITE_WORDS = new Set(['john', 'smith', 'object']);
+let siteWords;
+beforeEach(() => {
+  siteWords = jest.spyOn(reportBlogPost, 'wordsOnTheSite').mockImplementation(async (_knex, query) => {
+    const terms = reportBlogPost.searchTerms(query, Infinity);
+    return { terms, known: terms.map((term) => !NOT_SITE_WORDS.has(term.word)) };
+  });
+});
+afterEach(() => { siteWords.mockRestore(); });
 const router = require('../routes/admin-dispatch');
 
 // A knex fake for the search (no live post unless given), the day's count,
@@ -140,38 +152,50 @@ describe('suggestionRow', () => {
 });
 
 describe('personal data (pre-push P1 on 1aaeaa36ab)', () => {
-  test('is read in the words as typed: lowercasing hides a capitalized name from the redactor', () => {
-    expect(phraseProblem(normalizePhrase('ants at John Smith home'))).toBeNull();
-    expect(phraseProblem(normalizePhrase('ants at John Smith home'), 'ants at John Smith home')).toBe('not_a_topic');
+  test('a name is refused in any case: no live post uses its words, and nothing is written (GitHub Codex P1 on 45144528b8)', async () => {
+    for (const phrase of ['ants for John', 'ants at john smith home', 'ants at John Smith home']) {
+      const knex = queueKnex();
+      expect(await suggestReportBlogPost(knex, { phrase, actorId: 'tech-1' })).toEqual({ error: 'not_a_topic' });
+      expect(queueWrites(knex)).toEqual([]);
+    }
   });
 
   test('a phrase the redactor is unsure of is refused', () => {
-    expect(phraseProblem(normalizePhrase('ants 12345678'), 'ants 12345678')).toBe('not_a_topic');
+    expect(phraseProblem(normalizePhrase('ants 12345678'))).toBe('not_a_topic');
   });
 
-  test('a capitalized topic can read as a name and is refused with it; written as a sentence it is not', () => {
-    expect(phraseProblem(normalizePhrase('Standing Water'), 'Standing Water')).toBe('not_a_topic');
-    expect(phraseProblem(normalizePhrase('Standing water'), 'Standing water')).toBeNull();
+  test('a capitalized topic whose words are site words is taken, not mistaken for a name', async () => {
+    expect(await suggestReportBlogPost(queueKnex(), { phrase: 'Standing Water', actorId: 'tech-1' })).toEqual({ status: 'queued' });
   });
 
-  test('a suggestion is checked as typed, before anything is read', async () => {
-    const knex = queueKnex();
-    expect(await suggestReportBlogPost(knex, { phrase: 'ants at John Smith home', actorId: 'tech-1' })).toEqual({ error: 'not_a_topic' });
-    expect(knex.calls).toEqual([]);
+  test('only text is a phrase: an object or a list is refused before anything is read (GitHub Codex P2 on 45144528b8)', async () => {
+    for (const phrase of [{ topic: 'standing water' }, ['standing', 'water'], 42, null]) {
+      const knex = queueKnex();
+      expect(await suggestReportBlogPost(knex, { phrase, actorId: 'tech-1' })).toEqual({ error: 'not_a_topic' });
+      expect(knex.calls).toEqual([]);
+    }
   });
 });
 
 describe('suggestReportBlogPost', () => {
-  test('the count, the held check and the write run in one transaction under the person\'s lock (pre-push P1 on 1aaeaa36ab)', async () => {
+  test('the held check, the count and the write run in one transaction under the person\'s lock, held first (pre-push P1 on 1aaeaa36ab; GitHub Codex P2 on 45144528b8)', async () => {
     const knex = queueKnex();
     expect(await suggestReportBlogPost(knex, { phrase: 'standing water', actorId: 'tech-1' })).toEqual({ status: 'queued' });
     expect(knex.transaction).toHaveBeenCalledTimes(1);
     const lock = knex.calls.findIndex(([name, sql]) => name === 'raw' && /pg_advisory_xact_lock/.test(String(sql)));
+    const held = knex.calls.findIndex(([name, sql]) => name === 'opportunity_queue whereRaw' && /lower\(query\)/.test(String(sql)));
     const count = knex.calls.findIndex(([name, sql]) => name === 'opportunity_queue whereRaw' && /suggested_by/.test(String(sql)));
     const write = knex.calls.findIndex(([name, sql]) => name === 'raw' && /^INSERT INTO opportunity_queue/.test(String(sql)));
     expect(knex.calls[lock]).toEqual(['raw', 'SELECT pg_advisory_xact_lock(hashtext(?))', ['report-blog-suggestion:tech-1']]);
-    expect(lock).toBeLessThan(count);
+    expect(lock).toBeLessThan(held);
+    expect(held).toBeLessThan(count);
     expect(count).toBeLessThan(write);
+  });
+
+  test('a held topic answers already_queued even past the day\'s cap (GitHub Codex P2 on 45144528b8)', async () => {
+    const knex = queueKnex({ held: { id: 'mined-row' }, sentToday: MAX_PER_DAY });
+    expect(await suggestReportBlogPost(knex, { phrase: 'standing water', actorId: 'tech-1' })).toEqual({ status: 'already_queued' });
+    expect(queueWrites(knex)).toEqual([]);
   });
 
   test('writes one row for a phrase no post covers; an expired suggestion of it is revived, nothing else overwritten', async () => {
@@ -269,7 +293,7 @@ describe('POST /:serviceId/blog-suggestions', () => {
     }
     const res = await invoke({ phrase: 'standing water' });
     expect(res.statusCode).toBe(404);
-    expect(res.body).toEqual({ enabled: false });
+    expect(res.body).toEqual({ enabled: false, code: 'suggestions_off' });
     expect(queue.raw).not.toHaveBeenCalled();
   });
 
@@ -292,13 +316,17 @@ describe('POST /:serviceId/blog-suggestions', () => {
     mockResolveProfile.mockResolvedValue({ serviceKey: 'wdo_inspection', projectType: 'wdo_inspection' });
     const res = await invoke({ phrase: 'standing water' });
     expect(res.statusCode).toBe(409);
-    expect(res.body).toEqual({ error: 'not_available' });
+    expect(res.body).toEqual({ error: 'not_available', code: 'not_available' });
   });
 
-  test('no topic is 422; a phrase over the day\'s limit is 429', async () => {
-    expect((await invoke({ phrase: 'near me' })).statusCode).toBe(422);
+  test('no topic is 422; a phrase over the day\'s limit is 429; each names itself in code (GitHub Codex P2 on 45144528b8)', async () => {
+    const refused = await invoke({ phrase: 'near me' });
+    expect(refused.statusCode).toBe(422);
+    expect(refused.body).toEqual({ error: 'not_a_topic', code: 'not_a_topic' });
     queue = queueKnex({ sentToday: MAX_PER_DAY });
     mockDbCurrent.raw = queue.raw;
-    expect((await invoke({ phrase: 'standing water' })).statusCode).toBe(429);
+    const limited = await invoke({ phrase: 'standing water' });
+    expect(limited.statusCode).toBe(429);
+    expect(limited.body).toEqual({ error: 'too_many_suggestions', code: 'too_many_suggestions' });
   });
 });

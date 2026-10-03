@@ -595,23 +595,26 @@ router.get('/:serviceId/blog-posts', async (req, res, next) => {
 // search's own. Answers 201 { status: 'queued' }, 200 { status:
 // 'already_queued' }, 409 { status: 'covered' } when a live post now holds
 // every word, 422 { error: 'not_a_topic' }, 429 { error:
-// 'too_many_suggestions' }. Never logs the phrase.
+// 'too_many_suggestions' }, and 404 with suggestions off or 409 { error:
+// 'not_available' } for a visit that carries no post. Every refusal names
+// itself in `code`, so the form tells a final answer from a passing failure
+// (GitHub Codex P2 on 45144528b8). Never logs the phrase.
 router.post('/:serviceId/blog-suggestions', async (req, res, next) => {
   try {
     const gates = require('../config/feature-gates');
-    if (!gates.reportBlogPostLive() || !gates.blogSearchSuggestLive()) return res.status(404).json({ enabled: false });
+    if (!gates.reportBlogPostLive() || !gates.blogSearchSuggestLive()) return res.status(404).json({ enabled: false, code: 'suggestions_off' });
     const visit = await blogPostVisit(req, res);
     if (!visit) return undefined;
-    if (!visit.allowed) return res.status(409).json({ error: 'not_available' });
+    if (!visit.allowed) return res.status(409).json({ error: 'not_available', code: 'not_available' });
     const { suggestReportBlogPost } = require('../services/service-report/report-blog-suggestion');
     const answer = await suggestReportBlogPost(db, {
       phrase: req.body?.phrase,
       actorId: req.technicianId || null,
       scheduledServiceId: visit.svc.id,
     });
-    if (answer.error === 'too_many_suggestions') return res.status(429).json(answer);
-    if (answer.error) return res.status(422).json(answer);
-    if (answer.status === 'covered') return res.status(409).json(answer);
+    if (answer.error === 'too_many_suggestions') return res.status(429).json({ ...answer, code: answer.error });
+    if (answer.error) return res.status(422).json({ ...answer, code: answer.error });
+    if (answer.status === 'covered') return res.status(409).json({ ...answer, code: 'covered' });
     logger.info(`[blog-suggest] ${answer.status} from service ${visit.svc.id}`);
     return res.status(answer.status === 'queued' ? 201 : 200).json(answer);
   } catch (err) { return next(err); }
