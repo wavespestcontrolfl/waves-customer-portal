@@ -54,7 +54,7 @@ const SERVICE = {
 };
 
 const PLANNED = [
-  { productId: P_TALAK, name: 'Talak 7.9%', applicationMethod: 'broadcast_spray', amount: 6.4, amountUnit: 'fl_oz', treatedSqft: 6000, areaUnit: 'sqft', approvedForReport: true, wateringRule: null, wateringSummary: 'Water in', mowHoldDays: null },
+  { productId: P_TALAK, name: 'Talak 7.9%', applicationMethod: 'broadcast_spray', amount: 6.4, amountUnit: 'fl_oz', treatedSqft: 6000, areaUnit: 'sqft', ratePer1000: 1.07, rateUnit: 'fl_oz', approvedForReport: true, wateringRule: null, wateringSummary: 'Water in', mowHoldDays: null },
   { productId: P_IRON, name: 'Iron Plus', applicationMethod: 'spot_treatment', amount: null, amountUnit: 'fl_oz', approvedForReport: true, wateringRule: null, wateringSummary: 'No rule', mowHoldDays: null },
 ];
 
@@ -415,7 +415,7 @@ describe('the submit body', () => {
       sendCompletionSms: true, requestReview: true, includePayLink: true, reviewTiming: 'auto',
     });
     expect(body.products).toEqual([
-      { productId: P_TALAK, applicationMethod: 'broadcast_spray', totalAmount: 6.4, amountUnit: 'fl_oz', applicationArea: 'Front yard, Back yard, Side yards', areaValue: 6000, areaUnit: 'sqft', targets: [] },
+      { productId: P_TALAK, applicationMethod: 'broadcast_spray', totalAmount: 6.4, amountUnit: 'fl_oz', rate: 1.07, rateUnit: 'fl_oz', applicationArea: 'Front yard, Back yard, Side yards', areaValue: 6000, areaUnit: 'sqft', targets: [] },
       { productId: P_IRON, applicationMethod: 'spot_treatment', totalAmount: 2, amountUnit: 'fl_oz', applicationArea: 'Front yard, Back yard, Side yards', targets: [] },
     ]);
     expect(body).not.toHaveProperty('lawnProtocolCompletion');
@@ -919,5 +919,102 @@ describe('a product the plan lists twice', () => {
     expect(skipped.every((id) => id === id.toLowerCase())).toBe(true);
     expect(body.techTips).toEqual({ ids: ['tip-a'], custom: null });
     expect(body.products.every((p) => p.targets.length === 0)).toBe(true);
+  });
+});
+
+// ── pre-push P1: planned rates in the completion record ─────────────────────
+describe('application rate on the product rows', () => {
+  const planned = (extra = {}, method = 'broadcast_spray') => plannedOne(method, { treatedSqft: 6000, areaUnit: 'sqft', ratePer1000: 1.07, rateUnit: 'fl_oz', ...extra });
+  const rateBox = () => within(editorFor('Talak 7.9%')).getByLabelText('Talak 7.9% rate');
+  const sentRow = () => completeCalls()[0].body.products[0];
+  const run = async (ctx, after) => {
+    await openSheet({ request: makeRequest({ ctx }) });
+    if (after) await after();
+    await confirmAssessment();
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+  };
+
+  test('a planned row whose amount, area and method are untouched sends the plan rate and unit, and shows it', async () => {
+    await run(planned(), async () => expect(rateBox().value).toBe('1.07'));
+    expect(sentRow()).toMatchObject({ rate: 1.07, rateUnit: 'fl_oz', totalAmount: 2, amountUnit: 'fl_oz', areaValue: 6000 });
+  });
+
+  test.each([
+    ['the amount', () => fireEvent.change(within(editorFor('Talak 7.9%')).getByLabelText('Talak 7.9%'), { target: { value: '3' } })],
+    ['the amount unit', () => fireEvent.change(within(editorFor('Talak 7.9%')).getByLabelText('Unit for Talak 7.9%'), { target: { value: 'gal' } })],
+    ['the plan\'s area', () => fireEvent.change(within(editorFor('Talak 7.9%')).getByLabelText('Area treated (sq ft)'), { target: { value: '4000' } })],
+    ['the method', () => fireEvent.click(within(editorFor('Talak 7.9%')).getByRole('button', { name: 'Granular' }))],
+  ])('a change to %s makes the plan rate stale: it is not sent and the box empties (never recomputed)', async (_label, change) => {
+    await run(planned(), async () => {
+      change();
+      await waitFor(() => expect(rateBox().value).toBe(''));
+    });
+    expect(sentRow()).not.toHaveProperty('rate');
+    expect(sentRow()).not.toHaveProperty('rateUnit');
+  });
+
+  test('a rate the technician types after a change is sent, in the label\'s unit', async () => {
+    await run(planned(), async () => {
+      fireEvent.change(within(editorFor('Talak 7.9%')).getByLabelText('Talak 7.9%'), { target: { value: '3' } });
+      fireEvent.change(rateBox(), { target: { value: '1.2' } });
+    });
+    // After a change the unit is the label's own, as the sibling does for a typed rate.
+    expect(sentRow()).toMatchObject({ rate: 1.2, rateUnit: 'oz' });
+  });
+
+  test('a unit /complete does not accept is never sent (mL, an odd catalog unit)', async () => {
+    await run(planned({ rateUnit: 'ml' }));
+    expect(sentRow()).not.toHaveProperty('rate');
+    cleanup();
+    requests = [];
+    await run(planned({ rateUnit: 'percent_solution' }));
+    expect(sentRow()).not.toHaveProperty('rateUnit');
+  });
+
+  test('a plan with no rate sends none, and no catalog default is invented for a planned row', async () => {
+    await run(planned({ ratePer1000: null, rateUnit: null }));
+    expect(sentRow()).not.toHaveProperty('rate');
+  });
+
+  test('a perimeter row keeps the plan rate as the plan gave it, and linear feet are the area', async () => {
+    await run(plannedOne('perimeter_spray', { ratePer1000: 0.5, rateUnit: 'fl_oz' }), async () => {
+      fireEvent.change(areaInput('Linear feet treated'), { target: { value: '150' } });
+    });
+    expect(sentRow()).toMatchObject({ rate: 0.5, rateUnit: 'fl_oz', areaValue: 150, areaUnit: 'linear_ft' });
+  });
+
+  test('an added product has no prefilled rate (the sibling\'s rule); one the technician types is sent with the label unit', async () => {
+    const catalog = [{ ...CATALOG[0], default_unit: 'fl_oz', default_rate_per_1000: 2 }, CATALOG[1], CATALOG[2]];
+    await openSheet({ request: makeRequest({ ctx: ONE_TIME() }), props: { catalog } });
+    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
+    fireEvent.click(await screen.findByText('Talak 7.9%'));
+    expect(rateBox().value).toBe('');
+    fireEvent.change(within(editorFor('Talak 7.9%')).getByLabelText('Talak 7.9%'), { target: { value: '2' } });
+    fireEvent.change(within(editorFor('Talak 7.9%')).getByLabelText('Area treated (sq ft)'), { target: { value: '1000' } });
+    await confirmAssessment();
+    await submit();
+    expect(sentRow()).not.toHaveProperty('rate');
+    cleanup();
+    requests = [];
+    await openSheet({ request: makeRequest({ ctx: ONE_TIME() }), props: { catalog } });
+    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
+    fireEvent.click(await screen.findByText('Talak 7.9%'));
+    fireEvent.change(within(editorFor('Talak 7.9%')).getByLabelText('Talak 7.9%'), { target: { value: '2' } });
+    fireEvent.change(within(editorFor('Talak 7.9%')).getByLabelText('Area treated (sq ft)'), { target: { value: '1000' } });
+    fireEvent.change(rateBox(), { target: { value: '2' } });
+    await confirmAssessment();
+    await submit();
+    expect(sentRow()).toMatchObject({ rate: 2, rateUnit: 'fl_oz' });
+  });
+
+  test('a rate over the label maximum is flagged to the technician, not blocked', async () => {
+    const catalog = [{ ...CATALOG[0], rate_unit: 'fl_oz', default_unit: 'fl_oz', max_label_rate_per_1000: 1 }, CATALOG[1], CATALOG[2]];
+    await run(planned(), null).catch(() => {});
+    cleanup();
+    await openSheet({ request: makeRequest({ ctx: planned() }), props: { catalog } });
+    expect(await screen.findByText(/label max/)).toBeTruthy();
+    await confirmAssessment();
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
   });
 });

@@ -43,13 +43,13 @@ import LawnAssessmentCompletionBlock from '../lawn/LawnAssessmentCompletionBlock
 import { LAWN_FINDINGS_TYPE } from '../../lib/lawn-fast-complete';
 import { detectServiceCategory } from '../../lib/service-colors';
 import { LAWN_DEFAULT_AREAS } from '../../lib/lawn-completion';
-import { defaultApplicationMethodForLine, normalizeApplicationMethod } from '../../lib/product-rate-prefill';
+import { defaultApplicationMethodForLine, normalizeApplicationMethod, prefillRateCeiling, resolveRatePrefill } from '../../lib/product-rate-prefill';
 import {
   UNIT_CHOICES, amountText, categoryLabel, hasAmount, measureUnit, productUnits, seededAmount, stockHolds,
 } from '../../lib/fast-complete-products';
 import { submittedAmount } from '../../lib/measure-units';
 import {
-  AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, ProductTileButton,
+  AmountRow, CLOSED_VISIT_STATUSES, isSendableRateUnit, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, ProductTileButton,
   SavedView, SheetHeader, TipSection, VisitNote, methodLabel, techTipsOf, useProductPicker, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
 } from './FastCompleteParts';
 import { Button, ActionFeedback, Input } from '../ui';
@@ -85,8 +85,6 @@ export const METHOD_REQUIREMENTS = {
 };
 export const requirementOf = (row) => METHOD_REQUIREMENTS[normalizeApplicationMethod(row.method)] || null;
 const needsArea = (row) => requirementOf(row) !== null;
-// No rate: the context carries none, so none is recorded (AmountRow hides the row).
-const NO_RATE = { rate: '', rateUnit: '', max: null };
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -295,8 +293,42 @@ function productRow(product, { planned = null, added = false }) {
     fromPlan: seeded.amount !== '',
     area: '',
     areaFrom: '',
+    // The plan's own rate (ratePer1000 in rateUnit), only in a unit /complete
+    // accepts. It describes the plan's amount, method and area: the first change
+    // to any of them makes it stale (rateStale) and it is no longer sent.
+    planRate: planned && Number(planned.ratePer1000) > 0 && isSendableRateUnit(planned.rateUnit)
+      ? { rate: Number(planned.ratePer1000), unit: String(planned.rateUnit).trim() }
+      : null,
+    rateStale: false,
+    // A rate the technician typed; null until they do.
+    rateInput: null,
     // The square feet the context's planned item carries (preferred), if any.
     plannedSqft: planned && Number(planned.treatedSqft) > 0 && (!planned.areaUnit || planned.areaUnit === 'sqft') ? Number(planned.treatedSqft) : null,
+  };
+}
+
+// The row's rate, the way the lawn re-service sheet resolves it (its rowRate),
+// for the lawn line:
+//  - a PLANNED row sends the plan's rate while its amount, unit, area and method
+//    are as the plan had them; the first change makes that rate stale and it is
+//    NOT recomputed (a nutrient rate such as lb N cannot be got back from the
+//    product amount), so the box empties for the technician;
+//  - an ADDED product has no prefilled rate (the sibling's rule), only what the
+//    technician types, in the label's own unit;
+//  - a rate is sent only above zero, with a unit /complete accepts
+//    (isSendableRateUnit: never mL, never an odd catalog unit).
+function rowRate(row) {
+  const resolved = resolveRatePrefill(row.product, { applicationMethod: row.method, serviceLine: 'lawn' });
+  const labelUnit = String(row.product?.default_unit || row.product?.rate_unit || '').trim();
+  const labelUnitOk = !(row.added && !labelUnit) && isSendableRateUnit(resolved.rateUnit);
+  const plan = !row.rateStale ? row.planRate : null;
+  const rateUnit = plan ? plan.unit : (labelUnitOk ? resolved.rateUnit : '');
+  // The label ceiling is in the label's unit; only compare in that unit.
+  const sameUnit = String(rateUnit).toLowerCase() === String(resolved.rateUnit || '').toLowerCase();
+  return {
+    rate: row.rateInput ?? (plan ? String(plan.rate) : ''),
+    rateUnit,
+    max: sameUnit ? prefillRateCeiling(resolved, row.product) : null,
   };
 }
 
@@ -343,6 +375,11 @@ function useProductRows(ctx, catalog) {
         // typed is no longer a fact the sheet filled in.
         ...('totalAmount' in patch || 'amountUnit' in patch ? { fromPlan: false } : {}),
         ...('area' in patch ? { areaFrom: '' } : {}),
+        // The plan's rate no longer describes the row once its amount, unit, area or method moves.
+        // (An area the plan never gave, typed for the first time, changes nothing the rate stood on.)
+        ...(['totalAmount', 'amountUnit', 'method'].some((key) => key in patch) || ('area' in patch && row.areaFrom) ? { rateStale: true } : {}),
+        // A rate typed for one method does not carry to another.
+        ...('method' in patch && patch.method !== row.method ? { rateInput: null } : {}),
       };
       if (!('method' in patch)) return next;
       // An area belongs to the unit of the method it was entered for.
@@ -435,10 +472,12 @@ function completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, typed, t
     lawnAssessmentId: assessmentId,
     products: active.map((row) => {
       const { totalAmount, amountUnit } = submittedAmount(row.totalAmount, row.amountUnit);
+      const rateOf = rowRate(row);
       return {
         productId: row.productId,
         applicationMethod: row.method,
         ...(hasAmount(row) ? { totalAmount, amountUnit } : {}),
+        ...(Number(rateOf.rate) > 0 && rateOf.rateUnit ? { rate: Number(rateOf.rate), rateUnit: rateOf.rateUnit } : {}),
         // A plan product goes on the plan's default areas, as the full form sends it.
         ...(row.planned ? { applicationArea: LAWN_DEFAULT_AREAS.join(', ') } : {}),
         ...(needsArea(row) ? { areaValue: Number(row.area), areaUnit: requirementOf(row).unit } : {}),
@@ -761,7 +800,7 @@ function ProductEditor({ row, locked, onChange, onRemove }) {
         <span className="tech-visit-muted">{[categoryLabel(row.product), row.added ? 'added by you' : 'planned'].filter(Boolean).join(' · ')}</span>
       </div>
       <div>
-        <AmountRow row={row} rate={NO_RATE} onChange={onChange} />
+        <AmountRow row={row} rate={rowRate(row)} onChange={onChange} />
         {row.fromPlan && <p className="tech-visit-muted">Planned amount</p>}
         {!hasAmount(row) && <p className="tech-visit-muted" role="status">No amount entered. It is recorded without one.</p>}
         <div>
