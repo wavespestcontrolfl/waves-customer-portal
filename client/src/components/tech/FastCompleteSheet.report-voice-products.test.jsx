@@ -91,8 +91,13 @@ async function generate(label = 'Generate AI report') {
     fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: NOTE } });
     fireEvent.click(screen.getByRole('button', { name: '3, moderate' }));
   }
+  // Generate holds (disabled, its reason in the footer) while the visit's
+  // photos and promises load, and a click before then does nothing: wait for
+  // it to be live (the CI flake of 2026-10-03, reproduced with a slow photos
+  // read).
+  await waitFor(() => expect(screen.getByRole('button', { name: label }).disabled).toBe(false), { timeout: 10000 });
   fireEvent.click(screen.getByRole('button', { name: label }));
-  await screen.findByText('Report the customer will see');
+  await screen.findByText('Report the customer will see', {}, { timeout: 10000 });
 }
 const completeButton = () => screen.getByRole('button', { name: 'Complete & send' });
 const confirmList = () => screen.getByRole('region', { name: 'Confirm what I filled' });
