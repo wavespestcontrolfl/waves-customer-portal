@@ -998,7 +998,7 @@ function confirmationDisplayParams(toolName, params, preview) {
  * response's pendingActions array. Model-supplied confirmed/confirm booleans
  * are stripped before anything is stored or previewed.
  */
-async function proposePendingWrite({ toolUse, req, context, selectedLeadId = null, task = null, taskContext = null, refuseBeforePersist = null }) {
+async function proposePendingWrite({ toolUse, req, context, selectedLeadId = null, task = null, taskContext = null, ownerDirectVerdict = null }) {
   const params = { ...(toolUse.input || {}) };
   delete params.confirmed;
   delete params.confirm;
@@ -1200,6 +1200,9 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // Pinned on every path, task or not, so a stale card (legacy or
       // platform) can never replace notes written after it (Codex r2).
       params._ib_customer_version = current.version;
+      // …and the notes themselves, compared by value at commit: not every
+      // notes writer advances updated_at (Codex r3).
+      params._ib_notes_before = current.crm_notes ?? null;
       notesReadVersion = current.version;
     }
     if (toolUse.name === 'create_appointment' && params.customer_id) {
@@ -1679,8 +1682,11 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   // A caller's last word on the finished preview, before anything is stored
   // (the owner-direct bulk cap): a refusal here leaves no pending action, so
   // the task's write frontier stays open for the bulk card that follows.
-  const refusal = refuseBeforePersist ? refuseBeforePersist(preview) : null;
-  if (refusal) return { failed: true, modelResult: refusal };
+  const directVerdict = ownerDirectVerdict ? ownerDirectVerdict(preview) : null;
+  if (directVerdict?.refuse) return { failed: true, modelResult: directVerdict.refuse };
+  // Marks the stored action as an owner-direct commit, so a resumed task
+  // counts those and not the cards the owner confirmed (Codex r3).
+  if (directVerdict?.direct) params._ib_owner_direct = true;
 
   // W0B authorization contract: the structured, server-built effect set the
   // operator approves. Derived from the same curated display params the card
@@ -3025,9 +3031,10 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
               // finished preview, so an edit the preview cards still reaches
               // its card (Codex r2), and before the approval is stored, so
               // the bulk card that follows is not blocked (pre-push P1).
-              refuseBeforePersist: directCapped.has(toolUse.name)
-                ? preview => (OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input, preview) ? { ...OwnerDirect.BULK_LIMIT_RESULT } : null)
-                : null,
+              ownerDirectVerdict: ownerDirectCommits ? (preview) => {
+                if (!OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input, preview)) return null;
+                return directCapped.has(toolUse.name) ? { refuse: { ...OwnerDirect.BULK_LIMIT_RESULT } } : { direct: true };
+              } : null,
             });
             result = proposed.modelResult;
             if (proposed.failed) {

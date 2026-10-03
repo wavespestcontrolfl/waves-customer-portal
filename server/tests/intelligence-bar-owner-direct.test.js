@@ -410,7 +410,7 @@ describe('owner-direct limits (owner ruling 2026-10-02)', () => {
   });
 
   const seedDb = (rows, { fail = false } = {}) => () => {
-    const q = { where: () => q, whereNotNull: () => q, whereIn: () => q, groupBy: () => q, select: () => q,
+    const q = { where: () => q, whereNotNull: () => q, whereRaw: () => q, groupBy: () => q, select: () => q,
       count: async () => { if (fail) throw new Error('db down'); return rows; } };
     return q;
   };

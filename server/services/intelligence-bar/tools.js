@@ -398,7 +398,8 @@ async function executeTool(toolName, input, actionContext = {}) {
       case 'compare_technicians': return await compareTechnicians(input);
       case 'find_duplicates': return await findDuplicates(input);
       case 'create_customer': return await createCustomer(input);
-      case 'update_customer': return await updateCustomer(input.customer_id, input.updates, input._ib_customer_version);
+      case 'update_customer': return await updateCustomer(input.customer_id, input.updates, input._ib_customer_version,
+        Object.prototype.hasOwnProperty.call(input, '_ib_notes_before') ? { value: input._ib_notes_before } : null);
       case 'bulk_update_customers': return await bulkUpdateCustomers(input.customer_ids, input.updates);
       case 'update_property_access': return await updatePropertyAccess(input);
       case 'cancel_plan': return await cancelPlan(input, actionContext);
@@ -1282,7 +1283,7 @@ async function createCustomer(input) {
 }
 
 
-async function updateCustomer(customerId, updates, expectedVersion) {
+async function updateCustomer(customerId, updates, expectedVersion, notesPin = null) {
   const clean = sanitizeUpdates(updates);
   Object.assign(clean, normalizeContactRecord(clean));
   if (Object.keys(clean).length <= 1) return { error: 'No valid fields to update' };
@@ -1394,6 +1395,15 @@ async function updateCustomer(customerId, updates, expectedVersion) {
           err.previewChanged = true;
           throw err;
         }
+      }
+      // A notes edit replaces the field, and not every notes writer bumps
+      // updated_at (Customer 360, the call processor's append), so the notes
+      // the proposal showed are compared by value on the locked row
+      // (Codex r3 on #5675).
+      if (notesPin && clean.crm_notes !== undefined && (lockedBefore.crm_notes ?? null) !== (notesPin.value ?? null)) {
+        const err = new Error('This customer\'s notes changed since this action was prepared. Review a fresh proposal.');
+        err.previewChanged = true;
+        throw err;
       }
       // ADMIN-BUG-R10 (round 3): runs on EVERY write of pipeline_stage=
       // 'churned' — including a re-save on an already-churned row — so a

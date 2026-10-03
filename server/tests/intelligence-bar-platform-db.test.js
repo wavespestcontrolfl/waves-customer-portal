@@ -767,6 +767,8 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
       expect(rows).toHaveLength(1);
       expect(rows[0]).toMatchObject({ status: 'confirmed', requested_by: owner });
       expect(rows[0].consumed_at).not.toBeNull();
+      // Stamped as an owner-direct commit: the bulk cap's resume seed counts these only.
+      expect(rows[0].params._ib_owner_direct).toBe(true);
       // jsonb comes back parsed from pg; a text column would not.
       expect(typeof rows[0].result === 'string' ? JSON.parse(rows[0].result) : rows[0].result).toMatchObject({ success: true });
       expect((await db('customers').where('id', customerA).first('crm_notes')).crm_notes).toBe(note);
@@ -793,7 +795,10 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
       // The notes read and the version pin are one read: the stored action's
       // version is the row the card's "before" came from.
       const overwriteRow = await db('ib_pending_actions').where('id', overwrite.body.pendingActions[0].id).first('params');
-      const pinned = (typeof overwriteRow.params === 'string' ? JSON.parse(overwriteRow.params) : overwriteRow.params)._ib_customer_version;
+      const overwriteParams = typeof overwriteRow.params === 'string' ? JSON.parse(overwriteRow.params) : overwriteRow.params;
+      expect(overwriteParams._ib_owner_direct).toBeUndefined(); // a card is never counted as a direct edit
+      expect(overwriteParams._ib_notes_before).toBe(note);
+      const pinned = overwriteParams._ib_customer_version;
       expect(pinned).toBe((await db('customers').where('id', customerA).first(db.raw('updated_at::text AS version'))).version);
 
       // Two direct writes in one model turn: each commits with its own
@@ -856,6 +861,18 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     expect(confirmed.status).toBe(409);
     expect(confirmed.body).toMatchObject({ code: 'target_changed' });
     expect((await db('customers').where('id', customerA).first('crm_notes')).crm_notes).toBe('Newer operator edit');
+  }, 30000);
+
+  test('a notes card cannot delete notes written after it by a writer that leaves updated_at alone', async () => {
+    await db('customers').where('id', customerA).update({ crm_notes: 'Shown on the card' });
+    proposeNote(customerA, 'Replacement note');
+    const proposed = await api('/query', request(`Add a note for ${nameA}: Replacement note`));
+    const card = proposed.body.pendingActions[0];
+    // Customer 360 and the call processor write crm_notes without touching updated_at.
+    await db('customers').where('id', customerA).update({ crm_notes: 'Shown on the card\nGate code 0000 added later' });
+    const confirmed = await api('/confirm-action', { pending_action_id: card.id, contract_hash: card.contract_hash });
+    expect(confirmed.body.success).not.toBe(true);
+    expect((await db('customers').where('id', customerA).first('crm_notes')).crm_notes).toBe('Shown on the card\nGate code 0000 added later');
   }, 30000);
 
   test('revoked mutation permission records a blocked receipt after claiming the approval', async () => {

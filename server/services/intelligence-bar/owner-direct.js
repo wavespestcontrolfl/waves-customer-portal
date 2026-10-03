@@ -174,15 +174,18 @@ function mayExecuteWithoutCard(toolName, input = {}) {
   return true;
 }
 
-// Direct commits already made for this task, by tool. A failed read counts
+// Direct commits already made for this task, by tool (proposePendingWrite
+// stamps `_ib_owner_direct` on them). A failed read counts
 // as the cap reached: never a reason to skip the bulk card.
 async function seedDirectCounts(task, dbh = null) {
   const counts = new Map();
   if (!task?.id) return counts;
   try {
     const knex = dbh || require('../../models/db');
+    // Only actions the proposal marked owner-direct: a card the owner
+    // confirmed is consumed the same way and is not a direct edit.
     const rows = await knex('ib_pending_actions').where({ task_id: task.id, status: 'confirmed' }).whereNotNull('consumed_at')
-      .whereIn('tool_name', [...OWNER_DIRECT_TOOL_NAMES]).groupBy('tool_name').select('tool_name').count('* as n');
+      .whereRaw("params->>'_ib_owner_direct' = 'true'").groupBy('tool_name').select('tool_name').count('* as n');
     for (const row of rows) counts.set(row.tool_name, Number(row.n) || 0);
   } catch {
     counts.set(SEED_FAILED, true);
