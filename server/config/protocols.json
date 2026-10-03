@@ -1570,7 +1570,7 @@
       {
         "id": "outside-order",
         "ask": "What is the order of work outside?",
-        "rule": "First sweep the webs and the wasp nests. Then apply the Taurus band. Then apply Talak.",
+        "rule": "First sweep the webs and the wasp nests. If Taurus is due, apply the Taurus band. Then apply Talak.",
         "source": "Owner walkthrough 2026-10-03"
       },
       {
@@ -1766,6 +1766,7 @@
             "scope": "exterior",
             "treatmentApplied": true,
             "catalogProductHints": [
+              "Atticus Talak",
               "Atticus Talak 7.9 F"
             ]
           },
@@ -1773,6 +1774,7 @@
             "scope": "exterior",
             "treatmentApplied": true,
             "catalogProductHints": [
+              "Atticus Talak",
               "Atticus Talak 7.9 F"
             ]
           },
@@ -1839,7 +1841,7 @@
       {
         "visit": 3,
         "month": "Any",
-        "primary": "Ant service\nIdentify species and trail source before applying\nAnt gel or granular bait along active trails\nNon-repellent treatment (interior + exterior) for ghost or trailing ants",
+        "primary": "Ant service\nIdentify species and trail source before applying\nAnt gel or granular bait along active trails\nNon-repellent treatment (interior) for ghost or trailing ants",
         "secondary": "Treat conducive entry points and moisture sources\nAvoid repellent spray on active trails\nRecheck bait acceptance at callback",
         "lineMeta": {
           "Ant gel or granular bait along active trails": {
@@ -1849,7 +1851,7 @@
               "Advion Ant Gel"
             ]
           },
-          "Non-repellent treatment (interior + exterior) for ghost or trailing ants": {
+          "Non-repellent treatment (interior) for ghost or trailing ants": {
             "scope": "interior",
             "treatmentApplied": true,
             "catalogProductHints": [

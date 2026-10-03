@@ -74,7 +74,7 @@ describe('routine pest visit checklist agrees with the field rules', () => {
   });
 
   test('outside is the Taurus band and Talak', () => {
-    expect([...new Set(exteriorHints)].sort()).toEqual(['Atticus Talak 7.9 F', 'Taurus SC']);
+    expect([...new Set(exteriorHints)].sort()).toEqual(['Atticus Talak', 'Atticus Talak 7.9 F', 'Taurus SC']);
   });
 });
 
@@ -84,4 +84,10 @@ test('Taurus is an if-due step, never selected base work (2 times a year)', () =
   expect(visit.secondary.split('\n')).toContain(taurusLine);
   expect(visit.primary).not.toContain('non-repellent band');
   expect(taurusLine).toMatch(/2 times a year/);
+});
+
+test('standalone rules and the ant visit keep the Taurus cap and the no-Alpine-outside rule', () => {
+  expect(ruleById['outside-order']).toContain('If Taurus is due');
+  const ant = protocols.pest.visits[2];
+  expect(`${ant.primary}\n${ant.secondary}`).not.toMatch(/exterior/i);
 });

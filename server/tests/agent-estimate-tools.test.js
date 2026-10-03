@@ -122,7 +122,7 @@ const INPUT = {
   inventoryReview: [
     { serviceKey: 'pest', productName: 'Taurus SC', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Alpine WSG', status: 'in_stock', onHand: 8 },
-    { serviceKey: 'pest', productName: 'Atticus Talak 7.9 F', status: 'in_stock', onHand: 8 },
+    { serviceKey: 'pest', productName: 'Atticus Talak', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Advion Cockroach Gel Bait', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Gentrol IGR', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Advion Ant Gel', status: 'in_stock', onHand: 8 },
@@ -677,7 +677,7 @@ describe('Agent Estimate draft tool', () => {
 
     expect(result.lane_reasons).toEqual(expect.arrayContaining([
       'inventory review for pest is missing protocol product: Alpine WSG',
-      'inventory review for pest is missing protocol product: Atticus Talak 7.9 F',
+      'inventory review for pest is missing protocol product: Atticus Talak or Atticus Talak 7.9 F',
     ]));
   });
 
