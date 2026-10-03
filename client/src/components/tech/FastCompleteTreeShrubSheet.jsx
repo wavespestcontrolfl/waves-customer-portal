@@ -526,6 +526,15 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
   }, []);
   const tips = useTipLibrary({ base, request });
   const tipsAvailable = !!tips;
+  // Tips written for a watch item the tech marked Seen lead the picker (library
+  // order, set by TipSection). Only the gated watch list yields Seen choices.
+  const priorityTipIds = useMemo(() => {
+    const seen = new Set(Object.keys(watchChoices).filter((key) => watchChoices[key]?.state === 'seen'));
+    if (!seen.size) return [];
+    return (tips?.groups || []).flatMap((group) => group.tips || [])
+      .filter((tip) => Array.isArray(tip.watchKeys) && tip.watchKeys.some((key) => seen.has(key)))
+      .map((tip) => tip.id);
+  }, [watchChoices, tips]);
   const photos = usePhotoSlots({ base, request, watchList: Array.isArray(ctx.watchList) && ctx.watchList.length > 0 });
   const picker = useProductPicker({
     products: ctx.products,
@@ -607,6 +616,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
           {tipsAvailable && (
             <TipSection
               library={tips}
+              priorityTipIds={priorityTipIds}
               tipId={form.tipId}
               customTip={form.customTip}
               locked={locked}

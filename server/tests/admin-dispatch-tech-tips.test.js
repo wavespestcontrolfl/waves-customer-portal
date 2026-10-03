@@ -196,6 +196,18 @@ describe('GET /:serviceId/tech-tips', () => {
       .toEqual(['bc_keep_dry', 'flea_keep_vacuuming', 'flea_pet_prevention', 'flea_shady_spots', 'mq_pool', 'mq_tree_holes']);
   });
 
+  test('a tree & shrub visit\'s picker payload carries watchKeys on the tips that have them', async () => {
+    process.env.GATE_TECH_TIPS = 'true';
+    mockResolveProfile.mockResolvedValue({ serviceKey: null });
+    mockDbCurrent = scriptedDb({ service: { ...SERVICE, service_type: 'Tree & Shrub Care' }, calls: [] });
+    const res = await invoke({ serviceId: 'svc-1' });
+    expect(res.body.line).toBe('tree_shrub');
+    const tips = Object.fromEntries(res.body.groups.flatMap((g) => g.tips).map((tip) => [tip.id, tip]));
+    expect(tips.ts_black_film.watchKeys).toEqual(['scale', 'sooty_mold']);
+    expect(tips.ts_wait_prune_cold.watchKeys).toEqual(['cold_freeze_damage']);
+    expect(tips.ts_mulch_trunk).not.toHaveProperty('watchKeys');
+  });
+
   test('both gates off preserve the no-read unavailable response', async () => {
     const calls = [];
     mockDbCurrent = scriptedDb({ service: SERVICE, calls });
