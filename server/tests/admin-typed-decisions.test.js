@@ -63,6 +63,8 @@ let baseUrl;
 beforeAll(() => {
   const app = express();
   app.use(express.json());
+  // Same order as server/index.js: the labeler-token router sits in front.
+  app.use('/admin/typed-decisions', require('../routes/typed-decisions-labeler'));
   app.use('/admin/typed-decisions', router);
   app.use((err, _req, res, _next) => res.status(500).json({ error: err.message }));
   server = app.listen(0);
@@ -399,15 +401,27 @@ describe('machine labeler token (X-Labeler-Token)', () => {
   });
 });
 
-describe('labelerPreGuard wiring (server/index.js)', () => {
-  test('is mounted ahead of the global cors(), the /api/ limiter and the /api/admin parsers, and the global limiter skips a verified token', () => {
+describe('labeler-token router wiring (server/index.js)', () => {
+  test('is mounted ahead of the global cors(), the /api/ limiter, the body parsers and the admin router', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'index.js'), 'utf8');
-    const guard = src.indexOf("app.use('/api/admin/typed-decisions', require('./routes/admin-typed-decisions').labelerPreGuard)");
-    expect(guard).toBeGreaterThan(-1);
-    expect(guard).toBeLessThan(src.indexOf('app.use(cors('));
-    expect(guard).toBeLessThan(src.indexOf("app.use('/api/', limiter)"));
-    expect(guard).toBeLessThan(src.indexOf('requireStaffTokenForLargeBody, express.json'));
-    expect(src).toMatch(/\|\| req\.machineLabeler === true,/);
-    expect(typeof router.labelerPreGuard).toBe('function');
+    const mount = src.indexOf("app.use('/api/admin/typed-decisions', require('./routes/typed-decisions-labeler'))");
+    expect(mount).toBeGreaterThan(-1);
+    expect(mount).toBeLessThan(src.indexOf('app.use(cors('));
+    expect(mount).toBeLessThan(src.indexOf("app.use('/api/', limiter)"));
+    expect(mount).toBeLessThan(src.indexOf('requireStaffTokenForLargeBody, express.json'));
+    expect(mount).toBeLessThan(src.indexOf("app.use('/api/admin/typed-decisions', require('./routes/admin-typed-decisions'))"));
+  });
+
+  test('the admin router keeps its literal admin guard (the route census reads it)', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'admin-typed-decisions.js'), 'utf8');
+    expect(src).toContain('router.use(adminAuthenticate, requireAdmin);');
+  });
+
+  test('a request without the header never reaches the token branch: admin sign-in labels as the person', async () => {
+    const log = installDb({ decision_reviews: { returning: [baseRow({ label_status: 'confirmed_correct' })], first: [baseRow()] } });
+    const { status } = await post(`/reviews/${ID}/label`, { verdict: 'jev_right', seen_answer: SEEN });
+    expect(status).toBe(200);
+    expect(called(log, 'decision_reviews', 'update')[0][0].labeled_by).toBe('owner@example.test');
+    expect(called(log, 'decision_reviews', 'where')).not.toContainEqual(['label_status', 'unreviewed']);
   });
 });
