@@ -230,49 +230,46 @@ describe('computeEditSummary', () => {
     expect(summary.servicesRemoved).toBeUndefined();
   });
 
-  test('the same property in the autocomplete form is not an address change', () => {
+  test('engine key aliases are one service on both sides', () => {
+    const summary = computeEditSummary({
+      baseline: baselineRow({
+        baseline_estimate_data: { engineInputs: { services: { termiteBait: {}, palm: {} } } },
+      }),
+      sentRow: sentRow({
+        estimate_data: { engineRequest: { profile: {}, selectedServices: ['TERMITE_BAIT', 'PALM_INJECTION'], options: {} } },
+      }),
+    });
+    expect(summary.servicesComparable).toBe(true);
+    expect(summary.servicesAdded).toBeUndefined();
+    expect(summary.servicesRemoved).toBeUndefined();
+  });
+
+  test('the same property in another format is not an address change', () => {
     const same = (a, b) => computeEditSummary({
       baseline: baselineRow({ baseline_fields: { ...baselineRow().baseline_fields, address: a } }),
       sentRow: sentRow({ address: b }),
     }).addressChanged;
     expect(same('123 Main St, Bradenton, FL', '123 Main Street, Bradenton, FL 34205, USA')).toBeUndefined();
-    expect(same('123 Main St, Bradenton, FL 34205', '123 Main St Bradenton FL 34205')).toBeUndefined();
-    expect(same('123 East Oak St, Bradenton, FL', '123 E Oak Street Bradenton Florida 34205')).toBeUndefined();
-    // A state or ZIP on one side only is formatting.
-    expect(same('123 Main St, Bradenton', '123 Main St, Bradenton, FL 34205-1234')).toBeUndefined();
-    expect(same('123 Main St, Bradenton, FL 34205', '123 Main St Bradenton')).toBeUndefined();
+    expect(same('123 East Oak St, Bradenton, FL', '123 E Oak Street, Bradenton, FL 34205')).toBeUndefined();
+    expect(same('123 Main St, Bradenton 34205', '123 Main St, Bradenton, FL 34205, USA')).toBeUndefined();
+    // The builder often stores the street line alone.
+    expect(same('123 Main St, Bradenton, FL 34205', '123 main st')).toBeUndefined();
+    // The same unit in another spelling.
+    expect(same('123 Main St #4, Bradenton, FL', '123 Main St Unit 4, Bradenton, FL 34205')).toBeUndefined();
     expect(same(null, null)).toBeUndefined();
-    // Another house, street, direction, unit, city or ZIP is a real change,
-    // and so is one added or dropped at the end.
+    // Another house, street, direction, city or ZIP is a real change.
     expect(same('123 Main St, Bradenton, FL', '125 Main St, Bradenton, FL')).toBe(true);
     expect(same('123 Main St, Bradenton, FL', '123 Oak St, Bradenton, FL')).toBe(true);
     expect(same('123 East Oak St, Bradenton, FL', '123 East Pine St, Bradenton, FL 34205')).toBe(true);
     expect(same('123 Oak St, Bradenton, FL', '123 Oak Ave, Bradenton, FL')).toBe(true);
-    expect(same('123 Main St, Bradenton, FL', '123 Main St E, Bradenton, FL')).toBe(true);
-    expect(same('123 Main St, Bradenton, FL', '123 Main St Apt 4, Bradenton, FL 34205')).toBe(true);
     expect(same('123 Main St, Bradenton, FL', '123 Main St, Sarasota, FL')).toBe(true);
     expect(same('123 Main St, Bradenton, FL 34205', '123 Main St, Bradenton, FL 34219')).toBe(true);
-    expect(same('123 Main St', '123 Main St E')).toBe(true);
-    expect(same('123 Main St', '123 Main St Apt 4')).toBe(true);
-    expect(same('123 Main St Apt 4', '123 Main St')).toBe(true);
-    // A state inserted before a ZIP both sides share is formatting.
-    expect(same('123 Main St, Bradenton 34205', '123 Main St, Bradenton, FL 34205, USA')).toBeUndefined();
-    expect(same('123 Main St, Bradenton, FL', '123 Main St, Bradenton 34205-1234')).toBeUndefined();
-    expect(same('123 Main St, Bradenton, FL 34205-1234', '123 Main St, Bradenton, FL 34205-9999')).toBe(true);
-    // A unit written after the ZIP is not a ZIP+4.
-    expect(same('123 Main St, Bradenton, FL 34205', '123 Main St, Bradenton, FL 34205 #1234')).toBe(true);
-    expect(same('123 Main St, Bradenton, FL 34205 #1234', '123 Main St, Bradenton, FL 34205 #5678')).toBe(true);
-    // A "#" unit is never a ZIP, whatever its length.
-    expect(same('123 Main St, Bradenton, FL', '123 Main St, Bradenton, FL #12345')).toBe(true);
-    expect(same('123 Main St, Bradenton, FL # 12345', '123 Main St, Bradenton, FL')).toBe(true);
-    expect(same('123 Main St #4, Bradenton, FL', '123 Main St # 4, Bradenton, FL 34205')).toBeUndefined();
-    // A lone four-digit ending is a unit, not a ZIP+4.
-    expect(same('123 Main St, Bradenton', '123 Main St, Bradenton #1234')).toBe(true);
-    expect(same('123 Main St, Bradenton, FL 34205', '123 Main St, Bradenton, FL 34205-1234')).toBeUndefined();
-    expect(same('123 Main St, Bradenton', '123 Main St, Bradenton, 34205 FL')).toBe(true);
-    expect(same('123 Main St', '123 Main St, Bradenton')).toBe(true);
-    // Too little to match on, or one side missing.
-    expect(same('123 Main', '123 Main 34205')).toBe(true);
+    // A unit added, dropped or changed is a real change.
+    expect(same('123 Main St, Bradenton, FL', '123 Main St Apt 4, Bradenton, FL 34205')).toBe(true);
+    expect(same('123 Main St Apt 4, Bradenton, FL', '123 Main St, Bradenton, FL')).toBe(true);
+    expect(same('123 Main St #4, Bradenton, FL', '123 Main St #5, Bradenton, FL')).toBe(true);
+    expect(same('123 Main St', '123 Main St #1234')).toBe(true);
+    // One side missing.
     expect(same(null, '123 Main St')).toBe(true);
   });
 

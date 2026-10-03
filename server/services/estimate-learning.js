@@ -106,18 +106,35 @@ function translateBuilderCodes(engineRequest, codes) {
     const input = translate(engineRequest.profile || {}, codes, engineRequest.options || {});
     const keys = Object.keys(input?.services || {});
     // Codes the translator does not know yield nothing: unknown, not "none".
-    return keys.length ? keys.sort() : null;
+    return keys.length ? canonicalEngineKeys(keys) : null;
   } catch {
     return null;
   }
 }
+
+// Engine keys the pricing engine reads as one service (estimate-engine.js:
+// `services.termite || services.termiteBait || services.termite_bait`, and
+// the same for palm, BoraCare, pre-slab, flea and recurring foam). Both
+// sides are reduced to one spelling so an alias is never an add plus a remove.
+const ENGINE_KEY_ALIASES = Object.freeze({
+  termiteBait: 'termite',
+  termite_bait: 'termite',
+  palm: 'palmInjection',
+  bora_care: 'boraCare',
+  pre_slab_termiticide: 'preSlabTermiticide',
+  preSlab: 'preSlabTermiticide',
+  pre_slab_termidor: 'preSlabTermidor',
+  fleaExterior: 'flea',
+  foam_recurring: 'foamRecurring',
+});
+const canonicalEngineKeys = (keys) => [...new Set(keys.map((k) => ENGINE_KEY_ALIASES[k] || k))].sort();
 
 function serviceKeysFrom(data) {
   const services = data?.engineInputs?.services
     || data?.engineRequest?.services
     || data?.inputs?.services;
   if (services && typeof services === 'object' && !Array.isArray(services)) {
-    return Object.keys(services).sort();
+    return canonicalEngineKeys(Object.keys(services));
   }
   const selected = data?.engineRequest?.selectedServices;
   if (Array.isArray(selected)) {
@@ -127,66 +144,20 @@ function serviceKeysFrom(data) {
   return null;
 }
 
-// The same address in another FORMAT is not an edit. The engine draft
-// holds the address as the caller gave it; the builder's save replaces it
-// with the autocomplete form (suffix spelled out, country appended, commas
-// dropped). Two addresses are the same only when they are equal word for
-// word after punctuation is dropped, suffix and direction words are
-// abbreviated and a trailing country is removed. The one part allowed to
-// differ is the ending state and ZIP: each may be missing on one side.
-// Anything else is a change: another house number, street word, direction,
-// unit or city, a different ZIP, or a word added anywhere. No other address
-// part is guessed at, so the rule can over-count an edit and never hide one.
-const STREET_WORDS = Object.freeze({
-  street: 'st', avenue: 'ave', av: 'ave', road: 'rd', drive: 'dr', boulevard: 'blvd', lane: 'ln',
-  court: 'ct', circle: 'cir', place: 'pl', terrace: 'ter', terr: 'ter', trail: 'trl', parkway: 'pkwy',
-  highway: 'hwy', north: 'n', south: 's', east: 'e', west: 'w',
-  northeast: 'ne', northwest: 'nw', southeast: 'se', southwest: 'sw',
-  florida: 'fl',
-});
-const COUNTRY_TAIL = [['usa'], ['us'], ['united', 'states'], ['united', 'states', 'of', 'america']];
-
-function addressTokens(value) {
-  // Read while the punctuation is still there: a ZIP+4 by its hyphen (kept
-  // as one token) and a "#" unit by its mark (kept as a unit token), so
-  // "34205 #1234" is a ZIP and a unit and "#12345" is never a ZIP.
-  const tokens = norm(value)
-    .replace(/\b(\d{5})-(\d{4})\b/g, '$1plus$2')
-    .replace(/#\s*([a-z0-9]+)/g, ' unit$1 ')
-    .replace(/[^a-z0-9 ]/g, ' ')
-    .split(' ')
-    .filter(Boolean)
-    .map((t) => STREET_WORDS[t] || t);
-  // The country says nothing about which property it is.
-  for (const tail of COUNTRY_TAIL) {
-    if (tokens.length > tail.length && tail.every((t, i) => tokens[tokens.length - tail.length + i] === t)) {
-      return tokens.slice(0, -tail.length);
-    }
-  }
-  return tokens;
-}
-
-// Split off the ending "[state] [ZIP or ZIP+4]", in that order. A bare
-// four-digit ending is never a +4 (it is a unit). The core keeps a house
-// number, a street word and one more word at least; with less than that
-// nothing is split off.
-function splitAddress(tokens) {
-  const core = tokens.slice();
-  const out = { core: tokens, state: '', zip: '', plus4: '' };
-  let state = '';
-  const zipMatch = /^(\d{5})(?:plus(\d{4}))?$/.exec(core[core.length - 1] || '');
-  if (zipMatch) core.pop();
-  if (core[core.length - 1] === 'fl') state = core.pop();
-  if (core.length < 3 || !(zipMatch || state)) return out;
-  return { core, state, zip: zipMatch ? zipMatch[1] : '', plus4: (zipMatch && zipMatch[2]) || '' };
-}
-
+// The same address in another FORMAT is not an edit. The engine draft holds
+// the address as the caller gave it; the builder's save replaces it with the
+// autocomplete form. Sameness is the estimator engine's own comparator
+// (address-compare.js sameStreetAddress: whole street line with suffix,
+// direction, route and unit forms canonicalized; city and ZIP must agree
+// when both sides carry one), with the unit required to match exactly, so an
+// added, dropped or changed unit is a change. Its limits are the shared
+// parser's (a unit written after the ZIP is not read as a unit); they are
+// kept in that one module rather than re-decided here.
 function sameProperty(a, b) {
-  const x = splitAddress(addressTokens(a));
-  const y = splitAddress(addressTokens(b));
-  if (x.core.length !== y.core.length || !x.core.every((t, i) => y.core[i] === t)) return false;
-  // Each ending part may be missing on one side; present on both, it must agree.
-  return ['state', 'zip', 'plus4'].every((k) => !x[k] || !y[k] || x[k] === y[k]);
+  if (norm(a) === norm(b)) return true;
+  // Lazy: the engine module tree is not needed by the write paths here.
+  const { sameStreetAddress } = require('./estimator-engine/address-compare');
+  return sameStreetAddress(a, b, { requireExactUnit: true });
 }
 
 // The builder's save folds the WaveGuard setup fee into the stored one-time
