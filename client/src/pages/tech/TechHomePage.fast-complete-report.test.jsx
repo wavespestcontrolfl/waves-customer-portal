@@ -286,5 +286,8 @@ it('a technician lets a saved retry go at the server\'s 7-day window: off the li
   mount();
   fireEvent.click(await screen.findByRole('button', { name: /Recover Completion/ }));
   expect(await sheetService()).toMatchObject({ id: 'recent' });
-  expect(mocks.prune).toHaveBeenCalledWith(expect.any(Number), 7 * DAY);
+  // Its own attempts only: another operator's on a shared device keep the
+  // store's own sweep (pre-push P0 on 1dc0f16fb9).
+  expect(mocks.prune).toHaveBeenCalledWith(expect.any(Number), 7 * DAY, { operatorId: 'tech-fixture' });
+  expect(mocks.prune).toHaveBeenCalledWith();
 });

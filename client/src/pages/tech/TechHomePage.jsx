@@ -619,9 +619,12 @@ export default function TechHomePage({ section = 'today' }) {
   // stays in this page never runs the admin schedule's full sweep.
   useEffect(() => {
     pruneRecapClipDrafts().catch(() => {});
-    (currentRole === 'technician'
-      ? pruneFastCompletionAttempts(Date.now(), TECH_RETRY_HORIZON_MS)
-      : pruneFastCompletionAttempts()).catch(() => {});
+    pruneFastCompletionAttempts().catch(() => {});
+    // A technician's own retries also go at the server's 7-day window; never
+    // another operator's on a shared device (pre-push P0 on 1dc0f16fb9).
+    if (currentRole === 'technician' && staffIdForDevice) {
+      pruneFastCompletionAttempts(Date.now(), TECH_RETRY_HORIZON_MS, { operatorId: staffIdForDevice }).catch(() => {});
+    }
   }, []);
 
   useEffect(() => {

@@ -202,6 +202,19 @@ describe("completion resume store (IndexedDB)", () => {
     expect(await getCompletionResumeBody("regular-completion")).toEqual(committedBody());
   });
 
+  it("a sweep scoped to one operator never touches another operator's attempts (pre-push P0 on 1dc0f16fb9)", async () => {
+    const eightDays = Date.now() - 8 * 24 * 60 * 60 * 1000;
+    const sevenDays = 7 * 24 * 60 * 60 * 1000;
+    await putFastCompletionAttempt("svc-tech-old", "tech-a", { body: committedBody(), summary: "tech old" }, eightDays);
+    await putFastCompletionAttempt("svc-tech-new", "tech-a", { body: committedBody(), summary: "tech new" });
+    await putFastCompletionAttempt("svc-owner-old", "owner-b", { body: committedBody(), summary: "owner old" }, eightDays);
+
+    expect(await pruneFastCompletionAttempts(Date.now(), sevenDays, { operatorId: "tech-a" })).toBe(1);
+    expect((await getFastCompletionAttempt("svc-tech-old", "tech-a")).attempt).toBeNull();
+    expect((await getFastCompletionAttempt("svc-tech-new", "tech-a")).attempt).not.toBeNull();
+    expect((await getFastCompletionAttempt("svc-owner-old", "owner-b")).attempt).not.toBeNull();
+  });
+
   it("atomically rechecks age so a second connection's refresh survives prune", async () => {
     const old = Date.now() - DRAFT_RETENTION_MS - 1000;
     const body = { ...committedBody(), idempotencyKey: "refresh-key" };

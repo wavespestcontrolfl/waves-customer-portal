@@ -267,14 +267,19 @@ export function deleteFastCompletionAttempt(serviceId, operatorId, expectedBody)
   ));
 }
 
-export function pruneFastCompletionAttempts(now = Date.now(), maxAgeMs = DRAFT_RETENTION_MS) {
+// `operatorId` scopes a sweep to one operator's own attempts (by key and by
+// the row's owner), so a shorter window for one role never deletes another
+// operator's attempts on a shared device (pre-push P0 on 1dc0f16fb9).
+export function pruneFastCompletionAttempts(now = Date.now(), maxAgeMs = DRAFT_RETENTION_MS, { operatorId = null } = {}) {
+  const prefix = operatorId ? `${FAST_COMPLETION_PREFIX}${String(operatorId)}:` : FAST_COMPLETION_PREFIX;
   return withStore(FAST_COMPLETION_DB_NAME, "readonly", [], (store) => store.getAllKeys())
     .then((keys) => Promise.all(
       (Array.isArray(keys) ? keys : [])
         .map((key) => String(key))
-        .filter((key) => key.startsWith(FAST_COMPLETION_PREFIX))
+        .filter((key) => key.startsWith(prefix))
         .map((key) => mutateFastCompletionRow(key, (record) => (
-          record && now - Number(record.storedAt || 0) >= maxAgeMs ? { delete: true } : null
+          record && (!operatorId || String(record.operatorId) === String(operatorId))
+            && now - Number(record.storedAt || 0) >= maxAgeMs ? { delete: true } : null
         ))),
     ))
     .then((results) => results.filter(Boolean).length);
