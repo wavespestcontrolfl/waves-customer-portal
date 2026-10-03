@@ -5501,6 +5501,26 @@ async function syncTermForRefundedPayment(payment, conn = db) {
   const invoiceId = await findInvoiceIdForRefundedPayment(payment, conn);
   if (!invoiceId) return [];
 
+  // Ownership check (B03; the charge.refunded handler's terminalize guard,
+  // same rule): findInvoiceIdForRefundedPayment reads the payment's
+  // metadata.invoice_id first, which a dispute-created reopen never clears.
+  // When a REPLACEMENT payment has since paid the invoice, the invoice row
+  // points at the replacement, and refunding the ORIGINAL charge must not
+  // claw back coverage the replacement is paying for. Covers both callers
+  // (the webhook's per-row loop, combined rows included, and the in-app
+  // refund). A payment with no Stripe identity to compare keeps the legacy
+  // claw-back (refundedPaymentOwnsInvoice).
+  const invoiceRow = await conn('invoices')
+    .where({ id: invoiceId })
+    .first('id', 'stripe_payment_intent_id', 'stripe_charge_id');
+  if (invoiceRow && !require('./invoice-helpers').refundedPaymentOwnsInvoice(invoiceRow, {
+    paymentIntentId: payment.stripe_payment_intent_id,
+    chargeId: payment.stripe_charge_id,
+  })) {
+    logger.warn(`[annual-prepay] refund of payment ${payment.id || payment.stripe_charge_id} no longer owns invoice ${invoiceId} (invoice PI ${invoiceRow.stripe_payment_intent_id || 'none'}, charge ${invoiceRow.stripe_charge_id || 'none'}) — term coverage left untouched`);
+    return [];
+  }
+
   return syncTermForInvoicePayment({
     id: invoiceId,
     status: 'refunded',

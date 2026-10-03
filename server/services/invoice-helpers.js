@@ -205,6 +205,36 @@ function invoiceWithdrawnFromCustomer(invoice) {
     && PACKET_WITHDRAWN_SEND_ERROR.test(String(invoice.scheduled_send_error || ''));
 }
 
+/**
+ * Does the refunded Stripe payment still OWN this invoice? (B03 — the
+ * single-invoice twin of the combined refund path's codex r36 P1 guard.)
+ *
+ * A dispute-created reopen clears the invoice's PaymentIntent, and a
+ * REPLACEMENT payment can then pay it, leaving the invoice row pointing at the
+ * replacement. A full refund of the ORIGINAL (reinstated) charge must not
+ * terminalize that invoice, hand back credit the replacement still consumes,
+ * or cancel prepay coverage the replacement is paying for.
+ *
+ * The invoice row is the authority: it owns-by-payment when its own
+ * stripe_payment_intent_id equals the refunded PI (pay-page / saved-card
+ * charges), OR its own stripe_charge_id equals the refunded charge (a
+ * charge-only reconciled payment carries no PI — the reconcile route stamps
+ * invoices.stripe_charge_id and leaves any stale PI alone, so a PI mismatch
+ * alone must not disown it). An invoice pointing at neither (including one
+ * whose pointers a dispute reopen cleared) is not owned by this payment. A
+ * payment with no Stripe identity at all has nothing to compare, so it keeps
+ * the legacy answer.
+ */
+function refundedPaymentOwnsInvoice(invoice, { paymentIntentId, chargeId } = {}) {
+  if (!invoice) return false;
+  const pi = paymentIntentId ? String(paymentIntentId) : null;
+  const charge = chargeId ? String(chargeId) : null;
+  if (!pi && !charge) return true;
+  const invoicePi = invoice.stripe_payment_intent_id ? String(invoice.stripe_payment_intent_id) : null;
+  const invoiceCharge = invoice.stripe_charge_id ? String(invoice.stripe_charge_id) : null;
+  return (!!pi && invoicePi === pi) || (!!charge && invoiceCharge === charge);
+}
+
 // Codex round-23 P1: ONE definition of "a collectible invoice the HOMEOWNER owes" shared by the SMS context
 // (outstanding balance, open invoice, Zelle-target list, invoice-status facts), the settlement / obligation
 // checks and the drafter's invoice-status map. Status must be one a customer can still be asked to pay
@@ -376,6 +406,7 @@ module.exports = {
   assertInvoiceVoidable,
   isInvoiceCollectibleStatus,
   invoiceWithdrawnFromCustomer,
+  refundedPaymentOwnsInvoice,
   OWN_COLLECTIBLE_INVOICE_STATUSES,
   PARTIALLY_PAID_STATUS,
   isUncountedPartialDueInvoice,
