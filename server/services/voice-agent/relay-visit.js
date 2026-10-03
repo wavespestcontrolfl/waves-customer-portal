@@ -93,7 +93,7 @@ function speakClock(value) {
  * Today's (ET) appointment for this customer, with a read-only peek at the
  * tracker lifecycle. Returns model-facing text; never writes.
  */
-async function todayEtaText(customerId, { tier = 'redacted' } = {}) {
+async function todayEtaText(customerId, { tier = 'redacted', recognisedContact = false } = {}) {
   const redacted = tier !== 'full';
   // PHYSICAL SECURITY: an unverified voice learns NOTHING about today, not even
   // that a visit exists. "Is anyone coming to 42 Oak today?" answered yes/no is
@@ -103,10 +103,25 @@ async function todayEtaText(customerId, { tier = 'redacted' } = {}) {
   // the refusal itself cannot be read as a signal — and the row is never even
   // read.
   if (redacted) {
-    return 'Today\'s schedule is only available for the account the caller\'s own phone number matches. '
+    const refusal = 'Today\'s schedule is only available for the account the caller\'s own phone number matches. '
       + 'Do NOT say whether a visit is or is not on today\'s schedule for this account, do not state a '
       + 'window, and do not describe any technician\'s status. Tell the caller the account holder can see '
       + 'it in the Waves portal, or the office can go over it with them directly.';
+    // ⭐ A RECOGNISED CONTACT IS NOT LEFT WITH NOTHING. The caller's own number
+    // sits in a secondary slot on THIS account (spouse, tenant), so the refusal
+    // also names the next step: a follow-up with THEM, saved before it is
+    // promised. A looked-up third party gets the bare refusal — a capture there
+    // records a stranger's number against someone else's question. The added
+    // sentence depends only on WHO is calling, never on the schedule, so the
+    // refusal still cannot be read as a signal about today.
+    if (!recognisedContact) return refusal;
+    return `${refusal} This caller's number is a contact on the account, so do not end the call there: `
+      + 'say you cannot give today\'s schedule on this call, and in THIS SAME turn save a follow-up for '
+      + 'THIS caller with capture_lead so the office goes over it with them. You already have the number '
+      + 'they are calling from — do NOT ask for a name, address or email first; call capture_lead now with '
+      + 'a one-line summary of what they asked. Promise that follow-up to the caller only after capture_lead '
+      + 'confirms it. Never promise that Waves will contact the account holder, and never say the account '
+      + 'holder\'s name.';
   }
   const db = require('../../models/db');
   const { etDateString } = require('../../utils/datetime-et');

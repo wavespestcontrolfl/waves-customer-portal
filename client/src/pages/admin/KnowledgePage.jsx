@@ -35,11 +35,16 @@ function staffRole() {
   }
 }
 
+// Sources (add / compile) is owner-only too: a technician reads the wiki
+// (staff allow-list, 2026-10-02) but cannot ingest or compile sources.
+const OWNER_ONLY_WIKI_TABS = ["health", "sources"];
+
 export default function KnowledgePage({ embedded = false }) {
   const [searchParams, setSearchParams] = useSearchParams();
-  const availableTabs = staffRole() === "admin"
+  const isAdminRole = staffRole() === "admin";
+  const availableTabs = isAdminRole
     ? TABS
-    : TABS.filter((item) => item.key !== "health");
+    : TABS.filter((item) => !OWNER_ONLY_WIKI_TABS.includes(item.key));
   const requestedTab = searchParams.get(embedded ? "wikiTab" : "tab");
   const tab = availableTabs.some(({ key }) => key === requestedTab)
     ? requestedTab
@@ -164,6 +169,7 @@ export default function KnowledgePage({ embedded = false }) {
         <KnowledgeQuestionDialog
           open
           onClose={() => setShowQA(false)}
+          canFileBack={isAdminRole}
         />
       )}
 

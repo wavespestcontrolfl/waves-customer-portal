@@ -22,8 +22,18 @@
 # can block a Railway deploy (verified locally: "Batch 1 run: 917 migrations").
 name: tests
 
+# A PR run starts when the PR opens and, after that, only when someone asks:
+# a push alone starts nothing. Measured 2026-10-03 on 213 PR runs: 56% were on
+# heads a Codex round then replaced, and jobs waited 8 to 20 minutes for a
+# runner behind them. The request is a label change (any label, added or
+# removed: `labeled` / `unlabeled`), by convention a toggle of `run-ci`. The
+# run tests the PR's head merged into the current base, exactly as before.
+# `reopened` stays so close-and-reopen still forces a run.
+# The merge bar is unchanged: `tests` must be green on the head being merged,
+# and a head nobody asked a run for has no `tests` checks at all.
 on:
   pull_request:
+    types: [opened, reopened, labeled, unlabeled]
   push:
     branches: [main]
 
@@ -85,6 +95,12 @@ jobs:
         env:
           PEST_FORECAST_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand --no-coverage tests/pest-forecast-history-postgres.test.js
+      - name: Portal chat durable-turn PostgreSQL tests
+        working-directory: server
+        env:
+          PORTAL_CHAT_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand --no-coverage tests/portal-chat-reliability-postgres.test.js
+
       - name: Customer 360 SMS read and bell transaction tests
         run: |
           node <<'JS'
@@ -186,7 +202,7 @@ jobs:
         working-directory: server
         env:
           VISIT_PACKET_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/visit-completion-packets-postgres.test.js tests/invoice-issued-closeout-completion-postgres.test.js
+        run: npx jest --ci --silent --runInBand tests/visit-completion-packets-postgres.test.js tests/invoice-issued-closeout-completion-postgres.test.js tests/visit-linked-invoice-withdrawal-postgres.test.js
       - name: Invoice-issued closeout resolver transaction tests
         working-directory: server
         env:
@@ -196,7 +212,7 @@ jobs:
         working-directory: server
         env:
           DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/invoice-claim-ownership-postgres.test.js tests/invoice-review-hold-serializer-postgres.test.js tests/invoice-scheduled-readiness-postgres.test.js
+        run: npx jest --ci --silent --runInBand tests/invoice-claim-ownership-postgres.test.js tests/invoice-review-hold-serializer-postgres.test.js tests/invoice-scheduled-readiness-postgres.test.js tests/admin-customers-payer-linked-invoices-postgres.test.js
       - name: Historical invoice repair transaction tests
         working-directory: server
         env:
@@ -228,7 +244,7 @@ jobs:
         working-directory: server
         env:
           APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand --forceExit tests/customer-dunning-schedules-migration-postgres.test.js tests/reconciliation-fence-read-only-postgres.test.js tests/customer-dunning-schedule-postgres.test.js tests/customer-dunning-email-authority-postgres.test.js tests/customer-dunning-live-wiring-postgres.test.js tests/customer-dunning-merge-postgres.test.js tests/customer-dunning-member-landing-postgres.test.js tests/customer-dunning-timeline-postgres.test.js
+        run: npx jest --ci --silent --runInBand --forceExit tests/customer-dunning-schedules-migration-postgres.test.js tests/reconciliation-fence-read-only-postgres.test.js tests/customer-dunning-schedule-postgres.test.js tests/customer-dunning-email-authority-postgres.test.js tests/customer-dunning-live-wiring-postgres.test.js tests/customer-dunning-merge-postgres.test.js tests/customer-merge-linked-invoice-fence-postgres.test.js tests/customer-dunning-member-landing-postgres.test.js tests/customer-dunning-timeline-postgres.test.js
       - name: Booking capacity commit transaction tests
         working-directory: server
         env:

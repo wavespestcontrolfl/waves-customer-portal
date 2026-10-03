@@ -86,6 +86,7 @@ function mockHappyPath({ restored, deferredRows = [] } = {}) {
   db
     .mockReturnValueOnce(chain({ first: voidInvoice() }))
     .mockReturnValueOnce(noRow()) // pre-guard: no owning annual_prepay_terms row
+    .mockReturnValueOnce(chain({ first: voidInvoice() })) // in-transaction ownership re-read (no lock)
     .mockReturnValueOnce(updateChain)
     .mockReturnValueOnce(noRow()) // TOCTOU: still no owning term
     .mockReturnValueOnce(noRow()) // fresh-row money guard
@@ -284,6 +285,7 @@ describe('InvoiceService.unvoidInvoice', () => {
     db
       .mockReturnValueOnce(chain({ first: voidInvoice() }))
       .mockReturnValueOnce(noRow())
+      .mockReturnValueOnce(chain({ first: voidInvoice() })) // in-transaction ownership re-read (no lock)
       .mockReturnValueOnce(chain({ returning: [voidInvoice({ status: 'draft' })] }))
       .mockReturnValueOnce(noRow())
       .mockReturnValueOnce(noRow());
@@ -299,6 +301,7 @@ describe('InvoiceService.unvoidInvoice', () => {
     db
       .mockReturnValueOnce(chain({ first: voidInvoice() }))
       .mockReturnValueOnce(noRow())
+      .mockReturnValueOnce(chain({ first: voidInvoice() })) // in-transaction ownership re-read (no lock)
       .mockReturnValueOnce(chain({ returning: [voidInvoice({ status: 'draft' })] }))
       .mockReturnValueOnce(noRow())
       .mockReturnValueOnce(noRow())
@@ -313,6 +316,7 @@ describe('InvoiceService.unvoidInvoice', () => {
     db
       .mockReturnValueOnce(chain({ first: voidInvoice() }))
       .mockReturnValueOnce(noRow())
+      .mockReturnValueOnce(chain({ first: voidInvoice() })) // in-transaction ownership re-read (no lock)
       .mockReturnValueOnce(chain({ returning: [voidInvoice({ status: 'draft' })] }))
       .mockReturnValueOnce(noRow())
       .mockReturnValueOnce(noRow())
@@ -359,6 +363,7 @@ describe('InvoiceService.unvoidInvoice', () => {
     db
       .mockReturnValueOnce(chain({ first: voidInvoice() }))
       .mockReturnValueOnce(noRow())
+      .mockReturnValueOnce(chain({ first: voidInvoice() })) // in-transaction ownership re-read (no lock)
       .mockReturnValueOnce(chain({ returning: [voidInvoice({ status: 'draft', annual_prepay_term_id: 'term-9' })] }));
     await expect(InvoiceService.unvoidInvoice('inv-1')).rejects.toThrow(/annual prepay term/);
     expect(mockReconcile).not.toHaveBeenCalled();
@@ -369,6 +374,7 @@ describe('InvoiceService.unvoidInvoice', () => {
     db
       .mockReturnValueOnce(chain({ first: voidInvoice() }))
       .mockReturnValueOnce(noRow())
+      .mockReturnValueOnce(chain({ first: voidInvoice() })) // in-transaction ownership re-read (no lock)
       .mockReturnValueOnce(chain({ returning: [voidInvoice({ status: 'draft' })] }))
       .mockReturnValueOnce(chain({ first: { id: 'term-9' } }));
     await expect(InvoiceService.unvoidInvoice('inv-1')).rejects.toThrow(/annual prepay term/);
@@ -473,6 +479,7 @@ describe('InvoiceService.unvoidInvoice', () => {
       .mockReturnValueOnce(noRow()) // term pre-guard
       .mockReturnValueOnce(chain({ first: { id: 'svc-1', status: 'confirmed' } })) // fast-fail pass: visit live
       .mockReturnValueOnce(noRow()) // fast-fail pass: bills no other upcoming visit
+      .mockReturnValueOnce(chain({ first: voidInvoice() })) // in-transaction ownership re-read (no lock)
       .mockReturnValueOnce(chain({ returning: [voidInvoice({ status: 'draft', scheduled_service_id: 'svc-1' })] }))
       .mockReturnValueOnce(noRow()) // TOCTOU term re-check
       .mockReturnValueOnce(noRow()) // money guard
@@ -520,6 +527,7 @@ describe('InvoiceService.unvoidInvoice', () => {
     db
       .mockReturnValueOnce(chain({ first: voidInvoice() }))
       .mockReturnValueOnce(noRow())
+      .mockReturnValueOnce(chain({ first: voidInvoice() })) // in-transaction ownership re-read (no lock)
       .mockReturnValueOnce(chain({ returning: [voidInvoice({ status: 'draft' })] }))
       .mockReturnValueOnce(noRow())
       .mockReturnValueOnce(chain({ first: { id: 'pay-9' } })); // fresh-row money guard hit → rollback
@@ -533,6 +541,7 @@ describe('InvoiceService.unvoidInvoice', () => {
     db
       .mockReturnValueOnce(chain({ first: voidInvoice() }))
       .mockReturnValueOnce(noRow())
+      .mockReturnValueOnce(chain({ first: voidInvoice() })) // in-transaction ownership re-read (no lock)
       .mockReturnValueOnce(chain({ returning: [] }));
     await expect(InvoiceService.unvoidInvoice('inv-1')).rejects.toThrow(
       'Invoice status changed while unvoiding — re-check and retry',
@@ -562,6 +571,7 @@ describe('InvoiceService.unvoidInvoice', () => {
     db
       .mockReturnValueOnce(chain({ first: voidInvoice({ stripe_payment_intent_id: 'pi_1' }) }))
       .mockReturnValueOnce(noRow())
+      .mockReturnValueOnce(chain({ first: voidInvoice() })) // in-transaction ownership re-read (no lock)
       .mockReturnValueOnce(chain({ returning: [restored] }))
       .mockReturnValueOnce(noRow())
       .mockReturnValueOnce(noRow())

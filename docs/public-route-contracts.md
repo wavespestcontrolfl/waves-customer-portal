@@ -2269,12 +2269,11 @@ through `reportV2.lead`. `lead.headline` is the snapshot's `statusHeadline`;
 (`treatment-summary.js`), never the AI treatment narrative that later overwrites
 `snapshot.treatmentSummary` (with no products it is `null`); and `lead` gains two
 optional keys, absent (never `null`) unless there is text: `whatToExpect` (at most
-42 words: the visible-change sentence of the first two expectation rows the owner
-has approved for today's products, printed word for word, a sentence that would
-pass the cap left out whole; no by-next-visit timing yet, since that needs the
-next visit at this property, which the report's own next-visit line does not
-resolve; every row ships `approved: false`, so the key is absent until the owner
-approves one) and
+42 words: for the first two expectation rows the owner has approved for today's
+products, each row's visible-change sentence and, when the gap to the next lawn
+visit at this property is known, its by-next-visit sentence, printed word for
+word, a sentence that would pass the cap left out whole; every unapproved row
+is skipped) and
 `watching` ("We are also keeping an eye on <topics>." for the watched issues
 after the one the headline names, at most three). The lead's word budget gives
 these fields up, when over 250 words, in the order `why`, `watching`, `applied`,
@@ -2300,7 +2299,22 @@ key. The lawn PDF prints the lead's headline as its "Overall" line (the frozen o
 under this gate, so a later assessment correction cannot make the PDF and the
 live report disagree; without it, the same `statusHeadline`) and `whatToExpect`
 as a "What to expect" line (the insights it already lists cover `watching`),
-and its cache signature carries a `:copyv6=1` stamp while the gate is live. The same gate keeps model-written lawn copy from stating result timing
+and its cache signature carries a `:copyv6=1` stamp while the gate is live. While the gate is live,
+`snapshot.nextVisit` (the lead's "Next visit" line) is the next lawn booking AT
+THIS REPORT'S PROPERTY (`report-data.js` `lawnNextVisitAtProperty`, the shared
+same-line / same-property scan): a booking at another of the customer's homes is
+skipped, no booking here falls back to the visit's own plan cadence estimate, a
+visit that cannot be tied to a property uses the customer-wide booking only on a
+proven single-premises account, and otherwise the key is absent. The copy's
+by-next-visit sentence is timed from that same visit, counted from the selected
+assessment's date, and the frozen entry records that visit's day
+(`nextVisitIso`, with each printed sentence in `expectSentences`): when a later
+render shows a different day (a reschedule) the gap-timed sentence is left out
+of `whatToExpect` and the rest of the frozen copy stands. The by-next-visit
+sentences are LIVE-VIEW ONLY, like `snapshot.nextVisit` itself: a non-live render
+(PDF, static) prints `whatToExpect` without them (`stripLiveOnlyScheduleFields`),
+so a stored PDF never depends on the customer's bookings and its cache signature
+carries no booking state. Gate off: the customer-wide lookup, as before. The same gate keeps model-written lawn copy from stating result timing
 (P15), so "What to expect" is its only source: the dedicated lawn treatment
 technician report writer (not the physical-lawn remaining-service module, whose
 visits carry no "What to expect" and whose prompt already forbids an
@@ -4079,6 +4093,20 @@ office, never converted against its card), and
 accept with no resolved per-application amount — never the monthly
 display rate). Same contract via the admin manual-acceptance path, which
 preserves these 4xx verbatim.
+A NO-SLOT `/accept` of MORE THAN ONE recurring service (B06/B17) keeps each
+series' parent visit unpriced (the combined first-application invoice covers
+its first visit) but prices every seeded follow-up at that service's own
+quoted per-visit amount — the same per-service figures the customer saw and
+the first-application invoice summed (`firstApplicationRowAmounts`), matched
+to the services one-to-one. Never the customer's existing per-application fee,
+never an annual-over-visits reconstruction. When the amounts cannot be matched
+exactly (a tier-monthly accept, a fallback visit total, an unmatched service),
+nothing is priced by guess and the accept raises ONE billing bell for the
+office (`per-application-fee-unresolved:<estimateId>`, stamped Billing /
+needs-you / estimate subject) — through the converter's deferred
+`perApplicationFeeNotification` field, so it fires post-commit on every accept
+path and a rolled-back accept never pages. A reserved-slot accept is unchanged
+(its own `reservedAcceptPerVisitSplit`).
 Overlapping annual coverage on public `/accept` returns 409
 `{ error, code: 'ANNUAL_PREPAY_OVERLAP' }` with the existing call-the-office
 explanation and no acceptance committed. Clients preserve the appointment
