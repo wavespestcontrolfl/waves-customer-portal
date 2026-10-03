@@ -48,8 +48,9 @@ describe('staff correction of one invoice address', () => {
   }
 
   test('normalizes a complete address and refuses an incomplete or malformed one', () => {
-    expect(normalizeInvoiceAddressInput({ address_line1: ' 12  Corrected Way ', city: 'Bradenton', state: 'fl', zip: '34203' }))
-      .toEqual({ address_line1: '12 Corrected Way', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34203' });
+    // Line 2 is always cleared: receipts print line 1 only, so the unit rides there.
+    expect(normalizeInvoiceAddressInput({ address_line1: ' 12  Corrected Way Apt 2 ', address_line2: 'Apt 9', city: 'Bradenton', state: 'fl', zip: '34203' }))
+      .toEqual({ address_line1: '12 Corrected Way Apt 2', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34203' });
     for (const bad of [
       { city: 'Bradenton', state: 'FL', zip: '34203' },
       { address_line1: '12 Corrected Way', city: 'Bradenton', state: 'Florida', zip: '34203' },
@@ -66,7 +67,8 @@ describe('staff correction of one invoice address', () => {
     });
     const result = await correctInvoiceAddress(trx, 'inv-1', { address_line1: '12 Corrected Way', city: 'Bradenton', state: 'FL', zip: '34203' });
     expect(result.before).toMatchObject({ address_line1: '100 Wrong St', city: 'Sarasota' });
-    expect(result.after).toMatchObject({ address_line1: '12 Corrected Way', city: 'Bradenton' });
+    expect(result.after).toMatchObject({ address_line1: '12 Corrected Way', city: 'Bradenton', address_line2: null });
+    expect(result.after.corrected_at).toEqual(expect.any(String));
     expect(updates).toEqual([{
       table: 'invoices',
       criteria: { id: 'inv-1' },

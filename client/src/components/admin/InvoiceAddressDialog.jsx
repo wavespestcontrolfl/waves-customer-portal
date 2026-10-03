@@ -19,7 +19,7 @@ import {
 } from "../ui";
 import { adminFetch } from "../../utils/admin-fetch";
 
-const EMPTY = { address_line1: "", address_line2: "", city: "", state: "", zip: "" };
+const EMPTY = { address_line1: "", city: "", state: "", zip: "" };
 
 export default function InvoiceAddressDialog({ invoice, onClose, onSaved }) {
   const [form, setForm] = useState(EMPTY);
@@ -35,9 +35,10 @@ export default function InvoiceAddressDialog({ invoice, onClose, onSaved }) {
       .then((data) => {
         if (!alive) return;
         const a = data?.address || {};
+        // Receipts print the street line only, so a unit stored on line 2
+        // folds into it; the server clears line 2 on save.
         setForm({
-          address_line1: a.address_line1 || "",
-          address_line2: a.address_line2 || "",
+          address_line1: [a.address_line1, a.address_line2].filter(Boolean).join(" "),
           city: a.city || "",
           state: a.state || "",
           zip: a.zip || "",
@@ -77,11 +78,8 @@ export default function InvoiceAddressDialog({ invoice, onClose, onSaved }) {
           status. Nothing is sent; use Resend receipt if the customer needs a corrected copy.
         </div>
         {error && <ActionFeedback error>{error}</ActionFeedback>}
-        <Field label="Street" className="min-w-0">
+        <Field label="Street (include any unit or suite)" className="min-w-0">
           <Input value={form.address_line1} onChange={set("address_line1")} disabled={loading || saving} autoComplete="off" />
-        </Field>
-        <Field label="Unit / line 2 (optional)" className="min-w-0">
-          <Input value={form.address_line2} onChange={set("address_line2")} disabled={loading || saving} autoComplete="off" />
         </Field>
         <div className="grid grid-cols-[1fr_5rem_7rem] gap-3">
           <Field label="City" className="min-w-0">

@@ -23,6 +23,9 @@ jest.mock('../services/audit-log', () => ({ recordAuditEvent: (...a) => mockAudi
 
 const express = require('express');
 const db = require('../models/db');
+// Loaded once at module scope: the router is large, and requiring it inside
+// the first test spent most of that test's 5s budget under parallel load.
+const router = require('../routes/admin-invoices');
 
 let rows;
 let updates;
@@ -39,7 +42,7 @@ function table(name) {
 async function withServer(callback) {
   const app = express();
   app.use(express.json());
-  app.use('/invoices', require('../routes/admin-invoices'));
+  app.use('/invoices', router);
   app.use((err, _req, res, _next) => res.status(500).json({ error: err.message }));
   const server = app.listen(0, '127.0.0.1');
   try {

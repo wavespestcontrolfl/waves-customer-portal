@@ -32,18 +32,23 @@ async function freezeCustomerInvoiceAddresses(trx, customer) {
 
 const ZIP_RE = /^\d{5}(-\d{4})?$/;
 const STATE_RE = /^[A-Z]{2}$/;
-const ADDRESS_LIMITS = { address_line1: 200, address_line2: 200, city: 100 };
+const ADDRESS_LIMITS = { address_line1: 200, city: 100 };
 
 function addressError(message) {
   return Object.assign(new Error(message), { status: 400, statusCode: 400, isOperational: true, code: 'invalid_address' });
 }
 
-/** Staff correction input → a complete snapshot, or a 400. */
+/**
+ * Staff correction input → a complete snapshot, or a 400. The unit rides in
+ * the street line: the receipt page and PDFs print address_line1 only, so a
+ * separate line 2 would be saved but never shown. line 2 is cleared so the
+ * email Property row (which does print it) cannot keep a stale unit.
+ */
 function normalizeInvoiceAddressInput(input = {}) {
   const text = (field) => String(input[field] ?? '').trim().replace(/\s+/g, ' ');
   const address = {
     address_line1: text('address_line1'),
-    address_line2: text('address_line2') || null,
+    address_line2: null,
     city: text('city'),
     state: text('state').toUpperCase(),
     zip: text('zip'),
@@ -71,6 +76,13 @@ async function getInvoiceDisplayedAddress(conn, invoiceId) {
   return loadDisplayedInvoiceAddress(conn, invoice);
 }
 
+/** The snapshot when staff corrected it (correctInvoiceAddress), else null. */
+function correctedInvoiceAddress(invoice) {
+  const snapshot = invoice?.customer_address_snapshot;
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return null;
+  return snapshot.corrected_at ? snapshot : null;
+}
+
 /**
  * Staff correction of the address printed on ONE invoice and its receipt.
  * Rewrites only customer_address_snapshot — presentation data. Amounts,
@@ -78,7 +90,9 @@ async function getInvoiceDisplayedAddress(conn, invoiceId) {
  * untouched, and nothing is sent. Returns { before, after } for the audit.
  */
 async function correctInvoiceAddress(trx, invoiceId, input) {
-  const after = normalizeInvoiceAddressInput(input);
+  // corrected_at marks a staff correction: it outranks the linked visit's
+  // address in billing emails (billing-email-details invoicePropertyAddress).
+  const after = { ...normalizeInvoiceAddressInput(input), corrected_at: new Date().toISOString() };
   const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate()
     .first('id', 'customer_id', 'customer_address_snapshot');
   if (!invoice) return null;
@@ -89,5 +103,5 @@ async function correctInvoiceAddress(trx, invoiceId, input) {
 
 module.exports = {
   invoiceAddressSnapshot, invoiceCustomerAddress, freezeCustomerInvoiceAddresses,
-  normalizeInvoiceAddressInput, getInvoiceDisplayedAddress, correctInvoiceAddress,
+  normalizeInvoiceAddressInput, getInvoiceDisplayedAddress, correctInvoiceAddress, correctedInvoiceAddress,
 };

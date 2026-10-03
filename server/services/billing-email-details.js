@@ -19,7 +19,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { propertyStreetAddress } = require('../utils/property-display');
-const { invoiceCustomerAddress } = require('./invoice-address');
+const { invoiceCustomerAddress, correctedInvoiceAddress } = require('./invoice-address');
 const { formatDateOnly } = require('../utils/date-only');
 const { parseRawAddress } = require('../utils/address-normalizer');
 const featureGates = require('../config/feature-gates');
@@ -265,6 +265,11 @@ async function invoicePropertyAddress(invoice, customer) {
   try {
     const customerId = invoice?.customer_id;
     if (!customerId) return '';
+    // A staff correction of this invoice's address (Invoices → Edit address)
+    // outranks every link below, so a resent receipt email agrees with its
+    // receipt page and PDF. A correction always carries a street line.
+    const corrected = correctedInvoiceAddress(invoice);
+    if (corrected) return propertyStreetAddress(corrected);
     if (invoice.visit_completion_packet_id) {
       // A combined-visit invoice: every verified member must name the SAME
       // street address; a member that cannot be resolved omits the row. This
