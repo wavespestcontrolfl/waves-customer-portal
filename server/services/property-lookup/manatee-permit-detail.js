@@ -358,6 +358,7 @@ async function selectCandidates(limit, nowMs) {
     .select('permit_no', 'co_date', 'detail_status');
 }
 
+const FACT_COLUMNS = ['conditioned_sqft', 'under_roof_sqft', 'stories', 'bedrooms', 'bathrooms'];
 const toDateOnly = (v) => (v ? new Date(v).toISOString().slice(0, 10) : null);
 
 async function recordResult(candidate, status, facts, fetchedAt) {
@@ -368,17 +369,19 @@ async function recordResult(candidate, status, facts, fetchedAt) {
     await db('construction_permit_records').where({ permit_no: candidate.permit_no }).update({ detail_fetched_at: fetchedAt });
     return;
   }
+  const factColumns = Object.fromEntries(FACT_COLUMNS.map((col) => [col, facts?.[col] ?? null]));
+  // A good re-read of an already-ok row only overwrites the facts it actually
+  // found: a field missing from this parse keeps the value stored earlier.
+  if (candidate.detail_status === 'ok') {
+    for (const col of FACT_COLUMNS) if (factColumns[col] === null) delete factColumns[col];
+  }
   await db('construction_permit_records')
     .where({ permit_no: candidate.permit_no })
     .update({
       detail_status: status,
       detail_fetched_at: fetchedAt,
       detail_co_date: toDateOnly(candidate.co_date),
-      conditioned_sqft: facts?.conditioned_sqft ?? null,
-      under_roof_sqft: facts?.under_roof_sqft ?? null,
-      stories: facts?.stories ?? null,
-      bedrooms: facts?.bedrooms ?? null,
-      bathrooms: facts?.bathrooms ?? null,
+      ...factColumns,
     });
 }
 
@@ -453,6 +456,11 @@ async function syncPermitDetails({ sleep, now } = {}) {
   // Results that could not be stored are a failed run for job health (the
   // scheduler's lease records the throw); counts only, never row values.
   if (out.writeFailures) throw new Error(`permit detail sync: ${out.writeFailures} result write(s) failed`);
+  // A systemic stop (ACA down, or the page structure changed) is a failed run
+  // too — the per-permit results above are already stored.
+  if (out.stopped === 'outage' || out.stopped === 'structure') {
+    throw Object.assign(new Error(`permit detail sync stopped: ${out.stopped} (${out.attempted} attempted, ${out.ok} ok)`), { summary: out });
+  }
   return out;
 }
 

@@ -254,7 +254,7 @@ describe('search form validation', () => {
     global.fetch = jest.fn(async (url, opts = {}) => (/CapHome\.aspx/.test(url) && opts.method === 'GET'
       ? response('<html>Scheduled maintenance</html>')
       : realFetch(url, opts)));
-    const out = await syncPermitDetails({ now: clock, sleep: clock.sleep });
+    const out = await syncPermitDetails({ now: clock, sleep: clock.sleep }).then(() => null, (err) => err.summary);
     expect(out).toMatchObject({ errors: 5, notFound: 0, stopped: 'outage' });
     expect(global.fetch.mock.calls.some(([, o]) => o.method === 'POST')).toBe(false);
     expect(calls).toBeDefined();
@@ -506,7 +506,7 @@ describe('syncPermitDetails', () => {
     const ids = Array.from({ length: 8 }, (_, i) => `BLD9801-070${i}`);
     stubDb(ids.map((id) => cand(id)));
     fakeAca(Object.fromEntries(ids.map((id) => [id, { pages: [noFieldsPage(id)] }])), { clock });
-    const out = await syncPermitDetails({ now: clock, sleep: clock.sleep });
+    const out = await syncPermitDetails({ now: clock, sleep: clock.sleep }).then(() => null, (err) => err.summary);
     expect(out).toMatchObject({ attempted: 5, noFields: 5, stopped: 'structure' });
     expect(logger.warn).toHaveBeenCalledTimes(1);
     expect(logger.warn.mock.calls[0][0]).toMatch(/page structure changed/);
@@ -545,7 +545,7 @@ describe('syncPermitDetails', () => {
     const ids = Array.from({ length: 7 }, (_, i) => `BLD9801-090${i}`);
     stubDb(ids.map((id) => cand(id)));
     fakeAca(Object.fromEntries(ids.map((id) => [id, { fail: true }])), { clock });
-    const out = await syncPermitDetails({ now: clock, sleep: clock.sleep });
+    const out = await syncPermitDetails({ now: clock, sleep: clock.sleep }).then(() => null, (err) => err.summary);
     expect(out).toMatchObject({ attempted: 5, errors: 5, stopped: 'outage' });
     expect(logger.warn).toHaveBeenCalledTimes(1);
   });
@@ -568,7 +568,9 @@ describe('syncPermitDetails', () => {
     expect(b.update).toHaveBeenCalledTimes(2);
     expect(Object.keys(b.update.mock.calls[0][0])).toEqual(['detail_fetched_at']);
     expect(b.where).toHaveBeenCalledWith({ permit_no: 'BLD9801-1002' });
-    expect(b.update.mock.calls[1][0]).toMatchObject({ conditioned_sqft: 2400, bedrooms: 4, under_roof_sqft: null, detail_co_date: '2026-09-11' });
+    expect(b.update.mock.calls[1][0]).toMatchObject({ conditioned_sqft: 2400, bedrooms: 4, detail_co_date: '2026-09-11' });
+    // Fields the re-read did not find are left as stored, not nulled.
+    expect(b.update.mock.calls[1][0]).not.toHaveProperty('under_roof_sqft');
   });
 
   test('a write failure never stops the loop, and the run then fails for job health (counts only)', async () => {
@@ -608,6 +610,20 @@ describe('syncPermitDetails', () => {
     ] } }, { clock });
     await syncPermitDetails({ now: clock, sleep: clock.sleep });
     expect(b.update.mock.calls[0][0]).toMatchObject({ conditioned_sqft: 2400, stories: 2, bedrooms: 4 });
+  });
+
+  test('a partial good re-read of an ok row keeps facts it did not find again', async () => {
+    process.env.GATE_PERMIT_DETAIL_SYNC = 'true';
+    const clock = fakeClock();
+    const pn = 'BLD9801-1106';
+    const b = stubDb([cand(pn, { detail_status: 'ok', co_date: '2026-09-10' })]);
+    fakeAca({ [pn]: { pages: [recordPage(pn, row('Square Footage (Conditioned)', '2,500'))] } }, { clock });
+    await syncPermitDetails({ now: clock, sleep: clock.sleep });
+    const written = b.update.mock.calls[0][0];
+    expect(written.conditioned_sqft).toBe(2500);
+    // Not found this time → not in the update, so the stored values stand.
+    expect(written).not.toHaveProperty('bedrooms');
+    expect(written).not.toHaveProperty('under_roof_sqft');
   });
 
   test('only partial pages anywhere: the best partial is stored', async () => {
