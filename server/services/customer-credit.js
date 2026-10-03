@@ -506,12 +506,23 @@ async function restoreAccountCreditForVoidedInvoice({ invoice, createdBy = 'syst
   return { restored: restore };
 }
 
-// Run `fn` once the caller's transaction has COMMITTED (never on a rollback):
-// knex's executionPromise settles with the transaction (the dispatch-alerts
-// pattern). Without a transaction handle (a bare test double) it runs inline.
+// Run `fn` once the OUTERMOST transaction has COMMITTED (never on a rollback).
+// A nested knex transaction's executionPromise settles when its SAVEPOINT is
+// released, before the outer transaction commits, so a callback registered
+// against a savepoint could fire for work an outer rollback then discards.
+// knex gives a nested transaction's handle a `parentTransaction` (the handle of
+// the transaction it was started from; the outermost one has none), so the walk
+// ends at the real commit. Without a
+// transaction handle (a bare test double) it runs inline.
+function outermostTransaction(trx) {
+  let top = trx;
+  for (let hops = 0; top && top.parentTransaction && hops < 32; hops += 1) top = top.parentTransaction;
+  return top;
+}
 function afterCommit(trx, fn) {
-  if (trx && trx.executionPromise && typeof trx.executionPromise.then === 'function') {
-    trx.executionPromise.then(fn).catch(() => {});
+  const top = outermostTransaction(trx);
+  if (top && top.executionPromise && typeof top.executionPromise.then === 'function') {
+    top.executionPromise.then(fn).catch(() => {});
   } else {
     Promise.resolve().then(fn).catch(() => {});
   }
@@ -796,6 +807,7 @@ async function reverseCreditAndStampPayer({ invoiceId, payerId, poNumber = null,
 
 module.exports = {
   afterCommit,
+  outermostTransaction,
   customerAutoApplyEnabled,
   VALID_SOURCES,
   CREDIT_DISPLAY_TYPE_BY_SOURCE,

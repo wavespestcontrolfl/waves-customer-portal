@@ -1351,7 +1351,7 @@ postgres('membership dues — prepaid marker, refund alert, payer, merge, copy (
   }
 
   // ── Finding 1: a prepaid marker on a covered plan visit ──
-  test('a second same-month plan visit is covered by the dues invoice: the prepaid pre-check names that invoice; the dues invoice\'s own visit, a priced visit and a month with no dues invoice are not refused', async () => {
+  test('a second same-month plan visit is covered by the dues invoice: the prepaid pre-check names that invoice; the dues invoice\'s own visit, a priced NON-recurring visit, a callback and a month with no dues invoice are not; a priced RECURRING visit is', async () => {
     const f = await seedMember();
     try {
       const a = await mintDues(f, 'Lawn Care');
@@ -1364,7 +1364,16 @@ postgres('membership dues — prepaid marker, refund alert, payer, merge, copy (
       expect(await duesInvoiceCoveringPlanVisit(a.visit)).toBeNull(); // its own invoice is not "covering" it
       const priced = await seedVisit(f, { label: 'Add-on Treatment', estimatedPrice: 85 });
       await mockPg('scheduled_services').where({ id: priced }).update({ is_recurring: false });
-      expect(await duesInvoiceCoveringPlanVisit(priced)).toBeNull();
+      expect(await duesInvoiceCoveringPlanVisit(priced)).toBeNull(); // priced and NOT recurring: billed on its own
+      // A priced RECURRING plan visit is covered by the dues like an unpriced one (the completion predicate), so it is refused too.
+      const pricedRecurring = await seedVisit(f, { label: 'Quarterly Treatment', estimatedPrice: 85 });
+      expect(await duesInvoiceCoveringPlanVisit(pricedRecurring)).toMatchObject({ id: a.invoice.id });
+      const refusedPriced = await recordPrepaidUnderDuesLock(pricedRecurring, { amount: 85, writeStamp: writeMarker(pricedRecurring, 85) });
+      expect(refusedPriced.covering).toMatchObject({ id: a.invoice.id });
+      expect(await prepaidOf(pricedRecurring)).toBeNull();
+      const callback = await seedVisit(f, { label: 'Callback Visit' });
+      await mockPg('scheduled_services').where({ id: callback }).update({ is_callback: true });
+      expect(await duesInvoiceCoveringPlanVisit(callback)).toBeNull();
       await mockPg('invoices').where({ id: a.invoice.id }).update({ status: 'void' });
       expect(await duesInvoiceCoveringPlanVisit(second)).toBeNull();
     } finally { await cleanup(f); }

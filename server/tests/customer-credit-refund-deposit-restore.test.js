@@ -35,7 +35,7 @@ jest.mock('../services/invoice', () => ({
   alertIfMembershipDuesCoverageReleased: (...args) => mockDuesAlert(...args),
 }));
 
-const { returnAppliedCreditOnRefund } = require('../services/customer-credit');
+const { returnAppliedCreditOnRefund, afterCommit } = require('../services/customer-credit');
 
 function makeTrx(invRow) {
   const updates = [];
@@ -218,5 +218,62 @@ describe('returnAppliedCreditOnRefund — dues coverage release alert', () => {
     replay.settle.resolve();
     await flush();
     expect(mockDuesAlert).not.toHaveBeenCalled();
+  });
+});
+
+// afterCommit resolves against the OUTERMOST transaction: a savepoint's
+// executionPromise settles when the savepoint is released, before the outer
+// transaction commits, so a callback bound to it could fire for work an outer
+// rollback then discards. knex hands a nested transaction handle a
+// `parentTransaction` pointing at the handle it was started from.
+describe('afterCommit — outermost transaction', () => {
+  const flush = () => new Promise((r) => setImmediate(r));
+  function handles() {
+    let settleTop; let settleSavepoint;
+    const top = { executionPromise: new Promise((resolve, reject) => { settleTop = { resolve, reject }; }) };
+    top.executionPromise.catch(() => {});
+    const savepoint = { parentTransaction: top, executionPromise: new Promise((resolve, reject) => { settleSavepoint = { resolve, reject }; }) };
+    savepoint.executionPromise.catch(() => {});
+    return { top, savepoint, settleTop, settleSavepoint };
+  }
+
+  it('a callback registered inside a released savepoint does NOT fire when the outer transaction then rolls back', async () => {
+    const { savepoint, settleTop, settleSavepoint } = handles();
+    const fn = jest.fn();
+    afterCommit(savepoint, fn);
+    settleSavepoint.resolve(); // savepoint released
+    await flush();
+    expect(fn).not.toHaveBeenCalled(); // not at the savepoint release
+    settleTop.reject(new Error('outer rolled back'));
+    await flush();
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it('fires exactly once, after the real commit, when the outer transaction commits', async () => {
+    const { savepoint, settleTop, settleSavepoint } = handles();
+    const fn = jest.fn();
+    afterCommit(savepoint, fn);
+    settleSavepoint.resolve();
+    await flush();
+    expect(fn).not.toHaveBeenCalled();
+    settleTop.resolve();
+    await flush();
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  it('walks a chain of savepoints, and a top-level handle behaves as before', async () => {
+    const { top, savepoint, settleTop } = handles();
+    const deeper = { parentTransaction: savepoint, executionPromise: Promise.resolve() };
+    const viaDeeper = jest.fn();
+    const direct = jest.fn();
+    afterCommit(deeper, viaDeeper);
+    afterCommit(top, direct);
+    await flush();
+    expect(viaDeeper).not.toHaveBeenCalled();
+    expect(direct).not.toHaveBeenCalled();
+    settleTop.resolve();
+    await flush();
+    expect(viaDeeper).toHaveBeenCalledTimes(1);
+    expect(direct).toHaveBeenCalledTimes(1);
   });
 });

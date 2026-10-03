@@ -45,7 +45,7 @@ const {
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
-const { resolveBillingLane, isMembershipDuesShapedVisit, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, isSiblingCoverageEligibleVisit, sameTripFirstApplicationBreakdown, collectionStateForCoveredInvoice } = require('../services/billing-lane');
+const { resolveBillingLane, isMembershipDuesShapedVisit, membershipDuesCoverVisit, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, isSiblingCoverageEligibleVisit, sameTripFirstApplicationBreakdown, collectionStateForCoveredInvoice } = require('../services/billing-lane');
 const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
 const DiscountEngine = require('../services/discount-engine');
 const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
@@ -17079,10 +17079,14 @@ function membershipDuesMintRequest(svc, amount) {
 }
 
 // The (customer, month) a prepayment on this visit would interact with, from an
-// UNLOCKED read of the visit and customer, or null when the visit is not a
-// membership-dues-shaped plan visit (judged by the mint's own dues-shape test,
-// membershipDuesMintRequest). The caller re-verifies both after it holds the
-// visit row.
+// UNLOCKED read of the visit and customer, or null when the month's dues would
+// not cover this visit. "Covered" is decided by THE coverage predicate
+// completion itself uses (billing-lane membershipDuesCoverVisit, with the dues
+// as the cover), not a hand-rolled price test: an unpriced plan visit AND a
+// priced RECURRING plan visit are both covered (both complete without an invoice
+// once a dues invoice bills the month), while a callback, a non-recurring priced
+// visit and a payer-billed visit are not. The caller re-verifies customer and
+// month after it holds the visit row.
 const visitMonthOf = (d) => String(d instanceof Date ? d.toISOString() : d).slice(0, 7);
 async function planVisitDuesScope(serviceId) {
   const svc = await db('scheduled_services')
@@ -17095,10 +17099,27 @@ async function planVisitDuesScope(serviceId) {
       'customers.billing_mode as cust_billing_mode',
     )
     .first();
-  if (!svc) return null;
-  const request = membershipDuesMintRequest(svc, Number(svc.cust_monthly_rate));
-  if (!request) return null;
-  return { serviceId: svc.id, customerId: String(svc.customer_id), month: request.month };
+  if (!svc || svc.is_callback) return null;
+  let payerBilled = false;
+  try {
+    const resolved = await require('../services/payer').resolveForInvoice({ customerId: svc.customer_id, scheduledServiceId: svc.id });
+    payerBilled = !!resolved?.payerId;
+  } catch (e) {
+    logger.warn(`[schedule] prepaid dues-scope payer resolve failed for service ${svc.id}: ${e.message}`);
+  }
+  if (!membershipDuesCoverVisit({
+    visitIsPayerBilled: payerBilled,
+    perApplicationBilling: svc.cust_billing_mode === 'per_application',
+    annualPrepayBilling: svc.cust_billing_mode === 'annual_prepay',
+    customerAutopayActive: false,
+    duesCollectedThisMonth: true,
+    hasVisitPrice: Number(svc.estimated_price) >= 0.01,
+    isRecurring: svc.is_recurring,
+    waveguardTier: svc.cust_waveguard_tier,
+    monthlyRate: svc.cust_monthly_rate,
+    billingMode: svc.cust_billing_mode || null,
+  })) return null;
+  return { serviceId: svc.id, customerId: String(svc.customer_id), month: visitMonthOf(svc.scheduled_date) };
 }
 
 // The live stamped dues invoice that already bills this plan visit's month, or
