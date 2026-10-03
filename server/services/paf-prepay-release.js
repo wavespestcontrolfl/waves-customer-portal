@@ -534,7 +534,21 @@ async function releaseDeferredPrepayCharges({ pageSize = 200, now = new Date() }
   return summary;
 }
 
+// The first-visit completion text (owner ruling 2026-10-03, neutral wording):
+// this visit is the FIRST performed visit held by a year that is still unpaid.
+// Completion stamped it (paf_held_term_id) just before the text; any earlier
+// performed visit stamped by the same year already had its first visit.
+async function isFirstHeldVisitOfUnpaidYear(svc, conn = db) {
+  if (!svc?.paf_held_term_id || !svc.customer_id) return false;
+  const term = await conn('annual_prepay_terms').where({ id: svc.paf_held_term_id }).first('id', 'status', 'source_estimate_id');
+  if (!term || String(term.status || '') !== 'payment_pending' || !term.source_estimate_id) return false;
+  const others = (await performedVisitCandidates(term.source_estimate_id, svc.customer_id))
+    .filter((v) => String(v.id) !== String(svc.id) && String(v.paf_held_term_id || '') === String(term.id));
+  return others.length === 0;
+}
+
 module.exports = {
+  isFirstHeldVisitOfUnpaidYear,
   AWAITING,
   planHasUnfinishedCompletion,
   visitStillPerformed,
