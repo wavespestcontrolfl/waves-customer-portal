@@ -107,6 +107,7 @@ describe('gate on', () => {
   test.each([
     ['a reply older than 15 minutes', { repliedAt: new Date('2026-10-02T14:40:00Z') }, {}, 'reply_too_old'],
     ['a visit that is gone', {}, { loadById: jest.fn(async () => null) }, 'visit_missing'],
+    ['an archived customer (still active = true)', {}, { loadById: jest.fn(async () => ({ ...SVC, customer_deleted_at: new Date('2026-10-01T00:00:00Z') })) }, 'customer_archived'],
     ['a visit that changed since the decide step read it', {}, { loadById: jest.fn(async () => ({ ...SVC, window_start: '09:00:00' })) }, 'visit_changed'],
     ['a visit the reschedule link refuses', {}, { pageEligibility: jest.fn(async () => ({ ok: false, reason: 'grouped' })) }, 'not_eligible'],
     ['a date outside the booking range', {}, { bookingRange: jest.fn(() => ({ rangeFrom: '2026-10-07', rangeTo: '2026-11-15' })) }, 'outside_booking_range'],

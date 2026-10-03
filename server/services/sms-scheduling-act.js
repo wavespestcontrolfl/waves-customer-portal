@@ -127,53 +127,35 @@ function buildMoveGuard({ decisionId, offer, visitId, customerId, now, target, e
   };
 }
 
-// A notice that did not go through gives its claim back, up to this many tries.
-const MAX_EFFECT_ATTEMPTS = 3;
-const releaseEffects = (dbh) => dbh.raw("(COALESCE(execution, '{}'::jsonb) - 'effects_started_at') || jsonb_build_object('effects_attempts', COALESCE((execution->>'effects_attempts')::int, 0) + 1)");
+const MAX_SYNC_ATTEMPTS = 3;
 const stampEffects = (dbh, key) => dbh.raw("COALESCE(execution, '{}'::jsonb) || jsonb_build_object(?::text, to_jsonb(now()))", [key]);
+const countAttempt = (dbh) => dbh.raw("COALESCE(execution, '{}'::jsonb) || jsonb_build_object('effects_attempts', COALESCE((execution->>'effects_attempts')::int, 0) + 1)");
 
 /**
- * A single move's customer notice and reminder sync, taken once. The claim
- * (effects_started_at on the decision) is written before the send, so a
- * process that died between the move's commit and this point leaves a moved
- * decision with no claim, which finishMoveEffects picks up; one that died
- * mid-send is never sent twice. A sync that reports failure releases the
- * claim for the cron to retry. The sync is pinned to the slot this move
- * committed, so it never overwrites a newer move's reminder state.
+ * A single move's reminder sync, pinned to the slot the move committed so it
+ * never overwrites a newer move's reminder state. handleReschedule never
+ * throws: it returns the reminder row when the sync ran and null when it
+ * could not. Stamps effects_done_at when it ran.
+ *
+ * The customer's confirmation text is attempted ONCE, here, right after the
+ * commit (`notify: true`). Every later run is the sweep's and is silent
+ * (`sendNotification: false`): it puts the reminders on the new time, so the
+ * day-before reminder still tells the customer, and it can never send a
+ * second confirmation, whatever happened to the first attempt.
  */
-async function notifySingleMove({ dbh, decisionId, visitId, date, start, deps = {} }) {
-  const claimed = await dbh('sms_offer_decisions')
-    .where({ id: decisionId, execution_status: 'moved' })
-    .whereRaw("execution->>'effects_started_at' IS NULL")
-    .update({ execution: stampEffects(dbh, 'effects_started_at') })
-    .returning('id');
-  if (!claimed.length) return false;
+async function syncReminders({ dbh, decisionId, visitId, date, start, notify, deps = {} }) {
+  let synced = null;
   try {
-    // Re-arms the reminders and sends the standard rescheduled text. After
-    // hours the text is held and the confirmation sweep sends it at 8 AM.
-    // handleReschedule never throws: it returns the reminder row when the
-    // sync ran and null when it could not (no row yet, or an error inside).
-    // "Ran" is the bar here, not "the text was delivered": a notice it could
-    // not send (opted out, held by the send window, a carrier refusal) is
-    // re-armed by handleReschedule itself (the 72h reminder or the 8 AM
-    // confirmation), exactly as for a move made from the reschedule link.
-    // Sending again from here would risk a second text.
-    const synced = await (deps.reminders || require('./appointment-reminders')).handleReschedule(visitId, `${date}T${start}`, { expectSchedule: { date, windowStart: start } });
-    if (synced) {
-      // The claim stays whether or not this stamp lands: the sync ran, and a
-      // released claim would send the text again.
-      await dbh('sms_offer_decisions').where({ id: decisionId }).update({ execution: stampEffects(dbh, 'effects_done_at') })
-        .catch((err) => logger.warn(`[sms-scheduling-act] effects stamp failed for ${decisionId}: ${errorCode(err)}`));
-      return true;
-    }
+    synced = await (deps.reminders || require('./appointment-reminders')).handleReschedule(
+      visitId, `${date}T${start}`, { expectSchedule: { date, windowStart: start }, ...(notify ? {} : { sendNotification: false }) },
+    );
   } catch (err) {
     logger.error(`[sms-scheduling-act] reminder sync failed for ${visitId}: ${errorCode(err)}`);
   }
-  // Not done: the claim goes back, and the cron tries again (a bounded number
-  // of times, so a visit with no reminder row is not swept forever).
-  await dbh('sms_offer_decisions').where({ id: decisionId }).update({ execution: releaseEffects(dbh) })
-    .catch((err) => logger.warn(`[sms-scheduling-act] effects release failed for ${decisionId}: ${errorCode(err)}`));
-  return false;
+  await dbh('sms_offer_decisions').where({ id: decisionId })
+    .update({ execution: synced ? stampEffects(dbh, 'effects_done_at') : countAttempt(dbh) })
+    .catch((err) => logger.warn(`[sms-scheduling-act] effects stamp failed for ${decisionId}: ${errorCode(err)}`));
+  return Boolean(synced);
 }
 
 /**
@@ -201,13 +183,15 @@ async function syncSelfBooking({ dbh, decisionId, visitId, target }) {
   }
 }
 
-const EFFECTS_MIN_AGE_MS = 2 * 60000;
+// Long past the executor's own attempt, which takes seconds.
+const EFFECTS_MIN_AGE_MS = 5 * 60000;
 const EFFECTS_LOOKBACK_MS = 24 * 3600000;
 
 /**
- * Moves whose after-commit effects never ran (the process exited right after
- * the move committed): finish them. The /book snapshot for any move; the
- * notice for a single move (a series move's is the series reconciler's).
+ * Moves whose after-commit effects did not finish (the process exited right
+ * after the move committed, or the sync failed): finish them. The /book
+ * snapshot for any move; a silent reminder sync for a single move (a series
+ * move's effects are the series reconciler's).
  * Runs on the offer-ledger cron, gate on or off, so a kill switch never
  * strands a customer who was already moved. Never throws.
  */
@@ -228,15 +212,15 @@ async function finishMoveEffects({ now = new Date(), dbh = db, deps = {} } = {})
       await syncSelfBooking({ dbh, decisionId: row.id, visitId: row.scheduled_service_id, target });
     }
     const rows = await due()
-      .whereRaw("d.execution->>'effects_started_at' IS NULL")
-      .whereRaw("COALESCE((d.execution->>'effects_attempts')::int, 0) < ?", [MAX_EFFECT_ATTEMPTS])
+      .whereRaw("d.execution->>'effects_done_at' IS NULL")
+      .whereRaw("COALESCE((d.execution->>'effects_attempts')::int, 0) < ?", [MAX_SYNC_ATTEMPTS])
       .whereRaw("COALESCE(d.execution->>'series', 'false') <> 'true'")
       .limit(20)
       .select('d.id', 'd.execution', 'o.scheduled_service_id');
     for (const row of rows) {
       const target = typeof row.execution === 'string' ? JSON.parse(row.execution) : (row.execution || {});
       if (!row.scheduled_service_id || !target.date || !target.start) continue;
-      if (await notifySingleMove({ dbh, decisionId: row.id, visitId: row.scheduled_service_id, date: target.date, start: target.start, deps })) finished += 1;
+      if (await syncReminders({ dbh, decisionId: row.id, visitId: row.scheduled_service_id, date: target.date, start: target.start, notify: false, deps })) finished += 1;
     }
     return { finished };
   } catch (err) {
@@ -261,7 +245,7 @@ async function afterMove({ dbh, decisionId, svc, date, window, result, deps }) {
     }
     return;
   }
-  await notifySingleMove({ dbh, decisionId, visitId: svc.id, date, start: window.start, deps });
+  await syncReminders({ dbh, decisionId, visitId: svc.id, date, start: window.start, notify: true, deps });
   try {
     await (deps.emitDispatchJobUpdate || require('./dispatch-assignment').emitDispatchJobUpdate)({ jobId: svc.id, actorId: null });
   } catch (err) {
@@ -274,6 +258,8 @@ async function moveVisit({ dbh, decisionId, offer, slot, visit, inboundSmsLogId,
   const page = deps.reschedulePublic || require('../routes/reschedule-public')._internals;
   const svc = await page.loadById(offer.scheduled_service_id, dbh);
   if (!svc) return refusal('visit_missing');
+  // An archived profile keeps active = true; the link refuses it the same way.
+  if (svc.customer_deleted_at) return refusal('customer_archived');
   // Exactly the visit the decide step checked, or nothing.
   const same = dateOnlyString(svc.scheduled_date) === dateOnlyString(visit?.scheduled_date)
     && hhmm(svc.window_start) === hhmm(visit?.window_start) && hhmm(svc.window_end) === hhmm(visit?.window_end)
