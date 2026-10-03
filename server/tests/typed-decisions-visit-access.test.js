@@ -326,6 +326,21 @@ describe('visit access shadow: rules that need no database', () => {
     expect(after).toMatchObject({ subject_hash: before.subject_hash, sampled_for: before.sampled_for });
   });
 
+  test('a fresh answer the recorder refused (its row is labeled) does not decide the other provider\'s cohort', async () => {
+    process.env.GATE_TYPED_DECISIONS_CLEF = 'true';
+    const visitId = await visit();
+    await sweep();
+    await database('decision_reviews').where({ subject_id: visitId, provider: 'cloudflare' }).update({ label_status: 'confirmed_correct' });
+    await text('We will be home all day', '2026-10-05T13:40:00Z');
+    // Both are asked on the new state only if due: the labeled provider is settled, so only Jev is.
+    mockAsk.mockImplementation(async (_id, _state, opts) => reply(opts && opts.provider === 'cloudflare' ? { contact_before_arrival: yes } : {}));
+    expect(await sweep()).toMatchObject({ asked: 1 });
+    const { sampleFor, stableDraw } = require('../services/typed-decisions/shadow-recorder');
+    for (const row of (await rows(visitId)).filter((r) => r.provider === 'typesafe')) {
+      expect(row.sampled_for).toBe(sampleFor(row.jev_answer, row.baseline_answers, () => stableDraw(row), []));
+    }
+  });
+
   test('the review route\'s rebuild matches the stored digest after the visit is completed', async () => {
     await text('The dog will be inside today', '2026-10-04T15:00:00Z');
     const visitId = await visit();

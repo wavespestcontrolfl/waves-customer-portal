@@ -348,23 +348,31 @@ async function shadowVisit(svc, { dbh, providers, out }) {
   // sibling whose pair just arrived (a retry), and a new answer that would
   // otherwise copy the cohort of a switched-off provider's row for an older
   // state. Unreviewed rows that are not held out only.
+  // The answers are re-read: a fresh answer the recorder refused to store (its
+  // row is labeled or held out, and keeps its older state) must not count.
   if (legs.length) {
     const { sampleFor, stableDraw } = require('./shadow-recorder');
-    const current = [...legs, ...stored];
-    for (const mine of current) {
-      for (const id of questionIds) {
-        const answer = mine.answers[id];
-        if (!answer) continue;
-        const key = { capability: pkg.capability, package_id: pkg.id, provider: mine.provider, subject_type: SUBJECT_TYPE, subject_id: svc.id, question_id: id };
-        const others = current.filter((other) => other.provider !== mine.provider).map((other) => other.answers[id]).filter(Boolean);
-        const cohort = sampleFor(answer, built.baselines[id], () => stableDraw(key), others);
-        try {
-          await dbh(TABLE).where(key).where({ subject_hash: built.subjectHash, label_status: 'unreviewed' })
-            .whereRaw(`sampled_for IS DISTINCT FROM 'heldout'`)
-            .update({ sampled_for: cohort });
-        } catch (err) {
-          logger.warn(`[typed-decisions] visit access (${mine.provider}) cohort refresh failed: ${err.message}`);
-        }
+    let persisted;
+    try {
+      persisted = await dbh(TABLE)
+        .where({ package_id: pkg.id, subject_type: SUBJECT_TYPE, subject_id: svc.id, subject_hash: built.subjectHash })
+        .select('id', 'capability', 'package_id', 'provider', 'subject_type', 'subject_id', 'question_id', 'jev_answer', 'label_status', 'sampled_for');
+    } catch (err) {
+      logger.warn(`[typed-decisions] visit access cohort refresh read failed: ${err.message}`);
+      return;
+    }
+    const parsed = (row) => (typeof row.jev_answer === 'string' ? JSON.parse(row.jev_answer) : row.jev_answer);
+    for (const row of persisted) {
+      if (row.label_status !== 'unreviewed' || row.sampled_for === 'heldout') continue;
+      const others = persisted.filter((other) => other.question_id === row.question_id && other.provider !== row.provider).map(parsed);
+      const cohort = sampleFor(parsed(row), built.baselines[row.question_id], () => stableDraw(row), others);
+      if (cohort === row.sampled_for) continue;
+      try {
+        await dbh(TABLE).where({ id: row.id, subject_hash: built.subjectHash, label_status: 'unreviewed' })
+          .whereRaw(`sampled_for IS DISTINCT FROM 'heldout'`)
+          .update({ sampled_for: cohort });
+      } catch (err) {
+        logger.warn(`[typed-decisions] visit access (${row.provider}) cohort refresh failed: ${err.message}`);
       }
     }
   }
