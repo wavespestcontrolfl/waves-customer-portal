@@ -730,7 +730,7 @@ describe('deprecated client estimator pricing drift guards', () => {
     // "discards a response that was requested for a previous address"; and
     // EstimateToolViewV2.property-lifecycle.test.jsx, "ignores a delayed
     // old-address response after the next property has already populated".
-    const at = adminToolViewSource.indexOf('async function doLookup({ refresh = false } = {}) {');
+    const at = adminToolViewSource.indexOf('async function doLookup({ refresh = false, occupancy } = {}) {');
     expect(at).toBeGreaterThan(0);
     const fetchAt = adminToolViewSource.indexOf('"/api/admin/estimator/property-lookup"', at);
     expect(fetchAt).toBeGreaterThan(at);
