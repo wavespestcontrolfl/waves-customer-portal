@@ -10,7 +10,7 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import ReviewVelocityEngine from "./ReviewVelocityEngine";
+import ReviewVelocityEngine, { decisionLine } from "./ReviewVelocityEngine";
 
 const response = (body, status = 200) =>
   new Response(JSON.stringify(body), {
@@ -110,5 +110,27 @@ describe("Review outreach interactions", () => {
         body: "Hi Taylor, checking that everything is resolved.",
       });
     });
+  });
+});
+
+describe("review-ask hold decisions (GATE_REVIEW_ASK_TECH_VOICE)", () => {
+  it("names a repeat hold with the held text and the earlier step it repeats", () => {
+    const line = decisionLine({
+      decision: {
+        reason: "ask_held_repeat",
+        plannedAt: "2026-10-09T14:00:00.000Z",
+        detail: { step: 1, heldBody: "How are the ants?", earlierQuote: "How are the ants doing", earlierStep: 0 },
+      },
+    }, true);
+    expect(line).toContain("Ask held: the drafted text repeated an earlier one");
+    expect(line).toContain('Held text: "How are the ants?" — repeats step 1: "How are the ants doing"');
+  });
+
+  it("names a payment hold and what it saw", () => {
+    const line = decisionLine({
+      decision: { reason: "payment_hold", nextEvalAt: "2026-10-04T14:00:00.000Z", detail: { step: 1, hold: "overdue_invoice", heldSince: "2026-10-03T14:00:00.000Z" } },
+    }, true);
+    expect(line).toContain("Held: the customer has an overdue bill or a recent payment reminder");
+    expect(line).toMatch(/Hold: overdue bill since /);
   });
 });

@@ -576,6 +576,14 @@ function predictCompletionBilling({
       primaryLinePrice, hasVisitPrice, noCharge,
     });
   }
+  // GATE_PAF_PREPAY: an UNSTAMPED visit validated as covered can only be a
+  // visit held by a deferred annual prepay (annualCoverageVerdictForPrediction
+  // returns null for every other unstamped visit). Completion suppresses it in
+  // whatever lane the customer sits — a deferred customer stays
+  // per_application until the year is paid — so predict the same here.
+  if (annualCoverageValidated === true && prepaidMethod !== ANNUAL_PREPAY_PREPAID_METHOD) {
+    return { kind: 'covered_annual', amount: null, conflictStampedPrice: false };
+  }
   // Completion's numeric prepaid fallback covers ONLY out-of-band methods
   // (cash/Zelle) — an annual_prepay_invoice stamp is governed exclusively
   // by the term-validated gate, so a STALE annual stamp's amount must not

@@ -309,6 +309,9 @@ const READ_ONLY = [
   'list_gap_reports',
   // needs-me-tools.js: read-only list over open admin alerts and standing conditions.
   'needs_me',
+  // billing-reader-tools.js (W9): read-only per-customer invoice list and invoice detail
+  // with a payments timeline (attempts kept apart from received payments).
+  'get_customer_invoices', 'get_invoice_detail',
 ];
 
 describe('intelligence bar write-gate contract (issue #1568)', () => {

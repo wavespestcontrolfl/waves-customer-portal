@@ -96,12 +96,16 @@ async function loadFlags() {
 // in the DB). Pass `true` to flip a flag default-on: every user gets the
 // feature unless they have an explicit `enabled: false` row. A failed read
 // still fails closed: every flag is off until a read succeeds (flagValue).
-export function useFeatureFlag(key, defaultValue = false) {
-  const [enabled, setEnabled] = useState(defaultValue);
+// refreshKey (optional): the verified staff account a long-lived shell reads
+// for. A value resolved for another key/account, or read while the cache is
+// unloaded (refetched for a new account), is never returned: off is, derived
+// in render, until this read answers (Codex #5573 r10, r12).
+export function useFeatureFlag(key, defaultValue = false, refreshKey = undefined) {
+  const [state, setState] = useState(() => ({ key, refreshKey, enabled: defaultValue, resolved: false }));
   useEffect(() => {
     let mounted = true;
     const apply = (flags) => {
-      if (mounted) setEnabled(flagValue(flags, key, defaultValue));
+      if (mounted) setState({ key, refreshKey, enabled: flagValue(flags, key, defaultValue), resolved: true });
     };
     const unsubscribe = subscribe(apply);
     loadFlags().then(apply);
@@ -109,16 +113,17 @@ export function useFeatureFlag(key, defaultValue = false) {
       mounted = false;
       unsubscribe();
     };
-  }, [key, defaultValue]);
-  return enabled;
+  }, [key, defaultValue, refreshKey]);
+  // Unresolved for this key/account, or refetching: closed, default-on flags
+  // included (AGENTS.md: flags fail closed; pre-push P1).
+  if (!state.resolved || state.key !== key || state.refreshKey !== refreshKey || cache === null) return false;
+  return state.enabled;
 }
 
-// Same as useFeatureFlag but also exposes `ready` — `false` until the flag
-// fetch has resolved, `true` after. Gates use this to defer rendering
-// until the flag is known, avoiding a V1→V2 remount flash (which double-
-// fires any fetches the V1 component does on mount).
-export function useFeatureFlagReady(key, defaultValue = false) {
+export function useFeatureFlagReady(key, defaultValue = false, refreshKey = undefined) {
   const [state, setState] = useState(() => ({
+    key,
+    refreshKey,
     enabled: cache ? flagValue(cache, key, defaultValue) : defaultValue,
     ready: cache !== null,
   }));
@@ -126,7 +131,7 @@ export function useFeatureFlagReady(key, defaultValue = false) {
     let mounted = true;
     const apply = (flags) => {
       if (!mounted) return;
-      setState({ enabled: flagValue(flags, key, defaultValue), ready: true });
+      setState({ key, refreshKey, enabled: flagValue(flags, key, defaultValue), ready: true });
     };
     const unsubscribe = subscribe(apply);
     if (cache !== null) apply(cache);
@@ -135,8 +140,13 @@ export function useFeatureFlagReady(key, defaultValue = false) {
       mounted = false;
       unsubscribe();
     };
-  }, [key, defaultValue]);
-  return state;
+  }, [key, defaultValue, refreshKey]);
+  // Derived in render, like useFeatureFlag: never another key/account's value,
+  // never a value while the cache is unloaded (Codex #5573 r12).
+  if (state.key !== key || state.refreshKey !== refreshKey || cache === null) {
+    return { enabled: false, ready: false };
+  }
+  return { enabled: state.enabled, ready: state.ready };
 }
 
 // Call after a toggle UI mutation so the operator's own view reflects

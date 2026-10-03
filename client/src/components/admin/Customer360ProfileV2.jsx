@@ -7239,6 +7239,234 @@ function AccessPrefsEditForm({ d, set, setDraft, fieldErrors, hasStructuredPets 
   );
 }
 
+// ─── Neighborhood access (shared gate codes, staff only) ─────────
+// The neighborhood each active property is linked to and the gate entries
+// the whole neighborhood shares, with an office pick. Admin-only; renders
+// nothing at all when the directory is off (404) or the viewer is not an
+// admin (403).
+const NEIGHBORHOOD_COUNTIES = ["Manatee", "Sarasota", "Charlotte"];
+const NEIGHBORHOOD_SOURCE_LABEL = { office: "Set by office", county: "County records" };
+const NEIGHBORHOOD_SEARCH_DEBOUNCE_MS = 250;
+
+function NeighborhoodPicker({ property, onSaved, onCancel }) {
+  const fieldId = useId();
+  const [search, setSearch] = useState("");
+  const [results, setResults] = useState([]);
+  const [searched, setSearched] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [name, setName] = useState("");
+  const [county, setCounty] = useState(NEIGHBORHOOD_COUNTIES[0]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const searchSeq = useRef(0);
+
+  useEffect(() => {
+    const q = search.trim();
+    const seq = ++searchSeq.current;
+    if (!q) {
+      setResults([]);
+      setSearched(false);
+      return undefined;
+    }
+    // A new query never shows the previous query's choices: they could link
+    // the property to a neighborhood that does not match what was typed.
+    setResults([]);
+    setSearched(false);
+    const timer = setTimeout(async () => {
+      try {
+        const data = await adminFetch(`/admin/neighborhood-access?q=${encodeURIComponent(q)}&limit=8&picker=1`);
+        if (seq !== searchSeq.current) return;
+        setResults(Array.isArray(data?.neighborhoods) ? data.neighborhoods : []);
+        setSearched(true);
+        setError("");
+      } catch (err) {
+        if (seq !== searchSeq.current) return;
+        setResults([]);
+        setSearched(false);
+        setError(apiErrorMessage(err, "Could not search neighborhoods"));
+      }
+    }, NEIGHBORHOOD_SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [search]);
+
+  const save = async (body) => {
+    setBusy(true);
+    setError("");
+    try {
+      const updated = await adminFetch(`/admin/neighborhood-access/properties/${property.id}/neighborhood`, {
+        method: "PUT",
+        body: JSON.stringify(body),
+      });
+      onSaved(updated);
+    } catch (err) {
+      setError(apiErrorMessage(err, "Could not save the neighborhood"));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mt-2 grid gap-2 rounded-sm border-hairline border-zinc-200 bg-zinc-50 px-3 py-3">
+      <label className="block">
+        <span className="ui-label text-ink-secondary mb-1 block">Find a neighborhood</span>
+        <Input
+          id={`${fieldId}-search`}
+          type="search"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Neighborhood or subdivision"
+          disabled={busy}
+        />
+      </label>
+      {results.length > 0 && (
+        <div className="grid gap-1">
+          {results.map((n) => (
+            <Button
+              key={n.id}
+              size="sm"
+              variant="secondary"
+              className="justify-start"
+              disabled={busy}
+              onClick={() => save({ neighborhoodId: n.id })}
+            >
+              {[n.name, n.county].filter(Boolean).join(" · ")}
+            </Button>
+          ))}
+        </div>
+      )}
+      {searched && results.length === 0 && (
+        <div className="text-ui-label text-ink-secondary">No neighborhood matches. You can create it below.</div>
+      )}
+      {creating ? (
+        <form
+          className="grid gap-2"
+          onSubmit={(e) => { e.preventDefault(); save({ create: { name: name.trim(), county } }); }}
+        >
+          <label className="block">
+            <span className="ui-label text-ink-secondary mb-1 block">Neighborhood name</span>
+            <Input value={name} onChange={(e) => setName(e.target.value)} maxLength={120} disabled={busy} />
+          </label>
+          <label className="block">
+            <span className="ui-label text-ink-secondary mb-1 block">County</span>
+            <Select value={county} onChange={(e) => setCounty(e.target.value)} disabled={busy}>
+              {NEIGHBORHOOD_COUNTIES.map((c) => <option key={c} value={c}>{c}</option>)}
+            </Select>
+          </label>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button type="submit" size="sm" disabled={busy || !name.trim()}>Save neighborhood</Button>
+            <Button size="sm" variant="ghost" disabled={busy} onClick={() => setCreating(false)}>Cancel</Button>
+          </div>
+        </form>
+      ) : (
+        <div className="flex flex-wrap items-center gap-2">
+          <Button size="sm" variant="secondary" disabled={busy} onClick={() => setCreating(true)}>Create neighborhood</Button>
+          {property.neighborhood && (
+            <Button size="sm" variant="ghost" disabled={busy} onClick={() => save({ neighborhoodId: null })}>Clear</Button>
+          )}
+          <Button size="sm" variant="ghost" disabled={busy} onClick={onCancel}>Cancel</Button>
+        </div>
+      )}
+      {error && <ActionFeedback error>{error}</ActionFeedback>}
+    </div>
+  );
+}
+
+function PropertyNeighborhood({ property, showAddress, onUpdated }) {
+  const [changing, setChanging] = useState(false);
+  const hood = property.neighborhood;
+  // Label, street, unit and city, so two properties in one building never
+  // read the same (their Change buttons name the same text).
+  const street = [property.addressLine1, property.addressLine2].filter(Boolean).join(" ");
+  const address = [street, property.city].filter(Boolean).join(", ");
+  const heading = [property.label, address].filter(Boolean).join(" · ") || "Property";
+  return (
+    <div className="mb-2 last:mb-0">
+      {showAddress && (
+        <div className="text-ui-label text-ink-secondary">{heading}</div>
+      )}
+      <div className="flex flex-wrap items-center justify-between gap-2 py-1">
+        <div className="min-w-0">
+          <span className={cn("text-ui-label break-words", hood ? "text-zinc-900" : "text-ink-tertiary italic")}>
+            {hood ? hood.name : "Not linked"}
+          </span>
+          {hood && NEIGHBORHOOD_SOURCE_LABEL[property.neighborhoodSource] && (
+            <span className="ml-2 text-ui-label text-ink-secondary">{NEIGHBORHOOD_SOURCE_LABEL[property.neighborhoodSource]}</span>
+          )}
+        </div>
+        {!changing && (
+          <button
+            type="button"
+            onClick={() => setChanging(true)}
+            aria-label={`Change neighborhood${showAddress ? ` for ${heading}` : ""}`}
+            className="text-ui-label text-zinc-900 underline underline-offset-2 hover:no-underline u-focus-ring"
+          >
+            Change
+          </button>
+        )}
+      </div>
+      {hood && property.entries.length === 0 && (
+        <div className="py-1 text-ui-label text-ink-tertiary italic">No gate entry on file.</div>
+      )}
+      {hood && property.entries.map((e) => (
+        <div key={e.id} className="flex justify-between gap-2 py-1 text-ui-label border-b border-hairline border-zinc-200/60">
+          <span className="text-ink-secondary flex-shrink-0">{e.gateLabel}</span>
+          <span className="flex flex-wrap items-center justify-end gap-2 text-right max-w-[220px] break-words text-zinc-900">
+            {e.status === "needs_confirm" && <Badge tone="neutral">Unconfirmed</Badge>}
+            <span className={e.code ? "u-nums" : ""}>{e.code || e.instructions || "Not set"}</span>
+          </span>
+        </div>
+      ))}
+      {changing && (
+        <NeighborhoodPicker
+          property={property}
+          onCancel={() => setChanging(false)}
+          onSaved={(updated) => { setChanging(false); onUpdated(updated); }}
+        />
+      )}
+    </div>
+  );
+}
+
+export function CustomerNeighborhoodBlock({ customerId }) {
+  const [properties, setProperties] = useState(null);
+  const [loadError, setLoadError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    setProperties(null);
+    setLoadError("");
+    adminFetch(`/admin/neighborhood-access/customers/${customerId}/properties`)
+      .then((data) => { if (!cancelled) setProperties(Array.isArray(data?.properties) ? data.properties : null); })
+      .catch((err) => {
+        if (cancelled || err?.status === 404 || err?.status === 403) return;
+        setLoadError(apiErrorMessage(err, "Could not load the neighborhood"));
+      });
+    return () => { cancelled = true; };
+  }, [customerId]);
+
+  if (loadError) {
+    return (
+      <div className="mt-3">
+        <AccessPrefsSubheading>Neighborhood</AccessPrefsSubheading>
+        <div className="text-ui-label text-ink-secondary">{loadError}</div>
+      </div>
+    );
+  }
+  if (!properties || properties.length === 0) return null;
+  return (
+    <div className="mt-3">
+      <AccessPrefsSubheading>Neighborhood</AccessPrefsSubheading>
+      {properties.map((p) => (
+        <PropertyNeighborhood
+          key={p.id}
+          property={p}
+          showAddress={properties.length > 1}
+          onUpdated={(updated) => setProperties((prev) => prev.map((x) => (x.id === updated.id ? updated : x)))}
+        />
+      ))}
+    </div>
+  );
+}
+
 function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
   const [draft, setDraft] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -7315,7 +7543,12 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
   };
 
   if (!draft) {
-    return <AccessPrefsReadView p={prefs || {}} isAdmin={isAdmin} onEdit={openEdit} />;
+    return (
+      <>
+        <AccessPrefsReadView p={prefs || {}} isAdmin={isAdmin} onEdit={openEdit} />
+        {isAdmin && <CustomerNeighborhoodBlock customerId={customerId} />}
+      </>
+    );
   }
 
   return (

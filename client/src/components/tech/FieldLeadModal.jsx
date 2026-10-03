@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useFieldPortalClass } from './fieldPortal';
 import { createPortal } from 'react-dom';
 import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
@@ -9,6 +10,7 @@ const API = import.meta.env.VITE_API_URL || '/api';
 const SERVICE_TYPES = ['Pest', 'Lawn', 'Termite', 'Mosquito', 'Tree & Shrub', 'Other'];
 
 export default function FieldLeadModal({ service, onClose, onSubmit }) {
+  const fieldPortalClass = useFieldPortalClass();
   const isMobile = useIsMobile();
   const dialogRef = useModalFocus(true, onClose);
   const [serviceType, setServiceType] = useState('');
@@ -48,7 +50,7 @@ export default function FieldLeadModal({ service, onClose, onSubmit }) {
   };
 
   return createPortal(
-    <div ref={dialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Flag Opportunity" style={{
+    <div ref={dialogRef} className={fieldPortalClass || undefined} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Flag Opportunity" style={{
       position: 'fixed', inset: 0, zIndex: 9999, fontFamily: '"DM Sans", Inter, system-ui, sans-serif',
       display: 'flex', alignItems: 'center', justifyContent: 'center',
       background: 'rgba(0,0,0,0.5)',
