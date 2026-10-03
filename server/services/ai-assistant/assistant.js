@@ -348,6 +348,14 @@ function portalPrompt({ payments, visits, reservice, reserviceLawn, emailChange 
   return PORTAL_PROMPTS.get(key);
 }
 
+// What the durable hand-off row says. A confirmed email change keeps both
+// addresses on it, so the request survives a bell that did not ring. They
+// are not put in `reason`, which is logged.
+function escalationSummary(reason, customer, newEmail) {
+  if (!newEmail) return reason;
+  return `${reason}. Email on file: ${String(customer?.email || '').trim() || 'none'}. New email: ${newEmail}`;
+}
+
 const TOPIC_WORDING = {
   cancellation: 'a cancellation',
   schedule_change: 'a schedule change',
@@ -735,7 +743,7 @@ class WavesAssistant {
       conversation_id: conversation.id,
       customer_id: conversation.customer_id,
       reason: this.classifyEscalation(customerMessage),
-      summary: reason,
+      summary: escalationSummary(reason, customer, newEmail),
       customer_message: customerMessage,
       ai_draft_response: null,
       priority,

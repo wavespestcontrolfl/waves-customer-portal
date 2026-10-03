@@ -52,6 +52,7 @@ beforeEach(() => {
   chat = [];
   failMessages = false;
   db.__queries.length = 0;
+  db.__bindings = [];
   db.__rows = (q) => {
     if (q.sql.includes('from "agent_sessions"')) return [conversation];
     if (q.sql.includes('from "agent_messages"')) {
@@ -60,7 +61,7 @@ beforeEach(() => {
       return [...chat];
     }
     if (q.sql.includes('from "customers"')) return [customer];
-    if (q.sql.includes('insert into "ai_escalations"')) return [{ id: 'esc-1' }];
+    if (q.sql.includes('insert into "ai_escalations"')) { db.__bindings.push(q.bindings); return [{ id: 'esc-1' }]; }
     return [];
   };
   NotificationService.notifyAdmin.mockResolvedValue({ id: 'n-1', deduped: false });
@@ -172,6 +173,8 @@ test('when the bell does not ring the customer is not told the team has it', asy
 
   expect(result.teamNotified).toBe(false);
   expect(result.reply).toMatch(/saved your email change request/);
+  // What was saved names both addresses: the request does not depend on the bell.
+  expect(db.__bindings[0]).toContain(`Customer confirmed a new email address in portal chat. Email on file: pat.old@example.com. New email: ${NEW}`);
   expect(result.reply).not.toMatch(/sent your new email/);
 });
 
