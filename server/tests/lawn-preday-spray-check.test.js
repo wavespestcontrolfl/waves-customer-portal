@@ -428,3 +428,65 @@ describe('cardStillValid', () => {
   });
 });
 
+describe('hourly backstop runs: only upcoming visits, never a re-card', () => {
+  beforeEach(() => { process.env.GATE_LAWN_PREDAY_SPRAY_CHECK = 'true'; jest.clearAllMocks(); });
+  afterEach(() => { delete process.env.GATE_LAWN_PREDAY_SPRAY_CHECK; });
+
+  const at = (hhmmEt) => new Date(`2026-10-03T${String(Number(hhmmEt.slice(0, 2)) + 4).padStart(2, '0')}:${hhmmEt.slice(3)}:00Z`); // EDT = UTC-4
+  const visitRow = (over = {}) => ({ id: 'visit-1', service_type: 'Lawn Care Visit', window_start: '09:00:00', window_end: null, estimated_duration_minutes: null, ...over });
+
+  test('the "still upcoming" rule: the arrival window [start, start + its own length) has not ended', () => {
+    const up = (visit, hhmm) => Sweep.visitStillUpcoming(visit, DAY, at(hhmm));
+    expect(up(visitRow(), '05:41')).toBe(true);
+    expect(up(visitRow(), '09:59')).toBe(true);          // no end booked: 60 min default
+    expect(up(visitRow(), '10:00')).toBe(false);
+    expect(up(visitRow(), '15:41')).toBe(false);         // the 3:41 PM run never cards a 9 AM visit
+    expect(up(visitRow({ window_end: '11:00:00' }), '10:41')).toBe(true);   // a stored 2 h window
+    expect(up(visitRow({ window_end: '11:00:00' }), '11:00')).toBe(false);
+    expect(up(visitRow({ estimated_duration_minutes: 150 }), '11:00')).toBe(true); // else the visit's duration
+    expect(up(visitRow({ window_start: null }), '12:41')).toBe(true);       // no window: noon + 60
+    expect(up(visitRow({ window_start: null }), '13:00')).toBe(false);
+    expect(up(visitRow({ window_start: '15:00:00' }), '15:41')).toBe(true);
+  });
+
+  test('a late run skips a morning visit that never started: no context read, no forecast read, no card', async () => {
+    const alerts = [];
+    const d = deps({ ctx: ctxFor([baseLine(herbicide)]), fc: forecast({ wind: 30 }), alerts });
+    const out = await Sweep.runSweep({ dbh: fakeDb({ alerts }), now: at('15:41'), deps: d });
+    expect(out).toMatchObject({ considered: 1, checked: 0, carded: 0 });
+    expect(d.loadContext).not.toHaveBeenCalled();
+    expect(d.fetchForecast).not.toHaveBeenCalled();
+  });
+
+  test('a visit moved onto today later is carded by a later run', async () => {
+    const alerts = [];
+    const visits = [visitRow({ window_start: '15:00:00' })];
+    const ctx = ctxFor([baseLine(herbicide)], { windowStart: '15:00:00', arrival: new Date('2026-10-03T19:00:00Z') });
+    const d = deps({ ctx, fc: forecast({ wind: 30 }), alerts });
+    const out = await Sweep.runSweep({ dbh: fakeDb({ alerts, visits }), now: at('11:41'), deps: d });
+    expect(out).toMatchObject({ carded: 1 });
+  });
+
+  test('a card a dispatcher RESOLVED by hand for the same date and window is never rewritten by a later run', async () => {
+    const alerts = [{ id: 'hand-resolved', type: 'lawn_spray_hold', job_id: 'visit-1', resolved_at: '2026-10-03T12:00:00Z', resolved_by: 'tech-1',
+      payload: { for_date: DAY, window_start: '09:00:00' } }];
+    const d = deps({ ctx: ctxFor([baseLine(herbicide)]), fc: forecast({ wind: 30 }), alerts });
+    for (const hhmm of ['07:41', '08:41']) {
+      const out = await Sweep.runSweep({ dbh: fakeDb({ alerts }), now: at(hhmm), deps: d });
+      expect(out).toMatchObject({ duplicate: 1, carded: 0 });
+    }
+    expect(alerts).toHaveLength(1);
+    expect(d.fetchForecast).not.toHaveBeenCalled();
+  });
+
+  test('the cron is hourly at :41 from 5:41 to 15:41 ET, under the same lock and gate check', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/scheduler.js'), 'utf8');
+    const i = src.indexOf("cron.schedule('41 5-15 * * *'");
+    expect(i).toBeGreaterThan(0);
+    const body = src.slice(i, src.indexOf("timezone: 'America/New_York'", i) + 40);
+    expect(body).toMatch(/LawnPredaySprayCheck\.enabled\(\)\) return/);
+    expect(body).toMatch(/runExclusive\('lawn-preday-spray-check'/);
+    expect(body).toMatch(/timezone: 'America\/New_York'/);
+  });
+});
+

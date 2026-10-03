@@ -62,6 +62,12 @@ export const TECH_OUT_ALERTS_EVENT = 'waves:tech-out-alerts-changed';
 // Card types whose identity (customer, service) only the queue read joins in.
 const REHYDRATE_ON_RECEIPT_TYPES = new Set(['visit_not_closed_out', 'lawn_spray_hold']);
 const TECH_OUT_ALERT_TYPE = 'tech_out_overflow';
+const SPRAY_HOLD_TYPE = 'lawn_spray_hold';
+// The queue read's default page (server GET /alerts, no limit param): a read
+// shorter than this holds every open card, so a card it omits is no longer open.
+const QUEUE_PAGE_LIMIT = 50;
+// Updates for one visit come in bursts (a drag, a bulk move): one re-read.
+const SPRAY_REREAD_DEBOUNCE_MS = 400;
 
 function relayTechOutAlertChange(alert) {
   if (!alert || alert.type !== TECH_OUT_ALERT_TYPE) return;
@@ -138,7 +144,7 @@ export function useDispatchAlerts() {
 
   // Read the open queue and merge it into state (the mount, and again after a
   // card decision). `isCancelled`: the mount's unmount guard.
-  const hydrate = useCallback(async (isCancelled = () => false) => {
+  const hydrate = useCallback(async (isCancelled = () => false, { reconcileJobs = null } = {}) => {
     const res = await fetch(
       `${API_BASE}/admin/dispatch/alerts?unresolved=true`,
       { headers: adminAuthHeaders() }
@@ -148,7 +154,18 @@ export function useDispatchAlerts() {
     if (isCancelled()) return;
     const fetched = Array.isArray(data.alerts) ? data.alerts : [];
     setAlerts((prev) => mergeHydration(prev, fetched, resolvedIdsRef.current));
-  }, []);
+    // A spray hold whose visit was edited is dropped (and superseded) by this
+    // read; the supersede's resolved broadcast normally removes it, but a
+    // failed write or a lost packet must not leave it on screen. Only when the
+    // read was a whole queue (a short page), so an omission means "not open".
+    if (reconcileJobs && fetched.length < QUEUE_PAGE_LIMIT) {
+      const open = new Set(fetched.map((a) => a.id));
+      const gone = alertsRef.current
+        .filter((a) => a.type === SPRAY_HOLD_TYPE && reconcileJobs.has(a.job_id) && !open.has(a.id))
+        .map((a) => a.id);
+      if (gone.length) markResolved(gone);
+    }
+  }, [markResolved]);
 
   // ---- initial hydration ----
   useEffect(() => {
@@ -210,12 +227,34 @@ export function useDispatchAlerts() {
       markResolved([payload.id]);
     }
 
+    // A placement edit (date, window, status) changes whether a spray hold
+    // still describes its visit. The queue read judges and supersedes it, so
+    // re-read when a visit that has a loaded spray hold updates; jobs without
+    // one cost nothing, and a burst of updates is one read (trailing debounce).
+    const sprayJobs = new Set();
+    let sprayTimer = null;
+    function handleJobUpdate(payload) {
+      const jobId = payload && payload.job_id;
+      if (!jobId) return;
+      if (!alertsRef.current.some((a) => a.type === SPRAY_HOLD_TYPE && a.job_id === jobId)) return;
+      sprayJobs.add(jobId);
+      clearTimeout(sprayTimer);
+      sprayTimer = setTimeout(() => {
+        const reconcileJobs = new Set(sprayJobs);
+        sprayJobs.clear();
+        hydrate(() => false, { reconcileJobs }).catch(() => {});
+      }, SPRAY_REREAD_DEBOUNCE_MS);
+    }
+
     socket.on('dispatch:alert', handleAlert);
     socket.on('dispatch:alert_resolved', handleResolved);
+    socket.on('dispatch:job_update', handleJobUpdate);
 
     return () => {
       socket.off('dispatch:alert', handleAlert);
       socket.off('dispatch:alert_resolved', handleResolved);
+      socket.off('dispatch:job_update', handleJobUpdate);
+      clearTimeout(sprayTimer);
       socket.disconnect();
     };
   }, [hydrate, markResolved]);

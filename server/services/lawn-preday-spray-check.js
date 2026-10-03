@@ -1,7 +1,7 @@
 /**
  * Lawn pre-day spray check (lawn report rebuild P32). Staff-facing only.
  *
- * The 5:41 AM ET cron runs the job card's own spray check (buildSprayCheck)
+ * The 5:41 AM ET cron (and its hourly backstop through 3:41 PM) runs the job card's own spray check (buildSprayCheck)
  * on each of today's lawn visits' planned PRIMARY products, against the
  * Open-Meteo property forecast for the visit's arrival window. A hold on a
  * primary product writes ONE quiet `lawn_spray_hold` card to the Dispatch
@@ -22,7 +22,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { lawnPredaySprayCheckLive } = require('../config/feature-gates');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, parseETDateTime, windowDurationMinutes } = require('../utils/datetime-et');
 const { OPEN_PRE_ARRIVAL_STATUSES, cardStillValid, readVisit } = require('./lawn-spray-card-validity');
 const { detectServiceLine } = require('./service-report/service-line-configs');
 const { fetchPropertyForecast } = require('./service-report/application-conditions');
@@ -258,10 +258,28 @@ async function writeCard({ dbh, jobId, day, ctx, holds, deps }) {
   return 'carded';
 }
 
+/**
+ * "Still upcoming": the visit's arrival window has not ended. The window is
+ * [start, start + its own length): start = window_start (noon when none is
+ * booked, the same fallback the job card uses), length = windowDurationMinutes
+ * (stored span, else estimated_duration_minutes, else 60 — the shared rule
+ * the movers use). Equivalent to the schedule's own "window elapsed" notion
+ * (sameDayWindowElapsed: end at or before now), so the hourly backstop runs
+ * never card a morning visit that simply was not started by afternoon.
+ */
+function visitStillUpcoming(visit, day, now) {
+  const start = parseETDateTime(`${day}T${normWindowStart(visit.window_start)}`);
+  if (!Number.isFinite(start.getTime())) return false;
+  const minutes = windowDurationMinutes(visit.window_start, visit.window_end, visit.estimated_duration_minutes);
+  return start.getTime() + minutes * 60000 > now.getTime();
+}
+const normWindowStart = (v) => (/^\d{2}:\d{2}/.test(String(v || '')) ? String(v).slice(0, 5) : '12:00');
+
 // One visit → { counter, checked, held }: the result counter it moves
 // (duplicate / unavailable / stale / carded, or null), whether a forecast was judged,
 // and whether a hold was found. Throws are the caller's to count.
 async function checkVisit({ dbh, visit, day, now, catalog, deps }) {
+  if (!visitStillUpcoming(visit, day, now)) return {};
   if (await alreadyCarded(dbh, visit.id, day, visit.window_start)) return { counter: 'duplicate' };
   const ctx = await (deps.loadContext || JobCard.loadVisitSprayContext)(visit.id, { dbh, now, catalog, deps: deps.jobCard || {} });
   if (!ctx || !ctx.isLawn || ctx.scheduledDate !== day) return {};
@@ -298,7 +316,7 @@ async function runSweep({ dbh = db, now = new Date(), deps = {} } = {}) {
     .whereIn('s.status', OPEN_PRE_ARRIVAL_STATUSES)
     .orderBy('s.window_start', 'asc')
     .orderBy('s.id', 'asc')
-    .select('s.id', 's.service_type', 's.window_start');
+    .select('s.id', 's.service_type', 's.window_start', 's.window_end', 's.estimated_duration_minutes');
   const lawnVisits = visits.filter((v) => detectServiceLine(v.service_type) === 'lawn');
   result.considered = lawnVisits.length;
   if (!lawnVisits.length) return result;
@@ -326,4 +344,4 @@ async function runSweep({ dbh = db, now = new Date(), deps = {} } = {}) {
   return result;
 }
 
-module.exports = { enabled, runSweep, supersedeStaleCards, cardStillValid, OPEN_PRE_ARRIVAL_STATUSES, holdsForVisit, cardLines, hourlyForSprayCheck, rainInches, TYPE, SOURCE, RAIN_MIN_INCHES };
+module.exports = { enabled, runSweep, visitStillUpcoming, supersedeStaleCards, cardStillValid, OPEN_PRE_ARRIVAL_STATUSES, holdsForVisit, cardLines, hourlyForSprayCheck, rainInches, TYPE, SOURCE, RAIN_MIN_INCHES };
