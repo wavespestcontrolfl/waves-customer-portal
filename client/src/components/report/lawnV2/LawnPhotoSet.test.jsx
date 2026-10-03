@@ -5,7 +5,7 @@
 // strip renders exactly as before. Synthetic URLs only.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import LawnReportV2Section from './LawnReportV2Section';
 import { LawnPhotoStrip, PrintContext } from './LawnReportV2';
@@ -55,6 +55,16 @@ describe('LawnPhotoStrip with a photo set', () => {
   it('captions are at least 14px', () => {
     const { container } = render(<LawnPhotoStrip photoSet={SET} />);
     for (const caption of container.querySelectorAll('figcaption')) expect(parseFloat(caption.style.fontSize)).toBeGreaterThanOrEqual(14);
+  });
+
+  // Codex r3: Cmd+P on the live page sets usePrintRequested while PrintContext
+  // stays false; the printed page must not embed expiring signed links.
+  it('drops the links when the browser prints the live page', () => {
+    const live = render(<LawnPhotoStrip photoSet={SET} />);
+    expect(live.container.querySelectorAll('a')).toHaveLength(SET.length);
+    act(() => { window.dispatchEvent(new Event('beforeprint')); });
+    expect(live.container.querySelector('a')).toBeNull();
+    expect(live.container.querySelectorAll('img')).toHaveLength(SET.length);
   });
 
   it('ignores a photo with no link and falls back to the strip when the set is empty or missing', () => {

@@ -539,7 +539,7 @@ export function LawnPhotoStrip({ photos = [], summary = null, embedded = false, 
   return (
     <Frame>
       {!embedded && <CardTitle>Lawn photos</CardTitle>}
-      {set.length ? <LawnPhotoSetGrid set={set} print={print} /> : null}
+      {set.length ? <LawnPhotoSetGrid set={set} print={printOpen} /> : null}
       {pics.length && print ? (
         /* Static grid for PDF/print — no slider/arrows. */
         <div style={{ display: 'grid', gridTemplateColumns: pics.length === 1 ? '1fr' : '1fr 1fr', gap: 10 }}>
