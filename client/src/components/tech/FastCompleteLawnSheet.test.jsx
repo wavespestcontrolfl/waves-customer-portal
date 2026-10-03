@@ -923,20 +923,26 @@ describe('a product the plan lists twice', () => {
 });
 
 // ── pre-push P1: planned rates in the completion record ─────────────────────
+// No rate is typed on this sheet. An untouched planned row records the plan's
+// rate exactly as given; every other row records none, so no unit can be wrong.
 describe('application rate on the product rows', () => {
   const planned = (extra = {}, method = 'broadcast_spray') => plannedOne(method, { treatedSqft: 6000, areaUnit: 'sqft', ratePer1000: 1.07, rateUnit: 'fl_oz', ...extra });
-  const rateBox = () => within(editorFor('Talak 7.9%')).getByLabelText('Talak 7.9% rate');
   const sentRow = () => completeCalls()[0].body.products[0];
-  const run = async (ctx, after) => {
-    await openSheet({ request: makeRequest({ ctx }) });
+  const noRateKeys = () => { expect(sentRow()).not.toHaveProperty('rate'); expect(sentRow()).not.toHaveProperty('rateUnit'); };
+  const run = async (ctx, after, props) => {
+    await openSheet({ request: makeRequest({ ctx }), props });
     if (after) await after();
     await confirmAssessment();
     await waitFor(() => expect(completeButton().disabled).toBe(false));
     await submit();
   };
+  const planLine = () => within(editorFor('Talak 7.9%')).queryByText(/^Planned rate:/);
 
-  test('a planned row whose amount, area and method are untouched sends the plan rate and unit, and shows it', async () => {
-    await run(planned(), async () => expect(rateBox().value).toBe('1.07'));
+  test('an untouched planned row sends the plan rate and unit, and shows it as plain text with no box', async () => {
+    await run(planned(), async () => {
+      expect(planLine().textContent).toBe('Planned rate: 1.07 fl oz per 1,000 sq ft');
+      expect(within(editorFor('Talak 7.9%')).queryByLabelText('Talak 7.9% rate')).toBeNull();
+    });
     expect(sentRow()).toMatchObject({ rate: 1.07, rateUnit: 'fl_oz', totalAmount: 2, amountUnit: 'fl_oz', areaValue: 6000 });
   });
 
@@ -945,76 +951,58 @@ describe('application rate on the product rows', () => {
     ['the amount unit', () => fireEvent.change(within(editorFor('Talak 7.9%')).getByLabelText('Unit for Talak 7.9%'), { target: { value: 'gal' } })],
     ['the plan\'s area', () => fireEvent.change(within(editorFor('Talak 7.9%')).getByLabelText('Area treated (sq ft)'), { target: { value: '4000' } })],
     ['the method', () => fireEvent.click(within(editorFor('Talak 7.9%')).getByRole('button', { name: 'Granular' }))],
-  ])('a change to %s makes the plan rate stale: it is not sent and the box empties (never recomputed)', async (_label, change) => {
+  ])('a change to %s sends no rate keys and removes the line', async (_label, change) => {
     await run(planned(), async () => {
       change();
-      await waitFor(() => expect(rateBox().value).toBe(''));
+      await waitFor(() => expect(planLine()).toBeNull());
     });
-    expect(sentRow()).not.toHaveProperty('rate');
-    expect(sentRow()).not.toHaveProperty('rateUnit');
+    noRateKeys();
   });
 
-  test('a rate the technician types after a change is sent, in the label\'s unit', async () => {
+  test('putting the method back does not bring the rate back', async () => {
     await run(planned(), async () => {
-      fireEvent.change(within(editorFor('Talak 7.9%')).getByLabelText('Talak 7.9%'), { target: { value: '3' } });
-      fireEvent.change(rateBox(), { target: { value: '1.2' } });
+      fireEvent.click(within(editorFor('Talak 7.9%')).getByRole('button', { name: 'Granular' }));
+      fireEvent.click(within(editorFor('Talak 7.9%')).getByRole('button', { name: 'Broadcast spray' }));
+      expect(planLine()).toBeNull();
     });
-    // After a change the unit is the label's own, as the sibling does for a typed rate.
-    expect(sentRow()).toMatchObject({ rate: 1.2, rateUnit: 'oz' });
+    noRateKeys();
   });
 
-  test('a unit /complete does not accept is never sent (mL, an odd catalog unit)', async () => {
-    await run(planned({ rateUnit: 'ml' }));
-    expect(sentRow()).not.toHaveProperty('rate');
-    cleanup();
-    requests = [];
-    await run(planned({ rateUnit: 'percent_solution' }));
-    expect(sentRow()).not.toHaveProperty('rateUnit');
+  test.each(['ml', 'percent_solution'])('a plan rate in %s (a unit /complete does not accept) is neither shown nor sent', async (rateUnit) => {
+    await run(planned({ rateUnit }), async () => expect(planLine()).toBeNull());
+    noRateKeys();
   });
 
-  test('a plan with no rate sends none, and no catalog default is invented for a planned row', async () => {
-    await run(planned({ ratePer1000: null, rateUnit: null }));
-    expect(sentRow()).not.toHaveProperty('rate');
+  test('a plan with no rate sends none', async () => {
+    await run(planned({ ratePer1000: null, rateUnit: null }), async () => expect(planLine()).toBeNull());
+    noRateKeys();
   });
 
-  test('a perimeter row keeps the plan rate as the plan gave it, and linear feet are the area', async () => {
+  test('an untouched perimeter row sends the plan rate with its linear feet', async () => {
     await run(plannedOne('perimeter_spray', { ratePer1000: 0.5, rateUnit: 'fl_oz' }), async () => {
       fireEvent.change(areaInput('Linear feet treated'), { target: { value: '150' } });
     });
     expect(sentRow()).toMatchObject({ rate: 0.5, rateUnit: 'fl_oz', areaValue: 150, areaUnit: 'linear_ft' });
   });
 
-  test('an added product has no prefilled rate (the sibling\'s rule); one the technician types is sent with the label unit', async () => {
-    const catalog = [{ ...CATALOG[0], default_unit: 'fl_oz', default_rate_per_1000: 2 }, CATALOG[1], CATALOG[2]];
+  test('an added product has no rate box and sends no rate keys, even with a catalog default rate', async () => {
+    const catalog = [{ ...CATALOG[0], default_unit: 'fl_oz', default_rate_per_1000: 2, max_label_rate_per_1000: 1 }, CATALOG[1], CATALOG[2]];
     await openSheet({ request: makeRequest({ ctx: ONE_TIME() }), props: { catalog } });
     fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
     fireEvent.click(await screen.findByText('Talak 7.9%'));
-    expect(rateBox().value).toBe('');
+    expect(within(editorFor('Talak 7.9%')).queryByLabelText('Talak 7.9% rate')).toBeNull();
+    expect(planLine()).toBeNull();
     fireEvent.change(within(editorFor('Talak 7.9%')).getByLabelText('Talak 7.9%'), { target: { value: '2' } });
     fireEvent.change(within(editorFor('Talak 7.9%')).getByLabelText('Area treated (sq ft)'), { target: { value: '1000' } });
     await confirmAssessment();
     await submit();
-    expect(sentRow()).not.toHaveProperty('rate');
-    cleanup();
-    requests = [];
-    await openSheet({ request: makeRequest({ ctx: ONE_TIME() }), props: { catalog } });
-    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
-    fireEvent.click(await screen.findByText('Talak 7.9%'));
-    fireEvent.change(within(editorFor('Talak 7.9%')).getByLabelText('Talak 7.9%'), { target: { value: '2' } });
-    fireEvent.change(within(editorFor('Talak 7.9%')).getByLabelText('Area treated (sq ft)'), { target: { value: '1000' } });
-    fireEvent.change(rateBox(), { target: { value: '2' } });
-    await confirmAssessment();
-    await submit();
-    expect(sentRow()).toMatchObject({ rate: 2, rateUnit: 'fl_oz' });
+    noRateKeys();
   });
 
-  test('a rate over the label maximum is flagged to the technician, not blocked', async () => {
-    const catalog = [{ ...CATALOG[0], rate_unit: 'fl_oz', default_unit: 'fl_oz', max_label_rate_per_1000: 1 }, CATALOG[1], CATALOG[2]];
-    await run(planned(), null).catch(() => {});
-    cleanup();
+  test('no rate box and no label-max warning, even for a planned row over the label maximum', async () => {
+    const catalog = [{ ...CATALOG[0], rate_unit: 'fl_oz', default_unit: 'fl_oz', max_label_rate_per_1000: 0.5 }, CATALOG[1], CATALOG[2]];
     await openSheet({ request: makeRequest({ ctx: planned() }), props: { catalog } });
-    expect(await screen.findByText(/label max/)).toBeTruthy();
-    await confirmAssessment();
-    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    expect(screen.queryByText(/label max/)).toBeNull();
+    expect(screen.queryByLabelText(/ rate$/)).toBeNull();
   });
 });
