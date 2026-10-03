@@ -5679,14 +5679,17 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
         && typeof expectVisit.id === 'string' && expectVisit.id
         && Array.isArray(expectVisit.memberIds) && expectVisit.memberIds.length > 0
         && expectVisit.memberIds.every((id) => typeof id === 'string' && id)
-        && (expectVisit.liveCount == null || Number.isInteger(expectVisit.liveCount));
-      if (!validExpectVisit) return res.status(400).json({ error: 'expectVisit must be { id, memberIds, liveCount }' });
+        && (expectVisit.liveCount == null || Number.isInteger(expectVisit.liveCount))
+        && (expectVisit.liveMemberIds == null || (Array.isArray(expectVisit.liveMemberIds)
+          && expectVisit.liveMemberIds.every((id) => typeof id === 'string' && id)));
+      if (!validExpectVisit) return res.status(400).json({ error: 'expectVisit must be { id, memberIds, liveCount, liveMemberIds }' });
       rescheduleOptions.expect = { ...(rescheduleOptions.expect || {}), visit_id: expectVisit.id };
       rescheduleOptions.expectGroupedVisit = true;
       rescheduleOptions.expectVisitMembership = {
         id: expectVisit.id,
         memberIds: expectVisit.memberIds,
         liveCount: expectVisit.liveCount == null ? null : expectVisit.liveCount,
+        ...(Array.isArray(expectVisit.liveMemberIds) ? { liveMemberIds: expectVisit.liveMemberIds } : {}),
       };
     }
     // Disclosure contract (PR2 wires it): the collective choke point would

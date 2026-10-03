@@ -2221,8 +2221,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     return [h1, m1, h2, m2].every(Number.isFinite) ? h2 * 60 + m2 - (h1 * 60 + m1) : null;
   };
   // The whole-stop move keeps every service's own length.
+  // A stop that opened with no time has no span to keep: giving it a time
+  // (a suggested slot fills both bounds) is a move, not a length change.
+  const comboOpenedSpan = spanOf(comboOpened.start, comboOpened.end);
   const comboLengthChanged = slotCheckDuration !== comboOpened.duration
-    || spanOf(comboStart, comboEnd) !== spanOf(comboOpened.start, comboOpened.end);
+    || (comboOpenedSpan != null && spanOf(comboStart, comboEnd) !== comboOpenedSpan);
   const comboSlotChanged = !!comboVisit && !comboDoneRef.current.separated && (comboPlaceChanged || comboLengthChanged);
   // The whole-stop move re-dates THIS visit's stop only: the server never
   // widens a grouped recurring visit to its series (admin-dispatch.js
@@ -3726,7 +3729,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           method: "POST",
           body: JSON.stringify({
             newDate: form.scheduledDate,
-            ...(comboStart ? { newWindow: { start: comboStart, end: comboEnd || undefined }, deriveWindowFromCurrentVisit: true } : {}),
+            // A stop that had no time takes the start only: each service's
+            // end is derived from its own length.
+            ...(comboStart ? { newWindow: { start: comboStart, end: (comboOpenedSpan != null && comboEnd) || undefined }, deriveWindowFromCurrentVisit: true } : {}),
             notifyCustomer: notifyOnMove,
             // A technician change rides the whole-stop move, so every
             // service lands on the new technician; on the PUT it would
@@ -3736,7 +3741,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             // if a service joined or left it since, and does not text again
             // when a repeated request finds the stop already moved.
             ...(Array.isArray(comboVisit.memberIds)
-              ? { expectVisit: { id: comboVisit.id, memberIds: comboVisit.memberIds, liveCount: comboVisit.liveCount } }
+              ? { expectVisit: { id: comboVisit.id, memberIds: comboVisit.memberIds, liveCount: comboVisit.liveCount, ...(Array.isArray(comboVisit.liveMemberIds) ? { liveMemberIds: comboVisit.liveMemberIds } : {}) } }
               : {}),
           }),
         }).catch((moveErr) => {

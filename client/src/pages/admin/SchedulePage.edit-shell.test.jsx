@@ -522,3 +522,17 @@ it('a move that did not confirm (lost response or server error) is never reporte
   expect(alert).not.toHaveTextContent('but the stop was not moved');
 });
 
+// ---- GitHub Codex round 6 on #5759 (owner 2026-10-03: merge with known limits) ----
+it('a combo with no set time can be given one: a filled start and end is a move, and only the start is sent', async () => {
+  const dialog = openModal({ ...combo, windowStart: '', windowEnd: '', visit: { ...combo.visit, liveMemberIds: ['fixture-visit', 'fixture-lawn'] } });
+  const [start, end] = dialog.querySelectorAll('input[type="time"]');
+  fireEvent.change(start, { target: { value: '10:00' } });
+  fireEvent.change(end, { target: { value: '11:00' } });
+  expect(screen.getByTestId('combo-move-choice')).toBeInTheDocument();
+  await clickSave();
+  await waitFor(() => expect(writes()).toHaveLength(2));
+  expect(writeUrls()).toEqual([PUT, MOVE]);
+  expect(body(1).newWindow).toEqual({ start: '10:00' });
+  expect(body(1).expectVisit.liveMemberIds).toEqual(['fixture-visit', 'fixture-lawn']);
+});
+

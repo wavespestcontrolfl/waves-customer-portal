@@ -2032,6 +2032,7 @@ function visitSummariesForRows(rows, {
       estimatedDuration: members.reduce((acc, m) => acc + (Number(m[durationKey]) || 0), 0),
       serviceTypes: members.map((m) => m.serviceType || m.service_type).filter(Boolean),
       liveCount: live.length,
+      liveMemberIds: live.map((m) => m[memberIdKey]),
     };
     for (const m of members) m.visit = summary;
   }
@@ -2450,9 +2451,11 @@ function expectMatchesRow(row, expect) {
   return true;
 }
 
-// expectVisitMembership ({ id, memberIds, liveCount }): the stop a caller's
-// operator was shown. A live member they never saw, a different live count,
-// or another visit changes what the move would do, so it is refused. Checked
+// expectVisitMembership ({ id, memberIds, liveCount, liveMemberIds }): the
+// stop a caller's operator was shown. A live member they never saw, a
+// different live count, or another visit changes what the move would do, so
+// it is refused. With liveMemberIds the live set must match exactly (a member
+// that closed while a closed one reopened keeps the count). Checked
 // at every point before the first member write: the locked plan, the
 // reminder-hold claim, and inside the primary's own move transaction.
 function assertShownMembership(shown, visitId, liveMemberIds) {
@@ -2460,7 +2463,9 @@ function assertShownMembership(shown, visitId, liveMemberIds) {
   const seen = new Set(shown.memberIds.map(String));
   const same = String(visitId) === String(shown.id)
     && liveMemberIds.every((id) => seen.has(String(id)))
-    && (shown.liveCount == null || liveMemberIds.length === shown.liveCount);
+    && (shown.liveCount == null || liveMemberIds.length === shown.liveCount)
+    && (!Array.isArray(shown.liveMemberIds) || (shown.liveMemberIds.length === liveMemberIds.length
+      && liveMemberIds.every((id) => shown.liveMemberIds.map(String).includes(String(id)))));
   if (!same) {
     throw Object.assign(new Error('This stop changed since it was opened: a service was added, separated or closed. Reload and try again. Nothing was moved.'), { statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED', isOperational: true });
   }

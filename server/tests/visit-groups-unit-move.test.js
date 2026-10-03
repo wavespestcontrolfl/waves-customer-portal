@@ -100,7 +100,7 @@ describe('visitSummaryForService', () => {
       ],
     } };
     expect(await visitSummaryForService(db, 'a')).toMatchObject({
-      id: 'v1', serviceCount: 3, liveCount: 2, memberIds: ['a', 'b', 'c'], serviceTypes: ['Lawn Care', 'Pest Control', 'Mosquito'],
+      id: 'v1', serviceCount: 3, liveCount: 2, memberIds: ['a', 'b', 'c'], liveMemberIds: ['a', 'b'], serviceTypes: ['Lawn Care', 'Pest Control', 'Mosquito'],
     });
   });
 });
@@ -527,6 +527,10 @@ describe('moveVisitAsUnit', () => {
     // Unchanged: the move runs. A closed member the operator saw is not required to be live.
     db.__script = script({ members: [member('a'), member('b')] });
     await move({ expectVisitMembership: { id: 'v1', memberIds: ['a', 'b', 'closed'], liveCount: 2 } });
+    expect(rebooker.reschedule).toHaveBeenCalledTimes(2);
+    // Same count, different live set (b closed while c reopened): refused when the live ids were shown.
+    db.__script = script({ members: [member('a'), member('c')] });
+    await expect(move({ expectVisitMembership: { id: 'v1', memberIds: ['a', 'b', 'c'], liveCount: 2, liveMemberIds: ['a', 'b'] } })).rejects.toMatchObject(refused);
     expect(rebooker.reschedule).toHaveBeenCalledTimes(2);
   });
 
