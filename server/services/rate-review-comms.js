@@ -1024,18 +1024,21 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
   let emailHold = null;
   // The public page serves the frozen words only once a provider request is about to be
   // made (publicReview): recorded inside each leg's handoff, after its last check and
-  // immediately before the request — on its own connection, so it is committed before the
-  // provider is called. A claim refused or stalled in preparation never exposes them.
+  // immediately before the request — every line of the letter in ONE transaction of its
+  // own, committed before the provider is called (all lines carry it, or none does). A
+  // claim refused or stalled in preparation never exposes them.
   let handoffMarked = false;
   const markHandoff = async () => {
     if (handoffMarked) return;
     const at = clock().toISOString();
-    for (const id of claimed) {
-      const row = await dbh('price_change_notices').where({ id, status: 'sending' }).first('metadata');
-      const meta = parseJson(row && row.metadata, {});
-      if (!meta.pending_letter) continue;
-      await dbh('price_change_notices').where({ id, status: 'sending' }).update({ metadata: JSON.stringify({ ...meta, pending_letter: { ...meta.pending_letter, handoff_at: at } }) });
-    }
+    await dbh.transaction(async (mark) => {
+      for (const id of claimed) {
+        const row = await mark('price_change_notices').where({ id, status: 'sending' }).forUpdate().first('metadata');
+        const meta = parseJson(row && row.metadata, {});
+        if (!meta.pending_letter) continue;
+        await mark('price_change_notices').where({ id, status: 'sending' }).update({ metadata: JSON.stringify({ ...meta, pending_letter: { ...meta.pending_letter, handoff_at: at } }) });
+      }
+    });
     handoffMarked = true;
   };
   // From here a provider may have the message: an exception is no longer a clean non-send.

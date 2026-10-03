@@ -461,6 +461,20 @@ describe('sendBatch', () => {
     expect(out.html).not.toContain('A newer paragraph.');
   });
 
+  test('a two-line letter: the handoff is recorded on both lines in one transaction, or on neither', async () => {
+    const lawn = draft(2, { customer_id: CUSTOMER(1), rate_review_row_id: ROW(2), family_key: 'lawn_care', effective_date: '2026-12-20', noticed_current_cents: 6100, noticed_new_cents: 6400, current_amount_cents: 6100, new_amount_cents: 6400 });
+    const b = book({ notices: [draft(1), lawn] });
+    b.rate_review_snapshots[1].family_key = 'lawn_care';
+    mockDb.reset(b);
+    const marks = [];
+    emailLeg.mockImplementation(async (args) => {
+      const res = await args.sendOptions.withProviderHandoff(async () => { marks.push(notices().map((n) => !!JSON.parse(n.metadata).pending_letter.handoff_at)); }, { to: args.recipient.email });
+      return { sent: res.ok, attempted: true };
+    });
+    await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+    expect(marks[0]).toEqual([true, true]);
+  });
+
   test('never handed to a provider: parks unreachable without words, and is sendable again', async () => {
     mockDb.reset(book());
     emailLeg.mockResolvedValue({ sent: false, attempted: false });

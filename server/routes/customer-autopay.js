@@ -44,15 +44,20 @@ async function rateChangesField(customerId, { autopayEnabled, method, funding, c
   try {
     const changes = await require('../services/rate-review-comms').upcomingRateChanges(customerId);
     if (!changes.length) return {};
+    // An annual-prepay invoice still awaiting payment: the dues cron skips the account
+    // (getPaymentPendingCustomerIds), so no monthly charge is announced. Unreadable = none.
+    const prepayPending = await require('../services/annual-prepay-renewals')
+      .getPaymentPendingCustomerIds(undefined, undefined, { throwOnError: true })
+      .then((ids) => [...ids].map(String).includes(String(customerId)), () => true);
     const out = { rate_changes: changes.map(({ chargeCents, chargeDate, ...change }) => {
       const at = chargeDate ? new Date(`${chargeDate}T16:00:00Z`) : null;
       // Announced only when that debit will really run on this method: the
       // account still bills monthly dues (the lane the cron charges), Auto
-      // Pay is on, no pause covers the date (the cron's isPaused), service is
+      // Pay is on, no prepay invoice is pending, no pause covers the date (the cron's isPaused), service is
       // not paused after failed payments (the cron skips service_paused_at) and
       // the method is not a card expired by then (charge() refuses it).
       const runs = monthlyBilling && autopayEnabled && method && chargeCents > 0 && at
-        && !customer.service_paused_at && !isPaused(customer, at) && !(isCardMethodType(method.method_type) && isExpiredCardMethod(method, at));
+        && !prepayPending && !customer.service_paused_at && !isPaused(customer, at) && !(isCardMethodType(method.method_type) && isExpiredCardMethod(method, at));
       const charge = runs ? computeChargeAmount(chargeCents / 100, method.method_type, { funding }) : null;
       return { ...change, nextCharge: charge ? { total: charge.total, base: charge.base, surcharge: charge.surcharge, date: chargeDate } : null };
     }) };

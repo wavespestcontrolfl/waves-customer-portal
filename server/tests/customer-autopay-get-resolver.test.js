@@ -38,6 +38,8 @@ jest.mock('../services/payment-lifecycle-email', () => ({
 let mockLane = 'monthly_membership';
 jest.mock('../services/billing-lane', () => ({ resolveBillingLane: () => ({ mode: mockLane }) }));
 const mockUpcomingRateChanges = jest.fn(async () => []);
+const mockPrepayPendingIds = jest.fn(async () => new Set());
+jest.mock('../services/annual-prepay-renewals', () => ({ getPaymentPendingCustomerIds: (...a) => mockPrepayPendingIds(...a) }));
 jest.mock('../services/rate-review-comms', () => ({ upcomingRateChanges: (...a) => mockUpcomingRateChanges(...a) }));
 
 const express = require('express');
@@ -176,6 +178,15 @@ describe('annual rate review upcoming rate (rate_changes)', () => {
     mockUpcomingRateChanges.mockResolvedValueOnce([{ ...change, unit: 'year', chargeCents: null, chargeDate: null }]);
     const { body } = await getAutopay();
     expect(body.rate_changes[0].nextCharge).toBeNull();
+  });
+
+  test('an annual-prepay invoice awaiting payment announces no charge (the cron skips the account); an unreadable check announces none either', async () => {
+    mockUpcomingRateChanges.mockResolvedValueOnce([change]);
+    mockPrepayPendingIds.mockResolvedValueOnce(new Set(['cust-1']));
+    expect((await getAutopay()).body.rate_changes[0].nextCharge).toBeNull();
+    mockUpcomingRateChanges.mockResolvedValueOnce([change]);
+    mockPrepayPendingIds.mockRejectedValueOnce(new Error('db down'));
+    expect((await getAutopay()).body.rate_changes[0].nextCharge).toBeNull();
   });
 
   test('service paused after failed payments announces no charge (the cron skips service_paused_at)', async () => {
