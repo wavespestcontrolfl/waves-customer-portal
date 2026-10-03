@@ -6980,8 +6980,12 @@ const ReviewService = {
         const said = await Holds.customerSaysReviewed(seq.customer_id, { since: seq.started_at || seq.created_at });
         if (said.claim) {
           claim = { quote: said.claim.quote, at: said.claim.at };
-          await db("review_sequences").where({ customer_id: seq.customer_id }).whereIn("status", ["active", "deferred"])
-            .update({ reviewed_claim: JSON.stringify(claim), updated_at: new Date() });
+          // Open ones, and ones parked behind their visit summary (resumable:
+          // the recovery reactivates them with their remaining asks).
+          const Summary = require("./visit-completion-summary");
+          const stamp = { reviewed_claim: JSON.stringify(claim), updated_at: new Date() };
+          await db("review_sequences").where({ customer_id: seq.customer_id }).whereIn("status", ["active", "deferred"]).update(stamp);
+          await db("review_sequences").where({ customer_id: seq.customer_id, status: "stopped", stop_reason: Summary.PARKED_REVIEW_REASON }).update(stamp);
           await this._stopFutureAsksLocked(seq.customer_id, { reason: "customer_says_reviewed" });
         }
       }

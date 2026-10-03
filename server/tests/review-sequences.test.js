@@ -7785,12 +7785,18 @@ describe('review-ask holds (GATE_REVIEW_ASK_TECH_VOICE, build plan PR 2)', () =>
   test('a claim during a cadence with a later private check-in skips this ask and keeps the check-in; the claim counts as series engagement', async () => {
     mockGates.reviewAskTechVoice = true;
     const mock = book({ plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }, { day: 4, channel: 'sms', templateKey: 'soft_reminder' }, { day: 7, channel: 'sms', templateKey: 'resolution_check' }]) });
+    mock.__state.rows.review_sequences.push({
+      id: 'seq-parked', customer_id: 'hold-1', status: 'stopped', stop_reason: require('../services/visit-completion-summary').PARKED_REVIEW_REASON, current_step: 0, touches_sent: 0,
+      plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }, { day: 7, channel: 'sms', templateKey: 'resolution_check' }]),
+    });
     db.mockImplementation(mock);
     mockSaysReviewed.mockResolvedValueOnce({ claim: { quote: 'left you a review', at: new Date() } });
     const out = await ReviewService._runSequenceStep('seq-hold');
     expect(out).toMatchObject({ stepSkipped: true, reason: 'ask_skipped_customer_says_reviewed' });
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     expect(seqRow(mock)).toMatchObject({ status: 'active', current_step: 2 });
+    // A parked cadence with a later check-in (resumable) carries the claim too.
+    expect(JSON.parse(mock.__state.rows.review_sequences.find((r) => r.id === 'seq-parked').reviewed_claim)).toMatchObject({ quote: 'left you a review' });
     // The claim is kept on the row: the series-final guard sees it while the cadence is still active ...
     expect(JSON.parse(seqRow(mock).reviewed_claim)).toMatchObject({ quote: 'left you a review' });
     expect(await ReviewService._seriesEngagement(['seq-hold'])).toBe(true);
