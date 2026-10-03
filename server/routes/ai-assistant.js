@@ -9,6 +9,7 @@ const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../midd
 const WavesAssistant = require('../services/ai-assistant/assistant');
 const logger = require('../services/logger');
 const { resolveSessionScope, isSecondarySelection } = require('../services/account-properties');
+const assistantTools = require('../services/ai-assistant/tools');
 const { sendManualCustomerSms } = require('../services/messaging/send-manual-customer-sms');
 const { preferredRouteDecisionForFeedback } = require('../services/call-route-decisions');
 const { withLockedRouteDecisions, innerJoinRouteFeedback, resolveDisplayedRouteDecision, STALE_ROUTE_DECISION, ROUTE_DECISION_REVISION_SQL } = require('../services/call-routing-gates');
@@ -108,9 +109,10 @@ router.post('/chat', authenticate, async (req, res, next) => {
     // The free re-service button books at the account's primary address, so
     // it is withheld when the session is looking at another saved property
     // (the Schedule tab's rule). Only read when that tool can run (the chat's
-    // master switch and its own gate); a failed read withholds it.
+    // master switch, its own gate and the re-service page's two switches); a
+    // failed read withholds it.
     let secondaryProperty = true;
-    if (portalChatSelfServeLive() && portalChatReserviceLive()) {
+    if (portalChatSelfServeLive() && portalChatReserviceLive() && assistantTools.reservicePageSwitchesOn()) {
       try {
         secondaryProperty = isSecondarySelection(await resolveSessionScope(req));
       } catch (err) {

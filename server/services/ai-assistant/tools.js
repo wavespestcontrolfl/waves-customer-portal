@@ -485,7 +485,12 @@ const RESERVICE_HAND_OFF = {
 // looking at another property gets no button (the Schedule tab's own rule),
 // and the same two switches the Schedule tab's hand-off to the page reads.
 function reserviceSurfaceOpen({ secondaryProperty }) {
-  if (secondaryProperty) return false;
+  return !secondaryProperty && reservicePageSwitchesOn();
+}
+// The two switches the /reservice page and the Schedule tab's hand-off to it
+// need. POST /api/ai/chat reads them too, so it never resolves the property
+// scope (which can write) for a tool that would refuse anyway.
+function reservicePageSwitchesOn() {
   const { isEnabled } = require('../../config/feature-gates');
   return isEnabled('reserviceStreamline') && require('../reservice-scheduler').reserviceSelfServeEnabled();
 }
@@ -596,4 +601,4 @@ async function getPestAdvice(topic) {
   }
 }
 
-module.exports = { TOOLS, PORTAL_TOOLS, PORTAL_FACTS_TOOLS, PORTAL_SECTIONS, portalToolsFor, executeToolCall };
+module.exports = { TOOLS, PORTAL_TOOLS, PORTAL_FACTS_TOOLS, PORTAL_SECTIONS, portalToolsFor, executeToolCall, reservicePageSwitchesOn };
