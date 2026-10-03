@@ -77,7 +77,7 @@ function timeoutQuery(query, remainingMs) {
 }
 
 function leaseDeadline(executor, remainingMs) {
-  return executor.raw("CURRENT_TIMESTAMP + (? * INTERVAL '1 millisecond')", [
+  return executor.raw("clock_timestamp() + (? * INTERVAL '1 millisecond')", [
     Math.max(1, Math.floor(remainingMs)),
   ]);
 }
@@ -334,13 +334,13 @@ async function claimRequest(row, attemptId, root) {
       await root.queryOnConnection(
         trx('portal_chat_requests')
           .where({ scope_key: row.scope_key, state: 'pending' })
-          .where('lease_expires_at', '<=', trx.fn.now())
+          .where('lease_expires_at', '<=', trx.raw('clock_timestamp()'))
           .update({ state: 'expired', attempt_id: null, updated_at: trx.fn.now() }),
         connection, 'abandoned turn expiry',
       );
       let active = await root.queryOnConnection(
         trx('portal_chat_requests').where({ scope_key: row.scope_key, state: 'processing' })
-          .select('*', trx.raw('lease_expires_at <= CURRENT_TIMESTAMP AS lease_expired'))
+          .select('*', trx.raw('lease_expires_at <= clock_timestamp() AS lease_expired'))
           .forUpdate().first(),
         connection, 'turn claim',
       );
@@ -498,7 +498,7 @@ async function recoverOwnedResult(context, resolvedResult) {
         id: context.requestRowId,
         state: 'processing',
         attempt_id: context.attemptId,
-      }).where('lease_expires_at', '>', db.fn.now()).first('id'),
+      }).where('lease_expires_at', '>', db.raw('clock_timestamp()')).first('id'),
       'attempt ownership confirmation',
       true,
     );
