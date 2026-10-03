@@ -80,8 +80,6 @@ function makeVisitUploadKnex({
   transactionError = null,
   existingStaged = null,
   serviceRecordId = null,
-  committedTable = null,
-  cleanupQueryError = null,
   visitStatus = 'on_site',
 } = {}) {
   const visit = {
@@ -90,7 +88,6 @@ function makeVisitUploadKnex({
     scheduled_date: '2026-10-02', status: visitStatus,
   };
   let insertPayload = null;
-  let transactionSettled = false;
   const trx = jest.fn((table) => {
     let whereClause = {};
     const chain = {
@@ -102,8 +99,6 @@ function makeVisitUploadKnex({
       select: jest.fn(() => chain),
       columnInfo: jest.fn(async () => ({})),
       first: jest.fn(async () => {
-        if (transactionSettled && cleanupQueryError) throw cleanupQueryError;
-        if (transactionSettled && table === committedTable) return { id: 'committed-photo-1' };
         if (table === 'scheduled_services') return visit;
         if (table === 'service_records') {
           return serviceRecordId && (!whereClause.id || String(whereClause.id) === String(serviceRecordId))
@@ -126,13 +121,8 @@ function makeVisitUploadKnex({
   });
   trx.isTransaction = true;
   const knex = jest.fn((table) => trx(table));
-  knex.raw = jest.fn(async () => {
-    if (cleanupQueryError) throw cleanupQueryError;
-    return { rows: [{ referenced: committedTable != null }] };
-  });
   knex.transaction = jest.fn(async (handler) => {
     const result = await handler(trx);
-    transactionSettled = true;
     if (transactionError) throw transactionError;
     return result;
   });
@@ -487,7 +477,7 @@ describe('service photo uploads', () => {
     });
   });
 
-  test('removes only rolled-back staged and completed objects after verifying the commit outcome', async () => {
+  test('retains objects when COMMIT fails with an uncertain transaction outcome', async () => {
     const { servicePhotoVisitSnapshot, uploadServicePhotoForVisit } = require('../services/service-photos');
     const commitError = new Error('transaction commit failed');
     const upload = (knex, photoType = 'before') => uploadServicePhotoForVisit({
@@ -506,54 +496,10 @@ describe('service photo uploads', () => {
 
     expect(mockS3Send.mock.calls.map((call) => call[0].constructor.name)).toEqual([
       'PutObjectCommand',
-      'DeleteObjectCommand',
-    ]);
-    expect(mockS3Send.mock.calls[1][0].input.Key).toBe(mockS3Send.mock.calls[0][0].input.Key);
-
-    mockS3Send.mockClear();
-    const committedStaged = makeVisitUploadKnex({
-      transactionError: commitError,
-      committedTable: 'scheduled_service_photo_staging',
-    });
-    await expect(upload(committedStaged)).rejects.toBe(commitError);
-    expect(mockS3Send.mock.calls.map((call) => call[0].constructor.name)).toEqual([
-      'PutObjectCommand',
-    ]);
-
-    mockS3Send.mockClear();
-    const committedCompleted = makeVisitUploadKnex({
-      transactionError: commitError,
-      serviceRecordId: 'record-1',
-      committedTable: 'service_photos',
-    });
-    await expect(upload(committedCompleted, 'after')).rejects.toBe(commitError);
-    expect(mockS3Send.mock.calls.map((call) => call[0].constructor.name)).toEqual([
-      'PutObjectCommand',
-    ]);
-
-    mockS3Send.mockClear();
-    const verificationFailed = makeVisitUploadKnex({
-      transactionError: commitError,
-      cleanupQueryError: new Error('cleanup query failed'),
-    });
-    await expect(upload(verificationFailed)).rejects.toBe(commitError);
-    expect(mockS3Send.mock.calls.map((call) => call[0].constructor.name)).toEqual([
-      'PutObjectCommand',
     ]);
     expect(require('../services/logger').warn).toHaveBeenCalledWith(
-      expect.stringContaining('commit cleanup verification failed'),
+      expect.stringContaining('uncertain transaction outcome'),
     );
-
-    mockS3Send.mockClear();
-    mockS3Send.mockResolvedValueOnce({});
-    mockS3Send.mockRejectedValueOnce(new Error('cleanup failed'));
-    const completed = makeVisitUploadKnex({ transactionError: commitError, serviceRecordId: 'record-1' });
-    await expect(upload(completed, 'after')).rejects.toBe(commitError);
-    expect(mockS3Send.mock.calls.map((call) => call[0].constructor.name)).toEqual([
-      'PutObjectCommand',
-      'DeleteObjectCommand',
-    ]);
-    expect(mockS3Send.mock.calls[1][0].input.Key).toBe(mockS3Send.mock.calls[0][0].input.Key);
 
     mockS3Send.mockClear();
     const deduped = makeVisitUploadKnex({ transactionError: commitError, existingStaged: {
