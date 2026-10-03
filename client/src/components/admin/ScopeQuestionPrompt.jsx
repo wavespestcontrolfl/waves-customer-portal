@@ -60,11 +60,11 @@ export default function ScopeQuestionPrompt({ profile, question, answer, busy, o
       {line && (
         <>
           <p className="m-0">{line}</p>
-          <p className="m-0 text-12 text-zinc-600" translate="no">Google Maps</p>
+          <p className="m-0 text-14 text-zinc-600" translate="no">Google Maps</p>
         </>
       )}
       {question && <p className="m-0 mt-1 font-medium">{question}</p>}
-      {hint && <p className="m-0 mt-1 text-12 text-zinc-600">{hint}</p>}
+      {hint && <p className="m-0 mt-1 text-14 text-zinc-600">{hint}</p>}
       <div className="mt-2 flex flex-wrap items-center gap-2">
         {ANSWERS.map((a) => (
           <Button

@@ -3202,6 +3202,9 @@ export default function EstimateToolViewV2({
   // The CSR's answer to the scope question: remembered for this address and
   // sent with the re-run lookup, which returns the decided scope.
   function answerScope(answer) {
+    // The answer already applied, clicked again: nothing changes, and sizes
+    // staff typed for this scope stay.
+    if (!scopeQuestion && enrichedProfile?.occupancyAnswer === answer) return;
     occupancyRef.current = { address: form.address.trim(), answer };
     setScopePending({ address: form.address.trim(), answer });
     // A size typed for the old scope is not a measurement of the new one (a
@@ -3220,7 +3223,12 @@ export default function EstimateToolViewV2({
   async function doLookup({ refresh = false, occupancy } = {}) {
     const address = form.address.trim();
     if (occupancy) occupancyRef.current = { address, answer: occupancy };
-    const occupancyAnswer = occupancyRef.current.address === address ? occupancyRef.current.answer : "";
+    // A reopened estimate has the saved answer on its profile and nothing in
+    // the ref: the profile always belongs to the address in the box (an
+    // address change drops it), so its answer is re-sent and not re-asked.
+    const occupancyAnswer = occupancyRef.current.address === address
+      ? occupancyRef.current.answer
+      : (enrichedProfile?.occupancyAnswer || "");
     // Read at click time: a deep link seeds form.customerId with no chip.
     const customerAlreadyLinked = !!(existingCustomerMatch || form.customerId);
     if (!address) {

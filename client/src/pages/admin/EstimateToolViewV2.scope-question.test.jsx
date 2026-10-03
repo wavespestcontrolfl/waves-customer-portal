@@ -313,6 +313,27 @@ describe("scope question", { timeout: 20000 }, () => {
     await waitFor(() => expect(screen.getByLabelText("Home Sq Ft")).toHaveValue(9000));
   });
 
+  it("clicking the answer that is already applied changes nothing: no new lookup, and a typed size stays", async () => {
+    await lookUp();
+    fireEvent.click(screen.getByRole("button", { name: "Just their space" }));
+    await waitFor(() => expect(lookupBodies()).toHaveLength(2));
+    await waitFor(() => expect(screen.getByLabelText("Home Sq Ft")).toHaveValue(1200));
+    fireEvent.change(screen.getByLabelText("Home Sq Ft"), { target: { value: "1350" } });
+    fireEvent.click(screen.getByRole("button", { name: "Just their space" }));
+    expect(lookupBodies()).toHaveLength(2);
+    expect(screen.getByLabelText("Home Sq Ft")).toHaveValue(1350);
+  });
+
+  it("a profile that already carries a staff answer and nothing remembered (a reopened estimate) re-sends that answer on the next lookup", async () => {
+    // First lookup returns an answered profile though no answer was sent, as a reopened estimate's profile reads.
+    lookupReply = () => answeredProfile("suite");
+    await lookUp();
+    expect(lookupBodies()[0]).not.toHaveProperty("occupancy");
+    fireEvent.click(screen.getByRole("button", { name: "Property Lookup", exact: true }));
+    await waitFor(() => expect(lookupBodies()).toHaveLength(2));
+    expect(lookupBodies()[1].occupancy).toBe("suite");
+  });
+
   it("changing a decided scope blocks pricing until the lookup for the new answer succeeds: in flight, and after it fails", async () => {
     let failAnswered = true;
     // A scope staff already answered "suite" (the server carries the answer).

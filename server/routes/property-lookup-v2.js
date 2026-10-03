@@ -27,7 +27,7 @@ const { outerRing, simplifyRing } = require('../services/property-lookup/parcel-
 const { commercialSuiteSizingLive, lookupBusinessIdentityLive } = require('../config/feature-gates');
 const {
   identifyBusinessAtAddress,
-  DEFAULT_TIMEOUT_MS: BUSINESS_IDENTITY_TIMEOUT_MS,
+  timeoutMsFromEnv: businessIdentityTimeoutMs,
   MIN_TIMEOUT_MS: BUSINESS_IDENTITY_MIN_TIMEOUT_MS,
 } = require('../services/property-lookup/business-identity');
 const {
@@ -273,7 +273,7 @@ async function prepareBusinessIdentity({ record, aiAnalysis, address, lat, lng, 
     const eligible = detectCategory(record, aiAnalysis) === 'COMMERCIAL' || !hasCountyEvidence(record);
     if (!eligible || options.cacheOnly === true) return null;
     if (budgetMs != null && budgetMs < BUSINESS_IDENTITY_MIN_TIMEOUT_MS) return miss;
-    const timeoutMs = budgetMs == null ? undefined : Math.min(budgetMs, BUSINESS_IDENTITY_TIMEOUT_MS);
+    const timeoutMs = budgetMs == null ? undefined : Math.min(budgetMs, businessIdentityTimeoutMs());
     const identity = await identifyBusinessAtAddress({ address, lat, lng, timeoutMs });
     // An answer is about a business an earlier lookup found. A reply that
     // finds none this time (empty, or nobody at the number) cannot carry it

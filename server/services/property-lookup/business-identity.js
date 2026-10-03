@@ -370,6 +370,7 @@ module.exports = {
   MAX_RESULT_COUNT,
   DEFAULT_TIMEOUT_MS,
   MIN_TIMEOUT_MS,
+  timeoutMsFromEnv,
   TYPE_TO_SUBTYPE,
   SUBTYPE_GENERIC,
 };

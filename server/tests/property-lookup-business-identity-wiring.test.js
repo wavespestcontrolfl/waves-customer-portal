@@ -497,6 +497,25 @@ describe('the lookup time budget', () => {
     expect(Date.now() - started).toBeLessThan(1500);
   });
 
+  test('the configured timeout caps a budgeted call too, in both directions', async () => {
+    const saved = process.env.LOOKUP_BUSINESS_IDENTITY_TIMEOUT_MS;
+    const timers = jest.spyOn(global, 'setTimeout');
+    const lastAbortDelay = () => timers.mock.calls.map(([, ms]) => ms).filter((ms) => [500, 2500, 4000, 30000].includes(ms));
+    try {
+      process.env.LOOKUP_BUSINESS_IDENTITY_TIMEOUT_MS = '500';
+      await prepareBusinessIdentity(input(30000));
+      expect(lastAbortDelay()).toEqual([500]);
+      timers.mockClear();
+      process.env.LOOKUP_BUSINESS_IDENTITY_TIMEOUT_MS = '4000';
+      await prepareBusinessIdentity(input(30000));
+      expect(lastAbortDelay()).toEqual([4000]);
+    } finally {
+      timers.mockRestore();
+      if (saved === undefined) delete process.env.LOOKUP_BUSINESS_IDENTITY_TIMEOUT_MS;
+      else process.env.LOOKUP_BUSINESS_IDENTITY_TIMEOUT_MS = saved;
+    }
+  });
+
   test('no deadline (accuracy mode) or plenty of budget asks as usual', async () => {
     expect(await prepareBusinessIdentity(input(null))).toMatchObject({ source: 'google_places' });
     expect(await prepareBusinessIdentity(input(30000))).toMatchObject({ source: 'google_places' });
