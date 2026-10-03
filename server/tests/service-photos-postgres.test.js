@@ -299,4 +299,69 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
       await db('technicians').where({ id: technicianId }).del();
     }
   }, 30000);
+
+  test('ambiguous-upload cleanup racing promotion never deletes committed gallery bytes', async () => {
+    const visitId = randomUUID();
+    const stagingTechnicianId = randomUUID();
+    const stagedId = randomUUID();
+    const key = `qa-staged/${stagedId}`;
+    try {
+      await db('technicians').insert({ id: stagingTechnicianId, name: 'Synthetic Cleanup Technician' });
+      await db('scheduled_services').insert({ id: visitId, customer_id: customerId,
+        scheduled_date: require('../utils/datetime-et').etDateString(), service_type: 'QA cleanup race', status: 'completed' });
+      await db('scheduled_service_photo_staging').insert({
+        id: stagedId, scheduled_service_id: visitId, technician_id: stagingTechnicianId,
+        photo_type: 'before', s3_key: key, image_sha256: stagedId.replaceAll('-', '').repeat(2),
+      });
+      mockObjects.set(key, Buffer.from('already uploaded bytes'));
+
+      const { cleanupUploadedServicePhotoObjects, promoteStagedServicePhotos } = require('../services/service-photos');
+      let promotionPromise;
+      let announcePromotion;
+      const promotionStarted = new Promise((resolve) => { announcePromotion = resolve; });
+      const startPromotion = () => {
+        if (!promotionPromise) {
+          promotionPromise = promoteStagedServicePhotos({ scheduledServiceId: visitId, serviceRecordId: recordId, knex: db });
+          announcePromotion();
+        }
+        return promotionPromise;
+      };
+      const racingRead = (table) => {
+        const query = db(table);
+        const first = query.first.bind(query);
+        if (table === 'service_photos') {
+          query.first = async (...columns) => {
+            const beforePromotion = await first(...columns);
+            await startPromotion();
+            return beforePromotion;
+          };
+        } else if (table === 'scheduled_service_photo_staging') {
+          query.first = async (...columns) => {
+            await promotionStarted;
+            await promotionPromise;
+            return first(...columns);
+          };
+        }
+        return query;
+      };
+      racingRead.raw = async (...args) => {
+        const snapshotRead = db.raw(...args);
+        const promotion = startPromotion();
+        const [result] = await Promise.all([snapshotRead, promotion]);
+        return result;
+      };
+
+      expect(await cleanupUploadedServicePhotoObjects(
+        [{ s3_key: key }], { verifyAbsentWith: racingRead },
+      )).toEqual({ deleted: 0 });
+      expect(mockObjects.has(key)).toBe(true);
+      expect(await db('scheduled_service_photo_staging').where({ id: stagedId })).toHaveLength(0);
+      expect(await db('service_photos').where({ service_record_id: recordId, s3_key: key })).toHaveLength(1);
+    } finally {
+      await db('service_photos').where({ service_record_id: recordId, s3_key: key }).del();
+      await db('scheduled_service_photo_staging').where({ id: stagedId }).del();
+      await db('scheduled_services').where({ id: visitId, customer_id: customerId }).del();
+      await db('technicians').where({ id: stagingTechnicianId }).del();
+    }
+  }, 30000);
 });

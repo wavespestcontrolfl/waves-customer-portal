@@ -1093,9 +1093,22 @@ router.post('/:id/photos/reconcile', async (req, res, next) => {
       .first('id', 'technician_id', 'service_line', 'service_data', 'structured_notes');
     if (!record) return res.status(409).json({ error: 'Visit has no completion record', code: 'not_completed' });
     if (!recoveryReceiptMatchesRecord(record, req.body?.expectedVisit)) {
+      const { createAlertOnce } = require('../services/dispatch-alerts');
+      await createAlertOnce({
+        type: PHOTO_RECONCILIATION_HANDOFF,
+        severity: 'warn',
+        techId: svc.technician_id || null,
+        jobId: svc.id,
+        payload: {
+          source: 'photo_recovery_identity_changed',
+          serviceRecordId: record.id,
+          message: 'Recovered photos belong to an older completion record. The office must reconcile the correct report.',
+        },
+        existingPayloadSource: 'photo_recovery_identity_changed',
+      });
       return res.status(409).json({
-        error: 'The completion record changed after this photo recovery was saved.',
-        code: 'visit_identity_changed',
+        error: 'The completion record changed, so report repair was handed to the office.',
+        code: 'photo_reconciliation_handed_off',
       });
     }
 

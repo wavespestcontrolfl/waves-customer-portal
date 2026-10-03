@@ -170,10 +170,13 @@ describe('POST /:id/photos/reconcile', () => {
         expectedVisit: { ...storedReceipt, revision: 'old-completion' },
       });
       expect(response.status).toBe(409);
-      expect((await response.json()).code).toBe('visit_identity_changed');
+      expect((await response.json()).code).toBe('photo_reconciliation_handed_off');
       expect(updates).toHaveLength(0);
       expect(mockEnqueue).not.toHaveBeenCalled();
-      expect(mockAlert).not.toHaveBeenCalled();
+      expect(mockAlert).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'service_photo_reconciliation_required', jobId: 'svc-1',
+        payload: expect.objectContaining({ source: 'photo_recovery_identity_changed', serviceRecordId: 'rec-1' }),
+      }));
     });
   });
 

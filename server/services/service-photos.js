@@ -203,11 +203,17 @@ async function cleanupUploadedServicePhotoObjects(photos = [], { verifyAbsentWit
     seen.add(key);
     if (verifyAbsentWith) {
       try {
-        const [committedPhoto, committedStagedPhoto] = await Promise.all([
-          verifyAbsentWith('service_photos').where({ s3_key: key }).first('id'),
-          verifyAbsentWith('scheduled_service_photo_staging').where({ s3_key: key }).first('id'),
-        ]);
-        if (committedPhoto || committedStagedPhoto) continue;
+        // One statement means one PostgreSQL snapshot. Two independent reads
+        // can straddle a staging-to-gallery promotion and each miss the row,
+        // making cleanup delete bytes that the gallery now references.
+        const referenced = await verifyAbsentWith.raw(`
+          SELECT EXISTS (
+            SELECT 1 FROM service_photos WHERE s3_key = ?
+            UNION ALL
+            SELECT 1 FROM scheduled_service_photo_staging WHERE s3_key = ?
+          ) AS referenced
+        `, [key, key]);
+        if (referenced.rows?.[0]?.referenced === true) continue;
       } catch (err) {
         // Retaining an unreferenced object is recoverable; deleting one whose
         // commit outcome could not be read is not.

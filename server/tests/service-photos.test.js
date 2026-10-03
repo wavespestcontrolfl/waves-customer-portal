@@ -121,6 +121,10 @@ function makeVisitUploadKnex({
   });
   trx.isTransaction = true;
   const knex = jest.fn((table) => trx(table));
+  knex.raw = jest.fn(async () => {
+    if (cleanupQueryError) throw cleanupQueryError;
+    return { rows: [{ referenced: committedTable != null }] };
+  });
   knex.transaction = jest.fn(async (handler) => {
     const result = await handler(trx);
     transactionSettled = true;
