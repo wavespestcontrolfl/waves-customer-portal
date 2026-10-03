@@ -10,7 +10,7 @@
 import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import useSpeechDictation from '../../hooks/useSpeechDictation';
 import useVoiceFill from '../../hooks/useVoiceFill';
-import { planVoiceFill, unresolvedChecks } from '../../lib/fast-complete-voice-plan';
+import { lawnRowWatch, planLawnVoiceFill, planVoiceFill, unresolvedChecks } from '../../lib/fast-complete-voice-plan';
 import { Button, Textarea } from '../ui';
 import '../../styles/tech-workflow.css';
 
@@ -265,6 +265,133 @@ export function useProductVoiceFill({ enabled, request, serviceId, products, ctx
     dismiss,
     heard,
   };
+}
+
+// ── The lawn re-service sheet ─────────────────────────────────────────────
+// One screen, no report step: the tech taps "Fill products from my note" and the
+// read lands on the sheet's own rows (a tile turned on, a product added, an amount,
+// a way), each waiting on a ✓. `products` is that sheet's useProductRows (with
+// `applyVoiceFill` and `makeRow`); `ctx` its loaded context.
+export const LAWN_FILL_ERROR = "Couldn't read the products from your note. Pick them by hand.";
+export function useLawnVoiceFill({ enabled, request, serviceId, products, ctx }) {
+  const [checks, setChecks] = useState([]);
+  const [confirms, setConfirms] = useState([]);
+  const [heard, setHeard] = useState({ products: {}, visit: '' });
+  const [status, setStatus] = useState({ filling: false, error: '', unavailable: false });
+  const nextId = useRef(0);
+  const answered = useRef(new Set());
+  // A product the fill turned on or added that the tech then turned off or removed
+  // stays that way on the next read of the same note.
+  const setByFill = useRef(new Set());
+  const declined = useRef(new Set());
+  const latest = useRef({ products, ctx });
+  latest.current = { products, ctx };
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+
+  const fill = useCallback(async (note) => {
+    setStatus((prev) => ({ ...prev, filling: true, error: '' }));
+    let answer = null;
+    let gone = false;
+    try {
+      answer = await request(`/admin/dispatch/${encodeURIComponent(serviceId)}/fast-complete/voice-fill/products`, { method: 'POST', body: JSON.stringify({ note }) });
+    } catch (err) {
+      gone = err?.status === 404;
+    }
+    if (!mounted.current) return;
+    if (answer?.status !== 'read') {
+      setStatus({ filling: false, error: gone ? '' : LAWN_FILL_ERROR, unavailable: gone });
+      return;
+    }
+    const { products: sheetProducts, ctx: sheetCtx } = latest.current;
+    const rows = sheetProducts.rows;
+    const plan = planLawnVoiceFill({
+      fill: { ...answer, products: (answer.products || []).filter((product) => !declined.current.has(String(product.productId))) },
+      rows,
+      catalog: sheetCtx.products,
+      methods: sheetCtx.methods.map((choice) => choice.value),
+      makeRow: sheetProducts.makeRow,
+    });
+    sheetProducts.applyVoiceFill(plan.added, plan.patches);
+    const filled = new Map([
+      ...rows.map((row) => [String(row.productId), plan.patches[String(row.productId)] ? { ...row, ...plan.patches[String(row.productId)] } : row]),
+      ...plan.added.map((row) => [String(row.productId), row]),
+    ]);
+    const held = (item) => (item.watch ? { ...item, baseline: lawnRowWatch(filled.get(item.watch)) } : item);
+    for (const item of plan.confirms) setByFill.current.add(item.watch);
+    setConfirms((prev) => [
+      ...prev.filter((old) => !plan.confirms.some((next) => next.watch === old.watch)),
+      ...plan.confirms.map((item) => ({ ...held(item), id: ++nextId.current })),
+    ]);
+    setHeard((prev) => ({ ...prev, products: { ...prev.products, ...plan.heard } }));
+    setChecks((prev) => {
+      const open = new Set(prev.map((check) => check.text));
+      const fresh = plan.checks.filter((check) => !open.has(check.text) && !answered.current.has(check.text));
+      return fresh.length ? [...prev, ...fresh.map((check) => ({ ...held(check), id: ++nextId.current }))] : prev;
+    });
+    setStatus({ filling: false, error: '', unavailable: false });
+  }, [request, serviceId]);
+
+  // Changing the row a confirm or a Check points at answers it.
+  const { rows } = products;
+  useEffect(() => {
+    const byKey = new Map(rows.map((row) => [String(row.productId), row]));
+    for (const id of setByFill.current) {
+      if (byKey.get(id)?.active) continue;
+      setByFill.current.delete(id);
+      declined.current.add(id);
+    }
+    const stillOpen = (list) => {
+      const open = list.filter((item) => !item.watch || lawnRowWatch(byKey.get(item.watch)) === item.baseline);
+      return open.length === list.length ? list : open;
+    };
+    setChecks(stillOpen);
+    setConfirms(stillOpen);
+  }, [rows]);
+
+  const dismiss = useCallback((id) => setChecks((prev) => {
+    const check = prev.find((entry) => entry.id === id);
+    if (check) answered.current.add(check.text);
+    return prev.filter((entry) => entry.id !== id);
+  }), []);
+  const confirm = useCallback((id) => setConfirms((prev) => prev.filter((entry) => entry.id !== id)), []);
+
+  const pending = checks.length > 0 || confirms.length > 0;
+  return {
+    enabled: enabled && (!status.unavailable || pending),
+    fillEnabled: enabled && !status.unavailable,
+    filling: status.filling,
+    error: status.error,
+    fill,
+    checks,
+    confirms,
+    confirm,
+    dismiss,
+    heard,
+  };
+}
+
+// The lawn sheet's one tap: read the products out of the note.
+export function NoteProductsFill({ voice, note, locked, busy }) {
+  if (!voice.fillEnabled) return null;
+  return (
+    <section className="tech-visit-choice-section">
+      <Button
+        type="button"
+        variant="secondary"
+        className="tech-visit-action tech-visit-wide"
+        loading={voice.filling}
+        disabled={locked || busy || voice.filling || !note.trim()}
+        onClick={() => voice.fill(note)}
+      >
+        Fill products from my note
+      </Button>
+      {voice.error && <p className="tech-visit-muted tech-visit-status--warn" role="status">{voice.error}</p>}
+    </section>
+  );
 }
 
 function MicIcon() {

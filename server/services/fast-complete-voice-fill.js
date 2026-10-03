@@ -34,7 +34,8 @@
  * tech dictated, since that flow already reads where, pests and how through
  * visit-voice-facts.js). `transcribeVisitClip` is the report flow's note mic:
  * the same transcriber, primed with the same product names, answering the words
- * for the note box.
+ * for the note box. Both also take a lawn re-service (its own catalog and its own
+ * ways, loadLawnReserviceContext), whose sheet reads products from its note too.
  *
  * Privacy: the transcript and both notes are never logged or stored here; the
  * route's audit line carries counts only.
@@ -233,6 +234,66 @@ async function loadPestContext(serviceId, knex = db, { anyPestVisit = false } = 
 }
 
 const loadPestReserviceContext = (serviceId, knex = db) => loadPestContext(serviceId, knex);
+
+// ── The lawn re-service sheet's context ──────────────────────────────────
+// FastCompleteLawnReserviceSheet.jsx: the catalog and the ways that sheet offers
+// (services/lawn-reservice-fast-context.js, the same read its screen loads), while
+// its own gate is on. Only its products are read: a row there has no "follows How",
+// so every way the sheet offers is a product way (`anyProductMethod`). The visit
+// lists below only give the shared schema its enums; nothing is read from them.
+const LAWN_SHEET_LABEL = 'lawn re-service';
+const LAWN_TRANSCRIBE_WORDS = 'broadcast, spot treatment, granular, spreader, soil drench, foliar, pounds, ounces, gallons, per thousand, square feet, front lawn, back lawn, side lawns, weeds, dollarweed, sedge, crabgrass, chinch bugs, sod webworms, fungus, fertilizer, pre-emergent, no wait, same as last time';
+async function loadLawnReserviceContext(serviceId, knex = db) {
+  if (!require('../config/feature-gates').lawnReserviceFastCompleteLive()) return { ok: false, reason: 'not_eligible' };
+  const lawn = await require('./lawn-reservice-fast-context').buildLawnReserviceFastContext(serviceId, knex);
+  if (!lawn.ok) return { ok: false, reason: lawn.reason === 'not_found' ? 'not_found' : 'not_eligible' };
+  if (!lawn.eligible) {
+    if (lawn.reason === 'catalog_unavailable') logger.warn(`[voice-fill] product catalog empty or unavailable for ${serviceId}`);
+    return { ok: false, reason: lawn.reason === 'catalog_unavailable' ? 'catalog_unavailable' : 'not_eligible' };
+  }
+  const catalog = lawn.products.filter((row) => row && row.id != null && String(row.name || '').trim() && !HIDDEN_CATEGORIES.has(categoryKey(row)));
+  if (!catalog.length) return { ok: false, reason: 'catalog_unavailable' };
+  const aliases = await loadProductAliases(knex, catalog.map((row) => row.id));
+  // The unit the property's last lawn visit recorded each product in: what the
+  // sheet's tile opens with.
+  const usualUnits = new Map((lawn.lastVisit?.products || []).filter((p) => p?.amountUnit).map((p) => [String(p.productId), p.amountUnit]));
+  const products = catalog.map((row) => {
+    const measure = productMeasure({ ...row, usual_unit: usualUnits.get(String(row.id)) });
+    return {
+      id: String(row.id),
+      name: String(row.display_name || row.name).trim(),
+      fullName: String(row.name).trim(),
+      aliases: (aliases.get(String(row.id)) || []).slice(0, 8),
+      measure,
+      units: [...UNITS_BY_MEASURE[measure]],
+      catalogMethod: '',
+    };
+  });
+  const methods = lawn.methods.map((choice) => choice.value);
+  return {
+    ok: true,
+    context: {
+      sheet: 'lawn_reservice',
+      label: LAWN_SHEET_LABEL,
+      products,
+      pests: [...PEST_SHEET_PESTS],
+      areas: [...PEST_SHEET_AREAS],
+      activity: [...PEST_SHEET_ACTIVITY],
+      visitMethods: methods,
+      productMethods: methods,
+      anyProductMethod: true,
+      sheetWords: LAWN_TRANSCRIBE_WORDS,
+    },
+  };
+}
+
+// The visit a note read is for: any pest visit the report flow takes, else a lawn
+// re-service on its own sheet.
+async function loadNoteContext(serviceId, knex = db) {
+  const pest = await loadPestContext(serviceId, knex, { anyPestVisit: true });
+  if (pest.ok || pest.reason !== 'not_eligible') return pest;
+  return loadLawnReserviceContext(serviceId, knex);
+}
 
 // The method a product's row offers on the pest sheet, derived EXACTLY as the
 // sheet does (client product-rate-prefill.js defaultApplicationMethodForLine on
@@ -1151,7 +1212,11 @@ function methodLexicon(method) {
 }
 
 function productMethod(raw, product, heard, transcript, ctx, world, unclear) {
-  const offered = PEST_SHEET_PRODUCT_METHODS.includes(raw.method) || (product.catalogMethod && raw.method === product.catalogMethod);
+  // The pest sheet: the four standard ways plus the product's own. A sheet whose
+  // rows each pick their own way (lawn): any way that sheet offers.
+  const offered = ctx.anyProductMethod
+    ? ctx.productMethods.includes(raw.method)
+    : PEST_SHEET_PRODUCT_METHODS.includes(raw.method) || (product.catalogMethod && raw.method === product.catalogMethod);
   if (!offered) return '';
   const mentions = productMentions(product, heard, world);
   const text = mentions.map((m) => positiveWords(world, mentionClause(m, world))).join(' . ');
@@ -1703,7 +1768,8 @@ function transcriptionPrompt(ctx) {
     if (list.length + name.length + 2 > TRANSCRIBE_PROMPT_MAX_CHARS) break;
     list += list ? `, ${name}` : name;
   }
-  return `A pest control technician describing a completed visit. Product names that may be said: ${list}. Other words that may be said: ${TRANSCRIBE_SHEET_WORDS}.`;
+  const trade = ctx.sheet === 'lawn_reservice' ? 'lawn care' : 'pest control';
+  return `A ${trade} technician describing a completed visit. Product names that may be said: ${list}. Other words that may be said: ${ctx.sheetWords || TRANSCRIBE_SHEET_WORDS}.`;
 }
 
 /**
@@ -1755,10 +1821,11 @@ async function voiceFillFromClip({ serviceId, sheet, audio, mimeType, filename, 
   return result.ok ? { ...result, chars: heard.text.length } : result;
 }
 
-// ── The report flow (any untyped pest visit) ──────────────────────────────
-// That sheet's note is the tech's own words, on the screen and editable, so its
+// ── The note readers (the report flow, and the lawn re-service sheet) ─────
+// Those sheets' note is the tech's own words, on the screen and editable, so the
 // mic answers the words (`transcribeVisitClip`) and the products are read from the
-// note when the report is written (`voiceProductsFromNote`).
+// note (`voiceProductsFromNote`): when the report is written on the report flow,
+// on the tech's tap on the lawn sheet.
 
 /**
  * The report flow's note mic: one clip as words for the note box.
@@ -1766,7 +1833,7 @@ async function voiceFillFromClip({ serviceId, sheet, audio, mimeType, filename, 
  * transcription_failed | transcription_unreliable | nothing_heard.
  */
 async function transcribeVisitClip({ serviceId, audio, mimeType, filename, durationSeconds = 0, knex = db, transcribe = null }) {
-  const loaded = await loadPestContext(serviceId, knex, { anyPestVisit: true });
+  const loaded = await loadNoteContext(serviceId, knex);
   if (!loaded.ok) return { ok: false, reason: loaded.reason };
   return hearClip(loaded.context, { audio, mimeType, filename, durationSeconds }, transcribe);
 }
@@ -1779,7 +1846,7 @@ async function transcribeVisitClip({ serviceId, audio, mimeType, filename, durat
  */
 async function voiceProductsFromNote({ serviceId, note, knex = db, call = callAnthropic }) {
   const text = typeof note === 'string' ? note.trim() : '';
-  const loaded = await loadPestContext(serviceId, knex, { anyPestVisit: true });
+  const loaded = await loadNoteContext(serviceId, knex);
   if (!loaded.ok) return { ok: false, reason: loaded.reason };
   if (!text) return { ok: true, fill: { products: [], unclear: [] }, chars: 0 };
   // Never cut: a correction near the end would be lost.
@@ -1804,6 +1871,7 @@ module.exports = {
   productMeasure,
   loadPestReserviceContext,
   loadPestContext,
+  loadLawnReserviceContext,
   buildSchema,
   buildPrompt,
   validateFill,
