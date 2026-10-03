@@ -1340,6 +1340,7 @@ export const COMPLETION_RESUME_OWED_CODES = new Set([
   "invoice_hold_handover_failed",        // dispute-hold: the invoice could not be queued behind the hold; the resume re-queues it
   "setup_fee_claim_in_flight",           // another closeout of the series is billing its setup fee; the resume re-reads the claim
   "setup_fee_park_failed",               // the setup fee could not be parked for the office; the resume parks it
+  "deferred_prepay_lookup_failed",       // the deferred annual-prepay hold could not be read; the resume re-reads it
 ]);
 export function completionResumeOwedError(error) {
   // The 503 is part of the contract: a reused code on any other status is
