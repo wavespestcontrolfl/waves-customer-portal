@@ -649,7 +649,7 @@ async function sweepAbandonedHotAlerts({ limit = 10 } = {}) {
  * re-proven under the call row's lock in the SAME transaction as the write
  * (claimOwnedElsewhere — the lead, booking and re-service writers' fence).
  */
-async function alertOfficeContactFollowUp({ customerId, callbackPhone, summary, callSid, notes = [], sessionKey = null, restricted = false }) {
+async function alertOfficeContactFollowUp({ customerId, callbackPhone, summary, callSid, notes = [], sessionKey = null }) {
   if (!customerId || !callSid) return false;
   try {
     const db = require('../../models/db');
@@ -664,21 +664,18 @@ async function alertOfficeContactFollowUp({ customerId, callbackPhone, summary, 
       }
       return raiseAdminAlert('alert', {
       area: 'Comms',
-      // A contact who restricted how (or whether) to reach them is a request
-      // to READ, never an instruction to reach out: their words are in the
-      // detail, and a person decides.
-      action: restricted
-        ? (name
-          ? fitAction('Comms', name, [(n) => `review a contact request on ${n}'s account`, (n) => `review ${n}'s contact request`])
-          : 'review a contact request on a customer account')
-        : (name
-          ? fitAction('Comms', name, [(n) => `follow up with a contact on ${n}'s account`, (n) => `follow up with ${n}'s contact`])
-          : 'follow up with a contact on a customer account'),
+      // ⭐ ONE NEUTRAL ACTION, WHATEVER THEY ASKED. The bell never tells the
+      // office to reach out: the caller may have restricted how (or whether)
+      // to be contacted, on a capture or in words before a hangup, and the
+      // code does not judge that. A person reads the call and decides.
+      action: name
+        ? fitAction('Comms', name, [(n) => `review a contact's call on ${n}'s account`, (n) => `review ${n}'s contact's call`])
+        : "review a contact's call on a customer account",
       why: whyWithQuote({ lead: 'They called Sandy from a number on the account: ', quote: firstSentence(redactedWords(summary)).replace(/[.!?]+$/, '') || 'asked for a follow-up' }),
       severity: 'needs-you',
       link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
       subject: { type: 'customer', id: String(customerId) },
-      doneWhen: restricted ? 'contact_request_reviewed' : 'contact_followed_up',
+      doneWhen: 'contact_call_reviewed',
       who: 'person',
     }, {
       bell: true,
@@ -687,7 +684,9 @@ async function alertOfficeContactFollowUp({ customerId, callbackPhone, summary, 
       // number, an added email, a do-not-contact request) rewrites it in
       // place without ringing again.
       refreshOnDedupe: true,
-      ringOnRefresh: () => false,
+      // …unless the office already marked it done: new details from the same
+      // call are new work, so that refresh rings and reopens the row.
+      ringOnRefresh: (existing) => Boolean(existing && existing.done_at),
       trx,
       // The number to reach them on, the whole summary, and anything they
       // asked about HOW to be contacted (a channel, a do-not-contact request)

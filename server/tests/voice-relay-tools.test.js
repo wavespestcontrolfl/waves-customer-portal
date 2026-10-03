@@ -295,6 +295,11 @@ describe('capture_lead for a recognised contact (secondary slot)', () => {
     const second = bell.mock.calls[1][0];
     expect(second.summary).toBe('Asked what time the lawn tech is coming today.');
     expect(second.notes).toEqual(expect.arrayContaining(['Later on the call: Added their email.']));
+    // A third capture keeps the second one's note as well.
+    await executeTool('capture_lead', { call_summary: 'Also discuss the damaged gate.' }, ctx);
+    const third = bell.mock.calls[2][0];
+    expect(third.summary).toBe('Asked what time the lawn tech is coming today.');
+    expect(third.notes).toEqual(expect.arrayContaining(['Later on the call: Added their email. | Also discuss the damaged gate.']));
   });
 
   // The code never judges which channels a restriction covers: any
@@ -310,7 +315,6 @@ describe('capture_lead for a recognised contact (secondary slot)', () => {
       call_summary: 'Asked about today\'s visit.', ...(words ? { contact_preference: words } : {}), do_not_contact_request: true,
     }, recognised());
     const arg = bell.mock.calls[0][0];
-    expect(arg.restricted).toBe(true);
     expect(arg.notes).toEqual(expect.arrayContaining([expect.stringMatching(/^Has a contact restriction/)]));
     if (words) expect(arg.notes).toEqual(expect.arrayContaining([`Contact preference: “${words}”.`]));
     expect(out).toMatch(/Promise a follow-up ONLY by a way they did not decline/);
@@ -320,7 +324,7 @@ describe('capture_lead for a recognised contact (secondary slot)', () => {
 
   test('no restriction → the ordinary follow-up bell and promise', async () => {
     const out = await executeTool('capture_lead', { call_summary: 'Asked about today\'s visit.', preferred_contact_method: 'phone' }, recognised());
-    expect(bell.mock.calls[0][0].restricted).toBe(false);
+    expect(bell.mock.calls[0][0].notes).not.toEqual(expect.arrayContaining([expect.stringMatching(/^Has a contact restriction/)]));
     expect(out).toMatch(/follow up with THEM/);
   });
 

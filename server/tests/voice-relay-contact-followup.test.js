@@ -32,26 +32,27 @@ test('rings one needs-you bell on the customer, naming them and quoting the requ
   await expect(call()).resolves.toBe(true);
   const [category, headline, why, opts] = notifyAdmin.mock.calls[0];
   expect(category).toBe('alert');
-  expect(headline).toBe("Comms — follow up with a contact on Pat Example's account");
+  expect(headline).toBe("Comms — review a contact's call on Pat Example's account");
   expect(why).toBe('They called Sandy from a number on the account: “Asked what time the lawn tech is coming today”');
   expect(opts).toMatchObject({
     bell: true,
     dedupeKey: 'sandy-contact-followup:CA-contact-1',
     refreshOnDedupe: true, // a later capture on the same call rewrites the one bell
     link: '/admin/customers?customerId=c-1111',
-    metadata: { severity: 'needs-you', who: 'person', doneWhen: 'contact_followed_up', subject: { type: 'customer', id: 'c-1111' }, callbackPhone: '+19415550133' },
+    metadata: { severity: 'needs-you', who: 'person', doneWhen: 'contact_call_reviewed', subject: { type: 'customer', id: 'c-1111' }, callbackPhone: '+19415550133' },
   });
-  expect(opts.ringOnRefresh()).toBe(false); // …without ringing again
+  expect(opts.ringOnRefresh({ done_at: null })).toBe(false); // …without ringing again
+  // …unless the office already marked it done: changed details reopen it.
+  expect(opts.ringOnRefresh({ done_at: new Date() })).toBe(true);
   // Their number and the whole summary ride in the detail.
   expect(opts.detail).toBe('Their number: +19415550133. Asked what time the lawn tech is coming today. Wants a call back.');
 });
 
-test('a contact restriction rings as a request to review, never as outreach', async () => {
-  await call({ restricted: true });
-  const [, headline, , opts] = notifyAdmin.mock.calls[0];
-  expect(headline).toBe("Comms — review a contact request on Pat Example's account");
-  expect(headline.length).toBeLessThanOrEqual(60);
-  expect(opts.metadata.doneWhen).toBe('contact_request_reviewed');
+test('the action never tells the office to reach out — the caller may have restricted contact, even before a hangup', async () => {
+  await call({ summary: 'do not contact me again' });
+  const [, headline, why] = notifyAdmin.mock.calls[0];
+  expect(headline).not.toMatch(/follow up|call back/i);
+  expect(why).toMatch(/“do not contact me again”/);
 });
 
 test('how they asked to be contacted is kept for the office', async () => {
@@ -66,7 +67,7 @@ test('a long name still fits the headline, and a missing name or summary still r
 
   primeCustomer(undefined);
   await expect(call({ summary: '' })).resolves.toBe(true);
-  expect(notifyAdmin.mock.calls[1][1]).toBe('Comms — follow up with a contact on a customer account');
+  expect(notifyAdmin.mock.calls[1][1]).toBe("Comms — review a contact's call on a customer account");
   expect(notifyAdmin.mock.calls[1][2]).toMatch(/“asked for a follow-up”$/);
 });
 

@@ -1314,14 +1314,17 @@ async function executeTool(name, input = {}, ctx = {}) {
           // replace the reason the office is reaching out.
           request: prior.request || extracted.call_summary || extracted.requested_service || null,
         };
+        // Every later capture's summary is kept too, in order (a third capture
+        // must not erase what the second one added).
         const latestSummary = extracted.call_summary || '';
+        const laterSoFar = prior.later ? String(prior.later).split(' | ') : [];
+        if (latestSummary && latestSummary !== followUp.request && !laterSoFar.includes(latestSummary)) laterSoFar.push(latestSummary);
+        followUp.later = laterSoFar.join(' | ') || null;
         if (typeof ctx.noteContactFollowUp === 'function') ctx.noteContactFollowUp(followUp);
         const belled = await alertOfficeContactFollowUp({
           customerId: ctx.customerId,
           callbackPhone: followUp.callbackPhone,
           summary: followUp.request || '',
-          // Any contact restriction turns the bell into a request to review.
-          restricted: followUp.restricted,
           callSid: ctx.callSid || null,
           // The claim-owner nonce: the bell write re-proves ownership under the
           // call row's lock, like the lead capture below.
@@ -1336,7 +1339,7 @@ async function executeTool(name, input = {}, ctx = {}) {
             extracted.email ? `Email: ${extracted.email}.` : null,
             [extracted.address_line1, extracted.city, extracted.zip].filter(Boolean).length
               ? `Address given: ${[extracted.address_line1, extracted.city, extracted.zip].filter(Boolean).join(', ')}.` : null,
-            latestSummary && latestSummary !== followUp.request ? `Later on the call: ${latestSummary}` : null,
+            followUp.later ? `Later on the call: ${followUp.later}` : null,
             extracted.requested_service ? `Service: ${extracted.requested_service}.` : null,
             followUp.timing ? `Timing: ${followUp.timing}.` : null,
             extracted.pain_points ? `Problem: ${extracted.pain_points}.` : null,

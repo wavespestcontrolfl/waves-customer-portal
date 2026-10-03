@@ -58,14 +58,15 @@ function nonEmptyFields(fields) {
   return Object.keys(kept).length ? kept : null;
 }
 
-const CONTACT_FOLLOWUP_TEXT = ['callbackPhone', 'method', 'preference', 'timing', 'request'];
+const CONTACT_FOLLOWUP_TEXT = ['callbackPhone', 'method', 'preference', 'timing', 'request', 'later'];
+const CONTACT_FOLLOWUP_MAX_CHARS = 600;
 const CONTACT_FOLLOWUP_FLAGS = ['restricted', 'textsStopped', 'estimateAsked'];
 
 /** The contact follow-up bag in its stored shape: known keys only, or null when empty. */
 function contactFollowUpFields(fields) {
   if (!fields || typeof fields !== 'object') return null;
   const kept = {};
-  for (const k of CONTACT_FOLLOWUP_TEXT) if (fields[k] != null && String(fields[k]).trim() !== '') kept[k] = String(fields[k]).trim().slice(0, 300);
+  for (const k of CONTACT_FOLLOWUP_TEXT) if (fields[k] != null && String(fields[k]).trim() !== '') kept[k] = String(fields[k]).trim().slice(0, CONTACT_FOLLOWUP_MAX_CHARS);
   for (const k of CONTACT_FOLLOWUP_FLAGS) if (fields[k] === true) kept[k] = true;
   return Object.keys(kept).length ? kept : null;
 }
