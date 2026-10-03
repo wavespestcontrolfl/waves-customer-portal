@@ -156,6 +156,22 @@ describe('the situs guard and the parent parcel', () => {
       expect(out.parentParcel).toBeNull();
     });
 
+    test('a point inside a HOLE in the parcel is outside the parcel: nothing kept', () => {
+      const H = 0.0003;
+      const hole = [[LNG - H, LAT - H], [LNG - H, LAT + H], [LNG + H, LAT + H], [LNG + H, LAT - H], [LNG - H, LAT - H]];
+      expect(guard(plazaParcel({ polygon: [square[0], hole] })).parentParcel).toBeNull();
+      // Between the hole and the outer line (about 11 m from each) it is inside.
+      const between = { lat: LAT + 0.0004, lng: LNG };
+      expect(guard(plazaParcel({ polygon: [square[0], hole] }), { point: between }).parentParcel).not.toBeNull();
+    });
+
+    test('the shared unit predicate decides: a building designator is not a unit, a bare trailing unit is', () => {
+      const bldg = '100 Example Plaza Dr Bldg #2, Examplecity, FL 00000';
+      expect(guard(plazaParcel(), { searchAddress: bldg, address: bldg }).parentParcel).not.toBeNull();
+      const bare = '100 Example Plaza Dr 201, Examplecity, FL 00000';
+      expect(guard(plazaParcel(), { searchAddress: bare, address: bare }).parentParcel).toBeNull();
+    });
+
     test('a parcel with no polygon cannot prove the point is inside it: nothing kept', () => {
       expect(guard(plazaParcel({ polygon: null })).parentParcel).toBeNull();
     });

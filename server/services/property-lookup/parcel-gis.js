@@ -170,6 +170,14 @@ function pointToPolygonEdgeMeters(rings, lng, lat) {
   return best;
 }
 
+// Inside the parcel proper: an ArcGIS polygon lists its holes as extra
+// rings, so a point is inside when an ODD number of rings contain it (the
+// outer ring alone; outer + hole = the hole, which is outside the parcel).
+function pointInsidePolygon(rings, lng, lat) {
+  if (!Array.isArray(rings) || !Number.isFinite(lng) || !Number.isFinite(lat)) return false;
+  return rings.filter((ring) => pointInRing(ring, lng, lat)).length % 2 === 1;
+}
+
 function polygonContainsPoint(rings, lng, lat) {
   return Array.isArray(rings) && rings.some((ring) => pointInRing(ring, lng, lat));
 }
@@ -341,6 +349,7 @@ module.exports = {
   outerRing,
   polygonAreaSqft,
   pointToPolygonEdgeMeters,
+  pointInsidePolygon,
   simplifyRing,
   isParcelGisDisabled,
   parcelGisTimeoutMs,

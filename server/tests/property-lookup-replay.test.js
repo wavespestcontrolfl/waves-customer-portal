@@ -177,6 +177,11 @@ describe('classifyReplay', () => {
   test('a guard-dropped parcel carries its reason, and the street miss still ranks first', () => {
     const dropped = { status: 'dropped', dropReason: 'situs_house_number_mismatch', errors: [] };
     expect(replay.classifyReplay(base({ audit: ran({ hasExactMatch: true }), point: dropped }))).toBe('point_parcel_dropped:situs_house_number_mismatch');
+    // A drop that kept the parcel as parent-parcel context is its own stop, ahead of the roll-miss stops
+    // (the storefront it exists for is normally not on the roll).
+    const keptParent = { ...dropped, parentParcel: true };
+    expect(replay.classifyReplay(base({ point: keptParent }))).toBe('parent_parcel_kept:situs_house_number_mismatch');
+    expect(replay.classifyReplay(base({ audit: ran({ streetExists: false }), point: keptParent }))).toBe('parent_parcel_kept:situs_house_number_mismatch');
     expect(replay.classifyReplay(base({ audit: ran({ streetExists: false }), point: dropped }))).toBe('address_text_miss');
     // audit gave no signal at all: the drop is the verdict
     expect(replay.classifyReplay(base({ audit: { status: 'no_signal', errors: [] }, point: dropped }))).toBe('point_parcel_dropped:situs_house_number_mismatch');

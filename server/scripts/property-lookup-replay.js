@@ -32,8 +32,9 @@
 //   gis_error                    a county query failed/timed out (never a roll verdict)
 //   address_text_miss            the street is not on the roll under the typed spelling
 //   number_not_on_roll           the street exists, the typed house number does not
-//   point_parcel_dropped:<why>   a parcel sits at the point but a guard dropped it; "+parent_parcel_kept"
-//                                when the drop kept the parcel as parent-parcel context
+//   parent_parcel_kept:<why>     a guard dropped the parcel at the point but kept it as parent-parcel
+//                                context (GATE_LOOKUP_BUSINESS_IDENTITY); ranks ahead of the roll-miss stops
+//   point_parcel_dropped:<why>   a parcel sits at the point but a guard dropped it
 //   no_coordinates               the row stores no lat/lng, so no point query was made: inconclusive
 //                                (the roll audit above still ranks first when it speaks)
 //   point_lookup_unsupported     county has no point layer (Hillsborough): inconclusive
@@ -459,11 +460,13 @@ const STOP_RULES = [
   { stop: 'commercial_no_suite_path', when: (r) => parcelFound(r) && r.snapshot.isCommercial === true && r.snapshot.unitScopedLookup !== true },
   { stop: 'matched_now', when: parcelFound },
   { stop: 'gis_error', when: (r) => (r.point.status === 'error' || r.audit.status === 'error') && !pointDropped(r) },
+  // A dropped parcel kept as parent-parcel context is its own stop, ahead of
+  // the roll-miss stops: the storefront it exists for is normally not on the
+  // roll, and would otherwise be counted there and never as a kept parent.
+  { stop: 'parent_parcel_kept', detail: (r) => r.point.dropReason, when: (r) => pointDropped(r) && r.point.parentParcel === true },
   { stop: 'address_text_miss', when: (r) => auditRan(r) && !r.audit.streetExists },
   { stop: 'number_not_on_roll', when: (r) => auditRan(r) && r.audit.streetExists && !r.audit.hasExactMatch },
-  // A dropped parcel kept as parent-parcel context reads as its own stop, so
-  // the summary counts it apart from a plain drop.
-  { stop: 'point_parcel_dropped', detail: (r) => `${r.point.dropReason}${r.point.parentParcel ? '+parent_parcel_kept' : ''}`, when: pointDropped },
+  { stop: 'point_parcel_dropped', detail: (r) => r.point.dropReason, when: pointDropped },
   { stop: 'no_coordinates', when: (r) => r.point.reason === 'no_coordinates' },
   { stop: 'point_lookup_unsupported', when: (r) => r.point.reason === 'point_lookup_unsupported_county' },
   { stop: 'county_unknown', when: (r) => !r.countyUsed },

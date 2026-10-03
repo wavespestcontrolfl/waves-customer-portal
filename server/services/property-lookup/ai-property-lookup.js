@@ -2009,14 +2009,17 @@ function parentParcelEnabled() {
 // other caller's response (property-lookup-v2.js).
 function parentParcelContext(parcel, { address, gisPrecision, point }) {
   if (!parentParcelEnabled() || !parcel || gisPrecision !== 'rooftop') return null;
-  if (TYPED_DWELLING_UNIT_RE.test(String(address || ''))) return null;
+  // The shared unit-address predicate: it sets a building designator aside
+  // ("Bldg #2" is not a unit) and catches a bare trailing unit ("… Dr 201").
+  if (addressMayNameUnit(address)) return null;
   const major = parseInt(dorMajorCategory(parcel.dorUseCode), 10);
   if (!Number.isFinite(major) || major < PARENT_PARCEL_DOR_MIN || major > PARENT_PARCEL_DOR_MAX) return null;
-  const { pointToPolygonEdgeMeters, _private: { polygonContainsPoint } } = require('./parcel-gis');
+  const { pointToPolygonEdgeMeters, pointInsidePolygon } = require('./parcel-gis');
   // Inside first: the county layer can hand back a nearby parcel that does
   // not contain the point, and the edge distance alone is unsigned — 20 m
-  // OUTSIDE the line would read the same as 20 m inside it.
-  if (!polygonContainsPoint(parcel.polygon, Number(point?.lng), Number(point?.lat))) return null;
+  // OUTSIDE the line (or inside a hole in the parcel) would read the same as
+  // 20 m inside it.
+  if (!pointInsidePolygon(parcel.polygon, Number(point?.lng), Number(point?.lat))) return null;
   const edgeM = pointToPolygonEdgeMeters(parcel.polygon, Number(point?.lng), Number(point?.lat));
   if (edgeM === null || edgeM < PARENT_PARCEL_MIN_EDGE_M) return null;
   return {
