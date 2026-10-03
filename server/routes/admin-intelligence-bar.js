@@ -546,6 +546,16 @@ const IB_WRITES_DISABLED_MESSAGE = 'Intelligence Bar writes are currently disabl
 // never touched by this — only this health-event copy.
 const REDACTED_TOOL_HEALTH_ERROR = '[redacted — PII or outside-write tool]';
 
+// The refusal's machine code (capability_not_loaded, invalid_input,
+// target_clarification_required, ...) stays on the health event even when its
+// text is redacted: without it a refused PII tool leaves no reason at all. Only
+// a code-shaped value is kept, so free text can never ride in through `code`.
+const TOOL_HEALTH_CODE_RE = /^[a-z][a-z0-9_]{1,63}$/;
+function toolHealthFailureCode(result) {
+  const code = result?.code;
+  return typeof code === 'string' && TOOL_HEALTH_CODE_RE.test(code) ? code : null;
+}
+
 // A search_field_intelligence result with no page, entry or operational
 // match. Open contradictions only ever attach to returned hits.
 const KNOWLEDGE_GAP_MAX = 300;
@@ -3148,6 +3158,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
           errorMessage: (PII_TOOL_NAMES.has(toolUse.name) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(toolUse.name)) && errorMessage
             ? REDACTED_TOOL_HEALTH_ERROR
             : errorMessage,
+          ...(failed && toolHealthFailureCode(result) ? { metadata: { code: toolHealthFailureCode(result) } } : {}),
         });
         gapCollector?.toolResult(toolUse.name, result, failed);
 

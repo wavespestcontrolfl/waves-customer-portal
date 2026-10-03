@@ -208,6 +208,33 @@ describe('outside-service write tools are full-access-only in the /query dispatc
     });
   });
 
+  // A refused PII tool used to leave no reason at all in tool_health_events (the text is
+  // redacted). Its machine code is kept; anything that is not code-shaped is dropped.
+  test.each([
+    ['target_clarification_required', { code: 'target_clarification_required' }],
+    ['Jane Example, 12 Fixture Lane', undefined],
+    [undefined, undefined],
+  ])('a refused PII tool keeps its machine code on the health event (code %p)', async (code, metadata) => {
+    const { executeTool } = require('../services/intelligence-bar/tools');
+    executeTool.mockResolvedValueOnce({ error: 'Name one customer for this action: Jane Example', ...(code ? { code } : {}) });
+    mockRecordToolEvent.mockClear();
+    await withServer(async (baseUrl) => {
+      mockMessagesCreate
+        .mockResolvedValueOnce(toolUseTurn('get_customer_detail', { customer_id: '11111111-1111-4111-8111-111111111111' }))
+        .mockResolvedValueOnce(finalTextTurn());
+      const res = await fetch(`${baseUrl}/admin/intelligence-bar/query`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ context: 'customers', prompt: 'show the customer' }),
+      });
+      expect(res.status).toBe(200);
+      const healthCall = mockRecordToolEvent.mock.calls.find(([c]) => c.toolName === 'get_customer_detail');
+      expect(healthCall[0]).toMatchObject({ success: false, errorMessage: expect.stringMatching(/redacted/) });
+      expect(healthCall[0].metadata).toEqual(metadata);
+      expect(JSON.stringify(healthCall[0])).not.toContain('Jane Example');
+    });
+  });
+
   // Codex r3 P1 on #5275: a github-ops no-op refusal embeds the PR title in
   // `error`, and that string used to reach tool_health_events.error_message
   // verbatim via recordToolEvent. github-ops-tools loads for REAL here (not
