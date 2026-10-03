@@ -192,18 +192,101 @@ describe('computeEditSummary', () => {
     expect(summary.servicesRemoved).toBeUndefined();
   });
 
-  test('admin-builder selectedServices arrays are comparable against engine object maps', () => {
+  test('admin-builder service codes are translated to engine keys before the diff', () => {
     const summary = computeEditSummary({
       baseline: baselineRow(),
       sentRow: sentRow({
         // Admin revise persists the raw /calculate-estimate payload: an
-        // ARRAY of service-key strings, not the engine's object map.
-        estimate_data: { engineRequest: { selectedServices: ['pest', 'mosquito', 'pest'] } },
+        // ARRAY of builder codes (PEST), not the engine's object map (pest).
+        estimate_data: { engineRequest: { profile: {}, selectedServices: ['PEST', 'MOSQUITO', 'PEST'], options: {} } },
       }),
     });
     expect(summary.servicesComparable).toBe(true);
     expect(summary.servicesAdded).toEqual(['mosquito']);
     expect(summary.servicesRemoved).toEqual(['lawn']);
+  });
+
+  test('the same services under builder codes are not a service change', () => {
+    const summary = computeEditSummary({
+      baseline: baselineRow({
+        baseline_estimate_data: { engineInputs: { services: { pest: {}, oneTimePest: {}, rodentBait: {} } } },
+      }),
+      sentRow: sentRow({
+        estimate_data: { engineRequest: { selectedServices: ['RODENT_BAIT', 'OT_PEST', 'PEST'] } },
+      }),
+    });
+    expect(summary.servicesComparable).toBe(true);
+    expect(summary.servicesAdded).toBeUndefined();
+    expect(summary.servicesRemoved).toBeUndefined();
+  });
+
+  test('codes the translator does not know are not comparable, never a false change', () => {
+    const summary = computeEditSummary({
+      baseline: baselineRow(),
+      sentRow: sentRow({ estimate_data: { engineRequest: { selectedServices: ['NOT_A_SERVICE'] } } }),
+    });
+    expect(summary.servicesComparable).toBe(false);
+    expect(summary.servicesAdded).toBeUndefined();
+    expect(summary.servicesRemoved).toBeUndefined();
+  });
+
+  test('the same property in the autocomplete form is not an address change', () => {
+    const same = (a, b) => computeEditSummary({
+      baseline: baselineRow({ baseline_fields: { ...baselineRow().baseline_fields, address: a } }),
+      sentRow: sentRow({ address: b }),
+    }).addressChanged;
+    expect(same('123 Main St, Bradenton, FL', '123 Main Street, Bradenton, FL 34205, USA')).toBeUndefined();
+    expect(same('123 Main St, Bradenton, FL 34205', '123 Main St Bradenton FL 34205')).toBeUndefined();
+    expect(same('123 Main St, Bradenton, FL', '123 main st')).toBeUndefined();
+    // Another house, another street or another ZIP is a real change.
+    expect(same('123 Main St, Bradenton, FL', '125 Main St, Bradenton, FL')).toBe(true);
+    expect(same('123 Main St, Bradenton, FL', '123 Oak St, Bradenton, FL')).toBe(true);
+    expect(same('123 Main St, Bradenton, FL 34205', '123 Main St, Parrish, FL 34219')).toBe(true);
+    expect(same('34205 Main St, Bradenton, FL 34205', '34205 Main St, Parrish, FL 34219')).toBe(true);
+    // An address with no house number is compared as written.
+    expect(same('Main St, Bradenton', 'Main St, Parrish')).toBe(true);
+    expect(same(null, '123 Main St')).toBe(true);
+  });
+
+  test('the display label counts only when the service keys cannot be compared', () => {
+    const relabeled = { service_interest: 'Pest Control' };
+    expect(computeEditSummary({ baseline: baselineRow(), sentRow: sentRow(relabeled) }).serviceInterestChanged).toBeUndefined();
+    const summary = computeEditSummary({
+      baseline: baselineRow({ baseline_estimate_data: { freeform: true } }),
+      sentRow: sentRow(relabeled),
+    });
+    expect(summary.servicesComparable).toBe(false);
+    expect(summary.serviceInterestChanged).toBe(true);
+  });
+
+  test('the setup fee the builder folds into the one-time total is not a price change', () => {
+    const builderData = (oneTime) => ({ engineRequest: { selectedServices: ['PEST', 'LAWN'] }, result: { oneTime } });
+    const feeOnly = computeEditSummary({
+      baseline: baselineRow(),
+      sentRow: sentRow({ onetime_total: '99.00', estimate_data: builderData({ membershipFee: 99, total: 99 }) }),
+    });
+    expect(feeOnly.totalsChanged).toBeUndefined();
+    expect(feeOnly.setupFeeExcluded).toBe(99);
+    // A one-time line added on top of the fee is still a change, net of the fee.
+    const withLine = computeEditSummary({
+      baseline: baselineRow(),
+      sentRow: sentRow({ onetime_total: '298.00', estimate_data: builderData({ membershipFee: 99, total: 298 }) }),
+    });
+    expect(withLine.totalsChanged.onetime_total).toEqual({ from: 0, to: 199 });
+    // An engine-shaped sent row carries no builder fee: compared as stored.
+    const engineShape = computeEditSummary({ baseline: baselineRow(), sentRow: sentRow({ onetime_total: '99.00' }) });
+    expect(engineShape.totalsChanged.onetime_total).toEqual({ from: 0, to: 99 });
+    expect(engineShape.setupFeeExcluded).toBeUndefined();
+    // Both sides builder-saved with the fee: nothing is subtracted.
+    const both = computeEditSummary({
+      baseline: baselineRow({
+        baseline_estimate_data: builderData({ membershipFee: 99, total: 99 }),
+        baseline_fields: { ...baselineRow().baseline_fields, onetime_total: 99 },
+      }),
+      sentRow: sentRow({ onetime_total: '99.00', estimate_data: builderData({ membershipFee: 99, total: 99 }) }),
+    });
+    expect(both.totalsChanged).toBeUndefined();
+    expect(both.setupFeeExcluded).toBeUndefined();
   });
 });
 

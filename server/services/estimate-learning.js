@@ -81,12 +81,37 @@ function baselineFieldsFrom(row) {
 }
 
 // Service keys across the persisted shapes: engine + ai_agent drafts store
-// pricing inputs at engineInputs.services (object keyed by service); the
-// admin builder's save persists the raw /calculate-estimate payload, whose
-// engineRequest.selectedServices is an ARRAY of service-key strings (see
-// serverRecomputeFromEstimateData). Absent all of them the side is not
-// comparable, and the diff omits the service arrays rather than reporting
-// a false empty set.
+// pricing inputs at engineInputs.services (object keyed by ENGINE service
+// key: pest, lawn, oneTimePest); the admin builder's save persists the raw
+// /calculate-estimate payload, whose engineRequest.selectedServices is an
+// ARRAY of BUILDER codes (PEST, LAWN, OT_PEST). The two vocabularies are
+// different names for the same services, so a code array is run through the
+// builder's own translator (translateV2CallToV1Input, the same one the save
+// path reprices with) before the diff. Comparing them raw reported a remove
+// plus an add on every send (60-day read 2026-10-03: 37 of 49 "service
+// changes" were pest vs PEST). Absent a readable shape, or when the codes
+// cannot be translated, the side is not comparable and the diff omits the
+// service arrays rather than reporting a false change or a false empty set.
+function translateBuilderCodes(engineRequest, codes) {
+  if (!codes.length) return [];
+  let translate;
+  try {
+    // Lazy: the route adapter requires services that require this module.
+    translate = require('../routes/property-lookup-v2').translateV2CallToV1Input;
+  } catch {
+    return null;
+  }
+  if (typeof translate !== 'function') return null;
+  try {
+    const input = translate(engineRequest.profile || {}, codes, engineRequest.options || {});
+    const keys = Object.keys(input?.services || {});
+    // Codes the translator does not know yield nothing: unknown, not "none".
+    return keys.length ? keys.sort() : null;
+  } catch {
+    return null;
+  }
+}
+
 function serviceKeysFrom(data) {
   const services = data?.engineInputs?.services
     || data?.engineRequest?.services
@@ -96,9 +121,50 @@ function serviceKeysFrom(data) {
   }
   const selected = data?.engineRequest?.selectedServices;
   if (Array.isArray(selected)) {
-    return [...new Set(selected.filter((key) => typeof key === 'string'))].sort();
+    const codes = [...new Set(selected.filter((key) => typeof key === 'string'))];
+    return translateBuilderCodes(data.engineRequest, codes);
   }
   return null;
+}
+
+// The same property written two ways is not an edit. The engine draft holds
+// the address as the caller gave it; the builder's save replaces it with the
+// autocomplete form (unit, city, state, ZIP, country added or reordered).
+// An address counts as changed only when the house number, the first word of
+// the street name, or (when both sides carry one) the ZIP differs.
+function addressParts(value) {
+  const text = norm(value).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+  const tokens = text ? text.split(' ') : [];
+  const zips = text.match(/\b\d{5}\b/g) || [];
+  return {
+    text,
+    number: tokens[0] || '',
+    street: tokens[1] || '',
+    // The last 5-digit group: a 5-digit house number comes first.
+    zip: zips.length && (zips.length > 1 || tokens[0] !== zips[0]) ? zips[zips.length - 1] : '',
+  };
+}
+
+function sameProperty(a, b) {
+  const x = addressParts(a);
+  const y = addressParts(b);
+  if (x.text === y.text) return true;
+  if (!x.text || !y.text) return false;
+  if (!/\d/.test(x.number) || x.number !== y.number || x.street !== y.street) return false;
+  return !(x.zip && y.zip && x.zip !== y.zip);
+}
+
+// The WaveGuard setup fee is not an edit either. The builder's save folds
+// it into the stored one-time total (result.oneTime.membershipFee); the
+// engine draft's stored one-time total does not carry it (60-day read
+// 2026-10-03: 34 of 36 one-time changes were exactly this fee). So a
+// builder-saved row is compared net of that fee against an engine baseline;
+// the amount taken out is recorded as setupFeeExcluded.
+function builderSetupFee(data) {
+  if (!Array.isArray(data?.engineRequest?.selectedServices)) return 0;
+  const root = data.result && typeof data.result === 'object' ? data.result : data;
+  const fee = parseFloat(root?.oneTime?.membershipFee);
+  return Number.isFinite(fee) && fee > 0 ? money(fee) : 0;
 }
 
 /**
@@ -110,6 +176,8 @@ function computeEditSummary({ baseline, sentRow }) {
     return { reviseCount: 0, baselineCapture: null, sentUnedited: true };
   }
   const fields = parseData(baseline.baseline_fields);
+  const baselineData = parseData(baseline.baseline_estimate_data);
+  const sentData = parseData(sentRow.estimate_data);
   const summary = {
     reviseCount: baseline.revise_count || 0,
     baselineCapture: baseline.capture_point || 'first_revise',
@@ -118,23 +186,30 @@ function computeEditSummary({ baseline, sentRow }) {
   const totals = {};
   for (const key of ['monthly_total', 'annual_total', 'onetime_total']) {
     const from = money(fields[key]);
-    const to = money(sentRow[key]);
+    let to = money(sentRow[key]);
+    if (key === 'onetime_total') {
+      // Net of the setup fee only when the baseline does not hold it too.
+      const fee = builderSetupFee(sentData) - builderSetupFee(baselineData);
+      if (fee > 0 && to >= fee) {
+        to = money(to - fee);
+        summary.setupFeeExcluded = fee;
+      }
+    }
     if (from !== to) totals[key] = { from, to };
   }
   if (Object.keys(totals).length) summary.totalsChanged = totals;
 
-  if (norm(fields.address) !== norm(sentRow.address)) summary.addressChanged = true;
+  if (!sameProperty(fields.address, sentRow.address)) summary.addressChanged = true;
   if (
     norm(fields.customer_name) !== norm(sentRow.customer_name)
     || norm(fields.customer_phone) !== norm(sentRow.customer_phone)
     || norm(fields.customer_email) !== norm(sentRow.customer_email)
   ) summary.contactChanged = true;
   if (norm(fields.waveguard_tier) !== norm(sentRow.waveguard_tier)) summary.tierChanged = true;
-  if (norm(fields.service_interest) !== norm(sentRow.service_interest)) summary.serviceInterestChanged = true;
   if (norm(fields.category) !== norm(sentRow.category)) summary.categoryChanged = true;
 
-  const baseKeys = serviceKeysFrom(parseData(baseline.baseline_estimate_data));
-  const sentKeys = serviceKeysFrom(parseData(sentRow.estimate_data));
+  const baseKeys = serviceKeysFrom(baselineData);
+  const sentKeys = serviceKeysFrom(sentData);
   if (baseKeys && sentKeys) {
     const added = sentKeys.filter((k) => !baseKeys.includes(k));
     const removed = baseKeys.filter((k) => !sentKeys.includes(k));
@@ -143,6 +218,13 @@ function computeEditSummary({ baseline, sentRow }) {
     summary.servicesComparable = true;
   } else {
     summary.servicesComparable = false;
+  }
+  // service_interest is a display label: the engine writes the caller's
+  // words ("Quarterly Pest Control Service"), the builder its own category
+  // name ("Pest Control"). When the service keys are comparable they are the
+  // record of what changed; the label counts only when they are not.
+  if (!summary.servicesComparable && norm(fields.service_interest) !== norm(sentRow.service_interest)) {
+    summary.serviceInterestChanged = true;
   }
 
   summary.sentUnedited = summary.reviseCount === 0
@@ -341,6 +423,8 @@ module.exports = {
   _private: {
     baselineFieldsFrom,
     serviceKeysFrom,
+    sameProperty,
+    builderSetupFee,
     money,
     norm,
     // Test-only: the cutover is cached for the process lifetime.
