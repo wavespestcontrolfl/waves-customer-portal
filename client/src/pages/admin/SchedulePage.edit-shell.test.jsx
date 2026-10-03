@@ -172,3 +172,85 @@ it('re-entering the stored time (HH:MM:SS vs HH:MM) is not an edit', () => {
   fireEvent.change(start, { target: { value: '08:00' } });
   expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument();
 });
+
+// ---- a stop shared by two services (owner ruling 2026-10-03) ----
+const combo = { ...service, visit: { id: 'fixture-stop', serviceCount: 2, serviceTypes: ['Lawn Care', 'Pest Control'] } };
+const writeUrls = () => writes().map(([url, options]) => `${options.method} ${String(url).replace(/^.*\/api/, '')}`);
+const okJson = (url) => ({ ok: true, json: async () => (String(url).endsWith('/admin/discounts') ? [] : {}) });
+const openCombo = () => {
+  if (!fetch.getMockImplementation()) fetch.mockImplementation(async (url) => okJson(url));
+  render(<EditServiceModal service={combo} technicians={[]} onClose={vi.fn()} onSaved={vi.fn()} />);
+  return screen.getByRole('dialog', { name: 'Edit appointment' });
+};
+// Save enables once the debounced money preview lands (see the save test above).
+const clickSave = async () => {
+  const save = screen.getByRole('button', { name: 'Save', exact: true });
+  await waitFor(() => expect(save).toBeEnabled(), { timeout: 2000 });
+  fireEvent.click(save);
+};
+
+it('a combo edited without touching its date or time saves as one ordinary edit', async () => {
+  openCombo();
+  expect(screen.queryByTestId('combo-move-choice')).not.toBeInTheDocument();
+  await clickSave();
+  await waitFor(() => expect(writes()).toHaveLength(1));
+  expect(writeUrls()).toEqual(['PUT /admin/schedule/fixture-visit/update-details']);
+});
+
+it('moving a combo moves the whole stop first, then saves the rest', async () => {
+  const dialog = openCombo();
+  fireEvent.change(dialog.querySelector('input[type="date"]'), { target: { value: '2035-01-03' } });
+  const choice = screen.getByTestId('combo-move-choice');
+  expect(choice).toHaveTextContent('This stop has 2 services (Lawn Care, Pest Control).');
+  expect(within(choice).getByLabelText('Move all of them together')).toBeChecked();
+  await clickSave();
+  await waitFor(() => expect(writes()).toHaveLength(2));
+  expect(writeUrls()).toEqual([
+    'POST /admin/dispatch/fixture-visit/reschedule',
+    'PUT /admin/schedule/fixture-visit/update-details',
+  ]);
+  const move = JSON.parse(writes()[0][1].body);
+  expect(move).toMatchObject({ newDate: '2035-01-03', newWindow: { start: '08:00', end: '09:00' }, deriveWindowFromCurrentVisit: true, notifyCustomer: false });
+  // The edit that follows no longer moves or texts anyone.
+  expect(JSON.parse(writes()[1][1].body).notifyCustomer).toBeUndefined();
+});
+
+it('choosing Separate splits this service off, then saves it on its own', async () => {
+  const dialog = openCombo();
+  fireEvent.change(dialog.querySelector('input[type="date"]'), { target: { value: '2035-01-03' } });
+  fireEvent.click(screen.getByLabelText('Separate: move only this service'));
+  await clickSave();
+  await waitFor(() => expect(writes()).toHaveLength(2));
+  expect(writeUrls()).toEqual([
+    'POST /admin/visits/fixture-stop/split',
+    'PUT /admin/schedule/fixture-visit/update-details',
+  ]);
+  expect(JSON.parse(writes()[0][1].body)).toEqual({ serviceId: 'fixture-visit' });
+});
+
+it('a failed whole-stop move saves nothing else; a failed edit after it says the stop did move, and a retry does not move it twice', async () => {
+  let rescheduleFails = true;
+  let putFails = true;
+  fetch.mockImplementation(async (url, options) => {
+    if (String(url).includes('/reschedule') && rescheduleFails) return { ok: false, status: 409, json: async () => ({ error: 'That window is past the end of the workday' }) };
+    if (String(url).includes('/update-details') && !String(url).includes('/preview') && options?.method === 'PUT' && putFails) {
+      return { ok: false, status: 500, json: async () => ({ error: 'boom' }) };
+    }
+    return okJson(url);
+  });
+  const dialog = openCombo();
+  fireEvent.change(dialog.querySelector('input[type="date"]'), { target: { value: '2035-01-03' } });
+  await clickSave();
+  expect(await screen.findByRole('alert')).toHaveTextContent('Save failed: That window is past the end of the workday');
+  expect(writeUrls()).toEqual(['POST /admin/dispatch/fixture-visit/reschedule']);
+  rescheduleFails = false;
+  await clickSave();
+  await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Both services were moved, but the other changes were not saved.'));
+  putFails = false;
+  await clickSave();
+  await waitFor(() => expect(writes()).toHaveLength(4));
+  expect(writeUrls()[3]).toBe('PUT /admin/schedule/fixture-visit/update-details');
+  // Two reschedule calls in all (one refused, one committed) — never a third.
+  expect(writeUrls().filter((u) => u.includes('/reschedule'))).toHaveLength(2);
+});
+

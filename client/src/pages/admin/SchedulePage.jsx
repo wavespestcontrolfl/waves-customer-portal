@@ -2166,6 +2166,35 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   ].join("|");
   const openedSlotKey = useRef(slotKey).current;
   const slotEdited = slotKey !== openedSlotKey;
+  // A stop shared by two or more services (lawn + pest). update-details
+  // writes ONE row, so the server refuses a date/time change on it; the
+  // operator chooses here, and the save runs that choice through the action
+  // that already does it — the schedule's whole-stop move, or Separate —
+  // before the rest of the edit (owner ruling 2026-10-03: a combo can be
+  // moved together or separated from this form). No `visit` on the payload
+  // = not known to be a combo = today's behavior, server guard included.
+  const comboVisit = service.visit && service.visit.id && Number(service.visit.serviceCount) > 1 ? service.visit : null;
+  const [comboMove, setComboMove] = useState("together");
+  // What this modal already did, so a retried save never moves or splits twice.
+  const comboDoneRef = useRef({ movedTo: null, separated: false });
+  const comboOpened = useRef({
+    date: form.scheduledDate,
+    start: String(form.windowStart || "").slice(0, 5),
+    end: String(form.windowEnd || "").slice(0, 5),
+    duration: slotCheckDuration,
+  }).current;
+  const comboStart = String(form.windowStart || "").slice(0, 5);
+  const comboEnd = String(form.windowEnd || "").slice(0, 5);
+  const comboPlaceChanged = form.scheduledDate !== comboOpened.date || comboStart !== comboOpened.start;
+  const spanOf = (start, end) => {
+    const [h1, m1] = String(start).split(":").map(Number);
+    const [h2, m2] = String(end).split(":").map(Number);
+    return [h1, m1, h2, m2].every(Number.isFinite) ? h2 * 60 + m2 - (h1 * 60 + m1) : null;
+  };
+  // The whole-stop move keeps every service's own length.
+  const comboLengthChanged = slotCheckDuration !== comboOpened.duration
+    || spanOf(comboStart, comboEnd) !== spanOf(comboOpened.start, comboOpened.end);
+  const comboSlotChanged = !!comboVisit && !comboDoneRef.current.separated && (comboPlaceChanged || comboLengthChanged);
   // A VERIFIED miss only (never "could not check"): Save stays enabled —
   // the strip is advisory — but says what it is about to do.
   const routeMissVerdict = slotEdited && availabilityVerdict(availability, stripCurrent)?.tone === "miss";
@@ -3439,6 +3468,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         }
       }
     }
+    let comboMovedThisSave = false;
+    let comboMoveWarnings = [];
     try {
       // Only manage add-on lines when there are any to send (or any existed
       // originally, so removals persist). Otherwise keep the legacy payload.
@@ -3450,15 +3481,49 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       // convention by the field's presence, never by guessing from the number.
       const primaryLinePriceValue = parseFinitePrice(form.price) ?? undefined;
       const notifyOnMove = scheduleMoved && notificationType === "sms";
+      // A combo's date/time change runs first, through the action that owns
+      // it; the PUT below then carries the row's (now current) slot and
+      // saves everything else.
+      if (comboSlotChanged && comboMove === "separate") {
+        await adminFetch(`/admin/visits/${comboVisit.id}/split`, {
+          method: "POST", body: JSON.stringify({ serviceId: service.id }),
+        });
+        comboDoneRef.current.separated = true;
+      } else if (comboSlotChanged) {
+        if (comboLengthChanged) {
+          throw new Error("Moving both services keeps each one's length. Save the move first, or choose Separate to change this service's length.");
+        }
+        const moveKey = `${form.scheduledDate}|${comboStart}`;
+        if (comboDoneRef.current.movedTo !== moveKey) {
+          const moved = await adminFetch(`/admin/dispatch/${service.id}/reschedule`, {
+            method: "POST",
+            body: JSON.stringify({
+              newDate: form.scheduledDate,
+              ...(comboStart ? { newWindow: { start: comboStart, end: comboEnd || undefined }, deriveWindowFromCurrentVisit: true } : {}),
+              notifyCustomer: notifyOnMove,
+              ...seriesAckPayload(seriesPreview.preview),
+            }),
+          });
+          comboDoneRef.current.movedTo = moveKey;
+          comboMovedThisSave = true;
+          if (Array.isArray(moved?.warnings) && moved.warnings.length) comboMoveWarnings = moved.warnings;
+          if (notifyOnMove && moved?.notificationSent === false) {
+            comboMoveWarnings = [...comboMoveWarnings, `The customer was not texted about the move: ${moved.notificationError || "the text could not be sent"}.`];
+          }
+        }
+      }
+      const comboMovedByUnit = !!comboVisit && comboDoneRef.current.movedTo === `${form.scheduledDate}|${comboStart}`;
       const result = await adminFetch(`/admin/schedule/${service.id}/update-details`, {
         method: "PUT",
         body: JSON.stringify({
           ...form,
           ...(selectedPropertyId ? { propertyId: selectedPropertyId } : {}),
-          notifyCustomer: notifyOnMove || undefined,
+          // The whole-stop move above already texted and already carried
+          // the collective-move ack; this PUT no longer moves anything.
+          notifyCustomer: (!comboMovedByUnit && notifyOnMove) || undefined,
           // Collective-move ack — bound to the previewed occurrence set the
           // modal showed (empty when this save is not a collective move).
-          ...seriesAckPayload(seriesPreview.preview),
+          ...(comboMovedByUnit ? {} : seriesAckPayload(seriesPreview.preview)),
           // Sent unconditionally (see primaryLinePriceValue's own comment) —
           // NOT only when sendAddons — so the server can tell this payload's
           // gross-Price convention apart from MobileServiceEditModal's net
@@ -3591,8 +3656,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       // Advisory schedule-overlap notes: the save COMMITTED (conflicts no
       // longer block admin edits) — tell the operator what now stacks so
       // the double-booking is a choice, not a surprise.
-      if (Array.isArray(result?.warnings) && result.warnings.length) {
-        showScheduleSaveNotice(`Appointment saved.\n\n${result.warnings.join("\n\n")}`);
+      if (comboMoveWarnings.length || (Array.isArray(result?.warnings) && result.warnings.length)) {
+        showScheduleSaveNotice(`Appointment saved.\n\n${[...comboMoveWarnings, ...(result?.warnings || [])].join("\n\n")}`);
       }
       // A 'following' scope rewrites visits the operator can't see from this
       // modal — report what actually moved rather than closing silently.
@@ -3771,7 +3836,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         // field. Invalidate it and re-run the dry-run now.
         setPreviewNonce((n) => n + 1);
       } else {
-        setSaveError("Save failed: " + e.message);
+        // The stop already moved (its own committed action); say so, so the
+        // operator fixes the rest instead of re-doing the move.
+        setSaveError(`${comboMovedThisSave ? "Both services were moved, but the other changes were not saved. " : ""}Save failed: ${e.message}`);
       }
     }
     savingRef.current = false;
@@ -5849,6 +5916,27 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   />{" "}
                 </div>{" "}
               </div>{" "}
+              {comboSlotChanged && (
+                <div
+                  role="group"
+                  aria-label="How to move this stop"
+                  data-testid="combo-move-choice"
+                  style={{ marginTop: -2, marginBottom: 14, padding: "10px 12px", borderRadius: 6, background: "#F4F4F5", color: "#18181B", fontSize: 14, lineHeight: 1.5 }}
+                >
+                  <div style={{ fontWeight: 600 }}>
+                    This stop has {comboVisit.serviceCount} services
+                    {Array.isArray(comboVisit.serviceTypes) && comboVisit.serviceTypes.length ? ` (${comboVisit.serviceTypes.join(", ")})` : ""}.
+                  </div>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, minHeight: 44, cursor: "pointer" }}>
+                    <input type="radio" name="combo-move" checked={comboMove === "together"} onChange={() => setComboMove("together")} />
+                    Move all of them together
+                  </label>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, minHeight: 44, cursor: "pointer" }}>
+                    <input type="radio" name="combo-move" checked={comboMove === "separate"} onChange={() => setComboMove("separate")} />
+                    Separate: move only this service
+                  </label>
+                </div>
+              )}
               <SeriesMoveNotice
                 tone="inline"
                 preview={seriesPreview.preview}
