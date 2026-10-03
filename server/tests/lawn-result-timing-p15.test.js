@@ -167,7 +167,12 @@ describe('lawnResultTimingViolation: a closed world on durations', () => {
     'We will recheck at your next visit.',
     'The lawn has been browning for three days.',
     'Three weeks of dry weather stressed the lawn before our visit.',
-  ])('past windows, history and "next visit" pass: %s', (text) => {
+    'The lawn looked stressed during the seven days leading up to this visit.',
+    'Rainfall during the seven days leading up to this visit was about an inch.',
+    'Water twice a week on your assigned days.',
+    'Hold irrigation until Thursday so the treatment can settle.',
+    'Wait two days before mowing the treated areas.',
+  ])('past windows, history, the care plan and "next visit" pass: %s', (text) => {
     expect(lawnResultTimingViolation(text)).toBe(false);
   });
 });

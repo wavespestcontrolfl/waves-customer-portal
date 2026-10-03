@@ -354,7 +354,7 @@ const DURATION_PHRASE_RE = new RegExp(
 // the number-free words the lawn prompts name. "today", "peak season" and
 // "next visit" pass.
 const LAWN_TIME_UNIT_RE = /\b(?:hours?|days?|weeks?|weekends?|fortnights?|months?|years?)\b/gi;
-const PAST_AFTER_RE = /^\s+(?:before|ago|earlier|prior)\b/i;
+const PAST_AFTER_RE = /^\s+(?:before|ago|earlier|prior|leading\s+up\s+to)\b/i;
 // "the last two weeks" is history; the verb "last" ("will last weeks") is not,
 // so "last" counts only after a determiner.
 const PAST_BEFORE_RE = /(?:\b(?:the|these|those)\s+(?:last|past|previous|prior|preceding)|\b(?:past|previous|preceding))\s+(?:\S+\s+){0,3}$/i;
@@ -371,13 +371,19 @@ const LAWN_NAMED_TIMING_RE = /\bover\s+time\b|\b(?:soon|shortly|eventually|later
 // sentence with a future word still fails on any duration.
 const LAWN_PAST_SENTENCE_RE = /\b(?:has|have|had)\s+been\b|\b(?:was|were|did|ago)\b|\bbefore\s+(?:our|the|this|today'?s)\s+(?:visit|service|treatment)\b/i;
 const LAWN_FUTURE_WORD_RE = /\b(?:will|should|may|might|can|could|would|expect\w*|going\s+to|begin\w*|start\w*|continue\w*|keep\w*|until|soon)\b|'ll\b/i;
+// Watering, irrigation, mowing and rainfall sentences are out of scope: the
+// lawn prompt has the writer preserve the approved watering plan's own timing
+// and name the supplied rainfall window, and rejecting those would fail
+// correct drafts. A backstop errs toward accepting.
+const LAWN_CARE_PLAN_SENTENCE_RE = /water|irrigat|sprinkl|\bmow|\brain/i;
 function lawnResultTimingViolation(text) {
   const copy = String(text || '');
-  if (TIMEFRAME_RE.test(copy) || LAWN_NAMED_TIMING_RE.test(copy) || LAWN_BY_NEXT_VISIT_RE.test(copy)
-    || LAWN_WEEKDAY_RE.test(copy) || LAWN_MONTH_DAY_RE.test(copy) || LAWN_NUMERIC_DATE_RE.test(copy)) return true;
   for (const sentence of copy.split(/(?<=[.!?])\s+|\n+/)) {
+    if (LAWN_CARE_PLAN_SENTENCE_RE.test(sentence)) continue;
+    if (TIMEFRAME_RE.test(sentence) || LAWN_NAMED_TIMING_RE.test(sentence) || LAWN_BY_NEXT_VISIT_RE.test(sentence)
+      || LAWN_WEEKDAY_RE.test(sentence) || LAWN_MONTH_DAY_RE.test(sentence) || LAWN_NUMERIC_DATE_RE.test(sentence)) return true;
     for (const m of sentence.matchAll(LAWN_TIME_UNIT_RE)) {
-      const after = sentence.slice(m.index + m[0].length, m.index + m[0].length + 20);
+      const after = sentence.slice(m.index + m[0].length, m.index + m[0].length + 24);
       const before = sentence.slice(Math.max(0, m.index - 30), m.index);
       if (PAST_AFTER_RE.test(after) || PAST_BEFORE_RE.test(before)) continue;
       // History is judged on the duration's own clause: "was applied, and
