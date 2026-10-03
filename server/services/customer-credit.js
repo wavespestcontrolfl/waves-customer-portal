@@ -795,6 +795,7 @@ async function reverseCreditAndStampPayer({ invoiceId, payerId, poNumber = null,
 }
 
 module.exports = {
+  afterCommit,
   customerAutoApplyEnabled,
   VALID_SOURCES,
   CREDIT_DISPLAY_TYPE_BY_SOURCE,

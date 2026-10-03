@@ -17587,14 +17587,15 @@ router.post('/:id/prepaid', async (req, res, next) => {
     // same message. Not dead code: the lock cannot hold across the receipt mint
     // (it takes its own locks and may call out), and a sibling mint never looks
     // at the marker.
-    // KNOWN LIMIT (marker first, sibling's dues mint after, no receipt request):
-    // nothing re-checks after the marker commits. The prepaid plan visit mints no
-    // invoice of its own at completion (its prepaid amount covers the dues amount),
-    // and the sibling's completion mints the month's stamped dues invoice, since
-    // the marker is on a visit, not on the ledger. The month is billed ONCE (no
-    // second invoice), but the cash recorded on the prepaid visit is not applied to
-    // that invoice, which can keep dunning: the office applies the payment to it.
-    // Making the sibling's mint see a prepaid plan visit would be new money logic.
+    // MARKER FIRST, a sibling's dues mint after (no receipt request): nothing
+    // re-checks here, and billing is deliberately left as it is. The prepaid plan
+    // visit mints no invoice of its own at completion (its prepaid amount covers
+    // the dues amount) and the sibling's completion mints the month's stamped dues
+    // invoice, so the month is billed ONCE but the cash on the visit is not
+    // applied to it. The MINT raises one office alert per (dues invoice, visit)
+    // asking a person to apply that cash (alertPrepaidVisitsToApplyToDuesInvoice
+    // in invoice.js, after the mint commits); no payment row or invoice change is
+    // made automatically.
     if (receipt && receipt.reason === 'membership_dues_covered') {
       await db('scheduled_services')
         .where({ id: req.params.id, prepaid_at: updated[0].prepaid_at })

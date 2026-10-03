@@ -1441,7 +1441,7 @@ postgres('membership dues — prepaid marker, refund alert, payer, merge, copy (
     } finally { if (restore) restore(); await cleanup(f); }
   });
 
-  test('marker first, then a sibling dues mint (reverse order, no receipt): the month is billed once; the prepaid visit mints no invoice of its own and its cash stays on the visit (stated limit)', async () => {
+  test('marker first, then a sibling dues mint (reverse order, no receipt): the month is billed once; the prepaid visit mints no invoice of its own and its cash stays on the visit and ONE office alert asks a person to apply it', async () => {
     const f = await seedMember();
     try {
       const marked = await seedVisit(f, { label: 'Lawn Care' });
@@ -1452,6 +1452,69 @@ postgres('membership dues — prepaid marker, refund alert, payer, merge, copy (
       expect(live.map((r) => r.id)).toEqual([sibling.invoice.id]); // billed once, nothing double-billed
       expect(Number(await prepaidOf(marked))).toBe(49); // the cash is on the visit, not applied to the sibling's invoice
       expect(sibling.invoice.status).not.toBe('paid');
+      expect(await prepaidAlerts(sibling.invoice.id)).toHaveLength(1);
+    } finally { await cleanup(f); }
+  });
+
+  // ── Owner ruling: a prepaid marker written BEFORE the dues invoice -> one office alert ──
+  async function prepaidAlerts(invoiceId, waitForFirst = true) {
+    const find = () => mockPg('notifications').whereRaw('metadata::text LIKE ?', [`%dues_prepaid_unapplied:${invoiceId}:%`]);
+    for (let i = 0; waitForFirst && i < 40 && !(await find()).length; i += 1) await new Promise((r) => setTimeout(r, 100));
+    return find();
+  }
+  const mark = (id, over = {}) => mockPg('scheduled_services').where({ id })
+    .update({ prepaid_amount: 49, prepaid_method: 'cash', prepaid_at: new Date(), ...over });
+
+  test('marker first, a sibling\'s dues invoice minted later raises ONE needs-you alert naming the dues invoice and the prepaid visit; nothing is billed or paid automatically', async () => {
+    const f = await seedMember();
+    try {
+      const marked = await seedVisit(f, { label: 'Lawn Care' });
+      await mark(marked);
+      const a = await mintDues(f, 'Pest Control');
+      const rows = await prepaidAlerts(a.invoice.id);
+      expect(rows).toHaveLength(1);
+      expect(JSON.stringify(rows[0])).toContain(marked);
+      expect(JSON.stringify(rows[0])).toContain(a.invoice.invoice_number);
+      expect(rows[0].metadata?.severity ?? JSON.parse(rows[0].metadata).severity).toBe('needs-you');
+      expect(await mockPg('payments').where({ customer_id: f.customerId })).toHaveLength(0);
+      expect((await mockPg('invoices').where({ id: a.invoice.id }).first()).status).not.toBe('paid');
+      expect(await mockPg('invoices').where({ customer_id: f.customerId })).toHaveLength(1);
+    } finally { await cleanup(f); }
+  });
+
+  test('no alert for a marker whose cash already has its own payment row, a zero marker, annual coverage, a cancelled visit, or no marker at all; the one real marker still alerts', async () => {
+    const f = await seedMember();
+    try {
+      const withReceipt = await seedVisit(f, { label: 'Lawn Care' });
+      await mark(withReceipt);
+      await mockPg('payments').insert({ customer_id: f.customerId, amount: 49, status: 'paid', description: 'Prepaid at visit',
+        payment_date: etDateString(), metadata: JSON.stringify({ scheduled_service_id: withReceipt, source: 'scheduled_service_prepaid', method: 'cash' }) });
+      const zero = await seedVisit(f, { label: 'Mosquito' });
+      await mark(zero, { prepaid_amount: 0 });
+      const annual = await seedVisit(f, { label: 'Termite' });
+      await mark(annual, { prepaid_method: 'annual_prepay_invoice' });
+      const cancelled = await seedVisit(f, { label: 'Rodent' });
+      await mark(cancelled);
+      await mockPg('scheduled_services').where({ id: cancelled }).update({ status: 'cancelled' });
+      await seedVisit(f, { label: 'No marker' });
+      const real = await seedVisit(f, { label: 'Real marker' });
+      await mark(real);
+      const a = await mintDues(f, 'Pest Control');
+      const rows = await prepaidAlerts(a.invoice.id);
+      expect(rows).toHaveLength(1);
+      const text = JSON.stringify(rows[0]);
+      expect(text).toContain(real);
+      for (const other of [withReceipt, zero, annual, cancelled]) expect(text).not.toContain(other);
+    } finally { await cleanup(f); }
+  });
+
+  test('no marker anywhere: minting the month\'s dues invoice raises no prepaid alert', async () => {
+    const f = await seedMember();
+    try {
+      await seedVisit(f, { label: 'Lawn Care' });
+      const a = await mintDues(f, 'Pest Control');
+      await new Promise((r) => setTimeout(r, 800));
+      expect(await prepaidAlerts(a.invoice.id, false)).toHaveLength(0);
     } finally { await cleanup(f); }
   });
 

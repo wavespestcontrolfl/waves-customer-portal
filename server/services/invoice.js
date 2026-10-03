@@ -2211,6 +2211,85 @@ async function alertIfMembershipDuesCoverageReleased(invoiceRow, { releasedBy = 
   }
 }
 
+// MARKER FIRST, DUES INVOICE LATER. A manual prepaid marker (cash / Zelle on a
+// plan visit) lives on the VISIT, not the payment ledger: a sibling visit's
+// stamped dues invoice minted afterwards bills the month and never sees it, so
+// the cash sits beside an open invoice that asks for it again. Billing is left
+// as it is (owner ruling: no new money logic); one office alert per (dues
+// invoice, visit) asks a person to apply the cash to that invoice. Raised from
+// the mint side after the mint commits, so it covers every writer of the marker
+// (single visit, series, bulk) that wrote it BEFORE the mint. A marker written
+// AFTER the mint is refused by the single-visit POST (recordPrepaidUnderDuesLock);
+// the series and bulk writers do not check that and raise nothing (stated limit).
+// The receipt-mint undo needs no call: it removes the marker it wrote.
+//
+// Selection (pure, unit-tested): a positive manual prepaid amount, not annual
+// coverage, not a cancelled / skipped visit, not the dues invoice's own visit
+// (its prepaid credit applies at completion); the SQL narrows it further to
+// visits with no live invoice of their own and no payment row recording the cash.
+const PREPAID_ALERT_REFUSED_STATUSES = ["cancelled", "canceled", "no_show", "skipped"];
+function prepaidVisitsToApplyToDuesInvoice(candidates, { ownVisitId = null } = {}) {
+  const { hasAnnualCoverage } = require("./prepaid-series");
+  return (candidates || []).filter((v) => v
+    && Number(v.prepaid_amount) >= 0.01
+    && !hasAnnualCoverage(v)
+    && !PREPAID_ALERT_REFUSED_STATUSES.includes(String(v.status || "").toLowerCase())
+    && String(v.id) !== String(ownVisitId || ""));
+}
+function composePrepaidDuesAlertSpec({ customerName, monthName, amount, invoiceId, customerId }) {
+  const { fitAction } = require("./admin-alert-names");
+  const dollars = `$${Number(amount).toFixed(2)}`;
+  return {
+    area: "Billing",
+    action: fitAction("Billing", customerName || "the customer", [
+      (who) => `apply ${who}'s prepaid cash to dues`,
+      (who) => `apply ${who}'s prepayment`,
+    ]),
+    why: `${dollars} was prepaid on a ${monthName} visit, but the ${monthName} dues invoice still asks for it.`,
+    severity: "needs-you",
+    link: `/admin/customers?customerId=${customerId}`,
+    subject: { type: "invoice", id: String(invoiceId) },
+    doneWhen: "prepaid_applied",
+    who: "person",
+  };
+}
+async function alertPrepaidVisitsToApplyToDuesInvoice(invoiceRow) {
+  const month = invoiceRow ? membershipDuesStampMonth(invoiceRow.line_items) : null;
+  if (!month || !invoiceRow.customer_id) return;
+  try {
+    const candidates = await db("scheduled_services as s")
+      .where({ "s.customer_id": invoiceRow.customer_id })
+      .whereRaw("to_char(s.scheduled_date, 'YYYY-MM') = ?", [month])
+      .where("s.prepaid_amount", ">", 0)
+      .whereNotIn("s.status", PREPAID_ALERT_REFUSED_STATUSES)
+      .whereNotExists(db("invoices as i")
+        .whereRaw("i.scheduled_service_id = s.id")
+        .whereRaw("i.status NOT IN ('void', 'refunded', 'canceled', 'cancelled')"))
+      .whereNotExists(db("payments as p")
+        .whereRaw("p.metadata::jsonb ->> 'scheduled_service_id' = s.id::text")
+        .whereIn("p.status", ["paid", "processing"]))
+      .select("s.id", "s.status", "s.prepaid_amount", "s.prepaid_method", "s.annual_prepay_term_id");
+    const visits = prepaidVisitsToApplyToDuesInvoice(candidates, { ownVisitId: invoiceRow.scheduled_service_id });
+    if (!visits.length) return;
+    const { raiseAdminAlert } = require("./admin-alert-compose");
+    const customer = await db("customers").where({ id: invoiceRow.customer_id }).first("first_name", "last_name");
+    const customerName = `${customer?.first_name || ""} ${customer?.last_name || ""}`.trim();
+    const [y, m] = month.split("-").map(Number);
+    const monthName = new Date(Date.UTC(y, (m || 1) - 1, 1)).toLocaleString("en-US", { month: "long", timeZone: "UTC" });
+    for (const v of visits) {
+      await raiseAdminAlert("billing", composePrepaidDuesAlertSpec({
+        customerName, monthName, amount: v.prepaid_amount, invoiceId: invoiceRow.id, customerId: invoiceRow.customer_id,
+      }), {
+        detail: `Invoice ${invoiceRow.invoice_number || invoiceRow.id} is the ${month} membership dues invoice. Visit ${v.id} has $${Number(v.prepaid_amount).toFixed(2)} recorded as prepaid (${v.prepaid_method || "method not recorded"}) with no invoice or payment of its own recording that cash. Apply that payment to invoice ${invoiceRow.invoice_number || invoiceRow.id}; nothing was applied automatically.`,
+        bell: true,
+        dedupeKey: `dues_prepaid_unapplied:${invoiceRow.id}:${v.id}`,
+      });
+    }
+  } catch (err) {
+    logger.warn(`[invoice] prepaid-vs-dues alert failed for invoice ${invoiceRow.id}: ${err.message}`);
+  }
+}
+
 async function buildScheduledServiceInvoiceLines(
   scheduledServiceId,
   {
@@ -5992,6 +6071,11 @@ const InvoiceService = {
     // Not a column — the effective deposit credit rides back to the caller
     // so the ledger consume matches what the invoice actually absorbed.
     invoice.applied_deposit_credit = appliedDepositCredit;
+    // A stamped dues invoice that just committed: any manual prepaid marker the
+    // month's other visits already carry needs a person to apply the cash to it.
+    if (trustedMembershipDues && membershipDuesStampMonth(invoice.line_items)) {
+      require("./customer-credit").afterCommit(database, () => alertPrepaidVisitsToApplyToDuesInvoice(invoice));
+    }
     return invoice;
   },
 
@@ -13225,6 +13309,7 @@ InvoiceService.lineIsBaseApplication = lineIsBaseApplication;
 // Shared with the scheduled-invoice mint helper (Charge now's pre-mint).
 InvoiceService.stampMembershipDuesUnderLock = stampMembershipDuesUnderLock;
 InvoiceService.membershipDuesStampMonth = membershipDuesStampMonth;
+InvoiceService._prepaidDuesAlert = { prepaidVisitsToApplyToDuesInvoice, composePrepaidDuesAlertSpec };
 // Post-commit "rebill the month" alert, also raised by the full-refund transition (customer-credit).
 InvoiceService.alertIfMembershipDuesCoverageReleased = alertIfMembershipDuesCoverageReleased;
 

@@ -60,3 +60,39 @@ describe('stampMembershipDuesUnderLock — the locked visit must still belong to
     expect(mockChain.mock.calls.at(-1)[1].visitColumns).toContain('customer_id');
   });
 });
+
+// A manual prepaid marker on another plan visit of the month, written BEFORE the
+// dues invoice was minted, needs a person to apply the cash to that invoice.
+// The pure selection rule and the alert copy (rules of docs/admin-notifications.md).
+describe('prepaid marker vs a newly minted dues invoice — selection and copy', () => {
+  const { prepaidVisitsToApplyToDuesInvoice, composePrepaidDuesAlertSpec } = InvoiceService._prepaidDuesAlert;
+  const visit = (over = {}) => ({ id: 'v1', status: 'confirmed', prepaid_amount: 49, prepaid_method: 'cash', annual_prepay_term_id: null, ...over });
+
+  test('a positive manual prepayment on a live or completed plan visit is selected', () => {
+    expect(prepaidVisitsToApplyToDuesInvoice([visit(), visit({ id: 'v2', status: 'completed', prepaid_method: 'zelle' })]).map((v) => v.id)).toEqual(['v1', 'v2']);
+  });
+
+  test('amount 0 or missing, annual coverage (term link or annual method), cancelled / skipped visits and the dues invoice\'s own visit are not', () => {
+    const out = prepaidVisitsToApplyToDuesInvoice([
+      visit({ id: 'zero', prepaid_amount: 0 }),
+      visit({ id: 'none', prepaid_amount: null }),
+      visit({ id: 'annual-term', annual_prepay_term_id: 'term-1' }),
+      visit({ id: 'annual-method', prepaid_method: 'annual_prepay_invoice' }),
+      visit({ id: 'cancelled', status: 'cancelled' }),
+      visit({ id: 'skipped', status: 'skipped' }),
+      visit({ id: 'own' }),
+      visit({ id: 'ok' }),
+    ], { ownVisitId: 'own' });
+    expect(out.map((v) => v.id)).toEqual(['ok']);
+  });
+
+  test('the alert copy satisfies the notification rules for the longest month and a large amount; the amount rides the why, the invoice is the subject', () => {
+    const { composeAdminAlert } = require('../services/admin-alert-compose');
+    const spec = composePrepaidDuesAlertSpec({ customerName: 'Fixture DuesMember', monthName: 'September', amount: 1234.5, invoiceId: 'inv-1', customerId: 'cust-1' });
+    const composed = composeAdminAlert(spec);
+    expect(composed.why).toContain('$1234.50');
+    expect(composed.headline.length).toBeLessThanOrEqual(60);
+    expect(composed.metadata.subject).toEqual({ type: 'invoice', id: 'inv-1' });
+    expect(composed.metadata.severity).toBe('needs-you');
+  });
+});
