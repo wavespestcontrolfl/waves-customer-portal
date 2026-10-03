@@ -54,6 +54,7 @@ const { buildPublicLawnReport } = require('../routes/public-lawn-diagnostic');
 const { overallStatusLabel } = require('../utils/public-report-egress');
 const { storeFunnelPhotos } = require('../utils/funnel-photos');
 const { etParts } = require('../utils/datetime-et');
+const { gateEnvValue } = require('../config/feature-gates');
 
 let PhotoService;
 try { PhotoService = require('./photos'); } catch { PhotoService = null; }
@@ -212,7 +213,7 @@ const TYPES = {
     listFields: (row) => pestListFields(row),
     techView: (row, contract) => pestTechView(row, contract),
     customerPreview: (row) => buildPublicPestReport(row),
-    analyze: (photos, prospectNote) => runPestAnalysis(photos, prospectNote),
+    analyze: (photos, prospectNote, source) => runPestAnalysis(photos, prospectNote, source),
   },
   tree_shrub: {
     table: 'tree_shrub_identifications',
@@ -383,7 +384,35 @@ async function runLawnAnalysis(photos, prospectNote, source) {
   };
 }
 
-async function runPestAnalysis(photos, prospectNote) {
+// Texted photos (source 'auto_triage', the SMS photo-triage lane) read with the SAME
+// engine the customer app uses — v2, one Gemini read (owner 2026-10-01 for the app;
+// extended to texted pest photos 2026-10-03) — while GATE_PHOTO_ID_V2 is on. The
+// stored row keeps the v1 shape every consumer reads: the engine's own v1-mapped
+// pest_id_v1 report_contract (its unsure tier rides as `contested`), with the v2
+// object under a `v2` key exactly as routes/photo-id.js stores it. Staff-created
+// assessments keep the full v1 ladder. A v2 failure is the same error v1 returns —
+// never a silent v1 fallback (that would double the paid-vision spend).
+async function runPestAnalysisV2(photos, prospectNote) {
+  const { identifyPestV2 } = require('./photo-id-v2/pest-engine');
+  const v2Result = await identifyPestV2(photos, { ladder: 'gemini_only' });
+  if (!v2Result.ok) return { error: 'Photo analysis is unavailable right now — try again in a few minutes.' };
+  const contract = v2Result.v1.report_contract;
+  return {
+    insert: {
+      // `internal` (which models answered) stays in this admin/debug column only
+      ai_analysis: JSON.stringify({ prospect_note: prospectNote, engine: 'v2', internal: v2Result.internal }),
+      report_contract: JSON.stringify({ ...contract, v2: v2Result.v2 }),
+      category: contract.identification.category,
+      species_slug: contract.identification.slug,
+      service_line: contract.service.line,
+      urgency: contract.urgency,
+      ai_summary: (contract.observations || []).join(' ').slice(0, 2000) || null,
+    },
+  };
+}
+
+async function runPestAnalysis(photos, prospectNote, source) {
+  if (source === 'auto_triage' && gateEnvValue('GATE_PHOTO_ID_V2')) return runPestAnalysisV2(photos, prospectNote);
   const result = await identifyPest(photos);
   if (!result.ok) return { error: 'Photo analysis is unavailable right now — try again in a few minutes.' };
   const contract = buildPestReportContract(result);
@@ -732,6 +761,7 @@ module.exports = {
   createAdminAssessment,
   _test: {
     normalizePhotos,
+    runPestAnalysis,
     runTreeShrubAnalysis,
     worstTreeShrubSignal,
     headlineTreeShrubPhoto,
