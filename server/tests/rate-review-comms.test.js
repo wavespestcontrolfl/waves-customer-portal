@@ -888,6 +888,21 @@ describe('customer surfaces', () => {
     expect((await comms.sendPreview(BATCH_KEY, { now: later })).counts.letters).toBe(1);
   });
 
+  test('send: the whole letter is claimed in ONE transaction — a failure part-way through the claim leaves no line sending', async () => {
+    const second = draft(2, { customer_id: CUSTOMER(1), rate_review_row_id: ROW(2), family_key: 'lawn_care', effective_date: '2026-12-20', noticed_current_cents: 6100, noticed_new_cents: 6400, current_amount_cents: 6100, new_amount_cents: 6400 });
+    const b = book({ notices: [draft(1), second] });
+    b.rate_review_snapshots[0].customer_id = CUSTOMER(1);
+    mockDb.reset(b);
+    const digest = await previewDigest();
+    const lockNoticeEvent = jest.spyOn(PriceChangeNotices, 'lockNoticeEvent');
+    lockNoticeEvent.mockImplementationOnce(async () => {}).mockImplementationOnce(async () => { throw new Error('second claim exploded'); });
+    const res = await comms.sendBatch(BATCH_KEY, { expectedDigest: digest, now: NOW });
+    lockNoticeEvent.mockRestore();
+    expect(res).toMatchObject({ sent: 0, failed: 1 });
+    expect(notices().map((n) => n.status)).toEqual(['draft', 'draft']); // the first line's claim rolled back with it
+    expect(emailLeg).not.toHaveBeenCalled();
+  });
+
   test('send: an exception AFTER a provider call parks the letter as send_uncertain with its words', async () => {
     mockDb.reset(book());
     const digest = await previewDigest();
@@ -1277,6 +1292,34 @@ describe('customer surfaces', () => {
       await comms.handleEmailDeliveryEvent(mockDb, message(), bounce());
       expect(mockDb.store.annual_prepay_terms[0].next_term_prepay_amount).toBeNull();
       expect(meta().prepay_unstaged).toBe(true);
+    });
+
+    test('an email of UNKNOWN outcome next to a text that later fails parks the letter as send_uncertain (it may have arrived), never a clean draft', async () => {
+      mockDb.reset(book());
+      emailLeg.mockResolvedValue({ sent: false, attempted: true }); // timed out: ambiguous
+      smsLeg.mockResolvedValue({ sent: true, attempted: true, sid: 'SM1' });
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      expect(notices()[0]).toMatchObject({ status: 'sent', sms_sent: true });
+      expect(meta().uncertain_channels).toEqual({ email: true });
+      mockDb.store.sms_log = [{ twilio_sid: 'SM1', customer_id: CUSTOMER(1) }];
+      await comms.handleSmsDeliveryFailure({ sid: 'SM1', status: 'undelivered' }, { dbh: mockDb });
+      expect(notices()[0]).toMatchObject({ status: 'send_uncertain', sent_at: null });
+      expect(meta().delivery_revoked).toMatchObject({ channel: 'sms' });
+      expect(comms.publicReview(notices()[0]).lines).toBeTruthy(); // the link the email may carry still works
+      expect(JSON.parse(snapshots()[0].flags || '[]')).not.toContain('delivery_bounced');
+    });
+
+    test('the same when the text fails before the stamp: parked uncertain, not draft', async () => {
+      mockDb.reset(book());
+      emailLeg.mockResolvedValue({ sent: false, attempted: true });
+      mockDb.store.sms_log = [];
+      smsLeg.mockImplementation(async () => {
+        await comms.handleSmsDeliveryFailure({ sid: 'SM1', status: 'undelivered' }, { dbh: mockDb });
+        return { sent: true, attempted: true, sid: 'SM1' };
+      });
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      expect(notices()[0].status).toBe('send_uncertain');
+      expect(meta().pending_letter).toBeTruthy();
     });
 
     test('a rate already written (non-prepaid) cannot be un-written: recorded and flagged for a hand check, not re-sent', async () => {

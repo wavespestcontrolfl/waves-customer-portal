@@ -665,32 +665,34 @@ function noSendAttemptMeta(lines) {
   return { send_attempts: Math.max(0, ...lines.map((l) => Number(parseJson(l.notice.metadata, {}).send_attempts) || 0)) + 1 };
 }
 
+class ClaimLost extends Error {}
+
+// ALL of a letter's lines are claimed in ONE transaction (the customer-comms fence
+// first, then the shared notice-event lock per line, the same order as before): a
+// line that cannot be claimed, or any error part-way, rolls the whole claim back, so
+// nothing is ever left half 'sending'. The fence is not held through the provider
+// call — the SMS sender takes the same fence on its own connection.
 async function claimLines(dbh, entry) {
-  const lines = entry.lines;
-  const claimed = [];
-  for (const l of lines) {
-    // Under the shared notice-event lock (price-change-notices.js
-    // lockNoticeEvent — the legacy batch and the scheduler take it too).
-    // ...and the customer-comms fence (merge / merge-undo repoint notices
-    // under it): the claim only lands while the notice still belongs to the
-    // customer this letter was built for. Not held through the provider
-    // call — the SMS sender takes the same fence on its own connection.
-    const n = await dbh.transaction(async (trx) => {
+  try {
+    return await dbh.transaction(async (trx) => {
       await lockCustomerComms(trx, entry.customerId);
-      await PriceChangeNotices.lockNoticeEvent(trx, { customerId: l.notice.customer_id, effectiveDate: l.effectiveDate, currentCents: l.notice.current_amount_cents, newCents: l.notice.new_amount_cents });
-      return trx('price_change_notices')
-        .where({ id: l.noticeId, customer_id: entry.customerId })
-        .whereNull('sent_at')
-        .whereIn('status', SENDABLE_STATUSES)
-        .update({ status: 'sending', updated_at: new Date() });
+      const claimed = [];
+      for (const l of entry.lines) {
+        await PriceChangeNotices.lockNoticeEvent(trx, { customerId: l.notice.customer_id, effectiveDate: l.effectiveDate, currentCents: l.notice.current_amount_cents, newCents: l.notice.new_amount_cents });
+        const n = await trx('price_change_notices')
+          .where({ id: l.noticeId, customer_id: entry.customerId })
+          .whereNull('sent_at')
+          .whereIn('status', SENDABLE_STATUSES)
+          .update({ status: 'sending', updated_at: new Date() });
+        if (!n) throw new ClaimLost();
+        claimed.push(l.noticeId);
+      }
+      return claimed;
     });
-    if (!n) {
-      if (claimed.length) await dbh('price_change_notices').whereIn('id', claimed).where({ status: 'sending' }).update({ status: 'draft', updated_at: new Date() });
-      return null;
-    }
-    claimed.push(l.noticeId);
+  } catch (err) {
+    if (err instanceof ClaimLost) return null;
+    throw err;
   }
-  return claimed;
 }
 
 function frozenLetter(entry, payload, costBlock) {
@@ -988,17 +990,25 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
       if (smsSidVerdict && !early.sms) early.sms = { event: smsSidVerdict, channel: 'sms', at: sentAt.toISOString(), reason: 'status callback before the stamp' };
       const emailOk = !!email.sent && !early.email;
       const smsOk = !!sms.sent && !early.sms;
-      const base = { ...meta, ...(priorRevoked ? { delivery_revocations: [...(meta.delivery_revocations || []), priorRevoked] } : {}), ...dispatchMeta };
+      // A channel whose outcome is unknown (a timeout, a provider error that may have
+      // delivered) is remembered: it is neither confirmed nor failed.
+      const uncertainChannels = {
+        ...(email.attempted && !email.sent && !email.definiteNonSend && !emailHold ? { email: true } : {}),
+        ...(sms.attempted && !sms.sent && !sms.definiteNonSend && !smsHold ? { sms: true } : {}),
+      };
+      const base = { ...meta, ...(priorRevoked ? { delivery_revocations: [...(meta.delivery_revocations || []), priorRevoked] } : {}), ...dispatchMeta, ...(Object.keys(uncertainChannels).length ? { uncertain_channels: uncertainChannels } : {}) };
       if (!emailOk && !smsOk) {
-        // Every channel that went out failed before the stamp: undelivered, a
-        // sendable draft again, the ranking row flagged for a re-send.
+        // Every confirmed channel failed before the stamp. With an UNKNOWN channel left the
+        // letter may still have arrived: parked as send_uncertain with its words. Otherwise
+        // undelivered: a sendable draft again, the ranking row flagged for a re-send.
         const failure = early.email || early.sms;
+        const parked = Object.keys(uncertainChannels).length > 0;
         await trx('price_change_notices').where({ id: live.id }).update({
-          status: 'draft', sent_at: null, email_sent: false, sms_sent: false, updated_at: sentAt,
-          metadata: JSON.stringify({ ...base, channel_failures: early, delivery_revoked: failure }),
+          status: parked ? UNCERTAIN : 'draft', sent_at: null, email_sent: false, sms_sent: false, updated_at: sentAt,
+          metadata: JSON.stringify({ ...base, channel_failures: early, delivery_revoked: failure, ...(parked ? { pending_letter: frozen } : {}) }),
         });
         const snap = await trx('rate_review_snapshots').where({ notice_id: live.id }).first();
-        if (snap) {
+        if (snap && !parked) {
           const flags = flagList(snap.flags);
           if (!flags.includes(DELIVERY_BOUNCED_FLAG)) flags.push(DELIVERY_BOUNCED_FLAG);
           await trx('rate_review_snapshots').where({ id: snap.id }).update({ flags: JSON.stringify(flags), status: 'approved', updated_at: sentAt });
@@ -1362,7 +1372,13 @@ async function recordChannelFailure(trx, notice, channel, detail) {
   next.delivery_revoked = failure;
   const prepay = live.billing_lane === 'annual_prepay';
   const rateWritten = !!live.applied_at && !prepay;
-  if (!rateWritten) {
+  // A channel of unknown outcome is still out there: not a clean failure.
+  const parked = !rateWritten && Object.keys(meta.uncertain_channels || {}).length > 0;
+  if (parked) {
+    patch.status = UNCERTAIN;
+    patch.sent_at = null;
+    next.pending_letter = { key: meta.letter && meta.letter.key ? meta.letter.key : null, letter: meta.letter || null };
+  } else if (!rateWritten) {
     patch.status = 'draft';
     patch.sent_at = null;
     if (live.applied_at && prepay) {
@@ -1382,7 +1398,7 @@ async function recordChannelFailure(trx, notice, channel, detail) {
   const snap = await trx('rate_review_snapshots').where({ notice_id: live.id }).first();
   if (snap) {
     const flags = flagList(snap.flags);
-    if (!flags.includes(DELIVERY_BOUNCED_FLAG)) flags.push(DELIVERY_BOUNCED_FLAG);
+    if (!parked && !flags.includes(DELIVERY_BOUNCED_FLAG)) flags.push(DELIVERY_BOUNCED_FLAG);
     await trx('rate_review_snapshots').where({ id: snap.id }).update({
       flags: JSON.stringify(flags), ...(rateWritten ? {} : { status: 'approved' }), updated_at: new Date(),
     });
