@@ -1007,7 +1007,7 @@ function confirmationDisplayParams(toolName, params, preview) {
  * response's pendingActions array. Model-supplied confirmed/confirm booleans
  * are stripped before anything is stored or previewed.
  */
-async function proposePendingWrite({ toolUse, req, context, selectedLeadId = null, task = null, taskContext = null }) {
+async function proposePendingWrite({ toolUse, req, context, selectedLeadId = null, task = null, taskContext = null, ownerDirectVerdict = null }) {
   const params = { ...(toolUse.input || {}) };
   delete params.confirmed;
   delete params.confirm;
@@ -1019,6 +1019,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   }
 
   let preview;
+  let notesReadVersion = null; // update_customer notes: the version read with the notes (below)
   if (WRITE_TWO_STEP_TOOL_NAMES.has(toolUse.name)) {
     // Two-step executors are contract-tested to be mutation-free without
     // confirmed — run them for the rich preview (on a copy: the stored
@@ -1186,6 +1187,32 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
           name: `${target.first_name || ''} ${target.last_name || ''}`.trim() || 'Unnamed customer',
         },
       };
+    }
+    if (toolUse.name === 'update_customer' && params.customer_id && params.updates
+      && Object.prototype.hasOwnProperty.call(params.updates, 'notes')) {
+      // `notes` REPLACES crm_notes (gate codes, access details), so the card
+      // shows what it deletes (Codex r1 on #5675). Read now and bound into
+      // the contract; the customer-version pin refuses a commit after a
+      // later edit. Fail closed: an unreadable current value is no card.
+      // The notes and the row version come from ONE read: the version pin
+      // below reuses it, so a note added after this read fails the commit's
+      // version check instead of being deleted unseen (pre-push P0).
+      let current;
+      try {
+        current = await db('customers').where('id', params.customer_id).first('crm_notes', db.raw('updated_at::text AS version'));
+      } catch {
+        return { failed: true, modelResult: { error: 'Could not read this customer\'s current notes — nothing was proposed. Try again in a moment.' } };
+      }
+      if (!current) return { failed: true, modelResult: { error: 'Customer no longer exists' } };
+      const before = String(current.crm_notes ?? '').trim();
+      preview = { ...preview, notes_replaced: { before: before || null } };
+      // Pinned on every path, task or not, so a stale card (legacy or
+      // platform) can never replace notes written after it (Codex r2).
+      params._ib_customer_version = current.version;
+      // …and the notes themselves, compared by value at commit: not every
+      // notes writer advances updated_at (Codex r3).
+      params._ib_notes_before = current.crm_notes ?? null;
+      notesReadVersion = current.version;
     }
     if (toolUse.name === 'create_appointment' && params.customer_id) {
       // The visit's price (owner 2026-09-27: the Intelligence Bar books like
@@ -1652,11 +1679,25 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     if (invalidTarget) return { failed: true, modelResult: invalidTarget };
     params._ib_task_context = taskContext;
     if (toolUse.name === 'update_customer') {
-      const current = await db('customers').where('id', params.customer_id).first(db.raw('updated_at::text AS version'));
-      if (!current) return { failed: true, modelResult: { error: 'Customer no longer exists' } };
-      params._ib_customer_version = current.version;
+      if (notesReadVersion) params._ib_customer_version = notesReadVersion;
+      else {
+        const current = await db('customers').where('id', params.customer_id).first(db.raw('updated_at::text AS version'));
+        if (!current) return { failed: true, modelResult: { error: 'Customer no longer exists' } };
+        params._ib_customer_version = current.version;
+      }
     }
   }
+
+  // A caller's last word on the finished preview, before anything is stored
+  // (the owner-direct bulk cap): a refusal here leaves no pending action, so
+  // the task's write frontier stays open for the bulk card that follows.
+  const directVerdict = ownerDirectVerdict ? ownerDirectVerdict(preview) : null;
+  if (directVerdict?.refuse) return { failed: true, modelResult: directVerdict.refuse };
+  // Marks the stored action as an owner-direct commit, so a resumed task
+  // counts those and not the cards the owner confirmed (Codex r3).
+  // Always written on the owner-direct path, true or false: a row with no
+  // marker predates it and is counted conservatively (Codex r4).
+  if (ownerDirectVerdict) params._ib_owner_direct = directVerdict?.direct === true;
 
   // W0B authorization contract: the structured, server-built effect set the
   // operator approves. Derived from the same curated display params the card
@@ -2820,6 +2861,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     };
     const pendingProposals = []; // client-only payloads (carry the confirmation ids — never shown to the model)
     const directActionIds = []; // owner-direct commits this turn: no card, but their receipts join the thread like a card's
+    // Owner-direct bulk cap: direct commits this task already made, by tool
+    // (seeded so a resumed task keeps its count; Codex r1 on #5675).
+    const directCommitsByTool = ownerDirectCommits ? await OwnerDirect.seedDirectCounts(activeTask) : new Map();
     let directOutcomeUncertain = false; // a direct commit whose outcome is unknown or whose receipt did not save
     let directOutcomePartial = false; // a direct commit that landed with a failed follow-on step (partially_completed)
     let writeFrontierBlocked = false;
@@ -2872,6 +2916,12 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       );
 
       const toolUses = response.content.filter(c => c.type === 'tool_use');
+      // This message's calls that could run direct, judged before any of them
+      // runs, so three parallel same-tool edits never land two first.
+      const directCapped = ownerDirectCommits
+        ? OwnerDirect.cappedTools(directCommitsByTool, OwnerDirect.messageDirectPlan(toolUses,
+          toolUse => !(platformEnabled && ActionRegistry.validateInput(toolUse.name, toolUse.input, actionScope))))
+        : new Set();
       const textBlocks = response.content.filter(c => c.type === 'text');
       if (activeTask) await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token });
 
@@ -2990,6 +3040,15 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
               selectedLeadId: pageData?.agent_estimate_context?.lead?.id || null,
               task: activeTask,
               taskContext,
+              // Three or more same-tool edits that would run direct: refused
+              // as a set, pointing at the bulk tool (one card). Judged on the
+              // finished preview, so an edit the preview cards still reaches
+              // its card (Codex r2), and before the approval is stored, so
+              // the bulk card that follows is not blocked (pre-push P1).
+              ownerDirectVerdict: ownerDirectCommits ? (preview) => {
+                if (!OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input, preview)) return null;
+                return directCapped.has(toolUse.name) ? { refuse: { ...OwnerDirect.BULK_LIMIT_RESULT } } : { direct: true };
+              } : null,
             });
             result = proposed.modelResult;
             if (proposed.failed) {
@@ -3009,6 +3068,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
               });
               result = direct.result;
               if (direct.actionId) directActionIds.push(direct.actionId);
+              // A known failure changed nothing and does not count toward the
+              // bulk cap; an unknown outcome may have, and does (Codex r5).
+              if (direct.actionId && direct.result.executed !== false) OwnerDirect.recordDirectCommit(directCommitsByTool, toolUse.name);
               if (direct.uncertain) writeFrontierBlocked = directOutcomeUncertain = true;
               // A partial outcome closes the frontier too (Codex r5): the task
               // store treats the partial receipt as unresolved, so a later
