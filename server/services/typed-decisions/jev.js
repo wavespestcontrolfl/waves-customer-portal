@@ -3,7 +3,8 @@
  *
  * askPackage(packageId, state) asks a decision model the registered questions
  * of a decision package (./packages.js) about one `state` and returns
- * normalised, threshold-aware answers. TypeSafe Jev is the default provider;
+ * normalised, threshold-aware answers. `{ images }` (fitImagesForClef records, Clef only,
+ * and only for a package that declares `imageSlots`) ride beside the state; see imagesProblem. TypeSafe Jev is the default provider;
  * `{ provider: 'cloudflare' }` puts the same package to Cloudflare Clef
  * (ROUTES.typedDecisionClef, behind GATE_TYPED_DECISIONS_CLEF as well), whose
  * answers share Jev's shape. It is the ONLY way a caller reaches either
@@ -16,7 +17,7 @@ const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { dispatch, rejectCall } = require('../llm/call');
 const { typedDecisionsLive, typedDecisionsClefLive } = require('../../config/feature-gates');
-const { packageFor, packageHash } = require('./packages');
+const { packageFor, packageHash, validImageSlots, MAX_IMAGE_SLOTS } = require('./packages');
 
 function stateProblem(state, pkg) {
   if (!state || typeof state !== 'object' || Array.isArray(state)) return 'state must be an object';
@@ -66,7 +67,24 @@ function normaliseAnswer(question, answer, thresholds) {
 // can read them in this file.
 const KNOWN_PROVIDERS = Object.freeze([MODELS.PROVIDER.TYPESAFE, MODELS.PROVIDER.CLOUDFLARE]);
 
-async function askPackage(packageId, state, { laneId, provider = MODELS.PROVIDER.TYPESAFE } = {}) {
+// Images ride only a package that declares `imageSlots` (1..4), only to Clef,
+// never more than the package's slots, and only as records fitImagesForClef
+// returned (decoded and re-encoded by sharp; bare strings are refused). Anything
+// else is refused before a provider is called; Jev never receives an image.
+function imagesProblem(pkg, provider, images) {
+  if (images === undefined || images === null) return null;
+  if (!Array.isArray(images)) return 'images must be an array';
+  if (!images.length) return null;
+  if (!validImageSlots(pkg.imageSlots)) return `package declares no valid imageSlots (1..${MAX_IMAGE_SLOTS})`;
+  if (provider !== MODELS.PROVIDER.CLOUDFLARE) return 'only the cloudflare provider takes images';
+  if (images.length > pkg.imageSlots) return `package takes at most ${pkg.imageSlots} images`;
+  // Loaded only when images are present: the fitter pulls in sharp.
+  const { isFittedImage } = require('./image-budget');
+  if (!images.every(isFittedImage)) return 'images must be records returned by fitImagesForClef';
+  return null;
+}
+
+async function askPackage(packageId, state, { laneId, provider = MODELS.PROVIDER.TYPESAFE, images } = {}) {
   if (!typedDecisionsLive()) return { ok: false, reason: 'gate_off' };
   if (!KNOWN_PROVIDERS.includes(provider)) return { ok: false, reason: 'unknown_provider', provider };
   const clef = provider === MODELS.PROVIDER.CLOUDFLARE;
@@ -74,6 +92,11 @@ async function askPackage(packageId, state, { laneId, provider = MODELS.PROVIDER
   const pkg = packageFor(packageId);
   if (!pkg) return { ok: false, reason: 'unknown_package', packageId };
   const base = { packageId: pkg.id, packageHash: packageHash(pkg), provider };
+  const imageIssue = imagesProblem(pkg, provider, images);
+  if (imageIssue) {
+    logger.warn(`[typed-decisions] images_not_allowed for ${pkg.id}: ${imageIssue}`);
+    return { ok: false, reason: 'images_not_allowed', ...base };
+  }
   const problem = stateProblem(state, pkg);
   if (problem) {
     logger.warn(`[typed-decisions] bad_state for ${pkg.id}: ${problem}`);
@@ -84,6 +107,7 @@ async function askPackage(packageId, state, { laneId, provider = MODELS.PROVIDER
     const result = await dispatch(route, {
       state,
       questions: pkg.questions,
+      ...(Array.isArray(images) && images.length ? { images: images.map((image) => image.dataUrl) } : {}),
       laneId: laneId || (clef ? 'typed_decisions_clef' : 'typed_decisions'),
       promptVersion: pkg.id,
     });

@@ -1340,6 +1340,7 @@ export const COMPLETION_RESUME_OWED_CODES = new Set([
   "invoice_hold_handover_failed",        // dispute-hold: the invoice could not be queued behind the hold; the resume re-queues it
   "setup_fee_claim_in_flight",           // another closeout of the series is billing its setup fee; the resume re-reads the claim
   "setup_fee_park_failed",               // the setup fee could not be parked for the office; the resume parks it
+  "deferred_prepay_lookup_failed",       // the deferred annual-prepay hold could not be read; the resume re-reads it
 ]);
 export function completionResumeOwedError(error) {
   // The 503 is part of the contract: a reused code on any other status is
@@ -7146,6 +7147,35 @@ function JobCardTank({ tank, serviceId, D }) {
   );
 }
 
+// Why the customer booked this visit (GATE_JOB_CARD_CUSTOMER_CONTEXT). Their
+// own typed or texted words are quoted; a call is an AI summary and an
+// office entry is the office's wording, so neither is quoted.
+const JOB_CARD_REQUEST_LABELS = {
+  picker: { label: "Customer wrote (re-service page)", quoted: true },
+  text: { label: "Customer texted", quoted: true },
+  call: { label: "From the call (AI summary)", quoted: false },
+  office: { label: "Office note on the booking", quoted: false },
+};
+
+export function JobCardCustomerRequest({ request, D }) {
+  if (!request || (!request.text && !request.pests?.length)) return null;
+  const how = JOB_CARD_REQUEST_LABELS[request.source] || { label: "Why they booked", quoted: false };
+  return (
+    <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, padding: "10px 12px", margin: "0 0 14px", fontSize: 14, lineHeight: 1.5, color: D.text }}>
+      <div style={{ fontWeight: 500, marginBottom: 4 }}>Why they booked</div>
+      {request.text && (
+        <div>
+          <span style={{ color: D.muted }}>{how.label}: </span>
+          {how.quoted ? `\u201C${request.text}\u201D` : request.text}
+        </div>
+      )}
+      {request.pests?.length > 0 && (
+        <div><span style={{ color: D.muted }}>Pests picked: </span>{request.pests.join(", ")}</div>
+      )}
+    </div>
+  );
+}
+
 function JobCardTab({ card, loading, error, D }) {
   if (loading) {
     return <div style={{ padding: 40, textAlign: "center", color: D.muted }}>Loading job card...</div>;
@@ -7160,6 +7190,7 @@ function JobCardTab({ card, loading, error, D }) {
       {card.paragraph?.text && (
         <p style={{ fontSize: 14, lineHeight: 1.5, color: D.text, margin: "0 0 14px" }}>{card.paragraph.text}</p>
       )}
+      <JobCardCustomerRequest request={card.notes?.customerRequest} D={D} />
       {card.notes?.chemicalSensitivity && (
         <p style={{ fontSize: 14, lineHeight: 1.5, color: D.text, margin: "0 0 8px" }}>Chemical sensitivity: {card.notes.chemicalSensitivity}</p>
       )}
@@ -10361,6 +10392,15 @@ function LawnAssessmentCompletionBlock({
                   </select>
                 </div>
               ))}
+            </div>
+          )}
+          {/* A soft hint, never a requirement (owner 2026-10-02): the report's
+              "since your last visit" score line needs 2+ usable photos on both
+              visits (lawn-progress.js COMPARABLE_LEVELS), so a 1-photo visit
+              can never show it. Analyze stays enabled at one photo. */}
+          {photos.length < 2 && (
+            <div data-testid="lawn-photo-nudge" style={{ fontSize: 14, color: D.muted, lineHeight: 1.4 }}>
+              2 or 3 photos work best: front, close-up and any trouble spot. With one photo, next visit&apos;s report can&apos;t show whether the lawn improved.
             </div>
           )}
           <button

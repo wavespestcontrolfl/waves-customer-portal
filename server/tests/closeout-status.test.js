@@ -25,9 +25,16 @@ jest.mock('../services/typed-followup-obligation', () => ({
 jest.mock('../services/estimate-first-application-invoice', () => ({
   findFirstApplicationInvoiceForEstimateService: jest.fn(async () => ({ invoice: null, liveBeside: null })),
 }));
-jest.mock('../services/annual-prepay-renewals', () => ({
-  annualPrepayCoversVisit: jest.fn(async () => true),
-}));
+jest.mock('../services/annual-prepay-renewals', () => {
+  const annualPrepayCoversVisit = jest.fn(async () => true);
+  return {
+    annualPrepayCoversVisit,
+    // The prediction verdict validates a stamped visit through the same strict
+    // check; an unstamped visit has no deferred hold in these fixtures.
+    annualCoverageVerdictForPrediction: jest.fn(async (visit, conn) => (
+      visit?.prepaid_method === 'annual_prepay_invoice' ? annualPrepayCoversVisit(visit, conn, { throwOnError: true }) : null)),
+  };
+});
 jest.mock('../config/feature-gates', () => ({ gates: { completionAutopayCharge: false }, isEnabled: () => false }));
 jest.mock('../services/billing-lane', () => {
   const actual = jest.requireActual('../services/billing-lane');
