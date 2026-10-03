@@ -241,6 +241,29 @@ describe('syncLowRatingReviewAlerts', () => {
     await expect(recordActivation(broken)).resolves.toBeNull();
   });
 
+  test('ALERT_EPISODES killed: a plain deduped raise per review through raiseAdminAlert, no reopen, no close', async () => {
+    const compose = require('../services/admin-alert-compose');
+    const spy = jest.spyOn(compose, 'raiseAdminAlert').mockResolvedValue({ id: 'n1', deduped: false });
+    const was = process.env.ALERT_EPISODES;
+    process.env.ALERT_EPISODES = 'off';
+    try {
+      mockEpisodes.openAdminAlertKeys.mockResolvedValue([`review-low-rating:${R2}`]);
+      const { conn } = fakeConn({ reviews: [{ id: R1, google_review_id: 'g-1', star_rating: 2, reviewer_name: 'Pat Example', customer_id: null }] });
+      const out = await syncLowRatingReviewAlerts({ conn });
+      const [category, spec, opts] = spy.mock.calls[0];
+      expect(category).toBe('review_low_rating');
+      expect(spec).toMatchObject({ area: 'Customers', severity: 'needs-you', link: `/admin/reviews?responded=all&review=${R1}` });
+      expect(opts).toMatchObject({ dedupeKey: `review-low-rating:${R1}`, metadata: { reviewId: R1 } });
+      expect(mockEpisodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+      expect(mockEpisodes.openAdminAlertMetadata).not.toHaveBeenCalled();
+      expect(mockEpisodes.closeAdminAlertKeys).not.toHaveBeenCalled();
+      expect(out).toMatchObject({ raised: 1, closed: 0 });
+    } finally {
+      spy.mockRestore();
+      if (was === undefined) delete process.env.ALERT_EPISODES; else process.env.ALERT_EPISODES = was;
+    }
+  });
+
   test('the category rings by default and the owner can silence it', () => {
     const policy = require('../services/notification-bell-policy');
     expect(policy.DEFAULT_ON_CATEGORIES.has('review_low_rating')).toBe(true);

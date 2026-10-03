@@ -30,7 +30,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
-const { reviewLowRatingAlertLive } = require('../config/feature-gates');
+const { reviewLowRatingAlertLive, alertEpisodesLive } = require('../config/feature-gates');
 
 const CATEGORY = 'review_low_rating';
 const KEY_PREFIX = 'review-low-rating:';
@@ -74,9 +74,10 @@ function composeForReview(review) {
   const spec = lowRatingAlertSpec(args);
   if (!spec) return null;
   try {
-    return composeAdminAlert(spec);
+    return { ...composeAdminAlert(spec), spec };
   } catch {
-    return composeAdminAlert(lowRatingAlertSpec({ ...args, reviewerName: null }));
+    const generic = lowRatingAlertSpec({ ...args, reviewerName: null });
+    return { ...composeAdminAlert(generic), spec: generic };
   }
 }
 
@@ -176,7 +177,11 @@ async function reconcile(conn, now, out) {
     // while it was still unlinked) is closed below (Codex #5659 r2).
     const eligible = (review) => !(review.customer_id && isInternalTestCustomerId(review.customer_id));
     const reviews = (await needsAnswerQuery(conn, since)).filter(eligible);
-    const keyOf = keyIndex(await episodes.openAdminAlertMetadata(conn, KEY_PREFIX));
+    // ALERT_EPISODES killed (Codex #5659 r5): the shared kill switch's contract
+    // is no close pass and no reopen, the emitter's plain deduped raise. Each
+    // review still rings once on its own key; nothing is auto-closed.
+    const episodesOn = alertEpisodesLive();
+    const keyOf = episodesOn ? keyIndex(await episodes.openAdminAlertMetadata(conn, KEY_PREFIX)) : (review) => keyFor(review.id);
     const live = new Set();
     for (const listed of reviews) {
       const key = keyOf(listed);
@@ -190,6 +195,18 @@ async function reconcile(conn, now, out) {
           live.add(key);
           const composed = composeForReview(review);
           if (!composed) return 'settled';
+          if (!episodesOn) {
+            const { raiseAdminAlert } = require('./admin-alert-compose');
+            const plain = await raiseAdminAlert(CATEGORY, composed.spec, {
+              trx,
+              dedupeKey: key,
+              metadata: {
+                ...composed.metadata, reviewId: String(review.id), googleReviewId: review.google_review_id || null,
+                customerId: review.customer_id || null, starRating: Number(review.star_rating),
+              },
+            });
+            return plain ? { ...plain, rang: !plain.suppressed && !plain.deduped } : null;
+          }
           return episodes.raiseAdminAlertWithReopen(CATEGORY, composed.headline, composed.why, {
             trx,
             link: composed.link,
@@ -220,6 +237,7 @@ async function reconcile(conn, now, out) {
         logger.warn(`[review-alert] low-rating bell failed for review ${listed.id}: ${err.message}`);
       }
     }
+    if (!episodesOn) return out;
     const settled = (await episodes.openAdminAlertKeys(conn, KEY_PREFIX)).filter((key) => !live.has(key));
     if (settled.length) {
       out.closed = Number(await episodes.closeAdminAlertKeys(conn, settled, 'review answered', { now, resolution: 'The review no longer needs an answer' })) || 0;
