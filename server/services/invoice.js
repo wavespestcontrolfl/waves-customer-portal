@@ -10207,7 +10207,7 @@ const InvoiceService = {
         // The same re-judgement for a restored invoice with no packet: a payer assigned to its
         // visit while it sat void must not hand the homeowner a collectible link on restore.
         const Linked = require("./visit-linked-invoice-withdrawal");
-        await Linked.reconcileLinkedInvoices(trx, { invoiceId: id });
+        await Linked.reconcileLinkedInvoices(trx, { invoiceId: id }, { requeue: false });
         await Linked.withdrawLinkedInvoicesForOwner(trx, { invoiceId: id });
       }
       // Term-link TOCTOU re-check on the FRESH row under the lock (Codex

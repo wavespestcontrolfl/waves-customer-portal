@@ -716,6 +716,19 @@ postgres('payer assignment withdraws visit-linked invoices with no packet', () =
     }
   });
 
+  test('a release for an unvoided invoice never revives its old send queue: it stays a draft with the stamp cleared', async () => {
+    const Linked = require('../services/visit-linked-invoice-withdrawal');
+    const payerId = await payer();
+    const f = await fixture({ link: 'record', status: 'scheduled', invoice: { scheduled_send_at: new Date(Date.now() + 3600e3) } });
+    await assignJobPayer(f.visitId, payerId);
+    // The stamp survives a void and the unvoid's draft; the payer is then cleared before the restore.
+    await mockPg('invoices').where({ id: f.invoiceId }).update({ status: 'draft' });
+    await mockPg('scheduled_services').where({ id: f.visitId }).update({ payer_id: null });
+    expect(await Linked.reconcileLinkedInvoices(mockPg, { invoiceId: f.invoiceId }, { requeue: false })).toBe(1);
+    expect(await invoiceRow(f.invoiceId)).toMatchObject({ status: 'draft', scheduled_send_error: null, scheduled_send_at: null });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
   test('moving the visit to a different payer re-points the stamp instead of releasing it', async () => {
     const { visitId, invoiceId } = await fixture({ link: 'record' });
     const first = await payer();

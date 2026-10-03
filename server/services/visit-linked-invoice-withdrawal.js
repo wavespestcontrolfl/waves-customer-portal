@@ -258,7 +258,7 @@ async function withdrawLinkedInvoicesForOwner(trx, scope = {}) {
 // a stamped invoice whose owner is now nobody is released - the stamp clears, an invoice that was
 // waiting in the send queue goes back into it, the dunning the withdrawal paused resumes. A stamp
 // whose payer changed follows the payer that owns the visit now. Returns the released count.
-async function reconcileLinkedInvoices(trx, scope = {}) {
+async function reconcileLinkedInvoices(trx, scope = {}, { requeue: mayRequeue = true } = {}) {
   const { resumeDunningPausedByWithdrawal } = require('./visit-completion-packets');
   const { STALE_SEND_PARK_ERROR } = require('./invoice-helpers');
   let released = 0;
@@ -280,7 +280,8 @@ async function reconcileLinkedInvoices(trx, scope = {}) {
       continue;
     }
     const parked = flags.includes('park');
-    const requeue = flags.includes('queued') && t.status === 'draft';
+    // `mayRequeue` false (unvoid): a restored invoice is a DRAFT by design; its old send queue is never revived.
+    const requeue = mayRequeue && flags.includes('queued') && t.status === 'draft';
     // The marker goes back exactly as it was, so a requeued invoice stays email-only.
     const restored = parked ? STALE_SEND_PARK_ERROR : priorMarker;
     const moved = await trx('invoices')
