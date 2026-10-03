@@ -299,12 +299,12 @@ describe('GATE_PORTAL_CHAT_RESERVICE', () => {
     expect(mockCreate.mock.calls[1][0].messages.at(-1).content[0].content).toMatch(/separately priced/);
   });
 
-  test('portal history is read newest-first, so a long chat reaches its latest words (model and classifier alike)', async () => {
+  test('portal history is read newest-first, and only this turn\'s message is classified', async () => {
     let sql;
     mockRecentWords = (q) => { sql = q.sql; return [{ role: 'user', content: 'yes please' }, { role: 'assistant', content: 'Sorry to hear that. Want me to check your plan?' }, { role: 'user', content: 'The ants are back in the kitchen' }]; };
     mockCreate
       .mockResolvedValueOnce({ content: [{ type: 'tool_use', id: 't1', name: 'offer_reservice', input: { service_line: 'pest' } }] })
-      .mockResolvedValueOnce({ content: [{ type: 'text', text: 'Tap below to book it.' }] });
+      .mockResolvedValueOnce({ content: [{ type: 'text', text: 'Let me pass that to the team.' }] });
 
     const result = await assistant.processMessage({ message: 'yes please', channel: 'portal_chat', channelIdentifier: 'sess-1', customerId: 'cust-1', secondaryProperty: false });
 
@@ -313,7 +313,9 @@ describe('GATE_PORTAL_CHAT_RESERVICE', () => {
     const sent = mockCreate.mock.calls[0][0].messages;
     const textOf = (m) => (typeof m.content === 'string' ? m.content : m.content.map((b) => b.text).join(''));
     expect(sent.map(textOf)).toEqual(['The ants are back in the kitchen', 'Sorry to hear that. Want me to check your plan?', 'yes please']);
-    expect(result.actions).toEqual([{ type: 'link', label: 'Book your free re-service', href: '/reservice/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' }]);
+    // "yes please" reports nothing: the earlier report is not carried forward.
+    expect(mockPageState).not.toHaveBeenCalled();
+    expect(result).not.toHaveProperty('actions');
   });
 
   test('a newest-20 window that opens on an assistant row starts at the customer turn after it', async () => {

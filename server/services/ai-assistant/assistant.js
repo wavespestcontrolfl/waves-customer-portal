@@ -123,15 +123,6 @@ function portalLane(channel, { secondaryProperty = true } = {}) {
   };
 }
 
-// The customer's last three messages, newest last, ending with this one (a
-// failed save leaves it out of the history, so it is added back).
-const CUSTOMER_WORDS_KEPT = 3;
-function recentCustomerWords(history, message) {
-  const words = history.filter((m) => m.role === 'user' && typeof m.content === 'string').map((m) => m.content);
-  if (words[words.length - 1] !== message) words.push(message);
-  return words.slice(-CUSTOMER_WORDS_KEPT);
-}
-
 const SYSTEM_PROMPT = `You are the Waves Pest Control AI assistant. You help customers with questions about their pest control and lawn care services in Southwest Florida.
 
 PERSONALITY:
@@ -287,7 +278,7 @@ function withReservice(prompt) {
     .replace(VISIT_PROBLEM_ESCALATION, 'If the customer says something was missed at the visit, or reports damage, escalate. Pests or a lawn problem back since the visit follow PESTS BACK BETWEEN VISITS below.')
     .replace('- Hand the conversation to the Waves team (escalate)', '- Offer a free re-service when pests or a lawn problem come back between visits (offer_reservice)\n- Hand the conversation to the Waves team (escalate)')
     .replace('WHAT YOU MUST ESCALATE (use the escalate tool):', `PESTS BACK BETWEEN VISITS:
-When the customer reports pests, or a lawn problem, back or still there between scheduled visits, call offer_reservice with the service line (pest or lawn) and follow its instruction. Offer a free visit ONLY when it says the plan covers one and a button is shown. If the same message is a complaint about the service or the technician, or reports damage, escalate instead.
+When the customer reports pests, or a lawn problem, back or still there between scheduled visits, call offer_reservice in that same turn, with the service line (pest or lawn), and follow its instruction. It reads the customer's message from that turn only. Offer a free visit ONLY when it says the plan covers one and a button is shown. If the same message is a complaint about the service or the technician, or reports damage, escalate instead.
 
 WHAT YOU MUST ESCALATE (use the escalate tool):`);
 }
@@ -387,9 +378,11 @@ class WavesAssistant {
     // Portal chat reads the newest messages; other channels keep the original
     // oldest-first read.
     const history = await this.buildHistory(conversation.id, { newest: lane.portal === true });
-    // The customer's own latest words, which the re-service tool classifies
-    // (the model's reading of them never decides what is covered).
-    if (lane.reservice) lane.context.customerWords = recentCustomerWords(history, message);
+    // The customer's own words this turn, which the re-service tool
+    // classifies (the model's reading of them never decides what is covered).
+    // Only this message counts: an earlier report is never carried forward
+    // past a later "they're gone now".
+    if (lane.reservice) lane.context.customerMessage = message;
 
     // 6. Build a data-minimized context string. Older active rows may still
     // contain the legacy full-account summary; never forward that shape to the

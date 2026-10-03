@@ -31,9 +31,9 @@ const db = require('../models/db');
 const { _internals: reschedulePage } = require('../routes/reschedule-public');
 const { portalToolsFor, executeToolCall } = require('../services/ai-assistant/tools');
 
-const ANTS = ['The ants are back in the kitchen'];
-const WEEDS = ['Weeds are coming back all over the lawn'];
-const PRIMARY = { secondaryProperty: false, customerWords: ANTS };
+const ANTS = 'The ants are back in the kitchen';
+const WEEDS = 'Weeds are coming back all over the lawn';
+const PRIMARY = { secondaryProperty: false, customerMessage: ANTS };
 const CUSTOMER = { id: 'cust-1', latitude: 27.4, longitude: -82.5 };
 const BOOKED_PEST = { date: '2026-10-09', windowStart: '10:00', serviceType: 'Pest Control Re-Service', rescheduleUrl: '/reschedule/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' };
 // The page's verdict: lanes the plan holds (with any open re-service) and the bookable ones.
@@ -64,7 +64,7 @@ beforeEach(() => {
   reschedulePage.pageEligibility.mockResolvedValue({ ok: true });
 });
 
-const offer = (line, context = line === 'lawn' ? { ...PRIMARY, customerWords: WEEDS } : PRIMARY, actions = []) => executeToolCall('offer_reservice', { service_line: line }, 'cust-1', actions, null, context)
+const offer = (line, context = line === 'lawn' ? { ...PRIMARY, customerMessage: WEEDS } : PRIMARY, actions = []) => executeToolCall('offer_reservice', { service_line: line }, 'cust-1', actions, null, context)
   .then((result) => ({ result, actions }));
 
 test('the tool is in the set only when its gate is on, and escalate stays last', () => {
@@ -91,7 +91,7 @@ test('a lane the page would book: a booking button the server built, and the mod
 
 test('a second offer call in one turn adds no second button', async () => {
   const actions = [];
-  const context = { secondaryProperty: false, customerWords: ['The ants are back and weeds are coming back all over the lawn'] };
+  const context = { secondaryProperty: false, customerMessage: 'The ants are back and weeds are coming back all over the lawn' };
 
   await executeToolCall('offer_reservice', { service_line: 'pest' }, 'cust-1', actions, null, context);
   await executeToolCall('offer_reservice', { service_line: 'lawn' }, 'cust-1', actions, null, context);
@@ -167,8 +167,8 @@ test.each([
 });
 
 test.each([
-  ['a secondary saved-property session', { secondaryProperty: true, customerWords: ANTS }, () => {}],
-  ['no property context at all', { customerWords: ANTS }, () => {}],
+  ['a secondary saved-property session', { secondaryProperty: true, customerMessage: ANTS }, () => {}],
+  ['no property context at all', { customerMessage: ANTS }, () => {}],
   ['GATE_RESERVICE_STREAMLINE off', PRIMARY, () => { mockGates.reserviceStreamline = false; }],
   ['GATE_RESERVICE_SELF_SERVE off', PRIMARY, () => { mockSelfServe.mockReturnValue(false); }],
 ])('%s: no page read, no button', async (_label, context, arrange) => {
@@ -187,14 +187,23 @@ test('an unknown service line or a missing customer reads nothing', async () => 
   expect(mockPage.pageLaneState).not.toHaveBeenCalled();
 });
 
-describe('the customer\'s own words decide what is covered, not the line the model picked', () => {
+describe('the customer\'s own message this turn decides what is covered, not the line the model picked', () => {
+  test.each([
+    ['a follow-up with no report of its own', 'yes please'],
+    ['a resolution', 'The ants are gone now'],
+  ])('%s opens nothing: an earlier report is never carried forward', async (_label, text) => {
+    const { result } = await offer('pest', { secondaryProperty: false, customerMessage: text });
+    expect(result.offered).toBe(false);
+    expect(mockPage.pageLaneState).not.toHaveBeenCalled();
+  });
+
   test.each([
     ['rodents', 'I hear rats in the attic again'],
     ['termites', 'Termites are back in the garage'],
     ['mosquitoes', 'The mosquitoes are back in the yard'],
     ['a specialty riding with a covered pest', 'The ants are back and I saw a rat'],
   ])('%s: no free offer and no page read, even when the model says pest', async (_label, text) => {
-    const { result, actions } = await offer('pest', { secondaryProperty: false, customerWords: [text] });
+    const { result, actions } = await offer('pest', { secondaryProperty: false, customerMessage: text });
 
     expect(mockPage.pageLaneState).not.toHaveBeenCalled();
     expect(actions).toEqual([]);
@@ -203,7 +212,7 @@ describe('the customer\'s own words decide what is covered, not the line the mod
   });
 
   test('a report in the other line is not this line: weeds never open a free pest visit', async () => {
-    const { result, actions } = await offer('pest', { secondaryProperty: false, customerWords: WEEDS });
+    const { result, actions } = await offer('pest', { secondaryProperty: false, customerMessage: WEEDS });
 
     expect(actions).toEqual([]);
     expect(result.offered).toBe(false);
@@ -213,7 +222,7 @@ describe('the customer\'s own words decide what is covered, not the line the mod
     ['a coverage question', 'Do you cover ants?'],
     ['a general lawn question', 'Tell me about lawn care'],
   ])('%s names a line but reports nothing: no offer', async (_label, text) => {
-    const { result, actions } = await offer(text.includes('lawn') ? 'lawn' : 'pest', { secondaryProperty: false, customerWords: [text] });
+    const { result, actions } = await offer(text.includes('lawn') ? 'lawn' : 'pest', { secondaryProperty: false, customerMessage: text });
 
     expect(mockPage.pageLaneState).not.toHaveBeenCalled();
     expect(actions).toEqual([]);
@@ -225,7 +234,7 @@ describe('the customer\'s own words decide what is covered, not the line the mod
     'the grass is looking bad again',
     'my yard treatment did not work',
   ])('an active lawn report opens the lawn offer: %s', async (text) => {
-    const { result, actions } = await offer('lawn', { secondaryProperty: false, customerWords: [text] });
+    const { result, actions } = await offer('lawn', { secondaryProperty: false, customerMessage: text });
 
     expect(result.offered).toBe(true);
     expect(result.instruction).toMatch(/lawn care re-service/);
@@ -233,22 +242,14 @@ describe('the customer\'s own words decide what is covered, not the line the mod
   });
 
   test('a lawn report never opens a pest offer', async () => {
-    const { result } = await offer('pest', { secondaryProperty: false, customerWords: ['weeds all over my lawn'] });
+    const { result } = await offer('pest', { secondaryProperty: false, customerMessage: 'weeds all over my lawn' });
     expect(result.offered).toBe(false);
   });
 
-  test('the newest report decides: a covered report after a specialty one opens the offer', async () => {
-    const { result } = await offer('pest', { secondaryProperty: false, customerWords: ['rats are back in the attic', 'also, the ants are back in the kitchen'] });
-    expect(result.offered).toBe(true);
-  });
-
-  test('the newest report decides: a specialty after a covered report refuses it', async () => {
-    const { result } = await offer('pest', { secondaryProperty: false, customerWords: ['the ants are back in the kitchen', 'and I saw a rat in the garage'] });
-    expect(result.instruction).toMatch(/separately priced/);
-  });
-
+  
+  
   test('a plain yard-condition report opens the lawn offer', async () => {
-    const { result } = await offer('lawn', { secondaryProperty: false, customerWords: ['my yard is brown'] });
+    const { result } = await offer('lawn', { secondaryProperty: false, customerMessage: 'my yard is brown' });
     expect(result.offered).toBe(true);
   });
 
@@ -258,10 +259,4 @@ describe('the customer\'s own words decide what is covered, not the line the mod
     expect(mockPage.pageLaneState).not.toHaveBeenCalled();
   });
 
-  test('an earlier message carries the report when the latest only says yes', async () => {
-    const { result, actions } = await offer('pest', { secondaryProperty: false, customerWords: ['The ants are back in the kitchen', 'yes please'] });
-
-    expect(result.offered).toBe(true);
-    expect(actions).toHaveLength(1);
   });
-});

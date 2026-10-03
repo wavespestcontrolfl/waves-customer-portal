@@ -189,7 +189,7 @@ function addAction(actions, action) {
 // under the reply and `cards` the fact cards; callers that cannot render
 // them leave both out. `context.secondaryProperty`: the portal session is
 // scoped to a non-primary saved property (or its scope could not be read);
-// `context.customerWords`: the customer's latest messages, newest last.
+// `context.customerMessage`: the customer's message this turn.
 async function executeToolCall(toolName, input, contextCustomerId, actions = null, cards = null, context = {}) {
   try {
     input = input && typeof input === 'object' ? input : {};
@@ -519,40 +519,32 @@ function bookedReserviceFacts(line, booked, movable) {
   };
 }
 
-// What is covered is read from the customer's own words with the texting
-// AI's classifier, never from the line the model picked: a separately priced
-// specialty anywhere in them means no free offer, and so does anything short
-// of an active report in this line ("Do you cover ants?" names a line but
-// reports nothing): isActivePestReport (the SMS flow's own predicate) for
-// pest; for lawn, isActiveLawnReport (weeds back, turf in bad shape, a lawn
-// treatment not working) or a turf insect the pest test catches.
-// The NEWEST message that reports anything decides, so "yes please" after
-// a report still counts and an older report never overrides a newer one.
-function reportRefusal(customerWords, line) {
+// What is covered is read from the customer's own message THIS turn with the
+// texting AI's classifier, never from the line the model picked and never
+// carried forward from an earlier message (a later "they're gone now" must
+// not leave an old report standing). A separately priced specialty in it
+// means no free offer, and so does anything short of an active report in
+// this line ("Do you cover ants?" names a line but reports nothing):
+// isActivePestReport (the SMS flow's own predicate) for pest; for lawn,
+// isActiveLawnReport, which names its own lawn subject ("my yard is brown";
+// the lane reader treats a plain "yard" as a location), or a turf insect the
+// pest test catches.
+function reportRefusal(customerMessage, line) {
   const { reportedReserviceLanes, reportedReserviceExcludedSpecialty, isActivePestReport, isActiveLawnReport } = require('../reservice-scheduler');
-  const words = (Array.isArray(customerWords) ? customerWords : []).map((w) => String(w || '')).filter(Boolean);
-  for (const w of [...words].reverse()) {
-    const specialty = reportedReserviceExcludedSpecialty(w);
-    const pest = isActivePestReport(w);
-    // The lawn check names its own lawn subject, so it is the lawn line's
-    // evidence by itself ("my yard is brown"); the lane reader treats a
-    // plain "yard" as a location.
-    const lawn = isActiveLawnReport(w);
-    if (!specialty && !pest && !lawn) continue;
-    if (specialty) return RESERVICE_SPECIALTY;
-    const inLine = line === 'lawn'
-      ? lawn || (pest && reportedReserviceLanes(w).includes('lawn'))
-      : pest && reportedReserviceLanes(w).includes('pest');
-    return inLine ? null : RESERVICE_HAND_OFF;
-  }
-  return RESERVICE_HAND_OFF;
+  const text = String(customerMessage || '');
+  if (reportedReserviceExcludedSpecialty(text)) return RESERVICE_SPECIALTY;
+  const pest = isActivePestReport(text);
+  const inLine = line === 'lawn'
+    ? isActiveLawnReport(text) || (pest && reportedReserviceLanes(text).includes('lawn'))
+    : pest && reportedReserviceLanes(text).includes('pest');
+  return inLine ? null : RESERVICE_HAND_OFF;
 }
 
-async function offerReservice(customerId, serviceLine, actions, { secondaryProperty = true, customerWords = [] } = {}) {
+async function offerReservice(customerId, serviceLine, actions, { secondaryProperty = true, customerMessage = '' } = {}) {
   const line = Object.prototype.hasOwnProperty.call(RESERVICE_LINE_WORDS, serviceLine) ? serviceLine : null;
   if (!customerId || !line || !Array.isArray(actions)) return RESERVICE_HAND_OFF;
   if (!reserviceSurfaceOpen({ secondaryProperty })) return RESERVICE_HAND_OFF;
-  const refusal = reportRefusal(customerWords, line);
+  const refusal = reportRefusal(customerMessage, line);
   if (refusal) return refusal;
   // An open re-service in the line is read on its own, as the page does: a
   // visit booked while the plan covered the line stays on the schedule after
