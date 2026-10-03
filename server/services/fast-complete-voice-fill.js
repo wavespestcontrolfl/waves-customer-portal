@@ -640,7 +640,7 @@ function quantitiesIn(text) {
 // Only a positive dose / mix phrase says "same as last time"; a historical or
 // negated mention ("last time I used...", "but not today", "same area") does not.
 const SAME_AS_LAST_RE = /\b(same (amount|mix|rate|dose|as last time|as last visit)|the usual (mix|amount|rate|dose)|like last time)\b/i;
-const NOT_SAME_AS_LAST_RE = /\b(last time i|but not|not today|not this time|same area|(not|never|isn'?t|wasn'?t|no longer)( (the|quite|exactly))? same|different (amount|mix|rate|dose))\b/i;
+const NOT_SAME_AS_LAST_RE = /\b(last time i|but not|not today|not this time|same area|(not|never|isn['\s]?t|wasn['\s]?t|no longer)( (the|quite|exactly))? same|different (amount|mix|rate|dose))\b/i;
 
 function pushUnclear(unclear, heard, reason) {
   const entry = { heard: cleanText(heard, CAPS.heard), reason: cleanText(reason, CAPS.reason) };
@@ -1084,13 +1084,27 @@ function productMethod(raw, product, heard, transcript, ctx, world, unclear) {
   return '';
 }
 
-function productSameAsLast(raw, amount, heard, transcript, unclear) {
+// The words of the sentence a mention sits in; with `contrast`, only the part of
+// it on the mention's side of a "but / except / however / whereas".
+const CONTRAST_WORDS = new Set(['but', 'except', 'however', 'whereas']);
+function mentionSentenceWords(mention, world, { contrast = false } = {}) {
+  let { from, to } = sentenceSpan(mention, world);
+  if (contrast) {
+    for (let j = mention.start; j >= from; j -= 1) if (CONTRAST_WORDS.has(world.tokens[j])) { from = j + 1; break; }
+    for (let j = mention.end; j < to; j += 1) if (CONTRAST_WORDS.has(world.tokens[j])) { to = j; break; }
+  }
+  return world.tokens.slice(from, to).join(' ');
+}
+
+function productSameAsLast(raw, amount, heard, transcript, unclear, product, world) {
   // a spoken number wins over the flag
   if (raw.sameAsLast !== true || amount !== null) return false;
-  // Read from the transcript's own sentence, never from the quote: a stitched quote
-  // ("Taurus, same as last time") could borrow the phrase from another product's sentence.
-  const said = sentenceOf(transcript, heard, { contrast: true });
-  const whole = sentenceOf(transcript, heard);
+  // Read from the sentence where THIS product is named, never from the quote: a
+  // stitched quote ("Taurus, same as last time" / "same as last time, Taurus") could
+  // borrow the phrase from another product's sentence.
+  const mentions = productMentions(product, heard, world);
+  const said = mentions.map((m) => mentionSentenceWords(m, world, { contrast: true })).join(' . ');
+  const whole = mentions.map((m) => mentionSentenceWords(m, world)).join(' . ');
   if (SAME_AS_LAST_RE.test(said) && !NOT_SAME_AS_LAST_RE.test(whole)) return true;
   pushUnclear(unclear, heard, 'same_as_last_not_heard');
   return false;
@@ -1112,7 +1126,7 @@ function validateProducts(rawProducts, ctx, normTranscript, unclear, transcript 
     }
     seen.add(product.id);
     const { amount, unit } = productAmount(raw, product, heard, unclear, world);
-    const sameAsLast = productSameAsLast(raw, amount, heard, transcript, unclear);
+    const sameAsLast = productSameAsLast(raw, amount, heard, transcript, unclear, product, world);
     const method = productMethod(raw, product, heard, transcript, ctx, world, unclear);
     out.push({ productId: product.id, amount, unit, sameAsLast, method, heard });
   }

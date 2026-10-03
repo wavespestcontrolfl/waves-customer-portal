@@ -1682,3 +1682,16 @@ describe('Codex #5698 round 1', () => {
     expect(own.products[0].sameAsLast).toBe(true);
   });
 });
+
+test('same-as-last is read where the product is named: a reversed stitched quote borrows nothing', () => {
+  const t = 'Used Taurus today. Talstar was same as last time.';
+  const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard: 'same as last time, Taurus' }] }), ctx, t);
+  expect(out.products[0].sameAsLast).toBe(false);
+  expect(out.unclear.map((u) => u.reason)).toContain('same_as_last_not_heard');
+});
+
+test('"Taurus isn\'t the same as last time" is no same-as-last flag', () => {
+  const t = "Taurus isn't the same as last time.";
+  const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard: 'Taurus' }] }), ctx, t);
+  expect(out.products[0].sameAsLast).toBe(false);
+});
