@@ -551,4 +551,27 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
     expect(leadOnlySig).not.toBe(off);
     expect(both).not.toBe(leadOnlySig);
   });
+
+  test('gate live: the PDF key follows the upcoming lawn bookings (a reschedule or cancellation re-keys it; a failed read never matches)', async () => {
+    jest.useFakeTimers({
+      now: new Date('2026-10-02T16:00:00Z'),
+      doNotFake: ['nextTick', 'setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'queueMicrotask', 'hrtime', 'performance'],
+    });
+    try {
+      process.env.GATE_LAWN_REPORT_COPY_V6 = 'true';
+      process.env.GATE_LAWN_REPORT_LEAD = 'true';
+      const svc = { id: 'svc-cur', customer_id: CUSTOMER, service_line: 'lawn', service_date: '2026-09-30' };
+      const sigWith = async (scheduled) => (await resolveCanonicalLawnRender(svc, makeKnex({ ...fixtures(), service_records: [], scheduled_services: scheduled }))).signature;
+      const visit = (date, status = 'confirmed') => ({ id: `ss-${date}`, customer_id: CUSTOMER, scheduled_date: date, status, service_type: 'Lawn Care Treatment Program' });
+      const booked = await sigWith([visit('2026-11-11')]);
+      expect(await sigWith([visit('2026-11-11')])).toBe(booked);
+      expect(await sigWith([visit('2026-11-18')])).not.toBe(booked);
+      expect(await sigWith([visit('2026-11-11', 'cancelled')])).not.toBe(booked);
+      const failedA = await sigWith(FAIL);
+      expect(failedA).not.toBe(booked);
+      expect(await sigWith(FAIL)).not.toBe(failedA);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 });

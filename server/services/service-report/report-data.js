@@ -2649,6 +2649,41 @@ async function lawnWateringRuleStamp(service, knex) {
   }
 }
 
+const LAWN_NEXT_VISIT_SCAN = 200;
+// The customer's upcoming lawn bookings, for the PDF key while
+// GATE_LAWN_REPORT_COPY_V6 is live: the lead's next-visit line, and the frozen
+// copy's gap-timed sentence it can drop, both follow those bookings, so a
+// reschedule or cancellation must re-key a cached PDF. Customer-wide on
+// purpose (a superset of the property-scoped visit the render picks): it can
+// only re-render more often, never serve a stale page. A failed read is
+// UNKNOWN, never "no bookings", so it gets a non-reusable stamp.
+async function lawnUpcomingVisitsStamp(service, knex) {
+  if (!service?.customer_id) return ':nv=0';
+  try {
+    const svcRaw = service.service_date;
+    const svcIso = svcRaw ? (svcRaw instanceof Date ? svcRaw.toISOString().slice(0, 10) : String(svcRaw).slice(0, 10)) : '';
+    const todayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    const rows = await knex('scheduled_services')
+      .where('customer_id', service.customer_id)
+      .andWhere('scheduled_date', '>', svcIso && svcIso > todayIso ? svcIso : todayIso)
+      .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
+      .orderBy('scheduled_date', 'asc')
+      .limit(LAWN_NEXT_VISIT_SCAN)
+      .select('scheduled_date', 'service_type', 'service_id', ...PROPERTY_SCOPE_COLUMNS);
+    const days = (Array.isArray(rows) ? rows : [])
+      .filter((row) => isSameLineVisit(row, { serviceLine: 'lawn' }))
+      .slice(0, 6)
+      .map((row) => {
+        const raw = row.scheduled_date;
+        const iso = raw instanceof Date ? raw.toISOString().slice(0, 10) : String(raw).slice(0, 10);
+        return `${iso}@${row.property_id || row.service_address_line1 || row.source_estimate_id || ''}`;
+      });
+    return `:nv=${crypto.createHash('sha1').update(days.join('|')).digest('hex').slice(0, 8)}`;
+  } catch {
+    return `:nv=err${crypto.randomBytes(4).toString('hex')}`;
+  }
+}
+
 async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY') } = {}) {
   const line = service?.service_line || detectServiceLine(service?.service_type);
   if (line !== 'lawn') return { pin: null, signature: '' };
@@ -2714,7 +2749,7 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   if (featureGates.lawnReportLeadLive()) irrigationStamp += ':lead=1';
   // The v6 copy writer (GATE_LAWN_REPORT_COPY_V6) changes the lead's words, so
   // its PDF key moves with it; the stamp rides only while the gate is live.
-  if (featureGates.lawnReportCopyV6Live()) irrigationStamp += ':copyv6=1';
+  if (featureGates.lawnReportCopyV6Live()) irrigationStamp += `:copyv6=1${await lawnUpcomingVisitsStamp(service, knex)}`;
 
   const assessment = await loadLinkedLawnAssessment(service, knex, { failClosed: true, propertyHistoryEnabled });
   const lawnHistory = propertyHistoryEnabled
@@ -3834,7 +3869,6 @@ const LAWN_COPY_V6_EMPTY = Object.freeze({ headline: null, whatWeDid: null, what
 // answer is unknown and nothing is shown. A read that FAILS is recorded, so
 // the v6 copy never freezes on it.
 // Returns { state: 'scheduled', row } | { state: 'none' } | { state: 'unknown' }.
-const LAWN_NEXT_VISIT_SCAN = 200;
 async function lawnNextVisitAtProperty(service, afterIso, knex, readFailures) {
   const noteFailure = () => { if (readFailures) readFailures.add('next_visit'); };
   const rows = await knex('scheduled_services')
