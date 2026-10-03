@@ -874,6 +874,10 @@ function isReactionToOurText(body, outbound) {
   return outbound.some((o) => squash(o).startsWith(quote));
 }
 
+// An address reply: a house number, one to four words, then a street word ("123 Bayshore Dr", "830 Main St
+// Apt 4"). "2 hours works" is not one.
+const ADDRESS_REPLY_RE = /^\d{1,6}\s+(?:[\p{L}'-]+\s+){0,3}(?:st|street|rd|road|dr|drive|ln|lane|ave|avenue|blvd|boulevard|ct|court|cir|circle|pl|place|ter|terrace|way|pkwy|parkway|hwy|highway|trl|trail|loop|cv|cove|pt|point|sq|square)\b/iu;
+
 async function usuallyWritesEnglish(customerId, smsLogId) {
   try {
     const trigger = db('sms_log').where({ id: smsLogId }).select('created_at');
@@ -889,7 +893,7 @@ async function usuallyWritesEnglish(customerId, smsLogId) {
     const bodies = rows.map((r) => r.message_body)
       .filter((b) => typeof b === 'string' && b.trim() && !isSmsReaction(b) && !isReactionToOurText(b, outbound))
       .map((b) => b.replace(/\S*(?:@|:\/\/|\p{L}\.\p{L})\S*/gu, ' ').trim())
-      .filter((b) => /\p{L}/u.test(b) && !/^\d{1,6}\s+\p{L}/u.test(b));
+      .filter((b) => /\p{L}/u.test(b) && !ADDRESS_REPLY_RE.test(b));
     // a short foreign reply ("Perfecto", "Vale") reads as English to the majority check: the short-word signal counts it foreign
     // (a capitalized word mid-sentence is a name - "Thanks Nadia" stays English; "Perfecto" or "Ok. Perfecto" does not)
     const english = bodies.filter((b) => isEnglishInbound(b) && !hasUnknownShortWord(b, { namesExempt: 'mid-sentence' })).length;

@@ -595,6 +595,12 @@ describe('runTranslationTrial', () => {
     expect(await runTranslationTrial({ inboundMessage: 'Gracias', customer, smsLogId: 's1' })).toBeNull();
   });
 
+  test('a reply starting with a number ("2 hours works") still votes; only an address shape is left out', async () => {
+    mockEarlier.mockResolvedValueOnce([{ message_body: '2 hours works' }, { message_body: 'Ok thanks' }, { message_body: 'Gracias' }]);
+    scriptModels({ inbound: { ...SPANISH_INBOUND, english: 'Thank you' } });
+    expect(await runTranslationTrial({ inboundMessage: 'Gracias', customer, smsLogId: 's1' })).toBeNull();
+  });
+
   test('"Ok. Perfecto" counts as foreign: a word after a full stop is not a name', async () => {
     mockEarlier.mockResolvedValueOnce([{ message_body: 'Ok. Perfecto' }, { message_body: 'Ok. Vale' }, { message_body: 'Ok thanks' }]);
     scriptModels({ inbound: SPANISH_INBOUND });
