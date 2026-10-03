@@ -90,6 +90,8 @@ async function receiptIndexFor(customerId, visiblePayments, database = db) {
         if (row.invoice_number) receiptTokenByNumber.set(row.invoice_number, entry);
       });
     } catch (err) {
+      if (database !== db && (['PORTAL_CHAT_DEADLINE', 'ABORT_ERR', '57014'].includes(err?.code)
+        || ['AbortError', 'KnexTimeoutError'].includes(err?.name))) throw err;
       // Best-effort: a receipt-link lookup failure must not break the
       // payment history itself.
       logger.warn(`[billing] receipt token lookup failed for customer ${customerId}: ${err.message}`);

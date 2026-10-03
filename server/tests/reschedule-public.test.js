@@ -753,6 +753,23 @@ describe('grouped visits are refused before slot selection (codex #3609 r4)', ()
     await expect(eligibilityAsync({ status: 'confirmed', scheduled_date: '2026-07-10', visit_id: 'v1' }, NOW, scopedDatabase))
       .rejects.toBe(cancelled);
   });
+  test.each([{ code: '57014' }, { name: 'KnexTimeoutError' }])('default database timeouts keep membership fail-closed: %j', async (identity) => {
+    const failure = Object.assign(new Error('database timeout'), identity);
+    const api = { where: () => api, whereNotIn: () => api, count: () => api, first: async () => { throw failure; } };
+    mockDb.mockImplementation(() => api);
+    expect(await eligibilityAsync({ status: 'confirmed', scheduled_date: '2026-07-10', visit_id: 'v1' }, NOW))
+      .toEqual({ ok: false, reason: 'not_available' });
+  });
+  test.each([{ code: '57014' }, { name: 'KnexTimeoutError' }])('default frozen-visit timeouts keep self-service blocked: %j', async (identity) => {
+    const failure = Object.assign(new Error('database timeout'), identity);
+    mockDb.mockImplementation((table) => {
+      const api = { where: () => api, whereNotIn: () => api, count: () => api,
+        first: async () => { if (table === 'scheduled_services') return { n: '1' }; throw failure; } };
+      return api;
+    });
+    expect(await eligibilityAsync({ status: 'confirmed', scheduled_date: '2026-07-10', visit_id: 'v1' }, NOW))
+      .toEqual({ ok: false, reason: 'grouped' });
+  });
   test('cancellation inside the frozen-visit reader also propagates', async () => {
     const cancelled = Object.assign(new Error('deadline'), { code: 'PORTAL_CHAT_DEADLINE' });
     const scopedDatabase = (table) => {

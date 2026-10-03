@@ -126,3 +126,17 @@ test('a deadline assertion after routing cannot start a keyword query', async ()
   expect(database).toHaveBeenCalledTimes(1);
   expect(mockInserts).toHaveLength(0);
 });
+
+// Standalone cancellation is supported even without a deadline clock.
+test('forwards a standalone abort signal to both knowledge model requests', async () => {
+  dispatchWithFallback
+    .mockResolvedValueOnce({ ok: true, json: { paths: ['pests/ants.md'] } })
+    .mockResolvedValueOnce({ ok: true, text: 'Ants answer.\nCOVERAGE: full' });
+  const signal = new AbortController().signal;
+  await WikiQA.query('ants', { source: 'lead_agent' }, { signal });
+  expect(dispatchWithFallback).toHaveBeenCalledTimes(2);
+  for (const [, options] of dispatchWithFallback.mock.calls) {
+    expect(options.signal).toBe(signal);
+    expect(options).not.toHaveProperty('timeoutMs');
+  }
+});

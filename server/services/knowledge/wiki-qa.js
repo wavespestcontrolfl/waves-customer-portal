@@ -16,7 +16,7 @@ const runRead = (context, query, stage) => context?.read ? context.read(query, s
 const runWrite = (context, work, stage) => context?.write ? context.write(work, stage) : work(db);
 const modelBudget = (context) => context?.remainingMs
   ? { timeoutMs: Math.max(1, context.remainingMs()), signal: context.signal }
-  : {};
+  : (context?.signal ? { signal: context.signal } : {});
 
 // The answer model ends with one coverage line (stripped before anyone sees
 // the answer) so the weekly knowledge-gaps email can list what the

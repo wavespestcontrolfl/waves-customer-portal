@@ -275,7 +275,7 @@ async function destinationTechClash(t, { technicianId, date, windowStart, window
 // beside a terminal one would be moved under a parent — and artifacts —
 // describing the old stop. Returns { frozen, reason } — an unreadable
 // state reads as frozen (fail closed).
-async function frozenVisitVerdict(t, visitId) {
+async function frozenVisitVerdict(t, visitId, { propagateCancellation = false } = {}) {
   if (!visitId) return { frozen: false, reason: null };
   try {
     const activity = await visitActivity(visitId, t);
@@ -293,8 +293,8 @@ async function frozenVisitVerdict(t, visitId) {
     if (claim) return { frozen: true, reason: 'completion_in_flight' };
     return { frozen: false, reason: null };
   } catch (err) {
-    if (['PORTAL_CHAT_DEADLINE', 'ABORT_ERR', '57014'].includes(err?.code)
-      || ['AbortError', 'KnexTimeoutError'].includes(err?.name)) throw err;
+    if (propagateCancellation && (['PORTAL_CHAT_DEADLINE', 'ABORT_ERR', '57014'].includes(err?.code)
+      || ['AbortError', 'KnexTimeoutError'].includes(err?.name))) throw err;
     require('./logger').warn(`[visit-groups] frozenVisitVerdict(${visitId}) unreadable — treated as frozen: ${err.message}`);
     return { frozen: true, reason: 'unreadable' };
   }
