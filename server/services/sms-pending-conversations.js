@@ -54,12 +54,11 @@ async function loadPendingSmsConversations({
   // When the call ended: the stamp /call-status writes from Twilio's own
   // event time. Nothing else is trusted as an end: a callback card's
   // customer_leg.ended_at is our receipt time, and a late callback would
-  // move it past texts sent after the hangup. A row without the stamp gets
-  // an estimate that can only be EARLY, so it only ever leaves a text
-  // pending: insert time plus duration on a row inserted when the call began
-  // (early by the ring time), and the call's start on a row inserted after
-  // the call was over (call-timeline.js; created_at there is already past
-  // the hangup, so adding the duration would reach into the future). The
+  // move it past texts sent after the hangup. A row without the stamp that
+  // was inserted when the call began gets insert time plus duration, which
+  // is early by the ring time and so only ever leaves a text pending. A row
+  // inserted after the call was over (call-timeline.js) says nothing about
+  // when the call happened, so without the stamp it answers no text. The
   // pattern has no "?" and no ":word": db.raw reads either as a binding.
   const postCallRow = `(spoken.metadata->>'source' IN (${[...POST_CALL_ROW_SOURCES].map((source) => `'${source}'`).join(', ')})
     AND NOT (spoken.metadata->>'source' = 'status_callback'
@@ -67,8 +66,8 @@ async function loadPendingSmsConversations({
   const callEndedAt = `COALESCE(
     CASE WHEN spoken.metadata->>'ended_at' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]{8,12}Z$'
       THEN CAST(spoken.metadata->>'ended_at' AS timestamptz) END,
-    spoken.created_at + make_interval(secs => COALESCE(spoken.duration_seconds, 0))
-      * (CASE WHEN ${postCallRow} THEN -1 ELSE 1 END))`;
+    CASE WHEN NOT ${postCallRow}
+      THEN spoken.created_at + make_interval(secs => COALESCE(spoken.duration_seconds, 0)) END)`;
   const customerPeer = phoneIdentitySql('candidate_customer.phone');
   const duplicateCustomerPeer = phoneIdentitySql('duplicate_customer.phone');
   // An uncertain historical STOP must never migrate to a customer's changed

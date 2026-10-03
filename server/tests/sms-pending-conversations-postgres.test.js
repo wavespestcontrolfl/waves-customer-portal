@@ -291,8 +291,10 @@ postgres('pending SMS conversation query (PostgreSQL)', () => {
     await seedCall({ direction: 'outbound', source: 'lead-webhook-auto-bridge' });
     // A call that was over before the text, on a row inserted after it
     // (a status-callback fallback): its created_at is not the call's start.
+    // Inserted long after a short call, too: no stamp, no answer.
     await seedCall({ duration: 600, metadata: { source: 'status_callback', inserted_on_status: 'completed' } });
-    await seedCall({ duration: 600, metadata: { source: 'twilio_recording_status_recovered' } });
+    await seedCall({ duration: 60, metadata: { source: 'twilio_recording_status_recovered' } });
+    await seedCall({ duration: 0, metadata: { source: 'twilio_studio_recording_status' } });
     // A sandbox test call is never customer contact.
     await seedCall({ source: 'voice_relay_sandbox' });
     // A real conversation with someone else.
