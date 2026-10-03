@@ -932,7 +932,7 @@ class WavesAssistant {
       } catch { /* internal SMS is best-effort; the operator bell remains truth */ }
     }
 
-    logger.info(`AI escalated: ${conversation.id} reason="${reason}" priority=${priority}`);
+    logger.info('[ai-assistant] portal escalation committed', { conversationId: conversation.id, escalationId: persisted.escalation.id, priority });
     return persisted.handoff;
   }
 
