@@ -132,12 +132,14 @@ async function paymentHold(customerId, { now = new Date() } = {}) {
   try {
     const { openBalanceInvoices } = require('./open-balance');
     const { invoiceDaysOverdue } = require('./collections/account-anchor');
-    let resolveFailed = false;
-    const open = await openBalanceInvoices(customerId, { database: db, onResolveFailure: () => { resolveFailed = true; } });
+    let incomplete = false;
+    const markIncomplete = () => { incomplete = true; };
+    const open = await openBalanceInvoices(customerId, { database: db, onResolveFailure: markIncomplete, onTruncation: markIncomplete });
     const overdue = open.find((inv) => inv.status === 'overdue' || invoiceDaysOverdue(now, inv) > 0);
     if (overdue) return { reason: 'overdue_invoice', invoiceId: overdue.id };
-    // A bill dropped because its payer could not be resolved may be theirs.
-    if (resolveFailed) return { reason: 'payment_lookup_unavailable' };
+    // A bill dropped because its payer could not be resolved, or one beyond
+    // the read's cap, may be theirs and overdue.
+    if (incomplete) return { reason: 'payment_lookup_unavailable' };
     const { lastOverdueReminderWithin7d } = require('./collections/dunning-spacing');
     const last = await lastOverdueReminderWithin7d(customerId, { now, database: db, requireDelivered: true });
     if (last && now.getTime() - new Date(last.occurred_at).getTime() < PAYMENT_TEXT_HOLD_MS) {

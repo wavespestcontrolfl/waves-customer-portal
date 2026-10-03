@@ -140,8 +140,10 @@ describe('paymentHold', () => {
     expect(await Holds.paymentHold('c-1', { now })).toBeNull();
   });
 
-  test('a bill dropped because its payer could not be resolved holds (it may be theirs)', async () => {
+  test('an incomplete read holds: a bill dropped because its payer could not be resolved, or a read cut at its cap', async () => {
     mockOpenBalance.mockImplementationOnce(async (_id, { onResolveFailure }) => { onResolveFailure(new Error('payer down')); return []; });
+    expect(await Holds.paymentHold('c-1', { now })).toEqual({ reason: 'payment_lookup_unavailable' });
+    mockOpenBalance.mockImplementationOnce(async (_id, { onTruncation }) => { onTruncation(200); return [{ id: 'inv-ok', status: 'sent', due_date: '2026-10-10', created_at: now }]; });
     expect(await Holds.paymentHold('c-1', { now })).toEqual({ reason: 'payment_lookup_unavailable' });
   });
 
