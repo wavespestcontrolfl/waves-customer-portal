@@ -2146,6 +2146,7 @@ export default function EstimateToolViewV2({
         savedFormRef.current = JSON.stringify(stale ? restored : seeded);
         setForm(seeded);
         setEnrichedProfile(scopeUnitParcelProfile(d.engineProfile) || null);
+        forgetScopeAnswer();
         setLookupMeta(null);
         setSatelliteData(null);
         setEstimate(d.result && !stale ? { ...d.result, engineRequest: d.engineRequest } : null);
@@ -2182,8 +2183,6 @@ export default function EstimateToolViewV2({
 
   function exitEditMode() {
     if (dirty && !window.confirm("Start a new estimate with unsaved changes?")) return;
-    occupancyRef.current = { address: "", answer: "" };
-    setScopePending(null);
     onStartNew?.();
     setEditMode(null);
     // The county-roll warning is scoped to the draft it was loaded for (codex r21 P2).
@@ -2193,6 +2192,7 @@ export default function EstimateToolViewV2({
     setEditLoadError(null);
     setForm(buildDefaultEstimateForm());
     setEnrichedProfile(null);
+    forgetScopeAnswer();
     setSatelliteData(null);
     setEstimate(null);
     setSavedId(null);
@@ -2216,6 +2216,7 @@ export default function EstimateToolViewV2({
     lookupSeqRef.current += 1;
     lookupAbortRef.current?.abort();
     setEnrichedProfile(null);
+    forgetScopeAnswer();
     setSatelliteData(null);
     setLookupStatus({ type: "", msg: "" });
     setSatelliteStatus({ type: "", msg: "" });
@@ -2626,6 +2627,14 @@ export default function EstimateToolViewV2({
   // can raise the question on its own.
   const occupancyRef = useRef({ address: "", answer: "" });
   const [scopeConflict, setScopeConflict] = useState("");
+  // The remembered answer belongs to ONE lookup profile. Whenever that profile
+  // is dropped or replaced by a saved estimate's (Clear All, a new or another
+  // estimate, a prefill, an address change) the answer goes with it: a loaded
+  // estimate's own saved answer rides its profile and is re-sent from there.
+  function forgetScopeAnswer() {
+    occupancyRef.current = { address: "", answer: "" };
+    setScopePending(null);
+  }
   const scopeUnresolved = enrichedProfile?.serviceScopeDecision === "scope_unresolved"
     && !enrichedProfile?.occupancyAnswer;
   // An answer just clicked is not applied until the lookup it started comes
@@ -2920,6 +2929,7 @@ export default function EstimateToolViewV2({
     setSavedViewUrl(null);
     setLookupStatus({ type: "", msg: "" });
     setEnrichedProfile(null);
+    forgetScopeAnswer();
     setExistingCustomerMatch(null);
     setAddressMatches([]);
     preLinkContactRef.current = null;
@@ -3142,8 +3152,6 @@ export default function EstimateToolViewV2({
     setGroupAnchorId(anchorId);
     lookupAbortRef.current?.abort();
     lookupSeqRef.current += 1;
-    occupancyRef.current = { address: "", answer: "" };
-    setScopePending(null);
     onStartNew?.();
     setEditMode(null);
     // The county-roll warning is scoped to the draft it was loaded for (codex r21 P2).
@@ -3176,6 +3184,7 @@ export default function EstimateToolViewV2({
         : {}),
     }));
     setEnrichedProfile(null);
+    forgetScopeAnswer();
     setSatelliteData(null);
     setSatelliteStatus({ type: "", msg: "" });
     setLookupStatus({ type: "", msg: "" });
@@ -4417,8 +4426,6 @@ export default function EstimateToolViewV2({
 
   function nextEstimate() {
     if (dirty && !window.confirm("Start another estimate with unsaved changes?")) return;
-    occupancyRef.current = { address: "", answer: "" };
-    setScopePending(null);
     onStartNew?.();
     // A fresh estimate is OUTSIDE any group build: a stale anchor would make
     // the next unrelated save carry groupWithEstimateId and 400 on the
@@ -4554,6 +4561,7 @@ export default function EstimateToolViewV2({
     setSavedViewUrl(null);
     setLookupStatus({ type: "", msg: "" });
     setEnrichedProfile(null);
+    forgetScopeAnswer();
     setExistingCustomerMatch(null);
     setAddressMatches([]);
     preLinkContactRef.current = null;
@@ -4592,6 +4600,7 @@ export default function EstimateToolViewV2({
       savedFormRef.current = JSON.stringify(stale ? restored : seeded);
       setForm(seeded);
       setEnrichedProfile(scopeUnitParcelProfile(source.engineProfile) || null);
+      forgetScopeAnswer();
       setExistingCustomerMatch(source.customer || null);
       if (stale) setSavedId(null);
       setReopenNotice(notice);
@@ -5156,11 +5165,8 @@ export default function EstimateToolViewV2({
                     }));
                     setLookupStatus({ type: "", msg: "" });
                     setEnrichedProfile(null);
+                    forgetScopeAnswer();
                     setScopeConflict("");
-                    // The scope answer belongs to the estimate it was given
-                    // for: the same address typed again is asked again.
-                    occupancyRef.current = { address: "", answer: "" };
-                    setScopePending(null);
                     setExistingCustomerMatch(null);
                     setAddressMatches([]);
                     // The customer linkage survives Clear All (customerId is
