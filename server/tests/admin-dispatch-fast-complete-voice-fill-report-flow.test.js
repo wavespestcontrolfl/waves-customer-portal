@@ -295,6 +295,53 @@ describe('report flow voice fill', () => {
       expect(res.body.products).toEqual([expect.objectContaining({ productId: 'p-celsius', method: 'soil_drench' })]);
     });
 
+    const answerWith = (product) => callAnthropic.mockResolvedValue({ ok: true, json: { ...MODEL_ANSWER, products: [{ amount: 0, unit: 'not_said', sameAsLast: false, ...product }] } });
+    const lawnMethods = (...values) => buildLawnReserviceFastContext.mockResolvedValue({
+      ok: true, eligible: true, reason: null, products: LAWN_CATALOG, methods: values.map((value) => ({ value })), lastVisit: null,
+    });
+
+    test('fog/ULV is heard from its own words', async () => {
+      lawnMethods('spot_treatment', 'fog_ulv');
+      answerWith({ productId: 'p-celsius', method: 'fog_ulv', heard: 'fogged the hedge line with Celsius' });
+      const res = await readProducts('I fogged the hedge line with Celsius.');
+      expect(res.body.products).toEqual([expect.objectContaining({ productId: 'p-celsius', method: 'fog_ulv' })]);
+    });
+
+    test.each([
+      ['a liquid broadcast is not filled as granular', 'Broadcast sprayed Celsius over the back lawn.', 'Broadcast sprayed Celsius', 'granular_broadcast', 'broadcast_spray'],
+      ['granules are not filled as a liquid broadcast', 'Spread the Celsius granules over the back lawn.', 'Spread the Celsius granules', 'broadcast_spray', 'granular_broadcast'],
+    ])('%s', async (_name, note, heard, wrong, right) => {
+      lawnMethods('spot_treatment', 'broadcast_spray', 'granular_broadcast');
+      answerWith({ productId: 'p-celsius', method: wrong, heard });
+      const refused = await readProducts(note);
+      expect(refused.body.products).toEqual([expect.objectContaining({ productId: 'p-celsius', method: '' })]);
+      expect(refused.body.unclear.map((u) => u.reason)).toContain('method_not_heard');
+      answerWith({ productId: 'p-celsius', method: right, heard });
+      const kept = await readProducts(note);
+      expect(kept.body.products).toEqual([expect.objectContaining({ productId: 'p-celsius', method: right })]);
+    });
+
+    test('a bare "broadcast" proves neither way: the tech picks it', async () => {
+      lawnMethods('spot_treatment', 'broadcast_spray', 'granular_broadcast');
+      answerWith({ productId: 'p-celsius', method: 'broadcast_spray', heard: 'Broadcast the Celsius' });
+      const res = await readProducts('Broadcast the Celsius out back.');
+      expect(res.body.products).toEqual([expect.objectContaining({ productId: 'p-celsius', method: '' })]);
+    });
+
+    test('a product the last visit recorded in another measure takes a spoken amount in that measure, as its row does', async () => {
+      // a liquid by its stock unit, logged in pounds last time: the sheet's row is in weight units
+      buildLawnReserviceFastContext.mockResolvedValue({
+        ok: true, eligible: true, reason: null,
+        products: [{ id: 'p-liquid', name: 'Dismiss NXT', category: 'herbicide', inventory_unit: 'fl_oz', formulation: 'SC' }],
+        methods: [{ value: 'spot_treatment' }],
+        lastVisit: { products: [{ productId: 'p-liquid', amountUnit: 'lb', totalAmount: 2 }] },
+      });
+      answerWith({ productId: 'p-liquid', amount: 3, unit: 'lb', heard: 'three pounds of Dismiss' });
+      const res = await readProducts('Put down three pounds of Dismiss.');
+      expect(res.body.products).toEqual([expect.objectContaining({ productId: 'p-liquid', amount: 3, unit: 'lb' })]);
+      expect(callAnthropic.mock.calls[0][0].text).toContain('p-liquid | Dismiss NXT | units: g, oz, lb');
+    });
+
     test('the note mic hears it as lawn care, with the lawn catalog\'s names', async () => {
       transcribeWithOpenAI.mockResolvedValue({ text: LAWN_NOTE });
       const res = await dictate();

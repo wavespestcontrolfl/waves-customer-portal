@@ -242,6 +242,23 @@ const loadPestReserviceContext = (serviceId, knex = db) => loadPestContext(servi
 // so every way the sheet offers is a product way (`anyProductMethod`). The visit
 // lists below only give the shared schema its enums; nothing is read from them.
 const LAWN_SHEET_LABEL = 'lawn re-service';
+// The lawn sheet offers a liquid and a granular broadcast side by side, so the
+// bare word "broadcast" proves neither: a spray needs "spray" beside it, granules
+// need a granule word. Fog/ULV's words are too short for the derived rule.
+const LAWN_METHOD_WORDS = Object.freeze({
+  broadcast_spray: /\bbroadcast\W+spray\w*|\bspray\w*\W+(?:\w+\W+){0,3}broadcast\b|\bblanket\W+spray\w*/,
+  granular_broadcast: /\b(granular|granules?|spread|spreader|spreading)\b/,
+  fog_ulv: /\b(fog|fogged|fogging|fogger|ulv|mist|misted|misting)\b/,
+});
+// The measure a lawn row offers units in, as the sheet decides it
+// (FastCompleteLawnReserviceSheet productRow): the product's own, unless the last
+// visit recorded an amount in a unit of another measure (a liquid logged in
+// pounds), which then is the row's.
+function lawnRowMeasure(row, last) {
+  const own = productMeasure(row);
+  if (!last || !(Number(last.totalAmount) > 0) || sheetUnit(last.amountUnit, own)) return own;
+  return unitMeasure(last.amountUnit) || own;
+}
 const LAWN_TRANSCRIBE_WORDS = 'broadcast, spot treatment, granular, spreader, soil drench, foliar, pounds, ounces, gallons, per thousand, square feet, front lawn, back lawn, side lawns, weeds, dollarweed, sedge, crabgrass, chinch bugs, sod webworms, fungus, fertilizer, pre-emergent, no wait, same as last time';
 async function loadLawnReserviceContext(serviceId, knex = db) {
   if (!require('../config/feature-gates').lawnReserviceFastCompleteLive()) return { ok: false, reason: 'not_eligible' };
@@ -254,11 +271,11 @@ async function loadLawnReserviceContext(serviceId, knex = db) {
   const catalog = lawn.products.filter((row) => row && row.id != null && String(row.name || '').trim() && !HIDDEN_CATEGORIES.has(categoryKey(row)));
   if (!catalog.length) return { ok: false, reason: 'catalog_unavailable' };
   const aliases = await loadProductAliases(knex, catalog.map((row) => row.id));
-  // The unit the property's last lawn visit recorded each product in: what the
-  // sheet's tile opens with.
-  const usualUnits = new Map((lawn.lastVisit?.products || []).filter((p) => p?.amountUnit).map((p) => [String(p.productId), p.amountUnit]));
+  // What the property's last lawn visit recorded for each product: the tile opens
+  // in that unit's measure.
+  const lastById = new Map((lawn.lastVisit?.products || []).filter((p) => p?.productId != null).map((p) => [String(p.productId), p]));
   const products = catalog.map((row) => {
-    const measure = productMeasure({ ...row, usual_unit: usualUnits.get(String(row.id)) });
+    const measure = lawnRowMeasure(row, lastById.get(String(row.id)));
     return {
       id: String(row.id),
       name: String(row.display_name || row.name).trim(),
@@ -282,6 +299,7 @@ async function loadLawnReserviceContext(serviceId, knex = db) {
       visitMethods: methods,
       productMethods: methods,
       anyProductMethod: true,
+      methodWords: LAWN_METHOD_WORDS,
       sheetWords: LAWN_TRANSCRIBE_WORDS,
     },
   };
@@ -1205,7 +1223,8 @@ const METHOD_LEXICON = {
 // "foliar_spray" → "foliar"), at its start ("drenched", "injected"); a context
 // noun ("soil", "trunk") proves nothing.
 const GENERIC_METHOD_WORDS = new Set(['spray', 'treatment', 'application', 'placement', 'and', 'the', 'of']);
-function methodLexicon(method) {
+function methodLexicon(method, ctx = null) {
+  if (ctx?.methodWords?.[method]) return ctx.methodWords[method];
   if (METHOD_LEXICON[method]) return METHOD_LEXICON[method];
   const action = method.split('_').filter((w) => w.length >= 4 && !GENERIC_METHOD_WORDS.has(w)).pop();
   return action ? new RegExp(`\\b${action.slice(0, Math.max(4, action.length - 3))}\\w*\\b`) : null;
@@ -1220,7 +1239,7 @@ function productMethod(raw, product, heard, transcript, ctx, world, unclear) {
   if (!offered) return '';
   const mentions = productMentions(product, heard, world);
   const text = mentions.map((m) => positiveWords(world, mentionClause(m, world))).join(' . ');
-  if (methodLexicon(raw.method)?.test(text)) return raw.method;
+  if (methodLexicon(raw.method, ctx)?.test(text)) return raw.method;
   // Said in the product's sentence but beside another product ("did the perimeter
   // with Taurus, Talstar and surfactant"): the row simply follows the visit's How,
   // no Check. A method with no word for it anywhere near is a Check.
@@ -1228,12 +1247,12 @@ function productMethod(raw, product, heard, transcript, ctx, world, unclear) {
   // sprayed Talstar around the perimeter"): that spoken method was dropped, so Check.
   // (the standard ways and every catalog way the sheet offers)
   const ways = [...new Set([...Object.keys(METHOD_LEXICON), ...ctx.productMethods, product.catalogMethod].filter(Boolean))];
-  const ownOther = ways.some((method) => method !== raw.method && methodLexicon(method)?.test(text));
+  const ownOther = ways.some((method) => method !== raw.method && methodLexicon(method, ctx)?.test(text));
   // Shared only when the way is said in the sentence's lead-in, before the first
   // product name ("Did the perimeter with Taurus, Talstar and surfactant"): a way
   // said after another product's name ("...and sprayed Talstar around the
   // perimeter") is that product's.
-  const shared = mentions.length > 0 && mentions.every((m) => methodLexicon(raw.method)?.test(leadInWords(m, world)));
+  const shared = mentions.length > 0 && mentions.every((m) => methodLexicon(raw.method, ctx)?.test(leadInWords(m, world)));
   if (ownOther || !shared) pushUnclear(unclear, heard, 'method_not_heard');
   return '';
 }

@@ -205,6 +205,19 @@ describe('lawn re-service, voice fill on', () => {
     expect(screen.queryByRole('region', { name: 'Check' })).toBeNull();
   });
 
+  test('a confirmed "same as last time" amount is the tech\'s own: a later read raises a Check, never replaces it', async () => {
+    const request = makeRequest({ fill: read([{ productId: 'celsius', amount: null, unit: '', sameAsLast: true, method: '', heard: 'same Celsius as last time' }]) });
+    await openSheet(request);
+    typeNote('Same Celsius as last time.');
+    await fill(request);
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm Celsius WG — 1.5 oz' }));
+    typeNote('Same Celsius as last time. Actually half an ounce of Celsius.');
+    request.fill = read([CELSIUS_HALF]);
+    await fill(request, 2);
+    expect(within(editorFor('Celsius WG')).getByLabelText('How much?').value).toBe('1.5');
+    expect(within(screen.getByRole('region', { name: 'Check' })).getByText('You entered 1.5 oz; heard 14.2 g for Celsius WG.')).toBeTruthy();
+  });
+
   test('what the read could not settle is a Check the tech taps away, and it is not raised again', async () => {
     const request = makeRequest({ fill: read([], [{ heard: 'the blue stuff', reason: 'unknown_product' }]) });
     await openSheet(request);

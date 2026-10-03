@@ -363,7 +363,16 @@ export function useLawnVoiceFill({ enabled, request, serviceId, products, ctx })
     if (check) answered.current.add(check.text);
     return prev.filter((entry) => entry.id !== id);
   }), []);
-  const confirm = useCallback((id) => setConfirms((prev) => prev.filter((entry) => entry.id !== id)), []);
+  const confirmsRef = useRef(confirms);
+  confirmsRef.current = confirms;
+  // ✓ makes the row's amount the tech's own (no longer "last time's"): a later
+  // read that hears another amount raises a Check, never replaces it.
+  const confirm = useCallback((id) => {
+    const item = confirmsRef.current.find((entry) => entry.id === id);
+    const row = latest.current.products.rows.find((r) => String(r.productId) === item?.watch);
+    if (row?.fromLast) latest.current.products.updateRow(row.productId, { fromLast: false });
+    setConfirms((prev) => prev.filter((entry) => entry.id !== id));
+  }, []);
 
   const pending = checks.length > 0 || confirms.length > 0;
   return {
