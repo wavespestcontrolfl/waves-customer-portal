@@ -1388,7 +1388,8 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
         if (table !== 'sms_log') return base(table);
         const chain = {};
         for (const m of ['whereRaw', 'select', 'orderBy']) chain[m] = () => chain;
-        let size = Infinity; let before = Infinity; let after = -Infinity;
+        let size = Infinity; let skip = 0; let before = Infinity; let after = -Infinity;
+        chain.offset = (n) => { skip = n; return chain; };
         chain.where = (...args) => {
           // excludeRecruitingSmsLog's grouped predicate: record that it was applied.
           if (typeof args[0] === 'function') { smsReads.grouped.push(args[0].name); return chain; }
@@ -1397,7 +1398,7 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
           return chain;
         };
         chain.limit = (n) => { size = n; return chain; };
-        const page = () => texts.filter((t) => { const at = Date.parse(t.created_at); return at < before && at > after; }).slice(0, size);
+        const page = () => texts.map((t, i) => ({ id: `sms-${i}`, ...t })).filter((t) => { const at = Date.parse(t.created_at); return at < before && at > after; }).slice(skip, skip + size);
         chain.then = (res, rej) => (texts instanceof Error ? Promise.reject(texts) : Promise.resolve(page())).then(res, rej);
         smsReads.count += 1;
         return chain;
@@ -1428,6 +1429,15 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       const tapbacks = Array.from({ length: 300 }, (_, i) => ({ created_at: new Date(Date.parse('2026-09-03T15:00:00Z') - i * 60000).toISOString(), message_body: 'Liked "Your visit is confirmed"', message_type: 'sms' }));
       const out = await jobCard.loadJobCardFacts('svc1', withTexts(onSite, [...tapbacks, { created_at: '2026-09-01T15:00:00Z', message_body: 'Ants are back by the pool', message_type: 'sms' }]), deps);
       expect(out.notes.customerTexts).toEqual([{ date: '2026-09-01', text: 'Ants are back by the pool' }]);
+    });
+
+    test('rows sharing one timestamp across a page edge are never skipped (Codex r6)', async () => {
+      process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = 'true';
+      // 30 rows at the SAME instant: 29 tapbacks, then the real text — past the first page of 25.
+      const same = '2026-09-03T15:00:00Z';
+      const rows = [...Array.from({ length: 29 }, () => ({ created_at: same, message_body: 'Liked "Your visit is confirmed"', message_type: 'sms' })), { created_at: same, message_body: 'Wasps by the lanai door', message_type: 'sms' }];
+      const out = await jobCard.loadJobCardFacts('svc1', withTexts(onSite, rows), deps);
+      expect(out.notes.customerTexts).toEqual([{ date: '2026-09-03', text: 'Wasps by the lanai door' }]);
     });
 
     test('texts stop at the recorded arrival, not the window start; none recorded = now (Codex r2)', async () => {

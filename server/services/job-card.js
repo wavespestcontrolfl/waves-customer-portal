@@ -358,33 +358,36 @@ async function loadTextsSince(dbh, customerId, sinceInstant, untilInstant) {
   const since = sinceInstant ? new Date(sinceInstant) : new Date(until.getTime() - TEXTS_FALLBACK_DAYS * 86400000);
   try {
     // Typed reactions are dropped in SQL; a tapback that only its body
-    // gives away is dropped here, so pages are read (newest first, each
-    // from where the last ended) until three real texts are kept or the
-    // window itself runs out — no run of reactions hides the text before it.
+    // gives away is dropped here, so pages are read until three real texts
+    // are kept or the window itself runs out — no run of reactions hides
+    // the text before it. Pages step by position over a total order
+    // (created_at, then the unique id), so rows sharing a timestamp at a
+    // page edge are never skipped; a text landing mid-read can only repeat
+    // a row, which the id check drops.
     const kept = [];
-    let before = until;
-    for (;;) {
+    const seen = new Set();
+    for (let offset = 0; ; offset += TEXTS_PAGE) {
       // The customer timeline's own exclusions: recruiting rows (an applicant
       // who is also a customer; owner-only) and unresolved send reservations.
       const rows = await excludeUnresolvedSendReservations(excludeRecruitingSmsLog(dbh('sms_log').where({ customer_id: customerId })))
         .where('direction', 'inbound')
         .whereRaw("COALESCE(sms_log.message_type, '') <> 'sms_reaction'")
         .where('created_at', '>', since)
-        .where('created_at', '<', before)
-        .select('created_at', 'message_body', 'message_type')
+        .where('created_at', '<', until)
+        .select('id', 'created_at', 'message_body', 'message_type')
         .orderBy('created_at', 'desc')
-        .limit(TEXTS_PAGE);
+        .orderBy('id', 'desc')
+        .limit(TEXTS_PAGE)
+        .offset(offset);
       for (const r of rows) {
+        if (seen.has(r.id)) continue;
+        seen.add(r.id);
         if (r.message_type === 'sms_reaction' || isSmsReaction(r.message_body)) continue;
         const text = clean(r.message_body, 300);
         if (text) kept.push({ date: etDateString(new Date(r.created_at)), text });
         if (kept.length >= TEXTS_MAX) return kept;
       }
       if (rows.length < TEXTS_PAGE) return kept;
-      const last = new Date(rows[rows.length - 1].created_at);
-      // A page that cannot move the cursor back would loop; it ends here.
-      if (!(last < before)) return kept;
-      before = last;
     }
   } catch (err) {
     logger.warn(`[job-card] texts unavailable for ${customerId}: ${err.code || err.name || 'error'}`);
