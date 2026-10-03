@@ -16354,7 +16354,7 @@ function ChatWidget({ customer, onClose, initialQuestion, onNavigate }) {
   useLockBodyScroll(true);
   const dialogRef = useModalFocus(true, onClose);
   const compact = useIsMobile(760);
-  const firstName = customer?.firstName || customer?.first_name || '';
+  const firstName = [customer?.firstName, customer?.first_name].find(Boolean);
   const [messages, setMessages] = useState([
     { role: 'assistant', content: `Hi${firstName ? ` ${firstName}` : ''}! I'm the Waves AI assistant. How can I help you today?` },
   ]);
@@ -16373,7 +16373,7 @@ function ChatWidget({ customer, onClose, initialQuestion, onNavigate }) {
   // Report an AI reply as inappropriate (Microsoft Store policy 11.16 —
   // users must be able to flag AI-generated content for review).
   const reportMessage = async (idx, content, conversationId) => {
-    if (reportState[idx] === 'sending' || reportState[idx] === 'done') return;
+    if (['sending', 'done'].includes(reportState[idx])) return;
     setReportState(prev => ({ ...prev, [idx]: 'sending' }));
     try {
       // api.request, not raw fetch: access tokens expire after 15 minutes and

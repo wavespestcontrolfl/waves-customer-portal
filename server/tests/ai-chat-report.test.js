@@ -121,7 +121,7 @@ describe('POST /ai/chat/report', () => {
 
   test('files an ai_escalations row plus an operator-inbox mirror for the admin hub', async () => {
     const { sessionQuery, escalationInsert, inboxInsert } = mockReportTables({
-      session: { id: 'conv-1', customer_id: 'cust-1' },
+      session: { id: 'conv-1', customer_id: 'cust-1', channel: 'portal_chat', channel_identifier: 'chat-123' },
     });
 
     await withServer(async (baseUrl) => {
@@ -193,7 +193,7 @@ describe('POST /ai/chat/report', () => {
       channel_identifier: 'chat-123',
       customer_id: 'cust-1',
     });
-    expect(sessionQuery.orderBy).toHaveBeenCalledTimes(1);
+    expect(sessionQuery.orderBy).toHaveBeenCalledTimes(2);
     expect(escalationInsert.mock.calls.map(([row]) => row.conversation_id)).toEqual([olderId, newerId]);
   });
 
@@ -202,7 +202,9 @@ describe('POST /ai/chat/report', () => {
     const { propertyQuery, sessionQuery, escalationInsert } = mockReportTables({
       customer: { id: 'cust-1', account_id: 'account-1', active: true },
       property: { id: 'prop-1', customer_id: 'cust-1', active: true },
-      session: { id: 'conv-property-1', customer_id: 'cust-1' },
+      session: {
+        id: 'conv-property-1', customer_id: 'cust-1', channel: 'portal_chat', channel_identifier: 'property:prop-1:shared-session',
+      },
     });
 
     await withServer(async (baseUrl) => {
@@ -272,7 +274,7 @@ describe('POST /ai/chat/report', () => {
       channel_identifier: 'property:prop-1:shared-session',
       customer_id: 'cust-1',
     });
-    expect(sessionQuery.orderBy).not.toHaveBeenCalled();
+    expect(sessionQuery.orderBy).toHaveBeenCalledWith('created_at', 'desc');
     expect(escalationInsert).toHaveBeenCalledWith(expect.objectContaining({ conversation_id: null }));
   });
 
