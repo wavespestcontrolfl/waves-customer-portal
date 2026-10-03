@@ -116,3 +116,22 @@ test('report dates print as the Eastern day, also after 8 PM Eastern', () => {
   const { formatReportDate } = require('../services/sms-scheduling-funnel');
   expect(formatReportDate(new Date('2026-10-02T01:30:00Z'))).toBe('2026-10-01');
 });
+
+test('decide-step decisions are counted, and a would-move is matched only when the visit now sits in that slot', () => {
+  const { summarizeDecisions } = require('../services/sms-scheduling-funnel');
+  const would = (id, date, start) => JSON.stringify({ kind: 'move_visit', scheduled_service_id: id, date, start, end: null });
+  const out = summarizeDecisions([
+    { action: 'accept_slot', outcome: 'would_move', refusals: '[]', would_have: would('v1', '2026-10-06', '10:00') },
+    { action: 'accept_slot', outcome: 'would_move', refusals: '[]', would_have: would('v2', '2026-10-07', '14:00') },
+    { action: 'accept_slot', outcome: 'staff', refusals: '["quote_not_in_text"]', would_have: null },
+    { action: 'decline', outcome: 'no_action', refusals: [], would_have: null },
+  ], new Map([['v1', { date: '2026-10-06', start: '10:00' }], ['v2', { date: '2026-10-05', start: '08:00' }]]));
+  expect(out).toEqual({
+    total: 4,
+    by_outcome: { would_move: 2, staff: 1, no_action: 1 },
+    by_action: { accept_slot: 3, decline: 1 },
+    refusals: { quote_not_in_text: 1 },
+    would_move_matched: 1,
+    would_move_unmatched: 1,
+  });
+});

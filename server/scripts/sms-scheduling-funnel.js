@@ -45,6 +45,15 @@ function printReport(since, until, f) {
       `    with a slot that did not resolve ${f.offers.with_unresolved_slot}`,
     );
   }
+  if (f.decisions) {
+    const fmt = (o) => Object.keys(o).sort().map((k) => `${k} ${o[k]}`).join(', ') || 'none';
+    lines.push(
+      `  Decide step (shadow) decisions     ${f.decisions.total}`,
+      `    by outcome                       ${fmt(f.decisions.by_outcome)}`,
+      `    refused because                  ${fmt(f.decisions.refusals)}`,
+      `    would-move now in that slot      ${f.decisions.would_move_matched} of ${f.decisions.would_move_matched + f.decisions.would_move_unmatched}`,
+    );
+  }
   console.log(lines.join('\n'));
 }
 

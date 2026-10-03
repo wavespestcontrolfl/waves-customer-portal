@@ -1,0 +1,157 @@
+/**
+ * SMS scheduling decide step, SHADOW (GATE_SMS_SCHEDULING_DECIDE, dark): the
+ * model's answer is read strictly, every check refuses to staff, a slot the
+ * calendar already shows is confirm-only, and nothing but a decision row is
+ * written. Synthetic people and numbers only.
+ */
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+
+const decide = require('../services/sms-scheduling-decide');
+
+const GATE = 'GATE_SMS_SCHEDULING_DECIDE';
+const NOW = new Date('2026-10-02T15:00:00Z');
+const CUSTOMER = { id: 'cust-1', phone: '+19415550100', service_contact_phone: null, service_contact2_phone: null };
+const VISIT_ID = '11111111-1111-4111-8111-111111111111';
+const SLOTS = [
+  { date_label: 'Tuesday, October 6', window_label: '10:00 AM - 12:00 PM', date: '2026-10-06', start: '10:00', end: '12:00' },
+  { date_label: 'Wednesday, October 7', window_label: '2:00 PM - 4:00 PM', date: '2026-10-07', start: '14:00', end: '16:00' },
+];
+const OFFER = {
+  id: 'offer-1', kind: 'move_visit', customer_id: 'cust-1', scheduled_service_id: VISIT_ID,
+  estimate_id: null, service_key: null, slots: SLOTS, sent_at: new Date('2026-10-02T13:00:00Z'),
+};
+const VISIT = {
+  id: VISIT_ID, customer_id: 'cust-1', status: 'confirmed', scheduled_date: '2026-10-05',
+  window_start: '08:00:00', window_end: '10:00:00', visit_id: null, source_action: null, customer_confirmed: true,
+};
+const accept = (n = 1, quote = 'Tuesday works', confidence = 'high') => ({ action: 'accept_slot', slot_number: n, customer_quote: quote, confidence });
+const evaluate = (over = {}) => decide.evaluateDecision({
+  offer: OFFER, decision: accept(), inboundBody: 'Tuesday works for us, thanks!', customer: CUSTOMER,
+  fromPhone: '+19415550100', visit: VISIT, movedSinceOffer: false, now: NOW, ...over,
+});
+
+afterEach(() => { delete process.env[GATE]; });
+
+describe('readDecision', () => {
+  test('a well-formed answer is kept; anything off-schema is null', () => {
+    expect(decide.readDecision(accept())).toEqual(accept());
+    expect(decide.readDecision({ ...accept(), action: 'book_it' })).toBeNull();
+    expect(decide.readDecision({ ...accept(), slot_number: 1.5 })).toBeNull();
+    expect(decide.readDecision({ ...accept(), confidence: 'certain' })).toBeNull();
+    expect(decide.readDecision(null)).toBeNull();
+  });
+});
+
+describe('evaluateDecision', () => {
+  test('a clean accept of an offered slot for a movable visit would move it', () => {
+    expect(evaluate()).toEqual({
+      outcome: 'would_move',
+      refusals: [],
+      would_have: {
+        kind: 'move_visit', scheduled_service_id: VISIT_ID, date: '2026-10-06', start: '10:00', end: '12:00',
+        from: { date: '2026-10-05', start: '08:00', end: '10:00' },
+      },
+    });
+  });
+
+  test('accepting the slot the calendar already shows is confirm-only (no write)', () => {
+    const visit = { ...VISIT, scheduled_date: '2026-10-06', window_start: '10:00:00', window_end: '12:00:00' };
+    expect(evaluate({ visit }).outcome).toBe('confirm_only');
+  });
+
+  test('decline and asks-other-time take no action; unclear goes to staff', () => {
+    expect(evaluate({ decision: { ...accept(0, 'none of those work'), action: 'decline' } }).outcome).toBe('no_action');
+    expect(evaluate({ decision: { ...accept(0, 'how about Friday'), action: 'asks_other_time' } }).outcome).toBe('no_action');
+    expect(evaluate({ decision: { ...accept(0, ''), action: 'unclear' } })).toMatchObject({ outcome: 'staff', refusals: ['unclear'] });
+  });
+
+  test('a malformed or missing answer is an error row', () => {
+    expect(evaluate({ decision: null }).outcome).toBe('error');
+  });
+
+  test.each([
+    ['slot_out_of_range', { decision: accept(3) }],
+    ['quote_not_in_text', { decision: accept(1, 'Monday is perfect') }],
+    ['not_high_confidence', { decision: accept(1, 'Tuesday works', 'medium') }],
+    ['customer_mismatch', { customer: { ...CUSTOMER, id: 'cust-2' } }],
+    ['phone_not_on_file', { fromPhone: '+19415550199' }],
+    ['slot_in_past', { now: new Date('2026-10-08T15:00:00Z') }],
+    ['visit_missing', { visit: null }],
+    ['visit_not_movable', { visit: { ...VISIT, status: 'completed' } }],
+    ['grouped_visit', { visit: { ...VISIT, visit_id: 'group-1' } }],
+    ['moved_since_offer', { movedSinceOffer: true }],
+  ])('%s refuses the accept to staff', (reason, over) => {
+    const verdict = evaluate(over);
+    expect(verdict.outcome).toBe('staff');
+    expect(verdict.refusals).toContain(reason);
+  });
+
+  test('the quote check ignores case, curly quotes and spacing, never wording', () => {
+    expect(evaluate({ inboundBody: 'TUESDAY   works  for us', decision: accept(1, 'tuesday works') }).outcome).toBe('would_move');
+    expect(evaluate({ inboundBody: 'We can’t do Tuesday', decision: accept(1, "can't do Tuesday") }).refusals).toEqual([]);
+  });
+
+  test('a slot whose date or window could not be read back is refused', () => {
+    const offer = { ...OFFER, slots: [{ ...SLOTS[0], date: null }] };
+    expect(evaluate({ offer }).refusals).toContain('slot_unresolved');
+  });
+
+  test('booking offers would book with their own ids; a legacy offer is never actionable', () => {
+    const book = { ...OFFER, kind: 'book_new', scheduled_service_id: null, service_key: 'pest_control' };
+    expect(evaluate({ offer: book, visit: null })).toEqual({
+      outcome: 'would_book', refusals: [],
+      would_have: { kind: 'book_new', estimate_id: null, service_key: 'pest_control', date: '2026-10-06', start: '10:00', end: '12:00' },
+    });
+    expect(evaluate({ offer: { ...OFFER, kind: 'unknown' }, visit: null }).refusals).toContain('offer_kind_not_actionable');
+  });
+});
+
+describe('buildDecideText', () => {
+  test('numbers the offered times as sent and puts the latest message last', () => {
+    const text = decide.buildDecideText({
+      offer: OFFER, slots: SLOTS, inboundBody: 'Tuesday works',
+      thread: [{ direction: 'outbound', message_body: 'We can do Tuesday or Wednesday.' }, { direction: 'inbound', message_body: 'Need to move it' }],
+    });
+    expect(text).toContain('1. Tuesday, October 6, 10:00 AM - 12:00 PM');
+    expect(text).toContain('2. Wednesday, October 7, 2:00 PM - 4:00 PM');
+    expect(text).toContain('[Waves] We can do Tuesday or Wednesday.');
+    expect(text.trim().endsWith('LATEST CUSTOMER MESSAGE:\nTuesday works')).toBe(true);
+  });
+});
+
+describe('runShadowDecision', () => {
+  test('gate off: nothing is read and no model is called', async () => {
+    const dbh = jest.fn();
+    const llm = { dispatch: jest.fn() };
+    await expect(decide.runShadowDecision({ customer: CUSTOMER, inboundBody: 'Tuesday works', inboundSmsLogId: 'in-1', fromPhone: '+19415550100', dbh, llm }))
+      .resolves.toEqual({ recorded: false, reason: 'gate_off' });
+    expect(dbh).not.toHaveBeenCalled();
+    expect(llm.dispatch).not.toHaveBeenCalled();
+  });
+
+  test('gate on: a phone with no open offer costs one read and no model call', async () => {
+    process.env[GATE] = 'true';
+    const builder = { where: () => builder, orderBy: () => builder, first: async () => undefined };
+    const dbh = jest.fn(() => builder);
+    const llm = { dispatch: jest.fn() };
+    await expect(decide.runShadowDecision({ customer: CUSTOMER, inboundBody: 'Tuesday works', inboundSmsLogId: 'in-1', fromPhone: '+19415550100', now: NOW, dbh, llm }))
+      .resolves.toEqual({ recorded: false, reason: 'no_open_offer' });
+    expect(llm.dispatch).not.toHaveBeenCalled();
+  });
+
+  test('gate on: a database error is reported, never thrown', async () => {
+    process.env[GATE] = 'true';
+    const dbh = jest.fn(() => { throw new Error('connection lost'); });
+    await expect(decide.runShadowDecision({ customer: CUSTOMER, inboundBody: 'x', inboundSmsLogId: 'in-1', fromPhone: '+19415550100', dbh, llm: { dispatch: jest.fn() } }))
+      .resolves.toEqual({ recorded: false, reason: 'error' });
+  });
+});
+
+describe('the decision schema', () => {
+  test('carries no numeric bounds (the Anthropic grammar rejects them) and requires every field', () => {
+    expect(JSON.stringify(decide.DECISION_SCHEMA)).not.toMatch(/minimum|maximum/);
+    expect(decide.DECISION_SCHEMA.required.sort()).toEqual(Object.keys(decide.DECISION_SCHEMA.properties).sort());
+    expect(decide.DECISION_SCHEMA.additionalProperties).toBe(false);
+  });
+});

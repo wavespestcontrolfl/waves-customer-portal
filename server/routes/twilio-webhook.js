@@ -1575,6 +1575,22 @@ router.post('/sms', async (req, res) => {
       } catch (e) { logger.error(`[sms-shadow] wiring failed: ${e.message}`); }
     }
 
+    // SMS SCHEDULING DECIDE, SHADOW (GATE_SMS_SCHEDULING_DECIDE, dark): when
+    // this phone holds an open offer of picker times (sms_offers), record what
+    // the decide step concludes about this reply and what it WOULD have done.
+    // Moves, books and sends nothing. Runs after the reminder reply-1/2 handler
+    // and the lead-intake veto (both return above when they consume the text),
+    // and regardless of the scheduling regex: "Tuesday works" may not match it.
+    if (Body && customer && !smsReaction && !isAiNumber && numberConfig.type === 'location'
+      && require('../config/feature-gates').gateEnvValue('GATE_SMS_SCHEDULING_DECIDE')) {
+      void require('../services/sms-scheduling-decide').runShadowDecision({
+        customer,
+        inboundBody: Body,
+        inboundSmsLogId: smsLogEntry?.id || null,
+        fromPhone: From,
+      }).catch((err) => logger.warn(`[sms-scheduling-decide] async decide failed: ${err.message}`));
+    }
+
 
      } catch (sideErr) {
        logger.error(`[twilio-webhook] async inbound side-effects failed: ${sideErr.message}`);

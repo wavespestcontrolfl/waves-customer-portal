@@ -97,6 +97,29 @@ function summarizeOffers(offers, { moveTimes, bookingTimes, now, observedAt }) {
 }
 
 /**
+ * The shadow decide step's rows (sms_offer_decisions) and how its would-move
+ * calls compare with what actually happened: `visitsNow` maps a visit id to
+ * its CURRENT { date, start } — a would-move counts as matched when the visit
+ * now sits in the slot the decision named (whoever moved it), as unmatched
+ * when it does not. That pair is the shadow exit bar's evidence.
+ */
+function summarizeDecisions(decisions, visitsNow = new Map()) {
+  const out = { total: decisions.length, by_outcome: {}, by_action: {}, refusals: {}, would_move_matched: 0, would_move_unmatched: 0 };
+  for (const d of decisions) {
+    out.by_outcome[d.outcome] = (out.by_outcome[d.outcome] || 0) + 1;
+    if (d.action) out.by_action[d.action] = (out.by_action[d.action] || 0) + 1;
+    const refusals = typeof d.refusals === 'string' ? JSON.parse(d.refusals) : (d.refusals || []);
+    for (const r of refusals) out.refusals[r] = (out.refusals[r] || 0) + 1;
+    if (d.outcome !== 'would_move') continue;
+    const would = typeof d.would_have === 'string' ? JSON.parse(d.would_have) : (d.would_have || {});
+    const now = visitsNow.get(String(would.scheduled_service_id || ''));
+    if (now && now.date === would.date && now.start === would.start) out.would_move_matched += 1;
+    else out.would_move_unmatched += 1;
+  }
+  return out;
+}
+
+/**
  * Pure. Every argument is a list of rows already limited to the report window
  * (follow-up rows may run 48h past its end).
  *   inbound       [{ customer_id, body, created_at }]
@@ -110,7 +133,7 @@ function summarizeOffers(offers, { moveTimes, bookingTimes, now, observedAt }) {
  *                 the change rate is over matured texts, so a text from the
  *                 last two days never counts as not followed before it could be.
  */
-function summarizeFunnel({ inbound = [], moves = [], cancels = [], bookings = [], offers = null, now = new Date(), observedAt = now } = {}) {
+function summarizeFunnel({ inbound = [], moves = [], cancels = [], bookings = [], offers = null, decisions = null, visitsNow = new Map(), now = new Date(), observedAt = now } = {}) {
   const observedMs = new Date(observedAt).getTime();
   const flagged = inbound.filter((r) => r.customer_id && isSchedulingText(r.body));
   const moveTimes = byCustomer(moves, 'created_at');
@@ -145,6 +168,7 @@ function summarizeFunnel({ inbound = [], moves = [], cancels = [], bookings = []
     per_week: perWeek,
     followed_within_48h: followed,
     offers: offerSummary,
+    decisions: decisions ? summarizeDecisions(decisions, visitsNow) : null,
   };
 }
 
@@ -170,6 +194,20 @@ function parseReportInstant(value, fallback, now = new Date()) {
   return parsed;
 }
 
+// The current date and window start of every visit a would-move named.
+async function loadVisitsNow(dbh, decisions) {
+  const ids = [...new Set(decisions.filter((d) => d.outcome === 'would_move').map((d) => {
+    const would = typeof d.would_have === 'string' ? JSON.parse(d.would_have) : (d.would_have || {});
+    return would.scheduled_service_id;
+  }).filter(Boolean))];
+  if (!ids.length) return new Map();
+  const rows = await dbh('scheduled_services').whereIn('id', ids).select('id', 'scheduled_date', 'window_start');
+  return new Map(rows.map((r) => [String(r.id), {
+    date: r.scheduled_date instanceof Date ? r.scheduled_date.toISOString().slice(0, 10) : String(r.scheduled_date || '').slice(0, 10),
+    start: r.window_start ? String(r.window_start).slice(0, 5).padStart(5, '0') : null,
+  }]));
+}
+
 /** Read the rows for [since, until) and summarise them. `dbh` is a knex handle. */
 async function loadFunnel({ since, until = new Date(), dbh = require('../models/db') } = {}) {
   const from = new Date(since);
@@ -181,6 +219,12 @@ async function loadFunnel({ since, until = new Date(), dbh = require('../models/
     .where({ direction: 'inbound' }).whereNotNull('customer_id')
     .where('created_at', '>=', from).where('created_at', '<', to)
     .select('customer_id', 'message_body as body', 'created_at');
+  const hasDecisions = await dbh.schema.hasTable('sms_offer_decisions');
+  const decisions = hasDecisions
+    ? await dbh('sms_offer_decisions').where('created_at', '>=', from).where('created_at', '<', to)
+      .select('action', 'outcome', 'refusals', 'would_have')
+    : null;
+  const visitsNow = await loadVisitsNow(dbh, decisions || []);
   const hasOffers = await dbh.schema.hasTable('sms_offers');
   const offers = hasOffers
     ? await dbh('sms_offers').where('sent_at', '>=', from).where('sent_at', '<', to)
@@ -190,7 +234,7 @@ async function loadFunnel({ since, until = new Date(), dbh = require('../models/
     ...inbound.filter((r) => isSchedulingText(r.body)).map((r) => r.customer_id),
     ...(offers || []).map((o) => o.customer_id).filter(Boolean),
   ])];
-  if (!customerIds.length) return summarizeFunnel({ inbound, offers, now: to, observedAt });
+  if (!customerIds.length) return summarizeFunnel({ inbound, offers, decisions, visitsNow, now: to, observedAt });
   const [moves, cancels, bookings] = await Promise.all([
     dbh('reschedule_log').whereIn('customer_id', customerIds).whereNot('initiated_by', 'system')
       .where('created_at', '>=', from).where('created_at', '<=', followTo).select('customer_id', 'created_at'),
@@ -201,7 +245,7 @@ async function loadFunnel({ since, until = new Date(), dbh = require('../models/
     dbh('scheduled_services').whereIn('customer_id', customerIds)
       .where('created_at', '>=', from).where('created_at', '<=', followTo).select('customer_id', 'created_at'),
   ]);
-  return summarizeFunnel({ inbound, moves, cancels, bookings, offers, now: to, observedAt });
+  return summarizeFunnel({ inbound, moves, cancels, bookings, offers, decisions, visitsNow, now: to, observedAt });
 }
 
-module.exports = { loadFunnel, summarizeFunnel, parseReportInstant, formatReportDate, isSchedulingText, weekOf, FOLLOW_WINDOW_MS };
+module.exports = { loadFunnel, summarizeFunnel, summarizeDecisions, parseReportInstant, formatReportDate, isSchedulingText, weekOf, FOLLOW_WINDOW_MS };
