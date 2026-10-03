@@ -914,6 +914,36 @@ async function reviewAskDeliveryEvidence(requestId, customerId) {
   }
 }
 
+// The same evidence for many requests in ONE query (the review page lists up
+// to 200 outcomes): Map of request id -> its sms_log row. `requests` are
+// { id, customer_id }. An unreadable sms_log reads as no evidence, as above.
+async function reviewAskDeliveryEvidenceFor(requests) {
+  const wanted = new Map((requests || []).filter((r) => r?.id && r?.customer_id).map((r) => [String(r.id), r.customer_id]));
+  const found = new Map();
+  if (!wanted.size) return found;
+  try {
+    const accepted = await db("sms_log")
+      .where({ direction: "outbound" })
+      .whereIn("customer_id", [...new Set(wanted.values())])
+      .whereIn("status", ["sent", "delivered"])
+      .whereRaw("metadata->>'review_request_id' = ANY(?)", [[...wanted.keys()]])
+      .select("id", "customer_id", "created_at", "metadata");
+    // Oldest first: a request's evidence is its first accepted send.
+    accepted.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+    for (const row of accepted) {
+      let meta = row.metadata;
+      try { meta = typeof meta === "string" ? JSON.parse(meta) : meta || {}; } catch { continue; }
+      const requestId = String(meta?.review_request_id);
+      // The reservation marker, the request id and its customer all have to match.
+      if (meta?.review_ask_reservation !== true || wanted.get(requestId) !== row.customer_id || found.has(requestId)) continue;
+      found.set(requestId, row);
+    }
+  } catch (err) {
+    logger.warn(`[review] delivered-ask evidence batch lookup failed (requests=${wanted.size}): ${err.message}`);
+  }
+  return found;
+}
+
 // promoteReviewSmsReservation (turn an accepted-but-unstamped reservation
 // into durable delivery evidence) now lives in messaging/review-ask-
 // reservation.js as `promote` — imported above. releaseReviewSmsReservation
@@ -5139,6 +5169,12 @@ const ReviewService = {
             { deliveryOutcome: "not_sent", retryable: true, code: "FALLBACK_STAMP_FAILED" }, manageRetryVia, "sms");
         }
         request.template_key = fallbackId;
+        // The review page: this request now carries the fixed text, not the
+        // draft recorded for it (best effort, never blocks the send).
+        await require("./review-ask-drafts").recordDraft(
+          { customer: { id: request.customer_id }, sequenceId: request.sequence_id || null, sequenceStep: request.sequence_step ?? null, channel: "sms" },
+          { outcome: "fallback", reason: "long_link", requestId: request.id },
+        );
       }
     }
 
@@ -5727,7 +5763,22 @@ const ReviewService = {
    * (review-ask-holds.js), by kind. Called under review-send:<customer>.
    */
   _applyAskHold: {
-    drop(seq, held, skipStep) { return skipStep("ask_dropped_payment_hold", held.detail); },
+    async drop(seq, held, skipStep) {
+      // Kept in review_ask_drafts too: the sequence's decision is only its
+      // latest one, and the next step overwrites it. The row commits with the
+      // advance or not at all (a failed or no-op advance leaves no drop on
+      // the page, and a retry cannot add a second one). The history is best
+      // effort: when it cannot be written, the step still advances.
+      const Drafts = require("./review-ask-drafts");
+      try {
+        return await db.transaction((trx) => skipStep("ask_dropped_payment_hold", held.detail, {
+          database: trx, onAdvanced: () => Drafts.recordPaymentDrop(seq, held.detail, trx),
+        }));
+      } catch (err) {
+        Drafts.warnWrite("payment drop record", seq.customer_id, seq.id, err);
+        return skipStep("ask_dropped_payment_hold", held.detail);
+      }
+    },
     async wait(seq, held) {
       await db("review_sequences").where({ id: seq.id, status: "active" }).update({
         next_run_at: held.retryAt, payment_hold_step: seq.current_step, payment_hold_since: held.heldSince,
@@ -6709,25 +6760,28 @@ const ReviewService = {
     // current step (a check-in).
     // Skip the current ask without sending: advance exactly as after a send
     // (same schedule), but no touch is counted. `claimed`: the step's send
-    // claim (next_run_at NULL) is already taken.
-    const skipStep = async (reason, detail = null) => {
+    // claim (next_run_at NULL) is already taken. `onAdvanced` runs on
+    // `database` only when the cadence row actually moved (it is still active).
+    const skipStep = async (reason, detail = null, { database = db, onAdvanced = null } = {}) => {
       const step = seq.current_step;
       const nextStep = step + 1;
       // The skipped step was the last: the cadence is done, as after a send.
       if (nextStep >= plan.length) {
-        await db("review_sequences").where({ id: seq.id, status: "active" }).update({
+        const moved = await database("review_sequences").where({ id: seq.id, status: "active" }).update({
           status: "completed", stop_reason: "completed", current_step: nextStep, next_run_at: null,
           completed_at: new Date(), decision: sequenceDecision({ reason, detail }), updated_at: new Date(),
         });
+        if (moved && onAdvanced) await onAdvanced();
         return { ran: true, sent: false, stepSkipped: true, completed: true, reason, step };
       }
       const next_run_at = nextTouchRunAt({ startedAt: seq.started_at, step: plan[nextStep], previousStep: plan[step] || null });
-      await db("review_sequences").where({ id: seq.id, status: "active" }).update({
+      const moved = await database("review_sequences").where({ id: seq.id, status: "active" }).update({
         current_step: nextStep,
         next_run_at,
         decision: sequenceDecision({ reason, plannedAt: next_run_at, nextEvalAt: next_run_at, detail }),
         updated_at: new Date(),
       });
+      if (moved && onAdvanced) await onAdvanced();
       // Never `skipped`: that is runExclusive's held-lock shape, and
       // _runSequenceStep would report this step as a busy lock.
       return { ran: true, sent: false, stepSkipped: true, reason, step };
@@ -8043,5 +8097,8 @@ ReviewService.REVIEW_TOKEN_RE = REVIEW_TOKEN_RE;
 ReviewService.LEGACY_REVIEW_DELAY_MINUTES = LEGACY_REVIEW_DELAY_MINUTES;
 ReviewService.supersedeQueuedAsks = supersedeQueuedAsks;
 ReviewService.reserveSendableReviewSms = reserveSendableReviewSms;
+
+// The review page reads the same delivered-ask evidence the sender trusts.
+ReviewService.reviewAskDeliveryEvidenceFor = reviewAskDeliveryEvidenceFor;
 
 module.exports = ReviewService;

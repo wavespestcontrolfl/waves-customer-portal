@@ -1,11 +1,12 @@
 /**
- * POST /admin/dispatch/:serviceId/fast-complete/voice-fill (Fast Complete voice
- * fill, dark behind GATE_FAST_COMPLETE_VOICE_FILL). The model call is mocked.
+ * POST /admin/dispatch/:serviceId/fast-complete/voice-fill/clip: what the fill
+ * answers once the clip is heard (Fast Complete voice fill, dark behind
+ * GATE_FAST_COMPLETE_VOICE_FILL). The transcriber and the model are mocked; the
+ * upload itself (gate order, ownership, audio types, transcriber failures) is in
+ * admin-dispatch-fast-complete-voice-fill-clip.test.js.
  *
  *  - Gate off answers 404 {enabled:false} without touching the database.
- *  - A technician only fills their own visit; admins any.
  *  - A visit whose live completion profile is not pest_re_service is a 409.
- *  - The body must be { sheet: 'pest_reservice', transcript: 1..4000 chars }.
  *  - The happy path answers the validated fill; a model failure is a 502.
  *  - The audit line carries ids and counts only: never the transcript or notes.
  */
@@ -41,21 +42,28 @@ jest.mock('../services/llm/call', () => ({
   ...jest.requireActual('../services/llm/call'),
   callAnthropic: jest.fn(),
 }));
+jest.mock('../services/call-recording-processor', () => ({
+  ...jest.requireActual('../services/call-recording-processor'),
+  transcribeWithOpenAI: jest.fn(),
+}));
 
 const logger = require('../services/logger');
 const { resolveEligibility, loadRecapCatalogProducts, loadCommonProducts } = require('../services/pest-recap');
 const { callAnthropic } = require('../services/llm/call');
+const { transcribeWithOpenAI } = require('../services/call-recording-processor');
 const MODELS = require('../config/models');
 const router = require('../routes/admin-dispatch');
 
-const PATH = '/:serviceId/fast-complete/voice-fill';
+const PATH = '/:serviceId/fast-complete/voice-fill/clip';
 const params = { serviceId: 'visit-1' };
 
 function routeLayer(method, routePath) {
   return router.stack.find((l) => l.route && l.route.path === routePath && l.route.methods[method]);
 }
 
-function invoke({ body, actor = { techRole: 'admin', technicianId: 'admin-1' } } = {}) {
+// The final handler, as multer would hand it the parsed request. The clip is heard as TRANSCRIPT.
+const CLIP = { sheet: 'pest_reservice', duration_seconds: '12' };
+function invoke({ body = CLIP, actor = { techRole: 'admin', technicianId: 'admin-1' } } = {}) {
   const layer = routeLayer('post', PATH);
   const handler = layer.route.stack[layer.route.stack.length - 1].handle;
   const res = {
@@ -65,7 +73,7 @@ function invoke({ body, actor = { techRole: 'admin', technicianId: 'admin-1' } }
     json(payload) { this.body = payload; return this; },
   };
   return new Promise((resolve, reject) => {
-    handler({ params, body, query: {}, ...actor }, res, (err) => (err ? reject(err) : resolve(res)))
+    handler({ params, body, file: { buffer: Buffer.from('audio-bytes'), mimetype: 'audio/webm;codecs=opus' }, query: {}, ...actor }, res, (err) => (err ? reject(err) : resolve(res)))
       .then(() => resolve(res))
       .catch(reject);
   });
@@ -98,7 +106,7 @@ const MODEL_ANSWER = {
   unclear: [],
 };
 
-describe('POST fast-complete/voice-fill', () => {
+describe('POST fast-complete/voice-fill/clip: the fill', () => {
   const savedGate = process.env.GATE_FAST_COMPLETE_VOICE_FILL;
   beforeEach(() => {
     process.env.GATE_FAST_COMPLETE_VOICE_FILL = 'true';
@@ -107,6 +115,7 @@ describe('POST fast-complete/voice-fill', () => {
     loadRecapCatalogProducts.mockResolvedValue(CATALOG);
     loadCommonProducts.mockResolvedValue([]);
     callAnthropic.mockResolvedValue({ ok: true, json: MODEL_ANSWER });
+    transcribeWithOpenAI.mockResolvedValue({ text: TRANSCRIPT });
   });
   afterEach(() => {
     if (savedGate === undefined) delete process.env.GATE_FAST_COMPLETE_VOICE_FILL; else process.env.GATE_FAST_COMPLETE_VOICE_FILL = savedGate;
@@ -120,8 +129,8 @@ describe('POST fast-complete/voice-fill', () => {
     const authIdx = router.stack.findIndex((l) => !l.route && l.name === 'adminAuthenticate');
     expect(authIdx).toBeGreaterThan(-1);
     expect(router.stack.indexOf(layer)).toBeGreaterThan(authIdx);
-    // dark gate, limiter, then the handler
-    expect(layer.route.stack).toHaveLength(3);
+    // dark gate, limiter, ownership, the upload parse, then the handler
+    expect(layer.route.stack).toHaveLength(5);
   });
 
   test('with the gate off the FIRST layer answers 404, so the limiter bucket is never spent', () => {
@@ -138,27 +147,24 @@ describe('POST fast-complete/voice-fill', () => {
     expect(next).toHaveBeenCalledTimes(1);
   });
 
-  test.each([undefined, '', 'false', '1', 'TRUE', 'on'])('gate %p answers 404 {enabled:false} and reads and calls nothing', async (value) => {
+  test.each([undefined, '', 'false', '1', 'TRUE', 'on'])('gate %p answers 404 {enabled:false} and reads and calls nothing', (value) => {
     if (value === undefined) delete process.env.GATE_FAST_COMPLETE_VOICE_FILL; else process.env.GATE_FAST_COMPLETE_VOICE_FILL = value;
     const calls = [];
     mockDbCurrent = dbWithOwner('tech-1', calls);
-    const res = await invoke({ body: { sheet: 'pest_reservice', transcript: TRANSCRIPT } });
+    const res = { statusCode: 200, body: null, status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return this; } };
+    const next = jest.fn();
+    routeLayer('post', PATH).route.stack[0].handle({}, res, next);
     expect(res.statusCode).toBe(404);
     expect(res.body).toEqual({ enabled: false });
+    expect(next).not.toHaveBeenCalled();
     expect(calls).toEqual([]);
-    expect(callAnthropic).not.toHaveBeenCalled();
-  });
-
-  test("a technician cannot fill another technician's visit", async () => {
-    mockDbCurrent = dbWithOwner('tech-2');
-    const res = await invoke({ body: { sheet: 'pest_reservice', transcript: TRANSCRIPT }, actor: { techRole: 'technician', technicianId: 'tech-1' } });
-    expect(res.statusCode).toBe(403);
+    expect(transcribeWithOpenAI).not.toHaveBeenCalled();
     expect(callAnthropic).not.toHaveBeenCalled();
   });
 
   test('a visit whose completion profile is not pest_re_service is a 409 and the model is never called', async () => {
     resolveEligibility.mockResolvedValue({ ok: true, svc: {}, profile: { serviceKey: 'lawn_re_service', category: 'lawn_care' }, eligible: false });
-    const res = await invoke({ body: { sheet: 'pest_reservice', transcript: TRANSCRIPT } });
+    const res = await invoke();
     expect(res.statusCode).toBe(409);
     expect(res.body).toEqual({ error: 'not_pest_re_service', code: 'not_pest_re_service' });
     expect(callAnthropic).not.toHaveBeenCalled();
@@ -166,43 +172,19 @@ describe('POST fast-complete/voice-fill', () => {
 
   test('a pest re-service the short form cannot take (typed / project-backed) is a 409', async () => {
     resolveEligibility.mockResolvedValue({ ok: true, svc: {}, profile: { serviceKey: 'pest_re_service' }, eligible: false });
-    const res = await invoke({ body: { sheet: 'pest_reservice', transcript: TRANSCRIPT } });
+    const res = await invoke();
     expect(res.statusCode).toBe(409);
     expect(res.body.code).toBe('not_eligible');
   });
 
   test('a visit that disappears is 404', async () => {
     resolveEligibility.mockResolvedValue({ ok: false, reason: 'not_found' });
-    const res = await invoke({ body: { sheet: 'pest_reservice', transcript: TRANSCRIPT } });
+    const res = await invoke();
     expect(res.statusCode).toBe(404);
   });
 
-  describe('body validation (400)', () => {
-    const long = 'a'.repeat(4001);
-    test.each([
-      ['no body', undefined],
-      ['no sheet', { transcript: 'hello' }],
-      ['unknown sheet', { sheet: 'tree_shrub', transcript: 'hello' }],
-      ['inherited sheet name', { sheet: 'constructor', transcript: 'hello' }],
-      ['no transcript', { sheet: 'pest_reservice' }],
-      ['empty transcript', { sheet: 'pest_reservice', transcript: '' }],
-      ['blank transcript', { sheet: 'pest_reservice', transcript: '   ' }],
-      ['non-string transcript', { sheet: 'pest_reservice', transcript: ['hello'] }],
-      ['transcript over 4000 characters', { sheet: 'pest_reservice', transcript: long }],
-    ])('%s', async (_name, body) => {
-      const res = await invoke({ body });
-      expect(res.statusCode).toBe(400);
-      expect(callAnthropic).not.toHaveBeenCalled();
-    });
-
-    test('a transcript of exactly 4000 characters is accepted', async () => {
-      const res = await invoke({ body: { sheet: 'pest_reservice', transcript: 'a'.repeat(4000) } });
-      expect(res.statusCode).toBe(200);
-    });
-  });
-
   test('happy path: the model is asked on the FAST tier with a closed schema and the validated fill comes back', async () => {
-    const res = await invoke({ body: { sheet: 'pest_reservice', transcript: TRANSCRIPT } });
+    const res = await invoke();
     expect(res.statusCode).toBe(200);
     expect(res.body).toEqual({
       enabled: true,
@@ -227,19 +209,19 @@ describe('POST fast-complete/voice-fill', () => {
     // no stock unit on file for the row, so the usual unit decides (the sheet's precedence)
     loadRecapCatalogProducts.mockResolvedValue([CATALOG[0], { id: 'p-talak', name: 'Atticus Talak 7.9 F', category: 'insecticide' }]);
     loadCommonProducts.mockResolvedValue([{ productId: 'p-talak', visits: 12, usualUnit: 'g', usualAmount: 30 }]);
-    await invoke({ body: { sheet: 'pest_reservice', transcript: TRANSCRIPT } });
+    await invoke();
     const { text } = callAnthropic.mock.calls[0][0];
     expect(text).toContain('p-talak | Atticus Talak 7.9 F | also called: Talstar P | units: g, oz, lb');
     expect(text).toContain('p-taurus | Taurus SC | units: tsp, fl_oz, gal');
     // and with a stock unit on file, that wins over the usual unit
     loadRecapCatalogProducts.mockResolvedValue(CATALOG);
-    await invoke({ body: { sheet: 'pest_reservice', transcript: TRANSCRIPT } });
+    await invoke();
     expect(callAnthropic.mock.calls[1][0].text).toContain('p-talak | Atticus Talak 7.9 F | also called: Talstar P | units: tsp, fl_oz, gal');
   });
 
   test('an empty catalog fails closed: 502, and the model is never called', async () => {
     loadRecapCatalogProducts.mockResolvedValue([]);
-    const res = await invoke({ body: { sheet: 'pest_reservice', transcript: TRANSCRIPT } });
+    const res = await invoke();
     expect(res.statusCode).toBe(502);
     expect(res.body).toEqual({ error: 'Voice fill is unavailable right now. Keep typing.' });
     expect(callAnthropic).not.toHaveBeenCalled();
@@ -247,13 +229,13 @@ describe('POST fast-complete/voice-fill', () => {
 
   test('a catalog of only hidden categories is empty too', async () => {
     loadRecapCatalogProducts.mockResolvedValue([{ id: 'p-supply', name: 'Yard sign', category: 'supplies' }]);
-    expect((await invoke({ body: { sheet: 'pest_reservice', transcript: TRANSCRIPT } })).statusCode).toBe(502);
+    expect((await invoke()).statusCode).toBe(502);
     expect(callAnthropic).not.toHaveBeenCalled();
   });
 
   test('an off-list product from the model comes back as unclear, not as a tap', async () => {
     callAnthropic.mockResolvedValue({ ok: true, json: { ...MODEL_ANSWER, products: [{ productId: 'p-invented', amount: 0, unit: 'not_said', sameAsLast: false, method: 'not_said', heard: '4 ounces of Taurus' }] } });
-    const res = await invoke({ body: { sheet: 'pest_reservice', transcript: TRANSCRIPT } });
+    const res = await invoke();
     expect(res.statusCode).toBe(200);
     expect(res.body.products).toEqual([]);
     expect(res.body.unclear).toEqual([{ heard: '4 ounces of Taurus', reason: 'not_on_sheet' }]);
@@ -264,14 +246,14 @@ describe('POST fast-complete/voice-fill', () => {
     ['the adapter returns no JSON', { ok: true, json: null }],
   ])('model failure (%s) is a 502 and tells the client to keep typing', async (_name, result) => {
     callAnthropic.mockResolvedValue(result);
-    const res = await invoke({ body: { sheet: 'pest_reservice', transcript: TRANSCRIPT } });
+    const res = await invoke();
     expect(res.statusCode).toBe(502);
     expect(res.body).toEqual({ error: 'Voice fill is unavailable right now. Keep typing.' });
   });
 
   test('a throwing model call is a 502 too', async () => {
     callAnthropic.mockRejectedValue(new Error('socket hang up'));
-    const res = await invoke({ body: { sheet: 'pest_reservice', transcript: TRANSCRIPT } });
+    const res = await invoke();
     expect(res.statusCode).toBe(502);
   });
 
@@ -279,7 +261,7 @@ describe('POST fast-complete/voice-fill', () => {
     const lines = () => logger.info.mock.calls.map((c) => String(c[0]));
 
     test('carries ids and counts, never the transcript or either note', async () => {
-      await invoke({ body: { sheet: 'pest_reservice', transcript: TRANSCRIPT }, actor: { techRole: 'technician', technicianId: 'tech-1' } });
+      await invoke({ actor: { techRole: 'technician', technicianId: 'tech-1' } });
       const audit = lines().filter((l) => l.includes('[voice-fill]'));
       expect(audit).toHaveLength(1);
       expect(audit[0]).toContain('service=visit-1');
@@ -292,11 +274,11 @@ describe('POST fast-complete/voice-fill', () => {
 
     test('nothing logged at any level holds a word of the transcript or the notes', async () => {
       callAnthropic.mockResolvedValueOnce({ ok: true, json: MODEL_ANSWER });
-      await invoke({ body: { sheet: 'pest_reservice', transcript: TRANSCRIPT } });
+      await invoke();
       callAnthropic.mockResolvedValueOnce({ ok: false, reason: 'anthropic_529' });
-      await invoke({ body: { sheet: 'pest_reservice', transcript: TRANSCRIPT } });
+      await invoke();
       callAnthropic.mockRejectedValueOnce(new Error('upstream said: Note for the office: gate code is 7731'));
-      await invoke({ body: { sheet: 'pest_reservice', transcript: TRANSCRIPT } });
+      await invoke();
       const everything = ['info', 'warn', 'error', 'debug'].flatMap((level) => logger[level].mock.calls.map((c) => c.join(' '))).join('\n');
       for (const secret of ['7731', 'Taurus', 'perimeter', 'Note for the office', 'gate code', 'ants']) {
         expect(everything).not.toContain(secret);
@@ -305,10 +287,11 @@ describe('POST fast-complete/voice-fill', () => {
 
     test('a model failure is audited with ok=false and no counts of words', async () => {
       callAnthropic.mockResolvedValue({ ok: false, reason: 'anthropic_529' });
-      await invoke({ body: { sheet: 'pest_reservice', transcript: TRANSCRIPT } });
+      await invoke();
       const audit = lines().find((l) => l.includes('[voice-fill]'));
       expect(audit).toContain('ok=false');
-      expect(audit).toContain(`chars=${TRANSCRIPT.length}`);
+      expect(audit).toContain('reason=model_failed');
+      expect(audit).not.toContain('chars=');
     });
   });
 });

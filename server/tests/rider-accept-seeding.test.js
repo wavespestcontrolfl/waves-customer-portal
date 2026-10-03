@@ -81,6 +81,51 @@ describe('host / rider pairing table', () => {
     }
     expect(riderPairingEnabled(lawn({ recurring_pattern: 'bimonthly' }), 'pest_control', 'quarterly')).toBe(false);
   });
+
+  describe('second batch (GATE_RIDER_PAIRS_MONTHLY_LAWN)', () => {
+    const original = process.env.GATE_RIDER_PAIRS_MONTHLY_LAWN;
+    afterEach(() => {
+      if (original === undefined) delete process.env.GATE_RIDER_PAIRS_MONTHLY_LAWN;
+      else process.env.GATE_RIDER_PAIRS_MONTHLY_LAWN = original;
+    });
+    const six = lawn({ recurring_pattern: 'every_6_weeks' });
+    const monthly = lawn({ recurring_pattern: 'monthly' });
+    const secondBatch = [
+      ['pest_control', 'bimonthly'], ['tree_shrub', 'bimonthly'], ['pest_control', 'monthly'],
+      ['pest_control', 'semiannual'], ['mosquito', 'seasonal_feb_oct'],
+    ];
+
+    test('gate off: none of the second-batch pairs ride, and the quarterly pairs still do', () => {
+      delete process.env.GATE_RIDER_PAIRS_MONTHLY_LAWN;
+      for (const [family, pattern] of secondBatch) expect(riderPairingEnabled(monthly, family, pattern)).toBe(false);
+      expect(riderPairingEnabled(monthly, 'pest_control', 'quarterly')).toBe(true);
+    });
+
+    test('gate on: they ride a monthly lawn only; the pairs the owner did not choose stay separate', () => {
+      process.env.GATE_RIDER_PAIRS_MONTHLY_LAWN = 'true';
+      for (const [family, pattern] of secondBatch) {
+        expect(riderPairingEnabled(monthly, family, pattern)).toBe(true);
+        expect(riderPairingEnabled(six, family, pattern)).toBe(false);
+      }
+      // Year-round mosquito, monthly tree & shrub, semiannual palm and termite bait: no row.
+      for (const [family, pattern] of [
+        ['mosquito', 'monthly'], ['tree_shrub', 'monthly'], ['palm_injection', 'semiannual'],
+        ['tree_shrub', 'semiannual'], ['termite_bait', 'bimonthly'], ['pest_control', 'annual'],
+      ]) expect(riderPairingEnabled(monthly, family, pattern)).toBe(false);
+    });
+
+    test('dark by default; only the exact string true opens it', () => {
+      const { riderPairsMonthlyLawnLive } = require('../config/feature-gates');
+      delete process.env.GATE_RIDER_PAIRS_MONTHLY_LAWN;
+      expect(riderPairsMonthlyLawnLive()).toBe(false);
+      for (const v of ['1', 'on', 'TRUE', '']) {
+        process.env.GATE_RIDER_PAIRS_MONTHLY_LAWN = v;
+        expect(riderPairsMonthlyLawnLive()).toBe(false);
+      }
+      process.env.GATE_RIDER_PAIRS_MONTHLY_LAWN = 'true';
+      expect(riderPairsMonthlyLawnLive()).toBe(true);
+    });
+  });
 });
 
 describe('rider context fall-backs', () => {

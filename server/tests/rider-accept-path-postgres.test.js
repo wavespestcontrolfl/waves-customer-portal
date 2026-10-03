@@ -115,11 +115,10 @@ postgres('pest rides the lawn from accept', () => {
 
   // Slot-reserved accept: the first pest visit is already on the books, the lawn
   // line promotes as a same-trip standalone row.
-  async function reservedAccept(trx, services, { before } = {}) {
+  async function reservedAccept(trx, services, { before, date = weekdayAhead(21) } = {}) {
     const base = await customerFixture(trx);
     if (before) await before(base);
     const estimateId = randomUUID();
-    const date = weekdayAhead(21);
     await trx('estimates').insert({
       id: estimateId, customer_id: base.customerId, property_id: base.propertyId, status: 'accepted',
       token: randomUUID().replaceAll('-', '') + randomUUID().replaceAll('-', ''),
@@ -224,6 +223,93 @@ postgres('pest rides the lawn from accept', () => {
       expect(dates).toHaveLength(6);
       expect(dates).not.toContain(addDays(f.date, 84));
     } finally { await trx.rollback(); }
+  });
+
+  // Second batch (GATE_RIDER_PAIRS_MONTHLY_LAWN, owner ruling 2026-10-01): on a
+  // MONTHLY lawn a bi-monthly rider takes every 2nd lawn visit and a seasonal
+  // mosquito rider every Feb-Oct one. Each rider visit must be IN its lawn visit.
+  describe('second batch on a monthly lawn', () => {
+    const SECOND = 'GATE_RIDER_PAIRS_MONTHLY_LAWN';
+    const MOSQUITO_SEASONAL = {
+      service: 'mosquito', name: 'Seasonal Mosquito Program', program: 'seasonal9', visitsPerYear: 9, frequency: 'seasonal9', annual: 720, mo: 60, perTreatment: 80,
+    };
+    let originalSecond;
+    beforeEach(() => { originalSecond = process.env[SECOND]; process.env[GATE] = 'true'; });
+    afterEach(() => {
+      if (originalSecond === undefined) delete process.env[SECOND];
+      else process.env[SECOND] = originalSecond;
+    });
+
+    async function riderAndLawn(trx, estimateId, riderName) {
+      const rows = await trx('scheduled_services').where({ source_estimate_id: estimateId }).orderBy('scheduled_date');
+      const parentOf = (name) => rows.find((r) => !r.recurring_parent_id && new RegExp(name, 'i').test(r.service_type));
+      const series = (parent) => rows.filter((r) => r.id === parent.id || r.recurring_parent_id === parent.id);
+      const lawnParent = parentOf('lawn');
+      const riderParent = parentOf(riderName);
+      return { lawnParent, riderParent, lawn: series(lawnParent), rider: series(riderParent) };
+    }
+
+    function expectInLawnVisits(rider, lawn) {
+      for (const row of rider) {
+        const host = lawn.find((l) => dateOf(l.scheduled_date) === dateOf(row.scheduled_date));
+        expect(host).toBeDefined();
+        expect(row.visit_id).not.toBeNull();
+        expect(row.visit_id).toBe(host.visit_id);
+      }
+    }
+
+    test('second gate on: bi-monthly pest takes every 2nd monthly lawn visit, grouped and linked', async () => {
+      process.env[SECOND] = 'true';
+      const trx = await mockPg.transaction();
+      try {
+        const f = await reservedAccept(trx, [PEST_BIMONTHLY, LAWN_MONTHLY]);
+        const { lawnParent, riderParent, lawn, rider } = await riderAndLawn(trx, f.estimateId, 'pest');
+        expect(riderParent.rides_parent_id).toBe(lawnParent.id);
+        const lawnDates = lawn.map((r) => dateOf(r.scheduled_date));
+        expect(lawnDates).toHaveLength(12);
+        expect(rider.map((r) => dateOf(r.scheduled_date))).toEqual([0, 2, 4, 6, 8, 10].map((k) => lawnDates[k]));
+        expect(rider.every((r) => r.id === riderParent.id || r.recurring_pattern === 'bimonthly')).toBe(true);
+        expectInLawnVisits(rider, lawn);
+      } finally { await trx.rollback(); }
+    });
+
+    test('second gate off: the same accept seeds the bi-monthly walk and links nothing', async () => {
+      delete process.env[SECOND];
+      const trx = await mockPg.transaction();
+      try {
+        const f = await reservedAccept(trx, [PEST_BIMONTHLY, LAWN_MONTHLY]);
+        const { riderParent, rider } = await riderAndLawn(trx, f.estimateId, 'pest');
+        expect(riderParent.rides_parent_id).toBeNull();
+        expect(rider).toHaveLength(6);
+      } finally { await trx.rollback(); }
+    });
+
+    test('second gate on: seasonal mosquito takes every Feb-Oct lawn visit and none in Nov-Jan', async () => {
+      process.env[SECOND] = 'true';
+      const trx = await mockPg.transaction();
+      try {
+        const month = (d) => Number(d.slice(5, 7));
+        const inSeason = (d) => month(d) >= 2 && month(d) <= 10;
+        // A seasonal accept refuses a Nov-Jan first visit, so in winter the
+        // synthetic first visit is the first weekday of the coming February.
+        let date = weekdayAhead(21);
+        if (!inSeason(date)) {
+          date = `${Number(date.slice(0, 4)) + (month(date) > 10 ? 1 : 0)}-02-01`;
+          while ([0, 6].includes(etParts(parseETDateTime(`${date}T12:00`)).dayOfWeek)) date = addDays(date, 1);
+        }
+        // The pest visit is the reserved one; lawn and mosquito promote beside it
+        // as same-trip rows with their catalog services (the lawn seeds first).
+        const f = await reservedAccept(trx, [PEST_QUARTERLY, MOSQUITO_SEASONAL, LAWN_MONTHLY], { date });
+        const { lawnParent, riderParent, lawn, rider } = await riderAndLawn(trx, f.estimateId, 'mosquito');
+        expect(riderParent.recurring_pattern).toBe('seasonal_feb_oct');
+        expect(riderParent.rides_parent_id).toBe(lawnParent.id);
+        const lawnFollowUps = lawn.map((r) => dateOf(r.scheduled_date)).slice(1);
+        const riderDates = rider.map((r) => dateOf(r.scheduled_date));
+        expect(riderDates).toEqual([date, ...lawnFollowUps.filter(inSeason).slice(0, 8)]);
+        expect(riderDates).toHaveLength(9);
+        expectInLawnVisits(rider, lawn);
+      } finally { await trx.rollback(); }
+    });
   });
 
   // A reserved lawn visit seeds AFTER the promoted programs, so the quarterly
