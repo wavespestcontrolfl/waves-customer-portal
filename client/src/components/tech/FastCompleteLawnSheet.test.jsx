@@ -54,7 +54,7 @@ const SERVICE = {
 };
 
 const PLANNED = [
-  { productId: P_TALAK, name: 'Talak 7.9%', applicationMethod: 'broadcast_spray', amount: 6.4, amountUnit: 'fl_oz', approvedForReport: true, wateringRule: null, wateringSummary: 'Water in', mowHoldDays: null },
+  { productId: P_TALAK, name: 'Talak 7.9%', applicationMethod: 'broadcast_spray', amount: 6.4, amountUnit: 'fl_oz', treatedSqft: 6000, areaUnit: 'sqft', approvedForReport: true, wateringRule: null, wateringSummary: 'Water in', mowHoldDays: null },
   { productId: P_IRON, name: 'Iron Plus', applicationMethod: 'spot_treatment', amount: null, amountUnit: 'fl_oz', approvedForReport: true, wateringRule: null, wateringSummary: 'No rule', mowHoldDays: null },
 ];
 
@@ -63,6 +63,7 @@ const context = (overrides = {}) => ({
   eligible: true,
   reason: null,
   visitType: 'recurring',
+  findingsType: null,
   service: VISIT,
   visitDate: '2026-10-04',
   turfHeightCapture: false,
@@ -86,7 +87,6 @@ let requests;
 let completeErrors;
 let previewAnswer;
 let lookup;
-let planArea;
 let tips;
 let catalogAnswer;
 
@@ -103,10 +103,6 @@ function makeRequest({ ctx = context(), contextError = null } = {}) {
       const answer = typeof previewAnswer === 'function' ? previewAnswer(body) : previewAnswer;
       if (answer instanceof Error) throw answer;
       return answer;
-    }
-    if (path.includes('/treatment-plans/')) {
-      if (planArea instanceof Error) throw planArea;
-      return planArea;
     }
     if (path.endsWith('/tech-tips')) return tips;
     if (path === '/admin/dispatch/products/catalog') return catalogAnswer;
@@ -148,7 +144,6 @@ beforeEach(() => {
   completeErrors = [];
   previewAnswer = { products: [], state: null, lines: [], sentence: null, mowHold: null, asOf: '2026-10-04T14:00:00.000Z', provisional: [], omitted: [] };
   lookup = { shotListEnabled: true, assessment: null };
-  planArea = { plan: { completionDefaults: { lawnSqft: 6400, items: [{ product: { id: P_TALAK }, mix: { treatedSqft: 6000 } }] } } };
   tips = { available: false, groups: [] };
   catalogAnswer = { products: CATALOG };
   vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
@@ -262,8 +257,8 @@ describe('products', () => {
   });
 
   test('a sprayed product takes its area from the lawn plan, and Complete waits for one when there is none', async () => {
-    planArea = new Error('plan unavailable');
-    await openSheet();
+    // The plan has no area for it (treatedSqft null): the box is the technician's.
+    await openSheet({ request: makeRequest({ ctx: plannedOne('broadcast_spray', { treatedSqft: null, areaUnit: null }) }) });
     await confirmAssessment();
     // Talak is a broadcast spray with no area yet.
     await waitFor(() => expect(footerReason()).toBe('Enter the square feet treated for Talak 7.9%.'));
@@ -323,8 +318,8 @@ describe('Complete', () => {
   });
 
   test('a one-time lawn visit asks for the lawn condition the server requires, and sends it as typed findings', async () => {
-    const request = makeRequest({ ctx: ONE_TIME() });
-    await openSheet({ request, props: { service: { ...SERVICE, findingsType: 'one_time_lawn_treatment' } } });
+    const request = makeRequest({ ctx: { ...ONE_TIME(), findingsType: 'one_time_lawn_treatment' } });
+    await openSheet({ request });
     await confirmAssessment();
     await waitFor(() => expect(footerReason()).toBe('Pick the lawn condition.'));
     expect(completeButton().disabled).toBe(true);
@@ -602,7 +597,6 @@ describe('what /complete requires per application method', () => {
   ];
 
   test.each(TABLE)('%s needs %s', async (method, unit, label) => {
-    planArea = new Error('none');
     await openSheet({ request: makeRequest({ ctx: plannedOne(method) }) });
     await confirmAssessment();
     if (!unit) {
@@ -622,21 +616,21 @@ describe('what /complete requires per application method', () => {
     expect(completeCalls()[0].body.products[0]).toMatchObject({ areaValue: 120, areaUnit: unit });
   });
 
-  test('a perimeter row is never seeded with the lawn\'s square feet', async () => {
-    await openSheet({ request: makeRequest({ ctx: plannedOne('perimeter_spray') }) });
+  test('a perimeter row is never seeded with the plan\'s square feet', async () => {
+    await openSheet({ request: makeRequest({ ctx: plannedOne('perimeter_spray', { treatedSqft: 6000, areaUnit: 'sqft' }) }) });
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(areaInput('Linear feet treated').value).toBe('');
   });
 
   test('switching a row from a perimeter spray to a spray drops the linear feet it held', async () => {
-    await openSheet({ request: makeRequest({ ctx: plannedOne('perimeter_spray') }) });
+    await openSheet({ request: makeRequest({ ctx: plannedOne('perimeter_spray', { treatedSqft: 6000, areaUnit: 'sqft' }) }) });
     fireEvent.change(areaInput('Linear feet treated'), { target: { value: '90' } });
     fireEvent.click(within(editorFor('Talak 7.9%')).getByRole('button', { name: 'Broadcast spray' }));
     // Square feet now: the plan's, never the 90 linear feet.
     await waitFor(() => expect(areaInput('Area treated (sq ft)').value).toBe('6000'));
   });
 
-  test('the context\'s own treatedSqft is used first and the plan read is not made', async () => {
+  test('the plan\'s treatedSqft seeds the box and no treatment-plan read is made', async () => {
     const request = makeRequest({ ctx: plannedOne('broadcast_spray', { treatedSqft: 4100, areaUnit: 'sqft' }) });
     await openSheet({ request });
     expect(areaInput('Area treated (sq ft)').value).toBe('4100');
@@ -811,5 +805,119 @@ describe('the saved-photo advisory', () => {
     await screen.findAllByText(WARNING);
     fireEvent.click(screen.getByRole('button', { name: 'Retake' }));
     await waitFor(() => expect(screen.queryByText(WARNING)).toBeNull());
+  });
+});
+
+// ── Codex round 2 on #5824 ──────────────────────────────────────────────────
+describe('the original method stays on offer', () => {
+  test('a perimeter row: tap Broadcast, the perimeter chip is still there, tap it, linear feet are required again', async () => {
+    await openSheet({ request: makeRequest({ ctx: plannedOne('perimeter_spray') }) });
+    const how = () => within(editorFor('Talak 7.9%'));
+    const names = () => how().getAllByRole('button').map((b) => b.textContent).filter((t) => /spray|Granular|Spot/.test(t));
+    expect(names()).toEqual(['Broadcast spray', 'Granular', 'Spot treatment', 'Perimeter spray']);
+    fireEvent.click(how().getByRole('button', { name: 'Broadcast spray' }));
+    expect(names()).toEqual(['Broadcast spray', 'Granular', 'Spot treatment', 'Perimeter spray']);
+    expect(how().getByRole('button', { name: 'Perimeter spray' }).getAttribute('aria-pressed')).toBe('false');
+    fireEvent.click(how().getByRole('button', { name: 'Perimeter spray' }));
+    expect(how().getByRole('button', { name: 'Perimeter spray' }).getAttribute('aria-pressed')).toBe('true');
+    expect(areaInput('Linear feet treated')).toBeTruthy();
+    expect(areaInput('Linear feet treated').value).toBe('');
+  });
+});
+
+describe('typed findings come from the context only', () => {
+  test('the schedule row says recurring but the context says one-time: the condition is required and sent', async () => {
+    const request = makeRequest({ ctx: { ...ONE_TIME(), findingsType: 'one_time_lawn_treatment' } });
+    await openSheet({ request, props: { service: { ...SERVICE, findingsType: null } } });
+    await confirmAssessment();
+    await waitFor(() => expect(footerReason()).toBe('Pick the lawn condition.'));
+    fireEvent.click(screen.getByRole('button', { name: 'Fair' }));
+    await submit();
+    expect(completeCalls()[0].body.structuredFindings).toEqual({ type: 'one_time_lawn_treatment', values: { lawn_condition: 'Fair' } });
+  });
+
+  test('context findingsType null: no condition row and no typed findings, whatever the schedule row says', async () => {
+    await openSheet({ request: makeRequest({ ctx: ONE_TIME() }), props: { service: { ...SERVICE, findingsType: 'one_time_lawn_treatment' } } });
+    expect(screen.queryByRole('heading', { name: 'Lawn condition' })).toBeNull();
+    await confirmAssessment();
+    await submit();
+    expect(completeCalls()[0].body).not.toHaveProperty('structuredFindings');
+  });
+
+  test('the key absent (an older server) hands off to the full form instead of guessing; null is not absent', async () => {
+    const { findingsType: _omit, ...older } = ONE_TIME();
+    const onFullForm = vi.fn();
+    render(<FastCompleteLawnSheet service={SERVICE} request={makeRequest({ ctx: older })} catalog={CATALOG} onClose={() => {}} onFullForm={onFullForm} />);
+    await waitFor(() => expect(onFullForm).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole('heading', { name: 'Lawn photos' })).toBeNull();
+  });
+
+  test('a findings type that is not the lawn one hands off too', async () => {
+    const onFullForm = vi.fn();
+    render(<FastCompleteLawnSheet service={SERVICE} request={makeRequest({ ctx: context({ findingsType: 'tree_shrub' }) })} catalog={CATALOG} onClose={() => {}} onFullForm={onFullForm} />);
+    await waitFor(() => expect(onFullForm).toHaveBeenCalledTimes(1));
+  });
+
+  test.each([
+    ['service type', { routedServiceType: 'Lawn Re-Service' }],
+    ['catalog service', { routedCatalogServiceId: 'cat-other' }],
+  ])('a visit whose %s changed since the schedule loaded shows the changed-visit message', async (_label, routed) => {
+    render(<FastCompleteLawnSheet service={{ ...SERVICE, ...routed }} request={makeRequest({ ctx: context({ service: { ...VISIT, catalogServiceId: 'cat-1' } }) })} catalog={CATALOG} onClose={() => {}} />);
+    await screen.findByText('This visit changed since your schedule loaded. Close and reopen it from the schedule.');
+  });
+
+  test('the same service type (any case) and a matching catalog id open the sheet', async () => {
+    await openSheet({ request: makeRequest({ ctx: context({ service: { ...VISIT, catalogServiceId: 'cat-1' } }) }), props: { service: { ...SERVICE, routedServiceType: 'lawn care', routedCatalogServiceId: 'cat-1' } } });
+    expect(screen.getByRole('heading', { name: 'Lawn photos' })).toBeTruthy();
+  });
+});
+
+describe('a product the plan lists twice', () => {
+  const twice = () => context({
+    plannedProducts: {
+      source: 'plan',
+      items: [
+        { productId: P_TALAK, name: 'Talak 7.9%', applicationMethod: 'spot_treatment', amount: 3, amountUnit: 'fl_oz' },
+        { productId: P_TALAK.toUpperCase(), name: 'Talak 7.9%', applicationMethod: 'spot_treatment', amount: 5, amountUnit: 'fl_oz' },
+        { productId: P_IRON, name: 'Iron Plus', applicationMethod: 'spot_treatment', amount: 1, amountUnit: 'fl_oz' },
+      ],
+    },
+  });
+
+  test('is one tile; on, it is one product row with the first amount (as the full form keeps the first)', async () => {
+    await openSheet({ request: makeRequest({ ctx: twice() }) });
+    expect(screen.getAllByRole('button', { name: /^Talak/ })).toHaveLength(1);
+    expect(within(editorFor('Talak 7.9%')).getByLabelText('Talak 7.9%').value).toBe('3');
+    await confirmAssessment();
+    await submit();
+    const { body } = completeCalls()[0];
+    expect(body.products.map((p) => p.productId)).toEqual([P_TALAK, P_IRON]);
+    expect(body).not.toHaveProperty('lawnProtocolCompletion');
+  });
+
+  test('off, it is one skipped entry, so /complete\'s unique-list rule holds', async () => {
+    await openSheet({ request: makeRequest({ ctx: twice() }) });
+    fireEvent.click(tile('Talak'));
+    await confirmAssessment();
+    await submit();
+    const { body } = completeCalls()[0];
+    expect(body.lawnProtocolCompletion.skippedProducts).toEqual([{ productId: P_TALAK, productName: 'Talak 7.9%' }]);
+    expect(body.products.map((p) => p.productId)).toEqual([P_IRON]);
+  });
+
+  test('every array in the body is unique where the server needs it', async () => {
+    tips = { available: true, groups: [{ tips: [{ id: 'tip-a', label: 'Tip A', copy: 'Copy A' }] }] };
+    await openSheet({ request: makeRequest({ ctx: twice() }) });
+    fireEvent.click(tile('Iron Plus'));
+    fireEvent.click(tile('Talak'));
+    fireEvent.click(await screen.findByRole('button', { name: /Tip A/ }));
+    await confirmAssessment();
+    await submit();
+    const { body } = completeCalls()[0];
+    const skipped = body.lawnProtocolCompletion.skippedProducts.map((p) => p.productId);
+    expect(new Set(skipped).size).toBe(skipped.length);
+    expect(skipped.every((id) => id === id.toLowerCase())).toBe(true);
+    expect(body.techTips).toEqual({ ids: ['tip-a'], custom: null });
+    expect(body.products.every((p) => p.targets.length === 0)).toBe(true);
   });
 });

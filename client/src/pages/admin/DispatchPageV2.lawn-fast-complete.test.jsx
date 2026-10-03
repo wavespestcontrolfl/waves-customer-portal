@@ -27,7 +27,7 @@ vi.mock('../../components/tech/FastCompleteTreeShrubSheet', () => ({
 vi.mock('../../components/tech/FastCompleteLawnSheet', () => ({
   default: ({ service, catalog, onClose, onCompleted, onFullForm }) => (
     <div>
-      Lawn sheet for {service.id} (catalog {catalog.length}, findings {String(service.findingsType)})
+      Lawn sheet for {service.id} (catalog {catalog.length}, type {String(service.routedServiceType)})
       <button type="button" onClick={() => onClose()}>Sheet close</button>
       <button type="button" onClick={() => onClose({ refresh: true })}>Sheet close refresh</button>
       <button type="button" onClick={() => onCompleted()}>Sheet completed</button>
@@ -77,17 +77,17 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.clearAllMocks(); });
 
 describe('Dispatch completion routing for lawn', () => {
-  it('opens the sheet, not CompletionPanel, for an eligible open lawn visit, with the catalog and typed-findings key', async () => {
+  it('opens the sheet, not CompletionPanel, for an eligible open lawn visit, with the catalog', async () => {
     mount([visit('svc-lawn-on')]);
     fireEvent.click(await screen.findByRole('button', { name: 'Open mobile svc-lawn-on' }));
-    expect(await screen.findByText('Lawn sheet for svc-lawn-on (catalog 2, findings null)')).toBeInTheDocument();
+    expect(await screen.findByText('Lawn sheet for svc-lawn-on (catalog 2, type null)')).toBeInTheDocument();
     expect(screen.queryByText(/Completion panel/)).not.toBeInTheDocument();
   });
 
-  it('passes a one-time lawn visit\'s typed findings to the sheet', async () => {
-    mount([visit('svc-lawn-once', { completionProfile: { category: 'lawn_care', serviceKey: 'lawn_care_one_time', findingsType: 'one_time_lawn_treatment' } })]);
+  it('passes the visit\'s raw service type to the sheet to check against the live visit (no findings type: the context decides that)', async () => {
+    mount([visit('svc-lawn-once', { serviceTypeRaw: 'Lawn Care One-Time', completionProfile: { category: 'lawn_care', serviceKey: 'lawn_care_one_time', findingsType: 'one_time_lawn_treatment' } })]);
     fireEvent.click(await screen.findByRole('button', { name: 'Open mobile svc-lawn-once' }));
-    expect(await screen.findByText(/findings one_time_lawn_treatment/)).toBeInTheDocument();
+    expect(await screen.findByText(/type Lawn Care One-Time/)).toBeInTheDocument();
   });
 
   it('with the gate off the page is exactly what it was: the full form, and the same markup as a payload that has no such key', async () => {

@@ -88,6 +88,8 @@ const needsArea = (row) => requirementOf(row) !== null;
 // No rate: the context carries none, so none is recorded (AmountRow hides the row).
 const NO_RATE = { rate: '', rateUnit: '', max: null };
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
 // Real WaveGuard member tiers (complete-scheduled-service.js isWaveGuardLawnCompletion).
 const WAVEGUARD_TIERS = new Set(['Bronze', 'Silver', 'Gold', 'Platinum']);
 
@@ -151,13 +153,13 @@ const RETRYABLE_REASONS = new Set(['profile_unavailable']);
 const EMPTY_CONTEXT = {
   loading: true, loadError: '', blockedReason: '', handoff: false, visit: null, raw: null,
   visitType: null, turfHeightCapture: false, planned: [], plannedUnavailable: null, assessment: null, photoStatus: null,
-  findingsType: undefined, stockAdvisory: undefined,
+  findingsType: null, stockAdvisory: undefined,
 };
 
 // Why the live context can't be completed here, or '' when it can.
 function blockedReasonFor(data, service) {
   const visit = data?.service || {};
-  if (visitChangedSinceSchedule(visit, service)) return 'This visit changed since your schedule loaded. Close and reopen it from the schedule.';
+  if (visitChangedSinceSchedule(visit, service) || serviceChangedSinceSchedule(visit, service)) return 'This visit changed since your schedule loaded. Close and reopen it from the schedule.';
   if (CLOSED_VISIT_STATUSES.has(String(visit.status || ''))) return `This visit is already ${visit.status}. Close and reopen it from the schedule.`;
   return '';
 }
@@ -185,12 +187,28 @@ function visitTypeUnreadable(data) {
   return !data?.visitType || data.visitType === 'unknown' || failures.includes('billing_mode');
 }
 
-// When the context carries these they win; the sheet's own sources (the
-// schedule row, the treatment-plan read) are the fallback.
+// `findingsType` decides the lawn-condition requirement, from the context ONLY.
+// null means "no typed findings" (a recurring visit) and is a real answer; the
+// KEY being absent (`'findingsType' in data` is false) means an older server
+// during a deploy, and the sheet cannot decide, so the full form opens.
+// `stockAdvisory`, when the context carries it, wins over the schedule row.
+const findingsTypeUndecidable = (data) => !('findingsType' in data)
+  || (data.findingsType !== null && data.findingsType !== LAWN_FINDINGS_TYPE);
 const optionalContextFields = (data) => ({
-  findingsType: data && 'findingsType' in data ? data.findingsType : undefined,
+  findingsType: data.findingsType ?? null,
   stockAdvisory: typeof data?.stockAdvisory === 'boolean' ? data.stockAdvisory : undefined,
 });
+
+const sameText = (a, b) => String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase();
+// The visit's service type or catalog service differs from the row the tech
+// tapped (the office changed it since the schedule loaded). A routed value that
+// is absent gives no verdict, as the shared property check does.
+function serviceChangedSinceSchedule(visit, service) {
+  const type = service?.routedServiceType;
+  const catalog = service?.routedCatalogServiceId;
+  return !!((type != null && visit?.serviceType != null && !sameText(type, visit.serviceType))
+    || (catalog != null && visit?.catalogServiceId != null && String(catalog) !== String(visit.catalogServiceId)));
+}
 
 function contextFrom(data, service) {
   if (data?.eligible !== true && RETRYABLE_REASONS.has(data?.reason)) {
@@ -199,6 +217,8 @@ function contextFrom(data, service) {
   const blockedReason = blockedReasonFor(data, service);
   // The server says this visit does not use the quick sheet: the full form opens.
   if (data?.eligible !== true && !blockedReason) return { ...EMPTY_CONTEXT, loading: false, handoff: true };
+  // An older server that does not say the findings type: hand over, never guess.
+  if (!blockedReason && data?.eligible === true && findingsTypeUndecidable(data)) return { ...EMPTY_CONTEXT, loading: false, handoff: true };
   if (!blockedReason && visitTypeUnreadable(data)) return { ...EMPTY_CONTEXT, loading: false, loadError: LOAD_ERROR };
   return {
     loading: false,
@@ -239,30 +259,6 @@ function useLawnFastContext({ base, request, service }) {
   return { ...ctx, retry };
 }
 
-// The square feet the lawn plan treats, from the full form's own plan read. It
-// only fills the area box a sprayed product needs; a failed read leaves the box
-// for the tech to fill. Read only for a visit that has planned products.
-function useLawnPlanArea({ serviceId, request, enabled }) {
-  const [area, setArea] = useState({ lawnSqft: null, byProduct: {} });
-  useEffect(() => {
-    if (!enabled) return undefined;
-    let active = true;
-    request(`/admin/treatment-plans/${serviceId}?completionDefaults=1`)
-      .then((data) => {
-        if (!active) return;
-        const defaults = data?.plan?.completionDefaults || {};
-        const byProduct = {};
-        for (const item of Array.isArray(defaults.items) ? defaults.items : []) {
-          if (item?.product?.id != null && Number(item?.mix?.treatedSqft) > 0) byProduct[String(item.product.id)] = Number(item.mix.treatedSqft);
-        }
-        setArea({ lawnSqft: Number(defaults.lawnSqft) > 0 ? Number(defaults.lawnSqft) : null, byProduct });
-      })
-      .catch(() => { /* the area box stays empty for the tech */ });
-    return () => { active = false; };
-  }, [serviceId, request, enabled]);
-  return area;
-}
-
 // ── products ────────────────────────────────────────────────────────────────
 
 // A row for a catalog product. `planned` carries the plan's amount, unit and
@@ -291,6 +287,8 @@ function productRow(product, { planned = null, added = false }) {
     // A planned product starts applied; the tech turns off what was not.
     active: !!planned,
     method,
+    // The planned or catalog method stays on offer for the life of the row.
+    originalMethod: method,
     dimension,
     totalAmount: seeded.amount,
     amountUnit: seeded.unit,
@@ -302,35 +300,39 @@ function productRow(product, { planned = null, added = false }) {
   };
 }
 
-// A sprayed or spread row with no area yet starts from the plan's square feet
-// for that product (the context's, else the treatment plan's), else the lawn's.
-// Linear feet are never seeded. Nothing else is filled in, and the tech's own
-// entry is never replaced.
-function withAreaSeed(row, planArea) {
+// A sprayed or spread row with no area yet starts from the square feet the
+// context's planned item carries (the server sends `treatedSqft` whenever the
+// plan has one; null leaves the box for the technician). Linear feet are never
+// seeded. Nothing else is filled in, and the tech's own entry is never replaced.
+function withAreaSeed(row) {
   if (requirementOf(row)?.unit !== 'sqft' || row.area !== '') return row;
-  const seed = row.plannedSqft || planArea.byProduct[String(row.productId)] || planArea.lawnSqft;
-  return seed > 0 ? { ...row, area: String(seed), areaFrom: 'from the lawn plan' } : row;
+  return row.plannedSqft > 0 ? { ...row, area: String(row.plannedSqft), areaFrom: 'from the lawn plan' } : row;
+}
+
+// One id, one planned product, however the plan lists it: the FIRST entry wins
+// (the full form's lawnPlanSelections keeps the first too). Ids compare
+// lower-case, as the server lowercases them. The rendered tiles and the skipped
+// list both come from this, so they can never disagree.
+export function uniquePlanned(items) {
+  const seen = new Set();
+  return (items || []).filter((item) => {
+    const id = String(item?.productId || '').toLowerCase();
+    if (!id || seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
 }
 
 function plannedRows(ctx, catalog) {
-  const byId = new Map((catalog || []).map((product) => [String(product.id), product]));
-  const seen = new Set();
-  const rows = [];
-  for (const item of ctx.planned) {
-    const id = String(item.productId);
-    if (seen.has(id)) continue;
-    seen.add(id);
-    rows.push(productRow(byId.get(id) || { id: item.productId, name: item.name || 'Planned product' }, { planned: item }));
-  }
-  return rows;
+  const byId = new Map((catalog || []).map((product) => [String(product.id).toLowerCase(), product]));
+  return uniquePlanned(ctx.planned).map((item) => withAreaSeed(productRow(
+    byId.get(String(item.productId).toLowerCase()) || { id: item.productId, name: item.name || 'Planned product' },
+    { planned: item },
+  )));
 }
 
-function useProductRows(ctx, catalog, planArea) {
+function useProductRows(ctx, catalog) {
   const [rows, setRows] = useState(() => plannedRows(ctx, catalog));
-  // The plan's area arrives after the sheet opens: fill the boxes still empty.
-  useEffect(() => {
-    setRows((prev) => prev.map((row) => withAreaSeed(row, planArea)));
-  }, [planArea]);
   const updateRow = useCallback((productId, patch) => {
     setRows((prev) => prev.map((row) => {
       if (row.productId !== productId) return row;
@@ -345,15 +347,15 @@ function useProductRows(ctx, catalog, planArea) {
       if (!('method' in patch)) return next;
       // An area belongs to the unit of the method it was entered for.
       const moved = requirementOf(row)?.unit !== requirementOf(next)?.unit;
-      return withAreaSeed(moved ? { ...next, area: '', areaFrom: '' } : next, planArea);
+      return withAreaSeed(moved ? { ...next, area: '', areaFrom: '' } : next);
     }));
-  }, [planArea]);
+  }, []);
   const addProduct = useCallback((product) => {
     setRows((prev) => (prev.some((row) => row.productId === product.id) ? prev : [
       ...prev,
-      { ...withAreaSeed(productRow(product, { added: true }), planArea), active: true },
+      { ...withAreaSeed(productRow(product, { added: true })), active: true },
     ]));
-  }, [planArea]);
+  }, []);
   const removeRow = useCallback((productId) => setRows((prev) => prev.filter((row) => row.productId !== productId)), []);
   // A fresh stock read changes each row's stock on hand, nothing the tech set.
   const applyStock = useCallback((fresh) => {
@@ -415,10 +417,16 @@ function completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, typed, t
   const active = rows.filter((row) => row.active);
   // Plan defaults the tech turned off or removed: the lawn actuals ledger
   // records them as skipped (id and name only, no reason asked).
-  const skipped = ctx.planned
-    .filter((item) => !active.some((row) => String(row.productId) === String(item.productId)))
-    .map((item) => ({ productId: item.productId, productName: item.name || rows.find((row) => String(row.productId) === String(item.productId))?.name }))
-    .filter((item) => item.productName);
+  // The server wants each product once (ids lower-case), a uuid, and a name of
+  // at most 180 characters.
+  const on = new Set(active.map((row) => String(row.productId).toLowerCase()));
+  const skipped = uniquePlanned(ctx.planned)
+    .filter((item) => !on.has(String(item.productId).toLowerCase()))
+    .map((item) => ({
+      productId: String(item.productId).toLowerCase(),
+      productName: String(item.name || rows.find((row) => String(row.productId).toLowerCase() === String(item.productId).toLowerCase())?.name || '').trim().slice(0, 180),
+    }))
+    .filter((item) => item.productName && UUID_RE.test(item.productId));
   return {
     visitOutcome: 'completed',
     // The context's service object, every key, nulls included.
@@ -568,10 +576,9 @@ function useStockHold({ ctx, service, rows, products, request }) {
 
 function LawnFastForm({ service, request, catalog, ctx, submission, locked, dictationPending, onDictationPending, onFullForm, isMobile }) {
   const base = `/admin/dispatch/${service?.id}`;
-  // The context's findingsType when it carries one, else the schedule row's.
-  const typed = (ctx.findingsType !== undefined ? ctx.findingsType : service?.findingsType) === LAWN_FINDINGS_TYPE;
-  const planArea = useLawnPlanArea({ serviceId: service?.id, request, enabled: ctx.planned.some((item) => !(Number(item.treatedSqft) > 0)) });
-  const products = useProductRows(ctx, catalog, planArea);
+  // From the context's findingsType only (the live profile), never the schedule row.
+  const typed = ctx.findingsType === LAWN_FINDINGS_TYPE;
+  const products = useProductRows(ctx, catalog);
   const { rows } = products;
   const [form, setForm] = useState({ note: '', condition: '', tipId: '', customTip: '' });
   const setField = useCallback((key, value) => setForm((prev) => ({ ...prev, [key]: value })), []);
@@ -742,9 +749,11 @@ function ProductEditor({ row, locked, onChange, onRemove }) {
   const nameId = useId();
   const areaId = useId();
   const methodId = useId();
-  const choices = METHOD_CHOICES.some((choice) => choice.value === row.method)
+  // The row's original method (planned or catalog) is always among the choices,
+  // last when it is not one of the three, so a mis-tap can be undone.
+  const choices = METHOD_CHOICES.some((choice) => choice.value === row.originalMethod)
     ? METHOD_CHOICES
-    : [...METHOD_CHOICES, { value: row.method, label: methodLabel(row.method) }];
+    : [...METHOD_CHOICES, { value: row.originalMethod, label: methodLabel(row.originalMethod) }];
   return (
     <div role="group" aria-labelledby={nameId} className="tech-product-editor">
       <div className="tech-product-editor-head">
