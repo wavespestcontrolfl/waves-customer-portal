@@ -374,11 +374,16 @@ export default function AdminTwoStepPage() {
       return;
     }
     // The server signed out every earlier session; this one continues on the
-    // fresh two-step token.
-    localStorage.setItem('waves_admin_token', data.token);
-    localStorage.setItem('waves_admin_user', JSON.stringify(data.user));
-    setToken(data.token);
-    setSignedInUser(data.user);
+    // fresh two-step token — unless another tab signed out or signed in while
+    // this was pending, whose choice stands (the codes still show once).
+    if (localStorage.getItem('waves_admin_token') === token) {
+      localStorage.setItem('waves_admin_token', data.token);
+      localStorage.setItem('waves_admin_user', JSON.stringify(data.user));
+      setToken(data.token);
+      setSignedInUser(data.user);
+    } else {
+      setSignedInUser({ superseded: true });
+    }
     setRecoveryCodes(data.recoveryCodes || []);
     setSetup(null);
     show('codes');
@@ -408,7 +413,9 @@ export default function AdminTwoStepPage() {
     setRecoveryCodes([]);
     setNotice('');
     if (signedInUser) {
-      navigate(destinationFor(signedInUser), { replace: true });
+      // A superseded confirmation goes to /admin, where the shell checks
+      // whatever session the other tab left (or sends to sign in).
+      navigate(signedInUser.superseded ? '/admin' : destinationFor(signedInUser), { replace: true });
       return;
     }
     show('overview');

@@ -265,9 +265,14 @@ async function recordFailure(conn, technicianId) {
 // no parallel burst can guess past the fifth wrong code. Replay protection: a
 // TOTP code is accepted only for a time step later than the last accepted
 // one; a recovery code only while its used_at is NULL.
-// Returns { ok: true, method } or { ok: false, reason: invalid|locked|unavailable }.
-async function verifySecondFactor(technicianId, code, { conn = db, nowMs = Date.now() } = {}) {
+// The account row is locked first at the caller's credential version (the
+// same fence every factor write uses), so a code — a single-use recovery code
+// above all — is never consumed for a session or sign-in that a password
+// change or factor replacement already revoked.
+// Returns { ok: true, method } or { ok: false, reason: invalid|locked|unavailable|revoked }.
+async function verifySecondFactor(technicianId, code, { expectedTokenVersion, conn = db, nowMs = Date.now() } = {}) {
   return conn.transaction(async (trx) => {
+    if (!await lockAccountAtVersion(trx, technicianId, expectedTokenVersion)) return { ok: false, reason: 'revoked' };
     const row = await trx('staff_mfa_totp').where({ technician_id: technicianId }).forUpdate().first();
     if (!row || !row.secret_enc) return { ok: false, reason: 'unavailable' };
     if (row.locked_until && new Date(row.locked_until) > new Date(nowMs)) return lockedResult(new Date(row.locked_until));

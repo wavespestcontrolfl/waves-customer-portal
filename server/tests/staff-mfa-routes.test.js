@@ -162,7 +162,7 @@ describe('POST /login/mfa', () => {
     const res = await invoke(loginMfa, { body: { challengeToken: challenge(), code: '123456' } });
 
     expect(res.statusCode).toBe(200);
-    expect(staffMfa.verifySecondFactor).toHaveBeenCalledWith('tech-1', '123456');
+    expect(staffMfa.verifySecondFactor).toHaveBeenCalledWith('tech-1', '123456', { expectedTokenVersion: 3 });
     expect(jwt.verify(res.body.token, SECRET)).toMatchObject({ technicianId: 'tech-1', type: 'access', tokenVersion: 3, mfa: true });
     expect(jwt.verify(res.body.token, SECRET).mfaRecoveryUntil).toBeUndefined();
     expect(res.body.user.twoStep).toEqual({ enabled: true, enrollmentRequired: false });
@@ -211,11 +211,21 @@ describe('POST /login/mfa', () => {
     expect(staffMfa.verifySecondFactor).not.toHaveBeenCalled();
   });
 
-  test('gate turned off between the steps: the challenge is dead', async () => {
+  test('gate turned off between the steps: a generic 404, no lookup', async () => {
     delete process.env.GATE_ADMIN_MFA;
     const res = await invoke(loginMfa, { body: { challengeToken: challenge(), code: '123456' } });
-    expect(res.body.code).toBe('MFA_CHALLENGE_INVALID');
+    expect(res.statusCode).toBe(404);
+    expect(res.body).toEqual({ error: 'Not found' });
     expect(db).not.toHaveBeenCalled();
+  });
+
+  test('a password change between the steps (fenced inside the code check) restarts sign-in', async () => {
+    db.mockReturnValueOnce(builder({ first: staffRow({ mfa_enabled_at: new Date() }) }));
+    staffMfa.verifySecondFactor.mockResolvedValue({ ok: false, reason: 'revoked' });
+    const res = await invoke(loginMfa, { body: { challengeToken: challenge(), code: 'AAAA-BBBB-CCCC-DDDD' } });
+    expect(res.statusCode).toBe(401);
+    expect(res.body.code).toBe('MFA_CHALLENGE_INVALID');
+    expect(res.body.token).toBeUndefined();
   });
 });
 

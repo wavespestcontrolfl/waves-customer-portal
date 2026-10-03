@@ -4292,8 +4292,9 @@ on `unauthenticatedAuthLimitKey` with production-only limiters;
 bearer. Two-step sign-in (`GATE_ADMIN_MFA`, dark): for an enrolled account
 `/login` returns `{ mfaRequired, challengeToken }` (a 5-minute signed JWT of
 type `staff_mfa_challenge`, never an access token) instead of a session, and
-the public `POST /login/mfa` (same `authLimiter` by prefix, plus a 5-wrong-code
-per-account lockout) takes that challenge plus an authenticator or recovery
+the public `POST /login/mfa` (a generic 404 while the gate is dark, answered in
+`server/index.js` before the login limiter; live, the same `authLimiter` by
+prefix, a 5-wrong-code per-account lockout and no-store/noindex headers) takes that challenge plus an authenticator or recovery
 code and is the only path that mints an access token carrying `mfa: true`;
 `/reset-password` on an enrolled account returns `{ passwordReset,
 signInRequired }` with no session. The native WavesPay app (`ios/WavesPay`,

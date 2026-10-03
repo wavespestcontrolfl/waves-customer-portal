@@ -96,6 +96,23 @@ describe('AdminTwoStepPage', () => {
     expect(screen.queryByRole('button', { name: 'Turn off two-step sign-in' })).not.toBeInTheDocument();
   });
 
+  it('a confirmation that finishes after another tab signed out does not bring the old session back', async () => {
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(reply(200, { available: true, enabled: false, enrollmentRequired: false, enforced: false, recoveryCodesRemaining: 0 }))
+      .mockResolvedValueOnce(reply(200, { secret: 'JBSWY3DPEHPK3PXP', otpauthUrl: 'otpauth://totp/x', expiresInMinutes: 15 }))
+      .mockImplementationOnce(async () => {
+        store.delete('waves_admin_token');
+        return reply(200, { token: 'new-jwt', user: { id: 'a', role: 'admin' }, recoveryCodes: ['AAAA-BBBB-CCCC-DDDD'] });
+      }));
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Current password'), { target: { value: 'pw' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    fireEvent.change(await screen.findByLabelText('Code from the app'), { target: { value: '123456' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Turn on two-step sign-in' }));
+    expect(await screen.findByText('AAAA-BBBB-CCCC-DDDD')).toBeInTheDocument();
+    expect(store.has('waves_admin_token')).toBe(false);
+  });
+
   it('a 401 for a token another tab already replaced keeps the newer session', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => {
       store.set('waves_admin_token', 'newer-jwt-from-another-tab');

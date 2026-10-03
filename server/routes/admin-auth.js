@@ -28,6 +28,7 @@ const { employmentPatch } = require('../services/technician-eligibility');
 const { seedNewHireCapabilities } = require('../services/technician-capabilities');
 const { assertMayChangeFullAccessEmail } = require('../services/intelligence-bar/ib-access');
 const staffMfa = require('../services/staff-mfa');
+const { noStore } = require('../middleware/no-store');
 const { adminMfaLive } = require('../config/feature-gates');
 
 const RESET_TOKEN_BYTES = 32;
@@ -240,6 +241,9 @@ router.post('/login', login);
 // the signed-in management routes answer it 400 so a typo never reads as a
 // revoked session.
 function mfaFailureResponse(res, result, invalidStatus = 401) {
+  if (result.reason === 'revoked') {
+    return res.status(401).json({ error: 'Session has been revoked', code: 'TOKEN_REVOKED' });
+  }
   if (result.reason === 'locked') {
     return res.status(429).json({ error: 'Too many wrong codes. Try again in 15 minutes.', code: 'MFA_LOCKED' });
   }
@@ -254,11 +258,12 @@ function mfaFailureResponse(res, result, invalidStatus = 401) {
 async function loginMfa(req, res, next) {
   try {
     const { challengeToken, code } = req.body || {};
+    // Dark: the same generic 404 as the pre-limiter gate in server/index.js.
+    if (!adminMfaLive()) return res.status(404).json({ error: 'Not found' });
     const restart = () => res.status(401).json({ error: 'Your sign-in expired. Enter your email and password again.', code: 'MFA_CHALLENGE_INVALID' });
     if (typeof challengeToken !== 'string' || typeof code !== 'string' || !code.trim() || code.length > 64) {
       return res.status(400).json({ error: 'Enter the code from your authenticator app.' });
     }
-    if (!adminMfaLive()) return restart();
     let claims;
     try {
       claims = jwt.verify(challengeToken, config.jwt.secret);
@@ -273,7 +278,8 @@ async function loginMfa(req, res, next) {
       .first();
     if (!tech || Number(tech.auth_token_version) !== claims.tokenVersion || !staffMfa.mfaEnabled(tech)) return restart();
 
-    const result = await staffMfa.verifySecondFactor(tech.id, code);
+    const result = await staffMfa.verifySecondFactor(tech.id, code, { expectedTokenVersion: claims.tokenVersion });
+    if (!result.ok && result.reason === 'revoked') return restart();
     if (!result.ok) return mfaFailureResponse(res, result);
 
     const { token, refreshToken } = mintStaffTokens(tech, {
@@ -286,7 +292,7 @@ async function loginMfa(req, res, next) {
   } catch (err) { return next(err); }
 }
 
-router.post('/login/mfa', loginMfa);
+router.post('/login/mfa', noStore, loginMfa);
 
 // The self-service two-step routes exist only while GATE_ADMIN_MFA is on.
 function requireMfaGate(req, res, next) {
@@ -322,7 +328,7 @@ async function mfaSetup(req, res, next) {
       if (typeof code !== 'string' || !code.trim() || code.length > 64) {
         return res.status(400).json({ error: 'Enter a code from your current authenticator app to replace it.' });
       }
-      const result = await staffMfa.verifySecondFactor(tech.id, code);
+      const result = await staffMfa.verifySecondFactor(tech.id, code, { expectedTokenVersion: staffTokenVersion(tech) });
       if (!result.ok) return mfaFailureResponse(res, result, 400);
     }
     const started = await staffMfa.startSetup(tech, { expectedTokenVersion: staffTokenVersion(tech) });
@@ -371,7 +377,7 @@ async function mfaRegenerateRecoveryCodes(req, res, next) {
     if (typeof code !== 'string' || !code.trim() || code.length > 64) {
       return res.status(400).json({ error: 'Enter the code from your authenticator app.' });
     }
-    const result = await staffMfa.verifySecondFactor(tech.id, code);
+    const result = await staffMfa.verifySecondFactor(tech.id, code, { expectedTokenVersion: staffTokenVersion(tech) });
     if (!result.ok) return mfaFailureResponse(res, result, 400);
     const regenerated = await staffMfa.regenerateRecoveryCodes(tech.id, { expectedTokenVersion: staffTokenVersion(tech) });
     if (!regenerated.ok) return res.status(401).json({ error: 'Session has been revoked', code: 'TOKEN_REVOKED' });
@@ -393,7 +399,7 @@ async function mfaDisable(req, res, next) {
     if (typeof code !== 'string' || !code.trim() || code.length > 64) {
       return res.status(400).json({ error: 'Enter the code from your authenticator app.' });
     }
-    const result = await staffMfa.verifySecondFactor(tech.id, code);
+    const result = await staffMfa.verifySecondFactor(tech.id, code, { expectedTokenVersion: staffTokenVersion(tech) });
     if (!result.ok) return mfaFailureResponse(res, result, 400);
     const disabled = await staffMfa.disable(tech.id, { expectedTokenVersion: staffTokenVersion(tech) });
     if (!disabled.ok) return res.status(401).json({ error: 'Session has been revoked', code: 'TOKEN_REVOKED' });
@@ -401,11 +407,13 @@ async function mfaDisable(req, res, next) {
   } catch (err) { return next(err); }
 }
 
-router.get('/mfa', adminAuthenticate, requireMfaGate, mfaStatus);
-router.post('/mfa/totp/setup', adminAuthenticate, requireMfaGate, mfaManageLimiter, mfaSetup);
-router.post('/mfa/totp/confirm', adminAuthenticate, requireMfaGate, mfaManageLimiter, mfaConfirm);
-router.post('/mfa/recovery-codes', adminAuthenticate, requireMfaGate, mfaManageLimiter, mfaRegenerateRecoveryCodes);
-router.post('/mfa/disable', adminAuthenticate, requireMfaGate, mfaManageLimiter, mfaDisable);
+// noStore: these answers carry sessions, the authenticator secret or
+// recovery codes.
+router.get('/mfa', noStore, adminAuthenticate, requireMfaGate, mfaStatus);
+router.post('/mfa/totp/setup', noStore, adminAuthenticate, requireMfaGate, mfaManageLimiter, mfaSetup);
+router.post('/mfa/totp/confirm', noStore, adminAuthenticate, requireMfaGate, mfaManageLimiter, mfaConfirm);
+router.post('/mfa/recovery-codes', noStore, adminAuthenticate, requireMfaGate, mfaManageLimiter, mfaRegenerateRecoveryCodes);
+router.post('/mfa/disable', noStore, adminAuthenticate, requireMfaGate, mfaManageLimiter, mfaDisable);
 
 async function lockStaffAccountMutations(trx) {
   await trx.raw('LOCK TABLE technicians IN SHARE ROW EXCLUSIVE MODE');

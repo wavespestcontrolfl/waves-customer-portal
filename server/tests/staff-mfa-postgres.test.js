@@ -102,26 +102,32 @@ postgres('staff two-step sign-in on migrated PostgreSQL', () => {
     const { secret } = await staffMfa.startSetup(tech, { expectedTokenVersion: 1 });
     const code = codeFor(secret);
     expect((await staffMfa.confirmSetup(tech, code, { expectedTokenVersion: 1 })).ok).toBe(true);
-    expect(await staffMfa.verifySecondFactor(techId, code)).toMatchObject({ ok: false, reason: 'invalid' });
+    expect(await staffMfa.verifySecondFactor(techId, code, { expectedTokenVersion: 2 })).toMatchObject({ ok: false, reason: 'invalid' });
+  });
+
+  test('a sign-in revoked by a password change consumes no code', async () => {
+    const { recoveryCodes } = await enroll();
+    expect(await staffMfa.verifySecondFactor(techId, recoveryCodes[0], { expectedTokenVersion: 1 })).toEqual({ ok: false, reason: 'revoked' });
+    expect(await staffMfa.verifySecondFactor(techId, recoveryCodes[0], { expectedTokenVersion: 2 })).toEqual({ ok: true, method: 'recovery' });
   });
 
   test('a code is accepted once; replaying it, or an older step, is refused', async () => {
     const { secret } = await enroll();
     const code = codeFor(secret);
     const [first, second] = await Promise.all([
-      staffMfa.verifySecondFactor(techId, code),
-      staffMfa.verifySecondFactor(techId, code),
+      staffMfa.verifySecondFactor(techId, code, { expectedTokenVersion: 2 }),
+      staffMfa.verifySecondFactor(techId, code, { expectedTokenVersion: 2 }),
     ]);
     expect([first.ok, second.ok].sort()).toEqual([false, true]);
-    expect(await staffMfa.verifySecondFactor(techId, codeFor(secret, -1))).toMatchObject({ ok: false });
-    expect(await staffMfa.verifySecondFactor(techId, codeFor(secret, 1))).toEqual({ ok: true, method: 'totp' });
+    expect(await staffMfa.verifySecondFactor(techId, codeFor(secret, -1), { expectedTokenVersion: 2 })).toMatchObject({ ok: false });
+    expect(await staffMfa.verifySecondFactor(techId, codeFor(secret, 1), { expectedTokenVersion: 2 })).toEqual({ ok: true, method: 'totp' });
   });
 
   test('each recovery code works exactly once, typed any way', async () => {
     const { recoveryCodes } = await enroll();
     const typed = recoveryCodes[3].toLowerCase().replace(/-/g, ' ');
-    expect(await staffMfa.verifySecondFactor(techId, typed)).toEqual({ ok: true, method: 'recovery' });
-    expect(await staffMfa.verifySecondFactor(techId, recoveryCodes[3])).toMatchObject({ ok: false });
+    expect(await staffMfa.verifySecondFactor(techId, typed, { expectedTokenVersion: 2 })).toEqual({ ok: true, method: 'recovery' });
+    expect(await staffMfa.verifySecondFactor(techId, recoveryCodes[3], { expectedTokenVersion: 2 })).toMatchObject({ ok: false });
     const status = await staffMfa.status(await mockDatabase('technicians').where({ id: techId }).first());
     expect(status).toMatchObject({ available: true, enabled: true, recoveryCodesRemaining: 9 });
   });
@@ -129,12 +135,12 @@ postgres('staff two-step sign-in on migrated PostgreSQL', () => {
   test('five wrong codes lock the account for 15 minutes, even against a right code', async () => {
     const { secret } = await enroll();
     for (let i = 0; i < 4; i += 1) {
-      expect(await staffMfa.verifySecondFactor(techId, 'AAAA-AAAA-AAAA-AAAA')).toEqual({ ok: false, reason: 'invalid' });
+      expect(await staffMfa.verifySecondFactor(techId, 'AAAA-AAAA-AAAA-AAAA', { expectedTokenVersion: 2 })).toEqual({ ok: false, reason: 'invalid' });
     }
-    const fifth = await staffMfa.verifySecondFactor(techId, 'AAAA-AAAA-AAAA-AAAA');
+    const fifth = await staffMfa.verifySecondFactor(techId, 'AAAA-AAAA-AAAA-AAAA', { expectedTokenVersion: 2 });
     expect(fifth.reason).toBe('locked');
     expect(fifth.lockedUntil.getTime()).toBeGreaterThan(Date.now() + 14 * 60 * 1000);
-    expect((await staffMfa.verifySecondFactor(techId, codeFor(secret, 1))).reason).toBe('locked');
+    expect((await staffMfa.verifySecondFactor(techId, codeFor(secret, 1), { expectedTokenVersion: 2 })).reason).toBe('locked');
   });
 
   test('without the encryption key the stored secret is unreadable and every code fails closed', async () => {
@@ -142,7 +148,7 @@ postgres('staff two-step sign-in on migrated PostgreSQL', () => {
     const key = process.env.STAFF_MFA_KEY;
     process.env.STAFF_MFA_KEY = `other-${randomUUID()}`;
     try {
-      expect(await staffMfa.verifySecondFactor(techId, codeFor(secret, 1))).toEqual({ ok: false, reason: 'unavailable' });
+      expect(await staffMfa.verifySecondFactor(techId, codeFor(secret, 1), { expectedTokenVersion: 2 })).toEqual({ ok: false, reason: 'unavailable' });
     } finally {
       process.env.STAFF_MFA_KEY = key;
     }
@@ -155,8 +161,8 @@ postgres('staff two-step sign-in on migrated PostgreSQL', () => {
     expect(await staffMfa.disable(techId, { expectedTokenVersion: 1 })).toEqual({ ok: false, reason: 'revoked' });
     const { recoveryCodes: fresh } = await staffMfa.regenerateRecoveryCodes(techId, { expectedTokenVersion: 2 });
     expect(fresh).toHaveLength(10);
-    expect(await staffMfa.verifySecondFactor(techId, recoveryCodes[0])).toMatchObject({ ok: false });
-    expect(await staffMfa.verifySecondFactor(techId, fresh[0])).toEqual({ ok: true, method: 'recovery' });
+    expect(await staffMfa.verifySecondFactor(techId, recoveryCodes[0], { expectedTokenVersion: 2 })).toMatchObject({ ok: false });
+    expect(await staffMfa.verifySecondFactor(techId, fresh[0], { expectedTokenVersion: 2 })).toEqual({ ok: true, method: 'recovery' });
 
     expect(await staffMfa.disable(techId, { expectedTokenVersion: 2 })).toEqual({ ok: true });
     expect(await mockDatabase('staff_mfa_totp').where({ technician_id: techId }).first()).toBeUndefined();
@@ -211,22 +217,22 @@ postgres('staff two-step sign-in on migrated PostgreSQL', () => {
     const right = codeFor(secret, 1);
     const wrong = right === '000000' ? '111111' : '000000';
     const results = await Promise.all([
-      ...Array.from({ length: 8 }, () => staffMfa.verifySecondFactor(techId, wrong)),
-      staffMfa.verifySecondFactor(techId, 'BBBB-BBBB-BBBB-BBBB'),
+      ...Array.from({ length: 8 }, () => staffMfa.verifySecondFactor(techId, wrong, { expectedTokenVersion: 2 })),
+      staffMfa.verifySecondFactor(techId, 'BBBB-BBBB-BBBB-BBBB', { expectedTokenVersion: 2 }),
     ]);
     expect(results.every((r) => !r.ok)).toBe(true);
     expect(results.filter((r) => r.reason === 'invalid')).toHaveLength(4);
     expect(results.filter((r) => r.reason === 'locked')).toHaveLength(5);
     // Locked: even the right code is refused, and nothing reset the lock.
-    expect((await staffMfa.verifySecondFactor(techId, right)).reason).toBe('locked');
+    expect((await staffMfa.verifySecondFactor(techId, right, { expectedTokenVersion: 2 })).reason).toBe('locked');
   });
   test('turning it off while a recovery code is being used never deadlocks', async () => {
     const { recoveryCodes } = await enroll();
     const results = await Promise.allSettled([
       staffMfa.disable(techId, { expectedTokenVersion: 2 }),
-      staffMfa.verifySecondFactor(techId, recoveryCodes[0]),
+      staffMfa.verifySecondFactor(techId, recoveryCodes[0], { expectedTokenVersion: 2 }),
       staffMfa.disable(techId, { expectedTokenVersion: 2 }),
-      staffMfa.verifySecondFactor(techId, recoveryCodes[1]),
+      staffMfa.verifySecondFactor(techId, recoveryCodes[1], { expectedTokenVersion: 2 }),
     ]);
     expect(results.every((r) => r.status === 'fulfilled')).toBe(true);
     expect((await mockDatabase('technicians').where({ id: techId }).first()).mfa_enabled_at).toBeNull();

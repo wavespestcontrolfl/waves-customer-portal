@@ -500,6 +500,11 @@ const authLimiter = rateLimit({
 });
 app.use('/api/auth/send-code', authLimiter);
 app.use('/api/auth/verify-code', authLimiter);
+// Two-step code step (GATE_ADMIN_MFA): while dark it answers a generic 404
+// BEFORE the login limiter, so a probe never sees a revealing 401 or 429.
+app.use('/api/admin/auth/login/mfa', (req, res, next) => (
+  require('./config/feature-gates').adminMfaLive() ? next() : res.status(404).json({ error: 'Not found' })
+));
 app.use('/api/admin/auth/login', authLimiter);
 
 // Public, unauthenticated surfaces that hit paid third-party APIs get tight
