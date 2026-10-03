@@ -646,7 +646,18 @@ async function sendCustomerMessageCore(input) {
     // reload under them and fail closed. A lead has no customer row: phone only.
     || (['lead', 'customer'].includes(input.audience) && input.purpose === 'estimate_followup'
       && input.entryPoint === 'estimate_service_details_send'
-      && input.metadata?.original_message_type === 'estimate_service_details');
+      && input.metadata?.original_message_type === 'estimate_service_details')
+    // The annual rate review letter's text pointer (rate-review-comms.js): its
+    // notice token is a bearer link that belongs to ONE customer, so the
+    // customer-comms + phone locks are held through the provider request and
+    // notice ownership and the recipient phone are re-read inside them (a
+    // merge undo can never repoint the notice between the check and Twilio).
+    // Operator-initiated and billing-purpose, so it never fans out through
+    // the billing delivery preferences.
+    || (input.audience === 'customer' && input.purpose === 'billing'
+      && input.operatorInitiated === true
+      && input.metadata?.original_message_type === 'price_change_notice'
+      && input.metadata?.rate_review_letter === true);
   if (withSmsHandoff && (typeof withSmsHandoff !== 'function' || sendInput.channel !== 'sms' || !smsHandoffAllowed)) {
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_SMS_HANDOFF', reason: 'Locked SMS handoff is not allowed for this message' };
   }

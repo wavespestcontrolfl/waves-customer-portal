@@ -542,6 +542,63 @@ describe('customer surfaces', () => {
     expect(await check()).toEqual({ ok: true });
   });
 
+  test('send: the text pointer holds the comms + phone fence through dispatch; a notice repointed after the pre-check sends no text and records the hold', async () => {
+    mockDb.reset(book());
+    emailLeg.mockResolvedValue({ sent: false, attempted: false });
+    const dispatch = jest.fn(async () => ({ ok: true }));
+    let order = null;
+    smsLeg.mockImplementation(async ({ sendOptions }) => {
+      // the canonical sender: pre-check passes, then provider preparation runs...
+      expect(await sendOptions.preDispatchCheck()).toEqual({ ok: true });
+      // ...and a merge undo lands before the locked handoff reaches Twilio
+      mockDb.store.price_change_notices[0].customer_id = CUSTOMER(9);
+      mockDb.raw.mockClear();
+      const verdict = await sendOptions.withSmsHandoff(dispatch);
+      order = mockDb.raw.mock.calls.map((c) => String(c[1] && c[1][0]));
+      return { sent: false, attempted: false, blockedCode: verdict.code };
+    });
+    const res = await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(res).toMatchObject({ sent: 0, texted: 0, inFlight: 1 });
+    expect(smsLeg.mock.calls[0][0].sendOptions.metadata).toEqual({ rate_review_letter: true });
+    // customer-comms first, then the phone (the order every SMS authority takes)
+    expect(order[0]).toMatch(/^customer-comms:/);
+    expect(order[1]).toMatch(/^\+?1?5555550101$/);
+    // released untouched (never parked unreachable) with the named reason on the line
+    expect(notices()[0]).toMatchObject({ status: 'draft', sms_sent: false, email_sent: false, sent_at: null });
+    expect(JSON.parse(notices()[0].metadata).send_hold).toMatchObject({ reason: 'notice_repointed' });
+    expect(snapshots()[0].status).not.toBe('sent');
+  });
+
+  test('send: the locked text handoff dispatches inside the fence when clear, and refuses a number changed since the claim', async () => {
+    mockDb.reset(book());
+    const dispatch = jest.fn(async () => ({ ok: true }));
+    const verdicts = [];
+    smsLeg.mockImplementation(async ({ sendOptions }) => {
+      verdicts.push(await sendOptions.withSmsHandoff(dispatch));
+      mockDb.store.customers[0].phone = '+15555550177'; // corrected after the leg read it
+      verdicts.push(await sendOptions.withSmsHandoff(dispatch));
+      mockDb.store.customers[0].phone = '+15555550101';
+      mockDb.store.customers[0].active = false;
+      verdicts.push(await sendOptions.withSmsHandoff(dispatch));
+      return { sent: true, attempted: true };
+    });
+    await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+    expect(verdicts[0]).toEqual({ ok: true });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(verdicts[1]).toMatchObject({ ok: false, code: 'RECIPIENT_PHONE_CHANGED' });
+    expect(verdicts[2]).toMatchObject({ ok: false, code: 'RECIPIENT_UNAVAILABLE' });
+  });
+
+  test('send: a withheld text pointer does not stop the email letter being stamped sent', async () => {
+    mockDb.reset(book());
+    smsLeg.mockResolvedValue({ sent: false, attempted: false, blockedCode: 'RECIPIENT_PHONE_CHANGED' });
+    const res = await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+    expect(res).toMatchObject({ sent: 1, emailed: 1, texted: 0 });
+    expect(notices()[0]).toMatchObject({ status: 'sent', email_sent: true, sms_sent: false });
+    expect(JSON.parse(notices()[0].metadata).sms_withheld).toBe('recipient_phone_changed');
+  });
+
   test('portal: a prepaid change whose renewal is already recorded (a successor term) is not upcoming', async () => {
     const prepay = draft(1, {
       billing_lane: 'annual_prepay', cadence_label: 'year', effective_date: '2027-05-15', status: 'sent', sent_at: NOW, applied_at: NOW,

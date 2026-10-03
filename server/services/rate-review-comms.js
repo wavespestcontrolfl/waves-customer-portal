@@ -47,7 +47,8 @@ const { formatDisplayDate } = require('../utils/date-only');
 const { portalUrl } = require('../utils/portal-url');
 const { propertyStreetLine } = require('../utils/property-display');
 const { getInvoiceEmailRecipients } = require('./customer-contact');
-const { lockCustomerComms } = require('../utils/customer-comms-lock');
+const { lockCustomerComms, withSmsConsentLock } = require('../utils/customer-comms-lock');
+const { toE164 } = require('../utils/phone');
 const PriceChangeNotices = require('./price-change-notices');
 
 const TEMPLATE_KEY = 'billing.rate_review_notice';
@@ -620,11 +621,14 @@ async function freezeLetter(dbh, entry, frozen) {
   }
 }
 
-async function settleLines(dbh, entry, { status, keepFrozen, frozen }) {
+// hold: a named reason the send was refused before any provider took it
+// (recorded on each line as metadata.send_hold; the next attempt clears it).
+async function settleLines(dbh, entry, { status, keepFrozen, frozen, hold = null }) {
   for (const l of entry.lines) {
-    const { pending_letter: _p, ...meta } = parseJson(l.notice.metadata, {});
+    const { pending_letter: _p, send_hold: _h, ...meta } = parseJson(l.notice.metadata, {});
+    const next = { ...meta, ...(keepFrozen ? { pending_letter: frozen } : {}), ...(hold ? { send_hold: { reason: hold, at: new Date().toISOString() } } : {}) };
     await dbh('price_change_notices').where({ id: l.noticeId, status: 'sending' }).update({
-      status, metadata: JSON.stringify(keepFrozen ? { ...meta, pending_letter: frozen } : meta), updated_at: new Date(),
+      status, metadata: JSON.stringify(next), updated_at: new Date(),
     });
   }
 }
@@ -632,6 +636,33 @@ async function settleLines(dbh, entry, { status, keepFrozen, frozen }) {
 async function stillOwned(dbh, noticeIds, customerId) {
   const rows = await dbh('price_change_notices').whereIn('id', noticeIds).select('id', 'customer_id');
   return rows.length === noticeIds.length && rows.every((r) => String(r.customer_id) === String(customerId));
+}
+
+// The text pointer's named holds: the canonical sender's refusal code from the
+// ownership/recipient re-read held through its provider request.
+const SMS_HOLD_REASONS = {
+  NOTICE_REPOINTED: 'notice_repointed',
+  RECIPIENT_PHONE_CHANGED: 'recipient_phone_changed',
+  RECIPIENT_UNAVAILABLE: 'recipient_unavailable',
+};
+
+const phoneKey = (p) => { const e = toE164(String(p || '').trim()); return e ? String(e).replace(/\D/g, '') : ''; };
+
+// Run INSIDE the customer-comms + phone fence, immediately before the Twilio
+// request: the notice must still belong to the letter's customer and that
+// customer must still own the number being texted. null = clear to send.
+async function smsHandoffRefusal(trx, noticeIds, customerId, phone) {
+  if (!(await stillOwned(trx, noticeIds, customerId))) {
+    return { ok: false, code: 'NOTICE_REPOINTED', reason: 'the notice no longer belongs to this customer', retryable: false };
+  }
+  const live = await trx('customers').where({ id: customerId }).first();
+  if (!live || live.deleted_at || live.active === false) {
+    return { ok: false, code: 'RECIPIENT_UNAVAILABLE', reason: 'the customer is no longer active', retryable: false };
+  }
+  if (!phoneKey(phone) || phoneKey(live.phone) !== phoneKey(phone)) {
+    return { ok: false, code: 'RECIPIENT_PHONE_CHANGED', reason: 'the number on file is no longer the one this text was built for', retryable: false };
+  }
+  return null;
 }
 
 async function sendEntry(dbh, entry, { batchKey, costBlock, templateHash, actorId }) {
@@ -677,21 +708,33 @@ async function sendEntry(dbh, entry, { batchKey, costBlock, templateHash, actorI
       }),
     },
   });
+  const smsPhone = String(customer.phone || '').trim();
   const sms = await PriceChangeNotices.sendNoticeSms({
     customer,
     vars: { effective_date: payload.effective_date, price_change_url: payload.notice_url },
     actorId,
     hasEmailLeg: email.sent,
     operatorInitiated: true,
-    // The canonical SMS sender's last abort point before the provider (its
-    // locked provider handoff is reserved for invoice delivery): ownership
-    // is re-read there, so a notice repointed meanwhile never texts its
-    // token to the previous customer.
     sendOptions: {
+      // Marks the lane for the canonical sender's locked SMS handoff.
+      metadata: { rate_review_letter: true },
+      // Early, cheap abort before provider preparation (not the last word).
       preDispatchCheck: async () => ((await stillOwned(dbh, claimed, entry.customerId))
         ? { ok: true } : { ok: false, code: 'NOTICE_REPOINTED', reason: 'the notice no longer belongs to this customer' }),
+      // The authoritative check: the customer-comms + phone fence (the order
+      // every SMS authority takes) is held through the Twilio request, and
+      // notice ownership plus the recipient phone are re-read inside it. A
+      // merge undo or a number change that commits first fails the send
+      // closed with a named code; one that arrives later waits for the
+      // request. A notice token therefore never texts a previous customer.
+      withSmsHandoff: (dispatch) => withSmsConsentLock(dbh, { phone: smsPhone, customerId: entry.customerId }, async (trx) => {
+        const refusal = await smsHandoffRefusal(trx, claimed, entry.customerId, smsPhone);
+        return refusal || dispatch(trx);
+      }),
     },
   });
+  const smsHold = SMS_HOLD_REASONS[sms.blockedCode] || null;
+  if (smsHold) logger.warn(`[rate-review-comms] text pointer withheld for customer ${entry.customerId}: ${smsHold}`);
   if (!email.sent && !sms.sent) {
     // Never handed to a provider (no contact, every leg policy-blocked):
     // definitively unsent — parks as unreachable, words dropped, retirable
@@ -699,17 +742,24 @@ async function sendEntry(dbh, entry, { batchKey, costBlock, templateHash, actorI
     // may still have delivered): held as send_uncertain with its words, for
     // the owner — never auto-retried, never retired.
     const attempted = email.attempted || sms.attempted;
-    await settleLines(dbh, entry, { status: attempted ? UNCERTAIN : 'unreachable', keepFrozen: attempted, frozen });
+    // Nothing reached a provider and the text was refused because the notice
+    // moved or the number changed: released to draft with the named reason
+    // (the preview recomputes who it belongs to) — never parked unreachable.
+    if (smsHold && !attempted) {
+      await settleLines(dbh, entry, { status: 'draft', keepFrozen: false, frozen, hold: smsHold });
+      return { outcome: 'in_flight', holdReason: smsHold };
+    }
+    await settleLines(dbh, entry, { status: attempted ? UNCERTAIN : 'unreachable', keepFrozen: attempted, frozen, hold: smsHold });
     return { outcome: attempted ? 'uncertain' : 'unreachable' };
   }
   const sentAt = new Date();
   // Every line of one letter is stamped together.
   await dbh.transaction(async (trx) => {
     for (const l of entry.lines) {
-      const { pending_letter: _p, ...meta } = parseJson(l.notice.metadata, {});
+      const { pending_letter: _p, send_hold: _h, ...meta } = parseJson(l.notice.metadata, {});
       const stamped = await trx('price_change_notices').where({ id: l.noticeId, status: 'sending', customer_id: entry.customerId }).update({
         status: 'sent', sent_at: sentAt, email_sent: !!email.sent, sms_sent: !!sms.sent,
-        metadata: JSON.stringify({ ...meta, letter: { ...frozen.letter, sent_on: etDateString(sentAt) } }), updated_at: sentAt,
+        metadata: JSON.stringify({ ...meta, ...(smsHold ? { sms_withheld: smsHold } : {}), letter: { ...frozen.letter, sent_on: etDateString(sentAt) } }), updated_at: sentAt,
       });
       if (!stamped) continue; // repointed away mid-send: its ranking row is not this letter's
       await trx('rate_review_snapshots').where({ notice_id: l.noticeId, status: 'approved' }).update({ status: 'sent', updated_at: sentAt });

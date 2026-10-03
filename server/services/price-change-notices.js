@@ -260,6 +260,9 @@ async function sendNoticeSms({ customer, vars, actorId, hasEmailLeg, operatorIni
       price_change_url: vars.price_change_url,
     }, { workflow: 'price_change_notice', entity_type: 'customer', entity_id: customer.id });
     if (!body) return { sent: false, attempted };
+    // A caller's own metadata keys (the rate review letter's marker for the
+    // locked SMS handoff) ride along without replacing the base metadata.
+    const { metadata: callerMetadata, ...callerOptions } = sendOptions || {};
     const res = await sendCustomerMessage({
       to: phone,
       body,
@@ -278,15 +281,18 @@ async function sendNoticeSms({ customer, vars, actorId, hasEmailLeg, operatorIni
       // moment; without it every SMS-only recipient would be recorded
       // 'unreachable' (see validators/send-window.js).
       ...(operatorInitiated ? { operatorInitiated: true } : {}),
-      metadata: { original_message_type: 'price_change_notice', adminUserId: actorId || undefined },
+      metadata: { original_message_type: 'price_change_notice', adminUserId: actorId || undefined, ...callerMetadata },
       // A caller's own canonical-sender hooks (the rate review letter: its
-      // preDispatchCheck re-reads notice ownership at the last abort point).
-      ...sendOptions,
+      // preDispatchCheck re-reads notice ownership at the first abort point
+      // and its withSmsHandoff holds the fence through the provider request).
+      ...callerOptions,
     });
     // A policy block (sms_enabled=false, STOP suppression, billing pref)
     // is not a provider failure — rerunning cannot deliver it, so it must
     // not hold the notice in the retryable class forever.
-    if (res.blocked) return { sent: false, attempted: false };
+    // blockedCode names a caller-hook refusal (the rate review letter's
+    // NOTICE_REPOINTED / RECIPIENT_PHONE_CHANGED) for the caller's own hold.
+    if (res.blocked) return { sent: false, attempted: false, blockedCode: res.code || null };
     return { sent: !!res.sent, attempted };
   } catch (err) {
     logger.error(`[price-change] SMS failed for customer ${customer.id}: ${err.message}`);
