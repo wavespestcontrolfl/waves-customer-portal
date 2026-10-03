@@ -9,19 +9,19 @@
  * posts are the content registry's rows whose route the daily live sweep
  * (or, until it next looks, the post-publish check) verified on the hub
  * (content/related-posts.js registryRowLivePath and registryRowLiveKeys, the
- * proof the writer's related-post links stand on; registryLink), and a
- * portal post the deploy poller stamped live that the registry keeps no row
- * for yet (content/blog-share-gate.js, astro_status 'live'; portalLink). The
- * portal's own table alone marks only the posts it published itself, which
- * left the search all but empty (owner 2026-10-02: "does not work, or is
- * limited"). The URL is used verbatim, never rebuilt from the slug: legacy
- * rows keep a planned-era slug that never became a path.
+ * proof the writer's related-post links stand on; registryLink), read by the
+ * deployed page's own words. The portal's own table marks only the posts it
+ * published itself, which left the search all but empty (owner 2026-10-02:
+ * "does not work, or is limited"), and its fields can be edited before a page
+ * is republished, so it is never searched: a new post is found once the
+ * nightly registry sync has it (GitHub Codex P2 on 0d357564c5), as the site's
+ * own related-post links find it. The URL is used verbatim, never rebuilt from
+ * the slug: legacy rows keep a planned-era slug that never became a path.
  * The pick is frozen at completion (id, title, URL) so the report shows what
  * the customer was sent to on the day; the read side checks the frozen value
  * against the same host rule before it renders.
  */
 
-const { blogPostShareability } = require('../content/blog-share-gate');
 const { isSiteUrl, SITE_HOST } = require('../link-library');
 const { detectServiceLine } = require('./service-line-configs');
 const logger = require('../logger');
@@ -35,7 +35,6 @@ const MAX_READ = 5000;
 const MAX_TERMS = 4;
 const MAX_TITLE_CHARS = 200;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const COLUMNS = ['id', 'title', 'status', 'astro_status', 'astro_live_url', 'astro_published_at'];
 const REGISTRY_COLUMNS = [
   'id', 'title', 'h1', 'meta_description', 'live_url', 'canonical_url', 'canonical_url_normalized',
   'content_type', 'workflow_status', 'astro_status', 'live_status', 'reconciliation_status', 'noindex_detected',
@@ -51,14 +50,12 @@ const REGISTRY_LIVE_STATUSES = ['live', 'live_visible'];
 // another source's than the checked page's; GitHub Codex P2 on 8c57183332),
 // nor any state the registry adds later.
 const REGISTRY_ATTRIBUTABLE_STATES = ['matched', 'astro_only', 'astro_changed_since_sync', 'db_changed_since_sync'];
-// The text a search reads, per source, by where it sits: the title (and the
-// headline), the keyword the post targets, and the summary under it (the
-// article itself lives in the site's repository, not here). A registry row is
-// read by the deployed page's own words only: its title, headline and summary
-// come from the live page, but its keyword prefers the portal's database, which
-// can be edited before the page is republished (GitHub Codex P2 on 3d597eb15d).
-const REGISTRY_FIELDS = { title: ['title', 'h1'], keyword: [], summary: ['meta_description'] };
-const PORTAL_FIELDS = { title: ['title'], keyword: ['keyword'], summary: ['meta_description'] };
+// The text a search reads, by where it sits: the title (and the headline) and
+// the summary under it (the article itself lives in the site's repository,
+// not here). These are the deployed page's own words; the registry's keyword
+// prefers the portal's database, which can be edited before the page is
+// republished, so it is never read (GitHub Codex P2 on 3d597eb15d).
+const REGISTRY_FIELDS = { title: ['title', 'h1'], summary: ['meta_description'] };
 // An absolute URL, and one on the hub host, as Postgres patterns.
 const ABSOLUTE_URL_RE = '^https?://';
 const HUB_URL_RE = `^https?://(www\\.)?${SITE_HOST.replace(/\./g, '\\.')}(/|$)`;
@@ -95,15 +92,6 @@ function blogPostAllowedFor({ serviceType, profile }) {
   return !NO_POST_LABEL_RE.test(String(serviceType || ''));
 }
 
-// What a report may link, or null.
-function reportBlogLink(row) {
-  if (!row || row.status !== 'published' || !blogPostShareability(row).ok) return null;
-  const url = String(row.astro_live_url || '').trim();
-  const title = String(row.title || '').trim();
-  if (!title || !isSiteUrl(url)) return null;
-  return { id: String(row.id), title: title.slice(0, MAX_TITLE_CHARS), url };
-}
-
 // A post the content registry verified live on the hub, as a report links
 // it, or null: its route checked live and indexable (by the daily sweep, or
 // by the post-publish check until the sweep next looks), the row one page's,
@@ -123,30 +111,6 @@ function registryLink(row) {
   const title = String(row.title || row.h1 || '').trim();
   if (!title || !isSiteUrl(url)) return null;
   return { id: String(row.id), title: title.slice(0, MAX_TITLE_CHARS), url };
-}
-
-// A portal post as a report may link it, given the registry's rows for the
-// post (db_blog_id). Once the registry keeps a row for the post, the registry
-// alone decides: a row it links, or nothing, never the portal's stamp (GitHub
-// Codex P1 r5 on #5652; P1s on 8c57183332: a page the post-publish check
-// failed, or a post moved to a spoke). The portal's own rule decides only a
-// post the registry keeps no row for. A row synced before its post went live
-// catches up at the nightly sync (content-registry maintenance, 1:20 AM).
-function portalLink(row, matched = []) {
-  if (!matched.length) return reportBlogLink(row);
-  return matched.map(registryLink).find(Boolean) || null;
-}
-
-// The registry rows the sweep keeps for these portal posts, by post id.
-async function registryRowsForPortal(knex, ids) {
-  const byPost = new Map();
-  if (!ids.length) return byPost;
-  const rows = await knex('content_registry').whereIn('db_blog_id', ids).select([...REGISTRY_COLUMNS, 'db_blog_id']);
-  for (const row of rows || []) {
-    const key = String(row.db_blog_id);
-    byPost.set(key, [...(byPost.get(key) || []), row]);
-  }
-  return byPost;
 }
 
 // Words a search drops: short words that name no topic ("how to get rid
@@ -213,7 +177,7 @@ const jsPattern = (term) => new RegExp(`\\b(?:${term.forms.join('|')})\\b`, 'i')
 // those holding the most terms first, newest first among them, id last (a
 // total order), so a read that ever reached its guard keeps the best covered.
 function anyTermIn(query, fields, terms, newestColumn) {
-  const columns = [...fields.title, ...fields.keyword, ...fields.summary];
+  const columns = [...fields.title, ...fields.summary];
   const holds = `(${columns.map((column) => `COALESCE(${column}, '') ~* ?`).join(' OR ')})`;
   const holdsBindings = (term) => columns.map(() => sqlPattern(term));
   return query
@@ -249,23 +213,13 @@ function registryMatches(knex, terms) {
       knex.raw("jsonb_build_object('frontmatter', metadata -> 'frontmatter', 'astro', jsonb_build_object('frontmatter', metadata -> 'astro' -> 'frontmatter')) AS metadata"),
     ]);
 }
-// The portal's posts stamped live on the site that hold any of the terms.
-function portalMatches(knex, terms) {
-  return anyTermIn(knex('blog_posts')
-    .where('status', 'published')
-    .where('astro_status', 'live')
-    .whereNotNull('astro_live_url')
-    .whereRaw('astro_live_url ILIKE ?', [`%${SITE_HOST}%`]), PORTAL_FIELDS, terms, 'astro_published_at')
-    .select([...COLUMNS, 'meta_description', 'keyword']);
-}
-
 // Which terms a post's text holds, and where (a title or headline over the
-// keyword over the summary).
+// summary).
 function matchOf(texts, terms) {
   let placed = 0;
   const held = terms.map((term) => {
     const pattern = jsPattern(term);
-    const where = [[texts.title, 3], [texts.keyword, 2], [texts.summary, 1]].find(([text]) => pattern.test(String(text || '')));
+    const where = [[texts.title, 3], [texts.summary, 1]].find(([text]) => pattern.test(String(text || '')));
     if (where) placed += where[1];
     return !!where;
   });
@@ -282,18 +236,15 @@ const pathKey = (url) => {
 /**
  * The site's live hub posts that answer a search, best first, at most eight:
  * those holding every word first, then those holding the rarest of the
- * words, a word in the title or headline before one only in the keyword or
- * summary, newest first among equals. No usable words, no results. Read from the content
- * registry's verified-live posts and the portal posts stamped live since its
- * last sweep (each URL once).
+ * words, a word in the title or headline before one only in the summary,
+ * newest first among equals. No usable words, no results. Read from the
+ * content registry's verified-live posts (each URL once).
  */
 async function searchReportBlogPosts(knex, query) {
   const terms = searchTerms(query);
   if (!terms.length) return [];
-  const [registryFound, portalFound] = await Promise.all([registryMatches(knex, terms), portalMatches(knex, terms)]);
-  for (const [source, rows] of [['registry', registryFound], ['portal', portalFound]]) {
-    if (rows.length >= MAX_READ) logger.warn(`[report-blog-post] the ${source} search read reached ${MAX_READ} rows; rows past it were not ranked`);
-  }
+  const registryFound = await registryMatches(knex, terms);
+  if (registryFound.length >= MAX_READ) logger.warn(`[report-blog-post] the registry search read reached ${MAX_READ} rows; rows past it were not ranked`);
   const found = new Map();
   const add = (post, texts, when) => {
     if (!post) return;
@@ -302,16 +253,7 @@ async function searchReportBlogPosts(knex, query) {
     found.set(key, { post, ...matchOf(texts, terms), when: when ? new Date(when).getTime() || 0 : 0 });
   };
   for (const row of registryFound) {
-    add(registryLink(row), { title: `${row.title || ''} ${row.h1 || ''}`, keyword: '', summary: row.meta_description }, row.published_at);
-  }
-  // A portal post the registry keeps a row for is the registry's alone
-  // (portalLink): found above by its current text, or not at all (GitHub
-  // Codex P2 on 8117bdc9dc: a retitled post must not match on the portal's
-  // stale title). The portal adds the posts the registry has no row for.
-  const registryByPost = await registryRowsForPortal(knex, portalFound.map((row) => row.id).filter(Boolean));
-  for (const row of portalFound) {
-    if (registryByPost.has(String(row.id))) continue;
-    add(reportBlogLink(row), { title: row.title, keyword: row.keyword, summary: row.meta_description }, row.astro_published_at);
+    add(registryLink(row), { title: `${row.title || ''} ${row.h1 || ''}`, summary: row.meta_description }, row.published_at);
   }
   const entries = [...found.values()].filter((entry) => entry.held.some(Boolean));
   // A word few posts hold says more than one many hold ("tick" over
@@ -328,8 +270,9 @@ async function searchReportBlogPosts(knex, query) {
 }
 
 /**
- * The post a completion picked, checked against the link rule, from the
- * source the search found it in (a registry row, else a portal post).
+ * The post a completion picked, checked against the link rule: a registry row
+ * the search offers, or a portal post's id (as an earlier search offered)
+ * through the registry's row for it; never the portal's own fields.
  * Returns { post } for a linkable pick, { post: null, rejected: true } for
  * one that is not (unknown, unpublished, not live, off the site, or
  * unreadable), and { post: null, rejected: false } when nothing was picked.
@@ -340,14 +283,10 @@ async function resolveReportBlogPostPick(read, blogPostId) {
   const registryRow = await read((k) => k('content_registry').where({ id: blogPostId }).first(REGISTRY_COLUMNS));
   const fromRegistry = registryLink(registryRow);
   if (fromRegistry) return { post: fromRegistry };
-  const row = await read((k) => k('blog_posts').where({ id: blogPostId }).first(COLUMNS));
-  if (!row) return { post: null, rejected: true };
-  // A portal pick the sweep has a row for stands on the sweep's verdict. A
-  // failed read (the completion's fail-soft reader answers null) refuses the
-  // pick, never falls back to the portal's stamp (pre-push P1).
+  // A portal post's id stands on the registry's row for it. A failed read (the
+  // completion's fail-soft reader answers null) refuses the pick (pre-push P1).
   const matched = await read((k) => k('content_registry').where({ db_blog_id: blogPostId }).select(REGISTRY_COLUMNS));
-  if (!Array.isArray(matched)) return { post: null, rejected: true };
-  const post = portalLink(row, matched);
+  const post = Array.isArray(matched) ? matched.map(registryLink).find(Boolean) : null;
   return post ? { post } : { post: null, rejected: true };
 }
 
@@ -363,7 +302,6 @@ function frozenBlogPost(value) {
 
 module.exports = {
   blogPostAllowedFor,
-  reportBlogLink,
   searchReportBlogPosts,
   resolveReportBlogPostPick,
   frozenBlogPost,

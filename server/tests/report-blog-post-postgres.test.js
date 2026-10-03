@@ -11,9 +11,10 @@
  *    counted over the posts a report may link, read with the frontmatter the
  *    link rule needs (GitHub Codex P2 on 8c57183332: spoke-only rows never
  *    make "tick" look common).
- *  - A portal post the registry keeps a row for stands on that row alone; a
- *    row in conflict never comes back; the post-publish check's
- *    'live_visible' counts as live (GitHub Codex P1s and P2 on 8c57183332).
+ *  - A portal post is offered and picked only through the registry's row for
+ *    it, never the portal's own fields; a row in conflict never comes back;
+ *    the post-publish check's 'live_visible' counts as live (GitHub Codex P1s
+ *    and P2 on 8c57183332, P2 on 0d357564c5).
  */
 jest.mock('../models/db', () => new Proxy((...args) => mockPg(...args), {
   get: (_, key) => (typeof mockPg[key] === 'function' ? mockPg[key].bind(mockPg) : mockPg[key]),
@@ -125,14 +126,6 @@ postgres('report blog search on Postgres', () => {
     expect(posts.slice(1).map((post) => post.title)).toEqual(Array.from({ length: 7 }, (_, i) => `Weed Control Tips ${i}`));
   });
 
-  test('the portal read does the same', async () => {
-    const common = Array.from({ length: 600 }, (_, i) => portalRow(`Weed Control Tips ${i}`, { daysAgo: i }));
-    const rare = portalRow('Tick Season Guide for Florida Yards', { daysAgo: 2000 });
-    await mockPg.batchInsert('blog_posts', [...common, rare], 200);
-    const posts = await searchReportBlogPosts(mockPg, 'tick control');
-    expect(posts[0]).toEqual({ id: rare.id, title: rare.title, url: rare.astro_live_url });
-  });
-
   test('a post holding every word outranks the rare word alone; the title outranks the summary', async () => {
     const both = registryRow('Weed Control Around the Lanai', { daysAgo: 300, meta_description: 'Keeping ticks off the lanai too.' });
     const tick = registryRow('Tick Season Guide', { daysAgo: 1 });
@@ -150,14 +143,14 @@ postgres('report blog search on Postgres', () => {
     expect((await searchReportBlogPosts(mockPg, 'tick control')).map((post) => post.id)).toEqual([tick.id, ...control.map((row) => row.id)]);
   });
 
-  test('a portal post the registry keeps a row for stands on that row alone', async () => {
+  test('a portal post is offered and picked only through the registry\'s row for it', async () => {
     const post = portalRow('Ghost Ants After Rain');
     await mockPg('blog_posts').insert(post);
     const search = async () => (await searchReportBlogPosts(mockPg, 'ghost ants')).map((found) => found.url);
     const pick = async () => (await resolveReportBlogPostPick((fn) => fn(mockPg), post.id)).post?.url || null;
-    // No registry row yet: the portal's own rule.
-    expect(await search()).toEqual([post.astro_live_url]);
-    expect(await pick()).toBe(post.astro_live_url);
+    // No registry row yet: never offered or linked on the portal's own fields.
+    expect(await search()).toEqual([]);
+    expect(await pick()).toBeNull();
     const row = registryRow(post.title, { db_blog_id: post.id, live_url: post.astro_live_url, canonical_url: post.astro_live_url });
     for (const refused of [
       { live_status: 'visibility_review' },
