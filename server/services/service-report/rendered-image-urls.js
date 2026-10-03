@@ -31,7 +31,8 @@ function collectRenderedImageUrls(data) {
     ...((data?.proofMoments || data?.visualServiceMoments || [])
       .filter((m) => m && m.mediaType !== 'video')
       .map((m) => m?.mediaUrl)),
-    data?.mowingHeight?.photoUrl,
+    // New-sod mode: the document prints no height-of-cut module, so its gauge photo is not rendered.
+    data?.reportV2?.banner?.state === 'new_sod' ? null : data?.mowingHeight?.photoUrl,
     data?.treatmentMap?.traced?.snapshotUrl,
   ];
   return [...new Set(urls.filter((u) => typeof u === 'string' && /^https?:\/\//i.test(u)))];

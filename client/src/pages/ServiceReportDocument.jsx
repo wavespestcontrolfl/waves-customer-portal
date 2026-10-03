@@ -388,6 +388,10 @@ export default function ServiceReportDocument({ data, token }) {
     .filter((f) => !data.cockroachReportV2 || !COCKROACH_V2_DASHBOARD_FIELD_KEYS.has(f.fieldKey));
   const activity = data.activity || null;
   const reentry = data.dynamicContext?.reentry || null;
+  // New-sod mode (GATE_LAWN_NEW_SOD_MODE): the server already removed the height-of-cut module and the
+  // watering-in notes from the payload; the document ALSO never prints them (nor a label irrigation-hold
+  // bullet from the re-entry context, which is added after the payload is built) for such a visit.
+  const newSodReport = data.reportV2?.banner?.state === 'new_sod';
   // Older records store the aliases the web report's conditionRows accepts
   // (temp / humidity / wind / cloudCover) — normalize before deciding the
   // visit recorded nothing.
@@ -472,7 +476,7 @@ export default function ServiceReportDocument({ data, token }) {
     }));
   // The turf-height gauge shot is pulled from data.photos only when lawn V2
   // surfaced it in the mowing module — carry it back in with its own label.
-  const gaugePhoto = data.mowingHeight?.photoUrl
+  const gaugePhoto = !newSodReport && data.mowingHeight?.photoUrl
     ? [{ id: 'mowing-gauge', url: data.mowingHeight.photoUrl, caption: 'Turf height measured at this visit', isMoment: true }]
     : [];
   // A failed image is NOT silently dropped: an omission nobody can see is the
@@ -944,7 +948,7 @@ export default function ServiceReportDocument({ data, token }) {
       .filter(([key]) => legacyLawnScores[key] != null)
       .map(([key, label]) => `${label} ${legacyLawnScores[key]}`)
     : [];
-  const mowing = data.mowingHeight || null;
+  const mowing = newSodReport ? null : (data.mowingHeight || null);
   const interaction = interactionLabel(data.customerInteraction);
 
   return (
@@ -1314,7 +1318,7 @@ export default function ServiceReportDocument({ data, token }) {
             {sanitizeReentryCopy(reentry?.petAdvisory || (hasActualTreatment ? data.advisory?.pet_advisory : null)) && (
               <Bullet>{sanitizeReentryCopy(reentry?.petAdvisory || data.advisory?.pet_advisory)}</Bullet>
             )}
-            {reentry?.irrigationReadyAt && (
+            {!newSodReport && reentry?.irrigationReadyAt && (
               <Bullet>Hold irrigation until {fmtTime(reentry.irrigationReadyAt)} on {fmtDayLabel(reentry.irrigationReadyAt)}.</Bullet>
             )}
             {hasActualTreatment && sanitizeReentryCopy(data.reportV2?.aftercare?.reentry) && (
@@ -1406,7 +1410,7 @@ export default function ServiceReportDocument({ data, token }) {
                             {/* Legacy lawn reports (no reportV2) carry approved
                                 watering-in guidance ONLY here — dropping it
                                 loses a required instruction. */}
-                            {product.irrigation_notes && (
+                            {!newSodReport && product.irrigation_notes && (
                               <div><strong style={{ color: INK, fontWeight: 600 }}>Watering in:</strong> {product.irrigation_notes}</div>
                             )}
                           </div>

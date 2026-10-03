@@ -82,7 +82,7 @@ import CustomerEngagementTimeline from "./CustomerEngagementTimeline";
 import Customer360Summary from "./Customer360Summary";
 import Customer360Estimates from "./Customer360Estimates";
 import useUnreadConversations from "../../hooks/useUnreadConversations";
-import { formatETDateOnly } from "../../lib/timezone";
+import { etDateString, formatETDateOnly } from "../../lib/timezone";
 import { useCollectionHold } from "../../hooks/useCollectionHold";
 import { CollectionHoldStatus, HOLD_UNKNOWN_MESSAGE } from "./CollectionHoldNotice";
 import useModalFocus from "../../hooks/useModalFocus";
@@ -7223,9 +7223,9 @@ function AccessPrefsEditForm({ d, set, setDraft, fieldErrors, hasStructuredPets 
       {/* Sod someone else laid (Waves does not install sod). While the lawn
           report's visit falls in the first weeks after this day, the report
           shows new-sod care instead of the usual watering plan. Clear to end it. */}
-      <AccessPrefsTextInput {...f} label="New Sod Laid On" field="sodLaidOn" type="date" max={todayDateInput()} />
+      <AccessPrefsTextInput {...f} label="New Sod Laid On" field="sodLaidOn" type="date" max={etDateString()} />
       <div className="text-ui-caption text-ink-secondary">
-        Sod someone else laid. For the first 21 days the lawn report shows daily light watering, no mowing and no weed control. Leave blank for none.
+        Sod someone else laid. For the first 21 days the lawn report shows daily light watering and no mowing in place of the usual watering and mowing advice. Leave blank for none.
       </div>
 
       <AccessPrefsSubheading>HOA</AccessPrefsSubheading>

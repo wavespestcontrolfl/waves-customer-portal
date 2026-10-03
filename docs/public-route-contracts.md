@@ -2234,11 +2234,23 @@ lead's `applied` is the deterministic treatment sentence, `watching` is absent a
 headline override applies; computed in memory only, so an older normal freeze is left
 untouched and replays again when the mode ends or the gate is off); the water/coverage finding cards
 (`insights[].category === 'water'`) and `reportV2.mowing` (null) are withheld for the
-visit. The watering instruction the engine would build is not built, so
-`reportV2.aftercare` is the legacy product-label note, nothing is frozen under
+visit. One rule (`enforceNewSodPayload`, `lawn-new-sod-payload.js`) runs over the finished
+payload of an active visit: top-level `mowingHeight` is `null` (no height, band, trend or
+gauge photo); `applications[].product.irrigation_notes` and `irrigation_required` are
+`null`; `lawnAssessment.waterContext.{irrigationAdvice,targetInchesPerWeek}` and
+`lawnAssessment.droughtStress` are `null` and `overwateringSignal` is `false`;
+`reportV2.water` has `targetInches: null`, `scheduleOnFile: true`,
+`scheduleUnconfirmed: false` (rain / irrigation / total figures stay); `reportV2.mowing`
+is `null`; `reportV2.trends` has no `waterGap`, `mowing` or `mowingBand`; the water and
+mowing finding cards are gone and the advice-bearing text keys of the snapshot, the other
+cards, `followUp` and `smsSummary` that mention watering or mowing are `null`; and
+`reportV2.aftercare` is `{ watering: "<the two fixed lines, joined>", reentry,
+waterInRequired: false, neutral: true, ruleSource: null }` (no hold, credit, review or
+instruction-evidence field; the pet re-entry note stays). The watering instruction the
+engine would build is not built, so nothing is frozen under
 `structured_notes.lawnWateringFreeze` for the visit, and `GATE_LAWN_WATERING_SMS` /
 `GATE_LAWN_WATERING_FORECAST` produce nothing for it. The lawn PDF cache key gains
-`:sod=<date>` while the gate is on and the date is set. No new route, query parameter
+`:sod=<active|inactive>:<laidOn>:<visitDay>:<reason>` (the shared resolver's verdict) while the gate is on and the date is set. No new route, query parameter
 or customer message.
 `GATE_LAWN_REPORT_LEAD` (dark; gate off leaves the lawn payload unchanged, key for
 key) adds `reportV2.lead` `{ headline, why, applied, yourPart, next }` (plus the

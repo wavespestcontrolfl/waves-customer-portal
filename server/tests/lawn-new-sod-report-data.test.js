@@ -182,6 +182,28 @@ describe('GATE_LAWN_NEW_SOD_MODE on the report payload', () => {
     expect(await sig(SOD_PREFS('2026-09-25'))).toBe(noDate);
   });
 
+  test('the PDF cache key carries the resolved verdict: visit day, property and reason, not the date alone', async () => {
+    process.env.GATE_LAWN_NEW_SOD_MODE = 'true';
+    const sig = async (parts, prefs = SOD_PREFS('2026-09-25')) => (await resolveCanonicalLawnRender(
+      { id: 'svc-lawn-w1', customer_id: 'cust-lawn-w1', service_line: 'lawn', service_date: '2026-09-30' },
+      makeKnex({ ...withIdentity(prefs, parts), ...(parts && parts.extra) }),
+    )).signature;
+    const active = await sig({});
+    // The same date, a visit at ANOTHER property: a different render, so a different key.
+    const elsewhere = await sig({ appointment: { service_address_line1: '200 Sample Lane', service_address_zip: '34202' } });
+    expect(elsewhere).not.toBe(active);
+    // The same date, the visit moved across day 21 (service record day): a different key.
+    const day22 = await sig({ record: { service_date: '2026-10-17' } });
+    expect(day22).not.toBe(active);
+    expect(await sig({})).toBe(active); // and it is stable
+    // A verdict that cannot be read is a unique token (never a shared, cacheable key).
+    const failing = async () => (await resolveCanonicalLawnRender(
+      { id: 'svc-lawn-w1', customer_id: 'cust-lawn-w1', service_line: 'lawn', service_date: '2026-09-30' },
+      makeKnex({ ...withIdentity(SOD_PREFS('2026-09-25')), 'service_records as sr': FAIL }),
+    )).signature;
+    expect(await failing()).not.toBe(await failing());
+  });
+
   test('gate on, inside the window: the watering and mowing banner, the plan card and the expectation line', async () => {
     process.env.GATE_LAWN_NEW_SOD_MODE = 'true';
     const data = await render(HOLD, SOD_PREFS('2026-09-25'));

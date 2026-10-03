@@ -16,6 +16,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Customer360ProfileV2 from './Customer360ProfileV2';
+import { etDateString } from '../../lib/timezone';
 
 vi.mock('./StickyActionBar', () => ({ CustomerActionBar: () => null }));
 vi.mock('./AuthenticatedCallAudio', () => ({ default: () => null }));
@@ -256,6 +257,12 @@ describe('Customer 360 → Property → Access & Preferences', () => {
     const input = (await screen.findByText('New Sod Laid On')).closest('label').querySelector('input');
     expect(input).toHaveAttribute('type', 'date');
     expect(input.value).toBe('2026-10-01');
+    // The latest day is today in America/New_York (the server's rule), not the browser's day.
+    expect(input.getAttribute('max')).toBe(etDateString());
+    // The hint names only the watering and mowing substitutions.
+    const hint = screen.getByText(/Sod someone else laid\. For the first 21 days/);
+    expect(hint.textContent).toMatch(/daily light watering and no mowing/);
+    expect(hint.textContent).not.toMatch(/weed/i);
     fireEvent.change(input, { target: { value: '' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(bodies).toHaveLength(1));

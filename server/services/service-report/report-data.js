@@ -47,6 +47,7 @@ const {
   buildNewSodBanner, buildNewSodWeekPlan, ymdOrNull: sodDayOrNull, NEW_SOD_COPY,
 } = require('./lawn-new-sod');
 const { resolveNewSodVerdict } = require('./lawn-new-sod-visit');
+const { enforceNewSodPayload } = require('./lawn-new-sod-payload');
 const { pestReportExpectationsGateOn } = require('./pest-report-expectations');
 const { reportProductCopyGateOn, reportProductCopyForApplicationProduct } = require('./report-product-copy');
 const { validatePhotoChainRows } = require('./photo-chain');
@@ -2771,13 +2772,17 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
     // without touching updated_at, and a cached PDF keyed before it would
     // keep serving the former home's irrigation rows.
     irrigationStamp = `${portalIrrigationInches(prefs) ?? ''}:${prefs?.irrigation_system === false ? 'off' : 'on'}:${prefs?.updated_at ? new Date(prefs.updated_at).toISOString() : ''}:moved=${prefs?.irrigation_home_changed_at ? new Date(prefs.irrigation_home_changed_at).toISOString() : ''}:conf=${typeof prefs?.irrigation_confirmed_fields === 'string' ? prefs.irrigation_confirmed_fields : JSON.stringify(prefs?.irrigation_confirmed_fields || [])}`;
-    // GATE_LAWN_NEW_SOD_MODE (P35): while the gate is live and the property has a
-    // sod date, the report may be the fixed new-sod report, so the date rides the
-    // PDF key (a date edit also moves updated_at above; the gate flip itself is
-    // only visible here). Gate off = nothing appended, every key unchanged. The
-    // stamp is the date, not the verdict: a visit outside the window re-renders
-    // once with identical content, which is harmless.
-    if (typeof featureGates.lawnNewSodModeLive === 'function' && featureGates.lawnNewSodModeLive() && prefs?.sod_laid_on) irrigationStamp += `:sod=${sodDayOrNull(prefs.sod_laid_on) || 'err'}`;
+    // GATE_LAWN_NEW_SOD_MODE (P35): while the gate is live and the property has a sod date, the render
+    // depends on the RESOLVED VERDICT, not the date alone: the visit day and the visit's proven
+    // property decide it. So the key carries the shared resolver's answer (active or not, the date, the
+    // visit day and the reason). A verdict that cannot be read is the unique fail-closed token, like
+    // every other unreadable input here. Gate off, or no date = nothing appended, every key unchanged.
+    if (typeof featureGates.lawnNewSodModeLive === 'function' && featureGates.lawnNewSodModeLive() && prefs?.sod_laid_on) {
+      const verdict = await resolveNewSodVerdict(knex, { customerId: service.customer_id, prefs, serviceRecordId: service.id });
+      irrigationStamp += verdict.reason === 'read_failed'
+        ? `:sod=err${crypto.randomBytes(4).toString('hex')}`
+        : `:sod=${verdict.active ? 'active' : 'inactive'}:${sodDayOrNull(prefs.sod_laid_on) || 'none'}:${verdict.visitDay || 'none'}:${verdict.reason}`;
+    }
     // The week plan is a render input too: a new Monday snapshot, a restriction
     // policy change/expiry, or the gate itself must re-render a cached PDF.
   } catch {
@@ -7089,7 +7094,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     }
   }
 
-  return {
+  const reportData = {
     reportVersion: 'service_report_v1',
     reportV2,
     token,
@@ -7492,6 +7497,13 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       },
     },
   };
+  // GATE_LAWN_NEW_SOD_MODE: while new-sod mode is ACTIVE for the visit, ONE rule enforces it over the
+  // whole finished payload (lawn-new-sod-payload.js): every watering / irrigation / mowing module the
+  // clients read is replaced with the fixed new-sod value or removed.
+  if (reportV2 && lawnAssessment && lawnAssessment.newSod && lawnAssessment.newSod.active === true) {
+    enforceNewSodPayload(reportData);
+  }
+  return reportData;
 }
 
 // Pure — the termite bait-station pin-animation payload flag

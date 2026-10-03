@@ -923,6 +923,16 @@ const PLAN_CREDIT_COPY = {
 
 function WeekPlanCallout({ weekPlan, aftercare }) {
   if (!weekPlan?.title) return null;
+  // New-sod mode (GATE_LAWN_NEW_SOD_MODE): the plan is the server's fixed new-sod card. It is never a run
+  // or hold plan, so none of the product-watering credit / hold / review wording applies to it.
+  if (weekPlan.action === 'new_sod') {
+    return (
+      <div className="lawn-callout-plan" data-testid="lawn-week-plan" data-plan-action="new_sod" style={{ marginTop: 12, padding: '11px 13px', background: COLORS.sand, border: `1px solid ${COLORS.glassNavy}`, borderRadius: 8, fontSize: 14.5, color: BODY, lineHeight: 1.5 }}>
+        <div data-testid="lawn-week-plan-title" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14.5, color: TEXT }}>{weekPlan.title}</div>
+        {weekPlan.detail ? <div data-testid="lawn-week-plan-detail" style={{ marginTop: 3 }}>{weekPlan.detail}</div> : null}
+      </div>
+    );
+  }
   const care = aftercare || {};
   const verdict = aftercareVerdict(care);
   const canCreditWaterIn = verdict === 'credit';
@@ -996,7 +1006,12 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
   // an all-missing payload or the customer never learns how to fix it
   // (codex P2 r8).
   const hasAnyReading = hasRain || hasIrr;
-  if (!hasAnyReading && water.scheduleOnFile !== false) return null;
+  if (!hasAnyReading && water.scheduleOnFile !== false) {
+    // New-sod mode: with no rain or irrigation reading the card would vanish and take the fixed plan with it.
+    return water.weekPlan && water.weekPlan.action === 'new_sod'
+      ? (<Card><CardTitle>Water This Week</CardTitle><WeekPlanCallout weekPlan={water.weekPlan} aftercare={aftercare} /></Card>)
+      : null;
+  }
   // The chart draws only VISIBLE readings — a not-on-file irrigation zero
   // renders as a text row, not a segment, so it must not conjure an empty
   // bar + target legend for a week with no actual water reading

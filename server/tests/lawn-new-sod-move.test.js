@@ -152,6 +152,9 @@ describe('a move inside the new-sod window', () => {
     const path = require('path');
     const read = (f) => fs.readFileSync(path.join(__dirname, '../services', f), 'utf8');
     expect(read('customer-dedupe.js')).toMatch(/markSprinklerSettingsMoved\(winnerId, sp, \{ clearSodLaidOn: false \}\)/);
+    // One premise test, decided once: the preferences fill and the move stamp read the same value.
+    expect(read('customer-dedupe.js')).toMatch(/copySodLaidOn: !mergeDifferentHomes/);
+    expect(read('customer-dedupe.js')).toMatch(/if \(mergeDifferentHomes\) \{\s*try \{/);
     expect(read('property-role-proposals.js')).toMatch(/markSprinklerSettingsMoved\(customerId, trx\)/);
     expect(read('customer-address-fanout.js').match(/markSprinklerSettingsMoved\(customerId, conn\)/g)).toHaveLength(2);
   });

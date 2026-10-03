@@ -996,6 +996,8 @@ describe('revertMerge', () => {
       }
       const cfg = tables[table];
       if (cfg) {
+        // A single-row read of a configured table (the new-sod conflict probe).
+        if (q.called('first') && cfg.firstRow !== undefined) return cfg.firstRow;
         if (q.called('sum')) {
           const whereArg = q.args('where')?.[0] || {};
           return { total: (cfg.ledgerSums || {})[whereArg.customer_id] ?? 0 };
@@ -1138,6 +1140,18 @@ describe('revertMerge', () => {
       // ... then the date returns, only to the loser's row and only while it is still the merge-written null.
       expect(sodRestores(state)).toEqual([{ table: 'property_preferences', where: { id: 'pp-1', customer_id: LOSER }, payload: { sod_laid_on: '2026-10-01' } }]);
       expect(result.skipped.filter((x) => x.key === 'property_preferences.sod_laid_on')).toEqual([]);
+    });
+
+    it('REFUSES the undo, with zero writes, when a date was entered on that row after the merge', async () => {
+      const tables = tablesFor();
+      tables.property_preferences.firstRow = { id: 'pp-1', customer_id: WINNER, sod_laid_on: new Date('2026-10-02T00:00:00Z') };
+      const { trx, state } = buildRevertTrx({ journal: journalWithSod(), winner: baseWinner(), loser: baseLoser(), tables });
+      db.transaction.mockImplementation(async (fn) => fn(trx));
+      await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+        .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/sod-laid date was entered .* after this merge/) });
+      expect(state.repointedBack).toEqual([]);
+      expect(sodRestores(state)).toEqual([]);
+      expect(state.journalUpdate).toBeNull();
     });
 
     it('a journal with no cleared date restores nothing', async () => {

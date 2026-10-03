@@ -550,12 +550,26 @@ describe('mergeSingletonPrefRow', () => {
   describe('property_preferences.sod_laid_on (new-sod date, P35)', () => {
     const prefs = (customer_id, sod_laid_on, extra = {}) => ({ id: `p-${customer_id}`, customer_id, sod_laid_on, pet_details: null, created_at: 'x', updated_at: 'x', ...extra });
 
-    it('the loser\'s date is never copied onto a winner that has none (it describes the loser\'s home)', async () => {
-      const { trx, state } = stubTrx({ winnerRow: prefs('W', null), loserRow: prefs('L', '2026-10-01', { pet_details: 'one dog' }) });
-      await mergeSingletonPrefRow(trx, 'property_preferences', 'customer_id', 'W', 'L');
-      expect(state.updated.pet_details).toBe('one dog'); // ordinary fields still fill
-      expect(state.updated).not.toHaveProperty('sod_laid_on');
-      expect(state.deleted).toBe(true);
+    it('different homes (and by default): the loser\'s date is never copied onto a winner that has none (it describes the loser\'s home)', async () => {
+      for (const options of [undefined, { copySodLaidOn: false }]) {
+        const { trx, state } = stubTrx({ winnerRow: prefs('W', null), loserRow: prefs('L', '2026-10-01', { pet_details: 'one dog' }) });
+        await mergeSingletonPrefRow(trx, 'property_preferences', 'customer_id', 'W', 'L', options);
+        expect(state.updated.pet_details).toBe('one dog'); // ordinary fields still fill
+        expect(state.updated).not.toHaveProperty('sod_laid_on');
+        expect(state.deleted).toBe(true);
+      }
+    });
+
+    it('SAME home: the usual empty-winner fill takes the loser\'s date (the home is the same one)', async () => {
+      const { trx, state } = stubTrx({ winnerRow: prefs('W', null), loserRow: prefs('L', '2026-10-01') });
+      await mergeSingletonPrefRow(trx, 'property_preferences', 'customer_id', 'W', 'L', { copySodLaidOn: true });
+      expect(state.updated.sod_laid_on).toBe('2026-10-01');
+    });
+
+    it('SAME home: the winner\'s own date still wins over the loser\'s', async () => {
+      const { trx, state } = stubTrx({ winnerRow: prefs('W', '2026-09-28'), loserRow: prefs('L', '2026-10-01') });
+      await mergeSingletonPrefRow(trx, 'property_preferences', 'customer_id', 'W', 'L', { copySodLaidOn: true });
+      expect(state.updated || {}).not.toHaveProperty('sod_laid_on');
     });
 
     it('the winner\'s own date stands, whatever the loser holds (the winner\'s home did not move)', async () => {
