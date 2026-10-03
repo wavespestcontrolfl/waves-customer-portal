@@ -14,6 +14,9 @@ import { Button, Textarea } from '../ui';
 import '../../styles/tech-workflow.css';
 
 const VOICE_SHEET = 'pest_reservice';
+// The server keeps this much of an office note (complete-scheduled-service.js
+// OFFICE_NOTE_MAX_CHARS); the box never holds more.
+export const OFFICE_NOTE_MAX_CHARS = 800;
 
 // The sheet's voice-fill state: Checks, Heard lines, the office note, and
 // `apply`, which turns one fill into taps. `sheet` carries the sheet's own
@@ -21,6 +24,9 @@ const VOICE_SHEET = 'pest_reservice';
 export function useVoiceFillSheet({ enabled, request, serviceId, sheet }) {
   const { fill, status, error, unavailable } = useVoiceFill({ request, serviceId, sheet: VOICE_SHEET });
   const [checks, setChecks] = useState([]);
+  // What the fill set, until the tech taps ✓ or changes it (one tap per product,
+  // visit taps too: owner 2026-10-02).
+  const [confirms, setConfirms] = useState([]);
   const [heard, setHeard] = useState({ products: {}, visit: '' });
   const [officeNote, setOfficeNote] = useState('');
   const nextId = useRef(0);
@@ -38,6 +44,11 @@ export function useVoiceFillSheet({ enabled, request, serviceId, sheet }) {
     if (method) chooseMethod(method);
     if (plan.customerNote) appendNote(plan.customerNote);
     if (plan.officeNote) setOfficeNote((prev) => (prev.trim() ? `${prev.trimEnd()}\n${plan.officeNote}` : plan.officeNote));
+    // a newer fill of the same field replaces the older confirm
+    setConfirms((prev) => [
+      ...prev.filter((old) => !plan.confirms.some((next) => next.watch === old.watch)),
+      ...plan.confirms.map((confirm) => ({ ...confirm, id: ++nextId.current })),
+    ]);
     setHeard((prev) => ({ products: { ...prev.products, ...plan.heard.products }, visit: plan.heard.visit || prev.visit }));
     setChecks((prev) => [...prev, ...plan.checks.map((check) => ({ ...check, id: ++nextId.current }))]);
   }, []);
@@ -51,17 +62,23 @@ export function useVoiceFillSheet({ enabled, request, serviceId, sheet }) {
   // Fixing the field a Check points at clears it.
   const { rows } = sheet.products;
   const { form } = sheet;
+  // Changing what a confirm points at is the tech's own tap: it is confirmed.
   useEffect(() => {
     setChecks((prev) => (prev.length ? unresolvedChecks(prev, rows, form) : prev));
+    setConfirms((prev) => (prev.length ? unresolvedChecks(prev, rows, form) : prev));
   }, [rows, form]);
 
   const dismiss = useCallback((id) => setChecks((prev) => prev.filter((check) => check.id !== id)), []);
+  const confirm = useCallback((id) => setConfirms((prev) => prev.filter((item) => item.id !== id)), []);
 
   return {
     enabled: enabled && !unavailable,
     filling: status === 'filling',
     error,
     checks,
+    confirms,
+    confirm,
+    officeNoteTooLong: officeNote.length > OFFICE_NOTE_MAX_CHARS,
     heard,
     officeNote,
     setOfficeNote,
@@ -91,12 +108,14 @@ function micLabel({ listening, uploading, filling }) {
 // the clip upload gives one transcript after you stop.
 function VoiceFillMic({ serviceId, locked, filling, error, onWords, onPendingChange }) {
   const chunks = useRef([]);
-  const { listening, supported, toggle, mode, starting, uploading } = useSpeechDictation(
+  const { listening, supported, toggle, starting, uploading } = useSpeechDictation(
     (text) => chunks.current.push(text),
     { uploadServiceId: serviceId },
   );
-  // A clip still being recorded or transcribed would miss the save.
-  const pending = mode === 'upload' && (starting || listening || uploading);
+  // Words still being heard, recorded or transcribed would miss the save: in
+  // browser speech too, since a Complete tap would stop it before its words
+  // are filled in (unlike plain field dictation, the fill is not instant).
+  const pending = starting || listening || uploading;
   useEffect(() => {
     onPendingChange?.(pending);
     return () => onPendingChange?.(false);
@@ -156,6 +175,32 @@ function ChecksSection({ checks, locked, onDismiss }) {
   );
 }
 
+// What the fill set, each waiting on the tech's ✓ (or a change to it).
+function ConfirmSection({ confirms, locked, onConfirm }) {
+  if (!confirms.length) return null;
+  return (
+    <section className="tech-visit-choice-section" aria-label="Confirm what I filled">
+      <div className="tech-visit-section-head">
+        <h3 className="tech-visit-section-title">Confirm what I filled</h3>
+        <span className="tech-visit-muted">{confirms.length === 1 ? '1 to confirm' : `${confirms.length} to confirm`}</span>
+      </div>
+      <ul className="tech-visit-check-list">
+        {confirms.map((item) => (
+          <li key={item.id} className="tech-visit-check">
+            <span className="tech-visit-check-text">
+              {item.text}
+              {item.heard && <span className="tech-visit-heard">{`Heard: \u201C${item.heard}\u201D`}</span>}
+            </span>
+            <Button type="button" variant="secondary" className="tech-visit-action" disabled={locked} aria-label={`Confirm ${item.text}`} onClick={() => onConfirm(item.id)}>
+              {'✓ Right'}
+            </Button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 // A small muted "Heard: ..." under what the words filled.
 function HeardLine({ children }) {
   if (!children) return null;
@@ -170,6 +215,7 @@ export function VoiceFillTop({ voice, serviceId, locked, onPendingChange }) {
   return (
     <>
       <VoiceFillMic serviceId={serviceId} locked={locked} filling={voice.filling} error={voice.error} onWords={voice.onWords} onPendingChange={onPendingChange} />
+      <ConfirmSection confirms={voice.confirms} locked={locked} onConfirm={voice.confirm} />
       <ChecksSection checks={voice.checks} locked={locked} onDismiss={voice.dismiss} />
     </>
   );
@@ -203,9 +249,14 @@ export function OfficeNote({ voice, locked }) {
         rows={2}
         value={voice.officeNote}
         disabled={locked}
+        maxLength={OFFICE_NOTE_MAX_CHARS}
+        aria-invalid={voice.officeNoteTooLong || undefined}
         onChange={(e) => voice.setOfficeNote(e.target.value)}
         placeholder="Gate codes, access, anything the office should know"
       />
+      {voice.officeNoteTooLong && (
+        <p className="tech-visit-muted tech-visit-status--warn" role="status">{`Office note is over ${OFFICE_NOTE_MAX_CHARS} characters. Shorten it to complete.`}</p>
+      )}
     </section>
   );
 }

@@ -14,7 +14,13 @@
 //    product's usual amount); else a Check;
 //  - the activity level is ignored when the sheet shows none;
 //  - every Check that points at a field clears itself when the tech changes
-//    that field (unresolvedChecks), and the rest are dismissed by hand.
+//    that field (unresolvedChecks), and the rest are dismissed by hand;
+//  - one tap per product, and visit taps too (owner 2026-10-02): every product
+//    row and visit value the fill sets starts UNCONFIRMED (`confirms`, shown
+//    with its "Heard" words) until the tech taps ✓ or changes it, and
+//    Complete waits on them like a Check;
+//  - a How the tech tapped themselves (form.methodPicked) is never replaced,
+//    even when it is the default way.
 import { UNIT_CHOICES, amountText, hasAmount, usualAmountFor } from './fast-complete-products';
 import { submittedAmount } from './measure-units';
 
@@ -41,6 +47,15 @@ const REASON_TEXT = {
   value_not_heard: 'it was not clear which choice you meant',
   other_pest_unnamed: 'the other pest was not named',
   unclear_other: 'I could not tell what this meant',
+  product_said_not_filled: 'you named it, but it was not filled in',
+  amount_said_not_filled: 'you said an amount, but it was not filled in',
+  visit_said_not_filled: 'you said it, but it was not filled in',
+  office_said_not_filled: 'you said it for the office, but it is not in the office note',
+  note_not_heard: 'those were not your words, so it was left out of the note',
+  note_audience_unclear: 'it may have been for the office, so it was left out of the customer note',
+  note_safety_claim: 'safety wording cannot go on the customer report',
+  note_company_name: 'the company is Waves Pest Control',
+  note_over_cap: 'the note was too long for this line',
 };
 const FALLBACK_REASON = 'I could not match it to a choice';
 
@@ -67,6 +82,7 @@ function sameAmount(a, b) {
 // A Check about a field records that field's value when it was raised; the
 // tech changing it (to anything) is the fix.
 const WATCHERS = {
+  row: (row) => (row ? `${row.totalAmount ?? ''}|${row.amountUnit}|${row.active}|${row.methodInput ?? ''}` : 'gone'),
   amount: (row) => (row ? `${row.totalAmount ?? ''}|${row.amountUnit}` : 'gone'),
   active: (row) => (row ? String(row.active) : 'gone'),
   rowMethod: (row) => (row ? String(row.methodInput ?? '') : 'gone'),
@@ -104,6 +120,7 @@ function newPlan({ rows, form, ctx, ops }) {
     formPatch: {},
     heard: { products: {}, visit: '' },
     checks: [],
+    confirms: [],
     sprayHints: [],
   };
 }
@@ -247,7 +264,7 @@ function planVisitMethod(plan, visit) {
   const current = plan.form.method;
   if (current === wanted) {
     // already how it is
-  } else if (current === plan.ops.defaultMethod) {
+  } else if (current === plan.ops.defaultMethod && !plan.form.methodPicked) {
     setField(plan, 'method', wanted);
   } else {
     addCheck(plan, `You tapped ${titled(current)}; heard ${titled(wanted)}.`, 'form:method');
@@ -279,6 +296,28 @@ function planVisit(plan, visit) {
   if (safe.heard) plan.heard.visit = safe.heard;
 }
 
+// ── Confirm taps ──────────────────────────────────────────────────────────
+// What the fill SET (a row added or changed, a visit field filled) is a
+// suggestion until the tech confirms it. A value the tech had already set and
+// the fill left alone needs nothing.
+const VISIT_LABELS = { pests: 'Pests', areas: 'Where', otherPest: 'Other pest', linearFt: 'Linear feet', activity: 'Activity', method: 'How' };
+function visitValueText(field, value) {
+  if (value instanceof Set) return [...value].join(', ');
+  if (field === 'linearFt') return `${value} ft`;
+  return titled(value);
+}
+function addConfirms(plan) {
+  for (const key of new Set([...plan.newKeys, ...Object.keys(plan.patches)])) {
+    const row = plan.rows.get(key);
+    if (!row) continue;
+    const amount = hasAmount(row) ? ` — ${textOf(rowAmount(row))}` : '';
+    plan.confirms.push({ text: `${row.name}${amount}`, heard: plan.heard.products[key] || '', watch: `row:${key}` });
+  }
+  for (const field of Object.keys(plan.formPatch)) {
+    plan.confirms.push({ text: `${VISIT_LABELS[field] || titled(field)}: ${visitValueText(field, plan.formPatch[field])}`, heard: plan.heard.visit, watch: `form:${field}` });
+  }
+}
+
 /**
  * The taps a fill makes, as a plan:
  *   added      rows to add (a product not yet on the sheet)
@@ -287,6 +326,8 @@ function planVisit(plan, visit) {
  *   customerNote / officeNote  text to append to each note
  *   heard      { products: { [productId]: words }, visit: words }
  *   checks     [{ text, watch?, baseline? }] to show as Check chips
+ *   confirms   [{ text, heard, watch, baseline }] what the fill set, each held
+ *              unconfirmed until the tech taps ✓ or changes it
  * `rows` and `form` are the sheet's state right now; `ctx` its loaded context;
  * `ops` the sheet's own row rules (see FastCompleteSheet.jsx VOICE_SHEET_OPS).
  */
@@ -297,7 +338,8 @@ export function planVoiceFill({ fill, rows, form, ctx, ops }) {
   }
   for (const p of Array.isArray(fill?.products) ? fill.products : []) planProduct(plan, p);
   planVisit(plan, fill?.visit);
-  for (const check of plan.checks) {
+  addConfirms(plan);
+  for (const check of [...plan.checks, ...plan.confirms]) {
     if (check.watch) check.baseline = watchValue(check.watch, plan.rows, plan.form);
   }
   return {
@@ -308,5 +350,6 @@ export function planVoiceFill({ fill, rows, form, ctx, ops }) {
     officeNote: String(fill?.officeNote || '').trim(),
     heard: plan.heard,
     checks: plan.checks,
+    confirms: plan.confirms,
   };
 }

@@ -292,7 +292,7 @@ function rowRate(row, sprayMethod) {
 // The first requirement the application record still needs, in screen order
 // (reason '' when none), and the product whose stock holds Complete when
 // that is what is missing.
-function missingRequirement(form, rows, ratingAllowed, dictationPending, openChecks = 0) {
+function missingRequirement(form, rows, ratingAllowed, dictationPending, openChecks = 0, voiceHolds = {}) {
   const active = rows.filter((row) => row.active);
   // The server refuses the whole visit when a tracked stock would go below
   // zero; a stock already at zero is named here instead.
@@ -312,6 +312,9 @@ function missingRequirement(form, rows, ratingAllowed, dictationPending, openChe
     [ratingAllowed && !form.activity, 'Select activity seen.'],
     // Voice fill: something it could not settle is still open.
     [openChecks > 0, 'Check what I couldn\'t fill.'],
+    // Voice fill: what it set waits on the tech's ✓, and the office note fits.
+    [voiceHolds.confirms > 0, 'Confirm what I filled.'],
+    [voiceHolds.officeNoteTooLong, 'Shorten the office note.'],
   ].find(([missing]) => missing) || [];
   return { reason, stockRow };
 }
@@ -664,7 +667,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
   const { rows, addProduct, clearFollowingRates } = products;
   const [editAmounts, setEditAmounts] = useState(false);
   const [form, setForm] = useState(() => ({
-    pests: new Set(), otherPest: '', areas: new Set(), method: DEFAULT_METHOD, linearFt: '', activity: '', note: '',
+    pests: new Set(), otherPest: '', areas: new Set(), method: DEFAULT_METHOD, methodPicked: false, linearFt: '', activity: '', note: '',
     tipId: '', customTip: '',
   }));
   const setField = useCallback((key, value) => setForm((prev) => ({ ...prev, [key]: value })), []);
@@ -679,6 +682,11 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
     setField('method', next);
     clearFollowingRates();
   }, [setField, clearFollowingRates]);
+  // The tech's own How tap: voice fill never replaces it, even the default way.
+  const pickMethod = useCallback((next) => {
+    chooseMethod(next);
+    setField('methodPicked', true);
+  }, [chooseMethod, setField]);
   // Voice fill (GATE_FAST_COMPLETE_VOICE_FILL, delivered as the `voiceFillEnabled`
   // prop): off, nothing below renders and the sheet is as it always was.
   const voiceOps = useMemo(() => ({
@@ -708,7 +716,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
     onPick: (product) => addProduct(product, form.method),
   });
 
-  const { reason: missingReason, stockRow } = missingRequirement(form, rows, ctx.rating.allowed, busy, voice.checks.length);
+  const { reason: missingReason, stockRow } = missingRequirement(form, rows, ctx.rating.allowed, busy, voice.checks.length, { confirms: voice.confirms.length, officeNoteTooLong: voice.officeNoteTooLong });
   // "Update inventory or remove it": once the stock is updated, the tech
   // re-reads it here rather than close the sheet and lose the visit.
   const [checkingStock, setCheckingStock] = useState(false);
@@ -759,7 +767,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
               <Chip disabled={locked} key={label} label={label} pressed={form.areas.has(label)} onClick={() => setField('areas', toggleInSet(form.areas, label))} />
             ))}
           </ChoiceSection>
-          <MethodSection form={form} rows={rows} setField={setField} chooseMethod={chooseMethod} locked={locked} />
+          <MethodSection form={form} rows={rows} setField={setField} chooseMethod={pickMethod} locked={locked} />
           {ctx.rating.allowed && (
             <ChoiceSection title="Activity seen" columns={4}>
               {ACTIVITY_LEVELS.map((level) => (

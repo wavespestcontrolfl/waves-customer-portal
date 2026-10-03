@@ -251,3 +251,53 @@ describe('Checks that watch a field', () => {
     expect(unresolvedChecks(checks, [], { ...FORM, activity: 'light' })).toEqual([]);
   });
 });
+
+describe('confirm taps (owner 2026-10-02: one tap per product, visit taps too)', () => {
+  test('every row the fill changed or added and every visit field it set waits on a confirm', () => {
+    const result = plan({
+      rows: [row('a')],
+      products: [product('a', { amount: 6, unit: 'gal', heard: 'six gallons of a' }), product('b', { amount: 2, unit: 'gal' })],
+      visit: { ...NO_VISIT, pests: ['Ants'], areas: ['Outside'], activity: 'light', heard: 'ants outside light' },
+    });
+    const byWatch = Object.fromEntries(result.confirms.map((c) => [c.watch, c]));
+    expect(byWatch['row:a']).toMatchObject({ text: 'Product a — 6 gal', heard: 'six gallons of a' });
+    expect(byWatch['row:b']).toMatchObject({ text: 'Product b — 2 gal' });
+    expect(byWatch['form:pests']).toMatchObject({ text: 'Pests: Ants', heard: 'ants outside light' });
+    expect(byWatch['form:areas']).toMatchObject({ text: 'Where: Outside' });
+    expect(byWatch['form:activity']).toMatchObject({ text: 'Activity: Light' });
+  });
+
+  test('a value the sheet already had and the fill left alone needs no confirm', () => {
+    const result = plan({ products: [product('a', { amount: 4, unit: 'fl_oz' })] });
+    expect(result.confirms).toEqual([]);
+  });
+
+  test('a confirm clears when the tech changes what it points at', () => {
+    const result = plan({ rows: [row('a')], products: [product('a', { amount: 6, unit: 'gal' })] });
+    const filled = [row('a', { totalAmount: '6', amountUnit: 'gal' })];
+    expect(unresolvedChecks(result.confirms, filled, FORM)).toHaveLength(1);
+    expect(unresolvedChecks(result.confirms, [row('a', { totalAmount: '5', amountUnit: 'gal' })], FORM)).toHaveLength(0);
+    expect(unresolvedChecks(result.confirms, [row('a', { totalAmount: '6', amountUnit: 'gal', active: false })], FORM)).toHaveLength(0);
+  });
+});
+
+describe('a How the tech tapped themselves', () => {
+  test('is never replaced, even when it is the default way: the difference is a Check', () => {
+    const result = plan({ form: { ...FORM, methodPicked: true }, visit: { ...NO_VISIT, method: 'perimeter_spray', heard: 'perimeter' } });
+    expect(result.formPatch.method).toBeUndefined();
+    expect(texts(result)).toContain('You tapped Spot treatment; heard Perimeter spray.');
+  });
+
+  test('the untouched default is still filled', () => {
+    const result = plan({ visit: { ...NO_VISIT, method: 'perimeter_spray', heard: 'perimeter' } });
+    expect(result.formPatch.method).toBe('perimeter_spray');
+  });
+});
+
+test.each([
+  'product_said_not_filled', 'amount_said_not_filled', 'visit_said_not_filled', 'office_said_not_filled', 'note_not_heard',
+  'note_audience_unclear', 'note_safety_claim', 'note_company_name', 'note_over_cap',
+])('the server reason %s reads as plain words', (code) => {
+  expect(plainReason(code)).not.toBe('I could not match it to a choice');
+  expect(plainReason(code)).not.toContain('_');
+});

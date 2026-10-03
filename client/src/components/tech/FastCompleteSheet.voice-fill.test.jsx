@@ -99,6 +99,10 @@ function say(...chunks) {
 const voiceFillCalls = (request) => request.calls.filter((c) => c.path.endsWith('/voice-fill'));
 const completeBodies = (request) => request.calls.filter((c) => c.path.endsWith('/complete')).map((c) => JSON.parse(c.options.body));
 const completeButton = () => screen.getByRole('button', { name: 'Complete re-service' });
+// The tech's ✓ on everything the fill set (one tap per product, visit taps too).
+const confirmAll = () => {
+  for (const button of screen.queryAllByRole('button', { name: /^Confirm / })) fireEvent.click(button);
+};
 
 describe('FastCompleteSheet voice fill, gate off', () => {
   test('no mic, no office note, no request, and the /complete body is the sheet\'s own', async () => {
@@ -142,8 +146,8 @@ describe('FastCompleteSheet voice fill, gate on', () => {
     say('okay so I did the perimeter outside for ants and roaches, Taurus six ounces,', 'five grams of the Advion gel, light activity, 120 linear feet,', 'note for the office the gate code changed, and some other stuff');
 
     // Products: the house row's amount changes, the other product is added like "+ Other product".
-    expect(await screen.findByRole('button', { name: /Taurus SC — 6 fl oz/ })).toBeTruthy();
-    expect(screen.getByRole('button', { name: /Advion Ant Bait Gel — 5 g/ })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: /^Taurus SC — 6 fl oz/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^Advion Ant Bait Gel — 5 g/ })).toBeTruthy();
     // Visit taps.
     for (const name of ['Ants', 'Roaches', 'Outside', 'Perimeter spray', 'Light']) {
       expect(screen.getByRole('button', { name }).getAttribute('aria-pressed')).toBe('true');
@@ -153,9 +157,10 @@ describe('FastCompleteSheet voice fill, gate on', () => {
     expect(screen.getByLabelText('Tell me about the visit').value).toBe(FILL.customerNote);
     expect(screen.getByLabelText('Office note (not on the report)').value).toBe(FILL.officeNote);
     // Heard lines, small and muted.
-    expect(screen.getByText('Heard: “Taurus six ounces”')).toBeTruthy();
-    expect(screen.getByText('Heard: “five grams of the Advion gel”')).toBeTruthy();
-    expect(screen.getByText(`Heard: “${FILL.visit.heard}”`)).toBeTruthy();
+    // (under the row and on its confirm item)
+    expect(screen.getAllByText('Heard: “Taurus six ounces”').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Heard: “five grams of the Advion gel”').length).toBeGreaterThan(0);
+    expect(screen.getAllByText(`Heard: “${FILL.visit.heard}”`).length).toBeGreaterThan(0);
     // The one thing it could not place is a Check, and it holds Complete.
     const check = screen.getByRole('region', { name: 'Check' });
     expect(within(check).getByText(/some other stuff/)).toBeTruthy();
@@ -165,6 +170,15 @@ describe('FastCompleteSheet voice fill, gate on', () => {
 
     fireEvent.click(within(check).getByRole('button', { name: '✓ Got it' }));
     expect(screen.queryByRole('region', { name: 'Check' })).toBeNull();
+    // Everything the fill set still waits on the tech's ✓, each with its words.
+    const confirm = screen.getByRole('region', { name: 'Confirm what I filled' });
+    expect(within(confirm).getByText(/Taurus SC — 6 fl oz/)).toBeTruthy();
+    expect(within(confirm).getByText(/Pests: Ants, Roaches/)).toBeTruthy();
+    expect(within(confirm).getAllByText('Heard: “Taurus six ounces”').length).toBeGreaterThan(0);
+    expect(screen.getByText('Confirm what I filled.')).toBeTruthy();
+    expect(completeButton().disabled).toBe(true);
+    confirmAll();
+    expect(screen.queryByRole('region', { name: 'Confirm what I filled' })).toBeNull();
     expect(completeButton().disabled).toBe(false);
 
     fireEvent.click(completeButton());
@@ -220,6 +234,9 @@ describe('FastCompleteSheet voice fill, gate on', () => {
     fireEvent.click(screen.getAllByRole('button', { name: '✓ Got it' })[0]);
     expect(completeButton().disabled).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: '✓ Got it' }));
+    // the visit values it filled still wait on their ✓
+    expect(completeButton().disabled).toBe(true);
+    confirmAll();
     expect(completeButton().disabled).toBe(false);
   });
 
@@ -246,6 +263,7 @@ describe('FastCompleteSheet voice fill, gate on', () => {
     expect(screen.getByLabelText('Office note (not on the report)').value).not.toContain('Taurus six ounces');
 
     fireEvent.click(screen.getByRole('button', { name: '✓ Got it' }));
+    confirmAll();
     fireEvent.click(completeButton());
     await waitFor(() => expect(completeBodies(request)).toHaveLength(1));
     const body = completeBodies(request)[0];
@@ -288,6 +306,7 @@ describe('FastCompleteSheet voice fill, gate on', () => {
     fireEvent.change(office, { target: { value: 'Gate code is 4-4-4-4 now.' } });
     expect(office.value).toBe('Gate code is 4-4-4-4 now.');
 
+    confirmAll();
     fireEvent.click(completeButton());
     await waitFor(() => expect(completeBodies(request)).toHaveLength(1));
     const body = completeBodies(request)[0];
@@ -300,8 +319,62 @@ describe('FastCompleteSheet voice fill, gate on', () => {
     await openSheet(request);
     say('hello');
     await waitFor(() => expect(screen.getByLabelText('Office note (not on the report)').value).toBe(''));
+    confirmAll();
     fireEvent.click(completeButton());
     await waitFor(() => expect(completeBodies(request)).toHaveLength(1));
     expect(completeBodies(request)[0]).not.toHaveProperty('officeNote');
+  });
+
+  test('one ✓ confirms one value; changing a filled value is the tech\'s own tap', async () => {
+    const request = makeRequest({ fill: { ...FILL, unclear: [] } });
+    await openSheet(request);
+    say('hello');
+    const confirm = await screen.findByRole('region', { name: 'Confirm what I filled' });
+    const before = within(confirm).getAllByRole('button', { name: /^Confirm / }).length;
+    fireEvent.click(within(confirm).getByRole('button', { name: /^Confirm Taurus SC/ }));
+    expect(within(screen.getByRole('region', { name: 'Confirm what I filled' })).getAllByRole('button', { name: /^Confirm / })).toHaveLength(before - 1);
+    // tapping a different activity level confirms the activity by changing it
+    fireEvent.click(screen.getByRole('button', { name: 'Moderate' }));
+    expect(screen.queryByRole('button', { name: /^Confirm Activity/ })).toBeNull();
+  });
+
+  test('a How the tech tapped is kept even when it is the default way', async () => {
+    await openSheet(makeRequest({ fill: { ...FILL, products: [], unclear: [], visit: { ...FILL.visit, method: 'perimeter_spray' } } }));
+    fireEvent.click(screen.getByRole('button', { name: 'Spot treatment' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Perimeter spray' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Spot treatment' }));
+    say('perimeter');
+    const check = await screen.findByRole('region', { name: 'Check' });
+    expect(within(check).getByText('You tapped Spot treatment; heard Perimeter spray.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Spot treatment' }).getAttribute('aria-pressed')).toBe('true');
+  });
+
+  test('live browser speech holds Complete until the words are in', async () => {
+    await openSheet(makeRequest());
+    fireEvent.click(screen.getByRole('button', { name: 'Ants' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Outside' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Light' }));
+    expect(completeButton().disabled).toBe(false);
+    setDictation({ listening: true, mode: 'speech' });
+    expect(completeButton().disabled).toBe(true);
+    setDictation({ listening: false });
+  });
+
+  test('the office note box holds at most 800 characters', async () => {
+    await openSheet(makeRequest());
+    const office = screen.getByLabelText('Office note (not on the report)');
+    expect(office.getAttribute('maxlength')).toBe('800');
+  });
+
+  test('a fill that pushes the office note past 800 characters holds Complete until it is shortened', async () => {
+    const request = makeRequest({ fill: { ...FILL, products: [], unclear: [], officeNote: 'x'.repeat(790) } });
+    await openSheet(request);
+    fireEvent.change(screen.getByLabelText('Office note (not on the report)'), { target: { value: 'Gate code is 1234.' } });
+    say('hello');
+    await waitFor(() => expect(screen.getByText('Office note is over 800 characters. Shorten it to complete.')).toBeTruthy());
+    confirmAll();
+    expect(completeButton().disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText('Office note (not on the report)'), { target: { value: 'Gate code is 1234.' } });
+    expect(completeButton().disabled).toBe(false);
   });
 });
