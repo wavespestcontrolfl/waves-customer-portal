@@ -258,6 +258,92 @@ postgres('payer assignment withdraws visit-linked invoices with no packet', () =
     expect(await invoiceRow(draft.invoiceId)).toMatchObject({ status: 'draft', scheduled_send_error: null });
   });
 
+  test('an accepted-channel marker survives withdrawal and release, so a requeued invoice stays email-only (no second text)', async () => {
+    const { BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED, SUMMARY_TEXT_CARRIED_ERROR } = require('../services/invoice-helpers');
+    const payerId = await payer();
+    for (const marker of [BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED, `${SUMMARY_TEXT_CARRIED_ERROR}: mailbox full: try later`]) {
+      const { visitId, invoiceId } = await fixture({
+        link: 'record', status: 'scheduled',
+        invoice: { scheduled_send_at: new Date(Date.now() + 3600e3), scheduled_send_error: marker, sms_sent_at: new Date() },
+      });
+      const smsSentAt = (await invoiceRow(invoiceId)).sms_sent_at;
+      await assignJobPayer(visitId, payerId);
+      expect(await invoiceRow(invoiceId)).toMatchObject({ status: 'draft', scheduled_send_error: `payer_billed:${payerId}:queued:m=${marker}` });
+      await clearJobPayer(visitId);
+      const back = await invoiceRow(invoiceId);
+      expect(back).toMatchObject({ status: 'scheduled', scheduled_send_error: marker });
+      expect(back.sms_sent_at).toEqual(smsSentAt);
+    }
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a payer-to-payer move keeps the marker in the re-pointed stamp', async () => {
+    const { BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED } = require('../services/invoice-helpers');
+    const { visitId, invoiceId } = await fixture({
+      link: 'record', status: 'scheduled',
+      invoice: { scheduled_send_at: new Date(Date.now() + 3600e3), scheduled_send_error: BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED, sms_sent_at: new Date() },
+    });
+    const first = await payer();
+    const second = await payer();
+    await assignJobPayer(visitId, first);
+    await mockPg('scheduled_services').where({ id: visitId }).update({ payer_id: second });
+    await Packets.reconcileWithdrawnPacketInvoices(mockPg, { scheduledServiceId: visitId });
+    expect(await invoiceRow(invoiceId)).toMatchObject({ scheduled_send_error: `payer_billed:${second}:queued:m=${BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED}` });
+  });
+
+  test('the Bill-To fence only counts invoices whose effective owner the change would move', async () => {
+    const payerId = await payer();
+    const open = await fixture({ link: 'record', status: 'sending' });
+    const pinned = await fixture({ link: 'record', status: 'sending', selfPayOverride: true });
+    const ownPayer = await fixture({ link: 'record', status: 'sending', visitPayerId: await payer() });
+    // A customer default payer change reaches an unpinned visit only.
+    expect(await Packets.packetInvoiceSendInFlight({ customerId: open.customerId }, mockPg)).toBe(true);
+    expect(await Packets.packetInvoiceSendInFlight({ customerId: pinned.customerId }, mockPg)).toBe(false);
+    expect(await Packets.packetInvoiceSendInFlight({ customerId: ownPayer.customerId }, mockPg)).toBe(false);
+    // …a payer activation reaches a visit that names that payer, and no other.
+    await mockPg('scheduled_services').where({ id: ownPayer.visitId }).update({ payer_id: payerId });
+    expect(await Packets.packetInvoiceSendInFlight({ payerId }, mockPg)).toBe(true);
+    await mockPg('scheduled_services').where({ id: ownPayer.visitId }).update({ payer_id: await payer() });
+    await mockPg('customers').where({ id: ownPayer.customerId }).update({ payer_id: payerId });
+    expect(await Packets.packetInvoiceSendInFlight({ payerId }, mockPg)).toBe(false);
+    // The visit's own Bill-To change always counts.
+    expect(await Packets.packetInvoiceSendInFlight({ scheduledServiceId: pinned.visitId }, mockPg)).toBe(true);
+  });
+
+  test('inside a writer transaction the fence holds the candidate invoice and ownership rows to commit (committed fixture, second connection)', async () => {
+    // The fixture must be committed for a second connection to see and lock it.
+    const customerId = randomUUID();
+    const visitId = randomUUID();
+    const recordId = randomUUID();
+    const invoiceId = randomUUID();
+    const date = etDateString();
+    await database('customers').insert({ id: customerId, first_name: 'Fixture', last_name: 'Locked', phone: '+12025550166', email: `${customerId}@example.invalid` });
+    await database('scheduled_services').insert({ id: visitId, customer_id: customerId, service_type: 'Fixture General Pest Control', scheduled_date: date, status: 'completed' });
+    await database('service_records').insert({ id: recordId, customer_id: customerId, scheduled_service_id: visitId, service_type: 'Fixture General Pest Control', service_date: date });
+    await database('invoices').insert({ id: invoiceId, customer_id: customerId, invoice_number: `FIX-${invoiceId.slice(0, 8)}`, token: randomUUID().replace(/-/g, ''), status: 'sent', total: 50, service_record_id: recordId });
+    // mockPg is this test's own transaction; release it so the writer below is the only holder.
+    const writer = await database.transaction();
+    try {
+      expect(await Packets.packetInvoiceSendInFlight({ scheduledServiceId: visitId }, writer)).toBe(false);
+      const contender = await database.transaction();
+      try {
+        // A queue sender's claim flip or a saved-card claim must write or lock the invoice row.
+        await expect(contender('invoices').where({ id: invoiceId }).forUpdate().noWait().first('id')).rejects.toMatchObject({ code: '55P03' });
+      } finally { await contender.rollback(); }
+      const contender2 = await database.transaction();
+      try {
+        // …and a Bill-To editor of the visit waits behind the shared ownership lock.
+        await expect(contender2('scheduled_services').where({ id: visitId }).forNoKeyUpdate().noWait().first('id')).rejects.toMatchObject({ code: '55P03' });
+      } finally { await contender2.rollback(); }
+    } finally {
+      await writer.rollback();
+      await database('invoices').where({ id: invoiceId }).del();
+      await database('service_records').where({ id: recordId }).del();
+      await database('scheduled_services').where({ id: visitId }).del();
+      await database('customers').where({ id: customerId }).del();
+    }
+  });
+
   test('moving the visit to a different payer re-points the stamp instead of releasing it', async () => {
     const { visitId, invoiceId } = await fixture({ link: 'record' });
     const first = await payer();

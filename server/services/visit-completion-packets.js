@@ -1083,6 +1083,15 @@ async function resolvePacketOwnershipLocked(packetId, trx) {
   return { visit, billed, payerId: await liveThirdPartyPayerForPacket(packetId, trx) };
 }
 
+// The send-state markers on scheduled_send_error (matched everywhere by prefix) that a withdrawal
+// must not lose.
+function retryMarkerOf(error) {
+  const text = String(error || '');
+  const { BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED } = require('./invoice-helpers');
+  return [BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED, SUMMARY_TEXT_CARRIED_ERROR, SUMMARY_TEXT_PLANNED_ERROR]
+    .some((marker) => text.startsWith(marker)) ? text : null;
+}
+
 // The invoice-level half of a Bill-To withdrawal, shared by the combined-visit (packet)
 // path below and the visit-linked path (visit-linked-invoice-withdrawal.js): credit
 // returned, the invoice off the send queue and stamped `payer_billed:<payer>`, armed
@@ -1125,7 +1134,13 @@ async function withdrawInvoiceFromCustomer(trx, { invoiceId, payerId, markQueued
   // `queued` (non-packet callers only): the invoice was waiting in the send queue, so a
   // release puts it back there instead of leaving it a draft.
   const queued = markQueued && !parked && prior?.status === 'scheduled';
-  const stamp = `payer_billed:${payerId}${parked ? ':park' : ''}${queued ? ':queued' : ''}`;
+  // The accepted-channel / summary-carried retry marker is what keeps a requeued send EMAIL-ONLY
+  // (its Text leg already went out). The stamp replaces the column, so a non-packet withdrawal
+  // carries the marker verbatim as the stamp's tail (`:m=<marker>`) and the release writes it back;
+  // without it the requeue would text the pay link a second time. (The packet release rebuilds its
+  // marker from sms_sent_at and the summary record instead, so it never needed the tail.)
+  const priorMarker = markQueued ? retryMarkerOf(prior?.scheduled_send_error) : null;
+  const stamp = `payer_billed:${payerId}${parked ? ':park' : ''}${queued ? ':queued' : ''}${priorMarker ? `:m=${priorMarker}` : ''}`;
   const withdrawn = parked
     ? await trx('invoices').where({ id: invoiceId, status: 'scheduled' }).whereNull('payer_id').whereNull('scheduled_send_at')
       .update({ scheduled_send_error: stamp, updated_at: trx.fn.now() })

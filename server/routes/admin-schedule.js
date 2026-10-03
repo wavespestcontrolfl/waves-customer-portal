@@ -14412,8 +14412,13 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           } catch { /* no children / column absent */ }
           // The children's visit-linked invoices change hands with the payer propagation below,
           // so a send or charge in flight on one is refused here, before the first Stripe cancel.
-          if (fencedVisitIds.length > 1
-            && await require('../services/visit-linked-invoice-withdrawal').linkedInvoiceChargeInFlight(trx, { scheduledServiceIds: fencedVisitIds.slice(1) })) {
+          // Only the children the propagation below actually rewrites (pending / confirmed): a send
+          // or charge on a completed or cancelled child's invoice does not move with this edit.
+          const rewrittenChildIds = fencedVisitIds.length > 1
+            ? await trx('scheduled_services').where({ recurring_parent_id: req.params.id }).whereIn('status', ['pending', 'confirmed']).pluck('id')
+            : [];
+          if (rewrittenChildIds.length
+            && await require('../services/visit-linked-invoice-withdrawal').linkedInvoiceChargeInFlight(trx, { scheduledServiceIds: rewrittenChildIds })) {
             throw Object.assign(new Error('An invoice for a later visit in this series is being delivered or charged. Retry the Bill-To change in a moment.'), {
               statusCode: 409, isOperational: true, code: 'invoice_send_in_flight',
             });

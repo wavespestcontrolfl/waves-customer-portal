@@ -57,14 +57,20 @@ function applyScope(trx, query, { customerId, scheduledServiceId, scheduledServi
 }
 
 // The ownership rows taken in the packet path's order - customer, visit, then every payer row
-// the resolver can consult (all FOR SHARE) - and the live Bill-To decision made under them, so a
-// payer assignment serializes behind this decision instead of racing it. null = self-pay.
-async function liveOwnerLocked(trx, invoice, visitId) {
+// the resolver can consult (all FOR SHARE) - so a payer assignment serializes behind the decision
+// instead of racing it. Returns the visit row.
+async function lockOwnershipRows(trx, invoice, visitId) {
   await trx('customers').where({ id: invoice.customer_id }).forShare().first('id');
-  const visit = await trx('scheduled_services').where({ id: visitId }).forShare().first('id', 'payer_id');
+  const visit = await trx('scheduled_services').where({ id: visitId }).forShare().first('id', 'payer_id', 'self_pay_override');
   const customer = await trx('customers').where({ id: invoice.customer_id }).first('payer_id');
   const payerIds = [...new Set([visit?.payer_id, customer?.payer_id].filter(Boolean).map(String))];
   if (payerIds.length) await trx('payers').whereIn('id', payerIds).orderBy('id').forShare().select('id');
+  return visit;
+}
+
+// The live Bill-To decision, made under those rows. null = self-pay.
+async function liveOwnerLocked(trx, invoice, visitId) {
+  await lockOwnershipRows(trx, invoice, visitId);
   const resolved = await require('./payer').resolveForInvoice({
     database: trx, customerId: invoice.customer_id, scheduledServiceId: visitId, throwOnError: true,
   });
@@ -133,22 +139,28 @@ async function reconcileLinkedInvoices(trx, scope = {}) {
     const visitId = await linkedVisitOf(invoice, trx);
     if (!visitId) continue;
     const live = await liveOwnerLocked(trx, invoice, visitId);
-    const [, stampedPayer, ...flags] = invoice.scheduled_send_error.split(':');
-    const flagSuffix = flags.length ? `:${flags.join(':')}` : '';
+    // `payer_billed:<id>[:park][:queued][:m=<marker>]` - the marker is the verbatim send-state marker
+    // the withdrawal replaced and may itself contain ':'.
+    const stamp = invoice.scheduled_send_error;
+    const markerAt = stamp.indexOf(':m=');
+    const priorMarker = markerAt >= 0 ? stamp.slice(markerAt + 3) : null;
+    const [, stampedPayer, ...flags] = (markerAt >= 0 ? stamp.slice(0, markerAt) : stamp).split(':');
     if (live) {
       if (String(live) !== stampedPayer) {
-        await trx('invoices').where({ id: invoice.id, status: invoice.status, scheduled_send_error: invoice.scheduled_send_error })
-          .update({ scheduled_send_error: `payer_billed:${live}${flagSuffix}`, updated_at: trx.fn.now() });
+        await trx('invoices').where({ id: invoice.id, status: invoice.status, scheduled_send_error: stamp })
+          .update({ scheduled_send_error: stamp.replace(/^payer_billed:[^:]+/, `payer_billed:${live}`), updated_at: trx.fn.now() });
       }
       continue;
     }
     const parked = flags.includes('park');
     const requeue = flags.includes('queued') && invoice.status === 'draft';
+    // The marker goes back exactly as it was, so a requeued invoice stays email-only.
+    const restored = parked ? STALE_SEND_PARK_ERROR : priorMarker;
     const moved = await trx('invoices')
-      .where({ id: invoice.id, status: invoice.status, scheduled_send_error: invoice.scheduled_send_error }).whereNull('payer_id')
+      .where({ id: invoice.id, status: invoice.status, scheduled_send_error: stamp }).whereNull('payer_id')
       .update(requeue
-        ? { status: 'scheduled', scheduled_send_at: trx.fn.now(), scheduled_send_attempts: 0, scheduled_send_error: null, updated_at: trx.fn.now() }
-        : { scheduled_send_error: parked ? STALE_SEND_PARK_ERROR : null, updated_at: trx.fn.now() });
+        ? { status: 'scheduled', scheduled_send_at: trx.fn.now(), scheduled_send_attempts: 0, scheduled_send_error: restored, updated_at: trx.fn.now() }
+        : { scheduled_send_error: restored, updated_at: trx.fn.now() });
     if (!moved) continue;
     await resumeDunningPausedByWithdrawal(trx, invoice.id);
     released += 1;
@@ -156,19 +168,51 @@ async function reconcileLinkedInvoices(trx, scope = {}) {
   return released;
 }
 
+// Can this Bill-To change move the invoice's effective owner? Decided from the visit row, since
+// the new payer is not written yet when the fence runs. A change to the visit's own Bill-To always
+// can; a change to the customer default (or to a payer a customer or visit references) cannot reach
+// a visit that names its own payer (unless it is the payer changing) or is pinned self-pay.
+function ownerCouldChange(scope, visit) {
+  if (scope.scheduledServiceId || (scope.scheduledServiceIds && scope.scheduledServiceIds.length) || scope.invoiceId) return true;
+  if (!visit) return false;
+  if (visit.payer_id) return Boolean(scope.payerId) && String(visit.payer_id) === String(scope.payerId);
+  return visit.self_pay_override !== true;
+}
+
 // The refusal fence, run BEFORE the writer's first Stripe cancel: a visit-linked invoice whose
-// send claim is held, whose bank debit is captured, or whose charge is unresolved (an in-flight
-// or ambiguous saved-card attempt, an orphan charge) is money or delivery in motion - the Bill-To
-// change is refused (the caller's 409) instead of handing that debt to AP underneath it. The
-// charge fence is read-only here (nothing is released or promoted).
+// owner this change would move and whose send claim is held, whose bank debit is captured, or whose
+// charge is unresolved (an in-flight or ambiguous saved-card attempt, an orphan charge) is money or
+// delivery in motion - the Bill-To change is refused (the caller's 409) instead of handing that debt
+// to AP underneath it. The charge fence is read-only here (nothing is released or promoted).
+//
+// Inside a writer transaction the fence also LOCKS what it judges, in the packet path's order
+// (customer, visit, payer rows FOR SHARE, then the invoice FOR UPDATE) and holds it to commit: a queue
+// sender's claim flip (invoice.js claimInvoiceForSend / claimDueScheduledInvoiceForSend) and a
+// saved-card claim (stripe.js claimInvoiceSavedCardCharge) both write or lock the invoice row, so
+// neither can slip in between this check and the withdrawal; one that already committed is seen here
+// as status 'sending' or an unresolved attempt.
 async function linkedInvoiceChargeInFlight(database, scope = {}) {
   if (scopeIsEmpty(scope)) return false;
   const { isCollectionPendingFenceError } = require('./invoice-helpers');
+  const locking = database.isTransaction === true;
   const candidates = await applyScope(database, visitLinkedBase(database, TERMINAL), scope)
     .where((q) => q.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'payer_billed:%'))
     .orderBy('id')
-    .select('id', 'status', 'stripe_payment_intent_id');
-  for (const invoice of candidates) {
+    .select('id', 'customer_id', 'scheduled_service_id', 'service_record_id', 'status', 'stripe_payment_intent_id');
+  for (const candidate of candidates) {
+    const visitId = await linkedVisitOf(candidate, database);
+    if (!visitId) continue;
+    const visit = locking
+      ? await lockOwnershipRows(database, candidate, visitId)
+      : await database('scheduled_services').where({ id: visitId }).first('id', 'payer_id', 'self_pay_override');
+    if (!ownerCouldChange(scope, visit)) continue;
+    // Re-read under the invoice row lock: this is the row the claims race for.
+    const invoice = locking
+      ? await database('invoices').where({ id: candidate.id }).forUpdate()
+        .first('id', 'status', 'payer_id', 'payer_statement_id', 'scheduled_send_error', 'stripe_payment_intent_id')
+      : candidate;
+    if (!invoice || invoice.payer_id || invoice.payer_statement_id || TERMINAL.includes(invoice.status)
+      || /^payer_billed:/.test(String(invoice.scheduled_send_error || ''))) continue;
     if (invoice.status === 'sending') return true;
     if (invoice.status === 'processing' && invoice.stripe_payment_intent_id) return true;
     try {
