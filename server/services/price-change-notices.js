@@ -212,11 +212,15 @@ async function sendNoticeEmail({ customer, idempotencyKeyBase, vars, templateKey
     attempted = true;
     const recipientHash = crypto.createHash('sha256').update(to.toLowerCase()).digest('hex').slice(0, 10);
     const firstName = String(recipient?.name || customer.first_name || '').trim().split(/\s+/)[0] || 'there';
+    // The caller's provider-handoff fence is told the address this send
+    // resolved, so it can re-judge that exact recipient under its locks.
+    const { withProviderHandoff: callerHandoff, ...libraryOptions } = sendOptions || {};
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey,
       // Extra library options a caller pins (the rate review letter: the
       // reviewed template's content hash and its provider-handoff fence).
-      ...sendOptions,
+      ...libraryOptions,
+      ...(callerHandoff ? { withProviderHandoff: (dispatch) => callerHandoff(dispatch, { to }) } : {}),
       to,
       recipientType: 'customer',
       recipientId: customer.id,

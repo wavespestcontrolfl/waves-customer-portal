@@ -132,6 +132,7 @@ class Query {
   orderByRaw() { return this; }
   limit(n) { this.limitN = n; return this; }
   forUpdate() { this.calls.push(['forUpdate', []]); this.db.log.push(['forUpdate', this.table]); return this; }
+  forShare() { this.calls.push(['forShare', []]); this.db.log.push(['forShare', this.table]); return this; }
   noWait() { return this; }
   select(...cols) { this.projection = cols.flat(); return this; }
   count(spec) { this.counting = spec || { n: '*' }; return this; }

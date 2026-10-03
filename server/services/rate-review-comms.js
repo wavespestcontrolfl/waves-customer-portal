@@ -47,7 +47,7 @@ const { formatDisplayDate } = require('../utils/date-only');
 const { portalUrl } = require('../utils/portal-url');
 const { propertyStreetLine } = require('../utils/property-display');
 const { getInvoiceEmailRecipients } = require('./customer-contact');
-const { lockCustomerComms, withSmsConsentLock } = require('../utils/customer-comms-lock');
+const { lockCustomerComms, lockCustomerEmail, withSmsConsentLock } = require('../utils/customer-comms-lock');
 const { toE164 } = require('../utils/phone');
 const PriceChangeNotices = require('./price-change-notices');
 
@@ -689,6 +689,9 @@ async function sendEntry(dbh, entry, { batchKey, costBlock, templateHash, actorI
     await settleLines(dbh, entry, { status: 'draft', keepFrozen: false, frozen });
     return { outcome: 'in_flight' };
   }
+  // Set when the handoff refused before dispatch: the request never left, so
+  // the letter is definitively unsent (a named hold, not an uncertain send).
+  let emailHold = null;
   const email = await PriceChangeNotices.sendNoticeEmail({
     customer,
     idempotencyKeyBase: `rate_review:${batchKey}:${entry.customerId}:${claimKey}`,
@@ -698,12 +701,23 @@ async function sendEntry(dbh, entry, { batchKey, costBlock, templateHash, actorI
     sendOptions: {
       expectedContentHash: templateHash,
       // The email leg's provider call runs under the customer-comms fence,
-      // with notice ownership re-read inside it: a merge undo can never
-      // repoint a notice between that check and the dispatch.
-      withProviderHandoff: (dispatch) => dbh.transaction(async (trx) => {
+      // with notice ownership AND the recipient address re-read inside it: a
+      // merge undo can never repoint a notice, and a corrected email or
+      // billing contact can never be overtaken, between that check and the
+      // dispatch. `to` is the address this send resolved.
+      withProviderHandoff: (dispatch, { to } = {}) => dbh.transaction(async (trx) => {
         await lockCustomerComms(trx, entry.customerId);
-        if (!(await stillOwned(trx, claimed, entry.customerId))) return { ok: false, reason: 'notice_repointed' };
-        await dispatch();
+        if (!(await stillOwned(trx, claimed, entry.customerId))) { emailHold = 'notice_repointed'; return { ok: false, reason: 'notice_repointed' }; }
+        // Rows first (a contact writer holds the customer row, then the
+        // address key), then the address key, held through the request.
+        const live = await trx('customers').where({ id: entry.customerId }).whereNull('deleted_at').forShare().first();
+        const prefs = await trx('notification_prefs').where({ customer_id: entry.customerId }).forShare().first();
+        if (!live || live.active === false) { emailHold = 'recipient_unavailable'; return { ok: false, reason: 'recipient_unavailable' }; }
+        if (!to) { emailHold = 'recipient_changed'; return { ok: false, reason: 'recipient_changed' }; }
+        await lockCustomerEmail(trx, to);
+        const [recipient] = getInvoiceEmailRecipients(live, prefs || {});
+        if (!to || String(recipient?.email || '').trim().toLowerCase() !== String(to).trim().toLowerCase()) { emailHold = 'recipient_changed'; return { ok: false, reason: 'recipient_changed' }; }
+        await dispatch(trx);
         return { ok: true };
       }),
     },
@@ -741,15 +755,17 @@ async function sendEntry(dbh, entry, { batchKey, costBlock, templateHash, actorI
     // and sendable again. Attempted (a provider or template failure that
     // may still have delivered): held as send_uncertain with its words, for
     // the owner — never auto-retried, never retired.
-    const attempted = email.attempted || sms.attempted;
-    // Nothing reached a provider and the text was refused because the notice
-    // moved or the number changed: released to draft with the named reason
-    // (the preview recomputes who it belongs to) — never parked unreachable.
-    if (smsHold && !attempted) {
-      await settleLines(dbh, entry, { status: 'draft', keepFrozen: false, frozen, hold: smsHold });
-      return { outcome: 'in_flight', holdReason: smsHold };
+    const attempted = (email.attempted && !emailHold) || sms.attempted;
+    const holdReason = emailHold || smsHold;
+    // Nothing reached a provider and a leg was refused inside the fence
+    // because the notice moved or the recipient changed: released to draft
+    // with the named reason (the preview recomputes who it belongs to) —
+    // never parked unreachable.
+    if (holdReason && !attempted) {
+      await settleLines(dbh, entry, { status: 'draft', keepFrozen: false, frozen, hold: holdReason });
+      return { outcome: 'in_flight', holdReason };
     }
-    await settleLines(dbh, entry, { status: attempted ? UNCERTAIN : 'unreachable', keepFrozen: attempted, frozen, hold: smsHold });
+    await settleLines(dbh, entry, { status: attempted ? UNCERTAIN : 'unreachable', keepFrozen: attempted, frozen, hold: holdReason });
     return { outcome: attempted ? 'uncertain' : 'unreachable' };
   }
   const sentAt = new Date();

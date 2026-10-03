@@ -529,11 +529,19 @@ describe('customer surfaces', () => {
     emailLeg.mockImplementation(async (args) => { handoff = args.sendOptions.withProviderHandoff; return { sent: true, attempted: true }; });
     await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
     const dispatch = jest.fn(async () => {});
-    expect(await handoff(dispatch)).toEqual({ ok: true });
+    const to = 'cust1@example.com';
+    expect(await handoff(dispatch, { to })).toEqual({ ok: true });
     expect(dispatch).toHaveBeenCalledTimes(1);
+    // the recipient is judged under the fence: a corrected address, or a billing contact that moved, is refused
+    mockDb.store.customers[0].email = 'corrected1@example.com';
+    const moved = jest.fn(async () => {});
+    expect(await handoff(moved, { to })).toEqual({ ok: false, reason: 'recipient_changed' });
+    expect(await handoff(moved)).toEqual({ ok: false, reason: 'recipient_changed' });
+    expect(moved).not.toHaveBeenCalled();
+    mockDb.store.customers[0].email = to;
     mockDb.store.price_change_notices[0].customer_id = CUSTOMER(9);
     const late = jest.fn(async () => {});
-    expect(await handoff(late)).toEqual({ ok: false, reason: 'notice_repointed' });
+    expect(await handoff(late, { to })).toEqual({ ok: false, reason: 'notice_repointed' });
     expect(late).not.toHaveBeenCalled();
     // the text leg's last abort point re-reads ownership the same way
     const check = smsLeg.mock.calls[0][0].sendOptions.preDispatchCheck;
@@ -568,6 +576,26 @@ describe('customer surfaces', () => {
     expect(notices()[0]).toMatchObject({ status: 'draft', sms_sent: false, email_sent: false, sent_at: null });
     expect(JSON.parse(notices()[0].metadata).send_hold).toMatchObject({ reason: 'notice_repointed' });
     expect(snapshots()[0].status).not.toBe('sent');
+  });
+
+  test('send: a recipient corrected after the leg resolved it is refused inside the email fence — nothing sent, released with the named hold', async () => {
+    mockDb.reset(book());
+    const dispatch = jest.fn(async () => {});
+    smsLeg.mockResolvedValue({ sent: false, attempted: false });
+    emailLeg.mockImplementation(async ({ sendOptions }) => {
+      mockDb.store.customers[0].email = 'corrected1@example.com'; // landed after the leg resolved cust1@example.com
+      mockDb.raw.mockClear();
+      const verdict = await sendOptions.withProviderHandoff(dispatch, { to: 'cust1@example.com' });
+      expect(verdict).toEqual({ ok: false, reason: 'recipient_changed' });
+      // customer-comms, then the address key, held in that order
+      expect(mockDb.raw.mock.calls.map((c) => String(c[1][0]))).toEqual([expect.stringMatching(/^customer-comms:/), 'customer-email:cust1@example.com']);
+      return { sent: false, attempted: true }; // the library's aborted-before-dispatch shape
+    });
+    const res = await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(res).toMatchObject({ sent: 0, uncertain: 0, inFlight: 1 });
+    expect(notices()[0]).toMatchObject({ status: 'draft', email_sent: false, sent_at: null });
+    expect(JSON.parse(notices()[0].metadata).send_hold).toMatchObject({ reason: 'recipient_changed' });
   });
 
   test('send: the locked text handoff dispatches inside the fence when clear, and refuses a number changed since the claim', async () => {
