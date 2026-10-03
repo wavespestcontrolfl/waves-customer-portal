@@ -112,6 +112,12 @@ describe('assignDispatchJob → tech notice', () => {
     expect(previous).not.toEqual(snapshot);
   });
 
+  test('a caller whose row already moved (grouped unit move) names the old slot as noticePrevious', async () => {
+    const old = { date: '2026-10-03', windowStart: '09:00', windowEnd: '10:00' };
+    await assignDispatchJob({ jobId: 'job-1', technicianId: 't-new', actorId: 'adam', trx: assignmentTrx(), noticePrevious: old });
+    expect(mockNotifyAssignmentChange.mock.calls.at(-1)[0].previous).toEqual(old);
+  });
+
   test('a plain reassignment (no schedule change) carries no previous slot', async () => {
     await assignDispatchJob({ jobId: 'job-1', technicianId: 't-new', actorId: 'adam', trx: assignmentTrx() });
     expect(mockNotifyAssignmentChange.mock.calls.at(-1)[0].previous).toBeNull();
