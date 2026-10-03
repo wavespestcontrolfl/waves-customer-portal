@@ -807,6 +807,10 @@ describe('missedVisit (logged customer no-shows)', () => {
     const other = await load([todayMiss], { id: 'visit-2', status: 'pending' });
     expect(other.missedVisit).toMatchObject({ visitId: 'visit-1' });
     expect(other.pastWindow).toMatchObject({ visitId: 'visit-2' });
+    // the SAME row reused for another slot keeps its own current fact (Codex #5610 r10)
+    const reusedMiss = noshow({ original_date: '2026-10-01', ss_scheduled_date: '2026-10-01', original_window: '08:00:00-08:30:00', window_start: '08:00:00', status: 'pending' });
+    const reused = await load([reusedMiss], { status: 'pending' }); // the row now sits at 09:00
+    expect(reused.pastWindow).toMatchObject({ visitId: 'visit-1', windowStart: '09:00:00' });
   });
 
   test('the signature names the logged occurrence', async () => {

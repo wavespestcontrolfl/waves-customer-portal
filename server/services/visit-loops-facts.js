@@ -721,7 +721,11 @@ async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = nul
   // The nightly sweep logs a miss but leaves the row unstarted, so the same occurrence
   // can also read as a passed window or a delay that evening: the logged miss is the
   // stronger fact and supersedes them (one instruction per visit — Codex #5610 r4).
-  const sameVisit = (f) => Boolean(missedVisit && missedVisit.visitId && f && String(f.visitId) === missedVisit.visitId);
+  // the same OCCURRENCE — row, day and start — never just the row: a row reused for
+  // another day/window keeps its own current facts (Codex #5610 r10)
+  const sameVisit = (f) => Boolean(missedVisit && missedVisit.visitId && f && String(f.visitId) === missedVisit.visitId
+    && calendarDay(f.scheduledDate) === missedVisit.date
+    && hhmmToMinutes(f.windowStart) === hhmmToMinutes(missedVisit.windowStart));
   out.lateAlert = sameVisit(lateAlert) ? null : lateAlert;
   out.pastWindow = sameVisit(pastWindow) ? null : pastWindow;
   out.missedVisit = missedVisit;
