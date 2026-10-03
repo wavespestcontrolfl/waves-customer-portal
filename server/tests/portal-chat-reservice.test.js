@@ -9,13 +9,24 @@ jest.mock('../services/portal-payment-history', () => ({ listPortalPayments: jes
 jest.mock('../services/portal-service-history', () => ({ listPortalServiceHistory: jest.fn() }));
 const mockGates = { reserviceStreamline: true };
 jest.mock('../config/feature-gates', () => ({ isEnabled: (name) => mockGates[name] === true }));
+// The real classifier of the customer's words; only the reads are stubbed.
 const mockScheduler = { reserviceSelfServeEnabled: jest.fn(() => true), loadReserviceLaneAvailability: jest.fn() };
-jest.mock('../services/reservice-scheduler', () => mockScheduler);
+jest.mock('../services/reservice-scheduler', () => {
+  const actual = jest.requireActual('../services/reservice-scheduler');
+  return {
+    reportedReserviceLanes: actual.reportedReserviceLanes,
+    reportedReserviceExcludedSpecialty: actual.reportedReserviceExcludedSpecialty,
+    reserviceSelfServeEnabled: (...a) => mockScheduler.reserviceSelfServeEnabled(...a),
+    loadReserviceLaneAvailability: (...a) => mockScheduler.loadReserviceLaneAvailability(...a),
+  };
+});
 
 const db = require('../models/db');
 const { portalToolsFor, executeToolCall } = require('../services/ai-assistant/tools');
 
-const PRIMARY = { secondaryProperty: false };
+const ANTS = ['The ants are back in the kitchen'];
+const WEEDS = ['Weeds are coming back all over the lawn'];
+const PRIMARY = { secondaryProperty: false, customerWords: ANTS };
 let tokenRow;
 
 beforeEach(() => {
@@ -27,7 +38,7 @@ beforeEach(() => {
   db.mockImplementation(() => chain);
 });
 
-const offer = (line, context = PRIMARY, actions = []) => executeToolCall('offer_reservice', { service_line: line }, 'cust-1', actions, null, context)
+const offer = (line, context = line === 'lawn' ? { ...PRIMARY, customerWords: WEEDS } : PRIMARY, actions = []) => executeToolCall('offer_reservice', { service_line: line }, 'cust-1', actions, null, context)
   .then((result) => ({ result, actions }));
 
 test('the tool is in the set only when its gate is on, and escalate stays last', () => {
@@ -46,6 +57,7 @@ test('a bookable line: a booking button the server built, and the model is told 
   expect(mockScheduler.loadReserviceLaneAvailability).toHaveBeenCalledWith('cust-1');
   expect(actions).toEqual([{ type: 'link', label: 'Book your free pest control re-service', href: '/reservice/tok_rs_1' }]);
   expect(result.offered).toBe(true);
+  expect(result.instruction).toMatch(/rodents, termites, mosquitoes/);
   expect(JSON.stringify(result)).not.toMatch(/tok_rs_1/);
 });
 
@@ -121,8 +133,8 @@ test('a token that fails the link shape gives no button', async () => {
 });
 
 test.each([
-  ['a secondary saved-property session', { secondaryProperty: true }, () => {}],
-  ['no property context at all', {}, () => {}],
+  ['a secondary saved-property session', { secondaryProperty: true, customerWords: ANTS }, () => {}],
+  ['no property context at all', { customerWords: ANTS }, () => {}],
   ['GATE_RESERVICE_STREAMLINE off', PRIMARY, () => { mockGates.reserviceStreamline = false; }],
   ['GATE_RESERVICE_SELF_SERVE off', PRIMARY, () => { mockScheduler.reserviceSelfServeEnabled.mockReturnValue(false); }],
 ])('%s: no availability read, no button', async (_label, context, arrange) => {
@@ -139,4 +151,44 @@ test('an unknown service line or a missing customer reads nothing', async () => 
   expect((await offer('termite')).result.offered).toBe(false);
   expect((await executeToolCall('offer_reservice', { service_line: 'pest' }, null, [], null, PRIMARY)).error).toMatch(/Authenticated customer/);
   expect(mockScheduler.loadReserviceLaneAvailability).not.toHaveBeenCalled();
+});
+
+describe('the customer\'s own words decide what is covered, not the line the model picked', () => {
+  beforeEach(() => {
+    mockScheduler.loadReserviceLaneAvailability.mockResolvedValue({ eligible: ['pest', 'lawn'], open: {}, bookable: ['pest', 'lawn'], verified: true, hasRecurringPlan: true });
+  });
+
+  test.each([
+    ['rodents', 'I hear rats in the attic again'],
+    ['termites', 'Termites are back in the garage'],
+    ['mosquitoes', 'The mosquitoes are back in the yard'],
+    ['a specialty riding with a covered pest', 'The ants are back and I saw a rat'],
+  ])('%s: no free offer and no read, even when the model says pest', async (_label, text) => {
+    const { result, actions } = await offer('pest', { secondaryProperty: false, customerWords: [text] });
+
+    expect(mockScheduler.loadReserviceLaneAvailability).not.toHaveBeenCalled();
+    expect(actions).toEqual([]);
+    expect(result.offered).toBe(false);
+    expect(result.instruction).toMatch(/separately priced/);
+  });
+
+  test('a report in the other line is not this line: weeds never open a free pest visit', async () => {
+    const { result, actions } = await offer('pest', { secondaryProperty: false, customerWords: WEEDS });
+
+    expect(actions).toEqual([]);
+    expect(result.offered).toBe(false);
+  });
+
+  test('no customer words at all: no offer', async () => {
+    const { result } = await offer('pest', { secondaryProperty: false });
+    expect(result.offered).toBe(false);
+    expect(mockScheduler.loadReserviceLaneAvailability).not.toHaveBeenCalled();
+  });
+
+  test('an earlier message carries the report when the latest only says yes', async () => {
+    const { result, actions } = await offer('pest', { secondaryProperty: false, customerWords: ['The ants are back in the kitchen', 'yes please'] });
+
+    expect(result.offered).toBe(true);
+    expect(actions).toHaveLength(1);
+  });
 });

@@ -155,7 +155,7 @@ const OFFER_RESERVICE_TOOL = {
   description: 'For a customer reporting pests, or a lawn problem, back between scheduled visits: checks whether their plan covers a free re-service for that service line and, when it does, shows a button that opens the booking page with the real open times. If one is already booked, shows a button to move it instead. You are told which case applies.',
   input_schema: {
     type: 'object',
-    properties: { service_line: { type: 'string', enum: ['pest', 'lawn'], description: 'pest: insects, rodents, spiders and the like. lawn: weeds, turf insects, brown or thin grass.' } },
+    properties: { service_line: { type: 'string', enum: ['pest', 'lawn'], description: 'pest: household insects and spiders. lawn: weeds, turf insects, brown or thin grass. The server checks the customer\'s own words; rodents, termites, mosquitoes and tree or shrub problems are separate services and are never a free re-service.' } },
     required: ['service_line'],
     additionalProperties: false,
   },
@@ -188,7 +188,8 @@ function addAction(actions, action) {
 // Tool execution. `actions` collects the buttons a portal tool wants shown
 // under the reply and `cards` the fact cards; callers that cannot render
 // them leave both out. `context.secondaryProperty`: the portal session is
-// scoped to a non-primary saved property (or its scope could not be read).
+// scoped to a non-primary saved property (or its scope could not be read);
+// `context.customerWords`: the customer's latest messages, newest last.
 async function executeToolCall(toolName, input, contextCustomerId, actions = null, cards = null, context = {}) {
   try {
     input = input && typeof input === 'object' ? input : {};
@@ -461,6 +462,10 @@ async function getRecentVisits(customerId, actions, cards) {
 }
 
 const RESERVICE_LINE_WORDS = { pest: 'pest control', lawn: 'lawn care' };
+const RESERVICE_SPECIALTY = {
+  offered: false,
+  instruction: 'What the customer describes includes a separately priced service (such as rodents, termites, mosquitoes or a tree and shrub problem), which a free re-service does not cover. Do not offer or imply a free visit. Acknowledge what they are seeing and use the escalate tool with topic pest_problem so the team follows up.',
+};
 const RESERVICE_HAND_OFF = {
   offered: false,
   instruction: 'A free re-service cannot be offered online for this right now. Do not offer or imply a free visit. Acknowledge what the customer is seeing and use the escalate tool with topic pest_problem so the team follows up.',
@@ -494,10 +499,23 @@ function bookedReserviceResult(line, booked, actions) {
   };
 }
 
-async function offerReservice(customerId, serviceLine, actions, { secondaryProperty = true } = {}) {
+// What is covered is read from the customer's own words with the texting
+// AI's classifier, never from the line the model picked: a separately priced
+// specialty anywhere in them, or no report in this line, means no free offer.
+function reportRefusal(customerWords, line) {
+  const { reportedReserviceLanes, reportedReserviceExcludedSpecialty } = require('../reservice-scheduler');
+  const words = (Array.isArray(customerWords) ? customerWords : []).map((w) => String(w || '')).filter(Boolean);
+  if (words.some((w) => reportedReserviceExcludedSpecialty(w))) return RESERVICE_SPECIALTY;
+  if (!words.some((w) => reportedReserviceLanes(w).includes(line))) return RESERVICE_HAND_OFF;
+  return null;
+}
+
+async function offerReservice(customerId, serviceLine, actions, { secondaryProperty = true, customerWords = [] } = {}) {
   const line = Object.prototype.hasOwnProperty.call(RESERVICE_LINE_WORDS, serviceLine) ? serviceLine : null;
   if (!customerId || !line || !Array.isArray(actions)) return RESERVICE_HAND_OFF;
   if (!reserviceSurfaceOpen({ secondaryProperty })) return RESERVICE_HAND_OFF;
+  const refusal = reportRefusal(customerWords, line);
+  if (refusal) return refusal;
   // The page's own availability read: plan coverage minus lanes that already
   // hold an open re-service. Any failure resolves to nothing bookable.
   const state = await require('../reservice-scheduler').loadReserviceLaneAvailability(customerId);
@@ -516,7 +534,7 @@ async function offerReservice(customerId, serviceLine, actions, { secondaryPrope
   addAction(actions, { type: 'link', label: `Book your free ${RESERVICE_LINE_WORDS[line]} re-service`, href: `/reservice/${token}` });
   return {
     offered: true,
-    instruction: `The customer's plan covers a free ${RESERVICE_LINE_WORDS[line]} re-service, and a button to book it is now shown under your reply. Acknowledge what they are seeing, tell them the visit is free under their plan, and tell them to tap the button to pick a time. Do not state or promise a time yourself.`,
+    instruction: `The customer's plan covers a free ${RESERVICE_LINE_WORDS[line]} re-service, and a button to book it is now shown under your reply. Acknowledge what they are seeing, tell them the visit is free under their plan, and tell them to tap the button to pick a time. Do not state or promise a time yourself. The free visit covers ${line === 'pest' ? 'general pest control' : 'lawn care'} only: never say it covers rodents, termites, mosquitoes or a tree and shrub problem.`,
   };
 }
 

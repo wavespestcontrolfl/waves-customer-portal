@@ -26,7 +26,15 @@ jest.mock('../services/portal-payment-history', () => ({ listPortalPayments: (..
 const mockListVisits = jest.fn(async () => ({ services: [], total: 0 }));
 jest.mock('../services/portal-service-history', () => ({ listPortalServiceHistory: (...a) => mockListVisits(...a) }));
 const mockLaneState = jest.fn(async () => ({ eligible: ['pest'], open: {}, bookable: ['pest'], verified: true, hasRecurringPlan: true }));
-jest.mock('../services/reservice-scheduler', () => ({ reserviceSelfServeEnabled: () => true, loadReserviceLaneAvailability: (...a) => mockLaneState(...a) }));
+jest.mock('../services/reservice-scheduler', () => {
+  const actual = jest.requireActual('../services/reservice-scheduler');
+  return {
+    reportedReserviceLanes: actual.reportedReserviceLanes,
+    reportedReserviceExcludedSpecialty: actual.reportedReserviceExcludedSpecialty,
+    reserviceSelfServeEnabled: () => true,
+    loadReserviceLaneAvailability: (...a) => mockLaneState(...a),
+  };
+});
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({ messages: { create: mockCreate } })));
 
 const db = require('../models/db');
@@ -267,6 +275,18 @@ describe('GATE_PORTAL_CHAT_RESERVICE', () => {
 
     expect(mockLaneState).not.toHaveBeenCalled();
     expect(result).not.toHaveProperty('actions');
+  });
+
+  test('the customer\'s message reaches the tool: a rodent report gets no free offer even when the model picks pest', async () => {
+    mockCreate
+      .mockResolvedValueOnce({ content: [{ type: 'tool_use', id: 't1', name: 'offer_reservice', input: { service_line: 'pest' } }] })
+      .mockResolvedValueOnce({ content: [{ type: 'text', text: 'Sorry about that, I am passing this to the team.' }] });
+
+    const result = await assistant.processMessage({ message: 'The rats are back in the attic', channel: 'portal_chat', channelIdentifier: 'sess-1', customerId: 'cust-1', secondaryProperty: false });
+
+    expect(mockLaneState).not.toHaveBeenCalled();
+    expect(result).not.toHaveProperty('actions');
+    expect(mockCreate.mock.calls[1][0].messages.at(-1).content[0].content).toMatch(/separately priced/);
   });
 
   test('the gates compose: every portal section in one prompt', async () => {

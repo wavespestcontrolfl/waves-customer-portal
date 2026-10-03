@@ -121,6 +121,15 @@ function portalLane(channel, { secondaryProperty = true } = {}) {
   };
 }
 
+// The customer's last three messages, newest last, ending with this one (the
+// history read already holds it once saved; a failed save leaves it out).
+const CUSTOMER_WORDS_KEPT = 3;
+function recentCustomerWords(history, message) {
+  const words = (history || []).filter((m) => m.role === 'user' && typeof m.content === 'string').map((m) => m.content);
+  if (words[words.length - 1] !== message) words.push(message);
+  return words.slice(-CUSTOMER_WORDS_KEPT);
+}
+
 const SYSTEM_PROMPT = `You are the Waves Pest Control AI assistant. You help customers with questions about their pest control and lawn care services in Southwest Florida.
 
 PERSONALITY:
@@ -367,6 +376,9 @@ class WavesAssistant {
 
     // 5. Build conversation history for Claude
     const history = await this.buildHistory(conversation.id);
+    // The customer's own latest words, which the re-service tool classifies
+    // (the model's reading of them never decides what is covered).
+    if (lane.context) lane.context.customerWords = recentCustomerWords(history, message);
 
     // 6. Build a data-minimized context string. Older active rows may still
     // contain the legacy full-account summary; never forward that shape to the
