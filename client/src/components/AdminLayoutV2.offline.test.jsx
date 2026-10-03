@@ -375,6 +375,30 @@ describe("AdminLayoutV2 field workspace offline fallback", () => {
     expect(screen.queryByText("Saved route content")).not.toBeInTheDocument();
   });
 
+  it("leaving Today after its check failed re-runs the check for the destination (Codex #5573 r21)", async () => {
+    localStorage.setItem("waves_admin_token", LIVE_TOKEN);
+    let fail = true;
+    vi.stubGlobal("fetch", vi.fn(async () => (fail ? response(503, { error: "unavailable" }) : response(200, TECH))));
+    function Go() { const go = useNavigate(); return <button type="button" onClick={() => go("/admin/schedule")}>leave</button>; }
+    render(
+      <TechNavigationLock>
+        <MemoryRouter initialEntries={["/admin/today"]}>
+          <Go />
+          <Routes>
+            <Route element={<AdminLayoutV2 />}>
+              <Route path="/admin/today" element={<div>Saved route content</div>} />
+              <Route path="/admin/schedule" element={<div>Schedule content</div>} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      </TechNavigationLock>,
+    );
+    expect(await screen.findByText(/Unable to verify staff access/i)).toBeInTheDocument();
+    fail = false;
+    await act(async () => { screen.getByRole("button", { name: "leave" }).click(); });
+    expect(await screen.findByText("Schedule content")).toBeInTheDocument();
+  });
+
   it("treats a 2xx whose body cannot be read as weak signal", async () => {
     localStorage.setItem("waves_admin_token", LIVE_TOKEN);
     seedOfflinePass(LIVE_TOKEN);

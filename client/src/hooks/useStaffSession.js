@@ -140,14 +140,13 @@ export default function useStaffSession() {
   }, []);
 
   // One rule for moving between Today and the rest of the app (Codex #5573
-  // r9, r10, r12): a real move INTO Today after a failed or still-pending
-  // check restarts it as the bounded field check (a direct /admin/today load
-  // already started that one); leaving Today while its bounded check is still
-  // pending restarts it as the unbounded non-field check.
+  // r9, r10, r12, r21): a real move across that boundary with a check that is
+  // not ready re-runs it as the destination's check (bounded on Today,
+  // unbounded elsewhere). A direct load already started the right one.
   useEffect(() => {
     const moved = onField !== wasOnField.current;
     wasOnField.current = onField;
-    if (moved && (onField ? session.status !== "ready" : session.status === "checking")) {
+    if (moved && session.status !== "ready") {
       restart({ status: "checking" });
     }
   }, [onField]);
