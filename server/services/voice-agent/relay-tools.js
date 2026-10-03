@@ -939,6 +939,11 @@ async function executeTool(name, input = {}, ctx = {}) {
         logger.info(`[voice-relay] capture_lead dropped an invalid email (${String(extracted.email).length} chars) callSid=${ctx.callSid || 'n/a'}`);
         extracted.email = null;
       }
+      // An email the caller GAVE but that could not be read is not "no email
+      // given": they asked for the estimate somewhere, so the account's own
+      // address never stands in for it. Remembered for the call until a
+      // readable one arrives.
+      const emailUnreadable = !emailNow && (Boolean(nz(input.email)) || priorEstimateFields.email_unreadable === 'true');
       const estimateFields = {
         first_name: nz(extracted.first_name) || nz(priorEstimateFields.first_name),
         last_name: nz(extracted.last_name) || nz(priorEstimateFields.last_name),
@@ -972,16 +977,18 @@ async function executeTool(name, input = {}, ctx = {}) {
           for (const k of LOCATION) if (nz(account[k])) estimateFields[k] = nz(account[k]);
           locationFromAccount = true;
         }
-        if (!estimateFields.email && nz(account.email) && isValidEmail(nz(account.email))) estimateFields.email = nz(account.email);
+        if (!estimateFields.email && !emailUnreadable && nz(account.email) && isValidEmail(nz(account.email))) estimateFields.email = nz(account.email);
       }
       // The account's location is a default read fresh on every capture, never
       // remembered as something the caller said: the call's store only adds
       // fields, so a borrowed street kept there would be mixed with a city the
       // caller states later.
       if (typeof ctx.noteEstimateFields === 'function') {
-        ctx.noteEstimateFields(locationFromAccount
-          ? { ...estimateFields, address_line1: null, city: null, zip: null }
-          : estimateFields);
+        ctx.noteEstimateFields({
+          ...estimateFields,
+          ...(locationFromAccount ? { address_line1: null, city: null, zip: null } : {}),
+          ...(emailUnreadable && !estimateFields.email ? { email_unreadable: 'true' } : {}),
+        });
       }
       // The accumulated fields ALSO ride the lead write (hook P1): identity
       // resolution (email match) and fill-forward must see the name/email/

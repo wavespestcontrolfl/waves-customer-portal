@@ -138,6 +138,21 @@ describe('a written estimate for a customer on file asks for nothing twice', () 
     expect(cards[1][2]).toMatchObject({ stillMissing: ['address_line1'] });
   });
 
+  test('an email the caller gave but that could not be read is asked for again, never replaced by the account email — on that capture or a later one', async () => {
+    createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: 'c-1', created: false });
+    let bag = {};
+    const ctx = fullTier({ getEstimateFields: () => ({ ...bag }), noteEstimateFields: (f) => { bag = { ...bag, ...Object.fromEntries(Object.entries(f).filter(([, v]) => v != null && String(v).trim() !== '')) }; } });
+    const first = await executeTool('capture_lead', { call_summary: 'Send the estimate to my work email.', estimate_requested: true, email: 'dana at work dot' }, ctx);
+    expect(first).toMatch(/still missing: email/);
+    expect(bag.email).toBeUndefined();
+    const second = await executeTool('capture_lead', { call_summary: 'Send the estimate to my work email.', estimate_requested: true }, ctx);
+    expect(second).toMatch(/still missing: email/);
+    expect(surfaceEstimateRequestForCustomer.mock.calls.every((c) => Array.isArray(c[2].stillMissing))).toBe(true); // nothing filed
+    const third = await executeTool('capture_lead', { call_summary: 'Send the estimate to my work email.', estimate_requested: true, email: 'dana@work.example.com' }, ctx);
+    expect(third).toMatch(/IS on the office queue/);
+    expect(surfaceEstimateRequestForCustomer.mock.calls.at(-1)[1]).toMatchObject({ email: 'dana@work.example.com' });
+  });
+
   test('a recognised-only caller gets nothing filled, and an ordinary capture never reads the account', async () => {
     const relayAlert = require('../services/voice-agent/relay-alert');
     const bell = jest.spyOn(relayAlert, 'alertOfficeContactFollowUp').mockResolvedValue(true);
