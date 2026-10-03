@@ -2,7 +2,7 @@
 // open for every unanswered 1-3 star Google review written since the lane's
 // first live run, raised and closed by a pass after every review sync.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-const mockEpisodes = { raiseAdminAlertWithReopen: jest.fn(), openAdminAlertKeys: jest.fn(), closeAdminAlertKeys: jest.fn() };
+const mockEpisodes = { raiseAdminAlertWithReopen: jest.fn(), openAdminAlertKeys: jest.fn(), closeAdminAlertKeys: jest.fn(), openAdminAlertMetadata: jest.fn() };
 jest.mock('../services/admin-alert-episodes', () => mockEpisodes);
 jest.mock('../services/internal-test-customers', () => ({ isInternalTestCustomerId: (id) => id === 'test-cust' }));
 
@@ -16,24 +16,44 @@ const original = process.env.GATE_REVIEW_ALERT;
 const BOUNDARY = '2026-10-01T00:00:00.000Z';
 
 // A minimal knex stand-in: system_settings holds the boundary, google_reviews
-// returns `reviews`; every where() on the reviews query is recorded.
-function fakeConn({ reviews = [], boundary = BOUNDARY } = {}) {
-  const seen = { reviewWheres: [], settingsInserts: [] };
+// returns `reviews` (or, inside the raise's transaction, `recheck` when given:
+// what a re-read sees by then); every where() on the reviews query is recorded.
+function fakeConn({ reviews = [], boundary = BOUNDARY, recheck = null } = {}) {
+  const seen = { reviewWheres: [], settingsInserts: [], locked: [] };
   const settings = boundary ? { value: boundary } : null;
-  const conn = (table) => {
-    const b = {
-      where(...a) { if (typeof a[0] === 'function') a[0](b); else if (table === 'google_reviews') seen.reviewWheres.push(a); return b; },
-      whereBetween(...a) { seen.reviewWheres.push(['between', ...a]); return b; },
-      whereNull(...a) { seen.reviewWheres.push(['null', ...a]); return b; },
-      orWhereNull() { return b; }, orWhereNot() { return b; }, whereRaw(...a) { seen.reviewWheres.push(['raw', ...a]); return b; },
-      first: async () => (table === 'system_settings' ? settings : null),
-      select: async () => (table === 'google_reviews' ? reviews : []),
-      insert(row) { seen.settingsInserts.push(row); return { onConflict: () => ({ ignore: async () => {} }) }; },
+  const make = (inTrx) => {
+    const conn = (table) => {
+      let idFilter = null;
+      let shared = false;
+      const b = {
+        where(...a) {
+          if (typeof a[0] === 'function') a[0](b);
+          else if (a[0] === 'id') idFilter = a[1];
+          else if (table === 'google_reviews' && !inTrx) seen.reviewWheres.push(a);
+          return b;
+        },
+        whereBetween(...a) { if (!inTrx) seen.reviewWheres.push(['between', ...a]); return b; },
+        whereNull(...a) { if (!inTrx) seen.reviewWheres.push(['null', ...a]); return b; },
+        orWhereNull() { return b; }, orWhereNot() { return b; },
+        whereRaw(...a) { if (!inTrx) seen.reviewWheres.push(['raw', ...a]); return b; },
+        forShare() { shared = true; return b; },
+        first: async () => (table === 'system_settings' ? settings : null),
+        select() { return b; },
+        insert(row) { seen.settingsInserts.push(row); return { onConflict: () => ({ ignore: async () => {} }) }; },
+        then(res, rej) {
+          if (table !== 'google_reviews') return Promise.resolve([]).then(res, rej);
+          const pool = inTrx && recheck ? recheck : reviews;
+          if (shared) seen.locked.push(idFilter);
+          return Promise.resolve(idFilter ? pool.filter((r) => r.id === idFilter) : pool).then(res, rej);
+        },
+      };
+      return b;
     };
-    return b;
+    conn.raw = async () => ({ rows: [{ now: new Date(BOUNDARY) }] });
+    conn.transaction = async (fn) => fn(make(true));
+    return conn;
   };
-  conn.raw = async () => ({ rows: [{ now: new Date(BOUNDARY) }] });
-  return { conn, seen };
+  return { conn: make(false), seen };
 }
 
 beforeEach(() => {
@@ -42,6 +62,7 @@ beforeEach(() => {
   mockEpisodes.raiseAdminAlertWithReopen.mockResolvedValue({ id: 'n1', rang: true });
   mockEpisodes.openAdminAlertKeys.mockResolvedValue([]);
   mockEpisodes.closeAdminAlertKeys.mockResolvedValue(0);
+  mockEpisodes.openAdminAlertMetadata.mockResolvedValue([]);
 });
 afterAll(() => { if (original === undefined) delete process.env.GATE_REVIEW_ALERT; else process.env.GATE_REVIEW_ALERT = original; });
 
@@ -132,6 +153,38 @@ describe('syncLowRatingReviewAlerts', () => {
     expect(mockEpisodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
     expect(mockEpisodes.closeAdminAlertKeys).toHaveBeenCalledWith(conn, [`review-low-rating:${R1}`], 'review answered', expect.any(Object));
     expect(out.closed).toBe(1);
+  });
+
+  test('re-reads and share-locks each review in the raise transaction: one answered meanwhile never rings, and its item closes', async () => {
+    mockEpisodes.openAdminAlertKeys.mockResolvedValue([`review-low-rating:${R1}`]);
+    const listed = [{ id: R1, google_review_id: 'g-1', star_rating: 2, reviewer_name: 'Pat', customer_id: null }];
+    const { conn, seen } = fakeConn({ reviews: listed, recheck: [] });
+    await syncLowRatingReviewAlerts({ conn });
+    expect(seen.locked).toEqual([R1]);
+    expect(mockEpisodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+    expect(mockEpisodes.closeAdminAlertKeys).toHaveBeenCalledWith(conn, [`review-low-rating:${R1}`], 'review answered', expect.any(Object));
+  });
+
+  test('an open item is matched on either identity: a re-inserted row keeps its key by Google id, an adopted row by row id', async () => {
+    const NEW_ID = '33333333-3333-4333-8333-333333333333';
+    mockEpisodes.openAdminAlertMetadata.mockResolvedValue([{ dedupeKey: `review-low-rating:${R1}`, reviewId: R1, googleReviewId: 'places_p_1' }]);
+    mockEpisodes.openAdminAlertKeys.mockResolvedValue([`review-low-rating:${R1}`]);
+    // fresh Places re-pull: new row id, same google_review_id
+    const { conn } = fakeConn({ reviews: [{ id: NEW_ID, google_review_id: 'places_p_1', star_rating: 2, reviewer_name: 'Pat', customer_id: null }] });
+    await syncLowRatingReviewAlerts({ conn });
+    expect(mockEpisodes.raiseAdminAlertWithReopen.mock.calls[0][3].dedupeKey).toBe(`review-low-rating:${R1}`);
+    expect(mockEpisodes.closeAdminAlertKeys).not.toHaveBeenCalled();
+    // GBP adoption: same row id, new google_review_id
+    mockEpisodes.raiseAdminAlertWithReopen.mockClear();
+    const adopted = fakeConn({ reviews: [{ id: R1, google_review_id: 'accounts/1/locations/2/reviews/r', star_rating: 2, reviewer_name: 'Pat', customer_id: null }] });
+    await syncLowRatingReviewAlerts({ conn: adopted.conn });
+    expect(mockEpisodes.raiseAdminAlertWithReopen.mock.calls[0][3]).toMatchObject({ dedupeKey: `review-low-rating:${R1}`, metadata: { googleReviewId: 'accounts/1/locations/2/reviews/r' } });
+  });
+
+  test('the linkage is the version: linking a customer quietly refreshes the standing item (never re-rings)', async () => {
+    const { conn } = fakeConn({ reviews: [{ id: R1, google_review_id: 'g-1', star_rating: 2, reviewer_name: 'Pat', customer_id: 'cust-7' }] });
+    await syncLowRatingReviewAlerts({ conn });
+    expect(mockEpisodes.raiseAdminAlertWithReopen.mock.calls[0][3]).toMatchObject({ dedupeVersion: 'customer:cust-7', refreshOnDedupe: true, ringOnRefresh: false, metadata: { customerId: 'cust-7', subject: { type: 'customer', id: 'cust-7' } } });
   });
 
   test('a failed write is counted and retried next pass (the review is still there), never thrown', async () => {

@@ -104,7 +104,24 @@ function needsAnswerQuery(conn, since) {
     .whereNull('missing_since')
     // No published reply: blank, or our own unpublished '[DRAFT] …' text.
     .whereRaw("(TRIM(COALESCE(review_reply, '')) = '' OR LEFT(TRIM(review_reply), 7) = '[DRAFT]')")
-    .select('id', 'star_rating', 'reviewer_name', 'customer_id');
+    .select('id', 'google_review_id', 'star_rating', 'reviewer_name', 'customer_id');
+}
+
+// The open item's key for a review, matched on EITHER identity (Codex #5659
+// r3): a fresh Places re-pull re-inserts the row under a new id but the same
+// google_review_id, and a GBP sync adopts a Places row, keeping its id but
+// rewriting google_review_id. A review with no open item gets a new key.
+function keyIndex(openMetadata) {
+  const byReviewId = new Map();
+  const byGoogleId = new Map();
+  for (const meta of openMetadata) {
+    if (!meta?.dedupeKey) continue;
+    if (meta.reviewId) byReviewId.set(String(meta.reviewId), meta.dedupeKey);
+    if (meta.googleReviewId) byGoogleId.set(String(meta.googleReviewId), meta.dedupeKey);
+  }
+  return (review) => byReviewId.get(String(review.id))
+    || (review.google_review_id ? byGoogleId.get(String(review.google_review_id)) : null)
+    || keyFor(review.id);
 }
 
 /**
@@ -121,28 +138,48 @@ async function syncLowRatingReviewAlerts({ conn = db, now = new Date() } = {}) {
     // A review linked to an internal test account never needs an answer from
     // the office: left out of the live set, so an item it already has (raised
     // while it was still unlinked) is closed below (Codex #5659 r2).
-    const reviews = (await needsAnswerQuery(conn, since))
-      .filter((review) => !(review.customer_id && isInternalTestCustomerId(review.customer_id)));
+    const eligible = (review) => !(review.customer_id && isInternalTestCustomerId(review.customer_id));
+    const reviews = (await needsAnswerQuery(conn, since)).filter(eligible);
+    const keyOf = keyIndex(await episodes.openAdminAlertMetadata(conn, KEY_PREFIX));
     const live = new Set();
-    for (const review of reviews) {
-      const key = keyFor(review.id);
-      live.add(key);
+    for (const listed of reviews) {
+      const key = keyOf(listed);
       try {
-        const composed = composeForReview(review);
-        if (!composed) continue;
-        const result = await episodes.raiseAdminAlertWithReopen(CATEGORY, composed.headline, composed.why, {
-          link: composed.link,
-          dedupeKey: key,
-          // customerId at the top level: notification-service's central
-          // internal-test-customer suppression reads it there.
-          metadata: { ...composed.metadata, reviewId: String(review.id), customerId: review.customer_id || null, starRating: Number(review.star_rating) },
+        // Re-read and share-lock the review in the raise's own transaction
+        // (Codex #5659 r3): a reply or dismissal that committed after the
+        // list was read never rings, and one arriving now waits for this.
+        const result = await conn.transaction(async (trx) => {
+          const [review] = await needsAnswerQuery(trx, since).where('id', listed.id).forShare();
+          if (!review || !eligible(review)) return 'settled';
+          live.add(key);
+          const composed = composeForReview(review);
+          if (!composed) return 'settled';
+          return episodes.raiseAdminAlertWithReopen(CATEGORY, composed.headline, composed.why, {
+            trx,
+            link: composed.link,
+            dedupeKey: key,
+            // The linkage is the version: a review linked to a customer after
+            // it rang quietly refreshes the standing item's subject (never
+            // re-rings it).
+            dedupeVersion: `customer:${review.customer_id || 'none'}`,
+            refreshOnDedupe: true,
+            ringOnRefresh: false,
+            // customerId at the top level: notification-service's central
+            // internal-test-customer suppression reads it there.
+            metadata: {
+              ...composed.metadata, reviewId: String(review.id), googleReviewId: review.google_review_id || null,
+              customerId: review.customer_id || null, starRating: Number(review.star_rating),
+            },
+          });
         });
         // A null result is a failed write (notifyAdmin swallows errors); the
         // next sync sees the same review and tries again.
-        if (!result) out.failed += 1; else if (result.rang) out.raised += 1;
+        if (result === 'settled') continue;
+        if (!result) { live.add(key); out.failed += 1; } else if (result.rang) out.raised += 1;
       } catch (err) {
+        live.add(key);
         out.failed += 1;
-        logger.warn(`[review-alert] low-rating bell failed for review ${review.id}: ${err.message}`);
+        logger.warn(`[review-alert] low-rating bell failed for review ${listed.id}: ${err.message}`);
       }
     }
     const settled = (await episodes.openAdminAlertKeys(conn, KEY_PREFIX)).filter((key) => !live.has(key));
