@@ -2355,7 +2355,7 @@ router.get('/agent-draft', async (req, res, next) => {
     // It can never break the draft card: any failure reads as no translation.
     let translation = null;
     try {
-      translation = customerId ? await require('../services/sms-translation').inboxAssistFor(customerId) : null;
+      translation = customerId ? await require('../services/sms-translation').inboxAssistFor(customerId, new Date(), phoneLast10 || null) : null;
     } catch (err) {
       logger.warn(`[communications] translation assist skipped: ${err.code || err.name || 'error'}`);
     }

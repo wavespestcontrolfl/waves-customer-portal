@@ -1214,6 +1214,11 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   // Inbox assist for a text in another language: its English translation and the
   // checked reply in the customer's language (null when off or nothing to show).
   const [translationAssist, setTranslationAssist] = useState(null);
+  const translationRecipientRef = useRef("");
+  // Changes whenever the loaded thread does (a new text in, a reply out), so the
+  // translation card is re-read and never outlives the text it answers.
+  const threadMessages = customer ? customerMessages : messages;
+  const threadVersion = `${threadMessages.length}:${threadMessages[0]?.id || ""}:${threadMessages[threadMessages.length - 1]?.id || ""}`;
   // MMS attachments: [{ url, key, fileName, size, mimeType, previewUrl }, ...]
   const [uploading, setUploading] = useState(false);
   // Purely a label distinction — `uploading` gates the controls for the whole
@@ -1647,8 +1652,11 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     }
 
     // The recipient changed: the previous customer's translation card (and its
-    // Use Reply) must not stay on screen while the new one loads.
-    setTranslationAssist(null);
+    // Use Reply) must not stay on screen while the new one loads. A message
+    // refresh for the same recipient re-reads it in place.
+    const assistRecipient = `${selectedCustomerId || ""}|${phoneKey(phone)}`;
+    if (translationRecipientRef.current !== assistRecipient) setTranslationAssist(null);
+    translationRecipientRef.current = assistRecipient;
     let cancelled = false;
     const t = setTimeout(() => {
       const params = new URLSearchParams();
@@ -1680,7 +1688,19 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       cancelled = true;
       clearTimeout(t);
     };
-  }, [active, toNumber, selectedCustomerId]);
+  }, [active, toNumber, selectedCustomerId, threadVersion]);
+
+  // The suggested reply is good until the server's stated moment (15 minutes
+  // when it quotes minutes-away, otherwise a day): drop it then, keep the translation.
+  useEffect(() => {
+    if (!translationAssist?.replyTranslated || !translationAssist.replyExpiresAt) return undefined;
+    const { trialId } = translationAssist;
+    const expire = () => setTranslationAssist((current) => current?.trialId === trialId
+      ? { ...current, replyEnglish: null, replyTranslated: null, replyExpiresAt: null, heldReason: "The suggested reply is out of date." }
+      : current);
+    const t = setTimeout(expire, Math.min(Math.max(new Date(translationAssist.replyExpiresAt).getTime() - Date.now(), 0), 2 ** 31 - 1));
+    return () => clearTimeout(t);
+  }, [translationAssist]);
 
   // Prefill compose from deep links (Estimates/Customers SMS button, Agent Ops drafts).
   useEffect(() => {
@@ -2052,6 +2072,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         }
         setSendResult({ ok: true, text: `Provider accepted; delivery is not yet confirmed.${reviewEmailNote(sent?.reviewEmail)}` });
       }
+      // the text the translation card answered has now been answered
+      setTranslationAssist(null);
       notifyUnreadChanged();
       const { cleared, persisted } = clearDraft(draftRevision);
       if (cleared && persisted) {

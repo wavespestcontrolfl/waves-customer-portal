@@ -963,16 +963,20 @@ const INBOX_REPLY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
  * in the thread (nobody has answered and they have not written again). null when the gate is off, there is no
  * such row, or the read fails. The translated reply is offered only for a 'ready' row under 24 hours old (it may
  * quote a visit time); the English of the customer's text is shown only when its translation passed its checks.
+ * A reply quoting minutes-away is offered for 15 minutes. With phoneLast10, only when the text came from that number.
  * Read-only: staff send through the ordinary composer.
  */
-async function inboxAssistFor(customerId, now = new Date()) {
+async function inboxAssistFor(customerId, now = new Date(), phoneLast10 = null) {
   try {
     if (!customerId || !inboxAssistEnabled()) return null;
     const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
     // (a placeholder for a send still in flight is not a message: left out, as every general reader of sms_log does)
     const last = await excludeUnresolvedSendReservations(db('sms_log').where({ customer_id: customerId }))
-      .orderBy('created_at', 'desc').limit(1).first('id', 'direction', 'created_at');
+      .orderBy('created_at', 'desc').limit(1).first('id', 'direction', 'created_at', 'from_phone');
     if (!last || last.direction !== 'inbound') return null;
+    // the composer may be pointed at another number than the one this customer wrote from (a shared or edited
+    // To number): the reply is offered only into the thread the text came in on
+    if (phoneLast10 && String(last.from_phone || '').replace(/\D/g, '').slice(-10) !== phoneLast10) return null;
     const row = await db(TRIAL_TABLE).where({ sms_log_id: last.id, customer_id: customerId }).first();
     if (!row || row.verdict === 'skipped') return null;
     const inboundConfirmed = Boolean(row.inbound_english) && !INBOUND_UNCONFIRMED_RE.test(row.hold_reason || '');
@@ -983,6 +987,7 @@ async function inboxAssistFor(customerId, now = new Date()) {
     const quotesEta = fresh && require('./sms-shadow-drafter').findEtaMinutesClaims(row.reply_english || '').length > 0;
     const etaStale = quotesEta && ageMs > require('./sms-eta-freshness').ETA_FRESHNESS_WINDOW_MS;
     const ready = fresh && !etaStale;
+    const replyMaxAgeMs = quotesEta ? require('./sms-eta-freshness').ETA_FRESHNESS_WINDOW_MS : INBOX_REPLY_MAX_AGE_MS;
     if (!inboundConfirmed && !ready) return null;
     const held = row.verdict === 'held' ? (HOLD_WORDS.find(([re]) => re.test(row.hold_reason || '')) || [null, 'The reply did not pass every check.'])[1] : null;
     const staleWords = etaStale ? 'The arrival time in the suggested reply is out of date.' : 'The suggested reply is more than a day old.';
@@ -996,6 +1001,8 @@ async function inboxAssistFor(customerId, now = new Date()) {
       replyTranslated: ready ? row.reply_translated : null,
       heldReason: ready ? null : (held || (row.verdict === 'ready' ? staleWords : null)),
       customerId,
+      // the composer drops the reply at this moment without asking again
+      replyExpiresAt: ready ? new Date(new Date(row.created_at).getTime() + replyMaxAgeMs).toISOString() : null,
       createdAt: row.created_at,
     };
   } catch (err) {
