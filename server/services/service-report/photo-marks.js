@@ -161,6 +161,20 @@ function validateMarks(rawMarks, { serviceKey } = {}) {
  * An empty array clears the marks, which is how "Skip" is honoured after
  * marks were previously saved.
  */
+// A staged photo of the visit, or one on its completed record.
+async function visitPhotoExists(trx, scheduledServiceId, s3Key) {
+  const staged = await trx('scheduled_service_photo_staging')
+    .where({ scheduled_service_id: scheduledServiceId, s3_key: s3Key })
+    .first('id');
+  if (staged) return true;
+  const record = await trx('service_records')
+    .where({ scheduled_service_id: scheduledServiceId })
+    .orderBy('created_at', 'desc')
+    .first('id');
+  if (!record) return false;
+  return !!(await trx('service_photos').where({ service_record_id: record.id, s3_key: s3Key }).first('id'));
+}
+
 async function saveMarksForPhoto({
   scheduledServiceId, s3Key, marks, technicianId = null, knex = db,
 }) {
@@ -178,6 +192,13 @@ async function saveMarksForPhoto({
       .where({ scheduled_service_id: scheduledServiceId, s3_key: s3Key })
       .del();
     if (!marks.length) return [];
+    // The route found the photo before this lock was taken; a removal that
+    // held the lock in between has since deleted the photo and its marks.
+    // Checked again here, under the lock a removal takes too, so marks are
+    // never written for a photo that is gone (Codex P2 on #5745).
+    if (!(await visitPhotoExists(trx, scheduledServiceId, s3Key))) {
+      throw Object.assign(new Error('photo is no longer on this visit'), { code: 'photo_not_found' });
+    }
     const rows = marks.map((mark) => ({
       scheduled_service_id: scheduledServiceId,
       s3_key: s3Key,

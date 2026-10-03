@@ -4,7 +4,8 @@
  * Nothing alerted on a negative Google review: reviews under 4 stars are
  * neither drafted nor belled (the 08-29 ruling was about drafts), and the
  * unlinked-review bell is silent by default under the bell policy. This keeps
- * ONE needs-you item open for every unanswered Google review of 1 to 3 stars,
+ * ONE needs-you item open for every unanswered Google review of 1 to 4 stars (owner ruling
+ * 2026-10-03: "make it 4 stars or lower"; it shipped at 3),
  * so the owner reads it the day it lands.
  *
  * Level-triggered, not fired at insert (Codex #5659 r1): after every review
@@ -13,7 +14,7 @@
  * settled, through the shared alert episodes (admin-alert-episodes.js). So a
  * failed bell write is retried on the next sync, a review stored already
  * answered never rings, and a reply removed later (at any age) rings again.
- * "Needs an answer": 1 to 3 stars, no published reply (an unpublished
+ * "Needs an answer": 1 to 4 stars, no published reply (an unpublished
  * '[DRAFT] …' reply does not count, review-reply/draft-prefix.js), not
  * dismissed, still on Google (no missing_since), and written at or after this
  * lane's activation boundary (`activationBoundary`: stored once in
@@ -38,7 +39,7 @@ const errorCode = (err) => require('./notification-service')._private.safeErrorS
 
 const CATEGORY = 'review_low_rating';
 const KEY_PREFIX = 'review-low-rating:';
-const MAX_STARS = 3;
+const MAX_STARS = 4;
 const ACTIVATION_SETTINGS_KEY = 'review_low_rating_alert_activated_at';
 
 const keyFor = (reviewId) => `${KEY_PREFIX}${reviewId}`;
