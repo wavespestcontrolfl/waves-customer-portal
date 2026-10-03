@@ -4079,6 +4079,20 @@ office, never converted against its card), and
 accept with no resolved per-application amount — never the monthly
 display rate). Same contract via the admin manual-acceptance path, which
 preserves these 4xx verbatim.
+A NO-SLOT `/accept` of MORE THAN ONE recurring service (B06/B17) keeps each
+series' parent visit unpriced (the combined first-application invoice covers
+its first visit) but prices every seeded follow-up at that service's own
+quoted per-visit amount — the same per-service figures the customer saw and
+the first-application invoice summed (`firstApplicationRowAmounts`), matched
+to the services one-to-one. Never the customer's existing per-application fee,
+never an annual-over-visits reconstruction. When the amounts cannot be matched
+exactly (a tier-monthly accept, a fallback visit total, an unmatched service),
+nothing is priced by guess and the accept raises ONE billing bell for the
+office (`per-application-fee-unresolved:<estimateId>`, stamped Billing /
+needs-you / estimate subject) — through the converter's deferred
+`perApplicationFeeNotification` field, so it fires post-commit on every accept
+path and a rolled-back accept never pages. A reserved-slot accept is unchanged
+(its own `reservedAcceptPerVisitSplit`).
 Overlapping annual coverage on public `/accept` returns 409
 `{ error, code: 'ANNUAL_PREPAY_OVERLAP' }` with the existing call-the-office
 explanation and no acceptance committed. Clients preserve the appointment
