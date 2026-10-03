@@ -401,4 +401,24 @@ describe('TimeGridDay open hours', () => {
     vi.useRealTimers();
     expect(screen.queryByText(/^Open · /)).toBeNull();
   });
+
+  it('lets the Open marker take the click over a skipped visit, not the visit', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-07-15T10:00:00Z')); // 6:00 AM ET
+    render(
+      <TimeGridDay
+        date="2026-07-15"
+        services={[...SERVICES, {
+          id: 'svc-skipped', customerName: 'Skipped Customer', status: 'skipped',
+          windowStart: '09:00', windowEnd: '10:00', windowDisplay: '9–10 AM', technicianId: 'tech-1', technicianName: 'Alex Tech',
+        }]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+        onChange={vi.fn()}
+        onCreateSlot={vi.fn()}
+      />,
+    );
+    vi.useRealTimers();
+    expect(screen.getByRole('button', { name: 'Book open hour 9–10 AM for Alex Tech' })).not.toHaveClass('pointer-events-none');
+    expect(screen.getByRole('button', { name: 'Book open hour 11 AM–12 PM for Alex Tech' })).toHaveClass('pointer-events-none');
+  });
 });
