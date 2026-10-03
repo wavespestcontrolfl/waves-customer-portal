@@ -1753,15 +1753,25 @@ async function stampMembershipDuesUnderLock(conn, { customerId, scheduledService
     return lineItems;
   }
   await acquireMembershipDuesMonthLock(conn, customerId, month);
-  let covered = false;
+  let covered;
   try {
     const { savepointRead } = require("../utils/savepoint-read");
     covered = await savepointRead(conn, (k) => monthlyDuesCollected(
       k, customerId, new Date(`${month}-15T12:00:00Z`), { excludeScheduledServiceId: scheduledServiceId },
     ));
   } catch (err) {
-    // An unreadable month never loses the bill: mint (and stamp) as before.
-    logger.warn(`[invoice] dues-coverage recheck failed for visit ${scheduledServiceId}: ${err.message}`);
+    // Fail CLOSED. The lock serializes the decisions but cannot stand in for
+    // a successful coverage read: a month another visit already billed would
+    // be billed twice. Nothing is written (the transaction rolls back), and
+    // the completion releases itself for resume — the retry reads coverage
+    // again and mints exactly once if nothing covers the month.
+    logger.error(`[invoice] dues-coverage recheck failed for visit ${scheduledServiceId} — refusing the dues mint: ${err.message}`);
+    const e = new Error(`Membership dues coverage for ${month} could not be verified — no dues invoice was created; retry.`);
+    e.status = 503;
+    e.statusCode = 503;
+    e.code = "MEMBERSHIP_DUES_COVERAGE_UNVERIFIED";
+    e.cause = err;
+    throw e;
   }
   if (covered) {
     const e = new Error(`Membership dues for ${month} are already covered — no second dues invoice was created.`);

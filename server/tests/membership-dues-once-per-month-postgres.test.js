@@ -136,9 +136,9 @@ async function cleanup(f) {
   await mockPg('customers').where({ id: f.customerId }).del().catch(() => {});
 }
 
-async function complete(f, serviceId, overrides = {}) {
+async function complete(f, serviceId, overrides = {}, idempotencyKey = randomUUID()) {
   const { completeScheduledService } = require('../services/complete-scheduled-service');
-  return completeScheduledService({ serviceId, idempotencyKey: randomUUID(),
+  return completeScheduledService({ serviceId, idempotencyKey,
     actor: { techRole: 'admin', technicianId: f.techId, technician: null },
     body: { customerRecap: 'Visit closed out.', visitOutcome: 'completed', products: [], areasServiced: [],
       sendCompletionSms: false, requestReview: false, ...overrides } });
@@ -318,6 +318,71 @@ postgres('membership dues are owed once per ET month (B08)', () => {
       const dues = after.find((r) => Number(r.total) === 49);
       expect(dues.line_items.find((li) => li.membership_dues_month)).toMatchObject({ membership_dues_month: monthOf(etDateString()) });
     } finally { await cleanup(f); }
+  });
+
+  // The coverage re-read under the dues lock must fail CLOSED. The failure is
+  // injected at the pg driver for exactly the stamped-invoice coverage query,
+  // so it hits the pre-lock read too (which defaults to "not covered" and
+  // lets the decision reach the mint) — the in-lock read is what decides.
+  function failCoverageReads() {
+    // Transaction clients are built from the driver CLASS, so patch its prototype.
+    const client = Object.getPrototypeOf(mockPg.client);
+    const original = client._query;
+    client._query = function patched(connection, obj) {
+      if (String(obj?.sql || '').includes('line_items::jsonb @>')) {
+        return Promise.reject(new Error('canceling statement due to statement timeout (injected)'));
+      }
+      return original.call(this, connection, obj);
+    };
+    return () => { client._query = original; };
+  }
+
+  async function insertStampedDuesInvoice(f, visitId, status) {
+    const id = randomUUID();
+    await mockPg('invoices').insert({ id, token: randomUUID().replace(/-/g, ''), invoice_number: `B08-${id.slice(0, 8)}`,
+      customer_id: f.customerId, scheduled_service_id: visitId, status, total: 49, subtotal: 49,
+      line_items: JSON.stringify([{ description: 'Lawn Care', quantity: 1, unit_price: 49, amount: 49, membership_dues_month: monthOf(etDateString()) }]) });
+    return id;
+  }
+
+  test('a month ALREADY billed + an unreadable coverage lookup under the lock → no second dues invoice; the retry finds it covered', async () => {
+    const f = await seedMember();
+    let restore = null;
+    try {
+      const billed = await seedVisit(f, { label: 'Lawn Care' });
+      const pest = await seedVisit(f, { label: 'Pest Control' });
+      await insertStampedDuesInvoice(f, billed, 'sent');
+      restore = failCoverageReads();
+      const key = randomUUID();
+      const out = await complete(f, pest, {}, key);
+      expect(out).toMatchObject({ status: 503, body: { code: 'membership_dues_coverage_unverified' } });
+      expect(await invoicesFor(f)).toHaveLength(1);
+      restore(); restore = null;
+      // Retryable: the same closeout, coverage readable again → covered, still one invoice.
+      expect(await complete(f, pest, {}, key)).toMatchObject({ status: 200 });
+      expect(await invoicesFor(f)).toHaveLength(1);
+    } finally { if (restore) restore(); await cleanup(f); }
+  });
+
+  test('a month NOTHING covered + an unreadable lookup → no invoice now, and the retry mints the dues exactly once', async () => {
+    const f = await seedMember();
+    let restore = null;
+    try {
+      const lawn = await seedVisit(f, { label: 'Lawn Care' });
+      restore = failCoverageReads();
+      const key = randomUUID();
+      expect(await complete(f, lawn, {}, key)).toMatchObject({ status: 503, body: { code: 'membership_dues_coverage_unverified' } });
+      expect(await invoicesFor(f)).toHaveLength(0);
+      restore(); restore = null;
+      expect(await complete(f, lawn, {}, key)).toMatchObject({ status: 200 });
+      const rows = await invoicesFor(f);
+      expect(rows).toHaveLength(1);
+      expect(Number(rows[0].total)).toBe(49);
+      expect(rows[0].line_items.find((li) => li.membership_dues_month)).toBeTruthy();
+      // A repeat of the same closeout adds nothing.
+      await complete(f, lawn, {}, key);
+      expect(await invoicesFor(f)).toHaveLength(1);
+    } finally { if (restore) restore(); await cleanup(f); }
   });
 
   test('a visit with its OWN stamped price is not a dues visit: its invoice carries no month stamp', async () => {

@@ -377,6 +377,8 @@ describe('completion route wires dues-collected coverage', () => {
     expect(source).toMatch(/const duesCoveredUnderLock = invErr\?\.code === 'MEMBERSHIP_DUES_COVERED' && !invoice\?\.id;/);
     expect(source).toMatch(/if \(duesCoveredUnderLock\) \{\s*\n\s*membershipDuesCoveredAtMint = true;[\s\S]{0,400}\} else if \(!coveredByCombined && !setupFeeInFlight && backfillReviewMintRequired && !invoice\?\.id\) \{/);
     expect(source).toMatch(/\} else if \(!duesCoveredUnderLock\) \{\s*\n\s*logger\.error\(`\[dispatch\] Auto-invoice failed \(non-blocking\)/);
+    // An unreadable month under the lock is a retryable release, never a mint or a quiet finalize.
+    expect(source).toMatch(/invErr\?\.code === 'MEMBERSHIP_DUES_COVERAGE_UNVERIFIED' && !invoice\?\.id\) \{[\s\S]{0,900}releaseCompletionAttemptForResume\(completionAttempt, invErr\)[\s\S]{0,900}code: 'membership_dues_coverage_unverified'/);
     // The covered visit reads like one covered before the mint at every later reader.
     expect((source.match(/membershipDuesCoveredAtMint/g) || []).length).toBeGreaterThanOrEqual(5);
   });

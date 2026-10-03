@@ -11542,6 +11542,26 @@ async function completeScheduledService(completionInput, packetContext = null) {
             serviceRecordId: record.id,
           } });
         }
+        // The in-lock dues-coverage re-read failed (MEMBERSHIP_DUES_COVERAGE_
+        // UNVERIFIED): nothing was written and nothing may be minted on an
+        // unknown month. Retryable on EVERY lane, like the combined-invoice
+        // refusal below — a quiet finalize would leave the month's dues
+        // unbilled with no bell. The retry re-reads coverage under the lock.
+        if (invErr?.code === 'MEMBERSHIP_DUES_COVERAGE_UNVERIFIED' && !invoice?.id) {
+          logger.error(`[dispatch] visit ${svc.id}: dues coverage could not be verified under the dues lock — releasing for resume instead of minting or finalizing without the month's dues`);
+          const duesReleased = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, invErr);
+          if (!duesReleased) {
+            logger.error(`[dispatch] release-for-resume did NOT release attempt ${completionAttempt?.id} for ${svc.id} — retry blocked until the ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)}-minute stale window reclaims it`);
+          }
+          return ({ status: 503, body: {
+            error: duesReleased
+              ? 'This month\'s membership dues could not be checked — the closeout is saved but NOT finalized. Retry the closeout to bill them.'
+              : `This month's membership dues could not be checked — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
+            code: 'membership_dues_coverage_unverified',
+            ...(duesReleased ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+            serviceRecordId: record.id,
+          } });
+        }
         if (setupFeeInFlight) {
           logger.warn(`[dispatch] visit ${svc.id}: a setup-fee claim on its series is still in flight — releasing for resume instead of minting without the fee`);
           const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, invErr);
