@@ -18027,6 +18027,33 @@ const CallRecordingProcessor = {
                       logger.warn(`[call-proc] default technician ${reuseTechId} is no longer assignable; leaving reused booking unassigned`);
                       reuseTechId = null;
                     }
+                    // The pick read availability before the tech-day locks above.
+                    // Read it again under them (the row itself excluded): a
+                    // booking or a schedule block that landed while this
+                    // transaction waited leaves the row unassigned for the
+                    // office instead of on a technician who is no longer free.
+                    if (reuseTechId && reuseTechPicked && existing.window_start) {
+                      try {
+                        const reuseStart = String(existing.window_start).slice(0, 5);
+                        const reuseEnd = followUpProbeEnd(existing.window_start, existing.window_end, existing.estimated_duration_minutes);
+                        const stillFree = !!reuseEnd && await trx.transaction(async (probeSp) => {
+                          const clash = await require('./scheduling/occupancy').findConflictingVisits({
+                            db: probeSp, date: dayRow.day, windowStart: reuseStart, windowEnd: reuseEnd,
+                            technicianId: reuseTechId, excludeServiceIds: [existing.id],
+                          });
+                          if (clash.length) return false;
+                          const toMin = (t) => { const [h, m] = String(t).split(':').map(Number); return h * 60 + (m || 0); };
+                          return !(await require('./tech-out-auto-move').blockedBySchedule(reuseTechId, dayRow.day, toMin(reuseStart), toMin(reuseEnd), probeSp));
+                        });
+                        if (!stillFree) {
+                          logger.info(`[call-proc] picked technician ${reuseTechId} no longer free for reused booking ${maskSid(callSid)}; leaving it unassigned`);
+                          reuseTechId = null;
+                        }
+                      } catch (recheckErr) {
+                        logger.warn(`[call-proc] reused-booking availability recheck failed for ${maskSid(callSid)} (left unassigned): ${recheckErr.message}`);
+                        reuseTechId = null;
+                      }
+                    }
                     const [updatedExisting] = reuseTechId
                       ? await trx('scheduled_services')
                         .where({ id: existing.id })

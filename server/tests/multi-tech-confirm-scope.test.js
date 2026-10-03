@@ -191,6 +191,9 @@ describe('wiring', () => {
     expect(src).toContain('const repick = await pickBookingTechnician();');
     // A picked technician's capability is re-read under the share lock at save (fresh + reused).
     expect(src.match(/assertCapabilitiesActive\(trx, (insertData\.technician_id|reuseTechId),/g)).toHaveLength(2);
+    // The reused row's pick is re-read under the tech-day locks, excluding only that row.
+    expect(src).toContain('if (reuseTechId && reuseTechPicked && existing.window_start) {');
+    expect(src).toMatch(/technicianId: reuseTechId, excludeServiceIds: \[existing\.id\],/);
     // Post-commit recheck judges each fresh row on its own technician.
     expect(src).toContain('technicianId: svc.technician_id || null,');
     expect(src).toContain('technicianId: followUpCreated.technician_id || null,');
