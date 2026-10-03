@@ -8,7 +8,7 @@ const guard = require('../services/review-click-guard');
 function fakeDb({ serviceDate = null, scheduledDate = null, clicks = [], saidReviewed = false } = {}) {
   return (table) => {
     if (table === 'review_sequences') {
-      const q = { where(arg) { if (typeof arg === 'function') arg({ whereNotNull: () => ({ orWhere: () => q }) }); return q; }, first: async () => (saidReviewed ? { id: 'seq-1' } : null) };
+      const q = { where: () => q, whereNotNull: () => q, whereRaw: () => q, first: async () => (saidReviewed ? { id: 'seq-1' } : null) };
       return q;
     }
     if (table === 'service_records') return { where: () => ({ first: async () => (serviceDate ? { service_date: serviceDate } : null) }) };

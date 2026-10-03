@@ -6839,6 +6839,7 @@ const ReviewService = {
         serviceRecordId: seq.service_record_id,
         scheduledServiceId: seq.scheduled_service_id,
         fallbackAnchor: seq.created_at || seq.started_at || null,
+        clicksOnly: true,
       })) {
       const handled = await handleClick();
       if (handled) return handled;

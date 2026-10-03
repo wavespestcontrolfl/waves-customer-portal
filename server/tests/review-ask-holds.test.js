@@ -97,9 +97,14 @@ describe('askHold', () => {
   });
   afterEach(() => jest.restoreAllMocks());
 
-  test('a claim stored on the row wins without reading the texts again', async () => {
-    expect(await Holds.askHold(seq({ reviewed_claim: { quote: 'posted', at: 'x' } }), { now })).toEqual({ kind: 'reviewed', claim: { quote: 'posted', at: 'x' }, fresh: false });
+  test('a claim stored on the row wins without reading the texts again, while its text is inside the window', async () => {
+    const at = new Date(now.getTime() - 86400000).toISOString();
+    expect(await Holds.askHold(seq({ reviewed_claim: { quote: 'posted', at } }), { now })).toEqual({ kind: 'reviewed', claim: { quote: 'posted', at }, fresh: false });
     expect(says).not.toHaveBeenCalled();
+    // a claim whose text is older than the window no longer counts (however recently the row changed)
+    const old = new Date(now.getTime() - Holds.CLAIM_WINDOW_MS - 86400000).toISOString();
+    expect(await Holds.askHold(seq({ reviewed_claim: { quote: 'posted', at: old }, updated_at: now }), { now })).toBeNull();
+    expect(says).toHaveBeenCalledTimes(1);
     says.mockResolvedValueOnce({ claim: { quote: 'just posted', at: now } });
     expect(await Holds.askHold(seq(), { now })).toEqual({ kind: 'reviewed', claim: { quote: 'just posted', at: now }, fresh: true });
   });
@@ -155,5 +160,22 @@ describe('paymentHold', () => {
   test('a failed read holds (no evidence is never a clear)', async () => {
     mockOpenBalance.mockRejectedValueOnce(new Error('db down'));
     expect(await Holds.paymentHold('c-1', { now })).toEqual({ reason: 'payment_lookup_unavailable' });
+  });
+});
+
+describe('customerSaidReviewed (the send-time guard\'s evidence)', () => {
+  const gates = require('../config/feature-gates');
+  afterEach(() => jest.restoreAllMocks());
+
+  test('expires from the customer\'s own text time, never from when the row last changed; switch off reads nothing', async () => {
+    jest.spyOn(gates, 'isEnabled').mockImplementation((g) => g === 'reviewAskTechVoice');
+    const raws = [];
+    const q = { where: () => q, whereNotNull: () => q, whereRaw: (sql, b) => { raws.push([sql, b]); return q; }, first: async () => null };
+    expect(await Holds.customerSaidReviewed('c-1', { database: () => q, now })).toBe(false);
+    expect(raws).toEqual([["(reviewed_claim->>'at')::timestamptz > ?", [new Date(now.getTime() - Holds.CLAIM_WINDOW_MS)]]]);
+    gates.isEnabled.mockReturnValue(false);
+    const untouched = jest.fn();
+    expect(await Holds.customerSaidReviewed('c-1', { database: untouched, now })).toBe(false);
+    expect(untouched).not.toHaveBeenCalled();
   });
 });

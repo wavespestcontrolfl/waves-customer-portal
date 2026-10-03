@@ -153,7 +153,9 @@ async function paymentHold(customerId, { now = new Date() } = {}) {
 /**
  * Durable "said they already reviewed" evidence for the send-time guards
  * (review-click-guard.js): a confirmed claim stored on any cadence of the
- * customer within the claim window (reviewed_claim, or the stop it caused).
+ * customer, still inside the claim window measured from the customer's own
+ * text (reviewed_claim.at; a fresh claim is stored on the cadences it stops
+ * too).
  * Covers an ask queued before the claim whose send reservation outlived the
  * customer-wide stop. Switch off: never read. A failed read throws (the
  * guards' callers fail closed).
@@ -162,8 +164,8 @@ async function customerSaidReviewed(customerId, { database = db, now = new Date(
   if (!customerId || !require('../config/feature-gates').isEnabled('reviewAskTechVoice')) return false;
   const row = await database('review_sequences')
     .where({ customer_id: customerId })
-    .where('updated_at', '>', new Date(now.getTime() - CLAIM_WINDOW_MS))
-    .where((q) => q.whereNotNull('reviewed_claim').orWhere('stop_reason', 'customer_says_reviewed'))
+    .whereNotNull('reviewed_claim')
+    .whereRaw("(reviewed_claim->>'at')::timestamptz > ?", [new Date(now.getTime() - CLAIM_WINDOW_MS)])
     .first('id');
   return !!row;
 }
@@ -183,8 +185,15 @@ function parseJson(value) {
  *   { kind: 'wait', retryAt, heldSince, detail }
  * `shiftRetry` moves a retry time onto the step's own send days.
  */
+// A stored claim counts while its text is inside the claim window.
+function liveClaim(value, now) {
+  const claim = parseJson(value);
+  const at = claim?.at ? new Date(claim.at).getTime() : NaN;
+  return Number.isFinite(at) && now.getTime() - at < CLAIM_WINDOW_MS ? claim : null;
+}
+
 async function askHold(seq, { now = new Date(), shiftRetry = null } = {}) {
-  const stored = parseJson(seq.reviewed_claim);
+  const stored = liveClaim(seq.reviewed_claim, now);
   if (stored) return { kind: 'reviewed', claim: stored, fresh: false };
   // Through the exports, so a test can stand in for either check.
   const said = await module.exports.customerSaysReviewed(seq.customer_id, { now });

@@ -123,9 +123,9 @@ async function newestCompletedVisitAnchor(customerId, database = db) {
 // The customer already went to Google: a tracked click since the anchor, or
 // (GATE_REVIEW_ASK_TECH_VOICE) a confirmed "I already left a review" text on
 // record (review-ask-holds.js customerSaidReviewed).
-async function alreadyReviewedSince(customerId, anchor, database) {
+async function alreadyReviewedSince(customerId, anchor, database, { clicksOnly = false } = {}) {
   if (await reviewLinkClickedSince(customerId, anchor, database)) return true;
-  return require('./review-ask-holds').customerSaidReviewed(customerId, { database });
+  return !clicksOnly && require('./review-ask-holds').customerSaidReviewed(customerId, { database });
 }
 
 // The guard for an ask described by a review_requests row (sendSMS, follow-ups,
@@ -162,12 +162,14 @@ async function askIdSuppressedByClick(reviewRequestId, database = db) {
 
 // The guard for a cadence / outreach touch that has no request row yet: the
 // visit, else `fallbackAnchor` (a cadence's own start), else — when
-// `newestVisitFallback` — the customer's newest completed visit.
-async function touchSuppressedByClick(customerId, { serviceRecordId = null, scheduledServiceId = null, fallbackAnchor = null, newestVisitFallback = false } = {}, database = db) {
+// `newestVisitFallback` — the customer's newest completed visit. `clicksOnly`:
+// the sequence runner, whose review-ask holds record a reviewed claim under
+// its own reason.
+async function touchSuppressedByClick(customerId, { serviceRecordId = null, scheduledServiceId = null, fallbackAnchor = null, newestVisitFallback = false, clicksOnly = false } = {}, database = db) {
   const anchor = (await visitAnchor({ serviceRecordId, scheduledServiceId }, database))
     || (fallbackAnchor ? new Date(fallbackAnchor) : null)
     || (newestVisitFallback ? await newestCompletedVisitAnchor(customerId, database) : null);
-  return alreadyReviewedSince(customerId, anchor, database);
+  return alreadyReviewedSince(customerId, anchor, database, { clicksOnly });
 }
 
 const REVIEW_LINK_CLICKED_REASON = 'This customer already tapped their Google review link, so no further review request is sent.';
