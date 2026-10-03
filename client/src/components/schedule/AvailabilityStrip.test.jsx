@@ -179,6 +179,13 @@ describe('calendar facts on the days', () => {
     const stale = { ...answer({ start: '14:00', fits: false, reason: 'arrival_window', detourMinutes: null }), stale: true };
     expect(availabilityVerdict(stale, at('2035-01-02', '15:00'))).toMatchObject({ tone: 'ok', text: 'Checking…', offers: [] });
     expect(stripCoversRouteWarning(stale, at('2035-01-02', '15:00'))).toBe(true);
+    // Its hours were scored for the previous technician / duration: none can be taken.
+    const onPick = vi.fn();
+    render(<AvailabilityStrip availability={stale} currentDate="2035-01-02" currentStart="15:00" onPick={onPick} />);
+    const chips = screen.getAllByTestId('availability-hour');
+    expect(chips.length).toBeGreaterThan(0);
+    for (const chip of chips) { expect(chip.disabled).toBe(true); fireEvent.click(chip); }
+    expect(onPick).not.toHaveBeenCalled();
   });
 });
 

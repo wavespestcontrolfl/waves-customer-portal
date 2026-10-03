@@ -236,6 +236,9 @@ export default function AvailabilityStrip({ availability, currentDate, currentSt
   // visit does not have (an unassigned visit adopts it on pick) stays tappable.
   const techMatches = (hour) => !hour.technicianId || String(hour.technicianId) === String(currentTechnicianId ?? '');
   const isCurrent = (hour) => hour.date === currentDate && sameStart(hour.start, currentStart) && techMatches(hour);
+  // Mid re-check the listed hours were scored for the previous technician,
+  // duration and pick: show them, but take none until the new answer lands.
+  const pick = availability.stale ? undefined : onPick;
   const today = etDateString();
 
   return (
@@ -249,7 +252,7 @@ export default function AvailabilityStrip({ availability, currentDate, currentSt
           <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, marginTop: 6, color: '#52525B' }}>
             {verdict.lead ? <span>{verdict.lead}</span> : null}
             {verdict.offers.map((hour) => (
-              <HourChip key={`${hour.date}-${hour.start}`} hour={hour} withDay={verdict.withDay} current={isCurrent(hour)} onPick={onPick} />
+              <HourChip key={`${hour.date}-${hour.start}`} hour={hour} withDay={verdict.withDay} current={isCurrent(hour)} onPick={pick} />
             ))}
           </div>
         )}
@@ -291,7 +294,7 @@ export default function AvailabilityStrip({ availability, currentDate, currentSt
               : `${fmtDay(viewed.date)}: ${viewed.closed ? 'closed day, ' : ''}${emptyDayLine(viewed)}`}
           </span>
           {viewed.hours.map((hour) => (
-            <HourChip key={`${hour.date}-${hour.start}`} hour={hour} withDay={false} current={isCurrent(hour)} onPick={onPick} />
+            <HourChip key={`${hour.date}-${hour.start}`} hour={hour} withDay={false} current={isCurrent(hour)} onPick={pick} />
           ))}
         </div>
       )}
