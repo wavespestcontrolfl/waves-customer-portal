@@ -68,6 +68,11 @@ function cohort(overrides = new Map(), size = 41) {
   return { rows, adjudications, bodies };
 }
 
+function reseal(c, index) {
+  c.rows[index].evidence_fingerprint = fingerprintEvidence(c.rows[index].decision_evidence);
+  c.adjudications[index].evidenceFingerprint = c.rows[index].evidence_fingerprint;
+}
+
 test('qualification uses the complete reviewed cohort and conservative distinct-offer recall', () => {
   const c = cohort();
   const earlierBody = 'synthetic earlier standing offer';
@@ -164,6 +169,51 @@ test('stale plans and incomplete operational snapshots cannot complete the cohor
   emptyMove.rows[0].evidence_fingerprint = fingerprintEvidence(emptyMove.rows[0].decision_evidence);
   emptyMove.adjudications[0].evidenceFingerprint = emptyMove.rows[0].evidence_fingerprint;
   expect(summarizeQualification(emptyMove.rows, { ...source, adjudications: emptyMove.adjudications }, emptyMove.bodies))
+    .toMatchObject({ status: 'inconclusive', epochs: [{ incompleteEvidence: 1 }] });
+});
+
+test('every selected move offer requires a complete before-visit snapshot', () => {
+  const c = cohort();
+  c.rows[1].decision_evidence.before.visit = null;
+  reseal(c, 1);
+  expect(summarizeQualification(c.rows, { ...source, adjudications: c.adjudications }, c.bodies))
+    .toMatchObject({ status: 'inconclusive', epochs: [{ incompleteEvidence: 1 }] });
+});
+
+test('an accepted move offer scores only when the adjudicated slot is complete', () => {
+  const c = cohort(new Map([[5, {
+    action: 'accept_slot', outcome: 'confirm_only', expectedAction: 'accept_slot', expectedOutcome: 'confirm_only',
+  }]]));
+  c.rows[5].decision_evidence.offers[0].slots = [
+    { date: '2026-10-06', start: '10:00' },
+    { date: '2026-10-06', start: '13:00', end: '15:00' },
+  ];
+  reseal(c, 5);
+  const result = summarizeQualification(c.rows, { ...source, adjudications: c.adjudications }, c.bodies);
+  expect(result.status).toBe('inconclusive');
+  expect(result.epochs[0]).toMatchObject({ reviewed: 41, distinctOffersReviewed: 40, distinctOffersScored: 39 });
+});
+
+test('malformed persisted would-have JSON cannot match a null decision plan', () => {
+  const c = cohort();
+  c.rows[1].would_have = '{';
+  expect(summarizeQualification(c.rows, { ...source, adjudications: c.adjudications }, c.bodies))
+    .toMatchObject({ status: 'inconclusive', epochs: [{ incompleteEvidence: 1 }] });
+});
+
+test('duplicate or blank offer ids cannot identify one linked selected offer', () => {
+  const duplicate = cohort();
+  duplicate.rows[1].decision_evidence.offers.push({ ...duplicate.rows[1].decision_evidence.offers[0] });
+  reseal(duplicate, 1);
+  expect(summarizeQualification(duplicate.rows, { ...source, adjudications: duplicate.adjudications }, duplicate.bodies))
+    .toMatchObject({ status: 'inconclusive', epochs: [{ incompleteEvidence: 1 }] });
+
+  const blank = cohort();
+  blank.rows[1].sms_offer_id = ' ';
+  blank.rows[1].decision_evidence.offers[0].id = ' ';
+  blank.rows[1].decision_evidence.selectedOfferId = ' ';
+  reseal(blank, 1);
+  expect(summarizeQualification(blank.rows, { ...source, adjudications: blank.adjudications }, blank.bodies))
     .toMatchObject({ status: 'inconclusive', epochs: [{ incompleteEvidence: 1 }] });
 });
 

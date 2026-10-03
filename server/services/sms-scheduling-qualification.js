@@ -40,6 +40,12 @@ function parse(value) {
   try { return JSON.parse(value); } catch { return null; }
 }
 
+function parsePersisted(value) {
+  if (value === null || (value && typeof value === 'object')) return { ok: true, value };
+  if (typeof value !== 'string') return { ok: false, value: null };
+  try { return { ok: true, value: JSON.parse(value) }; } catch { return { ok: false, value: null }; }
+}
+
 function isNonblankString(value) {
   return typeof value === 'string' && Boolean(value.trim());
 }
@@ -81,7 +87,9 @@ function decisionMatchesRow(decision, row) {
   if (!decision || decision.model !== row.model || decision.promptVersion !== row.prompt_version) return false;
   if (!isNonblankString(decision.servedModel) || decision.servedModel !== row.model) return false;
   if (decision.action !== row.action || decision.slotNumber !== row.slot_number || decision.outcome !== row.outcome) return false;
-  if (fingerprintEvidence(decision.wouldHave) !== fingerprintEvidence(parse(row.would_have))) return false;
+  const persistedWouldHave = parsePersisted(row.would_have);
+  if (!persistedWouldHave.ok) return false;
+  if (fingerprintEvidence(decision.wouldHave) !== fingerprintEvidence(persistedWouldHave.value)) return false;
   const shouldHavePlan = decision.action === 'accept_slot' && PLANNED_DECISION_OUTCOMES.has(decision.outcome);
   return shouldHavePlan ? decision.wouldHave != null : decision.wouldHave == null;
 }
@@ -90,8 +98,13 @@ function linkedOffers(evidence, row, smsBodiesById) {
   const offers = Array.isArray(evidence.offers) ? evidence.offers : [];
   if (!offers.length) return null;
   if (offers.some((offer) => !currentBodyMatches(offer?.outbound, smsBodiesById))) return null;
-  if (!offers.some((offer) => String(offer.id) === String(row.sms_offer_id))) return null;
-  return String(evidence.selectedOfferId || '') === String(row.sms_offer_id) ? offers : null;
+  const ids = offers.map((offer) => String(offer?.id || '').trim());
+  if (ids.some((id) => !id) || new Set(ids).size !== ids.length) return null;
+  const selectedId = String(evidence.selectedOfferId || '').trim();
+  const rowOfferId = String(row.sms_offer_id || '').trim();
+  if (!selectedId || selectedId !== rowOfferId) return null;
+  const selectedIndex = ids.indexOf(rowOfferId);
+  return selectedIndex >= 0 ? { offers, selected: offers[selectedIndex] } : null;
 }
 
 function completeVisit(visit) {
@@ -119,10 +132,11 @@ function evidenceFor(row, smsBodiesById) {
   if (fingerprintEvidence(evidence) !== row.evidence_fingerprint) return null;
   if (String(evidence.reply?.smsLogId || '') !== String(row.inbound_sms_log_id || '')) return null;
   if (!currentBodyMatches(evidence.reply, smsBodiesById)) return null;
-  const offers = linkedOffers(evidence, row, smsBodiesById);
-  if (!offers || !completeDecisionFacts(evidence, row.outcome)) return null;
+  const linked = linkedOffers(evidence, row, smsBodiesById);
+  if (!linked || !completeDecisionFacts(evidence, row.outcome)) return null;
+  if (linked.selected.kind === 'move_visit' && !completeVisit(evidence.before.visit)) return null;
   if (!decisionMatchesRow(evidence.decision, row)) return null;
-  return { evidence, offers };
+  return { evidence, offers: linked.offers };
 }
 
 function numberedPick(expected, offers) {
@@ -268,10 +282,14 @@ function acceptIsCorrect(row, expected, found) {
   return row.outcome === requiredOutcome && (expected.outcome !== 'move' || proposedMoveMatches(found, expected));
 }
 
-function actionableMoveOffer(offer) {
+function completeSlot(slot) {
+  return ['date', 'start', 'end'].every((field) => isNonblankString(slot?.[field]));
+}
+
+function actionableMoveOffer(offer, expected) {
   return isNonblankString(String(offer?.scheduledServiceId || ''))
     && Array.isArray(offer.slots)
-    && offer.slots.some((slot) => ['date', 'start', 'end'].every((field) => isNonblankString(slot?.[field])));
+    && (expected.action === 'accept_slot' ? completeSlot(expected.slot) : offer.slots.some(completeSlot));
 }
 
 function reviewedActionFamily(row, review) {
@@ -305,7 +323,7 @@ function scoreReviewedRow(epoch, epochState, row, review) {
   epochState.reviewedOffers.add(family.offerId);
   if (expected.action === 'unsupported') { epoch.unsupported += 1; return; }
   if (expected.action === 'unclear') { epoch.unclear += 1; return; }
-  if (!actionableMoveOffer(family.offer)) return;
+  if (!actionableMoveOffer(family.offer, expected)) return;
   epochState.scoredOffers.add(family.offerId);
   if (expected.action !== 'accept_slot') return;
   epoch.trueAccepts.decisions += 1;
