@@ -349,6 +349,41 @@ const ORDINARY_NAME_WORDS = new Set([
   'while', 'until', 'upon', 'without', 'within', 'through', 'other', 'there',
   'here', 'what', 'both', 'even', 'back', 'around', 'along', 'across',
   'between', 'among', 'every', 'made', 'make', 'used', 'using', 'waves',
+  // Short words: a name whose long words are all plain falls back to its
+  // short ones ("Tim-bor Professional Insecticide and Fungicide"), so a plain
+  // short word there ("and") would match nearly every report.
+  'and', 'for', 'the', 'of', 'to', 'in', 'on', 'at', 'by', 'or', 'an', 'as',
+  'is', 'it', 'be', 'all', 'use', 'per', 'off', 'new', 'one', 'two', 'big',
+  'out', 'not', 'any', 'our', 'can', 'may', 'am', 'up', 'so', 'no', 'pre',
+]);
+
+// Report vocabulary inside catalog names, for the mention check only
+// (catalogScreensForPrompt, admin-schedule.js): a plain word in a note never
+// marks a catalog product named. Audit 2026-10-03 (prod, read-only): over the
+// 274 most recent pest AI reports, a note that read like its report marked a
+// catalog product "mentioned" by one of these words, and that product's full
+// screen then refused the report itself, for 135 of them (49%): "high" (LESCO
+// High Manganese Combo), "contact" (LESCO Manicure 6FL Contact Fungicide),
+// "plant growth regulator", "moisture" (LESCO Moisture Manager), "monitoring
+// … system" (HexPro), "foliage", "three-way". Reports write these lowercase,
+// as plain words; brands stay (Taurus, Talstar, Demand, Tenacity, Celsius,
+// Alpine, Manicure, HexPro). Then plain descriptors from the catalog's names.
+// The visit's own products, and a product the note does name, keep their full
+// screen (#5729).
+const REPORT_VOCABULARY_NAME_WORDS = new Set([
+  'high', 'contact', 'growth', 'plant', 'regulator', 'moisture', 'monitoring',
+  'system', 'foliage', 'three', 'selective', 'chelated', 'micronutrient',
+  'micronutrients', 'micro', 'micros', 'manganese', 'iron', 'soil', 'southern',
+  'emergent', 'post', 'clean', 'zone', 'storm', 'action', 'landscape',
+  'tropical', 'nutrition', 'green', 'snap', 'soluble', 'systemic', 'purpose',
+  'crabgrass', 'indicate', 'indicator', 'biological', 'select', 'organic',
+  'expanded', 'trigger', 'amendment', 'annual', 'baiting', 'bloom', 'board',
+  'glue', 'brand', 'cartridges', 'city', 'combo', 'compressed', 'tablets',
+  'double', 'fertilize', 'flowable', 'foam', 'generic', 'injectable', 'killer',
+  'manager', 'mini', 'mobile', 'ornamental', 'pack', 'professional', 'shrubs',
+  'trees', 'starter', 'total', 'turfgrass', 'tech', 'meal', 'urea', 'humic',
+  'kelp', 'alfalfa', 'vinegar', 'colorant', 'humectant', 'bactericide',
+  'acidifier', 'biostimulant',
 ]);
 
 async function generateRecap(input = {}) {
@@ -736,6 +771,8 @@ module.exports = {
   buildPrompt,
   buildReportTradeNameScreen,
   containsProductName,
+  REPORT_GENERIC_PRODUCT_TOKENS,
+  REPORT_VOCABULARY_NAME_WORDS,
   isSupplyCategory,
   composeCompletionSmsPreview,
   deterministicRecap,

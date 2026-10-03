@@ -15,9 +15,16 @@
  *  - `copy` is ADVICE, never an observation of this visit. "If you have
  *    bromeliads…" is fine; "I noticed your bromeliads…" is a finding and
  *    belongs in the tech's notes. The visit-claim lint rejects it.
+ *  - `watchKeys` (optional, tree & shrub tips only) names the seasonal watch
+ *    list items (config/tree-shrub-watch-list.js) the tip is advice for. The
+ *    Fast Complete sheet floats a tip to the top when the tech marks one of
+ *    them Seen; it never selects a tip. Every key must exist in that list.
  *  - Ids are stable forever — frozen structured_notes reference them and the
  *    picker's "already sent" mark matches on id. Never rename; retire by
  *    removing the entry (frozen reports keep their copy).
+ *
+ * Lawn tips (owner 2026-09-29) may also carry `findings` and `months`, which
+ * only reorder the picker (see LAWN_FINDINGS).
  *
  * Search happens on the client (the registry is small and ships whole);
  * `keywords` are the tech's vocabulary so a query typed at the truck hits.
@@ -42,10 +49,119 @@ const WET_SEASON_MONTHS = new Set([6, 7, 8, 9, 10]);
 // Accepts a Date (read in ET) or a 'YYYY-MM-DD' calendar day, which is how
 // the schedule stores a visit date — never parse that string through
 // `new Date()`, which reads it as UTC midnight (the previous ET evening).
-function seasonForDate(date = new Date()) {
+function monthForDate(date = new Date()) {
   const day = typeof date === 'string' ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(date.trim()) : null;
-  const month = day ? Number(day[2]) : etParts(date).month;
-  return WET_SEASON_MONTHS.has(month) ? 'wet' : 'dry';
+  return day ? Number(day[2]) : etParts(date).month;
+}
+
+function seasonForDate(date = new Date()) {
+  return WET_SEASON_MONTHS.has(monthForDate(date)) ? 'wet' : 'dry';
+}
+
+// Lawn finding keys (owner 2026-09-29, scope round 3c). A lawn tip may carry
+// `findings`: the watch-list issues it is advice for; and `months`: the
+// calendar months (1-12) the owner has supplied for it. Both only REORDER the
+// picker (tipsForVisit); neither hides a tip from search. Each key maps to its
+// family, so a coarse finding ('disease') lifts every tip for the issues in
+// it, and a specific one ('gray_leaf_spot') lifts just its own tips.
+const LAWN_FINDINGS = Object.freeze({
+  gray_leaf_spot: 'disease',
+  large_patch: 'disease',
+  take_all: 'disease',
+  sod_webworm: 'insects',
+  armyworm: 'insects',
+  chinch_bugs: 'insects',
+  white_grubs: 'insects',
+  mole_crickets: 'insects',
+  dollarweed: 'weeds',
+  sedges: 'weeds',
+  broadleaf_weeds: 'weeds',
+  crabgrass: 'weeds',
+  thatch: 'thatch',
+  shade: 'shade',
+  drought: 'drought',
+  scalping: 'scalping',
+});
+
+// Finding keys from the visit's TECH-CONFIRMED lawn assessment (never an
+// unconfirmed read). Confirmed scores are 0-100, higher = healthier; the
+// cut-offs are the "minor or worse" step of the assessment's own category
+// ramp (lawn-assessment.js FUNGUS_DISPLAY / THATCH_DISPLAY) and 10% weed
+// cover. The tech's stress flags add what the scores cannot say. Coarse keys
+// only: the scores do not name an issue. Named findings join this list when
+// the lawn confirm tiles land.
+const LAWN_SCORE_CUTOFFS = Object.freeze({ fungus_control: 75, thatch_level: 60, weed_suppression: 90 });
+const LAWN_FLAG_FINDINGS = Object.freeze({
+  disease_suspicion: 'disease', shade_stress: 'shade', drought_stress: 'drought', recent_scalp: 'scalping',
+});
+
+function lawnFindingsFromAssessment(row) {
+  if (!row || row.confirmed_by_tech !== true) return [];
+  const found = new Set();
+  const atOrBelow = (value, max) => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value)) && Number(value) <= max;
+  if (atOrBelow(row.fungus_control, LAWN_SCORE_CUTOFFS.fungus_control)) found.add('disease');
+  if (atOrBelow(row.thatch_level, LAWN_SCORE_CUTOFFS.thatch_level)) found.add('thatch');
+  if (atOrBelow(row.weed_suppression, LAWN_SCORE_CUTOFFS.weed_suppression)) found.add('weeds');
+  let flags = row.stress_flags;
+  if (typeof flags === 'string') {
+    try { flags = JSON.parse(flags); } catch { flags = null; }
+  }
+  if (flags && typeof flags === 'object') {
+    for (const [flag, finding] of Object.entries(LAWN_FLAG_FINDINGS)) if (flags[flag] === true) found.add(finding);
+  }
+  return [...found];
+}
+
+// Named findings: the technician-reviewed findings on the visit's assessment
+// run (lawn_assessment_runs.reviewed_findings / added_details). Each carries
+// the allowlisted customer label of lawn-diagnostic-report CONDITION_LABELS;
+// this table says which finding keys a label stands for. A label not listed
+// (overwatering, thinning, color, a generic or clean label) lifts nothing.
+// "Caterpillar activity" does not say which caterpillar, so it lifts both.
+const LAWN_LABEL_FINDINGS = Object.freeze({
+  'chinch bug activity': ['chinch_bugs'],
+  'caterpillar activity': ['sod_webworm', 'armyworm'],
+  'grub activity': ['white_grubs'],
+  'large patch (fungal) activity': ['large_patch'],
+  'gray leaf spot': ['gray_leaf_spot'],
+  'dollar spot': ['disease'],
+  'fungal activity': ['disease'],
+  'weed pressure': ['weeds'],
+  'drought stress': ['drought'],
+});
+
+// Finding keys from one assessment run's technician review. Only a finding
+// the technician KEPT counts (a rejected one has keep: false), and a
+// technician-added detail counts unless it rules the condition out. A run
+// not yet reviewed has neither list and gives nothing.
+function lawnFindingsFromRun(run) {
+  if (!run) return [];
+  const list = (value) => {
+    let rows = value;
+    if (typeof rows === 'string') {
+      try { rows = JSON.parse(rows); } catch { rows = null; }
+    }
+    return Array.isArray(rows) ? rows : [];
+  };
+  const kept = [
+    ...list(run.reviewed_findings).filter((row) => row && row.keep !== false),
+    ...list(run.added_details).filter((row) => row && row.negated !== true),
+  ];
+  const found = new Set();
+  for (const row of kept) {
+    const keys = Object.prototype.hasOwnProperty.call(LAWN_LABEL_FINDINGS, row.label) ? LAWN_LABEL_FINDINGS[row.label] : [];
+    for (const key of keys) found.add(key);
+  }
+  return [...found];
+}
+
+// 4 for a tip written for one of this visit's findings, 2 for the owner's
+// months, 1 for the wet/dry season (the old in-season-first order).
+function tipRank(tip, { season, month, findings }) {
+  const fits = findings.size > 0 && (tip.findings || []).some((key) => findings.has(key) || findings.has(LAWN_FINDINGS[key]));
+  return (fits ? 4 : 0)
+    + ((tip.months || []).includes(month) ? 2 : 0)
+    + (tip.season === 'all' || tip.season === season ? 1 : 0);
 }
 
 // Picker group order per season: wet leads with water and humidity, dry with
@@ -271,7 +387,8 @@ const TIPS = Object.freeze([
   // ── Lawn ──────────────────────────────────────────────────────────────
   {
     id: 'lawn_water_morning', group: 'lawn', label: 'Water the lawn in the early morning',
-    keywords: ['irrigation', 'sprinkler', 'water', 'fungus', 'timer'], lines: ['lawn', 'mosquito'], season: 'wet',
+    keywords: ['irrigation', 'sprinkler', 'water', 'fungus', 'timer', 'night', 'leaf spot'], lines: ['lawn', 'mosquito'], season: 'wet',
+    findings: ['gray_leaf_spot', 'large_patch'],
     copy: "Overnight watering leaves the blades wet until morning, which is exactly what fungus needs. Set the irrigation to finish around sunrise; the morning sun dries the turf by midday and gives fungus and mosquitos far less to work with.",
   },
   {
@@ -289,24 +406,209 @@ const TIPS = Object.freeze([
   {
     id: 'lawn_sharp_blade', group: 'lawn', label: 'Sharpen the mower blade',
     keywords: ['mower', 'blade', 'mow', 'brown tips'], lines: ['lawn'], season: 'all',
+    findings: ['scalping'],
     copy: "A dull blade tears the leaf instead of cutting it. Torn tips brown out and are the entry point for fungus, so a sharpened blade once a season shows up as a greener lawn a week later.",
+  },
+
+  // Lawn seed (owner 2026-09-29, scope round 3c; copy chosen under the owner's
+  // 2026-10-03 lawn authorization, list sent to the owner to read). Keyed to the seasonal watch list (`months` are only the
+  // months the owner has supplied: October, plus the two seasonal notes) and
+  // to the finding families in LAWN_FINDINGS. ADVICE only: no result timelines,
+  // no product names, no mowing-height or watering numbers.
+  {
+    id: 'lawn_bag_clippings', group: 'lawn', label: 'Bag clippings while fungus is active',
+    keywords: ['clippings', 'bag', 'mulch', 'fungus', 'leaf spot', 'mower'], lines: ['lawn'], season: 'all',
+    findings: ['gray_leaf_spot', 'large_patch'], months: [10],
+    copy: "Mowing carries fungus spores from sick turf to healthy turf on the deck and in the clippings. While leaf spot or another fungus is active, bag the clippings and rinse the mower deck afterward. If a crew mows for you, ask them to do the same.",
+  },
+  {
+    id: 'lawn_shade_dry_between', group: 'lawn', label: 'Let shaded areas dry between waterings',
+    keywords: ['shade', 'wet', 'patch', 'fungus', 'large patch', 'irrigation'], lines: ['lawn'], season: 'all',
+    findings: ['large_patch', 'shade'], months: [10],
+    copy: "Turf in the shade stays wet much longer than turf in full sun, and wet shaded turf is where large patch and other fungus get started. If one sprinkler zone covers both sun and shade, check that the shaded part is not still soggy when the sunny part is dry.",
+  },
+  {
+    id: 'lawn_skip_extra_nitrogen', group: 'lawn', label: 'Skip the extra nitrogen on a weak lawn',
+    keywords: ['fertilizer', 'nitrogen', 'yellow', 'weak', 'root rot', 'take-all'], lines: ['lawn'], season: 'all',
+    findings: ['take_all', 'large_patch'], months: [10],
+    copy: "When a lawn looks yellow and thin, the first thought is to feed it. If the roots are the problem, extra nitrogen pushes leaf growth the roots cannot keep up with. Check with me before adding fertilizer of your own, and I will tell you what the lawn needs.",
+  },
+  {
+    id: 'lawn_dont_pull_sedge', group: 'lawn', label: "Don't pull sedge",
+    keywords: ['sedge', 'nutsedge', 'kyllinga', 'pull', 'tubers', 'weeds'], lines: ['lawn'], season: 'all',
+    findings: ['sedges'], months: [10],
+    copy: "Sedge grows from small underground tubers, and pulling the plant usually leaves the tubers behind to send up new ones. Pulling can leave you with more sedge than you started with. Leave it in place and point it out to me.",
+  },
+  {
+    id: 'lawn_dollarweed_wet_soil', group: 'lawn', label: 'Dollarweed likes soil that stays wet',
+    keywords: ['dollarweed', 'pennywort', 'wet', 'sprinkler', 'drainage', 'weeds'], lines: ['lawn'], season: 'all',
+    findings: ['dollarweed'], months: [10],
+    copy: "Dollarweed thrives where the soil stays wet. If it keeps coming back in one spot, look for a sprinkler head that overlaps its neighbor, a small leak, or a low spot that holds water. Correcting the wet spot is usually the first step.",
+  },
+  {
+    id: 'lawn_chinch_hot_edge', group: 'lawn', label: 'Watch the hot strip by the driveway',
+    keywords: ['chinch', 'chinch bugs', 'driveway', 'sidewalk', 'edge', 'hot', 'dry'], lines: ['lawn'], season: 'all',
+    findings: ['chinch_bugs', 'drought'], months: [10],
+    copy: "The strip of lawn along a driveway, sidewalk, or street heats up first and dries out first, and that is where chinch bugs like to settle. Make sure the sprinklers reach that strip, and let me know if it starts to yellow while the rest of the lawn stays green.",
+  },
+  {
+    id: 'lawn_moths_at_dusk', group: 'lawn', label: 'Moths at dusk can mean caterpillars',
+    keywords: ['moths', 'webworm', 'sod webworm', 'armyworm', 'chewed', 'caterpillar', 'dusk'], lines: ['lawn'], season: 'all',
+    findings: ['sod_webworm', 'armyworm'], months: [10],
+    copy: "Small tan moths flying up from the grass as you walk across it, or around the yard at dusk, can be an early sign that sod webworm or armyworm caterpillars will follow. If you see them, let me know so I can take a closer look at the lawn.",
+  },
+  {
+    id: 'lawn_digging_animals', group: 'lawn', label: 'Digging animals can be a grub clue',
+    keywords: ['grubs', 'white grubs', 'digging', 'armadillo', 'raccoon', 'holes', 'birds'], lines: ['lawn'], season: 'all',
+    findings: ['white_grubs'], months: [10],
+    copy: "Armadillos, raccoons, and birds dig up lawns looking for grubs and other insects in the soil. If something keeps digging in the same area, tell me where. It can point to what is living in the root zone, and it is worth a look.",
+  },
+  {
+    id: 'lawn_spongy_soil', group: 'lawn', label: 'Soft, spongy soil is worth a call',
+    keywords: ['mole cricket', 'mole crickets', 'spongy', 'tunnel', 'soft', 'ridges'], lines: ['lawn'], season: 'all',
+    findings: ['mole_crickets'], months: [10],
+    copy: "Mole crickets tunnel just under the surface, which can leave the ground soft and spongy, sometimes with raised, wandering ridges. If you notice that underfoot, let me know where, and I will check the area at my next visit.",
+  },
+  {
+    id: 'lawn_mow_one_third', group: 'lawn', label: 'Never take more than a third off',
+    keywords: ['mow', 'mowing', 'height', 'third', 'scalp', 'scalping', 'tall'], lines: ['lawn'], season: 'all',
+    findings: ['scalping'],
+    copy: "Cutting more than a third of the blade in one mow shocks the grass and can leave a scalped, stressed lawn. If the lawn has gotten tall, raise the mower for the first cut and bring it back down over the next few mows. If a crew mows for you, pass this along.",
+  },
+  {
+    id: 'lawn_mow_after_weed_treatment', group: 'lawn', label: 'Ask before mowing after a weed treatment',
+    keywords: ['mow', 'herbicide', 'sedge', 'wait', 'weeds', 'treatment'], lines: ['lawn'], season: 'all',
+    findings: ['sedges', 'broadleaf_weeds', 'crabgrass'],
+    copy: "Mowing too soon after a weed treatment cuts the weeds before the treatment has worked into them. How long to wait depends on the product I used, so ask me before the next mow. If a crew mows for you, ask them to check with me first.",
+  },
+  {
+    id: 'lawn_check_heads_after_mow', group: 'lawn', label: 'Check the sprinkler heads after a mow',
+    keywords: ['heads', 'coverage', 'dry spot', 'sprinkler', 'irrigation', 'mow crew', 'broken'], lines: ['lawn'], season: 'all',
+    findings: ['drought'],
+    copy: "Mowers and edgers knock sprinkler heads out of line and sometimes crack them. That leaves a dry spot in one place and a soggy spot in another. Run each zone once after the lawn is mowed and watch for heads that spray the wrong way, spray weakly, or sit buried in grass.",
+  },
+  {
+    id: 'lawn_deep_water', group: 'lawn', label: 'Water deeper, not more often',
+    keywords: ['deep', 'shallow', 'roots', 'irrigation', 'sprinkler', 'timer', 'frequency'], lines: ['lawn'], season: 'all',
+    findings: ['drought', 'take_all'],
+    copy: "Short, frequent runs keep the top of the soil wet and the roots shallow. Longer runs on fewer days, within your area's watering rules, send water deeper and give the roots a reason to follow it.",
+  },
+  {
+    id: 'lawn_shade_thin_turf', group: 'lawn', label: 'Thin turf under trees is often a light problem',
+    keywords: ['shade', 'thin', 'trees', 'canopy', 'light', 'groundcover'], lines: ['lawn'], season: 'all',
+    findings: ['shade'],
+    copy: "Grass under a tree canopy often thins out because it is not getting enough light. Trimming up the lower branches lets more light through. Where the shade is heavy, mulch or a shade groundcover under the tree can look better than grass that struggles.",
+  },
+  {
+    id: 'lawn_thatch_half_inch', group: 'lawn', label: 'Thick thatch holds water and insects',
+    keywords: ['thatch', 'spongy', 'half inch', 'water', 'insects', 'fertilizer'], lines: ['lawn'], season: 'all',
+    findings: ['thatch'],
+    copy: "Thatch is the layer of dead and living stems above the soil. Once it is thicker than about half an inch, it holds water against the surface, shelters insects, and keeps water and fertilizer from reaching the soil. Taking no more than a third off in a mow and going easy on nitrogen both help keep it from building up.",
+  },
+  {
+    id: 'lawn_treated_weeds_leave', group: 'lawn', label: 'Leave treated weeds in place',
+    keywords: ['weeds', 'yellow', 'brown', 'pull', 'wait', 'treated'], lines: ['lawn'], season: 'all',
+    findings: ['sedges', 'broadleaf_weeds', 'crabgrass', 'dollarweed'],
+    copy: "Weeds that have been treated can turn yellow or brown while the treatment works through them. Pulling them early can interrupt that, so leave them in place until my next visit. If a weed looks unchanged, point it out to me.",
+  },
+  {
+    id: 'lawn_cooler_nights', group: 'lawn', label: 'Cooler nights slow the lawn',
+    keywords: ['color', 'cool', 'cold', 'dormant', 'winter', 'fall', 'lighter'], lines: ['lawn'], season: 'all',
+    months: [10, 11],
+    copy: "As nights cool in the fall, warm-season grass grows more slowly, and the whole lawn can lighten a little as it heads toward its winter rest. If one patch looks different from the rest instead of the whole lawn easing evenly, tell me.",
+  },
+  {
+    id: 'lawn_early_spring_low_mow', group: 'lawn', label: 'Hold off on a very low mow in early spring',
+    keywords: ['scalp', 'scalping', 'spring', 'low mow', 'mow', 'green up'], lines: ['lawn'], season: 'all',
+    months: [2, 3],
+    copy: "A very low mow in late winter can set back turf that is just waking up. Keep the mower at your normal setting until the lawn is growing steadily, and ask me if you are not sure what is right for your grass.",
   },
 
   // ── Trees and shrubs ──────────────────────────────────────────────────
   {
     id: 'ts_ants_on_trunk', group: 'tree_shrub', label: 'Ants on the trunk = scale or aphids',
-    keywords: ['ants', 'trunk', 'scale', 'aphids', 'sooty mold', 'honeydew'], lines: ['tree_shrub', 'pest'], season: 'all',
+    keywords: ['ants', 'trunk', 'scale', 'aphids', 'sooty mold', 'honeydew'], lines: ['tree_shrub', 'pest'], season: 'all', watchKeys: ['scale', 'sooty_mold', 'aphids'],
     copy: "Ants running up and down a trunk are usually farming scale or aphids for their honeydew, and the black sooty mold on the leaves is growing on that honeydew. If you see the ant traffic, let me know — it tells me exactly where the scale is.",
   },
   {
     id: 'ts_deep_water', group: 'tree_shrub', label: 'Deep and infrequent, not daily',
-    keywords: ['shrubs', 'water', 'root rot', 'wilting', 'yellow'], lines: ['tree_shrub'], season: 'all',
+    keywords: ['shrubs', 'water', 'root rot', 'wilting', 'yellow'], lines: ['tree_shrub'], season: 'all', watchKeys: ['root_rot'],
     copy: "Root rot from overwatering looks like drought — wilting and yellowing — and the reflex is to water more. Established shrubs want deep, infrequent watering; let the top inch of soil dry between runs.",
   },
   {
     id: 'ts_mulch_trunk', group: 'tree_shrub', label: 'Keep mulch off the trunk',
     keywords: ['mulch', 'trunk', 'volcano', 'borers', 'bark'], lines: ['tree_shrub'], season: 'all',
     copy: "Mulch piled against the trunk keeps the bark wet and invites borers and rot at the collar. Pull it back into a ring a few inches from the trunk — a donut, not a volcano.",
+  },
+  {
+    id: 'ts_black_film', group: 'tree_shrub', label: 'Black film on leaves comes from insects',
+    keywords: ['sooty mold', 'black', 'sticky', 'scale'], lines: ['tree_shrub'], season: 'all', watchKeys: ['scale', 'sooty_mold'],
+    copy: "That black film on leaves usually grows on the sticky honeydew insects leave behind, and it fades once the insects are under control.",
+  },
+  {
+    id: 'ts_leaf_undersides', group: 'tree_shrub', label: 'Check leaf undersides',
+    keywords: ['whitefly', 'underside', 'sticky'], lines: ['tree_shrub'], season: 'all', watchKeys: ['whitefly', 'scale'],
+    copy: "Whitefly and scale live on the underside of leaves, so that's the best place to look between visits.",
+  },
+  {
+    id: 'ts_dusty_leaves_dry', group: 'tree_shrub', label: 'Dusty leaves in dry weeks',
+    keywords: ['mites', 'dusty', 'dry', 'rinse'], lines: ['tree_shrub'], season: 'dry', watchKeys: ['spider_mites'],
+    copy: "Rinsing dusty shrubs with plain water during dry spells helps keep mites from building up.",
+  },
+  {
+    id: 'ts_chewed_new_leaves', group: 'tree_shrub', label: 'Chewed new leaves',
+    keywords: ['chewed', 'caterpillar', 'holes'], lines: ['tree_shrub'], season: 'all', watchKeys: ['caterpillars'],
+    copy: "Fresh chewing on new growth is often caterpillars; a quick look at dusk can spot them.",
+  },
+  {
+    id: 'ts_yellow_new_leaves', group: 'tree_shrub', label: 'Yellow new leaves with green veins',
+    keywords: ['yellow', 'chlorosis', 'iron', 'veins'], lines: ['tree_shrub'], season: 'all', watchKeys: ['chlorosis'],
+    copy: "Yellow new leaves with green veins usually mean the plant can't pull iron or manganese from the soil, which takes a few weeks to green up after treatment.",
+  },
+  {
+    id: 'ts_palm_dont_trim_yellow', group: 'tree_shrub', label: "Don't trim yellow palm fronds",
+    keywords: ['palm', 'yellow fronds', 'trim', 'prune'], lines: ['tree_shrub'], season: 'all', watchKeys: ['palm_potassium_deficiency', 'palm_magnesium_deficiency'],
+    copy: "Leave yellowing lower palm fronds on; the palm pulls nutrients from them, and cutting them speeds the decline.",
+  },
+  {
+    id: 'ts_palm_nine_and_three', group: 'tree_shrub', label: "Never prune above 9 and 3 o'clock",
+    keywords: ['palm', 'prune', 'hurricane cut'], lines: ['tree_shrub'], season: 'all',
+    copy: "When fronds are trimmed, keep everything above the 9-to-3 o'clock line on the palm.",
+  },
+  {
+    id: 'ts_palm_fertilizer_canopy', group: 'tree_shrub', label: 'Keep fertilizer off the trunk',
+    keywords: ['palm', 'fertilizer', 'trunk'], lines: ['tree_shrub'], season: 'all', watchKeys: ['palm_potassium_deficiency', 'palm_magnesium_deficiency'],
+    copy: "Palm fertilizer works spread under the whole canopy, not piled against the trunk.",
+  },
+  {
+    id: 'ts_water_early_morning', group: 'tree_shrub', label: 'Water beds in the early morning',
+    keywords: ['water', 'morning', 'leaf spot'], lines: ['tree_shrub'], season: 'wet', watchKeys: ['leaf_spot'],
+    copy: "Watering beds early in the morning lets leaves dry fast, which keeps leaf spot down.",
+  },
+  {
+    id: 'ts_soggy_beds_root_rot', group: 'tree_shrub', label: 'Wet beds invite root rot',
+    keywords: ['soggy', 'wet', 'root rot', 'sprinkler'], lines: ['tree_shrub'], season: 'wet', watchKeys: ['root_rot'],
+    copy: "Beds that stay soggy for days are where root rot starts; check for a stuck zone or a broken head.",
+  },
+  {
+    id: 'ts_new_plantings_water', group: 'tree_shrub', label: 'New plantings need extra water the first summer',
+    keywords: ['new plants', 'heat', 'wilt'], lines: ['tree_shrub'], season: 'all', watchKeys: ['heat_stress', 'heat_drought_decline'],
+    copy: "Shrubs planted in the last year need more water than established ones through their first summer.",
+  },
+  {
+    id: 'ts_wait_prune_cold', group: 'tree_shrub', label: 'Wait to prune cold damage',
+    keywords: ['cold', 'freeze', 'brown', 'prune'], lines: ['tree_shrub'], season: 'dry', watchKeys: ['cold_freeze_damage'],
+    copy: "After a cold snap, wait until spring growth starts before cutting back damaged branches.",
+  },
+  {
+    id: 'ts_fresh_mulch_weeds', group: 'tree_shrub', label: 'Weeds in fresh mulch',
+    keywords: ['weeds', 'mulch', 'beds'], lines: ['tree_shrub'], season: 'all', watchKeys: ['bed_weeds'],
+    copy: "A thin layer of fresh mulch helps the pre-emergent hold weeds back between treatments.",
+  },
+  {
+    id: 'ts_blooms_gentler', group: 'tree_shrub', label: 'Blooming shrubs get gentler treatment',
+    keywords: ['bees', 'blooms', 'flowers'], lines: ['tree_shrub'], season: 'all',
+    copy: "We time insect treatments around blooms to protect bees, so flowering shrubs may get a lighter touch that visit.",
   },
 
   // ── Pets and fleas ────────────────────────────────────────────────────
@@ -704,11 +1006,13 @@ function registryLineFor(serviceLine) {
  * 2026-10-02) leads those visits' list in its own group ("For this service")
  * and stays out of every other visit's list.
  */
-function tipsForVisit({ serviceLine, serviceKey = null, serviceKeys = [], date = new Date() } = {}) {
+function tipsForVisit({ serviceLine, serviceKey = null, serviceKeys = [], date = new Date(), findings = [] } = {}) {
   const line = registryLineFor(serviceLine);
   const season = seasonForDate(date);
-  const inSeason = (tip) => tip.season === 'all' || tip.season === season;
-  const bySeason = (a, b) => Number(inSeason(b)) - Number(inSeason(a));
+  // Within a group the best fit leads: this visit's confirmed findings, then
+  // the month, then the season; ties keep registry order (the sort is stable).
+  const rankCtx = { season, month: monthForDate(date), findings: new Set(Array.isArray(findings) ? findings : []) };
+  const bySeason = (a, b) => tipRank(b, rankCtx) - tipRank(a, rankCtx);
   const groups = GROUP_ORDER[season]
     .map((groupId) => {
       const group = TIP_GROUPS.find((g) => g.id === groupId);
@@ -817,7 +1121,12 @@ module.exports = {
   SEASONS,
   MAX_TIPS_PER_VISIT,
   MAX_CUSTOM_TIP_CHARS,
+  LAWN_FINDINGS,
+  monthForDate,
   seasonForDate,
+  LAWN_LABEL_FINDINGS,
+  lawnFindingsFromAssessment,
+  lawnFindingsFromRun,
   registryLineFor,
   tipsForVisit,
   resolveTipIds,

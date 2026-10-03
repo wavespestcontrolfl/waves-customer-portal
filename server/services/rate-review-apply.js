@@ -164,6 +164,7 @@ const HOLD_COPY = Object.freeze({
   term_family_changed: 'The prepaid term now covers a different plan than the notice named, so nothing was changed.',
   termite_program: 'Termite programs renew under their own agreement and are never repriced here.',
   notice_event_collision: 'A notice with the same amounts and date already exists for this customer.',
+  delivery_revoked: 'The notice bounced or was blocked after it went out, so the customer was not told and the rate was not changed.',
   notice_too_recent: 'The notice went out fewer than 30 days before the new rate, so the rate waits.',
   billing_lane_changed: 'The account moved to a different billing lane since the notice, so the rate was not applied.',
   renewal_in_progress: 'A renewal of this prepaid plan is being recorded right now, so the amount is retried tonight.',
@@ -423,6 +424,20 @@ async function activePlanHold(dbh, customerId) {
   return dbh('plan_holds').where({ customer_id: customerId, status: 'active' }).first('id', 'family_key', 'resume_on');
 }
 
+// Whether an ACTIVE plan hold still covers `day` (the day a rate would start):
+// it has no return date, or returns after that day. A hold returning on the day
+// itself is resumed ahead of the 03:10 apply (resumeHoldsEndingToday), so it
+// does not block — but only while the resume lifecycle runs (the cancel-flow
+// gate, as its cron and resumeHoldsEndingToday): with it off nothing clears the
+// hold on its return date, so an active hold blocks whatever that date is. The
+// comms lane asks this before announcing a start date the apply would answer
+// with plan_on_hold.
+function planHoldCovers(hold, day, { resumeLive = require('./cancellation-resolution').cancelFlowV2Enabled() } = {}) {
+  if (!hold) return false;
+  if (!resumeLive) return true;
+  return !hold.resume_on || ymd(hold.resume_on) > day;
+}
+
 // ── scheduling ──────────────────────────────────────────────────────────
 
 // Effective date per lane; throws a HoldError when none qualifies.
@@ -477,7 +492,7 @@ async function flagSnapshotHold(dbh, row, code) {
 // The series roots of a line's open plan-row visits: the plan identity a
 // notice names (the apply reprices or bills only that series, never a
 // replacement accepted after it — see lockPerApplicationTargets and
-// assertMonthlyPlanUnchanged).
+// monthlyPlanRefusal).
 function seriesRoots(visits) {
   return [...new Set(visits.map((v) => String(v.recurring_parent_id || v.id)))];
 }
@@ -733,7 +748,28 @@ async function scheduleUnderLock(dbh, { batchKey, plannedSend, today, actorId })
 // with sent_at set and at least one leg delivered. Re-read under the row
 // lock in applyNotice.
 function wasDelivered(notice) {
-  return !!(notice && notice.sent_at && NOTIFIED_STATUSES.includes(String(notice.status)) && (notice.email_sent === true || notice.sms_sent === true));
+  // A notice whose every channel later failed (a hard bounce, a drop, a block,
+  // an undelivered text — rate-review-comms.js recordChannelFailure) is not a
+  // notified customer, whatever stamps remain on the row.
+  return !!(notice && notice.sent_at && NOTIFIED_STATUSES.includes(String(notice.status)) && (notice.email_sent === true || notice.sms_sent === true)
+    && !parseMetadata(notice.metadata).delivery_revoked);
+}
+
+// Twilio's own verdict on the text pointer, read from sms_log (the status
+// callback's bookkeeping lands there even when the notice reconciliation did
+// not): a notice delivered ONLY by text whose sid ended failed / undelivered /
+// blocked / canceled was never delivered. Returns the status, else null.
+const SMS_FAILED_STATUSES = ['failed', 'undelivered', 'blocked', 'canceled'];
+async function smsDeliveryFailure(dbh, notice) {
+  if (!notice || notice.email_sent === true || notice.sms_sent !== true) return null;
+  const sid = parseMetadata(notice.metadata).sms_sid;
+  if (!sid) return null;
+  const log = await dbh('sms_log').where({ twilio_sid: sid }).first('status');
+  if (log && SMS_FAILED_STATUSES.includes(String(log.status).toLowerCase())) return String(log.status).toLowerCase();
+  // A failure callback that beat the send log's insert (rate-review-comms.js
+  // handleSmsDeliveryFailure keeps it, keyed by sid).
+  const early = await dbh('rate_review_sms_failures').where({ twilio_sid: sid }).first('status');
+  return early ? String(early.status).toLowerCase() : null;
 }
 
 async function loadDueNotices(dbh, asOfDay) {
@@ -814,30 +850,35 @@ async function moveMonthlySlice(trx, { customer, familyKey, deltaMonthly, requir
 // its ledger slices' accept provenance. A same-family plan accepted since —
 // at the same price or not — is a different plan and never takes the old
 // notice (the per-application lane's lockPerApplicationTargets rule). A
-// notice that recorded neither fails closed.
-async function assertMonthlyPlanUnchanged(trx, { notice, customer, metadata, today }) {
+// notice that recorded neither fails closed. Returns { reason, detail } | null.
+async function monthlyPlanRefusal(dbh, { notice, customer, metadata, today }) {
   const noticedSlices = Array.isArray(metadata.slice_estimates) ? metadata.slice_estimates : null;
-  if (!metadata.series_root_id && !noticedSlices) throw hold('notice_series_unrecorded');
+  if (!metadata.series_root_id && !noticedSlices) return { reason: 'notice_series_unrecorded', detail: undefined };
   if (metadata.series_root_id) {
-    const snapshot = await trx('rate_review_snapshots').where({ id: notice.rate_review_row_id }).first('cadence');
-    const roots = seriesRoots(await loadLineOpenVisits(trx, { customerId: customer.id, familyKey: notice.family_key, cadence: snapshot ? snapshot.cadence : null, fromDate: today }));
+    const snapshot = await dbh('rate_review_snapshots').where({ id: notice.rate_review_row_id }).first('cadence');
+    const roots = seriesRoots(await loadLineOpenVisits(dbh, { customerId: customer.id, familyKey: notice.family_key, cadence: snapshot ? snapshot.cadence : null, fromDate: today }));
     if (roots.length && (roots.length > 1 || roots[0] !== String(metadata.series_root_id))) {
-      throw hold('plan_replaced', { noticedSeries: metadata.series_root_id, liveSeries: roots });
+      return { reason: 'plan_replaced', detail: { noticedSeries: metadata.series_root_id, liveSeries: roots } };
     }
   }
   if (noticedSlices) {
-    const liveSlices = await familySliceEstimates(trx, customer.id, notice.family_key);
-    if (liveSlices.join('|') !== noticedSlices.join('|')) throw hold('plan_replaced', { noticedSlices, liveSlices });
+    const liveSlices = await familySliceEstimates(dbh, customer.id, notice.family_key);
+    if (liveSlices.join('|') !== noticedSlices.join('|')) return { reason: 'plan_replaced', detail: { noticedSlices, liveSlices } };
   }
+  return null;
 }
 
-async function applyMonthly(trx, ctx) {
-  const { notice, customer, today } = ctx;
-  const { all, family } = await loadFamilySlices(trx, customer.id, notice.family_key);
-  const source = ctx.metadata.current_rate_source;
+// Every refusal applyMonthly raises from the rows alone, in its order (the
+// rate on file, the scalar/ledger structure, the plan identity). The apply
+// throws it; the comms lane's send preflight and its upcoming-charge
+// projection ask the same question through this one function.
+// Returns { reason, detail } | null.
+async function monthlyRefusal(dbh, { notice, customer, metadata, today }) {
+  const { all, family } = await loadFamilySlices(dbh, customer.id, notice.family_key);
+  const source = metadata.current_rate_source;
   // Re-read the lane's current rate the way the ranking resolved it.
   const currentCents = monthlyCurrentCents(customer, family, source);
-  if (currentCents !== Number(notice.noticed_current_cents)) throw hold('rate_moved_since_notice', { currentCents, source });
+  if (currentCents !== Number(notice.noticed_current_cents)) return { reason: 'rate_moved_since_notice', detail: { currentCents, source } };
   // A notice ranked from the whole scalar named the account's ONE plan line
   // at that rate. If the ledger has since split the scalar across lines
   // (pest $60 + lawn $40 under an unchanged $100), the family's own slice
@@ -849,19 +890,26 @@ async function applyMonthly(trx, ctx) {
   // replaced by lawn at the same total, or a second line joining with no
   // ledger attribution, is not the plan the letter named).
   if (source !== 'ledger_slice') {
-    const lines = await loadAccountPlanLineCount(trx, { customerId: customer.id, fromDate: today });
-    const own = await loadLineOpenVisits(trx, { customerId: customer.id, familyKey: notice.family_key, fromDate: today });
-    if (lines !== 1 || own.length === 0) throw hold('rate_moved_since_notice', { currentCents, source, accountLines: lines });
+    const lines = await loadAccountPlanLineCount(dbh, { customerId: customer.id, fromDate: today });
+    const own = await loadLineOpenVisits(dbh, { customerId: customer.id, familyKey: notice.family_key, fromDate: today });
+    if (lines !== 1 || own.length === 0) return { reason: 'rate_moved_since_notice', detail: { currentCents, source, accountLines: lines } };
   }
   if (source !== 'ledger_slice' && all.length > 0) {
     const familyKeys = new Set(family.map((r) => r.family_key));
     const outside = all.filter((r) => !familyKeys.has(r.family_key) && r.family_key !== PlanRateLedger.UNATTRIBUTED);
     const carried = family.length > 0 ? cents(sumSlices(family)) : cents(sumSlices(all));
     if (outside.length > 0 || carried !== currentCents) {
-      throw hold('rate_moved_since_notice', { currentCents, source, ledger: all.map((r) => r.family_key) });
+      return { reason: 'rate_moved_since_notice', detail: { currentCents, source, ledger: all.map((r) => r.family_key) } };
     }
   }
-  await assertMonthlyPlanUnchanged(trx, { notice, customer, metadata: ctx.metadata, today });
+  return monthlyPlanRefusal(dbh, { notice, customer, metadata, today });
+}
+
+async function applyMonthly(trx, ctx) {
+  const { notice, customer, today } = ctx;
+  const source = ctx.metadata.current_rate_source;
+  const refusal = await monthlyRefusal(trx, { notice, customer, metadata: ctx.metadata, today });
+  if (refusal) throw hold(refusal.reason, refusal.detail);
   const deltaMonthly = dollars(Number(notice.noticed_new_cents) - Number(notice.noticed_current_cents));
   const moved = await moveMonthlySlice(trx, { customer, familyKey: notice.family_key, deltaMonthly, requireSlice: source === 'ledger_slice' });
   return { lane: LANE_MONTHLY, before: { monthly_rate: moved.oldScalar }, after: { monthly_rate: moved.newScalar }, deltaMonthly };
@@ -887,6 +935,52 @@ function flatVisitRefusal(visit, addonCount, noticedCurrentCents, liveTermIds = 
   return null;
 }
 
+// The structural refusals of the per-application lane, as PURE predicates over
+// loaded rows. The apply's lock/guard path below and the comms lane's
+// pre-send preflight (rate-review-comms.js) both call them, so a letter is
+// never sent for a change these would hold.
+function seriesRefusal(visits, noticedRoot, effectiveDate) {
+  if (!visits.length) return { reason: 'no_future_visit', detail: { effectiveDate } };
+  const roots = seriesRoots(visits);
+  if (roots.length > 1) return { reason: 'multiple_series', detail: { roots } };
+  // A series cancelled and replaced since the notice (same line, cadence
+  // and price) is a new plan: the old notice never reprices it. A notice
+  // that did not record its series fails closed.
+  if (!noticedRoot) return { reason: 'notice_series_unrecorded', detail: undefined };
+  if (String(noticedRoot) !== roots[0]) return { reason: 'plan_replaced', detail: { noticedSeries: noticedRoot, liveSeries: roots[0] } };
+  return null;
+}
+
+// The visit the letter named as the first at the new rate: one already under
+// way or finished billed at the old rate.
+function startedVisitRefusal(first) {
+  if (first && ['en_route', 'on_site', 'completed'].includes(String(first.status))) return { reason: 'effective_visit_started', detail: { visitId: first.id, status: first.status } };
+  return null;
+}
+
+// A parked reschedule request in the window is outside the propagation's
+// target set and would keep the old price; a legacy NULL-status visit is live
+// but the series helper only reprices pending/confirmed rows.
+function parkedVisitRefusal(visits) {
+  const parked = visits.find((v) => String(v.status) === 'rescheduled');
+  if (parked) return { reason: 'visit_in_reschedule', detail: { visitId: parked.id } };
+  const statusless = visits.find((v) => v.status == null);
+  if (statusless) return { reason: 'visit_status_missing', detail: { visitId: statusless.id } };
+  return null;
+}
+
+// Every refusal the apply raises from the rows alone, in the apply's order;
+// null when none. visits = loadLineOpenVisits from the effective date.
+function perApplicationStructuralRefusal({ visits, addonCounts = new Map(), liveTermIds = new Set(), noticedCurrentCents, noticedRoot, firstVisit = null, effectiveDate }) {
+  const found = seriesRefusal(visits, noticedRoot, effectiveDate) || startedVisitRefusal(firstVisit) || parkedVisitRefusal(visits);
+  if (found) return found.reason;
+  for (const visit of visits.filter((v) => UPCOMING_STATUSES.includes(String(v.status)))) {
+    const refusal = flatVisitRefusal(visit, addonCounts.get(String(visit.id)) || 0, noticedCurrentCents, liveTermIds);
+    if (refusal) return refusal;
+  }
+  return null;
+}
+
 // Which series carries the line, locked in the writers' order (series
 // maintenance → comms → customer row → visit rows; the comms lock and the
 // customers row are already held by the caller) and guarded exactly as the
@@ -899,16 +993,9 @@ async function lockPerApplicationTargets(trx, { notice, customer, effectiveDate,
   // the new rate when it is finally completed — exactly what the customer
   // was told.
   const visits = await loadLineOpenVisits(trx, { customerId: customer.id, familyKey: notice.family_key, cadence: row ? row.cadence : null, fromDate: effectiveDate });
-  if (!visits.length) throw hold('no_future_visit', { effectiveDate });
-  const roots = [...new Set(visits.map((v) => String(v.recurring_parent_id || v.id)))];
-  if (roots.length > 1) throw hold('multiple_series', { roots });
-  const parentId = roots[0];
-  // A series cancelled and replaced since the notice (same line, cadence
-  // and price) is a new plan: the old notice never reprices it. A notice
-  // that did not record its series fails closed.
-  const noticedRoot = parseMetadata(notice.metadata).series_root_id;
-  if (!noticedRoot) throw hold('notice_series_unrecorded');
-  if (String(noticedRoot) !== String(parentId)) throw hold('plan_replaced', { noticedSeries: noticedRoot, liveSeries: parentId });
+  const series = seriesRefusal(visits, parseMetadata(notice.metadata).series_root_id, effectiveDate);
+  if (series) throw hold(series.reason, series.detail);
+  const parentId = seriesRoots(visits)[0];
   // The visit the letter named as the first at the new rate: a delayed run
   // that finds it already under way or finished billed it at the old rate,
   // and repricing only the later visits would record a change that did not
@@ -916,7 +1003,8 @@ async function lockPerApplicationTargets(trx, { notice, customer, effectiveDate,
   const firstVisitId = parseMetadata(notice.metadata).first_visit_id;
   if (firstVisitId) {
     const first = await trx('scheduled_services').where({ id: firstVisitId }).first('id', 'status');
-    if (first && ['en_route', 'on_site', 'completed'].includes(String(first.status))) throw hold('effective_visit_started', { visitId: first.id, status: first.status });
+    const started = startedVisitRefusal(first);
+    if (started) throw hold(started.reason, started.detail);
   }
   let locked;
   try {
@@ -930,12 +1018,8 @@ async function lockPerApplicationTargets(trx, { notice, customer, effectiveDate,
   if (!locked.length) throw hold('no_future_visit', { effectiveDate });
   // A parked reschedule request in the window is outside the propagation's
   // target set and would keep the old price — refuse instead.
-  const parkedReschedule = visits.find((v) => String(v.status) === 'rescheduled');
-  if (parkedReschedule) throw hold('visit_in_reschedule', { visitId: parkedReschedule.id });
-  // A legacy NULL-status visit is live (it bills at its own stamp when
-  // completed) but the series helper only reprices pending/confirmed rows.
-  const statusless = visits.find((v) => v.status == null);
-  if (statusless) throw hold('visit_status_missing', { visitId: statusless.id });
+  const parked = parkedVisitRefusal(visits);
+  if (parked) throw hold(parked.reason, parked.detail);
   const lockedIds = new Set(locked.map((v) => String(v.id)));
   const expected = new Set(visits.filter((v) => UPCOMING_STATUSES.includes(String(v.status))).map((v) => String(v.id)));
   if (lockedIds.size !== expected.size || [...lockedIds].some((id) => !expected.has(id))) throw hold('target_set_changed', { locked: [...lockedIds], expected: [...expected] });
@@ -963,10 +1047,12 @@ async function assertFlatTargets(trx, { locked, addonRows, fields, noticedCurren
 
 // Every later extension spawns from the parent overlaid with the template
 // overrides — simulate that spawn and refuse unless it prices at the noticed
-// amount (a parent with add-on lines or a discount would not).
-async function assertTemplateSpawnsAtNoticed(trx, { parentId, parentAddons, fields, noticedNew, schedule }) {
-  const parent = await trx('scheduled_services').where({ id: parentId }).first();
-  if (!parent) throw hold('no_future_visit', { parentId });
+// amount (a parent with add-on lines or a discount would not). Read-only:
+// the apply throws the refusal; the comms lane's send preflight asks the same
+// question. Returns { reason, detail } | null.
+async function templateSpawnRefusal(dbh, { parentId, parentAddons, fields, noticedNew, schedule }) {
+  const parent = await dbh('scheduled_services').where({ id: parentId }).first();
+  if (!parent) return { reason: 'no_future_visit', detail: { parentId } };
   // An extension prices each date with the add-ons due on it
   // (filterAddonLinesForDate). A line sold for the anchor visit alone never
   // reaches a later one; any other line lands on some later visits and not
@@ -974,13 +1060,34 @@ async function assertTemplateSpawnsAtNoticed(trx, { parentId, parentAddons, fiel
   // an anchor-only line here would let it offset a discount and hide
   // spawns that price below the notice.
   const recurring = parentAddons.filter((a) => schedule.addonRecursAfterAnchor(a));
-  if (recurring.length) throw hold('series_template_complex', { recurringAddons: recurring.length });
+  if (recurring.length) return { reason: 'series_template_complex', detail: { recurringAddons: recurring.length } };
   const existing = schedule.parseTemplateOverrides(parent.recurring_template_overrides) || {};
   const provenance = schedule.readProvenanceOverrides(parent.recurring_template_overrides);
   const template = { ...parent, ...provenance, ...existing, ...fields };
-  const scope = await schedule.loadStoredDiscountScope(trx, template, parentAddons);
+  const scope = await schedule.loadStoredDiscountScope(dbh, template, parentAddons);
   const spawn = schedule.calculateStoredVisitFinancials(template, [], parentAddons, scope);
-  if (cents(spawn.price) !== noticedNew) throw hold('series_template_complex', { spawn: spawn.price, parentAddons: parentAddons.length });
+  if (cents(spawn.price) !== noticedNew) return { reason: 'series_template_complex', detail: { spawn: spawn.price, parentAddons: parentAddons.length } };
+  return null;
+}
+
+async function assertTemplateSpawnsAtNoticed(trx, args) {
+  const refusal = await templateSpawnRefusal(trx, args);
+  if (refusal) throw hold(refusal.reason, refusal.detail);
+}
+
+// The apply's series-template checks as one read-only question for the comms
+// lane: the price-override gate, then the parent/template spawn test. `visits`
+// are the line's open visits from the effective date (loadLineOpenVisits).
+async function perApplicationTemplateRefusal(dbh, { visits, noticedNew, schedule }) {
+  if (!isEnabled('editApptPriceServiceScope')) return 'template_overlay_gate_off';
+  const roots = seriesRoots(visits);
+  if (roots.length !== 1) return null; // the structural predicate reports it
+  const parentId = roots[0];
+  const newDollars = dollars(noticedNew);
+  const fields = { primary_line_price: newDollars, estimated_price: newDollars };
+  const addonRows = await dbh('scheduled_service_addons').whereIn('scheduled_service_id', [parentId]).select('*');
+  const refusal = await templateSpawnRefusal(dbh, { parentId, parentAddons: addonRows, fields, noticedNew, schedule });
+  return refusal ? refusal.reason : null;
 }
 
 // The write: the series helper reprices the targets, the template is
@@ -1068,44 +1175,55 @@ async function applyPerApplication(trx, ctx) {
   return { lane: LANE_PER_APPLICATION, appliesFromVisitId: first.id, visitIds: [...lockedIds], parentId, ...money };
 }
 
-async function applyPrepay(trx, ctx) {
-  const { notice, customer, today, metadata } = ctx;
-  if (notice.family_key === 'termite') throw hold('termite_program');
-  const found = await resolvePrepayTerm(trx, { customerId: customer.id, familyKey: notice.family_key, today, termId: metadata.term_id || null });
-  if (!found.term) throw hold(found.reason || 'prepay_term_not_found');
+// Every refusal applyPrepay raises from the rows alone, in its order; the
+// comms lane's send preflight asks the same question. Returns
+// { refusal: { reason, detail } | null, term } (term = the matched live term).
+async function prepayChecks(dbh, { notice, customer, today, metadata }) {
+  const refuse = (reason, detail) => ({ refusal: { reason, detail }, term: null });
+  if (notice.family_key === 'termite') return refuse('termite_program');
+  const found = await resolvePrepayTerm(dbh, { customerId: customer.id, familyKey: notice.family_key, today, termId: metadata.term_id || null });
+  if (!found.term) return refuse(found.reason || 'prepay_term_not_found');
   const term = found.term;
-  if (term.annual_plan_version) throw hold('termite_program', { termId: term.id });
-  if (term.renewal_decision) throw hold('term_not_live', { termId: term.id, decision: term.renewal_decision });
+  if (term.annual_plan_version) return refuse('termite_program', { termId: term.id });
+  if (term.renewal_decision) return refuse('term_not_live', { termId: term.id, decision: term.renewal_decision });
   // The notice named the renewal day (its effective_date = the term_end it
   // was scheduled from + 1). A term whose dates were edited since is a
   // different renewal window — the old notice (and its 30-day lead) never
   // carries over to it.
   if (addDaysYmd(ymd(term.term_end), 1) !== ymd(notice.effective_date)) {
-    throw hold('renewal_window_changed', { termId: term.id, termEnd: ymd(term.term_end), noticedEffectiveDate: ymd(notice.effective_date) });
+    return refuse('renewal_window_changed', { termId: term.id, termEnd: ymd(term.term_end), noticedEffectiveDate: ymd(notice.effective_date) });
   }
   // The notice carries the ANNUAL totals: the term's amount the customer
   // saw and the successor amount they were told — the renewal charges
   // exactly the latter.
-  if (cents(term.prepay_amount) !== Number(notice.noticed_current_cents)) throw hold('rate_moved_since_notice', { termAmountCents: cents(term.prepay_amount) });
+  if (cents(term.prepay_amount) !== Number(notice.noticed_current_cents)) return refuse('rate_moved_since_notice', { termAmountCents: cents(term.prepay_amount) });
   const visitsPerTerm = Number(term.coverage_visit_count) > 0 ? Number(term.coverage_visit_count) : Number(metadata.coverage_visits);
-  if (visitsPerTerm !== Number(metadata.coverage_visits)) throw hold('rate_moved_since_notice', { coverageVisits: visitsPerTerm });
+  if (visitsPerTerm !== Number(metadata.coverage_visits)) return refuse('rate_moved_since_notice', { coverageVisits: visitsPerTerm });
   // The per-application figure the letter quotes must still describe the
   // term (the ranking's own derivation, resolveCurrentRate, to the cent).
   if (metadata.per_application_current_cents != null
     && Math.round((Number(term.prepay_amount) / visitsPerTerm) * 100) !== Number(metadata.per_application_current_cents)) {
-    throw hold('rate_moved_since_notice', { perApplication: true });
+    return refuse('rate_moved_since_notice', { perApplication: true });
   }
   // "Notified amount is the charged amount": once the renewal reminder is
   // out (or a termite fee was frozen), the term's amount is spoken for.
-  if (termRenewalNoticed(term)) throw hold('renewal_notice_already_sent', { termId: term.id });
+  if (termRenewalNoticed(term)) return refuse('renewal_notice_already_sent', { termId: term.id });
   // A successor already on the books (a renewal recorded, at whatever
   // amount, or a termite successor minted) makes the predecessor's noticed
   // amount moot — never written after the fact.
-  if (await successorTermExists(trx, term, notice.family_key)) throw hold('successor_already_created', { termId: term.id });
+  if (await successorTermExists(dbh, term, notice.family_key)) return refuse('successor_already_created', { termId: term.id });
   const nextAmount = dollars(Number(notice.noticed_new_cents));
   if (term.next_term_prepay_amount != null && term.next_term_prepay_amount !== '' && roundMoney(term.next_term_prepay_amount) !== nextAmount) {
-    throw hold('rate_moved_since_notice', { nextTermPrepayAmount: Number(term.next_term_prepay_amount) });
+    return refuse('rate_moved_since_notice', { nextTermPrepayAmount: Number(term.next_term_prepay_amount) });
   }
+  return { refusal: null, term };
+}
+
+async function applyPrepay(trx, ctx) {
+  const { notice, customer, today, metadata } = ctx;
+  const { refusal, term } = await prepayChecks(trx, { notice, customer, today, metadata });
+  if (refusal) throw hold(refusal.reason, refusal.detail);
+  const nextAmount = dollars(Number(notice.noticed_new_cents));
   await trx('annual_prepay_terms').where({ id: term.id }).update({ next_term_prepay_amount: nextAmount, updated_at: new Date() });
   return {
     lane: LANE_PREPAY, termId: term.id,
@@ -1164,7 +1282,12 @@ async function applyNotice(noticeRow, { now = new Date(), dbh = db } = {}) {
       const customer = await trx('customers').where({ id: noticeRow.customer_id }).forUpdate().first();
       if (!customer || customer.deleted_at) throw hold('rate_moved_since_notice', 'customer gone');
       const notice = await trx('price_change_notices').where({ id: noticeRow.id }).forUpdate().first();
-      if (!notice || notice.applied_at || !wasDelivered(notice)) { outcomeBox.skipped = true; return; }
+      if (!notice || notice.applied_at) { outcomeBox.skipped = true; return; }
+      // Told, then the only channel failed: named, never silently skipped.
+      if (parseMetadata(notice.metadata).delivery_revoked) throw hold('delivery_revoked', { event: parseMetadata(notice.metadata).delivery_revoked.event });
+      if (!wasDelivered(notice)) { outcomeBox.skipped = true; return; }
+      const smsFailed = await smsDeliveryFailure(trx, notice);
+      if (smsFailed) throw hold('delivery_revoked', { event: smsFailed, channel: 'sms', source: 'sms_log' });
       // A merge undo can repoint the notice after the due scan: the locks
       // above are the scanned owner's, so never write under them — the next
       // run reads the live owner.
@@ -1333,13 +1456,23 @@ async function retireDraftNotices(batchKey, { dbh = db } = {}) {
     const revokeApprovals = () => trx('rate_review_snapshots').where({ batch_key: batchKey, status: 'approved' }).whereNull('notice_id')
       .update({ status: 'green', approved_at: null, approved_by: null, updated_at: new Date() });
     if (!noticeIds.length) return { ok: true, batchKey, retired: 0, keptDelivered: 0, revoked: await revokeApprovals() };
-    // Retirable = exactly what the DELETE below accepts: a draft, or a
-    // previewed draft ('viewed') with no sent_at and no delivered leg. A
-    // 'sending' claim or an 'unreachable' attempt is in flight and is kept
-    // linked. Rows are locked, deleted under the same predicate, and ONLY
-    // the rows confirmed deleted are unlinked (a count mismatch rolls back).
-    const retirable = (q) => q.whereIn('status', ['draft', 'viewed']).whereNull('sent_at').where('email_sent', false).where('sms_sent', false);
-    const candidates = await retirable(trx('price_change_notices').whereIn('id', noticeIds)).forUpdate().select('id');
+    // Retirable = exactly what the DELETE below accepts: a draft, a
+    // previewed draft ('viewed'), or a definitively unsent attempt
+    // ('unreachable': no contact / every leg policy-blocked — the comms lane
+    // drops its frozen words) with no sent_at and no delivered leg. A
+    // 'sending' claim is in flight and is kept linked. Rows are locked,
+    // deleted under the same predicate, and ONLY the rows confirmed deleted
+    // are unlinked (a count mismatch rolls back).
+    const retirable = (q) => q.whereIn('status', ['draft', 'viewed', 'unreachable']).whereNull('sent_at').where('email_sent', false).where('sms_sent', false);
+    // A draft carrying a letter frozen by a send attempt (comms lane,
+    // metadata.pending_letter) may already sit in the customer's inbox — the
+    // provider can accept and still report a failure — so it is kept like
+    // an in-flight row: retiring it would break the link that email carries.
+    const frozenLetter = (n) => {
+      const meta = typeof n.metadata === 'string' ? (() => { try { return JSON.parse(n.metadata); } catch { return {}; } })() : (n.metadata || {});
+      return !!meta.pending_letter;
+    };
+    const candidates = (await retirable(trx('price_change_notices').whereIn('id', noticeIds)).forUpdate().select('id', 'metadata')).filter((n) => !frozenLetter(n));
     const candidateIds = candidates.map((n) => n.id);
     let retired = 0;
     if (candidateIds.length) {
@@ -1384,7 +1517,10 @@ async function prepayNoticesByTerm(dbh, customerId) {
     }
     // Delivered with the 30-day lead the apply requires (applyNotice's
     // notice_too_recent rule): a notice the apply refuses guards nothing.
-    const told = wasDelivered(n) && daysBetweenYmd(etDateString(new Date(n.sent_at)), day) >= MIN_NOTICE_DAYS ? Number(n.noticed_new_cents ?? n.new_amount_cents) : 0;
+    // ...and a text-only notice whose text Twilio already reported failed (sms_log, or the
+    // kept early failure) told the customer nothing, even before its reconciliation lands.
+    const told = wasDelivered(n) && daysBetweenYmd(etDateString(new Date(n.sent_at)), day) >= MIN_NOTICE_DAYS && !(await smsDeliveryFailure(dbh, n))
+      ? Number(n.noticed_new_cents ?? n.new_amount_cents) : 0;
     if (told > 0) {
       familyByTerm.set(key, n.family_key);
       deliveredCents.set(key, { cents: told, day });
@@ -1560,7 +1696,7 @@ module.exports = {
   noticedRenewalAmountError,
   recordNoticedAmountOverride,
   _private: {
-    laneForRow, effectiveDateFor, nextBillingDayOnOrAfter, addDaysYmd, daysBetweenYmd, flatVisitRefusal, holdFromGuard, HoldError,
+    laneForRow, effectiveDateFor, prepayNoticesByTerm, nextBillingDayOnOrAfter, loadFamilySlices, sumSlices, cents, addDaysYmd, daysBetweenYmd, flatVisitRefusal, perApplicationStructuralRefusal, perApplicationTemplateRefusal, monthlyRefusal, prepayChecks, planHoldCovers, smsDeliveryFailure, holdFromGuard, HoldError,
     loadLineOpenVisits, loadAccountPlanLineCount, loadCustomerOpenVisits, consumesPerApplicationFee, feeScopeRefusal, resolvePrepayTerm, successorTermExists, tryAnnualPrepayLock, resolveLiveLane, applyNotice, loadDueNotices, wasDelivered, cadenceLabelFor, termRenewalNoticed, moveMonthlySlice, scheduleRow,
   },
 };

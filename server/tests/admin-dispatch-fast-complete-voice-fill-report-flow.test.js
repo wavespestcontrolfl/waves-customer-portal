@@ -12,7 +12,9 @@
  *  POST /admin/dispatch/:serviceId/fast-complete/voice-fill/dictation  (multipart)
  *   - answers the clip's words for the note box, heard with the sheet's product names.
  *
- *  Both also take a lawn re-service (its own catalog and ways), while its own
+ *  Both also take a specialty visit whose own record the sheet reads from the
+ *  note (a lane or a typed form: bed bug, cockroach, flea, mosquito, ...), with
+ *  the three more ways its rows offer, and a lawn re-service (its own catalog and ways), while its own
  *  gate GATE_LAWN_RESERVICE_FAST_COMPLETE is on.
  *
  *  Neither audit line carries a word the tech said.
@@ -43,6 +45,7 @@ jest.mock('../services/pest-recap', () => ({
   resolveEligibility: jest.fn(),
   loadRecapCatalogProducts: jest.fn(),
   loadCommonProducts: jest.fn(),
+  sheetRecordFor: jest.fn(),
 }));
 jest.mock('../services/lawn-reservice-fast-context', () => ({
   ...jest.requireActual('../services/lawn-reservice-fast-context'),
@@ -58,7 +61,7 @@ jest.mock('../services/call-recording-processor', () => ({
 }));
 
 const logger = require('../services/logger');
-const { resolveEligibility, loadRecapCatalogProducts, loadCommonProducts } = require('../services/pest-recap');
+const { resolveEligibility, loadRecapCatalogProducts, loadCommonProducts, sheetRecordFor } = require('../services/pest-recap');
 const { buildLawnReserviceFastContext } = require('../services/lawn-reservice-fast-context');
 const { callAnthropic } = require('../services/llm/call');
 const { transcribeWithOpenAI } = require('../services/call-recording-processor');
@@ -118,6 +121,8 @@ describe('report flow voice fill', () => {
     regularVisit();
     loadRecapCatalogProducts.mockResolvedValue(CATALOG);
     loadCommonProducts.mockResolvedValue([]);
+    // no lane, no typed form: a plain pest visit unless a case says otherwise
+    sheetRecordFor.mockResolvedValue({ lane: null, typedType: null });
     callAnthropic.mockResolvedValue({ ok: true, json: MODEL_ANSWER });
     transcribeWithOpenAI.mockResolvedValue({ text: NOTE });
   });
@@ -250,6 +255,78 @@ describe('report flow voice fill', () => {
       expect(audit[0]).toContain('products=1');
       expect(audit[1]).toContain('ok=false reason=model_failed');
       for (const secret of ['7731', 'Taurus', 'perimeter', 'Gate code', 'ants']) expect(everything).not.toContain(secret);
+    });
+  });
+
+  describe('a specialty visit (a lane or a typed form on the report flow)', () => {
+    const answerWith = (product) => callAnthropic.mockResolvedValue({ ok: true, json: { ...MODEL_ANSWER, products: [{ amount: 0, unit: 'not_said', sameAsLast: false, ...product }] } });
+    // Not a plain pest visit (typed, so pest-recap's `eligible` is false), but one
+    // the sheet reads: pest-recap's sheetRecordFor says which.
+    const specialty = (record, profile = { serviceKey: 'cockroach_treatment', category: 'pest_control', findingsType: 'cockroach' }) => {
+      resolveEligibility.mockResolvedValue({ ok: true, svc: { id: 'visit-1', service_type: 'Cockroach Treatment' }, profile, eligible: false });
+      sheetRecordFor.mockResolvedValue({ lane: null, typedType: null, ...record });
+    };
+
+    test.each([
+      ['a typed visit', { typedType: 'cockroach' }, 'SHEET: cockroach visit'],
+      ['a lane visit', { lane: 'bed_bug_treatment' }, 'SHEET: bed bug treatment visit'],
+    ])('%s: its products are read, under its own name', async (_name, record, label) => {
+      specialty(record);
+      const res = await readProducts(NOTE);
+      expect(res.statusCode).toBe(200);
+      expect(res.body.products).toEqual([expect.objectContaining({ productId: 'p-taurus', amount: 6, unit: 'fl_oz' })]);
+      expect(callAnthropic.mock.calls[0][0].text).toContain(label);
+      // the read is asked with the profile and the visit the context resolved
+      expect(sheetRecordFor).toHaveBeenCalledWith(expect.objectContaining({ findingsType: 'cockroach' }), expect.objectContaining({ id: 'visit-1' }), expect.anything());
+    });
+
+    test('a lane visit filed under pest control is read as its lane', async () => {
+      resolveEligibility.mockResolvedValue({ ok: true, svc: { id: 'visit-1' }, profile: { serviceKey: 'fire_ant', category: 'pest_control' }, eligible: true });
+      sheetRecordFor.mockResolvedValue({ lane: 'fire_ant_treatment', typedType: null });
+      await readProducts(NOTE);
+      expect(callAnthropic.mock.calls[0][0].text).toContain('SHEET: fire ant treatment visit');
+    });
+
+    test('the three more ways its rows offer are heard from their own words', async () => {
+      specialty({ lane: 'mosquito' });
+      for (const [method, note, heard] of [
+        ['fog_ulv', 'Fogged the hedges with Taurus.', 'Fogged the hedges with Taurus'],
+        ['soil_drench', 'Drenched the mound with Taurus.', 'Drenched the mound with Taurus'],
+        ['broadcast_spray', 'Broadcast sprayed Taurus over the yard.', 'Broadcast sprayed Taurus'],
+      ]) {
+        answerWith({ productId: 'p-taurus', method, heard });
+         
+        const res = await readProducts(note);
+        expect(res.body.products).toEqual([expect.objectContaining({ productId: 'p-taurus', method })]);
+        expect(callAnthropic.mock.calls.at(-1)[0].text).toContain(method);
+      }
+    });
+
+    test('on a plain pest visit those ways are still not offered', async () => {
+      answerWith({ productId: 'p-taurus', method: 'fog_ulv', heard: 'Fogged the hedges with Taurus' });
+      const res = await readProducts('Fogged the hedges with Taurus.');
+      expect(res.body.products).toEqual([expect.objectContaining({ productId: 'p-taurus', method: '' })]);
+      expect(callAnthropic.mock.calls[0][0].text).not.toContain('fog_ulv');
+    });
+
+    test('a bare "broadcast" proves neither a liquid nor a granular broadcast', async () => {
+      specialty({ lane: 'fire_ant_treatment' });
+      answerWith({ productId: 'p-taurus', method: 'granular_broadcast', heard: 'Broadcast the Taurus' });
+      const res = await readProducts('Broadcast the Taurus across the yard.');
+      expect(res.body.products).toEqual([expect.objectContaining({ productId: 'p-taurus', method: '' })]);
+    });
+
+    test('a visit the sheet reads no record for stays refused', async () => {
+      specialty({});
+      expect((await readProducts(NOTE)).statusCode).toBe(409);
+      expect(callAnthropic).not.toHaveBeenCalled();
+    });
+
+    test('its note mic hears the clip with the same product names', async () => {
+      specialty({ typedType: 'flea' });
+      const res = await dictate();
+      expect(res.body).toEqual({ text: NOTE });
+      expect(transcribeWithOpenAI.mock.calls[0][1].prompt).toContain('Taurus SC');
     });
   });
 

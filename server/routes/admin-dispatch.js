@@ -51,7 +51,7 @@ const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-p
 const { customerHasPriorVisitOnLine } = require('../services/pest-pressure/first-visit');
 const { resolveLabel: resolvePestPressureLabel } = require('../services/pest-pressure/label');
 
-const { tipsForVisit } = require('../services/service-report/tip-library');
+const { tipsForVisit, registryLineFor, lawnFindingsFromAssessment, lawnFindingsFromRun } = require('../services/service-report/tip-library');
 
 const {
   IRRIGATION_SIZING_FIELDS,
@@ -718,10 +718,35 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
         .catch(() => null),
       addonServiceKeys(svc.id),
     ]);
+    const serviceLine = detectServiceLine(svc.service_type);
+    // A lawn visit's tips are ranked by what the tech has CONFIRMED on this
+    // visit's CURRENT assessment (nothing until they confirm; the sheet asks
+    // again once it does). The newest row is read whatever its state: after a
+    // retake the new row is unconfirmed, and an older confirmed row it
+    // superseded must not keep lifting tips (lawnFindingsFromAssessment
+    // answers nothing for an unconfirmed row). Ranking only; a failed read
+    // just loses the lift.
+    const lawnAssessment = registryLineFor(serviceLine) === 'lawn' && svc.customer_id
+      ? await db('lawn_assessments')
+        .where({ service_id: svc.id, customer_id: svc.customer_id })
+        .orderBy('created_at', 'desc')
+        .first('id', 'confirmed_by_tech', 'fungus_control', 'thatch_level', 'weed_suppression', 'stress_flags')
+        .catch(() => null)
+      : null;
+    // The named findings the technician kept on that same confirmed
+    // assessment's run (one run per assessment row, so a superseded row's run
+    // is never read). A failed read loses only these keys.
+    const lawnRun = lawnAssessment?.confirmed_by_tech === true && lawnAssessment.id
+      ? await db('lawn_assessment_runs')
+        .where({ assessment_id: lawnAssessment.id, customer_id: svc.customer_id })
+        .first('reviewed_findings', 'added_details')
+        .catch(() => null)
+      : null;
     const library = tipsForVisit({
-      serviceLine: detectServiceLine(svc.service_type),
+      serviceLine,
       serviceKey,
       serviceKeys: addonKeys,
+      findings: [...lawnFindingsFromAssessment(lawnAssessment), ...lawnFindingsFromRun(lawnRun)],
       date: /^\d{4}-\d{2}-\d{2}$/.test(visitDay || '') ? visitDay : new Date(),
     });
     // The 90-day window is ET calendar days: the database's own current

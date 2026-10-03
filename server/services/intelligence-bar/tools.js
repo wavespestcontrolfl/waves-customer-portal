@@ -16,6 +16,7 @@ const logger = require('../logger');
 const { applyAssignable, assertAssignableTechnician } = require('../technician-eligibility');
 const { createDefaultCustomerRows } = require('../customer-default-rows');
 const { isAlwaysFreeServiceType } = require('../no-cost-visit-types');
+const { isReService } = require('../re-service');
 const { resolveBillingLane } = require('../billing-lane');
 const { stampPrimaryLineDiscount, stampPricingRegimeMarker, capsSnapshotFromPricing } = require('../booking/visit-financial-stamps');
 const { discountStackingLive } = require('../../config/feature-gates');
@@ -2808,9 +2809,10 @@ function ibBookingBillingRefusal(customer, serviceType, price) {
   // customer, cut an invoice (or be dues-covered, or free by design)? Asked
   // for ONE visit with the stamps this insert writes: a priced booking
   // carries create_invoice_on_complete (the Schedule modal's own default), an
-  // unpriced one carries neither, and no callback marker or typed one-time
-  // profile (that mint trigger needs a price, and a priced booking already
-  // mints through the create-invoice stamp).
+  // unpriced one carries neither, and no typed one-time profile (that mint
+  // trigger needs a price, and a priced booking already mints through the
+  // create-invoice stamp). The insert's callback marker is not passed: it
+  // is set only on a re-service row, which the gate already frees by name.
   const verdict = recurringWithoutBillableAmount({
     isRecurring: true,
     recurringFloorPrice: priced ? price : 0,
@@ -3089,6 +3091,15 @@ async function createAppointment(input, actionContext = {}) {
         customer_request: customerRequest.text,
         customer_request_source: 'office',
       } : {}),
+      // A re-service is a callback, derived from the catalog row exactly as
+      // the Schedule POST derives it (re-service.js). Callback reporting, the
+      // dispatch badge, the re-service report copy and plan-visit counts read
+      // this persisted flag, not the service name.
+      is_callback: isReService({
+        serviceKey: lockedBooking.catalogRow?.service_key,
+        serviceName: lockedBooking.catalogRow?.name,
+        serviceType: service_type,
+      }),
       // The catalog link and the price exactly as the Schedule POST stamps
       // them: service_id + key/category snapshots, and for a priced visit
       // estimated_price, the primary line's gross, and the create-invoice

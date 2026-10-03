@@ -85,14 +85,15 @@ test('rows: ONE alert with the counts, the review link and per-row detail', asyn
 test('caps: 8 disagreements and 2 spot checks, still unreviewed, from the last 14 days (not one calendar day)', async () => {
   const c = conn({ disagreements: [review()], audits: [review()] });
   await runDailyReviewItem({ now: new Date('2026-10-01T12:05:00Z'), conn: c });
-  expect(c.seen.map((s) => s.limit).sort((a, b) => a - b)).toEqual([2, 8]);
+  // One read per capability and cohort, each capped at that cohort's limit.
+  expect([...new Set(c.seen.map((s) => s.limit))].sort((a, b) => a - b)).toEqual([2, 8]);
   for (const state of c.seen) {
     expect(state.calls).toContainEqual(['where', [expect.objectContaining({ label_status: 'unreviewed' })]]);
     expect(state.calls).toContainEqual(['where', ['created_at', '>=', new Date('2026-09-17T04:00:00.000Z')]]);
     // no upper bound: a failed day, or a row a later re-record made a disagreement, is still raised
     expect(state.calls.some(([m, a]) => m === 'where' && a[0] === 'created_at' && a[1] === '<')).toBe(false);
   }
-  expect(c.seen.map((s) => s.calls.find(([m]) => m === 'where')[1][0].sampled_for).sort()).toEqual(['disagreement', 'random_audit']);
+  expect([...new Set(c.seen.map((s) => s.calls.find(([m]) => m === 'where')[1][0].sampled_for))].sort()).toEqual(['disagreement', 'random_audit']);
 });
 
 test('a notification that was not persisted is a failed run, not "raised"', async () => {
@@ -142,5 +143,36 @@ test('a row is described by the provider that answered it: a Clef row never read
   expect(describeRow({ ...row, provider: 'typesafe' })).toBe('sms_courtesy is_courtesy_only: Jev no (p 0.20) vs rules yes');
   // provider is NOT NULL on the table: a row without one is malformed and is refused, never described as Jev's (Codex r8)
   expect(() => describeRow(row)).toThrow(/unknown decision provider/);
+});
+
+test('capabilities take turns: a lane with many rows never takes every slot', async () => {
+  // A conn that answers by capability: twelve visit rows (newest), two call rows.
+  const byCapability = {
+    visit_access: Array.from({ length: 12 }, (_, i) => review({ id: `v${i}`, capability: 'visit_access', question_id: 'dog_on_property', created_at: new Date(Date.parse('2026-10-01T11:00:00Z') - i * 1000) })),
+    call_judge: [review({ id: 'c0', capability: 'call_judge', created_at: new Date('2026-09-30T08:00:00Z') }), review({ id: 'c1', capability: 'call_judge', question_id: 'complaint', created_at: new Date('2026-09-29T08:00:00Z') })],
+  };
+  const c = () => {
+    const where = {};
+    const b = new Proxy({}, {
+      get(_t, prop) {
+        if (prop === 'then') return (res, rej) => Promise.resolve(where.sampled_for === 'disagreement' ? (byCapability[where.capability] || []).slice(0, where.limit) : []).then(res, rej);
+        return (...args) => {
+          if (prop === 'where' && args[0] && typeof args[0] === 'object') Object.assign(where, args[0]);
+          if (prop === 'limit') where.limit = args[0];
+          return b;
+        };
+      },
+    });
+    return b;
+  };
+  const out = await runDailyReviewItem({ now: new Date('2026-10-01T12:05:00Z'), conn: c });
+  expect(out).toMatchObject({ raised: true, disagreements: 8 });
+  const lines = mockNotify.mock.calls[0][3].detail.split('\n').filter((l) => l.startsWith('Disagreement'));
+  expect(lines).toHaveLength(8);
+  // Both call rows are in, beside six visit rows; the newest lane leads.
+  expect(lines.filter((l) => l.includes('call_judge'))).toHaveLength(2);
+  expect(lines.filter((l) => l.includes('visit_access'))).toHaveLength(6);
+  expect(lines[0]).toContain('visit_access');
+  expect(lines[1]).toContain('call_judge');
 });
 

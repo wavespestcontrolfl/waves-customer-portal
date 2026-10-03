@@ -294,10 +294,13 @@ beforeEach(() => {
 // offered — and the ref carries the coords/duration/timeOfDay the offer was
 // generated from, so the commit-time re-check re-runs the engine identically.
 function slotCtx(extra = {}) {
+  // accountCustomerId: the times were looked up for THIS account's property
+  // (relay-tools knownCallerAvailabilityLocation) — the only offers a known
+  // caller is booked from.
   const slots = new Map([
-    ['S1', { date: BOOK_DATE, startMinutes: 540, lat: 27.4, lng: -82.5, duration: 60, timeOfDay: 'morning', expandOpenDays: true }],
-    ['S2', { date: BOOK_DATE, startMinutes: 840, lat: 27.4, lng: -82.5, duration: 60, timeOfDay: 'afternoon', expandOpenDays: true }],
-    ['S3', { date: BOOK_DATE, startMinutes: 420, lat: 27.4, lng: -82.5, duration: 60, timeOfDay: 'morning', expandOpenDays: true }],
+    ['S1', { date: BOOK_DATE, startMinutes: 540, lat: 27.4, lng: -82.5, duration: 60, timeOfDay: 'morning', expandOpenDays: true, accountCustomerId: CUSTOMER.id }],
+    ['S2', { date: BOOK_DATE, startMinutes: 840, lat: 27.4, lng: -82.5, duration: 60, timeOfDay: 'afternoon', expandOpenDays: true, accountCustomerId: CUSTOMER.id }],
+    ['S3', { date: BOOK_DATE, startMinutes: 420, lat: 27.4, lng: -82.5, duration: 60, timeOfDay: 'morning', expandOpenDays: true, accountCustomerId: CUSTOMER.id }],
   ]);
   let booked = false;
   return {
@@ -390,6 +393,17 @@ describe('GATES — both required, fail closed', () => {
 });
 
 describe('BOTH GATES ON — request_booking behavior', () => {
+  test('a known caller is booked only from times looked up for their own property: a slot scored for an address stated on the call (no account stamp, or another account\'s) is refused: nothing written, look the times up again', async () => {
+    for (const stamp of [{}, { accountCustomerId: 'someone-else' }]) {
+      const ctx = slotCtx({ resolveSlotRef: () => ({ date: BOOK_DATE, startMinutes: 540, lat: 27.1, lng: -82.4, duration: 60, timeOfDay: 'morning', expandOpenDays: true, ...stamp }) });
+      const out = await executeTool('request_booking', GOOD_INPUT, ctx);
+      expect(out).toMatch(/looked up for an address given on the call, not the service address on this\s+account, so nothing was booked/);
+      expect(out).toMatch(/Call find_slots again WITHOUT an address/);
+      expect(ctx.bookingRequested()).toBe(false);
+    }
+    expect(trxBuilders.scheduled_services.insert).not.toHaveBeenCalled();
+  });
+
   beforeEach(() => {
     process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true';
     process.env.GATE_VOICE_AI_BOOKING = 'true';
@@ -407,7 +421,7 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     try {
       const first = new RelayConversation({ sessionGeneration: 1, send: jest.fn() });
       const ref = first._buildToolCtx().rememberSlot(SLOT, {
-        lat: 27.4, lng: -82.5, duration: 60, timeOfDay: 'morning', expandOpenDays: true,
+        lat: 27.4, lng: -82.5, duration: 60, timeOfDay: 'morning', expandOpenDays: true, accountCustomerId: CUSTOMER.id,
       });
       const segment = JSON.parse(JSON.stringify(require('../services/voice-agent/relay-segments').buildSegment({ generation: 1, slotRefs: [...first._slotRefs] })));
       const fixtureDb = () => ({ where: () => ({ first: async () => ({ metadata: {
@@ -971,7 +985,7 @@ describe('BOTH GATES ON — request_booking behavior', () => {
   });
 
   test('a slot in the PAST is refused before the engine (ET-anchored, no timestamptz window)', async () => {
-    const past = slotCtx({ resolveSlotRef: () => ({ date: '2020-01-02', startMinutes: 540, lat: 27.4, lng: -82.5 }) });
+    const past = slotCtx({ resolveSlotRef: () => ({ date: '2020-01-02', startMinutes: 540, lat: 27.4, lng: -82.5, accountCustomerId: CUSTOMER.id }) });
     const out = await executeTool('request_booking', { slot_ref: 'S1' }, past);
     expect(out).toMatch(/not open for booking any more/i);
     expect(booking.buildBookingAvailability).not.toHaveBeenCalled();

@@ -771,10 +771,11 @@ function contextPromptAddendum() {
     '- A caller a KNOWN CALLER block says is already a customer (the block can arrive at the',
     '  start of the call or partway through) is the exception to gathering a name, address and',
     '  email: those are already on their account. Do not ask for them unless a tool needs one',
-    '  or its result says one is missing. Two tools do need them: checking open times needs the',
-    '  service address, or at least the city or ZIP, the visit is for, and a written estimate',
-    '  needs the full name, email and service address it should go to. Confirm those, and only',
-    '  those, when you get there.',
+    '  or its result says one is missing. Open times for such a customer need no address: call',
+    '  get_availability or find_slots without one and the tool uses the property on their',
+    '  account; pass an address only when they say the visit is for a different property. A',
+    '  written estimate does need the full name, email and service address it should go to:',
+    '  confirm those, and only those, when you get there.',
     '- "When is my tech coming?" is get_today_eta. Give the window it returns, and say the',
     '  technician is on the way ONLY when the tool says so. Never invent a tighter ETA, never',
     '  promise a minute-by-minute arrival.',
@@ -2707,6 +2708,9 @@ class RelayConversation {
           duration: (offerContext && offerContext.duration) || null,
           timeOfDay: (offerContext && offerContext.timeOfDay) || 'any',
           expandOpenDays: Boolean(offerContext && offerContext.expandOpenDays),
+          // The account whose property the times were scored at (null = a
+          // location stated on the call): request_booking's fence.
+          ...(offerContext && offerContext.accountCustomerId ? { accountCustomerId: offerContext.accountCustomerId } : {}),
         };
         const existing = this._slotRefsByKey.get(key);
         if (existing) {
@@ -2721,6 +2725,19 @@ class RelayConversation {
         return ref;
       },
       resolveSlotRef: (ref) => this._slotRefs.get(String(ref || '').trim().toUpperCase()) || null,
+      // The caller said the visit is for a DIFFERENT property: times already
+      // offered for the account's own are no longer bookable for it. The refs
+      // stay (a stale ref still resolves, to a refusal) and lose their account
+      // stamp, which request_booking's fence requires; the registry is what a
+      // reconnect carries, so the revocation survives one.
+      revokeAccountSlots: () => {
+        for (const [ref, slot] of this._slotRefs) {
+          if (slot && slot.accountCustomerId) {
+            const { accountCustomerId, ...rest } = slot; // eslint-disable-line no-unused-vars
+            this._slotRefs.set(ref, rest);
+          }
+        }
+      },
       bookingRequested: () => this._bookingRequested,
       markBookingRequested: () => { this._bookingRequested = true; },
       leadId: () => this._leadId,

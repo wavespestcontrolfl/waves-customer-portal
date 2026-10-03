@@ -556,6 +556,9 @@ async function recordDecision(dbh, { offer, inboundSmsLogId, who, result, route,
 
 // The AI assistant line answers its own texts; the webhook skips it too.
 const AI_NUMBER_DIGITS = ['18559260203', '8559260203'];
+// sms_log.message_type of an inbound text no handler consumed, by the kind
+// of Waves line it arrived on (twilio-webhook.js).
+const UNCONSUMED_INBOUND_TYPES = Object.freeze(['inbound', 'domain_lead', 'van_lead']);
 const SWEEP_MIN_AGE_MS = 2 * 60000;
 const SWEEP_LOOKBACK_MS = 48 * 3600000;
 const SWEEP_BATCH = 20;
@@ -590,8 +593,10 @@ async function sweepUndecidedReplies({ now = new Date(), dbh = db, run = runShad
         .where('sl.status', 'received')
         // The webhook decides only texts no other handler consumed: a
         // consumer retypes the row (reschedule_reply, lead_intake,
-        // sms_reaction, opt_out, ...), so only plain inbound texts qualify.
-        .where('sl.message_type', 'inbound')
+        // sms_reaction, opt_out, ...), so only unconsumed texts qualify: the
+        // webhook stores one as 'inbound', or as 'domain_lead' / 'van_lead'
+        // when it arrived on a tracking line (the webhook decides those too).
+        .whereIn('sl.message_type', UNCONSUMED_INBOUND_TYPES)
         .whereRaw("NULLIF(TRIM(sl.message_body), '') IS NOT NULL")
         .where('sl.created_at', '>=', new Date(nowMs - SWEEP_LOOKBACK_MS))
         .where('sl.created_at', '<=', new Date(nowMs - SWEEP_MIN_AGE_MS))

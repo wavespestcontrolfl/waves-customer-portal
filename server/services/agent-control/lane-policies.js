@@ -267,10 +267,6 @@ const LANE_RUNTIME = {
   // sends it in the customer completion SMS with no approval step (Codex r15).
   completion_recap: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report', maturity: 'M3' },
   lawn_visit_narratives: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report' },
-  // event: the half-hourly sweep returns cached briefs unchanged, so a stable
-  // route (or a day with no eligible visits) makes no model call.
-  // M3 (Codex r21): the generator writes body + provenance straight into scheduled_services.pre_service_brief; no approval boundary.
-  previsit_brief: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'retrieval_qa', maturity: 'M3' },
   // GATE_FAST_COMPLETE_REPORT: reads where the technician treated and the
   // pests they named from their own note, each fact quoted word for word;
   // the sheet shows what was heard and the technician sends it with the
