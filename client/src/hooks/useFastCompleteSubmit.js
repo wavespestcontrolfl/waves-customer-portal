@@ -21,6 +21,7 @@ function completionFailureOutcome(err, { confirmable = false } = {}) {
   const status = Number(err?.status);
   if (status === 409 && SAVED_CODES.has(err?.code)) return 'saved';
   if (confirmable && status === 409 && CONFIRM_FLAGS[err?.code]) return 'confirm';
+  if ([401, 403, 408, 425, 429].includes(status)) return 'retry';
   if (shouldResetCompletionIdempotencyKey(err)) return 'correctable';
   if (!Number.isFinite(status) || status >= 500 || (status === 409 && IN_PROGRESS_CODES.has(err?.code))) return 'retry';
   return 'terminal';
