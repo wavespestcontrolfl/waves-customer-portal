@@ -2415,19 +2415,27 @@ budget. PDF, static and queued builds never carry it, so PDF content and its
 cache signature are unchanged. No other payload key is added: the item below
 is internal and `reportV2.sinceLast` leaves it off. Only a product whose catalog
 row states a rainfast interval (`products_catalog.rainfast_minutes`, read from
-the facts frozen at completion) is judged; no interval means never judged. One
-hour after that interval ended, and for 7 days at most, a LIVE view reads the
-property's measured-by-model hourly rain from Open-Meteo (a weather-model
-analysis, not a gauge) for completion to completion plus the interval. Rain of
-at least 0.25 inch, judged on the unrounded total, writes ONE `retreatCheck`
-item onto the visit's frozen memory entry
+the facts frozen at completion) is judged; no interval means never judged. Only
+the rendered `/data` view opts in (the Ask Waves `/ask` build, which also uses
+`mode: 'live'`, makes no weather call and no write). Nothing is judged until
+EVERY interval on the visit is over: one hour after the LONGEST interval ended,
+and for 7 days at most, a LIVE `/data` view reads the property's modeled rain
+from Open-Meteo (a weather-model analysis, not a gauge; hourly slots for an
+interval of 2 hours or more, quarter-hour slots for a shorter one) for
+completion to completion plus each interval, in one pass. Rain of at least 0.25
+inch inside any interval, judged on the unrounded total, writes ONE
+`retreatCheck` item naming every breached interval and its products onto the
+visit's frozen memory entry
 (`structured_notes.lawnVisitMemory[assessmentId].retreatCheck`: first writer
 wins, compare-and-set on that entry, never creates an entry, no row lock) and
 the sentence follows. Later views replay the stored item with no weather call.
 A missing hour, a failed or slow read, missing coordinates or a missing
 completion time writes nothing and says nothing; the next live view tries
-again. The next visit's frozen `sinceLast` carries the item as engine input
-only. The sentence is fixed, carries no number, product name or promise of a
+again; one interval that cannot be read holds back the whole verdict. The next
+visit's frozen `sinceLast` carries the item as engine input only, even when the
+visit had no applied list or watched topics (a support-product-only visit): that
+internal block is not served, the progress engine and the since-last copy treat
+it as no block, and `reportV2.sinceLast` stays absent for such a visit. The sentence is fixed, carries no number, product name or promise of a
 free visit, and nothing is sent to a customer. No token, eligibility, privacy or
 rate-limit change.
 

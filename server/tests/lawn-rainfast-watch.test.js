@@ -13,7 +13,7 @@ const {
 } = require('../services/service-report/lawn-rainfast-watch');
 const { deriveLawnLead, LEAD_WORD_BUDGET, leadWords } = require('../services/service-report/lawn-report-lead');
 const {
-  buildSinceLast, publicSinceLast, storedVisitMemoryFor, recordRetreatCheck,
+  buildSinceLast, publicSinceLast, hasTreatmentMemory, storedVisitMemoryFor, recordRetreatCheck,
 } = require('../services/service-report/lawn-visit-memory');
 
 const HOUR = 3600000;
@@ -219,11 +219,34 @@ describe('judgeRainfastBreach with the real Open-Meteo hour math', () => {
     expect(global.fetch).not.toHaveBeenCalled();
   });
 
-  test('two intervals are judged separately; only the breached one is listed', async () => {
-    global.fetch = jest.fn(async () => mockMeteo({ '2026-09-10T16:00:00.000Z': 0.3 }));
-    const item = await judge({ completedAt: '2026-09-10T14:00:00Z', products: [SPRAY, product('Test Iron', 60)] });
-    // 14:00 to 15:00Z holds one hour (stamp 15:00Z, 0 in): clear. 14:00 to 17:00Z holds three hours (0.3 at 16:00Z).
-    expect(item.breaches).toEqual([expect.objectContaining({ minutes: 180, inches: 0.3, products: ['Test Herbicide A'] })]);
+  // One fetch mock for both series: the hourly series (180-minute window) and the quarter-hour series (60-minute window).
+  const bothSeries = (hourly, quarters) => jest.fn(async (url) => (String(url).includes('minutely_15') ? mockQuarters(quarters) : mockMeteo(hourly)));
+
+  test('two intervals: one verdict, judged only when the LONGEST window is ready, naming every breached product', async () => {
+    const hourly = { '2026-09-10T16:00:00.000Z': 0.3 }; // inside 14:00-17:00Z
+    const quarters = { '2026-09-10T14:15:00.000Z': 0.1, '2026-09-10T14:30:00.000Z': 0.1, '2026-09-10T14:45:00.000Z': 0.1 }; // inside 14:00-15:00Z
+    global.fetch = bothSeries(hourly, quarters);
+    const products = [SPRAY, product('Test Iron', 60)];
+    // two hours after completion: the 60-minute window is over, the 180-minute one is not
+    await expect(judge({ completedAt: '2026-09-10T14:00:00Z', products, now: new Date('2026-09-10T16:00:00Z') })).resolves.toBeNull();
+    expect(global.fetch).not.toHaveBeenCalled();
+    // an hour after the longest window ended: both are judged in one pass
+    const item = await judge({ completedAt: '2026-09-10T14:00:00Z', products, now: new Date('2026-09-10T18:00:00Z') });
+    expect(item.breaches).toEqual([
+      expect.objectContaining({ minutes: 60, inches: 0.3, products: ['Test Iron'] }),
+      expect.objectContaining({ minutes: 180, inches: 0.3, products: ['Test Herbicide A'] }),
+    ]);
+  });
+
+  test('two intervals: only the breached window is listed; a window that could not be read blocks the verdict', async () => {
+    const products = [SPRAY, product('Test Iron', 60)];
+    const when = { completedAt: '2026-09-10T14:00:00Z', products, now: new Date('2026-09-10T18:00:00Z') };
+    global.fetch = bothSeries({ '2026-09-10T16:00:00.000Z': 0.3 }, {}); // the short window is dry
+    const item = await judge(when);
+    expect(item.breaches).toEqual([expect.objectContaining({ minutes: 180, products: ['Test Herbicide A'] })]);
+    // the short window's read fails: no partial verdict, so the longer window can still be judged later
+    global.fetch = jest.fn(async (url) => (String(url).includes('minutely_15') ? { ok: false } : mockMeteo({ '2026-09-10T16:00:00.000Z': 0.3 })));
+    await expect(judge(when)).resolves.toBeNull();
   });
 });
 
@@ -349,6 +372,24 @@ describe('the visit memory carries the item to the next visit', () => {
     expect(pub).not.toHaveProperty('retreatCheck');
     expect(pub.checks).toEqual([{ key: 'weeds', status: 'watch' }]);
     expect(JSON.stringify(pub)).not.toMatch(/rainfast|retreat/);
+  });
+
+  test('a retreat-check alone builds the internal block (a support-product-only visit), and no public block comes from it', () => {
+    const bare = buildSinceLast({ priorVisit, priorMemory: { ...ENTRY, applied: [], checks: [], retreatCheck: ITEM } });
+    expect(bare).toMatchObject({ priorAssessmentId: 'la-1', applied: [], checks: [], retreatCheck: ITEM });
+    expect(hasTreatmentMemory(bare)).toBe(false);
+    expect(hasTreatmentMemory(publicSinceLast(bare))).toBe(false);
+    expect(publicSinceLast(bare)).not.toHaveProperty('retreatCheck');
+    // nothing at all still builds nothing
+    expect(buildSinceLast({ priorVisit, priorMemory: { ...ENTRY, applied: [], checks: [] } })).toBeNull();
+    expect(hasTreatmentMemory(buildSinceLast({ priorVisit, priorMemory: { ...ENTRY, checks: [{ key: 'weeds', status: 'watch' }] } }))).toBe(true);
+  });
+
+  test('only the rendered /data view opts in to the weather read; the Ask Waves build does not', () => {
+    const route = require('fs').readFileSync(require('path').join(__dirname, '../routes/reports-public.js'), 'utf8');
+    expect(route).toMatch(/buildServiceReportV1ResponseData\(service, req\.params\.token, \{ mode: 'live' \}\)/);
+    expect(route.match(/lawnRainfastWatch: true/g)).toHaveLength(1);
+    expect(route.slice(route.indexOf('lawnWateringCloseOut: true'))).toMatch(/^lawnWateringCloseOut: true,\s+lawnRainfastWatch: true,/);
   });
 
   test('recordRetreatCheck never creates an entry and refuses a bad call', async () => {

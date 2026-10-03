@@ -209,7 +209,13 @@ function buildSinceLast({ priorVisit, priorMemory } = {}) {
   if (String(priorMemory.assessmentId) !== String(priorVisit.assessmentId)) return null;
   const applied = Array.isArray(priorMemory.applied) ? priorMemory.applied : [];
   const checks = Array.isArray(priorMemory.checks) ? priorMemory.checks : [];
-  if (!applied.length && !checks.length) return null;
+  const retreatCheck = priorMemory.retreatCheck && typeof priorMemory.retreatCheck === 'object' && !Array.isArray(priorMemory.retreatCheck)
+    ? priorMemory.retreatCheck : null;
+  // A retreat-check alone is enough to carry: a visit whose only product is a
+  // support product (appliedFromProducts drops it) has no applied list and no
+  // watched checks, yet its rainfast breach still has to reach the next visit.
+  // That block is internal: publicSinceLast hands the payload nothing for it.
+  if (!applied.length && !checks.length && !retreatCheck) return null;
   return {
     v: VISIT_MEMORY_VERSION,
     priorAssessmentId: String(priorVisit.assessmentId),
@@ -220,8 +226,7 @@ function buildSinceLast({ priorVisit, priorMemory } = {}) {
     // P31: the prior visit's rainfast retreat-check, when the live view recorded
     // one after the visit. Engine input (the next visit's context), never
     // payload: publicSinceLast leaves it off.
-    ...(priorMemory.retreatCheck && typeof priorMemory.retreatCheck === 'object' && !Array.isArray(priorMemory.retreatCheck)
-      ? { retreatCheck: priorMemory.retreatCheck } : {}),
+    ...(retreatCheck ? { retreatCheck } : {}),
   };
 }
 
@@ -352,6 +357,18 @@ function publicSinceLast(sinceLast) {
 }
 
 /**
+ * Whether a sinceLast block says anything about the prior visit's treatment or
+ * watched topics. A block that exists only to carry the prior's rainfast
+ * retreat-check (P31) has neither: it is internal, and the progress engine, the
+ * since-last copy and the public payload treat it as no block at all.
+ */
+function hasTreatmentMemory(sinceLast) {
+  return !!sinceLast && typeof sinceLast === 'object'
+    && ((Array.isArray(sinceLast.applied) && sinceLast.applied.length > 0)
+      || (Array.isArray(sinceLast.checks) && sinceLast.checks.length > 0));
+}
+
+/**
  * Write the paired-photo recheck (P19b) onto an ALREADY FROZEN entry's
  * sinceLast, inside the same store the progress engine reads. Rules, all
  * enforced here and nowhere else:
@@ -464,6 +481,7 @@ module.exports = {
   freezeLawnVisitMemory,
   resolveVisitMemoryForRender,
   publicSinceLast,
+  hasTreatmentMemory,
   recordPairedRecheck,
   recordRetreatCheck,
 };

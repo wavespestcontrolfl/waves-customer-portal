@@ -878,9 +878,9 @@ describe('GATE_LAWN_RAINFAST_WATCH on the report payload (P31)', () => {
     process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
     ['GATE_LAWN_VISIT_MEMORY', 'GATE_LAWN_REPORT_LEAD', ...gates].forEach((gate) => { process.env[gate] = 'true'; });
   };
-  const serve = async (recs, patch, mode = 'live') => {
+  const serve = async (recs, patch, mode = 'live', optIn = true) => {
     const { knex, log } = withRecords({ ...fixtures(), ...patch }, recs);
-    const data = await buildReportV1Data(service(recs['svc-cur'].structured_notes), 'token-p31', knex, mode ? { mode } : {});
+    const data = await buildReportV1Data(service(recs['svc-cur'].structured_notes), 'token-p31', knex, mode ? { mode, lawnRainfastWatch: optIn } : {});
     applyLawnReportReconciliation(data, null);
     return { data, log };
   };
@@ -978,6 +978,36 @@ describe('GATE_LAWN_RAINFAST_WATCH on the report payload (P31)', () => {
     expect(stored(recs).retreatCheck).toBeUndefined();
     fetchSpy.mockResolvedValue({ status: 'ok', precipitationInTotalExact: 0.3 });
     expect((await serve(recs, withProduct())).data.reportV2.lead.watching).toBe(RAINFAST_WATCH_LINE);
+  });
+
+  test('the Ask Waves build (mode live, no explicit opt-in) makes no weather call and no write', async () => {
+    setHistory([CUR]);
+    live('GATE_LAWN_RAINFAST_WATCH');
+    const recs = records();
+    await serve(recs, withProduct()); // freezes the entry
+    const before = JSON.stringify(recs['svc-cur'].structured_notes);
+    const { data, log } = await serve(recs, withProduct(), 'live', false);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(data.reportV2.lead.watching).toBeUndefined();
+    expect(log.updates).toHaveLength(0);
+    expect(JSON.stringify(recs['svc-cur'].structured_notes)).toBe(before);
+  });
+
+  test('a visit whose only prior record is a retreat-check: no public sinceLast, no since-last copy, nothing else moves', async () => {
+    live('GATE_LAWN_SINCE_LAST');
+    setHistory([PRIOR, CUR]);
+    const item = { v: 1, kind: 'rainfast_breach', source: 'open_meteo', windowFrom: '2026-08-01T14:00:00.000Z', breaches: [{ minutes: 60, inches: 0.4, windowTo: '2026-08-01T15:00:00.000Z', products: ['Test Growth Regulator'] }], recordedAt: '2026-08-01T20:00:00.000Z' };
+    const bare = { ...PRIOR_ENTRY, applied: [], checks: [] };
+    const withoutItem = records();
+    withoutItem['svc-prior'] = { structured_notes: { lawnVisitMemory: { 'la-prior': bare } } };
+    const base = JSON.parse(JSON.stringify((await serve(withoutItem, withProduct())).data));
+    const recs = records();
+    recs['svc-prior'] = { structured_notes: { lawnVisitMemory: { 'la-prior': { ...bare, retreatCheck: item } } } };
+    const { data } = await serve(recs, withProduct());
+    expect(data.reportV2.sinceLast).toBeUndefined();
+    expect(JSON.parse(JSON.stringify(data))).toEqual(base);
+    // ...but the internal block that was frozen for the next reader carries it
+    expect(stored(recs).sinceLast).toMatchObject({ priorAssessmentId: 'la-prior', applied: [], checks: [], retreatCheck: { kind: 'rainfast_breach' } });
   });
 
   test('the item rides into the NEXT visit\'s sinceLast as engine input and stays off the public payload', async () => {

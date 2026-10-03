@@ -46,10 +46,10 @@ const QUARTER_HOUR_BELOW_MINUTES = 120;
 const SETTLE_MS = HOUR_MS;
 const LOOKBACK_DAYS = 7;
 const MAX_INTERVAL_MINUTES = 48 * 60;
-const MAX_WINDOWS = 3;
 const FETCH_TIMEOUT_MS = 2500;
 const ITEM_VERSION = 1;
 const ITEM_KIND = 'rainfast_breach';
+const UNREAD = Symbol('window could not be read');
 
 // The one customer sentence. Says what the source supports (weather data, soon
 // after), promises no action beyond looking at the next visit, no probability,
@@ -85,7 +85,6 @@ function rainfastWindows(products) {
   }
   return [...byMinutes.entries()]
     .sort((a, b) => a[0] - b[0])
-    .slice(0, MAX_WINDOWS)
     .map(([minutes, names]) => ({ minutes, products: names }));
 }
 
@@ -109,11 +108,14 @@ async function judgeRainfastBreach({
     const fromMs = toMs(completedAt);
     const nowMs = now instanceof Date ? now.getTime() : Date.now();
     if (!Number.isFinite(fromMs) || !Number.isFinite(nowMs)) return null;
-    const ready = rainfastWindows(products).filter(({ minutes }) => {
-      const endMs = fromMs + minutes * 60000;
-      return nowMs >= endMs + SETTLE_MS && nowMs <= endMs + LOOKBACK_DAYS * 24 * HOUR_MS;
-    });
+    // ONE verdict per visit, so nothing is judged until EVERY applicable window
+    // is ready (the longest interval plus the settle hour): a verdict stored
+    // after the short window alone would be first-writer-wins and the longer
+    // window's breach could never be added.
+    const ready = rainfastWindows(products);
     if (!ready.length) return null;
+    const lastEndMs = fromMs + Math.max(...ready.map(({ minutes }) => minutes)) * 60000;
+    if (nowMs < lastEndMs + SETTLE_MS || nowMs > lastEndMs + LOOKBACK_DAYS * 24 * HOUR_MS) return null;
 
     const results = await Promise.all(ready.map(async (window) => {
       const toMsValue = fromMs + window.minutes * 60000;
@@ -124,11 +126,12 @@ async function judgeRainfastBreach({
       const result = window.minutes < QUARTER_HOUR_BELOW_MINUTES
         ? (typeof fetchQuarterHours === 'function' ? await fetchQuarterHours(args).catch(() => null) : null)
         : await fetchForecast({ ...args, now: new Date(nowMs), exactTotal: true }).catch(() => null);
-      if (!result || result.status !== 'ok') return null;
+      if (!result || result.status !== 'ok') return UNREAD;
       // Judged on the unrounded total: 0.246 inch is not 0.25 inch. null = a
-      // needed slot had no reading, or no whole slot lies inside.
+      // needed slot had no reading, or no whole slot lies inside: unread.
       const total = result.precipitationInTotalExact;
-      if (typeof total !== 'number' || !Number.isFinite(total) || total + EPSILON < BREACH_INCHES) return null;
+      if (typeof total !== 'number' || !Number.isFinite(total)) return UNREAD;
+      if (total + EPSILON < BREACH_INCHES) return null;
       return {
         minutes: window.minutes,
         inches: round2(total),
@@ -137,6 +140,9 @@ async function judgeRainfastBreach({
         fetchedAt: typeof result.fetchedAt === 'string' ? result.fetchedAt : null,
       };
     }));
+    // A window that could not be read blocks the whole verdict (a later view
+    // tries again): the one stored item must name every breached product.
+    if (results.includes(UNREAD)) return null;
     const breaches = results.filter(Boolean);
     if (!breaches.length) return null;
     return {
