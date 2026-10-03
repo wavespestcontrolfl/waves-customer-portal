@@ -348,7 +348,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   test('account summary: total_due adds up only collectible invoices; reconciliation and other holds are counted apart', async () => {
     const { account_summary: summary } = await read('get_customer_invoices', { customer_id: A });
     // credited 100 + draft 40 + fillers 10+11+12+13 + failsup 66 (archived excluded; open, amb, orphan, failamb held by the fence; paid, void, processing terminal).
-    expect(summary).toMatchObject({ total_due: 252, needs_reconciliation_count: 4, not_yet_sent_due: 40, overdue_count: 0, outstanding_count: 11 });
+    expect(summary).toMatchObject({ total_due: 252, needs_reconciliation_count: 4, not_yet_sent_due: 40, overdue_count: 0, outstanding_count: 7 });
     // The one overdue invoice is held by the fence, so it is not counted as overdue (never a raw status count).
     expect(summary.dispute_hold).toMatchObject({ active: false });
     expect(summary.unknown).toMatch(/4 invoice\(s\) \(unpaid or processing\) need reconciliation and are NOT in total_due/);
@@ -427,7 +427,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
       spy.mockClear();
       const { account_summary: summary } = await read('get_customer_invoices', { customer_id: E, limit: 5 });
       for (const field of ['total_due', 'not_yet_sent_due', 'presented_self_pay_due', 'needs_reconciliation_count']) expect(summary[field]).toBeNull();
-      expect(summary.outstanding_count).toBe(5000);
+      expect(summary.outstanding_count).toBeNull();
       expect(summary.unknown).toMatch(/null \(unknown\), not zero/);
       // Stopped at the first page: the total proved the fence cap was exceeded (no ten-page crawl).
       expect(spy.mock.calls.filter(([params]) => params.status === 'unpaid' && params.limit === 100)).toHaveLength(1);
@@ -621,13 +621,52 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
       expect(text).not.toContain(row.token);
       expect(text).not.toContain('abc123x');
     }
-    expect(detail).toContain('/pay/[token]');
-    expect(detail).toContain('/receipt/[token]');
-    expect(detail).toContain('/estimate/[token]');
-    expect(detail).toContain('/api/estimates/[token]');
-    expect(detail).toContain('/l/[token]');
-    expect(detail).toContain('/track/[token]');
+    // Every URL goes: the title's pasted pay and receipt URLs, the description's links, the category path.
+    expect(detail).toContain('Link [link] and [link] sent');
+    expect(detail).toContain('see [link] or [link] or [link]');
+    expect(detail).toContain('"category":"[link]"');
     expect(detail).toContain(`token [token] id ${uuid} done`);
+  });
+
+  test('every URL is replaced with [link], whatever its route shape; a slash inside a word is not a path', async () => {
+    const Q = await customer(`Links${run}`, `Urls${run}`);
+    const stepUuid = '123e4567-e89b-12d3-a456-426614174001';
+    const tokenUuid = '123e4567-e89b-12d3-a456-426614174002';
+    const titles = [
+      `Preview https://portal.wavespestcontrol.com/api/public/automation-preview/${stepUuid}/${tokenUuid} now`,
+      `Pay at https://portal.wavespestcontrol.com/pay/abc123token done`,
+      'Visit www.example.org/some/page today',
+      'Open portal.wavespestcontrol.com/receipt/short9 please',
+      `See /api/public/automation-preview/${stepUuid}/${tokenUuid} for it`,
+      'Open /api/public/things/xyz ok',
+    ];
+    for (const [n, title] of titles.entries()) await invoice(`q_link_${n}`, Q, { total: 5, title });
+    await invoice('q_link_kept', Q, { total: 5, title: `Service lawn/shrub care for ${stepUuid} and 10/02/2026` });
+    const text = json(await read('get_customer_invoices', { customer_id: Q, limit: 50 }));
+    expect(text).not.toMatch(/automation-preview|abc123token|example\.org|short9|portal\.wavespestcontrol|\/api\/public|426614174002/);
+    expect(text).toContain('Preview [link] now');
+    expect(text).toContain('Pay at [link] done');
+    expect(text).toContain('Visit [link] today');
+    expect(text).toContain('Open [link] please');
+    expect(text).toContain('See [link] for it');
+    expect(text).toContain('Open [link] ok');
+    // An ordinary sentence with a slash, a bare UUID and a date are left intact.
+    expect(text).toContain(`Service lawn/shrub care for ${stepUuid} and 10/02/2026`);
+  });
+
+  test('line items are bounded at 50 with a truncation flag, a warning, and a bounded discounts block', async () => {
+    const Q = await customer(`Lines${run}`, `Many${run}`);
+    const many = Array.from({ length: 60 }, (_, n) => ({ description: `Line ${n}`, quantity: 1, unit_price: n % 2 ? -1 : 1, amount: n % 2 ? -1 : 1, category: 'service' }));
+    const big = await invoice('q_lines_big', Q, { total: 5, line_items: JSON.stringify(many) });
+    const detail = await read('get_invoice_detail', { invoice_id: big.id });
+    expect(detail.line_items).toHaveLength(50);
+    expect(detail.line_items_truncated).toBe(true);
+    expect(detail.discounts.discount_lines).toHaveLength(25);
+    expect(detail.discounts.discount_lines_truncated).toBe(true);
+    expect(detail.unknowns.join(' ')).toMatch(/more than 50 line items: only the first 50 are shown/);
+    const small = await read('get_invoice_detail', { invoice_id: inv.credited.id });
+    expect(small.line_items_truncated).toBe(false);
+    expect(small.discounts.discount_lines_truncated).toBe(false);
   });
 
   test('an email whose local part is a UUID is masked whole, while a standalone UUID stays', async () => {

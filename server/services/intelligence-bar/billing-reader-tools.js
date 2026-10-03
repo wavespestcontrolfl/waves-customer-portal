@@ -133,27 +133,39 @@ function maskCardNumbers(text) {
     return '[number]';
   });
 }
-// Bearer credentials. The customer-facing routes that carry a token as a path segment (client router paths and the
-// server's /api mounts for them: pay-v2 and pay-statement, receipt-v2, estimate-public, tracking, reports, review-gate
-// (rate), card-public, reviews, documents, the short-link and referral redirects, unsubscribe and the other :token
-// routes): the segment after the route is replaced. Beyond routes, any standalone 32+ character hex or base64url run
-// that is not a UUID is a token too, and the invoice tokens the reader holds are removed exactly.
-const TOKEN_ROUTES = [
-  'pay/statement', 'pay', 'receipt', 'estimates?', 'appointment', 'book', 'card', 'careers/interview', 'interview', 'contract', 'inspection',
-  'lawn-report', 'pest-report', 'prep', 'price-change', 'rate', 'recap', 'report/project', 'reports?', 'reschedule', 'reservice', 'review', 'reviews',
-  'secure', 'service-outlines', 'track(?:ing)?', 'visit', 'documents', 'project', 'quiz', 'feedback', 'confirm', 'shared', 'unsubscribe', 'stm', 'l', 'r', 'go', 'e',
+// Bearer credentials. The route surface that carries a token is unbounded (tokens are not always the first segment:
+// /api/public/automation-preview/<step>/<token>), so no route is allowlisted: EVERY link is replaced with [link]:
+// any scheme://... run, any www.... run, any bare host of ours (wavespestcontrol.com and its subdomains, the portal
+// and app hosts in config), and any root-relative path with two or more segments (/x/y...). A single "lawn/shrub"
+// slash inside a word is not a path and is left alone. Backstops: any standalone 32+ character hex or base64url run
+// that is not a UUID (a token with no URL around it), and the invoice tokens the call holds, removed exactly.
+const escapeRe = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function ownHosts() {
+  const hosts = new Set(['wavespestcontrol.com']);
+  for (const url of [require('../../config').clientUrl, process.env.PORTAL_URL, process.env.APP_URL, process.env.CLIENT_URL]) {
+    try { if (url) hosts.add(new URL(url).hostname); } catch { /* not a URL */ }
+  }
+  hosts.delete('localhost');
+  return [...hosts];
+}
+const URL_TAIL = '[^\\s<>"\'`)\\]]*';
+const LINK_RES = [
+  new RegExp(`[A-Za-z][A-Za-z0-9+.-]*://${URL_TAIL}`, 'g'),
+  new RegExp(`\\bwww\\.${URL_TAIL}`, 'gi'),
+  new RegExp(`\\b(?:[A-Za-z0-9-]+\\.)*(?:${ownHosts().map(escapeRe).join('|')})\\b(?::\\d+)?(?:[/?#]${URL_TAIL})?`, 'gi'),
+  /(?<![A-Za-z0-9_)\]])\/[A-Za-z0-9_.~%-]+(?:\/[A-Za-z0-9_.~%:@+=,-]+)+/g,
 ];
-const TOKEN_ROUTE_RE = new RegExp(`(/(?:api/)?(?:${TOKEN_ROUTES.join('|')})/)[A-Za-z0-9_.~%-]{4,}`, 'gi');
+const maskLinks = (text) => LINK_RES.reduce((out, re) => out.replace(re, '[link]'), text);
 const LONG_TOKEN_RE = /[A-Za-z0-9_-]{32,}/g;
-const maskTokens = (text) => text.replace(TOKEN_ROUTE_RE, '$1[token]').replace(LONG_TOKEN_RE, (run) => (/\d/.test(run) ? '[token]' : run));
+const maskTokens = (text) => text.replace(LONG_TOKEN_RE, (run) => (/\d/.test(run) ? '[token]' : run));
 // Emails and card numbers are masked; record ids (UUIDs) pass through untouched, so a digit-heavy id still works in
 // the follow-up read, and the text around them is masked.
-// Order: exact known tokens, tokenized routes, complete emails (an address may have a UUID local part), THEN standalone
-// UUIDs are exempted from the card and long-token passes.
+// Order: exact known tokens, every link (UUIDs inside a URL go with it), complete emails (an address may have a UUID
+// local part), THEN standalone UUIDs are exempted from the card and long-token passes.
 function maskSensitive(text, secrets = []) {
   let out = String(text);
   for (const secret of secrets) if (secret) out = out.split(String(secret)).join('[token]');
-  out = out.replace(TOKEN_ROUTE_RE, '$1[token]').replace(EMAIL_RE, '[email]');
+  out = maskLinks(out).replace(EMAIL_RE, '[email]');
   return out.split(UUID_IN_TEXT_RE).map((part, at) => (at % 2 ? part : maskCardNumbers(maskTokens(part)))).join('');
 }
 // Free text (a decline message, a manual-payment note, a ledger note) can echo
@@ -614,14 +626,15 @@ async function accountSummary(InvoiceService, customer, today, database) {
   const notYetSent = (invoice) => NOT_YET_SENT_STATUSES.includes(invoiceStatusKey(invoice.status));
   const summary = {
     total_due: sum(rowsWhere(() => true)),
-    outstanding_count: unpaid.total,
+    // Derived from the fenced collectible rows (null when the read is incomplete), never the raw status total.
+    outstanding_count: fenced ? rowsWhere(() => true).length : null,
     needs_reconciliation_count: reconcileCount,
     // Only collectible invoices count as overdue (the list's own `overdue` is null for the rest): never a raw status count.
     overdue_count: fenced ? rowsWhere((invoice) => isOverdue(invoice, today)).length : null,
     not_yet_sent_due: sum(rowsWhere(notYetSent)),
     presented_self_pay_due: sum(rowsWhere((invoice) => !notYetSent(invoice))),
     processing: {
-      count: processing.total,
+      count: fencedProcessing ? processing.rows.filter((invoice) => fencedProcessing.get(String(invoice.id)).state !== 'unavailable').length : null,
       bank_payment_in_flight: bankInFlight,
       needs_reconciliation: fencedProcessing ? processing.rows.filter((invoice) => fencedProcessing.get(String(invoice.id)).needs_reconciliation).length : null,
       note: 'Processing invoices are not counted in total_due and their amounts are not stated here. bank_payment_in_flight (any invoice, processing or not) are waiting on a bank transfer; needs_reconciliation are not: a charge state is unresolved, so check the Invoices page.',
@@ -739,15 +752,18 @@ async function listForCustomer(customer, input, database, secrets) {
 
 // ─── get_invoice_detail ─────────────────────────────────────────────
 
+const LINE_ITEM_CAP = 50;
+// Bounded like the payment and plan histories: one more than the cap is read to know whether it was cut.
 function lineItems(raw) {
-  return parseLineItems(raw).map((item) => ({
+  const parsed = parseLineItems(raw).slice(0, LINE_ITEM_CAP + 1);
+  return { items: parsed.slice(0, LINE_ITEM_CAP).map((item) => ({
     description: scrub(item.description || item.name, 200),
     quantity: item.quantity === undefined || item.quantity === null ? null : Number(item.quantity),
     unit_price: money(item.unit_price),
     amount: money(item.amount),
     category: scrub(item.category, 80),
     is_discount: Number(item.amount) < 0,
-  }));
+  })), truncated: parsed.length > LINE_ITEM_CAP };
 }
 
 function paymentPlanDetail(allRows, fence) {
@@ -909,8 +925,9 @@ function annualPrepayProjection({ termId, role, term }) {
 }
 
 // The warnings the detail carries for every bounded or failed optional read.
-function detailWarnings({ hold, plans, recorded }) {
+function detailWarnings({ hold, plans, recorded, lines }) {
   const unknowns = [];
+  if (lines.truncated) unknowns.push(`This invoice has more than ${LINE_ITEM_CAP} line items: only the first ${LINE_ITEM_CAP} are shown (line_items_truncated), and discounts.discount_lines covers only those.`);
   if (hold.unknown) unknowns.push(hold.unknown);
   if (plans.length > PLAN_HISTORY_CAP) unknowns.push(`This invoice has more than ${PLAN_HISTORY_CAP} payment plans: only the newest ${PLAN_HISTORY_CAP} are shown, older plans are not (history_truncated).`);
   if (recorded.namesUnavailable) unknowns.push('The payer name could not be read: a third-party payer is shown without its name.');
@@ -951,7 +968,9 @@ function invoiceDocument(facts, fence, today) {
 function discountsProjection(facts, lines) {
   return {
     document_discount: { amount: money(facts.discount_amount) || 0, label: scrub(facts.discount_label, 120) },
-    discount_lines: lines.filter((line) => line.is_discount),
+    // Bounded with the line items they come from.
+    discount_lines: lines.items.filter((line) => line.is_discount),
+    discount_lines_truncated: lines.truncated,
     account_credit_applied: money(facts.credit_applied) || 0,
   };
 }
@@ -973,14 +992,15 @@ async function detailInSnapshot(input, actionContext, database, secrets) {
   return {
     invoice: invoiceDocument(facts, fence, etDateString()),
     customer: { id: customer.id, name: customerName(customer), phone_last4: phoneLast4(customer.phone) },
-    line_items: lines,
+    line_items: lines.items,
+    line_items_truncated: lines.truncated,
     discounts: discountsProjection(facts, lines),
     recorded_payments: recorded.payments,
     recorded_payments_note: 'Informational: the payments-table rows tied to this invoice, with no verdict on whether it was paid or what is owed. collectible and balance_due decide that.',
     payment_plan: paymentPlanDetail(plans, fence),
     dispute_hold: hold,
     annual_prepay: annualPrepayProjection(prepay),
-    unknowns: detailWarnings({ hold, plans, recorded }),
+    unknowns: detailWarnings({ hold, plans, recorded, lines }),
     note: BALANCE_RULE,
   };
 }
