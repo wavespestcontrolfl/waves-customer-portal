@@ -202,15 +202,41 @@ async function announceGateChange(req, result) {
   } catch { /* the write stands; other screens catch up on their next load */ }
 }
 
+// A gate write always gives way. Other writers take the same rows in orders
+// that cannot all be matched (the property writers lock the customer before
+// its visits; the annual-prepay switch locks the visit before its customer),
+// so instead of an order this transaction waits at most GATE_LOCK_WAIT_MS for
+// any lock, well under Postgres's deadlock check, then rolls back and tries
+// again. It can never be the transaction that makes a billing or property
+// write fail; after the last try it answers "busy" and the technician retries.
+const GATE_LOCK_WAIT_MS = 300;
+const GATE_WRITE_TRIES = 3;
+const BUSY = { status: 503, body: { error: 'That stop is busy right now. Try again in a moment.', code: 'busy' } };
+const LOCK_NOT_AVAILABLE = '55P03';
+const DEADLOCK_DETECTED = '40P01';
+
+async function gateWrite(work) {
+  for (let attempt = 1; attempt <= GATE_WRITE_TRIES; attempt += 1) {
+    try {
+      return await db.transaction(async (trx) => {
+        await trx.raw(`SET LOCAL lock_timeout = '${GATE_LOCK_WAIT_MS}ms'`);
+        return work(trx);
+      });
+    } catch (err) {
+      if (!err || ![LOCK_NOT_AVAILABLE, DEADLOCK_DETECTED].includes(err.code)) throw err;
+      if (attempt < GATE_WRITE_TRIES) await new Promise((resolve) => { setTimeout(resolve, 50 * attempt); });
+    }
+  }
+  return BUSY;
+}
+
 const NO_NEIGHBORHOOD = {
   status: 409,
   body: { error: 'This stop has no neighborhood yet. Ask the office to set one.', code: 'no_neighborhood' },
 };
 
 // The neighborhood of a visit this login may act on, read under the locks
-// that make it stable. Lock order, the property writers' own
-// (customer-properties.js: customer row, property rows, then visits; the
-// office relink: customer row, property row, neighborhood):
+// that make it stable, each waited for only briefly (see gateWrite):
 //   1. the visit's CUSTOMER row, FOR SHARE. Every writer that adds a property,
 //      changes the primary or relinks a neighborhood takes that row FOR
 //      UPDATE first, so none of them can run until this commits and the
@@ -273,7 +299,7 @@ router.post('/visits/:visitId/entries', requireTechOrAdmin, techActionsLive, asy
   if (checked.error) return res.status(400).json({ error: checked.error });
   const { code, gate_label: gateLabel } = checked.value;
   try {
-    const result = await db.transaction(async (trx) => {
+    const result = await gateWrite(async (trx) => {
       const where = await lockVisitNeighborhood(trx, req, req.params.visitId);
       if (where.status) return where;
       const { neighborhoodId } = where;
@@ -326,7 +352,7 @@ router.post('/visits/:visitId/entries/:entryId/wrong', requireTechOrAdmin, techA
   const shown = req.body && typeof req.body.code === 'string' ? req.body.code.trim() : '';
   if (!shown) return res.status(400).json({ error: 'code is required' });
   try {
-    const result = await db.transaction(async (trx) => {
+    const result = await gateWrite(async (trx) => {
       const where = await lockVisitNeighborhood(trx, req, req.params.visitId);
       if (where.status) return where;
       // Only a code of THIS visit's neighborhood, and only a code: an

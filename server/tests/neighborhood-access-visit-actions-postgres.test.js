@@ -281,6 +281,36 @@ postgres('neighborhood gate codes from a visit', () => {
     expect((await call('POST', `/visits/${dead[0].id}/entries`, { code: '3030' })).status).toBe(404);
   });
 
+  test('a gate write gives way to another writer: it retries a lock wait, then answers busy', async () => {
+    const n = await neighborhood('Kestrel Cove');
+    const v = await visit(n);
+    // The connection the route sees, with its first transactions refused the
+    // way Postgres refuses a lock wait past lock_timeout.
+    const refuseFirst = (count) => {
+      const real = trx;
+      let left = count;
+      const flaky = (...args) => real(...args);
+      flaky.raw = (...args) => real.raw(...args);
+      flaky.transaction = (...args) => {
+        if (left > 0) {
+          left -= 1;
+          return Promise.reject(Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' }));
+        }
+        return real.transaction(...args);
+      };
+      mockConnection = flaky;
+    };
+    refuseFirst(2);
+    expect((await call('POST', `/visits/${v.id}/entries`, { code: '6060' })).status).toBe(201);
+    expect(mockEmit).toHaveBeenCalledTimes(1);
+    refuseFirst(3);
+    expect(await call('POST', `/visits/${v.id}/entries`, { code: '7070' }))
+      .toEqual({ status: 503, body: { error: 'That stop is busy right now. Try again in a moment.', code: 'busy' } });
+    mockConnection = trx;
+    expect((await rows(n)).map((r) => r.code)).toEqual(['6060']);
+    expect(mockEmit).toHaveBeenCalledTimes(1);
+  });
+
   test('a code must be a keypad code', async () => {
     const n = await neighborhood('Jasmine Key');
     const v = await visit(n);
