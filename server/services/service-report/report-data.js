@@ -19,7 +19,7 @@ const { isCardCustomerSurfaceable } = require('../lawn-recommendation-visibility
 const { buildIrrigationAdvice } = require('./irrigation-advice');
 const { buildMowingHeightContext } = require('./turf-height');
 const { buildLawnReportV2, grassLabelFor } = require('./lawn-report-v2');
-const { selectPriorVisit, resolveVisitMemoryForRender, storedVisitMemoryFor, publicSinceLast } = require('./lawn-visit-memory');
+const { selectPriorVisit, resolveVisitMemoryForRender, storedVisitMemoryFor, publicSinceLast, hasTreatmentMemory } = require('./lawn-visit-memory');
 const {
   buildLawnProgress, deriveAssessmentConfidence, divergentMetricsFrom, photoQualityForConfidence, scoresFromAssessmentRow,
 } = require('./lawn-progress');
@@ -5704,7 +5704,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
               ? require('../lawn-paired-recheck').scheduleAfterFreeze
               : null,
           });
-          visitMemorySinceLast = outcome.sinceLast;
+          // A block that exists only to carry the prior's rainfast retreat-check
+          // (P31) is internal: the engine, the copy and the payload see no block.
+          visitMemorySinceLast = hasTreatmentMemory(outcome.sinceLast) ? outcome.sinceLast : undefined;
           if (outcome.unfrozen) lawnAssessment.weekWeatherUncacheable = true;
         } catch {
           lawnAssessment.weekWeatherUncacheable = true;
@@ -6023,6 +6025,36 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             Object.defineProperty(reportV2, 'sinceLastCopy', { value: sinceLastCopy, enumerable: false, writable: true, configurable: true });
           }
         } catch { /* best-effort: the report renders without the block */ }
+      }
+      // GATE_LAWN_RAINFAST_WATCH (P31), LIVE VIEWS ONLY (the PDF and static
+      // builds never carry it, so their cache key is untouched): once a stated
+      // rainfast interval has ended, measured rain inside it records one
+      // retreat-check on the frozen visit memory and hands one fixed Watching
+      // sentence to the lead, the same non-enumerable way as sinceLastCopy.
+      // Fail closed and best-effort: any miss leaves the report as it was.
+      if (reportV2 && opts.mode === 'live' && opts.lawnRainfastWatch === true && typeof featureGates.lawnRainfastWatchLive === 'function' && featureGates.lawnRainfastWatchLive()) {
+        try {
+          const watch = await require('./lawn-rainfast-watch').resolveRainfastWatch({
+            structuredNotes: service.structured_notes,
+            serviceRecordId: service.id,
+            assessmentId: lawnAssessment.assessmentId,
+            products,
+            completedAt: completionTime,
+            latitude: service.customer_latitude ?? service.latitude ?? service.lat,
+            longitude: service.customer_longitude ?? service.longitude ?? service.lng,
+            // The product list is the verdict's input: when the products or their
+            // catalog facts could not be read cleanly, a stored verdict still
+            // replays but nothing new is judged or written (first writer wins,
+            // so a partial list would be permanent).
+            degraded: !!(productsLoadFailed || products.catalogEnrichmentFailed),
+            knex,
+            fetchForecast: require('./application-conditions').fetchPropertyForecast,
+            fetchQuarterHours: require('./application-conditions').fetchPropertyRainQuarterHours,
+          });
+          if (watch) {
+            Object.defineProperty(reportV2, 'rainfastWatch', { value: watch, enumerable: false, writable: true, configurable: true });
+          }
+        } catch { /* best-effort: the report renders without the sentence */ }
       }
     } catch {
       // Best-effort + additive: a V2 build hiccup must never break the report.

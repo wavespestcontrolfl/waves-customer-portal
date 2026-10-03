@@ -209,7 +209,13 @@ function buildSinceLast({ priorVisit, priorMemory } = {}) {
   if (String(priorMemory.assessmentId) !== String(priorVisit.assessmentId)) return null;
   const applied = Array.isArray(priorMemory.applied) ? priorMemory.applied : [];
   const checks = Array.isArray(priorMemory.checks) ? priorMemory.checks : [];
-  if (!applied.length && !checks.length) return null;
+  const retreatCheck = priorMemory.retreatCheck && typeof priorMemory.retreatCheck === 'object' && !Array.isArray(priorMemory.retreatCheck)
+    ? priorMemory.retreatCheck : null;
+  // A retreat-check alone is enough to carry: a visit whose only product is a
+  // support product (appliedFromProducts drops it) has no applied list and no
+  // watched checks, yet its rainfast breach still has to reach the next visit.
+  // That block is internal: publicSinceLast hands the payload nothing for it.
+  if (!applied.length && !checks.length && !retreatCheck) return null;
   return {
     v: VISIT_MEMORY_VERSION,
     priorAssessmentId: String(priorVisit.assessmentId),
@@ -217,6 +223,10 @@ function buildSinceLast({ priorVisit, priorMemory } = {}) {
     applied,
     checks,
     ...(Array.isArray(priorMemory.issues) && priorMemory.issues.length ? { issues: priorMemory.issues } : {}),
+    // P31: the prior visit's rainfast retreat-check, when the live view recorded
+    // one after the visit. Engine input (the next visit's context), never
+    // payload: publicSinceLast leaves it off.
+    ...(retreatCheck ? { retreatCheck } : {}),
   };
 }
 
@@ -334,8 +344,8 @@ function publicSinceLast(sinceLast) {
   if (!sinceLast || typeof sinceLast !== 'object') return sinceLast;
   const checks = Array.isArray(sinceLast.checks) ? sinceLast.checks : [];
   const carries = checks.some((c) => c && typeof c === 'object' && ('recheck' in c || 'recheckOverride' in c));
-  if (!carries && !('photoPairs' in sinceLast)) return sinceLast;
-  const { photoPairs, ...rest } = sinceLast; // eslint-disable-line no-unused-vars
+  if (!carries && !('photoPairs' in sinceLast) && !('retreatCheck' in sinceLast)) return sinceLast;
+  const { photoPairs, retreatCheck, ...rest } = sinceLast; // eslint-disable-line no-unused-vars
   return {
     ...rest,
     checks: checks.map((c) => {
@@ -344,6 +354,18 @@ function publicSinceLast(sinceLast) {
       return kept;
     }),
   };
+}
+
+/**
+ * Whether a sinceLast block says anything about the prior visit's treatment or
+ * watched topics. A block that exists only to carry the prior's rainfast
+ * retreat-check (P31) has neither: it is internal, and the progress engine, the
+ * since-last copy and the public payload treat it as no block at all.
+ */
+function hasTreatmentMemory(sinceLast) {
+  return !!sinceLast && typeof sinceLast === 'object'
+    && ((Array.isArray(sinceLast.applied) && sinceLast.applied.length > 0)
+      || (Array.isArray(sinceLast.checks) && sinceLast.checks.length > 0));
 }
 
 /**
@@ -403,6 +425,51 @@ async function recordPairedRecheck(serviceRecordId, assessmentId, { rechecks = {
   }
 }
 
+/**
+ * Write the rainfast retreat-check (P31) onto an ALREADY FROZEN entry as its one
+ * `retreatCheck` item, after the visit, on a live render. Same rules as
+ * recordPairedRecheck, enforced here:
+ *   - never creates an entry (no frozen entry for this assessment writes
+ *     nothing);
+ *   - first writer wins: an entry that already carries a `retreatCheck` keeps it
+ *     and that stored item is handed back, so two views that both measured the
+ *     breach agree on one record;
+ *   - compare-and-set on the entry as read (jsonb equality), so a concurrent
+ *     writer on the same entry forces a re-read, never a lost write; no
+ *     SELECT ... FOR UPDATE;
+ *   - nothing else in structured_notes or in the entry changes.
+ * Returns the item the entry now carries, or null when nothing could be stored.
+ */
+async function recordRetreatCheck(serviceRecordId, assessmentId, item, knex) {
+  if (!serviceRecordId || !assessmentId || !item || typeof item !== 'object' || !knex) return null;
+  try {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const row = await knex('service_records').where({ id: serviceRecordId }).first('structured_notes');
+      const entry = storedVisitMemoryFor(row?.structured_notes, assessmentId);
+      if (!entry) return null;
+      if (entry.retreatCheck != null) return entry.retreatCheck;
+
+      const next = { ...entry, retreatCheck: item };
+      const updated = await knex('service_records')
+        .where({ id: serviceRecordId })
+        .whereRaw("COALESCE(structured_notes::jsonb, '{}'::jsonb) -> 'lawnVisitMemory' -> ? = ?::jsonb", [assessmentId, JSON.stringify(entry)])
+        .update({
+          structured_notes: knex.raw(
+            "COALESCE(structured_notes::jsonb, '{}'::jsonb) || jsonb_build_object('lawnVisitMemory',"
+            + " COALESCE(COALESCE(structured_notes::jsonb, '{}'::jsonb) -> 'lawnVisitMemory', '{}'::jsonb) || ?::jsonb)",
+            [JSON.stringify({ [assessmentId]: next })],
+          ),
+        });
+      if (updated > 0) return item;
+      // The entry moved between the read and the write: read it again.
+    }
+    return null;
+  } catch (err) {
+    logger.warn(`[lawn-visit-memory] retreat check write failed for ${serviceRecordId}: ${err.message}`);
+    return null;
+  }
+}
+
 module.exports = {
   VISIT_MEMORY_VERSION,
   appliedFromProducts,
@@ -414,5 +481,7 @@ module.exports = {
   freezeLawnVisitMemory,
   resolveVisitMemoryForRender,
   publicSinceLast,
+  hasTreatmentMemory,
   recordPairedRecheck,
+  recordRetreatCheck,
 };

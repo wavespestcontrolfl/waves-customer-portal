@@ -526,6 +526,11 @@ async function buildServiceReportV1ResponseData(service, token, {
   // watering banner's rain close-out (GATE_LAWN_WATERING_FORECAST), so only it
   // pays for the radar lookup. Applied for mode === 'live' only.
   lawnWateringCloseOut = false,
+  // OPT-IN on the same terms: only the /data render shows the lawn Watching
+  // sentence (GATE_LAWN_RAINFAST_WATCH), so only it pays for the weather read
+  // and the memory write. /ask builds the report in mode 'live' purely for
+  // context and must not trigger either. Applied for mode === 'live' only.
+  lawnRainfastWatch = false,
 } = {}) {
   // staffViewer gates internal_only companion sections (combined-service
   // completions): report-data omits them from customer payloads entirely.
@@ -544,6 +549,7 @@ async function buildServiceReportV1ResponseData(service, token, {
     pestPressureConfig, staffViewer, mode, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt,
     propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, expectationFactsOut, planSummary, upcomingVisitsCard,
     nearYou,
+    lawnRainfastWatch,
     // pest week-weather is opt-in (codex P2 round 4, tightened by codex P2
     // #5137 deferred finding a): only a caller that opts into
     // pestExpectationsWeather above — the /data live render and the direct
@@ -2624,6 +2630,7 @@ router.get('/:token/data', async (req, res, next) => {
         // pestExpectationsWeather's own doc above.
         pestExpectationsWeather: true,
         lawnWateringCloseOut: true,
+        lawnRainfastWatch: true,
       });
       // "Your Visit, in Motion" — surface the tech-approved recap inside the
       // report (owner ask 2026-07-05; the standalone /recap/:token player was
