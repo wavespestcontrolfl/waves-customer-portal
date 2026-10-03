@@ -242,6 +242,9 @@ const LANE_RUNTIME = {
   // ── Service reports ──
   // draft_for_human + M2 (Codex r19): /generate-report copy lands in the tech's editable notes and reaches the customer only through the later completion action.
   report_copy: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report', maturity: 'M2' },
+  // Its verdict rejects a lawn report draft the technician has not read yet
+  // (it never sends anything; an unavailable check accepts the draft).
+  lawn_draft_timing_check: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'compliance_check', maturity: 'M2' },
   // M3 (Codex r21): buildTreatmentNarrative runs on report read with no staff step and caches the copy in service_report_ai_summaries.
   treatment_narrative: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report', maturity: 'M3' },
   rodent_narrative: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report' },

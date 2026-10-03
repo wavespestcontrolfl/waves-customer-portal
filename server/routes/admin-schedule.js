@@ -24387,7 +24387,8 @@ async function generateReportCopyWithFallback({
       const parsed = technicianReportCustomerCopy(report);
       const rejection = reportCopyRejection(report)
         || (parsed?.body && (!requireSections || parsed.sections) ? null : 'malformed_shape')
-        || (typeof extraRejection === 'function' ? extraRejection(report) : null);
+        // May be async: the lawn draft's result-timing check asks a model.
+        || (typeof extraRejection === 'function' ? await extraRejection(report) : null);
       if (!rejection) {
         return { ok: true, report, provider: provider.name, model: provider.model, failures };
       }
@@ -25900,6 +25901,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     // RESULT TIMING rule, so the copy is screened for it too; any forward
     // result timing is rejected (the report's "What to expect" owns timing).
     const { LAWN_RESULT_TIMING_RULE } = require('../services/service-report/lawn-report-copy-prompt');
+    const { lawnDraftTimingRejection, lawnDraftTimingCheckLive } = require('../services/service-report/lawn-draft-timing-check');
     const lawnTimingOn = String(effectiveSystemPrompt || '').includes(LAWN_RESULT_TIMING_RULE);
     const writerRulesScreen = (text) => (writerRulesOn
       ? writerRulesRejection(text, {
@@ -25909,7 +25911,12 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     const generated = await generateReportCopyWithFallback({
       systemPrompt: effectiveSystemPrompt,
       userMessage: fullUserMessage,
-      extraRejection: (text) => (screenTradeNames(text) ? 'trade_name' : null) || writerRulesScreen(text),
+      // Lawn drafts that pass the pattern screen get one meaning check (owner
+      // 2026-10-03): the pattern screen exempts watering / mowing clauses, so
+      // a result promise phrased around watering needs a reader. Fails open.
+      extraRejection: async (text) => (screenTradeNames(text) ? 'trade_name' : null)
+        || writerRulesScreen(text)
+        || (lawnTimingOn && lawnDraftTimingCheckLive() ? lawnDraftTimingRejection(text) : null),
       ...(writerRulesOn ? { maxTokens: 2000, requireSections: true } : {}),
     });
     if (!generated.ok) {
