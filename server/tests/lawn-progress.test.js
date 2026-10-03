@@ -499,12 +499,12 @@ describe('overall direction', () => {
 });
 
 describe('output shape', () => {
-  it('names roles and rows, never a brand name, and flags rows the owner has not approved', () => {
+  it('names roles and rows, never a brand name, and carries each row\'s owner approval', () => {
     const progress = run({ days: 30, applied: Object.values(PRODUCT), checks: [{ key: 'weeds', status: 'watch' }], cur: { weed_suppression: 85 } });
     const json = JSON.stringify(progress);
     for (const app of Object.values(PRODUCT)) expect(json).not.toContain(app.name);
     for (const it of progress.items.filter((i) => i.kind === 'applied')) {
-      expect(it.approved).toBe(false); // every P10 row ships unapproved
+      expect(it.approved).toBe(true); // owner approved every P10 row 2026-10-02
       expect(typeof it.appliesTo).toBe('string');
     }
   });
