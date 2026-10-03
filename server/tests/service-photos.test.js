@@ -76,6 +76,49 @@ function makeKnex({ existing = null, insertError = null, isTransaction = false, 
   return knex;
 }
 
+function makeVisitUploadKnex({ transactionError = null, existingStaged = null, serviceRecordId = null } = {}) {
+  const visit = {
+    id: 'visit-1', customer_id: 'customer-1', property_id: 'property-1',
+    technician_id: 'tech-1', scheduled_date: '2026-10-02', status: 'on_site',
+  };
+  let insertPayload = null;
+  const trx = jest.fn((table) => {
+    const chain = {
+      where: jest.fn(() => chain),
+      whereNotNull: jest.fn(() => chain),
+      orderBy: jest.fn(() => chain),
+      orderByRaw: jest.fn(() => chain),
+      forUpdate: jest.fn(() => chain),
+      select: jest.fn(() => chain),
+      columnInfo: jest.fn(async () => ({})),
+      first: jest.fn(async () => {
+        if (table === 'scheduled_services') return visit;
+        if (table === 'service_records') return serviceRecordId ? { id: serviceRecordId } : null;
+        if (table === 'scheduled_service_photo_staging') return existingStaged;
+        return null;
+      }),
+      insert: jest.fn((payload) => { insertPayload = payload; return chain; }),
+      returning: jest.fn(async (fields) => {
+        const saved = { id: 'uploaded-photo-1', ...insertPayload };
+        return [fields === '*'
+          ? saved
+          : Object.fromEntries(fields.map((field) => [field, saved[field]]))];
+      }),
+      update: jest.fn(() => chain),
+    };
+    return chain;
+  });
+  trx.isTransaction = true;
+  const knex = jest.fn((table) => trx(table));
+  knex.transaction = jest.fn(async (handler) => {
+    const result = await handler(trx);
+    if (transactionError) throw transactionError;
+    return result;
+  });
+  knex.visit = visit;
+  return knex;
+}
+
 function makePromotionKnex({ staged = [], existingHash = null } = {}) {
   const inserts = [];
   let deleted = false;
@@ -143,10 +186,10 @@ describe('service photo uploads', () => {
     const expected = servicePhotoVisitSnapshot(visit);
     expect(parseExpectedServicePhotoVisit(JSON.stringify(expected))).toEqual(expected);
     expect(servicePhotoVisitChanged(expected, visit)).toBe(false);
-    for (const status of ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site', 'completed']) {
+    for (const status of ['pending', 'confirmed', 'en_route', 'on_site', 'completed']) {
       expect(servicePhotoVisitChanged(expected, { ...visit, status })).toBe(false);
     }
-    for (const status of ['cancelled', 'skipped', 'unknown_terminal']) {
+    for (const status of ['cancelled', 'skipped', 'rescheduled', 'unknown_terminal']) {
       expect(servicePhotoVisitChanged(expected, { ...visit, status })).toBe(true);
     }
     expect(servicePhotoVisitChanged(expected, { ...visit, property_id: 'property-2' })).toBe(true);
@@ -316,6 +359,48 @@ describe('service photo uploads', () => {
       photo_type: 'before',
       image_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
+  });
+
+  test('removes only new staged and completed objects when the visit transaction fails after insert', async () => {
+    const { servicePhotoVisitSnapshot, uploadServicePhotoForVisit } = require('../services/service-photos');
+    const commitError = new Error('transaction commit failed');
+    const upload = (knex, photoType = 'before') => uploadServicePhotoForVisit({
+      scheduledServiceId: knex.visit.id,
+      actor: { techRole: 'admin', technicianId: 'tech-1' },
+      expectedVisit: servicePhotoVisitSnapshot(knex.visit),
+      buffer: Buffer.from(`${photoType} photo`),
+      originalName: `${photoType}.jpg`,
+      mimeType: 'image/jpeg',
+      photoType,
+      knex,
+    });
+    const knex = makeVisitUploadKnex({ transactionError: commitError });
+
+    await expect(upload(knex)).rejects.toBe(commitError);
+
+    expect(mockS3Send.mock.calls.map((call) => call[0].constructor.name)).toEqual([
+      'PutObjectCommand',
+      'DeleteObjectCommand',
+    ]);
+    expect(mockS3Send.mock.calls[1][0].input.Key).toBe(mockS3Send.mock.calls[0][0].input.Key);
+
+    mockS3Send.mockClear();
+    mockS3Send.mockResolvedValueOnce({});
+    mockS3Send.mockRejectedValueOnce(new Error('cleanup failed'));
+    const completed = makeVisitUploadKnex({ transactionError: commitError, serviceRecordId: 'record-1' });
+    await expect(upload(completed, 'after')).rejects.toBe(commitError);
+    expect(mockS3Send.mock.calls.map((call) => call[0].constructor.name)).toEqual([
+      'PutObjectCommand',
+      'DeleteObjectCommand',
+    ]);
+    expect(mockS3Send.mock.calls[1][0].input.Key).toBe(mockS3Send.mock.calls[0][0].input.Key);
+
+    mockS3Send.mockClear();
+    const deduped = makeVisitUploadKnex({ transactionError: commitError, existingStaged: {
+      id: 'existing-photo', s3_key: 'service-photo-staging/visit-1/existing.jpg',
+    } });
+    await expect(upload(deduped)).rejects.toBe(commitError);
+    expect(mockS3Send).not.toHaveBeenCalled();
   });
 
   test('rejects banned customer-facing wording in field photo captions', () => {

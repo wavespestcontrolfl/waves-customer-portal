@@ -119,7 +119,7 @@ function parseExpectedServicePhotoVisit(value) {
 
 const sameVisitValue = (left, right) => String(left ?? '') === String(right ?? '');
 const SERVICE_PHOTO_LIVE_STATUSES = new Set([
-  'pending', 'confirmed', 'rescheduled', 'en_route', 'on_site', 'completed',
+  'pending', 'confirmed', 'en_route', 'on_site', 'completed',
 ]);
 function servicePhotoVisitChanged(expected, visit) {
   if (!expected) return false;
@@ -131,7 +131,7 @@ function servicePhotoVisitChanged(expected, visit) {
     || expected.revision !== live.revision) return true;
   // Lifecycle can advance while a selected file is waiting or retrying. The
   // identity fields above still bind the bytes to the same visit; only a
-  // cancelled/skipped or otherwise unknown terminal state closes uploads.
+  // cancelled/skipped/rescheduled or an unknown terminal state closes uploads.
   return !SERVICE_PHOTO_LIVE_STATUSES.has(String(live.status || ''));
 }
 
@@ -227,6 +227,7 @@ async function uploadServicePhotoBuffer({
   appVersion,
   aiTags,
   annotation,
+  newlyUploadedObjects,
   knex = db,
 }) {
   if (!serviceRecordId) {
@@ -353,6 +354,7 @@ async function uploadServicePhotoBuffer({
   }
 
   if (reusedExisting) await deleteUploadedObject(key);
+  else if (Array.isArray(newlyUploadedObjects)) newlyUploadedObjects.push({ s3_key: key });
   return row;
 }
 
@@ -368,6 +370,7 @@ async function uploadStagedServicePhotoBuffer({
   gpsLat,
   gpsLng,
   capturedAt,
+  newlyUploadedObjects,
   knex = db,
 }) {
   if (!scheduledServiceId || !technicianId) {
@@ -424,6 +427,7 @@ async function uploadStagedServicePhotoBuffer({
       captured_at: dateOrNow(capturedAt),
       image_sha256: imageHash,
     }).returning('*');
+    if (Array.isArray(newlyUploadedObjects)) newlyUploadedObjects.push({ s3_key: key });
     return row;
   } catch (err) {
     await deleteUploadedObject(key);
@@ -465,6 +469,7 @@ async function uploadServicePhotoForVisit({
   knex = db,
 }) {
   const expected = parseExpectedServicePhotoVisit(expectedVisit);
+  const newlyUploadedObjects = [];
   return withPhotoDbTransaction(knex, async (trx) => {
     const visit = await trx('scheduled_services')
       .where({ id: scheduledServiceId })
@@ -512,6 +517,7 @@ async function uploadServicePhotoForVisit({
         appVersion,
         aiTags,
         annotation,
+        newlyUploadedObjects,
         knex: trx,
       });
       return {
@@ -535,6 +541,7 @@ async function uploadServicePhotoForVisit({
       gpsLat,
       gpsLng,
       capturedAt,
+      newlyUploadedObjects,
       knex: trx,
     });
     return {
@@ -544,6 +551,13 @@ async function uploadServicePhotoForVisit({
       serviceRecordId: null,
       visit: servicePhotoVisitSnapshot(visit),
     };
+  }).catch(async (err) => {
+    // The inner upload helpers can clean up insert-time failures, but their
+    // success still precedes this outer transaction's commit. If that commit
+    // rolls back, remove only objects created by this attempt; deduped rows
+    // are deliberately absent from this list.
+    await cleanupUploadedServicePhotoObjects(newlyUploadedObjects);
+    throw err;
   });
 }
 
