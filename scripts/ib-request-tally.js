@@ -29,6 +29,8 @@
  *   - public estimate Q&A rows share the table (a turn that called
  *     public_estimate_ask); they are customer traffic, not operator turns, and
  *     are left out of every count here
+ *   - a failed call shows its machine code in brackets when the bar recorded
+ *     one (since October 3, 2026); earlier failures and uncoded ones show none
  *   - tool_health_events records a read when it runs and a carded write when
  *     it is PROPOSED; the confirmed write records no health event. With
  *     owner-direct on, a direct write records its health event as it
@@ -91,16 +93,28 @@ const TURNS_SQL = `
   order by 1, 2
 `;
 
+// `codes` counts each failed call's machine code (metadata.code, written by the
+// bar route for a coded refusal); the error text itself is never read.
 const FAILURES_SQL = `
   select
-    e.tool_name as tool,
-    count(*)::int as events,
-    (count(*) filter (where e.success = false))::int as failures,
-    (count(*) filter (where e.circuit_open))::int as circuit_open
-  from tool_health_events e
-  where e.created_at >= now() - make_interval(days => ?)
-    and e.source = any(?)
-  group by 1
+    g.tool,
+    sum(g.n)::int as events,
+    coalesce(sum(g.n) filter (where g.success = false), 0)::int as failures,
+    sum(g.circuit_open)::int as circuit_open,
+    coalesce(jsonb_object_agg(g.code, g.n) filter (where g.success = false and g.code is not null), '{}'::jsonb) as codes
+  from (
+    select
+      e.tool_name as tool,
+      e.success,
+      e.metadata->>'code' as code,
+      count(*)::int as n,
+      (count(*) filter (where e.circuit_open))::int as circuit_open
+    from tool_health_events e
+    where e.created_at >= now() - make_interval(days => ?)
+      and e.source = any(?)
+    group by 1, 2, 3
+  ) g
+  group by g.tool
   order by failures desc, events desc, 1
 `;
 
@@ -220,13 +234,19 @@ function formatText(report) {
   lines.push('');
   lines.push('Tool-call health events per tool (tool_health_events: reads, card proposals, and, with owner-direct on, direct writes as they execute, so a failed direct write also appears under committed outcomes)');
   if (!report.summary.failures.length) lines.push('  (no health events in the window)');
-  for (const f of report.summary.failures) lines.push(`  ${String(f.failures).padStart(5)} failed / ${String(f.events).padStart(6)} events  ${f.tool}${f.circuit_open ? `  (circuit open on ${f.circuit_open})` : ''}`);
+  for (const f of report.summary.failures) lines.push(`  ${String(f.failures).padStart(5)} failed / ${String(f.events).padStart(6)} events  ${f.tool}${f.circuit_open ? `  (circuit open on ${f.circuit_open})` : ''}${failureCodes(f)}`);
   lines.push('');
   lines.push('Committed-write outcomes per tool (ib_pending_actions consumed rows: a Confirm click, or an owner-direct commit with no card)');
   const confirmed = report.summary.confirmed || [];
   if (!confirmed.length) lines.push('  (no committed writes in the window)');
   for (const c of confirmed) lines.push(`  ${String(c.succeeded).padStart(5)} succeeded / ${String(c.failed).padStart(5)} failed / ${String(c.partial).padStart(4)} partial / ${String(c.unknown).padStart(4)} unknown / ${String(c.confirmed).padStart(6)} committed  ${c.tool}`);
   return lines.join('\n');
+}
+
+// "  [capability_not_loaded x3, invalid_input x1]" for the failed calls that recorded a code.
+function failureCodes(f) {
+  const codes = Object.entries(f.codes || {}).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  return codes.length ? `  [${codes.map(([code, n]) => `${code} x${n}`).join(', ')}]` : '';
 }
 
 async function collect(db, days) {
