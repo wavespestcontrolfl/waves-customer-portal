@@ -12,7 +12,9 @@ import {
 } from "../../../components/ui";
 import { adminFetch } from "../../../utils/admin-fetch";
 
-export default function KnowledgeQuestionDialog({ open, onClose }) {
+// `canFileBack`: filing an answer into the wiki is an owner-only write
+// (staff allow-list, 2026-10-02); a technician may still ask and read answers.
+export default function KnowledgeQuestionDialog({ open, onClose, canFileBack = true }) {
   const [question, setQuestion] = useState("");
   const [result, setResult] = useState(null);
   const [asking, setAsking] = useState(false);
@@ -130,7 +132,7 @@ export default function KnowledgeQuestionDialog({ open, onClose }) {
                 >
                   Incomplete
                 </Button>
-                {!result.filedBack && (
+                {canFileBack && !result.filedBack && (
                   result.queryId ? (
                     <Button
                       variant="secondary"
@@ -149,13 +151,13 @@ export default function KnowledgeQuestionDialog({ open, onClose }) {
                     </Button>
                   )
                 )}
-                {result.filedBack && (
+                {canFileBack && result.filedBack && (
                   <span className="self-center text-ui-caption text-ink-secondary">
                     Filed
                   </span>
                 )}
               </div>
-              {!result.filedBack && !result.queryId && (
+              {canFileBack && !result.filedBack && !result.queryId && (
                 <p
                   id="wiki-file-back-unavailable"
                   className="text-ui-caption text-ink-secondary"

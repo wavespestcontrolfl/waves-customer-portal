@@ -194,7 +194,7 @@ export default function EquipmentPage() {
       key: g.key,
       label: g.label,
       Icon: g.Icon
-    }))} activeKey={activeGroup.key} onSectionChange={handleSectionChange} ariaLabel="Equipment section" navGridClassName="grid-cols-2 lg:grid-cols-4" action={tab === "assets" ? {
+    }))} activeKey={activeGroup.key} onSectionChange={handleSectionChange} ariaLabel="Equipment section" navGridClassName="grid-cols-2 lg:grid-cols-4" action={tab === "assets" && isAdminRole ? {
       label: "Add Equipment",
       icon: Plus,
       onClick: event => {
@@ -218,12 +218,16 @@ export default function EquipmentPage() {
         })}
           </TabList>
         </Tabs>}
-      {tab === "assets" && <EquipmentTab showToast={showToast} editing={editing} setEditing={setEditing} />}
-      {tab === "maintenance" && <EquipmentMaintenancePage key="maintenance" embedded initialTab="fleet" />}
+      {/* Equipment is READ-ONLY for a technician (staff allow-list, 2026-10-02):
+          create/edit, maintenance logging, mileage, alert resolution and mix
+          recalculation are owner-only writes. Calibration entry and
+          verification stay open to a technician (owner 2026-10-03). */}
+      {tab === "assets" && <EquipmentTab showToast={showToast} editing={editing} setEditing={setEditing} canEdit={isAdminRole} />}
+      {tab === "maintenance" && <EquipmentMaintenancePage key="maintenance" embedded initialTab="fleet" readOnly={!isAdminRole} />}
       {tab === "analytics" && isAdminRole && <EquipmentMaintenancePage key="analytics" embedded initialTab="analytics" />}
-      {tab === "tank-mixes" && <TankMixTab showToast={showToast} />}
+      {tab === "tank-mixes" && <TankMixTab showToast={showToast} canEdit={isAdminRole} />}
       {tab === "job-costs" && isAdminRole && <JobCostTab />}
-      {tab === "calibrations" && <EquipmentCalibrationPanel />}
+      {tab === "calibrations" && <EquipmentCalibrationPanel readOnly={!isAdminRole} />}
       {toast && <Card role="status" className="pointer-events-none fixed z-[300] right-4 bottom-[calc(80px+env(safe-area-inset-bottom))] sm:bottom-5 max-w-[calc(100vw-32px)] px-4 py-3">
           {toast}
         </Card>}
@@ -254,7 +258,8 @@ const EMPTY_EQUIP = {
 function EquipmentTab({
   showToast,
   editing,
-  setEditing
+  setEditing,
+  canEdit = true
 }) {
   const actionRef = useRef(false);
   const [actionError, setActionError] = useState("");
@@ -388,7 +393,7 @@ function EquipmentTab({
                   <Badge tone={STATUS_COLORS[e.status] === "#C8312F" ? "alert" : "neutral"}>
                     {e.status}
                   </Badge>{" "}
-                  <Button onClick={event => {
+                  {canEdit && <Button onClick={event => {
                 event.currentTarget.focus({
                   preventScroll: true
                 });
@@ -402,7 +407,7 @@ function EquipmentTab({
                 });
               }} type="button" variant="secondary" className="min-w-11" disabled={saving}>
                     Edit
-                  </Button>{" "}
+                  </Button>}{" "}
                 </div>{" "}
               </div>{" "}
               <div style={{
@@ -544,7 +549,8 @@ function EquipmentEditModal({
 // ── Tank Mix Tab ──
 // ── Tank Mix Tab ──
 function TankMixTab({
-  showToast
+  showToast,
+  canEdit = true
 }) {
   const actionRef = useRef(false);
   const [actionError, setActionError] = useState("");
@@ -690,9 +696,9 @@ function TankMixTab({
                           incomplete — unpriced component excluded
                         </div>}{" "}
                     </div>{" "}
-                    <Button onClick={() => recalculate(m.id)} type="button" variant="secondary" className="min-w-11" disabled={!!pendingAction} loading={pendingAction === m.id}>
+                    {canEdit && <Button onClick={() => recalculate(m.id)} type="button" variant="secondary" className="min-w-11" disabled={!!pendingAction} loading={pendingAction === m.id}>
                       Recalc
-                    </Button>{" "}
+                    </Button>}{" "}
                   </div>{" "}
                 </div>{" "}
                 <div style={{

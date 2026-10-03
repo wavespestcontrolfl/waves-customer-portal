@@ -33,6 +33,7 @@ import { createPortal } from 'react-dom';
 import AddressAutocomplete from '../AddressAutocomplete';
 import EstimateProvenanceCard from './EstimateProvenanceCard';
 import useModalFocus from '../../hooks/useModalFocus';
+import { useCanAccessCalls } from '../../hooks/useStaffCallAccess';
 import SlotConflictNotice from './SlotConflictNotice';
 import CallBookingConflictNotice from './CallBookingConflictNotice';
 import { useSlotConflicts } from './useSlotConflicts';
@@ -1605,7 +1606,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [propertyRefresh, setPropertyRefresh] = useState(0);
   // Wait for the selected customer's advisory address card before enabling
   // submit, so a slow warning cannot arrive just after booking.
-  const { addressAsk, addressAskPending, setAddressAsk } = useAddressAskLookup(selectedCustomer?.id);
+  // The address ask is derived from a call and read from /admin/triage, an
+  // owner-only route (technician allow-list, 2026-10-02): a technician login
+  // neither looks it up nor re-checks it at submit.
+  const canReadAddressAsk = useCanAccessCalls();
+  const { addressAsk, addressAskPending, setAddressAsk } = useAddressAskLookup(canReadAddressAsk ? selectedCustomer?.id : null);
   const addressAskNoticeRef = useRef(null);
   const propertyPickerActive = bookingPropertyState === 'ready';
   const selectedBookingProperty = propertyPickerActive
@@ -4054,11 +4059,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       const recheckController = new AbortController();
       addressSubmitRecheckRef.current?.controller.abort();
       addressSubmitRecheckRef.current = { customerId: submitCustomerId, controller: recheckController };
-      const freshAddressAsk = await recheckAddressAskAtSubmit({
-        customerId: submitCustomerId,
-        seenNotice: addressAsk,
-        signal: recheckController.signal,
-      });
+      const freshAddressAsk = canReadAddressAsk
+        ? await recheckAddressAskAtSubmit({
+          customerId: submitCustomerId,
+          seenNotice: addressAsk,
+          signal: recheckController.signal,
+        })
+        : { status: 'idle', notice: null, changed: false };
       if (addressSubmitRecheckRef.current?.controller === recheckController) {
         addressSubmitRecheckRef.current = null;
       }
