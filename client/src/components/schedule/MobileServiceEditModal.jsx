@@ -145,8 +145,13 @@ export default function MobileServiceEditModal({
       }
       // Advisory schedule-overlap notes — the save committed (conflicts no
       // longer block admin edits); say what now stacks before closing.
-      if (Array.isArray(result?.warnings) && result.warnings.length) {
-        showScheduleSaveNotice(`Saved.\n\n${result.warnings.join('\n\n')}`);
+      // ...including the ones a whole-stop change returns on its own answer.
+      const savedWarnings = [
+        ...(Array.isArray(result?.warnings) ? result.warnings : []),
+        ...(result?.comboMove?.moved === true && Array.isArray(result.comboMove.warnings) ? result.comboMove.warnings : []),
+      ];
+      if (savedWarnings.length) {
+        showScheduleSaveNotice(`Saved.\n\n${savedWarnings.join('\n\n')}`);
       }
       onSaved?.();
     } catch (e) {

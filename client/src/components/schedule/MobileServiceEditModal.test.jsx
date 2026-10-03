@@ -57,7 +57,7 @@ describe('MobileServiceEditModal save payload', () => {
   it('a refused change on a shared stop asks whole stop or separate, and the answer rides the next save', async () => {
     const answers = [
       new Response(JSON.stringify({ error: 'This service is grouped with another at the same stop.', code: 'VISIT_EDIT_SCHEDULE_UNSUPPORTED' }), { status: 409 }),
-      new Response(JSON.stringify({ success: true, comboMove: { moved: true } }), { status: 200 }),
+      new Response(JSON.stringify({ success: true, comboMove: { moved: true, warnings: ['Fixture overlap warning.'] } }), { status: 200 }),
     ];
     fetch.mockImplementation(async () => answers.shift());
     const onSaved = vi.fn();
@@ -71,6 +71,8 @@ describe('MobileServiceEditModal save payload', () => {
     const puts = fetch.mock.calls.filter(([, opts]) => opts?.method === 'PUT').map(([, opts]) => JSON.parse(opts.body));
     expect(puts[0]).not.toHaveProperty('comboMove');
     expect(puts[1].comboMove).toBe('together');
+    // A warning the whole-stop change returned (a double booking) is shown.
+    expect(saveNotice.shown).toEqual(['Saved.\n\nFixture overlap warning.']);
   });
 
   it('a whole-stop change that was partly done, did not confirm, or was refused is reported as that', async () => {
