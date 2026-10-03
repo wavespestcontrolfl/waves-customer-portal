@@ -263,6 +263,9 @@ async function sendNoticeEmail({ customer, idempotencyKeyBase, vars, templateKey
 // with a template/provider failure is retryable, no phone is not.
 async function sendNoticeSms({ customer, vars, actorId, hasEmailLeg, operatorInitiated = false, sendOptions, requireAccepted = false }) {
   let attempted = false;
+  // Set once the canonical sender is about to be called: a failure before that
+  // (template missing/inactive, rendering threw) never reached any provider.
+  let reachedSender = false;
   try {
     const { renderSmsTemplate } = require('./sms-template-renderer');
     const { sendCustomerMessage } = require('./messaging/send-customer-message');
@@ -275,7 +278,8 @@ async function sendNoticeSms({ customer, vars, actorId, hasEmailLeg, operatorIni
       effective_date: vars.effective_date,
       price_change_url: vars.price_change_url,
     }, { workflow: 'price_change_notice', entity_type: 'customer', entity_id: customer.id });
-    if (!body) return { sent: false, attempted };
+    if (!body) return { sent: false, attempted, definiteNonSend: true };
+    reachedSender = true;
     // A caller's own metadata keys (the rate review letter's marker for the
     // locked SMS handoff) ride along without replacing the base metadata.
     const { metadata: callerMetadata, ...callerOptions } = sendOptions || {};
@@ -317,7 +321,7 @@ async function sendNoticeSms({ customer, vars, actorId, hasEmailLeg, operatorIni
     return { sent: !!res.sent, attempted };
   } catch (err) {
     logger.error(`[price-change] SMS failed for customer ${customer.id}: ${err.message}`);
-    return { sent: false, attempted };
+    return { sent: false, attempted, ...(attempted && !reachedSender ? { definiteNonSend: true } : {}) };
   }
 }
 

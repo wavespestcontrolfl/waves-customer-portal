@@ -762,6 +762,19 @@ describe('customer surfaces', () => {
     expect(notices()[0].status).toBe('send_uncertain');
   });
 
+  test('send: a text-only customer whose SMS could not be prepared (template missing/inactive) is released to a retryable draft, not parked as send_uncertain', async () => {
+    mockDb.reset(book({ customers: [customer(1, { email: null })] }));
+    emailLeg.mockResolvedValue({ sent: false, attempted: false });
+    smsLeg.mockResolvedValue({ sent: false, attempted: true, definiteNonSend: true });
+    expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).toMatchObject({ sent: 0, failed: 1, uncertain: 0 });
+    expect(notices()[0]).toMatchObject({ status: 'draft', sent_at: null });
+    expect(JSON.parse(notices()[0].metadata).send_hold.reason).toBe('sms_not_prepared');
+    // an ambiguous failure of the sender itself still parks
+    mockDb.reset(book({ customers: [customer(1, { email: null })] }));
+    smsLeg.mockResolvedValue({ sent: false, attempted: true });
+    expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).toMatchObject({ uncertain: 1 });
+  });
+
   test('send: a notice repointed between provider acceptance and the delivery stamp is settled — never reported sent, never left sending; the stamp holds the comms fence', async () => {
     mockDb.reset(book());
     const digest = await previewDigest();

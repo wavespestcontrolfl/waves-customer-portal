@@ -847,15 +847,18 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
     // A definite rejection from the email library (unconfigured, a hard
     // provider refusal) is a certain non-send: retryable, not ambiguous.
     const emailRejected = !!email.definiteNonSend && !emailHold;
-    const attempted = (email.attempted && !emailHold && !emailRejected) || sms.attempted;
-    const holdReason = emailHold || (emailRejected ? 'email_rejected' : null) || smsHold;
+    // ...and so is a text that failed in preparation (template missing or
+    // inactive, rendering threw): the sender was never called.
+    const smsNotPrepared = !!sms.definiteNonSend;
+    const attempted = (email.attempted && !emailHold && !emailRejected) || (sms.attempted && !smsNotPrepared);
+    const holdReason = emailHold || (emailRejected ? 'email_rejected' : null) || (smsNotPrepared ? 'sms_not_prepared' : null) || smsHold;
     // Nothing reached a provider and a leg was refused inside the fence
     // because the notice moved or the recipient changed: released to draft
     // with the named reason (the preview recomputes who it belongs to) —
     // never parked unreachable.
     if (holdReason && !attempted) {
       await settleLines(dbh, entry, { status: 'draft', keepFrozen: false, frozen, hold: holdReason });
-      return { outcome: emailRejected ? 'rejected' : 'in_flight', holdReason };
+      return { outcome: emailRejected || smsNotPrepared ? 'rejected' : 'in_flight', holdReason };
     }
     await settleLines(dbh, entry, { status: attempted ? UNCERTAIN : 'unreachable', keepFrozen: attempted, frozen, hold: holdReason });
     return { outcome: attempted ? 'uncertain' : 'unreachable' };

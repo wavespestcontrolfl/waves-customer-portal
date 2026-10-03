@@ -509,3 +509,21 @@ describe('sendNoticeEmail definite-non-send classification', () => {
     expect(await sendNoticeEmail(args)).toEqual({ sent: false, attempted: true });
   });
 });
+
+describe('sendNoticeSms preparation failures are certain non-sends', () => {
+  const args = { customer: CUSTOMER, vars: { effective_date: 'December 10, 2026', price_change_url: 'waves.test/p/abc' }, hasEmailLeg: false };
+  it('a template that renders nothing (missing or inactive) never reached the sender', async () => {
+    renderSmsTemplate.mockResolvedValue(null);
+    expect(await sendNoticeSms(args)).toEqual({ sent: false, attempted: true, definiteNonSend: true });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+  it('a rendering throw never reached the sender', async () => {
+    renderSmsTemplate.mockRejectedValue(new Error('template exploded'));
+    expect(await sendNoticeSms(args)).toEqual({ sent: false, attempted: true, definiteNonSend: true });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+  it('a throw from the canonical sender itself stays ambiguous', async () => {
+    sendCustomerMessage.mockRejectedValue(new Error('socket hang up'));
+    expect(await sendNoticeSms(args)).toEqual({ sent: false, attempted: true });
+  });
+});
