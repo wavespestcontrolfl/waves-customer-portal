@@ -105,6 +105,9 @@ function summarizeOffers(offers, { moveTimes, bookingTimes, now, observedAt }) {
  * past report never changes as the calendar moves on. A move made in the
  * admin Edit form logs nothing and counts as unmatched (the report says so).
  */
+// reschedule_log.initiated_by values for moves no person asked for.
+const AUTOMATIC_MOVE_INITIATORS = Object.freeze(['system', 'machine', 'auto_dispatch', 'weather_auto', 'admin_bulk']);
+
 // A logged move of `visitId` into date + start, inside [t0, t0 + 48h].
 function movedInto(movesByVisit, visitId, t0, date, start) {
   return (movesByVisit.get(String(visitId || '')) || []).some((m) => {
@@ -260,8 +263,12 @@ async function loadMovesForScoring(dbh, decisions, offers) {
     first = Math.min(first, new Date(o.sent_at).getTime());
   }
   if (!ids.size) return new Map();
+  // Only moves that can be someone's answer to an offer: the system's own
+  // placements (weather, auto-dispatch, bulk and machine moves) are not.
   const rows = await dbh('reschedule_log').whereIn('scheduled_service_id', [...ids])
-    .where('created_at', '>=', new Date(first)).select('scheduled_service_id', 'created_at', 'new_date', 'new_window');
+    .where('created_at', '>=', new Date(first))
+    .where((q) => q.whereNull('initiated_by').orWhereNotIn('initiated_by', AUTOMATIC_MOVE_INITIATORS))
+    .select('scheduled_service_id', 'created_at', 'new_date', 'new_window');
   const map = new Map();
   for (const r of rows) {
     const key = String(r.scheduled_service_id);
@@ -317,4 +324,4 @@ async function loadFunnel({ since, until = new Date(), dbh = require('../models/
   return summarizeFunnel({ inbound, moves, cancels, bookings, offers, decisions, offerDecisions, movesByVisit, now: to, observedAt });
 }
 
-module.exports = { loadFunnel, summarizeFunnel, summarizeDecisions, summarizeRecall, parseReportInstant, formatReportDate, isSchedulingText, weekOf, FOLLOW_WINDOW_MS };
+module.exports = { loadFunnel, summarizeFunnel, summarizeDecisions, summarizeRecall, AUTOMATIC_MOVE_INITIATORS, parseReportInstant, formatReportDate, isSchedulingText, weekOf, FOLLOW_WINDOW_MS };

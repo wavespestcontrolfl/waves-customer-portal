@@ -134,12 +134,24 @@ describeOrSkip('sms_offer_decisions on PostgreSQL', () => {
     expect(run.mock.calls.map((c) => c[0].inboundSmsLogId)).toEqual([inboundId]);
   }));
 
-  test('the sweep leaves a reply the webhook could have decided (its offer was recorded before it)', () => inTrx(async (trx) => {
-    const { offerId } = await seed(trx);
+  test('the sweep recovers a reply whose webhook decision was lost (its offer was recorded before it)', () => inTrx(async (trx) => {
+    const { offerId, inboundId } = await seed(trx);
     await trx('sms_offers').where({ id: offerId }).update({ created_at: new Date('2040-03-01T13:00:01Z') });
     const run = jest.fn(async () => ({ recorded: true }));
     await decide.sweepUndecidedReplies({ now: new Date('2040-03-01T15:10:00Z'), dbh: trx, run });
-    expect(run).not.toHaveBeenCalled();
+    expect(run.mock.calls.map((c) => c[0].inboundSmsLogId)).toEqual([inboundId]);
+  }));
+
+  test('one decision per text, even across two offers', () => inTrx(async (trx) => {
+    const { customerId, offerId, inboundId } = await seed(trx);
+    const [d2] = await trx('agent_decisions').insert({ workflow: 'sms_reply', agent_name: 'decide-test', decision_version: 'test', suggested_message: 'offer 2' }).returning('id');
+    const [o2] = await trx('sms_offers').insert({
+      agent_decision_id: d2.id || d2, phone_last10: PHONE.slice(-10), customer_id: customerId, kind: 'book_estimate',
+      slots: '[]', sent_at: new Date('2040-03-01T13:00:00Z'), expires_at: new Date('2040-03-03T13:00:00Z'), status: 'open',
+    }).returning('id');
+    await trx('sms_offer_decisions').insert({ sms_offer_id: offerId, inbound_sms_log_id: inboundId, outcome: 'no_action' });
+    await expect(trx.transaction((sp) => sp('sms_offer_decisions').insert({ sms_offer_id: o2.id || o2, inbound_sms_log_id: inboundId, outcome: 'staff' })))
+      .rejects.toThrow(/sms_offer_decisions_one_per_inbound/);
   }));
 
   test('the sweep leaves a reply the reminder reply handler answered, even when its retype failed', () => inTrx(async (trx) => {

@@ -101,6 +101,8 @@ describe('evaluateDecision', () => {
     ['visit_changed_since_offer', { offer: { ...OFFER, visit_snapshot: { ...OFFER.visit_snapshot, status: 'pending' } } }],
     ['no_visit_snapshot', { offer: { ...OFFER, visit_snapshot: null } }],
     ['portal_request_open', { portalRequestOpen: true }],
+    ['reminder_offer_pending', { reminderOfferPending: true }],
+    ['slot_off_hour', { offer: { ...OFFER, slots: [{ ...SLOTS[0], start: '09:30' }] } }],
     ['ambiguous_slot', { ambiguousSlot: true }],
     ['visit_changed_near_send', { offer: { ...OFFER, visit_snapshot: { ...OFFER.visit_snapshot, updated_at: '2026-10-02T13:00:00.500Z' } } }],
     ['visit_changed_near_send', { offer: { ...OFFER, visit_snapshot: { ...OFFER.visit_snapshot, updated_at: null } } }],

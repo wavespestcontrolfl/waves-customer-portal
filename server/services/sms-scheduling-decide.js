@@ -222,6 +222,9 @@ function snapshotRefusal(offer, visit) {
 const SLOT_CHECKS = [
   ['slot_out_of_range', (c) => !c.slot],
   ['slot_unresolved', (c) => Boolean(c.slot) && (!c.slot.date || !c.slot.start)],
+  // Hourly windows only (owner 2026-09-30): a start off the hour is refused,
+  // never rounded to one the customer did not pick.
+  ['slot_off_hour', (c) => Boolean(c.slot?.start) && !/^\d{2}:00$/.test(c.slot.start)],
   ['slot_in_past', (c) => slotStarted(c.slot, c.now)],
   ['slot_no_longer_open', (c) => c.slotStillOpen?.ok === false],
   // The same time on two standing offers: "Tuesday at 10 works" does not say
@@ -238,6 +241,9 @@ const VISIT_CHECKS = [
   // A staff-owned schedule-change request for this visit may name a newer
   // preferred date (the call-reschedule mover's same fence).
   ['portal_request_open', (c) => Boolean(c.portalRequestOpen)],
+  // An unanswered reminder reply-1/2 offer stays actionable for 7 days: a
+  // later "1" would move the visit again (the call-reschedule mover's fence).
+  ['reminder_offer_pending', (c) => Boolean(c.reminderOfferPending)],
   ['visit_changed_during_decide', (c) => c.visitAfter !== undefined && !sameVisitShape(visitShape(c.visit), visitShape(c.visitAfter))],
 ];
 const failing = (checks, c) => checks.filter(([, applies]) => applies(c)).map(([reason]) => reason);
@@ -274,6 +280,7 @@ function plannedAction(c, target) {
  *   visitAfter         the same visit read again after it answered
  *   movedSinceOffer    a reschedule_log row for the visit after the offer went out
  *   portalRequestOpen  an open staff schedule-change request for the visit
+ *   reminderOfferPending an unanswered reminder reply-1/2 offer for the visit
  *   ambiguousSlot      another standing offer carries the same date and start
  *   slotStillOpen      { ok, reason } from the picker recheck, or null when not run
  *   now                Date
@@ -381,7 +388,7 @@ async function classifyReply(llm, { offers, thread, inboundBody }) {
 }
 
 // Phase 3: the facts the code checks the answer against, read after it.
-async function assessFacts(dbh, { offer, decision, customer, visitsBefore }) {
+async function assessFacts(dbh, { offer, decision, customer, visitsBefore, now }) {
   // Who the decision is about: the customer of the offer the reply was
   // judged against (a household phone can hold offers for two records).
   // The webhook's primary-phone match is reused only when it is that
@@ -391,7 +398,7 @@ async function assessFacts(dbh, { offer, decision, customer, visitsBefore }) {
   const who = sameCustomer ? customer
     : ((offer.customer_id ? await dbh('customers').where({ id: offer.customer_id }).first('id', ...KNOWN_CALLER_PHONE_COLS) : null)
       || customer || { id: null });
-  const facts = { who, visit: null, visitAfter: undefined, movedSinceOffer: false, portalRequestOpen: false };
+  const facts = { who, visit: null, visitAfter: undefined, movedSinceOffer: false, portalRequestOpen: false, reminderOfferPending: false };
   if (decision?.action !== 'accept_slot' || offer.kind !== 'move_visit' || !offer.scheduled_service_id) return facts;
   facts.visit = visitsBefore.get(offer.scheduled_service_id) || null;
   // Read again now: a move that landed while the model was answering.
@@ -400,8 +407,11 @@ async function assessFacts(dbh, { offer, decision, customer, visitsBefore }) {
     .where({ scheduled_service_id: offer.scheduled_service_id })
     .where('created_at', '>', offer.sent_at)
     .first('id'));
+  const fences = require('./call-reschedule-apply');
   facts.portalRequestOpen = Boolean(offer.customer_id
-    && await require('./call-reschedule-apply').openPortalRequest(dbh, offer.customer_id, offer.scheduled_service_id));
+    && await fences.openPortalRequest(dbh, offer.customer_id, offer.scheduled_service_id));
+  facts.reminderOfferPending = Boolean(offer.customer_id
+    && await fences.pendingSmsOffer(dbh, offer.customer_id, offer.scheduled_service_id, now));
   return facts;
 }
 
@@ -423,11 +433,12 @@ async function runShadowDecision({ customer = null, inboundBody, inboundSmsLogId
     const pick = resolvePick(ctx.offers, decision);
     const offer = pick?.offer || ctx.offers[0];
     const slot = pick?.slot || null;
-    const facts = await assessFacts(dbh, { offer, decision, customer, visitsBefore: ctx.visitsBefore });
+    const facts = await assessFacts(dbh, { offer, decision, customer, visitsBefore: ctx.visitsBefore, now });
     const base = {
       offer, slot, decision, inboundBody, customer: facts.who, fromPhone, now,
       visit: facts.visit, visitAfter: facts.visitAfter, movedSinceOffer: facts.movedSinceOffer,
-      portalRequestOpen: facts.portalRequestOpen, ambiguousSlot: slotIsAmbiguous(ctx.offers, pick),
+      portalRequestOpen: facts.portalRequestOpen, reminderOfferPending: facts.reminderOfferPending,
+      ambiguousSlot: slotIsAmbiguous(ctx.offers, pick),
     };
     let verdict = evaluateDecision(base);
     // The picker recheck costs a scheduler call: run it only for an accept
@@ -463,7 +474,9 @@ async function recordDecision(dbh, { offer, inboundSmsLogId, who, result, route,
     error: verdict.outcome === 'error' ? String(result?.ok ? 'malformed_answer' : (result?.reason || 'no_result')).slice(0, 60) : null,
   };
   const [inserted] = await dbh('sms_offer_decisions').insert(row)
-    .onConflict(['sms_offer_id', 'inbound_sms_log_id']).ignore()
+    // One row per text (sms_offer_decisions_one_per_inbound) and per
+    // (offer, text): a race on either records once.
+    .onConflict().ignore()
     .returning('id');
   if (!inserted) return { recorded: false, reason: 'already_decided' };
   logger.info(`[sms-scheduling-decide] offer ${offer.id} → ${verdict.outcome}${verdict.refusals.length ? ` (${verdict.refusals.join(',')})` : ''}`);
@@ -516,14 +529,14 @@ async function sweepUndecidedReplies({ now = new Date(), dbh = db, run = runShad
         .whereNotExists(function decidedAlready() {
           this.select(dbh.raw('1')).from('sms_offer_decisions as d').whereRaw('d.inbound_sms_log_id = sl.id');
         })
-        // Only what the webhook could not decide: a reply that arrived
-        // before the offer it answers was RECORDED (the post-send ledger
-        // write, or its backfill, landed after it). Anything later was the
-        // webhook's to decide (or to leave, when another handler took it).
+        // Any ordinary reply with no decision yet: one that arrived before
+        // its offer was recorded, or one whose webhook decision was lost (a
+        // deploy or exit after the acknowledgement). Replies another handler
+        // took are excluded below by that handler's own durable record.
         .whereExists(function offered() {
           this.select(dbh.raw('1')).from('sms_offers as o')
             .whereRaw(`o.phone_last10 = ${phoneIdentitySql('sl.from_phone')}`)
-            .whereRaw('o.sent_at <= sl.created_at AND o.expires_at > sl.created_at AND o.created_at > sl.created_at')
+            .whereRaw('o.sent_at <= sl.created_at AND o.expires_at > sl.created_at')
             .whereRaw("(o.status = 'open' OR (o.status = 'superseded' AND o.closed_at > sl.created_at))");
         })
         // A reply the reminder reply-1/2 handler answered (its own durable
