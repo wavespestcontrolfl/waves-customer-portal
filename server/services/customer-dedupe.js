@@ -3362,6 +3362,10 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         // Winner values the merge deliberately NULLED (consent stamps) —
         // the prior values, keyed by column, for the undo to restore.
         winner_prior_values: winnerPriorValues,
+        // Same-address merges: where the merged-away person's phone went
+        // ({ status, slot, phone_key }) — the undo refuses a partial restore
+        // that would lift that phone's text hold (see revertMerge).
+        loser_phone_carry: predictedBackfills.phoneCarry.status === 'not_applicable' ? undefined : predictedBackfills.phoneCarry,
         // Loser customer_dunning_schedules episodes renumbered above the
         // winner's ([{ id, from, to }]; absent when none were). Audit only:
         // the undo moves those rows back by id and keeps the new numbers.
@@ -5368,6 +5372,17 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       if (checkSet.some(memberChangedSinceMerge)) {
         for (const f of group.fields) frozenGroupFields.add(f);
       }
+    }
+    // A merged-away person's phone this merge carried into a contact slot is
+    // held out of texting by the winner's service_preferences / consent-stamp
+    // state. If that slot was edited since the merge the undo would keep the
+    // slot (frozen above) yet still restore the winner's old stamp and
+    // preferences blob — lifting the hold from a phone that stays on the
+    // customer. Refuse that partial restore (409, zero writes) instead.
+    const phoneCarry = recorded.loser_phone_carry;
+    if (phoneCarry && phoneCarry.status === 'carried' && phoneCarry.slot >= 1 && phoneCarry.slot <= 3
+      && ATOMIC_FIELD_GROUPS[phoneCarry.slot].fields.some((f) => frozenGroupFields.has(f))) {
+      refuse("The merged-in phone's contact slot on the kept customer was edited since the merge — undoing now would lift its text hold from a phone that stays on that customer; restore or remove that contact first, then revert");
     }
     for (const [field, value] of Object.entries(backfills)) {
       if (REVERT_BACKFILL_CLEAR_EXCLUDED.has(field)) continue;

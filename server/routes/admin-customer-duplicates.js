@@ -581,6 +581,8 @@ router.get('/merges', async (req, res) => {
           // email/name-bound identity artifact probes (EMAIL_BOUND_SURFACES),
           // the billing-identity, address-clear and service-contact-clear
           // activity gates,
+          // a same-address merge's carried phone whose contact slot was
+          // edited since (the undo would lift its text hold),
           // non-invoice journaled-row activity (estimates / visits /
           // contracts updated_at), children minted by journaled estimates /
           // visits / contracts, since-merge recipient_optin rows,

@@ -215,6 +215,29 @@ maybeDescribe('same-address merge carries the phone, holds consent, and the undo
     expect(loserAfter.phone).toBe(loserPhone);
   });
 
+  test('undo refuses (409, nothing written) once the carried contact was edited, so its text hold is never lifted', async () => {
+    const { winnerId, loserId, loserPhone } = await pairAtNewAddress({
+      winnerExtra: {
+        service_contact_name: 'Pat', service_contact_phone: '+19415550177', service_contacts_consent_at: new Date(),
+        service_contacts_consent_source: 'call',
+      },
+      loserExtra: { service_contact_name: 'Quinn', service_contact_phone: '+19415550166' },
+    });
+    const result = await mergeSameAddress(winnerId, loserId);
+    // The winner already had a contact in slot 1 (so the existing slot-wise copy skips the loser's
+    // slot 1 and its stamp rule clears the winner's stamp): the new phone takes slot 2.
+    expect(result.phoneCarry).toMatchObject({ status: 'carried', slot: 2 });
+    await db('customers').where({ id: winnerId }).update({ service_contact2_name: 'Blake (edited)' });
+    const before = await db('customers').where({ id: winnerId }).first();
+    await expect(dedupe.revertMerge({ journalId: result.journalId, performedBy: 'test:undo', performedById: null }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/text hold/) });
+    const after = await db('customers').where({ id: winnerId }).first();
+    expect(after.service_contact2_phone).toBe(loserPhone);
+    expect(after.service_contacts_consent_at).toEqual(before.service_contacts_consent_at);
+    expect(after.service_preferences).toEqual(before.service_preferences);
+    expect((await db('customers').where({ id: loserId }).first()).deleted_at).not.toBeNull();
+  });
+
   test('no free slot: the merge still succeeds, the phone is left, and the result says so', async () => {
     const { winnerId, loserId } = await pairAtNewAddress({
       winnerExtra: {
