@@ -79,7 +79,7 @@ const { redactAccessCodes } = require('../services/context-aggregator');
 const { technicianReportCustomerCopy, containsReportAccessCode } = require('../services/service-report/technician-report-copy');
 const {
   TECHNICIAN_NOTE_HEADER, CUSTOMER_WORDS_HEADER, withheldProductsLine, writerRulesRejection,
-  activeIngredientsMentioned, bookedReasonBlock,
+  activeIngredientsMentioned, bookedReasonBlock, lawnResultTimingViolation,
 } = require('../services/service-report/report-writer-rules');
 const CompletionRecap = require('../services/completion-recap');
 const {
@@ -25889,11 +25889,16 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         }
       }
     }
+    // Lawn under GATE_LAWN_REPORT_COPY_V6 (P15): the prompt carried the
+    // RESULT TIMING rule, so the copy is screened for it too; any forward
+    // result timing is rejected (the report's "What to expect" owns timing).
+    const { LAWN_RESULT_TIMING_RULE } = require('../services/service-report/lawn-report-copy-prompt');
+    const lawnTimingOn = String(effectiveSystemPrompt || '').includes(LAWN_RESULT_TIMING_RULE);
     const writerRulesScreen = (text) => (writerRulesOn
       ? writerRulesRejection(text, {
         activeIngredients: visitActiveIngredients, allowedPhrases: writerAllowedPhrases, allowedDates: writerAllowedDates,
       })
-      : null);
+      : null) || (lawnTimingOn && lawnResultTimingViolation(text) ? 'lawn_timing' : null);
     const generated = await generateReportCopyWithFallback({
       systemPrompt: effectiveSystemPrompt,
       userMessage: fullUserMessage,
