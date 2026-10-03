@@ -1257,6 +1257,14 @@ class GoogleBusinessService {
         }
       });
     }
+    if (result.inserted) {
+      // Bad-review bell (GATE_REVIEW_ALERT, dark): a NEW 1-3 star review rings
+      // once; the helper owns the gate, the star and recency bar, and never throws.
+      await sideEffect('low-rating bell', () => require('./review-low-rating-alert').notifyLowRatingReview({
+        reviewId: result.id, starRating: row.star_rating, reviewerName: row.reviewer_name,
+        customerId: row.customer_id, reviewCreatedAt: row.review_created_at,
+      }));
+    }
     if (row.customer_id) {
       // A matched review means the customer left one — stop asking them.
       await sideEffect('suppression mark', () => this._markCustomerLeftReview(row.customer_id), (flipped) => !!(flipped && flipped.failed));
@@ -1624,6 +1632,14 @@ class GoogleBusinessService {
           return newId;
         });
         newCount++;
+        // Bad-review bell on the Places fallback insert too (GATE_REVIEW_ALERT,
+        // dark); same helper as the GBP feed path, so a review rings once.
+        if (placesReviewRowId) {
+          await require('./review-low-rating-alert').notifyLowRatingReview({
+            reviewId: placesReviewRowId, starRating: insertStarRating, reviewerName,
+            customerId, reviewCreatedAt: placesCreatedAt,
+          });
+        }
       }
       // Existing-link-first, matching the persisted field above: a late name
       // match must not suppress customer B's asks while the row stays linked
