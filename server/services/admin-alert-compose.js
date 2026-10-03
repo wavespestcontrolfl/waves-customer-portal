@@ -110,10 +110,13 @@ function validStructuredFields(spec = {}) {
 }
 
 // needs-you rings through notifyAdmin under the emitter's own category; broken belongs to
-// deliverOpsDigest (the Activity feed reads ops_digest rows only); fyi writes nothing.
+// deliverOpsDigest (the Activity feed reads ops_digest rows only); fyi writes nothing,
+// unless the owner has ruled that one specific FYI is worth a row: `opts.fyiRow` is that
+// per-emitter opt-in (the /book preferred-time auto-close, owner ruling 2026-10-01).
 // A violation in a live emitter never crashes its work and never drops a needs-you alert:
 // it rings with the headline cut to fit and the violations stamped. Tests rethrow.
-async function raiseAdminAlert(category, spec = {}, opts = {}) {
+async function raiseAdminAlert(category, spec = {}, rawOpts = {}) {
+  const { fyiRow = false, ...opts } = rawOpts;
   let composed;
   try {
     composed = composeAdminAlert(spec);
@@ -121,7 +124,7 @@ async function raiseAdminAlert(category, spec = {}, opts = {}) {
     const { severity } = spec;
     if (err.code !== RULE_CODE || process.env.NODE_ENV === 'test' || (severity !== 'needs-you' && severity !== 'fyi')) throw err;
     logger.warn(`[admin-alert] ${category} broke the notification rule: ${err.violations.join(', ')}`);
-    if (severity === 'fyi') return { id: null, suppressed: true, reason: 'fyi' };
+    if (severity === 'fyi' && !fyiRow) return { id: null, suppressed: true, reason: 'fyi' };
     return require('./notification-service').notifyAdmin(category, truncateAtWord([spec.area, spec.action].filter(Boolean).join(' — '), MAX_HEADLINE_CHARS), spec.why, {
       ...opts, ...(linkIsUsable(spec.link) ? { link: spec.link } : {}), metadata: { ...opts.metadata, ...validStructuredFields(spec), ruleViolations: err.violations },
     });
@@ -129,7 +132,7 @@ async function raiseAdminAlert(category, spec = {}, opts = {}) {
   if (spec.severity === 'broken') {
     throw ruleError(['broken_uses_ops_digest'], "A broken alert is not raised here: call deliverOpsDigest (server/services/ops-digest.js) with the composed headline and why as headline and summary and audience 'engineering'. The Activity feed reads ops_digest rows only.");
   }
-  if (spec.severity === 'fyi') return { id: null, suppressed: true, reason: 'fyi' };
+  if (spec.severity === 'fyi' && !fyiRow) return { id: null, suppressed: true, reason: 'fyi' };
   return require('./notification-service').notifyAdmin(category, composed.headline, composed.why, {
     ...opts, link: composed.link, metadata: { ...(opts.metadata || {}), ...composed.metadata },
   });
@@ -137,5 +140,5 @@ async function raiseAdminAlert(category, spec = {}, opts = {}) {
 
 module.exports = {
   AREAS, SEVERITIES, WHO, SUBJECT_TYPES, MAX_HEADLINE_CHARS, MAX_WHY_CHARS,
-  composeAdminAlert, raiseAdminAlert, cutAtWord: truncateAtWord, firstSentence,
+  composeAdminAlert, raiseAdminAlert, validStructuredFields, cutAtWord: truncateAtWord, firstSentence,
 };

@@ -67,7 +67,7 @@ beforeEach(() => {
     firstEffectiveDate: '2026-12-10', lastEffectiveDate: '2027-01-04', notices: [],
   });
   mockListApplyHolds.mockResolvedValue([{ noticeId: 'n-1', holdReason: 'rate_moved_since_notice' }]);
-  mockRetireDraftNotices.mockResolvedValue({ ok: true, batchKey: '2026-12', retired: 2, keptDelivered: 1 });
+  mockRetireDraftNotices.mockResolvedValue({ ok: true, batchKey: '2026-12', retired: 2, keptDelivered: 1, revoked: 2 });
 });
 
 afterAll(() => { delete process.env.GATE_RATE_REVIEW; });
@@ -151,7 +151,7 @@ describe('DELETE /batches/:key/schedule', () => {
     await withServer(async (base) => {
       const out = await call(base, 'DELETE', '/api/admin/rate-review/batches/2026-12/schedule');
       expect(out.status).toBe(200);
-      expect(out.body).toEqual({ ok: true, batchKey: '2026-12', retired: 2, keptDelivered: 1 });
+      expect(out.body).toEqual({ ok: true, batchKey: '2026-12', retired: 2, keptDelivered: 1, revoked: 2 });
       expect(mockRetireDraftNotices).toHaveBeenCalledWith('2026-12');
       expect((await call(base, 'DELETE', '/api/admin/rate-review/batches/dec-2026/schedule')).status).toBe(400);
     });

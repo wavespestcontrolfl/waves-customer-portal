@@ -45,6 +45,17 @@ Examples:
 | Comms — call Mona Refay back | Promised on a 3:22 PM call; an hour has passed with no contact. |
 | System — Venice review sync silent 3 days | No new reviews fetched since Sat; Google shows 2. |
 
+**Say who and what** (owner audit 2026-10-01). A bell is read before anything is opened, so
+the customer's name (or the sender's) belongs in the headline and the words behind the alert
+belong in the why: a text, an email, a promise we made, the failed amount, the visit date.
+"Comms — send Albert Clark the estimate" with "“Swarming termites mobile home tenting free
+estimate” (Sep 29) — no estimate sent yet." works; "An SMS request needs follow-up" does not.
+Quote the customer, redacted the way every bell body is (`redactSensitiveText`, so a phone
+number or street address is masked), cut to the 110 characters at a word, and keep the whole
+quote in `detail`. `server/services/admin-alert-names.js` has the helpers (`fitAction` keeps a
+long name inside the 60-character headline; `whyWithQuote` budgets the quote). Where an
+alert is about a visit or an invoice, the link opens that visit or invoice, not a list page.
+
 ## 3. Never in a headline or a why
 
 Timestamps and ISO dates, UUIDs and hashes, table and column names, `GATE_*` and other
@@ -66,11 +77,23 @@ customer's message by this rule.
 1. **Ring once per episode.** A refresh of the same subject and class updates the row in
    place and keeps its read state (`refreshOnDedupe` with `ringOnRefresh`). A comeback
    after the row was cleared rings again.
+   A customer who keeps texting is one subject: a known sender's texts share ONE bell row
+   (`dedupeKey` `sms-thread:<customerId>`, `refreshOnDedupe` + `bumpOnRefresh`). Each new
+   text rewrites it (latest text as the body, "3 texts from Name" in the title, unread,
+   moved to the top) and still pushes; the count restarts once the row was read or done.
+   The link keeps its `?thread=<customerId>` prefix, which the thread-read matchers use.
+   A standing backlog (overdue promises past five) is a count on its page, never a bell:
+   its aggregate row is Activity-only (`metadata.feed = 'activity'`). Engineering work a
+   Claude window picks up by itself (an Intelligence Bar gap) goes to the Activity feed
+   as an `ops_digest` row, not the bell.
 2. **Clear yourself.** An emitter that re-raises a stable key closes it when its
    done-when holds (`server/services/admin-alert-episodes.js`). The relevance sweep
    (`server/services/admin-alert-relevance.js`) is the backstop for one-shot classes only.
 3. **Budget.** Rows that are not a customer reaching out should ring at most 10 times a
    day in total. A class that would push past that becomes a standing count.
+   Exception (owner ruling 2026-10-01): time-critical field work, a visit due today or
+   tomorrow with no time or technician (`server/services/combined-booking-check.js`), always
+   rings; tomorrow it may be too late to act.
 4. **Retention.** An `fyi` fact lives on its page for 7 days at most. A `needs-you` row
    unread for 14 days belongs in the Monday summary, not in the bell.
 5. **Read is not done.** A row has a `done` state (`notifications.done_at`, `done_by`,
@@ -132,6 +155,10 @@ Then, by severity:
   the full finding as `text`. `raiseAdminAlert` refuses a `broken` spec and says so.
 - **`fyi`**: `raiseAdminAlert` writes nothing and returns
   `{ id: null, suppressed: true, reason: 'fyi' }`. An FYI fact belongs on its page.
+  The one exception is an emitter the owner has ruled should leave a row: it passes
+  `fyiRow: true` in `opts` and the FYI is written like a `needs-you` row, with
+  `metadata.severity` still `fyi` (today only the `/book` preferred-time request that
+  closes itself when the customer books, under category `lead`).
 
 A rule violation never costs an alert. Outside tests, a `needs-you` spec that breaks the
 rule still rings, with its headline cut to 60, the structured fields that are valid
@@ -142,3 +169,41 @@ rules it broke, and a warning is logged with the category and rule names only. U
 A why that quotes a customer's own words (a service request, a text) can trip the
 section 3 checks through no fault of the emitter. That is the fallback's job; do not
 rewrite what the customer said to get past it.
+
+## 8. For Claude specifically
+
+Read what is open in one call instead of reading alert text and guessing. Each item comes
+back in the shape of section 2: area, headline, why, severity, link, subject, done-when,
+who. Pick the ones a session may fix alone with `who=claude` (exact: it returns `claude` only,
+never `either`, where a person still approves; `who=either` lists those; section 5 says what each
+may do), and never resolve a `person` item.
+
+- Route: `GET /api/admin/needs-me?who=&area=&limit=` (`server/routes/admin-needs-me.js`),
+  scoped to the caller's role like the bell list.
+- Intelligence Bar tool: `needs_me` (`server/services/intelligence-bar/needs-me-tools.js`).
+- CLI: `railway run --service Postgres node ops/agents/needs-me.js --who claude`
+  (`--json` for the full object).
+- All three are one reader, `listNeedsMe` in `server/services/needs-me.js`. It lists open
+  admin rows that are not done, including Activity-feed rows (the bell never shows those; they
+  carry `activityOnly: true`, and engineering `broken` findings are among them), and the
+  dashboard's standing counts, which are `needs-you`, `person`, done when the count is zero.
+An `ops_digest` row for the `fyi` audience is severity `fyi` and is never listed. An alert
+carries `detail`, the full finding (bounded to 2,000 characters; an engineering digest's
+diagnosis may live only there); when the row has no body, `why` is the first sentence of it.
+Every open row joins one global order (no scan cap: the walk reads only what classifying and ordering need, and body/detail are read for the returned page alone). A digest already marked `resolved` is closed even without `done_at`. A source that partly fails says so in `warnings`: a dashboard queue that threw is named
+(`{ source: 'dashboard_alerts', generator, error }`) instead of reading as empty.
+
+**Unsorted** (owner 2026-10-01): a raw `notifyAdmin` row with no stamped severity that is
+neither an `ops_digest` nor a registry event (`metadata.triggerKey`) carries no signal for work
+versus note. It is listed with `unsorted: true` and `severity: null`, after all known work, and
+is left out of `total` and `counts`; `unsortedTotal` counts it. The bar tool returns these in
+`unsorted`, the CLI under its own heading. A source leaves the pile by raising through
+`raiseAdminAlert` (or the trigger registry).
+
+An item with `derived: true` comes from an older raw `notifyAdmin` call that never stamped
+the eight parts (a dashboard standing condition is not one of these: it is `derived: false`).
+Its area is inferred from the admin page its link opens, else from the category, its severity is `broken` only for a
+`FIX` digest (for a digest with no stamped kind, the legacy title prefix decides: `FIX:` broken,
+`ACT:` / `[Review]` needs-you, `FYI:` / `OK:` fyi and left out), a registry event its trigger marks `informational` (a payment received, a job completed) is `fyi` and left out, its who is `person` (an engineering digest is `claude`), its subject is read
+from the ids in its metadata, and its done-when is unknown. Treat those as best guesses and
+read the record behind the link before acting.

@@ -932,7 +932,7 @@ router.post('/sms', async (req, res) => {
         }
         if (!landed && process.env.ADAM_PHONE && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
           try {
-            const senderName = customer ? `${customer.first_name} ${customer.last_name}` : From;
+            const senderName = customer ? ([customer.first_name, customer.last_name].filter(Boolean).join(' ') || From) : From;
             await TwilioService.sendSMS(process.env.ADAM_PHONE, `📩 New SMS\nFrom: ${senderName}\n"${(Body || '').slice(0, 120)}"`, { messageType: 'internal_alert' });
           } catch (e) { logger.error(`SMS notification failed: ${e.message}`); }
         }
@@ -1004,12 +1004,49 @@ router.post('/sms', async (req, res) => {
     // notifications or any auto-reply. This also covers tracking/tech lines.
     if (solicitationEnforced) return res.type('text/xml').send('<Response></Response>');
 
+    // Test answer in the customer's language (GATE_SMS_ANY_LANGUAGE_TRIAL, read inside; its own
+    // gate): registered here, right after the source row is kept and before any consuming branch
+    // (reschedule reply, lead intake) returns, so those texts are sampled too; started on response
+    // finish (like the typed-decisions shadow) so it reads the customer's state after that branch
+    // committed. Stored for the owner to read, never sent; nothing waits on it.
+    if (Body && customer && !smsReaction && !isAiNumber && numberConfig.type === 'location') {
+      const trialInput = { inboundMessage: Body, fromPhone: From, customer, smsLogId: smsLogEntry?.id || null, hasMedia: inboundMedia.length > 0 };
+      res.once('finish', () => {
+        void require('../services/sms-translation').runTranslationTrial(trialInput)
+          .catch((err) => logger.warn(`[sms-translation] async trial failed: ${err.code || err.name || 'error'}`));
+      });
+    }
+
     // The same post-ack kick covers both consumed replies and the ordinary
     // path. A failed or interrupted kick is recovered from the persisted row.
     if (Body && customer && !isAiNumber) {
       res.once('finish', () => {
         void require('../services/sms-operational-actions').runSmsOperationalActions()
           .catch(() => logger.warn('[sms-operations] inbound kick deferred to recovery sweep'));
+      });
+    }
+
+    // Typed-decisions shadow (GATE_TYPED_DECISIONS, dark): put the same text
+    // to TypeSafe Jev and record its answers beside the rule flags. Registered
+    // HERE, before the reschedule-reply and lead-intake returns, so consumed
+    // replies are sampled too; it runs after the response finishes, is never
+    // awaited, and its result changes nothing. Reactions and every
+    // non-customer/opt path are excluded inside the service (eligibleMessage),
+    // and the previous Waves text is read there.
+    // A message with an attachment is skipped: Jev and the reviewer see only
+    // the caption, while the attachment is what production's rules weighed.
+    if (Body && !smsReaction && inboundMedia.length === 0 && customer?.id && smsLogEntry?.id) {
+      res.once('finish', () => {
+        void Promise.resolve().then(() => require('../services/typed-decisions/sms-shadow').shadowInboundSms({
+          smsLogId: smsLogEntry.id,
+          customerId: customer.id,
+          body: Body,
+          rules: { courtesyOnly, rescheduleAsk },
+          fromPhone: From,
+          toPhone: To,
+          messageType,
+          receivedAt: smsLogEntry.created_at,
+        })).catch((err) => logger.warn(`[typed-decisions] inbound sms shadow failed: ${err.message}`));
       });
     }
 
@@ -1215,7 +1252,7 @@ router.post('/sms', async (req, res) => {
         ? `🌐 Lead from ${numberConfig.domain}: ${From} — "${(Body || '').slice(0, 80)}"`
         : numberConfig.type === 'van_tracking'
           ? `🚛 Lead from van wrap: ${From} — "${(Body || '').slice(0, 80)}"`
-          : `📱 SMS from ${customer ? `${customer.first_name} ${customer.last_name}` : From}: "${(Body || '').slice(0, 80)}"`,
+          : `📱 SMS from ${customer ? ([customer.first_name, customer.last_name].filter(Boolean).join(' ') || From) : From}: "${(Body || '').slice(0, 80)}"`,
       metadata: JSON.stringify({ from: From, to: To, domain: numberConfig.domain }),
     });
 
@@ -1333,7 +1370,7 @@ router.post('/sms', async (req, res) => {
 
     if ((Body || inboundMedia.length) && process.env.ADAM_PHONE && !smsReaction && !courtesyOnly && !isTrackingLeadInbound && !knownInboundNotified && !repeatUnknownSender && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
       try {
-        const senderName = customer ? `${customer.first_name} ${customer.last_name}` : From;
+        const senderName = customer ? ([customer.first_name, customer.last_name].filter(Boolean).join(' ') || From) : From;
         const mediaText = inboundMedia.length
           ? `\nMedia: ${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}`
           : '';
@@ -1537,6 +1574,7 @@ router.post('/sms', async (req, res) => {
         }).catch((err) => logger.warn(`[sms-shadow] async draft failed: ${err.message}`));
       } catch (e) { logger.error(`[sms-shadow] wiring failed: ${e.message}`); }
     }
+
 
      } catch (sideErr) {
        logger.error(`[twilio-webhook] async inbound side-effects failed: ${sideErr.message}`);

@@ -7,13 +7,14 @@ import LawnReportV2Section from '../components/report/lawnV2/LawnReportV2Section
 import { StationMapCard } from '../components/StationMapCard';
 import MarkedPhotoCard from '../components/report/MarkedPhotoCard';
 import PoisonControlCopy, { applicatorIdLine } from '../components/report/PoisonControlCopy';
-import { LawnVisitTimeline, LawnWateringBanner, PrintContext as LawnPrintContext } from '../components/report/lawnV2/LawnReportV2';
+import { LawnLeadCard, LawnVisitTimeline, LawnWateringBanner, PrintContext as LawnPrintContext } from '../components/report/lawnV2/LawnReportV2';
 import PestReportV2Section from '../components/report/pestV2/PestReportV2Section';
 import { PestCustomerConcern } from '../components/report/pestV2/PestReportV2';
 import TracedTreatmentZoneMap from '../components/report/TracedTreatmentZoneMap';
 import MosquitoReportV2Section from '../components/report/mosquitoV2/MosquitoReportV2Section';
 import TermiteReportV2Section from '../components/report/termiteV2/TermiteReportV2Section';
 import CockroachReportV2Section from '../components/report/cockroachV2/CockroachReportV2Section';
+import ReportText, { reportSectionsForText } from '../components/report/ReportSections';
 import { COCKROACH_V2_DASHBOARD_FIELD_KEYS } from '../components/report/cockroachV2/CockroachReportV2';
 import { TERMITE_V2_DASHBOARD_FIELD_KEYS } from '../components/report/termiteV2/TermiteReportV2';
 import { isProductApplication, reportHasRodenticide } from '../lib/product-application';
@@ -1015,8 +1016,10 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
       heading: 'your service is complete!',
       status: allReady ? 'Ready now' : 'Service complete',
       statusTone: 'neutral',
+      // A lawn report with the lead block (GATE_LAWN_REPORT_LEAD) prints the
+      // snapshot headline right below as its own heading — not here too.
       result: v2Snapshot.peaceOfMind
-        || v2Snapshot.statusHeadline
+        || (data.reportV2?.lead ? null : v2Snapshot.statusHeadline)
         || 'Service completed — we noted items to keep an eye on; details are below.',
       completedLine: completedAreas ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}` : 'Service areas were completed today.',
       // Times live on the tech card, product count on "What Waves did today" —
@@ -2425,6 +2428,32 @@ export function TechNoteCard({ data, mode = 'live' }) {
   );
 }
 
+// "From the Waves blog" (GATE_REPORT_BLOG_POST): the one post the technician
+// or the office picked at completion, frozen on the record with its title
+// and live URL (the server checks the URL is on the Waves site). The last
+// card before the footer; live view only, like the tech note.
+export function BlogPostCard({ data, mode = 'live' }) {
+  const post = data?.blogPost;
+  if (mode !== 'live' || !post?.url || !post?.title) return null;
+  let host = '';
+  try {
+    const parsed = new URL(post.url);
+    host = `${parsed.hostname.replace(/^www\./i, '')}${parsed.pathname}`;
+  } catch {
+    return null;
+  }
+  return (
+    <section data-glass="card" className="sr-section" id="from-the-blog">
+      {/* h2, not .section-eyebrow — see PlanSummaryCard. */}
+      <h2>From the Waves blog</h2>
+      <p className="map-context-copy" style={{ fontWeight: 600 }}>
+        <a href={post.url} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--text, #04395E)' }}>{post.title}</a>
+      </p>
+      <p className="map-context-copy" style={{ fontSize: 14, overflowWrap: 'anywhere' }}>{host}</p>
+    </section>
+  );
+}
+
 function readinessSummary(context, mode = 'live', nowMsOverride) {
   const fallbackNowMs = mode === 'live' ? Date.now() : Date.parse(context?.generatedAt) || Date.now();
   const nowMs = Number.isFinite(nowMsOverride) ? nowMsOverride : fallbackNowMs;
@@ -2645,6 +2674,116 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
         />
       </div>
     </section>
+  );
+}
+
+// Re-service report card (GATE_RESERVICE_REPORT_CARD, owner-approved card
+// 2026-09-26): "You told us" from the customer's own booking words (FROZEN on
+// the record at completion), a "What we did" summary, and the "Still seeing X?
+// Tell us" button. Every phrase and the quote rule are decided on the SERVER
+// (reservice-report-card.js) — this only renders what the payload carries: a
+// verbatim picker/text request arrives `quoted: true` and gets quote marks; a
+// call paraphrase or an office entry arrives `quoted: false` with its own
+// lead-in and never gets any. Absent payload key (gate dark, not a callback,
+// older cache) renders nothing, so the page is byte-identical to before.
+// Live view only — the PDF prints the same card from ServiceReportDocument.
+// The button reuses the footer's existing path (the AUTHENTICATED portal
+// Schedule tab, behind the server's reserviceEligible boolean): no token or
+// public route is added to this forwardable report.
+function reserviceCardJoin(items) {
+  const list = (Array.isArray(items) ? items : []).filter((item) => typeof item === 'string' && item);
+  if (list.length <= 1) return list[0] || '';
+  if (list.length === 2) return `${list[0]} and ${list[1]}`;
+  return `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}`;
+}
+
+const reserviceCardCapitalize = (text) => (text ? text.charAt(0).toUpperCase() + text.slice(1) : '');
+
+// What the card prints, from the server payload alone (shared with the PDF
+// document): the "You told us" line (quote marks only when the server says
+// the words are verbatim), the customer's pest chips, the "What we did" rows
+// and safety line, and the still-seeing topic. null = no card payload.
+export function reserviceCardView(card) {
+  if (!card || typeof card !== 'object') return null;
+  const told = card.youToldUs && typeof card.youToldUs === 'object' ? card.youToldUs : null;
+  const did = card.whatWeDid && typeof card.whatWeDid === 'object' ? card.whatWeDid : null;
+  const toldPests = Array.isArray(told?.pests) ? told.pests.filter(Boolean) : [];
+  const toldLine = told && told.text
+    ? `${told.lead ? `${told.lead} ` : ''}${told.quoted ? `\u201C${told.text}\u201D` : told.text}`
+    : '';
+  const rows = did ? [
+    Array.isArray(did.pests) && did.pests.length ? ['Treated for', reserviceCardCapitalize(reserviceCardJoin(did.pests))] : null,
+    did.where ? ['Where', reserviceCardCapitalize(did.where)] : null,
+    did.found?.label ? ['Activity seen', did.found.label] : null,
+  ].filter(Boolean) : [];
+  return {
+    toldLine,
+    toldQuoted: Boolean(told?.quoted),
+    toldPests,
+    showTold: Boolean(told && (toldLine || toldPests.length)),
+    rows,
+    safetyLine: did?.safetyLine || '',
+    showDid: Boolean(did && (rows.length || did.safetyLine)),
+    topic: typeof card.stillSeeing === 'string' ? card.stillSeeing.trim() : '',
+  };
+}
+
+export function ReserviceReportCard({ data, mode }) {
+  const view = mode === 'live' ? reserviceCardView(data?.reserviceReportCard) : null;
+  if (!view) return null;
+  const {
+    toldLine, toldQuoted, toldPests, showTold, rows: didRows, safetyLine, showDid, topic,
+  } = view;
+  const canRebook = data.reserviceEligible === true && Boolean(topic);
+  if (!showTold && !showDid && !canRebook) return null;
+  const cta = canRebook ? (
+    <div className="reservice-card-cta">
+      <a data-glass-accent="" href="/?tab=schedule" style={actionButtonStyle('primary')}>
+        {`Still seeing ${topic}? Tell us`}
+      </a>
+    </div>
+  ) : null;
+  return (
+    <>
+      {showTold && (
+        <section data-glass="card" className="sr-section reservice-card" id="reservice-you-told-us" data-section="reservice-you-told-us">
+          <h2 data-gt="h3x">You told us</h2>
+          {toldLine && (
+            <p className="reservice-card-body" data-quoted={toldQuoted ? 'true' : 'false'}>{toldLine}</p>
+          )}
+          {toldPests.length > 0 && (
+            <div className="reservice-chips" role="list" aria-label="What you reported">
+              {toldPests.map((pest) => (
+                <span key={pest} role="listitem" data-glass="chip" className="reservice-chip">{pest}</span>
+              ))}
+            </div>
+          )}
+          {!showDid && cta}
+        </section>
+      )}
+      {showDid && (
+        <section data-glass="card" className="sr-section reservice-card" id="reservice-what-we-did" data-section="reservice-what-we-did">
+          <h2 data-gt="h3x">What we did</h2>
+          {didRows.length > 0 && (
+            <div className="reservice-rows">
+              {didRows.map(([label, value]) => (
+                <div key={label} data-glass="soft" className="reservice-row">
+                  <div data-gt="eyebrow" className="reservice-row-label">{label}</div>
+                  <div className="reservice-row-value">{value}</div>
+                </div>
+              ))}
+            </div>
+          )}
+          {safetyLine && <p className="reservice-card-body">{safetyLine}</p>}
+          {cta}
+        </section>
+      )}
+      {!showTold && !showDid && cta && (
+        <section data-glass="card" className="sr-section reservice-card" id="reservice-still-seeing" data-section="reservice-still-seeing">
+          {cta}
+        </section>
+      )}
+    </>
   );
 }
 
@@ -3048,7 +3187,7 @@ function FloatingAskWaves({ mode, token, serviceLine, data }) {
  * generated and persisted at completion time (typedReportSnapshot) — what was
  * found, what we did, what happens next — never recomputed client-side.
  */
-function TodaysResultCard({ typedReport, sectionId = 'todays-result', bodyOverride = null }) {
+function TodaysResultCard({ typedReport, sectionId = 'todays-result', bodyOverride = null, reportSections = null, nextVisitLabel = null }) {
   const result = typedReport?.todaysResult;
   if (!result?.headline) return null;
   // The gated typed-report narrative (summarySource 'typed_narrative')
@@ -3080,7 +3219,7 @@ function TodaysResultCard({ typedReport, sectionId = 'todays-result', bodyOverri
       {/* Strip a trailing period — headlines aren't sentences, and snapshots
           persisted before the 2026-07-21 template fix still carry one. */}
       <h2>{String(result.headline).replace(/\.$/, '')}</h2>
-      {body && <p className="ai-summary-body">{body}</p>}
+      {body && <ReportText text={body} sections={reportSections} nextVisitLabel={nextVisitLabel} className="ai-summary-body" />}
       {/* The snapshot builder embeds nextStep in body on most paths — only
           render the bullet when it adds something the paragraph doesn't.
           This containment rule applies to the narrative override too: the
@@ -5968,6 +6107,19 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
       || (data.companionReports || []).some(
         (companion) => companion?.todaysResult?.bodySource === 'technician_report',
       ));
+  // Four-section report (GATE_REPORT_WRITER_RULES): its sections, shown
+  // wherever the report's text prints, and the next visit on this report's
+  // own service line for "What's next" (live view only: the server strips
+  // it from every other render).
+  const reportSections = Array.isArray(data.reportSections) ? data.reportSections : null;
+  const nextSameServiceLabel = formatNextAppointmentLabel(data.nextSameServiceAppointment);
+  // When the four-section report is what a termite or cockroach dashboard
+  // shows, its next visit is the property-scoped one opening "What's next";
+  // the dashboard's own customer-wide label stays off (Codex #5500).
+  const termiteSectionsShown = Boolean(data.termiteReportV2
+    && reportSectionsForText(reportSections, cleanVisitSummary(data.termiteReportV2.aiSummary?.body || '')));
+  const cockroachSectionsShown = Boolean(data.cockroachReportV2
+    && reportSectionsForText(reportSections, cleanVisitSummary(data.cockroachReportV2.aiSummary?.body || '')));
   // Bed bug also folds its cross-visit activity history into the Visit
   // Timeline card (one chronological story) — the standalone "Visit
   // history" card is suppressed only when the merged rows actually render.
@@ -6720,6 +6872,68 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .map-footnote {
           margin-top: 12px;
+        }
+        /* Re-service report card (GATE_RESERVICE_REPORT_CARD): glass type sheet —
+           16px body, 14/600 uppercase row labels (own class: the glass layout
+           hides .section-eyebrow), card titles via data-gt="h3x" (20/600). */
+        .reservice-card-body {
+          margin: 0 0 12px;
+          color: var(--text);
+          font-size: 16px;
+          line-height: 1.5;
+          overflow-wrap: anywhere;
+        }
+        .reservice-chips {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+          margin: 0 0 12px;
+        }
+        .reservice-chip {
+          display: inline-flex;
+          align-items: center;
+          min-height: 36px;
+          padding: 6px 14px;
+          border-radius: 999px;
+          border: 1px solid var(--line);
+          color: var(--text);
+          font-size: 14px;
+          font-weight: 600;
+          line-height: 1.2;
+        }
+        .reservice-rows {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+          gap: 10px;
+          margin: 0 0 14px;
+        }
+        .reservice-row {
+          padding: 12px 14px;
+          border-radius: 12px;
+          border: 1px solid var(--line);
+        }
+        .reservice-row-label {
+          margin: 0 0 4px;
+          color: var(--muted);
+          font-size: 14px;
+          font-weight: 600;
+          letter-spacing: 0.06em;
+          text-transform: uppercase;
+        }
+        .reservice-row-value {
+          color: var(--text);
+          font-size: 16px;
+          line-height: 1.4;
+        }
+        .reservice-card-cta {
+          margin-top: 4px;
+        }
+        .reservice-card-cta a {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          min-height: 44px;
+          text-decoration: none;
         }
         .coverage-section-header {
           display: flex;
@@ -8958,6 +9172,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
              Print on the live view, where the floating Ask-Waves bar and
              other controls would otherwise stamp into the paper document. */
           .waves-ask-card { display: none; }
+          /* The re-service card's call-to-action link is an action, not
+             report content (the PDF has no equivalent). This comment
+             renders into the page text, so it never quotes the CTA copy. */
+          .reservice-card-cta { display: none; }
           /* The accordion is a control, not content: never print the
              "More information / Details" toggle bar or its frame. An open
              details (force-open on pdf/static, or customer-expanded on a
@@ -9044,6 +9262,17 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           </LawnPrintContext.Provider>
         )}
 
+        {/* The lawn lead (GATE_LAWN_REPORT_LEAD) is the report's above-the-fold
+            summary, so it sits right under the status and watering banner, not
+            down in the lawn section (which then drops its hero). */}
+        {isLawnReport && data.reportV2?.lead && (
+          <LawnPrintContext.Provider value={mode === 'pdf' || mode === 'static'}>
+            <LawnLeadCard lead={data.reportV2.lead} snapshot={data.reportV2.snapshot || {}} style={{ marginTop: 16 }} />
+          </LawnPrintContext.Provider>
+        )}
+
+        <ReserviceReportCard data={data} mode={mode} />
+
         <PlanSummaryCard data={data} mode={mode} />
 
         <NearYouCard data={data} mode={mode} />
@@ -9065,6 +9294,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               && (data.pestReportV2 || data.mosquitoReportV2 || typedNarrativeOwnsSummary)
               ? cleanVisitSummary(data.summary)
               : null}
+            reportSections={reportSections}
+            nextVisitLabel={nextSameServiceLabel}
           />
         )}
 
@@ -9122,6 +9353,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           <div id="visit-summary">
             <PestReportV2Section
               data={data.pestReportV2}
+              reportSections={reportSections}
+              nextVisitLabel={nextSameServiceLabel}
               print={mode === 'pdf' || mode === 'static'}
               token={token}
               mode={mode}
@@ -9156,6 +9389,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           <div id="visit-summary">
             <MosquitoReportV2Section
               data={data.mosquitoReportV2}
+              reportSections={reportSections}
+              nextVisitLabel={nextSameServiceLabel}
               print={mode === 'pdf' || mode === 'static'}
               token={token}
               mode={mode}
@@ -9197,8 +9432,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               stationPins={Boolean(data.termiteStationPins)}
               /* Same-line next visit only — the builder scopes it; the
                  top-level nextAppointment may be ANY service line. */
-              nextVisitLabel={formatNextAppointmentLabel(data.termiteReportV2.nextVisit)}
+              nextVisitLabel={termiteSectionsShown ? null : formatNextAppointmentLabel(data.termiteReportV2.nextVisit)}
+              reportNextVisitLabel={termiteSectionsShown ? nextSameServiceLabel : null}
               narrative={data.termiteReportV2.aiSummary?.body ? cleanVisitSummary(data.termiteReportV2.aiSummary.body) : null}
+              reportSections={reportSections}
               /* Cross-visit trend from the activity gauge payload OF THE
                  REPORT ENTRY THAT OWNS THE DASHBOARD — the primary's gauge
                  for a primary dashboard, the bait companion's gauge for a
@@ -9226,8 +9463,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               mode={mode}
               /* Same-line next visit only — the builder scopes it to the
                  next ROACH-FAMILY appointment (live view only). */
-              nextVisitLabel={formatNextAppointmentLabel(data.cockroachReportV2.nextVisit)}
+              nextVisitLabel={cockroachSectionsShown ? null : formatNextAppointmentLabel(data.cockroachReportV2.nextVisit)}
+              reportNextVisitLabel={cockroachSectionsShown ? nextSameServiceLabel : null}
               narrative={data.cockroachReportV2.aiSummary?.body ? cleanVisitSummary(data.cockroachReportV2.aiSummary.body) : null}
+              reportSections={reportSections}
               /* the gauge trend describes the frozen select; when the status
                  was reconciled away from it the trend is stale (codex P2 #3613 r1) */
               activityTrend={data.cockroachReportV2.statusReconciled ? null : (data.activity || null)}
@@ -9275,7 +9514,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             && data.serviceLine === 'lawn' && !data.reportV2 && !data.lawnAssessment && !data.mowingHeight && !routineFindings.length) && (
           <section data-glass="card" className="sr-section visit-summary-section" id="visit-summary">
             <h2>Visit Summary</h2>
-            <p>{visitSummaryCopy(data, { skipPromotedBody: todaysResultCarriesSummary })}</p>
+            <ReportText
+              text={visitSummaryCopy(data, { skipPromotedBody: todaysResultCarriesSummary })}
+              sections={reportSections}
+              nextVisitLabel={nextSameServiceLabel}
+            />
             {recordedFindingsList}
             {/* Rodent refresh: the photo evidence the summary narrates renders
                 WITH the summary (owner 2026-07-27) — the bottom Field photos
@@ -9486,6 +9729,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
                 <TodaysResultCard
                   typedReport={companion}
                   sectionId={`companion-${companion.type}-todays-result`}
+                  reportSections={reportSections}
+                  nextVisitLabel={nextSameServiceLabel}
                 />
               )}
               <TypedFindingsCard
@@ -9638,6 +9883,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
         {/* V2 and pest show the review ask up top — don't also render the bottom one (dup CTA + dup events). */}
         {!reviewAskOnTop && <ReviewRequestCard data={data} token={token} mode={mode} placement="bottom" />}
+
+        {/* The Waves blog post picked at completion, at the bottom of the
+            report on every layout (live only). */}
+        <BlogPostCard data={data} mode={mode} />
 
 
 

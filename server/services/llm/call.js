@@ -16,8 +16,9 @@
  * incomplete / refused / unparseable answer); a chain's `failures` entries
  * carry it too, so a caller can account for every leg it paid for.
  *
- * (callTypeSafe is the decision-only exception: it returns typed `answers` as
- * `json`, via ROUTES.typedDecision.)
+ * (callTypeSafe and callWorkersAIDecision are the decision-only exceptions:
+ * they return typed `answers` as `json`, via ROUTES.typedDecision /
+ * ROUTES.typedDecisionClef.)
  *
  * Callers route via dispatch(route, payload) where `route` is a models.ROUTES
  * entry ({ provider, model }). On { ok: false } the caller falls back to its
@@ -29,7 +30,7 @@
  */
 
 const logger = require('../logger');
-const { PROVIDER } = require('../../config/models');
+const { PROVIDER, MODEL_CATALOG } = require('../../config/models');
 const { anthropicMaxTokens, anthropicEffortFor } = require('./anthropic-wire');
 const agentContext = require('../agent-control/context');
 // Top-level (not lazy) so the ledger shares this module's agent-control
@@ -44,6 +45,14 @@ const TYPESAFE_SYSTEMONE_API = 'https://api.typesafe.ai/v1/systemone';
 // Only a dated Jev version is allowed on the wire: the `jev-latest` alias moves
 // under us, so a typed-decision package's answers would silently change.
 const TYPESAFE_PINNED_MODEL_RE = /^jev-\d+\.\d+\.\d+$/;
+// Cloudflare Workers AI REST: POST <base>/<account id>/ai/run/@cf/cloudflare/<model>.
+const WORKERS_AI_ACCOUNTS_API = 'https://api.cloudflare.com/client/v4/accounts';
+// A Workers AI decision model is one the catalog registers as Cloudflare's
+// with the 'decision' cap (config/models.js is the one place ids live).
+function workersAiDecisionModel(model) {
+  const entry = MODEL_CATALOG[String(model || '')];
+  return Boolean(entry && entry.provider === PROVIDER.CLOUDFLARE && Array.isArray(entry.caps) && entry.caps.includes('decision'));
+}
 
 // Default per-request ceiling when a caller supplies no timeoutMs. Mirrors the
 // Anthropic SDK's built-in 10-minute default (which bounded these lanes before
@@ -479,6 +488,68 @@ async function callTypeSafe({ model, state, questions, timeoutMs = 15000, laneId
   }
 }
 
+// ── Cloudflare Clef (typed decisions on Workers AI) ───────────────────
+/**
+ * Clef / Clef-flash: decision-only models served by Workers AI, taking the
+ * same `state` + typed `questions` as Jev and answering in the same shape
+ * (verified against the live endpoint 2026-10-02: `{ result: { model,
+ * answers: { <id>: { type:'noul', noul } | { type:'choice', choice,
+ * probabilities, confidence } | { type:'score', score, legend, probabilities,
+ * confidence } }, usage }, success, errors }`). Same contract as
+ * callTypeSafe: never throws, `{ ok:false, reason }` on any miss (`no_key`,
+ * `cloudflare_unknown_model`, `cloudflare_<status>`, `cloudflare_unsuccessful`,
+ * `cloudflare_timeout`, `error`, `empty_json`); on success `json` is the
+ * `answers` map and `servedModel` is what the provider reports. Never retries.
+ * Credentials: CF_WORKERS_AI_TOKEN (a least-privilege "Workers AI - Read"
+ * token) or, when unset, the existing CF_API_TOKEN; plus CF_ACCOUNT_ID.
+ */
+async function callWorkersAIDecision({ model, state, questions, timeoutMs = 15000, laneId, promptVersion, policyLabel } = {}) {
+  let stateText;
+  try { stateText = typeof state === 'string' ? state : JSON.stringify(state); } catch { stateText = undefined; }
+  const base = { provider: 'cloudflare', requestedModel: model, laneId, promptVersion, policyLabel, text: stateText };
+  const token = process.env.CF_WORKERS_AI_TOKEN || process.env.CF_API_TOKEN;
+  const account = process.env.CF_ACCOUNT_ID;
+  // Like callTypeSafe, a missing credential or an unknown model files a failed
+  // ledger row: this lane is dark, so the ledger is where a dead key shows.
+  if (!token || !account) return failedLeg(base, { latencyMs: 0 }, 'no_key');
+  if (!workersAiDecisionModel(model)) return failedLeg(base, { latencyMs: 0 }, 'cloudflare_unknown_model');
+  const t0 = nowMs();
+  try {
+    const resp = await fetch(`${WORKERS_AI_ACCOUNTS_API}/${encodeURIComponent(account)}/ai/run/@cf/cloudflare/${model}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ state, questions }),
+      ...abortAfter(timeoutMs),
+    });
+    if (!resp.ok) {
+      logger.warn(`[llm] Workers AI ${resp.status}`);
+      return failedLeg(base, { latencyMs: elapsedMs(t0) }, `cloudflare_${resp.status}`);
+    }
+    const envelope = (await resp.json()) || {};
+    // A 200 whose envelope says the run failed carries no answers to trust.
+    if (envelope.success === false) return failedLeg(base, { latencyMs: elapsedMs(t0) }, 'cloudflare_unsuccessful');
+    const data = envelope.result && typeof envelope.result === 'object' ? envelope.result : {};
+    const answers = data.answers && typeof data.answers === 'object' && !Array.isArray(data.answers) ? data.answers : null;
+    const text = answers ? JSON.stringify(answers) : '';
+    const served = { servedModel: data.model, usage: usageOf('cloudflare', data), latencyMs: elapsedMs(t0), response: text };
+    if (!answers || !Object.keys(answers).length) return failedLeg(base, served, 'empty_json');
+    const result = {
+      ok: true,
+      json: answers,
+      text,
+      model,
+      usage: served.usage,
+      ...(typeof data.model === 'string' && data.model.trim() ? { servedModel: data.model } : {}),
+    };
+    ledgerIdOf.set(result, recordLedgerCall(base, { ...served, ok: true }));
+    return result;
+  } catch (err) {
+    const reason = isTimeoutError(err) ? 'cloudflare_timeout' : 'error';
+    logger.error(`[llm] callWorkersAIDecision failed (${reason}): ${err.message}`);
+    return failedLeg(base, { latencyMs: elapsedMs(t0) }, reason);
+  }
+}
+
 // ── Gemini ────────────────────────────────────────────────────────────
 // Every text part of the first Gemini candidate, joined. Gemini 3.x Flash is a
 // thinking model: a thought part can precede the answer part, so parts[0].text
@@ -705,6 +776,11 @@ async function dispatch(route, payload = {}) {
     case PROVIDER.TYPESAFE:
       if (!args.questions || typeof args.questions !== 'object') return { ok: false, reason: 'typesafe_requires_questions' };
       return callTypeSafe(args);
+    // Same rule for the Cloudflare decision models: questions or nothing, and
+    // never a TEXT_POLICIES leg.
+    case PROVIDER.CLOUDFLARE:
+      if (!args.questions || typeof args.questions !== 'object') return { ok: false, reason: 'cloudflare_requires_questions' };
+      return callWorkersAIDecision(args);
     default: return { ok: false, reason: `unknown_provider_${route.provider}` };
   }
 }
@@ -881,6 +957,7 @@ module.exports = {
   geminiText,
   callAnthropic,
   callTypeSafe,
+  callWorkersAIDecision,
   dispatch,
   dispatchWithFallback,
   extractOpenAIText,
@@ -889,5 +966,7 @@ module.exports = {
   OPENAI_RESPONSES_API,
   TYPESAFE_SYSTEMONE_API,
   TYPESAFE_PINNED_MODEL_RE,
+  WORKERS_AI_ACCOUNTS_API,
+  workersAiDecisionModel,
   geminiUrl,
 };

@@ -937,8 +937,10 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
       path.join(__dirname, '../services/time-tracking.js'),
       'utf8',
     );
-    expect(timeTrackingSource).toMatch(/const job = await trx\('scheduled_services'\)\.where\(\{ id: jobId \}\)\.forUpdate\(\)\.first\(\);/);
-    const lockAt = timeTrackingSource.indexOf("const job = await trx('scheduled_services').where({ id: jobId }).forUpdate().first();");
+    // The locked read may carry the technician scope filter (codex #5568 r7).
+    expect(timeTrackingSource).toMatch(/const jobQuery = trx\('scheduled_services'\)\.where\('scheduled_services\.id', jobId\);/);
+    expect(timeTrackingSource).toMatch(/const job = await jobQuery\.forUpdate\(\)\.first\(\);/);
+    const lockAt = timeTrackingSource.indexOf('const job = await jobQuery.forUpdate().first();');
     const closeAt = timeTrackingSource.indexOf(".where({ technician_id: technicianId, entry_type: 'job', status: 'active' })");
     expect(lockAt).toBeGreaterThan(-1);
     expect(closeAt).toBeGreaterThan(lockAt);

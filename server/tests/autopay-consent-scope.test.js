@@ -43,6 +43,9 @@ jest.mock('../services/payment-method-consents', () => ({
 const express = require('express');
 const db = require('../models/db');
 const ConsentService = require('../services/payment-method-consents');
+// A consent_accepted retry attests the consent text version the prompt
+// rendered (codex #5434 r1 P1).
+const { CONSENT_VERSION: CURRENT_CONSENT_VERSION } = require('../services/payment-method-consent-text');
 
 let state;
 
@@ -209,7 +212,7 @@ describe('PUT /billing/autopay consent scope', () => {
 
   test('consent_accepted retry records portal_autopay_enable consent then enrolls', () =>
     withServer('/billing/autopay', router(), async (baseUrl) => {
-      const res = await putAutopay(baseUrl, { autopay_enabled: true, autopay_payment_method_id: 'pm-hold', consent_accepted: true });
+      const res = await putAutopay(baseUrl, { autopay_enabled: true, autopay_payment_method_id: 'pm-hold', consent_accepted: true, consentTextVersion: CURRENT_CONSENT_VERSION });
       expect(res.status).toBe(200);
       expect(ConsentService.recordConsent).toHaveBeenCalledWith(expect.objectContaining({
         customerId: 'cust-1',
@@ -220,6 +223,21 @@ describe('PUT /billing/autopay consent scope', () => {
       }));
       expect(state.customers[0].autopay_enabled).toBe(true);
       expect(state.payment_methods.find((p) => p.id === 'pm-hold').autopay_enabled).toBe(true);
+    }));
+
+  test.each([
+    ['a stale version', 'v11_2026-08-25'],
+    ['no version', undefined],
+  ])('a consent_accepted retry attesting %s → 409 CONSENT_VERSION_STALE, nothing written (codex #5434 r1 P1)', (_name, consentTextVersion) =>
+    withServer('/billing/autopay', router(), async (baseUrl) => {
+      const res = await putAutopay(baseUrl, { autopay_enabled: true, autopay_payment_method_id: 'pm-hold', consent_accepted: true, consentTextVersion });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.code).toBe('CONSENT_VERSION_STALE');
+      expect(body.error).toMatch(/refresh/i);
+      expect(ConsentService.recordConsent).not.toHaveBeenCalled();
+      expect(state.customers[0].autopay_enabled).toBe(false);
+      expect(state.payment_methods.find((p) => p.id === 'pm-hold').autopay_enabled).toBe(false);
     }));
 
   test('already-consented method enables without a fresh consent row', () =>
@@ -262,7 +280,7 @@ describe('PUT /billing/cards/:id/default consent scope', () => {
   test('consent_accepted retry records portal_set_default consent then carries', () =>
     withServer('/billing', router(), async (baseUrl) => {
       state.payment_methods.find((p) => p.id === 'pm-old').autopay_enabled = true;
-      const res = await putDefault(baseUrl, 'pm-hold', { consent_accepted: true });
+      const res = await putDefault(baseUrl, 'pm-hold', { consent_accepted: true, consentTextVersion: CURRENT_CONSENT_VERSION });
       expect(res.status).toBe(200);
       expect(ConsentService.recordConsent).toHaveBeenCalledWith(expect.objectContaining({
         customerId: 'cust-1',
@@ -275,6 +293,18 @@ describe('PUT /billing/cards/:id/default consent scope', () => {
       expect(hold.is_default).toBe(true);
       expect(hold.autopay_enabled).toBe(true);
       expect(state.customers[0].autopay_payment_method_id).toBe('pm-hold');
+    }));
+
+  test('a consent_accepted retry attesting a stale version → 409 CONSENT_VERSION_STALE, nothing moves (codex #5434 r1 P1)', () =>
+    withServer('/billing', router(), async (baseUrl) => {
+      state.payment_methods.find((p) => p.id === 'pm-old').autopay_enabled = true;
+      const res = await putDefault(baseUrl, 'pm-hold', { consent_accepted: true, consentTextVersion: 'v11_2026-08-25' });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.code).toBe('CONSENT_VERSION_STALE');
+      expect(ConsentService.recordConsent).not.toHaveBeenCalled();
+      expect(state.payment_methods.find((p) => p.id === 'pm-hold').is_default).toBe(false);
+      expect(state.payment_methods.find((p) => p.id === 'pm-old').autopay_enabled).toBe(true);
     }));
 
   test('a bare default swap (incumbent not on Auto Pay) never consent-checks', () =>

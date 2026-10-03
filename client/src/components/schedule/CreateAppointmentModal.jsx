@@ -37,6 +37,7 @@ import SlotConflictNotice from './SlotConflictNotice';
 import CallBookingConflictNotice from './CallBookingConflictNotice';
 import { useSlotConflicts } from './useSlotConflicts';
 import BestTimeHint, { detourPhrase } from './BestTimeHint';
+import AvailabilityStrip, { stripCoversRouteWarning } from './AvailabilityStrip';
 import { useBestTimes } from './useBestTimes';
 import { etDateString } from '../../lib/timezone';
 import {
@@ -1073,6 +1074,45 @@ export function firstGroupSendFlags({ resultsCount, createdCount, sendSms, cardL
   };
 }
 
+// "Customer's words" (GATE_RESERVICE_OFFICE_REQUEST): the pest/lawn re-service
+// catalog rows an office booking may attach the customer's own words to. The
+// server re-checks the catalog key and the gate; this only decides whether the
+// section renders and the field rides the POST.
+export const OFFICE_REQUEST_SERVICE_KEYS = ['pest_re_service', 'lawn_re_service'];
+export const CUSTOMER_WORDS_MAX = 400;
+
+export function isOfficeRequestLine(svc) {
+  return OFFICE_REQUEST_SERVICE_KEYS.includes((svc?.service_key ?? svc?.serviceKey) || '');
+}
+
+// "Text, 3 h ago" / "Call, yesterday" — the suggestion's source and age.
+export function suggestionSourceLabel(suggestion, now = Date.now()) {
+  if (!suggestion) return '';
+  const kind = suggestion.kind === 'call' ? 'Call' : 'Text';
+  const ms = now - new Date(suggestion.at).getTime();
+  if (!Number.isFinite(ms)) return kind;
+  const hours = Math.floor(ms / 3600000);
+  if (hours < 1) return `${kind}, just now`;
+  if (hours < 24) return `${kind}, ${hours} h ago`;
+  if (hours < 48) return `${kind}, yesterday`;
+  return `${kind}, ${Math.floor(hours / 24)} days ago`;
+}
+
+// The POST field for the staff-saved words. The client names the suggestion
+// it filled from (id + kind) and NEVER a source — the server re-reads that
+// suggestion and decides text / call / office. Empty = nothing sent.
+export function customerRequestBodyField({ active, text, usedSuggestion }) {
+  if (!active) return {};
+  const trimmed = String(text || '').trim().slice(0, CUSTOMER_WORDS_MAX);
+  if (!trimmed) return {};
+  return {
+    customerRequest: {
+      text: trimmed,
+      ...(usedSuggestion ? { suggestionId: usedSuggestion.id, suggestionKind: usedSuggestion.kind } : {}),
+    },
+  };
+}
+
 // Everything a recurring series' POST carries: cadence pattern,
 // count/ongoing, interval/nth/weekday, skip-weekend rule, the union of
 // every line's booster-month picks, and the manual "collect prepay" flag —
@@ -2092,6 +2132,33 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       .catch(() => {});
     return () => { cancelled = true; };
   }, []);
+  // "Customer's words" on a pest/lawn re-service (GATE_RESERVICE_OFFICE_REQUEST).
+  // The probe doubles as the gate read: the route answers {enabled:false} while
+  // the lane is dark, and a failed fetch hides the section too, so a dark lane
+  // renders byte-identical. Probed only once a re-service line is on the form.
+  const [customerWords, setCustomerWords] = useState('');
+  const [usedSuggestion, setUsedSuggestion] = useState(null);
+  const [reserviceRequestProbe, setReserviceRequestProbe] = useState({ customerId: '', enabled: false, suggestion: null });
+  const hasReServiceLine = services.some(isOfficeRequestLine);
+  const reserviceProbeCustomerId = hasReServiceLine && selectedCustomer?.id != null ? String(selectedCustomer.id) : '';
+  useEffect(() => {
+    if (!reserviceProbeCustomerId) return undefined;
+    let cancelled = false;
+    adminFetch(`/admin/schedule/reservice-request-suggestion?customerId=${encodeURIComponent(reserviceProbeCustomerId)}`)
+      .then((r) => {
+        if (cancelled) return;
+        setReserviceRequestProbe({ customerId: reserviceProbeCustomerId, enabled: !!r?.enabled, suggestion: r?.suggestion || null });
+      })
+      .catch(() => {
+        if (!cancelled) setReserviceRequestProbe({ customerId: reserviceProbeCustomerId, enabled: false, suggestion: null });
+      });
+    return () => { cancelled = true; };
+  }, [reserviceProbeCustomerId]);
+  // A different customer's suggestion or words never carry over.
+  useEffect(() => { setCustomerWords(''); setUsedSuggestion(null); }, [reserviceProbeCustomerId]);
+  const reserviceRequestActive = !!reserviceProbeCustomerId
+    && reserviceRequestProbe.customerId === reserviceProbeCustomerId
+    && reserviceRequestProbe.enabled;
   const [saving, setSaving] = useState(false);
   // State updates are async — two clicks in one tick both saw saving=false
   // during the awaited re-quote and booked twice; the ref is synchronous.
@@ -3068,6 +3135,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // Placed AFTER the cadence-grouping helpers below: these read them
   // during render, so they must not run before those consts initialize.
   const appointmentSubmitGroups = groupServicesForAppointmentSubmit(services);
+  // "Customer's words" shows only when the words would actually be saved: the
+  // server stamps a group's PRIMARY row, and grouping can promote a recurring
+  // service ahead of a one-time re-service, so a re-service line riding as an
+  // add-on has no row to hold them. Same predicate the submit loop uses.
+  const reserviceRequestShown = reserviceRequestActive
+    && appointmentSubmitGroups.some((g) => isOfficeRequestLine(g.lines[0]));
   const submitGroupLinesFor = (svc) => submitGroupLinesForService(appointmentSubmitGroups, svc, services);
   const appointmentDiscountScopeLines = appointmentDiscountScopeLinesFor(
     appointmentSubmitGroups, services,
@@ -3886,7 +3959,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // the start time (window end is derived from durations at submit), and is
   // separate from the ranged "Find best times" panel above.
   const bestTimesTarget = bookingPropertyTarget(selectedBookingProperty);
-  const { bestTimes, picked, bestInRange } = useBestTimes({
+  // Under GATE_RESCHEDULE_AVAILABILITY the same search answers the
+  // availability strip (days around the chosen date) instead.
+  const { bestTimes, picked, bestInRange, availability } = useBestTimes({
+    summary: true,
     date: apptDate ? String(apptDate).split('T')[0] : null,
     customerId: selectedCustomer?.id,
     // Rank at the CHOSEN property, not the customer's primary.
@@ -4007,6 +4083,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       // null price — see appointmentGroupRequestBody. Named locally so the &&
       // that decides it lives in its own scope, not submitAppointments's.
       const isPrimaryBlankAutoMosquito = (s) => isOneTimeMosquitoLine(s) && !lineHasEnteredPrice(s);
+      const firstOfficeRequestGroup = groups.find((g) => isOfficeRequestLine(g.lines[0]));
       for (const group of groups) {
         const key = groupKey(group);
         // Skip groups already created in a prior attempt of this submit
@@ -4102,6 +4179,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               appointmentDiscount: carriesAppointmentDiscount ? appointmentDiscount : undefined,
               callBookingReviewedIds: callBookingOverrides.get(key),
             }),
+            // Staff-saved "Customer's words": rides only the first group whose
+            // primary line is a pest/lawn re-service (the server stamps the
+            // primary row and decides the source itself).
+            ...(group === firstOfficeRequestGroup
+              ? customerRequestBodyField({ active: reserviceRequestShown, text: customerWords, usedSuggestion })
+              : {}),
             // Only the FIRST created group of a booking asks for the customer
             // confirmation text and carries the card-link flag — a split
             // seasonal/year-round save posts multiple series for the same
@@ -6294,7 +6377,32 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               }
             }}
           />
-          <SlotConflictNotice conflicts={slotConflicts} style={{ marginBottom: 10 }} />
+          <SlotConflictNotice
+            // The strip states the route problem itself; the
+            // double-booking notice (no `warning`) always stays.
+            conflicts={stripCoversRouteWarning(availability, { currentDate: apptDate ? String(apptDate).split('T')[0] : null, currentStart: windowStart })
+              ? (slotConflicts || []).filter((conflict) => !conflict.warning)
+              : slotConflicts}
+            style={{ marginBottom: 10 }}
+          />
+          <AvailabilityStrip
+            availability={availability}
+            currentDate={apptDate ? String(apptDate).split('T')[0] : null}
+            currentStart={windowStart}
+            currentTechnicianId={techMode === 'choose' ? techId : null}
+            onPick={(slot) => {
+              // Same adoption as the hint chips: the hour was scored for
+              // one technician, so taking it books that technician.
+              setApptDate(slot.date);
+              setWindowStart(slot.start);
+              if (slot.technicianId) {
+                setTechMode('choose');
+                setTechId(slot.technicianId);
+                appliedSuggestionRef.current = true;
+              }
+            }}
+            style={{ marginBottom: 10 }}
+          />
           <BestTimeHint
             bestTimes={bestTimes}
             picked={picked}
@@ -6356,6 +6464,36 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         {/* Section 4: Notes & Confirm */}
         <div style={sectionStyle}>
           <div style={{ fontSize: 14, fontWeight: 500, color: '#18181B', marginBottom: 10 }}>Notes</div>
+          {reserviceRequestShown && (
+            <div style={{ marginBottom: 10 }} data-testid="customer-words-section">
+              <label style={labelStyle} htmlFor="customer-words-input">Customer's words</label>
+              {reserviceRequestProbe.suggestion && (
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 8, padding: '8px 10px', border: `1px solid ${D.border}`, borderRadius: 6 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 12, color: D.muted, marginBottom: 2 }}>{suggestionSourceLabel(reserviceRequestProbe.suggestion)}</div>
+                    <div style={{ fontSize: 14, color: D.text, wordBreak: 'break-word' }}>{reserviceRequestProbe.suggestion.text}</div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCustomerWords(String(reserviceRequestProbe.suggestion.text || '').slice(0, CUSTOMER_WORDS_MAX));
+                      setUsedSuggestion(reserviceRequestProbe.suggestion);
+                    }}
+                    style={{ minHeight: 44, padding: '0 12px', background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 6, color: D.teal, fontSize: 13, fontWeight: 500, cursor: 'pointer', whiteSpace: 'nowrap' }}
+                  >Use this</button>
+                </div>
+              )}
+              <textarea
+                id="customer-words-input"
+                value={customerWords}
+                maxLength={CUSTOMER_WORDS_MAX}
+                onChange={e => setCustomerWords(e.target.value)}
+                rows={2}
+                placeholder="Optional — what the customer said is wrong"
+                style={{ ...inputStyle, resize: 'vertical', minHeight: 60 }}
+              />
+            </div>
+          )}
           <div style={{ marginBottom: 10 }}>
             <label style={labelStyle}>Customer Notes</label>
             <textarea value={customerNotes} onChange={e => setCustomerNotes(e.target.value)} rows={2} style={{ ...inputStyle, resize: 'vertical', minHeight: 60 }} />

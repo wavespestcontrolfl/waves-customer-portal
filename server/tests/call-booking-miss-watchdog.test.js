@@ -138,6 +138,39 @@ describe('rowClearsSlot — call-linked booking evidence only', () => {
   });
 });
 
+describe('rowClearsSlot — cancelled/rescheduled rows clear only on call provenance', () => {
+  const slot = { dateET: '2026-08-01', minutes: 720 };
+  const afterCall = new Date(new Date(OLD_ENOUGH).getTime() + 10 * 60 * 1000).toISOString();
+
+  test('a cancelled/rescheduled row carrying the call (source_call_log_id or the Call SID note) clears, on any date or time', () => {
+    const cancelled = bookedRow({ status: 'cancelled', window_start: '08:00:00', created_at: afterCall });
+    expect(rowClearsSlot({ ...cancelled, source_call_log_id: 'call-1' }, call(), slot)).toBe(true);
+    expect(rowClearsSlot({ ...cancelled, status: 'rescheduled', source_call_log_id: 'call-1' }, call(), slot)).toBe(true);
+    expect(rowClearsSlot({ ...cancelled, sched_date: '2026-08-05', notes: 'Call SID: CAsynthetic001.' }, call(), slot)).toBe(true);
+  });
+
+  test('a cancelled row WITHOUT provenance never clears: not near the slot, not at the slot time, not created after the call', () => {
+    for (const window_start of ['08:00:00', '12:00:00', '13:00:00', null]) {
+      for (const status of ['cancelled', 'rescheduled']) {
+        expect(rowClearsSlot(bookedRow({ status, window_start, created_at: afterCall }), call(), slot)).toBe(false);
+      }
+    }
+    // Another call's provenance is not this call's.
+    expect(rowClearsSlot(bookedRow({ status: 'cancelled', source_call_log_id: 'call-other' }), call(), slot)).toBe(false);
+  });
+
+  test('an ACTIVE row keeps the window-proximity rule', () => {
+    expect(rowClearsSlot(bookedRow({ status: 'confirmed', window_start: '13:00:00', created_at: afterCall }), call(), slot)).toBe(true);
+    expect(rowClearsSlot(bookedRow({ status: 'scheduled', window_start: '08:00:00', created_at: afterCall }), call(), slot)).toBe(false);
+  });
+
+  test('computeBookingMisses: a provenance-linked cancelled visit is no miss; the same row without provenance is', () => {
+    const cancelled = bookedRow({ status: 'cancelled', window_start: '12:00:00', created_at: afterCall, source_call_log_id: 'call-1' });
+    expect(computeBookingMisses([call()], [cancelled], { now: NOW })).toEqual([]);
+    expect(computeBookingMisses([call()], [{ ...cancelled, source_call_log_id: null }], { now: NOW })).toHaveLength(1);
+  });
+});
+
 describe('computeBookingMisses — confirmed-slot vs schedule diff', () => {
   test('a confirmed slot with no booking evidence is a miss', () => {
     const misses = computeBookingMisses([call()], [], { now: NOW });

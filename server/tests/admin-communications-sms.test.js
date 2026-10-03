@@ -83,6 +83,11 @@ jest.mock('../services/twilio-failure-alerts', () => ({
 // these route tests only need the hooks to succeed quietly.
 jest.mock('../services/sms-suggest-mode', () => ({
   SUGGEST_WORKFLOW: 'sms_house_voice_suggest',
+  // bodyNeedsPaymentRecheck (the send seam's gate) asks this; an absent export reads as "unknowable => recheck" (fail closed)
+  hasPriceQuote: jest.fn(() => false),
+  // GATE_SMS_SCHEDULING_SUGGEST rollback filter: a pass-through here; its SQL
+  // is covered in sms-scheduling-suggest.test.js.
+  excludeGatedSchedulingSuggestions: jest.fn((query) => query),
   HUMAN_REPLY_TYPES: ['manual', 'ai_approved', 'ai_revised'],
   revertDraftsToShadow: jest.fn(async () => 0),
   markSuggestionScheduled: jest.fn(async () => 1),
@@ -150,6 +155,7 @@ jest.mock('../utils/cron-lock', () => ({
 jest.mock('../services/short-url', () => ({
   shortenOrPassthrough: jest.fn(async (url) => url),
   existingShortUrlFor: jest.fn(async () => null),
+  allShortUrlsFor: jest.fn(async () => []),
   createTrackedShortLink: jest.fn(async (url) => ({ code: null, shortUrl: url })),
   invoiceShortCodePrefix: jest.fn(() => 'wpc'),
   shortLinkBaseUrl: () => 'https://wavespest.co',
@@ -160,6 +166,7 @@ const mockGates = { smsAutoSend: false, smsGratitudeReplies: false };
 jest.mock('../config/feature-gates', () => ({
   isEnabled: (gate) => (Object.hasOwn(mockGates, gate) ? mockGates[gate] : true),
   gateEnvTimestamp: () => mockGates.gratitudeActivatedAt || null,
+  homeLineLive: () => mockGates.homeLine === true,
   gates: {},
   logGateStatus: jest.fn(),
 }));
@@ -542,6 +549,73 @@ describe('admin communications SMS route', () => {
           adminUserId: 'admin-1',
         }),
       }));
+    });
+  });
+
+  // Street-level address hold: the composer's reschedule / appointment link inserts carry their visit's
+  // id so the shared send step can hold the text when that visit is (or became) a live hold.
+  describe('linkedVisitIds — the visits the draft links point at', () => {
+    const VISIT_A = '3f1c2a9e-5b7d-4e21-9c0a-1d2e3f4a5b6c';
+    const VISIT_B = '8a7b6c5d-4e3f-4a2b-8c1d-0e9f8a7b6c5d';
+    const postSms = (baseUrl, payload) => fetch(`${baseUrl}/admin/communications/sms`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to: '+15551234567', body: 'Your reschedule link: https://example.test/r/abc', messageType: 'manual', ...payload }),
+    });
+
+    test('well-formed ids ride the send as metadata.linked_scheduled_service_ids; junk and duplicates are dropped; absent stays absent', async () => {
+      sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM-linked' });
+      await withServer(async (baseUrl) => {
+        const res = await postSms(baseUrl, { linkedVisitIds: [VISIT_A, 'not-a-uuid', VISIT_A.toUpperCase(), VISIT_B, 42] });
+        expect(res.status).toBe(200);
+        expect(sendCustomerMessage.mock.calls[0][0].metadata.linked_scheduled_service_ids).toEqual([VISIT_A, VISIT_B]);
+        // No customerId was posted (the phone-only flow): the send is classified a LEAD and still carries the ids,
+        // which the shared send step checks whatever the audience (street-level-hold-comms.test.js).
+        expect(sendCustomerMessage.mock.calls[0][0].audience).toBe('lead');
+        sendCustomerMessage.mockClear();
+        expect((await postSms(baseUrl, {})).status).toBe(200);
+        expect(sendCustomerMessage.mock.calls[0][0].metadata).not.toHaveProperty('linked_scheduled_service_ids');
+      });
+    });
+
+    test('a send the shared step holds (a live street-level hold) is not reported as sent', async () => {
+      sendCustomerMessage.mockResolvedValue({
+        sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'STREET_LEVEL_HOLD', reason: 'Visit is an address hold awaiting the office confirm', retryable: true,
+      });
+      await withServer(async (baseUrl) => {
+        const res = await postSms(baseUrl, { linkedVisitIds: [VISIT_A] });
+        expect(res.status).not.toBe(200);
+        expect(sendCustomerMessage.mock.calls[0][0].metadata.linked_scheduled_service_ids).toEqual([VISIT_A]);
+      });
+    });
+
+    test('schedule-sms refuses a draft whose link points at a live street-level hold (409, nothing queued); a clear visit queues', async () => {
+      const hold = require('../services/street-level-hold');
+      const spy = jest.spyOn(hold, 'isStreetLevelHoldVisit').mockImplementation(async (id) => id === VISIT_A);
+      const inserts = [];
+      db.mockImplementation((table) => {
+        const first = jest.fn(async () => (table === 'customers' ? { id: 'cust-A', phone: '+15551234567' } : null));
+        return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), whereRaw: jest.fn(function () { return this; }), orderBy: jest.fn(function () { return this; }), first, select: jest.fn(async () => []), update: jest.fn(async () => 1), insert: jest.fn((row) => { inserts.push({ table, row }); return { returning: jest.fn(async () => [{ id: 'sched-1' }]) }; }) };
+      });
+      try {
+        await withServer(async (baseUrl) => {
+          const post = (payload) => fetch(`${baseUrl}/admin/communications/schedule-sms`, {
+            method: 'POST',
+            headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+            body: JSON.stringify({ to: '+15551234567', body: 'Your tech is on the way.', messageType: 'manual', customerId: 'cust-A', scheduledFor: '2099-01-01T10:00', ...payload }),
+          });
+          const held = await post({ linkedVisitIds: [VISIT_B, VISIT_A] });
+          expect(held.status).toBe(409);
+          expect((await held.json()).code).toBe('street_level_hold');
+          expect(inserts.filter((i) => i.table === 'sms_log')).toHaveLength(0);   // nothing queued for the held draft
+          expect((await post({ linkedVisitIds: [VISIT_B] })).status).not.toBe(409);
+          // A queued draft keeps its linked visits so the cron replay re-checks the hold at DELIVERY.
+          const queued = inserts.find((i) => i.table === 'sms_log');
+          expect(JSON.parse(queued.row.metadata).linked_scheduled_service_ids).toEqual([VISIT_B]);
+        });
+      } finally {
+        spy.mockRestore();
+      }
     });
   });
 
@@ -2160,6 +2234,61 @@ describe('admin communications SMS route', () => {
     }));
   });
 
+  test('GATE_HOME_LINE: a send with no picked line leaves on the staff sender (conversation > home line > main)', async () => {
+    mockGates.smsGratitudeReplies = false;
+    mockGates.homeLine = true;
+    db.mockImplementation(() => makeUniversalBuilder());
+    const bearer = jest.spyOn(require('../services/composer-customer-links'), 'bearerLinkSendCheck')
+      .mockResolvedValue({ ok: true, customerId: 'cust-A' });
+    const sender = jest.spyOn(require('../services/home-line'), 'staffTextSender')
+      .mockResolvedValue({ fromNumber: '+19412972817', reason: 'home_line' });
+    sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM-home-line' });
+    try {
+      await withServer(async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/admin/communications/sms`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to: '+15551234567', body: 'Home line send', messageType: 'manual' }),
+        });
+        expect(response.status).toBe(200);
+      });
+      expect(sender).toHaveBeenCalledWith({ phone: '+15551234567', customerId: 'cust-A' });
+      expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+        customerId: 'cust-A',
+        metadata: expect.objectContaining({ fromNumber: '+19412972817' }),
+      }));
+    } finally {
+      bearer.mockRestore();
+      sender.mockRestore();
+      delete mockGates.homeLine;
+    }
+  });
+
+  test('GATE_HOME_LINE: a line the composer picked is never overridden', async () => {
+    mockGates.smsGratitudeReplies = false;
+    mockGates.homeLine = true;
+    db.mockImplementation(() => makeUniversalBuilder());
+    const sender = jest.spyOn(require('../services/home-line'), 'staffTextSender');
+    sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM-picked' });
+    try {
+      await withServer(async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/admin/communications/sms`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to: '+15551234567', body: 'Picked line', messageType: 'manual', fromNumber: '+19412972606' }),
+        });
+        expect(response.status).toBe(200);
+      });
+      expect(sender).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+        metadata: expect.objectContaining({ fromNumber: '+19412972606' }),
+      }));
+    } finally {
+      sender.mockRestore();
+      delete mockGates.homeLine;
+    }
+  });
+
   test('rejects an MMS whose media exceeds Twilio\'s 5MB total per-message cap', async () => {
     // Six sub-5MB images individually pass the per-file cap but blow the 5MB
     // aggregate Twilio enforces — guard before the send instead of bouncing.
@@ -3596,6 +3725,8 @@ describe('/sms — follow-up SLA phrase send-time recheck (Codex r3 P2)', () => 
       }
       if (table === 'agent_decisions') {
         const b = makeUniversalBuilder();
+        // the provider-boundary LABEL FACTS check re-reads the decision row (Codex #5416 P1)
+        b.first = jest.fn(async () => decision);
         b.update = jest.fn(async (patch) => { claimUpdates.push(patch); return 1; });
         return b;
       }
@@ -3677,7 +3808,7 @@ describe('/sms — follow-up SLA phrase send-time recheck (Codex r3 P2)', () => 
 
   // Codex round-41 P2 (PR #5334): the decision's live-ETA check also runs at the TRUE provider
   // boundary for an Agent Review send — decision-linked sends only.
-  test('a decision-linked send carries the live-ETA providerPreSendCheck; a hand-typed one does not', async () => {
+  test('a decision-linked send carries the live-ETA + LABEL FACTS providerPreSendCheck; a hand-typed one does not', async () => {
     const claimUpdates = [];
     mockDb({ decision: decisionRow({ suggested_message: 'Thanks for reaching out! We appreciate you.', input_snapshot: JSON.stringify({}) }), claimUpdates });
     await withServer(async (baseUrl) => {

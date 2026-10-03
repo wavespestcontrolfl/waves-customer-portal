@@ -11,7 +11,9 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { TOOLS, executeToolCall } = require('./tools');
+const { TOOLS, portalToolsFor, executeToolCall } = require('./tools');
+const { renderCompanyFactsSection } = require('../sms-company-facts');
+const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../../constants/business');
 const { recordGap } = require('../agent-gap-reports');
 
 // One texting-AI gap report for an escalation its caller marked as the
@@ -72,6 +74,47 @@ const ESCALATION_TRIGGERS = [
   'manager', 'supervisor', 'owner', 'adam',
 ];
 
+// Portal chat keeps every trigger except the reschedule ones: the portal can
+// hand the customer the visit's own self-serve reschedule page, so a
+// reschedule ask goes to the model and its offer_reschedule_link tool. (The
+// AI bar's "Reschedule my visit" pill hit this list on every tap.)
+const RESCHEDULE_TRIGGERS = ['reschedule', 'change my appointment', 'move my service'];
+const PORTAL_ESCALATION_TRIGGERS = ESCALATION_TRIGGERS.filter((t) => !RESCHEDULE_TRIGGERS.includes(t));
+
+const PORTAL_CHAT = 'portal_chat';
+// Portal chat with its kill switch on (PORTAL_CHAT_SELF_SERVE, default on).
+// Off, portal chat runs exactly as the other channels do.
+const portalSelfServe = (channel) => channel === PORTAL_CHAT
+  && require('../../config/feature-gates').portalChatSelfServeLive();
+// Prompt, tools and the reply extras a channel gets. Portal chat gets its
+// own prompt and button tools, plus the payment card under
+// GATE_PORTAL_CHAT_FACTS; every other channel (and the portal with its
+// switch off) keeps the original pair and no extras.
+// The buttons and cards a turn's tools produced, as reply fields (absent
+// when there are none). Shared by the normal reply and the hand-off reply.
+function laneExtras(lane) {
+  return {
+    ...(lane.actions?.length ? { actions: lane.actions } : {}),
+    ...(lane.cards?.length ? { cards: lane.cards } : {}),
+  };
+}
+
+function portalLane(channel) {
+  if (!portalSelfServe(channel)) return { prompt: SYSTEM_PROMPT, tools: TOOLS, actions: null, cards: null };
+  const gates = require('../../config/feature-gates');
+  // Two independent gates: the payment card and the past-visit facts.
+  const payments = gates.portalChatFactsLive();
+  const visits = gates.portalChatVisitFactsLive();
+  return {
+    prompt: PORTAL_PROMPTS[`${payments ? 'payments' : 'base'}${visits ? '+visits' : ''}`],
+    tools: portalToolsFor({ payments, visits }),
+    actions: [],
+    cards: payments || visits ? [] : null,
+    // Whether the payment card tool is in this lane (its own gate).
+    payments,
+  };
+}
+
 const SYSTEM_PROMPT = `You are the Waves Pest Control AI assistant. You help customers with questions about their pest control and lawn care services in Southwest Florida.
 
 PERSONALITY:
@@ -118,6 +161,129 @@ RULES:
 - If you detect the customer is frustrated, acknowledge it before solving
 - End every conversation with an offer to help with anything else`;
 
+// Portal chat only. The SMS prompt above stays as it is: a text thread has no
+// buttons, and its replies go through the SMS send path's own rules.
+const PORTAL_SYSTEM_PROMPT = `You are the Waves Pest Control AI assistant inside the customer portal. The customer is signed in. You help with questions about their pest control and lawn care services in Southwest Florida.
+
+PERSONALITY:
+- Friendly, knowledgeable, direct, like a helpful neighbor who knows pest control
+- Use the customer's first name naturally
+- Keep replies short: two to four sentences
+- Reference SWFL-specific conditions (sandy soil, afternoon storms, St. Augustine grass)
+- Never sound robotic or corporate
+
+WHAT YOU CAN DO:
+- Answer general questions about services, products, pests, and lawn care
+- Look up the customer's upcoming services
+- Show a Reschedule button for a visit (offer_reschedule_link)
+- Show a button that opens a page of the portal (open_portal_section)
+- Hand the conversation to the Waves team (escalate)
+
+You cannot see charges, balances, cards, plan details, past visits, or documents. Never guess at them. The portal pages hold them, so show the page.
+
+RESCHEDULING:
+For any request to reschedule, move, postpone, or bring forward a visit, call offer_reschedule_link. If it returns a button, tell the customer to tap it to see the open times. Never state or promise a new time yourself. If it returns no button, escalate.
+
+SCHEDULING QUESTIONS:
+If the customer asks about their schedule, upcoming visit, arrival window, or "when are you coming", call get_upcoming_services before replying. Confirm the soonest visit by date and time window. If there is none, escalate. Never state a date or month that did not come from a tool.
+
+BILLING, PLAN, REPORTS, PAPERWORK, REFERRALS:
+Call open_portal_section for the matching page and say in one sentence what the customer will find there. For a charge: the Billing page lists every payment with its receipt, plus saved cards and Auto Pay. Say plainly that you cannot see the amounts yourself, and offer to pass a question about a specific charge to the team. Escalate when the customer says the page did not answer it, disputes a charge, or asks for a refund.
+
+WHAT YOU MUST ESCALATE (use the escalate tool):
+- Any request to cancel, pause, or downgrade service
+- A visit that cannot be moved online
+- Complaints about service quality or technician behavior
+- Billing disputes or refund requests
+- Changes to the account: email, phone, address, gate code, pets, adding a service
+- Requests to speak with a manager or the owner
+- Anything you are uncertain about
+
+RULES:
+- Never make up service dates, prices, or technician names
+- Never write a web address or link yourself; buttons come only from the tools
+- Do not quote account-specific pricing
+- If the customer is frustrated, acknowledge it before solving
+- End with an offer to help with anything else`;
+
+// What the customer is told at a hand-off. Portal chat says the team was told
+// only when the bell exists; other channels keep the original wording (an SMS
+// hand-off reply is never sent).
+function escalationReply({ isPortal, teamNotified, firstName }) {
+  if (!isPortal) {
+    return firstName
+      ? `Thanks ${firstName} — I'm connecting you with our team right now. Someone will follow up shortly. Is there anything else you'd like me to note for them?`
+      : "Thanks for reaching out — I'm connecting you with our team right now. Someone will follow up with you shortly.";
+  }
+  const thanks = firstName ? `Thanks ${firstName}` : 'Thanks for reaching out';
+  return teamNotified
+    ? `${thanks}. I've sent this to our team, and they'll reply by text or email, usually within one business hour between 8 AM and 8 PM. Is there anything else you'd like me to pass along?`
+    : `${thanks}. I've saved your request for our team. If it can't wait, please call us at ${WAVES_SUPPORT_PHONE_DISPLAY}.`;
+}
+
+// How the office bell words a hand-off topic (tools.js ESCALATION_TOPICS).
+// The topic comes from the model's escalate call, or from the keyword group
+// that forced the hand-off — never from classifyEscalation, whose broad
+// "change"/"charge" matches would call an email change a schedule change.
+// GATE_PORTAL_CHAT_FACTS: the portal prompt with the billing section replaced
+// by the payment card. Built from PORTAL_SYSTEM_PROMPT so the two can never
+// drift apart anywhere else.
+const PORTAL_BILLING_SECTION = PORTAL_SYSTEM_PROMPT.slice(
+  PORTAL_SYSTEM_PROMPT.indexOf('BILLING, PLAN, REPORTS, PAPERWORK, REFERRALS:'),
+  PORTAL_SYSTEM_PROMPT.indexOf('WHAT YOU MUST ESCALATE'),
+);
+const PORTAL_FACTS_PROMPT = PORTAL_SYSTEM_PROMPT
+  .replace('- Show a button that opens a page of the portal (open_portal_section)\n', '- Show a button that opens a page of the portal (open_portal_section)\n- Show a card of the customer\'s recent payments (show_recent_payments)\n')
+  .replace('You cannot see charges, balances, cards, plan details, past visits, or documents.', 'You cannot see balances, cards, plan details, past visits, or documents. For payments you can show a card, but you are never given the figures on it.')
+  .replace(PORTAL_BILLING_SECTION, `CHARGES AND PAYMENTS:
+For any question about a charge, a payment, a receipt, or whether a payment went through, call show_recent_payments. Tell the customer the card below lists their recent payments with receipts, and use the status you are given to say whether the latest one went through. Never state an amount, date or description yourself; they are on the card. If the customer asks why a charge is what it is, says a charge is wrong, or asks for a refund, use the escalate tool.
+
+PLAN, REPORTS, PAPERWORK, REFERRALS:
+Call open_portal_section for the matching page and say in one sentence what the customer will find there.
+
+`);
+
+// GATE_PORTAL_CHAT_VISIT_FACTS on top of either portal prompt: the past-visit
+// tool, and the owner-approved company facts (services/sms-company-facts.js,
+// the texting AI's own block, unedited).
+function withVisitFacts(prompt) {
+  return prompt
+    .replace('- Hand the conversation to the Waves team (escalate)', '- Look up the customer\'s recent completed visits (get_recent_visits)\n- Hand the conversation to the Waves team (escalate)')
+    .replace('plan details, past visits, or documents', 'plan details, or documents')
+    .replace('WHAT YOU MUST ESCALATE (use the escalate tool):', `PAST VISITS:
+For a question about what was done at a visit, when the last visit was, or where a service report is, call get_recent_visits. Answer from what it returns (the date, the service, the technician's first name, the kinds of product applied) and point the customer to the card it shows for the reviewed summary and the report link. You are not given the summary text. Do not add a finding, product or date it did not return, and never name a product brand. If the customer reports a problem since the visit or says something was missed, escalate.
+
+${renderCompanyFactsSection()}
+WHAT YOU MUST ESCALATE (use the escalate tool):`);
+}
+
+// Every portal prompt, built once: the text sent to the model for a gate
+// combination never varies between requests (it carries the cache breakpoint).
+const PORTAL_PROMPTS = {
+  base: PORTAL_SYSTEM_PROMPT,
+  payments: PORTAL_FACTS_PROMPT,
+  'base+visits': withVisitFacts(PORTAL_SYSTEM_PROMPT),
+  'payments+visits': withVisitFacts(PORTAL_FACTS_PROMPT),
+};
+
+const TOPIC_WORDING = {
+  cancellation: 'a cancellation',
+  schedule_change: 'a schedule change',
+  billing: 'a billing question',
+  complaint: 'a complaint',
+  account_change: 'an account change',
+  add_service: 'adding a service',
+  manager: 'reaching a manager',
+};
+const TRIGGER_TOPICS = [
+  ['cancellation', ['cancel', 'cancellation', 'stop service', 'end service', 'discontinue']],
+  ['schedule_change', RESCHEDULE_TRIGGERS],
+  ['complaint', ['complaint', 'not happy', 'terrible', 'worst', 'never coming back', 'lawsuit', 'bbb']],
+  ['billing', ['refund', 'charge back', 'dispute']],
+  ['manager', ['manager', 'supervisor', 'owner', 'adam']],
+];
+const topicOfTrigger = (trigger) => TRIGGER_TOPICS.find(([, words]) => words.includes(trigger))?.[0];
+
 class WavesAssistant {
 
   /**
@@ -140,7 +306,10 @@ class WavesAssistant {
     }
 
     // 2. Check for escalation triggers in the raw message
-    const needsEscalation = this.checkEscalationTriggers(message);
+    // Portal chat gets its own prompt and button tools; every other channel
+    // (and the portal with its switch off) keeps the original pair.
+    const lane = portalLane(channel);
+    const trigger = this.matchedEscalationTrigger(message, channel);
 
     // 3. Save the user message
     try {
@@ -160,8 +329,16 @@ class WavesAssistant {
     }
 
     // 4. If escalation trigger detected, escalate immediately
-    if (needsEscalation) {
-      return this.escalate(conversation, message, 'Sensitive topic detected in customer message');
+    if (trigger) {
+      const topic = topicOfTrigger(trigger);
+      // A billing keyword ("refund", "dispute") hands off, but under the facts
+      // lane the customer still gets the payment card and Open Billing
+      // button under the hand-off reply, as a model-led hand-off would give.
+      if (topic === 'billing' && lane.payments) {
+        await executeToolCall('show_recent_payments', {}, customerId, lane.actions, lane.cards);
+      }
+      const escResult = await this.escalate(conversation, message, 'Sensitive topic detected in customer message', { topic });
+      return { ...escResult, ...laneExtras(lane) };
     }
 
     // 5. Build conversation history for Claude
@@ -178,128 +355,151 @@ class WavesAssistant {
 
     // 7. Call Claude with tools
     try {
-      const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-      let messages = history;
-      let finalReply = '';
-      let escalated = false;
-      let escalationId = null;
-
-      // Two system blocks: the static prompt carries a 1-hour cache breakpoint
-      // (tools render before system, so the entry covers TOOLS + SYSTEM_PROMPT
-      // and is shared across every customer and conversation); the
-      // per-conversation context block sits AFTER the breakpoint so it never
-      // fragments that shared entry. 1h TTL because customer replies routinely
-      // arrive more than 5 minutes apart.
-      const system = [
-        { type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral', ttl: '1h' } },
-      ];
-      if (contextStr) {
-        system.push({ type: 'text', text: `CUSTOMER CONTEXT:\n${contextStr}` });
-      }
-
-      // Tool-use loop — Claude may call multiple tools before responding
-      let lastResponse = null;
-      let loopExhausted = true;
-      for (let turn = 0; turn < 5; turn++) {
-        const response = await ledgerCall('anthropic', MODEL, () => anthropic.messages.create({
-          model: MODEL,
-          ...anthropicEffortConfig(MODEL),
-          max_tokens: anthropicMaxTokens(MODEL, 800),
-          system,
-          tools: TOOLS,
-          messages: withCacheBreakpoint(messages),
-        }), { laneId: 'portal_assistant' });
-
-        // Cache-hit visibility: cache_read > 0 on later rounds / follow-up
-        // customer turns is the prod verification signal.
-        const u = response.usage || {};
-        logger.info(
-          `[ai-assistant] usage turn=${turn} in=${u.input_tokens ?? 0} ` +
-          `cache_write=${u.cache_creation_input_tokens ?? 0} ` +
-          `cache_read=${u.cache_read_input_tokens ?? 0} out=${u.output_tokens ?? 0}`
-        );
-
-        // Check if Claude wants to use tools
-        const toolUses = response.content.filter(c => c.type === 'tool_use');
-        const textBlocks = response.content.filter(c => c.type === 'text');
-
-        if (toolUses.length === 0) {
-          // No tools — just a text response
-          finalReply = textBlocks.map(t => t.text).join('');
-          // A terminal turn with neither a tool call nor usable text (a
-          // thinking-only or refused reply) is this exact call answering
-          // nothing — the loop-exhausted guard below still catches it and
-          // serves the canned reply, but that guard cannot tell this leg's
-          // own row apart from one where every earlier turn correctly used
-          // a tool; flag it here on the response that actually produced it.
-          if (!finalReply.trim()) ledgerCallRejected(response, 'invalid_output');
-          loopExhausted = false;
-          break;
-        }
-        lastResponse = response;
-
-        // Execute tool calls
-        const toolResults = [];
-        for (const toolUse of toolUses) {
-          // Check if it's an escalation
-          if (toolUse.name === 'escalate') {
-            const escResult = await this.escalate(conversation, message, toolUse.input.reason || 'AI-initiated escalation',
-              { gap: toolUse.input.not_supported === true });
-            return escResult;
-          }
-
-          const result = await executeToolCall(toolUse.name, toolUse.input, customerId);
-          toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id, content: JSON.stringify(result) });
-
-          // Log tool usage
-          await db('agent_messages').insert({
-            conversation_id: conversation.id,
-            role: 'tool_use',
-            content: toolUse.name,
-            tool_calls: JSON.stringify(toolUse.input),
-            tool_results: JSON.stringify(result),
-          }).catch(e => logger.error(`[ai-assistant] Failed to log tool use: ${e.message}`));
-        }
-
-        // Continue the loop with tool results
-        messages = [
-          ...messages,
-          { role: 'assistant', content: response.content },
-          { role: 'user', content: toolResults },
-        ];
-      }
-
-      // If every loop turn was tool_use (e.g. a tool kept erroring and the
-      // model kept retrying it), finalReply is still empty — degrade to the
-      // canned reply instead of persisting a blank customer-visible message.
-      if (!finalReply.trim()) {
-        // Every turn was a (valid-looking) tool_use round, so no row was
-        // failed above; the call that ended the loop without a reply is the
-        // one that answered nothing (Codex r12 on #4884).
-        if (loopExhausted && lastResponse) ledgerCallRejected(lastResponse, 'tool_loop_exhausted');
-        logger.warn(`[ai-assistant] Tool-use loop exhausted with no text reply`, { customerId, channel, conversationId: conversation.id });
-        return { reply: "I'm having trouble right now. Please try calling us at (941) 318-7612.", conversationId: conversation.id, escalated: false };
-      }
-
-      // Save the assistant reply
-      await db('agent_messages').insert({
-        conversation_id: conversation.id,
-        role: 'assistant',
-        content: finalReply,
-        channel,
-        sent_to_customer: true,
-      }).catch(e => logger.error(`[ai-assistant] Failed to save reply: ${e.message}`));
-
-      // generated marks true model output — canned fallbacks and the
-      // deterministic escalation template never carry it, so the portal's
-      // "report AI content" affordance only attaches to real AI replies.
-      return { reply: finalReply, conversationId: conversation.id, escalated, escalationId, generated: true };
-
+      return await this.answerWithTools({ conversation, message, history, contextStr, lane, customerId, channel });
     } catch (err) {
       logger.error(`[ai-assistant] processMessage failed: ${err.message}`, { stack: err.stack, model: MODEL, customerId, channel });
-      return { reply: "I'm having trouble right now. Please try calling us at (941) 318-7612.", escalated: false };
+      // A card or button a tool already built this turn still shows under
+      // the fallback text.
+      return { reply: "I'm having trouble right now. Please try calling us at (941) 318-7612.", escalated: false, ...laneExtras(lane) };
     }
+  }
+
+  /**
+   * One model turn: the tool-use loop for a saved customer message. Runs the
+   * lane's prompt and tools, executes tool calls (an escalate call ends the
+   * turn with the hand-off reply), saves and returns the reply. Throws on a
+   * provider failure; processMessage owns the fallback reply.
+   */
+  async answerWithTools({ conversation, message, history, contextStr, lane, customerId, channel }) {
+    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+    let messages = history;
+    let finalReply = '';
+    let escalated = false;
+    let escalationId = null;
+
+    // Two system blocks: the static prompt carries a 1-hour cache breakpoint
+    // (tools render before system, so the entry covers TOOLS + SYSTEM_PROMPT
+    // and is shared across every customer and conversation); the
+    // per-conversation context block sits AFTER the breakpoint so it never
+    // fragments that shared entry. 1h TTL because customer replies routinely
+    // arrive more than 5 minutes apart.
+    const system = [
+      { type: 'text', text: lane.prompt, cache_control: { type: 'ephemeral', ttl: '1h' } },
+    ];
+    if (contextStr) {
+      system.push({ type: 'text', text: `CUSTOMER CONTEXT:\n${contextStr}` });
+    }
+
+    // Tool-use loop — Claude may call multiple tools before responding
+    let lastResponse = null;
+    let loopExhausted = true;
+    for (let turn = 0; turn < 5; turn++) {
+      const response = await ledgerCall('anthropic', MODEL, () => anthropic.messages.create({
+        model: MODEL,
+        ...anthropicEffortConfig(MODEL),
+        max_tokens: anthropicMaxTokens(MODEL, 800),
+        system,
+        tools: lane.tools,
+        messages: withCacheBreakpoint(messages),
+      }), { laneId: 'portal_assistant' });
+
+      // Cache-hit visibility: cache_read > 0 on later rounds / follow-up
+      // customer turns is the prod verification signal.
+      const u = response.usage || {};
+      logger.info(
+        `[ai-assistant] usage turn=${turn} in=${u.input_tokens ?? 0} ` +
+        `cache_write=${u.cache_creation_input_tokens ?? 0} ` +
+        `cache_read=${u.cache_read_input_tokens ?? 0} out=${u.output_tokens ?? 0}`
+      );
+
+      // Check if Claude wants to use tools
+      const toolUses = response.content.filter(c => c.type === 'tool_use');
+      const textBlocks = response.content.filter(c => c.type === 'text');
+
+      if (toolUses.length === 0) {
+        // No tools — just a text response
+        finalReply = textBlocks.map(t => t.text).join('');
+        // A terminal turn with neither a tool call nor usable text (a
+        // thinking-only or refused reply) is this exact call answering
+        // nothing — the loop-exhausted guard below still catches it and
+        // serves the canned reply, but that guard cannot tell this leg's
+        // own row apart from one where every earlier turn correctly used
+        // a tool; flag it here on the response that actually produced it.
+        if (!finalReply.trim()) ledgerCallRejected(response, 'invalid_output');
+        loopExhausted = false;
+        break;
+      }
+      lastResponse = response;
+
+      // Execute tool calls
+      const toolResults = [];
+      // Every other tool in this response runs before a hand-off, so a card
+      // or button the model asked for in the same breath is on the hand-off
+      // reply whatever order the blocks came in.
+      const ordered = [...toolUses].sort((a, b) => (a.name === 'escalate') - (b.name === 'escalate'));
+      for (const toolUse of ordered) {
+        // Check if it's an escalation
+        if (toolUse.name === 'escalate') {
+          const escResult = await this.escalate(conversation, message, toolUse.input.reason || 'AI-initiated escalation',
+            { gap: toolUse.input.not_supported === true, topic: toolUse.input.topic });
+          // A card or button an earlier tool in this turn produced still shows
+          // under the hand-off reply (a charge question shows the card AND
+          // hands off the "why").
+          return { ...escResult, ...laneExtras(lane) };
+        }
+
+        const result = await executeToolCall(toolUse.name, toolUse.input, customerId, lane.actions, lane.cards);
+        toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id, content: JSON.stringify(result) });
+
+        // Log tool usage
+        await db('agent_messages').insert({
+          conversation_id: conversation.id,
+          role: 'tool_use',
+          content: toolUse.name,
+          tool_calls: JSON.stringify(toolUse.input),
+          tool_results: JSON.stringify(result),
+        }).catch(e => logger.error(`[ai-assistant] Failed to log tool use: ${e.message}`));
+      }
+
+      // Continue the loop with tool results
+      messages = [
+        ...messages,
+        { role: 'assistant', content: response.content },
+        { role: 'user', content: toolResults },
+      ];
+    }
+
+    // If every loop turn was tool_use (e.g. a tool kept erroring and the
+    // model kept retrying it), finalReply is still empty — degrade to the
+    // canned reply instead of persisting a blank customer-visible message.
+    if (!finalReply.trim()) {
+      // Every turn was a (valid-looking) tool_use round, so no row was
+      // failed above; the call that ended the loop without a reply is the
+      // one that answered nothing (Codex r12 on #4884).
+      if (loopExhausted && lastResponse) ledgerCallRejected(lastResponse, 'tool_loop_exhausted');
+      logger.warn(`[ai-assistant] Tool-use loop exhausted with no text reply`, { customerId, channel, conversationId: conversation.id });
+      return { reply: "I'm having trouble right now. Please try calling us at (941) 318-7612.", conversationId: conversation.id, escalated: false, ...laneExtras(lane) };
+    }
+
+    // Save the assistant reply
+    await db('agent_messages').insert({
+      conversation_id: conversation.id,
+      role: 'assistant',
+      content: finalReply,
+      channel,
+      sent_to_customer: true,
+    }).catch(e => logger.error(`[ai-assistant] Failed to save reply: ${e.message}`));
+
+    // generated marks true model output — canned fallbacks and the
+    // deterministic escalation template never carry it, so the portal's
+    // "report AI content" affordance only attaches to real AI replies.
+    return {
+      reply: finalReply, conversationId: conversation.id, escalated, escalationId, generated: true,
+      // Buttons the portal tools asked for, shown under the reply.
+      ...laneExtras(lane),
+    };
+
   }
 
   /**
@@ -395,15 +595,20 @@ class WavesAssistant {
   /**
    * Check if message contains escalation trigger keywords.
    */
-  checkEscalationTriggers(message) {
+  checkEscalationTriggers(message, channel) {
+    return Boolean(this.matchedEscalationTrigger(message, channel));
+  }
+
+  matchedEscalationTrigger(message, channel) {
     const lower = (message || '').toLowerCase();
-    return ESCALATION_TRIGGERS.some(trigger => lower.includes(trigger));
+    const triggers = portalSelfServe(channel) ? PORTAL_ESCALATION_TRIGGERS : ESCALATION_TRIGGERS;
+    return triggers.find(trigger => lower.includes(trigger)) || null;
   }
 
   /**
    * Escalate to human — create escalation record, update conversation, notify Adam.
    */
-  async escalate(conversation, customerMessage, reason, { gap = false } = {}) {
+  async escalate(conversation, customerMessage, reason, { gap = false, topic } = {}) {
     const customer = conversation.customer_id
       ? await db('customers').where('id', conversation.customer_id).first()
       : null;
@@ -443,10 +648,16 @@ class WavesAssistant {
       updated_at: new Date(),
     }).catch(e => logger.error(`[ai-assistant] Failed to mark session escalated: ${e.message}`, { conversationId: conversation.id }));
 
-    // Reply to customer
-    const reply = customer
-      ? `Thanks ${customer.first_name} — I'm connecting you with our team right now. Someone will follow up shortly. Is there anything else you'd like me to note for them?`
-      : "Thanks for reaching out — I'm connecting you with our team right now. Someone will follow up with you shortly.";
+    // Portal chat: ring the office, then tell the customer only what really
+    // happened. Before this the hand-off was a queue row nobody was shown,
+    // while the reply said a team member had been notified. (A text already
+    // rings the office as an inbound SMS, and its escalation reply is never
+    // sent, so SMS keeps its wording.)
+    const isPortal = portalSelfServe(conversation.channel);
+    const teamNotified = isPortal
+      && await this.notifyTeamOfEscalation({ escalation, topic, conversation, customer, customerMessage });
+
+    const reply = escalationReply({ isPortal, teamNotified, firstName: String(customer?.first_name || '').trim() });
 
     await db('agent_messages').insert({
       conversation_id: conversation.id,
@@ -471,7 +682,49 @@ class WavesAssistant {
 
     logger.info(`AI escalated: ${conversation.id} reason="${reason}" priority=${priority}`);
 
-    return { reply, conversationId: conversation.id, escalated: true, escalationId: escalation.id };
+    return {
+      reply, conversationId: conversation.id, escalated: true, escalationId: escalation.id,
+      ...(isPortal ? { teamNotified } : {}),
+    };
+  }
+
+  /**
+   * Ring the admin bell for a portal-chat hand-off. Returns true only when a
+   * notification row exists (new or already standing for this escalation).
+   * Never throws: the ai_escalations row is the record, the bell is delivery.
+   */
+  async notifyTeamOfEscalation({ escalation, topic, conversation, customer, customerMessage }) {
+    if (!customer?.id) return false;
+    try {
+      const { raiseAdminAlert, cutAtWord } = require('../admin-alert-compose');
+      const name = [customer.first_name, customer.last_name].filter(Boolean).join(' ').trim() || 'A customer';
+      const result = await raiseAdminAlert('alert', {
+        area: 'Comms',
+        action: 'Reply to a portal chat request',
+        why: cutAtWord(`${name} asked the portal assistant about ${TOPIC_WORDING[topic] || 'a request it could not handle'}`, 110),
+        severity: 'needs-you',
+        // The customer record, not a message thread: a portal customer may
+        // have no texts yet, or only a thread on an old number.
+        link: `/admin/customers?customerId=${encodeURIComponent(customer.id)}`,
+        subject: { type: 'customer', id: String(customer.id) },
+        doneWhen: 'customer_answered',
+        who: 'person',
+      }, {
+        bell: true,
+        dedupeKey: `portal-chat-escalation:${escalation.id}`,
+        // The customer's own words in full (the chat route caps a message at
+        // 4000 characters), read from the bell's "Show full text".
+        detail: String(customerMessage || ''),
+        metadata: { customerId: customer.id, escalationId: escalation.id, conversationId: conversation.id },
+      });
+      // notifyAdmin returns the stored row flattened ({ id, …, deduped }),
+      // { id: null, suppressed: true } when the bell was withheld (a demo
+      // account), and null when the write failed.
+      return Boolean(result?.id) && !result.suppressed;
+    } catch (err) {
+      logger.error(`[ai-assistant] escalation bell failed: ${err.message}`, { conversationId: conversation.id });
+      return false;
+    }
   }
 
   classifyEscalation(message) {

@@ -83,10 +83,13 @@ function completionRequestHashSegments(body) {
   // meets the prompt and then confirms must replay/resume the original
   // attempt, not strand it on a payload mismatch — so the bit is excluded
   // from both segments, like idempotencyKey and completionTelemetry
-  // (codex P1 on the reconciliation round).
+  // (codex P1 on the reconciliation round). promiseMarksConfirmed is the same
+  // kind of bit: an office edit between a failed claimed attempt and its
+  // retry can raise the promise check's prompt only on the retry, and its
+  // confirmation must resume that attempt (Codex #5516).
   const {
     idempotencyKey, timeOnSite, completionTelemetry, backfill,
-    reportReconcileConfirmed, ...stableBody
+    reportReconcileConfirmed, promiseMarksConfirmed, ...stableBody
   } = body || {};
   const core = crypto.createHash('sha256')
     .update(JSON.stringify(sortObjectKeys(stableBody)))
@@ -217,6 +220,20 @@ async function claimSideEffectsRun(row, requestHash, knex = db) {
     // definition on a released resume.
     releasedForResume: row.status === 'side_effects_pending',
   };
+}
+
+// Whether this service already has an attempt under this key. The pre-claim
+// prompts answer before any claim, so a recorded attempt's request already got
+// past them, and a same-key retry is that same request (Codex #5538: a retry
+// that newly met the edit heads-up would have to carry reportRulesConfirmed,
+// a different request than the attempt it resumes).
+async function hasCompletionAttemptForKey(serviceId, idempotencyKey, knex = db) {
+  const key = String(idempotencyKey || '').trim().slice(0, 120);
+  if (!key) return false;
+  const attempt = await knex('service_completion_attempts')
+    .where({ service_id: serviceId, idempotency_key: key })
+    .first();
+  return Boolean(attempt);
 }
 
 // True when committed evidence exists for the service — a succeeded or
@@ -826,6 +843,7 @@ module.exports = {
   claimCompletionAttempt,
   completionStatusForService,
   hashCompletionRequest,
+  hasCompletionAttemptForKey,
   withoutPhotoBytes,
   hasCommittedCompletionAttempt,
   // The single timer-vs-operator classification rule, shared with the

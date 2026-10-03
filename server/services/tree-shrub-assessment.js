@@ -24,6 +24,10 @@ const logger = require('./logger');
 const MODELS = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
 const { anthropicText, geminiText } = require('./llm/call');
+const {
+  TECH_FINDING_LABELS, PALM_CROWN_PROMPT_RULE, techFindingsCopyLive, normalizeTechFindings, editText,
+  hideFrozenFindingsInScores, loadFrozenTechFindingsByRecord, withholdScores,
+} = require('./service-report/tree-shrub-tech-findings');
 
 // Order-independent content hash of a set of photo data URLs (each hashed, then
 // hashed together) so the review signature can be bound to the EXACT photos scored —
@@ -128,20 +132,34 @@ function validateTreeShrubReviewForReport(review, { serviceId } = {}) {
     : TREE_SHRUB_REVIEW_SCORE_KEYS;
   for (const key of includedKeys) includedScores[key] = scores[key];
 
-  return {
-    ok: true,
-    grounding: {
-      source: 'reviewed_photo_signals',
-      scores: includedScores,
-      scoredCount,
-      photoCount,
-      photosHash: review.photosHash,
-      // Any hidden signal can make the aggregate prose contradict the
-      // technician's review, so drop it whole.
-      observations: hiddenScoreKeys.size ? '' : review.observations.trim(),
-      hasHidden: hiddenScoreKeys.size > 0,
-    },
+  const grounding = {
+    source: 'reviewed_photo_signals',
+    scores: includedScores,
+    scoredCount,
+    photoCount,
+    photosHash: review.photosHash,
+    // Any hidden signal can make the aggregate prose contradict the
+    // technician's review, so drop it whole.
+    observations: hiddenScoreKeys.size ? '' : review.observations.trim(),
+    hasHidden: hiddenScoreKeys.size > 0,
   };
+  if (techFindingsCopyLive()) {
+    // GATE_TS_TECH_FINDINGS_COPY: the writer also hears the technician's own
+    // confirmed / edited findings. An edited category's photo-read score and the
+    // aggregate prose (written from the read the edit replaces) stay out.
+    // Normalized: an edit with nothing printable left reads as a hide, so its
+    // score goes like any hide's.
+    const techFindings = normalizeTechFindings(decisions);
+    const replaced = techFindings.filter((f) => f.action === 'hidden' || editText(f));
+    for (const f of replaced) delete grounding.scores[TREE_SHRUB_REVIEW_DECISION_KEYS[f.key]];
+    if (replaced.length) {
+      grounding.hasHidden = grounding.hasHidden || techFindings.some((f) => f.action === 'hidden');
+      delete grounding.scores.overallScore;
+      grounding.observations = '';
+    }
+    grounding.techFindings = techFindings;
+  }
+  return { ok: true, grounding };
 }
 
 let Anthropic;
@@ -322,7 +340,26 @@ function calculateOverall(scores = {}) {
   return Math.round(vals.reduce((a, b) => a + b, 0) / vals.length);
 }
 
+// The typed form's landscape_condition suggested from the preview's 0-100
+// overall, on the same 85/70/55 bands the customer report uses. Only the four
+// score-derivable options are ever suggested — Declining / Recovering need
+// visit history — and a visit with no score suggests nothing.
+const LANDSCAPE_CONDITION_BY_BAND = { strong: 'Excellent', healthy: 'Good', watch: 'Fair', needs_attention: 'Poor' };
+function suggestLandscapeCondition(overallScore) {
+  return LANDSCAPE_CONDITION_BY_BAND[scoreStatus(overallScore)] || null;
+}
+
 // ── Vision API calls (mirror lawn-assessment.js) ────────────────────────────────
+
+// GATE_TS_TECH_FINDINGS_COPY (owner 2026-10-01): photos are ground level, so the
+// read may only describe what a whole-palm or oldest-fronds shot shows. Gate off
+// = VISION_PROMPT exactly as before.
+function visionPromptText() {
+  if (!techFindingsCopyLive()) return VISION_PROMPT;
+  const rule = `${PALM_CROWN_PROMPT_RULE} In "observations", never call a palm's crown, spear leaf or newest fronds healthy, fine or normal; if only the crown is in view, say it is not clearly visible.`;
+  const marker = 'Return this exact JSON structure';
+  return VISION_PROMPT.replace(marker, `${rule}\n\n${marker}`);
+}
 async function callClaudeVision(base64Image, mimeType) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
   try {
@@ -335,7 +372,7 @@ async function callClaudeVision(base64Image, mimeType) {
         role: 'user',
         content: [
           { type: 'image', source: { type: 'base64', media_type: mimeType, data: base64Image } },
-          { type: 'text', text: VISION_PROMPT },
+          { type: 'text', text: visionPromptText() },
         ],
       }],
     });
@@ -360,7 +397,7 @@ async function geminiVisionAttempt(model, base64Image, mimeType) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      contents: [{ parts: [{ inline_data: { mime_type: mimeType, data: base64Image } }, { text: VISION_PROMPT }] }],
+      contents: [{ parts: [{ inline_data: { mime_type: mimeType, data: base64Image } }, { text: visionPromptText() }] }],
       generationConfig: { temperature: 0.2, maxOutputTokens: 2048 }, // thinking spend counts against this ceiling (Gemini 3.x)
     }),
   });
@@ -478,16 +515,17 @@ async function analyzePhoto(base64Image, mimeType = 'image/jpeg') {
 
 // ── Tech-facing findings (exception-based closeout) ─────────────────────────────
 
-const { buildTreeShrubVisualCategories } = require('./service-report/tree-shrub-visual-categories');
+const { buildTreeShrubVisualCategories, scoreStatus } = require('./service-report/tree-shrub-visual-categories');
 
 // Per-category tech-facing copy for a FLAGGED (watch/attention) signal. Stays in
 // "signals" language — the tech confirms before we ever assert a pest/disease.
+// Labels live with the frozen tech decisions (one name per finding).
 const FINDING_META = {
-  pest_activity: { label: 'Pest-pressure signals', flagged: 'Possible pest-pressure signals on foliage.' },
-  disease_leaf_spot: { label: 'Leaf-spot / disease signals', flagged: 'Possible leaf-spot or disease-like signals.' },
-  water_heat_mechanical_stress: { label: 'Water / heat / pruning stress', flagged: 'Visible water, heat, or pruning stress.' },
-  leaf_color_vigor: { label: 'Leaf color & vigor', flagged: 'Some off-color, pale, or yellowing foliage.' },
-  foliage_fullness: { label: 'Foliage fullness', flagged: 'Some thin, sparse, or bare areas.' },
+  pest_activity: { label: TECH_FINDING_LABELS.pest_activity, flagged: 'Possible pest-pressure signals on foliage.' },
+  disease_leaf_spot: { label: TECH_FINDING_LABELS.disease_leaf_spot, flagged: 'Possible leaf-spot or disease-like signals.' },
+  water_heat_mechanical_stress: { label: TECH_FINDING_LABELS.water_heat_mechanical_stress, flagged: 'Visible water, heat, or pruning stress.' },
+  leaf_color_vigor: { label: TECH_FINDING_LABELS.leaf_color_vigor, flagged: 'Some off-color, pale, or yellowing foliage.' },
+  foliage_fullness: { label: TECH_FINDING_LABELS.foliage_fullness, flagged: 'Some thin, sparse, or bare areas.' },
 };
 
 /**
@@ -953,9 +991,24 @@ async function buildTreeShrubAssessmentReportData(service, serviceLine, knex = d
   const droppedPhotoCount = photos.filter((p) => !p.url).length;
   const visiblePhotos = photos.filter((p) => p.url);
 
-  const scores = formatAssessmentScores(assessment);
+  // GATE_TS_TECH_FINDINGS_COPY: a visit whose preview was rejected and re-scored
+  // keeps its hide decisions only in the service record's frozen findings, so
+  // history applies each visit's own (one read, current visit included).
+  const gateOn = techFindingsCopyLive();
+  const frozenByRecord = gateOn ? await loadFrozenTechFindingsByRecord(historyRows, knex) : null;
+  // The read FAILED (not "no decisions"): an earlier visit's hides are unknown,
+  // so its scores are withheld rather than republished, and the artifact is
+  // flagged so no PDF caches it. The current visit's own decisions are in the
+  // service record the report builder already holds.
+  const techFindingsUnavailable = gateOn && frozenByRecord === null;
+  const withFrozenHides = (row, formatted) => {
+    if (!gateOn) return formatted;
+    if (techFindingsUnavailable) return String(row.id) === String(assessment.id) ? formatted : withholdScores(formatted);
+    return hideFrozenFindingsInScores(formatted, frozenByRecord.get(String(row.service_record_id)));
+  };
+  const scores = withFrozenHides(assessment, formatAssessmentScores(assessment));
   const trend = historyRows.map((r) => {
-    const s = formatAssessmentScores(r);
+    const s = withFrozenHides(r, formatAssessmentScores(r));
     return {
       date: r.service_date,
       overallScore: s.overallScore,
@@ -981,6 +1034,7 @@ async function buildTreeShrubAssessmentReportData(service, serviceLine, knex = d
     aiSummary: assessment.ai_summary || null,
     photos: visiblePhotos,
     droppedPhotoCount,
+    ...(techFindingsUnavailable ? { techFindingsUnavailable: true } : {}),
     plantGroups,
     trend,
     techConfirmedPest: !!assessment.tech_confirmed_pest,
@@ -1000,6 +1054,7 @@ module.exports = {
   isCompleteVisionResult,
   toCategoryScores,
   calculateOverall,
+  suggestLandscapeCondition,
   averageScores,
   isValidTreeShrubScores,
   normalizeTreeShrubScores,

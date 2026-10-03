@@ -15,6 +15,8 @@
 import { useState, useEffect, useId, useRef } from 'react';
 import { COLORS, FONTS } from '../../../theme-brand';
 import TracedTreatmentZoneMap from '../TracedTreatmentZoneMap';
+import ReportText from '../ReportSections';
+import ForecastComparison from '../ForecastComparison';
 import { CUSTOMER_SURFACE } from '../../../theme-customer';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -112,7 +114,7 @@ function TrendArrow({ trend }) {
 }
 
 // ── Hero: protection status first ───────────────────────────────────────────────
-export function PestStatusHero({ status, statusSummary, supportingMetric, aiSummary, token = null, mode = 'live', tracedMap = null, pressureTrendSlot = null }) {
+export function PestStatusHero({ status, statusSummary, supportingMetric, aiSummary, token = null, mode = 'live', tracedMap = null, pressureTrendSlot = null, reportSections = null, nextVisitLabel = null }) {
   const tracedLive = mode === 'live';
   // The embedded trend chart is built from the page's ORIGINAL payload — a
   // successful rating submit recalculates the score, so the chart's current
@@ -175,7 +177,13 @@ export function PestStatusHero({ status, statusSummary, supportingMetric, aiSumm
         onSettled={() => setTrendStale(true)}
       />
       {aiSummary?.body ? (
-        <p style={{ fontSize: 14, color: MUTED, lineHeight: 1.5, margin: '12px 0 0' }}>{aiSummary.body}</p>
+        <ReportText
+          text={aiSummary.body}
+          sections={reportSections}
+          nextVisitLabel={nextVisitLabel}
+          style={{ fontSize: 14, color: MUTED, lineHeight: 1.5, margin: '12px 0 0' }}
+          titleStyle={{ color: TEXT }}
+        />
       ) : null}
       {/* Where we sprayed — the tech-traced application, combined into the
           status card so status + narrative + map read as one story
@@ -785,8 +793,8 @@ export function PestSeasonForecast({ forecast }) {
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <span style={{ fontSize: 14, fontWeight: 700, color: TEXT }}>{p.label}</span>
-                <TrendArrow trend={p.trend} />
               </div>
+              <div style={{ fontSize: 14, color: MUTED, lineHeight: 1.4 }}><ForecastComparison forecast={p} /></div>
               {p.note ? <div style={{ fontSize: 14, color: MUTED, lineHeight: 1.4 }}>{p.note}</div> : null}
             </div>
             {p.level ? (

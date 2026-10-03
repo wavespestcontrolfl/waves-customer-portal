@@ -218,6 +218,7 @@ const TRIGGER_REGISTRY = {
   // Same no-PII contract as new_job_application: mode + when label only,
   // no name/phone/email cross the requireAdmin boundary.
   job_interview_booked: {
+    informational: true, // a fact, not work: needs_me leaves it out
     label: 'Interview booked',
     category: 'job_application',
     priority: 'high',
@@ -235,6 +236,7 @@ const TRIGGER_REGISTRY = {
   },
   // Fired by the public interview link's "I'm no longer interested" action.
   job_application_withdrawn: {
+    informational: true, // a fact, not work: needs_me leaves it out
     label: 'Applicant withdrew',
     category: 'job_application',
     priority: 'normal',
@@ -297,7 +299,10 @@ const TRIGGER_REGISTRY = {
     techVisible: true,
     group: 'Communication',
     build: (p) => ({
-      title: `SMS from ${p.fromName || (p.fromPhone ? maskPhone(p.fromPhone) : 'unknown')}`,
+      // One bell row per conversation: a known sender's later texts rewrite the
+      // row while it is still open, so a count leads the title ("3 texts from
+      // Name") and the body is always the latest text.
+      title: `${Number(p.textCount) > 1 ? `${Math.floor(Number(p.textCount))} texts from` : 'SMS from'} ${p.fromName || (p.fromPhone ? maskPhone(p.fromPhone) : 'unknown')}`,
       body: redactSensitiveText(p.message || '').slice(0, 140),
       // The whole text, for the bell's "Show full text": the 140-character
       // body above (also the push text) used to be all the bell ever kept.
@@ -589,6 +594,7 @@ const TRIGGER_REGISTRY = {
     },
   },
   payment_succeeded: {
+    informational: true, // a fact, not work: needs_me leaves it out
     label: 'Payment received',
     category: 'payment',
     priority: 'low',
@@ -604,11 +610,25 @@ const TRIGGER_REGISTRY = {
     category: 'payment',
     priority: 'urgent',
     group: 'Payments',
-    build: (p) => ({
-      title: 'Payment failed',
-      body: `$${Number(p.amount || 0).toFixed(2)} — ${p.customerName || 'customer'}${p.reason ? ' — ' + p.reason : ''}`,
-      link: p.invoiceId ? `/admin/invoices?invoice=${p.invoiceId}` : '/admin/revenue',
-    }),
+    // Owner audit 2026-10-01: the headline names WHO ("Billing — Dana Example's $85.00
+    // payment failed"), the body says why the processor refused, and the link opens the
+    // invoice, else the customer, never the revenue list. A customer with no name on file
+    // reaches here as the word "customer" (or a bare phone number, masked downstream).
+    build: (p) => {
+      const names = require('./admin-alert-names');
+      const amount = `$${Number(p.amount || 0).toFixed(2)}`;
+      const named = p.customerName && p.customerName !== 'customer' ? p.customerName : 'a customer';
+      const reason = String(p.reason || '').replace(/\s+/g, ' ').trim();
+      return {
+        title: `Billing — ${names.fitAction('Billing', named, [(n) => `${n}'s ${amount} payment failed`])}`,
+        // One sentence for the why (the friendly processor message can run to two); the whole
+        // reason rides in the detail.
+        body: require('./admin-alert-compose').cutAtWord(require('./admin-alert-compose').firstSentence(reason) || 'The processor gave no reason.', 110),
+        ...(reason ? { detail: reason } : {}),
+        link: p.invoiceId ? `/admin/invoices?invoice=${p.invoiceId}`
+          : (p.customerId ? `/admin/customers?customerId=${encodeURIComponent(p.customerId)}` : '/admin/revenue'),
+      };
+    },
   },
   bill_payment_error: {
     label: 'Bill payment checkout error',
@@ -627,6 +647,7 @@ const TRIGGER_REGISTRY = {
     },
   },
   payment_refunded: {
+    informational: true, // a fact, not work: needs_me leaves it out
     label: 'Refund issued',
     category: 'payment',
     priority: 'normal',
@@ -638,6 +659,7 @@ const TRIGGER_REGISTRY = {
     }),
   },
   job_complete: {
+    informational: true, // a fact, not work: needs_me leaves it out
     // Tech-visible: links to a day-to-day surface (schedule) a field tech works in.
     techVisible: true,
     // Owner ruling 2026-09-24: 13% of these bells were ever opened — off
@@ -723,6 +745,7 @@ const TRIGGER_REGISTRY = {
     }),
   },
   one_tap_purchase_completed: {
+    informational: true, // a fact, not work: needs_me leaves it out
     label: 'One-tap purchase completed',
     category: 'estimate',
     priority: 'high',
@@ -840,6 +863,7 @@ const TRIGGER_REGISTRY = {
     }),
   },
   newsletter_proof_approved: {
+    informational: true, // a fact, not work: needs_me leaves it out
     label: 'Newsletter approved via email reply',
     category: 'newsletter',
     priority: 'high',
@@ -1010,7 +1034,7 @@ function pushTagFor(triggerKey, payload = {}) {
  * @param {string} triggerKey — must match a key in TRIGGER_REGISTRY
  * @param {object} payload — trigger-specific data, see each build() for shape
  */
-async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null, shouldContinue = null, deliveredSubscriptionIds = null } = {}) {
+async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null, refreshOnDedupe = false, bumpOnRefresh = false, refreshPayload = null, shouldContinue = null, deliveredSubscriptionIds = null } = {}) {
   try {
     const trigger = TRIGGER_REGISTRY[triggerKey];
     if (!trigger) {
@@ -1116,11 +1140,36 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
             built.body,
             { link: built.link, ...(built.detail ? { detail: built.detail } : {}), metadata: { triggerKey, priority: trigger.priority, payload: safePayload },
               ...(dedupeKey ? { dedupeKey } : {}),
+              // A standing thread row (sms_reply, one per customer) is rewritten
+              // in place by each new message instead of inserting another row.
+              ...(dedupeKey && refreshOnDedupe ? { refreshOnDedupe: true, ...(bumpOnRefresh ? { bumpOnRefresh: true } : {}) } : {}),
+              // Decided inside notifyAdmin's keyed lock against the row as it stands:
+              // refreshPayload(existingRow, existingPayload) -> null | { payload, keepContent }.
+              // keepContent: this emission is OLDER than what the row shows, so the
+              // row keeps its text, link and position and only its payload (the
+              // count) moves, quietly.
+              ...(dedupeKey && refreshOnDedupe && typeof refreshPayload === 'function' ? {
+                standingRefresh: async (existing, existingMeta) => {
+                  const base = existingMeta?.payload || {};
+                  const r = await refreshPayload(existing, base);
+                  if (!r) return null;
+                  if (r.keepContent) {
+                    const kept = { ...base, ...r.payload };
+                    const rebuilt = sanitizeBuiltNotification(trigger.build(kept), trigger);
+                    return { title: rebuilt.title, body: existing.body, link: existing.link, detail: existing.detail ?? undefined, metadata: { payload: kept }, quiet: true };
+                  }
+                  const merged = { ...payload, ...r.payload };
+                  const rebuilt = sanitizeBuiltNotification(trigger.build(merged), trigger);
+                  return { title: rebuilt.title, body: rebuilt.body, link: rebuilt.link, detail: rebuilt.detail, metadata: { payload: sanitizeNotificationPayload(triggerKey, merged) } };
+                },
+              } : {}),
               ...(shouldContinue ? { shouldContinue } : {}),
               ...(relayFailureCall ? { relayFailureCall, dedupeKey: `relay-failure:${relayFailureCall.callSid}` } : {}) }
           );
           if (created && !created.suppressed) bellWritten = true;
-          if (created?.deduped && dedupeKey && (triggerKey === 'sms_reply' || triggerKey === 'promise_chaser')) dedupedNoPush = true;
+          // A refresh carries a NEW message onto the standing row: that is not
+          // an event that already delivered, so its push still goes.
+          if (created?.deduped && !created.refreshed && dedupeKey && (triggerKey === 'sms_reply' || triggerKey === 'promise_chaser')) dedupedNoPush = true;
           if (created?.suppressed) bellSuppressed = true;
         } catch (e) {
           logger.error(`[notification-triggers] bell write failed: ${e.message}`);

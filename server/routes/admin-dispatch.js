@@ -62,14 +62,15 @@ const {
   REENTRY_SEND_SEAL_TTL_MS,
 } = require('../services/service-report/email-delivery');
 
-const { previewTreeShrubAssessment, treeShrubReviewSignature, treeShrubPhotosHash } = require('../services/tree-shrub-assessment');
+const { previewTreeShrubAssessment, treeShrubReviewSignature, treeShrubPhotosHash, suggestLandscapeCondition } = require('../services/tree-shrub-assessment');
 const {
   resolveCompletionProfileForScheduledService,
   resolveCompletionProfileForServiceId,
   resolveCompletionDeliveryPosture,
 } = require('../services/service-completion-profiles');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
-const { gateEnvValue } = require('../config/feature-gates');
+const { gateEnvValue, tsFastCompleteLive } = require('../config/feature-gates');
+const { lawnReserviceFastCompleteLive } = require('../config/feature-gates');
 const { addressKey } = require('../services/customer-properties');
 
 // The follow-up override chain (German knockdown windows, two-treatment
@@ -207,6 +208,32 @@ function technicianPestRatingAllowedForService({ completionProfile = null, pestP
 }
 
 router.use(adminAuthenticate, requireTechOrAdmin);
+// Every /:serviceId route is pinned to the technician's own visit here, once,
+// before the handler (codex #5568 r2/r3 P1). The canonical row predicate
+// (technicianVisitRowInScope: assigned to the caller, not a dead status, inside
+// the 7-day window) decides; the ONE carve-out is PUT /:serviceId/status, whose
+// own terminal-transition logic must still see a same-status retry on a
+// cancelled/skipped/no_show row (allowTerminal, codex #4673 r3 P1) — there only
+// assignment + window are checked. A missing row is 404; an existing visit
+// that is not the caller's answers this router's documented 403
+// service_not_assigned. Admins pass.
+router.param('serviceId', async (req, res, next, serviceId) => {
+  try {
+    if (!isTechnicianRequest(req)) return next();
+    const { techAccessCutoff } = require('../services/technician-visit-scope');
+    const { dateOnly } = require('../services/visit-groups');
+    const row = await db('scheduled_services')
+      .where('scheduled_services.id', serviceId)
+      .first('scheduled_services.id', 'scheduled_services.technician_id', 'scheduled_services.scheduled_date', 'scheduled_services.status');
+    if (!row) return res.status(404).json({ error: 'Service not found' });
+    const statusRetry = req.method === 'PUT' && /^\/[^/]+\/status\/?$/.test(req.path);
+    const assigned = statusRetry
+      ? String(row.technician_id || '') === String(req.technicianId || '') && dateOnly(row.scheduled_date) >= techAccessCutoff()
+      : technicianVisitRowInScope(req, row);
+    if (!assigned) return res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
+    return next();
+  } catch (err) { return next(err); }
+});
 
 // GET /api/admin/dispatch/:serviceId/tech-rating-allowed
 // Tech-readable boolean reflecting whether the rating picker should be
@@ -502,9 +529,61 @@ async function loadPreviousRecommendations({ customerId, serviceType, serviceId,
   return output;
 }
 
+// GET /api/admin/dispatch/:serviceId/blog-posts?q= — the completion forms'
+// Waves blog search (GATE_REPORT_BLOG_POST, owner "ok go" 2026-10-01): live
+// hub posts matching every typed word, newest first, at most eight, each as
+// { id, title, url } under the one link rule (report-blog-post.js). The pick
+// rides /complete as blogPostId and is frozen there for every service but
+// WDO, termite pre-treat, lawn and tree, shrub & palm (blogPostAllowedFor,
+// the completion's own rule), so any other visit answers { available: false }
+// too. Read-only; off = the answer is { available: false } with no database
+// read.
+router.get('/:serviceId/blog-posts', async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').reportBlogPostLive()) {
+      return res.json({ available: false, posts: [] });
+    }
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.serviceId })
+      .first('id', 'technician_id', 'status', 'scheduled_date', 'service_type', 'service_id', 'service_key_snapshot', 'is_recurring');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    // A technician searches only from their own current visit; admins keep
+    // office-wide reach (the completion routes' rule).
+    const ownershipError = completionOwnershipError({
+      role: req.techRole,
+      actorTechnicianId: req.technicianId,
+      assignedTechnicianId: svc.technician_id,
+    });
+    if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
+    if (!technicianVisitRowInScope(req, svc)) {
+      return res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
+    }
+    // The completion's own rule for keeping a pick (complete-scheduled-service).
+    const { blogPostAllowedFor, searchReportBlogPosts } = require('../services/service-report/report-blog-post');
+    const profile = await resolveCompletionProfileForScheduledService(svc);
+    if (!blogPostAllowedFor({ serviceType: svc.service_type, profile })) return res.json({ available: false, posts: [] });
+    const posts = await searchReportBlogPosts(db, req.query?.q);
+    res.json({ available: true, posts });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/dispatch/:serviceId/tech-tips — the completion screen's
 // tip-picker payload plus the independently gated completion-choice history.
 // When both gates are off this remains a no-read availability probe. Read-only.
+// A visit's add-on lines by their catalog key: the key stamped on the line,
+// else its catalog row's. Fail-soft: a failed read only loses their tips.
+async function addonServiceKeys(scheduledServiceId) {
+  try {
+    const rows = await db('scheduled_service_addons')
+      .leftJoin('services', 'services.id', 'scheduled_service_addons.service_id')
+      .where({ 'scheduled_service_addons.scheduled_service_id': scheduledServiceId })
+      .select('scheduled_service_addons.service_key_snapshot as key_snapshot', 'services.service_key as catalog_key');
+    return rows.map((row) => row.key_snapshot || row.catalog_key).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
 router.get('/:serviceId/tech-tips', async (req, res, next) => {
   try {
     const completionChoicesEnabled = gateEnvValue('GATE_SERVICE_REPORT_COMPLETION_CHOICES');
@@ -526,6 +605,8 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
         'current_property.address_line1 as current_property_address_line1',
         'current_property.address_line2 as current_property_address_line2',
         'current_property.city as current_property_city', 'current_property.zip as current_property_zip',
+        'scheduled_services.service_id as service_id', 'scheduled_services.service_key_snapshot as service_key_snapshot',
+        'scheduled_services.is_recurring as is_recurring',
       );
     if (!svc) return res.status(404).json({ error: 'Service not found' });
     // A technician reads only their own assigned visit (the customer's tip
@@ -567,8 +648,20 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
         previousRecommendations,
       });
     }
+    // The visit's catalog service leads with its own tips (owner-approved
+    // service tips, 2026-10-02), and so does each add-on line (a pest visit
+    // with a flea or rodent add-on, Codex #5582); an unresolved identity only
+    // loses that lead.
+    const [serviceKey, addonKeys] = await Promise.all([
+      resolveCompletionProfileForScheduledService(svc)
+        .then((profile) => profile?.serviceKey || null)
+        .catch(() => null),
+      addonServiceKeys(svc.id),
+    ]);
     const library = tipsForVisit({
       serviceLine: detectServiceLine(svc.service_type),
+      serviceKey,
+      serviceKeys: addonKeys,
       date: /^\d{4}-\d{2}-\d{2}$/.test(visitDay || '') ? visitDay : new Date(),
     });
     // The 90-day window is ET calendar days: the database's own current
@@ -618,6 +711,181 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
       conditions: { irrigation_on_file: irrigationSettingsOnFile(prefs) },
       ...(completionChoicesEnabled ? { previousRecommendations } : {}),
     });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/dispatch/:serviceId/promises — the completion form's
+// promise check (owner "ok yes add these" 2026-10-01): the open promises
+// Waves made this visit's customer that a technician can keep at a visit,
+// from calls, texts and emails (visit-promises.js). Only while
+// GATE_REPORT_WRITER_RULES is live and only on visits the writer covers
+// (never lawn or tree, shrub & palm); otherwise a no-read
+// { available: false }. Read-only. `include` (comma-separated ids): open
+// promises beyond the newest ten that a restored draft had marked, listed
+// after them (Codex #5516).
+router.get('/:serviceId/promises', async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').reportWriterRulesLive()) {
+      return res.json({ available: false, promises: [] });
+    }
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.serviceId })
+      .first('id', 'service_id', 'service_type', 'customer_id', 'technician_id', 'status', 'scheduled_date');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    // A technician reads only their own assigned visit (the customer's
+    // promises are customer data); admins keep office-wide reach.
+    const ownershipError = completionOwnershipError({
+      role: req.techRole,
+      actorTechnicianId: req.technicianId,
+      assignedTechnicianId: svc.technician_id,
+    });
+    if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
+    // …and only while it is a current assignment: not cancelled or moved
+    // off them, inside the field access window (the shared predicate;
+    // Codex #5516).
+    if (!technicianVisitRowInScope(req, svc)) {
+      return res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
+    }
+    const VisitPromises = require('../services/service-report/visit-promises');
+    let profileFailed = false;
+    const completionProfile = await resolveCompletionProfileForScheduledService(svc)
+      .catch(() => { profileFailed = true; return null; });
+    if (!VisitPromises.promiseCheckInScope(svc.service_type, completionProfile, { failed: profileFailed })) {
+      return res.json({ available: false, promises: [] });
+    }
+    const include = String(req.query?.include || '').split(',').map((id) => id.trim()).filter(Boolean);
+    const { promises, total } = await VisitPromises.loadVisitPromises(db, { customerId: svc.customer_id, include });
+    res.json({ available: true, promises, total });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/dispatch/:serviceId/voice-facts — voice fill for the Fast
+// Complete report flow (GATE_FAST_COMPLETE_REPORT): where the technician
+// put product down (Inside / Outside / Garage) and the pests they named, read
+// from the note they dictated, each fact quoted word for word
+// (services/visit-voice-facts.js). Writes nothing: the sheet shows what was
+// heard and sends it with the completion. A failed read answers
+// { available: true, status: 'failed' } with no facts, never an error, so
+// the sheet carries on without them. Off = 404 { enabled: false }.
+router.post('/:serviceId/voice-facts', async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').fastCompleteReportLive()) {
+      return res.status(404).json({ enabled: false });
+    }
+    const note = req.body?.note;
+    if (typeof note !== 'string') return res.status(400).json({ error: 'note must be text' });
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.serviceId })
+      .first('id', 'technician_id', 'status', 'scheduled_date');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    // A technician reads only their own assigned visit, while it is a
+    // current assignment; admins keep office-wide reach (same rule as the
+    // promise check above).
+    const ownershipError = completionOwnershipError({
+      role: req.techRole,
+      actorTechnicianId: req.technicianId,
+      assignedTechnicianId: svc.technician_id,
+    });
+    if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
+    if (!technicianVisitRowInScope(req, svc)) {
+      return res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
+    }
+    const { readVoiceFacts } = require('../services/visit-voice-facts');
+    const facts = await readVoiceFacts(note);
+    res.json({ available: true, ...facts });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/dispatch/:serviceId/lane-facts — lane voice fill (Fast
+// Complete step 2, GATE_LANE_VOICE_FILL): a specialty visit's own record
+// (bed bug, fire ant, tick, bee & wasp, mud dauber, mosquito) read from the
+// note, the places from the lane's own list and at most one value per
+// finding group, each with the note's own words (services/visit-lane-facts.js).
+// The lane is the completion's own: the visit's completion profile, never a
+// typed form, never one the client names. Writes nothing: the form shows
+// each field with its words for a person to confirm. A visit with no lane
+// answers { available: false }; a failed read answers { available: true,
+// status: 'failed' } with nothing filled, never an error. Off = 404.
+router.post('/:serviceId/lane-facts', async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').laneVoiceFillLive()) {
+      return res.status(404).json({ enabled: false });
+    }
+    const note = req.body?.note;
+    if (typeof note !== 'string') return res.status(400).json({ error: 'note must be text' });
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.serviceId })
+      .first('id', 'technician_id', 'status', 'scheduled_date', 'service_type', 'service_id', 'service_key_snapshot', 'is_recurring');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    // A technician reads only their own assigned visit, while it is a
+    // current assignment; admins keep office-wide reach (the voice fill's
+    // rule above).
+    const ownershipError = completionOwnershipError({
+      role: req.techRole,
+      actorTechnicianId: req.technicianId,
+      assignedTechnicianId: svc.technician_id,
+    });
+    if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
+    if (!technicianVisitRowInScope(req, svc)) {
+      return res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
+    }
+    const { readLaneFacts, voiceLaneFor } = require('../services/visit-lane-facts');
+    const profile = await resolveCompletionProfileForScheduledService(svc);
+    const laneKey = voiceLaneFor({ profile, serviceType: svc.service_type });
+    if (!laneKey) return res.json({ available: false });
+    const facts = await readLaneFacts({ note, laneKey });
+    res.json({ available: true, ...facts });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/dispatch/:serviceId/typed-facts — typed voice fill (Fast
+// Complete step 3, GATE_TYPED_VOICE_FILL): a typed visit's own findings read
+// from the note, each pick field's values from the form's own options, each
+// with the note's own words (services/visit-typed-facts.js). The form is the
+// completion's own: the visit's completion profile findingsType, never one
+// the client names. Writes nothing: the form shows each field with its words
+// for a person to confirm. A visit whose form this step does not read
+// answers { available: false }; a failed read answers { available: true,
+// status: 'failed' } with nothing filled, never an error, and a form that
+// already holds every field the note could fill answers status
+// 'nothing_to_fill' with no model call. Off = 404.
+router.post('/:serviceId/typed-facts', async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').typedVoiceFillLive()) {
+      return res.status(404).json({ enabled: false });
+    }
+    const note = req.body?.note;
+    if (typeof note !== 'string') return res.status(400).json({ error: 'note must be text' });
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.serviceId })
+      .first('id', 'technician_id', 'status', 'scheduled_date', 'service_type', 'service_id', 'service_key_snapshot', 'is_recurring');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    // A technician reads only their own assigned visit, while it is a
+    // current assignment; admins keep office-wide reach (the lane fill's
+    // rule above).
+    const ownershipError = completionOwnershipError({
+      role: req.techRole,
+      actorTechnicianId: req.technicianId,
+      assignedTechnicianId: svc.technician_id,
+    });
+    if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
+    if (!technicianVisitRowInScope(req, svc)) {
+      return res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
+    }
+    const { readTypedFacts, voiceTypeFor } = require('../services/visit-typed-facts');
+    const profile = await resolveCompletionProfileForScheduledService(svc);
+    const findingsType = voiceTypeFor(profile);
+    if (!findingsType) return res.json({ available: false });
+    // The form's present values judge the fill (never stored): a field
+    // already set is never filled, and a fill that clashes with one is left
+    // for a person.
+    // The form as served for the visit's own service key; a score the
+    // client already holds (scoreSet) leaves nothing to read for when every
+    // field is set too.
+    const facts = await readTypedFacts({
+      note, findingsType, current: req.body?.current, serviceKey: profile?.serviceKey || null, scoreSet: req.body?.scoreSet === true,
+    });
+    res.json({ available: true, ...facts });
   } catch (err) { next(err); }
 });
 
@@ -968,6 +1236,14 @@ router.put('/customers/:customerId/termite-stations', requireAdmin, async (req, 
 router.post('/recap-preview', async (req, res, next) => {
   try {
     const body = req.body || {};
+    // The preview runs the paid model chain: a technician needs a visit of
+    // their own; admins keep the id-less path (codex #5568 r7 P1).
+    if (isTechnicianRequest(req)) {
+      const owned = body.serviceId
+        ? await technicianCurrentVisitFilter(req, db('scheduled_services').where('scheduled_services.id', body.serviceId)).first('scheduled_services.id')
+        : null;
+      if (!owned) return res.status(404).json({ error: 'Scheduled service not found' });
+    }
     // Season/weather/expectations context (owner directive 2026-07-21).
     // serviceId → customer geocode for the weather line; without it the
     // season + what-to-expect context still applies. Best-effort only.
@@ -975,7 +1251,7 @@ router.post('/recap-preview', async (req, res, next) => {
     try {
       let customerId = null;
       if (body.serviceId) {
-        const svcRow = await db('scheduled_services').where({ id: body.serviceId }).first('customer_id');
+        const svcRow = await technicianCurrentVisitFilter(req, db('scheduled_services').where('scheduled_services.id', body.serviceId)).first('customer_id');
         customerId = svcRow?.customer_id || null;
       }
       visitContext = await buildRecapVisitContext({ serviceType: body.serviceType, customerId });
@@ -2582,6 +2858,11 @@ router.put('/:serviceId/status', async (req, res, next) => {
         if (isOfficeReviewConfirm && typeof req.body?.expected_service_address === 'string') {
           await require('../services/street-level-hold').assertExpectedServiceAddress(trx, svc.id, req.body.expected_service_address);
         }
+        // Record the address this approval is for (same transaction, same row lock), so a later retry of
+        // the activation cannot release the hold against an address that changed afterwards.
+        if (isOfficeReviewConfirm && svc.source_action === 'voice_agent' && svc.customer_confirmed !== true) {
+          await require('../services/street-level-hold').recordApprovedAddressWitness(trx, svc.id);
+        }
         if ((takeoverCandidate || explicitFieldConfirm) && req.technicianId) {
           const locked = lockedRow;
           fieldConfirmVerified = !!locked
@@ -3077,8 +3358,17 @@ router.get('/:serviceId/complete-preview', async (req, res, next) => {
 //   unresolved: ['<name with no matching active catalog row>'] }
 router.get('/:serviceId/default-products', async (req, res, next) => {
   try {
+    const scheduled = await technicianCurrentVisitFilter(req,
+      db('scheduled_services').where({ id: req.params.serviceId })).first('id');
+    if (!scheduled) return res.status(404).json({ error: 'Service not found' });
     const { resolveCompletionProductDefaults } = require('../services/completion-product-defaults');
     const result = await resolveCompletionProductDefaults({ db, serviceId: req.params.serviceId });
+    // The resolution reads the visit's application history; a reassignment
+    // during that read must not hand it to the former technician (same
+    // before-and-after check as the Job Card route).
+    const stillInScope = await technicianCurrentVisitFilter(req,
+      db('scheduled_services').where({ id: req.params.serviceId })).first('id');
+    if (!stillInScope) return res.status(404).json({ error: 'Service not found' });
     res.json(result);
   } catch (err) { next(err); }
 });
@@ -3337,9 +3627,9 @@ async function assertRecapOwnership(req, res) {
   if (req.techRole === 'admin') return true;
   const svc = await db('scheduled_services')
     .where({ id: req.params.serviceId })
-    .first('technician_id');
+    .first('technician_id', 'status', 'scheduled_date');
   if (!svc) { res.status(404).json({ error: 'Service not found' }); return false; }
-  if (svc.technician_id !== req.technicianId) {
+  if (!technicianVisitRowInScope(req, svc)) {
     res.status(403).json({ error: 'Not assigned to this service' });
     return false;
   }
@@ -4137,6 +4427,48 @@ router.post('/slot-check', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/dispatch/:serviceId/tree-shrub/fast-context
+// What the Tree & Shrub Fast Complete sheet loads: eligibility, the visit
+// identity (echoed back as `expectedVisit` on /complete), the catalog with
+// per-product compliance flags, the protocol month's suggested products, the
+// last visit's values and the rotation / palm-spacing warnings. Read-only;
+// behind GATE_TS_FAST_COMPLETE alone (owner 2026-10-01: every tech completes
+// T&S here, no per-tech flag). See services/tree-shrub-fast-context.js.
+router.get('/:serviceId/tree-shrub/fast-context', async (req, res, next) => {
+  try {
+    if (!tsFastCompleteLive()) return res.status(404).json({ enabled: false });
+    if (!(await assertRecapOwnership(req, res))) return;
+    const ctx = await require('../services/tree-shrub-fast-context').buildTreeShrubFastContext(req.params.serviceId);
+    if (!ctx.ok) return res.status(recapStatusForReason(ctx.reason)).json({ error: ctx.reason });
+    const { ok, ...body } = ctx;
+    res.json({ enabled: true, ...body });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/dispatch/:serviceId/lawn-reservice/fast-context
+// What the lawn re-service Fast Complete sheet loads: the visit identity
+// (echoed back as `expectedVisit` on /complete), the customer's booking words,
+// the active catalog the picker searches, and the property's last completed
+// lawn visit with its products (suggestion tiles, amounts only from what that
+// visit recorded). Read-only; dark behind GATE_LAWN_RESERVICE_FAST_COMPLETE (no
+// per-tech flag). A visit whose live completion profile is not lawn_re_service
+// is refused (409 not_lawn_re_service); any other ineligibility answers 200
+// `eligible: false` with a reason, like the tree-shrub context. See
+// services/lawn-reservice-fast-context.js.
+router.get('/:serviceId/lawn-reservice/fast-context', async (req, res, next) => {
+  try {
+    if (!lawnReserviceFastCompleteLive()) return res.status(404).json({ enabled: false });
+    if (!(await assertRecapOwnership(req, res))) return;
+    const ctx = await require('../services/lawn-reservice-fast-context').buildLawnReserviceFastContext(req.params.serviceId);
+    if (!ctx.ok) {
+      const status = ctx.reason === 'not_lawn_re_service' ? 409 : recapStatusForReason(ctx.reason);
+      return res.status(status).json({ error: ctx.reason, code: ctx.reason });
+    }
+    const { ok, ...body } = ctx;
+    res.json({ enabled: true, ...body });
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/dispatch/:serviceId/tree-shrub/assess-preview
 // body: { photos: [{ data: <dataURL> }] }
 // Scores the closeout photos with dual-vision (NO persistence) and returns the
@@ -4176,12 +4508,15 @@ router.post('/:serviceId/tree-shrub/assess-preview', async (req, res) => {
       },
     });
     if (!result) {
-      return res.status(200).json({ scores: null, findings: [], aiSummary: 'AI photo review could not score these photos.', suggestedCustomerAction: 'No action needed', status: 'failed' });
+      return res.status(200).json({ scores: null, findings: [], aiSummary: 'AI photo review could not score these photos.', suggestedCustomerAction: 'No action needed', suggestedCondition: null, status: 'failed' });
     }
     // Sign the scores + observation + the EXACT photo set so the completion handler
     // can verify the review came from this preview for these images.
     const photosHash = treeShrubPhotosHash(photos.map((p) => p && p.data));
     result.signature = treeShrubReviewSignature(result.scores, result.scoredCount, req.params.serviceId, photosHash, result.observations);
+    // Fast Complete's condition suggestion — the tech confirms it; not part of
+    // the signed review.
+    result.suggestedCondition = suggestLandscapeCondition(result.scores?.overallScore);
     return res.json({ ...result, photosHash, status: 'complete' });
   } catch (err) {
     return res.status(500).json({ error: 'Tree & shrub assessment preview failed', detail: err.message });
@@ -4421,6 +4756,15 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
   // but they are never texted, closed or re-armed here — nothing covers
   // them but the reminder cron (codex r19 P1).
   const followUps = Array.isArray(result.followUpOccurrences) ? result.followUpOccurrences : [];
+  // Grouped-visit partners the move carried (GATE_SERIES_MOVE_CARRIES_VISIT)
+  // are the same appointment as their occurrence: the series notice covers
+  // them, so their reminders sync, close and re-arm exactly like the
+  // occurrences' (owned on the time THIS move recorded). They are never
+  // counted, conflicted or quoted by the text, and Quick Move's anchor-only
+  // close scope leaves them out like any sibling.
+  const carriedPartners = (Array.isArray(result.carriedVisitMembers) ? result.carriedVisitMembers : [])
+    .map((k) => ({ id: k.id, date: k.date, windowStart: k.windowStart, windowEnd: k.windowEnd }));
+  const reminderOccurrences = [...occurrences, ...carriedPartners];
   const leaseOwner = crypto.randomUUID();
   // Every marker write is fenced on the owner token: only the pass holding
   // the CURRENT lease can stamp or release.
@@ -4491,7 +4835,12 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
     // tech are kept; the operator sets a time from dispatch. Those rows often
     // land outside the reloaded week view — surface them in the response AND
     // ring the bell so a series move can't silently leave untimed visits.
-    if ((dueConflicts.length || (!cardOnly && (overlapDates.length || preserved.length))) && !markers.conflict_card_at) {
+    // Ring only for a real conflict (an untimed visit, or a kept appointment
+    // that needs a cadence review). A move whose only finding is an accepted
+    // overlap rings nothing (owner 2026-10-01: six bells in 72h, every one with
+    // no conflicts and no preserved visits); the overlap still rides the move's
+    // response, and it is listed in the card below when a real conflict rings one.
+    if ((dueConflicts.length || (!cardOnly && preserved.length)) && !markers.conflict_card_at) {
       try {
         const NotificationService = require('../services/notification-service');
         const parts = [];
@@ -4515,9 +4864,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
           : otherDates.length ? `/admin/dispatch?tab=schedule&date=${otherDates[0]}` : '/admin/dispatch?tab=schedule';
         const notif = await NotificationService.notifyAdmin(
           'schedule_conflict',
-          preserved.length ? 'Recurring move needs a future visit review'
-            : dueConflicts.length ? 'Series move left visits without a time window'
-              : (result.arrivalWindowDates?.length ? 'Series move needs route review' : 'Series move overlaps other visits'),
+          preserved.length ? 'Recurring move needs a future visit review' : 'Series move left visits without a time window',
           `A series move shifted a recurring plan: ${parts.join('; ')}.`,
           // A card-only pass stores only the conflicts it rings for: the
           // successor owns the preserved and overlap work (admin-alert-relevance.js
@@ -4535,6 +4882,10 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
     // The successor owns preserved commitments and accepted overlaps. With
     // no still-untimed conflict, this superseded operation owes no old card.
     if (cardOnly && !dueConflicts.length && !markers.conflict_card_at) await stampMarker('conflict_card_at');
+    // An overlap-only move owes no card (above), but its conflict_count still
+    // counts the overlaps: stamp the card marker so the recovery sweep
+    // (conflict_count > 0 AND conflict_card_at IS NULL) treats it as finished.
+    if (!cardOnly && !dueConflicts.length && !preserved.length && overlapDates.length && !markers.conflict_card_at) await stampMarker('conflict_card_at');
     if (cardOnly) return { notificationSent: false, notificationError: 'superseded', conflicts: dueConflicts, seriesMoveId };
     const seriesReminderGuards = [];
     let seriesGuardSnapshotFailed = false;
@@ -4547,7 +4898,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
     // closed under the series notice nor re-armed here — closing would
     // silence the newer schedule's reminders, re-arming would clear flags
     // the newer move owns and duplicate its texts (codex r8 P1).
-    const recordedReminderTimeById = new Map(occurrences.map((occurrence) => [
+    const recordedReminderTimeById = new Map(reminderOccurrences.map((occurrence) => [
       String(occurrence.id),
       parseETDateTime(rescheduleReminderTime(occurrence.date, { start: occurrence.windowStart, end: occurrence.windowEnd })).getTime(),
     ]));
@@ -4576,10 +4927,10 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
     // flags — either way a reminder for a window nobody set (hook r20 P1).
     // The sync itself still runs for them (handleReschedule keeps the
     // marker carve-out); only the close and the re-arm skip them.
-    const ownedOccurrences = () => occurrences.filter((occurrence) => !staleOccurrenceIds.has(String(occurrence.id))
+    const ownedOccurrences = () => reminderOccurrences.filter((occurrence) => !staleOccurrenceIds.has(String(occurrence.id))
       && occurrence.conflicted !== true && !!occurrence.windowStart);
     if (remindersThisPass) {
-      for (const occurrence of occurrences) {
+      for (const occurrence of reminderOccurrences) {
         // expectSchedule: the reminder moves only if the visit still sits on
         // the slot THIS move recorded — a replayed/retried pass whose
         // occurrence was rescheduled again in between must not drag its
@@ -4635,7 +4986,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
       // the flush here.
       const ownsFlush = !qualityDates;
       const seriesQualityDates = qualityDates || new Set();
-      for (const occurrence of [...occurrences, ...followUps]) {
+      for (const occurrence of [...reminderOccurrences, ...followUps]) {
         try {
           await emitDispatchJobUpdate({ jobId: occurrence.id, actorId, qualityDates: seriesQualityDates });
         } catch (err) {
@@ -4747,7 +5098,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
       // uses), never a direct customers.phone text: a primary who opted out,
       // has no phone, or routes appointment texts to an authorized service
       // contact gets exactly what the single-visit notice would do.
-      const svc = await db('scheduled_services').where({ id: serviceId }).first('customer_id', 'scheduled_date', 'window_start');
+      const svc = await db('scheduled_services').where({ id: serviceId }).first('customer_id', 'scheduled_date', 'window_start', 'visit_id');
       const customer = svc?.customer_id ? await db('customers').where({ id: svc.customer_id }).first() : null;
       // The text quotes the slot the series move RECORDED for the anchor —
       // date and arrival window. A replayed/retried pass whose anchor was
@@ -4759,10 +5110,19 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
       const recordedStart = anchorOcc ? hm(anchorOcc.windowStart) : hm(parseRescheduleWindow(newWindow).start);
       const anchorStillOnRecordedSlot = (row) => String(row.scheduled_date instanceof Date ? row.scheduled_date.toISOString() : row.scheduled_date || '').slice(0, 10) === String(newDate).split('T')[0]
         && (!anchorOcc || hm(row.window_start) === recordedStart);
+      // A grouped anchor's text quotes its stop's landed start: the anchor
+      // must still sit in that visit, and the visit still start there (a
+      // partner moved or detached since makes the quoted window obsolete).
+      const stopStillOnRecordedStart = async (row) => {
+        if (!anchorOcc?.visitWindowStart) return true;
+        if (String(row.visit_id || '') !== String(anchorOcc.visitId || '')) return false;
+        const visit = await db('service_visits').where({ id: row.visit_id }).first('window_start');
+        return !!visit && hm(visit.window_start) === hm(anchorOcc.visitWindowStart);
+      };
       if (!customer) {
         notificationError = 'Customer not found';
         definitiveNonSend = true;
-      } else if (!anchorStillOnRecordedSlot(svc)) {
+      } else if (!anchorStillOnRecordedSlot(svc) || !(await stopStillOnRecordedStart(svc))) {
         notificationError = 'anchor_changed';
         definitiveNonSend = true;
       } else {
@@ -4771,7 +5131,10 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
         // The anchor's landing window (the caller's, or its own kept window on
         // a date-only move) — window_text quotes the 2-hour arrival promise
         // from that start, never the job-duration block (see sms-time-format).
-        const startForText = anchorOcc?.windowStart || parseRescheduleWindow(newWindow).start;
+        // A grouped anchor quotes its STOP's landed start (the earliest member,
+        // recorded by the move as visitWindowStart) — the unit mover's rule
+        // (visitMove.visitStart, codex #3609 r25 P1).
+        const startForText = anchorOcc?.visitWindowStart || anchorOcc?.windowStart || parseRescheduleWindow(newWindow).start;
         const arrivalRange = arrivalWindowRange(startForText);
         const windowText = arrivalRange ? `, ${formatSmsTimeRange(arrivalRange)}` : '';
         // Persist the promised arrival instant the same way the single-visit
@@ -4819,12 +5182,12 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
             operatorInitiated: STAFF_SERIES_SURFACES.has(markers.source_surface),
             sendOutcome,
             preDispatchCheck: async () => {
-              const row = await db('scheduled_services').where({ id: serviceId }).first('scheduled_date', 'window_start', 'status');
+              const row = await db('scheduled_services').where({ id: serviceId }).first('scheduled_date', 'window_start', 'status', 'visit_id');
               if (!row) return { ok: false, code: 'appointment_missing', reason: 'appointment no longer exists' };
               if (['cancelled', 'completed', 'skipped', 'no_show'].includes(String(row.status))) {
                 return { ok: false, code: 'appointment_terminal', reason: `appointment is now ${row.status}` };
               }
-              return anchorStillOnRecordedSlot(row)
+              return anchorStillOnRecordedSlot(row) && await stopStillOnRecordedStart(row)
                 ? { ok: true }
                 : { ok: false, code: 'appointment_moved', reason: 'appointment changed again before the series text was sent' };
             },
@@ -5390,7 +5753,7 @@ router.get('/weather/tomorrow', async (req, res, next) => {
 });
 
 // GET /api/admin/dispatch/reschedules/log
-router.get('/reschedules/log', async (req, res, next) => {
+router.get('/reschedules/log', requireAdmin, async (req, res, next) => {
   try {
     const logs = await db('reschedule_log')
       .leftJoin('customers', 'reschedule_log.customer_id', 'customers.id')
@@ -6068,8 +6431,8 @@ const recapMedia = require('../services/service-report/recap-media');
 // 403 itself and returns false so the caller bails.
 async function recapOwnerOk(req, res) {
   if (req.techRole === 'admin') return true;
-  const svc = await db('scheduled_services').where({ id: req.params.serviceId }).first('technician_id');
-  if (svc && svc.technician_id === req.technicianId) return true;
+  const svc = await db('scheduled_services').where({ id: req.params.serviceId }).first('technician_id', 'status', 'scheduled_date');
+  if (svc && technicianVisitRowInScope(req, svc)) return true;
   res.status(403).json({ error: 'Not your visit' });
   return false;
 }

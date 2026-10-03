@@ -2,9 +2,9 @@
 
 /**
  * Staff controls for a customer's reminder schedule (dunning consolidation
- * §8): pause / resume / release / send-now. PR 2: nothing routes to these yet
- * (the routes and the send-now routing are PR 3); they are complete and tested
- * directly. Each is guarded on the state it read.
+ * §8): pause / resume / release / send-now. Reached through wiring.js (the
+ * POST /admin/customers/:id/dunning-schedule/* routes and the per-invoice
+ * send-now routing). Each is guarded on the state it read.
  */
 
 const db = require('../../models/db');
@@ -43,17 +43,48 @@ async function resume(scheduleId, { now = new Date() } = {}) {
   return { ok: Number(changed) === 1 };
 }
 
+const EVIDENCE_UNREADABLE = Object.freeze({
+  ok: false, reason: 'evidence_unreadable', message: 'Could not check whether the current reminder already went out. Try again in a minute.',
+});
+
+const OUTCOME_UNCONFIRMED = Object.freeze({
+  ok: false,
+  reason: 'outcome_unconfirmed',
+  message: 'The current reminder may already have gone out (its delivery is unconfirmed), so its invoices were not handed back. Check it before releasing.',
+});
+
 async function release(scheduleId, { now = new Date() } = {}) {
   const schedule = await openScheduleQuery(scheduleId).first();
   if (!schedule) return { ok: false, reason: 'not_open' };
   const out = await Schedule.release(schedule, 'released_admin', now);
   if (out.reason === 'in_flight') return { ...IN_FLIGHT };
+  if (out.reason === 'evidence_unreadable') return { ...EVIDENCE_UNREADABLE };
+  if (out.reason === 'outcome_unconfirmed') return { ...OUTCOME_UNCONFIRMED };
   return { ok: out.closed, released: out.landed.length };
 }
 
-/** Fires the CURRENT stage through the normal send path with operator channels. */
-async function sendNow(scheduleId, { now = new Date() } = {}) {
-  const out = await Runner.processSchedule(scheduleId, now, { operatorInitiated: true, force: true });
+// Why the claim refused: the schedule, or one of its active member rows (a per-invoice send), carries a
+// fresh claim (a send in flight), or the schedule is paused (a paused schedule is never claimed). The admin
+// is told which rather than "nothing happened". null = neither (it closed or changed).
+async function whyNotClaimable(scheduleId, now) {
+  const row = await openScheduleQuery(scheduleId).first();
+  if (!row) return null;
+  if (Schedule.claimIsFresh(row, now)) return 'in_flight';
+  if ((await Schedule.activeMemberRows(row.customer_id)).some((member) => Schedule.claimIsFresh(member, now))) return 'in_flight';
+  return row.status === 'paused' ? 'schedule_paused' : null;
+}
+
+/**
+ * Fires the CURRENT stage through the normal send path with operator channels. `expectedStepIndex` (the
+ * step the operator confirmed): a schedule that moved on since is not claimed (409 SCHEDULE_CHANGED).
+ */
+async function sendNow(scheduleId, { now = new Date(), expectedStepIndex = null } = {}) {
+  const out = await Runner.processSchedule(scheduleId, now, { operatorInitiated: true, force: true, expectedStepIndex });
+  if (out.outcome === 'skipped' && out.reason === 'not_claimable') {
+    const why = await whyNotClaimable(scheduleId, now);
+    if (why === 'in_flight') return { routedTo: 'customer_schedule', scheduleId, ...IN_FLIGHT };
+    if (why === 'schedule_paused') return { routedTo: 'customer_schedule', scheduleId, ...out, reason: 'schedule_paused' };
+  }
   return { routedTo: 'customer_schedule', scheduleId, ...out };
 }
 

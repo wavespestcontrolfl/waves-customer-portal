@@ -257,11 +257,21 @@ describe('buildPestReportV2 — seasonal forecast', () => {
     ],
   };
 
-  it('ranks rising pests first and caps at 3', () => {
+  it('ranks modeled levels and caps at 3 without treating baseline deltas as weekly rises', () => {
     const out = buildForecast(forecast);
     expect(out.pests).toHaveLength(3);
     expect(out.pests.map((p) => p.key)).toEqual(['ghost_ant', 'german_roach', 'termite']);
     expect(out.monthName).toBe('June');
+  });
+
+  it('a low seasonal-baseline riser cannot outrank high modeled pressure; dated comparisons survive shaping', () => {
+    const weekly = { direction: 'down', delta: -1, previous_date: '2026-09-25', current_date: '2026-10-02' };
+    const out = buildForecast({ ...forecast, pests: [
+      { key: 'ants', label: 'Ants', level: 'low', score10: 2, trend: 'up', baseline_comparison: 'above' },
+      { key: 'mosquitoes', label: 'Mosquitoes', level: 'high', score10: 8, trend: 'flat', baseline_comparison: 'near', week_over_week: weekly },
+    ] });
+    expect(out.pests[0]).toMatchObject({ key: 'mosquitoes', baselineComparison: 'near', weekOverWeek: weekly });
+    expect(out.pests[1].weekOverWeek).toBeNull();
   });
 
   it('returns null when there are no pests', () => {
@@ -337,7 +347,7 @@ describe('buildPestReportV2 — expectations wiring (GATE_PEST_REPORT_EXPECTATIO
     });
     expect(out.expectations.rain.lines.length).toBeGreaterThan(0);
     expect(out.expectations.spiders.headline).toBe('Spiders');
-    expect(out.expectations.whatToExpect.lines[0]).toMatch(/Non-repellent/);
+    expect(out.expectations.whatToExpect.lines[0]).toMatch(/non-repellent/);
   });
 
   it('gate on but no relevant facts: the expectations key is omitted (no data → no block)', () => {
@@ -424,12 +434,12 @@ describe('pestReportV2PdfSignature — expectations gate suffix', () => {
   const ORIGINAL = process.env.GATE_PEST_REPORT_EXPECTATIONS;
   afterEach(() => { process.env.GATE_PEST_REPORT_EXPECTATIONS = ORIGINAL; });
 
-  it('appends -pex1 to the pest-line key when the gate is on, independent of PEST_REPORT_V2', () => {
+  it('appends -pex2 to the pest-line key when the gate is on, independent of PEST_REPORT_V2', () => {
     process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
     const ORIGINAL_V2 = process.env.PEST_REPORT_V2;
     delete process.env.PEST_REPORT_V2;
     try {
-      expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-pex1');
+      expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-pex2');
     } finally {
       process.env.PEST_REPORT_V2 = ORIGINAL_V2;
     }

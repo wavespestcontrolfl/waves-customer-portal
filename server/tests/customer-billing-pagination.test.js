@@ -21,7 +21,7 @@ let payerInvoiceIds;
 
 function thenableBuilder(resolveRows, resolveFirst) {
   const builder = {};
-  for (const method of ['where', 'whereNotNull', 'whereRaw', 'select', 'count', 'orderBy', 'leftJoin', 'limit', 'offset']) {
+  for (const method of ['where', 'whereNull', 'whereNotNull', 'whereRaw', 'select', 'count', 'orderBy', 'leftJoin', 'limit', 'offset']) {
     builder[method] = jest.fn(() => builder);
   }
   builder.first = jest.fn(async () => resolveFirst());
@@ -71,8 +71,9 @@ beforeEach(() => {
     }
     if (table === 'payments') {
       return thenableBuilder(
-        () => rawPayments.map(({ metadata }) => ({ metadata })),
-        () => ({ count: String(rawPayments.length) }),
+        () => rawPayments.map(({ metadata, payer_id }) => ({ metadata, payer_id })),
+        // The COUNT path's SQL excludes direct payer stamps; mirror that here.
+        () => ({ count: String(rawPayments.filter((p) => p.payer_id == null && !(p.metadata && p.metadata.payer_id != null)).length) }),
       );
     }
     throw new Error(`Unexpected table ${table}`);
@@ -120,6 +121,22 @@ test('filters third-party payer rows while keeping visible cursor pagination com
   });
 });
 
+// A row the ledger stamps as the payer's directly (payments.payer_id, or
+// metadata.payer_id on statement refunds/disputes) is excluded whatever it
+// links to — the chat payment card reads this same list.
+test('filters rows stamped payer-owned directly, by column or metadata, with no payer invoice on file', async () => {
+  payerInvoiceIds = [];
+  rawPayments[1].payer_id = 7;
+  rawPayments[2].metadata = { payer_id: 7, source: 'statement_refund' };
+
+  await withServer(async (baseUrl) => {
+    const first = await fetch(`${baseUrl}/billing?limit=3&cursor=0`).then((response) => response.json());
+    expect(first.payments.map((payment) => payment.id)).toEqual(['payment-1', 'payment-4', 'payment-5']);
+    expect(first.payments.some((payment) => payment.payerLookupFailed !== undefined)).toBe(false);
+    expect(first).toMatchObject({ total: 123 });
+  });
+});
+
 // B10: the collections-hold deferral row (armed, or left 'failed' after the retry sweep
 // collected it through its own paid row) is a placeholder, not a payment. The history query (stripe.getPaymentHistory) and BOTH total-count queries apply
 // the shared predicate, so the customer never sees a FAILED row for a charge that was never
@@ -152,6 +169,10 @@ describe('hold-deferral placeholders (armed or collected) stay out of the custom
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/stripe.js'), 'utf8');
     const body = src.slice(src.indexOf('async getPaymentHistory('), src.indexOf('// REFUND'));
     expect(body).toContain("excludeHoldDeferralPlaceholders(q, 'payments')");
+    // Same-day rows (a failed attempt and its retry) order by creation, newest
+    // first, so the first row is the latest outcome.
+    expect(body).toContain(".orderBy('payments.created_at', 'desc')");
+    expect(body).toContain(".orderBy('payments.id', 'desc')");
   });
 });
 

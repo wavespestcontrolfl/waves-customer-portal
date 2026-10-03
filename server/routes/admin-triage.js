@@ -43,7 +43,7 @@ const CONFLICT_RECOVERY_REASONS = new Set([
 ]);
 // History-spanning review queue: rows from BOTH decision versions must stay
 // visible (pre-bump v2-1.0.0 rows + current v2-1.1.0 rows).
-const { withLockedRouteDecisions, resolveDisplayedRouteDecision, STALE_ROUTE_DECISION, ROUTE_DECISION_XMIN_TEXT, isListedRouteDecision, routeDecisionsListedScope } = require('../services/call-routing-gates');
+const { withLockedRouteDecisions, leftJoinRouteFeedback, resolveDisplayedRouteDecision, STALE_ROUTE_DECISION, ROUTE_DECISION_XMIN_TEXT, isListedRouteDecision, routeDecisionsListedScope } = require('../services/call-routing-gates');
 
 // A deny rejects the call's UNIT evidence only when it is a whole-call deny
 // (no wrong_fields) or names the address — a field-scoped deny (service,
@@ -303,8 +303,8 @@ router.get('/', async (req, res) => {
       if (counts[r.status] !== undefined) counts[r.status] = parseInt(r.n, 10);
     }
 
-    // A street-level address hold's read-back dialog must show the visit's LIVE service address
-    // (corrections after booking change it), not only the address captured on the card. One batched
+    // A street-level address hold's read-back dialog must show the visit's LIVE service address and
+    // slot (corrections and moves after booking change them), not only what the card captured. One batched
     // read for the hold cards on this page, admin-only like the card's confirm action.
     if (req.techRole === 'admin') {
       const parse = (v) => { if (v && typeof v === 'object') return v; try { return JSON.parse(v); } catch { return null; } };
@@ -315,16 +315,43 @@ router.get('/', async (req, res) => {
         try {
           const rows = await db('scheduled_services')
             .whereIn('id', [...new Set(holds.map((h) => String(h.payload.scheduled_service_id)))])
-            .select('id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_state', 'service_address_zip');
+            .select('id', 'scheduled_date', 'window_start', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_state', 'service_address_zip');
           const byId = new Map(rows.map((r) => [String(r.id), r]));
+          const { visitServiceAddressLine, visitWhenLine, streetLevelVisitLink } = require('../services/street-level-hold');
           for (const { item, payload } of holds) {
             const r = byId.get(String(payload.scheduled_service_id));
             if (!r) continue;
-            const line = require('../services/street-level-hold').visitServiceAddressLine(r);
+            const line = visitServiceAddressLine(r);
             if (line) item.visit_address = line;
+            // SmartRebooker / an admin can move the hold while its card stays open: the card's captured
+            // visit_when is the booking-time slot, the confirm activates the CURRENT one. Refresh it in the
+            // payload the card and the read-back dialog both read, and rebuild the "Open visit" link on the
+            // same live date (the link carries the schedule day, so the booking-time one opens the wrong day).
+            const when = visitWhenLine(r);
+            if (when) {
+              item.payload = {
+                ...payload,
+                visit_when: when,
+                visit_link: streetLevelVisitLink(r.id, visitWhenLine({ scheduled_date: r.scheduled_date })),
+              };
+            }
           }
         } catch (addrErr) {
           logger.warn(`[admin-triage] hold visit address read failed: ${addrErr.code || addrErr.name || 'error'}`);
+        }
+      }
+    }
+
+    // A first-name card's "Open customer" links must reach an editable record: a listed customer
+    // merged away since filing opens the survivor of its merge chain (codex #5559 r18).
+    const nameCards = items.filter((i) => i.reason_code === 'missing_first_name');
+    if (nameCards.length) {
+      const { owedCustomerOpenTargets } = require('../utils/missing-first-name-card');
+      for (const item of nameCards) {
+        try {
+          item.owed_customer_open_ids = [...new Set((await owedCustomerOpenTargets(db, item.payload)).map((t) => t.open_id))];
+        } catch (linkErr) {
+          logger.warn(`[admin-triage] first-name link targets read failed: ${linkErr.code || linkErr.name || 'error'}`);
         }
       }
     }
@@ -512,6 +539,9 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
       // address, retained visit) — a stale click must not close the newer
       // obligation (codex r30 P1).
       || item.reason_code === 'auto_booking_skipped_after_approval'
+      // …and the owed-first-name card, whose customer list a reprocess appends to: a stale
+      // Resolve / Dismiss must not settle a customer the operator never saw.
+      || item.reason_code === 'missing_first_name'
       // …and email review cards (codex round-3 P1): the client already
       // sends expected_updated_at on every resolve/dismiss, so a stale view
       // of a card whose evidence has since changed refuses instead of
@@ -522,6 +552,13 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
         || new Date(expectedUpdatedAt).getTime() !== new Date(live.updated_at).getTime()) {
         return { outcome: 'stale_version' };
       }
+    }
+    // Resolve on an owed-first-name card means the names were ENTERED: every listed customer
+    // must be live with a nonblank first name, judged on the LIVE payload under the per-call
+    // lock the append writer also takes (Dismiss is the explicit waiver).
+    if (nextStatus === 'resolved' && item.reason_code === 'missing_first_name') {
+      const { everyOwedCustomerNamed } = require('../utils/missing-first-name-card');
+      if (!(await everyOwedCustomerNamed(trx, live?.payload))) return { outcome: 'first_name_missing' };
     }
     if (nextStatus === 'resolved' && emailReviewCard) {
       // Judge the LIVE payload, not the route's pre-lock snapshot — a
@@ -707,6 +744,7 @@ function sendTransitionResult(res, result, id, nextStatus) {
     case 'already': return res.status(409).json({ error: `Item already ${result.current}` });
     case 'conflict': return res.status(409).json({ error: 'Item was just actioned by someone else' });
     case 'stale_version': return res.status(409).json({ error: 'Card changed since it was displayed — reload and review the latest', code: 'STALE_CARD_VERSION' });
+    case 'first_name_missing': return res.status(409).json({ error: 'Enter the first name on the customer record first', code: 'FIRST_NAME_STILL_MISSING' });
     case 'email_disagreement_unconfirmed': return res.status(409).json({
       error: 'V1 and V2 disagreed on the spelled email — correct the customer\'s email on the customer record with the confirmed spelling before resolving this card.',
       code: 'EMAIL_DISAGREEMENT_UNCONFIRMED',
@@ -728,6 +766,11 @@ async function transition(req, res, nextStatus) {
   if (req.techRole !== 'admin') {
     const guarded = await db('triage_items').where({ id }).first('reason_code');
     if (guarded && guarded.reason_code === 'property_role_confirm') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    // A missing first name is settled on the customer record, which only an admin edits:
+    // Resolve is admin-only (Dismiss stays open to the office).
+    if (guarded && guarded.reason_code === 'missing_first_name' && nextStatus === 'resolved') {
       return res.status(403).json({ error: 'Admin access required' });
     }
   }
@@ -1825,6 +1868,11 @@ router.post('/:id/verdict', async (req, res) => {
     if (item.reason_code === 'attached_booking_followup_unbooked') {
       return res.status(400).json({ error: 'This card is an owed follow-up visit, not a call verdict — book the follow-up and use Resolve instead.' });
     }
+    // A missing first name (GATE_CALL_FIRST_NAME_ADVISORY) is an owed capture on the
+    // customer record, not a routing judgment — a verdict would close it without a name.
+    if (item.reason_code === 'missing_first_name') {
+      return res.status(400).json({ error: 'This card is an owed first-name capture, not a call verdict — enter the first name on the customer record, then use Resolve or Dismiss.' });
+    }
     // A street-level address hold is settled by its visit, not by a verdict.
     if (await streetLevelHoldStillPending(db, item)) {
       return res.status(409).json({ error: STREET_LEVEL_HOLD_MESSAGE, code: 'STREET_LEVEL_HOLD_PENDING' });
@@ -2065,7 +2113,7 @@ router.post('/:id/verdict', async (req, res) => {
         // it in would resolve (and release the hold of) evidence the
         // operator never saw. It survives for its own click instead.
         .whereNotIn('reason_code', [
-          'email_bounce_reverify', 'property_role_confirm', 'reschedule_link_promise', 'attached_booking_followup_unbooked',
+          'email_bounce_reverify', 'property_role_confirm', 'reschedule_link_promise', 'attached_booking_followup_unbooked', 'missing_first_name',
           ...(item.reason_code !== 'auto_booking_skipped_after_approval' ? ['auto_booking_skipped_after_approval'] : []),
           ...(emailReviewCard ? [] : EMAIL_REVIEW_REASON_CODES),
         ])
@@ -2297,10 +2345,13 @@ router.post('/:id/verdict', async (req, res) => {
 router.get('/auto-routed', async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
-    const rows = await db('route_decisions')
+    const rows = await leftJoinRouteFeedback(db('route_decisions')
       .leftJoin('call_log', 'route_decisions.call_log_id', 'call_log.id')
-      .leftJoin('customers', 'call_log.customer_id', 'customers.id')
-      .leftJoin('route_feedback', 'route_decisions.call_log_id', 'route_feedback.call_log_id')
+      .leftJoin('customers', 'call_log.customer_id', 'customers.id'))
+      // A verdict shows against the decision it judged (leftJoinRouteFeedback,
+      // the ONE join every reader uses): only the row it points at, or a legacy
+      // verdict with no link. A newer pass's row is a new decision nobody has
+      // judged, so it reads unreviewed.
       // One row per call: a reprocessed call carries BOTH decision versions;
       // only its NEWEST supported enforce decision represents current state.
       // Calls that only have a pre-bump v2-1.0.0 row keep appearing (the

@@ -26,10 +26,13 @@ const { _test } = require('../services/call-recording-processor');
 const {
   normalizeCallExtraction,
   resolveCallSecondaryContact,
+  resolveCallSecondaryContacts,
   persistCallSecondaryContact,
+  onSiteOptinAskTrigger,
+  decideOnSiteOptinAsk,
   validatePhoneCallAppointmentCustomer,
 } = _test;
-const { flatView, mapSecondaryContactToLegacy } = require('../utils/extraction-compat');
+const { flatView, mapSecondaryContactToLegacy, canonicalV2Secondary } = require('../utils/extraction-compat');
 const { normalizeSecondaryContact: normalizeSecondaryContactV2 } = require('../utils/normalize-extraction-v2');
 const { validateModelOutput, validatePersisted, SCHEMA_VERSION } = require('../schemas/validate-extraction');
 const { ADVISORY_TRIAGE_FLAGS, computeDeterministicTriageFlags } = require('../services/call-triage-flags');
@@ -134,6 +137,8 @@ describe('secondary_contact V2 mapping', () => {
       email: 'joseph.haught89431@gmail.com',
       role: 'home_buyer',
       wants_notifications: true,
+      wants_appointment_texts: false,
+      on_site: false,
       is_billing_party: false,
       notes: null,
     });
@@ -170,11 +175,26 @@ describe('secondary_contact V2 mapping', () => {
       email: 'joseph.haught89431@gmail.com',
       role: 'home_buyer',
       wants_notifications: true,
+      wants_appointment_texts: false,
+      on_site: false,
       is_billing_party: false,
       notes: null,
     });
     expect(resolveCallSecondaryContact({}, { secondary_contact: v2Contact }).first_name).toBe('Joseph');
     expect(resolveCallSecondaryContact({}, null)).toBeNull();
+  });
+
+  test('resolveCallSecondaryContact: V2 on-site flags carry V2\'s role for the ask decision (V1 role differs)', () => {
+    const v1Other = { first_name: 'Sample', last_name: 'Partner', phone: '+15550100177', email: null, role: 'other', wants_notifications: false, notes: null };
+    const v2Partner = {
+      ...v2Contact, name_full: 'Sample Partner', first_name: 'Sample', last_name: 'Partner',
+      phone_e164: '+15550100177', email: null, role: 'spouse_partner', on_site: true,
+    };
+    const merged = resolveCallSecondaryContact({ secondary_contact: v1Other }, { secondary_contact: v2Partner });
+    expect(merged.role).toBe('other');
+    expect(merged.on_site).toBe(true);
+    expect(merged.on_site_role).toBe('spouse_partner');
+    expect(onSiteOptinAskTrigger(merged)).toBe(true);
   });
 
   test('resolveCallSecondaryContact: conflicting identities never merge — V1 wins unmerged', () => {
@@ -266,8 +286,8 @@ describe('schema 1.2.0 — secondary_contact is additive', () => {
     return payload;
   }
 
-  test('current SCHEMA_VERSION is 1.20.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.20.0');
+  test('current SCHEMA_VERSION is 1.22.0', () => {
+    expect(SCHEMA_VERSION).toBe('1.22.0');
   });
 
   test('a payload WITHOUT secondary_contact still validates (1.1.0-shape unchanged)', () => {
@@ -312,6 +332,26 @@ describe('schema 1.2.0 — secondary_contact is additive', () => {
     expect(validatePersisted(persistedMeta({ ...validModelOutput(), secondary_contact: lenderContact, secondary_contacts: [lenderContact] }, '1.7.0')).valid).toBe(true);
   });
 
+  test('1.22.0: wants_appointment_texts / on_site are optional booleans in both schemas, non-boolean rejected', () => {
+    const base = { ...secondaryContact };
+    // Absent (older payloads) still validates.
+    expect(validateModelOutput({ ...validModelOutput(), secondary_contact: base }).valid).toBe(true);
+    const flagged = { ...base, wants_appointment_texts: true, on_site: true };
+    const withFlags = { ...validModelOutput(), secondary_contact: flagged, secondary_contacts: [flagged] };
+    const model = validateModelOutput(withFlags);
+    expect(model.errors).toBeNull();
+    expect(model.valid).toBe(true);
+    const persisted = validatePersisted(persistedMeta({ ...validModelOutput(), secondary_contact: flagged, secondary_contacts: [flagged] }, SCHEMA_VERSION));
+    expect(persisted.errors).toBeNull();
+    expect(persisted.valid).toBe(true);
+    for (const bad of [{ ...base, wants_appointment_texts: 'yes' }, { ...base, on_site: null }]) {
+      expect(validateModelOutput({ ...validModelOutput(), secondary_contact: bad }).valid).toBe(false);
+      expect(validatePersisted(persistedMeta({ ...validModelOutput(), secondary_contact: bad }, SCHEMA_VERSION)).valid).toBe(false);
+      expect(validateModelOutput({ ...validModelOutput(), secondary_contacts: [bad] }).valid).toBe(false);
+    }
+    expect(validateModelOutput({ ...validModelOutput(), secondary_contact: { ...base, bogus_field: true } }).valid).toBe(false);
+  });
+
   test('model-output tolerates a non-E.164 secondary phone (server normalizes; must not schema-fail the extraction)', () => {
     const sloppy = { ...validModelOutput(), secondary_contact: { ...secondaryContact, phone_e164: '954-290-1693', email: null } };
     expect(validateModelOutput(sloppy).valid).toBe(true);
@@ -348,6 +388,7 @@ describe('persistCallSecondaryContact', () => {
 
   function makeDb({ customer, updateRows = 1, otherCustomer = null, prefs = undefined }) {
     const writes = { updates: [], prefsMerges: [], whereFns: 0 };
+    db.raw = jest.fn((sql, binds) => ({ sql, binds }));
     db.mockImplementation((table) => {
       if (table === 'customers') {
         // One builder serves both queries against `customers`: the main
@@ -482,7 +523,47 @@ describe('persistCallSecondaryContact', () => {
       service_contacts_consent_at: null,
       service_contacts_consent_source: null,
       service_contacts_consent_text_version: null,
+      // ...remembering which phones it DID cover, so the new recipient's YES
+      // can restore the stamp (grandfathered slots have no opt-in row).
+      service_preferences: {
+        sql: "jsonb_set(COALESCE(service_preferences, '{}'::jsonb), '{consent_covered_phone_keys}', ?::jsonb)",
+        binds: [JSON.stringify(['9415557777'])],
+      },
     }]);
+  });
+
+  test('keepConsentStamp (new phone already behind a blocking opt-in row): an inferred on-site add does NOT clear the account\'s existing stamp', async () => {
+    const writes = makeDb({
+      customer: {
+        ...bareCustomer,
+        service_contact_name: 'Property Manager',
+        service_contact_phone: '+19415557777',
+        service_contacts_consent_at: '2026-07-22T00:00:00Z',
+      },
+    });
+    expect(await persistCallSecondaryContact('cust-1', { ...buyer, role: 'spouse_partner', on_site: true }, { onSiteAskEligible: true, keepConsentStamp: true })).toBe('written');
+    expect(writes.updates[0]).not.toHaveProperty('service_contacts_consent_at');
+    // ...and the new phone goes on the account's unconsented list (held out of
+    // every text resolver until its own YES, whatever the opt-in gate does).
+    expect(writes.updates[0].service_preferences.sql).toContain('unconsented_slot_phone_keys');
+    // ...and the kept stamp's currently covered slot phones are recorded as covered.
+    expect(writes.updates[0].service_preferences.binds).toEqual(['9542901693', JSON.stringify(['9415557777'])]);
+  });
+
+  test('keepConsentStamp on a row with NO prior stamp (this write stamps it for the caller\'s explicit consent): the inferred phone is still held', async () => {
+    const writes = makeDb({ customer: bareCustomer });
+    expect(await persistCallSecondaryContact('cust-1', { ...buyer, role: 'spouse_partner', on_site: true, wants_notifications: false }, { smsConsentExplicit: true, onSiteAskEligible: true, keepConsentStamp: true })).toBe('written');
+    expect(writes.updates[0].service_contacts_consent_at).toBeInstanceOf(Date);
+    expect(writes.updates[0].service_preferences.sql).toContain('unconsented_slot_phone_keys');
+  });
+
+  test('a re-added phone that already confirmed its own opt-in keeps its consent: the stamp stays and it is NOT held', async () => {
+    const writes = makeDb({
+      customer: { ...bareCustomer, service_contact_name: 'Property Manager', service_contact_phone: '+19415557777', service_contacts_consent_at: '2026-07-22T00:00:00Z' },
+    });
+    expect(await persistCallSecondaryContact('cust-1', { ...buyer, role: 'spouse_partner', on_site: true }, { onSiteAskEligible: true, keepConsentStamp: true, holdPhone: false })).toBe('written');
+    expect(writes.updates[0]).not.toHaveProperty('service_contacts_consent_at');
+    expect(writes.updates[0]).not.toHaveProperty('service_preferences');
   });
 
   test('no explicit SMS consent on the call -> slot written WITHOUT a consent stamp (#2955 r2)', async () => {
@@ -494,6 +575,23 @@ describe('persistCallSecondaryContact', () => {
       service_contact_email: 'joseph.haught89431@gmail.com',
       service_contact_role: 'home_buyer',
     }]);
+  });
+
+  test('an on-site contact with no notification ask is still saved (unstamped) so the opt-in ask can reach them', async () => {
+    const writes = makeDb({ customer: bareCustomer });
+    expect(await persistCallSecondaryContact('cust-1', { ...buyer, role: 'spouse_partner', wants_notifications: false, on_site: true }, { onSiteAskEligible: true })).toBe('written');
+    expect(writes.updates[0].service_contacts_consent_at).toBeUndefined();
+    // Nobody asked for notifications to them: the phone is filed, the email is not.
+    expect(writes.updates[0].service_contact_email).toBeNull();
+    expect(writes.updates[0].service_contact_phone).toBe(buyer.phone);
+    // The ask cannot go out (do-not-contact / dark rail → not eligible): no write.
+    const writesDark = makeDb({ customer: bareCustomer });
+    expect(await persistCallSecondaryContact('cust-1', { ...buyer, role: 'spouse_partner', wants_notifications: false, on_site: true })).toBe('skipped_no_intent');
+    expect(writesDark.updates).toHaveLength(0);
+    // A non-on-site role with on_site=true is not an ask trigger: no write.
+    const writes2 = makeDb({ customer: bareCustomer });
+    expect(await persistCallSecondaryContact('cust-1', { ...buyer, role: 'real_estate_agent', wants_notifications: false, on_site: true }, { onSiteAskEligible: true })).toBe('skipped_no_intent');
+    expect(writes2.updates).toHaveLength(0);
   });
 
   test('no explicit notification intent → no write (contact stays triage/lead-only)', async () => {
@@ -676,5 +774,259 @@ describe('persistCallSecondaryContact', () => {
     const writes = makeDb({ customer: { ...bareCustomer, email: 'JOSEPH.HAUGHT89431@gmail.com' } });
     expect(await persistCallSecondaryContact('cust-1', { ...buyer, phone: null })).toBe('skipped_email_on_record');
     expect(writes.updates).toHaveLength(0);
+  });
+});
+
+// ─── on-site contact: the pipeline only SENDS THE ASK (owner redesign 2026-10-01).
+// Consent comes only from the recipient's own YES (recipient-optin.js).
+
+describe('on-site contact opt-in ask', () => {
+  const spouse = {
+    first_name: 'Sample', last_name: 'Spouse', phone: '+15550100123', role: 'spouse_partner',
+    wants_notifications: true, wants_appointment_texts: true, on_site: false,
+  };
+
+  test('trigger = on-site role AND (wants_appointment_texts OR on_site) AND a phone', () => {
+    // home_seller: the seller who meets the technician (WDO / access visits).
+    for (const role of ['spouse_partner', 'home_buyer', 'home_seller', 'tenant', 'family_member']) {
+      expect(onSiteOptinAskTrigger({ ...spouse, role })).toBe(true);
+    }
+    expect(onSiteOptinAskTrigger({ ...spouse, wants_appointment_texts: false, on_site: true })).toBe(true);
+    for (const role of ['landlord', 'lender', 'real_estate_agent', 'property_manager', 'other', 'unknown', null]) {
+      expect(onSiteOptinAskTrigger({ ...spouse, role })).toBe(false);
+    }
+    expect(onSiteOptinAskTrigger({ ...spouse, wants_appointment_texts: false, on_site: false })).toBe(false);
+    // wants_notifications alone (report / invoice emails) never triggers.
+    expect(onSiteOptinAskTrigger({ ...spouse, wants_appointment_texts: false })).toBe(false);
+    expect(onSiteOptinAskTrigger({ ...spouse, phone: null })).toBe(false);
+    expect(onSiteOptinAskTrigger(null)).toBe(false);
+  });
+
+  test('ask sent / not sent per gate (reasons feed the review card)', () => {
+    const live = { optinRailLive: true, persistResult: 'written' };
+    expect(decideOnSiteOptinAsk(spouse, live)).toEqual({ ask: true, reason: null });
+    // A phone only the legacy extractor read is never asked.
+    expect(decideOnSiteOptinAsk(spouse, { ...live, phoneFromV2: false })).toEqual({ ask: false, reason: 'phone_not_from_v2' });
+    // A phone filed by an earlier pass is asked too (a retry never leaves them unasked).
+    expect(decideOnSiteOptinAsk(spouse, { ...live, persistResult: 'skipped_phone_on_record' }).ask).toBe(true);
+    expect(decideOnSiteOptinAsk(spouse, { ...live, persistResult: 'skipped_phone_on_record_role_backfilled' }).ask).toBe(true);
+    // Gates.
+    expect(decideOnSiteOptinAsk({ ...spouse, role: 'lender' }, live)).toEqual({ ask: false, reason: 'not_on_site_contact' });
+    expect(decideOnSiteOptinAsk(spouse, { ...live, doNotContact: true })).toEqual({ ask: false, reason: 'do_not_contact' });
+    expect(decideOnSiteOptinAsk(spouse, { ...live, optinRailLive: false })).toEqual({ ask: false, reason: 'optin_rail_dark' });
+    expect(decideOnSiteOptinAsk(spouse, { ...live, persistResult: 'skipped_phone_belongs_to_other_customer' })).toEqual({ ask: false, reason: 'slot_not_saved' });
+    expect(decideOnSiteOptinAsk(spouse, { ...live, persistResult: 'skipped_slots_full' }).ask).toBe(false);
+  });
+
+  test('the pipeline NEVER stamps consent from the on-site rule: the slot is written unstamped without V2 explicit consent', async () => {
+    const db2 = require('../models/db');
+    const updates = [];
+    db2.mockImplementation((table) => {
+      if (table === 'customers') {
+        let collision = false;
+        const b = {
+          where: jest.fn((arg) => { if (typeof arg === 'function') { const sub = { whereNull: () => sub, orWhere: () => sub }; arg(sub); } return b; }),
+          whereNull: jest.fn(() => b),
+          whereNot: jest.fn(() => b),
+          whereRaw: jest.fn(() => { collision = true; return b; }),
+          first: jest.fn(async () => (collision ? null : {
+            id: 'cust-1', phone: '+15550100999', email: null,
+            service_contact_name: null, service_contact_phone: null, service_contact_email: null,
+            service_contact2_name: null, service_contact2_phone: null, service_contact2_email: null,
+            service_contact3_name: null, service_contact3_phone: null, service_contact3_email: null,
+          })),
+          update: jest.fn(async (p) => { updates.push(p); return 1; }),
+        };
+        return b;
+      }
+      if (table === 'notification_prefs') {
+        const b = { where: () => b, first: async () => undefined, insert: () => ({ onConflict: () => ({ merge: async () => 1 }) }) };
+        return b;
+      }
+      throw new Error(`unexpected table ${table}`);
+    });
+    const wanted = { ...spouse, on_site: true };
+    expect(await persistCallSecondaryContact('cust-1', wanted, { smsConsentExplicit: false })).toBe('written');
+    expect(updates[0]).toMatchObject({ service_contact_phone: '+15550100123', service_contact_role: 'spouse_partner' });
+    for (const key of ['service_contacts_consent_at', 'service_contacts_consent_source', 'service_contacts_consent_text_version']) {
+      expect(updates[0]).not.toHaveProperty(key);
+    }
+    // And the source never names the removed on-site stamp source.
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    expect(src).not.toContain('call_pipeline_onsite_contact');
+    expect(src).not.toContain('consent_upgraded_phone_on_record');
+    expect(src).not.toContain('written_consent_withheld');
+    expect(src).not.toContain('beforeStamp');
+    expect(src).not.toContain('phoneWithheld');
+  });
+
+  test('the loop only QUEUES the on-site ask (awaiting_booking); explicit consent keeps its own claim path', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    expect(src).toContain('decideOnSiteOptinAsk(secondaryEntry, { doNotContact: v2DoNotContact, optinRailLive, persistResult: result, phoneFromV2: onSitePhoneFromV2 })');
+    // Only a phone the V2 extraction itself captured, on the SAME V2 party that
+    // carries the on-site flags, may be asked.
+    expect(src).toContain('.filter((c) => c && onSiteOptinAskTrigger(c))');
+    // The rail read runs only when the secondary-contact pass can run (kill switch respected).
+    expect(src).toMatch(/const optinRailLive = \(process\.env\.GATE_CALL_SECONDARY_CONTACT === 'true' && customerId\s*&& callSecondaryContacts\.some\(onSiteOptinAskTrigger\)\)/);
+    expect(src).toContain('const onSitePhoneFromV2 = onSiteV2PhoneKeys.has(lastTen(secondaryEntry.phone));');
+    expect(src).toContain('pendingOnSiteAsks.push({ entry: secondaryEntry });');
+    expect(src).toContain("const optinAskState = onSiteDecision.ask ? 'awaiting_booking' : `not_sent:${onSiteDecision.reason}`;");
+    expect(src).toContain('JSON.stringify({ optin_ask: value })');
+    // The save only admits an on-site-only contact when the ask can go out.
+    expect(src).toContain('onSiteAskEligible: onSitePreAsk,');
+    // Either extractor's do-not-contact request blocks the ask.
+    expect(src).toMatch(/const v2DoNotContact = v2CanonicalExtraction\?\.consent\?\.do_not_contact_request === true\s*\|\| extracted\.do_not_contact_request === true;/);
+    // Explicit V2 consent keeps the original claim path (fresh slot only).
+    // ...but never for an entry queued for the booking site; that phone is also
+    // kept out of the same-call fan-out until it has an opt-in row.
+    expect(src).toMatch(/if \(result === 'written' && secondaryEntry\?\.phone && v2SmsConsentExplicit && !onSiteDecision\.ask && !v2DoNotContact\s*&& onSiteDecision\.reason !== 'phone_not_from_v2'\) \{/);
+    expect(src).toContain('if (!onSiteAlreadyConfirmed) optinClaimFailedPhones.add(lastTen(secondaryEntry.phone));');
+    // A re-added phone that already confirmed here gets the account stamp back.
+    expect(src).toContain("await require('./recipient-optin').restoreConfirmedPhone(customerId, lastTen(secondaryEntry.phone));");
+    // A YES that landed between the status read and the hold write is applied after the write.
+    expect(src).toContain("const heldOnWrite = onSiteBlockedBeforeWrite && !onSiteAlreadyConfirmed && result === 'written';");
+    expect(src).toContain("|| confirmedSinceRead) {");
+    // A phone NEW to the account is durably blocked (ask_failed, reclaimable)
+    // BEFORE the slot write, so the account's existing consent stamp stays; a
+    // phone already on record is left alone.
+    expect(src).toContain('if (newKey && !knownKeys.includes(newKey)) {');
+    expect(src).toContain('keepConsentStamp: onSiteBlockedBeforeWrite,');
+    // A phone that already confirmed on this account is not held again.
+    expect(src).toContain('holdPhone: onSiteBlockedBeforeWrite && !onSiteAlreadyConfirmed,');
+    // A full set of slots does not end the scan (a later on-record party still gets its ask).
+    expect(src).toContain("if (result === 'skipped_slots_full') continue;");
+    expect(src).not.toContain("if (result === 'skipped_slots_full') break;");
+    // The confirmed-status read runs for every on-site phone, on record or new.
+    const pre = src.slice(src.indexOf('if (newKey && !knownKeys.includes(newKey)) {'));
+    expect(pre.indexOf("onSiteAlreadyConfirmed = existing?.status === 'confirmed';")).toBeGreaterThan(pre.indexOf('onSiteBlockedBeforeWrite = true;\n          }'));
+    const block = src.indexOf('if (newKey && !knownKeys.includes(newKey)) {');
+    expect(block).toBeLessThan(src.indexOf('const result = await persistCallSecondaryContact(customerId, secondaryEntry, {', block));
+    // The same-call fan-out gate is the original one.
+    expect(src).toContain('const extraContacts = !v2SmsConsentExplicit ? [] : (await filterRecipientsByOptin(');
+    // No booking landed: the card says so.
+    expect(src).toContain("for (const { entry } of pendingOnSiteAsks) await markOptinAsk(entry, 'not_sent:no_booking');");
+  });
+
+  test('the booking site sends the on-site ask only once a confirmed visit landed: claim with the VISIT address and id, dispatch outcome on the card', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const landed = src.indexOf('scheduledServiceId = svc.id;');
+    // Runs AFTER any reuse activation, never for a street-level hold or an
+    // address-disputed visit, and only for a confirmed, live, future visit.
+    const activation = src.indexOf(".activateLegacyOutboundReviewRowIfNeeded(db, svc.id, 'call-proc-reuse');", landed);
+    const site = src.indexOf("if (onSiteAskVisitState !== 'dead') {", landed);
+    expect(site).toBeGreaterThan(activation);
+    expect(activation).toBeGreaterThan(landed);
+    const gate = src.slice(src.lastIndexOf('const onSiteAskVisitState', site), site);
+    expect(gate).toContain('!disputeHeldReuse && houseNumberDisputed !== true');
+    // The shared visit check (recipient-optin visitAskState: hold → wait,
+    // confirmed + ahead → live, else dead; its behavior is tested there). An
+    // unreadable visit is NOT read as gone: 'unknown'.
+    expect(gate).toContain("await require('./recipient-optin').visitAskState(svc.id, customerId)");
+    expect(gate).toContain(".then((r) => r.state).catch(() => 'unknown')");
+    const block = src.slice(site, site + 6000);
+    // The ask quotes the booked visit's address.
+    expect(block).toContain("const visitAddress = [svc.service_address_line1, svc.service_address_city].filter(Boolean).join(', ');");
+    expect(block).toContain('propertyAddress: visitAddress ||');
+    // The visit rides the claim (a send-window-deferred ask is re-checked against it).
+    expect(block).toContain('visitId: svc.id,');
+    // A failed claim stays on the visit-bound retry rail (pending + visit_id), not a dead ask_failed.
+    expect(block).toContain("status: db.raw(\"CASE WHEN recipient_optin.status IN ('ask_failed', 'pending') THEN 'pending' ELSE recipient_optin.status END\"),");
+    expect(block).toContain("await markOptinAsk(entry, 'not_sent:claim_failed_retrying');");
+    // An already-dispatched pending ask keeps its dispatch marker (never re-sent).
+    expect(block).toContain("dispatched_at: db.raw(\"CASE WHEN recipient_optin.status = 'ask_failed' THEN NULL ELSE recipient_optin.dispatched_at END\"),");
+    // 'wait' (office-review hold) and 'unknown' claim the ask without sending it.
+    expect(block).toContain("if (claims.length && onSiteAskVisitState !== 'live') {");
+    expect(block).toContain("onSiteAskVisitState === 'wait' ? 'not_sent:awaiting_office_review' : 'not_sent:visit_check_retry'");
+    expect(block).toContain("const requested = typeof outcome === 'number' ? outcome : Number(outcome?.requested || 0);");
+    expect(block).toContain("return markOptinAsk(entry, requested > 0 ? 'sent' : 'not_sent:dispatch_failed');");
+    // No caller demotion and no booking marker in this PR (owner split 10-01).
+    expect(src).not.toContain('appointment_notify_primary: false');
+    expect(src).not.toContain('demote_primary_on_optin');
+    // The persistence loop no longer claims for the on-site path.
+    expect(src).not.toContain('(askedViaOnSite && secondaryEntry?.phone)');
+  });
+});
+
+describe('on-site flags through the V1/V2 resolution', () => {
+  const entry = (flags = {}) => ({
+    name_full: 'Sample Spouse', first_name: 'Sample', last_name: 'Spouse', phone_e164: '+15550100123', email: null,
+    role: 'spouse_partner', wants_notifications: true, ...flags,
+  });
+  const { normalizeSecondaryContact: normalizeV1 } = require('../utils/intake-normalize');
+
+  test('a rejected V2 identity is excluded by its CANONICAL form: name-only singleton + mirror carrying a different phone than V1 never becomes a second contact', () => {
+    // V1 caught only the phone (no name), so name-based dedupe cannot hide a resurrected mirror.
+    const v1 = { secondary_contact: { first_name: null, last_name: null, phone: '+15550100777', role: 'spouse_partner', wants_notifications: true } };
+    const v2 = {
+      secondary_contact: entry({ phone_e164: null }),
+      secondary_contacts: [entry({ phone_e164: '+15550100123', on_site: true })],
+    };
+    const list = resolveCallSecondaryContacts(v1, v2);
+    expect(list).toHaveLength(1);
+    expect(list[0].phone).toBe('+15550100777');
+  });
+
+  test('mapper: strict booleans, false when absent', () => {
+    expect(mapSecondaryContactToLegacy(entry())).toMatchObject({ wants_appointment_texts: false, on_site: false });
+    expect(mapSecondaryContactToLegacy(entry({ wants_appointment_texts: true, on_site: true }))).toMatchObject({ wants_appointment_texts: true, on_site: true });
+    expect(mapSecondaryContactToLegacy(entry({ on_site: 'yes' })).on_site).toBe(false);
+  });
+
+  test('V1 does not extract the flags (no V1 plumbing): a V1 contact never carries them', () => {
+    const v1 = normalizeV1({ first_name: 'Sample', phone: '+15550100123', role: 'spouse_partner', wants_notifications: true, wants_appointment_texts: true, on_site: true });
+    expect(v1).not.toHaveProperty('wants_appointment_texts');
+    expect(v1).not.toHaveProperty('on_site');
+    const merged = resolveCallSecondaryContact({ secondary_contact: v1 }, { secondary_contact: entry() });
+    expect(onSiteOptinAskTrigger(merged)).toBe(false);
+  });
+
+  test('V2 flags carry on V2\'s own phone or a same person — never onto V1\'s different phone; bound to V2\'s own role', () => {
+    const v2 = { secondary_contact: entry({ wants_appointment_texts: true }) };
+    // V1 name-only, V2 supplies the phone: V2's own phone carries V2's flag.
+    const v1NameOnly = normalizeV1({ first_name: 'Sample', last_name: 'Spouse', role: 'spouse_partner', wants_notifications: true });
+    expect(onSiteOptinAskTrigger(resolveCallSecondaryContact({ secondary_contact: v1NameOnly }, v2))).toBe(true);
+    // V1 has its OWN different-identity phone-only contact: V2's flag must not attach to V1's number.
+    const v1PhoneOnly = normalizeV1({ phone: '+15550100777', role: 'spouse_partner', wants_notifications: true });
+    const v2NameOnly = { secondary_contact: { ...entry({ wants_appointment_texts: true }), phone_e164: null } };
+    const merged = resolveCallSecondaryContact({ secondary_contact: v1PhoneOnly }, v2NameOnly);
+    expect(merged.phone).toBe('+15550100777');
+    expect(onSiteOptinAskTrigger(merged)).toBe(false);
+    // Conflicting identities: V1 wins unmerged, V2's flags never arrive.
+    expect(onSiteOptinAskTrigger(resolveCallSecondaryContact({ secondary_contact: v1PhoneOnly }, v2))).toBe(false);
+    // V2's own lender role never pairs with the flags (merged role from V1 is spouse, V2 says lender).
+    const v1Spouse = normalizeV1({ first_name: 'Sample', last_name: 'Spouse', role: 'spouse_partner', wants_notifications: true });
+    const lenderV2 = { secondary_contact: entry({ wants_appointment_texts: true, role: 'lender' }) };
+    expect(onSiteOptinAskTrigger(resolveCallSecondaryContact({ secondary_contact: v1Spouse }, lenderV2))).toBe(false);
+  });
+
+  test('singleton + same-person array[0]: flags from either shape count (OR); a different person never lends flags', () => {
+    const v2 = { secondary_contact: entry(), secondary_contacts: [entry({ wants_appointment_texts: true, on_site: true })] };
+    expect(canonicalV2Secondary(v2)).toMatchObject({ wants_appointment_texts: true, on_site: true });
+    expect(onSiteOptinAskTrigger(resolveCallSecondaryContact({}, v2))).toBe(true);
+    expect(resolveCallSecondaryContacts({}, v2)).toHaveLength(1);
+    const other = { ...entry({ wants_appointment_texts: true, on_site: true }), name_full: 'Other Tenant', first_name: 'Other', last_name: 'Tenant', phone_e164: '+15550100888' };
+    expect(onSiteOptinAskTrigger(resolveCallSecondaryContact({}, { secondary_contact: entry(), secondary_contacts: [other] }))).toBe(false);
+  });
+
+  test('a same-person mirror with a CONFLICTING role lends no flags (fail closed)', () => {
+    const lenderMirror = { secondary_contact: entry({ role: 'spouse_partner' }), secondary_contacts: [entry({ role: 'lender', wants_appointment_texts: true, on_site: true })] };
+    const canon = canonicalV2Secondary(lenderMirror);
+    expect(canon.role).toBe('spouse_partner');
+    expect(!!canon.on_site || !!canon.wants_appointment_texts).toBe(false);
+    expect(onSiteOptinAskTrigger(resolveCallSecondaryContact({}, lenderMirror))).toBe(false);
+  });
+
+  test('entries 2+ (V2 array only) keep their own flags', () => {
+    const second = { ...entry({ wants_appointment_texts: true }), name_full: 'Sample Tenant', first_name: 'Sample', last_name: 'Tenant', phone_e164: '+15550100888', role: 'tenant' };
+    const list = resolveCallSecondaryContacts({}, { secondary_contact: entry(), secondary_contacts: [entry(), second] });
+    expect(list).toHaveLength(2);
+    expect(onSiteOptinAskTrigger(list[0])).toBe(false);
+    expect(onSiteOptinAskTrigger(list[1])).toBe(true);
+  });
+
+  test('the V2 normalizer keeps strict booleans', () => {
+    expect(normalizeSecondaryContactV2(entry())).toMatchObject({ wants_appointment_texts: false, on_site: false });
+    expect(normalizeSecondaryContactV2(entry({ wants_appointment_texts: true, on_site: true }))).toMatchObject({ wants_appointment_texts: true, on_site: true });
+    expect(normalizeSecondaryContactV2(entry({ wants_appointment_texts: 'true', on_site: 1 }))).toMatchObject({ wants_appointment_texts: false, on_site: false });
   });
 });

@@ -230,6 +230,28 @@ describe('IB search_field_intelligence', () => {
     spy.mockRestore();
   });
 
+  test('hybrid vector recall re-fetches a missing KB slug only when the row is not admin-deactivated', async () => {
+    const state = useDb({
+      knowledge_entries: [],
+      knowledge_base: [{ id: 'kb7', slug: 'stale-slug', title: 'Stale', category: 'chemicals', confidence: 'high', content: 'x' }],
+      knowledge_contradictions: [],
+    });
+    const gates = require('../config/feature-gates');
+    const gateSpy = jest.spyOn(gates, 'isEnabled').mockImplementation((name) => name === 'hybridKnowledge');
+    const hybridSpy = jest.spyOn(require('../services/knowledge-index/hybrid-search'), 'hybridKnowledgeSearch')
+      .mockResolvedValue({ results: [{ source: 'kb', sourceId: 'stale-slug', title: 'Stale' }] });
+    const spy = jest.spyOn(KnowledgeBridge, 'unifiedSearch').mockResolvedValue({ claudeopedia: [], wiki: [], bridged: [] });
+
+    const { executeTool } = require('../services/intelligence-bar/tools');
+    await executeTool('search_field_intelligence', { query: 'stale' });
+
+    const refetch = state.calls.knowledge_base.find((c) => c.ops.some(([m, a]) => m === 'whereIn' && a[0] === 'slug'));
+    expect(refetch).toBeTruthy();
+    expect(refetch.ops).toEqual(expect.arrayContaining([['whereRaw', ['active IS NOT FALSE']]]));
+    expect(refetch.ops).toEqual(expect.arrayContaining([['where', [{ status: 'active' }]]]));
+    spy.mockRestore(); hybridSpy.mockRestore(); gateSpy.mockRestore();
+  });
+
   test('a search that finds nothing stays a pure read (no knowledge_queries write)', async () => {
     const state = useDb({});
     const spy = jest.spyOn(KnowledgeBridge, 'unifiedSearch').mockResolvedValue({ claudeopedia: [], wiki: [], bridged: [] });

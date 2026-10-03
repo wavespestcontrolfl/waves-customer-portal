@@ -79,6 +79,11 @@ jobs:
         env:
           RECONCILE_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/newsletter-list-reconcile-postgres.test.js
+      - name: Pest forecast snapshot tests
+        working-directory: server
+        env:
+          PEST_FORECAST_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand --no-coverage tests/pest-forecast-history-postgres.test.js
       - name: Customer 360 SMS read and bell transaction tests
         run: |
           node <<'JS'
@@ -222,7 +227,7 @@ jobs:
         working-directory: server
         env:
           APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand --forceExit tests/customer-dunning-schedules-migration-postgres.test.js tests/reconciliation-fence-read-only-postgres.test.js tests/customer-dunning-schedule-postgres.test.js tests/customer-dunning-email-authority-postgres.test.js
+        run: npx jest --ci --silent --runInBand --forceExit tests/customer-dunning-schedules-migration-postgres.test.js tests/reconciliation-fence-read-only-postgres.test.js tests/customer-dunning-schedule-postgres.test.js tests/customer-dunning-email-authority-postgres.test.js tests/customer-dunning-live-wiring-postgres.test.js tests/customer-dunning-merge-postgres.test.js tests/customer-dunning-member-landing-postgres.test.js tests/customer-dunning-timeline-postgres.test.js
       - name: Booking capacity commit transaction tests
         working-directory: server
         env:
@@ -301,7 +306,7 @@ jobs:
         working-directory: server
         env:
           COMBINED_VISIT_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/combined-visit-capacity-postgres.test.js tests/combined-visit-conversion-postgres.test.js
+        run: npx jest --ci --silent --runInBand tests/combined-visit-capacity-postgres.test.js tests/combined-visit-conversion-postgres.test.js tests/combined-booking-check-postgres.test.js
       - name: Catalog allowance transaction tests
         working-directory: server
         env:
@@ -332,7 +337,7 @@ jobs:
         working-directory: server
         env:
           IB_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/intelligence-bar-operational-postgres.test.js tests/intelligence-bar-target-validation-db.test.js tests/intelligence-bar-target-context-db.test.js
+        run: npx jest --ci --silent --runInBand tests/intelligence-bar-operational-postgres.test.js tests/intelligence-bar-target-validation-db.test.js tests/intelligence-bar-target-context-db.test.js tests/intelligence-bar-workflow-matrix.test.js
       - name: Intelligence Bar task recovery transaction tests
         working-directory: server
         env:
@@ -547,6 +552,8 @@ jobs:
         run: npm run check:domain-rules
       - name: Intelligence Bar capability coverage drift
         run: npm run check:ib-coverage
+      - name: Technician-reachable routes list is current
+        run: npm run check:technician-routes
       - name: Local session supervisor lifecycle tests
         run: python3 -m unittest discover -s scripts/agents/tests -v
       - name: Lint changed files (errors-only, same scope as the pre-commit hook)

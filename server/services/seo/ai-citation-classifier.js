@@ -87,7 +87,10 @@ const REFERENCE_DOMAINS = Object.freeze(['wikipedia.org']);
 // TRACKED_COMPETITORS, the admin-seo-v2.js seo_competitors seed), so every
 // competitor list the portal keeps reaches the no-competitor-links matcher
 // (content/competitor-links.js; its test pins the parity).
-const EXTRA_COMPETITOR_DOMAINS = Object.freeze(['flapest.com', 'hometeampestdefense.com', 'hoskinspest.com', 'nozzlenolen.com', 'abchomeandcommercial.com']);
+// greenteampest.com (Green Team Pest): owner 2026-10-01 — its Parrish
+// service-area page was cited 57x for "what pest control companies serve
+// Parrish" and classified as a listicle candidate, i.e. an outreach target.
+const EXTRA_COMPETITOR_DOMAINS = Object.freeze(['flapest.com', 'hometeampestdefense.com', 'hoskinspest.com', 'nozzlenolen.com', 'abchomeandcommercial.com', 'greenteampest.com']);
 // The live union of BOTH tracked competitor lists this portal already
 // maintains (competitor-discovery.js's national/regional franchises +
 // competitor-gap-miner.js's local SWFL independents, itself overridable via
@@ -321,7 +324,7 @@ function classifyUrl(urlString, { providerIntent = false } = {}) {
 const ENQUEUABLE_CATEGORIES = Object.freeze(['listing', 'editorial']);
 
 module.exports = {
-  classifyUrl, isLocallyRelevant, isProviderIntentQuestion, ENQUEUABLE_CATEGORIES,
+  classifyUrl, isLocallyRelevant, isProviderIntentQuestion, hasBestToken, ENQUEUABLE_CATEGORIES,
   _internals: {
     LISTING_DOMAINS, EDITORIAL_DOMAINS, REFERENCE_SUFFIXES, REFERENCE_DOMAINS, competitorDomains,
     EXTRA_COMPETITOR_DOMAINS, COMMUNITY_VIDEO_DOMAINS, SWFL_LOCAL_DOMAINS, GEO_TERMS, BEST_TOKENS,

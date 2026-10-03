@@ -28,6 +28,7 @@
  */
 
 const db = require('../models/db');
+const { greetingFirstToken } = require('../utils/greeting-first-name');
 const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
 const { TZ, parseETDateTime, etDateString, formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
@@ -293,13 +294,13 @@ function renderedCarriesAcceptanceCopy(result) {
 // address always wins. null when there is no usable address anywhere.
 async function resolveRecipient({ customerId, estimateId }) {
   const customer = customerId
-    ? await db('customers').where({ id: customerId }).first('id', 'first_name', 'email', 'account_id', 'is_primary_profile')
+    ? await db('customers').where({ id: customerId }).first('id', 'first_name', 'last_name', 'email', 'account_id', 'is_primary_profile')
     : null;
   const own = usableEmail(customer?.email) ? null : await db('estimates').where({ id: estimateId }).first('customer_name', 'customer_email');
   let email = clean(own ? own.customer_email : customer?.email);
   if (!usableEmail(email) && customer) email = clean((await withAccountPrimaryContact({ ...customer, email: '' })).email);
   if (!usableEmail(email)) return null;
-  return { email, firstName: clean(customer?.first_name || String(own?.customer_name || '').split(/\s+/)[0]) || 'there' };
+  return { email, firstName: clean(customer?.first_name || greetingFirstToken({ customerName: own?.customer_name, customer })) || 'there' };
 }
 
 // One send of the onboarding email: the combined signup variant when given,

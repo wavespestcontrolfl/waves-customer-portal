@@ -1558,9 +1558,9 @@ async function lockAndAssertNoAnnualPrepayOverlap(trx, customerId, termStart, al
 // included, minus the setup share) — the noticed amount is that figure.
 // The candidate term rows are locked too, so the nightly apply's write of
 // next_term_prepay_amount serializes against it.
-async function noticedRenewalAmountConflictFor(customerId, amount, { coverageServiceType, termStart, trx }) {
+async function noticedRenewalAmountConflictFor(customerId, amount, { coverageServiceType, termStart, visitCount = null, trx }) {
   if (!require('../config/feature-gates').rateReviewLive()) return null;
-  return require('../services/rate-review-apply').noticedRenewalAmountConflict(trx, { customerId, amount, coverageServiceType, termStart, today: etDateString(), lock: true });
+  return require('../services/rate-review-apply').noticedRenewalAmountConflict(trx, { customerId, amount, coverageServiceType, termStart, visitCount, today: etDateString(), lock: true });
 }
 
 // The 409 the in-transaction check throws (the handlers' catch returns
@@ -2643,6 +2643,26 @@ router.get('/:id/cards', async (req, res, next) => {
     });
   } catch (err) { next(err); }
 });
+
+// POST /api/admin/customers/:id/dunning-schedule/{send-now,pause,resume,release}
+// — staff controls for the customer's open customer-level overdue reminder
+// schedule (dunning consolidation §8; services/customer-dunning/wiring.js).
+// send-now sends the schedule's CURRENT step and only while the live gate
+// covers the customer; a send already in flight is a 409.
+const dunningScheduleControl = (control) => async (req, res, next) => {
+  try {
+    const { controlCustomerSchedule } = require('../services/customer-dunning/wiring');
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 200) : '';
+    const { status, body } = await controlCustomerSchedule(req.params.id, control, {
+      adminId: req.technicianId || null, reason: reason || null,
+    });
+    res.status(status).json(body);
+  } catch (err) { next(err); }
+};
+router.post('/:id/dunning-schedule/send-now', requireAdmin, dunningScheduleControl('send-now'));
+router.post('/:id/dunning-schedule/pause', requireAdmin, dunningScheduleControl('pause'));
+router.post('/:id/dunning-schedule/resume', requireAdmin, dunningScheduleControl('resume'));
+router.post('/:id/dunning-schedule/release', requireAdmin, dunningScheduleControl('release'));
 
 // GET /api/admin/customers/:id/collection-holds — active collections holds
 // (B10). A dispute hold ("stops_charges") halts every off-session charge and
@@ -5654,7 +5674,7 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
       // amount is the charged amount") unless the operator confirms a
       // different one (acknowledgeNoticedAmount). Compared with what this
       // term records — after tax, minus the setup — never the request.
-      const noticedInTrx = await noticedRenewalAmountConflictFor(customer.id, termPrepayAmount, { coverageServiceType, termStart, trx });
+      const noticedInTrx = await noticedRenewalAmountConflictFor(customer.id, termPrepayAmount, { coverageServiceType, termStart, visitCount, trx });
       if (noticedInTrx && req.body?.acknowledgeNoticedAmount !== true) throw noticedRenewalAmountError(noticedInTrx);
       if (noticedInTrx) {
         await require('../services/rate-review-apply').recordNoticedAmountOverride(trx, { customerId: customer.id, conflict: noticedInTrx, adminUserId: req.technicianId || null, adminName: req.technician?.name || null, source: 'customer360_annual_prepay_invoice', invoiceId: invoice.id });
@@ -6020,7 +6040,7 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       // amount is the charged amount") unless the operator confirms a
       // different one (acknowledgeNoticedAmount). Compared with what this
       // term records — after tax, minus the setup — never the request.
-      const noticedInTrx = await noticedRenewalAmountConflictFor(customer.id, termPrepayAmount, { coverageServiceType, termStart, trx });
+      const noticedInTrx = await noticedRenewalAmountConflictFor(customer.id, termPrepayAmount, { coverageServiceType, termStart, visitCount, trx });
       if (noticedInTrx && req.body?.acknowledgeNoticedAmount !== true) throw noticedRenewalAmountError(noticedInTrx);
       if (noticedInTrx) {
         await require('../services/rate-review-apply').recordNoticedAmountOverride(trx, { customerId: customer.id, conflict: noticedInTrx, adminUserId: req.technicianId || null, adminName: req.technician?.name || null, source: 'customer360_annual_prepay', invoiceId: updatedInvoice.id });

@@ -112,6 +112,10 @@ async function findArrivalWindowSlots(opts) {
   const today = etDateString(now);
   const parts = etParts(now);
   const slots = [];
+  // Refusal counts per date (same shape as findCapacitySlots'), so the
+  // availability strip can tell a day whose route could not be verified
+  // from a day that is full.
+  const rejectionsByDate = {};
   let evaluated = 0;
   for (const date of enumerateDates(dateFrom, dateTo, { includeWeekends: opts.includeWeekends })) {
     if (date < today) continue;
@@ -129,6 +133,10 @@ async function findArrivalWindowSlots(opts) {
       const floor = Math.max(DAY_START_HOUR * 60, date === today ? parts.hour * 60 + parts.minute + 30 : 0);
       const candidates = enumerateArrivalPlacements(context, { durationMinutes, earliestStartMin: floor, latestServiceEndMin: ADMIN_DAY_END_MINUTES });
       evaluated += candidates.evaluated;
+      for (const [reason, count] of Object.entries(candidates.rejections || {})) {
+        if (!rejectionsByDate[date]) rejectionsByDate[date] = {};
+        rejectionsByDate[date][reason] = (rejectionsByDate[date][reason] || 0) + count;
+      }
       for (const { windowStart, windowEnd, fit } of candidates.placements) {
         const daysOut = Math.max(0, (new Date(`${date}T12:00:00Z`) - new Date(`${dateFrom}T12:00:00Z`)) / 86400000);
         slots.push({
@@ -146,7 +154,10 @@ async function findArrivalWindowSlots(opts) {
   }
   slots.sort((a, b) => a.score - b.score || a.waiting_minutes - b.waiting_minutes
     || a.arrival_delay_minutes - b.arrival_delay_minutes || a.start_time.localeCompare(b.start_time));
-  return { slots: slots.slice(0, topN).map((slot, i) => ({ rank: i + 1, ...slot })), evaluated, total_feasible: slots.length };
+  return {
+    slots: slots.slice(0, topN).map((slot, i) => ({ rank: i + 1, ...slot })), evaluated, total_feasible: slots.length,
+    rejections_by_date: rejectionsByDate,
+  };
 }
 
 async function findCapacitySlots(opts) {
@@ -243,7 +254,15 @@ async function findCapacitySlots(opts) {
   // Why each refused candidate was refused (arrival_window, day_overcommitted,
   // return_time, detour_cap, ...), so a thin week explains itself.
   const rejections = {};
-  const reject = (reason) => { rejections[reason] = (rejections[reason] || 0) + 1; };
+  // The same counts per date, so a picker can tell a day the route could not
+  // be verified on (in progress, coordless stop) from a day that is full.
+  const rejectionsByDate = {};
+  const reject = (reason, date) => {
+    rejections[reason] = (rejections[reason] || 0) + 1;
+    if (!date) return;
+    if (!rejectionsByDate[date]) rejectionsByDate[date] = {};
+    rejectionsByDate[date][reason] = (rejectionsByDate[date][reason] || 0) + 1;
+  };
   // Zone route days (GATE_ZONE_ROUTE_DAYS): a customer-facing caller that
   // resolved the request's zone (opts.zoneSlug — /book and the estimate
   // picker) gets a per-candidate cap, lifted on that zone's route weekday
@@ -258,13 +277,13 @@ async function findCapacitySlots(opts) {
   for (const candidate of candidates) {
     const { context, date, tech, start, options } = candidate;
     const fit = evaluateArrivalPlacement(context, options);
-    if (!fit.feasible) { reject(fit.reason); continue; }
+    if (!fit.feasible) { reject(fit.reason, date); continue; }
     // Existing save probes have no traffic preload; their fallback must fit too.
     if (!opts.capacityPlacement && !evaluateArrivalPlacement({ ...context, travel: null }, options).feasible) {
-      reject('conservative_travel');
+      reject('conservative_travel', date);
       continue;
     }
-    if (fit.detourMinutes > capFor(date, tech.id)) { reject('detour_cap'); continue; }
+    if (fit.detourMinutes > capFor(date, tech.id)) { reject('detour_cap', date); continue; }
     const index = fit.routeOrder.indexOf(context.target.id);
     const byId = new Map(context.rows.map(row => [row.id, row]));
     const familyScore = serviceFamilyPreference(context.rows.filter(row => row.technician_id === tech.id),
@@ -305,7 +324,8 @@ async function findCapacitySlots(opts) {
   for (const slot of packed) delete slot._gap;
   packed.sort((a, b) => a.score - b.score || a.waiting_minutes - b.waiting_minutes || a.start_time.localeCompare(b.start_time));
   return { slots: packed.slice(0, topN).map((slot, i) => ({ rank: i + 1, ...slot })),
-    evaluated: candidates.length, total_feasible: packed.length, rejections, travel: travel.diagnostics() };
+    evaluated: candidates.length, total_feasible: packed.length, rejections, rejections_by_date: rejectionsByDate,
+    travel: travel.diagnostics() };
 }
 
 // Route neighbours of a capacity placement, BY TIME rather than
@@ -742,7 +762,7 @@ function toPackingBoundAnchor(stop) {
 // `geo` carries the invariants resolved once per findAvailableSlots call:
 // { newStop, dateFrom, stopBuffer, candidateExpectedMinutes, durationMinutes,
 //   dayOpen, earliestStartMin, startFloorByDate, todayEt, todayFloorMin }.
-function evaluateGap(prev, next, { date, tech, dayStops, geo }) {
+function evaluateGap(prev, next, { date, tech, dayStops, geo, dayClose }) {
   const {
     newStop, dateFrom, stopBuffer, candidateExpectedMinutes,
     durationMinutes, dayOpen, earliestStartMin, startFloorByDate, todayEt, todayFloorMin,
@@ -840,6 +860,11 @@ function evaluateGap(prev, next, { date, tech, dayStops, geo }) {
       // disappeared from the self-serve booking surfaces (2026-08-05
       // field report).
       latest_start_min: latestStartFloor,
+      // The day's close. latest_start_min is bounded by the NEXT anchor,
+      // which can be a stop booked after hours, so a surface that walks a
+      // gap to latest_start_min also stops where start + duration passes
+      // this (the single-candidate path below already refuses that start).
+      day_close_min: dayClose,
       insertion: {
         after: prev.id === 'HQ_START' ? 'HQ (start of day)' : `${prev.customer} (${minutesToTime(prev.endMin)})`,
         before: next.id === 'HQ_END' ? 'HQ (end of day)' : `${next.customer} (${minutesToTime(next.startMin)})`,
@@ -905,7 +930,7 @@ function candidatesForDay(date, tech, params) {
   // Evaluate each gap between anchor[i] and anchor[i+1]
   for (let i = 0; i < anchors.length - 1; i++) {
     evaluatedGaps++;
-    const gap = evaluateGap(anchors[i], anchors[i + 1], { date, tech, dayStops, geo });
+    const gap = evaluateGap(anchors[i], anchors[i + 1], { date, tech, dayStops, geo, dayClose });
 
     if (wantsPackedEnds && dayStops.length > 0) {
       for (const startMin of packedEndsStarts(gap, durationMinutes, dayClose)) {

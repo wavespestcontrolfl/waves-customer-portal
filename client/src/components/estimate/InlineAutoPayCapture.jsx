@@ -1,5 +1,6 @@
 import { useEffect, useImperativeHandle, useRef, useState, forwardRef } from 'react';
-import { ACH_CONSENT_TEXT, CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT } from '../../lib/paymentMethodConsentText';
+import { ACH_CONSENT_TEXT, AFTER_VISIT_CARD_CONSENT_TEXT, CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT, latchConsentVersion } from '../../lib/paymentMethodConsentText';
+import { FIRST_INVOICE_AT_CONFIRM_COPY } from '../../lib/paymentTiming';
 
 /**
  * Inline Auto Pay capture for the single-screen booking review (owner ask
@@ -44,12 +45,31 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
   // onReplace(setupIntentId) → Promise<boolean>: "Use a different payment
   // method" after a capture already succeeded — the parent retires the
   // saved intent and remounts this capture (keyed) on a fresh one.
+  // afterVisitSetup (GATE_PAF_SETUP_FEE): the monthly-tier setup fee is billed
+  // WITH the first visit, so the heading/summary/terms name that and the card
+  // consent is the after_visit_card variant the accept records.
+  // afterVisit (GATE_PAF_EXISTING_CUSTOMERS, server /data recurringCardPolicy
+  // .afterVisitConsent): an existing customer on the pay-after-first-visit
+  // card rail — the full terms rendered here are the after_visit_card (v12)
+  // authorization, the same variant the accept records. Card only: a bank
+  // method has no bank-specific variant copy (base ACH text covers it).
+  // paused (server /data recurringCardPolicy.afterVisitPaused): the customer's
+  // Auto Pay is paused — the card is kept on file but never charged
+  // automatically, so the copy says a pay link follows each service.
+  // autopayOff (server /data recurringCardPolicy.afterVisitAutopayOff): the
+  // customer explicitly turned Auto Pay off — same held shape as paused (card
+  // kept, never enrolled or charged, pay link after each service), neutral copy.
+  // firstInvoiceNow: this selection's first invoice goes out WHEN THE
+  // CUSTOMER CONFIRMS (setup-only, or the accept answered PAYMENT_TIMING_REFRESH
+  // afterVisitDeferred:false) — the copy says so instead of implying every
+  // bill follows a service.
   // savedFor: what the replayed saved method is "already saved for" —
   // "this plan" (estimate accept, default), "this visit" (one-time secure
   // appointment), "Auto Pay" (standalone link). Copy only.
-  { intent, loadStripeSdk, glassActive = false, website = false, bodyColor = '#3E5B73', borderColor = 'rgba(4,57,94,0.18)', busy = false, onStateChange, onReplace, prepay = false, savedFor = 'this plan' },
+  { intent, loadStripeSdk, glassActive = false, website = false, bodyColor = '#3E5B73', borderColor = 'rgba(4,57,94,0.18)', busy = false, onStateChange, onReplace, prepay = false, savedFor = 'this plan', afterVisit = false, paused = false, autopayOff = false, firstInvoiceNow = false, afterVisitSetup = false },
   ref,
 ) {
+  const held = paused || autopayOff;
   const mountRef = useRef(null);
   const stripeRef = useRef(null);
   const elementsRef = useRef(null);
@@ -92,9 +112,10 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
   const agreedRef = useRef(false);
   const setAgreedSync = (v) => { agreedRef.current = v; setAgreed(v); };
   // The checkbox assents to the RENDERED authorization — if the variant
-  // changes (per-application Auto Pay ↔ immediate annual prepay charge),
-  // the prior check must not carry over (Codex r5 P1).
-  useEffect(() => { agreedRef.current = false; setAgreed(false); }, [prepay]);
+  // changes (per-application Auto Pay ↔ immediate annual prepay charge, or
+  // base ↔ setup fee billed with the first visit), the prior check must not
+  // carry over (Codex r5 P1).
+  useEffect(() => { agreedRef.current = false; setAgreed(false); }, [prepay, afterVisitSetup]);
   const [termsOpen, setTermsOpen] = useState(false);
   const [error, setError] = useState(null);
   // Stripe.js failed to load/mount: reported upward so the parent can drop
@@ -200,6 +221,8 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
      * including the succeeded-replay short-circuit.
      */
     async confirmSetup() {
+      // The tender the consent on screen was rendered for (the parent attests it).
+      const tenderNow = () => (methodTypeRef.current === 'us_bank_account' ? 'us_bank_account' : 'card');
       if (replacing) {
         return { ok: false, error: 'Switching your payment method — one moment.' };
       }
@@ -212,7 +235,7 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
       if (replay) {
         // Consent was ticked for the tender the server told us is saved;
         // the accept gate re-verifies the intent against Stripe regardless.
-        return { ok: true, setupIntentId: intent.setupIntentId };
+        return { ok: true, setupIntentId: intent.setupIntentId, methodType: tenderNow() };
       }
       if (!stripeRef.current || !elementsRef.current) {
         return { ok: false, error: 'The secure card form is still loading — try again in a moment.' };
@@ -235,8 +258,11 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
             setStaleReplay(true);
             return fail('Your payment method was already saved. Choose "Use a different payment method" below, or refresh this page to continue.');
           }
-          return { ok: true, setupIntentId: existing.setupIntent.id };
+          return { ok: true, setupIntentId: existing.setupIntent.id, methodType: tenderNow() };
         }
+        // The consent text version this capture is authorized under, latched
+        // for a redirect return (codex #5434 r2 P1).
+        latchConsentVersion();
         const result = await stripeRef.current.confirmSetup({
           elements: elementsRef.current,
           confirmParams: { return_url: window.location.href },
@@ -247,7 +273,7 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
         }
         const si = result.setupIntent;
         if (si && si.status === 'succeeded') {
-          return { ok: true, setupIntentId: si.id };
+          return { ok: true, setupIntentId: si.id, methodType: tenderNow() };
         }
         // Instant-verified banks land 'succeeded' like cards; a bank that
         // could not instant-verify never gets here (Stripe surfaces the
@@ -264,16 +290,23 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
       <div style={{ fontSize: 15, fontWeight: 600, color: NAVY }}>
         {prepay
           ? (bank ? 'Annual prepay — your bank account pays for the year' : 'Annual prepay — your card pays for the year')
-          : 'Auto Pay — nothing charged today'}
+          // Tender-accurate (GitHub Codex #5481 r9 P2): a bank pick is not "a card".
+          : (held ? `${bank ? 'Bank account' : 'Card'} on file — nothing charged today` : 'Auto Pay — nothing charged today')}
       </div>
       <div style={{ fontSize: 14, color: bodyColor, lineHeight: 1.5, marginTop: 4 }}>
         {prepay
           ? (bank
             ? 'When you confirm, we show your exact 12-month total and debit this bank account. Bank transfers have no added card surcharge.'
             : 'When you confirm, we show your exact 12-month total — including any card surcharge — and charge this card.')
-          : (bank
-            ? 'After each completed service, that service’s amount is debited from your bank account automatically. Bank transfers have no added card surcharge.'
-            : `After each completed service, your ${bankOffered ? 'card or bank account' : 'card'} is charged that service’s amount automatically.`)}
+          : (held
+            ? `${firstInvoiceNow ? `${FIRST_INVOICE_AT_CONFIRM_COPY} ` : ''}${paused ? 'Your Auto Pay is paused, so we' : 'We'} keep this ${bankOffered ? 'payment method' : 'card'} on file and send you a pay link after each completed service.`
+            : afterVisitSetup
+            ? (bank
+              ? 'After your first visit is completed, that visit and your one-time setup fee are debited from your bank account, then each completed service after that. Bank transfers have no added card surcharge.'
+              : `After your first visit is completed, your ${bankOffered ? 'card or bank account' : 'card'} is charged for that visit and your one-time setup fee, then for each completed service after that.`)
+            : (firstInvoiceNow ? `${FIRST_INVOICE_AT_CONFIRM_COPY} ` : '') + (bank
+              ? 'After each completed service, that service’s amount is debited from your bank account automatically. Bank transfers have no added card surcharge.'
+              : `After each completed service, your ${bankOffered ? 'card or bank account' : 'card'} is charged that service’s amount automatically.`))}
       </div>
       {replay ? (
         <div style={{ fontSize: 14, color: NAVY, fontWeight: 600, marginTop: 14 }}>
@@ -310,9 +343,21 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
             ? (bank
               ? 'I authorize Waves to save this bank account and debit my 12-month annual prepay total now — at the exact total shown before I confirm — and future invoices as agreed. Cancel anytime.'
               : 'I authorize Waves to save this card and charge my 12-month annual prepay total now — at the exact total shown before I confirm — and future invoices as agreed. Cancel anytime.')
-            : (bank
-              ? 'I authorize Waves to debit this bank account after each completed service — cancel anytime.'
-              : 'I authorize Waves to charge this card after each completed service — cancel anytime.')}
+            // The recorded terms (base v11, shown under "View full terms")
+            // authorize charging "as agreed", so the short label says so too
+            // rather than promising a save-only authorization (GitHub Codex
+            // #5481 r1 P3). Nothing is charged automatically while held.
+            : (held
+              ? (bank
+                ? 'I authorize Waves to save this bank account on file and debit it for future invoices as agreed — cancel anytime.'
+                : 'I authorize Waves to save this card on file and charge it for future invoices as agreed — cancel anytime.')
+            : afterVisitSetup
+              ? (bank
+                ? 'I authorize Waves to debit this bank account after my first visit is completed (that visit plus my one-time setup fee) and after each completed service — cancel anytime.'
+                : 'I authorize Waves to charge this card after my first visit is completed (that visit plus my one-time setup fee) and after each completed service — cancel anytime.')
+              : (bank
+                ? 'I authorize Waves to debit this bank account after each completed service — cancel anytime.'
+                : 'I authorize Waves to charge this card after each completed service — cancel anytime.'))}
         </span>
       </label>
       <button
@@ -326,7 +371,7 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
         <div style={{ fontSize: 14, color: bodyColor, lineHeight: 1.5, marginTop: 8, marginLeft: 26 }}>
           {prepay
             ? (bank ? PREPAY_ACH_CONSENT_TEXT : PREPAY_CARD_CONSENT_TEXT)
-            : (bank ? ACH_CONSENT_TEXT : CARD_CONSENT_TEXT)}
+            : (bank ? ACH_CONSENT_TEXT : ((afterVisit || afterVisitSetup) ? AFTER_VISIT_CARD_CONSENT_TEXT : CARD_CONSENT_TEXT))}
         </div>
       ) : null}
       {error ? (

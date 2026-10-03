@@ -1,0 +1,81 @@
+// The four-section report (GATE_REPORT_WRITER_RULES): parsed with its
+// titles, screened like the paragraph; the two-section shape is unchanged.
+const { technicianReportCustomerCopy } = require('../services/service-report/technician-report-copy');
+
+const REPORT = [
+  'WHAT WE FOUND', '', 'You mentioned ants by the dishwasher. Ghost ants were trailing along the counter.', '',
+  'WHAT WE DID AND WHY', '', 'We placed bait along the counter, because ants carry it back to the colony. Outside, we treated the foundation.', '',
+  'WHAT TO EXPECT', '', 'You may see a few more ants for a few days.', '',
+  "WHAT'S NEXT", '', 'If the ants are still trailing after about 1–2 weeks, let us know.',
+].join('\n');
+
+const ORIGINAL_GATE = process.env.GATE_REPORT_WRITER_RULES;
+beforeEach(() => { process.env.GATE_REPORT_WRITER_RULES = 'true'; });
+afterEach(() => {
+  if (ORIGINAL_GATE === undefined) delete process.env.GATE_REPORT_WRITER_RULES;
+  else process.env.GATE_REPORT_WRITER_RULES = ORIGINAL_GATE;
+});
+
+describe('four-section report', () => {
+  test('is read only while the writer switch is on (kill switch included)', () => {
+    delete process.env.GATE_REPORT_WRITER_RULES;
+    expect(technicianReportCustomerCopy(REPORT)).toBeNull();
+    process.env.GATE_REPORT_WRITER_RULES = 'false';
+    expect(technicianReportCustomerCopy(REPORT)).toBeNull();
+  });
+
+  test('parses the sections in order with their paragraphs', () => {
+    const parsed = technicianReportCustomerCopy(REPORT);
+    expect(parsed.sections.map((section) => [section.key, section.title, section.paragraphs.length])).toEqual([
+      ['whatWeFound', 'What we found', 1],
+      ['whatWeDid', 'What we did and why', 1],
+      ['whatToExpect', 'What to expect', 1],
+      ['whatsNext', 'What’s next', 1],
+    ]);
+    expect(parsed.body).toBe('You mentioned ants by the dishwasher. Ghost ants were trailing along the counter. We placed bait along the counter, because ants carry it back to the colony. Outside, we treated the foundation. You may see a few more ants for a few days. If the ants are still trailing after about 1–2 weeks, let us know.');
+    expect(parsed.whatWeDid).toBe('We placed bait along the counter, because ants carry it back to the colony. Outside, we treated the foundation.');
+    expect(parsed.violations).toEqual([]);
+  });
+
+  test('takes titles written inline with their text', () => {
+    const inline = [
+      'WHAT WE FOUND: You mentioned ants by the dishwasher. Ghost ants were trailing along the counter.', '',
+      'WHAT WE DID AND WHY: We placed bait along the counter, because ants carry it back to the colony. Outside, we treated the foundation.', '',
+      'WHAT TO EXPECT: You may see a few more ants for a few days.', '',
+      "WHAT'S NEXT: If the ants are still trailing after about 1–2 weeks, let us know.",
+    ].join('\n');
+    expect(technicianReportCustomerCopy(inline)?.body).toBe(technicianReportCustomerCopy(REPORT).body);
+    expect(technicianReportCustomerCopy(inline.replace(/WHAT'S NEXT: .*$/, "WHAT'S NEXT: "))).toBeNull();
+  });
+
+  test('takes a curly apostrophe in the last title', () => {
+    expect(technicianReportCustomerCopy(REPORT.replace("WHAT'S NEXT", 'WHAT’S NEXT'))?.sections).toHaveLength(4);
+  });
+
+  test.each([
+    ['sections out of order', REPORT.replace('WHAT TO EXPECT', 'TMP').replace("WHAT'S NEXT", 'WHAT TO EXPECT').replace('TMP', "WHAT'S NEXT")],
+    ['a section missing', REPORT.replace('WHAT TO EXPECT\n\nYou may see a few more ants for a few days.\n\n', '')],
+    ['an empty section', REPORT.replace('You may see a few more ants for a few days.', '')],
+    ['free text above the report', `Note to self: call the office.\n${REPORT}`],
+    ['a second line in a section', REPORT.replace(' Outside, we treated the foundation.', '\nOutside, we treated the foundation.')],
+    ['an internal note under the report', `${REPORT}\nOffice: customer disputed the previous invoice.`],
+    ['a repeated title inside a section', REPORT.replace(' Outside, we treated the foundation.', '\nWHAT WE FOUND')],
+    ['a report over the cap', REPORT.replace('Outside, we treated the foundation.', 'Outside, we treated the foundation. '.repeat(100))],
+  ])('rejects %s', (label, text) => {
+    expect(technicianReportCustomerCopy(text)).toBeNull();
+  });
+
+  test('banned wording withholds the body and the sections', () => {
+    const parsed = technicianReportCustomerCopy(REPORT.replace('Ghost ants were trailing', 'The infestation was trailing'));
+    expect(parsed.body).toBeNull();
+    expect(parsed.sections).toBeNull();
+    expect(parsed.violations.length).toBeGreaterThan(0);
+  });
+
+  test('the two-section paragraph parses exactly as before', () => {
+    expect(technicianReportCustomerCopy('WHAT WE DID\nWe treated.\nWHAT WE FOUND\nLight activity.')).toEqual({
+      whatWeDid: 'We treated.', whatWeFound: 'Light activity.', body: 'We treated. Light activity.', violations: [],
+    });
+    expect(technicianReportCustomerCopy('WHAT WE DID\nWe treated.\nSecond line.\nWHAT WE FOUND\nLight activity.')).toBeNull();
+  });
+});

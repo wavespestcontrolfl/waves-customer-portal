@@ -584,15 +584,19 @@ const TwilioService = {
   // Bradenton. Exported so display surfaces (the Pending Drafts queue's
   // Communications deep link) can show the SAME number the send path will
   // pick instead of maintaining a parallel derivation (Codex #3700 r5 P1).
-  // `customer` is an optional preloaded row ({ city }) for callers that
-  // already hold it (the drafts list joins customers for a whole page) —
-  // it skips the per-call lookup without changing the derivation.
+  // `customer` is an optional preloaded row for callers that already hold it
+  // (the drafts list joins customers for a whole page; it must carry the
+  // address and home_line_* columns) — it skips the per-call lookup without
+  // changing the derivation.
+  // GATE_HOME_LINE: a known customer's home line (homeLineLocationId) wins
+  // over customerLocationId, so every text to one customer leaves one line.
   async deriveOutboundNumber({ customerLocationId, customerId, customer } = {}) {
     const TWILIO_NUMBERS = require("../config/twilio-numbers");
-    const { resolveLocation, resolveServiceLocation } = require("../config/locations");
-    const { gateEnvValue } = require("../config/feature-gates");
+    const { resolveLocation, resolveServiceLocation, homeLineLocationId } = require("../config/locations");
+    const { gateEnvValue, homeLineLive } = require("../config/feature-gates");
+    const homeLine = homeLineLive();
     let locationId = customerLocationId;
-    if (!locationId && (customer || customerId)) {
+    if ((homeLine || !locationId) && (customer || customerId)) {
       try {
         const row = customer || await db("customers")
           .where({ id: customerId })
@@ -601,10 +605,9 @@ const TwilioService = {
           // GATE_SMS_LINE_ADDRESS_FALLBACK: a blank/unmapped city falls
           // through ZIP → geocode instead of straight to the default office.
           // Mapped cities resolve identically either way.
-          const loc = gateEnvValue("GATE_SMS_LINE_ADDRESS_FALLBACK")
-            ? resolveServiceLocation(row)
-            : resolveLocation(row.city);
-          locationId = loc.id;
+          if (homeLine) locationId = homeLineLocationId(row);
+          else if (gateEnvValue("GATE_SMS_LINE_ADDRESS_FALLBACK")) locationId = resolveServiceLocation(row).id;
+          else locationId = resolveLocation(row.city).id;
         }
       } catch {}
     }

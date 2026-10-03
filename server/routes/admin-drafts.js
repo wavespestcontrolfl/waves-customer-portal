@@ -1,6 +1,20 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+
+// The corrections view (migration 20261002110000) counts a revised or
+// rejected draft only when a person's review wrote it: the campaign send guard
+// and the Agent Ops duplicate sweep also write status rejected with
+// approved_by. The two review endpoints stamp the status they set into
+// flags.review_verdict; the view requires the stamp to match the row's status.
+// flags is an object on some drafts and an ARRAY of tags on others (the
+// house-voice drafter writes an array), and array || object is an array, so
+// the stamp follows the row's shape: a 'review_verdict:<status>' tag on an
+// array, a review_verdict key on an object, a fresh object when null.
+const reviewVerdictStamp = (dbh, status) => dbh.raw(
+  "CASE jsonb_typeof(flags) WHEN 'array' THEN flags || ?::jsonb WHEN 'object' THEN flags || ?::jsonb ELSE ?::jsonb END",
+  [JSON.stringify([`review_verdict:${status}`]), JSON.stringify({ review_verdict: status }), JSON.stringify({ review_verdict: status })],
+);
 const logger = require('../services/logger');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
@@ -83,10 +97,14 @@ async function resolveDraftRecipient(draft, preloaded = {}) {
     : 'customer' in preloaded ? preloaded.customer
       : await db('customers').where({ id: draft.customer_id }).select('id', 'phone').first();
   const metadataPhone = normalizeE164(flags.toPhone || flags.phone || flags.leadPhone);
+  // A line pinned when the draft was written (seasonal win-back names it in
+  // the body) — honored only if it is one of our numbers.
+  const pinnedFrom = flags.fromNumber && TWILIO_NUMBERS.findByNumber(flags.fromNumber) ? flags.fromNumber : undefined;
   if (metadataPhone) {
     const customerMatches = customer?.phone && samePhone(metadataPhone, customer.phone);
     return {
       toPhone: metadataPhone,
+      fromNumber: pinnedFrom,
       customerId: customerMatches ? customer.id : null,
       identityTrustLevel: customerMatches ? 'phone_matches_customer' : 'phone_provided_unverified',
     };
@@ -96,6 +114,7 @@ async function resolveDraftRecipient(draft, preloaded = {}) {
     if (customer?.phone) {
       return {
         toPhone: customer.phone,
+        fromNumber: pinnedFrom,
         customerId: customer.id,
         identityTrustLevel: 'phone_matches_customer',
       };
@@ -842,7 +861,10 @@ router.get('/', async (req, res, next) => {
         'customers.phone', 'customers.waveguard_tier', 'customers.pipeline_stage',
         'customers.nearest_location_id', 'customers.city',
         'customers.zip as customer_zip', 'customers.latitude as customer_latitude',
-        'customers.longitude as customer_longitude')
+        'customers.longitude as customer_longitude',
+        'customers.address_line1 as customer_address_line1', 'customers.address_line2 as customer_address_line2',
+        'customers.home_line_location_id as customer_home_line_location_id',
+        'customers.home_line_address_key as customer_home_line_address_key')
       .orderBy('message_drafts.created_at', 'desc')
       .orderBy('message_drafts.id', 'desc')
       .limit(50);
@@ -876,6 +898,9 @@ router.get('/', async (req, res, next) => {
       const customer = d.customer_id ? {
         id: d.customer_id, phone: d.phone, city: d.city,
         zip: d.customer_zip, latitude: d.customer_latitude, longitude: d.customer_longitude,
+        address_line1: d.customer_address_line1, address_line2: d.customer_address_line2,
+        home_line_location_id: d.customer_home_line_location_id,
+        home_line_address_key: d.customer_home_line_address_key,
       } : null;
       const preloaded = { customer, ...(d.sms_log_id ? { smsLog: smsLogById.get(String(d.sms_log_id)) || null } : {}) };
       const r = await resolveDraftRecipient(d, preloaded).catch(() => null);
@@ -1110,6 +1135,7 @@ router.put('/:id/revise', async (req, res, next) => {
   try {
     const { revisedResponse } = req.body;
     if (!revisedResponse) return res.status(400).json({ error: 'revisedResponse required' });
+    const linkedVisitIds = require('../services/street-level-hold').linkedVisitIdsFrom(req.body?.linkedVisitIds);
     // Same rule as approve — judged before the claim, nothing to release.
     const reviseRefusal = await draftImmediateOnlyLinkRefusal(revisedResponse);
     if (reviseRefusal) return res.status(409).json({ error: reviseRefusal });
@@ -1127,6 +1153,9 @@ router.put('/:id/revise', async (req, res, next) => {
         final_response: revisedResponse,
         approved_by: req.technicianId,
         approved_at: claimTime,
+        // Review provenance: the corrections view counts a revised draft
+        // only when this endpoint wrote it (the system also sets approved_by).
+        flags: reviewVerdictStamp(db, 'revised'),
       })
       .returning('*');
     if (!draft) {
@@ -1214,6 +1243,9 @@ router.put('/:id/revise', async (req, res, next) => {
           customerLocationId: campaignGuard.customer?.nearest_location_id || undefined,
           adminUserId: req.technicianId,
           fromNumber,
+          // The visits the revised text's reschedule / appointment links point at (the composer sends them):
+          // the shared send step holds the text while any is a live street-level address hold.
+          ...(linkedVisitIds.length ? { linked_scheduled_service_ids: linkedVisitIds } : {}),
         },
       });
     } catch (sendErr) {
@@ -1296,6 +1328,8 @@ router.put('/:id/reject', async (req, res, next) => {
         .where({ id: req.params.id, status: 'pending' })
         .update({
           status: 'rejected', approved_by: req.technicianId, approved_at: new Date(),
+          // Review provenance, see /:id/revise.
+          flags: reviewVerdictStamp(trx, 'rejected'),
         });
       if (!updated) return;
       await trx('click_followup_actions')
@@ -1355,6 +1389,14 @@ router.get('/:id', async (req, res, next) => {
       )
       .first();
     if (!d) return res.status(404).json({ error: 'Draft not found' });
+    // Technician scope (codex #5568 r3 P1): the draft carries the customer's
+    // name, phone and both message bodies, so a technician reads only drafts
+    // for customers on their own route; a customerless draft is office work.
+    if (req.techRole !== 'admin') {
+      if (!d.customer_id) return res.status(403).json({ error: 'Admin access required' });
+      const { technicianServicesCustomer } = require('../services/technician-visit-scope');
+      if (!(await technicianServicesCustomer(req, d.customer_id))) return res.status(404).json({ error: 'Draft not found' });
+    }
 
     const flags = parseFlags(d.flags);
     // Same resolved recipient/from contract as the list (see GET / above).

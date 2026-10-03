@@ -38,8 +38,13 @@ test('tier mirrors write-gates: two-step/legacy-bare = yellow, confirmed-endpoin
   expect(tierFor('query_customers')).toBe('green');
 });
 
-test('every outside-write tool (Sentry/Cloudflare/Railway/GitHub/GSC/GrowthBook) is irreversible — none has a portal-side undo', () => {
+test('every outside-write tool (Sentry/Cloudflare/Railway/GitHub/GSC) is irreversible — none has a portal-side undo', () => {
+  // The two feature switches are undone by confirming the opposite value, so
+  // theirs is derived from the preview (Codex r4 on #5514;
+  // intelligence-bar-feature-switch-card.test.js).
+  const switches = new Set(['set_railway_gate', 'set_growthbook_feature_environment']);
   for (const n of gates.OUTSIDE_WRITE_TOOL_NAMES) {
+    if (switches.has(n)) continue;
     expect(buildContract({ toolName: n, params: {}, displayParams: {} }).irreversible).toBe(true);
   }
   expect(gates.OUTSIDE_WRITE_TOOL_NAMES.size).toBe(13);

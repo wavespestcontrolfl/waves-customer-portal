@@ -12,7 +12,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({ navigationBusy: vi.fn() }));
 vi.mock('socket.io-client', () => ({ io: () => ({ on: vi.fn(), off: vi.fn(), disconnect: vi.fn() }) }));
-vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: () => false }));
+vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: () => false, useFeatureFlagReady: () => ({ enabled: false, ready: true }) }));
 vi.mock('../../components/tech/TechIntelligenceBar', () => ({ default: () => <div>Field assistant</div> }));
 vi.mock('../../components/tech/GeofenceArrivalPrompt', () => ({ default: () => null }));
 vi.mock('../../components/tech/CreateProjectModal', () => ({ default: () => null, wdoFeeSeedFromVisit: () => null }));
@@ -23,7 +23,7 @@ vi.mock('../../components/tech/FieldLeadModal', () => ({ default: () => null }))
 vi.mock('../../components/ServiceRecapModal', () => ({ default: ({ service }) => <div>Existing recap form for {service.id}</div> }));
 vi.mock('../../components/tech/FastCompleteSheet', () => ({
   default: ({ service, onFullForm }) => (
-    <div>
+    <div data-recap-enabled={String(service.recapEnabled)}>
       Fast Complete sheet for {service.id}
       <button type="button" onClick={onFullForm}>Sheet full form</button>
     </div>
@@ -117,4 +117,27 @@ it('sends the sheet\'s full-form escape to the full completion screen, not the r
   fireEvent.click(await screen.findByRole('button', { name: 'Sheet full form' }));
   expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&completeService=svc-escape');
   expect(screen.queryByText(/Existing recap form/)).not.toBeInTheDocument();
+});
+
+// GATE_FAST_COMPLETE_RECAP rides the same schedule row: the sheet learns from
+// the payload, and only an exact true turns its customer recap on.
+it.each([
+  [true, 'true'],
+  [false, 'false'],
+  [undefined, 'false'],
+  ['true', 'false'],
+])('passes fastCompleteRecapEnabled %s to the sheet as recapEnabled=%s', async (flag, expected) => {
+  rows = [row('svc-recap', { reserviceFastCompleteEnabled: true, ...(flag === undefined ? {} : { fastCompleteRecapEnabled: flag }) })];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
+  const sheet = (await screen.findByText('Fast Complete sheet for svc-recap')).closest('[data-recap-enabled]');
+  expect(sheet.getAttribute('data-recap-enabled')).toBe(expected);
+});
+
+it('the recap flag alone never opens the sheet: the routing gate still decides', async () => {
+  rows = [row('svc-recap-only', { fastCompleteRecapEnabled: true })];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
+  expect(await screen.findByText('Existing recap form for svc-recap-only')).toBeInTheDocument();
+  expect(screen.queryByText(/Fast Complete sheet/)).not.toBeInTheDocument();
 });

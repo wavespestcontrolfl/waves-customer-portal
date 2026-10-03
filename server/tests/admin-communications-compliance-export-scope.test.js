@@ -10,7 +10,7 @@ jest.mock('twilio', () => jest.fn(() => ({ calls: { create: jest.fn() } })));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/twilio', () => ({}));
 jest.mock('../config', () => ({ twilio: { accountSid: 'AC_test', authToken: 'auth_test' } }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), homeLineLive: () => false }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {

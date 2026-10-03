@@ -59,16 +59,18 @@ const { APIFY_OPS_TOOLS, executeApifyOpsTool } = require('../services/intelligen
 const { SOCIAL_OPS_TOOLS, executeSocialOpsTool } = require('../services/intelligence-bar/social-ops-tools');
 const { MANAGED_AGENTS_OPS_TOOLS, executeManagedAgentsOpsTool } = require('../services/intelligence-bar/managed-agents-ops-tools');
 const { JOB_HEALTH_TOOLS, executeJobHealthTool } = require('../services/intelligence-bar/job-health-tools');
+const { NEEDS_ME_TOOLS, executeNeedsMeTool } = require('../services/intelligence-bar/needs-me-tools');
 const { CLOSEOUT_TOOLS, executeCloseoutTool } = require('../services/intelligence-bar/closeout-tools');
 const { CLOSEOUT_REPAIR_TOOLS, executeCloseoutRepairTool } = require('../services/intelligence-bar/closeout-repair-tools');
 const { CALL_RESEARCH_TOOLS, executeCallResearchTool } = require('../services/intelligence-bar/call-research-tools');
 const { CUSTOMER_LIFECYCLE_TOOLS, executeCustomerLifecycleTool, mergeCustomersEnabled } = require('../services/intelligence-bar/customer-lifecycle-tools');
 const {
   UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES, CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES,
-  FULL_ACCESS_TWO_STEP_TOOL_NAMES, OUTSIDE_WRITE_TOOL_NAMES, PREVIEW_ONLY_WRITE_TOOL_NAMES,
+  FULL_ACCESS_TWO_STEP_TOOL_NAMES, OUTSIDE_WRITE_TOOL_NAMES,
 } = require('../services/intelligence-bar/write-gates');
 const { outsideWritePins } = require('../services/intelligence-bar/outside-write-pins');
 const { ibFullAccess } = require('../services/intelligence-bar/ib-access');
+const OwnerDirect = require('../services/intelligence-bar/owner-direct');
 const PendingActions = require('../services/intelligence-bar/pending-actions');
 const { isToolFailure, executionOutcome } = require('../services/intelligence-bar/outcomes');
 const ActionRegistry = require('../services/intelligence-bar/action-registry');
@@ -145,6 +147,7 @@ const APIFY_OPS_TOOL_NAMES = new Set(APIFY_OPS_TOOLS.map(t => t.name));
 const SOCIAL_OPS_TOOL_NAMES = new Set(SOCIAL_OPS_TOOLS.map(t => t.name));
 const MANAGED_AGENTS_OPS_TOOL_NAMES = new Set(MANAGED_AGENTS_OPS_TOOLS.map(t => t.name));
 const JOB_HEALTH_TOOL_NAMES = new Set(JOB_HEALTH_TOOLS.map(t => t.name));
+const NEEDS_ME_TOOL_NAMES = new Set(NEEDS_ME_TOOLS.map(t => t.name));
 const CALL_RESEARCH_TOOL_NAMES = new Set(CALL_RESEARCH_TOOLS.map(t => t.name));
 const CUSTOMER_LIFECYCLE_TOOL_NAMES = new Set(CUSTOMER_LIFECYCLE_TOOLS.map(t => t.name));
 // Every infra module loads with EVERY admin context (any admin page can ask
@@ -158,6 +161,9 @@ const INFRA_TOOLS = [
   ...DATAFORSEO_OPS_TOOLS, ...GBP_OPS_TOOLS, ...GA4_OPS_TOOLS,
   ...META_ADS_OPS_TOOLS, ...BOUNCIE_OPS_TOOLS, ...APIFY_OPS_TOOLS,
   ...SOCIAL_OPS_TOOLS, ...MANAGED_AGENTS_OPS_TOOLS, ...JOB_HEALTH_TOOLS,
+  // needs_me: read-only list of open admin alerts + standing conditions. Alert text
+  // names customers, so it rides the admin-only infra set, not the base tools.
+  ...NEEDS_ME_TOOLS,
   // The sitemap submit is advertised with the other outside-service writes in
   // the global infrastructure prompt, so it rides the global infra set too —
   // not only the seo/blog contexts' SEO_TOOLS (Codex r4 on #5275).
@@ -795,6 +801,8 @@ const PINNED_DISPLAY_BUILDERS = {
       change: `${preview.current_state} → ${preview.new_state}`,
       default_value: preview.default_value ?? 'none set',
       targeting_rules: preview.rule_count,
+      // Every rule in full, one line each (Codex r1 on #5514, P1).
+      ...(preview.rules ? { rules: preview.rules } : {}),
       effect: preview.effect_note,
     }
     : null),
@@ -913,6 +921,16 @@ function confirmationDisplayParams(toolName, params, preview) {
   if (toolName === 'update_lead_status' && preview?.pinned_lead) {
     return { ...params, lead: `${preview.pinned_lead.name} — ${preview.pinned_lead.current_status} → ${params.new_status}` };
   }
+  if (toolName === 'update_lead_contact' && preview?.changes) {
+    // The card shows the resolved lead and only the fields that change,
+    // as before → after — never the raw lead_name search string.
+    return {
+      lead: `${preview.lead_name} (${preview.lead_status})`,
+      ...Object.fromEntries(Object.entries(preview.changes).map(([field, c]) => [
+        field, `${c.from == null ? '(empty)' : c.from} → ${c.to == null ? '(cleared)' : c.to}`,
+      ])),
+    };
+  }
   if (toolName === 'bulk_update_leads') {
     // Curated card: the pinned id list is authoritative but unreadable —
     // show the count + sample the operator is approving, never a raw array.
@@ -1016,6 +1034,17 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     // card; the model relays the existing match to the operator.
     if (toolUse.name === 'create_customer' && preview?.already_exists) {
       return { failed: true, modelResult: preview };
+    }
+    if (toolUse.name === 'update_lead_contact' && preview?.lead_id) {
+      // Pin the resolved lead: a lead_name proposal must never re-resolve to
+      // a different row at Confirm (the preview fingerprint also binds it).
+      params.lead_id = String(preview.lead_id);
+      delete params.lead_name;
+      // Pin the approved before → after values: the confirmed executor
+      // re-asserts THESE in its UPDATE's WHERE, not whatever it re-reads
+      // after the fingerprint check (pre-push P1). `_`-prefixed: never
+      // shown, ignored by the unconfirmed fingerprint re-run.
+      params._approved_changes = preview.changes;
     }
     // A feature switch already in the requested state is a plain answer, not
     // a failure and not a card (Codex r3 on #5489): no is_error result, no
@@ -1451,6 +1480,9 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // window, updateLeadStatus refuses (preview_changed) instead of
       // overwriting a state the card never showed.
       params._expected_status = lead.status;
+      // ...and its version (codex #5477 r18): a handled request reopened and closed
+      // again by a later booking during the pending window is a different close.
+      params._expected_updated_at = lead.updated_at ? new Date(lead.updated_at).toISOString() : null;
       preview = { ...preview, pinned_lead: { id: lead.id, name: params.lead_name, current_status: lead.status } };
     }
     if (toolUse.name === 'bulk_update_leads') {
@@ -1649,13 +1681,8 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     modelResult: {
       ...preview,
       ...(preview.params ? { params: Object.fromEntries(Object.entries(preview.params).filter(([key]) => !key.startsWith('_'))) } : {}),
-      ...(PREVIEW_ONLY_WRITE_TOOL_NAMES.has(toolUse.name) ? {
-        preview_only: true,
-        note: 'Preview shown on a card that CANNOT be confirmed — applying this from the bar is not available yet. Do NOT retry this tool and do NOT say it will run; tell the operator the preview is on the card and the change has to be made in its own dashboard for now.',
-      } : {
-        pending_confirmation: true,
-        note: 'Proposed — awaiting the operator\'s Confirm click on the confirmation card in the portal. Do NOT retry this tool and do NOT claim the action is done; tell the operator to confirm or cancel using the card.',
-      }),
+      pending_confirmation: true,
+      note: 'Proposed — awaiting the operator\'s Confirm click on the confirmation card in the portal. Do NOT retry this tool and do NOT claim the action is done; tell the operator to confirm or cancel using the card.',
     },
     clientPayload: {
       id: row.id,
@@ -2046,6 +2073,7 @@ You are on the Leads page. Virginia uses this daily to manage the sales pipeline
 PIPELINE STAGES (in order):
 new → contacted → estimate_sent → estimate_viewed → won
 Dead ends: lost, unresponsive, disqualified, duplicate
+Handled: a /book preferred-time request that closed itself when the customer booked online (not won, not lost)
 
 LEAD SOURCES: Google Ads, Google LSA, Organic, Referral, Door Knock campaigns, Nextdoor, Facebook, Walk-In, AI Agent, Voicemail, Email
 LEAD TYPES: inbound_call, inbound_sms, form_submission, chat_widget, walk_in, referral, ai_agent, voicemail, email_inquiry
@@ -2060,6 +2088,7 @@ LEADS CAPABILITIES:
 - Response time distribution and its correlation with conversion
 - Update single lead status (with confirmation)
 - Bulk update: move matching leads to a new status (dry-run first, then execute)
+- Fix a lead's contact details — first/last name, phone, email (update_lead_contact; shows before → after, then the confirmation card)
 
 RESPONSE STYLE:
 - Stale leads are URGENT — leads that haven't been contacted in 48+ hours are likely lost
@@ -2173,21 +2202,22 @@ RESPONSE STYLE:
 // requests never load the tools, so their prompts must not describe them.
 const INFRA_PROMPT = `INFRASTRUCTURE (read-only, except the owner-only confirmation-card actions listed below):
 The portal runs on Railway behind Cloudflare; errors report to Sentry; SMS/voice is Twilio; payments are Stripe; email is SendGrid; ads run on Google Ads; the four local listings are Google Business Profiles; site analytics is GA4; rank tracking is DataForSEO; code lives on GitHub.
-A handful of write actions exist now (owner ruling 2026-09-28) — resolve/ignore/assign a Sentry issue, purge the Cloudflare cache or retry a Pages build, redeploy/restart a Railway service, rerun failed GitHub checks, add a PR label, post "@codex review", submit a Search Console sitemap — but ONLY for the owner's own login, through the usual confirmation card; the write happens only when the operator confirms the card, and it acts on exactly the target the card named. Two more switch actions — set_railway_gate (set a known GATE_* variable to 'true' or 'false' on the portal's production service) and set_growthbook_feature_environment (enable or disable a GrowthBook feature in one environment — the environment switch, not the value it serves) — prepare a card for the owner's login too, but they are PREVIEW-ONLY for now: the card cannot yet be confirmed, so never say it will run on Confirm; say the preview is shown and applying it is not available yet. For a gate, Railway restarts the portal briefly when a variable changes. If a confirmed action reports the outside service's token needs write access, say so plainly. Never claim any of this for anyone else — point the operator to the relevant dashboard for everything else.
-- Railway: get_railway_status (per-service deploy status), get_railway_deployments, get_railway_logs (filter supports Railway syntax like "@level:error"), get_railway_variable_names (variable NAMES only; values are never available). redeploy_railway_service / restart_railway_service prepare a confirmation card (owner-only). set_railway_gate prepares a preview card setting one known GATE_* variable to the literal value 'true' or 'false' (owner-only, preview-only); only gates the portal already knows are accepted. The value is the raw variable value, not "on/off": some gates are inverted (a name ending in _OFF or _DISABLED — e.g. GATE_LATE_PAYMENT_CHECKER_OFF=true turns the checker OFF), so map what the operator wants to happen through the gate's meaning, and if that is unclear ask which value they want.
+A handful of write actions exist now (owner ruling 2026-09-28) — resolve/ignore/assign a Sentry issue, purge the Cloudflare cache or retry a Pages build, redeploy/restart a Railway service, rerun failed GitHub checks, add a PR label, post "@codex review", submit a Search Console sitemap — but ONLY for the owner's own login, through the usual confirmation card; the write happens only when the operator confirms the card, and it acts on exactly the target the card named. Two more switch actions — set_railway_gate (set a known GATE_* variable to 'true' or 'false' on the portal's production service) and set_growthbook_feature_environment (enable or disable a GrowthBook feature in one environment — the environment switch, not the value it serves) — prepare a confirmation card for the owner's login too; the change happens only when the operator confirms, and it refuses (nothing written) if the gate or flag changed after the card was shown. For a gate, Railway redeploys the portal with the new value, so it restarts briefly and the change takes effect once that deploy is live. If a confirmed action reports the outside service's token needs write access, say so plainly. Never claim any of this for anyone else — point the operator to the relevant dashboard for everything else.
+- Railway: get_railway_status (per-service deploy status), get_railway_deployments, get_railway_logs (filter supports Railway syntax like "@level:error"), get_railway_variable_names (variable NAMES only; values are never available). redeploy_railway_service / restart_railway_service prepare a confirmation card (owner-only). set_railway_gate prepares a preview card setting one known GATE_* variable to the literal value 'true' or 'false' (owner-only); only gates the portal already knows and has a description for are accepted — anything else is changed in the Railway dashboard. The value is the raw variable value, not "on/off": some gates are inverted (a name ending in _OFF or _DISABLED — e.g. GATE_LATE_PAYMENT_CHECKER_OFF=true turns the checker OFF), so map what the operator wants to happen through the gate's meaning, and if that is unclear ask which value they want.
 - Sentry: get_sentry_top_issues / get_sentry_new_issues / get_sentry_issue_detail — PREFER Sentry over Railway logs for application errors (logs rotate; Sentry keeps stack traces). resolve_sentry_issue / ignore_sentry_issue / assign_sentry_issue prepare a confirmation card (owner-only).
 - Cloudflare: get_cloudflare_zones (domain status), get_cloudflare_pages_builds (spoke-site builds), get_cloudflare_edge_errors (edge 5xx rate for a zone). purge_cloudflare_cache / retry_cloudflare_pages_build prepare a confirmation card (owner-only).
 - Twilio: get_twilio_alerts (carrier/webhook errors), get_twilio_failed_messages (failed/undelivered SMS — metadata only, never bodies).
 - Stripe: get_stripe_webhook_endpoints (subscriptions + status), get_stripe_webhook_failures (events the app may have missed), get_stripe_payment_intents (live payment attempts — the ONLY view of incomplete/abandoned drafts, which never reach the local database; requires_capture = card hold awaiting capture, not a draft). COMPLETED revenue questions use the revenue tools, not these.
 - GitHub: get_recent_merged_prs ("what shipped?"), get_commit_info (translate a Railway deploy SHA into a PR/commit). rerun_failed_github_checks / add_github_pr_label / request_codex_review prepare a confirmation card (owner-only); request_codex_review always posts the exact text "@codex review".
 - App stores: get_app_store_status (iOS version states — READY_FOR_SALE = live), get_play_store_status (Play track releases). Use during release windows.
-- GrowthBook: get_growthbook_experiments / get_growthbook_features — experiment + flag reads. set_growthbook_feature_environment prepares a card to enable or disable a feature in one environment (owner-only, preview-only). Enabled is NOT "serving true": an enabled feature serves its default value and rules, and a disabled environment makes callers fall back to their code default. Changing a flag's served value or rules happens in the GrowthBook UI.
+- GrowthBook: get_growthbook_experiments / get_growthbook_features — experiment + flag reads. set_growthbook_feature_environment prepares a confirmation card to enable or disable a feature in one environment (owner-only). Enabled is NOT "serving true": an enabled feature serves its default value and rules, and a disabled environment makes callers fall back to their code default. Changing a flag's served value or rules happens in the GrowthBook UI.
 - Google Ads: get_google_ads_serving_status (LIVE serving state + why a campaign is limited/not serving + daily budget), get_google_ads_disapprovals (policy-disapproved ads). Budget CHANGES go through /admin/ads only; spend/ROAS analysis uses the revenue tools.
 - Meta Ads: get_meta_ads_delivery_status (effective_status = what is ACTUALLY delivering), get_meta_ads_issues (WITH_ISSUES/disapproved ads). Same rules as Google Ads.
 - Truck (Bouncie): get_truck_status (live location/running/fuel/tracker freshness), get_truck_trips (a day's trips + mileage — the live view of the tax mileage ledger's source).
 - Apify: get_apify_status (monthly usage vs limit + recent scrape runs — the price-scan scraper dies silently at the cap).
 - Social: get_social_channel_status (per-channel flags + credential presence + dry-run/pause switches + recent posts). Token VALIDITY is token health; posting happens in the social studio.
 - Managed agents: get_managed_agent_runs (recent autonomous agent sessions — BI briefing, blog engine, backlink, lead response — with status and token usage). The "did last night's runs succeed?" check.
+- Open work: needs_me (everything open: unresolved admin alerts + the dashboard's standing counts, each with area, link, done-when and who may act; older unlabeled alerts come back separately as "unsorted" and are not counted as work). Read-only; never resolve a "person" item.
 - Internal crons: get_scheduled_job_health (the portal's OWN scheduled jobs — pricing sweeps, syncs, reminder crons — last run/success, failure streaks, stuck-mid-run). The internal counterpart to the external checks above.
 - SendGrid: get_email_suppressions (recent bounces/blocks/spam reports), check_email_suppression (is ONE address suppressed). A suppressed address silently swallows every send.
 - Google Business Profiles: get_gbp_status (connection + verification/suspension + latest posts per location). Reviews use the review tools.
@@ -2424,6 +2454,9 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   if (JOB_HEALTH_TOOL_NAMES.has(toolName)) {
     return executeJobHealthTool(toolName, input);
   }
+  if (NEEDS_ME_TOOL_NAMES.has(toolName)) {
+    return executeNeedsMeTool(toolName, input);
+  }
   if (CALL_RESEARCH_TOOL_NAMES.has(toolName)) {
     return executeCallResearchTool(toolName, input);
   }
@@ -2584,6 +2617,16 @@ async function runQuery(req, res, next) {
     // sees or can invoke one through initialTools/discover/validateInput
     // either, whatever GATE_IB_PLATFORM is set to.
     const actionScope = { role: req.techRole, context, fullAccess: ibFullAccess(req) };
+    // Owner-direct (owner ruling 2026-10-01, GATE_IB_OWNER_DIRECT): the owner
+    // login gets no target refusals, no card on internal edits and short
+    // replies. Read from the live request on every run; the isolated tech
+    // and agent_estimate rails keep their own contracts.
+    const ownerDirect = OwnerDirect.ownerDirectLive(req) && context !== 'tech' && context !== 'agent_estimate';
+    // Direct commits need the platform task: its request key dedupes a
+    // retried /query and its checkpoint carries the committed receipt, so a
+    // response failure after the commit cannot lead to a second execution
+    // (Codex r1 on #5563). Platform off = the owner still gets the card.
+    const ownerDirectCommits = ownerDirect && platformEnabled;
     let taskContext = null;
     if (platformEnabled) {
       const started = req.ibResumedTask ? { task: req.ibResumedTask, created: true } : await IbTasks.begin({ actorId: getAdminActorId(req), sessionId: req.body.session_id,
@@ -2613,6 +2656,10 @@ async function runQuery(req, res, next) {
           taskContext = { ...req.ibResumedTask.target, error: undefined, code: undefined, selectable: undefined, target: refreshed, targets: [refreshed], ambiguous: false };
         }
       }
+      // The flag comes from this request alone: a stored or resumed context
+      // never carries it in, and a non-owner run always has it cleared.
+      if (ownerDirect) taskContext = TaskContext.ownerDirectContext(taskContext);
+      else if (taskContext.ownerDirect) taskContext = { ...taskContext, ownerDirect: false };
       if (taskContext.error || taskContext.ambiguous) {
         // A customer choice is the only clarification the task card can
         // supply. A hard resolution error (stale or mismatched page record)
@@ -2684,9 +2731,13 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
 - Adding confirmed: true does nothing; it is ignored. Only the operator's Confirm click on the card executes the write.
 - NEVER claim the action is done. Say it is awaiting their confirmation on the card below your message.
 - The card shows the exact effect set the operator is approving; a different target, amount, recipient, or effect is a NEW proposal — never assume an earlier approval carries over.
-- Re-query current records when asked about a confirmed write. Never infer execution from earlier assistant prose.
-- EXCEPTION — the preview-only switch actions (set_railway_gate, set_growthbook_feature_environment): their card CANNOT be confirmed yet. Never say they will run on Confirm; say the preview is shown and applying it is not available yet.`;
+- Re-query current records when asked about a confirmed write. Never infer execution from earlier assistant prose.`;
     }
+    // Last, so every shared prefix above stays cacheable across logins. With
+    // the platform off nothing commits directly, so the owner block must
+    // stay card-aware (Codex r2 P1 on #5563).
+    if (ownerDirectCommits) systemPrompt += OwnerDirect.OWNER_DIRECT_PROMPT;
+    else if (ownerDirect) systemPrompt += OwnerDirect.OWNER_DIRECT_CARDED_PROMPT;
     // Live page data (current date, schedule stats, etc.) is injected on the
     // current user turn by buildUserMessageContent, NOT here — appending it to
     // the system prompt made the prefix unique per request and defeated
@@ -2756,6 +2807,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       }
     };
     const pendingProposals = []; // client-only payloads (carry the confirmation ids — never shown to the model)
+    const directActionIds = []; // owner-direct commits this turn: no card, but their receipts join the thread like a card's
+    let directOutcomeUncertain = false; // a direct commit whose outcome is unknown or whose receipt did not save
+    let directOutcomePartial = false; // a direct commit that landed with a failed follow-on step (partially_completed)
     let writeFrontierBlocked = false;
     // Gap reports (server/services/agent-gap-reports.js): what the bar could
     // not do this request, for the owner's weekly review. Platform mode gets
@@ -2842,13 +2896,19 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         let proposedCard = false; // a UI-gated write became a confirmation card
         const toolStartedAt = Date.now();
         let executionInput = toolUse.input;
+        // Owner-direct: a read keeps the task customer's scope unless the
+        // scoped preparation actually fell back to the raw call (Codex r6).
+        let readWidened = false;
         let validationFailure = platformEnabled ? ActionRegistry.validateInput(toolUse.name, toolUse.input, actionScope) : null;
         if (!validationFailure && platformEnabled && ActionRegistry.actions.get(toolUse.name)?.kind === 'read') {
           const readTarget = await TaskContext.prepareReadInput(toolUse.input, taskContext, {
             toolName: toolUse.name, schema: ActionRegistry.actions.get(toolUse.name).schema,
           });
           if (readTarget.error) validationFailure = readTarget;
-          else executionInput = readTarget.input;
+          else {
+            executionInput = readTarget.input;
+            readWidened = readTarget.widened === true;
+          }
         }
         if (validationFailure) {
           result = validationFailure;
@@ -2899,7 +2959,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
           // Issue #1568: gated writes are proposed, never executed, from the
           // model loop — unconditionally (no mode switch exists). The
           // confirmation id goes to the client only.
-          if (platformEnabled && writeFrontierBlocked) {
+          // A card closes the frontier under the platform only (set below);
+          // an uncertain owner-direct commit closes it on either path.
+          if (writeFrontierBlocked) {
             result = { error: 'The preceding write needs a successful recorded outcome before another write can be prepared.', code: 'dependency_unresolved' };
             failed = true;
             errorMessage = result.error;
@@ -2921,6 +2983,29 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
             if (proposed.failed) {
               failed = true;
               errorMessage = result.error || 'proposal failed';
+            } else if (proposed.clientPayload && ownerDirectCommits && OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input, proposed.modelResult)) {
+              // Owner-direct internal edit: no card. The pending action just
+              // minted is committed now through the same path a Confirm
+              // click takes, so its pins, receipt and audit row are the same.
+              // An uncertain outcome closes the write frontier for the rest
+              // of this response (later writes in the same model turn must
+              // not run before the model has seen it) and keeps the task
+              // open as outcome_unknown; reads stay open for a re-check.
+              const direct = await OwnerDirect.runDirectCommit(proposed.clientPayload, {
+                commit: (id, contractHash) => commitPendingAction(req, { id, contractHash }),
+                cancel: id => PendingActions.cancelPendingAction(id, getAdminActorId(req)),
+              });
+              result = direct.result;
+              if (direct.actionId) directActionIds.push(direct.actionId);
+              if (direct.uncertain) writeFrontierBlocked = directOutcomeUncertain = true;
+              // A partial outcome closes the frontier too (Codex r5): the task
+              // store treats the partial receipt as unresolved, so a later
+              // write in the same turn must not build on it.
+              if (direct.partial) writeFrontierBlocked = directOutcomePartial = true;
+              if (direct.failed) {
+                failed = true;
+                errorMessage = result.error;
+              }
             } else if (proposed.clientPayload) {
               if (!pendingProposals.some(p => p.id === proposed.clientPayload.id)) pendingProposals.push(proposed.clientPayload);
               proposedCard = true;
@@ -2942,7 +3027,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
             // Recall is actor-bound: the owner id travels from the
             // authenticated request, never from model-supplied input.
             result = await executeToolByName(toolUse.name, executionInput, techContext, {
-              actorId: getAdminActorId(req), readCustomerIds: taskContext?.targets?.map(target => target.customer_id) || [],
+              // A read that fits the task keeps the task customer's scope; only
+              // an owner-direct fallback read is unscoped.
+              actorId: getAdminActorId(req), readCustomerIds: readWidened ? [] : taskContext?.targets?.map(target => target.customer_id) || [],
               isAdmin: req.techRole === 'admin', technicianId: req.technicianId,
             });
             if (isToolFailure(result)) {
@@ -3075,6 +3162,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         prompt: redactPii ? redactNote : prompt,
         response: redactPii ? redactNote : finalResponse.substring(0, 5000),
         tool_calls: JSON.stringify(persistedToolCalls),
+        // Who asked. A staff id only (never an email); null when the request
+        // carries no staff identity, so a tally never groups under a made-up id.
+        operator_id: String(req.technicianId || req.technician?.id || '') || null,
         created_at: new Date(),
       });
     } catch {
@@ -3142,9 +3232,11 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         persistedThreadSeq = appended?.lastSeq ?? null;
         // Link this exchange's proposals to the thread so recall can join a
         // conversation to its receipts (actor-bound inside the service).
-        if (persistedThreadId && Number.isInteger(persistedThreadSeq) && pendingProposals.length) {
+        // Direct (owner-mode) commits join too: they had no card, but their
+        // execution receipt must be recallable from the conversation.
+        if (persistedThreadId && Number.isInteger(persistedThreadSeq) && (pendingProposals.length || directActionIds.length)) {
           await PendingActions.attachThread(
-            pendingProposals.map(p => p.id), persistedThreadId, persistedThreadSeq, getAdminActorId(req),
+            [...pendingProposals.map(p => p.id), ...directActionIds], persistedThreadId, persistedThreadSeq, getAdminActorId(req),
           );
         }
       } catch (err) {
@@ -3194,8 +3286,17 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       // or saved candidates). A child-record clarification (appointment,
       // email, call, lead) on an already-resolved page target has no card
       // path; it is answered in the response text and the task stays responded.
-      ...(activeTask ? { taskId: activeTask.id, taskState: pendingProposals.length ? 'awaiting_approval'
-        : unresolvedClarifications.size && (!taskContext.target || taskContext.candidates?.length) ? 'needs_information' : 'responded',
+      // A direct commit with an unknown outcome (or an unsaved receipt) keeps
+      // the task open as outcome_unknown — never 'responded', which the task
+      // store treats as closed and drops from the open list (pre-push P1 on
+      // #5563); its saved receipt stays the authority on recovery.
+      // A partial direct outcome is checkpointed as awaiting_approval, the raw
+      // state a carded partial keeps too: the snapshot derives the exposed
+      // partially_completed state from the receipts and the task stays open
+      // and actionable (Codex r4 P2).
+      ...(activeTask ? { taskId: activeTask.id, taskState: pendingProposals.length || directOutcomePartial ? 'awaiting_approval'
+        : directOutcomeUncertain ? 'outcome_unknown'
+          : unresolvedClarifications.size && (!taskContext.target || taskContext.candidates?.length) ? 'needs_information' : 'responded',
         taskTarget: taskContext.target, candidates: taskContext.candidates } : {}),
     };
     if (activeTask) {
@@ -3412,22 +3513,27 @@ router.post('/execute', async (req, res, next) => {
 // pending-action id is the confirmation credential: it travels client →
 // server only, and only a real Confirm click produces it.
 
-router.post('/confirm-action', async (req, res, next) => {
+// The one commit path for a pending action: the operator's Confirm click
+// (/confirm-action below) and the owner-direct internal edit in the /query
+// loop (owner ruling 2026-10-01, services/intelligence-bar/owner-direct.js)
+// both run exactly this — the same claim, role guards, proposal-time pin
+// re-checks and receipt. Returns { status, body, claimed } and never touches
+// the response; `claimed` says whether the approval was consumed.
+async function commitPendingAction(req, { id, contractHash }) {
   let claimedAction = null;
+  const reply = (status, body) => ({ status, body, claimed: claimedAction !== null });
   try {
-    const id = String(req.body?.pending_action_id || '').trim();
-    if (!id) return res.status(400).json({ error: 'pending_action_id is required' });
+    if (!id) return reply(400, { error: 'pending_action_id is required' });
 
     // Emergency write freeze covers commits too — a pending action proposed
     // before the freeze must not slip through after it.
     if (ibWritesDisabled()) {
-      return res.status(409).json({ error: IB_WRITES_DISABLED_MESSAGE });
+      return reply(409, { error: IB_WRITES_DISABLED_MESSAGE });
     }
 
     // Exact-effect confirm (W0B): the card echoes the contract hash it
     // displayed; the claim refuses any other, so the operator can only ever
     // approve exactly the effect set they saw.
-    const contractHash = req.body?.contract_hash ? String(req.body.contract_hash).trim() : null;
     const claim = await PendingActions.claimForConfirm(id, getAdminActorId(req), { contractHash });
     if (claim.error) {
       const status = claim.error === 'not_found' ? 404
@@ -3436,7 +3542,7 @@ router.post('/confirm-action', async (req, res, next) => {
       const message = claim.error === 'contract_mismatch'
         ? 'The confirmation card no longer matches the proposed action. Ask again to get a fresh card.'
         : `Pending action ${claim.error.replace(/_/g, ' ')}`;
-      return res.status(status).json({ error: message });
+      return reply(status, { error: message });
     }
     const action = claim.action;
     claimedAction = action;
@@ -3455,26 +3561,27 @@ router.post('/confirm-action', async (req, res, next) => {
       && (!ibCancelAppointmentLive() || !action.params?._frozen_cancellation_impact)) {
       const result = { error: CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE };
       await PendingActions.recordResult(action.id, result);
-      return res.status(409).json(result);
+      return reply(409, result);
     }
 
-    // Preview-only switches (Codex r1 on #5489): their card shows no Confirm
-    // and their executors cannot commit yet, so a forged or stale confirm is
-    // refused here, before any dispatch.
-    if (PREVIEW_ONLY_WRITE_TOOL_NAMES.has(action.tool_name)) {
-      const result = { error: 'This is a preview only — applying it from the bar is not available yet.', code: 'preview_only' };
+    // A card minted while its tool was still preview-only (#5489, before this
+    // commit path deployed) carries contract.preview_only — it was approved
+    // as "cannot be applied", so it never executes (Codex r5 on #5514). Such
+    // rows expire within PendingActions.TTL_MINUTES of the deploy.
+    if (action.contract?.preview_only === true) {
+      const result = { error: 'This card was created as a preview only and cannot be applied — ask again for a fresh confirmation card.', code: 'preview_only' };
       await PendingActions.recordResult(action.id, result);
-      return res.status(409).json(result);
+      return reply(409, result);
     }
 
     if (action.tool_name === AGENT_ESTIMATE_WRITE_TOOL && !(await agentEstimateEnabled(req))) {
       await PendingActions.recordResult(action.id, { error: 'Agent Estimate is not enabled' });
-      return res.status(404).json({ error: 'Agent Estimate is not enabled' });
+      return reply(404, { error: 'Agent Estimate is not enabled' });
     }
 
     if (ADMIN_ONLY_TOOL_NAMES.has(action.tool_name) && req.techRole !== 'admin') {
       await PendingActions.recordResult(action.id, { success: false, blocked: true, code: 'permission_denied', error: 'Admin access required for this action' });
-      return res.status(403).json({ error: 'Admin access required for this action' });
+      return reply(403, { error: 'Admin access required for this action' });
     }
 
     // Outside-service writes (owner ruling 2026-09-28) are full-access only.
@@ -3484,7 +3591,7 @@ router.post('/confirm-action', async (req, res, next) => {
     // only thing stopping a commit.
     if (FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(action.tool_name) && !ibFullAccess(req)) {
       await PendingActions.recordResult(action.id, { success: false, blocked: true, code: 'permission_denied', error: 'This action is limited to the owner account.' });
-      return res.status(403).json({ error: 'This action is limited to the owner account.' });
+      return reply(403, { error: 'This action is limited to the owner account.' });
     }
 
     // Default-deny catch-all: a technician may confirm/execute only the tech
@@ -3492,7 +3599,7 @@ router.post('/confirm-action', async (req, res, next) => {
     // admin-only guard so its message wins for the tools it covers.
     if (!isToolAllowedForRole(action.tool_name, req.techRole)) {
       await PendingActions.recordResult(action.id, { success: false, blocked: true, code: 'permission_denied', error: 'This action is not available to your role' });
-      return res.status(403).json({ error: 'This action is not available to your role' });
+      return reply(403, { error: 'This action is not available to your role' });
     }
 
     const execParams = { ...action.params };
@@ -3509,7 +3616,7 @@ router.post('/confirm-action', async (req, res, next) => {
       const targetFailure = await TaskContext.validateRecordTarget(execParams, execParams._ib_task_context, { toolName: action.tool_name });
       if (targetFailure) {
         await PendingActions.recordResult(action.id, targetFailure);
-        return res.status(409).json(targetFailure);
+        return reply(409, targetFailure);
       }
       delete execParams._ib_task_context;
     }
@@ -3520,7 +3627,7 @@ router.post('/confirm-action', async (req, res, next) => {
         || (approved.resourceName && approved.resourceName !== current._pin.resourceName)) {
         const result = { error: 'The review identity or content changed. Review a fresh confirmation card.', preview_changed: true };
         await PendingActions.recordResult(action.id, result);
-        return res.status(409).json(result);
+        return reply(409, result);
       }
     }
     let approvedAgentEstimateFingerprint = null;
@@ -3541,7 +3648,7 @@ router.post('/confirm-action', async (req, res, next) => {
           preview_changed: true,
         };
         await PendingActions.recordResult(action.id, result);
-        return res.status(409).json(result);
+        return reply(409, result);
       }
     }
     // W0B proposal-time pins for legacy-bare writes: re-resolve exactly as
@@ -3630,7 +3737,7 @@ router.post('/confirm-action', async (req, res, next) => {
           preview_changed: true,
         };
         await PendingActions.recordResult(action.id, result);
-        return res.status(409).json(result);
+        return reply(409, result);
       }
     }
 
@@ -3652,7 +3759,7 @@ router.post('/confirm-action', async (req, res, next) => {
             preview_changed: true,
           };
           await PendingActions.recordResult(action.id, result);
-          return res.status(409).json(result);
+          return reply(409, result);
         }
         if (action.tool_name === 'switch_appointment_property') execParams._verified_address_fingerprint = approvedTwoStep;
         if (['add_customer_property', 'update_customer_property', 'set_primary_property'].includes(action.tool_name)) {
@@ -3750,10 +3857,9 @@ router.post('/confirm-action', async (req, res, next) => {
     const success = ['completed', 'partially_completed', 'provider_accepted'].includes(outcome);
     logger.info(`[intelligence-bar:pending] Confirmed action ${action.id} (${action.tool_name})`, { success, outcome });
 
-    res.status(result?.preview_changed ? 409 : 200)
-      .json({ success, outcome, tool: action.tool_name, result,
-        ...(receiptSaved === false ? { receiptPersisted: false, warning: 'The backend returned this outcome, but its recovery record could not be saved. Do not repeat the action.' } : {}),
-      });
+    return reply(result?.preview_changed ? 409 : 200, { success, outcome, tool: action.tool_name, result,
+      ...(receiptSaved === false ? { receiptPersisted: false, warning: 'The backend returned this outcome, but its recovery record could not be saved. Do not repeat the action.' } : {}),
+    });
   } catch (err) {
     // Once an approval was consumed a thrown error may follow a committed
     // DB/provider effect. Preserve uncertainty instead of inviting a retry.
@@ -3764,11 +3870,23 @@ router.post('/confirm-action', async (req, res, next) => {
       // stopped. Never replace that evidence, including if recovery reads fail.
       const saved = await PendingActions.getActionReceipt(claimedAction.id, getAdminActorId(req)).catch(() => null);
       if (saved?.result && saved.outcome !== 'outcome_unknown') {
-        return res.status(200).json({ success: saved.success, outcome: saved.outcome, tool: claimedAction.tool_name, result: saved.result });
+        return reply(200, { success: saved.success, outcome: saved.outcome, tool: claimedAction.tool_name, result: saved.result });
       }
       await PendingActions.recordResult(claimedAction.id, result, { onlyIfEmpty: true });
-      return res.status(200).json({ success: false, outcome: 'outcome_unknown', tool: claimedAction.tool_name, result });
+      return reply(200, { success: false, outcome: 'outcome_unknown', tool: claimedAction.tool_name, result });
     }
+    throw err;
+  }
+}
+
+router.post('/confirm-action', async (req, res, next) => {
+  try {
+    const committed = await commitPendingAction(req, {
+      id: String(req.body?.pending_action_id || '').trim(),
+      contractHash: req.body?.contract_hash ? String(req.body.contract_hash).trim() : null,
+    });
+    res.status(committed.status).json(committed.body);
+  } catch (err) {
     logger.error(`[intelligence-bar] confirm-action failed (code=${err.code || 'unknown'})`);
     next(err);
   }

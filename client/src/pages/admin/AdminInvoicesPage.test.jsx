@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   ATTACHMENT_HELP_TEXT,
   ATTACHMENT_VISIBILITY_TEXT,
@@ -6,6 +6,10 @@ import {
   batchSendToast,
   buildInvoiceListParams,
   canAddInvoiceAttachments,
+  combinedReminderControls,
+  combinedReminderSummary,
+  followupActionErrorMessage,
+  followupSendNowPlan,
   invoiceAttachmentLimitLabel,
   invoiceCreatedSendFailedToast,
   invoiceCreatedSendToast,
@@ -403,5 +407,152 @@ describe("resendConflictMessage", () => {
     );
     expect(resendConflictMessage({ code: "send_claim_lost" })).toBeNull();
     expect(resendConflictMessage(new Error("boom"))).toBeNull();
+  });
+});
+
+describe("FollowupPanel send-now on combined reminders (Codex #5503 r2 P1)", () => {
+  const customerSchedule = {
+    id: "5b7a2c1e-0000-4000-8000-000000000001",
+    status: "active",
+    stepIndex: 4,
+    stepLabel: "60-day reminder",
+    invoiceCount: 3,
+    nextTouchAt: null,
+  };
+
+  it("an invoice on its own ladder keeps today's confirm and posts no body", () => {
+    expect(followupSendNowPlan({ sequence: { step_index: 2 }, customerSchedule: null })).toEqual({
+      confirmText: "Send the next follow-up SMS right now?",
+      body: undefined,
+    });
+  });
+
+  it("a customer on combined reminders: the confirm names the combined step and the invoice count, and the request confirms that exact step", () => {
+    const request = followupSendNowPlan({ sequence: { step_index: 2 }, customerSchedule });
+    expect(request.confirmText).toBe(
+      "This customer is on combined reminders. Send the 60-day reminder now to all 3 invoices on their balance, not just this one?",
+    );
+    expect(request.body).toEqual({ combined: true, scheduleId: customerSchedule.id, stepIndex: 4 });
+    // never the invoice's own step
+    expect(request.confirmText).not.toMatch(/17-day/);
+  });
+
+  it("one invoice left, or no step label: still plain English", () => {
+    expect(followupSendNowPlan({ customerSchedule: { ...customerSchedule, invoiceCount: 1, stepLabel: null } }).confirmText).toBe(
+      "This customer is on combined reminders. Send the current combined reminder now to the 1 invoice on their balance, not just this one?",
+    );
+  });
+
+  it("the panel line says the invoice is on combined reminders, which step is next and how many invoices", () => {
+    expect(combinedReminderSummary(null)).toBeNull();
+    expect(combinedReminderSummary(customerSchedule)).toBe(
+      "On combined reminders with 3 invoices for this customer. Next: the 60-day reminder.",
+    );
+    expect(combinedReminderSummary({ ...customerSchedule, status: "paused" })).toBe(
+      "On combined reminders with 3 invoices for this customer. Combined reminders are paused.",
+    );
+    const dated = combinedReminderSummary({ ...customerSchedule, nextTouchAt: "2026-10-05T14:00:00Z" });
+    expect(dated).toMatch(/^On combined reminders with 3 invoices for this customer\. Next: the 60-day reminder on .+ ET\.$/);
+    expect(combinedReminderSummary({ ...customerSchedule, invoiceCount: 1 })).toMatch(/with 1 invoice for/);
+  });
+
+  it("combined controls: pause while reminders run, resume while paused, never a release", () => {
+    const live = { ...customerSchedule, customerId: "cust-1", controllable: true };
+    for (const status of ["active", "held", "autopay_hold"]) {
+      const controls = combinedReminderControls({ ...live, status });
+      expect(controls.map((c) => c.control)).toEqual(["pause"]);
+      expect(controls[0].label).toBe("Pause combined");
+      expect(controls[0].promptText).toMatch(/^Why pause combined reminders for this customer\?/);
+    }
+    expect(combinedReminderControls({ ...live, status: "paused" }).map((c) => c.label)).toEqual(["Resume combined"]);
+    // a released customer is combined again by the next run, so the panel never offers it
+    for (const status of ["active", "held", "autopay_hold", "paused"]) {
+      expect(combinedReminderControls({ ...live, status }).map((c) => c.control)).not.toContain("release");
+    }
+  });
+
+  // Codex #5593 r1 P1: a schedule can stay open after the gate, a prerequisite or the allowlist turns off.
+  it("combined controls: none unless the server says the schedule is controllable, and none without the customer id", () => {
+    expect(combinedReminderControls(null)).toEqual([]);
+    // an older server response: no customer id, no controllable flag
+    expect(combinedReminderControls(customerSchedule)).toEqual([]);
+    expect(combinedReminderControls({ ...customerSchedule, customerId: "cust-1" })).toEqual([]);
+    expect(combinedReminderControls({ ...customerSchedule, customerId: "cust-1", controllable: false })).toEqual([]);
+    expect(combinedReminderControls({ ...customerSchedule, customerId: "cust-1", controllable: false, status: "paused" })).toEqual([]);
+    expect(combinedReminderControls({ ...customerSchedule, controllable: true })).toEqual([]);
+  });
+
+  // Codex #5593 r1 P2: Resume clears the stored reason, so the panel says why before anyone presses it.
+  it("a paused schedule says why, on the panel line and in the Resume confirm: the office's words or the system's reason", () => {
+    const paused = { ...customerSchedule, customerId: "cust-1", controllable: true, status: "paused" };
+    const byStaff = { ...paused, pausedBy: "staff", pausedReason: "customer will pay Friday" };
+    expect(combinedReminderSummary(byStaff)).toBe(
+      'On combined reminders with 3 invoices for this customer. Combined reminders are paused (by the office: "customer will pay Friday").',
+    );
+    expect(combinedReminderControls(byStaff)[0].confirmText).toBe(
+      'Resume combined reminders for this customer? They were paused by the office: "customer will pay Friday".',
+    );
+    const bySystem = { ...paused, pausedBy: "system", pausedReason: "there is no way to reach them" };
+    expect(combinedReminderSummary(bySystem)).toBe(
+      "On combined reminders with 3 invoices for this customer. Combined reminders are paused (automatically: there is no way to reach them).",
+    );
+    expect(combinedReminderControls(bySystem)[0].confirmText).toBe(
+      "Resume combined reminders for this customer? They were paused automatically: there is no way to reach them.",
+    );
+    // no reason from the server: still a confirm, no made-up reason
+    expect(combinedReminderControls({ ...paused, pausedBy: "staff", pausedReason: null })[0].confirmText).toBe(
+      "Resume combined reminders for this customer?",
+    );
+    expect(combinedReminderSummary({ ...paused, pausedReason: null })).toBe(
+      "On combined reminders with 3 invoices for this customer. Combined reminders are paused.",
+    );
+  });
+
+  // Codex local review P2: the server omits the count (null) when it cannot read the balance in time; the
+  // copy then names no number rather than one that may be wrong.
+  it("no count from the server: the confirm and the panel line say \"all invoices\", never a number", () => {
+    const noCount = { ...customerSchedule, invoiceCount: null };
+    expect(followupSendNowPlan({ customerSchedule: noCount }).confirmText).toBe(
+      "This customer is on combined reminders. Send the 60-day reminder now to all invoices on their balance, not just this one?",
+    );
+    expect(followupSendNowPlan({ customerSchedule: noCount }).body).toEqual({ combined: true, scheduleId: customerSchedule.id, stepIndex: 4 });
+    expect(combinedReminderSummary(noCount)).toBe("On combined reminders for this customer. Next: the 60-day reminder.");
+    expect(combinedReminderSummary({ ...noCount, invoiceCount: undefined })).not.toMatch(/undefined|null|NaN/);
+    expect(followupSendNowPlan({ customerSchedule: { ...noCount, invoiceCount: 0 } }).confirmText).toMatch(/to all invoices on/);
+  });
+
+  // Codex #5503 r3 P1: the next combined touch was formatted in the BROWSER's zone; the portal is Eastern-only.
+  it("the next combined touch is shown in Eastern time, whatever the browser's zone", () => {
+    // A browser in Pacific time: any toLocaleString that does not name its zone gets the browser's.
+    const original = Date.prototype.toLocaleString;
+    const spy = vi.spyOn(Date.prototype, "toLocaleString").mockImplementation(function pacific(locales, options) {
+      return original.call(this, locales, { timeZone: "America/Los_Angeles", ...(options || {}) });
+    });
+    try {
+      // 14:00Z on 2026-10-05 is 10:00 AM EDT
+      expect(combinedReminderSummary({ ...customerSchedule, nextTouchAt: "2026-10-05T14:00:00Z" })).toBe(
+        "On combined reminders with 3 invoices for this customer. Next: the 60-day reminder on 10/5/2026, 10:00:00 AM ET.",
+      );
+      // 02:30Z on 2026-12-01 is still Nov 30 in Eastern (EST, UTC-5)
+      expect(combinedReminderSummary({ ...customerSchedule, nextTouchAt: "2026-12-01T02:30:00Z" })).toMatch(
+        /on 11\/30\/2026, 9:30:00 PM ET\.$/,
+      );
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("a refused action shows the server's own words, else the generic toast", () => {
+    const refused = Object.assign(new Error("This customer is on combined reminders. Reload to see the combined step before sending."), {
+      status: 409,
+      code: "COMBINED_CONFIRM_REQUIRED",
+      serverError: "This customer is on combined reminders. Reload to see the combined step before sending.",
+    });
+    expect(followupActionErrorMessage(refused)).toBe(
+      "This customer is on combined reminders. Reload to see the combined step before sending.",
+    );
+    expect(followupActionErrorMessage(Object.assign(new Error("HTTP 502"), { status: 502 }))).toBe("Action failed");
+    expect(followupActionErrorMessage(new TypeError("Failed to fetch"))).toBe("Action failed");
+    expect(followupActionErrorMessage(undefined)).toBe("Action failed");
   });
 });

@@ -3956,32 +3956,100 @@ function typedBodyContradictions(projectType, values = {}, score = null, body = 
   return found;
 }
 
-// True when the frozen snapshots in a parsed service_data ACCEPT the
-// reviewed body for customer surfaces (codex r65 #3420): mirrors
-// report-data's governing-snapshot rule so voice consumers refuse exactly
-// what the web report refuses. Customer viewers see auto_send companions
-// only; a zero-score snapshot's reconcile flag never means acceptance.
-// No governing snapshot (untyped visit) accepts by default — the
-// request-context rejection marker covers that path separately.
-function typedStoryAcceptsBody(serviceData = {}) {
-  const sd = serviceData && typeof serviceData === 'object' ? serviceData : {};
-  const typedSnapshot = sd.typedReportSnapshot && typeof sd.typedReportSnapshot === 'object'
-    && sd.typedReportSnapshot.type ? sd.typedReportSnapshot : null;
-  const companions = Array.isArray(sd.companionReportSnapshots) ? sd.companionReportSnapshots : [];
+function frozenTypedSnapshot(serviceData) {
+  const snap = serviceData?.typedReportSnapshot;
+  return snap && typeof snap === 'object' && snap.type ? snap : null;
+}
+
+function frozenCompanionSnapshots(serviceData) {
+  return Array.isArray(serviceData?.companionReportSnapshots)
+    ? serviceData.companionReportSnapshots.filter((snap) => snap && typeof snap === 'object' && snap.type)
+    : [];
+}
+
+// The governing typed story's verdict on the body. When a typed story
+// GOVERNS the visit (the primary snapshot, or on companion-only profiles
+// any customer-visible companion snapshot), the body may stand only if that
+// story ACCEPTED it (bodySource stamped): zero-state branches refuse the
+// drafted body for fixed wording, and the summary must not resurrect what
+// Today's Result refused (codex r26 on #3420). CUSTOMER-facing companions
+// only, for staff too (codex r78): completion never offers the body to an
+// internal_only companion, so the decision matches what the customer gets.
+// A frozen reconcile confirmation is a PERSON accepting the body over the
+// matcher, EXCEPT on zero-state snapshots: their stories refuse the body for
+// fixed wording regardless (codex r42), and a cleared non-gauge
+// severity/activity select is a zero state too (codex r80/r81). No
+// governing snapshot (untyped visit) accepts.
+function governingStoryAcceptsBody(typedSnapshot, companionSnapshots = []) {
   const governing = [
     typedSnapshot,
-    ...(typedSnapshot ? [] : companions.filter((snap) => snap?.delivery === 'auto_send')),
+    ...(typedSnapshot ? [] : companionSnapshots.filter((snap) => snap?.delivery === 'auto_send')),
   ].filter((snap) => snap?.todaysResult);
   if (!governing.length) return true;
   return governing.some((snap) => snap.todaysResult?.bodySource === 'technician_report'
     || (snap.todaysResult?.reconcileConfirmed === true
       && snap.activity?.score !== 0
-      // A cleared non-gauge severity/activity select is a zero state too
-      // (codex r80/r81) — mirror the web report's exclusion so voice
-      // consumers refuse exactly what report-data refuses.
       && !['None observed', 'No activity'].includes(
         String(snap.values?.severity || snap.values?.activity_level || ''),
       )));
+}
+
+// True when the frozen snapshots in a parsed service_data ACCEPT the
+// reviewed body for customer surfaces (codex r65 #3420).
+function typedStoryAcceptsBody(serviceData = {}) {
+  const sd = serviceData && typeof serviceData === 'object' ? serviceData : {};
+  return governingStoryAcceptsBody(frozenTypedSnapshot(sd), frozenCompanionSnapshots(sd));
+}
+
+// The rodent trapping screens. A viewer-visible trapping snapshot declaring
+// an initial setup screens setup claims out of the body: the snapshot that
+// accepted the body can be another findings type entirely (a non-trapping
+// primary with a trapping COMPANION), so its acceptance never ran the setup
+// guard, and a body generated before the companion's selector changed can
+// still say the traps were checked or nothing was caught (codex P1 r18).
+// The COUNT screen runs from the same viewer-visible trapping snapshot
+// regardless of stage (pre-push P1 on 256c1f9): a companion whose
+// traps_checked or captures was corrected after the body was generated
+// would otherwise publish the stale number. Unverifiable values screen
+// nothing (countContradictions' own rules). A confirmed reconciliation
+// prompt frozen on the primary, or on the trapping companion of a
+// companion-only completion, is a PERSON overriding the matcher and is
+// honoured. Visibility follows the viewer: customers see auto_send
+// companions only; staff see every section (codex round 12).
+function trapScreenAcceptsBody({ typedSnapshot, companionSnapshots = [], staffViewer = false, body }) {
+  if (!body) return true;
+  const visible = [
+    typedSnapshot,
+    ...companionSnapshots.filter((snap) => staffViewer || snap?.delivery === 'auto_send'),
+  ];
+  const visibleTrapSnapshot = visible.find((snap) => snap?.type === 'rodent_trapping') || null;
+  if (typedSnapshot?.todaysResult?.reconcileConfirmed === true
+    || visibleTrapSnapshot?.todaysResult?.reconcileConfirmed === true) return true;
+  const setupSnapshot = visible.find((snap) => isInitialRodentTrapSetup(snap?.type, snap?.visitSequence, snap?.values)) || null;
+  return (!setupSnapshot || setupContradictions(body).length === 0)
+    && (!visibleTrapSnapshot || countContradictions(body, {
+      traps_checked: visibleTrapSnapshot.values?.traps_checked,
+      captures: visibleTrapSnapshot.values?.captures,
+    }).length === 0);
+}
+
+// THE rule for whether the reviewed technician report body may stand as the
+// customer's account of the visit: the web report's Visit Summary
+// (report-data.js) and every other customer render of the note
+// (context-aggregator.js customerSafeVisitNotes). A completion-time
+// request-context rejection frozen into service_data refuses it (codex
+// r58); so do the governing typed story and the trapping screens above.
+// report-data passes the snapshots it already normalised (its dark
+// four-section transform); everyone else reads them off service_data.
+function technicianReportDrivesSummary({
+  serviceData = {}, body, staffViewer = false, typedSnapshot, companionSnapshots,
+} = {}) {
+  const sd = serviceData && typeof serviceData === 'object' ? serviceData : {};
+  if (!body || sd.technicianReportBodyRejected) return false;
+  const typed = typedSnapshot === undefined ? frozenTypedSnapshot(sd) : typedSnapshot;
+  const companions = companionSnapshots === undefined ? frozenCompanionSnapshots(sd) : companionSnapshots;
+  return governingStoryAcceptsBody(typed, companions)
+    && trapScreenAcceptsBody({ typedSnapshot: typed, companionSnapshots: companions, staffViewer, body });
 }
 
 function buildTypedReportSnapshot({
@@ -4161,6 +4229,9 @@ function findingsSchemaForType(projectType, { serviceKey = null, companion = fal
           ...(COMPANION_EDITABLE_FINDINGS_FIELDS[projectType] || []),
         ].includes(f.key)),
         pesticideOnly: !!f.pesticideOnly,
+        // The state's notice questions: always a tap, never filled from the
+        // technician's notes (typed voice fill, visit-typed-facts.js).
+        tapOnly: !!f.tapOnly,
       })),
     photoCategories: config.photoCategories || [],
     requiredFields: requiredFindingsFieldsFor(projectType, { companion }),
@@ -4295,6 +4366,7 @@ module.exports = {
   buildTypedReportSnapshot,
   typedBodyContradictions,
   typedStoryAcceptsBody,
+  technicianReportDrivesSummary,
   isInitialRodentTrapSetup,
   setupContradictions,
   countContradictions,

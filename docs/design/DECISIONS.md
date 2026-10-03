@@ -2729,6 +2729,75 @@ referee's own quality verdict joins `photoReadFor` and an unusable referee
 read merges nothing, and admin-only `internal.referee` diagnostics. Full
 detail: `docs/photo-id/plant-engine.md`'s "Referee" section.
 
+## 2026-09-29 — Fast Complete customer text: one fixed template, server-built (dark)
+
+Fast Complete (`FastCompleteSheet.jsx`, pest re-service, `GATE_RESERVICE_FAST_COMPLETE`)
+pinned `sendCompletionSms`, `requestReview` and `includePayLink` to `false`, so a
+re-service closed through it sent the customer nothing. This is PR D of the
+Fast Complete scope (`~/fast-complete-scope-20260926.md`), building the adopted
+decision 5: the customer text is one fixed template, never AI, never signed.
+
+New dark gate `GATE_FAST_COMPLETE_RECAP` (registry key `fastCompleteRecap`, exact
+`true`, read at load). It rides the schedule payload per service as
+`fastCompleteRecapEnabled`, like `reserviceFastCompleteEnabled`, and reaches the
+sheet as `service.recapEnabled`. Kill switch: unset the variable.
+
+The sheet, with the gate on, posts `sendCompletionSms: true`,
+`customerRecapMode: 'reservice_fixed'`, `requestReview: false` and
+`includePayLink: false` (the scope says leave the review ask off on
+re-services), and no `customerRecap`. No customer wording lives on the client.
+`completeScheduledService` honors the mode only while both dark gates are on
+server-side and the live completion profile is `pest_re_service`. A request that
+is not honored sends no completion text at all, never the templated one, so a
+stale sheet cannot cause a second kind of text.
+
+The one text, built in `services/reservice-fixed-recap.js` from the saved
+facts and sent through the existing send path (consent, STOP, opt-out and phone
+checks unchanged; message type stays the completion family's, template key
+`reservice_fixed_recap`):
+
+> Your re-service at 1234 Oak Bend Dr is done. We treated inside and outside for
+> ants. Keep kids and pets off treated areas until dry; your technician confirms the timing. Details: <report link>
+
+- Address: the visit's stamped street, else the customer's.
+- Where: from `areas_serviced` (inside, outside, "inside and outside", the
+  garage, joined naturally). Pests: the product rows' saved targets, deduplicated
+  and lowercased; a name that is too long, has symbols or trips the banned
+  customer-copy screen is dropped.
+- "Keep kids and pets off treated areas until dry; your technician confirms the
+  timing." (the AGENTS.md compliance idiom) only when a saved product row went
+  down wet: spray-class by the report module's own classifier
+  (`isSprayApplicationMethod`, so soil drench, fog and pin stream count) and not
+  a dry granular broadcast. Bait, station and trunk-injection rows leave it out.
+- The street comes from the completion's frozen `reportIdentitySnapshot` (the
+  same source the linked report uses), falling back to the current rows only
+  when the record has no snapshot. The stored and displayed body is the
+  provider-normalized one (https scheme stripped, GSM punctuation), and
+  `customerText` carries the recorded channel, so an app push reads "Sent to the
+  customer's app" rather than "Text sent".
+- A clause whose fact is missing is dropped whole: no pests gives "We treated
+  inside."; no areas and no pests gives "Your re-service at X is done. Details:
+  <link>" plus the safety line where it applies.
+- It replaces the templated `service_complete` text, the AI recap and the
+  review suffix on this path: exactly one text. It is not built with
+  `completion-recap.js smsRecap`, so no "- Waves" sign-off (the no-signature
+  ruling). The sent body is stored on `structured_notes.completionSmsBody`
+  (with `completionSmsRecapMode`); `completionSmsStatus` carries the outcome.
+  A held (quiet-hours) replay row records the same `reservice_fixed_recap`
+  template key as an in-window send.
+
+After Complete the `/complete` response carries `customerText` (only when the
+sheet asked): `{ sent, body }` with the exact text, `{ queued, body }` when the
+send window holds it, or `{ sent: false, reason }` (no phone, opted out or
+blocked, failed, gate off). The sheet shows the text as sent, or "No text sent:
+<reason>." Gate off, either gate, is byte-identical to before.
+
+Visit-facts registry: `reservice_pest.fast_complete_customer_text` moves from
+`status: 'gap'` to a real fact (storage `structured_notes.completionSmsStatus`,
+writers `complete-scheduled-service.js` and, gated, the sheet via
+`customerRecapMode`, reader `closeout-status.js`), and its Known-gaps bullet is
+removed.
+
 ## 2026-09-29 — Lawn visit assessment backup: GPT-6 Sol replaces Astra
 
 Owner ruling 2026-09-29. The lawn visit assessment
@@ -2850,3 +2919,217 @@ units, footage, percentages, "per visit", other company names, "safe" words,
 "chemical" and active ingredients (a common list plus this visit's catalog
 actives) through the existing retry and provider fallback. Generation-time only:
 the completion-time recheck is unchanged. Kill switch: unset the gate.
+
+## 2026-10-01 — Office-booked re-service: "Customer's words" suggestion (dark)
+
+When the office books a pest or lawn re-service (`pest_re_service` /
+`lawn_re_service`) in the New Appointment modal, a "Customer's words" section
+offers the customer's latest INBOUND text (`sms_log`) or call note
+(`call_log`: the caller's own service-request quotes from the VALIDATED V2
+extraction's evidence, never V1 `pain_points` / `call_summary`, per the
+AGENTS.md downstream-composer rule; no valid V2 = no call suggestion) from the
+last 72 hours, whichever is newest, labeled with its source and age ("Text,
+3 h ago" / "Call, yesterday") and a "Use this" button, above an editable box
+(400 characters, the call processor's own cap). Optional: an empty box saves
+nothing. The words land in `scheduled_services.customer_request` /
+`customer_request_source` (migration 20260927100000, no new migration) on the
+primary inserted row only, never on recurring children or boosters;
+`customer_request_pests` is untouched.
+
+`GATE_RESERVICE_OFFICE_REQUEST` (registry key `reserviceOfficeRequest`, off
+unless exactly `true`, dark in every environment). Gate off: the suggestion
+route answers `{ enabled: false, suggestion: null }`, the modal shows nothing
+new, and `POST /api/admin/schedule` ignores `customerRequest` — byte-identical
+to before. The modal learns the gate from that route's `enabled` answer, the
+same probe pattern as the annual-prepay and card-link controls, and only asks
+once a re-service line is on the form. Kill switch: unset the gate.
+
+Source rule (owner ruling 2026-09-26: exact words may be quoted, a call
+paraphrase is shown without quotes), decided on the SERVER and never taken
+from the client. The client names the suggestion it filled from
+(`suggestionId` + `suggestionKind`); the server re-reads that row, which must
+belong to this customer, be inbound and sit inside the 72-hour window, and
+keeps `text` / `call` only when the trimmed saved words equal the suggestion
+exactly. Anything typed or edited by staff, a forged, stale, outbound or
+another customer's id, or a failed lookup is `office`, which is never quoted.
+The suggestion skips empty bodies, STOP / HELP / opt-in keywords and
+natural-language opt-outs (the inbound opt-out detector's own rules), and
+spam or voicemail calls. Nothing is sent to a customer.
+
+## 2026-10-01 — Re-service report card: "You told us" + "What we did" (dark)
+
+On a pest or lawn re-service report whose `reserviceReport` block composed
+(`GATE_RESERVICE_REPORT_COPY`), the live report and the PDF gain the owner-approved
+card of 2026-09-26: "You told us" (the customer's booking words), "What we did"
+(treated for, where, activity seen, the safety line) and a "Still seeing X? Tell
+us" button. `GATE_RESERVICE_REPORT_CARD` (registry key `reserviceReportCard`, off
+unless exactly `true`, read at call time, dark in every environment). Gate off: the
+payload has no `reserviceReportCard` key, the page renders as before and the PDF
+cache key is unchanged. On: the key `reserviceReportCard` joins the payload, the web
+report renders two glass sections (card, soft rows, chip pills, glass type sheet)
+right under the status hero (on a lawn callback, under the lawn watering banner and
+lawn lead, which `GATE_LAWN_WATERING_RULE` keeps ahead of everything else the customer
+reads), the PDF prints the same two sections, and callback PDFs re-render once under
+`-rcd1` (plus the printed activity label's key, so a Pest Pressure relabel re-renders). Kill switch: unset the gate.
+
+The report is a permanent record, so the words are FROZEN: complete-scheduled-service
+copies `scheduled_services.customer_request` / `_source` / `_pests` from the LOCKED
+visit row onto `service_records.service_data.reserviceRequest` inside the completion
+transaction (callbacks with something on file only; no migration), whether or not the
+card gate is on yet, so a later edit of the booking cannot rewrite what the report
+says. The card never reads the live booking: a callback completed before this shipped
+has no frozen request and shows no "You told us" (it still shows "What we did").
+
+Card rule (owner 2026-09-26), decided on the SERVER from the frozen source: `picker`
+and `text` are the customer's verbatim words and are quoted; `call` is a paraphrase
+and reads "On your call, you mentioned ..." with no quote marks; `office` is staff
+typing and reads "As reported to our office: ..." with no quote marks. A missing or
+unknown source shows no words (the picked pest chips still show). Nothing on file
+hides the section. The words pass the report writer's customer-words scrub
+(`scrubCustomerText`: pest talk only, access details dropped, credential-shaped
+tokens masked) and the banned customer-copy screen, are capped at 280 characters, and
+are left out entirely when the scrub is unavailable; never rendered raw.
+
+"What we did" prints only for a performed callback (outcome `treated`): pests from the
+product rows' targets, where from `areas_serviced`, activity from the technician's own
+tapped rating (never an untouched first-visit default or a customer rating; pest line
+only), and the safety line only with a recorded wet application, reusing
+`reservice-fixed-recap.js` (`pestsOf`, `whereOf`, `hasLiquidApplication`,
+`SAFETY_LINE`). Inspection-only, declined and incomplete visits show "You told us"
+only. Products stay in the report's product section.
+
+The button reuses the report footer's existing path (`/?tab=schedule`, the
+authenticated portal Schedule tab, behind the server's `reserviceEligible` boolean).
+No `/reservice/:token` link is put on the public, forwardable report and no new route
+or token is minted.
+
+## 2026-10-02 — Photos in the notes box, office Complete Service (dark)
+
+Owner "ok go" on the Fast Complete mockup v8 (call 10: photos go in the text
+box, each with a short description typed or said; the separate photo section
+goes away). Behind `GATE_NOTE_BOX_PHOTOS` (dark), the office Complete Service
+form, on a computer and on a phone, puts the visit's photos inside the notes
+box (`components/schedule/NoteBoxPhotos.jsx`). Tapping a photo opens its
+description, typed or dictated. "Describe with AI" and its summary move in
+with them. A description is the photo's caption, the same field the AI photo
+read fills: it goes to Generate (`photoCaptions`) and is frozen with the
+photo on the customer's report. A typed one carries no AI tag. The schedule
+payload's per-visit `noteBoxPhotosEnabled` is never on for lawn or tree,
+shrub & palm (another lane owns those completions and their photo steps),
+and the form checks the same lines again. Off, the photo section is exactly
+as before. The tech Fast Complete sheet's notes box follows in its own
+change.
+
+## 2026-10-02 — Service tips: 50 owner-approved tips for the services the general pest tips don't fit
+
+Owner "ok go" on the Fast Complete mockup v8 (call 12), then approval of all
+50 drafts ("looks good, approve"). The tip registry
+(`server/services/service-report/tip-library.js`) gains tips for bed bugs,
+German roaches, palmetto bugs, fleas and ticks, fire ants, bees, wasps and
+mud daubers, mosquitoes, rodent trapping, exclusion, bait stations and
+sanitation, termite bait stations, termite treatment (liquid, trench, spot,
+foam), termite inspections, Bora-Care and wildlife trapping. Each names the
+catalog services it is for (`services`, service keys). A visit of one of
+those services leads its picker with them as "For this service"; they stay
+out of every other visit's list. `GET /admin/dispatch/:serviceId/tech-tips`
+reads the visit's service key from its completion profile (fail-soft: no
+lead group). The 42 existing tips, and the lawn and tree & shrub tips, are
+unchanged. Every new tip passes the same customer-copy screen and
+visit-claim lint as the rest. Two rest on product-label guidance the owner
+approved as written (fire ant bait kept dry; Bora-Care sealed where
+exposed).
+
+## 2026-10-01 — Fast Complete report flow: talk, generate the report, trace, send (dark)
+
+Owner "ok go" on the talk / generate / trace / send mockup. Behind
+`GATE_FAST_COMPLETE_REPORT` (dark), the tech portal opens the one-screen
+Fast Complete sheet for every open untyped pest visit, a re-service or a
+regular visit, in its report flow: the tech talks into the note, adds
+photos (thumbnails), taps whether the customer was home (the full form's
+three choices, "not home, full access" picked every time), the pest activity
+on the 1–5 tracker (a first visit opens at 5, as the full form does), one tip
+and the promise check, then taps Generate AI report (the full form's own
+`POST /admin/schedule/generate-report`). The report the customer will see is
+read on its own step, with Edit and Write again (`fresh: true`, past the
+30-minute draft cache), then the spray is traced (the existing Treatment Zone
+tracer, opened over the sheet) and Complete & send posts `/complete` exactly
+as the full form does: billed at finish, the report text, a pay link and the
+review ask on a regular visit, never on a re-service. The edited-report
+heads-up and a promise changed after the report are confirmed on the sheet
+and resent under the same key.
+
+There are no Pests / Where / How taps (owner ruling 2026-09-30: those facts
+are voice only). `POST /admin/dispatch/:id/voice-facts` reads where product
+went down (Inside / Outside / Garage), the pests named and how the sprays
+went down (around the outside of the home, or spots), each quoted from the
+note word for word (a quote that denies it is dropped in code), and the
+report step shows them as "Heard from you". The note is read first and the
+report is written from exactly what the completion records: the visit's
+areas serviced (a product's area only when one place was heard, as the full
+form fills it), each product's targets and the sprays' method, so an indoor
+treatment keeps its re-entry wait on the customer's report. A perimeter
+spray takes its length from the trace, which never changes the record after
+the report was read; Complete & send waits for where the tech treated and,
+for a perimeter, the trace. Off, the tech portal routes pest visits exactly
+as before.
+
+## 2026-10-01 — "From the Waves blog" on the service report (dark)
+
+Owner "ok go" on the Fast Complete mockup: the technician or the office can
+pick one Waves blog post while completing a visit, searched the way
+Quick Links searches links, and the customer's report shows it at the bottom
+as "From the Waves blog": the post's title as a link and where it lives
+(`wavespestcontrol.com/pest-control/…`). Behind `GATE_REPORT_BLOG_POST`
+(dark). Only a published post that is live on the hub links, at its live
+URL on the site's own host (`server/services/service-report/report-blog-post.js`,
+the share gate's live rule); the pick is frozen on the record at completion
+and checked against the host again when the report renders. The card is a
+glass card with an `h2` title (the glass theme hides `.section-eyebrow`
+outside the hero), live view only, the last card above the footer on every
+layout. Owner ruling 2026-10-02: every service but WDO, termite pre-treat,
+lawn and tree, shrub & palm (another lane owns those completions), and never
+a visit that completes through a project (`blogPostAllowedFor`, the one rule
+the search and the completion share). Off, the search answers unavailable, a
+pick is ignored and no report shows a post.
+
+## 2026-10-02 — Lane voice fill, server reader (dark)
+
+Owner "ok go" on the Fast Complete mockup v8, step 2: a specialty visit's own
+record (bed bug, fire ant, tick, bee & wasp, mud dauber, recurring mosquito)
+is filled from the technician's note, on the office Complete Service form
+and the tech's sheet, through one reader on the server. This first slice is
+that reader: `POST /admin/dispatch/:id/lane-facts` (services/visit-lane-facts.js,
+`TEXT_POLICIES.fastStructured`, lane `visit_lane_facts`), behind
+`GATE_LANE_VOICE_FILL` (dark; off answers 404). The places come from the
+lane's own list and each finding group gets at most one value, each with the
+note's own words; the lane is the visit's completion profile (a typed form
+or a visit with no lane answers `available: false`), never one the client
+names. The model judges what the note means; the code keeps only a value the
+lane's closeout offers, standing on words the note holds word for word, and
+never a pair the completion refuses (the lane's exclusions leave both groups
+for a person to pick), following the 2026-09-30 direction on the call
+reader (the extraction judges, the code verifies). It writes nothing: the
+office form (slice 2) fills only fields nobody picked and the tech's sheet
+(slice 3) shows each field with its words and a Change, so a person confirms
+every value before anything is sent. The gate stays off until both land.
+Bora-Care has no lane yet; its places and findings wait for an owner ruling.
+
+## 2026-10-02 — Lane voice fill, the office form (dark)
+
+Slice 2 of the Fast Complete step 2 lane voice fill (the server reader
+landed in #5625). With the schedule payload's per-visit
+`laneVoiceFillEnabled` (`GATE_LANE_VOICE_FILL` and a lane the reader reads,
+resolved as the completion resolves it through `voiceLaneFor`), Generate AI
+report on the office Complete Service form (computer and phone) first reads
+the notes for the visit's own record, the notes as the report writer gets
+them (without the marker lines a tap writes), and fills only what nobody
+picked, the way a tap does: an empty group gets the `[Found]` marker and the
+label; the areas fill only while none are picked. A value that clashes with
+a pick (the lane's exclusions, or the selected protocol actions) is left for
+a person, with "The notes didn't make this clear. Pick one." under the
+group. Each filled field shows the words it came from ("Heard: ...") while
+it still holds the filled value. The report is written on the next render,
+from the record as the fill left it, so the report and the record agree; the
+form stays locked through both steps. A failed read fills nothing and the
+report is written anyway. The two Generate buttons (computer and phone) now
+share one handler. Off, Generate is exactly as before.

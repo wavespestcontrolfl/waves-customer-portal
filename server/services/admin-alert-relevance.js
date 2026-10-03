@@ -116,7 +116,15 @@ function refsFromRow(row) {
     visitIds: [...new Set(visitIds)],
     estimateId: uuidOrNull(first(meta.estimateId, meta.estimate_id, payload.estimateId, params.get('estimateId'))),
     leadId: uuidOrNull(first(payload.leadId, meta.leadId, params.get('lead'))),
+    promiseIds: arr(meta.promise_ids).map(uuidOrNull).filter(Boolean),
   };
+}
+
+// A non-empty id as text (customer ids are stored as text here; bad values
+// drop, never throw).
+function idTextOrNull(value) {
+  const text = value == null ? '' : String(value).trim();
+  return text && text.length <= 64 ? text : null;
 }
 
 // Which live records this row is about, resolved against loaded maps (an id
@@ -130,7 +138,7 @@ function resolveRefs(row, data) {
   return { refs, visit, lead, estimate };
 }
 
-const emptyData = () => ({ visits: new Map(), leads: new Map(), estimates: new Map(), leadVisits: new Map(), leadQuotes: new Map() });
+const emptyData = () => ({ visits: new Map(), leads: new Map(), estimates: new Map(), leadVisits: new Map(), leadQuotes: new Map(), promises: new Map(), consents: new Map() });
 const byId = (rows) => new Map(rows.map((r) => [String(r.id), r]));
 
 // The live records for a batch of notification rows: one query per table per
@@ -142,6 +150,10 @@ async function loadSubjects(rows, conn = db) {
   const ids = (pick) => [...new Set(all.flatMap(pick))];
   const visitIds = ids((r) => r.visitIds);
   const leadIds = ids((r) => (r.leadId ? [r.leadId] : []));
+  const promiseIds = ids((r) => r.promiseIds);
+  if (promiseIds.length) {
+    data.promises = byId(await conn('call_commitments').whereIn('id', promiseIds).select('id', 'status', 'reviewed_at'));
+  }
   if (visitIds.length) {
     // The service date as text: a DATE parsed to a JS Date lands at the
     // host's midnight, the previous ET day on a UTC host.
@@ -150,7 +162,26 @@ async function loadSubjects(rows, conn = db) {
   }
   if (leadIds.length) {
     data.leads = byId(await conn('leads').whereIn('id', leadIds)
-      .select('id', 'deleted_at', 'customer_id', 'estimate_id'));
+      .select('id', 'deleted_at', 'customer_id', 'estimate_id', 'status'));
+  }
+  // The stale-consent bells' customers: when did each last record a consent
+  // at a CURRENT recurring-card text version — the base text or the
+  // after-visit variant's (local max-effort review on #5434: an after-visit
+  // reauthorization lands as AFTER_VISIT_CONSENT_VERSION, and it settles
+  // the bell exactly like the base text does). A card-hold consent is not a
+  // recurring authorization and never settles it.
+  // (A customer id is deliberately NOT a subject ref — only this class reads
+  // it, straight from its own metadata.)
+  const consentCustomerIds = [...new Set(rows
+    .map((row) => parseMeta(row.metadata))
+    .filter((meta) => String(meta.dedupeKey || '').startsWith(CONSENT_STALE_PREFIX))
+    .map((meta) => idTextOrNull(meta.customerId)).filter(Boolean))];
+  if (consentCustomerIds.length) {
+    const { CONSENT_VERSION, AFTER_VISIT_CONSENT_VERSION } = require('./payment-method-consent-text');
+    const recorded = await conn('payment_method_consents').whereIn('customer_id', consentCustomerIds)
+      .whereIn('consent_text_version', [CONSENT_VERSION, AFTER_VISIT_CONSENT_VERSION])
+      .groupBy('customer_id').select('customer_id').max('created_at as latest_created_at');
+    data.consents = new Map(recorded.map((r) => [String(r.customer_id), r.latest_created_at]));
   }
   const resolved = rows.map((row) => resolveRefs(row, data));
   const estimateIds = [...new Set(resolved.flatMap((r) => [r.refs.estimateId, r.lead?.estimate_id && String(r.lead.estimate_id)]).filter(Boolean))];
@@ -193,8 +224,13 @@ function subjectFor(row, data, todayET) {
     bellAt: bellAt && !Number.isNaN(bellAt.getTime()) ? bellAt : null,
     // A visit the row names, by id; loaded ids only, so a miss is a visit gone.
     visitOf: (id) => data.visits.get(id),
+    // A promise the row names, by id; loaded ids only, so a miss is a promise gone.
+    promiseOf: (id) => data.promises.get(id),
     leadBookedAt: resolved.lead?.customer_id ? data.leadVisits.get(String(resolved.lead.customer_id)) : null,
     leadQuotedAt: resolved.lead?.customer_id ? data.leadQuotes.get(String(resolved.lead.customer_id)) : null,
+    // The latest consent the bell's customer recorded at the current text
+    // version (loaded for stale-consent bells only).
+    consentRecordedAt: (() => { const id = idTextOrNull(resolved.refs.meta.customerId); return id ? data.consents.get(id) : null; })(),
   };
 }
 
@@ -243,7 +279,8 @@ function seriesMoveMovedOn(s) {
 // happened AFTER the bell counts: the lead deleted, a quote sent (the one it
 // points at, or any to its customer), or a live visit booked for its customer. Timestamped facts only — a status
 // carries no time, and the lead's state can predate the bell (a website
-// submission attached to a lead already quoted or worked). Not converted_at:
+// submission attached to a lead already quoted or worked, and a lead whose current status is 'handled', which no
+// timestamp is needed for). Not converted_at:
 // booking the lead stamps it and cancelling that visit never clears it, so
 // the booking itself — while it is live — is the evidence.
 function newLeadMovedOn(s) {
@@ -253,14 +290,57 @@ function newLeadMovedOn(s) {
   if (!lead || !s.bellAt) return null;
   const after = (at) => !!at && new Date(at).getTime() > s.bellAt.getTime();
   if (after(lead.deleted_at)) return 'Lead was deleted';
+  // A lead whose CURRENT status is 'handled' (a /book request its own booking, or
+  // staff, closed) is moved on whatever the timestamps say: the close can land
+  // before the bell is even written, which no time comparison could see. A lead
+  // reopened since is not 'handled', so it reads relevant again.
+  if (lead.status === 'handled') return 'Request was handled';
   if (after(s.estimate?.sent_at) || after(s.leadQuotedAt)) return 'Estimate was sent';
   if (after(s.leadBookedAt)) return 'A visit was booked';
   return null;
 }
 
+// The stale-consent bell (payment-method-consents.js
+// refuseDeferredConsentRecording, dedupeKey consent_version_stale:<intent>):
+// a deferred capture carried a consent text version that was no longer
+// current, so the authorization was withheld and the office asked to
+// re-collect it. Settled only by the customer re-authorizing — a consent row
+// at a CURRENT recurring-card text version (base or after-visit) recorded
+// after the bell; never by the intent
+// (its stamp stays stale for good) and never by an older-version row
+// (codex local max-effort review on #5434).
+const CONSENT_STALE_PREFIX = 'consent_version_stale:';
+function consentReauthorized(s) {
+  if (!s.bellAt || !idTextOrNull(s.meta.customerId)) return null;
+  const at = s.consentRecordedAt ? new Date(s.consentRecordedAt) : null;
+  return at && !Number.isNaN(at.getTime()) && at.getTime() > s.bellAt.getTime() ? 'Authorization was re-collected' : null;
+}
+
+// A promise-mark bell (visit-promises.js alertUnsavedVisitPromiseMarks) is
+// about technician marks that never reached the office's promise list. It is
+// settled once every promise it names is closed (done or dismissed), gone,
+// or acted on by the office after the bell (reviewed_at, stamped by a Mark
+// done, an edit, a confirm, a Reopen). A bell naming no promise is never
+// judged. The emitter closes its own bell when a resumed completion saves the
+// marks.
+function promiseMarksSettled(s) {
+  const ids = s.refs.promiseIds;
+  if (!ids.length || !s.bellAt) return null;
+  const settled = ids.every((id) => {
+    const promise = s.promiseOf(id);
+    if (!promise || String(promise.status) !== 'open') return true;
+    const reviewedAt = promise.reviewed_at ? new Date(promise.reviewed_at).getTime() : NaN;
+    return reviewedAt > s.bellAt.getTime();
+  });
+  return settled ? 'Every promise it named is settled' : null;
+}
+
 // Alert classes: category (+ dedupeKey prefix, looked up in each emitter) → a
 // rule returning null while the alert is still relevant, else a short reason.
 const CLASSES = [
+  { // payment-method-consents.js refuseDeferredConsentRecording — one bell per intent
+    key: 'consent_version_stale', categories: ['billing'], prefix: CONSENT_STALE_PREFIX, rule: consentReauthorized,
+  },
   { // emitter removed in #5223; unread rows remain. Only the visit itself settles it.
     key: 'stale_visit', categories: ['alert'], prefix: 'stale-visit:', rule: staleVisitSettled,
   },
@@ -272,6 +352,10 @@ const CLASSES = [
     // submission filed as a duplicate, an email follow-up's new draft) is
     // fresh work about a lead already on file, never judged.
     key: 'new_lead', categories: ['new_lead'], match: (meta, row) => meta.triggerKey === 'new_lead' && !!refsFromRow(row).leadId, rule: newLeadMovedOn,
+  },
+  { // visit-promises.js alertUnsavedVisitPromiseMarks — one bell per visit,
+    // raised again (same key) only while a mark is still unsaved.
+    key: 'promise_marks', categories: ['alert'], prefix: 'visit-promise-marks:', rule: promiseMarksSettled,
   },
 ];
 

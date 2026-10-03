@@ -20,14 +20,28 @@
  *           unsafe rate would demand ~300 clean current-version drafts before
  *           an intent could clear the 8% cap, so a fixed drafter could never
  *           graduate. See resolveCohortVersions for the override knob.
- *   - suggest → auto_send is OUTCOME-driven. Once an intent is suggesting, the
- *     human's accept-verbatim / edit / ignore choices ARE the ground truth: a
- *     high accepted rate with few corrections means the draft is send-ready.
- *     A judge backstop (recent unsafe on drafts that reverted to shadow) guards
- *     against a regression the accept-rate hasn't caught yet.
+ *   - suggest → auto_send is OUTCOME-driven, by either of two evidence paths
+ *     (owner ruling 2026-10-01, decision D2 of the AI acceleration scope):
+ *       (a) HUMAN decisions — the accept-verbatim / edit / ignore choices on
+ *           suggestion cards once an intent is suggesting;
+ *       (b) JUDGE-GRADED replies — the nightly judge's verdict on a live draft
+ *           against the reply a human actually sent to the same inbound:
+ *           draft_better / equivalent count as accepted, human_better /
+ *           draft_unsafe as corrected. No-reply verdicts (human_no_reply /
+ *           both_no_reply) carry no ground truth and count for neither path.
+ *     Path (b) exists because at Waves' volume the cards go unworked (nine
+ *     human decisions ever against a 60 minimum), so path (a) alone could
+ *     never be earned. Each path clears the same bars (minimum count, accepted
+ *     rate, corrected rate; path (b)'s are separately env-tunable), and BOTH
+ *     sit behind the shared judge backstop (recent unsafe on scored drafts)
+ *     that guards against a regression neither rate has caught yet.
  *
  * Escalation intents never graduate (locked) — enforced here and in
- * sms-suggest-mode.validateModeChange. The auto_send rung is RECOMMEND-ONLY
+ * sms-suggest-mode.validateModeChange. The ladder is climbed one rung at a
+ * time: sms-suggest-mode.setIntentMode writes auto_send only over a stored
+ * suggest mode (judge-graded evidence accrues in shadow too, and this engine
+ * evaluates the rung without reading the stored mode); the fixed-copy
+ * gratitude lane is the documented exception and qualifies from shadow. The auto_send rung is RECOMMEND-ONLY
  * until the executor ships (next PR); eligibleFor:'auto_send' surfaces the
  * recommendation without enabling the flip.
  */
@@ -62,6 +76,12 @@ const THRESHOLDS = {
     // Require a populated live scored judge signal for THIS intent before
     // auto_send — outcome counts alone never suffice.
     minScoredBackstop: envNum('GRAD_AUTOSEND_MIN_SCORED', 30),
+    // Path (b), judge-graded replies: the same bars as path (a) unless tuned
+    // separately. A caller-supplied thresholds object that predates these
+    // keys falls back to path (a)'s values inside evaluateRung.
+    minGraded: envNum('GRAD_AUTOSEND_JUDGE_MIN_GRADED', envNum('GRAD_AUTOSEND_MIN_DECIDED', 60)),
+    minGradedAcceptedRate: envNum('GRAD_AUTOSEND_JUDGE_MIN_ACCEPTED_RATE', envNum('GRAD_AUTOSEND_MIN_ACCEPTED_RATE', 0.85)),
+    maxGradedCorrectedRate: envNum('GRAD_AUTOSEND_JUDGE_MAX_CORRECTED_RATE', envNum('GRAD_AUTOSEND_MAX_CORRECTED_RATE', 0.10)),
   },
 };
 
@@ -111,12 +131,88 @@ function resolveCohortVersions({ raw = process.env.GRAD_COHORT_VERSIONS, current
 }
 
 /**
+ * The shared judge backstop, on its own: the gates every autonomous send needs
+ * whatever else earned it. Read by the suggest → auto_send rung below and by
+ * the unanswered-text lane (evaluateJudgeBackstop), which requires nothing more.
+ */
+function judgeBackstopBlockers({ judge = {}, thresholds = THRESHOLDS, judgeAvailable = true } = {}) {
+  const t = thresholds.suggestToAutosend;
+  const blockers = [];
+  // Fail CLOSED: auto_send relies on the judge backstop (recent unsafe). If
+  // the live judge signal couldn't be loaded, the backstop is blind — never
+  // send autonomously on any other evidence.
+  if (!judgeAvailable) blockers.push('Live judge signal unavailable — safety backstop cannot be verified.');
+  // ...and even when loaded, an intent with no live SCORED judge data has an
+  // empty backstop (recentUnsafe defaults to 0). Require a populated one.
+  const scored = judge.judged || 0;
+  if (scored < t.minScoredBackstop) blockers.push(`Needs ${t.minScoredBackstop - scored} more live judged drafts for the safety backstop (${scored}/${t.minScoredBackstop}).`);
+  const recentUnsafe = judge.recentUnsafe || 0;
+  if (recentUnsafe > t.maxRecentUnsafe) blockers.push(`${recentUnsafe} unsafe in last ${t.recentWindow} judged (must be ${t.maxRecentUnsafe}).`);
+  return blockers;
+}
+
+/**
+ * suggest → auto_send verdict: the shared judge backstop plus either evidence
+ * path (see the module header). Split out of evaluateRung so each rung reads
+ * on its own; `blockers` is the shared-gate list evaluateRung started.
+ */
+function evaluateAutoSendRung({ judge = {}, suggest = {}, thresholds = THRESHOLDS, judgeAvailable = true, blockers = [] } = {}) {
+  const t = thresholds.suggestToAutosend;
+  // Path (a): human decisions on suggestion cards.
+  const accepted = suggest.accepted || 0;
+  const corrected = suggest.corrected || 0;
+  const ignored = suggest.ignored || 0;
+  const decided = accepted + corrected + ignored;
+  const acceptedRate = rate(accepted, decided);
+  const correctedRate = rate(corrected, decided);
+  // Path (b): judge-graded replies — scored verdicts that had a human reply
+  // to grade against. Counted by fetchLiveJudgeSignals under the same cohort
+  // and voice-profile pin as the backstop; absent fields read as 0 (no
+  // evidence), never as clear.
+  const gradedAccepted = judge.gradedAccepted || 0;
+  const gradedCorrected = judge.gradedCorrected || 0;
+  const graded = gradedAccepted + gradedCorrected;
+  const gradedAcceptedRate = rate(gradedAccepted, graded);
+  const gradedCorrectedRate = rate(gradedCorrected, graded);
+  const minGraded = t.minGraded ?? t.minDecided;
+  const minGradedAcceptedRate = t.minGradedAcceptedRate ?? t.minAcceptedRate;
+  const maxGradedCorrectedRate = t.maxGradedCorrectedRate ?? t.maxCorrectedRate;
+
+  blockers.push(...judgeBackstopBlockers({ judge, thresholds, judgeAvailable }));
+
+  const humanBlockers = [];
+  if (decided < t.minDecided) humanBlockers.push(`Needs ${t.minDecided - decided} more human-decided suggestions (${decided}/${t.minDecided}).`);
+  if (decided > 0 && acceptedRate < t.minAcceptedRate) humanBlockers.push(`Accepted-verbatim ${asPct(acceptedRate)} < ${asPct(t.minAcceptedRate)} required.`);
+  if (decided > 0 && correctedRate > t.maxCorrectedRate) humanBlockers.push(`Correction rate ${asPct(correctedRate)} > ${asPct(t.maxCorrectedRate)} cap.`);
+  const humanPathClear = humanBlockers.length === 0 && decided >= t.minDecided;
+
+  const judgeBlockers = [];
+  if (graded < minGraded) judgeBlockers.push(`Judge path: needs ${minGraded - graded} more judge-graded replies (${graded}/${minGraded}).`);
+  if (graded > 0 && gradedAcceptedRate < minGradedAcceptedRate) judgeBlockers.push(`Judge path: equivalent-or-better ${asPct(gradedAcceptedRate)} < ${asPct(minGradedAcceptedRate)} required.`);
+  if (graded > 0 && gradedCorrectedRate > maxGradedCorrectedRate) judgeBlockers.push(`Judge path: human-better ${asPct(gradedCorrectedRate)} > ${asPct(maxGradedCorrectedRate)} cap.`);
+  const judgePathClear = judgeBlockers.length === 0 && graded >= minGraded;
+
+  // Either path earns the rung; neither clear → explain both so the operator
+  // sees every route. A path that is itself clear is never re-listed as a
+  // blocker when only the shared backstop stands in the way.
+  const pathBasis = humanPathClear ? 'human_outcomes' : (judgePathClear ? 'judge_graded' : null);
+  if (!pathBasis) blockers.push(...humanBlockers, ...judgeBlockers);
+  // No data is never eligible: both paths require their minimum count.
+  const eligible = blockers.length === 0 && pathBasis !== null;
+  return { eligible, basis: eligible ? pathBasis : null, blockers };
+}
+
+/**
  * Pure rung evaluation — no DB, fully testable. Given an intent's current mode
  * and its two signals, returns the next rung, whether it's eligible, and the
  * human-readable blockers standing in the way.
  *
- *   judge   = { judged, unsafe, avgSafety, recentUnsafe }  (LIVE, non-backfill)
+ *   judge   = { judged, unsafe, avgSafety, recentUnsafe,
+ *               gradedAccepted, gradedCorrected }          (LIVE, non-backfill)
  *   suggest = { accepted, corrected, ignored }             (agent_decisions)
+ *
+ * The suggest → auto_send result carries `basis`: 'human_outcomes' or
+ * 'judge_graded' when eligible (which evidence path earned it), else null.
  */
 function evaluateRung({ mode = 'shadow', locked = false, judge = {}, suggest = {}, thresholds = THRESHOLDS, judgeAvailable = true } = {}) {
   const currentMode = LADDER.includes(mode) ? mode : 'shadow';
@@ -149,36 +245,18 @@ function evaluateRung({ mode = 'shadow', locked = false, judge = {}, suggest = {
   }
 
   // currentMode === 'suggest' → auto_send
-  const t = thresholds.suggestToAutosend;
-  const accepted = suggest.accepted || 0;
-  const corrected = suggest.corrected || 0;
-  const ignored = suggest.ignored || 0;
-  const decided = accepted + corrected + ignored;
-  const acceptedRate = rate(accepted, decided);
-  const correctedRate = rate(corrected, decided);
-  const recentUnsafe = judge.recentUnsafe || 0;
-
-  // Fail CLOSED: auto_send relies on the judge backstop (recent unsafe). If
-  // the live judge signal couldn't be loaded, the backstop is blind — never
-  // promote to autonomous sending on outcome counts alone.
-  if (!judgeAvailable) blockers.push('Live judge signal unavailable — safety backstop cannot be verified.');
-  // ...and even when loaded, an intent with no live SCORED judge data has an
-  // empty backstop (recentUnsafe defaults to 0). Require a populated one.
-  const scored = judge.judged || 0;
-  if (scored < t.minScoredBackstop) blockers.push(`Needs ${t.minScoredBackstop - scored} more live judged drafts for the safety backstop (${scored}/${t.minScoredBackstop}).`);
-  if (decided < t.minDecided) blockers.push(`Needs ${t.minDecided - decided} more human-decided suggestions (${decided}/${t.minDecided}).`);
-  if (decided > 0 && acceptedRate < t.minAcceptedRate) blockers.push(`Accepted-verbatim ${asPct(acceptedRate)} < ${asPct(t.minAcceptedRate)} required.`);
-  if (decided > 0 && correctedRate > t.maxCorrectedRate) blockers.push(`Correction rate ${asPct(correctedRate)} > ${asPct(t.maxCorrectedRate)} cap.`);
-  if (recentUnsafe > t.maxRecentUnsafe) blockers.push(`${recentUnsafe} unsafe in last ${t.recentWindow} judged (must be ${t.maxRecentUnsafe}).`);
-
-  const eligible = blockers.length === 0 && decided >= t.minDecided;
-  return { currentMode, nextRung: 'auto_send', eligible, blockers };
+  const rung = evaluateAutoSendRung({ judge, suggest, thresholds, judgeAvailable, blockers });
+  return { currentMode, nextRung: 'auto_send', eligible: rung.eligible, basis: rung.basis, blockers: rung.blockers };
 }
 
 /**
  * Per-intent LIVE judge signal for the CURRENT drafter cohort. Returns a Map
- * intent → { judged, unsafe, avgSafety, recentUnsafe, backfillJudged,
- * priorVersionJudged }. recentUnsafe counts draft_unsafe among the most recent
+ * intent → { judged, unsafe, avgSafety, recentUnsafe, gradedAccepted,
+ * gradedCorrected, backfillJudged, priorVersionJudged }. gradedAccepted /
+ * gradedCorrected are the suggest → auto_send path (b) evidence: scored
+ * verdicts graded against the human's actual reply (draft_better +
+ * equivalent / human_better + draft_unsafe), same cohort and pin as the
+ * backstop. recentUnsafe counts draft_unsafe among the most recent
  * `recentWindow` cohort judgments — the backstop for the suggest → auto_send
  * rung (a superseded drafter's regressions aren't evidence about the one that
  * would be sending, so the backstop is cohort-scoped too).
@@ -246,7 +324,11 @@ async function fetchLiveJudgeSignals(dbi = db, { recentWindow = THRESHOLDS.sugge
       // with no real safety signal.
       .select(dbi.raw('COUNT(*) FILTER (WHERE j.scores IS NOT NULL)::int as judged'))
       .select(dbi.raw("COUNT(*) FILTER (WHERE j.verdict = 'draft_unsafe')::int as unsafe"))
-      .select(dbi.raw("AVG((j.scores->>'safety')::numeric) FILTER (WHERE j.scores IS NOT NULL) as avg_safety")),
+      .select(dbi.raw("AVG((j.scores->>'safety')::numeric) FILTER (WHERE j.scores IS NOT NULL) as avg_safety"))
+      // Path (b) evidence: verdicts graded against a real human reply. The
+      // no-reply verdicts are unscored and fall outside both filters.
+      .select(dbi.raw("COUNT(*) FILTER (WHERE j.verdict IN ('draft_better', 'equivalent'))::int as graded_accepted"))
+      .select(dbi.raw("COUNT(*) FILTER (WHERE j.verdict IN ('human_better', 'draft_unsafe'))::int as graded_corrected")),
     dbi
       .with('ranked', (qb) => {
         qb.from({ j: 'shadow_draft_judgments' })
@@ -287,7 +369,7 @@ async function fetchLiveJudgeSignals(dbi = db, { recentWindow = THRESHOLDS.sugge
 
   const map = new Map();
   const ensure = (intent) => {
-    if (!map.has(intent)) map.set(intent, { judged: 0, unsafe: 0, avgSafety: null, recentUnsafe: 0, backfillJudged: 0, priorVersionJudged: 0 });
+    if (!map.has(intent)) map.set(intent, { judged: 0, unsafe: 0, avgSafety: null, recentUnsafe: 0, gradedAccepted: 0, gradedCorrected: 0, backfillJudged: 0, priorVersionJudged: 0 });
     return map.get(intent);
   };
   for (const r of totals) {
@@ -298,6 +380,8 @@ async function fetchLiveJudgeSignals(dbi = db, { recentWindow = THRESHOLDS.sugge
     // decimal here would let 7.96 round up to 8.0 and clear an 8.0 gate.
     // Display rounding happens in computeReadiness output only.
     e.avgSafety = r.avg_safety == null ? null : Number(r.avg_safety);
+    e.gradedAccepted = r.graded_accepted || 0;
+    e.gradedCorrected = r.graded_corrected || 0;
   }
   for (const r of recent) ensure(r.intent).recentUnsafe = r.recent_unsafe || 0;
   for (const r of backfill) ensure(r.intent).backfillJudged = r.backfill_judged || 0;
@@ -374,7 +458,7 @@ function rollupSuggestOutcomes(rows, cohort, voiceProfilePin) {
  */
 function evaluateAutoSendHealth({ judge = {}, suggest = {}, judgeAvailable = true } = {}) {
   const rung = evaluateRung({ mode: 'suggest', locked: false, judge, suggest, judgeAvailable });
-  return { sendReady: rung.eligible && rung.nextRung === 'auto_send', blockers: rung.blockers };
+  return { sendReady: rung.eligible && rung.nextRung === 'auto_send', basis: rung.basis ?? null, blockers: rung.blockers };
 }
 
 /**
@@ -433,15 +517,19 @@ async function computeReadiness({ intents, dbi = db } = {}) {
           ? { sendReady: qualification.eligible, blockers: qualification.blockers } : null,
         qualification,
         judge: { judged: 0, unsafe: 0, unsafeRate: 0, avgSafety: null,
-          recentUnsafe: 0, backfillJudged: 0, priorVersionJudged: 0 },
+          recentUnsafe: 0, gradedAccepted: 0, gradedCorrected: 0, gradedAcceptedRate: 0,
+          backfillJudged: 0, priorVersionJudged: 0 },
       });
       continue;
     }
-    const judge = judgeSignals.get(intent) || { judged: 0, unsafe: 0, avgSafety: null, recentUnsafe: 0, backfillJudged: 0, priorVersionJudged: 0 };
+    const judge = judgeSignals.get(intent) || { judged: 0, unsafe: 0, avgSafety: null, recentUnsafe: 0, gradedAccepted: 0, gradedCorrected: 0, backfillJudged: 0, priorVersionJudged: 0 };
     const verdict = evaluateRung({ mode, locked, judge, suggest, judgeAvailable });
     if (examBlockers && examBlockers.length && !locked && verdict.nextRung) {
       verdict.blockers = [...verdict.blockers, ...examBlockers];
       verdict.eligible = false;
+      // basis means "earned via": an exam-blocked rung earned nothing, so the
+      // UI must not read a stale judge basis next to the exam blocker (Codex r1).
+      verdict.basis = null;
     }
     // Intents ALREADY at auto_send get the send-time gate's view too, so the
     // UI can't show a no-blocker Auto-send chip while sends are blocked.
@@ -451,7 +539,7 @@ async function computeReadiness({ intents, dbi = db } = {}) {
       ? evaluateAutoSendHealth({ judge, suggest, judgeAvailable })
       : null;
     if (autoSendHealth && examBlockers && examBlockers.length) {
-      autoSendHealth = { sendReady: false, blockers: [...autoSendHealth.blockers, ...examBlockers] };
+      autoSendHealth = { sendReady: false, basis: null, blockers: [...autoSendHealth.blockers, ...examBlockers] };
     }
     out.set(intent, {
       ...verdict,
@@ -463,6 +551,9 @@ async function computeReadiness({ intents, dbi = db } = {}) {
         unsafeRate: Number(rate(judge.unsafe, judge.judged).toFixed(3)),
         avgSafety: judge.avgSafety == null ? null : Number(Number(judge.avgSafety).toFixed(1)), // display only
         recentUnsafe: judge.recentUnsafe,
+        gradedAccepted: judge.gradedAccepted || 0,
+        gradedCorrected: judge.gradedCorrected || 0,
+        gradedAcceptedRate: Number(rate(judge.gradedAccepted || 0, (judge.gradedAccepted || 0) + (judge.gradedCorrected || 0)).toFixed(3)), // display only
         backfillJudged: judge.backfillJudged || 0,
         priorVersionJudged: judge.priorVersionJudged || 0,
       },
@@ -544,7 +635,7 @@ async function evaluateAutoSendEligibility({ intent, dbi = db, voiceProfileVersi
       ? voiceProfileVersion
       : await resolveVoiceProfilePin({ dbi });
     const signals = await fetchLiveJudgeSignals(dbi, { voiceProfileVersion: pin });
-    judge = signals.get(intent) || { judged: 0, unsafe: 0, avgSafety: null, recentUnsafe: 0, backfillJudged: 0, priorVersionJudged: 0 };
+    judge = signals.get(intent) || { judged: 0, unsafe: 0, avgSafety: null, recentUnsafe: 0, gradedAccepted: 0, gradedCorrected: 0, backfillJudged: 0, priorVersionJudged: 0 };
     suggest = await fetchSuggestOutcomes({ intent, dbi, voiceProfileVersion: pin });
   } catch (err) {
     logger.warn(`[sms-graduation] auto-send eligibility fetch failed (${intent}): ${err.message}; blocking`);
@@ -569,12 +660,37 @@ async function evaluateAutoSendEligibility({ intent, dbi = db, voiceProfileVersi
       examBlockers = ['Sealed exam signal unavailable — auto-send blocked while GRAD_REQUIRE_SEALED_EXAM is on.'];
     }
     if (examBlockers.length) {
-      return { eligible: false, blockers: [...verdict.blockers, ...examBlockers], judge, suggest };
+      return { eligible: false, basis: null, blockers: [...verdict.blockers, ...examBlockers], judge, suggest };
     }
   }
 
   const eligible = verdict.eligible && verdict.nextRung === 'auto_send';
-  return { eligible, blockers: verdict.blockers, judge, suggest };
+  return { eligible, basis: eligible ? (verdict.basis ?? null) : null, blockers: verdict.blockers, judge, suggest };
+}
+
+/**
+ * The judge backstop alone for ONE intent, from live data: enough scored
+ * judgments under the current prompt cohort and voice profile, none of the
+ * recent ones unsafe. The unanswered-text lane's quality gate — it answers
+ * only what nobody else answered, so the ladder's evidence paths (and its
+ * sealed-exam requirement) are not asked for. Fail closed on any read error.
+ */
+async function evaluateJudgeBackstop({ intent, dbi = db, voiceProfileVersion } = {}) {
+  const { isEscalationIntent } = require('./sms-suggest-mode');
+  if (isEscalationIntent(intent)) return { clear: false, blockers: ['Escalation intent — never auto-sends.'] };
+  let judge;
+  try {
+    const pin = voiceProfileVersion !== undefined
+      ? voiceProfileVersion
+      : await resolveVoiceProfilePin({ dbi });
+    const signals = await fetchLiveJudgeSignals(dbi, { voiceProfileVersion: pin });
+    judge = signals.get(intent) || {};
+  } catch (err) {
+    logger.warn(`[sms-graduation] judge backstop fetch failed (${intent}): ${err.message}; blocking`);
+    return { clear: false, blockers: judgeBackstopBlockers({ judgeAvailable: false }) };
+  }
+  const blockers = judgeBackstopBlockers({ judge });
+  return { clear: blockers.length === 0, blockers, judge };
 }
 
 module.exports = {
@@ -588,5 +704,7 @@ module.exports = {
   resolveVoiceProfilePin,
   fetchSuggestOutcomes,
   evaluateAutoSendEligibility,
+  evaluateJudgeBackstop,
+  judgeBackstopBlockers,
   computeReadiness,
 };

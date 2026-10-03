@@ -3,6 +3,7 @@ const { PACKAGES, packageHash } = require('../services/typed-decisions/packages'
 const CALL_JUDGE_HASH = packageHash(PACKAGES['call_judge.v2']);
 
 const ROW = {
+  provider: 'typesafe',
   id: 'ignored-id',
   capability: 'call_judge',
   package_id: 'call_judge.v2',
@@ -27,8 +28,10 @@ describe('rowToCase', () => {
   test('keeps only ids, typed answers, labels, baselines and evidence; never text', () => {
     const c = rowToCase(ROW);
     expect(c).toEqual({
+      provider: 'typesafe',
       subject_type: 'call_log',
       subject_id: '11111111-1111-4111-8111-111111111111',
+      subject_version: null,
       package_id: 'call_judge.v2',
       package_hash: CALL_JUDGE_HASH,
       question_id: 'is_lead',
@@ -41,6 +44,19 @@ describe('rowToCase', () => {
       outcome_evidence: { source: 'leads_customers', window: '7d', value: true, observed_at: '2026-09-30T00:00:00.000Z' },
     });
     expect(JSON.stringify(c)).not.toMatch(/transcript|someone@example|labeled_by|Jane Doe|123 Main|note/);
+  });
+
+  test('provider is a closed registry value: a second provider exports as itself, a stored string outside the registry is not exported', () => {
+    expect(rowToCase({ ...ROW, provider: 'cloudflare' }).provider).toBe('cloudflare');
+    expect(rowToCase({ ...ROW, provider: null })).toBeNull(); // provider is NOT NULL: a row without one is malformed, never Jev's by default
+    expect(rowToCase({ ...ROW, provider: undefined })).toBeNull();
+    expect(rowToCase({ ...ROW, provider: 'Jane Doe at 123 Main' })).toBeNull();
+    expect(COLUMNS).toContain('provider');
+  });
+  test('carries the stored subject version so the eval can drop a reprocessed subject; never a non-digest', () => {
+    expect(rowToCase({ ...ROW, subject_hash: 'b'.repeat(64) }).subject_version).toBe('b'.repeat(64));
+    expect(rowToCase({ ...ROW, subject_hash: 'Caller: hi' }).subject_version).toBeNull();
+    expect(COLUMNS).toContain('subject_hash');
   });
   test('never selects a text column', () => {
     expect(COLUMNS).not.toEqual(expect.arrayContaining(['transcript', 'body', 'message']));
@@ -143,10 +159,12 @@ describe('exportCases (stubbed db)', () => {
       whereIn: jest.fn((c, v) => { calls.whereIn = [c, v]; return query; }),
       whereRaw: jest.fn((sql) => { calls.whereRaw = sql; return query; }),
       select: jest.fn((cols) => { calls.select = cols; return query; }),
-      orderBy: jest.fn(async () => [ROW]),
+      orderBy: jest.fn(async (order) => { calls.orderBy = order; return [ROW]; }),
     };
     const db = jest.fn((table) => { calls.table = table; return query; });
     const result = await exportCases({ db, capability: 'call_judge', now: () => new Date('2026-10-01T00:00:00Z') });
+    // provider is the last ordering column: two providers' rows for one subject and question never tie
+    expect(calls.orderBy.map((o) => o.column)).toEqual(['package_id', 'subject_type', 'subject_id', 'question_id', 'provider']);
     expect(calls).toMatchObject({ table: 'decision_reviews', where: { capability: 'call_judge' }, whereIn: ['label_status', ['confirmed_error', 'confirmed_correct']], whereRaw: expect.stringMatching(/package_hash ~ '\^\[0-9a-f\]\{64\}\$'.*label->>'verdict' IN \('jev_right','jev_wrong','unclear'\).*jsonb_exists\(label, 'correct_value'\).*btrim\(labeled_by\) <> ''.*confirmed_correct' AND label->>'verdict' = 'jev_right'/), select: COLUMNS });
     expect(calls.whereRaw).not.toMatch(/\?/);
     expect(rowToCase(ROW).package_hash).toBe(CALL_JUDGE_HASH);

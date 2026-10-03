@@ -514,6 +514,11 @@ router.post('/:id/send', async (req, res, next) => {
   try {
     const row = await db('lawn_diagnostics').where({ id: req.params.id }).first();
     if (!row) return res.status(404).json({ error: 'Diagnostic not found' });
+    // A technician may act only on a diagnostic they created (codex #5568 r3
+    // P1); an admin may act on any. 404 so an id seen elsewhere confirms nothing.
+    if (req.techRole !== 'admin' && String(row.created_by_technician_id || '') !== String(req.technicianId || '')) {
+      return res.status(404).json({ error: 'Diagnostic not found' });
+    }
 
     const { contact, address } = resolveRecipient(req, row);
 
@@ -572,6 +577,11 @@ router.post('/:id/lead', async (req, res, next) => {
   try {
     const row = await db('lawn_diagnostics').where({ id: req.params.id }).first();
     if (!row) return res.status(404).json({ error: 'Diagnostic not found' });
+    // A technician may act only on a diagnostic they created (codex #5568 r3
+    // P1); an admin may act on any. 404 so an id seen elsewhere confirms nothing.
+    if (req.techRole !== 'admin' && String(row.created_by_technician_id || '') !== String(req.technicianId || '')) {
+      return res.status(404).json({ error: 'Diagnostic not found' });
+    }
     if (row.lead_id) return res.json({ success: true, leadId: row.lead_id, alreadyLinked: true });
 
     // Same recipient resolution as /send — a cleared/partial recipient on the request

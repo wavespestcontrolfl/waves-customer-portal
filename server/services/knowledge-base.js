@@ -363,7 +363,10 @@ const KnowledgeBaseService = {
     let q = db('knowledge_base')
       .select('*', db.raw("ts_rank(search_vector, websearch_to_tsquery('english', ?)) as rank", [query]))
       .whereRaw("search_vector @@ websearch_to_tsquery('english', ?)", [query])
-      .where({ status: 'active' });
+      .where({ status: 'active' })
+      // An admin's active=false (status left 'active') hides the row too;
+      // a NULL flag on an old row still counts as on.
+      .whereRaw('active IS NOT FALSE');
     if (category) q = q.where({ category });
     q = q.orderBy('rank', 'desc').limit(limit);
     return q;

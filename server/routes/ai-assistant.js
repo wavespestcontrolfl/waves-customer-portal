@@ -5,12 +5,12 @@ const router = express.Router();
 const db = require('../models/db');
 const { rateLimitKey } = require('../middleware/rate-limit-key');
 const { authenticate } = require('../middleware/auth');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const WavesAssistant = require('../services/ai-assistant/assistant');
 const logger = require('../services/logger');
-const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { sendManualCustomerSms } = require('../services/messaging/send-manual-customer-sms');
 const { preferredRouteDecisionForFeedback } = require('../services/call-route-decisions');
-const { withLockedRouteDecisions, resolveDisplayedRouteDecision, STALE_ROUTE_DECISION, ROUTE_DECISION_REVISION_SQL } = require('../services/call-routing-gates');
+const { withLockedRouteDecisions, innerJoinRouteFeedback, resolveDisplayedRouteDecision, STALE_ROUTE_DECISION, ROUTE_DECISION_REVISION_SQL } = require('../services/call-routing-gates');
 
 async function tableExists(name) {
   return db.schema.hasTable(name).catch(() => false);
@@ -310,7 +310,8 @@ router.post('/admin/conversations/:id/reply', adminAuthenticate, requireTechOrAd
     // If SMS channel, actually send the SMS
     if (conv.channel === 'sms' && conv.channel_identifier) {
       try {
-        const smsResult = await sendCustomerMessage({
+        // Staff reply: the interlocked wrapper, so it never crosses an automatic reply on the thread.
+        const smsResult = await sendManualCustomerSms({
           to: conv.channel_identifier,
           body: message,
           channel: 'sms',
@@ -356,10 +357,12 @@ router.post('/admin/conversations/:id/reply', adminAuthenticate, requireTechOrAd
 
 // =========================================================================
 // CALL LOG — admin view of all calls
+// Admin-only (owner 2026-10-02): a technician login gets no customer calls —
+// no call list, no call row or transcript, no routing calibration.
 // =========================================================================
 
 // GET /api/ai/admin/calls — call history
-router.get('/admin/calls', adminAuthenticate, requireTechOrAdmin, async (req, res, next) => {
+router.get('/admin/calls', adminAuthenticate, requireAdmin, async (req, res, next) => {
   try {
     const { days = 30, limit = 50, search, id } = req.query;
     const searchTerm = typeof search === 'string' ? search.trim() : '';
@@ -423,9 +426,22 @@ router.get('/admin/calls', adminAuthenticate, requireTechOrAdmin, async (req, re
     }
 
     if (callIds.length && await tableExists('route_feedback')) {
-      const feedbackRows = await db('route_feedback')
-        .whereIn('call_log_id', callIds)
-        .orderBy('updated_at', 'desc');
+      // The verdict shown beside a call's decision is the one that decision
+      // carries (innerJoinRouteFeedback, the ONE join every reader uses: only the
+      // row the verdict points at — codex #5377 r9 P1), so a newer decision
+      // reads unreviewed. Calls with no decision
+      // row keep their by-call verdict.
+      const chosenIds = [...routeDecisionByCall.values()].map((row) => row.id).filter(Boolean);
+      const feedbackRows = [];
+      if (chosenIds.length) {
+        feedbackRows.push(...await innerJoinRouteFeedback(db('route_decisions').whereIn('route_decisions.id', chosenIds))
+          .select('route_feedback.*'));
+      }
+      const undecided = callIds.filter((id) => !routeDecisionByCall.has(id));
+      if (undecided.length) {
+        feedbackRows.push(...await db('route_feedback').whereIn('call_log_id', undecided));
+      }
+      feedbackRows.sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at));
       for (const row of feedbackRows) {
         if (!routeFeedbackByCall.has(row.call_log_id)) routeFeedbackByCall.set(row.call_log_id, row);
       }
@@ -461,7 +477,7 @@ router.get('/admin/calls', adminAuthenticate, requireTechOrAdmin, async (req, re
 });
 
 // GET /api/ai/admin/calls/route-calibration — Right/Wrong label summary
-router.get('/admin/calls/route-calibration', adminAuthenticate, requireTechOrAdmin, async (req, res, next) => {
+router.get('/admin/calls/route-calibration', adminAuthenticate, requireAdmin, async (req, res, next) => {
   try {
     if (!(await tableExists('route_feedback'))) {
       return res.json({
@@ -582,7 +598,7 @@ router.get('/admin/calls/route-calibration', adminAuthenticate, requireTechOrAdm
 });
 
 // GET /api/ai/admin/calls/:id — single call with transcription
-router.get('/admin/calls/:id', adminAuthenticate, requireTechOrAdmin, async (req, res, next) => {
+router.get('/admin/calls/:id', adminAuthenticate, requireAdmin, async (req, res, next) => {
   try {
     const call = await db('call_log').where('id', req.params.id).first();
     if (!call) return res.status(404).json({ error: 'Call not found' });
@@ -591,7 +607,7 @@ router.get('/admin/calls/:id', adminAuthenticate, requireTechOrAdmin, async (req
 });
 
 // POST /api/ai/admin/calls/:id/route-feedback — calibration verdict
-router.post('/admin/calls/:id/route-feedback', adminAuthenticate, requireTechOrAdmin, async (req, res, next) => {
+router.post('/admin/calls/:id/route-feedback', adminAuthenticate, requireAdmin, async (req, res, next) => {
   try {
     if (!(await tableExists('route_feedback'))) {
       return res.status(409).json({ error: 'route_feedback table has not been migrated yet' });

@@ -81,6 +81,7 @@ function conn({ scheduledService = null, claim = null, updateResult = 1, rootsFo
         q.update = async (patch) => { writes.push({ table, op: 'update', where: q._where, whereNull: q._whereNull, patch }); return updateResult; };
     q.delete = async () => { writes.push({ table, op: 'delete', where: q._where }); return 1; };
     q.whereNotIn = () => q;
+    q.whereRaw = () => q; // the office-parked setup fee probe (setup_fee_office_billing alert)
     q.whereIn = () => { q._whereIn = true; return q; };
     q.orderBy = () => q;
     q.select = async () => {
@@ -1451,7 +1452,7 @@ describe('r48 — completion claims restore, in-flight/sibling reconciliation, c
       const q = { _where: null };
       q.where = (w) => { if (typeof w === 'function') { w.call(q); return q; } q._where = { ...(q._where || {}), ...(typeof w === 'object' ? w : {}) }; return q; };
       q.whereNot = () => q; q.orWhere = () => q; q.whereNull = (col) => { q._whereNull = col; return q; }; q.forUpdate = () => q;
-      q.whereNotIn = () => q; q.whereIn = () => { q._whereIn = true; return q; }; q.orderBy = () => q; q.orWhereNotNull = () => q;
+      q.whereNotIn = () => q; q.whereIn = () => { q._whereIn = true; return q; }; q.orderBy = () => q; q.whereRaw = () => q; q.orWhereNotNull = () => q;
       q.first = async () => {
         if (table === 'setup_fee_claims') return q._where && q._where.scheduled_service_id ? (siblings[0] || null) : claimRow;
         if (table === 'annual_prepay_terms') return termBacked;
@@ -1544,7 +1545,7 @@ describe('r48 — completion claims restore, in-flight/sibling reconciliation, c
         q._where = { ...(q._where || {}), ...(typeof w === 'object' ? w : {}) };
         return q;
       };
-      q.whereNot = () => q; q.orWhere = () => q; q.whereNull = () => q; q.forUpdate = () => q; q.whereNotIn = () => q; q.whereIn = () => q; q.orderBy = () => q; q.orWhereNotNull = () => q;
+      q.whereNot = () => q; q.orWhere = () => q; q.whereNull = () => q; q.forUpdate = () => q; q.whereNotIn = () => q; q.whereIn = () => q; q.orderBy = () => q; q.whereRaw = () => q; q.orWhereNotNull = () => q;
       q.first = async () => {
         if (table === 'invoices') {
           // Not a switch-superseded prepay (source contract for this

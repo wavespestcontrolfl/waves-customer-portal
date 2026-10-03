@@ -147,6 +147,7 @@ beforeEach(() => {
   // Draft finalization may run in a transaction (upsell pitched flip) — the
   // trx handle reuses the same table-keyed queue machinery.
   db.transaction = jest.fn(async (fn) => fn(db));
+  db.raw = jest.fn((sql, bindings) => ({ sql, bindings })); // the review-provenance stamp (flags.review_verdict)
   sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM_real_sid' });
   mockGates.campaignDrafts = true;
   mockGates.smsGratitudeReplies = false;
@@ -264,6 +265,26 @@ describe('PUT /admin/drafts/:id/approve', () => {
       sourceRef: 'upsell_opportunities:opp-1',
       excludeDraftId: 'draft-1',
     });
+  });
+
+  test('a draft whose body names a call-us line sends FROM that pinned line (seasonal win-back)', async () => {
+    const draft = campaignDraft({ flags: JSON.stringify({ fromNumber: '+19412972817' }) });
+    enqueueApproveHappyPath(draft);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-1/approve`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: '{}' });
+      expect(res.status).toBe(200);
+    });
+    expect(sendCustomerMessage.mock.calls[0][0].metadata.fromNumber).toBe('+19412972817');
+  });
+
+  test('a pinned line that is not one of our numbers is ignored', async () => {
+    const draft = campaignDraft({ flags: JSON.stringify({ fromNumber: '+15550000000' }) });
+    enqueueApproveHappyPath(draft);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/drafts/draft-1/approve`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: '{}' });
+      expect(res.status).toBe(200);
+    });
+    expect(sendCustomerMessage.mock.calls[0][0].metadata.fromNumber).toBeUndefined();
   });
 
   test('gate off is a full kill switch: existing campaign drafts cannot be approve-sent, draft stays pending', async () => {
@@ -561,6 +582,26 @@ describe('PUT /admin/drafts/:id/revise', () => {
     // Campaign message_type + local office origin apply on revise too.
     expect(input.metadata.original_message_type).toBe('reactivation');
     expect(input.metadata.customerLocationId).toBe('loc-9');
+  });
+
+  test('a revised draft carries its composer-linked visits (UUIDs only) so the send step can hold a street-level address hold; none posted, none sent', async () => {
+    const VISIT = '3f1c2a9e-5b7d-4e21-9c0a-1d2e3f4a5b6c';
+    for (const [posted, expected] of [[[VISIT, 'junk', VISIT], [VISIT]], [undefined, undefined]]) {
+      sendCustomerMessage.mockClear();
+      enqueue('message_drafts', { returning: [campaignDraft({ campaign_type: 'reactivation', source_ref: 'customers:cust-1' })] });
+      enqueue('customers', { first: { id: 'cust-1', phone: '+19415550101' } });
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/drafts/draft-1/revise`, {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ revisedResponse: 'Your reschedule link: https://example.test/r/abc', linkedVisitIds: posted }),
+        });
+        expect(res.status).toBe(200);
+      });
+      const { metadata } = sendCustomerMessage.mock.calls[0][0];
+      if (expected) expect(metadata.linked_scheduled_service_ids).toEqual(expected);
+      else expect(metadata).not.toHaveProperty('linked_scheduled_service_ids');
+    }
   });
 
   test('gate off blocks revise-send for campaign drafts and restores the pending draft', async () => {

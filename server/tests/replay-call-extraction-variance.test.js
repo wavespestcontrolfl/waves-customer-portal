@@ -904,6 +904,28 @@ describe('call extraction replay variance reporting', () => {
     });
   });
 
+  describe('on-site consent input variance coverage (schema 1.22.0)', () => {
+    test('both flat mirrors are high-severity replay fields that collapse absent to false', () => {
+      for (const field of ['secondary_wants_appointment_texts', 'secondary_on_site']) {
+        expect(FIELD_GROUPS.high).toContain(field);
+        expect(normalizeField(field, null)).toBe(false);
+        expect(normalizeField(field, true)).toBe(true);
+        expect(compareFlatFields({ [field]: false }, { [field]: true }, true).find((v) => v.field === field).severity).toBe('high');
+      }
+    });
+    test('the per-contact consent signature covers every entry and collapses absent to empty', () => {
+      const field = 'secondary_contacts_consent_signature';
+      expect(FIELD_GROUPS.high).toContain(field);
+      expect(normalizeField(field, null)).toBe('');
+      expect(normalizeField(field, '')).toBe('');
+      // A flip on entry 2 (invisible to the singleton fields) is a high-severity variance.
+      const before = '5550100123:spouse_partner:1:1:1|other@example.com:tenant:1:0:0';
+      const after = '5550100123:spouse_partner:1:1:1|other@example.com:tenant:1:1:1';
+      expect(compareFlatFields({ [field]: before }, { [field]: after }, true).find((v) => v.field === field).severity).toBe('high');
+      expect(compareFlatFields({ [field]: before }, { [field]: before }, true).filter((v) => v.field === field)).toEqual([]);
+    });
+  });
+
   describe('consent.sms_declined variance coverage', () => {
     test('sms_declined is registered in FIELD_GROUPS', () => {
       const allFields = new Set(Object.values(FIELD_GROUPS).flat());
@@ -929,5 +951,38 @@ describe('call extraction replay variance reporting', () => {
       const variances = compareFlatFields(flat, { ...flat }, true).filter((v) => v.field === 'sms_declined');
       expect(variances).toEqual([]);
     });
+  });
+});
+
+describe('replay extraction grounds relative dates on the real call start (codex #5377)', () => {
+  test('extractCallDataV2 receives callStartedAt(call), not the fallback row insert time', () => {
+    const src = require('fs').readFileSync(require.resolve('../scripts/replay-call-extraction-variance'), 'utf8');
+    const at = src.indexOf('CRP._test.extractCallDataV2(transcriptForExtraction');
+    expect(at).toBeGreaterThan(-1);
+    expect(src.slice(at, at + 600)).toMatch(/callStartedAt: require\('\.\.\/utils\/call-timeline'\)\.callStartedAt\(call\)/);
+  });
+});
+
+describe('shadow verification grounds relative dates on the real call start (codex #5377 r16)', () => {
+  test('verify-v2-shadow-path passes callStartedAt(r) to extractCallDataV2, not the row insert time', () => {
+    const src = require('fs').readFileSync(require.resolve('../scripts/verify-v2-shadow-path'), 'utf8');
+    const at = src.indexOf('CRP._test.extractCallDataV2(');
+    expect(at).toBeGreaterThan(-1);
+    expect(src.slice(at, at + 700)).toMatch(/callStartedAt: require\('\.\.\/utils\/call-timeline'\)\.callStartedAt\(r\) \|\| new Date\(\)/);
+    expect(src.slice(at, at + 700)).not.toContain('new Date(r.created_at)');
+  });
+});
+
+describe('a retranscribed replay never borrows the stored V1 service view (codex #5377 r19 P2)', () => {
+  test('contextFor passes extracted: null for a transcript that differs from the stored one', () => {
+    const src = require('fs').readFileSync(require.resolve('../scripts/replay-call-extraction-variance'), 'utf8');
+    expect(src).toContain("...(transcript !== undefined && transcript !== call.transcription ? { extracted: null } : {}),");
+  });
+
+  test('the audit quote check holds a V2 call when it has no V1 record', () => {
+    const { auditCommercialQuoteBookableFor } = require('../services/call-recording-processor')._test;
+    const row = { id: 'svc-roach', service_key: 'cockroach_control', name: 'Cockroach Control Service', short_name: 'Cockroach Control', billing_type: 'one_time', pricing_type: 'fixed', base_price: '350.00' };
+    const v2 = { meta: { schema_version: '1.21.0' }, service_request: { specific_service_name: row.name } };
+    expect(auditCommercialQuoteBookableFor({ extracted: null, transcription: 'x', services: [row] })(150, v2)).toBe(false);
   });
 });

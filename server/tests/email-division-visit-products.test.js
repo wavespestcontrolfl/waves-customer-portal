@@ -389,9 +389,12 @@ describe('PRODUCT_FAMILIES customer-facing text carries no fabricated timeline',
 describe('treatmentTargets (area-intel treatment evidence)', () => {
   const bifen = (targets) => ({ product_name: 'Bifen I/T', active_ingredient: 'bifenthrin', targets });
 
-  // The completion picker's own catalog (SchedulePage.jsx) — the canonical
-  // source of service_products.targets chips. Read as text: it is client code.
-  const schedulePage = fs.readFileSync(path.join(__dirname, '../../client/src/pages/admin/SchedulePage.jsx'), 'utf8');
+  // The completion picker's own catalog (SchedulePage.jsx, with the lawn and
+  // nutrition lists in client/src/lib/lawn-targets.js) — the canonical source
+  // of service_products.targets chips. Read as text: it is client code.
+  const schedulePage = ['../../client/src/pages/admin/SchedulePage.jsx', '../../client/src/lib/lawn-targets.js']
+    .map((file) => fs.readFileSync(path.join(__dirname, file), 'utf8'))
+    .join('\n');
   const pickerList = (name) => {
     const match = schedulePage.match(new RegExp(`const ${name} = \\[([\\s\\S]*?)\\];`));
     return [...match[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);

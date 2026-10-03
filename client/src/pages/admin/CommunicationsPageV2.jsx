@@ -126,6 +126,21 @@ import {
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
+// Home-line PR 3: whether the composer may take the server's sender for a
+// fresh text — no draft in progress (body, attachments, or a loaded draft)
+// and no staff pick since the request: the line is still the one the
+// request was made with, or the one the automatic customer-sender effect set
+// (state.autoLine), which is initialization, not a staff choice.
+// replaceableLines (from the server's answer) bounds it further: a current
+// line that is not an office/main line — recruiting, tech, tracking — stays.
+export function composerAcceptsServerSender(state, requestedLine, replaceableLines = null) {
+  if (!state) return false;
+  const line = state.line || "";
+  if (replaceableLines && line && !replaceableLines.includes(line)) return false;
+  return !state.loadedDraft && !String(state.body || "").trim() && !state.attachmentCount
+    && (line === (requestedLine || "") || (!!state.autoLine && line === state.autoLine));
+}
+
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     headers: {
@@ -238,13 +253,15 @@ const TABS = [
   },
   { key: "sms", label: "SMS", Icon: MessageSquare },
   { key: "email", label: "Email", Icon: Mail, adminOnly: true },
-  { key: "calls", label: "Calls", Icon: PhoneCall },
+  // Calls are owner-only (2026-10-02): a technician login gets no customer
+  // calls — no call list, audio or transcript. The server refuses the reads.
+  { key: "calls", label: "Calls", Icon: PhoneCall, adminOnly: true },
   { key: "triage", label: "Triage", Icon: Inbox },
-  // Open promises across calls (call_commitments) — staff-wide like Calls.
+  // Open promises across calls (call_commitments) — staff-wide.
   { key: "owed", label: "Promises", Icon: ClipboardList },
   // Management tabs below are owner-only (2026-08-25 role lockdown):
   // template/routing/notification CONFIG and staff-performance scoring are
-  // not day-to-day comms work. Events/SMS/Calls/Triage stay staff-wide.
+  // not day-to-day comms work. Events/SMS/Triage/Promises stay staff-wide.
   {
     key: "templates",
     label: "Templates",
@@ -324,6 +341,16 @@ function linkFragment(url) {
 function bodyHasLink(body, url) {
   const frag = linkFragment(url);
   return !!frag && String(body || "").toLowerCase().includes(frag);
+}
+// The visit ids of the tracked reschedule / appointment links that are still IN the body. Judged at the
+// synchronous send boundary (the cleanup effects run after render): a link the operator deleted no longer
+// carries its visit id. The server also resolves the body itself; this is the additional input.
+export function trackedVisitIdsInBody(body, resched, customerLinks) {
+  const appointment = customerLinks?.appointment;
+  return [
+    resched && bodyHasLink(body, resched.url) ? resched.visitId : null,
+    appointment && bodyHasLink(body, appointment.url) ? appointment.visitId : null,
+  ].filter(Boolean);
 }
 function stripLinkLines(body, url) {
   const frag = linkFragment(url);
@@ -561,7 +588,7 @@ function SmsLogItemV2({ msg: m, onReply }) {
               variant="secondary"
               onClick={(e) => {
                 e.stopPropagation();
-                callViaBridge(contactPhone, contactLabel, ourNumber);
+                callViaBridge(contactPhone, contactLabel, ourNumber, m.linkedCustomerId || m.customerId);
               }}
             >
               <PhoneCall size={13} strokeWidth={1.75} className="mr-1.5" aria-hidden />
@@ -662,7 +689,7 @@ function ConversationViewV2({
             size="sm"
             variant="secondary"
             className="flex-1 md:flex-none"
-            onClick={() => callViaBridge(contactPhone, contactName, thread.ourNumber)}
+            onClick={() => callViaBridge(contactPhone, contactName, thread.ourNumber, thread.linkedCustomerId || thread.customerId)}
           >
             <PhoneCall size={13} strokeWidth={1.75} className="mr-1.5" aria-hidden />
             Call back
@@ -1111,6 +1138,9 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   const location = useLocation();
   const routeNeedsResponse = new URLSearchParams(location.search).get("needsResponse") === "true";
   const smsIsAdminRole = smsOutletContext?.user?.role === "admin";
+  // Deferred sends are office-only: the server replays a queued text later with
+  // no re-check of the sender's route, so a technician login only sends now.
+  const smsIsTechnicianRole = smsOutletContext?.user?.role === "technician";
   const navigate = useNavigate();
   const [messages, setMessages] = useState([]);
   const [stats, setStats] = useState(null);
@@ -1150,6 +1180,10 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     initialDraft: customer ? { selectedCustomerId: customer.id } : previousSenderRef.current ? { fromNumber: previousSenderRef.current } : undefined,
   });
   previousSenderRef.current = fromNumber;
+  // A restored draft cannot leave a technician on a hidden deferred timing.
+  useEffect(() => {
+    if (smsIsTechnicianRole && sendTiming !== "now") setSendTiming("now");
+  }, [smsIsTechnicianRole, sendTiming, setSendTiming]);
   const [sending, setSending] = useState(false);
   // Mirrors `sending` for async code that must not act mid-send: canceling
   // a review row while its /sms is in flight can land before the server's
@@ -1298,6 +1332,43 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       setThreadLock({ contactPhone: customer.phone, ourNumber: customerSenderNumber, label: customerSenderLabel });
     }
   }, [customer?.id, customer?.phone, customerSenderNumber, customerSenderLabel, fromNumber, threadLock?.ourNumber, loadedMessageDraft]);
+
+  // GATE_HOME_LINE (home-line PR 3): for a fresh text the server picks the
+  // line — the one they texted within 30 days, else their home line, else
+  // main. It answers null while the gate is off or the thread is on a
+  // non-customer line (recruiting, tech), leaving the thread-line choice
+  // above untouched. Never overrides a draft in progress.
+  const composerStateRef = useRef(null);
+  composerStateRef.current = {
+    line: fromNumber || "", body: msgBody, attachmentCount: attachments.length, loadedDraft: !!loadedMessageDraft,
+    autoLine: automaticCustomerSenderRef.current?.number || "",
+  };
+  useEffect(() => {
+    const phone = toNumber.trim();
+    const requested = composerStateRef.current;
+    if (phone.replace(/\D/g, "").length < 10 || !composerAcceptsServerSender(requested, requested.line)) return undefined;
+    let cancelled = false;
+    const params = new URLSearchParams({ phone });
+    if (selectedCustomerId) params.set("customerId", selectedCustomerId);
+    if (requested.line) params.set("currentLine", requested.line);
+    adminFetch(`/admin/communications/sender?${params.toString()}`)
+      .then((r) => {
+        // Re-read the composer at response time: a line staff picked, or a
+        // draft started, while the request was in flight must stand.
+        if (cancelled || !r?.fromNumber
+          || !composerAcceptsServerSender(composerStateRef.current, requested.line, Array.isArray(r.replaceableLines) ? r.replaceableLines : [])) return;
+        setFromNumber(r.fromNumber);
+        // Only a live conversation locks the picker ("Replying from … to
+        // continue thread"); a home-line / main default is a preselect staff
+        // can change.
+        setThreadLock(r.reason === "conversation"
+          ? { contactPhone: phone, ourNumber: r.fromNumber, label: NUMBER_LABEL_MAP[r.fromNumber] || r.label || r.fromNumber }
+          : null);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+    // Recipient changes only: a later staff pick of a line must stand.
+  }, [toNumber, selectedCustomerId, loadedMessageDraft]);
 
   const loadData = useCallback((search = "", options = {}) => {
     if (customer) return Promise.resolve();
@@ -1726,6 +1797,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   };
   const resolveScheduledFor = () => {
     if (sendTiming === "now") return { value: null, error: null };
+    if (smsIsTechnicianRole) return { value: null, error: "Scheduled sends are office-only. Send now instead." };
     if (sendTiming === "tomorrow_8") {
       const [y, m, d] = etDateOnly(new Date()).split("-").map(Number);
       // Build "tomorrow in ET" by adding 1 day at UTC noon (collision-free
@@ -1862,6 +1934,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       setSendResult({ ok: false, text: "An attachment has expired. Remove it and attach it again before sending." });
       return;
     }
+    const linkedVisitIds = trackedVisitIdsInBody(msgBody, insertedResched, insertedCustomerLinks);
     setSending(true);
     sendInFlightRef.current = true;
     setSendResult(null);
@@ -1877,7 +1950,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         } else {
           await adminFetch(`/admin/drafts/${encodeURIComponent(loadedMessageDraft.id)}/revise`, {
             method: "PUT",
-            body: JSON.stringify({ revisedResponse: revised, fromNumber }),
+            body: JSON.stringify({ revisedResponse: revised, fromNumber, linkedVisitIds: linkedVisitIds.length ? linkedVisitIds : undefined }),
           });
         }
         setSendResult({ ok: true, text: "Draft sent." });
@@ -1896,6 +1969,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             messageType: "manual",
             fromNumber,
             scheduledFor,
+            linkedVisitIds: linkedVisitIds.length ? linkedVisitIds : undefined,
             agentDecisionId: selectedAgentDraft?.decisionId || undefined,
             agentDraft: selectedAgentDraft?.suggestedMessage || undefined,
           }),
@@ -1948,6 +2022,9 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             // A freshly inserted contract signing link is unwritten until
             // this send activates it — the server needs the contract it names.
             contractId: insertedCustomerLinks.contract?.contractId || undefined,
+            // The visits the draft's reschedule / appointment links point at: the server's shared send
+            // step holds the text while one of them is a street-level address hold.
+            linkedVisitIds: linkedVisitIds.length ? linkedVisitIds : undefined,
           }),
         });
         if (!isAcceptedSms(sent)) {
@@ -2203,6 +2280,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         url: d.url,
         recipientKey: requestRecipientKey,
         customerId: requestCustomerId,
+        // The visit the link points at: the send carries it so a street-level address hold blocks the text.
+        visitId: d.appointment?.id || null,
       });
       setSendResult({
         ok: true,
@@ -2226,7 +2305,9 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   // the operator deletes it (or the body clears on send).
   useEffect(() => {
     if (!insertedResched) return;
-    if (!msgBody.includes(insertedResched.url)) {
+    // Canonical presence (bodyHasLink): a harmless edit such as a hostname case change leaves the same live
+    // link in the body, so its tracking — and the visit id the send carries — must stay.
+    if (!bodyHasLink(msgBody, insertedResched.url)) {
       setInsertedResched(null);
       return;
     }
@@ -2238,14 +2319,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       currentRecipientKey !== insertedResched.recipientKey ||
       (selectedCustomerId || null) !== insertedResched.customerId
     ) {
-      setMsgBody((b) =>
-        b
-          .split("\n")
-          .filter((l) => !l.includes(insertedResched.url))
-          .join("\n")
-          .replace(/\n{3,}/g, "\n\n")
-          .trim(),
-      );
+      setMsgBody((b) => stripLinkLines(b, insertedResched.url));
       setInsertedResched(null);
       setSendResult({
         ok: true,
@@ -2523,6 +2597,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         // resolved lead id, so the send can route through the leads-page
         // send route and get its audit trail (pre-push Codex P2).
         leadId: d.leadId || null,
+        // The appointment-page link's visit: carried through the send (see insertedResched).
+        visitId: d.appointment?.id || null,
         // Both: the send posts reviewRequestEmail so the same ask is
         // emailed once the text has really gone out.
         emailToo: channel === "both",
@@ -2771,6 +2847,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
           ourNumber,
           customerName: m.customerName || null,
           customerId: m.customerId || null,
+          linkedCustomerId: m.linkedCustomerId || null,
           messages: [],
           lastMessage: null,
           lastTimestamp: null,
@@ -2782,6 +2859,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       thread.messages.push(m);
       if (m.customerName) thread.customerName = m.customerName;
       if (m.customerId) thread.customerId = m.customerId;
+      if (m.linkedCustomerId) thread.linkedCustomerId = m.linkedCustomerId;
       if (ourNumber && allNums.has(ourNumber)) thread.ourNumber = ourNumber;
       thread.lastMessage =
         m.body ||
@@ -3573,7 +3651,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             e.target.value = "";
           }}
         />{" "}
-        <Field label="Send" className={sendTiming === "custom" ? "mb-2" : "mb-3"}>
+        {!smsIsTechnicianRole && <Field label="Send" className={sendTiming === "custom" ? "mb-2" : "mb-3"}>
         <Select
           aria-label="Send timing"
           value={sendTiming}
@@ -3588,8 +3666,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
           <option value="tomorrow_8">Tomorrow at 8 AM</option>{" "}
           <option value="custom">Custom time…</option>{" "}
         </Select>
-        </Field>
-        {sendTiming === "custom" && (
+        </Field>}
+        {!smsIsTechnicianRole && sendTiming === "custom" && (
           <Input
             type="datetime-local"
             aria-label="Scheduled send time (Eastern)"
@@ -3769,7 +3847,9 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
               setActiveThread(null);
             }}
             onOpenProfile={(id) => setSelected360Id(id)}
-            onMarkSpam={handleMarkSpam}
+            // Blocking a number is owner-only (2026-10-02); the server
+            // refuses a technician, so the button is not offered.
+            onMarkSpam={smsIsAdminRole ? handleMarkSpam : undefined}
           />{" "}
           {renderLoadMore("Load older SMS history")}
         </Card>

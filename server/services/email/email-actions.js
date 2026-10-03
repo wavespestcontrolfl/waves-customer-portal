@@ -373,7 +373,22 @@ async function maybeDraftEstimateFromEmailLead({ email, extracted, lead }) {
 
   if (outcome.created) {
     try {
-      await db('leads').where({ id: lead.id }).update({ estimate_id: outcome.estimateId });
+      // Only onto a lead that is still open (codex #5477 r16): the customer's own
+      // /book booking may have closed this request ('handled') since the match, and
+      // an estimate linked behind that close would vanish from open work. The draft
+      // that lost the claim is archived the way a superseded unsent draft is.
+      const { OPEN_LEAD_STATUSES } = require('../lead-statuses');
+      const linked = await db('leads').where({ id: lead.id })
+        .whereIn('status', OPEN_LEAD_STATUSES).whereNull('deleted_at')
+        .update({ estimate_id: outcome.estimateId });
+      if (!linked) {
+        const { lockSupersededDraftInTx, archiveSupersededDraftInTx } = require('../estimate-automation-duplicates');
+        await db.transaction(async (trx) => {
+          const stale = await lockSupersededDraftInTx(trx, { estimateId: outcome.estimateId });
+          await archiveSupersededDraftInTx(trx, stale, { reason: 'lead_closed_before_link' });
+        });
+        outcome = { ...outcome, created: false, archived: true };
+      }
     } catch (e) {
       logger.warn(`[email-actions] lead→estimate link failed (non-blocking): ${e.message}`);
     }
@@ -776,7 +791,7 @@ async function handleLeadInquiry(email, classification) {
           first = false;
         }
       })
-      .whereNotIn('status', ['won', 'lost'])
+      .whereNotIn('status', ['won', 'lost', 'handled'])
       .whereNull('deleted_at')
       .first();
   }
@@ -785,7 +800,7 @@ async function handleLeadInquiry(email, classification) {
   // it would glue unrelated prospects onto a single lead.
   if (!existingLead && email.from_address && !automatedSender) {
     existingLead = await db('leads').where('email', email.from_address)
-      .whereNotIn('status', ['won', 'lost'])
+      .whereNotIn('status', ['won', 'lost', 'handled'])
       .whereNull('deleted_at')
       .first();
   }
@@ -797,7 +812,7 @@ async function handleLeadInquiry(email, classification) {
       // fresh activity or have another email attached to it.
       const liveLead = await trx('leads')
         .where({ id: existingLead.id })
-        .whereNotIn('status', ['won', 'lost'])
+        .whereNotIn('status', ['won', 'lost', 'handled'])
         .whereNull('deleted_at')
         .forUpdate()
         .first();

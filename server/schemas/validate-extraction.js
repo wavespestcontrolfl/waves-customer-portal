@@ -131,7 +131,27 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // moved_appointment_date. call-reschedule-agreement.js only verifies the
 // flags, the quotes and the resolved date's weekday; a missing flag fails
 // closed there.
-const SCHEMA_VERSION = '1.20.0';
+// 1.21.0: additive — service_request.price_offered_by_staff,
+// service_request.price_accepted_by_caller, service_request.price_is_final,
+// scheduling.staff_accepted_proposed_slot (booleans) and
+// scheduling.selected_day_words (string), each nullable and optional in both
+// schemas, never `required`. Owner direction 2026-09-30 (codex #5377 r2: hand-
+// written word grammars for "the caller accepted the price", "staff offered
+// it", "staff accepted the caller's proposal" and "the caller selected this
+// day" never converge): the extraction JUDGES that language and pins the
+// quote for each; services/call-commercial-dictated-booking.js only verifies
+// the judgements, that each quote is word for word in a turn of its required
+// speaker, and their order. A missing judgement fails closed there.
+// 1.22.0: additive — secondary_contact(s).wants_appointment_texts and
+// .on_site (optional booleans in both schemas, never `required`). Owner ruling
+// 2026-09-30 "on-site person is the contact point", redesigned 2026-10-01:
+// wants_notifications is channel-neutral (it is also set for "email him the
+// report"), so the extraction separately records whether the caller agreed
+// THIS person gets the appointment TEXTS and whether the call says they will
+// be AT the property. The call pipeline uses them only to decide whether to
+// send that person the recipient opt-in ask; consent is their own YES. Older
+// payloads, which lack both, still validate and simply never qualify.
+const SCHEMA_VERSION = '1.22.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);

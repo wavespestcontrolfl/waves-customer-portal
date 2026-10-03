@@ -135,7 +135,7 @@ function recoveryMarkerPayload(db, passStamp) {
 }
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
-const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, upsertRouteDecision, updateUnreviewedRouteDecisions, buildTriageItem, V2_DECISION_VERSION, SUPERSEDE_KEPT_CARD_SQL } = require('./call-routing-gates');
+const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, upsertRouteDecision, updateUnreviewedRouteDecisions, buildTriageItem, routeDecisionFamilyVersions, V2_DECISION_VERSION, SUPERSEDE_KEPT_CARD_SQL } = require('./call-routing-gates');
 // Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
 const { isEnabled } = require('../config/feature-gates');
 
@@ -145,6 +145,17 @@ const { isEnabled } = require('../config/feature-gates');
 // both processor lanes, so the gate alone never half-applies (codex #5371 r2).
 function unclearServiceAssessmentActive(enabled = isEnabled) {
   return enabled('callUnclearServiceAssessment') === true && enabled('callFailOpenBooking') === true;
+}
+// GATE_CALL_COMMERCIAL_DICTATED_BOOKING as the canAutoRoute option: INBOUND
+// calls only (outbound speaker labels have swapped) and only with
+// GATE_CALL_AGENT_COMMIT_BOOKING on, the kill switch of the commercial
+// exception; read at call time like the GATE_CALL_PROPERTY_ROLE reads. ONE
+// predicate for both processor lanes AND buildFailOpenRoutingContext (the
+// offline routing audits), so they derive it one way (codex #5377 r6).
+function commercialDictatedBookingActive(call = {}, gates = {}) {
+  const enabled = gates.isEnabled || isEnabled;
+  const live = gates.commercialLive || (() => require('../config/feature-gates').callCommercialDictatedBookingLive?.());
+  return enabled('callAgentCommitBooking') === true && !isOutboundCall(call) && live() === true;
 }
 const { decideDisposition } = require('./call-disposition');
 const { classifyCall, recordVerdict, cnamFromEnvelope } = require('./call-spam-classifier');
@@ -880,6 +891,7 @@ const CONFIRM_REASON_TEXT = {
   service_area_unverified: 'the address on file could not be read to check the service area — confirm the address and county before booking',
   caller_not_authorized: 'caller is arranging service for someone else — confirm the account holder',
   missing_last_name: "no last name captured — get the account holder's full name",
+  missing_first_name: "no first name on file for this customer — get the account holder's first name",
   rental_or_tenant_occupied: 'rental / tenant-occupied property — confirm property access and whether to tag it a rental',
   second_service_address: 'service address differs from the one on file — may be a second property (e.g. a rental vs. their home)',
   on_file_house_number_conflict: 'caller gave a different house number on the same street as the address on file — confirm which number before sending the estimate or dispatching',
@@ -1433,7 +1445,7 @@ const { resolveCallLeadSource } = require('../utils/call-lead-source');
 // estimate_viewed / estimate_drafted / awaiting_address / …) is covered without
 // enumerating a growing set, while won/lost/disqualified/duplicate rows fall
 // through to a fresh insert instead of hiding the inquiry on a closed lead.
-const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate'];
+const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'handled'];
 
 // Coarse account classification of a phone-matched caller, used only to give the
 // extraction model context ("this caller is already a Waves customer"). Mirrors
@@ -1802,8 +1814,10 @@ function buildStreetLevelHold({ knownCaller, routingResult } = {}) {
 // triage card instead), so this is the only one.
 // The dispatch schedule link for a held visit: ?appointment opens the visit,
 // ?date selects its day. Shared by the admin bell and the review card.
+// The card's "Open visit" link; the one builder lives in street-level-hold.js (the triage list rebuilds it
+// with a moved hold's live date).
 function streetLevelVisitLink(visitId, visitDate) {
-  return `/admin/dispatch?tab=schedule${visitDate ? `&date=${visitDate}` : ''}&appointment=${encodeURIComponent(visitId)}`;
+  return require('./street-level-hold').streetLevelVisitLink(visitId, visitDate);
 }
 function streetLevelVisitWhen(scheduledDate, windowStart) {
   return [dateOnlyISO(scheduledDate), windowStart ? String(windowStart).slice(0, 5) : null].filter(Boolean).join(' ');
@@ -2113,9 +2127,35 @@ function callerIdNameForPrompt(call) {
  * The caller must still run demoteFailOpenOnV1AddressConflict on the result,
  * exactly as the live path does — the two are one contract.
  */
+// The commercial dictated booking options the audits hand canAutoRoute: the processor
+// lanes' context, with the trusted-label gate, the routed transcript, the call's own
+// START (callStartedAt: a post-call fallback row's created_at is after the call ended;
+// codex #5377 r12 P2) and the audit's catalog-aware quote check.
+function auditCommercialDictatedOptions({ call, gates, transcript, extracted, bookableServices }) {
+  const routedTranscript = transcript !== undefined ? transcript : call.transcription;
+  return {
+    commercialDictatedBooking: true,
+    transcriptLabelsTrusted: (gates?.isEnabled || isEnabled)('callAgentCommitTrustedLabels') === true,
+    transcript: routedTranscript,
+    callStartedAt: callStartedAt(call) || call.created_at,
+    commercialQuoteBookable: auditCommercialQuoteBookableFor({
+      extracted: extracted !== undefined ? extracted : parseLooseJson(call.ai_extraction),
+      transcription: routedTranscript,
+      services: bookableServices,
+    }),
+  };
+}
+
 function buildFailOpenRoutingContext({
   call = {}, customer = null, contactPhone = null, failOpenEnabled = false, onFileAddressVerdict = undefined,
   unclearServiceAssessmentEnabled = false,
+  // The transcript the routing decision is grounded in (default: the row's
+  // own); `gates` lets a test inject the gate reads.
+  transcript = undefined, gates = undefined,
+  // The bookable service catalog (loadBookableCallServices) and the call's V1
+  // record, for the commercial quote check; without a catalog the check fails
+  // closed (the audit holds the call, never over-admits it).
+  bookableServices = null, extracted = undefined,
 } = {}) {
   const knownCaller = customer ? summarizeKnownCaller(customer) : null;
   // A new lead's trust comes from the verdict production persisted for this
@@ -2144,6 +2184,12 @@ function buildFailOpenRoutingContext({
       // (the live pass's own two-gate predicate). Absent when off, so the
       // options shape the audits compare is unchanged gate-off.
       ...(failOpenEnabled && unclearServiceAssessmentEnabled ? { unclearServiceAssessment: true } : {}),
+      // GATE_CALL_COMMERCIAL_DICTATED_BOOKING (codex #5377 r6 P1): the processor
+      // lanes' commercial context, derived by the SAME predicate, with the
+      // trusted-label gate, the transcript and the call time the grounding reads
+      // off the call row every audit already has. Absent when the gate is off,
+      // so the options shape the audits compare is unchanged gate-off.
+      ...(commercialDictatedBookingActive(call, gates) ? auditCommercialDictatedOptions({ call, gates, transcript, extracted, bookableServices }) : {}),
     },
   };
 }
@@ -2231,9 +2277,10 @@ function demoteFailOpenOnV1AddressConflict(routingResult, extracted, knownCaller
     // branch files failedOpenFlags as advisory cards. Only the gate's own
     // waivers ride along (the on-file address flags stay dropped, as before),
     // so gate off the replacement verdict is unchanged.
-    ...(routingResult.unclearServiceDemotedFlags?.length ? {
-      failedOpenFlags: [...routingResult.unclearServiceDemotedFlags],
-      unclearServiceDemotedFlags: [...routingResult.unclearServiceDemotedFlags],
+    ...(routingResult.gateDemotedFlags?.length ? {
+      failedOpenFlags: [...routingResult.gateDemotedFlags],
+      gateDemotedFlags: [...routingResult.gateDemotedFlags],
+      ...(routingResult.unclearServiceDemotedFlags?.length ? { unclearServiceDemotedFlags: [...routingResult.unclearServiceDemotedFlags] } : {}),
     } : {}),
   };
 }
@@ -3045,11 +3092,13 @@ async function quotePromisedAlreadyNotified(callSid, { ignoreNoLead = false } = 
 // when their identities conflict (different phone, email, or first name), the
 // V1 extraction wins unmerged — never chimera two different people.
 function resolveCallSecondaryContact(extracted = {}, v2Extraction = null) {
-  const { mapSecondaryContactToLegacy } = require('../utils/extraction-compat');
+  const { canonicalV2Secondary } = require('../utils/extraction-compat');
   const v1 = (extracted.secondary_contact && typeof extracted.secondary_contact === 'object')
     ? extracted.secondary_contact
     : null;
-  const v2 = mapSecondaryContactToLegacy(v2Extraction?.secondary_contact);
+  // The singleton and the mirrored secondary_contacts[0] are canonicalized first, so
+  // flags the model put on only one of the two shapes still count.
+  const v2 = canonicalV2Secondary(v2Extraction);
   if (!v1 || !v2) return v1 || v2;
 
   const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
@@ -3062,6 +3111,27 @@ function resolveCallSecondaryContact(extracted = {}, v2Extraction = null) {
     || (v1.last_name && v2.last_name && norm(v1.last_name) !== norm(v2.last_name));
   if (conflicts) return v1;
 
+  // POSITIVE same-person evidence (shared email, phone, or full name). The
+  // conflict check above only proves the two extractions do not DISAGREE —
+  // an email-only V1 and a phone-only V2 never conflict, yet may be two
+  // different people. Anything that authorizes action on the OTHER
+  // extractor's identifier (billing V1's inbox for V2's payer; texting V2's
+  // phone on V1's consent) needs this, not just the absence of conflict.
+  const samePerson = (!!v1.email && !!v2.email && norm(v1.email) === norm(v2.email))
+    || (!!v1.phone && !!v2.phone && last10(v1.phone) === last10(v2.phone))
+    || (!!norm(v1.first_name) && norm(v1.first_name) === norm(v2.first_name)
+      && !!norm(v1.last_name) && norm(v1.last_name) === norm(v2.last_name));
+  // The on-site flags (wants_appointment_texts, on_site) come ONLY from the V2
+  // extraction (V1 does not extract them). They only decide whether the
+  // recipient gets the opt-in ASK (owner redesign 2026-10-01: consent is the
+  // recipient's own YES). A V2 flag is that extractor's statement about ITS OWN
+  // person, so it may only attach to the merged phone when that phone is V2's
+  // own (V1 has none) or the two are positively the same person — never to
+  // V1's different number — and it is bound to the role V2 itself assigned.
+  const v2FlagsCarry = !v1.phone || samePerson;
+  const onSiteRole = (r) => ON_SITE_NOTIFY_ROLES.has(String(r || '').trim().toLowerCase());
+  const v2Flag = (field) => v2[field] === true && v2FlagsCarry && onSiteRole(v2.role);
+
   return {
     first_name: v1.first_name || v2.first_name,
     last_name: v1.last_name || v2.last_name,
@@ -3071,6 +3141,15 @@ function resolveCallSecondaryContact(extracted = {}, v2Extraction = null) {
     // OR, not V1-wins: either extractor observing the caller's direction
     // ("send notifications to the buyer and myself") is enough.
     wants_notifications: v1.wants_notifications === true || v2.wants_notifications === true,
+    // Appointment-text intent and on-site presence (schema 1.22.0): V2's flags
+    // under the carry rules above. The identity-conflict check already returned
+    // V1 unmerged for a different person, so a conflicting V2 partner's flags
+    // never arrive here.
+    wants_appointment_texts: v2Flag('wants_appointment_texts'),
+    on_site: v2Flag('on_site'),
+    // The role those V2 flags were judged under: the ask decision reads it, so
+    // a different non-unknown V1 role never vetoes a V2 on-site contact.
+    ...((v2Flag('wants_appointment_texts') || v2Flag('on_site')) ? { on_site_role: v2.role } : {}),
     // Billing flag: V1's own flag always stands. A V2 flag is only inherited
     // when V1 and V2 are POSITIVELY the same person — a shared email, phone, or
     // full name. The identity-conflict check above can't see this gap: if V1
@@ -3079,13 +3158,7 @@ function resolveCallSecondaryContact(extracted = {}, v2Extraction = null) {
     // bill V1's inbox for V2's payer. Requiring a positive shared identifier
     // keeps the legitimate gap-fill (same name, V2 adds the flag) while refusing
     // to carry an "owner pays" flag onto an unrelated contact's email.
-    is_billing_party: v1.is_billing_party === true
-      || (v2.is_billing_party === true && (
-        (!!v1.email && !!v2.email && norm(v1.email) === norm(v2.email))
-        || (!!v1.phone && !!v2.phone && last10(v1.phone) === last10(v2.phone))
-        || (!!norm(v1.first_name) && norm(v1.first_name) === norm(v2.first_name)
-          && !!norm(v1.last_name) && norm(v1.last_name) === norm(v2.last_name))
-      )),
+    is_billing_party: v1.is_billing_party === true || (v2.is_billing_party === true && samePerson),
     notes: v1.notes || v2.notes,
   };
 }
@@ -3105,7 +3178,7 @@ function identityConflicts(a, b) {
 }
 
 function resolveCallSecondaryContacts(extracted = {}, v2Extraction = null) {
-  const { mapSecondaryContactsToLegacy, mapSecondaryContactToLegacy } = require('../utils/extraction-compat');
+  const { mapSecondaryContactsToLegacy, canonicalV2Secondary } = require('../utils/extraction-compat');
   const primary = resolveCallSecondaryContact(extracted, v2Extraction);
   let v2List = mapSecondaryContactsToLegacy(v2Extraction?.secondary_contacts);
   // When the single-contact resolver rejected V2's person on an identity
@@ -3114,7 +3187,10 @@ function resolveCallSecondaryContacts(extracted = {}, v2Extraction = null) {
   // rejected identity as an "additional" contact and fan notifications out
   // to it (codex P1). Drop the conflicting mirror; genuinely-different
   // extra parties (entries 2+) stay.
-  const v2Single = mapSecondaryContactToLegacy(v2Extraction?.secondary_contact);
+  // The CANONICAL V2 person (the same identity resolveCallSecondaryContact
+  // compared): a name-only singleton filled from its mirror carries the
+  // mirror's phone, so a phone conflict with V1 drops that mirror here too.
+  const v2Single = canonicalV2Secondary(v2Extraction);
   if (primary && v2Single && identityConflicts(primary, v2Single)) {
     const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
     const norm = (v) => String(v || '').trim().toLowerCase();
@@ -3237,8 +3313,16 @@ async function resolveCallBillingPayer(secondaryContacts, v2Extraction = null, c
 //   A customer who already had service contacts keeps their existing
 //   notify-primary choice: that was an explicit admin decision.
 // Returns a short status string for logging/tests.
-async function persistCallSecondaryContact(customerId, contact, { smsConsentExplicit = false } = {}) {
-  if (!customerId || !contact || contact.wants_notifications !== true) return 'skipped_no_intent';
+async function persistCallSecondaryContact(customerId, contact, { smsConsentExplicit = false, onSiteAskEligible = false, keepConsentStamp = false, holdPhone = keepConsentStamp } = {}) {
+  // An on-site contact the opt-in ask will actually go to (the caller's
+  // onSiteAskEligible: trigger + no do-not-contact + live rail) is saved too,
+  // unstamped: the slot is where the ask's phone and the later YES stamp live.
+  const onSiteOnly = !!contact && contact.wants_notifications !== true && onSiteAskEligible && onSiteOptinAskTrigger(contact);
+  if (!customerId || !contact || (contact.wants_notifications !== true && !onSiteOnly)) return 'skipped_no_intent';
+  // Nobody asked for this person to get notifications: their opt-in covers
+  // appointment TEXTS only, so their email is not filed (service-report
+  // emails fan out to every slot email).
+  if (onSiteOnly && contact.email) contact = { ...contact, email: null };
   if (!contact.phone && !contact.email) return 'skipped_no_contact_info';
   const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
   const customer = await db('customers').where({ id: customerId }).first();
@@ -3396,10 +3480,35 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
       service_contacts_consent_source: 'call_pipeline_request',
       service_contacts_consent_text_version: 'call-2026-07-23',
     } : {}),
-    ...((contact.phone && !smsConsentExplicit && customer.service_contacts_consent_at) ? {
+    // keepConsentStamp: the stamp (other people's consent) stays, and the new
+    // phone goes on the account's unconsented list — held out of every text
+    // resolver (customer-contact) whatever the opt-in gate does, until that
+    // person's own YES (recipient-optin) takes it off.
+    // Whether or not the row was stamped before (this same write may stamp
+    // it for the caller's explicit consent), the inferred phone is held —
+    // unless it already confirmed its own opt-in on this account (holdPhone).
+    // A kept stamp also records the phones it covers right now (grandfathered
+    // contacts often have no opt-in row): if a later edit clears the stamp,
+    // the held person's YES can still restore it.
+    ...((contact.phone && holdPhone) ? {
+      service_preferences: db.raw(
+        "jsonb_set(jsonb_set(COALESCE(service_preferences, '{}'::jsonb), '{unconsented_slot_phone_keys}', COALESCE(service_preferences -> 'unconsented_slot_phone_keys', '[]'::jsonb) || to_jsonb(?::text)), '{consent_covered_phone_keys}', COALESCE(service_preferences -> 'consent_covered_phone_keys', '[]'::jsonb) || ?::jsonb)",
+        [last10(contact.phone), JSON.stringify(customer.service_contacts_consent_at
+          ? SERVICE_CONTACT_SLOTS.map((sl) => last10(customer[sl.phone])).filter(Boolean)
+          : [])],
+      ),
+    } : {}),
+    ...((contact.phone && !smsConsentExplicit && !keepConsentStamp && customer.service_contacts_consent_at) ? {
       service_contacts_consent_at: null,
       service_contacts_consent_source: null,
       service_contacts_consent_text_version: null,
+      // The phones the cleared stamp DID cover (pre-double-opt-in slots have
+      // no recipient_optin row): kept so the new recipient's YES can restore
+      // the account stamp instead of being blocked by them forever.
+      service_preferences: db.raw(
+        "jsonb_set(COALESCE(service_preferences, '{}'::jsonb), '{consent_covered_phone_keys}', ?::jsonb)",
+        [JSON.stringify(SERVICE_CONTACT_SLOTS.map((sl) => last10(customer[sl.phone])).filter(Boolean))],
+      ),
     } : {}),
   };
   const updated = await write.update(slotWrite);
@@ -3613,6 +3722,44 @@ const AV_COUNTY_ENUM = { manatee: 'Manatee', sarasota: 'Sarasota', charlotte: 'C
 // customer, so a slot-phone hit alone must go to review, not auto-link.
 const HOUSEHOLD_SLOT_ROLES = new Set(['tenant', 'spouse_partner', 'family_member', 'home_buyer', 'home_seller', 'landlord']);
 const AGENT_TYPE_SLOT_ROLES = new Set(['real_estate_agent', 'property_manager', 'lender']);
+// Roles for a person who will be AT the property on the visit day. Narrower
+// than HOUSEHOLD_SLOT_ROLES on purpose: home_seller and landlord are not
+// on-site for the appointment, and agent-type roles serve many accounts.
+// home_seller: the seller who meets the technician (WDO / access visits) —
+// only when the on-site or text flag says so, like every role here.
+const ON_SITE_NOTIFY_ROLES = new Set(['spouse_partner', 'home_buyer', 'home_seller', 'tenant', 'family_member']);
+// Owner ruling 2026-09-30 "on-site person is the contact point", redesigned
+// 2026-10-01: when the caller books for someone who will be at the property
+// and the V2 extraction says that person should get the appointment texts
+// (wants_appointment_texts) or will be on site (on_site), the ONLY thing the
+// pipeline does is SEND THEM THE OPT-IN ASK. Consent is the recipient's own
+// YES to that text (recipient-optin.js stamps the artifact then) — never what
+// the extractor inferred. The flags are model-judged, so they may trigger the
+// ask and nothing else. Pure; every other gate (do-not-contact, a live rail,
+// the cross-customer phone guard, STOP / past-decline holds) is applied by the
+// caller and the opt-in service.
+function onSiteOptinAskTrigger(contact) {
+  if (!contact || !String(contact.phone || '').trim()) return false;
+  if (!ON_SITE_NOTIFY_ROLES.has(String(contact.on_site_role || contact.role || '').trim().toLowerCase())) return false;
+  return contact.wants_appointment_texts === true || contact.on_site === true;
+}
+// The pre-claim gates on the on-site opt-in ask, in one pure place: not an
+// on-site contact, the caller's do-not-contact request, a dark rail, then
+// whether the slot was saved (or the phone already filed). The opt-in service
+// still applies its own holds (STOP, past-decline, suppression, the claim
+// dedupe). Returns { ask, reason } with reason the card's not_sent:<reason>.
+function decideOnSiteOptinAsk(contact, { doNotContact = false, optinRailLive = false, persistResult = null, phoneFromV2 = true } = {}) {
+  if (!onSiteOptinAskTrigger(contact)) return { ask: false, reason: 'not_on_site_contact' };
+  // The ask goes only to a phone the V2 extraction itself captured — never a
+  // number only the legacy extractor read (a misparse would text a stranger).
+  if (!phoneFromV2) return { ask: false, reason: 'phone_not_from_v2' };
+  if (doNotContact) return { ask: false, reason: 'do_not_contact' };
+  if (!optinRailLive) return { ask: false, reason: 'optin_rail_dark' };
+  const slotSaved = persistResult === 'written'
+    || (typeof persistResult === 'string' && persistResult.startsWith('skipped_phone_on_record'));
+  if (!slotSaved) return { ask: false, reason: 'slot_not_saved' };
+  return { ask: true, reason: null };
+}
 // Slot-only match gating: the number belongs to a person STORED ON this
 // account (tenant/spouse/buyer/agent). Household-type roles identify the
 // account; agent-type people (realtor, property manager) serve MANY accounts
@@ -3673,6 +3820,111 @@ async function avAddressUniqueOwner(matches, opts) {
     logger.warn(`[call-proc] address-based disambiguation failed: ${e.code || e.message}`);
     return null;
   }
+}
+
+// ── First-name advisory: exact address match ───────────────────────────────
+
+// An accepted Address Validation verdict for an in-area PREMISE-level address
+// (PREMISE and SUB_PREMISE both qualify, as in the canonical validator
+// address-validation/index.js).
+const PREMISE_LEVEL_GRANULARITIES = new Set(['PREMISE', 'SUB_PREMISE']);
+function verdictAcceptsAddress(av) {
+  return ['validated_accept', 'corrected'].includes(av?.status) && av.inServiceArea === true
+    && PREMISE_LEVEL_GRANULARITIES.has(av.granularity);
+}
+
+// "Book only on an exact match" (owner ruling 2026-10-02). ONE rule for both customer
+// creation and the booking hold: the address the call STORED (line 1, line 2, city,
+// ZIP-5) must equal the address the verdict's Address Validation RAN ON, after basic
+// cleanup only — case, whitespace, punctuation, ZIP+4 -> ZIP-5, and the street-suffix
+// alias table (St/Street, Lp/Loop). Nothing else is interpreted: a unit spelled
+// differently (Apt vs Unit vs bare), a building split across lines, a missing piece,
+// or a verdict input that recovery rewrote all mean "not exact" and the call goes to
+// the office through the existing hold / card. Pure.
+function addressesExactlyMatch(stored = {}, verdictInput = {}) {
+  const { STREET_SUFFIX_ALIASES } = require('../utils/address-normalizer');
+  const clean = (v) => String(v || '').toLowerCase().replace(/[.,#]/g, ' ').replace(/\s+/g, ' ').trim();
+  const street = (v) => clean(v).split(' ').map((w) => String(STREET_SUFFIX_ALIASES[w] || w).toLowerCase()).join(' ');
+  const zip5 = (v) => (String(v || '').match(/\d{5}/) || [''])[0];
+  const mine = [street(stored.address_line1), clean(stored.address_line2), clean(stored.city), zip5(stored.zip)];
+  const theirs = [street(verdictInput?.street_line_1), clean(verdictInput?.street_line_2), clean(verdictInput?.city), zip5(verdictInput?.postal_code)];
+  // Line 2 may be empty on both sides; line 1, city and ZIP must be present.
+  return [0, 2, 3].every((i) => mine[i] && theirs[i]) && mine.every((v, i) => v === theirs[i]);
+}
+
+// GATE_CALL_FIRST_NAME_ADVISORY: a last-name-only customer is created — and booked —
+// only when the verdict is an accepted in-area premise AND the stored address exactly
+// matches BOTH the address the verdict ran on (`verdictInput`: the caller's raw V2
+// service_address; a street recovery that rewrote it is not exact) AND the verdict's own
+// normalized address (street, city, ZIP — Google's form carries no unit). Only a
+// `validated_accept` verdict qualifies: a `corrected` one changed some component of what
+// the caller said — possibly the unit, which the normalized form cannot show — so it
+// holds for the office (codex #5559 r13 pre-push P1, r16 P1). Used by customer creation
+// and by the booking hold, so neither can re-judge what the other accepted. Pure.
+function firstNameAdvisoryAddressOk(av, extracted = {}, verdictInput = null) {
+  const n = av?.normalized;
+  return av?.status === 'validated_accept' && verdictAcceptsAddress(av) && !!verdictInput && !!n
+    && addressesExactlyMatch(extracted, verdictInput)
+    && addressesExactlyMatch({ ...extracted, address_line2: null },
+      { street_line_1: n.street_line_1, street_line_2: null, city: n.city, postal_code: n.postal_code });
+}
+
+// The missing_first_name card: ONE open card per call (the unique index stays) whose
+// payload.customer_ids lists EVERY customer the call left owing a first name (a card
+// filed before the list shape carries the scalar customer_id, read as a one-element
+// list). Filed at customer creation AND on the booking path:
+//   - a customer already listed on an OPEN card, or on a card the office DISMISSED, is
+//     never duplicated or re-opened; one listed only on a RESOLVED card is owed again (we
+//     file only while the name is blank, so the name was cleared since) and gets a fresh
+//     card (codex #5559 r16);
+//   - while the call's card is open / claimed, a NEW owed customer (a relink or rebook to
+//     another blank-name customer) is APPENDED to its list — never replacing one;
+//   - when the call's cards are all terminal, a new owed customer gets a fresh card.
+// Advisory; the list is what Resolve, the sweep and the office link read.
+// Returns true when a customer was newly listed (filed or appended).
+async function fileMissingFirstNameCard(conn, { callLogId, customerId, extraction, extracted = {} }) {
+  const { owedCustomerIds } = require('../utils/missing-first-name-card');
+  const stamp = customerId ? String(customerId) : null;
+  const heard = { first_name: extracted?.first_name ?? null, last_name: extracted?.last_name ?? null };
+  // EVERYTHING — dedup, append, fresh insert — runs inside one transaction under the per-call
+  // triage lock (the global lock order), taken BEFORE the first read: a Resolve / Dismiss /
+  // sweep that closes the card, and a concurrent filer, serialize with this decision, so a
+  // newly owed customer is never dropped by a stale read or an ignored insert conflict.
+  return conn.transaction(async (trx) => {
+    await lockTriageCall(trx, callLogId);
+    const rows = await trx('triage_items').where({ call_log_id: callLogId, reason_code: 'missing_first_name' })
+      .select('id', 'status', 'payload');
+    if (rows.some((row) => stamp && ['open', 'in_progress', 'dismissed'].includes(row.status)
+      && owedCustomerIds(row.payload).includes(stamp))) return false;
+    const live = rows.find((row) => ['open', 'in_progress'].includes(row.status));
+    if (live) {
+      const ids = owedCustomerIds(live.payload);
+      if (!stamp) return false;
+      await trx('triage_items').where({ id: live.id }).forUpdate().first('id');
+      await trx('triage_items').where({ id: live.id }).update({
+        payload: trx.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ customer_ids: [...ids, stamp] })]),
+        updated_at: new Date(),
+      });
+      return true;
+    }
+    await trx('triage_items').insert(buildTriageItem({
+      callLogId,
+      flag: 'missing_first_name',
+      extraction,
+      severity: 'advisory',
+      extraPayload: { customer_ids: stamp ? [stamp] : [], heard_name_v1: heard },
+    }));
+    return true;
+  });
+}
+
+// Is the call's missing_first_name card still an open task (open or claimed)? Read under
+// the finalization triage lock so a concurrent close is seen. Pure of side effects.
+async function missingFirstNameCardStillOpen(conn, callLogId) {
+  const card = await conn('triage_items')
+    .where({ call_log_id: callLogId, reason_code: 'missing_first_name' })
+    .whereIn('status', ['open', 'in_progress']).first('id');
+  return !!card;
 }
 
 async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
@@ -5283,7 +5535,7 @@ async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, schedule
         // quote hides in a closed lead the pipeline view never shows.
         const currentLead = await inner('leads')
           .where({ id: leadId })
-          .whereNotIn('status', ['won', 'duplicate'])
+          .whereNotIn('status', ['won', 'duplicate', 'handled'])
           .where(ownedOrUnclaimedOpen)
           .first('id', 'status');
         if (!currentLead) return false;
@@ -5294,7 +5546,7 @@ async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, schedule
         }
         const claimed = await inner('leads')
           .where({ id: leadId })
-          .whereNotIn('status', ['won', 'duplicate'])
+          .whereNotIn('status', ['won', 'duplicate', 'handled'])
           .where(ownedOrUnclaimedOpen)
           .update(claimUpdates);
         if (claimed) {
@@ -5336,13 +5588,13 @@ async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, schedule
         q.whereNull('customer_id').orWhere('customer_id', customerId);
       const convertible = await inner('leads')
         .where({ id: leadId })
-        .whereNotIn('status', ['won', 'duplicate'])
+        .whereNotIn('status', ['won', 'duplicate', 'handled'])
         .where(ownedOrUnclaimed)
         .first('id');
       if (!convertible) return false;
       const updated = await inner('leads')
         .where({ id: leadId })
-        .whereNotIn('status', ['won', 'duplicate'])
+        .whereNotIn('status', ['won', 'duplicate', 'handled'])
         .where(ownedOrUnclaimed)
         .update({
           status: 'won',
@@ -6293,7 +6545,7 @@ async function demoteOpenTriageCards(conn, callLogId, flags, procToken, advisory
     const have = new Set((present || []).map((r) => r.reason_code));
     const missing = flags.filter((f) => !have.has(f));
     if (missing.length) {
-      throw new Error(`unclear-service advisory card missing for: ${missing.join(', ')}`);
+      throw new Error(`gated advisory card missing for: ${missing.join(', ')}`);
     }
     return demoted;
   });
@@ -6391,6 +6643,83 @@ function v2BookingServiceView(extracted = {}, v2Extraction = null) {
   return view;
 }
 
+// GATE_CALL_COMMERCIAL_DICTATED_BOOKING (codex #5377 r9 P1): the dictated
+// booking is only safe when the agreed quote SURVIVES the booking path's own
+// catalog-aware price resolver. resolveCallBookingPrice discards every quote
+// when the resolved catalog row is not one_time (a recurring service bills
+// through the recurring machinery) or is a covered re-service, and books no
+// price at all: the caller's accepted amount would never reach the visit.
+// Returns `(quoted, v2Extraction) => boolean` that resolves the catalog row the
+// way the booking resolves it, on every view of the call's service (the V1
+// record before V2 adoption, the merged fields, the V2-overridden view — the same
+// views the whole-structure waiver judges), and requires resolveCallBookingPrice
+// to return exactly the quoted amount for each. FAILS CLOSED: no catalog loaded,
+// no row resolved (the booking's Waves Assessment fallback is not a settled
+// service), a re-service revisit, or any error. ONE builder for both processor
+// lanes and buildFailOpenRoutingContext (the offline audits).
+function parseLooseJson(value) {
+  if (value && typeof value === 'object') return value;
+  try { return JSON.parse(value) || {}; } catch (_e) { return {}; }
+}
+
+// The extraction fields the service resolvers read (resolveSchedulableCallService,
+// resolveCallBookingCatalogService, hasCallReServiceIntent). V2-primary adoption can
+// fill or replace them, so the V1 values it replaced are recorded on the canonical
+// extraction as `pre_adoption_service_fields` ({} when adoption touched none).
+const CALL_SERVICE_VIEW_FIELDS = Object.freeze(['matched_service', 'requested_service', 'specific_service_name', 'call_summary', 'pain_points']);
+function preAdoptionServiceFields(preAdoptionExtracted = {}, adoptedFields = []) {
+  return Object.fromEntries(CALL_SERVICE_VIEW_FIELDS
+    .filter((key) => adoptedFields.includes(key))
+    .map((key) => [key, preAdoptionExtracted?.[key] ?? null]));
+}
+
+// The offline audits' commercial quote check (buildFailOpenRoutingContext): the live
+// check's views rebuilt from the persisted extraction. The pre-adoption view is the
+// canonical record with the recorded V1 service values restored. A row with a V2
+// extraction and no record (processed before it was written) has an unknown
+// pre-adoption view, so the audit holds it rather than over-admit (codex #5377 r17 P1).
+function auditCommercialQuoteBookableFor({ extracted = {}, transcription = '', services = null } = {}) {
+  const recorded = extracted?.pre_adoption_service_fields;
+  const hasRecord = !!recorded && typeof recorded === 'object' && !Array.isArray(recorded);
+  const preAdoptionExtracted = hasRecord && Object.keys(recorded).length ? { ...extracted, ...recorded } : null;
+  const check = commercialQuoteBookableFor({ extracted, preAdoptionExtracted, transcription, services });
+  return (quoted, v2Extraction = null) => {
+    if (!hasRecord && isV2Extraction(v2Extraction)) return false;
+    return check(quoted, v2Extraction);
+  };
+}
+
+function commercialQuoteBookableFor({ extracted = {}, preAdoptionExtracted = null, transcription = '', services = null } = {}) {
+  return (quoted, v2Extraction = null) => {
+    try {
+      if (!Array.isArray(services) || !services.length) return false;
+      const views = [];
+      if (preAdoptionExtracted) views.push(preAdoptionExtracted);
+      views.push(extracted || {});
+      const finalView = v2BookingServiceView(extracted || {}, v2Extraction);
+      if (finalView) views.push(finalView);
+      if (views.some((view) => hasCallReServiceIntent(view))) return false;
+      // The approved booking re-asserts the owner's recurring-intent rule over the
+      // V2-merged service before it books (the singular-to-program override): judge
+      // each view as the booking will book it, so a one-time pick that becomes a
+      // quarterly program (which drops the quote) holds here (codex #5377 local r1 P1).
+      const serviceNames = services.map((s) => s.name).filter(Boolean);
+      return views.map((view) => applyRecurringIntentDefault(view, transcription, serviceNames)).every((view) => {
+        const coarse = resolveSchedulableCallService(view, { transcription });
+        const row = resolveCallBookingCatalogService({
+          extracted: view,
+          transcription,
+          services,
+          coarseServiceLabel: coarse.ok ? coarse.service : null,
+        });
+        return !!row && resolveCallBookingPrice({ quotedPrice: quoted, catalogRow: row }).price === quoted;
+      });
+    } catch (_e) {
+      return false;
+    }
+  };
+}
+
 // Whole-structure unit waiver for one call (GATE_CALL_WHOLE_STRUCTURE_NO_UNIT;
 // caller checks the gate). Resolves the call's service the way the booking
 // resolves it and hands the verdict to the pure waiver in call-triage-flags.js.
@@ -6473,6 +6802,22 @@ function hasUsablePhone(value) {
   return String(value || '').replace(/\D/g, '').length >= 10;
 }
 
+// Outside enforce mode canAutoRoute's address-trust gate never runs, so a booking
+// that lacks the email — or, under GATE_CALL_FIRST_NAME_ADVISORY, the first name —
+// must still have its ACTUAL destination positively validated (the verdict must
+// validate the street/unit being booked, not just some address V2 heard).
+// Returns the advisory fields that put the booking on hold; [] = no hold. Pure.
+function advisoryBookingAddressHoldFields({ enforceModeActive, customerValidation, avPositiveForBooking, exactAddressForBooking } = {}) {
+  if (!customerValidation?.ok) return [];
+  const advisory = customerValidation.advisory || [];
+  return [
+    // Enforce mode exempts only the email advisory (canAutoRoute owns that address trust);
+    // the first-name waiver's exact-match rule applies in EVERY mode.
+    ...(advisory.includes('email') && !enforceModeActive && !avPositiveForBooking ? ['email'] : []),
+    ...(advisory.includes('first_name') && !exactAddressForBooking ? ['first_name'] : []),
+  ];
+}
+
 function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, callerPhone = null) {
   // A service-contact slot email satisfies the email requirement: it is a
   // deliverable account email (appointment-email's resolveRecipients includes
@@ -6507,7 +6852,13 @@ function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, cal
   };
 
   const missing = [];
-  if (!String(merged.firstName || '').trim()) missing.push('first_name');
+  // GATE_CALL_FIRST_NAME_ADVISORY (owner ruling 2026-10-02): a caller who
+  // gave only a last name still books; the missing first name is ADVISORY
+  // (the missing_first_name card asks the office for it), like the last name.
+  // Gate off: first_name stays required, byte-identical to before.
+  const firstNameAdvisory = require('../config/feature-gates').callFirstNameAdvisoryLive();
+  // The waiver needs a surname: a caller with neither name never auto-books.
+  if (!String(merged.firstName || '').trim() && !(firstNameAdvisory && String(merged.lastName || '').trim())) missing.push('first_name');
   if (!hasUsablePhone(merged.phone)) missing.push('phone');
   if (!String(merged.streetAddress || '').trim()) missing.push('street_address');
   if (!String(merged.city || '').trim()) missing.push('city');
@@ -6535,6 +6886,9 @@ function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, cal
   }
   if (!String(merged.lastName || '').trim()) {
     advisory.push('last_name');
+  }
+  if (firstNameAdvisory && !String(merged.firstName || '').trim()) {
+    advisory.push('first_name');
   }
 
   return { ok: missing.length === 0, missing, advisory, details: merged };
@@ -9781,6 +10135,12 @@ const CallRecordingProcessor = {
     // ── Shadow v2 extraction (records alongside v1, no side effects) ──
     let v2Result = null;
     let v2AddressValidation = null;
+    // The caller's own V2 service address, frozen BEFORE address validation and the
+    // routing-path normalization rewrite v2Result.extraction (and `extracted`) with
+    // Google's form. The first-name advisory exact-match compares against THIS, so a
+    // `corrected` verdict that changed the house number, unit, city or ZIP holds
+    // (codex #5559 r12 P1). Null unless the extraction is valid.
+    let v2StatedServiceAddressRaw = null;
     if (CALL_EXTRACTION_V2_ENABLED) {
       try {
         const v2StartedAt = Date.now();
@@ -9803,6 +10163,8 @@ const CallRecordingProcessor = {
         // recorded for the promotion-readiness gate and reused by the routing
         // gate below without a second API call.
         if (v2Result?.status === 'valid' && v2Result.extraction) {
+          const rawServiceAddress = v2Result.extraction.property?.service_address;
+          v2StatedServiceAddressRaw = rawServiceAddress ? Object.freeze({ ...rawServiceAddress }) : null;
           try {
             // Gate off (GATE_CALL_ADDRESS_ONFILE_ASSIST): the wrapper makes the
             // same validateAddress call this site always made. Gate on, a
@@ -9921,6 +10283,7 @@ const CallRecordingProcessor = {
     // structure unit waiver must agree with it too (a V1 pick V2 overwrites
     // is a service disagreement, not a WDO).
     const preAdoptionExtracted = { ...extracted };
+    let serviceFieldsAdopted = [];
     if (callExtractionV2PrimaryEnabled() && v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)) {
       const adoption = adoptV2PrimaryFields(extracted, v2Result.extraction, {
         etWallClock: v2IsoToEtWallClock,
@@ -9936,6 +10299,14 @@ const CallRecordingProcessor = {
         // like the enforce path's approved-booking re-assert (codex P2).
         if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
       }
+      serviceFieldsAdopted = adoption.adoptedFields;
+    }
+    // The V1 values of the service fields adoption replaced ride on the canonical
+    // extraction ({} when none, or when the primary gate kept adoption off), so the
+    // offline audits rebuild the same pre-adoption service view the live commercial
+    // quote check reads (codex #5377 r17 P1).
+    if (v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)) {
+      extracted = { ...extracted, pre_adoption_service_fields: preAdoptionServiceFields(preAdoptionExtracted, serviceFieldsAdopted) };
     }
 
     // ── Tech follow-up short-circuit ── (see isTechFollowUpCall)
@@ -10332,6 +10703,9 @@ const CallRecordingProcessor = {
     // suppressed. Approved calls capture v2's validated scheduling fields so
     // the appointment is created from the data the gate actually checked.
     let v2RoutingBlocked = false;
+    // The enforce decision write's report (upsertRouteDecision `out`): which row
+    // of the decision's family this pass wrote, or null when it wrote none.
+    const routeDecisionWrite = {};
     let v2SmsBlocked = false;
     let v2SmsConsentExplicit = false;
     // P1-C (callback_number_needed reminder hold): set true the moment the
@@ -10852,9 +11226,31 @@ const CallRecordingProcessor = {
             // Speaker labels are LLM-inferred today — the demotion stays dark
             // until this companion gate flips (see feature-gates.js).
             transcriptLabelsTrusted: isEnabled('callAgentCommitTrustedLabels'),
+            // Commercial dictated booking (GATE_CALL_COMMERCIAL_DICTATED_BOOKING,
+            // owner ruling 2026-09-30): staff dictated + caller accepted, both
+            // quotes grounded in the right speaker's turn. INBOUND ONLY for
+            // now (owner ruling, same day; codex #5377 r1 P1): it trusts the
+            // same "Agent:" labels the demotion above does, and outbound
+            // diarization has swapped them — outbound waits until staff
+            // identity on an outbound recording is established independently
+            // of the labels. Also needs GATE_CALL_AGENT_COMMIT_BOOKING, the
+            // kill switch of the commercial exception. Read at call time
+            // (like the GATE_CALL_PROPERTY_ROLE reads); off = false.
+            // Decision key: a force-reprocess whose verdict differs from a
+            // REVIEWED decision row records a '+r<n>' revision row
+            // (upsertRouteDecision, gate-agnostic; codex #5377 r4 P1) — no
+            // per-gate version is needed.
+            commercialDictatedBooking: commercialDictatedBookingActive(call),
+            // The agreed quote must survive the booking path's own catalog-aware
+            // price resolver (codex #5377 r9 P1); absent when the gate is off.
+            ...(commercialDictatedBookingActive(call) ? {
+              commercialQuoteBookable: commercialQuoteBookableFor({
+                extracted, preAdoptionExtracted, transcription, services: bookableCallServices,
+              }),
+            } : {}),
             // Slot binding needs the call time: a spoken weekday only names a
             // unique date within the 7 days after the call.
-            callStartedAt: call.created_at,
+            callStartedAt: callStartedAt(call) || call.created_at,
             // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT: a settled time + trusted
             // address is not held on an unclear service — the Waves
             // Assessment fallback below books it (both directions, same as
@@ -10974,7 +11370,7 @@ const CallRecordingProcessor = {
           // dark gate flipped either way — replaces the recommendation and
           // created_at instead of leaving the first pass's verdict as the
           // newest decision. Fenced to the pass that owns the processing token.
-          await upsertRouteDecision(db, routeDecision, { callLogId: call.id, processingToken: procToken });
+          await upsertRouteDecision(db, routeDecision, { callLogId: call.id, processingToken: procToken }, routeDecisionWrite);
 
           // Advisory flags (missing surname / rental / second address) reach the
           // Needs Review inbox even when the call AUTO-ROUTES — they inform, they
@@ -11181,9 +11577,12 @@ const CallRecordingProcessor = {
             // call (null = claim lost: abandon), the call is NOT booked — a
             // blocking card left standing on a booked visit is what invites a
             // duplicate booking.
+            // The same fenced, verified demotion serves EVERY gated waiver
+            // (gateDemotedFlags: unclear-service and commercial dictated
+            // booking alike; codex #5377 r4 P1).
             const demoted = await demoteOpenTriageCards(
-              db, call.id, routingResult.unclearServiceDemotedFlags, procToken,
-              (routingResult.unclearServiceDemotedFlags || []).map((f) => buildTriageItem({
+              db, call.id, routingResult.gateDemotedFlags, procToken,
+              (routingResult.gateDemotedFlags || []).map((f) => buildTriageItem({
                 callLogId: call.id, flag: f, extraction: v2Extraction, severity: 'advisory', addressValidation, onFileAddress,
               })),
             );
@@ -11704,6 +12103,12 @@ const CallRecordingProcessor = {
       resolveCallQuoteSignals(extracted, v2CanonicalExtraction);
     const callAgreedPrice = resolveCallAgreedPrice(v2CanonicalExtraction);
     const callSecondaryContacts = resolveCallSecondaryContacts(extracted, v2CanonicalExtraction);
+    // The caller asked not to be contacted: no on-site opt-in ask for any
+    // contact on this call (the slot may still be written).
+    // Either extractor hearing a do-not-contact request blocks the on-site
+    // opt-in ask (same both-signals rule as the other outbound gates).
+    const v2DoNotContact = v2CanonicalExtraction?.consent?.do_not_contact_request === true
+      || extracted.do_not_contact_request === true;
     const callSecondaryContact = callSecondaryContacts[0] || null;
     // Capture the caller's email BEFORE the secondary-contact scrub below clears
     // it — payer linking (resolveCallBillingPayer) uses it to reject a billing
@@ -11771,6 +12176,17 @@ const CallRecordingProcessor = {
       }
     }
 
+    // GATE_CALL_FIRST_NAME_ADVISORY (owner ruling 2026-10-02): a caller who
+    // gave only a LAST name still becomes a customer when the call otherwise
+    // qualifies — a validated, in-service-area premise address (the caller is
+    // on the line to book it). The missing first name rides an advisory card.
+    // Every other creation guard (phone, voicemail, non-customer nature)
+    // still applies at the branch below. Gate off: first_name is required.
+    const firstNameAdvisoryCreate = !extracted.first_name
+      && require('../config/feature-gates').callFirstNameAdvisoryLive()
+      && !!String(extracted.last_name || '').trim()
+      && !addressRecovery?.recovered
+      && firstNameAdvisoryAddressOk(effectiveAddressValidation, extracted, v2CanonicalExtraction ? v2StatedServiceAddressRaw : null);
     const sharedPhoneAmbiguity = {};
     let phoneMatchedThisPass = false;
     if (!customerId && phone && !explicitUnlink) {
@@ -11823,7 +12239,7 @@ const CallRecordingProcessor = {
           .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
           .ignore()
           .catch((triageErr) => logger.warn(`[call-proc] shared-phone triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
-      } else if (extracted.first_name && phone && !extracted.is_voicemail && !v2NonCustomerCallNature) {
+      } else if ((extracted.first_name || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !v2NonCustomerCallNature) {
         // Create new customer. NEVER from a voicemail — a one-sided message
         // transcription is too lossy to mint a customer record from (the Josh
         // incident: first name + mangled address became a "real" customer).
@@ -11872,7 +12288,7 @@ const CallRecordingProcessor = {
           // Lazy require: route module from a service (load-cycle risk).
           const { ensureCustomerAccount } = require('../routes/admin-customers');
           const account = await ensureCustomerAccount(db, {
-            firstName: extracted.first_name,
+            firstName: extracted.first_name || '',
             lastName: extracted.last_name || null,
             phone,
             email: extracted.email || null,
@@ -11901,7 +12317,10 @@ const CallRecordingProcessor = {
               account_id: account.accountId,
               is_primary_profile: !account.existingCustomer,
               profile_label: account.existingCustomer ? 'Additional property' : 'Primary',
-              first_name: extracted.first_name,
+              // customers.first_name is NOT NULL: the advisory-create path
+              // (last name only) stores '' — every greeting falls back to
+              // "there" (see the audit in the PR notes).
+              first_name: extracted.first_name || '',
               last_name: extracted.last_name || null,
               phone,
               email: extracted.email || null,
@@ -11948,6 +12367,18 @@ const CallRecordingProcessor = {
           customerId = newCust.id;
           createdCustomerFromCall = true;
           logger.info(`[call-proc] Created customer ${customerId} from call recording`);
+
+          // A customer created on a last name alone (GATE_CALL_FIRST_NAME_ADVISORY) gets
+          // its owed-first-name card NOW, so every blank-name customer has one whether
+          // or not a booking follows. Fail-soft: a card failure never undoes the create.
+          if (!String(extracted.first_name || '').trim()) {
+            try {
+              await fileMissingFirstNameCard(db, { callLogId: call.id, customerId, extraction: v2CanonicalExtraction || undefined, extracted });
+              if (!bridgeNeedsConfirmation.includes('missing_first_name')) bridgeNeedsConfirmation.push('missing_first_name');
+            } catch (cardErr) {
+              logger.warn(`[call-proc] first-name card insert failed for ${maskSid(callSid)}: ${cardErr.code || cardErr.name || 'db_error'}`);
+            }
+          }
 
           // Both default rows (notification_prefs + property_preferences),
           // onConflict-ignore inside the helper.
@@ -13451,21 +13882,140 @@ const CallRecordingProcessor = {
     // fan-out must exclude them — no row means grandfathered, and a claim
     // failure must fail CLOSED for that phone, not text it (#2956 r13).
     const optinClaimFailedPhones = new Set();
+    // On-site contacts whose opt-in ask is due: the ask is NOT sent here. It
+    // goes out at the booking site, only once a confirmed visit has actually
+    // landed (not a street-level office-review hold, not an address dispute),
+    // quoting that visit's address. Filled for a fresh slot write AND for a
+    // contact already on record, so a retry of the call still asks.
+    const pendingOnSiteAsks = [];
+    // Phones the V2 extraction itself captured for a party it ALSO flagged as
+    // on-site (role + on_site / wants_appointment_texts on that same V2 entry):
+    // the only numbers an on-site opt-in ask may go to. Binding phone and
+    // flags to one V2 party keeps a merge with V1 from moving one person's
+    // flags onto another person's number.
+    const onSiteV2PhoneKeys = (() => {
+      const { canonicalV2Secondary, mapSecondaryContactsToLegacy } = require('../utils/extraction-compat');
+      const ten = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+      return new Set([canonicalV2Secondary(v2CanonicalExtraction), ...mapSecondaryContactsToLegacy(v2CanonicalExtraction?.secondary_contacts)]
+        .filter((c) => c && onSiteOptinAskTrigger(c))
+        .map((c) => ten(c.phone)).filter(Boolean));
+    })();
+    let onSiteAsksHandled = false;
+    // Review-card breadcrumb (secondary_contact_captured payload.optin_ask) for
+    // the card's own contact: awaiting_booking | dispatching | sent |
+    // not_sent:<reason>.
+    const markOptinAsk = async (entry, value) => {
+      const tenOf = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+      if (!callSecondaryContact || !tenOf(entry?.phone) || tenOf(entry.phone) !== tenOf(callSecondaryContact.phone)) return;
+      try {
+        await db('triage_items')
+          .where({ call_log_id: call.id, reason_code: 'secondary_contact_captured' })
+          .whereIn('status', ['open', 'in_progress'])
+          .update({
+            payload: db.raw('(coalesce(payload, \'{}\'::jsonb)) || ?::jsonb', [JSON.stringify({ optin_ask: value })]),
+            updated_at: new Date(),
+          });
+      } catch (triageErr) {
+        logger.warn(`[call-proc] optin-ask triage update failed for ${maskSid(callSid)}: ${triageErr.code || triageErr.name || 'db_error'}`);
+      }
+    };
+    // The opt-in ask needs a LIVE rail (gate on + request template active);
+    // dark = nobody can be asked. Read once per call, only when it can matter.
+    // Read only when the secondary-contact pass can run at all (same gate,
+    // customer and contacts as the persistence block): with the kill switch
+    // off, a template-read failure must not fail the call.
+    const optinRailLive = (process.env.GATE_CALL_SECONDARY_CONTACT === 'true' && customerId
+      && callSecondaryContacts.some(onSiteOptinAskTrigger))
+      ? await require('./recipient-optin').isOptinRailLive()
+      : false;
     if (process.env.GATE_CALL_SECONDARY_CONTACT === 'true' && customerId && callSecondaryContacts.length) {
       // Every extracted party (up to 3), in notification-centrality order —
       // each entry passes the SAME per-contact gates (wants_notifications,
-      // dedup, cross-customer, empty slot). Stop early when slots run out.
+      // dedup, cross-customer, empty slot). A full set of slots does not end
+      // the scan: a later party already on record still gets its on-site ask.
+      const lastTen = (v) => String(v || '').replace(/\D/g, '').slice(-10);
       for (const secondaryEntry of callSecondaryContacts) {
+      let onSitePath = false;
       try {
-        const result = await persistCallSecondaryContact(customerId, secondaryEntry, { smsConsentExplicit: v2SmsConsentExplicit });
+        // Pre-persist: only entries that could be asked need the slot-phone read.
+        const onSitePhoneFromV2 = onSiteV2PhoneKeys.has(lastTen(secondaryEntry.phone));
+        const onSitePreAsk = onSiteOptinAskTrigger(secondaryEntry) && !v2DoNotContact && optinRailLive && onSitePhoneFromV2;
+        onSitePath = onSitePreAsk;
+        let onSiteBlockedBeforeWrite = false;
+        let onSiteAlreadyConfirmed = false;
+        if (onSitePreAsk) {
+          const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
+          const before = await db('customers').where({ id: customerId }).first();
+          // A phone NEW to this account is blocked BEFORE the slot write (a
+          // reclaimable ask_failed row; an existing row is left as it is), so
+          // the account's existing consent stamp can stay: the row, not the
+          // stamp, holds the new phone until its own YES (the rail is live, so
+          // the opt-in gate is on). A phone already on record keeps its standing.
+          const newKey = lastTen(secondaryEntry.phone);
+          const knownKeys = [before?.phone, ...SERVICE_CONTACT_SLOTS.map((slot) => before?.[slot.phone])].map(lastTen).filter(Boolean);
+          if (newKey && !knownKeys.includes(newKey)) {
+            await db('recipient_optin').insert({
+              phone_key: newKey,
+              phone_e164: String(secondaryEntry.phone || '').trim(),
+              status: 'ask_failed',
+              customer_id: customerId,
+              requested_by: 'call_pipeline',
+              requested_at: new Date(),
+            }).onConflict(['customer_id', 'phone_key']).ignore();
+            onSiteBlockedBeforeWrite = true;
+          }
+          // A phone that already said YES on this account (on record now, or
+          // removed and re-added) keeps its consent: no hold, no new ask, and
+          // it stays in the same-call fan-out.
+          const existing = newKey ? await db('recipient_optin').where({ customer_id: customerId, phone_key: newKey }).first('status') : null;
+          onSiteAlreadyConfirmed = existing?.status === 'confirmed';
+        }
+        const result = await persistCallSecondaryContact(customerId, secondaryEntry, {
+          smsConsentExplicit: v2SmsConsentExplicit,
+          onSiteAskEligible: onSitePreAsk,
+          // Model-inferred on-site contact behind a blocking opt-in row: the
+          // account's existing consent (other people's) is not cleared.
+          keepConsentStamp: onSiteBlockedBeforeWrite,
+          holdPhone: onSiteBlockedBeforeWrite && !onSiteAlreadyConfirmed,
+        });
         logger.info(`[call-proc] secondary contact for ${maskSid(callSid)}: ${result}`);
+        // Re-added phone that already confirmed its own opt-in here: restore
+        // the account stamp a contact edit may have cleared (same coverage
+        // rule as its YES). And a YES that landed between the status read
+        // above and the hold write (its own follow-up found no hold to
+        // remove) is applied now: re-read after the write, release the hold.
+        const heldOnWrite = onSiteBlockedBeforeWrite && !onSiteAlreadyConfirmed && result === 'written';
+        const confirmedSinceRead = heldOnWrite
+          && (await db('recipient_optin').where({ customer_id: customerId, phone_key: lastTen(secondaryEntry.phone) }).first('status'))?.status === 'confirmed';
+        if ((onSiteAlreadyConfirmed && (result === 'written' || String(result).startsWith('skipped_phone_on_record'))) || confirmedSinceRead) {
+          await require('./recipient-optin').restoreConfirmedPhone(customerId, lastTen(secondaryEntry.phone));
+        }
         // Recipient double opt-in parity with the portal flow (#2956): a
         // call-created phone recipient gets the same claim + confirmation
         // ask (dark template = nothing pends; gate off = no-op). The CLAIM
         // is awaited so the same-call fan-out below can never race a
         // rowless (grandfathered-looking) new phone; the Twilio dispatch
-        // stays async.
-        if (result === 'written' && secondaryEntry?.phone && v2SmsConsentExplicit) {
+        // stays async. Asked here when the caller gave explicit SMS consent
+        // (as always). An on-site contact's ask waits for the booking site
+        // (pendingOnSiteAsks) — no booking, no ask.
+        const onSiteDecision = decideOnSiteOptinAsk(secondaryEntry, { doNotContact: v2DoNotContact, optinRailLive, persistResult: result, phoneFromV2: onSitePhoneFromV2 });
+        if (onSiteDecision.ask && secondaryEntry?.phone) {
+          pendingOnSiteAsks.push({ entry: secondaryEntry });
+          // Queued for the booking site: excluded from the same-call fan-out
+          // (no opt-in row yet must not read as grandfathered) and from the
+          // explicit-consent claim below, so nobody is asked before a visit lands.
+          // (A phone that already confirmed on this account is a consented
+          // recipient: not excluded.)
+          if (!onSiteAlreadyConfirmed) optinClaimFailedPhones.add(lastTen(secondaryEntry.phone));
+          // (Durably blocked before the slot write — see onSiteBlockedBeforeWrite.)
+        }
+        const optinAskState = onSiteDecision.ask ? 'awaiting_booking' : `not_sent:${onSiteDecision.reason}`;
+        // Either extractor's do-not-contact request suppresses every opt-in
+        // dispatch, this legacy explicit-consent path included.
+        // ...and never for an on-site candidate refused because its phone is
+        // not V2-captured (that number must not be texted by any path).
+        if (result === 'written' && secondaryEntry?.phone && v2SmsConsentExplicit && !onSiteDecision.ask && !v2DoNotContact
+          && onSiteDecision.reason !== 'phone_not_from_v2') {
           try {
             const { claimRecipientOptins, dispatchRecipientOptins } = require('./recipient-optin');
             const custRow = await db('customers').where({ id: customerId }).first();
@@ -13508,6 +14058,7 @@ const CallRecordingProcessor = {
             logger.warn(`[call-proc] recipient opt-in hook failed for ${maskSid(callSid)}: ${optErr.message}`);
           }
         }
+        await markOptinAsk(secondaryEntry, optinAskState);
         if (result === 'skipped_phone_belongs_to_other_customer') {
           // Distinct review card: the named contact's number is another
           // customer's primary phone — the office decides whether it's the
@@ -13523,10 +14074,16 @@ const CallRecordingProcessor = {
             .ignore()
             .catch((triageErr) => logger.warn(`[call-proc] secondary-collision triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
         }
-        if (result === 'skipped_slots_full') break;
+        // Slots full is NOT the end of the scan: a later party may already sit
+        // in a slot (on record) and still owe its on-site opt-in ask.
+        if (result === 'skipped_slots_full') continue;
       } catch (e) {
         // Code/name only — a DB error message can echo the contact's phone/email.
         logger.warn(`[call-proc] secondary-contact write skipped for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`);
+        // An on-site contact's setup (blocking row, status reads, slot write)
+        // must not be dropped on a transient error — the call would finalize
+        // with the person never saved or asked. Fail the pass so it retries.
+        if (onSitePath) throw e;
       }
       }
     }
@@ -13540,7 +14097,7 @@ const CallRecordingProcessor = {
     // customer_creation_failed and pollute failure reporting (codex r4 P2).
     // An explicit operator unlink is an INTENTIONAL customer-less result,
     // never a creation failure to file a card for on every reprocess.
-    const customerExpected = !!(extracted.first_name && phone && !extracted.is_voicemail && !extracted.is_spam && !v2NonCustomerCallNature && !explicitUnlink);
+    const customerExpected = !!((extracted.first_name || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !extracted.is_spam && !v2NonCustomerCallNature && !explicitUnlink);
     const customerLanded = !!customerId;
     // Downgraded below if a customer-less recovery lead was expected but its
     // insert failed — that lead is the only durable record for this call, and
@@ -16490,6 +17047,21 @@ const CallRecordingProcessor = {
             await fileLastNameAdvisoryCard(db)
               .catch((err) => logger.warn(`[call-proc] last-name advisory insert failed for ${maskSid(callSid)} (${err.code}:${err.errorToken})`));
           }
+          // First-name advisory (GATE_CALL_FIRST_NAME_ADVISORY, owner ruling
+          // 2026-10-02): the same ONE card per call the customer-create branch
+          // files (fileMissingFirstNameCard is idempotent across both sites).
+          const fileFirstNameAdvisoryCard = (conn) => fileMissingFirstNameCard(conn, {
+            callLogId: call.id, customerId, extraction: v2ApprovedExtraction || undefined, extracted,
+          }).catch((err) => { throw sanitizeLastNameAdvisoryInsertError(err); });
+          if (customerValidation.advisory?.includes('first_name')) {
+            await fileFirstNameAdvisoryCard(db)
+              .catch((err) => logger.warn(`[call-proc] first-name advisory insert failed for ${maskSid(callSid)} (${err.code}:${err.errorToken})`));
+            // The call is under review while that card is open (filed now or by the
+            // create branch); the finalizer's lock-time recheck drops the reason if
+            // the card is closed meanwhile.
+            if (await missingFirstNameCardStillOpen(db, call.id).catch(() => false)
+              && !bridgeNeedsConfirmation.includes('missing_first_name')) bridgeNeedsConfirmation.push('missing_first_name');
+          }
           // Email-less bookings in SHADOW/LEGACY mode still require a
           // positively validated address (codex round-7 P1). canAutoRoute's
           // central address-trust gate only runs in enforce mode — and
@@ -16577,12 +17149,15 @@ const CallRecordingProcessor = {
             && ['validated_accept', 'corrected'].includes(String(effectiveAddressValidation.status || ''))
             && effectiveAddressValidation.inServiceArea === true
             && avValidatesBookedAddress;
-          const emailAdvisoryHold = !enforceModeActive
-            && customerValidation.ok
-            && !!customerValidation.advisory?.includes('email')
-            && !avPositiveForBooking;
+          // A last-name-only booking needs the SAME exact-match rule customer creation used
+          // (a recovery-rewritten verdict input is never exact); the email advisory keeps its
+          // own long-standing validated-address bar above.
+          const exactAddressForBooking = !addressRecovery?.recovered
+            && firstNameAdvisoryAddressOk(effectiveAddressValidation, extracted, v2ForAddressCheck ? v2StatedServiceAddressRaw : null);
+          const advisoryHoldFields = advisoryBookingAddressHoldFields({ enforceModeActive, customerValidation, avPositiveForBooking, exactAddressForBooking });
+          const emailAdvisoryHold = advisoryHoldFields.length > 0;
           if (!customerValidation.ok || emailAdvisoryHold) {
-            const missingFields = customerValidation.ok ? ['email'] : customerValidation.missing;
+            const missingFields = customerValidation.ok ? advisoryHoldFields : customerValidation.missing;
             appointmentResult = {
               service: serviceResolution.service,
               dateTime: extracted.preferred_date_time,
@@ -16593,10 +17168,23 @@ const CallRecordingProcessor = {
             };
             logger.warn(
               `[call-proc] Skipping appointment auto-create for ${callSid}: missing required customer fields ` +
-              missingFields.join(', ') + (emailAdvisoryHold ? ' (email-less booking outside enforce mode requires a validated address)' : '')
+              missingFields.join(', ') + (emailAdvisoryHold ? ' (a booking with no email or no first name outside enforce mode requires a validated address)' : '')
             );
+            // The first-name exact-address hold skipped a confirmed booking: outside enforce
+            // mode nothing else files a scheduling task, and the first-name card closes as soon
+            // as the name is typed in — so the office gets the booking task too (codex #5559 r13).
+            if (customerValidation.ok && advisoryHoldFields.includes('first_name') && !enforceModeActive) {
+              await fileSkippedBookingCard({
+                call, procToken, customerId, extraction: v2CanonicalExtraction || undefined,
+                skippedReason: 'first_name_exact_address_hold',
+                preferredDateTime: extracted.preferred_date_time,
+                serviceType: serviceResolution.service, bridgeNeedsConfirmation, callSid,
+              });
+            }
           } else {
-            const firstName = customerValidation.details.firstName || '';
+            // 'there' when no first name is on file (advisory-create path):
+            // a confirmation must never read "Hello !" or "Hello null!".
+            const firstName = customerValidation.details.firstName || 'there';
             const serviceType = callBookingCatalogRow?.name || serviceResolution.service;
             // Price: transcript-quoted (what the agent and caller agreed)
             // first, catalog list price fallback (one_time services only).
@@ -16684,6 +17272,11 @@ const CallRecordingProcessor = {
           // missed fence changes nothing about the booking.
           let bookingFence = null;
           let followUpFence = null;
+          // The fenced reread found the customer owes a first name. The card is NEVER filed
+          // inside the booking transaction — any later throw (hold, geo veto, insert failure)
+          // would roll it back — but once the try below settles, committed or not
+          // (codex #5559 r12 + r14).
+          let fencedFirstNameOwed = false;
           try {
             const parsedDt = parseETDateTime(extracted.preferred_date_time);
             let scheduledDate, windowStart;
@@ -16985,6 +17578,19 @@ const CallRecordingProcessor = {
                   // (codex #4991 r2).
                   if (freshValidation.advisory?.includes('last_name')) {
                     await fileLastNameAdvisoryCard(trx);
+                  }
+                  // The fresh row may have LOST its first name (merge-undo) since the pre-fence
+                  // validation passed: re-apply the same advisory address hold, so a
+                  // last-name-only booking never proceeds without the exact validated address.
+                  const freshHoldFields = advisoryBookingAddressHoldFields({
+                    enforceModeActive, customerValidation: freshValidation, avPositiveForBooking, exactAddressForBooking,
+                  });
+                  if (freshValidation.advisory?.includes('first_name')) fencedFirstNameOwed = true;
+                  if (freshHoldFields.includes('first_name')) {
+                    fencedFirstNameOwed = true;
+                    const firstNameErr = new Error('customer lost its first name while waiting on the comms fence (merge-undo) — the booking needs the exact validated address; held for office review');
+                    firstNameErr.firstNameHold = true;
+                    throw firstNameErr;
                   }
                   // Geographic veto re-runs on the fenced row (Codex #5403
                   // r6): when the call stated no locality, the pre-fence
@@ -18348,6 +18954,109 @@ const CallRecordingProcessor = {
                 await require('./outbound-review-confirm')
                   .activateLegacyOutboundReviewRowIfNeeded(db, svc.id, 'call-proc-reuse');
               }
+              // On-site opt-in asks (owner ruling 2026-09-30, redesigned 10-01:
+              // consent is the recipient's own YES). Claimed only HERE, once a
+              // visit has landed and after any reuse activation above — never for
+              // an unbooked / held call or a visit whose house number is disputed.
+              // The shared visit check (recipient-optin visitAskState) decides:
+              //   'live'    — confirmed, canonical arrival ahead: ask now;
+              //   'wait'    — a street-level address hold under office review
+              //               (#5381): claimed (pending, visit-bound) but not
+              //               sent; the undispatched-ask sweep sends it once the
+              //               office confirms the visit, or releases it if the
+              //               visit dies;
+              //   'unknown' — the visit read failed: claimed the same way, so the
+              //               sweep re-checks this visit (never read as gone);
+              //   'dead'    — nothing.
+              // The visit id rides the claim and the row, so every later send
+              // (deferred replay, recovery sweep) re-checks this same visit.
+              const onSiteAskVisitState = (pendingOnSiteAsks.length && !disputeHeldReuse && houseNumberDisputed !== true)
+                ? await require('./recipient-optin').visitAskState(svc.id, customerId)
+                  .then((r) => r.state).catch(() => 'unknown')
+                : 'dead';
+              if (onSiteAskVisitState !== 'dead') {
+                onSiteAsksHandled = true;
+                const { claimRecipientOptins, dispatchRecipientOptins } = require('./recipient-optin');
+                const tenOf = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+                const visitAddress = [svc.service_address_line1, svc.service_address_city].filter(Boolean).join(', ');
+                for (const { entry } of pendingOnSiteAsks) {
+                  const phoneKey = tenOf(entry.phone);
+                  try {
+                    const custRow = await db('customers').where({ id: customerId }).first();
+                    // The phone must still occupy a service-contact slot on the
+                    // fresh row: a contact removed or replaced since the save is
+                    // no longer an appointment recipient and is never asked.
+                    const slotPhones = custRow
+                      ? [custRow.service_contact_phone, custRow.service_contact2_phone, custRow.service_contact3_phone]
+                      : [];
+                    if (custRow && !slotPhones.some((ph) => tenOf(ph) === phoneKey)) {
+                      await markOptinAsk(entry, 'not_sent:not_in_slot');
+                      continue;
+                    }
+                    const claims = custRow ? await claimRecipientOptins({
+                      customer: custRow,
+                      contacts: [{
+                        name: [entry.first_name, entry.last_name].filter(Boolean).join(' '),
+                        firstName: entry.first_name || '',
+                        phone: entry.phone,
+                      }],
+                      priorPhones: [custRow.service_contact_phone, custRow.service_contact2_phone, custRow.service_contact3_phone]
+                        .filter((ph) => tenOf(ph) !== phoneKey),
+                      propertyAddress: visitAddress || [custRow.address_line1, custRow.city].filter(Boolean).join(', '),
+                      visitId: svc.id,
+                    }) : [];
+                    if (claims.length && onSiteAskVisitState !== 'live') {
+                      await markOptinAsk(entry, onSiteAskVisitState === 'wait' ? 'not_sent:awaiting_office_review' : 'not_sent:visit_check_retry');
+                    } else if (claims.length) {
+                      await markOptinAsk(entry, 'dispatching');
+                      void dispatchRecipientOptins(claims, custRow)
+                        .catch((err) => {
+                          logger.warn(`[call-proc] on-site opt-in dispatch failed for ${maskSid(callSid)}: ${err.message}`);
+                          return 0;
+                        })
+                        .then((outcome) => {
+                          // dispatchRecipientOptins resolves { requested }; the catch yields 0.
+                          const requested = typeof outcome === 'number' ? outcome : Number(outcome?.requested || 0);
+                          return markOptinAsk(entry, requested > 0 ? 'sent' : 'not_sent:dispatch_failed');
+                        });
+                    } else {
+                      await markOptinAsk(entry, 'not_sent:no_new_ask');
+                    }
+                  } catch (askErr) {
+                    // The claim failed (a read / render error): keep the
+                    // obligation on the visit-bound retry rail — a PENDING,
+                    // undispatched row carrying this visit, which the recovery
+                    // sweep re-checks and sends (or releases) later. Still
+                    // blocking: a pending row holds the phone like ask_failed.
+                    // A confirmed / declined row is left as it is.
+                    await db('recipient_optin').insert({
+                      phone_key: phoneKey,
+                      phone_e164: String(entry.phone || '').trim(),
+                      status: 'pending',
+                      customer_id: customerId,
+                      requested_by: 'call_pipeline',
+                      requested_at: new Date(),
+                      visit_id: svc.id,
+                    }).onConflict(['customer_id', 'phone_key']).merge({
+                      status: db.raw("CASE WHEN recipient_optin.status IN ('ask_failed', 'pending') THEN 'pending' ELSE recipient_optin.status END"),
+                      // A pending ask mid-dispatch (live lease) keeps its visit.
+                      visit_id: db.raw("CASE WHEN recipient_optin.status = 'ask_failed' OR (recipient_optin.status = 'pending' AND (recipient_optin.dispatch_lease_at IS NULL OR recipient_optin.dispatch_lease_at < now() - interval '10 minutes')) THEN EXCLUDED.visit_id ELSE recipient_optin.visit_id END"),
+                      // Only a FAILED ask restarts as undispatched; a pending ask
+                      // that already went out keeps its marker (never re-sent).
+                      dispatched_at: db.raw("CASE WHEN recipient_optin.status = 'ask_failed' THEN NULL ELSE recipient_optin.dispatched_at END"),
+                      // A reclaimed failed ask drops its old SID: a late failure
+                      // callback for the old send must not flip the new row.
+                      provider_sid: db.raw("CASE WHEN recipient_optin.status = 'ask_failed' THEN NULL ELSE recipient_optin.provider_sid END"),
+                      updated_at: new Date(),
+                    });
+                    // (A failure of THIS write propagates: the call-processing
+                    // pass fails and retries rather than finalizing with no
+                    // retry row for the confirmed visit.)
+                    await markOptinAsk(entry, 'not_sent:claim_failed_retrying');
+                    logger.warn(`[call-proc] on-site opt-in ask failed for ${maskSid(callSid)}: ${safeErrorToken(askErr)}`);
+                  }
+                }
+              }
               // NOTE: payer_id is stamped only on FRESH bookings (insert +
               // fresh follow-up child). Retroactively backfilling the Bill-To on
               // a REUSED/pre-gate row is intentionally out of scope here — it
@@ -18975,6 +19684,31 @@ const CallRecordingProcessor = {
                 });
               }
             }
+            // A fenced first-name hold is a HOLD too, surfaced like the pre-fence hold (its
+            // first-name card is filed after this catch, with every other fenced outcome).
+            if (schedErr.firstNameHold) {
+              appointmentResult = {
+                ...appointmentResult, scheduleCreated: false,
+                skippedReason: 'missing_required_customer_fields', missingFields: ['first_name'],
+              };
+              if (!(CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED)) {
+                await fileSkippedBookingCard({
+                  call, procToken, customerId, extraction: v2CanonicalExtraction || undefined,
+                  skippedReason: 'first_name_exact_address_hold',
+                  preferredDateTime: extracted.preferred_date_time,
+                  serviceType, bridgeNeedsConfirmation, callSid,
+                });
+              }
+            }
+          }
+          // The owed first-name card from the fenced reread, filed on its own connection now
+          // that the booking transaction has committed or rolled back (no locks held), and
+          // counted toward review while it stays open (the finalizer rechecks under the lock).
+          if (fencedFirstNameOwed) {
+            await fileFirstNameAdvisoryCard(db)
+              .catch((err) => logger.warn(`[call-proc] fenced first-name advisory insert failed for ${maskSid(callSid)} (${err.code}:${err.errorToken})`));
+            if (await missingFirstNameCardStillOpen(db, call.id).catch(() => false)
+              && !bridgeNeedsConfirmation.includes('missing_first_name')) bridgeNeedsConfirmation.push('missing_first_name');
           }
 
           // SMS cleared ONLY by IMPLIED inbound consent, the resolved target
@@ -19890,16 +20624,24 @@ const CallRecordingProcessor = {
       try {
         // Row-locked like every write to an existing decision (codex #5371 r9 P1):
         // a verdict landing concurrently serializes on the route_decisions row.
-        await db.transaction((trx) => updateUnreviewedRouteDecisions(trx,
-          // Same-run outcome update: targets the row THIS process wrote
-          // moments ago, so the CURRENT version only (a reprocess writes —
-          // and updates — its own fresh v2-1.1.0 row). A row a human has
-          // reviewed keeps the outcome that review judged.
-          { call_log_id: call.id, decision_version: V2_DECISION_VERSION, mode: 'enforce', recording_sid: call.recording_sid || '' },
-          {
-            final_action_taken: bookedServiceId ? 'auto_route' : 'auto_route_skipped',
-            ...(bookedServiceId ? { created_scheduled_service_id: bookedServiceId } : {}),
-          }));
+        // Same-run outcome update: targets the row THIS pass wrote moments ago
+        // (upsertRouteDecision reports its version: the family's unreviewed
+        // member, the base or its '+r1' — every pass has exactly one writable
+        // row, whatever its verdict; codex #5377 r4 / r7 / r8 P1). Null only when
+        // the pass lost its claim and wrote nothing. A pass that never reached the
+        // write (report absent) keeps the old family-wide scope. A reviewed row is
+        // never updated either way.
+        const outcomeVersion = routeDecisionWrite.decisionVersion === undefined
+          ? routeDecisionFamilyVersions(V2_DECISION_VERSION)
+          : routeDecisionWrite.decisionVersion;
+        if (outcomeVersion) {
+          await db.transaction((trx) => updateUnreviewedRouteDecisions(trx,
+            { call_log_id: call.id, decision_version: outcomeVersion, mode: 'enforce', recording_sid: call.recording_sid || '' },
+            {
+              final_action_taken: bookedServiceId ? 'auto_route' : 'auto_route_skipped',
+              ...(bookedServiceId ? { created_scheduled_service_id: bookedServiceId } : {}),
+            }));
+        }
       } catch (rdErr) {
         logger.warn(`[call-proc] route_decisions outcome update failed for ${maskSid(callSid)}: ${rdErr.message}`);
       }
@@ -20584,7 +21326,15 @@ const CallRecordingProcessor = {
           agentCommitFailOpen: isEnabled('callAgentCommitBooking') && !isOutboundCall(call),
           transcript: transcription,
           transcriptLabelsTrusted: isEnabled('callAgentCommitTrustedLabels'),
-          callStartedAt: call.created_at,
+          // Inbound-only and behind the agent-commit gate, mirroring the
+          // enforce lane (owner ruling 2026-09-30; codex #5377 r1 P1).
+          commercialDictatedBooking: commercialDictatedBookingActive(call),
+          ...(commercialDictatedBookingActive(call) ? {
+            commercialQuoteBookable: commercialQuoteBookableFor({
+              extracted, preAdoptionExtracted, transcription, services: bookableCallServices,
+            }),
+          } : {}),
+          callStartedAt: callStartedAt(call) || call.created_at,
           // Mirrors the enforce lane (GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT).
           unclearServiceAssessment: unclearServiceAssessmentActive(),
         });
@@ -20701,6 +21451,11 @@ const CallRecordingProcessor = {
       }).catch((e) => logger.warn(`[call-proc] late-scheduling-hold lead-activity refresh failed for ${maskSid(callSid)}: ${e.message}`));
     }
 
+    // On-site asks that never reached a landed, active visit: nothing was sent.
+    if (pendingOnSiteAsks.length && !onSiteAsksHandled) {
+      for (const { entry } of pendingOnSiteAsks) await markOptinAsk(entry, 'not_sent:no_booking');
+    }
+
     const liveLeadConversation = isLiveLeadConversation({
       call, extracted, leadId, finalStatus, nonLeadCall, voicemailLeadPath, transcription,
     });
@@ -20720,8 +21475,14 @@ const CallRecordingProcessor = {
       // it, and a stale reason must not reopen a call with no open card.
       const streetLevelStillHeld = !bridgeNeedsConfirmation.includes('street_level_address_review')
         || (!!appointmentResult?.scheduledServiceId && await isStreetLevelHoldVisit(appointmentResult.scheduledServiceId, trx));
+      // …and the same for the owed-first-name reason: an office Resolve / Dismiss (or the
+      // auto-resolve sweep) may have closed the card since this pass filed it, and a
+      // closed card's reason must not reopen review. Judged under the lock just taken.
+      const firstNameStillOwed = !bridgeNeedsConfirmation.includes('missing_first_name')
+        || await missingFirstNameCardStillOpen(trx, call.id);
       const reviewReasonCount = bridgeNeedsConfirmation
-        .filter((r) => r !== 'street_level_address_review' || streetLevelStillHeld).length;
+        .filter((r) => (r !== 'street_level_address_review' || streetLevelStillHeld)
+          && (r !== 'missing_first_name' || firstNameStillOwed)).length;
       // Keep the established leads -> call_log lock order. The transition
       // below must commit only with this processing token's final verdict.
       if (liveLeadConversation) await trx('leads').where({ id: leadId }).forUpdate().first('id');
@@ -22044,9 +22805,14 @@ CallRecordingProcessor._test = {
   unclearServiceAssessmentActive,
   maskPhone,
   validatePhoneCallAppointmentCustomer,
+  advisoryBookingAddressHoldFields,
+  addressesExactlyMatch,
+  fileMissingFirstNameCard,
+  missingFirstNameCardStillOpen,
   slotOnlyLinkAllowed,
   extractedNameMatchesCustomer,
   findCustomerForCallContact,
+  firstNameAdvisoryAddressOk,
   normalizeCallExtraction,
   shouldCreateCallLeadForCustomer,
   findExistingCallAppointment,
@@ -22115,10 +22881,16 @@ CallRecordingProcessor._test = {
   isFreshInboundCall,
   resolveCallBillingPayer,
   persistCallSecondaryContact,
+  onSiteOptinAskTrigger,
+  decideOnSiteOptinAsk,
   resolveCallBookingPropertyLinkage,
   demoteFailOpenOnV1AddressConflict,
   resolveOnFileAddressAuthority,
   buildFailOpenRoutingContext,
+  commercialDictatedBookingActive,
+  commercialQuoteBookableFor,
+  auditCommercialQuoteBookableFor,
+  preAdoptionServiceFields,
   resolveKnownCallerCustomer,
   v2IsoToEtWallClock,
   phoneNearMissOfAni,

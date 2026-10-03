@@ -17,6 +17,8 @@
  */
 
 const { aftercareCustomerTask, hasCreditableWaterIn, normalizeLawnAftercare } = require('./lawn-aftercare');
+const { deriveLawnLead } = require('./lawn-report-lead');
+const { lawnReportLeadLive } = require('../../config/feature-gates');
 
 // Customer-facing lead extraction for the today's-result hero. Unlike
 // firstSentence (whose callers want a short excerpt and tolerate a "…"),
@@ -846,15 +848,8 @@ function reconcileLawnReport({ data = {}, reportV2 = null, serviceLine = 'lawn' 
   };
 }
 
-/**
- * Apply reconcileLawnReport's fixes onto an assembled report payload in
- * place. Shared by the public route AND the queued PDF renderer — the queue
- * builds its payload directly and renders under the deterministic storage
- * key, so a queue render without this pass would bake the pre-reconciliation
- * copy into the cache and the direct route would then serve it as current
- * (codex P2 #3197 r6). Best-effort: any throw leaves the payload untouched.
- */
-function applyLawnReportReconciliation(data, dynamicContext = null) {
+// reconcileLawnReport's fixes applied onto the payload in place (best-effort).
+function applyReconciliationFixes(data, dynamicContext) {
   if (!data || !data.reportV2) return data;
   try {
     const fix = reconcileLawnReport({
@@ -883,6 +878,39 @@ function applyLawnReportReconciliation(data, dynamicContext = null) {
       dynamicContext.reentry = { ...dynamicContext.reentry, petAdvisory: fix.reentry.petAdvisory };
     }
   } catch { /* reconciliation is best-effort — never block the report */ }
+  return data;
+}
+
+/**
+ * Apply reconcileLawnReport's fixes onto an assembled report payload in
+ * place. Shared by the public route AND the queued PDF renderer — the queue
+ * builds its payload directly and renders under the deterministic storage
+ * key, so a queue render without this pass would bake the pre-reconciliation
+ * copy into the cache and the direct route would then serve it as current
+ * (codex P2 #3197 r6). Best-effort: any throw leaves the payload untouched.
+ */
+function applyLawnReportReconciliation(data, dynamicContext = null) {
+  // The "Since your last visit" block rides the built report as a
+  // non-enumerable hand-off (report-data.js); the fixes below rebuild
+  // reportV2 by spread, which would drop it, so it is read first.
+  const sinceLast = (data && data.reportV2 && data.reportV2.sinceLastCopy) || null;
+  // The v6 copy writer's fields (GATE_LAWN_REPORT_COPY_V6) ride the built report
+  // as a non-enumerable hand-off (report-data.js); the fixes below rebuild
+  // reportV2 by spread, which would drop it, so it is read first. They reach
+  // the customer only through reportV2.lead, never as a payload key.
+  const copyV6 = (data && data.reportV2 && data.reportV2.copyV6) || null;
+  applyReconciliationFixes(data, dynamicContext);
+  // The lead (GATE_LAWN_REPORT_LEAD) is derived from the FINAL reconciled
+  // strings, so it runs after the fixes above and even when
+  // reconcileLawnReport returned null. Lawn only: the reportV2 slot also
+  // carries tree & shrub payloads, which never get a lead. Its own try/catch —
+  // a lead failure leaves the payload exactly as reconciled.
+  if (data && data.reportV2 && data.serviceLine === 'lawn' && lawnReportLeadLive()) {
+    try {
+      const lead = deriveLawnLead(data.reportV2, { sinceLast, copyV6 });
+      if (lead) data.reportV2 = { ...data.reportV2, lead };
+    } catch { /* the lead is best-effort — the report renders without it */ }
+  }
   return data;
 }
 

@@ -275,7 +275,8 @@ const {
   applicatorIdentityPdfSignature,
   applicatorRenderedPdfSignature,
 } = require('../services/service-report/pdf-storage');
-const { summaryCopySignature, technicianReportCustomerCopy } = require('../services/service-report/technician-report-copy');
+const { summaryCopySignature } = require('../services/service-report/technician-report-copy');
+const { customerSafeVisitNotes } = require('../services/context-aggregator');
 const {
   mosquitoReportV2PdfSignature,
   buildMosquitoReportV2,
@@ -285,6 +286,7 @@ const { pestReportV2PdfSignature } = require('../services/service-report/pest-re
 const { attachTermiteReportV2, termiteReportV2PdfSignature } = require('../services/service-report/termite-report-v2');
 const { cockroachReportV2PdfSignature, cockroachReportV2RenderedSignature, attachCockroachReportV2 } = require('../services/service-report/cockroach-report-v2');
 const { reserviceReportPdfSignature, reserviceReportRenderedSignature, reserviceTrendsPdfSignature, reserviceReportCopyGateOn } = require('../services/service-report/reservice-report');
+const { reserviceCardRenderFence } = require('../services/service-report/reservice-report-card');
 const { reportPhotoSetPdfSignature } = require('../services/service-report/photo-set-signature');
 const { treatmentZonePdfSignature } = require('../services/treatment-zone-maps');
 const { photoMarksPdfSignature } = require('../services/service-report/photo-marks');
@@ -2252,6 +2254,7 @@ router.get('/:token', async (req, res, next) => {
       let apRenderedSignature = apSignature;
       let cockroachRenderedSignature = cockroachV2Signature;
       let reserviceRenderedSignature = reserviceV2Signature;
+      let cardFenceAtRender = null;
       // The canonical snapshot the render is pinned to. Declared out here so
       // the storage block below keys the object by what was RENDERED, not by
       // the cache-lookup value; assigned inside the try so an unreadable
@@ -2274,6 +2277,11 @@ router.get('/:token', async (req, res, next) => {
         laRenderSignature = canonical.signature;
         for (let attempt = 0; attempt < 2; attempt += 1) {
           const renderSignature = visibilitySignature;
+          // ONE card snapshot (gate + the score row its "Activity seen" word
+          // reads) taken before the payload and its signature are built; the
+          // post-render fence compares against it (the browser fetches its own
+          // /data, so a change anywhere in between skips the store).
+          cardFenceAtRender = await reserviceCardRenderFence(service, db);
           const data = await buildServiceReportV1ResponseData(service, req.params.token, {
             mode: 'pdf', pestPressureConfig, pinnedLawnAssessmentId: canonicalPin, pinnedWeekPlanAvailableAt: canonical.weekPlanAvailableAt,
             propertyHistoryEnabled, lawnHistory: canonical.lawnHistory, pinnedLawnHistoryIdentity: canonical.lawnHistory?.identity,
@@ -2362,12 +2370,14 @@ router.get('/:token', async (req, res, next) => {
         } else if (renderedData?.pestWeekWeatherUncacheable) {
           // Same rule as the lawn branch above, mirrored for the pest-line
           // rain block (codex P0 2026-09-28): a still-OPEN 7-day window
-          // must never be baked into the stable '-pex1' PDF key, or later
+          // must never be baked into the stable '-pex2' PDF key, or later
           // downloads keep serving the "no rain block" bytes forever even
           // after the window settles.
           logger.warn(`[reports-public] pest week weather not cacheable for ${service.id} (${renderedData.pestWeekWeatherPendingReason || 'open_window'}) — not caching this render`);
         } else if (laAfter !== laRenderSignature) {
           logger.warn(`[reports-public] lawn assessment changed during PDF render for ${service.id} — not caching this render`);
+        } else if (cardFenceAtRender === null || await reserviceCardRenderFence(service, db) !== cardFenceAtRender) {
+          logger.warn(`[reports-public] re-service card gate or activity label changed during PDF render for ${service.id} — not caching this render`);
         } else if (await reserviceTrendsPdfSignature(service, db) !== reserviceTrendsSignature) {
           // Same fence as pdf-queue: a callback inserted/reclassified
           // mid-render must not store the old chart under the new key.
@@ -2398,7 +2408,7 @@ router.get('/:token', async (req, res, next) => {
     // served anymore: they were written with raw technician_notes (gate
     // codes, billing notes) before the 2026-07-16 owner ruling and a stored
     // file can't be sanitized in place — regenerate on the fly instead, which
-    // routes notes through technicianReportCustomerCopy (codex P1 #2797).
+    // routes notes through customerSafeVisitNotes (codex P1 #2797).
 
     // Generate PDF on-the-fly
     const products = await db('service_products').where({ service_record_id: service.id });
@@ -2645,8 +2655,9 @@ router.get('/:token/data', async (req, res, next) => {
       customerName: `${service.first_name} ${service.last_name}`,
       cityState: `${service.city || ''}${service.state ? ', ' + service.state : ''}`.trim().replace(/^,\s*/, ''),
       // technician_notes is internal (owner ruling 2026-07-16): only the
-      // reviewed WHAT WE DID / WHAT WE FOUND parse may reach the customer.
-      notes: technicianReportCustomerCopy(service.technician_notes)?.body || '',
+      // reviewed parse may reach the customer, through the one rule every
+      // customer render uses (context-aggregator customerSafeVisitNotes).
+      notes: customerSafeVisitNotes(service) || '',
       products: products.map(p => ({
         name: p.product_name, category: p.product_category,
         activeIngredient: p.active_ingredient, moaGroup: p.moa_group,
@@ -2729,8 +2740,9 @@ function generateReportPDF(service, products, weather, dryTimes, irrigation, res
   }
 
   // Tech notes — raw technician_notes is internal (owner ruling 2026-07-16);
-  // print only the reviewed WHAT WE DID / WHAT WE FOUND parse, or nothing.
-  const reviewedNotes = technicianReportCustomerCopy(service.technician_notes)?.body;
+  // print only the reviewed parse, through the one rule every customer
+  // render uses (context-aggregator customerSafeVisitNotes), or nothing.
+  const reviewedNotes = customerSafeVisitNotes(service);
   if (reviewedNotes) {
     doc.fontSize(11).font('Helvetica-Bold').fillColor(PDF_NAVY).text('TECHNICIAN NOTES');
     doc.moveDown(0.3);

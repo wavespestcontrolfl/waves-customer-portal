@@ -5,9 +5,9 @@
  *   strip      name / program line / phone, plus the access codes the strip
  *              renders tap-to-reveal (raw codes live ONLY here — never in
  *              the paragraph or the model payload)
- *   paragraph  1–3 plain sentences written by a FAST-tier model from
- *              deterministic portal facts, with the deterministic template
- *              as both the grounding and the fallback; cached per visit on
+ *   paragraph  the deterministic template from portal facts. A FAST-tier
+ *              model rewrite over that template sits behind its own dark
+ *              gate (GATE_JOB_CARD_LLM); cached per visit on
  *              scheduled_services.job_card by grounding hash
  *   sprayCheck per-product verdict against NWS hourly at the property
  *   products   the visit's protocol products as cards (verdict, short,
@@ -24,6 +24,8 @@ const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { gateEnvValue } = require('../config/feature-gates');
+const { treeShrubFieldGuide } = require('./tree-shrub-field-guide');
+const { resolveCatalogProductForName } = require('./completion-product-defaults');
 const { reviewedWeather, checkReviewedWeatherSources } = require('./product-label-weather');
 const { dispatchWithFallback } = require('./llm/call');
 const { getHourlyRainOutlook } = require('./weather-forecast');
@@ -56,6 +58,15 @@ const MAX_PARAGRAPH_WORDS = 60;
 
 function jobCardEnabled() {
   return gateEnvValue('GATE_JOB_CARD');
+}
+
+// The paragraph's model rewrite is a SEPARATE dark gate from the card
+// (owner decision 2026-10-02, same call as GATE_PREVISIT_BRIEF_LLM): the
+// grounding validator rejected every attempt on both providers, so off
+// means no provider call and the template IS the paragraph. Read at call
+// time, exact 'true'.
+function paragraphLlmEnabled() {
+  return process.env.GATE_JOB_CARD_LLM === 'true';
 }
 
 // ── Facts ───────────────────────────────────────────────────────────────────
@@ -674,6 +685,7 @@ function groundingHash(template) {
 async function writeParagraph(template, codes = [], deps = {}, critical = []) {
   const fallback = { text: template, source: 'template' };
   if (!template) return fallback;
+  if (!paragraphLlmEnabled()) return fallback;
   if (!deps.callModel && !process.env.ANTHROPIC_API_KEY && !process.env.OPENAI_API_KEY) return fallback;
   const validate = (result) => validateParagraph(result?.text, template, codes, critical);
   const callModel = deps.callModel
@@ -713,7 +725,14 @@ async function paragraphForVisit(facts, { dbh = db, deps = {} } = {}) {
   const template = buildTemplateParagraph(facts.facts, { isLawn: facts.isLawn });
   const hash = groundingHash(template);
   const stored = facts.cache.stored;
-  if (stored?.grounding_hash === hash && stored.source === 'model' && stored.text) {
+  if (!paragraphLlmEnabled()) {
+    // Gate off: the template is the paragraph. A stored template for the
+    // same grounding is a hit (no write per read); anything else — a cached
+    // model paragraph included — is replaced by the template below.
+    if (stored?.grounding_hash === hash && stored.source === 'template' && stored.text === template) {
+      return { text: template, source: 'template', cached: true };
+    }
+  } else if (stored?.grounding_hash === hash && stored.source === 'model' && stored.text) {
     return { text: stored.text, source: 'model', cached: true };
   }
   const written = await writeParagraph(template, facts.knownCodes || facts.access.codes, deps, criticalFacts(facts.facts));
@@ -1164,8 +1183,10 @@ function resolveProtocolLines(serviceType, scheduledDate, protocols, catalog, { 
   for (const line of linesFromProtocolText(visit, catalog)) {
     if (!lines.some((l) => l.product.id === line.product.id)) lines.push(line);
   }
+  const fieldGuide = treeShrubFieldGuide(visit);
   return { visit, lines, procedure: {
     name: program.name,
+    ...(fieldGuide ? { fieldGuide, safetyRules: program.safety_rules || [] } : {}),
     source: 'Service template',
     title: visit.visit_type || `Visit ${visit.visit}${visit.month && visit.month !== 'Any' ? ` · ${visit.month}` : ''}`,
     objective: procedureLines(visit.main_goal).join(' ') || null,
@@ -1332,9 +1353,11 @@ function linesFromProtocolText(visit, catalog) {
     // The parser's own flag (secondary text, "if …") plus the wider
     // condition phrasing the protocols use: a primary line the tech has to
     // justify is conditional work, never selected base work.
-    const conditional = Boolean(line.conditional) || isConditionalLine(line.raw);
+    const labelHold = visit?.fieldGuide && /\bheld\b|\bhold dose\b|exact.*label needed|verify container label|target-specific label rate|whiteflies.*listed scales/i.test(line.raw)
+      ? 'Treatment needs its verified label, target and application method before mixing' : null;
+    const conditional = Boolean(line.conditional) || isConditionalLine(line.raw) || Boolean(labelHold);
     for (const product of productsOnLine(line, catalog)) {
-      if (!out.some((l) => l.product.id === product.id)) out.push({ raw: line.raw, product, role: conditional ? 'conditional' : 'base', selected: !conditional });
+      if (!out.some((l) => l.product.id === product.id)) out.push({ raw: line.raw, product, role: conditional ? 'conditional' : 'base', selected: !conditional, ...(labelHold ? { labelHold } : {}) });
     }
   }
   return out;
@@ -1569,6 +1592,24 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
   const packSizes = await loadPackSizes(dbh, products.map((p) => p.id));
   const cards = await buildProductCards({ facts, lines, verdicts: sprayCheck.verdicts, packSizes, blocked: blocks.length > 0, tankReason: tank.calibrated ? null : tank.reason, includePricing, dbh });
 
+  // A month reference cannot bypass the job's label/weather holds. Keep
+  // target and source details, but withhold scaled mixing amounts until
+  // the exact catalog product and the current checks permit them.
+  for (const currentProcedure of [procedure, ...addons.map(addon => addon.procedure)]) {
+    if (!currentProcedure?.fieldGuide) continue;
+    for (const product of Object.values(currentProcedure.fieldGuide.products)) {
+      if (!product.mix) continue;
+      const name = product.name.startsWith('TriTek') ? 'TriTek Spray Oil Emulsion (OMRI)' : product.name;
+      const row = resolveCatalogProductForName(name, catalog, { exactOnly: true })
+        || fieldGuideLineProduct(name, products);
+      const verdict = sprayCheck.verdicts.find(item => item.productId === row?.id);
+      if (blocks.length || !row?.label_verified_at || !verdict || verdict.verdict !== 'ok') {
+        product.mix = null;
+        product.summary = 'Mix withheld · see product checks';
+      }
+    }
+  }
+
   return {
     enabled: true,
     serviceId: facts.serviceId,
@@ -1741,6 +1782,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
     [!protocolLine && !primaryIsLawn && Boolean(lawnAddon), `${lawnAddon} has no plan on this visit — amount withheld`],
     [planWide.length > 0, 'Lawn plan blocked — amounts withheld'],
     [productBlocks.length > 0, clean(productBlocks[0]?.message, 160)],
+    [Boolean(protocolLine?.labelHold), protocolLine?.labelHold],
     // The protocol lists this product as "if needed": no dose until the
     // call is made, exactly as the card withholds its amount.
     [protocolLine?.selected === false, `Listed as "if needed" on ${protocolLine?.addon || "this visit's protocol"} — confirm the call before mixing`],
@@ -1823,7 +1865,7 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
     const hit = lines.find((l) => l.product.id === product.id);
     if (!hit) continue;
     if (hit.selected !== false) return found({ addon: c.addon, selected: true, rate: lineRate(hit.raw) });
-    conditional = conditional || { addon: c.addon, selected: false, rate: null };
+    conditional = conditional || { addon: c.addon, selected: false, rate: null, ...(hit.labelHold ? { labelHold: hit.labelHold } : {}) };
   }
   return found(conditional);
 }
@@ -1853,8 +1895,27 @@ function buildPerGallonAmount(rate, gallons) {
   return { amount: round(rate.lo * gal), amountMax: rate.hi > rate.lo ? round(rate.hi * gal) : null, unit: rate.unit, gallons: gal, basis: 'per_gallon', reason: null };
 }
 
+// The month guide names products by their short label ("Mainspring GNL",
+// "Floramite SC") while the catalog carries the full name ("Mainspring GNL
+// Insecticide", "Floramite SC/LS 8 oz"). When the exact lookup misses, reuse
+// the row this visit's protocol lines already resolved, but only when exactly
+// one of them begins with the guide label. Anything else stays withheld.
+function fieldGuideLineProduct(name, products) {
+  const label = String(name || '').trim().toLowerCase();
+  if (!label) return null;
+  const byId = new Map();
+  for (const product of products || []) {
+    const full = String(product?.name || '').toLowerCase();
+    if (product?.id == null || !full.startsWith(label)) continue;
+    if (full.length > label.length && !/[\s/(,-]/.test(full[label.length])) continue;
+    byId.set(product.id, product);
+  }
+  return byId.size === 1 ? [...byId.values()][0] : null;
+}
+
 module.exports = {
   jobCardEnabled,
+  paragraphLlmEnabled,
   buildJobCard,
   mixForProduct,
   loadJobCardFacts,
@@ -1869,5 +1930,5 @@ module.exports = {
   resolveVisitLines,
   PROMPT_VERSION,
   SYSTEM_PROMPT,
-  _test: { dispatchReadiness, accessCodes, petLine, loadRain7d, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, criticalFacts, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, clauseMismatch, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations },
+  _test: { fieldGuideLineProduct, dispatchReadiness, accessCodes, petLine, loadRain7d, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, criticalFacts, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, clauseMismatch, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations },
 };

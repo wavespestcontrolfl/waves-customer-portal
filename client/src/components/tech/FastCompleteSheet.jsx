@@ -25,36 +25,83 @@
 // Dispatch CompletionPanel — before any attempt may have reached the
 // server; so does "+ Other product" when the product list did not load.
 //
+// Customer text (dark, GATE_FAST_COMPLETE_RECAP, `service.recapEnabled`): off,
+// the sheet pins sendCompletionSms / requestReview / includePayLink to false
+// and the customer gets nothing. On, it asks for the ONE fixed re-service text
+// (customerRecapMode 'reservice_fixed'); the SERVER builds it from the saved
+// facts (address, where, pests, products) and sends it through its normal send
+// path, so consent, STOP and opt-out checks still apply. No customer wording
+// lives here, no review ask and no pay link go with it, and after Complete the
+// tech sees the exact text that went (or why none did) from the response.
+//
 // The layout is compact (three/four-across choice rows, the note behind a
 // tap) so the choices fit a typical phone screen; the Complete button is
 // pinned in the footer either way.
 //
 // Product catalog and visit identity come from the SAME context endpoint
 // ServiceRecapModal loads (GET /admin/dispatch/:id/pest-recap/context).
+//
+// Report flow (GATE_FAST_COMPLETE_REPORT, owner "ok go" 2026-10-01): with
+// `service.reportFlow`, the sheet opens for any open untyped pest visit (a
+// re-service or a regular visit) and runs talk, generate the AI report,
+// read it, trace the spray, send. The tech talks into the note, adds photos,
+// taps whether the customer was home (not home, full access, picked every
+// time), the pest activity 1 to 5, one tip and the promise check, then
+// generates the report (POST /admin/schedule/generate-report, the full
+// form's own request) and reads it before anything goes. Where product went
+// down and the pests named are read from the note (POST
+// /admin/dispatch/:id/voice-facts, owner 2026-09-30: those facts are voice
+// only) and shown under the report. A saved perimeter trace makes the
+// sprays perimeter sprays at the trace's length; without one they are spot
+// treatments. Complete & send posts /complete as the full form does: the
+// visit bills at finish, the customer gets the report text, a regular visit
+// also gets the pay link and the review ask (never a re-service). The pieces
+// live in FastCompleteReport.jsx.
+//
+// The frame, header, saved view, note, tip picker and tiles are shared with
+// every Fast Complete sheet (FastCompleteParts.jsx), as is the /complete
+// submit (hooks/useFastCompleteSubmit.js); products, photos, pests and the
+// completion body are this sheet's own.
 import React, { useCallback, useEffect, useMemo, useRef, useState, useId } from 'react';
-import { createPortal } from 'react-dom';
 import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
-import { pestDefaultMixSelections } from '../../lib/pest-default-mix';
+import { isPestDefaultMixVisit, pestDefaultMixSelections } from '../../lib/pest-default-mix';
 import { defaultApplicationMethodForLine, prefillRateCeiling, resolveRatePrefill } from '../../lib/product-rate-prefill';
-import { shouldResetCompletionIdempotencyKey } from '../../lib/completion-idempotency';
 import { recapVisitIdentity } from '../../hooks/useServiceRecapDraft';
-import { rankTechTips, techTipSubtext, techTipSentLabel } from '../../lib/tech-tips';
 import {
-  UNIT_CHOICES, amountText, categoryLabel, isOutOfStock, productUnits, seededAmount, stockHolds,
+  UNIT_CHOICES, amountText, categoryLabel, hasAmount, isOutOfStock, productUnits, seededAmount, stockHolds,
 } from '../../lib/fast-complete-products';
 import { isMlUnit, submittedAmount } from '../../lib/measure-units';
-import DictationButton from './DictationButton';
-import FastCompleteProductPicker, { WarningIcon } from './FastCompleteProductPicker';
+import useFastCompleteSubmit from '../../hooks/useFastCompleteSubmit';
+import { WarningIcon } from './FastCompleteProductPicker';
 import RATE_UNITS from '../../../../shared/rate-units.json';
 import TechServicePhotosModal from './TechServicePhotosModal';
-import { UiSurface, Button, Field, Input, Textarea, ActionFeedback, cn } from '../ui';
+import TechTreatmentZoneModal from './TechTreatmentZoneModal';
+import {
+  ActivitySection, CollectPayment, ConfirmPrompt, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, FIRST_VISIT_RATING, PhotoStripSection,
+  BlogPostSection, EMPTY_LANE_RECORD, EMPTY_TYPED_RECORD, InspectionCreditToggle, LaneRecordCard, PromisesSection, ReportCard, SentSummary, StepFooter,
+  TechNoteBoxPhotos, TraceSection, TypedRecordCard, changeTypedRecord, laneRecordNeedsAction, mergeTypedRecord, scoreTypedRecord, typedCardFields,
+  typedScoreIsTechs,
+  WritingView, changeLaneRecord, customerHomeWriterLabel, factsHold, mergeLaneRecord, perimeterFeetOf, photoCaptionsOf, useBlogPostOffer,
+  useVisitPhotos, useVisitPromises, useVisitTrace,
+} from './FastCompleteReport';
+import { promiseMarksPayload } from '../schedule/PromiseCheck';
+import { SERVICE_COMPLETION_PRESETS } from '../../lib/service-completion-presets';
+import AREA_SCOPES from '../../../../shared/treatment-area-scopes.json';
+import {
+  completionAreasForTypedFindings, parseApplicationAreas, trapSetupConflicts, typedActivityScoreConflict, typedFieldRequiredNow,
+  typedFormTakesPlaces, typedTreatmentAreaField, typedZeroStateRefusesBody,
+} from '../../lib/typed-findings-rules';
+import {
+  AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, SavedView,
+  SheetHeader, TipSection, VisitNote, customerNameOf, techTipsOf, toggleInSet, useProductPicker, useTipLibrary,
+  visitChangedSinceSchedule,
+} from './FastCompleteParts';
+import { Button, Field, Input, ActionFeedback, cn } from '../ui';
 import '../../styles/tech-workflow.css';
 
 const unitLabel = (unit) => String(unit || '').replace(/_/g, ' ');
-// The amount /complete would receive is above zero (a tsp amount goes as fl oz).
-const hasAmount = (row) => submittedAmount(row.totalAmount, row.amountUnit).totalAmount > 0;
 
 // How the SPRAY products went down. Spot treatment needs no measured area;
 // a perimeter spray records its linear feet (the application record's area
@@ -64,6 +111,10 @@ const METHOD_CHOICES = [
   { value: 'perimeter_spray', label: 'Perimeter spray' },
 ];
 const SPRAY_METHODS = new Set(METHOD_CHOICES.map((choice) => choice.value));
+// Every way a product goes down as a spray, a catalog's own method included
+// (product-rate-prefill.js): a note that says "didn't spray" contradicts any
+// of them, not only the How row's two (codex local r17).
+const SPRAYED_METHODS = new Set(['perimeter_spray', 'spot_treatment', 'broadcast_spray', 'foliar_spray', 'fog_ulv', 'pin_stream']);
 // The How row's starting pick.
 const DEFAULT_METHOD = 'spot_treatment';
 // The ways an added product can go down, beside its own catalog method.
@@ -72,6 +123,20 @@ const ROW_METHOD_CHOICES = [
   { value: 'bait_placement', label: 'Bait placement' },
   { value: 'granular_broadcast', label: 'Granular' },
 ];
+// A lane visit's products (GATE_LANE_VOICE_FILL) also go down the ways the
+// full form records specialty work: a yard broadcast, a mosquito barrier
+// mist, a mound drench.
+const LANE_METHOD_CHOICES = [
+  ...ROW_METHOD_CHOICES,
+  { value: 'broadcast_spray', label: 'Broadcast spray' },
+  { value: 'fog_ulv', label: 'Fog/ULV' },
+  { value: 'soil_drench', label: 'Soil drench' },
+];
+
+// The line a lane visit's products resolve on, as the full form resolves
+// them: the mosquito lane's own (a methodless liquid is a barrier mist),
+// every other lane the pest line, bed bug's indoors.
+const laneProductLine = (lane) => ({ serviceLine: lane === 'mosquito' ? 'mosquito' : 'pest', interiorLane: lane === 'bed_bug_treatment' });
 // A rate goes on the record only in a unit /complete accepts: the server's
 // own list (shared/rate-units.json, read by inventory-units.js), matched
 // trimmed and case-blind as it matches them, less its mL units, which this
@@ -103,109 +168,52 @@ const ACTIVITY_LEVELS = [
   { value: 'moderate', label: 'Moderate', rating: 3 },
   { value: 'heavy', label: 'Heavy', rating: 5 },
 ];
-// Tips shown before the tech searches or opens the whole list.
-const TIP_PREVIEW_COUNT = 4;
-// Mirrors MAX_CUSTOM_TIP_CHARS (server tip-library.js): the server rejects a
-// longer line, never trims it.
-const CUSTOM_TIP_MAX_CHARS = 240;
-const MIC_PALETTE = { accent: '#e2e8f0', muted: '#334155', red: '#ef4444', card: '#1e293b' };
-const CLOSED_STATUSES = new Set(['completed', 'cancelled', 'skipped', 'no_show']);
-const dayOf = (value) => String(value || '').slice(0, 10);
-// Letters and digits only: the row's address is built in SQL and the live
-// one from fields, so spacing and punctuation may differ, but a different
-// unit never matches ("apt 4" vs "apt 5").
-const addressKey = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-
-// Whether the tapped row's property is no longer the live visit's. The row's
-// property id decides: a move to another unit at the same street is another
-// property. A visit never stamped with one (null on both sides) falls back to
-// the whole address, unit included. A row without the fields (an older
-// payload) gives no verdict.
-function propertyMoved(service, visit) {
-  const routedId = service?.routedPropertyId;
-  if (routedId !== undefined) {
-    if (String(routedId ?? '') !== String(visit?.propertyId ?? '')) return true;
-    if (routedId != null) return false;
-  }
-  const live = visit?.address;
-  if (!service?.routedAddress || !live?.line1) return false;
-  return addressKey(service.routedAddress) !== addressKey([live.line1, live.line2, live.city, live.state, live.zip].join(' '));
-}
 
 // Why the live context can't be completed here, or '' when it can: the
 // schedule row the tech tapped may be stale, so the loaded visit must still
 // be that visit (same customer, day and property), still an open pest
-// re-service, and still eligible for the short form (not typed or
-// project-backed).
+// re-service (any open pest visit in the report flow), and still eligible
+// for the short form (not typed or project-backed).
+// The report flow opens on any open pest visit, so the live visit must still
+// be the service the tech tapped (the header shows the schedule's): an office
+// edit that changed the service since the schedule loaded is a changed visit.
+function serviceChangedSinceSchedule(visit, service) {
+  // The row's stored label, as the context reports it (the schedule shows a
+  // cleaned-up one).
+  const changedType = service?.routedServiceType && visit?.serviceType
+    && String(service.routedServiceType).trim() !== String(visit.serviceType).trim();
+  const changedKey = service?.routedServiceKey && visit?.serviceKey && service.routedServiceKey !== visit.serviceKey;
+  return !!(changedType || changedKey);
+}
+
+// The lane a report-flow visit was routed as (GATE_LANE_VOICE_FILL): the
+// lane the live visit must still read as, and whose record the sheet reads.
+const routedLaneOf = (service) => (service?.reportFlow === true && service.laneFlow === true ? service.laneKey || null : null);
+// The typed form a report-flow visit was routed as (GATE_TYPED_VOICE_FILL):
+// the form the live visit must still read as, and whose record the sheet
+// reads.
+const routedTypedOf = (service) => (service?.reportFlow === true && service.typedFlow === true ? service.typedType || null : null);
+
+// Whether the live visit is still one this sheet takes as it was routed: a
+// lane visit its lane, a typed visit its form, any other one the short form.
+function routeStillHolds(context, service) {
+  if (service?.typedFlow) return context?.typedType === service.typedType;
+  if (service?.laneFlow) return context?.lane === service.laneKey;
+  return context?.eligible === true;
+}
+
 function blockedReasonFor(context, service) {
   const visit = context?.service || {};
-  const movedCustomer = service?.routedCustomerId && visit.customerId
-    && String(service.routedCustomerId) !== String(visit.customerId);
-  const movedDay = service?.routedScheduledDate && visit.scheduledDate
-    && dayOf(service.routedScheduledDate) !== dayOf(visit.scheduledDate);
-  const movedProperty = propertyMoved(service, visit);
-  if (movedCustomer || movedDay || movedProperty) return 'This visit changed since your schedule loaded. Close and reopen it from the schedule.';
-  if (visit.serviceKey !== 'pest_re_service') return 'This visit is no longer a pest re-service. Use the full form.';
-  if (CLOSED_STATUSES.has(String(visit.status || ''))) return `This visit is already ${visit.status}. Close and reopen it from the schedule.`;
-  if (context?.eligible !== true) return 'This visit needs the full form.';
+  if (visitChangedSinceSchedule(visit, service) || (service?.reportFlow && serviceChangedSinceSchedule(visit, service))) {
+    return 'This visit changed since your schedule loaded. Close and reopen it from the schedule.';
+  }
+  if (!service?.reportFlow && visit.serviceKey !== 'pest_re_service') return 'This visit is no longer a pest re-service. Use the full form.';
+  if (CLOSED_VISIT_STATUSES.has(String(visit.status || ''))) return `This visit is already ${visit.status}. Close and reopen it from the schedule.`;
+  // A lane visit (GATE_LANE_VOICE_FILL) must still read as the lane the
+  // schedule routed it for, a typed visit (GATE_TYPED_VOICE_FILL) as its
+  // form; any other visit must still be one the short form takes.
+  if (!routeStillHolds(context, service)) return 'This visit needs the full form.';
   return '';
-}
-
-// "123 Oak St, Bradenton" from the context's resolved address.
-function liveAddressLine(address) {
-  if (!address || typeof address !== 'object') return '';
-  return [[address.line1, address.line2].filter(Boolean).join(' '), address.city].filter(Boolean).join(', ');
-}
-
-// Every /complete failure lands in one of four outcomes:
-//  saved       — the visit is already saved: this or an earlier attempt
-//                committed (a lost response, another device, or a partly
-//                finished earlier try whose changed body the resume check
-//                refuses — completion_resume_payload_mismatch is only
-//                answered once a record exists; the office's Billing
-//                Recovery finishes those).
-//  correctable — a definitive pre-commit rejection: fix and resubmit under a
-//                fresh key (the full form's shared rule).
-//  retry       — outcome unknown or still running (network drop, 5xx, an
-//                attempt pending or finishing its side effects): resend the
-//                SAME body under the SAME key so the server replays/resumes.
-//  terminal    — a conflict no retry can fix (a future-dated, closed or
-//                changed visit, or an idempotency_key_mismatch, which the
-//                server also answers for pending/failed attempts with no
-//                record, so it is never proof of a save): show it and let
-//                the tech leave.
-const SAVED_CODES = new Set(['service_already_completed', 'completion_resume_payload_mismatch']);
-const IN_PROGRESS_CODES = new Set(['service_completion_pending', 'completion_pending', 'completion_side_effects_running']);
-function completionFailureOutcome(err) {
-  const status = Number(err?.status);
-  if (status === 409 && SAVED_CODES.has(err?.code)) return 'saved';
-  if (shouldResetCompletionIdempotencyKey(err)) return 'correctable';
-  if (!Number.isFinite(status) || status >= 500 || (status === 409 && IN_PROGRESS_CODES.has(err?.code))) return 'retry';
-  return 'terminal';
-}
-
-function outcomeMessage(outcome, err) {
-  if (outcome === 'retry') {
-    return `${err?.message || 'Completion failed'} We couldn't confirm it saved. Tap Retry to send the same completion again.`;
-  }
-  if (err?.code === 'idempotency_key_mismatch') {
-    return 'Another completion for this visit is in progress or was changed. Close and reopen it from the schedule to see where it stands.';
-  }
-  return err?.message || 'Completion failed';
-}
-
-function genIdempotencyKey() {
-  try {
-    if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
-  } catch { /* fall through */ }
-  return `fastcomplete_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-}
-
-function toggleInSet(set, value) {
-  const next = new Set(set);
-  if (next.has(value)) next.delete(value);
-  else next.add(value);
-  return next;
 }
 
 // A row keeps its catalog product: its method comes from the catalog (the
@@ -216,12 +224,14 @@ function toggleInSet(set, value) {
 // Its measure and starting unit are fixed when it lands on the sheet
 // (lib/fast-complete-products.js), so a later How change never re-labels an
 // amount already typed. What the tech typed wins.
-function productRow(product, { serviceType, totalAmount = '', common = null, visitMethod = DEFAULT_METHOD, added = false }) {
+function productRow(product, { serviceType, totalAmount = '', common = null, visitMethod = DEFAULT_METHOD, added = false, lane = null }) {
   const row = {
     product,
     productId: product.id,
     name: product.name,
-    catalogMethod: catalogMethodOf(product, serviceType),
+    catalogMethod: catalogMethodOf(product, serviceType, lane),
+    // A lane visit's row resolves on its lane's line and offers its ways.
+    lane,
     // The unit the catalog states the label rate in; '' when it names none
     // (the rate resolver then falls back to a bare "oz" of its own).
     labelUnit: String(product.default_unit || product.rate_unit || '').trim(),
@@ -235,8 +245,9 @@ function productRow(product, { serviceType, totalAmount = '', common = null, vis
   return { ...row, dimension, totalAmount: seeded.amount, amountUnit: seeded.unit };
 }
 
-function catalogMethodOf(product, serviceType) {
-  const resolved = defaultApplicationMethodForLine(product, 'pest', { serviceType });
+function catalogMethodOf(product, serviceType, lane = null) {
+  const { serviceLine, interiorLane } = laneProductLine(lane);
+  const resolved = defaultApplicationMethodForLine(product, serviceLine, { serviceType, interiorLane });
   if (product.application_method || product.method || !SPRAY_METHODS.has(resolved)) return resolved;
   const form = `${product.name || ''} ${product.category || ''} ${product.formulation || ''}`;
   if (SPRAYED_DRY_FORM.test(form)) return resolved;
@@ -261,7 +272,7 @@ function rowMethod(row, sprayMethod) {
 // the record unseen (owner ruling: the application record holds only what
 // the tech confirmed). The house mix starts at the rate the full form seeds.
 function rowRate(row, sprayMethod) {
-  const resolved = resolveRatePrefill(row.product, { applicationMethod: rowMethod(row, sprayMethod), serviceLine: 'pest' });
+  const resolved = resolveRatePrefill(row.product, { applicationMethod: rowMethod(row, sprayMethod), serviceLine: laneProductLine(row.lane).serviceLine });
   // An added product has a rate only in its label's own unit: never the pest
   // house default (4 oz, the house mix's rate), nor the resolver's bare "oz"
   // for a catalog row that names no unit at all.
@@ -269,7 +280,10 @@ function rowRate(row, sprayMethod) {
   const rateUnit = labelRate && isSendableRateUnit(resolved.rateUnit) ? resolved.rateUnit : '';
   const prefill = !row.added && Number(resolved.rate) > 0 && rateUnit ? String(Number(resolved.rate)) : '';
   const max = prefillRateCeiling(resolved, row.product);
-  return { rate: row.rateInput ?? prefill, rateUnit, max };
+  // A rate typed for one way of spraying doesn't carry to another (its unit
+  // is that way's): the report flow's way can change with the note's read.
+  const typed = row.rateInput != null && (row.rateMethod == null || row.rateMethod === rowMethod(row, sprayMethod));
+  return { rate: typed ? row.rateInput : prefill, rateUnit, max };
 }
 
 // The first requirement the application record still needs, in screen order
@@ -301,16 +315,24 @@ function targetsOf(form) {
   return [...form.pests].map((pest) => (pest === 'Other' ? form.otherPest.trim() : pest));
 }
 
-// One tip per service visit: a library pick OR the tech's own line, never
-// both. null when the picker never loaded, so nothing the tech could not see
-// freezes onto the report.
-function techTipsOf(form, tipsAvailable) {
-  if (!tipsAvailable) return null;
-  const custom = form.customTip.trim();
-  return custom ? { ids: [], custom } : { ids: form.tipId ? [form.tipId] : [], custom: null };
-}
+// Gate on: the completion text is asked for in the server's fixed re-service
+// mode (services/reservice-fixed-recap.js). The review ask and the pay link
+// stay off, as on a re-service they always were (fast-complete scope: "leave it
+// off on re-services").
+const CUSTOMER_RECAP_FLAGS = {
+  sendCompletionSms: true,
+  requestReview: false,
+  includePayLink: false,
+  customerRecapMode: 'reservice_fixed',
+};
+// Today's body: no customer text, no review ask, no pay link.
+const NO_CUSTOMER_RECAP_FLAGS = {
+  sendCompletionSms: false,
+  requestReview: false,
+  includePayLink: false,
+};
 
-function completionBody(form, rows, { visitIdentity, ratingAllowed, tipsAvailable }) {
+function completionBody(form, rows, { visitIdentity, ratingAllowed, tipsAvailable, recapEnabled }) {
   const targets = targetsOf(form);
   // Where rides each product row too: service_products.application_area
   // comes only from the row (the full form sends the same comma-joined string).
@@ -338,19 +360,39 @@ function completionBody(form, rows, { visitIdentity, ratingAllowed, tipsAvailabl
     ...(ratingAllowed ? { clientPestRating: ACTIVITY_LEVELS.find((a) => a.value === form.activity)?.rating ?? null } : {}),
     technicianNotes: form.note.trim(),
     techTips: techTipsOf(form, tipsAvailable),
-    // The customer recap text ships in a later Fast Complete PR; until then
-    // this path sends none. No review ask on a re-service (adopted
-    // 2026-09-26), and a free callback never carries a pay link.
-    sendCompletionSms: false,
-    requestReview: false,
-    includePayLink: false,
+    // Gate off (GATE_FAST_COMPLETE_RECAP): no customer text, review ask or pay
+    // link. Gate on: the fixed re-service text; the server composes it.
+    ...(recapEnabled ? CUSTOMER_RECAP_FLAGS : NO_CUSTOMER_RECAP_FLAGS),
   };
+}
+
+// The report flow takes visits the house mix is not for (an initial
+// cleanout), so it seeds only where the recap modal and the full form would;
+// a re-service sheet always starts with it.
+function seedsHouseMix(visit, { serviceType, reportFlow, laneKey, typedType }) {
+  // A lane visit (bed bug, fire ant, tick, …) is never the pest house mix,
+  // a callback included.
+  if (laneKey || typedType) return false;
+  return !reportFlow || isPestDefaultMixVisit({ ...visit, serviceType: visit.serviceType || serviceType });
+}
+
+// The identity the server re-checks under its lock. The report flow's pay
+// link and review ask follow whether the visit is a free callback, so that
+// flow echoes it too.
+function sheetVisitIdentity(visit, reportFlow) {
+  return reportFlow && typeof visit.isCallback === 'boolean'
+    ? { ...recapVisitIdentity(visit), isCallback: visit.isCallback }
+    : recapVisitIdentity(visit);
 }
 
 // The context + rating contract for this visit. The routed schedule row can
 // be stale: the context is re-checked to still be an open pest re-service
 // before anything can be completed here.
-function useFastCompleteContext({ base, request, serviceType, routedCustomerId, routedScheduledDate, routedPropertyId, routedAddress }) {
+function useFastCompleteContext({
+  base, request, serviceType, routedCustomerId, routedScheduledDate, routedPropertyId, routedAddress, routedServiceType, routedServiceKey, reportFlow,
+  laneKey = null,
+  typedType = null,
+}) {
   const [ctx, setCtx] = useState({
     loading: true, loadError: '', blockedReason: '', rows: [], products: [], commonProducts: [], visitIdentity: null, visit: null,
     rating: { allowed: false, scaleLabels: null },
@@ -375,26 +417,45 @@ function useFastCompleteContext({ base, request, serviceType, routedCustomerId, 
         const commonProducts = Array.isArray(data?.commonProducts)
           ? data.commonProducts.filter((common) => common && common.productId != null)
           : [];
+        // A typed visit keeps its own activity (the completion ignores the
+        // 1 to 5 rating on a typed form), so it asks for none.
+        const rates = ratingContract?.allowed === true && !typedType;
         setCtx({
           loading: false,
           loadError: '',
-          blockedReason: blockedReasonFor(data, { routedCustomerId, routedScheduledDate, routedPropertyId, routedAddress }),
+          blockedReason: blockedReasonFor(data, {
+            routedCustomerId, routedScheduledDate, routedPropertyId, routedAddress, reportFlow, routedServiceType, routedServiceKey,
+            laneFlow: !!laneKey, laneKey, typedFlow: !!typedType, typedType,
+          }),
           visit,
           products,
           commonProducts,
           // The house totals are in the unit the resolver gives (4 fl oz), so
           // a house row never takes a usual unit: that is for picked products
           // (a Taurus usually logged in gal would otherwise open as "4 gal").
-          rows: pestDefaultMixSelections(products).map(({ product, totalAmount }) => productRow(product, { serviceType, totalAmount })),
-          visitIdentity: recapVisitIdentity(visit),
-          rating: { allowed: ratingContract?.allowed === true, scaleLabels: ratingContract?.scaleLabels || null },
+          rows: seedsHouseMix(visit, { serviceType, reportFlow, laneKey, typedType })
+            ? pestDefaultMixSelections(products).map(({ product, totalAmount }) => productRow(product, { serviceType, totalAmount }))
+            : [],
+          visitIdentity: sheetVisitIdentity(visit, reportFlow),
+          // A lane visit: whether its saved trace would show on the report
+          // (an older server says nothing, so the trace holds stand).
+          traceOnReport: data?.traceOnReport !== false,
+          // Step 3 "after sending": book the follow-up a completion suggests.
+          followupBooking: data?.followupBooking === true,
+          rating: {
+            allowed: rates,
+            scaleLabels: ratingContract?.scaleLabels || null,
+            // The report flow opens a first visit's tracker at 5 (owner
+            // ruling 2026-09-24, the full form's prefill).
+            firstVisit: rates && ratingContract?.firstVisit === true,
+          },
         });
       } catch (err) {
         if (active) setCtx((prev) => ({ ...prev, loading: false, loadError: err?.message || 'Failed to load products' }));
       }
     })();
     return () => { active = false; };
-  }, [base, request, serviceType, routedCustomerId, routedScheduledDate, routedPropertyId, routedAddress]);
+  }, [base, request, serviceType, routedCustomerId, routedScheduledDate, routedPropertyId, routedAddress, routedServiceType, routedServiceKey, reportFlow, laneKey, typedType]);
   // The stock on hand the server has now, for a product restocked while the
   // sheet is open; nothing else is re-read. Resolves to the fresh catalog
   // rows by id.
@@ -413,94 +474,6 @@ function withFreshStock(product, fresh) {
   return row ? { ...product, inventory_on_hand: row.inventory_on_hand, inventory_unit: row.inventory_unit } : product;
 }
 
-// The tip library, read on its own: the picker is optional, so a slow or
-// failed read never holds the sheet. null until it arrives, and when the
-// read fails or the tips gate is off.
-function useTipLibrary({ base, request }) {
-  const [library, setLibrary] = useState(null);
-  useEffect(() => {
-    let active = true;
-    request(`${base}/tech-tips`)
-      .then((data) => { if (active) setLibrary(data?.available === true ? data : null); })
-      .catch(() => { if (active) setLibrary(null); });
-    return () => { active = false; };
-  }, [base, request]);
-  return library;
-}
-
-// One completion attempt at a time, settled into the four outcomes above.
-function useFastCompleteSubmit({ base, request }) {
-  const keyRef = useRef(null);
-  if (!keyRef.current) keyRef.current = genIdempotencyKey();
-  const pendingBodyRef = useRef(null);
-  const inFlight = useRef(false);
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState('');
-  const [failure, setFailure] = useState(null);
-  const [done, setDone] = useState(null);
-
-  const submit = useCallback(async (buildBody, summary) => {
-    if (inFlight.current) return;
-    inFlight.current = true;
-    setSubmitting(true);
-    setError('');
-    const body = pendingBodyRef.current || { idempotencyKey: keyRef.current, ...buildBody() };
-    try {
-      await request(`${base}/complete`, { method: 'POST', body: JSON.stringify(body) });
-      pendingBodyRef.current = null;
-      setFailure(null);
-      setDone({ summary });
-      // Saved: the done view can be dismissed (Close, Escape, backdrop).
-      setSubmitting(false);
-      inFlight.current = false;
-    } catch (err) {
-      const outcome = completionFailureOutcome(err);
-      pendingBodyRef.current = outcome === 'retry' ? body : null;
-      if (outcome === 'correctable') keyRef.current = genIdempotencyKey();
-      if (outcome === 'saved') {
-        setFailure(null);
-        setDone({ summary: 'This visit was already saved. The office will finish anything still pending.' });
-      } else {
-        setFailure(outcome === 'correctable' ? null : outcome);
-        setError(outcomeMessage(outcome, err));
-      }
-      setSubmitting(false);
-      inFlight.current = false;
-    }
-  }, [base, request]);
-
-  return { submitting, error, failure, done, submit, retryPending: failure === 'retry', hasPendingBody: () => !!pendingBodyRef.current };
-}
-
-// One tile — a real button, aria-pressed, 44px min touch target via the
-// shared Button component's `touch` density.
-function Chip({ label, pressed, onClick, className, disabled }) {
-  return (
-    <Button
-      type="button"
-      variant="secondary"
-      className={cn('tech-visit-action tech-visit-product', className)}
-      {...(pressed != null ? { 'aria-pressed': pressed } : {})}
-      onClick={onClick}
-      disabled={disabled}
-    >
-      {label}
-    </Button>
-  );
-}
-
-function ChoiceSection({ title, action, columns = 2, children }) {
-  return (
-    <section className="tech-visit-choice-section">
-      <div className="tech-visit-section-head">
-        <h3 className="tech-visit-section-title">{title}</h3>
-        {action}
-      </div>
-      <div className={cn('tech-visit-tile-grid', `tech-visit-tile-grid--${columns}`)}>{children}</div>
-    </section>
-  );
-}
-
 // The photo manager opens over the sheet. While it is up the sheet is inert
 // and hidden from assistive tech, the way the photo manager treats its own
 // marks dialog; `version` moves on each close so the count is read again.
@@ -511,6 +484,20 @@ function usePhotoManager() {
   return { ...state, open, close, hiddenProps: state.isOpen ? { 'aria-hidden': true, inert: '' } : {} };
 }
 
+// The sheet's title before and after the save: the report flow names a
+// regular visit as a service; the re-service sheet keeps its words.
+const SHEET_TITLES = {
+  reservice: ['Complete re-service', 'Re-service complete'],
+  service: ['Complete service', 'Service complete'],
+};
+const INERT = { 'aria-hidden': true, inert: '' };
+// A re-service: the pest re-service itself, or a free callback booked under
+// a regular service key. Neither gets a pay link or a review ask.
+const isReserviceVisit = (visit) => visit?.serviceKey === 'pest_re_service' || visit?.isCallback === true;
+function sheetTitle(reportFlow, visit, done) {
+  return SHEET_TITLES[reportFlow && !isReserviceVisit(visit) ? 'service' : 'reservice'][done ? 1 : 0];
+}
+
 export default function FastCompleteSheet({ service, request, onClose, onCompleted, onFullForm }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
@@ -518,6 +505,7 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
   useLockBodyScroll(true);
   const titleId = useId();
   const base = `/admin/dispatch/${service?.id}`;
+  const reportFlow = service?.reportFlow === true;
   const ctx = useFastCompleteContext({
     base,
     request,
@@ -526,15 +514,29 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
     routedScheduledDate: service?.routedScheduledDate,
     routedPropertyId: service?.routedPropertyId,
     routedAddress: service?.routedAddress,
+    routedServiceType: service?.routedServiceType,
+    routedServiceKey: service?.routedServiceKey,
+    reportFlow,
+    laneKey: routedLaneOf(service),
+    typedType: routedTypedOf(service),
   });
-  const submission = useFastCompleteSubmit({ base, request });
+  // Only the report flow renders the confirmable prompts (the edited-report
+  // heads-up, a promise changed since the report was written).
+  const submission = useFastCompleteSubmit({ base, request, confirmable: reportFlow });
   const { submitting, done } = submission;
   const photoManager = usePhotoManager();
+  // Another dialog a sheet opens over itself (the report flow's spray
+  // tracer), the way the photo manager opens: the sheet goes inert under it.
+  const [sheetOverlay, setSheetOverlay] = useState(null);
   // A recorded dictation clip is still being taken or transcribed (the
   // upload path). The full form is another page and carries nothing over,
   // so Full form and "+ Other product" wait for the clip, like Complete and
   // photos. Close still works: it discards the sheet, typed note included.
   const [dictationPending, setDictationPending] = useState(false);
+  // A photo change in hand in the note's box (a description open, whose own
+  // mic may be recording, a change saving, a removal to answer): Full form
+  // waits for it the same way (codex local r3 on #5624).
+  const [photoBusy, setPhotoBusy] = useState(false);
 
   // Dismissing a saved sheet refreshes the schedule like "Next stop" does,
   // so a missed socket update can't leave the visit showing as open.
@@ -551,77 +553,43 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
   // Nothing is editable while a save is in flight, unresolved, or refused
   // for good; the recap modal (Full form) can't resume a /complete attempt,
   // so it is offered only before one may have reached the server.
-  const locked = submitting || submission.failure !== null;
+  // A confirmable prompt (report flow) holds the sheet until it is answered.
+  const locked = submitting || submission.failure !== null || !!submission.prompt;
 
-  return createPortal(
-    <>
-    <UiSurface
-      density="touch"
-      className={cn('tech-visit-surface tech-visit-overlay', isMobile && 'tech-visit-overlay--fullscreen')}
-      onClick={(event) => { event.stopPropagation(); if (event.target === event.currentTarget) close(); }}
-    >
-      <section
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        className={cn('tech-visit-dialog', isMobile && 'tech-visit-dialog--fullscreen')}
-        {...photoManager.hiddenProps}
-      >
-        <SheetHeader titleId={titleId} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending} submitting={submitting} onFullForm={onFullForm} onClose={close} />
-        <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photoManager} dictationPending={dictationPending} onDictationPending={setDictationPending} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} />
-      </section>
-    </UiSurface>
-    {photoManager.isOpen && (
-      <TechServicePhotosModal serviceId={service?.id} customerName={customerNameOf(ctx.visit, service)} onClose={photoManager.close} />
-    )}
-    </>,
-    document.body,
-  );
-}
-
-// The LIVE visit once loaded, so the tech sees whose property this
-// completion records against.
-function customerNameOf(visit, service) {
-  return visit?.customerName || service?.customerName || '';
-}
-
-function SheetHeader({ titleId, service, visit, done, locked, dictationPending, submitting, onFullForm, onClose }) {
-  const address = liveAddressLine(visit?.address);
   return (
-    <header className="tech-visit-header">
-      <div>
-        <h2 id={titleId} className="tech-visit-title">{done ? 'Re-service complete' : 'Complete re-service'}</h2>
-        <p className="tech-visit-muted">
-          {customerNameOf(visit, service) || 'Customer'}{service?.serviceType ? ` · ${service.serviceType}` : ''}
-        </p>
-        {address && <p className="tech-visit-muted">{address}</p>}
-      </div>
-      {!done && (
-        <Button variant="ghost" className="tech-visit-action" onClick={onFullForm} disabled={locked || dictationPending}>Full form</Button>
-      )}
-      <Button variant="ghost" className="tech-visit-action tech-visit-close" onClick={onClose} disabled={submitting} aria-label="Close">×</Button>
-    </header>
+    <FastCompleteFrame
+      isMobile={isMobile}
+      dialogRef={dialogRef}
+      titleId={titleId}
+      onDismiss={close}
+      hiddenProps={sheetOverlay ? INERT : photoManager.hiddenProps}
+      overlay={(photoManager.isOpen && (
+        <TechServicePhotosModal serviceId={service?.id} customerName={customerNameOf(ctx.visit, service)} onClose={photoManager.close} />
+      )) || sheetOverlay}
+    >
+      <SheetHeader titleId={titleId} title={sheetTitle(reportFlow, ctx.visit, done)} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending || photoBusy} submitting={submitting} onFullForm={onFullForm} onClose={close} />
+      <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photoManager} onOverlay={setSheetOverlay} dictationPending={dictationPending} onDictationPending={setDictationPending} onPhotoBusy={setPhotoBusy} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} />
+    </FastCompleteFrame>
   );
 }
 
-function SheetBody({ service, request, ctx, submission, locked, photos, dictationPending, onDictationPending, onCompleted, onFullForm, isMobile }) {
-  if (submission.done) {
+function SheetBody({ service, request, ctx, submission, locked, photos, onOverlay, dictationPending, onDictationPending, onPhotoBusy, onCompleted, onFullForm, isMobile }) {
+  const reportFlow = service?.reportFlow === true;
+  // The report flow keeps its form mounted through the saved view: what the
+  // tech marked shows there.
+  if (submission.done && !reportFlow) {
     return (
-      <div className="tech-visit-body">
-        <div className="tech-visit-card">
-          <p className="tech-visit-muted">{[service?.address, service?.timeLabel].filter(Boolean).join(' · ') || 'This visit'}</p>
-          <p>{submission.done.summary}</p>
-        </div>
-        <div className="tech-visit-actions">
-          <Button className="tech-visit-action tech-visit-complete tech-visit-wide" onClick={() => onCompleted?.()}>Next stop</Button>
-        </div>
-      </div>
+      <SavedView service={service} summary={submission.done.summary} onCompleted={onCompleted}>
+        <CustomerTextResult outcome={submission.done.customerText} />
+      </SavedView>
     );
   }
   if (ctx.loading) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Loading…</ActionFeedback>;
   const stop = ctx.loadError || ctx.blockedReason;
   if (stop) return <ActionFeedback error={!!ctx.loadError} className="tech-visit-feedback tech-visit-loading">{stop}</ActionFeedback>;
+  if (reportFlow) {
+    return <ReportFlowForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} onOverlay={onOverlay} dictationPending={dictationPending} onDictationPending={onDictationPending} onPhotoBusy={onPhotoBusy} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} />;
+  }
   return <FastCompleteForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} dictationPending={dictationPending} onDictationPending={onDictationPending} onFullForm={onFullForm} isMobile={isMobile} />;
 }
 
@@ -629,7 +597,7 @@ function SheetBody({ service, request, ctx, submission, locked, photos, dictatio
 // added from the picker. One product, one row (/complete keeps only the
 // first row per product); an added product's editor is open while the tech
 // sets how much and how.
-function useProductRows(ctx, serviceType) {
+function useProductRows(ctx, serviceType, lane = null) {
   const [rows, setRows] = useState(ctx.rows);
   const [editingId, setEditingId] = useState(null);
   const commonById = useMemo(
@@ -642,10 +610,10 @@ function useProductRows(ctx, serviceType) {
   const addProduct = useCallback((product, visitMethod) => {
     setRows((prev) => (prev.some((row) => row.productId === product.id) ? prev : [
       ...prev,
-      productRow(product, { serviceType, common: commonById.get(String(product.id)), visitMethod, added: true }),
+      productRow(product, { serviceType, common: commonById.get(String(product.id)), visitMethod, added: true, lane }),
     ]));
     setEditingId(product.id);
-  }, [serviceType, commonById]);
+  }, [serviceType, commonById, lane]);
   const removeRow = useCallback((productId) => {
     setRows((prev) => prev.filter((row) => row.productId !== productId));
     setEditingId(null);
@@ -659,50 +627,6 @@ function useProductRows(ctx, serviceType) {
     setRows((prev) => prev.map((row) => ({ ...row, product: withFreshStock(row.product, fresh) })));
   }, []);
   return { rows, editingId, setEditingId, updateRow, addProduct, removeRow, clearFollowingRates, applyStock };
-}
-
-// "+ Other product" opens the product picker: a bottom sheet over the form
-// on a phone, a popover under the button at desktop width. With no product
-// list loaded it opens the full completion screen, as it always did.
-function useProductPicker({ ctx, rows, locked, isMobile, onFullForm, onPick }) {
-  const buttonRef = useRef(null);
-  const [open, setOpen] = useState(false);
-  const hasCatalog = ctx.products.length > 0;
-  useEffect(() => { if (locked) setOpen(false); }, [locked]);
-  // The house mix is always on the sheet, so "Used most" lists the rest.
-  const commonProducts = useMemo(() => {
-    const mixIds = new Set(ctx.rows.map((row) => String(row.productId)));
-    return ctx.commonProducts.filter((common) => !mixIds.has(String(common.productId)));
-  }, [ctx.rows, ctx.commonProducts]);
-  const onSheetIds = useMemo(() => new Set(rows.map((row) => String(row.productId))), [rows]);
-  const shown = open && !locked;
-  const picker = shown ? (
-    <FastCompleteProductPicker
-      variant={isMobile ? 'sheet' : 'popover'}
-      products={ctx.products}
-      commonProducts={commonProducts}
-      onSheetIds={onSheetIds}
-      anchorRef={buttonRef}
-      onPick={(product) => { setOpen(false); onPick(product); }}
-      onClose={() => setOpen(false)}
-    />
-  ) : null;
-  const onClick = (event) => {
-    if (!hasCatalog) {
-      onFullForm?.();
-      return;
-    }
-    // Safari never focuses a tapped button; the picker hands focus back here.
-    event.currentTarget.focus();
-    setOpen((was) => !was);
-  };
-  return {
-    button: { buttonRef, locked, onClick, hasPicker: hasCatalog, expanded: shown },
-    popover: isMobile ? null : picker,
-    sheet: isMobile ? picker : null,
-    // What the phone sheet covers is out of reach until it closes.
-    coverProps: shown && isMobile ? { 'aria-hidden': true, inert: '' } : {},
-  };
 }
 
 function FastCompleteForm({ service, request, ctx, submission, locked, photos, dictationPending, onDictationPending, onFullForm, isMobile }) {
@@ -725,8 +649,14 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
     setField('method', next);
     clearFollowingRates();
   }, [setField, clearFollowingRates]);
+  // The house mix is always on the sheet, so "Used most" lists the rest.
+  const pickerCommonProducts = useMemo(() => {
+    const mixIds = new Set(ctx.rows.map((row) => String(row.productId)));
+    return ctx.commonProducts.filter((common) => !mixIds.has(String(common.productId)));
+  }, [ctx.rows, ctx.commonProducts]);
   const picker = useProductPicker({
-    ctx,
+    products: ctx.products,
+    commonProducts: pickerCommonProducts,
     rows,
     locked: locked || dictationPending,
     isMobile,
@@ -751,7 +681,9 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
     if (missingReason && !submission.hasPendingBody()) return;
     const names = rows.filter((row) => row.active).map((row) => row.name).join(', ');
     submission.submit(
-      () => completionBody(form, rows, { visitIdentity: ctx.visitIdentity, ratingAllowed: ctx.rating.allowed, tipsAvailable }),
+      () => completionBody(form, rows, {
+        visitIdentity: ctx.visitIdentity, ratingAllowed: ctx.rating.allowed, tipsAvailable, recapEnabled: recapOn(service),
+      }),
       `${names} · ${targetsOf(form).join(', ')}`,
     );
   };
@@ -800,35 +732,1122 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
         </fieldset>
         {submission.submitting && <ActionFeedback className="tech-visit-feedback">Saving completion…</ActionFeedback>}
       </div>
-      {/* The reason sits above full-width actions, so neither squeezes the
-          other on a phone or beside "Check stock". */}
-      <footer className="tech-visit-footer tech-visit-footer--stacked" {...picker.coverProps}>
-        {submission.error && <ActionFeedback error className="tech-visit-feedback tech-visit-error-banner">{submission.error}</ActionFeedback>}
-        {missingReason && !submission.failure && (
-          <p className={cn('tech-visit-muted', stockRow && 'tech-visit-status--warn')} role="status">{missingReason}</p>
+      <CompleteFooter
+        submission={submission}
+        missingReason={missingReason}
+        warn={!!stockRow}
+        label="Complete re-service"
+        onSubmit={submit}
+        coverProps={picker.coverProps}
+      >
+        {stockRow && !locked && (
+          <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={checkingStock} onClick={checkStock}>Check stock</Button>
         )}
-        <div className="tech-visit-actions">
-          {stockRow && !locked && (
-            <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={checkingStock} onClick={checkStock}>Check stock</Button>
-          )}
-          <Button
-            className="tech-visit-action tech-visit-complete tech-visit-wide"
-            onClick={submit}
-            loading={submission.submitting}
-            disabled={submission.failure === 'terminal' || (!!missingReason && !submission.retryPending)}
-          >
-            {submission.retryPending ? 'Retry' : 'Complete re-service'}
-          </Button>
-        </div>
-      </footer>
+      </CompleteFooter>
       {picker.sheet}
+    </div>
+  );
+}
+
+// ── Report flow (GATE_FAST_COMPLETE_REPORT) ─────────────────────────────────
+
+// How a spray went down when the tech picked no other way for it, as the
+// note says it (owner ruling 2026-09-30: How is voice only): around the
+// outside of the home is a perimeter spray, anything else a spot treatment.
+// It is read before the report is written, so the report and the record
+// agree; the trace only gives a perimeter spray its length. (The server
+// reads a spray sent with no method as a perimeter spray and refuses it
+// without linear feet.)
+const reportSprayMethod = (facts) => (facts?.spray === 'perimeter' ? 'perimeter_spray' : 'spot_treatment');
+
+// What the record says about one product, heard from the note: how it went
+// down and the pests it was for; where only when the visit was in one place,
+// as the full form fills it (the note does not say which product went where,
+// so two places stay on the visit's areas serviced, never on every product).
+// The report is written from exactly this, and the completion records
+// exactly this.
+function recordedApplication(row, facts) {
+  const sprayMethod = reportSprayMethod(facts);
+  const { rate, rateUnit } = rowRate(row, sprayMethod);
+  const areas = facts?.areas || [];
+  return {
+    applicationMethod: rowMethod(row, sprayMethod),
+    targets: facts?.pests || [],
+    ...(areas.length === 1 ? { applicationArea: areas[0] } : {}),
+    ...(Number(rate) > 0 && rateUnit ? { rate: Number(rate), rateUnit } : {}),
+  };
+}
+
+// "October 1, 2026" from the visit's ET calendar day, as the full form
+// sends it; never browser-local date math.
+function reportServiceDate(day) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(day || ''));
+  if (!match) return undefined;
+  return new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 12))
+    .toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+}
+
+// What the report is written from. A change after it was written marks it
+// stale: the note (and so what is heard from it), a product or a way or rate
+// the tech picked for one, the customer choice, the rating, the promise
+// marks and the photos the writer reads. The tip prints as its own card on
+// the report (the writer never repeats it), so it is not part of it. Nor is
+// the trace: it only gives a perimeter spray its length.
+function writerSignature(form, rows, promiseMarks, photos, recordPart = null) {
+  return JSON.stringify({
+    // A lane or typed visit's record is what the report says.
+    ...(recordPart || {}),
+    note: form.note.trim(),
+    products: rows.filter((row) => row.active)
+      .map((row) => [String(row.productId), row.methodInput || null, row.rateInput ?? null, row.rateMethod ?? null])
+      .sort(([a], [b]) => a.localeCompare(b)),
+    customerHome: form.customerHome,
+    rating: form.rating,
+    // Choosing the default's own value still changes what the writer reads.
+    ratingPrefilled: !!form.ratingPrefilled,
+    promiseMarks,
+    photos: [photos.length, photoCaptionsOf(photos)],
+  });
+}
+
+// The report request: the same POST /admin/schedule/generate-report the
+// full form's "Generate AI report" sends, with each product as the record
+// will hold it. The visit id grounds it (the route re-reads the visit, the
+// customer's texts and calls, past visits and the weather).
+// What a report and its completion say of where and what: a lane visit's
+// own record (GATE_LANE_VOICE_FILL), its places standing where the note's
+// heard places stand and its findings as the observations the full form
+// sends; else what the note was heard to say.
+// A typed visit's record (GATE_TYPED_VOICE_FILL) is its typed form's own
+// values, sent as the full form sends them (structuredFindings), with the
+// activity score when it is the tech's to set; its places are its form's own
+// area field, as the full form sends them (the sheet has no other places).
+function recordInputs(mode, record, facts, typedSchema = null) {
+  if (mode === 'lane' && record) {
+    const observations = Object.values(record.values);
+    return { heard: { areas: record.areas }, writerExtras: { observations }, completionExtras: { structuredObservations: observations } };
+  }
+  if (mode === 'typed' && record) {
+    const structuredFindings = { type: typedSchema.type, values: record.values };
+    const score = typedScoreIsTechs(typedSchema) && Number.isInteger(record.score) ? record.score : null;
+    const areaKey = typedTreatmentAreaField(typedSchema)?.key || null;
+    return {
+      heard: { areas: completionAreasForTypedFindings({ typedAreaKey: areaKey, findingsValues: record.values, genericAreas: [] }) },
+      writerExtras: { structuredFindings, typedActivityScore: score },
+      completionExtras: { structuredFindings, ...(score != null ? { activityScore: score, activityScoreSource: 'technician' } : {}) },
+    };
+  }
+  return { heard: facts, writerExtras: {}, completionExtras: {} };
+}
+
+function writerPayload({ service, visit, form, rows, facts, ratingAllowed, photos, promiseMarks }) {
+  const active = rows.filter((row) => row.active);
+  const captions = photoCaptionsOf(photos);
+  return {
+    scheduledServiceId: service?.id || null,
+    customerName: visit?.customerName || service?.customerName || undefined,
+    serviceType: visit?.serviceType || service?.serviceType,
+    ...(service?.technicianName ? { technicianName: service.technicianName } : {}),
+    serviceDate: reportServiceDate(visit?.scheduledDate),
+    serviceNotes: form.note.trim(),
+    productsApplied: active.map((row) => row.name).join(', '),
+    products: active.map((row) => ({ productId: row.productId || null, name: row.name, ...recordedApplication(row, facts) })),
+    areasServiced: facts?.areas || [],
+    customerInteraction: customerHomeWriterLabel(form.customerHome),
+    // The first-visit 5 is a scoring default, not something the technician
+    // saw: the writer gets a rating only once they choose one (codex local
+    // r28 on #5538), as the completion recap leaves the default out.
+    pestActivityRating: ratingAllowed && !form.ratingPrefilled && Number.isInteger(form.rating) ? form.rating : null,
+    photoCount: photos.length,
+    ...(captions.length ? { photoCaptions: captions } : {}),
+    // The full form's default: the customer's texts and calls ground the report.
+    includeCustomerComms: true,
+    ...(promiseMarks.length ? { promiseMarks } : {}),
+  };
+}
+
+// The completion: the full /complete body for the report the tech read,
+// each product as the report was written from it (a perimeter spray with the
+// trace's length). The report is the notes, and reportDraftBase tells the
+// server what was written so an edit gets its heads-up. A regular visit gets
+// the full form's customer text, pay link and review ask; a re-service never
+// gets a pay link or a review ask.
+function reportCompletionBody({
+  form, rows, draft, perimeterFeet, trace, visitIdentity, ratingAllowed, tipsAvailable, isReservice, promiseMarks, recordFields = null,
+}) {
+  const ratingSent = ratingAllowed && Number.isInteger(form.rating);
+  // A lane or typed visit records its own record, as the report was written
+  // from it.
+  const { heard, completionExtras } = recordFields || recordInputs(null, null, draft.facts);
+  return {
+    visitOutcome: 'completed',
+    ...(visitIdentity ? { expectedVisit: visitIdentity } : {}),
+    // The saved trace this report was judged against (null: none, or a map
+    // gate that hides traces), for the server to re-check under the visit
+    // lock and freeze: the report shows only this trace.
+    traceSeen: trace.zone?.updated_at ?? null,
+    products: rows.filter((row) => row.active).map((row) => {
+      const application = recordedApplication(row, heard);
+      const { totalAmount, amountUnit } = submittedAmount(row.totalAmount, row.amountUnit);
+      return {
+        productId: row.productId,
+        ...application,
+        totalAmount,
+        amountUnit,
+        ...(application.applicationMethod === 'perimeter_spray' ? { areaValue: perimeterFeet, areaUnit: 'linear_ft' } : {}),
+      };
+    }),
+    areasServiced: heard?.areas || [],
+    ...completionExtras,
+    customerInteraction: form.customerHome,
+    ...(ratingSent ? { clientPestRating: form.rating } : {}),
+    // The untouched first-visit 5: the server re-checks it is still the
+    // first visit (owner ruling 2026-09-24).
+    ...(ratingSent && form.ratingPrefilled ? { clientPestRatingPrefilled: true } : {}),
+    technicianNotes: draft.text.trim(),
+    reportDraftBase: draft.base,
+    ...(promiseMarks.length ? { promiseMarks } : {}),
+    techTips: techTipsOf(form, tipsAvailable),
+    // The picked Waves blog post; /complete checks it is still live and
+    // freezes it onto the report.
+    ...(form.blogPost ? { blogPostId: form.blogPost.id } : {}),
+    sendCompletionSms: true,
+    includePayLink: !isReservice,
+    requestReview: !isReservice,
+  };
+}
+
+// What an empty product list says, per record mode. A lane visit's work
+// without a product (heat, steam, nest removal, an inspection) is recorded by
+// its protocol action, which carries its re-entry wait or inspection-only
+// standing on the report; the sheet records none, so that work goes on the
+// full form. A typed form records its work in its own fields (treatments,
+// inspections), so it needs no product (null: no hold).
+// The send holds per record mode: a lane visit's, a typed visit's, else the
+// pest visit's.
+const sendHoldsFor = (mode) => ({ lane: laneSendHolds, typed: typedSendHolds })[mode] || sendHolds;
+
+const NO_PRODUCT_HOLDS = {
+  lane: 'Add the product you applied. Work done without one (heat, steam, nest removal, an inspection) goes on the Full form.',
+  typed: null,
+};
+
+// What still holds the report (generate) or the completion (complete), in
+// screen order, the product whose stock holds it, and the fix the hold
+// offers on the sheet ('remove_trace').
+function reportFlowMissing({ form, active, ratingAllowed, dictationPending, photoHold, photosLoaded, photosFailed, promisesLoaded, stage, mode, ...sendInputs }) {
+  const outOfStock = active.find((row) => stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
+  const missingAmount = active.find((row) => !hasAmount(row));
+  const noProduct = mode in NO_PRODUCT_HOLDS ? NO_PRODUCT_HOLDS[mode] : 'Select at least one product.';
+  const [, reason = '', stockRow = null, fix = null] = [
+    [dictationPending, 'Finish dictating first.'],
+    [photoHold, photoHold],
+    [!photosLoaded, 'Loading photos…'],
+    [photosFailed, 'Read the photos again first.'],
+    [!promisesLoaded, 'Loading promises…'],
+    [!active.length && noProduct, noProduct],
+    [outOfStock, outOfStock && `${outOfStock.name} shows 0 in stock. Update inventory or remove it.`, outOfStock],
+    [missingAmount, missingAmount && `Enter the amount for ${missingAmount.name}.`],
+    [ratingAllowed && !Number.isInteger(form.rating), 'Pick the pest activity, 1 to 5.'],
+    ...(stage === 'complete' ? sendHoldsFor(mode)({ active, ...sendInputs }) : []),
+  ].find(([missing]) => missing) || [];
+  return { reason, stockRow, fix };
+}
+
+// What else holds Complete & send: the report itself; the note's read of
+// where product went down, which decides the customer's re-entry wait (an
+// indoor treatment keeps its indoor wait; a failed read is written again,
+// and the Full form stays open for an outage); and, for a perimeter spray,
+// the trace that gives it its length.
+// The first active product the record sprays around the house: the note's
+// perimeter, or a product the tech set to Perimeter spray by hand.
+function perimeterSprayRow(active, draft) {
+  return draft ? active.find((row) => rowMethod(row, reportSprayMethod(draft.facts)) === 'perimeter_spray') || null : null;
+}
+
+// What holds any report's send: the report itself, and the read of a saved
+// trace (whether one is saved decides what the report shows, and the
+// completion re-checks it).
+function reportReadyHolds({ draft, writing, traceRead }) {
+  return {
+    report: [
+      [writing, 'Writing the report…'],
+      [!draft, 'Generate the report first.'],
+      [draft && !draft.text.trim(), 'The report is empty. Write it again.'],
+    ],
+    trace: [
+      [!traceRead.loaded, 'Checking for a saved trace…'],
+      [traceRead.failed, 'Couldn’t check for a saved trace. Check the trace again.'],
+    ],
+  };
+}
+
+// The saved outlines that claim an area treated (the lawn and yard
+// workflows; trace-eligibility.js reads them as outline captures), and the
+// ways a product goes down across an area.
+const AREA_CAPTURES = new Set(['lawn', 'lawn_highlight', 'yard']);
+const AREA_METHODS = new Set(['broadcast_spray', 'granular_broadcast', 'fog_ulv']);
+
+// A lane visit (GATE_LANE_VOICE_FILL) has no pest facts and no trace step
+// (its outline stays on the full form): its record is the tech's to
+// confirm. A product picked as a perimeter spray needs a traced length, and
+// a saved trace shows on the customer's report only with such a spray to
+// back it (as on a pest visit).
+function laneSendHolds({ active, draft, writing, perimeterFeet, traceRead, lane, record: laneRecord, traceOnReport = true }) {
+  const ready = reportReadyHolds({ draft, writing, traceRead });
+  const laneAreas = laneRecord.areas;
+  const perimeterRow = perimeterSprayRow(active, draft);
+  const untraced = !perimeterFeet && perimeterRow;
+  // A saved trace claims what it shows: a perimeter a spray around the
+  // house, an outline (the lawn and yard workflows) an area treated, so each
+  // stands only with a product that went down that way (codex local r2 on
+  // #5629).
+  const traceMode = traceRead.zone?.capture_mode ?? traceRead.zone?.captureMode;
+  const areaTrace = AREA_CAPTURES.has(traceMode);
+  const areaRow = active.find((row) => AREA_METHODS.has(rowMethod(row, reportSprayMethod(draft?.facts))));
+  // A trace the report never shows (bed bug's indoor work, nest work)
+  // claims nothing, so only one it shows can hold the send (codex local r5
+  // on #5629).
+  const shownTrace = traceOnReport && traceRead.zone;
+  const unusedTrace = draft && shownTrace && (areaTrace ? !areaRow : !perimeterRow);
+  // An "Interior spray too" trace claims indoor treatment on the customer's
+  // map, so the record must list a place inside (the pest sheet asks the
+  // note for Inside; codex local r4 on #5629).
+  const interiorUnbacked = draft && shownTrace && traceMode === 'interior' && !laneAreas.some((area) => AREA_SCOPES.interior.includes(area));
+  return [
+    ...ready.report,
+    // The record's places are the visit's treated side on the report: with
+    // none, the outdoor re-entry wait is dropped and the indoor one kept
+    // (report-data.js normalizeAdvisoryForTreatmentScope), so a lane visit
+    // never sends without one (codex local r3 on #5629). A read that heard
+    // none leaves them for the tech to pick.
+    [!laneAreas.length, 'Pick where you treated: tap Change beside Where.'],
+    // A finding the completion takes only beside the work performed (a lane
+    // with a work state) goes on the full form, which records the work.
+    [laneRecordNeedsAction(SERVICE_COMPLETION_PRESETS[lane], laneRecord), 'A finding on this record needs the work you did recorded beside it, and only the Full form records that. Use the Full form.'],
+    ...ready.trace,
+    [untraced, untraced && `${untraced.name} is a perimeter spray and this visit can’t be traced here. Use the Full form.`],
+    [unusedTrace, areaTrace
+      ? 'Your saved outline would show on the customer’s report as the area treated, but nothing on this visit was broadcast, spread or misted across an area. Remove the trace, or use the Full form.'
+      : 'Your saved trace would show on the customer’s report, but nothing on this visit was sprayed around the house. Remove the trace, or use the Full form.', null, 'remove_trace'],
+    [interiorUnbacked, 'Your trace says you sprayed inside too, but no place on the record is inside. Add the place inside (Change beside Where), or remove the trace.', null, 'remove_trace'],
+  ];
+}
+
+// A typed visit (GATE_TYPED_VOICE_FILL): its record must answer every field
+// the completion requires now (typed_findings_required/invalid), the
+// activity score when it is the tech's, and a score that agrees with the
+// findings (activity_score_inconsistent). A record whose nothing-found state
+// keeps the report's standard wording (the full form holds Generate there)
+// goes on the full form. No trace step here: a perimeter spray needs its
+// traced length, and a saved trace the report would show goes on the full
+// form too.
+// The ways a product goes down that are not a spray (the office form's spray
+// evidence leaves them out).
+const PLACED_METHODS = new Set(['bait_placement', 'station_check', 'trunk_injection']);
+
+// The activity score a typed record carries: the tech's own where they set
+// it, else the one its findings derive (deriveScores), or none.
+function typedScoreOf(schema, record) {
+  const activity = schema?.activity;
+  if (!activity) return null;
+  if (!activity.deriveField) return Number.isInteger(record.score) ? record.score : null;
+  const derived = activity.deriveScores?.[String(record.values[activity.deriveField] ?? '')];
+  return Number.isInteger(derived) ? derived : null;
+}
+
+function typedSendHolds({ active, draft, writing, perimeterFeet, traceRead, record, typedSchema, traceOnReport = true }) {
+  const ready = reportReadyHolds({ draft, writing, traceRead });
+  const values = record.values;
+  const missing = typedCardFields(typedSchema).find((field) => typedFieldRequiredNow(field, values) && !String(values[field.key] ?? '').trim());
+  const typedIn = missing && (missing.type === 'text' || missing.type === 'count');
+  // An initial setup's own rules (its trap count; no work on traps already
+  // out), as the office form holds them before submit.
+  const [setupConflict] = trapSetupConflicts(typedSchema.type, values);
+  const scoreMissing = typedScoreIsTechs(typedSchema) && !Number.isInteger(record.score);
+  // The score the completion keeps: the tech's own, or the one its findings
+  // derive (a bait visit's consumption), as the office form judges it.
+  const score = typedScoreOf(typedSchema, record);
+  const scoreConflict = typedActivityScoreConflict(typedSchema.type, values, score);
+  const standardWording = typedZeroStateRefusesBody(typedSchema.type, values, score);
+  const perimeterRow = perimeterSprayRow(active, draft);
+  const untraced = !perimeterFeet && perimeterRow;
+  const shownTrace = draft && traceOnReport && traceRead.zone;
+  // A product's place is the visit's treated side on the report (as on a
+  // lane visit): the form's own area field, or, for a form whose places the
+  // full form picks (pest inspection, wildlife, a bait station visit where
+  // something went down other than bait), the full form.
+  const areaField = typedTreatmentAreaField(typedSchema);
+  const sprayed = active.some((row) => !PLACED_METHODS.has(rowMethod(row, reportSprayMethod(draft?.facts))));
+  const placesMissing = active.length > 0 && (areaField
+    ? !parseApplicationAreas(values[areaField.key]).length
+    : typedFormTakesPlaces(typedSchema.type, { sprayed }));
+  return [
+    ...ready.report,
+    [missing, missing && (typedIn ? `Fill in ${missing.label}.` : `Pick ${missing.label}: tap Change beside it.`)],
+    [setupConflict, setupConflict],
+    [placesMissing, areaField
+      ? `Pick where you treated: tap Change beside ${areaField.label}.`
+      : 'Where you applied the product is picked on the Full form. Use the Full form.'],
+    [scoreMissing, `Pick the ${String(typedSchema.activity?.label || 'activity').toLowerCase()} score, 0 to 5.`],
+    [scoreConflict, scoreConflict],
+    [standardWording, 'Nothing was found on this record, so the customer’s report uses its standard wording, not this one. Use the Full form.'],
+    ...ready.trace,
+    [untraced, untraced && `${untraced.name} is a perimeter spray and this visit can’t be traced here. Use the Full form.`],
+    [shownTrace, 'This visit has a saved trace the customer’s report would show, and this sheet doesn’t check it. Remove the trace, or use the Full form.', null, 'remove_trace'],
+  ];
+}
+
+function sendHolds({ active, draft, writing, perimeterFeet, traceAvailable, traceRead }) {
+  const ready = reportReadyHolds({ draft, writing, traceRead });
+  const perimeterRow = perimeterSprayRow(active, draft);
+  const untraced = !perimeterFeet && perimeterRow;
+  // The note says no spraying, so a product still going down as a spray (the
+  // house mix starts on) would be recorded as applied when it wasn't.
+  const sprayedAnyway = draft?.facts?.noSpray
+    && active.find((row) => SPRAYED_METHODS.has(rowMethod(row, reportSprayMethod(draft.facts))));
+  // A saved trace shows on the customer's report whatever its length or
+  // kind (a perimeter, an outline), so one the record has no spray around
+  // the house for would claim a spray it never records (Codex #5538).
+  const unusedTrace = draft && traceRead.zone && !perimeterRow;
+  // An "Interior spray too" trace (saved now or earlier) claims inside on the
+  // customer's map; the record and the re-entry wait only say inside when the
+  // note does.
+  const traceMode = traceRead.zone?.capture_mode ?? traceRead.zone?.captureMode;
+  const interiorUnheard = draft && traceMode === 'interior' && !(draft.facts?.areas || []).includes('Inside');
+  return [
+    ...ready.report,
+    [draft && factsHold(draft.facts), draft && factsHold(draft.facts)],
+    [sprayedAnyway, sprayedAnyway && `Your note says you didn’t spray, but ${sprayedAnyway.name} is a spray. Remove it or change how it went down, then write it again.`],
+    // Whether a trace is saved decides both holds below.
+    ...ready.trace,
+    [untraced, untraced && (traceAvailable
+      ? `Trace where you sprayed: ${untraced.name} is a perimeter spray.`
+      : `${untraced.name} is a perimeter spray and this visit can’t be traced here. Use the Full form.`)],
+    // A trace the note doesn't back can also come off ("Remove the trace").
+    [unusedTrace, 'Your saved trace would show on the customer’s report, but your note doesn’t say you sprayed around the house. Remove the trace, or say plainly how you sprayed and write it again.', null, 'remove_trace'],
+    [interiorUnheard, 'Your trace says you sprayed inside too, but your note doesn’t say you treated inside. Say where you treated, trace again without Interior spray, or remove the trace.', null, 'remove_trace'],
+  ];
+}
+
+// The report action both steps offer: write it the first time, or write it
+// again once the visit changed (a fresh draft); null while it is current.
+function writeAction(draft, stale, writeError) {
+  if (!draft) return { label: writeError ? 'Try again' : 'Generate AI report', fresh: false };
+  return stale ? { label: 'Write it again', fresh: true } : null;
+}
+
+function writerSources({ productCount, photoCount, marked, rated }) {
+  return [
+    'What you said',
+    `Products used (${productCount})`,
+    ...(photoCount ? [`Photos (${photoCount})`] : []),
+    'The customer’s texts and calls since the last visit',
+    'Past visits',
+    ...(marked ? ['The promises you marked'] : []),
+    'Whether the customer was home',
+    ...(rated ? ['The pest activity you rated'] : []),
+    'Rain this week',
+  ];
+}
+
+// The products as one line ("Taurus SC 4 fl oz · …"), opened to the full
+// product tiles on Edit.
+function ProductsLine({ active, locked, onOpen }) {
+  const listed = active.map((row) => (hasAmount(row) ? `${row.name} ${amountText(row.totalAmount, row.amountUnit)}` : row.name));
+  return (
+    <section className="tech-visit-choice-section">
+      <div className="tech-visit-section-head">
+        <h3 className="tech-visit-section-title">Products</h3>
+        <Button type="button" variant="ghost" className="tech-visit-action" aria-expanded={false} disabled={locked} onClick={onOpen}>Edit</Button>
+      </div>
+      <p className="tech-visit-muted">{listed.length ? listed.join(' · ') : 'None selected'}</p>
+    </section>
+  );
+}
+
+// A lane visit's reader answer (GATE_LANE_VOICE_FILL) as the record merges
+// it; anything else is a read that failed: nothing fills, and the tech picks
+// each field.
+function laneFactsOf(heard) {
+  const listOf = (value) => (Array.isArray(value) ? value.filter((item) => item && typeof item === 'object') : []);
+  return heard?.available === true && heard.status === 'read'
+    ? {
+      status: 'read',
+      areas: listOf(heard.areas),
+      findings: listOf(heard.findings),
+      unclearGroups: Array.isArray(heard.unclearGroups) ? heard.unclearGroups.filter((key) => typeof key === 'string') : [],
+    }
+    : { status: 'failed', areas: [], findings: [], unclearGroups: [] };
+}
+
+// Reads the note (where product went down, the pests named, how the sprays
+// went down; a lane visit's own record), then writes the report from exactly
+// those facts, so the report and the record agree. Only the latest request
+// may land.
+// The note's pest facts (where product went down, the pests named, how the
+// sprays went down); anything else is a read that failed.
+function pestFactsOf(heard) {
+  const listOf = (value) => (Array.isArray(value) ? value.filter((item) => typeof item === 'string' && item.trim()) : []);
+  return heard?.available === true
+    ? {
+      status: heard.status,
+      areas: listOf(heard.areas),
+      unclearAreas: listOf(heard.unclearAreas),
+      pests: listOf(heard.pests),
+      unclearPests: listOf(heard.unclearPests),
+      spray: heard.spray === 'perimeter' || heard.spray === 'spot' ? heard.spray : null,
+      unclearSpray: heard.unclearSpray === true,
+      noSpray: heard.noSpray === true,
+    }
+    : { status: 'failed', areas: [], unclearAreas: [], pests: [], unclearPests: [], spray: null, unclearSpray: false, noSpray: false };
+}
+
+// A typed visit's reader answer (GATE_TYPED_VOICE_FILL) as the record merges
+// it: the form's own values, the words each stood on, the fields left
+// unclear. A record that already holds every field the note could fill is
+// answered without a read (nothing new, nothing failed). Anything else is a
+// read that failed: nothing fills.
+function typedFactsOf(heard) {
+  if (heard?.available === true && heard.status === 'nothing_to_fill') {
+    return { status: 'read', type: heard.type, values: {}, heard: {}, unclearFields: [], score: null, scoreUnclear: false };
+  }
+  if (heard?.available !== true || heard.status !== 'read') {
+    return { status: 'failed', values: {}, heard: {}, unclearFields: [], score: null, scoreUnclear: false };
+  }
+  return {
+    status: 'read',
+    type: heard.type,
+    values: Object.fromEntries(Object.entries(heard.values || {}).filter(([, value]) => typeof value === 'string' && value)),
+    heard: heard.heard && typeof heard.heard === 'object' ? heard.heard : {},
+    unclearFields: Array.isArray(heard.unclearFields) ? heard.unclearFields.filter((key) => typeof key === 'string') : [],
+    // The technician's own rating (step 4), on a form whose score they set.
+    score: Number.isInteger(heard.score?.value) && typeof heard.score.quote === 'string' ? { value: heard.score.value, quote: heard.score.quote } : null,
+    scoreUnclear: heard.scoreUnclear === true,
+  };
+}
+
+// Each record mode's reader and the facts it answers.
+const READS = {
+  lane: { endpoint: 'lane-facts', factsOf: laneFactsOf },
+  typed: { endpoint: 'typed-facts', factsOf: typedFactsOf },
+};
+const PEST_READ = { endpoint: 'voice-facts', factsOf: pestFactsOf };
+
+function useReportDraft({ request, base, mode = null }) {
+  const [draft, setDraft] = useState(null);
+  const [writing, setWriting] = useState(false);
+  const [writeError, setWriteError] = useState('');
+  const sequenceRef = useRef(0);
+  const write = useCallback(async ({ buildPayload, note, current, scoreSet, signature, fresh }) => {
+    const sequence = ++sequenceRef.current;
+    setWriting(true);
+    setWriteError('');
+    const read = READS[mode] || PEST_READ;
+    // A typed read is judged beside the record's present values (never
+    // stored on the server).
+    const body = mode === 'typed' ? { note, current: current || {}, scoreSet: scoreSet === true } : { note };
+    const heard = await request(`${base}/${read.endpoint}`, { method: 'POST', body: JSON.stringify(body) }).catch(() => null);
+    const facts = read.factsOf(heard);
+    if (sequence !== sequenceRef.current) return;
+    // The signature of what the report is written from, read included (a
+    // lane visit's record fills from the read).
+    const draftSignature = signature(facts);
+    const payload = buildPayload(facts);
+    let written = null;
+    let failure = null;
+    try {
+      written = await request('/admin/schedule/generate-report', { method: 'POST', body: JSON.stringify(fresh ? { ...payload, fresh: true } : payload) });
+    } catch (err) {
+      failure = err;
+    }
+    if (sequence !== sequenceRef.current) return;
+    setWriting(false);
+    const text = typeof written?.report === 'string' ? written.report.trim() : '';
+    if (!text) {
+      setWriteError(failure ? `${failure.message || 'The report could not be written.'} Try again.` : 'The writer sent back no report. Try again.');
+      return;
+    }
+    setDraft({ text, base: text, signature: draftSignature, deterministic: written.deterministic === true, facts });
+  }, [request, base, mode]);
+  const editText = useCallback((text) => setDraft((prev) => ({ ...prev, text })), []);
+  return { draft, writing, writeError, write, editText };
+}
+
+// Lane voice fill (GATE_LANE_VOICE_FILL, Fast Complete step 2): a specialty
+// visit's own record (its places and findings) in place of the pest facts
+// (where treated, the pests, the sprays). With no lane every part answers as
+// absent: no record, no card.
+function useLaneRecord(service) {
+  const lane = routedLaneOf(service);
+  const preset = lane ? SERVICE_COMPLETION_PRESETS[lane] : null;
+  const [laneRecord, setLaneRecord] = useState(EMPTY_LANE_RECORD);
+  const ref = useRef(laneRecord);
+  ref.current = laneRecord;
+  // The record a read lands on: only what is empty and unpicked fills.
+  const recordFor = (facts) => (lane ? mergeLaneRecord(ref.current, facts, preset) : null);
+  return {
+    lane,
+    mode: lane ? 'lane' : null,
+    record: lane ? laneRecord : null,
+    // What the report is written from, for its stale check.
+    signaturePart: (record) => (record ? { lane: [record.areas, record.values] } : null),
+    inputs: (record, facts) => recordInputs(lane ? 'lane' : null, record, facts),
+    recordFor,
+    // Lands a read on the record and answers the filled record.
+    settle: (facts) => {
+      const filled = recordFor(facts);
+      if (filled) {
+        ref.current = filled;
+        setLaneRecord(filled);
+      }
+      return filled;
+    },
+    card: ({ draft, locked, writing }) => (lane ? (
+      <LaneRecordCard
+        lane={lane}
+        preset={preset}
+        record={laneRecord}
+        unclear={draft?.facts?.unclearGroups || []}
+        readFailed={draft?.facts?.status === 'failed'}
+        locked={locked || writing}
+        onChange={(key, value) => setLaneRecord((prev) => changeLaneRecord(prev, key, value, preset))}
+      />
+    ) : null),
+  };
+}
+
+// Typed voice fill (GATE_TYPED_VOICE_FILL, Fast Complete step 3): a typed
+// visit's own record (its typed form's values and, when the tech sets it,
+// the activity score) in place of the pest facts. With no typed form every
+// part answers as absent.
+function useTypedRecord(service) {
+  const typed = routedTypedOf(service);
+  const schema = typed && service.typedSchema?.type === typed ? service.typedSchema : null;
+  const [typedRecord, setTypedRecord] = useState(EMPTY_TYPED_RECORD);
+  const ref = useRef(typedRecord);
+  ref.current = typedRecord;
+  // A typed inspection's credit toward booked service (the office form's
+  // toggle), on unless the tech turns it off; sent only where it is offered.
+  const creditOffered = !!schema && service.inspectionCredit === true;
+  const [offerCredit, setOfferCredit] = useState(true);
+  // The record a read lands on: only fields still empty that nobody picked,
+  // and only from an answer for this form.
+  const recordFor = (facts) => {
+    if (!schema) return null;
+    return facts?.type === schema.type ? mergeTypedRecord(ref.current, facts) : ref.current;
+  };
+  return {
+    lane: null,
+    mode: schema ? 'typed' : null,
+    schema,
+    record: schema ? typedRecord : null,
+    // What the read is judged beside (the server never fills over it), and
+    // whether the tech's rating is already set.
+    current: typedRecord.values,
+    scoreSet: typedRecord.score != null,
+    signaturePart: (record) => (record ? { typed: [record.values, record.score] } : null),
+    inputs: (record, facts) => {
+      const fields = recordInputs(schema ? 'typed' : null, record, facts, schema);
+      return creditOffered ? { ...fields, completionExtras: { ...fields.completionExtras, offerInspectionCredit: offerCredit } } : fields;
+    },
+    recordFor,
+    settle: (facts) => {
+      const filled = recordFor(facts);
+      if (filled) {
+        ref.current = filled;
+        setTypedRecord(filled);
+      }
+      return filled;
+    },
+    card: ({ draft, locked, writing }) => (schema ? (
+      <>
+        <TypedRecordCard
+          schema={schema}
+          record={typedRecord}
+          unclear={draft?.facts?.unclearFields || []}
+          scoreUnclear={draft?.facts?.scoreUnclear === true}
+          readFailed={draft?.facts?.status === 'failed'}
+          locked={locked || writing}
+          onChange={(key, value) => setTypedRecord((prev) => changeTypedRecord(prev, key, value))}
+          onScore={(score) => setTypedRecord((prev) => scoreTypedRecord(prev, score))}
+        />
+        {creditOffered && <InspectionCreditToggle checked={offerCredit} locked={locked || writing} onChange={setOfferCredit} />}
+      </>
+    ) : null),
+  };
+}
+
+// The record a report-flow visit keeps: a lane visit's, a typed visit's, or
+// none (a pest visit, whose facts the note gives).
+function useVisitRecord(service) {
+  const laneState = useLaneRecord(service);
+  const typedState = useTypedRecord(service);
+  return laneState.lane ? laneState : typedState;
+}
+
+// The line a lane or typed visit's products resolve on: the lane's own, or
+// a typed form's (a mosquito event's mist; otherwise the pest line).
+function productLaneOf(service) {
+  const typed = routedTypedOf(service);
+  if (typed) return typed === 'mosquito_event' ? 'mosquito' : 'typed';
+  return routedLaneOf(service);
+}
+
+function ReportFlowForm({
+  service, request, ctx, submission, locked, photos, onOverlay, dictationPending, onDictationPending,
+  onPhotoBusy, onCompleted, onFullForm, isMobile,
+}) {
+  // Only opened for a visit in the report flow (service.reportFlow), so the
+  // service is always there.
+  const base = `/admin/dispatch/${service.id}`;
+  const products = useProductRows(ctx, service.serviceType, productLaneOf(service));
+  const { rows, addProduct } = products;
+  const active = rows.filter((row) => row.active);
+  const isReservice = isReserviceVisit(ctx.visit);
+  const [form, setForm] = useState(() => ({
+    note: '',
+    customerHome: DEFAULT_CUSTOMER_HOME,
+    rating: ctx.rating.firstVisit ? FIRST_VISIT_RATING : null,
+    ratingPrefilled: !!ctx.rating.firstVisit,
+    tipId: '',
+    customTip: '',
+    promiseMarks: {},
+    blogPost: null,
+  }));
+  const tips = useTipLibrary({ base, request });
+  const tipsAvailable = !!tips;
+  const visitPromises = useVisitPromises({ base, request });
+  const blog = useBlogPostOffer({ base, request });
+  // A description saved or a photo removed in the note's box reads the
+  // photos again, as closing the photo manager does.
+  const [photoReloads, setPhotoReloads] = useState(0);
+  const reloadPhotos = useCallback(() => setPhotoReloads((n) => n + 1), []);
+  const [photoHold, setPhotoHold] = useState('');
+  // The sheet's header (Full form) waits on the same photo change in hand.
+  useEffect(() => { onPhotoBusy?.(!!photoHold); }, [photoHold, onPhotoBusy]);
+  useEffect(() => () => onPhotoBusy?.(false), [onPhotoBusy]);
+  const noteBoxPhotos = service.noteBoxPhotosEnabled === true;
+  const visitPhotos = useVisitPhotos({ serviceId: service.id, request, version: photos.version + photoReloads, keepOnFailure: noteBoxPhotos });
+  const trace = useVisitTrace({ serviceId: service.id, request });
+  // A lane or typed visit's own record (or none: a pest visit).
+  const recordState = useVisitRecord(service);
+  const { lane, mode, record } = recordState;
+  const report = useReportDraft({ request, base, mode });
+  const { draft, writing } = report;
+  const [step, setStep] = useState('visit');
+
+  const perimeterFeet = perimeterFeetOf(trace.zone);
+  const traceAvailable = trace.enabled && service.traceEligible !== false;
+  // The property this sheet loaded: a trace saved or removed here is refused
+  // if the office has moved the visit to another one since.
+  const loadedPropertyId = ctx.visit && 'propertyId' in ctx.visit ? ctx.visit.propertyId : undefined;
+  const promiseMarks = visitPromises.available ? promiseMarksPayload(form.promiseMarks, visitPromises.promises) : [];
+  const signature = writerSignature(form, rows, promiseMarks, visitPhotos.photos, recordState.signaturePart(record));
+  const stale = !!draft && draft.signature !== signature;
+  const ratingAllowed = ctx.rating.allowed;
+  const action = writeAction(draft, stale, report.writeError);
+  const holdInputs = {
+    form, active, ratingAllowed, dictationPending, photoHold, photosLoaded: visitPhotos.loaded, photosFailed: visitPhotos.failed, promisesLoaded: visitPromises.loaded, mode,
+  };
+  const generateMissing = reportFlowMissing({ ...holdInputs, stage: 'generate' });
+  const completeMissing = reportFlowMissing({
+    ...holdInputs, stage: 'complete', draft, writing, perimeterFeet, traceAvailable, traceRead: trace, lane, record, typedSchema: recordState.schema, traceOnReport: ctx.traceOnReport,
+  });
+
+  // "Update inventory or remove it": once the stock is updated, the tech
+  // re-reads it here rather than close the sheet and lose the visit.
+  const [checkingStock, setCheckingStock] = useState(false);
+  const checkStock = async () => {
+    setCheckingStock(true);
+    try {
+      products.applyStock(await ctx.refreshStock());
+    } catch {
+      // The hold stays; the tech can check again.
+    }
+    setCheckingStock(false);
+  };
+  const stockButton = generateMissing.stockRow && !locked ? (
+    <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={checkingStock} onClick={checkStock}>Check stock</Button>
+  ) : null;
+
+  const write = (fresh) => {
+    if (writing || generateMissing.reason) return;
+    setStep('report');
+    // A lane or typed read first fills the record (only what is empty and
+    // unpicked), and the report is written from the filled record.
+    report.write({
+      buildPayload: (facts) => {
+        const { heard, writerExtras } = recordState.inputs(recordState.settle(facts), facts);
+        const payload = writerPayload({ service, visit: ctx.visit, form, rows, facts: heard, ratingAllowed, photos: visitPhotos.photos, promiseMarks });
+        return { ...payload, ...writerExtras };
+      },
+      note: form.note,
+      // A typed read is judged beside the record's present values.
+      current: recordState.current,
+      scoreSet: recordState.scoreSet,
+      signature: (facts) => writerSignature(form, rows, promiseMarks, visitPhotos.photos, recordState.signaturePart(recordState.recordFor(facts))),
+      fresh,
+    });
+  };
+  const summary = () => {
+    // A typed visit's places live in its form, so its record names the form.
+    const where = { lane: () => record.areas, typed: () => [recordState.schema.label] }[mode];
+    const areas = where ? where() : (draft?.facts?.areas || []);
+    return [active.map((row) => row.name).join(', '), areas.join(', ')].filter(Boolean).join(' · ');
+  };
+  const submit = () => {
+    if (completeMissing.reason && !submission.hasPendingBody()) return;
+    submission.submit(
+      () => reportCompletionBody({
+        form, rows, draft, perimeterFeet, trace, visitIdentity: ctx.visitIdentity, ratingAllowed, tipsAvailable, isReservice, promiseMarks,
+        recordFields: recordState.inputs(record, draft?.facts),
+      }),
+      summary(),
+    );
+  };
+  // The tracer opens over the sheet, the way the photo manager does.
+  const openTracer = () => onOverlay(
+    <TechTreatmentZoneModal
+      serviceId={service.id}
+      expectedPropertyId={loadedPropertyId}
+      openVisitOnly
+      customerName={customerNameOf(ctx.visit, service) || 'Customer'}
+      address={service.routedAddress || service.address || ''}
+      lat={service.lat}
+      lng={service.lng}
+      onClose={() => onOverlay(null)}
+      onSaved={trace.saved}
+    />,
+  );
+
+  // "Remove the trace": a saved trace the note no longer backs comes off,
+  // then the trace is read again. A refusal (the visit moved, or was
+  // completed elsewhere) is shown and the hold stays.
+  const [removingTrace, setRemovingTrace] = useState(false);
+  const [traceError, setTraceError] = useState('');
+  const removeTrace = async () => {
+    setRemovingTrace(true);
+    setTraceError('');
+    const bound = loadedPropertyId === undefined ? '' : `?expectedPropertyId=${encodeURIComponent(loadedPropertyId ?? '')}`;
+    try {
+      await request(`/tech/services/${service.id}/treatment-zone${bound}`, { method: 'DELETE' });
+    } catch (err) {
+      setTraceError(err?.message || 'Couldn’t remove the trace. Try again.');
+    }
+    setRemovingTrace(false);
+    trace.reload();
+  };
+
+  if (submission.done) {
+    const doneMarks = promiseMarks.filter((mark) => mark.mark === 'done').map((mark) => ({
+      id: mark.id,
+      description: visitPromises.promises.find((promise) => promise.id === mark.id)?.description || '',
+    }));
+    return (
+      <SavedView service={service} summary={submission.done.summary} onCompleted={onCompleted}>
+        <SentSummary result={submission.done.response} doneMarks={doneMarks} base={base} request={request} followupBooking={ctx.followupBooking} />
+        <CollectPayment result={submission.done.response} />
+      </SavedView>
+    );
+  }
+  if (step === 'report') {
+    const stepTrace = traceAvailable && perimeterSprayRow(active, draft) ? trace : null;
+    return (
+      <ReportStep
+        report={report}
+        stale={stale}
+        action={action}
+        locked={locked}
+        submission={submission}
+        generateMissing={generateMissing}
+        completeMissing={completeMissing}
+        stockButton={stockButton}
+        // Only a perimeter spray is traced: a spot visit has no trace step
+        // (nor has a lane or typed visit: the schedule routes it untraced,
+        // and a trace saved on the full form goes on its report as it is).
+        trace={stepTrace}
+        traced={!!(mode ? ctx.traceOnReport && trace.zone : stepTrace?.zone)}
+        pestHeard={!mode}
+        laneCard={recordState.card({ draft, locked, writing })}
+        onRetryTrace={trace.failed ? trace.reload : null}
+        onRemoveTrace={completeMissing.fix === 'remove_trace' ? removeTrace : null}
+        removingTrace={removingTrace}
+        traceError={traceError}
+        sources={writerSources({
+          productCount: active.length,
+          photoCount: visitPhotos.photos.length,
+          marked: promiseMarks.length > 0,
+          rated: ratingAllowed && Number.isInteger(form.rating),
+        })}
+        photoCount={visitPhotos.photos.length}
+        blogPost={form.blogPost}
+        onWrite={write}
+        onSubmit={submit}
+        onTrace={openTracer}
+        onBack={() => setStep('visit')}
+        onConfirm={() => submission.confirm(summary())}
+        // A promise that changed after the report was written: the list
+        // reloads, and a mark that no longer holds makes the report stale.
+        onBackFromPrompt={() => {
+          if (submission.prompt?.code === 'promise_marks_changed') visitPromises.reload();
+          submission.dismissPrompt();
+        }}
+      />
+    );
+  }
+  return (
+    <VisitStep
+      service={service}
+      ctx={ctx}
+      form={form}
+      setForm={setForm}
+      products={products}
+      active={active}
+      sprayMethod={reportSprayMethod(draft?.facts)}
+      tips={tips}
+      blog={blog}
+      visitPromises={visitPromises}
+      photos={visitPhotos.photos}
+      onPhotos={photos.open}
+      noteBoxPhotos={noteBoxPhotos}
+      photosReadFailed={visitPhotos.failed}
+      request={request}
+      photoHold={photoHold}
+      onPhotoHold={setPhotoHold}
+      onPhotosUpdate={visitPhotos.update}
+      onPhotosChanged={reloadPhotos}
+      locked={locked}
+      dictationPending={dictationPending}
+      onDictationPending={onDictationPending}
+      onFullForm={onFullForm}
+      isMobile={isMobile}
+      onAddProduct={addProduct}
+      footer={action
+        ? { reason: generateMissing.reason, label: action.label, onAction: () => write(action.fresh) }
+        // A photo change in hand (a description open, a change saving, a
+        // removal to answer) holds the way back too (codex local r2).
+        : { reason: photoHold, label: 'Back to the report', onAction: () => setStep('report') }}
+      writing={writing}
+      warn={!!generateMissing.stockRow}
+      stockButton={stockButton}
+    />
+  );
+}
+
+// The report step: the report being written, or the report to read (edit,
+// write again), the trace, and the footer that fits: answer a completion
+// prompt, write the report, or complete & send.
+function ReportStep({
+  report, stale, action, locked, submission, generateMissing, completeMissing, stockButton, trace, traced, sources, photoCount,
+  blogPost, pestHeard, laneCard, onWrite, onSubmit, onTrace, onRetryTrace, onRemoveTrace, removingTrace, traceError, onBack, onConfirm,
+  onBackFromPrompt,
+}) {
+  const { draft, writing, writeError } = report;
+  const [editing, setEditing] = useState(false);
+  const showDraft = draft && !writing;
+  let footer = (
+    <CompleteFooter submission={submission} missingReason={completeMissing.reason} warn={!!completeMissing.stockRow} label="Complete & send" onSubmit={onSubmit}>
+      {stockButton}
+      {onRetryTrace && (
+        <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" disabled={locked} onClick={onRetryTrace}>Check the trace again</Button>
+      )}
+      {onRemoveTrace && (
+        <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={removingTrace} disabled={locked} onClick={onRemoveTrace}>Remove the trace</Button>
+      )}
+    </CompleteFooter>
+  );
+  if (submission.prompt) {
+    footer = (
+      <footer className="tech-visit-footer tech-visit-footer--stacked">
+        <ConfirmPrompt prompt={submission.prompt} busy={submission.submitting} onBack={onBackFromPrompt} onConfirm={onConfirm} />
+      </footer>
+    );
+  } else if (action) {
+    footer = <StepFooter reason={generateMissing.reason} label={action.label} busy={writing} disabled={writing} onAction={() => onWrite(action.fresh)} />;
+  }
+  return (
+    <div className="tech-visit-form-area">
+      <div className="tech-visit-body">
+        <Button type="button" variant="ghost" className="tech-visit-action tech-report-back" disabled={locked || writing} onClick={() => { setEditing(false); onBack(); }}>
+          Back to the visit
+        </Button>
+        {writing && <WritingView sources={sources} />}
+        {writeError && !writing && <ActionFeedback error className="tech-visit-feedback">{writeError}</ActionFeedback>}
+        {traceError && <ActionFeedback error className="tech-visit-feedback">{traceError}</ActionFeedback>}
+        {showDraft && (
+          <ReportCard
+            draft={draft}
+            editing={editing}
+            stale={stale}
+            locked={locked}
+            photoCount={photoCount}
+            traced={traced}
+            blogPost={blogPost}
+            pestHeard={pestHeard}
+            onEdit={() => setEditing(true)}
+            onDoneEditing={() => setEditing(false)}
+            onChangeText={report.editText}
+            onWriteAgain={() => { setEditing(false); onWrite(true); }}
+          />
+        )}
+        {showDraft && laneCard}
+        {showDraft && trace && <TraceSection trace={trace} locked={locked} onTrace={onTrace} />}
+        {submission.submitting && <ActionFeedback className="tech-visit-feedback">Saving completion…</ActionFeedback>}
+      </div>
+      {footer}
+    </div>
+  );
+}
+
+// The visit step: talk, products, photos, the three taps, the tip, the
+// promise check, then write the report (or go back to it while current).
+function VisitStep({
+  service, ctx, form, setForm, products, active, sprayMethod, tips, blog, visitPromises, photos, onPhotos, locked, dictationPending,
+  onDictationPending, onFullForm, isMobile, onAddProduct, footer, writing, warn, stockButton,
+  noteBoxPhotos, photosReadFailed, request, photoHold, onPhotoHold, onPhotosUpdate, onPhotosChanged,
+}) {
+  const [editAmounts, setEditAmounts] = useState(false);
+  const [productsOpen, setProductsOpen] = useState(false);
+  const setField = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
+  // Each dictated chunk joins what is already in the box (stable for the mic).
+  const appendNote = useCallback(
+    (text) => setForm((prev) => ({ ...prev, note: prev.note.trim() ? `${prev.note.trimEnd()} ${text}` : text })),
+    [setForm],
+  );
+  // The house mix is always on the sheet, so "Used most" lists the rest.
+  const pickerCommonProducts = useMemo(() => {
+    const mixIds = new Set(ctx.rows.map((row) => String(row.productId)));
+    return ctx.commonProducts.filter((common) => !mixIds.has(String(common.productId)));
+  }, [ctx.rows, ctx.commonProducts]);
+  const picker = useProductPicker({
+    products: ctx.products,
+    commonProducts: pickerCommonProducts,
+    rows: products.rows,
+    // A photo description's own mic may be recording: the picker never
+    // covers it (codex local r3 on #5624).
+    locked: locked || dictationPending || !!photoHold,
+    isMobile,
+    onFullForm,
+    onPick: (product) => onAddProduct(product, sprayMethod),
+  });
+  return (
+    <div className="tech-visit-form-area">
+      <div className="tech-visit-body" {...picker.coverProps}>
+        <fieldset className="tech-visit-form" disabled={locked}>
+          {/* Photos in the note's box (GATE_NOTE_BOX_PHOTOS): the note's mic
+              waits while a photo's description is open or a change is
+              saving, so one microphone records at a time. */}
+          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked || !!photoHold}>
+            {noteBoxPhotos ? (
+              <TechNoteBoxPhotos
+                serviceId={service.id}
+                request={request}
+                photos={photos}
+                disabled={locked || dictationPending}
+                readFailed={photosReadFailed}
+                onAdd={onPhotos}
+                onUpdate={onPhotosUpdate}
+                onChanged={onPhotosChanged}
+                onRetry={onPhotosChanged}
+                onHold={onPhotoHold}
+              />
+            ) : null}
+          </VisitNote>
+          {productsOpen ? (
+            <ProductsSection
+              products={products}
+              method={sprayMethod}
+              stickyPicks
+              editAmounts={editAmounts}
+              locked={locked}
+              onToggleEdit={() => setEditAmounts((on) => !on)}
+              other={picker.button}
+              popover={picker.popover}
+              onCollapse={() => setProductsOpen(false)}
+            />
+          ) : (
+            <ProductsLine active={active} locked={locked} onOpen={() => setProductsOpen(true)} />
+          )}
+          {/* A clip being recorded keeps recording behind the photo manager, so
+              photos wait until the dictation is finished. */}
+          {!noteBoxPhotos && <PhotoStripSection photos={photos} locked={locked || dictationPending} onOpen={onPhotos} />}
+          <CustomerHomeSection value={form.customerHome} locked={locked} onChange={(value) => setField('customerHome', value)} />
+          {ctx.rating.allowed && (
+            <ActivitySection
+              value={form.rating}
+              scaleLabels={ctx.rating.scaleLabels}
+              locked={locked}
+              onChange={(rating) => setForm((prev) => ({ ...prev, rating, ratingPrefilled: false }))}
+            />
+          )}
+          {tips && (
+            <TipSection
+              library={tips}
+              tipId={form.tipId}
+              customTip={form.customTip}
+              locked={locked}
+              onPick={(id) => setForm((prev) => ({ ...prev, tipId: prev.tipId === id ? '' : id, customTip: '' }))}
+              onCustom={(value) => setForm((prev) => ({ ...prev, customTip: value, tipId: value.trim() ? '' : prev.tipId }))}
+            />
+          )}
+          {blog.available && (
+            <BlogPostSection search={blog.search} value={form.blogPost} locked={locked} onChange={(post) => setField('blogPost', post)} />
+          )}
+          {visitPromises.available && visitPromises.promises.length > 0 && (
+            <PromisesSection
+              promises={visitPromises.promises}
+              total={visitPromises.total}
+              marks={form.promiseMarks}
+              locked={locked}
+              onChange={(next) => setField('promiseMarks', next)}
+            />
+          )}
+        </fieldset>
+      </div>
+      <StepFooter reason={footer.reason} warn={warn} label={footer.label} busy={writing} disabled={writing} onAction={footer.onAction} coverProps={picker.coverProps}>
+        {stockButton}
+      </StepFooter>
+      {picker.sheet}
+    </div>
+  );
+}
+
+// Only an exact true turns the customer recap on (GATE_FAST_COMPLETE_RECAP,
+// delivered as the schedule row's fastCompleteRecapEnabled).
+const recapOn = (service) => service?.recapEnabled === true;
+
+// After Complete: the exact text the server sent (its words, shown as sent),
+// or why none went. Nothing when the sheet never asked for one.
+// A held message's channel is only known once the replay picks it.
+function queuedLabel(channel) {
+  if (channel === 'push') return 'Queued for the customer\'s app';
+  if (channel === 'sms') return 'Text queued';
+  return 'Message queued';
+}
+
+function CustomerTextResult({ outcome }) {
+  if (!outcome) return null;
+  const { sent, queued, unverified, body, reason, channel } = outcome;
+  // The recorded channel decides the words: a text is not an app message.
+  const app = channel === 'push';
+  return (
+    <div data-testid="fast-complete-text-result">
+      {sent && <p className="tech-visit-muted">{app ? 'Sent to the customer\'s app:' : 'Text sent to the customer:'}</p>}
+      {!sent && queued && <p className="tech-visit-muted">{queuedLabel(channel)}: {reason}.</p>}
+      {!sent && unverified && <p className="tech-visit-muted">Delivery not confirmed: {reason}.</p>}
+      {!sent && !queued && !unverified && <p className="tech-visit-muted">No text sent: {reason}.</p>}
+      {body && <blockquote data-testid="fast-complete-text-body">{body}</blockquote>}
     </div>
   );
 }
 
 // Every product on the sheet. A house-mix tile taps off and on (struck
 // through, never removed); an added product's tile opens its editor.
-function ProductsSection({ products, method, editAmounts, locked, onToggleEdit, other, popover }) {
+// stickyPicks (the report flow): a way the tech picks for a product stays that
+// way. The visit's way there is the note's read, which can change when the
+// report is written, so a pick never quietly follows it.
+function ProductsSection({ products, method, editAmounts, locked, onToggleEdit, other, popover, onCollapse, stickyPicks = false }) {
   const { rows, editingId, setEditingId, updateRow, removeRow } = products;
   const editorId = useId();
   const tileRefs = useRef(new Map());
@@ -847,13 +1866,22 @@ function ProductsSection({ products, method, editAmounts, locked, onToggleEdit, 
     other.buttonRef.current?.focus();
     removeRow(editing.productId);
   };
+  const editAmountsButton = (
+    <Button type="button" variant="ghost" className="tech-visit-action" aria-pressed={editAmounts} onClick={onToggleEdit}>
+      {editAmounts ? 'Done' : 'Edit amounts'}
+    </Button>
+  );
   return (
     <section className="tech-visit-choice-section">
       <div className="tech-visit-section-head">
         <h3 className="tech-visit-section-title">Products used</h3>
-        <Button type="button" variant="ghost" className="tech-visit-action" aria-pressed={editAmounts} onClick={onToggleEdit}>
-          {editAmounts ? 'Done' : 'Edit amounts'}
-        </Button>
+        {/* The report flow folds the products back into one line. */}
+        {onCollapse ? (
+          <span className="tech-visit-head-actions">
+            {editAmountsButton}
+            <Button type="button" variant="ghost" className="tech-visit-action" onClick={onCollapse}>Hide</Button>
+          </span>
+        ) : editAmountsButton}
       </div>
       <div className="tech-visit-tile-grid">
         {rows.map((row) => (
@@ -876,6 +1904,7 @@ function ProductsSection({ products, method, editAmounts, locked, onToggleEdit, 
           id={editorId}
           row={editing}
           method={method}
+          stickyPicks={stickyPicks}
           locked={locked}
           onChange={(patch) => updateRow(editing.productId, patch)}
           onRemove={removeEditing}
@@ -883,7 +1912,12 @@ function ProductsSection({ products, method, editAmounts, locked, onToggleEdit, 
         />
       )}
       {editAmounts && rows.filter((row) => row.active).map((row) => (
-        <AmountRow key={row.productId} row={row} rate={rowRate(row, method)} onChange={(patch) => updateRow(row.productId, patch)} />
+        <AmountRow
+          key={row.productId}
+          row={row}
+          rate={rowRate(row, method)}
+          onChange={(patch) => updateRow(row.productId, 'rateInput' in patch ? { ...patch, rateMethod: rowMethod(row, method) } : patch)}
+        />
       ))}
       <OtherProductButton {...other} popover={popover} />
     </section>
@@ -931,7 +1965,7 @@ function ProductTile({ tileRef, row, editorId, locked, onClick }) {
 
 // An added product: how much, in the units its measure allows, and how it
 // went down. Fresh from the picker, the amount is the next thing to enter.
-function AddedProductEditor({ id, row, method, locked, onChange, onRemove, onDone }) {
+function AddedProductEditor({ id, row, method, stickyPicks, locked, onChange, onRemove, onDone }) {
   const nameId = useId();
   const amountId = useId();
   const amountRef = useRef(null);
@@ -945,29 +1979,8 @@ function AddedProductEditor({ id, row, method, locked, onChange, onRemove, onDon
         <h4 id={nameId} className="tech-product-editor-name">{row.name}</h4>
         <span className="tech-visit-muted">{[categoryLabel(row.product), 'added by you'].filter(Boolean).join(' · ')}</span>
       </div>
-      <div>
-        <label htmlFor={amountId} className="tech-product-editor-label">How much?</label>
-        <div className="tech-product-editor-amount">
-          <Input
-            ref={amountRef}
-            id={amountId}
-            className="tech-visit-control tech-product-amount-input"
-            type="number"
-            inputMode="decimal"
-            min="0"
-            step="any"
-            disabled={locked}
-            value={row.totalAmount ?? ''}
-            onChange={(e) => onChange({ totalAmount: e.target.value })}
-          />
-          <div role="group" aria-label="Unit" className="tech-product-units">
-            {UNIT_CHOICES[row.dimension].map((choice) => (
-              <Chip disabled={locked} key={choice.value} className="tech-product-unit" label={choice.label} pressed={row.amountUnit === choice.value} onClick={() => onChange({ amountUnit: choice.value })} />
-            ))}
-          </div>
-        </div>
-      </div>
-      <RowMethodPicker row={row} method={method} locked={locked} onChange={onChange} />
+      <AmountEntry id={amountId} inputRef={amountRef} row={row} locked={locked} onChange={onChange} />
+      <RowMethodPicker row={row} method={method} sticky={stickyPicks} locked={locked} onChange={onChange} />
       <div className="tech-product-editor-actions">
         <Button type="button" variant="secondary" className="tech-visit-action tech-product-remove" disabled={locked} onClick={onRemove}>Remove</Button>
         <Button type="button" variant="secondary" className="tech-visit-action tech-visit-primary" disabled={locked} onClick={onDone}>Done</Button>
@@ -984,14 +1997,23 @@ const methodLabel = (value) => {
 // How an added product went down. A spray follows the visit's How until the
 // tech picks another way; a product with its own catalog method (a bait, a
 // granule) starts there. Picking the row's standard way puts it back on it.
-function RowMethodPicker({ row, method, locked, onChange }) {
+// What a spray with no way picked goes down as: the visit's How, the way the
+// note says (the report flow), or a spot treatment on a lane visit (its note
+// is read for its record, not its sprays).
+function followHint(row, sticky) {
+  if (!sticky) return 'Same as the visit\'s How';
+  return row.lane ? 'Spot treatment until you pick another way' : 'Goes the way your note says until you pick one';
+}
+
+function RowMethodPicker({ row, method, sticky = false, locked, onChange }) {
   const labelId = useId();
   const current = rowMethod(row, method);
   const standard = SPRAY_METHODS.has(row.catalogMethod) ? method : row.catalogMethod;
-  const ownMethod = row.catalogMethod && !ROW_METHOD_CHOICES.some((choice) => choice.value === row.catalogMethod);
-  const choices = ownMethod ? [...ROW_METHOD_CHOICES, { value: row.catalogMethod, label: methodLabel(row.catalogMethod) }] : ROW_METHOD_CHOICES;
+  const ways = row.lane ? LANE_METHOD_CHOICES : ROW_METHOD_CHOICES;
+  const ownMethod = row.catalogMethod && !ways.some((choice) => choice.value === row.catalogMethod);
+  const choices = ownMethod ? [...ways, { value: row.catalogMethod, label: methodLabel(row.catalogMethod) }] : ways;
   const pick = (value) => onChange({
-    methodInput: value === standard ? null : value,
+    methodInput: !sticky && value === standard ? null : value,
     // A rate typed for one method doesn't carry to another.
     ...(value !== current ? { rateInput: null } : {}),
   });
@@ -1003,26 +2025,7 @@ function RowMethodPicker({ row, method, locked, onChange }) {
           <Chip disabled={locked} key={choice.value} label={choice.label} pressed={current === choice.value} onClick={() => pick(choice.value)} />
         ))}
       </div>
-      {followsVisitMethod(row) && <p className="tech-visit-muted">Same as the visit&apos;s How</p>}
-    </div>
-  );
-}
-
-function OtherProductButton({ buttonRef, locked, onClick, hasPicker, expanded, popover }) {
-  return (
-    <div className="tech-product-other">
-      <Button
-        ref={buttonRef}
-        type="button"
-        variant="secondary"
-        className="tech-visit-action tech-visit-wide"
-        disabled={locked}
-        onClick={onClick}
-        {...(hasPicker ? { 'aria-haspopup': 'dialog', 'aria-expanded': expanded } : {})}
-      >
-        + Other product
-      </Button>
-      {popover}
+      {followsVisitMethod(row) && <p className="tech-visit-muted">{followHint(row, sticky)}</p>}
     </div>
   );
 }
@@ -1068,31 +2071,6 @@ function MethodSection({ form, rows, setField, chooseMethod, locked }) {
   );
 }
 
-// The visit note leads the sheet. The mic appends what the tech says; on a
-// phone without speech recognition it records a clip for server transcription
-// (DictationButton's upload fallback), and renders nothing where neither works.
-function VisitNote({ note, onChange, onDictated, onDictationPending, serviceId, locked }) {
-  const noteId = useId();
-  return (
-    <section className="tech-visit-choice-section">
-      <div className="tech-visit-section-head">
-        <h3 className="tech-visit-section-title"><label htmlFor={noteId}>Tell me about the visit</label></h3>
-      </div>
-      <div className="tech-visit-note-row">
-        <DictationButton onAppend={onDictated} onPendingChange={onDictationPending} palette={MIC_PALETTE} size={48} title="Talk about the visit" disabled={locked} uploadServiceId={serviceId} />
-        <Textarea
-          id={noteId}
-          className="tech-visit-control"
-          rows={3}
-          value={note}
-          onChange={(e) => onChange(e.target.value)}
-          placeholder="What you treated, where, and what you saw"
-        />
-      </div>
-    </section>
-  );
-}
-
 // Photos are staged against the visit by the existing photo manager (opened
 // over the sheet by the parent) and promoted into the service record at
 // completion. Optional here.
@@ -1120,87 +2098,6 @@ function PhotosSection({ serviceId, request, photos, locked }) {
       <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" onClick={photos.open} disabled={locked}>
         {count ? 'Add or view photos' : 'Add photos'}
       </Button>
-    </section>
-  );
-}
-
-// What the picker says beside a tip: already covered by the customer's
-// saved settings, or when it last went out to this customer.
-function tipMark(tip, library) {
-  if (tip.condition === 'irrigation_on_file' && library?.conditions?.irrigation_on_file === true) return 'already on file';
-  const day = library?.lastSent?.[tip.id];
-  return day ? techTipSentLabel(day) : null;
-}
-
-// The tips on screen: search results, the whole list, or the short list,
-// with the pick always kept in view. `noMatch` is about the search alone, so
-// a pinned pick never hides that a search found nothing.
-function visibleTips(allTips, { query, showAll, tipId }) {
-  const listed = query ? rankTechTips(allTips, query) : showAll ? allTips : allTips.slice(0, TIP_PREVIEW_COUNT);
-  const pinned = tipId && !listed.some((tip) => tip.id === tipId) ? allTips.find((tip) => tip.id === tipId) : null;
-  return { tips: pinned ? [pinned, ...listed] : listed, noMatch: !!query && !listed.length };
-}
-
-function TipOption({ tip, library, pressed, locked, onPick }) {
-  return (
-    <Button
-      type="button"
-      variant="secondary"
-      className="tech-visit-action tech-visit-tip"
-      aria-pressed={pressed}
-      onClick={() => onPick(tip.id)}
-      disabled={locked}
-    >
-      <span>
-        {tip.label}
-        <span className="tech-visit-tip-copy">{[techTipSubtext(tip.copy), tipMark(tip, library)].filter(Boolean).join(' · ')}</span>
-      </span>
-    </Button>
-  );
-}
-
-// One tip per service visit, from this visit's options: a short list first,
-// the whole list behind "Show all", search across all of it, or the tech's
-// own line. Only the id (or the typed line) goes on the wire; the server
-// resolves and freezes the copy.
-function TipSection({ library, tipId, customTip, locked, onPick, onCustom }) {
-  const [query, setQuery] = useState('');
-  const [showAll, setShowAll] = useState(false);
-  const [writing, setWriting] = useState(false);
-  const allTips = useMemo(
-    () => (library?.groups || []).flatMap((group) => group.tips || []),
-    [library],
-  );
-  const q = query.trim().toLowerCase();
-  const { tips: visible, noMatch } = visibleTips(allTips, { query: q, showAll, tipId });
-  const hasPick = !!tipId || !!customTip.trim();
-  const writingOwn = writing || !!customTip;
-  return (
-    <section className="tech-visit-choice-section">
-      <div className="tech-visit-section-head">
-        <h3 className="tech-visit-section-title">Tip for the customer</h3>
-        <span className="tech-visit-muted">{hasPick ? '1 picked' : 'Pick 1 (optional)'}</span>
-      </div>
-      <Field label="Search tips" className="tech-visit-field">
-        <Input className="tech-visit-control" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="e.g. ants, porch light" />
-      </Field>
-      <div className="tech-visit-tip-list">
-        {visible.map((tip) => (
-          <TipOption key={tip.id} tip={tip} library={library} pressed={tip.id === tipId} locked={locked} onPick={onPick} />
-        ))}
-        {noMatch && <p className="tech-visit-muted">No tips match.</p>}
-      </div>
-      <div className="tech-visit-tile-grid">
-        {!q && allTips.length > TIP_PREVIEW_COUNT && (
-          <Chip disabled={locked} label={showAll ? 'Show fewer' : 'Show all'} onClick={() => setShowAll((on) => !on)} />
-        )}
-        {!writingOwn && <Chip disabled={locked} label="Write your own" onClick={() => setWriting(true)} />}
-      </div>
-      {writingOwn && (
-        <Field label="Your own tip (one sentence)" className="tech-visit-field">
-          <Input className="tech-visit-control" value={customTip} maxLength={CUSTOM_TIP_MAX_CHARS} onChange={(e) => onCustom(e.target.value)} placeholder="Goes on the report as a note from you" />
-        </Field>
-      )}
     </section>
   );
 }

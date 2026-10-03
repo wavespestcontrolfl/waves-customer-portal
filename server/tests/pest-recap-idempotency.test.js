@@ -1474,6 +1474,7 @@ describe('recap ownership identity under the lock (codex P1 #4249)', () => {
     customerId: 'cust-1', propertyId: 'property-a', catalogServiceId: 'cat-1',
     serviceType: 'Quarterly Pest Control', scheduledDate: '2026-05-29',
     address: { line1: '200 Palm Ave', line2: null, city: 'Parrish', state: 'FL', zip: '34219' },
+    isCallback: false,
   };
   const customerRow = { first_name: 'Pat', last_name: 'Jones', address_line1: '200 Palm Ave', city: 'Parrish', state: 'FL', zip: '34219' };
   const submit = (store, expectedVisit) => submitRecap({
@@ -1495,6 +1496,8 @@ describe('recap ownership identity under the lock (codex P1 #4249)', () => {
     ['service type', { lockedStamp: { service_type: 'Mosquito Control' } }],
     ['scheduled date', { lockedScheduledDate: '2026-05-30' }],
     ['stamped address', { lockedStamp: { service_address_line1: '300 Palm Ave', service_address_city: 'Parrish', service_address_state: 'FL', service_address_zip: '34219' } }],
+    // The Fast Complete report flow's pay link and review ask follow it.
+    ['free-callback', { lockedStamp: { is_callback: true } }],
   ])('a %s reassignment committing before the lock rejects the recap without writing', async (_label, lockedChange) => {
     const store = { serviceStatus: 'scheduled', records: [], customerRow, lockedPropertyId: 'property-a', lockedCatalogServiceId: 'cat-1', ...lockedChange };
     const result = await submit(store, identity);

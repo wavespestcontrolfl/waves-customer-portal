@@ -369,7 +369,10 @@ async function auditRecurringScheduleCoverage({ now = new Date(), limit = 100, o
 // This check starts at ACCEPTANCE, including reservations that never acquired
 // is_recurring. It only reports evidence for staff review: a later manual
 // amendment can legitimately differ from the accepted snapshot.
-function acceptedScheduleFindings(estimate, visits, stoppedRoots = new Set(), { todayET = etDateString(), heldFamilies = new Set() } = {}) {
+// `skippedFamilies` (a Set) collects the families left unjudged here (an
+// active plan hold, every matching row on a stopped series); `onHoldFamilies`
+// (a Set) the subset skipped for an active plan hold, the one temporary reason.
+function acceptedScheduleFindings(estimate, visits, stoppedRoots = new Set(), { todayET = etDateString(), heldFamilies = new Set(), skippedFamilies = new Set(), onHoldFamilies = new Set() } = {}) {
   const converter = require('./estimate-converter');
   const seeder = require('./recurring-appointment-seeder');
   const { inferFrequencyKeyFromEstimateData } = require('./billing-cadence');
@@ -397,7 +400,7 @@ function acceptedScheduleFindings(estimate, visits, stoppedRoots = new Set(), { 
   ];
   const findings = [];
   for (const { service, family } of units) {
-    if (heldFamilies.has(family)) continue;
+    if (heldFamilies.has(family)) { skippedFamilies.add(family); onHoldFamilies.add(family); continue; }
     const pattern = converter.converterFollowUpSeedingPattern(service, {}, fallback, acceptedFrequency);
     // Commercial, billing riders and contradictory custom terms already use
     // office scheduling. Do not invent a cadence for them from today's prices.
@@ -410,7 +413,10 @@ function acceptedScheduleFindings(estimate, visits, stoppedRoots = new Set(), { 
         : converter.seedingFamilyKey({ service: identity, name: row.service_type }) === family;
       return matches && !row.is_callback && !row.followup_included && !isBoosterVisit(row);
     });
-    if (matching.length && matching.every((row) => stoppedRoots.has(row.recurring_parent_id || row.id))) continue;
+    if (matching.length && matching.every((row) => stoppedRoots.has(row.recurring_parent_id || row.id))) {
+      skippedFamilies.add(family);
+      continue;
+    }
     const rows = matching.filter((row) => !stoppedRoots.has(row.recurring_parent_id || row.id));
     const finding = classifyAcceptedSchedule({ estimate, family, pattern, rows, todayET, seeder });
     if (finding) findings.push(finding);
@@ -535,13 +541,25 @@ async function readStoppedRecurringRoots(conn, customerIds) {
 async function findAcceptedRecurringScheduleGaps({ now = new Date() } = {}, conn = db) {
   // Let the accept/conversion transaction settle before paging. A real Date
   // binds a timestamptz cutoff independently of Railway's UTC process zone.
-  const cutoff = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  return acceptedRecurringScheduleGaps(conn, {
+    now, cutoff: new Date(now.getTime() - 24 * 60 * 60 * 1000), estimateIds: null, coverage: new Map(),
+  });
+}
+
+// The classifier over accepted estimates. The watchdog asks about every
+// estimate accepted before its 24h cutoff (findAcceptedRecurringScheduleGaps);
+// the combined-booking check asks about specific just-accepted estimates
+// (`estimateIds`, cutoff = now) and reads `coverage`, which receives, per
+// estimate id the classifier actually judged, { skipped, onHold }: the Set of
+// families it skipped, and the subset skipped for an active plan hold.
+async function acceptedRecurringScheduleGaps(conn, { now, cutoff, estimateIds, coverage }) {
   const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
   const estimates = await conn('estimates as e')
     .join('customers as c', 'c.id', 'e.customer_id')
     .where('e.status', 'accepted').whereNull('e.archived_at')
     .where('e.accepted_at', '<=', cutoff).where('c.active', true)
     .whereNull('c.deleted_at')
+    .modify((query) => { if (estimateIds) query.whereIn('e.id', estimateIds); })
     .where(function includeUnconvertedStage() {
       this.whereNotIn('c.pipeline_stage', FORMER_CUSTOMER_STAGES).orWhereNull('c.pipeline_stage');
     })
@@ -610,7 +628,12 @@ async function findAcceptedRecurringScheduleGaps({ now = new Date() } = {}, conn
     const linkedRows = [...roots].flatMap((root) => (customer.roots.get(root) || [])
       .filter((row) => stopped.has(root) || !retainedRoots.has(root) || row.scheduled_date >= acceptedDay))
       .filter((row) => !isStandaloneReservation(row, reservations));
-    findings.push(...acceptedScheduleFindings(estimate, linkedRows, stopped, { todayET, heldFamilies: customer.holds }));
+    const skippedFamilies = new Set();
+    const onHoldFamilies = new Set();
+    findings.push(...acceptedScheduleFindings(estimate, linkedRows, stopped, {
+      todayET, heldFamilies: customer.holds, skippedFamilies, onHoldFamilies,
+    }));
+    coverage.set(String(estimate.id), { skipped: skippedFamilies, onHold: onHoldFamilies });
   }
   return findings;
 }
@@ -623,6 +646,7 @@ module.exports = {
   formatDateOnly,
   normalizeLimit,
   acceptedScheduleFindings,
+  acceptedRecurringScheduleGaps,
   isStandaloneReservation,
   readActiveFamilyHolds,
   readStoppedRecurringRoots,

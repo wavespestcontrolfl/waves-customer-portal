@@ -12,6 +12,7 @@
  */
 
 const db = require('../models/db');
+const { greetingFirstName } = require('../utils/greeting-first-name');
 const logger = require('./logger');
 const StripeService = require('./stripe');
 const { invoiceWithdrawnFromCustomer } = require('./invoice-helpers');
@@ -430,8 +431,7 @@ async function sendDepositReceiptSms({ estimate, customer, phone, amountDollars,
   const estimateId = estimate.id;
   const { renderSmsTemplate } = require('./sms-template-renderer');
   const firstName = String(customer?.first_name || '').trim()
-    || String(estimate.customer_name || '').trim().split(/\s+/)[0]
-    || 'there';
+    || greetingFirstName({ customerName: estimate.customer_name, customer });
   const amount = Number(amountDollars || 0).toFixed(2).replace(/\.00$/, '');
   const body = await renderSmsTemplate('deposit_receipt', {
     first_name: firstName,
@@ -511,13 +511,12 @@ async function sendDepositReceiptSms({ estimate, customer, phone, amountDollars,
     if (isRetryable && retryAt) {
       try {
         // sms_log.from_phone is NOT NULL — resolve the same location number
-        // the immediate send would have used (twilio.js falls back to the
-        // bradenton line when no location can be derived). The cron forwards
-        // this as the sending number on replay.
-        const { resolveLocation } = require('../config/locations');
-        const TWILIO_NUMBERS = require('../config/twilio-numbers');
-        const locationId = customer?.city ? resolveLocation(customer.city).id : null;
-        const fromPhone = TWILIO_NUMBERS.getOutboundNumber(locationId || 'bradenton');
+        // the immediate send would have used, through the send path's own
+        // derivation (city, then ZIP/geocode under
+        // GATE_SMS_LINE_ADDRESS_FALLBACK; the bradenton line for a lead).
+        // Customer-linked rows also replay with resolve_from_by_customer, so
+        // the cron re-derives the line at send time like the immediate send.
+        const fromPhone = await require('./twilio').deriveOutboundNumber({ customer });
         await db('sms_log').insert({
           customer_id: estimate.customer_id || null,
           direction: 'outbound',
@@ -548,7 +547,7 @@ async function sendDepositReceiptSms({ estimate, customer, phone, amountDollars,
             // The customer can change their phone between the hold and
             // nextAllowedAt — the cron re-reads customers.phone at send time
             // so the phone_matches_customer trust it asserts stays true.
-            ...(estimate.customer_id ? { refresh_customer_phone: true } : {}),
+            ...(estimate.customer_id ? { refresh_customer_phone: true, resolve_from_by_customer: true } : {}),
             ...(estimate.customer_id ? {} : {
               consent_basis: {
                 status: 'transactional_allowed',
@@ -600,8 +599,7 @@ async function sendDepositReceiptEmail({ estimate, customer, prefs, amountDollar
   }
 
   const firstName = String(customer?.first_name || '').trim()
-    || String(estimate.customer_name || '').trim().split(/\s+/)[0]
-    || 'there';
+    || greetingFirstName({ customerName: estimate.customer_name, customer });
   // Amount comes straight from the verified deposit ledger amount — never
   // recomputed here (waves-billing rule 1).
   const amount = `$${Number(amountDollars || 0).toFixed(2).replace(/\.00$/, '')}`;

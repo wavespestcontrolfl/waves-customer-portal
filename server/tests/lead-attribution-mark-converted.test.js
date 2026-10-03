@@ -22,7 +22,7 @@ jest.mock('../models/db', () => {
     };
     return q;
   };
-  db.raw = (s) => ({ __raw: s });
+  db.raw = (s, bindings) => ({ __raw: s, ...(bindings ? { bindings } : {}) });
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -65,10 +65,21 @@ describe('markConverted claims', () => {
     expect(settleRepeatFunnelRow).toHaveBeenCalledWith(db, 'lead-rep', { customerId: 'c1', estimateId: 'e-B' });
   });
 
+  test('a /book booking-scoped conversion persists its booking id on the won row in the SAME update as the win (extracted_data.won_booking_id); absent otherwise (codex #5477 r3 P1)', async () => {
+    await markConverted('lead-rep', { customerId: 'c1', bookingId: 'sba-9' });
+    const patch = mockCalls.find((c) => c[1] === 'update')[2];
+    expect(patch).toMatchObject({ status: 'won' });
+    expect(patch.extracted_data).toMatchObject({ __raw: expect.stringContaining("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb") });
+    expect(patch.extracted_data.bindings).toEqual([JSON.stringify({ won_booking_id: 'sba-9' })]);
+    mockCalls.length = 0;
+    await markConverted('lead-rep', { customerId: 'c1', estimateId: 'e-B', bookingId: 'sba-9' });
+    expect(mockCalls.find((c) => c[1] === 'update')[2].extracted_data.bindings).toEqual([JSON.stringify({ won_estimate_id: 'e-B', won_booking_id: 'sba-9' })]);
+  });
+
   test('an estimate-scoped conversion persists that scope on the won row (extracted_data.won_estimate_id, never the estimate_id FK) so a replay without an estimate settles the same way; an unscoped conversion writes no extracted_data (codex r37 P1)', async () => {
     await markConverted('lead-rep', { customerId: 'c1', estimateId: 'e-B' });
     const patch = mockCalls.find((c) => c[1] === 'update')[2];
-    expect(patch.extracted_data).toEqual({ __raw: expect.stringContaining("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb") });
+    expect(patch.extracted_data).toMatchObject({ __raw: expect.stringContaining("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb") });
     expect(patch).not.toHaveProperty('estimate_id');
     mockCalls.length = 0;
     await markConverted('lead-rep', { customerId: 'c1' });

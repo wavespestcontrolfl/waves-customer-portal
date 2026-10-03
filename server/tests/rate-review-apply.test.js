@@ -25,6 +25,7 @@ const fixture = require('./helpers/rate-review-apply-fixture');
 
 const mockDb = fixture.createFakeDb();
 const mockSchedule = { guardThrows: null, seriesLockBusy: false, propagateOverride: null, calls: [] };
+const mockResumeHolds = jest.fn(async () => ({ reminded: 0, resumed: 0, skipsRecovered: 0, errors: [] }));
 const mockNotifyAdmin = jest.fn(async () => ({ id: 'bell-1' }));
 
 jest.mock('../models/db', () => mockDb);
@@ -50,6 +51,10 @@ jest.mock('../services/annual-prepay-renewals', () => ({
     .where('t.term_end', '>=', today),
 }));
 jest.mock('../routes/admin-customers', () => ({ _private: { ANNUAL_PREPAY_LOCK_NS: 0x4150 } }));
+jest.mock('../services/cancellation-resolution/holds', () => ({
+  ...jest.requireActual('../services/cancellation-resolution/holds'),
+  resumeHoldsDueFor: (...args) => mockResumeHolds(...args),
+}));
 jest.mock('../routes/admin-schedule', () => {
   const { parseTemplateOverrides } = require('../services/recurring-template-overrides');
   const sum = (rows) => (rows || []).reduce((s, a) => s + (Number(a.estimated_price) > 0 ? Number(a.estimated_price) : 0), 0);
@@ -104,6 +109,9 @@ jest.mock('../routes/admin-schedule', () => {
         return true;
       }),
       calculateStoredVisitFinancials: calc,
+      // admin-schedule.js addonRecursAfterAnchor, reduced: a 'one_time' line
+      // is due on the anchor only, every other line recurs.
+      addonRecursAfterAnchor: (line) => (line?.recurring_pattern || line?.recurringPattern || null) !== 'one_time',
       loadStoredDiscountScope: async () => null,
       parseTemplateOverrides,
       readProvenanceOverrides: (raw) => {
@@ -153,6 +161,7 @@ beforeEach(() => {
   mockSchedule.guardThrows = null;
   mockSchedule.seriesLockBusy = false;
   mockSchedule.propagateOverride = null;
+  delete process.env.GATE_CANCEL_FLOW_V2;
   mockDb.reset();
 });
 
@@ -328,16 +337,43 @@ describe('scheduleNoticeRows — per_application effective date', () => {
   });
 });
 
+describe('scheduleNoticeRows — live inputs under the fence', () => {
+  test('a visit the notice would reprice no longer carries the ranked rate → held, no notice (never told, then refused at apply)', async () => {
+    const book = pestBook();
+    book.scheduled_services[2].estimated_price = '125.00';
+    const out = await scheduleBook(book);
+    expect(out.created).toBe(0);
+    expect(out.held.map((h) => h.reason)).toEqual(['rate_moved_since_ranking']);
+    expect(notices()).toHaveLength(0);
+  });
+  test('the account now bills on another lane than the ranking saw → held, no notice', async () => {
+    const out = await scheduleBook(pestBook(1, { customer: { billing_mode: 'monthly_membership' } }));
+    expect(out.held.map((h) => h.reason)).toEqual(['lane_moved_since_ranking']);
+    expect(notices()).toHaveLength(0);
+  });
+  test('monthly dues the ledger no longer carries at the ranked rate → held, no notice', async () => {
+    const out = await scheduleBook(pestBook(1, {
+      snapshot: { billing_lane: 'monthly_membership', rate_unit: 'month', current_rate_source: 'ledger_slice', current_rate_cents: 3333, proposed_rate_cents: 3633, delta_cents: 300 },
+      customer: { billing_mode: 'monthly_membership', billing_day: 15, monthly_rate: '39.00' },
+    }), { plannedSendDate: '2026-11-02' });
+    expect(out.held.map((h) => h.reason)).toEqual(['rate_moved_since_ranking']);
+    expect(notices()).toHaveLength(0);
+  });
+});
+
 describe('scheduleNoticeRows — monthly and prepaid lanes', () => {
   test('monthly_membership: the first dues day on or after both floors, labelled per month', async () => {
     const book = pestBook(1, {
       snapshot: { billing_lane: 'monthly_membership', rate_unit: 'month', current_rate_source: 'ledger_slice', current_rate_cents: 3333, proposed_rate_cents: 3633, delta_cents: 300, visits_per_year: 4 },
       customer: { billing_mode: 'monthly_membership', billing_day: 15, monthly_rate: '33.33' },
     });
+    book.customer_plan_rates[0].monthly_rate = '33.33';
     const out = await scheduleBook(book, { plannedSendDate: '2026-11-02' });
     expect(out.created).toBe(1);
     // floor = anniversary 2026-12-05 (> 2026-12-02) → first 15th on/after → 2026-12-15
     expect(notices()[0]).toMatchObject({ billing_lane: 'monthly_membership', cadence_label: 'month', effective_date: '2026-12-15', noticed_current_cents: 3333, noticed_new_cents: 3633 });
+    // the plan the letter names: its series and the ledger slices' accept provenance
+    expect(JSON.parse(notices()[0].metadata)).toMatchObject({ series_root_id: VISIT(100), slice_estimates: ['pest_control:'] });
   });
   test('monthly_membership: a floor past the dues day rolls to next month', async () => {
     const book = pestBook(1, {
@@ -363,10 +399,12 @@ describe('scheduleNoticeRows — monthly and prepaid lanes', () => {
     const out = await scheduleBook(prepayBook());
     expect(out.created).toBe(1);
     const notice = notices()[0];
-    // the public page shows current → new "per year": the ANNUAL totals, cent-exact with the renewal amount
+    // the public page shows the per-application rates (never a combined
+    // yearly total); the enforced amounts are the ANNUAL totals, cent-exact
+    // with the renewal amount
     expect(notice).toMatchObject({
-      billing_lane: 'annual_prepay', cadence_label: 'year', effective_date: '2027-05-15',
-      current_amount_cents: 46800, new_amount_cents: 48400, noticed_current_cents: 46800, noticed_new_cents: 48400,
+      billing_lane: 'annual_prepay', cadence_label: 'application', effective_date: '2027-05-15',
+      current_amount_cents: 11700, new_amount_cents: 12100, noticed_current_cents: 46800, noticed_new_cents: 48400,
     });
     expect(JSON.parse(notice.metadata)).toMatchObject({
       term_id: TERM(1), term_end: '2027-05-14', coverage_visits: 4, current_term_amount_cents: 46800, next_term_amount_cents: 48400,
@@ -653,6 +691,26 @@ describe('applyDueRateChanges — per_application', () => {
     expect(closeCall[1]).toContain(`rate-review-apply-hold:${notices()[0].id}:plan_on_hold`);
     expect(closeCall[2]).toBe('rate_review_notice_applied');
   });
+  test('a hold ending today is resumed before the apply, so the rate lands on its own effective date', async () => {
+    process.env.GATE_CANCEL_FLOW_V2 = 'true';
+    const book = sentBook();
+    book.plan_holds = [{ id: 'hold-1', customer_id: CUSTOMER(1), family_key: 'lawn_care', status: 'active', resume_on: '2026-12-10' }];
+    mockResumeHolds.mockImplementationOnce(async (ids, { today }) => {
+      for (const h of mockDb.store.plan_holds) if (ids.includes(String(h.customer_id)) && h.resume_on <= today) h.status = 'resumed';
+      return { reminded: 0, resumed: 1, skipsRecovered: 0, errors: [] };
+    });
+    const out = await runApply(book);
+    expect(mockResumeHolds).toHaveBeenCalledWith([String(CUSTOMER(1))], { today: '2026-12-10' });
+    expect(out).toMatchObject({ applied: 1, held: 0 });
+    expect(visits()[1].estimated_price).toBe('121.00');
+  });
+  test('with the cancel flow off, no hold is resumed early (the lifecycle cron owns it)', async () => {
+    const book = sentBook();
+    book.plan_holds = [{ id: 'hold-1', customer_id: CUSTOMER(1), family_key: 'lawn_care', status: 'active', resume_on: '2026-12-10' }];
+    const out = await runApply(book);
+    expect(mockResumeHolds).not.toHaveBeenCalled();
+    expect(out.holds.map((h) => h.reason)).toEqual(['plan_on_hold']);
+  });
   test('a hold that changes reason closes the earlier reason\'s bell and keeps the current one', async () => {
     const book = sentBook();
     book.plan_holds = [{ id: 'hold-1', customer_id: CUSTOMER(1), family_key: 'lawn_care', status: 'active', resume_on: '2026-12-20' }];
@@ -796,6 +854,29 @@ describe('applyDueRateChanges — per_application', () => {
     expect(out.holds).toEqual([]);
     expect(out.applied).toBe(1);
   });
+  test('the first visit the letter named is already under way or done at the old rate → hold, later visits not repriced', async () => {
+    const book = sentBook({ notice: { metadata: { ...fixture.noticeRow(1).metadata, first_visit_id: VISIT(101) } } });
+    book.scheduled_services[1].status = 'en_route';
+    const out = await runApply(book);
+    expect(out.holds.map((h) => h.reason)).toEqual(['effective_visit_started']);
+    expect(visits()[2].estimated_price).toBe('117.00');
+    expect(notices()[0].applied_at == null).toBe(true);
+  });
+  test('an add-on sold for the anchor visit only never reaches a later spawn: the template still spawns flat → applied', async () => {
+    const book = sentBook();
+    book.scheduled_service_addons = [{ id: 'ad-1', scheduled_service_id: VISIT(100), estimated_price: '20.00', recurring_pattern: 'one_time' }];
+    const out = await runApply(book);
+    expect(out).toMatchObject({ applied: 1, held: 0 });
+  });
+  test('a recurring add-on on the series parent lands on some spawns and not others → hold, whatever a discount offsets', async () => {
+    const book = sentBook();
+    book.scheduled_service_addons = [{ id: 'ad-1', scheduled_service_id: VISIT(100), estimated_price: '20.00', recurring_pattern: 'quarterly' }];
+    book.scheduled_services[0].discount_type = 'fixed';
+    book.scheduled_services[0].discount_amount = 20;
+    const out = await runApply(book);
+    expect(out.holds.map((h) => h.reason)).toEqual(['series_template_complex']);
+    expect(visits()[1].estimated_price).toBe('117.00');
+  });
   test('a series template that would not spawn later visits at the noticed amount (parent discount) → hold', async () => {
     const book = sentBook();
     book.scheduled_services[0].discount_type = 'percent';
@@ -885,13 +966,34 @@ describe('applyDueRateChanges — monthly_membership', () => {
       notice: {
         billing_lane: 'monthly_membership', cadence_label: 'month', effective_date: '2027-01-01', noticed_current_cents: 3333, noticed_new_cents: 3633,
         current_amount_cents: 3333, new_amount_cents: 3633,
-        metadata: { source: 'rate_review', batch_key: BATCH_KEY, planned_send_date: TODAY, rate_unit: 'month', visits_per_year: 4, current_rate_source: source }, ...notice,
+        metadata: { source: 'rate_review', batch_key: BATCH_KEY, planned_send_date: TODAY, rate_unit: 'month', visits_per_year: 4, current_rate_source: source, series_root_id: VISIT(100) }, ...notice,
       },
     });
     book.customer_plan_rates = ledger || [{ id: 'cpr-1', customer_id: CUSTOMER(1), family_key: 'pest_control', monthly_rate: '33.33', source: 'estimate_accept' }];
     return book;
   }
   const JAN = new Date('2027-01-01T08:10:00Z');
+  test('a same-family plan re-accepted since the notice (new ledger provenance, same price) → plan_replaced, dues untouched', async () => {
+    const book = monthlyBook({
+      ledger: [{ id: 'cpr-1', customer_id: CUSTOMER(1), family_key: 'pest_control', monthly_rate: '33.33', source: 'estimate_accept', source_estimate_id: 'est-new' }],
+      notice: { metadata: { source: 'rate_review', rate_unit: 'month', current_rate_source: 'ledger_slice', series_root_id: VISIT(100), slice_estimates: ['pest_control:est-old'] } },
+    });
+    const out = await runApply(book, JAN);
+    expect(out.holds.map((h) => h.reason)).toEqual(['plan_replaced']);
+    expect(customer1().monthly_rate).toBe('33.33');
+    // the same provenance applies
+    const same = monthlyBook({
+      ledger: [{ id: 'cpr-1', customer_id: CUSTOMER(1), family_key: 'pest_control', monthly_rate: '33.33', source: 'estimate_accept', source_estimate_id: 'est-old' }],
+      notice: { metadata: { source: 'rate_review', rate_unit: 'month', current_rate_source: 'ledger_slice', series_root_id: VISIT(100), slice_estimates: ['pest_control:est-old'] } },
+    });
+    expect(await runApply(same, JAN)).toMatchObject({ applied: 1, held: 0 });
+  });
+  test('the noticed series was replaced by another of the same line → plan_replaced; a notice recording no plan fails closed', async () => {
+    const book = monthlyBook({ notice: { metadata: { source: 'rate_review', rate_unit: 'month', current_rate_source: 'ledger_slice', series_root_id: VISIT(999) } } });
+    expect((await runApply(book, JAN)).holds.map((h) => h.reason)).toEqual(['plan_replaced']);
+    const bare = monthlyBook({ notice: { metadata: { source: 'rate_review', rate_unit: 'month', current_rate_source: 'ledger_slice' } } });
+    expect((await runApply(bare, JAN)).holds.map((h) => h.reason)).toEqual(['notice_series_unrecorded']);
+  });
   test('moves the family slice and the dues scalar by the delta under source annual_review; nothing else is touched', async () => {
     const out = await runApply(monthlyBook(), JAN);
     expect(out).toMatchObject({ due: 1, applied: 1, held: 0 });
@@ -928,6 +1030,36 @@ describe('applyDueRateChanges — monthly_membership', () => {
     expect(mockDb.store.customer_plan_rates).toEqual([expect.objectContaining({ family_key: 'unattributed', monthly_rate: 36.33, source: 'annual_review' })]);
     expect(customer1().monthly_rate).toBe(36.33);
   });
+  test('priced off the scalar, then the ledger split it across lines before the apply (pest + lawn under the same total) → held, nothing written', async () => {
+    const book = monthlyBook({ source: 'monthly_rate', ledger: [
+      { id: 'cpr-1', customer_id: CUSTOMER(1), family_key: 'pest_control', monthly_rate: '20.00', source: 'estimate_accept' },
+      { id: 'cpr-2', customer_id: CUSTOMER(1), family_key: 'lawn_care', monthly_rate: '13.33', source: 'estimate_accept' },
+    ] });
+    const out = await runApply(book, JAN);
+    expect(out).toMatchObject({ applied: 0, held: 1 });
+    expect(out.holds.map((h) => h.reason)).toEqual(['rate_moved_since_notice']);
+    expect(mockDb.store.customer_plan_rates.map((r) => Number(r.monthly_rate))).toEqual([20, 13.33]);
+    expect(customer1().monthly_rate).toBe('33.33');
+  });
+  test('priced off the scalar, then the account stopped running exactly that one line (replaced by lawn, or a lawn line joined, ledger empty) → held, nothing written', async () => {
+    const replaced = monthlyBook({ source: 'monthly_rate', ledger: [] });
+    for (const v of replaced.scheduled_services) v._line = 'lawn_care';
+    let out = await runApply(replaced, JAN);
+    expect(out).toMatchObject({ applied: 0, held: 1 });
+    expect(out.holds.map((h) => h.reason)).toEqual(['rate_moved_since_notice']);
+    expect(customer1().monthly_rate).toBe('33.33');
+    const joined = monthlyBook({ source: 'monthly_rate', ledger: [] });
+    joined.scheduled_services.push({ ...joined.scheduled_services[joined.scheduled_services.length - 1], id: VISIT(900), recurring_parent_id: null, _line: 'lawn_care' });
+    out = await runApply(joined, JAN);
+    expect(out).toMatchObject({ applied: 0, held: 1 });
+    expect(customer1().monthly_rate).toBe('33.33');
+    expect(mockDb.store.customer_plan_rates).toEqual([]);
+  });
+  test('priced off the scalar and the family slice still carries the whole scalar → applied', async () => {
+    const out = await runApply(monthlyBook({ source: 'monthly_rate' }), JAN);
+    expect(out).toMatchObject({ applied: 1, held: 0 });
+    expect(customer1().monthly_rate).toBe(36.33);
+  });
   test('legacy account with an EMPTY ledger: the blind-scalar-writer reset seeds one unattributed slice equal to the new scalar', async () => {
     const book = monthlyBook({ source: 'monthly_rate', ledger: [] });
     const out = await runApply(book, JAN);
@@ -959,8 +1091,8 @@ describe('applyDueRateChanges — annual_prepay', () => {
     const book = sentBook({
       book: { snapshot: { billing_lane: 'annual_prepay', current_rate_source: 'prepay_term' }, customer: { billing_mode: 'annual_prepay' } },
       notice: {
-        billing_lane: 'annual_prepay', cadence_label: 'year', effective_date: '2027-05-15',
-        current_amount_cents: 46800, new_amount_cents: 48400, noticed_current_cents: 46800, noticed_new_cents: 48400,
+        billing_lane: 'annual_prepay', cadence_label: 'application', effective_date: '2027-05-15',
+        current_amount_cents: 11700, new_amount_cents: 12100, noticed_current_cents: 46800, noticed_new_cents: 48400,
         metadata: {
           source: 'rate_review', batch_key: BATCH_KEY, planned_send_date: TODAY, rate_unit: 'application', visits_per_year: 4, current_rate_source: 'prepay_term',
           term_id: TERM(1), term_end: '2027-05-14', coverage_visits: 4, current_term_amount_cents: 46800, next_term_amount_cents: 48400, per_application_current_cents: 11700, per_application_new_cents: 12100,
@@ -1134,7 +1266,7 @@ describe('scheduling races', () => {
     expect(mockDb.transaction).toHaveBeenCalled();
     const lockCall = mockDb.raw.mock.calls.find(([sql]) => /pg_advisory_xact_lock/.test(sql));
     expect(lockCall).toBeTruthy();
-    expect(lockCall[1]).toEqual(['rate-review-batch', BATCH_KEY]);
+    expect(lockCall[1]).toEqual([`rate_review_batch:${BATCH_KEY}`]);
     const fs = require('fs');
     const path = require('path');
     const migration = fs.readFileSync(path.join(__dirname, '../models/migrations/20260930230000_rate_review_apply.js'), 'utf8');
@@ -1176,15 +1308,37 @@ describe('retireDraftNotices and the rebuild guard', () => {
     mockDb.store.rate_review_snapshots.push(fixture.snapshotRow(4, { customer_id: CUSTOMER(1), status: 'approved', family_key: 'tree_shrub', notice_id: 'n-sending-4' }));
     mockDb.store.price_change_notices.push(fixture.noticeRow(4, { id: 'n-sending-4', customer_id: CUSTOMER(1), family_key: 'tree_shrub', status: 'sending', sent_at: null, email_sent: false, sms_sent: false, current_amount_cents: 6500, new_amount_cents: 7000, noticed_current_cents: 6500, noticed_new_cents: 7000 }));
     const out = await apply.retireDraftNotices(BATCH_KEY);
-    expect(out).toEqual({ ok: true, batchKey: BATCH_KEY, retired: 2, keptDelivered: 2 });
+    expect(out).toEqual({ ok: true, batchKey: BATCH_KEY, retired: 2, keptDelivered: 2, revoked: 2 });
     expect(notices().map((n) => n.id).sort()).toEqual(['n-sending-4', 'n-sent-2']);
     expect(snapshots().map((r) => [r.family_key, r.notice_id])).toEqual([['pest_control', null], ['mosquito', null], ['lawn_care', 'n-sent-2'], ['tree_shrub', 'n-sending-4']]);
+    // the retired rows' approval goes with their drafts; the delivered and in-flight rows keep theirs
+    expect(snapshots().map((r) => [r.family_key, r.status])).toEqual([['pest_control', 'green'], ['mosquito', 'green'], ['lawn_care', 'sent'], ['tree_shrub', 'approved']]);
+    expect(snapshots().filter((r) => r.status === 'green').every((r) => r.approved_at == null && r.approved_by == null)).toBe(true);
     expect(mockDb.log.some((e) => e[0] === 'forUpdate' && e[1] === 'price_change_notices')).toBe(true);
-    // and the batch can be scheduled again (the mosquito line has no visits in this book → held, not re-linked; the in-flight one stays linked)
+    // and once the owner approves again the batch can be scheduled again (the mosquito line has no visits in this book → held, not re-linked; the in-flight one stays linked)
+    for (const r of snapshots()) if (r.status === 'green') r.status = 'approved';
     const again = await apply.scheduleNoticeRows(BATCH_KEY, { plannedSendDate: TODAY, now: NOW });
     expect(again).toMatchObject({ created: 1, alreadyScheduled: 1 });
     expect(again.held.map((h) => [h.familyKey, h.reason])).toEqual([['mosquito', 'no_future_visit']]);
     expect(snapshots().find((r) => r.family_key === 'pest_control').notice_id).not.toBeNull();
+  });
+  test('retire → rebuild: retiring a scheduled batch\'s drafts returns its approved rows to green, so the rebuild is no longer refused', async () => {
+    const rateReview = require('../services/rate-review');
+    const book = pestBook();
+    book.rate_review_config = [];
+    await scheduleBook(book);
+    expect(await rateReview.buildBatch({ batchKey: BATCH_KEY, now: NOW })).toMatchObject({ ok: false, reason: 'batch_has_scheduled_rows' });
+    expect(await apply.retireDraftNotices(BATCH_KEY)).toMatchObject({ ok: true, retired: 1, revoked: 1 });
+    expect(snapshots()[0]).toMatchObject({ status: 'green', notice_id: null, approved_at: null, approved_by: null });
+    // an empty book from here: the rebuild runs to its write and replaces the undecided row
+    mockDb.rawHandlers.push([/WITH ov AS|AS first_visit|WITH te AS|WaveGuard Monthly/, () => ({ rows: [] })]);
+    const out = await rateReview.buildBatch({ batchKey: BATCH_KEY, now: NOW });
+    expect(out).toMatchObject({ ok: true, batchKey: BATCH_KEY });
+  });
+  test('retire with nothing scheduled still returns an approved-but-unscheduled row to green', async () => {
+    mockDb.reset(pestBook(1, { snapshot: { status: 'approved', approved_at: NOW, approved_by: 'tech-1' } }));
+    expect(await apply.retireDraftNotices(BATCH_KEY)).toEqual({ ok: true, batchKey: BATCH_KEY, retired: 0, keptDelivered: 0, revoked: 1 });
+    expect(snapshots()[0]).toMatchObject({ status: 'green', approved_at: null, approved_by: null });
   });
   test('gate off → retires nothing', async () => {
     process.env.GATE_RATE_REVIEW = 'false';
@@ -1202,10 +1356,13 @@ describe('retireDraftNotices and the rebuild guard', () => {
     const book = pestBook();
     book.rate_review_config = [];
     mockDb.reset(book);
+    // undecided when the ranking starts (an approved row is refused up
+    // front); the draft — and its approval — land during the ranking
+    mockDb.store.rate_review_snapshots[0].status = 'green';
     // an empty book: every ranking loader answers nothing, so the only
     // thing left to the write is the lock + the re-checked guards
     mockDb.rawHandlers.push([/WITH ov AS|AS first_visit|WITH te AS|WaveGuard Monthly/, () => ({ rows: [] })]);
-    mockDb.rawHandlers.push([/pg_advisory_xact_lock/, () => { mockDb.store.rate_review_snapshots[0].notice_id = 'n-landed-during-ranking'; return { rows: [] }; }]);
+    mockDb.rawHandlers.push([/pg_advisory_xact_lock/, () => { Object.assign(mockDb.store.rate_review_snapshots[0], { status: 'approved', notice_id: 'n-landed-during-ranking' }); return { rows: [] }; }]);
     const out = await rateReview.buildBatch({ batchKey: BATCH_KEY, now: NOW });
     expect(out).toEqual({ ok: false, reason: 'batch_has_scheduled_rows', batchKey: BATCH_KEY });
     // the refusal came from INSIDE the write (after the lock), and nothing was deleted or rewritten
@@ -1223,6 +1380,17 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
     mockDb.reset({ annual_prepay_terms: [term()] });
     expect(await renew(468)).toEqual({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484, chargedAmount: 468 });
     expect(await renew(484)).toBeNull();
+  });
+  test('the visit count behind the noticed per-application rate is enforced too: the same total over more visits is a conflict', async () => {
+    const notice = { id: 'n-visits', customer_id: CUSTOMER(1), billing_lane: 'annual_prepay', family_key: 'pest_control', applied_at: new Date('2027-02-01T08:00:00Z'), effective_date: '2027-05-15', metadata: JSON.stringify({ term_id: TERM(1), coverage_visits: 4 }) };
+    mockDb.reset({ annual_prepay_terms: [term()], price_change_notices: [notice] });
+    expect(await renew(484, { visitCount: 6 })).toEqual({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484, chargedAmount: 484, noticedVisits: 4, chargedVisits: 6 });
+    expect(await renew(484, { visitCount: 4 })).toBeNull();
+    // a caller that does not know the count is judged on the amount alone
+    expect(await renew(484)).toBeNull();
+    const err = apply.noticedRenewalAmountError({ termId: TERM(1), noticedAmount: 484, chargedAmount: 484, noticedVisits: 4, chargedVisits: 6 });
+    expect(err.noticedRenewalAmount).toMatchObject({ code: 'RENEWAL_AMOUNT_NOTICED', noticedVisits: 4, chargedVisits: 6 });
+    expect(err.noticedRenewalAmount.error).toContain('for 4 applications');
   });
   test('the predecessor is matched by coverage family and the new term\'s start — a pest notice never blocks a lawn prepay, nor a renewal a year away', async () => {
     mockDb.reset({ annual_prepay_terms: [term()] });
@@ -1274,7 +1442,7 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
     // no notice attribution yet → a named request does not match an unlabeled term
     expect(await renew(468)).toBeNull();
     // the apply recorded the notice for this term under the pest line → the pest renewal is guarded
-    mockDb.reset({ annual_prepay_terms: [unlabeled], price_change_notices: [fixture.noticeRow(1, { billing_lane: 'annual_prepay', family_key: 'pest_control', applied_at: new Date('2027-04-01T08:10:00Z'), metadata: { term_id: TERM(1) } })] });
+    mockDb.reset({ annual_prepay_terms: [unlabeled], price_change_notices: [fixture.noticeRow(1, { billing_lane: 'annual_prepay', family_key: 'pest_control', applied_at: new Date('2027-04-01T08:10:00Z'), effective_date: '2027-05-15', metadata: { term_id: TERM(1) } })] });
     expect(await renew(468)).toEqual({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484, chargedAmount: 468 });
     expect(await renew(300, { coverageServiceType: 'Lawn Care Program' })).toBeNull(); // another family's renewal is not blocked
   });
@@ -1312,7 +1480,7 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
     const collectedAmount = /const termPrepayAmount = Math\.round\(\(Number\(updatedInvoice\.total\) - collectedSetupShare\) \* 100\) \/ 100;/;
     for (const [route, amountRe] of [[draftRoute, draftAmount], [collectedRoute, collectedAmount]]) {
       expect(route).toMatch(amountRe);
-      const calls = [...route.matchAll(/const noticedInTrx = await noticedRenewalAmountConflictFor\(customer\.id, termPrepayAmount, \{ coverageServiceType, termStart, trx \}\);\s*if \(noticedInTrx && req\.body\?\.acknowledgeNoticedAmount !== true\) throw noticedRenewalAmountError\(noticedInTrx\);/g)];
+      const calls = [...route.matchAll(/const noticedInTrx = await noticedRenewalAmountConflictFor\(customer\.id, termPrepayAmount, \{ coverageServiceType, termStart, visitCount, trx \}\);\s*if \(noticedInTrx && req\.body\?\.acknowledgeNoticedAmount !== true\) throw noticedRenewalAmountError\(noticedInTrx\);/g)];
       expect(calls).toHaveLength(1);
       const at = calls[0].index;
       expect(route.slice(at).search(amountRe)).toBe(-1); // the amount is computed before the check
@@ -1322,7 +1490,7 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
       expect(route.slice(0, at)).toMatch(/await lockAndAssertNoAnnualPrepayOverlap\(/);
     }
     expect(src).toMatch(/if \(!require\('\.\.\/config\/feature-gates'\)\.rateReviewLive\(\)\) return null;/);
-    expect(src).toMatch(/noticedRenewalAmountConflict\(trx, \{ customerId, amount, coverageServiceType, termStart, today: etDateString\(\), lock: true \}\)/);
+    expect(src).toMatch(/noticedRenewalAmountConflict\(trx, \{ customerId, amount, coverageServiceType, termStart, visitCount, today: etDateString\(\), lock: true \}\)/);
     expect(src.match(/if \(err && err\.noticedRenewalAmount\) return res\.status\(409\)\.json\(err\.noticedRenewalAmount\);/g)).toHaveLength(2);
   });
   test('the invoice route that marks an invoice as annual prepay (POST /api/admin/invoices/:id/annual-prepay) is a renewal writer too: it consults the guard inside its transaction, under the annual-prepay lock, with the term amount, coverage and start, and 409s without the acknowledgement', () => {
@@ -1331,15 +1499,25 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
     const src = fs.readFileSync(path.join(__dirname, '../routes/admin-invoices.js'), 'utf8');
     const route = src.slice(src.indexOf("router.post('/:id/annual-prepay'"), src.indexOf("router.delete('/:id/annual-prepay'"));
     // an amount-only edit of its own term (coverage omitted) is judged on the coverage that term keeps, never as unlabeled
-    const call = route.indexOf('.noticedRenewalAmountConflict(trx, { customerId: termCustomerId, amount: resolvedAmount, coverageServiceType: resolvedServiceType === undefined ? (linkedTermForNotice?.coverage_service_type || null) : resolvedServiceType, termStart: start || dateOnly(linkedTermForNotice?.term_start) || null, today: etDateString(), lock: true, editingTermId: linkedTermForNotice?.id || null })');
+    expect(route).toContain('const noticeArgs = { customerId: termCustomerId, coverageServiceType: resolvedServiceType === undefined ? (linkedTermForNotice?.coverage_service_type || null) : resolvedServiceType, termStart: start || dateOnly(linkedTermForNotice?.term_start) || null, today: etDateString(), lock: true, editingTermId: linkedTermForNotice?.id || null, visitCount: resolvedVisitCount ?? null };');
+    const call = route.indexOf('.noticedRenewalAmountConflict(trx, { ...noticeArgs, amount: resolvedAmount })');
     expect(call).toBeGreaterThan(0);
+    // what the customer actually pays is judged too, FIRST (so the prompt and the override log name the real charge):
+    // the LOCKED invoice's total, whenever it differs from the term amount
+    expect(route).toMatch(/\.where\(\{ id: invoice\.id \}\)\.forUpdate\(\)\.first\('id', 'customer_id', 'total', 'line_items'\)/);
+    // gross of a paid deposit (a negative deposit_credit line): a $434 invoice + $50 deposit is a $484 coverage charge
+    expect(route).toMatch(/InvoiceService\._parseInvoiceLineItems\(lockedInvoiceRow\.line_items\)\s*\.filter\(\(li\) => li && li\.category === 'deposit_credit'\)/);
+    expect(route).toContain('const chargedTotal = Math.round((Number(lockedInvoiceRow.total) + depositCredit) * 100) / 100;');
+    const totalCall = route.indexOf('.noticedRenewalAmountConflict(trx, { ...noticeArgs, amount: chargedTotal })');
+    expect(totalCall).toBeGreaterThan(0);
+    expect(totalCall).toBeLessThan(call);
     // an edit of the invoice's own term keeps that term's dates (createTermForAnnualPrepay
     // preserves them when no start is sent), so the guard judges the preserved start, never today
     expect(route).toMatch(/const linkedTermForNotice = await trx\('annual_prepay_terms'\)\s*\.where\(\{ prepay_invoice_id: invoice\.id \}\)/);
     // after the per-customer annual-prepay advisory lock, before the term write
     expect(route.indexOf('pg_advisory_xact_lock')).toBeLessThan(call);
     expect(call).toBeLessThan(route.indexOf('AnnualPrepayRenewals.createTermForAnnualPrepay('));
-    expect(route.slice(Math.max(0, call - 900), call)).toMatch(/rateReviewLive\(\)/);
+    expect(route.slice(Math.max(0, call - 3000), call)).toMatch(/rateReviewLive\(\)/);
     expect(route).toMatch(/req\.body\?\.acknowledgeNoticedAmount !== true\) throw RateReviewApply\.noticedRenewalAmountError\(noticed\)/);
     expect(route).toMatch(/if \(err && err\.noticedRenewalAmount\) return res\.status\(409\)\.json\(err\.noticedRenewalAmount\);/);
   });
@@ -1360,6 +1538,20 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
     // never delivered → the customer was told nothing yet
     mockDb.reset({ annual_prepay_terms: [term({ next_term_prepay_amount: null })], price_change_notices: [pending({ status: 'draft', sent_at: null, email_sent: false, sms_sent: false })] });
     expect(await renew(468)).toBeNull();
+    // the term's dates were edited after delivery (extended through June 30) → a different renewal window: the apply
+    // holds that notice (renewal_window_changed), so it guards the July 1 renewal no more than it would be applied to it
+    mockDb.reset({ annual_prepay_terms: [term({ next_term_prepay_amount: null, term_end: '2027-06-30' })], price_change_notices: [pending()] });
+    expect(await renew(468, { termStart: '2027-07-01', today: '2027-06-30' })).toBeNull();
+  });
+  test('an APPLIED notice\'s frozen amount guards only the window it named: the term end moved since (the date editor keeps the amount) → it guards nothing', async () => {
+    const applied = fixture.noticeRow(1, {
+      billing_lane: 'annual_prepay', family_key: 'pest_control', applied_at: new Date('2027-04-15T07:10:00Z'), status: 'sent', sent_at: new Date('2027-03-01T15:00:00Z'), email_sent: true,
+      new_amount_cents: 48400, noticed_new_cents: 48400, effective_date: '2027-05-15', metadata: { term_id: TERM(1), next_term_amount_cents: 48400 },
+    });
+    mockDb.reset({ annual_prepay_terms: [term()], price_change_notices: [applied] });
+    expect(await renew(468)).toEqual({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484, chargedAmount: 468 });
+    mockDb.reset({ annual_prepay_terms: [term({ term_end: '2027-04-09' })], price_change_notices: [applied] });
+    expect(await renew(468, { termStart: '2027-04-10', today: '2027-04-09' })).toBeNull();
   });
   test('editing the successor term itself (the invoice route on its own term) is still guarded: that term is not a successor that settles the guard', async () => {
     const successor = { id: TERM(2), customer_id: CUSTOMER(1), status: 'payment_pending', prepay_amount: '484.00', coverage_service_type: 'Quarterly Pest Control', term_start: '2027-05-15', term_end: '2028-05-14', renewal_decision: null, next_term_prepay_amount: null, renewed_from_term_id: TERM(1) };

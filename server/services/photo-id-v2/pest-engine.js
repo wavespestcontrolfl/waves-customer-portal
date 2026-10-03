@@ -8,11 +8,15 @@
  * response shape, and the v1-column mapping). PR-2b wires this into
  * `server/routes/photo-id.js` behind `GATE_PHOTO_ID_V2`.
  *
- * Model calls (steps 1–3): Gemini candidates → Gemini verify (only when ≥1
- * catalog candidate) → OpenAI escalation (only when a trigger fires),
+ * Model calls: the customer app route asks for `ladder: 'gemini_only'`
+ * (owner 2026-10-01): Gemini candidates alone, OpenAI only when Gemini
+ * returns nothing (see `geminiOnly`). Every other caller, the full ladder
+ * (steps 1–3): Gemini candidates → Gemini verify
+ * (only when ≥1 catalog candidate) → OpenAI escalation (only when a trigger
+ * fires),
  * SEQUENTIAL, never parallel, no Claude leg — the same deliberate departure
  * from the Claude-fallback rule as `lawn-visit-assessment.js`
- * (`MODELS.TEXT_POLICIES.photoIdVision`, added by PR #4865 — this module
+ * (`MODELS.TEXT_POLICIES.photoIdPestV2` / `photoIdVision` — this module
  * reads it at call time so it builds and tests independently of whichever
  * lane lands first; an absent policy degrades every leg to `no_route`,
  * exactly like `dispatch()` already handles a missing route).
@@ -46,7 +50,16 @@ const {
 } = require('./pest-engine-prompts');
 
 const PROMPT_VERSION = 'photo-id-v2-pest-1';
-const MAX_OUTPUT_TOKENS = 2048;
+// Gemini 3.x Flash always thinks, and its reasoning shares this budget with
+// the JSON answer. At 2048 a customer's chinch bug photo came back cut off
+// (gemini_incomplete, 2026-10-01), so the read fell to OpenAI alone and
+// climbed to "a true bug". Same cap as the v1 engine's vision leg.
+const MAX_OUTPUT_TOKENS = 8192;
+// Gemini thinks at MEDIUM by default. On the same chinch bug photo
+// (2026-10-01) MEDIUM spent 5–7k reasoning tokens and ~30 s on the
+// candidates leg alone; LOW answered in ~2 s with the same top read. The
+// customer waits on every leg, and OpenAI escalation is the second look.
+const GEMINI_THINKING_LEVEL = 'LOW';
 const SITE_BASE_URL = 'https://www.wavespestcontrol.com/pest-identifier/';
 const PRETTY_SURE_MIN = 0.80;
 const HARMLESS_PRETTY_SURE_MIN = 0.70;
@@ -189,10 +202,46 @@ function clausesFor(entry) {
   return HAZARD_CLAUSES.filter(([, applies]) => applies(entry)).map(([key]) => key);
 }
 
+// The entries an unnamed answer's safety line is triaged for: the catalog
+// species the models named under the answered node, plus each one's catalog
+// look-alikes. Owner 2026-10-01: a "true bug" climb from a chinch bug read
+// told the customer to call 911 because kissing and wheel bugs share the
+// group; a sibling no model named and the catalog never pairs with the read
+// does not set the warning. Any supporting read that is not a catalog entry
+// (an off-catalog name) could be anything under the node, so the node's
+// whole membership applies, as it does when nothing supports the node.
+// Look-alike pairs are authored one way (little fire ant lists pharaoh ant,
+// not the reverse), so the triage reads both directions.
+const LOOK_ALIKES_EITHER_WAY = (() => {
+  const edges = new Map();
+  const link = (a, b) => {
+    if (!edges.has(a)) edges.set(a, new Set());
+    edges.get(a).add(b);
+  };
+  for (const entry of catalog.listEntries()) {
+    for (const la of entry.look_alikes || []) {
+      link(entry.slug, la.slug);
+      link(la.slug, entry.slug);
+    }
+  }
+  return edges;
+})();
+
+function safetyMembersFor(nodeId, supporting = []) {
+  const all = NODE_MEMBERS.get(nodeId) || [];
+  if (!supporting.length || supporting.some((c) => !c.entry)) return all;
+  const slugs = new Set();
+  for (const c of supporting) {
+    slugs.add(c.entry.slug);
+    for (const slug of LOOK_ALIKES_EITHER_WAY.get(c.entry.slug) || []) slugs.add(slug);
+  }
+  return [...slugs].map((slug) => catalog.getEntry(slug)).filter(Boolean);
+}
+
 // An unknown answer (no node) could be anything, so it is triaged for the
 // whole catalog.
-function unnamedSafetyLineFor(nodeId) {
-  const members = nodeId ? (NODE_MEMBERS.get(nodeId) || []) : catalog.listEntries({ section: 'pest' });
+function unnamedSafetyLineFor(nodeId, supporting = []) {
+  const members = nodeId ? safetyMembersFor(nodeId, supporting) : catalog.listEntries({ section: 'pest' });
   const extra = new Set(members.flatMap(clausesFor));
   if (nodeId && !extra.size && !members.some(keepsDistance)) return null;
   return [
@@ -228,6 +277,22 @@ function derivedNodeCompatibility(nodeId) {
     serviceLabel: shared((e) => e.service?.label || null, null) || DEFAULT_GENERIC_COMPATIBILITY.serviceLabel,
     urgency: URGENCY_ORDER[Math.max(...members.map((e) => URGENCY_ORDER.indexOf(e.urgency)), 0)],
   };
+}
+
+// Owner 2026-10-01 ("lets just use Gemini for this"): the customer app's
+// Photo ID answers from Gemini's one read. No verify leg, no OpenAI second
+// opinion; OpenAI stands in only when Gemini returns nothing usable (outage,
+// cut-off reply), so a customer never gets an error for a Gemini miss.
+// Without a trait check the answer tops out at "Likely". That read uses the
+// app's own policy (photoIdPestV2) and ledger lane (pest_id_app); every other
+// caller (visit prep) keeps the full ladder on photoIdVision (Codex #5560 r3).
+// A missing policy is a `no_route` miss, never a silent swap (Codex r4).
+function photoIdPolicy(singleRead) {
+  return singleRead ? MODELS.TEXT_POLICIES?.photoIdPestV2 : MODELS.TEXT_POLICIES?.photoIdVision;
+}
+
+function geminiOnly(ladder) {
+  return ladder === 'gemini_only';
 }
 
 function escalateBelow() {
@@ -436,9 +501,17 @@ function candidateContextFor(candidates) {
 
 // ── model calls (sequential, no Claude leg) ────────────────────────────────
 
+// thinkingLevel is a Gemini 3.x setting; any other route (an override to
+// another provider or an older Gemini) never receives it (Codex #5560 r1).
+function supportsThinkingLevel(route) {
+  return route.provider === 'gemini' && /^gemini-3/.test(String(route.model));
+}
+
 async function callWithProvider(route, payload) {
   if (!route || !route.provider || !route.model) return { ok: false, reason: 'no_route', provider: route?.provider || null, model: route?.model || null };
-  const result = await dispatch(route, payload);
+  const { thinkingLevel, ...rest } = payload;
+  const sent = thinkingLevel && supportsThinkingLevel(route) ? { ...rest, thinkingLevel } : rest;
+  const result = await dispatch(route, sent);
   return { ...result, provider: route.provider, model: result.model || route.model };
 }
 
@@ -458,8 +531,8 @@ function totalBudgetMs() {
 // all" — the opposite of what an exhausted budget should mean).
 const MIN_LEG_TIMEOUT_MS = 1000;
 
-async function callCandidatesModel(images, catalogEntries, timeoutMs) {
-  const route = MODELS.TEXT_POLICIES?.photoIdVision?.primary;
+async function callCandidatesModel(images, catalogEntries, timeoutMs, singleRead = false) {
+  const route = photoIdPolicy(singleRead)?.primary;
   return callWithProvider(route, {
     system: buildCandidatesSystemPrompt(buildCatalogIndexText(catalogEntries)),
     text: `These ${images.length} photo(s) show the same subject from different angles. Identify it.`,
@@ -468,13 +541,14 @@ async function callCandidatesModel(images, catalogEntries, timeoutMs) {
     jsonSchema: CANDIDATES_SCHEMA,
     maxTokens: MAX_OUTPUT_TOKENS,
     timeoutMs,
-    laneId: 'photo_id_v2_candidates',
+    thinkingLevel: GEMINI_THINKING_LEVEL,
+    laneId: singleRead ? 'pest_id_app' : 'photo_id_v2_candidates',
     promptVersion: PROMPT_VERSION,
   });
 }
 
 async function callVerifyModel(images, candidateContext, timeoutMs) {
-  const route = MODELS.TEXT_POLICIES?.photoIdVision?.primary;
+  const route = photoIdPolicy(false)?.primary;
   return callWithProvider(route, {
     system: buildVerifySystemPrompt(candidateContext),
     text: 'Check each candidate above against these same photos.',
@@ -483,13 +557,14 @@ async function callVerifyModel(images, candidateContext, timeoutMs) {
     jsonSchema: VERIFY_SCHEMA,
     maxTokens: MAX_OUTPUT_TOKENS,
     timeoutMs,
+    thinkingLevel: GEMINI_THINKING_LEVEL,
     laneId: 'photo_id_v2_verify',
     promptVersion: PROMPT_VERSION,
   });
 }
 
-async function callEscalationModel(images, catalogEntries, candidateContext, timeoutMs) {
-  const route = MODELS.TEXT_POLICIES?.photoIdVision?.fallback;
+async function callEscalationModel(images, catalogEntries, candidateContext, timeoutMs, singleRead = false) {
+  const route = photoIdPolicy(singleRead)?.fallback;
   return callWithProvider(route, {
     system: buildEscalationSystemPrompt(buildCatalogIndexText(catalogEntries), candidateContext),
     text: `These ${images.length} photo(s) show the same subject from different angles. Identify it and check any candidates already raised.`,
@@ -498,7 +573,7 @@ async function callEscalationModel(images, catalogEntries, candidateContext, tim
     jsonSchema: ESCALATION_SCHEMA,
     maxTokens: MAX_OUTPUT_TOKENS,
     timeoutMs,
-    laneId: 'photo_id_v2_escalation',
+    laneId: singleRead ? 'pest_id_app' : 'photo_id_v2_escalation',
     promptVersion: PROMPT_VERSION,
   });
 }
@@ -1141,7 +1216,7 @@ function buildAnswer(ctx) {
     // to the team (or an inspection) instead of borrowing a group's.
     referral: referralFor(entry),
     genericCompatibility: entry ? { safety: {} } : derivedNodeCompatibility(nodeId),
-    genericSafetyLine: entry ? null : unnamedSafetyLineFor(nodeId),
+    genericSafetyLine: entry ? null : unnamedSafetyLineFor(nodeId, candidatesSupporting(candidates, level, nodeId)),
     tier,
     topEntrySlug: entry?.slug || null,
   };
@@ -1476,7 +1551,7 @@ function legInfo(result) {
  * `internal` (which models answered, escalation reasons) must never reach
  * the customer.
  */
-async function identifyPestV2(photos = []) {
+async function identifyPestV2(photos = [], { ladder = 'full' } = {}) {
   const images = toImages(photos);
   if (!images.length) return { ok: false, reason: 'no_photos' };
 
@@ -1487,7 +1562,8 @@ async function identifyPestV2(photos = []) {
   const deadline = Date.now() + totalBudgetMs();
   const legTimeoutMs = (legsRemaining) => Math.max(MIN_LEG_TIMEOUT_MS, Math.ceil((deadline - Date.now()) / legsRemaining));
 
-  const candidatesResult = await callCandidatesModel(images, catalogEntries, legTimeoutMs(3));
+  const singleRead = geminiOnly(ladder);
+  const candidatesResult = await callCandidatesModel(images, catalogEntries, legTimeoutMs(3), singleRead);
   // An `ok:true` response whose shape doesn't match what was requested is
   // treated the same as a failed leg — see `hasCandidatesArray`.
   const candidatesJson = validLegJson(candidatesResult, 'candidates');
@@ -1498,7 +1574,7 @@ async function identifyPestV2(photos = []) {
 
   let verifyResult = null;
   let verifiedCandidates = candidatesFromCall1;
-  if (catalogCandidates1.length) {
+  if (catalogCandidates1.length && !singleRead) {
     verifyResult = await callVerifyModel(images, candidateContextFor(catalogCandidates1), legTimeoutMs(2));
     verifiedCandidates = mergeVerify(candidatesFromCall1, verifyResult);
   }
@@ -1524,12 +1600,18 @@ async function identifyPestV2(photos = []) {
   const verifiedTop = dedupeCandidates(triggerCandidates.filter((c) => candidateNodeId(c)))[0] || null;
   const topConfidenceForTrigger = verifiedTop ? verifiedTop.confidence : 0;
 
-  const escalationReasons = [
+  // Gemini-only: a reply that names candidates but none that resolves to a
+  // catalog node of the kind the photo shows (malformed items, unknown
+  // slugs, a kind the read itself rules out) is a miss, not an unknown; a
+  // valid empty list is still a genuine unknown (Codex #5560 r3, r5 P2).
+  const rawCandidateCount = hasCandidatesArray(candidatesResult?.json) ? candidatesResult.json.candidates.length : 0;
+  const noUsableRead = !candidatesJson || (rawCandidateCount > 0 && !verifiedTop);
+  const escalationReasons = (singleRead ? [[noUsableRead, 'gemini_missed']] : [
     [geminiMissed, 'gemini_missed'],
     [contradicted, 'self_contradiction'],
     [lookAlikeClose, 'consequential_lookalike_close'],
     [topConfidenceForTrigger < escalateBelow(), 'low_confidence'],
-  ].filter(([applies]) => applies).map(([, reason]) => reason);
+  ]).filter(([applies]) => applies).map(([, reason]) => reason);
   const escalationTriggered = escalationReasons.length > 0;
 
   let finalCandidates = dedupeCandidates(verifiedCandidates);
@@ -1546,7 +1628,7 @@ async function identifyPestV2(photos = []) {
   let openaiStoodInAlone = false;
 
   if (escalationTriggered) {
-    escalationResult = await callEscalationModel(images, catalogEntries, candidateContextFor(catalogCandidates1), legTimeoutMs(1));
+    escalationResult = await callEscalationModel(images, catalogEntries, candidateContextFor(catalogCandidates1), legTimeoutMs(1), singleRead);
     escalationJson = validLegJson(escalationResult, 'escalation');
     escalationShows = (escalationJson || {}).shows;
     evidenceKind = normalizeEvidenceKind(candidatesShows, escalationShows);
@@ -1623,6 +1705,7 @@ async function identifyPestV2(photos = []) {
       verify: legInfo(verifyResult),
       escalation: legInfo(escalationResult),
     },
+    ladder: singleRead ? 'gemini_only' : 'full',
     escalation_triggered: escalationTriggered,
     escalation_reasons: escalationReasons,
     disagreed,

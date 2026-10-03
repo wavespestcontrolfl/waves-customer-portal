@@ -25,6 +25,7 @@ function providerOf(id) {
   if (id.startsWith('gpt') || id.startsWith('text-embedding') || /^o\d/.test(id)) return 'openai';
   if (id.startsWith('gemini') || id.startsWith('veo')) return 'gemini';
   if (id.startsWith('jev')) return 'typesafe';
+  if (id === 'clef' || id.startsWith('clef-')) return 'cloudflare';
   if (id === 'sonar' || id.startsWith('sonar')) return 'perplexity';
   return 'unknown';
 }
@@ -69,6 +70,7 @@ const SELECTORS = [
   // with one pinned catalog version, so the row is read-only here: moving it
   // is the env change below after a replay on the new pinned version.
   { key: 'TYPESAFE_JEV', env: 'MODEL_TYPESAFE_JEV', description: 'Typed decisions (TypeSafe Jev, pinned; dark behind GATE_TYPED_DECISIONS)', accepts: { providers: ['typesafe'], cap: 'decision' }, lock: { kind: 'provider', label: 'Provider-specific', detail: 'decision-only model; pin a new jev-N.N.N via MODEL_TYPESAFE_JEV after a replay, no picker discovery' } },
+  { key: 'CLOUDFLARE_CLEF', env: 'MODEL_CLOUDFLARE_CLEF', description: 'Typed decisions, second provider (Cloudflare Clef on Workers AI; dark behind GATE_TYPED_DECISIONS_CLEF)', accepts: { providers: ['cloudflare'], cap: 'decision' }, lock: { kind: 'provider', label: 'Provider-specific', detail: 'decision-only model; clef-flash or clef via MODEL_CLOUDFLARE_CLEF, no picker discovery' } },
   // deep: true — same rationale as NEWSLETTER above: its only call site
   // (plant-engine.js's runReferee, ROUTES.plantIdReferee) reaches the model
   // through llm/call.js#dispatch, which already floors max_tokens for
@@ -81,6 +83,11 @@ const SELECTORS = [
   // only call site (lawn-visit-referee.js, ROUTES.lawnAssessmentReferee) goes
   // through llm/call.js#dispatch and sends the visit's photos.
   { key: 'LAWN_ASSESSMENT_REFEREE', env: 'MODEL_LAWN_ASSESSMENT_REFEREE', description: 'Lawn visit assessment name referee (owner ruling 2026-09-29: Fable 5.1, effort high; dark behind GATE_LAWN_ASSESSMENT_REFEREE)', accepts: { providers: ['anthropic'], cap: 'vision', deep: true } },
+  // deep: true — its only call site (campaign-advisor.js, TEXT_POLICIES.adsAdvisor)
+  // goes through llm/call.js#dispatch, which floors max_tokens for always-thinking
+  // models and reads past thinking blocks; its default (Fable 5.1) is itself a
+  // requires:'deep' catalog model.
+  { key: 'ADS_ADVISOR', env: 'MODEL_ADS_ADVISOR', description: 'Daily Google Ads advisor (owner ruling 2026-10-01: Fable 5.1, effort high)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
   { key: 'SMS_SONNET', env: 'MODEL_SMS_SONNET', description: 'Every SMS draft route', accepts: { providers: ['anthropic'], cap: 'text' } },
   { key: 'CALL_EXTRACTION_ANTHROPIC', env: 'MODEL_CALL_EXTRACTION_ANTHROPIC', description: 'Call extraction Claude fallback leg', accepts: { providers: ['anthropic'], cap: 'text' }, lock: { kind: 'benchmark', label: 'Bake-off pinned', detail: 'fallback leg of the 25-call bake-off route; run a new bake-off to move it' } },
   { key: 'CALL_RESEARCH_ANTHROPIC', env: 'MODEL_CALL_RESEARCH_ANTHROPIC', description: 'Call-research miner Claude fallback leg', accepts: { providers: ['anthropic'], cap: 'text' }, lock: { kind: 'benchmark', label: 'Bake-off pinned', detail: 'fallback leg of the 7-arm bake-off route' } },
@@ -94,6 +101,8 @@ const SELECTORS = [
   { key: 'OPENAI_FAST', env: 'MODEL_OPENAI_FAST', description: 'Cheap structured classification (Luna)', accepts: { providers: ['openai'], cap: 'text' } },
   { key: 'OPENAI_SMS_DRAFT', env: 'MODEL_OPENAI_SMS_DRAFT', description: 'Sealed-eval Luna leg (follows OPENAI_FAST unless set)', derivesFrom: 'OPENAI_FAST', accepts: { providers: ['openai'], cap: 'text' }, lock: { kind: 'measurement', label: 'Measurement probe', detail: 'frozen exam leg; changing it invalidates the sealed-eval ranking' } },
   { key: 'GEMINI_VISION_BEST', env: 'MODEL_GEMINI_VISION', description: 'Gemini leg of the photo lanes', accepts: { providers: ['gemini'], cap: 'vision' } },
+  { key: 'GEMINI_PHOTO_ID_PEST', env: 'MODEL_GEMINI_PHOTO_ID_PEST', description: 'App Photo ID pest engine (Gemini-only, owner 2026-10-01)', accepts: { providers: ['gemini'], cap: 'vision' } },
+  { key: 'GEMINI_PHOTO_ID_PLANT', env: 'MODEL_GEMINI_PHOTO_ID_PLANT', description: 'App lawn + tree/shrub/palm Photo ID (Gemini-only, owner 2026-10-02)', accepts: { providers: ['gemini'], cap: 'vision' } },
   { key: 'GEMINI_VISION_FALLBACK', env: 'GEMINI_VISION_FALLBACK_MODEL', description: 'Gemini photo retry model', accepts: { providers: ['gemini'], cap: 'vision' } },
   { key: 'GEMINI_TEXT_BEST', env: 'MODEL_GEMINI_TEXT', description: 'Sealed-eval Gemini leg (measurement only)', accepts: { providers: ['gemini'], cap: 'text' }, lock: { kind: 'measurement', label: 'Measurement probe', detail: 'frozen exam leg; changing it invalidates the sealed-eval ranking' } },
   { key: 'OPENAI_EMBEDDING', env: 'MODEL_OPENAI_EMBEDDING', description: 'Knowledge embeddings (1536-dim)', accepts: { providers: ['openai'], cap: 'embedding' }, lock: { kind: 'migration', label: 'Requires re-embed', detail: 'changing it re-embeds the whole corpus' } },
@@ -123,12 +132,14 @@ const ROUTE_SELECTOR = {
   plantIdReferee: 'PLANT_ID_REFEREE',
   lawnAssessmentReferee: 'LAWN_ASSESSMENT_REFEREE',
   typedDecision: 'TYPESAFE_JEV',
+  typedDecisionClef: 'CLOUDFLARE_CLEF',
 };
 const POLICY_SELECTOR = {
   report: { primary: 'OPENAI_REPORT_WRITER', fallback: 'FLAGSHIP' },
   customerCopy: { primary: 'FLAGSHIP', fallback: 'OPENAI_BALANCED' },
   contentDraft: { primary: 'WORKHORSE', fallback: 'OPENAI_BALANCED' },
   highStakes: { primary: 'FLAGSHIP', fallback: 'OPENAI_REPORT_WRITER' },
+  adsAdvisor: { primary: 'ADS_ADVISOR', fallback: 'OPENAI_REPORT_WRITER' },
   fastStructured: { primary: 'OPENAI_FAST', fallback: 'FAST' },
   balancedAnswer: { primary: 'OPENAI_BALANCED', fallback: 'WORKHORSE' },
   askWaves: { primary: 'OPENAI_BALANCED', fallback: 'VOICE' },
@@ -137,6 +148,8 @@ const POLICY_SELECTOR = {
   photoCaptions: { primary: 'GEMINI_VISION_BEST', fallback: 'VISION' },
   lawnVisitAssessment: { primary: 'GEMINI_VISION_BEST', fallback: 'OPENAI_LAWN_ASSESSMENT' },
   photoIdVision: { primary: 'GEMINI_VISION_BEST', fallback: 'OPENAI_FRONTIER' },
+  photoIdPestV2: { primary: 'GEMINI_PHOTO_ID_PEST', fallback: 'OPENAI_FRONTIER' },
+  photoIdPlantV2: { primary: 'GEMINI_PHOTO_ID_PLANT', fallback: 'OPENAI_PLANT_ID' },
   plantIdVision: { primary: 'GEMINI_VISION_BEST', fallback: 'OPENAI_PLANT_ID' },
   visitBrief: { primary: 'WORKHORSE', fallback: 'OPENAI_BALANCED' },
   jobCardParagraph: { primary: 'OPENAI_FAST', fallback: 'FAST' },
@@ -335,6 +348,10 @@ const LANES = [
   L('email-operational-actions', 'Email operational extraction (asks + staff promises)', 'sms-operational-extractor.js', 'fastText', P('highStakes', 'primary'), P('highStakes', 'fallback'), { inbound: true }),
   L('sms_intent', 'SMS service-intent classification', 'sms-service-intent.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('review_topic', 'Day-0 review-ask topic classification', 'review-ask-topic.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
+  L('visit_voice_facts', 'Fast Complete voice fill (where treated, pests named)', 'visit-voice-facts.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true, note: 'GATE_FAST_COMPLETE_REPORT, dark' }),
+  L('visit_lane_facts', 'Lane voice fill (a specialty visit\'s places and findings)', 'visit-lane-facts.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true, note: 'GATE_LANE_VOICE_FILL, dark' }),
+  L('visit_typed_facts', 'Typed voice fill (a typed visit\'s findings)', 'visit-typed-facts.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true, note: 'GATE_TYPED_VOICE_FILL, dark' }),
+  L('review_ask_fact_check', 'Tech-voice review text fact check', 'review-ask-drafter.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('sms_service_identity', 'SMS draft · which job the open times are for', 'sms-shadow-drafter.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true, note: 'GATE_SMS_REAL_ANSWERS only' }),
   L('call_sentiment', 'Call sentiment', 'call-sentiment.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('ask_waves_emergency_check', 'Ask Waves · emergency second opinion', 'ask-waves-intake.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
@@ -369,6 +386,9 @@ const LANES = [
   // TEXT_POLICIES.photoIdVision): identifyPest's analyzePhoto tries Gemini,
   // then the prior Gemini, and reaches ChatGPT's best vision model when both
   // miss OR Gemini is unsure / lists a runner-up of different risk. No Claude.
+  // Customer app Photo ID (owner 2026-10-01, TEXT_POLICIES.photoIdPestV2):
+  // one Gemini read answers; OpenAI only when Gemini returns nothing usable.
+  L('pest_id_app', 'Pest identification (customer app Photo ID)', 'photo-id-v2/pest-engine.js, routes/photo-id.js', 'multimodal', P('photoIdPestV2', 'primary'), P('photoIdPestV2', 'fallback'), { inbound: true, note: 'Gemini-only (owner 2026-10-01); OpenAI stands in on a Gemini miss' }),
   L('pest_id', 'Pest identification (customer photo)', 'pest-identification.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('GEMINI_VISION_FALLBACK'), { skipsEqualLeg: true, inbound: true, retry: P('photoIdVision', 'fallback'), note: `Gemini-first (owner 2026-09-26); OpenAI takes a second look when Gemini misses, scores itself under PHOTO_ID_ESCALATE_BELOW, or lists a runner-up of different risk · ${SHARED_GEMINI_PIN}` }),
   // Sequential ladder, same shape as pest_id above (owner ruling 2026-09-28,
   // TEXT_POLICIES.plantIdVision): identifyPlantV2 tries Gemini, then reaches
@@ -376,6 +396,10 @@ const LANES = [
   // low, or disagrees. L3 only — no route wires it in yet (Codex #5307 r7
   // finding 3: this lane previously had zero entries, so the switchboard
   // showed zero blast radius for both PLANT_ID_VISION legs).
+  // Customer app lawn + tree/shrub/palm Photo ID (owner 2026-10-02,
+  // TEXT_POLICIES.photoIdPlantV2): one Gemini read (Call A + Call C) answers;
+  // OpenAI only when Gemini returns nothing usable. No verify, no referee.
+  L('plant_id_app', 'Plant/tree/shrub/palm photo ID (customer app)', 'photo-id-v2/plant-engine.js', 'multimodal', P('photoIdPlantV2', 'primary'), P('photoIdPlantV2', 'fallback'), { inbound: true, note: 'Gemini-only (owner 2026-10-02); OpenAI stands in on a Gemini miss' }),
   L('plant_id', 'Plant/tree/shrub/palm photo ID (lawn + tree/shrub/palm)', 'photo-id-v2/plant-engine.js, config/models.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), P('plantIdVision', 'fallback'), { inbound: true, note: `L3 only, no runtime caller yet; Gemini-first, Sol second opinion (owner ruling 2026-09-28) · ${SHARED_GEMINI_PIN}` }),
   // The gated tie-break referee (owner ruling 2026-09-29, narrowed from
   // 09-28): identify mode only, and only for an identity lane where Gemini
@@ -387,6 +411,7 @@ const LANES = [
   // not a fan-out: Gemini live, then the prior Gemini model, then Claude
   // VISION only when both Gemini rungs miss.
   L('typed_decisions', 'Typed yes/no/choice decisions (shadow)', 'typed-decisions/jev.js', 'fastText', R('typedDecision'), null, { inbound: true, note: 'GATE_TYPED_DECISIONS dark' }),
+  L('typed_decisions_clef', 'Typed decisions, second provider (shadow)', 'typed-decisions/jev.js', 'fastText', R('typedDecisionClef'), null, { inbound: true, note: 'GATE_TYPED_DECISIONS_CLEF dark' }),
   L('lawn_assess', 'Lawn assessment (customer photo)', 'lawn-assessment.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('GEMINI_VISION_FALLBACK'), { skipsEqualLeg: true, inbound: true, retry: T('VISION'), note: `Gemini-only (owner 2026-09-24); Claude is a fallback only when Gemini returns nothing · ${SHARED_GEMINI_PIN}` }),
   L('lawn_visit_assessment', 'Lawn visit assessment', 'lawn-visit-assessment.js', 'multimodal', P('lawnVisitAssessment', 'primary'), P('lawnVisitAssessment', 'fallback'), { inbound: true, note: 'All visit photos in one chain; GATE_LAWN_VISIT_ASSESSMENT; technician review before publication' }),
   // The gated name tie-break (owner ruling 2026-09-29): Sol re-reads an unsure
@@ -429,6 +454,7 @@ const LANES = [
   L('sms_draft', 'SMS auto-reply draft (routine)', 'sms-shadow-drafter.js', 'voice', R('smsDraftDefault'), P('highStakes', 'fallback'), { inbound: true }),
   L('sms_save_sale', 'SMS draft · save-the-sale', 'sms-shadow-drafter.js', 'voice', R('smsDraftSaveSale'), P('highStakes', 'fallback'), { inbound: true }),
   L('sms_tone', 'SMS tone rewrite', 'routes/admin-communications.js', 'voice', R('smsToneRewrite'), P('customerCopy', 'fallback'), { inbound: true }),
+  L('sms_translation', 'SMS test answers in the customer\'s language', 'sms-translation.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback'), { inbound: true, note: 'GATE_SMS_ANY_LANGUAGE_TRIAL only; never sends' }),
   L('sms_suggest', 'SMS draft suggestion (comms panel)', 'routes/admin-communications.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback'), { inbound: true }),
   // response-drafter.js picks the policy per intent: cancellations, complaints
   // and high-severity flags ride highStakes; everything else rides customerCopy.
@@ -452,7 +478,7 @@ const LANES = [
   L('newsletter', 'Newsletter drafts + autopilot rerank', 'newsletter-draft.js, newsletter-autopilot.js, routes/admin-newsletter.js', 'voice', P('newsletterWriter', 'primary'), P('newsletterWriter', 'fallback'), { note: 'owner ruling 2026-09-27: Opus 5.5 effort max; the admin Compose UI overrides effort to high per-call so an interactive draft cannot hang the request' }),
   L('content_misc', 'Content ideas, scheduler copy, automation emails', 'routes/admin-content-v2.js, content-scheduler.js, routes/admin-automations.js', 'voice', P('contentDraft', 'primary'), P('contentDraft', 'fallback')),
   L('previsit_brief', 'Pre-visit brief', 'previsit-brief.js', 'voice', P('visitBrief', 'primary'), P('visitBrief', 'fallback')),
-  L('job_card_paragraph', 'Job card customer paragraph', 'job-card.js', 'voice', P('jobCardParagraph', 'primary'), P('jobCardParagraph', 'fallback'), { note: 'GATE_JOB_CARD, dark' }),
+  L('job_card_paragraph', 'Job card customer paragraph', 'job-card.js', 'voice', P('jobCardParagraph', 'primary'), P('jobCardParagraph', 'fallback'), { note: 'GATE_JOB_CARD_LLM, dark' }),
   // Inbound Sandy calls resolve their own env chain — VOICE_RELAY_INBOUND_MODEL
   // (pinned once per session at conversation construction), else the shared
   // VOICE_RELAY_MODEL, else the VOICE tier. Collections reads VOICE_RELAY_MODEL
@@ -488,7 +514,7 @@ const LANES = [
   L('link_investigator', 'Internal-link path investigation', 'seo/link-path-investigator.js', 'qa', T('WORKHORSE')),
   L('internal_link_judge', 'Internal-link reader check before auto-merge', 'content/internal-link-judge.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback')),
   L('seo_advisor', 'SEO weekly advisor + action drafts', 'seo/seo-advisor.js, seo/seo-action-generator.js', 'qa', P('highStakes', 'primary'), P('highStakes', 'fallback')),
-  L('ads_advisor', 'Ads campaign advisor (daily)', 'ads/campaign-advisor.js', 'qa', P('highStakes', 'primary'), P('highStakes', 'fallback')),
+  L('ads_advisor', 'Ads campaign advisor (daily)', 'ads/campaign-advisor.js', 'qa', P('adsAdvisor', 'primary'), P('adsAdvisor', 'fallback')),
   L('chart_builder_image', 'AI chart builder · image intent read', 'ai-chart-builder.js', 'qa', T('GEMINI_VISION_BEST'), T('FLAGSHIP'), { note: 'image-backed charts only; stage 1 of 2' }),
   L('chart_builder_sql', 'AI chart builder · SQL + chart spec', 'ai-chart-builder.js', 'qa', P('highStakes', 'primary'), P('highStakes', 'fallback'), { note: 'every chart; stage 2' }),
 
@@ -601,6 +627,7 @@ const LANE_AREA = {
   'email-operational-actions': 'email',
   sms_intent: 'sms',
   sms_service_identity: 'sms',
+  sms_translation: 'sms',
   contact_correction: 'sms',
   sms_pathology: 'sms',
   sms_verifier: 'sms',
@@ -619,6 +646,7 @@ const LANE_AREA = {
   // Shadow typed decisions ride the nightly call self-audit (and inbound texts
   // in PR 2); one area per lane, so it sits with the audit it is scored against.
   typed_decisions: 'calls',
+  typed_decisions_clef: 'calls',
   lead_synopsis: 'calls',
   call_commitments: 'calls',
   csr_coach: 'calls',
@@ -630,7 +658,9 @@ const LANE_AREA = {
   voice_relay_collections: 'voice',
   voice_relay_judge: 'voice',
   pest_id: 'photos',
+  pest_id_app: 'photos',
   plant_id: 'photos',
+  plant_id_app: 'photos',
   plant_id_referee: 'photos',
   lawn_assessment_referee: 'photos',
   lawn_assess: 'photos',
@@ -667,6 +697,9 @@ const LANE_AREA = {
   lawn_visit_narratives: 'reports',
   previsit_brief: 'reports',
   job_card_paragraph: 'reports',
+  visit_voice_facts: 'reports',
+  visit_lane_facts: 'reports',
+  visit_typed_facts: 'reports',
   invoice_summary: 'reports',
   wdo_appt_brief: 'reports',
   email_classify: 'email',
@@ -683,6 +716,7 @@ const LANE_AREA = {
   review_ask: 'content',
   review_reply: 'content',
   review_topic: 'content',
+  review_ask_fact_check: 'content',
   hero_alt: 'content',
   image_screen: 'content',
   editorial_review: 'content',
@@ -754,6 +788,7 @@ const LANE_DESCRIBE = {
   'email-operational-actions': 'Captures customer asks and staff promises from email',
   sms_intent: 'Works out what an inbound text is asking for',
   sms_service_identity: 'Picks which visit or service a reply\'s open times are for',
+  sms_translation: 'Translates a foreign-language text and a test answer to it (never sent)',
   contact_correction: 'Pulls corrected names, emails and addresses out of texts',
   sms_pathology: 'Groups failed drafts by what went wrong',
   sms_verifier: 'Fact-checks a draft before it can send',
@@ -780,9 +815,12 @@ const LANE_DESCRIBE = {
   voice_relay_collections: 'Speaks with customers on collections calls',
   voice_relay_judge: 'Grades Sandy\'s eval calls against each scenario\'s spec',
   pest_id: 'Identifies the pest in a customer photo',
+  pest_id_app: "Identifies the pest in a photo a customer takes in the app's Photo ID",
   plant_id: 'Identifies the grass, weed, shrub or palm in a customer photo, and what may be wrong with it',
+  plant_id_app: "Identifies the grass, weed, shrub or palm in a photo a customer takes in the app's Photo ID, and what may be wrong with it",
   plant_id_referee: 'Breaks a tie when the two photo models name different plants (dark)',
   typed_decisions: 'Answers fixed yes/no questions about a call or text, recorded for review only (dark)',
+  typed_decisions_clef: 'The same fixed questions put to a second provider (Cloudflare Clef) for comparison, recorded for review only (dark)',
   lawn_assessment_referee: 'Breaks a tie when the two photo models name a different grass or lawn problem (dark)',
   lawn_assess: 'Assesses lawn health from a customer photo',
   lawn_visit_assessment: 'Assesses all lawn visit photos for technician review',
@@ -818,6 +856,9 @@ const LANE_DESCRIBE = {
   lawn_visit_narratives: 'Writes lawn and visit summaries',
   previsit_brief: 'Briefs the tech before a visit',
   job_card_paragraph: 'Writes the job card\'s customer paragraph',
+  visit_voice_facts: 'Reads where the technician treated and the pests they named from their visit note',
+  visit_lane_facts: 'Reads a specialty visit\'s places and findings from the technician\'s visit note',
+  visit_typed_facts: 'Reads a typed visit\'s findings from the technician\'s visit note',
   invoice_summary: 'Summarises an invoice in plain words',
   wdo_appt_brief: 'Briefs a WDO appointment',
   email_classify: 'Sorts inbound email',
@@ -834,6 +875,7 @@ const LANE_DESCRIBE = {
   review_ask: 'Writes the review request',
   review_reply: 'Replies to Google reviews',
   review_topic: 'Finds the topic a customer raised before the Day-0 review ask',
+  review_ask_fact_check: 'Checks every sentence of a tech-voice review text against the customer record (GATE_REVIEW_ASK_TECH_VOICE)',
   hero_alt: 'Writes alt text for hero images',
   image_screen: 'Screens a generated blog image for a wrong text mark, logo, uniform badge or van wrap',
   editorial_review: 'Audits complete article evidence and editorial quality',

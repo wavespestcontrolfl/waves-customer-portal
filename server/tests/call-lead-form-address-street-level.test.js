@@ -636,8 +636,12 @@ describe('r8 fixes: hold survives reprocess, no follow-up child, bell format, fo
     const w = read('../routes/lead-webhook.js');
     const triage = w.slice(w.indexOf('if (triageResult.extractedData) {'));
     const block = triage.slice(0, triage.indexOf('if (Object.keys(updates).length > 0)'));
-    expect(block).toContain("'stage', COALESCE(extracted_data, '{}'::jsonb)->'stage'");
-    expect(block).toContain("'address', COALESCE(extracted_data, '{}'::jsonb)->'address'");
+    // The replace SQL lives in TRIAGE_REPLACE_EXTRACTED_SQL (run against
+    // Postgres in lead-webhook-triage-carry-forward.test.js).
+    expect(block).toContain('db.raw(TRIAGE_REPLACE_EXTRACTED_SQL, ');
+    const sql = require('../routes/lead-webhook')._test.TRIAGE_REPLACE_EXTRACTED_SQL;
+    expect(sql).toContain("'stage', COALESCE(extracted_data, '{}'::jsonb)->'stage'");
+    expect(sql).toContain("'address', COALESCE(extracted_data, '{}'::jsonb)->'address'");
   });
 
   test('gate off / any other pending row: the pending branches are scoped to street-level holds, so a reused legacy or voice-agent row keeps its exact prior behavior', () => {
@@ -738,7 +742,9 @@ describe('r8 fixes: hold survives reprocess, no follow-up child, bell format, fo
     expect(lock).toBeGreaterThan(0);
     expect(recheck).toBeGreaterThan(proc.indexOf('await lockTriageCall(trx, call.id);', lock));
     expect(write).toBeGreaterThan(recheck);
-    expect(proc).toContain("bridgeNeedsConfirmation\n        .filter((r) => r !== 'street_level_address_review' || streetLevelStillHeld).length;");
+    // The street-level reason is still filtered by the lock-time recheck (the
+    // owed-first-name reason rides the same filter since #5559).
+    expect(proc).toContain("bridgeNeedsConfirmation\n        .filter((r) => (r !== 'street_level_address_review' || streetLevelStillHeld)");
     // Every other reason still opens review as before.
     expect(proc).not.toContain('...(bridgeNeedsConfirmation.length || schedulingChangeHeld ||');
   });

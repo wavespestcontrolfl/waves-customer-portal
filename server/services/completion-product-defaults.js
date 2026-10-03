@@ -20,13 +20,10 @@
  * `completionApplicationMethod`, which this resolver hands back per
  * product so the seed can override the catalog's own inferred method.
  *
- * `completionDefaultProducts` is a PLAIN ARRAY OF CATALOG NAME STRINGS,
- * nothing else (pre-push audit P2, PR #5049 r1: a seasonal-window shape
- * with per-entry rate/typicalGallons/zone objects was built ahead of any
- * visit using it — an unexercised config contract, which AGENTS.md rules
- * out — and was removed; the rate the completion form prefills always
- * comes from the catalog row's own label default, exactly like a manual
- * "add product" tap). PEST is NOT curated here either (owner ruling
+ * `completionDefaultProducts` contains catalog names. T&S entries also
+ * carry a treeShrubKey for due-history and dose-selection rules; they
+ * never prescribe a quantity. Other services use the catalog's defaults
+ * exactly like a manual "add product" tap. PEST is NOT curated here (owner ruling
  * 2026-09-27): the general recurring/one-time pest visit keeps its
  * existing house mix on the client — lib/pest-default-mix.js (Taurus SC +
  * Atticus Talak 7.9 F + LESCO 90/10 Nonionic Surfactant, fixed totals). A
@@ -94,21 +91,22 @@
  */
 
 const { matchServiceProtocol, MATCH_RULES } = require('./protocol-matcher');
+const { gateEnvValue } = require('../config/feature-gates');
+const { filterTreeShrubDefaults } = require('./tree-shrub-completion-defaults');
 
 // -- name parsing / dedupe (pure) --------------------------------------
 
-// Case-insensitive dedupe that preserves first-seen order and casing —
-// order matters (it is display order on the completion form).
-function dedupeNames(names) {
+// Preserve order and the T&S identity needed by history/dose checks.
+function dedupeEntries(rawEntries) {
   const seen = new Set();
   const out = [];
-  for (const raw of names || []) {
-    const name = String(raw || '').trim();
+  for (const raw of rawEntries || []) {
+    const name = String(typeof raw === 'string' ? raw : raw?.name || '').trim();
     if (!name) continue;
     const key = name.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push(name);
+    out.push({ name, ...(raw?.treeShrubKey ? { treeShrubKey: String(raw.treeShrubKey) } : {}) });
   }
   return out;
 }
@@ -128,16 +126,22 @@ function nameTokens(value) {
 // name is a token of the candidate's own name), tightest candidate wins.
 // Never returns a guess: an anchor-less or ambiguous name returns null and
 // the caller reports it unresolved.
-function resolveCatalogProductForName(name, catalogRows = []) {
+function resolveCatalogProductForName(name, catalogRows = [], { exactOnly = false } = {}) {
   const target = normalizeName(name);
   if (!target || !Array.isArray(catalogRows) || !catalogRows.length) return null;
 
-  const exact = catalogRows.find((row) => normalizeName(row.name) === target);
-  if (exact) return exact;
+  if (exactOnly) {
+    const matches = catalogRows.filter(row => normalizeName(row.name) === target ||
+      (row.aliases || []).some(alias => normalizeName(alias) === target));
+    return matches.length === 1 ? matches[0] : null;
+  }
 
-  const aliasHit = catalogRows.find((row) => (row.aliases || [])
+  const exact = catalogRows.filter((row) => normalizeName(row.name) === target);
+  if (exact.length) return exact.length === 1 ? exact[0] : null;
+
+  const aliasHits = catalogRows.filter((row) => (row.aliases || [])
     .some((alias) => normalizeName(alias) === target));
-  if (aliasHit) return aliasHit;
+  if (aliasHits.length) return aliasHits.length === 1 ? aliasHits[0] : null;
 
   const targetTokens = nameTokens(name);
   if (!targetTokens.length) return null;
@@ -153,6 +157,7 @@ function resolveCatalogProductForName(name, catalogRows = []) {
   // Prefer the tightest superset (fewest extra tokens) so a short legacy
   // name doesn't grab an unrelated longer product sharing one word.
   candidates.sort((a, b) => a.tokens.size - b.tokens.size);
+  if (candidates[1]?.tokens.size === candidates[0].tokens.size) return null;
   return candidates[0].row;
 }
 
@@ -162,7 +167,7 @@ function resolveCatalogProductForName(name, catalogRows = []) {
 // visit's own record of how it's actually applied there (scope +
 // completionApplicationMethod) — a name can appear in more than one
 // line's hints (rare), so the FIRST line naming it wins, matching
-// dedupeNames' own first-seen rule.
+// dedupeEntries' own first-seen rule.
 function completionApplicationMethodForName(visit, name) {
   const lineMeta = visit?.lineMeta;
   if (!lineMeta || typeof lineMeta !== 'object') return null;
@@ -246,20 +251,21 @@ function resolveCompletionDefaultProductNames({
   // (lawn-completion-defaults.js) — this resolver must never seed a
   // second, conflicting product list for it.
   if (programKey === 'lawn') {
-    return { programKey, matchedVisit, source: 'excluded_lawn', names: [], methodsByName: {} };
+    return { programKey, matchedVisit, source: 'excluded_lawn', entries: [], names: [], methodsByName: {} };
   }
 
-  const protocolNames = dedupeNames(visit?.completionDefaultProducts);
+  const entries = dedupeEntries(visit?.completionDefaultProducts);
+  const protocolNames = entries.map(entry => entry.name);
   if (protocolNames.length) {
     const methodsByName = {};
     for (const name of protocolNames) {
       const method = completionApplicationMethodForName(visit, name);
       if (method) methodsByName[name.toLowerCase()] = method;
     }
-    return { programKey, matchedVisit, source: 'protocol_visit', names: protocolNames, methodsByName };
+    return { programKey, matchedVisit, source: 'protocol_visit', entries, names: protocolNames, methodsByName };
   }
 
-  return { programKey, matchedVisit, source: 'none', names: [], methodsByName: {} };
+  return { programKey, matchedVisit, source: 'none', entries: [], names: [], methodsByName: {} };
 }
 
 // -- line shaping --------------------------------------------------------
@@ -366,15 +372,12 @@ async function resolveCompletionProductDefaults({ db, serviceId, protocols } = {
     const scheduled = await db('scheduled_services')
       .where({ id: serviceId })
       .first(
-        'id', 'customer_id', 'service_id', 'service_type', 'service_key_snapshot',
+        'id', 'customer_id', 'property_id', 'service_id', 'service_type', 'service_key_snapshot',
         'scheduled_date', 'followup_source_service_id',
       );
     if (!scheduled) return empty;
 
-    // Month only matters for month-keyed programs (lawn, tree & shrub) —
-    // neither carries completionDefaultProducts today, but resolve it
-    // correctly anyway so this stays generically right as the owner adds
-    // more visits.
+    // Month selects the visit in month-keyed programs such as T&S.
     const month = monthFromDateColumn(scheduled.scheduled_date);
 
     const resolved = resolveCompletionDefaultProductNames({
@@ -390,25 +393,45 @@ async function resolveCompletionProductDefaults({ db, serviceId, protocols } = {
       isFollowup: !!scheduled.followup_source_service_id,
     });
 
-    if (!resolved.names.length) {
+    let holds = [];
+    if (resolved.programKey === 'tree_shrub' && !gateEnvValue('GATE_TREE_SHRUB_FIELD_GUIDE')) {
+      // Gate dark: the new protocol-visit entries stay hidden, and every other
+      // source keeps main's pre-#5089 behavior unchanged.
+      if (resolved.source === 'protocol_visit') return { ...empty, programKey: 'tree_shrub' };
+    } else if (resolved.programKey === 'tree_shrub') {
+      // Legacy service defaults are not reviewed T&S treatment choices.
+      if (resolved.source !== 'protocol_visit') return { ...empty, programKey: 'tree_shrub' };
+      const applicable = await filterTreeShrubDefaults({ db, scheduled, entries: resolved.entries });
+      resolved.entries = applicable.entries;
+      holds = applicable.holds;
+    }
+
+    if (!resolved.entries.length) {
       return {
         serviceId, programKey: resolved.programKey, matchedVisit: resolved.matchedVisit,
-        source: resolved.source, products: [], unresolved: [],
+        source: resolved.source, products: [], unresolved: [], holds,
       };
     }
 
     const catalogRows = await loadActiveCatalogWithAliases(db);
     const products = [];
     const unresolved = [];
-    for (const name of resolved.names) {
-      const row = resolveCatalogProductForName(name, catalogRows);
-      if (!row) { unresolved.push(name); continue; }
-      products.push(shapeCompletionProductLine(row, resolved, name));
+    const seenProductIds = new Set();
+    for (const entry of resolved.entries) {
+      const row = resolveCatalogProductForName(entry.name, catalogRows, { exactOnly: Boolean(entry.treeShrubKey) });
+      if (!row) { unresolved.push(entry.name); continue; }
+      // Two entries resolving to the SAME catalog row show one line on the
+      // drawer, not two — first occurrence wins.
+      if (seenProductIds.has(row.id)) continue;
+      seenProductIds.add(row.id);
+      products.push({ ...shapeCompletionProductLine(row, resolved, entry.name),
+        ...(entry.treeShrubKey ? { treeShrubKey: entry.treeShrubKey, requiresDoseSelection: true } : {}),
+      });
     }
 
     return {
       serviceId, programKey: resolved.programKey, matchedVisit: resolved.matchedVisit,
-      source: resolved.source, products, unresolved,
+      source: resolved.source, products, unresolved, holds,
     };
   } catch (err) {
     return { ...empty, error: err?.message || 'completion_product_defaults_failed' };

@@ -68,6 +68,7 @@ const REASON_LABELS = {
   email_unverified: "Email spelled — read back",
   email_invalid: "Email couldn't be captured",
   secondary_contact_captured: "Second contact named — confirm",
+  missing_first_name: "First name missing — get it",
   property_role_confirm: "Property roles",
   reschedule_link_promise: "Promised reschedule link",
   attached_booking_followup_unbooked: "Follow-up visit not booked — book by hand",
@@ -97,10 +98,21 @@ function parsePayload(payload) {
 
 // A card's visit link must stay inside the admin app (navigation only — not an API call).
 const ADMIN_LINK_PATTERN = /^\/admin\//;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export function ConfirmEvidence({ payload }) {
+export function ConfirmEvidence({ payload, reasonCode = null, openCustomerIds = null }) {
   const p = parsePayload(payload);
   if (!p) return null;
+  // A missing-first-name task is owed on EVERY customer it lists (payload.customer_ids; a
+  // pre-list card's scalar customer_id is one), not the call's current link: a relink must
+  // not send the office to edit some other account.
+  // The server resolves each listed customer to the record to open (a merged-away one opens
+  // its survivor); older responses fall back to the ids on the card.
+  const firstNameCustomerIds = reasonCode === "missing_first_name"
+    ? [...new Set((Array.isArray(openCustomerIds) ? openCustomerIds
+      : Array.isArray(p.customer_ids) ? p.customer_ids : [p.customer_id])
+      .map((id) => String(id || "")).filter((id) => UUID_PATTERN.test(id)))]
+    : [];
   const emailCandidates = Array.isArray(p.email_candidates) ? p.email_candidates : [];
   const addressCandidates = Array.isArray(p.address_candidates) ? p.address_candidates : [];
   // secondary_contact arrives in the V2 nested shape (name_full / phone_e164)
@@ -122,6 +134,7 @@ export function ConfirmEvidence({ payload }) {
     ? p.secondary_contacts.slice(1).filter((c) => c && typeof c === "object")
     : [];
   const rows = [
+    firstNameCustomerIds.length > 0 && { label: "Add first name on", value: firstNameCustomerIds.length > 1 ? "the customers linked to this task" : "the customer linked to this task" },
     scValue && { label: "Second contact", value: scValue },
     ...extraContacts.map((c, i) => ({ label: i === 0 ? "Also named" : `Also named (${i + 2})`, value: fmtContact(c) })),
     // 1.4.0 contract: this flag means a 4th+ party exists BEYOND the captured
@@ -296,6 +309,11 @@ export function ConfirmEvidence({ payload }) {
       {p.street_level_address && typeof p.visit_link === "string" && ADMIN_LINK_PATTERN.test(p.visit_link) && (
         <a href={p.visit_link} className="inline-block mt-1 text-13 font-medium text-zinc-900 underline">Open visit</a>
       )}
+      {firstNameCustomerIds.map((id, i) => (
+        <a key={id} href={`/admin/customers?customerId=${id}`} className="inline-block mt-1 mr-3 text-14 font-medium text-zinc-900 underline">
+          {firstNameCustomerIds.length > 1 ? `Open customer ${i + 1}` : "Open customer"}
+        </a>
+      ))}
     </div>
   );
 }
@@ -439,6 +457,78 @@ function VerdictBadge({ verdict, wrongFields }) {
   return <Badge tone="alert">Denied{labels ? ` · ${labels}` : ""}</Badge>;
 }
 
+// Word boundaries survive ("1 23rd Ave" is not "12 3rd Ave"). Same normalization the server's
+// address-changed check applies (street-level-hold.js).
+const normAddressLine = (v) => String(v || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+
+// What the street-level hold's read-back dialog shows, from the list row. The visit's LIVE address
+// (item.visit_address) and slot (the list refreshes payload.visit_when from the visit) win over what the
+// card captured at booking: a correction or a move (SmartRebooker, an admin) after the card was filed
+// changes them, and the confirm activates the CURRENT visit, so the office must never read back stale
+// scheduling or address context.
+export function holdReadBackView(item) {
+  const payload = parsePayload(item?.payload) || {};
+  const captured = payload.address_on_file || "";
+  const live = item?.visit_address || "";
+  return {
+    address: live || captured || "Address on the visit",
+    // Always show the LIVE address when there is one (it is what the confirm submits), labelled when
+    // it differs from the one captured at booking.
+    showCurrentLabel: !!live && normAddressLine(live) !== normAddressLine(captured),
+    visitWhen: payload.visit_when || "",
+    addressLoaded: !!live,
+  };
+}
+
+function HoldConfirmDialog({ item, readBack, onReadBackChange, actioning, onClose, onConfirm }) {
+  const view = holdReadBackView(item);
+  const busy = !!item && actioning === item.id;
+  return (
+    <Dialog open={!!item} onClose={onClose} size="sm">
+      {item && (
+        <>
+          <DialogHeader>
+            <DialogTitle>Confirm address &amp; book — {callerName(item)}</DialogTitle>
+          </DialogHeader>
+          <DialogBody>
+            <p className="text-13 text-ink-secondary mb-2">
+              Google matched only the street. Read this address back to the customer before confirming the visit:
+            </p>
+            <div className="text-14 font-medium text-zinc-900 mb-1">
+              {view.showCurrentLabel && <span className="block text-11 font-medium text-ink-tertiary">Current visit address</span>}
+              {view.address}
+            </div>
+            {view.visitWhen && <div className="text-13 text-ink-secondary mb-3">Visit: {view.visitWhen}</div>}
+            {!view.addressLoaded && (
+              <div className="text-12 text-alert-fg mb-2">The visit's current address did not load. Reload the inbox before confirming.</div>
+            )}
+            <label className="flex items-start gap-2 text-13 text-zinc-900">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={readBack}
+                onChange={(e) => onReadBackChange(e.target.checked)}
+              />
+              <span>I read this address back to the customer.</span>
+            </label>
+          </DialogBody>
+          <DialogFooter>
+            <Button variant="secondary" size="sm" onClick={onClose}>Cancel</Button>
+            <Button
+              variant="primary"
+              size="sm"
+              disabled={!readBack || !view.addressLoaded || busy}
+              onClick={() => onConfirm(item)}
+            >
+              {busy ? "Confirming…" : "Confirm & book"}
+            </Button>
+          </DialogFooter>
+        </>
+      )}
+    </Dialog>
+  );
+}
+
 // `isAdmin` is the server-verified role from the shell's Outlet context
 // (CommunicationsPageV2 passes it; never localStorage). Admin-only actions
 // (confirm-email 403s non-admin staff) hide for everyone else — hidden when
@@ -555,6 +645,8 @@ export default function TriageInboxTabV2({ isAdmin }) {
         setError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Action failed — try again.");
       });
   };
+
+  const closeHoldDialog = () => { setConfirmHoldFor(null); setHoldReadBack(false); };
 
   // Street-level address hold: the office reads the form address back to the customer, then
   // confirms the linked visit through the EXISTING admin status route (pending -> confirmed),
@@ -887,6 +979,10 @@ export default function TriageInboxTabV2({ isAdmin }) {
                 // Accepting a house-number conflict stores a calibration
                 // `deny · address` on route_feedback; neither the settled
                 // conflict nor the recovery task it files is judged by it.
+                // A missing first name is an owed capture, not a call verdict (the server
+                // 400s /verdict on it): enter the name on the customer record, then Resolve
+                // (or Dismiss). The sweep also closes it once the record carries a name.
+                const isFirstNameCard = isTriage && item.reason_code === "missing_first_name";
                 const isConflictCard = isTriage && item.reason_code === "on_file_house_number_conflict";
                 const isRecoveryCard = isTriage && item.reason_code === "auto_booking_skipped_after_approval";
                 const isRescheduleProposal = isTriage && !!parsePayload(item.payload)?.reschedule_proposal;
@@ -932,7 +1028,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
                               on the call's ROUTING card would render here as if
                               it judged this still-pending property card — the
                               two resolve independently. */}
-                          {!isPropertyRoleCard && !isPromiseCard && !isFollowUpCard && !isRescheduleProposal && !isConflictCard && !isRecoveryCard && !isStreetLevelHoldCard && (
+                          {!isPropertyRoleCard && !isPromiseCard && !isFollowUpCard && !isFirstNameCard && !isRescheduleProposal && !isConflictCard && !isRecoveryCard && !isStreetLevelHoldCard && (
                             <VerdictBadge verdict={item.feedback_verdict} wrongFields={item.feedback_wrong_fields} />
                           )}
                         </div>
@@ -1005,6 +1101,20 @@ export default function TriageInboxTabV2({ isAdmin }) {
                               <CheckCircle2 size={13} strokeWidth={1.75} className="mr-1" aria-hidden />
                               {actioning === busyKey ? "Saving…" : "Mark handled"}
                             </Button>
+                          ) : isFirstNameCard ? (
+                            // Admin-only (the server 403s a non-admin Resolve): the first name is
+                            // entered on the customer record, which only an admin edits.
+                            isAdmin ? (
+                              <Button
+                                size="sm"
+                                variant="primary"
+                                disabled={actioning === busyKey}
+                                onClick={() => resolveItem(item)}
+                              >
+                                <CheckCircle2 size={13} strokeWidth={1.75} className="mr-1" aria-hidden />
+                                {actioning === busyKey ? "Saving…" : "Resolve"}
+                              </Button>
+                            ) : null
                           ) : isFollowUpCard ? (
                             <Button
                               size="sm"
@@ -1041,7 +1151,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
 
                     <p className="text-13 text-ink-secondary mt-2 whitespace-pre-wrap line-clamp-6">{synopsis}</p>
 
-                    {isTriage && <ConfirmEvidence payload={item.payload} />}
+                    {isTriage && <ConfirmEvidence payload={item.payload} reasonCode={item.reason_code} openCustomerIds={item.owed_customer_open_ids} />}
                     {isPropertyRoleCard && <PropertyRoleEvidence payload={item.payload} />}
                     {isEmailDisagreementCard && isOpenView && !isAdmin && (
                       <div className="mt-2 text-12 text-ink-tertiary">
@@ -1137,62 +1247,14 @@ export default function TriageInboxTabV2({ isAdmin }) {
       </Dialog>
 
       {/* Street-level address hold: read the address back, then confirm the visit */}
-      <Dialog open={!!confirmHoldFor} onClose={() => { setConfirmHoldFor(null); setHoldReadBack(false); }} size="sm">
-        {confirmHoldFor && (
-          <>
-            <DialogHeader>
-              <DialogTitle>Confirm address &amp; book — {callerName(confirmHoldFor)}</DialogTitle>
-            </DialogHeader>
-            <DialogBody>
-              <p className="text-13 text-ink-secondary mb-2">
-                Google matched only the street. Read this address back to the customer before confirming the visit:
-              </p>
-              {(() => {
-                // The visit's LIVE service address (read with the list) wins over the address captured
-                // when the card was filed: corrections after booking change it.
-                const captured = parsePayload(confirmHoldFor.payload)?.address_on_file || "";
-                const live = confirmHoldFor.visit_address || "";
-                // Word boundaries survive ("1 23rd Ave" is not "12 3rd Ave").
-                const norm = (v) => String(v || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-                const differs = !!live && norm(live) !== norm(captured);
-                // Always show the LIVE address when there is one: it is the address the confirm submits.
-                return (
-                  <div className="text-14 font-medium text-zinc-900 mb-1">
-                    {differs && <span className="block text-11 font-medium text-ink-tertiary">Current visit address</span>}
-                    {live || captured || "Address on the visit"}
-                  </div>
-                );
-              })()}
-              {parsePayload(confirmHoldFor.payload)?.visit_when && (
-                <div className="text-13 text-ink-secondary mb-3">Visit: {parsePayload(confirmHoldFor.payload).visit_when}</div>
-              )}
-              {!confirmHoldFor.visit_address && (
-                <div className="text-12 text-alert-fg mb-2">The visit's current address did not load. Reload the inbox before confirming.</div>
-              )}
-              <label className="flex items-start gap-2 text-13 text-zinc-900">
-                <input
-                  type="checkbox"
-                  className="mt-0.5"
-                  checked={holdReadBack}
-                  onChange={(e) => setHoldReadBack(e.target.checked)}
-                />
-                <span>I read this address back to the customer.</span>
-              </label>
-            </DialogBody>
-            <DialogFooter>
-              <Button variant="secondary" size="sm" onClick={() => { setConfirmHoldFor(null); setHoldReadBack(false); }}>Cancel</Button>
-              <Button
-                variant="primary"
-                size="sm"
-                disabled={!holdReadBack || !confirmHoldFor.visit_address || actioning === confirmHoldFor.id}
-                onClick={() => confirmHold(confirmHoldFor)}
-              >
-                {actioning === confirmHoldFor.id ? "Confirming…" : "Confirm & book"}
-              </Button>
-            </DialogFooter>
-          </>
-        )}
-      </Dialog>
+      <HoldConfirmDialog
+        item={confirmHoldFor}
+        readBack={holdReadBack}
+        onReadBackChange={setHoldReadBack}
+        actioning={actioning}
+        onClose={closeHoldDialog}
+        onConfirm={confirmHold}
+      />
 
       {/* Dismiss (triage only) — not actionable, no verdict */}
       <Dialog open={!!dismissFor} onClose={() => setDismissFor(null)} size="sm">

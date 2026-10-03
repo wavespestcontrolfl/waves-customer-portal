@@ -99,10 +99,14 @@ function isExpired(fact, today) {
 // expiry extended (or removed), a derived flag or the verification date
 // changing must reach the row even when no word of the fact changed —
 // otherwise hasProvenance keeps rejecting the fact at its FORMER deadline.
+// A fact checked on another day than the register's default carries its own
+// `verifiedOn`.
+const verifiedOnFor = (fact) => fact.verifiedOn || VERIFIED_ON;
+
 function managedMetadataCurrent(meta, fact) {
   return (meta.expires_on ?? null) === (fact.expiresOn ?? null)
     && (meta.derived === true) === (fact.derived === true)
-    && meta.verified_on === VERIFIED_ON
+    && meta.verified_on === verifiedOnFor(fact)
     && meta.source_url === fact.sourceUrls[0];
 }
 
@@ -146,7 +150,7 @@ function planFactSync(fact, row, { today, priorSeed = false } = {}) {
   // so a comeback never switches the row back on.
   if (expired) {
     if (row.status === 'archived') return { action: 'unchanged' };
-    return { action: 'retire', reason: 'expired', keepDeactivation: !row.active && !meta.retired_reason };
+    return { action: 'retire', reason: 'expired', keepDeactivation: row.active === false && !meta.retired_reason };
   }
   if (!legacy && rowHash !== meta.register_hash && !converged) {
     return { action: 'hold', reason: 'edited_by_person', rowHash, shippedHash };
@@ -154,7 +158,7 @@ function planFactSync(fact, row, { today, priorSeed = false } = {}) {
   // active=false with no retirement stamp is a person's deactivation (the
   // admin knowledge routes write arbitrary columns); the register does not
   // switch it back on — nor after it retired and un-retired the row.
-  if (!row.active && (!meta.retired_reason || meta.deactivated_by_person)) return { action: 'hold', reason: 'deactivated_by_person' };
+  if (row.active === false && (!meta.retired_reason || meta.deactivated_by_person)) return { action: 'hold', reason: 'deactivated_by_person' };
   const sameWording = converged || (!legacy && meta.register_hash === shippedHash);
   if (sameWording && !converged && row.active && managedMetadataCurrent(meta, fact)) return { action: 'unchanged' };
   return { action: 'update', legacy, reactivate: !row.active, metadataOnly: sameWording, converged };
@@ -173,7 +177,7 @@ function planStraySync(row) {
   // word for word (retirement never touches the wording) but withdrawn
   // guidance leaves the shared search like expired guidance does (codex
   // round 7 P2); a person's active=false is remembered too.
-  return { action: 'retire', reason: 'withdrawn_from_register', keepDeactivation: !row.active && !meta.retired_reason };
+  return { action: 'retire', reason: 'withdrawn_from_register', keepDeactivation: row.active === false && !meta.retired_reason };
 }
 
 function rowValues(fact, existingMeta, now) {
@@ -186,7 +190,7 @@ function rowValues(fact, existingMeta, now) {
     source_url: fact.sourceUrls[0],
     source_urls: fact.sourceUrls,
     quote: fact.quote,
-    verified_on: VERIFIED_ON,
+    verified_on: verifiedOnFor(fact),
     derived: fact.derived === true,
     expires_on: fact.expiresOn || null,
     register_hash: factFingerprint(fact),
@@ -200,7 +204,7 @@ function rowValues(fact, existingMeta, now) {
     source: SOURCE,
     confidence: 'high',
     metadata: JSON.stringify(meta),
-    last_verified_at: new Date(`${VERIFIED_ON}T00:00:00Z`),
+    last_verified_at: new Date(`${verifiedOnFor(fact)}T00:00:00Z`),
     verified_by: SOURCE,
     updated_at: now,
   };
@@ -285,7 +289,7 @@ async function applyFactPlan(trx, fact, row, plan, { now, today, hasAuditLog, ha
         result.held.push({ slug: fact.slug, reason: held.reason });
         return;
       }
-      await audit(trx, hasAuditLog, AUDIT_ACTIONS.seeded, created, { verified_on: VERIFIED_ON });
+      await audit(trx, hasAuditLog, AUDIT_ACTIONS.seeded, created, { verified_on: verifiedOnFor(fact) });
       result.inserted.push(fact.slug);
       return;
     }
@@ -361,6 +365,9 @@ async function applyFactPlan(trx, fact, row, plan, { now, today, hasAuditLog, ha
       return;
     }
     case 'hold':
+      // A person's deactivation also leaves the hybrid index now, not at
+      // the next nightly rebuild (the shared readers honor `active`).
+      if (plan.reason === 'deactivated_by_person' && row) await dropIndexChunks(trx, hasEmbeddings, row.slug);
       await auditHold(trx, hasAuditLog, row || { slug: fact.slug }, plan);
       result.held.push({ slug: row?.slug || fact.slug, reason: plan.reason });
       return;
@@ -512,7 +519,8 @@ async function listFacts({ tags, limit = 50, now = new Date() } = {}) {
     .orderBy('title', 'asc');
 
   const today = etDateString(now);
-  const usable = rows.filter((row) => hasProvenance(row, today));
+  // newsletter: false facts are knowledge-base only (see fact-register-data.js).
+  const usable = rows.filter((row) => hasProvenance(row, today) && FACT_BY_SLUG.get(row.slug).newsletter !== false);
   const wanted = Array.isArray(tags) ? tags : (tags ? [tags] : null);
   const filtered = (wanted && wanted.length)
     ? usable.filter((r) => {
@@ -697,14 +705,111 @@ const PATCH = /\b(?:(?:brown|large)\s+patch|rhizoctonia\s+solani|r\.\s?solani)\b
 // 90s / eighties / nineties / triple digits"; (iv) a figure of 80+ given
 // in degrees ("at 85°F", "in 90-degree weather"). A downward comparator
 // ("below 80°F", "under 85", "cooler than 90") is never a trigger.
-const HOT_FIGURE = '(?:(?:8|9)\\d|1[0-2]\\d)(?!\\d|,\\d{3})(?:\'?s)?|(?:eighty|ninety)(?:[-\\s](?:one|two|three|four|five|six|seven|eight|nine))?|(?:one|a)\\s+hundred';
+const HOT_FIGURE = '(?:(?:8|9)\\d|1[0-2]\\d)(?:\\.\\d+)?(?!\\d|,\\d{3}|\\.\\d)(?:\'?s)?|(?:eighty|ninety)(?:[-\\s](?:one|two|three|four|five|six|seven|eight|nine))?|(?:one|a)\\s+hundred';
 const UPWARD_COMPARATOR = '(?:above|over|past|beyond|exceed(?:s|ed|ing)?|(?:more|greater|higher|warmer|hotter)\\s+than|upwards\\s+of|in\\s+excess\\s+of|north\\s+of|at\\s+least|top(?:s|ped|ping)?|reach(?:es|ed|ing)?|hit(?:s|ting)?|(?:climb(?:s|ed|ing)?|ris(?:e|es|ing|en)|rose|go(?:es|ing)?|went|push(?:es|ed|ing)?|soar(?:s|ed|ing)?|stay(?:s|ed|ing)?|remain(?:s|ed|ing)?|get(?:s|ting)?|got)\\s+(?:up\\s+)?(?:to|past|above|over|into|beyond|at))';
-const NOT_A_TEMPERATURE = '(?!\\s*(?:%|percent|per\\s*cent|square|sq\\b|acres?|feet|foot|ft\\b|yards?|miles?|pounds?|lbs?|years?|days?|weeks?|months?|hours?|minutes?|dollars?|homes?|houses?|lawns?|yards?|customers?|people|samples?|species|cases?|times?|calls?|visits?))';
+const NOT_A_TEMPERATURE = '(?!\\s*(?:%|percent|per\\s*cent|square|sq\\b|acres?|feet|foot|ft\\b|yards?|miles?|pounds?|lbs?|years?|days?|weeks?|months?|hours?|minutes?|dollars?|homes?|houses?|lawns?|yards?|customers?|people|samples?|species|cases?|times?|calls?|visits?|inch(?:es)?|cm|centimet(?:er|re)s?|met(?:er|re)s?|mm))';
+// A temperature unit: 85°F, 85°, 85 degrees, 85-degree, 85 degrees Fahrenheit,
+// 85 Fahrenheit.
+const TEMP_UNIT = '(?:\\s*°\\s*[FC]?(?![A-Za-z])|-?\\s*degrees?(?:\\s+(?:fahrenheit|celsius|centigrade))?\\b|\\s*(?:fahrenheit|celsius|centigrade)\\b)';
+// A degree figure followed by a geometry noun is an angle, not a temperature:
+// "a 90-degree arc around a sprinkler head", "at a 90° angle" (codex #5414
+// round 3). Only the bare-unit trigger needs this; a folded range or bound
+// ("between 85 and 95 degrees") already carries temperature context.
+const NOT_AN_ANGLE = '(?!\\s*(?:arcs?|angles?|turns?|rotations?|bends?|corners?|elbows?|sweeps?|curves?|slopes?|pitch|of\\s+(?:arc|rotation|sweep|turn))\\b)';
+const TEMP_TENS = 'twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety';
+const TEMP_UNITS_WORD = 'one|two|three|four|five|six|seven|eight|nine';
+const TEMP_NUM = `(?<![\\d.,])(?:\\d{1,3}(?:\\.\\d+)?(?!\\d|,\\d{3}|\\.\\d)|(?:${TEMP_TENS})(?:[-\\s](?:${TEMP_UNITS_WORD}))?(?![a-z])|(?:one|a)\\s+hundred)`;
+const TENS_VALUE = { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
+const UNIT_VALUE = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9 };
+function tempValue(text) {
+  const word = String(text).toLowerCase().trim();
+  if (/^\d+(?:\.\d+)?$/.test(word)) return parseFloat(word); // "85.5", "26.7"
+  if (/hundred$/.test(word)) return 100;
+  const [tens, unit] = word.split(/[-\s]+/);
+  return (TENS_VALUE[tens] || 0) + (UNIT_VALUE[unit] || 0);
+}
+const isHotValue = (n) => n >= 80 && n <= 129;
+// The 80-degree line is Fahrenheit. A Celsius figure is converted before it
+// is judged, so "thrives at 30°C" (86°F) is the claim and "20°C" is not
+// (codex #5414 round 4).
+const CELSIUS_UNIT = '(?:\\s*°\\s*C(?![A-Za-z])|-?\\s*degrees?\\s+(?:celsius|centigrade)\\b|\\s*(?:celsius|centigrade)\\b)';
+const IS_CELSIUS = /°\s*C(?![A-Za-z])|celsius|centigrade/i;
+// Clamped at 129°F: 80°C is 176°F, which is heat, not an implausible
+// figure to drop (codex #5561 rounds 6-7). Every fold shares this.
+const toFahrenheit = (celsius) => Math.min((celsius * 9) / 5 + 32, 129);
+const tempValueF = (text, ...units) => (units.some((u) => u && IS_CELSIUS.test(u)) ? toFahrenheit(tempValue(text)) : tempValue(text));
+
+// Temperatures are judged at SENTENCE level, once, BEFORE the sentence is
+// split into clauses (codex #5187 follow-up, rounds 1-2): the splitter breaks
+// on "and" and on dashes, which cut "80°F and below" and "85 to 95 degrees"
+// in half, and every shape the clause regex had to list (copula, adverb,
+// spelled-out unit) was one more way to slip. Each temperature phrase that
+// carries its direction is replaced by ONE token — hottemp<n> (the figure,
+// or the low end of a range, is 80-129 on the hot side) or cooltemp<n>
+// (anything else) — and put back in the clause that is reported. The
+// PATCH_TRIGGER only reads the hot token and a bare figure with a unit.
+//   range        "85 to 95 degrees", "between 85 and 95°F", "85–95°F" -> the LOW end decides
+//   trailing     "80°F or higher", "85 and up" (hot) / "80°F and below" (cool)
+//   leading down "below 80°F", "under 85 degrees", "cooler than 90"    (cool)
+const TEMP_RANGE = new RegExp(`(?:\\b(?:between|from)\\s+)?(${TEMP_NUM})(${TEMP_UNIT})?\\s*(?:\\b(?:to|through|thru|until|and)\\b|[-–—])\\s*(${TEMP_NUM})(${TEMP_UNIT})?`, 'gi');
+const TEMP_TRAILING = new RegExp(`(${TEMP_NUM})(${TEMP_UNIT})?\\s*\\b(?:or|and)\\s+(?:(?:a\\s+)?(?:bit|little)\\s+)?(up(?:wards?)?(?!\\s+to\\b)|higher|hotter|warmer|above|more|greater|over|lower|below|less|under|cooler|colder|down(?:wards?)?)\\b${NOT_A_TEMPERATURE}`, 'gi');
+// One shared list of phrases that CAP the temperature (the figure that follows
+// is a ceiling, so the claim is about the cool side): comparators ("below",
+// "no higher than", "not above", "doesn't exceed"), ceilings ("a maximum of",
+// "max temperature of", "a ceiling of", "capped at", "tops out at") and "at
+// most" / "up to", and the compound forms "less than or equal to" / "at or
+// below" / "equal to or lower than" (codex #5414 round 3). A phrase that merely NAMES a figure ("peaks at 90°F", "a
+// minimum of 85°F", "a high of 90°F") is not here: the lawn is active AT the
+// peak, so those stay hot through the bare temperature-unit trigger. "a high
+// of 80°F or less" is cool through the trailing "or less" fold.
+const DOWNWARD_BOUND = '(?:at\\s+or\\s+(?:below|under|beneath)|below|under|beneath|(?:less|lower|cooler|colder)\\s+than(?:\\s+or\\s+equal\\s+to)?|equal\\s+to\\s+or\\s+(?:less|lower|cooler|colder)\\s+than|down\\s+to|drop(?:s|ped|ping)?\\s+(?:to|below)|fall(?:s|ing)?\\s+(?:to|below)|no\\s+(?:more|higher|warmer|hotter|greater)\\s+than|(?:is|are|was|were|be)\\s+not\\s+(?:above|over|past|exceeding|more\\s+than|higher\\s+than|warmer\\s+than|hotter\\s+than)|not\\s+(?:above|over|exceeding|to\\s+exceed)|(?:never|\\w+n[\'\u2019]t)\\s+(?:(?:go|get|rise|climb|reach|exceed)(?:es|s)?\\s+(?:above|over|past|beyond)|exceed(?:s|ing)?)|at\\s+most|up\\s+to|(?:a\\s+)?max(?:imum)?(?:\\s+(?:air|soil|daytime|daily|high))?(?:\\s+temp(?:erature)?s?)?\\s+(?:of|is|are)|(?:a|an|the)\\s+(?:upper\\s+)?(?:ceiling|cap|limit)\\s+of|cap(?:s|ped|ping)?\\s+(?:out\\s+)?at|(?:top(?:s|ped|ping)?|max(?:es|ed|ing)?)\\s+out\\s+at)';
+const TEMP_LEADING_DOWN = new RegExp(`\\b${DOWNWARD_BOUND}\\s+(?:the\\s+|(?:about|around|roughly|approximately|near|nearly)\\s+)?(?:${TEMP_NUM})(?:${TEMP_UNIT})?`, 'gi');
+// A ceiling named AFTER the figure ("80°F max", "an 80°F maximum
+// temperature") is NOT folded: three review rounds each found a new suffix
+// that slipped past it (owner 2026-10-02, #5561). Such copy stays a false
+// block the proof surfaces to the owner, as on the parent.
+const TEMP_BARE_CELSIUS = new RegExp(`(${TEMP_NUM})${CELSIUS_UNIT}`, 'gi');
+const HOT_DIRECTION = /^(?:up|higher|hotter|warmer|above|more|greater|over)/i;
+
+function foldTemperatures(sentence) {
+  const stash = [];
+  const token = (kind, original) => {
+    stash.push(original);
+    return `${kind}${stash.length - 1}`;
+  };
+  let text = String(sentence).replace(TEMP_RANGE, (match, a, unitA, b, unitB) => {
+    if (!unitA && !unitB) return match; // "80 to 90 lawns" is not a temperature
+    // Each end is read in its own unit; an end with no unit takes the other's
+    // ("29 to 35°C"), so "between 70°F and 30°C" keeps 70°F as its low end.
+    const low = Math.min(tempValueF(a, unitA || unitB), tempValueF(b, unitB || unitA));
+    return token(isHotValue(low) ? 'hottemp' : 'cooltemp', match);
+  });
+  text = text.replace(TEMP_TRAILING, (match, figure, unit, direction) => {
+    const hot = HOT_DIRECTION.test(direction) && isHotValue(tempValueF(figure, unit));
+    return token(hot ? 'hottemp' : 'cooltemp', match);
+  });
+  text = text.replace(TEMP_LEADING_DOWN, (match) => token('cooltemp', match));
+  // A bare Celsius figure left over ("at 30°C", "above 30 degrees Celsius"):
+  // judged on its Fahrenheit value, so the raw-number triggers never see it.
+  text = text.replace(TEMP_BARE_CELSIUS, (match, figure) => token(isHotValue(toFahrenheit(tempValue(figure))) ? 'hottemp' : 'cooltemp', match));
+  const restore = (clause) => String(clause).replace(/\b(?:hot|cool)temp(\d+)\b/g, (_m, n) => stash[Number(n)] ?? _m);
+  return { text, restore };
+}
+
 const PATCH_TRIGGER = new RegExp(
   '\\b(?:summer(?:s|time)?|june|july|august|september|rainy\\s+season|hot(?:ter|test)?|heat(?:waves?)?|warm(?:er|est)\\s+months?|dog\\s+days)\\b'
   + `|\\b${UPWARD_COMPARATOR}[-\\s]+(?:the\\s+)?(?:${HOT_FIGURE})${NOT_A_TEMPERATURE}`
   + '|\\bthe\\s+(?:(?:upper|high|mid|low|mid-to-upper)[-\\s]+)?(?:(?:8|9)0\'?s|eighties|nineties|100\'?s|hundreds|triple[-\\s]+digits)\\b'
-  + `|\\b(?:at|around|about|near|approximately|roughly|in|during|on)\\s+(?:the\\s+)?(?:${HOT_FIGURE})\\s*(?:°|-?\\s*degrees?\\b|-degree\\b)`,
+  // (iv) a figure of 80+ with a temperature unit ANYWHERE in the clause —
+  // "at 85°F", "in 90-degree weather", "are 85°F", "are consistently 90
+  // degrees or higher" — not only after a preposition or a listed copula:
+  // the unit makes it a temperature, so no verb or adverb shape is
+  // enumerated. The cool side of the line (a downward comparator, "or
+  // lower", a range that starts below 80) was folded away first, see
+  // foldTemperatures.
+  + `|(?<![\\d.,])\\b(?:${HOT_FIGURE})${TEMP_UNIT}${NOT_AN_ANGLE}`
+  // (v) a phrase foldTemperatures judged hot: a range, "or higher" / "and up".
+  + '|\\bhottemp\\d+\\b',
   'i',
 );
 // A clause that says large patch RECEDES in the heat is the fact, not the
@@ -713,11 +818,22 @@ const PATCH_TRIGGER = new RegExp(
 // clause — "Large patch thrives in summer as the grass slows down" is
 // still the claim — and must not itself be negated: "Large patch doesn't
 // slow down in summer" asserts the claim, whatever a negation elsewhere
-// would otherwise clear.
-const RECEDE_SOURCE = '(?:stop(?:s|ped|ping)?\\s+spreading|slow(?:s|ed|ing)?(?:\\s+down)?|stop(?:s|ped|ping)?|fad(?:e|es|ed|ing)(?:\\s+away|\\s+out)?|subsid(?:e|es|ed|ing)|(?:go(?:es)?|went|going|gone)\\s+(?:dormant|quiet|away)|dorman(?:t|cy)|back(?:s|ed|ing)?\\s+off|eas(?:e|es|ed|ing)(?:\\s+off|\\s+up)?|declin(?:e|es|ed|ing)|wan(?:e|es|ed|ing)|disappear(?:s|ed|ing)?|clear(?:s|ed|ing)?\\s+up|(?:di(?:e|es|ed)|dying)\\s+(?:back|down|out|off)|shut(?:s|ting)?\\s+down|quiet(?:s|ed|ing)?\\s+down|inactive|recover(?:s|ed|ing)?|(?:grow(?:s|ing)?|grew)\\s+out|retreat(?:s|ed|ing)?|diminish(?:es|ed|ing)?|abat(?:e|es|ed|ing)|halt(?:s|ed|ing)?|end(?:s|ed)?|rare|uncommon|unlikely|less\\s+(?:common|likely|active|prevalent|severe|of\\s+a\\s+problem))';
+// would otherwise clear. "rarely" / "seldom" recede only when they modify
+// an activity or uncommon predicate ("rarely a problem", "seldom spreads");
+// bare, they are a negation — "rarely absent in summer", "seldom quiet",
+// "rarely lets up" assert the claim (codex #5414 round 3 P1), which
+// NEGATED_RECEDE catches because absent / quiet / lets up are receding terms.
+// The predicate must follow the adverb DIRECTLY: no free words in between,
+// so "rarely fails to thrive" (a double negative, the claim) is not read as
+// "rarely thrives" (codex #5414 round 5 P1). Unlisted wording is flagged.
+const RECEDE_SOURCE = '(?:stop(?:s|ped|ping)?\\s+spreading|slow(?:s|ed|ing)?(?:\\s+down)?|stop(?:s|ped|ping)?|fad(?:e|es|ed|ing)(?:\\s+away|\\s+out)?|subsid(?:e|es|ed|ing)|(?:go(?:es)?|went|going|gone)\\s+(?:dormant|quiet|away)|dorman(?:t|cy)|back(?:s|ed|ing)?\\s+off|eas(?:e|es|ed|ing)(?:\\s+off|\\s+up)?|declin(?:e|es|ed|ing)|wan(?:e|es|ed|ing)|disappear(?:s|ed|ing)?|clear(?:s|ed|ing)?\\s+up|(?:di(?:e|es|ed)|dying)\\s+(?:back|down|out|off)|shut(?:s|ting)?\\s+down|quiet(?:s|ed|ing)?\\s+down|inactive|recover(?:s|ed|ing)?|(?:grow(?:s|ing)?|grew)\\s+out|retreat(?:s|ed|ing)?|diminish(?:es|ed|ing)?|abat(?:e|es|ed|ing)|halt(?:s|ed|ing)?|end(?:s|ed)?|absent|quiet|let(?:s|ting)?\\s+up|rare|uncommon|unlikely|less\\s+(?:common|likely|active|prevalent|severe|of\\s+a\\s+problem)|(?:rarely|seldom|hardly\\s+ever|infrequently)\\s+(?:ever\\s+)?(?:(?:a|an|much\\s+of\\s+a)\\s+)?(?:problem|issue|concern|seen|found|present|noticed|spotted|reported|visible|noticeable|active|thriv\\w*|flar\\w*|spread\\w*|appear\\w*|show(?:s|ed|ing)?\\s+up|develop\\w*|strik\\w*|attack\\w*|damag\\w*|return\\w*|infect\\w*|kill\\w*|surviv\\w*|persist\\w*))';
 const RECEDE = new RegExp(`\\b${RECEDE_SOURCE}\\b`, 'i');
 const PATCH_ACTIVE = /\b(?:thriv\w*|flar\w*|spread\w*|peak\w*|explod\w*|surg\w*|take[sn]?\s+off|taking\s+off|took\s+off|worst|strik\w*|attack\w*|appear\w*|show(?:s|ed|ing)?\s+up|develop\w*|active|activit\w*|lov(?:e|es|ed|ing)|prefer\w*|favou?r\w*|grow(?:s|ing)?|kick\w*\s+in|ramp\w*\s+up|common|prevalent|rampant|big\w*\s+problem|problem|damag\w*|kill\w*|infect\w*|return\w*|come\w*\s+back|comes)\b/i;
 const NEGATED_RECEDE = new RegExp(`\\b(?:not|never|no\\s+longer|hardly|rarely|seldom|cannot|\\w+n't)\\s+(?:\\w+\\s+){0,2}?${RECEDE_SOURCE}\\b(?![^]*\\b(?:until|before)\\b)`, 'i');
+// "anything but active" is NOT read as a negation (codex #5561 rounds 1-2):
+// every reading of the idiom either let "never anything but active" or
+// "thrives in anything but dry summers" pass, so it stays a false block,
+// which the proof surfaces to the owner, rather than a false pass.
 const MYTH_WORD = /\b(?:myth|misconception|misunderstanding|folklore|old\s+wives'?\s+tales?|false|untrue|wrong)\b/i;
 
 // The clause is the fact that large patch recedes: a receding verb, not
@@ -785,7 +901,8 @@ function patchVerdictUnit(clauses, i) {
 }
 
 function patchClaimInSentence(sentence, previousSentence = '') {
-  const clauses = splitClauses(sentence);
+  const folded = foldTemperatures(sentence);
+  const clauses = splitClauses(folded.text);
   // The subject carries across clauses the same way it does for termites:
   // "Large patch, rather than chinch damage, is what you see in summer"
   // asserts the claim in its third clause (codex round 8); a leading pronoun
@@ -808,10 +925,10 @@ function patchClaimInSentence(sentence, previousSentence = '') {
     // for the heat), the same as within one clause.
     if (NEGATED_RECEDE.test(judged) && !/\b(?:until|before)\b/i.test(span)) {
       if (MYTH_WORD.test(judged)) continue;
-      return clause;
+      return folded.restore(clause);
     }
     if (patchRecedes(judged) || clauseDenies(judged) || PATCH_CONTRAST.test(span)) continue;
-    return clause;
+    return folded.restore(clause);
   }
   return null;
 }

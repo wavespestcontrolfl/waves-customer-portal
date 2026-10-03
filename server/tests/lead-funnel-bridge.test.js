@@ -117,6 +117,11 @@ describe('status → stage mapping', () => {
     });
   });
 
+  test("'handled' (closed, neither won nor lost) has NO funnel meaning: it is never mapped to lost or booked", () => {
+    expect(LEAD_STATUS_TO_FUNNEL_STAGE).not.toHaveProperty('handled');
+    expect(Object.values(LEAD_STATUS_TO_FUNNEL_STAGE)).not.toContain('handled');
+  });
+
   test('rank order is lead < contacted < estimate_sent < estimate_viewed < booked < completed', () => {
     const ordered = ['lead', 'contacted', 'estimate_sent', 'estimate_viewed', 'booked', 'completed'];
     for (let i = 1; i < ordered.length; i += 1) {
@@ -230,12 +235,17 @@ describe('bridgeLeadsFunnelStage — bulk form (IB bulk update, staleness sweep)
   });
 
   test('empty/nullish id lists and unmapped statuses no-op without touching the db', async () => {
-    for (const [ids, status] of [[[], 'won'], [[null, undefined], 'won'], [['L1'], 'new'], [null, 'won']]) {
+    for (const [ids, status] of [[[], 'won'], [[null, undefined], 'won'], [['L1'], 'handled'], [null, 'won']]) {
       const database = makeCaptureDb();
       const res = await bridgeLeadsFunnelStage(ids, status, database);
       expect(res).toEqual({ updated: 0, reason: 'no_mapping' });
       expect(database._captured.table).toBeNull();
     }
+    // 'new' has no stage either, but the status writer's call is where a reopened /book request
+    // that lost its row is re-stamped: it reads `leads` (preferred-time requests only), never the funnel table.
+    const database = makeCaptureDb();
+    expect(await bridgeLeadsFunnelStage(['L1'], 'new', database)).toEqual({ updated: 0, reason: 'no_mapping' });
+    expect(database._captured.table).not.toBe('ad_service_attribution');
   });
 
   test('a db failure is swallowed', async () => {
@@ -312,7 +322,7 @@ describe('savepoint isolation for transactional callers', () => {
 
 describe('bridgeLeadFunnelStage — no-ops and failure containment', () => {
   test('statuses with no funnel meaning no-op without touching the db', async () => {
-    for (const status of ['new', 'garbage', '', null, undefined]) {
+    for (const status of ['handled', 'garbage', '', null, undefined]) {
       const database = makeCaptureDb();
       const res = await bridgeLeadFunnelStage('L1', status, database);
       expect(res).toEqual({ updated: 0, reason: 'no_mapping' });

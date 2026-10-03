@@ -1407,6 +1407,14 @@
     "approval": null,
     "scope": "broad"
   },
+  "needs_me": {
+    "module": "needs-me-tools.js",
+    "domain": "ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "broad"
+  },
   "list_open_closeouts": {
     "module": "closeout-tools.js",
     "domain": "closeout",
@@ -1834,6 +1842,14 @@
   "update_customer_property": {
     "module": "property-tools.js",
     "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
+  "update_lead_contact": {
+    "module": "leads-tools.js",
+    "domain": "leads",
     "kind": "internal_write",
     "role": "admin",
     "approval": "ui_confirm",

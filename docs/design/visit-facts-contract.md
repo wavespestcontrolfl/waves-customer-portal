@@ -58,7 +58,7 @@ has a method and targets. 140 of 240 pest product rows have an area.
 | capture | meaning |
 |---|---|
 | `tap` | the tech types or picks it on the Complete Service form (`client/src/pages/admin/SchedulePage.jsx` CompletionPanel) or the Fast Complete sheet |
-| `voice` | voice fill must write it. Voice fill has **not shipped yet**, so today every `voice` fact is filled by `tap` |
+| `voice` | voice fill must write it. Voice fill ships **dark** on the Fast Complete report flow (`GATE_FAST_COMPLETE_REPORT`): where product went down, the pests named and how the sprays went down are read from the note (`server/services/visit-voice-facts.js`) and sent as the visit's areas serviced (a product's area only when one place was heard), each product's targets and the sprays' method. Lane voice fill ships **dark** too (`GATE_LANE_VOICE_FILL`): a bed bug, fire ant, tick, bee & wasp, mud dauber or recurring mosquito visit's places and one value per finding group are read from the note (`server/services/visit-lane-facts.js`); the office form's Generate fills only fields nobody picked, and the tech's Fast Complete sheet shows them on its record card for the tech to confirm, both sending them as `areasServiced` and `structuredObservations`. Typed voice fill ships **dark** too (`GATE_TYPED_VOICE_FILL`): a typed form's pick fields and counts (cockroach, the German and palmetto knockdowns, flea, pest inspection, mosquito event, wildlife trapping, rodent exclusion, sanitation and inspection; step 4: rodent trap checks, rodent and termite bait stations; step 5: termite liquid, trenching, rodding, spot and foam treatments and termite inspections, never new-construction pre-treat), a termite treatment's solution strength, and the technician's own 0-5 rating where they set the score, are read from the note (`server/services/visit-typed-facts.js`, a count or rating only when its quote states the number, a solution strength only as the percent its quote states, judged by the completion's own `validateTypedFindings`); the state's notice questions (treatment notice posted, inspection notice affixed) are never read, always a tap (`tapOnly`), and the office form's Generate fills only fields still empty, and the tech's Fast Complete sheet (with `GATE_FAST_COMPLETE_REPORT`) shows them on its record card for the tech to confirm, with the activity score where the tech sets it, both sending them in `structuredFindings` as a tap would; free-text fields stay `tap`, the termite forms are read on the office form only (the tech's sheet keeps their visits on the full form until it carries their record), and station pins stay on the station map: a station visit (trap check, rodent or termite bait stations) opens the tech's sheet only while that tech's station map (`station-map-v1`) is off, since the full form records a check for every station and the sheet carries no map. Every other `voice` fact is still filled by `tap` |
 | `prefill` | defaulted from the protocol, the product label or the service config; the tech confirms it |
 | `derived` | computed by the server from other facts or photos |
 | `photo` | an uploaded image, optionally captioned |
@@ -105,6 +105,7 @@ stay internal, without a decision either way.
 | `recommendations` | prefill, tap | `structured_notes.recommendations` | Recommendations | hidden |
 | `form_recommendations` | prefill, tap | `structured_notes.formRecommendations` | Recommendations, form-sourced only | hidden |
 | `tech_tips` | prefill, tap | `structured_notes.techTips` | Tips from your tech (`techNote`, `GATE_TECH_TIPS`) | hidden |
+| `blog_post` | tap only | `structured_notes.blogPost` | From the Waves blog (`payload.blogPost`, `GATE_REPORT_BLOG_POST`) | hidden |
 | `protocol_actions_completed` | prefill, tap | `structured_notes.protocolActionsCompleted` | What we did (protocol actions) | hidden |
 | `protocol_action_scopes_completed` | derived | `structured_notes.protocolActionScopesCompleted` | Treatment scope (interior/exterior) + re-entry countdown retained/zeroed decision (`structuredActionScope`/`treatmentScope`, report-data.js) | fallback to area-text/product-based scope classification |
 | `technician_notes` (internal) | voice, tap, derived | `service_records.technician_notes` | AI report writer prompt ("Service Notes", `redactAccessCodes`); Visit summary / Today's Result body **only** through `technicianReportCustomerCopy`'s screened parse | fallback to the deterministic summary |
@@ -408,9 +409,21 @@ recurring pest, plus:
   (`GATE_RESERVICE_REPORT_COPY`).
 - Fast Complete's `completionBody` sends `visitOutcome`, products (method,
   targets, area, amount and unit, rate and unit, and linear ft for perimeter
-  spray), `areasServiced`, the rating and `technicianNotes`. It sends **no
-  customer text and no photos**, so `fast_complete_customer_text` is a
-  **gap** with no writer.
+  spray), `areasServiced`, the rating and `technicianNotes`. Photos are
+  staged and promoted at completion, not sent in the body.
+- `fast_complete_customer_text` (storage `structured_notes.completionSmsStatus`)
+  has a **gated writer**. With `GATE_FAST_COMPLETE_RECAP` off (the default) the
+  sheet pins `sendCompletionSms`, `requestReview` and `includePayLink` to
+  `false` and the customer gets no text. With it on, the sheet posts
+  `customerRecapMode: 'reservice_fixed'` (review ask and pay link stay off) and
+  **no `customerRecap`**. The server, only while both gates are on and the
+  visit is a pest re-service, sends **one** fixed text built from the saved
+  address, areas and product targets and methods
+  (`services/reservice-fixed-recap.js`), never AI and never signed, through its
+  normal consent-checked path, and stores the sent body in
+  `structured_notes.completionSmsBody`. The "keep kids and pets off" sentence
+  needs a recorded liquid application; a clause with no recorded fact is
+  dropped.
 
 ### Lawn (`lawn`)
 Catalog: `lawn_care_6week`, `lawn_care_monthly`, `lawn_care_quarterly`,
@@ -577,7 +590,11 @@ reports still render through the same facts as the active keys.
 
 `wdo_inspection` (FDACS-13645) and `termite_slab_pretreat` (typed pointer
 `pre_treatment_termite_certificate`, the FBC certificate) stay on the
-compliance Projects flow. They never produce a customer Service Report, and
+compliance Projects flow. New-construction `termite_pretreatment` completes
+on the termite treatment form (so it stays in that line's `catalogKeys`),
+but voice fill never reads it (`visit-typed-facts.js`
+`NOT_READ_SERVICE_KEYS`, owner mockup v8: only pre-treat and the slab
+certificate are out). They never produce a customer Service Report, and
 voice fill does not cover them. The registry lists them in
 `EXCLUDED_SERVICE_LINES`, and the test fails if either one appears as a line
 identifier OR inside any line's `catalogKeys` (the same both-places check the
@@ -624,10 +641,6 @@ listed here, and every bullet here is still a gap fact on that line.
   line, but nothing records it today. The observations vocabulary is
   species-neutral and was unused on 0 of 69 visits, and product targets are
   the label list, not finds. Voice fill has to add the storage.
-- `reservice_pest.fast_complete_customer_text`: **Fast Complete sends no
-  customer text.** `FastCompleteSheet.jsx` `completionBody` sends no
-  `customerRecap` and sets `sendCompletionSms: false`, so the fact has no
-  writer.
 
 ## Data-quality and writer gaps
 
@@ -820,6 +833,18 @@ means the field is legal on a primary OR a companion submission.
 | `gallons_or_amount` | Gallons / amount applied | textarea | both | required | — |
 | `posted_notice` | Posted notice placed (exterior / perimeter applications) | select | both | required | — |
 | `followup_plan` | Follow-up / warranty plan | textarea | both | hidden | — |
+
+### `termite_inspection` — typed `termite_inspection` form
+
+| fact | label | type | applicability | when missing | also read by name in |
+|---|---|---|---|---|---|
+| `areas_inspected` | Areas inspected | textarea | both | hidden | — |
+| `areas_not_inspected` | Areas not inspected / why | textarea | both | required | — |
+| `termite_type` | Termite species (if found) | select | both | required | — |
+| `activity_status` | Activity status | select | both | required | — |
+| `infestation_extent` | Infestation extent | textarea | both | hidden | — |
+| `treatment_recommendation` | Recommended treatment | textarea | both | hidden | — |
+| `inspection_notice_affixed` | Inspection notice affixed | select | both | required | — |
 
 ### `rodent_inspection` — typed `rodent_inspection` form
 

@@ -45,6 +45,17 @@ jest.mock('../services/job-costing', () => ({
   resolveServiceRecord: jest.requireActual('../services/job-costing').resolveServiceRecord,
 }));
 jest.mock('../services/time-tracking', () => ({ adminEditEntry: jest.fn(async () => ({})) }));
+jest.mock('../services/completion-product-defaults', () => ({ resolveCompletionProductDefaults: jest.fn(async () => ({ products: [], holds: [] })) }));
+// The real resolver for every route; the tip tests below stub the visit's
+// service so their read lists stay exact.
+const mockResolveProfile = jest.fn();
+jest.mock('../services/service-completion-profiles', () => ({
+  ...jest.requireActual('../services/service-completion-profiles'),
+  resolveCompletionProfileForScheduledService: (...args) => mockResolveProfile(...args),
+}));
+beforeEach(() => {
+  mockResolveProfile.mockImplementation((...args) => jest.requireActual('../services/service-completion-profiles').resolveCompletionProfileForScheduledService(...args));
+});
 
 const fs = require('fs');
 const path = require('path');
@@ -58,8 +69,8 @@ function routeLayer(method, routePath) {
   return router.stack.find((l) => l.route && l.route.path === routePath && l.route.methods[method]);
 }
 
-function invoke(params = {}, actor = { techRole: 'admin', technicianId: 'admin-1' }) {
-  const layer = routeLayer('get', '/:serviceId/tech-tips');
+function invoke(params = {}, actor = { techRole: 'admin', technicianId: 'admin-1' }, routePath = '/:serviceId/tech-tips') {
+  const layer = routeLayer('get', routePath);
   const handler = layer.route.stack[layer.route.stack.length - 1].handle;
   const res = {
     statusCode: 200,
@@ -77,7 +88,7 @@ function invoke(params = {}, actor = { techRole: 'admin', technicianId: 'admin-1
 // A scripted db: scheduled_services → the visit; service_records → optional
 // recommendation history then prior frozen tips; property_preferences → the
 // irrigation flag.
-function scriptedDb({ service, recommendationRows = null, sentRows = [], prefs = null, calls }) {
+function scriptedDb({ service, recommendationRows = null, sentRows = [], prefs = null, addons = [], calls }) {
   return (table) => {
     calls.push(table);
     const chain = {};
@@ -101,6 +112,7 @@ function scriptedDb({ service, recommendationRows = null, sentRows = [], prefs =
     };
     chain.first = async () => (table === 'scheduled_services' ? service : table === 'property_preferences' ? prefs : null);
     chain.then = (resolve) => {
+      if (table === 'scheduled_service_addons') return Promise.resolve(addons).then(resolve);
       if (table !== 'service_records') return Promise.resolve([]).then(resolve);
       // History fixtures are published by default; visibility-negative cases
       // opt out explicitly with report_view_token: null.
@@ -156,6 +168,34 @@ afterEach(() => {
 });
 
 describe('GET /:serviceId/tech-tips', () => {
+  beforeEach(() => {
+    mockResolveProfile.mockResolvedValue({ serviceKey: 'mosquito_monthly_unlisted' });
+  });
+
+  test('the visit\'s catalog service leads with its own tips, which no other visit lists (owner-approved 2026-10-02)', async () => {
+    process.env.GATE_TECH_TIPS = 'true';
+    mockResolveProfile.mockResolvedValue({ serviceKey: 'mosquito_monthly' });
+    mockDbCurrent = scriptedDb({ service: SERVICE, calls: [] });
+    const res = await invoke({ serviceId: 'svc-1' });
+    expect(res.body.groups[0]).toMatchObject({ id: 'for_service', label: 'For this service', primary: true });
+    expect(res.body.groups[0].tips.map((tip) => tip.id)).toEqual(['mq_pool', 'mq_tree_holes']);
+    expect(mockResolveProfile).toHaveBeenCalledWith(expect.objectContaining({ id: 'svc-1' }));
+    mockResolveProfile.mockRejectedValue(new Error('catalog down'));
+    const fallback = await invoke({ serviceId: 'svc-1' });
+    expect(fallback.body.groups.map((group) => group.id)).not.toContain('for_service');
+    expect(fallback.body.available).toBe(true);
+  });
+
+  test('an add-on line leads with its own tips beside the primary\'s (Codex #5582)', async () => {
+    process.env.GATE_TECH_TIPS = 'true';
+    mockResolveProfile.mockResolvedValue({ serviceKey: 'mosquito_monthly' });
+    // The key stamped on the line wins; an older line falls back to its catalog row's.
+    mockDbCurrent = scriptedDb({ service: SERVICE, calls: [], addons: [{ key_snapshot: 'flea_tick', catalog_key: 'tick_control' }, { key_snapshot: null, catalog_key: 'bora_care' }] });
+    const res = await invoke({ serviceId: 'svc-1' });
+    expect(res.body.groups[0].tips.map((tip) => tip.id).sort())
+      .toEqual(['bc_keep_dry', 'flea_keep_vacuuming', 'flea_pet_prevention', 'flea_shady_spots', 'mq_pool', 'mq_tree_holes']);
+  });
+
   test('both gates off preserve the no-read unavailable response', async () => {
     const calls = [];
     mockDbCurrent = scriptedDb({ service: SERVICE, calls });
@@ -209,14 +249,14 @@ describe('GET /:serviceId/tech-tips', () => {
     expect(res.body.completionChoicesEnabled).toBe(false);
     expect(res.body.line).toBe('mosquito');
     expect(res.body.season).toBe('wet');
-    expect(res.body.groups.flatMap((g) => g.tips).map((tip) => tip.id).sort()).toEqual(TIPS.filter((tip) => tip.lines.includes('mosquito')).map((tip) => tip.id).sort());
+    expect(res.body.groups.flatMap((g) => g.tips).map((tip) => tip.id).sort()).toEqual(TIPS.filter((tip) => tip.lines.includes('mosquito') && !tip.services).map((tip) => tip.id).sort());
     expect(res.body.groups[0].primary).toBe(true);
     // newest send wins per id
     expect(res.body.lastSent).toEqual({ water_bromeliads: '2026-08-03', light_warm_bulbs: '2026-07-01' });
     expect(res.body.conditions).toEqual({ irrigation_on_file: true });
     expect(res.body).not.toHaveProperty('previousRecommendations');
     // read-only: three reads, no writes
-    expect(calls.sort()).toEqual(['property_preferences', 'scheduled_services', 'service_records']);
+    expect(calls.sort()).toEqual(['property_preferences', 'scheduled_service_addons', 'scheduled_services', 'service_records']);
   });
 
   test('gate on: the irrigation flag alone never counts as settings on file', async () => {
@@ -250,7 +290,7 @@ describe('GET /:serviceId/tech-tips', () => {
     expect(res.body.available).toBe(true);
     expect(res.body.lastSent).toEqual({});
     expect(res.body.conditions).toEqual({ irrigation_on_file: false });
-    expect(calls).toEqual(['scheduled_services']);
+    expect(calls).toEqual(['scheduled_services', 'scheduled_service_addons']);
   });
 
   test('completion choices work with tech tips off and return only three prior same-line visits through the visit date', async () => {
@@ -793,5 +833,68 @@ describe('route wiring contracts', () => {
     expect(block).toContain(".leftJoin('scheduled_services as history_visit'");
     expect(block).toContain(".leftJoin('customer_properties as history_property'");
     expect(block).not.toContain('technician_notes');
+  });
+});
+
+describe('default-product reads keep the current technician assignment boundary', () => {
+  const { resolveCompletionProductDefaults } = require('../services/completion-product-defaults');
+  const { etDateString, addETDays } = require('../utils/datetime-et');
+  test.each([
+    ['own current', 'technician', 'tech-7', 'confirmed', 0, 200],
+    ['another technician', 'technician', 'tech-9', 'confirmed', 0, 404],
+    ['unassigned', 'technician', null, 'confirmed', 0, 404],
+    ['cancelled', 'technician', 'tech-7', 'cancelled', 0, 404],
+    ['stale', 'technician', 'tech-7', 'confirmed', -8, 404],
+    ['recent completed', 'technician', 'tech-7', 'completed', -1, 200],
+    ['office', 'admin', 'tech-9', 'cancelled', -8, 200],
+  ])('%s', async (_, techRole, technician_id, status, dayOffset, expected) => {
+    resolveCompletionProductDefaults.mockClear();
+    mockDbCurrent = table => {
+      expect(table).toBe('scheduled_services');
+      let rows = [{ id: 'svc-1', technician_id, status, scheduled_date: etDateString(addETDays(new Date(), dayOffset)) }];
+      const q = {
+        where(column, op, value) {
+          if (typeof column === 'object') rows = rows.filter(row => Object.entries(column).every(([key, target]) => row[key] === target));
+          else {
+            const key = column.split('.').pop();
+            rows = rows.filter(row => value === undefined ? row[key] === op : row[key] >= value);
+          }
+          return q;
+        },
+        whereNotIn(column, values) { rows = rows.filter(row => !values.includes(row[column.split('.').pop()])); return q; },
+        first: async () => rows[0],
+      };
+      return q;
+    };
+    const result = await invoke({ serviceId: 'svc-1' }, { techRole, technicianId: 'tech-7' }, '/:serviceId/default-products');
+    expect(result.statusCode).toBe(expected);
+    expect(resolveCompletionProductDefaults).toHaveBeenCalledTimes(expected === 200 ? 1 : 0);
+    if (expected === 404) expect(result.body).toEqual({ error: 'Service not found' });
+  });
+
+  test('a visit reassigned while defaults resolve is not returned to the former technician', async () => {
+    let assigned = 'tech-7';
+    resolveCompletionProductDefaults.mockClear();
+    resolveCompletionProductDefaults.mockImplementationOnce(async () => { assigned = 'tech-9'; return { products: [{ id: 'p1' }] }; });
+    mockDbCurrent = () => {
+      let rows = [{ id: 'svc-1', technician_id: assigned, status: 'confirmed', scheduled_date: etDateString(new Date()) }];
+      const q = {
+        where(column, op, value) {
+          if (typeof column === 'object') rows = rows.filter(row => Object.entries(column).every(([key, target]) => row[key] === target));
+          else {
+            const key = column.split('.').pop();
+            rows = rows.filter(row => value === undefined ? row[key] === op : row[key] >= value);
+          }
+          return q;
+        },
+        whereNotIn(column, values) { rows = rows.filter(row => !values.includes(row[column.split('.').pop()])); return q; },
+        first: async () => rows[0],
+      };
+      return q;
+    };
+    const result = await invoke({ serviceId: 'svc-1' }, { techRole: 'technician', technicianId: 'tech-7' }, '/:serviceId/default-products');
+    expect(resolveCompletionProductDefaults).toHaveBeenCalledTimes(1);
+    expect(result.statusCode).toBe(404);
+    expect(result.body).toEqual({ error: 'Service not found' });
   });
 });

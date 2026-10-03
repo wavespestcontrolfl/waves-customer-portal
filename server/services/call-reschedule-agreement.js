@@ -852,4 +852,262 @@ function groundRescheduleAgreement({ v2, transcript, callStartedAt } = {}) {
   return { ok: true, reason: 'agreement_grounded', movedDate };
 }
 
-module.exports = { groundRescheduleAgreement };
+// ---------------------------------------------------------------------------
+// NEW-BOOKING grounding (owner ruling 2026-09-30, commercial dictated booking:
+// services/call-commercial-dictated-booking.js). A SEPARATE function beside
+// groundRescheduleAgreement, which is not changed: it reuses the same turn
+// parser, quote grounding, plainness screens, slot-word checks and language
+// judgements, and differs only where a NEW booking differs from a move.
+//
+// Owner direction 2026-09-30 (codex #5377 r2): hand-written word grammars for
+// "the caller accepted", "staff accepted the caller's proposal" and "the
+// caller selected this day" never converge, so the EXTRACTION judges them
+// (schema 1.21.0) and this code only VERIFIES that the pinned quotes are word
+// for word in a turn of their required speaker, in the right order and
+// adjacent where required, plus the deterministic parts: the exact on-the-hour
+// slot, date resolution and the recorded words. A missing judgement fails
+// closed.
+//   - no existing visit is named (a moved appointment fails closed);
+//   - staff's commitment states the slot (as for a move), or, when the CALLER
+//     proposed one exact day and on-the-hour time, staff's very next turn
+//     accepts that whole proposal (scheduling.staff_accepted_proposed_slot,
+//     the whole reply turn pinned);
+//   - the caller's acceptance (caller_accepted_slot, pinned) is the caller's
+//     whole turn directly after staff's commitment turn, or a quote that
+//     restates the agreed hour, on the hour and in the slot's half of the day;
+//   - a final time turn that omits the day: the day the caller SELECTED
+//     (scheduling.selected_day_words, pinned to a caller turn before the time
+//     turn) must resolve to the agreed date.
+// ---------------------------------------------------------------------------
+
+// A caller's acceptance that restates the hour must state THIS slot: the hour
+// on the hour, no half of the day but the slot's ("two in the morning" never
+// accepts 2 PM), no alternative and no day beyond the recorded day words.
+// The same reading commitsToSlot applies to staff's commitment quote.
+function acceptanceStatesSlot(quote, words, hour24, turns, relative) {
+  const around = sentencesHolding(turns, quote);
+  // Minutes and the hour's own words are read in the sentences the quote sits
+  // in, never the quote alone ("Yes, Thursday at two" cut from "... at two
+  // thirty works" states 2:30).
+  if (!holds(quote, words.hour) || !periodIsTheHours(around, { ...words, period: null })) return false;
+  const otherDays = typeof words.day === 'string' ? padded(around).replace(padded(normalize(words.day)), ' ') : around;
+  return !/ (?:or|either) /.test(padded(around)) && !namesAnyDay(otherDays)
+    // The whole turn says one exact hour (an exact lead and tail, no bound,
+    // alternative or other hour), whether or not a period was said.
+    && turnsHolding(turns, quote, 'caller').every((turn) => proposalIsExact(turn, words, relative)
+      || hourExactIn(turn.raw, { day: words.day, hour: words.hour }, true, relative))
+    && halvesSaid(around).every((half) => half === (hour24 >= 12 ? 'pm' : 'am'));
+}
+
+// The caller's proposal turn states exactly one day and on-the-hour time:
+// the slot words, one hour with an exact lead and tail, no alternative and no
+// other number or hour word (hourExactIn, with the period words attached to
+// the hour when they were said).
+function proposalIsExact(turn, words, relative = false) {
+  const hour = typeof words.period === 'string' ? `${words.hour} ${words.period}` : words.hour;
+  return hourExactIn(turn.raw, { day: words.day, hour }, true, relative);
+}
+
+const isWholeTurn = (turn, quote) => normalize(quote) === turn.ns;
+
+// Everything both modes share. { fail } or the context.
+function newBookingContext({ v2, transcript, callStartedAt }) {
+  const fail = (reason) => ({ fail: { ok: false, reason, mode: null } });
+  const scheduling = v2?.scheduling || {};
+  if (scheduling.moved_appointment_date || scheduling.moved_appointment_relative_date_used === true) return fail('moves_existing_visit');
+  if (scheduling.caller_accepted_slot !== true) return fail('caller_did_not_accept');
+  if (scheduling.agent_committed_booking !== true) return fail('agent_did_not_commit');
+  const unjudged = languageJudgementFailure(scheduling);
+  if (unjudged) return fail(unjudged);
+  const wall = etWallClockOfConfirmedStart(scheduling.confirmed_start_at);
+  const started = new Date(String(callStartedAt || ''));
+  if (!wall || Number.isNaN(started.getTime())) return fail('unparseable_slot');
+  const turns = parseTurns(transcript);
+  if (!turns || new Set(turns.map((t) => t.agent)).size < 2) return fail('unparseable_transcript');
+  const words = scheduling.agreed_slot_words;
+  if (typeof words?.hour !== 'string') return fail('agreed_slot_words_missing');
+  const evidence = Array.isArray(v2.evidence) ? v2.evidence : [];
+  const pinned = (fieldPath, speaker = null) => evidence.filter((e) => e?.field_path === fieldPath && typeof e.quote === 'string' && (!speaker || e.speaker === speaker));
+  // Quotes pinned to a field that appear word for word in a turn of their
+  // stated speaker, plainly said wherever they appear (as for a move).
+  const grounded = (fieldPath, speaker = null) => pinned(fieldPath, speaker)
+    .filter((e) => isPlain(turnsHolding(turns, e.quote, e.speaker), e.quote, fieldPath)).map((e) => e.quote);
+  const ctx = {
+    scheduling, words, started, turns, pinned, grounded, relative: scheduling.relative_date_used,
+    slot: { date: wall.slice(0, 10), hour24: Number(wall.slice(11, 13)) },
+    commitments: grounded('/scheduling/agent_committed_booking', 'agent'),
+    acceptPinned: pinned('/scheduling/caller_accepted_slot', 'caller'),
+    relativeQuotes: [],
+  };
+  if (!ctx.commitments.length) return fail('agent_commitment_ungrounded');
+  if (!ctx.acceptPinned.length) return fail('caller_acceptance_ungrounded');
+  if (ctx.relative) {
+    ctx.relativeQuotes = grounded('/scheduling/relative_date_used');
+    if (!ctx.relativeQuotes.length) return fail('relative_date_ungrounded');
+  }
+  return ctx;
+}
+
+// The day the caller SELECTED, when the final time turn omits it: the
+// extraction's selected_day_words, pinned to a caller turn that holds them and
+// comes before the turn holding the agreed time, resolving to the agreed date.
+function selectedDayBinds(ctx, slotTurns) {
+  const { scheduling, turns, started, slot, relative } = ctx;
+  const chosen = scheduling.selected_day_words;
+  if (relative || typeof chosen !== 'string' || !slotTurns.length) return false;
+  return ctx.pinned('/scheduling/selected_day_words', 'caller').some((e) => {
+    const holding = turnsHolding(turns, e.quote, 'caller');
+    return holds(e.quote, chosen) && namesDate(chosen, slot.date, started)
+      && holding.length > 0 && holding.every((t) => slotTurns.every((st) => turns.indexOf(t) < turns.indexOf(st)));
+  });
+}
+
+// The caller's pinned acceptance: the WHOLE caller turn directly after staff's
+// commitment turn, or a quote restating the agreed hour for THIS slot.
+function acceptanceVerified(ctx, commitTurns) {
+  const { turns, words, slot, relative } = ctx;
+  return ctx.acceptPinned.some(({ quote: q }) => {
+    const holding = turnsHolding(turns, q, 'caller');
+    if (!holding.length || !isPlain(holding, q, '/scheduling/caller_accepted_slot')) return false;
+    if (holds(q, words.hour)) return acceptanceStatesSlot(q, words, slot.hour24, turns, relative);
+    return holding.every((t) => isWholeTurn(t, q) && commitTurns.has(turns[turns.indexOf(t) - 1]));
+  });
+}
+
+// Mode A: staff's own commitment states the slot (the reschedule shape).
+function groundStaffStated(ctx, commitsSlot) {
+  const fail = (reason) => ({ ok: false, reason, mode: null });
+  const { turns, words, slot, started, relative } = ctx;
+  const slotQuotes = ctx.grounded('/scheduling/confirmed_start_at', 'agent').concat(ctx.grounded('/scheduling/confirmed_start_at', 'caller'));
+  const commitTurns = new Set(commitsSlot.flatMap((q) => turnsHolding(turns, q, 'agent')));
+  if (!acceptanceVerified(ctx, commitTurns)) return fail('caller_acceptance_not_of_the_slot');
+  if (words.day) {
+    if (!wordsStateSlot(words, slot, started, null, relative, ctx.relativeQuotes)) return fail('agreed_slot_words_mismatch');
+  } else {
+    const slotTurns = slotQuotes.flatMap((q) => turnsHolding(turns, q, 'agent').concat(turnsHolding(turns, q, 'caller')));
+    if (statedHour(words.hour, words.period) !== slot.hour24) return fail('agreed_slot_words_mismatch');
+    if (!selectedDayBinds(ctx, slotTurns)) return fail('day_not_bound');
+  }
+  const agreementQuotes = [...commitsSlot, ...ctx.acceptPinned.map((e) => e.quote)];
+  if (!slotQuotes.some((q) => statesSlotWords(q, words, turns, agreementQuotes, relative))) return fail('agreed_slot_ungrounded');
+  return { ok: true, reason: 'agreement_grounded', mode: 'staff_stated' };
+}
+
+// Mode B: the caller proposed one exact day and on-the-hour time and staff's
+// very next turn accepted that whole proposal (the extraction's judgement,
+// with the ENTIRE reply turn pinned).
+function groundCallerProposed(ctx) {
+  const fail = (reason) => ({ ok: false, reason, mode: null });
+  const { turns, words, slot, started, relative, scheduling } = ctx;
+  if (!words.day || relative) return fail('agent_commitment_not_the_slot');
+  if (scheduling.staff_accepted_proposed_slot !== true) return fail('staff_acceptance_unjudged');
+  if (!wordsStateSlot(words, slot, started, null, false)) return fail('agreed_slot_words_mismatch');
+  const proposals = ctx.pinned('/scheduling/confirmed_start_at', 'caller');
+  const heldBy = (pins, turn) => pins.find((e) => turnsHolding(turns, e.quote, 'caller').includes(turn));
+  const verified = ctx.pinned('/scheduling/staff_accepted_proposed_slot', 'agent').some((reply) => turnsHolding(turns, reply.quote, 'agent').some((replyTurn) => {
+    const proposalTurn = turns[turns.indexOf(replyTurn) - 1];
+    const proposal = proposalTurn && !proposalTurn.agent && heldBy(proposals, proposalTurn);
+    return proposal && isWholeTurn(replyTurn, reply.quote)
+      && ctx.commitments.some((q) => turnsHolding(turns, q, 'agent').includes(replyTurn))
+      && heldBy(ctx.acceptPinned, proposalTurn)
+      && isPlain(turnsHolding(turns, proposal.quote, 'caller'), proposal.quote, '/scheduling/caller_acceptance_of_proposal')
+      && statesSlotWords(proposal.quote, words, turns, [reply.quote, proposal.quote], false)
+      && proposalIsExact(proposalTurn, words);
+  }));
+  return verified ? { ok: true, reason: 'agreement_grounded', mode: 'caller_proposed' } : fail('agent_commitment_not_the_slot');
+}
+
+function groundNewBookingAgreement(args = {}) {
+  const ctx = newBookingContext(args);
+  if (ctx.fail) return ctx.fail;
+  const commitsSlot = ctx.commitments.filter((q) => commitsToSlot(q, ctx.words, ctx.slot.hour24, ctx.turns, ctx.relative));
+  return commitsSlot.length ? groundStaffStated(ctx, commitsSlot) : groundCallerProposed(ctx);
+}
+
+// Spoken amounts in a transcript turn ("a hundred forty nine", "two hundred and
+// fifty", "fifteen hundred", "forty-nine"), for the commercial dictated booking's
+// price grounding (codex #5377 r12 P2). The repo had no reusable spoken-number
+// parser (procurement-tools' percentWordsToValue is private, 1-99 only), so this
+// is a small CLOSED-SET one: zero..nineteen, the tens, "hundred", "thousand",
+// "and" (only right after a hundred/thousand), "a" (only right before one), and
+// hyphens. Returns one entry per run of number words:
+//   - the value for a well-formed run of 20 or more;
+//   - NaN for a run that is malformed or AMBIGUOUS ("one fifty", "two thirty", "ten
+//     thirty": a unit/teen directly before a tens word could be a price, a clock or
+//     a different number) — NaN never equals an amount, so the caller fails CLOSED;
+//   - nothing for a well-formed run under 20 ("one", "two", "nineteen"): ordinary
+//     prose ("one of our technicians", "at two") and no price Waves quotes (the
+//     bookable floor is $20).
+// Digit amounts are the caller's own concern; this reads number WORDS only.
+const SPOKEN_UNITS = { zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9 };
+const SPOKEN_TEENS = { ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19 };
+const SPOKEN_TENS = { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
+const isSpokenNumberWord = (w) => Object.hasOwn(SPOKEN_UNITS, w) || Object.hasOwn(SPOKEN_TEENS, w) || Object.hasOwn(SPOKEN_TENS, w) || w === 'hundred' || w === 'thousand';
+
+// The kinds of number word each kind may NOT directly follow ("one fifty", "two thirty":
+// a unit or teen right before a tens word is ambiguous; "hundred hundred" is malformed).
+const SPOKEN_FORBIDDEN_PREV = {
+  unit: new Set(['unit', 'teen']),
+  teen: new Set(['unit', 'teen', 'tens', 'tens-unit']),
+  tens: new Set(['unit', 'teen', 'tens', 'tens-unit']),
+  hundred: new Set(['hundred', 'thousand']),
+  thousand: new Set(),
+};
+const SPOKEN_VALUES = { unit: SPOKEN_UNITS, teen: SPOKEN_TEENS, tens: SPOKEN_TENS };
+const spokenKind = (w) => (w === 'hundred' || w === 'thousand' ? w
+  : Object.keys(SPOKEN_VALUES).find((kind) => Object.hasOwn(SPOKEN_VALUES[kind], w)));
+
+function evaluateSpokenRun(words) {
+  let total = 0;
+  let group = 0; // the part below 1000 being built
+  let prev = null; // 'unit' | 'teen' | 'tens' | 'tens-unit' | 'hundred' | 'thousand'
+  let sawHundredInGroup = false;
+  let sawThousand = false;
+  for (const w of words) {
+    const kind = spokenKind(w);
+    if (SPOKEN_FORBIDDEN_PREV[kind].has(prev)) return NaN;
+    if (kind === 'hundred') {
+      if (sawHundredInGroup || group < 1 || group > 99) return NaN;
+      group *= 100; sawHundredInGroup = true;
+    } else if (kind === 'thousand') {
+      if (sawThousand || group < 1) return NaN;
+      total += group * 1000; group = 0; sawHundredInGroup = false; sawThousand = true;
+    } else {
+      // a unit may follow a tens word only to complete it ("forty nine")
+      if (kind === 'unit' && prev === 'tens' && group % 10 !== 0) return NaN;
+      group += SPOKEN_VALUES[kind][w];
+    }
+    prev = kind === 'unit' && prev === 'tens' ? 'tens-unit' : kind;
+  }
+  return total + group;
+}
+
+// Every run of number words in the text, each read whole: its value (under
+// 20 too), or NaN for a malformed or ambiguous run. The typed visit reader
+// (visit-typed-facts.js) grounds a count on it; spokenFiguresIn keeps the
+// runs a price can be.
+function spokenNumbersIn(text) {
+  const tokens = String(text || '').toLowerCase().replace(/[-\u2010-\u2015]/g, ' ').replace(/[^a-z\s]/g, ' ').split(/\s+/).filter(Boolean);
+  const out = [];
+  for (let i = 0; i < tokens.length;) {
+    const aBeforeMultiplier = tokens[i] === 'a' && (tokens[i + 1] === 'hundred' || tokens[i + 1] === 'thousand');
+    if (!aBeforeMultiplier && !isSpokenNumberWord(tokens[i])) { i += 1; continue; }
+    const words = [];
+    if (aBeforeMultiplier) { words.push('one'); i += 1; }
+    while (i < tokens.length) {
+      if (isSpokenNumberWord(tokens[i])) { words.push(tokens[i]); i += 1; continue; }
+      // "one hundred AND fifty": "and" joins only right after a hundred/thousand, before another number word
+      const last = words[words.length - 1];
+      if (tokens[i] === 'and' && (last === 'hundred' || last === 'thousand') && isSpokenNumberWord(tokens[i + 1]) && tokens[i + 1] !== 'hundred' && tokens[i + 1] !== 'thousand') { i += 1; continue; }
+      break;
+    }
+    out.push(evaluateSpokenRun(words));
+  }
+  return out;
+}
+
+function spokenFiguresIn(text) {
+  return spokenNumbersIn(text).filter((value) => Number.isNaN(value) || value >= 20);
+}
+
+module.exports = { groundRescheduleAgreement, groundNewBookingAgreement, groundingTools: { parseTurns, turnsHolding, spokenFiguresIn, spokenNumbersIn } };

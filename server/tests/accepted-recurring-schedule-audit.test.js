@@ -191,6 +191,22 @@ test('an active family hold defers the schedule check until the resume date', ()
   expect(acceptedScheduleFindings(estimate(), [], new Set(), { todayET: TODAY, heldFamilies: new Set(['pest_control']) })).toEqual([]);
 });
 
+test('a held or stopped family is reported back as skipped, so a caller never reads it as judged', () => {
+  const held = new Set();
+  const onHold = new Set();
+  acceptedScheduleFindings(estimate(), [], new Set(), { todayET: TODAY, heldFamilies: new Set(['pest_control']), skippedFamilies: held, onHoldFamilies: onHold });
+  expect([...held]).toEqual(['pest_control']);
+  expect([...onHold]).toEqual(['pest_control']); // a plan hold is the one temporary reason
+  const stopped = new Set();
+  const stoppedOnHold = new Set();
+  acceptedScheduleFindings(estimate(), [parent()], new Set(['visit-1']), { todayET: TODAY, skippedFamilies: stopped, onHoldFamilies: stoppedOnHold });
+  expect([...stopped]).toEqual(['pest_control']);
+  expect([...stoppedOnHold]).toEqual([]); // a stopped series is skipped for good, not on hold
+  const judged = new Set();
+  acceptedScheduleFindings(estimate(), series('quarterly', 4), new Set(), { todayET: TODAY, skippedFamilies: judged });
+  expect([...judged]).toEqual([]);
+});
+
 test('legacy custom 42-day lawn recurrence agrees with the accepted nine-application plan', () => {
   const e = estimate({ estimate_data: { result: { recurring: { services: [{ service: 'lawn_care', name: 'Lawn Care', visitsPerYear: 9 }] } } } });
   const rows = series('every_6_weeks', 9).map((row) => ({ ...row, service_type: 'Lawn Care', catalog_service_key: 'lawn_program',

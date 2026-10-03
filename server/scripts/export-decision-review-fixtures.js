@@ -19,7 +19,10 @@ const ALL_STATUSES = ['unreviewed', 'suspected_error', 'confirmed_error', 'disag
 // jev_answer is the NORMALISED answer ({ p, yes, confident } or { choice, … }),
 // never text: a jev_right label confirms it, so without it two confirmed cases
 // with opposite answers would export identically (pre-push audit, 0d1f917627).
-const COLUMNS = ['capability', 'subject_type', 'subject_id', 'package_id', 'package_hash', 'question_id', 'jev_answer', 'label', 'label_status', 'baseline_answers', 'outcome_evidence'];
+// subject_hash travels as subject_version: the eval re-reads the text by
+// subject id and must drop a case whose live digest no longer matches (a call
+// reprocessed after it was labeled), or the label would score new text.
+const COLUMNS = ['capability', 'provider', 'subject_type', 'subject_id', 'package_id', 'package_hash', 'question_id', 'jev_answer', 'label', 'label_status', 'baseline_answers', 'outcome_evidence', 'subject_hash'];
 // The same contract the schema enforces (migrations 20261001130000 +
 // 20261001140000), repeated here so the export stays honest against rows older
 // than the CHECKs: a real sha256 hex hash, and for confirmed rows a label of the
@@ -41,7 +44,7 @@ const EVIDENCE_PREDICATE = `package_hash ~ '^[0-9a-f]{64}$' AND (label_status NO
 // a score is a finite number. Anything else (a name, an address, a sentence, an
 // option that is not in the package) is dropped, and a confirmed case that
 // cannot produce an in-domain expected answer is not exported at all.
-const { packageFor, packageHash, OUTCOME_SOURCES } = require('../services/typed-decisions/packages');
+const { packageFor, packageHash, OUTCOME_SOURCES, answerInDomain, DECISION_PROVIDERS } = require('../services/typed-decisions/packages');
 
 // The row must name a registered package AND carry that package's CURRENT
 // content hash: a syntactically valid digest for different question wording
@@ -55,14 +58,7 @@ function packageAndQuestion(row, capability) {
   const question = pkg.questions[row.question_id];
   return question ? { pkg, question } : null;
 }
-// The question's answer domain: true when `v` is a valid answer for it.
-function inDomain(question, v) {
-  if (!question) return false;
-  if (question.type === 'noul') return typeof v === 'boolean';
-  if (question.type === 'choice') return typeof v === 'string' && Object.prototype.hasOwnProperty.call(question.criteria || {}, v);
-  if (question.type === 'score') return typeof v === 'number' && Number.isFinite(v);
-  return false;
-}
+const inDomain = answerInDomain;
 const isProb = (n) => typeof n === 'number' && Number.isFinite(n) && n >= 0 && n <= 1;
 // The normalised Jev answer, rebuilt from its raw measurement with the same
 // rules as services/typed-decisions/jev.js#normaliseAnswer: yes and confident
@@ -150,9 +146,17 @@ function rowToCase(row, capability = null) {
   if (row.label_status === 'confirmed_error' && verdict !== 'jev_wrong') return null;
   const label = structuredLabel(row.label);
   if (label && row.label && row.label.verdict === 'jev_wrong' && inDomain(question, row.label.correct_value)) label.correct_value = row.label.correct_value;
+  // Which provider's answer this case holds: a closed registry value, never a
+  // stored string. provider is NOT NULL and selected here, so a row without one
+  // is malformed and is not exported, like a value outside the registry (it can
+  // never be relabeled as another provider's answer; Codex r7, #5555).
+  const provider = DECISION_PROVIDERS.includes(row.provider) ? row.provider : null;
+  if (!provider) return null;
   return {
+    provider,
     subject_type: row.subject_type,
     subject_id: row.subject_id,
+    subject_version: typeof row.subject_hash === 'string' && /^[0-9a-f]{64}$/.test(row.subject_hash) ? row.subject_hash : null,
     package_id: row.package_id,
     package_hash: row.package_hash,
     question_id: row.question_id,
@@ -188,7 +192,9 @@ async function exportCases({ db, capability, statuses = DEFAULT_STATUSES, now = 
     .whereIn('label_status', statuses)
     .whereRaw(EVIDENCE_PREDICATE)
     .select(COLUMNS)
-    .orderBy([{ column: 'package_id' }, { column: 'subject_type' }, { column: 'subject_id' }, { column: 'question_id' }]);
+    // provider last: two providers' rows for one subject and question tie on
+    // every other column, and a committed fixture must not reorder on re-export.
+    .orderBy([{ column: 'package_id' }, { column: 'subject_type' }, { column: 'subject_id' }, { column: 'question_id' }, { column: 'provider' }]);
   return { capability, exported_at: now().toISOString(), cases: rows.map((row) => rowToCase(row, capability)).filter(Boolean) };
 }
 

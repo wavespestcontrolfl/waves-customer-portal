@@ -42,6 +42,7 @@ let activityInserts;
 let customersUpdateCalls;
 let customersWhereNotInCalls;
 let existingNoticeRow;
+let rateReviewNoticeRow;
 let insertConflict;
 let conflictTargets = [];
 let claimRejected;
@@ -73,8 +74,10 @@ function noticesQuery() {
       return { onConflict: jest.fn((target) => { conflictTargets.push(target); return { ignore: jest.fn(() => ({ returning })) }; }), returning };
     }),
     where: jest.fn(() => q),
+    whereNull: jest.fn(() => q),
+    whereNotNull: jest.fn((col) => { if (col === 'rate_review_row_id') q.rateReviewOnly = true; return q; }),
     orderBy: jest.fn(() => q),
-    first: jest.fn(async () => existingNoticeRow),
+    first: jest.fn(async () => (q.rateReviewOnly ? rateReviewNoticeRow : existingNoticeRow)),
     update: jest.fn(async (patch) => {
       noticeUpdates.push(patch);
       // The draft→sending claim reports affected rows; 0 = claim lost.
@@ -111,6 +114,7 @@ beforeEach(() => {
   customersUpdateCalls = [];
   customersWhereNotInCalls = [];
   existingNoticeRow = null;
+  rateReviewNoticeRow = null;
   insertConflict = false;
   claimRejected = false;
   getActivelyCoveredCustomerIds.mockResolvedValue([]);
@@ -345,6 +349,18 @@ describe('createAndSendBatch delivery', () => {
     expect(sendTemplate).not.toHaveBeenCalled();
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(noticeUpdates).toHaveLength(0);
+  });
+
+  it('leaves an event the annual rate review already owns to that lane — its draft is never claimed or sent here', async () => {
+    customerRows = [CUSTOMER];
+    rateReviewNoticeRow = { id: 'n-rate-review' };
+    existingNoticeRow = { id: 'n-rate-review', status: 'draft', notice_token: '0123456789abcdef0123456789abcdef', rate_review_row_id: 'rr-1' };
+    const out = await createAndSendBatch({ ...GOOD_ARGS, expectedDigest: await digestFor(GOOD_ARGS) });
+    expect(out).toMatchObject({ ok: true, created: 0, emailed: 0, texted: 0, alreadyNotified: 0, rateReview: 1, failed: 0 });
+    expect(noticeInserts).toHaveLength(0);
+    expect(noticeUpdates).toHaveLength(0);
+    expect(sendTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
   it('targets the legacy (partial) event index by its predicate — rate-review notices key per plan line', async () => {

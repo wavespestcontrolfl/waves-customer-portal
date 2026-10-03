@@ -115,8 +115,19 @@ describe('v2 extraction prompt', () => {
   });
 
   test('prompt version and hash are stable', () => {
-    expect(PROMPT_VERSION).toBe('v19');
-    expect(PROMPT_HASH).toMatch(/^v19-[a-f0-9]{12}$/);
+    expect(PROMPT_VERSION).toBe('v21');
+    expect(PROMPT_HASH).toMatch(/^v21-[a-f0-9]{12}$/);
+  });
+
+  test('includes the on-site consent rules (schema 1.22.0, prompt v21, owner ruling 2026-09-30)', () => {
+    const prompt = buildExtractionPrompt(transcript, callerPhone, callDateET);
+    expect(prompt).toContain('- wants_appointment_texts: true ONLY when the caller agreed this person should receive the appointment TEXT messages');
+    expect(prompt).toContain('Wanting the REPORT or INVOICE sent to someone ("email him the report") is NOT appointment-text intent');
+    expect(prompt).toContain('- on_site: true ONLY when the call says this person will be AT the property for the visit');
+    expect(prompt).toContain('Default false; do not invent.');
+    // Each needs an evidence quote when true, for both the single and array shapes.
+    expect(prompt).toContain('secondary_contact.wants_appointment_texts (when true');
+    expect(prompt).toContain('secondary_contact.on_site (when true');
   });
 
   test('includes the family_member relationship instructions (schema 1.18.0)', () => {
@@ -146,6 +157,19 @@ describe('v2 extraction prompt', () => {
     expect(prompt).toContain('moved_appointment_words: for reschedule_requested only');
     expect(prompt).toContain('null whenever moved_appointment_date is null');
     expect(prompt).toContain('When scheduling.agreed_slot_words is set, the /scheduling/confirmed_start_at quote must contain each of its non-null values');
+  });
+
+  test('includes the commercial dictated booking judgements (schema 1.21.0, owner direction 2026-09-30)', () => {
+    const prompt = buildExtractionPrompt(transcript, callerPhone, callDateET);
+    for (const field of ['price_offered_by_staff', 'price_accepted_by_caller', 'price_is_final', 'staff_accepted_proposed_slot', 'selected_day_words']) {
+      expect(prompt).toContain(`- ${field}:`);
+    }
+    expect(prompt).toContain('never a question about a price ("did another company quote you $150?")');
+    expect(prompt).toContain('accepts that WHOLE proposal as stated');
+    expect(prompt).toContain('pin that ENTIRE reply turn as the agent_committed_booking quote');
+    expect(prompt).toContain('never one the caller rejected, called impossible or unavailable');
+    expect(prompt).toContain('/service_request/price_accepted_by_caller');
+    expect(prompt).toContain('/scheduling/selected_day_words');
   });
 
   test('includes the reschedule language-judgement rules (schema 1.20.0, owner direction 2026-09-30)', () => {
@@ -334,7 +358,7 @@ describe('v2 extraction function (extractCallDataV2)', () => {
 
 describe('schema version alignment', () => {
   test('schema version matches between validator and prompt', () => {
-    expect(SCHEMA_VERSION).toBe('1.20.0');
+    expect(SCHEMA_VERSION).toBe('1.22.0');
   });
 
   test('persisted schema_version enum accepts the current SCHEMA_VERSION (P1: a missing enum entry fail-closes every extraction)', () => {

@@ -238,15 +238,22 @@ function inchLabel(v) {
 }
 
 // ── 1. Lawn Health Snapshot (hero) ──────────────────────────────────────────────
-export function LawnSnapshotHero({ snapshot = {}, children }) {
-  const { overallScore, statusHeadline, scoreExplanation, rootCause, seasonalNote, todaysFocus = [], watching = [], wavesNext, customerAction, noActionNeeded, nextVisit } = snapshot;
-  const status = snapshot.status || scoreStatus(overallScore);
+// The next-visit sentence the hero and the lead share: a scheduled label as-is,
+// a cadence estimate as "Expected around …", and nothing for a missing or
+// 'Invalid Date' label (an older cached payload).
+function nextVisitSentence(nextVisit) {
   const hasNextVisit = nextVisit && nextVisit.label && nextVisit.label !== 'Invalid Date';
-  const nextVisitText = hasNextVisit
+  return hasNextVisit
     ? (nextVisit.source === 'estimated'
       ? `Expected around ${nextVisit.label}${nextVisit.cadenceWeeks ? ` (about every ${nextVisit.cadenceWeeks} weeks)` : ''}`
       : nextVisit.label)
     : null;
+}
+
+export function LawnSnapshotHero({ snapshot = {}, children }) {
+  const { overallScore, statusHeadline, scoreExplanation, rootCause, seasonalNote, todaysFocus = [], watching = [], wavesNext, customerAction, noActionNeeded, nextVisit } = snapshot;
+  const status = snapshot.status || scoreStatus(overallScore);
+  const nextVisitText = nextVisitSentence(nextVisit);
   return (
     <Card style={{ background: TAN }}>
       <div style={{ display: 'flex', gap: 18, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -319,8 +326,103 @@ export function LawnSnapshotHero({ snapshot = {}, children }) {
   );
 }
 
+// "Aug 1" from the server's YYYY-MM-DD (a calendar day, so it is read at noon
+// UTC and printed in UTC: no viewer time zone can move it a day).
+function shortDay(ymd) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(ymd || ''))) return null;
+  const date = new Date(`${ymd}T12:00:00Z`);
+  return Number.isNaN(date.getTime()) ? null : date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+}
+
+// ── 1b. Lead (GATE_LAWN_REPORT_LEAD) ────────────────────────────────────────────
+// The above-the-fold block when the payload carries reportV2.lead (server:
+// lawn-report-lead.js). One owner per fact: the score ring + headline, why, an
+// what we applied, the homeowner's part, and ONE next
+// visit line (date + the lead's reason). It replaces the hero AND the follow-up
+// card, so there is no Today's focus, "What's driving it" box, watching list,
+// "What Waves will do next", seasonal note or "no action needed" line here. The
+// watering banner (rendered above the report) owns the watering task.
+// lead.sinceLast (GATE_LAWN_SINCE_LAST) is the "Since your last visit" block:
+// server-selected sentences printed as given, above what was applied today.
+export function LawnLeadCard({ lead = {}, snapshot = {}, style = null }) {
+  const status = snapshot.status || scoreStatus(snapshot.overallScore);
+  const yourPart = Array.isArray(lead.yourPart) ? lead.yourPart.filter(Boolean) : [];
+  const visitDate = nextVisitSentence(snapshot.nextVisit);
+  const nextVisit = [visitDate, lead.next].filter(Boolean).join(' — ');
+  const sinceLastLines = Array.isArray(lead.sinceLast?.lines) ? lead.sinceLast.lines.filter(Boolean) : [];
+  const sinceLastDay = shortDay(lead.sinceLast?.priorDate);
+  return (
+    <div data-testid="lawn-lead-region">
+      <Card style={{ background: TAN, ...(style || {}) }}>
+        <div style={{ display: 'flex', gap: 18, alignItems: 'center', flexWrap: 'wrap' }}>
+          <div style={{ flex: 'none' }}>
+            <ScoreRing value={snapshot.overallScore} status={status} size={116} />
+          </div>
+          <div style={{ flex: '1 1 220px', minWidth: 0 }}>
+            <div data-gt="eyebrow" style={{ fontSize: 14, textTransform: 'uppercase', letterSpacing: '0.08em', color: MUTED, fontWeight: 700, marginBottom: 4 }}>
+              Overall Lawn Status
+            </div>
+            <h2 className="sr-v2-hero-title" style={{ fontFamily: FONTS.serif, fontSize: 25, fontWeight: 500, lineHeight: 1.2, color: TEXT, margin: '0 0 8px' }}>
+              {lead.headline || statusMeta(status).label}
+            </h2>
+            {lead.why ? <p style={{ fontSize: 16, color: BODY, lineHeight: 1.5, margin: '0 0 6px' }}>{lead.why}</p> : null}
+          </div>
+        </div>
+
+        {sinceLastLines.length ? (
+          <div data-testid="lawn-since-last" style={{ marginTop: 10, padding: '11px 13px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 10 }}>
+            <div data-gt="eyebrow" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+              {sinceLastDay ? `Since your last visit, ${sinceLastDay}` : 'Since your last visit'}
+            </div>
+            <div style={{ fontSize: 16, color: BODY, lineHeight: 1.5, marginTop: 3 }}>
+              {sinceLastLines.map((line, i) => <div key={i} style={i ? { marginTop: 4 } : null}>{line}</div>)}
+            </div>
+          </div>
+        ) : null}
+
+        {lead.applied ? (
+          <div style={{ marginTop: 10, padding: '11px 13px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 10 }}>
+            <div data-gt="eyebrow" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em' }}>What we applied today</div>
+            <div style={{ fontSize: 16, color: BODY, lineHeight: 1.5, marginTop: 3 }}>{lead.applied}</div>
+          </div>
+        ) : null}
+
+        {/* GATE_LAWN_REPORT_COPY_V6: approved expectation sentences (selected, never
+            model-written) and the short guarded "watching" line. Absent keys render nothing. */}
+        {lead.whatToExpect ? (
+          <div data-testid="lawn-lead-expect" style={{ marginTop: 10, padding: '11px 13px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 10 }}>
+            <div data-gt="eyebrow" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em' }}>What to expect</div>
+            <div style={{ fontSize: 16, color: BODY, lineHeight: 1.5, marginTop: 3 }}>{lead.whatToExpect}</div>
+          </div>
+        ) : null}
+
+        {lead.watching ? (
+          <div data-testid="lawn-lead-watching" style={{ marginTop: 10, padding: '11px 13px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 10 }}>
+            <div data-gt="eyebrow" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Watching</div>
+            <div style={{ fontSize: 16, color: BODY, lineHeight: 1.5, marginTop: 3 }}>{lead.watching}</div>
+          </div>
+        ) : null}
+
+        {yourPart.length || nextVisit ? (
+          <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${BORDER}`, display: 'grid', gap: 10 }}>
+            {yourPart.length ? (
+              <KeyLine
+                label="Your part this week"
+                value={yourPart.map((task, i) => <div key={i} style={i ? { marginTop: 4 } : null}>{task}</div>)}
+                dot={COLORS.glassNavy}
+                valueSize={16}
+              />
+            ) : null}
+            {nextVisit ? <KeyLine label="Next visit" value={nextVisit} dot={COLORS.glassNavy} valueSize={16} /> : null}
+          </div>
+        ) : null}
+      </Card>
+    </div>
+  );
+}
+
 // Reassurance card: a planned/scheduled follow-up, surfaced instead of buried in prose.
-export function LawnFollowUpCard({ followUp = null }) {
+export function LawnFollowUpCard({ followUp = null, showYourPart = true }) {
   if (!followUp || !followUp.scheduled) return null;
   return (
     <Card style={{ background: 'rgba(4, 57, 94, 0.10)', border: `1px solid ${COLORS.glassNavy}` }}>
@@ -329,7 +431,7 @@ export function LawnFollowUpCard({ followUp = null }) {
         <div style={{ minWidth: 0 }}>
           <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 16.5, color: TEXT }}>{followUp.headline || 'Follow-up already planned'}</div>
           {followUp.reason ? <p style={{ margin: '4px 0 0', fontSize: 14, color: BODY, lineHeight: 1.5 }}>{followUp.reason}</p> : null}
-          {followUp.customerAction ? (
+          {showYourPart && followUp.customerAction ? (
             <p style={{ margin: '8px 0 0', fontSize: 14.5, color: BODY, lineHeight: 1.5 }}>
               <strong style={{ color: TEXT }}>Your part:</strong> {followUp.customerAction}
             </p>
@@ -340,13 +442,28 @@ export function LawnFollowUpCard({ followUp = null }) {
   );
 }
 
-function KeyLine({ label, value, dot }) {
+// GATE_LAWN_EXPECTATIONS (lead layout): the month's program sentence, rendered
+// once beside the trends. The server marks the line with
+// snapshot.seasonalNoteSource === 'program'; any other seasonalNote is the old
+// season note, which the lead layout has never rendered.
+export function LawnProgramLine({ snapshot = null }) {
+  const text = snapshot && snapshot.seasonalNoteSource === 'program' ? String(snapshot.seasonalNote || '').trim() : '';
+  if (!text) return null;
+  return (
+    <Card>
+      <CardTitle>This time of year</CardTitle>
+      <p style={{ margin: 0, fontSize: 14.5, color: BODY, lineHeight: 1.55 }}>{text}</p>
+    </Card>
+  );
+}
+
+function KeyLine({ label, value, dot, valueSize = 14.5 }) {
   return (
     <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
       <span style={{ width: 9, height: 9, borderRadius: 999, background: dot, flex: 'none', marginTop: 6 }} />
       <div>
         <div data-gt="eyebrow" style={{ fontSize: 14, textTransform: 'uppercase', letterSpacing: '0.06em', color: MUTED, fontWeight: 700 }}>{label}</div>
-        <div style={{ fontSize: 14.5, color: BODY, lineHeight: 1.5 }}>{value}</div>
+        <div style={{ fontSize: valueSize, color: BODY, lineHeight: 1.5 }}>{value}</div>
       </div>
     </div>
   );
@@ -370,8 +487,12 @@ function SliderArrow({ dir, onClick, disabled }) {
   );
 }
 
-export function LawnPhotoStrip({ photos = [], summary = null, embedded = false }) {
+export function LawnPhotoStrip({ photos = [], summary = null, embedded = false, lead = false }) {
   const print = usePrint();
+  // The browser print pass (Report Tools "Print", Cmd+P) over the live page
+  // opens the expanders too, not only ?mode=pdf/static (codex P1 #5517 r1).
+  const printRequested = usePrintRequested();
+  const printOpen = print || printRequested;
   const pics = (photos || []).filter((p) => p && p.url);
   const scroller = useRef(null);
   const [idx, setIdx] = useState(0);
@@ -435,7 +556,13 @@ export function LawnPhotoStrip({ photos = [], summary = null, embedded = false }
           ) : null}
         </div>
       ) : null}
-      {summary ? <p style={{ margin: '12px 0 0', fontSize: 14, color: BODY, lineHeight: 1.55 }}>{summary}</p> : null}
+      {summary && lead ? (
+        <details open={printOpen} style={{ marginTop: 12 }}>
+          <summary style={{ cursor: 'pointer', fontSize: 14, fontWeight: 700, color: MUTED }}>Technician notes</summary>
+          <p style={{ margin: '8px 0 0', fontSize: 14, color: BODY, lineHeight: 1.55 }}>{summary}</p>
+        </details>
+      ) : null}
+      {summary && !lead ? <p style={{ margin: '12px 0 0', fontSize: 14, color: BODY, lineHeight: 1.55 }}>{summary}</p> : null}
     </Frame>
   );
 }
@@ -467,14 +594,14 @@ const CATEGORY_DETAIL = {
   },
 };
 
-export function VisualDiagnosisCards({ categories = [] }) {
+export function VisualDiagnosisCards({ categories = [], lead = false, scoreExplanation = null }) {
   const print = usePrint();
   const [barsRef, mounted] = useInViewOnce(0.25);
   const cats = categories.filter(Boolean);
   if (!cats.length) return null;
   return (
     <Card>
-      <CardTitle sub="Five diagnostic categories scored from today’s field photos with AI-assisted image analysis and verified by your technician. Tap a row for details.">Turf Health Analysis</CardTitle>
+      <CardTitle sub={lead ? (scoreExplanation || 'Scored from today’s photos. Tap a row for details.') : 'Five diagnostic categories scored from today’s field photos with AI-assisted image analysis and verified by your technician. Tap a row for details.'}>Turf Health Analysis</CardTitle>
       {/* Visual-primary rows: the score ring + bar + status carry the read at a glance;
           the plain-language detail lives in the dropdown. */}
       {/* minmax(0, 1fr), not the implicit auto track: an auto track is sized to
@@ -555,20 +682,82 @@ const INSIGHT_CONFIDENCE = {
   area_estimated: 'Estimated for your area',
 };
 
-export function LawnInsightCards({ insights = [], limit = 3 }) {
+// In lead mode the top-ranked card leaves out the step and next-visit plan the
+// lead already shows (same text, or one sentence containing the other); anything
+// the lead did not carry stays on the card.
+const sameText = (a, b) => {
+  const x = String(a || '').trim();
+  const y = String(b || '').trim();
+  return Boolean(x && y && (x === y || x.includes(y) || y.includes(x)));
+};
+
+export function LawnInsightCards({ insights = [], limit = 3, lead = null }) {
+  const print = usePrint();
+  // The browser print pass (Report Tools "Print", Cmd+P) over the live page
+  // opens the expanders too, not only ?mode=pdf/static (codex P1 #5517 r1).
+  const printRequested = usePrintRequested();
+  const printOpen = print || printRequested;
   const top = [...insights.filter(Boolean)]
     .sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99))
     .slice(0, limit);
   if (!top.length) return null;
+  // Lead mode: a healthy report's only card is the 'overall' reassurance, which
+  // the lead's headline already says, so the whole card is left out.
+  if (lead && top.every((card) => card.category === 'overall')) return null;
   return (
     <Card>
-      <CardTitle sub="Your technician’s key findings from today’s inspection, ranked by priority — what we found, why it matters, and the treatment plan for each.">Priority Findings & Action Plan</CardTitle>
+      <CardTitle sub={lead ? null : 'Your technician’s key findings from today’s inspection, ranked by priority — what we found, why it matters, and the treatment plan for each.'}>{lead ? 'Priority findings' : 'Priority Findings & Action Plan'}</CardTitle>
       {/* minmax(0, 1fr) for the same reason as the diagnosis rows: an auto track
           sized to the headline's longest word + the status pill blew past the
           card on a 320px phone. */}
       <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 12 }}>
-        {top.map((it, i) => {
-          const meta = statusMeta(it.status || 'tracking');
+        {top.map((card, i) => {
+          const meta = statusMeta(card.status || 'tracking');
+          const inLead = lead && i === 0;
+          const it = inLead ? {
+            ...card,
+            customerAction: (lead.yourPart || []).some((task) => sameText(task, card.customerAction)) ? null : card.customerAction,
+            // The lead's "Next visit" line owns the plan whenever it has one,
+            // so the card never prints a second, different "Next visit".
+            nextVisitPlan: (lead.next || sameText(lead.next, card.nextVisitPlan)) ? null : card.nextVisitPlan,
+          } : card;
+          if (lead) {
+            // A finding is its headline, status and what we saw. The reason it
+            // matters stays inline only for needs_attention; a step or plan the
+            // lead could not carry stays visible; the rest folds into "More
+            // about this" (opened in print/PDF).
+            const showWhy = it.status === 'needs_attention';
+            const showPlan = inLead && Boolean(it.nextVisitPlan);
+            const more = [
+              !showWhy && it.whyItMatters ? <InsightLine key="why" label="Why it matters" value={it.whyItMatters} size={16} /> : null,
+              it.wavesAction ? <InsightLine key="did" label="What Waves did" value={it.wavesAction} size={16} /> : null,
+              !showPlan && it.nextVisitPlan ? <InsightLine key="next" label="Next visit" value={it.nextVisitPlan} size={16} /> : null,
+            ].filter(Boolean);
+            const confidenceLabel = it.confidence && INSIGHT_CONFIDENCE[it.confidence] ? INSIGHT_CONFIDENCE[it.confidence] : null;
+            return (
+              <div key={i} style={{ border: `1px solid ${BORDER}`, borderLeft: `4px solid ${meta.color}`, borderRadius: 12, background: CARD, padding: '14px 16px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'space-between', marginBottom: 6, flexWrap: 'wrap' }}>
+                  <div style={{ flex: '1 1 auto', minWidth: 0, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 16.5, color: TEXT, lineHeight: 1.25 }}>{it.headline}</div>
+                  <StatusPill status={it.status || 'tracking'} small />
+                </div>
+                <div style={{ display: 'grid', gap: 6 }}>
+                  {it.whatWeSaw ? <InsightLine label="What we saw" value={it.whatWeSaw} size={16} /> : null}
+                  {showWhy && it.whyItMatters ? <InsightLine label="Why it matters" value={it.whyItMatters} size={16} /> : null}
+                  {it.customerAction ? <InsightLine label="Your next step" value={it.customerAction} strong size={16} /> : null}
+                  {showPlan ? <InsightLine label="Next visit" value={it.nextVisitPlan} size={16} /> : null}
+                </div>
+                {more.length || confidenceLabel ? (
+                  <details open={printOpen} style={{ marginTop: 10 }}>
+                    <summary style={{ cursor: 'pointer', fontSize: 14, fontWeight: 700, color: MUTED }}>More about this</summary>
+                    <div style={{ display: 'grid', gap: 6, marginTop: 8 }}>
+                      {more}
+                      {confidenceLabel ? <div style={{ fontSize: 14, color: MUTED, fontStyle: 'italic' }}>{confidenceLabel}</div> : null}
+                    </div>
+                  </details>
+                ) : null}
+              </div>
+            );
+          }
           return (
             <div key={i} style={{ border: `1px solid ${BORDER}`, borderLeft: `4px solid ${meta.color}`, borderRadius: 12, background: CARD, padding: '14px 16px' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'space-between', marginBottom: 6, flexWrap: 'wrap' }}>
@@ -576,11 +765,14 @@ export function LawnInsightCards({ insights = [], limit = 3 }) {
                 <StatusPill status={it.status || 'tracking'} small />
               </div>
               <div style={{ display: 'grid', gap: 6 }}>
-                {it.whatWeSaw ? <InsightLine label="What we saw" value={it.whatWeSaw} /> : null}
-                {it.whyItMatters ? <InsightLine label="Why it matters" value={it.whyItMatters} /> : null}
-                {it.wavesAction ? <InsightLine label="What Waves did" value={it.wavesAction} /> : null}
-                {it.customerAction ? <InsightLine label="Your next step" value={it.customerAction} strong /> : null}
-                {!it.customerAction && it.nextVisitPlan ? <InsightLine label="Next visit" value={it.nextVisitPlan} /> : null}
+                {it.whatWeSaw ? <InsightLine label="What we saw" value={it.whatWeSaw} size={lead ? 16 : 14.5} /> : null}
+                {it.whyItMatters ? <InsightLine label="Why it matters" value={it.whyItMatters} size={lead ? 16 : 14.5} /> : null}
+                {it.wavesAction ? <InsightLine label="What Waves did" value={it.wavesAction} size={lead ? 16 : 14.5} /> : null}
+                {it.customerAction ? <InsightLine label="Your next step" value={it.customerAction} strong size={lead ? 16 : 14.5} /> : null}
+                {/* In lead mode a plan the lead could not show (filtered under the
+                    banner or over its cap) prints beside the step, so the
+                    report still says a follow-up is planned (codex P2 #5496 r6). */}
+                {(inLead || !it.customerAction) && it.nextVisitPlan ? <InsightLine label="Next visit" value={it.nextVisitPlan} size={lead ? 16 : 14.5} /> : null}
               </div>
               {it.confidence && INSIGHT_CONFIDENCE[it.confidence] ? (
                 <div style={{ marginTop: 8, fontSize: 14, color: MUTED, fontStyle: 'italic' }}>{INSIGHT_CONFIDENCE[it.confidence]}</div>
@@ -593,9 +785,9 @@ export function LawnInsightCards({ insights = [], limit = 3 }) {
   );
 }
 
-function InsightLine({ label, value, strong }) {
+function InsightLine({ label, value, strong, size = 14.5 }) {
   return (
-    <div style={{ fontSize: 14.5, lineHeight: 1.5, color: strong ? TEXT : BODY }}>
+    <div style={{ fontSize: size, lineHeight: 1.5, color: strong ? TEXT : BODY }}>
       <span style={{ fontWeight: 700, color: COLORS.glassNavy }}>{label}: </span>
       {value}
     </div>
@@ -725,8 +917,13 @@ function WeekPlanCallout({ weekPlan, aftercare }) {
 }
 
 // ── 3. Water This Week (stacked bar vs target band) ──────────────────────────────
-export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', aftercare = null }) {
+export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', aftercare = null, lead = false, coverageCardShown = false }) {
   const mounted = useMounted();
+  const print = usePrint();
+  // The browser print pass (Report Tools "Print", Cmd+P) over the live page
+  // opens the expanders too, not only ?mode=pdf/static (codex P1 #5517 r1).
+  const printRequested = usePrintRequested();
+  const printOpen = print || printRequested;
   if (!water) return null;
   // Missing readings stay missing card-wide: Number(null)/Number('') are a
   // finite 0, and a rain-unknown payload must not render a false `Rain 0"`
@@ -780,6 +977,8 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
   const stackedExtent = (hasRain ? rain : 0) + (hasIrr && irrOnFile ? irrigation : 0);
   const axisMax = Math.max(hasTotal ? total : 0, stackedExtent, hasTarget ? target : 0) * 1.25 || 2;
   const pctOf = (v) => `${clamp((v / axisMax) * 100)}%`;
+  const explanationShown = Boolean(water.explanation && !(water.weekPlan && water.weekPlan.title) && !(!irrOnFile && /irrigat|schedul|sprinkler|total|combined/i.test(water.explanation)));
+  const afterNote = Boolean(aftercare && aftercare.watering);
 
   return (
     <Card>
@@ -831,7 +1030,7 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
           watering instruction — the legacy balance explanation ("more
           irrigation time will help") can contradict a hold or a
           rain-conditional plan (codex gh-r21). */}
-      {water.explanation && !(water.weekPlan && water.weekPlan.title) && !(!irrOnFile && /irrigat|schedul|sprinkler|total|combined/i.test(water.explanation)) ? (
+      {!lead && explanationShown ? (
         <p style={{ margin: '12px 0 0', fontSize: 14, color: BODY, lineHeight: 1.55 }}>{water.explanation}</p>
       ) : null}
       {water.scheduleUnconfirmed ? (
@@ -853,14 +1052,31 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
           cover — treatment-first still, but no "counts as a run" claim
           (codex gh-r16). */}
       <WeekPlanCallout weekPlan={water.weekPlan} aftercare={aftercare} />
+      {/* Lead mode: the reading, the plan and the label note fold into one
+          expander (opened in print/PDF) under the plan. The static "Coverage
+          watch" callout is dropped there only when the coverage finding card
+          says it; a surplus week with a dry photo read has no coverage card,
+          so the callout stays as the one place that says it (Fable P2 #5517). */}
+      {lead && (explanationShown || afterNote) ? (
+        <details open={printOpen} style={{ marginTop: 12 }}>
+          <summary style={{ cursor: 'pointer', fontSize: 14, fontWeight: 700, color: MUTED }}>Why this reading</summary>
+          {explanationShown ? <p style={{ margin: '8px 0 0', fontSize: 14, color: BODY, lineHeight: 1.55 }}>{water.explanation}</p> : null}
+          {afterNote ? (
+            <div className="lawn-callout-after" style={{ marginTop: 10, fontSize: 14.5, color: BODY, lineHeight: 1.5 }}>
+              <strong style={{ color: TEXT }}>After today’s visit:</strong> {aftercare.watering}
+              {aftercare.reentry ? <div style={{ marginTop: 4, fontSize: 14, color: MUTED }}>{aftercare.reentry}</div> : null}
+            </div>
+          ) : null}
+        </details>
+      ) : null}
       {/* Amount-adequate but a localized dry/uneven area → coverage, not "water more". */}
-      {water.coverageWatch ? (
+      {(!lead || !coverageCardShown) && water.coverageWatch ? (
         <div className="lawn-callout-watch" style={{ marginTop: 10, padding: '9px 12px', background: COLORS.sand, border: `1px solid ${COLORS.glassNavy}`, borderRadius: 8, fontSize: 14, color: BODY, lineHeight: 1.5 }}>
           <strong style={{ color: TEXT }}>Coverage watch:</strong> total weekly water looks adequate, but a few areas may not be getting even coverage — worth checking that your sprinklers reach those spots rather than watering the whole lawn more.
         </div>
       ) : null}
       {/* Watering after today, from the product label (or a safe default). */}
-      {aftercare && aftercare.watering ? (
+      {!lead && afterNote ? (
         <div className="lawn-callout-after" style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${BORDER}`, fontSize: 14.5, color: BODY, lineHeight: 1.5 }}>
           <strong style={{ color: TEXT }}>After today’s visit:</strong> {aftercare.watering}
           {aftercare.reentry ? <div style={{ marginTop: 4, fontSize: 14, color: MUTED }}>{aftercare.reentry}</div> : null}

@@ -34,7 +34,9 @@ const makeHandle = ({ visit, held, calls, history = false }) => {
   h.raw = jest.fn(async () => ({}));
   return h;
 };
-const today = '2020-01-06';   // never a future date
+// Today in ET: never a future date, and inside the technician access window
+// the field guards now apply (codex #5568 r8 sweep).
+const today = require('../utils/datetime-et').etDateString();
 const baseVisit = (extra = {}) => ({
   id: 'v1', technician_id: 'tech-1', status: 'pending', customer_confirmed: false, source_action: 'voice_agent',
   scheduled_date: today, customer_id: 'c1', source_call_log_id: 'call-1', ...extra,
@@ -399,7 +401,8 @@ describe('r20: the confirm is bound to the address the office was shown', () => 
     expect(check).toBeGreaterThan(lock);
     expect(check).toBeLessThan(s.indexOf('await transitionJobStatus({', check));
     const t = fs.readFileSync(require.resolve('../routes/admin-triage.js'), 'utf8');
-    expect(t).toContain("require('../services/street-level-hold').visitServiceAddressLine(r)");
+    expect(t).toContain("const { visitServiceAddressLine, visitWhenLine, streetLevelVisitLink } = require('../services/street-level-hold');");
+    expect(t).toContain('visitServiceAddressLine(r)');
     expect(visitServiceAddressLine(row)).toBe('1234 Sample Newbuild Trl, Parrish, FL, 34219');
   });
 });

@@ -18,10 +18,12 @@
 
 const TWILIO_NUMBERS = require('../../../config/twilio-numbers');
 
-// The callback number spoken in every fixed line — the business main line,
-// the same number the call presents as caller ID.
-function callbackNumber() {
-  return TWILIO_NUMBERS.mainLine.formatted;
+// The callback number spoken in every fixed line — the same number the call
+// presents as caller ID (call_log.from_phone: the customer's home line under
+// GATE_HOME_LINE, owner 2026-10-02), so they never hear a different number
+// than the one that rang them. Unknown / absent → the main line.
+function callbackNumber(callerId) {
+  return (callerId && TWILIO_NUMBERS.findByNumber(callerId)?.formatted) || TWILIO_NUMBERS.mainLine.formatted;
 }
 
 // ── Vestibule (fixed TwiML stage — plays before ANY audio processing) ──────
@@ -48,10 +50,10 @@ const CONSENT_REVOKED_CONFIRMATION =
 // Press 0 outside staffed hours (or transfer failed).
 // Missed transfer DURING staffed hours (gh prb-r2): the office is open but
 // the line was busy/unanswered — never announce a false closure.
-function transferMissedCallback() {
+function transferMissedCallback(callerId) {
   return (
     'I was not able to reach our office just now, so I have asked the team to give you a call back shortly. '
-    + `You can also reach us directly at ${callbackNumber()}. Goodbye.`
+    + `You can also reach us directly at ${callbackNumber(callerId)}. Goodbye.`
   );
 }
 
@@ -63,14 +65,14 @@ function transferMissedCallback() {
 const PRE_VERIFY_FORBIDDEN_RE = /\b(balance|invoice|amount|owe[sd]?|owing|past.?due|overdue|payment link|pay link)\b|\$\s?\d/i;
 const PRE_VERIFY_DEFLECTION = 'I can only go into the details once I have confirmed I am speaking with the right person. Is this a good time?';
 
-function callbackNumberOnly() {
-  return `Please reach us at ${callbackNumber()} and the team will help right away. Goodbye.`;
+function callbackNumberOnly(callerId) {
+  return `Please reach us at ${callbackNumber(callerId)} and the team will help right away. Goodbye.`;
 }
 
-function callbackPromise() {
+function callbackPromise(callerId) {
   return (
     'Our office is closed right now, so I have asked the team to give you a call back. '
-    + `You can also reach us at ${callbackNumber()}. Goodbye.`
+    + `You can also reach us at ${callbackNumber(callerId)}. Goodbye.`
   );
 }
 
@@ -80,10 +82,10 @@ const TRANSFER_ANNOUNCEMENT = 'One moment while I connect you to our office.';
 // ── Generic callback voicemail ─────────────────────────────────────────────
 // Fixed, deterministic, ZERO debt mention. Max 1 per 30 days per customer
 // (ledger-enforced), and NEVER on an uncertain AMD result.
-function genericCallbackVoicemail() {
+function genericCallbackVoicemail(callerId) {
   return (
     'Hi, this is Sandy calling from Waves Pest Control. '
-    + `When you have a moment, please give our office a call back at ${callbackNumber()}. `
+    + `When you have a moment, please give our office a call back at ${callbackNumber(callerId)}. `
     + 'Thank you, and have a great day.'
   );
 }
@@ -109,8 +111,8 @@ const VERIFICATION_FAILED_CLOSE =
   "I'm not able to verify the account over this call, so I'll leave it with our office. "
   + `If you'd like to reach us directly, the number is CALLBACK. Goodbye.`;
 
-function verificationFailedClose() {
-  return VERIFICATION_FAILED_CLOSE.replace('CALLBACK', callbackNumber());
+function verificationFailedClose(callerId) {
+  return VERIFICATION_FAILED_CLOSE.replace('CALLBACK', callbackNumber(callerId));
 }
 
 // Security interrupt: a caller starts reading a card/bank/SSN/one-time code.

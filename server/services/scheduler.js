@@ -6,6 +6,117 @@ const db = require('../models/db');
 const PROCESS_BOOT_AT = new Date();
 const TwilioService = require('./twilio');
 const logger = require('./logger');
+
+// Reviewer-facing note for a scheduled reply retired by the fire-time amount /
+// payment recheck (Codex round-11 P1): name the SPECIFIC reason instead of a
+// generic price block. Zelle and credit reasons say what actually changed.
+const AMOUNT_BLOCK_NOTES = {
+  zelle_recipient_stale: 'The Zelle recipient in this scheduled reply is no longer the current one (or Zelle is disabled)',
+  zelle_invoice_unresolved: 'The invoice this scheduled reply\u2019s Zelle instructions were written for no longer resolves (paid off, reassigned, or none open)',
+  zelle_invoice_ineligible: 'This scheduled reply offers Zelle for an invoice that can no longer be paid that way',
+  zelle_recheck_failed: 'The Zelle eligibility recheck could not be completed for this scheduled reply',
+  zelle_target_ambiguous: 'This scheduled reply says Zelle is not available, but the customer has several open invoices and the reply does not say which one it is about',
+  zelle_now_available: 'This scheduled reply says Zelle is not available, but Zelle can now be used for this account',
+  credit_unverifiable: 'The account-credit state for this scheduled reply\u2019s Zelle instructions could not be verified',
+  payer_owned: 'The invoice in this scheduled reply\u2019s Zelle instructions is now billed to a third-party payer',
+  payer_unverifiable: 'Who owns the invoice in this scheduled reply\u2019s Zelle instructions could not be verified',
+  amount_no_customer: 'This scheduled reply states an amount or payment status but the customer could not be loaded',
+  amount_recheck_no_customer: 'This scheduled reply states an amount or payment status but the customer could not be loaded',
+  amount_recheck_failed: 'The payment/amount recheck for this scheduled reply could not be completed',
+  amount_unverifiable: 'This scheduled reply states an amount that cannot be verified',
+  amount_no_longer_authorized: 'This scheduled reply states an amount or payment status that no longer matches the account',
+  payment_status_unauthorized: 'This scheduled reply states a payment, invoice, refund or balance status that is not a word-for-word copy of the account sentence the draft was written from',
+  payment_status_changed: 'The payment status this scheduled reply states no longer matches the account',
+  payment_status_recheck_no_customer: 'This scheduled reply states a payment status but the customer could not be loaded',
+  payment_status_recheck_failed: 'The payment-status recheck for this scheduled reply could not be completed',
+};
+// The fire-time amount / Zelle / payment-status recheck for one claimed
+// scheduled reply (extracted from the send loop so the pre-screen and the
+// reason surfacing are unit-testable). { stale, reason }; reason is the
+// SPECIFIC outgoingAmountsStale reason. Fails closed on any read error.
+async function recheckScheduledSmsAmounts({ msg, claimMeta }) {
+  const recheck = require('./sms-amount-recheck');
+  const { parseInputSnapshot, bodyIsStaffEdited } = require('./agent-decision-send-checks');
+  const loadDecision = () => db('agent_decisions').where({ id: claimMeta.agent_decision_id }).first('prompt_version', 'input_snapshot', 'customer_id', 'suggested_message');
+  const pre = await prescreenScheduledSmsRecheck({ msg, claimMeta, recheck, bodyIsStaffEdited, loadDecision });
+  if (pre.failed) return { stale: true, reason: 'amount_recheck_failed' };
+  if (!pre.needs) return { stale: false, reason: null };
+  try {
+    const decision = pre.decisionLoaded ? pre.decision : await loadDecision();
+    const staffEdited = pre.staffEdited || isStaffEditedScheduledBody(claimMeta, decision, msg, bodyIsStaffEdited);
+    const args = scheduledSmsStaleArgs({ msg, claimMeta, decision, snapshot: parseInputSnapshot(decision?.input_snapshot), staffEdited });
+    // Codex round-50 P1: the billing fingerprint BEFORE the recheck, so the provider-boundary check refuses if anything changes after it.
+    // Only for a body the boundary judges - a staff edit's own status wording is exempt (owner ruling), and with no customer there is
+    // nothing to fingerprint (the recheck itself fails closed for anything it must verify) - local review pass 2.
+    const boundaryJudged = !!args.customerId && recheck.bodyNeedsBillingBoundaryCheck(args.body, {
+      inboundMessage: args.inboundMessage, promptVersion: args.promptVersion, statusVocabulary: !staffEdited,
+    });
+    const fingerprint = boundaryJudged ? await require('./billing-fingerprint').billingFingerprint(args.customerId) : null;
+    const verdict = await recheck.outgoingAmountsStale(args);
+    if (verdict.stale) return { stale: true, reason: verdict.reason || 'amount_recheck_failed' };
+    if (!boundaryJudged) return { stale: false, reason: null };
+    return { stale: false, reason: null, boundary: { customerId: args.customerId, fingerprint, zelle: verdict.zelle || null } };
+  } catch (err) {
+    logger.warn(`[scheduler] amount recheck failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
+    return { stale: true, reason: 'amount_recheck_failed' };
+  }
+}
+// Owner ruling 2026-10-01: a staff-edited body (human_authored AND different from the decision's stored AI draft) is the staff member's own
+// wording: the payment-status contract does not judge it. Amounts and Zelle are rechecked as before. Unknown => strict.
+function isStaffEditedScheduledBody(claimMeta, decision, msg, bodyIsStaffEdited) {
+  return claimMeta.human_authored === true && bodyIsStaffEdited(decision?.suggested_message, msg.message_body);
+}
+// Main's read-free pre-screen: amounts, Zelle claims, price grammar - plus status vocabulary while real answers is live. The
+// conditional decision load (and its fail-closed read) happens only for a decision-linked row whose body reads as a payment status.
+// { failed: true } when that read fails; else { needs, staffEdited, decision, decisionLoaded }.
+async function prescreenScheduledSmsRecheck({ msg, claimMeta, recheck, bodyIsStaffEdited, loadDecision }) {
+  let decision;
+  let decisionLoaded = false;
+  let staffEdited = false;
+  let needs = recheck.bodyNeedsPaymentRecheck(msg.message_body);
+  if (!needs && claimMeta.agent_decision_id && recheck.bodyHasPaymentStatusVocabulary(msg.message_body)) {
+    // A DECISION-LINKED row whose body reads as a payment status: the decision's own prompt version decides (one indexed read), whatever
+    // the live gate says - a v12 reply queued before GATE_SMS_REAL_ANSWERS was rolled back is still rechecked as one. An unreadable
+    // decision fails closed. (Gate off, this is the only divergence from main: decision-linked rows with status vocabulary.)
+    try {
+      decision = await loadDecision();
+      decisionLoaded = true;
+    } catch (err) {
+      logger.warn(`[scheduler] decision read failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
+      return { failed: true };
+    }
+    staffEdited = isStaffEditedScheduledBody(claimMeta, decision, msg, bodyIsStaffEdited);
+    needs = !staffEdited && recheck.bodyNeedsPaymentRecheck(msg.message_body, { promptVersion: decision?.prompt_version ?? null });
+  }
+  return { needs, staffEdited, decision, decisionLoaded };
+}
+// The outgoingAmountsStale argument object (key order and values unchanged from the inline call).
+function scheduledSmsStaleArgs({ msg, claimMeta, decision, snapshot, staffEdited }) {
+  // Codex round-11 P1: a scheduled row with no customer_id (shared phone) must
+  // not skip the recheck — fall back to the linked decision's customer. With none
+  // at all, outgoingAmountsStale fails closed for a Zelle offer, a figure or a
+  // payment-status claim (amount_recheck_no_customer / zelle_invoice_unresolved).
+  return {
+    customerId: msg.customer_id || decision?.customer_id || null,
+    body: msg.message_body,
+    promptVersion: decision?.prompt_version ?? null,
+    // The invoice the drafter's Zelle fact was built for (null for a human-
+    // authored reply with no snapshot — the recheck resolves the CURRENT
+    // open invoice itself).
+    zelleInvoiceId: snapshot?.zelle_invoice_id || null,
+    // The customer's own inbound (draft-time snapshot): scopes the payment-status detector and names the Zelle invoice.
+    inboundMessage: snapshot?.sms?.body || null,
+    // The payment-status sentences the draft copied: the only status wording this body may carry, each re-rendered from live data.
+    paymentStatusSnapshot: snapshot?.payment_status_snapshot || null,
+    // A human edit trusts only the OWED-amount half, never a Zelle offer or a payment status (round-4 finding 3).
+    trustOwedAmounts: claimMeta.human_authored === true,
+    humanEditedBody: staffEdited,
+  };
+}
+function amountsStaleNote(reason) {
+  const what = AMOUNT_BLOCK_NOTES[reason] || 'This scheduled reply states an amount, payment status or payment instruction that is no longer accurate';
+  return `${what} (${reason || 'amount_recheck'}) — review the thread.`;
+}
 const { scrubSentryText } = require('../utils/sentry-scrub');
 const { etDateString, addETDays, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
@@ -833,6 +944,17 @@ function initScheduledJobs() {
     return;
   }
 
+  // Public forecast history: first successful snapshot per city / ET day.
+  // Afternoon retry fills weather gaps, never rewrites morning predictions.
+  cron.schedule('15 8,14 * * *', async () => {
+    if (!gateEnvValue('GATE_PEST_FORECAST_HISTORY')) return;
+    try {
+      await runExclusive('pest-forecast-history', () => require('./pest-forecast/history').collectDailyForecasts());
+    } catch (err) {
+      logger.error(`[pest-forecast-history] ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // BOOT (+60s, then EVERY 6H at :23) — SMS draft-route canary: probes the
   // routed reply-drafting providers (gpt mini default / Sonnet save-the-sale)
   // and alerts Adam the moment one stops answering (bad model ID, revoked key,
@@ -848,6 +970,22 @@ function initScheduledJobs() {
   };
   cron.scheduleTimeout(smsDraftCanaryTick, 60 * 1000);
   cron.schedule('23 */6 * * *', smsDraftCanaryTick, { timezone: 'America/New_York' });
+
+  // EVERY 15 MIN — SMS offer ledger backfill (GATE_SMS_OFFER_LEDGER, dark):
+  // re-records an offer whose post-send write failed after the carrier took
+  // the text. Gate off, the sweep returns before touching the database.
+  cron.schedule('7,22,37,52 * * * *', async () => {
+    try {
+      await runExclusive('sms-offer-ledger-backfill', async () => {
+        const result = await require('./sms-offers').backfillMissedOffers();
+        if (result.recorded > 0) logger.info(`[sms-offer-ledger-backfill] recorded=${result.recorded} scanned=${result.scanned}`);
+        // A failed scan or write must fail job health, not read as a green tick.
+        if (result.errors > 0) throw new Error(`sms offer backfill unhealthy: errors=${result.errors} scanned=${result.scanned}`);
+      });
+    } catch (err) {
+      logger.error(`[sms-offer-ledger-backfill] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
 
   // BOOT (+90s, then EVERY 6H at :37) — booking-funnel conversion canary:
   // alerts Adam when real /book visitors keep entering the funnel but ZERO
@@ -1088,6 +1226,17 @@ function initScheduledJobs() {
         require('./link-library').syncSitemapLinks());
     } catch (err) {
       logger.error(`[link-library] nightly sitemap sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 3:05AM — Customer home line stamp (GATE_HOME_LINE, read inside)
+  // =========================================================================
+  cron.schedule('5 3 * * *', async () => {
+    try {
+      await runExclusive('home-line-sweep', () => require('./home-line').stampHomeLines());
+    } catch (err) {
+      logger.error(`[home-line] daily sweep failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -1928,6 +2077,34 @@ function initScheduledJobs() {
       }
     } catch (err) {
       logger.error(`[callback-cards] tick failed (${err.code || err.name || 'error'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // Neighborhood gate-code directory (PR 2): file every saved neighborhood
+  // gate code under its property's neighborhood; dark behind
+  // GATE_NEIGHBORHOOD_ACCESS, read at each tick. Logs counts and error codes
+  // only — never a code.
+  cron.schedule('0 7,22,37,52 * * * *', async () => {
+    if (!require('../config/feature-gates').neighborhoodAccessLive()) return;
+    const tickStartedAt = Date.now();
+    try {
+      // A pass in which any customer's filing or any conflict bell failed is
+      // reported to job health as failed (both retry next pass).
+      const lockRes = await runExclusive('neighborhood-gate-codes', async () => {
+        const result = await require('./neighborhood-access').sweepSavedGateCodes();
+        if (result?.customers) logger.info(`[neighborhood-access] sweep: ${JSON.stringify({ customers: result.customers, tally: result.tally, failed: result.failed, bellsFailed: result.bellsFailed, conflicts: result.conflicts })}`);
+        if (result?.failed > 0) throw Object.assign(new Error(`${result.failed} gate-code filing(s) failed`), { code: 'GATE_CODE_FILINGS_FAILED' });
+        if (result?.bellsFailed > 0) throw Object.assign(new Error(`${result.bellsFailed} gate-code conflict bell step(s) failed`), { code: 'GATE_CODE_BELLS_FAILED' });
+        return result;
+      });
+      // No connection / lost lock session = no filing ran: a missed tick in
+      // job health. 'lease_held' means a concurrent run is doing the work.
+      if (lockRes?.skipped === true && lockRes.reason !== 'lease_held') {
+        await recordMissedTick('neighborhood-gate-codes', tickStartedAt, `tick skipped: ${lockRes.reason || 'no_connection'}`).catch(() => {});
+        throw Object.assign(new Error(`tick skipped: ${lockRes.reason || 'no_connection'}`), { code: 'TICK_SKIPPED' });
+      }
+    } catch (err) {
+      logger.error(`[neighborhood-access] sweep tick failed (${err.code || err.name || 'error'})`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -3173,6 +3350,27 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 4:30AM ET — Incident adjudicator (correction loop, owner 10-02).
+  // The judge's human_better verdict is a lead, not a failure: this turns
+  // each one into a confirmed mistake ONLY when two models on different
+  // providers both name the same failure and each quotes text the draft
+  // really contains; everything else is stored as a lead. Writes
+  // ai_incidents only — shadow data, nothing reads it at runtime. Same
+  // gate as the ledger it widens; PATHOLOGY_ADJUDICATE_BATCH=0 stops it.
+  // =========================================================================
+  cron.schedule('30 4 * * *', async () => {
+    if (!isEnabled('smsPathologyLedger')) return;
+    logger.info('Running: SMS incident adjudicator');
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { adjudicateHumanBetter } = require('./sms-pathology-ledger');
+      await runExclusive('sms-incident-adjudicate', () => adjudicateHumanBetter());
+    } catch (err) {
+      logger.error(`SMS incident adjudicator failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WEEKLY SUN 4:40AM ET — Pathology patch proposer. Cells with enough fresh
   // evidence get ONE parked harness-patch proposal card + bell (Agents →
   // Shadow Drafts). Recommendation only — a human ships any actual prompt
@@ -3188,6 +3386,25 @@ function initScheduledJobs() {
       await runExclusive('sms-pathology-propose', () => proposePatches());
     } catch (err) {
       logger.error(`SMS pathology proposer failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // WEEKLY SUN 4:45AM ET — Correction-loop fix proposals (owner 10-02). A
+  // cell with enough DISTINCT confirmed ai_incidents on the live prompt
+  // version gets one pending ai_fix_proposals row with its dev/holdout
+  // split. No model call, no bell: the Monday correction-loop lane reads the
+  // rows. Same gate as the ledger; PATHOLOGY_FIX_PROPOSAL_MAX_CELLS=0 stops it.
+  // =========================================================================
+  cron.schedule('45 4 * * 0', async () => {
+    if (!isEnabled('smsPathologyLedger')) return;
+    logger.info('Running: SMS correction-loop fix proposals');
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { proposeSmsFixes } = require('./sms-pathology-ledger');
+      await runExclusive('sms-fix-proposals', () => proposeSmsFixes());
+    } catch (err) {
+      logger.error(`SMS correction-loop fix proposals failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -4165,6 +4382,38 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 5 MIN (offset three minutes) — Unanswered-text replies
+  // A suggested reply still waiting after two open hours goes out on its own
+  // (sms-unanswered-reply.js, GATE_SMS_UNANSWERED_REPLY read at call time).
+  // Same shape as the gratitude sweep above: no cron lease (each send holds
+  // pool connections through the provider call), claims are send-once per
+  // inbound under the thread lock, and the in-process guard only skips a tick
+  // that would overlap this instance's still-running sweep.
+  // =========================================================================
+  let unansweredSweepRunning = false;
+  cron.schedule('3-59/5 * * * *', async () => {
+    const unanswered = require('./sms-unanswered-reply');
+    // Runs while the variable is present at all: after a rollback to false it
+    // still repairs answered-card labels, and sends nothing.
+    if (!unanswered.unansweredClaimsPossible() || unansweredSweepRunning) return;
+    unansweredSweepRunning = true;
+    try {
+      const result = await unanswered.processUnansweredReplyCandidates();
+      // Every run that read anything, refusals included: the rollout is judged
+      // on what was held back and why (docs/sms-unanswered-reply.md).
+      if (result?.scanned || result?.attempted) {
+        const refused = Object.entries(result.refused || {}).map(([why, n]) => `${why}=${n}`).join(' ') || 'none';
+        logger.info(`[sms-unanswered] sweep: scanned=${result.scanned} attempted=${result.attempted} sent=${result.sent} refused: ${refused}`);
+      }
+    } catch (err) {
+      // name/code only: knex errors can carry bound customer text (PII)
+      logger.warn(`[sms-unanswered] sweep failed: ${[err?.name || 'Error', err?.code].filter(Boolean).join(' ')}`);
+    } finally {
+      unansweredSweepRunning = false;
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 5 MIN — Process scheduled SMS sends
   // =========================================================================
   cron.schedule('*/5 * * * *', async () => {
@@ -4487,6 +4736,9 @@ function initScheduledJobs() {
               } catch { /* leave undefined — the consent validator fails closed */ }
             }
           }
+          // the billing state the decision-linked amount recheck judged (fingerprint + Zelle invoice), re-checked at the provider boundary
+          // (Codex round-50 P1); null = nothing billing-bearing was rechecked
+          let billingBoundary = null;
           // A decision-linked scheduled reply must clear a fire-time
           // re-check: its anchoring inbound is still the newest on the
           // thread. (The former price-quote fire-time block is RETIRED —
@@ -4503,24 +4755,57 @@ function initScheduledJobs() {
           if (claimMeta.agent_decision_id) {
             const suggest = require('./sms-suggest-mode');
             const anchorStale = await suggest.suggestionAnchorIsStale({ decisionId: claimMeta.agent_decision_id, excludeSmsLogId: msg.id });
+            // GATE_SMS_SCHEDULING_SUGGEST rollback (Codex #5617 r2): a scheduling
+            // card queued while the gate was on must not fire after it is unset.
+            // Gate on, this reads nothing. Same block+retire path as the checks below.
+            const schedulingGated = !anchorStale
+              && await suggest.decisionIsGatedSchedulingSuggestion({ decisionId: claimMeta.agent_decision_id });
             // Amount revalidation (Codex r9): the account can change between
             // review and fire (a portal payment sends no inbound SMS, so the
-            // anchor check can't see it). Non-human-authored agent text
-            // carrying numeric amounts must still match the CURRENT
-            // authoritative billing values; unverifiable or mismatched →
-            // block + retire, same path as a stale anchor. Fail CLOSED on
-            // any error — an unknowable account state must not send figures.
+            // anchor check can't see it). Agent text carrying numeric amounts
+            // must still match the CURRENT authoritative billing values;
+            // unverifiable or mismatched → block + retire, same path as a
+            // stale anchor. Fail CLOSED on any error — an unknowable account
+            // state must not send figures.
+            //
+            // Independent-review P1 (round 4, PR #5331, finding 3): this used
+            // to run ONLY for `human_authored !== true`, so an operator who
+            // edited so much as a word of the drafted reply skipped it
+            // entirely at fire time — including the Zelle recipient/
+            // eligibility recheck bundled inside it, which has nothing to do
+            // with the wording the operator reviewed (ZELLE_RECIPIENT is a
+            // live env var, and the invoice it was eligible against can
+            // settle or start a saved-card charge between review and fire).
+            // It now runs for EVERY agent-decision-linked scheduled reply,
+            // human-edited or not; only the OWED-amount half of the shared
+            // binder (a price/balance figure) is excused for a human edit,
+            // via trustOwedAmounts — the owner's 2026-07-30 ruling was about
+            // trusting a REVIEWED PRICE, never a Zelle offer or a payment-
+            // receipt claim, both of which assert a fact that can go stale
+            // regardless of who wrote the words.
             let amountsStale = false;
-            if (!anchorStale && claimMeta.human_authored !== true && msg.customer_id) {
-              // Shared with the immediate Agent Review send since PR #5119
-              // follow-up #2 (sms-amount-recheck): fresh context, current
-              // obligations only, payment history only for an ack, fail
-              // closed on any error.
-              const { outgoingAmountsStale } = require('./sms-amount-recheck');
-              const amountDecision = await db('agent_decisions').where({ id: claimMeta.agent_decision_id }).first('prompt_version');
-              amountsStale = (await outgoingAmountsStale({
-                customerId: msg.customer_id, body: msg.message_body, promptVersion: amountDecision?.prompt_version ?? null,
-              })).stale;
+            // The SPECIFIC reason (zelle_invoice_unresolved, zelle_recipient_stale,
+            // credit_unverifiable, amount_no_longer_authorized, …) — recorded on the
+            // blocked row and shown to the reviewer on the retired card (round-11).
+            let amountsReason = null;
+            // Codex round-11 P1: only read anything when the body actually carries a
+            // figure, a Zelle offer or a payment-status claim (pre-screen inside
+            // recheckScheduledSmsAmounts) — a human reply about scheduling costs no
+            // agent_decisions/customer/billing reads.
+            if (!anchorStale) {
+              const amountsVerdict = await recheckScheduledSmsAmounts({ msg, claimMeta });
+              amountsStale = amountsVerdict.stale;
+              amountsReason = amountsVerdict.reason;
+              billingBoundary = amountsVerdict.boundary || null;
+              // Codex round-65 P2: a billing READ failure says nothing about the message - for a decision-linked reply, do NOT retire it.
+              // The provider-boundary billing check is armed with no fingerprint, so it refuses RETRYABLY onto the bounded retry rail
+              // (each retry reruns this full recheck) - never sent unverified, never permanently stale. Other rows keep the block.
+              if (amountsStale && claimMeta.agent_decision_id
+                && require('./agent-decision-send-checks').blockReasonIsBillingInfrastructure(`amount no longer authorized (${amountsReason})`)) {
+                logger.warn(`[scheduled-sms] ${msg.id} billing recheck unreadable (${amountsReason}); deferring to the provider-boundary check`);
+                amountsStale = false;
+                billingBoundary = { customerId: msg.customer_id || null, fingerprint: null, zelle: null };
+              }
             }
             // OPEN TIMES revalidation (Codex P2): the same "can't see it
             // from an inbound-anchored check" gap as the amount check above
@@ -4612,6 +4897,34 @@ function initScheduledJobs() {
                 slaStale = true;
               }
             }
+            // LABEL FACTS revalidation: a scheduled reply that copies a label
+            // sentence (rainfast / re-entry) must still be backed by the
+            // customer's CURRENT latest performed visit - a newer visit, a
+            // visit today, or a changed label blocks it. Same fail-closed
+            // block+retire path, no new mechanism.
+            let labelStale = false;
+            if (!anchorStale && !amountsStale && !openTimesStale && !slaStale) {
+              try {
+                const labelDecision = await db('agent_decisions')
+                  .where({ id: claimMeta.agent_decision_id })
+                  .first('input_snapshot', 'prompt_version');
+                // The reply guard runs on the final body of every real-answers
+                // decision (an edit may not add label timing); the visit recheck
+                // only for a body that still copies a snapshotted sentence.
+                // (a decision row that cannot be read blocks the send: never "no snapshot, so send")
+                const labelReason = await require('./agent-decision-send-checks').scheduledLabelFactsBlock({ decision: labelDecision, outgoingBody: msg.message_body });
+                // An unreadable latest visit (Codex #5416 r31 P2) says nothing about the message: do NOT retire the decision
+                // here. The send proceeds to the provider-boundary label check, which re-reads and, if still unreadable,
+                // refuses RETRYABLY onto the bounded retry rail - never sent unverified, never permanently stale.
+                if (require('./agent-decision-send-checks').blockReasonIsLabelInfrastructure(labelReason)) {
+                  logger.warn(`[scheduled-sms] ${msg.id} label-facts recheck unreadable; deferring to the provider-boundary check`);
+                } else {
+                  labelStale = Boolean(labelReason);
+                }
+              } catch (err) {
+                logger.warn(`[scheduler] label-facts revalidation failed for scheduled sms ${msg.id}: ${err.message}; deferring to the provider-boundary check`);
+              }
+            }
             // Re-service promise revalidation (Codex round-3 P2): the same
             // "reviewed wording can go stale before it fires" gap as the
             // checks above, for a free re-service promise — the customer's
@@ -4642,8 +4955,25 @@ function initScheduledJobs() {
             // window on its own facts. Same shared check the immediate
             // /sms send and the auto-send executor run (sms-eta-freshness),
             // same fail-closed block+retire path, no new mechanism.
+            // Open-loop revalidation (PR #5499 r1): a promise the reply was grounded on
+            // can be fulfilled or dismissed before this fires. Fail-closed.
+            let openLoopsStale = false;
+            let openLoopsReason = null;
+            if (!anchorStale && !amountsStale && !openTimesStale && !slaStale && !labelStale && !reserviceStale) {
+              const { scheduledOpenLoopsBlockReason } = require('./agent-decision-send-checks');
+              const rawOpenLoopsReason = await scheduledOpenLoopsBlockReason({ agentDecisionId: claimMeta.agent_decision_id, dbh: db });
+              // An unreadable recheck says nothing about the message (same as the LIVE ETA
+              // leg below): never retire on it — the provider-boundary open-loop check re-reads
+              // and, if still unreadable, refuses retryably onto the bounded retry rail.
+              if (rawOpenLoopsReason === 'open_loops_recheck_failed') {
+                logger.warn(`[scheduled-sms] ${msg.id} open-loop recheck unreadable; deferring to the provider-boundary check`);
+              } else if (rawOpenLoopsReason != null) {
+                openLoopsReason = rawOpenLoopsReason;
+                openLoopsStale = true;
+              }
+            }
             const { scheduledEtaBlockReason } = require('./agent-decision-send-checks');
-            const priorStale = anchorStale || amountsStale || openTimesStale || slaStale || reserviceStale;
+            const priorStale = anchorStale || schedulingGated || amountsStale || openTimesStale || slaStale || labelStale || reserviceStale || openLoopsStale;
             const rawEtaReason = await scheduledEtaBlockReason({ decisionId: claimMeta.agent_decision_id, outgoingBody: msg.message_body, skip: priorStale });
             // An unreadable recheck (Codex round-42 P2) says nothing about the message: do NOT
             // retire the decision as stale here. The send proceeds to the provider-boundary
@@ -4656,15 +4986,21 @@ function initScheduledJobs() {
             if (priorStale || etaReason != null) {
               const blockedReason = anchorStale
                 ? 'stale_agent_decision'
-                : amountsStale
+                : schedulingGated
+                  ? 'scheduling_suggest_gate_off'
+                  : amountsStale
                   ? 'stale_amount_agent_decision'
                   : openTimesStale
                     ? 'stale_open_times_agent_decision'
                     : slaStale
                       ? 'stale_sla_agent_decision'
-                      : reserviceStale
-                        ? 'stale_reservice_agent_decision'
-                        : 'stale_eta_agent_decision';
+                      : labelStale
+                        ? 'stale_label_facts_agent_decision'
+                        : reserviceStale
+                          ? 'stale_reservice_agent_decision'
+                          : openLoopsStale
+                            ? 'stale_open_loops_agent_decision'
+                            : 'stale_eta_agent_decision';
               const threadKey = String(msg.to_phone || '').replace(/\D/g, '').slice(-10) || msg.customer_id || msg.id;
               // Everything under the lock, metadata read THROUGH the trx
               // AFTER acquiring it — the cancel route can transfer parked
@@ -4683,22 +5019,31 @@ function initScheduledJobs() {
                 await trx('sms_log').where({ id: msg.id, status: 'sending' }).update({
                   status: 'blocked',
                   updated_at: new Date(),
-                  metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', ?::text)", [blockedReason]),
+                  // blocked_detail carries the SPECIFIC recheck reason (round-11).
+                  metadata: amountsStale && amountsReason && !anchorStale
+                    ? trx.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', ?::text, 'blocked_detail', ?::text)", [blockedReason, amountsReason])
+                    : trx.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', ?::text)", [blockedReason]),
                 });
                 await suggest.supersedeStaleDecision({
                   decisionId: freshMeta.agent_decision_id || claimMeta.agent_decision_id,
                   fromStatus: 'scheduled',
                   note: anchorStale
                     ? 'A newer customer message arrived before this scheduled reply fired — review the thread.'
-                    : amountsStale
-                      ? 'This scheduled reply quoted a price — house rule: no prices in SMS. Review the thread.'
+                    : schedulingGated
+                      ? 'AI scheduling suggestions were switched off before this scheduled reply fired — review the thread.'
+                      : amountsStale
+                      ? amountsStaleNote(amountsReason)
                       : openTimesStale
                         ? `This scheduled reply quoted an appointment time that is no longer open (${openTimesReason}) — review the thread.`
                         : slaStale
                           ? 'This scheduled reply’s follow-up timing no longer matches the current window — review the thread.'
-                          : reserviceStale
-                            ? `This scheduled reply promises a free re-service that could not be revalidated (${reserviceReason}) — review the thread.`
-                            : `This scheduled reply quotes a live ETA that is no longer current (${etaReason}) — review the thread.`,
+                          : labelStale
+                            ? 'This scheduled reply quoted product label timing that is no longer current for the customer’s latest visit — review the thread.'
+                            : reserviceStale
+                              ? `This scheduled reply promises a free re-service that could not be revalidated (${reserviceReason}) — review the thread.`
+                              : openLoopsStale
+                                ? `A promise this scheduled reply was written around is no longer open (${openLoopsReason}) — review the thread.`
+                                : `This scheduled reply quotes a live ETA that is no longer current (${etaReason}) — review the thread.`,
                   dbi: trx,
                   strict: true,
                 });
@@ -4954,6 +5299,11 @@ function initScheduledJobs() {
               parkedDecisionIds: Array.isArray(claimMeta.parked_decision_ids) && claimMeta.parked_decision_ids.length
                 ? claimMeta.parked_decision_ids
                 : undefined,
+              // The composer draft's linked visits (persisted by /schedule-sms): the shared send step holds the
+              // text at delivery while any of them is a live street-level address hold.
+              ...(Array.isArray(claimMeta.linked_scheduled_service_ids) && claimMeta.linked_scheduled_service_ids.length
+                ? { linked_scheduled_service_ids: claimMeta.linked_scheduled_service_ids }
+                : {}),
             },
           };
           // LIVE ETA at the TRUE provider boundary (Codex round-40 P2): the recheck above ran
@@ -4962,10 +5312,19 @@ function initScheduledJobs() {
           // check also runs as the replay's providerPreSendCheck (twilio.js, immediately before
           // its request), composed AFTER any predicate the entry point registered.
           if (claimMeta.agent_decision_id) {
-            const { etaProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
+            const { etaProviderPreSendCheck, labelFactsProviderPreSendCheck, openLoopsDecisionProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
             replayInput.providerPreSendCheck = composeProviderPreSendChecks(
               replayInput.providerPreSendCheck,
               etaProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),
+              // LABEL FACTS (Codex #5416 P1): same window, same boundary re-read of the latest visit.
+              labelFactsProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),
+              // open-loop facts (PR #5499) at the same boundary
+              openLoopsDecisionProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id }),
+              // BILLING at the same boundary (Codex round-50 P1): the rows the amount recheck judged are unchanged, and a Zelle offer's
+              // invoice has no card / bank payment in flight
+              billingBoundary
+                ? require('./billing-fingerprint').billingUnchangedProviderPreSendCheck(billingBoundary)
+                : undefined,
             );
           }
           return require('./messaging/deferred-replay-registry')
@@ -5100,6 +5459,34 @@ function initScheduledJobs() {
               `, [smsResult.code === 'COLLECTION_HOLD_DEFER' ? 'collection_hold_deferred_at' : 'quiet_hours_hold_at', completedAt]),
             });
             logger.info(`[scheduled-sms] ${msg.id} held outside the 8AM-8PM ET send window — rescheduled for ${holdRetryAt.toISOString()} (attempt refunded)`);
+          } else if (smsResult.code === 'STREET_LEVEL_HOLD') {
+            // A visit the text is about is a street-level address hold awaiting the office confirm
+            // (street-level-hold.js): a validator deferral that can last as long as the office takes, so it
+            // must not spend the bounded 3-attempt rail and end terminally blocked. Like the send-window
+            // hold above: no provider send was tried, the attempt is REFUNDED and the row waits (re-polled
+            // every 15 minutes, the generic retry spacing) until the office confirms and the text sends, or
+            // the visit leaves the hold. No expiry of its own, same as the other wait branches.
+            const holdRetryAt = smsResult.nextAllowedAt ? new Date(smsResult.nextAllowedAt) : new Date(completedAt.getTime() + 15 * 60 * 1000);
+            await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+              status: 'scheduled',
+              scheduled_for: holdRetryAt,
+              updated_at: completedAt,
+              metadata: db.raw(`
+                COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+                  'street_level_hold_at', ?::timestamptz,
+                  'scheduled_sms_attempts',
+                  GREATEST(
+                    CASE
+                      WHEN COALESCE(metadata->>'scheduled_sms_attempts', '') ~ '^[0-9]+$'
+                        THEN (metadata->>'scheduled_sms_attempts')::int - 1
+                      ELSE 0
+                    END,
+                    0
+                  )
+                )
+              `, [completedAt]),
+            });
+            logger.info(`[scheduled-sms] ${msg.id} waiting on a street-level address hold — rescheduled for ${holdRetryAt.toISOString()} (attempt refunded)`);
           } else if (smsResult.code === 'BILLING_TEXT_LEG_IN_FLIGHT' && smsResult.nextAllowedAt) {
             // Another attempt holds this notice's billing Text claim
             // (messaging/billing-text-leg-dedupe.js), so no provider send
@@ -5200,6 +5587,12 @@ function initScheduledJobs() {
                   updated_at: completedAt,
                   metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('terminal_pending', ?::boolean)", [requiresTerminalHook(claimMeta.entry_point)]),
                 });
+                // A stale linked visit (the shared send step's LINKED_VISIT_ENDED) ends the row with its reason on it.
+                if (smsResult.code === 'LINKED_VISIT_ENDED') {
+                  await db('sms_log').where({ id: msg.id, status: 'blocked' }).update({
+                    metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_code', ?::text, 'blocked_reason', ?::text)", [smsResult.code, String(smsResult.reason || '')]),
+                  });
+                }
                 logger.warn(`[scheduled-sms] Blocked/failed scheduled SMS ${msg.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
                 // Terminal block on a deferred replay: delivery was refused,
                 // or an exhausted ambiguous review passed its safety hold.
@@ -7114,6 +7507,42 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 7:40 AM ET — Estimated AI spend check (dark, GATE_LLM_COST_TRACKING,
+  // checked inside the service). Refreshes the OpenRouter list prices when
+  // the stored ones are a week old, then raises ONE admin item when a lane's
+  // estimated spend yesterday jumped well above its own recent average, and
+  // closes it once spend is back to normal. Throws on failure so job_health
+  // records it.
+  // =========================================================================
+  cron.schedule('40 7 * * *', async () => {
+    try {
+      await runExclusive('llm-cost-check', async () => {
+        const { runLlmCostCheck } = require('./llm-cost');
+        const result = await runLlmCostCheck();
+        if (result.raised) logger.info(`[llm-cost] spend spike item raised: ${result.spikes} lane(s)`);
+        if (result.reason === 'alert_not_persisted') throw new Error('spend spike item was not persisted');
+      });
+    } catch (e) { logger.error(`[llm-cost] daily spend check failed: ${e.message}`); }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 8:05 AM ET — Typed-decisions review item (shadow lane, dark).
+  // Refreshes unknown outcome evidence, then raises ONE admin item for
+  // yesterday's unreviewed shadow decisions (up to 8 Jev-vs-baseline
+  // disagreements + 2 spot checks). Gated GATE_TYPED_DECISIONS (checked
+  // inside the service); nothing acts on a Jev answer.
+  // =========================================================================
+  cron.schedule('5 8 * * *', async () => {
+    await runExclusive('typed-decisions-daily-review', async () => {
+      try {
+        const { runDailyReviewItem } = require('./typed-decisions/daily-review-item');
+        const result = await runDailyReviewItem();
+        if (result.raised) logger.info(`[typed-decisions] daily review item raised: ${result.disagreements} disagreements, ${result.spotChecks} spot checks`);
+      } catch (e) { logger.error(`Typed-decisions daily review failed: ${e.message}`); }
+    });
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 15 MIN — Send scheduled review request SMS
   // Picks up review requests whose scheduled_for has passed.
   // =========================================================================
@@ -7517,6 +7946,11 @@ function initScheduledJobs() {
         const candidates = await db('scheduled_services')
           .whereBetween('scheduled_date', [yesterday, today])
           .whereIn('status', ['pending', 'confirmed'])
+          // A street-level address hold the office has not cleared was never dispatched, so it cannot be
+          // a customer no-show (no customer_noshow row, no repeated-miss outreach).
+          .whereNotExists(function unclearedAddressHold() {
+            require('./street-level-hold').heldVisitSubquery(this, 'scheduled_services');
+          })
           .select('id', 'scheduled_date', 'window_start', 'window_end');
 
         // Only flag services whose arrival window has already elapsed at
@@ -7572,7 +8006,10 @@ function initScheduledJobs() {
             .first('id');
           if (alreadyFlagged) continue;
           try {
-            await missedAppointment.onSkip(svc.id, 'no_show');
+            // A promotion to a street-level hold can land after the candidate scan above: re-read the hold
+            // under the visit row lock (the promoter's own lock) right before recording, and skip if held.
+            const guarded = await require('./street-level-hold').runUnlessLiveHold(svc.id, (trx) => missedAppointment.onSkip(svc.id, 'no_show', trx));
+            if (guarded.held) continue;
             flagged++;
           } catch (skipErr) {
             logger.error(`Missed appointment onSkip failed for ${svc.id}: ${skipErr.message}`);
@@ -8066,11 +8503,28 @@ function initScheduledJobs() {
     try {
       const { runScheduleIntegrityWatchdog } = require('./schedule-integrity-watchdog');
       const result = await runScheduleIntegrityWatchdog();
-      if (!result.skipped && (result.unpricedSeries > 0 || result.lawnEmailGaps > 0 || result.lawnGapCheckFailed || result.acceptedScheduleGaps > 0 || result.acceptedScheduleCheckFailed || result.prepayCoverageGaps > 0)) {
-        logger.warn(`[schedule-integrity] unpricedSeries=${result.unpricedSeries} lawnEmailGaps=${result.lawnEmailGaps}${result.lawnGapCheckFailed ? ' LAWN-GAP-CHECK-FAILED' : ''} acceptedScheduleGaps=${result.acceptedScheduleGaps}${result.acceptedScheduleCheckFailed ? ' ACCEPTED-SCHEDULE-CHECK-FAILED' : ''} prepayCoverageGaps=${result.prepayCoverageGaps} alerted=${result.alerted}`);
+      if (!result.skipped && (result.unpricedSeries > 0 || result.lawnEmailGaps > 0 || result.lawnGapCheckFailed || result.acceptedScheduleGaps > 0 || result.acceptedScheduleCheckFailed || result.combinedBookingCheckFailed || result.prepayCoverageGaps > 0)) {
+        logger.warn(`[schedule-integrity] unpricedSeries=${result.unpricedSeries} lawnEmailGaps=${result.lawnEmailGaps}${result.lawnGapCheckFailed ? ' LAWN-GAP-CHECK-FAILED' : ''} acceptedScheduleGaps=${result.acceptedScheduleGaps}${result.acceptedScheduleCheckFailed ? ' ACCEPTED-SCHEDULE-CHECK-FAILED' : ''}${result.combinedBookingCheckFailed ? ' COMBINED-BOOKING-CHECK-FAILED' : ''} prepayCoverageGaps=${result.prepayCoverageGaps} alerted=${result.alerted}`);
       }
     } catch (err) {
       logger.error(`Schedule-integrity watchdog tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // HOURLY :25, 7 AM-8 PM ET — the combined-booking check's urgent pass: a
+  // booking with a visit TODAY or TOMORROW that has no time or technician
+  // rings now, not at the next 6:40 run (by then a today visit is history).
+  // Catches bookings made, and technicians removed, after the daily tick, and
+  // retries a failed write. Same gate as the watchdog it belongs to.
+  cron.schedule('25 7-20 * * *', async () => {
+    try {
+      const { isEnabled } = require('../config/feature-gates');
+      if (!isEnabled('scheduleIntegrityWatchdog')) return;
+      const result = await runExclusive('combined-booking-check-urgent', () =>
+        require('./combined-booking-check').runCombinedBookingCheck({ urgentOnly: true }));
+      if (result?.failed) logger.warn(`[combined-booking-check] urgent pass: ${result.failed} failed`);
+    } catch (err) {
+      logger.error(`[combined-booking-check] urgent pass failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -8210,6 +8664,8 @@ async function runSmsRecoveryTick({ now = Date.now() } = {}) {
 }
 
 module.exports = {
+  recheckScheduledSmsAmounts,
+  amountsStaleNote,
   initScheduledJobs,
   runSmsRecoveryTick,
   initBankingSync,

@@ -8,7 +8,7 @@ describe('typed-decision packages', () => {
   const ids = Object.keys(PACKAGES);
 
   test('ships the three foundation packages', () => {
-    expect(ids.sort()).toEqual(['call_judge.v2', 'sms_courtesy.v1', 'sms_reschedule.v1']);
+    expect(ids.sort()).toEqual(['call_gate_checks.v1', 'call_judge.v2', 'sms_courtesy.v1', 'sms_reschedule.v1']);
   });
 
   test.each(ids)('%s: id is <capability>.v<version> and shape is complete', (id) => {
@@ -23,6 +23,13 @@ describe('typed-decision packages', () => {
       expect(['noul', 'choice', 'score']).toContain(q.type);
       expect(q.instructions).toEqual(expect.any(String));
     }
+  });
+
+  test('call_gate_checks.v1 asks one yes/no per dark call gate, over the same call state as call_judge', () => {
+    const pkg = PACKAGES['call_gate_checks.v1'];
+    expect(Object.keys(pkg.questions)).toEqual(['service_unclear', 'reschedule_committed', 'promise_open']);
+    for (const q of Object.values(pkg.questions)) expect(q.type).toBe('noul');
+    expect(pkg.stateShape).toEqual(PACKAGES['call_judge.v2'].stateShape);
   });
 
   test('call_judge.v2 asks the six agreed questions', () => {
@@ -62,5 +69,20 @@ describe('typed-decision packages', () => {
     const snapshot = JSON.parse(fs.readFileSync(SNAPSHOT, 'utf8'));
     expect(Object.keys(snapshot).sort()).toEqual(ids.slice().sort());
     for (const id of ids) expect({ id, hash: packageHash(PACKAGES[id]) }).toEqual({ id, hash: snapshot[id] });
+  });
+});
+
+describe('decision providers', () => {
+  const { DECISION_PROVIDERS, DEFAULT_DECISION_PROVIDER, DECISION_PROVIDER_LABELS, providerLabel } = require('../services/typed-decisions/packages');
+  test('a closed set with typesafe as the default, each with the name reviewers see', () => {
+    expect([...DECISION_PROVIDERS]).toEqual(['typesafe', 'cloudflare']);
+    expect(DEFAULT_DECISION_PROVIDER).toBe('typesafe');
+    expect(Object.keys(DECISION_PROVIDER_LABELS).sort()).toEqual([...DECISION_PROVIDERS].sort());
+    expect(providerLabel('typesafe')).toBe('Jev');
+    expect(providerLabel('cloudflare')).toBe('Clef');
+    // rows from before the column, and anything unknown, read as the default: never an object key
+    // provider is NOT NULL and registry-constrained: an unknown value is malformed data, never shown as Jev's
+    expect(() => providerLabel(undefined)).toThrow(/unknown decision provider/);
+    expect(() => providerLabel('constructor')).toThrow(/unknown decision provider/);
   });
 });

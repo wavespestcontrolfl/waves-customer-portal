@@ -140,15 +140,20 @@ const LEAD_STATUSES = [
   'unresponsive',
   'disqualified',
   'duplicate',
+  // Closed, neither won nor lost: a /book preferred-time request takes it
+  // when the customer books online (booking-preferred-time.js), which also
+  // settles its funnel row. System-set only (codex #5477 r9): staff never
+  // pick it by hand (the PATCH below refuses it), but can reopen it.
+  'handled',
 ];
 const LEAD_STATUS_SET = new Set(LEAD_STATUSES);
 const FIRST_RESPONSE_STATUSES = new Set(['contacted', 'estimate_sent', 'estimate_viewed', 'won']);
 // "Open" pipeline statuses — everything still being worked (not won/lost/
-// unresponsive/disqualified/duplicate). The list route expands the virtual
+// unresponsive/disqualified/duplicate/handled). The list route expands the virtual
 // `status=open` filter (the Pipeline table's default) to this set — shared
 // with the dashboard alerts service so action queues use the same
 // membership.
-const { OPEN_LEAD_STATUSES, scopeToProspects, PROSPECT_SCOPE_SQL } = require('../services/lead-statuses');
+const { OPEN_LEAD_STATUSES, scopeToProspects, PROSPECT_SCOPE_SQL, handledStatusRefusal, unlessHandledSince } = require('../services/lead-statuses');
 
 // Auto-create leads tables if missing — uses raw SQL CREATE IF NOT EXISTS to avoid pg_type conflicts
 async function ensureLeadsTables(db) {
@@ -261,7 +266,7 @@ router.get('/analytics/overview', async (req, res, next) => {
     const lost = leads.filter(l => l.status === 'lost').length;
     // unresponsive included: the daily staleness sweep assigns it at scale,
     // and an auto-closed lead must leave the active count immediately.
-    const active = leads.filter(l => !['won', 'lost', 'unresponsive', 'disqualified', 'duplicate'].includes(l.status)).length;
+    const active = leads.filter(l => !['won', 'lost', 'unresponsive', 'disqualified', 'duplicate', 'handled'].includes(l.status)).length;
     const conversionRate = total > 0 ? Math.round(won / total * 1000) / 10 : 0;
 
     // Response time headline is the MEDIAN, not the mean: a handful of multi-day
@@ -662,6 +667,7 @@ router.get('/campaigns', async (req, res, next) => {
       if (c.lead_source_id && c.start_date) {
         const q = db('leads').where('lead_source_id', c.lead_source_id)
           .whereNull('deleted_at')
+          .modify(scopeToProspects)
           .where('first_contact_at', '>=', c.start_date);
         if (c.end_date) q.where('first_contact_at', '<=', c.end_date);
         const counts = await q.clone().select(
@@ -1155,6 +1161,13 @@ router.put('/:id', async (req, res, next) => {
     const responseLead = await db.transaction(async (trx) => {
       const current = await trx('leads').where('id', req.params.id).whereNull('deleted_at').forUpdate().first();
       if (!current) return null;
+      // 'handled' is system-set only, and a status change made from a view loaded
+      // before the customer's booking closed the request never reopens it.
+      // `seen_status`: the status the client SHOWED when staff acted (its page may be
+      // hours old). No fallback (codex #5477 r14): a caller that does not say it saw
+      // 'handled' (an older Leads tab, any other client) never moves a lead off it.
+      const refusal = handledStatusRefusal(updates.status, req.body.seen_status, current.status, req.body.seen_updated_at, current.updated_at);
+      if (refusal) return { refusal };
       previousStatus = current.status;
       // Email-specific correction provenance (Codex round-4 P1 on the
       // V1/V2 email-disagreement hold, PR #4802): stamped ONLY when the
@@ -1193,6 +1206,7 @@ router.put('/:id', async (req, res, next) => {
       return statusChanged ? trx('leads').where('id', lead.id).first() : lead;
     });
     if (!responseLead) return res.status(404).json({ error: 'Lead not found' });
+    if (responseLead.refusal) return res.status(responseLead.refusal.code).json({ error: responseLead.refusal.error });
 
     // Existing best-effort funnel settlement runs after the atomic lead/history write.
     if (updates.status && updates.status !== previousStatus) {
@@ -1276,12 +1290,23 @@ router.post('/:id/convert', async (req, res, next) => {
     const customer = await db('customers').where('id', customerId).first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
-    await leadAttribution.markConverted(req.params.id, {
+    // Same stale-view rule as the PUT and mark-lost (codex #5477 r14): a request the
+    // customer's booking closed after staff loaded it is not won from that view.
+    // Judged on the status the client showed, and re-asserted in the win's own UPDATE.
+    const seen = req.body.seen_status;
+    const refusal = handledStatusRefusal('won', seen, lead.status, req.body.seen_updated_at, lead.updated_at);
+    if (refusal) return res.status(refusal.code).json({ error: refusal.error });
+    const won = await leadAttribution.markConverted(req.params.id, {
       customerId,
       monthlyValue: monthly_value,
       initialServiceValue: initial_service_value,
       waveguardTier: waveguard_tier,
+      // Only 'handled' is excluded, unless it is the very close the page showed (any
+      // other status converts exactly as before): the claim's where() takes a callback,
+      // re-asserting it in the win's own UPDATE.
+      onlyIfIdentity: unlessHandledSince(seen, req.body.seen_updated_at),
     });
+    if (won === false) return res.status(409).json({ error: 'This lead changed since the page loaded (it may have closed on its own when the customer booked online). Reload to see it.' });
     const updatedLead = await db('leads').where('id', req.params.id).first();
     res.json({ lead: updatedLead });
   } catch (err) { next(err); }
@@ -1293,7 +1318,14 @@ router.post('/:id/lost', async (req, res, next) => {
     const { reason, competitor, notes } = req.body;
     const existing = await db('leads').where('id', req.params.id).whereNull('deleted_at').first();
     if (!existing) return res.status(404).json({ error: 'Lead not found' });
-    await leadAttribution.markLost(req.params.id, { reason, competitor, notes });
+    // A request the customer's booking closed ('handled') after staff loaded it is not
+    // theirs to mark lost from that stale view (codex #5477 r13): judged on the status
+    // the client showed, and re-asserted in the write itself.
+    const seen = req.body.seen_status; // explicit only (see the PUT)
+    const refusal = handledStatusRefusal('lost', seen, existing.status, req.body.seen_updated_at, existing.updated_at);
+    if (refusal) return res.status(refusal.code).json({ error: refusal.error });
+    const marked = await leadAttribution.markLost(req.params.id, { reason, competitor, notes, onlyIf: unlessHandledSince(seen, req.body.seen_updated_at) });
+    if (marked === false) return res.status(409).json({ error: 'This lead changed since the page loaded (it may have closed on its own when the customer booked online, or been deleted). Reload to see it.' });
     const lead = await db('leads').where('id', req.params.id).first();
     res.json({ lead });
   } catch (err) { next(err); }
@@ -1453,7 +1485,7 @@ router.post('/:id/send-sms', async (req, res, next) => {
     }
     const ownerCustomerId = linkedOwnerId || bearerCheck.customerId || null;
 
-    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    const { sendManualCustomerSms } = require('../services/messaging/send-manual-customer-sms');
     const { insertConsultationLinkAttempt, deleteConsultationLinkAttempt } = require('../services/call-booking-link-text');
     // codex #5196 P1: durable pre-provider evidence for THIS send, written
     // only when it carries a validated consultation link (same condition
@@ -1462,7 +1494,8 @@ router.post('/:id/send-sms', async (req, res, next) => {
     // block (round-3 P2) so onDispatchAbort, the post-send definite-failure
     // cleanup below, AND the catch cleanup all delete exactly this attempt,
     // never a sibling one.
-    const sendResult = await sendCustomerMessage({
+    // Staff reply: the interlocked wrapper, so it never crosses an automatic reply on the thread.
+    const sendResult = await sendManualCustomerSms({
       to: lead.phone,
       body: message,
       channel: 'sms',
@@ -1810,7 +1843,7 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
         // Every contact field the conversion uses comes from THIS locked row
         // (matching inputs, customer payload, estimate link) — never from the
         // unlocked pre-read, which can be stale by the time we hold the lock.
-        .first('id', 'customer_id', 'converted_at', 'status', 'first_name', 'last_name', 'phone', 'email', 'address', 'city', 'zip');
+        .first('id', 'customer_id', 'converted_at', 'status', 'updated_at', 'first_name', 'last_name', 'phone', 'email', 'address', 'city', 'zip');
       if (!lockedLead) {
         const gone = new Error('Lead was deleted while booking — appointment not created');
         gone.status = 409;
@@ -1834,6 +1867,14 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       // after the first commit sees converted_at on its pre-read too).
       if (lockedLead.converted_at && !rebook) {
         throw alreadyConverted('This lead was already converted — reload the lead (or book a repeat visit from the linked customer).');
+      }
+      // A request the customer's own /book booking closed ('handled') after this form
+      // opened is already booked (codex #5477 r18): a second, staff booking from that
+      // stale view is refused before anything is inserted. Judged on the status and
+      // version the page showed, under the lead lock.
+      const handledRefusal = handledStatusRefusal('won', req.body.seen_status, lockedLead.status, req.body.seen_updated_at, lockedLead.updated_at);
+      if (handledRefusal) {
+        throw Object.assign(new Error(handledRefusal.error), { statusCode: handledRefusal.code, status: handledRefusal.code, isOperational: true, code: 'LEAD_HANDLED' });
       }
       if (!customerId && lockedLead.customer_id) {
         // Customer discovered only under the lead lock (rebook on a lead

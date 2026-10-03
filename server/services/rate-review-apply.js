@@ -24,11 +24,16 @@
  *                         the same two floors.
  *       annual_prepay     the successor term's start (term_end + 1); held
  *                         when that is under 31 days out or a renewal
- *                         reminder already went out for the term. Its
- *                         notice amounts are the ANNUAL totals (the term's
- *                         amount → the successor's), labelled per year —
- *                         the public page shows them as stored; the
- *                         per-application figures ride in metadata.
+ *                         reminder already went out for the term. The
+ *                         public page shows the PER-APPLICATION rates
+ *                         (current_amount_cents → new_amount_cents, per
+ *                         application); noticed_current_cents /
+ *                         noticed_new_cents carry the ANNUAL totals (the
+ *                         term's amount → the successor's) the apply and
+ *                         the renewal guard enforce.
+ *     Every fact a notice states is read under the customer's comms fence
+ *     and the ranking row's lock (deriveNotice), and the account must still
+ *     bill on the ranked lane at the ranked rate.
  *     The ranking row keeps status `approved` and records notice_id; only
  *     the comms PR marks it `sent`.
  *
@@ -166,6 +171,8 @@ const HOLD_COPY = Object.freeze({
   renewal_window_changed: 'The prepaid term now renews on a different day than the notice named, so nothing was changed.',
   row_not_approved: 'The ranking row is no longer approved, so no notice was created.',
   row_owner_changed: 'The ranking row moved to another customer record, so no notice was created.',
+  lane_moved_since_ranking: 'The account now bills on a different basis than the ranking saw, so no notice was created.',
+  effective_visit_started: 'The first visit at the new rate was already started or finished at the old rate, so the change needs a hand check.',
   rate_moved_since_ranking: 'The rate on file changed since the ranking was approved, so no notice was created.',
   apply_error: 'The nightly apply hit an error on this account and will retry tonight.',
 });
@@ -449,10 +456,11 @@ function effectiveDateFor(lane, { floor, visits = [], billingDay = 1, term = nul
   throw hold('lane_unknown');
 }
 
+// The unit the public page prints after the shown amounts: dues are per
+// month; every other lane, a prepaid term included, shows per-application
+// rates (AGENTS.md "Per application" price copy).
 function cadenceLabelFor(lane) {
-  if (lane === LANE_MONTHLY) return 'month';
-  if (lane === LANE_PREPAY) return 'year';
-  return 'application';
+  return lane === LANE_MONTHLY ? 'month' : 'application';
 }
 
 function withoutNoticeHolds(rawFlags) {
@@ -466,9 +474,94 @@ async function flagSnapshotHold(dbh, row, code) {
   await dbh('rate_review_snapshots').where({ id: row.id }).update({ flags: JSON.stringify(next), updated_at: new Date() });
 }
 
+// The series roots of a line's open plan-row visits: the plan identity a
+// notice names (the apply reprices or bills only that series, never a
+// replacement accepted after it — see lockPerApplicationTargets and
+// assertMonthlyPlanUnchanged).
+function seriesRoots(visits) {
+  return [...new Set(visits.map((v) => String(v.recurring_parent_id || v.id)))];
+}
+
+// The ledger slices' accept provenance for the line's family keys: a
+// same-family plan re-accepted at the same price (applyAcceptToLedger)
+// rewrites source_estimate_id, so a changed set is a different plan.
+async function familySliceEstimates(dbh, customerId, familyKey) {
+  const keys = LEDGER_FAMILIES_FOR_LINE[familyKey] || [familyKey];
+  const rows = await dbh('customer_plan_rates').where({ customer_id: customerId }).whereIn('family_key', keys).select('family_key', 'source_estimate_id');
+  return rows.map((r) => `${r.family_key}:${r.source_estimate_id || ''}`).sort();
+}
+
+// The lane's current rate, read the way the apply reads it: dues from the
+// family's ledger slices (a slice-sourced ranking row) or the scalar.
+function monthlyCurrentCents(customer, familySlices, source) {
+  return source === 'ledger_slice' ? cents(sumSlices(familySlices)) : cents(customer.monthly_rate);
+}
+
+// Everything a notice states — effective date, amounts, the plan it names —
+// derived from LIVE rows. Called under the customer's comms fence and the
+// ranking row's lock, so an admin rate edit, series move or renewal that
+// committed while scheduling waited for the fence is what the notice reads
+// (never a value read before the fence). Throws a HoldError when the
+// account no longer carries the rate the ranking approved.
+async function deriveNotice(sp, row, { lane, customer, today, floor, plannedSend, metadata }) {
+  const current = Number(row.current_rate_cents);
+  let visits = [];
+  let term = null;
+  if (lane === LANE_PER_APPLICATION || lane === LANE_MONTHLY) {
+    visits = await loadLineOpenVisits(sp, { customerId: row.customer_id, familyKey: row.family_key, cadence: row.cadence, fromDate: today });
+    const roots = seriesRoots(visits);
+    if (roots.length === 1) metadata.series_root_id = roots[0];
+  }
+  if (lane === LANE_MONTHLY) {
+    const { family } = await loadFamilySlices(sp, row.customer_id, row.family_key);
+    const liveCents = monthlyCurrentCents(customer, family, row.current_rate_source);
+    if (liveCents !== current) throw hold('rate_moved_since_ranking', { liveCents });
+    metadata.slice_estimates = await familySliceEstimates(sp, row.customer_id, row.family_key);
+  } else if (lane === LANE_PREPAY) {
+    const found = await resolvePrepayTerm(sp, { customerId: row.customer_id, familyKey: row.family_key, cadence: row.cadence, today });
+    if (!found.term) throw hold(found.reason);
+    term = found.term;
+    const visitsPerTerm = Number(term.coverage_visit_count) > 0 ? Number(term.coverage_visit_count) : visitsPerYearFor(row.cadence, row.visits_per_year);
+    if (!(visitsPerTerm > 0)) throw hold('prepay_term_not_found', 'no coverage visit count');
+    // The live term must still be the rate the ranking approved (the apply's
+    // own derivation, to the cent) and the noticed renewal a real increase —
+    // never a letter mixing a moved term amount with stale snapshot rates.
+    const livePerApplication = Math.round((Number(term.prepay_amount) / visitsPerTerm) * 100);
+    if (livePerApplication !== current || !(Number(row.proposed_rate_cents) * visitsPerTerm > cents(term.prepay_amount))) {
+      throw hold('rate_moved_since_ranking', { termId: term.id, livePerApplication });
+    }
+    Object.assign(metadata, {
+      term_id: term.id, term_end: ymd(term.term_end), coverage_visits: visitsPerTerm,
+      current_term_amount_cents: cents(term.prepay_amount),
+      next_term_amount_cents: Number(row.proposed_rate_cents) * visitsPerTerm,
+      per_application_current_cents: current,
+      per_application_new_cents: Number(row.proposed_rate_cents),
+    });
+  }
+  const { effectiveDate, firstVisitId } = effectiveDateFor(lane, { floor, visits, billingDay: customer.billing_day, term, plannedSend });
+  if (firstVisitId) {
+    metadata.first_visit_id = firstVisitId;
+    // Every visit the apply will reprice must still be stamped at the rate
+    // the letter quotes as current: the apply refuses anything else, but
+    // only after the customer has been told.
+    const off = visits.find((v) => v.scheduled_date >= effectiveDate && UPCOMING_STATUSES.includes(String(v.status)) && cents(v.estimated_price) !== current);
+    if (off) throw hold(cents(off.estimated_price) == null ? 'visit_unpriced' : 'rate_moved_since_ranking', { visitId: off.id });
+  }
+  // The public page renders current_amount_cents → new_amount_cents "per
+  // <cadence_label>" exactly as stored. Customer-facing prices are per
+  // application (AGENTS.md "Per application" price copy) except true dues,
+  // which are per month. noticed_current_cents / noticed_new_cents are what
+  // the apply enforces: the per-application or dues rate, and for a prepaid
+  // term the ANNUAL totals (the renewal charges exactly the successor's).
+  const shownCurrent = lane === LANE_PREPAY ? metadata.per_application_current_cents : current;
+  const shownNew = Number(row.proposed_rate_cents);
+  const noticedCurrent = lane === LANE_PREPAY ? metadata.current_term_amount_cents : current;
+  const noticedNew = lane === LANE_PREPAY ? metadata.next_term_amount_cents : shownNew;
+  return { effectiveDate, shownCurrent, shownNew, noticedCurrent, noticedNew };
+}
+
 // One approved ranking row → one draft notice row (or a HoldError).
-async function scheduleRow(dbh, row, { batch, customer, lane, today, plannedSend, noticeFloor, batchId, batchKey, actorId }) {
-  if (!customer) throw hold('lane_unknown', 'customer missing');
+async function scheduleRow(dbh, row, { batch, lane, today, plannedSend, noticeFloor, batchId, batchKey, actorId }) {
   if (!lane) throw hold('lane_cleanup', { billingLane: row.billing_lane });
   if (row.family_key === 'termite') throw hold('termite_program');
   // The ranking's own review date (rate_review_snapshots.review_date —
@@ -481,44 +574,6 @@ async function scheduleRow(dbh, row, { batch, customer, lane, today, plannedSend
     source: NOTICE_METADATA_SOURCE, batch_key: batchKey, planned_send_date: plannedSend, anniversary_occurrence: occurrence,
     rate_unit: row.rate_unit, visits_per_year: row.visits_per_year, current_rate_source: row.current_rate_source,
   };
-  let visits = [];
-  let term = null;
-  if (lane === LANE_PER_APPLICATION) {
-    visits = await loadLineOpenVisits(dbh, { customerId: row.customer_id, familyKey: row.family_key, cadence: row.cadence, fromDate: today });
-    // The series this notice names: the apply reprices only that series,
-    // never a replacement accepted after it (see lockPerApplicationTargets).
-    const roots = [...new Set(visits.map((v) => String(v.recurring_parent_id || v.id)))];
-    if (roots.length === 1) metadata.series_root_id = roots[0];
-  } else if (lane === LANE_PREPAY) {
-    const found = await resolvePrepayTerm(dbh, { customerId: row.customer_id, familyKey: row.family_key, cadence: row.cadence, today });
-    if (!found.term) throw hold(found.reason);
-    term = found.term;
-    const visitsPerTerm = Number(term.coverage_visit_count) > 0 ? Number(term.coverage_visit_count) : visitsPerYearFor(row.cadence, row.visits_per_year);
-    if (!(visitsPerTerm > 0)) throw hold('prepay_term_not_found', 'no coverage visit count');
-    // The live term must still be the rate the ranking approved (the apply's
-    // own derivation, to the cent) and the noticed renewal a real increase —
-    // never a letter mixing a moved term amount with stale snapshot rates.
-    const livePerApplication = Math.round((Number(term.prepay_amount) / visitsPerTerm) * 100);
-    if (livePerApplication !== Number(row.current_rate_cents) || !(Number(row.proposed_rate_cents) * visitsPerTerm > cents(term.prepay_amount))) {
-      throw hold('rate_moved_since_ranking', { termId: term.id, livePerApplication });
-    }
-    Object.assign(metadata, {
-      term_id: term.id, term_end: ymd(term.term_end), coverage_visits: visitsPerTerm,
-      current_term_amount_cents: cents(term.prepay_amount),
-      next_term_amount_cents: Number(row.proposed_rate_cents) * visitsPerTerm,
-      per_application_current_cents: Number(row.current_rate_cents),
-      per_application_new_cents: Number(row.proposed_rate_cents),
-    });
-  }
-  const { effectiveDate, firstVisitId } = effectiveDateFor(lane, { floor, visits, billingDay: customer.billing_day, term, plannedSend });
-  if (firstVisitId) metadata.first_visit_id = firstVisitId;
-  // The public page renders current_amount_cents → new_amount_cents "per
-  // <cadence_label>" exactly as stored, and the apply charges exactly what
-  // was shown: per application for a visit-billed line, per month for dues,
-  // and the ANNUAL totals for a prepaid term (the per-application figures
-  // stay in metadata for the letter).
-  const noticedCurrent = lane === LANE_PREPAY ? metadata.current_term_amount_cents : Number(row.current_rate_cents);
-  const noticedNew = lane === LANE_PREPAY ? metadata.next_term_amount_cents : Number(row.proposed_rate_cents);
   // The notice row and the ranking row's link commit together (a savepoint
   // when the caller already holds a transaction): a crash between the two
   // would otherwise leave a draft row the next schedule cannot re-link.
@@ -536,15 +591,22 @@ async function scheduleRow(dbh, row, { batch, customer, lane, today, plannedSend
     if (!live || String(live.status) !== 'approved') throw hold('row_not_approved', { status: live ? live.status : null });
     if (String(live.customer_id) !== String(row.customer_id)) throw hold('row_owner_changed', { customerId: live.customer_id });
     if (live.notice_id) return { alreadyScheduled: true, noticeId: live.notice_id };
+    // Every customer, visit and term fact is read from here on, under the
+    // fence: the account must still bill on the lane the ranking priced.
+    const customer = await sp('customers').where({ id: row.customer_id }).first();
+    if (!customer || customer.deleted_at) throw hold('lane_unknown', 'customer missing');
+    const liveLane = await resolveLiveLane(sp, { customer, familyKey: row.family_key, cadence: row.cadence, today });
+    if (liveLane !== lane) throw hold('lane_moved_since_ranking', { ranked: lane, live: liveLane });
+    const { effectiveDate, shownCurrent, shownNew, noticedCurrent, noticedNew } = await deriveNotice(sp, row, { lane, customer, today, floor, plannedSend, metadata });
     // One notice per change EVENT: a legacy notice with the same customer,
     // date and amounts is the same event; another rate-review notice is
     // only when it is the same plan line (two lines can share date and
     // amounts and are two changes). Checked under the shared per-event lock
     // the legacy send path also takes; the partial unique indexes of
     // migration 20261001190000 are the belt.
-    await lockNoticeEvent(sp, { customerId: row.customer_id, effectiveDate, currentCents: noticedCurrent, newCents: noticedNew });
+    await lockNoticeEvent(sp, { customerId: row.customer_id, effectiveDate, currentCents: shownCurrent, newCents: shownNew });
     const sameEvent = await sp('price_change_notices')
-      .where({ customer_id: row.customer_id, effective_date: effectiveDate, current_amount_cents: noticedCurrent, new_amount_cents: noticedNew })
+      .where({ customer_id: row.customer_id, effective_date: effectiveDate, current_amount_cents: shownCurrent, new_amount_cents: shownNew })
       .where(function legacyOrSameLine() { this.whereNull('rate_review_row_id').orWhere('family_key', row.family_key); })
       .first('id');
     if (sameEvent) throw hold('notice_event_collision', { effectiveDate });
@@ -553,8 +615,8 @@ async function scheduleRow(dbh, row, { batch, customer, lane, today, plannedSend
       inserted = await sp('price_change_notices').insert({
         batch_id: batchId,
         customer_id: row.customer_id,
-        current_amount_cents: noticedCurrent,
-        new_amount_cents: noticedNew,
+        current_amount_cents: shownCurrent,
+        new_amount_cents: shownNew,
         cadence_label: cadenceLabelFor(lane),
         effective_date: effectiveDate,
         notice_token: crypto.randomBytes(16).toString('hex'),
@@ -576,10 +638,10 @@ async function scheduleRow(dbh, row, { batch, customer, lane, today, plannedSend
     // An earlier scheduling hold is resolved now: its notice_hold flag goes,
     // every other ranking flag stays.
     await sp('rate_review_snapshots').where({ id: row.id }).update({ notice_id: inserted[0].id, flags: JSON.stringify(withoutNoticeHolds(row.flags)), updated_at: new Date() });
-    return { noticeId: inserted[0].id };
+    return { noticeId: inserted[0].id, effectiveDate };
   });
   if (noticeId.alreadyScheduled) return { alreadyScheduled: true, rowId: row.id };
-  return { noticeId: noticeId.noticeId, rowId: row.id, customerId: row.customer_id, familyKey: row.family_key, lane, effectiveDate };
+  return { noticeId: noticeId.noticeId, rowId: row.id, customerId: row.customer_id, familyKey: row.family_key, lane, effectiveDate: noticeId.effectiveDate };
 }
 
 /**
@@ -622,15 +684,13 @@ async function scheduleUnderLock(dbh, { batchKey, plannedSend, today, actorId })
   };
   if (!candidates.length) return { ...result, ok: false, reason: approved ? 'no_positive_delta' : 'nothing_approved' };
 
-  const customerIds = [...new Set(candidates.map((r) => r.customer_id))];
-  const customers = new Map((await dbh('customers').whereIn('id', customerIds).select('id', 'billing_day', 'billing_mode', 'per_application_fee', 'monthly_rate')).map((c) => [c.id, c]));
   const noticeFloor = addDaysYmd(plannedSend, MIN_NOTICE_DAYS);
 
   for (const row of candidates) {
     if (row.notice_id) { result.alreadyScheduled += 1; continue; }
     try {
       const notice = await scheduleRow(dbh, row, {
-        batch, customer: customers.get(row.customer_id), lane: laneForRow(row),
+        batch, lane: laneForRow(row),
         today, plannedSend, noticeFloor, batchId: result.batchId, batchKey, actorId,
       });
       if (notice.alreadyScheduled) { result.alreadyScheduled += 1; continue; }
@@ -750,13 +810,58 @@ async function moveMonthlySlice(trx, { customer, familyKey, deltaMonthly, requir
   return { oldScalar, newScalar };
 }
 
+// The plan the letter named, recorded at scheduling: the line's series and
+// its ledger slices' accept provenance. A same-family plan accepted since —
+// at the same price or not — is a different plan and never takes the old
+// notice (the per-application lane's lockPerApplicationTargets rule). A
+// notice that recorded neither fails closed.
+async function assertMonthlyPlanUnchanged(trx, { notice, customer, metadata, today }) {
+  const noticedSlices = Array.isArray(metadata.slice_estimates) ? metadata.slice_estimates : null;
+  if (!metadata.series_root_id && !noticedSlices) throw hold('notice_series_unrecorded');
+  if (metadata.series_root_id) {
+    const snapshot = await trx('rate_review_snapshots').where({ id: notice.rate_review_row_id }).first('cadence');
+    const roots = seriesRoots(await loadLineOpenVisits(trx, { customerId: customer.id, familyKey: notice.family_key, cadence: snapshot ? snapshot.cadence : null, fromDate: today }));
+    if (roots.length && (roots.length > 1 || roots[0] !== String(metadata.series_root_id))) {
+      throw hold('plan_replaced', { noticedSeries: metadata.series_root_id, liveSeries: roots });
+    }
+  }
+  if (noticedSlices) {
+    const liveSlices = await familySliceEstimates(trx, customer.id, notice.family_key);
+    if (liveSlices.join('|') !== noticedSlices.join('|')) throw hold('plan_replaced', { noticedSlices, liveSlices });
+  }
+}
+
 async function applyMonthly(trx, ctx) {
-  const { notice, customer } = ctx;
-  const { family } = await loadFamilySlices(trx, customer.id, notice.family_key);
+  const { notice, customer, today } = ctx;
+  const { all, family } = await loadFamilySlices(trx, customer.id, notice.family_key);
   const source = ctx.metadata.current_rate_source;
   // Re-read the lane's current rate the way the ranking resolved it.
-  const currentCents = source === 'ledger_slice' ? cents(sumSlices(family)) : cents(customer.monthly_rate);
+  const currentCents = monthlyCurrentCents(customer, family, source);
   if (currentCents !== Number(notice.noticed_current_cents)) throw hold('rate_moved_since_notice', { currentCents, source });
+  // A notice ranked from the whole scalar named the account's ONE plan line
+  // at that rate. If the ledger has since split the scalar across lines
+  // (pest $60 + lawn $40 under an unchanged $100), the family's own slice
+  // is no longer the noticed rate — moving it would raise a different
+  // amount than the letter quoted. Hold unless this family's slice (or a
+  // lone unattributed slice) still carries the whole scalar.
+  // The ranking prices off the scalar only for an account with ONE plan
+  // line; the account must still run exactly that line (a pest plan
+  // replaced by lawn at the same total, or a second line joining with no
+  // ledger attribution, is not the plan the letter named).
+  if (source !== 'ledger_slice') {
+    const lines = await loadAccountPlanLineCount(trx, { customerId: customer.id, fromDate: today });
+    const own = await loadLineOpenVisits(trx, { customerId: customer.id, familyKey: notice.family_key, fromDate: today });
+    if (lines !== 1 || own.length === 0) throw hold('rate_moved_since_notice', { currentCents, source, accountLines: lines });
+  }
+  if (source !== 'ledger_slice' && all.length > 0) {
+    const familyKeys = new Set(family.map((r) => r.family_key));
+    const outside = all.filter((r) => !familyKeys.has(r.family_key) && r.family_key !== PlanRateLedger.UNATTRIBUTED);
+    const carried = family.length > 0 ? cents(sumSlices(family)) : cents(sumSlices(all));
+    if (outside.length > 0 || carried !== currentCents) {
+      throw hold('rate_moved_since_notice', { currentCents, source, ledger: all.map((r) => r.family_key) });
+    }
+  }
+  await assertMonthlyPlanUnchanged(trx, { notice, customer, metadata: ctx.metadata, today });
   const deltaMonthly = dollars(Number(notice.noticed_new_cents) - Number(notice.noticed_current_cents));
   const moved = await moveMonthlySlice(trx, { customer, familyKey: notice.family_key, deltaMonthly, requireSlice: source === 'ledger_slice' });
   return { lane: LANE_MONTHLY, before: { monthly_rate: moved.oldScalar }, after: { monthly_rate: moved.newScalar }, deltaMonthly };
@@ -804,6 +909,15 @@ async function lockPerApplicationTargets(trx, { notice, customer, effectiveDate,
   const noticedRoot = parseMetadata(notice.metadata).series_root_id;
   if (!noticedRoot) throw hold('notice_series_unrecorded');
   if (String(noticedRoot) !== String(parentId)) throw hold('plan_replaced', { noticedSeries: noticedRoot, liveSeries: parentId });
+  // The visit the letter named as the first at the new rate: a delayed run
+  // that finds it already under way or finished billed it at the old rate,
+  // and repricing only the later visits would record a change that did not
+  // start when the customer was told. Held for a person instead.
+  const firstVisitId = parseMetadata(notice.metadata).first_visit_id;
+  if (firstVisitId) {
+    const first = await trx('scheduled_services').where({ id: firstVisitId }).first('id', 'status');
+    if (first && ['en_route', 'on_site', 'completed'].includes(String(first.status))) throw hold('effective_visit_started', { visitId: first.id, status: first.status });
+  }
   let locked;
   try {
     await schedule.acquireRecurringSeriesMaintenanceLock(trx, parentId, false);
@@ -853,11 +967,19 @@ async function assertFlatTargets(trx, { locked, addonRows, fields, noticedCurren
 async function assertTemplateSpawnsAtNoticed(trx, { parentId, parentAddons, fields, noticedNew, schedule }) {
   const parent = await trx('scheduled_services').where({ id: parentId }).first();
   if (!parent) throw hold('no_future_visit', { parentId });
+  // An extension prices each date with the add-ons due on it
+  // (filterAddonLinesForDate). A line sold for the anchor visit alone never
+  // reaches a later one; any other line lands on some later visits and not
+  // others, so the series has no single flat price to move — and counting
+  // an anchor-only line here would let it offset a discount and hide
+  // spawns that price below the notice.
+  const recurring = parentAddons.filter((a) => schedule.addonRecursAfterAnchor(a));
+  if (recurring.length) throw hold('series_template_complex', { recurringAddons: recurring.length });
   const existing = schedule.parseTemplateOverrides(parent.recurring_template_overrides) || {};
   const provenance = schedule.readProvenanceOverrides(parent.recurring_template_overrides);
   const template = { ...parent, ...provenance, ...existing, ...fields };
   const scope = await schedule.loadStoredDiscountScope(trx, template, parentAddons);
-  const spawn = schedule.calculateStoredVisitFinancials(template, parentAddons, parentAddons, scope);
+  const spawn = schedule.calculateStoredVisitFinancials(template, [], parentAddons, scope);
   if (cents(spawn.price) !== noticedNew) throw hold('series_template_complex', { spawn: spawn.price, parentAddons: parentAddons.length });
 }
 
@@ -1021,7 +1143,7 @@ async function finalizeApplied(trx, ctx, outcome, now) {
   await trx('activity_log').insert({
     customer_id: customer.id,
     action: ACTIVITY_APPLIED,
-    description: `Annual rate review applied (${notice.family_key}, ${notice.billing_lane}): $${dollars(notice.noticed_current_cents).toFixed(2)} → $${dollars(notice.noticed_new_cents).toFixed(2)} per ${notice.cadence_label || 'application'} from ${ymd(notice.effective_date)}.`,
+    description: `Annual rate review applied (${notice.family_key}, ${notice.billing_lane}): $${dollars(notice.noticed_current_cents).toFixed(2)} → $${dollars(notice.noticed_new_cents).toFixed(2)} per ${notice.billing_lane === LANE_PREPAY ? 'year' : (notice.cadence_label || 'application')} from ${ymd(notice.effective_date)}.`,
     metadata: JSON.stringify({ notice_id: notice.id, rate_review_row_id: notice.rate_review_row_id, lane: notice.billing_lane, ...outcome }),
   });
 }
@@ -1137,6 +1259,24 @@ async function raiseHoldAlert(noticeRow, code) {
   }
 }
 
+// A plan hold whose return date is today still reads 'active' at 03:10 (the
+// hold lifecycle resumes it at 10:18, restoring the pre-hold rate), so a
+// notice effective that day would wait a night and miss its own date and
+// the 08:00 dues run. Resume those holds first, through the lifecycle's own
+// resume phase (cancel-flow gate, as its cron), for the due customers only.
+async function resumeHoldsEndingToday(due, asOfDay) {
+  const customerIds = [...new Set(due.map((n) => String(n.customer_id)))];
+  if (!customerIds.length) return;
+  try {
+    const { cancelFlowV2Enabled } = require('./cancellation-resolution');
+    if (!cancelFlowV2Enabled()) return;
+    const result = await require('./cancellation-resolution/holds').resumeHoldsDueFor(customerIds, { today: asOfDay });
+    if (result.resumed || result.errors.length) logger.info(`[rate-review-apply] ${result.resumed} plan hold(s) ending ${asOfDay} resumed before the apply${result.errors.length ? ` (errors: ${result.errors.join(', ')})` : ''}`);
+  } catch (err) {
+    logger.warn(`[rate-review-apply] same-day hold resume failed: ${err.message}`);
+  }
+}
+
 /**
  * Nightly apply. Gate off → returns before any query. Returns
  * { ok, asOf, due, applied, held, skipped, holds: [{ noticeId, reason }] }.
@@ -1147,6 +1287,7 @@ async function applyDueRateChanges({ asOf = new Date(), now = null, dbh = db } =
   const asOfDay = etDateString(asOf);
   const due = await loadDueNotices(dbh, asOfDay);
   const out = { ok: true, asOf: asOfDay, due: due.length, applied: 0, held: 0, skipped: 0, holds: [] };
+  await resumeHoldsEndingToday(due, asOfDay);
   for (const noticeRow of due) {
     const result = await applyNotice(noticeRow, { now: at, dbh });
     if (result.applied) {
@@ -1176,7 +1317,12 @@ async function applyDueRateChanges({ asOf = new Date(), now = null, dbh = db } =
 // touched (reported as kept). The notices are locked, judged by the same
 // delivery evidence the apply uses (wasDelivered), deleted under those
 // same guards in the DELETE's own predicate, and unlinked — one
-// transaction under the batch lock.
+// transaction under the batch lock. The approval goes with them: every
+// approved row left with no notice returns to green (approved_at /
+// approved_by cleared), since a rebuild (batch_has_approved_rows) and a
+// row edit (row_locked) both refuse approved rows — the owner edits or
+// rebuilds, then approves again. A row still linked to a kept (delivered
+// or in-flight) notice keeps its approval.
 async function retireDraftNotices(batchKey, { dbh = db } = {}) {
   if (!rateReviewLive()) return { ok: false, reason: 'gate_off' };
   if (!BATCH_KEY_RE.test(String(batchKey || ''))) throw badInput('batchKey must be YYYY-MM');
@@ -1184,7 +1330,9 @@ async function retireDraftNotices(batchKey, { dbh = db } = {}) {
     await lockBatch(trx, batchKey);
     const rows = await trx('rate_review_snapshots').where({ batch_key: batchKey }).whereNotNull('notice_id').select('id', 'notice_id');
     const noticeIds = rows.map((r) => r.notice_id);
-    if (!noticeIds.length) return { ok: true, batchKey, retired: 0, keptDelivered: 0 };
+    const revokeApprovals = () => trx('rate_review_snapshots').where({ batch_key: batchKey, status: 'approved' }).whereNull('notice_id')
+      .update({ status: 'green', approved_at: null, approved_by: null, updated_at: new Date() });
+    if (!noticeIds.length) return { ok: true, batchKey, retired: 0, keptDelivered: 0, revoked: await revokeApprovals() };
     // Retirable = exactly what the DELETE below accepts: a draft, a
     // previewed draft ('viewed'), or a definitively unsent attempt
     // ('unreachable': no contact / every leg policy-blocked — the comms lane
@@ -1210,9 +1358,50 @@ async function retireDraftNotices(batchKey, { dbh = db } = {}) {
       await trx('rate_review_snapshots').where({ batch_key: batchKey }).whereIn('notice_id', candidateIds).update({ notice_id: null, updated_at: new Date() });
     }
     const kept = noticeIds.length - candidateIds.length;
-    logger.info(`[rate-review-apply] ${batchKey}: ${retired} undelivered notice rows retired, ${kept} delivered or in-flight kept`);
-    return { ok: true, batchKey, retired, keptDelivered: kept };
+    const revoked = await revokeApprovals();
+    logger.info(`[rate-review-apply] ${batchKey}: ${retired} undelivered notice rows retired, ${kept} delivered or in-flight kept, ${revoked} approvals returned to green`);
+    return { ok: true, batchKey, retired, keptDelivered: kept, revoked };
   });
+}
+
+// The customer's prepaid-lane notices indexed by the term they name (see
+// noticedRenewalAmountConflict).
+async function prepayNoticesByTerm(dbh, customerId) {
+  // Family attribution through the notice the apply wrote for the term —
+  // and, before the nightly tick froze its amount, the DELIVERED notice
+  // that names the term: the customer was already told that amount, so it
+  // guards the renewal from delivery, not from the next 03:10 apply.
+  const prepayNotices = await dbh('price_change_notices')
+    .where({ customer_id: customerId, billing_lane: LANE_PREPAY })
+    .select('family_key', 'metadata', 'applied_at', 'status', 'sent_at', 'email_sent', 'sms_sent', 'noticed_new_cents', 'new_amount_cents', 'effective_date');
+  // Per term: the noticed family, the renewal day its APPLIED notice named,
+  // and the amount a delivered-but-unapplied notice told the customer.
+  const familyByTerm = new Map();
+  const appliedDay = new Map();
+  const deliveredCents = new Map();
+  // The visit count behind the per-application rate the letter quoted: the
+  // same total over more visits is a lower rate than the customer was told.
+  const noticedVisits = new Map();
+  for (const n of prepayNotices) {
+    const meta = parseMetadata(n.metadata);
+    const key = String(meta.term_id || '');
+    const day = ymd(n.effective_date);
+    if (n.applied_at) {
+      familyByTerm.set(key, n.family_key);
+      appliedDay.set(key, day);
+      if (Number(meta.coverage_visits) > 0) noticedVisits.set(key, Number(meta.coverage_visits));
+      continue;
+    }
+    // Delivered with the 30-day lead the apply requires (applyNotice's
+    // notice_too_recent rule): a notice the apply refuses guards nothing.
+    const told = wasDelivered(n) && daysBetweenYmd(etDateString(new Date(n.sent_at)), day) >= MIN_NOTICE_DAYS ? Number(n.noticed_new_cents ?? n.new_amount_cents) : 0;
+    if (told > 0) {
+      familyByTerm.set(key, n.family_key);
+      deliveredCents.set(key, { cents: told, day });
+      if (!noticedVisits.has(key) && Number(meta.coverage_visits) > 0) noticedVisits.set(key, Number(meta.coverage_visits));
+    }
+  }
+  return { familyByTerm, appliedDay, deliveredCents, noticedVisits };
 }
 
 // The non-termite renewal consumer of next_term_prepay_amount: an admin
@@ -1233,7 +1422,7 @@ async function retireDraftNotices(batchKey, { dbh = db } = {}) {
 // `lock` (inside the caller's write transaction): the candidate rows are
 // read FOR UPDATE, so a concurrent nightly apply writing
 // next_term_prepay_amount serializes against the renewal that reads it.
-async function noticedRenewalAmountConflict(dbh, { customerId, amount, coverageServiceType, termStart, today, lock, editingTermId }) {
+async function noticedRenewalAmountConflict(dbh, { customerId, amount, coverageServiceType, termStart, today, lock, editingTermId, visitCount = null }) {
   // $0 is a price (a different amount than the one noticed), never an
   // absent one: only a missing or invalid amount skips the check.
   const chargedCents = cents(amount);
@@ -1251,26 +1440,21 @@ async function noticedRenewalAmountConflict(dbh, { customerId, amount, coverageS
     .whereNotIn('status', ['cancelled', 'canceled', 'refunded', 'switch_plan']);
   if (lock) query.forUpdate();
   const terms = await query.select('id', 'customer_id', 'term_end', 'next_term_prepay_amount', 'coverage_service_type', 'renewal_decision');
-  // Family attribution through the notice the apply wrote for the term —
-  // and, before the nightly tick froze its amount, the DELIVERED notice
-  // that names the term: the customer was already told that amount, so it
-  // guards the renewal from delivery, not from the next 03:10 apply.
-  const prepayNotices = await dbh('price_change_notices')
-    .where({ customer_id: customerId, billing_lane: LANE_PREPAY })
-    .select('family_key', 'metadata', 'applied_at', 'status', 'sent_at', 'email_sent', 'sms_sent', 'noticed_new_cents', 'new_amount_cents', 'effective_date');
-  const familyByTerm = new Map();
-  const deliveredCents = new Map();
-  for (const n of prepayNotices) {
-    const termId = parseMetadata(n.metadata).term_id;
-    // Delivered with the 30-day lead the apply requires (applyNotice's
-    // notice_too_recent rule): a notice the apply refuses guards nothing.
-    const told = !n.applied_at && wasDelivered(n)
-      && daysBetweenYmd(etDateString(new Date(n.sent_at)), ymd(n.effective_date)) >= MIN_NOTICE_DAYS
-      && Number(n.noticed_new_cents ?? n.new_amount_cents);
-    if (told > 0) deliveredCents.set(String(termId), told);
-    if (termId && (n.applied_at || told > 0)) familyByTerm.set(String(termId), n.family_key);
-  }
-  const noticedCentsOf = (t) => cents(t.next_term_prepay_amount) ?? deliveredCents.get(String(t.id)) ?? null;
+  const { familyByTerm, appliedDay, deliveredCents, noticedVisits } = await prepayNoticesByTerm(dbh, customerId);
+  // Either amount guards only the renewal window its notice named
+  // (effective_date = term_end + 1, applyPrepay's renewal_window_changed
+  // rule): a term whose dates were edited since is a different renewal —
+  // the term-date editor keeps next_term_prepay_amount when the dates move,
+  // and the apply never writes a delivered notice's amount for it. A frozen
+  // amount with no applied notice on record keeps guarding.
+  const noticedCentsOf = (t) => {
+    const key = String(t.id);
+    const renewalDay = addDaysYmd(ymd(t.term_end), 1);
+    const frozen = cents(t.next_term_prepay_amount);
+    if (frozen != null && [undefined, null, renewalDay].includes(appliedDay.get(key))) return frozen;
+    const delivered = deliveredCents.get(key);
+    return delivered && delivered.day === renewalDay ? delivered.cents : null;
+  };
   const term = terms
     .filter((t) => noticedCentsOf(t) != null && !['cancel', 'switch_plan'].includes(String(t.renewal_decision || '')))
     .filter((t) => {
@@ -1290,8 +1474,14 @@ async function noticedRenewalAmountConflict(dbh, { customerId, amount, coverageS
   // judged like the renewal itself.
   if (await successorTermExists(dbh, term, familyByTerm.get(String(term.id)) || family, editingTermId)) return null;
   const noticedCents = noticedCentsOf(term);
-  if (noticedCents === chargedCents) return null;
-  return { termId: term.id, termEnd: ymd(term.term_end), noticedAmount: dollars(noticedCents), chargedAmount: dollars(chargedCents) };
+  const told = noticedVisits.get(String(term.id)) || null;
+  const charged = Number(visitCount) > 0 ? Number(visitCount) : null;
+  const visitsDiffer = told != null && charged != null && told !== charged;
+  if (noticedCents === chargedCents && !visitsDiffer) return null;
+  return {
+    termId: term.id, termEnd: ymd(term.term_end), noticedAmount: dollars(noticedCents), chargedAmount: dollars(chargedCents),
+    ...(told != null ? { noticedVisits: told, chargedVisits: charged } : {}),
+  };
 }
 
 // The 409 every renewal writer returns when noticedRenewalAmountConflict
@@ -1301,10 +1491,12 @@ async function noticedRenewalAmountConflict(dbh, { customerId, amount, coverageS
 function noticedRenewalAmountError(conflict) {
   return Object.assign(new Error('renewal amount noticed by the annual rate review'), {
     noticedRenewalAmount: {
-      error: `This customer was noticed a renewal amount of $${conflict.noticedAmount.toFixed(2)} for this plan by the annual rate review. Charge that amount, or confirm the different amount deliberately.`,
+      error: `This customer was noticed a renewal amount of $${conflict.noticedAmount.toFixed(2)}${conflict.noticedVisits ? ` for ${conflict.noticedVisits} applications` : ''} for this plan by the annual rate review. Charge that amount${conflict.noticedVisits ? ' for that many applications' : ''}, or confirm the difference deliberately.`,
       code: 'RENEWAL_AMOUNT_NOTICED',
       noticedAmount: conflict.noticedAmount,
       chargedAmount: conflict.chargedAmount,
+      noticedVisits: conflict.noticedVisits || null,
+      chargedVisits: conflict.chargedVisits || null,
       termId: conflict.termId,
     },
   });
@@ -1323,6 +1515,8 @@ async function recordNoticedAmountOverride(trx, { customerId, conflict, adminUse
     metadata: JSON.stringify({
       noticed_amount: conflict.noticedAmount,
       charged_amount: conflict.chargedAmount,
+      noticed_visits: conflict.noticedVisits || null,
+      charged_visits: conflict.chargedVisits || null,
       predecessor_term_id: conflict.termId,
       predecessor_term_end: conflict.termEnd || null,
       invoice_id: invoiceId,

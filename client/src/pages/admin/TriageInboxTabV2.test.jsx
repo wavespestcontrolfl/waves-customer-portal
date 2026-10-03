@@ -281,6 +281,42 @@ describe('follow-up card Resolve path', () => {
   });
 });
 
+describe('missing first-name card', () => {
+  const card = { ...ordinary, id: 'fn', first_name: '', last_name: 'Murphy', feedback_verdict: null,
+    reason_code: 'missing_first_name', payload: JSON.stringify({ flag: 'missing_first_name', heard_name_v1: { first_name: null, last_name: 'Murphy' } }) };
+  const load = () => adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
+    ? { items: [card], counts: { open: 1, resolved: 0, dismissed: 0 } } : { ok: true }));
+
+  it('is an operational card: Resolve and Dismiss, no Accept/Deny', async () => {
+    load();
+    render(<TriageInboxTabV2 isAdmin />);
+    const el = (await screen.findByText('Murphy')).closest('.py-4');
+    expect(within(el).queryByRole('button', { name: /accept/i })).toBeNull();
+    expect(within(el).queryByRole('button', { name: /deny/i })).toBeNull();
+    expect(within(el).getByRole('button', { name: /dismiss/i })).toBeInTheDocument();
+    expect(within(el).getByRole('button', { name: /^resolve$/i })).toBeInTheDocument();
+  });
+
+  it('Resolve is admin-only: a non-admin sees Dismiss but no Resolve', async () => {
+    load();
+    render(<TriageInboxTabV2 isAdmin={false} />);
+    const el = (await screen.findByText('Murphy')).closest('.py-4');
+    expect(within(el).getByRole('button', { name: /dismiss/i })).toBeInTheDocument();
+    expect(within(el).queryByRole('button', { name: /^resolve$/i })).toBeNull();
+  });
+
+  it('Resolve closes the card only: PUT /resolve with its version, never a /verdict', async () => {
+    load();
+    render(<TriageInboxTabV2 isAdmin />);
+    const el = (await screen.findByText('Murphy')).closest('.py-4');
+    fireEvent.click(within(el).getByRole('button', { name: /^resolve$/i }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/fn/resolve', {
+      method: 'PUT', body: JSON.stringify({ expected_updated_at: card.updated_at }),
+    }));
+    expect(adminFetch.mock.calls.some(([url]) => String(url).includes('/verdict'))).toBe(false);
+  });
+});
+
 describe('verdict 409 with its own instruction', () => {
   it('shows the server message for a relinked call instead of reloading and looping', async () => {
     const card = { ...ordinary, id: 'relinked', first_name: 'Relinked', last_name: 'Card', feedback_verdict: null };
@@ -303,6 +339,42 @@ describe('verdict 409 with its own instruction', () => {
 // secondary_contact_captured review items carry the second person named on
 // the call (a realtor's buyer, a landlord's tenant) — the card must show the
 // operator WHO to confirm, in both payload shapes the server produces.
+describe('ConfirmEvidence — missing first name', () => {
+  const A = '11111111-2222-4333-8444-555555555555';
+  const B = '66666666-7777-4888-8999-000000000000';
+  it('links the customer listed on the task with neutral wording', () => {
+    render(<ConfirmEvidence reasonCode="missing_first_name" payload={{ flag: 'missing_first_name', customer_ids: [A] }} />);
+    expect(screen.getByRole('link', { name: 'Open customer' })).toHaveAttribute('href', `/admin/customers?customerId=${A}`);
+    expect(screen.getByText(/the customer linked to this task/)).toBeInTheDocument();
+  });
+
+  it('links the record the server resolved (a merged-away customer opens its survivor) — codex #5559 r18', () => {
+    render(<ConfirmEvidence reasonCode="missing_first_name" payload={{ flag: 'missing_first_name', customer_ids: [A] }} openCustomerIds={[B]} />);
+    expect(screen.getByRole('link', { name: 'Open customer' })).toHaveAttribute('href', `/admin/customers?customerId=${B}`);
+  });
+
+  it('a pre-list card (scalar customer_id) reads as one listed customer', () => {
+    render(<ConfirmEvidence reasonCode="missing_first_name" payload={{ flag: 'missing_first_name', customer_id: A }} />);
+    expect(screen.getByRole('link', { name: 'Open customer' })).toHaveAttribute('href', `/admin/customers?customerId=${A}`);
+  });
+
+  it('several listed customers: plural wording and ONE link each, invalid ids dropped', () => {
+    render(<ConfirmEvidence reasonCode="missing_first_name" payload={{ flag: 'missing_first_name', customer_ids: [A, B, A, 'not-a-uuid'] }} />);
+    expect(screen.getByText(/the customers linked to this task/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Open customer 1' })).toHaveAttribute('href', `/admin/customers?customerId=${A}`);
+    expect(screen.getByRole('link', { name: 'Open customer 2' })).toHaveAttribute('href', `/admin/customers?customerId=${B}`);
+    expect(screen.getAllByRole('link')).toHaveLength(2);
+  });
+
+  it('shows no customer link without a valid listed id, or on another reason', () => {
+    const { unmount } = render(<ConfirmEvidence reasonCode="missing_first_name" payload={{ flag: 'missing_first_name', customer_ids: ['not-a-uuid'] }} />);
+    expect(screen.queryByRole('link')).toBeNull();
+    unmount();
+    render(<ConfirmEvidence reasonCode="email_unverified" payload={{ flag: 'email_unverified', customer_ids: [A], customer_id: A }} />);
+    expect(screen.queryByRole('link')).toBeNull();
+  });
+});
+
 describe('ConfirmEvidence — dispute recovery task', () => {
   it('names the promised follow-up the hold kept from booking', () => {
     render(<ConfirmEvidence payload={{
@@ -569,6 +641,26 @@ describe('street-level address hold: office confirm', () => {
     fireEvent.click(screen.getByRole('button', { name: /^confirm & book$/i }));
     await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/dispatch/visit-1/status', { method: 'PUT', body: JSON.stringify({ status: 'confirmed', expected_service_address: '1240 Sample Newbuild Trl, Parrish, FL, 34219' }) }));
     await waitFor(() => expect(screen.getByText('The visit address changed since you opened this.')).toBeInTheDocument());
+  });
+
+  it('the dialog shows the visit\'s LIVE slot (a moved hold), not the booking-time one the card captured', async () => {
+    // The list endpoint refreshes payload.visit_when from the visit when SmartRebooker / an admin moved it.
+    const moved = { ...hold, payload: JSON.stringify({ ...holdPayload, visit_when: '2026-10-12 14:00' }) };
+    adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
+      ? { items: [moved], counts: { open: 1, resolved: 0, dismissed: 0 } } : { success: true }));
+    render(<TriageInboxTabV2 isAdmin />);
+    const card = (await screen.findByText('Hold Card')).closest('.py-4');
+    fireEvent.click(within(card).getByRole('button', { name: /confirm address/i }));
+    expect(await screen.findByText('Visit: 2026-10-12 14:00')).toBeInTheDocument();
+    expect(screen.queryByText(/Mon Oct 5, 1 PM/)).not.toBeInTheDocument();
+  });
+
+  it('with no live slot on the row, the dialog falls back to the slot the card captured', async () => {
+    mockList();
+    render(<TriageInboxTabV2 isAdmin />);
+    const card = (await screen.findByText('Hold Card')).closest('.py-4');
+    fireEvent.click(within(card).getByRole('button', { name: /confirm address/i }));
+    expect(await screen.findByText('Visit: Mon Oct 5, 1 PM')).toBeInTheDocument();
   });
 
   it('keeps Confirm disabled when the live visit address did not load', async () => {

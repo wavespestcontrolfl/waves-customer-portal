@@ -53,12 +53,20 @@ const mockFindConsentedChargeableCard = jest.fn(async () => null);
 const mockHasConsentSnapshotForVariant = jest.fn(async () => false);
 const mockRecordConsent = jest.fn(async () => ({ id: 'consent-1' }));
 const mockLinkPaymentMethodId = jest.fn(async () => {});
+// The rendered consent-version rule (codex #5434 r1 P1) runs REAL against
+// the live intent's stamp: the completion tail records a consent only when
+// the intent was minted for a page rendering the current text.
+const mockDeferredCaptureConsentVersionCurrent = jest.fn(async (intent) => (
+  intent?.metadata?.consent_text_version === jest.requireActual('../services/payment-method-consent-text').CONSENT_VERSION
+));
 jest.mock('../services/payment-method-consents', () => ({
   findConsentedChargeableCard: (...a) => mockFindConsentedChargeableCard(...a),
   hasConsentSnapshotForVariant: (...a) => mockHasConsentSnapshotForVariant(...a),
   recordConsent: (...a) => mockRecordConsent(...a),
   linkPaymentMethodId: (...a) => mockLinkPaymentMethodId(...a),
+  deferredCaptureConsentVersionCurrent: (...a) => mockDeferredCaptureConsentVersionCurrent(...a),
 }));
+const { CONSENT_VERSION: CV } = jest.requireActual('../services/payment-method-consent-text');
 jest.mock('../config/feature-gates', () => {
   const actual = jest.requireActual('../config/feature-gates');
   return { ...actual, isEnabled: (name) => (name === 'autopayCustomerSms' ? actual.gates.autopayCustomerSms === true : actual.isEnabled(name)) };
@@ -207,7 +215,7 @@ describe('requestAutopaySetupLink — ordered checks', () => {
   });
 
   it('Auto Pay activated elsewhere between GET and POST closes the link under the lock (no_longer_needed, nothing enrolled)', async () => {
-    mockRetrieveSetupIntent.mockResolvedValue({ id: 'seti_new', status: 'succeeded', payment_method: 'pm_new', metadata: { purpose: 'autopay_setup_link', request_id: 'req-1' } });
+    mockRetrieveSetupIntent.mockResolvedValue({ id: 'seti_new', status: 'succeeded', payment_method: 'pm_new', metadata: { purpose: 'autopay_setup_link', request_id: 'req-1', consent_text_version: CV } });
     mockTableHandlers.payment_methods = { first: () => null };
     mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, billing_mode: 'per_visit' }) };
     // Unlocked request-time checks passed earlier; under the lock the customer is now on Auto Pay.
@@ -502,14 +510,14 @@ describe('loadAutopaySetupPageData — state machine', () => {
   });
 
   it('replaces a still-unconfirmed card-only intent once bank becomes eligible (never pins the link to card)', async () => {
-    mockRetrieveSetupIntent.mockResolvedValue({ id: 'seti_card', client_secret: 'cs_card', status: 'requires_payment_method', payment_method_types: ['card'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1' } });
+    mockRetrieveSetupIntent.mockResolvedValue({ id: 'seti_card', client_secret: 'cs_card', status: 'requires_payment_method', payment_method_types: ['card'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1', consent_text_version: CV } });
     mockCreateSetupIntent.mockResolvedValue({ clientSecret: 'cs_cb', setupIntentId: 'seti_cb', paymentMethodTypes: ['card', 'us_bank_account'], status: 'requires_payment_method' });
     const d = await loadAutopaySetupPageData({ ...PENDING, stripe_setup_intent_id: 'seti_card' });
     expect(d.setupIntentId).toBe('seti_cb');
     expect(d.paymentMethodTypes).toEqual(['card', 'us_bank_account']);
     // A SUCCEEDED card-only intent is kept — a card is already captured.
     mockCreateSetupIntent.mockClear();
-    mockRetrieveSetupIntent.mockResolvedValue({ id: 'seti_card', client_secret: 'cs_card', status: 'succeeded', payment_method: { id: 'pm_k', type: 'card' }, payment_method_types: ['card'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1' } });
+    mockRetrieveSetupIntent.mockResolvedValue({ id: 'seti_card', client_secret: 'cs_card', status: 'succeeded', payment_method: { id: 'pm_k', type: 'card' }, payment_method_types: ['card'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1', consent_text_version: CV } });
     expect((await loadAutopaySetupPageData({ ...PENDING, stripe_setup_intent_id: 'seti_card' })).setupIntentId).toBe('seti_card');
     expect(mockCreateSetupIntent).not.toHaveBeenCalled();
   });
@@ -542,10 +550,12 @@ describe('loadAutopaySetupPageData — state machine', () => {
     const d = await loadAutopaySetupPageData({ ...PENDING });
     expect(d).toEqual(expect.objectContaining({ state: 'ready', kind: 'customer', clientSecret: 'cs_new', setupIntentId: 'seti_new', paymentMethodTypes: ['card', 'us_bank_account'] }));
     expect(mockCreateSetupIntent).toHaveBeenCalledWith('cust-1', 'card_or_bank', expect.objectContaining({
-      metadata: { purpose: 'autopay_setup_link', request_id: 'req-1' },
+      // Stamped with the consent text version the page renders (codex #5434 r1 P1).
+      metadata: { purpose: 'autopay_setup_link', request_id: 'req-1', consent_text_version: CV },
       verificationMethod: 'instant',
-      // Deterministic per (request, tender): concurrent page loads replay ONE intent.
-      idempotencyKey: 'autopay_setup_link_req-1_card_or_bank',
+      // Deterministic per (request, tender, consent version): concurrent page
+      // loads replay ONE intent; a copy change mints fresh under the new text.
+      idempotencyKey: `autopay_setup_link_req-1_card_or_bank_${CV}`,
     }));
     const calls = touches('appointment_card_requests').flatMap((c) => c.calls);
     expect(calls.find((c) => c[0] === 'update')[1]).toEqual(expect.objectContaining({ stripe_setup_intent_id: 'seti_new' }));
@@ -554,12 +564,12 @@ describe('loadAutopaySetupPageData — state machine', () => {
   it('mints card-only while GATE_ACCEPT_ACH_CAPTURE is off (one ACH-capture kill switch)', async () => {
     gates.acceptAchCapture = false;
     await loadAutopaySetupPageData({ ...PENDING });
-    expect(mockCreateSetupIntent).toHaveBeenCalledWith('cust-1', 'card', expect.objectContaining({ idempotencyKey: 'autopay_setup_link_req-1_card' }));
+    expect(mockCreateSetupIntent).toHaveBeenCalledWith('cust-1', 'card', expect.objectContaining({ idempotencyKey: `autopay_setup_link_req-1_card_${CV}` }));
   });
 
   it('refuses a BANK capture at completion once GATE_ACCEPT_ACH_CAPTURE is off (intent minted earlier)', async () => {
     gates.acceptAchCapture = false;
-    mockRetrieveSetupIntent.mockResolvedValue({ id: 'seti_new', status: 'succeeded', payment_method: { id: 'pm_b', type: 'us_bank_account' }, metadata: { purpose: 'autopay_setup_link', request_id: 'req-1' } });
+    mockRetrieveSetupIntent.mockResolvedValue({ id: 'seti_new', status: 'succeeded', payment_method: { id: 'pm_b', type: 'us_bank_account' }, metadata: { purpose: 'autopay_setup_link', request_id: 'req-1', consent_text_version: CV } });
     expect((await completeAutopaySetupCapture({ request: { ...PENDING }, setupIntentId: 'seti_new' })).code).toBe('bank_not_allowed');
     expect(mockSavePaymentMethod).not.toHaveBeenCalled();
   });
@@ -572,7 +582,7 @@ describe('loadAutopaySetupPageData — state machine', () => {
 
   it('replays an existing confirmable SetupIntent pinned to this request instead of minting again', async () => {
     // The existing intent already matches the current tender (card_or_bank).
-    mockRetrieveSetupIntent.mockResolvedValue({ id: 'seti_old', client_secret: 'cs_old', status: 'requires_payment_method', payment_method_types: ['card', 'us_bank_account'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1' } });
+    mockRetrieveSetupIntent.mockResolvedValue({ id: 'seti_old', client_secret: 'cs_old', status: 'requires_payment_method', payment_method_types: ['card', 'us_bank_account'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1', consent_text_version: CV } });
     const d = await loadAutopaySetupPageData({ ...PENDING, stripe_setup_intent_id: 'seti_old' });
     expect(d.clientSecret).toBe('cs_old');
     expect(d.paymentMethodTypes).toEqual(['card', 'us_bank_account']);
@@ -585,21 +595,67 @@ describe('loadAutopaySetupPageData — state machine', () => {
       .mockResolvedValueOnce({ clientSecret: 'cs_2', setupIntentId: 'seti_2', paymentMethodTypes: ['card', 'us_bank_account'], status: 'requires_payment_method' });
     const d = await loadAutopaySetupPageData({ ...PENDING });
     expect(d.setupIntentId).toBe('seti_2');
-    expect(mockCreateSetupIntent).toHaveBeenNthCalledWith(2, 'cust-1', 'card_or_bank', expect.objectContaining({ idempotencyKey: 'autopay_setup_link_req-1_card_or_bank_g1' }));
+    expect(mockCreateSetupIntent).toHaveBeenNthCalledWith(2, 'cust-1', 'card_or_bank', expect.objectContaining({ idempotencyKey: `autopay_setup_link_req-1_card_or_bank_${CV}_g1` }));
+  });
+
+  it('the attested version the route validated is what the mint stamps and salts (the constant is only the direct-caller fallback)', async () => {
+    const d = await loadAutopaySetupPageData({ ...PENDING }, { consentTextVersion: CV });
+    expect(d.setupIntentId).toBe('seti_new');
+    expect(mockCreateSetupIntent).toHaveBeenCalledWith('cust-1', 'card_or_bank', expect.objectContaining({
+      metadata: expect.objectContaining({ consent_text_version: CV }),
+      idempotencyKey: `autopay_setup_link_req-1_card_or_bank_${CV}`,
+    }));
   });
 
   it('does NOT replay a bank-capable confirmable intent once bank is no longer offered — mints a card-only generation', async () => {
     gates.acceptAchCapture = false;
-    mockRetrieveSetupIntent.mockResolvedValue({ id: 'seti_old', client_secret: 'cs_old', status: 'requires_payment_method', payment_method_types: ['card', 'us_bank_account'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1' } });
+    mockRetrieveSetupIntent.mockResolvedValue({ id: 'seti_old', client_secret: 'cs_old', status: 'requires_payment_method', payment_method_types: ['card', 'us_bank_account'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1', consent_text_version: CV } });
     mockCreateSetupIntent.mockResolvedValue({ clientSecret: 'cs_card', setupIntentId: 'seti_card', paymentMethodTypes: ['card'], status: 'requires_payment_method' });
     const d = await loadAutopaySetupPageData({ ...PENDING, stripe_setup_intent_id: 'seti_old' });
     expect(d.setupIntentId).toBe('seti_card');
     expect(d.paymentMethodTypes).toEqual(['card']);
-    expect(mockCreateSetupIntent).toHaveBeenCalledWith('cust-1', 'card', expect.objectContaining({ idempotencyKey: 'autopay_setup_link_req-1_card' }));
+    expect(mockCreateSetupIntent).toHaveBeenCalledWith('cust-1', 'card', expect.objectContaining({ idempotencyKey: `autopay_setup_link_req-1_card_${CV}` }));
+  });
+
+  // codex #5434 r1 P1 (pre-push hook r2): a pending link opened BEFORE a copy
+  // change points at an intent stamped with the older consent text version
+  // (or none). Completion refuses that intent, so the reload must never
+  // replay it — it mints fresh under the version-salted key, repoints the
+  // row, and the fresh capture completes.
+  it.each([
+    ['a stale stamp', { purpose: 'autopay_setup_link', request_id: 'req-1', consent_text_version: 'v11_2026-08-25' }],
+    ['no stamp', { purpose: 'autopay_setup_link', request_id: 'req-1' }],
+  ])('old intent (%s) → completion refusal → reload mints a current-version intent → the fresh capture completes', async (_name, oldMetadata) => {
+    const OLD = { id: 'seti_old', client_secret: 'cs_old', status: 'succeeded', payment_method: 'pm_old', payment_method_types: ['card', 'us_bank_account'], metadata: oldMetadata };
+    const FRESH = { id: 'seti_fresh', client_secret: 'cs_fresh', status: 'requires_payment_method', payment_method_types: ['card', 'us_bank_account'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1', consent_text_version: CV } };
+    mockRetrieveSetupIntent.mockImplementation(async (id) => (id === 'seti_old' ? OLD : FRESH));
+    mockTableHandlers.payment_methods = { first: () => null };
+    // 1. The old tab confirms its old intent — completion refuses it.
+    const refused = await completeAutopaySetupCapture({ request: { ...PENDING, stripe_setup_intent_id: 'seti_old' }, setupIntentId: 'seti_old' });
+    expect(refused).toEqual({ ok: false, code: 'consent_version_stale' });
+    expect(mockSavePaymentMethod).not.toHaveBeenCalled();
+    // 2. The customer reloads: the stored old intent is NOT replayed; a fresh
+    //    one is minted under the current text and the row repointed.
+    mockCreateSetupIntent.mockResolvedValue({ clientSecret: 'cs_fresh', setupIntentId: 'seti_fresh', paymentMethodTypes: ['card', 'us_bank_account'], status: 'requires_payment_method' });
+    const d = await loadAutopaySetupPageData({ ...PENDING, stripe_setup_intent_id: 'seti_old' });
+    expect(d).toEqual(expect.objectContaining({ state: 'ready', setupIntentId: 'seti_fresh', clientSecret: 'cs_fresh' }));
+    expect(mockCreateSetupIntent).toHaveBeenCalledWith('cust-1', 'card_or_bank', expect.objectContaining({
+      idempotencyKey: `autopay_setup_link_req-1_card_or_bank_${CV}`,
+      metadata: expect.objectContaining({ consent_text_version: CV }),
+    }));
+    const updates = touches('appointment_card_requests').flatMap((c) => c.calls).filter((c) => c[0] === 'update').map((c) => c[1]);
+    expect(updates.some((u) => u.stripe_setup_intent_id === 'seti_fresh')).toBe(true);
+    // 3. The fresh intent, confirmed, completes: saved, recorded, enrolled.
+    mockRetrieveSetupIntent.mockImplementation(async (id) => (id === 'seti_fresh' ? { ...FRESH, status: 'succeeded', payment_method: 'pm_fresh' } : OLD));
+    const done = await completeAutopaySetupCapture({ request: { ...PENDING, stripe_setup_intent_id: 'seti_fresh' }, setupIntentId: 'seti_fresh' });
+    expect(done).toEqual({ ok: true });
+    expect(mockSavePaymentMethod).toHaveBeenCalledWith('cust-1', 'pm_fresh', expect.anything());
+    expect(mockRecordConsent).toHaveBeenCalledWith(expect.objectContaining({ stripePaymentMethodId: 'pm_fresh', source: 'autopay_setup_link' }));
+    expect(mockEnrollConsentedMethod).toHaveBeenCalled();
   });
 
   it('a replayed SUCCEEDED intent carries capturedMethodType so the capture UI renders the matching consent (GH P1)', async () => {
-    mockRetrieveSetupIntent.mockResolvedValue({ id: 'seti_old', client_secret: 'cs_old', status: 'succeeded', payment_method: 'pm_b', payment_method_types: ['card', 'us_bank_account'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1' } });
+    mockRetrieveSetupIntent.mockResolvedValue({ id: 'seti_old', client_secret: 'cs_old', status: 'succeeded', payment_method: 'pm_b', payment_method_types: ['card', 'us_bank_account'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1', consent_text_version: CV } });
     mockRetrievePaymentMethod.mockResolvedValue({ id: 'pm_b', type: 'us_bank_account' });
     const d = await loadAutopaySetupPageData({ ...PENDING, stripe_setup_intent_id: 'seti_old' });
     expect(d).toEqual(expect.objectContaining({ state: 'ready', setupIntentId: 'seti_old', capturedMethodType: 'us_bank_account' }));
@@ -613,7 +669,7 @@ describe('loadAutopaySetupPageData — state machine', () => {
     };
     // The minted generation reads live as usable (pinned — implementations
     // persist across tests).
-    mockRetrieveSetupIntent.mockResolvedValue({ id: 'seti_new', status: 'requires_payment_method', client_secret: 'cs_new', payment_method_types: ['card', 'us_bank_account'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1' } });
+    mockRetrieveSetupIntent.mockResolvedValue({ id: 'seti_new', status: 'requires_payment_method', client_secret: 'cs_new', payment_method_types: ['card', 'us_bank_account'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1', consent_text_version: CV } });
     // The re-read row completed and the enrollment is live → secured.
     mockCustomerOnAutopay.mockResolvedValueOnce(false).mockResolvedValue(true);
     const d = await loadAutopaySetupPageData({ ...PENDING });
@@ -639,7 +695,7 @@ describe('loadAutopaySetupPageData — state machine', () => {
 });
 
 describe('completion tail (page POST + webhook)', () => {
-  const GOOD_SI = { id: 'seti_new', status: 'succeeded', payment_method: 'pm_new', metadata: { purpose: 'autopay_setup_link', request_id: 'req-1' } };
+  const GOOD_SI = { id: 'seti_new', status: 'succeeded', payment_method: 'pm_new', metadata: { purpose: 'autopay_setup_link', request_id: 'req-1', consent_text_version: CV } };
 
   it('re-judges the billing lane under the customer lock and enrolls on the same transaction handle; a lane moved under the lock retires the link', async () => {
     mockRetrieveSetupIntent.mockResolvedValue(GOOD_SI);
@@ -685,6 +741,36 @@ describe('completion tail (page POST + webhook)', () => {
     expect(updates[updates.length - 1]).toEqual(expect.objectContaining({ status: 'completed', stripe_payment_method_id: 'pm_new', payment_method_id: 'pm-row-1' }));
   });
 
+  // codex #5434 r1 P1 (pre-push hook on the attestation round): the webhook
+  // backstop carries no browser attestation, so the intent's OWN stamp — the
+  // consent text version the page it was minted for rendered — decides for
+  // both paths. An older page's intent completed after a copy change is
+  // refused under the claim: nothing saved, recorded or enrolled, the claim
+  // reverts (a fresh page load mints under the current text), the office
+  // gets one bell, and the webhook acks (a permanent code, not a retry).
+  it.each([
+    ['a stale stamp (minted under older copy)', { ...GOOD_SI.metadata, consent_text_version: 'v11_2026-08-25' }],
+    ['no stamp (minted before stamps existed)', { purpose: 'autopay_setup_link', request_id: 'req-1' }],
+  ])('an intent carrying %s is refused under the claim (consent_version_stale) on the page POST and the webhook alike', async (_name, metadata) => {
+    const stale = { ...GOOD_SI, metadata };
+    mockRetrieveSetupIntent.mockResolvedValue(stale);
+    mockTableHandlers.payment_methods = { first: () => null };
+    const page = await completeAutopaySetupCapture({ request: { ...PENDING }, setupIntentId: 'seti_new', ip: '1.2.3.4', userAgent: 'jest' });
+    expect(page).toEqual({ ok: false, code: 'consent_version_stale' });
+    // Webhook path: the row is looked up by the event's request id.
+    mockTableHandlers.appointment_card_requests = { first: () => ({ ...PENDING }) };
+    const hook = await completeAutopaySetupCaptureFromWebhook(stale);
+    expect(hook).toEqual({ ok: false, code: 'consent_version_stale' });
+    expect(mockDeferredCaptureConsentVersionCurrent).toHaveBeenCalledWith(stale, expect.objectContaining({ customerId: 'cust-1' }));
+    expect(mockSavePaymentMethod).not.toHaveBeenCalled();
+    expect(mockRecordConsent).not.toHaveBeenCalled();
+    expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
+    const updates = touches('appointment_card_requests').flatMap((c) => c.calls).filter((c) => c[0] === 'update').map((c) => c[1]);
+    expect(updates.some((u) => u.status === 'completing')).toBe(true);
+    expect(updates.some((u) => u.status === 'pending')).toBe(true);
+    expect(updates.some((u) => u.status === 'completed')).toBe(false);
+  });
+
   it('guards every write on its own lease token and reports retryable (never success) when the final update misses', async () => {
     mockRetrieveSetupIntent.mockResolvedValue(GOOD_SI);
     mockTableHandlers.payment_methods = { first: () => null };
@@ -721,7 +807,7 @@ describe('completion tail (page POST + webhook)', () => {
 
   it('mints a card-only generation instead of replaying a SUCCEEDED bank-capable intent once bank is no longer offered (GH #3726 r1 P0)', async () => {
     gates.acceptAchCapture = false;
-    mockRetrieveSetupIntent.mockResolvedValue({ id: 'seti_bank', client_secret: 'cs_bank', status: 'succeeded', payment_method: 'pm_b', payment_method_types: ['card', 'us_bank_account'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1' } });
+    mockRetrieveSetupIntent.mockResolvedValue({ id: 'seti_bank', client_secret: 'cs_bank', status: 'succeeded', payment_method: 'pm_b', payment_method_types: ['card', 'us_bank_account'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1', consent_text_version: CV } });
     mockCreateSetupIntent.mockResolvedValue({ clientSecret: 'cs_card', setupIntentId: 'seti_card', paymentMethodTypes: ['card'], status: 'requires_payment_method' });
     const d = await loadAutopaySetupPageData({ ...PENDING, stripe_setup_intent_id: 'seti_bank' });
     expect(d.setupIntentId).toBe('seti_card');
@@ -975,7 +1061,7 @@ describe('_test helpers', () => {
 // first method saved on a standalone link is the only one it can enroll.
 // Same design as the estimate accept (#4144) and the visit lane.
 describe('replaceAutopaySetupIntent — "use a different payment method"', () => {
-  const SAVED = { id: 'seti_old', status: 'succeeded', client_secret: 'cs_old', payment_method: { id: 'pm_old', type: 'card' }, payment_method_types: ['card', 'us_bank_account'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1' } };
+  const SAVED = { id: 'seti_old', status: 'succeeded', client_secret: 'cs_old', payment_method: { id: 'pm_old', type: 'card' }, payment_method_types: ['card', 'us_bank_account'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1', consent_text_version: CV } };
   const FRESH = { id: 'seti_after', status: 'requires_payment_method', client_secret: 'cs_after', payment_method_types: ['card', 'us_bank_account'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1', replaces: 'seti_old' } };
   const ROW = { ...PENDING, stripe_setup_intent_id: 'seti_old' };
 
@@ -1001,7 +1087,7 @@ describe('replaceAutopaySetupIntent — "use a different payment method"', () =>
     expect(res).toEqual({ ok: true, retired: true, intent: { clientSecret: 'cs_after', setupIntentId: 'seti_after', paymentMethodTypes: ['card', 'us_bank_account'], capturedMethodType: null } });
     expect(order).toEqual(['mint', 'retire']);
     expect(mockCreateSetupIntent).toHaveBeenCalledWith('cust-1', 'card_or_bank', expect.objectContaining({
-      idempotencyKey: 'autopay_setup_link_req-1_card_or_bank_after_seti_old',
+      idempotencyKey: `autopay_setup_link_req-1_card_or_bank_after_seti_old_${CV}`,
       metadata: expect.objectContaining({ purpose: 'autopay_setup_link', request_id: 'req-1', replaces: 'seti_old' }),
       // The Stripe-customer link-up inside createSetupIntent rides the
       // held transaction (GH Codex #4163 r5 P1).
@@ -1019,7 +1105,7 @@ describe('replaceAutopaySetupIntent — "use a different payment method"', () =>
     mockCreateSetupIntent.mockResolvedValue({ clientSecret: 'cs_after', setupIntentId: 'seti_after', paymentMethodTypes: ['card'], status: 'requires_payment_method' });
     const res = await replaceAutopaySetupIntent({ request: { ...ROW }, setupIntentId: 'seti_old' });
     expect(res.ok).toBe(true);
-    expect(mockCreateSetupIntent).toHaveBeenCalledWith('cust-1', 'card', expect.objectContaining({ idempotencyKey: 'autopay_setup_link_req-1_card_after_seti_old' }));
+    expect(mockCreateSetupIntent).toHaveBeenCalledWith('cust-1', 'card', expect.objectContaining({ idempotencyKey: `autopay_setup_link_req-1_card_after_seti_old_${CV}` }));
   });
 
   it('a mint failure retires NOTHING; a retire failure does not re-point the row', async () => {
@@ -1146,7 +1232,7 @@ describe('replaceAutopaySetupIntent — "use a different payment method"', () =>
 // GH Codex #4163 r6 P2: a page load's generation mint must not overwrite a
 // replacement pointer that committed while it waited.
 describe('the standalone mint\'s row repoint is a CAS on the pointer the load observed', () => {
-  const FRESH = { id: 'seti_after', status: 'requires_payment_method', client_secret: 'cs_after', payment_method_types: ['card', 'us_bank_account'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1' } };
+  const FRESH = { id: 'seti_after', status: 'requires_payment_method', client_secret: 'cs_after', payment_method_types: ['card', 'us_bank_account'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1', consent_text_version: CV } };
 
   it('a CAS miss follows the fresh pointer to the replacement instead of clobbering it', async () => {
     gates.acceptAchCapture = true;
@@ -1158,8 +1244,8 @@ describe('the standalone mint\'s row repoint is a CAS on the pointer the load ob
     mockCreateSetupIntent.mockResolvedValue({ clientSecret: 'cs_g0', setupIntentId: 'seti_g0', paymentMethodTypes: ['card', 'us_bank_account'], status: 'requires_payment_method' });
     mockRetrieveSetupIntent.mockImplementation(async (id) => {
       // The row's intent is no longer replayable (canceled) → generation mint.
-      if (id === 'seti_stale') return { id: 'seti_stale', status: 'canceled', metadata: { purpose: 'autopay_setup_link', request_id: 'req-1' } };
-      if (id === 'seti_g0') return { id: 'seti_g0', status: 'requires_payment_method', client_secret: 'cs_g0', payment_method_types: ['card', 'us_bank_account'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1' } };
+      if (id === 'seti_stale') return { id: 'seti_stale', status: 'canceled', metadata: { purpose: 'autopay_setup_link', request_id: 'req-1', consent_text_version: CV } };
+      if (id === 'seti_g0') return { id: 'seti_g0', status: 'requires_payment_method', client_secret: 'cs_g0', payment_method_types: ['card', 'us_bank_account'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1', consent_text_version: CV } };
       if (id === 'seti_after') return { ...FRESH };
       return null;
     });
@@ -1176,7 +1262,7 @@ describe('the standalone mint\'s row repoint is a CAS on the pointer the load ob
       update: (chain, patch) => (patch.stripe_setup_intent_id ? 0 : 1),
     };
     mockCreateSetupIntent.mockResolvedValue({ clientSecret: 'cs_g0', setupIntentId: 'seti_g0', paymentMethodTypes: ['card'], status: 'requires_payment_method' });
-    mockRetrieveSetupIntent.mockResolvedValue({ id: 'seti_g0', status: 'requires_payment_method', client_secret: 'cs_g0', payment_method_types: ['card'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1' } });
+    mockRetrieveSetupIntent.mockResolvedValue({ id: 'seti_g0', status: 'requires_payment_method', client_secret: 'cs_g0', payment_method_types: ['card'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1', consent_text_version: CV } });
     const d = await loadAutopaySetupPageData({ ...PENDING });
     expect(['closed', 'unavailable', 'secured']).toContain(d.state);
     expect(d.clientSecret).toBeUndefined();
@@ -1184,7 +1270,7 @@ describe('the standalone mint\'s row repoint is a CAS on the pointer the load ob
 });
 
 describe('a retired capture never enrolls (standalone Auto Pay link)', () => {
-  const GOOD_SI = { id: 'seti_new', status: 'succeeded', payment_method: 'pm_new', metadata: { purpose: 'autopay_setup_link', request_id: 'req-1' } };
+  const GOOD_SI = { id: 'seti_new', status: 'succeeded', payment_method: 'pm_new', metadata: { purpose: 'autopay_setup_link', request_id: 'req-1', consent_text_version: CV } };
   const RETIRED = { ...GOOD_SI, metadata: { ...GOOD_SI.metadata, retired: 'true', replaced_by: 'seti_after' } };
 
   beforeEach(() => {
@@ -1223,7 +1309,7 @@ describe('a retired capture never enrolls (standalone Auto Pay link)', () => {
 
   it('the page load replays a RETIRED row intent as its live replacement, and judges a deterministic replay LIVE', async () => {
     gates.acceptAchCapture = true;
-    const FRESH = { id: 'seti_after', status: 'requires_payment_method', client_secret: 'cs_after', payment_method_types: ['card', 'us_bank_account'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1' } };
+    const FRESH = { id: 'seti_after', status: 'requires_payment_method', client_secret: 'cs_after', payment_method_types: ['card', 'us_bank_account'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1', consent_text_version: CV } };
     mockRetrieveSetupIntent.mockImplementation(async (id) => {
       if (id === 'seti_old') return { id: 'seti_old', status: 'succeeded', client_secret: 'cs_old', payment_method: 'pm_old', payment_method_types: ['card', 'us_bank_account'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1', retired: 'true', replaced_by: 'seti_after' } };
       if (id === 'seti_after') return { ...FRESH };
@@ -1239,7 +1325,7 @@ describe('a retired capture never enrolls (standalone Auto Pay link)', () => {
       .mockResolvedValueOnce({ clientSecret: 'cs_g1', setupIntentId: 'seti_g1', paymentMethodTypes: ['card', 'us_bank_account'], status: 'requires_payment_method' });
     mockRetrieveSetupIntent.mockImplementation(async (id) => {
       if (id === 'seti_old') return { id: 'seti_old', status: 'succeeded', metadata: { purpose: 'autopay_setup_link', request_id: 'req-1', retired: 'true' } };
-      if (id === 'seti_g1') return { id: 'seti_g1', status: 'requires_payment_method', client_secret: 'cs_g1', payment_method_types: ['card', 'us_bank_account'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1' } };
+      if (id === 'seti_g1') return { id: 'seti_g1', status: 'requires_payment_method', client_secret: 'cs_g1', payment_method_types: ['card', 'us_bank_account'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1', consent_text_version: CV } };
       return null;
     });
     const d2 = await loadAutopaySetupPageData({ ...PENDING });

@@ -40,14 +40,27 @@ import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import useIsMobile from "../../hooks/useIsMobile";
 import useLockBodyScroll from "../../hooks/useLockBodyScroll";
 import { formatLabelRate, formatMeasuredAmount, formatMeasuredRange } from "../../lib/mix-amount";
+import {
+  STATION_TYPE_PROGRAM, TREATMENT_AREA_FIELD_KEYS, completionAreasForTypedFindings, parseApplicationAreas,
+  termiteRecordFromVisit, trapSetupConflicts, typedActivityScoreConflict, typedFieldLabel, typedFieldRequiredNow,
+  typedFormTakesPlaces, typedTreatmentAreaField, typedZeroStateRefusesBody,
+} from "../../lib/typed-findings-rules";
+// Typed findings rules live in lib/typed-findings-rules.js (shared with the
+// tech Fast Complete sheet, which never imports this module); re-exported
+// here for existing importers.
+export { completionAreasForTypedFindings, typedActivityScoreConflict, typedFieldLabel, typedFieldRequiredNow, typedTreatmentAreaField };
 import useModalFocus from "../../hooks/useModalFocus";
 import CompletionPricingCard from "../../components/schedule/CompletionPricingCard";
+import PromiseCheck, { currentMark, promiseMarksPayload, promiseMarksSignature } from "../../components/schedule/PromiseCheck";
+import BlogPostPicker from "../../components/schedule/BlogPostPicker";
+import NoteBoxPhotos from "../../components/schedule/NoteBoxPhotos";
 import VisitProtocol from "../../components/admin/VisitProtocol";
 import { createPortal } from "react-dom";
 import RescheduleDialogView from "../../components/schedule/RescheduleDialogView";
 
 import { addETDays, etDateString, etDatetimeLocalToISO, etParts, formatETDateOnly, formatETDateTime } from "../../lib/timezone";
 import { completionDraftKey } from "../../lib/completion-drafts";
+import { prepareCompletionPhoto } from "../../lib/completion-photo";
 import {
   stackablePresets,
   isCustomAmountPreset,
@@ -75,6 +88,7 @@ import {
 } from "../../lib/product-rate-prefill";
 import { hasMlAmount, isMlUnit, mlToFlOz, submittedAmount } from "../../lib/measure-units";
 import { productDimension } from "../../lib/fast-complete-products";
+import { DOSE_UNITS, doseText, injectionBasis, injectionLabelRate, injectionLabelText, injectionRecordView, parseDose, quantityOf, pickedBand, recordForProduct, recordWithBand, trunkInchesText, typedDraft } from "../../lib/injection-dose";
 import {
   isPestDefaultMixVisit,
   pestDefaultMixSelections,
@@ -122,6 +136,7 @@ import { useSlotConflicts } from "../../components/schedule/useSlotConflicts";
 import { appointmentHistory as buildAppointmentHistory } from "../../components/schedule/customerAppointments";
 
 import BestTimeHint from "../../components/schedule/BestTimeHint";
+import AvailabilityStrip, { availabilityVerdict, stripCoversRouteWarning } from "../../components/schedule/AvailabilityStrip";
 import IntelligenceBarShell from "../../components/admin/IntelligenceBarShell";
 import { useBestTimes } from "../../components/schedule/useBestTimes";
 import SeriesMoveNotice from "../../components/schedule/SeriesMoveNotice";
@@ -142,10 +157,10 @@ import { request as payGrowthRequest } from "../../components/payGrowth/common";
 import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
 import { shouldResetCompletionIdempotencyKey } from "../../lib/completion-idempotency";
 import { rankTechTips, techTipSubtext, techTipSentLabel } from "../../lib/tech-tips";
+import { LAWN_TARGET_SUGGESTIONS, NUTRITION_TARGET_SUGGESTIONS, productControlsTargets, productTargetsNutrition } from "../../lib/lawn-targets";
 // Round 14 P2 (:2494): sentinel <option> value for the row's own stored appointment discount.
 const STORED_APPOINTMENT_DISCOUNT_OPTION = "__stored_appointment_discount";
 const { TERMITE_PERIMETER_METHODS } = termiteTreatmentMethods;
-const TREATMENT_AREA_FIELD_KEYS = ["areas_treated", "spot_treatment_areas", "treatment_zones"];
 // Area fields that changed from free text to chips in this PR: restored legacy
 // values stay visible (removable legacy chips) and block submit until replaced.
 // areas_inspected is inspection location, never treatment scope, so it is
@@ -297,29 +312,6 @@ function baseUnitOf(unit) {
 // server (typed area fields accept these as migrated values) via
 // shared/legacy-completion-areas.json.
 export const AREAS_BY_SERVICE = legacyCompletionAreas.categories;
-// Per-product treatment areas are multi-select but stored as ONE
-// comma-joined string in the existing applicationArea field
-// ("Kitchen, Bathrooms") so drafts, the submit payload, and the
-// service_products.application_area column keep their shape — only the
-// picker UI changed. Area labels are a controlled chip vocabulary and
-// never contain commas.
-function parseApplicationAreas(value) {
-  return String(value || "")
-    .split(",")
-    .map((part) => part.trim())
-    .filter(Boolean);
-}
-export function typedTreatmentAreaField(schema) {
-  return (schema?.fields || []).find((field) => TREATMENT_AREA_FIELD_KEYS.includes(field?.key)) || null;
-}
-export function completionAreasForTypedFindings({ typedAreaKey, findingsValues, genericAreas }) {
-  if (!typedAreaKey) return genericAreas || [];
-  const typedAreas = parseApplicationAreas(findingsValues?.[typedAreaKey]);
-  // Drafts saved before a lane gained its typed area field carry only the
-  // generic list. Preserve that scope until the technician picks a typed
-  // value; new typed selections remain authoritative once present.
-  return typedAreas.length ? typedAreas : (genericAreas || []);
-}
 // One parser for every marker line ("[Tag] text"), built from the same
 // grammar the server reads (shared/completion-marker-grammar.json): whitespace
 // after the closing bracket is optional, so "[Protocol]Label" is a live marker
@@ -370,6 +362,17 @@ function markerLines(notes) {
 function markerTexts(notes, tags) {
   const wanted = new Set(tags);
   return markerLines(notes).filter((entry) => wanted.has(entry.tag)).map((entry) => entry.text);
+}
+// Lane and typed voice fill (GATE_LANE_VOICE_FILL, GATE_TYPED_VOICE_FILL):
+// the words a field was filled from on Generate, shown under the field while
+// it still holds the filled value; or, for a field the notes left unclear
+// and nobody picked, an ask to pick (one, or what applies for a list).
+function LaneHeardLine({ quotes, unclear, color, ask = "Pick one." }) {
+  if (quotes?.length) {
+    return <div style={{ fontSize: 14, color, marginTop: 4 }}>Heard: {quotes.map((quote) => `“${quote}”`).join(" · ")}</div>;
+  }
+  if (unclear) return <div style={{ fontSize: 14, color, marginTop: 4 }}>The notes didn’t make this clear. {ask}</div>;
+  return null;
 }
 export function labelsPresentInMarkerNotes(notes, labels) {
   const markerValues = new Set(markerLines(notes).map((entry) => entry.text.toLowerCase()));
@@ -689,9 +692,6 @@ const CUSTOMER_INTERACTION_ALIASES = {
   not_home_partial: "not_home_partial_access",
   concern: "customer_specific_concern",
 };
-const COMPLETION_PHOTO_MAX_BYTES = 1.5 * 1024 * 1024;
-const COMPLETION_PHOTO_MAX_DIMENSION = 1600;
-const COMPLETION_PHOTO_QUALITY_STEPS = [0.82, 0.72, 0.62, 0.54];
 
 function normalizeCustomerInteractionValue(value) {
   return CUSTOMER_INTERACTION_ALIASES[value] || value || "";
@@ -699,61 +699,6 @@ function normalizeCustomerInteractionValue(value) {
 
 function isCustomerConcernInteraction(value) {
   return normalizeCustomerInteractionValue(value) === "customer_specific_concern";
-}
-
-function dataUrlApproxBytes(dataUrl) {
-  const encoded = String(dataUrl || "").split(",")[1] || "";
-  return Math.ceil((encoded.length * 3) / 4);
-}
-
-function loadImageFromFile(file) {
-  return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(file);
-    const img = new Image();
-    img.onload = () => {
-      URL.revokeObjectURL(url);
-      resolve(img);
-    };
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error("Could not read photo"));
-    };
-    img.src = url;
-  });
-}
-
-async function prepareCompletionPhoto(file) {
-  if (!file?.type?.startsWith("image/")) {
-    throw new Error("Only image files can be attached.");
-  }
-  const image = await loadImageFromFile(file);
-  const largestSide = Math.max(image.naturalWidth || image.width, image.naturalHeight || image.height);
-  let scale = largestSide > COMPLETION_PHOTO_MAX_DIMENSION
-    ? COMPLETION_PHOTO_MAX_DIMENSION / largestSide
-    : 1;
-
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    const width = Math.max(1, Math.round((image.naturalWidth || image.width) * scale));
-    const height = Math.max(1, Math.round((image.naturalHeight || image.height) * scale));
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext("2d");
-    ctx.drawImage(image, 0, 0, width, height);
-
-    for (const quality of COMPLETION_PHOTO_QUALITY_STEPS) {
-      const data = canvas.toDataURL("image/jpeg", quality);
-      if (dataUrlApproxBytes(data) <= COMPLETION_PHOTO_MAX_BYTES) {
-        return {
-          data,
-          name: file.name?.replace(/\.[^.]+$/, ".jpg") || "service-photo.jpg",
-          capturedAt: new Date().toISOString(),
-        };
-      }
-    }
-    scale *= 0.75;
-  }
-  throw new Error("Photo is too large to attach to completion.");
 }
 
 const isMobile = typeof window !== "undefined" && window.innerWidth < 640;
@@ -1088,6 +1033,55 @@ export function completionReconcilePrompt(error) {
   return `${lead}\n\nOK — complete anyway (the recorded values stay authoritative on the report).\nCancel — go back to fix the fields or regenerate the AI report.`;
 }
 
+// Whether the notes still carry a generated report's titles: the two-section
+// paragraph or the four-section report (writer rules), each title on its own
+// line or written inline with its text ("WHAT WE FOUND: You mentioned…"),
+// the forms the server's parser accepts.
+export function reportShapedNotes(notes) {
+  const text = String(notes || '');
+  return /^\s*WHAT WE DID(?: AND WHY)?(?::.*)?$/m.test(text)
+    && /^\s*WHAT WE FOUND(?::.*)?$/m.test(text);
+}
+
+// Whether a Generate should save the current notes as the tech's own
+// handwritten notes (the grounding a later regeneration or invalidation
+// restores). Never the untouched installed draft; never an edited draft
+// (report-shaped notes while a draft is installed, codex r54); but notes a
+// tech typed under the report's headings before any draft was installed
+// are theirs and are saved.
+export function shouldCaptureHandwrittenNotes({ notes, installedText = null, draftInstalled = false } = {}) {
+  const text = String(notes || '');
+  if (draftInstalled && reportShapedNotes(text)) return false;
+  return text.trim() !== String(installedText || '').trim();
+}
+
+// The completion route's edit heads-up 409 (code 'report_rules_review',
+// four-section report under GATE_REPORT_WRITER_RULES): an edit added
+// something the report leaves out. Returns the confirm() text, or null for
+// any other error. Like the reconciliation 409 it keeps the idempotency key,
+// so the confirmed resubmit replays under the same key.
+export const PROMISE_MARKS_LOADING_ALERT = "Still loading the promises you marked. Try again in a moment.";
+// An open photo description (GATE_NOTE_BOX_PHOTOS) may hold typed or
+// dictated words not yet on the photo: Generate and Complete wait for it.
+export const PHOTO_DESCRIPTION_OPEN_ALERT = "Save or cancel the photo description first.";
+// The promise list is an optional read: a stalled one gives up rather than
+// hold the form (Codex #5516).
+const PROMISE_CHECK_TIMEOUT_MS = 15000;
+
+export function completionPromiseMarksPrompt(error) {
+  if (error?.code !== "promise_marks_changed") return null;
+  const lead = String(error?.message || "").trim();
+  return `${lead}\n\nOK — send as is.\nCancel — go back (the promise list reloads).`;
+}
+
+export const PROMISE_MARKS_CHANGED_PROMPT = "You changed a promise mark after the report was written, so the report may not match it.\n\nOK — send as is.\nCancel — go back and write the report again.";
+
+export function completionReportRulesPrompt(error) {
+  if (error?.code !== "report_rules_review") return null;
+  const lead = String(error?.message || "").trim();
+  return `Heads-up on your edits:\n${lead}\n\nOK — send as is.\nCancel — go back and edit the report.`;
+}
+
 // Human copy for a re-entry stepper value ("No wait", "45 min", "2 hr",
 // "2 hr 15 min"). Minutes only — the steppers clamp to 0..1440.
 export function formatReentryStepperMinutes(min) {
@@ -1344,6 +1338,8 @@ export const COMPLETION_RESUME_OWED_CODES = new Set([
   "annual_prepay_addons_lookup_failed",  // annual-prepay add-ons unreadable against the visit's invoice
   "first_application_coverage_changed",  // trip's combined invoice now covers the visit; the resume reuses it
   "invoice_hold_handover_failed",        // dispute-hold: the invoice could not be queued behind the hold; the resume re-queues it
+  "setup_fee_claim_in_flight",           // another closeout of the series is billing its setup fee; the resume re-reads the claim
+  "setup_fee_park_failed",               // the setup fee could not be parked for the office; the resume parks it
 ]);
 export function completionResumeOwedError(error) {
   // The 503 is part of the contract: a reused code on any other status is
@@ -2124,8 +2120,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // and the range chip would move the finished (or cancelled / skipped /
   // no-show) visit onto a live day (update-details allows the edit) — no
   // hint at all (Codex #4120 r4 P2, r5 P2).
-  const { bestTimes, picked, bestInRange } = useBestTimes({
+  const { bestTimes, picked, bestInRange, availability } = useBestTimes({
     enabled: !isTerminalVisit,
+    // Availability strip (GATE_RESCHEDULE_AVAILABILITY): one search over the
+    // days around the picked date. Gate off = no `availability`, and the
+    // three-line hint below renders exactly as before.
+    summary: true,
     arrivalWindows: true,
     date: form.scheduledDate,
     serviceId: service.id,
@@ -2147,6 +2147,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     // score there, and re-score when the selection changes (Codex r7 P2).
     propertyId: selectedPropertyId || undefined,
   });
+  const stripCurrent = { currentDate: form.scheduledDate, currentStart: form.windowStart };
+  // A VERIFIED miss only (never "could not check"): Save stays enabled —
+  // the strip is advisory — but says what it is about to do.
+  const routeMissVerdict = availabilityVerdict(availability, stripCurrent)?.tone === "miss";
   // Estimate provenance: if this appointment was scheduled from an accepted
   // estimate, surface the same quote/deposit/charge card the New Appointment
   // modal and the appointment detail sheet show. The endpoint resolves the
@@ -4823,7 +4827,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 whiteSpace: "nowrap",
               }}
             >
-              {saving ? "Saving..." : "Save & take payment"}
+              {saving ? "Saving..." : (routeMissVerdict ? "Save & take payment anyway" : "Save & take payment")}
             </button>{" "}
             <button
               onClick={() => handleSave()}
@@ -4841,7 +4845,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 whiteSpace: "nowrap",
               }}
             >
-              {saving ? "Saving..." : "Save"}
+              {saving ? "Saving..." : (routeMissVerdict ? "Save anyway" : "Save")}
             </button>{" "}
             <button
               onClick={closeEditor}
@@ -5835,7 +5839,32 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 style={{ marginTop: -2, marginBottom: 14 }}
               />{" "}
               <SlotConflictNotice
-                conflicts={slotConflicts}
+                // The strip states the route problem itself; the
+                // double-booking notice (no `warning`) always stays.
+                conflicts={stripCoversRouteWarning(availability, stripCurrent)
+                  ? slotConflicts.filter((conflict) => !conflict.warning)
+                  : slotConflicts}
+                style={{ marginTop: -2, marginBottom: 14 }}
+              />{" "}
+              <AvailabilityStrip
+                availability={availability}
+                currentDate={form.scheduledDate}
+                currentStart={form.windowStart}
+                currentTechnicianId={form.technicianId}
+                onPick={(slot) =>
+                  // Same adoption rule as the hint chips below: an
+                  // unassigned visit takes the technician the hour was
+                  // scored for; an assigned visit's technician never changes.
+                  setForm((f) => ({
+                    ...f,
+                    scheduledDate: slot.date,
+                    windowStart: slot.start,
+                    windowEnd: slot.end,
+                    technicianId: !f.technicianId && slot.technicianId
+                      ? slot.technicianId
+                      : f.technicianId,
+                  }))
+                }
                 style={{ marginTop: -2, marginBottom: 14 }}
               />{" "}
               <BestTimeHint
@@ -8996,7 +9025,8 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
   });
   // Advisory drive-detour suggestions for the picked day — a chip only sets
   // the start select, never submits the reschedule.
-  const { bestTimes: manualBestTimes, picked: manualPicked, bestInRange: manualBestInRange } = useBestTimes({
+  const { bestTimes: manualBestTimes, picked: manualPicked, bestInRange: manualBestInRange, availability: manualAvailability } = useBestTimes({
+    summary: true,
     // Same route check as the manual save and the edit form: under
     // GATE_ADMIN_ARRIVAL_WINDOWS the verdict and the chips must not endorse
     // an hour the save would refuse for another customer's window
@@ -9187,6 +9217,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
       manualBestTimes={manualBestTimes}
       manualPicked={manualPicked}
       manualBestInRange={manualBestInRange}
+      manualAvailability={manualAvailability}
       onClose={onClose}
     />
   );
@@ -9307,59 +9338,6 @@ function CPChip({ selected, onClick, children, dot }) {
   );
 }
 
-// Whether a typed findings field is required for the CURRENT values —
-// static `required` plus the schema's conditional `requiredUnless`
-// metadata ({ field, value } or { field, values }: required exactly when
-// the named sibling field holds a non-empty value other than `value` /
-// outside `values`). Mirrors the server's conditional enforcement so the
-// tech gets the normal pre-submit prompt instead of a post-submit 422
-// (Codex P2).
-export function typedFieldRequiredNow(field, values) {
-  if (field?.required) return true;
-  const rule = field?.requiredUnless;
-  if (!rule?.field) return false;
-  const driver = String(values?.[rule.field] ?? "").trim();
-  if (!driver) return false;
-  const excluded = Array.isArray(rule.values) ? rule.values : [rule.value];
-  return !excluded.includes(driver);
-}
-
-// Mirrors the server's final-score vs findings cleared-boundary rule
-// (validateActivityScoreConsistency / activity_score_inconsistent): a
-// pinned nonzero score beside cleared evidence — or a pinned 0 beside
-// positive evidence — would publish a headline that says the opposite of
-// the findings card. Returns the conflict message or null.
-const TYPED_SCORE_CLEARED_SELECT = {
-  flea: { field: "evidence_level", cleared: "None observed" },
-  german_roach_knockdown: { field: "activity_level", cleared: "None observed" },
-  palmetto_roach_knockdown: { field: "activity_level", cleared: "None observed" },
-};
-export function typedActivityScoreConflict(schemaType, values, score) {
-  if (score == null) return null;
-  const rule = TYPED_SCORE_CLEARED_SELECT[schemaType];
-  if (!rule) return null;
-  const selected = String(values?.[rule.field] ?? "").trim();
-  if (!selected) return null;
-  if (selected === rule.cleared && score > 0) {
-    return `Activity score ${score} conflicts with "${rule.cleared}" — set the score to 0 or update the recorded level`;
-  }
-  if (selected !== rule.cleared && score === 0) {
-    return `Activity score 0 conflicts with the recorded level (${selected}) — select "${rule.cleared}" or use a nonzero score`;
-  }
-  return null;
-}
-
-// Follow-up-only trap actions a declared Initial setup cannot carry —
-// mirrors SETUP_INCOMPATIBLE_TRAP_ACTIONS in
-// server/services/service-report/activity-indicators.js.
-const SETUP_INCOMPATIBLE_TRAP_ACTIONS = [
-  "Traps reset",
-  "Traps moved",
-  "Traps replaced",
-  "Bait/lure refreshed",
-  "Damaged or missing traps found",
-];
-
 // Termite Phase-3 attestation contradictions, mirrored pre-submit so the
 // tech gets the inline prompt instead of the server 422 (Codex P3 r3 on
 // #2703). The method list mirrors TERMITE_PERIMETER_METHODS in
@@ -9400,44 +9378,10 @@ export function typedFieldValueConflicts(schemaType, values, fields = null) {
       'The inspection notice must be affixed before completing — affix the notice and select "Yes"',
     );
   }
-  // Initial-setup constraints on rodent trapping, mirrored pre-submit so
-  // the tech gets the inline prompt instead of the server 422 (codex P2
-  // round 14 on #3159) — same rationale as the termite mirrors above, and
-  // the caller already runs this for both the primary and every companion
-  // section. The action list mirrors SETUP_INCOMPATIBLE_TRAP_ACTIONS and
-  // the messages mirror validateTypedFindings in activity-indicators.js.
-  if (
-    schemaType === "rodent_trapping" &&
-    String(values?.trap_visit_type ?? "").trim() === "Initial setup"
-  ) {
-    const followUpOnly = String(values?.trap_actions ?? "")
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean)
-      .filter((action) => SETUP_INCOMPATIBLE_TRAP_ACTIONS.includes(action));
-    if (followUpOnly.length) {
-      conflicts.push(
-        `Trap actions ${followUpOnly.map((a) => `"${a}"`).join(", ")} describe traps that were already out — either clear them or set this visit to "Follow-up check"`,
-      );
-    }
-    // Shape FIRST, exactly as validateTypedFindings checks a count field:
-    // Number("1.0") and Number("1e1") are positive integers here but the
-    // server rejects both, so a coercion-only mirror still let the 422 it
-    // exists to prevent through (codex P2 round 15).
-    const rawCount = values?.traps_checked;
-    const countStr = typeof rawCount === "number"
-      ? String(rawCount)
-      : (typeof rawCount === "string" ? rawCount.trim() : null);
-    if (countStr == null || !/^\d{1,4}$/.test(countStr)) {
-      conflicts.push(
-        'An initial setup must record how many traps were set — enter the count as a whole number, or set this visit to "Follow-up check"',
-      );
-    } else if (Number(countStr) < 1) {
-      conflicts.push(
-        'An initial setup must record how many traps were set — enter the count, or set this visit to "Follow-up check"',
-      );
-    }
-  }
+  // Initial-setup constraints on rodent trapping (shared with the tech
+  // sheet); the caller already runs this for both the primary and every
+  // companion section.
+  conflicts.push(...trapSetupConflicts(schemaType, values));
   return conflicts;
 }
 
@@ -9512,35 +9456,6 @@ export function pruneRestoredFindingsValues(restored, fields, findingsType = nul
 
 // Render-time fallback for a companion section with no state yet. Never
 // mutated — every companion handler spreads into fresh objects.
-// Typed zero states whose renderer refuses generated copy at completion —
-// buildTodaysResult keeps the fixed template for them, so Generate must
-// hold: the tech would review (and the business be billed for) prose the
-// report never publishes. Bait/trap gauges refuse on a zero score; flea,
-// knockdown, and mosquito stories refuse on their cleared/none-observed
-// states (codex r43/r44 bait rule, generalized in r45).
-function typedZeroStateRefusesBody(type, values, score) {
-  // Story lanes (exclusion/inspection) consume the reviewed body in their
-  // own branches at every score, so a generation is never wasted there.
-  if (type === "rodent_exclusion" || type === "rodent_inspection") return false;
-  if (type === "mosquito_event") return String(values?.activity_level ?? "") === "None observed";
-  // Derived from the renderer's refusal rule rather than an enumeration
-  // (codex r48): buildTodaysResult keeps the fixed template on a zero
-  // indicator score for EVERY gauge lane (bait/trapping, bed bug,
-  // cockroach, termite inspection, wildlife trapping, knockdowns, flea) —
-  // a non-gauge schema never carries a score, so the check is safe
-  // unconditionally.
-  if (score === 0) return true;
-  // Cleared select states refuse the same way when no score is pinned —
-  // reuse the shared cleared-boundary map instead of re-listing the lanes.
-  const rule = TYPED_SCORE_CLEARED_SELECT[type];
-  if (rule && score == null) return String(values?.[rule.field] ?? "") === rule.cleared;
-  // Non-gauge cleared states keep the fixed template in buildTodaysResult's
-  // zeroSeverity branch (severity / activity_level "None observed" or
-  // "No activity") — Generate must hold for them too (codex r66).
-  const clearedSelect = String(values?.severity ?? values?.activity_level ?? "").trim();
-  if (clearedSelect === "None observed" || clearedSelect === "No activity") return true;
-  return false;
-}
 
 const EMPTY_COMPANION_ENTRY = {
   values: {},
@@ -9554,17 +9469,6 @@ const EMPTY_COMPANION_ENTRY = {
 // "Initial setup" would contradict the report, which labels the very same
 // number "Traps set" (owner 2026-08-02). Kept to this one pair rather than a
 // general mechanism: it is the only field whose noun flips.
-export function typedFieldLabel(schemaType, field, values = {}) {
-  if (
-    schemaType === "rodent_trapping"
-    && field.key === "traps_checked"
-    && String(values.trap_visit_type || "").trim() === "Initial setup"
-  ) {
-    return "Traps set";
-  }
-  return field.label;
-}
-
 // Typed specialty completion form (specialty-service-completion-contract.md
 // §3-§4, §7): registry-driven findings fields + activity gauge + next-step
 // chips + optional AI-drafted recommendations. Shared by the mobile and
@@ -9598,6 +9502,21 @@ export function TypedFindingsSection({
   onRecommendationsChange,
   pesticideProductPresent = true,
   frozen = false,
+  // Typed voice fill (GATE_TYPED_VOICE_FILL): the words each filled field
+  // came from ({ key: { value, quotes } }) and the fields the notes left
+  // unclear (keys). Null off.
+  heard = null,
+  unclear = null,
+  // The technician's own rating heard from the notes ({ value, quote }) and
+  // whether the notes left it unclear (step 4). Null off.
+  heardScore = null,
+  scoreUnclear = false,
+  // Step 5: whether Generate fills this form from the notes (a notice
+  // question then says it is always a tap), and the record fields the visit
+  // itself filled ({ key: { value, source } }, a termite treatment's products,
+  // EPA numbers, gallons and traced feet). Off by default.
+  voiceFill = false,
+  sources = null,
 }) {
   // Owner directive 2026-08-27: the desktop closeout mirrors the mobile
   // sheet — same monochrome tokens and Roboto chrome on both variants.
@@ -9650,7 +9569,14 @@ export function TypedFindingsSection({
   // the stale value would otherwise hide in the drawer and still reach the
   // server's contradiction check as a 422 (codex P1 r2 on #3536).
   const holdsValue = (f) => String(values?.[f.key] ?? "").trim() !== "";
-  const staysPrimary = (f) => !f.detail || typedFieldRequiredNow(f, values) || holdsValue(f);
+  // A field the notes left unclear asks to be picked, so it shows too.
+  const leftUnclear = (f) => !!unclear?.includes(f.key) && !holdsValue(f);
+  const staysPrimary = (f) => !f.detail || typedFieldRequiredNow(f, values) || holdsValue(f) || leftUnclear(f);
+  // The words a field was filled from, while it still holds that value.
+  const heardQuotes = (f) => (heard?.[f.key] && heard[f.key].value === values?.[f.key] ? heard[f.key].quotes : null);
+  // Where the visit filled a field from (its products or its trace), while it
+  // still holds that value.
+  const sourceOf = (f) => (sources?.[f.key]?.value && sources[f.key].value === values?.[f.key] ? sources[f.key].source : null);
   const primaryFields = visibleFields.filter(staysPrimary);
   const detailFields = visibleFields.filter((f) => !staysPrimary(f));
   const renderField = (field, index, list) => (
@@ -9691,6 +9617,18 @@ export function TypedFindingsSection({
         onChange={(value) => onFieldChange(field.key, value)}
         inputStyle={{ width: "100%", boxSizing: "border-box" }}
       />
+      <LaneHeardLine
+        quotes={heardQuotes(field)}
+        unclear={leftUnclear(field)}
+        color={mutedColor}
+        ask={({ chips: "Pick what applies.", count: "Enter the number.", text: "Type it in." })[field.type] || "Pick one."}
+      />
+      {sourceOf(field) && (
+        <div style={{ fontSize: 14, color: mutedColor, marginTop: 4 }}>{sourceOf(field)}</div>
+      )}
+      {voiceFill && field.tapOnly && (
+        <div style={{ fontSize: 14, color: mutedColor, marginTop: 4 }}>Always a tap: never filled from the notes.</div>
+      )}
     </div>
   );
   return (
@@ -9772,6 +9710,11 @@ export function TypedFindingsSection({
                 ? `Prefills from findings: ${scoreLabels[activityScore] || activityScore} — choose to confirm or change`
                 : "Prefills from findings until you choose"}
           </div>
+          <LaneHeardLine
+            quotes={heardScore && activityScore === heardScore.value ? [heardScore.quote] : []}
+            unclear={scoreUnclear && activityScore == null}
+            color={mutedColor}
+          />
         </div>
       )}
       {/* The "Next steps (up to 4)" chip picker was retired (owner ruling
@@ -10621,24 +10564,7 @@ export function defaultApplicationMethod(product = {}, serviceType = "", { inter
 // products DO (owner request 2026-07-23): their targets are the nutrition
 // goals of the application (green-up, iron chlorosis, potassium deficiency),
 // prefilled from the catalog like pest targets. Unknown catalog rows keep it.
-export function productControlsTargets(product) {
-  const category = String(
-    product?.category || product?.product_category || "",
-  ).toLowerCase();
-  if (!category) return true;
-  return !/(adjuvant|surfactant|soil|moisture|growth regulator|pgr)/.test(
-    category,
-  );
-}
-
-// Fertilizer-family products (incl. micros/biostimulants) target nutrition
-// goals rather than pests — their picker swaps to the nutrition suggestions.
-export function productTargetsNutrition(product) {
-  const category = String(
-    product?.category || product?.product_category || "",
-  ).toLowerCase();
-  return /(fert|micronutrient|biostimulant)/.test(category);
-}
+export { productTargetsNutrition, productControlsTargets };
 
 function requiresLinearFt(method) {
   return normalizeApplicationMethod(method) === "perimeter_spray";
@@ -10811,7 +10737,16 @@ function treeShrubText(...values) {
   return values.filter(Boolean).join(" ").toLowerCase();
 }
 
-function treeShrubProductFlagsClient(selectedProducts = []) {
+// A catalog row labelled as a trunk injection, whatever its name says:
+// application method trunk_injection, or a rate per inch of trunk or per
+// palm. Mirrors isInjectionProduct in server/services/tree-shrub-closeout.js.
+function isInjectionCatalogRow(row) {
+  if (!row) return false;
+  if ((row.application_method ?? row.applicationMethod) === "trunk_injection") return true;
+  return /^\s*(ml|g)\s*\/\s*(inch|in\b|palm)/i.test(String(row.default_unit ?? row.defaultUnit ?? ""));
+}
+
+function treeShrubProductFlagsClient(selectedProducts = [], catalog = []) {
   const productsText = (product) =>
     treeShrubText(
       product.name,
@@ -10845,9 +10780,12 @@ function treeShrubProductFlagsClient(selectedProducts = []) {
     if (/\b0\s*-\s*0\s*-\s*\d+/.test(textValue)) return false;
     return /\b(fertiliz|fertiliser|fertilizer|fert\b|palm\s*fert|alfalfa|13\s*-\s*0\s*-\s*13|8\s*-\s*2\s*-\s*12)\b/.test(textValue);
   });
-  const hasInjectionProduct = selectedProducts.some((product) =>
-    /\b(palm[\s-]*jet|mn[\s-]*jet|ima[\s-]*jet|propizol|tree[\s-]*age|injection|injectable)\b/.test(productsText(product)),
+  const injectionRows = selectedProducts.filter((product) =>
+    /\b(palm[\s-]*jet|mn[\s-]*jet|ima[\s-]*jet|propizol|tree[\s-]*age|injection|injectable)\b/.test(productsText(product)) ||
+    isInjectionCatalogRow(product) ||
+    isInjectionCatalogRow((catalog || []).find((row) => String(row.id) === String(product.productId))),
   );
+  const hasInjectionProduct = injectionRows.length > 0;
   const missingActuals = selectedProducts.filter((product) => {
     const amount = treeShrubNumber(product.totalAmount);
     return !amount || amount <= 0 || !product.amountUnit;
@@ -10860,6 +10798,7 @@ function treeShrubProductFlagsClient(selectedProducts = []) {
     hasSnapshot,
     hasNpFertilizer,
     hasInjectionProduct,
+    injectionRows,
     missingActuals,
   };
 }
@@ -10884,6 +10823,7 @@ function isNoneLikeTreeShrubValue(value = "") {
 export function treeShrubCloseoutBlocksClient({
   closeout,
   productFlags,
+  injectionProducts = [],
   servicePhotos,
   service,
   customerRecap,
@@ -10945,12 +10885,25 @@ export function treeShrubCloseoutBlocksClient({
   if (closeout.injectionPerformed || productFlags.hasInjectionProduct) {
     const injection = closeout.injectionRecord || {};
     if (!String(injection.plantSpecies || "").trim()) push("Injection record requires plant species.", "injectionRecord.plantSpecies");
+    // The record's product, when it is one of this visit's injection products,
+    // brings its label: a per-inch label needs the trunk in inches (unless a
+    // palm is picked), and a label split by the tech's pick needs that band
+    // (the server checks the same).
+    const { rate: labelRate, pickKey, trunkNeeded } = injectionRecordView(injection, injectionProducts);
+    const inches = trunkInchesText(injection.sizeClassOrDbh);
     if (!String(injection.sizeClassOrDbh || "").trim()) push("Injection record requires DBH or palm size class.", "injectionRecord.sizeClassOrDbh");
+    else if (trunkNeeded && !(Number(inches) > 0)) push("Enter the trunk in inches.", "injectionRecord.sizeClassOrDbh");
+    if (labelRate?.pick && !pickedBand(labelRate, pickKey)) {
+      push(`Pick the ${labelRate.pick.toLowerCase()} for the injection dose.`, "injectionRecord.labelBand");
+    }
     if (!String(injection.product || "").trim()) push("Injection record requires product.", "injectionRecord.product");
     if (!String(injection.dose || "").trim()) push("Injection record requires dose.", "injectionRecord.dose");
     // Nothing a tech records is in mL (owner ruling 2026-09-29); the server
     // refuses the same dose (tree-shrub-closeout.js).
     else if (hasMlAmount(injection.dose)) push("Injection dose must be in tsp or fl oz, not mL.", "injectionRecord.dose");
+    // A dose saved before the dose became a number of tsp or fl oz, and not
+    // readable as one, is entered again rather than sent unseen.
+    else if (!(Number(parseDose(injection.dose).amount) > 0)) push("Enter the injection dose as a number of tsp or fl oz.", "injectionRecord.dose");
     if (treeShrubNumber(injection.numberOfPorts) === null) push("Injection record requires number of ports.", "injectionRecord.numberOfPorts");
     if (!String(injection.targetIssue || "").trim()) push("Injection record requires target issue.", "injectionRecord.targetIssue");
     if (!String(injection.followUpDate || "").trim()) push("Injection record requires follow-up date.", "injectionRecord.followUpDate");
@@ -10959,11 +10912,317 @@ export function treeShrubCloseoutBlocksClient({
   return blocks;
 }
 
-function TreeShrubCloseoutBlock({
+// The injection product's label in tsp or fl oz: the band that applies (or
+// the whole label until one does), the label's own rule for choosing, and the
+// pick the label leaves to the tech.
+function InjectionLabelFields({ rate, band, pickKey, onPick, select, colors }) {
+  const hint = { fontSize: 14, color: colors.muted };
+  // A palm is dosed from the label's canopy-spread table, never the tree
+  // rate per inch of trunk.
+  const palm = Boolean(pickedBand(rate, pickKey)?.palm);
+  return (
+    <>
+      {palm ? (
+        <div style={hint}>
+          Label: <strong style={{ color: colors.text }}>palms are dosed per palm from the label's canopy-spread table</strong>
+        </div>
+      ) : (
+        <div style={hint}>
+          Label: <strong style={{ color: colors.text }}>{injectionLabelText(rate, band)}</strong>
+          {band && rate.bands.length > 1 ? ` (${band.label.toLowerCase()})` : ""}
+        </div>
+      )}
+      {!rate.bands && (
+        <div style={hint}>No dose is worked out for this product until its label is checked. Dose from the label.</div>
+      )}
+      {rate.pick && (
+        <label style={{ display: "grid", gap: 4, fontSize: 14, color: colors.muted }}>
+          {rate.pick}
+          <select aria-label={rate.pick} value={pickKey} onChange={(e) => onPick(e.target.value)} style={select}>
+            <option value="" disabled>{`Pick the ${rate.pick.toLowerCase()}`}</option>
+            {rate.bands.map((option) => (
+              <option key={option.key} value={option.key}>
+                {option.palm ? option.label : `${option.label}: ${injectionLabelText(rate, option)}`}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+    </>
+  );
+}
+
+// The dose: what the label works out for this tree (or palm), and the dose
+// the tech put in as a number of tsp or fl oz, noted when it is over the label.
+function InjectionDoseFields({ record, view, onDose, input, select, colors }) {
+  const { trunkInches, doseRange, dose, unreadableDose } = view;
+  // The unit a dose is entered in: the saved dose's own, so clearing its
+  // amount never switches tsp to fl oz under the tech.
+  const [doseUnitPick, setDoseUnitPick] = useState(() => dose.unit || "fl_oz");
+  // What the tech is typing: the record keeps only a number it can read
+  // ("1 1/2" reads 1.5), never digits run together.
+  const [doseTyped, setDoseTyped] = useState(null);
+  const doseDraft = typedDraft(doseTyped, record.dose);
+  const doseUnit = dose.unit || doseUnitPick;
+  const overLabel = view.overLabel(doseUnit);
+  const underLabel = view.underLabel(doseUnit);
+  const forWhat = view.basis === "palm" ? "per palm" : `for a ${trunkInches}-inch trunk`;
+  const doseTypingUnreadable = Boolean(doseDraft?.trim()) && !quantityOf(doseDraft);
+  const caption = { display: "grid", gap: 4, fontSize: 14, color: colors.muted };
+  const hint = { fontSize: 14, color: colors.muted };
+  const problem = { fontSize: 14, color: colors.error };
+  // Per palm: a per-palm label, or a palm picked on a per-inch one.
+  const perPalm = view.basis === "palm" || Boolean(view.basis && !view.trunkNeeded);
+  return (
+    <>
+      {doseRange && (
+        <div style={{ border: `1px solid ${colors.border}`, borderRadius: 10, padding: "10px 12px", background: colors.card }}>
+          <div style={hint}>{perPalm ? "Dose per palm" : "Dose for this tree"}</div>
+          <div style={{ fontSize: 22, fontWeight: 700, color: colors.text }}>{doseRange}</div>
+          <div style={hint}>
+            {perPalm ? "Rounded inside the label." : `Rounded inside the label for a ${trunkInches}-inch trunk.`}
+          </div>
+        </div>
+      )}
+      <div style={caption}>
+        <span>{perPalm ? "Dose you put in, per palm" : "Dose you put in"}</span>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 110px", gap: 8 }}>
+          <input
+            inputMode="decimal"
+            aria-label="Dose amount"
+            value={doseDraft ?? dose.amount}
+            onChange={(e) => {
+              const typed = e.target.value;
+              const stored = doseText(quantityOf(typed), doseUnit);
+              setDoseUnitPick(doseUnit);
+              setDoseTyped({ typed, stored });
+              onDose(stored);
+            }}
+            placeholder="Dose"
+            style={input}
+          />
+          <select
+            aria-label="Dose unit"
+            value={doseUnit}
+            onChange={(e) => {
+              setDoseUnitPick(e.target.value);
+              if (dose.amount) onDose(doseText(dose.amount, e.target.value));
+            }}
+            style={select}
+          >
+            {DOSE_UNITS.map((unit) => (
+              <option key={unit.value} value={unit.value}>{unit.label}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+      {doseTypingUnreadable && <div style={problem}>Enter the dose as a number, like 1.5 or 1 1/2.</div>}
+      {unreadableDose && !doseDraft && (
+        <div style={problem}>
+          {`The saved dose "${unreadableDose}" is not a number of tsp or fl oz. Enter it again.`}
+        </div>
+      )}
+      {overLabel && (
+        <div role="note" style={{ border: `1px solid ${colors.warn}`, background: `${colors.warn}14`, color: colors.text, borderRadius: 10, padding: "10px 12px", fontSize: 14, lineHeight: 1.4 }}>
+          {`${doseText(dose.amount, doseUnit)} is more than the label allows ${forWhat}${doseRange ? ` (${doseRange})` : ""}. Check the label before you inject.`}
+        </div>
+      )}
+      {underLabel && (
+        <div role="note" style={{ border: `1px solid ${colors.warn}`, background: `${colors.warn}14`, color: colors.text, borderRadius: 10, padding: "10px 12px", fontSize: 14, lineHeight: 1.4 }}>
+          {`${doseText(dose.amount, doseUnit)} is less than the label's dose ${forWhat} (${doseRange}). Check the label before you inject.`}
+        </div>
+      )}
+    </>
+  );
+}
+
+// The tree's trunk in inches for a per-inch label (a saved size in another
+// unit is shown, to enter again); otherwise the size as typed. A banded palm
+// label's pick is the palm's size, so it has no field here.
+function InjectionSizeFields({ record, view, onSize, input, colors }) {
+  const { trunkNeeded, trunkInches, unreadableTrunk } = view;
+  const [trunkTyped, setTrunkTyped] = useState(null);
+  const trunkDraft = typedDraft(trunkTyped, record.sizeClassOrDbh);
+  const trunkTypingUnreadable = Boolean(trunkDraft?.trim()) && !quantityOf(trunkDraft);
+  const caption = { display: "grid", gap: 4, fontSize: 14, color: colors.muted };
+  const problem = { fontSize: 14, color: colors.error };
+  return (
+    <>
+      {trunkNeeded ? (
+        <label style={caption}>
+          Trunk (inches across, chest high)
+          <input
+            inputMode="decimal"
+            value={trunkDraft ?? trunkInches}
+            onChange={(e) => {
+              const typed = e.target.value;
+              // Only a trunk above zero is stored; "." or "0" stays a draft.
+              const inches = quantityOf(typed);
+              const stored = Number(inches) > 0 ? `${inches} in DBH` : "";
+              setTrunkTyped({ typed, stored });
+              onSize(stored);
+            }}
+            placeholder="Inches"
+            style={input}
+          />
+        </label>
+      ) : (
+        <input
+          value={record.sizeClassOrDbh || ""}
+          onChange={(e) => onSize(e.target.value)}
+          placeholder="DBH / palm size"
+          style={input}
+        />
+      )}
+      {trunkNeeded && trunkTypingUnreadable && (
+        <div style={problem}>Enter the trunk as a number of inches, like 10 or 10.5.</div>
+      )}
+      {unreadableTrunk && !trunkDraft && (
+        <div style={problem}>{`The saved size "${unreadableTrunk}" is not in inches. Enter the trunk in inches.`}</div>
+      )}
+    </>
+  );
+}
+
+// The injection record (owner rulings 2026-09-29, 2026-10-01): the product,
+// its label in tsp or fl oz, the band and trunk that settle the dose, and the
+// dose itself as a number of tsp or fl oz.
+function TreeShrubInjectionRecord({ value, onChange, injectionProducts, input, select, colors }) {
+  const setInjectionField = (field, nextValue) =>
+    onChange({ ...value, injectionRecord: { ...(value.injectionRecord || {}), [field]: nextValue } });
+  // The injection dose in the truck's measures (lib/injection-dose.js): the
+  // record's product, if it is one of this visit's injection products, brings
+  // its label rate in mL per inch of trunk or per palm, shown in tsp or fl oz
+  // with the dose for the tree measured. The dose is a number of tsp or fl oz.
+  const record = value.injectionRecord || {};
+  const [otherProduct, setOtherProduct] = useState(false);
+  const view = injectionRecordView(record, injectionProducts);
+  const { chosen: chosenInjection, rate: labelRate, pickKey, band } = view;
+  // The record keeps the catalog id of one of this visit's products, so the
+  // server matches its label by id even if the product is renamed.
+  const setProduct = (product, productAuto) => {
+    const next = injectionProducts.find((option) => option.name === product) || null;
+    // A label measured another way (per palm vs per inch) starts without the
+    // old size.
+    const clearSize = Boolean(next?.basis) && next.basis !== view.basis;
+    onChange({ ...value, injectionRecord: recordForProduct(record, product, { productAuto, productId: next?.productId ?? null, clearSize }) });
+  };
+  // One injection product on this visit: the record names it, until the tech
+  // chooses or types a product of their own (then it is never put back). A
+  // product the form named itself follows the visit: when that product leaves
+  // the visit, the record names the new only one, or none.
+  const onlyInjection = injectionProducts.length === 1 ? injectionProducts[0].name : "";
+  // The record marks a product the form named (productAuto), so a restored
+  // draft still knows it may follow the visit.
+  const productTouched = useRef(false);
+  useEffect(() => {
+    if (productTouched.current) return;
+    const stale = Boolean(record.product) && record.productAuto === true &&
+      !injectionProducts.some((product) => product.name === record.product);
+    if ((!record.product && onlyInjection) || stale) {
+      setProduct(onlyInjection, Boolean(onlyInjection));
+    }
+  }, [onlyInjection, record.product, injectionProducts]);
+  return (
+    <div style={{ display: "grid", gap: 8 }}>
+      {injectionProducts.length > 0 && (
+        <select
+          aria-label="Injection product"
+          value={otherProduct ? "__other__" : chosenInjection?.name || ""}
+          onChange={(e) => {
+            const picked = e.target.value;
+            productTouched.current = true;
+            setOtherProduct(picked === "__other__");
+            setProduct(picked === "__other__" ? "" : picked, false);
+          }}
+          style={select}
+        >
+          <option value="" disabled>Injection product</option>
+          {injectionProducts.map((product) => (
+            <option key={product.name} value={product.name}>{product.name}</option>
+          ))}
+          <option value="__other__">Other product…</option>
+        </select>
+      )}
+      {(!injectionProducts.length || otherProduct || (record.product && !chosenInjection)) && (
+        <input
+          value={record.product || ""}
+          onChange={(e) => {
+            productTouched.current = true;
+            setProduct(e.target.value, false);
+          }}
+          placeholder="Injection product"
+          style={input}
+        />
+      )}
+      {labelRate && (
+        <InjectionLabelFields
+          rate={labelRate}
+          band={band}
+          pickKey={pickKey}
+          onPick={(key) => {
+            // Tree to palm (or back) measures the size another way: it starts over.
+            const clearSize = Boolean(pickedBand(labelRate, key)?.palm) !== Boolean(pickedBand(labelRate, view.pickKey)?.palm);
+            onChange({ ...value, injectionRecord: recordWithBand(record, key, { clearSize }) });
+          }}
+          select={select}
+          colors={colors}
+        />
+      )}
+      <InjectionSizeFields
+        record={record}
+        view={view}
+        onSize={(size) => setInjectionField("sizeClassOrDbh", size)}
+        input={input}
+        colors={colors}
+      />
+      <InjectionDoseFields
+        record={record}
+        view={view}
+        onDose={(dose) => setInjectionField("dose", dose)}
+        input={input}
+        select={select}
+        colors={colors}
+      />
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+        <input
+          type="number"
+          value={record.numberOfPorts ?? ""}
+          onChange={(e) => setInjectionField("numberOfPorts", e.target.value)}
+          placeholder="Ports"
+          style={input}
+        />
+        <input
+          type="date"
+          value={record.followUpDate || ""}
+          onChange={(e) => setInjectionField("followUpDate", e.target.value)}
+          style={input}
+        />
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+        <input
+          value={record.plantSpecies || ""}
+          onChange={(e) => setInjectionField("plantSpecies", e.target.value)}
+          placeholder="Plant species"
+          style={input}
+        />
+        <input
+          value={record.targetIssue || ""}
+          onChange={(e) => setInjectionField("targetIssue", e.target.value)}
+          placeholder="Injection target issue"
+          style={input}
+        />
+      </div>
+    </div>
+  );
+}
+
+export function TreeShrubCloseoutBlock({
   value,
   onChange,
   blocks,
   productFlags,
+  injectionProducts = [],
   inputStyle: baseInputStyle,
   selectStyle,
   textareaStyle,
@@ -10973,14 +11232,6 @@ function TreeShrubCloseoutBlock({
   const select = { ...(selectStyle || baseInputStyle), marginBottom: 8 };
   const textarea = { ...(textareaStyle || baseInputStyle), marginBottom: 8, minHeight: 82 };
   const setField = (field, nextValue) => onChange({ ...value, [field]: nextValue });
-  const setInjectionField = (field, nextValue) =>
-    onChange({
-      ...value,
-      injectionRecord: {
-        ...(value.injectionRecord || {}),
-        [field]: nextValue,
-      },
-    });
   const injectionVisible = value.injectionPerformed || productFlags.hasInjectionProduct;
   return (
     <div style={{ display: "grid", gap: 8 }}>
@@ -11124,57 +11375,14 @@ function TreeShrubCloseoutBlock({
         Injection add-on performed
       </label>
       {injectionVisible && (
-        <div style={{ display: "grid", gap: 8 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-            <input
-              value={value.injectionRecord?.plantSpecies || ""}
-              onChange={(e) => setInjectionField("plantSpecies", e.target.value)}
-              placeholder="Plant species"
-              style={input}
-            />
-            <input
-              value={value.injectionRecord?.sizeClassOrDbh || ""}
-              onChange={(e) => setInjectionField("sizeClassOrDbh", e.target.value)}
-              placeholder="DBH / palm size"
-              style={input}
-            />
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-            <input
-              value={value.injectionRecord?.product || ""}
-              onChange={(e) => setInjectionField("product", e.target.value)}
-              placeholder="Injection product"
-              style={input}
-            />
-            <input
-              value={value.injectionRecord?.dose || ""}
-              onChange={(e) => setInjectionField("dose", e.target.value)}
-              placeholder="Dose (tsp or fl oz)"
-              style={input}
-            />
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-            <input
-              type="number"
-              value={value.injectionRecord?.numberOfPorts ?? ""}
-              onChange={(e) => setInjectionField("numberOfPorts", e.target.value)}
-              placeholder="Ports"
-              style={input}
-            />
-            <input
-              type="date"
-              value={value.injectionRecord?.followUpDate || ""}
-              onChange={(e) => setInjectionField("followUpDate", e.target.value)}
-              style={input}
-            />
-          </div>
-          <input
-            value={value.injectionRecord?.targetIssue || ""}
-            onChange={(e) => setInjectionField("targetIssue", e.target.value)}
-            placeholder="Injection target issue"
-            style={input}
-          />
-        </div>
+        <TreeShrubInjectionRecord
+          value={value}
+          onChange={onChange}
+          injectionProducts={injectionProducts}
+          input={input}
+          select={select}
+          colors={colors}
+        />
       )}
     </div>
   );
@@ -12561,6 +12769,7 @@ export function CompletionPanel({
   // Completion photos are intentionally kept out of localStorage (a handful
   // of base64 images can exceed its quota).
   const [servicePhotos, setServicePhotos] = useState([]);
+  const [photoDescriptionOpen, setPhotoDescriptionOpen] = useState(false);
   // Turf height-of-cut capture (lawn completion, behind the flag). `ready` gates
   // submit so a lawn visit can't be completed before the flag state is known —
   // otherwise a pre-load submit hides the field the server still requires (422).
@@ -12637,11 +12846,7 @@ export function CompletionPanel({
   // COMPANIONS the tie breaks termite-first. Any divergence makes the panel
   // load/submit one program's station ids while the sync targets the other,
   // silently skipping the visit's checks.
-  const stationTypeProgram = {
-    termite_bait_station: "termite",
-    rodent_bait_station: "rodent",
-    rodent_trapping: "trapping",
-  };
+  const stationTypeProgram = STATION_TYPE_PROGRAM;
   const companionStationTypes = stationTypeSet.slice(1);
   const stationProgram = stationTypeProgram[stationTypeSet[0]]
     || (companionStationTypes.includes("termite_bait_station") ? "termite"
@@ -12904,6 +13109,9 @@ export function CompletionPanel({
   // count into findings/companion state; consumed by the invalidation
   // effect below the state declarations (codex r70).
   const stationAutoWroteRef = useRef(false);
+  // Set when the termite record fill (step 5, below) actually writes a field;
+  // consumed by the same invalidation effect.
+  const termiteRecordWroteRef = useRef(false);
   useEffect(() => {
     if (!stationFeatureOn) return;
     // While an AI report request is in flight, the payload snapshot must stay
@@ -13064,8 +13272,9 @@ export function CompletionPanel({
   // Runs on the commit that applied the write, so the invalidation sees the
   // same findings state the next generation payload would submit.
   useEffect(() => {
-    if (!stationAutoWroteRef.current) return;
+    if (!stationAutoWroteRef.current && !termiteRecordWroteRef.current) return;
     stationAutoWroteRef.current = false;
+    termiteRecordWroteRef.current = false;
     invalidateGeneratedReportOnTypedEdit();
   }, [findingsValues, companionState]);
   // The trapping section — primary OR companion, `trap_visit_type` can
@@ -13112,6 +13321,16 @@ export function CompletionPanel({
   // stale AI prose can't publish beside contradicting structured findings
   // (codex r23). An edited draft is the tech's reviewed copy and is theirs.
   const generatedReportTextRef = useRef(null);
+  // The installed generated report the notes hold (or were edited from);
+  // null again once the handwritten notes come back. Saved with the draft.
+  // Lets a regeneration tell an edited draft from handwritten notes that
+  // merely use the report's headings, and is the base completion compares
+  // the submitted report against for the edit heads-up (Codex #5500).
+  const installedReportDraftRef = useRef(null);
+  // The promise marks the installed report was written with (pending while
+  // a Generate request is out): a later change asks before sending.
+  const pendingGenerationPromiseSignatureRef = useRef(null);
+  const generationPromiseSignatureRef = useRef(null);
   const [generatedReportCleared, setGeneratedReportCleared] = useState(false);
   // Whether the CURRENTLY INSTALLED draft was actually generated with photo
   // grounding — the server's own photoGroundingUsed flag on its response
@@ -13282,10 +13501,34 @@ export function CompletionPanel({
   // and the tech's picks. `techTips.available === false` (gate off) keeps
   // the observations/recommendations textareas above in place.
   const [techTips, setTechTips] = useState(null);
+  // The promise check (owner "ok yes add these" 2026-10-01): the open
+  // promises the tech can mark, and the marks by promise id.
+  const [promiseCheck, setPromiseCheck] = useState(null);
+  const [promiseCheckLoading, setPromiseCheckLoading] = useState(true);
+  const [promiseReloadKey, setPromiseReloadKey] = useState(0);
+  // Older promises a restored draft had marked, beyond the newest ten the
+  // list shows: asked for by id so the mark is kept and shown (Codex #5516).
+  // `promiseIncludeAnswered` is the include list the last load answered.
+  const [promiseIncludeIds, setPromiseIncludeIds] = useState([]);
+  const [promiseIncludeAnswered, setPromiseIncludeAnswered] = useState("");
+  // The last load failed (or timed out): kept apart from a list that came
+  // back empty, so a failed read never drops the marks (Codex #5516).
+  const [promiseCheckUnavailable, setPromiseCheckUnavailable] = useState(false);
+  const promiseIncludeKey = promiseIncludeIds.join(",");
+  const [promiseMarks, setPromiseMarks] = useState({});
   const [techTipsLoading, setTechTipsLoading] = useState(true);
   const [techTipsError, setTechTipsError] = useState("");
   const [selectedTipIds, setSelectedTipIds] = useState([]);
   const [customTip, setCustomTip] = useState("");
+  // A Waves blog post for the customer (GATE_REPORT_BLOG_POST): every service
+  // but WDO, termite pre-treat, lawn and tree, shrub & palm; the search
+  // answers available:false elsewhere and while the switch is off.
+  // Whether the server offers the blog search for this visit: "checking"
+  // until it answers, then "yes" or "no"; "unknown" when it could not be
+  // asked. A pick (a restored draft's) stays and is sent unless the answer
+  // is a firm "no": /complete checks it either way.
+  const [blogPostOffer, setBlogPostOffer] = useState("no");
+  const [blogPost, setBlogPost] = useState(null);
   // Free-typed [Found]/[Next] note lines parked when an AI draft replaces
   // the notes (parkTaggedNoteLines). Their own state, NOT the textarea
   // state: they ground the AI draft, the recap and the photo context, but
@@ -13302,6 +13545,17 @@ export function CompletionPanel({
   // arrays are authoritative and selections render as removable pills instead
   // of tagged lines inside the report text. Persisted with the draft.
   const [chipLinesDetached, setChipLinesDetached] = useState(false);
+  // Lane voice fill (GATE_LANE_VOICE_FILL): what the last Generate filled
+  // from the notes (each field's words) and the groups it left for a person.
+  const [laneHeard, setLaneHeard] = useState(null);
+  // Typed voice fill: { values: { key: { value, quotes } }, unclear: [keys] }.
+  const [typedHeard, setTypedHeard] = useState(null);
+  // The fill's picks land on the next render; Generate then writes the
+  // report from them.
+  const [generateQueued, setGenerateQueued] = useState(0);
+  useEffect(() => {
+    if (generateQueued) runGenerate();
+  }, [generateQueued]);
   const [protocolCarrierGalPer1000, setProtocolCarrierGalPer1000] =
     useState("");
   const [treatmentPlanMixItems, setTreatmentPlanMixItems] = useState([]);
@@ -13500,6 +13754,20 @@ export function CompletionPanel({
   const isRodentTrappingVisit =
     service.completionProfile?.findingsType === "rodent_trapping";
   const serviceLineForCloseout = serviceLineFromType(serviceTypeForArea);
+  // Photos in the notes box (GATE_NOTE_BOX_PHOTOS, the schedule's per-visit
+  // flag): the visit's photos and their descriptions sit inside the notes
+  // box and the separate photo section goes away. Never on lawn or tree,
+  // shrub & palm: another lane owns those completions and their photo steps.
+  const noteBoxPhotos = service.noteBoxPhotosEnabled === true && !quickComplete && !hideServicePhotos
+    && !["lawn", "tree_shrub", "palm"].includes(serviceLineForCloseout);
+  // Locked while a report is being written, like removePhoto: the request
+  // already read these captions.
+  const setPhotoCaption = (index, caption) => {
+    if (generating) return;
+    setServicePhotos((prev) => prev.map((photo, i) => (i === index
+      ? { ...photo, caption, captionSource: caption ? "tech" : undefined }
+      : photo)));
+  };
   const propertyAreaLine = propertyAreaLineFor(service);
   const propertyAreaKey = { tree_shrub: "beds", lawn: "lawn", mosquito: "mosquito" }[propertyAreaLine];
   const propertyAreasBlocked = propertyAreasRefreshing || (!!propertyAreaKey && propertyAreasSettledFor !== service.id);
@@ -13654,15 +13922,12 @@ export function CompletionPanel({
   );
   const areasTreatedHidden = treeShrubCloseoutOn
     || typedFindingsOwnAreas
-    || [
-      "rodent_trapping", "rodent_exclusion", "rodent_sanitation",
-      "rodent_inspection", "rodent_bait_station", "bed_bug",
-    ].includes(service.completionProfile?.findingsType)
     // Station visits have no meaningful "areas treated" — the station
     // map IS the coverage story (owner 2026-08-27). Liquid/foam/trench
     // termite lanes keep the termite area list, and a station visit that
-    // records spray evidence gets the picker back.
-    || (service.completionProfile?.findingsType === "termite_bait_station" && !sprayEvidenceInForm);
+    // records spray evidence gets the picker back (typedFormTakesPlaces,
+    // shared with the tech sheet).
+    || !typedFormTakesPlaces(service.completionProfile?.findingsType, { sprayed: sprayEvidenceInForm });
 
   // Auto-run the AI photo review once enough closeout photos are captured. The
   // dual-vision scoring lives server-side (no persistence); the result rides the
@@ -14004,6 +14269,48 @@ export function CompletionPanel({
   // "Follow-up recommended") were dropped everywhere (owner 2026-07-30):
   // they aren't areas and don't belong in the treated-areas list.
   const specialtyCompletion = specialtyCompletionFor(service);
+  // Lane voice fill (GATE_LANE_VOICE_FILL, Fast Complete step 2): the
+  // schedule payload says when Generate first fills this visit's own record
+  // (its places and findings) from the notes.
+  const laneVoiceFill = service.laneVoiceFillEnabled === true && !!specialtyCompletion && !isTypedFindings;
+  // GATE_TYPED_VOICE_FILL (Fast Complete step 3): Generate first reads the
+  // notes for a typed visit's own findings (the schedule row's flag).
+  const typedVoiceFill = service.typedVoiceFillEnabled === true && isTypedFindings;
+  // Fast Complete step 5: a termite treatment's state record fills from the
+  // visit's own products and trace (lib termiteRecordFromVisit), each field
+  // only while it is empty or still holds what was last filled this way, so
+  // a hand edit always wins (the station counts' rule). Never while an AI
+  // report is generating (its payload stays what the model saw); a write
+  // invalidates an untouched report like a typed edit.
+  const termiteRecord = useMemo(() => (
+    typedVoiceFill && service.completionProfile?.findingsType === "termite_treatment"
+      ? termiteRecordFromVisit({ products: selectedProducts, catalog: products, tracedFeet: tracedLinearFt })
+      : null
+  ), [typedVoiceFill, service.completionProfile?.findingsType, selectedProducts, products, tracedLinearFt]);
+  const termiteRecordAutoRef = useRef({});
+  useEffect(() => {
+    if (!termiteRecord || generating) return;
+    const lastAuto = { ...termiteRecordAutoRef.current };
+    const filled = Object.fromEntries(Object.entries(termiteRecord).map(([key, entry]) => [key, entry.value]));
+    // A field whose source went away (a product removed) clears while the
+    // fill still owns it.
+    const keys = [...new Set([...Object.keys(filled), ...Object.keys(lastAuto)])];
+    setFindingsValues((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const key of keys) {
+        const current = String(next[key] ?? "");
+        const value = filled[key] ?? "";
+        if ((current === "" || current === String(lastAuto[key] ?? "")) && current !== value) {
+          next[key] = value;
+          changed = true;
+        }
+      }
+      if (changed) termiteRecordWroteRef.current = true;
+      return changed ? next : prev;
+    });
+    termiteRecordAutoRef.current = filled;
+  }, [termiteRecord, generating]);
   const areaOptions = [
     ...(specialtyCompletion?.areas
       || (isBedBugVisit
@@ -14326,6 +14633,7 @@ export function CompletionPanel({
   const selectedProductsMissingActualAmount = selectedProducts.filter(
     (product) =>
       !product.totalAmount ||
+      !Number.isFinite(Number(product.totalAmount)) ||
       Number(product.totalAmount) <= 0 ||
       !product.amountUnit ||
       (product.lawnPlanDefaults && !productApplicationMethod(product, serviceTypeForArea)),
@@ -14358,7 +14666,7 @@ export function CompletionPanel({
   // actual (pre-push audit P1). The empty-list and inventory gates stay
   // tier-scoped.
   const productActualsRequired = (calibrationRequired || lawnDefaultsEnabled
-    || selectedProducts.some((product) => product.lawnPlanDefaults)) && !isIncompleteVisit;
+    || selectedProducts.some((product) => product.lawnPlanDefaults || product.requiresDoseSelection)) && !isIncompleteVisit;
   const protocolActualsCompletionBlocked =
     (calibrationRequired &&
       !isIncompleteVisit &&
@@ -14522,11 +14830,24 @@ export function CompletionPanel({
     (calibrationRequired || (completionImprovements && isLawn)) &&
     !isIncompleteVisit &&
     (treatmentPlanLoading || (isLawn && protocolActionsLoading));
-  const treeShrubProductFlags = treeShrubProductFlagsClient(selectedProducts);
+  const treeShrubProductFlags = treeShrubProductFlagsClient(selectedProducts, products);
+  // The injection record's product list: this visit's rows the closeout flags
+  // as injections (by name or by the catalog's injection label), each with its
+  // label rate in mL per inch of trunk or per palm for the dose helper.
+  const injectionProducts = treeShrubProductFlags.injectionRows.map((row) => {
+    const catalogRow = (products || []).find((p) => String(p.id) === String(row.productId));
+    return {
+      name: row.name,
+      productId: row.productId ?? null,
+      basis: injectionBasis(catalogRow || {}),
+      rate: injectionLabelRate({ ...(catalogRow || {}), name: catalogRow?.name || row.name }),
+    };
+  });
   const treeShrubCloseoutBlocks = treeShrubCloseoutRequired
     ? treeShrubCloseoutBlocksClient({
         closeout: treeShrubCloseout,
         productFlags: treeShrubProductFlags,
+        injectionProducts,
         servicePhotos,
         service,
         customerRecap,
@@ -14639,6 +14960,33 @@ export function CompletionPanel({
     });
   }, [techTips, selectedTipIds]);
 
+  // The blog search is offered wherever the server answers available (an
+  // empty query reads nothing but the visit): only where /complete keeps the
+  // pick, every service but WDO, termite pre-treat, lawn and tree, shrub &
+  // palm (blogPostAllowedFor). The lawn and tree, shrub & palm forms never
+  // ask: another lane owns those completions.
+  useEffect(() => {
+    let cancelled = false;
+    setBlogPost(null);
+    if (!service.id || ["lawn", "tree_shrub", "palm"].includes(serviceLineForCloseout)) {
+      setBlogPostOffer("no");
+      return () => { cancelled = true; };
+    }
+    setBlogPostOffer("checking");
+    adminFetch(`/admin/dispatch/${service.id}/blog-posts`)
+      .then((data) => { if (!cancelled) setBlogPostOffer(data?.available === true ? "yes" : "no"); })
+      .catch(() => { if (!cancelled) setBlogPostOffer("unknown"); });
+    return () => { cancelled = true; };
+  }, [service.id, serviceLineForCloseout]);
+  const blogPostKept = !!blogPost && blogPostOffer !== "no";
+  // A kept pick shows while the answer is pending or failed, so it can be
+  // removed (a post /complete finds gone answers BLOG_POST_UNAVAILABLE).
+  const blogPostShown = blogPostOffer === "yes" || blogPostKept;
+  const searchBlogPosts = useCallback(
+    (query) => adminFetch(`/admin/dispatch/${service.id}/blog-posts?q=${encodeURIComponent(query)}`),
+    [service.id],
+  );
+
   useEffect(() => {
     let cancelled = false;
     setTechTips(null);
@@ -14664,6 +15012,93 @@ export function CompletionPanel({
       });
     return () => { cancelled = true; };
   }, [service.id]);
+
+  // The promise check: listed only while the writer rules are live on a
+  // visit the writer covers (the server decides). A failed load shows no
+  // card and keeps any marks as they stand; marking is optional.
+  useEffect(() => {
+    let cancelled = false;
+    setPromiseCheck(null);
+    if (!service.id) {
+      setPromiseCheckLoading(false);
+      return () => { cancelled = true; };
+    }
+    setPromiseCheckLoading(true);
+    const include = promiseIncludeKey;
+    // A deadline on every supported browser (AbortSignal.timeout is missing
+    // on older WebKit): a controller and a timer, which also cancels a load
+    // this effect has moved on from (Codex #5516).
+    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const deadline = controller ? setTimeout(() => controller.abort(), PROMISE_CHECK_TIMEOUT_MS) : null;
+    const timeout = controller ? { signal: controller.signal } : {};
+    adminFetch(`/admin/dispatch/${service.id}/promises${include ? `?include=${encodeURIComponent(include)}` : ""}`, timeout)
+      .then((data) => {
+        if (cancelled) return;
+        setPromiseCheck(data?.available === true && Array.isArray(data.promises) && data.promises.length ? data : null);
+        setPromiseCheckUnavailable(false);
+        setPromiseIncludeAnswered(include);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setPromiseCheck(null);
+        setPromiseCheckUnavailable(true);
+      })
+      .finally(() => {
+        clearTimeout(deadline);
+        if (!cancelled) setPromiseCheckLoading(false);
+      });
+    return () => {
+      cancelled = true;
+      clearTimeout(deadline);
+      controller?.abort();
+    };
+  }, [service.id, promiseReloadKey, promiseIncludeKey]);
+  const visitPromises = promiseCheck?.promises || [];
+  // Marks on promises the list has not shown yet and has not been asked
+  // for: kept as they stand until the list answers for them. Nothing is
+  // asked of a list that could not be read.
+  const unlistedMarkIds = promiseCheckLoading || promiseCheckUnavailable ? [] : Object.keys(promiseMarks).filter((id) => (
+    !visitPromises.some((promise) => promise.id === id)
+    && !(promiseIncludeAnswered ? promiseIncludeAnswered.split(",") : []).includes(id)
+  ));
+  const unlistedMarkKey = unlistedMarkIds.join(",");
+  useEffect(() => {
+    if (!unlistedMarkKey) return;
+    setPromiseIncludeIds((ids) => [...new Set([...ids, ...unlistedMarkKey.split(",")])].slice(0, 50));
+  }, [unlistedMarkKey]);
+  // No marks while Quick complete hides the report, on a backdated closeout
+  // (the marks would never apply) or on a visit that did no work: declined
+  // or incomplete (Codex #5516).
+  const promiseMarksSuppressed = quickComplete || backfillCloseout
+    || visitOutcome === "customer_declined" || visitOutcome === "incomplete";
+  // Marked, listed promises only, each with the wording version the tech saw.
+  // While the list cannot be read, the marks go as the technician made them:
+  // the server checks each one against the promise as it stands, and asks
+  // when one changed (Codex #5516).
+  const markedPromises = Object.entries(promiseMarks || {}).map(([id, entry]) => ({ id, version: entry?.version }));
+  const promiseMarksForRequest = promiseMarksSuppressed ? []
+    : promiseMarksPayload(promiseMarks, promiseCheckUnavailable ? markedPromises : visitPromises);
+  // The marks that still hold: once the list loads, only marks on a listed
+  // promise's current wording (a restored mark on a reworded promise drops
+  // out); while it loads, or while it has yet to answer for a marked
+  // promise it did not show, the marks as they stand (so a restore never
+  // clears a good report early).
+  const validPromiseMarks = promiseCheckLoading || promiseCheckUnavailable || unlistedMarkIds.length
+    ? promiseMarks
+    : Object.fromEntries(visitPromises.flatMap((promise) => {
+      const entry = currentMark(promiseMarks, promise);
+      return entry ? [[promise.id, entry]] : [];
+    }));
+  // Marks the list has not answered for yet (still loading, or an older
+  // promise still being asked for): a report written now would leave them
+  // out while completion later applied them, so Generate and Complete wait
+  // (Codex #5516).
+  // Marks that will not be sent (a declined or incomplete visit, Quick
+  // complete, a backdated closeout) never hold anything (Codex #5516).
+  const promiseMarksPending = !promiseMarksSuppressed && promiseMarksSignature(promiseMarks).length > 0
+    && (promiseCheckLoading || unlistedMarkIds.length > 0);
+  // The marks as the staleness check and the report heads-up compare them.
+  const effectivePromiseSignature = JSON.stringify(promiseMarksSignature(promiseMarksSuppressed ? {} : validPromiseMarks));
 
   useEffect(() => {
     let cancelled = false;
@@ -15025,6 +15460,10 @@ export function CompletionPanel({
       recommendationsText.trim() ||
       selectedTipIds.length ||
       customTip.trim() ||
+      // A picked blog post is tech input on its own.
+      blogPost ||
+      // A promise mark is tech input on its own (a mark-only draft saves).
+      promiseMarksSignature(promiseMarks).length ||
       parkedFound.trim() ||
       parkedNext.trim() ||
       nextVisitNote.trim() ||
@@ -15169,6 +15608,9 @@ export function CompletionPanel({
         recommendationsText,
         selectedTipIds,
         customTip,
+        // The picked blog post comes back with the draft, or the completion
+        // after a reload or billing detour would silently leave it off.
+        blogPost,
         parkedFound,
         parkedNext,
         // Which deselect model the label arrays were saved under — a restored
@@ -15182,6 +15624,10 @@ export function CompletionPanel({
         // The installed-report identity restores too, so an UNTOUCHED
         // restored draft stays invalidatable on later typed edits (codex r24).
         generatedReportText: generatedReportTextRef.current,
+        installedReportDraft: installedReportDraftRef.current,
+        // The promise check's marks restore with the draft they shaped.
+        promiseMarks,
+        generationPromiseSignature: generationPromiseSignatureRef.current,
         // Whether that installed report was actually generated WITH photo
         // grounding (pre-push P2, Codex #5145 r3) — restores alongside it so
         // a reload/billing-detour doesn't forget a grounded draft is
@@ -15310,6 +15756,10 @@ export function CompletionPanel({
     service.address,
     service.serviceAddress,
     service.propertyAddress,
+    // A mark is operator input: a mark-only change must save the draft.
+    promiseMarks,
+    // So is a picked blog post.
+    blogPost,
   ]);
 
   function restoreDraft() {
@@ -15581,6 +16031,13 @@ export function CompletionPanel({
         : [],
     );
     setCustomTip(restoredCustom);
+    // The pick as the search answered it; /complete re-checks it is still a
+    // live post. Older drafts have none.
+    const draftBlogPost = savedDraft.blogPost;
+    setBlogPost(draftBlogPost && typeof draftBlogPost === "object"
+      && ["id", "title", "url"].every((key) => typeof draftBlogPost[key] === "string" && draftBlogPost[key])
+      ? { id: draftBlogPost.id, title: draftBlogPost.title, url: draftBlogPost.url }
+      : null);
     setParkedFound(typeof savedDraft.parkedFound === "string" ? savedDraft.parkedFound : "");
     setParkedNext(typeof savedDraft.parkedNext === "string" ? savedDraft.parkedNext : "");
     // Drafts saved before the detached-selection model lack the field → false,
@@ -15590,6 +16047,16 @@ export function CompletionPanel({
     setAiReportUsed(savedDraft.aiReportUsed === true);
     generatedReportTextRef.current = typeof savedDraft.generatedReportText === "string" && savedDraft.generatedReportText
       ? savedDraft.generatedReportText
+      : null;
+    // Older drafts lack the field: a restored installed report counts.
+    installedReportDraftRef.current = typeof savedDraft.installedReportDraft === "string" && savedDraft.installedReportDraft
+      ? savedDraft.installedReportDraft
+      : generatedReportTextRef.current;
+    setPromiseMarks(savedDraft.promiseMarks && typeof savedDraft.promiseMarks === "object" && !Array.isArray(savedDraft.promiseMarks)
+      ? savedDraft.promiseMarks
+      : {});
+    generationPromiseSignatureRef.current = typeof savedDraft.generationPromiseSignature === "string"
+      ? savedDraft.generationPromiseSignature
       : null;
     // Restores with it (pre-push P2, Codex #5145 r3) — older drafts lack the
     // field, which defaults to false (byte-identical to this fix not
@@ -15783,6 +16250,7 @@ export function CompletionPanel({
         setChipLinesDetached(preGenerationChipDetachedRef.current === true);
         preGenerationNotesRef.current = null;
         preGenerationChipDetachedRef.current = false;
+        installedReportDraftRef.current = null;
         setGeneratedReportCleared(true);
       }
     }
@@ -16023,19 +16491,23 @@ export function CompletionPanel({
     installedPhotoGroundingUsedRef.current = photoGroundingUsed;
     // Capture the tech's own notes the FIRST time a draft replaces them —
     // an untouched installed draft is never the grounding for regeneration.
-    // An EDITED older draft still carries the two-section report shape and
-    // must not be captured either: invalidation would restore it and
-    // completion would publish stale generated copy that predates the
-    // final findings (codex r54). Only genuinely handwritten notes ground
-    // a regeneration; the previous handwritten capture is kept otherwise.
-    const notesLookGenerated = /^\s*WHAT WE DID:?\s*$/m.test(notes)
-      && /^\s*WHAT WE FOUND:?\s*$/m.test(notes);
-    if (!notesLookGenerated
-      && notes.trim() !== String(generatedReportTextRef.current || "").trim()) {
+    // An EDITED older draft still carries the report shape (two sections,
+    // or the four-section report under the writer rules, whose title is
+    // "WHAT WE DID AND WHY") and must not be captured either: invalidation
+    // would restore it and completion would publish stale generated copy
+    // that predates the final findings (codex r54). Only genuinely
+    // handwritten notes ground a regeneration; the previous handwritten
+    // capture is kept otherwise.
+    if (shouldCaptureHandwrittenNotes({
+      notes,
+      installedText: generatedReportTextRef.current,
+      draftInstalled: Boolean(installedReportDraftRef.current),
+    })) {
       preGenerationNotesRef.current = notes;
       preGenerationChipDetachedRef.current = chipLinesDetached;
     }
     generatedReportTextRef.current = String(reportText || "").trim();
+    installedReportDraftRef.current = generatedReportTextRef.current || null;
     setGeneratedReportCleared(false);
     if (!chipLinesDetached) {
       setSelectedProtocolActionLabels(
@@ -16066,6 +16538,7 @@ export function CompletionPanel({
     // the OLD flag/shape, self-invalidating a draft the tech never touched
     // the instant the flag changes.
     generationInputsRef.current = buildGenerationInputsSnapshot();
+    generationPromiseSignatureRef.current = pendingGenerationPromiseSignatureRef.current;
   }
   // Deselect handle after an AI draft: remove a structured selection from its
   // label array (and its recorded re-entry/treatment scope, for protocol
@@ -16194,6 +16667,217 @@ export function CompletionPanel({
   // prompt won't turn a customer concern or a recommendation into a confirmed
   // finding (see the server prompt). photoCount is reported but never enough on
   // its own — the model can't see the photos.
+  // The tech's OWN notes, as the report writer and the lane fill read them:
+  // regeneration grounds in them, so when the notes box still holds the
+  // installed draft the pre-generation notes are the grounding (codex r43;
+  // pre-push P1 on the lane fill: a second Generate never reads the AI's
+  // own report as the tech's words); a hand-edited draft is the tech's copy
+  // and grounds itself. Never the marker lines a tap writes.
+  function groundingNotes() {
+    return stripChipTagLines(
+      generatedReportTextRef.current
+        && notes.trim() === String(generatedReportTextRef.current).trim()
+        ? (preGenerationNotesRef.current || "")
+        : notes,
+    );
+  }
+  // Lane voice fill: reads the tech's own words (groundingNotes, as the
+  // report writer gets them) and fills only what nobody picked, the way a tap does (the
+  // [Found] marker and the label; the areas while none are picked), never a
+  // value that clashes with a pick (the lane's exclusions, the selected
+  // actions): a clash is left for a person to pick. Best effort: a failed
+  // read fills nothing and Generate carries on.
+  async function fillLaneFromNotes() {
+    const note = groundingNotes();
+    const heard = note
+      ? await adminFetch(`/admin/dispatch/${service.id}/lane-facts`, {
+        method: "POST",
+        body: JSON.stringify({ note }),
+      }).catch(() => null)
+      : null;
+    if (heard?.status !== "read") {
+      // A read that answered nothing usable leaves no group unclear: the asks
+      // always reflect the latest Generate (the typed fill's rule, #5632).
+      // Words beside values still standing stay.
+      setLaneHeard((prev) => (prev?.unclear?.length ? { ...prev, unclear: [] } : prev));
+      return;
+    }
+    // A value fills only an unpicked group and only beside what is chosen:
+    // the tap's own rules decide a clash (reconcile drops a value the new
+    // one excludes; the selected actions refuse a value), and a clash is
+    // left for a person.
+    const actions = activeSelectedLabels(selectedProtocolActionLabels);
+    const chosen = activeSelectedLabels(selectedObservationLabels);
+    const unclear = new Set(heard.unclearGroups);
+    const findings = [];
+    for (const finding of heard.findings) {
+      const group = specialtyCompletion.findingGroups.find((item) => (
+        item.key === finding.group && item.options.some((option) => option.value === finding.value)
+      ));
+      if (!group || group.options.some((option) => chosen.includes(option.value))) continue;
+      const kept = reconcileDependentFindingSelections(specialtyCompletion, chosen, group, finding.value);
+      if (chosen.some((value) => !kept.includes(value)) || specialtyFindingActionConflict(specialtyCompletion, kept, actions)) {
+        unclear.add(group.key);
+      } else {
+        chosen.push(finding.value);
+        findings.push(finding);
+      }
+    }
+    const areas = areasServiced.length ? [] : heard.areas.filter((entry) => areaOptions.includes(entry.area));
+    if (findings.length || areas.length) applyLaneFill(findings, areas);
+    // Words heard earlier stay beside values still standing; a group or
+    // area filled again takes its new words.
+    setLaneHeard((prev) => ({
+      areas: [...(prev?.areas || []).filter((entry) => !areas.some((next) => next.area === entry.area)), ...areas],
+      findings: [...(prev?.findings || []).filter((entry) => !findings.some((next) => next.group === entry.group)), ...findings],
+      unclear: [...unclear],
+    }));
+  }
+  // A fill changes the record an installed report was written from, as a
+  // tap does: the report goes and the tech's own notes, with their marker
+  // lines, come back before the fill's markers are written (pre-push P1;
+  // mirrors handleSpecialtyFindingChange). While the picks stay detached
+  // from the notes (an edited report), the notes an edit would bring back
+  // get the markers instead, so a later restore keeps the fill (codex local
+  // r1 on #5628).
+  function applyLaneFill(findings, areas) {
+    const detached = invalidateGeneratedReportOnTypedEdit();
+    const withMarkers = (text) => [String(text || "").trimEnd(), ...findings.map(({ value }) => `[Found] ${value}`)]
+      .filter(Boolean).join("\n");
+    if (!detached) setNotes(withMarkers);
+    else if (preGenerationNotesRef.current != null) preGenerationNotesRef.current = withMarkers(preGenerationNotesRef.current);
+    for (const { value } of findings) appendUniqueLabel(setSelectedObservationLabels, value);
+    if (areas.length) {
+      lawnAreasInitializedRef.current = true;
+      setAreasServiced((prev) => (prev.length ? prev : areas.map((entry) => entry.area)));
+    }
+  }
+  // Typed voice fill (GATE_TYPED_VOICE_FILL): reads the tech's own words
+  // (groundingNotes) for the typed form's findings and fills only fields
+  // still empty. The server judges every fill beside the form's present
+  // values (sent only for that, never stored): a field set is never filled
+  // over and a clash is left for a person. Best effort: a failed read fills
+  // nothing and Generate carries on.
+  async function fillTypedFromNotes() {
+    const note = groundingNotes();
+    const heard = note
+      ? await adminFetch(`/admin/dispatch/${service.id}/typed-facts`, {
+        method: "POST",
+        // A rating already set leaves nothing to read for once every field
+        // is set too (the server's nothing_to_fill).
+        body: JSON.stringify({ note, current: findingsValues, scoreSet: typedActivityScore != null }),
+      }).catch(() => null)
+      : null;
+    if (heard?.status !== "read" || heard.type !== typedFindingsSchema?.type) {
+      // A read that answered nothing usable (it failed, named another form,
+      // or found nothing left to fill) leaves no field unclear: the asks
+      // always reflect the latest Generate (pre-push P1). Words beside
+      // values still standing stay.
+      setTypedHeard((prev) => (prev?.unclear?.length || prev?.scoreUnclear ? { ...prev, unclear: [], scoreUnclear: false } : prev));
+      return;
+    }
+    const fills = Object.entries(heard.values || {}).filter(([key, value]) => (
+      typeof value === "string" && value && String(findingsValues[key] ?? "").trim() === ""
+    ));
+    // The technician's own rating, heard on a form whose score they set
+    // (step 4), fills the gauge only while nobody has set it.
+    const activity = typedFindingsSchema?.activity;
+    const heardScore = activity && !activity.deriveField && !typedActivityTouched && typedActivityScore == null
+      && Number.isInteger(heard.score?.value) ? heard.score : null;
+    if (fills.length || heardScore) applyTypedFill(fills, heardScore?.value ?? null);
+    // Words heard earlier stay beside values still standing; a field filled
+    // again takes its new words.
+    setTypedHeard((prev) => ({
+      values: {
+        ...(prev?.values || {}),
+        // One quote per words heard: two values said in the same words show them once.
+        ...Object.fromEntries(fills.map(([key, value]) => [key, { value, quotes: [...new Set((heard.heard?.[key] || []).map((entry) => entry.quote))] }])),
+      },
+      unclear: Array.isArray(heard.unclearFields) ? heard.unclearFields : [],
+      score: heardScore ? { value: heardScore.value, quote: heardScore.quote } : prev?.score || null,
+      scoreUnclear: heard.scoreUnclear === true,
+    }));
+  }
+  // A fill changes what an installed report was written from, as a typed
+  // edit does (the report goes and the notes come back). It writes the
+  // values itself: handleTypedFindingChange refuses writes while generating,
+  // and the fill runs inside Generate. An untouched gauge follows its derive
+  // field, as a pick does.
+  function applyTypedFill(fills, score = null) {
+    invalidateGeneratedReportOnTypedEdit();
+    setFindingsValues((prev) => {
+      const next = { ...prev };
+      for (const [key, value] of fills) if (String(prev[key] ?? "").trim() === "") next[key] = value;
+      return next;
+    });
+    if (score != null) {
+      // The technician said the rating, so it is theirs, as a tap is.
+      setTypedActivityTouched(true);
+      setTypedActivityScore(score);
+    }
+    const activity = typedFindingsSchema?.activity;
+    const derive = activity?.deriveField && !typedActivityTouched
+      ? fills.find(([key]) => key === activity.deriveField)
+      : null;
+    if (derive) {
+      const derived = activity.deriveScores?.[String(derive[1])];
+      setTypedActivityScore(derived == null ? null : derived);
+    }
+  }
+  // The report itself, from the form as it stands.
+  async function runGenerate() {
+    const { payload, hasReportInput } = buildAiReportPayload();
+    if (!hasReportInput) {
+      setGenerating(false);
+      alert("Add service notes, products, or visit details first.");
+      return;
+    }
+    setGenerating(true);
+    try {
+      const r = await generateAiReport(payload);
+      if (r.report) applyGeneratedReport(r.report, { deterministic: r.deterministic === true, photoGroundingUsed: r.photoGroundingUsed === true });
+    } catch (e) {
+      alert("AI report failed: " + e.message);
+    }
+    setGenerating(false);
+  }
+  // Generate AI report (computer and phone layouts). With the lane or typed
+  // fill on, the record is filled from the notes first and the report is written on
+  // the next render, from the picks as they landed; the form stays locked
+  // (generating) all the way through.
+  async function handleGenerateClick() {
+    // Stop dictation BEFORE snapshotting notes for the payload, so a final
+    // spoken chunk lands in serviceNotes rather than after the snapshot.
+    // Once generating flips true the dictation callback ignores any late
+    // chunk (and the mic is disabled). Upload-mode dictation transcribes
+    // AFTER the mic stops (an async server round-trip), so a snapshot taken
+    // now would miss it. Hold the action until the transcript has landed.
+    if (dictation.mode === "upload" && (dictation.listening || dictation.uploading)) {
+      alert("Stop dictation and wait for the transcript to appear in your notes first.");
+      return;
+    }
+    if (photoDescriptionOpen) {
+      alert(PHOTO_DESCRIPTION_OPEN_ALERT);
+      return;
+    }
+    if (promiseMarksPending) {
+      alert(PROMISE_MARKS_LOADING_ALERT);
+      return;
+    }
+    if (dictation.listening) dictation.toggle();
+    if (!laneVoiceFill && !typedVoiceFill) {
+      await runGenerate();
+      return;
+    }
+    setGenerating(true);
+    try {
+      if (laneVoiceFill) await fillLaneFromNotes();
+      else await fillTypedFromNotes();
+    } catch {
+      // The fill is best effort: the report is written either way.
+    }
+    setGenerateQueued((n) => n + 1);
+  }
   function buildAiReportPayload() {
     const productsApplied = selectedProducts
       .map((p) => p.name + (p.rate ? ` (${p.rate} ${p.rateUnit})` : ""))
@@ -16376,16 +17060,7 @@ export function CompletionPanel({
             timeZone: "America/New_York",
           })
         : "",
-      // Regeneration grounds in the tech's OWN notes: when the notes box
-      // still holds the installed draft, the pre-generation notes are the
-      // grounding (codex r43) — a hand-edited draft is the tech's copy and
-      // grounds itself.
-      serviceNotes: stripChipTagLines(
-        generatedReportTextRef.current
-          && notes.trim() === String(generatedReportTextRef.current).trim()
-          ? (preGenerationNotesRef.current || "")
-          : notes,
-      ),
+      serviceNotes: groundingNotes(),
       productsApplied,
       areasServiced: completionAreasServiced,
       actionsCompleted,
@@ -16414,8 +17089,11 @@ export function CompletionPanel({
       // on the customer report" directly, with no separate opt-in step).
       ...(reportPhotoSummary ? { photoSummary: reportPhotoSummary } : {}),
       includeCustomerComms: aiReportIncludeComms,
+      // The promise check: the report says only what the tech marked.
+      ...(promiseMarksForRequest.length ? { promiseMarks: promiseMarksForRequest } : {}),
       ...typedFindingsPayload,
     };
+    pendingGenerationPromiseSignatureRef.current = effectivePromiseSignature;
     const hasReportInput =
       Boolean(payload.serviceNotes) ||
       productsApplied.length > 0 ||
@@ -16443,7 +17121,9 @@ export function CompletionPanel({
       // The omitted-field fallback state must REACH the server — after a
       // failed lookup the client can't know whether a visit-linked confirmed
       // row exists; the server's validated gate decides.
-      (isLawn && lawnAssessmentReady === "failed");
+      (isLawn && lawnAssessmentReady === "failed") ||
+      // A marked promise is visit detail the report can speak to (Codex #5516).
+      promiseMarksForRequest.length > 0;
     return { payload, hasReportInput };
   }
   function recordActionScope(label, scope, treatmentApplied, dryDown) {
@@ -16952,6 +17632,11 @@ export function CompletionPanel({
     setAreasServiced((prev) =>
       prev.includes(area) ? prev.filter((a) => a !== area) : [...prev, area],
     );
+    // A person's tick is theirs: the words the lane fill heard for this place
+    // go with it.
+    setLaneHeard((prev) => (prev?.areas?.some((entry) => entry.area === area)
+      ? { ...prev, areas: prev.areas.filter((entry) => entry.area !== area) }
+      : prev));
   }
   async function handlePhotoSelect(e) {
     // Photo count is a generation input (payload photoCount) — the set is
@@ -17215,7 +17900,7 @@ export function CompletionPanel({
     }
   }
 
-  async function handleSubmit(reconcileConfirmed = false, { resumingPoll = false } = {}) {
+  async function handleSubmit(reconcileConfirmed = false, { resumingPoll = false, rulesConfirmed = false, promisesConfirmed = false } = {}) {
     // The status poll's "resumable" verdict re-enters here while submitting
     // is STILL true (the button stayed in its completing state through the
     // whole chain) — that re-entry is the continuation of the same logical
@@ -17251,6 +17936,26 @@ export function CompletionPanel({
     // completion posted now would ship notes without it (pre-push P1).
     if (dictation.mode === "upload" && (dictation.listening || dictation.uploading)) {
       alert("Stop dictation and wait for the transcript to appear in your notes before completing.");
+      return;
+    }
+    if (photoDescriptionOpen) {
+      alert(PHOTO_DESCRIPTION_OPEN_ALERT);
+      return;
+    }
+    // Marks restored with a draft are checked against the promise list once
+    // it loads; completing before then would drop them (Codex #5516).
+    if (!reconcileConfirmed && !rulesConfirmed && !promisesConfirmed && !resumingPoll && promiseMarksPending) {
+      alert(PROMISE_MARKS_LOADING_ALERT);
+      return;
+    }
+    // A promise mark changed after the report was written and the tech kept
+    // their edited report (an untouched one clears itself): the report may
+    // not match the marks, so the tech decides (Codex #5516).
+    if (!reconcileConfirmed && !rulesConfirmed && !resumingPoll
+      && installedReportDraftRef.current
+      && generationPromiseSignatureRef.current != null
+      && generationPromiseSignatureRef.current !== effectivePromiseSignature
+      && !window.confirm(PROMISE_MARKS_CHANGED_PROMPT)) {
       return;
     }
     const specialtyProductConflict = exclusiveProtocolProductConflict(
@@ -17779,10 +18484,23 @@ export function CompletionPanel({
         techTips: techTips?.available === true
           ? { ids: selectedTipIds, custom: customTip.trim() || null }
           : null,
+        // The Waves blog post picked for the customer: the id only; the server
+        // checks it is live on the site and freezes its title and URL.
+        ...(blogPostKept ? { blogPostId: blogPost.id } : {}),
         internalRecommendations,
         // Set only on the resubmit after the tech OK'd the reconciliation
         // prompt — the server then skips the 409 and completes.
         ...(reconcileConfirmed ? { reportReconcileConfirmed: true } : {}),
+        // Edit heads-up (four-section report): the draft the notes were
+        // edited from, and the tech's "send as is" on the resubmit.
+        reportDraftBase: installedReportDraftRef.current || null,
+        ...(rulesConfirmed ? { reportRulesConfirmed: true } : {}),
+        // The tech chose to send though a marked promise changed since the
+        // report was written (promise_marks_changed).
+        ...(promisesConfirmed ? { promiseMarksConfirmed: true } : {}),
+        // The promise check: Done closes the promise in the office list,
+        // Partly adds the still-left note (applied after the save).
+        ...(promiseMarksForRequest.length ? { promiseMarks: promiseMarksForRequest } : {}),
         // customerRecap is intentionally NOT sent: the report summary is generated
         // server-side from the technician notes (there's no recap editor here).
         // Sending a hidden/restored stale draft would bypass that and become
@@ -18095,7 +18813,7 @@ export function CompletionPanel({
       const result = await onSubmit(service.id, body);
       if (await finishCompletionSuccess(result) === "closed") return;
     } catch (e) {
-      return settleCompletionSubmitError(e, reconcileConfirmed);
+      return settleCompletionSubmitError(e, reconcileConfirmed, rulesConfirmed, promisesConfirmed);
     }
     setSubmitting(false);
   }
@@ -18117,7 +18835,7 @@ export function CompletionPanel({
 
   // Every non-success outcome of a completion POST — the fresh build and
   // the committed replay end here.
-  async function settleCompletionSubmitError(e, reconcileConfirmed) {
+  async function settleCompletionSubmitError(e, reconcileConfirmed, rulesConfirmed = false, promisesConfirmed = false) {
     // Any outcome but another quiet side-effects retry ends the retry
     // COUNT — the committed flag and body snapshot deliberately survive
     // (see the ref declarations): after a committed 409, even the manual
@@ -18142,8 +18860,30 @@ export function CompletionPanel({
     if (reconcileText) {
       setSubmitting(false);
       if (window.confirm(reconcileText)) {
-        return handleSubmit(true);
+        return handleSubmit(true, { rulesConfirmed, promisesConfirmed });
       }
+      return;
+    }
+    // Edit heads-up (409, key preserved): never blocks — OK sends the
+    // report as is, Cancel goes back to edit it.
+    const rulesText = completionReportRulesPrompt(e);
+    if (rulesText) {
+      setSubmitting(false);
+      if (window.confirm(rulesText)) {
+        return handleSubmit(reconcileConfirmed, { rulesConfirmed: true, promisesConfirmed });
+      }
+      return;
+    }
+    // A marked promise changed after the report was written (409, key
+    // preserved): OK sends as is; Cancel reloads the promises so the tech
+    // can mark them again and write the report again.
+    const promiseText = completionPromiseMarksPrompt(e);
+    if (promiseText) {
+      setSubmitting(false);
+      if (window.confirm(promiseText)) {
+        return handleSubmit(reconcileConfirmed, { rulesConfirmed, promisesConfirmed: true });
+      }
+      setPromiseReloadKey((key) => key + 1);
       return;
     }
     if (completionResumeOwedError(e)) {
@@ -18405,6 +19145,12 @@ export function CompletionPanel({
         .trim());
     }
     setSelectedObservationLabels(reconciled);
+    // A person's pick is theirs: the edited group's heard words go, and so do
+    // those of a value the pick reconciled away, even when the filled value
+    // is picked again later (Codex P2 r3 on #5632, the typed fill's rule).
+    setLaneHeard((prev) => (prev
+      ? { ...prev, findings: prev.findings.filter((entry) => entry.group !== group?.key && reconciled.includes(entry.value)) }
+      : prev));
   }
   function markTypedFirstFieldTouch() {
     if (!completionTelemetryRef.current.firstFieldTouchedAt) {
@@ -18473,6 +19219,9 @@ export function CompletionPanel({
       // below invalidates an in-flight response on settle like any other
       // input
       aiReportIncludeComms,
+      // a promise marked (or re-marked) after generation changes what the
+      // report should say about it
+      effectivePromiseSignature,
     ]);
   }
   useEffect(() => {
@@ -18493,7 +19242,20 @@ export function CompletionPanel({
   }, [areasServiced, observationsText, recommendationsText,
     customerInteraction, customerConcern, clientPestRating,
     servicePhotos, typedPhotoSummary, generating, lawnAssessmentId, lawnAssessmentRevision,
-    aiReportIncludeComms, selectedProducts, serviceTypeForArea]);
+    aiReportIncludeComms, selectedProducts, serviceTypeForArea, effectivePromiseSignature]);
+  // The installed report was written with promise marks that no longer
+  // hold (a restored draft whose promise was reworded since, which the
+  // restore's fresh watcher baseline cannot see): an untouched report clears
+  // itself like any changed input; an edited one asks at submit (Codex #5516).
+  useEffect(() => {
+    if (promiseCheckLoading || generating) return;
+    const written = generationPromiseSignatureRef.current;
+    if (written == null || written === effectivePromiseSignature) return;
+    const installed = generatedReportTextRef.current;
+    if (installed && String(notes || "").trim() === installed) invalidateGeneratedReportOnTypedEdit();
+    // promiseMarks: a restore sets marks and the report together, and its
+    // stale marks may leave the effective signature itself unchanged.
+  }, [effectivePromiseSignature, promiseCheckLoading, generating, promiseMarks]);
   // A typed edit AFTER generation settles invalidates an UNTOUCHED draft —
   // the installed prose described the old facts, and completion would
   // publish it beside contradicting structured findings (codex r23). Prose
@@ -18527,6 +19289,7 @@ export function CompletionPanel({
       setChipLinesDetached(restoredDetached);
       preGenerationNotesRef.current = null;
       preGenerationChipDetachedRef.current = false;
+      installedReportDraftRef.current = null;
       setAiReportUsed(false);
       setGeneratedReportCleared(true);
       return restoredDetached;
@@ -18542,6 +19305,12 @@ export function CompletionPanel({
     invalidateGeneratedReportOnTypedEdit();
     markTypedFirstFieldTouch();
     setFindingsValues((prev) => ({ ...prev, [key]: value }));
+    // A person's edit is theirs: the words a fill stood on no longer show
+    // beside the field, even when the same value is picked again (Codex P2
+    // r3 on #5632).
+    setTypedHeard((prev) => (prev?.values?.[key]
+      ? { ...prev, values: Object.fromEntries(Object.entries(prev.values).filter(([field]) => field !== key)) }
+      : prev));
     // Derived prefill (contract §4): while the picker is untouched, the
     // score recomputes from the derive-field select on every change.
     const activity = typedFindingsSchema?.activity;
@@ -18561,6 +19330,8 @@ export function CompletionPanel({
     // First tap pins technician-set, even when the value doesn't change.
     setTypedActivityTouched(true);
     setTypedActivityScore(n);
+    // A person's pick is theirs: the words a heard rating stood on go.
+    setTypedHeard((prev) => (prev?.score ? { ...prev, score: null } : prev));
   }
   function handleTypedRecommendationsChange(value) {
     // While a Generate request is in flight the snapshot must stay what the
@@ -19369,6 +20140,7 @@ export function CompletionPanel({
                   }
                   blocks={treeShrubCloseoutBlocks}
                   productFlags={treeShrubProductFlags}
+                  injectionProducts={injectionProducts}
                   inputStyle={mInput}
                   selectStyle={mSelect}
                   textareaStyle={mTextarea}
@@ -19378,6 +20150,7 @@ export function CompletionPanel({
                     text: M.ink,
                     muted: M.ink3,
                     error: M.err,
+                    warn: M.warn,
                   }}
                 />
               </Field>
@@ -19447,8 +20220,9 @@ export function CompletionPanel({
                 ))}
               </select>{" "}
             </Field>{" "}
-            <details open={!(completionImprovements && isLawn) || undefined}>{completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Add a note{notes.trim() ? " · recorded" : ""}</summary>}<Field label="Technician notes">
+            <details open={!(completionImprovements && isLawn) || undefined}>{completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Add a note{notes.trim() ? " · recorded" : ""}</summary>}<Field label={noteBoxPhotos ? "Notes and photos" : "Technician notes"}>
               {" "}
+              <div style={noteBoxPhotos ? { border: `1px solid ${M.hairline}`, borderRadius: 12, background: M.card, overflow: "hidden" } : undefined}>
               <div style={{ position: "relative" }}>
                 <textarea
                   value={notes}
@@ -19472,13 +20246,16 @@ export function CompletionPanel({
                     // typed text never runs under it.
                     paddingRight: dictation.supported ? 52 : mTextarea.padding,
                     opacity: generating ? 0.6 : 1,
+                    ...(noteBoxPhotos ? { border: "none", borderRadius: 0, background: "transparent" } : {}),
                   }}
                 />{" "}
                 {dictation.supported && (
                   <button
                     type="button"
                     onClick={dictation.toggle}
-                    disabled={generating || dictation.uploading}
+                    // One microphone at a time: an open photo description holds the notes
+                    // mic (it can still stop a recording already going).
+                    disabled={generating || dictation.uploading || (photoDescriptionOpen && !dictation.listening)}
                     aria-busy={dictation.uploading || undefined}
                     aria-label={
                       dictation.uploading
@@ -19513,6 +20290,35 @@ export function CompletionPanel({
                     {dictation.listening ? <MicOff size={16} strokeWidth={2.2} /> : <Mic size={16} strokeWidth={2.2} />}
                   </button>
                 )}
+              </div>
+              {noteBoxPhotos && (
+                <>
+                  <input ref={photoInputRef} type="file" accept="image/*" multiple onChange={handlePhotoSelect} style={{ display: "none" }} />
+                  <NoteBoxPhotos
+                    photos={servicePhotos}
+                    max={5}
+                    disabled={generating}
+                    palette={{ text: M.ink, muted: M.ink3, border: M.hairline, card: M.card, danger: M.err, onDanger: M.actionFg }}
+                    dictationServiceId={service.id}
+                    onAdd={() => photoInputRef.current?.click()}
+                    onRemove={removePhoto}
+                    onCaption={setPhotoCaption}
+                    onEditingChange={setPhotoDescriptionOpen}
+                    micBusy={dictation.listening || dictation.starting || dictation.uploading}
+                    onDescribeWithAi={handlePhotoAnalyze}
+                    describing={photoAnalyzing}
+                    describeError={photoAiError}
+                    summary={typedPhotoSummary}
+                    summaryLabel={isTypedFindings ? "Photo summary (appears on the customer report)" : "Photo summary — review, then add to notes if useful"}
+                    onSummary={setTypedPhotoSummary}
+                    onAddSummaryToNotes={isTypedFindings ? null : () => {
+                      const summary = typedPhotoSummary.trim();
+                      if (!summary) return;
+                      setNotes((prev) => (prev.trim() ? `${prev.trimEnd()}\n\n${summary}` : summary));
+                    }}
+                  />
+                </>
+              )}
               </div>
             </Field></details>
             {/* Post-AI-draft structured selections — the tagged lines no
@@ -19582,6 +20388,11 @@ export function CompletionPanel({
                     value={selected}
                     onChange={(value) => handleSpecialtyFindingChange(group, value)}
                     inputStyle={{ width: "100%", boxSizing: "border-box" }}
+                  />
+                  <LaneHeardLine
+                    quotes={laneHeard?.findings.filter((entry) => entry.group === group.key && entry.value === selected).map((entry) => entry.quote)}
+                    unclear={!selected && laneHeard?.unclear.includes(group.key)}
+                    color={M.ink3}
                   />
                 </Field>
               );
@@ -19682,6 +20493,17 @@ export function CompletionPanel({
                 />
               </Field>
             )}
+            {blogPostShown && (
+              <Field label="Blog post for the customer">
+                <BlogPostPicker
+                  search={searchBlogPosts}
+                  value={blogPost}
+                  onChange={setBlogPost}
+                  disabled={generating || submitting}
+                  tokens={{ ink: M.ink, muted: M.ink3, border: M.hairline, card: M.card, font, inputStyle: mInput }}
+                />
+              </Field>
+            )}
             {/* Lines parked from the notes when an AI draft replaced them
                 stay visible and editable here — they still submit as
                 findings / internal next steps, so the tech can correct or
@@ -19746,39 +20568,23 @@ export function CompletionPanel({
                 />{" "}
               </Field>
             )}
+            {!promiseMarksSuppressed && promiseCheck && (
+              <PromiseCheck
+                promises={visitPromises}
+                total={promiseCheck.total}
+                marks={promiseMarks}
+                onChange={setPromiseMarks}
+                disabled={generating || submitting}
+                tokens={{ ink: M.ink, muted: M.ink3, border: M.hairline, card: M.card, onInk: M.actionFg, font }}
+              />
+            )}
             {/* AI report — drafts customer-facing visit copy into the notes box
                 from the structured visit data (actions, observations, products,
                 concern), for the tech to review/edit before completing. */}
             {!quickComplete && (
               <button
                 type="button"
-                onClick={async () => {
-                  // Stop dictation BEFORE snapshotting notes for the payload, so
-                  // a final spoken chunk lands in serviceNotes rather than after
-                  // the snapshot. Once generating flips true the dictation
-                  // callback ignores any late chunk (and the mic is disabled).
-                  // Upload-mode dictation transcribes AFTER the mic stops (an
-                  // async server round-trip), so a snapshot taken now would miss
-                  // it. Hold the action until the transcript has landed.
-                  if (dictation.mode === "upload" && (dictation.listening || dictation.uploading)) {
-                    alert("Stop dictation and wait for the transcript to appear in your notes first.");
-                    return;
-                  }
-                  if (dictation.listening) dictation.toggle();
-                  const { payload, hasReportInput } = buildAiReportPayload();
-                  if (!hasReportInput) {
-                    alert("Add service notes, products, or visit details first.");
-                    return;
-                  }
-                  setGenerating(true);
-                  try {
-                    const r = await generateAiReport(payload);
-                    if (r.report) applyGeneratedReport(r.report, { deterministic: r.deterministic === true, photoGroundingUsed: r.photoGroundingUsed === true });
-                  } catch (e) {
-                    alert("AI report failed: " + e.message);
-                  }
-                  setGenerating(false);
-                }}
+                onClick={handleGenerateClick}
                 disabled={generating
                   || (isLawn && lawnAssessmentReady === false)
                   // A mid-load station registry would land counts AFTER the
@@ -19871,6 +20677,9 @@ export function CompletionPanel({
                 {zoneMapOpen && (
                   <TechTreatmentZoneModal
                     serviceId={service.id}
+                    // The property this form loaded the visit at: a save that lands after
+                    // the office moved the visit is refused (Codex #5538).
+                    expectedPropertyId={'propertyId' in service ? (service.propertyId ?? null) : undefined}
                     customerName={service.customerName || "Customer"}
                     address={service.address || ""}
                     lat={service.lat ?? service.customer_latitude}
@@ -19891,7 +20700,7 @@ export function CompletionPanel({
                 </span>
               </Field>
             )}
-            {!quickComplete && !hideServicePhotos && (
+            {!quickComplete && !hideServicePhotos && !noteBoxPhotos && (
               <Field label={`Service photos (${servicePhotos.length}/5)`}>
                 {" "}
                 <input
@@ -20114,6 +20923,12 @@ export function CompletionPanel({
                 onActivityTap={handleTypedActivityTap}
                 recommendations={typedRecommendations}
                 onRecommendationsChange={handleTypedRecommendationsChange}
+                heard={typedVoiceFill ? typedHeard?.values : null}
+                unclear={typedVoiceFill ? typedHeard?.unclear : null}
+                heardScore={typedVoiceFill ? typedHeard?.score : null}
+                scoreUnclear={typedVoiceFill && typedHeard?.scoreUnclear === true}
+                voiceFill={typedVoiceFill}
+                sources={termiteRecord}
               />
             )}
             {/* Companion sections — one typed form per companion schema,
@@ -20144,6 +20959,7 @@ export function CompletionPanel({
             })}
             {/* Products applied */}
             <Field label="Products applied">
+              {protocolCompletionDefaults?.holds?.map(hold => <p key={hold.name} style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{hold.name}: {hold.reason}</p>)}
               {quickComplete ? (
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                   {(products || []).slice(0, 8).map((p) => {
@@ -20552,6 +21368,10 @@ export function CompletionPanel({
                     [...added, ...removed].forEach((area) => toggleArea(area));
                   }}
                   inputStyle={{ width: "100%", boxSizing: "border-box" }}
+                />
+                <LaneHeardLine
+                  quotes={[...new Set((laneHeard?.areas || []).filter((entry) => areasServiced.includes(entry.area)).map((entry) => entry.quote))]}
+                  color={M.ink3}
                 />
               </Field>
             )}
@@ -21701,6 +22521,7 @@ export function CompletionPanel({
                 }
                 blocks={treeShrubCloseoutBlocks}
                 productFlags={treeShrubProductFlags}
+                injectionProducts={injectionProducts}
                 inputStyle={inputStyle}
                 selectStyle={inputStyle}
                 textareaStyle={{ ...inputStyle, minHeight: 82, resize: "vertical" }}
@@ -21710,6 +22531,7 @@ export function CompletionPanel({
                   text: D.text,
                   muted: D.muted,
                   error: D.red,
+                  warn: D.amber,
                 }}
               />
             </div>
@@ -21749,6 +22571,9 @@ export function CompletionPanel({
               {zoneMapOpen && (
                 <TechTreatmentZoneModal
                   serviceId={service.id}
+                  // The property this form loaded the visit at: a save that lands after
+                  // the office moved the visit is refused (Codex #5538).
+                  expectedPropertyId={'propertyId' in service ? (service.propertyId ?? null) : undefined}
                   customerName={service.customerName || "Customer"}
                   address={service.address || ""}
                   lat={service.lat ?? service.customer_latitude}
@@ -21878,7 +22703,8 @@ export function CompletionPanel({
           </select>
           {/* Technician Notes */}
           <details open={!(completionImprovements && isLawn) || undefined}>{completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Add a note{notes.trim() ? " · recorded" : ""}</summary>}
-          <label style={labelStyle}>Technician Notes</label>{" "}
+          <label style={labelStyle}>{noteBoxPhotos ? "Notes and photos" : "Technician Notes"}</label>{" "}
+          <div style={noteBoxPhotos ? { border: `1px solid ${D.border}`, borderRadius: 10, background: D.input, overflow: "hidden" } : undefined}>
           <div style={{ position: "relative" }}>
             <textarea
               value={notes}
@@ -21902,6 +22728,7 @@ export function CompletionPanel({
                 fontFamily: "'Nunito Sans', sans-serif",
                 boxSizing: "border-box",
                 opacity: generating ? 0.6 : 1,
+                ...(noteBoxPhotos ? { border: "none", borderRadius: 0, background: "transparent" } : {}),
               }}
               placeholder={
                 dictation.listening
@@ -21915,7 +22742,9 @@ export function CompletionPanel({
               <button
                 type="button"
                 onClick={dictation.toggle}
-                disabled={generating || dictation.uploading}
+                // One microphone at a time: an open photo description holds the notes
+                // mic (it can still stop a recording already going).
+                disabled={generating || dictation.uploading || (photoDescriptionOpen && !dictation.listening)}
                 aria-busy={dictation.uploading || undefined}
                 aria-label={
                   dictation.uploading
@@ -21949,6 +22778,35 @@ export function CompletionPanel({
                 {dictation.listening ? <MicOff size={16} strokeWidth={2.2} /> : <Mic size={16} strokeWidth={2.2} />}
               </button>
             )}
+          </div>
+          {noteBoxPhotos && (
+            <>
+              <input ref={photoInputRef} type="file" accept="image/*" multiple onChange={handlePhotoSelect} style={{ display: "none" }} />
+              <NoteBoxPhotos
+                photos={servicePhotos}
+                max={5}
+                disabled={generating}
+                palette={{ text: D.text, muted: D.muted, border: D.border, card: D.input, danger: D.red, onDanger: D.white }}
+                dictationServiceId={service.id}
+                onAdd={() => photoInputRef.current?.click()}
+                onRemove={removePhoto}
+                onCaption={setPhotoCaption}
+                onEditingChange={setPhotoDescriptionOpen}
+                micBusy={dictation.listening || dictation.starting || dictation.uploading}
+                onDescribeWithAi={handlePhotoAnalyze}
+                describing={photoAnalyzing}
+                describeError={photoAiError}
+                summary={typedPhotoSummary}
+                summaryLabel={isTypedFindings ? "Photo summary (appears on the customer report)" : "Photo summary — review, then add to notes if useful"}
+                onSummary={setTypedPhotoSummary}
+                onAddSummaryToNotes={isTypedFindings ? null : () => {
+                  const summary = typedPhotoSummary.trim();
+                  if (!summary) return;
+                  setNotes((prev) => (prev.trim() ? `${prev.trimEnd()}\n\n${summary}` : summary));
+                }}
+              />
+            </>
+          )}
           </div>
           </details>
           {/* Post-AI-draft structured selections — the tagged lines no longer
@@ -22021,6 +22879,11 @@ export function CompletionPanel({
                     value={selected}
                     onChange={(value) => handleSpecialtyFindingChange(group, value)}
                     inputStyle={inputStyle}
+                  />
+                  <LaneHeardLine
+                    quotes={laneHeard?.findings.filter((entry) => entry.group === group.key && entry.value === selected).map((entry) => entry.quote)}
+                    unclear={!selected && laneHeard?.unclear.includes(group.key)}
+                    color={D.muted}
                   />
                 </div>
               );
@@ -22115,6 +22978,18 @@ export function CompletionPanel({
                 />
               </div>
             )}
+            {blogPostShown && (
+              <div style={{ marginBottom: 12 }}>
+                <label style={labelStyle}>Blog post for the customer</label>{" "}
+                <BlogPostPicker
+                  search={searchBlogPosts}
+                  value={blogPost}
+                  onChange={setBlogPost}
+                  disabled={generating || submitting}
+                  tokens={{ ink: D.text, muted: D.muted, border: D.border, card: D.card, inputStyle }}
+                />
+              </div>
+            )}
             {/* Parked note lines stay visible and editable after an AI draft
                 replaced the notes (see the mobile branch). */}
             {parkedFound.trim() && (
@@ -22182,39 +23057,24 @@ export function CompletionPanel({
               </div>
             )}{" "}
           </div>
+          {!promiseMarksSuppressed && promiseCheck && (
+            <PromiseCheck
+              promises={visitPromises}
+              total={promiseCheck.total}
+              marks={promiseMarks}
+              onChange={setPromiseMarks}
+              disabled={generating || submitting}
+              compact
+              tokens={{ ink: D.text, muted: D.muted, border: D.border, card: D.card, onInk: D.white }}
+            />
+          )}
           {/* AI Service Report — drafts customer-facing visit copy into the
               notes box from the structured visit data, for the tech to
               review/edit before completing. */}
           {!quickComplete && (
             <button
               type="button"
-              onClick={async () => {
-                // Stop dictation BEFORE snapshotting notes for the payload, so
-                // a final spoken chunk lands in serviceNotes rather than after
-                // the snapshot. Once generating flips true the dictation
-                // callback ignores any late chunk (and the mic is disabled).
-                // Upload-mode dictation transcribes AFTER the mic stops (an
-                // async server round-trip), so a snapshot taken now would miss
-                // it. Hold the action until the transcript has landed.
-                if (dictation.mode === "upload" && (dictation.listening || dictation.uploading)) {
-                  alert("Stop dictation and wait for the transcript to appear in your notes first.");
-                  return;
-                }
-                if (dictation.listening) dictation.toggle();
-                const { payload, hasReportInput } = buildAiReportPayload();
-                if (!hasReportInput) {
-                  alert("Add service notes, products, or visit details first.");
-                  return;
-                }
-                setGenerating(true);
-                try {
-                  const r = await generateAiReport(payload);
-                  if (r.report) applyGeneratedReport(r.report, { deterministic: r.deterministic === true, photoGroundingUsed: r.photoGroundingUsed === true });
-                } catch (e) {
-                  alert("AI report failed: " + e.message);
-                }
-                setGenerating(false);
-              }}
+              onClick={handleGenerateClick}
               disabled={generating
                 || (isLawn && lawnAssessmentReady === false)
                 // Same station-registry hold as the mobile Generate button.
@@ -22280,7 +23140,7 @@ export function CompletionPanel({
               turf photos in the Lawn Assessment block above (which flow into the
               report gallery), so this redundant second upload is hidden.
               Combined visits keep it (companions have their own photo gates). */}
-          {!quickComplete && !hideServicePhotos && (
+          {!quickComplete && !hideServicePhotos && !noteBoxPhotos && (
             <div style={{ marginBottom: 20 }}>
               {" "}
               <label style={labelStyle}>Service Photos</label>{" "}
@@ -22521,6 +23381,12 @@ export function CompletionPanel({
               onActivityTap={handleTypedActivityTap}
               recommendations={typedRecommendations}
               onRecommendationsChange={handleTypedRecommendationsChange}
+              heard={typedVoiceFill ? typedHeard?.values : null}
+              unclear={typedVoiceFill ? typedHeard?.unclear : null}
+              heardScore={typedVoiceFill ? typedHeard?.score : null}
+              scoreUnclear={typedVoiceFill && typedHeard?.scoreUnclear === true}
+              voiceFill={typedVoiceFill}
+              sources={termiteRecord}
             />
           )}
           {/* Companion sections — one typed form per companion schema,
@@ -22549,6 +23415,7 @@ export function CompletionPanel({
           })}
           {/* Products Applied */}
           <label style={labelStyle}>Products Applied</label>
+          {protocolCompletionDefaults?.holds?.map(hold => <p key={hold.name} style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{hold.name}: {hold.reason}</p>)}
           {quickComplete ? (
             <div
               style={{
@@ -22938,6 +23805,10 @@ export function CompletionPanel({
                   [...added, ...removed].forEach((area) => toggleArea(area));
                 }}
                 inputStyle={{ width: "100%", boxSizing: "border-box" }}
+              />
+              <LaneHeardLine
+                quotes={[...new Set((laneHeard?.areas || []).filter((entry) => areasServiced.includes(entry.area)).map((entry) => entry.quote))]}
+                color={D.muted}
               />
             </div>
           )}
@@ -23795,36 +24666,6 @@ const PEST_TARGET_SUGGESTIONS = [
   "Scorpions",
 ];
 
-// What a lawn product treats: weeds, turf-damaging insects, and turf diseases —
-// what a lawn tech actually enters as a product's target, not structural pests.
-const LAWN_TARGET_SUGGESTIONS = [
-  "Broadleaf weeds",
-  "Crabgrass",
-  "Nutsedge / sedge",
-  "Green kyllinga",
-  "Dollarweed",
-  "Doveweed",
-  "Chamberbitter",
-  "Spurge",
-  "Clover",
-  "Goosegrass",
-  "Torpedograss",
-  "Annual bluegrass (Poa annua)",
-  "Southern chinch bugs",
-  "Fall armyworms",
-  "Tropical sod webworms",
-  "White grubs",
-  "Tawny mole crickets",
-  "Fire ants",
-  "Nematodes",
-  "Large patch",
-  "Dollar spot",
-  "Gray leaf spot",
-  "Take-all root rot",
-  "Fairy ring",
-  "Pythium root rot",
-];
-
 // Tree & shrub / palm targets: the SWFL ornamental pests a T&S tech actually
 // treats — whitefly species, scale, thrips, mites — plus the foliar diseases.
 const ORNAMENTAL_TARGET_SUGGESTIONS = [
@@ -23842,24 +24683,6 @@ const ORNAMENTAL_TARGET_SUGGESTIONS = [
   "Sooty mold (sap-feeder cleanup)",
   "Fungal leaf spot",
   "Powdery mildew",
-];
-
-// Fertilizer-family targets are the nutrition goal of the application — what
-// the feeding is meant to correct or stimulate, in customer-report language.
-const NUTRITION_TARGET_SUGGESTIONS = [
-  "Nitrogen green-up",
-  "Deep green color",
-  "Color & density",
-  "Iron chlorosis (yellowing turf)",
-  "Potassium deficiency",
-  "Root strength & stress tolerance",
-  "Balanced feeding",
-  "Micronutrient deficiency",
-  "Slow-release feeding",
-  "Winter hardiness",
-  "Magnesium deficiency (palms)",
-  "Manganese deficiency (palms)",
-  "Potassium deficiency (palms)",
 ];
 
 // Which suggestion list / placeholder noun a product's Targets picker gets:
@@ -24522,6 +25345,8 @@ const PRODUCT_DESCRIPTIONS = {
   "snapshot 2.5tg": "granular bed pre-emergent for long residual weed prevention",
   snapshot: "granular bed pre-emergent for long residual weed prevention",
   "8-2-12": "palm fertilizer with potassium and magnesium for palm nutrition",
+  "8-0-12": "LESCO palm fertilizer #511542; dose in pounds from the canopy chart",
+  "0-0-16": "LESCO palm fertilizer #510513; potassium and magnesium without N or P",
   "13-0-13": "ornamental fertilizer used only where N/P rules allow",
   "suffoil-x": "horticultural oil for scale, mites, and whitefly crawlers when plant/weather safe",
   suffoil: "horticultural oil for scale, mites, and whitefly crawlers when plant/weather safe",

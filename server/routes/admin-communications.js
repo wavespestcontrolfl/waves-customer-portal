@@ -7,6 +7,7 @@ const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
+const { isTechnicianRequest, technicianServicesCustomer, technicianCustomerIdsSubquery } = require('../services/technician-visit-scope');
 const { hideRecruitingThreadsFromNonAdmin, isRecruitingPhone, isRecruitingMessageType } = require('../utils/recruiting-thread-scope');
 const { resolveLocation } = require('../config/locations');
 const logger = require('../services/logger');
@@ -29,10 +30,10 @@ const { placeBridgeCall } = require('../services/call-bridge');
 const { parseETDateTime, etDateString, etParts } = require('../utils/datetime-et');
 const { ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
 const { buildRescheduleLink } = require('../services/reschedule-link');
-const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
+const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS, isUnreviewedDispatchOwned } = require('../services/call-booking-source-actions');
 const { purposeForScheduledMessageType } = require('../services/scheduler');
 const { normalizePhone: normalizeCompliancePhone, phoneHash } = require('../services/messaging/compliance-contact-checks');
-const { isEnabled } = require('../config/feature-gates');
+const { isEnabled, homeLineLive } = require('../config/feature-gates');
 const {
   SUGGEST_WORKFLOW,
   markSuggestionScheduled,
@@ -48,12 +49,30 @@ const {
 } = require('../services/sms-suggest-mode');
 const autoSendExecutor = require('../services/sms-auto-send');
 const { gratitudeClaimsPossible } = require('../services/sms-gratitude-context');
+const { unansweredClaimsPossible } = require('../services/sms-unanswered-reply');
 const { cancelScheduledSmsRow } = require('../services/scheduled-sms-cancel');
 const {
   excludeUnresolvedSendReservations,
   releaseById: releaseReservationById,
   reserveForRequest,
 } = require('../services/messaging/review-ask-reservation');
+
+// Technician texting scope (owner 2026-10-02, codex #5568 r2 P1): a technician
+// reads and sends texts only with customers on their own current/recent
+// route. 404 (not 403) when a named customer is out of scope — existence must
+// not leak. Admins are unscoped.
+async function technicianCustomerGuard(req, res, customerId) {
+  if (!isTechnicianRequest(req)) return true;
+  if (!customerId) {
+    res.status(403).json({ error: 'Pick the customer first — technicians text customers on their own route', code: 'TECHNICIAN_SCOPE' });
+    return false;
+  }
+  if (!(await technicianServicesCustomer(req, customerId))) {
+    res.status(404).json({ error: 'Customer not found' });
+    return false;
+  }
+  return true;
+}
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -115,10 +134,15 @@ function normalizeReplyForComparison(value) {
 async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomerId, outgoingBody }) {
   try {
     const sentPhoneLast10 = normalizePhoneLast10(to);
-    const decision = await db('agent_decisions as ad')
-      .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
-      .leftJoin('customers as c', 'ad.customer_id', 'c.id')
-      .where({ 'ad.id': agentDecisionId, 'ad.status': 'pending_review' })
+    // A scheduling card whose gate was rolled back is not sendable either
+    // (GATE_SMS_SCHEDULING_SUGGEST); it reads as no pending decision.
+    const decision = await require('../services/sms-suggest-mode').excludeGatedSchedulingSuggestions(
+      db('agent_decisions as ad')
+        .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
+        .leftJoin('customers as c', 'ad.customer_id', 'c.id')
+        .where({ 'ad.id': agentDecisionId, 'ad.status': 'pending_review' }),
+      'ad',
+    )
       .select(
         'ad.id',
         'ad.customer_id',
@@ -130,6 +154,14 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
         's.created_at as inbound_created_at',
         's.from_phone as sms_from_phone',
         's.to_phone as sms_to_phone',
+        // Independent-review P1 (round 6, PR #5331): the customer's own
+        // inbound wording — the thing a tender/date the customer named must
+        // be bound against, since a confirmation must never bind a generic
+        // "we received your payment" to a DIFFERENT tender than the one the
+        // customer actually asked about. input_snapshot's own `sms.body` is
+        // the same text for a drafted card and is kept as the fallback in
+        // agent-decision-send-checks.js for a row with no linked sms_log.
+        's.message_body as inbound_message',
         'c.phone as customer_phone'
       )
       .first();
@@ -182,13 +214,16 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
     // (stale or edited timing), and the billing amounts (re-read now). This
     // route keeps ownership + thread staleness and orchestrates. Any block
     // refuses and retires the decision the same way a stale anchor does.
-    const { agentDecisionSendBlockReason } = require('../services/agent-decision-send-checks');
+    const { agentDecisionSendBlockReason, billingFingerprintForSend } = require('../services/agent-decision-send-checks');
+    // Codex round-49 P1: the billing fingerprint BEFORE the full recheck - the provider-boundary check refuses if anything changes after
+    decision.billing_fingerprint = await billingFingerprintForSend({ decision, outgoingBody });
     const blockReason = await agentDecisionSendBlockReason({ decision, outgoingBody });
     if (blockReason) {
       logger.info(`[agent-review] decision ${decision.id} ${blockReason} — refusing send`);
       // A recheck that could not READ the live state (round-42 P2) refuses this attempt but
       // does NOT retire the card: nothing is known to be stale, so the reviewer can retry.
-      if (!require('../services/agent-decision-send-checks').blockReasonIsEtaInfrastructure(blockReason)) {
+      // (a label-facts recheck that could not read the latest visit is the same case, Codex #5416 r31 P2)
+      if (!require('../services/agent-decision-send-checks').blockReasonIsRecheckInfrastructure(blockReason)) {
         await require('../services/sms-suggest-mode').supersedeStaleDecision({ decisionId: decision.id });
       }
       return null;
@@ -210,6 +245,18 @@ async function customerOfSourceCall(callId, to) {
     .whereIn('c.id', db('call_log').select('customer_id').where({ id: callId }).whereNotNull('customer_id'))
     .whereNull('c.deleted_at').first('c.*')
     .catch((e) => { logger.warn(`[admin-call] source-call customer lookup failed: ${e.message}`); return null; });
+  if (!customer) return null;
+  const { KNOWN_CALLER_PHONE_COLS } = require('../utils/known-caller-phone');
+  return KNOWN_CALLER_PHONE_COLS.some((column) => normalizedTo === normalizePhone(customer[column])) ? customer : null;
+}
+
+// The customer `customerId` when `to` is one of their known-caller numbers;
+// null otherwise (deleted, unknown, or a number they are not known by).
+async function customerKnownByNumber(customerId, to) {
+  const normalizedTo = normalizePhone(to);
+  if (!normalizedTo) return null;
+  const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first()
+    .catch((e) => { logger.warn(`[admin-call] hinted customer lookup failed: ${e.message}`); return null; });
   if (!customer) return null;
   const { KNOWN_CALLER_PHONE_COLS } = require('../utils/known-caller-phone');
   return KNOWN_CALLER_PHONE_COLS.some((column) => normalizedTo === normalizePhone(customer[column])) ? customer : null;
@@ -318,6 +365,8 @@ async function dispatchPrepLinkSend(preps, dispatch, actorId, recheck) {
 }
 
 // POST /api/admin/communications/sms — send an SMS from admin
+const { linkedVisitIdsFrom } = require('../services/street-level-hold');
+
 router.post('/sms', async (req, res, next) => {
   let claimedDecisionId = null;
   let manualReservationId = null;
@@ -479,6 +528,7 @@ router.post('/sms', async (req, res, next) => {
       // auto-send check) still applies.
       leadId,
     } = req.body;
+    const linkedVisitIds = linkedVisitIdsFrom(req.body.linkedVisitIds);
     const trustedLeadId = leadId && UUID_RE.test(String(leadId)) ? String(leadId) : null;
     // The lead whose outreach this send records: ONLY a lead the bearer
     // check actually validated a consultation link for (Codex #4709 r17 P2)
@@ -515,6 +565,7 @@ router.post('/sms', async (req, res, next) => {
       }
       trustedCustomerId = customer.id;
     }
+    if (!(await technicianCustomerGuard(req, res, trustedCustomerId))) return undefined;
     // Texting an applicant from the composer stays on the recruiting rail
     // (Codex r7 P0): owner-only, typed job_owner_reply, handoff evidence on
     // the application — never a 'manual' customer text that would hand the
@@ -564,14 +615,18 @@ router.post('/sms', async (req, res, next) => {
     // Coordination follows claim possibility, not the live gate: during a
     // rolling disable an older instance can still claim until the activation
     // stamp is cleared.
-    const providerCoordinationEnabled = gratitudeClaimsPossible();
+    const providerCoordinationEnabled = gratitudeClaimsPossible() || unansweredClaimsPossible();
+    // The sender when the composer picked none. GATE_HOME_LINE: the line they
+    // texted us on within 30 days, else their home line, else main
+    // (services/home-line.js staffTextSender). Off: the old derivation.
+    const resolveStaffSender = async (customerId) => (homeLineLive()
+      ? (await require('../services/home-line').staffTextSender({ phone: to, customerId })).fromNumber
+      : TwilioService.deriveOutboundNumber({ customerId }));
     let providerCoordinationFromNumber = null;
     let providerCoordinationCustomerId = trustedCustomerId || null;
     if (providerCoordinationEnabled) {
       try {
-        providerCoordinationFromNumber = fromNumber || await TwilioService.deriveOutboundNumber({
-          customerId: trustedCustomerId || null,
-        });
+        providerCoordinationFromNumber = fromNumber || await resolveStaffSender(trustedCustomerId || null);
       } catch (deriveErr) {
         logger.warn(`[communications] provider sender resolution failed before dispatch: ${deriveErr.message}`);
         return res.status(503).json({
@@ -591,9 +646,7 @@ router.post('/sms', async (req, res, next) => {
     const refreshProviderCoordinationOwner = async () => {
       if (!providerCoordinationEnabled || !trustedCustomerId
         || providerCoordinationCustomerId === trustedCustomerId) return;
-      const resolvedFromNumber = fromNumber || await TwilioService.deriveOutboundNumber({
-        customerId: trustedCustomerId,
-      });
+      const resolvedFromNumber = fromNumber || await resolveStaffSender(trustedCustomerId);
       if (manualReservationId) {
         const threadLast10 = normalizePhoneLast10(to);
         await db.transaction(async (trx) => {
@@ -657,7 +710,7 @@ router.post('/sms', async (req, res, next) => {
     // be made or retained after its gate is disabled (activation stamp set).
     // The recovery reservation below is also required whenever this send
     // claims or parks a suggestion.
-    const autoSendInterlock = isEnabled('smsAutoSend') || gratitudeClaimsPossible();
+    const autoSendInterlock = isEnabled('smsAutoSend') || gratitudeClaimsPossible() || unansweredClaimsPossible();
     try {
       const parkPhoneLast10 = normalizePhoneLast10(to);
       if (parkPhoneLast10) {
@@ -1081,6 +1134,13 @@ router.post('/sms', async (req, res, next) => {
     // these exports with jest.spyOn, which a module-scope destructure
     // would capture before the spy ever lands.
     const { insertConsultationLinkAttempt, deleteConsultationLinkAttempt } = require('../services/call-booking-link-text');
+    // GATE_HOME_LINE: no line picked by the composer and none resolved for a
+    // provider reservation — resolve it here, after every customer adoption
+    // above, instead of leaving the send layer to derive a home line that
+    // ignores a live conversation on another line.
+    const homeLineSender = !fromNumber && !providerCoordinationFromNumber && homeLineLive()
+      ? await resolveStaffSender(trustedCustomerId || null)
+      : null;
     const sendMessage = (reservationId = null) => sendCustomerMessage({
       to,
       body: cleanBody,
@@ -1095,9 +1155,21 @@ router.post('/sms', async (req, res, next) => {
       // check ran in verifyAgentDraftDecision, before this route's many link / claim /
       // consent / policy awaits. Decision-linked sends only (a hand-typed composer text
       // has no snapshot to recheck); the predicate reads the decision's persisted snapshot.
+      // BILLING FACTS (amounts / payment status / Zelle) at the same boundary (Codex round-48 P1): a payment landing during those
+      // awaits must not let an approved balance / status sentence reach the customer after it became false.
+      // Open-loop facts (PR #5499) ride the same boundary: a promise can close, or the
+      // visit-status window lapse, during those awaits too.
       ...(verifiedAgentDecision?.id ? {
-        providerPreSendCheck: require('../services/agent-decision-send-checks')
-          .etaProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
+        // LABEL FACTS (Codex #5416 P1): the latest visit is re-read at the same boundary.
+        providerPreSendCheck: (() => {
+          const checks = require('../services/agent-decision-send-checks');
+          return checks.composeProviderPreSendChecks(
+            checks.etaProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
+            checks.labelFactsProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
+            checks.openLoopsDecisionProviderPreSendCheck({ decisionId: verifiedAgentDecision.id }),
+            checks.amountsProviderPreSendCheck({ decision: verifiedAgentDecision, getBody: () => cleanBody }),
+          );
+        })(),
       } : {}),
       // codex #5018 pre-push P2: a consultation link can ride this composer
       // send (a pasted URL, or one the operator typed in) without the
@@ -1177,6 +1249,9 @@ router.post('/sms', async (req, res, next) => {
         original_message_type: providerMessageType,
         ...(autopayLinkTokens ? { autopay_setup_tokens: autopayLinkTokens } : {}),
         ...(cardClaim ? { scheduled_service_id: cardVisitIds[0], trigger: 'admin', ...(cardVisitIds.length > 1 ? { scheduled_service_ids: cardVisitIds } : {}) } : {}),
+        // The visits the draft's reschedule / appointment links point at: the shared send step holds
+        // the text when any is a live street-level address hold (street-level-hold.js).
+        ...(linkedVisitIds.length ? { linked_scheduled_service_ids: linkedVisitIds } : {}),
         adminUserId: req.technicianId,
         agentDecisionId: verifiedAgentDecision?.id || undefined,
         // Parked ids ride into the provider-created sms_log row (same as
@@ -1185,7 +1260,7 @@ router.post('/sms', async (req, res, next) => {
         parkedDecisionIds: parkedThreadIds.length ? parkedThreadIds : undefined,
         agentDraft: verifiedAgentDraft || undefined,
         suggestedReply: verifiedAgentDraft || undefined,
-        fromNumber: providerCoordinationFromNumber || fromNumber || undefined,
+        fromNumber: providerCoordinationFromNumber || fromNumber || homeLineSender || undefined,
         mediaUrls: cleanMediaUrls.length ? cleanMediaUrls : undefined,
         allowMediaUrls: cleanMediaUrls.length > 0,
         media,
@@ -1737,6 +1812,7 @@ router.post('/send-prep', async (req, res, next) => {
   try {
     const { customerId, pestType = 'flea', channel = 'both' } = req.body || {};
     if (!customerId) return res.status(400).json({ error: 'customerId required' });
+    if (!(await technicianCustomerGuard(req, res, customerId))) return undefined;
     if (!isSupportedPestType(pestType)) {
       return res.status(400).json({ error: `Unsupported prep type: ${pestType}` });
     }
@@ -1754,12 +1830,37 @@ router.post('/send-prep', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/communications/sender?phone=&customerId= — the line a
+// staff text to this person leaves from (home-line PR 3): the line they
+// texted within 30 days, else their home line, else main. GATE_HOME_LINE off
+// → { fromNumber: null } and the composer keeps its own thread-line choice.
+router.get('/sender', async (req, res, next) => {
+  try {
+    if (!homeLineLive()) return res.json({ fromNumber: null });
+    const phone = typeof req.query.phone === 'string' ? req.query.phone.trim() : '';
+    if (!normalizePhone(phone)) return res.status(400).json({ error: 'phone required' });
+    // A thread on a non-customer line (recruiting, a tech line, a tracking
+    // number) keeps that line: only an office or main line is re-pointed.
+    const currentLine = typeof req.query.currentLine === 'string' ? normalizePhone(req.query.currentLine.trim()) : null;
+    const customerLines = [TWILIO_NUMBERS.mainLine.number, ...Object.values(TWILIO_NUMBERS.locations).map((l) => l.number)];
+    if (currentLine && !customerLines.includes(currentLine)) return res.json({ fromNumber: null });
+    const rawCustomerId = typeof req.query.customerId === 'string' ? req.query.customerId.trim() : '';
+    const customerId = UUID_RE.test(rawCustomerId) ? rawCustomerId : null;
+    const { fromNumber, reason } = await require('../services/home-line').staffTextSender({ phone, customerId });
+    const line = TWILIO_NUMBERS.findByNumber(fromNumber);
+    // replaceableLines: the composer applies fromNumber only while its own
+    // line is empty or one of these, so a recruiting / tech / tracking line
+    // set after the request (or without currentLine) is never replaced.
+    res.json({ fromNumber, label: line?.label || fromNumber, reason, replaceableLines: customerLines });
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/communications/call — initiate an outbound call via Twilio
 router.post('/call', async (req, res, next) => {
   let attemptedFrom = req.body?.fromNumber || null;
   let attemptedTo = req.body?.to || null;
   try {
-    const { to, fromNumber, customerId, source: rawSource, relatedCallId, relatedCommitmentId } = req.body;
+    const { to, fromNumber, customerId, customerIdHint, source: rawSource, relatedCallId, relatedCommitmentId } = req.body;
     if (relatedCommitmentId && !UUID_RE.test(String(relatedCommitmentId))) {
       return res.status(400).json({ error: 'Invalid callback id' });
     }
@@ -1780,11 +1881,10 @@ router.post('/call', async (req, res, next) => {
     // below); it also owns the call_log row, the Twilio call, and the
     // touchpoint. This handler keeps the admin-only validations.
 
-    // All outbound calls present the main company line, regardless of which
-    // endpoint the UI picker selected (fromNumber is still validated above so
-    // garbage input fails loudly rather than silently dialing as main).
-    const from = TWILIO_NUMBERS.mainLine.number;
-    attemptedFrom = from;
+    // The caller ID is server-chosen, regardless of which endpoint the UI
+    // picker selected (fromNumber is still validated above so garbage input
+    // fails loudly): the linked customer's home line under GATE_HOME_LINE,
+    // else the main company line — set below once the customer is resolved.
     const source = relatedCommitmentId || rawSource === 'call-log-callback' ? 'admin-callback' : 'admin-click';
     // A callback attempt placed while the card policy is on is stamped so
     // rollback keeps its strict customer-leg proof and completion action,
@@ -1842,6 +1942,12 @@ router.post('/call', async (req, res, next) => {
       // number is one they are known by. Otherwise the phone-only lookup
       // below decides, as for any click-to-call.
       if (relatedCallId) customer = await customerOfSourceCall(relatedCallId, to);
+      // A soft link (the client's customerIdHint — the customer whose page,
+      // thread, estimate or lead the number came from): used only when the
+      // dialed number is one that customer is known by (primary, secondary or
+      // a service contact); otherwise the phone-only lookup decides, so a
+      // stale number on an old thread or estimate is never refused.
+      if (!customer && customerIdHint && UUID_RE.test(String(customerIdHint))) customer = await customerKnownByNumber(customerIdHint, to);
       if (!customer) customer = await findSingleCustomerForPhone(to).catch((e) => {
         logger.warn(`[admin-call] customer lookup failed for ${maskPhone(to)}: ${e.message}`);
         return null;
@@ -1850,6 +1956,8 @@ router.post('/call', async (req, res, next) => {
     const leadName = customer
       ? `${customer.first_name || ''} ${customer.last_name || ''}`.trim()
       : '';
+    const from = require('../services/home-line').homeLineCallerId(customer);
+    attemptedFrom = from;
 
     let bridgeClaimIds = [];
     // Every callback attempt under the card policy takes the customer claim
@@ -1858,8 +1966,8 @@ router.post('/call', async (req, res, next) => {
     if (relatedCommitmentId || cardPolicy) bridgeClaimIds = await db.transaction(async (trx) => {
       if (relatedCommitmentId && !require('../services/callback-cards').enabled()) throw Object.assign(new Error('Callback cards are disabled'), { status: 409 });
       // The same durable claim the tech-line bridge uses covers the gap
-      // before call_log is inserted, keyed to the NUMBER being called: every
-      // card dials from the shared main line, so a line-wide key would let
+      // before call_log is inserted, keyed to the NUMBER being called: cards
+      // share caller-ID lines (main or a home line), so a line-wide key would let
       // one ringing callback block every other customer's card; a
       // per-commitment or per-customer key would let a linked and an
       // unlinked attempt ring the same phone twice at once.
@@ -1945,6 +2053,9 @@ router.post('/call', async (req, res, next) => {
 router.get('/log', async (req, res, next) => {
   try {
     const { customerId, direction, messageType, page, limit, search, needsResponse } = req.query;
+    if (customerId && isTechnicianRequest(req) && !(await technicianServicesCustomer(req, customerId))) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
     if (![undefined, 'true', 'false'].includes(needsResponse)) {
       return res.status(400).json({ error: 'Invalid needs-response filter' });
     }
@@ -2008,6 +2119,9 @@ router.get('/log', async (req, res, next) => {
     // Recruiting threads (applicant texts carry a bearer interview link) are
     // owner-only — see utils/recruiting-thread-scope.js.
     query = hideRecruitingThreadsFromNonAdmin(query, req);
+    // A technician's inbox is their own customers' threads only; unknown-sender
+    // threads (no customer behind them) are office work.
+    if (isTechnicianRequest(req)) query = query.whereIn('conversations.customer_id', technicianCustomerIdsSubquery(req, db));
 
     // Exclude internal admin phone messages from either side of the conversation.
     for (const phone of ADMIN_PHONES) {
@@ -2161,6 +2275,11 @@ router.get('/log', async (req, res, next) => {
         responseReplyToMessageId: m.response_reply_to_message_id || null,
         responseCreatedAt: m.response_created_at || m.created_at,
         customerId: recipientCustomerId, customerName,
+        // The row's linked customer even when the contact is one of their
+        // service-contact numbers (customerId above is the REPLY recipient and
+        // stays null then). Call actions send it as a soft customerIdHint,
+        // which /call re-validates against that customer's known numbers.
+        linkedCustomerId: m.customer_id || fallbackCustomer?.id || null,
         createdAt: m.effective_created_at || m.created_at,
         isRead: !!m.is_read,
         readAt: m.read_at,
@@ -2188,6 +2307,7 @@ router.get('/agent-draft', async (req, res, next) => {
     if (!customerId && !phoneLast10) {
       return res.status(400).json({ error: 'customerId or phone required' });
     }
+    if (!(await technicianCustomerGuard(req, res, customerId))) return undefined;
 
     let q = db('agent_decisions as ad')
       .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
@@ -2201,6 +2321,8 @@ router.get('/agent-draft', async (req, res, next) => {
     // pending house-voice cards must stop surfacing too — not just stop
     // being created.
     if (!isEnabled('smsSuggestMode')) q = q.whereNot('ad.workflow', SUGGEST_WORKFLOW);
+    // Same for scheduling cards when GATE_SMS_SCHEDULING_SUGGEST is rolled back.
+    q = require('../services/sms-suggest-mode').excludeGatedSchedulingSuggestions(q, 'ad');
 
     q = q
       .select(
@@ -2274,6 +2396,21 @@ router.post('/messages/read', async (req, res, next) => {
       return res.status(400).json({ error: 'readBefore required when marking a conversation read' });
     }
 
+    if (isTechnicianRequest(req)) {
+      // Every named message and conversation must belong to one of the
+      // technician's own customers; a thread with no customer is office work.
+      const scoped = technicianCustomerIdsSubquery(req, db);
+      const foreignMessage = ids.length ? await db('messages')
+        .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
+        .whereIn('messages.id', ids)
+        .where((b) => b.whereNull('conversations.customer_id').orWhereNotIn('conversations.customer_id', scoped))
+        .first('messages.id') : null;
+      const foreignConversation = conversationIds.length ? await db('conversations')
+        .whereIn('conversations.id', conversationIds)
+        .where((b) => b.whereNull('conversations.customer_id').orWhereNotIn('conversations.customer_id', scoped))
+        .first('conversations.id') : null;
+      if (foreignMessage || foreignConversation) return res.status(404).json({ error: 'Message not found' });
+    }
     const { markInboundSmsRead } = require('../services/inbound-sms-read');
     const { updated, notificationsCleared } = await markInboundSmsRead({
       messageIds: ids, conversationIds, readBefore, adminUserId: req.technicianId || null, role: req.techRole,
@@ -2297,7 +2434,7 @@ router.get('/unread-count', requireAdmin, async (req, res, next) => {
 });
 
 // GET /api/admin/communications/stats — channel analytics
-router.get('/stats', async (req, res, next) => {
+router.get('/stats', requireAdmin, async (req, res, next) => {
   try {
     const som = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString();
 
@@ -2411,6 +2548,21 @@ router.post('/ai-draft', async (req, res, next) => {
 
     // Look up customer context
     const customer = await db('customers').where('phone', 'like', `%${cleanPhone}`).first();
+    if (isTechnicianRequest(req)) {
+      // The history below is keyed by phone, not by customer: when records
+      // share the number, a technician drafts only if EVERY one is on their
+      // route — otherwise another customer's texts would reach the prompt
+      // (codex #5568 r9 P1). They can still type the reply themselves.
+      // Stored phones carry punctuation: compare the last 10 digits, the
+      // file's own rule elsewhere (pre-push P1).
+      const sharing = await db('customers')
+        .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [cleanPhone])
+        .select('id');
+      if (!sharing.length) return res.status(404).json({ error: 'Customer not found' });
+      for (const row of sharing) {
+        if (!(await technicianServicesCustomer(req, row.id))) return res.status(404).json({ error: 'Customer not found' });
+      }
+    }
 
     // Get recent SMS history for context. Recruiting rows (job_*) are
     // excluded for EVERY caller, admin included: this is a customer-copy
@@ -2565,6 +2717,10 @@ async function soonestUpcomingVisit(customerIds, { statuses = ['pending', 'confi
     // `skip` may be async (the composer's pick reads the grouped page state).
     svc = null;
     for (const c of candidates) {
+      // A voice-agent booking a writer moved to 'confirmed' with customer_confirmed still false is a
+      // street-level address hold the office has not cleared: no link to it (the SQL filter above
+      // only drops the still-pending shape).
+      if (isUnreviewedDispatchOwned(c)) continue;
       if (!(await skip(c))) { svc = c; break; }
     }
     if (svc || candidates.length < PAGE) break;
@@ -3641,6 +3797,7 @@ router.post('/rewrite-sms', async (req, res) => {
           return null;
         });
       if (!customer) return res.status(404).json({ error: 'customerId not found' });
+      if (!(await technicianCustomerGuard(req, res, customer.id))) return undefined;
       const customerPhoneLast10 = fullPhoneLast10(customer.phone);
       if (!customerPhoneLast10 || customerPhoneLast10 !== requestedPhoneLast10) {
         return res.status(400).json({ error: 'customerPhone must match the selected customer phone' });
@@ -3660,10 +3817,21 @@ router.post('/rewrite-sms', async (req, res) => {
           });
         if (matches.length === 1) {
           customer = matches[0];
+          // Same scope as the customerId branch: a technician gets no context
+          // for a customer off their route (pre-push Codex P1).
+          if (!(await technicianCustomerGuard(req, res, customer.id))) return undefined;
         } else if (matches.length > 1) {
           logger.warn(`[sms-rewrite] ${matches.length} customers matched ${maskPhone(req.body.customerPhone)}; skipping customer context`);
         }
       }
+    }
+
+    // A technician rewrites only for a customer resolved and authorized
+    // above (one of their route's): no customer, an unmatched or ambiguous
+    // phone means no paid model call. Admins keep the context-free path
+    // (codex #5568 r13 P1).
+    if (isTechnicianRequest(req) && !customer) {
+      return res.status(404).json({ error: 'Customer not found' });
     }
 
     const rewritePrompt = buildSmsRewritePrompt({
@@ -3775,6 +3943,12 @@ async function trustedCustomerForScheduledSms(customerId, to) {
 
 router.post('/schedule-sms', async (req, res, next) => {
   try {
+    // Deferred sends are office-only. The scheduler replays a queued row later
+    // from the stored admin_user_id with no re-check of the sender's route, so a
+    // technician's route-scoped authorization at enqueue time would outlive the
+    // reassignment it was granted under (Codex #5568 r14 P1). Refused before any
+    // lookup or insert, with the staff default-deny gate on or off.
+    if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
     const { to, body, scheduledFor, customerId, fromNumber, from, messageType, agentDecisionId, agentDraft, replyToMessageId } = req.body || {};
     const cleanBody = typeof body === 'string' ? body.trim() : '';
     if (!to || !cleanBody || !scheduledFor) {
@@ -3798,6 +3972,18 @@ router.post('/schedule-sms', async (req, res, next) => {
     const trusted = await trustedCustomerForScheduledSms(customerId, to);
     if (trusted.error) return res.status(trusted.status).json({ error: trusted.error });
     const trustedCustomerId = trusted.customerId;
+    if (!(await technicianCustomerGuard(req, res, customerId ? trustedCustomerId : null))) return undefined;
+    // A draft whose reschedule / appointment link points at a street-level address hold is not queued:
+    // nothing about a held visit reaches the customer before the office confirms the address.
+    const scheduledLinkedVisitIds = linkedVisitIdsFrom(req.body?.linkedVisitIds);
+    if (scheduledLinkedVisitIds.length) {
+      const { isStreetLevelHoldVisit, HOLD_REFUSAL } = require('../services/street-level-hold');
+      for (const visitId of scheduledLinkedVisitIds) {
+        if (await isStreetLevelHoldVisit(visitId)) {
+          return res.status(409).json({ error: HOLD_REFUSAL, code: 'street_level_hold' });
+        }
+      }
+    }
     const explicitCustomerContext = Boolean(customerId && trustedCustomerId);
     // Recruiting boundary (Codex r7 P0): a scheduled 'manual' text to an
     // applicant would later hand their reply to the customer pipeline —
@@ -3869,7 +4055,7 @@ router.post('/schedule-sms', async (req, res, next) => {
         // the marker the auto-send's guard sees, so this check only needs to
         // cover the reverse race (auto claimed first). No-op while both
         // autonomous lanes are dormant and gratitude was never activated.
-        if ((isEnabled('smsAutoSend') || gratitudeClaimsPossible())
+        if ((isEnabled('smsAutoSend') || gratitudeClaimsPossible() || unansweredClaimsPossible())
           && await autoSendExecutor.hasActiveAutoSendClaim(trx, { threadLast10: normalizePhoneLast10(to), customerId: trustedCustomerId })) {
           const conflict = new Error('An automated reply is going out to this conversation right now — refresh in a moment before scheduling.');
           conflict.statusCode = 409;
@@ -3899,6 +4085,9 @@ router.post('/schedule-sms', async (req, res, next) => {
         if (usedDecisionId) metaObj.agent_decision_id = usedDecisionId;
         if (parkedIds.length) metaObj.parked_decision_ids = parkedIds;
         if (scheduledHumanAuthored) metaObj.human_authored = true;
+        // The visits the draft's links point at: the cron replay forwards them so the shared send step
+        // re-checks for a street-level hold at DELIVERY (a visit can become one after this enqueue).
+        if (scheduledLinkedVisitIds.length) metaObj.linked_scheduled_service_ids = scheduledLinkedVisitIds;
         const metadata = Object.keys(metaObj).length ? JSON.stringify(metaObj) : null;
 
         const [inserted] = await trx('sms_log')
@@ -4020,6 +4209,9 @@ router.delete('/scheduled/:id', async (req, res, next) => {
  * the call-disposition-as-spam flow. Surfaced here so the SMS inbox can block
  * without routing through the calls tab. */
 
+// Block list role rule (owner 2026-10-02): any staff login may READ the list
+// (the SMS tab filters and labels blocked threads from it); only an admin may
+// block or unblock — unblocking releases that number's held texts.
 // GET /api/admin/communications/blocked-numbers — list + set for client-side filter
 router.get('/blocked-numbers', async (req, res, next) => {
   try {
@@ -4044,7 +4236,7 @@ router.get('/blocked-numbers', async (req, res, next) => {
 // formatting. A number that resolves to a live customer (main phone or a
 // service-contact slot) is refused, mirroring the call-disposition guard —
 // blocking it would silently drop that customer's texts.
-router.post('/blocked-numbers', async (req, res, next) => {
+router.post('/blocked-numbers', requireAdmin, async (req, res, next) => {
   try {
     const { blockType, reason } = req.body;
     const number = normalizePhone(req.body.number);
@@ -4094,7 +4286,7 @@ router.post('/blocked-numbers', async (req, res, next) => {
 });
 
 // DELETE /api/admin/communications/blocked-numbers/:number — unblock
-router.delete('/blocked-numbers/:number', async (req, res, next) => {
+router.delete('/blocked-numbers/:number', requireAdmin, async (req, res, next) => {
   try {
     await db('blocked_numbers').where({ number: req.params.number }).del();
     res.json({ success: true });
@@ -4479,3 +4671,5 @@ router._internals = {
 };
 
 module.exports = router;
+// Test seam for the technician texting scope.
+router._technicianCustomerGuard = technicianCustomerGuard;

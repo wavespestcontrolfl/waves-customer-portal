@@ -1212,6 +1212,7 @@ function predictWinnerBackfills(winner, loser, { derivedStripeCustomerId = null 
   ];
   let movedContactSlot = false;
   let movedContactPhone = false;
+  const movedPhoneKeys = new Set();
   const winnerHadAnyContact = CONTACT_SLOTS.some((slot) => slot.some((f) => !isEmptyValue(winner[f])));
   for (const slot of CONTACT_SLOTS) {
     const winnerSlotEmpty = slot.every((f) => isEmptyValue(winner[f]));
@@ -1222,7 +1223,10 @@ function predictWinnerBackfills(winner, loser, { derivedStripeCustomerId = null 
         movedContactSlot = true;
         // slot[1] is the phone column — only a moved TEXTING target can
         // invalidate the winner's SMS-consent stamp below.
-        if (f === slot[1]) movedContactPhone = true;
+        if (f === slot[1]) {
+          movedContactPhone = true;
+          movedPhoneKeys.add(String(loser[f]).replace(/\D/g, '').slice(-10));
+        }
       }
     }
   }
@@ -1255,6 +1259,47 @@ function predictWinnerBackfills(winner, loser, { derivedStripeCustomerId = null 
     winnerPriorValues.service_contacts_consent_at = winner.service_contacts_consent_at;
     winnerPriorValues.service_contacts_consent_source = winner.service_contacts_consent_source ?? null;
     winnerPriorValues.service_contacts_consent_text_version = winner.service_contacts_consent_text_version ?? null;
+  }
+  // Per-phone consent boundary (#5467, service_preferences): a loser contact
+  // phone the call pipeline held out of texting until its own YES
+  // (unconsented_slot_phone_keys), or one the loser's cleared stamp covered
+  // (consent_covered_phone_keys), keeps that standing on the winner when the
+  // phone ends up in the winner's slots. The winner's prior blob is journaled
+  // so an undo restores it.
+  const prefsObj = (row) => {
+    const raw = row.service_preferences;
+    if (raw && typeof raw === 'object') return raw;
+    try { return JSON.parse(raw || '{}') || {}; } catch { return {}; }
+  };
+  const loserPrefs = prefsObj(loser);
+  const winnerPrefs = prefsObj(winner);
+  // Every phone in the winner's FINAL slot set (its own slots plus the ones
+  // moving in): a held loser phone the winner already carries keeps its hold
+  // too (the loser's recipient_optin row is repointed to the winner).
+  const ten = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+  const finalSlotKeys = new Set([
+    ...CONTACT_SLOTS.map((slot) => ten(winner[slot[1]])).filter(Boolean),
+    ...movedPhoneKeys,
+  ]);
+  const carried = {};
+  for (const key of ['unconsented_slot_phone_keys', 'consent_covered_phone_keys']) {
+    const moving = (Array.isArray(loserPrefs[key]) ? loserPrefs[key] : []).filter((k) => finalSlotKeys.has(k));
+    if (moving.length) carried[key] = [...new Set([...(Array.isArray(winnerPrefs[key]) ? winnerPrefs[key] : []), ...moving])];
+  }
+  // When this merge CLEARED the winner's own stamp (a mixed list), the
+  // winner's existing slot phones were covered by it (grandfathered, often no
+  // recipient_optin row): record them as covered, as an ordinary unconsented
+  // add does, so a later YES can restore the account stamp.
+  if (Object.prototype.hasOwnProperty.call(backfills, 'service_contacts_consent_at') && backfills.service_contacts_consent_at === null) {
+    const winnerOwn = CONTACT_SLOTS.map((slot) => ten(winner[slot[1]])).filter(Boolean);
+    carried.consent_covered_phone_keys = [...new Set([
+      ...(carried.consent_covered_phone_keys || (Array.isArray(winnerPrefs.consent_covered_phone_keys) ? winnerPrefs.consent_covered_phone_keys : [])),
+      ...winnerOwn,
+    ])];
+  }
+  if (Object.keys(carried).length) {
+    backfills.service_preferences = { ...winnerPrefs, ...carried };
+    if (!isEmptyValue(winner.service_preferences)) winnerPriorValues.service_preferences = winner.service_preferences;
   }
   // Acceptance-terms stamp (GATE_ESTIMATE_ACCEPTANCE_TERMS): the loser's
   // estimate_acceptances rows repoint to the winner below, so the winner's
@@ -1952,7 +1997,25 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
   // post-commit contact audit event.
   let winnerBeforeMerge = null;
   let mergeLockedAt = null;
+  // Customer-level overdue reminders (customer-dunning/merge.js): every OPEN
+  // schedule on either side is read BEFORE the transaction (its row version
+  // and the current step's delivery evidence, a ledger read that must not run
+  // under the merge's locks) and anything a release would refuse aborts the
+  // merge here, for both customers, before anything moved. The releases
+  // themselves run INSIDE the transaction below, so a merge that refuses later
+  // rolls them back too. The next run promotes the merged customer as one.
+  const DunningMerge = require('./customer-dunning/merge');
+  const dunningNow = new Date();
+  const dunningPrepared = await DunningMerge.prepareMergeRelease([winnerId, loserId], { now: dunningNow });
+  let dunningEpisodeRenumbers = [];
+  let dunningReleased = [];
   const result = await db.transaction(async (trx) => {
+    // FIRST, before every other lock: both customers' dunning keys
+    // (EXCLUSIVE, sorted) — every engine path takes that key first in a
+    // fresh transaction, so waiting on it here holds nothing. Under them a
+    // schedule that opened since the read above refuses the merge. Nothing is
+    // written yet: the releases run below, after the merge's own locks.
+    const dunningPlan = await DunningMerge.lockInMergeTransaction(trx, { winnerId, loserId, prepared: dunningPrepared });
     // The collections case lock for BOTH parties, before anything moves
     // (PR C / codex gh-r7): the repoint below rewrites collection_cases FKs
     // while the dial surfaces promote/rotate under this same customer lock —
@@ -2213,6 +2276,19 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         throw new Error('executeMerge: could not preserve the surviving customer account address as its primary property');
       }
     }
+
+    // Customer-level overdue reminders, released ON THIS TRANSACTION after
+    // every prerequisite lock and refusal above and before the first repoint:
+    // the member invoice rows are locked (id order) before any member
+    // sequence, the engine's order, so an invoice edit (invoice row, then its
+    // sequence) cannot deadlock with this merge. Each open schedule closes
+    // against the version read before the transaction (a write since refuses
+    // the merge), and the loser's episodes are renumbered above the winner's
+    // so the FK sweep's repoint keeps UNIQUE (customer_id, episode) — Codex
+    // #5503 r2 P1. A refusal anywhere later rolls these releases back too.
+    const dunning = await DunningMerge.releaseInMergeTransaction(trx, dunningPlan, { now: dunningNow });
+    dunningEpisodeRenumbers = dunning.renumbers;
+    dunningReleased = dunning.released;
 
     const repointed = {};
     // Row-precise record of every PLAIN repoint for the journal's
@@ -3005,6 +3081,10 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         // Winner values the merge deliberately NULLED (consent stamps) —
         // the prior values, keyed by column, for the undo to restore.
         winner_prior_values: winnerPriorValues,
+        // Loser customer_dunning_schedules episodes renumbered above the
+        // winner's ([{ id, from, to }]; absent when none were). Audit only:
+        // the undo moves those rows back by id and keeps the new numbers.
+        dunning_episode_renumbers: dunningEpisodeRenumbers.length ? dunningEpisodeRenumbers : undefined,
       }),
       winner_backfills: JSON.stringify(backfills),
       tier: mode === 'auto' ? 'green' : 'manual',
@@ -3017,6 +3097,9 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // link-as-property route preserves the loser's address on the winner).
     return { journalId: journal?.id || journal, repointed, backfills, loserSnapshot: loser };
   });
+  // Released combined reminder schedules: the log line and any past-final
+  // office alert, post-commit (never on the merge's transaction; never throws).
+  await DunningMerge.afterMergeCommit(dunningReleased, { winnerId });
   // 360 timeline events for loser contacts appended onto the winner —
   // post-commit, best-effort, awaited (the recorder never throws; a failed
   // event only warns and never fails the merge). No-op when the backfills
@@ -3333,7 +3416,7 @@ const EMAIL_BOUND_SURFACES = [
     emailColumn: 'email',
     linkColumn: 'customer_id',
     active: (q) => q.whereNull('deleted_at')
-      .where((w) => w.whereNull('status').orWhereNotIn('status', ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive'])),
+      .where((w) => w.whereNull('status').orWhereNotIn('status', ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive', 'handled'])),
     label: 'open lead(s)',
     carriesName: true,
   },
@@ -3470,6 +3553,16 @@ const REVERT_BACKFILL_CLEAR_EXCLUDED = new Set(['stripe_customer_id', 'is_primar
 function backfillValueUnchanged(current, recorded) {
   if (current === recorded) return true;
   if (current === null || current === undefined || recorded === null || recorded === undefined) return false;
+  // A jsonb column (service_preferences, #5467) compares by content with keys
+  // sorted — String() of two objects is always '[object Object]'.
+  const plainObject = (v) => typeof v === 'object' && !(v instanceof Date);
+  if (plainObject(current) || plainObject(recorded)) {
+    const canon = (v) => JSON.stringify(typeof v === 'string' ? JSON.parse(v) : v, (k, val) => (
+      val && typeof val === 'object' && !Array.isArray(val)
+        ? Object.fromEntries(Object.keys(val).sort().map((key) => [key, val[key]]))
+        : val));
+    try { return canon(current) === canon(recorded); } catch { return false; }
+  }
   if (String(current) === String(recorded)) return true;
   const a = Number(current);
   const b = Number(recorded);
@@ -3783,6 +3876,11 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     }
     const winnerId = journal.winner_customer_id;
     const loserId = journal.loser_customer_id;
+    // Both customers' dunning keys (EXCLUSIVE, sorted), before the case
+    // locks as in the forward merge: no promotion, claim or release of a
+    // customer-level overdue reminder schedule runs while the journaled
+    // invoices and sequences move back (customer-dunning/merge.js).
+    await require('./customer-dunning/merge').lockForMergeUndo(trx, { winnerId, loserId });
     // The collections case lock for BOTH parties, same as the forward
     // merge (codex gh-r11): the undo repoints collection_cases back to the
     // restored customer while the dial surfaces promote/claim under this
@@ -6055,6 +6153,7 @@ module.exports = {
   UNDO_MERGE_DISMISSAL_REASON,
   // exported for tests
   _test: {
+    backfillValueUnchanged,
     classifyPair,
     lockedPairAutoEligibility,
     EMAIL_BOUND_SURFACES,

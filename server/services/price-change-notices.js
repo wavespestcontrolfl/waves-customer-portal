@@ -325,7 +325,7 @@ async function createAndSendBatch({ locationId = null, increase, effectiveDate, 
   const batchId = crypto.randomUUID();
   const effectiveLabel = formatDisplayDate(effective, { fallback: effective });
   const byId = new Map(customers.map((c) => [c.id, c]));
-  const summary = { created: 0, emailed: 0, texted: 0, unreachable: 0, alreadyNotified: 0, failed: 0 };
+  const summary = { created: 0, emailed: 0, texted: 0, unreachable: 0, alreadyNotified: 0, rateReview: 0, failed: 0 };
 
   for (let i = 0; i < rows.length; i += SEND_CONCURRENCY) {
     const batch = rows.slice(i, i + SEND_CONCURRENCY);
@@ -341,15 +341,17 @@ async function createAndSendBatch({ locationId = null, increase, effectiveDate, 
         const event = { customerId: row.customerId, effectiveDate: effective, currentCents: row.currentCents, newCents: row.newCents };
         const found = await db.transaction(async (trx) => {
           await lockNoticeEvent(trx, event);
-          const existingRow = await trx('price_change_notices')
-            .where({
-              customer_id: row.customerId,
-              effective_date: effective,
-              current_amount_cents: row.currentCents,
-              new_amount_cents: row.newCents,
-            })
-            .orderBy('created_at', 'desc')
-            .first();
+          const eventRows = () => trx('price_change_notices').where({
+            customer_id: row.customerId,
+            effective_date: effective,
+            current_amount_cents: row.currentCents,
+            new_amount_cents: row.newCents,
+          });
+          // The annual rate review already owns this event (its scheduler
+          // treats a legacy notice the same way): its notice is its own
+          // lane's to send and apply, never this batch's.
+          if (await eventRows().whereNotNull('rate_review_row_id').first('id')) return { rateReview: true };
+          const existingRow = await eventRows().whereNull('rate_review_row_id').orderBy('created_at', 'desc').first();
           if (existingRow) return { existing: existingRow };
           // onConflict on the event tuple (unique index) stays the belt. The
           // legacy event key is a PARTIAL unique index since 20261001190000
@@ -369,6 +371,10 @@ async function createAndSendBatch({ locationId = null, increase, effectiveDate, 
           }).onConflict(trx.raw('(customer_id, effective_date, current_amount_cents, new_amount_cents) WHERE rate_review_row_id IS NULL')).ignore().returning('*');
           return { existing: null, inserted };
         });
+        if (found.rateReview) {
+          summary.rateReview += 1;
+          return;
+        }
         const existing = found.existing;
         // An annual rate review notice for the same tuple belongs to the
         // rate review's own sender (its letter, its frozen page): this batch
@@ -473,7 +479,7 @@ async function createAndSendBatch({ locationId = null, increase, effectiveDate, 
     await db('activity_log').insert({
       admin_user_id: actorId || null,
       action: 'price_change_batch_sent',
-      description: `Price-change notices (${inc.type === 'percent' ? `${inc.value}%` : formatMoney(Math.round(inc.value * 100))}${loc ? ` @ ${loc}` : ''}, effective ${effective}): ${summary.created} created, ${summary.emailed} emailed, ${summary.texted} texted, ${summary.unreachable} unreachable, ${summary.alreadyNotified} already notified, ${summary.failed} failed.`,
+      description: `Price-change notices (${inc.type === 'percent' ? `${inc.value}%` : formatMoney(Math.round(inc.value * 100))}${loc ? ` @ ${loc}` : ''}, effective ${effective}): ${summary.created} created, ${summary.emailed} emailed, ${summary.texted} texted, ${summary.unreachable} unreachable, ${summary.alreadyNotified} already notified, ${summary.rateReview} left to the annual rate review, ${summary.failed} failed.`,
       metadata: JSON.stringify({ batch_id: batchId, increase: inc, location_id: loc, effective_date: effective, summary }),
     });
   } catch (auditErr) {
