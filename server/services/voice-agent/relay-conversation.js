@@ -2980,6 +2980,8 @@ class RelayConversation {
     // fields win over the earlier ones.
     this._holdOpenForRetry ??= state.holdOpen || null;
     this._estimateFields = { ...state.estimateFields, ...this._estimateFields };
+    // Earlier legs first, this leg's own captures on top.
+    this._contactFollowUp = require('./relay-segments').mergeContactFollowUp(state.contactFollowUp, this._contactFollowUp);
     // The provider-failure streak continues across the drop (codex r1 P2):
     // a second consecutive failure on the resumed leg hands off at the
     // documented threshold instead of counting from zero again.
@@ -3878,6 +3880,7 @@ class RelayConversation {
           promises: [...this._promises.entries()].map(([kind, v]) => ({ kind, ...v })),
           holdOpen: this._holdOpenForRetry === true,
           estimateFields: this._estimateFields || null,
+          contactFollowUp: this._contactFollowUp || null,
           startedAt: this._startedAt,
           lookupsUsed: this._priorLookupsUsed + this._lookupsUsed,
           lookupRefs: [...this._lookupRefs.entries()],
