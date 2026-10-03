@@ -16,6 +16,7 @@
 const db = require('../models/db');
 const { lookupCountyParcelByPoint, subdivisionBaseName } = require('./property-lookup/county-parcel-gis');
 const { SERVICE_AREA_COUNTY_ZIPS } = require('../config/county-zips');
+const { TECH_DEAD_ASSIGNMENT_STATUSES } = require('./technician-visit-scope');
 
 // The county module's subdivisionBaseName gives the estimator's base PLAT
 // (cut at PH/PHASE/UNIT/SEC/SECTION/PB) — deliberately narrow, because its
@@ -573,8 +574,11 @@ async function visitNeighborhoodIds(conn, visits) {
 // The visits whose stop is in an ACTIVE neighborhood: where a gate code can
 // be added or marked wrong from the visit (routes/admin-neighborhood-access.js
 // lockVisitNeighborhood applies the same two tests).
+// A cancelled, skipped or no-show row never counts: the routes refuse it for
+// a technician (lockOwnedLiveVisit), so the screen must not offer it.
 async function gateActionVisitIds(conn, visits) {
-  const visitNeighborhood = await visitNeighborhoodIds(conn, visits);
+  const live = (visits || []).filter((v) => !TECH_DEAD_ASSIGNMENT_STATUSES.includes(v.status));
+  const visitNeighborhood = await visitNeighborhoodIds(conn, live);
   if (!visitNeighborhood.size) return new Set();
   const active = new Set(await conn('neighborhoods')
     .whereIn('id', [...new Set(visitNeighborhood.values())]).where({ active: true }).pluck('id'));

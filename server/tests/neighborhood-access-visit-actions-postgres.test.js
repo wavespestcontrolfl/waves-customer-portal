@@ -264,7 +264,11 @@ postgres('neighborhood gate codes from a visit', () => {
     }
     expect((await call('POST', `/visits/${inOff.id}/entries/${offEntry}/wrong`)).status).toBe(409);
     expect(await trx('neighborhood_access').where({ code: '3030' })).toEqual([]);
-    expect([...(await gateActionVisitIds(trx, [none, inOff, on]))]).toEqual([on.id]);
+    // Nor does a dead row (the routes refuse it), even beside a live sibling.
+    const hood = (await trx('customer_properties').where({ id: on.property_id }).first('neighborhood_id')).neighborhood_id;
+    const dead = await Promise.all(['skipped', 'no_show', 'cancelled'].map((status) => visit(hood, { status })));
+    expect([...(await gateActionVisitIds(trx, [none, inOff, ...dead, on]))]).toEqual([on.id]);
+    expect((await call('POST', `/visits/${dead[0].id}/entries`, { code: '3030' })).status).toBe(404);
   });
 
   test('a code must be a keypad code', async () => {
