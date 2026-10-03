@@ -24,6 +24,7 @@ const { lookupParcelByPoint, parcelGisTimeoutMs } = require('./parcel-gis');
 const { condoUnitFolioLive } = require('../../config/feature-gates');
 const { lookupCountyParcelByPoint, unitParcelFromAggregate, unitParcelFromAggregateRow, normalizeUnitId, lookupCountyParcelAttributesById, queryStreetSitusAddresses, countyUseDescToPropertyType, dorMajorCategory, normalizeCountyName } = require('./county-parcel-gis');
 const { routeSpellingVariants } = require('./route-spellings');
+const { USPS_STREET_SUFFIXES } = require('./usps-street-suffixes');
 
 const DEFAULT_TIMEOUT_MS = 30000;
 const DEFAULT_MAX_SEARCHES = 5;
@@ -2835,37 +2836,74 @@ function normalizeCountyCityName(value) {
     .trim();
 }
 
-// New long-form suffixes canonicalize ONLY at the terminal suffix position
-// (optionally before a post-direction and/or a unit tail): these words are
-// common INSIDE street names ("Glen Oaks Dr", "Cove Point Rd"), and a global
-// replacement would corrupt the outbound county query key before any roll
-// row could match (codex P2). Terminal canonicalization is query-safe
-// because every candidate builder also emits a suffix-STRIPPED candidate,
-// so a roll that spells the suffix out is still found. The historical
-// globals below (AVENUE, STREET, …) keep their long-standing behavior.
-const TERMINAL_ONLY_SUFFIX_ALIASES = {
-  BEND: 'BND',
-  COVE: 'CV',
-  CROSSING: 'XING',
-  GLEN: 'GLN',
-  HIGHWAY: 'HWY',
-  // Google abbreviates Loop as "Lp" (live miss: "SKIPPING STONE LP" vs the
-  // Manatee roll's "SKIPPING STONE LOOP" read as street-not-found) — the
-  // roll spells it out, so LOOP is the canonical form here.
-  LP: 'LOOP',
-  PLAZA: 'PLZ',
-  POINT: 'PT',
-  POINTE: 'PT',
-  SQUARE: 'SQ',
-  TRACE: 'TRCE',
-  // Customers and Google write Way as "Wy"; the Manatee, Sarasota and
-  // Charlotte rolls spell WAY out and never use WY (live GIS reads 10-02), so
-  // "<street> Wy" read as street-not-found.
-  WY: 'WAY',
+// Street-suffix canonicalization is driven by the USPS Publication 28
+// Appendix C1 table (usps-street-suffixes.js): every primary name and every
+// commonly used variant maps to the USPS standard abbreviation. The twelve
+// historical long forms (AVENUE, STREET, … in normalizeCountyStreetLine)
+// stay GLOBAL replacements, unchanged. Every other table word canonicalizes
+// ONLY at the terminal suffix position (optionally before a post-direction
+// and/or a unit tail): words like GLEN, PARK, LAKE, CREEK, VIEW, RIDGE,
+// HARBOR, ISLAND, MEADOWS, SPRINGS and VILLAGE are common INSIDE street names
+// ("Glen Oaks Dr", "Creek View Way"), and a global replacement would corrupt
+// the outbound county query key before any roll row could match (codex P2).
+// Terminal canonicalization is query-safe because every candidate builder
+// also emits a suffix-STRIPPED candidate, so a roll that spells the suffix
+// out is still found.
+//
+// The key is only ever compared with itself (typed side and roll side run
+// through the same normalizer), so it need not equal the roll spelling. It is
+// the USPS standard abbreviation, except where noted below. Live reads
+// 10-02 of the Manatee (SITUS_STREET_SUF, full roll), Sarasota (loct, full
+// roll), Charlotte and Hillsborough layers: the rolls write the USPS standard
+// for every common suffix (Manatee: ST AVE DR CT CIR TER PL WAY LN RD TRL
+// LOOP BLVD CV RUN GLN PKWY XING PLZ, WAY/RUN/PASS/PATH/WALK/LOOP are their
+// own standard), so those keys already match the roll. The words below are
+// spelled OUT on the rolls and essentially never abbreviated, so the key keeps
+// the spelled word (the first outbound candidate then matches the roll text):
+//   CREEK  (CRK:  Charlotte 16 + Hillsborough 16 spelled, 3 abbreviated)
+//   ISLAND (IS:   Charlotte 255 + Hillsborough 7 spelled, 13 abbreviated)
+//   KEY    (KY:   Hillsborough 84 spelled, 0 abbreviated)
+//   VISTA  (VIS:  Charlotte 21 + Hillsborough 22 spelled, 0 abbreviated)
+//   HOLLOW (HOLW: Sarasota 38 + Hillsborough 2 spelled, 4 abbreviated)
+// MEADOW(S): the USPS table lists MDW as the standard for MEADOW AND as a
+// variant of MEADOWS (standard MDWS); Sarasota writes MDW (321 rows), so the
+// whole family keys as MDW and "Meadows"/"Mdws"/"Mdw" read as one street type.
+// TRACE/BEND/CROSSING/COVE keep the USPS standard (TRCE/BND/XING/CV, as
+// before): Manatee writes the standard, Sarasota spells them out — the key
+// is the same on both sides either way.
+const STREET_SUFFIX_CANON_OVERRIDES = {
+  CRK: 'CREEK',
+  HOLW: 'HOLLOW',
+  IS: 'ISLAND',
+  KY: 'KEY',
+  MDWS: 'MDW',
+  VIS: 'VISTA',
 };
+// TRAILER's standard (TRLR) is also a secondary-unit designator that
+// stripUnitDesignators peels off the end of a street line, so rewriting a
+// terminal "Trailer" to TRLR would erase the word. It is left exactly as typed.
+const STREET_SUFFIX_NEVER_CANONICALIZED = new Set(['TRLR']);
+// Not in the USPS table: Google abbreviates Loop as "Lp" (live miss: "SKIPPING
+// STONE LP" vs the roll's "… LOOP") and writes Pointe for Point.
+const STREET_SUFFIX_SUPPLEMENTAL_ALIASES = { LP: 'LOOP', POINTE: 'PT' };
+// Long forms normalizeCountyStreetLine already replaces GLOBALLY.
+const GLOBAL_LONG_SUFFIXES = new Set([
+  'AVENUE', 'BOULEVARD', 'CIRCLE', 'COURT', 'DRIVE', 'LANE', 'PARKWAY', 'PLACE', 'ROAD', 'STREET', 'TERRACE', 'TRAIL',
+]);
+function canonicalStreetSuffix(standard) {
+  return STREET_SUFFIX_CANON_OVERRIDES[standard] || standard;
+}
+const TERMINAL_ONLY_SUFFIX_ALIASES = { ...STREET_SUFFIX_SUPPLEMENTAL_ALIASES };
+const CANONICAL_STREET_SUFFIX_SET = new Set(Object.values(STREET_SUFFIX_SUPPLEMENTAL_ALIASES));
+for (const [variant, standard] of Object.entries(USPS_STREET_SUFFIXES)) {
+  if (STREET_SUFFIX_NEVER_CANONICALIZED.has(standard)) continue;
+  const canonical = canonicalStreetSuffix(standard);
+  CANONICAL_STREET_SUFFIX_SET.add(canonical);
+  if (variant !== canonical && !GLOBAL_LONG_SUFFIXES.has(variant)) TERMINAL_ONLY_SUFFIX_ALIASES[variant] = canonical;
+}
 const TERMINAL_ONLY_SUFFIX_RE = new RegExp(
-  `\\b(${Object.keys(TERMINAL_ONLY_SUFFIX_ALIASES).join('|')})`
-  + '(?=(?:\\s+[NSEW])?(?:\\s+(?:APT|APARTMENT|UNIT|STE|SUITE|BLDG|BUILDING|LOT|TRLR|RM)\\b[\\sA-Z0-9]*)?$)',
+  `\\b(${Object.keys(TERMINAL_ONLY_SUFFIX_ALIASES).sort((x, y) => y.length - x.length || (x < y ? -1 : 1)).join('|')})`
+  + '(?=(?:\\s+(?:[NS][EW]|[NSEW]))?(?:\\s+(?:APT|APARTMENT|UNIT|STE|SUITE|BLDG|BUILDING|LOT|TRLR|RM)\\b[\\sA-Z0-9]*)?$)',
 );
 
 // Numbered-route spellings → one canonical county-search key. The typed
@@ -2991,22 +3029,37 @@ function extractTrailingCountyCity(normalizedText) {
 // extractPostSuffixDirection / AUDIT_SUFFIX_ALT so they can never drift apart
 // again — the original inline copies omitted LOOP entirely, and every
 // Loop-suffixed street (all of Canoe Creek) read as not-on-the-roll.
-const COUNTY_STREET_SUFFIXES = 'AVE|BLVD|BND|CIR|CT|CV|DR|GLN|HWY|LN|LOOP|PASS|PATH|PKWY|PL|PLZ|PT|RD|RUN|SQ|ST|TER|TRCE|TRL|WALK|WAY|XING';
-// "…ends with a street suffix" — canonical abbreviations plus the
-// spelled-out forms, because extractTrailingCountyCity runs BEFORE the
-// suffix replacements in normalizeCountyStreetLine.
+// Derived from the USPS table (plus the supplemental aliases), longest first
+// so no alternation can stop on a shorter prefix of another suffix.
+const COUNTY_STREET_SUFFIXES = [...CANONICAL_STREET_SUFFIX_SET]
+  .sort((x, y) => y.length - x.length || (x < y ? -1 : 1))
+  .join('|');
+// "…ends with a street suffix" — canonical forms plus every spelled-out or
+// variant form in the USPS table, because extractTrailingCountyCity runs
+// BEFORE the suffix replacements in normalizeCountyStreetLine.
 const PRE_DIRECTION_STREET_SUFFIX_RE = new RegExp(
-  `\\b(?:${COUNTY_STREET_SUFFIXES}|AVENUE|BEND|BOULEVARD|CIRCLE|COURT|COVE|CROSSING|DRIVE|GLEN|HIGHWAY|LANE|PARKWAY|PLACE|PLAZA|POINT|POINTE|ROAD|SQUARE|STREET|TERRACE|TRACE|TRAIL)$`,
+  `\\b(?:${COUNTY_STREET_SUFFIXES}|${Object.keys({ ...USPS_STREET_SUFFIXES, ...STREET_SUFFIX_SUPPLEMENTAL_ALIASES })
+    .sort((x, y) => y.length - x.length || (x < y ? -1 : 1)).join('|')})$`,
 );
-const BARE_TRAILING_UNIT_RE = new RegExp(`\\b(?:${COUNTY_STREET_SUFFIXES})(?:\\s+(?:[NS][EW]|[NSEW]))?\\s+\\d[A-Z0-9-]*$`);
+// The two "digit-led token after a suffix is a unit" heuristics stay on the
+// historical suffix set on purpose: a number after one of the newer USPS words
+// ("… LAKE 5", "… PARK 3") is as likely part of a street name as a unit, and
+// no live miss needs it.
+const UNIT_HEURISTIC_SUFFIXES = 'AVE|BLVD|BND|CIR|CT|CV|DR|GLN|HWY|LN|LOOP|PASS|PATH|PKWY|PL|PLZ|PT|RD|RUN|SQ|ST|TER|TRCE|TRL|WALK|WAY|XING';
+const BARE_TRAILING_UNIT_RE = new RegExp(`\\b(?:${UNIT_HEURISTIC_SUFFIXES})(?:\\s+(?:[NS][EW]|[NSEW]))?\\s+\\d[A-Z0-9-]*$`);
 const REMOVE_SUFFIX_RE = new RegExp(`\\s+(${COUNTY_STREET_SUFFIXES})(?:\\s+[NSEW])?$`, 'i');
 const EXTRACT_SUFFIX_RE = new RegExp(`\\b(${COUNTY_STREET_SUFFIXES})(?:\\s+[NSEW])?$`, 'i');
 const POST_SUFFIX_DIRECTION_RE = new RegExp(`\\b(?:${COUNTY_STREET_SUFFIXES})\\s+([NSEW])\\b`, 'i');
 
+// A line that is only a number and/or a direction once the suffix is gone
+// ("100 N LK" — a street NAMED Lake) keeps its suffix: stripping it would leave
+// a query as wide as "N". The wider USPS suffix set makes that shape reachable.
+const BARE_DIRECTION_ONLY_RE = /^(?:\d+[A-Z]?\s*)?(?:[NSEW]{1,2})?$/;
 function removeStreetSuffix(street) {
-  return String(street || '')
+  const stripped = String(street || '')
     .replace(REMOVE_SUFFIX_RE, '')
     .trim();
+  return BARE_DIRECTION_ONLY_RE.test(stripped) ? String(street || '').trim() : stripped;
 }
 
 function extractStreetSuffix(street) {
@@ -3050,7 +3103,7 @@ const AUDIT_UNIT_DESIGNATOR_RE = /\s+(?:APT|APARTMENT|UNIT|STE|SUITE|BLDG|BUILDI
 // a numbered route ("US 41", "SR 70 E") has no suffix in front of its number.
 // Suffixes that routinely precede a ROUTE number ("OLD TAMPA HWY 41",
 // "SOMETHING RD 70") are left out so the route number is never peeled.
-const BARE_UNIT_SUFFIXES = COUNTY_STREET_SUFFIXES.split('|')
+const BARE_UNIT_SUFFIXES = UNIT_HEURISTIC_SUFFIXES.split('|')
   .filter((suffix) => !['HWY', 'RD', 'TRL', 'PKWY'].includes(suffix))
   .join('|');
 const AUDIT_BARE_UNIT_RE = new RegExp(
