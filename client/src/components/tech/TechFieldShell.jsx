@@ -2,18 +2,16 @@ import { useEffect, useRef } from 'react';
 import { Link, matchPath, Outlet, useLocation } from 'react-router-dom';
 import useIsMobile from '../../hooks/useIsMobile';
 import { CalendarDays, ClipboardList, MoreHorizontal, Waves, Wrench } from 'lucide-react';
-import { useFeatureFlagReady } from '../../hooks/useFeatureFlag';
 import AddToHomeScreenHint from './AddToHomeScreenHint';
 import { useTechNavigationLock } from './TechNavigationLock';
 import { useTechBasePath } from './techBasePath';
 import './tech-field.css';
 
-// Mounted only after the admin shell verifies the staff profile. One flag read
-// owns the entire workspace; child routes consume the outlet context.
+// Mounted only after the admin shell verifies the staff profile. Child routes
+// consume the outlet context.
 // embedded adjusts the chrome for the admin scroll container and adds a Menu
 // tab back into the rest of Waves Admin.
-export default function TechFieldShell({ children, techName, techRole, staffProfile = null, documentsAvailable, payGrowthAvailable, embedded = false }) {
-  const { enabled, ready } = useFeatureFlagReady('tech-field-workspace', false);
+export default function TechFieldShell({ techName, techRole, staffProfile = null, documentsAvailable, payGrowthAvailable, embedded = false }) {
   const base = useTechBasePath();
   const { pathname, search } = useLocation();
   const isMobile = useIsMobile();
@@ -32,12 +30,6 @@ export default function TechFieldShell({ children, techName, techRole, staffProf
   const visit = new URLSearchParams(search).get('visit');
   const visitSearch = visit ? `?visit=${encodeURIComponent(visit)}` : '';
   const legacyTool = ['protocols', 'lawn-diagnostic', 'social-post'].map(tool => `${base}/${tool}`).some(path => matchPath(path, pathname));
-  if (!ready) return <div className={embedded ? 'tech-field tf-embedded' : 'tech-field'} role="status">Loading field workspace…</div>;
-  // The retired /tech shell showed the install hint whatever the flag said:
-  // the flag-off (or fail-closed) view keeps it (Codex #5573 r8).
-  // The flag-off view keeps the field typography too: its root carries the
-  // font exemption class (index.css; Codex #5573 r18).
-  if (!enabled) return <div className="tech-field-fallback"><AddToHomeScreenHint />{children}</div>;
   const section = moreRoute || documentsRoute || payGrowthRoute ? 'more'
     : todayRoute ? 'today' : 'tools';
   return (
@@ -52,7 +44,7 @@ export default function TechFieldShell({ children, techName, techRole, staffProf
         <div className={legacyTool ? 'tf-existing' : undefined}>
           {documentsRoute && !documentsAvailable
             ? <p>Staff documents are unavailable.</p>
-            : <Outlet context={{ fieldWorkspace: true, techRole, staffProfile, documentsAvailable, payGrowthAvailable, setNavigationBusy }} />}
+            : <Outlet context={{ techRole, staffProfile, documentsAvailable, payGrowthAvailable, setNavigationBusy }} />}
         </div>
       </main>
       <nav className="tf-nav" aria-label="Field navigation">

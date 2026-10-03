@@ -3,14 +3,11 @@ import React, { useEffect } from 'react';
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { BrowserRouter, Link, MemoryRouter, Route, Routes, useOutletContext } from 'react-router-dom';
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-const flag = vi.hoisted(() => ({ enabled: true, ready: true }));
-vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlagReady: () => flag }));
+import { afterEach, expect, it, vi } from 'vitest';
 vi.mock('./AddToHomeScreenHint', () => ({ default: () => <p>Install hint</p> }));
 import TechFieldShell from './TechFieldShell';
 import TechNavigationLock from './TechNavigationLock';
 const unmounted = vi.fn();
-beforeEach(() => { flag.enabled = true; flag.ready = true; });
 function Visit() {
   const { setNavigationBusy } = useOutletContext();
   useEffect(() => unmounted, []);
@@ -20,7 +17,7 @@ afterEach(() => { cleanup(); unmounted.mockClear(); window.history.replaceState(
 
 function renderShell(path = '/admin/today', documentsAvailable = false) {
   return render(<TechNavigationLock><MemoryRouter initialEntries={[path]}><Routes>
-    <Route path="/admin/today" element={<TechFieldShell techName="Fixture Tech" documentsAvailable={documentsAvailable}><div>Existing route</div></TechFieldShell>}>
+    <Route path="/admin/today" element={<TechFieldShell techName="Fixture Tech" documentsAvailable={documentsAvailable} />}>
       <Route index element={<div>Route content</div>} />
       <Route path="tools" element={<div>Tools content</div>} />
       <Route path="more" element={<div>More content</div>} />
@@ -29,25 +26,6 @@ function renderShell(path = '/admin/today', documentsAvailable = false) {
     </Route>
   </Routes></MemoryRouter></TechNavigationLock>);
 }
-
-it('uses the existing route when disabled and waits for an unresolved flag', () => {
-  flag.enabled = false;
-  const mounted = renderShell();
-  expect(screen.getByText('Existing route')).toBeInTheDocument();
-  expect(screen.queryByRole('navigation', { name: 'Field navigation' })).not.toBeInTheDocument();
-  mounted.unmount();
-  flag.ready = false;
-  renderShell();
-  expect(screen.getByRole('status')).toHaveTextContent('Loading field workspace');
-  expect(screen.queryByText('Route content')).not.toBeInTheDocument();
-});
-
-it('the flag-off view keeps the install hint the retired /tech shell showed (Codex #5573 r8)', () => {
-  flag.enabled = false;
-  renderShell();
-  expect(screen.getByText('Install hint')).toBeInTheDocument();
-  expect(screen.getByText('Existing route')).toBeInTheDocument();
-});
 
 it.each(['/admin/today/documents', '/admin/today/documents/', '/ADMIN/TODAY/DOCUMENTS/'])('keeps documents gated at %s', (path) => {
   const mounted = renderShell(path);
@@ -109,17 +87,11 @@ it('opening a visit (?visit= only) scrolls the field main back to the top (Codex
   Object.defineProperty(HTMLElement.prototype, 'scrollTo', { configurable: true, value: scrollTo });
   function Go() { const { setNavigationBusy } = useOutletContext(); void setNavigationBusy; return <Link to="/admin/today?visit=row%3Aone">Open stop</Link>; }
   render(<TechNavigationLock><MemoryRouter initialEntries={['/admin/today']}><Routes>
-    <Route path="/admin/today" element={<TechFieldShell techName="Fixture Tech" documentsAvailable={false}><div>Existing route</div></TechFieldShell>}>
+    <Route path="/admin/today" element={<TechFieldShell techName="Fixture Tech" documentsAvailable={false} />}>
       <Route index element={<Go />} />
     </Route>
   </Routes></MemoryRouter></TechNavigationLock>);
   const before = scrollTo.mock.calls.length;
   fireEvent.click(screen.getByRole('link', { name: 'Open stop' }));
   await waitFor(() => expect(scrollTo.mock.calls.length).toBeGreaterThan(before));
-});
-
-it('the flag-off view sits in the font-exempt fallback root (Codex #5573 r18)', () => {
-  flag.enabled = false;
-  renderShell();
-  expect(screen.getByText('Existing route').closest('.tech-field-fallback')).not.toBeNull();
 });
