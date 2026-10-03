@@ -916,7 +916,8 @@ function productMentions(product, heard, world) {
   const all = world.mentions.filter((m) => m.id === product.id);
   const positive = all.filter((m) => !isNegatedMention(m, world));
   const mine = positive.length ? positive : all;
-  const piece = tokensOf(String(heard).split(/\.{3}|…/)[0]);
+  // the quote's first phrase (pieces break as in heardInTranscript) points at a mention
+  const piece = tokensOf(String(heard).split(HEARD_BREAKS)[0]);
   const ranges = world.tokens.map((_, i) => i).filter((i) => piece.length && piece.every((t, k) => world.tokens[i + k] === t)).map((i) => ({ start: i, end: i + piece.length }));
   const hit = mine.filter((m) => ranges.some((r) => m.start < r.end && m.end > r.start));
   return hit.length ? hit : mine;
@@ -1006,11 +1007,14 @@ function productRefusal(raw, product, heard, normTranscript, seen, evidence, wor
   // place those words were said is negated ("Used Alpine PT. Alpine WSG was not
   // used."), a positive mention elsewhere (the shared "Alpine") does not rescue it.
   // (only the NAME words of the piece: "Taurus" said again positively still counts)
+  // Every name run in the piece counts ("Did not use Atticus Talak but used Talstar P"
+  // names it twice, once positively).
   const pieceTokens = tokensOf(piece);
-  const nameRun = nameEvidence(product, pieceTokens).runs[0];
-  const words = nameRun ? pieceTokens.slice(nameRun.start, nameRun.end) : [];
-  const named = !words.length ? [] : mentions.filter((m) => world.tokens.some((_, i) => words.every((w, k) => world.tokens[i + k] === w)
-    && m.start < i + words.length && m.end > i));
+  const named = nameEvidence(product, pieceTokens).runs.flatMap((run) => {
+    const words = pieceTokens.slice(run.start, run.end);
+    return mentions.filter((m) => world.tokens.some((_, i) => words.every((w, k) => world.tokens[i + k] === w)
+      && m.start < i + words.length && m.end > i));
+  });
   return named.length && named.every((m) => isNegatedMention(m, world)) ? { reason: 'negated_product', text: heard } : null;
 }
 

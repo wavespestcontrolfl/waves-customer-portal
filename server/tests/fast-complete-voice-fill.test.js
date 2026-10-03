@@ -1774,3 +1774,17 @@ describe('Codex #5698 round 5', () => {
     expect(out.unclear.map((u) => u.reason)).toContain('method_not_heard');
   });
 });
+
+describe('Codex #5698 round 6', () => {
+  test('a piece with a negated canonical name and a positive alias keeps the product', () => {
+    const t = 'Did not use Atticus Talak but used Talstar P.';
+    const out = validateFill(answer({ products: [{ productId: 'p-talak', amount: 0, unit: 'not_said', sameAsLast: false, method: '', heard: 'Did not use Atticus Talak but used Talstar P' }] }), ctx, t);
+    expect(out.products.map((p) => p.productId)).toEqual(['p-talak']);
+  });
+
+  test('a stitched quote\'s first phrase singles out the mention for same-as-last', () => {
+    const t = 'I used Taurus in the kitchen, same as last time. Taurus worked well.';
+    const out = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard: 'I used Taurus, same as last time' }] }), ctx, t);
+    expect(out.products[0].sameAsLast).toBe(true);
+  });
+});
