@@ -96,6 +96,23 @@ describe('buildReportCopyContext — lawn EXPECTATIONS (P15)', () => {
     expect(text).toMatch(/Quote a sentence word for word or say nothing about timing/);
   });
 
+  it('the selected targets pick the row: chinch-tagged Talstar P grounds the curative sentence, untagged the preventive one', async () => {
+    live();
+    const TALSTAR = { ...HERBICIDE, id: 'p3', name: 'Talstar P', category: 'insecticide', product_type: 'insecticide', active_ingredient: 'Bifenthrin' };
+    const run = (targets) => buildReportCopyContext({
+      customerId: 'c1', serviceType: 'Lawn Care Treatment Program', serviceLine: 'lawn', serviceDate: '2026-07-15',
+      products: [{ productId: 'p3', name: 'Talstar P', ...(targets ? { targets } : {}) }],
+      knex: makeKnexStub({ customers: [CUSTOMER], catalogProducts: [TALSTAR] }),
+    }).then((r) => r.contextText);
+    const [curative] = approvedExpectationSentences([{ name: 'Talstar P', targets: ['Southern chinch bugs'] }], { visitDate: '2026-07-15' }).sentences;
+    const [preventive] = approvedExpectationSentences([{ name: 'Talstar P' }], { visitDate: '2026-07-15' }).sentences;
+    expect(curative).not.toBe(preventive);
+    const tagged = await run(['Southern chinch bugs']);
+    expect(tagged).toContain(`- ${curative}`);
+    expect(tagged).not.toContain(preventive);
+    expect(await run(null)).toContain(`- ${preventive}`);
+  });
+
   it('gate live, no approved row for the product: the writer is told to give no timing at all', async () => {
     live();
     const text = await contextFor(UNMAPPED);

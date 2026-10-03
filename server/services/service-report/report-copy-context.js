@@ -832,8 +832,10 @@ async function buildReportCopyContext({
     // same sentences the report's "What to expect" prints (lawn-copy-v6.js, by
     // exact catalog name); none approved for today's products = no timing.
     const { approvedExpectationSentences } = require('./lawn-copy-v6');
+    // writerApplications keeps each product's selected targets, which pick
+    // the curative vs preventive row (chinch-tagged Talstar P = curative).
     const { sentences } = approvedExpectationSentences(
-      productSafety.map((p) => ({ name: p.name })),
+      productEvidence.writerApplications.map((p) => ({ name: p.name, targets: p.targets || [] })),
       { visitDate: serviceYmd },
     );
     sections.push(sentences.length
