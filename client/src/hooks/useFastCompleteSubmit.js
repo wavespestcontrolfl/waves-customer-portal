@@ -62,6 +62,7 @@ export default function useFastCompleteSubmit({
   const pendingBodyRef = useRef(null);
   const pendingSummaryRef = useRef('');
   const rejectedKeyRef = useRef(null);
+  const persistedKeyRef = useRef(null);
   const inFlight = useRef(false);
   const scopeRef = useRef(scopeOf(serviceId, operatorId, 0));
   const storageWarningSeenRef = useRef(false);
@@ -81,6 +82,7 @@ export default function useFastCompleteSubmit({
     scopeRef.current = scope;
     keyRef.current = genIdempotencyKey();
     rejectedKeyRef.current = null;
+    persistedKeyRef.current = null;
     pendingBodyRef.current = null;
     pendingSummaryRef.current = '';
     inFlight.current = false;
@@ -112,6 +114,7 @@ export default function useFastCompleteSubmit({
         pendingBodyRef.current = attempt.body;
         pendingSummaryRef.current = attempt.summary || '';
         keyRef.current = attempt.body.idempotencyKey;
+        persistedKeyRef.current = attempt.body.idempotencyKey;
         setRestored(true);
         setFailure('retry');
         setError('An unfinished completion is saved on this device. Tap Retry when you’re ready to send the same completion again.');
@@ -137,6 +140,7 @@ export default function useFastCompleteSubmit({
     );
     if (!sameScope(scopeRef.current, scope)) return 'stale';
     if (stored) {
+      persistedKeyRef.current = body.idempotencyKey;
       setStorageWarning('');
       storageWarningSeenRef.current = false;
       if (failure === 'storage') setFailure(null);
@@ -159,6 +163,7 @@ export default function useFastCompleteSubmit({
     if (observed.available && observedKey === body.idempotencyKey
       && observed.attempt.summary === summary
       && JSON.stringify(observed.attempt.body) === JSON.stringify(body)) {
+      persistedKeyRef.current = body.idempotencyKey;
       return 'send';
     }
     setStorageWarning(STORAGE_WARNING);
@@ -174,7 +179,9 @@ export default function useFastCompleteSubmit({
     const outcome = completionFailureOutcome(err, { confirmable });
     const removed = DEFINITIVE_OUTCOMES.has(outcome) ? await clearStored(scope, body.idempotencyKey) : true;
     if (!sameScope(scopeRef.current, scope)) return;
-    if (outcome === 'correctable' && !removed) rejectedKeyRef.current = body.idempotencyKey;
+    if (outcome === 'correctable' && !removed && persistedKeyRef.current === body.idempotencyKey) {
+      rejectedKeyRef.current = body.idempotencyKey;
+    }
     pendingBodyRef.current = outcome === 'retry' || outcome === 'confirm' ? body : null;
     pendingSummaryRef.current = pendingBodyRef.current ? summary : '';
     if (outcome === 'correctable') {
@@ -272,7 +279,7 @@ export default function useFastCompleteSubmit({
     try {
       const removed = await clearStored(scope, idempotencyKey);
       if (!sameScope(scopeRef.current, scope)) return;
-      if (!removed) {
+      if (!removed && persistedKeyRef.current === idempotencyKey) {
         const current = await getFastCompletionAttempt(scope.serviceId, scope.operatorId);
         if (!sameScope(scopeRef.current, scope)) return;
         if (!current.available || current.attempt?.body?.idempotencyKey === idempotencyKey) {
@@ -283,6 +290,7 @@ export default function useFastCompleteSubmit({
       pendingBodyRef.current = null;
       pendingSummaryRef.current = '';
       keyRef.current = genIdempotencyKey();
+      persistedKeyRef.current = null;
       setRestored(false);
       setFailure(null);
       setError('');
