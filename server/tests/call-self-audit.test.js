@@ -421,7 +421,7 @@ describe('voicemail triage evidence (voicemail.v1: every inbound voicemail besid
   const JEV = { ok: true, answers: { callback_requested: { p: 0.9, yes: true, confident: true } }, packageHash: 'h', servedModel: 'jev-1.13.0' };
   const VM = (over = {}) => ({ id: 'vm-1', twilio_call_sid: 'CA_vm1', direction: 'inbound', processing_status: 'voicemail', disposition: null, voicemail_callback_alerted_at: null, transcription: 'Hi, this is about my termites, please call me back.', ai_extraction: JSON.stringify({ is_voicemail: true }), duration_seconds: 21, ...over });
 
-  function vmDb({ rows = [], leadSids = [], triageIds = [] } = {}) {
+  function vmDb({ rows = [], leadSids = [], triageIds = [], answered = [] } = {}) {
     const seen = {};
     db.raw = (sql) => sql;
     db.mockImplementation((table) => {
@@ -435,7 +435,11 @@ describe('voicemail triage evidence (voicemail.v1: every inbound voicemail besid
           if (table === 'leads') return leadSids.map((sid) => ({ twilio_call_sid: sid }));
           return [];
         },
-        distinct: async () => (table === 'triage_items' ? triageIds.map((id) => ({ call_log_id: id })) : []),
+        distinct: async () => {
+          if (table === 'triage_items') return triageIds.map((id) => ({ call_log_id: id }));
+          if (table === 'decision_reviews') return answered.map(([subject_id, provider]) => ({ subject_id, provider }));
+          return [];
+        },
       };
       return b;
     });
@@ -483,15 +487,30 @@ describe('voicemail triage evidence (voicemail.v1: every inbound voicemail besid
     vmDb({ rows: [
       VM({ id: 'vm-s', processing_status: 'spam' }),
       VM({ id: 'vm-x', processing_status: 'processed', ai_extraction: JSON.stringify({ is_voicemail: true, is_spam: true }) }),
-      VM({ id: 'vm-vendor', disposition: 'vendor_logged' }),
+      VM({ id: 'vm-vendor', v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ call_nature: 'vendor_or_partner' }) }),
+      VM({ id: 'vm-applicant', disposition: 'vendor_logged', v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ call_nature: 'job_applicant' }) }),
       VM({ id: 'vm-real' }),
       VM({ id: 'call-live', processing_status: 'processed', ai_extraction: JSON.stringify({ is_voicemail: false }) }),
     ] });
     await shadowVoicemails();
     const s = bySubject();
-    expect(Object.keys(s).sort()).toEqual(['vm-real', 'vm-s', 'vm-vendor', 'vm-x']);
+    expect(Object.keys(s).sort()).toEqual(['vm-applicant', 'vm-real', 'vm-s', 'vm-vendor', 'vm-x']);
     for (const id of ['vm-s', 'vm-x', 'vm-vendor']) expect(s[id].baselines.is_vendor_or_spam).toEqual({ production: true });
-    expect(s['vm-real'].baselines.is_vendor_or_spam).toEqual({ production: false });
+    // a job applicant shares the vendor_logged disposition but is no vendor pitch
+    for (const id of ['vm-real', 'vm-applicant']) expect(s[id].baselines.is_vendor_or_spam).toEqual({ production: false });
+  });
+
+  test('each enabled provider is asked until its own answer is recorded: a voicemail one provider answered re-asks only the other', async () => {
+    typedDecisionsClefLive.mockReturnValue(true);
+    try {
+      askPackage.mockImplementation(async () => JEV);
+      vmDb({ rows: [VM({ id: 'vm-half' }), VM({ id: 'vm-done' }), VM({ id: 'vm-new' })], answered: [['vm-half', 'typesafe'], ['vm-done', 'typesafe'], ['vm-done', 'cloudflare']] });
+      const tally = await shadowVoicemails();
+      const asked = asksFor('voicemail.v1').map((c) => (c[2] && c[2].provider) || 'typesafe');
+      expect(asked.sort()).toEqual(['cloudflare', 'cloudflare', 'typesafe']); // vm-half: Clef only; vm-new: both; vm-done: none
+      expect(Object.keys(bySubject()).sort()).toEqual(['vm-half', 'vm-new']);
+      expect(tally).toMatchObject({ asked: 1, recorded: 1, clef: { asked: 2, recorded: 2 } });
+    } finally { typedDecisionsClefLive.mockReturnValue(false); }
   });
 
   test('a 7-day lookback over terminal voicemails, inbound only, skipping any already answered; a long voicemail is counted, never asked', async () => {
@@ -503,9 +522,8 @@ describe('voicemail triage evidence (voicemail.v1: every inbound voicemail besid
     expect(calls.map((a) => String(a[0]))).toContain("COALESCE(direction, '') NOT LIKE 'outbound%'");
     expect(calls.find((a) => a[0] === 'created_at')[2]).toEqual(new Date('2026-09-26T08:00:00Z'));
     expect(calls.find((a) => a[0] === 'processing_status')[1]).toEqual(['voicemail', 'processed', 'spam', 'lead_creation_failed']);
-    // already answered = any decision_reviews row for this voicemail
-    expect(calls).toContainEqual(['notExists', 'decision_reviews as dr']);
-    expect(calls).toContainEqual(['notExists', 'dr.capability', 'voicemail']);
+    // answered per provider, from decision_reviews rows for these voicemails
+    expect(seen.decision_reviews).toContainEqual([{ capability: 'voicemail', subject_type: 'call_log' }]);
   });
 
   test('a read failure is logged, never thrown', async () => {

@@ -162,8 +162,8 @@ const VOICEMAIL = {
       true: 'They ask for a call or text back, ask a question, or request service or a visit.',
       false: 'No reply is needed: a thank-you, a hang-up or silence, a robocall, a vendor pitch, or information only.',
     }),
-    needs_attention_today: noul('Should a person deal with this voicemail TODAY: active pests inside the home, damage, a safety concern (stings, bites, snakes, rodents in the living space), a missed or late appointment, or an upset customer?', {
-      true: 'It describes one of those, so waiting until tomorrow would hurt the customer or Waves.',
+    needs_attention_today: noul('Did this voicemail need a person to deal with it the SAME DAY it was left: active pests inside the home, damage, a safety concern (stings, bites, snakes, rodents in the living space), a missed or late appointment, or an upset customer?', {
+      true: 'It describes one of those, so waiting until the next day would have hurt the customer or Waves.',
       false: 'Nothing in it needs same-day handling (a routine question, a scheduling request with no urgency, or nothing actionable).',
     }),
     is_vendor_or_spam: noul('Is this voicemail a robocall, a sales or vendor pitch to Waves, or other junk, rather than a customer or prospect?', {

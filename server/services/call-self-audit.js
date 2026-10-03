@@ -142,12 +142,15 @@ function gateCheckBaselines(call, wavesPromiseCallIds) {
 //                       a lead minted from the call, or a triage item opened
 //                       for it (a failed lead creation opens one)
 //   is_vendor_or_spam   production = spam status, the extraction's is_spam, or
-//                       the vendor disposition (vendor_logged)
+//                       a vendor call by the v2 extraction's call_nature
+//                       (vendor_or_partner; a job applicant shares the
+//                       vendor_logged disposition but is not a vendor)
 //   needs_attention_today  no baseline: nothing decides urgency today
-// Idempotent over a 7-day lookback (Codex #5655 r1): a voicemail is asked once
-// it is terminal and never again once any answer for it is recorded, so one
-// that was still processing at run time, or a missed nightly run, is picked up
-// next time. A voicemail longer than the span the models and reviewer see is
+// Idempotent over a 7-day lookback (Codex #5655 r1/r2): a voicemail is asked
+// once it is terminal, and each enabled provider only until that provider's
+// answer is recorded, so one still processing at run time, a missed nightly
+// run, or one provider's failed leg is picked up next time and nothing is
+// asked twice. A voicemail longer than the span the models and reviewer see is
 // counted, never asked (as for the gate checks). Never throws; evidence only.
 const VOICEMAIL_STATUSES = ['voicemail', 'processed', 'spam', 'lead_creation_failed'];
 const VOICEMAIL_LOOKBACK_DAYS = 7;
@@ -161,16 +164,24 @@ async function shadowVoicemails({ now = new Date() } = {}) {
       .whereIn('processing_status', VOICEMAIL_STATUSES)
       .where('created_at', '>', new Date(now.getTime() - VOICEMAIL_LOOKBACK_DAYS * 24 * 60 * 60 * 1000))
       .whereRaw("LENGTH(TRIM(COALESCE(transcription, ''))) > 0")
-      // Already answered by any provider: asked once, never again.
-      .whereNotExists(function answered() {
-        this.select(db.raw('1')).from('decision_reviews as dr')
-          .where('dr.capability', 'voicemail').where('dr.subject_type', 'call_log')
-          .whereRaw('dr.subject_id = call_log.id');
-      })
       .orderBy('created_at', 'asc')
-      .select('id', 'twilio_call_sid', 'direction', 'processing_status', 'disposition', 'voicemail_callback_alerted_at', 'transcription', 'ai_extraction', 'duration_seconds');
+      .select('id', 'twilio_call_sid', 'direction', 'processing_status', 'voicemail_callback_alerted_at', 'transcription', 'ai_extraction', 'ai_extraction_enriched', 'v2_extraction_status', 'duration_seconds');
     // A lead-path voicemail ends 'processed' (or 'lead_creation_failed'); only the extraction says it was a voicemail.
-    const voicemails = rows.filter((c) => c.processing_status === 'voicemail' || safeParse(c.ai_extraction).is_voicemail === true);
+    const candidates = rows.filter((c) => c.processing_status === 'voicemail' || safeParse(c.ai_extraction).is_voicemail === true);
+    if (!candidates.length) return tally;
+    // Which enabled providers have already answered each voicemail.
+    const clef = typedDecisionsClefLive();
+    const enabled = clef ? ['typesafe', 'cloudflare'] : ['typesafe'];
+    const answeredRows = await db('decision_reviews').where({ capability: 'voicemail', subject_type: 'call_log' })
+      .whereIn('subject_id', candidates.map((c) => c.id)).distinct('subject_id', 'provider');
+    const answered = new Map();
+    for (const r of answeredRows) {
+      const key = String(r.subject_id);
+      if (!answered.has(key)) answered.set(key, new Set());
+      answered.get(key).add(r.provider);
+    }
+    const missingFor = (call) => enabled.filter((p) => !(answered.get(String(call.id)) || new Set()).has(p));
+    const voicemails = candidates.filter((c) => missingFor(c).length > 0);
     if (!voicemails.length) return tally;
     const ids = voicemails.map((c) => c.id);
     const sids = voicemails.map((c) => c.twilio_call_sid).filter(Boolean);
@@ -180,15 +191,22 @@ async function shadowVoicemails({ now = new Date() } = {}) {
     ]);
     const leadSids = new Set(leads.map((r) => r.twilio_call_sid));
     const triaged = new Set(triage.map((r) => String(r.call_log_id)));
-    const clef = typedDecisionsClefLive();
     for (const call of voicemails) {
       if (String(call.transcription || '').length > CALL_TRANSCRIPT_CHARS) { tally.skippedLong++; continue; }
       const ex = safeParse(call.ai_extraction);
+      const v2 = call.v2_extraction_status === 'valid' ? safeParse(call.ai_extraction_enriched) : {};
       const baselines = {
         callback_requested: { production: Boolean(call.voicemail_callback_alerted_at) || leadSids.has(call.twilio_call_sid) || triaged.has(String(call.id)) },
-        is_vendor_or_spam: { production: call.processing_status === 'spam' || ex.is_spam === true || call.disposition === 'vendor_logged' },
+        is_vendor_or_spam: { production: call.processing_status === 'spam' || ex.is_spam === true || v2.call_nature === 'vendor_or_partner' },
       };
-      count(tally, clef, await askAndRecord(call, { packageId: 'voicemail.v1', baselines }, clef));
+      const only = missingFor(call);
+      const outcome = await askAndRecord(call, { packageId: 'voicemail.v1', baselines, only }, clef);
+      // Per provider actually asked: Jev on the main counts, Clef under .clef.
+      for (const provider of only) {
+        const t = provider === 'typesafe' ? tally : (tally.clef = tally.clef || { asked: 0, recorded: 0, failed: 0 });
+        t.asked++;
+        if (outcome[provider] === 'recorded') t.recorded++; else t.failed++;
+      }
     }
   } catch (err) {
     logger.warn(`[self-audit] voicemail shadow failed: ${err.message}`);
@@ -233,8 +251,10 @@ function productionAnswers(call) {
 // One call to every live provider, then one record per provider that
 // answered, each handed the others' answers. Returns { typesafe, cloudflare }
 // as 'recorded' | 'failed' (cloudflare only when asked).
-async function askAndRecord(call, { packageId, baselines }, clef = false) {
-  const outcome = { typesafe: 'failed', ...(clef ? { cloudflare: 'failed' } : {}) };
+async function askAndRecord(call, { packageId, baselines, only = null }, clef = false) {
+  // `only`: ask just these providers (a voicemail one provider already answered).
+  const providers = (clef ? ['typesafe', 'cloudflare'] : ['typesafe']).filter((p) => !only || only.includes(p));
+  const outcome = Object.fromEntries(providers.map((p) => [p, 'failed']));
   try {
     const { askPackage } = require('./typed-decisions/jev');
     const { packageFor } = require('./typed-decisions/packages');
@@ -245,7 +265,6 @@ async function askAndRecord(call, { packageId, baselines }, clef = false) {
       duration_seconds: call.duration_seconds ?? null,
       transcript: callTranscriptSpan(call.transcription),
     };
-    const providers = clef ? ['typesafe', 'cloudflare'] : ['typesafe'];
     const legs = await Promise.all(providers.map(async (provider) => {
       try {
         const result = provider === 'typesafe' ? await askPackage(packageId, state) : await askPackage(packageId, state, { provider });
