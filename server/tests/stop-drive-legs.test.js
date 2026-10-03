@@ -1,0 +1,48 @@
+const { attachDriveLegs } = require('../services/scheduling/stop-drive-legs');
+const { driveMin } = require('../services/auto-dispatch/geo');
+
+const A = { lat: 27.52, lng: -82.45 };
+const B = { lat: 27.40, lng: -82.50 };
+const C = { lat: 27.30, lng: -82.40 };
+
+function stop(id, windowStart, geo, extra = {}) {
+  return { id, windowStart, status: 'confirmed', lat: geo ? geo.lat : null, lng: geo ? geo.lng : null, ...extra };
+}
+
+describe('attachDriveLegs', () => {
+  it('gives each stop its leg in and out in day order, first and last marked', () => {
+    const services = [stop('c', '13:00', C), stop('a', '08:00', A), stop('b', '10:00', B)];
+    attachDriveLegs(services);
+    const by = Object.fromEntries(services.map((s) => [s.id, s]));
+    expect(by.a).toMatchObject({ firstStop: true, lastStop: false, driveFromPrevMin: null, driveToNextMin: driveMin(A, B) });
+    expect(by.b).toMatchObject({ driveFromPrevMin: driveMin(A, B), driveToNextMin: driveMin(B, C) });
+    expect(by.c).toMatchObject({ firstStop: false, lastStop: true, driveFromPrevMin: driveMin(B, C), driveToNextMin: null });
+    expect(driveMin(A, B)).toBeGreaterThan(0);
+  });
+
+  it('shares legs across one physical stop and skips cancelled rows', () => {
+    const services = [
+      stop('a', '08:00', A),
+      stop('b1', '10:00', B, { visitId: 'v1' }),
+      stop('b2', '10:00', B, { visitId: 'v1' }),
+      stop('x', '11:00', A, { status: 'cancelled' }),
+      stop('c', '13:00', C),
+    ];
+    attachDriveLegs(services);
+    const by = Object.fromEntries(services.map((s) => [s.id, s]));
+    expect(by.b1.driveFromPrevMin).toBe(driveMin(A, B));
+    expect(by.b2.driveFromPrevMin).toBe(driveMin(A, B));
+    expect(by.b1.driveToNextMin).toBe(driveMin(B, C));
+    expect(by.b2.driveToNextMin).toBe(driveMin(B, C));
+    expect(by.x).toMatchObject({ driveFromPrevMin: null, driveToNextMin: null, firstStop: false, lastStop: false });
+  });
+
+  it('leaves a leg null, never 0, when a stop has no coordinates', () => {
+    const services = [stop('a', '08:00', A), stop('b', '10:00', null), stop('c', '13:00', C)];
+    attachDriveLegs(services);
+    const by = Object.fromEntries(services.map((s) => [s.id, s]));
+    expect(by.a.driveToNextMin).toBeNull();
+    expect(by.b).toMatchObject({ driveFromPrevMin: null, driveToNextMin: null });
+    expect(by.c.driveFromPrevMin).toBeNull();
+  });
+});

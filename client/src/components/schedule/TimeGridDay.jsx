@@ -332,6 +332,16 @@ function CloseoutOwedChip({ onClick }) {
   return <span className={className}>Closeout owed</span>;
 }
 
+// "~14 min in · ~9 min out" from the day route's straight-line legs
+// (GET /admin/schedule); null when the payload carries none.
+function driveLegsLabel(service) {
+  const into = service.firstStop ? 'first stop'
+    : Number.isFinite(service.driveFromPrevMin) ? `~${service.driveFromPrevMin} min in` : null;
+  const out = service.lastStop ? 'last stop'
+    : Number.isFinite(service.driveToNextMin) ? `~${service.driveToNextMin} min out` : null;
+  return [into, out].filter(Boolean).join(' · ') || null;
+}
+
 function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, laneCount = 1, onEdit, onResize, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, owesCompletion, isSelected, onToggleSelect, routeOrder, accent }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `svc-${service.id}`,
@@ -413,7 +423,7 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
         borderLeft: accent ? `3px solid ${accent}` : undefined,
         ...dragStyle,
       }}
-      title={`${service.customerName || 'Unassigned'} · ${serviceDisplayName(service)} · ${service.windowDisplay || ''}\nShift+click to select for bulk actions`}
+      title={`${service.customerName || 'Unassigned'} · ${serviceDisplayName(service)} · ${service.windowDisplay || ''}${driveLegsLabel(service) ? `\nDrive: ${driveLegsLabel(service)}` : ''}\nShift+click to select for bulk actions`}
     >
       {routeOrder != null && (
         <div
@@ -524,6 +534,9 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
       </div>
       {effectiveHeight > SLOT_HEIGHT && (
         <div className="opacity-80 truncate">{serviceDisplayName(service)}</div>
+      )}
+      {driveLegsLabel(service) && effectiveHeight > SLOT_HEIGHT * 2 && (
+        <div className="opacity-70 truncate u-nums">{driveLegsLabel(service)}</div>
       )}
       {service.address && effectiveHeight > SLOT_HEIGHT * 2 && (
         <div className="opacity-70 truncate">{service.address}</div>
