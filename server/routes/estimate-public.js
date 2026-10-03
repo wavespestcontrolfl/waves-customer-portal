@@ -15717,6 +15717,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         bookingUrl,
         billingTerm,
         annualPrepayAmount: annualPrepayQuotedAmount,
+        // The office notice names the same charge timing as the agreement
+        // this accept is about to issue (none is issued yet here, so this is
+        // "what would be issued now": gate + active wording).
+        annualChargeAfterInstallation: invoiceKind === 'annual_prepay_deferred'
+          && await require('../services/termite-program-agreement').annualAgreementChargesAfterInstallation({ estimateId: estimate.id, customerId: estimate.customer_id }),
         // 'ambiguous' keeps its own value (Codex r6 P1): the attempt may
         // have been a CARD, so the copy must stay tender-neutral — never
         // assert a bank debit; the one thing all three outcomes share is
@@ -15820,6 +15825,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       prepayCoveredByCredit: prepayAutoCharge?.coveredByCredit === true,
       setupFeeAfterFirstVisit: txResult.setupFeeDeferredToFirstVisit === true,
       }),
+      // The agreement this customer was just issued (or, with none issued,
+      // the one GATE_PAF_TERMITE would issue) charges after the station
+      // installation, not at signing. Present only when true (gate-off
+      // payload byte-identical).
+      ...(invoiceKind === 'annual_prepay_deferred'
+        && await require('../services/termite-program-agreement').annualAgreementChargesAfterInstallation({ estimateId: estimate.id, customerId: estimate.customer_id })
+        ? { annualChargeAfterInstallation: true } : {}),
     });
   } catch (err) {
     // Translate user-visible 4xx errors thrown from inside the transaction
@@ -20922,6 +20934,28 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
   // — no pay link, and the copy says the card is charged after that visit.
   const prepayAwaitingFirstVisit = !!prepayTerm && !!invoice
     && !!prepayJobStamp && String(prepayJobStamp.status || '') === 'awaiting_first_visit';
+  // GATE_PAF_TERMITE: a signed, activated termite annual plan whose charge
+  // waits for the station installation (or is being taken right after it) is
+  // not owed now either. Signing mints the term and invoice, so this retry
+  // reads as 'annual_prepay' — without this it would hand the customer the
+  // /pay link and the prepay_invoice step before installation (GitHub Codex
+  // #5816 r3). The wait record on the estimate decides.
+  let termiteChargeState = estimate.annual_plan_signature_charge || null;
+  if (typeof termiteChargeState === 'string') {
+    try { termiteChargeState = JSON.parse(termiteChargeState); } catch { termiteChargeState = null; }
+  }
+  const termiteAwaitingInstallation = !!prepayTerm && !!invoice && !!termiteChargeState
+    && (termiteChargeState.status === 'awaiting_installation'
+      || (termiteChargeState.status === 'claimed' && termiteChargeState.trigger === 'installation_complete'));
+  // Every OTHER state of that record that is not a pay-link outcome is
+  // staff-owned or still moving, and termite-annual-signature-charge.js sends
+  // no pay link for it: a charge in flight (claimed), one that may have gone
+  // through (ambiguous), one held for the office (deferred — an edited
+  // invoice, a cancelled agreement). The retry must not hand the customer the
+  // pay rail the charge path withheld (GitHub Codex #5816 r5). Only
+  // 'declined' and 'skipped' return to the pay link.
+  const termiteChargeStaffOwned = !!prepayTerm && !!invoice && !!termiteChargeState && !termiteAwaitingInstallation
+    && ['claimed', 'ambiguous', 'deferred'].includes(String(termiteChargeState.status || ''));
   // Never hand the homeowner a payer's bearer /pay token — nor ANY /pay token
   // for a settled invoice (nothing is owed), nor a pay-now link for a
   // card-lane accept whose invoice completion will auto-charge.
@@ -20931,7 +20965,7 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
   const prepayFallbackOwed = !!prepayTerm && !!invoice && prepayJobStamp?.deferred_to_first_visit === true
     && String(prepayJobStamp?.status || '') === 'delivered_fallback';
   const invoicePayUrl = invoice && !invoiceSettled && !payerBilled && (!recurringCardLaneRetry || prepayFallbackOwed) && !prepaySweepPending
-    && !prepayAwaitingFirstVisit && invoice.token
+    && !prepayAwaitingFirstVisit && !termiteAwaitingInstallation && !termiteChargeStaffOwned && invoice.token
     ? `/pay/${invoice.token}`
     : null;
   const invoiceNotes = String(invoice?.notes || '');
@@ -20995,7 +21029,8 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
       // no consumer (including the client's legacy invoiceMode fallback) can
       // route the customer to a pay step for it. Card-lane retries likewise
       // stay out of the pay step (see recurringCardLaneRetry above).
-      invoiceMode: !!invoice && !invoiceSettled && !recurringCardLaneRetry && !prepaySweepPending && !prepayAwaitingFirstVisit,
+      invoiceMode: !!invoice && !invoiceSettled && !recurringCardLaneRetry && !prepaySweepPending && !prepayAwaitingFirstVisit
+        && !termiteAwaitingInstallation && !termiteChargeStaffOwned,
       invoiceLinkDelivered: !!(invoice?.sent_at || invoice?.sms_sent_at),
       invoiceId: invoice?.id || null,
       invoiceAmount,
@@ -21022,12 +21057,19 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
       // deferral released the claim) → 'deferred' copy; a 'claimed' stamp
       // may have an executor mid-charge → tender-neutral 'ambiguous'
       // "we're confirming your payment" copy (Codex r26 P2).
-      invoiceSettled: invoiceSettled || prepaySweepPending || prepayAwaitingFirstVisit,
+      invoiceSettled: invoiceSettled || prepaySweepPending || prepayAwaitingFirstVisit || termiteAwaitingInstallation || termiteChargeStaffOwned,
       prepayChargeStatus: retryPrepayChargeStatus || (prepaySweepPending
         ? (String(prepayJobStamp?.status || '') === 'pending' ? 'deferred' : 'ambiguous')
-        : (prepayAwaitingFirstVisit ? 'after_first_visit' : null)),
+        : (prepayAwaitingFirstVisit
+          ? 'after_first_visit'
+          // Staff-owned: the tender-neutral "we're confirming" copy, which
+          // asserts neither a charge nor its absence.
+          : (termiteAwaitingInstallation ? 'after_installation' : (termiteChargeStaffOwned ? 'ambiguous' : null)))),
       prepayCoveredByCredit: retryPrepayCoveredByCredit,
     }),
+    ...(invoiceKind === 'annual_prepay_deferred'
+      && await require('../services/termite-program-agreement').annualAgreementChargesAfterInstallation({ estimateId: estimate.id, customerId: estimate.customer_id })
+      ? { annualChargeAfterInstallation: true } : {}),
     alreadyAccepted: true,
   };
 }
@@ -21193,6 +21235,9 @@ function buildAcceptNotificationCopy({
   // GATE_PAF_SETUP_FEE: the accept stamped the setup fee on the first visit
   // instead of minting a payable invoice — nothing is due or sent today.
   setupFeeDeferred = false,
+  // GATE_PAF_TERMITE: the agreement being issued charges after the station
+  // installation, not at signature.
+  annualChargeAfterInstallation = false,
 } = {}) {
   // Sign-before-pay (codex round-3 P2 on #4819): the durable notifications
   // must send the customer to the signature, never read as "approved,
@@ -21202,7 +21247,7 @@ function buildAcceptNotificationCopy({
     const amountText = annualPrepayAmount != null ? ` (${fmtMoney(annualPrepayAmount)})` : '';
     return {
       adminTitle: `Estimate accepted — signature pending: ${customerName}`,
-      adminBody: `Termite annual protection plan${amountText} accepted, waiting on the customer's signature on the annual agreement. Nothing is billed or booked until they sign; at signature the saved payment method is charged, or the pay link sent. The 12-month coverage year begins on the installation date.`,
+      adminBody: `Termite annual protection plan${amountText} accepted, waiting on the customer's signature on the annual agreement. Nothing is billed or booked until they sign; ${annualChargeAfterInstallation ? 'nothing is charged at signature either: after the station installation is completed the saved payment method is charged, or the pay link sent' : 'at signature the saved payment method is charged, or the pay link sent'}. The 12-month coverage year begins on the installation date.`,
       adminNext: 'Waiting on their signature; nothing is billed yet',
       customerTitle: 'Next step: sign your plan agreement',
       // Codex #4819 r6: signing starts the plan and its billing; the
