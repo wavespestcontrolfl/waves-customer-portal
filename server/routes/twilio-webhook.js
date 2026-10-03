@@ -1057,8 +1057,7 @@ router.post('/sms', async (req, res) => {
         const rescheduleResult = await RescheduleSMS.handleRescheduleReply(customer.id, Body);
         if (rescheduleResult?.handled) {
           logger.info(`Reschedule reply handled for customer ${customer.id}: ${rescheduleResult.action}`);
-          await db('sms_log').where({ id: smsLogEntry.id }).update({ message_type: 'reschedule_reply' })
-            .catch(() => logger.warn('[sms-ingestion] reschedule source classification deferred'));
+          await retypeConsumedInbound(smsLogEntry.id, 'reschedule_reply', 'reschedule');
           // A handled reschedule reply can still CONTAIN an explicit contact
           // correction ("1. Also, my email is wrong; use …") — the
           // correction block further down is unreachable past this return,
@@ -1100,8 +1099,7 @@ router.post('/sms', async (req, res) => {
           // The machine ANSWERED the customer (asked for the address, or
           // drafted and alerted the owner) — it owns this reply end to end.
           logger.info(`[lead-intake] Handled for customer ${customer.id}: ${customer.lead_intake_status} → ${intakeResult.next}`);
-          await db('sms_log').where({ id: smsLogEntry.id }).update({ message_type: 'lead_intake' })
-            .catch(() => logger.warn('[sms-ingestion] lead-intake source classification deferred'));
+          await retypeConsumedInbound(smsLogEntry.id, 'lead_intake', 'lead-intake');
           // A consumed intake reply can still CONTAIN an explicit contact
           // correction (an awaiting_address customer correcting their email,
           // say) — the correction block further down is unreachable past
@@ -2088,6 +2086,23 @@ router.post('/status', async (req, res) => {
  */
 // Why the legacy AI draft does NOT run for an inbound, or null when it does.
 // Skip reasons that were logged before keep their log line.
+// A consumer that took an inbound text retypes its sms_log row: that type is
+// what later readers (the scheduling decide sweep, the response policy) use
+// to leave the text alone. Three tries, since for lead intake it is the only
+// record that this text was consumed; never throws.
+async function retypeConsumedInbound(smsLogId, messageType, label) {
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      await db('sms_log').where({ id: smsLogId }).update({ message_type: messageType });
+      return true;
+    } catch {
+      if (attempt < 3) await new Promise((resolve) => { setTimeout(resolve, 150 * attempt); });
+    }
+  }
+  logger.warn(`[sms-ingestion] ${label} source classification deferred`);
+  return false;
+}
+
 function legacyAiDraftSkip({ customer, numberConfig, Body, enabled, schedulingIntent, rescheduleAsk, smsReaction, courtesyOnly }) {
   if (!customer || numberConfig.type !== 'location' || !Body) return 'not_applicable';
   if (!enabled) return 'gate_disabled';

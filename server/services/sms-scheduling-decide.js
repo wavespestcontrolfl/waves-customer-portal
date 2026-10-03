@@ -550,14 +550,11 @@ async function sweepUndecidedReplies({ now = new Date(), dbh = db, run = runShad
             .whereRaw('rl.customer_id = sl.customer_id')
             .whereRaw('rl.customer_response_text = sl.message_body')
             .whereRaw("rl.sms_responded_at BETWEEN sl.created_at - interval '1 minute' AND sl.created_at + interval '10 minutes'");
-        })
-        // A customer in the lead-intake machine: its replies are intake's.
-        .whereNotExists(function inIntake() {
-          this.select(dbh.raw('1')).from('customers as c')
-            .whereRaw('c.id = sl.customer_id')
-            .whereNotNull('c.lead_intake_status')
-            .whereNot('c.lead_intake_status', 'estimate_drafted');
         });
+      // Lead intake keeps no per-text record: a reply it consumed is marked
+      // only by the row's retype, which the webhook retries. The customer's
+      // CURRENT intake status is not used: status now is not status then,
+      // and reschedule asks and scope-vetoed replies bypass intake.
       if (cursor) query.whereRaw('(sl.created_at, sl.id) > (?, ?)', [cursor.created_at, cursor.id]);
       rows = await query
         .orderBy([{ column: 'sl.created_at', order: 'asc' }, { column: 'sl.id', order: 'asc' }])
