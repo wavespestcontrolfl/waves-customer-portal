@@ -65,6 +65,12 @@ describe('foldVisitUnit', () => {
     expect(unit.id).toBe('a');
   });
 
+  test('a pending length change on the tapped service is in the total', () => {
+    const stored = stop('a', { estimated_duration_minutes: 60 });
+    const edited = { ...stored, estimated_duration_minutes: 120 };
+    expect(foldVisitUnit(edited, stored, [stop('b', { estimated_duration_minutes: 60 })]).estimated_duration_minutes).toBe(180);
+  });
+
   test('not one clean stop: another technician, other or missing coordinates, another day, or a member under way', () => {
     const a = stop('a');
     expect(foldVisitUnit(a, a, [stop('b', { technician_id: 't2' })])).toBe(null);
@@ -116,18 +122,18 @@ describe('who asks for the whole visit', () => {
   const fs = require('fs');
   const path = require('path');
   const read = (file) => fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
-  test('the availability box does (the offered hours and the picked-hour verdict); customer booking, estimate holds and the save paths do not', () => {
+  test('the staff availability box does (the hint route, on both slot-finder paths, and the picked-hour verdict); nothing else does', () => {
     const hints = read('services/scheduling/find-time-hints.js');
     const verdict = hints.slice(hints.indexOf('async function pickedByArrivalChecker'));
     expect(verdict.slice(0, verdict.indexOf('if (fit.feasible)'))).toContain('unit: true,');
+    // The hint route marks its existing-visit request; the slot finder forwards
+    // that mark on the capacity path and on the non-capacity path.
+    expect(read('routes/admin-schedule-find-time.js')).toContain('arrivalWindow: { serviceId, changes: hintChanges, unit: true }');
     const findTime = read('services/scheduling/find-time.js');
-    const existing = findTime.indexOf('serviceId: opts.arrivalWindow.serviceId, date, technicianId: tech.id,');
-    expect(findTime.slice(existing, existing + 420)).toContain('unit: true,');
-    // One other loader call in find-time (a prospective slot for a customer or a new visit): no unit.
-    expect(findTime.split('unit: true').length - 1).toBe(1);
-    for (const file of ['routes/booking.js', 'services/slot-reservation.js', 'services/rebooker.js', 'services/rain-out.js', 'services/tech-out-auto-move.js', 'services/scheduling/occupancy.js']) {
-      expect(read(file)).not.toMatch(/\bunit: true\b/);
+    expect(findTime.split('unit: opts.arrivalWindow.unit === true').length - 1).toBe(2);
+    expect(findTime.includes('unit: true')).toBe(false);
+    for (const file of ['routes/booking.js', 'services/slot-reservation.js', 'services/rebooker.js', 'services/rain-out.js', 'services/tech-out-auto-move.js', 'services/scheduling/occupancy.js', 'routes/admin-schedule.js']) {
+      expect(read(file).includes('unit: true')).toBe(false);
     }
   });
 });
-

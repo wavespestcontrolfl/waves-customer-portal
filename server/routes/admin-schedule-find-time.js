@@ -350,7 +350,9 @@ router.post('/', async (req, res) => {
       excludeServiceIds,
       // Existing-visit staff hints share their route check with the edit
       // and rebooker save probes. Other consumers retain their slot contract.
-      ...(hint && serviceId && arrivalWindows === true ? { arrivalWindow: { serviceId, changes: hintChanges } } : {}),
+      // unit: every staff screen this hint feeds moves a shared stop as a
+      // whole (GATE_COMBO_ROUTE_CHECK decides; alone, it changes nothing).
+      ...(hint && serviceId && arrivalWindows === true ? { arrivalWindow: { serviceId, changes: hintChanges, unit: true } } : {}),
       slotStepMinutes: plan.step,
       // Staff tool: blackout days stay visible — admin manual scheduling is
       // deliberately unblocked (Settings blackouts gate CUSTOMER surfaces).

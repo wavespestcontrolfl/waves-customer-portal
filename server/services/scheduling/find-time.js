@@ -128,9 +128,9 @@ async function findArrivalWindowSlots(opts) {
       const context = await loadArrivalRouteContext({
         serviceId: opts.arrivalWindow.serviceId, date, technicianId: tech.id,
         excludeServiceIds: opts.excludeServiceIds, changes: opts.arrivalWindow.changes, now,
-        // The hours offered for an existing visit are for moving its whole
-        // stop (GATE_COMBO_ROUTE_CHECK; ignored when off or when it is alone).
-        unit: true,
+        // The staff availability box asks for the whole stop
+        // (GATE_COMBO_ROUTE_CHECK; ignored when off or when the visit is alone).
+        unit: opts.arrivalWindow.unit === true,
       });
       if (!context) continue;
       const floor = Math.max(DAY_START_HOUR * 60, date === today ? parts.hour * 60 + parts.minute + 30 : 0);
@@ -219,6 +219,8 @@ async function findCapacitySlots(opts) {
         excludeEstimateId: opts.excludeEstimateId,
         ...(opts.arrivalWindow?.serviceId ? {
           serviceId: opts.arrivalWindow.serviceId, changes: opts.arrivalWindow.changes,
+          // Same as the non-capacity path above: the staff box moves the whole stop.
+          unit: opts.arrivalWindow.unit === true,
         } : { prospective: { lat: opts.lat, lng: opts.lng, estimated_duration_minutes: durationMinutes,
           service_type: opts.serviceType || opts.serviceKey || requestedServices.map(row => row.service_type).join(' ') } }),
       });

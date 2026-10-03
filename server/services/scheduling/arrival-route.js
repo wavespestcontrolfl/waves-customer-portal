@@ -82,11 +82,13 @@ function foldVisitUnit(target, stored, siblings) {
     && hasCoords(row) && Number(row.lat) === Number(target.lat) && Number(row.lng) === Number(target.lng)
     && !['en_route', 'on_site'].includes(row.status));
   if (!clean) return null;
-  const members = [stored, ...siblings];
+  // The tapped member's work is the EDITED row's (a pending length change
+  // rides `changes` onto the target); the siblings' is as stored.
+  const work = row => workDuration({ ...row, planning_exempt: true });
   return {
     ...target,
-    memberIds: members.map(row => row.id),
-    estimated_duration_minutes: members.reduce((sum, row) => sum + workDuration({ ...row, planning_exempt: true }), 0),
+    memberIds: [stored.id, ...siblings.map(row => row.id)],
+    estimated_duration_minutes: work(target) + siblings.reduce((sum, row) => sum + work(row), 0),
   };
 }
 
