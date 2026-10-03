@@ -29,7 +29,10 @@ const {
   MEMBERSHIP_DUES_LINE_KEY,
   membershipDuesProvenanceHolds,
   acquireMembershipDuesMonthLock,
+  tryAcquireMembershipDuesMonthLock,
   monthlyDuesCollected,
+  findLiveStampedDuesInvoice,
+  findCollectedDuesPayment,
 } = require("./billing-lane");
 const {
   SEND_CLAIMABLE_STATUSES,
@@ -1799,6 +1802,95 @@ async function stampMembershipDuesUnderLock(conn, { customerId, scheduledService
   return lineItems.map((li) => (
     li === duesLine ? { ...li, [MEMBERSHIP_DUES_LINE_KEY]: month } : li
   ));
+}
+
+// ── Stamp lifetime (B08) ───────────────────────────────────────────────────
+// membership_dues_month is written ONLY by the completion mint
+// (stampMembershipDuesUnderLock). After the mint it can be KEPT or REMOVED,
+// never created or re-pointed: create() drops it unless the mint vouches for
+// it, and every rewrite of line_items (update) re-runs the mint's provenance
+// check on the line as edited and strips the marker when it no longer holds.
+function stripMembershipDuesMarkers(lineItems) {
+  if (!Array.isArray(lineItems) || !lineItems.some((li) => li && li[MEMBERSHIP_DUES_LINE_KEY] !== undefined)) {
+    return lineItems;
+  }
+  return lineItems.map((li) => {
+    if (!li || li[MEMBERSHIP_DUES_LINE_KEY] === undefined) return li;
+    const { [MEMBERSHIP_DUES_LINE_KEY]: _dropped, ...rest } = li;
+    return rest;
+  });
+}
+
+async function sanitizeMembershipDuesMarkers(existing, newLines) {
+  if (!Array.isArray(newLines) || !newLines.some((li) => li && li[MEMBERSHIP_DUES_LINE_KEY] !== undefined)) {
+    return newLines;
+  }
+  const stored = parseInvoiceLineItems(existing.line_items).find((li) => li && li[MEMBERSHIP_DUES_LINE_KEY]);
+  if (!stored) return stripMembershipDuesMarkers(newLines);
+  let visit = null;
+  let customer = null;
+  try {
+    let visitId = existing.scheduled_service_id || null;
+    if (!visitId && existing.service_record_id) {
+      visitId = (await db("service_records").where({ id: existing.service_record_id }).first("scheduled_service_id"))?.scheduled_service_id || null;
+    }
+    if (visitId) visit = await db("scheduled_services").where({ id: visitId }).first("estimated_price", "primary_line_price", "is_callback");
+    customer = await db("customers").where({ id: existing.customer_id }).first("billing_mode", "monthly_rate", "waveguard_tier");
+  } catch (err) {
+    // Unverifiable provenance never keeps a marker (a stripped marker only
+    // re-bills the month; a kept one could hide it).
+    logger.warn(`[invoice] dues provenance recheck failed for invoice ${existing.id}: ${err.message}`);
+  }
+  const sameService = (li) => String(li.description || "").trim() === String(stored.description || "").trim()
+    && String(li.category || "") === String(stored.category || "");
+  let kept = false;
+  return newLines.map((li) => {
+    if (!li || li[MEMBERSHIP_DUES_LINE_KEY] === undefined) return li;
+    const lineAmount = Math.round((Number(li.quantity) || 1) * (Number(li.unit_price) || 0) * 100) / 100;
+    const holds = !kept
+      && li[MEMBERSHIP_DUES_LINE_KEY] === stored[MEMBERSHIP_DUES_LINE_KEY]
+      && sameService(li)
+      && membershipDuesProvenanceHolds({ visit, customer, lineAmount });
+    if (holds) { kept = true; return li; }
+    const { [MEMBERSHIP_DUES_LINE_KEY]: _dropped, ...rest } = li;
+    return rest;
+  });
+}
+
+// Restoring a voided stamped dues invoice re-opens a bill for its month. The
+// void let a later visit or the collectors bill that month again, so under the
+// dues-month lock (non-blocking: an office action never waits on a mint or a
+// collector) the month must not be covered by anything ELSE. Refusal style
+// matches assertUnvoidableLinkedVisit.
+async function assertStampedDuesMonthFreeToRestore(trx, invoiceRow) {
+  const stamp = parseInvoiceLineItems(invoiceRow.line_items).find((li) => li && li[MEMBERSHIP_DUES_LINE_KEY]);
+  if (!stamp) return;
+  const month = String(stamp[MEMBERSHIP_DUES_LINE_KEY]);
+  const { tryClaimCustomerCollectionInTrx } = require("../utils/customer-billing-lock");
+  if (!(await tryAcquireMembershipDuesMonthLock(trx, invoiceRow.customer_id, month))
+    || !(await tryClaimCustomerCollectionInTrx(trx, invoiceRow.customer_id))) {
+    throw new Error(
+      `Cannot unvoid right now — ${month} membership dues are being billed or collected; retry in a moment`,
+    );
+  }
+  let other;
+  let payment;
+  try {
+    other = await findLiveStampedDuesInvoice(trx, invoiceRow.customer_id, month, { excludeInvoiceId: invoiceRow.id });
+    payment = other ? null : await findCollectedDuesPayment(trx, invoiceRow.customer_id, month);
+  } catch (err) {
+    throw new Error(`Could not verify ${month} membership dues coverage — refusing to unvoid (${err.message})`);
+  }
+  if (other) {
+    throw new Error(
+      `Cannot unvoid — ${month} membership dues are already billed on invoice ${other.invoice_number || other.id}; restoring this one would bill the month twice`,
+    );
+  }
+  if (payment) {
+    throw new Error(
+      `Cannot unvoid — ${month} membership dues were already collected (payment ${payment.id}); restoring this invoice would bill the month twice`,
+    );
+  }
 }
 
 async function buildScheduledServiceInvoiceLines(
@@ -4663,7 +4755,11 @@ const InvoiceService = {
       // undefined (no caller passes it — every internal mint/batch/retry
       // caller included) skips the check, byte-identical to before.
       expectedDiscountStacking = undefined,
+      // Set ONLY by createFromService's dues mint when it wrote the stamp
+      // itself: any other caller's membership_dues_month is dropped below.
+      trustedMembershipDues = false,
     } = createArgs;
+    if (!trustedMembershipDues) lineItems = stripMembershipDuesMarkers(lineItems);
 
     if (
       expectedDiscountStacking !== undefined &&
@@ -5999,6 +6095,7 @@ const InvoiceService = {
               category: sr.service_type,
             },
           ];
+      let membershipDuesStamped = false;
       if (membershipDuesMonth && conn && sr.scheduled_service_id) {
         lineItems = await stampMembershipDuesUnderLock(conn, {
           customerId: sr.customer_id,
@@ -6006,6 +6103,7 @@ const InvoiceService = {
           month: membershipDuesMonth,
           lineItems,
         });
+        membershipDuesStamped = lineItems.some((li) => li && li[MEMBERSHIP_DUES_LINE_KEY]);
       }
       // Retention offer (cancel-flow C1, 15% × 2 charges / $75 cap): a
       // GRANTED offer discounts the VISIT's recurring lines only — computed
@@ -6036,6 +6134,7 @@ const InvoiceService = {
         discountIds: scheduledInvoice?.discountIds || undefined,
         taxRate,
         dueDate,
+        ...(membershipDuesStamped ? { trustedMembershipDues: true } : {}),
         trustedStoredDiscountSources: scheduledInvoice
           ? ["scheduled_service"]
           : [],
@@ -9459,6 +9558,11 @@ const InvoiceService = {
       }
     }
 
+    // The dues stamp survives an edit only while the mint's provenance still
+    // holds on the line as edited (see stripMembershipDuesMarkers).
+    if (updates.line_items) {
+      updates = { ...updates, line_items: await sanitizeMembershipDuesMarkers(existing, updates.line_items) };
+    }
     const allowed = INVOICE_UPDATE_ALLOWED_FIELDS;
     const data = { updated_at: new Date() };
     for (const key of allowed) {
@@ -10271,6 +10375,7 @@ const InvoiceService = {
       if (!updated) {
         throw new Error("Invoice status changed while unvoiding — re-check and retry");
       }
+      await assertStampedDuesMonthFreeToRestore(trx, updated);
       // The preserved withdrawal stamp is re-judged against LIVE ownership
       // (Codex #4311 r30 P1): a withdrawn invoice that was voided is skipped
       // by the Bill-To reconciliation (void is terminal), so a payer cleared

@@ -563,6 +563,106 @@ postgres('Charge now vs a stamped membership-dues invoice (B08)', () => {
   });
 });
 
+// The stamp's lifetime after the mint: it can be kept or removed, never
+// created or left lying about on an invoice that no longer is the month's
+// dues, and a voided stamped invoice cannot be restored beside its replacement.
+postgres('membership-dues stamp lifetime — void/unvoid and edits (B08)', () => {
+  const InvoiceService = require('../services/invoice');
+  beforeAll(() => { mockPg = knex({ client: 'pg', connection, pool: { min: 0, max: 8 } }); });
+  afterAll(async () => { if (mockPg) await mockPg.destroy(); });
+
+  async function mintDues(f, label) {
+    const visit = await seedVisit(f, { label });
+    expect(await complete(f, visit)).toMatchObject({ status: 200 });
+    const rows = await invoicesFor(f);
+    return { visit, invoice: rows.find((r) => r.scheduled_service_id === visit) };
+  }
+  const stampedOf = (inv) => (inv.line_items || []).find((li) => li.membership_dues_month);
+  const reload = (id) => mockPg('invoices').where({ id }).first();
+
+  test('void A, a replacement B bills the month → unvoid A is refused naming B; void A with nothing else → unvoid allowed and A covers the month again', async () => {
+    const f = await seedMember();
+    try {
+      const a = await mintDues(f, 'Lawn Care');
+      await mockPg('invoices').where({ id: a.invoice.id }).update({ status: 'void' });
+      // Nothing else bills the month: restoring A is allowed and A covers it again.
+      await InvoiceService.unvoidInvoice(a.invoice.id);
+      expect((await reload(a.invoice.id)).status).toBe('draft');
+      const { monthlyDuesCollected } = require('../services/billing-lane');
+      expect(await monthlyDuesCollected(mockPg, f.customerId, new Date())).toBe(true);
+      // Void again; a later plan visit bills the month (B)…
+      await mockPg('invoices').where({ id: a.invoice.id }).update({ status: 'void' });
+      const b = await mintDues(f, 'Pest Control');
+      expect(b.invoice.id).not.toBe(a.invoice.id);
+      // …so restoring A would bill it twice.
+      await expect(InvoiceService.unvoidInvoice(a.invoice.id)).rejects.toThrow(new RegExp(`already billed on invoice ${b.invoice.invoice_number}`));
+      expect((await reload(a.invoice.id)).status).toBe('void');
+    } finally { await cleanup(f); }
+  });
+
+  test('void A, the cron collected the month → unvoid A is refused naming the payment', async () => {
+    const f = await seedMember();
+    try {
+      const a = await mintDues(f, 'Lawn Care');
+      await mockPg('invoices').where({ id: a.invoice.id }).update({ status: 'void' });
+      const paymentId = randomUUID();
+      await mockPg('payments').insert({ id: paymentId, customer_id: f.customerId, amount: 49, status: 'paid', payment_date: etDateString(),
+        description: 'Silver WaveGuard Monthly — Fixture', metadata: JSON.stringify({ billed_month: monthOf(etDateString()) }) });
+      await expect(InvoiceService.unvoidInvoice(a.invoice.id)).rejects.toThrow(new RegExp(`already collected \\(payment ${paymentId}\\)`));
+      expect((await reload(a.invoice.id)).status).toBe('void');
+    } finally { await cleanup(f); }
+  });
+
+  test('editing a stamped line\'s AMOUNT or SERVICE strips the marker → the next unpriced plan visit bills the month', async () => {
+    for (const edit of [{ unit_price: 60, amount: 60 }, { description: 'Something else entirely', category: 'Other' }]) {
+      const f = await seedMember();
+      try {
+        const a = await mintDues(f, 'Lawn Care');
+        const lines = a.invoice.line_items.map((li) => (li.membership_dues_month ? { ...li, ...edit } : li));
+        await InvoiceService.update(a.invoice.id, { line_items: lines });
+        expect(stampedOf(await reload(a.invoice.id))).toBeUndefined();
+        // The month is uncovered again: the next plan visit mints dues.
+        await mintDues(f, 'Pest Control');
+        expect((await liveInvoicesFor(f)).filter((r) => stampedOf(r))).toHaveLength(1);
+        expect(await invoicesFor(f)).toHaveLength(2);
+      } finally { await cleanup(f); }
+    }
+  });
+
+  test('an edit that leaves the dues line intact (an extra line added) keeps the marker', async () => {
+    const f = await seedMember();
+    try {
+      const a = await mintDues(f, 'Lawn Care');
+      const lines = [...a.invoice.line_items, { description: 'Gate fee', quantity: 1, unit_price: 10, amount: 10, category: 'Fee' }];
+      await InvoiceService.update(a.invoice.id, { line_items: lines });
+      expect(stampedOf(await reload(a.invoice.id))).toMatchObject({ membership_dues_month: monthOf(etDateString()), amount: 49 });
+      await mintDues(f, 'Pest Control').catch(() => {});
+      expect(await invoicesFor(f)).toHaveLength(1);
+    } finally { await cleanup(f); }
+  });
+
+  test('a client-supplied marker is ignored: never ADDED by an edit, never kept by create()', async () => {
+    const f = await seedMember();
+    try {
+      const priced = await seedVisit(f, { label: 'Add-on Treatment', estimatedPrice: 49 });
+      await mockPg('scheduled_services').where({ id: priced }).update({ is_recurring: false });
+      await complete(f, priced);
+      const [plain] = await invoicesFor(f);
+      expect(stampedOf(plain)).toBeUndefined();
+      const forged = plain.line_items.map((li) => ({ ...li, membership_dues_month: monthOf(etDateString()) }));
+      await InvoiceService.update(plain.id, { line_items: forged });
+      expect(stampedOf(await reload(plain.id))).toBeUndefined();
+      const created = await InvoiceService.create({
+        customerId: f.customerId,
+        lineItems: [{ description: 'Manual', quantity: 1, unit_price: 49, amount: 49, membership_dues_month: monthOf(etDateString()) }],
+      });
+      expect(stampedOf(await reload(created.id))).toBeUndefined();
+      const { monthlyDuesCollected } = require('../services/billing-lane');
+      expect(await monthlyDuesCollected(mockPg, f.customerId, new Date())).toBe(false);
+    } finally { await cleanup(f); }
+  });
+});
+
 // The month key itself, straight against the helper: a visit instant late on
 // the last ET day is that month's, even though UTC has already rolled over.
 postgres('monthlyDuesCollected — ET month attribution of a stamped dues invoice (B08)', () => {

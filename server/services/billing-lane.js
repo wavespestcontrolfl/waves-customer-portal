@@ -948,6 +948,16 @@ async function acquireMembershipDuesMonthLock(trx, customerId, month) {
   );
 }
 
+// Non-blocking sibling for an OFFICE action that must not wait (un-voiding a
+// stamped dues invoice): true when this transaction now holds the lock.
+async function tryAcquireMembershipDuesMonthLock(trx, customerId, month) {
+  const res = await trx.raw(
+    'SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS acquired',
+    ['membership.dues_month', `${customerId}:${month}`],
+  );
+  return res?.rows?.[0]?.acquired === true;
+}
+
 // Is THIS ET month's membership dues covered? Mirrors the monthly cron's
 // already-charged check: the metadata.billed_month stamp on a paid /
 // processing payment is authoritative (month-of-obligation attribution — a
@@ -970,7 +980,15 @@ async function monthlyDuesCollected(dbConn, customerId, now = new Date(), {
 } = {}) {
   const { etDateString } = require('../utils/datetime-et');
   const monthKey = etDateString(now).slice(0, 7);
-  const row = await dbConn('payments')
+  if (await findCollectedDuesPayment(dbConn, customerId, monthKey)) return true;
+  return !!(await findLiveStampedDuesInvoice(dbConn, customerId, monthKey, { excludeScheduledServiceId, openInvoiceCovers }));
+}
+
+// The paid / processing payment the cron (or Charge now / a retry rung)
+// collected for this ET month — billed_month stamp first, payment month +
+// the canonical "WaveGuard Monthly" description as the legacy fallback.
+async function findCollectedDuesPayment(dbConn, customerId, monthKey) {
+  return (await dbConn('payments')
     .where({ customer_id: customerId })
     .whereIn('status', ['paid', 'processing'])
     .where(function billedThisMonth() {
@@ -981,9 +999,7 @@ async function monthlyDuesCollected(dbConn, customerId, now = new Date(), {
             .andWhere('description', 'like', '%WaveGuard Monthly%');
         });
     })
-    .first('id');
-  if (row) return true;
-  return !!(await findLiveStampedDuesInvoice(dbConn, customerId, monthKey, { excludeScheduledServiceId, openInvoiceCovers }));
+    .first('id')) || null;
 }
 
 // The live completion-minted dues invoice for a customer + ET month, or null
@@ -994,6 +1010,7 @@ async function monthlyDuesCollected(dbConn, customerId, now = new Date(), {
 // processing.
 async function findLiveStampedDuesInvoice(dbConn, customerId, monthKey, {
   excludeScheduledServiceId = null,
+  excludeInvoiceId = null,
   openInvoiceCovers = true,
 } = {}) {
   // Lazy, like the status vocabulary below: invoice.js requires this module.
@@ -1015,6 +1032,7 @@ async function findLiveStampedDuesInvoice(dbConn, customerId, monthKey, {
       this.whereNull('scheduled_service_id').orWhereNot('scheduled_service_id', excludeScheduledServiceId);
     });
   }
+  if (excludeInvoiceId) invoiceQuery.whereNot({ id: excludeInvoiceId });
   return (await invoiceQuery.first('id', 'status', 'scheduled_service_id', 'invoice_number')) || null;
 }
 
@@ -1723,6 +1741,8 @@ module.exports = {
   predictCompletionBilling,
   monthlyDuesCollected,
   findLiveStampedDuesInvoice,
+  findCollectedDuesPayment,
+  tryAcquireMembershipDuesMonthLock,
   siblingCoverageForSchedule,
   collectionStateForCoveredInvoice,
   siblingInvoiceCoverageVerdict,
