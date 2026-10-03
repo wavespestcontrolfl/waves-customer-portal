@@ -418,6 +418,12 @@ const DECISION_ONLY_ALERT_TYPES = Object.freeze(['visit_not_closed_out']);
 // Same terminal-status set clears both.
 const OVERDUE_ALERT_TYPES = ['tech_late', 'unassigned_overdue'];
 
+// Cleared by the same terminal-status transitions as the overdue family but
+// NOT part of it (the no-show detector reads OVERDUE_ALERT_TYPES for its own
+// dedupe). The pre-day spray hold (services/lawn-preday-spray-check.js) is
+// moot once the visit starts, is done, or is off the day.
+const STATUS_CLEARED_ALERT_TYPES = [...OVERDUE_ALERT_TYPES, 'lawn_spray_hold'];
+
 /**
  * Resolve every open overdue-family alert (tech_late +
  * unassigned_overdue) for a job when the job's new status makes
@@ -451,7 +457,7 @@ async function autoResolveOverdueAlertsForJob({ jobId, resolvedBy, trx, toStatus
   }
   const t = trx || db;
   const openAlerts = await t('dispatch_alerts')
-    .whereIn('type', OVERDUE_ALERT_TYPES)
+    .whereIn('type', STATUS_CLEARED_ALERT_TYPES)
     .where({ job_id: jobId })
     .whereNull('resolved_at')
     .select('id');

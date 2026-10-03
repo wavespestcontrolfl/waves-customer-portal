@@ -73,12 +73,22 @@ function hourlyForSprayCheck(rows) {
   });
 }
 
-// Inches that fell in the whole hours [fromMs, fromMs + hours): the slots
-// stamped in (from, from + hours]. Null unless every slot has a reading.
-function rainInches(rows, fromMs, hours) {
+// Inches of rain over the label interval [arrival, arrival + hours], hours
+// possibly fractional (30 min, 1.5 h). Open-Meteo stamps a value at hour S as
+// the rain in the hour ENDING at S, i.e. [S-1h, S]. The rule: sum EVERY slot
+// whose hour overlaps the interval, so the end rounds UP to the next slot and
+// an interval shorter than an hour still reads the slot containing the
+// arrival. That is the slots S with arrival < S <= ceil((arrival + hours) /
+// 1h) * 1h. A partly overlapping hour counts whole (it can only over-state
+// rain, never lose a hold). fetchPropertyForecast's own total counts only
+// whole hours INSIDE a window, the wrong tool for a sub-hour interval.
+// Null unless every counted slot has a reading.
+function rainInches(rows, arrivalMs, hours) {
   const byMs = new Map(rows.map((r) => [Date.parse(r.at), r]));
+  const first = Math.floor(arrivalMs / HOUR_MS) * HOUR_MS + HOUR_MS;
+  const last = Math.ceil((arrivalMs + hours * HOUR_MS) / HOUR_MS) * HOUR_MS;
   let total = 0;
-  for (let slot = fromMs + HOUR_MS; slot <= fromMs + hours * HOUR_MS; slot += HOUR_MS) {
+  for (let slot = first; slot <= last; slot += HOUR_MS) {
     const row = byMs.get(slot);
     if (!row || row.precipitation_in == null) return null;
     total += Number(row.precipitation_in);
@@ -86,17 +96,20 @@ function rainInches(rows, fromMs, hours) {
   return Math.round(total * 100) / 100;
 }
 
+// The interval as the label states it: "30 min", "1.5 h", "6 h".
+const intervalLabel = (hours) => (hours < 1 ? `${Math.round(hours * 60)} min` : `${trimNumber(hours)} h`);
+
 // One held product → its card line. `reason` is buildSprayCheck's own text
 // ("under 50°F", "over 90°F", "wind over 15 mph", "rain likely inside 6 h"),
 // joined with ", "; each piece is restated with the measured forecast number.
-function describeHold({ product, reason, limits, forecast, rows, rainFromMs, arrivalLabel, windowHours }) {
+function describeHold({ product, reason, limits, forecast, rows, arrivalMs, arrivalLabel, windowHours }) {
   const parts = [];
   const after = arrivalLabel ? `after the ${arrivalLabel} arrival` : 'after the planned arrival';
   for (const piece of String(reason || '').split(', ')) {
     if (piece.startsWith('rain')) {
       const hours = limits.rainFreeHours;
-      const inches = hours != null ? rainInches(rows, rainFromMs, hours) : null;
-      if (inches != null && inches >= RAIN_MIN_INCHES) parts.push({ kind: 'rain', text: `${trimNumber(inches)} in of rain forecast in the ${trimNumber(hours)} h ${after}`, inches });
+      const inches = hours != null ? rainInches(rows, arrivalMs, hours) : null;
+      if (inches != null && inches >= RAIN_MIN_INCHES) parts.push({ kind: 'rain', text: `${trimNumber(inches)} in of rain forecast in the ${intervalLabel(hours)} ${after}`, inches });
     } else if (piece.startsWith('wind')) {
       if (forecast?.windMph != null) parts.push({ kind: 'wind', text: `wind forecast up to ${trimNumber(forecast.windMph)} mph in the ${windowHours} h ${after} (label limit ${trimNumber(limits.maxWindMph)} mph)`, windMph: forecast.windMph });
     } else if (piece.startsWith('under')) {
@@ -134,7 +147,7 @@ function holdsForVisit({ ctx, forecast }) {
     labelSources: ctx.labelSources,
   });
   const verdictFor = (id) => sprayCheck.verdicts.find((v) => v.productId === id);
-  const rainFromMs = Math.floor(ctx.arrival.getTime() / HOUR_MS) * HOUR_MS;
+  const arrivalMs = ctx.arrival.getTime();
   const holds = [];
   const seen = new Set();
   for (const line of primaryLines) {
@@ -147,7 +160,7 @@ function holdsForVisit({ ctx, forecast }) {
       limits: JobCard.sprayLimitsFor(line.product, ctx.labelSources[line.product.id]),
       forecast: sprayCheck.forecast,
       rows,
-      rainFromMs,
+      arrivalMs,
       arrivalLabel,
       windowHours: sprayCheck.windowHours,
     });

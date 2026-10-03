@@ -205,3 +205,60 @@ describe('lawn pre-day spray check', () => {
     expect(alerts).toHaveLength(0);
   });
 });
+
+describe('rain over a label interval that is not a whole number of hours', () => {
+  beforeEach(() => { process.env.GATE_LAWN_PREDAY_SPRAY_CHECK = 'true'; jest.clearAllMocks(); });
+  afterEach(() => { delete process.env.GATE_LAWN_PREDAY_SPRAY_CHECK; });
+
+  // Slot i is stamped ARRIVAL + i h and holds the rain of the hour ENDING there.
+  const withInterval = (minutes) => ({ ...herbicide, rainfast_minutes: minutes, max_wind_mph: null, min_temp_f: null, max_temp_f: null });
+  async function run({ minutes, slot, windowStart = '09:00:00', arrival = ARRIVAL }) {
+    const alerts = [];
+    const d = deps({
+      ctx: ctxFor([baseLine(withInterval(minutes))], { windowStart, arrival }),
+      fc: forecast({ rain: slot == null ? {} : { [slot]: 0.2 }, prob: 80 }),
+      alerts,
+    });
+    await Sweep.runSweep({ dbh: fakeDb({ alerts }), now: NOW, deps: d });
+    return alerts.map((a) => a.payload.lines[0]);
+  }
+  const text = (inches, interval, time = '9:00 AM') => `Sample Herbicide: hold. ${inches} in of rain forecast in the ${interval} after the ${time} arrival. Move the visit to a clearer window.`;
+
+  test('30 minutes: the slot containing the arrival counts, the next one does not', async () => {
+    expect(await run({ minutes: 30, slot: 1 })).toEqual([text('0.2', '30 min')]);
+    expect(await run({ minutes: 30, slot: 2 })).toEqual([]);
+  });
+
+  test('1.5 hours: the partly covered second slot counts, the third does not', async () => {
+    expect(await run({ minutes: 90, slot: 2 })).toEqual([text('0.2', '1.5 h')]);
+    expect(await run({ minutes: 90, slot: 3 })).toEqual([]);
+  });
+
+  test('6 hours: the last slot counts, the one after does not', async () => {
+    expect(await run({ minutes: 360, slot: 6 })).toEqual([text('0.2', '6 h')]);
+    expect(await run({ minutes: 360, slot: 7 })).toEqual([]);
+  });
+
+  test('arrival not on the hour: the end rounds up to the next slot', async () => {
+    const half = new Date(ARRIVAL.getTime() + HOUR / 2); // 9:30 AM ET
+    // 30 min from 9:30 ends at 10:00: the 10:00 slot (index 1) counts, 11:00 does not.
+    expect(await run({ minutes: 30, slot: 1, windowStart: '09:30:00', arrival: half })).toEqual([text('0.2', '30 min', '9:30 AM')]);
+    expect(await run({ minutes: 30, slot: 2, windowStart: '09:30:00', arrival: half })).toEqual([]);
+    // 1.5 h from 9:30 ends at 11:00: index 2 counts, index 3 does not.
+    expect(await run({ minutes: 90, slot: 2, windowStart: '09:30:00', arrival: half })).toEqual([text('0.2', '1.5 h', '9:30 AM')]);
+    expect(await run({ minutes: 90, slot: 3, windowStart: '09:30:00', arrival: half })).toEqual([]);
+  });
+
+  test('no measured rain: no card whatever the interval', async () => {
+    for (const minutes of [30, 90, 360]) expect(await run({ minutes, slot: null })).toEqual([]);
+  });
+
+  test('wind in the hour containing an off-the-hour arrival still holds', async () => {
+    const alerts = [];
+    const half = new Date(ARRIVAL.getTime() + HOUR / 2);
+    const d = deps({ ctx: ctxFor([baseLine(herbicide)], { windowStart: '09:30:00', arrival: half }), fc: forecast({ wind: (i) => (i === 0 ? 22 : 6) }), alerts });
+    await Sweep.runSweep({ dbh: fakeDb({ alerts }), now: NOW, deps: d });
+    expect(alerts[0].payload.lines[0]).toMatch(/^Sample Herbicide: hold\. Wind forecast up to 22 mph in the 4 h after the 9:30 AM arrival/);
+  });
+});
+

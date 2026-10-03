@@ -106,6 +106,20 @@ describe('autoResolveOverdueAlertsForJob stamps every resolve as automatic', () 
     }));
   });
 
+  test('the pre-day spray hold card is cleared by the same transitions, beside the overdue family', async () => {
+    const row = { id: 'alert-9', type: 'lawn_spray_hold', payload: { source: 'lawn_preday_spray_check' }, resolved_at: 'NOW()' };
+    const { trx, selectForOpenAlerts } = fakeTrx({ openAlertIds: ['alert-9'], updateReturns: [[row]] });
+    const whereIn = jest.fn((col, types) => ({ where: () => ({ whereNull: () => ({ select: selectForOpenAlerts }) }) }));
+    const real = trx.getMockImplementation();
+    trx.mockImplementation((table) => (table === 'dispatch_alerts' ? { ...real(table), whereIn } : real(table)));
+
+    const result = await dispatchAlerts.autoResolveOverdueAlertsForJob({ jobId: 'visit-1', trx, toStatus: 'completed' });
+
+    expect(whereIn).toHaveBeenCalledWith('type', expect.arrayContaining(['tech_late', 'unassigned_overdue', 'lawn_spray_hold']));
+    expect(result).toEqual({ resolved: 1 });
+    expect(dispatchAlerts.OVERDUE_ALERT_TYPES).not.toContain('lawn_spray_hold');
+  });
+
   test('no-op statuses never touch dispatch_alerts at all', async () => {
     const { trx } = fakeTrx();
     const result = await dispatchAlerts.autoResolveOverdueAlertsForJob({ jobId: 'visit-1', trx, toStatus: 'rescheduled' });
