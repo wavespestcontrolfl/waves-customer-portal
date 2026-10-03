@@ -226,7 +226,9 @@ async function findCapacitySlots(opts) {
       });
       if (!context) continue;
       if (opts.arrivalWindow?.serviceId && (await require('../technician-capabilities')
-        .inactiveCapabilitiesForServices(db, [tech.id], [context.target])).length) continue;
+        // A whole visit carries every member's service: the technician must
+        // be able to do all of them.
+        .inactiveCapabilitiesForServices(db, [tech.id], context.target.memberServices || [context.target])).length) continue;
       const floor = Math.max(SHIFT.startMinutes, startFloorFor(date, opts.earliestStartMin, opts.startFloorByDate),
         date === today ? parts.hour * 60 + parts.minute + 30 : 0);
       // Enumerate every on-the-hour start through the shift close and let

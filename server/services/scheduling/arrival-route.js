@@ -85,13 +85,17 @@ function foldVisitUnit(target, stored, siblings) {
     && String(row.window_start || '').slice(0, 5) === String(stored.window_start || '').slice(0, 5)
     && !['en_route', 'on_site'].includes(row.status));
   if (!clean) return null;
-  // The tapped member's work is the EDITED row's (a pending length change
-  // rides `changes` onto the target); the siblings' is as stored.
-  const work = row => workDuration({ ...row, planning_exempt: true });
+  // The tapped member keeps its own row untouched: its work is resolved per
+  // candidate window by buildPlacementTarget, exactly as for a visit alone
+  // (so the offered hours and the picked-hour verdict agree, and a pending
+  // length change counts). The siblings' work is as stored and is added
+  // there. Every member's service is kept for the technician capability
+  // checks, which must cover the whole combo.
   return {
     ...target,
     memberIds: [stored.id, ...siblings.map(row => row.id)],
-    estimated_duration_minutes: work(target) + siblings.reduce((sum, row) => sum + work(row), 0),
+    siblingWorkMinutes: siblings.reduce((sum, row) => sum + workDuration({ ...row, planning_exempt: true }), 0),
+    memberServices: [target, ...siblings].map(row => ({ service_type: row.service_type, service_id: row.service_id })),
   };
 }
 
@@ -291,12 +295,15 @@ function routeDriveMinutes(stops, origin) {
  *  catalog) applies to THIS row; owner minutes apply only to the other
  *  stops already on the route. */
 function buildPlacementTarget(context, windowStart, windowEnd, durationMinutes) {
+  // A whole visit (loadArrivalRouteContext `unit`): its other members' work
+  // is added to the tapped member's. Zero for every other target.
+  const siblingWork = Number(context.target?.siblingWorkMinutes) || 0;
   return {
     ...context.target, window_start: windowStart, window_end: windowEnd,
-    raw_estimate_minutes: Number(context.target?.estimated_duration_minutes) || 0,
+    raw_estimate_minutes: (Number(context.target?.estimated_duration_minutes) || 0) + siblingWork,
     planning_exempt: true,
-    estimated_duration_minutes: context.prospective ? Number(durationMinutes)
-      : Math.max(workDuration({ ...context.target, planning_exempt: true }), Number(durationMinutes) || 0),
+    estimated_duration_minutes: siblingWork + (context.prospective ? Number(durationMinutes)
+      : Math.max(workDuration({ ...context.target, planning_exempt: true }), Number(durationMinutes) || 0)),
   };
 }
 
@@ -649,6 +656,7 @@ async function assertCapacityEligibility(conn, context, serviceTypes) {
   }
   const members = serviceTypes?.map(service_type => ({ service_type }))
     || context.target.reservation_service_mix?.services?.map(service_type => ({ service_type }))
+    || context.target.memberServices
     || [context.target];
   await require('../technician-capabilities').assertCapabilitiesActive(conn, context.target.technician_id, members,
     () => capacityError('technician_unavailable'));
@@ -713,5 +721,5 @@ module.exports = {
   enumerateArrivalPlacements,
   groupRouteStops, workDuration,
   prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder, persistCapacityAllocation, capacityError,
-  _internals: { clockOrder, storedOrderStale, arrivalExceedsGrace, foldVisitUnit, comboRouteCheckLive },
+  _internals: { clockOrder, storedOrderStale, arrivalExceedsGrace, foldVisitUnit, comboRouteCheckLive, buildPlacementTarget },
 };

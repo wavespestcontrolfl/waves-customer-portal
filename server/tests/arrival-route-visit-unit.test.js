@@ -20,7 +20,7 @@ jest.mock('../services/scheduling/day-stops', () => ({
   resolveServiceLocation: async (row) => ({ lat: row.lat, lng: row.lng }),
 }));
 
-const { loadArrivalRouteContext, evaluateArrivalPlacement, _internals: { foldVisitUnit } } = require('../services/scheduling/arrival-route');
+const { loadArrivalRouteContext, evaluateArrivalPlacement, _internals: { foldVisitUnit, buildPlacementTarget } } = require('../services/scheduling/arrival-route');
 
 const DATE = '2035-03-06';
 const stop = (id, over = {}) => ({
@@ -55,20 +55,33 @@ beforeEach(() => { mockDayRows = []; delete process.env.GATE_COMBO_ROUTE_CHECK; 
 afterAll(() => { delete process.env.GATE_COMBO_ROUTE_CHECK; });
 
 describe('foldVisitUnit', () => {
-  test('two services at one stop become one target with their summed work and both ids', () => {
-    const a = stop('a');
-    const b = stop('b', { estimated_duration_minutes: 45, window_start: '09:00:00', window_end: '09:45:00' });
+  test('two services at one stop become one target: both ids, both services, and the sibling\'s work carried beside the tapped row', () => {
+    const a = stop('a', { service_type: 'Pest Control' });
+    const b = stop('b', { estimated_duration_minutes: 45, window_end: '09:45:00', service_type: 'Lawn Care' });
     const unit = foldVisitUnit(a, a, [b]);
     expect(unit.memberIds).toEqual(['a', 'b']);
-    // a: max(60-minute span, 30) = 60; b: max(45-minute span, 45) = 45.
-    expect(unit.estimated_duration_minutes).toBe(105);
     expect(unit.id).toBe('a');
+    // The tapped row is untouched; b's work is max(45-minute span, 45) = 45.
+    expect(unit.estimated_duration_minutes).toBe(30);
+    expect(unit.siblingWorkMinutes).toBe(45);
+    expect(unit.memberServices.map((s) => s.service_type)).toEqual(['Pest Control', 'Lawn Care']);
   });
 
-  test('a pending length change on the tapped service is in the total', () => {
-    const stored = stop('a', { estimated_duration_minutes: 60 });
-    const edited = { ...stored, estimated_duration_minutes: 120 };
-    expect(foldVisitUnit(edited, stored, [stop('b', { estimated_duration_minutes: 60 })]).estimated_duration_minutes).toBe(180);
+  test('the placed work is the tapped service for THIS candidate window plus the siblings, the same from the offered hours and the picked hour', () => {
+    const stored = stop('a', { estimated_duration_minutes: 120, window_start: '09:00:00', window_end: '11:00:00' });
+    const sibling = stop('b', { estimated_duration_minutes: 60, window_end: '10:00:00' });
+    // Offered hours: the context carries the pending length change only.
+    const offered = { target: foldVisitUnit({ ...stored, estimated_duration_minutes: 60 }, stored, [sibling]), prospective: false };
+    // Picked hour: the context also carries the picked window.
+    const picked = { target: foldVisitUnit({ ...stored, estimated_duration_minutes: 60, window_start: '13:00', window_end: '14:00' }, stored, [sibling]), prospective: false };
+    const a = buildPlacementTarget(offered, '13:00', '14:00', 60);
+    const b = buildPlacementTarget(picked, '13:00', '14:00', 60);
+    expect(b.estimated_duration_minutes).toBe(120);
+    // The offered-hours context still holds the stored 120-minute span on the tapped row, as it does for a visit alone.
+    expect(a.estimated_duration_minutes).toBe(180);
+    expect(a.estimated_duration_minutes - 60).toBe(buildPlacementTarget({ target: { ...stored, estimated_duration_minutes: 60 }, prospective: false }, '13:00', '14:00', 60).estimated_duration_minutes);
+    // A visit alone is unchanged by the fold: no sibling minutes.
+    expect(buildPlacementTarget({ target: stored, prospective: false }, '09:00', '11:00', 120).estimated_duration_minutes).toBe(120);
   });
 
   test('not one clean stop: another technician, other or missing coordinates, another day, or a member under way', () => {
@@ -91,7 +104,7 @@ describe('loadArrivalRouteContext({ unit })', () => {
     const context = await load(fakeConn({ target: stop('a'), siblings: [stop('b')] }), { unit: true });
     expect(context.grouped).toBe(false);
     expect(context.target.memberIds).toEqual(['a', 'b']);
-    expect(context.target.estimated_duration_minutes).toBe(120);
+    expect(context.target.siblingWorkMinutes).toBe(60);
     expect(context.rows.map((row) => row.id)).toEqual(['x']);
     // The engine then places it like any single visit, never "unverified" for being grouped.
     const fit = evaluateArrivalPlacement(context, { windowStart: '09:00', windowEnd: '11:00', durationMinutes: 120 });
