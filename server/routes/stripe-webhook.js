@@ -31,7 +31,7 @@ const {
 } = require('../services/stripe-invoice-state');
 const { computeChargeAmount } = require('../services/stripe-pricing');
 const { isEnabled } = require('../config/feature-gates');
-const { INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue, invoiceWithdrawnFromCustomer } = require('../services/invoice-helpers');
+const { INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue, invoiceWithdrawnFromCustomer, invoicePrincipalCents } = require('../services/invoice-helpers');
 const { publicPortalUrl } = require('../utils/portal-url');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 const ReceiptDeliveryQueue = require('../services/receipt-delivery-queue');
@@ -6874,6 +6874,43 @@ function parsePaymentMeta(row) {
   } catch { return {}; }
 }
 
+// The dispute's final outcome (won / lost / warning_closed) already stamped on
+// the payment row for THIS dispute — a created event arriving after it is a late
+// replay and must not flip the row or reopen the invoice.
+function disputeFinalFor(meta, dispute) {
+  return !!meta.dispute_final && meta.dispute_id === dispute.id;
+}
+
+// Flip the disputed payment's row under its own lock, re-reading the CURRENT
+// metadata (never a stale snapshot) so another handler's stamps survive, and
+// refusing when a closure already finalized this dispute. Callers that also
+// touch the invoice hold the invoice lock first (invoice -> payment).
+async function markPaymentDisputed(trx, { payment, dispute, reason, extraMeta = null }) {
+  const fresh = await trx('payments').where({ id: payment.id }).forUpdate().first();
+  const meta = parsePaymentMeta(fresh);
+  if (disputeFinalFor(meta, dispute)) return false;
+  await trx('payments').where({ id: payment.id }).update({
+    status: 'disputed',
+    updated_at: new Date(), // dates the revocation (parentChangedAtSql — Codex #4971 r11)
+    failure_reason: `Dispute: ${reason}`,
+    ...(extraMeta ? { metadata: JSON.stringify({ ...meta, ...extraMeta }) } : {}),
+  });
+  return true;
+}
+
+// The invoice a dispute CLOSURE acts on, found so a concurrent dispute.created
+// cannot hide it: created clears the invoice's PI and writes dispute_invoice_id
+// in ONE transaction, so looking up by PI first and the (freshly re-read)
+// payment metadata second always hits one of the two.
+async function findInvoiceForDisputeClosure(payment) {
+  if (payment.stripe_payment_intent_id) {
+    const byPi = await db('invoices').where({ stripe_payment_intent_id: payment.stripe_payment_intent_id }).first();
+    if (byPi) return byPi;
+  }
+  const fresh = await db('payments').where({ id: payment.id }).first();
+  return findInvoiceForPayment(fresh || payment);
+}
+
 // A locked invoice row the disputed payment (still) settles: status paid /
 // processing under exactly the disputed PI. Anything else — a replacement
 // payment now owns it, or it left the settled shape — means do not reopen.
@@ -6919,10 +6956,11 @@ async function removeCardSurchargeFromReopenedInvoice(trx, { invoice, payment })
   const restoredCents = shape.totalCents - shape.surchargeCents;
   // Never below what the invoice's line items bill, nor below the credit
   // already applied (amount due would go negative).
-  const lineFloorCents = Math.round(((Number(invoice.subtotal) || 0)
-    - (Number(invoice.discount_amount) || 0) + (Number(invoice.tax_amount) || 0)) * 100);
+  // What the invoice itself bills: invoice-helpers' invoicePrincipalCents, the
+  // expression create() stores as `total` (subtotal - discount + tax - the
+  // deposit_credit lines), so an estimate deposit never trips this floor.
   if (restoredCents <= 0 || restoredCents < shape.creditCents
-    || (invoice.subtotal != null && restoredCents < lineFloorCents)) {
+    || (invoice.subtotal != null && restoredCents < invoicePrincipalCents(invoice))) {
     logger.warn(`[stripe-webhook] invoice ${invoice.id}: surcharge ${shape.surchargeCents}c not removed on reopen — restored total ${restoredCents}c would fall below its line items / applied credit`);
     return false;
   }
@@ -7535,12 +7573,6 @@ async function handleDisputeCreated(dispute) {
     if (createdPaymentMeta.dispute_final && createdPaymentMeta.dispute_id === dispute.id) {
       logger.warn(`[stripe-webhook] Dispute ${dispute.id} already closed (${createdPaymentMeta.dispute_final}) — created event is a late replay, skipping ledger writes`);
     } else {
-    await db('payments').where({ id: payment.id }).update({
-      status: 'disputed',
-      updated_at: new Date(), // dates the revocation (parentChangedAtSql — Codex #4971 r11)
-      failure_reason: `Dispute: ${reason}`,
-    });
-
     // (Statement payments are handled by the PI-keyed block above and return early.)
     // payments has no invoice_id column — the linkage lives in the
     // metadata JSON and on invoices.stripe_payment_intent_id. 'overdue'
@@ -7554,19 +7586,12 @@ async function handleDisputeCreated(dispute) {
     disputedInvoiceId = invoice?.id || null;
     const invoicePi = invoice?.stripe_payment_intent_id ? String(invoice.stripe_payment_intent_id) : null;
     const disputedPi = payment.stripe_payment_intent_id ? String(payment.stripe_payment_intent_id) : null;
+    let reopenedInvoice = false;
     // Only reopen when THIS disputed payment still settles the invoice —
     // if a different PI (or a cash/check reconcile with no PI) owns it,
     // the money in question isn't what's backing the invoice.
     if (invoice && ['paid', 'processing'].includes(invoice.status)
       && invoicePi && disputedPi && invoicePi === disputedPi) {
-      // Persist the binding on the payment row BEFORE clearing the
-      // invoice's PI: card-on-file payment rows don't carry invoice_id
-      // in metadata, and dispute-closed (won) must still find this
-      // invoice to restore it.
-      await db('payments').where({ id: payment.id }).update({
-        metadata: JSON.stringify({ ...createdPaymentMeta, dispute_invoice_id: invoice.id }),
-      });
-
       // Annual-prepay coverage must not ride on provisionally clawed-back
       // money: SUSPEND (active → payment_pending, never cancel) any live
       // term this invoice paid for. A won dispute restores the invoice to
@@ -7595,12 +7620,25 @@ async function handleDisputeCreated(dispute) {
         // step's billing-mode reset locks the customer, and the lock order
         // must stay term -> customer -> invoice, never invoice -> customer.
         const lockedInvoice = await trx('invoices').where({ id: invoice.id }).forUpdate().first();
-        if (!lockedInvoiceStillBacksDispute(lockedInvoice, disputedPi)) {
-          // Throw to roll back the term suspension above: a suspended term
-          // beside an invoice that was never reopened is the half-state this
-          // transaction exists to prevent. Caught right outside.
-          throw Object.assign(new Error('invoice no longer settled by the disputed payment'), { disputeReopenSuperseded: true });
+        // Then the payment row (invoice -> payment, the order every dispute
+        // writer shares) and its CURRENT dispute outcome: a closure that
+        // committed first has already written dispute_final here, and a
+        // reopen after the final outcome would strand a won invoice overdue.
+        // Both refusals come before any write; the sentinel rolls the term
+        // suspension above back with them.
+        const lockedPayment = await trx('payments').where({ id: payment.id }).forUpdate().first();
+        const lockedPaymentMeta = parsePaymentMeta(lockedPayment);
+        if (disputeFinalFor(lockedPaymentMeta, dispute)
+          || !lockedInvoiceStillBacksDispute(lockedInvoice, disputedPi)) {
+          // A suspended term beside an invoice that was never reopened is the
+          // half-state this transaction exists to prevent. Caught right outside.
+          throw Object.assign(new Error('dispute already final or invoice no longer settled by the disputed payment'), { disputeReopenSuperseded: true });
         }
+        // Persist the binding on the payment row in the SAME transaction that
+        // clears the invoice's PI: card-on-file payment rows don't carry
+        // invoice_id in metadata, and dispute-closed (won/lost) must still
+        // find this invoice to restore or claw back.
+        await markPaymentDisputed(trx, { payment, dispute, reason, extraMeta: { dispute_invoice_id: invoice.id } });
         await trx('invoices').where({ id: invoice.id }).update({
           status: 'overdue',
           paid_at: null,
@@ -7616,10 +7654,16 @@ async function handleDisputeCreated(dispute) {
         // in the reopened invoice's total as principal.
         await removeCardSurchargeFromReopenedInvoice(trx, { invoice: lockedInvoice, payment });
       });
+        reopenedInvoice = true;
       } catch (reopenErr) {
         if (!reopenErr?.disputeReopenSuperseded) throw reopenErr;
-        logger.warn(`[stripe-webhook] dispute ${dispute.id}: invoice ${invoice.id} no longer settled by disputed PI ${disputedPi} at reopen — not reopening`);
+        logger.warn(`[stripe-webhook] dispute ${dispute.id}: invoice ${invoice.id} not reopened — the dispute is already final or the invoice is no longer settled by disputed PI ${disputedPi}`);
       }
+    }
+    // No reopen (not owned by this payment, or superseded above): the payment
+    // itself is still disputed money — unless a closure already finalized it.
+    if (!reopenedInvoice) {
+      await db.transaction((trx) => markPaymentDisputed(trx, { payment, dispute, reason }));
     }
     }
   }
@@ -8412,34 +8456,47 @@ async function handleDisputeClosed(dispute) {
       }
       // Funds reinstated — restore paid status (a VALIDATED statement settlement,
       // or an invoice payment).
-      await db('payments').where({ id: payment.id }).update({ status: 'paid', metadata: finalMeta });
-      if (payment.statement_id) {
-        await restoreStatementCascadeForDispute(payment.statement_id, payment.stripe_payment_intent_id);
-      }
-      const invoice = await findInvoiceForPayment(payment);
-      const wonInvoicePi = invoice?.stripe_payment_intent_id ? String(invoice.stripe_payment_intent_id) : null;
+      const invoice = await findInvoiceForDisputeClosure(payment);
       const wonDisputedPi = payment.stripe_payment_intent_id ? String(payment.stripe_payment_intent_id) : null;
-      // Only restore when no REPLACEMENT payment owns the invoice: after
-      // dispute.created reopened it, the customer may have re-paid with
-      // a new PI (now paid or processing). Marking that invoice paid
-      // here would double-settle it while the replacement still
-      // collects. The reopen path cleared the PI, so a null PI means
-      // the dispute still owns it.
-      if (invoice && invoice.status !== 'paid'
-        && (!wonInvoicePi || (wonDisputedPi && wonInvoicePi === wonDisputedPi))) {
-        // One transaction with the surcharge put-back (B05): the invoice is
-        // never paid-again with the surcharge still out of its total.
+      // The final outcome is written on the payment row INSIDE the transaction
+      // that holds the invoice lock (invoice -> payment, like dispute.created),
+      // so created and this closure are ordered by that one lock: created first
+      // = this transaction finds the invoice reopened and restores it; this
+      // first = created finds dispute_final under its own payment lock and
+      // never reopens (see dispute.created). The statement cascade and the
+      // payment-only shape (no invoice) write the same stamp without one.
+      // `wonOwnsInvoice` is decided on the LOCKED row only — never on the
+      // pre-lock read — and gates everything below that acts on the invoice.
+      let wonOwnsInvoice = false;
+      const writeWonFinal = async (trx) => {
+        const fresh = await trx('payments').where({ id: payment.id }).forUpdate().first();
+        await trx('payments').where({ id: payment.id }).update({
+          status: 'paid',
+          metadata: JSON.stringify({ ...parsePaymentMeta(fresh), dispute_id: dispute.id, dispute_final: status }),
+        });
+      };
+      if (invoice) {
         await db.transaction(async (trx) => {
-          // Lock + re-read FIRST and re-run the replacement-owner guard on the
-          // locked row: a replacement card payment can settle between the read
-          // above and here, and flipping it back to the disputed PI (or adding
-          // the old surcharge to ITS total) would be a money error. The flip
-          // below was an unconditional write on the stale read before B05.
+          // Lock + re-read FIRST and run the replacement-owner guard on the
+          // locked row: a replacement card payment can settle between the
+          // read above and here, and flipping it back to the disputed PI (or
+          // adding the old surcharge to ITS total) would be a money error.
           const lockedWonInvoice = await trx('invoices').where({ id: invoice.id }).forUpdate().first();
+          await writeWonFinal(trx);
+          const lockedPi = lockedWonInvoice?.stripe_payment_intent_id ? String(lockedWonInvoice.stripe_payment_intent_id) : null;
+          wonOwnsInvoice = !!lockedWonInvoice && (!lockedPi || (!!wonDisputedPi && lockedPi === wonDisputedPi));
+          // Only restore when no REPLACEMENT payment owns the invoice: after
+          // dispute.created reopened it, the customer may have re-paid with
+          // a new PI (now paid or processing). Marking that invoice paid
+          // here would double-settle it while the replacement still
+          // collects. The reopen path cleared the PI, so a null PI means
+          // the dispute still owns it.
           if (!lockedInvoiceOwedToWonDispute(lockedWonInvoice, wonDisputedPi)) {
-            logger.warn(`[stripe-webhook] dispute ${dispute.id} won: invoice ${invoice.id} changed before restore (status ${lockedWonInvoice?.status}, PI ${lockedWonInvoice?.stripe_payment_intent_id || 'none'}) — not restoring`);
+            logger.warn(`[stripe-webhook] dispute ${dispute.id} won: invoice ${invoice.id} not restored (status ${lockedWonInvoice?.status}, PI ${lockedWonInvoice?.stripe_payment_intent_id || 'none'})`);
             return;
           }
+          // One transaction with the surcharge put-back (B05): the invoice is
+          // never paid-again with the surcharge still out of its total.
           await trx('invoices').where({ id: invoice.id }).update({
             status: 'paid',
             paid_at: new Date().toISOString(),
@@ -8450,6 +8507,11 @@ async function handleDisputeClosed(dispute) {
           });
           await reinstateCardSurchargeOnWonInvoice(trx, { invoice: lockedWonInvoice, payment });
         });
+      } else {
+        await db.transaction(writeWonFinal);
+      }
+      if (payment.statement_id) {
+        await restoreStatementCascadeForDispute(payment.statement_id, payment.stripe_payment_intent_id);
       }
       // Restored settlement completes any plan created while the dispute had
       // the invoice reopened (codex r8 P1). Runs for the ALREADY-restored
@@ -8457,9 +8519,10 @@ async function handleDisputeClosed(dispute) {
       // r13 P1): the restore and the plan flip are separate autocommit
       // writes, so a prior delivery may have committed the restore and
       // failed the flip — redelivery then sees status='paid' under the
-      // disputed PI and must still repair it. Throwing + idempotent.
-      if (invoice
-        && (!wonInvoicePi || (wonDisputedPi && wonInvoicePi === wonDisputedPi))) {
+      // disputed PI and must still repair it. Throwing + idempotent. Keyed on
+      // the LOCKED ownership above, so an invoice a replacement payment now
+      // owns is left to that payment's own settlement.
+      if (invoice && wonOwnsInvoice) {
         await require('../services/payment-plans').completeActivePlansForInvoice(invoice.id);
       }
       // Annual-prepay sync on the restored money: a paid PREPAY invoice
@@ -8492,63 +8555,74 @@ async function handleDisputeClosed(dispute) {
       // then read as paid BEFORE the change and lose its refund-or-honor
       // alert. Only a lost-closure with no prior created event dates the
       // revocation itself.
-      const priorStatus = String((await db('payments').where({ id: payment.id }).first('status'))?.status || '').toLowerCase();
-      await db('payments').where({ id: payment.id }).update({
-        status: 'disputed',
-        ...(priorStatus === 'disputed' ? {} : { updated_at: new Date() }),
-        failure_reason: `Dispute lost — $${amount} returned to customer`,
-        metadata: finalMeta,
-      });
-      // Statement: ensure the cascade is reversed (idempotent — created already
-      // did it, but closed(lost) can arrive without a created event).
-      if (payment.statement_id) await reverseStatementCascadeForDispute(payment.statement_id, payment.stripe_payment_intent_id, 'dispute.lost');
-      const lostInvoice = await findInvoiceForPayment(payment);
-      const lostInvoicePi = lostInvoice?.stripe_payment_intent_id ? String(lostInvoice.stripe_payment_intent_id) : null;
+      // The final outcome is written on the payment row INSIDE the transaction
+      // that holds the invoice lock (invoice -> payment, like dispute.created
+      // and the won closure), from a fresh read of the row under its lock — so
+      // the three handlers are ordered by that one invoice lock. The statement
+      // cascade and the payment-only shape (no invoice) write it alone.
+      const lostInvoice = await findInvoiceForDisputeClosure(payment);
       const lostDisputedPi = payment.stripe_payment_intent_id ? String(payment.stripe_payment_intent_id) : null;
-      // Only reopen when the disputed PI still settles the invoice.
-      // Normal flow: dispute.created already reopened it, the customer
-      // re-paid with a NEW PI, then closed(lost) lands days later —
-      // that newly paid invoice must not be flipped back to overdue.
-      if (lostInvoice && ['paid', 'processing'].includes(lostInvoice.status)
-        && lostInvoicePi && lostDisputedPi && lostInvoicePi === lostDisputedPi) {
-        // Persist the invoice binding (mirrors dispute-created): the reopen
-        // below clears the invoice's PI, so a Stripe retry of THIS event can
-        // only re-find the invoice — and re-run the prepay claw-back sync —
-        // through the metadata.
-        await db('payments').where({ id: payment.id }).update({
-          metadata: JSON.stringify({
-            ...closedPaymentMeta,
-            dispute_id: dispute.id,
-            dispute_final: status,
-            dispute_invoice_id: lostInvoice.id,
-          }),
+      const writeLostFinal = async (trx, extraMeta = null) => {
+        const fresh = await trx('payments').where({ id: payment.id }).forUpdate().first();
+        const freshMeta = parsePaymentMeta(fresh);
+        const priorStatus = String(fresh?.status || '').toLowerCase();
+        await trx('payments').where({ id: payment.id }).update({
+          status: 'disputed',
+          ...(priorStatus === 'disputed' ? {} : { updated_at: new Date() }),
+          failure_reason: `Dispute lost — $${amount} returned to customer`,
+          metadata: JSON.stringify({ ...freshMeta, dispute_id: dispute.id, dispute_final: status, ...(extraMeta || {}) }),
         });
+        return freshMeta;
+      };
+      // Decided on the LOCKED invoice row inside the transaction, never on the
+      // pre-lock read: it gates the term clawback below.
+      let lostDisputeOwnedInvoice = false;
+      if (lostInvoice) {
         // Gate first (Codex #4971 r4 P1): a closed(lost) that arrives
         // without its created event reopens a PAID invoice here, revoking a
         // termite parent's paid evidence when this is its prepay invoice.
         await db.transaction(async (trx) => {
           await require('../services/annual-prepay-renewals').acquireTermiteGateAtEntry(trx, { invoiceIds: [lostInvoice.id] });
           // Lock + re-read before any write, re-checking ownership (B05): a
-          // replacement payment may have settled since the read above.
+          // replacement payment may have settled since the read above. Only
+          // reopen when the disputed PI still settles the invoice. Normal
+          // flow: dispute.created already reopened it, the customer re-paid
+          // with a NEW PI, then closed(lost) lands days later — that newly
+          // paid invoice must not be flipped back to overdue.
           const lockedLostInvoice = await trx('invoices').where({ id: lostInvoice.id }).forUpdate().first();
-          if (!lockedInvoiceStillBacksDispute(lockedLostInvoice, lostDisputedPi)) {
-            logger.warn(`[stripe-webhook] dispute ${dispute.id} lost: invoice ${lostInvoice.id} no longer settled by disputed PI ${lostDisputedPi} at reopen (status ${lockedLostInvoice?.status}) — not reopening`);
-            return;
+          const stillBacks = lockedInvoiceStillBacksDispute(lockedLostInvoice, lostDisputedPi);
+          // Persist the invoice binding (mirrors dispute-created) in the same
+          // write as the final outcome: the reopen below clears the invoice's
+          // PI, so a Stripe retry of THIS event can only re-find the invoice
+          // — and re-run the prepay claw-back sync — through the metadata.
+          const freshMeta = await writeLostFinal(trx, stillBacks ? { dispute_invoice_id: lostInvoice.id } : null);
+          if (stillBacks) {
+            await trx('invoices').where({ id: lostInvoice.id }).update({
+              status: 'overdue',
+              paid_at: null,
+              // Same PI-linkage clear as dispute-created: a lingering
+              // non-canceled intent blocks the pay page / card-on-file
+              // re-collection paths with "payment already in progress".
+              stripe_payment_intent_id: null,
+              stripe_charge_id: null,
+            });
+            // B05: same surcharge take-back as dispute-created (idempotent —
+            // created normally did it already).
+            await removeCardSurchargeFromReopenedInvoice(trx, { invoice: lockedLostInvoice, payment });
+          } else {
+            logger.warn(`[stripe-webhook] dispute ${dispute.id} lost: invoice ${lostInvoice.id} not reopened (status ${lockedLostInvoice?.status}, PI ${lockedLostInvoice?.stripe_payment_intent_id || 'none'}, disputed PI ${lostDisputedPi})`);
           }
-          await trx('invoices').where({ id: lostInvoice.id }).update({
-            status: 'overdue',
-            paid_at: null,
-            // Same PI-linkage clear as dispute-created: a lingering
-            // non-canceled intent blocks the pay page / card-on-file
-            // re-collection paths with "payment already in progress".
-            stripe_payment_intent_id: null,
-            stripe_charge_id: null,
-          });
-          // B05: same surcharge take-back as dispute-created (idempotent —
-          // created normally did it already).
-          await removeCardSurchargeFromReopenedInvoice(trx, { invoice: lockedLostInvoice, payment });
+          lostDisputeOwnedInvoice = stillBacks || (!!lockedLostInvoice
+            && !lockedLostInvoice.stripe_payment_intent_id
+            && String(lockedLostInvoice.status || '').toLowerCase() === 'overdue'
+            && freshMeta.dispute_invoice_id === lostInvoice.id);
         });
+      } else {
+        await db.transaction((trx) => writeLostFinal(trx));
       }
+      // Statement: ensure the cascade is reversed (idempotent — created already
+      // did it, but closed(lost) can arrive without a created event).
+      if (payment.statement_id) await reverseStatementCascadeForDispute(payment.statement_id, payment.stripe_payment_intent_id, 'dispute.lost');
       // Annual-prepay claw-back: lost = the money is gone for good — the
       // same semantics as a full refund. Run the refund-shaped sync
       // whenever the DISPUTED payment (not a replacement) backed the
@@ -8561,12 +8635,6 @@ async function handleDisputeClosed(dispute) {
       // reopened, pending-window credits reversed, billing mode restored);
       // for a VISIT invoice the pending-window hook reverses that visit's
       // slice credit. Idempotent; no .catch (critical-write discipline).
-      const lostDisputeOwnedInvoice = !!lostInvoice && (
-        (lostInvoicePi && lostDisputedPi && lostInvoicePi === lostDisputedPi)
-        || (!lostInvoicePi
-          && String(lostInvoice.status || '').toLowerCase() === 'overdue'
-          && closedPaymentMeta.dispute_invoice_id === lostInvoice.id)
-      );
       if (lostDisputeOwnedInvoice) {
         await require('../services/annual-prepay-renewals')
           .syncTermForInvoicePayment({ id: lostInvoice.id, status: 'refunded', paid_at: null });
