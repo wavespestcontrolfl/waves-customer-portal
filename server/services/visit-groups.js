@@ -293,6 +293,8 @@ async function frozenVisitVerdict(t, visitId) {
     if (claim) return { frozen: true, reason: 'completion_in_flight' };
     return { frozen: false, reason: null };
   } catch (err) {
+    if (['PORTAL_CHAT_DEADLINE', 'ABORT_ERR', '57014'].includes(err?.code)
+      || ['AbortError', 'KnexTimeoutError'].includes(err?.name)) throw err;
     require('./logger').warn(`[visit-groups] frozenVisitVerdict(${visitId}) unreadable — treated as frozen: ${err.message}`);
     return { frozen: true, reason: 'unreadable' };
   }

@@ -743,6 +743,28 @@ describe('grouped visits are refused before slot selection (codex #3609 r4)', ()
     mockDb.mockImplementation(() => api);
     expect(await eligibilityAsync({ status: 'confirmed', scheduled_date: '2026-07-10', visit_id: 'v1' }, NOW)).toEqual({ ok: false, reason: 'not_available' });
   });
+  test.each([
+    { code: 'PORTAL_CHAT_DEADLINE' }, { code: 'ABORT_ERR' },
+    { code: '57014' }, { name: 'AbortError' }, { name: 'KnexTimeoutError' },
+  ])('a cancelled scoped membership read propagates instead of refusing reschedule: %j', async (identity) => {
+    const cancelled = Object.assign(new Error('cancelled'), identity);
+    const api = { where: () => api, whereNotIn: () => api, count: () => api, first: async () => { throw cancelled; } };
+    const scopedDatabase = () => api;
+    await expect(eligibilityAsync({ status: 'confirmed', scheduled_date: '2026-07-10', visit_id: 'v1' }, NOW, scopedDatabase))
+      .rejects.toBe(cancelled);
+  });
+  test('cancellation inside the frozen-visit reader also propagates', async () => {
+    const cancelled = Object.assign(new Error('deadline'), { code: 'PORTAL_CHAT_DEADLINE' });
+    const scopedDatabase = (table) => {
+      const api = {
+        where: () => api, whereNotIn: () => api, count: () => api,
+        first: async () => { if (table === 'scheduled_services') return { n: '1' }; throw cancelled; },
+      };
+      return api;
+    };
+    await expect(eligibilityAsync({ status: 'confirmed', scheduled_date: '2026-07-10', visit_id: 'v1' }, NOW, scopedDatabase))
+      .rejects.toBe(cancelled);
+  });
   test('terminal verdicts win without a membership query', async () => {
     mockDb.mockClear();
     expect(await eligibilityAsync({ status: 'completed', scheduled_date: '2026-07-10', visit_id: 'v1' }, NOW)).toEqual({ ok: false, reason: 'completed' });

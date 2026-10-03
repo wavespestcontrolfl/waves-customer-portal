@@ -76,7 +76,9 @@ class WikiQA {
    * Answer a question using the knowledge base.
    * Two-step: route to relevant articles, then answer with full context.
    */
-  async query(question, context = {}) {
+  // Execution hooks are private caller options, separate from the context JSON
+  // accepted by the authenticated knowledge route.
+  async query(question, context = {}, execution = {}) {
     // GATE_KB_CUSTOMER_AUDIENCE: a customer-facing caller reads only the
     // customer-safe categories, on every knowledge_base read below.
     const customerOnly = this.customerAudienceOnly(context.source);
@@ -86,7 +88,7 @@ class WikiQA {
       .whereRaw('active IS NOT FALSE') // NULL counts as on, the same rule as the article load below
       .whereNot('path', 'like', 'wiki/_%');
     if (customerOnly) indexQuery.whereIn('category', KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES);
-    const indexRows = await runRead(context, indexQuery
+    const indexRows = await runRead(execution, indexQuery
       .select('path', 'title', 'summary', 'category')
       .orderBy('category'), 'knowledge index');
 
@@ -94,7 +96,7 @@ class WikiQA {
     // an empty allowlist falls through so the species catalog can still answer.
     if (indexRows.length === 0 && !customerOnly) {
       const answer = 'The knowledge base is empty. Add articles via the compiler before asking questions.';
-      await this.logQuery(question, answer, [], context.source, 'none', context);
+      await this.logQuery(question, answer, [], context.source, 'none', execution);
       return { answer, articlesUsed: [] };
     }
 
@@ -104,12 +106,12 @@ class WikiQA {
 
     if (!process.env.ANTHROPIC_API_KEY && !process.env.OPENAI_API_KEY) {
       // Fallback: keyword search
-      return this.keywordSearch(question, context);
+      return this.keywordSearch(question, context, execution);
     }
 
     // Owner-approved species-catalog entries for this question
     // (GATE_KB_SPECIES_QA; [] when off).
-    const species = await this.speciesContext(question, context.source, context);
+    const species = await this.speciesContext(question, context.source, execution);
 
     // Step 1: Route to relevant articles (FLAGSHIP first, Sol on a miss)
     const knownPaths = new Set(indexRows.map((r) => r.path));
@@ -129,7 +131,7 @@ ${liveIndex}`,
         jsonMode: true,
         jsonSchema: ROUTING_SCHEMA,
         maxTokens: 500,
-        ...modelBudget(context),
+        ...modelBudget(execution),
       }, {
         // Every routed path must be an article from the index the model was
         // shown: an invented one used to be cited back as a source and stored
@@ -141,10 +143,12 @@ ${liveIndex}`,
           return listed.every((p) => typeof p === 'string' && knownPaths.has(p)) ? null : 'invalid_output';
         },
       });
-      context.assertActive?.('knowledge routing');
+      execution.assertActive?.('knowledge routing');
       if (!routing.ok || !Array.isArray(routing.json?.paths)) throw new Error(routing.reason || 'no_paths');
       paths = routing.json.paths.slice(0, 8);
-    } catch {
+    } catch (err) {
+      if (execution.signal?.aborted || err?.code === 'PORTAL_CHAT_DEADLINE'
+        || err?.name === 'AbortError' || err?.code === 'ABORT_ERR') throw err;
       // Fallback: search by keywords (nothing to search when the index was empty)
       const keywords = question.toLowerCase().split(/\s+/).filter(w => w.length > 3);
       const fallbackQuery = !routable ? null : db('knowledge_base')
@@ -156,7 +160,7 @@ ${liveIndex}`,
           }
         });
       if (fallbackQuery && customerOnly) fallbackQuery.whereIn('category', KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES);
-      const fallbackArticles = fallbackQuery ? await runRead(context, fallbackQuery
+      const fallbackArticles = fallbackQuery ? await runRead(execution, fallbackQuery
         .limit(5)
         .select('path'), 'knowledge fallback') : [];
       paths = fallbackArticles.map(a => a.path);
@@ -164,7 +168,7 @@ ${liveIndex}`,
 
     if (paths.length === 0 && species.length === 0) {
       const answer = "I couldn't find relevant articles in the knowledge base for this question. The topic may not be documented yet.";
-      await this.logQuery(question, answer, [], context.source, 'none', context);
+      await this.logQuery(question, answer, [], context.source, 'none', execution);
       return { answer, articlesUsed: [] };
     }
 
@@ -177,7 +181,7 @@ ${liveIndex}`,
         .whereRaw('active IS NOT FALSE'); // an admin's active=false hides the row (NULL counts as on), as in every other reader
       // A routed path outside the allowlist can never load for a customer caller.
       if (customerOnly) articleQuery.whereIn('category', KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES);
-      kbArticles = await runRead(context, articleQuery.select('path', 'title', 'content'), 'knowledge articles');
+      kbArticles = await runRead(execution, articleQuery.select('path', 'title', 'content'), 'knowledge articles');
     }
     const articles = [...kbArticles, ...species];
     const refs = [...paths, ...species.map((a) => a.path)];
@@ -193,13 +197,13 @@ Wiki articles:
 ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n')}`,
       jsonMode: false,
       maxTokens: 2000,
-      ...modelBudget(context),
+      ...modelBudget(execution),
     });
-    context.assertActive?.('knowledge answer');
+    execution.assertActive?.('knowledge answer');
     if (!answered.ok) throw new Error(`wiki answer failed: ${answered.reason}`);
 
     const { answer, coverage } = splitCoverage(answered.text);
-    await this.logQuery(question, answer, refs, context.source, coverage, context);
+    await this.logQuery(question, answer, refs, context.source, coverage, execution);
 
     return { answer, articlesUsed: refs, articleTitles: articles.map(a => ({ path: a.path, title: a.title })) };
   }
@@ -269,7 +273,7 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
   /**
    * Search articles by text content, title, or tags.
    */
-  async search(query, limit = 20, context = null) {
+  async search(query, limit = 20, context = null, execution = {}) {
     const keywords = query.toLowerCase().split(/\s+/).filter(w => w.length > 2);
     if (keywords.length === 0) return [];
 
@@ -289,7 +293,7 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
     if (context && this.customerAudienceOnly(context.source)) {
       searchQuery.whereIn('category', KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES);
     }
-    const results = await runRead(context, searchQuery
+    const results = await runRead(execution, searchQuery
       .select('id', 'path', 'title', 'summary', 'category', 'tags', 'word_count', 'last_compiled')
       .limit(limit), 'knowledge search');
 
@@ -299,13 +303,11 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
   /**
    * Keyword-based fallback when AI is unavailable.
    */
-  async keywordSearch(question, context) {
-    const results = await this.search(question, 5, context
-      ? { ...context, source: context.source }
-      : { source: undefined });
+  async keywordSearch(question, context, execution = {}) {
+    const results = await this.search(question, 5, context, execution);
     if (results.length === 0) {
       const answer = 'No matching articles found. Try different keywords.';
-      await this.logQuery(question, answer, [], context?.source || 'keyword_fallback', 'none', context);
+      await this.logQuery(question, answer, [], context?.source || 'keyword_fallback', 'none', execution);
       return { answer, articlesUsed: [] };
     }
 
@@ -314,12 +316,12 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
     if (this.customerAudienceOnly(context?.source)) {
       articleQuery.whereIn('category', KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES);
     }
-    const articles = await runRead(context, articleQuery.select('path', 'title', 'content'), 'knowledge articles');
+    const articles = await runRead(execution, articleQuery.select('path', 'title', 'content'), 'knowledge articles');
 
     const answer = `Found ${results.length} relevant article(s):\n\n` +
       articles.map(a => `**${a.title}**\n${(a.content || '').substring(0, 500)}...`).join('\n\n---\n\n');
 
-    await this.logQuery(question, answer, results.map(r => r.path), context?.source || 'keyword_fallback', null, context);
+    await this.logQuery(question, answer, results.map(r => r.path), context?.source || 'keyword_fallback', null, execution);
     return { answer, articlesUsed: results.map(r => r.path) };
   }
 
@@ -362,9 +364,9 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
     return refs.some((ref) => String(ref).startsWith('species:'));
   }
 
-  async logQuery(query, answer, articlesReferenced, askedBy, coverage = null, context = null) {
+  async logQuery(query, answer, articlesReferenced, askedBy, coverage = null, execution = {}) {
     try {
-      await runWrite(context, (database) => database('knowledge_queries').insert({
+      await runWrite(execution, (database) => database('knowledge_queries').insert({
         query, answer,
         articles_referenced: JSON.stringify(articlesReferenced),
         asked_by: askedBy || 'admin_manual',

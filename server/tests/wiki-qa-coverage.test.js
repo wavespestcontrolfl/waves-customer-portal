@@ -85,3 +85,44 @@ test('a missing coverage line logs no coverage', async () => {
   await WikiQA.query('ants', { source: 'lead_agent' });
   expect(mockInserts[0]).not.toHaveProperty('coverage');
 });
+
+
+test('request JSON context cannot become internal database or model execution hooks', async () => {
+  dispatchWithFallback
+    .mockResolvedValueOnce({ ok: true, json: { paths: ['pests/ants.md'] } })
+    .mockResolvedValueOnce({ ok: true, text: 'Ants answer.\nCOVERAGE: partial' });
+  const result = await WikiQA.query('ants', {
+    source: 'admin_manual', read: true, write: true, remainingMs: true,
+    assertActive: true, signal: { aborted: true },
+  });
+  expect(result.answer).toBe('Ants answer.');
+  expect(mockInserts).toHaveLength(1);
+  expect(dispatchWithFallback.mock.calls[0][1]).not.toHaveProperty('signal');
+});
+
+test.each(['PORTAL_CHAT_DEADLINE', 'ABORT_ERR'])(
+  'routing cancellation %s stops before keyword fallback or logging', async (code) => {
+    const database = require('../models/db');
+    database.mockClear();
+    const cancelled = Object.assign(new Error('cancelled'), { code });
+    dispatchWithFallback.mockRejectedValueOnce(cancelled);
+    await expect(WikiQA.query('ants in the pantry', { source: 'admin_manual' }, {
+      signal: new AbortController().signal,
+    })).rejects.toBe(cancelled);
+    expect(database).toHaveBeenCalledTimes(1);
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+    expect(mockInserts).toHaveLength(0);
+  },
+);
+
+test('a deadline assertion after routing cannot start a keyword query', async () => {
+  const database = require('../models/db');
+  database.mockClear();
+  const cancelled = Object.assign(new Error('deadline'), { code: 'PORTAL_CHAT_DEADLINE' });
+  dispatchWithFallback.mockResolvedValueOnce({ ok: false, reason: 'provider_failed' });
+  await expect(WikiQA.query('ants in the pantry', {}, {
+    assertActive: () => { throw cancelled; },
+  })).rejects.toBe(cancelled);
+  expect(database).toHaveBeenCalledTimes(1);
+  expect(mockInserts).toHaveLength(0);
+});

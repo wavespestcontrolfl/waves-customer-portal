@@ -234,6 +234,8 @@ async function groupedVisit(svc, database = db) {
     const { frozen } = await require('../services/visit-groups').frozenVisitVerdict(database, svc.visit_id);
     return frozen;
   } catch (err) {
+    if (['PORTAL_CHAT_DEADLINE', 'ABORT_ERR', '57014'].includes(err?.code)
+      || ['AbortError', 'KnexTimeoutError'].includes(err?.name)) throw err;
     // Unknown membership is NOT "ungrouped" (local codex audit): the surfaces
     // would advertise self-service for a possibly grouped visit and the
     // rebooker would refuse the picked slot at commit. Fail closed.
