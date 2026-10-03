@@ -815,7 +815,7 @@ function presenceWindowFor(visitsPerYear) {
 function isImportedAccount(member, accountCreatedDay) {
   return !!(member && accountCreatedDay) && (ymdToUtcMs(accountCreatedDay) - ymdToUtcMs(member)) / DAY_MS >= IMPORTED_ACCOUNT_LEAD_DAYS;
 }
-function resolveAnniversary({ firstCompletedVisit, acceptedAt, memberSince, accountFirstVisit = null, presenceWindowDays = IMPORT_PRESENCE_DAYS, accountCreatedAt = null, onlyActiveFamily = false, accountHasAcceptedEstimate = false }) {
+function resolveAnniversary({ firstCompletedVisit, acceptedAt, memberSince, accountFirstVisit = null, presenceWindowDays = IMPORT_PRESENCE_DAYS, accountCreatedAt = null, onlyActiveFamily = false, accountHasActivity = false }) {
   const firstVisit = dateColumn(firstCompletedVisit);
   const accepted = etDay(acceptedAt);
   const member = dateColumn(memberSince);
@@ -837,9 +837,10 @@ function resolveAnniversary({ firstCompletedVisit, acceptedAt, memberSince, acco
   // its history simply was not loaded — so member_since dates the line.
   // A second program on the account (counted on the underlying plan lines
   // and service keys, not the consolidated family — tree/shrub + palm is
-  // two programs in one entry), an accepted estimate anywhere on the
-  // account, or any completed visit, takes the rules above.
-  else if (member && !accountFirst && onlyActiveFamily && !accountHasAcceptedEstimate && isImportedAccount(member, etDay(accountCreatedAt))) { date = member; source = 'member_since_import'; }
+  // two programs in one entry), or any portal activity on the account
+  // (loadAccountActivity: an accepted estimate, a completed visit of any
+  // kind, a recurring add-on program), takes the rules above.
+  else if (member && !accountFirst && onlyActiveFamily && !accountHasActivity && isImportedAccount(member, etDay(accountCreatedAt))) { date = member; source = 'member_since_import'; }
   let conflict = false;
   if (date && member && source !== 'member_since') {
     conflict = (ymdToUtcMs(date) - ymdToUtcMs(member)) / DAY_MS > 90;
@@ -1625,18 +1626,32 @@ async function loadEstimates(dbh, estimateIds) {
   return new Map(rows.map((r) => [r.id, r]));
 }
 
-// Customers with ANY accepted estimate on the account (not only the ones the
-// open visits link): the import exception in resolveAnniversary requires
-// that none exists — a cancelled earlier quote still says the account did
-// business through the portal, so its sole program is not an import.
-async function loadAcceptedEstimateCustomers(dbh, customerIds) {
+// Customers with ANY portal activity that says the account did not simply
+// arrive by import with one running program — the one gate the import
+// exception in resolveAnniversary reads (Codex #5668 r1–r2 found a new
+// signal each round when these were judged piecemeal):
+//   • an accepted estimate on the account, by status OR timestamp (a legacy
+//     row can be status accepted with accepted_at NULL), linked or not;
+//   • a completed scheduled_services row of ANY kind — any family, an
+//     inspection, a specialty visit (the per-line dating map filters these;
+//     the account gate must not);
+//   • a live upcoming row carrying a recurring add-on program
+//     (ADDON_LINE_IS_PLAN_SQL): a second program the plan-line count
+//     cannot see.
+async function loadAccountActivity(dbh, customerIds, { today }) {
   if (!customerIds.length) return new Set();
-  const rows = await dbh('estimates')
-    .whereIn('customer_id', customerIds)
-    .whereNotNull('accepted_at')
-    .select('customer_id');
+  const { ADDON_LINE_IS_PLAN_SQL } = require('./service-library');
+  const { rows } = await dbh.raw(`
+    SELECT c.id AS customer_id,
+      (EXISTS (SELECT 1 FROM estimates e WHERE e.customer_id = c.id AND (e.accepted_at IS NOT NULL OR e.status = 'accepted'))
+       OR EXISTS (SELECT 1 FROM scheduled_services s WHERE s.customer_id = c.id AND s.status = 'completed')
+       OR EXISTS (SELECT 1 FROM scheduled_services s JOIN scheduled_service_addons ON scheduled_service_addons.scheduled_service_id = s.id
+                  WHERE s.customer_id = c.id AND ${LIVE_STATUS_SQL} AND s.scheduled_date >= ? AND ${ADDON_LINE_IS_PLAN_SQL})
+      ) AS account_activity
+    FROM customers c WHERE c.id = ANY(?::uuid[])
+  `, [today, customerIds]);
   const ids = new Set(customerIds.map(String));
-  return new Set(rows.map((r) => String(r.customer_id)).filter((id) => ids.has(id)));
+  return new Set(rows.filter((r) => r.account_activity === true).map((r) => String(r.customer_id)).filter((id) => ids.has(id)));
 }
 
 async function loadLiveTerms(dbh, customerIds, { today }) {
@@ -2020,7 +2035,7 @@ async function loadBookInputs(dbh, { today, sinceYmd }) {
   const settledDues = await loadSettledDues(dbh, monthlyIds, { sinceYmd });
   const estimateIds = [...new Set(planLines.flatMap((p) => p.source_estimate_ids || []))];
   const estimates = await loadEstimates(dbh, estimateIds);
-  const acceptedCustomers = await loadAcceptedEstimateCustomers(dbh, customerIds);
+  const activeAccounts = await loadAccountActivity(dbh, customerIds, { today });
   const visitsByLine = new Map();
   for (const row of completedRows) {
     const key = `${row.customer_id}|${row.line}`;
@@ -2030,7 +2045,7 @@ async function loadBookInputs(dbh, { today, sinceYmd }) {
   // Conversation allowances per line, from the whole book's completed
   // visits — stored on the batch row so every snapshot is reproducible.
   const allowances = computeLineAllowances(completedRows);
-  return { planLines, customerIds, customers, firstVisits, visitsByLine, liveTerms, ledger, settledDues, estimates, allowances, acceptedCustomers };
+  return { planLines, customerIds, customers, firstVisits, visitsByLine, liveTerms, ledger, settledDues, estimates, allowances, activeAccounts };
 }
 
 // Stage 2 — one book entry per plan line: current rate per lane, duration /
@@ -2211,7 +2226,7 @@ function reviewOccurrence(entry, latest, { from, to, carryFloor }) {
   return { reviewDate: anchor, carriedFrom: latest.batch_key };
 }
 
-function selectReviewEntries(book, { from, to, now, latestByLine, firstVisits = null, acceptedCustomers = new Set() }) {
+function selectReviewEntries(book, { from, to, now, latestByLine, firstVisits = null, activeAccounts = new Set() }) {
   const carryFloor = daysAgoYmd(now, CARRY_FORWARD_MAX_DAYS_PAST);
   const accountFirst = accountFirstVisits(firstVisits, book);
   // active PROGRAMS per account: plan lines (account_lines) and, within a
@@ -2229,7 +2244,7 @@ function selectReviewEntries(book, { from, to, now, latestByLine, firstVisits = 
       presenceWindowDays: presenceWindowFor(entry.visitsPerYear),
       accountCreatedAt: entry.customer.created_at,
       onlyActiveFamily: onlyProgramFor(entry),
-      accountHasAcceptedEstimate: !!entry.acceptedAt || acceptedCustomers.has(String(entry.customer.id)),
+      accountHasActivity: !!entry.acceptedAt || activeAccounts.has(String(entry.customer.id)),
     });
     const occurrence = reviewOccurrence(entry, latestByLine.get(`${entry.customer.id}|${entry.familyKey}`), { from, to, carryFloor });
     if (!occurrence) continue;
@@ -2415,7 +2430,7 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, windowAnch
   const refs = computeLineReferences(book);
   const { lineRphStats } = refs;
   const latestByLine = await loadLatestSnapshots(dbh, inputs.customerIds, { batchKey });
-  const selected = selectReviewEntries(book, { from, to, now, latestByLine, firstVisits: inputs.firstVisits, acceptedCustomers: inputs.acceptedCustomers || new Set() });
+  const selected = selectReviewEntries(book, { from, to, now, latestByLine, firstVisits: inputs.firstVisits, activeAccounts: inputs.activeAccounts || new Set() });
   const reviewFacts = await loadReviewFacts(dbh, selected, { now, config, batchKey });
   const manualEditCutoff = monthsAgoYmd(now, config.exception_manual_edit_months);
   const rows = selected.map((entry) => rankEntry(entry, { refs, reviewFacts, batchKey, today, config, manualEditCutoff }));
@@ -3164,7 +3179,7 @@ module.exports = {
     isMultiProgramLine,
     trimmedMedian, median, quartiles, modeCents, monthsBetween, monthsAgoYmd, monthKeyMinus, anniversaryInWindow, reviewWindowFor, dateColumn, etDay,
     isBatchKey, assertBatchKey, assertYmd, firstCompletedVisitFor, selectReviewEntries, loadLatestSnapshots, engineItemLowConfidence, windowLabel, syncPricingConstants, daysAgoYmd, qualifyingKeyForLine,
-    PLAN_ROW_SQL, DATING_ROW_SQL, LIVE_STATUS_SQL, isImportedAccount, IMPORTED_ACCOUNT_LEAD_DAYS, informationalFlags, loadAcceptedEstimateCustomers, reviewOccurrence,
+    PLAN_ROW_SQL, DATING_ROW_SQL, LIVE_STATUS_SQL, isImportedAccount, IMPORTED_ACCOUNT_LEAD_DAYS, informationalFlags, loadAccountActivity, reviewOccurrence,
     CARRY_FORWARD_STATUSES, CARRY_FORWARD_MAX_DAYS_PAST, REVIEW_WINDOW_FROM_DAYS, REVIEW_WINDOW_TO_DAYS, CALLBACK_LANE_FOR_FAMILY,
     visitsPerYearFor,
     conversationMinutesFor, interactionFor, wallMinutesFor, treatmentMinutesFor, computeLineAllowances, allowanceFor, lineDurationStats, visitRevenueCents,

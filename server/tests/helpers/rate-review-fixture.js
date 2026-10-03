@@ -109,6 +109,7 @@ function scriptedDb(scenario) {
   db.raw = jest.fn(async (sql, bindings = []) => {
     if (/WITH ov AS/.test(sql)) return { rows: scenario.planLines || [] };
     if (/AS first_visit/.test(sql)) return { rows: scenario.firstVisits || [] };
+    if (/AS account_activity/.test(sql)) return { rows: (scenario.accountActivity || []).map((customer_id) => ({ customer_id, account_activity: true })) };
     if (/WITH te AS/.test(sql)) return { rows: scenario.completedVisits || [] };
     if (/is_callback = true/.test(sql)) return { rows: (signalsFor(bindings[0]).callbacks || []).map((line) => ({ line, n: 1 })) };
     if (/WaveGuard Monthly/.test(sql)) return { rows: Object.entries(scenario.settledDues || {}).map(([customer_id, settled]) => ({ customer_id, settled })) };

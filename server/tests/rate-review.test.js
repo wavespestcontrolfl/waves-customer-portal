@@ -808,8 +808,8 @@ describe('anniversary and tenure', () => {
     expect(P.resolveAnniversary({ ...imported, accountCreatedAt: null, onlyActiveFamily: true })).toMatchObject({ date: null, source: null });
     // any completed visit on the account takes the ordinary rules (not the import exception)
     expect(P.resolveAnniversary({ ...imported, onlyActiveFamily: true, accountFirstVisit: '2026-05-01' })).toMatchObject({ date: null, source: null });
-    // an accepted estimate ANYWHERE on the account (even one the open visits no longer link): not an import
-    expect(P.resolveAnniversary({ ...imported, onlyActiveFamily: true, accountHasAcceptedEstimate: true })).toMatchObject({ date: null, source: null });
+    // any portal activity on the account (accepted estimate by status or timestamp, a completed visit of any kind, a recurring add-on): not an import
+    expect(P.resolveAnniversary({ ...imported, onlyActiveFamily: true, accountHasActivity: true })).toMatchObject({ date: null, source: null });
     expect(P.isImportedAccount('2025-06-06', '2026-04-06')).toBe(true);
     expect(P.isImportedAccount('2026-03-10', '2026-04-06')).toBe(false); // 27 days < IMPORTED_ACCOUNT_LEAD_DAYS
     expect(P.isImportedAccount('2026-03-07', '2026-04-06')).toBe(true); // exactly 30
@@ -839,8 +839,18 @@ describe('anniversary and tenure', () => {
     P.selectReviewEntries([twoLines], win);
     expect(twoLines.anniversary).toMatchObject({ date: null });
     const accepted = mk({ account_lines: 1 }, ['tree_shrub']);
-    P.selectReviewEntries([accepted], { ...win, acceptedCustomers: new Set(['c1']) });
+    P.selectReviewEntries([accepted], { ...win, activeAccounts: new Set(['c1']) });
     expect(accepted.anniversary).toMatchObject({ date: null });
+  });
+  test('the account-activity gate is ONE query: accepted by status or timestamp, any completed visit, a live recurring add-on', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
+    const body = src.slice(src.indexOf('async function loadAccountActivity'), src.indexOf('async function loadLiveTerms'));
+    expect(body).toMatch(/e\.accepted_at IS NOT NULL OR e\.status = 'accepted'/);
+    expect(body).toMatch(/s\.status = 'completed'\)/); // no family / kind filter on the account gate
+    expect(body).not.toMatch(/LINE_SQL/);
+    expect(body).toMatch(/scheduled_service_addons/);
+    expect(body).toMatch(/\$\{ADDON_LINE_IS_PLAN_SQL\}/);
+    expect(body).toMatch(/\$\{LIVE_STATUS_SQL\}/);
   });
   test('a portal-sold line on an account that predates it by > 90 days is flagged, not held', () => {
     const out = P.resolveAnniversary({ firstCompletedVisit: '2026-09-05', acceptedAt: '2026-09-01T15:00:00Z', memberSince: '2024-05-11' });
@@ -1388,7 +1398,7 @@ describe('engine replay guards', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
     expect(src).toMatch(/accountFirstVisit: accountFirst\.get\(entry\.customer\.id\) \|\| null,\n\s+presenceWindowDays: presenceWindowFor\(entry\.visitsPerYear\),/);
     // the account's earliest visit comes from the COMPLETE completed history, cancelled programs included — never just the active book
-    expect(src).toMatch(/selectReviewEntries\(book, \{ from, to, now, latestByLine, firstVisits: inputs\.firstVisits, acceptedCustomers: inputs\.acceptedCustomers \|\| new Set\(\) \}\)/);
+    expect(src).toMatch(/selectReviewEntries\(book, \{ from, to, now, latestByLine, firstVisits: inputs\.firstVisits, activeAccounts: inputs\.activeAccounts \|\| new Set\(\) \}\)/);
     const history = new Map([['c|lawn_care', { customer_id: 'c', line: 'lawn_care', first_visit: '2026-01-05' }], ['c|tree_shrub', { customer_id: 'c', line: 'tree_shrub', first_visit: '2026-08-20' }]]);
     expect(P.accountFirstVisits(history, []).get('c')).toBe('2026-01-05');
     expect(P.accountFirstVisits(null, [{ customer: { id: 'c' }, first: { first_visit: '2026-08-20' } }]).get('c')).toBe('2026-08-20');
