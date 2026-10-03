@@ -150,6 +150,24 @@ async function paymentHold(customerId, { now = new Date() } = {}) {
   }
 }
 
+/**
+ * Durable "said they already reviewed" evidence for the send-time guards
+ * (review-click-guard.js): a confirmed claim stored on any cadence of the
+ * customer within the claim window (reviewed_claim, or the stop it caused).
+ * Covers an ask queued before the claim whose send reservation outlived the
+ * customer-wide stop. Switch off: never read. A failed read throws (the
+ * guards' callers fail closed).
+ */
+async function customerSaidReviewed(customerId, { database = db, now = new Date() } = {}) {
+  if (!customerId || !require('../config/feature-gates').isEnabled('reviewAskTechVoice')) return false;
+  const row = await database('review_sequences')
+    .where({ customer_id: customerId })
+    .where('updated_at', '>', new Date(now.getTime() - CLAIM_WINDOW_MS))
+    .where((q) => q.whereNotNull('reviewed_claim').orWhere('stop_reason', 'customer_says_reviewed'))
+    .first('id');
+  return !!row;
+}
+
 function parseJson(value) {
   if (!value) return null;
   if (typeof value === 'object') return value;
@@ -194,6 +212,7 @@ async function askHold(seq, { now = new Date(), shiftRetry = null } = {}) {
 
 module.exports = {
   askHold,
+  customerSaidReviewed,
   customerSaysReviewed,
   paymentHold,
   PAYMENT_TEXT_HOLD_MS,

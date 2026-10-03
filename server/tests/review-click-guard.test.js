@@ -5,8 +5,12 @@
  */
 const guard = require('../services/review-click-guard');
 
-function fakeDb({ serviceDate = null, scheduledDate = null, clicks = [] } = {}) {
+function fakeDb({ serviceDate = null, scheduledDate = null, clicks = [], saidReviewed = false } = {}) {
   return (table) => {
+    if (table === 'review_sequences') {
+      const q = { where(arg) { if (typeof arg === 'function') arg({ whereNotNull: () => ({ orWhere: () => q }) }); return q; }, first: async () => (saidReviewed ? { id: 'seq-1' } : null) };
+      return q;
+    }
     if (table === 'service_records') return { where: () => ({ first: async () => (serviceDate ? { service_date: serviceDate } : null) }) };
     if (table === 'scheduled_services') return { where: () => ({ first: async () => (scheduledDate ? { scheduled_date: scheduledDate } : null) }) };
     if (table === 'review_requests') {
@@ -87,5 +91,24 @@ describe('newestCompletedVisitAnchor ordering matches the anchor instant', () =>
     expect(raws.scheduled_services).toMatch(/COALESCE\(\s*actual_end_time\s*,\s*check_out_time\s*,\s*completed_at\s*\)\s+DESC\s+NULLS\s+LAST/i);
     // ...and the anchor reads check_out_time before completed_at, like the ORDER BY.
     expect(anchor.toISOString()).toBe('2026-09-25T20:00:00.000Z');
+  });
+});
+
+describe('a confirmed "I already left a review" text (GATE_REVIEW_ASK_TECH_VOICE)', () => {
+  const gates = require('../config/feature-gates');
+  afterEach(() => jest.restoreAllMocks());
+
+  test('suppresses every ask at send time, a reserved one queued before the claim included', async () => {
+    jest.spyOn(gates, 'isEnabled').mockImplementation((g) => g === 'reviewAskTechVoice');
+    const db = fakeDb({ serviceDate: '2026-09-30', saidReviewed: true });
+    expect(await guard.touchSuppressedByClick('cust-1', { serviceRecordId: 'sr-1' }, db)).toBe(true);
+    expect(await guard.askSuppressedByClick({ customer_id: 'cust-1', service_record_id: 'sr-1' }, db)).toBe(true);
+    expect(await guard.touchSuppressedByClick('cust-1', { serviceRecordId: 'sr-1' }, fakeDb({ serviceDate: '2026-09-30' }))).toBe(false);
+  });
+
+  test('switch off: the stored claim is never read', async () => {
+    jest.spyOn(gates, 'isEnabled').mockReturnValue(false);
+    const db = fakeDb({ serviceDate: '2026-09-30', saidReviewed: true });
+    expect(await guard.touchSuppressedByClick('cust-1', { serviceRecordId: 'sr-1' }, db)).toBe(false);
   });
 });
