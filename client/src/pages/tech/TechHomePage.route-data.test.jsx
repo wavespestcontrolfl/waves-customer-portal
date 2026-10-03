@@ -31,11 +31,11 @@ let scheduleFails;
 let briefStatus;
 let fetchMock;
 
-function mount(path = '/tech', { enabled = false, role = 'technician', id = 'tech-fixture' } = {}) {
+function mount(path = '/admin/today', { enabled = false, role = 'technician', id = 'tech-fixture' } = {}) {
   localStorage.setItem('waves_admin_token', 'fixture-only');
   localStorage.setItem('waves_admin_user', JSON.stringify({ id, name: 'Fixture Technician', role }));
   return render(<MemoryRouter initialEntries={[path]}><Routes>
-    <Route path="/tech" element={<Outlet context={{ fieldWorkspace: enabled, setNavigationBusy: mocks.navigationBusy }} />}>
+    <Route path="/admin/today" element={<Outlet context={{ fieldWorkspace: enabled, setNavigationBusy: mocks.navigationBusy }} />}>
       <Route index element={<TechHomePage />} />
       <Route path="tools" element={<TechHomePage section="tools" />} />
       <Route path="more" element={<TechHomePage section="more" />} />
@@ -78,7 +78,7 @@ it('shows only assigned rows and shows none while the technician identity is mis
   await screen.findByRole('button', { name: /Fixture two/ });
   expect(screen.queryByText('Fixture other')).not.toBeInTheDocument();
   view.unmount();
-  mount('/tech', { id: null });
+  mount('/admin/today', { id: null });
   await screen.findByText('No services scheduled today');
   expect(screen.queryByRole('button', { name: /Fixture (one|two|other)/ })).not.toBeInTheDocument();
 });

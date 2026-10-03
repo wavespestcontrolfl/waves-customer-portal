@@ -148,6 +148,17 @@ describe('validateParagraph', () => {
 
 describe('writeParagraph', () => {
   const template = 'Pets: dog. First visit on record.';
+  beforeEach(() => { process.env.GATE_JOB_CARD_LLM = 'true'; });
+  afterEach(() => { delete process.env.GATE_JOB_CARD_LLM; });
+
+  test('GATE_JOB_CARD_LLM off → template with no provider call', async () => {
+    for (const value of [undefined, 'false', '1', 'TRUE']) {
+      if (value === undefined) delete process.env.GATE_JOB_CARD_LLM; else process.env.GATE_JOB_CARD_LLM = value;
+      const callModel = jest.fn(async () => ({ ok: true, text: 'A dog is here and this is the first visit on record.' }));
+      expect(await jobCard.writeParagraph(template, [], { callModel })).toEqual({ text: template, source: 'template' });
+      expect(callModel).not.toHaveBeenCalled();
+    }
+  });
 
   test('model text that passes validation is returned as source=model', async () => {
     const callModel = jest.fn(async () => ({ ok: true, text: 'A dog is here and this is the first visit on record.' }));
@@ -174,6 +185,8 @@ describe('writeParagraph', () => {
 });
 
 describe('paragraphForVisit cache', () => {
+  beforeEach(() => { process.env.GATE_JOB_CARD_LLM = 'true'; });
+  afterEach(() => { delete process.env.GATE_JOB_CARD_LLM; });
   const makeDb = () => {
     const update = jest.fn(async () => 1);
     const chain = { where() { return this; }, update };
@@ -208,6 +221,49 @@ describe('paragraphForVisit cache', () => {
     expect(callModel).toHaveBeenCalledTimes(1);
     const written = JSON.parse(update.mock.calls[0][0].job_card);
     expect(written).toMatchObject({ version: jobCard.PROMPT_VERSION, grounding_hash: hash, source: 'model' });
+  });
+
+  describe('GATE_JOB_CARD_LLM off (the template is the paragraph)', () => {
+    beforeEach(() => { delete process.env.GATE_JOB_CARD_LLM; });
+
+    test('no cache → template stored, no provider call', async () => {
+      const template = jobCard.buildTemplateParagraph(baseFacts());
+      const hash = jobCard._test.groundingHash(template);
+      const { dbh, update } = makeDb();
+      const callModel = jest.fn();
+      const out = await jobCard.paragraphForVisit(facts(null), { dbh, deps: { callModel } });
+      expect(out).toEqual({ text: template, source: 'template', cached: false });
+      expect(callModel).not.toHaveBeenCalled();
+      expect(JSON.parse(update.mock.calls[0][0].job_card)).toEqual({ version: jobCard.PROMPT_VERSION, grounding_hash: hash, text: template, source: 'template' });
+    });
+
+    test('a cached MODEL paragraph for the same grounding is replaced by the template', async () => {
+      const template = jobCard.buildTemplateParagraph(baseFacts());
+      const hash = jobCard._test.groundingHash(template);
+      const { dbh, update } = makeDb();
+      const callModel = jest.fn();
+      const out = await jobCard.paragraphForVisit(facts({ grounding_hash: hash, source: 'model', text: 'Cached text.' }), { dbh, deps: { callModel } });
+      expect(out).toEqual({ text: template, source: 'template', cached: false });
+      expect(callModel).not.toHaveBeenCalled();
+      expect(JSON.parse(update.mock.calls[0][0].job_card)).toMatchObject({ grounding_hash: hash, source: 'template', text: template });
+    });
+
+    test('a cached template for the same grounding is a hit with no write', async () => {
+      const template = jobCard.buildTemplateParagraph(baseFacts());
+      const hash = jobCard._test.groundingHash(template);
+      const { dbh, update } = makeDb();
+      const out = await jobCard.paragraphForVisit(facts({ grounding_hash: hash, source: 'template', text: template }), { dbh, deps: { callModel: jest.fn() } });
+      expect(out).toEqual({ text: template, source: 'template', cached: true });
+      expect(update).not.toHaveBeenCalled();
+    });
+
+    test('a cached template for older facts is rewritten with the current template', async () => {
+      const template = jobCard.buildTemplateParagraph(baseFacts());
+      const { dbh, update } = makeDb();
+      const out = await jobCard.paragraphForVisit(facts({ grounding_hash: 'stale', source: 'template', text: 'Old facts.' }), { dbh, deps: { callModel: jest.fn() } });
+      expect(out).toEqual({ text: template, source: 'template', cached: false });
+      expect(update).toHaveBeenCalledTimes(1);
+    });
   });
 });
 

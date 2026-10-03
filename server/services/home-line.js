@@ -71,10 +71,10 @@ async function stampHomeLines({ now = new Date(), database = db } = {}) {
 
 /**
  * The caller ID a staff-placed outbound call to this customer presents
- * (home-line PR 2, owner ruling 2026-10-02): their home line while
- * GATE_HOME_LINE is on and their address identifies an office, else the main
- * line — a lead with no office, an unlinked number, or the gate off (the
- * pre-home-line behavior: every call from the main line).
+ * (home-line PR 2, owner rulings 2026-10-02): their home line while
+ * GATE_HOME_LINE is on — the default office (Bradenton) when their address
+ * names none — else the main line: an unlinked number (no customer record)
+ * or the gate off (the pre-home-line behavior: every call from main).
  *
  * @param {object|null} customer  a customers row (address + home_line_* columns)
  * @returns {string} an E.164 Waves number
@@ -83,9 +83,8 @@ function homeLineCallerId(customer) {
   const TWILIO_NUMBERS = require('../config/twilio-numbers');
   const main = TWILIO_NUMBERS.mainLine.number;
   if (!customer || !homeLineLive()) return main;
-  const { homeLineOfficeId } = require('../config/locations');
-  const officeId = homeLineOfficeId(customer);
-  return (officeId && TWILIO_NUMBERS.locations[officeId]?.number) || main;
+  const { homeLineLocationId } = require('../config/locations');
+  return TWILIO_NUMBERS.locations[homeLineLocationId(customer)]?.number || main;
 }
 
 // Owner ruling 2026-10-02: a staff reply stays on the conversation's line
@@ -97,8 +96,9 @@ const CONVERSATION_WINDOW_DAYS = 30;
  * GATE_HOME_LINE (home-line PR 3, owner ruling 2026-10-02):
  *   1. the Waves line (an office line or the main line) they last texted
  *      within the last 30 days — keep the conversation where it is;
- *   2. else their home line (homeLineCallerId: an office the address names);
- *   3. else the main line (no customer, or a lead with no office).
+ *   2. else their home line (homeLineCallerId; Bradenton when the address
+ *      names no office);
+ *   3. else the main line (no customer record).
  * Callers check homeLineLive() first; gate off keeps the old derivation.
  *
  * @param {{ phone: string, customerId?: string|null, database?: Function, now?: Date }} args

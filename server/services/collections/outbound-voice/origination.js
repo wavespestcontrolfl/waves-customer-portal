@@ -298,8 +298,10 @@ async function originateCollectionCall(caseId, { now = new Date(), clock = () =>
     throw err;
   }
 
-  const TWILIO_NUMBERS = require('../../../config/twilio-numbers');
-  const from = TWILIO_NUMBERS.mainLine.number;
+  // Caller ID = the customer's home line under GATE_HOME_LINE (owner
+  // 2026-10-02: collections uses the same number as every other call); the
+  // script speaks the same number back (call_log.from_phone).
+  const from = require('../../home-line').homeLineCallerId(customer);
 
   // call_log BEFORE calls.create (admin click-to-call pattern).
   let callLogRow;
