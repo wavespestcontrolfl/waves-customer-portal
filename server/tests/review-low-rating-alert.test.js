@@ -1,5 +1,5 @@
 // Bad-review bell (Clef second wave idea 7, owner CW-D4): one needs-you item
-// open for every unanswered 1-3 star Google review written since the lane's
+// open for every unanswered 1-4 star Google review written since the lane's
 // first live run, raised and closed by a pass after every review sync.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 const mockEpisodes = { raiseAdminAlertWithReopen: jest.fn(), openAdminAlertKeys: jest.fn(), closeAdminAlertKeys: jest.fn(), openAdminAlertMetadata: jest.fn() };
@@ -74,9 +74,9 @@ beforeEach(() => {
 afterAll(() => { if (original === undefined) delete process.env.GATE_REVIEW_ALERT; else process.env.GATE_REVIEW_ALERT = original; });
 
 describe('lowRatingAlertSpec', () => {
-  test('1, 2 and 3 stars; 4, 5, 0 and junk are not', () => {
-    for (const s of [1, 2, 3]) expect(lowRatingAlertSpec({ ...base, starRating: s })).not.toBeNull();
-    for (const s of [4, 5, 0, null, 'x', 2.5]) expect(lowRatingAlertSpec({ ...base, starRating: s })).toBeNull();
+  test('1 to 4 stars (owner 2026-10-03); 5, 0 and junk are not', () => {
+    for (const s of [1, 2, 3, 4]) expect(lowRatingAlertSpec({ ...base, starRating: s })).not.toBeNull();
+    for (const s of [5, 0, null, 'x', 2.5]) expect(lowRatingAlertSpec({ ...base, starRating: s })).toBeNull();
   });
 
   test('passes the admin notification rules as written and deep-links to the review under every response state', () => {
@@ -115,7 +115,7 @@ describe('syncLowRatingReviewAlerts', () => {
   test('reads only reviews that need an answer, written since the first live run', async () => {
     const { conn, seen } = fakeConn();
     await syncLowRatingReviewAlerts({ conn });
-    expect(seen.reviewWheres).toContainEqual(['between', 'star_rating', [1, 3]]);
+    expect(seen.reviewWheres).toContainEqual(['between', 'star_rating', [1, 4]]);
     expect(seen.reviewWheres).toContainEqual(['review_created_at', '>=', new Date(BOUNDARY)]);
     expect(seen.reviewWheres).toContainEqual(['null', 'missing_since']);
     // the Reviews page's own needs-a-real-reply rule and active locations
