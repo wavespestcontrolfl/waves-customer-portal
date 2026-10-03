@@ -146,7 +146,7 @@ postgres('neighborhood gate-code filing sweep', () => {
     expect(category).toBe('customer');
     expect(headline).toBe('Customers — confirm a neighborhood gate code');
     expect(why).toBe("Willow Grande now has 2 different gate codes on file after Sample's update.");
-    expect(opts).toMatchObject({ dedupeKey: `neighborhood-gate-conflict:${n}`, bellDefault: true, link: `/admin/customers?customerId=${customerId}` });
+    expect(opts).toMatchObject({ dedupeKey: `neighborhood-gate-conflict:${n}`, bellDefault: true, link: `/admin/customers/gate-codes?neighborhood=${n}` });
     // Top-level customerId: the internal-test-customer bell suppression reads it.
     expect(opts.metadata).toMatchObject({ customerId: String(customerId), neighborhoodId: n });
     expect(why).not.toMatch(/3333|4444/);
@@ -360,7 +360,8 @@ postgres('neighborhood gate-code filing sweep', () => {
     const r = await sweepSavedGateCodes();
     expect(r).toMatchObject({ tally: { duplicate: 1 }, conflicts: 1 });
     expect(mockRaise).toHaveBeenCalledTimes(1);
-    expect(mockRaise.mock.calls[0][3]).toMatchObject({ link: `/admin/customers?customerId=${customerId}` });
+    expect(mockRaise.mock.calls[0][3]).toMatchObject({ link: `/admin/customers/gate-codes?neighborhood=${n}` });
+    expect(mockRaise.mock.calls[0][3].metadata).toMatchObject({ customerId: String(customerId) });
   });
 
   test('the conflict bell opens the customer whose code was filed last; an unrelated preference edit never steers it', async () => {
@@ -378,7 +379,8 @@ postgres('neighborhood gate-code filing sweep', () => {
     mockRaise.mockClear();
     await sweepSavedGateCodes();
     expect(mockRaise).toHaveBeenCalledTimes(1);
-    expect(mockRaise.mock.calls[0][3]).toMatchObject({ link: `/admin/customers?customerId=${first}` });
+    expect(mockRaise.mock.calls[0][3]).toMatchObject({ link: `/admin/customers/gate-codes?neighborhood=${n}` });
+    expect(mockRaise.mock.calls[0][3].metadata).toMatchObject({ customerId: String(first) });
   });
 
   test('an internal test account is never the customer the conflict bell opens', async () => {
@@ -395,7 +397,35 @@ postgres('neighborhood gate-code filing sweep', () => {
     mockRaise.mockClear();
     await sweepSavedGateCodes();
     expect(mockRaise).toHaveBeenCalledTimes(1);
-    expect(mockRaise.mock.calls[0][3]).toMatchObject({ link: `/admin/customers?customerId=${real}` });
+    expect(mockRaise.mock.calls[0][3]).toMatchObject({ link: `/admin/customers/gate-codes?neighborhood=${n}` });
+    expect(mockRaise.mock.calls[0][3].metadata).toMatchObject({ customerId: String(real) });
+  });
+
+  test('a property the office cleared is settled: its saved code is not retried every pass', async () => {
+    const n = await neighborhood('Cleared By Office');
+    const customerId = await customerWithCode('4545', { neighborhoodId: n });
+    await sweepSavedGateCodes();
+    await trx('customer_properties').where({ customer_id: customerId })
+      .update({ neighborhood_id: null, neighborhood_source: 'office', neighborhood_checked_at: trx.fn.now() });
+    expect((await sweepSavedGateCodes()).customers).toBe(0);
+    // Linked again by the office: it files there.
+    const n2 = await neighborhood('Relinked By Office');
+    await trx('customer_properties').where({ customer_id: customerId }).update({ neighborhood_id: n2 });
+    expect((await sweepSavedGateCodes()).customers).toBe(1);
+    expect((await accessRows(n2)).map((r) => r.code)).toEqual(['4545']);
+  });
+
+  test('a switched-off neighborhood never rings a conflict bell, and its open bell closes', async () => {
+    const n = await neighborhood('Parked Conflict');
+    await trx('neighborhood_access').insert({ neighborhood_id: n, access_type: 'keypad', code: '1212', status: 'active', source: 'backfill' });
+    await customerWithCode('3434', { neighborhoodId: n });
+    await trx('neighborhoods').where({ id: n }).update({ active: false });
+    // Open-bell keys are read twice per pass (reconcile, then close).
+    const openKey = `neighborhood-gate-conflict:${n}`;
+    mockOpenKeys.mockResolvedValueOnce([openKey]).mockResolvedValueOnce([openKey]);
+    await sweepSavedGateCodes();
+    expect(mockRaise).not.toHaveBeenCalled();
+    expect(mockClose).toHaveBeenCalledWith(expect.anything(), expect.arrayContaining([`neighborhood-gate-conflict:${n}`]), 'gate_code_confirmed', expect.anything());
   });
 
   test('free text files for the office to confirm, with no bell', async () => {
@@ -424,13 +454,18 @@ postgres('neighborhood gate-code filing sweep', () => {
     await trx('neighborhood_access_filings').insert({ customer_id: customerId, value_hash: require('node:crypto').createHash('sha256').update('7777').digest('hex'), neighborhood_id: n, outcome: 'filed_conflict' });
     await sweepSavedGateCodes(); // the code is already filed; only the bell is missing
     expect(mockRaise).toHaveBeenCalledTimes(1);
-    expect(mockRaise.mock.calls[0][3]).toMatchObject({ dedupeKey: `neighborhood-gate-conflict:${n}`, link: `/admin/customers?customerId=${customerId}` });
-    // An open (or person-dismissed) bell for it is left alone.
+    expect(mockRaise.mock.calls[0][3]).toMatchObject({ dedupeKey: `neighborhood-gate-conflict:${n}`, link: `/admin/customers/gate-codes?neighborhood=${n}` });
+    expect(mockRaise.mock.calls[0][3].metadata).toMatchObject({ customerId: String(customerId) });
+    // An open (or person-dismissed) bell is refreshed QUIETLY: its link and
+    // wording follow the current code, it never re-rings, a read stands.
     mockRaise.mockClear();
     mockOpenKeys.mockResolvedValue([`neighborhood-gate-conflict:${n}`]);
     await sweepSavedGateCodes();
     mockOpenKeys.mockResolvedValue([]);
-    expect(mockRaise).not.toHaveBeenCalled();
+    expect(mockRaise).toHaveBeenCalledTimes(1);
+    const refresh = mockRaise.mock.calls[0][3];
+    expect(refresh).toMatchObject({ refreshOnDedupe: true, link: `/admin/customers/gate-codes?neighborhood=${n}` });
+    expect(refresh.ringOnRefresh()).toBe(false);
   });
 
   test('a county lookup that failed is retried on the next pass', async () => {

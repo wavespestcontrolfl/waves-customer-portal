@@ -107,6 +107,41 @@ old list).
   `call_log_id`) are `broad`: unavailable inside a customer-scoped task, open
   otherwise.
 
+- `get_customer_invoices` and `get_invoice_detail` (`billing-reader-tools.js`,
+  W9) are `record` reads and admin-only (technicians get no billing reads; the
+  action registry refuses them for any technician and the route lists them only
+  in the admin-only infra set and `ADMIN_ONLY_TOOL_NAMES`). Both are read-only
+  and in no write-gate set. The list takes `customer_id` or `customer_name`
+  (no phone selector: the current-request grammar cannot bind an unscoped phone
+  to a billing read) through the same task-context selector handling and
+  `comms-tools.resolveCustomer` as the other customer readers (an ambiguous
+  name returns candidates, a name that disagrees with the id is
+  `selector_conflict`); the detail takes `invoice_id`, which `validateRecordTarget`
+  maps to the owning customer so it must belong to a task customer. The readers
+  derive no money state of their own: an invoice's balance is stated only when
+  `invoiceCollectibility` (billing-reader-tools.js) says it is collectible. That
+  function applies, read-only (no writes, no locks), the checks the collection
+  entry points run, by calling pay-combined.js `memberCollectionPending` (status,
+  amount due, payer billed with a live payer lookup, Bill-To withdrawn, estimate
+  deposit settlement via `assertInvoiceDepositSettlementReady`, and the saved-card
+  charge fence `assertNoInvoiceChargeReconciliationPending` readOnly), plus
+  `assertInvoiceCollectible`'s own reasons, a processing invoice's charge-fence
+  check, an ACH-in-flight classification from a `processing` payments row, and a
+  hold on any attached PaymentIntent (the reader never calls Stripe). Otherwise
+  every due-style amount is null with `collectible: false`, the reason and
+  "needs reconciliation — check the Invoices page" (or `bank_payment_processing`). Each tool call runs in one read-only REPEATABLE READ
+  snapshot (`InvoiceService.list` takes an optional `database`), so the status
+  buckets, re-read rows and payment linkage agree; an invoice whose owner changed
+  during the read is unavailable, never shown. `overdue_count` counts only
+  collectible overdue invoices. Amount
+  due is `invoiceAmountDue`; the invoice rows and the unpaid and overdue counts
+  come from `InvoiceService.list`. `account_summary.total_due` sums only invoices
+  whose fences passed, counts the ones needing reconciliation separately, and is
+  null with a warning when a read is incomplete. The detail's `recorded_payments`
+  are informational payments-table rows (amount, status, date, method, refund,
+  payer) with no received / not-received verdict. Card numbers, full emails and
+  pay-link tokens are never returned.
+
 ## Deferred
 
 - `find_available_slots` is `record`: inside a customer-scoped task the
