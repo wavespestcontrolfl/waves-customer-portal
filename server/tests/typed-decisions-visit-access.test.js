@@ -181,6 +181,8 @@ describe('visit access shadow: rules that need no database', () => {
       { customer_id: customerId, status: 'completed', service_type: 'Quarterly Pest Control', service_date: '2026-07-06', technician_notes: 'Gate was locked, could not reach the back yard.' },
       { customer_id: customerId, status: 'completed', service_type: 'Lawn Care', service_date: '2026-09-20', technician_notes: 'Mowed short.' },
     ]);
+    await visit({ scheduled_date: '2026-07-06', status: 'completed' });
+    await visit({ scheduled_date: '2026-09-20', status: 'completed', service_type: 'Lawn Care' });
     await text('Please text before you come, the baby naps at noon.', '2026-10-01T15:00:00Z');
     await text('The garage one changed', '2026-10-01T16:00:00Z');
     await text('nine zero four two', '2026-10-01T16:02:00Z');
@@ -213,6 +215,18 @@ describe('visit access shadow: rules that need no database', () => {
     expect(JSON.stringify(built.state)).not.toMatch(/7731|5512|9042|latch/);
     expect(built.baselines).toEqual({ dog_on_property: { rules: true }, needs_code_key_or_person: { rules: true } });
     expect(Object.keys(built.state).sort()).toEqual([...pkg.stateShape].sort());
+  });
+
+  test('a completed visit with no service record still counts and still starts the text window', async () => {
+    await visit({ scheduled_date: '2026-09-01', status: 'completed' });
+    await text('We are away the last week of August', '2026-08-20T15:00:00Z');
+    await text('The baby sleeps until ten', '2026-09-15T15:00:00Z');
+    const visitId = await visit();
+    const built = await access.buildVisitAccessState(await database('scheduled_services').where({ id: visitId }).first(), database);
+    expect(built.state.visit_count).toBe(1);
+    expect(built.state.recent_texts).toContain('The baby sleeps until ten');
+    expect(built.state.recent_texts).not.toContain('away the last week');
+    expect(built.state.last_tech_notes).toBeNull();
   });
 
   test('the access fields never leave as written, whatever they say', async () => {

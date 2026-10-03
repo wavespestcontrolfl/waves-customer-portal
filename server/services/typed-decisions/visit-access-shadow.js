@@ -195,19 +195,32 @@ async function buildVisitAccessState(svc, dbh) {
     'access_notes', 'parking_notes', 'special_instructions', 'chemical_sensitivities', 'chemical_sensitivity_details',
   ) || null;
 
-  // Completed visits on days BEFORE this one: the count, and the newest on
-  // this visit's own service line (its technician note, and the texts' floor).
-  const history = await dbh('service_records')
+  // Completed visits on days BEFORE this one. scheduled_services is the
+  // history (a completed recurring visit can have no service_records row, as
+  // completion-comms-context reads it): the count, and the newest on this
+  // visit's own service line, where the texts' window starts. service_records
+  // supplies only the last technician note on that line.
+  const completed = await dbh('scheduled_services')
+    .where({ customer_id: svc.customer_id, status: 'completed' })
+    .whereNot({ id: svc.id })
+    .where('scheduled_date', '<', day)
+    .orderBy('scheduled_date', 'desc').orderBy('id', 'desc')
+    .limit(200)
+    .select('service_type', 'scheduled_date');
+  const lastCompleted = completed.find((r) => detectServiceLine(r.service_type) === serviceLine) || null;
+  const records = await dbh('service_records')
     .where({ customer_id: svc.customer_id, status: 'completed' })
     .where('service_date', '<', day)
     .orderBy('service_date', 'desc').orderBy('created_at', 'desc').orderBy('id', 'desc')
     .limit(100)
     .select('service_type', 'service_line', 'service_date', 'technician_notes');
-  const lastLine = history.find((r) => (String(r.service_line || '').trim() || detectServiceLine(r.service_type)) === serviceLine) || null;
+  const lastLine = records.find((r) => (String(r.service_line || '').trim() || detectServiceLine(r.service_type)) === serviceLine) || null;
 
   const capFloor = new Date(cutoff.getTime() - WINDOW_CAP_DAYS * 24 * 60 * 60 * 1000);
-  // Eastern midnight of that visit's day, never UTC midnight.
-  const lastLineDay = lastLine ? require('../../utils/datetime-et').parseETDateTime(`${dayString(lastLine.service_date)}T00:00`) : null;
+  // Eastern midnight of the last same-line visit's day (the later of the two
+  // sources), never UTC midnight.
+  const lastDay = [lastCompleted && dayString(lastCompleted.scheduled_date), lastLine && dayString(lastLine.service_date)].filter(Boolean).sort().pop() || null;
+  const lastLineDay = lastDay ? require('../../utils/datetime-et').parseETDateTime(`${lastDay}T00:00`) : null;
   const floor = lastLineDay && lastLineDay > capFloor ? lastLineDay : capFloor;
   const texts = await excludeUnresolvedSendReservations(dbh('sms_log').where({ customer_id: svc.customer_id }))
     .where('direction', 'inbound')
@@ -246,7 +259,7 @@ async function buildVisitAccessState(svc, dbh) {
 
   const state = {
     service_line: serviceLine,
-    visit_count: history.length,
+    visit_count: completed.length,
     structured: {
       pet_count: petCount,
       has_codes: hasCodes,
