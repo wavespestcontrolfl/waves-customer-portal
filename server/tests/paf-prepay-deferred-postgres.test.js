@@ -571,6 +571,24 @@ postgres('annual prepay charged after the first visit', () => {
       closeSpy.mockRestore();
     });
 
+    it('a refunded year cancelled with no end-at-term decision is dead and reaches the office (GitHub Codex #5656 r1)', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      await trx('invoices').where({ id: f.invoiceId }).update({ status: 'refunded' });
+      await trx('annual_prepay_terms').where({ id: f.termId }).update({ status: 'cancelled' });
+      await release();
+      expect(await jobOf(f)).toMatchObject({ status: 'cancelled_after_visit', performed_visit_id: f.parentId });
+    });
+
+    it('a paid year cancelled to end at term is settled, never office work (pre-push audit)', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      await trx('invoices').where({ id: f.invoiceId }).update({ status: 'paid', paid_at: new Date() });
+      await trx('annual_prepay_terms').where({ id: f.termId }).update({ status: 'cancelled', renewal_decision: 'cancel' });
+      expect(await release()).toMatchObject({ released: 1 });
+      expect((await jobOf(f)).status).toBe('pending');
+    });
+
     it('a year cancelled after the first visit was performed rings the office to bill that visit', async () => {
       const f = await deferredAccept();
       await perform(f.parentId, f.customerId);
@@ -870,6 +888,53 @@ postgres('annual prepay charged after the first visit', () => {
       }
     });
 
+    it('a bill raised above the approval goes to the pay link without auto-applying credit (pre-push audit P0)', async () => {
+      const f = await deferredAccept({ jobPatch: { authorized_invoice_total_cents: TOTAL_CENTS } });
+      await perform(f.parentId, f.customerId);
+      expect(await release()).toMatchObject({ released: 1 });
+      await trx('invoices').where({ id: f.invoiceId }).update({ total: 520, subtotal: 520 });
+      const StripeService = require('../services/stripe');
+      StripeService.chargeInvoiceWithSavedCard.mockRejectedValueOnce(new Error('Invoice exceeds the customer-accepted amount. Review before charging.'));
+      await sweep();
+      expect(require('../services/invoice').sendViaSMSAndEmail).toHaveBeenCalledWith(f.invoiceId, { skipAccountCreditAutoApply: true });
+    });
+
+    it('a payer refusal at recovery enrollment re-routes through the payer handler, never the homeowner pay link (pre-push audit P0)', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      expect(await release()).toMatchObject({ released: 1 });
+      const enrollment = require('../services/autopay-enrollment');
+      enrollment.enrollConsentedMethod.mockResolvedValueOnce({ enrolled: false, reason: 'payer_billed' });
+      const payer = require('../services/payer');
+      const credit = require('../services/customer-credit');
+      const stampSpy = jest.spyOn(credit, 'reverseCreditAndStampPayer').mockResolvedValue({ reversed: 0 });
+      payer.resolveForInvoice.mockImplementation(async ({ scheduledServiceId }) => ({ payerId: scheduledServiceId ? null : 7 }));
+      try {
+        await sweep();
+        expect(stampSpy).toHaveBeenCalledWith(expect.objectContaining({ invoiceId: f.invoiceId, payerId: 7 }));
+        expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+      } finally {
+        payer.resolveForInvoice.mockImplementation(async () => ({ payerId: null }));
+        stampSpy.mockRestore();
+      }
+    });
+
+    it('a failed deferred eligibility read leaves the job for the next pass, never a pay link (pre-push audit)', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      expect(await release()).toMatchObject({ released: 1 });
+      const Release = require('../services/paf-prepay-release');
+      const spy = jest.spyOn(Release, 'visitStillPerformed').mockRejectedValueOnce(new Error('synthetic read failure'));
+      try {
+        await sweep();
+        expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+        expect(require('../services/invoice').sendViaSMSAndEmail).not.toHaveBeenCalled();
+        expect((await jobOf(f)).status).not.toBe('delivered_fallback');
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it('a closeout that starts after the release holds the charge until it finishes (Codex r13)', async () => {
       const f = await deferredAccept();
       await perform(f.parentId, f.customerId);
@@ -940,7 +1005,7 @@ postgres('annual prepay charged after the first visit', () => {
       await trx('invoices').where({ id: f.invoiceId }).update({ status: 'sent', payment_method: 'us_bank_account' });
       await sweep();
       expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
-      expect(require('../services/invoice').sendViaSMSAndEmail).toHaveBeenCalledWith(f.invoiceId);
+      expect(require('../services/invoice').sendViaSMSAndEmail).toHaveBeenCalledWith(f.invoiceId, { skipAccountCreditAutoApply: true });
       expect(await jobOf(f)).toMatchObject({ status: 'delivered_fallback', charge_returned: true });
       const { raiseAdminAlert } = require('../services/admin-alert-compose');
       expect(raiseAdminAlert).toHaveBeenCalledWith('billing', expect.objectContaining({ subject: { type: 'invoice', id: f.invoiceId } }),
@@ -1134,7 +1199,7 @@ postgres('annual prepay charged after the first visit', () => {
       const StripeService = require('../services/stripe');
       StripeService.chargeInvoiceWithSavedCard.mockRejectedValue(new Error('Your card was declined.'));
       await sweep();
-      expect(require('../services/invoice').sendViaSMSAndEmail).toHaveBeenCalledWith(f.invoiceId);
+      expect(require('../services/invoice').sendViaSMSAndEmail).toHaveBeenCalledWith(f.invoiceId, { skipAccountCreditAutoApply: true });
       expect((await jobOf(f)).status).toBe('delivered_fallback');
       const { raiseAdminAlert } = require('../services/admin-alert-compose');
       expect(raiseAdminAlert).toHaveBeenCalledWith('billing', expect.objectContaining({

@@ -51,6 +51,14 @@ async function sendRecap(scheduledServiceId, { knex = db } = {}) {
   if (!recap) return { ok: false, reason: 'no_recap' };
   if (recap.status !== 'approved') return { ok: false, reason: `not_approved (${recap.status})` };
   if (recap.sent_at) return { ok: false, reason: 'already_sent' };
+  // An approved video rendered before the greeting rule would greet a no-first-name
+  // customer by their surname: re-render it (back to pending, approval cleared) instead
+  // of sending it (codex #5674 r1).
+  const { recapNeedsGreetingRerender, enqueueRecap } = require('./recap-pipeline');
+  if (await recapNeedsGreetingRerender(recap, knex)) {
+    await enqueueRecap(scheduledServiceId, { force: true, knex });
+    return { ok: false, reason: 'rerendering_greeting' };
+  }
 
   const service = await knex('service_records')
     .where({ scheduled_service_id: scheduledServiceId })
