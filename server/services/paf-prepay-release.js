@@ -577,6 +577,16 @@ async function isFirstHeldVisitOfUnpaidYear(svc, conn = db) {
     .where({ id: term.source_estimate_id })
     .whereRaw(`${JOB} ->> 'deferred_to_first_visit' = 'true'`)
     .whereRaw(`coalesce(${JOB} ->> 'first_visit_text_visit_id', ?) = ?`, [String(svc.id), String(svc.id)])
+    // Rechecked in the claim itself: a payment or cancellation that lands
+    // between the reads above and this write loses the text (Codex r15).
+    .whereRaw(`${JOB} ->> 'status' in (?, 'pending')`, [AWAITING])
+    .whereExists(function termStillPending() {
+      this.select(conn.raw('1')).from('annual_prepay_terms').where({ id: term.id, status: 'payment_pending' });
+    })
+    .whereExists(function invoiceStillOwed() {
+      this.select(conn.raw('1')).from('invoices').where({ id: job.invoice_id })
+        .whereNotIn('status', ['processing', 'paid', 'prepaid', ...DEAD_INVOICE_STATUSES]);
+    })
     .update({
       estimate_data: conn.raw(
         "jsonb_set(estimate_data, '{prepayAutoChargeJob}', (estimate_data -> 'prepayAutoChargeJob') || ?::jsonb)",

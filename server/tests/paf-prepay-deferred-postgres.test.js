@@ -513,6 +513,18 @@ postgres('annual prepay charged after the first visit', () => {
       }
     });
 
+    it('an eligibility read failure never sends the "nothing due" text (GitHub Codex #5640 r15)', async () => {
+      const f = await deferredAccept();
+      const Release = require('../services/paf-prepay-release');
+      const spy = jest.spyOn(Release, 'isFirstHeldVisitOfUnpaidYear').mockRejectedValue(new Error('synthetic read failure'));
+      try {
+        const text = await completeWithText(f, f.parentId).catch(() => '');
+        expect(text).not.toMatch(/nothing (is )?due/);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it('a disabled neutral template falls back to the regular annual-prepay text', async () => {
       const f = await deferredAccept();
       await trx('sms_templates').where({ template_key: 'service_complete_annual_prepay_after_first_visit' }).update({ is_active: false });

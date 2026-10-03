@@ -13569,9 +13569,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // GATE_PAF_PREPAY (owner ruling 2026-10-03): the first visit of a
             // year charged after that visit says so, neutrally (no amount, no
             // "now"); a disabled / missing template falls to the regular one.
+            // A failed eligibility read throws like a missing template does:
+            // the text stays retryable instead of falling to "nothing due
+            // today" minutes before the year is charged (Codex #5640 r15).
             if (!body && annualPrepayCovered
               && !['inspection_only', 'customer_declined', 'incomplete'].includes(visitOutcome)
-              && await require('../services/paf-prepay-release').isFirstHeldVisitOfUnpaidYear(svc, db).catch(() => false)) {
+              && await require('../services/paf-prepay-release').isFirstHeldVisitOfUnpaidYear(svc, db)) {
               sentSmsType = 'service_complete_annual_prepay_after_first_visit';
               body = await renderTemplate(sentSmsType, paidTemplateVars, paidTemplateContext);
             }
