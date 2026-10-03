@@ -142,6 +142,7 @@ import CustomerRequestsPanel from "./CustomerRequestsPanel";
 import CustomerGeocodeReviewPanel, { confirmDiscardDraft } from "./CustomerGeocodeReviewPanel";
 import CustomerPropertiesPanelV2 from "./CustomerPropertiesPanelV2";
 import CancelPlanDialog from "./CancelPlanDialog";
+import RemovePaymentMethodDialog from "./RemovePaymentMethodDialog";
 import { CONTACT_ROLE_OPTIONS, contactRoleLabel, contactRoleTitle } from "../../lib/contact-roles";
 import { ZoneMarkingStep, StationMarkingStep } from "../../pages/admin/SchedulePage";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
@@ -6320,6 +6321,7 @@ function CustomerProfileBilling({
   payments,
   setRefundPayment,
   cards,
+  setRemovePaymentMethod,
   setCancelSignupOpen,
   setCancelPlanOpen,
 }) {
@@ -6544,6 +6546,15 @@ function CustomerProfileBilling({
                 >
                   Default
                 </Badge>
+              )}
+              {isAdmin && (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => setRemovePaymentMethod(cd)}
+                >
+                  Remove
+                </Button>
               )}
             </div>
           ))}
@@ -10211,6 +10222,7 @@ function useCustomerProfileNavigation({
   const [cancelSignupOpen, setCancelSignupOpen] = useState(false);
   const [cancelPlanOpen, setCancelPlanOpen] = useState(false);
   const [refundPayment, setRefundPayment] = useState(null);
+  const [removePaymentMethod, setRemovePaymentMethod] = useState(null);
   const panelRef = useRef(null);
   const activeTabButtonRef = useRef(null);
   const [headerPast, setHeaderPast] = useState(false);
@@ -10272,7 +10284,8 @@ function useCustomerProfileNavigation({
     annualPrepayInvoiceOpen ||
     cancelSignupOpen ||
     cancelPlanOpen ||
-    !!refundPayment;
+    !!refundPayment ||
+    !!removePaymentMethod;
   useEffect(() => {
     if (embedded) return undefined;
     const handler = (e) => {
@@ -10342,6 +10355,7 @@ function useCustomerProfileNavigation({
     setCancelSignupOpen(false);
     setCancelPlanOpen(false);
     setRefundPayment(null);
+    setRemovePaymentMethod(null);
   }, [customerId, profileReloadKey, isAdmin]);
   return {
     activeTab,
@@ -10351,6 +10365,7 @@ function useCustomerProfileNavigation({
     viewServiceRecords,
     setAnnualPrepayInvoiceOpen,
     setRefundPayment,
+    setRemovePaymentMethod,
     setCancelSignupOpen,
     setCancelPlanOpen,
     setTimelineFilter,
@@ -10375,6 +10390,7 @@ function useCustomerProfileNavigation({
     cancelSignupOpen,
     cancelPlanOpen,
     refundPayment,
+    removePaymentMethod,
     handleDraftActiveChange,
     guardedClose,
     guardedSelectCustomer,
@@ -10700,6 +10716,7 @@ export default function Customer360ProfileV2({
     viewServiceRecords,
     setAnnualPrepayInvoiceOpen,
     setRefundPayment,
+    setRemovePaymentMethod,
     setCancelSignupOpen,
     setCancelPlanOpen,
     setTimelineFilter,
@@ -10721,6 +10738,7 @@ export default function Customer360ProfileV2({
     cancelSignupOpen,
     cancelPlanOpen,
     refundPayment,
+    removePaymentMethod,
     handleDraftActiveChange,
     guardedClose,
     guardedSelectCustomer,
@@ -10988,6 +11006,7 @@ export default function Customer360ProfileV2({
         payments={payments}
         setRefundPayment={setRefundPayment}
         cards={cards}
+        setRemovePaymentMethod={setRemovePaymentMethod}
         setCancelSignupOpen={setCancelSignupOpen}
         setCancelPlanOpen={setCancelPlanOpen}
       />
@@ -11170,6 +11189,16 @@ export default function Customer360ProfileV2({
               onDone={reloadCustomer}
             />
           )}
+          {/* Renders nothing without a method. Same sub-modal layer as
+              CancelPlanDialog: ui/Dialog's default layer paints beneath this
+              z-[1000] profile overlay. */}
+          <RemovePaymentMethodDialog
+            customer={c}
+            method={removePaymentMethod}
+            onClose={() => setRemovePaymentMethod(null)}
+            onDone={reloadCustomer}
+            layer={1120}
+          />
           <CustomerProfileEditor
             editOpen={editOpen}
             savingEdit={savingEdit}
