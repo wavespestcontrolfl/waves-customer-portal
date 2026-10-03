@@ -10,7 +10,7 @@
 import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import useSpeechDictation from '../../hooks/useSpeechDictation';
 import useVoiceFill from '../../hooks/useVoiceFill';
-import { planVoiceFill, unresolvedChecks } from '../../lib/fast-complete-voice-plan';
+import { lawnRowWatch, planLawnVoiceFill, planVoiceFill, unresolvedChecks } from '../../lib/fast-complete-voice-plan';
 import { Button, Textarea } from '../ui';
 import '../../styles/tech-workflow.css';
 
@@ -144,6 +144,12 @@ export function useNoteClip({ enabled, request, serviceId, onText }) {
   return { onClip: enabled && !state.unavailable ? onClip : undefined, error: state.error };
 }
 
+// What the tech declined: a product the fill put on the sheet that the tech then
+// took off, with the note it was read from. Reading the same note again does not
+// bring it back (whatever words the reader quotes this time); an edited note does.
+const noteKey = (note) => String(note || '').trim();
+const notDeclined = (declined, note) => (product) => declined.get(String(product.productId)) !== noteKey(note);
+
 // A spray's way is the note's own read on this sheet (visit-voice-facts), so a
 // product's spray way is not a tap here; any other way (a bait, a granule) is.
 const withoutSprayWay = (product, ops) => (ops.sprayMethods.has(product.method) ? { ...product, method: '' } : product);
@@ -158,7 +164,7 @@ const withFill = (rows, added, patches) => {
 // The products the note names, read when the report is written and applied as
 // unconfirmed rows: `read(note)` asks, `settle(fill, sprayMethod)` turns the answer
 // into taps and answers the rows as they then stand (the report is written from
-// those). Confirms and Checks hold Complete & send until the tech answers each.
+// those; `note` is the note that was read). Confirms and Checks hold Complete & send until the tech answers each.
 // `products` is the sheet's useProductRows; `ops` its row rules.
 export function useProductVoiceFill({ enabled, request, serviceId, products, ctx, ops }) {
   const [checks, setChecks] = useState([]);
@@ -171,8 +177,8 @@ export function useProductVoiceFill({ enabled, request, serviceId, products, ctx
   const answered = useRef(new Set());
   // A product the fill added that the tech then removed stays removed: the next
   // read of the same note does not bring it back.
-  const addedByFill = useRef(new Set());
-  const declined = useRef(new Set());
+  const addedByFill = useRef(new Map());
+  const declined = useRef(new Map());
   const latest = useRef({ products, ctx, ops });
   latest.current = { products, ctx, ops };
   const rowsRef = useRef(products.rows);
@@ -189,13 +195,13 @@ export function useProductVoiceFill({ enabled, request, serviceId, products, ctx
     }
   }, [request, serviceId]);
 
-  const settle = useCallback((fill, sprayMethod) => {
+  const settle = useCallback((fill, sprayMethod, note) => {
     const rows = rowsRef.current;
     if (!fill || fill.status !== 'read') return rows;
     const { products: sheetProducts, ctx: sheetCtx, ops: sheetOps } = latest.current;
     const plan = planVoiceFill({
       fill: {
-        products: (fill.products || []).filter((product) => !declined.current.has(String(product.productId))).map((product) => withoutSprayWay(product, sheetOps)),
+        products: (fill.products || []).filter(notDeclined(declined.current, note)).map((product) => withoutSprayWay(product, sheetOps)),
         unclear: fill.unclear,
       },
       rows,
@@ -206,7 +212,7 @@ export function useProductVoiceFill({ enabled, request, serviceId, products, ctx
     sheetProducts.applyFill(plan.added, plan.patches);
     const filled = withFill(rows, plan.added, plan.patches);
     rowsRef.current = filled;
-    for (const row of plan.added) addedByFill.current.add(String(row.productId));
+    for (const row of plan.added) addedByFill.current.set(String(row.productId), noteKey(note));
     setConfirms((prev) => [
       ...prev.filter((old) => !plan.confirms.some((next) => next.watch === old.watch)),
       ...plan.confirms.map((confirm) => ({ ...confirm, id: ++nextId.current })),
@@ -225,10 +231,10 @@ export function useProductVoiceFill({ enabled, request, serviceId, products, ctx
   useEffect(() => {
     const form = { method: '' };
     const onSheet = new Set(rows.map((row) => String(row.productId)));
-    for (const id of addedByFill.current) {
+    for (const [id, readFrom] of addedByFill.current) {
       if (onSheet.has(id)) continue;
       addedByFill.current.delete(id);
-      declined.current.add(id);
+      declined.current.set(id, readFrom);
     }
     setChecks((prev) => (prev.length ? unresolvedChecks(prev, rows, form) : prev));
     setConfirms((prev) => (prev.length ? unresolvedChecks(prev, rows, form) : prev));
@@ -265,6 +271,142 @@ export function useProductVoiceFill({ enabled, request, serviceId, products, ctx
     dismiss,
     heard,
   };
+}
+
+// ── The lawn re-service sheet ─────────────────────────────────────────────
+// One screen, no report step: the tech taps "Fill products from my note" and the
+// read lands on the sheet's own rows (a tile turned on, a product added, an amount,
+// a way), each waiting on a ✓. `products` is that sheet's useProductRows (with
+// `applyVoiceFill` and `makeRow`); `ctx` its loaded context.
+export const LAWN_FILL_ERROR = "Couldn't read the products from your note. Pick them by hand.";
+export function useLawnVoiceFill({ enabled, request, serviceId, products, ctx }) {
+  const [checks, setChecks] = useState([]);
+  const [confirms, setConfirms] = useState([]);
+  const [heard, setHeard] = useState({ products: {}, visit: '' });
+  const [status, setStatus] = useState({ filling: false, error: '', unavailable: false });
+  const nextId = useRef(0);
+  const answered = useRef(new Set());
+  // A product the fill turned on or added that the tech then turned off or removed
+  // stays that way on the next read of the same note.
+  const setByFill = useRef(new Map());
+  const declined = useRef(new Map());
+  const latest = useRef({ products, ctx });
+  latest.current = { products, ctx };
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+
+  const fill = useCallback(async (note) => {
+    setStatus((prev) => ({ ...prev, filling: true, error: '' }));
+    let answer = null;
+    let gone = false;
+    try {
+      answer = await request(`/admin/dispatch/${encodeURIComponent(serviceId)}/fast-complete/voice-fill/products`, { method: 'POST', body: JSON.stringify({ note }) });
+    } catch (err) {
+      gone = err?.status === 404;
+    }
+    if (!mounted.current) return;
+    if (answer?.status !== 'read') {
+      setStatus({ filling: false, error: gone ? '' : LAWN_FILL_ERROR, unavailable: gone });
+      return;
+    }
+    const { products: sheetProducts, ctx: sheetCtx } = latest.current;
+    const rows = sheetProducts.rows;
+    const plan = planLawnVoiceFill({
+      fill: { ...answer, products: (answer.products || []).filter(notDeclined(declined.current, note)) },
+      rows,
+      catalog: sheetCtx.products,
+      methods: sheetCtx.methods.map((choice) => choice.value),
+      makeRow: sheetProducts.makeRow,
+    });
+    sheetProducts.applyVoiceFill(plan.added, plan.patches);
+    const filled = new Map([
+      ...rows.map((row) => [String(row.productId), plan.patches[String(row.productId)] ? { ...row, ...plan.patches[String(row.productId)] } : row]),
+      ...plan.added.map((row) => [String(row.productId), row]),
+    ]);
+    const held = (item) => (item.watch ? { ...item, baseline: lawnRowWatch(filled.get(item.watch)) } : item);
+    for (const item of plan.confirms) setByFill.current.set(item.watch, noteKey(note));
+    setConfirms((prev) => [
+      ...prev.filter((old) => !plan.confirms.some((next) => next.watch === old.watch)),
+      ...plan.confirms.map((item) => ({ ...held(item), id: ++nextId.current })),
+    ]);
+    setHeard((prev) => ({ ...prev, products: { ...prev.products, ...plan.heard } }));
+    setChecks((prev) => {
+      const open = new Set(prev.map((check) => check.text));
+      const fresh = plan.checks.filter((check) => !open.has(check.text) && !answered.current.has(check.text));
+      return fresh.length ? [...prev, ...fresh.map((check) => ({ ...held(check), id: ++nextId.current }))] : prev;
+    });
+    setStatus({ filling: false, error: '', unavailable: false });
+  }, [request, serviceId]);
+
+  // Changing the row a confirm or a Check points at answers it.
+  const { rows } = products;
+  useEffect(() => {
+    const byKey = new Map(rows.map((row) => [String(row.productId), row]));
+    for (const [id, readFrom] of setByFill.current) {
+      if (byKey.get(id)?.active) continue;
+      setByFill.current.delete(id);
+      declined.current.set(id, readFrom);
+    }
+    const stillOpen = (list) => {
+      const open = list.filter((item) => !item.watch || lawnRowWatch(byKey.get(item.watch)) === item.baseline);
+      return open.length === list.length ? list : open;
+    };
+    setChecks(stillOpen);
+    setConfirms(stillOpen);
+  }, [rows]);
+
+  const dismiss = useCallback((id) => setChecks((prev) => {
+    const check = prev.find((entry) => entry.id === id);
+    if (check) answered.current.add(check.text);
+    return prev.filter((entry) => entry.id !== id);
+  }), []);
+  const confirmsRef = useRef(confirms);
+  confirmsRef.current = confirms;
+  // ✓ makes the row's amount the tech's own (no longer "last time's"): a later
+  // read that hears another amount raises a Check, never replaces it.
+  const confirm = useCallback((id) => {
+    const item = confirmsRef.current.find((entry) => entry.id === id);
+    const row = latest.current.products.rows.find((r) => String(r.productId) === item?.watch);
+    if (row?.fromLast) latest.current.products.updateRow(row.productId, { fromLast: false });
+    setConfirms((prev) => prev.filter((entry) => entry.id !== id));
+  }, []);
+
+  const pending = checks.length > 0 || confirms.length > 0;
+  return {
+    enabled: enabled && (!status.unavailable || pending),
+    fillEnabled: enabled && !status.unavailable,
+    filling: status.filling,
+    error: status.error,
+    fill,
+    checks,
+    confirms,
+    confirm,
+    dismiss,
+    heard,
+  };
+}
+
+// The lawn sheet's one tap: read the products out of the note.
+export function NoteProductsFill({ voice, note, locked, busy }) {
+  if (!voice.fillEnabled) return null;
+  return (
+    <section className="tech-visit-choice-section">
+      <Button
+        type="button"
+        variant="secondary"
+        className="tech-visit-action tech-visit-wide"
+        loading={voice.filling}
+        disabled={locked || busy || voice.filling || !note.trim()}
+        onClick={() => voice.fill(note)}
+      >
+        Fill products from my note
+      </Button>
+      {voice.error && <p className="tech-visit-muted tech-visit-status--warn" role="status">{voice.error}</p>}
+    </section>
+  );
 }
 
 function MicIcon() {

@@ -4664,8 +4664,9 @@ router.post('/:serviceId/fast-complete/voice-fill/clip', fastCompleteVoiceFillGa
   } catch (err) { next(err); }
 });
 
-// The report flow's two voice-fill reads (any untyped pest visit, a regular visit
-// or a re-service; same gate GATE_FAST_COMPLETE_VOICE_FILL, same ownership fence).
+// The note's two voice-fill reads: the report flow (any untyped pest visit, a
+// regular visit or a re-service) and the lawn re-service sheet (while its own gate
+// is on). Same gate GATE_FAST_COMPLETE_VOICE_FILL, same ownership fence.
 // Each is a paid call with its own staff bucket, so a long note dictated in pieces
 // never spends the product read's budget.
 const voiceFillBucket = (max, error) => require('express-rate-limit')({
@@ -5813,6 +5814,30 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     rescheduleOptions.sourceSurface = 'dispatch_board';
     rescheduleOptions.notifyRequested = notifyCustomer !== false;
     if (operationKey) rescheduleOptions.operationKey = operationKey;
+    // Edit appointment's "move all of them together" names the stop the
+    // operator was shown ({ id, memberIds, liveCount } from the schedule
+    // payload's visit summary). The unit mover checks it against the locked
+    // membership, and visit_id rides the CAS, so a service that joined, left
+    // or was separated since is refused instead of changing what moves.
+    const expectVisit = req.body.expectVisit;
+    if (expectVisit != null) {
+      const validExpectVisit = typeof expectVisit === 'object' && !Array.isArray(expectVisit)
+        && typeof expectVisit.id === 'string' && expectVisit.id
+        && Array.isArray(expectVisit.memberIds) && expectVisit.memberIds.length > 0
+        && expectVisit.memberIds.every((id) => typeof id === 'string' && id)
+        && (expectVisit.liveCount == null || Number.isInteger(expectVisit.liveCount))
+        && (expectVisit.liveMemberIds == null || (Array.isArray(expectVisit.liveMemberIds)
+          && expectVisit.liveMemberIds.every((id) => typeof id === 'string' && id)));
+      if (!validExpectVisit) return res.status(400).json({ error: 'expectVisit must be { id, memberIds, liveCount, liveMemberIds }' });
+      rescheduleOptions.expect = { ...(rescheduleOptions.expect || {}), visit_id: expectVisit.id };
+      rescheduleOptions.expectGroupedVisit = true;
+      rescheduleOptions.expectVisitMembership = {
+        id: expectVisit.id,
+        memberIds: expectVisit.memberIds,
+        liveCount: expectVisit.liveCount == null ? null : expectVisit.liveCount,
+        ...(Array.isArray(expectVisit.liveMemberIds) ? { liveMemberIds: expectVisit.liveMemberIds } : {}),
+      };
+    }
     // Disclosure contract (PR2 wires it): the collective choke point would
     // widen this singular move to the whole series. A surface that sent
     // `scope: 'this_only'` without `seriesAck: true` has not shown the
@@ -5942,7 +5967,12 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     // stranded sweep owns the (corrected) text once the stop is whole.
     const partialVisitMove = (Array.isArray(result?.visitMove?.failed) && result.visitMove.failed.length > 0)
       || result?.visitMove?.parentRetargetFailed === true; // the parent still describes the old stop (codex r28 P1)
-    const willNotify = notifyCustomer !== false && !partialVisitMove;
+    // Edit appointment (expectVisit) repeats this request when a save is
+    // retried. A stop already at the target moved nothing this time, so the
+    // "your visit moved" text is not sent again.
+    const repeatOfCommittedMove = expectVisit != null && result?.visitMove?.alreadyAtTarget === true
+      && !(result.visitMove.moved || []).length;
+    const willNotify = notifyCustomer !== false && !partialVisitMove && !repeatOfCommittedMove;
     await syncRescheduleReminder(req.params.serviceId, newDate, effectiveWindow, { willNotify, preserveMoveHold: partialVisitMove });
     try {
       // qualityDates: the same Set already passed to the rebooker above —
@@ -5986,6 +6016,9 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
           memberIds: stuck,
         },
       });
+    }
+    if (repeatOfCommittedMove) {
+      return res.json({ ...result, ...(notifyCustomer !== false ? { notificationSent: false, notificationSkipped: 'already_at_target' } : {}) });
     }
     if (notifyCustomer !== false) {
       // Shared notice path (recipient routing incl. appointment_notify_primary

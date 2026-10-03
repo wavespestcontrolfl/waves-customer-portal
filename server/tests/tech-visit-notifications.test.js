@@ -170,6 +170,12 @@ describe('notifyTechVisitChange', () => {
       previous: { date: '2026-09-09', windowStart: '13:00', windowEnd: '15:00' },
     });
     expect(mockWriteCard.mock.calls[0][1].payload.actor).toBe('by the customer by text');
+    // The SMS move executor's own initiator (an accepted offer) reads the same.
+    await notices.notifyTechVisitChange({
+      visitId: 'visit-1', kind: 'rescheduled', technicianId: 'tech-1', actorId: require('../services/sms-scheduling-act').INITIATED_BY,
+      previous: { date: '2026-09-09', windowStart: '13:00', windowEnd: '15:00' },
+    });
+    expect(mockWriteCard.mock.calls[1][1].payload.actor).toBe('by the customer by text');
   });
 
   test('a card the committed row already contradicts is dropped (deploy overlap: two instances, two queues)', async () => {

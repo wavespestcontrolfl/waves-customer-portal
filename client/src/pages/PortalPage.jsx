@@ -16337,6 +16337,18 @@ function chatRowsFor(data) {
   return rows;
 }
 
+function newChatRequestId() {
+  if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map((n) => n.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+const CHAT_TRANSPORT_TIMEOUT_MS = 17_000;
+
 function ChatActions({ actions, onNavigate }) {
   if (!actions?.length) return null;
   return (
@@ -16355,7 +16367,7 @@ function ChatWidget({ customer, onClose, initialQuestion, onNavigate }) {
   useLockBodyScroll(true);
   const dialogRef = useModalFocus(true, onClose);
   const compact = useIsMobile(760);
-  const firstName = customer?.firstName || customer?.first_name || '';
+  const firstName = [customer?.firstName, customer?.first_name].find(Boolean);
   const [messages, setMessages] = useState([
     { role: 'assistant', content: `Hi${firstName ? ` ${firstName}` : ''}! I'm the Waves AI assistant. How can I help you today?` },
   ]);
@@ -16366,11 +16378,14 @@ function ChatWidget({ customer, onClose, initialQuestion, onNavigate }) {
   const messagesEndRef = useRef(null);
   const sessionId = useRef(`chat-${Date.now()}`);
   const initialSentRef = useRef(false);
+  // A network timeout is ambiguous: the server may have completed the turn.
+  // Keep each unresolved text's durable id so later turns cannot discard it.
+  const retryTurnsRef = useRef(new Map());
 
   // Report an AI reply as inappropriate (Microsoft Store policy 11.16 —
   // users must be able to flag AI-generated content for review).
   const reportMessage = async (idx, content, conversationId) => {
-    if (reportState[idx] === 'sending' || reportState[idx] === 'done') return;
+    if (['sending', 'done'].includes(reportState[idx])) return;
     setReportState(prev => ({ ...prev, [idx]: 'sending' }));
     try {
       // api.request, not raw fetch: access tokens expire after 15 minutes and
@@ -16407,22 +16422,54 @@ function ChatWidget({ customer, onClose, initialQuestion, onNavigate }) {
     const text = (typeof textOverride === 'string' ? textOverride : input).trim();
     if (!text || sending) return;
 
-    setMessages(prev => [...prev, { role: 'user', content: text }]);
+    const retryRequestId = retryTurnsRef.current.get(text);
+    const retrying = Boolean(retryRequestId);
+    const requestId = retryRequestId || newChatRequestId();
+
+    if (!retrying) setMessages(prev => [...prev, { role: 'user', content: text }]);
     setInput('');
     setSending(true);
 
+    const controller = new AbortController();
+    let timer;
     try {
       // api.request, not raw fetch: access tokens expire after 15 minutes and
       // only the api client can rotate the refresh session on a 401.
-      const data = await api.request('/ai/chat', {
+      const request = api.request('/ai/chat', {
         method: 'POST',
-        body: JSON.stringify({ message: text, sessionId: sessionId.current }),
+        body: JSON.stringify({ message: text, sessionId: sessionId.current, requestId }),
+        signal: controller.signal,
       });
+      // The signal bounds fetch, but an expired-token request can be waiting
+      // inside the shared refresh promise or Web Lock, neither of which owns
+      // this signal. Race the whole API operation so the chat always becomes
+      // retryable after 17s. The shared refresh may still finish for the rest
+      // of the app; this turn keeps its requestId for reconciliation.
+      const deadline = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          controller.abort();
+          reject(new Error('Portal chat transport deadline reached'));
+        }, CHAT_TRANSPORT_TIMEOUT_MS);
+      });
+      const data = await Promise.race([request, deadline]);
       setMessages(prev => [...prev, ...chatRowsFor(data)]);
+      if (data.retryable) {
+        retryTurnsRef.current.set(text, requestId);
+        // The input stays enabled while a turn is pending so the customer can
+        // draft their next question. Restore the retry text only if they have
+        // not started one; the retry map still preserves this original turn.
+        setInput(current => current.trim() ? current : text);
+      } else {
+        retryTurnsRef.current.delete(text);
+      }
     } catch {
       setMessages(prev => [...prev, { role: 'assistant', content: "Connection issue — please try again or call us at (941) 297-5749." }]);
+      retryTurnsRef.current.set(text, requestId);
+      setInput(current => current.trim() ? current : text);
+    } finally {
+      clearTimeout(timer);
+      setSending(false);
     }
-    setSending(false);
   };
 
   return (

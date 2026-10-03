@@ -12,6 +12,9 @@
  *  POST /admin/dispatch/:serviceId/fast-complete/voice-fill/dictation  (multipart)
  *   - answers the clip's words for the note box, heard with the sheet's product names.
  *
+ *  Both also take a lawn re-service (its own catalog and ways), while its own
+ *  gate GATE_LAWN_RESERVICE_FAST_COMPLETE is on.
+ *
  *  Neither audit line carries a word the tech said.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
@@ -41,6 +44,10 @@ jest.mock('../services/pest-recap', () => ({
   loadRecapCatalogProducts: jest.fn(),
   loadCommonProducts: jest.fn(),
 }));
+jest.mock('../services/lawn-reservice-fast-context', () => ({
+  ...jest.requireActual('../services/lawn-reservice-fast-context'),
+  buildLawnReserviceFastContext: jest.fn(),
+}));
 jest.mock('../services/llm/call', () => ({
   ...jest.requireActual('../services/llm/call'),
   callAnthropic: jest.fn(),
@@ -52,6 +59,7 @@ jest.mock('../services/call-recording-processor', () => ({
 
 const logger = require('../services/logger');
 const { resolveEligibility, loadRecapCatalogProducts, loadCommonProducts } = require('../services/pest-recap');
+const { buildLawnReserviceFastContext } = require('../services/lawn-reservice-fast-context');
 const { callAnthropic } = require('../services/llm/call');
 const { transcribeWithOpenAI } = require('../services/call-recording-processor');
 const router = require('../routes/admin-dispatch');
@@ -103,6 +111,7 @@ const everythingLogged = () => ['info', 'warn', 'error', 'debug'].flatMap((level
 
 describe('report flow voice fill', () => {
   const savedGate = process.env.GATE_FAST_COMPLETE_VOICE_FILL;
+  const savedLawnGate = process.env.GATE_LAWN_RESERVICE_FAST_COMPLETE;
   beforeEach(() => {
     process.env.GATE_FAST_COMPLETE_VOICE_FILL = 'true';
     mockDbCurrent = dbWithOwner('tech-1');
@@ -114,6 +123,7 @@ describe('report flow voice fill', () => {
   });
   afterEach(() => {
     if (savedGate === undefined) delete process.env.GATE_FAST_COMPLETE_VOICE_FILL; else process.env.GATE_FAST_COMPLETE_VOICE_FILL = savedGate;
+    if (savedLawnGate === undefined) delete process.env.GATE_LAWN_RESERVICE_FAST_COMPLETE; else process.env.GATE_LAWN_RESERVICE_FAST_COMPLETE = savedLawnGate;
     mockDbCurrent = null;
     jest.clearAllMocks();
   });
@@ -214,6 +224,7 @@ describe('report flow voice fill', () => {
       ['a visit that is gone', { ok: false, reason: 'not_found' }, 404],
     ])('%s is refused before any model call', async (_name, eligibility, status) => {
       resolveEligibility.mockResolvedValue(eligibility);
+      buildLawnReserviceFastContext.mockResolvedValue({ ok: false, reason: 'not_lawn_re_service' });
       const res = await readProducts(NOTE);
       expect(res.statusCode).toBe(status);
       expect(callAnthropic).not.toHaveBeenCalled();
@@ -239,6 +250,130 @@ describe('report flow voice fill', () => {
       expect(audit[0]).toContain('products=1');
       expect(audit[1]).toContain('ok=false reason=model_failed');
       for (const secret of ['7731', 'Taurus', 'perimeter', 'Gate code', 'ants']) expect(everything).not.toContain(secret);
+    });
+  });
+
+  describe('a lawn re-service', () => {
+    const LAWN_CATALOG = [
+      { id: 'p-celsius', name: 'Celsius WG', category: 'herbicide', inventory_unit: 'oz', formulation: 'WG' },
+      { id: 'p-fert', name: 'LESCO 24-0-11', category: 'fertilizer', inventory_unit: 'lb', formulation: 'granular' },
+    ];
+    const LAWN_NOTE = 'Spot treated the dollarweed in the back lawn with half an ounce of Celsius, and drenched the front bed.';
+    const lawnVisit = () => {
+      resolveEligibility.mockResolvedValue({ ok: true, svc: { id: 'visit-1' }, profile: { serviceKey: 'lawn_re_service', category: 'lawn_care', findingsType: 'one_time_lawn_treatment' }, eligible: false });
+      buildLawnReserviceFastContext.mockResolvedValue({
+        ok: true, eligible: true, reason: null, products: LAWN_CATALOG,
+        methods: [{ value: 'spot_treatment' }, { value: 'broadcast_spray' }, { value: 'granular_broadcast' }, { value: 'soil_drench' }],
+        lastVisit: { products: [{ productId: 'p-celsius', amountUnit: 'oz', totalAmount: 0.5 }] },
+      });
+    };
+    beforeEach(() => {
+      process.env.GATE_LAWN_RESERVICE_FAST_COMPLETE = 'true';
+      lawnVisit();
+      callAnthropic.mockResolvedValue({ ok: true, json: {
+        ...MODEL_ANSWER,
+        products: [{ productId: 'p-celsius', amount: 0.5, unit: 'oz', sameAsLast: false, method: 'spot_treatment', heard: 'Spot treated the dollarweed in the back lawn with half an ounce of Celsius' }],
+      } });
+    });
+
+    test('its products are read from the lawn sheet\'s own catalog and ways', async () => {
+      const res = await readProducts(LAWN_NOTE);
+      expect(res.statusCode).toBe(200);
+      expect(res.body.status).toBe('read');
+      expect(res.body.products).toEqual([expect.objectContaining({ productId: 'p-celsius', amount: 0.5, unit: 'oz', method: 'spot_treatment' })]);
+      const { text } = callAnthropic.mock.calls[0][0];
+      expect(text).toContain('SHEET: lawn re-service');
+      expect(text).toContain('p-celsius | Celsius WG');
+      expect(text).toContain('soil_drench');
+      // the pest catalog is never the lawn sheet's
+      expect(text).not.toContain('Taurus');
+    });
+
+    test('a way the lawn sheet offers is kept when its word is said for the product', async () => {
+      callAnthropic.mockResolvedValue({ ok: true, json: { ...MODEL_ANSWER, products: [{ productId: 'p-celsius', amount: 0, unit: 'not_said', sameAsLast: false, method: 'soil_drench', heard: 'drenched the bed with Celsius' }] } });
+      const res = await readProducts('I drenched the bed with Celsius.');
+      expect(res.body.products).toEqual([expect.objectContaining({ productId: 'p-celsius', method: 'soil_drench' })]);
+    });
+
+    const answerWith = (product) => callAnthropic.mockResolvedValue({ ok: true, json: { ...MODEL_ANSWER, products: [{ amount: 0, unit: 'not_said', sameAsLast: false, ...product }] } });
+    const lawnMethods = (...values) => buildLawnReserviceFastContext.mockResolvedValue({
+      ok: true, eligible: true, reason: null, products: LAWN_CATALOG, methods: values.map((value) => ({ value })), lastVisit: null,
+    });
+
+    test('fog/ULV is heard from its own words', async () => {
+      lawnMethods('spot_treatment', 'fog_ulv');
+      answerWith({ productId: 'p-celsius', method: 'fog_ulv', heard: 'fogged the hedge line with Celsius' });
+      const res = await readProducts('I fogged the hedge line with Celsius.');
+      expect(res.body.products).toEqual([expect.objectContaining({ productId: 'p-celsius', method: 'fog_ulv' })]);
+    });
+
+    test.each([
+      ['a liquid broadcast is not filled as granular', 'Broadcast sprayed Celsius over the back lawn.', 'Broadcast sprayed Celsius', 'granular_broadcast', 'broadcast_spray'],
+      ['granules are not filled as a liquid broadcast', 'Spread the Celsius granules over the back lawn.', 'Spread the Celsius granules', 'broadcast_spray', 'granular_broadcast'],
+    ])('%s', async (_name, note, heard, wrong, right) => {
+      lawnMethods('spot_treatment', 'broadcast_spray', 'granular_broadcast');
+      answerWith({ productId: 'p-celsius', method: wrong, heard });
+      const refused = await readProducts(note);
+      expect(refused.body.products).toEqual([expect.objectContaining({ productId: 'p-celsius', method: '' })]);
+      expect(refused.body.unclear.map((u) => u.reason)).toContain('method_not_heard');
+      answerWith({ productId: 'p-celsius', method: right, heard });
+      const kept = await readProducts(note);
+      expect(kept.body.products).toEqual([expect.objectContaining({ productId: 'p-celsius', method: right })]);
+    });
+
+    test.each([
+      ['station_check', 'Checked the lawn and used Celsius.', 'Checked the lawn and used Celsius', 'Checked the bait station and used Celsius in it.', 'used Celsius in it'],
+      ['pin_stream', 'Stressed turf by the street, used Celsius.', 'used Celsius', 'Used Celsius with a pin stream along the cracks.', 'Used Celsius with a pin stream'],
+    ])('%s needs its own word, not a look-alike', async (method, lookAlike, lookAlikeHeard, real, realHeard) => {
+      lawnMethods('spot_treatment', method);
+      answerWith({ productId: 'p-celsius', method, heard: lookAlikeHeard });
+      const refused = await readProducts(lookAlike);
+      expect(refused.body.products).toEqual([expect.objectContaining({ productId: 'p-celsius', method: '' })]);
+      answerWith({ productId: 'p-celsius', method, heard: realHeard });
+      const kept = await readProducts(real);
+      expect(kept.body.products).toEqual([expect.objectContaining({ productId: 'p-celsius', method })]);
+    });
+
+    test('a bare "broadcast" proves neither way: the tech picks it', async () => {
+      lawnMethods('spot_treatment', 'broadcast_spray', 'granular_broadcast');
+      answerWith({ productId: 'p-celsius', method: 'broadcast_spray', heard: 'Broadcast the Celsius' });
+      const res = await readProducts('Broadcast the Celsius out back.');
+      expect(res.body.products).toEqual([expect.objectContaining({ productId: 'p-celsius', method: '' })]);
+    });
+
+    test('a product the last visit recorded in another measure takes a spoken amount in that measure, as its row does', async () => {
+      // a liquid by its stock unit, logged in pounds last time: the sheet's row is in weight units
+      buildLawnReserviceFastContext.mockResolvedValue({
+        ok: true, eligible: true, reason: null,
+        products: [{ id: 'p-liquid', name: 'Dismiss NXT', category: 'herbicide', inventory_unit: 'fl_oz', formulation: 'SC' }],
+        methods: [{ value: 'spot_treatment' }],
+        lastVisit: { products: [{ productId: 'p-liquid', amountUnit: 'lb', totalAmount: 2 }] },
+      });
+      answerWith({ productId: 'p-liquid', amount: 3, unit: 'lb', heard: 'three pounds of Dismiss' });
+      const res = await readProducts('Put down three pounds of Dismiss.');
+      expect(res.body.products).toEqual([expect.objectContaining({ productId: 'p-liquid', amount: 3, unit: 'lb' })]);
+      expect(callAnthropic.mock.calls[0][0].text).toContain('p-liquid | Dismiss NXT | units: g, oz, lb');
+    });
+
+    test('the note mic hears it as lawn care, with the lawn catalog\'s names', async () => {
+      transcribeWithOpenAI.mockResolvedValue({ text: LAWN_NOTE });
+      const res = await dictate();
+      expect(res.body).toEqual({ text: LAWN_NOTE });
+      const { prompt } = transcribeWithOpenAI.mock.calls[0][1];
+      expect(prompt).toContain('A lawn care technician');
+      expect(prompt).toContain('Celsius WG');
+      expect(prompt).toContain('dollarweed');
+    });
+
+    test.each([
+      ['its own gate is off', () => { delete process.env.GATE_LAWN_RESERVICE_FAST_COMPLETE; }],
+      ['the sheet cannot take the visit', () => buildLawnReserviceFastContext.mockResolvedValue({ ok: true, eligible: false, reason: 'visit_closed' })],
+      ['it is another lawn visit', () => buildLawnReserviceFastContext.mockResolvedValue({ ok: false, reason: 'not_lawn_re_service' })],
+    ])('%s: refused (409) before any model call', async (_name, arrange) => {
+      arrange();
+      const res = await readProducts(LAWN_NOTE);
+      expect(res.statusCode).toBe(409);
+      expect(callAnthropic).not.toHaveBeenCalled();
     });
   });
 
@@ -283,6 +418,7 @@ describe('report flow voice fill', () => {
     });
 
     test('a visit the sheet does not take is refused without transcribing', async () => {
+      buildLawnReserviceFastContext.mockResolvedValue({ ok: false, reason: 'not_lawn_re_service' });
       resolveEligibility.mockResolvedValue({ ok: true, svc: {}, profile: { serviceKey: 'lawn', category: 'lawn_care' }, eligible: false });
       const res = await dictate();
       expect(res.statusCode).toBe(409);
