@@ -403,9 +403,14 @@ describe('sendBatch', () => {
   test('a claim still running its pre-dispatch checks exposes nothing on the public page; the frozen words are served only once a provider handoff is recorded', async () => {
     mockDb.reset(book());
     const seen = [];
-    emailLeg.mockImplementation(async () => { seen.push(comms.publicReview(notices()[0])); return { sent: true, attempted: true }; });
+    emailLeg.mockImplementation(async (args) => {
+      seen.push(comms.publicReview(notices()[0])); // inside the email library, before its provider handoff
+      const res = await args.sendOptions.withProviderHandoff(async () => { seen.push(comms.publicReview(notices()[0])); }, { to: args.recipient.email });
+      return { sent: res.ok, attempted: true };
+    });
     await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
-    expect(seen[0]).toMatchObject({ delivered: false, lines: [{ current: '$117', next: '$121' }] }); // handed off: the link works
+    expect(seen[0]).toEqual({ unavailable: true }); // preparation: nothing handed over yet
+    expect(seen[1]).toMatchObject({ delivered: false, lines: [{ current: '$117', next: '$121' }] }); // at the provider request: the link works
     const claimed = { rate_review_row_id: 'r', status: 'sending', sent_at: null };
     const letter = { lines: [{ service: 'Pest control', current_cents: 11700, new_cents: 12100 }] };
     expect(comms.publicReview({ ...claimed, metadata: { pending_letter: { key: 'k', letter } } })).toEqual({ unavailable: true });
@@ -422,6 +427,38 @@ describe('sendBatch', () => {
     expect(JSON.stringify(emailLeg.mock.calls[0][0].vars)).toContain('Pest control');
     expect(JSON.stringify(emailLeg.mock.calls[0][0].vars)).not.toContain('Example Way');
     expect(JSON.stringify(comms.publicReview(notices()[0]))).not.toContain('Example Way');
+  });
+
+  test('the cost block saved from another session during the fan-out stops a letter not yet handed to a provider', async () => {
+    mockDb.reset(book());
+    const digest = await previewDigest();
+    let fired = false;
+    mockDb.rawHandlers.push([/customer-comms|hashtextextended/, () => { if (!fired) { fired = true; mockDb.store.rate_review_config[0].cost_block = 'Edited in another tab.'; } return { rows: [] }; }]);
+    const out = await comms.sendBatch(BATCH_KEY, { expectedDigest: digest, now: NOW });
+    expect(out).toMatchObject({ sent: 0 });
+    expect(emailLeg).not.toHaveBeenCalled();
+    expect(notices()[0].status).toBe('draft');
+    expect(JSON.parse(notices()[0].metadata).send_hold).toMatchObject({ reason: 'cost_block_changed' });
+  });
+
+  test('a service address changed after the preview holds the letter (the street label is part of the reviewed line)', async () => {
+    mockDb.reset(book());
+    const digest = await previewDigest();
+    let fired = false;
+    mockDb.rawHandlers.push([/customer-comms|hashtextextended/, () => { if (!fired) { fired = true; mockDb.store.customers[0].address_line1 = '9 Other Road'; } return { rows: [] }; }]);
+    await comms.sendBatch(BATCH_KEY, { expectedDigest: digest, now: NOW });
+    expect(emailLeg).not.toHaveBeenCalled();
+    expect(JSON.parse(notices()[0].metadata).send_hold).toMatchObject({ reason: 'line_changed' });
+  });
+
+  test('a sent row previews the letter the customer received, not one rebuilt from today\'s cost block', async () => {
+    mockDb.reset(book());
+    await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+    mockDb.store.rate_review_config[0].cost_block = 'A newer paragraph.';
+    const out = await comms.letterPreview(BATCH_KEY, ROW(1), { now: NOW });
+    expect(out.delivered).toBe(true);
+    expect(out.html).toContain(COST_BLOCK.slice(0, 20));
+    expect(out.html).not.toContain('A newer paragraph.');
   });
 
   test('never handed to a provider: parks unreachable without words, and is sendable again', async () => {

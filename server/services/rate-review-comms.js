@@ -194,7 +194,6 @@ function lineFor(notice, snapshot, customer) {
     familyKey: notice.family_key,
     service: [service, street].filter(Boolean).join(' · '),
     serviceLabel: service || null,
-    streetOmitted,
     unit,
     currentCents: current,
     newCents: next,
@@ -681,6 +680,13 @@ async function letterPreview(batchKey, rowId, { dbh = db, now = new Date() } = {
   if (!lines.length) {
     const notice = data.notices.find((n) => String(n.id) === String(row.notice_id));
     if (!notice) throw badInput('This row has no scheduled notice yet', 404);
+    // Delivered: the letter the customer received (every line of it, with the cost block
+    // as sent), from the variables frozen at the stamp — never rebuilt from today's rows.
+    const delivered = notice.sent_at ? parseJson(notice.metadata, {}).letter : null;
+    if (delivered && delivered.payload) {
+      const sent = await renderLetter(delivered.payload);
+      return { ok: true, subject: sent.subject, html: sent.html, costBlockReady: true, suppressed: entry ? entry.reason : null, delivered: true };
+    }
     lines = [{ ...lineFor(notice, row, data.customers.get(String(row.customer_id))), notice }];
   }
   const customer = data.customers.get(String(row.customer_id));
@@ -798,8 +804,13 @@ async function settleLines(dbh, entry, { status, keepFrozen, frozen, hold = null
 async function settleAttempted(dbh, entry, { frozen, emailUnknown, smsUnknown, dispatchMeta }) {
   let retryable = true;
   const alerts = [];
+  // Under the customer-comms fence and the row lock the delivery callbacks take
+  // (recordChannelFailure): a bounce either committed its early_failures before this read,
+  // or waits and finds the settled row.
+  await dbh.transaction(async (trx) => {
+  await lockCustomerComms(trx, entry.customerId);
   for (const l of entry.lines) {
-    const live = await dbh('price_change_notices').where({ id: l.noticeId, status: 'sending' }).first();
+    const live = await trx('price_change_notices').where({ id: l.noticeId, status: 'sending' }).forUpdate().first();
     if (!live) continue;
     const { pending_letter: _p, send_hold: _h, early_failures: early = {}, delivery_revoked: priorRevoked, uncertain_channels: _u, uncertain_claim_key: _k, ...meta } = parseJson(live.metadata, {});
     // A revocation from an EARLIER attempt is history, not overwritten: it advances the attempt
@@ -808,7 +819,7 @@ async function settleAttempted(dbh, entry, { frozen, emailUnknown, smsUnknown, d
     const stillUnknown = (emailUnknown && !early.email) || (smsUnknown && !early.sms);
     if (stillUnknown) {
       retryable = false;
-      await dbh('price_change_notices').where({ id: live.id }).update({
+      await trx('price_change_notices').where({ id: live.id }).update({
         status: UNCERTAIN, updated_at: new Date(),
         metadata: JSON.stringify({ ...meta, ...history, ...(priorRevoked ? { delivery_revoked: priorRevoked } : {}), ...dispatchMeta, ...(Object.keys(early).length ? { early_failures: early } : {}),
           // the channels whose outcome is still unknown, so a late bounce can settle them
@@ -818,18 +829,19 @@ async function settleAttempted(dbh, entry, { frozen, emailUnknown, smsUnknown, d
       continue;
     }
     const failure = early.email || early.sms;
-    await dbh('price_change_notices').where({ id: live.id }).update({
+    await trx('price_change_notices').where({ id: live.id }).update({
       status: 'draft', sent_at: null, email_sent: false, sms_sent: false, updated_at: new Date(),
       metadata: JSON.stringify({ ...meta, ...history, ...dispatchMeta, channel_failures: early, delivery_revoked: failure, send_hold: { reason: 'delivery_failed_before_stamp', at: new Date().toISOString() } }),
     });
-    const snap = await dbh('rate_review_snapshots').where({ notice_id: live.id }).first();
+    const snap = await trx('rate_review_snapshots').where({ notice_id: live.id }).first();
     if (snap) {
       const flags = flagList(snap.flags);
       if (!flags.includes(DELIVERY_BOUNCED_FLAG)) flags.push(DELIVERY_BOUNCED_FLAG);
-      await dbh('rate_review_snapshots').where({ id: snap.id }).update({ flags: JSON.stringify(flags), updated_at: new Date() });
+      await trx('rate_review_snapshots').where({ id: snap.id }).update({ flags: JSON.stringify(flags), updated_at: new Date() });
     }
     alerts.push({ noticeId: live.id, customerId: live.customer_id, rowId: live.rate_review_row_id, familyKey: live.family_key, rateWritten: false, channel: early.email ? 'email' : 'sms', event: failure.event });
   }
+  });
   if (alerts.length) await raiseDeliveryAlerts(alerts);
   return { retryable };
 }
@@ -900,9 +912,10 @@ async function revalidateClaimed(dbh, entry, claimed, { today, now }) {
     const line = lineFor(notice, snapshot, customer);
     const reason = firstMatch(rules, { notice, snapshot, line, today, now, declinedTerms: ctx.declinedTerms, liveLanes: ctx.liveLanes, ratesMoved: ctx.ratesMoved, linesGone: ctx.linesGone });
     if (reason) return { ok: false, reason };
-    // The reviewed words: amounts and date must be the ones the owner's
-    // preview digest covered.
-    if (line.currentCents !== planned.currentCents || line.newCents !== planned.newCents || line.effectiveDate !== planned.effectiveDate) return { ok: false, reason: 'line_changed' };
+    // The reviewed words: amounts, date and the service / street label must be
+    // the ones the owner's preview digest covered.
+    if (line.currentCents !== planned.currentCents || line.newCents !== planned.newCents || line.effectiveDate !== planned.effectiveDate
+      || String(line.service || '') !== String(planned.service || '')) return { ok: false, reason: 'line_changed' };
     lines.push({ ...line, notice });
   }
   // The whole-letter rule, on the live rows: a sibling line of this customer's batch that is
@@ -961,7 +974,7 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
   // measure from sent_at.
   const now = clock();
   const today = etDateString(now);
-  const fresh = await revalidateClaimed(dbh, entry, claimed, { today, now });
+  const fresh = (await loadCostBlock(dbh)) !== costBlock ? { ok: false, reason: 'cost_block_changed' } : await revalidateClaimed(dbh, entry, claimed, { today, now });
   if (!fresh.ok) {
     await settleLines(dbh, entry, { status: 'draft', keepFrozen: false, frozen: null, hold: fresh.reason });
     return { outcome: fresh.reason === 'gate_off' ? 'gate_off' : 'in_flight', holdReason: fresh.reason };
@@ -973,7 +986,7 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
   // one the email carries.
   const prefs = await dbh('notification_prefs').where({ customer_id: entry.customerId }).first().catch(() => null);
   const [resolvedRecipient] = getInvoiceEmailRecipients(customer, prefs || {});
-  const payload = letterPayload({ customer, prefs, lines: entry.lines.map((l) => ({ ...l, service: [l.serviceLabel, l.streetOmitted ? null : propertyStreetLine(customer)].filter(Boolean).join(' · ') })), costBlock, noticeUrl: noticeUrlFor(entry.lines) });
+  const payload = letterPayload({ customer, prefs, lines: entry.lines, costBlock, noticeUrl: noticeUrlFor(entry.lines) });
   const frozen = { key: claimKey, payload, letter: frozenLetter(entry, payload, costBlock) };
   await freezeLetter(dbh, entry, frozen);
   // Ownership is re-read right before each provider leg: a merge undo
@@ -1000,15 +1013,31 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
   // handoff (so they cannot drift): the shared apply predicates, lane, rate, line,
   // approval, amounts and dates, read on the connection the caller passes.
   const recheckEligibility = async (conn) => {
+    // The cost block the owner's digest covered must still be the saved one: an edit from
+    // any session during the fan-out stops the letters not yet handed to a provider.
+    if ((await loadCostBlock(conn)) !== costBlock) return { ok: false, reason: 'cost_block_changed' };
     const at = clock();
     return revalidateClaimed(conn, entry, claimed, { today: etDateString(at), now: at });
   };
   // Set when the handoff refused before dispatch: the request never left, so
   // the letter is definitively unsent (a named hold, not an uncertain send).
   let emailHold = null;
-  // The public page serves the frozen words only from here on (publicReview): a claim that
-  // is refused before any provider is called never exposes them.
-  await freezeLetter(dbh, entry, { ...frozen, handoff_at: clock().toISOString() });
+  // The public page serves the frozen words only once a provider request is about to be
+  // made (publicReview): recorded inside each leg's handoff, after its last check and
+  // immediately before the request — on its own connection, so it is committed before the
+  // provider is called. A claim refused or stalled in preparation never exposes them.
+  let handoffMarked = false;
+  const markHandoff = async () => {
+    if (handoffMarked) return;
+    const at = clock().toISOString();
+    for (const id of claimed) {
+      const row = await dbh('price_change_notices').where({ id, status: 'sending' }).first('metadata');
+      const meta = parseJson(row && row.metadata, {});
+      if (!meta.pending_letter) continue;
+      await dbh('price_change_notices').where({ id, status: 'sending' }).update({ metadata: JSON.stringify({ ...meta, pending_letter: { ...meta.pending_letter, handoff_at: at } }) });
+    }
+    handoffMarked = true;
+  };
   // From here a provider may have the message: an exception is no longer a clean non-send.
   progress.crossed = true;
   const email = await PriceChangeNotices.sendNoticeEmail({
@@ -1043,6 +1072,7 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
         // BOTH the address and the greeting must still be the frozen ones.
         if (!to || String(recipient?.email || '').trim().toLowerCase() !== String(to).trim().toLowerCase()
           || greetingName(live, prefs) !== payload.first_name) { emailHold = 'recipient_changed'; return { ok: false, reason: 'recipient_changed' }; }
+        await markHandoff();
         await dispatch(trx);
         return { ok: true };
       }),
@@ -1080,7 +1110,9 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
       // request. A notice token therefore never texts a previous customer.
       withSmsHandoff: (dispatch) => withSmsConsentLock(dbh, { phone: smsPhone, customerId: entry.customerId }, async (trx) => {
         const refusal = await smsHandoffRefusal(trx, claimed, entry.customerId, smsPhone, recheckEligibility);
-        return refusal || dispatch(trx);
+        if (refusal) return refusal;
+        await markHandoff();
+        return dispatch(trx);
       }),
     },
   });
@@ -1185,7 +1217,7 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
       }
       await trx('price_change_notices').where({ id: live.id }).update({
         status: 'sent', sent_at: sentAt, email_sent: emailOk, sms_sent: smsOk, updated_at: sentAt,
-        metadata: JSON.stringify({ ...base, ...(Object.keys(early).length ? { channel_failures: early } : {}), ...(smsHold ? { sms_withheld: smsHold } : {}), letter: { ...frozen.letter, sent_on: etDateString(sentAt) } }),
+        metadata: JSON.stringify({ ...base, ...(Object.keys(early).length ? { channel_failures: early } : {}), ...(smsHold ? { sms_withheld: smsHold } : {}), letter: { ...frozen.letter, sent_on: etDateString(sentAt), payload: frozen.payload } }),
       });
       const snap = await trx('rate_review_snapshots').where({ notice_id: l.noticeId }).first();
       await trx('rate_review_snapshots').where({ notice_id: l.noticeId, status: 'approved' }).update({

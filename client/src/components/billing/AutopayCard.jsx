@@ -157,10 +157,10 @@ function UpcomingRateChanges({ changes, formatDate }) {
       <div style={{ fontSize: 14, fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase', color: PORTAL_BILLING.muted, marginBottom: 6 }}>Upcoming rate</div>
       {changes.map((change) => (
         <div key={change.noticePath} style={{ padding: '4px 0' }}>
-          <div style={{ fontSize: 15, fontWeight: 700, color: PORTAL_BILLING.text, lineHeight: 1.4 }}>
+          <div style={{ fontSize: 16, fontWeight: 700, color: PORTAL_BILLING.text, lineHeight: 1.4 }}>
             {change.service ? `${change.service}: ` : ''}{change.next} per {change.unit} from {formatDate(change.effectiveDate)}
           </div>
-          <div style={{ fontSize: 14, color: PORTAL_BILLING.muted, lineHeight: 1.45 }}>
+          <div style={{ fontSize: 16, color: PORTAL_BILLING.muted, lineHeight: 1.45 }}>
             Now {change.current} per {change.unit}.{' '}
             {/* exact next charge for monthly dues only; else the start date */}
             {rateChangeChargeLine(change, formatDate)}{' '}
