@@ -266,17 +266,16 @@ describe('the repeated-miss outreach task follows the confirmation that raised i
 
   describe('reconcileOutreach (nightly repair)', () => {
     // tables: pending tasks, recent confirmed rows; `count` = the customer's misses now
-    function world({ pendingTasks = [], confirmed = [], tasksByLog = {}, count = '2' }) {
+    function world({ pendingTasks = [], confirmed = [], recentTask = null, count = '2' }) {
       const writes = [];
       const conn = (table) => {
-        let logIdFilter = null;
         const chain = {
           where() { return chain; }, whereNotNull() { return chain; }, orderBy() { return chain; },
-          whereRaw(sql, b) { if (/log_id/.test(sql)) [logIdFilter] = b; return chain; },
+          whereRaw() { return chain; },
           select: () => (table === 'customer_interactions' ? Promise.resolve(pendingTasks) : (table === 'reschedule_log' ? Object.assign(Promise.resolve(confirmed), { first: async () => ({ count }) }) : chain)),
           first: async () => {
             if (table === 'customers') return { id: 'c1', first_name: 'Sam' };
-            if (table === 'customer_interactions') return tasksByLog[logIdFilter] || undefined;
+            if (table === 'customer_interactions') return recentTask || undefined;
             return { count };
           },
           update: async (patch) => { writes.push(['update', patch.status]); return 1; },
@@ -300,11 +299,12 @@ describe('the repeated-miss outreach task follows the confirmation that raised i
       expect(writes).toEqual([['update', 'cancelled']]);
     });
 
-    test('a latest confirmed miss with two misses and no task gets the task; one that has it is left alone', async () => {
+    test('two misses and no task in the window: one task, linked to the latest confirmed miss; any recent task (a Quick Move\'s too) means none is added', async () => {
       let writes = world({ confirmed: [{ id: 'log-B', customer_id: 'c1' }, { id: 'log-A', customer_id: 'c1' }], count: '2' });
       expect(await MissedAppointment.reconcileOutreach()).toEqual({ withdrawn: 0, raised: 1 });
       expect(writes).toEqual([['insert', 'log-B']]); // the latest row only: never a second task for the earlier miss
-      writes = world({ confirmed: [{ id: 'log-B', customer_id: 'c1' }], tasksByLog: { 'log-B': { id: 't1' } }, count: '2' });
+      // e.g. first miss confirmed, second a no-show Quick Move whose task carries no log id
+      writes = world({ confirmed: [{ id: 'log-A', customer_id: 'c1' }], recentTask: { id: 't1' }, count: '2' });
       expect(await MissedAppointment.reconcileOutreach()).toEqual({ withdrawn: 0, raised: 0 });
       expect(writes).toEqual([]);
     });

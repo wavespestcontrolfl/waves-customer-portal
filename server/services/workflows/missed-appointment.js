@@ -258,8 +258,10 @@ class MissedAppointment {
    * failure there is repaired here:
    *   - a pending task this workflow raised in the last `days` days whose customer
    *     no longer has two misses is cancelled;
-   *   - a customer whose LATEST confirmed miss (last `days` days) has no task, and
-   *     who has two misses, gets the task.
+   *   - a customer with a confirmed miss in the last `days` days, two misses, and
+   *     NO task from this workflow in those days (whatever raised it — a
+   *     confirmation or a no-show Quick Move — and whatever its status) gets one.
+   *     Conservative on purpose: it never adds a second task in the window.
    * Never throws.
    * @returns {Promise<{withdrawn: number, raised: number}>}
    */
@@ -284,13 +286,14 @@ class MissedAppointment {
       const seen = new Set();
       for (const row of Array.isArray(confirmed) ? confirmed : []) {
         if (!row.customer_id || seen.has(String(row.customer_id))) continue;
-        seen.add(String(row.customer_id)); // the customer's latest confirmed miss only
+        seen.add(String(row.customer_id)); // once per customer, linked to the latest confirmed miss
         try {
           const result = await db.transaction(async (t) => {
             await this.lockOutreach(row.customer_id, t);
             const has = await t('customer_interactions')
               .where({ customer_id: row.customer_id, interaction_type: 'task' })
-              .whereRaw("metadata->>'log_id' = ?", [String(row.id)])
+              .whereRaw("metadata->>'source' = 'missed_appointment_threshold'")
+              .where('created_at', '>', t.raw("NOW() - (?::int * INTERVAL '1 day')", [days]))
               .first('id');
             if (has) return null;
             return this.evaluateThreshold(row.customer_id, 'confirmed_miss', t, { logId: row.id });
