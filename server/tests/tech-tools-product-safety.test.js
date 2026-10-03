@@ -193,4 +193,22 @@ describe('get_product_info product match', () => {
     mockRows = [{ name: 'Sample CS', active: true, default_rate: '0.2-0.8', default_unit: 'fl_oz/gal' }];
     expect((await ask('Sample CS')).rate_note).toBeUndefined();
   });
+
+  test('a per-1,000 label rate counts as a rate on file and is returned with its basis', async () => {
+    mockRows = [{
+      name: 'Acelepryn Xtra', active: true, default_rate: null,
+      default_rate_per_1000: '0.46', min_label_rate_per_1000: '0.23', max_label_rate_per_1000: '0.92', rate_unit: 'fl_oz',
+    }];
+    const result = await ask('Acelepryn Xtra');
+    expect(result.rate_note).toBeUndefined();
+    expect(result.label_rate_per_1000).toEqual({ unit: 'fl_oz per 1,000 sq ft', default: '0.46', min: '0.23', max: '0.92' });
+  });
+
+  test('for a technician, an mL per-1,000 rate is withheld and the rate note stands', async () => {
+    mockRows = [{ name: 'Sample Liquid', active: true, default_rate: null, default_rate_per_1000: '30', rate_unit: 'ml' }];
+    const result = await ask('Sample Liquid');
+    expect(result.label_rate_per_1000).toBeUndefined();
+    expect(result.rate_note).toBe('No rate on file. Check the current label before mixing.');
+    expect(JSON.stringify(result)).not.toMatch(/\bml\b/i);
+  });
 });

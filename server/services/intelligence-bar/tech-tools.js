@@ -453,6 +453,30 @@ function pickProduct(rows, productName) {
   return { result: { error: `Product "${productName}" not found` } };
 }
 
+const isPresent = (value) => value != null && value !== '';
+
+// Many turf products keep their label rate only in the per-1,000 sq ft
+// columns (default_rate stays null), so those count as a rate on file. Only
+// when neither form exists does the answer carry rate_note, so a blank never
+// invites a number from memory. A tech never gets an mL figure.
+function perThousandRate(product, { forTech, hasDefaultRate }) {
+  const fields = {
+    default: product.default_rate_per_1000,
+    min: product.min_label_rate_per_1000,
+    max: product.max_label_rate_per_1000,
+  };
+  const usable = Object.values(fields).some(isPresent) && !(forTech && isMlUnit(product.rate_unit));
+  const out = {};
+  if (usable) {
+    out.label_rate_per_1000 = { unit: product.rate_unit ? `${product.rate_unit} per 1,000 sq ft` : 'per 1,000 sq ft' };
+    for (const [key, value] of Object.entries(fields)) {
+      if (isPresent(value)) out.label_rate_per_1000[key] = value;
+    }
+  }
+  if (!hasDefaultRate && !usable) out.rate_note = 'No rate on file. Check the current label before mixing.';
+  return out;
+}
+
 async function getProductInfo(productName, { forTech = false } = {}) {
   const rows = await db('products_catalog')
     .whereILike('name', `%${productName}%`)
@@ -506,10 +530,7 @@ async function getProductInfo(productName, { forTech = false } = {}) {
     container_size: product.container_size,
     default_rate: mlLabelRate ? null : product.default_rate,
     default_unit: mlLabelRate ? null : product.default_unit,
-    // A blank rate must never invite a number from memory.
-    rate_note: mlLabelRate || product.default_rate == null || product.default_rate === ''
-      ? 'No rate on file. Check the current label before mixing.'
-      : undefined,
+    ...perThousandRate(product, { forTech, hasDefaultRate: !mlLabelRate && isPresent(product.default_rate) }),
     sku: product.sku,
     safety,
   };
