@@ -422,7 +422,17 @@ const LOOKUP_ATTEMPT_STATUSES = new Set([
   'interrupted',
 ]);
 
-async function markLookupAttempt(address, status, reason = null) {
+// attemptId identifies the attempt (one id per lookup, shared with the
+// payload saveLookup stores). It is stamped on EVERY attempt write — pending,
+// the finalize, a cache hit, an error — and an absent id writes NULL, never
+// leaves the previous attempt's id behind: a stamp that cannot name its
+// attempt must read as "no payload of this attempt" to the replay harness.
+// The sweep below moves status only and keeps the dead attempt's id.
+function attemptIdOrNull(attemptId) {
+  return attemptId || null;
+}
+
+async function markLookupAttempt(address, status, reason = null, attemptId) {
   if (isCacheDisabled()) return;
   if (!LOOKUP_ATTEMPT_STATUSES.has(status)) return;
   try {
@@ -436,6 +446,7 @@ async function markLookupAttempt(address, status, reason = null) {
       last_attempt_at: db.fn.now(),
       last_attempt_status: status,
       last_attempt_reason: reason ? String(reason).slice(0, 250) : null,
+      last_attempt_id: attemptIdOrNull(attemptId),
     };
     await db('property_lookups')
       .insert({
@@ -508,7 +519,12 @@ async function sweepStalePendingAttempts() {
     });
 }
 
-async function saveLookup(address, result) {
+// attemptId: the attempt that produced `result`. Stored as payload_attempt_id
+// beside the payload, so a row whose last_attempt_id differs (a later failed
+// refresh kept this payload) is provably stale. A save with no id clears it:
+// the payload is replaced, so the old id must not vouch for it. Evidence
+// backfills and override saves do not replace the payload and never touch it.
+async function saveLookup(address, result, attemptId) {
   if (isCacheDisabled()) return;
   // Never cache a failed lookup — a transient outage must not become a
   // 180-day "no data" answer.
@@ -555,6 +571,7 @@ async function saveLookup(address, result) {
       // Freshness anchor for the override-vs-data comparison in
       // getCachedLookup (updated_at also moves on override saves).
       data_saved_at: dataAsOf,
+      payload_attempt_id: attemptIdOrNull(attemptId),
       expires_at: expiresAt,
       updated_at: db.fn.now(),
     };
