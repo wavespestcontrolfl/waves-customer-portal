@@ -1651,6 +1651,9 @@ module.exports = {
   // operational-style labels ('on_site', ...) with this SAME function — not
   // a second copy of the mapping.
   operationalStatusForTrackState,
+  // The job card's texts cutoff reads which arrival stamps belong to the
+  // current attempt with this SAME per-field rule (Codex r5, PR #5685).
+  staleLifecycleFieldClears,
   _test: {
     operationalStatusForTrackState,
     classifyArrivalSend,

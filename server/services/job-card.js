@@ -323,15 +323,20 @@ async function loadOpenIssues(dbh, customerId) {
 // card must not show later conversations as its pre-visit context.
 // Where the texts stop. window_start only opens a two-hour arrival range,
 // so a text sent inside it (gate instructions at 9:30 for a 9–11 arrival)
-// still belongs on the card: the cutoff is the technician's recorded
-// arrival, else now while the visit is today or still ahead. With no
-// arrival stamp, a finished visit or one on an earlier day (whatever its
-// status — rescheduled, never closed out) stops at its nominal start, so an
-// old card never shows conversations that came after it.
+// still belongs on the card: the cutoff is the technician's arrival on the
+// CURRENT attempt, else now while the visit is today or still ahead. Which
+// stamps belong to the current attempt is track-transitions' own per-field
+// rule (staleLifecycleFieldClears): a rescheduled visit can keep an
+// abandoned attempt's stamp next to a fresh one, and the old one is never
+// the cutoff. With no current arrival, a finished visit or one on an
+// earlier day (whatever its status) stops at its nominal start, so an old
+// card never shows conversations that came after it.
 const ARRIVAL_STAMPS = ['arrived_at', 'actual_start_time', 'check_in_time'];
 const TEXTS_DONE_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show'];
 function textsCutoff(svc, visitStart, today = etDateString()) {
-  const stamps = ARRIVAL_STAMPS.map((k) => (svc[k] ? new Date(svc[k]).getTime() : NaN)).filter(Number.isFinite);
+  const stale = require('./track-transitions').staleLifecycleFieldClears(svc);
+  const stamps = ARRIVAL_STAMPS.filter((k) => !(k in stale))
+    .map((k) => (svc[k] ? new Date(svc[k]).getTime() : NaN)).filter(Number.isFinite);
   if (stamps.length) return new Date(Math.min(...stamps));
   if (!visitStart) return null;
   const day = etCalendarDayOf(svc.scheduled_date);

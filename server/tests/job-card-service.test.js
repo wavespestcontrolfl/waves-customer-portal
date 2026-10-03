@@ -1437,6 +1437,9 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       const arrived = await jobCard.loadJobCardFacts('svc1', withTexts({ window_start: '09:00', status: 'on_site', check_in_time: '2026-09-04T13:50:00Z', arrived_at: '2026-09-04T13:45:00Z' }, texts), deps);
       expect(smsReads.until.toISOString()).toBe('2026-09-04T13:45:00.000Z');
       expect(arrived.notes.customerTexts).toEqual([{ date: '2026-09-04', text: 'Use the side entrance today' }]);
+      // A rescheduled visit keeps an abandoned attempt's stamps next to today's arrival: the old ones never win (Codex r5).
+      await jobCard.loadJobCardFacts('svc1', withTexts({ window_start: '09:00', status: 'on_site', actual_start_time: '2026-08-20T14:00:00Z', check_in_time: '2026-08-20T14:05:00Z', arrived_at: '2026-09-04T13:45:00Z' }, texts), deps);
+      expect(smsReads.until.toISOString()).toBe('2026-09-04T13:45:00.000Z');
       // Not arrived yet, visit today or ahead: everything up to this read.
       const t0 = Date.now();
       await jobCard.loadJobCardFacts('svc1', withTexts({ window_start: '09:00', status: 'confirmed', scheduled_date: '2099-01-05' }, texts), deps);
