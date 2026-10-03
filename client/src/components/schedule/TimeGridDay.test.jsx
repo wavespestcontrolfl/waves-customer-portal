@@ -438,4 +438,21 @@ describe('TimeGridDay open hours', () => {
     expect(screen.queryByRole('button', { name: /for Former Tech$/ })).toBeNull();
     expect(screen.getByRole('button', { name: 'Book open hour 9–10 AM for Alex Tech' })).toBeInTheDocument();
   });
+
+  it('leaves a completed block clickable: no Open marker drawn over it', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-07-15T10:00:00Z'));
+    render(
+      <TimeGridDay
+        date="2026-07-15"
+        services={[...SERVICES, { id: 'svc-done', customerName: 'Done Early', status: 'completed', windowStart: '12:00', windowEnd: '13:00', technicianId: 'tech-1', technicianName: 'Alex Tech' }]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+        onChange={vi.fn()}
+        onCreateSlot={vi.fn()}
+      />,
+    );
+    vi.useRealTimers();
+    expect(screen.queryByRole('button', { name: 'Book open hour 12–1 PM for Alex Tech' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Book open hour 11 AM–12 PM for Alex Tech' })).toBeInTheDocument();
+  });
 });

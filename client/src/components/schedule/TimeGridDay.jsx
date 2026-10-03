@@ -31,7 +31,7 @@ import {
   seriesMoveSummary,
 } from './seriesMove';
 import { useBulkSlotConflicts } from './useSlotConflicts';
-import { openHoursForDay, formatOpenHour, hourToHHMM, useHourClock, NOT_OCCUPYING } from './openHours';
+import { openHoursForDay, formatOpenHour, hourToHHMM, useHourClock } from './openHours';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -646,12 +646,17 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
     window.addEventListener('pointerup', onUp);
   }, [onCreateSlot, tech.id]);
 
-  // Hours an open marker shares with a skipped/cancelled block.
-  const freedHours = useMemo(() => new Set(openHours.filter((h) => services.some((svc) => {
-    if (!NOT_OCCUPYING.has(svc.status)) return false;
+  // Hours an open marker shares with a freed block. Over a skipped or
+  // cancelled block the marker takes the click (that visit has nothing
+  // left to open); a completed or no-show block keeps its own click (it
+  // can still owe a closeout), so no marker is drawn over it.
+  const freedBy = (statuses) => new Set(openHours.filter((h) => services.some((svc) => {
+    if (!statuses.includes(svc.status)) return false;
     const start = parseHHMM(svc.windowStart);
     return start != null && start < (h + 1) * 60 && start + effectiveDuration(svc) > h * 60;
-  }))), [openHours, services]);
+  })));
+  const freedHours = freedBy(['cancelled', 'skipped']);
+  const doneHours = freedBy(['completed', 'no_show']);
 
   const selTop = sel ? Math.min(sel.startIdx, sel.endIdx) * SLOT_HEIGHT : 0;
   const selHeight = sel
@@ -692,7 +697,7 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
             or drag; the button itself is the keyboard / screen-reader way in.
             Over a skipped or cancelled block (which frees its hour) the
             button takes the click itself, so it never opens that visit. */}
-        {openHours.map((h) => (
+        {openHours.filter((h) => !doneHours.has(h)).map((h) => (
           <button
             key={`open-${h}`}
             type="button"
@@ -702,7 +707,7 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
               'absolute z-[2] flex items-center justify-between rounded-xs border border-dashed border-zinc-300 bg-zinc-50 text-ink-tertiary focus-visible:border-zinc-900 u-focus-ring',
               freedHours.has(h) ? 'cursor-pointer hover:border-zinc-900' : 'pointer-events-none',
             )}
-            style={{ top: minutesToTopPx(h * 60) + 3, height: (60 / SLOT_MIN) * SLOT_HEIGHT - 6, left: 6, right: 6, padding: '0 10px', fontSize: 12 }}
+            style={{ top: minutesToTopPx(h * 60) + 3, height: (60 / SLOT_MIN) * SLOT_HEIGHT - 6, left: 6, right: 6, padding: '0 10px', fontSize: 14 }}
           >
             <span className="u-nums">Open · {formatOpenHour(h)}</span>
             <span className="font-medium">+ Book</span>
