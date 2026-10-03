@@ -2645,6 +2645,34 @@ router.get('/:id/cards', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// DELETE /api/admin/customers/:id/payment-methods/:methodId — staff removal
+// of a saved card/bank. Same removal path as the customer portal, with the
+// Auto Pay guard always on: the method Auto Pay is using → 409
+// autopay_method_in_use (switch or turn off Auto Pay first); staff removal
+// never turns Auto Pay off as a side effect.
+router.delete('/:id/payment-methods/:methodId', requireAdmin, async (req, res, next) => {
+  try {
+    const { removePaymentMethod } = require('../services/payment-method-removal');
+    const { status, body, removedMethod } = await removePaymentMethod({
+      customerId: req.params.id,
+      methodId: req.params.methodId,
+      guard: true,
+      source: 'admin_delete',
+    });
+    if (removedMethod) {
+      // The detach is already final at Stripe — a lost audit row must not
+      // turn a completed removal into an error.
+      void auditCustomerMutation(req, 'customer.payment_method.remove', req.params.id, {
+        paymentMethodId: removedMethod.id,
+        methodType: removedMethod.method_type || null,
+        brand: removedMethod.card_brand || removedMethod.bank_name || null,
+        lastFour: removedMethod.last_four || removedMethod.bank_last_four || null,
+      }).catch(() => {});
+    }
+    res.status(status).json(body);
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/customers/:id/dunning-schedule/{send-now,pause,resume,release}
 // — staff controls for the customer's open customer-level overdue reminder
 // schedule (dunning consolidation §8; services/customer-dunning/wiring.js).

@@ -30,4 +30,64 @@ async function freezeCustomerInvoiceAddresses(trx, customer) {
     .update({ customer_address_snapshot: invoiceAddressSnapshot(customer) });
 }
 
-module.exports = { invoiceAddressSnapshot, invoiceCustomerAddress, freezeCustomerInvoiceAddresses };
+const ZIP_RE = /^\d{5}(-\d{4})?$/;
+const STATE_RE = /^[A-Z]{2}$/;
+const ADDRESS_LIMITS = { address_line1: 200, address_line2: 200, city: 100 };
+
+function addressError(message) {
+  return Object.assign(new Error(message), { status: 400, statusCode: 400, isOperational: true, code: 'invalid_address' });
+}
+
+/** Staff correction input → a complete snapshot, or a 400. */
+function normalizeInvoiceAddressInput(input = {}) {
+  const text = (field) => String(input[field] ?? '').trim().replace(/\s+/g, ' ');
+  const address = {
+    address_line1: text('address_line1'),
+    address_line2: text('address_line2') || null,
+    city: text('city'),
+    state: text('state').toUpperCase(),
+    zip: text('zip'),
+  };
+  if (!address.address_line1 || !address.city || !address.state || !address.zip) {
+    throw addressError('Street, city, state and ZIP are all required.');
+  }
+  for (const [field, max] of Object.entries(ADDRESS_LIMITS)) {
+    if (address[field] && address[field].length > max) throw addressError(`${field.replace(/_/g, ' ')} is too long.`);
+  }
+  if (!STATE_RE.test(address.state)) throw addressError('State must be a two-letter code (e.g. FL).');
+  if (!ZIP_RE.test(address.zip)) throw addressError('ZIP must be 5 digits (or ZIP+4).');
+  return address;
+}
+
+async function loadDisplayedInvoiceAddress(conn, invoice) {
+  const customer = await conn('customers').where({ id: invoice.customer_id }).first(...ADDRESS_FIELDS);
+  return invoiceAddressSnapshot(invoiceCustomerAddress(invoice, customer || {}));
+}
+
+/** The address an invoice's documents (receipt page, PDF, emails) display. */
+async function getInvoiceDisplayedAddress(conn, invoiceId) {
+  const invoice = await conn('invoices').where({ id: invoiceId }).first('id', 'customer_id', 'customer_address_snapshot');
+  if (!invoice) return null;
+  return loadDisplayedInvoiceAddress(conn, invoice);
+}
+
+/**
+ * Staff correction of the address printed on ONE invoice and its receipt.
+ * Rewrites only customer_address_snapshot — presentation data. Amounts,
+ * status, the customer profile, saved properties and payer bill-to stay
+ * untouched, and nothing is sent. Returns { before, after } for the audit.
+ */
+async function correctInvoiceAddress(trx, invoiceId, input) {
+  const after = normalizeInvoiceAddressInput(input);
+  const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate()
+    .first('id', 'customer_id', 'customer_address_snapshot');
+  if (!invoice) return null;
+  const before = await loadDisplayedInvoiceAddress(trx, invoice);
+  await trx('invoices').where({ id: invoiceId }).update({ customer_address_snapshot: after, updated_at: trx.fn.now() });
+  return { invoice, before, after };
+}
+
+module.exports = {
+  invoiceAddressSnapshot, invoiceCustomerAddress, freezeCustomerInvoiceAddresses,
+  normalizeInvoiceAddressInput, getInvoiceDisplayedAddress, correctInvoiceAddress,
+};
