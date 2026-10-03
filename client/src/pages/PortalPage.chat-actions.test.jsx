@@ -159,3 +159,30 @@ describe('hand-off notice', () => {
     expect(screen.getByText(NOTIFIED_LINE)).toBeInTheDocument();
   });
 });
+
+describe('AI response reports', () => {
+  it('reports the selected older reply with that reply\'s server conversation id', async () => {
+    const olderConversationId = '11111111-1111-4111-8111-111111111111';
+    const newerConversationId = '22222222-2222-4222-8222-222222222222';
+    api.request
+      .mockResolvedValueOnce({ reply: 'Repeated assistant reply.', conversationId: olderConversationId })
+      .mockResolvedValueOnce({ reply: 'Repeated assistant reply.', conversationId: newerConversationId })
+      .mockResolvedValueOnce({ success: true });
+    render(<ChatWidget customer={customer} initialQuestion="First question" onClose={() => {}} onNavigate={() => {}} />);
+    await settle();
+
+    fireEvent.change(screen.getByLabelText('Chat message'), { target: { value: 'Second question' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+    await settle();
+    fireEvent.click(screen.getAllByRole('button', { name: 'Report this AI response as inappropriate' })[0]);
+    await settle();
+
+    const chatCall = api.request.mock.calls.find(([path]) => path === '/ai/chat');
+    const reportCall = api.request.mock.calls.find(([path]) => path === '/ai/chat/report');
+    expect(JSON.parse(reportCall[1].body)).toEqual({
+      sessionId: JSON.parse(chatCall[1].body).sessionId,
+      conversationId: olderConversationId,
+      messageContent: 'Repeated assistant reply.',
+    });
+  });
+});

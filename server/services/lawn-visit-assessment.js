@@ -13,8 +13,10 @@ const { refereeVisit, skippedReferee } = require('./lawn-visit-referee');
 
 // Invalid input fails before a paid call. Provider misses return an explicit
 // unavailable result with no invented scores. The route owns the feature gate.
-async function analyzeVisit({ photos = [], visionContext = {}, thinkingLevel } = {}) {
-  const { error, zones } = validateVisitPhotos(photos);
+// `shotList` is GATE_LAWN_SHOT_LIST as the route decided it for this request:
+// true widens the photo contract to the eight-shot list (cap 8). Off = unchanged.
+async function analyzeVisit({ photos = [], visionContext = {}, thinkingLevel, shotList = false } = {}) {
+  const { error, zones } = validateVisitPhotos(photos, { shotList });
   if (error) throw Object.assign(new Error(error), { code: 'INVALID_VISIT_PHOTOS', statusCode: 400 });
   const context = visionContext || {};
   const images = photos.map((photo, index) => ({

@@ -2060,6 +2060,7 @@ cache revision so older PDFs cannot retain the substituted scores. Token, access
 privacy, and rate-limit guards are unchanged.
 Under `GATE_LAWN_PROPERTY_HISTORY`, lawn trends, initial scores and before/after comparisons use the visit property’s confirmed assessments, one installed result per visit, bounded by the report visit date and applicable baseline-reset window. Mowing and water-gap histories use the same proven visit eligibility. Payload keys stay unchanged; `assessmentDate` and trend dates use visit dates, including the seasonal calculation and water-gap history cutoff. Frozen weather remains keyed to the assessment run date. The PDF signature includes the resolved history identity. The existing opaque `asig` may carry a signed `h1.<history fingerprint>.<HMAC>` envelope: the data route verifies it and refuses a changed history or a disabled gate with the existing generic 409 pin refusal. Legacy signatures remain accepted; token, eligibility, privacy and rate-limit guards remain in force.
 Lawn report payload cleanup (lawn report rebuild P6): the `/api/reports/:token/data` lawn `reportV2` no longer carries `snapshot.mainWatch` or the top-level `seasonalNote` (the web hero and PDF never rendered either; `snapshot.seasonalNote`, which the hero renders, and `trends.seasonalNote` are unchanged), and `reportV2.photoSummary` is `null` instead of the stock “No additional observations from the photo review.” placeholder so no empty-evidence sentence prints under the photos or in the PDF. The lawn narrative model no longer writes `mainWatch` or `treatmentSummary`; older frozen payloads and cached narratives that still carry those keys are tolerated (extra keys are ignored). No token, eligibility, privacy or rate-limit change; `LAWN_RENDER_STRATEGY` and `SERVICE_REPORT_PDF_STORAGE_VERSION` bumped so cached renders re-key.
+Lawn result-timing copy (lawn report rebuild P16, owner 2026-10-03): on the `/api/reports/:token/data` lawn `reportV2` (and the PDF and report-email renders that share `buildReportV1Data`) no hand-written lawn copy states an unsourced result timeline. The seasonal dormancy explanation on the color diagnosis card (`diagnosis[].customerExplanation` / `explanation` when `seasonal` is true) now comes from the approved `seasonal_dip` expectation row in `server/config/lawn-expectations.js` ("...often returns as nights warm", no count) instead of "should green back up as it warms"; while the row is not `approved` it falls back to the same sentence without the promise. The cross-season notes (`progressionNote`, `trends.seasonalNote`, and the progress engine's in-process `seasonalLine`) carry the same hedge ("...and color often returns as nights warm" / "...often returns as nights warm") in place of "greens back up" / "recovers as it warms"; all three copy sites ask one shared check (`approvedSeasonalDipRow` in `lawn-seasonality.js`, read at call time), and while the row is not `approved` the notes end at "...in the cooler months." with no returns clause. The gated lawn re-service `expectation` (GATE_RESERVICE_REPORT_COPY, lawn treated outcome) no longer says "two to three weeks" or "after three weeks"; it reads "Lawn treatments take time to show, and how fast depends on the problem and the weather. Contact us if the problem areas are not improving." These apply with or without the lawn gates, so gate-off lawn output changes by those sentences only. `LAWN_RENDER_STRATEGY` is bumped to `p9-lawn-seasonal-timing-20261003` so cached lawn PDFs and renders re-key once (`SERVICE_REPORT_PDF_STORAGE_VERSION` is unchanged: the lawn signature already feeds the PDF key). No token, eligibility, privacy or rate-limit change.
 Confirmed assessment property stamps remain eligible after another property is added, subject to ownership and conflicting visit/address checks; unstamped assessment and ancillary histories still require the live sole-property/no-move fallback. Unresolved property scope retains only the report visit’s installed assessment (or its valid signed pin), without prior-property comparisons. An empty same-day baseline reset excludes confirmations preceding the reset from the active window; reports for those earlier confirmations retain their historical window.
 The lawn assessment payload also carries `droughtStress` (`none`, `minor`,
 `moderate`, `severe`, or `null`) from the linked, tech-confirmed assessment's
@@ -2159,6 +2160,40 @@ separate customer text right after the lawn completion text, rendered from the
 `lawn_watering_instruction` SMS template with the instruction's `lines` joined
 by single spaces, at most once per visit
 (`structured_notes.lawnWateringSmsStatus`).
+`GATE_LAWN_WATERING_FORECAST` (dark; also requires `GATE_LAWN_WATERING_RULE`; gate
+off leaves the payload unchanged, key for key) adds two LIVE-VIEW-ONLY optional keys
+to `reportV2.banner` of a plain `water_in` banner (never `hold`, `hold_then_water_in`
+or `none`), both finished customer sentences in inches, never a probability or a
+percent, chosen by code with no model. Neither replaces or alters the instruction
+(`lines`), which stays visible. `forecastLine` (string): a sentence frozen at
+completion beside the instruction (`structured_notes.lawnWateringFreeze
+.wateringInstruction.forecast`, first writer wins with the rest of the freeze,
+replayed verbatim) asking the customer to check the rain by a CHECKPOINT six hours
+before the water-in deadline, so a full cycle still fits in the label window if the
+rain did not come ("About 0.4 inch of rain is forecast by Wed 8 AM. If at least ¼
+inch has fallen by then, it counts as watering in today's treatment. If it has not,
+run the watering above right away."). It exists only when completion to checkpoint
+is at least six hours and the hourly forecast total for completion to the
+CHECKPOINT (not the deadline) is known and reaches the label amount; the frozen
+block also records `checkpointAt` / `checkpointLabel`. Otherwise the key is absent
+and the instruction is today's. `observedRain` (`{ inches, line, source: 'mrms',
+days }`): computed per live `/api/reports/:token/data` request from radar-measured
+(MRMS daily) rain on whole Eastern days that lie inside the frozen water-in window
+(a one-hour margin at each edge), only once those days have ended, only while the
+banner has not expired, and only when the measured total reaches the water-in amount.
+The line is qualified like the existing rain-since-visit copy because a radar cell
+is not the customer's lawn: "Radar measured about 0.5 inch of rain near your address
+since your visit. If your lawn got that rain, it counts as watering in today's
+treatment. Local totals may vary, so run the watering above if your lawn stayed
+dry." The client shows it as a note under the instruction, and it supersedes
+`forecastLine` once present. The radar request carries the page's own 2.5 s deadline
+and is aborted when that deadline wins; a miss leaves the banner as it was. Both
+keys are deleted from every non-live render (`stripLiveOnlyScheduleFields`: PDF,
+static, sms_preview), so the printed record, the lawn PDF cache key, the completion
+email, the watering text (`lines` only), the hero task and Ask Waves are unchanged.
+When present on a live payload the displayed one (the note, else the forecast
+sentence) counts toward `reportV2.lead`'s 250-word budget (`leadWords`). No new
+route, query parameter or customer message.
 `GATE_LAWN_REPORT_LEAD` (dark; gate off leaves the lawn payload unchanged, key for
 key) adds `reportV2.lead` `{ headline, why, applied, yourPart, next }` (plus the
 optional `sinceLast` described under `GATE_LAWN_SINCE_LAST` below) to
@@ -2322,6 +2357,20 @@ establishment date) gets a RESULT TIMING rule and generate-report rejects any fo
 its output, and the lawn "What we applied today" paragraph
 (`treatment-narrative.js`, its own prompt version) and its deterministic
 fallback carry none, any forward timing failing the paragraph to that fallback.
+`GATE_LAWN_SHOT_LIST` (dark): on the service-report payload
+(`/api/reports/:token/data` and the PDF, which share `buildReportV1Data`),
+`lawnAssessment.photos` carries up to 8 photos (5 with the gate off), and each
+photo gains a `zoneLabel`: the customer wording for the shot the technician
+tagged, one of "Front yard", "Back yard", "Side yard", "Close-up", "Blade
+close-up", "Sunny edge", "Shaded area" or "Trouble spot" (the `reportLabel`
+values in `shared/lawn-photo-shots.json`, not the technician's shot names). It is
+`null` for an untagged photo. `reportV2.photos`, the strip the lawn lead layout
+and the PDF print, carries up to 8 photos too (6 with the gate off). The web
+report captions a photo with `zoneLabel` when present. The lawn PDF
+cache signature gains `:shots=1` while the gate is live, so a flip re-keys lawn
+PDFs in both directions. Nothing else in the payload changes, and with the gate
+off the payload and the signature are byte-identical to before.
+
 `GATE_LAWN_SINCE_LAST` (dark; effective only while `GATE_LAWN_VISIT_MEMORY` and
 `GATE_LAWN_REPORT_LEAD` are also live; off leaves the lawn payload and render
 unchanged, key for key) adds an optional `reportV2.lead.sinceLast`
@@ -2977,7 +3026,27 @@ confidence, so the naming gate still decides what is named and the stored
 `confirmation_step` and photo limitations (model or client free text) are
 still never published. A label the table does not know gets no `evidence`
 key. The `/api/public/lawn-assessment` teaser's `first_finding` never carries
-`evidence`),
+`evidence`. Result-timing copy (lawn report rebuild P16, owner 2026-10-03; no new
+field, gate, token, eligibility, privacy or rate-limit change): `expectations.weeds`
+is the owner-approved selective-weed-control expectation row's sentences from
+`server/config/lawn-expectations.js` (no day or week count; while that row is not
+`approved` it is the fixed line "How fast weeds respond depends on the weed and
+the weather.", no row text), and `expectations.insects` no longer says "over the
+next week". Reports stored before this change are cleaned at egress, never
+rewritten in the database: the `expectations.weeds` and `expectations.insects`
+lines are computed at SERVE time. Whenever the stored contract has that key at
+all, the route emits today's line (the weed row's sentences while the row is
+`approved`, otherwise the fixed line above; the fixed insects line) and the stored
+string for those two keys is never emitted, so a pre-v0.7 timeline and the text of
+a row that is later withdrawn both stop showing without inspecting the stored
+text; every other expectation key passes through as stored, and a contract
+without the key gets none. Also, any sentence of the stored `customer_summary` that states result timing (the P15
+`lawnResultTimingViolation` screen, fail closed: any count is dropped) is removed
+while the rest of the summary is kept; a summary with nothing left falls back to
+the route's existing neutral summary. Text with no timing passes through
+byte-identical. The prospect diagnostic prompt's RESULT TIMING block is generated
+from the approved rows that carry a label- or catalog-sourced window
+(`PROMPT_VERSION` `lawn-diagnostic-v0.7`)),
 `/api/public/lawn-diagnostic/:token/quote-request` (write; same token gate
 + sent/unexpired requirement + generic 404, 10 req/min limit, strict body
 validation before coercion — name plus a valid email or phone — links one
