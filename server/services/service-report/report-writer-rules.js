@@ -346,7 +346,7 @@ const DURATION_PHRASE_RE = new RegExp(
 // The same forward-timeframe screen as the writer rules (a past window, "today"
 // or "peak season" passes), plus the no-number timing words the lawn prompts
 // name.
-const LAWN_NAMED_TIMING_RE = /\bover\s+time\b|\b(?:soon|shortly|eventually)\b|\bwithin\s+(?:days|weeks|months)\b/i;
+const LAWN_NAMED_TIMING_RE = /\bover\s+time\b|\b(?:soon|shortly|eventually|tomorrow)\b|\bwithin\s+(?:days|weeks|months)\b|\bnext\s+(?:week|weekend)\b/i;
 function lawnResultTimingViolation(text) {
   const copy = String(text || '');
   return TIMEFRAME_RE.test(copy) || LAWN_NAMED_TIMING_RE.test(copy);

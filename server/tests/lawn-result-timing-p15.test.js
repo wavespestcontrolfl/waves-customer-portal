@@ -61,7 +61,7 @@ describe('lawn treatment paragraph: no timing', () => {
     expect(validateNarrative(clean, [], [], { noTiming: true })).toBeNull();
     expect(validateNarrative(timed)).toBeNull();
     // Every phrase the prompt names is caught, "over time" included.
-    for (const phrase of ['over time', 'over the coming weeks', 'soon', 'in a few days', 'within weeks', 'next month', 'within 2 weeks']) {
+    for (const phrase of ['over time', 'over the coming weeks', 'soon', 'in a few days', 'within weeks', 'next month', 'within 2 weeks', 'next week', 'tomorrow']) {
       expect(validateNarrative(`The treated weeds should fade ${phrase}.`, [], [], { noTiming: true })).toBe('lawn_timing');
     }
     // Result timing only: the section's own "today", "peak season" protection
