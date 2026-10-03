@@ -313,10 +313,14 @@ async function sendNoticeSms({ customer, vars, actorId, hasEmailLeg, operatorIni
     // blockedCode names a caller-hook refusal (the rate review letter's
     // NOTICE_REPOINTED / RECIPIENT_PHONE_CHANGED) for the caller's own hold.
     if (res.blocked) return { sent: false, attempted: false, blockedCode: res.code || null };
-    if (requireAccepted && res.sent && res.deliveryOutcome !== 'accepted') {
-      // sent:true without provider acceptance: 'not_sent' is definitively
-      // unsent; anything else may still have left (held by the caller).
-      return { sent: false, attempted: res.deliveryOutcome !== 'not_sent' };
+    if (requireAccepted) {
+      // Delivery evidence is provider acceptance. deliveryOutcome 'not_sent' is
+      // definitively unsent whatever `sent` says (the SMS gate off, owner
+      // silence, a provider refusal that never took the message); sent:true
+      // with any other non-accepted outcome may still have left (held by the
+      // caller). A bare sent:false keeps the legacy attempted semantics.
+      if (res.deliveryOutcome === 'not_sent') return { sent: false, attempted: false };
+      if (res.sent && res.deliveryOutcome !== 'accepted') return { sent: false, attempted: true };
     }
     return { sent: !!res.sent, attempted };
   } catch (err) {

@@ -471,6 +471,10 @@ describe('sendNoticeSms delivery evidence', () => {
     [{ sent: true, deliveryOutcome: 'not_sent' }, { sent: false, attempted: false }],
     // unknown whether it left: held by the caller, never stamped delivered
     [{ sent: true, deliveryOutcome: 'uncertain' }, { sent: false, attempted: true }],
+    // the canonical sender's definite provider non-send: sent:false with a not_sent outcome (not blocked)
+    [{ sent: false, deliveryOutcome: 'not_sent' }, { sent: false, attempted: false }],
+    // an ambiguous failure keeps the attempt (held for the owner)
+    [{ sent: false, deliveryOutcome: 'uncertain' }, { sent: false, attempted: true }],
     [{ sent: true }, { sent: false, attempted: true }],
   ])('requireAccepted: %j', async (answer, expected) => {
     sendCustomerMessage.mockResolvedValue(answer);
