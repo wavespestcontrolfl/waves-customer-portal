@@ -1440,6 +1440,9 @@ export default function TechHomePage({ section = 'today' }) {
             lng: fastCompleteService.lng ?? null,
           }}
           request={techRequest}
+          // GATE_FAST_COMPLETE_VOICE_FILL rides the same schedule row: only an
+          // exact true shows the mic, the Check chips and the office note.
+          voiceFillEnabled={fastCompleteService.fastCompleteVoiceFillEnabled === true}
           onClose={(options) => {
             setFastCompleteService(null);
             // A sheet blocked on a stale row asks for a refresh, so reopening
