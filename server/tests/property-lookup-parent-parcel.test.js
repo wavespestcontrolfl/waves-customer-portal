@@ -203,7 +203,7 @@ describe('the whole lookup when every fact provider fails', () => {
   test('gate on: a facts-free record carries the parent parcel, and does not read as county evidence', async () => {
     process.env.GATE_LOOKUP_BUSINESS_IDENTITY = 'true';
     lookupCountyParcelByPoint.mockResolvedValue(plazaParcel());
-    const record = await lookupPropertyFromAITrio(TYPED, geo, null, { commercialSuiteSizing: true });
+    const record = await lookupPropertyFromAITrio(TYPED, geo, null, { commercialSuiteSizing: true, retainParentParcel: true });
     expect(record).not.toBeNull();
     // Never cached: a failed lookup with a note attached stays retryable.
     expect(record._contextOnly).toBe(true);
@@ -219,22 +219,41 @@ describe('the whole lookup when every fact provider fails', () => {
     // A parcel was examined.
     lookupCountyParcelByPoint.mockResolvedValue(plazaParcel());
     const examined = {};
-    await lookupPropertyFromAITrio(TYPED, geo, examined, { commercialSuiteSizing: true });
+    await lookupPropertyFromAITrio(TYPED, geo, examined, { commercialSuiteSizing: true, retainParentParcel: true });
     expect(examined.parentParcelCheckRan).toBe(true);
     // The county layer threw and the statewide fallback (fetch) is down too: no parcel was examined.
     lookupCountyParcelByPoint.mockRejectedValue(new Error('gis down'));
     const failed = {};
-    await lookupPropertyFromAITrio(TYPED, geo, failed, { commercialSuiteSizing: true });
+    await lookupPropertyFromAITrio(TYPED, geo, failed, { commercialSuiteSizing: true, retainParentParcel: true });
     expect(failed.parentParcelCheckRan).toBe(false);
     // The county layer cleanly finds nothing, then the statewide fallback errors fast: still not an answer.
     lookupCountyParcelByPoint.mockResolvedValue(null);
     const fallbackFailed = {};
-    await lookupPropertyFromAITrio(TYPED, geo, fallbackFailed, { commercialSuiteSizing: true });
+    await lookupPropertyFromAITrio(TYPED, geo, fallbackFailed, { commercialSuiteSizing: true, retainParentParcel: true });
     expect(fallbackFailed.parentParcelCheckRan).toBe(false);
     // No usable geocode point: the check cannot apply, which is definitive.
     const noPoint = {};
-    await lookupPropertyFromAITrio(TYPED, { county: 'Examplecounty' }, noPoint, { commercialSuiteSizing: true });
+    await lookupPropertyFromAITrio(TYPED, { county: 'Examplecounty' }, noPoint, { commercialSuiteSizing: true, retainParentParcel: true });
     expect(noPoint.parentParcelCheckRan).toBe(true);
+  });
+
+  test('the statewide layer switched off is a skipped check, not a clean none', async () => {
+    process.env.GATE_LOOKUP_BUSINESS_IDENTITY = 'true';
+    process.env.PARCEL_GIS_DISABLED = '1';
+    try {
+      lookupCountyParcelByPoint.mockResolvedValue(null);
+      const diag = {};
+      await lookupPropertyFromAITrio(TYPED, geo, diag, { commercialSuiteSizing: true, retainParentParcel: true });
+      expect(diag.parentParcelCheckRan).toBe(false);
+    } finally {
+      delete process.env.PARCEL_GIS_DISABLED;
+    }
+  });
+
+  test('a direct caller that did not ask to keep the parent parcel gets no context record, gates on or not', async () => {
+    process.env.GATE_LOOKUP_BUSINESS_IDENTITY = 'true';
+    lookupCountyParcelByPoint.mockResolvedValue(plazaParcel());
+    expect(await lookupPropertyFromAITrio(TYPED, geo, null, { commercialSuiteSizing: true })).toBeNull();
   });
 
   test('gate on but the caller did not opt in: no record at all, as before', async () => {
@@ -269,7 +288,7 @@ describe('who sees the parent parcel', () => {
 
   test('with the identity gate off, even an opted-in caller gets the record without a cached parent parcel', () => {
     const shared = result();
-    const view = route.withoutParentParcelUnlessOptedIn(shared, { commercialSuiteSizing: true });
+    const view = route.withoutParentParcelUnlessOptedIn(shared, { commercialSuiteSizing: true, retainParentParcel: true });
     expect(view.propertyRecord).not.toHaveProperty('_parentParcel');
   });
 

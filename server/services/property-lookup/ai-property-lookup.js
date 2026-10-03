@@ -2007,6 +2007,18 @@ function parentParcelEnabled() {
 // caller filled it. Only the opted-in callers (the admin estimate tool's
 // lookup, the estimator engine) ever read it; the route strips it from every
 // other caller's response (property-lookup-v2.js).
+// parcel-gis helpers behind typeof guards (suites that mock the module
+// without them read "layer on" / "not inside").
+function statewideParcelLayerDisabled() {
+  const fn = require('./parcel-gis').isParcelGisDisabled;
+  return typeof fn === 'function' && fn() === true;
+}
+
+function pointInsideParcelPolygon(polygon, lng, lat) {
+  const fn = require('./parcel-gis').pointInsidePolygon;
+  return typeof fn === 'function' && fn(polygon, lng, lat) === true;
+}
+
 function parentParcelContext(parcel, { address, gisPrecision, point }) {
   if (!parentParcelEnabled() || !parcel || gisPrecision !== 'rooftop') return null;
   // The shared unit-address predicate: it sets a building designator aside
@@ -2014,12 +2026,13 @@ function parentParcelContext(parcel, { address, gisPrecision, point }) {
   if (addressMayNameUnit(address)) return null;
   const major = parseInt(dorMajorCategory(parcel.dorUseCode), 10);
   if (!Number.isFinite(major) || major < PARENT_PARCEL_DOR_MIN || major > PARENT_PARCEL_DOR_MAX) return null;
-  const { pointToPolygonEdgeMeters, pointInsidePolygon } = require('./parcel-gis');
+  const { pointToPolygonEdgeMeters } = require('./parcel-gis');
+  if (typeof pointToPolygonEdgeMeters !== 'function') return null;
   // Inside first: the county layer can hand back a nearby parcel that does
   // not contain the point, and the edge distance alone is unsigned — 20 m
   // OUTSIDE the line (or inside a hole in the parcel) would read the same as
   // 20 m inside it.
-  if (!pointInsidePolygon(parcel.polygon, Number(point?.lng), Number(point?.lat))) return null;
+  if (!pointInsideParcelPolygon(parcel.polygon, Number(point?.lng), Number(point?.lat))) return null;
   const edgeM = pointToPolygonEdgeMeters(parcel.polygon, Number(point?.lng), Number(point?.lat));
   if (edgeM === null || edgeM < PARENT_PARCEL_MIN_EDGE_M) return null;
   return {
@@ -2476,14 +2489,38 @@ async function lookupPropertyFromAITrio(address, geoContext = null, diag = null,
       } else {
         pointLookupFailed = true;
       }
+      // The statewide layer switched off (PARCEL_GIS_DISABLED) returns null
+      // without asking anyone: skipped, not a clean "no parcel".
+      if (!parcel && statewideParcelLayerDisabled()) pointLookupFailed = true;
     }
-    if (diag) diag.parentParcelCheckRan = Boolean(parcel) || !pointLookupFailed;
+    const point = { lat: geoContext.lat, lng: geoContext.lng };
+    // The county layer can hand back the nearest parcel when none contains
+    // the point. The existing guards judge it as before; for the parent
+    // parcel it is not the parcel the point sits in.
+    const countyParcelMissesPoint = Boolean(parcel) && Array.isArray(parcel.polygon)
+      && !pointInsideParcelPolygon(parcel.polygon, point.lng, point.lat);
     const guarded = applyGisParcelGuards(parcel, {
-      searchAddress, address, gisPrecision, diag, point: { lat: geoContext.lat, lng: geoContext.lng },
+      searchAddress, address, gisPrecision, diag, point,
     });
     parcel = guarded.parcel;
     parkParcelSignal = guarded.parkParcelSignal;
     parentParcel = guarded.parentParcel;
+    // That nearest-parcel case, dropped by the situs guard: the statewide
+    // layer is asked which parcel DOES contain the point, for the parent
+    // context only (the facts stay dropped either way).
+    if (options.retainParentParcel === true && parentParcelEnabled() && gisPrecision === 'rooftop'
+      && countyParcelMissesPoint && guarded.dropReason === 'situs_house_number_mismatch' && !parentParcel) {
+      const parentTimeoutMs = Math.min(parcelGisTimeoutMs(), remainingCountyMs());
+      if (parentTimeoutMs >= COUNTY_LOOKUP_MIN_REMAINING_MS && !statewideParcelLayerDisabled()) {
+        const statewide = await pointLeg(parentTimeoutMs, lookupParcelByPoint(point.lat, point.lng, { timeoutMs: parentTimeoutMs, rethrowErrors: true }));
+        if (statewide && situsHouseNumberMismatch(searchAddress, statewide.situsAddress)) {
+          parentParcel = parentParcelContext(statewide, { address, gisPrecision, point });
+        }
+      } else {
+        pointLookupFailed = true;
+      }
+    }
+    if (diag) diag.parentParcelCheckRan = !pointLookupFailed;
   }
 
   // County record: keyed by parcel ID when GIS matched, else (or on a
@@ -2572,7 +2609,7 @@ async function lookupPropertyFromAITrio(address, geoContext = null, diag = null,
   if (!records.length) {
     // Opted-in callers only: for everyone else a lookup with no record stays
     // exactly the null it was.
-    if (!parkParcelSignal && parentParcel && options.commercialSuiteSizing === true) {
+    if (!parkParcelSignal && parentParcel && options.commercialSuiteSizing === true && options.retainParentParcel === true) {
       // Every fact provider failed or found nothing — the usual state of an
       // unlisted storefront, the case the parent parcel exists for. Ship a
       // facts-free record carrying only that context. Its source stays the
@@ -2618,7 +2655,10 @@ async function lookupPropertyFromAITrio(address, geoContext = null, diag = null,
   if (!countyRecord) stampMultiSitusParcelSignal(merged, parkParcelSignal);
   // Same rule for the parent parcel: context only when the roll did not
   // resolve the typed address on a parcel of its own.
-  if (!countyRecord && parentParcel) merged._parentParcel = parentParcel;
+  // Only for a caller that asked to keep it (the property-lookup route, for
+  // its shared cache row). A direct caller of this function gets the record
+  // it always got.
+  if (!countyRecord && parentParcel && options.retainParentParcel === true) merged._parentParcel = parentParcel;
   return attachParcelMeta(applyCountyGisTypeOverride(merged, cadastralRecord), parcel);
 }
 
