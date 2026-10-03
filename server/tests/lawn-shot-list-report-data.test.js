@@ -17,6 +17,10 @@ jest.mock('../services/llm/call', () => {
 const history = require('../services/lawn-assessment-history');
 const { dispatchWithFallback } = require('../services/llm/call');
 const { buildReportV1Data, resolveCanonicalLawnRender } = require('../services/service-report/report-data');
+const { buildLawnReportV2 } = require('../services/service-report/lawn-report-v2');
+const shots = require('../services/lawn-photo-shots');
+const fs = require('fs');
+const path = require('path');
 
 function makeKnex(fixtures) {
   const knex = (table) => {
@@ -163,5 +167,57 @@ describe('GATE_LAWN_SHOT_LIST on the lawn report payload', () => {
     expect(on).not.toBe(off);
     delete process.env.GATE_LAWN_SHOT_LIST;
     expect(await sig()).toBe(off);
+  });
+});
+
+describe('the lawn lead layout and PDF strip (reportV2.photos)', () => {
+  const lawnAssessment = (zones) => ({
+    scores: { turfDensity: 80, weedSuppression: 80, colorHealth: 80, stressDamage: 80, fungusControl: 80, overallScore: 80, season: 'peak' },
+    photos: zones.map((zone, i) => ({ url: `https://example.test/p${i}.jpg`, zone, isBest: i === 0, qualityScore: 90 - i, zoneLabel: shots.SHOT_REPORT_LABELS[zone] || null })),
+  });
+  const ZONES = ['front', 'back', 'side', 'close_up', 'blade_crown', 'hot_edge', 'shade', 'trouble'];
+
+  test('gate off: six photos in the strip, as before', () => {
+    expect(buildLawnReportV2({ lawnAssessment: lawnAssessment(ZONES) }).photos).toHaveLength(6);
+  });
+
+  test('gate on (photoLimit 8): all eight reach the strip with their customer labels', () => {
+    const v2 = buildLawnReportV2({ lawnAssessment: lawnAssessment(ZONES), photoLimit: shots.SHOT_CAP });
+    expect(v2.photos.map((p) => p.label)).toEqual([
+      'Front yard', 'Back yard', 'Side yard', 'Close-up', 'Blade close-up', 'Sunny edge', 'Shaded area', 'Trouble spot',
+    ]);
+  });
+
+  test('report-data passes the raised limit only while the gate is live', async () => {
+    const withUrls = () => photoRows().map((row) => ({ ...row, s3_key: `lawn/${row.id}.jpg` }));
+    jest.spyOn(require('../services/photos'), 'getViewUrl').mockResolvedValue('https://example.test/x.jpg');
+    process.env.GATE_LAWN_SHOT_LIST = 'true';
+    const data = await buildReportV1Data(service(), 'token-p18', makeKnex(fixtures(withUrls())), {});
+    expect(data.lawnAssessment.photos.length).toBe(8);
+    expect(data.reportV2.photos.length).toBe(8);
+    delete process.env.GATE_LAWN_SHOT_LIST;
+    const off = await buildReportV1Data(service(), 'token-p18', makeKnex(fixtures(withUrls())), {});
+    expect(off.reportV2.photos.length).toBeLessThanOrEqual(5);
+  });
+});
+
+describe('docs/public-route-contracts.md matches the payload', () => {
+  const doc = fs.readFileSync(path.join(__dirname, '../../docs/public-route-contracts.md'), 'utf8');
+  const start = doc.indexOf('`GATE_LAWN_SHOT_LIST` (dark)');
+  // Whitespace-collapsed, so a label wrapped across two lines still matches.
+  const paragraph = doc.slice(start, doc.indexOf('\n\n', start)).replace(/\s+/g, ' ');
+
+  test('the paragraph lists every customer label (reportLabel) verbatim and none of the technician names', () => {
+    expect(start).toBeGreaterThan(-1);
+    for (const shot of shots.SHOTS) expect(paragraph).toContain(`"${shot.reportLabel}"`);
+    const customerLabels = new Set(shots.SHOTS.map((s) => s.reportLabel));
+    for (const shot of shots.SHOTS) {
+      if (!customerLabels.has(shot.label)) expect(paragraph).not.toContain(`"${shot.label}"`);
+    }
+  });
+
+  test('the paragraph states both photo list sizes and the strip size', () => {
+    expect(paragraph).toMatch(new RegExp(`up to ${shots.SHOT_CAP} photos \\(5 with the gate off\\)`));
+    expect(paragraph).toMatch(new RegExp(`reportV2\\.photos[\\s\\S]*up to ${shots.SHOT_CAP} photos too \\(6 with the gate off\\)`));
   });
 });

@@ -3,7 +3,7 @@
 // admin drawer builds on.
 import { describe, expect, it } from "vitest";
 import DEFINITION from "../../../shared/lawn-photo-shots.json";
-import { MAX_PHOTO_BYTES, MAX_TOTAL_BYTES, SHOTS, SHOT_CAP, SHOT_MINIMUM, appendTaggedPhotos, assignShotZone, decodedBytes, fitPhotosToSizeLimit, missingMinimumSlots, shotIsFull, shotLabel, shotListHint } from "./lawn-photo-shots";
+import { MAX_PHOTO_BYTES, MAX_TOTAL_BYTES, SHOTS, SHOT_CAP, SHOT_MINIMUM, addPhotos, assignShotZone, decodedBytes, describeAddResult, missingMinimumSlots, shotIsFull, shotLabel, shotListHint } from "./lawn-photo-shots";
 
 const photos = (...zones) => zones.map((zone, i) => ({ name: `p${i}`, zone }));
 const zonesOf = (list) => list.map((p) => p.zone);
@@ -66,51 +66,136 @@ describe("shotIsFull", () => {
   });
 });
 
-describe("appendTaggedPhotos", () => {
-  it("tags the first new photo with the tapped shot when that shot has room", () => {
-    const next = appendTaggedPhotos(photos("front"), [{ name: "n" }], "back", 8);
-    expect(zonesOf(next)).toEqual(["front", "back"]);
-  });
+const MIB = 1048576;
+const pic = (mb, name) => ({ name, data: `data:image/jpeg;base64,${Buffer.alloc(Math.floor(mb * MIB)).toString("base64")}` });
+const small = (name) => ({ name, data: "data:image/jpeg;base64,cGhvdG8=" });
+const names = (list) => list.map((p) => p.name);
 
-  it("leaves the new photo untagged when the shot filled up while it was being read", () => {
-    const next = appendTaggedPhotos(photos("back"), [{ name: "n" }], "back", 8);
-    expect(zonesOf(next)).toEqual(["back", null]);
-    // A problem area still has room for a second photo.
-    expect(zonesOf(appendTaggedPhotos(photos("trouble"), [{ name: "n" }], "trouble", 8))).toEqual(["trouble", "trouble"]);
-  });
-
-  it("never exceeds the cap, and no tag means no tag", () => {
-    expect(appendTaggedPhotos(photos(null, null), [{}, {}, {}], null, 3)).toHaveLength(3);
-    expect(zonesOf(appendTaggedPhotos(photos(), [{}], null, 8))).toEqual([null]);
-  });
-});
-
-describe("size rule", () => {
-  const photo = (mb, name) => ({ name, data: `data:image/jpeg;base64,${Buffer.alloc(Math.floor(mb * 1048576)).toString("base64")}` });
-
-  it("uses the shared numbers: 5 MiB each, 30 MiB together, and a full base64 set leaves 8 MiB under the 50 MiB body limit", () => {
+describe("size numbers", () => {
+  it("come from the shared JSON, and a full base64 set leaves 8 MiB under the 50 MiB body limit", () => {
     expect(MAX_PHOTO_BYTES).toBe(DEFINITION.maxPhotoBytes);
     expect(MAX_TOTAL_BYTES).toBe(DEFINITION.maxTotalBytes);
-    expect(50 * 1048576 - Math.ceil(MAX_TOTAL_BYTES / 3) * 4).toBeGreaterThanOrEqual(8 * 1048576);
-  });
-
-  it("measures decoded bytes from a data URL", () => {
+    expect(50 * MIB - Math.ceil(MAX_TOTAL_BYTES / 3) * 4).toBeGreaterThanOrEqual(8 * MIB);
     expect(decodedBytes("data:image/jpeg;base64,cGhvdG8=")).toBe(5);
     expect(decodedBytes("")).toBe(0);
   });
+});
 
-  it("keeps photos that fit and names every one that does not", () => {
-    const held = [photo(4.5, "h1"), photo(4.5, "h2"), photo(4.5, "h3"), photo(4.5, "h4"), photo(4.5, "h5"), photo(4.5, "h6")];
-    const fit = fitPhotosToSizeLimit(held, [photo(1, "ok"), photo(4.5, "late"), photo(6, "huge")]);
-    expect(fit.accepted.map((p) => p.name)).toEqual(["ok"]);
-    expect(fit.message).toMatch(/late \(4\.5 MB\) was not added/);
-    expect(fit.message).toMatch(/huge is 6\.0 MB; each photo must be 5\.0 MB or smaller/);
-    expect(fitPhotosToSizeLimit([], [photo(1, "a")])).toEqual({ accepted: expect.any(Array), message: "" });
+describe("addPhotos, shot list off (the original behavior)", () => {
+  const off = { shotList: false };
+  it("caps at 3, never tags, never checks size, and reports nothing", () => {
+    const held = [small("a")];
+    const out = addPhotos(held, [small("b"), small("c"), small("d")], { ...off, shot: "back" });
+    expect(names(out.photos)).toEqual(["a", "b", "c"]);
+    expect(zonesOf(out.photos)).toEqual([undefined, null, null]);
+    expect(out.rejected).toEqual([]);
+    expect(out.untagged).toEqual([]);
+    expect(describeAddResult(out)).toBe("");
+    expect(addPhotos([], [pic(6, "huge")], off).photos).toHaveLength(1);
+    expect(addPhotos(photos(null, null, null), [small("x")], off).photos).toHaveLength(3);
+  });
+});
+
+describe("addPhotos, shot list on", () => {
+  const on = { shotList: true };
+
+  it("adds untagged photos in order and reports nothing", () => {
+    const out = addPhotos([], [small("a"), small("b")], on);
+    expect(names(out.photos)).toEqual(["a", "b"]);
+    expect(zonesOf(out.photos)).toEqual([null, null]);
+    expect(describeAddResult(out)).toBe("");
   });
 
-  it("enforces the size rule inside the append when asked", () => {
-    const held = Array.from({ length: 6 }, (_, i) => ({ ...photo(4.5, `h${i}`), zone: null }));
-    const next = appendTaggedPhotos(held, [photo(4.5, "late")], "back", 8, { enforceSize: true });
-    expect(next).toHaveLength(6);
+  it("holds 8 photos and names each one left out beyond the cap", () => {
+    const held = Array.from({ length: 6 }, (_, i) => small(`h${i}`));
+    const out = addPhotos(held, [small("a"), small("b"), small("c"), small("d")], on);
+    expect(out.photos).toHaveLength(8);
+    expect(out.rejected.map((r) => r.name)).toEqual(["c", "d"]);
+    expect(describeAddResult(out)).toBe("c was not added: a visit holds up to 8 photos. Remove one first. d was not added: a visit holds up to 8 photos. Remove one first.");
+  });
+
+  it("refuses a photo over the per-photo limit, naming it, and keeps the rest", () => {
+    const out = addPhotos([], [small("ok"), pic(6, "huge.jpg")], on);
+    expect(names(out.photos)).toEqual(["ok"]);
+    expect(describeAddResult(out)).toBe("huge.jpg is 6.0 MB; each photo must be 5.0 MB or smaller. Retake it or choose a smaller one.");
+    expect(addPhotos([], [pic(5, "edge")], on).photos).toHaveLength(1); // exactly 5 MiB fits
+  });
+
+  it("refuses a photo that would pass the total, naming it and the running total", () => {
+    const held = Array.from({ length: 6 }, (_, i) => pic(4.5, `h${i}`));
+    const out = addPhotos(held, [small("fits"), pic(4.5, "late")], on);
+    expect(names(out.photos).slice(-1)).toEqual(["fits"]);
+    expect(out.rejected.map((r) => r.name)).toEqual(["late"]);
+    expect(describeAddResult(out)).toMatch(/^late \(4\.5 MB\) was not added: one visit can carry 30\.0 MB of photos and these already total 27\.0 MB/);
+    // Exactly at the total still fits.
+    expect(addPhotos([pic(5, "a"), pic(5, "b"), pic(5, "c"), pic(5, "d"), pic(5, "e")], [pic(5, "f")], on).photos).toHaveLength(6);
+    expect(addPhotos([pic(5, "a"), pic(5, "b"), pic(5, "c"), pic(5, "d"), pic(5, "e"), pic(5, "f")], [small("g")], on).rejected).toHaveLength(1);
+  });
+
+  it("tags the photo with the tapped shot while it has room", () => {
+    const out = addPhotos(photos("front"), [small("n")], { ...on, shot: "back" });
+    expect(zonesOf(out.photos)).toEqual(["front", "back"]);
+    expect(out.untagged).toEqual([]);
+  });
+
+  it("a one-photo shot that is already taken: the new photo goes in untagged and the technician is told", () => {
+    const out = addPhotos(photos("back"), [small("n.jpg")], { ...on, shot: "back" });
+    expect(zonesOf(out.photos)).toEqual(["back", null]);
+    expect(describeAddResult(out)).toMatch(/^n\.jpg was added without a shot tag: Back overview already has its photo\./);
+  });
+
+  it("a problem area takes two photos from one pick (wide + close-up); a third goes in untagged and is reported", () => {
+    const out = addPhotos([], [small("wide"), small("close"), small("extra")], { ...on, shot: "trouble" });
+    expect(zonesOf(out.photos)).toEqual(["trouble", "trouble", null]);
+    expect(out.untagged.map((u) => u.name)).toEqual(["extra"]);
+    expect(describeAddResult(out)).toMatch(/extra was added without a shot tag: Problem area already has its 2 photos/);
+    // One problem photo already held: only one more fits.
+    expect(zonesOf(addPhotos(photos("trouble"), [small("a"), small("b")], { ...on, shot: "trouble" }).photos)).toEqual(["trouble", "trouble", null]);
+  });
+
+  it("a one-photo shot picked with two files tags the first and reports the second", () => {
+    const out = addPhotos([], [small("a"), small("b")], { ...on, shot: "close_up" });
+    expect(zonesOf(out.photos)).toEqual(["close_up", null]);
+    expect(out.untagged.map((u) => u.name)).toEqual(["b"]);
+  });
+
+  it("a rejected photo never takes the tag: the next kept photo does", () => {
+    const out = addPhotos([], [pic(6, "huge"), small("ok")], { ...on, shot: "side" });
+    expect(zonesOf(out.photos)).toEqual(["side"]);
+    expect(names(out.photos)).toEqual(["ok"]);
+  });
+
+  it("overlapping adds decided one after the other give the same total either way round", () => {
+    const first = [pic(4.5, "A1"), pic(4.5, "A2"), pic(4.5, "A3")];
+    const second = [pic(4.5, "B1"), pic(4.5, "B2"), pic(4.5, "B3")];
+    const run = (x, y) => {
+      const one = addPhotos([], x, on);
+      const two = addPhotos(one.photos, y, on);
+      return { photos: two.photos, rejected: [...one.rejected, ...two.rejected] };
+    };
+    const ab = run(first, [...second, pic(4.5, "B4")]);
+    const ba = run([...second, pic(4.5, "B4")], first);
+    // 6 x 4.5 = 27 MB fits, the 7th photo (31.5 MB) does not, whichever read lands first.
+    expect(ab.photos).toHaveLength(6);
+    expect(ba.photos).toHaveLength(6);
+    expect(ab.rejected).toHaveLength(1);
+    expect(ba.rejected).toHaveLength(1);
+    expect(describeAddResult({ rejected: ab.rejected })).toMatch(/was not added: one visit can carry 30\.0 MB/);
+  });
+
+  it("two reads for the same one-photo shot never leave two tags, in either order", () => {
+    const a = addPhotos([], [small("a")], { ...on, shot: "back" });
+    const b = addPhotos(a.photos, [small("b")], { ...on, shot: "back" });
+    expect(zonesOf(b.photos).filter((z) => z === "back")).toHaveLength(1);
+    const c = addPhotos([], [small("b")], { ...on, shot: "back" });
+    const d = addPhotos(c.photos, [small("a")], { ...on, shot: "back" });
+    expect(zonesOf(d.photos).filter((z) => z === "back")).toHaveLength(1);
+  });
+
+  it("does not mutate its inputs", () => {
+    const held = [{ ...small("h"), zone: "front" }];
+    const snapshot = JSON.stringify(held);
+    addPhotos(held, [small("n")], { ...on, shot: "back" });
+    expect(JSON.stringify(held)).toBe(snapshot);
   });
 });

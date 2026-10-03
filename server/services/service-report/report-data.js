@@ -5567,6 +5567,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         waterSnapshot,
         waterGapHistory,
         mowingTrendFallback,
+        // GATE_LAWN_SHOT_LIST: a visit can carry 8 photos, so the strip does too (6 off).
+        ...(featureGates.gateEnvValue('GATE_LAWN_SHOT_LIST') ? { photoLimit: LAWN_SHOT_LIST_CAP } : {}),
       });
       if (reportV2 && wateringInstruction) {
         const banner = buildWateringBanner(wateringInstruction, lawnAssessment.waterContext?.weekPlan);

@@ -64,21 +64,6 @@ export function shotIsFull(photos, key) {
   return photos.filter((photo) => photo.zone === key).length >= maxFor(key);
 }
 
-// Append freshly read photos to the list. The first one carries `zone` (the shot
-// whose Add button was tapped) only if it is kept and that shot still has room
-// in `prev`, so a race between two reads can never leave two photos on a
-// one-photo shot. `enforceSize` also drops photos that no longer fit the size
-// rule against what `prev` holds now.
-export function appendTaggedPhotos(prev, incoming, zone, cap, { enforceSize = false } = {}) {
-  const kept = enforceSize ? fitPhotosToSizeLimit(prev, incoming).accepted : incoming;
-  const next = [...prev];
-  kept.forEach((photo) => {
-    const tag = photo === incoming[0] && zone && !shotIsFull(next, zone) ? zone : null;
-    next.push({ ...photo, zone: tag });
-  });
-  return next.slice(0, cap);
-}
-
 const mb = (bytes) => `${(bytes / 1048576).toFixed(1)} MB`;
 export function decodedBytes(dataUrl) {
   const base64 = String(dataUrl || "").split(",")[1] || "";
@@ -86,25 +71,59 @@ export function decodedBytes(dataUrl) {
   return Math.floor((base64.length * 3) / 4) - padding;
 }
 
-// Which of the freshly read photos fit the size rule (each within the per-photo
-// limit, all of them together within the total), and a message naming every
-// photo that was left out so the technician can retake or remove it. `held` are
-// the photos already in the list.
-export function fitPhotosToSizeLimit(held, incoming) {
-  let total = held.reduce((sum, photo) => sum + decodedBytes(photo.data), 0);
-  const accepted = [];
-  const problems = [];
+const LEGACY_CAP = 3;
+
+// THE one decision for adding freshly read photos to the visit's list.
+//
+//   addPhotos(prev, incoming, { shot, shotList }) -> { photos, rejected, untagged }
+//
+// `prev` is the list as it stands now; `incoming` are the new photos in the
+// order picked; `shot` is the shot whose Add button was tapped (or null).
+// Pure: the component calls it with the latest list at the moment a read lands,
+// so overlapping reads are decided one after the other against what is really
+// held, in whatever order they finish.
+//
+// Shot list on, per photo in order: it is left out (listed in `rejected`, with
+// the reason) if the visit already holds the 8-photo cap, if the photo is over
+// the per-photo size limit, or if it would push the visit past the total size
+// limit. A kept photo takes `shot` while that shot has room (a problem area
+// takes two, every other shot one); a kept photo beyond the shot's room is added
+// untagged and listed in `untagged`. Nothing is dropped silently.
+//
+// Shot list off: exactly the original behavior (3-photo cap, no tags, no size
+// rule); `rejected` and `untagged` stay empty so that screen is unchanged.
+export function addPhotos(prev, incoming, { shot = null, shotList = false } = {}) {
+  if (!shotList) {
+    const remaining = Math.max(0, LEGACY_CAP - prev.length);
+    const added = incoming.slice(0, remaining).map((photo) => ({ ...photo, zone: null }));
+    return { photos: [...prev, ...added].slice(0, LEGACY_CAP), rejected: [], untagged: [] };
+  }
+  const photos = [...prev];
+  const rejected = [];
+  const untagged = [];
+  let total = photos.reduce((sum, photo) => sum + decodedBytes(photo.data), 0);
   for (const photo of incoming) {
-    const bytes = decodedBytes(photo.data);
     const name = photo.name || "A photo";
-    if (bytes > MAX_PHOTO_BYTES) {
-      problems.push(`${name} is ${mb(bytes)}; each photo must be ${mb(MAX_PHOTO_BYTES)} or smaller. Retake it or choose a smaller one.`);
+    const bytes = decodedBytes(photo.data);
+    if (photos.length >= SHOT_CAP) {
+      rejected.push({ name, reason: `was not added: a visit holds up to ${SHOT_CAP} photos. Remove one first.` });
+    } else if (bytes > MAX_PHOTO_BYTES) {
+      rejected.push({ name, reason: `is ${mb(bytes)}; each photo must be ${mb(MAX_PHOTO_BYTES)} or smaller. Retake it or choose a smaller one.` });
     } else if (total + bytes > MAX_TOTAL_BYTES) {
-      problems.push(`${name} (${mb(bytes)}) was not added: one visit can carry ${mb(MAX_TOTAL_BYTES)} of photos and these already total ${mb(total)}. Remove a large photo or retake it smaller.`);
+      rejected.push({ name, reason: `(${mb(bytes)}) was not added: one visit can carry ${mb(MAX_TOTAL_BYTES)} of photos and these already total ${mb(total)}. Remove a large photo or retake it smaller.` });
     } else {
-      accepted.push(photo);
+      const tagged = shot && !shotIsFull(photos, shot);
+      if (shot && !tagged) untagged.push({ name, reason: `was added without a shot tag: ${shotLabel(shot)} already has ${maxFor(shot) === 1 ? "its photo" : `its ${maxFor(shot)} photos`}. Pick its shot from the slot menu if it belongs somewhere else.` });
+      photos.push({ ...photo, zone: tagged ? shot : null });
       total += bytes;
     }
   }
-  return { accepted, message: problems.join(" ") };
+  return { photos, rejected, untagged };
+}
+
+// The message the technician sees for an addPhotos result ("" when all went in
+// as asked). Derived from the result alone, so it is the same however often
+// it is computed.
+export function describeAddResult({ rejected = [], untagged = [] } = {}) {
+  return [...rejected, ...untagged].map(({ name, reason }) => `${name} ${reason}`).join(" ");
 }

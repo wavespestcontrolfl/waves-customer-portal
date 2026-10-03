@@ -533,7 +533,7 @@ export function LawnPhotoStrip({ photos = [], summary = null, embedded = false, 
               <figure key={i} style={{ margin: 0, flex: '0 0 100%', scrollSnapAlign: 'center' }}>
                 {/* Eager on purpose: these are presigned URLs, and lazy
                     deferred the fetch until after they expired — swiped-to
-                    slides rendered blank (owner-reported). ≤5 photos. */}
+                    slides rendered blank (owner-reported). ≤8 photos. */}
                 <img
                   src={p.url}
                   alt={p.label || 'Lawn photo'}

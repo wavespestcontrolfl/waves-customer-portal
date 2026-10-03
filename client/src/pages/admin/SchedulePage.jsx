@@ -159,7 +159,7 @@ import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
 import { shouldResetCompletionIdempotencyKey } from "../../lib/completion-idempotency";
 import { rankTechTips, techTipSubtext, techTipSentLabel } from "../../lib/tech-tips";
 import { LAWN_TARGET_SUGGESTIONS, NUTRITION_TARGET_SUGGESTIONS, productControlsTargets, productTargetsNutrition } from "../../lib/lawn-targets";
-import { SHOTS as LAWN_SHOTS, SHOT_CAP as LAWN_SHOT_CAP, appendTaggedPhotos, assignShotZone, fitPhotosToSizeLimit, shotIsFull, shotListHint } from "../../lib/lawn-photo-shots";
+import { SHOTS as LAWN_SHOTS, SHOT_CAP as LAWN_SHOT_CAP, addPhotos as addLawnPhotos, assignShotZone, describeAddResult, shotIsFull, shotListHint } from "../../lib/lawn-photo-shots";
 // Round 14 P2 (:2494): sentinel <option> value for the row's own stored appointment discount.
 const STORED_APPOINTMENT_DISCOUNT_OPTION = "__stored_appointment_discount";
 const { TERMITE_PERIMETER_METHODS } = termiteTreatmentMethods;
@@ -10141,14 +10141,25 @@ function LawnAssessmentCompletionBlock({
   // so the AI photo analysis can factor them in alongside the images.
   technicianNotes = "",
 }) {
-  const [photos, setPhotos] = useState([]);
-  // The latest list, for async reads that finish after a re-render.
-  const photosRef = useRef(photos);
-  photosRef.current = photos;
+  const [photos, setPhotosState] = useState([]);
+  // The photo list's source of truth is this ref: every change goes through
+  // setPhotos below, which computes from the latest list and mirrors it into
+  // state. A read that lands after a re-render (or another read) therefore
+  // always decides against what is really held, with no stale closure.
+  const photosRef = useRef([]);
+  const setPhotos = (update) => {
+    const next = typeof update === "function" ? update(photosRef.current) : update;
+    photosRef.current = next;
+    setPhotosState(next);
+  };
   // GATE_LAWN_SHOT_LIST (lawn report rebuild P18): the server says so in the
   // existing-assessment lookup below. Off (the default, and on any lookup
   // failure) the step keeps its three optional slots and 3-photo cap.
   const [shotList, setShotList] = useState(false);
+  // False until the lookup below has answered (or failed): the mode decides the
+  // photo cap, so capture waits for it rather than truncating at 3 photos and
+  // then switching to 8.
+  const [modeKnown, setModeKnown] = useState(false);
   const pendingShotRef = useRef(null);
   // Shots whose photo is still being read: held so a second tap on the same
   // one-photo shot cannot queue a duplicate while the first decode is in flight.
@@ -10171,6 +10182,7 @@ function LawnAssessmentCompletionBlock({
     let cancelled = false;
     setPhotos([]);
     setShotList(false);
+    setModeKnown(false);
     pendingShotRef.current = null;
     setReadingShots([]);
     setResult(null);
@@ -10182,6 +10194,7 @@ function LawnAssessmentCompletionBlock({
     onConfirmed?.(null);
     onReady?.(false);
     if (!service?.id) {
+      setModeKnown(true);
       onReady?.(true);
       return () => { cancelled = true; };
     }
@@ -10222,7 +10235,7 @@ function LawnAssessmentCompletionBlock({
         if (!cancelled) onReady?.("failed");
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) { setLoading(false); setModeKnown(true); }
       });
 
     return () => {
@@ -10232,30 +10245,25 @@ function LawnAssessmentCompletionBlock({
 
   async function addPhotos(event) {
     const files = Array.from(event.target.files || []);
-    const remaining = Math.max(0, photoCap - photos.length);
-    // A shot's own "Add" button tags the first photo it brings in; only set
-    // while the shot list is on, so this is null (every photo untagged) off.
+    // A shot's own "Add" button tags the photos it brings in; only set while
+    // the shot list is on, so this is null (every photo untagged) off.
     const pendingZone = pendingShotRef.current;
     pendingShotRef.current = null;
-    if (!files.length || remaining === 0) return;
+    // Shot list off keeps its original pre-read cut at the 3-photo cap; on, every
+    // picked file is read and addLawnPhotos decides (and names what it leaves out).
+    const picked = shotList ? files : files.slice(0, Math.max(0, 3 - photosRef.current.length));
+    if (!files.length || picked.length === 0) return;
     setError("");
     if (pendingZone) setReadingShots((prev) => [...prev, pendingZone]);
     try {
-      let nextPhotos = await Promise.all(
-        files.slice(0, remaining).map(readLawnAssessmentPhoto),
-      );
-      if (shotList) {
-        // Eight photos must fit one request: each within the per-photo limit and
-        // all together within the total (shared/lawn-photo-shots.json). A photo
-        // that does not fit is named so it can be retaken or removed.
-        const fit = fitPhotosToSizeLimit(photosRef.current, nextPhotos);
-        nextPhotos = fit.accepted;
-        if (fit.message) setError(fit.message);
-        if (!nextPhotos.length) return;
-      }
-      // The per-shot maximum is enforced inside the update itself, so two reads
-      // landing together can never leave a duplicate tag.
-      setPhotos((prev) => appendTaggedPhotos(prev, nextPhotos, pendingZone, photoCap, { enforceSize: shotList }));
+      const nextPhotos = await Promise.all(picked.map(readLawnAssessmentPhoto));
+      // One pure decision over the list as it is right now: photo cap, size
+      // limits, per-shot room and tagging. Nothing is pre-checked outside it.
+      const outcome = addLawnPhotos(photosRef.current, nextPhotos, { shot: pendingZone, shotList });
+      const message = describeAddResult(outcome);
+      if (message) setError(message);
+      if (outcome.photos.length === photosRef.current.length) return;
+      setPhotos(outcome.photos);
       setResult(null);
       setTechScores(null);
       setTypedKeys(new Set());
@@ -10442,7 +10450,7 @@ function LawnAssessmentCompletionBlock({
             <button
               type="button"
               onClick={() => { pendingShotRef.current = null; fileRef.current?.click(); }}
-              disabled={disabled || photos.length >= photoCap || analyzing}
+              disabled={disabled || photos.length >= photoCap || analyzing || !modeKnown}
               style={{
                 height: 38,
                 padding: "0 14px",
@@ -10452,13 +10460,14 @@ function LawnAssessmentCompletionBlock({
                 color: D.heading,
                 fontSize: 13,
                 fontWeight: 500,
-                cursor: disabled || photos.length >= photoCap || analyzing ? "not-allowed" : "pointer",
-                opacity: disabled || photos.length >= photoCap || analyzing ? 0.55 : 1,
+                cursor: disabled || photos.length >= photoCap || analyzing || !modeKnown ? "not-allowed" : "pointer",
+                opacity: disabled || photos.length >= photoCap || analyzing || !modeKnown ? 0.55 : 1,
               }}
             >
               Add turf photos
             </button>
             <span style={{ fontSize: 12, color: D.muted }}>{photos.length}/{photoCap}</span>
+            {!modeKnown && <span role="status" data-testid="lawn-photo-mode-pending" style={{ fontSize: 12, color: D.muted }}>Checking photo options…</span>}
           </>
         )}
             {showGaugeReading && (

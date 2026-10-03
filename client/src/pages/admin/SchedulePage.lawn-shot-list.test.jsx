@@ -26,6 +26,8 @@ let assessRequests;
 let shotListEnabled;
 let holdRead;
 let readResult;
+let lookupGate;
+let lookupFails;
 
 class FixtureFileReader {
   readAsDataURL() {
@@ -46,6 +48,8 @@ beforeEach(async () => {
   assessRequests = [];
   holdRead = null;
   readResult = null;
+  lookupGate = null;
+  lookupFails = false;
   localStorage.clear();
   localStorage.setItem('waves_admin_token', 'test-token');
   localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
@@ -57,7 +61,11 @@ beforeEach(async () => {
     if (url.includes('feature-flags')) data = { flags: {} };
     if (url.includes('turf-profile')) data = { profile: {} };
     // No assessment on file; the server only adds shotListEnabled when the gate is live.
-    if (url.includes('lawn-assessment/service/')) data = shotListEnabled ? { shotListEnabled: true, assessment: null } : { assessment: null };
+    if (url.includes('lawn-assessment/service/')) {
+      if (lookupFails) throw new Error('lookup failed');
+      if (lookupGate) await lookupGate;
+      data = shotListEnabled ? { shotListEnabled: true, assessment: null } : { assessment: null };
+    }
     if (url.includes('lawn-assessment/history')) data = { history: [] };
     if (url.includes('lawn-assessment/assess')) {
       assessRequests.push(JSON.parse(options.body));
@@ -83,6 +91,8 @@ const mount = () => render(<CompletionPanel service={service} products={[]} onCl
 const file = (name) => new File([name], `${name}.jpg`, { type: 'image/jpeg' });
 const addFiles = async (names) => {
   const input = await screen.findByLabelText('Add turf photos');
+  // Capture opens once the lookup has said which mode this visit is in.
+  await waitFor(() => expect(screen.queryByTestId('lawn-photo-mode-pending')).toBeNull());
   fireEvent.change(input, { target: { files: names.map(file) } });
 };
 
@@ -200,6 +210,58 @@ describe('gate on', () => {
       { data: 'cGhvdG8=', mimeType: 'image/jpeg' },
     ]);
   });
+  it('while the lookup is pending the Add buttons are disabled with a visible "checking" state; they open once the mode is known', async () => {
+    let answer;
+    lookupGate = new Promise((resolve) => { answer = resolve; });
+    mount();
+    const pending = await screen.findByTestId('lawn-photo-mode-pending');
+    expect(pending.textContent).toMatch(/Checking photo options/);
+    expect(screen.getByRole('button', { name: 'Add turf photos' }).disabled).toBe(true);
+    answer();
+    await waitFor(() => expect(screen.queryByTestId('lawn-photo-mode-pending')).toBeNull());
+    expect(screen.getByRole('button', { name: 'Add turf photos' }).disabled).toBe(false);
+    expect((await screen.findByRole('button', { name: 'Add photo for Front overview' })).disabled).toBe(false);
+  });
+
+  it('a failed lookup falls back to the original three-photo mode with Add enabled', async () => {
+    lookupFails = true;
+    mount();
+    await waitFor(() => expect(screen.queryByTestId('lawn-photo-mode-pending')).toBeNull());
+    expect(screen.getByRole('button', { name: 'Add turf photos' }).disabled).toBe(false);
+    expect(screen.queryByTestId('lawn-shot-list')).toBeNull();
+    expect(screen.getByText('0/3')).toBeTruthy();
+  });
+
+  it('two overlapping reads near the total limit: the second is told which photo did not fit', async () => {
+    mount();
+    await screen.findByTestId('lawn-shot-list');
+    const big = `data:image/jpeg;base64,${Buffer.alloc(4.5 * 1048576).toString('base64')}`;
+    let release;
+    holdRead = new Promise((resolve) => { release = resolve; });
+    readResult = big;
+    const input = screen.getByLabelText('Add turf photos');
+    // Both picks start before either read finishes: 4 x 4.5 MB and 3 x 4.5 MB.
+    fireEvent.change(input, { target: { files: ['a1', 'a2', 'a3', 'a4'].map(file) } });
+    fireEvent.change(input, { target: { files: ['b1', 'b2', 'b3'].map(file) } });
+    release();
+    await screen.findByText(/b3\.jpg \(4\.5 MB\) was not added: one visit can carry 30\.0 MB of photos and these already total 27\.0 MB/);
+    expect(screen.getByText('6/8')).toBeTruthy();
+    // The first read's four and the second read's first two fit (27.0 MB); only the third of the second read does not.
+    expect(screen.queryByText(/b1\.jpg/)).toBeNull();
+  }, 60000);
+
+  it('a problem-area pick of two files tags both photos', async () => {
+    mount();
+    const input = await screen.findByLabelText('Add turf photos');
+    vi.spyOn(input, 'click').mockImplementation(() => {});
+    fireEvent.click(screen.getByRole('button', { name: 'Add photo for Problem area' }));
+    fireEvent.change(input, { target: { files: [file('wide'), file('close')] } });
+    await screen.findByLabelText('Slot for photo 2');
+    expect(screen.getByLabelText('Slot for photo 1').value).toBe('trouble');
+    expect(screen.getByLabelText('Slot for photo 2').value).toBe('trouble');
+    expect(screen.getByRole('button', { name: 'Add photo for Problem area' }).disabled).toBe(true);
+  });
+
   it('holds a shot while its photo is still being read, so a second tap cannot queue a duplicate', async () => {
     let release;
     holdRead = new Promise((resolve) => { release = resolve; });
@@ -254,7 +316,7 @@ describe('gate on', () => {
     await addFiles(['p7']);
     await screen.findByText(/p7\.jpg \(4\.5 MB\) was not added: one visit can carry 30\.0 MB of photos and these already total 27\.0 MB/);
     expect(screen.queryByLabelText('Slot for photo 7')).toBeNull();
-  });
+  }, 60000);
 });
 
 describe('gate off', () => {

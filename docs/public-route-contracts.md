@@ -2325,10 +2325,13 @@ fallback carry none, any forward timing failing the paragraph to that fallback.
 `GATE_LAWN_SHOT_LIST` (dark): on the service-report payload
 (`/api/reports/:token/data` and the PDF, which share `buildReportV1Data`),
 `lawnAssessment.photos` carries up to 8 photos (5 with the gate off), and each
-photo gains an optional string `zoneLabel`: the customer-safe name of the shot
-the technician tagged ("Front overview", "Canopy close-up", "Problem area", and
-so on, from `shared/lawn-photo-shots.json`). It is `null` for an untagged photo.
-The web report captions a photo with `zoneLabel` when present. The lawn PDF
+photo gains a `zoneLabel`: the customer wording for the shot the technician
+tagged, one of "Front yard", "Back yard", "Side yard", "Close-up", "Blade
+close-up", "Sunny edge", "Shaded area" or "Trouble spot" (the `reportLabel`
+values in `shared/lawn-photo-shots.json`, not the technician's shot names). It is
+`null` for an untagged photo. `reportV2.photos`, the strip the lawn lead layout
+and the PDF print, carries up to 8 photos too (6 with the gate off). The web
+report captions a photo with `zoneLabel` when present. The lawn PDF
 cache signature gains `:shots=1` while the gate is live, so a flip re-keys lawn
 PDFs in both directions. Nothing else in the payload changes, and with the gate
 off the payload and the signature are byte-identical to before.
