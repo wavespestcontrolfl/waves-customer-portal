@@ -1075,6 +1075,14 @@ describe('GATE ON — disclosure tiers (enforced in tool output, not prompt lang
     // session — a model that never sees it cannot say it to a spouse or tenant.
     expect(ctx.block).not.toMatch(/First name/);
     expect(ctx.block).not.toContain(CONTACT_SLOT_CUSTOMER.first_name);
+    // Benchmark 10-03: with no name in the block the agent quizzed the caller
+    // for the account holder's name and address instead of calling the tool.
+    expect(ctx.block).toMatch(/Do not ask this caller to prove who they are/);
+    expect(ctx.block).toMatch(/call the tool\s+right away/);
+    // The benchmark fixture's block opens with the same live header.
+    const fixtureBlock = require('../fixtures/voice-relay-eval/scenarios.json').scenarios.find((sc) => sc.id === 'eta-recognised-redacted').caller.context.block;
+    const header = (b) => b.slice(0, b.indexOf('<<<KNOWN CALLER DATA'));
+    expect(header(fixtureBlock)).toBe(header(ctx.block));
   });
 
   // …and not through the free-text history either: a prior-call gist or a

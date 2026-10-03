@@ -38,6 +38,8 @@ jest.mock('../services/geocoder', () => ({
   ensureCustomerGeocoded: jest.fn(),
   buildAddress: jest.requireActual('../services/geocoder').buildAddress,
 }));
+jest.mock('../services/scheduling/blackout-dates', () => ({ getBlackoutDates: jest.fn(async () => new Set()) }));
+jest.mock('../services/technician-eligibility', () => ({ absentTechDays: jest.fn(async () => new Set()) }));
 jest.mock('../services/scheduling/find-time', () => ({
   ...jest.requireActual('../services/scheduling/find-time'),
   findAvailableSlots: jest.fn(),
@@ -208,6 +210,30 @@ test('a hint search spends no Google drive-time; the ranged button keeps it', as
   expect(findAvailableSlots.mock.calls[0][0].providerTravel).toBe(false);
   await post({ ...BASE, hint: undefined });
   expect(findAvailableSlots.mock.calls[1][0]).not.toHaveProperty('providerTravel');
+});
+
+test('summary days carry the calendar: closed days (blackout, Sunday) and the technician off', async () => {
+  process.env.GATE_RESCHEDULE_AVAILABILITY = 'true';
+  const { getBlackoutDates } = require('../services/scheduling/blackout-dates');
+  const { absentTechDays } = require('../services/technician-eligibility');
+  getBlackoutDates.mockResolvedValueOnce(new Set(['2026-09-03']));
+  absentTechDays.mockResolvedValueOnce(new Set(['tech-1:2026-09-04']));
+  findAvailableSlots.mockResolvedValue({ slots: [slot('2026-09-03', '09:00', 4)], evaluated: 1 });
+  loadOccupancy.mockResolvedValue(emptyOccupancy());
+  // Sep 1 2026 is a Tuesday; Sep 6 is the Sunday.
+  const body = await (await post({ ...BASE, dateTo: '2026-09-06', technicianId: 'tech-1', summary: true })).json();
+  const byDate = Object.fromEntries(body.summary.days.map((day) => [day.date, day]));
+  expect(byDate['2026-09-03']).toMatchObject({ status: 'open', closed: true });
+  expect(byDate['2026-09-03'].hours).toHaveLength(1);
+  expect(byDate['2026-09-04']).toMatchObject({ status: 'off' });
+  expect(byDate['2026-09-04'].closed).toBeUndefined();
+  expect(byDate['2026-09-06']).toMatchObject({ closed: true });
+  expect(byDate['2026-09-02']).toEqual({ date: '2026-09-02', status: 'full', hours: [] });
+  expect(absentTechDays).toHaveBeenCalledWith(expect.anything(), { dateFrom: '2026-09-01', dateTo: '2026-09-06', technicianIds: ['tech-1'] });
+  // An all-technician search has no one technician to be off.
+  absentTechDays.mockClear();
+  await post({ ...BASE, dateTo: '2026-09-06', summary: true });
+  expect(absentTechDays).not.toHaveBeenCalled();
 });
 
 test('summary is a hint-mode construct: ignored without the hint flag', async () => {

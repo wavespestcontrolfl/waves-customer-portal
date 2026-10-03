@@ -12,10 +12,11 @@
  *                timing clause (never the AI treatment narrative that later
  *                overwrites the snapshot's copy)
  *   whatToExpect owner-approved expectation rows matched to today's products,
- *                each row's visible-change sentence printed word for word (at most
- *                2 rows, 42 words). No by-next-visit timing: that needs the next
- *                visit at THIS property, which the report's own next-visit line
- *                does not resolve yet (Codex #5604 r2-r5), so it waits.
+ *                each row's visible-change sentence and, when the gap to the next
+ *                lawn visit AT THIS PROPERTY is known, its by-next-visit sentence,
+ *                printed word for word (at most 2 rows, 42 words). The gap comes
+ *                from the same visit the report's "Next visit" line shows
+ *                (report-data lawnNextVisitAtProperty), so they never disagree.
  *   watching     "We are also keeping an eye on <topics>." for the watched issues
  *                the headline does not already name
  *
@@ -42,7 +43,7 @@ const FREEZE_VERSION = 1;
 
 const FIELD_CAPS = { whatToExpect: 42 };
 const MAX_EXPECT_ROWS = 2;
-const EXPECT_SENTENCE_KEY = 'visibleChange';
+const EXPECT_SENTENCE_KEYS = ['visibleChange', 'byNextVisit'];
 const FIELD_NAMES = ['headline', 'whatWeDid', 'whatToExpect', 'watching'];
 const MAX_WATCH_TOPICS = 3;
 
@@ -100,16 +101,18 @@ function buildWatching(reportV2) {
 }
 
 // Approved rows for today's products, in the engine's order; each row's own
-// visible-change sentence, printed word for word. A row without one is
-// skipped; a sentence that would pass the cap is skipped whole.
+// visible-change sentence, then its by-next-visit sentence (the engine only
+// materializes one when the gap is known or the row is judged by absence),
+// printed word for word. A sentence that would pass the cap is skipped whole.
 function buildWhatToExpect(reportV2, ctx, deps) {
   const products = productsOf(reportV2);
-  if (!products.length) return { text: null, rows: [] };
+  if (!products.length) return { text: null, rows: [], sentences: [] };
   const build = deps.buildExpectations || buildLawnExpectations;
   const built = build({
     applications: products.map((p) => ({ name: p.name, targets: Array.isArray(p.targets) ? p.targets : [] })),
     issues: [],
     visitDate: ctx.visitDate || null,
+    nextVisitGapDays: Number.isFinite(ctx.nextVisitGapDays) ? ctx.nextVisitGapDays : undefined,
     // Not tracked for the report yet: the cap makes a Celsius row print its
     // "a different product may be used" line, true either way, rather than
     // promise a second application that may be capped.
@@ -117,45 +120,61 @@ function buildWhatToExpect(reportV2, ctx, deps) {
   });
   const rows = (Array.isArray(built && built.rows) ? built.rows : [])
     .filter((row) => row && row.approved === true && typeof row.id === 'string' && Array.isArray(row.sentences));
+  const visitKnown = Number.isFinite(ctx.nextVisitGapDays);
   const pieces = [];
   const picked = [];
+  // Each printed sentence, in order, with whether it was timed from the gap to
+  // the next visit (a row judged by absence words its line without one).
+  const sentences = [];
   let words = 0;
   for (const row of rows) {
     if (picked.length >= MAX_EXPECT_ROWS) break;
-    const sentence = row.sentences.find((s) => s && s.key === EXPECT_SENTENCE_KEY && clean(s.text));
-    if (!sentence) continue;
-    const w = countWords(sentence.text);
-    if (words + w > FIELD_CAPS.whatToExpect) continue;
-    words += w;
-    pieces.push(sentence.text.trim());
-    picked.push({ id: row.id, keys: [sentence.key] });
+    const keys = [];
+    for (const key of EXPECT_SENTENCE_KEYS) {
+      // "By your next visit..." needs a visit the report shows: with no known
+      // gap there is none, even for a row whose line is not timed by it.
+      if (key === 'byNextVisit' && !visitKnown) continue;
+      const sentence = row.sentences.find((s) => s && s.key === key && clean(s.text));
+      if (!sentence) continue;
+      const w = countWords(sentence.text);
+      if (words + w > FIELD_CAPS.whatToExpect) continue;
+      words += w;
+      pieces.push(sentence.text.trim());
+      keys.push(key);
+      sentences.push({
+        key, text: sentence.text.trim(), needsVisit: key === 'byNextVisit', gapBased: key === 'byNextVisit' && !row.judgedByAbsence,
+      });
+    }
+    if (keys.length) picked.push({ id: row.id, keys });
   }
-  return { text: pieces.length ? pieces.join(' ') : null, rows: picked };
+  return { text: pieces.length ? pieces.join(' ') : null, rows: picked, sentences };
 }
 
 /**
  * The v6 fields for one visit, from its facts alone.
  *
  * @param {object} reportV2 the deterministic lawn reportV2 (snapshot, treatment, insights)
- * @param {object} ctx { visitDate }
+ * @param {object} ctx { visitDate, nextVisitGapDays }
  * @param {object} deps { buildExpectations? } injectable for tests
  * @returns {{ fields: {headline, whatWeDid, whatToExpect, watching}, expectRows: Array<{id, keys}> }}
  */
 function buildLawnCopyV6(reportV2, ctx = {}, deps = {}) {
   const fields = emptyFields();
-  if (!reportV2 || typeof reportV2 !== 'object') return { fields, expectRows: [] };
+  if (!reportV2 || typeof reportV2 !== 'object') return { fields, expectRows: [], expectSentences: [] };
   fields.headline = clean(reportV2.snapshot && reportV2.snapshot.statusHeadline);
   fields.whatWeDid = clean(buildTreatmentSummary(reportV2.treatment, { noTiming: true }));
   fields.watching = buildWatching(reportV2);
   let expectRows = [];
+  let expectSentences = [];
   try {
     const expect = buildWhatToExpect(reportV2, ctx, deps);
     fields.whatToExpect = expect.text;
     expectRows = expect.rows;
+    expectSentences = expect.sentences;
   } catch (err) {
     logger.warn(`[lawn-copy-v6] expectations failed: ${err.message}`);
   }
-  return { fields, expectRows };
+  return { fields, expectRows, expectSentences };
 }
 
 // ── Freeze (first writer wins, per assessment) ─────────────────────────────
@@ -164,6 +183,35 @@ function cleanFields(fields) {
   const out = emptyFields();
   for (const f of FIELD_NAMES) out[f] = clean(src[f]);
   return out;
+}
+
+// "What to expect" with every by-next-visit sentence left out: what a cached
+// PDF / static render prints. Those renders never carry live schedule fields
+// (report-data stripLiveOnlyScheduleFields drops the "Next visit" line too),
+// so a reschedule can never leave a stale sentence in a stored document.
+function staticWhatToExpect(sentences, fallback) {
+  if (!Array.isArray(sentences)) return fallback || null;
+  const kept = sentences.filter((s) => s && !s.needsVisit && !s.gapBased && clean(s.text)).map((s) => s.text.trim());
+  return kept.length ? kept.join(' ') : null;
+}
+
+// A frozen entry's fields for THIS render. Everything replays as frozen except
+// the by-next-visit sentences, which follow the visit the report now shows:
+// one TIMED from the gap is left out when that visit is on another day (a
+// reschedule), and every one is left out when the report shows no next visit
+// at all. Never re-chosen: the rest of the frozen copy stands.
+// `whatToExpectStatic` rides along for non-live renders (staticWhatToExpect).
+function replayFields(entry, ctx = {}) {
+  const fields = cleanFields(entry.fields);
+  const sentences = Array.isArray(entry.expectSentences) ? entry.expectSentences : null;
+  const whatToExpectStatic = staticWhatToExpect(sentences, fields.whatToExpect);
+  if (!sentences) return { ...fields, whatToExpectStatic };
+  const shownIso = ctx.nextVisitIso || null;
+  const moved = (entry.nextVisitIso || null) !== shownIso;
+  const dropped = (s) => (s.gapBased && moved) || ((s.needsVisit || s.gapBased) && !shownIso);
+  if (!sentences.some((s) => s && dropped(s))) return { ...fields, whatToExpectStatic };
+  const kept = sentences.filter((s) => s && !dropped(s) && clean(s.text)).map((s) => s.text.trim());
+  return { ...fields, whatToExpect: kept.length ? kept.join(' ') : null, whatToExpectStatic };
 }
 
 /** One assessment's frozen entry out of a record's structured_notes, or null. */
@@ -224,7 +272,8 @@ async function freezeLawnCopyV6(serviceRecordId, entry, knex) {
  * writer wins.
  *
  * Returns { copy, unfrozen }. `copy` is { headline, whatWeDid, whatToExpect,
- * watching } (each a string or null) or null when there is nothing to carry.
+ * watching, whatToExpectStatic } (each a string or null; the last is what a
+ * non-live render prints) or null when there is nothing to carry.
  * `unfrozen` means this render is not reproducible (degraded read or the
  * freeze failed): the caller must not durably cache it.
  */
@@ -232,7 +281,7 @@ async function resolveLawnCopyV6ForRender({
   structuredNotes, serviceRecordId, assessmentId, reportV2, ctx = {}, degraded = false, knex, deps = {},
 } = {}) {
   const stored = storedLawnCopyV6For(structuredNotes, assessmentId);
-  if (stored) return { copy: cleanFields(stored.fields), unfrozen: false };
+  if (stored) return { copy: replayFields(stored, ctx), unfrozen: false };
   if (!assessmentId || !serviceRecordId || !knex) return { copy: null, unfrozen: true };
   // A freeze may only be CREATED from a complete, healthy read (first writer
   // wins: a degraded entry could never be repaired).
@@ -246,10 +295,13 @@ async function resolveLawnCopyV6ForRender({
     frozenAt: (deps.now ? deps.now() : new Date()).toISOString(),
     fields: built.fields,
     expectRows: built.expectRows,
+    // What the by-next-visit sentences were timed for (replayFields).
+    expectSentences: built.expectSentences,
+    nextVisitIso: ctx.nextVisitIso || null,
   };
   const frozen = await freezeLawnCopyV6(serviceRecordId, entry, knex);
-  if (!frozen) return { copy: cleanFields(built.fields), unfrozen: true };
-  return { copy: cleanFields(frozen.fields), unfrozen: false };
+  if (!frozen) return { copy: replayFields(entry, ctx), unfrozen: true };
+  return { copy: replayFields(frozen, ctx), unfrozen: false };
 }
 
 module.exports = {

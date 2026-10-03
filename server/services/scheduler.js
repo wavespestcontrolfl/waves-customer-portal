@@ -979,6 +979,11 @@ function initScheduledJobs() {
       await runExclusive('sms-offer-ledger-backfill', async () => {
         const result = await require('./sms-offers').backfillMissedOffers();
         if (result.recorded > 0) logger.info(`[sms-offer-ledger-backfill] recorded=${result.recorded} scanned=${result.scanned}`);
+        // Replies that arrived before their offer was recorded get their
+        // shadow decision now (GATE_SMS_SCHEDULING_DECIDE; gate off, no read).
+        const replies = await require('./sms-scheduling-decide').sweepUndecidedReplies();
+        if (replies.recorded > 0) logger.info(`[sms-offer-ledger-backfill] decided ${replies.recorded} waiting replies`);
+        if (replies.errors > 0) throw new Error(`sms reply decide sweep unhealthy: errors=${replies.errors} scanned=${replies.scanned}`);
         // A failed scan or write must fail job health, not read as a green tick.
         if (result.errors > 0) throw new Error(`sms offer backfill unhealthy: errors=${result.errors} scanned=${result.scanned}`);
       });
@@ -2111,13 +2116,13 @@ function initScheduledJobs() {
     if (!require('../config/feature-gates').neighborhoodAccessLive()) return;
     const tickStartedAt = Date.now();
     try {
-      // A pass in which any customer's filing or any conflict bell failed is
-      // reported to job health as failed (both retry next pass).
+      // A pass in which any customer's filing or a conflict step (the count,
+      // retiring an old bell) failed is reported to job health as failed.
       const lockRes = await runExclusive('neighborhood-gate-codes', async () => {
         const result = await require('./neighborhood-access').sweepSavedGateCodes();
         if (result?.customers) logger.info(`[neighborhood-access] sweep: ${JSON.stringify({ customers: result.customers, tally: result.tally, failed: result.failed, bellsFailed: result.bellsFailed, conflicts: result.conflicts })}`);
         if (result?.failed > 0) throw Object.assign(new Error(`${result.failed} gate-code filing(s) failed`), { code: 'GATE_CODE_FILINGS_FAILED' });
-        if (result?.bellsFailed > 0) throw Object.assign(new Error(`${result.bellsFailed} gate-code conflict bell step(s) failed`), { code: 'GATE_CODE_BELLS_FAILED' });
+        if (result?.bellsFailed > 0) throw Object.assign(new Error(`${result.bellsFailed} gate-code conflict step(s) failed`), { code: 'GATE_CODE_BELLS_FAILED' });
         return result;
       });
       // No connection / lost lock session = no filing ran: a missed tick in

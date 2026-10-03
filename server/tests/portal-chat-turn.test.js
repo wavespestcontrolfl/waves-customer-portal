@@ -31,6 +31,7 @@ jest.mock('../services/reservice-scheduler', () => {
     reportedReserviceLanes: actual.reportedReserviceLanes,
     reportedReserviceExcludedSpecialty: actual.reportedReserviceExcludedSpecialty,
     isActivePestReport: actual.isActivePestReport,
+    RESERVICE_LAWN_SERVICE_WORDS: actual.RESERVICE_LAWN_SERVICE_WORDS,
     reserviceSelfServeEnabled: () => true,
     openReserviceCallbacks: async () => ({}),
   };
@@ -64,11 +65,13 @@ beforeEach(() => {
   delete process.env.GATE_PORTAL_CHAT_FACTS;
   delete process.env.GATE_PORTAL_CHAT_VISIT_FACTS;
   delete process.env.GATE_PORTAL_CHAT_RESERVICE;
+  delete process.env.GATE_PORTAL_CHAT_RESERVICE_LAWN;
 });
 afterAll(() => {
   delete process.env[ENV];
   delete process.env.GATE_PORTAL_CHAT_FACTS;
   delete process.env.GATE_PORTAL_CHAT_RESERVICE;
+  delete process.env.GATE_PORTAL_CHAT_RESERVICE_LAWN;
 });
 
 test('a billing ask in the portal returns the reply with an Open Billing button', async () => {
@@ -348,6 +351,48 @@ describe('GATE_PORTAL_CHAT_RESERVICE', () => {
     expect(result.escalated).toBe(true);
     expect(result.actions).toEqual([{ type: 'tab', label: 'Open completed visits and reports', tab: 'services' }]);
     escalate.mockRestore();
+  });
+
+  describe('with GATE_PORTAL_CHAT_RESERVICE_LAWN', () => {
+    beforeEach(() => { process.env.GATE_PORTAL_CHAT_RESERVICE_LAWN = 'true'; });
+
+    test('the prompt and the tool gain the lawn line, and a quoted current lawn problem gets the button', async () => {
+      mockPageState.mockResolvedValueOnce({ customer: { id: 'cust-1' }, laneCatalog: {}, lanes: [{ key: 'lawn', alreadyBooked: null }], bookableLanes: ['lawn'] });
+      mockCreate
+        .mockResolvedValueOnce({ content: [{ type: 'tool_use', id: 't1', name: 'offer_reservice', input: { service_line: 'lawn', current_problem: true, customer_quote: 'weeds are coming back all over the lawn' } }] })
+        .mockResolvedValueOnce({ content: [{ type: 'text', text: 'Sorry about the weeds. Your plan covers a free visit; tap below.' }] });
+
+      const result = await assistant.processMessage({ message: 'Weeds are coming back all over the lawn', channel: 'portal_chat', channelIdentifier: 'sess-1', customerId: 'cust-1', secondaryProperty: false });
+
+      const first = mockCreate.mock.calls[0][0];
+      const tool = first.tools.find((t) => t.name === 'offer_reservice');
+      expect(tool.input_schema.properties.service_line.enum).toEqual(['pest', 'lawn']);
+      expect(first.system[0].text).toMatch(/call offer_reservice in that same turn with service line lawn, current_problem true, and customer_quote/);
+      expect(first.system[0].text).not.toMatch(/A lawn problem \(weeds, brown or thin grass\) is not this tool's/);
+      expect(result.actions).toEqual([{ type: 'link', label: 'Book your free re-service', href: `/reservice/${'b'.repeat(64)}` }]);
+    });
+
+    test('a quote from an earlier turn is not in this message: no button', async () => {
+      mockCreate
+        .mockResolvedValueOnce({ content: [{ type: 'tool_use', id: 't1', name: 'offer_reservice', input: { service_line: 'lawn', current_problem: true, customer_quote: 'weeds are coming back all over the lawn' } }] })
+        .mockResolvedValueOnce({ content: [{ type: 'text', text: 'Let me pass that along.' }] });
+
+      const result = await assistant.processMessage({ message: 'yes please', channel: 'portal_chat', channelIdentifier: 'sess-1', customerId: 'cust-1', secondaryProperty: false });
+
+      expect(mockPageState).not.toHaveBeenCalled();
+      expect(result).not.toHaveProperty('actions');
+    });
+
+    test('the lawn gate without the offer\'s own gate changes nothing', async () => {
+      delete process.env.GATE_PORTAL_CHAT_RESERVICE;
+      mockCreate.mockResolvedValueOnce({ content: [{ type: 'text', text: 'Hi.' }] });
+
+      await assistant.processMessage({ message: 'Hi', channel: 'portal_chat', channelIdentifier: 'sess-1', customerId: 'cust-1' });
+
+      const call = mockCreate.mock.calls[0][0];
+      expect(toolNames(call)).not.toContain('offer_reservice');
+      expect(call.system[0].text).not.toMatch(/PESTS BACK BETWEEN VISITS/);
+    });
   });
 
   test('SMS keeps the original oldest-first history read', async () => {

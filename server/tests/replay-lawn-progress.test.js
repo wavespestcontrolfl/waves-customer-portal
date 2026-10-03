@@ -84,7 +84,7 @@ describe('replayLawnProgress over the fixture', () => {
     const a2 = result.pairs.find((p) => p.assessment === 'a0000002');
     expect(a2).toBeTruthy();
     expect(a2.items.map((i) => `${i.item}=${i.state}`)).toEqual(expect.arrayContaining([
-      'herbicide_broadleaf:weed_suppression=on_track',
+      'herbicide_celsius:weed_suppression=on_track',
       'granular_fertilizer:color_health=on_track',
       'granular_fertilizer:turf_density=too_early',
     ]));
@@ -114,7 +114,7 @@ describe('replayLawnProgress over the fixture', () => {
   it('a divergent metric is unclear while the rest of the pair compares (e2 color)', () => {
     const e2 = result.pairs.find((p) => p.date === '2026-07-01');
     // Celsius (weeds, 30 days, delta 0) is behind; the feed row has no windows (K-Flow) and is judged by its own metric
-    expect(e2.items.find((i) => i.item === 'herbicide_broadleaf:weed_suppression').state).toBe('behind');
+    expect(e2.items.find((i) => i.item === 'herbicide_celsius:weed_suppression').state).toBe('behind');
     expect(e2.items.find((i) => i.item === 'potassium_feed:color_health').state).toBe('unclear');
   });
 
