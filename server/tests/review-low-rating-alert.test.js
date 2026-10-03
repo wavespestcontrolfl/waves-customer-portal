@@ -228,9 +228,13 @@ describe('syncLowRatingReviewAlerts', () => {
   });
 
   test('a failed write is counted and retried next pass (the review is still there), never thrown', async () => {
-    mockEpisodes.raiseAdminAlertWithReopen.mockRejectedValue(new Error('db down'));
+    mockEpisodes.raiseAdminAlertWithReopen.mockRejectedValue(Object.assign(new Error('insert into "notifications" values (\'Pat Example left 2 stars\')'), { code: '23505' }));
     const { conn } = fakeConn({ reviews: [{ id: R1, star_rating: 2, reviewer_name: 'Pat', customer_id: null }] });
     await expect(syncLowRatingReviewAlerts({ conn })).resolves.toMatchObject({ failed: 1 });
+    // the log names the error code only, never the SQL (the reviewer's name rides in it)
+    const logged = require('../services/logger').warn.mock.calls.map((c) => c.join(' ')).join('\n');
+    expect(logged).toMatch(/23505/);
+    expect(logged).not.toMatch(/Pat Example/);
     mockEpisodes.raiseAdminAlertWithReopen.mockResolvedValue({ id: 'n2', rang: true });
     await expect(syncLowRatingReviewAlerts({ conn })).resolves.toMatchObject({ raised: 1, failed: 0 });
   });

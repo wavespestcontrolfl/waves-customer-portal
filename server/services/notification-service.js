@@ -1138,6 +1138,7 @@ module.exports = NotificationService;
 module.exports.safeErrorSummary = safeErrorSummary;
 module.exports._private = {
   resolveRingOnRefresh,
+  safeErrorSummary,
   CUSTOMER_PREFERENCE_KEYS,
   customerPreferenceEnabled,
   existingCustomerNotification,

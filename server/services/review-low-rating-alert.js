@@ -32,6 +32,10 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { reviewLowRatingAlertLive, alertEpisodesLive } = require('../config/feature-gates');
 
+// Error code / constraint only: a knex error's message renders the SQL, and a
+// notification write carries the reviewer's name (AGENTS.md: no PII in logs).
+const errorCode = (err) => require('./notification-service')._private.safeErrorSummary(err);
+
 const CATEGORY = 'review_low_rating';
 const KEY_PREFIX = 'review-low-rating:';
 const MAX_STARS = 3;
@@ -144,7 +148,7 @@ async function recordActivation(conn = db) {
   try {
     return await activationBoundary(conn);
   } catch (err) {
-    logger.warn(`[review-alert] activation boundary not recorded: ${err.message}`);
+    logger.warn(`[review-alert] activation boundary not recorded: ${errorCode(err)}`);
     return null;
   }
 }
@@ -167,7 +171,7 @@ async function syncLowRatingReviewAlerts({ conn = db, now = new Date() } = {}) {
     const ran = await runExclusive('review-low-rating-alert', () => reconcile(conn, now, out), { recordHealth: false });
     return ran && typeof ran === 'object' && 'raised' in ran ? ran : { ...out, skipped: 'busy' };
   } catch (err) {
-    logger.warn(`[review-alert] low-rating pass could not take its lock: ${err.message}`);
+    logger.warn(`[review-alert] low-rating pass could not take its lock: ${errorCode(err)}`);
     return { ...out, error: true };
   }
 }
@@ -245,7 +249,7 @@ async function reconcile(conn, now, out) {
       } catch (err) {
         live.add(key);
         out.failed += 1;
-        logger.warn(`[review-alert] low-rating bell failed for review ${listed.id}: ${err.message}`);
+        logger.warn(`[review-alert] low-rating bell failed for review ${listed.id}: ${errorCode(err)}`);
       }
     }
     if (!episodesOn) return out;
@@ -254,7 +258,7 @@ async function reconcile(conn, now, out) {
       out.closed = Number(await episodes.closeAdminAlertKeys(conn, settled, 'review answered', { now, resolution: 'The review no longer needs an answer' })) || 0;
     }
   } catch (err) {
-    logger.warn(`[review-alert] low-rating pass failed: ${err.message}`);
+    logger.warn(`[review-alert] low-rating pass failed: ${errorCode(err)}`);
     return { ...out, error: true };
   }
   return out;
