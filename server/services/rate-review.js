@@ -2229,10 +2229,17 @@ function reviewOccurrence(entry, latest, { from, to, carryFloor }) {
 function selectReviewEntries(book, { from, to, now, latestByLine, firstVisits = null, activeAccounts = new Set() }) {
   const carryFloor = daysAgoYmd(now, CARRY_FORWARD_MAX_DAYS_PAST);
   const accountFirst = accountFirstVisits(firstVisits, book);
-  // active PROGRAMS per account: plan lines (account_lines) and, within a
-  // consolidated family entry, its service keys — one program means exactly
-  // one plan line carrying at most one service key
-  const onlyProgramFor = (entry) => Number(entry.planLine && entry.planLine.account_lines) === 1 && (entry.serviceKeys || []).length <= 1;
+  // active PROGRAMS per account, counted as normalized program identities:
+  // one plan line (account_lines), whose linePrograms() is exactly one (a
+  // keyless tree_shrub line is of unknown composition = two; tree/shrub +
+  // palm = two), with no retired combined catalog identity (two programs
+  // in one row) and at most one catalog key
+  const onlyProgramFor = (entry) => {
+    if (Number(entry.planLine && entry.planLine.account_lines) !== 1) return false;
+    const keys = (entry.serviceKeys || []).map((k) => String(k || '').toLowerCase());
+    if (keys.length > 1 || keys.some((k) => RETIRED_COMBINED_CATALOG_KEYS.includes(k))) return false;
+    return linePrograms({ familyKey: entry.familyKey, serviceKeys: entry.serviceKeys }).length === 1;
+  };
   const selected = [];
   for (const entry of book) {
     entry.anniversary = resolveAnniversary({

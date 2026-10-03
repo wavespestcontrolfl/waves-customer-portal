@@ -838,6 +838,15 @@ describe('anniversary and tenure', () => {
     const twoLines = mk({ account_lines: 2 }, ['tree_shrub']);
     P.selectReviewEntries([twoLines], win);
     expect(twoLines.anniversary).toMatchObject({ date: null });
+    // single-key composites are two programs in one row; a keyless tree_shrub line is of unknown composition
+    for (const keys of [['pest_termite_bait_quarterly'], ['lawn_tree_shrub_combo'], []]) {
+      const composite = mk({ account_lines: 1 }, keys);
+      P.selectReviewEntries([composite], win);
+      expect(composite.anniversary).toMatchObject({ date: null });
+    }
+    const pest = { ...mk({ account_lines: 1 }, []), familyKey: 'pest_control' }; // a keyless single-program family is one program
+    P.selectReviewEntries([pest], win);
+    expect(pest.anniversary).toMatchObject({ date: '2025-06-06', source: 'member_since_import' });
     const accepted = mk({ account_lines: 1 }, ['tree_shrub']);
     P.selectReviewEntries([accepted], { ...win, activeAccounts: new Set(['c1']) });
     expect(accepted.anniversary).toMatchObject({ date: null });
