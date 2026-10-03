@@ -829,21 +829,30 @@ function frozenLetter(entry, payload, costBlock) {
 // Freeze the letter on the claimed rows BEFORE any provider call: if the
 // outcome turns out uncertain, the public page still shows exactly what
 // that email said (only a delivered message carries the token).
+// The generation check and the write are one step: under the customer-comms fence (which a
+// reclaim takes) and the row lock, so a reclaim either committed first and is seen, or waits.
 async function freezeLetter(dbh, entry, frozen) {
-  for (const l of entry.lines) {
-    const live = await dbh('price_change_notices').where({ id: l.noticeId, status: 'sending' }).first('metadata');
-    if (!live || !ownsClaim(live, entry.claimGen)) continue; // reclaimed by another request
-    await dbh('price_change_notices').where({ id: l.noticeId, status: 'sending' }).update({ metadata: JSON.stringify({ ...parseJson(live.metadata, {}), pending_letter: frozen }) });
-  }
+  await dbh.transaction(async (trx) => {
+    await lockCustomerComms(trx, entry.customerId);
+    for (const l of entry.lines) {
+      const live = await trx('price_change_notices').where({ id: l.noticeId, status: 'sending' }).forUpdate().first('metadata');
+      if (!live || !ownsClaim(live, entry.claimGen)) continue; // reclaimed by another request
+      await trx('price_change_notices').where({ id: l.noticeId, status: 'sending' }).update({ metadata: JSON.stringify({ ...parseJson(live.metadata, {}), pending_letter: frozen }) });
+    }
+  });
 }
 
 // hold: a named reason the send was refused before any provider took it
 // (recorded on each line as metadata.send_hold; the next attempt clears it).
-async function settleLines(dbh, entry, { status, keepFrozen, frozen, hold = null, holdError = null, extra = {} }) {
+async function settleLines(root, entry, { status, keepFrozen, frozen, hold = null, holdError = null, extra = {} }) {
+  // One step under the customer-comms fence and the row lock (as freezeLetter): the
+  // generation check cannot be overtaken by a reclaim before the write.
+  await root.transaction(async (dbh) => {
+  await lockCustomerComms(dbh, entry.customerId);
   for (const l of entry.lines) {
     // The LIVE row's metadata, not the copy read before the provider calls: a callback
     // (a bounce, a failed text) may have written early_failures onto it meanwhile.
-    const live = await dbh('price_change_notices').where({ id: l.noticeId }).first('metadata');
+    const live = await dbh('price_change_notices').where({ id: l.noticeId }).forUpdate().first('metadata');
     if (live && !ownsClaim(live, entry.claimGen)) continue; // reclaimed by another request: not this send's row
     const { pending_letter: livePending, send_hold: _h, early_failures: early, ...meta } = parseJson(live ? live.metadata : l.notice.metadata, {});
     // The failures belong to the attempt that is ending: kept only while it is parked uncertain.
@@ -852,6 +861,7 @@ async function settleLines(dbh, entry, { status, keepFrozen, frozen, hold = null
       status, metadata: JSON.stringify(next), updated_at: new Date(),
     });
   }
+  });
 }
 
 // Parking a send whose outcome is unknown: the evidence on the LIVE rows decides. A
