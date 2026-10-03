@@ -54,6 +54,7 @@ import CreateProjectModal, { wdoFeeSeedFromVisit } from '../../components/tech/C
 import ServiceRecapModal from '../../components/ServiceRecapModal';
 import FastCompleteSheet from '../../components/tech/FastCompleteSheet';
 import FastCompleteTreeShrubSheet from '../../components/tech/FastCompleteTreeShrubSheet';
+import { isTreeShrubFastCompleteEligible } from '../../lib/tree-shrub-fast-complete';
 import FastCompleteLawnReserviceSheet from '../../components/tech/FastCompleteLawnReserviceSheet';
 import ConsultationOutcomeSheet from '../../components/ConsultationOutcomeSheet';
 import TechRecapCapture from './TechRecapCapture';
@@ -213,18 +214,6 @@ function reportFlowFields(service, { stationMapOff = false } = {}) {
     inspectionCredit: typedFlow && offersInspectionCredit(service),
     traceEligible: service.traceEligible !== false && !laneFlow && !typedFlow,
   };
-}
-
-// Fast Complete for Tree & Shrub (GATE_TS_FAST_COMPLETE plus the per-tech
-// flag): `treeShrubFastCompleteEnabled` rides the schedule payload per
-// service, true only when the gate is live AND this tech has the flag. An
-// open tree & shrub visit then opens the one-screen sheet instead of the
-// Dispatch typed-completion deep link. Flag off, or any other service, routes
-// exactly as before.
-function isTreeShrubFastCompleteEligible(service) {
-  return service?.treeShrubFastCompleteEnabled === true
-    && service?.completionProfile?.findingsType === 'tree_shrub'
-    && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));
 }
 
 // Fast Complete for lawn re-services (GATE_LAWN_RESERVICE_FAST_COMPLETE):
