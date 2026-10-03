@@ -518,3 +518,51 @@ describe('buildTreeShrubFastContext', () => {
     });
   });
 });
+
+describe('GATE_TS_WATCH_LIST: the fast-context watchList', () => {
+  const saved = process.env.GATE_TS_WATCH_LIST;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.GATE_TS_WATCH_LIST; else process.env.GATE_TS_WATCH_LIST = saved;
+  });
+  const catalog = [cat('snapshot', 'Snapshot 2.5TG', { category: 'herbicide' })];
+  const build = (scheduledDate) => buildTreeShrubFastContext('visit-1', fakeKnex({
+    scheduled_services: visit({ scheduled_date: scheduledDate }), products_catalog: catalog,
+  }));
+  beforeEach(() => {
+    resolveCompletionProfileForScheduledService.mockReset();
+    resolveCompletionProfileForScheduledService.mockResolvedValue(TS_PROFILE);
+  });
+
+  test('gate off: the key is absent', async () => {
+    delete process.env.GATE_TS_WATCH_LIST;
+    const ctx = await build('2026-10-01');
+    expect(ctx.eligible).toBe(true);
+    expect('watchList' in ctx).toBe(false);
+  });
+
+  test('gate on: the visit month items, in order, as key / label / signal / referOnly', async () => {
+    process.env.GATE_TS_WATCH_LIST = 'true';
+    const ctx = await build('2026-12-03');
+    expect(ctx.watchList.map((item) => item.key)).toEqual([
+      'scale', 'cold_freeze_damage', 'declining_palms', 'sooty_mold',
+      'palm_potassium_deficiency', 'palm_magnesium_deficiency', 'palm_fronds_dying_one_side', 'trunk_conk_base',
+    ]);
+    expect(ctx.watchList[0]).toEqual({ key: 'scale', label: 'Scale', signal: 'Possible scale', referOnly: false });
+    expect(ctx.watchList.find((item) => item.key === 'declining_palms').referOnly).toBe(true);
+    expect(Object.keys(ctx.watchList[0]).sort()).toEqual(['key', 'label', 'referOnly', 'signal']);
+  });
+
+  test('gate on: the month is the New York month of the visit date', async () => {
+    process.env.GATE_TS_WATCH_LIST = 'true';
+    expect((await build('2026-03-31')).watchList[0].key).toBe('whitefly');
+    expect((await build('2026-04-01')).watchList.map((item) => item.key)).toContain('caterpillars');
+  });
+
+  test('an ineligible visit carries no watch list even with the gate on', async () => {
+    process.env.GATE_TS_WATCH_LIST = 'true';
+    resolveCompletionProfileForScheduledService.mockResolvedValue({ ...TS_PROFILE, findingsType: 'pest' });
+    const ctx = await build('2026-10-01');
+    expect(ctx.eligible).toBe(false);
+    expect('watchList' in ctx).toBe(false);
+  });
+});

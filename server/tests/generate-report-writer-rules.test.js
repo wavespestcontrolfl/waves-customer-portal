@@ -539,3 +539,37 @@ describe('the promise check reaches the writer', () => {
   });
 });
 
+
+// Prod 2026-10-02: a visit's notes said "yard" and "along with", which made
+// yard-sign supplies and two fertilizers whose names hold "with" count as
+// products the prompt named; every draft was refused for "with" or "Waves",
+// and the office read "temporarily unavailable".
+test('gate on: notes that say "yard" and "along with" keep an ordinary draft; supplies and "with" are no brands (prod 2026-10-02)', async () => {
+  process.env.GATE_REPORT_WRITER_RULES = 'true';
+  mockCatalogRows = [
+    { name: 'Pesticide application sign 4x5 (yard sign card)', category: 'supplies', active_ingredient: null },
+    { name: 'Yard sign sticker 4x5 "Serviced by Waves"', category: 'supplies', active_ingredient: null },
+    { name: 'LESCO 24-0-11 with PolyPlus OPTI', category: 'fertilizer', active_ingredient: '24-0-11' },
+    { name: 'The Andersons 17-0-3 Fertilizer with Grubout Plus', category: 'fertilizer', active_ingredient: 'Unknown - pending SDS' },
+  ];
+  const ordinary = CLEAN_V2
+    .replace('We treated the door thresholds', 'Along with the yard, we treated the door thresholds')
+    .replace('Let us know', 'Let Waves know');
+  mockProvider.mockImplementation(async () => ({ ok: true, text: ordinary }));
+  const res = mkRes();
+  await handler(mkReq({ serviceNotes: 'A repellent solution along with a surfactant went into the yard and ornamentals (ordinary words case).' }), res);
+  expect(mockProvider).toHaveBeenCalledTimes(1);
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: ordinary }));
+});
+
+test('gate on: every draft refused for its wording, with nothing safe to fall back on, says so instead of "unavailable" (prod 2026-10-02)', async () => {
+  process.env.GATE_REPORT_WRITER_RULES = 'true';
+  mockProvider.mockImplementation(async () => ({ ok: true, text: CLEAN_V2.replace('activity was light.', 'activity was light, and the treatment is safe for pets.') }));
+  const res = mkRes();
+  await handler(mkReq({ serviceNotes: 'Treated the thresholds (refused wording case).', products: [], productsApplied: '' }), res);
+  expect(res.statusCode).toBe(503);
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+    retryable: true,
+    error: expect.stringMatching(/did not pass the report’s wording checks/),
+  }));
+});

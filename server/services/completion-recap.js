@@ -263,6 +263,7 @@ function containsProductName(text, products, { extraGenericTokens = null, wholeW
   return safeProducts(products).some((p) => {
     const nameTokens = String(p.name || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
     const isGeneric = (token) => GENERIC_NAME_TOKENS.has(token)
+      || ORDINARY_NAME_WORDS.has(token)
       // Callers may widen the generic set (e.g. the generate-report guard
       // ignores pest-target nouns like "cockroach" that appear in catalog
       // names but legitimately belong in report copy — codex r21 on #3420).
@@ -333,6 +334,21 @@ const GENERIC_NAME_TOKENS = new Set([
   'concentrate', 'spray', 'nonionic', 'surfactant', 'miticide', 'insect',
   'control', 'plus', 'pro', 'max', 'maxx', 'lawn', 'turf', 'palm', 'tree',
   'shrub', 'weed', 'grass', 'pest', 'bait', 'dust', 'emulsion',
+  'pesticide', 'application',
+]);
+// Ordinary English words inside a catalog name are never its brand: "LESCO
+// 24-0-11 with PolyPlus" must not make every sentence with "with" read as a
+// trade name, and "Waves" (a yard-sign sticker reads "Serviced by Waves") is
+// our own name, which every report may say (prod 2026-10-02: every draft of a
+// visit whose notes said "along with" was refused, so the report failed).
+const ORDINARY_NAME_WORDS = new Set([
+  'with', 'from', 'into', 'onto', 'over', 'under', 'that', 'this', 'these',
+  'those', 'your', 'their', 'them', 'they', 'have', 'will', 'were', 'been',
+  'when', 'then', 'than', 'also', 'only', 'each', 'most', 'more', 'some',
+  'such', 'very', 'just', 'about', 'after', 'before', 'where', 'which',
+  'while', 'until', 'upon', 'without', 'within', 'through', 'other', 'there',
+  'here', 'what', 'both', 'even', 'back', 'around', 'along', 'across',
+  'between', 'among', 'every', 'made', 'make', 'used', 'using', 'waves',
 ]);
 
 async function generateRecap(input = {}) {
@@ -393,6 +409,9 @@ const REPORT_GENERIC_PRODUCT_TOKENS = new Set([
 // only a productId are name-hydrated from the catalog so they are screened
 // too. Chunked by 10 so safeProducts' cap never leaves an entry
 // unscreened. Catalog lookup failure keeps the guard strict.
+// The catalog's non-product rows (yard signs, stakes, stickers).
+const isSupplyCategory = (category) => String(category || '').trim().toLowerCase() === 'supplies';
+
 async function buildReportTradeNameScreen({ products = [], extraNames = [], db = null } = {}) {
   const list = Array.isArray(products) ? products.filter(Boolean) : [];
   let hydrated = list;
@@ -411,7 +430,7 @@ async function buildReportTradeNameScreen({ products = [], extraNames = [], db =
       rows = ids.length
         ? await savepointRead(db, (k) => k('products_catalog')
           .whereIn('id', ids)
-          .select('id', 'name', 'active_ingredient', 'formulation'))
+          .select('id', 'name', 'active_ingredient', 'formulation', 'category'))
         : [];
     } catch (err) {
       // A failed lookup loses two different things: exemption tokens
@@ -424,9 +443,15 @@ async function buildReportTradeNameScreen({ products = [], extraNames = [], db =
       rows = [];
     }
     const nameById = new Map((rows || []).map((r) => [String(r.id), r.name]));
-    hydrated = list.map((p) => (p && !p.name && !p.product_name && p.productId
-      ? { ...p, name: nameById.get(String(p.productId)) || null }
-      : p));
+    // A supply recorded on the visit (a yard sign, its stake or sticker) is
+    // no product a report could name, and its words ("pesticide application
+    // sign") are ordinary report words.
+    const supplyIds = new Set((rows || []).filter((r) => isSupplyCategory(r.category)).map((r) => String(r.id)));
+    hydrated = list
+      .filter((p) => !(p?.productId && supplyIds.has(String(p.productId))))
+      .map((p) => (p && !p.name && !p.product_name && p.productId
+        ? { ...p, name: nameById.get(String(p.productId)) || null }
+        : p));
     for (const row of rows || []) {
       `${row.active_ingredient || ''} ${row.formulation || ''}`
         .toLowerCase().split(/[^a-z0-9]+/)
@@ -453,6 +478,7 @@ module.exports = {
   buildPrompt,
   buildReportTradeNameScreen,
   containsProductName,
+  isSupplyCategory,
   composeCompletionSmsPreview,
   deterministicRecap,
   generateRecap,

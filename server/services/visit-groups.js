@@ -330,7 +330,7 @@ async function assertRowMovableAlone(t, rowId, observedVisitId) {
   }
 }
 
-async function alignMemberTechnician(t, rowId, technicianId, { skipVisitSeam = false, expectTechnicianId, actorId = null, noticeActorId } = {}) {
+async function alignMemberTechnician(t, rowId, technicianId, { skipVisitSeam = false, expectTechnicianId, actorId = null, noticeActorId, noticePrevious } = {}) {
   const { assignDispatchJob } = require('./dispatch-assignment');
   // actorId: the staff row behind a unit move (dispatch_alerts.resolved_by
   // + the broadcast). noticeActorId: who the tech's card names when that is
@@ -341,6 +341,7 @@ async function alignMemberTechnician(t, rowId, technicianId, { skipVisitSeam = f
     jobId: rowId, technicianId, actorId, emit: true, trx: t, skipVisitSeam,
     ...(expectTechnicianId !== undefined ? { expectTechnicianId } : {}),
     ...(noticeActorId !== undefined ? { noticeActorId } : {}),
+    ...(noticePrevious ? { noticePrevious } : {}),
   });
 }
 
@@ -3113,6 +3114,10 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
               // rebooker's initiatedBy label (a customer's online move reads
               // "by the customer online", as the moved-off card below does).
               noticeActorId: options.actorId || initiatedBy || null,
+              // The row already moved: its slot before this unit move is the
+              // cards' previous day (a move off today/tomorrow stays a
+              // today/tomorrow change; Codex #5786 P2).
+              noticePrevious: { date: target.expect.scheduled_date, windowStart: target.expect.window_start, windowEnd: target.expect.window_end },
             });
           });
           return;
