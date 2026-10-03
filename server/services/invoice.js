@@ -10199,10 +10199,10 @@ const InvoiceService = {
       if (updated.visit_completion_packet_id) {
         const Packets = require("./visit-completion-packets");
         // A stamp that outlived the void is re-pointed or released…
-        await Packets.reconcileWithdrawnPacketInvoices(trx, { customerId: updated.customer_id });
+        await Packets.reconcileWithdrawnPacketInvoices(trx, { customerId: updated.customer_id, includeLinked: false });
         // …and a restored row whose live owner is a payer is withdrawn before
         // it can ever be collected.
-        await Packets.withdrawPacketInvoicesForOwner(trx, { customerId: updated.customer_id });
+        await Packets.withdrawPacketInvoicesForOwner(trx, { customerId: updated.customer_id, includeLinked: false });
       } else if (updated.customer_id && (updated.scheduled_service_id || updated.service_record_id)) {
         // The same re-judgement for a restored invoice with no packet: a payer assigned to its
         // visit while it sat void must not hand the homeowner a collectible link on restore.

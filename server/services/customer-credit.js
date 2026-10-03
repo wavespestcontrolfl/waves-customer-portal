@@ -749,9 +749,20 @@ async function reverseAppliedCredit({ invoiceId, amount, createdBy = 'system', n
 async function reverseCreditAndStampPayer({ invoiceId, payerId, poNumber = null, payerSnapshot = null, createdBy = 'system', note = null }) {
   if (!payerId) throw new Error('reverseCreditAndStampPayer requires a payerId');
   return db.transaction(async (trx) => {
+    // Customer before invoice (the order every Bill-To writer and charge takes): the credit movement
+    // reverseAppliedCredit posts locks the customer row, so it is locked first, on an unlocked read of
+    // the invoice's owner, re-checked once the invoice is held.
+    const ownerRead = await trx('invoices').where({ id: invoiceId }).first('customer_id');
+    if (!ownerRead) throw new Error(`reverseCreditAndStampPayer: invoice ${invoiceId} not found`);
+    if (ownerRead.customer_id) await trx('customers').where({ id: ownerRead.customer_id }).forUpdate().first('id');
     const inv = await trx('invoices').where({ id: invoiceId }).forUpdate()
-      .first('id', 'credit_applied', 'payer_id');
+      .first('id', 'customer_id', 'credit_applied', 'payer_id');
     if (!inv) throw new Error(`reverseCreditAndStampPayer: invoice ${invoiceId} not found`);
+    if (String(inv.customer_id) !== String(ownerRead.customer_id)) {
+      const moved = new Error('invoice moved to another customer while stamping its payer — invoice stays self-pay');
+      moved.code = 'CREDIT_REVERSAL_INCOMPLETE';
+      throw moved;
+    }
     if (inv.payer_id) return { stamped: false, alreadyStamped: true, reversed: 0 };
     const applied = round2(inv.credit_applied || 0);
     if (applied > 0) {

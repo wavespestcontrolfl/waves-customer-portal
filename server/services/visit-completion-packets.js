@@ -1272,7 +1272,7 @@ function parseOfficeReviewState(error) {
 // loses its marker — its visit's hold is lifted, and the office-review state
 // the withdrawal recorded (the packet error and the open alert) is cleared.
 // An invoice voided or settled since keeps its terminal state untouched.
-async function reconcileWithdrawnPacketInvoices(trx, { customerId = null, payerId = null, scheduledServiceId = null } = {}) {
+async function reconcileWithdrawnPacketInvoices(trx, { customerId = null, payerId = null, scheduledServiceId = null, includeLinked = true } = {}) {
   const query = trx('invoices').whereNotIn('status', INVOICE_TERMINAL_STATUSES).whereNull('payer_id').whereNotNull('visit_completion_packet_id')
     .where('scheduled_send_error', 'like', 'payer_billed:%');
   if (customerId) query.where({ customer_id: customerId });
@@ -1289,8 +1289,10 @@ async function reconcileWithdrawnPacketInvoices(trx, { customerId = null, payerI
   for (const invoice of withdrawn) {
     if (await releaseWithdrawnPacketInvoice(trx, invoice)) released += 1;
   }
-  released += await require('./visit-linked-invoice-withdrawal')
-    .reconcileLinkedInvoices(trx, { customerId, payerId, scheduledServiceId });
+  if (includeLinked) {
+    released += await require('./visit-linked-invoice-withdrawal')
+      .reconcileLinkedInvoices(trx, { customerId, payerId, scheduledServiceId });
+  }
   return released;
 }
 
@@ -1459,7 +1461,7 @@ async function liftPayerOfficeReview(trx, packet) {
 // stamped and the visit held for the office — instead of staying payable
 // through its link while the debt belongs to AP. Ownership is decided under
 // the held rows, so the resolver sees this transaction's own write.
-async function withdrawPacketInvoicesForOwner(trx, { customerId = null, scheduledServiceId = null, payerId = null } = {}) {
+async function withdrawPacketInvoicesForOwner(trx, { customerId = null, scheduledServiceId = null, payerId = null, includeLinked = true } = {}) {
   const query = trx('invoices').whereNotIn('status', INVOICE_TERMINAL_STATUSES).whereNull('payer_id').whereNotNull('visit_completion_packet_id')
     .where((q) => q.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'payer_billed:%'));
   if (customerId) query.where({ customer_id: customerId });
@@ -1486,8 +1488,11 @@ async function withdrawPacketInvoicesForOwner(trx, { customerId = null, schedule
   }
   // Invoices that ride the visit without a packet (minted from the service record, or linked to
   // the visit directly) change hands in the same transaction, by the same withdrawal.
-  withdrawn.push(...await require('./visit-linked-invoice-withdrawal')
-    .withdrawLinkedInvoicesForOwner(trx, { customerId, scheduledServiceId, payerId }));
+  // (includeLinked false: a caller that narrows the visit-linked side itself, as unvoid does to the restored invoice.)
+  if (includeLinked) {
+    withdrawn.push(...await require('./visit-linked-invoice-withdrawal')
+      .withdrawLinkedInvoicesForOwner(trx, { customerId, scheduledServiceId, payerId }));
+  }
   return withdrawn;
 }
 

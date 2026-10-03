@@ -692,6 +692,42 @@ postgres('payer assignment withdraws visit-linked invoices with no packet', () =
     }
   });
 
+  test('stamping a payer onto an invoice (with its credit reversal) locks the customer before the invoice (committed fixture, three connections)', async () => {
+    const { reverseCreditAndStampPayer } = require('../services/customer-credit');
+    const customerId = randomUUID();
+    const invoiceId = randomUUID();
+    const [payerRow] = await database('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+    await database('customers').insert({ id: customerId, first_name: 'Fixture', last_name: 'Stamp', phone: '+12025550100', email: `${customerId}@example.invalid` });
+    await database('invoices').insert({ id: invoiceId, customer_id: customerId, invoice_number: `FIX-${invoiceId.slice(0, 8)}`, token: randomUUID().replace(/-/g, ''), status: 'draft', total: 50, credit_applied: 10 });
+    const billToWriter = await database.transaction();
+    let stamping;
+    try {
+      await billToWriter('customers').where({ id: customerId }).forUpdate().first('id');
+      // The stamp runs on its own committed connection (the mocked root handle), not the test's rolled-back one.
+      const testTrx = mockPg;
+      mockPg = database;
+      stamping = reverseCreditAndStampPayer({ invoiceId, payerId: payerRow.id, createdBy: 'test' }).finally(() => { mockPg = testTrx; });
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      const probe = await database.transaction();
+      try { expect(await probe('invoices').where({ id: invoiceId }).forUpdate().noWait().first('id')).toBeTruthy(); } finally { await probe.rollback(); }
+    } finally {
+      await billToWriter.rollback();
+      if (stamping) await stamping;
+      await database('customer_credit_ledger').where({ customer_id: customerId }).del();
+      await database('invoices').where({ id: invoiceId }).del();
+      await database('customers').where({ id: customerId }).del();
+      await database('payers').where({ id: payerRow.id }).del();
+    }
+  });
+
+  test('unvoid\'s packet branch narrows to the restored invoice: an unrelated payer-owned linked invoice of the customer is left alone (includeLinked false)', async () => {
+    const payerId = await payer();
+    const residue = await fixture({ link: 'record', customerPayerId: payerId, invoice: { stripe_payment_intent_id: 'pi_unrelated_residue' } });
+    expect(await Packets.withdrawPacketInvoicesForOwner(mockPg, { customerId: residue.customerId, includeLinked: false })).toEqual([]);
+    expect(await Packets.reconcileWithdrawnPacketInvoices(mockPg, { customerId: residue.customerId, includeLinked: false })).toBe(0);
+    expect(await invoiceRow(residue.invoiceId)).toMatchObject({ scheduled_send_error: null, stripe_payment_intent_id: 'pi_unrelated_residue' });
+  });
+
   test('the fence takes the PENDING payer row FOR SHARE before it reads its active flag, so a concurrent deactivation waits (committed fixture, second connection)', async () => {
     const Linked = require('../services/visit-linked-invoice-withdrawal');
     const customerId = randomUUID();
