@@ -24,12 +24,14 @@
 .tf-brand strong { font-weight: 500; }
 .tf-brand svg { color: var(--tf-ink); width: 20px; height: 20px; }
 .tf-profile { font-size: 14px; color: var(--tf-muted); overflow-wrap: anywhere; text-align: right; }
-.tf-main { max-width: 1200px; margin: auto; padding: 16px 12px calc(108px + env(safe-area-inset-bottom, 0px)); }
+.tf-main { width: 100%; box-sizing: border-box; max-width: 1200px; margin: auto; padding: 16px 12px calc(108px + env(safe-area-inset-bottom, 0px)); }
 .tf-nav { position: fixed; bottom: 0; left: 0; right: 0; z-index: 50; display: flex; justify-content: center; padding: 6px 8px calc(6px + env(safe-area-inset-bottom, 0px)); background: var(--tf-surface); border-top: 0.5px solid var(--tf-line); }
 .tf-nav a { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; min-height: 52px; flex: 1; max-width: 240px; color: var(--tf-faint); font-size: 11px; font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; text-decoration: none; border-radius: 6px; }
 .tf-nav a svg { width: 20px; height: 20px; }
 .tf-nav a[aria-current] { color: var(--tf-ink); background: var(--tf-subtle); }
 .tech-field :is(a, button):focus-visible { outline: 2px solid var(--tf-ink); outline-offset: 2px; }
+/* The legacy dark panels keep a ring that shows on their dark ground (Codex #5794). */
+.tech-field .tf-existing :is(a, button):focus-visible { outline-color: #7dd3fc; }
 .tf-page h1, .tf-page h2, .tf-page h3 { font-family: inherit; color: var(--tf-ink); font-weight: 500; }
 .tf-page h1 { font-size: 22px; line-height: 1.3; letter-spacing: -0.015em; margin: 0; }
 .tf-page h2 { font-size: 18px; line-height: 1.35; letter-spacing: -0.005em; margin: 0; }
@@ -58,7 +60,10 @@
 .tf-primary { width: 100%; background: var(--tf-ink); border-color: var(--tf-ink); color: #ffffff; }
 .tf-primary:hover { background: var(--tf-ink); opacity: .9; }
 .tf-ghost { border-color: transparent; color: var(--tf-muted); }
-.tf-section-title { margin: 0 0 8px !important; color: var(--tf-muted) !important; font-size: 11px !important; letter-spacing: 0.06em !important; text-transform: uppercase; }
+.tf-section-title { margin: 24px 0 12px !important; }
+/* An UPPERCASE section label ("Your route"); the visit header's
+   .tf-section-title wrapper keeps names and addresses as written (Codex #5794). */
+.tf-page h2.tf-overline { margin: 0 0 8px; color: var(--tf-muted); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; }
 .tf-route { display: grid; gap: 6px; }
 .tf-stop { width: 100%; display: flex; align-items: center; gap: 12px; padding: 10px 14px; border: 0.5px solid var(--tf-line); background: var(--tf-surface); border-radius: 6px; text-align: left; cursor: pointer; color: inherit; font: inherit; }
 .tf-stop:hover { background: var(--tf-subtle); }
@@ -88,6 +93,10 @@
 @media (min-width: 768px) {
   .tf-main { padding: 20px 20px calc(108px + env(safe-area-inset-bottom, 0px)); }
   .tf-today-grid { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr); align-items: start; gap: 16px; }
+  /* Nothing rendered on the right (follow-through dark, no other cards): one
+     full-width column instead of a blank one (Codex #5794). */
+  .tf-today-grid:not(:has(> .tf-col:last-child > :not(:empty))) { grid-template-columns: minmax(0, 1fr); }
+  .tf-today-grid:not(:has(> .tf-col:last-child > :not(:empty))) > .tf-col:last-child { display: none; }
   .tf-col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
   .tf-tool-grid { grid-template-columns: 1fr 1fr; }
   .tf-button { min-height: 32px; }
