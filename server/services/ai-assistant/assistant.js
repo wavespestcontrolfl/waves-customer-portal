@@ -398,8 +398,18 @@ function emailChangeLines(customer, { newEmail, emailReadBack, alsoAsked, emailU
     newEmail
       ? `New email, confirmed by the customer in portal chat: ${newEmail}`
       : `New email the chat had just read back, not yet confirmed (the message below is the customer's answer): ${emailReadBack}`,
-    ...(alsoAsked ? [`The customer also asked about ${TOPIC_WORDING[alsoAsked.topic] || 'something else'}: ${alsoAsked.reason}`] : []),
+    ...(alsoAsked ? [`${ALSO_ASKED} ${TOPIC_WORDING[alsoAsked.topic] || 'something else'}: ${alsoAsked.reason}`] : []),
   ];
+}
+const ALSO_ASKED = 'The customer also asked about';
+// The refreshed text of an email bell that is already standing: the new
+// text, plus every request line the standing bell carries that the new one
+// lacks. A duplicate confirmation adds requests; it never removes one.
+function mergedEmailBellDetail(standing, next) {
+  const kept = String(standing || '').split('\n').filter((line) => line.startsWith(ALSO_ASKED) && !next.includes(line));
+  if (!kept.length) return null;
+  const [head, ...rest] = next.split('\n\n');
+  return { detail: [`${head}\n${kept.join('\n')}`, ...rest].join('\n\n') };
 }
 const gapReason = (reason, alsoAsked) => (alsoAsked ? alsoAsked.reason : reason);
 // The escalate call the model made beside a confirmed email change, as
@@ -901,6 +911,7 @@ class WavesAssistant {
         ? { area: 'Customers', action: require('../admin-alert-names').fitAction('Customers', name, [(who) => `Change ${who}'s email`]), why: `${name} confirmed a new email address in portal chat`, doneWhen: 'email_changed' }
         : { area: 'Comms', action: 'Reply to a portal chat request', why: `${name} asked the portal assistant about ${TOPIC_WORDING[topic] || 'a request it could not handle'}`, doneWhen: 'customer_answered' };
       const emailDetail = emailChangeLines(customer, { newEmail, emailReadBack, alsoAsked, emailUnchecked });
+      const bellDetail = emailDetail ? `${emailDetail.join('\n')}\n\nCustomer's message: ${String(customerMessage || '')}` : String(customerMessage || '');
       const result = await raiseAdminAlert('alert', {
         area: wording.area,
         action: wording.action,
@@ -919,9 +930,10 @@ class WavesAssistant {
         // bell already standing on this key, so a duplicate confirmation can
         // add that request but a plain duplicate never removes it.
         refreshOnDedupe: Boolean(alsoAsked),
+        standingRefresh: (existing) => mergedEmailBellDetail(existing.detail, bellDetail),
         // The customer's own words in full (the chat route caps a message at
         // 4000 characters), read from the bell's "Show full text".
-        detail: emailDetail ? `${emailDetail.join('\n')}\n\nCustomer's message: ${String(customerMessage || '')}` : String(customerMessage || ''),
+        detail: bellDetail,
         // The topic lets the relevance sweep close an add-a-service bell once
         // an estimate goes out (admin-alert-relevance.js).
         metadata: { customerId: customer.id, escalationId: escalation.id, conversationId: conversation.id, ...(Object.hasOwn(TOPIC_WORDING, topic) ? { topic } : {}) },

@@ -263,6 +263,12 @@ test('a second need handed off beside the confirmed change rides on the same bel
   expect(db.__bindings[0].some((value) => String(value).includes('The customer also asked about adding a service: wants mosquito service quoted'))).toBe(true);
   // It rewrites a bell already standing for this change; a plain confirmation does not.
   expect(NotificationService.notifyAdmin.mock.calls[0][3].refreshOnDedupe).toBe(true);
+  // Against a standing bell that carries another request, the rewrite keeps that request.
+  const { standingRefresh } = NotificationService.notifyAdmin.mock.calls[0][3];
+  const standing = detail.replace('adding a service: wants mosquito service quoted', 'an account change: new gate code');
+  expect(standingRefresh({ detail: standing }).detail).toBe(detail.replace('\n\nCustomer', '\nThe customer also asked about an account change: new gate code\n\nCustomer'));
+  // Nothing extra on the standing bell: the plain rewrite.
+  expect(standingRefresh({ detail })).toBeNull();
 });
 
 test('an address longer than the account can hold is handed off, never read back', async () => {
