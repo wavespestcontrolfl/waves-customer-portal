@@ -1551,16 +1551,16 @@ postgres('membership dues — prepaid marker, refund alert, payer, merge, copy (
       return { a, b, paymentId, refund: { id: refundId, charge: chargeId, payment_intent: piId, amount: 4900, status: 'failed', failure_reason: 'fixture' } };
     }
 
-    test('UNPAID replacement: the original is restored to paid and the replacement is voided through the canonical void; one live stamped invoice remains, no alert', async () => {
+    test('UNPAID replacement: the original is restored to paid, the replacement is left untouched (never voided), and ONE needs-you alert asks the office to void or adjust it', async () => {
       const f = await seedMember();
       try {
         const { a, b, refund } = await refundedThenReplaced(f);
         await handleRefundFailed(refund);
         expect((await reload(a.invoice.id)).status).toBe('paid');
-        expect((await reload(b.invoice.id)).status).toBe('void');
-        const live = (await liveInvoicesFor(f)).filter((r) => stampedOf(r));
-        expect(live.map((r) => r.id)).toEqual([a.invoice.id]);
-        expect(await conflictAlerts(a.invoice.id)).toHaveLength(0);
+        expect((await reload(b.invoice.id)).status).not.toBe('void');
+        const rows = await conflictAlerts(a.invoice.id);
+        expect(rows).toHaveLength(1);
+        expect(JSON.stringify(rows[0])).toContain(b.invoice.invoice_number);
       } finally { await cleanup(f); }
     });
 
@@ -1579,7 +1579,7 @@ postgres('membership dues — prepaid marker, refund alert, payer, merge, copy (
       } finally { await cleanup(f); }
     });
 
-    test('a replacement with an extra fee line is PRESERVED (not voided) and ONE alert asks the office to adjust it; the original is restored', async () => {
+    test('a replacement with an extra fee line is preserved untouched with ONE alert; the original is restored', async () => {
       const f = await seedMember();
       try {
         const { a, b, refund } = await refundedThenReplaced(f);
