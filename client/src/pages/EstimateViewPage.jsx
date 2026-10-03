@@ -7160,6 +7160,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       if (r.status === 409) {
         const body = await r.json().catch(() => ({}));
         if (reserveAttemptRef.current !== attemptId) return;
+        if (body.code === 'ACCEPT_NEEDS_OFFICE_REVIEW') {
+          // Parked for the office (B18): leave the booking UI for the review state, same transition as the accept.
+          await enterContactReviewRef.current(body);
+          return;
+        }
         const message = body.error || 'Unable to reserve this slot.';
         setPaymentPreference(null);
         setSelectedSlotId(null);
@@ -8068,6 +8073,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         body: JSON.stringify({ serviceMode, paymentMethodPreference: paymentPreference, replaceSetupIntentId: setupIntentId }),
       });
       const body = await r.json().catch(() => ({}));
+      if (r.status === 409 && body.code === 'ACCEPT_NEEDS_OFFICE_REVIEW') {
+        await enterContactReviewRef.current(body);
+        return false;
+      }
       if (!r.ok || !body?.clientSecret) return false;
       if (recurringCardIntentOpenRef.current) {
         setRecurringCardIntent(body);
@@ -8174,6 +8183,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           body: JSON.stringify({ serviceMode, paymentMethodPreference: paymentPreference }),
         });
         const body = await r.json().catch(() => ({}));
+        // Parked for the office (B18): the page leaves checkout for the review state whatever the staleness below says.
+        if (r.status === 409 && body.code === 'ACCEPT_NEEDS_OFFICE_REVIEW') {
+          await enterContactReviewRef.current(body);
+          return;
+        }
         // Staleness re-check at RESOLVE time (r3 P2): a confirm tapped before
         // this pre-mint resolved fell back to the modal path with its own
         // intent — accepting this late response would render the inline
@@ -9754,6 +9768,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                   serviceCadences={serviceCadences}
                   onFirstSlotDate={setFirstSlotDate}
                   cityLabel={estimateCity}
+                  onContactReview={(body) => enterContactReviewRef.current(body)}
                 />
               </div>
             ) : (

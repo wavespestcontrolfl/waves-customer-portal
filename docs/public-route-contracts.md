@@ -1730,8 +1730,9 @@ answers:
   it. The legacy server-rendered estimate page is never served for such an estimate: `handleEstimateView` forces it to
 the React page (the `/estimate/` mount falls through to the SPA, the `/api/estimates/` mount redirects to the
 React URL, GrowthBook never reassigns it), the same way it forces a contact-gap estimate. A stale tab handles the
-409 from the accept and from both card intents through one transition (drop the
-  captured cards, release the slot hold, refetch `/data`). The estimate's own phone is left as staff typed
+409 from the accept, `reserve`, every `recurring-card-intent` caller (modal mint, replace-method, inline pre-mint)
+and the card-hold intent, and the empty review shape from the slot reads (`available-slots`, `find-slots`, picked
+date), through one transition (drop the captured cards, release the slot hold, refetch `/data`). The estimate's own phone is left as staff typed
   it, so its follow-up texts are unchanged until the office fixes the number. Several phone candidates, or
   a lone candidate that agrees on email or address, behave as before. A one-time card-hold SetupIntent a
   stale tab captured before the park stays unbound at Stripe (customerless until an accept commits); it
