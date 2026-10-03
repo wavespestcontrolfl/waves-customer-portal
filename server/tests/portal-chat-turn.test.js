@@ -19,6 +19,8 @@ jest.mock('../models/db', () => {
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+const mockRecordGap = jest.fn(async () => []);
+jest.mock('../services/agent-gap-reports', () => ({ recordGap: (...args) => mockRecordGap(...args) }));
 
 const mockCreate = jest.fn();
 const mockListPayments = jest.fn(async () => ({ payments: [] }));
@@ -161,6 +163,75 @@ test('a card and a hand-off asked for in one response: the card runs first and r
   expect(result.cards).toHaveLength(1);
   expect(result.actions).toEqual([{ type: 'tab', label: 'Open Billing', tab: 'billing' }]);
   escalate.mockRestore();
+});
+
+test.each([undefined, 'new@example.test'])('a portal escalation checkpoints its exact handoff and completed cards (email=%s)', async (newEmail) => {
+  const customer = { id: 'cust-1', first_name: 'Pat', last_name: 'Sample', email: 'old@example.test' };
+  const escalation = { id: 'esc-1' };
+  const insertEscalation = jest.fn().mockReturnValue({ returning: jest.fn().mockResolvedValue([escalation]) });
+  const cards = [{ type: 'payments', title: 'Your most recent payment', rows: [{ id: 'p1' }] }];
+  const actions = [{ type: 'tab', label: 'Open Billing', tab: 'billing' }];
+  const trx = Object.assign(jest.fn((table) => {
+    if (table === 'customers') return { where: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(customer) };
+    if (table === 'ai_escalations') return {
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue(null),
+      insert: insertEscalation,
+    };
+    if (table === 'agent_sessions') return { where: jest.fn().mockReturnThis(), update: jest.fn().mockResolvedValue(1) };
+    if (table === 'agent_messages') return {
+      insert: jest.fn().mockReturnValue({
+        onConflict: jest.fn().mockReturnValue({ ignore: jest.fn().mockResolvedValue(1) }),
+      }),
+    };
+    throw new Error(`unexpected table ${table}`);
+  }), { transaction: async (work) => work(trx) });
+  let insideTransaction = false;
+  const turn = {
+    requestRowId: 'request-row-handoff',
+    assertActive: jest.fn(),
+    fallbackExtras: () => ({ actions, cards }),
+    persistCommittedResult: jest.fn(async (_executor, result) => {
+      expect(insideTransaction).toBe(true);
+      return result;
+    }),
+    rememberCommittedResult: jest.fn((result) => result),
+    transaction: async (_stage, work) => {
+      insideTransaction = true;
+      try { return await work(trx); } finally { insideTransaction = false; }
+    },
+  };
+  const notify = jest.spyOn(assistant, 'notifyTeamOfEscalation').mockRejectedValue(new Error('bell write failed'));
+
+  const result = await assistant.escalatePortalTurn(
+    { id: 'conv-1', customer_id: 'cust-1', channel: 'portal_chat' },
+    'Please help with this charge',
+    'Customer needs billing help',
+    { gap: true, topic: newEmail ? 'account_change' : 'billing', newEmail, turn },
+  );
+
+  if (newEmail) {
+    expect(insertEscalation).toHaveBeenCalledWith(expect.objectContaining({
+      reason: 'account_change', summary: expect.stringContaining(newEmail),
+    }));
+    expect(insertEscalation.mock.calls[0][0].summary).toContain(customer.email);
+    expect(notify).toHaveBeenCalledWith(expect.objectContaining({ newEmail, trx }));
+    expect(result.reply).toContain('email change request');
+  }
+  expect(turn.persistCommittedResult).toHaveBeenCalledWith(trx, expect.objectContaining({
+    escalated: true,
+    escalationId: 'esc-1',
+    teamNotified: false,
+    generated: false,
+    actions,
+    cards,
+  }));
+  expect(turn.rememberCommittedResult).toHaveBeenCalledWith(expect.objectContaining({ escalated: true, cards }));
+  expect(mockRecordGap).toHaveBeenCalledWith(expect.objectContaining({
+    source: 'texting-ai', summary: 'Customer needs billing help',
+  }), trx);
+  expect(result).toEqual(expect.objectContaining({ escalated: true, actions, cards }));
+  notify.mockRestore();
 });
 
 test('a billing keyword hand-off ("refund") still shows the card under the facts gate, with no model call', async () => {
