@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useFieldPortalClass } from './fieldPortal';
 import { createPortal } from 'react-dom';
 import useIsMobile from '../../hooks/useIsMobile';
 import { adminFetch } from '../../lib/adminFetch';
@@ -330,6 +331,7 @@ export default function CreateProjectModal({
   // visit. Caller-owned, rendered only when provided.
   onViewDetails = null,
 }) {
+  const fieldPortalClass = useFieldPortalClass();
   const P = PALETTES[theme] || PALETTES.dark;
   const isEstimateStyle = theme === 'light';
   const isSheet = presentation === 'sheet';
@@ -1873,6 +1875,7 @@ export default function CreateProjectModal({
   // are unaffected: the card sets P.bodyFont per theme.
   return createPortal(
     <div
+      className={fieldPortalClass || undefined}
       ref={dialogRef}
       tabIndex={-1}
       role="dialog"

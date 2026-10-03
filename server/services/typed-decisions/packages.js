@@ -11,6 +11,11 @@
  * tests/typed-decisions-packages.test.js pins each id to a hash in
  * fixtures/typed-decisions/package-hashes.json, so an in-place edit fails CI.
  *
+ * An optional `imageSlots` (an integer 1..MAX_IMAGE_SLOTS = 4, Clef's per-request
+ * maximum) lets a package take that many photos on the Clef provider only
+ * (askPackage `{ images }`); none declares it yet. A registered package with any
+ * other value fails at load.
+ *
  * Question ids are the keys of `questions` (Jev answers by id). A `noul`
  * question answers a 0..1 probability that the statement is true.
  */
@@ -119,12 +124,45 @@ const CALL_GATE_CHECKS = {
   },
 };
 
+// Evidence for GATE_SMS_SPAM_CLASSIFIER (Clef second wave, idea 8): a text
+// from an UNKNOWN sender (the same messages its screen sees) recorded beside
+// the screen's regex marker (`rules`) and, when the classifier ran, its own
+// model verdict (`production`). Wording follows sms-solicitation-classifier's
+// prompt so the model and the gate judge the same thing. Same state shape as
+// the other SMS packages (an unknown sender's previous Waves text is usually
+// none), so the review route and the labeling tools need nothing new.
+const SMS_SOLICITATION = {
+  id: 'sms_solicitation.v1',
+  capability: 'sms_solicitation',
+  version: 1,
+  description: 'Is a text from an unknown sender a business pitching something to Waves (a solicitation)?',
+  stateShape: ['previous_waves_text', 'customer_text'],
+  thresholds: { ...THRESHOLDS },
+  questions: {
+    is_solicitation: noul('Is the sender a business pitching something TO Waves (lead generation, marketing or ads, review tools, software, an AI receptionist, staffing, financing, insurance, or a contractor offering services or a partnership)?', {
+      true: 'A pitch, offer or sales outreach aimed at Waves as a business.',
+      false: 'Someone asking Waves for service, a quote, pricing or an appointment (even a business or property manager), a question about a job or bill, a wrong number, or a personal message.',
+    }),
+  },
+};
+
 const PACKAGES = deepFreeze({
   [CALL_JUDGE.id]: CALL_JUDGE,
   [CALL_GATE_CHECKS.id]: CALL_GATE_CHECKS,
   [SMS_COURTESY.id]: SMS_COURTESY,
   [SMS_RESCHEDULE.id]: SMS_RESCHEDULE,
+  [SMS_SOLICITATION.id]: SMS_SOLICITATION,
 });
+
+// Clef's per-request image maximum (callWorkersAIDecision CLEF_MAX_IMAGES): a
+// package can never advertise more slots than the provider takes.
+const MAX_IMAGE_SLOTS = 4;
+const validImageSlots = (slots) => Number.isInteger(slots) && slots >= 1 && slots <= MAX_IMAGE_SLOTS;
+for (const pkg of Object.values(PACKAGES)) {
+  if (pkg.imageSlots !== undefined && !validImageSlots(pkg.imageSlots)) {
+    throw new Error(`typed-decisions package ${pkg.id}: imageSlots must be an integer 1..${MAX_IMAGE_SLOTS}`);
+  }
+}
 
 function packageFor(id) {
   return Object.prototype.hasOwnProperty.call(PACKAGES, id) ? PACKAGES[id] : null;
@@ -140,9 +178,14 @@ function canonical(value) {
 }
 
 // sha256 over the parts that define the decision: questions + stateShape +
-// thresholds. The description is prose and may be edited without a new version.
+// thresholds (+ imageSlots, only for a package that declares it: how many
+// photos it is shown is part of the decision, and a package without it hashes
+// exactly as it always did). The description is prose and may be edited
+// without a new version.
 function packageHash(pkg) {
-  const body = canonical({ questions: pkg.questions, stateShape: pkg.stateShape, thresholds: pkg.thresholds });
+  const parts = { questions: pkg.questions, stateShape: pkg.stateShape, thresholds: pkg.thresholds };
+  if (pkg.imageSlots !== undefined) parts.imageSlots = pkg.imageSlots;
+  const body = canonical(parts);
   return crypto.createHash('sha256').update(body).digest('hex');
 }
 
@@ -188,4 +231,4 @@ function providerLabel(provider) {
 // admin review route shows the reviewer the same span.
 const CALL_TRANSCRIPT_CHARS = 5000;
 
-module.exports = { PACKAGES, packageFor, packageHash, OUTCOME_SOURCES, answerInDomain, CALL_TRANSCRIPT_CHARS, DECISION_PROVIDERS, DEFAULT_DECISION_PROVIDER, DECISION_PROVIDER_LABELS, providerLabel };
+module.exports = { PACKAGES, packageFor, packageHash, MAX_IMAGE_SLOTS, validImageSlots, OUTCOME_SOURCES, answerInDomain, CALL_TRANSCRIPT_CHARS, DECISION_PROVIDERS, DEFAULT_DECISION_PROVIDER, DECISION_PROVIDER_LABELS, providerLabel };

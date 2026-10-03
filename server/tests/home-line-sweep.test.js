@@ -63,8 +63,8 @@ describe('stampHomeLines', () => {
     const { database, updates } = fakeDb([blank, outOfArea, parrish]);
     expect(await stampHomeLines({ now, database })).toEqual({ stamped: 1, unchanged: 0, noOffice: 2, lostRace: 0 });
     expect(updates.map((u) => [u.id, u.home_line_location_id])).toEqual([['a', 'parrish']]);
-    // …so the call path still presents the main line for them after a sweep.
-    expect(homeLineCallerId(blank)).toBe('+19412975749');
+    // …so their line stays the reader's default office (Bradenton), not a stamp.
+    expect(homeLineCallerId(blank)).toBe('+19413187612');
   });
 
   test('a row changed since the read is counted, not overwritten', async () => {
@@ -108,11 +108,15 @@ describe('homeLineCallerId (calls, PR 2)', () => {
     expect(homeLineCallerId(stamped)).toBe('+19412973337');
   });
 
-  test('gate on: no customer, or a lead with no office, keeps the main line', () => {
+  test('gate on: no customer record keeps the main line', () => {
     process.env.GATE_HOME_LINE = 'true';
     expect(homeLineCallerId(null)).toBe(MAIN);
-    expect(homeLineCallerId({ id: 'lead', city: '', zip: '' })).toBe(MAIN);
-    expect(homeLineCallerId({ id: 'far', city: 'Orlando', zip: '32801' })).toBe(MAIN);
+  });
+
+  test('gate on: a customer whose address names no office gets Bradenton (owner 2026-10-02)', () => {
+    process.env.GATE_HOME_LINE = 'true';
+    expect(homeLineCallerId({ id: 'lead', city: '', zip: '' })).toBe('+19413187612');
+    expect(homeLineCallerId({ id: 'far', city: 'Orlando', zip: '32801' })).toBe('+19413187612');
   });
 });
 
@@ -173,10 +177,10 @@ describe('staffTextSender (staff texts, PR 3)', () => {
       .toEqual({ fromNumber: PARRISH, reason: 'home_line' });
   });
 
-  test('no customer, or a customer whose address names no office: main', async () => {
+  test('no customer record: main; a customer whose address names no office: Bradenton', async () => {
     expect(await staffTextSender({ phone: '+15551234567', database: senderDb().database, now }))
       .toEqual({ fromNumber: MAIN, reason: 'main' });
     expect(await staffTextSender({ phone: '+15551234567', customerId: 'c', database: senderDb({ customer: { id: 'c', city: '', zip: '' } }).database, now }))
-      .toEqual({ fromNumber: MAIN, reason: 'main' });
+      .toEqual({ fromNumber: '+19413187612', reason: 'home_line' });
   });
 });

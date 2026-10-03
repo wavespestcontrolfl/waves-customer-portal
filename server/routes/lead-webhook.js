@@ -698,8 +698,8 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
           const domain = process.env.SERVER_DOMAIN || process.env.RAILWAY_PUBLIC_DOMAIN || 'portal.wavespestcontrol.com';
           // Internal alert leg to Adam: dedicated caller ID (see config), NOT the
           // main line. The customer-facing bridge leg below presents the lead's
-          // home line under GATE_HOME_LINE when their address names an office,
-          // else the main line.
+          // home line under GATE_HOME_LINE (Bradenton when their address names
+          // no office), else the main line.
           const fromNumber = TWILIO_NUMBERS.internalAlertCallerId();
           attemptedLeadCallFrom = fromNumber;
           const autoBridge = isEnabled('leadAutoBridge');

@@ -3,7 +3,14 @@
  *
  * GET    /                          — neighborhoods with their gate entries
  *                                     (?q= search, ?filter=needs_confirm,
- *                                     ?include_retired=1, ?limit, ?offset)
+ *                                     ?include_retired=1, ?neighborhood=<id>, ?limit, ?offset)
+ * GET    /customers/:customerId/properties — the customer's active properties, each
+ *                                     with its neighborhood and that neighborhood's live entries
+ * PUT    /properties/:propertyId/neighborhood — the office links a property to a
+ *                                     neighborhood ({ neighborhoodId }), creates one
+ *                                     ({ create: { name, county } }) or clears it
+ *                                     ({ neighborhoodId: null }); an office pick is never
+ *                                     overwritten by the county lookup
  * POST   /:neighborhoodId/entries   — office adds an entry (active, confirmed now;
  *                                     other live codes there then need confirming)
  * PATCH  /entries/:id               — edit an entry (a new value counts as confirmed),
@@ -23,7 +30,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { neighborhoodAccessLive } = require('../config/feature-gates');
-const { isKeypadCode } = require('../services/neighborhood-access');
+const { isKeypadCode, matchKey } = require('../services/neighborhood-access');
 
 const router = express.Router();
 router.use(adminAuthenticate, requireAdmin);
@@ -41,6 +48,8 @@ const MAX_LABEL = 60;
 const MAX_CODE = 100;
 const MAX_INSTRUCTIONS = 1000;
 const MAX_QUERY = 100;
+const MAX_NAME = 120;
+const COUNTIES = ['Manatee', 'Sarasota', 'Charlotte'];
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 200;
 
@@ -161,10 +170,19 @@ router.get('/', async (req, res) => {
     const includeRetired = ['1', 'true'].includes(String(req.query.include_retired || ''));
     const limit = Math.max(1, positiveInt(req.query.limit, DEFAULT_LIMIT, MAX_LIMIT));
     const offset = positiveInt(req.query.offset, 0, 1_000_000);
+    const onlyId = req.query.neighborhood === undefined ? null : String(req.query.neighborhood);
+    if (onlyId !== null && !UUID_RE.test(onlyId)) return res.status(400).json({ error: 'neighborhood must be an id' });
     const cutoff = staleCutoff();
 
     const bindings = [cutoff];
-    let where = 'n.active AND (COALESCE(f.live, 0) > 0 OR COALESCE(p.cnt, 0) > 0)';
+    // ?picker=1 (Customer 360's neighborhood picker): every active
+    // neighborhood, so an empty one can be reused instead of created again.
+    const picker = req.query.picker === '1';
+    let where = picker ? 'n.active' : 'n.active AND (COALESCE(f.live, 0) > 0 OR COALESCE(p.cnt, 0) > 0)';
+    if (onlyId) {
+      where += ' AND n.id = ?';
+      bindings.push(onlyId);
+    }
     if (needsConfirmOnly) where += ' AND (f.needs_confirm OR f.conflict OR f.stale)';
     if (q) {
       const like = likePattern(q);
@@ -225,6 +243,143 @@ router.get('/', async (req, res) => {
   } catch (err) {
     logFailure('list', err);
     res.status(500).json({ error: 'Could not load gate codes' });
+  }
+});
+
+// Each property with its neighborhood and that neighborhood's live entries.
+async function propertyViews(conn, props) {
+  const ids = [...new Set(props.map((p) => p.neighborhood_id).filter(Boolean))];
+  // A switched-off neighborhood is not shown (the directory hides it and the
+  // picker refuses it): the property reads as not linked, with no codes.
+  const hoods = ids.length ? await conn('neighborhoods').whereIn('id', ids).where({ active: true }).select('id', 'name', 'county') : [];
+  const entryRows = ids.length
+    ? await conn('neighborhood_access').whereIn('neighborhood_id', ids).whereNot('status', 'retired')
+      .orderBy([{ column: 'gate_label' }, { column: 'created_at' }, { column: 'id' }])
+    : [];
+  const hoodById = new Map(hoods.map((h) => [h.id, h]));
+  return props.map((p) => {
+    const hood = hoodById.get(p.neighborhood_id);
+    return {
+      id: p.id,
+      label: p.label || null,
+      addressLine1: p.address_line1 || null,
+      addressLine2: p.address_line2 || null,
+      city: p.city || null,
+      zip: p.zip || null,
+      neighborhood: hood ? { id: hood.id, name: hood.name, county: hood.county || null } : null,
+      neighborhoodSource: hood ? (p.neighborhood_source || null) : null,
+      entries: hood
+        ? entryRows.filter((e) => e.neighborhood_id === hood.id).map((e) => ({
+          id: e.id,
+          gateLabel: e.gate_label,
+          accessType: e.access_type,
+          code: e.code || null,
+          instructions: e.instructions || null,
+          status: e.status,
+        }))
+        : [],
+    };
+  });
+}
+
+const PROPERTY_COLUMNS = ['id', 'label', 'address_line1', 'address_line2', 'city', 'zip', 'neighborhood_id', 'neighborhood_source'];
+
+router.get('/customers/:customerId/properties', async (req, res) => {
+  const { customerId } = req.params;
+  if (!UUID_RE.test(customerId)) return res.status(404).json({ error: 'Customer not found' });
+  try {
+    const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('id');
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+    const props = await db('customer_properties').where({ customer_id: customerId, active: true })
+      .orderBy([{ column: 'is_primary', order: 'desc' }, { column: 'created_at' }, { column: 'id' }])
+      .select(PROPERTY_COLUMNS);
+    return res.json({ properties: await propertyViews(db, props) });
+  } catch (err) {
+    logFailure('customer properties', err);
+    return res.status(500).json({ error: 'Could not load the neighborhood' });
+  }
+});
+
+// Returns { error } or { value: { neighborhoodId } | { create: { name, county } } }.
+function validateLink(body) {
+  const input = body && typeof body === 'object' ? body : {};
+  const hasId = Object.prototype.hasOwnProperty.call(input, 'neighborhoodId');
+  const hasCreate = Object.prototype.hasOwnProperty.call(input, 'create');
+  if (hasId === hasCreate) return { error: 'Send either neighborhoodId or create' };
+  if (hasId) {
+    const id = input.neighborhoodId;
+    if (id === null) return { value: { neighborhoodId: null } };
+    if (typeof id !== 'string' || !UUID_RE.test(id)) return { error: 'neighborhoodId must be an id or null' };
+    return { value: { neighborhoodId: id } };
+  }
+  const c = input.create && typeof input.create === 'object' ? input.create : null;
+  if (!c) return { error: 'create needs a name and county' };
+  const name = typeof c.name === 'string' ? c.name.replace(/\s+/g, ' ').trim() : '';
+  if (!name) return { error: 'name is required' };
+  if (name.length > MAX_NAME) return { error: `name is limited to ${MAX_NAME} characters` };
+  if (!COUNTIES.includes(c.county)) return { error: `county must be one of ${COUNTIES.join(', ')}` };
+  return { value: { create: { name, county: c.county } } };
+}
+
+router.put('/properties/:propertyId/neighborhood', async (req, res) => {
+  const { propertyId } = req.params;
+  if (!UUID_RE.test(propertyId)) return res.status(404).json({ error: 'Property not found' });
+  const checked = validateLink(req.body);
+  if (checked.error) return res.status(400).json({ error: checked.error });
+  const link = checked.value;
+  try {
+    const result = await db.transaction(async (trx) => {
+      // The sweep's lock order: the customer's advisory lock, the customer row,
+      // the property row, then the neighborhood (advisory lock + row), so an
+      // office pick and the filer cannot deadlock or overwrite each other.
+      const peek = await trx('customer_properties').where({ id: propertyId }).first('customer_id');
+      if (!peek) return { status: 404, body: { error: 'Property not found' } };
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(peek.customer_id)]);
+      const customer = await trx('customers').where({ id: peek.customer_id }).whereNull('deleted_at').forUpdate().first('id');
+      if (!customer) return { status: 404, body: { error: 'Property not found' } };
+      const prop = await trx('customer_properties').where({ id: propertyId, customer_id: peek.customer_id, active: true })
+        .forUpdate().first('id');
+      if (!prop) return { status: 404, body: { error: 'Property not found' } };
+
+      let neighborhoodId = null;
+      if (link.create) {
+        const { name, county } = link.create;
+        const key = matchKey(county, name);
+        // The same advisory key the county upsert takes, so a racing writer of
+        // this name cannot insert a duplicate.
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`neighborhood:${key}`]);
+        const existing = await trx('neighborhoods').where({ match_key: key }).forUpdate().first('id', 'active');
+        if (existing) {
+          if (!existing.active) return { status: 409, body: { error: 'That neighborhood is switched off' } };
+          neighborhoodId = existing.id;
+        } else {
+          const [ins] = await trx('neighborhoods').insert({
+            name, county, match_key: key, subdivision_names: JSON.stringify([]), source: 'office',
+          }).returning('id');
+          neighborhoodId = ins.id ?? ins;
+        }
+      } else if (link.neighborhoodId) {
+        const hood = await trx('neighborhoods').where({ id: link.neighborhoodId }).forUpdate().first('id', 'active');
+        if (!hood || !hood.active) return { status: 404, body: { error: 'Neighborhood not found' } };
+        neighborhoodId = hood.id;
+      }
+
+      // Checked-at is stamped on a clear too, so the county lookup never
+      // overwrites an office decision.
+      await trx('customer_properties').where({ id: propertyId }).update({
+        neighborhood_id: neighborhoodId,
+        neighborhood_source: 'office',
+        neighborhood_checked_at: trx.fn.now(),
+        updated_at: trx.fn.now(),
+      });
+      const updated = await trx('customer_properties').where({ id: propertyId }).first(PROPERTY_COLUMNS);
+      return { status: 200, body: (await propertyViews(trx, [updated]))[0] };
+    });
+    return res.status(result.status).json(result.body);
+  } catch (err) {
+    if (err && err.code === '23505') return res.status(409).json({ error: 'That neighborhood already exists' });
+    logFailure('link property', err);
+    return res.status(500).json({ error: 'Could not save the neighborhood' });
   }
 });
 

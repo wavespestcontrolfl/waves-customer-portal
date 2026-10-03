@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { KeyRound } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import {
   ActionFeedback, Badge, Button, Card, CardBody, Field, Input, Select, Textarea, UiSurface,
@@ -157,7 +158,13 @@ function EntryRow({ entry, busyKey, editing, formError, onAction, onEdit, onCanc
   );
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export default function NeighborhoodGateCodesPage() {
+  // A link (a conflict bell, a customer's neighborhood) can open one neighborhood.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const rawOnly = searchParams.get("neighborhood") || "";
+  const onlyNeighborhood = UUID_RE.test(rawOnly) ? rawOnly : "";
   const [neighborhoods, setNeighborhoods] = useState([]);
   const [total, setTotal] = useState(0);
   const [filter, setFilter] = useState("all");
@@ -179,14 +186,30 @@ export default function NeighborhoodGateCodesPage() {
   }, [search]);
 
   const readSeq = useRef(0);
+  // What the rows on screen were loaded for. A first page for a different
+  // view (search, filter or linked neighborhood) drops the old rows at once,
+  // so a slow or failed load never leaves another view's entries actionable;
+  // a reload of the same view (after a save) keeps them in place.
+  const shownView = useRef(null);
   const load = useCallback(async ({ offset = 0 } = {}) => {
     const seq = ++readSeq.current;
+    const view = `${onlyNeighborhood || ""}|${query}|${filter}`;
+    if (!offset && shownView.current !== view) {
+      setNeighborhoods([]);
+      setTotal(0);
+      shownView.current = view;
+    }
     setLoading(true);
     setReadError("");
     try {
       const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) });
-      if (query) params.set("q", query);
-      if (filter === "needs_confirm") params.set("filter", "needs_confirm");
+      // A linked single neighborhood (the conflict bell) opens on its own: a
+      // search or filter left from before must never hide it.
+      if (onlyNeighborhood) params.set("neighborhood", onlyNeighborhood);
+      else {
+        if (query) params.set("q", query);
+        if (filter === "needs_confirm") params.set("filter", "needs_confirm");
+      }
       const data = await api(`/admin/neighborhood-access?${params.toString()}`);
       if (seq !== readSeq.current) return;
       setDisabled(false);
@@ -199,7 +222,7 @@ export default function NeighborhoodGateCodesPage() {
     } finally {
       if (seq === readSeq.current) setLoading(false);
     }
-  }, [query, filter]);
+  }, [query, filter, onlyNeighborhood]);
 
   useEffect(() => { load(); }, [load]);
   // A save that finishes after the search or filter changed reloads the
@@ -300,6 +323,20 @@ export default function NeighborhoodGateCodesPage() {
               </Button>
             </div>
           </div>
+
+          {onlyNeighborhood && (
+            <div className="mb-3 flex flex-wrap items-center gap-2 text-ui-body text-ink-secondary">
+              <span>Showing one neighborhood</span>
+              <span aria-hidden="true">·</span>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setSearchParams((prev) => { const next = new URLSearchParams(prev); next.delete("neighborhood"); return next; })}
+              >
+                Show all
+              </Button>
+            </div>
+          )}
 
           {readError && <ActionFeedback error onRetry={() => load()} className="mb-3">{readError}</ActionFeedback>}
           {actionError && <ActionFeedback error className="mb-3">{actionError}</ActionFeedback>}

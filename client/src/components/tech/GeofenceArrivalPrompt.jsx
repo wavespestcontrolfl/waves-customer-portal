@@ -21,7 +21,7 @@
  *     on this tech's route) — same kept-until-"Got it" rule and cap,
  *     sharing the visit-card slot
  *
- * Mount once inside TechLayout / TechHomePage — it renders a fixed-position
+ * Mount once inside TechHomePage — it renders a fixed-position
  * container so the parent layout doesn't need to reserve space.
  *
  * Audit focus:
