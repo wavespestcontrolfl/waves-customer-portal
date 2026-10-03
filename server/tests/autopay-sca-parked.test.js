@@ -9,7 +9,7 @@
  *     key of each row it resolved;
  *   - closeScaParkedAlerts recomputes the key from a payments row and never throws.
  */
-const mockState = { updates: [], wheres: [], rawBindings: [], resolvedRows: [], inserts: [] };
+const mockState = { updates: [], wheres: [], rawBindings: [], resolvedRows: [], alreadySuperseded: [], inserts: [] };
 
 jest.mock('../models/db', () => {
   function paymentsBuilder() {
@@ -23,6 +23,8 @@ jest.mock('../models/db', () => {
     });
     b.update = jest.fn((payload) => { mockState.updates.push(payload); return b; });
     b.returning = jest.fn(() => Promise.resolve(mockState.resolvedRows));
+    // the "rows already superseded by this collecting payment" read
+    b.select = jest.fn(() => Promise.resolve(mockState.alreadySuperseded));
     return b;
   }
   const db = jest.fn((table) => {
@@ -34,7 +36,7 @@ jest.mock('../models/db', () => {
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
-jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
+jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(), _private: { doneColumns: jest.fn(() => ({ done_at: 'now' })) } }));
 jest.mock('../services/admin-alert-episodes', () => ({ closeAdminAlertKeys: jest.fn(async () => 1) }));
 
 const NotificationService = require('../services/notification-service');
@@ -52,7 +54,7 @@ const PERIOD = { monthKey: '2026-10', monthStart: '2026-10-01', monthEnd: '2026-
 
 beforeEach(() => {
   jest.clearAllMocks();
-  Object.assign(mockState, { updates: [], wheres: [], rawBindings: [], resolvedRows: [], inserts: [] });
+  Object.assign(mockState, { updates: [], wheres: [], rawBindings: [], resolvedRows: [], alreadySuperseded: [], inserts: [] });
   NotificationService.notifyAdmin.mockResolvedValue({ id: 'n-1' });
 });
 
@@ -197,5 +199,53 @@ describe('settleParkedForPaidPayment', () => {
     db.mockImplementationOnce(() => { throw new Error('db down'); });
     await expect(Sca.settleParkedForPaidPayment(settledAchReplacement())).resolves.toEqual([]);
     expect(logger.error.mock.calls.some((c) => /could not resolve parked rows/.test(String(c[0])))).toBe(true);
+  });
+});
+
+// The supersede commits BEFORE the alert close, and the next call no longer selects those rows.
+// So a close that failed must be retried from the rows already superseded by this payment.
+describe('recoverable alert close (supersede committed, close failed)', () => {
+  const PAID = { id: 'pay-new', customer_id: 'cust-1', status: 'paid', metadata: JSON.stringify({ billed_month: '2026-10' }) };
+  const ORIGINAL = { id: 'pay-sca-1', customer_id: 'cust-1', stripe_payment_intent_id: 'pi_sca_orig' };
+
+  test('close throws after the supersede committed: logged at error level; a replay closes the original keys', async () => {
+    mockState.resolvedRows = [ORIGINAL];
+    closeAdminAlertKeys.mockRejectedValueOnce(new Error('notifications down'));
+    await expect(Sca.settleParkedForPaidPayment(PAID)).resolves.toHaveLength(1);
+    expect(mockState.updates).toHaveLength(1); // the supersede committed
+    expect(logger.error.mock.calls.some((c) => /could not close the parked-charge alert/.test(String(c[0])))).toBe(true);
+
+    // replay: the update now matches nothing (row is already superseded), but the row IS superseded by this payment
+    closeAdminAlertKeys.mockClear();
+    mockState.resolvedRows = [];
+    mockState.alreadySuperseded = [ORIGINAL];
+    await expect(Sca.settleParkedForPaidPayment(PAID)).resolves.toEqual([]);
+    expect(closeAdminAlertKeys.mock.calls.flatMap((c) => c[1])).toEqual(expect.arrayContaining([
+      'autopay-sca-parked:cust-1:pi_sca_orig', 'autopay-sca-parked:cust-1:pay-sca-1',
+    ]));
+    expect(mockState.wheres).toEqual(expect.arrayContaining([
+      ['where', { customer_id: 'cust-1', superseded_by_payment_id: 'pay-new' }],
+      ['whereNot', { id: 'pay-new' }],
+    ]));
+  });
+
+  test('a row superseded by a DIFFERENT payment is not this payment\'s to close (query is scoped to this payment id)', async () => {
+    await Sca.settleParkedForPaidPayment(PAID);
+    const scoped = mockState.wheres.filter((w) => w[0] === 'where' && w[1] && w[1].superseded_by_payment_id);
+    expect(scoped).toEqual([['where', { customer_id: 'cust-1', superseded_by_payment_id: 'pay-new' }]]);
+  });
+
+  test('closing keys that are already closed is a no-op: the real closer only touches rows not already auto-cleared', async () => {
+    const { closeAdminAlertKeys: realClose } = jest.requireActual('../services/admin-alert-episodes');
+    const calls = { raw: [], update: null };
+    const qb = {};
+    qb.where = jest.fn(() => qb);
+    qb.whereRaw = jest.fn((sql) => { calls.raw.push(sql); return qb; });
+    qb.update = jest.fn((payload) => { calls.update = payload; return Promise.resolve(0); });
+    const conn = jest.fn(() => qb);
+    conn.raw = jest.fn((sql, b) => ({ sql, b }));
+    await expect(realClose(conn, ['autopay-sca-parked:cust-1:pi_sca_orig'], 'charge_collected')).resolves.toBe(0);
+    // already-cleared rows are excluded by the predicate, so nothing is rewritten, re-versioned or re-rung
+    expect(calls.raw.some((sql) => /autoCleared' IS DISTINCT FROM 'true'/.test(sql))).toBe(true);
   });
 });

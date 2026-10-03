@@ -100,7 +100,9 @@ async function closeScaParkedAlerts(rows, reason, { conn = db, resolution = null
     const { closeAdminAlertKeys } = require('./admin-alert-episodes');
     return await closeAdminAlertKeys(conn, keys, reason, { resolution: resolution || 'The parked autopay charge was collected' });
   } catch (err) {
-    logger.warn(`[autopay-sca] could not close the parked-charge alert: ${err.message}`);
+    // error level: the supersede that precedes a close has already committed, so a failed
+    // close leaves an alert telling staff to collect paid debt until a replay retries it
+    logger.error(`[autopay-sca] could not close the parked-charge alert (a replay of the settlement retries it): ${err.message}`);
     return 0;
   }
 }
@@ -112,7 +114,12 @@ async function closeScaParkedAlerts(rows, reason, { conn = db, resolution = null
 // the same month matcher (metadata.billed_month, else the payment_date window plus the
 // 'WaveGuard Monthly' marker). Only unarmed rows (an armed row is the sweep's own to
 // resolve) of the same customer and month; the collecting payment itself and rows
-// already superseded are left alone. Returns the rows it resolved.
+// superseded by some OTHER payment are left alone. Returns the rows THIS call superseded.
+// The alert close is recoverable: the supersede commits first, so a close that failed would
+// otherwise never be retried (the next call no longer selects those rows). The keys closed
+// therefore also cover every row already superseded by THIS collecting payment, so a replay
+// of the settlement (or a second Charge now) finishes a close that failed. Closing an
+// already-closed key is a no-op (closeAdminAlertKeys skips alerts already auto-cleared).
 async function resolveParkedMonthlyRows(customerId, { monthKey, monthStart, monthEnd }, collectedPaymentId, { conn = db } = {}) {
   const resolved = await conn('payments')
     .where({ customer_id: customerId, status: 'failed' })
@@ -133,8 +140,13 @@ async function resolveParkedMonthlyRows(customerId, { monthKey, monthStart, mont
       failure_reason: conn.raw("COALESCE(failure_reason, '') || ?", [` — resolved: ${monthKey} collected by payment ${collectedPaymentId}`]),
     })
     .returning(['id', 'customer_id', 'stripe_payment_intent_id']);
-  if (resolved?.length) {
-    await closeScaParkedAlerts(resolved, 'charge_collected', { conn });
+  const mine = await conn('payments')
+    .where({ customer_id: customerId, superseded_by_payment_id: collectedPaymentId })
+    .whereNot({ id: collectedPaymentId })
+    .select('id', 'customer_id', 'stripe_payment_intent_id');
+  const toClose = [...(resolved || []), ...(mine || [])];
+  if (toClose.length) {
+    await closeScaParkedAlerts(toClose, 'charge_collected', { conn });
   }
   return resolved || [];
 }
@@ -158,7 +170,8 @@ const parseMetadata = (raw) => {
 //      Its description is NOT used (Charge now's own row reads "Manual charge — WaveGuard
 //      <tier>") and the month is NEVER inferred from payment_date: the settle path restamps
 //      that to the settlement day, so a late-settling ACH would land in the wrong month.
-// A replay finds no unsuperseded row left and an alert already cleared: a no-op.
+// A replay supersedes nothing new and re-closes the keys of rows this payment already
+// superseded (a no-op when they are closed; the recovery when an earlier close failed).
 async function settleParkedForPaidPayment(payment, { conn = db } = {}) {
   try {
     if (!payment?.customer_id || String(payment.status) !== 'paid') return [];

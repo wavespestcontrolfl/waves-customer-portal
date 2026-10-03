@@ -558,7 +558,7 @@ async function settleParkedAutopayForIntent(paymentIntent) {
     if (!row?.customer_id) return;
     await require('../services/autopay-sca-parked').settleParkedForPaidPayment(row);
   } catch (err) {
-    logger.warn(`[stripe-webhook] could not settle parked-autopay state for PI ${paymentIntent?.id}: ${err.message}`);
+    logger.error(`[stripe-webhook] could not settle parked-autopay state for PI ${paymentIntent?.id} (a redelivery or a second Charge now retries it): ${err.message}`);
   }
 }
 
