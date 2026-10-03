@@ -9021,6 +9021,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       const responsePayload = {
         success: true,
         serviceRecordId: record.id,
+        servicePhotoVisit,
         invoiceId: null,
         invoiceTotal: null,
         completionPhotoUpload: completionPhotoUploadResult,

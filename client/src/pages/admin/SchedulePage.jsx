@@ -17919,10 +17919,16 @@ export function CompletionPanel({
           reconciliationNeeded = true;
         } catch (error) {
           failedPhotos.push(photo);
-          if ([
+          const uploadDefinitelyRejected = [
             error?.code === "visit_identity_changed",
             Number(error?.status) === 403,
-          ].some(Boolean)) {
+          ].some(Boolean);
+          // A transport/server failure can arrive after the attachment row
+          // committed but before the response reached this device. Preserve
+          // the reconciliation obligation until the server confirms it, so
+          // discarding the local copy cannot leave a stale report behind.
+          reconciliationNeeded = [reconciliationNeeded, !uploadDefinitelyRejected].some(Boolean);
+          if (uploadDefinitelyRejected) {
             retryPermanentlyBlocked = true;
             failedPhotos.push(...photos.slice(index + 1));
             break;

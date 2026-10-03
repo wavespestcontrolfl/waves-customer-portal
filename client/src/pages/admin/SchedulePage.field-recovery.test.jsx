@@ -306,6 +306,44 @@ describe('completion photos in an unsubmitted draft', () => {
     expect(reconciles).toHaveLength(0);
   });
 
+  it('preserves reconciliation when an upload may have committed before its response was lost', async () => {
+    await seed();
+    const servicePhotoVisit = {
+      customerId: service.customerId, propertyId: 'property-a', technicianId: 'tech-a',
+      catalogServiceId: 'catalog-pest', serviceType: service.serviceType,
+      scheduledDate: service.scheduledDate, status: 'on_site', revision: 'completion-visit-revision',
+    };
+    const completion = vi.fn().mockResolvedValue({
+      serviceRecordId: 'record-1', servicePhotoVisit, completionPhotoUpload: { failed: 1 },
+    });
+    const view = await mount(completion);
+    fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
+    await act(async () => fireEvent.click(submitButton()));
+    const retry = await screen.findByRole('button', { name: 'Retry photo uploads' });
+
+    const originalFetch = fetch.getMockImplementation();
+    const reconciles = [];
+    fetch.mockImplementation(async (url, options) => {
+      if (url === `/api/tech/services/${service.id}/photos`) throw new Error('response lost after commit');
+      if (url === `/api/tech/services/${service.id}/photos/reconcile`) {
+        reconciles.push(options);
+        return { ok: true, json: async () => ({ ok: true }) };
+      }
+      return originalFetch(url, options);
+    });
+
+    await act(async () => fireEvent.click(retry));
+    expect(await getCompletionDraft(service.id)).toMatchObject({ servicePhotos: photos, reconcileOwed: true });
+
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Discard retained photos' })));
+    expect(await screen.findByRole('button', { name: 'Finish report update' })).toBeTruthy();
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Finish report update' })));
+    expect(reconciles).toHaveLength(1);
+    expect(JSON.parse(reconciles[0].body)).toEqual({ abandonMissingPhotos: true, expectedVisit: servicePhotoVisit });
+    expect(completionResumeOwed(service.id)).toBe(false);
+    view.unmount();
+  });
+
   it('does not discard recovery state while a photo retry is running', async () => {
     await seed();
     const completion = vi.fn().mockResolvedValue({ serviceRecordId: 'record-1', completionPhotoUpload: { failed: 1 } });
