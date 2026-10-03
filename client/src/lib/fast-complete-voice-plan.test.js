@@ -321,3 +321,10 @@ test('a product\'s standard way the tech picked themselves is kept; the differen
   const untouched = plan({ rows: [row('b', { catalogMethod: 'bait_placement' })], products: [product('b', { method: 'granular_broadcast' })] });
   expect(untouched.patches.b).toMatchObject({ methodInput: 'granular_broadcast' });
 });
+
+test('a spray row whose way the tech picked (stored, sticky) is not moved by a dictated How', () => {
+  const picked = [row('b', { catalogMethod: 'spot_treatment', methodInput: 'spot_treatment', methodPicked: true })];
+  const result = plan({ rows: picked, products: [product('b', { method: 'perimeter_spray', heard: 'b around the perimeter' })], visit: { ...NO_VISIT, method: 'perimeter_spray', heard: 'perimeter' } });
+  expect(result.patches).toEqual({});
+  expect(texts(result)).toContain('You picked spot treatment; heard perimeter spray for Product b.');
+});

@@ -770,6 +770,9 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
           <ProductsSection
             products={products}
             heardLines={<ProductHeardLines voice={voice} rows={rows} />}
+            // With voice fill on, a way the tech picks for a product is stored as
+            // picked (never "follows How"), so a dictated How cannot move it.
+            stickyPicks={voiceFillEnabled === true}
             method={form.method}
             editAmounts={editAmounts}
             locked={formLocked}
