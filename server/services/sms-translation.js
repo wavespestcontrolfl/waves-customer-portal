@@ -315,36 +315,47 @@ const EMAIL_RE = /[^\s<>"'@]+@[^\s<>"'@]+\.(?:\p{L}{2,}|xn--[a-z0-9-]+)/giu;
 const NUMBER_RE = /\d+(?:[.,:]\d+)*/g;
 // Chinese / Japanese / Korean write the hour with a suffix: 14点, 14時, 14시
 // (Vietnamese "9 giờ", Haitian Creole "9 è" / "9è", Russian "9 часов")
-const HOUR_WORD_RE = /^\s*(?:h\b|horas?\b|heures?\b|uhr\b|ore\b|gi\u1EDD(?!\p{L})|\u00E8(?!\p{L})|\u0447\u0430\u0441(?:\u0430|\u043E\u0432)?(?!\p{L})|[時시点點])/iu;
+const HOUR_WORD_RE = /^\s*(?:h\b|horas?\b|heures?\b|uhr\b|gi\u1EDD(?!\p{L})|\u00E8(?!\p{L})|\u0447\u0430\u0441(?:\u0430|\u043E\u0432)?(?!\p{L})|[時시点點])/iu;
 // a clock marker only: "2 horas" / "2 heures" are durations, not 2 o'clock
 const CLOCK_MARK_RE = /^\s*(?:h\b|uhr\b|[時시点點])/iu;
 const PM_RE = /^\s*(?:pm\b|p\.\s?m\.)/i;
 const AM_RE = /^\s*(?:am\b|a\.\s?m\.)/i;
 // a customer writes the half of the day their way: "2 de la tarde", "2 da tarde", "2 h du soir"
-// (an hour word may sit between the number and the half: "2 h du soir", "9 giờ sáng", "9 è nan maten", "2 часа дня")
-// Words that name NIGHT without saying which side of midnight ("đêm", "ночи", "nachts") are left out: such a
-// time keeps no half on its side and holds the trial. Vietnamese "trưa" (midday) is read by its hour instead
-// (MIDDAY_RE): "11 giờ trưa" is 11 AM, "12 giờ trưa" and "1 giờ trưa" are PM.
-const RU_HOUR = '\\u0447\\u0430\\u0441(?:\\u0430|\\u043E\\u0432)?';
-const HOUR_GAP = `(?:(?:h|horas?|heures?|uhr|ore|gi\\u1EDD|\\u00E8|${RU_HOUR})\\s+)?`;
+// Listed for the languages customers have texted in or the made-up test covered (Spanish, Portuguese, French,
+// Vietnamese, Haitian Creole, Russian); any other language's day-part word reads no half and holds the trial.
+// Words that name NIGHT without saying which side of midnight ("đêm", "ночи") are left out for the same reason.
+// An hour word may sit between the number and the half. A word that is only ever a clock mark ("h", Vietnamese
+// "giờ", Creole "è") may always; one that is also a DURATION ("2 horas", "2 heures", "2 часа" = 2 hours) only
+// when the number follows a clock preposition ("às 9 horas da manhã", "à 8 heures du soir", "в 2 часа дня"), so
+// "trabalham 2 horas da noite" stays a duration. Russian "дня" is also "days" ("через 2 дня"): it names the
+// afternoon only in that form.
 const END = '(?![\\p{L}\\p{N}])';
-// Russian "дня" (afternoon) is also "days" ("через 2 дня" = in 2 days): it names the half only after the hour
-// word ("2 часа дня").
-const LOCAL_PM_RE = new RegExp(`^\\s*(?:${RU_HOUR}\\s+\\u0434\\u043D\\u044F|${HOUR_GAP}(?:${[
+const CLOCK_GAP = '(?:(?:h|gi\\u1EDD|\\u00E8)\\s+)?';
+const DURATION_GAP = '(?:horas?|heures?|\\u0447\\u0430\\u0441(?:\\u0430|\\u043E\\u0432)?)\\s+';
+const CLOCK_PREP_RE = /(?<![\p{L}\p{N}])(?:a\s+las?|[aà]s|à|в|к)\s*$/iu;
+const PM_WORDS = [
   'de\\s+la\\s+(?:tarde|noche)', 'da\\s+(?:tarde|noite)', "de\\s+l['\\u2019]apr[e\\u00E8]s-midi", 'du\\s+soir',
   'in\\s+the\\s+(?:afternoon|evening)', 'at\\s+night',
-  // Vietnamese, Haitian Creole, Russian, Italian, German, Tagalog
   'chi\\u1EC1u', 't\\u1ED1i',
   'nan\\s+apr[e\\u00E8]midi', 'apr[e\\u00E8]midi', 'nan\\s+asw[e\\u00E8]', 'di\\s?swa',
   '\\u0432\\u0435\\u0447\\u0435\\u0440\\u0430',
-  'del\\s+pomeriggio', 'di\\s+sera', 'nachmittags', 'abends', 'ng\\s+hapon', 'ng\\s+gabi',
-].join('|')}))${END}`, 'iu');
-const LOCAL_AM_RE = new RegExp(`^\\s*${HOUR_GAP}(?:${[
+].join('|');
+const AM_WORDS = [
   'de\\s+la\\s+(?:ma[n\\u00F1]ana|madrugada)', 'da\\s+(?:manh[a\\u00E3]|madrugada)', 'du\\s+matin', 'in\\s+the\\s+morning',
   's\\u00E1ng', 'nan\\s+maten', 'di\\s?maten', '\\u0443\\u0442\\u0440\\u0430',
-  'di\\s+mattina', 'del\\s+mattino', 'morgens', 'vormittags', 'ng\\s+umaga',
-].join('|')})${END}`, 'iu');
-const MIDDAY_RE = new RegExp(`^\\s*${HOUR_GAP}tr\\u01B0a${END}`, 'iu');
+].join('|');
+const LOCAL_PM_RE = new RegExp(`^\\s*${CLOCK_GAP}(?:${PM_WORDS})${END}`, 'iu');
+const LOCAL_AM_RE = new RegExp(`^\\s*${CLOCK_GAP}(?:${AM_WORDS})${END}`, 'iu');
+const HOURS_PM_RE = new RegExp(`^\\s*${DURATION_GAP}(?:${PM_WORDS}|\\u0434\\u043D\\u044F)${END}`, 'iu');
+const HOURS_AM_RE = new RegExp(`^\\s*${DURATION_GAP}(?:${AM_WORDS})${END}`, 'iu');
+function localHalf(before, after) {
+  if (LOCAL_PM_RE.test(after)) return 'pm';
+  if (LOCAL_AM_RE.test(after)) return 'am';
+  if (!CLOCK_PREP_RE.test(before)) return null;
+  return HOURS_PM_RE.test(after) ? 'pm' : (HOURS_AM_RE.test(after) ? 'am' : null);
+}
+// Vietnamese "trưa" (midday) is read by its hour: "11 giờ trưa" is 11 AM, "12 giờ trưa" and "1 giờ trưa" are PM.
+const MIDDAY_RE = new RegExp(`^\\s*${CLOCK_GAP}tr\\u01B0a${END}`, 'iu');
 function middayHalf(raw, after) {
   if (!MIDDAY_RE.test(after)) return null;
   const hour = Number(raw.split(':')[0]);
@@ -434,9 +445,10 @@ function numberValues(text, { strictTimes = false } = {}) {
     // ("Oct"): it is compared as a month name through the English read-back (calendarTokens), not as a figure
     if (/^\s*[月월]/u.test(after)) continue;
     const before = str.slice(0, m.index);
+    const local = localHalf(before, after);
     const flags = {
       pm: PM_RE.test(after),
-      half: PM_RE.test(after) || LOCAL_PM_RE.test(after) || PREFIX_PM_RE.test(before) ? 'pm' : (AM_RE.test(after) || LOCAL_AM_RE.test(after) || PREFIX_AM_RE.test(before) ? 'am' : middayHalf(raw, after)),
+      half: PM_RE.test(after) || local === 'pm' || PREFIX_PM_RE.test(before) ? 'pm' : (AM_RE.test(after) || local === 'am' || PREFIX_AM_RE.test(before) ? 'am' : middayHalf(raw, after)),
       time: raw.includes(':') || HOUR_WORD_RE.test(after),
       // a clock time only ("14:00", "14 h", "14時"); "14 horas" is a duration and never stands in for "2 PM"
       clock: raw.includes(':') || CLOCK_MARK_RE.test(after),
@@ -732,8 +744,16 @@ function durationFaults(englishReply, backTranslation) {
 // Capitalized names only ("march" and "sun" are words); "May" only beside a number.
 const WEEKDAYS = ['Monday|Mon', 'Tuesday|Tues|Tue', 'Wednesday|Wed', 'Thursday|Thurs|Thur|Thu', 'Friday|Fri', 'Saturday|Sat', 'Sunday|Sun'];
 const MONTHS = ['January|Jan', 'February|Feb', 'March|Mar', 'April|Apr', 'May', 'June|Jun', 'July|Jul', 'August|Aug', 'September|Sept|Sep', 'October|Oct', 'November|Nov', 'December|Dec'];
+const ORDINAL_WORDS = ['first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth', 'ninth', 'tenth', 'eleventh', 'twelfth', 'thirteenth', 'fourteenth', 'fifteenth', 'sixteenth', 'seventeenth', 'eighteenth', 'nineteenth', 'twentieth'];
+// a read-back may word the day ("October first", "the twenty-first of October"): read as its number
+function ordinalDigits(text) {
+  return text
+    .replace(/\b(twenty|thirty)[-\s](first|second|third|fourth|fifth|sixth|seventh|eighth|ninth)\b/gi, (m, tens, unit) => String((tens.toLowerCase() === 'twenty' ? 20 : 30) + ORDINAL_WORDS.indexOf(unit.toLowerCase()) + 1))
+    .replace(/\bthirtieth\b/gi, '30')
+    .replace(new RegExp(`\\b(?:${ORDINAL_WORDS.join('|')})\\b`, 'gi'), (w) => String(ORDINAL_WORDS.indexOf(w.toLowerCase()) + 1));
+}
 function calendarTokens(text) {
-  const str = asciiDigits(text);
+  const str = ordinalDigits(asciiDigits(text));
   const out = [];
   WEEKDAYS.forEach((names, i) => { for (const _ of str.matchAll(new RegExp(`\\b(?:${names})\\b\\.?`, 'g'))) out.push(`day:${i}`); });
   MONTHS.forEach((names, i) => {

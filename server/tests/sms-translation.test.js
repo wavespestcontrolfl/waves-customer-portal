@@ -86,7 +86,7 @@ beforeEach(() => {
 
 describe('tokenParity', () => {
   // From the made-up test of 2026-10-03 (24 texts, 4 held): three of the holds were gaps in these checks.
-  test('a customer\'s half of the day is read in more languages (Vietnamese, Russian, Haitian Creole), and still cannot flip', () => {
+  test('a customer\'s half of the day is read in Vietnamese, Russian and Haitian Creole, and still cannot flip', () => {
     const loose = (en, tr) => tokenParity(en, tr, { strictTimes: false });
     expect(loose('I would like to reschedule to Saturday at 9 AM, is that possible?', 'Tôi muốn đổi lịch hẹn sang thứ Bảy lúc 9 giờ sáng được không?').ok).toBe(true);
     expect(loose('Can you come at 2 PM?', 'Bạn đến lúc 2 giờ chiều được không?').ok).toBe(true);
@@ -96,6 +96,10 @@ describe('tokenParity', () => {
     // the usual hour word may sit between the number and the half (Portuguese, French)
     expect(loose('Come at 9 AM.', 'Venha às 9 horas da manhã.').ok).toBe(true);
     expect(loose('Come at 8 PM.', 'Venez à 8 heures du soir.').ok).toBe(true);
+    // ...but only after a clock preposition: without one, "2 horas" is a duration and reads no half
+    expect(loose('Do you work 2 hours in the evening?', 'Trabalham 2 horas da noite?').ok).toBe(true);
+    // a language not listed reads no half, so its clock time holds rather than passing unread
+    expect(loose('Come at 12 AM', 'Pumunta ng 12 ng gabi')).toMatchObject({ ok: false, order: ['12 am'] });
     expect(loose('Come at 9 AM', 'Приходите в 9 утра').ok).toBe(true);
     expect(loose('Come at 9 AM', 'Vini a 9è nan maten').ok).toBe(true);
     expect(loose('Come at 3 PM', 'Vini a 3 è nan aprèmidi').ok).toBe(true);
@@ -569,6 +573,12 @@ describe('runTranslationTrial', () => {
     scriptModels({ inbound: SPANISH_INBOUND, translated: 'Veo un pago el 1 de octubre.', back: 'I see a payment on October the 1st.' });
     mockDraft.mockResolvedValueOnce({ parsed: { reply }, converged: true, passes: 1 });
     expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's3' })).not.toMatchObject({ hold_reason: 'date_name_changed_in_translation' });
+    // a worded day in the read-back is the same day
+    for (const [id, back] of [['s4', 'I see a payment on October first.'], ['s5', 'I see a payment on the first of October.']]) {
+      scriptModels({ inbound: SPANISH_INBOUND, translated: 'Veo un pago el 1 de octubre.', back });
+      mockDraft.mockResolvedValueOnce({ parsed: { reply }, converged: true, passes: 1 });
+      expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: id })).not.toMatchObject({ hold_reason: 'date_name_changed_in_translation' });
+    }
     // the faithful one passes the date check, day before or after the month
     scriptModels({ inbound: SPANISH_INBOUND, translated: 'Veo un pago el 1 de octubre.', back: 'I see a payment on the 1st of October.' });
     mockDraft.mockResolvedValueOnce({ parsed: { reply }, converged: true, passes: 1 });
