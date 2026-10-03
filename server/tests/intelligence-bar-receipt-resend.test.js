@@ -57,6 +57,8 @@ function fakeDb(tables) {
         if (cond && typeof cond === 'object') rows = rows.filter((r) => Object.entries(cond).every(([k, v]) => r[k] === v));
         return chain;
       },
+      whereIn: (column, values) => { rows = rows.filter((r) => values.includes(r[column])); return chain; },
+      whereNot: (column, value) => { rows = rows.filter((r) => r[column] !== value); return chain; },
       first: async () => rows[0],
     };
     return chain;
@@ -74,6 +76,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   db.mockImplementation(fakeDb({}));
   resolveReceiptEmailRecipient.mockResolvedValue({ ok: true, recipient: { email: 'Pat@Example.com' }, customer: CUSTOMER });
+  Invoice.receiptAmountFor.mockResolvedValue('129.00');
   issuedCloseoutTarget.mockResolvedValue(null);
   sendInvoiceReceipt.mockResolvedValue({ status: 200, body: { ok: true, email: { ok: true }, sms: { ok: true } }, closeout: null , delivery: { email: 'sent', sms: 'sent' } });
 });
@@ -177,7 +180,11 @@ test('confirmed: sends through the shared writer with the pinned channels, memo 
   const result = await confirm({ via: 'both', memo: '  Thanks for your business  ' });
   expect(sendInvoiceReceipt).toHaveBeenCalledTimes(1);
   // An unknown provider outcome must park a claimed automatic job, not re-queue it.
-  expect(sendInvoiceReceipt).toHaveBeenCalledWith(INV, { memo: 'Thanks for your business', via: 'both', actorTechnicianId: 'admin-1', sawUnsent: true, holdUnknownOutcome: true });
+  // The writer also gets the approved version and a way to re-derive it: its own check, under its claim.
+  expect(sendInvoiceReceipt).toHaveBeenCalledWith(INV, {
+    memo: 'Thanks for your business', via: 'both', actorTechnicianId: 'admin-1', sawUnsent: true, holdUnknownOutcome: true,
+    expect: { approved: expect.objectContaining({ invoice_id: INV, receipt_state: 'unsent' }), rederive: expect.any(Function) },
+  });
   // No linked visit to close: the card and result say nothing about one.
   expect(result.visit_closeout).toBeUndefined();
   expect(result).toEqual(expect.objectContaining({ success: true, email: { status: 'sent' }, text: { status: 'sent' } }));
@@ -315,7 +322,7 @@ describe('the visit closeout the shared writer runs ahead of the legs', () => {
     const contract = buildContract({ toolName: 'resend_receipt', params: { invoice_id: INV }, preview });
     expect(contract.effects.map((e) => e.label).join('\n')).toMatch(/Also completes the linked visit — Pest Control on 2026-09-30/);
     issuedCloseoutTarget.mockResolvedValue({ ...VISIT, resuming: true });
-    expect((await run({})).visit_closeout).toMatch(/finishing a closeout already started/);
+    expect((await run({})).visit_closeout).toMatch(/Also finishes a closeout already started for the linked visit/);
   });
 
   test('drift: the visit appearing, changing or disappearing after the card refuses and sends nothing', async () => {
@@ -364,7 +371,97 @@ describe('the visit closeout the shared writer runs ahead of the legs', () => {
     const out = await confirm({ via: 'email' });
     expect(out.outcome_unknown).toBe(true);
     expect(out.visit_closeout.status).toBe('completed');
-    expect(out.email.detail).toMatch(/held so it cannot send it again/);
+    // The queue's own disposition decides what is said about the automatic job — never the unknown leg alone.
+    expect(out.email.detail).not.toMatch(/retried|held/);
+  });
+});
+
+describe('the writer\'s final check: the tool hands it the approved version and a re-derivation that uses the preview\'s own functions', () => {
+  const rederiveFor = async (input = {}) => {
+    const preview = await run(input);
+    await run({ ...input, confirmed: true, _verified_receipt_version: preview._version }, { technicianId: 'admin-1' });
+    return { preview, expectArg: sendInvoiceReceipt.mock.calls.at(-1)[1].expect };
+  };
+
+  test('re-deriving unchanged state returns exactly the approved version', async () => {
+    const { preview, expectArg } = await rederiveFor({});
+    expect(expectArg.approved).toEqual(preview._version);
+    expect(await expectArg.rederive({ ownClaimToken: null })).toEqual(preview._version);
+  });
+
+  test.each([
+    ['a different recipient', () => resolveReceiptEmailRecipient.mockResolvedValue({ ok: true, recipient: { email: 'other@example.com' }, customer: CUSTOMER })],
+    ['a different amount', () => Invoice.receiptAmountFor.mockResolvedValue('99.00')],
+    ['a different linked visit', () => issuedCloseoutTarget.mockResolvedValue({ visitId: '00000000-0000-0000-0000-00000000f0a9', serviceType: 'Pest Control', date: '2026-09-30', resuming: false })],
+    ['a receipt stamped by a resend that landed first', () => db.mockImplementation(fakeDb({ invoices: [{ ...PAID, receipt_sent_at: SENT_AT }] }))],
+  ])('%s after approval re-derives to something else (the writer then refuses)', async (_label, mutate) => {
+    const { preview, expectArg } = await rederiveFor({});
+    mutate();
+    expect(await expectArg.rederive({ ownClaimToken: null })).not.toEqual(preview._version);
+  });
+
+  test('a blocker at re-check time is null (the writer refuses on it)', async () => {
+    const { expectArg } = await rederiveFor({});
+    db.mockImplementation(fakeDb({ invoices: [{ ...PAID, status: 'sent' }] }));
+    expect(await expectArg.rederive({ ownClaimToken: null })).toBeNull();
+  });
+
+  test('the writer\'s own claim row is not a "running automatic receipt": only another holder blocks the re-check', async () => {
+    const { preview, expectArg } = await rederiveFor({});
+    db.mockImplementation(fakeDb({ receipt_delivery_jobs: [{ id: 'job-1', invoice_id: INV, status: 'running', locked_by: 'operator:me' }] }));
+    expect(await expectArg.rederive({ ownClaimToken: 'operator:me' })).toEqual(preview._version);
+    expect(await expectArg.rederive({ ownClaimToken: 'operator:other' })).toBeNull();
+    expect(await expectArg.rederive({ ownClaimToken: null })).toBeNull();
+  });
+
+  test('the card discloses a queued automatic receipt (not pinned: the claim handles it)', async () => {
+    db.mockImplementation(fakeDb({ receipt_delivery_jobs: [{ id: 'job-1', invoice_id: INV, status: 'queued' }] }));
+    const preview = await run({});
+    expect(preview.automatic_receipt).toMatch(/goes back in the queue and will try again on its own/);
+    expect(JSON.stringify(preview._version)).not.toMatch(/job|queued/);
+    db.mockImplementation(fakeDb({}));
+    expect((await run({})).automatic_receipt).toBeUndefined();
+  });
+});
+
+describe('result wording comes only from what the writer reported about the automatic receipt job', () => {
+  const sent = { status: 200, body: { ok: true, email: { ok: true }, sms: { ok: true } }, closeout: null, delivery: { email: 'sent', sms: 'sent' } };
+  const emailFailed = { status: 200, body: { ok: false, email: { ok: false, error: 'PDF generation failed' }, sms: { ok: false, skipped: true } }, closeout: null, delivery: { email: 'not_sent', sms: 'not_requested' } };
+  const emailFailedTextSent = { status: 200, body: { ok: true, email: { ok: false, error: 'PDF generation failed' }, sms: { ok: true } }, closeout: null, delivery: { email: 'not_sent', sms: 'sent' } };
+  const unknownEmail = { status: 200, body: { ok: false, email: { ok: false, error: 'provider response lost' }, sms: { ok: false, skipped: true } }, closeout: null, delivery: { email: 'unknown', sms: 'not_requested' } };
+
+  test.each([
+    ['definite email failure, job back in the queue: says it will be retried automatically — never "not retried"', emailFailed, 'returned_to_queue', /back in the queue and will try again on its own/, /NOT retried|nothing else will send/i],
+    ['text sent, email failed, job back in the queue: says the email will go automatically', emailFailedTextSent, 'returned_to_queue', /back in the queue and will try again on its own/, /NOT re-sent|nothing else will send/i],
+    ['email failed and no automatic job exists: says nothing else will send it', emailFailed, 'removed', /No automatic receipt is waiting in the queue, so nothing else will send this receipt/, /back in the queue/],
+    ['email failed and the job was already finished: same', emailFailed, 'none', /nothing else will send this receipt/, /back in the queue/],
+    ['unknown outcome, job held: says the queue will not send it again and to check first', unknownEmail, 'held_for_reconciliation', /held, not re-queued: the queue will not send it again\. Check whether the customer got the receipt/, /back in the queue/],
+    ['job could not be settled: says the queue recovers it and may email again', emailFailed, 'release_failed', /could not be settled here; the queue recovers it on its own and may email the customer the receipt again/, /nothing else will send/],
+    ['everything sent and the job closed: says nothing about the queue', sent, 'completed', /^The receipt was sent\.$/, /queue/],
+    ['everything sent but a job went back to the queue (a text-only resend): still says it will email on its own', sent, 'returned_to_queue', /The receipt was sent\. The automatic receipt .* back in the queue/, /nothing else/],
+  ])('%s', async (_label, writerResult, queue, mustMatch, mustNotMatch) => {
+    sendInvoiceReceipt.mockResolvedValue({ ...writerResult, queue });
+    const out = await confirm({});
+    expect(out.automatic_receipt).toBe(queue);
+    expect(out.note).toMatch(mustMatch);
+    expect(out.note).not.toMatch(mustNotMatch);
+  });
+
+  test('no result sentence promises "not retried" / "not re-sent" unconditionally', async () => {
+    for (const queue of ['returned_to_queue', 'removed', 'none', 'completed', 'held_for_reconciliation', 'release_failed', undefined]) {
+      for (const r of [sent, emailFailed, emailFailedTextSent, unknownEmail]) {
+        sendInvoiceReceipt.mockResolvedValue({ ...r, queue });
+        const out = await confirm({});
+        expect(JSON.stringify(out)).not.toMatch(/NOT retried|NOT re-sent|never retried|it is not retried/i);
+      }
+    }
+  });
+
+  test('the writer refusing at its own final check reports changed state and nothing sent', async () => {
+    sendInvoiceReceipt.mockResolvedValue({ status: 409, body: { error: 'changed after it was approved', code: 'receipt_approval_changed' }, queue: 'returned_to_queue' });
+    const out = await confirm({});
+    expect(out).toEqual(expect.objectContaining({ code: 'receipt_approval_changed', preview_changed: true }));
+    expect(out.error).toMatch(/Nothing was sent/);
   });
 });
 

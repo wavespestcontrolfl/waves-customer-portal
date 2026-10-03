@@ -328,6 +328,38 @@ postgres('operator receipt claim on PostgreSQL', () => {
     expect(await claimReceiptJobForOperatorSend(drainHeld)).toEqual({ inFlight: true, byOperator: false });
   });
 
+  describe('releaseOperatorReceiptClaim reports what became of the automatic job (the IB tool words its result from this)', () => {
+    test('every disposition, on real rows', async () => {
+      // A claim that holds no job (the job already finished): nothing to settle.
+      const finished = await seedJob({ status: 'completed' });
+      expect(await releaseOperatorReceiptClaim(await claimReceiptJobForOperatorSend(finished), { emailDelivered: false })).toBe('none');
+      // A delivered email closes the job.
+      const delivered = await seedJob();
+      expect(await releaseOperatorReceiptClaim(await claimReceiptJobForOperatorSend(delivered), { emailDelivered: true })).toBe('completed');
+      // A claim-created row goes away.
+      expect(await releaseOperatorReceiptClaim(await claimReceiptJobForOperatorSend(randomUUID()), { emailDelivered: false })).toBe('removed');
+      // A queued job goes back to the queue — and WILL be delivered by the drain.
+      const queued = await seedJob({ status: 'retry_scheduled' });
+      expect(await releaseOperatorReceiptClaim(await claimReceiptJobForOperatorSend(queued), { emailDelivered: false })).toBe('returned_to_queue');
+      expect((await claimDueReceiptDeliveryJobs({ limit: 50 })).map((j) => j.invoice_id)).toContain(queued);
+      // An enqueue that took over the claim-created row is queued again.
+      const takenOver = randomUUID();
+      const claim = await claimReceiptJobForOperatorSend(takenOver);
+      await enqueueReceiptDelivery({ invoiceId: takenOver, source: 'ib_closeout_repair' });
+      expect(await releaseOperatorReceiptClaim(claim, { emailDelivered: false })).toBe('returned_to_queue');
+      // Unknown outcome: held.
+      const held = await seedJob();
+      expect(await releaseOperatorReceiptClaim(await claimReceiptJobForOperatorSend(held), { emailDelivered: false, holdForReconciliation: true })).toBe('held_for_reconciliation');
+    });
+
+    test('a release that touches no row (the claim was re-owned) is not reported as settled', async () => {
+      const invoiceId = await seedJob();
+      const claim = await claimReceiptJobForOperatorSend(invoiceId);
+      await mockPg('receipt_delivery_jobs').where({ id: claim.id }).update({ locked_by: 'someone-else' });
+      expect(await releaseOperatorReceiptClaim(claim, { emailDelivered: false })).toBe('release_failed');
+    });
+  });
+
   describe('holdForReconciliation — an unknown provider outcome never goes back to the drain', () => {
     test('a queued job the operator claimed is parked as failed, not re-queued; the drain and a new claim leave it alone', async () => {
       const invoiceId = await seedJob({ status: 'retry_scheduled' });

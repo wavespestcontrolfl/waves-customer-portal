@@ -14,9 +14,19 @@
  * provider outcome is unknown and nothing was recorded delivered, the claimed
  * automatic receipt job is parked for reconciliation instead of handed back to
  * the drain, which would send again (see releaseOperatorReceiptClaim).
- * Besides `{status, body}` the result carries `closeout` (what the visit
- * closeout ahead of the legs reported) and `delivery` (per-leg certainty, see
- * smsDelivery / emailDelivery) — never part of the route's body.
+ * `expect` (the IB tool; the route passes none): `{ approved, rederive }` — the
+ * version the operator approved and a function that re-derives it. The writer
+ * owns the final check: once it holds the claim (so no other operator send or
+ * the drain can run on this invoice) and before the closeout or either leg, it
+ * re-derives and refuses with 409 `receipt_approval_changed` on ANY difference
+ * (receipt_sent_at, recipients, amount, linked visit, channels): no effect, the
+ * claim handed back untouched. `rederive({ownClaimToken})` must ignore the
+ * caller's own claim row.
+ * Besides `{status, body}` the result carries what the caller must not guess:
+ * `closeout` (what the visit closeout ahead of the legs reported), `delivery`
+ * (per-leg certainty, see smsDelivery / emailDelivery) and `queue` (what became
+ * of the automatic receipt job, from releaseOperatorReceiptClaim) — never part
+ * of the route's body.
  */
 const db = require('../models/db');
 const logger = require('./logger');
@@ -40,7 +50,7 @@ function smsDelivery(result, err) {
 }
 const emailDelivery = (result) => (result?.ok ? 'sent' : result?.deliveryOutcome === 'uncertain' ? 'unknown' : 'not_sent');
 
-async function sendInvoiceReceipt(invoiceId, { memo, via = 'both', actorTechnicianId = null, sawUnsent, holdUnknownOutcome = false } = {}) {
+async function sendInvoiceReceipt(invoiceId, { memo, via = 'both', actorTechnicianId = null, sawUnsent, holdUnknownOutcome = false, expect = null } = {}) {
   const id = invoiceId;
   if (!['email', 'sms', 'both'].includes(via)) {
     return { status: 400, body: { error: "via must be 'email', 'sms', or 'both'" } };
@@ -83,57 +93,81 @@ async function sendInvoiceReceipt(invoiceId, { memo, via = 'both', actorTechnici
   let smsResult = { ok: false, skipped: true };
   let smsThrown = null;
   let closeout = null;
+  let refused = null;
+  let queue = 'none';
   const delivery = { email: 'not_requested', sms: 'not_requested' };
 
   try {
-    // Invoice issued ⇒ visit completed (owner ruling 2026-09-07, dark behind
-    // GATE_INVOICE_ISSUED_CLOSES_VISIT): the operator's "resend receipt" is
-    // the reachable retry for a payment-triggered closeout that did not
-    // finish (pre-push P1). Runs once here, ahead of BOTH legs, so an
-    // email-only resend retries too; a completed visit refuses quietly.
-    {
-      const { closeOutVisitForIssuedInvoice } = require('./invoice-issued-closeout');
-      closeout = await closeOutVisitForIssuedInvoice({ invoiceId: id, trigger: 'paid', actorTechnicianId });
-    }
-
-    if (via === 'email' || via === 'both') {
-      emailResult = await sendReceiptEmail(id, { memo: trimmedMemo }).catch((err) => ({ ok: false, error: err.message }));
-      delivery.email = emailDelivery(emailResult);
-      if (emailResult.ok) await recordOperatorReceiptDelivered(claim, 'email');
-    }
-    if (via === 'sms' || via === 'both') {
-      // Manual operator resend — pass force:true to override the auto-send
-      // idempotency guard (otherwise re-clicking SEND RECEIPT would no-op
-      // for invoices already auto-receipted by the Stripe webhook).
-      // recordActivity:false because this function writes its own activity_log
-      // row below with the memo and channel mix.
+    // The final check, under the claim and ahead of every effect.
+    if (expect) {
+      let current = null;
       try {
-        const r = await InvoiceService.sendReceipt(id, { force: true, recordActivity: false, hasEmailLeg: via === 'both', operatorInitiated: true });
-        smsResult = r?.sent ? { ok: true } : { ok: false, error: r?.reason || r?.code || 'not-sent' };
+        current = await expect.rederive({ ownClaimToken: claim.token || null });
       } catch (err) {
-        smsResult = { ok: false, error: err.message };
-        smsThrown = err;
+        logger.warn(`[invoice-receipt-resend] approved-state re-check failed for ${id}: ${err.message}`);
       }
-      delivery.sms = smsDelivery(smsResult.ok ? { sent: true } : null, smsThrown);
-      if (smsResult.ok) await recordOperatorReceiptDelivered(claim, 'sms');
+      if (!current || JSON.stringify(current) !== JSON.stringify(expect.approved)) {
+        refused = {
+          status: 409,
+          body: {
+            error: 'What this receipt would do changed after it was approved (or could not be re-checked) — nothing was sent.',
+            code: 'receipt_approval_changed',
+          },
+        };
+      }
     }
+    if (!refused) {
+      // Invoice issued ⇒ visit completed (owner ruling 2026-09-07, dark behind
+      // GATE_INVOICE_ISSUED_CLOSES_VISIT): the operator's "resend receipt" is
+      // the reachable retry for a payment-triggered closeout that did not
+      // finish (pre-push P1). Runs once here, ahead of BOTH legs, so an
+      // email-only resend retries too; a completed visit refuses quietly.
+      {
+        const { closeOutVisitForIssuedInvoice } = require('./invoice-issued-closeout');
+        closeout = await closeOutVisitForIssuedInvoice({ invoiceId: id, trigger: 'paid', actorTechnicianId });
+      }
 
-    // Stamp receipt metadata whenever at least one channel succeeded. If
-    // both failed, leave receipt_sent_at NULL so the operator can retry.
-    if (emailResult.ok || smsResult.ok) {
-      await db('invoices').where({ id }).update({
-        receipt_sent_at: db.fn.now(),
-        receipt_memo: trimmedMemo || null,
-      });
+      if (via === 'email' || via === 'both') {
+        emailResult = await sendReceiptEmail(id, { memo: trimmedMemo }).catch((err) => ({ ok: false, error: err.message }));
+        delivery.email = emailDelivery(emailResult);
+        if (emailResult.ok) await recordOperatorReceiptDelivered(claim, 'email');
+      }
+      if (via === 'sms' || via === 'both') {
+        // Manual operator resend — pass force:true to override the auto-send
+        // idempotency guard (otherwise re-clicking SEND RECEIPT would no-op
+        // for invoices already auto-receipted by the Stripe webhook).
+        // recordActivity:false because this function writes its own activity_log
+        // row below with the memo and channel mix.
+        try {
+          const r = await InvoiceService.sendReceipt(id, { force: true, recordActivity: false, hasEmailLeg: via === 'both', operatorInitiated: true });
+          smsResult = r?.sent ? { ok: true } : { ok: false, error: r?.reason || r?.code || 'not-sent' };
+        } catch (err) {
+          smsResult = { ok: false, error: err.message };
+          smsThrown = err;
+        }
+        delivery.sms = smsDelivery(smsResult.ok ? { sent: true } : null, smsThrown);
+        if (smsResult.ok) await recordOperatorReceiptDelivered(claim, 'sms');
+      }
+
+      // Stamp receipt metadata whenever at least one channel succeeded. If
+      // both failed, leave receipt_sent_at NULL so the operator can retry.
+      if (emailResult.ok || smsResult.ok) {
+        await db('invoices').where({ id }).update({
+          receipt_sent_at: db.fn.now(),
+          receipt_memo: trimmedMemo || null,
+        });
+      }
     }
   } finally {
     const holdForReconciliation = holdUnknownOutcome && emailResult.ok !== true
       && (delivery.email === 'unknown' || delivery.sms === 'unknown');
-    await releaseOperatorReceiptClaim(claim, {
+    queue = await releaseOperatorReceiptClaim(claim, {
       emailDelivered: emailResult.ok === true, smsDelivered: smsResult.ok === true, smsResult, emailResult,
       ...(holdForReconciliation ? { holdForReconciliation } : {}),
     });
   }
+
+  if (refused) return { ...refused, queue };
 
   if (emailResult.ok || smsResult.ok) {
     await db('activity_log').insert({
@@ -156,6 +190,7 @@ async function sendInvoiceReceipt(invoiceId, { memo, via = 'both', actorTechnici
     },
     closeout,
     delivery,
+    queue,
   };
 }
 

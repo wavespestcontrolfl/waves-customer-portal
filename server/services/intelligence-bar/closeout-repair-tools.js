@@ -178,12 +178,14 @@ function maskPhone(phone) {
 // resend (the resend_receipt tool, the Invoices "Resend receipt" button's own
 // rules): an already-sent receipt and a finished or queued job are fine — only
 // a job being delivered right now blocks.
-async function receiptInvoiceOrBlocker(invoiceId, knex, { resend = false } = {}) {
+async function receiptInvoiceOrBlocker(invoiceId, knex, { resend = false, ownClaimToken = null } = {}) {
   const invoice = await knex('invoices').where({ id: invoiceId }).first();
   if (!invoice) return { blocker: 'invoice not found' };
   if (String(invoice.status || '').toLowerCase() !== 'paid') return { blocker: `invoice is ${invoice.status}, not paid` };
   if (resend) {
-    const running = await knex('receipt_delivery_jobs').where({ invoice_id: invoiceId, status: 'running' }).first('id');
+    // ownClaimToken: the resend writer's re-check runs while it holds its own claim (a running row).
+    const runningJobs = knex('receipt_delivery_jobs').where({ invoice_id: invoiceId, status: 'running' });
+    const running = await (ownClaimToken ? runningJobs.whereNot('locked_by', ownClaimToken) : runningJobs).first('id');
     if (running) return { blocker: 'the automatic receipt for this invoice is being delivered right now — try again in a minute' };
   } else {
     if (invoice.receipt_sent_at) return { blocker: 'receipt already sent' };
@@ -227,8 +229,8 @@ async function receiptMayReachApp(customerId, emailAvailable, knex) {
   return (billingChannelsPayload(prefs || {}, { emailAvailable }).paymentConfirmationChannels || []).includes('push');
 }
 
-async function receiptRecipients(invoiceId, knex, { resend = false } = {}) {
-  const eligible = await receiptInvoiceOrBlocker(invoiceId, knex, { resend });
+async function receiptRecipients(invoiceId, knex, { resend = false, ownClaimToken = null } = {}) {
+  const eligible = await receiptInvoiceOrBlocker(invoiceId, knex, { resend, ownClaimToken });
   if (eligible.blocker) return eligible;
   const { invoice } = eligible;
   const emailLeg = await receiptEmailLeg(invoice, { resend });

@@ -151,3 +151,50 @@ describe('holdUnknownOutcome — only the tool opts in; the route keeps handing 
     expect(releaseOperatorReceiptClaim.mock.calls[1][1]).not.toHaveProperty('holdForReconciliation');
   });
 });
+
+describe('expect — the writer owns the final check, under the claim and ahead of every effect', () => {
+  const approved = { receipt_state: 'unsent', amount: '129.00' };
+
+  test('an unchanged re-derivation proceeds, and the re-check runs after the claim and before the closeout and both legs', async () => {
+    const rederive = jest.fn(async () => ({ ...approved }));
+    const out = await sendInvoiceReceipt(ID, { via: 'both', expect: { approved, rederive } });
+    expect(out.status).toBe(200);
+    expect(rederive).toHaveBeenCalledWith({ ownClaimToken: 'claim-1' });
+    const at = rederive.mock.invocationCallOrder[0];
+    expect(claimReceiptJobForOperatorSend.mock.invocationCallOrder[0]).toBeLessThan(at);
+    expect(at).toBeLessThan(closeOutVisitForIssuedInvoice.mock.invocationCallOrder[0]);
+    expect(at).toBeLessThan(sendReceiptEmail.mock.invocationCallOrder[0]);
+    expect(at).toBeLessThan(InvoiceService.sendReceipt.mock.invocationCallOrder[0]);
+  });
+
+  test.each([
+    ['a changed value (recipients, amount, linked visit or a receipt stamped since)', async () => ({ ...approved, amount: '99.00' })],
+    ['a blocker (null)', async () => null],
+    ['a re-check that throws', async () => { throw new Error('read failed'); }],
+  ])('%s: 409 receipt_approval_changed, no closeout, no leg, nothing stamped, claim handed back untouched', async (_label, rederive) => {
+    releaseOperatorReceiptClaim.mockResolvedValueOnce('returned_to_queue');
+    const out = await sendInvoiceReceipt(ID, { via: 'both', holdUnknownOutcome: true, expect: { approved, rederive } });
+    expect(out).toEqual({ status: 409, body: expect.objectContaining({ code: 'receipt_approval_changed' }), queue: 'returned_to_queue' });
+    expect(closeOutVisitForIssuedInvoice).not.toHaveBeenCalled();
+    expect(sendReceiptEmail).not.toHaveBeenCalled();
+    expect(InvoiceService.sendReceipt).not.toHaveBeenCalled();
+    expect(updates).toEqual([]);
+    expect(activity).toEqual([]);
+    // Released as "nothing delivered, nothing unknown": the queued job goes back as it was.
+    expect(releaseOperatorReceiptClaim).toHaveBeenCalledWith(expect.objectContaining({ id: 'job-1' }), expect.objectContaining({ emailDelivered: false, smsDelivered: false }));
+    expect(releaseOperatorReceiptClaim.mock.calls[0][1]).not.toHaveProperty('holdForReconciliation');
+  });
+
+  test('no expect (the route): no re-check at all, behavior unchanged', async () => {
+    const out = await sendInvoiceReceipt(ID, { via: 'email' });
+    expect(out.status).toBe(200);
+    expect(out.body.ok).toBe(true);
+  });
+
+  test('the automatic job disposition from the release rides beside the body', async () => {
+    releaseOperatorReceiptClaim.mockResolvedValueOnce('held_for_reconciliation');
+    const out = await sendInvoiceReceipt(ID, { via: 'email' });
+    expect(out.queue).toBe('held_for_reconciliation');
+    expect(Object.keys(out.body).sort()).toEqual(['email', 'invoice', 'ok', 'sms']);
+  });
+});
