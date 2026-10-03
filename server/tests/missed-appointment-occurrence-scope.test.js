@@ -187,3 +187,42 @@ describe('the office card for a flagged visit (not-closed-out.js)', () => {
     });
   });
 });
+
+describe('the repeated-miss outreach task follows the confirmation that raised it', () => {
+  test('the task carries the flagged row it came from', async () => {
+    const inserts = [];
+    const conn = (table) => {
+      const chain = {
+        where() { return chain; },
+        select() { return chain; },
+        first: async () => (table === 'customers' ? { id: 'c1', first_name: 'Sam' } : { count: '2' }),
+        insert: async (row) => { inserts.push({ table, row }); },
+      };
+      return chain;
+    };
+    conn.raw = (sql) => sql;
+    expect(await MissedAppointment.evaluateThreshold('c1', 'confirmed_miss', conn, { logId: 'log-9' })).toEqual({ action: 'recommendation_created', skips: 2 });
+    expect(JSON.parse(inserts[0].row.metadata)).toEqual({ source: 'missed_appointment_threshold', log_id: 'log-9' });
+  });
+
+  test('withdrawOutreachFor cancels only that row\'s pending task, in a savepoint, and never throws', async () => {
+    const calls = [];
+    const sp = (table) => {
+      const chain = {
+        where(c) { calls.push(['where', table, c]); return chain; },
+        whereRaw(sql, b) { calls.push(['whereRaw', sql, b]); return chain; },
+        update: async (patch) => { calls.push(['update', patch.status]); return 1; },
+      };
+      return chain;
+    };
+    sp.raw = (sql) => sql;
+    expect(await MissedAppointment.withdrawOutreachFor('log-9', { transaction: (fn) => fn(sp) })).toEqual({ withdrawn: 1 });
+    expect(calls).toEqual(expect.arrayContaining([
+      ['where', 'customer_interactions', { interaction_type: 'task', status: 'pending' }],
+      ['whereRaw', "metadata->>'log_id' = ?", ['log-9']],
+      ['update', 'cancelled'],
+    ]));
+    expect(await MissedAppointment.withdrawOutreachFor('log-9', { transaction: async () => { throw new Error('db down'); } })).toEqual({ withdrawn: 0 });
+  });
+});
+

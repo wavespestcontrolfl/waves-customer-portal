@@ -196,6 +196,9 @@ export function useDispatchAlerts() {
       if (payload.resolved_at || resolvedIdsRef.current.has(payload.id)) return;
       setAlerts((prev) => mergeAlertBroadcast(prev, payload, resolvedIdsRef.current));
       relayTechOutAlertChange(payload);
+      // The broadcast is the bare row. A "Visit not closed out" card is told apart
+      // by its customer, which only the queue read joins in: re-read for it.
+      if (payload.type === 'visit_not_closed_out' && !payload.customer_first_name) hydrate().catch(() => {});
     }
 
     function handleResolved(payload) {
@@ -213,7 +216,7 @@ export function useDispatchAlerts() {
       socket.off('dispatch:alert_resolved', handleResolved);
       socket.disconnect();
     };
-  }, []);
+  }, [hydrate, markResolved]);
 
   // ---- resolve action ----
   // Optimistic removal: drop the row locally on success and let the

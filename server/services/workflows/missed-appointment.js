@@ -124,7 +124,9 @@ class MissedAppointment {
    * customer_noshow through the rebooker — can run the threshold without
    * inserting the occurrence a second time (codex r2 on #3110).
    */
-  async evaluateThreshold(customerId, reason = 'no_show', conn = db) {
+  // `logId`: the flagged row whose confirmation triggered this evaluation; kept on
+  // the task so a withdrawn confirmation can withdraw its task (withdrawOutreachFor).
+  async evaluateThreshold(customerId, reason = 'no_show', conn = db, { logId = null } = {}) {
     const customer = await conn('customers').where({ id: customerId }).first();
     if (!customer) return null;
 
@@ -173,9 +175,34 @@ class MissedAppointment {
         `Recommend a phone call or reviewing/sending the SMS below.\n\n` +
         `Suggested SMS:\n${suggestedSms}`,
       status: 'pending',
+      ...(logId ? { metadata: JSON.stringify({ source: 'missed_appointment_threshold', log_id: String(logId) }) } : {}),
     });
 
     return { action: 'recommendation_created', skips: totalSkips };
+  }
+
+  /**
+   * A person confirmed a miss, the outreach task was raised from it, and the
+   * person then said "Not a miss": the still-pending task is cancelled, with the
+   * reason on it. Runs in the dismissal's transaction, in a savepoint, and never
+   * fails it.
+   */
+  async withdrawOutreachFor(logId, trx) {
+    if (!logId || !trx) return { withdrawn: 0 };
+    try {
+      const withdrawn = await trx.transaction((sp) => sp('customer_interactions')
+        .where({ interaction_type: 'task', status: 'pending' })
+        .whereRaw("metadata->>'source' = 'missed_appointment_threshold'")
+        .whereRaw("metadata->>'log_id' = ?", [String(logId)])
+        .update({
+          status: 'cancelled',
+          body: sp.raw("concat('Withdrawn: the office marked this visit as not a miss.', E'\\n\\n', body)"),
+        }));
+      return { withdrawn: Number(withdrawn) || 0 };
+    } catch (err) {
+      logger.warn(`MissedAppointment: outreach task for flagged row ${logId} not withdrawn: ${err.message}`);
+      return { withdrawn: 0 };
+    }
   }
 }
 

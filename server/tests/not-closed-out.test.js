@@ -19,7 +19,11 @@ jest.mock('../services/dispatch-alerts', () => ({
 }));
 
 const mockEvaluateThreshold = jest.fn(async () => null);
-jest.mock('../services/workflows/missed-appointment', () => ({ evaluateThreshold: (...a) => mockEvaluateThreshold(...a) }));
+const mockWithdrawOutreachFor = jest.fn(async () => ({ withdrawn: 0 }));
+jest.mock('../services/workflows/missed-appointment', () => ({
+  evaluateThreshold: (...a) => mockEvaluateThreshold(...a),
+  withdrawOutreachFor: (...a) => mockWithdrawOutreachFor(...a),
+}));
 
 // A tiny in-memory knex: tables are arrays of rows; where/whereNull filter them;
 // update/first/select act on the filtered set. transaction(fn) runs fn on itself.
@@ -72,6 +76,7 @@ beforeEach(() => {
   mockCreateAlertOnce.mockClear();
   mockResolveAlert.mockClear();
   mockEvaluateThreshold.mockClear();
+  mockWithdrawOutreachFor.mockClear();
   mockTables.reschedule_log = [logRow()];
   mockTables.dispatch_alerts = [card()];
   mockTables.scheduled_services = [{ ...service }];
@@ -260,6 +265,8 @@ describe('the dispatcher\'s two decisions', () => {
     expect(mockTables.reschedule_log[0].miss_confirmed_at).toBe('NOW');
     expect(await notClosedOut.dismiss({ logId: 'log-1', dismissedBy: STAFF })).toEqual({ ok: true });
     expect(mockTables.reschedule_log[0]).toMatchObject({ resolution: 'dismissed', miss_confirmed_at: null, miss_confirmed_by: null });
+    // and the outreach task that confirmation raised is withdrawn with it
+    expect(mockWithdrawOutreachFor).toHaveBeenCalledWith('log-1', expect.anything());
     // "Done" keeps it: a handled miss was still a miss
     mockTables.reschedule_log = [logRow({ miss_confirmed_at: 'THEN', miss_confirmed_by: STAFF })];
     await notClosedOut.markHandled({ logId: 'log-1', handledBy: STAFF });
@@ -279,7 +286,7 @@ describe('the dispatcher\'s two decisions', () => {
     mockTables.reschedule_log = [logRow({ customer_id: 'cust-1' })];
     await notClosedOut.confirmMiss({ logId: 'log-1', confirmedBy: STAFF });
     expect(mockEvaluateThreshold).toHaveBeenCalledTimes(1);
-    expect(mockEvaluateThreshold).toHaveBeenCalledWith('cust-1', 'confirmed_miss');
+    expect(mockEvaluateThreshold).toHaveBeenCalledWith('cust-1', 'confirmed_miss', expect.anything(), { logId: 'log-1' });
     await notClosedOut.confirmMiss({ logId: 'log-1', confirmedBy: STAFF });
     expect(mockEvaluateThreshold).toHaveBeenCalledTimes(1);
     // a failed evaluation never fails the decision
@@ -298,7 +305,7 @@ describe('the dispatcher\'s two decisions', () => {
   });
 });
 
-describe('backfillMissingCards (nightly): an open flagged row with no card gets one', () => {
+describe('reconcileOpenRows (nightly repair pass)', () => {
   test('raises a card only for visits whose open row has none, one per visit', async () => {
     mockTables.reschedule_log = [
       logRow(), // has a card (alert-1)
@@ -306,8 +313,8 @@ describe('backfillMissingCards (nightly): an open flagged row with no card gets 
       logRow({ id: 'log-3', scheduled_service_id: 'visit-2' }),
       logRow({ id: 'log-4', scheduled_service_id: 'visit-3', resolved_at: 'EARLIER', resolution: 'completed' }),
     ];
-    mockTables.scheduled_services = [{ ...service }, { ...service, id: 'visit-2' }, { ...service, id: 'visit-3' }];
-    expect(await notClosedOut.backfillMissingCards()).toEqual({ raised: 1 });
+    mockTables.scheduled_services = [{ ...service, status: 'pending' }, { ...service, id: 'visit-2', status: 'no_show' }, { ...service, id: 'visit-3', status: 'completed' }];
+    expect(await notClosedOut.reconcileOpenRows()).toEqual({ raised: 1, settled: 0 });
     expect(mockCreateAlertOnce).toHaveBeenCalledTimes(1);
     expect(mockCreateAlertOnce.mock.calls[0][0]).toMatchObject({
       jobId: 'visit-2',
@@ -315,13 +322,39 @@ describe('backfillMissingCards (nightly): an open flagged row with no card gets 
     });
   });
 
-  test('gate off: nothing; a database failure never throws', async () => {
+  test.each([
+    ['completed', { status: 'completed' }, 'completed'],
+    ['cancelled', { status: 'cancelled' }, 'dismissed'],
+    ['moved to another day', { status: 'pending', scheduled_date: '2026-10-06' }, 'rebooked'],
+    ['moved to a later window', { status: 'confirmed', window_start: '15:00:00', window_end: '16:00:00' }, 'rebooked'],
+  ])('a row whose visit is already %s is settled from the visit and its card closed', async (_label, visitNow, resolution) => {
+    mockTables.reschedule_log = [logRow({ original_date: '2026-09-29', original_window: '09:00:00-10:00:00' })];
+    mockTables.scheduled_services = [{ ...service, ...visitNow }];
+    expect(await notClosedOut.reconcileOpenRows()).toEqual({ raised: 0, settled: 1 });
+    expect(mockTables.reschedule_log[0]).toMatchObject({ resolution, resolved_by: 'system' });
+    expect(mockResolveAlert).toHaveBeenCalledWith(expect.objectContaining({ id: 'alert-1' }));
+  });
+
+  test('an open visit still in its flagged slot, and a no_show visit, stay open', async () => {
+    mockTables.reschedule_log = [logRow({ original_date: '2026-09-29', original_window: '09:00:00-10:00:00' })];
+    for (const status of ['pending', 'no_show']) {
+      mockTables.scheduled_services = [{ ...service, status }];
+      expect(await notClosedOut.reconcileOpenRows()).toEqual({ raised: 0, settled: 0 });
+    }
+    expect(mockTables.reschedule_log[0].resolved_at).toBeNull();
+  });
+
+  test('gate off: rows are still settled from the visit, no card is raised; a database failure never throws', async () => {
     mockTables.dispatch_alerts = [];
+    mockTables.scheduled_services = [{ ...service, status: 'pending' }];
     mockGateOn = false;
-    expect(await notClosedOut.backfillMissingCards()).toEqual({ raised: 0 });
+    expect(await notClosedOut.reconcileOpenRows()).toEqual({ raised: 0, settled: 0 });
+    mockTables.scheduled_services = [{ ...service, status: 'completed' }];
+    expect(await notClosedOut.reconcileOpenRows()).toEqual({ raised: 0, settled: 1 });
     mockGateOn = true;
+    mockTables.reschedule_log = [logRow()];
     mockFailTransaction = true;
-    expect(await notClosedOut.backfillMissingCards()).toEqual({ raised: 0 });
+    expect(await notClosedOut.reconcileOpenRows()).toEqual({ raised: 0, settled: 0 });
     expect(mockCreateAlertOnce).not.toHaveBeenCalled();
   });
 });

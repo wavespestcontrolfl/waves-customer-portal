@@ -263,7 +263,7 @@ async function confirmMiss({ logId, confirmedBy = null, reopen = false } = {}) {
   // is when it is evaluated. After the commit; never fails the decision.
   if (result.ok && newlyConfirmedFor && queueEnabled()) {
     try {
-      await require('./workflows/missed-appointment').evaluateThreshold(newlyConfirmedFor, 'confirmed_miss');
+      await require('./workflows/missed-appointment').evaluateThreshold(newlyConfirmedFor, 'confirmed_miss', db, { logId });
     } catch (err) {
       logger.warn(`[not-closed-out] outreach evaluation failed after a confirmed miss: ${err.message}`);
     }
@@ -323,6 +323,10 @@ async function dismiss({ logId, dismissedBy = null, note = null } = {}) {
       miss_confirmed_at: null, miss_confirmed_by: null,
       ...(reason ? { notes: t.raw("left(concat_ws(' | ', NULLIF(notes, ''), ?::text), 500)", [`not a miss: ${reason}`]) } : {}),
     });
+    // the outreach task this row's confirmation raised goes with the confirmation
+    if (log.miss_confirmed_at) {
+      await require('./workflows/missed-appointment').withdrawOutreachFor(logId, t);
+    }
     await cardAfterSettle(t, log, dismissedBy);
     return { ok: true };
   });
@@ -349,51 +353,75 @@ async function markHandled({ logId, handledBy = null } = {}) {
   });
 }
 
+// How an open flagged row's visit settles it now, read from the visit itself: a
+// closed visit by its status; a still-open visit that left the flagged slot was
+// moved. null = the row stays open (same slot still open, or a no_show visit,
+// which only a person's "Done" settles).
+function settlementFromVisit(visit, log) {
+  if (!visit) return null;
+  if (RESOLUTION_BY_STATUS[visit.status]) return RESOLUTION_BY_STATUS[visit.status];
+  if (!['pending', 'confirmed', 'rescheduled'].includes(visit.status) || !log.original_date) return null;
+  const visitWindow = visit.window_start ? `${visit.window_start}-${visit.window_end}` : null;
+  const moved = dateOnly(log.original_date) !== dateOnly(visit.scheduled_date)
+    || (!!log.original_window && log.original_window !== visitWindow);
+  return moved ? 'rebooked' : null;
+}
+
 /**
- * Raise the card for every open flagged row that has none. A first card is
- * best-effort (raiseCard never fails the nightly check or a status change), and
- * the check skips an occurrence it already logged — so without this pass a card
- * whose insert failed once would never appear. Run by the nightly check after its
- * own flags. Each card is raised under the visit's lock, re-reading the row, so a
- * visit settled in between gets none. Rows older than `days` are left alone.
- * @returns {Promise<{raised: number}>}
+ * The nightly repair pass over open flagged rows of the last `days` days. Both
+ * the first card and settle-on-evidence are best-effort where they run (they
+ * never fail a status change, a move or the check), so a failure there would
+ * otherwise be permanent:
+ *   - a row whose visit is already completed, cancelled, skipped or moved is
+ *     settled from the visit's state (runs with the queue gate on or off);
+ *   - an open row with no card gets one (gate on only).
+ * Each repair runs under the visit's lock and re-reads the row.
+ * @returns {Promise<{raised: number, settled: number}>}
  */
-async function backfillMissingCards({ days = 7 } = {}) {
-  if (!queueEnabled()) return { raised: 0 };
+async function reconcileOpenRows({ days = 7 } = {}) {
   let raised = 0;
+  let settled = 0;
   try {
     const open = await db('reschedule_log')
       .where({ reason_code: 'customer_noshow' })
       .whereNull('resolved_at')
       .where('created_at', '>', db.raw("NOW() - (?::int * INTERVAL '1 day')", [days]))
       .orderBy('created_at', 'desc')
-      .select('id', 'scheduled_service_id');
+      .select('id', 'scheduled_service_id', 'original_date', 'original_window');
     const seen = new Set();
     for (const row of Array.isArray(open) ? open : []) {
       const visitId = row.scheduled_service_id;
       if (!visitId || seen.has(String(visitId))) continue;
       seen.add(String(visitId));
-      const hasCard = await db('dispatch_alerts').where({ type: ALERT_TYPE, job_id: visitId }).whereNull('resolved_at').first('id');
-      if (hasCard) continue;
       try {
+        // unlocked look first: most rows need nothing
+        const glance = await db('scheduled_services').where({ id: visitId }).first('id', 'status', 'scheduled_date', 'window_start', 'window_end');
+        const hasCard = await db('dispatch_alerts').where({ type: ALERT_TYPE, job_id: visitId }).whereNull('resolved_at').first('id');
+        if (!settlementFromVisit(glance, row) && (hasCard || !queueEnabled())) continue;
         const result = await db.transaction(async (t) => {
-          const { log } = await lockVisitThenLog(t, row.id);
-          if (!log || log.resolved_at) return { raised: false };
+          const { visit, log } = await lockVisitThenLog(t, row.id);
+          if (!log || log.resolved_at) return {};
+          const resolution = settlementFromVisit(visit, log);
+          if (resolution) {
+            return { settled: (await resolveForService({ serviceId: visitId, resolution, resolvedBy: 'system', trx: t })).resolved };
+          }
+          if (hasCard) return {};
           const service = await t('scheduled_services').where({ id: visitId })
             .first('id', 'technician_id', 'scheduled_date', 'window_start', 'window_end', 'service_type');
-          if (!service) return { raised: false };
+          if (!service) return {};
           const slot = loggedSlot(log);
           return raiseCard({ logId: log.id, service: slot.scheduled_date ? { ...service, ...slot } : service, confirmed: !!log.miss_confirmed_at, trx: t });
         });
         if (result && result.raised) raised += 1;
+        if (result && result.settled) settled += result.settled;
       } catch (err) {
-        logger.warn(`[not-closed-out] missing card not raised for visit ${visitId}: ${err.message}`);
+        logger.warn(`[not-closed-out] open flagged row of visit ${visitId} not repaired: ${err.message}`);
       }
     }
   } catch (err) {
-    logger.warn(`[not-closed-out] missing-card pass failed: ${err.message}`);
+    logger.warn(`[not-closed-out] repair pass failed: ${err.message}`);
   }
-  return { raised };
+  return { raised, settled };
 }
 
 module.exports = {
@@ -409,6 +437,6 @@ module.exports = {
   confirmMiss,
   dismiss,
   markHandled,
-  backfillMissingCards,
+  reconcileOpenRows,
   queueEnabled,
 };
