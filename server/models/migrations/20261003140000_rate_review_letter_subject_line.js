@@ -26,7 +26,9 @@ const asList = (v) => {
   if (Array.isArray(v)) return v;
   try { const p = JSON.parse(v || '[]'); return Array.isArray(p) ? p : []; } catch { return []; }
 };
-const sameShape = (original, list) => (Array.isArray(original) ? list : JSON.stringify(list));
+// jsonb columns are always written as JSON text: the pg driver would send a raw JS array as a
+// Postgres array literal ({"a","b"}), which is not JSON. (Reading accepts either shape.)
+const toJson = (list) => JSON.stringify(list);
 
 async function swap(knex, from, to, addVar) {
   if (!(await knex.schema.hasTable('email_templates'))) return;
@@ -37,8 +39,8 @@ async function swap(knex, from, to, addVar) {
   await knex('email_template_versions').where({ id: version.id }).update({ subject: to, updated_at: new Date() });
   const withVar = (list) => (addVar ? [...new Set([...list, VAR])] : list.filter((x) => x !== VAR));
   await knex('email_templates').where({ id: template.id }).update({
-    allowed_variables: sameShape(template.allowed_variables, withVar(asList(template.allowed_variables))),
-    optional_variables: sameShape(template.optional_variables, withVar(asList(template.optional_variables))),
+    allowed_variables: toJson(withVar(asList(template.allowed_variables))),
+    optional_variables: toJson(withVar(asList(template.optional_variables))),
     updated_at: new Date(),
   });
 }

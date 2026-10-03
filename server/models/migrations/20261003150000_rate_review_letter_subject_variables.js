@@ -23,7 +23,9 @@ const asList = (v) => {
   if (Array.isArray(v)) return v;
   try { const p = JSON.parse(v || '[]'); return Array.isArray(p) ? p : []; } catch { return []; }
 };
-const sameShape = (original, list) => (Array.isArray(original) ? list : JSON.stringify(list));
+// jsonb columns are always written as JSON text: the pg driver would send a raw JS array as a
+// Postgres array literal ({"a","b"}), which is not JSON. (Reading accepts either shape.)
+const toJson = (list) => JSON.stringify(list);
 const uniq = (a) => [...new Set(a)];
 
 // Pure: the lists after this migration (up) or before it (down).
@@ -53,9 +55,9 @@ async function shift(knex, up) {
   if (up ? !current.required.includes(DATE_VAR) : !current.required.includes(VAR)) return;
   const next = shiftVariables(current, up);
   await knex('email_templates').where({ id: template.id }).update({
-    allowed_variables: sameShape(template.allowed_variables, next.allowed),
-    required_variables: sameShape(template.required_variables, next.required),
-    optional_variables: sameShape(template.optional_variables, next.optional),
+    allowed_variables: toJson(next.allowed),
+    required_variables: toJson(next.required),
+    optional_variables: toJson(next.optional),
     updated_at: new Date(),
   });
 }
