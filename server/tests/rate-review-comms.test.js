@@ -865,6 +865,64 @@ describe('customer surfaces', () => {
     expect(clock.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
 
+  test('send: an exception after the claim and BEFORE any provider handoff releases the notices to a retryable draft (pre_dispatch_error), never left sending to be parked uncertain', async () => {
+    mockDb.reset(book());
+    const digest = await previewDigest();
+    // the letter freeze (an update that writes pending_letter) blows up after the claim
+    let boom = true;
+    const orig = mockDb.log.push.bind(mockDb.log);
+    mockDb.log.push = (entry) => {
+      if (boom && Array.isArray(entry) && entry[0] === 'update' && entry[2] && String(entry[2].metadata || '').includes('pending_letter')) { boom = false; throw new Error('freeze exploded'); }
+      return orig(entry);
+    };
+    const res = await comms.sendBatch(BATCH_KEY, { expectedDigest: digest, now: NOW });
+    mockDb.log.push = orig;
+    expect(boom).toBe(false);
+    expect(res).toMatchObject({ sent: 0, failed: 1, uncertain: 0 });
+    expect(emailLeg).not.toHaveBeenCalled();
+    expect(notices()[0].status).toBe('draft');
+    expect(JSON.parse(notices()[0].metadata).send_hold).toMatchObject({ reason: 'pre_dispatch_error', error: 'freeze exploded' });
+    expect(JSON.parse(notices()[0].metadata).pending_letter).toBeUndefined();
+    // not uncertain after the 15-minute stale window either
+    const later = new Date(NOW.getTime() + 20 * 60 * 1000);
+    expect((await comms.sendPreview(BATCH_KEY, { now: later })).counts.letters).toBe(1);
+  });
+
+  test('send: an exception AFTER a provider call parks the letter as send_uncertain with its words', async () => {
+    mockDb.reset(book());
+    const digest = await previewDigest();
+    emailLeg.mockResolvedValue({ sent: true, attempted: true, messageId: 'em-1' });
+    smsLeg.mockRejectedValue(new Error('sms leg exploded')); // email already went out
+    const res = await comms.sendBatch(BATCH_KEY, { expectedDigest: digest, now: NOW });
+    expect(res).toMatchObject({ sent: 0, failed: 1 });
+    expect(notices()[0].status).toBe('send_uncertain');
+    expect(JSON.parse(notices()[0].metadata).pending_letter).toBeTruthy();
+  });
+
+  test('send: the recipient is passed through unchanged, and a billing contact renamed between the freeze and the handoff is refused — no send, the frozen greeting untouched', async () => {
+    const b = book();
+    b.notification_prefs = [{ customer_id: CUSTOMER(1), billing_email: 'billing1@example.com', billing_contact_name: 'Billy Contact' }];
+    mockDb.reset(b);
+    await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+    const args = emailLeg.mock.calls[0][0];
+    expect(args.recipient).toMatchObject({ email: 'billing1@example.com', name: 'Billy Contact' });
+    expect(args.vars.first_name).toBe('Billy');
+    // rename the contact (same address) after the freeze: the handoff compares the greeting too
+    mockDb.reset(b);
+    const digest = await previewDigest();
+    emailLeg.mockImplementation(async ({ sendOptions }) => {
+      mockDb.store.notification_prefs[0].billing_contact_name = 'Renamed Person';
+      const dispatch = jest.fn(async () => {});
+      expect(await sendOptions.withProviderHandoff(dispatch, { to: 'billing1@example.com' })).toEqual({ ok: false, reason: 'recipient_changed' });
+      expect(dispatch).not.toHaveBeenCalled();
+      return { sent: false, attempted: true };
+    });
+    smsLeg.mockResolvedValue({ sent: false, attempted: false });
+    await comms.sendBatch(BATCH_KEY, { expectedDigest: digest, now: NOW });
+    expect(notices()[0]).toMatchObject({ status: 'draft', email_sent: false });
+    expect(JSON.parse(notices()[0].metadata).send_hold.reason).toBe('recipient_changed');
+  });
+
   test('send: a notice repointed between provider acceptance and the delivery stamp is settled — never reported sent, never left sending; the stamp holds the comms fence', async () => {
     mockDb.reset(book());
     const digest = await previewDigest();
@@ -1109,10 +1167,36 @@ describe('customer surfaces', () => {
       expect(meta().delivery_revoked).toMatchObject({ channel: 'sms', event: 'failed' });
     });
 
+    test('rate_review_sms_failures keeps only unresolved early callbacks: an unrelated sid leaves no row; an early rate-review sid is kept, then removed once the stamp consumes it', async () => {
+      mockDb.reset(book({ customers: [customer(1, { email: null })] }));
+      mockDb.store.sms_log = [{ twilio_sid: 'SM-OTHER', customer_id: CUSTOMER(2), status: 'sent', message_type: 'appointment_reminder' }];
+      // logged to a customer with no rate review letter in play: nothing kept
+      await comms.handleSmsDeliveryFailure({ sid: 'SM-OTHER', status: 'failed' }, { dbh: mockDb });
+      expect(mockDb.store.rate_review_sms_failures).toEqual([]);
+      emailLeg.mockResolvedValue({ sent: false, attempted: false });
+      smsLeg.mockImplementation(async () => {
+        await comms.handleSmsDeliveryFailure({ sid: 'SM1', status: 'undelivered' }, { dbh: mockDb }); // no sms_log row yet
+        expect(mockDb.store.rate_review_sms_failures.map((r) => r.twilio_sid)).toEqual(['SM1']);
+        return { sent: true, attempted: true, sid: 'SM1' };
+      });
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      expect(notices()[0].status).toBe('draft');
+      expect(mockDb.store.rate_review_sms_failures).toEqual([]); // consumed at the stamp
+    });
+
+    test('a failure reconciled onto a delivered notice removes its sid row', async () => {
+      mockDb.reset(book({ notices: [draft(1, { status: 'sent', sent_at: NOW, email_sent: false, sms_sent: true, metadata: { source: 'rate_review', batch_key: BATCH_KEY, series_root_id: fixture.VISIT(100), sms_sid: 'SM1' } })] }));
+      mockDb.store.sms_log = [{ twilio_sid: 'SM1', customer_id: CUSTOMER(1), status: 'sent' }];
+      expect(await comms.handleSmsDeliveryFailure({ sid: 'SM1', status: 'undelivered' }, { dbh: mockDb })).toHaveLength(1);
+      expect(mockDb.store.rate_review_sms_failures).toEqual([]);
+      expect(notices()[0].status).toBe('draft');
+    });
+
     test('a failed text reconciliation is re-thrown in strict mode (the status webhook then answers non-2xx) and swallowed otherwise', async () => {
       mockDb.reset(book());
       mockDb.store.sms_log = [{ twilio_sid: 'SM1', customer_id: CUSTOMER(1) }];
       const dbh = Object.assign((t) => { if (t === 'sms_log') throw new Error('db down'); return mockDb(t); }, mockDb);
+      dbh.transaction = async (fn) => fn(dbh);
       await expect(comms.handleSmsDeliveryFailure({ sid: 'SM1', status: 'failed' }, { dbh, strict: true })).rejects.toThrow('db down');
       expect(await comms.handleSmsDeliveryFailure({ sid: 'SM1', status: 'failed' }, { dbh })).toEqual([]);
     });

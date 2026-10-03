@@ -719,10 +719,10 @@ async function freezeLetter(dbh, entry, frozen) {
 
 // hold: a named reason the send was refused before any provider took it
 // (recorded on each line as metadata.send_hold; the next attempt clears it).
-async function settleLines(dbh, entry, { status, keepFrozen, frozen, hold = null, extra = {} }) {
+async function settleLines(dbh, entry, { status, keepFrozen, frozen, hold = null, holdError = null, extra = {} }) {
   for (const l of entry.lines) {
     const { pending_letter: _p, send_hold: _h, ...meta } = parseJson(l.notice.metadata, {});
-    const next = { ...meta, ...extra, ...(keepFrozen ? { pending_letter: frozen } : {}), ...(hold ? { send_hold: { reason: hold, at: new Date().toISOString() } } : {}) };
+    const next = { ...meta, ...extra, ...(keepFrozen ? { pending_letter: frozen } : {}), ...(hold ? { send_hold: { reason: hold, at: new Date().toISOString(), ...(holdError ? { error: holdError } : {}) } } : {}) };
     await dbh('price_change_notices').where({ id: l.noticeId, status: 'sending' }).update({
       status, metadata: JSON.stringify(next), updated_at: new Date(),
     });
@@ -793,10 +793,15 @@ async function revalidateClaimed(dbh, entry, claimed, { today, now }) {
   return { ok: true, entry: { ...entry, lines } };
 }
 
-async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash, actorId, clock }) {
+async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash, actorId, clock, progress = {} }) {
   let entry = originalEntry;
   const claimed = await claimLines(dbh, entry);
   if (!claimed) return { outcome: 'in_flight' };
+  // What the caller needs to settle an exception: the claimed rows, and whether a
+  // provider boundary has been crossed yet (set just before the first handoff).
+  progress.entry = originalEntry;
+  progress.claimed = claimed;
+  progress.crossed = false;
   // The recipient is re-read after the claim (a corrected address or phone
   // since the preview is the one used): the letter and both legs are built
   // from the live row. A customer gone inactive meanwhile releases the
@@ -823,6 +828,7 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
   // and frozen, so the greeting in the frozen letter and the public page is the
   // one the email carries.
   const prefs = await dbh('notification_prefs').where({ customer_id: entry.customerId }).first().catch(() => null);
+  const [resolvedRecipient] = getInvoiceEmailRecipients(customer, prefs || {});
   const payload = letterPayload({ customer, prefs, lines: entry.lines.map((l) => ({ ...l, service: [l.serviceLabel, propertyStreetLine(customer)].filter(Boolean).join(' · ') })), costBlock, noticeUrl: noticeUrlFor(entry.lines) });
   const frozen = { key: claimKey, payload, letter: frozenLetter(entry, payload, costBlock) };
   await freezeLetter(dbh, entry, frozen);
@@ -849,8 +855,12 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
   // Set when the handoff refused before dispatch: the request never left, so
   // the letter is definitively unsent (a named hold, not an uncertain send).
   let emailHold = null;
+  // From here a provider may have the message: an exception is no longer a clean non-send.
+  progress.crossed = true;
   const email = await PriceChangeNotices.sendNoticeEmail({
     customer,
+    // The recipient frozen with the letter, passed through unchanged (no second prefs read).
+    recipient: resolvedRecipient || null,
     idempotencyKeyBase: `rate_review:${batchKey}:${entry.customerId}:${claimKey}`,
     vars: payload,
     templateKey: TEMPLATE_KEY,
@@ -873,7 +883,9 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
         if (!to) { emailHold = 'recipient_changed'; return { ok: false, reason: 'recipient_changed' }; }
         await lockCustomerEmail(trx, to);
         const [recipient] = getInvoiceEmailRecipients(live, prefs || {});
-        if (!to || String(recipient?.email || '').trim().toLowerCase() !== String(to).trim().toLowerCase()) { emailHold = 'recipient_changed'; return { ok: false, reason: 'recipient_changed' }; }
+        // BOTH the address and the greeting must still be the frozen ones.
+        if (!to || String(recipient?.email || '').trim().toLowerCase() !== String(to).trim().toLowerCase()
+          || greetingName(live, prefs) !== payload.first_name) { emailHold = 'recipient_changed'; return { ok: false, reason: 'recipient_changed' }; }
         await dispatch(trx);
         return { ok: true };
       }),
@@ -969,6 +981,7 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
       if (sms.sent && sms.sid && !early.sms) {
         const verdict = await require('./rate-review-apply')._private.smsDeliveryFailure(trx, { email_sent: false, sms_sent: true, metadata: { sms_sid: String(sms.sid) } });
         if (verdict) early.sms = { event: verdict, channel: 'sms', at: sentAt.toISOString(), reason: 'status callback before the stamp' };
+        await trx('rate_review_sms_failures').where({ twilio_sid: String(sms.sid) }).del(); // consumed
       }
       const emailOk = !!email.sent && !early.email;
       const smsOk = !!sms.sent && !early.sms;
@@ -1022,6 +1035,24 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
   return { outcome: 'sent', email: !!email.sent, sms: !!sms.sent };
 }
 
+// An exception inside sendEntry after the claim. BEFORE the first provider
+// handoff nothing could have reached the customer: the claimed notices return to
+// a retryable draft with the reason (never left 'sending' for the 15-minute stale
+// rule to park as possibly delivered). AFTER it, a provider may hold the message:
+// parked as send_uncertain with its frozen words, for the owner. Best-effort.
+async function settleAfterException(dbh, progress, err) {
+  if (!progress || !progress.claimed || !progress.claimed.length) return;
+  try {
+    if (!progress.crossed) {
+      await settleLines(dbh, progress.entry, { status: 'draft', keepFrozen: false, frozen: null, hold: 'pre_dispatch_error', holdError: String((err && err.message) || err).slice(0, 200) });
+      return;
+    }
+    await dbh('price_change_notices').whereIn('id', progress.claimed).where({ status: 'sending' }).update({ status: UNCERTAIN, updated_at: new Date() });
+  } catch (settleErr) {
+    logger.error(`[rate-review-comms] could not settle claimed notices after an error: ${settleErr.message}`);
+  }
+}
+
 /**
  * Send a batch's letters. Refuses unless the digest matches the preview the
  * owner reviewed (same customers, lines, amounts, dates and cost block).
@@ -1048,8 +1079,9 @@ async function sendBatch(batchKey, { expectedDigest, actorId = null, dbh = db, n
   for (let i = 0; i < sendable.length; i += SEND_CONCURRENCY) {
     await Promise.all(sendable.slice(i, i + SEND_CONCURRENCY).map(async (entry) => {
       if (!rateReviewLive()) { summary.stoppedByGate += 1; return; }
+      const progress = {};
       try {
-        const res = await sendEntry(dbh, entry, { batchKey, costBlock, templateHash, actorId, clock });
+        const res = await sendEntry(dbh, entry, { batchKey, costBlock, templateHash, actorId, clock, progress });
         if (res.outcome === 'sent') {
           summary.sent += 1;
           if (res.email) summary.emailed += 1;
@@ -1064,6 +1096,7 @@ async function sendBatch(batchKey, { expectedDigest, actorId = null, dbh = db, n
       } catch (err) {
         summary.failed += 1;
         logger.error(`[rate-review-comms] letter failed for customer ${entry.customerId}: ${err.message}`);
+        await settleAfterException(dbh, progress, err);
       }
     }));
   }
@@ -1411,20 +1444,30 @@ async function handleEmailDeliveryEvent(trx, emailMessage, ev) {
 async function handleSmsDeliveryFailure({ sid, status, errorCode }, { dbh = db, strict = false } = {}) {
   try {
     if (!sid) return [];
-    // The failure is kept by sid FIRST, whether or not sms_log has the row (the
-    // callback can beat the log's insert, and its own status UPDATE can fail): the
-    // delivery stamp and the nightly apply read this, so an undelivered text is
-    // never stamped delivered. Idempotent.
-    await dbh('rate_review_sms_failures').insert({ twilio_sid: String(sid), status: String(status || 'failed').toLowerCase().slice(0, 30), error_code: errorCode ? String(errorCode).slice(0, 20) : null })
-      .onConflict('twilio_sid').ignore();
-    const log = await dbh('sms_log').where({ twilio_sid: sid }).first();
-    if (!log || !log.customer_id) return [];
     const alerts = [];
     await dbh.transaction(async (trx) => {
-      for (const notice of await noticesForDispatch(trx, log.customer_id, 'sms_sid', sid)) {
+      const keep = () => trx('rate_review_sms_failures').insert({ twilio_sid: String(sid), status: String(status || 'failed').toLowerCase().slice(0, 30), error_code: errorCode ? String(errorCode).slice(0, 20) : null })
+        .onConflict('twilio_sid').ignore();
+      const log = await trx('sms_log').where({ twilio_sid: sid }).first();
+      // Not logged yet: the callback beat the sender's own sms_log insert, so it cannot
+      // be proven unrelated. Kept by sid for the delivery stamp and the nightly apply
+      // (the stamp deletes it when it consumes it; reconciliation below deletes it).
+      if (!log || !log.customer_id) { await keep(); return; }
+      // Logged: only a customer with a rate review letter in play (this sid, or a send
+      // still in flight) can be affected. Anything else is unrelated: nothing is kept.
+      await lockCustomerComms(trx, log.customer_id);
+      const letters = (await trx('price_change_notices').where({ customer_id: log.customer_id }).whereNotNull('rate_review_row_id'))
+        .filter((n) => String(n.status) === 'sending' || String(parseJson(n.metadata, {}).sms_sid || '') === String(sid));
+      if (!letters.length) return;
+      // The failure is kept first (the log's own status update may have failed), then
+      // reconciled onto the delivered notice; a reconciled row is removed.
+      await keep();
+      const notices = await noticesForDispatch(trx, log.customer_id, 'sms_sid', sid);
+      for (const notice of notices) {
         const alert = await recordChannelFailure(trx, notice, 'sms', { event: String(status || 'failed'), at: new Date(), reason: errorCode ? `error ${errorCode}` : '' });
         if (alert) alerts.push(alert);
       }
+      if (notices.some((n) => String(n.status) !== 'sending')) await trx('rate_review_sms_failures').where({ twilio_sid: String(sid) }).del();
     });
     await raiseDeliveryAlerts(alerts);
     return alerts;

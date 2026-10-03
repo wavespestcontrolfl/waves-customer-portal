@@ -201,17 +201,25 @@ function validateEffectiveDate(effectiveDate) {
 // a corrected address can — and because the idempotency key includes the
 // resolved recipient, a corrected address mints a fresh key and sends,
 // while same-address retries keep deduping against the prior attempt.
-async function sendNoticeEmail({ customer, idempotencyKeyBase, vars, templateKey = 'billing.price_change_notice', categories = ['billing', 'price_change_notice'], sendOptions }) {
+async function sendNoticeEmail({ customer, idempotencyKeyBase, vars, templateKey = 'billing.price_change_notice', categories = ['billing', 'price_change_notice'], sendOptions, recipient: suppliedRecipient = null }) {
   let attempted = false;
   try {
     const EmailTemplateLibrary = require('./email-template-library');
-    const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null);
-    const [recipient] = getInvoiceEmailRecipients(customer, prefs || {});
+    // A caller that froze its words (the rate review letter) passes the recipient it
+    // already resolved: used unchanged, prefs are not re-read, and the greeting is the
+    // one in vars — so what is delivered is what was frozen.
+    let recipient = suppliedRecipient;
+    if (!recipient) {
+      const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null);
+      [recipient] = getInvoiceEmailRecipients(customer, prefs || {});
+    }
     const to = String(recipient?.email || '').trim();
     if (!to || !to.includes('@')) return { sent: false, attempted: false };
     attempted = true;
     const recipientHash = crypto.createHash('sha256').update(to.toLowerCase()).digest('hex').slice(0, 10);
-    const firstName = String(recipient?.name || customer.first_name || '').trim().split(/\s+/)[0] || 'there';
+    const firstName = suppliedRecipient && vars && vars.first_name
+      ? String(vars.first_name)
+      : (String(recipient?.name || customer.first_name || '').trim().split(/\s+/)[0] || 'there');
     // The caller's provider-handoff fence is told the address this send
     // resolved, so it can re-judge that exact recipient under its locks.
     const { withProviderHandoff: callerHandoff, ...libraryOptions } = sendOptions || {};
