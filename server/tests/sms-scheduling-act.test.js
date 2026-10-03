@@ -52,7 +52,7 @@ function fakeDeps(over = {}) {
     loadBookingConfig: jest.fn(async () => ({})),
     notice: { visitInsideMoveNoticeWindow: jest.fn(() => false), violatesSelfServeNotice: jest.fn(() => false), ...(over.notice || {}) },
     rebooker: { reschedule: jest.fn(async () => ({})), rescheduleSeries: jest.fn(async () => ({ seriesMoveId: 'series-1' })), ...(over.rebooker || {}) },
-    reminders: { handleReschedule: jest.fn(async () => null) },
+    reminders: { handleReschedule: jest.fn(async () => ({ id: 'reminder-1' })) },
     emitDispatchJobUpdate: jest.fn(async () => null),
     applySeriesMoveEffects: jest.fn(async () => ({ notificationSent: true })),
   };

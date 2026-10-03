@@ -31,6 +31,7 @@ const logger = require('./logger');
 const { gateEnvValue } = require('../config/feature-gates');
 const { dateOnlyString } = require('../utils/datetime-et');
 const { phoneIdentitySql } = require('./sms-response-policy');
+const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS, OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
 
 const REASON_CODE = 'customer_request'; // reschedule_log.reason_code varchar(30)
 // reschedule_log.initiated_by varchar(20). Its own value, so the scheduling
@@ -87,7 +88,7 @@ function buildMoveGuard({ decisionId, offer, visitId, customerId, now, target, e
     // files a schedule-change request, so that request is either visible
     // below or starts after this move.
     const row = await trx('scheduled_services').where({ id: visitId }).forUpdate()
-      .first('scheduled_date', 'window_start', 'window_end', 'status', 'customer_id', 'visit_id');
+      .first('scheduled_date', 'window_start', 'window_end', 'status', 'customer_id', 'visit_id', 'source_action', 'customer_confirmed');
     // The locked visit is still the one the decide step checked: an Edit
     // appointment save logs no move, and the series mover pins only date and
     // start, so the comparison is made here for both movers.
@@ -95,6 +96,11 @@ function buildMoveGuard({ decisionId, offer, visitId, customerId, now, target, e
       && hhmm(row.window_start) === expected.start && hhmm(row.window_end) === expected.end
       && row.status === expected.status && String(row.customer_id) === String(customerId) && !row.visit_id;
     if (!unchanged) throw guardError('visit_changed');
+    // The decide step's ownership checks, on the locked row: an office-review
+    // booking can go back to unconfirmed with no change to its date, window
+    // or status.
+    if (OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(row.source_action) && row.customer_confirmed !== true) throw guardError('office_review_unconfirmed');
+    if (DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(row.source_action) && row.status === 'pending') throw guardError('dispatch_owned_pending');
     const current = await trx('sms_offers').where({ id: offer.id }).forUpdate().first('id', 'status');
     if (!current || current.status !== 'open') throw guardError('offer_closed');
     const moved = await trx('reschedule_log').where({ scheduled_service_id: visitId })
@@ -121,6 +127,9 @@ function buildMoveGuard({ decisionId, offer, visitId, customerId, now, target, e
   };
 }
 
+// A notice that did not go through gives its claim back, up to this many tries.
+const MAX_EFFECT_ATTEMPTS = 3;
+const releaseEffects = (dbh) => dbh.raw("(COALESCE(execution, '{}'::jsonb) - 'effects_started_at') || jsonb_build_object('effects_attempts', COALESCE((execution->>'effects_attempts')::int, 0) + 1)");
 const stampEffects = (dbh, key) => dbh.raw("COALESCE(execution, '{}'::jsonb) || jsonb_build_object(?::text, to_jsonb(now()))", [key]);
 
 /**
@@ -128,7 +137,8 @@ const stampEffects = (dbh, key) => dbh.raw("COALESCE(execution, '{}'::jsonb) || 
  * (effects_started_at on the decision) is written before the send, so a
  * process that died between the move's commit and this point leaves a moved
  * decision with no claim, which finishMoveEffects picks up; one that died
- * mid-send is never sent twice. The sync is pinned to the slot this move
+ * mid-send is never sent twice. A sync that reports failure releases the
+ * claim for the cron to retry. The sync is pinned to the slot this move
  * committed, so it never overwrites a newer move's reminder state.
  */
 async function notifySingleMove({ dbh, decisionId, visitId, date, start, deps = {} }) {
@@ -141,12 +151,21 @@ async function notifySingleMove({ dbh, decisionId, visitId, date, start, deps = 
   try {
     // Re-arms the reminders and sends the standard rescheduled text. After
     // hours the text is held and the confirmation sweep sends it at 8 AM.
-    await (deps.reminders || require('./appointment-reminders')).handleReschedule(visitId, `${date}T${start}`, { expectSchedule: { date, windowStart: start } });
-    await dbh('sms_offer_decisions').where({ id: decisionId }).update({ execution: stampEffects(dbh, 'effects_done_at') });
+    // handleReschedule never throws: it returns the reminder row when the
+    // sync ran and null when it could not (no row yet, or an error inside).
+    const synced = await (deps.reminders || require('./appointment-reminders')).handleReschedule(visitId, `${date}T${start}`, { expectSchedule: { date, windowStart: start } });
+    if (synced) {
+      await dbh('sms_offer_decisions').where({ id: decisionId }).update({ execution: stampEffects(dbh, 'effects_done_at') });
+      return true;
+    }
   } catch (err) {
     logger.error(`[sms-scheduling-act] reminder sync failed for ${visitId}: ${errorCode(err)}`);
   }
-  return true;
+  // Not done: the claim goes back, and the cron tries again (a bounded number
+  // of times, so a visit with no reminder row is not swept forever).
+  await dbh('sms_offer_decisions').where({ id: decisionId }).update({ execution: releaseEffects(dbh) })
+    .catch((err) => logger.warn(`[sms-scheduling-act] effects release failed for ${decisionId}: ${errorCode(err)}`));
+  return false;
 }
 
 const EFFECTS_MIN_AGE_MS = 2 * 60000;
@@ -168,6 +187,7 @@ async function finishMoveEffects({ now = new Date(), dbh = db, deps = {} } = {})
       .where('d.executed_at', '>=', new Date(nowMs - EFFECTS_LOOKBACK_MS))
       .where('d.executed_at', '<=', new Date(nowMs - EFFECTS_MIN_AGE_MS))
       .whereRaw("d.execution->>'effects_started_at' IS NULL")
+      .whereRaw("COALESCE((d.execution->>'effects_attempts')::int, 0) < ?", [MAX_EFFECT_ATTEMPTS])
       .whereRaw("COALESCE(d.execution->>'series', 'false') <> 'true'")
       .limit(20)
       .select('d.id', 'd.execution', 'o.scheduled_service_id');

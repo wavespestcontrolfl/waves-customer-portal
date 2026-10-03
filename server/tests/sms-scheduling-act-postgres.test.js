@@ -107,6 +107,9 @@ describeOrSkip('sms scheduling move guard on PostgreSQL', () => {
     // Someone at Waves already answered on that line.
     cases['newer_message (outbound)'] = (trx, s) => trx('sms_log').insert({ customer_id: s.customerId, direction: 'outbound', from_phone: '+19415550199', to_phone: PHONE,
       message_body: 'Let me check Wednesday for you', status: 'sent', created_at: new Date('2040-03-01T14:59:50Z'), message_type: 'manual' });
+    // An office-review booking rolled back to unconfirmed: same date, window and status.
+    cases.office_review_unconfirmed = (trx, s) => trx('scheduled_services').where({ id: s.visitId })
+      .update({ source_action: require('../services/call-booking-source-actions').OFFICE_REVIEW_PENDING_SOURCE_ACTIONS[0], customer_confirmed: false });
     cases['visit_changed (status)'] = (trx, s) => trx('scheduled_services').where({ id: s.visitId }).update({ status: 'pending' });
     for (const [name, arrange] of Object.entries(cases)) {
       const reason = name.split(' ')[0];
@@ -122,7 +125,7 @@ describeOrSkip('sms scheduling move guard on PostgreSQL', () => {
 
   test('a moved decision whose notice never started is finished once, pinned to its slot; a series move is left to the reconciler', () => inTrx(async (trx) => {
     const s = await seed(trx);
-    const reminders = { handleReschedule: jest.fn(async () => null) };
+    const reminders = { handleReschedule: jest.fn(async () => ({ id: 'reminder-1' })) };
     const moved = (execution) => trx('sms_offer_decisions').where({ id: s.decisionId })
       .update({ execution_status: 'moved', execution: JSON.stringify(execution), executed_at: new Date('2040-03-01T15:00:00Z') });
     const sweep = (now) => act.finishMoveEffects({ now: new Date(now), dbh: trx, deps: { reminders } });
@@ -143,6 +146,21 @@ describeOrSkip('sms scheduling move guard on PostgreSQL', () => {
     // Claimed once: a second sweep sends nothing.
     expect(await sweep('2040-03-01T15:25:00Z')).toEqual({ finished: 0 });
     expect(reminders.handleReschedule).toHaveBeenCalledTimes(1);
+  }));
+
+  test('a notice that reports failure gives its claim back and is retried, at most three times', () => inTrx(async (trx) => {
+    const s = await seed(trx);
+    // handleReschedule returns null when it could not sync (it never throws).
+    const reminders = { handleReschedule: jest.fn(async () => null) };
+    await trx('sms_offer_decisions').where({ id: s.decisionId })
+      .update({ execution_status: 'moved', execution: JSON.stringify({ ...TARGET, series: false }), executed_at: new Date('2040-03-01T15:00:00Z') });
+    const sweep = () => act.finishMoveEffects({ now: new Date('2040-03-01T15:10:00Z'), dbh: trx, deps: { reminders } });
+    for (let i = 0; i < 4; i += 1) expect(await sweep()).toEqual({ finished: 0 });
+    expect(reminders.handleReschedule).toHaveBeenCalledTimes(3);
+    const row = await trx('sms_offer_decisions').where({ id: s.decisionId }).first('execution');
+    expect(row.execution.effects_attempts).toBe(3);
+    expect(row.execution.effects_done_at).toBeUndefined();
+    expect(row.execution.effects_started_at).toBeUndefined();
   }));
 
   test('a decision whose claim is not held is refused', () => inTrx(async (trx) => {
