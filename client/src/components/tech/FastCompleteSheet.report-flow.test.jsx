@@ -68,7 +68,7 @@ function makeRequest({
   const completes = [...complete];
   const request = vi.fn(async (path, options) => {
     calls.push({ path, options, body: options?.body ? JSON.parse(options.body) : null });
-    if (path.split('?')[0].endsWith('/pest-recap/context')) return { ok: true, eligible: true, service, products: typeof products === 'function' ? products() : products, ...context };
+    if (path.split('?')[0].endsWith('/pest-recap/context')) return { ok: true, eligible: true, reportFlow: true, service, products: typeof products === 'function' ? products() : products, ...context };
     if (path.endsWith('/tech-rating-allowed')) return rating;
     if (path.endsWith('/tech-tips')) return { available: false };
     if (path.split('?')[0].endsWith('/promises')) return typeof promises === 'function' ? promises(path) : promises;
@@ -113,8 +113,14 @@ describe('a report-flow sheet routed from a stale schedule row', () => {
     expect(screen.queryByRole('button', { name: 'Generate AI report' })).toBeNull();
   });
 
-  test.each([[{ reportFlow: true }], [{}]])('report flow live, or a server that predates the field (%j): the sheet opens', async (context) => {
-    await openSheet(makeRequest({ context }));
+  test('an answer without the field is not a yes: the visit is sent to the full form', async () => {
+    const request = makeRequest({ context: { reportFlow: undefined } });
+    render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} onCompleted={() => {}} />);
+    expect(await screen.findByText('This visit needs the full form.')).toBeTruthy();
+  });
+
+  test('report flow live: the sheet opens', async () => {
+    await openSheet(makeRequest());
     expect(screen.queryByText('This visit needs the full form.')).toBeNull();
     expect(screen.getByRole('button', { name: 'Generate AI report' })).toBeTruthy();
   });
@@ -404,7 +410,7 @@ describe('generate and read', () => {
     request.mockImplementation(async (path, options) => {
       request.calls.push({ path, options, body: options?.body ? JSON.parse(options.body) : null });
       if (path.endsWith('/voice-facts')) throw Object.assign(new Error('down'), { status: 503 });
-      if (path.split('?')[0].endsWith('/pest-recap/context')) return { ok: true, eligible: true, service: REGULAR, products: CATALOG };
+      if (path.split('?')[0].endsWith('/pest-recap/context')) return { ok: true, eligible: true, reportFlow: true, service: REGULAR, products: CATALOG };
       if (path.endsWith('/tech-rating-allowed')) return { allowed: true, firstVisit: false, scaleLabels: null };
       if (path === '/admin/schedule/generate-report') return { report: REPORT };
       if (path.endsWith('/treatment-zone')) return { enabled: true, treatmentZone: null };

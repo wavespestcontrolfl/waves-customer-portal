@@ -69,7 +69,7 @@ function makeRequest({ fill = FILL, fillError = null } = {}) {
   const calls = [];
   const request = vi.fn(async (path, options) => {
     calls.push({ path, options });
-    if (path.split('?')[0].endsWith('/pest-recap/context')) return { ok: true, eligible: true, service: CONTEXT_SERVICE, products: CATALOG };
+    if (path.split('?')[0].endsWith('/pest-recap/context')) return { ok: true, eligible: true, reportFlow: true, service: CONTEXT_SERVICE, products: CATALOG };
     if (path.endsWith('/tech-rating-allowed')) return { allowed: true, scaleLabels: null };
     if (path.endsWith('/tech-tips')) return { available: false };
     if (path.endsWith('/photos')) return { photos: [] };

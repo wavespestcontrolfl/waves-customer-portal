@@ -199,13 +199,13 @@ const routedTypedOf = (service) => (service?.reportFlow === true && service.type
 
 // Whether the live visit is still one this sheet takes as it was routed: a
 // lane visit its lane, a typed visit its form, any other one the short form.
-// A plain pest visit routed into the report flow also needs that flow still
-// live (context.reportFlow; a server that predates the field sends none,
-// which counts as live).
+// A plain pest visit routed into the report flow also needs the live context
+// to say that flow is on (context.reportFlow); an answer without the field is
+// not a yes.
 function routeStillHolds(context, service) {
   if (service?.typedFlow) return context?.typedType === service.typedType;
   if (service?.laneFlow) return context?.lane === service.laneKey;
-  if (service?.reportFlow === true && context?.reportFlow === false) return false;
+  if (service?.reportFlow === true && context?.reportFlow !== true) return false;
   return context?.eligible === true;
 }
 
