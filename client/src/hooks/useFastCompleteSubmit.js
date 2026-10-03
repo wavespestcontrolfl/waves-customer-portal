@@ -15,6 +15,11 @@ const SAVED_CODES = new Set(['service_already_completed', 'completion_resume_pay
 const IN_PROGRESS_CODES = new Set(['service_completion_pending', 'completion_pending', 'completion_side_effects_running']);
 const DEFINITIVE_OUTCOMES = new Set(['saved', 'correctable', 'terminal']);
 const CONFIRM_FLAGS = { report_rules_review: 'reportRulesConfirmed', promise_marks_changed: 'promiseMarksConfirmed' };
+// A saved completion whose stored copy this device could not clear (the
+// delete and its retry both left it) says so: a later scan may offer it, and
+// its Retry resends the same key, so it only confirms this save.
+const SAVED_COPY_NOTICE = 'This device could not clear its saved copy. If this visit offers it again, Retry only confirms this save.';
+const savedNotice = (cleared) => (cleared ? {} : { notice: SAVED_COPY_NOTICE });
 const STORAGE_WARNING = 'This device can’t save a reload-safe copy right now. Keep this screen open. You can still send after this warning.';
 
 function completionFailureOutcome(err, { confirmable = false } = {}) {
@@ -135,6 +140,23 @@ export default function useFastCompleteSubmit({
     return true;
   }, []);
 
+  // After a saved completion: removes the exact row the send stood on. A
+  // delete that removed nothing is re-read: another tab may have removed the
+  // row, or saved a newer revision, which stays. While this exact body is
+  // still there (or storage cannot be read), the delete runs once more, and a
+  // row that still stands is reported, so a later scan offering this visit's
+  // saved completion is explained (GitHub Codex P2 on 0fdeda8a25).
+  const clearSaved = useCallback(async (scope, storedBody) => {
+    const stillStored = async () => {
+      const current = await getFastCompletionAttempt(scope.serviceId, scope.operatorId);
+      return !current.available || JSON.stringify(current.attempt?.body) === JSON.stringify(storedBody);
+    };
+    if (await clearStored(scope, storedBody)) return true;
+    if (!(await stillStored())) return true;
+    if (await clearStored(scope, storedBody)) return true;
+    return !(await stillStored());
+  }, [clearStored]);
+
   const persistPrepared = useCallback(async (scope, body, summary) => {
     if (!scope.serviceId || !scope.operatorId) return 'send';
     const stored = await putFastCompletionAttempt(
@@ -181,7 +203,8 @@ export default function useFastCompleteSubmit({
 
   const settleFailure = useCallback(async (err, scope, body, summary, storedBody) => {
     const outcome = completionFailureOutcome(err, { confirmable });
-    const removed = DEFINITIVE_OUTCOMES.has(outcome) ? await clearStored(scope, storedBody) : true;
+    const clear = outcome === 'saved' ? clearSaved : clearStored;
+    const removed = DEFINITIVE_OUTCOMES.has(outcome) ? await clear(scope, storedBody) : true;
     if (!sameScope(scopeRef.current, scope)) return;
     if (outcome === 'correctable' && !removed && persistedBodyRef.current) {
       rejectedBodyRef.current = persistedBodyRef.current;
@@ -195,7 +218,7 @@ export default function useFastCompleteSubmit({
     }
     if (outcome === 'saved') {
       setFailure(null);
-      setDone({ summary: 'This visit was already saved. The office will finish anything still pending.' });
+      setDone({ summary: 'This visit was already saved. The office will finish anything still pending.', ...savedNotice(removed) });
       return;
     }
     if (outcome === 'confirm') {
@@ -205,7 +228,7 @@ export default function useFastCompleteSubmit({
     }
     setFailure(outcome === 'correctable' ? null : outcome);
     setError(outcomeMessage(outcome, err));
-  }, [clearStored, confirmable]);
+  }, [clearStored, clearSaved, confirmable]);
 
   const submit = useCallback(async (buildBody, summary) => {
     if (inFlight.current || recovering) return;
@@ -246,12 +269,12 @@ export default function useFastCompleteSubmit({
       if (persistence !== 'send') return;
       storedBody = persistedBodyRef.current;
       const result = await request(`${base}/complete`, { method: 'POST', body: JSON.stringify(body) });
-      await clearStored(scope, storedBody);
+      const cleared = await clearSaved(scope, storedBody);
       if (!sameScope(scopeRef.current, scope)) return;
       pendingBodyRef.current = null;
       pendingSummaryRef.current = '';
       setFailure(null);
-      setDone({ summary: heldSummary, customerText: result?.customerText || null, response: result || null });
+      setDone({ summary: heldSummary, customerText: result?.customerText || null, response: result || null, ...savedNotice(cleared) });
     } catch (err) {
       await settleFailure(err, scope, body, heldSummary, storedBody);
     } finally {
@@ -260,7 +283,7 @@ export default function useFastCompleteSubmit({
         inFlight.current = false;
       }
     }
-  }, [base, request, recovering, clearStored, persistPrepared, settleFailure]);
+  }, [base, request, recovering, clearStored, clearSaved, persistPrepared, settleFailure]);
 
   const retry = useCallback(() => {
     if (!pendingBodyRef.current) return;

@@ -440,7 +440,7 @@ export default function FastCompleteTreeShrubSheet({ service, request, operatorI
 }
 
 function SheetBody({ service, request, ctx, submission, locked, dictationPending, onDictationPending, onCompleted, onFullForm, isMobile }) {
-  if (submission.done) return <SavedView service={service} summary={submission.done.summary} onCompleted={onCompleted} />;
+  if (submission.done) return <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={onCompleted} />;
   if (submission.recovering) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Checking for an unfinished completion…</ActionFeedback>;
   if (submission.restored) return <RecoveredCompletion submission={submission} />;
   if (ctx.loading) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Loading…</ActionFeedback>;

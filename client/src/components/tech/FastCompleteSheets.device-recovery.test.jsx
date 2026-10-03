@@ -49,6 +49,28 @@ for (const [name, Sheet, reportFlow] of [
     fireEvent.click(next);
     expect(completed).toHaveBeenCalledTimes(1);
   });
+
+  test(`${name} says when this device could not clear the saved copy (GitHub Codex P2 on 0fdeda8a25)`, async () => {
+    const body = { idempotencyKey: 'saved-key', technicianNotes: 'Retained exact work' };
+    await putFastCompletionAttempt('visit-a', 'tech-a', { body, summary: 'Retained visit summary' });
+    let release;
+    const request = vi.fn((path) => {
+      if (!path.endsWith('/complete')) return Promise.reject(Object.assign(new Error('Context unavailable'), { status: 503 }));
+      return new Promise((resolve) => { release = () => resolve({ success: true }); });
+    });
+    render(<Sheet service={{ id: 'visit-a', reportFlow }} operatorId="tech-a" request={request}
+      onClose={vi.fn()} onCompleted={vi.fn()} onFullForm={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry', exact: true }));
+    await waitFor(() => expect(release).toBeTypeOf('function'));
+    const store = globalThis.indexedDB;
+    globalThis.indexedDB = undefined;
+    try {
+      release();
+      expect(await screen.findByText(/could not clear its saved copy/)).toBeInTheDocument();
+    } finally { globalThis.indexedDB = store; }
+    expect(screen.getByRole('button', { name: 'Next stop' })).toBeInTheDocument();
+    expect((await getFastCompletionAttempt('visit-a', 'tech-a')).attempt.body).toEqual(body);
+  });
 }
 
 

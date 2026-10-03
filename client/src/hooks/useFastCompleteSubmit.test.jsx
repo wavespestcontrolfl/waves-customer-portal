@@ -388,3 +388,49 @@ describe('a late response after leaving and reopening the same visit (handoff P1
     expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt?.body).toEqual(newer);
   });
 });
+
+describe('a saved completion whose stored copy will not clear (GitHub Codex P2 on 0fdeda8a25)', () => {
+  const attempt = { idempotencyKey: 'saved-copy-key', ...photoBody };
+
+  async function sendRestored(answer) {
+    await putFastCompletionAttempt('svc-1', 'tech-a', { body: attempt, summary: 'Saved visit' });
+    let release;
+    const request = vi.fn(() => new Promise((resolve) => { release = resolve; }).then(answer));
+    const view = renderHook(() => useFastCompleteSubmit({ ...scope, request }));
+    await waitFor(() => expect(view.result.current.restored).toBe(true));
+    let sent;
+    act(() => { sent = view.result.current.retry(); });
+    await waitFor(() => expect(request).toHaveBeenCalledTimes(1));
+    return { view, release: async () => { await act(async () => { release(); await sent; }); } };
+  }
+
+  it.each([
+    ['a receipt', () => ({ success: true, receiptId: 'receipt-1' })],
+    ['an already-saved answer', () => { throw Object.assign(new Error('Already saved'), { status: 409, code: 'service_already_completed' }); }],
+  ])('%s says the copy stayed on this device, after trying the delete again, and keeps it', async (_label, answer) => {
+    const { view, release } = await sendRestored(answer);
+    const store = globalThis.indexedDB;
+    globalThis.indexedDB = undefined;
+    try { await release(); } finally { globalThis.indexedDB = store; }
+    expect(view.result.current.done?.notice).toMatch(/could not clear its saved copy/);
+    expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt.body).toEqual(attempt);
+  });
+
+  it('a newer revision another tab saved stays, and the save says nothing of it', async () => {
+    const { view, release } = await sendRestored(() => ({ success: true }));
+    const newer = { ...attempt, reportRulesConfirmed: true };
+    await replaceFromSecondConnection('svc-1', 'tech-a', newer, 'Newer tab');
+    await release();
+    expect(view.result.current.done).toBeTruthy();
+    expect(view.result.current.done.notice).toBeUndefined();
+    expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt.body).toEqual(newer);
+  });
+
+  it('a copy that clears says nothing', async () => {
+    const { view, release } = await sendRestored(() => ({ success: true }));
+    await release();
+    expect(view.result.current.done).toBeTruthy();
+    expect(view.result.current.done.notice).toBeUndefined();
+    expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt).toBeNull();
+  });
+});

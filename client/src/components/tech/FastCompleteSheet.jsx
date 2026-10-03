@@ -595,7 +595,7 @@ function SheetBody({ service, request, ctx, submission, locked, photos, onOverla
   // tech marked shows there.
   if (submission.done && (!reportFlow || submission.restored)) {
     return (
-      <SavedView service={service} summary={submission.done.summary} onCompleted={onCompleted}>
+      <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={onCompleted}>
         {reportFlow ? <>
           <SentSummary result={submission.done.response} base={`/admin/dispatch/${service.id}`} request={request} followupBooking={ctx.followupBooking} />
           <CollectPayment result={submission.done.response} />
@@ -1643,7 +1643,7 @@ function ReportFlowForm({
       description: visitPromises.promises.find((promise) => promise.id === mark.id)?.description || '',
     }));
     return (
-      <SavedView service={service} summary={submission.done.summary} onCompleted={onCompleted}>
+      <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={onCompleted}>
         <SentSummary result={submission.done.response} doneMarks={doneMarks} base={base} request={request} followupBooking={ctx.followupBooking} />
         <CollectPayment result={submission.done.response} />
       </SavedView>
