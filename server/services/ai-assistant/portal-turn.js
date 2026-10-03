@@ -117,9 +117,12 @@ function deadlineTransaction(trx, context, stage) {
       return bounded(Reflect.apply(target, target, args));
     },
     get(target, property) {
-      if (property === 'raw') return (...args) => bounded(target.raw(...args));
       const value = Reflect.get(target, property, target);
-      return typeof value === 'function' ? value.bind(target) : value;
+      if (typeof value !== 'function') return value;
+      return (...args) => {
+        const result = Reflect.apply(value, target, args);
+        return result && typeof result.timeout === 'function' ? bounded(result) : result;
+      };
     },
   });
 }
@@ -457,6 +460,25 @@ async function recoverCommittedResult(context) {
   }
 }
 
+async function recoverOwnedResult(context, resolvedResult) {
+  const committed = await recoverCommittedResult(context);
+  if (committed || !context || !resolvedResult) return committed;
+  try {
+    const owned = await context.query(
+      db('portal_chat_requests').where({
+        id: context.requestRowId,
+        state: 'processing',
+        attempt_id: context.attemptId,
+      }).where('lease_expires_at', '>', db.fn.now()).first('id'),
+      'attempt ownership confirmation',
+      true,
+    );
+    return owned ? resolvedResult : null;
+  } catch {
+    return null;
+  }
+}
+
 // A response checkpoint is already the customer-visible truth. Promoting its
 // receipt to completed is cleanup: try it, but never trade the known response
 // for a fallback if that UPDATE is unavailable or misses its deadline.
@@ -575,9 +597,8 @@ async function runPortalTurn({ requestId, customerId, propertyId = null, channel
   } catch (err) {
     if (err?.status === 409) throw err;
     logUnexpectedFailure(err, `[portal-chat] request coordination failed: ${err.message}`, { customerId, requestId });
-    const committed = await recoverCommittedResult(turn);
+    const committed = await recoverOwnedResult(turn, resolvedResult);
     return committed
-      || resolvedResult
       || fallbackResult(requestId, TIMEOUT_REPLY, { ...turn?.fallbackExtras(), retryable: true });
   } finally {
     clearTimeout(workTimer);
