@@ -37,6 +37,7 @@ router.use((_req, res, next) => (typedDecisionsLive() ? next() : res.status(404)
 const TABLE = 'decision_reviews';
 const SMS_SUBJECT = 'sms_log';
 const CALL_SUBJECT = 'call_log';
+const VISIT_SUBJECT = 'scheduled_services';
 const LABEL_STATUSES = ['unreviewed', 'suspected_error', 'confirmed_error', 'disagreement', 'confirmed_correct'];
 const SAMPLED_FOR = ['disagreement', 'random_audit', 'heldout'];
 const VERDICT_STATUS = { jev_right: 'confirmed_correct', jev_wrong: 'confirmed_error', unclear: 'disagreement' };
@@ -139,6 +140,16 @@ async function loadSubjects(rows) {
         });
       }
     }
+    // A visit (visit_access): the state is rebuilt exactly as the sweep built
+    // it, already redacted, so the reviewer reads what the models read.
+    const visitIds = subjectIds(VISIT_SUBJECT);
+    if (visitIds.length) {
+      const { liveVisitAccess } = require('../services/typed-decisions/visit-access-shadow');
+      await Promise.all(visitIds.map(async (id) => {
+        const visit = await liveVisitAccess(id, db).catch(() => null);
+        if (visit) subjects.set(`${VISIT_SUBJECT}:${id}`, { type: VISIT_SUBJECT, text: visit.text, at: visit.at, hash: visit.hash });
+      }));
+    }
   } catch (err) {
     logger.warn(`[typed-decisions] review subject read failed: ${err.message}`);
   }
@@ -231,6 +242,10 @@ async function liveSubjectHash(target) {
   if (target.subject_type === CALL_SUBJECT) {
     const call = await db('call_log').where({ id: target.subject_id }).first('transcription');
     return call ? callSubjectHash(call.transcription) : null;
+  }
+  if (target.subject_type === VISIT_SUBJECT) {
+    const visit = await require('../services/typed-decisions/visit-access-shadow').liveVisitAccess(target.subject_id, db);
+    return visit ? visit.hash : null;
   }
   const text = await db('sms_log').where({ id: target.subject_id }).modify(excludeUnresolvedSendReservations)
     .first('from_phone', 'to_phone', 'message_body', 'created_at');
