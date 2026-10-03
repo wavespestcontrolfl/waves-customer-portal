@@ -64,7 +64,12 @@ const LIVE = {
   status: 'published',
   astro_status: 'live',
   astro_live_url: 'https://www.wavespestcontrol.com/pest-control/get-rid-of-ghost-ants-in-sarasota/',
+  astro_published_at: '2026-09-20T12:00:00Z',
 };
+// The registry's live checks of a post, before and after the portal saw it go
+// live (LIVE.astro_published_at).
+const CHECKED_BEFORE_LIVE = '2026-09-19T05:00:00Z';
+const CHECKED_SINCE_LIVE = '2026-09-21T05:00:00Z';
 
 // A content registry row the daily live sweep verified on the hub.
 const REGISTRY_LIVE = {
@@ -249,6 +254,18 @@ function recordingKnex(rowsByTable) {
       if (column === 'db_blog_id') postIds = ids.map(String);
       return chain;
     };
+    // How many of the table's rows hold each word (holderCounts), counted as
+    // the database would; a table served page by page is not counted.
+    chain.first = async (raw) => {
+      calls.push([`${table} first`, raw && raw.sql, raw && raw.bindings]);
+      const rows = Array.isArray(rowsByTable[table]) ? rowsByTable[table] : [];
+      const patterns = [...new Set((raw && raw.bindings) || [])];
+      const texts = (row) => [row.title, row.h1, row.meta_description, row.target_keyword, row.keyword];
+      return Object.fromEntries(patterns.map((pattern, i) => {
+        const re = new RegExp(pattern.replace(/\\[mM]/g, '\\b'), 'i');
+        return [`d${i}`, rows.filter((row) => texts(row).some((text) => re.test(String(text || '')))).length];
+      }));
+    };
     chain.select = async (...args) => {
       calls.push([`${table} select`, ...args]);
       if (postIds) return (rowsByTable[`${table}:swept`] || []).filter((row) => postIds.includes(String(row.db_blog_id)));
@@ -257,6 +274,7 @@ function recordingKnex(rowsByTable) {
     };
     return chain;
   };
+  knex.raw = (sql, bindings) => ({ sql, bindings });
   knex.calls = calls;
   return knex;
 }
@@ -266,7 +284,8 @@ describe('searchReportBlogPosts', () => {
     const knex = recordingKnex({ content_registry: [REGISTRY_LIVE] });
     await searchReportBlogPosts(knex, 'ghost ants');
     expect(knex.calls).toEqual(expect.arrayContaining([
-      ['content_registry where', { content_type: 'blog', workflow_status: 'published', astro_status: 'present', live_status: 'live' }],
+      ['content_registry where', { content_type: 'blog', workflow_status: 'published', astro_status: 'present' }],
+      ['content_registry whereIn', 'live_status', ['live', 'live_visible']],
       ['content_registry whereRaw', 'COALESCE(noindex_detected, false) = false'],
       ['content_registry inner orWhereRaw', "COALESCE(title, '') ~* ?", ['\\m(?:ghost|ghosts)\\M']],
       ['content_registry inner orWhereRaw', "COALESCE(meta_description, '') ~* ?", ['\\m(?:ants|ant|antses)\\M']],
@@ -278,8 +297,8 @@ describe('searchReportBlogPosts', () => {
     ]));
   });
 
-  test('each source orders by how many words a row holds before its read cap (GitHub Codex P2 on #5652)', async () => {
-    const knex = recordingKnex({ content_registry: [REGISTRY_LIVE] });
+  test('each source orders by the ranking the results use, before its read cap (GitHub Codex P2 on #5652 and on 7568aea485)', async () => {
+    const knex = recordingKnex({ content_registry: [REGISTRY_LIVE], blog_posts: [LIVE] });
     await searchReportBlogPosts(knex, 'ghost ants');
     for (const [table, newest] of [['content_registry', 'published_at'], ['blog_posts', 'astro_published_at']]) {
       const calls = knex.calls.filter(([name]) => name.startsWith(`${table} `));
@@ -288,10 +307,27 @@ describe('searchReportBlogPosts', () => {
       expect(order).toBeGreaterThanOrEqual(0);
       expect(order).toBeLessThan(limit);
       const [, sql, bindings] = calls[order];
-      expect(sql).toMatch(new RegExp(`^\\(CASE WHEN .+ THEN 1 ELSE 0 END \\+ CASE WHEN .+ THEN 1 ELSE 0 END\\) DESC, ${newest} DESC NULLS LAST, id$`));
-      expect(bindings).toEqual(expect.arrayContaining(['\\m(?:ghost|ghosts)\\M', '\\m(?:ants|ant|antses)\\M']));
+      // Every word, then the rarest words (a weight a word), then where the
+      // words sit, then newest, then id.
+      expect(sql).toMatch(new RegExp(`^\\(CASE WHEN .+ > 0 AND .+ > 0 THEN 1 ELSE 0 END\\) DESC, \\(CASE WHEN .+ > 0 THEN \\?::float8 ELSE 0 END \\+ CASE WHEN .+ > 0 THEN \\?::float8 ELSE 0 END\\) DESC, \\(CASE .+ END \\+ CASE .+ END\\) DESC, ${newest} DESC NULLS LAST, id$`));
+      // One binding a placeholder; the weights are the words' rarity over
+      // both sources: "ghost" in 2 posts, "ants" in 2.
+      expect(bindings).toHaveLength((sql.match(/\?/g) || []).length);
+      expect(bindings.filter((value) => typeof value === 'number')).toEqual([1 / 2, 1 / 2]);
       expect(calls[limit]).toEqual([`${table} limit`, 500]);
     }
+  });
+
+  test('the rarity of each word is counted over both sources before either is read', async () => {
+    const knex = recordingKnex({ content_registry: [REGISTRY_LIVE], blog_posts: [LIVE] });
+    await searchReportBlogPosts(knex, 'ghost ants');
+    const firstCount = knex.calls.findIndex(([name]) => name.endsWith(' first'));
+    const firstRead = knex.calls.findIndex(([name]) => name.endsWith(' select'));
+    expect(knex.calls.filter(([name]) => name.endsWith(' first')).map(([name]) => name)).toEqual(['content_registry first', 'blog_posts first']);
+    expect(firstCount).toBeLessThan(firstRead);
+    const [, sql, bindings] = knex.calls[firstCount];
+    expect(sql).toBe([0, 1].map((i) => `COUNT(*) FILTER (WHERE (COALESCE(title, '') ~* ? OR COALESCE(h1, '') ~* ? OR COALESCE(target_keyword, '') ~* ? OR COALESCE(meta_description, '') ~* ?))::int AS d${i}`).join(', '));
+    expect(bindings).toHaveLength(8);
   });
 
   test('a "mouse" search finds a post about mice', async () => {
@@ -381,17 +417,44 @@ describe('searchReportBlogPosts', () => {
       blog_posts: [LIVE, { ...LIVE, id: '77777777-7777-4777-8777-777777777777', astro_live_url: 'https://www.wavespestcontrol.com/pest-control/ghost-ants-after-rain/', title: 'Ghost Ants After Rain' }],
     });
     const posts = await searchReportBlogPosts(knex, 'ghost ants');
-    expect(posts.map((post) => post.url)).toEqual([LIVE.astro_live_url, 'https://www.wavespestcontrol.com/pest-control/ghost-ants-after-rain/']);
-    expect(posts[0].id).toBe('66666666-6666-4666-8666-666666666666');
+    // Equal matches, newest first: the portal post went live 2026-09-20, the
+    // registry's 2026-08-01. The post in both comes back once, as the registry's.
+    expect(posts.map((post) => post.url)).toEqual(['https://www.wavespestcontrol.com/pest-control/ghost-ants-after-rain/', LIVE.astro_live_url]);
+    expect(posts[1].id).toBe('66666666-6666-4666-8666-666666666666');
   });
 
-  test('a portal post the sweep found gone never comes back on its stale live stamp (GitHub Codex P1 r5 on #5652)', async () => {
-    const gone = { ...REGISTRY_LIVE, id: '44444444-4444-4444-8444-000000000002', db_blog_id: LIVE.id, live_status: 'not_found', live_url: LIVE.astro_live_url, canonical_url: LIVE.astro_live_url };
+  test('a portal post the sweep found gone since it went live never comes back on its stale live stamp (GitHub Codex P1 r5 on #5652)', async () => {
+    const gone = { ...REGISTRY_LIVE, id: '44444444-4444-4444-8444-000000000002', db_blog_id: LIVE.id, live_status: 'not_found', live_status_checked_at: CHECKED_SINCE_LIVE, live_url: LIVE.astro_live_url, canonical_url: LIVE.astro_live_url };
     const knex = recordingKnex({ blog_posts: [LIVE], 'content_registry:swept': [gone] });
     expect(await searchReportBlogPosts(knex, 'ghost ants')).toEqual([]);
     expect(knex.calls).toEqual(expect.arrayContaining([['content_registry whereIn', 'db_blog_id', [LIVE.id]]]));
-    // Not swept yet: the portal's own rule.
+    // Noindex since it went live: refused too.
+    const noindex = { ...gone, live_status: 'live', noindex_detected: true };
+    expect(await searchReportBlogPosts(recordingKnex({ blog_posts: [LIVE], 'content_registry:swept': [noindex] }), 'ghost ants')).toEqual([]);
+    // No registry row yet: the portal's own rule.
     expect((await searchReportBlogPosts(recordingKnex({ blog_posts: [LIVE] }), 'ghost ants')).map((post) => post.id)).toEqual([LIVE.id]);
+  });
+
+  test('a newly live portal post the registry has not judged since comes back on the portal\'s rule (GitHub Codex P2 on 7568aea485)', async () => {
+    const row = { ...REGISTRY_LIVE, id: '44444444-4444-4444-8444-000000000004', db_blog_id: LIVE.id, live_url: LIVE.astro_live_url, canonical_url: LIVE.astro_live_url };
+    for (const unjudged of [
+      // The post-publish check's verdict, on a row synced before the post
+      // existed (its source still reads missing).
+      { ...row, live_status: 'live_visible', astro_status: 'missing', live_status_checked_at: null },
+      // The sweep's last word predates the post going live.
+      { ...row, live_status: 'not_found', live_status_checked_at: CHECKED_BEFORE_LIVE },
+    ]) {
+      const knex = recordingKnex({ blog_posts: [LIVE], 'content_registry:swept': [unjudged] });
+      expect((await searchReportBlogPosts(knex, 'ghost ants')).map((post) => post.url)).toEqual([LIVE.astro_live_url]);
+    }
+  });
+
+  test('a registry post the post-publish check verified live is found before the sweep looks (GitHub Codex P2 on 7568aea485)', async () => {
+    const fresh = registryRow('aaaaaaaa-0000-4000-8000-000000000041', 'Ghost Ants After the First Rain', { live_status: 'live_visible' });
+    expect((await searchReportBlogPosts(recordingKnex({ content_registry: [fresh] }), 'ghost ants')).map((post) => post.id)).toEqual([fresh.id]);
+    // Anything else the check found is not live.
+    const review = { ...fresh, live_status: 'visibility_review' };
+    expect(await searchReportBlogPosts(recordingKnex({ content_registry: [review] }), 'ghost ants')).toEqual([]);
   });
 
   test('a swept portal post is found by its registry row\'s current text, never the portal\'s stale title (GitHub Codex P2 on 8117bdc9dc)', async () => {
@@ -442,14 +505,34 @@ describe('resolveReportBlogPostPick', () => {
     expect(read).not.toHaveBeenCalled();
   });
 
-  test('a portal pick the sweep has a row for stands on the sweep: gone or noindex is refused (GitHub Codex P1 r5 on #5652)', async () => {
-    const swept = { ...REGISTRY_LIVE, id: '44444444-4444-4444-8444-000000000001', db_blog_id: LIVE.id, live_url: LIVE.astro_live_url, canonical_url: LIVE.astro_live_url };
+  test('a portal pick the sweep has a row for stands on the sweep: gone or noindex since it went live is refused (GitHub Codex P1 r5 on #5652)', async () => {
+    const swept = { ...REGISTRY_LIVE, id: '44444444-4444-4444-8444-000000000001', db_blog_id: LIVE.id, live_url: LIVE.astro_live_url, canonical_url: LIVE.astro_live_url, live_status_checked_at: CHECKED_SINCE_LIVE };
     expect(await resolveReportBlogPostPick(readerOf({ blog_posts: LIVE, 'content_registry:swept': [{ ...swept, live_status: 'not_found' }] }), LIVE.id))
       .toEqual({ post: null, rejected: true });
     expect(await resolveReportBlogPostPick(readerOf({ blog_posts: LIVE, 'content_registry:swept': [{ ...swept, noindex_detected: true }] }), LIVE.id))
       .toEqual({ post: null, rejected: true });
     expect((await resolveReportBlogPostPick(readerOf({ blog_posts: LIVE, 'content_registry:swept': [swept] }), LIVE.id)).post)
       .toMatchObject({ url: LIVE.astro_live_url });
+  });
+
+  test('a newly live portal pick the registry has not judged since stands on the portal\'s rule (GitHub Codex P2 on 7568aea485)', async () => {
+    const row = { ...REGISTRY_LIVE, id: '44444444-4444-4444-8444-000000000005', db_blog_id: LIVE.id, live_url: LIVE.astro_live_url, canonical_url: LIVE.astro_live_url };
+    for (const unjudged of [
+      { ...row, live_status: 'live_visible', astro_status: 'missing', live_status_checked_at: null },
+      { ...row, live_status: 'not_found', live_status_checked_at: CHECKED_BEFORE_LIVE },
+    ]) {
+      expect((await resolveReportBlogPostPick(readerOf({ blog_posts: LIVE, 'content_registry:swept': [unjudged] }), LIVE.id)).post)
+        .toMatchObject({ url: LIVE.astro_live_url });
+    }
+    // A portal post with no live time: any check that found it gone refuses it.
+    const noTime = { ...LIVE, astro_published_at: null };
+    expect(await resolveReportBlogPostPick(readerOf({ blog_posts: noTime, 'content_registry:swept': [{ ...row, live_status: 'not_found', live_status_checked_at: CHECKED_BEFORE_LIVE }] }), LIVE.id))
+      .toEqual({ post: null, rejected: true });
+  });
+
+  test('a registry pick the post-publish check verified live resolves before the sweep looks (GitHub Codex P2 on 7568aea485)', async () => {
+    expect((await resolveReportBlogPostPick(readerOf({ content_registry: { ...REGISTRY_LIVE, live_status: 'live_visible' } }), REGISTRY_LIVE.id)).post)
+      .toMatchObject({ url: REGISTRY_LIVE.live_url });
   });
 
   test('a portal pick whose sweep read fails is refused, never linked on the portal stamp (pre-push P1)', async () => {
