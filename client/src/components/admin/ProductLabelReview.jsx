@@ -18,8 +18,43 @@ const FIELD_LABELS = {
   rainFreeHours: ["Rain-free interval", "hours"],
 };
 
-async function request(productId, action = "", body) {
-  const response = await fetch(`${import.meta.env.VITE_API_URL || "/api"}/admin/inventory/${productId}/label-review${action}`, {
+// Per-kind copy and route. The review flow (read, source check, approve,
+// reject, revoke) is the same for weather limits and application rates.
+const KINDS = {
+  weather: {
+    path: "label-review",
+    ariaLabel: "Label weather review",
+    title: "Label weather evidence",
+    intro:
+      "Read the EPA label, check the source pages, then approve weather facts for the Job Card. This review does not verify mixing rates.",
+    current: "Current weather review",
+    approve: "Approve weather facts",
+    revoke: "Revoke weather review",
+    confirm:
+      "I matched the exact product and formulation and checked each fact against the source pages. Conditional and missing limits remain unresolved.",
+    saved: "Review saved. Reopen the Job Card to use the current evidence.",
+    footer:
+      "No numeric limit in the source is not a clearance to apply. Missing and conditional evidence can still produce UNKNOWN.",
+  },
+  rates: {
+    path: "label-rate-review",
+    ariaLabel: "Label rate review",
+    title: "Label rate evidence",
+    intro:
+      "Read the EPA label, check each quoted rate passage against its source page, then approve. Approved passages are stored as label evidence; they do not change catalog rates, protocols or pricing.",
+    current: "Current rate review",
+    approve: "Approve rate lines",
+    revoke: "Revoke rate review",
+    confirm:
+      "I matched the exact product and formulation and checked every quoted passage, its site and its pests against the source pages.",
+    saved: "Review saved.",
+    footer:
+      "Each line is the label's own passage. Nothing here is a computed or converted amount.",
+  },
+};
+
+async function request(productId, path, action = "", body) {
+  const response = await fetch(`${import.meta.env.VITE_API_URL || "/api"}/admin/inventory/${productId}/${path}${action}`, {
     method: body ? "POST" : "GET",
     headers: { Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`, "Content-Type": "application/json" },
     ...(body ? { body: JSON.stringify(body) } : {}),
@@ -30,7 +65,43 @@ async function request(productId, action = "", body) {
   return data;
 }
 
-function Evidence({ entry }) {
+function EvidenceCard({ label, value, strong, quote, note, page, sourceUrl, children }) {
+  return (
+    <Card>
+      <CardBody>
+        <div className="flex flex-wrap justify-between gap-2">
+          <span>{label}</span>
+          <Badge tone={strong ? "strong" : "neutral"}>{value}</Badge>
+        </div>
+        {children}
+        {quote && (
+          <blockquote className="mx-0 my-3 border-0 border-l-2 border-solid border-zinc-200 pl-3 text-ui-body text-ink-secondary">
+            {quote}
+          </blockquote>
+        )}
+        {note && (
+          <p className="my-2 text-ui-body text-ink-secondary">{note}</p>
+        )}
+        {page && (
+          <a
+            href={`${sourceUrl}#page=${page}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className={buttonStyles({
+              variant: "ghost",
+              density: "comfortable",
+              className: "px-0",
+            })}
+          >
+            Source page {page}
+          </a>
+        )}
+      </CardBody>
+    </Card>
+  );
+}
+
+function Evidence({ entry, kind }) {
   return (
     <div className="grid gap-3">
       <div className="rounded-sm bg-zinc-50 p-3">
@@ -53,56 +124,53 @@ function Evidence({ entry }) {
           Open source PDF <ExternalLink size={15} aria-hidden />
         </a>
       </div>
-      {Object.entries(FIELD_LABELS).map(([key, [label, unit]]) => {
-        const fact = entry.facts[key];
-        const value =
-          fact.status === "limit"
-            ? `${fact.value} ${unit}`
-            : fact.status === "conditional"
-              ? "CONDITIONAL"
-              : "NOT STATED";
-        return (
-          <Card key={key}>
-            <CardBody>
-              <div className="flex flex-wrap justify-between gap-2">
-                <span>{label}</span>
-                <Badge tone={fact.status === "limit" ? "strong" : "neutral"}>
-                  {value}
-                </Badge>
-              </div>
-              {fact.quote && (
-                <blockquote className="mx-0 my-3 border-0 border-l-2 border-solid border-zinc-200 pl-3 text-ui-body text-ink-secondary">
-                  {fact.quote}
-                </blockquote>
-              )}
-              {fact.note && (
-                <p className="my-2 text-ui-body text-ink-secondary">
-                  {fact.note}
-                </p>
-              )}
-              {fact.page && (
-                <a
-                  href={`${entry.source.url}#page=${fact.page}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className={buttonStyles({
-                    variant: "ghost",
-                    density: "comfortable",
-                    className: "px-0",
-                  })}
-                >
-                  Source page {fact.page}
-                </a>
-              )}
-            </CardBody>
-          </Card>
-        );
-      })}
+      {kind === "rates"
+        ? (entry.facts.directions || []).map((direction, index) => (
+            <EvidenceCard
+              key={index}
+              label={direction.useSite}
+              value="LABEL PASSAGE"
+              quote={direction.quote}
+              page={direction.page}
+              sourceUrl={entry.source.url}
+            >
+              <p className="my-2 text-ui-caption text-ink-secondary">
+                {[
+                  direction.targets,
+                  direction.method,
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </p>
+            </EvidenceCard>
+          ))
+        : Object.entries(FIELD_LABELS).map(([key, [label, unit]]) => {
+            const fact = entry.facts[key];
+            const value =
+              fact.status === "limit"
+                ? `${fact.value} ${unit}`
+                : fact.status === "conditional"
+                  ? "CONDITIONAL"
+                  : "NOT STATED";
+            return (
+              <EvidenceCard
+                key={key}
+                label={label}
+                value={value}
+                strong={fact.status === "limit"}
+                quote={fact.quote}
+                note={fact.note}
+                page={fact.page}
+                sourceUrl={entry.source.url}
+              />
+            );
+          })}
     </div>
   );
 }
 
-export default function ProductLabelReview({ product }) {
+export default function ProductLabelReview({ product, kind = "weather" }) {
+  const copy = KINDS[kind];
   const [review, setReview] = useState(null);
   const [activeCurrent, setActiveCurrent] = useState(false);
   const [activeReason, setActiveReason] = useState("");
@@ -118,7 +186,7 @@ export default function ProductLabelReview({ product }) {
     setConfirmed(false);
     setError("");
     setNotice("");
-    request(product.id)
+    request(product.id, copy.path)
       .then((data) => {
         if (!cancelled) {
           setReview(data.review);
@@ -135,15 +203,15 @@ export default function ProductLabelReview({ product }) {
     return () => {
       cancelled = true;
     };
-  }, [product]);
+  }, [product, copy.path]);
 
   async function act(action, body) {
     setBusy(true);
     setError("");
     setNotice("");
     try {
-      await request(product.id, action, body);
-      const data = await request(product.id);
+      await request(product.id, copy.path, action, body);
+      const data = await request(product.id, copy.path);
       setReview(data.review);
       setActiveCurrent(data.activeCurrent === true);
       setActiveReason(data.activeReason || "");
@@ -151,7 +219,7 @@ export default function ProductLabelReview({ product }) {
       setNotice(
         action === "/extract"
           ? "Candidate ready for source review."
-          : "Review saved. Reopen the Job Card to use the current evidence.",
+          : copy.saved,
       );
     } catch (requestError) {
       setError(requestError.message);
@@ -168,18 +236,17 @@ export default function ProductLabelReview({ product }) {
     <UiSurface
       as="section"
       density="comfortable"
-      aria-label="Label weather review"
+      aria-label={copy.ariaLabel}
       className="my-4 max-w-[calc(100vw-64px)]"
     >
       <Card className="overflow-hidden">
         <CardBody className="space-y-4 break-words [overflow-wrap:anywhere]">
           <div>
             <h3 className="m-0 flex items-center gap-2 text-18 font-medium text-zinc-900">
-              <FileText size={18} aria-hidden /> Label weather evidence
+              <FileText size={18} aria-hidden /> {copy.title}
             </h3>
             <p className="mt-2 mb-3 text-ui-body text-ink-secondary">
-              Read the EPA label, check the source pages, then approve weather
-              facts for the Job Card. This review does not verify mixing rates.
+              {copy.intro}
             </p>
           </div>
           {loading && <ActionFeedback>Loading label review…</ActionFeedback>}
@@ -188,7 +255,7 @@ export default function ProductLabelReview({ product }) {
           {active && (
             <details className="border-0 border-b border-solid border-zinc-200 pb-3">
               <summary className="box-border min-h-11 cursor-pointer text-ui-body font-medium text-zinc-900">
-                Current weather review ·{" "}
+                {copy.current} ·{" "}
                 {active.status === "approved"
                   ? activeCurrent
                     ? "APPROVED"
@@ -201,7 +268,7 @@ export default function ProductLabelReview({ product }) {
                   the label again.
                 </ActionFeedback>
               )}
-              <Evidence entry={active} />
+              <Evidence entry={active} kind={kind} />
               <p className="my-3 text-ui-caption text-ink-secondary">
                 Reviewed{" "}
                 {new Date(active.reviewedAt).toLocaleString("en-US", {
@@ -215,7 +282,7 @@ export default function ProductLabelReview({ product }) {
                   disabled={disabled}
                   onClick={() => act("/revoke", { reviewId: active.id })}
                 >
-                  Revoke weather review
+                  {copy.revoke}
                 </Button>
               )}
             </details>
@@ -230,11 +297,11 @@ export default function ProductLabelReview({ product }) {
                 {product.formulation || "formulation not recorded"} · EPA{" "}
                 {product.epaRegNumber || "not recorded"}
               </p>
-              <Evidence entry={draft} />
+              <Evidence entry={draft} kind={kind} />
               <Checkbox
                 className="shrink-0"
-                id={`label-review-${product.id}`}
-                label="I matched the exact product and formulation and checked each fact against the source pages. Conditional and missing limits remain unresolved."
+                id={`${copy.path}-${product.id}`}
+                label={copy.confirm}
                 checked={confirmed}
                 disabled={disabled}
                 onChange={(event) => setConfirmed(event.target.checked)}
@@ -250,7 +317,7 @@ export default function ProductLabelReview({ product }) {
                     })
                   }
                 >
-                  Approve weather facts
+                  {copy.approve}
                 </Button>
                 <Button
                   variant="secondary"
@@ -276,8 +343,7 @@ export default function ProductLabelReview({ product }) {
             </Button>
           )}
           <p className="mt-3.5 mb-0 text-ui-body text-ink-secondary">
-            No numeric limit in the source is not a clearance to apply. Missing
-            and conditional evidence can still produce UNKNOWN.
+            {copy.footer}
           </p>
         </CardBody>
       </Card>

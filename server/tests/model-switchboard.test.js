@@ -534,7 +534,9 @@ describe('model-switchboard', () => {
     // NEWSLETTER is reached only through the newsletterWriter policy in
     // llm/call.js, whose wire cap gives always-thinking models their floor;
     // its default (Opus 5.5) is itself a requires:'deep' model.
-    expect(deepSafe).toEqual(['ADS_ADVISOR', 'DEEP', 'EXTREME', 'LAWN_ASSESSMENT_REFEREE', 'NEWSLETTER', 'PLANT_ID_REFEREE']);
+    // SMS_SCHEDULING_DECIDE: dispatched through llm/call.js like the
+    // referees; its default (Sonnet 5.5) is a requires:'deep' model.
+    expect(deepSafe).toEqual(['ADS_ADVISOR', 'DEEP', 'EXTREME', 'LAWN_ASSESSMENT_REFEREE', 'NEWSLETTER', 'PLANT_ID_REFEREE', 'SMS_SCHEDULING_DECIDE']);
     expect(sb.MODEL_CATALOG[MODELS.NEWSLETTER].requires).toBe('deep');
     expect(lanes.find((l) => l.id === 'newsletter').primary.accepts.deep).toBe(true);
     expect(lanes.find((l) => l.id === 'events_curation').primary.accepts.deep).toBe(true);
