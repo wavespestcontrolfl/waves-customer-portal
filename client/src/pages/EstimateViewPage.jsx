@@ -7486,6 +7486,17 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           throw new Error(body.error || 'Save a card for Auto Pay to confirm your recurring plan.');
         }
         if (r.status === 409) {
+          if (body.code === 'ACCEPT_NEEDS_OFFICE_REVIEW') {
+            // The accept was parked for the office (the estimate's phone belongs to another customer): nothing was
+            // booked or charged. Drop any captured card and refetch /data, which now answers with the page's
+            // existing review-before-booking state (cta.reviewBeforeBooking, reviewReason 'contact_review').
+            recurringCardSetupIntentIdRef.current = null;
+            setInlineCardIntent(null);
+            cardHoldSetupIntentIdRef.current = null;
+            setCardHoldIntent(null);
+            await loadEstimate({ preserveSelection: true });
+            throw new Error(body.error || 'A Waves specialist reviews this quote with you and schedules your visit.');
+          }
           if (body.code === 'PAYMENT_TIMING_REFRESH') {
             // The server bills this selection now (afterVisitDeferred false) or
             // after the visit (true): show that timing for it, drop the

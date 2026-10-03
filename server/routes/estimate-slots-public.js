@@ -55,6 +55,8 @@ const {
   handleEstimateAsk,
   isEstimateAcceptActive,
   matchAcceptCustomerByPhone,
+  acceptPhoneParkedVerdict,
+  acceptOfficeReviewBody,
   isEstimateCustomerViewable,
   isRodentGuaranteeOnlyEstimate,
   isStructuralOneTimeOnlyEstimate,
@@ -675,6 +677,9 @@ router.post('/:token/card-hold-intent', depositLimiter, async (req, res) => {
     if (estimateTrenchingReviewRequired(estData)) {
       return res.status(409).json(TRENCHING_REVIEW_409);
     }
+    // B18 park: no card is captured for an estimate whose phone belongs to another customer (the accept
+    // refuses it; the office has been told). A failed lookup fails closed (the route's own 500).
+    if (await acceptPhoneParkedVerdict(estimate)) return res.status(409).json(acceptOfficeReviewBody());
 
     // The hold only applies to a one-time booking — mirror accept's one-time
     // availability gate before minting the intent so a one_time request on an
@@ -782,6 +787,8 @@ router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) =>
     if (estimateTrenchingReviewRequired(estData)) {
       return res.status(409).json(TRENCHING_REVIEW_409);
     }
+    // B18 park: no card is captured for an estimate whose phone belongs to another customer (see card-hold-intent).
+    if (await acceptPhoneParkedVerdict(estimate)) return res.status(409).json(acceptOfficeReviewBody());
 
     // The Auto Pay card only applies to the recurring lane — a one-time
     // request keeps its own card-hold intent endpoint.

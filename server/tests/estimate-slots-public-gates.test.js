@@ -66,6 +66,10 @@ jest.mock('../routes/estimate-public', () => ({
   isStructuralOneTimeOnlyEstimate: jest.fn(() => false),
   isRodentGuaranteeOnlyEstimate: jest.fn(() => false),
   estimateTrenchingReviewRequired: jest.fn(() => false),
+  // B18 park (the real implementations are pinned in estimate-public-accept-phone-match / -atomicity).
+  resolveEstimateQuoteRequirement: jest.fn(() => ({ quoteRequired: false })),
+  acceptPhoneParkedVerdict: jest.fn(async () => null),
+  acceptOfficeReviewBody: jest.fn(() => ({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW', reviewBeforeBooking: true, reason: 'contact_review', error: 'parked' })),
   verifyEstimateAskToken: jest.fn(() => true),
   handleEstimateAsk: jest.fn((req, res) => res.json({})),
 }));
@@ -360,6 +364,23 @@ describe('bermuda-suppression money/slot gate', () => {
     getAvailableSlots.mockResolvedValue([]);
     const slots = await fetch(`${base}/${TOKEN}/available-slots`);
     expect(slots.status).not.toBe(409);
+  });
+});
+
+describe('B18 park: no card is captured for an estimate whose phone belongs to another customer', () => {
+  const { acceptPhoneParkedVerdict } = require('../routes/estimate-public');
+  const { createCardHoldSetupIntentForEstimate, resolveCardHoldPolicy } = require('../services/estimate-card-holds');
+  const PARKED_ESTIMATE = { id: 'est-parked', token: TOKEN, status: 'sent', expires_at: null, archived_at: null, customer_id: null, customer_phone: '(941) 555-0123', estimate_data: {} };
+
+  test.each(['card-hold-intent', 'recurring-card-intent'])('%s refuses with the coded park 409 before any intent or policy work', async (leg) => {
+    currentEstimate = PARKED_ESTIMATE;
+    acceptPhoneParkedVerdict.mockResolvedValueOnce({ rejectedCustomerId: 'cust-bob' });
+    const res = await fetch(`${base}/${TOKEN}/${leg}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW', reviewBeforeBooking: true, reason: 'contact_review' });
+    expect(createCardHoldSetupIntentForEstimate).not.toHaveBeenCalled();
+    expect(resolveCardHoldPolicy).not.toHaveBeenCalled();
+    expect(acceptPhoneParkedVerdict).toHaveBeenCalledWith(PARKED_ESTIMATE);
   });
 });
 

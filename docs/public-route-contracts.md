@@ -1551,7 +1551,14 @@ transaction on the locked row, after the eligibility checks, so a rejected
 accept changes nothing and a failed check fails the accept (retryable) rather
 than dropping the input. Customer resolution (phone match) runs on the
 pre-fill identity, so a submitted email never steers which profile the accept
-lands on; an authored proposal's `preparedFor` that matched the old name moves
+lands on - and an UNLINKED estimate whose phone matches a LONE customer that the
+estimate contradicts (the estimate carries an email AND an address, the profile
+carries an email AND a street line, and neither agrees: addresses by the canonical
+street comparison, so `Street`/`St`, unit formats and a trailing city/ZIP agree, a
+different street, house number, explicit unit, city or ZIP disagrees, and a missing
+unit/city/ZIP or no street number cannot disagree; checked in memory against the
+profile's own address only) is PARKED for the office instead of being matched, see the
+`ACCEPT_NEEDS_OFFICE_REVIEW` 409 below; an authored proposal's `preparedFor` that matched the old name moves
 with it (and `proposalDelivery` drops), as in the contact-fanout name sync; the
 new customer is created with the supplied values; an EXISTING matched, linked
 or grouped-sibling profile is filled only when the estimate's own first name
@@ -1687,11 +1694,30 @@ answers:
   invoice mode, or the cohort marker gone), and `afterVisitDeferred: true` when an after-visit
   cohort accept WILL defer its attached invoice but the tab attested no timing (a tab from before
   the sub-gate). The page shows the answered timing for that selection and refetches.
+- `409 { error, code: 'ACCEPT_NEEDS_OFFICE_REVIEW', reviewBeforeBooking: true, reason: 'contact_review' }`
+  when an unlinked estimate's phone matches a lone customer the estimate contradicts (above). Decided
+  BEFORE any plan, card, hold, prepay quote or write, from the request's one cached preflight verdict, so
+  nothing is created, charged, captured, reserved, texted or changed: no customer, no account, no status
+  change, no conversion. The `error` is the review-before-booking sentence the page already shows. The
+  office gets ONE Customers needs-you alert (`accept-phone-contradicted:<estimateId>`, a person acts: fix
+  the phone on the estimate or link it to the right customer), raised right after that decision on
+  every attempt and idempotent by its dedupe key. The same 409 comes from the accept transaction when its
+  authoritative match, or the locked re-read of a reused lone candidate (judged on the pre-fill identity
+  snapshot), finds the contradiction the preflight did not see; that transaction rolls back, the existing
+  retirement of a captured recurring card runs, and the alert is raised after the rollback. `GET /:token/data`
+  answers such an estimate with `cta.reviewBeforeBooking: true`, `cta.reviewReason: 'contact_review'` and
+  `cta.canAccept: false` (the page's existing review state; nothing about the other customer), and
+  `POST /:token/card-hold-intent` and `/recurring-card-intent` answer the same 409 without minting a
+  SetupIntent. The estimate's own phone is left as staff typed it, so its follow-up texts are unchanged
+  until the office fixes the number. Several phone candidates, or a lone candidate that agrees on
+  email or address, behave as before. A one-time card-hold SetupIntent a stale tab captured before the
+  park stays unbound at Stripe (customerless until an accept commits); it is not retired.
 - `409 { code: 'ACCEPT_BILLING_CHANGED' }` when the transaction's customer lock finds the moved
   cohort drifted: `billing_mode` moved into an ineligible lane, the pause or opt-out state changed,
   Auto Pay was turned on since the policy was resolved, the saved method a `saved_method_consented`
   policy chose is no longer that customer's consented chargeable card (it is row-locked until
-  commit), or the accept landed on another / no customer. Nothing is suppressed, charged or enrolled on the stale decision.
+  commit), the accept landed on another / no customer, the transaction's phone match differs from the preflight verdict, or
+  the reused lone candidate (re-read FOR UPDATE at the end of the transaction) was deleted or moved off the phone. Nothing is suppressed, charged or enrolled on the stale decision.
 
 On success the accept persists `estimate_data.acceptedRecurringCardConsent` `{ variant, version,
 tender, text }` (the exact authorization recorded as shown) beside the existing

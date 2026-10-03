@@ -70,6 +70,12 @@ describe('EstimateViewPage accept consent attestation', () => {
     expect(src).toMatch(/\(paused \|\| autopayOff\) \? 'Save a payment method' : 'Set up Auto Pay'/);
   });
 
+  it('B18: an ACCEPT_NEEDS_OFFICE_REVIEW 409 from a stale tab drops any captured card (both refs) and refetches /data, which answers with the review state', () => {
+    expect(src).toMatch(
+      /if \(body\.code === 'ACCEPT_NEEDS_OFFICE_REVIEW'\) \{[\s\S]{0,900}recurringCardSetupIntentIdRef\.current = null;\s*setInlineCardIntent\(null\);\s*cardHoldSetupIntentIdRef\.current = null;\s*setCardHoldIntent\(null\);\s*await loadEstimate\(\{ preserveSelection: true \}\);\s*throw new Error/,
+    );
+  });
+
   it('a CONSENT_VARIANT_STALE / ACCEPT_BILLING_CHANGED 409 drops the captured intent and refetches /data so the UI re-renders what the server will record', () => {
     expect(src).toMatch(
       /if \(body\.code === 'CONSENT_VARIANT_STALE' \|\| body\.code === 'ACCEPT_BILLING_CHANGED'\) \{[\s\S]{0,2000}recurringCardSetupIntentIdRef\.current = null;\s*setInlineCardIntent\(null\);\s*await loadEstimate\(\{ preserveSelection: true \}\);/,

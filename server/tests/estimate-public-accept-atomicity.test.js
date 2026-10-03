@@ -4122,3 +4122,197 @@ describe('PAF prepay — annual prepay charged after the first visit', () => {
     expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
   });
 });
+
+describe('B18 - an accept whose phone belongs to another customer is parked for the office (nothing created, taken or captured)', () => {
+  // A lone phone candidate whose email AND address both disagree with the estimate is somebody else's line.
+  // The accept returns a coded 409 BEFORE anything is written: no customer, no account, no status change, no
+  // kept reservation, no texts; the office gets ONE alert (deduped per estimate). Multi-candidate phones and
+  // lone candidates that agree on email or address behave exactly as before.
+  beforeEach(() => EstimateConverter.convertEstimate.mockReset());
+
+  const SHARED_PHONE = '(941) 555-0123';
+  const sharedPhoneRow = (overrides) => ({
+    id: 'cust-bob', account_id: 'acct-bob', first_name: 'Bob', last_name: 'Example', phone: SHARED_PHONE,
+    email: 'bob@example.com', address_line1: '9 Other St', deleted_at: null, ...overrides,
+  });
+  function conversionFor(customerId) {
+    EstimateConverter.convertEstimate.mockResolvedValueOnce({
+      customerId, tier: 'Bronze', monthlyRate: 60, firstScheduledServiceId: null, recurringConversionSkipped: false,
+      welcomeSms: null, membershipEmail: null, deferredFollowUpReminderRows: [],
+    });
+  }
+  // Distinct alert rows by dedupe key (the real notifyAdmin dedupes on it; the fake records every call).
+  const parkedAlertKeys = () => new Set(require('../services/notification-service').notifyAdmin.mock.calls
+    .map(([, , , opts]) => opts?.dedupeKey).filter((k) => String(k || '').startsWith('accept-phone-contradicted:')));
+  const parkedAlertCalls = () => require('../services/notification-service').notifyAdmin.mock.calls
+    .filter(([, , , opts]) => String(opts?.dedupeKey || '').startsWith('accept-phone-contradicted:'));
+  // The preflight verdict is formed first (root handle); a customers touch AFTER it lets a test move the
+  // candidate before the transaction's authoritative match (touch 2) or before the final locked read (touch 3).
+  function onCustomersTouch(n, mutate) {
+    let touches = 0;
+    db.__state.onTable = (table) => {
+      if (table !== 'customers') return;
+      touches += 1;
+      if (touches === n) mutate();
+    };
+  }
+  const repeatedAccept = async (id) => putAccept(`tok-${id}-x0123456789`);
+
+  test('preflight park: coded 409, reviewBeforeBooking body, ZERO writes (customers, accounts, estimate, reservation), no conversion, no texts, one alert; a repeat attempt answers the same and re-raises idempotently', async () => {
+    resetStore(recurringPestEstimate({ id: 'est-park-1', token: 'tok-est-park-1-x0123456789' }));
+    db.__state.tables.customers.push(sharedPhoneRow());
+    db.__state.tables.customer_accounts = [{ id: 'acct-bob' }];
+    const scheduledDate = require('../utils/datetime-et').etDateString(new Date(Date.now() + 7 * 86400000));
+    const hold = {
+      id: 'ss-park-1', source_estimate_id: 'est-park-1', customer_id: null, technician_id: null, status: 'pending',
+      scheduled_date: scheduledDate, window_start: '09:00:00', window_end: '10:00:00', estimated_duration_minutes: 60,
+      reservation_expires_at: new Date(Date.now() + 15 * 60000),
+    };
+    db.__state.tables.scheduled_services = [{ ...hold }];
+    const before = JSON.stringify(db.__state.tables);
+    const { notifyAdmin } = require('../services/notification-service');
+    const filed = new Map();
+    notifyAdmin.mockImplementation(async (c, h, w, opts) => {
+      const key = opts?.dedupeKey;
+      if (key && !filed.has(key)) filed.set(key, { id: `notif-${filed.size + 1}` });
+      return key ? filed.get(key) : { id: 'notif-x' };
+    });
+
+    const first = await putAccept('tok-est-park-1-x0123456789', { slotId: `${scheduledDate}_09-00_unassigned` });
+    expect(first.status).toBe(409);
+    expect(first.data).toEqual({
+      error: 'A Waves specialist reviews this quote with you and schedules your visit — it can’t be self-booked online.',
+      code: 'ACCEPT_NEEDS_OFFICE_REVIEW', reviewBeforeBooking: true, reason: 'contact_review',
+    });
+    expect(JSON.stringify(db.__state.tables)).toBe(before);
+    expect(storedEstimate().status).toBe('sent');
+    expect(storedEstimate().customer_id).toBeNull();
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(require('../services/messaging/send-customer-message').sendCustomerMessage).not.toHaveBeenCalled();
+
+    const [category, headline, why, opts] = parkedAlertCalls()[0];
+    expect(category).toBe('estimate');
+    expect(headline).toBe("Customers — fix Pat Tester's estimate phone");
+    expect(why).toBe('The phone on their estimate is another customer’s, so they could not accept yet.');
+    expect(opts).toMatchObject({ bell: true, dedupeKey: 'accept-phone-contradicted:est-park-1', link: '/admin/estimates?estimateId=est-park-1' });
+    expect(opts.metadata).toMatchObject({ area: 'Customers', severity: 'needs-you', who: 'person', doneWhen: 'phone_corrected', subject: { type: 'estimate', id: 'est-park-1' }, rejectedCustomerId: 'cust-bob' });
+    expect(opts.detail).toContain('Bob Example');
+    expect(opts.detail).toContain('customer id cust-bob');
+    expect(opts.detail).toMatch(/no card was taken/);
+
+    const second = await repeatedAccept('est-park-1');
+    expect(second.status).toBe(409);
+    expect(second.data.code).toBe('ACCEPT_NEEDS_OFFICE_REVIEW');
+    expect(JSON.stringify(db.__state.tables)).toBe(before);
+    expect(parkedAlertKeys().size).toBe(1);
+    expect(filed.size).toBe(1);
+    notifyAdmin.mockImplementation(async () => ({}));
+  });
+
+  test('control: a lone candidate that agrees on email, or on address, is reused exactly as before (no park, no alert)', async () => {
+    for (const [id, overrides] of [['est-park-2', { email: 'pat@example.com' }], ['est-park-3', { address_line1: '123 Palm Ave' }]]) {
+      jest.clearAllMocks();
+      resetStore(recurringPestEstimate({ id, token: `tok-${id}-x0123456789` }));
+      db.__state.tables.customers.push(sharedPhoneRow(overrides));
+      conversionFor('cust-bob');
+      expect((await repeatedAccept(id)).status).toBe(200);
+      expect(storedEstimate().customer_id).toBe('cust-bob');
+      expect(parkedAlertCalls()).toHaveLength(0);
+    }
+  });
+
+  test('control: several profiles share the phone and none is unique - unchanged: the accept proceeds and is never parked', async () => {
+    resetStore(recurringPestEstimate({ id: 'est-park-4', token: 'tok-est-park-4-x0123456789' }));
+    db.__state.tables.customers.push(
+      sharedPhoneRow({ id: 'cust-landlord', account_id: 'acct-shared', email: 'owner@example.com', address_line1: '10 Oak Ln' }),
+      sharedPhoneRow({ id: 'cust-rental', account_id: 'acct-shared', email: 'owner@example.com', address_line1: '55 Pine Ct' }),
+    );
+    db.__state.tables.customer_accounts = [{ id: 'acct-shared' }];
+    conversionFor('cust-new');
+    EstimateConverter.convertEstimate.mockReset();
+    EstimateConverter.convertEstimate.mockImplementationOnce(async () => ({
+      customerId: db.__state.tables.estimates[0].customer_id, tier: 'Bronze', monthlyRate: 60, firstScheduledServiceId: null,
+      recurringConversionSkipped: false, welcomeSms: null, membershipEmail: null, deferredFollowUpReminderRows: [],
+    }));
+    expect((await repeatedAccept('est-park-4')).status).toBe(200);
+    expect(['cust-landlord', 'cust-rental']).not.toContain(storedEstimate().customer_id);
+    expect(parkedAlertCalls()).toHaveLength(0);
+  });
+
+  test('drift (not contradicted at preflight, contradicted in the transaction): the same coded 409, the transaction rolls back, the alert is raised after the rollback', async () => {
+    resetStore(recurringPestEstimate({ id: 'est-park-5', token: 'tok-est-park-5-x0123456789' }));
+    const bob = sharedPhoneRow({ email: 'pat@example.com' });
+    db.__state.tables.customers.push(bob);
+    db.__state.tables.customer_accounts = [{ id: 'acct-bob' }];
+    onCustomersTouch(2, () => { bob.email = 'bob@example.com'; });
+    conversionFor('cust-bob');
+    const res = await repeatedAccept('est-park-5');
+    db.__state.onTable = null;
+    expect(res.status).toBe(409);
+    expect(res.data).toMatchObject({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW', reviewBeforeBooking: true, reason: 'contact_review' });
+    expect(storedEstimate().status).toBe('sent');
+    expect(storedEstimate().customer_id).toBeNull();
+    expect(db.__state.tables.customers).toHaveLength(1);
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(parkedAlertKeys().size).toBe(1);
+  });
+
+  test('drift (contradicted at preflight is parked; matched at preflight and a DIFFERENT customer in the transaction aborts for a reload)', async () => {
+    resetStore(recurringPestEstimate({ id: 'est-park-6', token: 'tok-est-park-6-x0123456789' }));
+    const bob = sharedPhoneRow({ email: 'pat@example.com' });
+    db.__state.tables.customers.push(bob);
+    // Before the transaction's match a second live profile appears on the phone and the pair is ambiguous.
+    onCustomersTouch(2, () => db.__state.tables.customers.push(sharedPhoneRow({ id: 'cust-late', email: 'pat@example.com', address_line1: '1 Late Way' })));
+    conversionFor('cust-bob');
+    const res = await repeatedAccept('est-park-6');
+    db.__state.onTable = null;
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('ACCEPT_BILLING_CHANGED');
+    expect(storedEstimate().status).toBe('sent');
+    expect(storedEstimate().customer_id).toBeNull();
+    expect(parkedAlertCalls()).toHaveLength(0);
+  });
+
+  test('the reused lone candidate edited so the estimate now contradicts it, between the match and the locked final read, parks the accept (rolled back, one alert)', async () => {
+    resetStore(recurringPestEstimate({ id: 'est-park-7', token: 'tok-est-park-7-x0123456789' }));
+    const bob = sharedPhoneRow({ email: 'pat@example.com' });
+    db.__state.tables.customers.push(bob);
+    db.__state.tables.customer_accounts = [{ id: 'acct-bob' }];
+    // Touches: preflight (1), authoritative match (2), then the end-of-transaction locked read (3).
+    onCustomersTouch(3, () => { bob.email = 'bob@example.com'; });
+    conversionFor('cust-bob');
+    const res = await repeatedAccept('est-park-7');
+    db.__state.onTable = null;
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('ACCEPT_NEEDS_OFFICE_REVIEW');
+    expect(storedEstimate().status).toBe('sent');
+    expect(storedEstimate().customer_id).toBeNull();
+    expect(parkedAlertKeys().size).toBe(1);
+  });
+
+  test('the reused lone candidate losing the phone before the locked read aborts for a reload (no park, no alert)', async () => {
+    resetStore(recurringPestEstimate({ id: 'est-park-8', token: 'tok-est-park-8-x0123456789' }));
+    const bob = sharedPhoneRow({ email: 'pat@example.com' });
+    db.__state.tables.customers.push(bob);
+    onCustomersTouch(3, () => { bob.phone = '+19415550000'; });
+    conversionFor('cust-bob');
+    const res = await repeatedAccept('est-park-8');
+    db.__state.onTable = null;
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('ACCEPT_BILLING_CHANGED');
+    expect(storedEstimate().customer_id).toBeNull();
+    expect(parkedAlertCalls()).toHaveLength(0);
+  });
+
+  test('the locked read judges the PRE-FILL identity: a submitted email that differs from the reused candidate\'s does not park (blank estimate email, repeat stable)', async () => {
+    resetStore(recurringPestEstimate({ id: 'est-park-9', token: 'tok-est-park-9-x0123456789', customer_name: 'Testy', customer_email: null }));
+    db.__state.tables.customers.push(sharedPhoneRow({ first_name: 'Testy', email: 'bob@example.com', address_line1: '9 Other St' }));
+    db.__state.tables.customer_accounts = [{ id: 'acct-bob' }];
+    conversionFor('cust-bob');
+    const first = await putAccept('tok-est-park-9-x0123456789', { contactEmail: 'testy@example.com' });
+    expect(first.status).toBe(200);
+    expect(storedEstimate().customer_id).toBe('cust-bob');
+    expect((await putAccept('tok-est-park-9-x0123456789', { contactEmail: 'testy@example.com' })).status).toBe(200);
+    expect(parkedAlertCalls()).toHaveLength(0);
+  });
+});
