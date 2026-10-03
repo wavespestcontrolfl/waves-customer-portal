@@ -56,8 +56,8 @@ describe('ProductLabelReview rates', () => {
     id: 'rate-candidate-1',
     source: { productName: 'Synthetic product', registration: 'TEST-100', url: 'https://example.test/label.pdf' },
     facts: { directions: [
-      { status: 'rate', useSite: 'Outdoor perimeter', targets: 'Ants, spiders', method: 'Coarse spray', low: 0.2, high: 0.8, unit: 'fl_oz', perAmount: 10, perUnit: 'gal', maxApplicationsPerYear: 2, minIntervalDays: 21, quote: 'Synthetic label: 0.2 to 0.8 fl oz per 10 gallons.', page: 4, note: '' },
-      { status: 'conditional', useSite: 'Turf', targets: 'Listed pests', method: '', low: null, high: null, unit: 'other', perAmount: null, perUnit: 'other', maxApplicationsPerYear: null, minIntervalDays: null, quote: 'Synthetic label: see rate table.', page: 7, note: 'Rate table by pest.' },
+      { status: 'rate', useSite: 'Outdoor perimeter', targets: 'Ants, spiders', method: 'Coarse spray', low: 0.2, high: 0.8, unit: 'fl_oz', unitText: 'fl oz', perAmount: 10, perUnit: 'gal', perUnitText: 'gallons', maxApplicationsPerYear: 2, minIntervalDays: 21, quote: 'Synthetic label: 0.2 to 0.8 fl oz per 10 gallons.', page: 4, note: '' },
+      { status: 'conditional', useSite: 'Turf', targets: 'Listed pests', method: '', low: null, high: null, unit: 'other', unitText: '', perAmount: null, perUnit: 'other', perUnitText: '', maxApplicationsPerYear: null, minIntervalDays: null, quote: 'Synthetic label: see rate table.', page: 7, note: 'Rate table by pest.' },
     ] },
   };
   beforeEach(() => {

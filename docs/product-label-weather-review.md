@@ -79,14 +79,16 @@ holds the one flow; `product-label-rates.js` holds what differs: the prompt, the
 direction schema, validation and the reader.
 
 A direction is one label line: use site, target pests, method, the amount as the
-label prints it (low, high, unit, and the label's own denominator as an amount
-and a unit, so "per 10 gallons" stays 10 gallons), stated yearly/interval limits, the
+label prints it (low, high, the unit in the label's own words, and the label's
+own denominator as an amount plus its unit in the label's own words, so
+"2 oz per 1,000 board feet" is stored exactly), stated yearly/interval limits, the
 source quote and the physical PDF page. The model may not compute, convert,
 average or infer an amount or a denominator. A percent dilution uses the label's
 own mixing table when one is printed; otherwise it stays a percent. A line whose
-amount depends on a table, a calculation or the applicator's volume, or whose
-unit or denominator is not one the record can hold, is `conditional` and carries
-no number.
+amount depends on a table, a calculation or the applicator's volume is
+`conditional` and carries no number. `unit` and `perUnit` are classifiers for a
+later reader that does math; `other` means the printed text is the only record,
+never that the rate was dropped.
 
 Approval is admin-only, needs the same identity and source-page confirmation,
 and rechecks the latest PPLS filename and checksum. It writes only

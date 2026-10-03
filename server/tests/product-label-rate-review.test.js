@@ -21,7 +21,7 @@ const PRODUCT_ID = '11111111-2222-4333-8444-555555555555';
 const ACTOR_ID = '22222222-2222-4333-8444-555555555555';
 const direction = (over = {}) => ({
   status: 'rate', useSite: 'Outdoor perimeter of structures', targets: 'Ants, spiders', method: 'Coarse spray',
-  low: 0.2, high: 0.8, unit: 'fl_oz', perAmount: 1, perUnit: 'gal', maxApplicationsPerYear: null, minIntervalDays: 21,
+  low: 0.2, high: 0.8, unit: 'fl_oz', unitText: 'fl oz', perAmount: 1, perUnit: 'gal', perUnitText: 'gallon of water', maxApplicationsPerYear: null, minIntervalDays: 21,
   quote: 'Synthetic label: mix 0.2 to 0.8 fl oz per gallon of water.', page: 2, note: '', ...over,
 });
 const extraction = (directions = [direction()]) => ({ identityMatch: true, registration: '123-456', productName: 'Synthetic test product', facts: { directions } });
@@ -71,7 +71,7 @@ test('extract → source review → approved directions; only label_rate_review 
   const candidateId = result.review.draft.id;
   await expect(decideLabelReview(PRODUCT_ID, ACTOR_ID, { candidateId, decision: 'approve' }, 'rates')).rejects.toMatchObject({ statusCode: 400 });
   await approve(candidateId);
-  expect(reviewedRates(row, 'current')).toMatchObject({ verified: true, directions: [expect.objectContaining({ low: 0.2, high: 0.8, unit: 'fl_oz', perAmount: 1, perUnit: 'gal', page: 2 })] });
+  expect(reviewedRates(row, 'current')).toMatchObject({ verified: true, directions: [expect.objectContaining({ low: 0.2, high: 0.8, unit: 'fl_oz', unitText: 'fl oz', perAmount: 1, perUnit: 'gal', perUnitText: 'gallon of water', page: 2 })] });
   expect(row.label_verified_at).toBeNull(); expect(row.default_rate).toBe('9');
   expect(row.label_weather_review).toEqual({ revision: 'w1' });
   expect(changes.every((p) => Object.keys(p).sort().join(',') === 'label_rate_review,updated_at')).toBe(true);
@@ -127,15 +127,21 @@ test('an unknown kind is refused', async () => {
 describe('rate direction validation', () => {
   const error = (directions, pageCount = 3) => extractionError(extraction(directions), '123-456', pageCount, 'rates');
   test('a quoted numeric direction and a quoted conditional one pass', () => {
-    expect(error([direction(), direction({ status: 'conditional', low: null, high: null, perAmount: null, perUnit: 'other', unit: 'other', note: 'Rate table by pest.' })])).toBeNull();
+    expect(error([direction(), direction({ status: 'conditional', low: null, high: null, perAmount: null, perUnit: 'other', perUnitText: '', unit: 'other', unitText: '', note: 'Rate table by pest.' })])).toBeNull();
     expect(error([direction({ high: null })])).toBeNull();
-    expect(error([direction({ perUnit: 'dilution', perAmount: null, unit: 'percent', low: 0.03, high: 0.06 })])).toBeNull();
+    expect(error([direction({ perUnit: 'dilution', perAmount: null, perUnitText: '', unit: 'percent', unitText: '%', low: 0.03, high: 0.06 })])).toBeNull();
   });
   test('a denominator is kept exactly as the label prints it', () => {
     expect(error([
       direction({ low: 1, high: null, perAmount: 10, perUnit: 'gal', quote: 'Synthetic label: 1 fl oz per 10 gallons of water.' }),
       direction({ low: 4, high: 8, perAmount: 100, perUnit: 'linear_ft', quote: 'Synthetic label: 4 to 8 fl oz per 100 linear feet.' }),
       direction({ low: 0.5, high: null, perAmount: 1000, perUnit: 'sq_ft', quote: 'Synthetic label: 0.5 fl oz per 1,000 sq ft.' }),
+    ])).toBeNull();
+  });
+  test('a rate in units outside the classifier lists is kept as a rate with its printed units', () => {
+    expect(error([
+      direction({ low: 2, high: null, unit: 'oz', unitText: 'oz', perAmount: 1000, perUnit: 'other', perUnitText: 'board feet', quote: 'Synthetic label: 2 oz per 1,000 board feet.' }),
+      direction({ low: 3, high: 6, unit: 'other', unitText: 'scoops', perAmount: 1, perUnit: 'other', perUnitText: 'cubic yard', quote: 'Synthetic label: 3 to 6 scoops per cubic yard.' }),
     ])).toBeNull();
   });
   test.each([
@@ -150,7 +156,8 @@ describe('rate direction validation', () => {
     ['high below low', [direction({ low: 1, high: 0.5 })], 'invalid_label_value'],
     ['a conditional direction carrying a number', [direction({ status: 'conditional', high: null, perAmount: null })], 'unscoped_label_value'],
     ['a conditional direction carrying a denominator', [direction({ status: 'conditional', low: null, high: null })], 'unscoped_label_value'],
-    ['a numeric direction on an unlisted denominator', [direction({ perUnit: 'other' })], 'unscoped_label_value'],
+    ['a rate with no printed unit', [direction({ unitText: ' ' })], 'missing_label_unit'],
+    ['a rate with no printed denominator unit', [direction({ perUnit: 'other', perUnitText: '' })], 'missing_label_basis'],
     ['a dilution with a volume unit', [direction({ perUnit: 'dilution', perAmount: null })], 'invalid_label_value'],
     ['a percent unit on a per-gallon denominator', [direction({ unit: 'percent' })], 'invalid_label_value'],
     ['a rate with no denominator amount', [direction({ perAmount: null })], 'missing_label_basis'],

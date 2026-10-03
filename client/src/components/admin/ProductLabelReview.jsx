@@ -53,29 +53,18 @@ const KINDS = {
   },
 };
 
-// [singular, plural] for the label's own denominator unit.
-const PER_UNIT_LABELS = {
-  gal: ["gallon", "gallons"],
-  sq_ft: ["sq ft", "sq ft"],
-  acre: ["acre", "acres"],
-  linear_ft: ["linear ft", "linear ft"],
-  cu_ft: ["cu ft", "cu ft"],
-  placement: ["placement", "placements"],
-};
-
-// The denominator exactly as approved: "per gallon", "per 10 gallons".
+// The denominator in the label's own words: "per gallon", "per 1,000 board feet".
 function rateBasis(direction) {
   if (direction.perUnit === "dilution") return "dilution";
-  const labels = PER_UNIT_LABELS[direction.perUnit];
-  if (!labels || direction.perAmount == null) return "";
+  if (direction.perAmount == null || !direction.perUnitText) return "";
   return direction.perAmount === 1
-    ? `per ${labels[0]}`
-    : `per ${Number(direction.perAmount).toLocaleString("en-US")} ${labels[1]}`;
+    ? `per ${direction.perUnitText}`
+    : `per ${Number(direction.perAmount).toLocaleString("en-US")} ${direction.perUnitText}`;
 }
 
 function rateAmount(direction) {
   if (direction.status !== "rate") return "CONDITIONAL";
-  const unit = direction.unit === "percent" ? "%" : ` ${direction.unit.replace(/_/g, " ")}`;
+  const unit = direction.unit === "percent" ? "%" : ` ${direction.unitText || ""}`;
   const range =
     direction.high != null && direction.high !== direction.low
       ? `${direction.low}–${direction.high}`
