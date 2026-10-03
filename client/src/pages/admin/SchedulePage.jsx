@@ -3362,6 +3362,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     recurringNth, recurringWeekday, recurringIntervalDays, skipWeekends, weekendShift,
     discountType, discountAmount, discountPresetId, storedDiscountCleared, createInvoice, assignmentScope,
     priceServiceScope, timeOnSiteMinutes, reentryExterior, reentryInterior,
+    // How a combo stop moves (together / separate) decides which write runs.
+    comboMove,
   };
   const saveInputsDrifted = (before) => {
     const after = saveInputsRef.current;
@@ -5964,11 +5966,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     {Array.isArray(comboVisit.serviceTypes) && comboVisit.serviceTypes.length ? ` (${comboVisit.serviceTypes.join(", ")})` : ""}.
                   </div>
                   <label style={{ display: "flex", alignItems: "center", gap: 8, minHeight: 44, cursor: "pointer" }}>
-                    <input type="radio" name="combo-move" checked={comboMove === "together"} onChange={() => setComboMove("together")} />
+                    <input type="radio" name="combo-move" checked={comboMove === "together"} onChange={() => setComboMove("together")} disabled={saving} />
                     Move all of them together
                   </label>
                   <label style={{ display: "flex", alignItems: "center", gap: 8, minHeight: 44, cursor: "pointer" }}>
-                    <input type="radio" name="combo-move" checked={comboMove === "separate"} onChange={() => setComboMove("separate")} />
+                    <input type="radio" name="combo-move" checked={comboMove === "separate"} onChange={() => setComboMove("separate")} disabled={saving} />
                     Separate: move only this service
                   </label>
                   {comboTogether && (service.isRecurring ?? service.is_recurring) ? (

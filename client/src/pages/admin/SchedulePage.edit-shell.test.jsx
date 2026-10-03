@@ -334,3 +334,19 @@ it('a separation that committed is disclosed when the edit after it fails', asyn
   expect(writeUrls().filter((u) => u.includes('/split'))).toHaveLength(1);
 });
 
+it('the move choice is frozen while a save is in flight', async () => {
+  let releaseMove;
+  fetch.mockImplementation(async (url) => (String(url).includes('/reschedule')
+    ? new Promise((resolve) => { releaseMove = () => resolve({ ok: true, json: async () => ({}) }); })
+    : okJson(url)));
+  const dialog = openCombo();
+  fireEvent.change(dialog.querySelector('input[type="date"]'), { target: { value: '2035-01-03' } });
+  await clickSave();
+  await waitFor(() => expect(writes()).toHaveLength(1));
+  expect(screen.getByLabelText('Separate: move only this service')).toBeDisabled();
+  expect(screen.getByLabelText('Move all of them together')).toBeDisabled();
+  await act(async () => releaseMove());
+  await waitFor(() => expect(writes()).toHaveLength(2));
+  expect(writeUrls()[0]).toBe('POST /admin/dispatch/fixture-visit/reschedule');
+});
+
