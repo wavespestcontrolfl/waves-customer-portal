@@ -19,6 +19,10 @@ import useSpeechDictation from "../../hooks/useSpeechDictation";
  *   uploadServiceId optional — the visit's id; where SpeechRecognition is
  *                   missing, the hook records a clip and sends it for server
  *                   transcription instead (GATE_TECH_DICTATION_UPLOAD)
+ *   clipHandler     optional — async (blob, seconds): the mic always records and
+ *                   hands the clip here (the caller sends it to its own
+ *                   transcriber and appends the words), never the browser's
+ *                   speech recognition
  *   onPendingChange optional — told true from the mic tap until a recorded
  *                   clip is taken and transcribed (the upload path only),
  *                   so the caller can hold a save until the words arrive
@@ -61,11 +65,12 @@ export default function DictationButton({
   presentation = "legacy",
   disabled = false,
   uploadServiceId,
+  clipHandler,
   onPendingChange,
 }) {
   const migrated = presentation === "admin";
   const Control = migrated ? Button : "button";
-  const { listening, supported, toggle, cancel, mode, starting, uploading } = useSpeechDictation(onAppend, { uploadServiceId });
+  const { listening, supported, toggle, cancel, mode, starting, uploading } = useSpeechDictation(onAppend, { uploadServiceId, clipHandler });
 
   // A recorded clip has no transcript until it is stopped and transcribed;
   // a save in that window would go out without it. The window opens at the
