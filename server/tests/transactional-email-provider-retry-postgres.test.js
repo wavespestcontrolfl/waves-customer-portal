@@ -489,7 +489,7 @@ postgres('provider-block retries after a customer email correction (PostgreSQL)'
   // Accepted by SendGrid, awaiting its verdict: the sender stamped the reservation delivered and the row carries sent_at.
   const acceptedAwaitingVerdict = () => {
     const token = randomUUID();
-    return { status: 'sent', provider_retry_next_at: null, provider_handoff_phase: 'started', send_attempt_token: token,
+    return { status: 'sent', provider_retry_next_at: null, provider_handoff_phase: 'started', send_attempt_token: token, queued_at: new Date(),
       provider_handoff_attempt_token: token, sent_at: new Date(Date.now() - 60000), provider_message_id: 'provider-accepted' };
   };
 
@@ -647,28 +647,94 @@ postgres('provider-block retries after a customer email correction (PostgreSQL)'
     expect((await rowOf(row.id)).error_message).toBe(`${Reservation.BILLING_EMAIL_REQUOTE_REFUSAL_PREFIX}${REASON}`);
   });
 
-  test('a failed reopen on a late block rolls the event back: the row is not terminalized and the event is not consumed, so a redelivery settles it', async () => {
+  // A refused ledger write for the settle, as a real database error: a trigger that rejects ledger updates.
+  const failLedgerWrites = async () => {
+    await mockDatabase.raw(`CREATE FUNCTION "${schema}".b15_refuse() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'ledger write refused'; END $$`);
+    await mockDatabase.raw(`CREATE TRIGGER b15_refuse BEFORE UPDATE ON "${schema}".collections_contact_ledger FOR EACH ROW EXECUTE FUNCTION "${schema}".b15_refuse()`);
+  };
+  const allowLedgerWrites = async () => {
+    await mockDatabase.raw(`DROP TRIGGER IF EXISTS b15_refuse ON "${schema}".collections_contact_ledger`);
+    await mockDatabase.raw(`DROP FUNCTION IF EXISTS "${schema}".b15_refuse()`);
+  };
+  afterEach(allowLedgerWrites);
+  const logger = require('../services/logger');
+
+  test('a late block whose settle fails still commits: event recorded, row failed and stamped but unsettled, no retry armed; the recovery sweep then settles it', async () => {
     const customerId = randomUUID();
     const { row, ledgerId } = await billingReplay(customerId, { delivered: true, row: acceptedAwaitingVerdict() });
     await correct(customerId);
     const ev = blockEvent();
-    const before = await rowOf(row.id);
+    await failLedgerWrites();
 
-    await expect(mockDatabase.transaction(async (trx) => {
-      await hideColumn(trx, 'collections_contact_ledger', 'metadata');
-      await handleEmailMessageEvent(ev, before, trx);
-    })).rejects.toThrow(/metadata/);
+    await expect(webhook(await rowOf(row.id), ev)).resolves.toBe(true);
 
-    // Nothing from the event survived: no recorded event, the row still reads as accepted and stamped.
-    expect(Number((await mockDatabase('email_message_events').count('* as n').first()).n)).toBe(0);
-    expect(await rowOf(row.id)).toMatchObject({ status: 'sent', error_message: null });
-    expect((await rowOf(row.id)).sent_at).toBeInstanceOf(Date);
+    // The webhook's own write committed; only the settle was rolled back (its savepoint).
+    expect(Number((await mockDatabase('email_message_events').count('* as n').first()).n)).toBe(1);
+    const unsettled = await rowOf(row.id);
+    expect(unsettled).toMatchObject({ status: 'failed', provider_handoff_phase: 'rejected', provider_retry_next_at: null, provider_retry_exhausted_at: null });
+    expect(unsettled.categories).toContain(STAMP);
+    expect(unsettled.sent_at).toBeInstanceOf(Date);
+    expect(unsettled.error_message).not.toBe(REASON);
     expect(await ledgerMetadata(ledgerId)).toMatchObject({ delivered: true });
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('not settled'));
+    // The stamp keeps it out of the retry schedule.
+    await expect(retry.runDueRetries()).resolves.toMatchObject({ claimed: 0 });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
 
-    // The same event delivered again (the fault cleared) is processed and settles the row.
-    await webhook(before, ev);
-    expect(await rowOf(row.id)).toMatchObject({ status: 'failed', sent_at: null, error_message: REASON });
+    // Sweep while the fault persists: nothing settles, nothing throws, the row stays unsettled.
+    await expect(retry.recoverStaleClaims()).resolves.toBe(0);
+    expect((await rowOf(row.id)).provider_retry_exhausted_at).toBeNull();
+
+    await allowLedgerWrites();
+    await expect(retry.recoverStaleClaims()).resolves.toBe(1);
+
+    const settled = await rowOf(row.id);
+    expect(settled).toMatchObject({ status: 'failed', sent_at: null, error_message: REASON });
+    expect(settled.provider_retry_exhausted_at).toBeInstanceOf(Date);
+    const metadata = await ledgerMetadata(ledgerId);
+    expect(metadata.delivered).toBeUndefined();
+    expect(claimVerdict({ id: ledgerId, metadata, reused: true })).toEqual({ allowed: true, reopen: true });
+  });
+
+  test('the same for a previsit reminder: the sweep frees the appointment claim', async () => {
+    const customerId = randomUUID();
+    const { row, ledgerId, appointmentId } = await billingReplay(customerId, { previsit: true, row: acceptedAwaitingVerdict() });
+    await correct(customerId);
+    await failLedgerWrites();
+    await webhook(await rowOf(row.id));
+    expect((await rowOf(row.id)).provider_retry_exhausted_at).toBeNull();
+    expect((await mockDatabase('scheduled_services').where({ id: appointmentId }).first()).balance_reminder_sent_at).toBeInstanceOf(Date);
+    await allowLedgerWrites();
+
+    await expect(retry.recoverStaleClaims()).resolves.toBeGreaterThanOrEqual(1);
+
+    expect(await rowOf(row.id)).toMatchObject({ status: 'failed', sent_at: null, error_message: 'Billing email old quote retired: ' + REASON });
     expect((await ledgerMetadata(ledgerId)).delivered).toBeUndefined();
+    expect((await mockDatabase('scheduled_services').where({ id: appointmentId }).first()).balance_reminder_sent_at).toBeNull();
+  });
+
+  test('the sweep is idempotent and skips delivered, already-settled, sender-rendered and old rows', async () => {
+    const customerId = randomUUID();
+    const stamped = (overrides) => scheduled(customerId, { provider_retry_next_at: null, queued_at: new Date(), categories: JSON.stringify(['email_template', STAMP]), ...overrides });
+    const delivered = stamped({ status: 'delivered', delivered_at: new Date(), sent_at: new Date() });
+    const alreadySettled = stamped({ provider_retry_exhausted_at: new Date(), error_message: REASON });
+    const senderRendered = stamped({ template_key: 'invoice.followup_7_day', suppression_group_key_snapshot: 'transactional_required' });
+    const old = stamped({ queued_at: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) });
+    const unstamped = stamped({ categories: JSON.stringify(['email_template']) });
+    const genuine = stamped({});
+    await mockDatabase('email_messages').insert([delivered, alreadySettled, senderRendered, old, unstamped, genuine]);
+    const snapshot = async (ids) => Object.fromEntries(await Promise.all(ids.map(async (id) => [id, JSON.stringify(await rowOf(id))])));
+    const untouchedIds = [delivered.id, alreadySettled.id, senderRendered.id, old.id, unstamped.id];
+    const before = await snapshot(untouchedIds);
+
+    await expect(retry.recoverStaleClaims()).resolves.toBe(1);
+    expect((await rowOf(genuine.id)).provider_retry_exhausted_at).toBeInstanceOf(Date);
+    // Second run: nothing left to settle, nothing changes.
+    const settledOnce = JSON.stringify(await rowOf(genuine.id));
+    await expect(retry.recoverStaleClaims()).resolves.toBe(0);
+
+    expect(await snapshot(untouchedIds)).toEqual(before);
+    expect(JSON.stringify(await rowOf(genuine.id))).toBe(settledOnce);
   });
 
   test('the legitimate no-ops still commit: a resolved reservation and a delivered row are terminalized or left alone without an error', async () => {
