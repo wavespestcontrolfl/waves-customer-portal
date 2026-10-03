@@ -322,8 +322,9 @@ async function mfaSetup(req, res, next) {
       const result = await staffMfa.verifySecondFactor(tech.id, code);
       if (!result.ok) return mfaFailureResponse(res, result, 400);
     }
-    const { secret, otpauthUrl } = await staffMfa.startSetup(tech);
-    return res.json({ secret, otpauthUrl, expiresInMinutes: staffMfa.PENDING_SETUP_TTL_MS / 60000 });
+    const started = await staffMfa.startSetup(tech, { expectedTokenVersion: staffTokenVersion(tech) });
+    if (!started.ok) return res.status(401).json({ error: 'Session has been revoked', code: 'TOKEN_REVOKED' });
+    return res.json({ secret: started.secret, otpauthUrl: started.otpauthUrl, expiresInMinutes: staffMfa.PENDING_SETUP_TTL_MS / 60000 });
   } catch (err) {
     if (err.status === 503) return res.status(503).json({ error: err.message });
     return next(err);

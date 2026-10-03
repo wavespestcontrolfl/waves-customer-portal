@@ -311,24 +311,33 @@ async function verifySecondFactor(technicianId, code, { conn = db, nowMs = Date.
 
 // ── enrollment ──────────────────────────────────────────────────────────────
 
-async function startSetup(tech, { conn = db } = {}) {
+// Stores a new pending secret, fenced on the session's credential version
+// like every other factor write: a request from a session that a password
+// change or factor replacement revoked meanwhile writes nothing.
+// Returns { ok: true, secret, otpauthUrl } or { ok: false, reason: 'revoked' }.
+async function startSetup(tech, { expectedTokenVersion } = {}) {
   if (!hasMfaKey()) {
     throw Object.assign(new Error('Two-step sign-in cannot be set up: no encryption key is configured.'), { status: 503 });
   }
   const secret = generateSecret();
+  let fenced;
   try {
-    await conn('staff_mfa_totp')
-      .insert({
-        technician_id: tech.id,
-        pending_secret_enc: encryptedSecretRaw(conn, secret),
-        pending_created_at: conn.fn.now(),
-      })
-      .onConflict('technician_id')
-      .merge({
-        pending_secret_enc: encryptedSecretRaw(conn, secret),
-        pending_created_at: conn.fn.now(),
-        updated_at: conn.fn.now(),
-      });
+    fenced = await db.transaction(async (trx) => {
+      if (!await lockAccountAtVersion(trx, tech.id, expectedTokenVersion)) return false;
+      await trx('staff_mfa_totp')
+        .insert({
+          technician_id: tech.id,
+          pending_secret_enc: encryptedSecretRaw(trx, secret),
+          pending_created_at: trx.fn.now(),
+        })
+        .onConflict('technician_id')
+        .merge({
+          pending_secret_enc: encryptedSecretRaw(trx, secret),
+          pending_created_at: trx.fn.now(),
+          updated_at: trx.fn.now(),
+        });
+      return true;
+    });
   } catch (e) {
     // knex puts bindings (the new secret AND the key) in its error message;
     // only a sanitized error with the database code leaves this function.
@@ -336,7 +345,8 @@ async function startSetup(tech, { conn = db } = {}) {
     err.code = e && e.code != null ? String(e.code) : undefined;
     throw err;
   }
-  return { secret, otpauthUrl: otpauthUri(secret, tech.email) };
+  if (!fenced) return { ok: false, reason: 'revoked' };
+  return { ok: true, secret, otpauthUrl: otpauthUri(secret, tech.email) };
 }
 
 // Confirms a pending setup with a code from the new authenticator. In one

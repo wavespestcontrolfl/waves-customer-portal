@@ -57,7 +57,7 @@ postgres('staff two-step sign-in on migrated PostgreSQL', () => {
   });
 
   async function enroll() {
-    const { secret } = await staffMfa.startSetup(tech);
+    const { secret } = await staffMfa.startSetup(tech, { expectedTokenVersion: 1 });
     // Confirm with the PREVIOUS step's code so the current step stays usable
     // for the login assertions below.
     const now = Date.now();
@@ -68,7 +68,7 @@ postgres('staff two-step sign-in on migrated PostgreSQL', () => {
 
   test('setup stores only ciphertext; confirm activates it, stamps the account and issues recovery codes', async () => {
     await mockDatabase('push_subscriptions').insert({ admin_user_id: techId, subscription_data: '{}', active: true });
-    const { secret, otpauthUrl } = await staffMfa.startSetup(tech);
+    const { secret, otpauthUrl } = await staffMfa.startSetup(tech, { expectedTokenVersion: 1 });
     expect(otpauthUrl).toContain(`secret=${secret}`);
     const pending = await mockDatabase('staff_mfa_totp').where({ technician_id: techId }).first();
     expect(pending.pending_secret_enc).toMatch(/BEGIN PGP MESSAGE/);
@@ -96,7 +96,7 @@ postgres('staff two-step sign-in on migrated PostgreSQL', () => {
   });
 
   test('the code that confirmed setup cannot be replayed at sign-in', async () => {
-    const { secret } = await staffMfa.startSetup(tech);
+    const { secret } = await staffMfa.startSetup(tech, { expectedTokenVersion: 1 });
     const code = codeFor(secret);
     expect((await staffMfa.confirmSetup(tech, code, { expectedTokenVersion: 1 })).ok).toBe(true);
     expect(await staffMfa.verifySecondFactor(techId, code)).toMatchObject({ ok: false, reason: 'invalid' });
@@ -162,12 +162,12 @@ postgres('staff two-step sign-in on migrated PostgreSQL', () => {
   });
 
   test('an expired setup cannot be confirmed', async () => {
-    const { secret } = await staffMfa.startSetup(tech);
+    const { secret } = await staffMfa.startSetup(tech, { expectedTokenVersion: 1 });
     const later = Date.now() + staffMfa.PENDING_SETUP_TTL_MS + 60 * 1000;
     expect(await staffMfa.confirmSetup(tech, codeFor(secret, 0, later), { nowMs: later, expectedTokenVersion: 1 })).toEqual({ ok: false, reason: 'expired' });
   });
   test('a password change that landed after the request authenticated wins: nothing is enabled', async () => {
-    const { secret } = await staffMfa.startSetup(tech);
+    const { secret } = await staffMfa.startSetup(tech, { expectedTokenVersion: 1 });
     await mockDatabase('technicians').where({ id: techId }).update({ auth_token_version: 2 });
     expect(await staffMfa.confirmSetup(tech, codeFor(secret), { expectedTokenVersion: 1 })).toEqual({ ok: false, reason: 'revoked' });
     expect((await mockDatabase('technicians').where({ id: techId }).first()).mfa_enabled_at).toBeNull();
@@ -178,7 +178,7 @@ postgres('staff two-step sign-in on migrated PostgreSQL', () => {
     delete process.env.STAFF_MFA_KEY;
     process.env.DATA_HYGIENE_VAULT_KEY = `fallback-${randomUUID()}`;
     try {
-      const { secret } = await staffMfa.startSetup(tech);
+      const { secret } = await staffMfa.startSetup(tech, { expectedTokenVersion: 1 });
       process.env.STAFF_MFA_KEY = dedicated;
       expect((await staffMfa.confirmSetup(tech, codeFor(secret), { expectedTokenVersion: 1 })).ok).toBe(true);
     } finally {
@@ -187,11 +187,21 @@ postgres('staff two-step sign-in on migrated PostgreSQL', () => {
     }
   });
   test('a failed setup write never carries the secret or the key in its error', async () => {
-    await mockDatabase('technicians').where({ id: techId }).del();
-    const err = await staffMfa.startSetup(tech).catch((e) => e);
-    expect(err).toBeInstanceOf(Error);
-    expect(err.message).toMatch(/^staff MFA setup failed: database error/);
-    expect(`${err.message}\n${err.stack}`).not.toContain(process.env.STAFF_MFA_KEY);
+    await mockDatabase.raw('ALTER TABLE staff_mfa_totp ADD CONSTRAINT staff_mfa_totp_test_block CHECK (false) NOT VALID');
+    try {
+      const err = await staffMfa.startSetup(tech, { expectedTokenVersion: 1 }).catch((e) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(err.message).toMatch(/^staff MFA setup failed: database error 23514$/);
+      expect(`${err.message}\n${err.stack}`).not.toContain(process.env.STAFF_MFA_KEY);
+    } finally {
+      await mockDatabase.raw('ALTER TABLE staff_mfa_totp DROP CONSTRAINT staff_mfa_totp_test_block');
+    }
+  });
+
+  test('a setup request from a session revoked meanwhile writes no secret', async () => {
+    await mockDatabase('technicians').where({ id: techId }).update({ auth_token_version: 2 });
+    expect(await staffMfa.startSetup(tech, { expectedTokenVersion: 1 })).toEqual({ ok: false, reason: 'revoked' });
+    expect(await mockDatabase('staff_mfa_totp').where({ technician_id: techId }).first()).toBeUndefined();
   });
   test('a parallel burst of wrong codes cannot get past the lockout', async () => {
     const { secret } = await enroll();

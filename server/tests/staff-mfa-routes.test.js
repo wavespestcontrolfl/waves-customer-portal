@@ -251,9 +251,15 @@ describe('self-service routes', () => {
     expect(staffMfa.startSetup).not.toHaveBeenCalled();
 
     staffMfa.verifySecondFactor.mockResolvedValue({ ok: true, method: 'totp' });
-    staffMfa.startSetup.mockResolvedValue({ secret: 'ABC', otpauthUrl: 'otpauth://totp/x' });
+    staffMfa.startSetup.mockResolvedValue({ ok: true, secret: 'ABC', otpauthUrl: 'otpauth://totp/x' });
     res = await invoke(mfaSetup, { technician: staffRow({ mfa_enabled_at: new Date() }), body: { currentPassword: 'right', code: '123456' } });
     expect(res.body).toEqual({ secret: 'ABC', otpauthUrl: 'otpauth://totp/x', expiresInMinutes: 15 });
+    expect(staffMfa.startSetup).toHaveBeenLastCalledWith(expect.objectContaining({ id: 'tech-1' }), { expectedTokenVersion: 3 });
+
+    staffMfa.startSetup.mockResolvedValue({ ok: false, reason: 'revoked' });
+    res = await invoke(mfaSetup, { technician: staffRow({ mfa_enabled_at: new Date() }), body: { currentPassword: 'right', code: '123456' } });
+    expect(res.statusCode).toBe(401);
+    expect(res.body.secret).toBeUndefined();
   });
 
   test('confirm is fenced on the session version and continues this session on the new version', async () => {
@@ -320,7 +326,7 @@ describe('self-service routes', () => {
 
   test('a session that signed in with a recovery code may replace the authenticator without another code, briefly', async () => {
     bcrypt.compare.mockResolvedValue(true);
-    staffMfa.startSetup.mockResolvedValue({ secret: 'ABC', otpauthUrl: 'otpauth://totp/x' });
+    staffMfa.startSetup.mockResolvedValue({ ok: true, secret: 'ABC', otpauthUrl: 'otpauth://totp/x' });
     const enrolled = staffRow({ mfa_enabled_at: new Date() });
     const now = Math.floor(Date.now() / 1000);
     let res = await invoke(mfaSetup, { technician: enrolled, staffToken: { mfa: true, mfaVia: 'recovery', iat: now }, body: { currentPassword: 'right' } });
