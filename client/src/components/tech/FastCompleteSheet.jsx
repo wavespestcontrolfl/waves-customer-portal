@@ -577,10 +577,13 @@ function SheetBody({ service, request, ctx, submission, locked, photos, onOverla
   const reportFlow = service?.reportFlow === true;
   // The report flow keeps its form mounted through the saved view: what the
   // tech marked shows there.
-  if (submission.done && !reportFlow) {
+  if (submission.done && (!reportFlow || submission.restored)) {
     return (
       <SavedView service={service} summary={submission.done.summary} onCompleted={onCompleted}>
-        <CustomerTextResult outcome={submission.done.customerText} />
+        {reportFlow ? <>
+          <SentSummary result={submission.done.response} base={`/admin/dispatch/${service.id}`} request={request} followupBooking={ctx.followupBooking} />
+          <CollectPayment result={submission.done.response} />
+        </> : <CustomerTextResult outcome={submission.done.customerText} />}
       </SavedView>
     );
   }
