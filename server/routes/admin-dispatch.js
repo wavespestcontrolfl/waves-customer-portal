@@ -839,7 +839,7 @@ router.post('/:serviceId/lane-facts', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/dispatch/:serviceId/standard-wording { values, activityScore, backfill }
+// POST /api/admin/dispatch/:serviceId/standard-wording { values, activityScore, backfill, products }
 // — the standard sentences a typed visit's customer report keeps when its
 // record says nothing was found (GATE_STANDARD_WORDING_PREVIEW; owner mockup
 // approval 2026-10-03), for the office form to show where it greys out
@@ -884,6 +884,7 @@ router.post('/:serviceId/standard-wording', async (req, res, next) => {
       profile,
       values: currentValuesFor(profile.findingsType, raw),
       techScore: Number.isInteger(score) ? score : null,
+      products: req.body?.products,
     });
     return res.json(wording ? { available: true, ...wording } : { available: false });
   } catch (err) { return next(err); }

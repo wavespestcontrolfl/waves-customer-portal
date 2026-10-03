@@ -44,12 +44,22 @@ const DAY = '2026-10-03';
 const BAIT = { findingsType: 'termite_bait_station', serviceKey: 'termite_monitoring' };
 const NOTHING = { stations_checked: '14', termite_activity: 'None observed', bait_consumption: 'None — bait intact' };
 
-// The customer's earlier scores: the latest one and how many.
-function scoresKnex({ prior = null, count = 0 } = {}) {
+// A cockroach visit with nothing found, and a gel bait from the catalog.
+const ROACH = { findingsType: 'cockroach', serviceKey: 'cockroach_treatment' };
+const ROACH_SVC = { ...SVC, service_type: 'German Roach Cleanout' };
+const ROACH_NONE = { species: 'German', activity_level: 'None observed', areas_treated: 'Kitchen' };
+const GEL = { id: 'abcdefab-0000-4000-8000-000000000001', name: 'Advion Cockroach Gel Bait', category: 'bait', product_type: 'gel bait', active_ingredient: 'indoxacarb' };
+const GEL_ROW = { productId: GEL.id.toUpperCase(), applicationMethod: 'bait_placement', applicationArea: 'Kitchen' };
+
+// The customer's earlier scores (the latest one and how many) and the
+// product catalog's rows.
+function scoresKnex({ prior = null, count = 0, catalog = [] } = {}) {
   const calls = [];
   const knex = (table) => {
     const chain = {};
     for (const m of ['where', 'orderBy']) chain[m] = (...args) => { calls.push([table, m, ...args]); return chain; };
+    chain.whereIn = (...args) => { calls.push([table, 'whereIn', ...args]); return chain; };
+    chain.select = async () => catalog;
     chain.first = async () => (prior == null ? null : { score: prior });
     chain.count = async () => [{ count: String(count) }];
     return chain;
@@ -103,6 +113,45 @@ describe('standardWordingPreview', () => {
       ['service_activity_scores', 'where', { customer_id: 'cust-1', indicator_key: 'termite_activity' }],
       ['service_activity_scores', 'where', 'service_date', '<=', DAY],
     ]));
+  });
+
+  test('a cockroach visit: the work comes from the products, as /complete derives it (pre-push P1)', async () => {
+    const knex = scoresKnex({ catalog: [GEL] });
+    const wording = await standardWordingPreview(knex, { svc: ROACH_SVC, serviceDate: DAY, profile: ROACH, values: ROACH_NONE, products: [GEL_ROW] });
+    const want = ActivityIndicators.buildTypedReportSnapshot({
+      projectType: 'cockroach',
+      values: { ...ROACH_NONE, work_completed: 'Bait placement' },
+      serviceKey: ROACH.serviceKey,
+      serviceLabel: ROACH_SVC.service_type,
+      visitSequence: 1,
+      activity: {
+        indicatorKey: 'roach_activity',
+        label: 'Roach Activity',
+        score: 0,
+        trend: ActivityIndicators.trendDirection(0, null),
+        trendWord: ActivityIndicators.trendWordForScores(0, null),
+      },
+      technicianReportBody: null,
+    }).todaysResult;
+    expect(wording).toEqual({ headline: want.headline, body: want.body });
+    expect(wording.body).toMatch(/placed targeted bait/);
+    // The catalog row is read by the id's canonical (lower-case) form.
+    expect(knex.calls).toEqual(expect.arrayContaining([['products_catalog', 'whereIn', 'id', [GEL.id]]]));
+  });
+
+  test('a cockroach visit with no products: the form\'s own work chips never reach the wording', async () => {
+    const withChips = await standardWordingPreview(scoresKnex(), {
+      svc: ROACH_SVC, serviceDate: DAY, profile: ROACH, values: { ...ROACH_NONE, work_completed: 'Bait placement' }, products: [],
+    });
+    const without = await standardWordingPreview(scoresKnex(), { svc: ROACH_SVC, serviceDate: DAY, profile: ROACH, values: ROACH_NONE });
+    expect(withChips).toEqual(without);
+    expect(withChips.body).not.toMatch(/placed targeted bait/);
+  });
+
+  test('a product id that is not a uuid is never looked up', async () => {
+    const knex = scoresKnex({ catalog: [GEL] });
+    await standardWordingPreview(knex, { svc: ROACH_SVC, serviceDate: DAY, profile: ROACH, values: ROACH_NONE, products: [{ productId: "1'; select 1", applicationMethod: 'bait_placement' }, null, 'x'] });
+    expect(knex.calls.filter(([table]) => table === 'products_catalog')).toEqual([]);
   });
 
   test('no completion day, no wording', async () => {
@@ -176,6 +225,15 @@ describe('POST /:serviceId/standard-wording', () => {
     const res = await invoke({ values: NOTHING, backfill: true }, { techRole: 'technician', technicianId: 'tech-1' });
     expect(res.body).toMatchObject({ available: true });
     expect(countedUpTo()).toEqual([etDateString(), etDateString()]);
+  });
+
+  test('the form\'s product rows reach the wording', async () => {
+    mockResolveProfile.mockResolvedValue(ROACH);
+    scores = scoresKnex({ catalog: [GEL] });
+    mockDbCurrent = (table) => (table === 'scheduled_services' ? { where: () => ({ first: async () => ROACH_SVC }) } : scores(table));
+    const res = await invoke({ values: ROACH_NONE, products: [GEL_ROW] });
+    expect(res.body).toMatchObject({ available: true });
+    expect(res.body.body).toMatch(/placed targeted bait/);
   });
 
   test('a record with activity answers none', async () => {

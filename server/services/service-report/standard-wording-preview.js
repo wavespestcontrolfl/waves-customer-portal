@@ -12,12 +12,20 @@
  * profile), the score the completion keeps (derived from the findings, or the
  * technician's own where they set it), and the visit number and trend from
  * the customer's earlier scores on the same indicator up to the day the
- * completion is dated.
+ * completion is dated. A primary cockroach report's work comes from the
+ * submitted products, as /complete derives it (pre-push P1 on the first
+ * push: "We placed targeted bait today." is product-derived).
  * Whether the report keeps its standard wording is the report's own verdict:
  * a write-up offered to it is refused. Read-only.
  */
 
 const ActivityIndicators = require('./activity-indicators');
+const { detectServiceLine } = require('./service-line-configs');
+const { canonicalProductId } = require('./report-identity-snapshot');
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+// The most product rows a preview reads (a visit uses a handful).
+const MAX_PRODUCTS = 200;
 
 // A write-up the report is offered: present in what it builds only when the
 // report would use one, which is not the standard wording.
@@ -65,15 +73,43 @@ async function activityFor(knex, svc, serviceDate, indicator, score) {
   };
 }
 
+// A primary cockroach report's work, from the submitted product rows (each
+// product's id, method and area) and the catalog as it stands: /complete's
+// own derivation (complete-scheduled-service.js
+// deriveCockroachWorkFromSubmittedProducts), never the form's chips. No
+// derived work, no work_completed.
+async function withDerivedWork(knex, { type, values, products, svc }) {
+  if (type !== 'cockroach') return values;
+  const { deriveCockroachWorkFromSubmittedProducts } = require('../complete-scheduled-service');
+  const rows = (Array.isArray(products) ? products : [])
+    .slice(0, MAX_PRODUCTS)
+    .filter((row) => row && typeof row === 'object' && !Array.isArray(row));
+  const ids = [...new Set(rows.map((row) => canonicalProductId(row.productId)).filter((id) => UUID_RE.test(id)))];
+  const catalog = ids.length ? await knex('products_catalog').whereIn('id', ids).select('*') : [];
+  const work = deriveCockroachWorkFromSubmittedProducts({
+    products: rows,
+    catalogRowsById: new Map(catalog.map((row) => [canonicalProductId(row.id), row])),
+    serviceLine: detectServiceLine(svc.service_type),
+  });
+  const next = { ...values };
+  if (work.length) next.work_completed = work.join(', ');
+  else delete next.work_completed;
+  return next;
+}
+
 /**
  * The standard wording ({ headline, body }) the visit's report keeps for
  * these values, or null when the report would use a write-up (or the visit
  * has no typed form). serviceDate is the day the completion is dated: today
- * (Eastern), or the scheduled day for a backdated closeout.
+ * (Eastern), or the scheduled day for a backdated closeout; products are the
+ * form's product rows as the completion would submit them.
  */
-async function standardWordingPreview(knex, { svc, serviceDate, profile, values, techScore = null }) {
+async function standardWordingPreview(knex, {
+  svc, serviceDate, profile, values: formValues, techScore = null, products = [],
+}) {
   const type = profile?.findingsType;
-  if (!type || !serviceDate || !values || typeof values !== 'object' || Array.isArray(values)) return null;
+  if (!type || !serviceDate || !formValues || typeof formValues !== 'object' || Array.isArray(formValues)) return null;
+  const values = await withDerivedWork(knex, { type, values: formValues, products, svc });
   const { indicator, score } = scoreFor(type, values, techScore);
   const { visitSequence, activity } = await activityFor(knex, svc, serviceDate, indicator, score);
   const todaysResult = ActivityIndicators.buildTypedReportSnapshot({

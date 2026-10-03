@@ -9491,6 +9491,17 @@ export function restoredActivityScoreState(activity, values, savedScore, savedTo
   };
 }
 
+// The product rows a cockroach report reads its work from, as the completion
+// submits them (each product's id, application method and area): the
+// standard wording preview sends these.
+export function standardWordingProductRows(selectedProducts = [], serviceType = "", areasServiced = []) {
+  return (selectedProducts || []).map((p) => ({
+    productId: p.productId,
+    applicationMethod: productApplicationMethod(p, serviceType),
+    applicationArea: p.applicationArea || (areasServiced.length === 1 ? areasServiced[0] : null),
+  }));
+}
+
 // The standard wording a nothing-found report keeps (GATE_STANDARD_WORDING_
 // PREVIEW, owner mockup approval 2026-10-03): read-only, under the greyed-out
 // Generate AI report, the exact sentences the customer will read.
@@ -14318,6 +14329,11 @@ export function CompletionPanel({
   // it looks off (the approved mockup); before, it looked on and did nothing.
   const generateHeldForStandardWording = standardWordingWanted || zeroStateCompanionOnly;
   const [standardWording, setStandardWording] = useState(null);
+  // The product rows a cockroach report's work comes from, as a text key, so
+  // typing an amount never asks again.
+  const standardWordingProducts = JSON.stringify(
+    standardWordingProductRows(selectedProducts, serviceTypeForArea, completionAreasServiced),
+  );
   useEffect(() => {
     setStandardWording(null);
     if (!standardWordingWanted) return undefined;
@@ -14329,6 +14345,7 @@ export function CompletionPanel({
           values: findingsValues,
           activityScore: typedActivityScore,
           backfill: backfillEligible && backfillCloseout,
+          products: JSON.parse(standardWordingProducts),
         }),
       })
         .then((data) => {
@@ -14339,7 +14356,7 @@ export function CompletionPanel({
         .catch(() => { if (!cancelled) setStandardWording(null); });
     }, 300);
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [standardWordingWanted, service.id, findingsValues, typedActivityScore, backfillEligible, backfillCloseout]);
+  }, [standardWordingWanted, service.id, findingsValues, typedActivityScore, backfillEligible, backfillCloseout, standardWordingProducts]);
   // Fast Complete step 5: a termite treatment's state record fills from the
   // visit's own products and trace (lib termiteRecordFromVisit), each field
   // only while it is empty or still holds what was last filled this way, so
