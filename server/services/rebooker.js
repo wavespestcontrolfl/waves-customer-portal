@@ -956,6 +956,10 @@ async function writePartnerCas(trx, partner, pUpdate) {
       window_end: partner.window_end ?? null,
       technician_id: partner.technician_id ?? null,
       visit_id: partner.visit_id,
+      // the scope its reschedule_log row freezes (Codex #5669 r2)
+      service_type: partner.service_type ?? null,
+      service_id: partner.service_id ?? null,
+      property_id: partner.property_id ?? null,
       ...((!pUpdate.window_end && process.env.REBOOKER_NULL_END_OCCUPANCY !== 'off')
         ? { estimated_duration_minutes: partner.estimated_duration_minutes ?? null }
         : {}),
@@ -3869,6 +3873,11 @@ class SmartRebooker {
                 ? { customer_confirmed: sib.customer_confirmed ?? null }
                 : {}),
               technician_id: sib.technician_id ?? null,
+              // the occurrence scope the reschedule_log freezes (Codex #5669 r2): an
+              // edit to service or address after the read must miss, not be logged stale
+              service_type: sib.service_type ?? null,
+              service_id: sib.service_id ?? null,
+              property_id: sib.property_id ?? null,
               // Reviewed proposals compare duration above, so their write
               // always pins it. Otherwise pin only when the occupancy probes
               // derived their span from it (null landing end + gate on): a
