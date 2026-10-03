@@ -94,7 +94,7 @@ describe('accept route wiring (source pins)', () => {
 
   test('r7 audit: a dropped capture is retired AFTER the transaction rolls back (no Stripe I/O under row locks), fail-closed 503', () => {
     expect(src).not.toMatch(/await retireOrDenyDroppedCapture\(estimate, recurringCardVerification\.setupIntentId\)/);
-    expect(src).toMatch(/if \(droppedCaptureToRetire && err && err\.status === 409\) \{\s*try \{\s*await retireOrDenyDroppedCapture\(droppedCaptureToRetire\.estimate, droppedCaptureToRetire\.setupIntentId\);\s*\} catch \(retireErr\) \{\s*return res\.status\(503\)/);
+    expect(src).toMatch(/if \(droppedCaptureToRetire && err && err\.status === 409\) \{\s*try \{\s*await retireOrDenyDroppedCapture\(droppedCaptureToRetire\.estimate, droppedCaptureToRetire\.setupIntentId, droppedCaptureToRetire\.holdSetupIntentId \|\| null\);\s*\} catch \(retireErr\) \{\s*return res\.status\(503\)/);
   });
 
   test('the promise is recomputed IN the accept transaction from the verified tender and the real invoice outcome, 409s on any attestation difference, and is what gets stamped', () => {

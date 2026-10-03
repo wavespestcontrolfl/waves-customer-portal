@@ -91,6 +91,19 @@ async function lockSmsPhone(trx, phone) {
   await trx.raw("SELECT pg_advisory_xact_lock(hashtext('twilio_21610'), hashtext(?::text))", [normalized]);
 }
 
+// Non-blocking form of lockSmsPhone (same key): true when the phone fence was taken for the rest of
+// the transaction, false when another transaction holds it. For a caller that already holds other locks
+// the phone-first writers (customer create / quick-add) order after - a blocking take could close a
+// cycle, so it refuses retryably instead. A value that normalizes to no phone has nothing to fence: true.
+async function tryLockSmsPhone(trx, phone) {
+  if (!String(phone || '').trim()) return true;
+  const normalized = require('./phone').toE164(phone);
+  if (!normalized) return true;
+  const res = await trx.raw("SELECT pg_try_advisory_xact_lock(hashtext('twilio_21610'), hashtext(?::text)) AS locked", [normalized]);
+  const row = res && res.rows ? res.rows[0] : (Array.isArray(res) ? res[0] : null);
+  return !!(row && (row.locked === true || row.locked === 't'));
+}
+
 // The callback covers final authority reads and the SDK call only. Provider
 // preparation and error recorders use separate connections and run outside it.
 async function withSmsConsentLock(dbh, { phone, customerId }, fn) {
@@ -211,5 +224,5 @@ async function lockAssignedCustomerEmails(trx, updates = {}) {
   return addresses;
 }
 
-module.exports = { lockCustomerComms, tryLockCustomerComms, withCustomerCommsLock, lockSmsPhone, withSmsConsentLock, lockCustomerEmail, lockEmailOwnershipForSend,
+module.exports = { lockCustomerComms, tryLockCustomerComms, withCustomerCommsLock, lockSmsPhone, tryLockSmsPhone, withSmsConsentLock, lockCustomerEmail, lockEmailOwnershipForSend,
   lockAssignedCustomerEmails, customerEmailLockKeys, CUSTOMER_EMAIL_COLUMNS, googleMailboxIdentity, GOOGLE_MAILBOX_SQL };

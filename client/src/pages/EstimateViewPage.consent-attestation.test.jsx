@@ -70,9 +70,15 @@ describe('EstimateViewPage accept consent attestation', () => {
     expect(src).toMatch(/\(paused \|\| autopayOff\) \? 'Save a payment method' : 'Set up Auto Pay'/);
   });
 
+  it('an ACCEPT_BILLING_CHANGED 409 also drops the one-time card hold (ref and modal) so the reload cannot resubmit it', () => {
+    expect(src).toMatch(
+      /if \(body\.code === 'CONSENT_VARIANT_STALE' \|\| body\.code === 'ACCEPT_BILLING_CHANGED'\) \{[\s\S]{0,2000}if \(body\.code === 'ACCEPT_BILLING_CHANGED'\) \{\s*cardHoldSetupIntentIdRef\.current = null;\s*setCardHoldIntent\(null\);\s*\}[\s\S]{0,700}await loadEstimate\(\{ preserveSelection: true \}\);/,
+    );
+  });
+
   it('a CONSENT_VARIANT_STALE / ACCEPT_BILLING_CHANGED 409 drops the captured intent and refetches /data so the UI re-renders what the server will record', () => {
     expect(src).toMatch(
-      /if \(body\.code === 'CONSENT_VARIANT_STALE' \|\| body\.code === 'ACCEPT_BILLING_CHANGED'\) \{[\s\S]{0,2000}recurringCardSetupIntentIdRef\.current = null;\s*setInlineCardIntent\(null\);\s*await loadEstimate\(\{ preserveSelection: true \}\);/,
+      /if \(body\.code === 'CONSENT_VARIANT_STALE' \|\| body\.code === 'ACCEPT_BILLING_CHANGED'\) \{[\s\S]{0,2400}recurringCardSetupIntentIdRef\.current = null;\s*setInlineCardIntent\(null\);\s*await loadEstimate\(\{ preserveSelection: true \}\);/,
     );
   });
 

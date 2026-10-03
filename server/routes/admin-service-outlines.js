@@ -7,6 +7,7 @@ const EmailTemplateLibrary = require('../services/email-template-library');
 const { wrapServiceEmail, ctaButton, colors } = require('../services/email-template');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { estimatePhoneQuarantined, ESTIMATE_PHONE_QUARANTINED_MESSAGE } = require('../services/estimate-phone-quarantine');
 const { publicPortalUrl } = require('../utils/portal-url');
 const {
   CONTENT_LIBRARY_VERSION,
@@ -543,6 +544,9 @@ router.post('/:id/send', async (req, res, next) => {
     if (sendSms) {
       if (!estimate.customer_phone) {
         outcomes.sms = { ok: false, error: 'No phone on estimate' };
+      } else if (await estimatePhoneQuarantined(estimate)) {
+        // B18: the estimate's phone is another customer's (a contradicted accept quarantined it).
+        outcomes.sms = { ok: false, error: ESTIMATE_PHONE_QUARANTINED_MESSAGE };
       } else {
         await persistGeneratedTokenBeforeDelivery();
         const shortUrl = await shortenOrPassthrough(publicUrl, {

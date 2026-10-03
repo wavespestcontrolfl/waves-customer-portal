@@ -6,6 +6,12 @@
 // retry. Any other SMS block (consent, suppression) keeps the old behavior:
 // the email leg still carries the touch, nothing is queued.
 
+// B18: the disputed-phone quarantine has its own suite (estimate-phone-quarantine.test.js); this suite's
+// db fake does not model the customers marker read.
+jest.mock('../services/estimate-phone-quarantine', () => ({
+  ...jest.requireActual('../services/estimate-phone-quarantine'),
+  estimatePhoneQuarantined: jest.fn(async () => false),
+}));
 jest.mock('../models/db', () => {
   const inserts = [];
   const mockDb = jest.fn((table) => {

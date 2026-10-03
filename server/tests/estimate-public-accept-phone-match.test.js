@@ -24,13 +24,15 @@ jest.mock('../models/db', () => {
         const v = mockDbFixtures[`${table}:first`];
         return v ?? null;
       },
-      then: (resolve, reject) => Promise.resolve(mockDbFixtures[`${table}:list`] || []).then(resolve, reject),
+      // A same-account sibling read (where({ account_id })) answers its own fixture list.
+      then: (resolve, reject) => Promise.resolve(mockDbFixtures[c.siblingRead ? `${table}:siblings` : `${table}:list`] || []).then(resolve, reject),
     };
     c.where = (arg) => {
       if (typeof arg === 'function') arg(c);
+      else if (arg && typeof arg === 'object' && 'account_id' in arg) c.siblingRead = true;
       return c;
     };
-    for (const m of ['orWhereRaw', 'whereRaw', 'whereNot', 'whereNotNull', 'whereNull', 'whereIn', 'orderBy', 'orderByRaw', 'forUpdate']) c[m] = () => c;
+    for (const m of ['orWhereRaw', 'whereRaw', 'whereNot', 'whereNotNull', 'whereNull', 'whereIn', 'orderBy', 'orderByRaw', 'forUpdate', 'select']) c[m] = () => c;
     return c;
   };
   const mock = jest.fn((table) => chain(table));
@@ -229,6 +231,53 @@ describe('matchAcceptCustomerByPhone: the contradiction uses the canonical addre
     expect(await same({ address_line1: '45 Oak Dr' }, '45 Oak Dr Apt 9')).toBe(true);
     expect(await same({ address_line1: '100 Palm Ave', city: 'Sarasota', zip: '34236' }, '100 Palm Ave')).toBe(true);
     expect(await same({ address_line1: '100 Palm Ave', city: null, zip: null }, '100 Palm Ave, Tampa, FL 33602')).toBe(true);
+  });
+});
+
+describe('matchAcceptCustomerByPhone: the candidate\'s other owned addresses (saved properties, same-account profiles)', () => {
+  // Jane's estimate is for her own street, her own email: only the owned-address check can keep the match.
+  const janeAtSecondProperty = (address = '742 Evergreen Ter, Sarasota, FL 34236') => janeEstimate({ address });
+  it('an active saved property at the estimate address keeps the match (a second property of the same account)', async () => {
+    mockDbFixtures['customers:list'] = [BOB];
+    mockDbFixtures['customer_properties:list'] = [
+      { address_line1: '55 Pine Ct', city: 'Sarasota', zip: '34236' },
+      { address_line1: '742 Evergreen Terrace', address_line2: null, city: 'Sarasota', zip: '34236' },
+    ];
+    const res = await matchAcceptCustomerByPhone(janeAtSecondProperty());
+    expect(res.match).toBe(BOB);
+    expect(res.contradicted).toBeUndefined();
+  });
+
+  it('saved properties that ALL differ leave the contradiction in place (and a property the comparator cannot decide keeps the match)', async () => {
+    mockDbFixtures['customers:list'] = [BOB];
+    mockDbFixtures['customer_properties:list'] = [{ address_line1: '55 Pine Ct', city: 'Sarasota', zip: '34236' }];
+    expect((await matchAcceptCustomerByPhone(janeAtSecondProperty())).contradicted).toBe(true);
+    // A saved row with no street number cannot prove a difference: keep the match.
+    mockDbFixtures['customer_properties:list'] = [{ address_line1: 'Lot 12' }];
+    expect((await matchAcceptCustomerByPhone(janeAtSecondProperty())).match).toBe(BOB);
+  });
+
+  it('a live same-account profile at the estimate address keeps the match (legacy one-row-per-property accounts)', async () => {
+    mockDbFixtures['customers:list'] = [{ ...BOB, account_id: 'acct-bob' }];
+    mockDbFixtures['customers:siblings'] = [{ id: 'cust-rental', address_line1: '742 Evergreen Ter', city: 'Sarasota', zip: '34236' }];
+    const res = await matchAcceptCustomerByPhone(janeAtSecondProperty());
+    expect(res.match).toMatchObject({ id: 'cust-bob' });
+    // A sibling at yet another address does not rescue it.
+    mockDbFixtures['customers:siblings'] = [{ id: 'cust-rental', address_line1: '9 Elm St', city: 'Sarasota', zip: '34236' }];
+    expect((await matchAcceptCustomerByPhone(janeAtSecondProperty())).contradicted).toBe(true);
+  });
+
+  it('the properties are read only on the contradiction path, and a read failure throws (never reuses a stranger)', async () => {
+    mockDbFixtures['customers:list'] = [BOB];
+    mockDbFixtures['customer_properties:list'] = [{ address_line1: '742 Evergreen Ter' }];
+    const dbMock = require('../models/db');
+    dbMock.mockClear();
+    // Email agrees -> no contradiction -> no property read.
+    await matchAcceptCustomerByPhone(janeEstimate({ customer_email: 'bob@example.com' }));
+    expect(dbMock.mock.calls.map(([t]) => t)).not.toContain('customer_properties');
+    dbMock.mockClear();
+    await matchAcceptCustomerByPhone(janeAtSecondProperty());
+    expect(dbMock.mock.calls.map(([t]) => t)).toContain('customer_properties');
   });
 });
 

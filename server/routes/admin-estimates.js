@@ -18,6 +18,7 @@ const { leadIdForEstimate } = require('../services/estimate-lead-linkage');
 const { estimateGreetingFirstName, estimateGreetingFirstToken } = require('../utils/greeting-first-name');
 const { wrapEmail, plainText } = require('../services/email-template');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { estimatePhoneQuarantined, ESTIMATE_PHONE_QUARANTINED_MESSAGE } = require('../services/estimate-phone-quarantine');
 const {
   estimateDataHasQuoteRequirement,
   estimateDataHasUnresolvedManagerApproval,
@@ -2836,6 +2837,8 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
         : null;
       if (!normalized) {
         channels.sms = { ok: false, error: `Invalid phone format: ${estimate.customer_phone}` };
+      } else if (await estimatePhoneQuarantined(estimate)) {
+        channels.sms = { ok: false, error: ESTIMATE_PHONE_QUARANTINED_MESSAGE };
       } else {
         try {
           const currentSmsBody = await smsTemplatesRouter.getTemplate('estimate_sent', { first_name: firstName, estimate_url: smsViewUrl }, {
@@ -5075,6 +5078,7 @@ router.post('/:id/follow-up', async (req, res, next) => {
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     if (!estimate.customer_phone) return res.status(400).json({ error: 'No phone on file' });
     if (estimate.status === 'accepted') return res.status(400).json({ error: 'Already accepted' });
+    if (await estimatePhoneQuarantined(estimate)) return res.status(409).json({ error: ESTIMATE_PHONE_QUARANTINED_MESSAGE, code: 'ESTIMATE_PHONE_QUARANTINED' });
     assertEstimateSendable(estimate);
     // Group-aware pricing-authority verdict (#3750, uncapped codex P0 r24):
     // this text carries the estimate link, and the link renders every
@@ -5152,6 +5156,12 @@ router.post('/:id/send-booking-link', async (req, res, next) => {
     const estimate = await db('estimates').where({ id: req.params.id }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     if (!estimate.customer_phone) return res.status(400).json({ error: 'No phone on file' });
+    // B18: a contradicted accept kept another customer's number on the estimate and saved the
+    // accepter without it - texting estimate.customer_phone would hand their booking link to that
+    // stranger (and phone_matches_customer below would vouch for it).
+    if (await estimatePhoneQuarantined(estimate)) {
+      return res.status(409).json({ error: ESTIMATE_PHONE_QUARANTINED_MESSAGE, code: 'ESTIMATE_PHONE_QUARANTINED' });
+    }
 
     // Status gate — only active offers can be booked. Drafts aren't real
     // offers yet; declined/expired/archived are intentionally closed and

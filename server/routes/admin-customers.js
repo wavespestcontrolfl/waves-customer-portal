@@ -5169,6 +5169,13 @@ router.patch('/:id/restore', requireAdmin, async (req, res, next) => {
     // restored primary profile takes its subscriber links back.
     const { relinkSubscribersForEmail } = require('../services/newsletter-subscribers');
     const relink = await db.transaction(async (trx) => {
+      // B18: a restore re-creates a LIVE profile on its phone, so it joins the per-phone fence customer
+      // creation takes (and the estimate accept's phone match holds to commit): the accept either sees the
+      // restored profile in its match or this restore waits for it. Taken FIRST, before the row lock
+      // below - the same phone -> rows order every phone-first writer uses.
+      if (String(customer.phone || '').trim() && require('../utils/phone').toE164(customer.phone)) {
+        await lockSmsPhone(trx, customer.phone);
+      }
       // ADMIN-BUG-R14 (round 3 → r6): restore clears deleted_at and NOTHING
       // else about the customer's state. Archive never touches `active`
       // (deleted_at alone removes the row from every charge/retry set), so

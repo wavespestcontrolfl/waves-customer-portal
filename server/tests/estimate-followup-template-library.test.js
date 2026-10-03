@@ -7,6 +7,12 @@
  * per stage so the cron writes audit rows and respects suppressions.
  */
 
+// B18: the disputed-phone quarantine has its own suite (estimate-phone-quarantine.test.js); this suite's
+// db fake does not model the customers marker read.
+jest.mock('../services/estimate-phone-quarantine', () => ({
+  ...jest.requireActual('../services/estimate-phone-quarantine'),
+  estimatePhoneQuarantined: jest.fn(async () => false),
+}));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(),

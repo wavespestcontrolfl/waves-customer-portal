@@ -71,6 +71,7 @@ jest.mock('../services/appointment-reminders', () => ({ scheduledServiceApptTime
 
 const mockRetrievePaymentIntent = jest.fn(async () => ({ latest_charge: { refunded: false, amount_refunded: 0 } }));
 const mockRetrieveSetupIntent = jest.fn();
+const mockRetireSetupIntent = jest.fn(async () => ({}));
 const mockCreateSetupIntent = jest.fn();
 const mockSavePaymentMethod = jest.fn();
 const mockChargeInvoiceWithSavedCard = jest.fn();
@@ -78,6 +79,7 @@ const mockChargeOffSession = jest.fn();
 const mockRetrievePaymentMethod = jest.fn(async () => ({ id: 'pm_s', customer: 'cus_1' }));
 jest.mock('../services/stripe', () => ({
   retrieveSetupIntent: (...a) => mockRetrieveSetupIntent(...a),
+  retireSetupIntent: (...a) => mockRetireSetupIntent(...a),
   retrievePaymentMethod: (...a) => mockRetrievePaymentMethod(...a),
   retrievePaymentIntent: (...a) => mockRetrievePaymentIntent(...a),
   createEstimateCardHoldSetupIntent: (...a) => mockCreateSetupIntent(...a),
@@ -102,6 +104,7 @@ const {
   cardHoldCancelWindowHours,
   resolveCardHoldPolicy,
   verifyCardHoldIntent,
+  retireOrphanedCardHoldIntent,
   isWithinCancelWindow,
   handleCardHoldCancellation,
   cardHoldCancelPreview,
@@ -1466,6 +1469,55 @@ describe('verifyCardHoldIntent — accept gate', () => {
     });
     const r = await verifyCardHoldIntent({ estimate: { id: 'EST' }, setupIntentId: '' });
     expect(r).toEqual(expect.objectContaining({ ok: true, paymentMethodId: 'pm_wh', setupIntentId: 'si_wh' }));
+  });
+});
+
+describe('retireOrphanedCardHoldIntent — an accept whose customer identity drifted drops the captured card (B18)', () => {
+  const HOLD_INTENT = { id: 'si_r1', status: 'succeeded', payment_method: 'pm_r1', metadata: { purpose: 'estimate_card_hold', estimate_id: 'EST' } };
+
+  it('stamps this estimate\'s succeeded hold intent as retired', async () => {
+    mockRetrieveSetupIntent.mockResolvedValue(HOLD_INTENT);
+    const r = await retireOrphanedCardHoldIntent({ estimate: { id: 'EST' }, setupIntentId: 'si_r1' });
+    expect(r).toEqual({ ok: true, retired: true });
+    expect(mockRetireSetupIntent).toHaveBeenCalledWith('si_r1');
+  });
+
+  it('a retired intent no longer satisfies the accept gate, by id or through the pending-row fallback', async () => {
+    const retired = { ...HOLD_INTENT, metadata: { ...HOLD_INTENT.metadata, retired: 'true' } };
+    expect(cardHoldIntentMatchesEstimate(HOLD_INTENT, 'EST')).toBe(true);
+    expect(cardHoldIntentMatchesEstimate(retired, 'EST')).toBe(false);
+    stubDb(null);
+    mockRetrieveSetupIntent.mockResolvedValue(retired);
+    const r = await verifyCardHoldIntent({ estimate: { id: 'EST' }, setupIntentId: 'si_r1' });
+    expect(r).toEqual(expect.objectContaining({ ok: false, reason: 'intent_mismatch' }));
+    stubDb([null, { stripe_setup_intent_id: 'si_r1' }]);
+    const viaPending = await verifyCardHoldIntent({ estimate: { id: 'EST' }, setupIntentId: '' });
+    expect(viaPending).toEqual(expect.objectContaining({ ok: false, reason: 'intent_mismatch' }));
+  });
+
+  it('touches nothing foreign: another estimate\'s intent, a recurring-card intent, an already-retired or canceled one', async () => {
+    for (const intent of [
+      { ...HOLD_INTENT, metadata: { purpose: 'estimate_card_hold', estimate_id: 'OTHER' } },
+      { ...HOLD_INTENT, metadata: { purpose: 'estimate_recurring_card', estimate_id: 'EST' } },
+      { ...HOLD_INTENT, metadata: { ...HOLD_INTENT.metadata, retired: 'true' } },
+      { ...HOLD_INTENT, status: 'canceled' },
+    ]) {
+      mockRetireSetupIntent.mockClear();
+      mockRetrieveSetupIntent.mockResolvedValue(intent);
+      expect(await retireOrphanedCardHoldIntent({ estimate: { id: 'EST' }, setupIntentId: 'si_r1' })).toEqual({ ok: true, retired: false });
+      expect(mockRetireSetupIntent).not.toHaveBeenCalled();
+    }
+    expect(await retireOrphanedCardHoldIntent({ estimate: { id: 'EST' }, setupIntentId: '' })).toEqual({ ok: true, retired: false });
+  });
+
+  it('an unknown intent needs nothing; a Stripe failure (read or stamp) is not ok so the caller fails closed', async () => {
+    mockRetrieveSetupIntent.mockRejectedValue(Object.assign(new Error('No such setupintent'), { code: 'resource_missing' }));
+    expect(await retireOrphanedCardHoldIntent({ estimate: { id: 'EST' }, setupIntentId: 'si_x' })).toEqual({ ok: true, retired: false });
+    mockRetrieveSetupIntent.mockRejectedValue(new Error('stripe down'));
+    expect((await retireOrphanedCardHoldIntent({ estimate: { id: 'EST' }, setupIntentId: 'si_x' })).ok).toBe(false);
+    mockRetrieveSetupIntent.mockResolvedValue(HOLD_INTENT);
+    mockRetireSetupIntent.mockRejectedValueOnce(new Error('stamp failed'));
+    expect((await retireOrphanedCardHoldIntent({ estimate: { id: 'EST' }, setupIntentId: 'si_r1' })).ok).toBe(false);
   });
 });
 

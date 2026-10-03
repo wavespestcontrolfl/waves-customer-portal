@@ -5,6 +5,12 @@
 // via scheduled_services.source_estimate_id (every admin/public booking
 // path) still got a fresh /book SMS. The guard now ORs both keys and
 // matches any live (non-TERMINAL_STATUSES) status.
+// B18: the disputed-phone quarantine has its own suite (estimate-phone-quarantine.test.js); this suite's
+// db fake does not model the customers marker read.
+jest.mock('../services/estimate-phone-quarantine', () => ({
+  ...jest.requireActual('../services/estimate-phone-quarantine'),
+  estimatePhoneQuarantined: jest.fn(async () => false),
+}));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => next(),

@@ -216,7 +216,9 @@ jest.mock('../models/db', () => {
     // logged so tests can assert rung-1 ordering against table mutations.
     state.ops.push({ type: 'raw', sql, bindings });
     if (sql.includes('pg_try_advisory_xact_lock')) {
-      const free = !(bindings?.[0] === 'estimate.deposit.ledger' && state.tryDepositLedgerBusy);
+      // state.phoneFenceBusy: another transaction holds the per-phone SMS fence (lockSmsPhone's key).
+      const free = !(bindings?.[0] === 'estimate.deposit.ledger' && state.tryDepositLedgerBusy)
+        && !(String(sql).includes('twilio_21610') && state.phoneFenceBusy);
       // `locked` is the alias tryLockCustomerComms reads; `acquired` the deposit-ledger probe.
       return { rows: [{ acquired: free, locked: free }] };
     }
@@ -276,6 +278,7 @@ jest.mock('../services/estimate-membership-context', () => ({
 jest.mock('../services/estimate-card-holds', () => ({
   resolveCardHoldPolicy: jest.fn(() => ({ required: false, enforced: false })),
   verifyCardHoldIntent: jest.fn(async () => ({ ok: false })),
+  retireOrphanedCardHoldIntent: jest.fn(async () => ({ ok: true, retired: true })),
   recordCardHoldHeld: jest.fn(async () => ({})),
   attachCardHoldPaymentMethod: jest.fn(async () => ({})),
   cardHoldNoShowFee: jest.fn(() => 49),
@@ -420,6 +423,7 @@ function resetStore(estimateRow) {
   };
   db.__state.ops = [];
   db.__state.tryDepositLedgerBusy = false;
+  db.__state.phoneFenceBusy = false;
   db.__state.onTable = null;
 }
 
@@ -4517,6 +4521,184 @@ describe('B18 — a contradicted phone match never lands the new profile on the 
     conversionOk();
     expect((await putAccept('tok-b18-k2-x0123456789')).status).toBe(200);
     expect(storedEstimate().customer_id).toBe('cust-bob');
+  });
+
+  // ── B18 r5: the whole candidate set is revalidated under the phone fence ───────────────────────────
+
+  const phoneFenceOps = () => db.__state.ops.filter((op) => op.type === 'raw' && String(op.sql).includes('twilio_21610'));
+
+  test('the accept takes the per-phone fence customer creation uses (a try-lock on the normalized number) before it matches', async () => {
+    resetStore(recurringPestEstimate({ id: 'est-b18-f1', token: 'tok-b18-f1-x0123456789' }));
+    db.__state.tables.customers.push(sharedPhoneRow());
+    db.__state.tables.customer_accounts = [{ id: 'acct-bob' }];
+    conversionOk();
+    expect((await putAccept('tok-b18-f1-x0123456789')).status).toBe(200);
+    const ops = phoneFenceOps();
+    expect(ops.length).toBeGreaterThan(0);
+    expect(String(ops[0].sql)).toContain('pg_try_advisory_xact_lock');
+    expect(ops[0].bindings).toEqual(['+19415550123']);
+  });
+
+  test('a busy phone fence refuses the accept retryably (CUSTOMER_BUSY_RETRY), nothing committed, nothing matched', async () => {
+    resetStore(recurringPestEstimate({ id: 'est-b18-f2', token: 'tok-b18-f2-x0123456789' }));
+    db.__state.tables.customers.push(sharedPhoneRow());
+    db.__state.tables.customer_accounts = [{ id: 'acct-bob' }];
+    db.__state.phoneFenceBusy = true;
+    conversionOk();
+    const res = await putAccept('tok-b18-f2-x0123456789');
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('CUSTOMER_BUSY_RETRY');
+    expect(storedEstimate().status).toBe('sent');
+    expect(storedEstimate().customer_id).toBeNull();
+    expect(db.__state.tables.customers).toHaveLength(1);
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(contradictionAlerts()).toHaveLength(0);
+  });
+
+  // The profile appears while the accept is converting (after the authoritative match, before the final
+  // revalidation): a NEW live row on the same phone, created or restored by a writer that did not fence.
+  function ghostAppearsDuringConversion(ghostOverrides) {
+    EstimateConverter.convertEstimate.mockImplementationOnce(async () => {
+      db.__state.tables.customers.push(sharedPhoneRow({ id: 'cust-ghost', account_id: 'acct-ghost', ...ghostOverrides }));
+      return { customerId: db.__state.tables.estimates[0].customer_id || 'cust-bob', tier: 'Bronze', monthlyRate: 60, firstScheduledServiceId: null, recurringConversionSkipped: false, welcomeSms: null, membershipEmail: null, deferredFollowUpReminderRows: [] };
+    });
+  }
+
+  test('a second live profile on the phone appearing after the match (reused lone candidate becomes ambiguous) aborts for a reload', async () => {
+    resetStore(recurringPestEstimate({ id: 'est-b18-g9', token: 'tok-b18-g9-x0123456789' }));
+    db.__state.tables.customers.push(sharedPhoneRow({ email: 'pat@example.com' }));
+    ghostAppearsDuringConversion({ email: 'pat@example.com', address_line1: '1 Ghost Way' });
+    const res = await putAccept('tok-b18-g9-x0123456789');
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('ACCEPT_BILLING_CHANGED');
+    expect(storedEstimate().status).toBe('sent');
+    expect(storedEstimate().customer_id).toBeNull();
+  });
+
+  test('a new profile that uniquely matches the estimate appearing after a contradiction aborts for a reload (no minted profile, no alert)', async () => {
+    // One-time: no recurring-card policy re-judge of its own, so only the final revalidation can catch it.
+    resetStore(oneTimeEstimate('est-b18-g8'));
+    db.__state.tables.customers.push(sharedPhoneRow());
+    db.__state.tables.customer_accounts = [{ id: 'acct-bob' }];
+    // The estimate's own email: the ghost is now the unique email match among two candidates. It appears at
+    // the first customers read after this accept minted its profile (one-time converts after the commit).
+    db.__state.onTable = (table) => {
+      const minted = db.__state.tables.customers.some((c) => c.phone === '' && c.internal_notes);
+      if (table === 'customers' && minted && !db.__state.tables.customers.some((c) => c.id === 'cust-ghost')) {
+        db.__state.tables.customers.push(sharedPhoneRow({ id: 'cust-ghost', account_id: 'acct-ghost', email: 'pat@example.com', address_line1: '1 Ghost Way' }));
+      }
+    };
+    const res = await putAccept('tok-est-b18-g8-x0123456789', { serviceMode: 'one_time' });
+    db.__state.onTable = null;
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('ACCEPT_BILLING_CHANGED');
+    expect(storedEstimate().customer_id).toBeNull();
+    // The profile this accept minted rolled back with it.
+    expect(db.__state.tables.customers.filter((c) => c.phone === '')).toHaveLength(0);
+    expect(contradictionAlerts()).toHaveLength(0);
+  });
+
+  test('control: the profile the accept ITSELF minted on the phone is not a phantom candidate (no candidates -> new profile commits)', async () => {
+    resetStore(recurringPestEstimate({ id: 'est-b18-g7', token: 'tok-b18-g7-x0123456789' }));
+    conversionOk();
+    const res = await putAccept('tok-b18-g7-x0123456789');
+    expect(res.status).toBe(200);
+    expect(storedEstimate().customer_id).toBeTruthy();
+  });
+
+  // ── B18 r5: a one-time card hold drops with the identity ────────────────────────────────────────
+
+  test('identity drift drops the one-time card hold: its SetupIntent is retired after the rollback and the 409 is reloadable', async () => {
+    const CardHolds = require('../services/estimate-card-holds');
+    CardHolds.resolveCardHoldPolicy.mockReturnValue({ required: true, enforced: true, noShowFeeAmount: 49, cancelWindowHours: 24 });
+    CardHolds.verifyCardHoldIntent.mockResolvedValue({ ok: true, paymentMethodId: 'pm_hold1', setupIntentId: 'seti_hold1' });
+    try {
+      resetStore(oneTimeEstimate('est-b18-h1'));
+      const scheduledDate = require('../utils/datetime-et').etDateString(new Date(Date.now() + 7 * 86400000));
+      db.__state.tables.scheduled_services = [{
+        id: 'ss-hold-1', source_estimate_id: 'est-b18-h1', customer_id: null, technician_id: null, status: 'pending',
+        scheduled_date: scheduledDate, window_start: '09:00:00', window_end: '10:00:00',
+        estimated_duration_minutes: 60, reservation_expires_at: new Date(Date.now() + 15 * 60000),
+      }];
+      const bob = sharedPhoneRow({ email: 'pat@example.com' });
+      db.__state.tables.customers.push(bob);
+      db.__state.tables.customer_accounts = [{ id: 'acct-bob' }];
+      driftAfterPreflight(() => { bob.email = 'bob@example.com'; });
+      conversionOk();
+      const res = await putAccept('tok-est-b18-h1-x0123456789', {
+        serviceMode: 'one_time', slotId: `${scheduledDate}_09-00_unassigned`, cardHoldSetupIntentId: 'seti_hold1',
+      });
+      db.__state.onTable = null;
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('ACCEPT_BILLING_CHANGED');
+      expect(CardHolds.recordCardHoldHeld).not.toHaveBeenCalled();
+      expect(CardHolds.retireOrphanedCardHoldIntent).toHaveBeenCalledTimes(1);
+      expect(CardHolds.retireOrphanedCardHoldIntent).toHaveBeenCalledWith({
+        estimate: expect.objectContaining({ id: 'est-b18-h1' }), setupIntentId: 'seti_hold1',
+      });
+    } finally {
+      db.__state.onTable = null;
+      CardHolds.resolveCardHoldPolicy.mockReturnValue({ required: false, enforced: false });
+      CardHolds.verifyCardHoldIntent.mockResolvedValue({ ok: false });
+    }
+  });
+
+  test('a hold satisfied by a saved method has no intent to retire on drift (nothing retired, still reloadable)', async () => {
+    const CardHolds = require('../services/estimate-card-holds');
+    CardHolds.resolveCardHoldPolicy.mockReturnValue({ required: true, enforced: true, noShowFeeAmount: 49, cancelWindowHours: 24 });
+    CardHolds.verifyCardHoldIntent.mockResolvedValue({ ok: true, paymentMethodId: 'pm_saved', setupIntentId: null, viaSavedMethod: true });
+    try {
+      resetStore(oneTimeEstimate('est-b18-h2'));
+      const scheduledDate = require('../utils/datetime-et').etDateString(new Date(Date.now() + 7 * 86400000));
+      db.__state.tables.scheduled_services = [{
+        id: 'ss-hold-2', source_estimate_id: 'est-b18-h2', customer_id: null, technician_id: null, status: 'pending',
+        scheduled_date: scheduledDate, window_start: '09:00:00', window_end: '10:00:00',
+        estimated_duration_minutes: 60, reservation_expires_at: new Date(Date.now() + 15 * 60000),
+      }];
+      const bob = sharedPhoneRow({ email: 'pat@example.com' });
+      db.__state.tables.customers.push(bob);
+      driftAfterPreflight(() => { bob.email = 'bob@example.com'; });
+      conversionOk();
+      const res = await putAccept('tok-est-b18-h2-x0123456789', { serviceMode: 'one_time', slotId: `${scheduledDate}_09-00_unassigned` });
+      db.__state.onTable = null;
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('ACCEPT_BILLING_CHANGED');
+      expect(CardHolds.retireOrphanedCardHoldIntent).not.toHaveBeenCalled();
+    } finally {
+      db.__state.onTable = null;
+      CardHolds.resolveCardHoldPolicy.mockReturnValue({ required: false, enforced: false });
+      CardHolds.verifyCardHoldIntent.mockResolvedValue({ ok: false });
+    }
+  });
+
+  test('a hold retirement Stripe cannot confirm fails closed: 503, the tab keeps its intent', async () => {
+    const CardHolds = require('../services/estimate-card-holds');
+    CardHolds.resolveCardHoldPolicy.mockReturnValue({ required: true, enforced: true, noShowFeeAmount: 49, cancelWindowHours: 24 });
+    CardHolds.verifyCardHoldIntent.mockResolvedValue({ ok: true, paymentMethodId: 'pm_hold3', setupIntentId: 'seti_hold3' });
+    CardHolds.retireOrphanedCardHoldIntent.mockResolvedValueOnce({ ok: false, reason: 'verification_failed' });
+    try {
+      resetStore(oneTimeEstimate('est-b18-h3'));
+      const scheduledDate = require('../utils/datetime-et').etDateString(new Date(Date.now() + 7 * 86400000));
+      db.__state.tables.scheduled_services = [{
+        id: 'ss-hold-3', source_estimate_id: 'est-b18-h3', customer_id: null, technician_id: null, status: 'pending',
+        scheduled_date: scheduledDate, window_start: '09:00:00', window_end: '10:00:00',
+        estimated_duration_minutes: 60, reservation_expires_at: new Date(Date.now() + 15 * 60000),
+      }];
+      const bob = sharedPhoneRow({ email: 'pat@example.com' });
+      db.__state.tables.customers.push(bob);
+      driftAfterPreflight(() => { bob.email = 'bob@example.com'; });
+      conversionOk();
+      const res = await putAccept('tok-est-b18-h3-x0123456789', {
+        serviceMode: 'one_time', slotId: `${scheduledDate}_09-00_unassigned`, cardHoldSetupIntentId: 'seti_hold3',
+      });
+      db.__state.onTable = null;
+      expect(res.status).toBe(503);
+      expect(res.data.code).toBe('RECURRING_CARD_RETIRE_FAILED');
+    } finally {
+      db.__state.onTable = null;
+      CardHolds.resolveCardHoldPolicy.mockReturnValue({ required: false, enforced: false });
+      CardHolds.verifyCardHoldIntent.mockResolvedValue({ ok: false });
+    }
   });
 
   test('the alert is retried when the writer returns no row or a suppression, and only a real id counts as filed', async () => {

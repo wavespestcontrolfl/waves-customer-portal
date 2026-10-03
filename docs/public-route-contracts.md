@@ -1556,7 +1556,9 @@ address are both present and both provably disagree with the profile's — the
 address by the canonical street comparison, so `Street`/`St`, unit formats and a
 trailing city/ZIP agree, a different explicit unit, city or ZIP disagrees, and a
 missing unit, city or ZIP, or no street number on either side, cannot disagree
-(that comparison alone decides) — in which case the
+(that comparison alone decides); the estimate address must also differ from every other address
+the candidate's account owns - its active saved properties (`customer_properties`) and its live
+same-account profiles - so a second property of the same account keeps the match — in which case the
 accept mints a fresh profile on its own account and the accepter gets the
 normal card rules. That profile and its account are stored WITHOUT a phone
 (`customers.phone = ''`, the usual phone-less shape): the number is another
@@ -1569,10 +1571,21 @@ estimate and in the new profile's internal notes, and once the accept commits th
 office gets one Customers needs-you alert (dedupe `accept-phone-contradicted:<estimateId>`)
 to add the accepter's real number or merge the two profiles (the alert is replayed,
 idempotently, by a re-POST of the already-accepted estimate while the profile is
-still phone-less); the preflight phone-identity verdict is formed once and the
-accept transaction's authoritative match must equal it and a reused lone candidate is
-re-judged against its row locked at the end of the transaction, else the accept aborts
-with the reloadable 409 `ACCEPT_BILLING_CHANGED` and nothing commits; this covers the lone-candidate case only, and when several
+still phone-less); every OTHER estimate-based text to that estimate phone is refused or skipped
+the same way - the admin follow-up, booking-link, estimate-send, lawn-outline and extension sends
+refuse with 409 `ESTIMATE_PHONE_QUARANTINED` (or an `ok:false` channel outcome) and ask the operator
+to add the customer's real number first, the follow-up cron and the page's service-details send skip
+quietly (decided by the customer's marker, `services/estimate-phone-quarantine.js`; an unreadable
+customer row fails closed); the preflight phone-identity verdict is formed once and the
+accept transaction's authoritative match must equal it, taken under the same per-phone advisory
+fence customer creation uses (try-lock, held to commit; a miss is the retryable 409
+`CUSTOMER_BUSY_RETRY`; the customer restore route takes it too), and the whole candidate set is
+re-matched once more just before the commit with the candidate rows locked - any difference in the
+matched customer or the contradicted verdict (another live profile on the phone, an edited
+candidate) aborts with the reloadable 409 `ACCEPT_BILLING_CHANGED` and nothing commits, and the
+captured Auto Pay card and the one-time card hold are both retired so the reload cannot resubmit
+them; a creator that takes no phone fence (lead conversion) can still commit between that
+re-match and the commit; when several
 profiles share the phone and none matches uniquely the fresh profile still
 joins the phone-matched account as before); an authored proposal's `preparedFor` that matched the old name moves
 with it (and `proposalDelivery` drops), as in the contact-fanout name sync; the

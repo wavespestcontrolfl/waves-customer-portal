@@ -7518,6 +7518,13 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             // since this tab loaded — refetch so the capture UI renders exactly
             // what the server will record, drop the captured intent (its
             // checkbox was for the old text) and keep the plan selections.
+            // The one-time card hold captured for the old identity is dropped
+            // too (the server retired it): the reload may resolve a different
+            // customer, and a resubmitted hold would be pinned to them.
+            if (body.code === 'ACCEPT_BILLING_CHANGED') {
+              cardHoldSetupIntentIdRef.current = null;
+              setCardHoldIntent(null);
+            }
             // An earlier setup-fee refresh answer is stale now too: the
             // refetched /data decides the setup-fee promise again.
             setSetupFeePromiseOverride(null);

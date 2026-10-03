@@ -106,6 +106,14 @@ function makeDb(getRow) {
       });
       return builder;
     }
+    if (table === 'customers') {
+      // B18: the disputed-phone marker read (services/estimate-phone-quarantine.js); db.__customerNotes
+      // carries the profile's internal notes (default none = an ordinary customer).
+      const builder = {};
+      builder.where = jest.fn(() => builder);
+      builder.first = jest.fn(async () => ({ id: 'cust-sd-1', phone: '', internal_notes: db.__customerNotes || null }));
+      return builder;
+    }
     if (table === 'sms_log') {
       const builder = {};
       builder.where = jest.fn(() => builder);
@@ -142,6 +150,7 @@ function makeDb(getRow) {
   db.__claimOutcome = null;
   db.__recentPacketFound = false;
   db.__annualLookupThrows = false;
+  db.__customerNotes = null;
   db.__shortCodeLog = [];
   return db;
 }
@@ -196,6 +205,7 @@ beforeEach(() => {
   mockDb.__claimOutcome = null;
   mockDb.__recentPacketFound = false;
   mockDb.__annualLookupThrows = false;
+  mockDb.__customerNotes = null;
   mockDb.__shortCodeLog = [];
   require('../services/short-url').createShortCode.mockReset();
   priorGates = GATE_KEYS.map((key) => process.env[key]);
@@ -321,6 +331,25 @@ describe('service-details SMS: annual-offer guard composed into preSendCheck (Co
     expect(capturedVerdict).toEqual({ ok: true });
     expect(res.status).toBe(200);
     expect(body).toEqual({ ok: true, channel: 'sms' });
+  });
+
+  test('B18: an estimate phone a contradicted accept quarantined for its customer is never texted the packet (generic policy refusal, no provider call)', async () => {
+    const TwilioService = require('../services/twilio');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    const { CONTRADICTED_PHONE_NOTE_MARK } = require('../services/estimate-phone-quarantine');
+    mockDb.__customerNotes = `Phone on the estimate ((941) 555-0188) ${CONTRADICTED_PHONE_NOTE_MARK}. Estimate ${ESTIMATE_ID}. Other customer id: cust-x.`;
+    const draft = baseEstimateRow({ customer_phone: '+19415550188' });
+    draft.estimate_data.deliveryState = { firstDeliveredAt: '2026-01-01T12:00:00Z', annualPlanOfferFingerprint: annualPlanOfferFingerprint(draft) };
+    currentRow = draft;
+
+    const res = await fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ service: 'pest_control', channel: 'sms' }),
+    });
+    expect(res.status).toBe(409);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
   });
 
   describe('GATE_SMS_LINK_WRAP dedupe (the wrap itself now runs inside sendCustomerMessage)', () => {

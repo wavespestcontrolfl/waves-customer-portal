@@ -25,6 +25,7 @@ const logger = require("./logger");
 const { shortenOrPassthrough } = require("./short-url");
 const { leadIdForEstimate } = require("./estimate-lead-linkage");
 const { sendCustomerMessage } = require("./messaging/send-customer-message");
+const { estimatePhoneQuarantined } = require("./estimate-phone-quarantine");
 const { inferEstimateServiceInterest } = require("./estimate-service-lines");
 const { isEnabled } = require("../config/feature-gates");
 const { billingEmailDetailsLive, customerPropertyAddress, isStreetShapedAddress } = require("./billing-email-details");
@@ -418,7 +419,14 @@ async function withFollowupPropertyRow(est, payload) {
 async function sendDualChannel(est, { sms, email }) {
   let attempted = false;
   let smsHold = null;
-  if (est.customer_phone && sms) {
+  // B18: an estimate whose typed phone a contradicted accept quarantined for its customer is never
+  // texted (the number is another customer's); the email leg is unaffected.
+  let smsLeg = !!(est.customer_phone && sms);
+  if (smsLeg && await estimatePhoneQuarantined(est)) {
+    smsLeg = false;
+    logger.warn(`[est-followup] SMS leg skipped for estimate ${est.id}: its phone is quarantined for the customer (disputed number)`);
+  }
+  if (smsLeg) {
     try {
       const result = await sendCustomerMessage({
         to: est.customer_phone,

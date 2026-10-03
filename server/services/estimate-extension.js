@@ -23,6 +23,7 @@ const { shortenOrPassthrough } = require('./short-url');
 const { leadIdForEstimate } = require('./estimate-lead-linkage');
 const { REPRICE_PENDING_ABSENT_SQL, ADDRESS_UNVERIFIED_ABSENT_SQL, DELIVERY_CLAIM_NOT_LIVE_SQL } = require('../utils/estimate-claim-sql');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
+const { estimatePhoneQuarantined } = require('./estimate-phone-quarantine');
 const { estimateOptedOutOfEngagement } = require('./estimate-comms-eligibility');
 // Router module doubling as the template helper — same import the
 // estimate-follow-up service uses.
@@ -84,7 +85,7 @@ function extensionStatusUpdate(estimate = {}, now = new Date()) {
  * @param {string} opts.workflow    template-audit workflow label
  * @param {object} [opts.smsMetadata] extra metadata for the outbound message
  * @returns {{ newExpiry: Date, status: string, smsResult: object }}
- *   smsResult: { sent, reason } — reason 'silent' | 'no_phone' |
+ *   smsResult: { sent, reason } — reason 'silent' | 'no_phone' | 'phone_quarantined' |
  *   'template_missing' | provider/consent block reasons from
  *   sendCustomerMessage.
  * @throws validation errors carrying statusCode 400 (bad days / status /
@@ -567,6 +568,9 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
     try {
       if (!estimate.customer_phone) {
         smsResult = { sent: false, reason: 'no_phone' };
+      } else if (await estimatePhoneQuarantined(estimate)) {
+        // B18: the estimate's phone is another customer's (a contradicted accept quarantined it).
+        smsResult = { sent: false, reason: 'phone_quarantined' };
       } else {
         const firstName = await estimateGreetingFirstName(db, estimate);
         const longUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;

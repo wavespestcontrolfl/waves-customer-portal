@@ -71,7 +71,11 @@ const {
 } = require('../../shared/estimate-purchased-warranty.cjs');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
-const { lockSmsPhone, withSmsConsentLock } = require('../utils/customer-comms-lock');
+const { lockSmsPhone, withSmsConsentLock, tryLockSmsPhone } = require('../utils/customer-comms-lock');
+const {
+  CONTRADICTED_PHONE_NOTE_MARK, customerHasContradictedPhoneMarker, customerIsContradictedPhoneQuarantine,
+  estimatePhoneQuarantined,
+} = require('../services/estimate-phone-quarantine');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { WAVEGUARD: PRICING_WAVEGUARD } = require('../services/pricing-engine/constants');
 const { pricedTreeShrubPalmCount } = require('../services/pricing-engine/tree-shrub-palm-priced');
@@ -522,8 +526,9 @@ function acceptAddressMatchesCandidate(estAddr, candidate) {
 // "123 Main St, Bradenton, FL 34205" agree; a different street, house number, explicit unit,
 // city or ZIP differs. What it cannot decide is NOT a contradiction: both sides need a primary
 // street number, a unit missing on one side is not a mismatch, and neither is a missing city or
-// ZIP on either side (the comparator treats them as conservatively equal). The candidate's other
-// properties live in customer_properties, which this in-memory check does not read.
+// ZIP on either side (the comparator treats them as conservatively equal). The check takes one
+// address row at a time: the candidate's own profile address AND each of its saved properties
+// (customer_properties, same columns) go through it - see acceptLoneCandidateContradicted.
 function acceptAddressProvablyDiffers(estimateAddress, candidate) {
   const { hasPrimaryStreetNumber } = require('../services/estimator-engine/unit-scope-model');
   const { sameStreetAddress } = require('../services/estimator-engine/address-compare');
@@ -536,17 +541,33 @@ function acceptAddressProvablyDiffers(estimateAddress, candidate) {
   return !sameStreetAddress(estAddress, candidateAddress);
 }
 
-function acceptLoneCandidateContradicted(candidate, estimate) {
+// `ownedAddresses` = the other addresses the candidate's ACCOUNT owns (active customer_properties rows
+// and live same-account profiles): the estimate's address is a different address only if it differs
+// from the candidate's primary AND from every one of them (a spouse accepting service at the account's
+// second property is not a contradiction). A row the comparator cannot decide on keeps the match.
+function acceptLoneCandidateContradicted(candidate, estimate, ownedAddresses = []) {
   const email = String(estimate.customer_email || '').trim().toLowerCase();
   const candEmail = String(candidate.email || '').trim().toLowerCase();
   if (!email || !candEmail || candEmail === email) return false;
-  return acceptAddressProvablyDiffers(estimate.address, candidate);
+  return acceptAddressProvablyDiffers(estimate.address, candidate)
+    && ownedAddresses.every((row) => acceptAddressProvablyDiffers(estimate.address, row));
 }
 
-function pickAcceptCustomerMatch(candidates, estimate) {
+// The candidate's other owned addresses, read only when the in-memory test already says "contradicted"
+// (the rare path). One read handle for preflight, authoritative match and final re-match.
+async function loadAcceptCandidateOwnedAddresses(candidate, database) {
+  const cols = ['address_line1', 'address_line2', 'city', 'zip'];
+  const saved = await database('customer_properties').where({ customer_id: candidate.id, active: true }).select(cols);
+  const siblings = candidate.account_id
+    ? await database('customers').where({ account_id: candidate.account_id }).whereNot({ id: candidate.id }).whereNull('deleted_at').select(cols)
+    : [];
+  return [...saved, ...siblings];
+}
+
+function pickAcceptCustomerMatch(candidates, estimate, loneOwnedAddresses = []) {
   if (!candidates.length) return null;
   if (candidates.length === 1) {
-    return acceptLoneCandidateContradicted(candidates[0], estimate) ? null : candidates[0];
+    return acceptLoneCandidateContradicted(candidates[0], estimate, loneOwnedAddresses) ? null : candidates[0];
   }
   const email = String(estimate.customer_email || '').trim().toLowerCase();
   const estAddr = normalizeAddressForMatch(estimate.address);
@@ -586,22 +607,34 @@ function acceptPhoneVerdictDrifted(estimate, fresh) {
     || (pre.contradicted === true) !== (fresh.contradicted === true);
 }
 
-async function matchAcceptCustomerByPhone(estimate, database = db, { authoritative = false } = {}) {
+// Options (transaction handle only): `lockRows` takes the candidate rows FOR UPDATE (the final
+// revalidation, so an admin edit of a candidate cannot land between the verdict and the commit);
+// `excludeCustomerId` leaves out the profile this very accept minted on the phone.
+async function matchAcceptCustomerByPhone(estimate, database = db, { authoritative = false, lockRows = false, excludeCustomerId = null } = {}) {
   if (!estimate?.customer_phone) return { match: null, candidateCount: 0 };
   const cacheable = database === db && !authoritative && typeof estimate === 'object';
   if (cacheable && acceptPhoneVerdicts.has(estimate)) return acceptPhoneVerdicts.get(estimate);
   const matchDigits = phoneLast10(estimate.customer_phone);
-  const candidates = await database('customers')
+  let candidateQuery = database('customers')
     .where((q) => {
       q.where({ phone: estimate.customer_phone });
       if (matchDigits) {
         q.orWhereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${matchDigits}`]);
       }
     })
-    .whereNull('deleted_at')
+    .whereNull('deleted_at');
+  if (excludeCustomerId) candidateQuery = candidateQuery.whereNot({ id: excludeCustomerId });
+  candidateQuery = candidateQuery
     .orderByRaw('(phone = ?) DESC NULLS LAST', [estimate.customer_phone])
     .orderBy('updated_at', 'desc');
-  const match = pickAcceptCustomerMatch(candidates, estimate);
+  if (lockRows) candidateQuery = candidateQuery.forUpdate();
+  const candidates = await candidateQuery;
+  // A read failure here throws (fail closed): treating "could not read the saved properties" as
+  // "uncontradicted" would reuse a stranger's saved card.
+  const loneOwnedAddresses = candidates.length === 1 && acceptLoneCandidateContradicted(candidates[0], estimate)
+    ? await loadAcceptCandidateOwnedAddresses(candidates[0], database)
+    : [];
+  const match = pickAcceptCustomerMatch(candidates, estimate, loneOwnedAddresses);
   // WHY there is no match, for the one case where "no match" must not fall
   // back to the phone: a lone candidate the estimate contradicts. The accept's
   // new-profile branch must then also keep the new profile OFF that
@@ -621,27 +654,13 @@ async function matchAcceptCustomerByPhone(estimate, database = db, { authoritati
 }
 
 // B18: the durable marker the contradicted accept writes into the new profile's internal_notes
-// (the office-visible record of the disputed number), and the alert it backs.
-const CONTRADICTED_PHONE_NOTE_MARK = 'belongs to another customer, so it was not saved on this profile';
+// (the office-visible record of the disputed number), and the alert it backs. The marker and the
+// predicates over it live in services/estimate-phone-quarantine.js, shared with every
+// estimate-based SMS sender.
 
 function contradictedPhoneNote({ estimate, rejectedCustomerId }) {
   return `Phone on the estimate (${estimate.customer_phone}) ${CONTRADICTED_PHONE_NOTE_MARK} and this customer is not texted. `
     + `Add their real number, or merge the two profiles if they are the same person. Estimate ${estimate.id}. Other customer id: ${rejectedCustomerId}.`;
-}
-
-// THE predicates for a contradicted-phone profile, from persisted state only (the marker note a
-// contradicted accept wrote into internal_notes, plus the phone on the row). Every consumer uses
-// them, so a profile reached by ANY route - the creating accept, a grouped sibling, an estimate
-// already linked by customer_id, a re-accept - is treated the same.
-//   marked      = the marker is on the profile: the estimate's staff-typed phone is the DISPUTED
-//                 number (another customer's), so no accept text may use it, ever.
-//   quarantined = marked AND still phone-less (login and texts resolve nothing until a real
-//                 number is added; the office alert replays only while this holds).
-function customerHasContradictedPhoneMarker(row) {
-  return !!row && String(row.internal_notes || '').includes(CONTRADICTED_PHONE_NOTE_MARK);
-}
-function customerIsContradictedPhoneQuarantine(row) {
-  return customerHasContradictedPhoneMarker(row) && String(row.phone || '').trim() === '';
 }
 
 // Raises (idempotently, by dedupe key) the one Customers needs-you alert for a contradicted accept.
@@ -9708,14 +9727,36 @@ async function stampAcceptedVisitCoordinates({ estimate, customerId, db }) {
 // captured, orphaning it (succeeded in Stripe, bound to nothing). Retire it so
 // no later recovery can read it as a legacy capture; when Stripe cannot confirm
 // the retirement the accept fails closed (503) and the tab keeps its intent.
-async function retireOrDenyDroppedCapture(estimate, setupIntentId) {
+async function retireOrDenyDroppedCapture(estimate, setupIntentId, holdSetupIntentId = null) {
   const retired = await RecurringCards.retireOrphanedCaptureIntent({ estimate, setupIntentId });
-  if (!retired.ok) {
+  // The one-time card hold's captured intent rides the same refusals (B18): retired in Stripe so the
+  // reload cannot resubmit it, nor the server's pending-row fallback re-verify it.
+  const holdRetired = holdSetupIntentId
+    ? await CardHolds.retireOrphanedCardHoldIntent({ estimate, setupIntentId: holdSetupIntentId })
+    : { ok: true };
+  if (!retired.ok || !holdRetired.ok) {
     const err = new Error('We could not update your payment terms just now. Please try again in a moment.');
     err.status = 503;
     err.code = 'RECURRING_CARD_RETIRE_FAILED';
     throw err;
   }
+}
+
+// B18: every ACCEPT_BILLING_CHANGED abort (the account's identity or billing moved since the page
+// loaded) drops BOTH captured SetupIntents the accept carried - the recurring Auto Pay card and the
+// one-time card hold. The reload resolves the estimate to today's customer, so a card captured for the
+// old identity must never be pinned to it. A hold satisfied by a saved method or already recorded
+// (no intent of its own to retire) is not touched. Returns the retirement for droppedCaptureToRetire.
+function identityDriftCaptureRetirement(estimate, { recurring, hold }, current = null) {
+  const setupIntentId = recurring?.ok && recurring.setupIntentId ? recurring.setupIntentId : null;
+  const holdSetupIntentId = hold?.ok && hold.setupIntentId && !hold.viaSavedMethod && !hold.alreadyHeld
+    ? hold.setupIntentId : null;
+  if (!setupIntentId && !holdSetupIntentId) return current;
+  return { estimate, setupIntentId, holdSetupIntentId };
+}
+
+function acceptBillingChangedError(message = 'Your account just changed. Please reload the page and confirm again.') {
+  return Object.assign(new Error(message), { status: 409, isOperational: true, code: 'ACCEPT_BILLING_CHANGED' });
 }
 
 // PUT /api/estimates/:token/accept — customer accepts
@@ -11961,9 +12002,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // Set only when the contradicted-phone branch below mints the profile; returned
       // with the commit so the office alert fires post-commit, never from a rolled-back accept.
       let phoneContradictionRejectedId = null;
-      // Set when the phone match reused a LONE candidate: its contradiction verdict is re-judged
-      // against the row locked at the end of this transaction (see the revalidation before the return).
-      let loneCandidateReusedId = null;
+      // The phone verdict this accept acts on ({ matchId, contradicted }; null when no phone match ran):
+      // re-run over the whole candidate set under the phone fence just before the commit (see the
+      // revalidation before the return).
+      let acceptedPhoneVerdict = null;
       // Already-linked customer: fill its last_name/email ONLY if blank/the
       // 'Customer' placeholder (the fill helpers re-check that under this
       // same lock — lockCustomerComms(trx, acceptPreLockedCommsId) above
@@ -12037,7 +12079,22 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // profile whose email/address uniquely matches — splitting the
         // estimate off the existing account. pickAcceptCustomerMatch needs the
         // full set to judge ambiguity.
+        // B18 phone fence: the same per-phone advisory key customer creation (quick-add, POST /) takes,
+        // held to commit, BEFORE the authoritative match - a profile created on this phone either
+        // committed before it (the match below sees it) or waits for this accept. TRY-lock: this
+        // transaction already holds the scheduling rungs, the customer-comms advisory and the estimate
+        // row, which phone-first writers take after the phone key, so a blocking take could close a
+        // cycle. A miss is the same retryable refusal as a busy customer.
+        if (!(await tryLockSmsPhone(trx, estimate.customer_phone))) {
+          const busyErr = new Error('This account is being updated right now \u2014 please retry your acceptance in a moment.');
+          busyErr.status = 409;
+          busyErr.isOperational = true;
+          busyErr.code = 'CUSTOMER_BUSY_RETRY';
+          throw busyErr;
+        }
         const { match: existing, candidateCount, contradicted: phoneContradicted, rejectedCustomerId: phoneRejectedCustomerId } = await matchAcceptCustomerByPhone(estimate, trx, { authoritative: true });
+        // The verdict this accept acts on; the final revalidation before the commit compares to it.
+        acceptedPhoneVerdict = { matchId: existing?.id || null, contradicted: phoneContradicted === true };
         // B18: the card policy, hold auto-satisfy and prepay quote were decided on the PREFLIGHT
         // identity (matched customer / none / contradicted). If this authoritative match differs
         // (the candidate's email/address or the candidate set moved in between), an Auto Pay or
@@ -12045,14 +12102,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // enroll on a newly matched customer. Abort with the existing reloadable 409; the reloaded
         // page recomputes the policy on today's identity. Nothing is committed.
         if (acceptPhoneVerdictDrifted(estimate, { match: existing, contradicted: phoneContradicted })) {
-          if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId) {
-            droppedCaptureToRetire = { estimate, setupIntentId: recurringCardVerification.setupIntentId };
-          }
-          const driftErr = new Error('Your account just changed. Please reload the page and confirm again.');
-          driftErr.status = 409;
-          driftErr.isOperational = true;
-          driftErr.code = 'ACCEPT_BILLING_CHANGED';
-          throw driftErr;
+          droppedCaptureToRetire = identityDriftCaptureRetirement(estimate, { recurring: recurringCardVerification, hold: cardHoldVerification }, droppedCaptureToRetire);
+          throw acceptBillingChangedError();
         }
         if (phoneContradicted) {
           phoneContradictionRejectedId = phoneRejectedCustomerId || null;
@@ -12063,7 +12114,6 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         }
         if (existing) {
           customerId = existing.id;
-          if (candidateCount === 1) loneCandidateReusedId = existing.id;
           // Re-resolve under the pre-taken lock (r22): the normal case is
           // customerId === acceptPreLockedCommsId — already fenced by the
           // blocking acquire above. A DIFFERENT id means a merge/undo
@@ -12205,9 +12255,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // CONSENT_VARIANT_STALE) — retire it so the reloaded accept, which may
         // be exempt and write no marker, can never have it recovered as a
         // legacy capture (r3 pre-push P0). Fail closed if Stripe cannot confirm.
-        if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId) {
-          droppedCaptureToRetire = { estimate, setupIntentId: recurringCardVerification.setupIntentId };
-        }
+        droppedCaptureToRetire = identityDriftCaptureRetirement(estimate, { recurring: recurringCardVerification, hold: cardHoldVerification }, droppedCaptureToRetire);
         const err = new Error('Your account just changed. Please reload the page and confirm again.');
         err.status = 409;
         err.isOperational = true;
@@ -13958,31 +14006,30 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         throw branchErr;
       }
 
-      // B18: the phone match above was an unlocked read. Re-judge the contradiction against the
-      // customer row LOCKED now (FOR UPDATE, the same mode convertEstimate takes on that row, held to
-      // commit): an admin edit of the candidate's email / address that committed after the match and
-      // before this lock would otherwise leave the plan and its saved-card / Auto Pay policy on a
-      // customer the estimate now contradicts. Lock order: scheduling rungs -> customer-comms
-      // advisory (taken at the top of this transaction / by the tryLock above) -> [convertEstimate:
-      // property-preferences advisory -> comms -> customers FOR UPDATE] -> this customers FOR UPDATE
-      // last (re-entrant when the converter already holds it), so no row lock is taken ahead of an
-      // advisory lock another writer orders before it. Abort with the same reloadable 409.
-      if (loneCandidateReusedId) {
-        const lockedMatch = await trx('customers').where({ id: loneCandidateReusedId }).forUpdate().first();
-        // Same phone test as the matcher (exact raw value, or the same last-10 digits): a row
-        // whose phone was changed away in that window is no longer this estimate's match either.
-        const lockedDigits = phoneLast10(estimate.customer_phone);
-        const lockedStillOnPhone = !!lockedMatch && (lockedMatch.phone === estimate.customer_phone
-          || (!!lockedDigits && String(lockedMatch.phone || '').replace(/\D/g, '').endsWith(lockedDigits)));
-        if (!lockedMatch || lockedMatch.deleted_at || !lockedStillOnPhone || acceptLoneCandidateContradicted(lockedMatch, estimate)) {
-          if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId) {
-            droppedCaptureToRetire = { estimate, setupIntentId: recurringCardVerification.setupIntentId };
-          }
-          const lockedErr = new Error('Your account just changed. Please reload the page and confirm again.');
-          lockedErr.status = 409;
-          lockedErr.isOperational = true;
-          lockedErr.code = 'ACCEPT_BILLING_CHANGED';
-          throw lockedErr;
+      // B18: ONE final revalidation of the phone verdict this accept acted on. The authoritative match
+      // above, the card policy, the plan and any saved-card / Auto Pay exemption all rest on it, so
+      // re-run the FULL matcher now, under the phone fence taken before the match and with the candidate
+      // rows locked FOR UPDATE (held to commit; an admin edit of a candidate's email / address / phone
+      // waits), leaving out the profile this accept itself minted on the phone. Any difference - another
+      // live profile on the phone created or restored since (it makes the match ambiguous or picks a
+      // different customer), the reused candidate edited so the estimate now contradicts it or moved
+      // off the phone, a contradiction that resolved - aborts with the same reloadable 409, nothing
+      // committed. Lock order: scheduling rungs -> customer-comms advisory (top of this transaction /
+      // the tryLock above) -> phone fence (try-lock) -> [convertEstimate: property-preferences advisory
+      // -> comms -> customers FOR UPDATE] -> these candidate rows last (re-entrant for a row the
+      // converter already holds), so no row lock is taken ahead of an advisory lock another writer
+      // orders before it. Remaining window: a creator or restore that does not take the phone key (the
+      // restore route and lead conversion) can still commit after this read and before the commit.
+      if (acceptedPhoneVerdict) {
+        const finalVerdict = await matchAcceptCustomerByPhone(estimate, trx, {
+          authoritative: true,
+          lockRows: true,
+          excludeCustomerId: customerCreatedThisAccept ? customerId : null,
+        });
+        if ((finalVerdict.match?.id || null) !== acceptedPhoneVerdict.matchId
+          || (finalVerdict.contradicted === true) !== acceptedPhoneVerdict.contradicted) {
+          droppedCaptureToRetire = identityDriftCaptureRetirement(estimate, { recurring: recurringCardVerification, hold: cardHoldVerification }, droppedCaptureToRetire);
+          throw acceptBillingChangedError('Your account just changed. Please reload the page and confirm again.');
         }
       }
 
@@ -16105,7 +16152,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // cannot confirm, 503 and the tab keeps its intent).
     if (droppedCaptureToRetire && err && err.status === 409) {
       try {
-        await retireOrDenyDroppedCapture(droppedCaptureToRetire.estimate, droppedCaptureToRetire.setupIntentId);
+        await retireOrDenyDroppedCapture(droppedCaptureToRetire.estimate, droppedCaptureToRetire.setupIntentId, droppedCaptureToRetire.holdSetupIntentId || null);
       } catch (retireErr) {
         return res.status(503).json({ error: retireErr.message, code: retireErr.code || 'RECURRING_CARD_RETIRE_FAILED' });
       }
@@ -28683,6 +28730,13 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       if (!(await stillOnCustomerSurface())) {
         await markClaimWithheld();
         return { success: false, withheld: true };
+      }
+      // B18: the estimate's typed phone is another customer's number when a contradicted accept
+      // quarantined it for this estimate's customer: never text the packet to it. Answered like any
+      // policy refusal (one generic 409, no reason named, never retried).
+      if (await estimatePhoneQuarantined({ ...estimate, customer_phone: contact.customerPhone })) {
+        await markClaimPolicyBlocked();
+        return { success: false, policyBlocked: true };
       }
       // Routed through sendCustomerMessage (the policy chain) like every other
       // customer/lead SMS: suppression (STOP / wrong_number / manual_dnc /

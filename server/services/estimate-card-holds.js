@@ -37,6 +37,7 @@ const { isInvoiceCollectibleStatus } = require('./invoice-helpers');
 const { etDateString } = require('../utils/datetime-et');
 const { explicitBillingChannels } = require('./billing-delivery-channels');
 const { isRecurringLineageVisit } = require('../utils/recurring-lineage');
+const { isRetiredSetupIntent, isStripeResourceMissing } = require('./setup-intent-replacement');
 
 function isCardHoldEnabled() {
   const flag = process.env.ONE_TIME_CARD_HOLD;
@@ -165,9 +166,12 @@ async function createCardHoldSetupIntentForEstimate(estimate) {
 }
 
 // A live-retrieved SetupIntent counts only when Stripe says it succeeded, it
-// carries a saved payment_method, AND its metadata pins it to THIS estimate.
+// carries a saved payment_method, its metadata pins it to THIS estimate, AND
+// it has not been retired (an accept that drifted to another customer retires
+// the capture it carried - retireOrphanedCardHoldIntent below).
 function cardHoldIntentMatchesEstimate(setupIntent, estimateId) {
   return !!setupIntent
+    && !isRetiredSetupIntent(setupIntent)
     && setupIntent.status === 'succeeded'
     && setupIntent.metadata?.purpose === 'estimate_card_hold'
     && String(setupIntent.metadata?.estimate_id) === String(estimateId)
@@ -223,6 +227,40 @@ async function verifyCardHoldIntent({ estimate, setupIntentId }) {
     return { ok: false, reason: 'intent_mismatch' };
   }
   return { ok: true, paymentMethodId: setupIntent.payment_method, setupIntentId: setupIntent.id };
+}
+
+// An accept refused because the customer identity it resolved moved (ACCEPT_BILLING_CHANGED) leaves
+// the card the tab captured succeeded in Stripe and unbound; the reload may resolve the estimate to a
+// DIFFERENT customer, and the hold would pin that card to them. Retire the intent (Stripe metadata
+// stamp, the same one the recurring capture uses) so verifyCardHoldIntent - whether the client echoes
+// the id or the pending-row fallback finds it - refuses it and the tab captures a fresh card. Only an
+// intent that belongs to THIS estimate as a card hold is touched; unknown / foreign / canceled /
+// already-retired needs nothing. ok:false only when Stripe could not confirm - the caller fails closed.
+async function retireOrphanedCardHoldIntent({ estimate, setupIntentId }) {
+  if (!setupIntentId) return { ok: true, retired: false };
+  let current = null;
+  try {
+    current = await StripeService.retrieveSetupIntent(setupIntentId);
+  } catch (err) {
+    if (isStripeResourceMissing(err)) return { ok: true, retired: false };
+    logger.warn('[estimate-card-holds] orphaned hold lookup failed', { error: err.message });
+    return { ok: false, reason: 'verification_failed' };
+  }
+  if (!current) return { ok: false, reason: 'verification_failed' };
+  if (current.metadata?.purpose !== 'estimate_card_hold'
+    || String(current.metadata?.estimate_id) !== String(estimate.id)
+    || current.status === 'canceled'
+    || isRetiredSetupIntent(current)) {
+    return { ok: true, retired: false };
+  }
+  try {
+    await StripeService.retireSetupIntent(current.id);
+  } catch (err) {
+    logger.warn(`[estimate-card-holds] orphaned hold retire failed for ${current.id}`, { error: err.message });
+    return { ok: false, reason: 'retire_failed' };
+  }
+  logger.info(`[estimate-card-holds] retired orphaned hold SetupIntent ${current.id} for estimate ${estimate.id} - the accept's customer identity changed`);
+  return { ok: true, retired: true };
 }
 
 // In-transaction DB upsert advancing the hold to 'held', pinned to the customer
@@ -2512,6 +2550,7 @@ module.exports = {
   resolveCardHoldPolicy,
   createCardHoldSetupIntentForEstimate,
   verifyCardHoldIntent,
+  retireOrphanedCardHoldIntent,
   recordCardHoldHeld,
   attachCardHoldPaymentMethod,
   handleCardHoldSetupIntentSucceeded,
