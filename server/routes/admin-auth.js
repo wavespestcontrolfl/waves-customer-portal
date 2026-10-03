@@ -233,14 +233,17 @@ async function login(req, res, next) {
 
 router.post('/login', login);
 
-function mfaFailureResponse(res, result) {
+// `invalidStatus`: the login step answers a wrong code 401 (no session yet);
+// the signed-in management routes answer it 400 so a typo never reads as a
+// revoked session.
+function mfaFailureResponse(res, result, invalidStatus = 401) {
   if (result.reason === 'locked') {
     return res.status(429).json({ error: 'Too many wrong codes. Try again in 15 minutes.', code: 'MFA_LOCKED' });
   }
   if (result.reason === 'unavailable') {
     return res.status(503).json({ error: 'Two-step sign-in cannot check codes right now. Try again shortly.', code: 'MFA_UNAVAILABLE' });
   }
-  return res.status(401).json({ error: 'That code did not work. Check your authenticator app and try again.', code: 'MFA_INVALID' });
+  return res.status(invalidStatus).json({ error: 'That code did not work. Check your authenticator app and try again.', code: 'MFA_INVALID' });
 }
 
 // Step two of an enrolled staff member's sign-in: the challenge from /login
@@ -313,7 +316,7 @@ async function mfaSetup(req, res, next) {
         return res.status(400).json({ error: 'Enter a code from your current authenticator app to replace it.' });
       }
       const result = await staffMfa.verifySecondFactor(tech.id, code);
-      if (!result.ok) return mfaFailureResponse(res, result);
+      if (!result.ok) return mfaFailureResponse(res, result, 400);
     }
     const { secret, otpauthUrl } = await staffMfa.startSetup(tech);
     return res.json({ secret, otpauthUrl, expiresInMinutes: staffMfa.PENDING_SETUP_TTL_MS / 60000 });
@@ -329,16 +332,23 @@ async function mfaConfirm(req, res, next) {
     if (typeof code !== 'string' || !code.trim() || code.length > 64) {
       return res.status(400).json({ error: 'Enter the 6-digit code from your authenticator app.' });
     }
-    const result = await staffMfa.confirmSetup(req.technician, code);
+    const result = await staffMfa.confirmSetup(req.technician, code, {
+      expectedTokenVersion: staffTokenVersion(req.technician),
+    });
     if (!result.ok) {
+      if (result.reason === 'revoked') {
+        return res.status(401).json({ error: 'Session has been revoked', code: 'TOKEN_REVOKED' });
+      }
       if (result.reason === 'no_pending' || result.reason === 'expired') {
         return res.status(409).json({ error: 'This setup expired. Start again to get a new QR code.', code: 'MFA_SETUP_EXPIRED' });
       }
-      return mfaFailureResponse(res, result);
+      return mfaFailureResponse(res, result, 400);
     }
-    const tech = await db('technicians').where({ id: req.technician.id }).first();
-    // This session passed the new factor, so it continues as a two-step
-    // session; every other session of this account without one is refused.
+    const tech = result.technician;
+    // The credential version moved, so every earlier session and device is
+    // signed out; this session passed the new factor and continues on a
+    // fresh two-step token minted from the row the fence wrote.
+    disconnectRevokedStaffSessions(tech.id, 'mfa_enrolled');
     const { token, refreshToken } = mintStaffTokens(tech, { mfa: true });
     setAdminMarkerCookie(res, tech.id);
     return res.json({ token, refreshToken, user: staffUser(tech), recoveryCodes: result.recoveryCodes });
@@ -354,7 +364,7 @@ async function mfaRegenerateRecoveryCodes(req, res, next) {
       return res.status(400).json({ error: 'Enter the code from your authenticator app.' });
     }
     const result = await staffMfa.verifySecondFactor(tech.id, code);
-    if (!result.ok) return mfaFailureResponse(res, result);
+    if (!result.ok) return mfaFailureResponse(res, result, 400);
     const recoveryCodes = await staffMfa.regenerateRecoveryCodes(tech.id);
     return res.json({ recoveryCodes });
   } catch (err) { return next(err); }
@@ -375,7 +385,7 @@ async function mfaDisable(req, res, next) {
       return res.status(400).json({ error: 'Enter the code from your authenticator app.' });
     }
     const result = await staffMfa.verifySecondFactor(tech.id, code);
-    if (!result.ok) return mfaFailureResponse(res, result);
+    if (!result.ok) return mfaFailureResponse(res, result, 400);
     await staffMfa.disable(tech.id);
     return res.json({ ok: true });
   } catch (err) { return next(err); }

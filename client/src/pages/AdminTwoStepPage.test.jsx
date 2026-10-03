@@ -102,4 +102,18 @@ describe('AdminTwoStepPage', () => {
     expect(await screen.findByText('Sign in page')).toBeInTheDocument();
     expect(store.has('waves_admin_token')).toBe(false);
   });
+  it('a mistyped code during setup stays on the QR step with an inline error', async () => {
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(reply(200, { available: true, enabled: false, enrollmentRequired: false, enforced: false, recoveryCodesRemaining: 0 }))
+      .mockResolvedValueOnce(reply(200, { secret: 'JBSWY3DPEHPK3PXP', otpauthUrl: 'otpauth://totp/x', expiresInMinutes: 15 }))
+      .mockResolvedValueOnce(reply(400, { error: 'That code did not work. Check your authenticator app and try again.', code: 'MFA_INVALID' })));
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Current password'), { target: { value: 'pw' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    fireEvent.change(await screen.findByLabelText('Code from the app'), { target: { value: '000000' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Turn on two-step sign-in' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('That code did not work');
+    expect(screen.getByAltText('QR code for your authenticator app')).toBeInTheDocument();
+    expect(store.get('waves_admin_token')).toBe('old-jwt');
+  });
 });

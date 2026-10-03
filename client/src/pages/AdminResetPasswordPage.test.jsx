@@ -125,6 +125,8 @@ describe('AdminResetPasswordPage', () => {
   });
 
   it('with two-step sign-in on, a reset stores no session and sends the person to sign in', async () => {
+    store.set('waves_admin_token', 'old-revoked-jwt');
+    store.set('waves_tech_offline_pass', '{"binding":"x"}');
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ passwordReset: true, signInRequired: true }) })));
     render(
       <MemoryRouter initialEntries={['/admin/reset-password']}>
@@ -139,5 +141,6 @@ describe('AdminResetPasswordPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Reset password' }));
     expect(await screen.findByText('Staff sign in')).toBeInTheDocument();
     expect(store.has('waves_admin_token')).toBe(false);
+    expect(store.has('waves_tech_offline_pass')).toBe(false);
   });
 });

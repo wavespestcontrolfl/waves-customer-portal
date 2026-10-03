@@ -25,11 +25,13 @@ function passwordChangeRouteAllowed(req) {
     || routePath === '/api/admin/auth/change-password';
 }
 
-// While GATE_ADMIN_MFA_ENFORCE holds an admin on enrollment, only the profile
-// and the two-step setup routes answer.
+// While GATE_ADMIN_MFA_ENFORCE holds an admin on enrollment, only the profile,
+// the two-step setup routes and a forced password change answer (a forced
+// change runs first; the password check above still applies).
 function mfaEnrollmentRouteAllowed(req) {
   const routePath = `${req.baseUrl || ''}${req.path || ''}`.replace(/\/+$/, '');
   return routePath === '/api/admin/auth/me'
+    || routePath === '/api/admin/auth/change-password'
     || routePath === '/api/admin/auth/mfa'
     || routePath === '/api/admin/auth/mfa/totp/setup'
     || routePath === '/api/admin/auth/mfa/totp/confirm';

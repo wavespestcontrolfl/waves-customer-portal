@@ -181,7 +181,10 @@ async function decryptSecret(conn, enc) {
   if (!enc) return null;
   for (const key of mfaKeys()) {
     try {
-      const r = await conn.raw('SELECT pgp_sym_decrypt(dearmor(?), ?) AS t', [enc, key]);
+      // Each attempt runs in its own (sub)transaction: inside a caller's
+      // transaction that is a savepoint, so a wrong key's error does not
+      // abort the caller's transaction before the next key is tried.
+      const r = await conn.transaction((attempt) => attempt.raw('SELECT pgp_sym_decrypt(dearmor(?), ?) AS t', [enc, key]));
       const t = r && r.rows && r.rows[0] && r.rows[0].t;
       if (t) return t;
     } catch (e) {
@@ -323,12 +326,21 @@ async function startSetup(tech, { conn = db } = {}) {
 }
 
 // Confirms a pending setup with a code from the new authenticator. In one
-// transaction: the pending secret becomes the active one, the confirming
-// step is recorded (so the same code cannot then be replayed at login),
-// recovery codes are replaced, and technicians.mfa_enabled_at is stamped.
-// Returns { ok: true, recoveryCodes } or { ok: false, reason }.
-async function confirmSetup(tech, code, { nowMs = Date.now() } = {}) {
+// transaction, fenced on the session's credential version (a password change
+// or reset that landed after this request authenticated wins): the pending
+// secret becomes the active one, the confirming step is recorded (so the same
+// code cannot then be replayed at login), recovery codes are replaced,
+// technicians.mfa_enabled_at is stamped, and — like a password change — the
+// credential version moves and push registrations are deactivated, so every
+// session and device registered before the authenticator is signed out.
+// Returns { ok: true, recoveryCodes, technician } or { ok: false, reason }.
+async function confirmSetup(tech, code, { expectedTokenVersion, nowMs = Date.now() } = {}) {
   return db.transaction(async (trx) => {
+    const account = await trx('technicians')
+      .where({ id: tech.id, auth_token_version: expectedTokenVersion })
+      .forUpdate()
+      .first();
+    if (!account) return { ok: false, reason: 'revoked' };
     const row = await trx('staff_mfa_totp').where({ technician_id: tech.id }).forUpdate().first();
     if (!row || !row.pending_secret_enc || !row.pending_created_at) return { ok: false, reason: 'no_pending' };
     if (new Date(row.pending_created_at).getTime() + PENDING_SETUP_TTL_MS < nowMs) return { ok: false, reason: 'expired' };
@@ -353,13 +365,28 @@ async function confirmSetup(tech, code, { nowMs = Date.now() } = {}) {
       updated_at: trx.fn.now(),
     });
     const recoveryCodes = await replaceRecoveryCodes(trx, tech.id);
-    await trx('technicians').where({ id: tech.id }).update({ mfa_enabled_at: trx.fn.now(), updated_at: trx.fn.now() });
-    return { ok: true, recoveryCodes };
+    const [technician] = await trx('technicians')
+      .where({ id: tech.id, auth_token_version: expectedTokenVersion })
+      .update({
+        mfa_enabled_at: trx.fn.now(),
+        auth_token_version: expectedTokenVersion + 1,
+        updated_at: trx.fn.now(),
+      })
+      .returning('*');
+    // Lazy: this module sits under every staff auth check, the push stack does not.
+    await require('./push-notifications').deactivateStaffUser(tech.id, trx);
+    return { ok: true, recoveryCodes, technician };
   });
 }
 
+// The factor row is locked first, so two concurrent regenerations replace the
+// codes one after the other instead of both deleting the old batch and
+// leaving two new ones valid.
 async function regenerateRecoveryCodes(technicianId) {
-  return db.transaction((trx) => replaceRecoveryCodes(trx, technicianId));
+  return db.transaction(async (trx) => {
+    await trx('staff_mfa_totp').where({ technician_id: technicianId }).forUpdate().first();
+    return replaceRecoveryCodes(trx, technicianId);
+  });
 }
 
 async function disable(technicianId) {

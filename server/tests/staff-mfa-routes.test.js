@@ -247,12 +247,30 @@ describe('self-service routes', () => {
     expect(res.body).toEqual({ secret: 'ABC', otpauthUrl: 'otpauth://totp/x', expiresInMinutes: 15 });
   });
 
-  test('confirm upgrades this session to a two-step session and returns the recovery codes once', async () => {
-    staffMfa.confirmSetup.mockResolvedValue({ ok: true, recoveryCodes: ['AAAA-BBBB-CCCC-DDDD'] });
-    db.mockReturnValueOnce(builder({ first: staffRow({ mfa_enabled_at: new Date() }) }));
+  test('confirm is fenced on the session version and continues this session on the new version', async () => {
+    staffMfa.confirmSetup.mockResolvedValue({
+      ok: true,
+      recoveryCodes: ['AAAA-BBBB-CCCC-DDDD'],
+      technician: staffRow({ mfa_enabled_at: new Date(), auth_token_version: 4 }),
+    });
     const res = await invoke(mfaConfirm, { technician: staffRow(), body: { code: '123456' } });
+    expect(staffMfa.confirmSetup).toHaveBeenCalledWith(expect.objectContaining({ id: 'tech-1' }), '123456', { expectedTokenVersion: 3 });
     expect(res.body.recoveryCodes).toEqual(['AAAA-BBBB-CCCC-DDDD']);
-    expect(jwt.verify(res.body.token, SECRET).mfa).toBe(true);
+    expect(jwt.verify(res.body.token, SECRET)).toMatchObject({ mfa: true, tokenVersion: 4 });
+    expect(require('../sockets').disconnectStaffSockets).toHaveBeenCalledWith('tech-1', 'mfa_enrolled');
+  });
+
+  test('a revoked session cannot finish enrollment; a wrong code is a 400, never a session end', async () => {
+    staffMfa.confirmSetup.mockResolvedValue({ ok: false, reason: 'revoked' });
+    let res = await invoke(mfaConfirm, { technician: staffRow(), body: { code: '123456' } });
+    expect(res.statusCode).toBe(401);
+    expect(res.body.code).toBe('TOKEN_REVOKED');
+    expect(res.body.token).toBeUndefined();
+
+    staffMfa.confirmSetup.mockResolvedValue({ ok: false, reason: 'invalid' });
+    res = await invoke(mfaConfirm, { technician: staffRow(), body: { code: '000000' } });
+    expect(res.statusCode).toBe(400);
+    expect(res.body.code).toBe('MFA_INVALID');
   });
 
   test('an enforced admin cannot turn two-step sign-in off', async () => {
@@ -267,7 +285,7 @@ describe('self-service routes', () => {
     bcrypt.compare.mockResolvedValue(true);
     staffMfa.verifySecondFactor.mockResolvedValue({ ok: false, reason: 'invalid' });
     let res = await invoke(mfaDisable, { technician: staffRow({ mfa_enabled_at: new Date() }), body: { currentPassword: 'x', code: '000000' } });
-    expect(res.statusCode).toBe(401);
+    expect(res.statusCode).toBe(400);
     expect(staffMfa.disable).not.toHaveBeenCalled();
     staffMfa.verifySecondFactor.mockResolvedValue({ ok: true, method: 'totp' });
     res = await invoke(mfaDisable, { technician: staffRow({ mfa_enabled_at: new Date() }), body: { currentPassword: 'x', code: '123456' } });
@@ -322,5 +340,14 @@ describe('adminAuthenticate and verifyStaffBearer', () => {
     }
     const disable = await run(authed(bare, {}, '/auth/mfa/disable'));
     expect(disable.res.statusCode).toBe(403);
+  });
+
+  test('enforce plus a forced password change: the change runs first, then enrollment', async () => {
+    process.env.GATE_ADMIN_MFA = 'true';
+    process.env.GATE_ADMIN_MFA_ENFORCE = 'true';
+    const rotating = staffRow({ must_change_password: true });
+    expect((await run(authed(rotating, {}, '/auth/change-password'))).next).toHaveBeenCalled();
+    const setup = await run(authed(rotating, {}, '/auth/mfa/totp/setup'));
+    expect(setup.res.body.code).toBe('PASSWORD_CHANGE_REQUIRED');
   });
 });

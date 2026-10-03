@@ -1,6 +1,7 @@
 import { useLayoutEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { refetchFlags } from '../hooks/useFeatureFlag';
+import { clearStaffDeviceData } from '../lib/adminAuth';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = {
@@ -56,7 +57,11 @@ export default function AdminResetPasswordPage() {
       if (!response.ok) throw new Error(data.error || 'Password reset failed');
       if (data.signInRequired) {
         // Two-step sign-in is on for this account: the reset link proves the
-        // inbox only, so sign in with the new password and the app code.
+        // inbox only, so sign in with the new password and the app code. The
+        // reset revoked any session this device held, so it goes too.
+        localStorage.removeItem('waves_admin_token');
+        localStorage.removeItem('waves_admin_user');
+        clearStaffDeviceData();
         navigate('/admin/login', { replace: true, state: { passwordReset: true } });
         return;
       }
