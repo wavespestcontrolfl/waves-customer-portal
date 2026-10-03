@@ -3990,6 +3990,18 @@ const gates = {
   // reads GATE_CALL_ADDRESS_ONFILE_ASSIST at call time via
   // callAddressOnFileAssistLive().
   callAddressOnFileAssist: process.env.GATE_CALL_ADDRESS_ONFILE_ASSIST === 'true',
+  // Call-address route-spelling retry. A caller who says a numbered state, US
+  // or county route with the direction FIRST ("14360 East State Road 64")
+  // can get a Google verdict for a different premise, and street recovery
+  // then gives up on a long candidate list. On, recovery first asks Google
+  // once more with the route in its canonical order ("14360 SR 64 E") and
+  // adopts that single verdict when it confirms the spoken house number on
+  // the same route (read-back card, as for any recovered street). Ships
+  // DARK: off unless exactly 'true'. This entry is for logGateStatus only:
+  // services/address-validation/recovery.js reads
+  // GATE_CALL_ROUTE_SPELLING_RETRY at call time via
+  // callRouteSpellingRetryLive().
+  callRouteSpellingRetry: process.env.GATE_CALL_ROUTE_SPELLING_RETRY === 'true',
 
   // Lawn report watering instruction (lawn report rebuild P2): the frozen
   // per-product watering rules drive the aftercare writer, the banner payload
@@ -4818,6 +4830,15 @@ function callAddressOnFileAssistLive() {
   return process.env.GATE_CALL_ADDRESS_ONFILE_ASSIST === 'true';
 }
 
+// GATE_CALL_ROUTE_SPELLING_RETRY read at CALL time — strict `=== 'true'`, off
+// by default. The one canonical reader for
+// server/services/address-validation/recovery.js. Off, street recovery is
+// byte-identical: no extra Address Validation request. The gates-map entry
+// above is for logGateStatus only.
+function callRouteSpellingRetryLive() {
+  return process.env.GATE_CALL_ROUTE_SPELLING_RETRY === 'true';
+}
+
 // GATE_LAWN_ASSESSMENT_REFEREE read at CALL time — ships DARK, off unless
 // exactly 'true' (owner ruling 2026-09-29). ONE gate covers both the GPT-6 Sol
 // second opinion and the Claude Fable name referee in
@@ -5372,6 +5393,7 @@ module.exports.dunningCustomerScheduleAllowlist = dunningCustomerScheduleAllowli
 module.exports.dunningCustomerScheduleAllowlistStatus = dunningCustomerScheduleAllowlistStatus;
 module.exports.zoneRouteDaysLive = zoneRouteDaysLive;
 module.exports.callAddressOnFileAssistLive = callAddressOnFileAssistLive;
+module.exports.callRouteSpellingRetryLive = callRouteSpellingRetryLive;
 module.exports.lawnAssessmentRefereeLive = lawnAssessmentRefereeLive;
 module.exports.billingEmailDetailsLive = billingEmailDetailsLive;
 module.exports.multiTechConfirmLive = multiTechConfirmLive;

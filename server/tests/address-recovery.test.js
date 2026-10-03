@@ -463,3 +463,110 @@ describe('recoverStreetAddress — ordinal streets are distinct premises', () =>
     expect(out.recovered).toMatchObject({ address_line1: '11106 4th Avenue East' });
   });
 });
+
+// GATE_CALL_ROUTE_SPELLING_RETRY. A caller says the direction before a
+// numbered route; Google's form has it after. Synthetic address throughout.
+describe('recoverStreetAddress — numbered-route respelling (gate)', () => {
+  const { numberedRouteRespelling } = require('../services/address-validation/recovery');
+  const GATE = 'GATE_CALL_ROUTE_SPELLING_RETRY';
+  const ROUTE = { address_line1: '1234 East State Road 64', city: 'Bradenton', state: 'FL', zip: '' };
+  const routeAccept = (overrides = {}) => ({
+    status: 'validated_accept',
+    county: 'Manatee County',
+    normalized: { street_line_1: '1234 Florida 64 East', city: 'Bradenton', state: 'FL', postal_code: '34211' },
+    ...overrides,
+  });
+  const MANY = [
+    '1234 Florida 64, Bradenton, Florida, USA',
+    '1234 64th Avenue Drive East, Bradenton, Florida, USA',
+    '1234 64th Avenue Circle East, Bradenton, Florida, USA',
+    '1234 64th Street Northeast, Bradenton, Florida, USA',
+  ];
+  let saved;
+  beforeEach(() => { saved = process.env[GATE]; });
+  afterEach(() => {
+    if (saved === undefined) delete process.env[GATE];
+    else process.env[GATE] = saved;
+  });
+
+  test('respelling: direction moves after the route; other wording is left alone', () => {
+    expect(numberedRouteRespelling('1234 East State Road 64')).toBe('1234 SR 64 E');
+    expect(numberedRouteRespelling('1234 E Florida 64')).toBe('1234 SR 64 E');
+    expect(numberedRouteRespelling('1234 North US 41')).toBe('1234 US 41 N');
+    // Already canonical: Google has judged this exact line.
+    expect(numberedRouteRespelling('1234 SR 64 E')).toBeNull();
+    // A bare "Highway" does not name the route class.
+    expect(numberedRouteRespelling('1234 East Highway 301')).toBeNull();
+    // A unit on the street line, an ordinal street, an ordinary street.
+    expect(numberedRouteRespelling('1234 East State Road 64 Unit 4')).toBeNull();
+    expect(numberedRouteRespelling('1234 64th Street East')).toBeNull();
+    expect(numberedRouteRespelling('1234 State Street')).toBeNull();
+  });
+
+  test('gate off: no extra request, the long candidate list still goes to review', async () => {
+    delete process.env[GATE];
+    const validate = jest.fn(async () => routeAccept());
+    const out = await recoverStreetAddress({
+      extracted: ROUTE, avStatus: 'confirm_needed',
+      deps: deps({ autocomplete: async () => MANY, validate }),
+    });
+    expect(out.recovered).toBeNull();
+    expect(validate.mock.calls.some(([arg]) => /SR 64 E/.test(arg.addressLines[0]))).toBe(false);
+  });
+
+  test('gate on: the respelled route is validated once and adopted', async () => {
+    process.env[GATE] = 'true';
+    const autocomplete = jest.fn(async () => MANY);
+    const validate = jest.fn(async () => routeAccept());
+    const out = await recoverStreetAddress({
+      extracted: ROUTE, avStatus: 'confirm_needed',
+      deps: deps({ autocomplete, validate }),
+    });
+    expect(validate).toHaveBeenCalledTimes(1);
+    expect(validate.mock.calls[0][0].addressLines).toEqual(['1234 SR 64 E, Bradenton FL']);
+    expect(autocomplete).not.toHaveBeenCalled();
+    expect(out.method).toBe('route_spelling');
+    expect(out.recovered).toEqual({ address_line1: '1234 Florida 64 East', city: 'Bradenton', state: 'FL', zip: '34211' });
+    expect(out.avResult.status).toBe('validated_accept');
+  });
+
+  test('gate on: a verdict on another street, house number or city is not adopted', async () => {
+    process.env[GATE] = 'true';
+    const wrong = [
+      { street_line_1: '1234 64th Street East', city: 'Bradenton', state: 'FL', postal_code: '34208' },
+      { street_line_1: '415 Florida 64 East', city: 'Bradenton', state: 'FL', postal_code: '34208' },
+      { street_line_1: '1234 Florida 64 East', city: 'Zolfo Springs', state: 'FL', postal_code: '33890' },
+    ];
+    for (const normalized of wrong) {
+      const out = await recoverStreetAddress({
+        extracted: ROUTE, avStatus: 'confirm_needed',
+        deps: deps({ validate: async () => routeAccept({ normalized }) }),
+      });
+      expect(out.method).not.toBe('route_spelling');
+      expect(out.recovered).toBeNull();
+    }
+  });
+
+  test('gate on: an unconfirmed respelling falls through to the normal phases', async () => {
+    process.env[GATE] = 'true';
+    const validate = jest.fn()
+      .mockResolvedValueOnce({ status: 'confirm_needed', normalized: routeAccept().normalized })
+      .mockResolvedValue(routeAccept());
+    const out = await recoverStreetAddress({
+      extracted: ROUTE, avStatus: 'confirm_needed',
+      deps: deps({ autocomplete: async () => [MANY[0]], validate }),
+    });
+    expect(out.method).toBe('autocomplete');
+    expect(out.recovered.address_line1).toBe('1234 Florida 64 East');
+  });
+
+  test('gate on: an ordinary garbled street makes no extra request', async () => {
+    process.env[GATE] = 'true';
+    const validate = jest.fn(async () => avAccept());
+    await recoverStreetAddress({
+      extracted: GARBLED, avStatus: 'missing_component',
+      deps: deps({ autocomplete: async () => ['5039 Seafoam Trail, Lakewood Ranch, FL, USA'], validate }),
+    });
+    expect(validate).toHaveBeenCalledTimes(1);
+  });
+});
