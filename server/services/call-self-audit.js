@@ -33,8 +33,6 @@ const AUDIT_PROMPT = `You are auditing one phone-call analysis for Waves Pest Co
 {"is_lead": boolean, "is_spam": boolean, "is_voicemail": boolean, "appointment_agreed": boolean, "quote_promised": boolean, "complaint": boolean, "excerpt": "<=25 words supporting your most important judgment"}
 Rules: a two-party conversation (both speakers 3+ turns) is never a voicemail; a caller with a service request/address/quoted price is never spam; an existing customer coordinating a visit is not a new lead. Each transcript is preceded by a CALL DIRECTION line — read it, since it can warn that the printed speaker labels are unreliable and tell you to judge by what each party says instead.`;
 
-// Identity of the audit contract, stored on every finding.
-const AUDIT_PROMPT_HASH = require('crypto').createHash('sha256').update(AUDIT_PROMPT).digest('hex').slice(0, 16);
 
 const OUTBOUND_DIRECTION_SQL = "COALESCE(direction, '') LIKE 'outbound%'";
 const INBOUND_DIRECTION_SQL = "COALESCE(direction, '') NOT LIKE 'outbound%'";
@@ -77,6 +75,23 @@ function compactDirection(direction) {
 // audit's own findings or counters; it only tallies into `tally`
 // ({ asked, recorded, failed } counts calls, not rows; `tally.clef` holds the
 // second leg's own counts and exists only while that gate is on).
+// What the auditor is shown for one call: the direction instruction and the
+// first 5,000 characters of the transcript. One builder, so the audit and
+// any later second reading render exactly the same text.
+const AUDIT_TRANSCRIPT_CHARS = 5000;
+function auditUserContent(call) {
+  return `${callDirectionBlock(call.direction)}\nTranscript:\n${String(call.transcription || '').slice(0, AUDIT_TRANSCRIPT_CHARS)}`;
+}
+
+// Identity of the COMPLETE input one audit ran on (system prompt + rendered
+// user content), stored on every finding. A second reading is valid only
+// while the same input can be rendered again: a changed prompt, direction
+// instruction, direction or transcript (re-transcription, a replaced
+// recording) all change this hash.
+function auditInputHash(call) {
+  return require('crypto').createHash('sha256').update(`${AUDIT_PROMPT}\n\u0000\n${auditUserContent(call)}`).digest('hex').slice(0, 24);
+}
+
 const JEV_SHARED_FIELDS = ['is_lead', 'is_spam', 'is_voicemail', 'appointment_agreed', 'quote_promised'];
 async function shadowJevJudge(call, prod, verdict, tally, gateBaselines = {}) {
   if (!typedDecisionsLive()) return;
@@ -286,7 +301,7 @@ async function runSelfAudit(depsIn = {}) {
       const res = await deps.createMessage({
         max_tokens: 4096,
         system: AUDIT_PROMPT,
-        messages: [{ role: 'user', content: `${callDirectionBlock(call.direction)}\nTranscript:\n${call.transcription.slice(0, 5000)}` }],
+        messages: [{ role: 'user', content: auditUserContent(call) }],
       });
       auditorModel = res?.model || null;
       // createDeepMessage's OpenAI backup returns a message with no id; an
@@ -331,9 +346,9 @@ async function runSelfAudit(depsIn = {}) {
           old_value: String(prod[f]),
           new_value: String(Boolean(verdict[f])),
           transcript_excerpt: String(verdict.excerpt || '').slice(0, 300),
-          // The audit contract (prompt hash) and who answered: a second reading
-          // is compared only under the same contract, on another provider.
-          detail: JSON.stringify({ diffs, verdict, disposition: call.disposition, auditor_model: auditorModel, auditor_provider: auditorProvider, audit_prompt_hash: AUDIT_PROMPT_HASH }),
+          // The exact input this audit ran on, and who answered: a second
+          // reading is compared only on the same input, on another provider.
+          detail: JSON.stringify({ diffs, verdict, disposition: call.disposition, auditor_model: auditorModel, auditor_provider: auditorProvider, audit_input_hash: auditInputHash(call) }),
         })
         .onConflict(['call_log_id', 'audit_source', 'category', 'field'])
         .merge(['old_value', 'new_value', 'transcript_excerpt', 'detail'])
@@ -375,4 +390,4 @@ async function runSelfAudit(depsIn = {}) {
 
 function safeParse(v) { if (!v) return {}; if (typeof v === 'object') return v; try { return JSON.parse(v); } catch { return {}; } }
 
-module.exports = { runSelfAudit, stratifySample, OUTBOUND_DIRECTION_SQL, INBOUND_DIRECTION_SQL, callDirectionBlock, gateCheckBaselines, AUDIT_PROMPT, AUDIT_PROMPT_HASH, productionAnswers };
+module.exports = { runSelfAudit, stratifySample, OUTBOUND_DIRECTION_SQL, INBOUND_DIRECTION_SQL, callDirectionBlock, gateCheckBaselines, AUDIT_PROMPT, AUDIT_TRANSCRIPT_CHARS, auditUserContent, auditInputHash, productionAnswers };

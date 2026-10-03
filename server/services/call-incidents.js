@@ -39,7 +39,6 @@ const SCHEMA_VERSION = 'ai-incidents.v1';
 const FIELDS = Object.freeze(['is_lead', 'is_spam', 'is_voicemail', 'appointment_agreed', 'quote_promised']);
 // The closed failure-mode list for calls: each field, wrongly true or wrongly false.
 const FAILURE_MODES = Object.freeze(FIELDS.flatMap((f) => [`${f}_false_positive`, `${f}_missed`]));
-const TRANSCRIPT_CHARS = 5000; // what the auditor was shown
 const MIN_EXCERPT_CHARS = 12;
 const LOOKBACK_DAYS = 14;
 // finding id + 12 hex of md5(everything the finding says): both values, the
@@ -122,7 +121,7 @@ async function askSecondReader(call, auditorProvider) {
   // `call` is the candidate row: transcript, direction and the disputed field.
   const { dispatchWithFallback } = require('./llm/call');
   const MODELS = require('../config/models');
-  const { AUDIT_PROMPT, callDirectionBlock } = require('./call-self-audit');
+  const { AUDIT_PROMPT, auditUserContent } = require('./call-self-audit');
   const policy = MODELS.TEXT_POLICIES.fastStructured;
   const leg = [policy.primary, policy.fallback].find((l) => l && l.provider !== auditorProvider);
   if (!leg) return { ok: false, reason: 'no_other_provider_leg' };
@@ -132,7 +131,8 @@ async function askSecondReader(call, auditorProvider) {
       laneId: 'call_incidents',
       // The auditor's own contract, plus one ask: the words behind THIS field.
       system: `${AUDIT_PROMPT}\nAlso include "field_excerpt": the exact words from the transcript (at most 25) that support your answer for "${call.field}".`,
-      text: `${callDirectionBlock(call.direction)}\nTranscript:\n${String(call.transcription || '').slice(0, TRANSCRIPT_CHARS)}`,
+      // The very text the auditor read (leadWithoutReading checked its hash).
+      text: auditUserContent(call),
       jsonMode: true,
       maxTokens: 400,
     },
@@ -160,19 +160,21 @@ async function typedSignals(dbi, callId, field) {
  *   auditor_value_missing — the auditor never answered this field as a
  *     boolean (the self-audit stores Boolean(verdict[field]), so a missing
  *     answer reads as "false");
- *   audit_contract_changed — the finding was written under another audit
- *     prompt (or before the hash was stored): a second reading under today's
- *     prompt would not be the same decision;
+ *   audit_input_changed — the exact input the auditor read (prompt,
+ *     direction instruction, transcript) can no longer be rendered from the
+ *     call: the prompt changed, the call was re-transcribed or its recording
+ *     replaced, or the finding predates the stored hash. A second reading
+ *     would be of different evidence;
  *   auditor_provider_unknown — a second reader could share its provider;
  *   transcript_truncated — the call is longer than both readers are shown,
  *     so the disagreement may sit in the part neither read.
  */
 function leadWithoutReading({ row, detail, auditorProvider, auditorValue }) {
-  const { AUDIT_PROMPT_HASH } = require('./call-self-audit');
+  const { auditInputHash, AUDIT_TRANSCRIPT_CHARS } = require('./call-self-audit');
   if (detail?.verdict?.[row.field] !== auditorValue) return 'auditor_value_missing';
-  if (detail?.audit_prompt_hash !== AUDIT_PROMPT_HASH) return 'audit_contract_changed';
+  if (detail?.audit_input_hash !== auditInputHash(row)) return 'audit_input_changed';
   if (!auditorProvider) return 'auditor_provider_unknown';
-  if (String(row.transcription || '').length > TRANSCRIPT_CHARS) return 'transcript_truncated';
+  if (String(row.transcription || '').length > AUDIT_TRANSCRIPT_CHARS) return 'transcript_truncated';
   return null;
 }
 
