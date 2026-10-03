@@ -989,6 +989,11 @@ describe('recentLookupVerdict', () => {
     // flight: it may already be paid for, and the retry's budget counts
     // ledger rows.
     expect(await _private.recentLookupVerdict(row, { stalePendingCools: true })).toBe('cooldown');
+    // Same lookup after the stale-attempt sweep renamed it 'interrupted':
+    // a normal run tries it again, the retry does not.
+    mockLedger({ last_attempt_status: 'interrupted', last_attempt_at: stale });
+    expect(await _private.recentLookupVerdict(row, { stalePendingCools: true })).toBe('cooldown');
+    expect(await _private.recentLookupVerdict(row)).not.toBe('cooldown');
     mockLedger({ last_attempt_status: 'pending', last_attempt_at: live });
     expect(await _private.recentLookupVerdict(row)).toBe('cooldown');
     // Terminal unproductive statuses cool for the full window regardless

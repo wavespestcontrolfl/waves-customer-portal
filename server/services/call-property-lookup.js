@@ -716,6 +716,10 @@ async function recentLookupVerdict(row, { stalePendingCools = false } = {}) {
       .first('last_attempt_status', 'last_attempt_at');
     if (!attempt) return null;
     const attemptedAt = attempt.last_attempt_at ? new Date(attempt.last_attempt_at).getTime() : NaN;
+    // The deploy-kill retry: the :03/:18 stale-attempt sweep may already
+    // have turned the killed run's in-flight 'pending' into 'interrupted'.
+    // Same lookup, same rule as the stale 'pending' below — not re-bought.
+    if (stalePendingCools && attempt.last_attempt_status === 'interrupted') return 'cooldown';
     if (COOLDOWN_STATUSES.includes(attempt.last_attempt_status)) {
       // 'pending' is NONTERMINAL: it cools only while a lookup is
       // genuinely in flight — the same PENDING_ACTIVE_MINUTES bound the
