@@ -28,9 +28,11 @@ let holdRead;
 let readResult;
 let lookupGate;
 let lookupFails;
+let readerCount;
 
 class FixtureFileReader {
   readAsDataURL() {
+    readerCount += 1;
     this.result = readResult || 'data:image/jpeg;base64,cGhvdG8=';
     const done = () => this.onload({ target: { result: this.result } });
     if (holdRead) holdRead.then(done); else done();
@@ -50,6 +52,7 @@ beforeEach(async () => {
   readResult = null;
   lookupGate = null;
   lookupFails = false;
+  readerCount = 0;
   localStorage.clear();
   localStorage.setItem('waves_admin_token', 'test-token');
   localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
@@ -244,10 +247,10 @@ describe('gate on', () => {
     fireEvent.change(input, { target: { files: ['a1', 'a2', 'a3', 'a4'].map(file) } });
     fireEvent.change(input, { target: { files: ['b1', 'b2', 'b3'].map(file) } });
     release();
-    await screen.findByText(/b3\.jpg \(4\.5 MB\) was not added: one visit can carry 30\.0 MB of photos and these already total 27\.0 MB/);
+    // Whichever read finishes last is the one that no longer fits; it is named either way.
+    await screen.findByText(/[ab]\d\.jpg \(4\.5 MB\) was not added: one visit can carry 30\.0 MB of photos and these already total 27\.0 MB/);
     expect(screen.getByText('6/8')).toBeTruthy();
-    // The first read's four and the second read's first two fit (27.0 MB); only the third of the second read does not.
-    expect(screen.queryByText(/b1\.jpg/)).toBeNull();
+    // Six of the seven fit (27.0 MB); exactly one is told it did not.
   }, 60000);
 
   it('a problem-area pick of two files tags both photos', async () => {
@@ -260,6 +263,59 @@ describe('gate on', () => {
     expect(screen.getByLabelText('Slot for photo 1').value).toBe('trouble');
     expect(screen.getByLabelText('Slot for photo 2').value).toBe('trouble');
     expect(screen.getByRole('button', { name: 'Add photo for Problem area' }).disabled).toBe(true);
+  });
+
+  it('bounds a big pick before decoding: 20 files with 3 slots left decode only 3 and the rest are named', async () => {
+    mount();
+    await addFiles(['h1', 'h2', 'h3', 'h4', 'h5']);
+    await screen.findByLabelText('Slot for photo 5');
+    readerCount = 0;
+    await addFiles(Array.from({ length: 20 }, (_, i) => `g${i + 1}`));
+    await screen.findByLabelText('Slot for photo 8');
+    expect(readerCount).toBe(3);
+    expect(screen.getByText('8/8')).toBeTruthy();
+    expect(screen.getByText(/g4\.jpg was not read: a visit holds up to 8 photos and 5 are added or being read\. Remove one first\./)).toBeTruthy();
+    expect(screen.getByText(/g20\.jpg was not read/)).toBeTruthy();
+  });
+
+  it('two quick picks in a row never decode more files than the visit can hold', async () => {
+    let release;
+    holdRead = new Promise((resolve) => { release = resolve; });
+    mount();
+    await addFiles(['a1', 'a2', 'a3', 'a4', 'a5', 'a6']);
+    await addFiles(['b1', 'b2', 'b3', 'b4', 'b5', 'b6']);
+    release();
+    await screen.findByLabelText('Slot for photo 8');
+    expect(readerCount).toBe(8);
+    expect(screen.getByText(/b3\.jpg was not read/)).toBeTruthy();
+    expect(screen.queryByLabelText('Slot for photo 9')).toBeNull();
+  });
+
+  it("a shot's Add button reads only as many files as that shot can still tag", async () => {
+    mount();
+    const input = await screen.findByLabelText('Add turf photos');
+    vi.spyOn(input, 'click').mockImplementation(() => {});
+    fireEvent.click(screen.getByRole('button', { name: 'Add photo for Back overview' }));
+    await addFiles(['x1', 'x2', 'x3']);
+    await screen.findByLabelText('Slot for photo 1');
+    expect(readerCount).toBe(1);
+    expect(screen.getByText(/x2\.jpg was not read: Back overview takes one photo and has room for 1\./)).toBeTruthy();
+    expect(screen.queryByLabelText('Slot for photo 2')).toBeNull();
+  });
+
+  it('the "checking" status and the shot list text render at 14px or larger', async () => {
+    lookupGate = new Promise(() => {});
+    mount();
+    const pending = await screen.findByTestId('lawn-photo-mode-pending');
+    expect(parseFloat(pending.style.fontSize)).toBeGreaterThanOrEqual(14);
+  });
+
+  it('the shot rows, the hint and the Add buttons render at 14px or larger', async () => {
+    mount();
+    const row = await screen.findByTestId('lawn-shot-front');
+    for (const el of [row.querySelector('div > div'), row.querySelector('div > div + div'), screen.getByTestId('lawn-shot-list-hint'), screen.getByRole('button', { name: 'Add photo for Front overview' })]) {
+      expect(parseFloat(el.style.fontSize)).toBeGreaterThanOrEqual(14);
+    }
   });
 
   it('holds a shot while its photo is still being read, so a second tap cannot queue a duplicate', async () => {

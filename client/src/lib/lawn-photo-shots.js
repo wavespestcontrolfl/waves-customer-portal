@@ -71,6 +71,29 @@ export function decodedBytes(dataUrl) {
   return Math.floor((base64.length * 3) / 4) - padding;
 }
 
+// How many of the picked files to decode at all (shot list on). Decoding is the
+// expensive part (FileReader plus a canvas resize per photo), so the batch is cut
+// to what could still be kept BEFORE any file is read: the visit's remaining room
+// (cap minus photos held minus reads already in flight) and, for a shot's own
+// Add button, that shot's remaining room. addPhotos still makes the final call
+// on what is kept; this only avoids work on files that cannot be.
+//
+//   planFileReads(files, { held, inFlight, inFlightForShot, shot }) -> { toRead, skipped }
+//
+// `skipped` names each file left unread and why, in describeAddResult's style.
+export function planFileReads(files, { held = [], inFlight = 0, inFlightForShot = 0, shot = null } = {}) {
+  const capacity = Math.max(0, SHOT_CAP - held.length - inFlight);
+  const shotRoom = shot ? Math.max(0, maxFor(shot) - held.filter((photo) => photo.zone === shot).length - inFlightForShot) : Infinity;
+  const allowed = Math.min(capacity, shotRoom);
+  const reason = shotRoom < capacity
+    ? `was not read: ${shotLabel(shot)} takes ${maxFor(shot) === 1 ? "one photo" : `${maxFor(shot)} photos`} and has room for ${shotRoom}. Use "Add turf photos" for the rest.`
+    : `was not read: a visit holds up to ${SHOT_CAP} photos and ${SHOT_CAP - capacity} are added or being read. Remove one first.`;
+  return {
+    toRead: files.slice(0, allowed),
+    skipped: files.slice(allowed).map((file) => ({ name: file.name || "A photo", reason })),
+  };
+}
+
 const LEGACY_CAP = 3;
 
 // THE one decision for adding freshly read photos to the visit's list.

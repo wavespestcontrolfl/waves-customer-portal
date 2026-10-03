@@ -3,7 +3,7 @@
 // admin drawer builds on.
 import { describe, expect, it } from "vitest";
 import DEFINITION from "../../../shared/lawn-photo-shots.json";
-import { MAX_PHOTO_BYTES, MAX_TOTAL_BYTES, SHOTS, SHOT_CAP, SHOT_MINIMUM, addPhotos, assignShotZone, decodedBytes, describeAddResult, missingMinimumSlots, shotIsFull, shotLabel, shotListHint } from "./lawn-photo-shots";
+import { MAX_PHOTO_BYTES, MAX_TOTAL_BYTES, SHOTS, SHOT_CAP, SHOT_MINIMUM, addPhotos, assignShotZone, decodedBytes, describeAddResult, planFileReads, missingMinimumSlots, shotIsFull, shotLabel, shotListHint } from "./lawn-photo-shots";
 
 const photos = (...zones) => zones.map((zone, i) => ({ name: `p${i}`, zone }));
 const zonesOf = (list) => list.map((p) => p.zone);
@@ -197,5 +197,35 @@ describe("addPhotos, shot list on", () => {
     const snapshot = JSON.stringify(held);
     addPhotos(held, [small("n")], { ...on, shot: "back" });
     expect(JSON.stringify(held)).toBe(snapshot);
+  });
+});
+
+describe("planFileReads (bound the batch before decoding)", () => {
+  const files = (n) => Array.from({ length: n }, (_, i) => ({ name: `f${i + 1}.jpg` }));
+
+  it("reads only what the visit can still hold and names the rest", () => {
+    const plan = planFileReads(files(20), { held: photos(null, null, null, null, null) });
+    expect(plan.toRead.map((f) => f.name)).toEqual(["f1.jpg", "f2.jpg", "f3.jpg"]);
+    expect(plan.skipped).toHaveLength(17);
+    expect(describeAddResult({ rejected: plan.skipped.slice(0, 1) })).toBe("f4.jpg was not read: a visit holds up to 8 photos and 5 are added or being read. Remove one first.");
+  });
+
+  it("counts reads already in flight, so two quick picks share the room", () => {
+    expect(planFileReads(files(6), { inFlight: 6 }).toRead).toHaveLength(2);
+    expect(planFileReads(files(6), { held: photos(null, null), inFlight: 6 }).toRead).toHaveLength(0);
+  });
+
+  it("reads everything when there is room", () => {
+    expect(planFileReads(files(3), {})).toEqual({ toRead: files(3), skipped: [] });
+    expect(planFileReads([], {})).toEqual({ toRead: [], skipped: [] });
+  });
+
+  it("for a shot's own Add, is limited to that shot's remaining room, counting in-flight reads", () => {
+    expect(planFileReads(files(3), { shot: "close_up" }).toRead).toHaveLength(1);
+    expect(planFileReads(files(3), { shot: "close_up", held: photos("close_up") }).toRead).toHaveLength(0);
+    expect(planFileReads(files(3), { shot: "trouble" }).toRead).toHaveLength(2);
+    expect(planFileReads(files(3), { shot: "trouble", inFlightForShot: 1 }).toRead).toHaveLength(1);
+    const plan = planFileReads(files(3), { shot: "back" });
+    expect(describeAddResult({ rejected: plan.skipped.slice(0, 1) })).toBe('f2.jpg was not read: Back overview takes one photo and has room for 1. Use "Add turf photos" for the rest.');
   });
 });

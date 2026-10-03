@@ -159,7 +159,7 @@ import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
 import { shouldResetCompletionIdempotencyKey } from "../../lib/completion-idempotency";
 import { rankTechTips, techTipSubtext, techTipSentLabel } from "../../lib/tech-tips";
 import { LAWN_TARGET_SUGGESTIONS, NUTRITION_TARGET_SUGGESTIONS, productControlsTargets, productTargetsNutrition } from "../../lib/lawn-targets";
-import { SHOTS as LAWN_SHOTS, SHOT_CAP as LAWN_SHOT_CAP, addPhotos as addLawnPhotos, assignShotZone, describeAddResult, shotIsFull, shotListHint } from "../../lib/lawn-photo-shots";
+import { SHOTS as LAWN_SHOTS, SHOT_CAP as LAWN_SHOT_CAP, addPhotos as addLawnPhotos, assignShotZone, describeAddResult, planFileReads, shotIsFull, shotListHint } from "../../lib/lawn-photo-shots";
 // Round 14 P2 (:2494): sentinel <option> value for the row's own stored appointment discount.
 const STORED_APPOINTMENT_DISCOUNT_OPTION = "__stored_appointment_discount";
 const { TERMITE_PERIMETER_METHODS } = termiteTreatmentMethods;
@@ -10164,6 +10164,9 @@ function LawnAssessmentCompletionBlock({
   // Shots whose photo is still being read: held so a second tap on the same
   // one-photo shot cannot queue a duplicate while the first decode is in flight.
   const [readingShots, setReadingShots] = useState([]);
+  // Photos being decoded right now (total, and per tapped shot): counted so two
+  // quick picks cannot each decode a full batch.
+  const inFlightRef = useRef({ total: 0, byShot: {} });
   const photoCap = shotList ? LAWN_SHOT_CAP : 3;
   const [result, setResult] = useState(null);
   const [visitReview, setVisitReview] = useState(null);
@@ -10249,18 +10252,42 @@ function LawnAssessmentCompletionBlock({
     // the shot list is on, so this is null (every photo untagged) off.
     const pendingZone = pendingShotRef.current;
     pendingShotRef.current = null;
-    // Shot list off keeps its original pre-read cut at the 3-photo cap; on, every
-    // picked file is read and addLawnPhotos decides (and names what it leaves out).
-    const picked = shotList ? files : files.slice(0, Math.max(0, 3 - photosRef.current.length));
-    if (!files.length || picked.length === 0) return;
-    setError("");
+    // Shot list off keeps its original pre-read cut at the 3-photo cap and its
+    // all-at-once decode. On, the batch is bounded BEFORE any file is decoded
+    // (room left after photos held and reads in flight; a shot's own room for its
+    // Add button), the rest are named, and the kept files decode one at a time.
+    let picked;
+    let skipped = [];
+    if (shotList) {
+      ({ toRead: picked, skipped } = planFileReads(files, {
+        held: photosRef.current,
+        inFlight: inFlightRef.current.total,
+        inFlightForShot: pendingZone ? (inFlightRef.current.byShot[pendingZone] || 0) : 0,
+        shot: pendingZone,
+      }));
+    } else {
+      picked = files.slice(0, Math.max(0, 3 - photosRef.current.length));
+    }
+    if (!files.length || (picked.length === 0 && skipped.length === 0)) return;
+    setError(describeAddResult({ rejected: skipped }));
+    if (picked.length === 0) { if (fileRef.current) fileRef.current.value = ""; return; }
     if (pendingZone) setReadingShots((prev) => [...prev, pendingZone]);
+    if (shotList) {
+      inFlightRef.current.total += picked.length;
+      if (pendingZone) inFlightRef.current.byShot[pendingZone] = (inFlightRef.current.byShot[pendingZone] || 0) + picked.length;
+    }
     try {
-      const nextPhotos = await Promise.all(picked.map(readLawnAssessmentPhoto));
+      let nextPhotos;
+      if (shotList) {
+        nextPhotos = [];
+        for (const file of picked) nextPhotos.push(await readLawnAssessmentPhoto(file));
+      } else {
+        nextPhotos = await Promise.all(picked.map(readLawnAssessmentPhoto));
+      }
       // One pure decision over the list as it is right now: photo cap, size
       // limits, per-shot room and tagging. Nothing is pre-checked outside it.
       const outcome = addLawnPhotos(photosRef.current, nextPhotos, { shot: pendingZone, shotList });
-      const message = describeAddResult(outcome);
+      const message = describeAddResult({ rejected: [...skipped, ...outcome.rejected], untagged: outcome.untagged });
       if (message) setError(message);
       if (outcome.photos.length === photosRef.current.length) return;
       setPhotos(outcome.photos);
@@ -10272,6 +10299,10 @@ function LawnAssessmentCompletionBlock({
     } catch (err) {
       setError(err.message || "Photo read failed");
     } finally {
+      if (shotList) {
+        inFlightRef.current.total -= picked.length;
+        if (pendingZone) inFlightRef.current.byShot[pendingZone] -= picked.length;
+      }
       if (pendingZone) setReadingShots((prev) => { const at = prev.indexOf(pendingZone); return at < 0 ? prev : prev.filter((_, i) => i !== at); });
       if (fileRef.current) fileRef.current.value = "";
     }
@@ -10467,7 +10498,7 @@ function LawnAssessmentCompletionBlock({
               Add turf photos
             </button>
             <span style={{ fontSize: 12, color: D.muted }}>{photos.length}/{photoCap}</span>
-            {!modeKnown && <span role="status" data-testid="lawn-photo-mode-pending" style={{ fontSize: 12, color: D.muted }}>Checking photo options…</span>}
+            {!modeKnown && <span role="status" data-testid="lawn-photo-mode-pending" style={{ fontSize: 14, color: D.muted }}>Checking photo options…</span>}
           </>
         )}
             {showGaugeReading && (
