@@ -887,6 +887,17 @@ describe('applyDueRateChanges — per_application', () => {
     const out = await runApply(book);
     expect(out.holds.map((h) => h.reason)).toEqual([reason]);
   });
+  test('a text-only notice whose sid Twilio reports undelivered is held delivery_revoked, never applied (the status callback\'s sms_log bookkeeping is the durable evidence)', async () => {
+    const book = sentBook({ notice: { email_sent: false, sms_sent: true, metadata: { ...fixture.noticeRow(1).metadata, sms_sid: 'SM1' } } });
+    book.sms_log = [{ twilio_sid: 'SM1', customer_id: CUSTOMER(1), status: 'undelivered' }];
+    const out = await runApply(book);
+    expect(out.holds.map((h) => h.reason)).toEqual(['delivery_revoked']);
+    expect(visits()[1].estimated_price).toBe('117.00');
+    // delivered (or no verdict yet): applied as usual
+    const ok = sentBook({ notice: { email_sent: false, sms_sent: true, metadata: { ...fixture.noticeRow(1).metadata, sms_sid: 'SM1' } } });
+    ok.sms_log = [{ twilio_sid: 'SM1', customer_id: CUSTOMER(1), status: 'delivered' }];
+    expect((await runApply(ok)).applied).toBe(1);
+  });
   test('a visit keeping only the audit LINK of a voided/refunded prepay (no live coverage, no prepaid money) is not prepaid — the reprice applies', async () => {
     const book = sentBook();
     book.annual_prepay_terms = [{ id: TERM(1), customer_id: CUSTOMER(1), status: 'refunded', prepay_amount: '400.00', coverage_visit_count: 4, coverage_service_type: 'Lawn Care Program', term_start: '2026-06-01', term_end: '2027-05-31' }];

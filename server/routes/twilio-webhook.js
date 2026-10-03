@@ -1645,6 +1645,7 @@ router.post('/sms', async (req, res) => {
 
 // POST /api/webhooks/twilio/status — delivery status callback
 router.post('/status', async (req, res) => {
+  let rateReviewReconcileFailed = false;
   try {
     const { MessageSid, MessageStatus, ErrorCode, ErrorMessage, From, To } = req.body;
     if (MessageSid && MessageStatus) {
@@ -1675,8 +1676,14 @@ router.post('/status', async (req, res) => {
         // A rate review letter's text pointer that failed: reconcile its notice
         // (the same undelivered handling as a bounced email). No-op for any
         // other message; best-effort, off the response path.
-        void require('../services/rate-review-comms').handleSmsDeliveryFailure({ sid: MessageSid, status: MessageStatus, errorCode: ErrorCode })
-          .catch((e) => logger.error(`[twilio-status] rate review reconciliation failed: ${e.message}`));
+        // Awaited and answered non-2xx on failure: a lost reconciliation would leave
+        // an undelivered notice looking delivered (the apply also re-reads sms_log).
+        try {
+          await require('../services/rate-review-comms').handleSmsDeliveryFailure({ sid: MessageSid, status: MessageStatus, errorCode: ErrorCode }, { strict: true });
+        } catch (e) {
+          rateReviewReconcileFailed = true;
+          logger.error(`[twilio-status] rate review reconciliation failed: ${e.message}`);
+        }
 
         // Error 21610 — the RECIPIENT's carrier-level opt-out verdict for a
         // STOP we never saw inbound (sent to a different number on the
@@ -2078,7 +2085,7 @@ router.post('/status', async (req, res) => {
       link: '/admin/communications',
     });
   }
-  res.sendStatus(200);
+  res.sendStatus(rateReviewReconcileFailed ? 500 : 200);
 });
 
 // Gate check FIRST (codex #3413 r55): with GATE_CONTACT_CORRECTION off —

@@ -345,8 +345,11 @@ async function linesGoneFor(dbh, notices, { snapshots, today }) {
   }
   // Delivered on paper but every channel failed afterwards (see recordChannelFailure):
   // the apply names it delivery_revoked and changes nothing.
+  const { smsDeliveryFailure } = require('./rate-review-apply')._private;
   for (const n of notices) {
-    if (n.sent_at && parseJson(n.metadata, {}).delivery_revoked) gone.set(String(n.id), 'delivery_revoked');
+    if (!n.sent_at) continue;
+    if (parseJson(n.metadata, {}).delivery_revoked) gone.set(String(n.id), 'delivery_revoked');
+    else if (await smsDeliveryFailure(dbh, n).catch(() => null)) gone.set(String(n.id), 'delivery_revoked');
   }
   for (const n of notices.filter((x) => x.billing_lane === 'per_application' && !gone.has(String(x.id)))) {
     try {
@@ -950,7 +953,15 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
       if (!live) { orphaned.push(l); continue; }
       // A re-send after a bounce: the earlier revocation is history, and the old
       // provider ids must not match this send's events.
-      const { pending_letter: _p, send_hold: _h, delivery_revoked: priorRevoked, channel_failures: priorFailures, email_message_id: _e, sms_sid: _s, early_failures: early = {}, ...meta } = parseJson(live.metadata, {});
+      const { pending_letter: _p, send_hold: _h, delivery_revoked: priorRevoked, channel_failures: priorFailures, email_message_id: _e, sms_sid: _s, early_failures: earlyRecorded = {}, ...meta } = parseJson(live.metadata, {});
+      const early = { ...earlyRecorded };
+      // Twilio's verdict may already be in sms_log (its callback beat this stamp):
+      // that is an early failure of the text too.
+      if (sms.sent && sms.sid && !early.sms) {
+        const smsLog = await trx('sms_log').where({ twilio_sid: String(sms.sid) }).first('status');
+        const failed = smsLog && ['failed', 'undelivered', 'blocked', 'canceled'].includes(String(smsLog.status).toLowerCase());
+        if (failed) early.sms = { event: String(smsLog.status).toLowerCase(), channel: 'sms', at: sentAt.toISOString(), reason: 'status callback before the stamp' };
+      }
       const emailOk = !!email.sent && !early.email;
       const smsOk = !!sms.sent && !early.sms;
       const base = { ...meta, ...(priorRevoked ? { delivery_revocations: [...(meta.delivery_revocations || []), priorRevoked] } : {}), ...dispatchMeta };
@@ -1244,17 +1255,16 @@ const isRateReviewMessage = (m) => !!m && m.template_key === TEMPLATE_KEY;
 const isEmailUndelivered = (ev) => EMAIL_UNDELIVERED_EVENTS.has(String(ev?.event || '').trim().toLowerCase());
 
 // Notices of this customer whose metadata names the provider id (set at dispatch).
-async function noticesForDispatch(dbh, customerId, key, value, { claimKey = null, anySending = false } = {}) {
+async function noticesForDispatch(dbh, customerId, key, value, { claimKey = null } = {}) {
   if (!customerId || !value) return [];
   const rows = await dbh('price_change_notices').where({ customer_id: customerId }).whereNotNull('rate_review_row_id');
   return rows.filter((n) => {
     const meta = parseJson(n.metadata, {});
-    if (String(meta[key] || '') === String(value)) return true;
-    // Still 'sending' (the ids are written at the stamp): the email by the claim
-    // key in its idempotency key; a text by the customer's in-flight letter.
-    if (String(n.status) !== 'sending') return false;
-    if (claimKey && meta.pending_letter && String(meta.pending_letter.key) === String(claimKey)) return true;
-    return anySending;
+    // A send in flight ('sending') belongs to its CURRENT attempt only: matched by
+    // that attempt's claim key — never by a provider id left from an earlier
+    // attempt, which would charge a delayed old failure to the new letter.
+    if (String(n.status) === 'sending') return !!claimKey && !!meta.pending_letter && String(meta.pending_letter.key) === String(claimKey);
+    return String(meta[key] || '') === String(value);
   });
 }
 
@@ -1379,15 +1389,14 @@ async function handleEmailDeliveryEvent(trx, emailMessage, ev) {
 
 // Twilio's status callback for a failed/undelivered text (routes/twilio-webhook.js):
 // the same reconciliation for the text pointer. Best-effort; never throws.
-async function handleSmsDeliveryFailure({ sid, status, errorCode }, { dbh = db } = {}) {
+async function handleSmsDeliveryFailure({ sid, status, errorCode }, { dbh = db, strict = false } = {}) {
   try {
     if (!sid) return [];
     const log = await dbh('sms_log').where({ twilio_sid: sid }).first();
     if (!log || !log.customer_id) return [];
     const alerts = [];
     await dbh.transaction(async (trx) => {
-      const pointer = String(log.message_type || '') === 'price_change_notice';
-      for (const notice of await noticesForDispatch(trx, log.customer_id, 'sms_sid', sid, { anySending: pointer })) {
+      for (const notice of await noticesForDispatch(trx, log.customer_id, 'sms_sid', sid)) {
         const alert = await recordChannelFailure(trx, notice, 'sms', { event: String(status || 'failed'), at: new Date(), reason: errorCode ? `error ${errorCode}` : '' });
         if (alert) alerts.push(alert);
       }
@@ -1396,6 +1405,7 @@ async function handleSmsDeliveryFailure({ sid, status, errorCode }, { dbh = db }
     return alerts;
   } catch (err) {
     logger.warn(`[rate-review-comms] sms failure reconciliation failed for ${sid}: ${err.message}`);
+    if (strict) throw err; // the status webhook answers non-2xx so the callback is not silently lost
     return [];
   }
 }

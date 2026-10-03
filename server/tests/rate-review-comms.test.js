@@ -1011,6 +1011,48 @@ describe('customer surfaces', () => {
       expect(meta().channel_failures.email).toMatchObject({ event: 'bounce' });
     });
 
+    test('a delayed failure from an EARLIER attempt is not charged to the re-send in flight (current attempt only)', async () => {
+      await sendEmailOnly();
+      const oldKey = `rate_review:${BATCH_KEY}:${CUSTOMER(1)}:oldattempt:abc`;
+      await comms.handleEmailDeliveryEvent(mockDb, message(), bounce());
+      emailLeg.mockResolvedValue({ sent: true, attempted: true, messageId: 'em-2' });
+      smsLeg.mockImplementation(async () => {
+        // the old message's second event (same id) arrives mid re-send, claim key of the old attempt
+        const stale = await comms.handleEmailDeliveryEvent(mockDb, message({ id: 'em-1', idempotency_key: oldKey }), bounce({ event: 'dropped' }));
+        expect(stale).toEqual([]);
+        expect(meta().early_failures).toBeUndefined();
+        return { sent: false, attempted: false };
+      });
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      expect(notices()[0]).toMatchObject({ status: 'sent', email_sent: true });
+    });
+
+    test('Twilio\'s verdict already in sms_log when the stamp runs counts as an early text failure: a text-only letter is not stamped delivered', async () => {
+      mockDb.reset(book({ customers: [customer(1, { email: null })] }));
+      mockDb.store.sms_log = [{ twilio_sid: 'SM1', customer_id: CUSTOMER(1), status: 'undelivered', message_type: 'price_change_notice' }];
+      emailLeg.mockResolvedValue({ sent: false, attempted: false });
+      smsLeg.mockResolvedValue({ sent: true, attempted: true, sid: 'SM1' });
+      expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).toMatchObject({ sent: 0, failed: 1 });
+      expect(notices()[0]).toMatchObject({ status: 'draft', sent_at: null, sms_sent: false });
+      expect(meta().delivery_revoked).toMatchObject({ channel: 'sms', event: 'undelivered' });
+    });
+
+    test('portal: a text-only notice whose sid Twilio reports failed is not upcoming', async () => {
+      mockDb.reset(book({ notices: [draft(1, { status: 'sent', sent_at: NOW, email_sent: false, sms_sent: true, metadata: { source: 'rate_review', batch_key: BATCH_KEY, series_root_id: fixture.VISIT(100), sms_sid: 'SM9' } })] }));
+      mockDb.store.sms_log = [{ twilio_sid: 'SM9', customer_id: CUSTOMER(1), status: 'failed' }];
+      expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toEqual([]);
+      mockDb.store.sms_log[0].status = 'delivered';
+      expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toHaveLength(1);
+    });
+
+    test('a failed text reconciliation is re-thrown in strict mode (the status webhook then answers non-2xx) and swallowed otherwise', async () => {
+      mockDb.reset(book());
+      mockDb.store.sms_log = [{ twilio_sid: 'SM1', customer_id: CUSTOMER(1) }];
+      const dbh = Object.assign((t) => { if (t === 'sms_log') throw new Error('db down'); return mockDb(t); }, mockDb);
+      await expect(comms.handleSmsDeliveryFailure({ sid: 'SM1', status: 'failed' }, { dbh, strict: true })).rejects.toThrow('db down');
+      expect(await comms.handleSmsDeliveryFailure({ sid: 'SM1', status: 'failed' }, { dbh })).toEqual([]);
+    });
+
     test('an authorized re-send after a bounce is a NEW attempt: the email idempotency key changes, so the library does not dedupe it against the bounced message', async () => {
       await sendEmailOnly();
       const first = emailLeg.mock.calls[0][0].idempotencyKeyBase;

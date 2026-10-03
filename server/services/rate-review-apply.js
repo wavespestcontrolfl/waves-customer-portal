@@ -750,6 +750,19 @@ function wasDelivered(notice) {
     && !parseMetadata(notice.metadata).delivery_revoked);
 }
 
+// Twilio's own verdict on the text pointer, read from sms_log (the status
+// callback's bookkeeping lands there even when the notice reconciliation did
+// not): a notice delivered ONLY by text whose sid ended failed / undelivered /
+// blocked / canceled was never delivered. Returns the status, else null.
+const SMS_FAILED_STATUSES = ['failed', 'undelivered', 'blocked', 'canceled'];
+async function smsDeliveryFailure(dbh, notice) {
+  if (!notice || notice.email_sent === true || notice.sms_sent !== true) return null;
+  const sid = parseMetadata(notice.metadata).sms_sid;
+  if (!sid) return null;
+  const log = await dbh('sms_log').where({ twilio_sid: sid }).first('status');
+  return log && SMS_FAILED_STATUSES.includes(String(log.status).toLowerCase()) ? String(log.status).toLowerCase() : null;
+}
+
 async function loadDueNotices(dbh, asOfDay) {
   return dbh('price_change_notices')
     .whereNotNull('rate_review_row_id')
@@ -1264,6 +1277,8 @@ async function applyNotice(noticeRow, { now = new Date(), dbh = db } = {}) {
       // Told, then the only channel failed: named, never silently skipped.
       if (parseMetadata(notice.metadata).delivery_revoked) throw hold('delivery_revoked', { event: parseMetadata(notice.metadata).delivery_revoked.event });
       if (!wasDelivered(notice)) { outcomeBox.skipped = true; return; }
+      const smsFailed = await smsDeliveryFailure(trx, notice);
+      if (smsFailed) throw hold('delivery_revoked', { event: smsFailed, channel: 'sms', source: 'sms_log' });
       // A merge undo can repoint the notice after the due scan: the locks
       // above are the scanned owner's, so never write under them — the next
       // run reads the live owner.
@@ -1669,7 +1684,7 @@ module.exports = {
   noticedRenewalAmountError,
   recordNoticedAmountOverride,
   _private: {
-    laneForRow, effectiveDateFor, nextBillingDayOnOrAfter, loadFamilySlices, sumSlices, cents, addDaysYmd, daysBetweenYmd, flatVisitRefusal, perApplicationStructuralRefusal, perApplicationTemplateRefusal, monthlyRefusal, prepayChecks, planHoldCovers, holdFromGuard, HoldError,
+    laneForRow, effectiveDateFor, nextBillingDayOnOrAfter, loadFamilySlices, sumSlices, cents, addDaysYmd, daysBetweenYmd, flatVisitRefusal, perApplicationStructuralRefusal, perApplicationTemplateRefusal, monthlyRefusal, prepayChecks, planHoldCovers, smsDeliveryFailure, holdFromGuard, HoldError,
     loadLineOpenVisits, loadAccountPlanLineCount, loadCustomerOpenVisits, consumesPerApplicationFee, feeScopeRefusal, resolvePrepayTerm, successorTermExists, tryAnnualPrepayLock, resolveLiveLane, applyNotice, loadDueNotices, wasDelivered, cadenceLabelFor, termRenewalNoticed, moveMonthlySlice, scheduleRow,
   },
 };
