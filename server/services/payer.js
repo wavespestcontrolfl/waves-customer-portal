@@ -204,8 +204,11 @@ async function updatePayer(id, body) {
       // the two writers deadlock. The set is re-checked under the payer lock
       // below; a reference that appears after this point refuses rather than
       // proceeding on a partial prelock.
+      // ARCHIVED customers (deleted_at) are included everywhere in this pipeline - the prelock, the in-flight
+      // fence, the session/checkout release, the withdrawal and the re-judge below all read this same customer
+      // set: the withdrawal acts on them (it scans by payer), so their issued checkout must be cancelled too.
       const referencingCustomerIds = [...new Set([
-        ...await trx('customers').where({ payer_id: pid }).whereNull('deleted_at').pluck('id'),
+        ...await trx('customers').where({ payer_id: pid }).pluck('id'),
         ...await trx('scheduled_services').where({ payer_id: pid }).whereNotNull('customer_id').pluck('customer_id'),
       ].map(String))].sort();
       let prelockedVisitIds = [];
@@ -246,7 +249,7 @@ async function updatePayer(id, body) {
       // A grown set refuses rather than proceeding on a partial prelock; the
       // caller retries and the new reference is prelocked from the start.
       const referencesUnderLock = [...new Set([
-        ...await trx('customers').where({ payer_id: pid }).whereNull('deleted_at').pluck('id'),
+        ...await trx('customers').where({ payer_id: pid }).pluck('id'),
         ...await trx('scheduled_services').where({ payer_id: pid }).whereNotNull('customer_id').pluck('customer_id'),
       ].map(String))].sort();
       if (dbUpdates.active === true && current.active !== true
@@ -277,7 +280,7 @@ async function updatePayer(id, body) {
       // the activation (its settlement never re-resolves ownership).
       if (activating) {
         const referencing = [...new Set([
-          ...await trx('customers').where({ payer_id: pid }).whereNull('deleted_at').pluck('id'),
+          ...await trx('customers').where({ payer_id: pid }).pluck('id'),
           ...await trx('scheduled_services').where({ payer_id: pid }).whereNotNull('customer_id').pluck('customer_id'),
         ].map(String))];
         const PayCombined = require('./pay-combined');
@@ -310,7 +313,7 @@ async function updatePayer(id, body) {
         // filtering on this payer would skip exactly the stamps that name
         // another.
         for (const customerId of [...new Set([
-          ...await trx('customers').where({ payer_id: pid }).whereNull('deleted_at').pluck('id'),
+          ...await trx('customers').where({ payer_id: pid }).pluck('id'),
           ...await trx('scheduled_services').where({ payer_id: pid }).whereNotNull('customer_id').pluck('customer_id'),
         ].map(String))].sort()) {
           await Packets.reconcileWithdrawnPacketInvoices(trx, { customerId });

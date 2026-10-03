@@ -905,6 +905,19 @@ postgres('payer assignment withdraws visit-linked invoices with no packet', () =
     expect(cancel).not.toHaveBeenCalled();
   });
 
+  test('an ARCHIVED customer whose default payer is reactivated: the same customer set drives the release and the withdrawal, so the unconfirmed checkout is cancelled and the invoice withdrawn', async () => {
+    const Payers = require('../services/payer');
+    const payerId = await payer(false);
+    const f = await fixture({ link: 'record', customerPayerId: payerId, invoice: { stripe_payment_intent_id: 'pi_archived' } });
+    await mockPg('customers').where({ id: f.customerId }).update({ deleted_at: new Date() });
+    const cancel = jest.spyOn(StripeService, 'cancelPaymentIntent').mockResolvedValue({});
+    jest.spyOn(StripeService, 'retrievePaymentIntent').mockImplementation(async (id) => ({ id, status: 'requires_payment_method', metadata: {} }));
+    const result = await Payers.updatePayer(payerId, { active: true });
+    expect(result.payer).toMatchObject({ active: true });
+    expect(cancel).toHaveBeenCalledWith('pi_archived');
+    expect(await invoiceRow(f.invoiceId)).toMatchObject({ stripe_payment_intent_id: null, scheduled_send_error: `payer_billed:${payerId}` });
+  });
+
   test('an invoice with APPLIED CREDIT and an unconfirmed checkout activates: the stamp clears first, the credit is returned, and the Stripe cancel runs last', async () => {
     const Payers = require('../services/payer');
     const payerId = await payer(false);
