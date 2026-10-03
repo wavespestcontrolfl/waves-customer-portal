@@ -1511,7 +1511,11 @@ class RelayConversation {
       // Deduped per KIND (not per shape): two kinds sharing an identical key
       // set are still two distinct things a payload drift could break.
       this._eventShapesByKind.set(ev.kind, ev.shape);
-      logger.info(`[voice-relay] relay event shape seen callSid=${maskSid(this.callSid)} kind=${ev.kind} shape=${ev.shape}`);
+      // A speaker frame's value is a state label (on/off), never speech; a
+      // short all-letters value is logged so a direction-word miss shows up
+      // on the first call instead of as a missing metric.
+      const state = /_speaking_/.test(ev.kind) && typeof frame.value === 'string' && /^[a-z]{1,8}$/i.test(frame.value) ? ` value=${frame.value}` : '';
+      logger.info(`[voice-relay] relay event shape seen callSid=${maskSid(this.callSid)} kind=${ev.kind} shape=${ev.shape}${state}`);
     }
     const t = now();
     switch (ev.kind) {
