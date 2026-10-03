@@ -62,12 +62,13 @@ function makeRequest({
   service = REGULAR, rating = { allowed: true, firstVisit: false, scaleLabels: null }, report = REPORT, facts = FACTS,
   trace = { enabled: true, treatmentZone: null }, complete = [{ success: true }], photos = [], products = CATALOG,
   promises = { available: false, promises: [] }, blog = { available: false, posts: [] }, photoChange = () => ({}),
+  context = {},
 } = {}) {
   const calls = [];
   const completes = [...complete];
   const request = vi.fn(async (path, options) => {
     calls.push({ path, options, body: options?.body ? JSON.parse(options.body) : null });
-    if (path.split('?')[0].endsWith('/pest-recap/context')) return { ok: true, eligible: true, service, products: typeof products === 'function' ? products() : products };
+    if (path.split('?')[0].endsWith('/pest-recap/context')) return { ok: true, eligible: true, service, products: typeof products === 'function' ? products() : products, ...context };
     if (path.endsWith('/tech-rating-allowed')) return rating;
     if (path.endsWith('/tech-tips')) return { available: false };
     if (path.split('?')[0].endsWith('/promises')) return typeof promises === 'function' ? promises(path) : promises;
@@ -101,6 +102,30 @@ async function openSheet(request, service = SERVICE) {
   render(<FastCompleteSheet service={service} request={request} onClose={() => {}} onCompleted={() => {}} />);
   await screen.findByText(/Taurus SC 4 fl oz/);
 }
+
+// The schedule row a phone cached can predate GATE_FAST_COMPLETE_REPORT going
+// off; the live context says so (Codex replay of #5633, plain pest visits).
+describe('a report-flow sheet routed from a stale schedule row', () => {
+  test('the report flow went off since the schedule loaded: the visit is sent to the full form', async () => {
+    const request = makeRequest({ context: { reportFlow: false } });
+    render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} onCompleted={() => {}} />);
+    expect(await screen.findByText('This visit needs the full form.')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Generate AI report' })).toBeNull();
+  });
+
+  test.each([[{ reportFlow: true }], [{}]])('report flow live, or a server that predates the field (%j): the sheet opens', async (context) => {
+    await openSheet(makeRequest({ context }));
+    expect(screen.queryByText('This visit needs the full form.')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Generate AI report' })).toBeTruthy();
+  });
+
+  test('a re-service on the short form (not the report flow) is not held by it', async () => {
+    const request = makeRequest({ service: RESERVICE, context: { reportFlow: false } });
+    render(<FastCompleteSheet service={{ ...SERVICE, serviceType: 'Pest Control Re-Service', reportFlow: undefined }} request={request} onClose={() => {}} onCompleted={() => {}} />);
+    await screen.findByText(/Taurus SC/);
+    expect(screen.queryByText('This visit needs the full form.')).toBeNull();
+  });
+});
 
 async function generate({ note = NOTE, rating = '3, moderate' } = {}) {
   fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: note } });
