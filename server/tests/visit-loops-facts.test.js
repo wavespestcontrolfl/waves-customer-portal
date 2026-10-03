@@ -630,3 +630,98 @@ describe('weOwe and customerWaiting', () => {
     expect((await run(conn)).weOwe).toHaveLength(1);
   });
 });
+
+describe('missedVisit (a miss the office confirmed and has not settled)', () => {
+  // The reader's query returns only confirmed, unsettled rows; these fakes stand for that result.
+  const miss = (over = {}) => ({
+    id: 'rl-1', scheduled_service_id: 'visit-1', original_date: '2026-09-29', original_window: '09:00:00-10:30:00',
+    occurrence_service_type: 'Pest Control', ...over,
+  });
+  const run = (rows) => {
+    const conn = fakeConn({ reschedule_log: () => [].concat(rows), scheduled_services: () => [] });
+    return loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn }).then((out) => ({ out, conn }));
+  };
+
+  test('a confirmed, unsettled miss renders its FROZEN scope and the window as promised', async () => {
+    const { out } = await run([miss()]);
+    expect(out.missedVisit).toEqual({ logId: 'rl-1', visitId: 'visit-1', type: 'Pest Control', date: '2026-09-29', windowStart: '09:00:00', windowDisplay: '9:00 AM–11:00 AM' });
+  });
+
+  test('the read takes ONLY rows a person confirmed on the office card and nothing has settled (owner 2026-10-03)', async () => {
+    const { conn } = await run([]);
+    const q = conn.calls.find((c) => c.table === 'reschedule_log');
+    expect(hasOp(q.ops, 'where', (a) => a[0] === 'rl.reason_code' && a[1] === 'customer_noshow')).toBe(true);
+    // "This was a miss" was pressed ...
+    expect(hasOp(q.ops, 'whereNotNull', (a) => a[0] === 'rl.miss_confirmed_at')).toBe(true);
+    // ... and it is not rebooked, completed, cancelled, "Done" or "Not a miss"
+    expect(hasOp(q.ops, 'whereNull', (a) => a[0] === 'rl.resolved_at')).toBe(true);
+    // a dispatch "No-show" is the customer's absence: never an apology from us
+    expect(hasOp(q.ops, 'whereRaw', (a) => /miss_confirmed_by.*NOT LIKE 'dispatch%'/.test(a[0]))).toBe(true);
+    expect(hasOp(q.ops, 'whereRaw', (a) => /ss\.status.*<> 'no_show'/.test(a[0]))).toBe(true);
+    // a frozen scope (pre-migration rows are unknown, never the live row's values), the last 7 ET days
+    expect(hasOp(q.ops, 'whereNotNull', (a) => a[0] === 'rl.occurrence_service_type')).toBe(true);
+    expect(hasOp(q.ops, 'where', (a) => a[0] === 'rl.original_date' && a[1] === '>=' && a[2] === '2026-09-24')).toBe(true);
+    // no guessing: the read never looks at later bookings
+    expect(conn.calls.some((c) => c.table === 'services')).toBe(false);
+  });
+
+  test('nothing confirmed: no missed visit', async () => {
+    expect((await run([])).out.missedVisit).toBeNull();
+  });
+
+  test('a same-day miss stays hidden until the PROMISED window has passed, not the internal job block (Codex #5610 r9)', async () => {
+    // NOW is 12:00 ET on 2026-10-01; a 10:00 start promises 10:00-12:00, an 11:00 start 11:00-1:00
+    const today = (start) => miss({ original_date: '2026-10-01', original_window: `${start}-${start}` });
+    expect((await run([today('11:00:00')])).out.missedVisit).toBeNull();
+    expect((await run([today('09:00:00')])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
+    // an earlier day is never held back
+    expect((await run([miss({ original_window: '11:00:00-12:00:00' })])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
+  });
+
+  test('an overnight window stays hidden until it closes (Codex #5610 r11)', async () => {
+    const overnight = miss({ original_date: '2026-09-30', original_window: '23:00:00-23:30:00' });
+    // NOW 12:00 ET 10-01: a 23:00 start on 09-30 promised 23:00-01:00, closed by now
+    expect((await run([overnight])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
+    // at 00:30 ET 10-01 it is still inside its window
+    const early = await loadVisitLoops({ customerId: 'c1', now: new Date('2026-10-01T04:30:00Z'), deriveWindow, conn: fakeConn({ reschedule_log: () => [overnight], scheduled_services: () => [] }) });
+    expect(early.missedVisit).toBeNull();
+  });
+
+  test('a confirmed miss does not drop a passed-window fact that also carries ANOTHER overdue visit (Codex #5610 r12)', async () => {
+    const out = await loadVisitLoops({ customerId: 'c1', now: new Date('2026-10-01T17:00:00Z'), deriveWindow, conn: fakeConn({
+      reschedule_log: () => [miss({ original_date: '2026-10-01' })],
+      scheduled_services: (ops) => (isCandidateQuery(ops)
+        ? [todayRow({ id: 'v-late', window_start: '10:00:00', status: 'confirmed' }), todayRow({ status: 'confirmed' })] : []),
+    }) });
+    expect(out.missedVisit).toMatchObject({ visitId: 'visit-1' });
+    expect(out.pastWindow).toMatchObject({ passedKeys: ['visit-1@2026-10-01T09:00:00', 'v-late@2026-10-01T10:00:00'] });
+  });
+
+  test('the confirmed miss supersedes WINDOW PASSED for the SAME occurrence, not for another (Codex #5610 r4, r10)', async () => {
+    const todayMiss = miss({ original_date: '2026-10-01' });
+    const load = (rows, pastRow) => loadVisitLoops({
+      customerId: 'c1', upcomingServices: [todayEntry()], now: NOW, deriveWindow,
+      conn: fakeConn({
+        reschedule_log: () => rows,
+        scheduled_services: (ops, kind) => (isCandidateQuery(ops) ? [todayRow(pastRow)] : (kind === 'first' ? null : [])),
+      }),
+    });
+    const same = await load([todayMiss], { status: 'pending' });
+    expect(same.missedVisit).toMatchObject({ logId: 'rl-1', visitId: 'visit-1' });
+    expect(same.pastWindow).toBeNull();
+    // a passed window on ANOTHER visit stays
+    const other = await load([todayMiss], { id: 'visit-2', status: 'pending' });
+    expect(other.missedVisit).toMatchObject({ visitId: 'visit-1' });
+    expect(other.pastWindow).toMatchObject({ visitId: 'visit-2' });
+    // the SAME row reused for another slot keeps its own current fact
+    const reused = await load([miss({ original_date: '2026-10-01', original_window: '08:00:00-08:30:00' })], { status: 'pending' }); // the row now sits at 09:00
+    expect(reused.pastWindow).toMatchObject({ visitId: 'visit-1', windowStart: '09:00:00' });
+  });
+
+  test('the signature names the confirmed occurrence', async () => {
+    const { visitStatusSignature } = require('../services/visit-loops-facts');
+    const m = { logId: 'rl-1', type: 'Pest Control', date: '2026-09-29', windowStart: '09:00:00' };
+    expect(visitStatusSignature({ missedVisit: m })).toBe('missed:rl-1:Pest Control:2026-09-29@09:00:00');
+    expect(visitStatusSignature({ missedVisit: { ...m, logId: 'rl-2' } })).not.toBe(visitStatusSignature({ missedVisit: m }));
+  });
+});

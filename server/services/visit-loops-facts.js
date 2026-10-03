@@ -51,6 +51,7 @@ function emptyVisitLoops() {
   return {
     lateAlert: null,
     pastWindow: null,
+    missedVisit: null,
     weOwe: [],
     customerWaiting: [],
   };
@@ -395,6 +396,78 @@ async function findPastWindow({ conn, now, deriveWindow, customerId }) {
   };
 }
 
+// ── missed visit ────────────────────────────────────────────────────────────
+// A visit the office CONFIRMED as missed and has not settled (owner 2026-10-03,
+// missed-visit worklist rulings). The nightly check's reschedule_log customer_noshow
+// row only means "still open at 6 PM" — 64% of those visits were later cancelled and
+// 27% completed — so a row reaches a customer only when ALL of these hold:
+//   - a person pressed "This was a miss" on the office card (miss_confirmed_at, and
+//     not a dispatch "No-show": that is the CUSTOMER not being there, with its own
+//     notice and fee — never something we apologize for);
+//   - nothing has settled it since (resolved_at IS NULL: not rebooked, completed,
+//     cancelled, "Done" or "Not a miss" — services/not-closed-out.js);
+//   - the visit itself is not a no_show.
+// There is no guessing about later bookings: the office's recorded decision is the
+// only signal. What was missed and where come from the occurrence scope frozen at
+// log time; a row with no frozen scope is skipped, never read from the current row.
+const MISSED_LOOKBACK_DAYS = 7;
+// The fixed last line of the gate-on VISIT STATUS & OPEN LOOPS section once the
+// missed-visit read exists: tells the model what MISSED VISIT covers, and marks
+// the section's contract — a sealed-eval item frozen before this read lacks it, so
+// it never grades the '7_m' prompt.
+const MISSED_VISIT_SCOPE_LINE = `(MISSED VISIT lists a visit from the last ${MISSED_LOOKBACK_DAYS} days that our office confirmed we missed and has not yet rebooked.)`;
+// The logged original START ("09:00:00-10:30:00" → "09:00:00"); writers store the
+// internal job block as the end, so only the start is the promised window.
+function missedWindowStart(originalWindow) {
+  const start = /^\s*(\d{1,2}:\d{2})/.exec(String(originalWindow || ''));
+  if (!start) return null;
+  return start[1].length === 4 ? `0${start[1]}:00` : `${start[1]}:00`;
+}
+// The newest confirmed, unsettled miss in the lookback.
+async function loadMissedVisit({ conn, customerId, now, deriveWindow }) {
+  const today = etDateString(now);
+  // ET calendar days, not fixed 24h periods (a DST week would reach an 8th day back)
+  const since = etDateString(addETDays(now, -MISSED_LOOKBACK_DAYS));
+  const yesterday = etDateString(addETDays(now, -1));
+  const misses = (await conn('reschedule_log as rl')
+    .leftJoin('scheduled_services as ss', 'ss.id', 'rl.scheduled_service_id')
+    .where('rl.customer_id', customerId).where('rl.reason_code', 'customer_noshow')
+    .where('rl.original_date', '<=', today).where('rl.original_date', '>=', since)
+    .whereNotNull('rl.occurrence_service_type')
+    .whereNotNull('rl.miss_confirmed_at')
+    .whereNull('rl.resolved_at')
+    // a dispatch "No-show" is the customer's absence, whoever logged or confirmed it
+    .whereRaw("COALESCE(rl.miss_confirmed_by, '') NOT LIKE 'dispatch%'")
+    .whereRaw("COALESCE(ss.status, '') <> 'no_show'")
+    .orderBy('rl.original_date', 'desc').orderBy('rl.created_at', 'desc').orderBy('rl.id', 'asc')
+    .limit(5)
+    .select('rl.id', 'rl.scheduled_service_id', 'rl.original_date', 'rl.original_window', 'rl.occurrence_service_type')) || [];
+  for (const miss of misses) {
+    // The check logs once the INTERNAL job block ends; the customer's promised
+    // arrival window can still be open (a 5 PM start runs to 7 PM). A same-day miss
+    // stays hidden until that promised window has passed (Codex #5610 r9).
+    // A window crossing midnight (23:00-01:00) ends past 1440 and is still open
+    // early the NEXT ET day (Codex #5610 r11).
+    const startHms = missedWindowStart(miss.original_window);
+    const promisedEnd = customerWindowEndMinutes({ window_start: startHms });
+    const missedDay = calendarDay(miss.original_date);
+    if (promisedEnd != null && ((missedDay === today && nowEtMinutes(now) < promisedEnd)
+      || (missedDay === yesterday && promisedEnd > 1440 && nowEtMinutes(now) < promisedEnd - 1440))) continue;
+    return {
+      logId: String(miss.id),
+      // the logged occurrence's row: a WINDOW PASSED / DELAY line for the same row yields to this one
+      visitId: miss.scheduled_service_id ? String(miss.scheduled_service_id) : null,
+      type: miss.occurrence_service_type,
+      date: missedDay,
+      windowStart: startHms,
+      // the window that was MISSED, as promised: the logged start through the
+      // arrival-window formatter, never the row's current (possibly moved) window
+      windowDisplay: startHms ? windowLabel({ window_start: startHms }, deriveWindow) : null,
+    };
+  }
+  return null;
+}
+
 // ── open promises / asks ────────────────────────────────────────────────────
 // A short fingerprint of the commitment fields a draft can restate (kind, wording):
 // a staff edit that keeps the row open changes it.
@@ -530,15 +603,27 @@ async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = nul
 
   const pastWindow = await read('past window', null, () => findPastWindow(ctx));
 
-  const [lateAlert, commitments] = await Promise.all([
+  const [lateAlert, missedVisit, commitments] = await Promise.all([
     read('late alert', null, () => loadLateAlert(ctx)),
+    read('missed visit', null, () => loadMissedVisit(ctx)),
     strict && !withCommitments
       ? { weOwe: [], customerWaiting: [] }
       : read('commitments', { weOwe: [], customerWaiting: [] }, () => loadCommitments(ctx)),
   ]);
 
-  out.lateAlert = lateAlert;
-  out.pastWindow = pastWindow;
+  // A confirmed miss leaves the row unstarted, so the same occurrence can also read
+  // as a passed window or a delay: the confirmed miss is the
+  // stronger fact and supersedes them (one instruction per visit — Codex #5610 r4).
+  // the same OCCURRENCE — row, day and start — never just the row: a row reused for
+  // another day/window keeps its own current facts (Codex #5610 r10)
+  const sameVisit = (f) => Boolean(missedVisit && missedVisit.visitId && f && String(f.visitId) === missedVisit.visitId
+    && calendarDay(f.scheduledDate) === missedVisit.date
+    && hhmmToMinutes(f.windowStart) === hhmmToMinutes(missedVisit.windowStart));
+  out.lateAlert = sameVisit(lateAlert) ? null : lateAlert;
+  // only when the miss IS the whole passed-window fact: one that also carries other
+  // overdue occurrences (passedKeys) stays, so none of them is dropped (Codex #5610 r12)
+  out.pastWindow = sameVisit(pastWindow) && [].concat(pastWindow.passedKeys || []).length <= 1 ? null : pastWindow;
+  out.missedVisit = missedVisit;
   out.weOwe = commitments.weOwe;
   out.customerWaiting = commitments.customerWaiting;
   return out;
@@ -558,9 +643,11 @@ function visitStatusSignature(visitLoops) {
   const at = (f) => `${f.visitId}@${f.scheduledDate ?? ''}T${f.windowStart ?? ''}`;
   const parts = [
     v.lateAlert && `late:${key(at(v.lateAlert), v.lateAlert.visitType, v.lateAlert.type, v.lateAlert.missingTracking === true)}`,
+    // the confirmed occurrence: a newer miss, or this one settled, changes it
+    v.missedVisit && `missed:${key(v.missedVisit.logId, v.missedVisit.type, `${v.missedVisit.date ?? ''}@${v.missedVisit.windowStart ?? ''}`)}`,
     v.pastWindow && `past:${key(at(v.pastWindow), v.pastWindow.type)}:${[].concat(v.pastWindow.passedKeys || []).join(',')}:${v.pastWindow.assigned === false ? 'unassigned' : 'assigned'}`,
   ].filter(Boolean);
   return parts.length ? parts.join('|') : null;
 }
 
-module.exports = { loadVisitLoops, emptyVisitLoops, commitmentRevision, visitStatusSignature, allOpenCallCommitments, allSmsLane };
+module.exports = { loadVisitLoops, emptyVisitLoops, MISSED_VISIT_SCOPE_LINE, commitmentRevision, visitStatusSignature, allOpenCallCommitments, allSmsLane };
