@@ -1606,3 +1606,17 @@ describe('Codex #5580 round 17', () => {
     expect(out.products.map((p) => p.productId)).toEqual(['p-taurus']);
   });
 });
+
+describe('a code never loses its label on the way to the office', () => {
+  test.each([
+    'Gate code: 1234.',
+    'Treated the exterior for ants, gate code, 1234.',
+    'Treated the exterior for ants; gate code is 1234.',
+    'Treated the exterior for ants, gate code, four four one two.',
+  ])('"%s": no digit of the code reaches the customer note', (t) => {
+    for (const note of [{ customerNote: t }, { officeNote: t }]) {
+      const out = validateFill(answer(note), ctx, t);
+      expect(out.customerNote).not.toMatch(/\d|four four/);
+    }
+  });
+});

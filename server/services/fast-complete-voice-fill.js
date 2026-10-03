@@ -1366,9 +1366,14 @@ function splitNotes(customerRaw, officeRaw, transcript = '', unclear = []) {
   // A said sentence whose internal topic sits in one comma clause ("Treated the
   // exterior for ants, gate was locked.") is routed clause by clause.
   const pieces = (raw) => String(raw ?? '').split(SENTENCE_SPLIT_RE).map((t) => t.trim()).filter(Boolean).flatMap((text) => {
-    if (!/[,;:]/.test(text) || !isOfficeSentence(text, COMPLETION_ACCESS_CODE_RE) || OFFICE_ADDRESSED_RE.test(text)) return [text];
-    const parts = text.replace(/[.!?]+$/, '').split(/\s*[,;:]\s*/).map((t) => t.trim()).filter(Boolean);
-    return parts.length > 1 && parts.every((part) => spokenClauseScope(part, spoken)) ? parts.map((part) => `${part}.`) : [text];
+    // never on a colon: "Gate code: 1234" is one label with its value
+    if (!/[,;]/.test(text) || !isOfficeSentence(text, COMPLETION_ACCESS_CODE_RE) || OFFICE_ADDRESSED_RE.test(text)) return [text];
+    const parts = text.replace(/[.!?]+$/, '').split(/\s*[,;]\s*/).map((t) => t.trim()).filter(Boolean);
+    if (parts.length < 2 || !parts.every((part) => spokenClauseScope(part, spoken))) return [text];
+    // a sentence holding a code keeps every piece with a digit in the office
+    const coded = COMPLETION_ACCESS_CODE_RE.test(text) || SPOKEN_CODE_RE.test(text);
+    const numberish = (part) => /\d/.test(part) || new RegExp(`^(?:${SPOKEN_DIGIT}[\\s-]*)+$`, 'i').test(part.trim());
+    return parts.map((part) => ({ text: `${part}.`, office: coded && numberish(part) }));
   });
   // one copy of a clause, wherever both note fields carried it
   const placed = new Set();
@@ -1378,10 +1383,11 @@ function splitNotes(customerRaw, officeRaw, transcript = '', unclear = []) {
     placed.add(key);
     list.push(text);
   };
-  for (const text of pieces(customerRaw)) {
+  for (const piece of pieces(customerRaw)) {
+    const text = typeof piece === 'string' ? piece : piece.text;
     // Said first (either note), then routed: internal-sounding text is office-only.
     const said = spokenClauseScope(text, spoken);
-    const scope = said && isOfficeSentence(text, COMPLETION_ACCESS_CODE_RE) ? 'office' : said;
+    const scope = said && (piece.office || isOfficeSentence(text, COMPLETION_ACCESS_CODE_RE)) ? 'office' : said;
     if (scope === 'office') place(office, text);
     // no pesticide is "safe", "pet-safe" or "EPA-approved" on a customer surface
     // (AGENTS.md compliance language): even said word for word, it is a Check
@@ -1394,10 +1400,11 @@ function splitNotes(customerRaw, officeRaw, transcript = '', unclear = []) {
   // the model's office label is not trusted either: a plain customer clause goes
   // back to the customer note (through the same safety screen)
   const officeSaid = [];
-  for (const text of pieces(officeRaw)) {
+  for (const piece of pieces(officeRaw)) {
+    const text = typeof piece === 'string' ? piece : piece.text;
     const said = spokenClauseScope(text, spoken);
     if (!said) pushUnclear(unclear, text, 'note_not_heard');
-    else if (said !== 'customer' || isOfficeSentence(text, COMPLETION_ACCESS_CODE_RE)) place(officeSaid, text);
+    else if (said !== 'customer' || piece.office || isOfficeSentence(text, COMPLETION_ACCESS_CODE_RE)) place(officeSaid, text);
     else if (reentrySafetyClaimFinding(text)) pushUnclear(unclear, text, 'note_safety_claim');
     else if (saysRetiredName(text)) pushUnclear(unclear, text, 'note_company_name');
     else place(customer, text);
