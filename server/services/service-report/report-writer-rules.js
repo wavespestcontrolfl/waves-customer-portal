@@ -371,29 +371,24 @@ const LAWN_NAMED_TIMING_RE = /\bover\s+time\b|\b(?:soon|shortly|eventually|later
 // sentence with a future word still fails on any duration.
 const LAWN_PAST_SENTENCE_RE = /\b(?:has|have|had)\s+been\b|\b(?:was|were|did|ago)\b|\bbefore\s+(?:our|the|this|today'?s)\s+(?:visit|service|treatment)\b/i;
 const LAWN_FUTURE_WORD_RE = /\b(?:will|should|may|might|can|could|would|expect\w*|going\s+to|begin\w*|start\w*|continue\w*|keep\w*|until|soon)\b|'ll\b/i;
-// Watering, irrigation, mowing and rainfall sentences are out of scope: the
+// Watering, irrigation, mowing and rainfall CLAUSES are out of scope: the
 // lawn prompt has the writer preserve the approved watering plan's own timing
 // and name the supplied rainfall window, and rejecting those would fail
-// correct drafts. A backstop errs toward accepting.
-const LAWN_CARE_PLAN_SENTENCE_RE = /water|irrigat|sprinkl|\bmow|\brain/i;
+// correct drafts (a backstop errs toward accepting). Only the clause is
+// exempt: "With regular watering, the weeds should fade within two weeks"
+// still fails on its second clause. History is judged per clause too.
+const LAWN_CARE_PLAN_CLAUSE_RE = /water|irrigat|sprinkl|\bmow|\brain/i;
+const LAWN_CLAUSE_SPLIT_RE = /(?<=[.!?])\s+|\n+|[,;:]\s*|\s(?:and|but|so|then)\s/;
 function lawnResultTimingViolation(text) {
-  const copy = String(text || '');
-  for (const sentence of copy.split(/(?<=[.!?])\s+|\n+/)) {
-    if (LAWN_CARE_PLAN_SENTENCE_RE.test(sentence)) continue;
-    if (TIMEFRAME_RE.test(sentence) || LAWN_NAMED_TIMING_RE.test(sentence) || LAWN_BY_NEXT_VISIT_RE.test(sentence)
-      || LAWN_WEEKDAY_RE.test(sentence) || LAWN_MONTH_DAY_RE.test(sentence) || LAWN_NUMERIC_DATE_RE.test(sentence)) return true;
-    for (const m of sentence.matchAll(LAWN_TIME_UNIT_RE)) {
-      const after = sentence.slice(m.index + m[0].length, m.index + m[0].length + 24);
-      const before = sentence.slice(Math.max(0, m.index - 30), m.index);
-      if (PAST_AFTER_RE.test(after) || PAST_BEFORE_RE.test(before)) continue;
-      // History is judged on the duration's own clause: "was applied, and
-      // improvement develops after two weeks" is a promise in its second clause.
-      const clauseStart = Math.max(...[',', ';', ':', ' and ', ' but ', ' so ', ' then ']
-        .map((sep) => { const i = sentence.lastIndexOf(sep, m.index); return i < 0 ? 0 : i + sep.length; }));
-      const tail = sentence.slice(m.index);
-      const nextSep = tail.search(/[,;:]|\s(?:and|but|so|then)\s/);
-      const clause = sentence.slice(clauseStart, nextSep < 0 ? sentence.length : m.index + nextSep);
-      if (LAWN_PAST_SENTENCE_RE.test(clause) && !LAWN_FUTURE_WORD_RE.test(clause)) continue;
+  for (const clause of String(text || '').split(LAWN_CLAUSE_SPLIT_RE)) {
+    if (!clause || LAWN_CARE_PLAN_CLAUSE_RE.test(clause)) continue;
+    if (TIMEFRAME_RE.test(clause) || LAWN_NAMED_TIMING_RE.test(clause) || LAWN_BY_NEXT_VISIT_RE.test(clause)
+      || LAWN_WEEKDAY_RE.test(clause) || LAWN_MONTH_DAY_RE.test(clause) || LAWN_NUMERIC_DATE_RE.test(clause)) return true;
+    const history = LAWN_PAST_SENTENCE_RE.test(clause) && !LAWN_FUTURE_WORD_RE.test(clause);
+    for (const m of clause.matchAll(LAWN_TIME_UNIT_RE)) {
+      const after = clause.slice(m.index + m[0].length, m.index + m[0].length + 24);
+      const before = clause.slice(Math.max(0, m.index - 30), m.index);
+      if (PAST_AFTER_RE.test(after) || PAST_BEFORE_RE.test(before) || history) continue;
       return true;
     }
   }
