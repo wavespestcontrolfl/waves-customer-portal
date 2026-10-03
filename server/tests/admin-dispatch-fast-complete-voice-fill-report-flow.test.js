@@ -321,6 +321,19 @@ describe('report flow voice fill', () => {
       expect(kept.body.products).toEqual([expect.objectContaining({ productId: 'p-celsius', method: right })]);
     });
 
+    test.each([
+      ['station_check', 'Checked the lawn and used Celsius.', 'Checked the lawn and used Celsius', 'Checked the bait station and used Celsius in it.', 'used Celsius in it'],
+      ['pin_stream', 'Stressed turf by the street, used Celsius.', 'used Celsius', 'Used Celsius with a pin stream along the cracks.', 'Used Celsius with a pin stream'],
+    ])('%s needs its own word, not a look-alike', async (method, lookAlike, lookAlikeHeard, real, realHeard) => {
+      lawnMethods('spot_treatment', method);
+      answerWith({ productId: 'p-celsius', method, heard: lookAlikeHeard });
+      const refused = await readProducts(lookAlike);
+      expect(refused.body.products).toEqual([expect.objectContaining({ productId: 'p-celsius', method: '' })]);
+      answerWith({ productId: 'p-celsius', method, heard: realHeard });
+      const kept = await readProducts(real);
+      expect(kept.body.products).toEqual([expect.objectContaining({ productId: 'p-celsius', method })]);
+    });
+
     test('a bare "broadcast" proves neither way: the tech picks it', async () => {
       lawnMethods('spot_treatment', 'broadcast_spray', 'granular_broadcast');
       answerWith({ productId: 'p-celsius', method: 'broadcast_spray', heard: 'Broadcast the Celsius' });

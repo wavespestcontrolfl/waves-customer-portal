@@ -242,13 +242,21 @@ const loadPestReserviceContext = (serviceId, knex = db) => loadPestContext(servi
 // so every way the sheet offers is a product way (`anyProductMethod`). The visit
 // lists below only give the shared schema its enums; nothing is read from them.
 const LAWN_SHEET_LABEL = 'lawn re-service';
-// The lawn sheet offers a liquid and a granular broadcast side by side, so the
-// bare word "broadcast" proves neither: a spray needs "spray" beside it, granules
-// need a granule word. Fog/ULV's words are too short for the derived rule.
+// The lawn sheet's own evidence for a way, where the pest words or the derived
+// rule would be wrong on a lawn. It offers a liquid and a granular broadcast side
+// by side, so the bare word "broadcast" proves neither: a spray needs "spray"
+// beside it, granules need a granule word. Fog/ULV's words are too short for the
+// derived rule. The ways left to that rule read their own distinctive stem
+// (drench, foliar, injection); spot treatment keeps the shared "spot".
 const LAWN_METHOD_WORDS = Object.freeze({
   broadcast_spray: /\bbroadcast\W+spray\w*|\bspray\w*\W+(?:\w+\W+){0,3}broadcast\b|\bblanket\W+spray\w*/,
   granular_broadcast: /\b(granular|granules?|spread|spreader|spreading)\b/,
   fog_ulv: /\b(fog|fogged|fogging|fogger|ulv|mist|misted|misting)\b/,
+  // The derived rule keeps a key's last word's stem, which here would read any
+  // "checked" as a station check and "stressed" or "street" as a pin stream.
+  station_check: /\bstations?\b/,
+  pin_stream: /\bpin\W?stream\w*/,
+  bait_placement: /\bbait(ed|s|ing)?\b/,
 });
 // The measure a lawn row offers units in, as the sheet decides it
 // (FastCompleteLawnReserviceSheet productRow): the product's own, unless the last
