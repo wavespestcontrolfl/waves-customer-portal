@@ -95,7 +95,7 @@ it("Merge on a same-address pair names the kind and reports where the phone went
   expect(path).toBe("/admin/customer-duplicates/merge");
   expect(JSON.parse(options.body)).toEqual({ winnerId: "sa-winner", loserId: "sa-loser", kind: "same_address" });
   expect(await screen.findByText(/number \(941\) 555-0102 is saved as a contact on the kept customer/)).toBeInTheDocument();
-  expect(screen.getByText(/not set to receive texts until they confirm/)).toBeInTheDocument();
+  expect(screen.getByText(/held from automated texts — it has not agreed to receive them/)).toBeInTheDocument();
 });
 
 it("a merge with no free contact slot tells the office to add the number by hand", async () => {

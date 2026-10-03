@@ -70,7 +70,7 @@ function visitsText(count) {
 function phoneCarryResult(carry, customer) {
   const phone = fmtPhone(customer?.phone);
   if (carry?.status === "carried") {
-    return { toast: `Merged — ${displayName(customer)}’s number${phone ? ` ${phone}` : ""} is saved as a contact on the kept customer, so their next call finds this account. It is not set to receive texts until they confirm.` };
+    return { toast: `Merged — ${displayName(customer)}’s number${phone ? ` ${phone}` : ""} is saved as a contact on the kept customer, so their next call finds this account. It is held from automated texts — it has not agreed to receive them.` };
   }
   if (carry?.status === "no_free_slot") {
     return { error: `Merged, but the kept customer has no free contact slot — add ${phone || "that phone number"} to them manually so ${displayName(customer)}’s next call finds this account.` };
@@ -293,7 +293,7 @@ export default function DuplicateCustomersPage() {
                             const carry = sameAddress ? phoneCarryResult(res?.phoneCarry, customer) : null;
                             if (!res?.propertyLinked) setActionError(`Merged, but the address could NOT be saved as a property — add it to the kept customer manually.${carry?.error ? ` ${carry.error}` : ""}`);
                             else if (carry?.error) setActionError(carry.error);
-                            else setToast(carry && carry.toast !== "Merged" ? "Merged — address saved as a property, and the number saved as a contact (not set to receive texts until they confirm)" : "Merged — address saved as a property");
+                            else setToast(carry && carry.toast !== "Merged" ? "Merged — address saved as a property, and the number saved as a contact (held from automated texts — not yet agreed to receive them)" : "Merged — address saved as a property");
                           },
                         })}
                       >
