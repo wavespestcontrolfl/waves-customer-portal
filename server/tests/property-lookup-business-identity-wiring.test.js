@@ -19,6 +19,7 @@ jest.mock('../services/property-lookup/lookup-cache', () => ({
   saveLookup: jest.fn(async () => {}),
   attachCommercialSuiteSizeToCachedLookup: jest.fn(async () => {}),
   attachBusinessIdentityToCachedLookup: jest.fn(async () => {}),
+  addressKey: jest.fn((address) => ({ hash: `hash:${String(address).length}` })),
 }));
 jest.mock('../services/property-lookup/fema-nfhl', () => ({ lookupFloodZoneByPoint: jest.fn(async () => null) }));
 jest.mock('../services/property-lookup/ai-property-lookup', () => ({
