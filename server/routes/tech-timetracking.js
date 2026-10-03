@@ -65,10 +65,11 @@ router.post('/clock-out', async (req, res, next) => {
 router.post('/start-job/:jobId', async (req, res, next) => {
   try {
     const { lat, lng } = req.body;
-    const entry = await timeTracking.startJob(req.technicianId, req.params.jobId, { lat, lng });
+    const entry = await timeTracking.startJob(req.technicianId, req.params.jobId, { lat, lng, scopeReq: req });
     res.json(entry);
   } catch (err) {
     if (err.message.includes('Must be clocked in')) return res.status(409).json({ error: err.message });
+    if (err.code === 'job_not_assigned') return res.status(404).json({ error: err.message });
     if (err.code === 'street_level_hold') return res.status(409).json({ error: err.message, code: 'street_level_hold' });
     next(err);
   }

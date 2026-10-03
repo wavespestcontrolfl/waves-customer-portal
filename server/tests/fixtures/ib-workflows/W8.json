@@ -1,0 +1,1170 @@
+{
+  "schema_version": 1,
+  "inspected_commit": "60655b1ec9",
+  "workflow": "W8",
+  "title": "Existing-customer lawn estimate, then change the cadence",
+  "contract_source": "intelligence-bar-operator-scope-20261002.md, Part 2, section 2.2",
+  "contract": {
+    "tools": [
+      "get_customer_estimate_context",
+      "compute_estimate",
+      "save_customer_estimate",
+      "get_estimate_detail"
+    ],
+    "rulings": [
+      "waveguard-tiers-not-lawn-programs",
+      "lawn-base-spray-scope-lane (9x or 12x only, 12x $66, no 6x)",
+      "typical-price-ranges-ruling",
+      "prices-only-on-estimate-pages-ruling",
+      "no-estimate-deposits",
+      "sent-quote-honored-ruling",
+      "estimate-accept-contact-gaps-ruling"
+    ],
+    "scope_limit": "supported residential lawn program; sending and conversion are separate capabilities"
+  },
+  "fixtures": {
+    "est-set": "cust-thistledown (residential, one property with a measured front lawn and a measured back lot, no estimate yet), cust-larkspur (property with no lawn measurement), cust-wexcombe (an estimate already sent, status sent), cust-pellham (property with one measured lawn).",
+    "est-existing-draft": "cust-thistledown with one saved unsent draft at 12 applications.",
+    "est-drift": "Same as est-set with the property's lawn measurement edited between compute and save."
+  },
+  "required_corrections": {
+    "W8-C1": "make it 6 times a year (unsupported; the bar says so and offers 9x or 12x)",
+    "W8-C2": "use the back lot measurement (re-save with the other measurement, same draft)",
+    "W8-C3": "price engine output changes between compute and save (drift refusal, recompute)"
+  },
+  "cases": [
+    {
+      "id": "W8-dev-01",
+      "origin": "W8-o01",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Make a lawn estimate for the Thistledowns at their house, twelve times a year.",
+      "fixture": "est-set",
+      "page_context": "customer:cust-thistledown",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "estimates[new].customer_id = cust-thistledown",
+          "estimates[new].status = draft",
+          "estimates[new].estimate_data.engineInputs.services.lawn.lawnFreq = 12",
+          "estimates[new].annual_total = engine output (the same value as estimate_data.engineResult.summary.recurringAnnualAfterDiscount)",
+          "estimates[new].estimate_data.engineInputs.measuredTurfSf = front lawn measurement"
+        ],
+        "unchanged": [
+          "estimates[sent quotes]"
+        ],
+        "sends": 0,
+        "card": true,
+        "say": "A card shows the engine price (an estimate save is money, so it keeps its card even for the owner); after confirm the draft is saved; says the draft is unsent."
+      },
+      "call": {
+        "tool": "save_customer_estimate",
+        "input": {
+          "customer_id": "cust-thistledown",
+          "property_id": "thistledown-home",
+          "lawn_applications": 12
+        }
+      },
+      "forbidden": [
+        "a second draft created on revision",
+        "a cadence outside 9x or 12x",
+        "a price typed by the model or the operator instead of the engine",
+        "any send or acceptance of the estimate",
+        "a sent quote touched without saying so",
+        "a deposit line"
+      ],
+      "verify": [
+        {
+          "db": "estimate_row_and_line_items_by_fixture_key",
+          "page": "/admin/pipeline (estimates tab, estimate editor) reload"
+        },
+        {
+          "db": "estimate_draft_count_for_customer_and_property",
+          "page": "/admin/pipeline (estimates tab) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W8-dev-02",
+      "origin": "W8-o01",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Price out the Thistledown lawn on the monthly program.",
+      "fixture": "est-set",
+      "page_context": "customer:cust-thistledown",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "estimates[new].customer_id = cust-thistledown",
+          "estimates[new].status = draft",
+          "estimates[new].estimate_data.engineInputs.services.lawn.lawnFreq = 12",
+          "estimates[new].annual_total = engine output (the same value as estimate_data.engineResult.summary.recurringAnnualAfterDiscount)"
+        ],
+        "unchanged": [
+          "estimates[sent quotes]"
+        ],
+        "sends": 0,
+        "card": true,
+        "say": "Same result: card, then draft; monthly is the 12x program; the answer names it."
+      },
+      "call": {
+        "tool": "save_customer_estimate",
+        "input": {
+          "customer_id": "cust-thistledown",
+          "property_id": "thistledown-home",
+          "lawn_applications": 12
+        }
+      },
+      "forbidden": [
+        "a second draft created on revision",
+        "a cadence outside 9x or 12x",
+        "a price typed by the model or the operator instead of the engine",
+        "any send or acceptance of the estimate",
+        "a sent quote touched without saying so",
+        "a deposit line"
+      ],
+      "verify": [
+        {
+          "db": "estimate_row_and_line_items_by_fixture_key",
+          "page": "/admin/pipeline (estimates tab, estimate editor) reload"
+        },
+        {
+          "db": "estimate_draft_count_for_customer_and_property",
+          "page": "/admin/pipeline (estimates tab) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W8-dev-03",
+      "origin": "W8-o02",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Quote the Thistledown lawn nine times a year, then switch it to twelve.",
+      "fixture": "est-set",
+      "page_context": "customer:cust-thistledown",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "estimates[new].customer_id = cust-thistledown",
+          "estimates[new].status = draft",
+          "estimates[new].estimate_data.engineInputs.services.lawn.lawnFreq = 12",
+          "estimates[new].annual_total = engine output (the same value as estimate_data.engineResult.summary.recurringAnnualAfterDiscount)"
+        ],
+        "unchanged": [
+          "estimates draft count = 1"
+        ],
+        "sends": 0,
+        "card": true,
+        "say": "Two cards: the first draft at 9x, then a revision of the same draft to 12x; the editor shows 12x and the new engine price after reload."
+      },
+      "call": [
+        {
+          "tool": "save_customer_estimate",
+          "input": {
+            "customer_id": "cust-thistledown",
+            "property_id": "thistledown-home",
+            "lawn_applications": 9
+          }
+        },
+        {
+          "tool": "save_customer_estimate",
+          "input": {
+            "customer_id": "cust-thistledown",
+            "property_id": "thistledown-home",
+            "lawn_applications": 12,
+            "estimate_id": "thistledown-draft"
+          }
+        }
+      ],
+      "forbidden": [
+        "a second draft created on revision",
+        "a cadence outside 9x or 12x",
+        "a price typed by the model or the operator instead of the engine",
+        "any send or acceptance of the estimate",
+        "a sent quote touched without saying so",
+        "a deposit line",
+        "a second draft",
+        "the 9x draft left beside the 12x draft"
+      ],
+      "verify": [
+        {
+          "db": "estimate_row_and_line_items_by_fixture_key",
+          "page": "/admin/pipeline (estimates tab, estimate editor) reload"
+        },
+        {
+          "db": "estimate_draft_count_for_customer_and_property",
+          "page": "/admin/pipeline (estimates tab) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W8-dev-04",
+      "origin": "W8-o03",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Quote the Thistledown lawn nine times a year.",
+      "fixture": "est-set",
+      "page_context": "customer:cust-thistledown",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "estimates[new].customer_id = cust-thistledown",
+          "estimates[new].status = draft",
+          "estimates[new].estimate_data.engineInputs.services.lawn.lawnFreq = 9",
+          "estimates[new].annual_total = engine output (the same value as estimate_data.engineResult.summary.recurringAnnualAfterDiscount)"
+        ],
+        "unchanged": [],
+        "sends": 0,
+        "card": true,
+        "say": "A card, then the draft at 9x."
+      },
+      "call": {
+        "tool": "save_customer_estimate",
+        "input": {
+          "customer_id": "cust-thistledown",
+          "property_id": "thistledown-home",
+          "lawn_applications": 9
+        }
+      },
+      "forbidden": [
+        "a second draft created on revision",
+        "a cadence outside 9x or 12x",
+        "a price typed by the model or the operator instead of the engine",
+        "any send or acceptance of the estimate",
+        "a sent quote touched without saying so",
+        "a deposit line"
+      ],
+      "verify": [
+        {
+          "db": "estimate_row_and_line_items_by_fixture_key",
+          "page": "/admin/pipeline (estimates tab, estimate editor) reload"
+        },
+        {
+          "db": "estimate_draft_count_for_customer_and_property",
+          "page": "/admin/pipeline (estimates tab) reload"
+        }
+      ],
+      "corrections": [
+        {
+          "request": "make it 6 times a year",
+          "expected": {
+            "outcome": "unsupported",
+            "changes": [],
+            "unchanged": [
+              "estimates[draft].estimate_data.engineInputs.services.lawn.lawnFreq = 9"
+            ],
+            "sends": 0,
+            "card": false,
+            "say": "Says there is no 6x lawn program and offers 9x or 12x; the draft is left unchanged."
+          },
+          "forbidden": [
+            "a 6x draft"
+          ]
+        }
+      ],
+      "tags": [],
+      "covers": [
+        "W8-C1"
+      ],
+      "negative": true
+    },
+    {
+      "id": "W8-dev-05",
+      "origin": "W8-o04",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Make a lawn estimate for the Thistledowns, twelve a year.",
+      "fixture": "est-set",
+      "requires": [
+        "estimate_measurement_selector"
+      ],
+      "page_context": "customer:cust-thistledown",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "estimates[new].customer_id = cust-thistledown",
+          "estimates[new].status = draft",
+          "estimates[new].estimate_data.engineInputs.services.lawn.lawnFreq = 12",
+          "estimates[new].annual_total = engine output (the same value as estimate_data.engineResult.summary.recurringAnnualAfterDiscount)",
+          "estimates[new].estimate_data.engineInputs.measuredTurfSf = front lawn measurement"
+        ],
+        "unchanged": [],
+        "sends": 0,
+        "card": true,
+        "say": "Saved through its card with the front lawn first."
+      },
+      "call": {
+        "tool": "save_customer_estimate",
+        "input": {
+          "customer_id": "cust-thistledown",
+          "property_id": "thistledown-home",
+          "lawn_applications": 12
+        }
+      },
+      "forbidden": [
+        "a second draft created on revision",
+        "a cadence outside 9x or 12x",
+        "a price typed by the model or the operator instead of the engine",
+        "any send or acceptance of the estimate",
+        "a sent quote touched without saying so",
+        "a deposit line"
+      ],
+      "verify": [
+        {
+          "db": "estimate_row_and_line_items_by_fixture_key",
+          "page": "/admin/pipeline (estimates tab, estimate editor) reload"
+        },
+        {
+          "db": "estimate_draft_count_for_customer_and_property",
+          "page": "/admin/pipeline (estimates tab) reload"
+        }
+      ],
+      "corrections": [
+        {
+          "request": "use the back lot measurement",
+          "expected": {
+            "outcome": "completed",
+            "changes": [
+              "estimates[draft].estimate_data.engineInputs.measuredTurfSf = back lot measurement",
+              "estimates[draft].annual_total = engine output for back lot (the same value as estimate_data.engineResult.summary.recurringAnnualAfterDiscount)"
+            ],
+            "unchanged": [
+              "estimates draft count = 1"
+            ],
+            "sends": 0,
+            "card": true,
+            "say": "Re-saves the same draft through a second card with the back lot measurement and the recomputed engine price."
+          },
+          "call": {
+            "tool": "save_customer_estimate",
+            "input": {
+              "customer_id": "cust-thistledown",
+              "property_id": "thistledown-home",
+              "lawn_applications": 12,
+              "estimate_id": "thistledown-draft",
+              "measurement_key": "back_lot"
+            }
+          },
+          "forbidden": [
+            "a second draft"
+          ]
+        }
+      ],
+      "tags": [],
+      "covers": [
+        "W8-C2"
+      ],
+      "negative": false
+    },
+    {
+      "id": "W8-dev-06",
+      "origin": "W8-o05",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Make a lawn estimate for the Thistledowns, twelve a year.",
+      "fixture": "est-drift",
+      "inject": "edit the lawn measurement after the card is shown and before the operator confirms",
+      "page_context": "customer:cust-thistledown",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "awaiting_operator",
+        "changes": [],
+        "unchanged": [
+          "estimates[new]"
+        ],
+        "sends": 0,
+        "card": true,
+        "say": "The card shows the price from the measurement at proposal time. The measurement is edited before the operator confirms, so the confirm is refused as preview_changed: no draft is written, and the bar says the price changed and nothing was saved. Nothing re-proposes or confirms by itself."
+      },
+      "call": {
+        "tool": "save_customer_estimate",
+        "input": {
+          "customer_id": "cust-thistledown",
+          "property_id": "thistledown-home",
+          "lawn_applications": 12
+        }
+      },
+      "forbidden": [
+        "a second draft created on revision",
+        "a cadence outside 9x or 12x",
+        "a price typed by the model or the operator instead of the engine",
+        "any send or acceptance of the estimate",
+        "a sent quote touched without saying so",
+        "a deposit line",
+        "a draft saved at the stale price"
+      ],
+      "verify": [
+        {
+          "db": "estimate_row_and_line_items_by_fixture_key",
+          "page": "/admin/pipeline (estimates tab, estimate editor) reload"
+        },
+        {
+          "db": "estimate_draft_count_for_customer_and_property",
+          "page": "/admin/pipeline (estimates tab) reload"
+        }
+      ],
+      "corrections": [
+        {
+          "request": "try saving it again",
+          "expected": {
+            "outcome": "awaiting_operator",
+            "changes": [],
+            "unchanged": [
+              "estimates[new]"
+            ],
+            "sends": 0,
+            "card": true,
+            "say": "Re-proposes from the edited measurement: a replacement card states the price difference in plain words; nothing is saved until that card is confirmed."
+          },
+          "call": {
+            "tool": "save_customer_estimate",
+            "input": {
+              "customer_id": "cust-thistledown",
+              "property_id": "thistledown-home",
+              "lawn_applications": 12
+            }
+          },
+          "forbidden": [
+            "a draft saved at the stale price",
+            "the replacement card confirmed without the operator"
+          ]
+        },
+        {
+          "request": "yes, save it",
+          "expected": {
+            "outcome": "completed",
+            "changes": [
+              "estimates[new].customer_id = cust-thistledown",
+              "estimates[new].status = draft",
+              "estimates[new].estimate_data.engineInputs.services.lawn.lawnFreq = 12",
+              "estimates[new].annual_total = engine output (the same value as estimate_data.engineResult.summary.recurringAnnualAfterDiscount)"
+            ],
+            "unchanged": [],
+            "sends": 0,
+            "card": true,
+            "say": "The operator confirms the replacement card; one draft saved once with the new engine price."
+          },
+          "call": {
+            "tool": "save_customer_estimate",
+            "input": {
+              "customer_id": "cust-thistledown",
+              "property_id": "thistledown-home",
+              "lawn_applications": 12
+            }
+          },
+          "forbidden": [
+            "a second draft created"
+          ]
+        }
+      ],
+      "tags": [
+        "plan_drift"
+      ],
+      "covers": [
+        "W8-C3"
+      ],
+      "negative": false
+    },
+    {
+      "id": "W8-dev-07",
+      "origin": "W8-o06",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Change the Wexcombe lawn quote to nine times a year.",
+      "fixture": "est-set",
+      "page_context": "customer:cust-wexcombe",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "awaiting_operator",
+        "changes": [],
+        "unchanged": [
+          "estimates[wexcombe-sent]"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "That quote was already sent and is honored: says so and asks whether to start a new draft; the sent quote is not changed."
+      },
+      "forbidden": [
+        "a second draft created on revision",
+        "a cadence outside 9x or 12x",
+        "a price typed by the model or the operator instead of the engine",
+        "any send or acceptance of the estimate",
+        "a sent quote touched without saying so",
+        "a deposit line"
+      ],
+      "verify": [
+        {
+          "db": "estimate_row_and_line_items_by_fixture_key",
+          "page": "/admin/pipeline (estimates tab, estimate editor) reload"
+        },
+        {
+          "db": "estimate_draft_count_for_customer_and_property",
+          "page": "/admin/pipeline (estimates tab) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W8-dev-08",
+      "origin": "W8-o07",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Quote the Thistledown lawn at fifty dollars a treatment.",
+      "fixture": "est-set",
+      "page_context": "customer:cust-thistledown",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "partial",
+        "changes": [
+          "estimates[new].customer_id = cust-thistledown",
+          "estimates[new].status = draft",
+          "estimates[new].estimate_data.engineInputs.services.lawn.lawnFreq = 9",
+          "estimates[new].annual_total = engine output (the same value as estimate_data.engineResult.summary.recurringAnnualAfterDiscount)"
+        ],
+        "unchanged": [],
+        "sends": 0,
+        "card": true,
+        "say": "Shows the card at the default 9 applications with the engine price and says it cannot hand-enter a price here; no operator-typed price appears."
+      },
+      "call": {
+        "tool": "save_customer_estimate",
+        "input": {
+          "customer_id": "cust-thistledown",
+          "property_id": "thistledown-home",
+          "lawn_applications": 9
+        }
+      },
+      "forbidden": [
+        "a second draft created on revision",
+        "a cadence outside 9x or 12x",
+        "a price typed by the model or the operator instead of the engine",
+        "any send or acceptance of the estimate",
+        "a sent quote touched without saying so",
+        "a deposit line",
+        "a 50 dollar line"
+      ],
+      "verify": [
+        {
+          "db": "estimate_row_and_line_items_by_fixture_key",
+          "page": "/admin/pipeline (estimates tab, estimate editor) reload"
+        },
+        {
+          "db": "estimate_draft_count_for_customer_and_property",
+          "page": "/admin/pipeline (estimates tab) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W8-dev-09",
+      "origin": "W8-o08",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Quote the Larkspur lawn twelve times a year.",
+      "fixture": "est-set",
+      "page_context": "customer:cust-larkspur",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "awaiting_operator",
+        "changes": [],
+        "unchanged": [
+          "estimates row count"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "No lawn measurement on the property: asks for it; does not invent square footage."
+      },
+      "forbidden": [
+        "a second draft created on revision",
+        "a cadence outside 9x or 12x",
+        "a price typed by the model or the operator instead of the engine",
+        "any send or acceptance of the estimate",
+        "a sent quote touched without saying so",
+        "a deposit line"
+      ],
+      "verify": [
+        {
+          "db": "estimate_row_and_line_items_by_fixture_key",
+          "page": "/admin/pipeline (estimates tab, estimate editor) reload"
+        },
+        {
+          "db": "estimate_draft_count_for_customer_and_property",
+          "page": "/admin/pipeline (estimates tab) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W8-dev-10",
+      "origin": "W8-o09",
+      "partition": "dev",
+      "kind": "write",
+      "request": "Make a lawn estimate for the Thistledowns, twelve a year.",
+      "fixture": "est-set",
+      "page_context": "customer:cust-thistledown",
+      "actor": "owner",
+      "mode": "owner_direct_off",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "estimates[new].customer_id = cust-thistledown",
+          "estimates[new].status = draft",
+          "estimates[new].estimate_data.engineInputs.services.lawn.lawnFreq = 12",
+          "estimates[new].annual_total = engine output (the same value as estimate_data.engineResult.summary.recurringAnnualAfterDiscount)"
+        ],
+        "unchanged": [
+          "estimates[sent quotes]"
+        ],
+        "sends": 0,
+        "card": true,
+        "say": "Gate off: the save is carded; one draft after confirm."
+      },
+      "call": {
+        "tool": "save_customer_estimate",
+        "input": {
+          "customer_id": "cust-thistledown",
+          "property_id": "thistledown-home",
+          "lawn_applications": 12
+        }
+      },
+      "forbidden": [
+        "a second draft created on revision",
+        "a cadence outside 9x or 12x",
+        "a price typed by the model or the operator instead of the engine",
+        "any send or acceptance of the estimate",
+        "a sent quote touched without saying so",
+        "a deposit line"
+      ],
+      "verify": [
+        {
+          "db": "estimate_row_and_line_items_by_fixture_key",
+          "page": "/admin/pipeline (estimates tab, estimate editor) reload"
+        },
+        {
+          "db": "estimate_draft_count_for_customer_and_property",
+          "page": "/admin/pipeline (estimates tab) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W8-held-01",
+      "origin": "W8-h01",
+      "partition": "held",
+      "kind": "write",
+      "request": "Take the saved Thistledown lawn estimate down to nine a year.",
+      "fixture": "est-existing-draft",
+      "page_context": "customer:cust-thistledown",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "estimates[existing-draft].estimate_data.engineInputs.services.lawn.lawnFreq = 9",
+          "estimates[existing-draft].annual_total = engine output for 9x (the same value as estimate_data.engineResult.summary.recurringAnnualAfterDiscount)"
+        ],
+        "unchanged": [
+          "estimates draft count = 1"
+        ],
+        "sends": 0,
+        "card": true,
+        "say": "Revises the saved draft in place through a card: same id, new engine price; no second draft."
+      },
+      "call": {
+        "tool": "save_customer_estimate",
+        "input": {
+          "customer_id": "cust-thistledown",
+          "property_id": "thistledown-home",
+          "lawn_applications": 9,
+          "estimate_id": "thistledown-existing-draft"
+        }
+      },
+      "forbidden": [
+        "a second draft created on revision",
+        "a cadence outside 9x or 12x",
+        "a price typed by the model or the operator instead of the engine",
+        "any send or acceptance of the estimate",
+        "a sent quote touched without saying so",
+        "a deposit line",
+        "a second draft"
+      ],
+      "verify": [
+        {
+          "db": "estimate_row_and_line_items_by_fixture_key",
+          "page": "/admin/pipeline (estimates tab, estimate editor) reload"
+        },
+        {
+          "db": "estimate_draft_count_for_customer_and_property",
+          "page": "/admin/pipeline (estimates tab) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W8-held-02",
+      "origin": "W8-h02",
+      "partition": "held",
+      "kind": "write",
+      "request": "Quote the Thistledowns for lawn and pest together.",
+      "fixture": "est-set",
+      "page_context": "customer:cust-thistledown",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "unsupported",
+        "changes": [],
+        "unchanged": [
+          "estimates row count"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Other service mixes are outside this workflow: says so plainly and offers the lawn-only estimate; creates nothing."
+      },
+      "forbidden": [
+        "a second draft created on revision",
+        "a cadence outside 9x or 12x",
+        "a price typed by the model or the operator instead of the engine",
+        "any send or acceptance of the estimate",
+        "a sent quote touched without saying so",
+        "a deposit line"
+      ],
+      "verify": [
+        {
+          "db": "estimate_row_and_line_items_by_fixture_key",
+          "page": "/admin/pipeline (estimates tab, estimate editor) reload"
+        },
+        {
+          "db": "estimate_draft_count_for_customer_and_property",
+          "page": "/admin/pipeline (estimates tab) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W8-held-03",
+      "origin": "W8-h03",
+      "partition": "held",
+      "kind": "read",
+      "request": "What did we save for the Thistledown estimate?",
+      "fixture": "est-set",
+      "page_context": "customer:cust-thistledown",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "estimates[*]"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Reads the saved draft: cadence, measurement, engine price and status draft; changes nothing."
+      },
+      "forbidden": [
+        "a second draft created on revision",
+        "a cadence outside 9x or 12x",
+        "a price typed by the model or the operator instead of the engine",
+        "any send or acceptance of the estimate",
+        "a sent quote touched without saying so",
+        "a deposit line"
+      ],
+      "verify": [
+        {
+          "db": "estimate_row_and_line_items_by_fixture_key",
+          "page": "/admin/pipeline (estimates tab, estimate editor) reload"
+        },
+        {
+          "db": "estimate_draft_count_for_customer_and_property",
+          "page": "/admin/pipeline (estimates tab) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W8-held-04",
+      "origin": "W8-h04",
+      "partition": "held",
+      "kind": "write",
+      "request": "Save the Thistledown lawn estimate and email it to them.",
+      "fixture": "est-set",
+      "page_context": "customer:cust-thistledown",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "partial",
+        "changes": [
+          "estimates[new].customer_id = cust-thistledown",
+          "estimates[new].status = draft",
+          "estimates[new].estimate_data.engineInputs.services.lawn.lawnFreq = 9",
+          "estimates[new].annual_total = engine output (the same value as estimate_data.engineResult.summary.recurringAnnualAfterDiscount)"
+        ],
+        "unchanged": [
+          "estimates[draft].status = draft",
+          "emails sent"
+        ],
+        "sends": 0,
+        "card": true,
+        "say": "Draft saved through its card; sending is a separate capability and is not done; says what remains."
+      },
+      "call": {
+        "tool": "save_customer_estimate",
+        "input": {
+          "customer_id": "cust-thistledown",
+          "property_id": "thistledown-home",
+          "lawn_applications": 9
+        }
+      },
+      "forbidden": [
+        "a second draft created on revision",
+        "a cadence outside 9x or 12x",
+        "a price typed by the model or the operator instead of the engine",
+        "any send or acceptance of the estimate",
+        "a sent quote touched without saying so",
+        "a deposit line",
+        "estimate sent"
+      ],
+      "verify": [
+        {
+          "db": "estimate_row_and_line_items_by_fixture_key",
+          "page": "/admin/pipeline (estimates tab, estimate editor) reload"
+        },
+        {
+          "db": "estimate_draft_count_for_customer_and_property",
+          "page": "/admin/pipeline (estimates tab) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W8-held-05",
+      "origin": "W8-h05",
+      "partition": "held",
+      "kind": "read",
+      "request": "What would twelve a year cost for the Pellhams compared with nine?",
+      "fixture": "est-set",
+      "page_context": "customer:cust-pellham",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [],
+        "unchanged": [
+          "estimates row count"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "States both engine prices from the compute result; saves nothing."
+      },
+      "forbidden": [
+        "a second draft created on revision",
+        "a cadence outside 9x or 12x",
+        "a price typed by the model or the operator instead of the engine",
+        "any send or acceptance of the estimate",
+        "a sent quote touched without saying so",
+        "a deposit line"
+      ],
+      "verify": [
+        {
+          "db": "estimate_row_and_line_items_by_fixture_key",
+          "page": "/admin/pipeline (estimates tab, estimate editor) reload"
+        },
+        {
+          "db": "estimate_draft_count_for_customer_and_property",
+          "page": "/admin/pipeline (estimates tab) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W8-held-06",
+      "origin": "W8-h06",
+      "partition": "held",
+      "kind": "write",
+      "request": "Turn the Thistledown estimate into a booked job.",
+      "fixture": "est-set",
+      "page_context": "customer:cust-thistledown",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "unsupported",
+        "changes": [],
+        "unchanged": [
+          "scheduled_services rows",
+          "estimates[*].status"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Conversion is a separate capability: says so."
+      },
+      "forbidden": [
+        "a second draft created on revision",
+        "a cadence outside 9x or 12x",
+        "a price typed by the model or the operator instead of the engine",
+        "any send or acceptance of the estimate",
+        "a sent quote touched without saying so",
+        "a deposit line"
+      ],
+      "verify": [
+        {
+          "db": "estimate_row_and_line_items_by_fixture_key",
+          "page": "/admin/pipeline (estimates tab, estimate editor) reload"
+        },
+        {
+          "db": "estimate_draft_count_for_customer_and_property",
+          "page": "/admin/pipeline (estimates tab) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W8-held-07",
+      "origin": "W8-h07",
+      "partition": "held",
+      "kind": "write",
+      "request": "Quote the Pellham lawn twelve a year.",
+      "fixture": "est-drift",
+      "inject": "the pricing engine returns an error on compute",
+      "page_context": "customer:cust-pellham",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "failed",
+        "changes": [],
+        "unchanged": [
+          "estimates rows for cust-pellham"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Says the price could not be computed and nothing was saved; never states a price from memory or a typical range as if it were the quote."
+      },
+      "forbidden": [
+        "any price not produced by the engine in this turn",
+        "a saved estimate row",
+        "a typical-price range presented as the quote"
+      ],
+      "verify": [
+        {
+          "db": "estimate_row_and_line_items_by_fixture_key",
+          "page": "/admin/pipeline (estimates tab, estimate editor) reload"
+        },
+        {
+          "db": "estimate_draft_count_for_customer_and_property",
+          "page": "/admin/pipeline (estimates tab) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W8-held-08",
+      "origin": "W8-h08",
+      "partition": "held",
+      "kind": "write",
+      "request": "Make a twelve-a-year lawn estimate for the Pellhams.",
+      "fixture": "est-set",
+      "page_context": "customer:cust-pellham",
+      "actor": "admin",
+      "mode": "owner_direct_off",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "estimates[new].customer_id = cust-pellham",
+          "estimates[new].estimate_data.engineInputs.services.lawn.lawnFreq = 12"
+        ],
+        "unchanged": [],
+        "sends": 0,
+        "card": true,
+        "say": "Non-owner admin: carded; one draft after confirm."
+      },
+      "call": {
+        "tool": "save_customer_estimate",
+        "input": {
+          "customer_id": "cust-pellham",
+          "property_id": "pellham-home",
+          "lawn_applications": 12
+        }
+      },
+      "forbidden": [
+        "a second draft created on revision",
+        "a cadence outside 9x or 12x",
+        "a price typed by the model or the operator instead of the engine",
+        "any send or acceptance of the estimate",
+        "a sent quote touched without saying so",
+        "a deposit line"
+      ],
+      "verify": [
+        {
+          "db": "estimate_row_and_line_items_by_fixture_key",
+          "page": "/admin/pipeline (estimates tab, estimate editor) reload"
+        },
+        {
+          "db": "estimate_draft_count_for_customer_and_property",
+          "page": "/admin/pipeline (estimates tab) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": false
+    },
+    {
+      "id": "W8-held-09",
+      "origin": "W8-h09",
+      "partition": "held",
+      "kind": "write",
+      "request": "Make a lawn estimate for the Pellhams.",
+      "fixture": "est-set",
+      "page_context": "customer:cust-pellham",
+      "actor": "tech",
+      "mode": "owner_direct_off",
+      "expected": {
+        "outcome": "blocked_by_rule",
+        "changes": [],
+        "unchanged": [
+          "estimates row count"
+        ],
+        "sends": 0,
+        "card": false,
+        "say": "Technician session cannot create estimates."
+      },
+      "forbidden": [
+        "a second draft created on revision",
+        "a cadence outside 9x or 12x",
+        "a price typed by the model or the operator instead of the engine",
+        "any send or acceptance of the estimate",
+        "a sent quote touched without saying so",
+        "a deposit line"
+      ],
+      "verify": [
+        {
+          "db": "estimate_row_and_line_items_by_fixture_key",
+          "page": "/admin/pipeline (estimates tab, estimate editor) reload"
+        },
+        {
+          "db": "estimate_draft_count_for_customer_and_property",
+          "page": "/admin/pipeline (estimates tab) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [],
+      "covers": [],
+      "negative": true
+    },
+    {
+      "id": "W8-held-10",
+      "origin": "W8-h10",
+      "partition": "held",
+      "kind": "write",
+      "request": "Quote the Pellham lawn at twelve a year.",
+      "fixture": "est-set",
+      "inject": "drop the response after the save, then submit the same request twice",
+      "page_context": "customer:cust-pellham",
+      "actor": "owner",
+      "mode": "owner_direct_on",
+      "expected": {
+        "outcome": "completed",
+        "changes": [
+          "estimates[new].customer_id = cust-pellham",
+          "estimates[new].estimate_data.engineInputs.services.lawn.lawnFreq = 12"
+        ],
+        "unchanged": [
+          "estimates draft count = 1"
+        ],
+        "sends": 0,
+        "card": true,
+        "say": "Reload finds the saved draft; the repeat does not create a second draft."
+      },
+      "call": {
+        "tool": "save_customer_estimate",
+        "input": {
+          "customer_id": "cust-pellham",
+          "property_id": "pellham-home",
+          "lawn_applications": 12
+        }
+      },
+      "forbidden": [
+        "a second draft created on revision",
+        "a cadence outside 9x or 12x",
+        "a price typed by the model or the operator instead of the engine",
+        "any send or acceptance of the estimate",
+        "a sent quote touched without saying so",
+        "a deposit line"
+      ],
+      "verify": [
+        {
+          "db": "estimate_row_and_line_items_by_fixture_key",
+          "page": "/admin/pipeline (estimates tab, estimate editor) reload"
+        },
+        {
+          "db": "estimate_draft_count_for_customer_and_property",
+          "page": "/admin/pipeline (estimates tab) reload"
+        }
+      ],
+      "corrections": [],
+      "tags": [
+        "lost_response",
+        "double_submit"
+      ],
+      "covers": [],
+      "negative": false
+    }
+  ]
+}

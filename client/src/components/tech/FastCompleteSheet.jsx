@@ -81,7 +81,8 @@ import TechTreatmentZoneModal from './TechTreatmentZoneModal';
 import {
   ActivitySection, CollectPayment, ConfirmPrompt, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, FIRST_VISIT_RATING, PhotoStripSection,
   BlogPostSection, EMPTY_LANE_RECORD, EMPTY_TYPED_RECORD, InspectionCreditToggle, LaneRecordCard, PromisesSection, ReportCard, SentSummary, StepFooter,
-  TechNoteBoxPhotos, TraceSection, TypedRecordCard, changeTypedRecord, laneRecordNeedsAction, mergeTypedRecord, typedCardFields, typedScoreIsTechs,
+  TechNoteBoxPhotos, TraceSection, TypedRecordCard, changeTypedRecord, laneRecordNeedsAction, mergeTypedRecord, scoreTypedRecord, typedCardFields,
+  typedScoreIsTechs,
   WritingView, changeLaneRecord, customerHomeWriterLabel, factsHold, mergeLaneRecord, perimeterFeetOf, photoCaptionsOf, useBlogPostOffer,
   useVisitPhotos, useVisitPromises, useVisitTrace,
 } from './FastCompleteReport';
@@ -89,8 +90,8 @@ import { promiseMarksPayload } from '../schedule/PromiseCheck';
 import { SERVICE_COMPLETION_PRESETS } from '../../lib/service-completion-presets';
 import AREA_SCOPES from '../../../../shared/treatment-area-scopes.json';
 import {
-  TYPED_TYPES_WITHOUT_PLACES, completionAreasForTypedFindings, parseApplicationAreas, typedActivityScoreConflict, typedFieldRequiredNow,
-  typedTreatmentAreaField, typedZeroStateRefusesBody,
+  completionAreasForTypedFindings, parseApplicationAreas, trapSetupConflicts, typedActivityScoreConflict, typedFieldRequiredNow,
+  typedFormTakesPlaces, typedTreatmentAreaField, typedZeroStateRefusesBody,
 } from '../../lib/typed-findings-rules';
 import {
   AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, SavedView,
@@ -416,6 +417,9 @@ function useFastCompleteContext({
         const commonProducts = Array.isArray(data?.commonProducts)
           ? data.commonProducts.filter((common) => common && common.productId != null)
           : [];
+        // A typed visit keeps its own activity (the completion ignores the
+        // 1 to 5 rating on a typed form), so it asks for none.
+        const rates = ratingContract?.allowed === true && !typedType;
         setCtx({
           loading: false,
           loadError: '',
@@ -439,13 +443,11 @@ function useFastCompleteContext({
           // Step 3 "after sending": book the follow-up a completion suggests.
           followupBooking: data?.followupBooking === true,
           rating: {
-            // A typed visit keeps its own activity (the completion ignores
-            // the 1 to 5 rating on a typed form), so it asks for none.
-            allowed: ratingContract?.allowed === true && !typedType,
+            allowed: rates,
             scaleLabels: ratingContract?.scaleLabels || null,
             // The report flow opens a first visit's tracker at 5 (owner
             // ruling 2026-09-24, the full form's prefill).
-            firstVisit: ratingContract?.allowed === true && !typedType && ratingContract?.firstVisit === true,
+            firstVisit: rates && ratingContract?.firstVisit === true,
           },
         });
       } catch (err) {
@@ -1040,27 +1042,50 @@ function laneSendHolds({ active, draft, writing, perimeterFeet, traceRead, lane,
 // goes on the full form. No trace step here: a perimeter spray needs its
 // traced length, and a saved trace the report would show goes on the full
 // form too.
+// The ways a product goes down that are not a spray (the office form's spray
+// evidence leaves them out).
+const PLACED_METHODS = new Set(['bait_placement', 'station_check', 'trunk_injection']);
+
+// The activity score a typed record carries: the tech's own where they set
+// it, else the one its findings derive (deriveScores), or none.
+function typedScoreOf(schema, record) {
+  const activity = schema?.activity;
+  if (!activity) return null;
+  if (!activity.deriveField) return Number.isInteger(record.score) ? record.score : null;
+  const derived = activity.deriveScores?.[String(record.values[activity.deriveField] ?? '')];
+  return Number.isInteger(derived) ? derived : null;
+}
+
 function typedSendHolds({ active, draft, writing, perimeterFeet, traceRead, record, typedSchema, traceOnReport = true }) {
   const ready = reportReadyHolds({ draft, writing, traceRead });
   const values = record.values;
   const missing = typedCardFields(typedSchema).find((field) => typedFieldRequiredNow(field, values) && !String(values[field.key] ?? '').trim());
   const typedIn = missing && (missing.type === 'text' || missing.type === 'count');
+  // An initial setup's own rules (its trap count; no work on traps already
+  // out), as the office form holds them before submit.
+  const [setupConflict] = trapSetupConflicts(typedSchema.type, values);
   const scoreMissing = typedScoreIsTechs(typedSchema) && !Number.isInteger(record.score);
-  const scoreConflict = typedActivityScoreConflict(typedSchema.type, values, record.score);
-  const standardWording = typedZeroStateRefusesBody(typedSchema.type, values, record.score);
+  // The score the completion keeps: the tech's own, or the one its findings
+  // derive (a bait visit's consumption), as the office form judges it.
+  const score = typedScoreOf(typedSchema, record);
+  const scoreConflict = typedActivityScoreConflict(typedSchema.type, values, score);
+  const standardWording = typedZeroStateRefusesBody(typedSchema.type, values, score);
   const perimeterRow = perimeterSprayRow(active, draft);
   const untraced = !perimeterFeet && perimeterRow;
   const shownTrace = draft && traceOnReport && traceRead.zone;
   // A product's place is the visit's treated side on the report (as on a
   // lane visit): the form's own area field, or, for a form whose places the
-  // full form picks (pest inspection, wildlife), the full form.
+  // full form picks (pest inspection, wildlife, a bait station visit where
+  // something went down other than bait), the full form.
   const areaField = typedTreatmentAreaField(typedSchema);
+  const sprayed = active.some((row) => !PLACED_METHODS.has(rowMethod(row, reportSprayMethod(draft?.facts))));
   const placesMissing = active.length > 0 && (areaField
     ? !parseApplicationAreas(values[areaField.key]).length
-    : !TYPED_TYPES_WITHOUT_PLACES.includes(typedSchema.type));
+    : typedFormTakesPlaces(typedSchema.type, { sprayed }));
   return [
     ...ready.report,
     [missing, missing && (typedIn ? `Fill in ${missing.label}.` : `Pick ${missing.label}: tap Change beside it.`)],
+    [setupConflict, setupConflict],
     [placesMissing, areaField
       ? `Pick where you treated: tap Change beside ${areaField.label}.`
       : 'Where you applied the product is picked on the Full form. Use the Full form.'],
@@ -1185,15 +1210,20 @@ function pestFactsOf(heard) {
 // read that failed: nothing fills.
 function typedFactsOf(heard) {
   if (heard?.available === true && heard.status === 'nothing_to_fill') {
-    return { status: 'read', type: heard.type, values: {}, heard: {}, unclearFields: [] };
+    return { status: 'read', type: heard.type, values: {}, heard: {}, unclearFields: [], score: null, scoreUnclear: false };
   }
-  if (heard?.available !== true || heard.status !== 'read') return { status: 'failed', values: {}, heard: {}, unclearFields: [] };
+  if (heard?.available !== true || heard.status !== 'read') {
+    return { status: 'failed', values: {}, heard: {}, unclearFields: [], score: null, scoreUnclear: false };
+  }
   return {
     status: 'read',
     type: heard.type,
     values: Object.fromEntries(Object.entries(heard.values || {}).filter(([, value]) => typeof value === 'string' && value)),
     heard: heard.heard && typeof heard.heard === 'object' ? heard.heard : {},
     unclearFields: Array.isArray(heard.unclearFields) ? heard.unclearFields.filter((key) => typeof key === 'string') : [],
+    // The technician's own rating (step 4), on a form whose score they set.
+    score: Number.isInteger(heard.score?.value) && typeof heard.score.quote === 'string' ? { value: heard.score.value, quote: heard.score.quote } : null,
+    scoreUnclear: heard.scoreUnclear === true,
   };
 }
 
@@ -1209,14 +1239,14 @@ function useReportDraft({ request, base, mode = null }) {
   const [writing, setWriting] = useState(false);
   const [writeError, setWriteError] = useState('');
   const sequenceRef = useRef(0);
-  const write = useCallback(async ({ buildPayload, note, current, signature, fresh }) => {
+  const write = useCallback(async ({ buildPayload, note, current, scoreSet, signature, fresh }) => {
     const sequence = ++sequenceRef.current;
     setWriting(true);
     setWriteError('');
     const read = READS[mode] || PEST_READ;
     // A typed read is judged beside the record's present values (never
     // stored on the server).
-    const body = mode === 'typed' ? { note, current: current || {} } : { note };
+    const body = mode === 'typed' ? { note, current: current || {}, scoreSet: scoreSet === true } : { note };
     const heard = await request(`${base}/${read.endpoint}`, { method: 'POST', body: JSON.stringify(body) }).catch(() => null);
     const facts = read.factsOf(heard);
     if (sequence !== sequenceRef.current) return;
@@ -1312,8 +1342,10 @@ function useTypedRecord(service) {
     mode: schema ? 'typed' : null,
     schema,
     record: schema ? typedRecord : null,
-    // What the read is judged beside (the server never fills over it).
+    // What the read is judged beside (the server never fills over it), and
+    // whether the tech's rating is already set.
     current: typedRecord.values,
+    scoreSet: typedRecord.score != null,
     signaturePart: (record) => (record ? { typed: [record.values, record.score] } : null),
     inputs: (record, facts) => {
       const fields = recordInputs(schema ? 'typed' : null, record, facts, schema);
@@ -1334,10 +1366,11 @@ function useTypedRecord(service) {
           schema={schema}
           record={typedRecord}
           unclear={draft?.facts?.unclearFields || []}
+          scoreUnclear={draft?.facts?.scoreUnclear === true}
           readFailed={draft?.facts?.status === 'failed'}
           locked={locked || writing}
           onChange={(key, value) => setTypedRecord((prev) => changeTypedRecord(prev, key, value))}
-          onScore={(score) => setTypedRecord((prev) => ({ ...prev, score }))}
+          onScore={(score) => setTypedRecord((prev) => scoreTypedRecord(prev, score))}
         />
         {creditOffered && <InspectionCreditToggle checked={offerCredit} locked={locked || writing} onChange={setOfferCredit} />}
       </>
@@ -1452,6 +1485,7 @@ function ReportFlowForm({
       note: form.note,
       // A typed read is judged beside the record's present values.
       current: recordState.current,
+      scoreSet: recordState.scoreSet,
       signature: (facts) => writerSignature(form, rows, promiseMarks, visitPhotos.photos, recordState.signaturePart(recordState.recordFor(facts))),
       fresh,
     });

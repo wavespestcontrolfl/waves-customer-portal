@@ -1031,6 +1031,36 @@ function englishKnown(word) {
 const ENGLISH_SHARE = 0.6;
 const REACTION_RE = /^\s*(?:(?:liked|loved|disliked|laughed\s+at|emphasi[sz]ed|questioned|removed\s+an?\s+\w+\s+from|reacted\s+\S+\s+to)\s+[\u201c\u2018"'][\s\S]*$|reacted\s+\S+\s+to\s+(?:an?\s+)?(?:image|photo|picture|video|message|attachment|sticker|gif)\s*$)/i;
 // A reaction with nothing typed after the quote it reacts to (a truncated quote with no closing mark is still pure).
+// A short text (up to 4 words) with a word the English lexicon does not know
+// ("Ndiyo", "service kesho", "Да"): the language checks above judge two or
+// three words by a majority, so a short code-switched reply can read as
+// English to them. Used by the any-language trial to ask a model; never by the
+// reply guards (a one-word "yes" stays English there). namesExempt (a model's
+// English output): a capitalized word is a name or product ("Use Termidor"),
+// so only a lowercase unknown word counts ("Please come kesho").
+function hasUnknownShortWord(text, { namesExempt = false, maxWords = 4 } = {}) {
+  const c = canonText(text);
+  if (isPureReaction(c)) return false;
+  const words = [...stripMarks(c).matchAll(/\p{L}+/gu)].map((m) => m[0]);
+  if (!words.length || words.length > maxWords) return false;
+  return words.some((raw) => {
+    if (namesExempt && /^\p{Lu}/u.test(raw)) return false;
+    const w = raw.toLowerCase();
+    return !/^[a-z]+$/.test(w) || (w.length > 1 && !englishKnown(w));
+  });
+}
+
+// Lowercase words a model's English output copied straight from the text it
+// translated without the lexicon knowing them ("We can come tomorrow if kesho
+// works" from "... kesho ..."): a word left untranslated, at any length. A
+// capitalized word (a name or product) is exempt.
+function untranslatedWords(text, source) {
+  // a link, domain or email is copied on purpose (portal.wavespestcontrol.com, a customer's address): not a word
+  const letters = (t) => [...stripMarks(canonText(String(t || '').replace(/\S*(?:@|:\/\/|\p{L}\.\p{L})\S*/gu, ' '))).matchAll(/\p{L}+/gu)].map((m) => m[0]);
+  const src = new Set(letters(source).map((w) => w.toLowerCase()));
+  return letters(text).filter((raw) => !/^\p{Lu}/u.test(raw) && raw.length > 2 && src.has(raw.toLowerCase()) && !englishKnown(raw.toLowerCase()));
+}
+
 function isPureReaction(text) {
   if (!REACTION_RE.test(text)) return false;
   const open = text.search(/[\u201c\u2018"']/);
@@ -1781,6 +1811,8 @@ module.exports = {
   isVerifiablyEnglish,
   isUnverifiedLanguageInbound,
   isEnglishInbound,
+  hasUnknownShortWord,
+  untranslatedWords,
   nonEnglishTimingWords,
   labelFactsForInbound,
   parseReentryText,

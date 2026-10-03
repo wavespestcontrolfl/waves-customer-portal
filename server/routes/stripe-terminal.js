@@ -9,6 +9,7 @@ const stripeConfig = require('../config/stripe-config');
 const config = require('../config');
 const {
   adminAuthenticate,
+  requireAdmin,
   isStaffAccessToken,
   staffTokenVersionMatches,
 } = require('../middleware/admin-auth');
@@ -152,6 +153,33 @@ function getHandoffSecret() {
 // pass the count check (READ COMMITTED isolation otherwise allows it).
 // adminAuthenticate guarantees req.technicianId is set — if that ever
 // changes the transaction aborts (advisory lock call throws on NULL).
+// Technician scope for in-person collection: the invoice's customer must be
+// on the technician's current/recent assigned route (technicianServicesCustomer
+// — the same predicate the schedule and customer routers use). Admins pass.
+async function technicianMayCollectInvoice(req, invoice) {
+  if (req.techRole !== 'technician') return true;
+  if (!invoice?.customer_id) return false;
+  const { technicianServicesCustomer } = require('../services/technician-visit-scope');
+  return technicianServicesCustomer(req, invoice.customer_id);
+}
+
+// The same predicate as technicianMayCollectInvoice, re-judged INSIDE the mint
+// transaction with the qualifying visit row locked FOR UPDATE (codex #5568 r14
+// P1): the unlocked check above runs before credit-apply and the separate mint
+// transaction, so a reassignment landing in between could still let the former
+// technician mint a collection token. Holding the row lock to commit means the
+// reassignment either lands first (this finds no row) or waits for the mint.
+async function technicianMayCollectInvoiceLocked(trx, req, invoice) {
+  if (req.techRole !== 'technician') return true;
+  if (!invoice?.customer_id) return false;
+  const { technicianCurrentVisitFilter } = require('../services/technician-visit-scope');
+  const assigned = await technicianCurrentVisitFilter(
+    req,
+    trx('scheduled_services').where({ customer_id: invoice.customer_id }),
+  ).forUpdate().first('scheduled_services.id');
+  return !!assigned;
+}
+
 router.post('/handoff', adminAuthenticate, async (req, res) => {
   // Hoisted so the generic catch below can reverse seam-applied credit when no
   // handoff token ends up minted (any abort after the credit-apply).
@@ -169,6 +197,11 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
 
     let invoice = await db('invoices').where({ id: invoice_id }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    // Technician scope (codex #5568 r1 P1): a technician mints a Tap to Pay
+    // handoff only for a customer on their current/recent route; an admin is
+    // unscoped. 404 so an invoice id observed elsewhere does not confirm
+    // existence. Runs before any credit-apply side effect.
+    if (!(await technicianMayCollectInvoice(req, invoice))) return res.status(404).json({ error: 'Invoice not found' });
 
     // Status + Bill-To guards run FIRST — before any Stripe cancellation or
     // credit-apply side effect — so we never cancel a payer's PaymentIntent (or
@@ -196,9 +229,35 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
     // mint's row lock, a follow-up). The common Tap-to-Pay flow is a
     // completion-created invoice with no PI and gets amount due here. Gated +
     // best-effort + idempotent; full coverage flips to 'prepaid', rejected below.
-    const { autoApplyAccountCreditIfEnabled } = require('../services/customer-credit');
-    const handoffCreditResult = await autoApplyAccountCreditIfEnabled(invoice_id);
+    //
+    // Ownership + credit are ONE transaction (codex #5568 r16 P1): the locked
+    // technician re-check runs FIRST and credit is applied only on a pass, so a
+    // reassignment can never leave credit consumed — a full-coverage apply
+    // flips the invoice to 'prepaid', which reverseAppliedCredit refuses to
+    // undo. A miss applies nothing. Full-coverage side effects (stop dunning,
+    // annual-prepay term sync) are deferred and run after commit.
+    const { autoApplyAccountCreditIfEnabled, runPostFullCoverageSideEffects } = require('../services/customer-credit');
+    let handoffCreditResult = null;
+    const ownershipHeld = await db.transaction(async (trx) => {
+      // Billing lock order (invoice → customer → visit), the order the credit
+      // apply and saved-card collection take, so a concurrent collection
+      // cannot deadlock against this ownership check (pre-push P1). The
+      // credit apply below re-locks the same rows within this transaction.
+      await trx('invoices').where({ id: invoice_id }).forUpdate().first('id');
+      if (invoice.customer_id) await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
+      if (!(await technicianMayCollectInvoiceLocked(trx, req, invoice))) return false;
+      handoffCreditResult = await autoApplyAccountCreditIfEnabled(invoice_id, { trx, deferFullCoverageSideEffects: true });
+      return true;
+    });
+    if (!ownershipHeld) return res.status(404).json({ error: 'Invoice not found' });
     handoffAppliedCredit = handoffCreditResult?.applied || 0;
+    if (handoffCreditResult?.fullyCovered) {
+      try {
+        await runPostFullCoverageSideEffects(invoice_id);
+      } catch (e) {
+        logger.warn(`[stripe-terminal] post-coverage side effects skipped for ${invoice_id}: ${e.message}`);
+      }
+    }
     invoice = (await db('invoices').where({ id: invoice_id }).first()) || invoice;
     if (invoice.status === 'prepaid') {
       return res.status(400).json({ error: 'Invoice is now covered by account credit — no in-person collection needed' });
@@ -215,8 +274,21 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
     let rateLimitedRetryAfter = 3600;
     let mintedJti = null;
     let mintedExpiresAt = null;
+    let ownershipLostAtMint = false;
 
     await db.transaction(async (trx) => {
+      // Locked re-validation of the technician's assignment BEFORE anything
+      // else in the mint (no token row, no rate-limit write on a miss), in
+      // the billing lock order invoice → customer → visit (pre-push P1).
+      if (req.techRole === 'technician') {
+        await trx('invoices').where({ id: invoice_id }).forUpdate().first('id');
+        if (invoice.customer_id) await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
+      }
+      if (!(await technicianMayCollectInvoiceLocked(trx, req, invoice))) {
+        ownershipLostAtMint = true;
+        return;
+      }
+
       // Serialize concurrent mints for this tech. Two int4 args give us a
       // namespace + key pair; the lock is held until the transaction ends.
       // Different techs get different keys and proceed in parallel.
@@ -282,6 +354,21 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
       mintedJti = jti;
       mintedExpiresAt = expires_at;
     });
+
+    if (ownershipLostAtMint) {
+      // Same refusal as the pre-check above. Reverse the credit this seam
+      // applied so the customer's credit is not consumed (and the invoice not
+      // edit-locked) for a collection the technician is no longer assigned to.
+      if (handoffCreditResult?.applied > 0) {
+        try {
+          const { reverseAppliedCredit } = require('../services/customer-credit');
+          await reverseAppliedCredit({ invoiceId: invoice_id, amount: handoffCreditResult.applied, createdBy: 'system:handoff_not_assigned' });
+        } catch (e) {
+          logger.warn(`[stripe-terminal] credit reversal after unassigned handoff skipped for ${invoice_id}: ${e.message}`);
+        }
+      }
+      return res.status(404).json({ error: 'Invoice not found' });
+    }
 
     if (rateLimited) {
       auditTerminalHandoffRateLimited({
@@ -1135,7 +1222,9 @@ router.post('/apply-surcharge', terminalAuthenticate, async (req, res) => {
 // POST /api/stripe/terminal/capture
 // Manual capture path (if we ever switch capture_method to 'manual').
 // Body: { paymentIntentId }
-router.post('/capture', adminAuthenticate, async (req, res) => {
+// Admin-only (codex #5568 r1 P1): captures an arbitrary PaymentIntent id with
+// no handoff binding, and no field flow calls it (capture_method is automatic).
+router.post('/capture', adminAuthenticate, requireAdmin, async (req, res) => {
   try {
     const { paymentIntentId } = req.body;
     if (!paymentIntentId) return res.status(400).json({ error: 'paymentIntentId required' });
@@ -1151,6 +1240,8 @@ router.post('/capture', adminAuthenticate, async (req, res) => {
 module.exports = router;
 module.exports._test = {
   handoffStaffSessionMatches,
+  technicianMayCollectInvoice,
+  technicianMayCollectInvoiceLocked,
   terminalChargeFenceResponse,
   terminalHandoffNeedsReissue,
 };
