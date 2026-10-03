@@ -9,14 +9,14 @@ const source = {
   source: { kind: 'independent_manual_review', reviewedBy: 'staff-reviewer-id', reviewedAt: '2026-10-02T12:00:00Z', reference: 'private-review-batch-1' },
 };
 
-function cohort(overrides = new Map()) {
+function cohort(overrides = new Map(), size = 41) {
   const rows = [];
   const adjudications = [];
   const bodies = new Map();
-  for (let i = 0; i < 41; i += 1) {
+  for (let i = 0; i < size; i += 1) {
     // Two independently reviewed accepts for offer 0 prove repeated replies do
     // not increase the distinct-offer denominator.
-    const offerNumber = i === 40 ? 0 : i;
+    const offerNumber = i === size - 1 ? 0 : i;
     const offerId = `offer-${offerNumber}`;
     const accept = i === 0 || i === 40;
     const configured = overrides.get(i) || {};
@@ -32,8 +32,9 @@ function cohort(overrides = new Map()) {
     const outboundBody = `synthetic offer ${offerNumber}`;
     bodies.set(replyId, replyBody);
     bodies.set(outboundId, outboundBody);
-    const wouldHave = configured.wouldHave || (outcome === 'would_move'
-      ? { kind: 'move_visit', scheduled_service_id: `visit-${offerNumber}`, date: '2026-10-06', start: '10:00', arrival_end: '12:00' }
+    const planned = ['would_move', 'would_book', 'confirm_only', 'staff'].includes(outcome) && action === 'accept_slot';
+    const wouldHave = configured.wouldHave || (planned
+      ? { kind: outcome === 'would_move' ? 'move_visit' : kind, scheduled_service_id: `visit-${offerNumber}`, date: '2026-10-06', start: '10:00', arrival_end: '12:00' }
       : null);
     const expectedOutcome = configured.expectedOutcome
       || (expectedAction === 'accept_slot' ? (kind === 'move_visit' ? 'move' : 'book') : 'no_action');
@@ -45,8 +46,8 @@ function cohort(overrides = new Map()) {
         outbound: { smsLogId: outboundId, bodySha256: sha256Text(outboundBody), createdAt: '2026-10-02T09:00:00Z' },
       }],
       selectedOfferId: offerId,
-      before: { observed: true, observedAt: '2026-10-02T10:00:00Z', visit: { date: '2026-10-05', start: '08:00', status: 'confirmed' } },
-      after: { observed: outcome === 'would_move', observedAt: '2026-10-02T10:00:01Z', visit: outcome === 'would_move' ? { date: '2026-10-05', start: '08:00', status: 'confirmed' } : null },
+      before: { observed: true, observedAt: '2026-10-02T10:00:00Z', visit: { date: '2026-10-05', start: '08:00', end: '10:00', status: 'confirmed' } },
+      after: { observed: outcome === 'would_move', observedAt: outcome === 'would_move' ? '2026-10-02T10:00:01Z' : null, visit: outcome === 'would_move' ? { date: '2026-10-05', start: '08:00', end: '10:00', status: 'confirmed' } : null },
       decision: { model: configured.model || MODEL, servedModel: configured.model || MODEL, requestedModel: MODEL, promptVersion, action, slotNumber, outcome, wouldHave },
     };
     const fingerprint = fingerprintEvidence(evidence);
@@ -138,6 +139,47 @@ test('unknown or missing offer kinds make the reviewed cohort inconclusive', () 
   expect(result.status).toBe('inconclusive');
   expect(result.epochs[0]).toMatchObject({ unknownOrMixedOfferKind: 2, distinctOffersScored: 38 });
   expect(result.epochs[0].reasons).toContain('unknown_or_mixed_offer_kind_not_scored');
+});
+
+test('stale plans and incomplete operational snapshots cannot complete the cohort', () => {
+  const strayPlan = cohort();
+  const wouldHave = { kind: 'move_visit', scheduled_service_id: 'visit-1', date: '2026-10-06', start: '10:00', arrival_end: '12:00' };
+  strayPlan.rows[1].would_have = wouldHave;
+  strayPlan.rows[1].decision_evidence.decision.wouldHave = wouldHave;
+  strayPlan.rows[1].evidence_fingerprint = fingerprintEvidence(strayPlan.rows[1].decision_evidence);
+  strayPlan.adjudications[1].evidenceFingerprint = strayPlan.rows[1].evidence_fingerprint;
+  expect(summarizeQualification(strayPlan.rows, { ...source, adjudications: strayPlan.adjudications }, strayPlan.bodies))
+    .toMatchObject({ status: 'inconclusive', epochs: [{ incompleteEvidence: 1 }] });
+
+  const placeholder = cohort();
+  placeholder.rows[1].decision_evidence.before = {};
+  placeholder.rows[1].evidence_fingerprint = fingerprintEvidence(placeholder.rows[1].decision_evidence);
+  placeholder.adjudications[1].evidenceFingerprint = placeholder.rows[1].evidence_fingerprint;
+  expect(summarizeQualification(placeholder.rows, { ...source, adjudications: placeholder.adjudications }, placeholder.bodies))
+    .toMatchObject({ status: 'inconclusive', epochs: [{ incompleteEvidence: 1 }] });
+
+  const emptyMove = cohort();
+  emptyMove.rows[0].decision_evidence.before.visit = {};
+  emptyMove.rows[0].decision_evidence.after.visit = {};
+  emptyMove.rows[0].evidence_fingerprint = fingerprintEvidence(emptyMove.rows[0].decision_evidence);
+  emptyMove.adjudications[0].evidenceFingerprint = emptyMove.rows[0].evidence_fingerprint;
+  expect(summarizeQualification(emptyMove.rows, { ...source, adjudications: emptyMove.adjudications }, emptyMove.bodies))
+    .toMatchObject({ status: 'inconclusive', epochs: [{ incompleteEvidence: 1 }] });
+});
+
+test('qualification compares exact recall counts instead of the rounded report value', () => {
+  const overrides = new Map();
+  for (let i = 0; i < 4005; i += 1) {
+    const caught = i <= 3202 || i === 4004;
+    overrides.set(i, { expectedAction: 'accept_slot', ...(caught ? {} : { action: 'decline', outcome: 'no_action' }) });
+  }
+  const c = cohort(overrides, 4005);
+  const result = summarizeQualification(c.rows, { ...source, adjudications: c.adjudications }, c.bodies);
+  expect(result.status).toBe('not_qualified');
+  expect(result.epochs[0].trueAccepts).toMatchObject({
+    distinctOffers: 4004, caughtDistinctOffers: 3203, offerRecall: 0.8,
+  });
+  expect(result.epochs[0].reasons).toContain('true_accept_offer_recall_below_80_percent');
 });
 
 test('one missed repeated accept misses that offer, and any wrong would-move fails the bar', () => {

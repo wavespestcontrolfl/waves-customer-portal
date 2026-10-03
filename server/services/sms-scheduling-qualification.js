@@ -17,6 +17,7 @@ const crypto = require('node:crypto');
 const REVIEW_KIND = 'independent_manual_review';
 const EXPECTED_ACTIONS = new Set(['accept_slot', 'decline', 'asks_other_time', 'unclear', 'unsupported']);
 const EXPECTED_OUTCOMES = new Set(['move', 'book', 'confirm_only', 'staff', 'no_action', 'unsupported']);
+const PLANNED_DECISION_OUTCOMES = new Set(['would_move', 'would_book', 'confirm_only', 'staff']);
 const HASH_RE = /^[0-9a-f]{64}$/;
 const OFFSET_ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/;
 
@@ -80,8 +81,9 @@ function decisionMatchesRow(decision, row) {
   if (!decision || decision.model !== row.model || decision.promptVersion !== row.prompt_version) return false;
   if (!isNonblankString(decision.servedModel) || decision.servedModel !== row.model) return false;
   if (decision.action !== row.action || decision.slotNumber !== row.slot_number || decision.outcome !== row.outcome) return false;
-  return row.outcome !== 'would_move'
-    || fingerprintEvidence(decision.wouldHave) === fingerprintEvidence(parse(row.would_have));
+  if (fingerprintEvidence(decision.wouldHave) !== fingerprintEvidence(parse(row.would_have))) return false;
+  const shouldHavePlan = decision.action === 'accept_slot' && PLANNED_DECISION_OUTCOMES.has(decision.outcome);
+  return shouldHavePlan ? decision.wouldHave != null : decision.wouldHave == null;
 }
 
 function linkedOffers(evidence, row, smsBodiesById) {
@@ -92,11 +94,22 @@ function linkedOffers(evidence, row, smsBodiesById) {
   return String(evidence.selectedOfferId || '') === String(row.sms_offer_id) ? offers : null;
 }
 
+function completeVisit(visit) {
+  return visit && typeof visit === 'object' && !Array.isArray(visit)
+    && ['date', 'start', 'end', 'status'].every((field) => isNonblankString(visit[field]));
+}
+
+function validSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return false;
+  if (typeof snapshot.observed !== 'boolean') return false;
+  if (!snapshot.observed) return snapshot.observedAt == null && snapshot.visit == null;
+  return validOffsetDate(snapshot.observedAt) && (snapshot.visit == null || completeVisit(snapshot.visit));
+}
+
 function completeDecisionFacts(evidence, outcome) {
-  if (!evidence.before || !evidence.after) return false;
+  if (!validSnapshot(evidence.before) || !validSnapshot(evidence.after) || !evidence.before.observed) return false;
   if (outcome !== 'would_move') return true;
-  return evidence.before.observed === true && evidence.after.observed === true
-    && Boolean(evidence.before.visit) && Boolean(evidence.after.visit);
+  return evidence.after.observed && completeVisit(evidence.before.visit) && completeVisit(evidence.after.visit);
 }
 
 function evidenceFor(row, smsBodiesById) {
@@ -189,9 +202,10 @@ function finishEpoch(epoch, state) {
   if (!epoch.trueAccepts.distinctOffers) epoch.reasons.push('no_independently_adjudicated_true_accepts');
   if (epoch.wrongProposedMoves > 0) epoch.reasons.push('adjudicated_wrong_proposed_move');
   const enough = complete && epoch.distinctOffersScored >= 40 && epoch.trueAccepts.distinctOffers > 0;
+  const recallPasses = epoch.trueAccepts.caughtDistinctOffers * 5 >= epoch.trueAccepts.distinctOffers * 4;
   if (enough) {
-    if (epoch.trueAccepts.offerRecall < 0.8) epoch.reasons.push('true_accept_offer_recall_below_80_percent');
-    epoch.status = epoch.wrongProposedMoves > 0 || epoch.trueAccepts.offerRecall < 0.8 ? 'not_qualified' : 'qualified';
+    if (!recallPasses) epoch.reasons.push('true_accept_offer_recall_below_80_percent');
+    epoch.status = epoch.wrongProposedMoves > 0 || !recallPasses ? 'not_qualified' : 'qualified';
   }
   return epoch;
 }
