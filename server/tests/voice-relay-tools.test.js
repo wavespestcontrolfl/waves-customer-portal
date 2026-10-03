@@ -242,7 +242,7 @@ describe('capture_lead for a recognised contact (secondary slot)', () => {
     expect(notes).toEqual(expect.arrayContaining([
       'Prefers: email.',
       'Contact preference: “please stop calling me”.',
-      expect.stringMatching(/^Asked for a contact restriction that is not a text opt-out/),
+      expect.stringMatching(/^Has a contact restriction/),
     ]));
   });
 
@@ -280,7 +280,7 @@ describe('capture_lead for a recognised contact (secondary slot)', () => {
       'Email: robin@example.com.',
       'Prefers: email.',
       'Contact preference: “email only, stop calling”.',
-      expect.stringMatching(/^Asked for a contact restriction that is not a text opt-out/),
+      expect.stringMatching(/^Has a contact restriction/),
     ]));
     // A new number given later replaces the earlier one.
     await executeTool('capture_lead', { call_summary: 'Different number.', callback_phone: '+19415550188' }, ctx);
@@ -297,30 +297,31 @@ describe('capture_lead for a recognised contact (secondary slot)', () => {
     expect(second.notes).toEqual(expect.arrayContaining(['Later on the call: Added their email.']));
   });
 
-  test('a text-only opt-out with a requested callback keeps the follow-up — it is not a total no-contact', async () => {
+  // The code never judges which channels a restriction covers: any
+  // restriction flags the bell for review with the caller's words, and the
+  // agent is told to promise only what the caller did not decline.
+  test.each([
+    ['a text-only opt-out with a requested callback', 'stop texting me, call me instead'],
+    ['an everything-but-email request', 'do not contact me except by email'],
+    ['a total no-contact request', 'do not contact me again'],
+    ['a bare flag with no words', undefined],
+  ])('%s → the bell is a request to review and no declined channel is promised', async (_label, words) => {
     const out = await executeTool('capture_lead', {
-      call_summary: 'Wants a call about today.', contact_preference: 'stop texting me, call me instead', do_not_contact_request: true,
+      call_summary: 'Asked about today\'s visit.', ...(words ? { contact_preference: words } : {}), do_not_contact_request: true,
     }, recognised());
     const arg = bell.mock.calls[0][0];
-    expect(arg.doNotContact).toBe(false);
-    expect(arg.notes).toEqual(expect.arrayContaining([expect.stringMatching(/^Asked for no text messages/)]));
-    expect(out).toMatch(/follow up with THEM/);
-    expect(out).not.toMatch(/asked NOT to be contacted/);
-  });
-
-  test('a bare do-not-contact flag with no words is noted for the office, never treated as total', async () => {
-    await executeTool('capture_lead', { call_summary: 'Something about contact.', do_not_contact_request: true }, recognised());
-    const arg = bell.mock.calls[0][0];
-    expect(arg.doNotContact).toBe(false);
-    expect(arg.notes).toEqual(expect.arrayContaining([expect.stringMatching(/^Asked for a contact restriction that is not a text opt-out/)]));
-  });
-
-  test('a no-contact request is passed on for review — Sandy is never told to promise a follow-up', async () => {
-    const out = await executeTool('capture_lead', { call_summary: 'Do not contact me again.', contact_preference: 'do not contact me again', do_not_contact_request: true }, recognised());
-    expect(bell).toHaveBeenCalledWith(expect.objectContaining({ doNotContact: true }));
-    expect(out).toMatch(/asked NOT to be contacted/);
-    expect(out).toMatch(/Do NOT promise that anyone will call, text or email them/);
+    expect(arg.restricted).toBe(true);
+    expect(arg.notes).toEqual(expect.arrayContaining([expect.stringMatching(/^Has a contact restriction/)]));
+    if (words) expect(arg.notes).toEqual(expect.arrayContaining([`Contact preference: “${words}”.`]));
+    expect(out).toMatch(/Promise a follow-up ONLY by a way they did not decline/);
+    expect(out).toMatch(/if they asked for no contact at all, promise none/);
     expect(out).not.toMatch(/follow up with THEM/);
+  });
+
+  test('no restriction → the ordinary follow-up bell and promise', async () => {
+    const out = await executeTool('capture_lead', { call_summary: 'Asked about today\'s visit.', preferred_contact_method: 'phone' }, recognised());
+    expect(bell.mock.calls[0][0].restricted).toBe(false);
+    expect(out).toMatch(/follow up with THEM/);
   });
 
   test('a card number in the summary is scrubbed before it reaches the bell', async () => {

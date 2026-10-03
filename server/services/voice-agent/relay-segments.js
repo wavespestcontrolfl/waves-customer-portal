@@ -59,7 +59,7 @@ function nonEmptyFields(fields) {
 }
 
 const CONTACT_FOLLOWUP_TEXT = ['callbackPhone', 'method', 'preference', 'timing', 'request'];
-const CONTACT_FOLLOWUP_FLAGS = ['doNotContact', 'noTexts', 'contactUnclear', 'textsStopped', 'estimateAsked'];
+const CONTACT_FOLLOWUP_FLAGS = ['restricted', 'textsStopped', 'estimateAsked'];
 
 /** The contact follow-up bag in its stored shape: known keys only, or null when empty. */
 function contactFollowUpFields(fields) {

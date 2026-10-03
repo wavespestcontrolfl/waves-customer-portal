@@ -1299,14 +1299,14 @@ async function executeTool(name, input = {}, ctx = {}) {
           method: extracted.preferred_contact_method || prior.method || null,
           preference: scrubbedField(extracted.contact_preference) || prior.preference || null,
           timing: extracted.preferred_date_time || prior.timing || null,
-          // ⭐ A CHANNEL OPT-OUT IS NOT A TOTAL ONE. "Stop texting me, call me
-          // instead" withdraws texts and ASKS for a call: only the classifier's
-          // total withdrawal (totalStop) turns the follow-up into a review.
-          // A text-only stop and a bare flag with no words are noted for the
-          // office and leave the follow-up standing.
-          doNotContact: totalStop || prior.doNotContact === true,
-          noTexts: statedSmsStop || prior.noTexts === true,
-          contactUnclear: (input.do_not_contact_request === true && !smsOptOut) || prior.contactUnclear === true,
+          // ⭐ THE CODE DOES NOT JUDGE WHICH CHANNELS A RESTRICTION COVERS.
+          // "Stop texting me, call me instead", "do not contact me except by
+          // email" and "never contact me again" are all a restriction; telling
+          // them apart is a language judgement, and a word list here would
+          // get one of them wrong. Any restriction is flagged, the caller's
+          // own words ride the bell, a person reads them — and the agent, who
+          // heard them, is told to promise only what they did not decline.
+          restricted: input.do_not_contact_request === true || smsOptOut || prior.restricted === true,
           textsStopped: smsSuppressionApplied || prior.textsStopped === true,
           estimateAsked: estimateRequested || prior.estimateAsked === true,
           // WHY they called is the FIRST capture's summary and stays: a later
@@ -1320,8 +1320,8 @@ async function executeTool(name, input = {}, ctx = {}) {
           customerId: ctx.customerId,
           callbackPhone: followUp.callbackPhone,
           summary: followUp.request || '',
-          // A total no-contact request turns the bell into a review, not outreach.
-          doNotContact: followUp.doNotContact,
+          // Any contact restriction turns the bell into a request to review.
+          restricted: followUp.restricted,
           callSid: ctx.callSid || null,
           // The claim-owner nonce: the bell write re-proves ownership under the
           // call row's lock, like the lead capture below.
@@ -1343,14 +1343,8 @@ async function executeTool(name, input = {}, ctx = {}) {
             followUp.estimateAsked ? 'Asked for a written estimate — none was queued.' : null,
             followUp.method ? `Prefers: ${followUp.method}.` : null,
             followUp.preference ? `Contact preference: “${followUp.preference}”.` : null,
-            followUp.doNotContact
-              ? `Asked not to be contacted at all — ${followUp.textsStopped ? 'texts to their number are already stopped; ' : ''}check before reaching out.`
-              : null,
-            !followUp.doNotContact && followUp.noTexts
-              ? `Asked for no text messages${followUp.textsStopped ? ' (already stopped)' : ''} — reach them another way.`
-              : null,
-            !followUp.doNotContact && followUp.contactUnclear
-              ? 'Asked for a contact restriction that is not a text opt-out (their words are above, if they gave any) — check before reaching out.'
+            followUp.restricted
+              ? `Has a contact restriction${followUp.textsStopped ? ' (texts to their number are already stopped)' : ''} — read their words before reaching out.`
               : null,
           ].filter(Boolean),
         });
@@ -1361,12 +1355,16 @@ async function executeTool(name, input = {}, ctx = {}) {
         if (belled) {
           if (typeof ctx.markCaptured === 'function') ctx.markCaptured({ leadCreated: false });
           if (typeof ctx.noteCallSummary === 'function') ctx.noteCallSummary(input.call_summary);
-          // ⭐ NO PROMISE OF CONTACT AFTER A NO-CONTACT REQUEST. The office
-          // reviews it; Sandy says only that the request was passed on.
-          if (followUp.doNotContact) {
-            return 'Saved for the office — the caller asked NOT to be contacted, and the office has that request to '
-              + 'review. Do NOT promise that anyone will call, text or email them, and do not say a new request '
-              + 'or appointment was created. Tell the caller their request has been passed to the office.'
+          // ⭐ NO PROMISE THE CALLER DECLINED. With a restriction on file the
+          // agent promises only a channel they did not decline — and nothing
+          // at all if they asked for no contact.
+          if (followUp.restricted) {
+            return 'Saved for the office — this caller is a contact on an existing customer\'s account, so no new '
+              + 'lead was created and none should be. The office has their request and exactly how they asked to be '
+              + 'contacted. Promise a follow-up ONLY by a way they did not decline; if they asked for no contact at '
+              + 'all, promise none and say their request has been passed to the office. Do not say a new request or '
+              + 'appointment was created. Never promise that Waves will contact the account holder.'
+              + (estimateRequested ? ' NO written estimate was queued — do not promise one.' : '')
               + (followUp.textsStopped ? ' The SMS opt-out WAS applied: you may tell the caller text messages to this number have been stopped.' : '');
           }
           return 'Saved for the office — this caller is a contact on an existing customer\'s account, so no new '

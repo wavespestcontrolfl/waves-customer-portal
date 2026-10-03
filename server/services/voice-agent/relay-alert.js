@@ -649,7 +649,7 @@ async function sweepAbandonedHotAlerts({ limit = 10 } = {}) {
  * re-proven under the call row's lock in the SAME transaction as the write
  * (claimOwnedElsewhere — the lead, booking and re-service writers' fence).
  */
-async function alertOfficeContactFollowUp({ customerId, callbackPhone, summary, callSid, notes = [], sessionKey = null, doNotContact = false }) {
+async function alertOfficeContactFollowUp({ customerId, callbackPhone, summary, callSid, notes = [], sessionKey = null, restricted = false }) {
   if (!customerId || !callSid) return false;
   try {
     const db = require('../../models/db');
@@ -664,12 +664,13 @@ async function alertOfficeContactFollowUp({ customerId, callbackPhone, summary, 
       }
       return raiseAdminAlert('alert', {
       area: 'Comms',
-      // A contact who asked NOT to be contacted is a request to review, never
-      // an instruction to reach out.
-      action: doNotContact
+      // A contact who restricted how (or whether) to reach them is a request
+      // to READ, never an instruction to reach out: their words are in the
+      // detail, and a person decides.
+      action: restricted
         ? (name
-          ? fitAction('Comms', name, [(n) => `review a no-contact request on ${n}'s account`, (n) => `review ${n}'s no-contact request`])
-          : 'review a no-contact request on a customer account')
+          ? fitAction('Comms', name, [(n) => `review a contact request on ${n}'s account`, (n) => `review ${n}'s contact request`])
+          : 'review a contact request on a customer account')
         : (name
           ? fitAction('Comms', name, [(n) => `follow up with a contact on ${n}'s account`, (n) => `follow up with ${n}'s contact`])
           : 'follow up with a contact on a customer account'),
@@ -677,7 +678,7 @@ async function alertOfficeContactFollowUp({ customerId, callbackPhone, summary, 
       severity: 'needs-you',
       link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
       subject: { type: 'customer', id: String(customerId) },
-      doneWhen: doNotContact ? 'contact_request_reviewed' : 'contact_followed_up',
+      doneWhen: restricted ? 'contact_request_reviewed' : 'contact_followed_up',
       who: 'person',
     }, {
       bell: true,

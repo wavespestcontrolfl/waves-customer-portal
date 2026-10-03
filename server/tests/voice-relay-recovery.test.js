@@ -237,26 +237,26 @@ describe('relay-recovery module', () => {
   // asked to be reached survives a reconnect, so a capture on the resumed leg
   // cannot revert the callback number or drop a restriction.
   test('a recognised contact\'s follow-up details ride the segment and merge across legs: latest text wins, a flag once set stays', async () => {
-    const seg = segmentStore.buildSegment({ generation: 1, text: 'Caller: hi', contactFollowUp: { callbackPhone: '+19415550199', method: 'email', preference: ' email only ', doNotContact: true, textsStopped: false, junk: 'dropped' } });
-    expect(seg.contact_followup).toEqual({ callbackPhone: '+19415550199', method: 'email', preference: 'email only', doNotContact: true });
+    const seg = segmentStore.buildSegment({ generation: 1, text: 'Caller: hi', contactFollowUp: { callbackPhone: '+19415550199', method: 'email', preference: ' email only ', restricted: true, textsStopped: false, junk: 'dropped' } });
+    expect(seg.contact_followup).toEqual({ callbackPhone: '+19415550199', method: 'email', preference: 'email only', restricted: true });
     expect(segmentStore.buildSegment({ generation: 1, text: 'x' }).contact_followup).toBeNull();
     const { db } = primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_segments: [
       { generation: 2, text: 'Caller: later', contact_followup: { method: 'text', estimateAsked: true } },
       seg,
     ] } } });
     const state = await recovery.loadResumeState(db, 'CA-1', { sessionKey: 'nonce-2' });
-    expect(state.contactFollowUp).toEqual({ callbackPhone: '+19415550199', method: 'text', preference: 'email only', doNotContact: true, estimateAsked: true });
+    expect(state.contactFollowUp).toEqual({ callbackPhone: '+19415550199', method: 'text', preference: 'email only', restricted: true, estimateAsked: true });
   });
 
   test('capture → reconnect → capture: the resumed leg\'s tool ctx starts from the earlier leg\'s follow-up details', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
-    primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_segments: [{ generation: 1, text: 'Caller: hi', contact_followup: { callbackPhone: '+19415550199', doNotContact: true } }] } } });
+    primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_segments: [{ generation: 1, text: 'Caller: hi', contact_followup: { callbackPhone: '+19415550199', restricted: true } }] } } });
     const convo = resumedConvo({ callSid: 'CA-contact-resume' });
     await convo._resumeReady;
     const ctx = convo._buildToolCtx();
-    expect(ctx.getContactFollowUp()).toEqual({ callbackPhone: '+19415550199', doNotContact: true });
+    expect(ctx.getContactFollowUp()).toEqual({ callbackPhone: '+19415550199', restricted: true });
     ctx.noteContactFollowUp({ ...ctx.getContactFollowUp(), method: 'email' });
-    expect(convo._contactFollowUp).toEqual({ callbackPhone: '+19415550199', doNotContact: true, method: 'email' });
+    expect(convo._contactFollowUp).toEqual({ callbackPhone: '+19415550199', restricted: true, method: 'email' });
   });
 
   test('an incomplete estimate capture rides the segment (hold + the fields given) and is restored from the LATEST leg, fields accumulated across legs (codex r2 P1)', async () => {
