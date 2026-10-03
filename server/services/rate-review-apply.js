@@ -887,6 +887,52 @@ function flatVisitRefusal(visit, addonCount, noticedCurrentCents, liveTermIds = 
   return null;
 }
 
+// The structural refusals of the per-application lane, as PURE predicates over
+// loaded rows. The apply's lock/guard path below and the comms lane's
+// pre-send preflight (rate-review-comms.js) both call them, so a letter is
+// never sent for a change these would hold.
+function seriesRefusal(visits, noticedRoot, effectiveDate) {
+  if (!visits.length) return { reason: 'no_future_visit', detail: { effectiveDate } };
+  const roots = seriesRoots(visits);
+  if (roots.length > 1) return { reason: 'multiple_series', detail: { roots } };
+  // A series cancelled and replaced since the notice (same line, cadence
+  // and price) is a new plan: the old notice never reprices it. A notice
+  // that did not record its series fails closed.
+  if (!noticedRoot) return { reason: 'notice_series_unrecorded', detail: undefined };
+  if (String(noticedRoot) !== roots[0]) return { reason: 'plan_replaced', detail: { noticedSeries: noticedRoot, liveSeries: roots[0] } };
+  return null;
+}
+
+// The visit the letter named as the first at the new rate: one already under
+// way or finished billed at the old rate.
+function startedVisitRefusal(first) {
+  if (first && ['en_route', 'on_site', 'completed'].includes(String(first.status))) return { reason: 'effective_visit_started', detail: { visitId: first.id, status: first.status } };
+  return null;
+}
+
+// A parked reschedule request in the window is outside the propagation's
+// target set and would keep the old price; a legacy NULL-status visit is live
+// but the series helper only reprices pending/confirmed rows.
+function parkedVisitRefusal(visits) {
+  const parked = visits.find((v) => String(v.status) === 'rescheduled');
+  if (parked) return { reason: 'visit_in_reschedule', detail: { visitId: parked.id } };
+  const statusless = visits.find((v) => v.status == null);
+  if (statusless) return { reason: 'visit_status_missing', detail: { visitId: statusless.id } };
+  return null;
+}
+
+// Every refusal the apply raises from the rows alone, in the apply's order;
+// null when none. visits = loadLineOpenVisits from the effective date.
+function perApplicationStructuralRefusal({ visits, addonCounts = new Map(), liveTermIds = new Set(), noticedCurrentCents, noticedRoot, firstVisit = null, effectiveDate }) {
+  const found = seriesRefusal(visits, noticedRoot, effectiveDate) || startedVisitRefusal(firstVisit) || parkedVisitRefusal(visits);
+  if (found) return found.reason;
+  for (const visit of visits.filter((v) => UPCOMING_STATUSES.includes(String(v.status)))) {
+    const refusal = flatVisitRefusal(visit, addonCounts.get(String(visit.id)) || 0, noticedCurrentCents, liveTermIds);
+    if (refusal) return refusal;
+  }
+  return null;
+}
+
 // Which series carries the line, locked in the writers' order (series
 // maintenance → comms → customer row → visit rows; the comms lock and the
 // customers row are already held by the caller) and guarded exactly as the
@@ -899,16 +945,9 @@ async function lockPerApplicationTargets(trx, { notice, customer, effectiveDate,
   // the new rate when it is finally completed — exactly what the customer
   // was told.
   const visits = await loadLineOpenVisits(trx, { customerId: customer.id, familyKey: notice.family_key, cadence: row ? row.cadence : null, fromDate: effectiveDate });
-  if (!visits.length) throw hold('no_future_visit', { effectiveDate });
-  const roots = [...new Set(visits.map((v) => String(v.recurring_parent_id || v.id)))];
-  if (roots.length > 1) throw hold('multiple_series', { roots });
-  const parentId = roots[0];
-  // A series cancelled and replaced since the notice (same line, cadence
-  // and price) is a new plan: the old notice never reprices it. A notice
-  // that did not record its series fails closed.
-  const noticedRoot = parseMetadata(notice.metadata).series_root_id;
-  if (!noticedRoot) throw hold('notice_series_unrecorded');
-  if (String(noticedRoot) !== String(parentId)) throw hold('plan_replaced', { noticedSeries: noticedRoot, liveSeries: parentId });
+  const series = seriesRefusal(visits, parseMetadata(notice.metadata).series_root_id, effectiveDate);
+  if (series) throw hold(series.reason, series.detail);
+  const parentId = seriesRoots(visits)[0];
   // The visit the letter named as the first at the new rate: a delayed run
   // that finds it already under way or finished billed it at the old rate,
   // and repricing only the later visits would record a change that did not
@@ -916,7 +955,8 @@ async function lockPerApplicationTargets(trx, { notice, customer, effectiveDate,
   const firstVisitId = parseMetadata(notice.metadata).first_visit_id;
   if (firstVisitId) {
     const first = await trx('scheduled_services').where({ id: firstVisitId }).first('id', 'status');
-    if (first && ['en_route', 'on_site', 'completed'].includes(String(first.status))) throw hold('effective_visit_started', { visitId: first.id, status: first.status });
+    const started = startedVisitRefusal(first);
+    if (started) throw hold(started.reason, started.detail);
   }
   let locked;
   try {
@@ -930,12 +970,8 @@ async function lockPerApplicationTargets(trx, { notice, customer, effectiveDate,
   if (!locked.length) throw hold('no_future_visit', { effectiveDate });
   // A parked reschedule request in the window is outside the propagation's
   // target set and would keep the old price — refuse instead.
-  const parkedReschedule = visits.find((v) => String(v.status) === 'rescheduled');
-  if (parkedReschedule) throw hold('visit_in_reschedule', { visitId: parkedReschedule.id });
-  // A legacy NULL-status visit is live (it bills at its own stamp when
-  // completed) but the series helper only reprices pending/confirmed rows.
-  const statusless = visits.find((v) => v.status == null);
-  if (statusless) throw hold('visit_status_missing', { visitId: statusless.id });
+  const parked = parkedVisitRefusal(visits);
+  if (parked) throw hold(parked.reason, parked.detail);
   const lockedIds = new Set(locked.map((v) => String(v.id)));
   const expected = new Set(visits.filter((v) => UPCOMING_STATUSES.includes(String(v.status))).map((v) => String(v.id)));
   if (lockedIds.size !== expected.size || [...lockedIds].some((id) => !expected.has(id))) throw hold('target_set_changed', { locked: [...lockedIds], expected: [...expected] });
@@ -1570,7 +1606,7 @@ module.exports = {
   noticedRenewalAmountError,
   recordNoticedAmountOverride,
   _private: {
-    laneForRow, effectiveDateFor, nextBillingDayOnOrAfter, loadFamilySlices, sumSlices, cents, addDaysYmd, daysBetweenYmd, flatVisitRefusal, holdFromGuard, HoldError,
+    laneForRow, effectiveDateFor, nextBillingDayOnOrAfter, loadFamilySlices, sumSlices, cents, addDaysYmd, daysBetweenYmd, flatVisitRefusal, perApplicationStructuralRefusal, holdFromGuard, HoldError,
     loadLineOpenVisits, loadAccountPlanLineCount, loadCustomerOpenVisits, consumesPerApplicationFee, feeScopeRefusal, resolvePrepayTerm, successorTermExists, tryAnnualPrepayLock, resolveLiveLane, applyNotice, loadDueNotices, wasDelivered, cadenceLabelFor, termRenewalNoticed, moveMonthlySlice, scheduleRow,
   },
 };
