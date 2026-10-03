@@ -187,6 +187,15 @@ describe('what the read flagged: Seen / Not seen', () => {
     expect(screen.getByText('The photo read flagged nothing on this list.')).toBeTruthy();
   });
 
+  test('the preview asks for the watch read because this sheet shows the list', async () => {
+    const request = makeRequest();
+    await openSheet(request);
+    await addBothPhotos();
+    await analyze();
+    const preview = request.calls.find((c) => c.path.endsWith('/assess-preview'));
+    expect(JSON.parse(preview.options.body).watchList).toBe(true);
+  });
+
   test('a watch read that did not finish is never shown as a clean result', async () => {
     await openSheet(makeRequest({ preview: { ...PREVIEW, watchSignals: [], watchSignalsComplete: false } }));
     await addBothPhotos();

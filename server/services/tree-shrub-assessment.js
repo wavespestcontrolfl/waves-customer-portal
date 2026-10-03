@@ -481,9 +481,13 @@ async function readWatchSignals(base64Image, mimeType, month) {
     const text = geminiText(await response.json());
     if (!text) return null;
     const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
-    // An answer without the array is not a read: null, never a clean [].
+    // An answer without the array, or with any entry that is not a key on this
+    // month's list, is not a read: null, never a clean [].
     if (!parsed || !Array.isArray(parsed.watch_signals)) return null;
-    return normalizeWatchSignals(parsed.watch_signals, month);
+    const signals = normalizeWatchSignals(parsed.watch_signals, month);
+    const conforming = parsed.watch_signals.every((entry) => typeof entry === 'string'
+      && signals.includes(entry.trim().toLowerCase()));
+    return conforming ? signals : null;
   } catch (err) {
     logger.warn(`Tree-shrub watch-signal read failed: ${err.message}`);
     return null;

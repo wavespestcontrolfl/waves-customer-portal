@@ -528,7 +528,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
   }, []);
   const tips = useTipLibrary({ base, request });
   const tipsAvailable = !!tips;
-  const photos = usePhotoSlots({ base, request });
+  const photos = usePhotoSlots({ base, request, watchList: Array.isArray(ctx.watchList) && ctx.watchList.length > 0 });
   const picker = useProductPicker({
     products: ctx.products,
     commonProducts: [],
@@ -639,7 +639,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
 // The five photo slots, the Analyze read, and what it flagged. `slots` is
 // slot key -> prepared photo; `list` is the photos in slot order, the order
 // the server scores and records them.
-function usePhotoSlots({ base, request }) {
+function usePhotoSlots({ base, request, watchList = false }) {
   const [slots, setSlots] = useState({});
   const [busyKeys, setBusyKeys] = useState(() => new Set());
   const [errors, setErrors] = useState({});
@@ -691,7 +691,8 @@ function usePhotoSlots({ base, request }) {
     try {
       const result = await request(`${base}/tree-shrub/assess-preview`, {
         method: 'POST',
-        body: JSON.stringify({ photos: analyzed.map((data) => ({ data })) }),
+        // watchList: ask for the watch read only when this sheet shows the list.
+        body: JSON.stringify({ photos: analyzed.map((data) => ({ data })), ...(watchList && { watchList: true }) }),
       });
       if (sequence !== readSequence.current) return;
       // Only a read that scored EVERY photo is reviewable: /complete trusts the

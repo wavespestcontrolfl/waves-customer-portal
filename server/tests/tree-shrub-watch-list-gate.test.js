@@ -190,21 +190,21 @@ describe('analyzePhoto: gate on with a valid month', () => {
     expect(mockAnthropicCreate).not.toHaveBeenCalled();
   });
 
-  test('known signals in list order; unknown, duplicate and other-month keys dropped', async () => {
-    serve({ watch: { watch_signals: ['whitefly', 'scale', 'scale', 'made_up', 7, 'trunk_conk_base', 'aphids'] } });
+  test('known signals come back in list order, duplicates once', async () => {
+    serve({ watch: { watch_signals: ['whitefly', 'scale', 'scale', 'trunk_conk_base'] } });
     const result = await analyzePhoto('b64', 'image/jpeg', { month: 10 });
-    // October: scale, whitefly, root_rot, bed_weeds, then year-round. aphids is not on it.
+    // October: scale, whitefly, root_rot, bed_weeds, then year-round.
     expect(result.watchSignals).toEqual(['scale', 'whitefly', 'trunk_conk_base']);
   });
 
-  test('a missing or malformed watch field is no read (null), junk entries are dropped, and the main read is unchanged', async () => {
+  test('a missing or malformed watch field, or any entry off the month list, is no read (null) and the main read is unchanged', async () => {
     serve();
     const clean = await analyzePhoto('b64', 'image/jpeg', { month: 4 });
     expect(clean.watchSignals).toEqual([]);
-    for (const bad of ['scale', 5, { 0: 'scale' }, [null, {}, []], true, null]) {
+    for (const bad of ['scale', 5, { 0: 'scale' }, [null, {}, []], ['scale insect'], ['scale', 'made_up'], ['spider_mites'], true, null]) {
       serve({ watch: { watch_signals: bad } });
       const result = await analyzePhoto('b64', 'image/jpeg', { month: 4 });
-      expect(result.watchSignals).toEqual(Array.isArray(bad) ? [] : null);
+      expect(result.watchSignals).toBeNull();
       expect(result.composite).toEqual(clean.composite);
     }
   });
@@ -379,7 +379,8 @@ describe('route wiring', () => {
     const start = src.indexOf("router.post('/:serviceId/tree-shrub/assess-preview'");
     const block = src.slice(start, src.indexOf("router.post('/:serviceId/rain-out'", start));
     expect(block).toContain("'id', 'service_type', 'scheduled_date'");
-    expect(block).toContain("month: require('../services/tree-shrub-watch-items').visitWatchMonth(svc.scheduled_date),");
+    // Only a caller that shows the list (the Fast Complete sheet) gets the watch read.
+    expect(block).toMatch(/month: req\.body\?\.watchList === true\s+\? require\('\.\.\/services\/tree-shrub-watch-items'\)\.visitWatchMonth\(svc\.scheduled_date\)\s+: null,/);
     expect(block).toContain("return res.json({ ...result, photosHash, status: 'complete' });");
   });
 });

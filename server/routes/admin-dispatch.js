@@ -4620,8 +4620,12 @@ router.post('/:serviceId/tree-shrub/assess-preview', async (req, res) => {
     const { decodeDataUrlPhoto, MAX_COMPLETION_PHOTO_DATA_URL_BYTES } = require('../services/service-photos');
     const result = await previewTreeShrubAssessment({
       photos,
-      // GATE_TS_WATCH_LIST: the visit's month for the read's watch list (ignored with the gate off).
-      month: require('../services/tree-shrub-watch-items').visitWatchMonth(svc.scheduled_date),
+      // GATE_TS_WATCH_LIST: the visit's month for the watch read, only when the
+      // caller asks for it (the Fast Complete sheet shows the list; the full
+      // form does not, so it never pays for or waits on the extra call).
+      month: req.body?.watchList === true
+        ? require('../services/tree-shrub-watch-items').visitWatchMonth(svc.scheduled_date)
+        : null,
       loadImage: (photo) => {
         try {
           const decoded = decodeDataUrlPhoto(photo?.data, { maxBytes: MAX_COMPLETION_PHOTO_DATA_URL_BYTES });
