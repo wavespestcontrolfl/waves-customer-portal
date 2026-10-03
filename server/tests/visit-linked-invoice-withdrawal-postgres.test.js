@@ -371,6 +371,20 @@ postgres('payer assignment withdraws visit-linked invoices with no packet', () =
     expect(await invoiceRow(winner.invoiceId)).toMatchObject({ scheduled_send_error: null, stripe_payment_intent_id: 'pi_winner_residue' });
   });
 
+  test('ownerTransitions for a merge (customerMove): the moved records resolve through the target customer\'s payer, active flag included', async () => {
+    const Linked = require('../services/visit-linked-invoice-withdrawal');
+    const activeWinnerPayer = await payer(true);
+    const inactiveLoserPayer = await payer(false);
+    const loser = await fixture({ link: 'record', customerPayerId: inactiveLoserPayer, status: 'sending' });
+    const move = (toPayerId) => ({ customerMove: { fromCustomerId: loser.customerId, toCustomerId: randomUUID(), toPayerId } });
+    // Into an active winner payer: self-pay (the inactive own payer did not count) -> payer: moved.
+    expect(await Linked.linkedInvoiceChargeInFlight(mockPg, { customerId: loser.customerId }, { pending: move(activeWinnerPayer) })).toBe(true);
+    // Into a winner with no payer: self-pay -> self-pay: not moved, nothing to fence.
+    expect(await Linked.linkedInvoiceChargeInFlight(mockPg, { customerId: loser.customerId }, { pending: move(null) })).toBe(false);
+    // Into an INACTIVE winner payer: still self-pay.
+    expect(await Linked.linkedInvoiceChargeInFlight(mockPg, { customerId: loser.customerId }, { pending: move(inactiveLoserPayer) })).toBe(false);
+  });
+
   test('a queued invoice returns to its own scheduled time, and to now only when that time has passed', async () => {
     const payerId = await payer();
     const future = new Date(Date.now() + 3 * 86400e3);

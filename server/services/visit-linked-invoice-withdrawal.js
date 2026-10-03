@@ -80,6 +80,7 @@ function applyScope(trx, query, { customerId, scheduledServiceId, scheduledServi
 //   mode 'pre'  (before the write): before = owner now; after = owner with `pending` laid over it.
 //               pending = { visitPatch: {visitIds, payer_id?, self_pay_override?},
 //                           customerPatch: {customerId, payer_id},
+//                           customerMove: {fromCustomerId, toCustomerId, toPayerId}  (a merge),
 //                           payerPatch: {id, active} }
 //               With no pending the new state is unknown and every candidate counts as moved.
 //               The before-owner is remembered per transaction (first write wins).
@@ -105,6 +106,10 @@ function withPending(state, { visitId, customerId }, pending) {
   }
   const customerPatch = pending?.customerPatch;
   if (customerPatch && String(customerPatch.customerId) === String(customerId)) next.customerPayerId = idOrNull(customerPatch.payer_id);
+  // A customer merge: this customer's records move under another customer, so they resolve through THAT
+  // customer's default payer (the visit's own payer and pin travel with the visit).
+  const customerMove = pending?.customerMove;
+  if (customerMove && String(customerMove.fromCustomerId) === String(customerId)) next.customerPayerId = idOrNull(customerMove.toPayerId);
   return next;
 }
 
@@ -118,7 +123,7 @@ async function readOwnerState(database, invoice, visitId, { lock, pending }) {
   // A visit of another customer is ignored by the resolver.
   const visit = visitRow && String(visitRow.customer_id) === String(invoice.customer_id) ? visitRow : null;
   const held = [...new Set([visitRow?.payer_id, customer?.payer_id].filter(Boolean).map(String))];
-  const pendingPayerIds = [pending?.visitPatch?.payer_id, pending?.customerPatch?.payer_id, pending?.payerPatch?.id]
+  const pendingPayerIds = [pending?.visitPatch?.payer_id, pending?.customerPatch?.payer_id, pending?.customerMove?.toPayerId, pending?.payerPatch?.id]
     .filter(Boolean).map(String);
   const looked = [...new Set([...held, ...pendingPayerIds])];
   // The payer rows the answer depends on - the ones referenced now AND the ones the pending write is

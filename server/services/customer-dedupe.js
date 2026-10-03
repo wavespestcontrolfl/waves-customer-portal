@@ -2439,6 +2439,16 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         && await require('./visit-completion-packets').packetInvoiceSendInFlight({ customerId: loser.id }, trx)) {
       throw new Error('A combined-visit invoice for the merged-away record is being sent and this merge would change its billing owner — retry after it settles');
     }
+    // The loser's visit-linked invoices move under the winner and resolve through the winner's default
+    // payer (the loser's, when the winner has none: the fill-if-empty backfill). One that would move to a
+    // payer while its send or charge is in flight defers the merge, judged before the sweep and before any
+    // Stripe cancellation, whichever payers the two records carry (an active winner absorbing a loser
+    // whose own payer is inactive moves them too).
+    if (await require('./visit-linked-invoice-withdrawal').linkedInvoiceChargeInFlight(trx, { customerId: loser.id }, {
+      pending: { customerMove: { fromCustomerId: loser.id, toCustomerId: winnerId, toPayerId: winner.payer_id || loser.payer_id || null } },
+    })) {
+      throw new Error('A combined-visit invoice for the merged-away record is being sent and this merge would change its billing owner — retry after it settles');
+    }
     // Remember who owns each side's visit-linked invoices BEFORE the sweep moves the loser's under the
     // winner, so the withdrawal after the Bill-To lands acts on the invoices whose owner moved.
     const LinkedOwners = require('./visit-linked-invoice-withdrawal');
