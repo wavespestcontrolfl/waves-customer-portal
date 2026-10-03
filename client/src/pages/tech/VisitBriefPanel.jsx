@@ -157,7 +157,7 @@ function useGateCodeActions(gate) {
       if (!window.confirm(`Report "${alert.text}" as not working? The office will check it.`)) return;
       post(`/${alert.neighborhoodEntryId}/wrong`, {}, 'Reported. The office will check that code.');
     },
-    add: (code) => post('', { code }, 'Saved. Every stop in this neighborhood now shows it.'),
+    add: (code) => post('', { code }, "Saved to this neighborhood's gate codes."),
   };
 }
 

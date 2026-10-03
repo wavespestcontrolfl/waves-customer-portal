@@ -245,7 +245,7 @@ describe('VisitBriefPanel', () => {
       fireEvent.change(screen.getByLabelText('Neighborhood gate code'), { target: { value: '5150' } });
       await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Save' })); });
       expect(onGateChanged).toHaveBeenCalledTimes(1);
-      expect(screen.getByRole('status')).toHaveTextContent('Saved. Every stop in this neighborhood now shows it.');
+      expect(screen.getByRole('status')).toHaveTextContent("Saved to this neighborhood's gate codes.");
       expect(screen.queryByLabelText('Neighborhood gate code')).not.toBeInTheDocument();
     });
 

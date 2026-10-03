@@ -21,6 +21,9 @@ const STORE = "bodies";
 const DB_VERSION = 1;
 const DRAFT_DB_NAME = "waves-completion-drafts";
 const draftOperations = new Map();
+const fastCompletionOperations = new Map();
+const FAST_COMPLETION_DB_NAME = "waves-fast-completion-attempts";
+const FAST_COMPLETION_PREFIX = "fast-complete:";
 
 // Drafts are private field work: photos, captions and notes a technician
 // has not submitted. On a shared tablet or browser profile the next operator
@@ -52,13 +55,17 @@ function openDb(dbName) {
     if (!factory) return resolve(null);
     let request;
     try {
-      request = factory.open(dbName, DB_VERSION);
+      request = factory.open(dbName, dbName === FAST_COMPLETION_DB_NAME ? 2 : DB_VERSION);
     } catch {
       return resolve(null);
     }
     request.onupgradeneeded = () => {
       const db = request.result;
-      if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE);
+      const store = db.objectStoreNames.contains(STORE)
+        ? request.transaction.objectStore(STORE) : db.createObjectStore(STORE);
+      if (dbName === FAST_COMPLETION_DB_NAME && !store.indexNames.contains("operatorMetadata")) {
+        store.createIndex("operatorMetadata", ["operatorId", "serviceId", "storedAt", "summary"]);
+      }
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => resolve(null);
@@ -114,6 +121,163 @@ export function deleteCompletionResumeBody(serviceId) {
   if (!serviceId) return Promise.resolve(false);
   return withStore(DB_NAME, "readwrite", false, (store) => store.delete(String(serviceId)))
     .then((result) => result !== false);
+}
+
+function fastCompletionAttemptKey(serviceId, operatorId) {
+  if (!serviceId || !operatorId) return "";
+  return `${FAST_COMPLETION_PREFIX}${String(operatorId)}:${String(serviceId)}`;
+}
+
+function withFastCompletionKey(key, operation) {
+  const pending = (fastCompletionOperations.get(key) || Promise.resolve()).then(() => operation(key));
+  fastCompletionOperations.set(key, pending);
+  void pending.finally(() => {
+    if (fastCompletionOperations.get(key) === pending) fastCompletionOperations.delete(key);
+  });
+  return pending;
+}
+
+function withFastCompletionAttempt(serviceId, operatorId, operation) {
+  const key = fastCompletionAttemptKey(serviceId, operatorId);
+  return key ? withFastCompletionKey(key, operation) : Promise.resolve(null);
+}
+
+// One readwrite transaction protects a Fast Complete row across browser tabs.
+// The local queue above preserves call order in this JS context; IndexedDB's
+// transaction lock and the mutation predicate are what keep another tab's
+// newer idempotency key from being overwritten or deleted by a late result.
+function mutateFastCompletionRow(key, mutate) {
+  return withFastCompletionKey(key, () => openDb(FAST_COMPLETION_DB_NAME).then((db) => {
+    if (!db) return false;
+    return new Promise((resolve) => {
+      let settled = false;
+      let result = false;
+      const done = (value) => {
+        if (settled) return;
+        settled = true;
+        try { db.close(); } catch { /* ignore */ }
+        resolve(value);
+      };
+      try {
+        const tx = db.transaction(STORE, "readwrite");
+        const store = tx.objectStore(STORE);
+        const read = store.get(key);
+        read.onsuccess = () => {
+          try {
+            const mutation = mutate(read.result);
+            if (!mutation) return;
+            const write = mutation.delete ? store.delete(key) : store.put(mutation.value, key);
+            write.onsuccess = () => { result = true; };
+            write.onerror = () => done(false);
+          } catch {
+            done(false);
+          }
+        };
+        read.onerror = () => done(false);
+        tx.oncomplete = () => done(result);
+        tx.onerror = () => done(false);
+        tx.onabort = () => done(false);
+      } catch {
+        done(false);
+      }
+    });
+  }));
+}
+
+// Fast Complete's final request is a committed retry attempt, not an editable
+// form draft. Its separate database is unreachable by older tabs' legacy
+// completion pruner; its scoped key keeps it operator-private on a shared
+// field device. Reads report storage availability separately from "no row" so
+// the sheet can warn when a reload-safe retry cannot be guaranteed.
+export function putFastCompletionAttempt(serviceId, operatorId, attempt, now = Date.now()) {
+  const attemptKey = String(attempt?.body?.idempotencyKey || "");
+  if (!attempt?.body || typeof attempt.body !== "object" || !attemptKey) return Promise.resolve(false);
+  const record = {
+    version: 1,
+    operatorId: String(operatorId || ""),
+    serviceId: String(serviceId || ""),
+    body: attempt.body,
+    summary: String(attempt.summary || ""),
+    storedAt: now,
+  };
+  const key = fastCompletionAttemptKey(serviceId, operatorId);
+  if (!key) return Promise.resolve(false);
+  return mutateFastCompletionRow(key, (current) => {
+    const currentKey = String(current?.body?.idempotencyKey || "");
+    if (current && currentKey !== attemptKey) return null;
+    if (attempt.expectedBody && !current) return null;
+    if (current && JSON.stringify(current.body) !== JSON.stringify(attempt.body)
+      && JSON.stringify(current.body) !== JSON.stringify(attempt.expectedBody)) return null;
+    return { value: record };
+  });
+}
+
+export function getFastCompletionAttempt(serviceId, operatorId) {
+  const key = fastCompletionAttemptKey(serviceId, operatorId);
+  if (!key) return Promise.resolve({ available: false, attempt: null });
+  const unavailable = {};
+  return withFastCompletionAttempt(serviceId, operatorId, (scopedKey) => (
+    withStore(FAST_COMPLETION_DB_NAME, "readonly", unavailable, (store) => store.get(scopedKey))
+  )).then((record) => {
+    if (record === unavailable) return { available: false, attempt: null };
+    const matches = record?.version === 1
+      && record.operatorId === String(operatorId)
+      && record.serviceId === String(serviceId)
+      && record.body && typeof record.body === "object";
+    return { available: true, attempt: matches ? record : null };
+  });
+}
+
+// The index cursor exposes only metadata keys, so a menu scan never clones
+// photo-bearing bodies. The exact request is loaded only on explicit open.
+export async function listFastCompletionAttempts(operatorId) {
+  const unavailable = { available: false, attempts: [] };
+  if (!operatorId) return unavailable;
+  const db = await openDb(FAST_COMPLETION_DB_NAME);
+  if (!db) return unavailable;
+  return new Promise((resolve) => {
+    const attempts = [];
+    const done = (available) => {
+      db.close();
+      resolve(available ? { available, attempts } : unavailable);
+    };
+    try {
+      const tx = db.transaction(STORE, "readonly");
+      const range = IDBKeyRange.bound([String(operatorId)], [String(operatorId), []]);
+      const read = tx.objectStore(STORE).index("operatorMetadata").openKeyCursor(range);
+      read.onsuccess = () => {
+        const cursor = read.result;
+        if (!cursor) return;
+        const [owner, serviceId, storedAt, summary] = cursor.key;
+        attempts.push({ operatorId: owner, serviceId, storedAt, summary });
+        cursor.continue();
+      };
+      read.onerror = () => done(false);
+      tx.oncomplete = () => done(true);
+      tx.onerror = tx.onabort = () => done(false);
+    } catch { done(false); }
+  });
+}
+
+export function deleteFastCompletionAttempt(serviceId, operatorId, expectedBody) {
+  const key = fastCompletionAttemptKey(serviceId, operatorId);
+  if (!key || !expectedBody?.idempotencyKey) return Promise.resolve(false);
+  return mutateFastCompletionRow(key, (current) => (
+    current && JSON.stringify(current.body) === JSON.stringify(expectedBody) ? { delete: true } : null
+  ));
+}
+
+export function pruneFastCompletionAttempts(now = Date.now(), maxAgeMs = DRAFT_RETENTION_MS) {
+  return withStore(FAST_COMPLETION_DB_NAME, "readonly", [], (store) => store.getAllKeys())
+    .then((keys) => Promise.all(
+      (Array.isArray(keys) ? keys : [])
+        .map((key) => String(key))
+        .filter((key) => key.startsWith(FAST_COMPLETION_PREFIX))
+        .map((key) => mutateFastCompletionRow(key, (record) => (
+          record && now - Number(record.storedAt || 0) >= maxAgeMs ? { delete: true } : null
+        ))),
+    ))
+    .then((results) => results.filter(Boolean).length);
 }
 
 // Order draft writes, reads and deletes across panel mounts. In particular,

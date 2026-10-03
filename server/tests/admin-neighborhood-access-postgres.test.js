@@ -22,6 +22,7 @@ jest.mock('../services/admin-alert-episodes', () => ({
   closeAdminAlertKeys: (...args) => mockClose(...args),
 }));
 
+jest.mock('../services/dispatch-assignment', () => ({ emitDispatchJobUpdate: jest.fn(async () => null) }));
 const { randomUUID } = require('node:crypto');
 const express = require('express');
 const router = require('../routes/admin-neighborhood-access');

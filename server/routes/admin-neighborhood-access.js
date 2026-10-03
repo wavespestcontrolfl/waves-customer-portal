@@ -39,6 +39,7 @@ const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../midd
 const { neighborhoodAccessLive, neighborhoodTechActionsLive } = require('../config/feature-gates');
 const { isKeypadCode, matchKey, visitNeighborhoodIds } = require('../services/neighborhood-access');
 const { isTechnicianRequest, lockOwnedLiveVisit } = require('../services/technician-visit-scope');
+const { emitDispatchJobUpdate } = require('../services/dispatch-assignment');
 
 const router = express.Router();
 router.use(adminAuthenticate);
@@ -190,13 +191,24 @@ function techActionsLive(req, res, next) {
   return next();
 }
 
+// Every open route screen refetches on dispatch:job_update: a shared code
+// changed for every stop in the neighborhood, not only on the phone that
+// sent it. Best effort, after the commit; the date set skips the
+// route-quality refresh (no visit moved).
+async function announceGateChange(req, result) {
+  if (result.status >= 300) return;
+  try {
+    await emitDispatchJobUpdate({ jobId: req.params.visitId, actorId: req.technicianId, qualityDates: new Set() });
+  } catch { /* the write stands; other screens catch up on their next load */ }
+}
+
 const NO_NEIGHBORHOOD = {
   status: 409,
   body: { error: 'This stop has no neighborhood yet. Ask the office to set one.', code: 'no_neighborhood' },
 };
 
 // The neighborhood of a visit this login may act on. Lock order: the visit
-// row, then the neighborhood row (the lock every writer of a neighborhood's
+// row, its property row(s), then the neighborhood row (the lock every writer of a neighborhood's
 // entries takes first). A technician reaches only a visit they can see on
 // their own route (assigned to them, not dead, inside the access window,
 // completed allowed), re-checked under the visit's row lock so a reassignment
@@ -217,6 +229,12 @@ async function lockVisitNeighborhood(trx, req, visitId) {
     if (err && (err.status === 403 || err.status === 404)) return notFound;
     throw err;
   }
+  // The stop's property link is read under the property's own row lock (the
+  // office relink takes that row before the neighborhood), so a relink
+  // cannot move the stop while this files a code under the old neighborhood.
+  const linked = trx('customer_properties').orderBy('id').forShare();
+  if (visit.property_id) await linked.where({ id: visit.property_id }).select('id');
+  else if (visit.customer_id) await linked.where({ customer_id: visit.customer_id, active: true }).select('id');
   const neighborhoodId = (await visitNeighborhoodIds(trx, [visit])).get(visit.id);
   if (!neighborhoodId) return NO_NEIGHBORHOOD;
   const hood = await trx('neighborhoods').where({ id: neighborhoodId }).forUpdate().first('id', 'active');
@@ -281,6 +299,7 @@ router.post('/visits/:visitId/entries', requireTechOrAdmin, techActionsLive, asy
       await demoteOtherActiveCodes(trx, neighborhoodId, newId);
       return { status: 201, body: { id: newId, status: 'active' } };
     });
+    await announceGateChange(req, result);
     return res.status(result.status).json(result.body);
   } catch (err) {
     if (err && err.code === '23505') return res.status(409).json({ error: 'That code is already on file for this neighborhood' });
@@ -316,6 +335,7 @@ router.post('/visits/:visitId/entries/:entryId/wrong', requireTechOrAdmin, techA
       });
       return { status: 200, body: { id: entryId, status: 'needs_confirm' } };
     });
+    await announceGateChange(req, result);
     return res.status(result.status).json(result.body);
   } catch (err) {
     logFailure('visit mark wrong', err);
@@ -606,7 +626,7 @@ router.patch('/entries/:id', async (req, res) => {
 
       if (action === 'retire') {
         if (row.status !== 'retired') {
-          await trx('neighborhood_access').where({ id }).update({ status: 'retired', updated_at: trx.fn.now() });
+          await trx('neighborhood_access').where({ id }).update({ status: 'retired', updated_at: trx.fn.now(), ...WRONG_REPORT_CLEARED });
         }
         return { status: 200, body: { id, status: 'retired' } };
       }

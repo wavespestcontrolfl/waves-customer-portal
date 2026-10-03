@@ -22,6 +22,9 @@ jest.mock('../middleware/admin-auth', () => ({
   requireTechOrAdmin: (_req, _res, next) => next(),
 }));
 
+const mockEmit = jest.fn(async () => null);
+jest.mock('../services/dispatch-assignment', () => ({ emitDispatchJobUpdate: (...args) => mockEmit(...args) }));
+
 const { randomUUID } = require('node:crypto');
 const express = require('express');
 const router = require('../routes/admin-neighborhood-access');
@@ -106,6 +109,7 @@ postgres('neighborhood gate codes from a visit', () => {
   beforeEach(async () => {
     process.env.GATE_NEIGHBORHOOD_ACCESS = 'true';
     process.env.GATE_NEIGHBORHOOD_TECH_ACTIONS = 'true';
+    mockEmit.mockClear();
     trx = await database.transaction();
     mockConnection = trx;
     tech = await staff('Synthetic Tech', 'technician');
@@ -154,6 +158,11 @@ postgres('neighborhood gate codes from a visit', () => {
       access_type: 'keypad', gate_label: 'Main gate',
     });
     expect(added.last_confirmed_at).not.toBeNull();
+    // Other open route screens are told to refetch; a refused write tells no one.
+    expect(mockEmit).toHaveBeenCalledTimes(1);
+    expect(mockEmit.mock.calls[0][0]).toMatchObject({ jobId: v.id, actorId: tech.id });
+    await call('POST', `/visits/${v.id}/entries`, { code: 'nope' });
+    expect(mockEmit).toHaveBeenCalledTimes(1);
   });
 
   test('adding a code already on file confirms it and clears a wrong report, keeping who filed it', async () => {
@@ -191,6 +200,12 @@ postgres('neighborhood gate codes from a visit', () => {
     expect(listed.markedWrongAt).toEqual(expect.any(String));
     expect((await call('PATCH', `/entries/${id}`, { action: 'confirm' })).status).toBe(200);
     expect((await rows(n))[0]).toMatchObject({ status: 'active', flagged_wrong_at: null, flagged_wrong_by: null });
+    // Retiring a reported code answers the report too.
+    mockStaff = tech;
+    expect((await call('POST', `/visits/${v.id}/entries/${id}/wrong`)).status).toBe(200);
+    mockStaff = admin;
+    expect((await call('PATCH', `/entries/${id}`, { action: 'retire' })).status).toBe(200);
+    expect((await rows(n))[0]).toMatchObject({ status: 'retired', flagged_wrong_at: null, flagged_wrong_by: null });
   });
 
   test('a technician reaches only a visit on their own route', async () => {
