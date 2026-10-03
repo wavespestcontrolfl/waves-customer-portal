@@ -633,10 +633,12 @@ describe('weOwe and customerWaiting', () => {
 
 describe('missedVisit (a miss the office confirmed and has not settled)', () => {
   // The reader's query returns only confirmed, unsettled rows; these fakes stand for that result.
-  const miss = (over = {}) => ({
-    id: 'rl-1', scheduled_service_id: 'visit-1', original_date: '2026-09-29', original_window: '09:00:00-10:30:00',
-    occurrence_service_type: 'Pest Control', ...over,
-  });
+  // the joined visit still sits, open, in the missed slot unless a test says otherwise
+  const miss = (over = {}) => {
+    const row = { id: 'rl-1', scheduled_service_id: 'visit-1', original_date: '2026-09-29', original_window: '09:00:00-10:30:00', occurrence_service_type: 'Pest Control', ...over };
+    const [start, end] = String(row.original_window).split('-');
+    return { ss_status: 'confirmed', ss_scheduled_date: row.original_date, ss_window_start: start, ss_window_end: end, ...row };
+  };
   const run = (rows) => {
     const conn = fakeConn({ reschedule_log: () => [].concat(rows), scheduled_services: () => [] });
     return loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn }).then((out) => ({ out, conn }));
@@ -665,6 +667,17 @@ describe('missedVisit (a miss the office confirmed and has not settled)', () => 
     expect(conn.calls.some((c) => c.table === 'services')).toBe(false);
   });
 
+  test.each([
+    ['completed', { ss_status: 'completed' }],
+    ['cancelled', { ss_status: 'cancelled' }],
+    ['skipped', { ss_status: 'skipped' }],
+    ['moved to another day', { ss_scheduled_date: '2026-10-06' }],
+    ['moved to a later window that day', { ss_window_start: '14:00:00', ss_window_end: '15:00:00' }],
+    ['gone', { ss_status: null }],
+  ])('a row not settled yet whose visit is already %s is never called "not rebooked"', async (_label, visitNow) => {
+    expect((await run([miss(visitNow)])).out.missedVisit).toBeNull();
+  });
+
   test('nothing confirmed: no missed visit', async () => {
     expect((await run([])).out.missedVisit).toBeNull();
   });
@@ -687,14 +700,14 @@ describe('missedVisit (a miss the office confirmed and has not settled)', () => 
     expect(early.missedVisit).toBeNull();
   });
 
-  test('a confirmed miss does not drop a passed-window fact that also carries ANOTHER overdue visit (Codex #5610 r12)', async () => {
+  test('with ANOTHER visit also overdue, WINDOW PASSED names that one and the miss is listed once', async () => {
     const out = await loadVisitLoops({ customerId: 'c1', now: new Date('2026-10-01T17:00:00Z'), deriveWindow, conn: fakeConn({
       reschedule_log: () => [miss({ original_date: '2026-10-01' })],
       scheduled_services: (ops) => (isCandidateQuery(ops)
         ? [todayRow({ id: 'v-late', window_start: '10:00:00', status: 'confirmed' }), todayRow({ status: 'confirmed' })] : []),
     }) });
     expect(out.missedVisit).toMatchObject({ visitId: 'visit-1' });
-    expect(out.pastWindow).toMatchObject({ passedKeys: ['visit-1@2026-10-01T09:00:00', 'v-late@2026-10-01T10:00:00'] });
+    expect(out.pastWindow).toMatchObject({ visitId: 'v-late', windowStart: '10:00:00', passedKeys: ['v-late@2026-10-01T10:00:00'] });
   });
 
   test('the confirmed miss supersedes WINDOW PASSED for the SAME occurrence, not for another (Codex #5610 r4, r10)', async () => {

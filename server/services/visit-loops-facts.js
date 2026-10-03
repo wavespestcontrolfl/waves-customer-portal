@@ -328,7 +328,9 @@ async function promisedOccurrences(conn, rows, now) {
 // signature (a second window passing while a card waits must change it).
 // Candidates are the customer's live rows near today — not only today's schedule —
 // since an uncommunicated move can take a row off today while its promise is today.
-async function findPastWindow({ conn, now, deriveWindow, customerId }) {
+// `exclude`: the confirmed missed occurrence (MISSED VISIT owns it): it is left out
+// of the passed set, so the fact rendered — and passedKeys — is whatever ELSE is overdue.
+async function findPastWindow({ conn, now, deriveWindow, customerId, exclude = null }) {
   const today = etDateString(now);
   const yesterday = etDateString(addETDays(now, -1));
   const nowMin = nowEtMinutes(now);
@@ -376,6 +378,10 @@ async function findPastWindow({ conn, now, deriveWindow, customerId }) {
     if (endMin == null || endMin >= nowOnDay) continue;
     // yesterday's occurrence counts only when its window ran past midnight into today
     if (occ.date !== today && endMin < 1440) continue;
+    // the same OCCURRENCE — row, day and start — never just the row: a row reused for
+    // another day/window keeps its own current fact (Codex #5610 r10)
+    if (exclude && exclude.visitId && String(row.id) === exclude.visitId && occ.date === exclude.date
+      && hhmmToMinutes(occ.startHms) === hhmmToMinutes(exclude.windowStart)) continue;
     passed.push({ row, occ, minutesPast: nowOnDay - endMin });
   }
   if (!passed.length) return null;
@@ -406,7 +412,11 @@ async function findPastWindow({ conn, now, deriveWindow, customerId }) {
 //     notice and fee — never something we apologize for);
 //   - nothing has settled it since (resolved_at IS NULL: not rebooked, completed,
 //     cancelled, "Done" or "Not a miss" — services/not-closed-out.js);
-//   - the visit itself is not a no_show.
+//   - the visit itself is not a no_show, and its own state does not already settle
+//     the row: settle-on-evidence is best-effort, and the nightly repair may not have
+//     run yet, so a visit that is completed, cancelled, skipped or moved off the
+//     missed slot is never called "not rebooked" (not-closed-out settlementFromVisit);
+//     a row whose visit is gone is skipped.
 // There is no guessing about later bookings: the office's recorded decision is the
 // only signal. What was missed and where come from the occurrence scope frozen at
 // log time; a row with no frozen scope is skipped, never read from the current row.
@@ -441,8 +451,15 @@ async function loadMissedVisit({ conn, customerId, now, deriveWindow }) {
     .whereRaw("COALESCE(ss.status, '') <> 'no_show'")
     .orderBy('rl.original_date', 'desc').orderBy('rl.created_at', 'desc').orderBy('rl.id', 'asc')
     .limit(5)
-    .select('rl.id', 'rl.scheduled_service_id', 'rl.original_date', 'rl.original_window', 'rl.occurrence_service_type')) || [];
+    .select('rl.id', 'rl.scheduled_service_id', 'rl.original_date', 'rl.original_window', 'rl.occurrence_service_type',
+      'ss.status as ss_status', 'ss.scheduled_date as ss_scheduled_date', 'ss.window_start as ss_window_start', 'ss.window_end as ss_window_end')) || [];
+  const { settlementFromVisit } = require('./not-closed-out');
   for (const miss of misses) {
+    if (!miss.ss_status) continue; // the visit row is gone: nothing to stand on
+    if (settlementFromVisit(
+      { status: miss.ss_status, scheduled_date: miss.ss_scheduled_date, window_start: miss.ss_window_start, window_end: miss.ss_window_end },
+      { original_date: miss.original_date, original_window: miss.original_window },
+    )) continue;
     // The check logs once the INTERNAL job block ends; the customer's promised
     // arrival window can still be open (a 5 PM start runs to 7 PM). A same-day miss
     // stays hidden until that promised window has passed (Codex #5610 r9).
@@ -601,28 +618,26 @@ async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = nul
   const ctx = { conn, now, deriveWindow, customerId, strict };
   const read = strict ? (_field, _fallback, fn) => fn() : safely;
 
-  const pastWindow = await read('past window', null, () => findPastWindow(ctx));
+  // The confirmed miss first: the same occurrence is left out of the passed-window
+  // read, so that fact names whatever else is overdue (one instruction per visit).
+  const missedVisit = await read('missed visit', null, () => loadMissedVisit(ctx));
+  const pastWindow = await read('past window', null, () => findPastWindow({ ...ctx, exclude: missedVisit }));
 
-  const [lateAlert, missedVisit, commitments] = await Promise.all([
+  const [lateAlert, commitments] = await Promise.all([
     read('late alert', null, () => loadLateAlert(ctx)),
-    read('missed visit', null, () => loadMissedVisit(ctx)),
     strict && !withCommitments
       ? { weOwe: [], customerWaiting: [] }
       : read('commitments', { weOwe: [], customerWaiting: [] }, () => loadCommitments(ctx)),
   ]);
 
   // A confirmed miss leaves the row unstarted, so the same occurrence can also read
-  // as a passed window or a delay: the confirmed miss is the
-  // stronger fact and supersedes them (one instruction per visit — Codex #5610 r4).
-  // the same OCCURRENCE — row, day and start — never just the row: a row reused for
-  // another day/window keeps its own current facts (Codex #5610 r10)
+  // as a delay: the confirmed miss is the stronger fact and supersedes it (Codex
+  // #5610 r4) — the same OCCURRENCE, never just the row (r10).
   const sameVisit = (f) => Boolean(missedVisit && missedVisit.visitId && f && String(f.visitId) === missedVisit.visitId
     && calendarDay(f.scheduledDate) === missedVisit.date
     && hhmmToMinutes(f.windowStart) === hhmmToMinutes(missedVisit.windowStart));
   out.lateAlert = sameVisit(lateAlert) ? null : lateAlert;
-  // only when the miss IS the whole passed-window fact: one that also carries other
-  // overdue occurrences (passedKeys) stays, so none of them is dropped (Codex #5610 r12)
-  out.pastWindow = sameVisit(pastWindow) && [].concat(pastWindow.passedKeys || []).length <= 1 ? null : pastWindow;
+  out.pastWindow = pastWindow;
   out.missedVisit = missedVisit;
   out.weOwe = commitments.weOwe;
   out.customerWaiting = commitments.customerWaiting;
