@@ -877,13 +877,15 @@ function isReactionToOurText(body, outbound) {
 async function usuallyWritesEnglish(customerId, smsLogId) {
   try {
     const trigger = db('sms_log').where({ id: smsLogId }).select('created_at');
-    const rows = await db('sms_log').where({ customer_id: customerId, direction: 'inbound' }).whereNot({ id: smsLogId })
+    // (unresolved send reservations are placeholders, never a message that was sent or received: left out of both reads)
+    const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
+    const rows = await excludeUnresolvedSendReservations(db('sms_log').where({ customer_id: customerId, direction: 'inbound' })).whereNot({ id: smsLogId })
       .where('created_at', '<', trigger).orderBy('created_at', 'desc').limit(60).select('message_body', 'created_at');
     if (!rows.length) return false;
     // each reply is matched only against our texts sent BEFORE it (a reaction quotes a text it has seen); the
     // window reaches 30 days before the oldest reply read, whatever the number of our texts in it
     const oldest = new Date(Math.min(...rows.map((r) => new Date(r.created_at).getTime())) - 30 * 86400000);
-    const outbound = await db('sms_log').where({ customer_id: customerId, direction: 'outbound' })
+    const outbound = await excludeUnresolvedSendReservations(db('sms_log').where({ customer_id: customerId, direction: 'outbound' }))
       .where('created_at', '<', trigger).where('created_at', '>=', oldest).orderBy('created_at', 'desc').limit(1000).select('message_body', 'created_at');
     const sentBefore = (at) => outbound.filter((o) => new Date(o.created_at) < new Date(at)).map((o) => o.message_body);
     const { isSmsReaction } = require('./sms-intent');

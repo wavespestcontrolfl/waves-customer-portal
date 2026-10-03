@@ -17,7 +17,7 @@ const mockEtaExpired = jest.fn(() => false);
 jest.mock('../models/db', () => jest.fn(() => {
   const q = {
     insert: (row) => { mockInsert(row); return { onConflict: () => ({ ignore: async () => [] }) }; },
-    where: (w) => { if (w && typeof w === 'object' && w.direction) q.direction = w.direction; return q; }, whereNot: () => q, whereNotNull: () => q, orderBy: () => q, limit: () => q,
+    where: (w) => { if (w && typeof w === 'object' && w.direction) q.direction = w.direction; return q; }, whereNot: () => q, whereRaw: () => q, whereNotNull: () => q, orderBy: () => q, limit: () => q,
     // history rows default to a time after every outbound row unless a test dates them
     select: (...cols) => (cols[0] === 'message_body'
       ? (q.direction === 'outbound' ? mockOutbound().then((r) => r.map((o) => ({ created_at: '2026-01-01T00:00:00Z', ...o })))
