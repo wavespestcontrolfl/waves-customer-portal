@@ -2345,7 +2345,7 @@ function calculateDiscountDollars(row, baseAmount, clientAmount) {
     // baseAmount * (amount / 100) — plain IEEE754 float division, which
     // rounds 5% of $20.70 down to $1.03 (20.70 * 0.05 ===
     // 1.0349999999999999). The mobile checkout preview (and every other
-    // discount surface, per CLAUDE.md's "regardless of the gate" rounding
+    // discount surface, per docs/gates-and-env.md's "regardless of the gate" rounding
     // rule) now shows the cent-exact $1.04 through
     // lib/discountStack.percentageDiscountDollars — sharing that same
     // integer-cents helper here keeps this cap-check from clamping the
@@ -13557,6 +13557,8 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       }
     }
     let addressUpdatedIds = [];
+    // The Stripe cancels of a planned Bill-To session release, run as the transaction's last step.
+    let applySessionRelease = null;
     await db.transaction(async (trx) => {
       // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): this trx can
       // spawn recurring children (scheduled_services inserts) — lock
@@ -14426,26 +14428,68 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // and a Stripe cancel does not roll back with this transaction — so an
         // edit rejected for an in-flight send must not already have destroyed
         // the customer's live pay-page session.
-        if (updates.payer_id !== undefined || updates.self_pay_override !== undefined) {
-          // The combined advisory lock for this customer was taken above,
-          // before any ownership row — both Bill-To writers share that order.
+        const payerFieldsTouched = updates.payer_id !== undefined || updates.self_pay_override !== undefined;
+        // The children this edit's Bill-To propagation rewrites (pending / confirmed only), PINNED: the
+        // visit and then its children are locked FOR UPDATE here, once, in the route's lock order (the
+        // customer rows are held above), and this id set - not a re-run of the status predicate - drives
+        // the fence, the checkout invalidation, the propagation UPDATE and the withdrawal. A child that
+        // becomes pending or is inserted afterwards is simply not part of this edit.
+        const seriesBillToTouched = payerFieldsTouched || updates.po_number !== undefined;
+        let rewrittenChildIds = [];
+        let ownerPending = null;
+        // Did who pays for this visit (or a child) move TO A PAYER? One answer, from the pending write
+        // laid over the resolver's own order (visit payer, self-pay pin, customer default, active flag),
+        // drives the packet pipeline AND the visit-linked one - not which fields were submitted. It covers
+        // a cleared visit payer that reveals the customer default as much as an assignment.
+        let movedToPayer = false;
+        let movedVisitIds = [];
+        if (seriesBillToTouched) {
           await trx('scheduled_services').where({ id: req.params.id }).forNoKeyUpdate().first('id');
-          if (await require('../services/visit-completion-packets').packetInvoiceSendInFlight({ scheduledServiceId: req.params.id }, trx)) {
+          try {
+            rewrittenChildIds = await trx('scheduled_services').where({ recurring_parent_id: req.params.id })
+              .whereIn('status', ['pending', 'confirmed']).orderBy('id').forUpdate().pluck('id');
+          } catch { /* no children / column absent */ }
+        }
+        if (payerFieldsTouched) {
+          ownerPending = {
+            visitPatch: {
+              visitIds: [req.params.id, ...rewrittenChildIds],
+              ...(updates.payer_id !== undefined ? { payer_id: updates.payer_id } : {}),
+              ...(updates.self_pay_override !== undefined ? { self_pay_override: updates.self_pay_override === true } : {}),
+            },
+          };
+          // The visits (the parent and the pinned children, no others) whose effective owner moves TO a payer.
+          movedVisitIds = (await require('../services/visit-linked-invoice-withdrawal')
+            .visitOwnerTransitions(trx, [req.params.id, ...rewrittenChildIds], { pending: ownerPending, lock: true }))
+            .filter((move) => move.moved && move.afterOwner).map((move) => move.visitId);
+          movedToPayer = movedVisitIds.length > 0;
+          // (The combined advisory lock for this customer was taken above, before any ownership row,
+          // and the visit and its children were locked just before this - both Bill-To writers share that order.)
+          if (await require('../services/visit-completion-packets').packetInvoiceSendInFlight({ scheduledServiceId: req.params.id }, trx, { pending: ownerPending })) {
             throw Object.assign(new Error('The combined-visit invoice for this service is being delivered. Retry the Bill-To change in a moment.'), {
               statusCode: 409, isOperational: true, code: 'invoice_send_in_flight',
             });
           }
+          // The children's visit-linked invoices change hands with the payer propagation below,
+          // so a send or charge in flight on one that MOVES is refused here, before the first Stripe cancel.
+          if (rewrittenChildIds.length
+            && await require('../services/visit-linked-invoice-withdrawal').linkedInvoiceChargeInFlight(trx, { scheduledServiceIds: rewrittenChildIds }, { pending: ownerPending })) {
+            throw Object.assign(new Error('An invoice for a later visit in this series is being delivered or charged. Retry the Bill-To change in a moment.'), {
+              statusCode: 409, isOperational: true, code: 'invoice_send_in_flight',
+            });
+          }
         }
-        const activatesPayer = (Object.prototype.hasOwnProperty.call(updates, 'payer_id') && updates.payer_id)
-          || (Object.prototype.hasOwnProperty.call(updates, 'self_pay_override') && !updates.self_pay_override);
-        if (activatesPayer) {
-          const fencedVisitIds = [req.params.id];
-          try {
-            const childIds = await trx('scheduled_services').where({ recurring_parent_id: req.params.id }).pluck('id');
-            fencedVisitIds.push(...childIds);
-          } catch { /* no children / column absent */ }
+        if (movedToPayer) {
+          // Only the visits whose owner moves: a completed or cancelled child that is not rewritten, or a
+          // pinned child whose owner is unchanged, is neither cancelled nor a reason to refuse.
           const visitRelease = await require('../services/pay-combined')
-            .releaseUnconfirmedCombinedSessionsForScheduledServices(trx, fencedVisitIds);
+            .releaseUnconfirmedCombinedSessionsForScheduledServices(trx, movedVisitIds, {
+              invalidateVisitIds: movedVisitIds,
+              pending: ownerPending,
+              // Planned and refused here; the Stripe cancels run as the LAST step of this transaction, after
+              // every later validation that can still reject the edit (they cannot roll back).
+              deferApply: true,
+            });
           // In-flight combined money DEFERS the payer edit (codex r30 P1,
           // same contract as the merge fence) — settlement never
           // re-resolves ownership.
@@ -14455,6 +14499,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               { isValidation: true },
             );
           }
+          applySessionRelease = visitRelease.apply || null;
         }
         // Locked before-image for the price/service series-scope blocks
         // below: group changes are detected value-by-value against this
@@ -14599,7 +14644,8 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           // The opposite transition (a job payer assigned, an override
           // cleared) withdraws the self-pay combined-visit invoice this job
           // now owes to AP, including one already with the homeowner.
-          if (activatesPayer) await Packets.withdrawPacketInvoicesForOwner(trx, { scheduledServiceId: req.params.id });
+          // The packet withdrawal (and the visit-linked one it runs) follows the same moved-to-a-payer answer.
+          if (movedToPayer) await Packets.withdrawPacketInvoicesForOwner(trx, { scheduledServiceId: req.params.id });
         }
         // A row ACTIVATED to recurring becomes a series root NOW (codex
         // #3591 r88 P1): a phone-booked catalog bait visit (the call
@@ -14669,10 +14715,23 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               childPayerUpdates.self_pay_override = updates.self_pay_override === true;
             }
             if (Object.keys(childPayerUpdates).length > 0) {
-              await trx('scheduled_services')
-                .where({ recurring_parent_id: req.params.id })
-                .whereIn('status', ['pending', 'confirmed'])
-                .update(childPayerUpdates);
+              // The pinned (locked) child set, not the status predicate again.
+              if (rewrittenChildIds.length) {
+                await trx('scheduled_services')
+                  .where({ recurring_parent_id: req.params.id })
+                  .whereIn('id', rewrittenChildIds)
+                  .update(childPayerUpdates);
+              }
+              // The children took the Bill-To in the same write: their visit-linked invoices follow
+              // it (withdrawn when a payer now owns them, released when it cleared).
+              const childVisitIds = rewrittenChildIds;
+              // Only an edit that touched the payer or the self-pay pin can move an invoice (a PO-only
+              // edit propagates the PO and nothing else).
+              if (childVisitIds.length && payerFieldsTouched) {
+                const Linked = require('../services/visit-linked-invoice-withdrawal');
+                await Linked.reconcileLinkedInvoices(trx, { scheduledServiceIds: childVisitIds });
+                await Linked.withdrawLinkedInvoicesForOwner(trx, { scheduledServiceIds: childVisitIds });
+              }
             }
           }
         }
@@ -15934,6 +15993,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           }
         }
       }
+      // Every refusal in this handler has passed: only now do the Stripe cancels of the planned session
+      // release run (they are external and cannot roll back with a rejected edit).
+      if (applySessionRelease) await applySessionRelease();
     });
 
     // Tech-facing notice for a same-tech date/time move (a tech change in the
@@ -24397,7 +24459,9 @@ async function generateReportCopyWithFallback({
       const parsed = technicianReportCustomerCopy(report);
       const rejection = reportCopyRejection(report)
         || (parsed?.body && (!requireSections || parsed.sections) ? null : 'malformed_shape')
-        || (typeof extraRejection === 'function' ? extraRejection(report) : null);
+        // May be async: the lawn draft's result-timing check asks a model, and
+        // is told what is left of this chain's budget so it never outlives it.
+        || (typeof extraRejection === 'function' ? await extraRejection(report, { remainingMs: deadline - Date.now() }) : null);
       if (!rejection) {
         return { ok: true, report, provider: provider.name, model: provider.model, failures };
       }
@@ -25806,8 +25870,21 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     // v9: canonical remaining-service modules join the dedicated writers.
     // Both the selected system
     // prompt and all visit facts participate in the cache identity.
+    // Lawn under GATE_LAWN_REPORT_COPY_V6 (P15): the prompt carried the
+    // RESULT TIMING rule, so the copy is screened for it too; any forward
+    // result timing is rejected (the report's "What to expect" owns timing).
+    const { LAWN_RESULT_TIMING_RULE } = require('../services/service-report/lawn-report-copy-prompt');
+    const { lawnDraftTimingRejection, lawnDraftTimingCheckLive } = require('../services/service-report/lawn-draft-timing-check');
+    const lawnTimingOn = String(effectiveSystemPrompt || '').includes(LAWN_RESULT_TIMING_RULE);
+    // The meaning check for this request (lawn-draft-timing-check.js). Its
+    // state joins the cache identity, and a draft it could not judge is never
+    // cached: a draft accepted while the check was off or down must not be
+    // served again once it is back.
+    const lawnTimingCheckOn = lawnTimingOn && lawnDraftTimingCheckLive();
+    let lawnTimingUnchecked = false;
     const cacheKey = crypto.createHash('sha256')
       .update(`v9|openai:${primaryModel}|anthropic:${backupModel}|${effectiveSystemPrompt}|${fullUserMessage}`)
+      .update(lawnTimingCheckOn ? '|lawn-timing-check:1' : '')
       // Under the writer rules product names never reach the prompt, so what
       // the output screens check joins the key instead: a draft screened for
       // one product set is never served for another.
@@ -25906,20 +25983,28 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         }
       }
     }
-    // Lawn under GATE_LAWN_REPORT_COPY_V6 (P15): the prompt carried the
-    // RESULT TIMING rule, so the copy is screened for it too; any forward
-    // result timing is rejected (the report's "What to expect" owns timing).
-    const { LAWN_RESULT_TIMING_RULE } = require('../services/service-report/lawn-report-copy-prompt');
-    const lawnTimingOn = String(effectiveSystemPrompt || '').includes(LAWN_RESULT_TIMING_RULE);
     const writerRulesScreen = (text) => (writerRulesOn
       ? writerRulesRejection(text, {
         activeIngredients: visitActiveIngredients, allowedPhrases: writerAllowedPhrases, allowedDates: writerAllowedDates,
       })
       : null) || (lawnTimingOn && lawnResultTimingViolation(text) ? 'lawn_timing' : null);
+    // The same wall-clock ceiling the provider chain keeps: the last-resort
+    // copy's meaning check below is charged against it too.
+    const reportChainDeadline = Date.now() + REPORT_CHAIN_BUDGET_MS;
     const generated = await generateReportCopyWithFallback({
       systemPrompt: effectiveSystemPrompt,
       userMessage: fullUserMessage,
-      extraRejection: (text) => (screenTradeNames(text) ? 'trade_name' : null) || writerRulesScreen(text),
+      // Lawn drafts that pass the pattern screen get one meaning check (owner
+      // 2026-10-03): the pattern screen exempts watering / mowing clauses, so
+      // a result promise phrased around watering needs a reader. Fails open.
+      extraRejection: async (text, { remainingMs } = {}) => {
+        const cheap = (screenTradeNames(text) ? 'trade_name' : null) || writerRulesScreen(text);
+        if (cheap || !lawnTimingCheckOn) return cheap;
+        // The flag describes the draft this call judges: the accepted draft
+        // is always the last one checked.
+        lawnTimingUnchecked = false;
+        return lawnDraftTimingRejection(text, { remainingMs, onUnchecked: () => { lawnTimingUnchecked = true; } });
+      },
       ...(writerRulesOn ? { maxTokens: 2000, requireSections: true } : {}),
     });
     if (!generated.ok) {
@@ -25969,7 +26054,15 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       // typed free text ("Reapply Termidor HE next visit") can carry names
       // into the fallback's recommendations. Degrade to no-report -> 503
       // rather than publish them.
-      const fallbackReport = report && (screenTradeNames(report) || writerRulesScreen(report)) ? null : report;
+      // The lawn meaning check reads the last-resort copy too: it echoes the
+      // technician's own structured observations, which can carry a result
+      // promise the pattern screen exempts (codex #5734 r1). Fails open.
+      // The cheap screens first: a copy they already refuse costs no model call.
+      const fallbackScreened = report && (screenTradeNames(report) || writerRulesScreen(report));
+      const fallbackTiming = report && !fallbackScreened && lawnTimingCheckOn
+        ? await lawnDraftTimingRejection(report, { remainingMs: reportChainDeadline - Date.now() })
+        : null;
+      const fallbackReport = report && (fallbackScreened || fallbackTiming) ? null : report;
       if (!fallbackReport) {
         logger.warn('[generate-report] both AI providers missed and no safe structured fallback facts were available', {
           failures: generated.failures,
@@ -25993,7 +26086,8 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     }
 
     const { report } = generated;
-    reportCopyCacheSet(cacheKey, report);
+    // An unjudged lawn draft (the check was unavailable) is served, not cached.
+    if (!lawnTimingUnchecked) reportCopyCacheSet(cacheKey, report);
     logger.info('[generate-report] generated', {
       provider: generated.provider,
       model: generated.model,

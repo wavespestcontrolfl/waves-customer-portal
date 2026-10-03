@@ -745,7 +745,7 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     expect(await db('ib_pending_actions').where('task_id', result.body.taskId).count('* as count').first()).toEqual({ count: '1' });
   }, 30000);
 
-  test('owner-direct: the owner login commits an internal edit in the same turn with no card; a non-owner admin keeps the card; two direct edits in one turn both commit', async () => {
+  test('owner-direct: the owner login commits an internal edit in the same turn with no card; a non-owner admin keeps the card; notes over existing notes keep the card; two direct edits in one turn commit, a third same-tool edit cards', async () => {
     // A second admin whose email is on the full-access list for this run only.
     const owner = crypto.randomUUID();
     const ownerEmail = `owner-${owner.slice(0, 8)}@synthetic.test`;
@@ -755,6 +755,8 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     process.env.GATE_IB_OWNER_DIRECT = 'true';
     try {
       const note = `Owner-direct fixture ${owner.slice(0, 8)}`;
+      // A direct notes edit needs nothing to overwrite (owner-direct limits, 2026-10-02).
+      await db('customers').where('id', customerA).update({ crm_notes: null });
       proposeNote(customerA, note);
       const direct = await api('/query', request(`Add a note for ${nameA}: ${note}`, { session_id: crypto.randomUUID() }), ownerToken);
       expect(direct.status).toBe(200);
@@ -765,6 +767,8 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
       expect(rows).toHaveLength(1);
       expect(rows[0]).toMatchObject({ status: 'confirmed', requested_by: owner });
       expect(rows[0].consumed_at).not.toBeNull();
+      // Stamped as an owner-direct commit: the bulk cap's resume seed counts these only.
+      expect(rows[0].params._ib_owner_direct).toBe(true);
       // jsonb comes back parsed from pg; a text column would not.
       expect(typeof rows[0].result === 'string' ? JSON.parse(rows[0].result) : rows[0].result).toMatchObject({ success: true });
       expect((await db('customers').where('id', customerA).first('crm_notes')).crm_notes).toBe(note);
@@ -778,16 +782,78 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
       expect((await db('customers').where('id', customerA).first('crm_notes')).crm_notes).toBe(note);
       await db('ib_pending_actions').where('id', carded.body.pendingActions[0].id).update({ status: 'cancelled' });
 
+      // The owner's notes edit over existing notes keeps its card: notes
+      // replace crm_notes (gate codes, access details).
+      proposeNote(customerA, `${note} replaced`);
+      const overwrite = await api('/query', request(`Add a note for ${nameA}: ${note} replaced`, { session_id: crypto.randomUUID() }), ownerToken);
+      expect(overwrite.body.pendingActions).toHaveLength(1);
+      // The card names the notes it deletes, hash-bound in the contract.
+      expect(JSON.stringify(overwrite.body.pendingActions[0].contract)).toContain(`REPLACES the existing notes — deletes \\"${note}\\"`);
+      expect((await db('customers').where('id', customerA).first('crm_notes')).crm_notes).toBe(note);
+      await db('ib_pending_actions').where('id', overwrite.body.pendingActions[0].id).update({ status: 'cancelled' });
+
+      // The notes read and the version pin are one read: the stored action's
+      // version is the row the card's "before" came from.
+      const overwriteRow = await db('ib_pending_actions').where('id', overwrite.body.pendingActions[0].id).first('params');
+      const overwriteParams = typeof overwriteRow.params === 'string' ? JSON.parse(overwriteRow.params) : overwriteRow.params;
+      expect(overwriteParams._ib_owner_direct).toBe(false); // a card is never counted as a direct edit
+      // The resume seed: the direct commit counts, a confirmed card does not, a pre-marker row does.
+      const OwnerDirect = require('../services/intelligence-bar/owner-direct');
+      expect((await OwnerDirect.seedDirectCounts({ id: direct.body.taskId }, db)).get('update_customer')).toBe(1);
+      await db('ib_pending_actions').where('id', rows[0].id).update({ params: db.raw("params - '_ib_owner_direct'") });
+      expect((await OwnerDirect.seedDirectCounts({ id: direct.body.taskId }, db)).get('update_customer')).toBe(1);
+      await db('ib_pending_actions').where('id', rows[0].id).update({ params: db.raw("jsonb_set(params, '{_ib_owner_direct}', 'false')") });
+      expect((await OwnerDirect.seedDirectCounts({ id: direct.body.taskId }, db)).has('update_customer')).toBe(false);
+      await db('ib_pending_actions').where('id', rows[0].id).update({ params: db.raw("jsonb_set(params, '{_ib_owner_direct}', 'true')") });
+      expect(overwriteParams._ib_notes_before).toBe(note);
+      const pinned = overwriteParams._ib_customer_version;
+      expect(pinned).toBe((await db('customers').where('id', customerA).first(db.raw('updated_at::text AS version'))).version);
+
       // Two direct writes in one model turn: each commits with its own
       // receipt (the frontier closes only after an unknown outcome).
-      const first = { type: 'tool_use', name: 'update_customer', input: { customer_id: customerA, updates: { notes: `${note} 2` } }, id: 'first' };
-      const second = { type: 'tool_use', name: 'update_customer', input: { customer_id: customerA, updates: { notes: `${note} 3` } }, id: 'second' };
+      const source = (value, id) => ({ type: 'tool_use', name: 'update_customer', input: { customer_id: customerA, updates: { lead_source: value } }, id });
       mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'update customer fields' }, 'discover'))
-        .mockResolvedValueOnce({ content: [first, second], usage: {} })
+        .mockResolvedValueOnce({ content: [source('google', 'first'), source('referral', 'second')], usage: {} })
         .mockResolvedValueOnce(answer('Done.'));
-      const pair = await api('/query', request(`Add two notes for ${nameA}`, { session_id: crypto.randomUUID() }), ownerToken);
+      const pair = await api('/query', request(`Fix the lead source for ${nameA}`, { session_id: crypto.randomUUID() }), ownerToken);
       expect(pair.body.pendingActions).toEqual([]);
-      expect((await db('customers').where('id', customerA).first('crm_notes')).crm_notes).toBe(`${note} 3`);
+      expect((await db('customers').where('id', customerA).first('lead_source')).lead_source).toBe('referral');
+
+      // Three same-tool edits in one model message: refused as a set with a
+      // pointer to the bulk tool (bulk cap, owner ruling 2026-10-02) — no
+      // direct commit and no stray cards; nothing is written.
+      // The model then does what the refusal says: the bulk tool, which gets
+      // its one card (nothing stored by the refusals blocks it).
+      mockModel.mockClear();
+      mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'bulk update customer fields' }, 'discover'))
+        .mockResolvedValueOnce({ content: [source('google', 'a'), source('facebook', 'b'), source('yelp', 'c')], usage: {} })
+        .mockResolvedValueOnce(tools('bulk_update_customers', { customer_ids: [customerA], updates: { lead_source: 'yelp' } }, 'bulk'))
+        .mockResolvedValueOnce(answer('Tap Confirm.'));
+      const triple = await api('/query', request(`Change the lead source for ${nameA} three times`, { session_id: crypto.randomUUID() }), ownerToken);
+      const refused = JSON.stringify(mockModel.mock.calls[2][0].messages.at(-1));
+      expect(refused.match(/owner_direct_bulk_limit/g)).toHaveLength(3);
+      expect(triple.body.pendingActions).toHaveLength(1);
+      expect(triple.body.pendingActions[0].tool).toBe('bulk_update_customers');
+      expect((await db('customers').where('id', customerA).first('lead_source')).lead_source).toBe('referral');
+      // The refusals stored nothing: the bulk card is the task's only action.
+      expect(await db('ib_pending_actions').where('task_id', triple.body.taskId).count('* as count').first()).toEqual({ count: '1' });
+      await db('ib_pending_actions').where('id', triple.body.pendingActions[0].id).update({ status: 'cancelled' });
+
+      // A capped tool's call that the preview cards (notes over existing
+      // notes) still reaches its card; only the would-be-direct calls are
+      // refused (Codex r2 on #5675).
+      const notesOver = { type: 'tool_use', name: 'update_customer', input: { customer_id: customerA, updates: { notes: `${note} over` } }, id: 'n' };
+      mockModel.mockClear();
+      mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'update customer fields' }, 'discover'))
+        .mockResolvedValueOnce({ content: [source('google', 'x'), source('yelp', 'y'), notesOver], usage: {} })
+        .mockResolvedValueOnce(answer('Tap Confirm.'));
+      const mixed = await api('/query', request(`Update ${nameA}`, { session_id: crypto.randomUUID() }), ownerToken);
+      expect(mixed.body.pendingActions).toHaveLength(1);
+      expect(mixed.body.pendingActions[0].tool).toBe('update_customer');
+      expect(JSON.stringify(mixed.body.pendingActions[0].contract)).toContain('REPLACES the existing notes');
+      expect(JSON.stringify(mockModel.mock.calls[2][0].messages.at(-1)).match(/owner_direct_bulk_limit/g)).toHaveLength(2);
+      expect(await db('customers').where('id', customerA).first('crm_notes', 'lead_source')).toEqual({ crm_notes: note, lead_source: 'referral' });
+      await db('ib_pending_actions').where('id', mixed.body.pendingActions[0].id).update({ status: 'cancelled' });
     } finally {
       delete process.env.IB_FULL_ACCESS_EMAILS;
       delete process.env.GATE_IB_OWNER_DIRECT;
@@ -803,6 +869,18 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     expect(confirmed.status).toBe(409);
     expect(confirmed.body).toMatchObject({ code: 'target_changed' });
     expect((await db('customers').where('id', customerA).first('crm_notes')).crm_notes).toBe('Newer operator edit');
+  }, 30000);
+
+  test('a notes card cannot delete notes written after it by a writer that leaves updated_at alone', async () => {
+    await db('customers').where('id', customerA).update({ crm_notes: 'Shown on the card' });
+    proposeNote(customerA, 'Replacement note');
+    const proposed = await api('/query', request(`Add a note for ${nameA}: Replacement note`));
+    const card = proposed.body.pendingActions[0];
+    // Customer 360 and the call processor write crm_notes without touching updated_at.
+    await db('customers').where('id', customerA).update({ crm_notes: 'Shown on the card\nGate code 0000 added later' });
+    const confirmed = await api('/confirm-action', { pending_action_id: card.id, contract_hash: card.contract_hash });
+    expect(confirmed.body.success).not.toBe(true);
+    expect((await db('customers').where('id', customerA).first('crm_notes')).crm_notes).toBe('Shown on the card\nGate code 0000 added later');
   }, 30000);
 
   test('revoked mutation permission records a blocked receipt after claiming the approval', async () => {

@@ -13,6 +13,15 @@
  *   red    — different last names AND different addresses on a shared line:
  *            almost certainly two people. Report-only; never one-click merged.
  *
+ * A second, review-only group kind sits beside the phone groups (owner ruling
+ * 2026-10-03, GATE_DUPLICATES_SAME_ADDRESS): "same address, different phone" —
+ * two live residential customers at the same premise (customer-address-match's
+ * canonical comparator, unit-strict) who share NO phone. A family member who
+ * calls from another number mints a second customer; the office finds and
+ * merges it here after the fact instead of the call pausing. Those groups are
+ * NEVER green: findSameAddressGroups is a separate function the auto-merge
+ * cron does not call, and executeMerge refuses mode 'auto' for that kind.
+ *
  * The merge executor discovers every FK column referencing customers(id) from
  * information_schema at run time (110+ tables and growing — a hardcoded list
  * would rot silently) and repoints each inside one transaction. The losing row
@@ -27,6 +36,9 @@ const logger = require('./logger');
 const { HOLD_FLAG, isDisputeHoldReason, embedPriorHoldReason, withoutPriorHoldReason, priorHoldReasonOf } = require('./collections/collection-hold');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { BILLING_DELIVERY_FIELDS, mergedBillingChannelUpdates } = require('./billing-delivery-channels');
+const { pairCustomersAtSameAddress } = require('./customer-address-match');
+const { normalizePropertyType } = require('./pricing-engine/commercial-helpers');
+const { isResidenceProperty } = require('./customer-properties');
 
 // ---------------------------------------------------------------------------
 // Normalization
@@ -391,6 +403,35 @@ function buildPhoneGroupCandidates(members, blockersById) {
   });
 }
 
+// The operator's "not a duplicate" verdicts as a Set of `${a}:${b}` pair keys
+// (ids ordered by pairKey) — ONE reader for the phone queue and the
+// same-address queue. The dismissals table is keyed on the customer PAIR, not
+// a phone, so a pair that shares no phone is dismissable with no schema change.
+async function readDismissedPairKeys(database, { failClosedOnDismissals = false, respectUndoMergeSuppression = false } = {}) {
+  // Fail-open: an unreadable dismissals table only means an adjudicated pair
+  // re-appears in the queue — never hide detection behind it.
+  try {
+    return new Set(
+      (await database('customer_duplicate_dismissals').select('customer_id_a', 'customer_id_b', 'reason'))
+        // An undo-merge suppression hides the pair ONLY from the automatic
+        // sweep (respectUndoMergeSuppression: true) — every other caller
+        // (the review queue, dashboard alert, IB tool, manual-merge
+        // eligibility recheck) must keep surfacing it so a human can still
+        // choose to re-merge it.
+        .filter((d) => respectUndoMergeSuppression || d.reason !== UNDO_MERGE_DISMISSAL_REASON)
+        .map((d) => `${d.customer_id_a}:${d.customer_id_b}`),
+    );
+  } catch (e) {
+    // Display fails OPEN (a dismissed pair reappearing in the queue is
+    // annoying, not dangerous). The auto-WRITER fails CLOSED: merging blind
+    // to operator "not a duplicate" verdicts is how a dismissed pair gets
+    // auto-merged anyway.
+    if (failClosedOnDismissals) throw e;
+    logger.warn(`[customer-dedupe] dismissals read failed (continuing without): ${e.message}`);
+    return new Set();
+  }
+}
+
 async function findDuplicateGroups(database = db, { failClosedOnDismissals = false, respectUndoMergeSuppression = false } = {}) {
   // Live ROWS only (active + not deleted) — deliberately NOT restricted to
   // whereLiveCustomer's real-customer stages: the duplicates this tool exists
@@ -415,28 +456,7 @@ async function findDuplicateGroups(database = db, { failClosedOnDismissals = fal
     byPhone.get(p10).push(row);
   }
 
-  // Fail-open: an unreadable dismissals table only means an adjudicated pair
-  // re-appears in the queue — never hide detection behind it.
-  let dismissed = new Set();
-  try {
-    dismissed = new Set(
-      (await database('customer_duplicate_dismissals').select('customer_id_a', 'customer_id_b', 'reason'))
-        // An undo-merge suppression hides the pair ONLY from the automatic
-        // sweep (respectUndoMergeSuppression: true) — every other caller
-        // (the review queue, dashboard alert, IB tool, manual-merge
-        // eligibility recheck) must keep surfacing it so a human can still
-        // choose to re-merge it.
-        .filter((d) => respectUndoMergeSuppression || d.reason !== UNDO_MERGE_DISMISSAL_REASON)
-        .map((d) => `${d.customer_id_a}:${d.customer_id_b}`),
-    );
-  } catch (e) {
-    // Display fails OPEN (a dismissed pair reappearing in the queue is
-    // annoying, not dangerous). The auto-WRITER fails CLOSED: merging blind
-    // to operator "not a duplicate" verdicts is how a dismissed pair gets
-    // auto-merged anyway.
-    if (failClosedOnDismissals) throw e;
-    logger.warn(`[customer-dedupe] dismissals read failed (continuing without): ${e.message}`);
-  }
+  const dismissed = await readDismissedPairKeys(database, { failClosedOnDismissals, respectUndoMergeSuppression });
 
   // Batch the blocker lookups across every duplicate-phone member up front —
   // cross-identity candidates need them too, not just same-cluster losers.
@@ -473,6 +493,332 @@ async function findDuplicateGroups(database = db, { failClosedOnDismissals = fal
   return groups;
 }
 
+// ---------------------------------------------------------------------------
+// Same address, different phone (review-only; GATE_DUPLICATES_SAME_ADDRESS)
+// ---------------------------------------------------------------------------
+
+const SAME_ADDRESS_KIND = 'same_address';
+// Always the first reason on a same-address candidate: the page labels the
+// section from the group kind, and this keeps the reason list non-empty so the
+// pair can never read as an unqualified green.
+const SAME_ADDRESS_REASON = 'same_address_different_phone';
+// The pair is at one address but a record has no usable phone (blank or
+// malformed), so "different phone" would be a lie: still listed (a likely
+// duplicate household), labeled plainly.
+const SAME_ADDRESS_PHONE_MISSING_REASON = 'same_address_phone_missing';
+// Same address AND the same phone, but a record is not in the phone queue
+// (not marked active), so this section is the only place the pair shows.
+const SAME_ADDRESS_PHONE_SHARED_REASON = 'same_address_phone_shared';
+
+// Contact-slot columns the carry prediction reads. Selected for same-address
+// rows only so the card can say what the merge will do with the phone; they
+// are stripped before the row is shipped to the browser.
+const SAME_ADDRESS_SLOT_COLUMNS = [
+  'service_contact_name', 'service_contact_phone', 'service_contact_email', 'service_contact_role',
+  'service_contact2_name', 'service_contact2_phone', 'service_contact2_email', 'service_contact2_role',
+  'service_contact3_name', 'service_contact3_phone', 'service_contact3_email', 'service_contact3_role',
+];
+
+// Visits that still describe a real future appointment (the ICS eligibility
+// helper's own set — one definition of "upcoming").
+const UPCOMING_VISIT_STATUSES = ['pending', 'confirmed'];
+
+// Commercial (and multi-unit / HOA / business) rows are never same-household
+// candidates. The canonical classifier lives in pricing-engine/commercial-
+// helpers; the tier column carries a 'commercial' sentinel the same way
+// rate-review's isCommercialCustomer reads it.
+function isCommercialRow(row) {
+  return normalizePropertyType(row.property_type) === 'commercial'
+    || normalizePropertyType(row.waveguard_tier) === 'commercial';
+}
+
+// The phone queue's own live-row rule (findDuplicateGroups: active = true, not
+// deleted, a parseable phone) — ONE predicate so a pair deferred to that queue
+// is really visible there. `active IS NULL` is live for the same-address read
+// but NOT for the phone queue, which this change must leave exactly as it is.
+function qualifiesForPhoneQueue(row) {
+  return row.active === true && !row.deleted_at && !!phone10(row.phone);
+}
+
+// Pure, two stages (buildSameAddressGroups runs both). Stage 1 —
+// sameAddressEdges: customers = live rows (DUPLICATE_GROUP_COLUMNS +
+// property_type, waveguard_tier); properties = active customer_properties rows
+// ({ customer_id, address_line1, address_line2, city, zip, property_type });
+// dismissed = Set of pairKey strings. Returns the pair edges: same premise,
+// no shared phone, residential, not dismissed. Stage 2 —
+// assembleSameAddressGroups: winner + candidates per group, review-only: tier
+// is 'yellow' unless the existing two-people rule reads the pair red, never
+// 'green'.
+function sameAddressEdges({ customers, properties = [], dismissed = new Set() }) {
+  const byId = new Map();
+  for (const row of customers) {
+    if (row.active === false || row.deleted_at || isCommercialRow(row)) continue;
+    byId.set(String(row.id), row);
+  }
+  const { isStackedUnitPropertyType } = require('./estimator-engine/unit-scope-model');
+  // customers.address_* is the MIRROR of the customer's primary property
+  // (is_primary). When that primary row exists and is not a residence (a
+  // rental, a family member's home, a client-managed address, commercial) the
+  // mirrored address is not where the customer lives either, so it must not be
+  // a candidate. No property row at all (legacy): the customer row stays.
+  const primaryProp = new Map();
+  for (const prop of properties) {
+    if (prop.is_primary === true && byId.has(String(prop.customer_id))) primaryProp.set(String(prop.customer_id), prop);
+  }
+  const isResidence = (prop) => !isCommercialRow(prop) && isResidenceProperty(prop);
+  const candidates = [];
+  for (const row of byId.values()) {
+    const primary = primaryProp.get(String(row.id));
+    if (primary && !isResidence(primary)) continue;
+    candidates.push({
+      customerId: row.id, matchedVia: 'primary',
+      address_line1: row.address_line1, address_line2: row.address_line2, city: row.city, zip: row.zip,
+      // Stacked-building types match only on a named, equal unit.
+      multiUnit: isStackedUnitPropertyType(row.property_type) || (primary ? isStackedUnitPropertyType(primary.property_type) : false),
+    });
+  }
+  for (const prop of properties) {
+    // A saved property counts only when it can be where the customer LIVES
+    // (customer-properties' own residence rule): a rental, a family member's
+    // home or a client-managed address must not pair its owner with whoever
+    // actually lives there.
+    if (!byId.has(String(prop.customer_id)) || !isResidence(prop)) continue;
+    candidates.push({
+      customerId: prop.customer_id, matchedVia: 'property',
+      address_line1: prop.address_line1, address_line2: prop.address_line2, city: prop.city, zip: prop.zip,
+      multiUnit: isStackedUnitPropertyType(prop.property_type) || (!prop.property_type && isStackedUnitPropertyType(byId.get(String(prop.customer_id)).property_type)),
+    });
+  }
+  // Edges: same premise, not dismissed, and not a pair the PHONE queue lists.
+  // A shared phone defers to the phone queue only when BOTH rows actually
+  // qualify for it (qualifiesForPhoneQueue — the phone queue's own live-row
+  // predicate); otherwise the pair would vanish from both, so it stays here,
+  // labeled as sharing a phone.
+  const edges = new Map();
+  for (const pair of pairCustomersAtSameAddress(candidates)) {
+    const a = byId.get(pair.a);
+    const b = byId.get(pair.b);
+    if (!a || !b) continue;
+    const pa = phone10(a.phone);
+    if (pa && pa === phone10(b.phone) && qualifiesForPhoneQueue(a) && qualifiesForPhoneQueue(b)) continue;
+    const [lo, hi] = pairKey(a.id, b.id);
+    if (dismissed.has(`${lo}:${hi}`)) continue;
+    edges.set(`${lo}:${hi}`, {
+      ids: [lo, hi],
+      via: { [pair.a]: pair.via.a, [pair.b]: pair.via.b },
+      matched: { [pair.a]: pair.matched.a, [pair.b]: pair.matched.b },
+    });
+  }
+  return { byId, edges };
+}
+
+function assembleSameAddressGroups({ byId, edges: allEdges }, { blockersById = new Map(), upcomingVisits = null } = {}) {
+  const edges = new Map(allEdges);
+  const businessBoost = (r) => 16 * (blockersById.get(r.id) || [])
+    .filter((b) => b !== 'stripe_customer_id' && b !== 'portal_login').length;
+  const groups = [];
+  // Each round: the strongest remaining row wins, its direct neighbours are
+  // the candidates, and every edge among the group's own members is spent
+  // (merging them into the winner covers it). Edges to outsiders survive for a
+  // later round, so no pair is dropped and the loop always shrinks.
+  while (edges.size) {
+    const inEdges = new Set();
+    for (const { ids } of edges.values()) ids.forEach((id) => inEdges.add(id));
+    const winner = pickWinner([...inEdges].map((id) => byId.get(id)), businessBoost);
+    const losers = [];
+    for (const { ids } of edges.values()) {
+      if (ids.includes(winner.id)) losers.push(byId.get(ids[0] === winner.id ? ids[1] : ids[0]));
+    }
+    const verdicts = new Map(losers.map((loser) => [loser.id, classifyPair(winner, loser, blockersById.get(loser.id) || [])]));
+    const edgeOf = (loserId) => {
+      const [lo, hi] = pairKey(winner.id, loserId);
+      return edges.get(`${lo}:${hi}`);
+    };
+    groups.push({
+      kind: SAME_ADDRESS_KIND,
+      phone10: null,
+      winner: decorateSameAddress(sanitizeCustomer(winner), winner, upcomingVisits),
+      candidates: losers.map((loser) => {
+        const verdict = verdicts.get(loser.id);
+        const { via, matched } = edgeOf(loser.id);
+        const phones = { winner: phone10(winner.phone) ? 'usable' : 'none', loser: phone10(loser.phone) ? 'usable' : 'none' };
+        const phonesMissing = phones.winner === 'none' || phones.loser === 'none';
+        const phonesShared = !phonesMissing && phone10(winner.phone) === phone10(loser.phone);
+        // What a merge would do with the loser's phone — the executor's own
+        // prediction, so the confirmation copy can never promise otherwise.
+        const { status: carryStatus, slot: carrySlot } = predictWinnerBackfills(winner, loser).phoneCarry;
+        return {
+          loser: decorateSameAddress(sanitizeCustomer(loser), loser, upcomingVisits),
+          // Review-only by construction: green never leaves this function.
+          tier: verdict.tier === 'red' ? 'red' : 'yellow',
+          reasons: [sameAddressLeadReason({ phonesMissing, phonesShared }), ...verdict.reasons],
+          evidence: {
+            kind: SAME_ADDRESS_KIND,
+            // True only when BOTH records have a usable phone and the keys
+            // differ. A shared key is normally the phone queue's pair; it is
+            // listed here only when a record is not in that queue.
+            phones_differ: !phonesMissing && !phonesShared,
+            phones,
+            phone_state: phonesShared ? 'shared_phone' : (phones.winner === 'none' && phones.loser === 'none' ? 'both_missing' : (phonesMissing ? 'one_missing' : 'both_usable')),
+            phone_carry: { status: carryStatus, slot: carrySlot },
+            names_compatible: verdict.namesOk,
+            address: verdict.addrStatus,
+            matched_via: { winner: via[winner.id], loser: via[loser.id] },
+            // The address each side matched on (a customer's own row or a saved
+            // property), so the page can show the premise the pair shares.
+            matched_address: { winner: matched[winner.id], loser: matched[loser.id] },
+          },
+        };
+      }),
+    });
+    // Spend the winner's own edges (all shown above), plus an edge between two
+    // of its candidates ONLY when merging both into the winner can cover it —
+    // a red candidate cannot be merged, so an edge that touches one stays for
+    // a later round (it may be the only mergeable pair among the three).
+    const coverable = new Set(losers.filter((l) => verdicts.get(l.id).tier !== 'red').map((l) => l.id));
+    for (const [key, { ids }] of [...edges]) {
+      const [x, y] = ids;
+      const winnerEdge = x === winner.id || y === winner.id;
+      if (winnerEdge || (coverable.has(x) && coverable.has(y))) edges.delete(key);
+    }
+  }
+  return groups;
+}
+
+function buildSameAddressGroups(input) {
+  return assembleSameAddressGroups(sameAddressEdges(input), input);
+}
+
+function sameAddressLeadReason({ phonesMissing, phonesShared }) {
+  if (phonesMissing) return SAME_ADDRESS_PHONE_MISSING_REASON;
+  return phonesShared ? SAME_ADDRESS_PHONE_SHARED_REASON : SAME_ADDRESS_REASON;
+}
+
+function decorateSameAddress(sanitized, row, upcomingVisits) {
+  const shipped = { ...sanitized };
+  for (const col of SAME_ADDRESS_SLOT_COLUMNS) delete shipped[col];
+  return {
+    ...shipped,
+    upcoming_visits: upcomingVisits ? (upcomingVisits.get(String(row.id)) || 0) : null,
+  };
+}
+
+// ONE bounded read (a fixed handful of queries, never per customer): the live
+// customers that have a street address on the row or on an active property,
+// those properties, the dismissals, the blocker counts for the members of a
+// pair, and one grouped upcoming-visit count. Cost is one scan of the live
+// customers table (the phone queue already does the same) plus an in-memory
+// bucket-by-house-number pairing, so it grows linearly with customers.
+// The rows same-address detection reads. ids = null reads the whole live
+// table (the queue); an id list narrows every leg to those customers (the
+// merge-time pair recheck, which must not rescan the building under locks).
+async function readSameAddressRows(database, ids = null) {
+  const customerColumns = [...DUPLICATE_GROUP_COLUMNS, 'active', 'deleted_at', 'property_type', 'waveguard_tier', ...SAME_ADDRESS_SLOT_COLUMNS].map((c) => `c.${c}`);
+  const customerQuery = database('customers as c')
+    .where((q) => q.where('c.active', true).orWhereNull('c.active'))
+    .whereNull('c.deleted_at')
+    .where((q) => q
+      .whereRaw("COALESCE(c.address_line1, '') <> ''")
+      .orWhereExists(function hasPropertyAddress() {
+        this.select(database.raw('1')).from('customer_properties as p0')
+          .whereRaw('p0.customer_id = c.id')
+          .where('p0.active', true)
+          .whereRaw("COALESCE(p0.address_line1, '') <> ''");
+      }));
+  if (ids) customerQuery.whereIn('c.id', ids);
+  const customers = await customerQuery.select(...customerColumns);
+  let properties = [];
+  try {
+    const propertyQuery = database('customer_properties as cp')
+      .join('customers as c', 'cp.customer_id', 'c.id')
+      .where('cp.active', true)
+      .where((q) => q.where('c.active', true).orWhereNull('c.active'))
+      .whereNull('c.deleted_at')
+      .whereRaw("COALESCE(cp.address_line1, '') <> ''");
+    if (ids) propertyQuery.whereIn('c.id', ids);
+    // relationship / occupancy_type decide whether a saved property is where
+    // the customer lives (customer-properties' isResidenceProperty).
+    properties = await propertyQuery.select('cp.customer_id', 'cp.address_line1', 'cp.address_line2', 'cp.city', 'cp.zip',
+      'cp.property_type', 'cp.occupancy_type', 'cp.relationship', 'cp.is_primary');
+  } catch (e) {
+    // Best-effort like customer-address-match's property leg: without it only
+    // customer-row addresses pair, which under-reports, never over-merges.
+    logger.warn(`[customer-dedupe] same-address property leg skipped: ${e.message}`);
+  }
+  return { customers, properties };
+}
+
+async function findSameAddressGroups(database = db, { failClosedOnDismissals = false } = {}) {
+  const { customers, properties } = await readSameAddressRows(database);
+  const dismissed = await readDismissedPairKeys(database, { failClosedOnDismissals });
+
+  // Detect first without blockers/visit counts, then fetch those for the
+  // pair members only (one grouped query per blocker table, as the phone
+  // queue does).
+  const detected = sameAddressEdges({ customers, properties, dismissed });
+  if (!detected.edges.size) return [];
+  const memberIds = new Set();
+  for (const { ids } of detected.edges.values()) ids.forEach((id) => memberIds.add(id));
+  const members = customers.filter((r) => memberIds.has(r.id));
+  const blockersById = await batchAutoBlockers(database, members);
+  let upcomingVisits = null;
+  try {
+    const { etDateString } = require('../utils/datetime-et');
+    const rows = await database('scheduled_services')
+      .whereIn('customer_id', [...memberIds])
+      .whereIn('status', UPCOMING_VISIT_STATUSES)
+      .where('scheduled_date', '>=', etDateString())
+      .groupBy('customer_id')
+      .select('customer_id')
+      .count('* as n');
+    upcomingVisits = new Map(rows.map((r) => [String(r.customer_id), Number(r.n)]));
+  } catch (e) {
+    logger.warn(`[customer-dedupe] same-address upcoming-visit counts unavailable: ${e.message}`);
+  }
+  return assembleSameAddressGroups(detected, { blockersById, upcomingVisits });
+}
+
+// The merge-time recheck for ONE same-address pair, scoped to that pair: its
+// two customers, their properties, their dismissal row and their blockers. It
+// runs under the merge's customer row locks, so it must never rescan the
+// building the way the queue read does. Same verdict shape as the phone
+// path's duplicatePairEligibility. The kept row must also still be the
+// stronger of the two by the queue's own pick (a billed row never loses to a
+// shell), the pair-level form of "the queue's winner".
+async function sameAddressPairEligibility(winnerId, loserId, database = db) {
+  const gone = { eligible: false, code: 'not_in_queue', reason: 'Pair is no longer in the duplicate queue', candidate: null };
+  const [a, b] = pairKey(winnerId, loserId);
+  let dismissals;
+  try {
+    dismissals = await database('customer_duplicate_dismissals').where({ customer_id_a: a, customer_id_b: b }).select('reason');
+  } catch (e) {
+    logger.warn(`[customer-dedupe] same-address pair recheck: dismissals unreadable, refusing: ${e.message}`);
+    return { eligible: false, code: 'dismissals_unreadable', reason: 'Operator dismissal verdicts could not be read — refusing to treat this pair as mergeable right now', candidate: null };
+  }
+  // An undo-merge sentinel does not hide the pair from a human (manual path).
+  if (dismissals.some((d) => d.reason !== UNDO_MERGE_DISMISSAL_REASON)) return gone;
+  const { customers, properties } = await readSameAddressRows(database, [winnerId, loserId]);
+  const detected = sameAddressEdges({ customers, properties });
+  if (!detected.edges.has(`${a}:${b}`)) return gone;
+  const winner = detected.byId.get(String(winnerId));
+  const loser = detected.byId.get(String(loserId));
+  const blockersById = await batchAutoBlockers(database, [winner, loser]);
+  const businessBoost = (r) => 16 * (blockersById.get(r.id) || [])
+    .filter((x) => x !== 'stripe_customer_id' && x !== 'portal_login').length;
+  if (pickWinner([winner, loser], businessBoost).id !== winner.id) return gone;
+  const verdict = classifyPair(winner, loser, blockersById.get(loser.id) || []);
+  const phonesMissing = !phone10(winner.phone) || !phone10(loser.phone);
+  const phonesShared = !phonesMissing && phone10(winner.phone) === phone10(loser.phone);
+  const candidate = { tier: verdict.tier === 'red' ? 'red' : 'yellow', reasons: [sameAddressLeadReason({ phonesMissing, phonesShared }), ...verdict.reasons] };
+  if (candidate.tier === 'red') {
+    return { eligible: false, code: 'red_pair', reason: 'This pair looks like two different people and cannot be merged from the queue', candidate };
+  }
+  if (candidate.reasons.some((r) => r.startsWith('address_'))) {
+    return { eligible: false, code: 'address_conflict', reason: "This duplicate has a different service address — use 'Merge + keep address' so the address isn't lost", candidate };
+  }
+  return { eligible: true, code: 'eligible', reason: null, candidate };
+}
+
 // Canonical duplicate-eligibility recheck — the SINGLE place that answers
 // "is this exact (winnerId, loserId) pair still a live, mergeable duplicate
 // candidate right now?" Originally inlined in admin-customer-duplicates.js
@@ -494,7 +840,10 @@ async function findDuplicateGroups(database = db, { failClosedOnDismissals = fal
 // re-merge a pair from the still-reviewable queue after an undo). The
 // automatic sweep's under-lock recheck is lockedPairAutoEligibility, which
 // refuses on that sentinel and never rebuilds the queue.
-async function duplicatePairEligibility(winnerId, loserId, database = db) {
+async function duplicatePairEligibility(winnerId, loserId, database = db, { kind = 'phone' } = {}) {
+  // kind 'same_address' (admin route, gate on) answers from the pair-scoped
+  // same-address recheck; every other caller keeps the phone queue.
+  if (kind === SAME_ADDRESS_KIND) return sameAddressPairEligibility(winnerId, loserId, database);
   let groups;
   try {
     groups = await findDuplicateGroups(database, { failClosedOnDismissals: true });
@@ -1230,6 +1579,46 @@ function predictWinnerBackfills(winner, loser, { derivedStripeCustomerId = null 
       }
     }
   }
+  // The loser's OWN phone (same-address merges only — a phone-group pair
+  // already shares the number): retiring the loser swaps its phone for a
+  // sentinel, so without this the person who calls from that number next
+  // would not find the surviving customer (the call pipeline matches the
+  // primary phone and these three slots). It goes into the winner's first
+  // slot still empty after the loser's own slots moved in. Consent is NOT
+  // copied: the slot stamp describes other people, so the number is recorded
+  // as an unconsented slot phone (held out of texting until its own YES,
+  // #5467), and the loser's contact-consent stamp is never applied for it.
+  // No free slot: nothing is written; phoneCarry says so for the merge result.
+  const phoneCarry = { status: 'not_applicable', phone_key: null, slot: null };
+  let carriedPhoneKey = null;
+  const loserPhoneKey = phone10(loser.phone);
+  if (loserPhoneKey && loserPhoneKey !== phone10(winner.phone)) {
+    phoneCarry.phone_key = loserPhoneKey;
+    // Only the columns the call pipeline MATCHES on count as "already
+    // there" (primary phone + the three slots). secondary_phone is not
+    // searched by findCustomerForCallContact, so a number held only there
+    // still needs a slot or the person's next call would mint a duplicate.
+    const winnerHolds = [...CONTACT_SLOTS.map((slot) => winner[slot[1]]),
+      ...CONTACT_SLOTS.map((slot) => backfills[slot[1]])]
+      .some((value) => phone10(value) === loserPhoneKey);
+    if (winnerHolds) {
+      phoneCarry.status = 'already_on_winner';
+    } else {
+      const freeIdx = CONTACT_SLOTS.findIndex((slot) => slot.every((f) => isEmptyValue(winner[f]) && isEmptyValue(backfills[f])));
+      if (freeIdx === -1) {
+        phoneCarry.status = 'no_free_slot';
+      } else {
+        const [nameCol, phoneCol, , roleCol] = CONTACT_SLOTS[freeIdx];
+        const loserName = [loser.first_name, loser.last_name].filter((v) => !isEmptyValue(v)).join(' ');
+        if (loserName) backfills[nameCol] = loserName;
+        backfills[phoneCol] = loser.phone;
+        backfills[roleCol] = 'family_member';
+        carriedPhoneKey = loserPhoneKey;
+        phoneCarry.status = 'carried';
+        phoneCarry.slot = freeIdx + 1;
+      }
+    }
+  }
   // Consent artifact travels WITH the contacts it describes (#2948) — but
   // ONLY when the resulting contact list is exactly the loser's (winner
   // had no contacts at all and no stamp). If the winner already held any
@@ -1285,6 +1674,12 @@ function predictWinnerBackfills(winner, loser, { derivedStripeCustomerId = null 
   for (const key of ['unconsented_slot_phone_keys', 'consent_covered_phone_keys']) {
     const moving = (Array.isArray(loserPrefs[key]) ? loserPrefs[key] : []).filter((k) => finalSlotKeys.has(k));
     if (moving.length) carried[key] = [...new Set([...(Array.isArray(winnerPrefs[key]) ? winnerPrefs[key] : []), ...moving])];
+  }
+  if (carriedPhoneKey) {
+    carried.unconsented_slot_phone_keys = [...new Set([
+      ...(carried.unconsented_slot_phone_keys || (Array.isArray(winnerPrefs.unconsented_slot_phone_keys) ? winnerPrefs.unconsented_slot_phone_keys : [])),
+      carriedPhoneKey,
+    ])];
   }
   // When this merge CLEARED the winner's own stamp (a mixed list), the
   // winner's existing slot phones were covered by it (grandfathered, often no
@@ -1350,7 +1745,7 @@ function predictWinnerBackfills(winner, loser, { derivedStripeCustomerId = null 
       backfills.last_seen_at = loser.last_seen_at;
     }
   }
-  return { backfills, winnerPriorValues };
+  return { backfills, winnerPriorValues, phoneCarry };
 }
 
 // Saved cards live on a specific STRIPE customer: charge paths attach
@@ -1989,9 +2384,15 @@ async function lockSeriesCreateForMerge(trx, winnerId, loserId) {
  *                 BOTH rows carry a Stripe customer (that must be resolved in
  *                 Stripe first — two payment profiles cannot be repointed).
  */
-async function executeMerge({ winnerId, loserId, performedBy, performedById = null, mode = 'manual', evidence = {}, expectedVersions = null, expectedEffectsFingerprint = null, requireQueueEligibility = false, allowAddressConflict = false }) {
+async function executeMerge({ winnerId, loserId, performedBy, performedById = null, mode = 'manual', evidence = {}, expectedVersions = null, expectedEffectsFingerprint = null, requireQueueEligibility = false, allowAddressConflict = false, pairKind = 'phone' }) {
   if (!winnerId || !loserId || winnerId === loserId) {
     throw new Error('executeMerge: winnerId and loserId must be distinct');
+  }
+  // Same-address pairs (no shared phone) are review-only and manual-only:
+  // never the auto sweep, and never without the locked queue re-check below
+  // (which is what proves the pair is still a live same-address candidate).
+  if (pairKind === SAME_ADDRESS_KIND && (mode === 'auto' || !requireQueueEligibility)) {
+    throw new Error('executeMerge: a same-address pair is review-only — it needs a manual merge with the queue re-check');
   }
   // Locked winner snapshot + lock-held timestamp, hoisted for the
   // post-commit contact audit event.
@@ -2163,7 +2564,7 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
       // row locks are held.
       const eligibility = mode === 'auto'
         ? await lockedPairAutoEligibility(trx, winner, loser)
-        : await duplicatePairEligibility(winnerId, loserId, trx);
+        : await duplicatePairEligibility(winnerId, loserId, trx, { kind: pairKind });
       const admitted = eligibility.eligible || (allowAddressConflict && eligibility.code === 'address_conflict');
       if (!admitted) {
         const err = new Error(`executeMerge: the pair is no longer mergeable (${eligibility.code}) — review a fresh proposal`);
@@ -2221,7 +2622,16 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // row lock that the pair still shares a phone (intake flows and admin
     // edits can change either side between detection and the merge click).
     const winnerPhone = phone10(winner.phone);
-    if (!winnerPhone || winnerPhone !== phone10(loser.phone)) {
+    if (pairKind === SAME_ADDRESS_KIND) {
+      // The locked queue re-check above re-derived the pair from these same
+      // rows: same premise, still no shared phone. A phone that has become
+      // shared since belongs to the phone queue — refuse here too.
+      // Only a pair the PHONE queue lists (both rows qualify) is refused here;
+      // a shared-phone pair with a not-active row is this queue's own.
+      if (winnerPhone && winnerPhone === phone10(loser.phone) && qualifiesForPhoneQueue(winner) && qualifiesForPhoneQueue(loser)) {
+        throw new Error('executeMerge: rows now share a phone — refresh the queue');
+      }
+    } else if (!winnerPhone || winnerPhone !== phone10(loser.phone)) {
       throw new Error('executeMerge: rows no longer share a phone — refresh the queue');
     }
     // The route's red-tier check also ran outside this transaction. Re-apply
@@ -2436,9 +2846,29 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // Judged here, under the customer locks and BEFORE the FK sweep repoints
     // those invoices to the winner (the send fence keys on customer_id).
     if (winner.payer_id && !loser.payer_id
-        && await require('./visit-completion-packets').packetInvoiceSendInFlight({ customerId: loser.id }, trx)) {
+        && await require('./visit-completion-packets').packetInvoiceSendInFlight({ customerId: loser.id }, trx, {
+          // The loser's records resolve through the winner's payer after the merge.
+          pending: { customerMove: { fromCustomerId: loser.id, toCustomerId: winnerId, toPayerId: winner.payer_id || null } },
+        })) {
       throw new Error('A combined-visit invoice for the merged-away record is being sent and this merge would change its billing owner — retry after it settles');
     }
+    // The loser's visit-linked invoices move under the winner and resolve through the winner's default
+    // payer (the loser's, when the winner has none: the fill-if-empty backfill). One that would move to a
+    // payer while its send or charge is in flight defers the merge, judged before the sweep and before any
+    // Stripe cancellation, whichever payers the two records carry (an active winner absorbing a loser
+    // whose own payer is inactive moves them too).
+    if (await require('./visit-linked-invoice-withdrawal').linkedInvoiceChargeInFlight(trx, { customerId: loser.id }, {
+      pending: { customerMove: { fromCustomerId: loser.id, toCustomerId: winnerId, toPayerId: winner.payer_id || loser.payer_id || null } },
+    })) {
+      throw new Error('A combined-visit invoice for the merged-away record is being sent and this merge would change its billing owner — retry after it settles');
+    }
+    // Remember who owns each side's visit-linked invoices BEFORE the sweep moves the loser's under the
+    // winner, so the withdrawal after the Bill-To lands acts on the invoices whose owner moved.
+    const LinkedOwners = require('./visit-linked-invoice-withdrawal');
+    // It also takes both sides' visit and payer rows FOR SHARE now, before the sweep writes invoice rows:
+    // the withdrawal after the sweep reads them, and must not wait on a payer row while holding invoices.
+    await LinkedOwners.recordOwnerPlan(trx, { customerId: loser.id }, null, { lock: true });
+    await LinkedOwners.recordOwnerPlan(trx, { customerId: winnerId }, null, { lock: true });
     const fks = await customerFkColumns(trx);
     for (const { table_name: table, column_name: column } of fks) {
       // Capture the moving row keys BEFORE the update, in an own savepoint:
@@ -2921,7 +3351,10 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
       // covers the repointed loser invoices; this one covers the winner's own
       // before anything is cancelled.
       if (backfills.payer_id && !winner.payer_id
-        && await require('./visit-completion-packets').packetInvoiceSendInFlight({ customerId: winnerId }, trx)) {
+        && await require('./visit-completion-packets').packetInvoiceSendInFlight({ customerId: winnerId }, trx, {
+          // The winner's default payer is about to be backfilled from the loser's.
+          pending: { customerPatch: { customerId: winnerId, payer_id: backfills.payer_id } },
+        })) {
         throw new Error('A combined-visit invoice for the surviving record is being sent and this merge would change its billing owner — retry after it settles');
       }
       // Past every defer: now the Stripe writes.
@@ -2935,7 +3368,10 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // winner's ownership covers the repointed loser invoices too, so this
     // one query fences both records for the loser-payer direction (the
     // winner-payer direction was fenced before the sweep).
-    if (backfills.payer_id && await require('./visit-completion-packets').packetInvoiceSendInFlight({ customerId: winnerId }, trx)) {
+    if (backfills.payer_id && await require('./visit-completion-packets').packetInvoiceSendInFlight({ customerId: winnerId }, trx, {
+          // The winner's default payer is about to be backfilled from the loser's.
+          pending: { customerPatch: { customerId: winnerId, payer_id: backfills.payer_id } },
+        })) {
       throw new Error('A combined-visit invoice for the surviving record is being sent and this merge would change its billing owner — retry after it settles');
     }
     if (Object.keys(backfills).length) {
@@ -3081,6 +3517,10 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         // Winner values the merge deliberately NULLED (consent stamps) —
         // the prior values, keyed by column, for the undo to restore.
         winner_prior_values: winnerPriorValues,
+        // Same-address merges: where the merged-away person's phone went
+        // ({ status, slot, phone_key }) — the undo refuses a partial restore
+        // that would lift that phone's text hold (see revertMerge).
+        loser_phone_carry: predictedBackfills.phoneCarry.status === 'not_applicable' ? undefined : predictedBackfills.phoneCarry,
         // Loser customer_dunning_schedules episodes renumbered above the
         // winner's ([{ id, from, to }]; absent when none were). Audit only:
         // the undo moves those rows back by id and keeps the new numbers.
@@ -3095,7 +3535,7 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     logger.info(`[customer-dedupe] merged ${loserId} -> ${winnerId} (${mode}, journal ${journal?.id || journal})`);
     // loserSnapshot lets callers act on the retired row post-commit (e.g. the
     // link-as-property route preserves the loser's address on the winner).
-    return { journalId: journal?.id || journal, repointed, backfills, loserSnapshot: loser };
+    return { journalId: journal?.id || journal, repointed, backfills, loserSnapshot: loser, phoneCarry: predictedBackfills.phoneCarry };
   });
   // Released combined reminder schedules: the log line and any past-final
   // office alert, post-commit (never on the merge's transaction; never throws).
@@ -3954,6 +4394,10 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     const locked = await trx('customers').whereIn('id', [winnerId, loserId]).forUpdate().select('*');
     const winner = locked.find((r) => r.id === winnerId);
     const loserRow = locked.find((r) => r.id === loserId);
+    // The undo's reconciliation reads each customer's visit and payer rows; take them (FOR SHARE) now,
+    // after the customer rows and before any invoice row is written back.
+    await require('./visit-linked-invoice-withdrawal').recordOwnerPlan(trx, { customerId: winnerId }, null, { lock: true });
+    await require('./visit-linked-invoice-withdrawal').recordOwnerPlan(trx, { customerId: loserId }, null, { lock: true });
     if (!winner) refuse('The kept customer no longer exists');
     if (winner.deleted_at || winner.active === false) {
       refuse('The kept customer is inactive or deleted — reactivate it before undoing the merge');
@@ -5088,6 +5532,35 @@ async function revertMerge({ journalId, performedBy, performedById }) {
         for (const f of group.fields) frozenGroupFields.add(f);
       }
     }
+    // A merged-away person's phone this merge carried into a contact slot is
+    // held out of texting by the winner's service_preferences / consent-stamp
+    // state. If the number is STILL on the kept customer in a contact that
+    // changed since the merge (edited name/role, or copied to another slot),
+    // the undo would keep that contact (frozen above) yet still restore the
+    // winner's old stamp and preferences blob — lifting the hold from a phone
+    // that stays on the customer: refuse that partial restore (409, zero
+    // writes). If the number is gone (slot emptied, or now another number)
+    // there is nothing to protect: the undo proceeds and leaves that slot
+    // alone, and the number's now-orphaned hold entry is dropped below.
+    const phoneCarry = recorded.loser_phone_carry;
+    const carryActive = !!(phoneCarry && phoneCarry.status === 'carried' && phoneCarry.phone_key
+      && phoneCarry.slot >= 1 && phoneCarry.slot <= 3);
+    const carriedSlotFrozen = carryActive
+      && ATOMIC_FIELD_GROUPS[phoneCarry.slot].fields.some((f) => frozenGroupFields.has(f));
+    const carriedNumberOnWinner = (onlySlot) => carryActive && [1, 2, 3].some((n) =>
+      (onlySlot === undefined || n === onlySlot)
+      && phone10(winner[ATOMIC_FIELD_GROUPS[n].fields[1]]) === phoneCarry.phone_key);
+    // The kept customer's own phone fields are SMS-resolved WITHOUT the slot hold
+    // (unconsented_slot_phone_keys guards contact slots only): a carried number moved into
+    // `phone` / `secondary_phone` is still on the customer, so the undo must not lift its
+    // hold and reactivate the other record around it (codex #5737 r4).
+    const carriedNumberOnWinnerOwnPhone = carryActive
+      && [winner.phone, winner.secondary_phone].some((v) => phone10(v) === phoneCarry.phone_key);
+    if (carryActive && (carriedNumberOnWinnerOwnPhone
+      || (carriedSlotFrozen && carriedNumberOnWinner())
+      || [1, 2, 3].some((n) => n !== phoneCarry.slot && carriedNumberOnWinner(n)))) {
+      refuse("The merged-in phone number is still saved on the kept customer (as its own phone, in a contact that was edited since the merge, or in another contact slot), and undoing now would lift its text hold. Remove that number from the kept customer, then revert");
+    }
     for (const [field, value] of Object.entries(backfills)) {
       if (REVERT_BACKFILL_CLEAR_EXCLUDED.has(field)) continue;
       // Restored (not just vacated) by the prior-values pass below.
@@ -5253,6 +5726,20 @@ async function revertMerge({ journalId, performedBy, performedById }) {
         winnerPatch[field] = prior;
       } else {
         skipped.push({ key: `customers.${field}`, reason: 'winner_value_changed_since_merge' });
+      }
+    }
+    // Carried number gone from the kept customer (slot emptied or reused for a
+    // different number): drop its hold entry so it does not linger pointing at
+    // nothing — unless the restore above already rewrote the blob wholesale.
+    if (carriedSlotFrozen && !carriedNumberOnWinner()
+      && !Object.prototype.hasOwnProperty.call(winnerPatch, 'service_preferences')) {
+      let currentPrefs = winner.service_preferences;
+      if (typeof currentPrefs === 'string') {
+        try { currentPrefs = JSON.parse(currentPrefs); } catch { currentPrefs = null; }
+      }
+      const heldKeys = currentPrefs && Array.isArray(currentPrefs.unconsented_slot_phone_keys) ? currentPrefs.unconsented_slot_phone_keys : [];
+      if (heldKeys.includes(phoneCarry.phone_key)) {
+        winnerPatch.service_preferences = { ...currentPrefs, unconsented_slot_phone_keys: heldKeys.filter((k) => k !== phoneCarry.phone_key) };
       }
     }
     // Inherited ADDRESS clears/restores guard their unstamped visits (r16):
@@ -6108,6 +6595,10 @@ async function describeMergeEffects(database, winner, loser) {
 
 module.exports = {
   findDuplicateGroups,
+  // Review-only second group kind (GATE_DUPLICATES_SAME_ADDRESS). Not read by
+  // runAutoMergeSweep — the cron's candidate query cannot see it.
+  findSameAddressGroups,
+  SAME_ADDRESS_KIND,
   duplicatePairEligibility,
   executeMerge,
   lockSeriesCreateForMerge,
@@ -6153,6 +6644,11 @@ module.exports = {
   UNDO_MERGE_DISMISSAL_REASON,
   // exported for tests
   _test: {
+    buildSameAddressGroups,
+    SAME_ADDRESS_REASON,
+    SAME_ADDRESS_PHONE_MISSING_REASON,
+    SAME_ADDRESS_PHONE_SHARED_REASON,
+    qualifiesForPhoneQueue,
     backfillValueUnchanged,
     classifyPair,
     lockedPairAutoEligibility,
