@@ -10,14 +10,23 @@ jest.mock('../services/service-completion-profiles', () => ({
 
 const { buildRecapContext } = require('../services/pest-recap');
 
-function contextDb(visit, { linkedProject = null, projectReadFails = false } = {}) {
+function contextDb(visit, { linkedProject = null, projectReadFails = false, projectLinkColumns = [] } = {}) {
   return jest.fn((table) => {
     if (!['scheduled_services', 'job_status_history', 'products_catalog', 'service_records', 'scheduled_service_addons', 'projects'].includes(table)) {
       throw new Error(`Unexpected recap context table: ${table}`);
     }
     const firstRow = { scheduled_services: visit, projects: linkedProject }[table] || null;
     const q = {
-      where: jest.fn().mockReturnThis(),
+      // The projects read names its links in a grouped where: record each
+      // column it matches the visit on.
+      where: jest.fn((arg, value) => {
+        if (table === 'projects' && typeof arg === 'function') {
+          const group = { where: (col, v) => { projectLinkColumns.push([col, v]); return group; } };
+          group.orWhere = group.where;
+          arg(group);
+        } else if (table === 'projects') projectLinkColumns.push([arg, value]);
+        return q;
+      }),
       leftJoin: jest.fn().mockReturnThis(),
       orderBy: jest.fn().mockReturnThis(),
       first: jest.fn(() => (table === 'projects' && projectReadFails
@@ -263,6 +272,16 @@ describe('the typed form the Fast Complete sheet reads (GATE_TYPED_VOICE_FILL)',
       expect(await buildRecapContext(roach.id, contextDb(roach, linked))).not.toHaveProperty('typedType');
       resolveCompletionProfileForScheduledService.mockResolvedValue(BED_BUG);
       expect((await buildRecapContext(bedBug.id, contextDb(bedBug, linked))).lane).toBeNull();
+    });
+
+    test('the linkage read covers a project linked directly and one linked only through its service record', async () => {
+      const projectLinkColumns = [];
+      resolveCompletionProfileForScheduledService.mockResolvedValue(ROACH);
+      await buildRecapContext(roach.id, contextDb(roach, { projectLinkColumns }));
+      expect(projectLinkColumns).toEqual([
+        ['projects.scheduled_service_id', roach.id],
+        ['service_records.scheduled_service_id', roach.id],
+      ]);
     });
 
     test('a project linkage that cannot be read counts as linked', async () => {

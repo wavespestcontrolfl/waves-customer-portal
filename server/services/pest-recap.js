@@ -323,7 +323,9 @@ function loadRecapCatalogProducts(knex = db, { extraColumns = [] } = {}) {
 // the gate going off, and this live answer is what stops that sheet (Codex
 // replay of #5633). Neither for a visit a project is now linked to: the
 // office may link one after the schedule loaded, and the sheet would file a
-// second record beside it. A linkage read that fails counts as linked.
+// second record beside it. A legacy project linked only through its service
+// record counts too (the admin-projects create guard's own lookup). A linkage
+// read that fails counts as linked.
 async function sheetRecordFor(profile, svc, knex) {
   const none = { lane: null, typedType: null };
   if (!profile || profile.projectBacked || profile.requiresProject) return none;
@@ -334,7 +336,13 @@ async function sheetRecordFor(profile, svc, knex) {
     typedType: gates.typedVoiceFillLive() && !(profile.companions || []).length ? require('./visit-typed-facts').sheetTypeFor(profile) : null,
   };
   if (!record.lane && !record.typedType) return record;
-  const linked = await knex('projects').where({ scheduled_service_id: svc.id }).first('id').catch(() => ({}));
+  const linked = await knex('projects')
+    .leftJoin('service_records', 'projects.service_record_id', 'service_records.id')
+    .where((q) => q
+      .where('projects.scheduled_service_id', svc.id)
+      .orWhere('service_records.scheduled_service_id', svc.id))
+    .first('projects.id')
+    .catch(() => ({}));
   return linked ? none : record;
 }
 
