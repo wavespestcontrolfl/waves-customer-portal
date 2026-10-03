@@ -28,7 +28,7 @@ describe('auditLawnExpectationProducts', () => {
 
   it('reports mapped, explicit null and UNMAPPED, merging case and spacing variants', () => {
     expect(byName['lesco k-flow 0-0-25']).toMatchObject({ status: 'mapped', family: 'potassium_feed' });
-    expect(byName['celsius wg']).toMatchObject({ status: 'mapped', family: 'herbicide_broadleaf', uses: 25 });
+    expect(byName['celsius wg']).toMatchObject({ status: 'mapped', family: 'herbicide_celsius', uses: 25 });
     expect(byName['acelepryn xtra']).toMatchObject({ status: 'mapped', modeLock: 'preventive' });
     expect(byName['primo maxx']).toMatchObject({ status: 'explicit_null', family: null });
     expect(byName['brand new herbicide']).toMatchObject({ status: 'unmapped', family: null });
@@ -48,7 +48,7 @@ describe('auditLawnExpectationProducts', () => {
     expect(text).toContain('UNMAPPED 1');
     expect(text).toMatch(/UNMAPPED\s+Brand New Herbicide/);
     expect(text).toMatch(/EXPLICIT_NULL\s+Primo Maxx/);
-    expect(text).toMatch(/MAPPED\s+herbicide_broadleaf\s+Celsius WG/);
+    expect(text).toMatch(/MAPPED\s+herbicide_celsius\s+Celsius WG/);
   });
 
   it('an empty list is a clean empty audit', () => {

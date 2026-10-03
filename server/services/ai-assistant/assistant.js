@@ -11,7 +11,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { TOOLS, portalToolsFor, executeToolCall } = require('./tools');
+const { TOOLS, portalToolsFor, executeToolCall, withoutEmails, emailReadBackAwaitingAnswer } = require('./tools');
 const { renderCompanyFactsSection } = require('../sms-company-facts');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../../constants/business');
 const { recordGap } = require('../agent-gap-reports');
@@ -47,13 +47,11 @@ async function persistedPortalTurn(channel, identifier, customerId, turn) {
   if (customerId) query.where('conversation.customer_id', customerId);
   else query.whereNull('conversation.customer_id');
   return runQuery(query.select('conversation.*',
-    'message.id as portal_turn_message_id', 'message.content as portal_turn_message_content',
-    'message.created_at as portal_turn_message_created_at').first(), turn, 'portal turn recovery');
+    'message.id as portal_turn_message_id', 'message.content as portal_turn_message_content').first(), turn, 'portal turn recovery');
 }
 function portalReplay(conversation, fallback) {
   if (!conversation.portal_turn_message_id) return { content: fallback, cursor: null, isolate: false };
-  const cursor = { id: conversation.portal_turn_message_id, content: conversation.portal_turn_message_content,
-    createdAt: conversation.portal_turn_message_created_at };
+  const cursor = { id: conversation.portal_turn_message_id, content: conversation.portal_turn_message_content };
   const legacy = conversation.customer_id
     && parsedContextSnapshot(conversation.context_snapshot)?.version !== MINIMAL_CONTEXT_VERSION;
   const expired = conversation.status !== 'active' || new Date(conversation.timeout_at).getTime() <= Date.now();
@@ -174,10 +172,31 @@ function laneExtras(lane) {
   };
 }
 
+// A hand-off's reply with the turn's buttons and cards. A card or button an
+// earlier tool in this turn produced still shows under the hand-off reply (a
+// charge question shows the card AND hands off the "why"), except a free
+// re-service booking button: a turn that hands off is one the team decides.
+function prepareHandOff(lane) {
+  if (lane.actions) lane.actions.splice(0, lane.actions.length, ...lane.actions.filter((a) => !String(a.href || '').startsWith('/reservice/')));
+}
+const ESCALATE_AFTER_READ_BACK = {
+  escalated: false,
+  instruction: 'Not handed off: the email address has to be read back to the customer first, so do that now. If the customer also needs the team for something else, call escalate again after they answer.',
+};
+// An escalate call in a response that also asked for a read-back: answered,
+// not run. True when this call was that escalate.
+function answeredInsteadOfRun(toolUse, toolResults) {
+  if (toolUse.name !== 'escalate') return false;
+  toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id, content: JSON.stringify(ESCALATE_AFTER_READ_BACK) });
+  return true;
+}
+// Tools that end the turn run last, in this order (every other tool first).
+const HAND_OFF_ORDER = ['request_email_change', 'escalate'];
+
 // `secondaryProperty`: the portal session is scoped to a non-primary saved
 // property (the route decides; anything but false withholds the re-service
 // button, which books at the primary address).
-function portalLane(channel, { secondaryProperty = true } = {}) {
+function portalLane(channel, { secondaryProperty = true, replay = false } = {}) {
   if (!portalSelfServe(channel)) return { prompt: SYSTEM_PROMPT, tools: TOOLS, actions: null, cards: null, context: {} };
   const gates = require('../../config/feature-gates');
   // Three independent gates: the payment card, the past-visit facts and the
@@ -187,16 +206,21 @@ function portalLane(channel, { secondaryProperty = true } = {}) {
   const reservice = gates.portalChatReserviceLive();
   // The lawn line of the re-service offer: its own gate, on top of the offer's.
   const reserviceLawn = reservice && gates.portalChatReserviceLawnLive();
+  // The confirmed email-change hand-off: its own gate.
+  // A crashed turn cannot confirm an address from a later transcript read-back.
+  // Recover its original ask through the ordinary account-change handoff instead.
+  const emailChange = !replay && gates.portalChatEmailChangeLive();
   return {
-    prompt: portalPrompt({ payments, visits, reservice, reserviceLawn }),
-    tools: portalToolsFor({ payments, visits, reservice, reserviceLawn }),
+    prompt: portalPrompt({ payments, visits, reservice, reserviceLawn, emailChange }),
+    tools: portalToolsFor({ payments, visits, reservice, reserviceLawn, emailChange }),
     actions: [],
     cards: payments || visits ? [] : null,
     portal: true,
     // Whether the payment card and re-service tools are in this lane.
     payments,
     reservice,
-    context: { secondaryProperty: secondaryProperty !== false, lawn: reserviceLawn },
+    emailChange,
+    context: { secondaryProperty: secondaryProperty !== false, lawn: reserviceLawn, emailChange },
   };
 }
 
@@ -294,13 +318,19 @@ RULES:
 // What the customer is told at a hand-off. Portal chat says the team was told
 // only when the bell exists; other channels keep the original wording (an SMS
 // hand-off reply is never sent).
-function escalationReply({ isPortal, teamNotified, firstName }) {
+function escalationReply({ isPortal, teamNotified, firstName, newEmail }) {
   if (!isPortal) {
     return firstName
       ? `Thanks ${firstName} — I'm connecting you with our team right now. Someone will follow up shortly. Is there anything else you'd like me to note for them?`
       : "Thanks for reaching out — I'm connecting you with our team right now. Someone will follow up with you shortly.";
   }
   const thanks = firstName ? `Thanks ${firstName}` : 'Thanks for reaching out';
+  // A confirmed email change: the team makes the change, the chat never does.
+  if (newEmail) {
+    return teamNotified
+      ? `${thanks}. I've sent your new email address, ${newEmail}, to our team. They'll update your account and reply by text or email, usually within one business hour between 8 AM and 8 PM. Until then our emails go to the address on file. Is there anything else you'd like me to pass along?`
+      : `${thanks}. I've saved your email change request for our team. If it can't wait, please call us at ${WAVES_SUPPORT_PHONE_DISPLAY}.`;
+  }
   return teamNotified
     ? `${thanks}. I've sent this to our team, and they'll reply by text or email, usually within one business hour between 8 AM and 8 PM. Is there anything else you'd like me to pass along?`
     : `${thanks}. I've saved your request for our team. If it can't wait, please call us at ${WAVES_SUPPORT_PHONE_DISPLAY}.`;
@@ -373,20 +403,63 @@ function withReserviceLawn(prompt) {
     .replace(RESERVICE_LAWN_ESCALATION, `For a lawn problem (weeds, turf insects, brown, thin or dying grass) the customer says is happening now, call offer_reservice in that same turn with service line lawn, current_problem true, and customer_quote set to their exact words about it from this message, copied word for word. A question about lawn care, a what-if, a past problem or one they say is fixed is NOT a current problem: answer it and do not call the tool with current_problem true.`);
 }
 
+// GATE_PORTAL_CHAT_EMAIL_CHANGE on top of any portal prompt: an email change
+// is read back, confirmed, then sent to the team by request_email_change
+// (owner ruling 2026-10-02: staff make the change).
+function withEmailChange(prompt) {
+  return prompt
+    .replace('- Hand the conversation to the Waves team (escalate)', '- Send a confirmed email change to the Waves team (request_email_change)\n- Hand the conversation to the Waves team (escalate)')
+    .replace('- Changes to the account: email, phone, address, gate code, pets, adding a service', '- Changes to the account: phone, address, gate code, pets, adding a service')
+    .replace('WHAT YOU MUST ESCALATE (use the escalate tool):', `EMAIL CHANGE:
+When the customer asks to change the email on their account, you cannot change it; the team does. If they have not typed the new address, ask for it. Then call request_email_change with the address exactly as they typed it and customer_confirmed false, and read the address back as it tells you. Only when the customer's next message confirms that address, call request_email_change again with customer_confirmed true: that sends it to the team. If they correct the address, start again with the corrected one. Never say the email has been changed, and never state or guess the email currently on the account.
+
+WHAT YOU MUST ESCALATE (use the escalate tool):`);
+}
+
 // Every portal prompt, built once per gate combination: the text sent to the
 // model for a combination never varies between requests (it carries the
 // cache breakpoint).
 const PORTAL_PROMPTS = new Map();
-function portalPrompt({ payments, visits, reservice, reserviceLawn }) {
-  const key = `${payments ? 'payments' : 'base'}${visits ? '+visits' : ''}${reservice ? '+reservice' : ''}${reserviceLawn ? '+lawn' : ''}`;
+function portalPrompt({ payments, visits, reservice, reserviceLawn, emailChange }) {
+  const key = `${payments ? 'payments' : 'base'}${visits ? '+visits' : ''}${reservice ? '+reservice' : ''}${reserviceLawn ? '+lawn' : ''}${emailChange ? '+email' : ''}`;
   if (!PORTAL_PROMPTS.has(key)) {
     let prompt = payments ? PORTAL_FACTS_PROMPT : PORTAL_SYSTEM_PROMPT;
     if (visits) prompt = withVisitFacts(prompt);
     if (reservice) prompt = withReservice(prompt);
     if (reserviceLawn) prompt = withReserviceLawn(prompt);
+    if (emailChange) prompt = withEmailChange(prompt);
     PORTAL_PROMPTS.set(key, prompt);
   }
   return PORTAL_PROMPTS.get(key);
+}
+
+// One bell per hand-off. A confirmed email change is one bell per chat and
+// address, so a confirmation the portal sent twice lands on the same bell,
+// and a later change to another address in a chat staff reopened rings its own.
+function bellKey({ escalation, conversation, newEmail }) {
+  return newEmail
+    ? `portal-chat-email-change:${conversation.id}:${newEmail.toLowerCase()}`
+    : `portal-chat-escalation:${escalation.id}`;
+}
+
+// What the durable hand-off row says. A confirmed email change keeps both
+// addresses on it, so the request survives a bell that did not ring. They
+// are not put in `reason`, which is logged.
+function escalationSummary(reason, customer, { newEmail, emailReadBack }) {
+  const lines = emailChangeLines(customer, { newEmail, emailReadBack });
+  return lines ? `${reason}. ${lines.join('. ')}` : reason;
+}
+// The two addresses of an email change, for the saved row and the bell's
+// full text: confirmed (`newEmail`), or read back by the chat and answered by
+// a message nobody judged (`emailReadBack`, a keyword hand-off).
+function emailChangeLines(customer, { newEmail, emailReadBack }) {
+  if (!newEmail && !emailReadBack) return null;
+  return [
+    `Email on file: ${String(customer?.email || '').trim() || 'none'}`,
+    newEmail
+      ? `New email, confirmed by the customer in portal chat: ${newEmail}`
+      : `New email the chat had just read back, not yet confirmed (the message below is the customer's answer): ${emailReadBack}`,
+  ];
 }
 
 const TOPIC_WORDING = {
@@ -434,7 +507,7 @@ class WavesAssistant {
     // 2. Check for escalation triggers in the raw message
     // Portal chat gets its own prompt and button tools; every other channel
     // (and the portal with its switch off) keeps the original pair.
-    const lane = portalLane(channel, { secondaryProperty });
+    const lane = portalLane(channel, { secondaryProperty, replay: Boolean(replay.cursor) });
     turn?.registerFallbackExtras?.(() => laneExtras(lane));
     const trigger = this.matchedEscalationTrigger(turnMessage, channel);
 
@@ -475,8 +548,12 @@ class WavesAssistant {
       if (topic === 'billing' && lane.payments) {
         await executeToolCall('show_recent_payments', {}, customerId, lane.actions, lane.cards, lane.context, turn);
       }
+      // The keyword hand-off runs before the model, so nobody judged whether
+      // this message confirmed an address the chat had just read back: the
+      // address rides on the same hand-off for the team to confirm.
+      const emailReadBack = lane.emailChange ? await emailReadBackAwaitingAnswer(conversation.id, turnMessage, turn) : null;
       const escResult = await this.escalate(conversation, turnMessage, 'Sensitive topic detected in customer message', {
-        topic, ...(turn ? { turn } : {}),
+        topic, ...(emailReadBack ? { emailReadBack } : {}), ...(turn ? { turn } : {}),
       });
       return { ...escResult, ...laneExtras(lane) };
     }
@@ -491,7 +568,9 @@ class WavesAssistant {
     // classifies (the model's reading of them never decides what is covered).
     // Only this message counts: an earlier report is never carried forward
     // past a later "they're gone now".
-    if (lane.reservice) lane.context.customerMessage = turnMessage;
+    lane.context.customerMessage = turnMessage;
+    // The chat whose messages the email-change check reads.
+    if (lane.emailChange) lane.context.conversationId = conversation.id;
 
     // 6. Build a data-minimized context string. Older active rows may still
     // contain the legacy full-account summary; never forward that shape to the
@@ -564,10 +643,11 @@ class WavesAssistant {
       // Cache-hit visibility: cache_read > 0 on later rounds / follow-up
       // customer turns is the prod verification signal.
       const u = response.usage || {};
+      const [inputTokens, cacheWrite, cacheRead, outputTokens] =
+        ['input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens', 'output_tokens'].map((key) => u[key] ?? 0);
       logger.info(
-        `[ai-assistant] usage turn=${round} in=${u.input_tokens ?? 0} ` +
-        `cache_write=${u.cache_creation_input_tokens ?? 0} ` +
-        `cache_read=${u.cache_read_input_tokens ?? 0} out=${u.output_tokens ?? 0}`
+        `[ai-assistant] usage turn=${round} in=${inputTokens} ` +
+        `cache_write=${cacheWrite} cache_read=${cacheRead} out=${outputTokens}`
       );
 
       // Check if Claude wants to use tools
@@ -594,15 +674,18 @@ class WavesAssistant {
       // Every other tool in this response runs before a hand-off, so a card
       // or button the model asked for in the same breath is on the hand-off
       // reply whatever order the blocks came in.
-      const ordered = [...toolUses].sort((a, b) => (a.name === 'escalate') - (b.name === 'escalate'));
+      // A confirmed email change is a hand-off too, and it goes before a
+      // plain escalate so the turn rings one bell, the one with the address.
+      const ordered = [...toolUses].sort((a, b) => HAND_OFF_ORDER.indexOf(a.name) - HAND_OFF_ORDER.indexOf(b.name));
+      // An address this response asked to have read back. A plain escalate
+      // in the same response would end the turn before the customer saw it,
+      // so that call is answered instead of run.
+      let readBackAsked = false;
       for (const toolUse of ordered) {
+        if (readBackAsked && answeredInsteadOfRun(toolUse, toolResults)) continue;
         // Check if it's an escalation
         if (toolUse.name === 'escalate') {
-          // A card or button an earlier tool in this turn produced still shows
-          // under the hand-off reply (a charge question shows the card AND
-          // hands off the "why"), except a free re-service booking button: a
-          // turn that hands off is one the team decides.
-          if (lane.actions) lane.actions.splice(0, lane.actions.length, ...lane.actions.filter((a) => !String(a.href || '').startsWith('/reservice/')));
+          prepareHandOff(lane);
           const escResult = await this.escalate(conversation, message, toolUse.input.reason || 'AI-initiated escalation',
             execution.escalationOptions({ gap: toolUse.input.not_supported === true, topic: toolUse.input.topic }));
           return { ...escResult, ...laneExtras(lane) };
@@ -626,6 +709,18 @@ class WavesAssistant {
         } catch (err) {
           execution.rethrowDeadline(err);
           logger.error(`[ai-assistant] Failed to log tool use: ${err.message}`);
+        }
+
+        // Only the email-change tool returns these two fields.
+        readBackAsked = readBackAsked || Boolean(result.read_back);
+
+        // The email-change check passed: the confirmed address goes to the
+        // team, and the turn ends with the hand-off reply.
+        if (result.confirmed_email) {
+          prepareHandOff(lane);
+          const escResult = await this.escalate(conversation, message, 'Customer confirmed a new email address in portal chat',
+            execution.escalationOptions({ topic: 'account_change', newEmail: result.confirmed_email }));
+          return { ...escResult, ...laneExtras(lane) };
         }
       }
 
@@ -786,11 +881,13 @@ class WavesAssistant {
     const historyQuery = db('agent_messages')
       .where('conversation_id', conversationId)
       .whereIn('role', ['user', 'assistant']);
-    if (through?.id && through?.createdAt) {
+    if (through?.id) {
+      // Keep PostgreSQL's full timestamp precision; a JS Date loses microseconds.
+      const cutoff = db('agent_messages').select('created_at').where('id', through.id);
       historyQuery.where((bounded) => bounded
-        .where('created_at', '<', through.createdAt)
+        .where('created_at', '<', cutoff.clone())
         .orWhere((sameTime) => sameTime
-          .where('created_at', through.createdAt)
+          .where('created_at', cutoff.clone())
           .where('id', '<=', through.id)));
     }
     const msgs = await runQuery(historyQuery
@@ -812,16 +909,21 @@ class WavesAssistant {
   }
 
   matchedEscalationTrigger(message, channel) {
-    const lower = (message || '').toLowerCase();
-    const triggers = portalSelfServe(channel) ? PORTAL_ESCALATION_TRIGGERS : ESCALATION_TRIGGERS;
+    const portal = portalSelfServe(channel);
+    let lower = (message || '').toLowerCase();
+    // Under the email-change lane an address the customer types is not their
+    // words: "homeowner@…" or "adam@…" must not read as asking for the owner.
+    // Only the address itself is left out, never the words around it.
+    if (portal && require('../../config/feature-gates').portalChatEmailChangeLive()) lower = withoutEmails(lower);
+    const triggers = portal ? PORTAL_ESCALATION_TRIGGERS : ESCALATION_TRIGGERS;
     return triggers.find(trigger => lower.includes(trigger)) || null;
   }
 
   /**
    * Escalate to human — create escalation record, update conversation, notify Adam.
    */
-  async escalate(conversation, customerMessage, reason, { gap = false, topic, turn = null } = {}) {
-    if (turn) return this.escalatePortalTurn(conversation, customerMessage, reason, { gap, topic, turn });
+  async escalate(conversation, customerMessage, reason, { gap = false, topic, newEmail, emailReadBack, turn = null } = {}) {
+    if (turn) return this.escalatePortalTurn(conversation, customerMessage, reason, { gap, topic, newEmail, emailReadBack, turn });
     const customer = await escalationCustomer(conversation.customer_id);
 
     // Determine priority
@@ -830,8 +932,8 @@ class WavesAssistant {
     const [escalation] = await db('ai_escalations').insert({
       conversation_id: conversation.id,
       customer_id: conversation.customer_id,
-      reason: this.classifyEscalation(customerMessage),
-      summary: reason,
+      reason: this.savedReason(customerMessage, { newEmail, topic, channel: conversation.channel }),
+      summary: escalationSummary(reason, customer, { newEmail, emailReadBack }),
       customer_message: customerMessage,
       ai_draft_response: null,
       priority,
@@ -863,9 +965,9 @@ class WavesAssistant {
     // sent, so SMS keeps its wording.)
     const isPortal = portalSelfServe(conversation.channel);
     const teamNotified = isPortal
-      && await this.notifyTeamOfEscalation({ escalation, topic, conversation, customer, customerMessage });
+      && await this.notifyTeamOfEscalation({ escalation, topic, conversation, customer, customerMessage, newEmail, emailReadBack });
 
-    const reply = escalationReply({ isPortal, teamNotified, firstName: String(customer?.first_name || '').trim() });
+    const reply = escalationReply({ isPortal, teamNotified, firstName: String(customer?.first_name || '').trim(), newEmail });
 
     await db('agent_messages').insert({
       conversation_id: conversation.id,
@@ -896,7 +998,7 @@ class WavesAssistant {
     };
   }
 
-  async escalatePortalTurn(conversation, customerMessage, reason, { gap, topic, turn }) {
+  async escalatePortalTurn(conversation, customerMessage, reason, { gap, topic, newEmail, emailReadBack, turn }) {
     const priority = escalationPriority(customerMessage);
 
     const persisted = await turn.transaction('escalation persistence', async (trx) => {
@@ -909,8 +1011,8 @@ class WavesAssistant {
         [escalation] = await trx('ai_escalations').insert({
           conversation_id: conversation.id,
           customer_id: conversation.customer_id,
-          reason: this.classifyEscalation(customerMessage),
-          summary: reason,
+          reason: this.savedReason(customerMessage, { newEmail, topic, channel: conversation.channel }),
+          summary: escalationSummary(reason, customer, { newEmail, emailReadBack }),
           customer_message: customerMessage,
           ai_draft_response: null,
           priority,
@@ -927,12 +1029,13 @@ class WavesAssistant {
         updated_at: new Date(),
       });
       const teamNotified = await trx.transaction((bellTrx) => this.notifyTeamOfEscalation({
-        escalation, topic, conversation, customer, customerMessage, trx: bellTrx,
+        escalation, topic, conversation, customer, customerMessage, newEmail, emailReadBack, trx: bellTrx,
       })).catch(() => false);
       const reply = escalationReply({
         isPortal: true,
         teamNotified,
         firstName: String(customer?.first_name || '').trim(),
+        newEmail,
       });
       await trx('agent_messages').insert({
         conversation_id: conversation.id,
@@ -988,28 +1091,34 @@ class WavesAssistant {
    * notification row exists (new or already standing for this escalation).
    * Never throws: the ai_escalations row is the record, the bell is delivery.
    */
-  async notifyTeamOfEscalation({ escalation, topic, conversation, customer, customerMessage, trx = null }) {
+  async notifyTeamOfEscalation({ escalation, topic, conversation, customer, customerMessage, newEmail, emailReadBack, trx = null }) {
     if (!customer?.id) return false;
     try {
       const { raiseAdminAlert, cutAtWord } = require('../admin-alert-compose');
       const name = [customer.first_name, customer.last_name].filter(Boolean).join(' ').trim() || 'A customer';
+      // A confirmed email change is its own bell: what to do, with both
+      // addresses in the full text (an address can break the headline rules).
+      const wording = newEmail
+        ? { area: 'Customers', action: require('../admin-alert-names').fitAction('Customers', name, [(who) => `Change ${who}'s email`]), why: `${name} confirmed a new email address in portal chat`, doneWhen: 'email_changed' }
+        : { area: 'Comms', action: 'Reply to a portal chat request', why: `${name} asked the portal assistant about ${TOPIC_WORDING[topic] || 'a request it could not handle'}`, doneWhen: 'customer_answered' };
+      const emailDetail = emailChangeLines(customer, { newEmail, emailReadBack });
       const result = await raiseAdminAlert('alert', {
-        area: 'Comms',
-        action: 'Reply to a portal chat request',
-        why: cutAtWord(`${name} asked the portal assistant about ${TOPIC_WORDING[topic] || 'a request it could not handle'}`, 110),
+        area: wording.area,
+        action: wording.action,
+        why: cutAtWord(wording.why, 110),
         severity: 'needs-you',
         // The customer record, not a message thread: a portal customer may
         // have no texts yet, or only a thread on an old number.
         link: `/admin/customers?customerId=${encodeURIComponent(customer.id)}`,
         subject: { type: 'customer', id: String(customer.id) },
-        doneWhen: 'customer_answered',
+        doneWhen: wording.doneWhen,
         who: 'person',
       }, {
         bell: true,
-        dedupeKey: `portal-chat-escalation:${escalation.id}`,
+        dedupeKey: bellKey({ escalation, conversation, newEmail }),
         // The customer's own words in full (the chat route caps a message at
         // 4000 characters), read from the bell's "Show full text".
-        detail: String(customerMessage || ''),
+        detail: emailDetail ? `${emailDetail.join('\n')}\n\nCustomer's message: ${String(customerMessage || '')}` : String(customerMessage || ''),
         metadata: { customerId: customer.id, escalationId: escalation.id, conversationId: conversation.id },
         ...(trx ? { trx } : {}),
       });
@@ -1022,6 +1131,16 @@ class WavesAssistant {
       if (trx) throw err;
       return false;
     }
+  }
+
+  // The reason a hand-off is saved under. Under the email-change lane an
+  // account change (a confirmed email change, or the lane's own fallback to
+  // escalate with that topic) is saved as one, whatever the message says:
+  // "please change my email" is not a schedule change.
+  savedReason(message, { newEmail, topic, channel } = {}) {
+    const accountChange = newEmail || (topic === 'account_change' && portalSelfServe(channel)
+      && require('../../config/feature-gates').portalChatEmailChangeLive());
+    return accountChange ? 'account_change' : this.classifyEscalation(message);
   }
 
   classifyEscalation(message) {

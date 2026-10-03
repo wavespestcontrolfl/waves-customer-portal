@@ -25,7 +25,7 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { recordAuditEvent } = require('../services/audit-log');
 const { typedDecisionsLive } = require('../config/feature-gates');
 const { packageFor, answerInDomain, providerLabel } = require('../services/typed-decisions/packages');
-const { callSubjectHash, callTranscriptSpan, smsSubjectHash } = require('../services/typed-decisions/subject-hash');
+const { callSubjectHash, callTranscriptSpan, smsSubjectHash, socialPostCaption, socialPostSubjectHash } = require('../services/typed-decisions/subject-hash');
 const { readLastOutboundBody } = require('../services/typed-decisions/sms-shadow');
 
 router.use(adminAuthenticate, requireAdmin);
@@ -37,6 +37,7 @@ router.use((_req, res, next) => (typedDecisionsLive() ? next() : res.status(404)
 const TABLE = 'decision_reviews';
 const SMS_SUBJECT = 'sms_log';
 const CALL_SUBJECT = 'call_log';
+const SOCIAL_POST_SUBJECT = 'social_post';
 const LABEL_STATUSES = ['unreviewed', 'suspected_error', 'confirmed_error', 'disagreement', 'confirmed_correct'];
 const SAMPLED_FOR = ['disagreement', 'random_audit', 'heldout'];
 const VERDICT_STATUS = { jev_right: 'confirmed_correct', jev_wrong: 'confirmed_error', unclear: 'disagreement' };
@@ -117,6 +118,7 @@ async function loadSubjects(rows) {
   const subjectIds = (type) => [...new Set(rows.filter((r) => r.subject_type === type).map((r) => r.subject_id))];
   const smsIds = subjectIds(SMS_SUBJECT);
   const callIds = subjectIds(CALL_SUBJECT);
+  const postIds = subjectIds(SOCIAL_POST_SUBJECT);
   try {
     if (smsIds.length) {
       const texts = await db('sms_log').whereIn('id', smsIds).modify(excludeUnresolvedSendReservations)
@@ -140,6 +142,18 @@ async function loadSubjects(rows) {
       for (const c of calls) {
         subjects.set(`call_log:${c.id}`, {
           type: 'call_log', direction: c.direction || null, text: callTranscriptSpan(c.transcription) || null, at: c.created_at, hash: callSubjectHash(c.transcription),
+        });
+      }
+    }
+    if (postIds.length) {
+      // A social post's photo question: the reviewer sees the hosted photo and
+      // the caption the model was given (photo-privacy-shadow.js builds both
+      // the same way).
+      const posts = await db('social_media_posts').whereIn('id', postIds).select('id', 'image_url', 'published_content', 'created_at');
+      for (const p of posts) {
+        subjects.set(`${SOCIAL_POST_SUBJECT}:${p.id}`, {
+          type: SOCIAL_POST_SUBJECT, text: socialPostCaption(p.published_content) || null, imageUrl: p.image_url || null, at: p.created_at,
+          hash: socialPostSubjectHash({ imageUrl: p.image_url, captions: p.published_content }),
         });
       }
     }
@@ -228,14 +242,21 @@ function correctValueFor(target, { verdict, seen }, value) {
 // Why a guarded update matched no row: gone (404), already confirmed without
 // force, or the Jev answer / transcript version moved since the page loaded (409, by code).
 // The subject changed after Jev answered: the live digest (a call's transcript,
-// or a text plus the previous Waves text, rebuilt exactly as the shadow built
-// Jev's state) no longer matches the one stored with the decision, so a label
+// a text plus the previous Waves text, or a social post's photo URL and
+// caption, rebuilt exactly as the shadow built the model's state) no longer matches the one stored with the decision, so a label
 // would confirm an answer against content Jev never saw.
 async function liveSubjectHash(target) {
   if (target.subject_type === CALL_SUBJECT) {
     const call = await db('call_log').where({ id: target.subject_id }).first('transcription');
     return call ? callSubjectHash(call.transcription) : null;
   }
+  if (target.subject_type === SOCIAL_POST_SUBJECT) {
+    const post = await db('social_media_posts').where({ id: target.subject_id }).first('image_url', 'published_content');
+    return post ? socialPostSubjectHash({ imageUrl: post.image_url, captions: post.published_content }) : null;
+  }
+  // A subject type this route cannot read back has no live digest: a row that
+  // stored one is then refused (subject_changed), never judged as a text.
+  if (target.subject_type !== SMS_SUBJECT) return null;
   const text = await db('sms_log').where({ id: target.subject_id }).modify(excludeUnresolvedSendReservations)
     .first('from_phone', 'to_phone', 'message_body', 'created_at');
   if (!text) return null;

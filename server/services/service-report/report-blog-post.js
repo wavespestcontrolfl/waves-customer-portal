@@ -35,8 +35,11 @@ const MAX_READ = 5000;
 const MAX_TERMS = 4;
 const MAX_TITLE_CHARS = 200;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Never the title or meta_description columns: a merged row falls back to the
+// portal's database there (content-registry.js mergeAstroDb), so the post's
+// words come from its deployed frontmatter (DEPLOYED, below).
 const REGISTRY_COLUMNS = [
-  'id', 'title', 'h1', 'meta_description', 'live_url', 'canonical_url', 'canonical_url_normalized',
+  'id', 'h1', 'live_url', 'canonical_url', 'canonical_url_normalized',
   'content_type', 'workflow_status', 'astro_status', 'live_status', 'reconciliation_status', 'noindex_detected',
   'metadata', 'published_at',
 ];
@@ -50,25 +53,36 @@ const REGISTRY_LIVE_STATUSES = ['live', 'live_visible'];
 // another source's than the checked page's; GitHub Codex P2 on 8c57183332),
 // nor any state the registry adds later.
 const REGISTRY_ATTRIBUTABLE_STATES = ['matched', 'astro_only', 'astro_changed_since_sync', 'db_changed_since_sync'];
-// The deployed page's keyword: the frontmatter the registry keeps from the
-// site's source (an Astro-only row's own, or a merged row's Astro side), in the
-// registry's own order (content-registry.js astroSourceToItem). Never the
-// target_keyword column, which prefers the portal's database, editable before
-// the page is republished (GitHub Codex P2s on 3d597eb15d and ffab3fb66a).
-const KEYWORD_PATHS = [['frontmatter'], ['astro', 'frontmatter']]
-  .flatMap((base) => ['target_keyword', 'primary_keyword', 'keyword'].map((key) => [...base, key]));
-const DEPLOYED_KEYWORD_SQL = `COALESCE(${KEYWORD_PATHS.map((path) => `metadata #>> '{${path.join(',')}}'`).join(', ')})`;
-const deployedKeyword = (row) => {
-  for (const path of KEYWORD_PATHS) {
+// The deployed page's own words: the frontmatter the registry keeps from the
+// site's source (an Astro-only row's own, or a merged row's Astro side; a row
+// carries one of the two), each field's aliases in the registry's own order
+// (content-registry.js astroSourceToItem). Never the title, meta_description
+// or target_keyword columns, where a merged row falls back to (for the
+// keyword, prefers) the portal's database, editable before the page is
+// republished (GitHub Codex P2s on 3d597eb15d, ffab3fb66a and d527cd5de1). A
+// field is its first alias that holds text, as the registry's parser reads
+// them with ||: an empty legacy target_keyword never hides a primary_keyword
+// (GitHub Codex P2 on d527cd5de1).
+const FRONTMATTER_BASES = [['frontmatter'], ['astro', 'frontmatter']];
+const DEPLOYED = {
+  title: ['title'],
+  keyword: ['target_keyword', 'primary_keyword', 'keyword'],
+  summary: ['meta_description', 'description'],
+};
+const deployedPaths = (aliases) => FRONTMATTER_BASES.flatMap((base) => aliases.map((key) => [...base, key]));
+const deployedSql = (aliases) => `COALESCE(${deployedPaths(aliases).map((path) => `NULLIF(metadata #>> '{${path.join(',')}}', '')`).join(', ')})`;
+function deployedText(row, aliases) {
+  for (const path of deployedPaths(aliases)) {
     const value = path.reduce((node, key) => (node && typeof node === 'object' ? node[key] : undefined), row?.metadata);
-    if (value !== undefined && value !== null) return typeof value === 'string' ? value : JSON.stringify(value);
+    if (value !== undefined && value !== null && value !== '') return typeof value === 'string' ? value : JSON.stringify(value);
   }
   return '';
-};
-// The text a search reads, by where it sits: the title (and the headline), the
-// keyword, and the summary under it, all the deployed page's own (the article
-// itself lives in the site's repository, not here).
-const REGISTRY_FIELDS = { title: ['title', 'h1'], keyword: [DEPLOYED_KEYWORD_SQL], summary: ['meta_description'] };
+}
+// The text a search reads, by where it sits: the title (and the headline, the
+// page's own first heading), the keyword, and the summary under it, all the
+// deployed page's own (the article itself lives in the site's repository, not
+// here).
+const REGISTRY_FIELDS = { title: [deployedSql(DEPLOYED.title), 'h1'], keyword: [deployedSql(DEPLOYED.keyword)], summary: [deployedSql(DEPLOYED.summary)] };
 // An absolute URL, and one on the hub host, as Postgres patterns.
 const ABSOLUTE_URL_RE = '^https?://';
 const HUB_URL_RE = `^https?://(www\\.)?${SITE_HOST.replace(/\./g, '\\.')}(/|$)`;
@@ -121,7 +135,9 @@ function registryLink(row) {
   if (!registryRowLivePath(judged)) return null;
   if (!registryRowLiveKeys(judged).some((key) => HUB_SITE_KEYS.includes(key.split('|')[0]))) return null;
   const url = registryLiveTargetUrl(judged);
-  const title = String(row.title || row.h1 || '').trim();
+  // The deployed title, else the page's own first heading (GitHub Codex P2 on
+  // d527cd5de1).
+  const title = deployedText(row, DEPLOYED.title).trim() || String(row.h1 || '').trim();
   if (!title || !isSiteUrl(url)) return null;
   return { id: String(row.id), title: title.slice(0, MAX_TITLE_CHARS), url };
 }
@@ -270,7 +286,11 @@ async function searchReportBlogPosts(knex, query) {
     found.set(key, { post, ...matchOf(texts, terms), when: when ? new Date(when).getTime() || 0 : 0 });
   };
   for (const row of registryFound) {
-    add(registryLink(row), { title: `${row.title || ''} ${row.h1 || ''}`, keyword: deployedKeyword(row), summary: row.meta_description }, row.published_at);
+    add(registryLink(row), {
+      title: `${deployedText(row, DEPLOYED.title)} ${row.h1 || ''}`,
+      keyword: deployedText(row, DEPLOYED.keyword),
+      summary: deployedText(row, DEPLOYED.summary),
+    }, row.published_at);
   }
   const entries = [...found.values()].filter((entry) => entry.held.some(Boolean));
   // A word few posts hold says more than one many hold ("tick" over

@@ -178,9 +178,10 @@ test('a card and a hand-off asked for in one response: the card runs first and r
   escalate.mockRestore();
 });
 
-test('a portal escalation checkpoints its exact handoff and completed cards inside the escalation transaction', async () => {
-  const customer = { id: 'cust-1', first_name: 'Pat', last_name: 'Sample' };
+test.each([undefined, 'new@example.test'])('a portal escalation checkpoints its exact handoff and completed cards (email=%s)', async (newEmail) => {
+  const customer = { id: 'cust-1', first_name: 'Pat', last_name: 'Sample', email: 'old@example.test' };
   const escalation = { id: 'esc-1' };
+  const insertEscalation = jest.fn().mockReturnValue({ returning: jest.fn().mockResolvedValue([escalation]) });
   const cards = [{ type: 'payments', title: 'Your most recent payment', rows: [{ id: 'p1' }] }];
   const actions = [{ type: 'tab', label: 'Open Billing', tab: 'billing' }];
   const trx = Object.assign(jest.fn((table) => {
@@ -188,7 +189,7 @@ test('a portal escalation checkpoints its exact handoff and completed cards insi
     if (table === 'ai_escalations') return {
       where: jest.fn().mockReturnThis(),
       first: jest.fn().mockResolvedValue(null),
-      insert: jest.fn().mockReturnValue({ returning: jest.fn().mockResolvedValue([escalation]) }),
+      insert: insertEscalation,
     };
     if (table === 'agent_sessions') return { where: jest.fn().mockReturnThis(), update: jest.fn().mockResolvedValue(1) };
     if (table === 'agent_messages') return {
@@ -219,9 +220,17 @@ test('a portal escalation checkpoints its exact handoff and completed cards insi
     { id: 'conv-1', customer_id: 'cust-1', channel: 'portal_chat' },
     'Please help with this charge',
     'Customer needs billing help',
-    { gap: true, topic: 'billing', turn },
+    { gap: true, topic: newEmail ? 'account_change' : 'billing', newEmail, turn },
   );
 
+  if (newEmail) {
+    expect(insertEscalation).toHaveBeenCalledWith(expect.objectContaining({
+      reason: 'account_change', summary: expect.stringContaining(newEmail),
+    }));
+    expect(insertEscalation.mock.calls[0][0].summary).toContain(customer.email);
+    expect(notify).toHaveBeenCalledWith(expect.objectContaining({ newEmail, trx }));
+    expect(result.reply).toContain('email change request');
+  }
   expect(turn.persistCommittedResult).toHaveBeenCalledWith(trx, expect.objectContaining({
     escalated: true,
     escalationId: 'esc-1',
@@ -316,8 +325,8 @@ test.each([
 });
 
 test('a crash retry finishes the expired conversation that owns its durable user row instead of a newer active session', async () => {
+  process.env.GATE_PORTAL_CHAT_EMAIL_CHANGE = 'true';
   const originalAsk = 'What did you treat in my kitchen?';
-  const messageCreatedAt = new Date('2026-10-01T14:00:00.000Z');
   const queries = [];
   let ordinaryLookupCalled = false;
   db.__rows = (query) => {
@@ -330,7 +339,6 @@ test('a crash retry finishes the expired conversation that owns its durable user
         context_snapshot: { version: 2, firstName: 'Pat' },
         portal_turn_message_id: '00000000-0000-4000-8000-000000000001',
         portal_turn_message_content: originalAsk,
-        portal_turn_message_created_at: messageCreatedAt,
       }];
     }
     if (query.sql.includes('from "agent_sessions"')) {
@@ -350,6 +358,8 @@ test('a crash retry finishes the expired conversation that owns its durable user
   const modelMessages = JSON.stringify(mockCreate.mock.calls[0][0].messages);
   expect(modelMessages).toContain(originalAsk);
   expect(modelMessages).not.toContain('different caller text');
+  expect(toolNames(mockCreate.mock.calls[0][0])).not.toContain('request_email_change');
+  delete process.env.GATE_PORTAL_CHAT_EMAIL_CHANGE;
   expect(result).toEqual(expect.objectContaining({
     reply: 'The kitchen treatment is in your report.', conversationId: 'conv-old', generated: true,
   }));
@@ -380,7 +390,6 @@ test('a crash retry bounds newest history at its immutable ask even after many l
         context_snapshot: { version: 2, firstName: 'Pat' },
         portal_turn_message_id: originalId,
         portal_turn_message_content: originalAsk,
-        portal_turn_message_created_at: originalAt,
       }];
     }
     if (query.sql.includes('from "agent_messages"') && query.sql.includes('order by')) {
@@ -402,7 +411,9 @@ test('a crash retry bounds newest history at its immutable ask even after many l
 
   expect(historyQuery.sql).toMatch(/"created_at" < .* or \("created_at" = .* and "id" <= .*\)/);
   expect(historyQuery.sql).toMatch(/order by "created_at" desc, "id" desc limit/);
-  expect(historyQuery.bindings).toEqual(expect.arrayContaining([originalAt, originalId]));
+  expect(historyQuery.sql.match(/select "created_at" from "agent_messages" where "id" = \$\d+/g)).toHaveLength(2);
+  expect(historyQuery.bindings.filter((value) => value === originalId)).toHaveLength(3);
+  expect(historyQuery.bindings.some((value) => value instanceof Date)).toBe(false);
   const modelMessages = JSON.stringify(mockCreate.mock.calls[0][0].messages);
   expect(modelMessages).toContain(originalAsk);
   expect(modelMessages).not.toContain('later ask');

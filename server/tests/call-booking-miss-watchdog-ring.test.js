@@ -119,6 +119,24 @@ describe('first bell', () => {
   });
 });
 
+// Owner 2026-10-03: a spouse called from a number not on file (no customer on
+// the call) and the office booked her visit on the household's account.
+describe('booked under another household member', () => {
+  test('a call with no customer is cleared by a visit that carries the call, under any customer', async () => {
+    mockState.calls = [missCall({ customer_id: null })];
+    mockState.booked = [{ customer_id: 'cust-household', status: 'confirmed', sched_date: '2026-10-04', window_start: '11:00:00', source_call_log_id: CALL_ID, notes: null }];
+    const result = await runCallBookingMissWatchdog({ now: NOW });
+    expect(result.misses).toBe(0);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('the same call with no such visit still rings', async () => {
+    mockState.calls = [missCall({ customer_id: null })];
+    const result = await runCallBookingMissWatchdog({ now: NOW });
+    expect(result).toMatchObject({ misses: 1, alerted: 1 });
+  });
+});
+
 describe('booked then cancelled by the office', () => {
   const afterCall = '2026-09-28T21:50:00Z';
 

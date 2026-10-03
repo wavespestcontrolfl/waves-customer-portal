@@ -2345,7 +2345,7 @@ function calculateDiscountDollars(row, baseAmount, clientAmount) {
     // baseAmount * (amount / 100) — plain IEEE754 float division, which
     // rounds 5% of $20.70 down to $1.03 (20.70 * 0.05 ===
     // 1.0349999999999999). The mobile checkout preview (and every other
-    // discount surface, per CLAUDE.md's "regardless of the gate" rounding
+    // discount surface, per docs/gates-and-env.md's "regardless of the gate" rounding
     // rule) now shows the cent-exact $1.04 through
     // lib/discountStack.percentageDiscountDollars — sharing that same
     // integer-cents helper here keeps this cap-check from clamping the
@@ -5926,9 +5926,16 @@ router.get('/', async (req, res, next) => {
     // the shared entry for a visit whose customer has no gate code. A failed
     // read just shows no fallback.
     let neighborhoodGateByVisit = new Map();
+    // Visits whose stop is in an active neighborhood, when a visit's assigned
+    // technician may add a gate code or mark one wrong
+    // (GATE_NEIGHBORHOOD_TECH_ACTIONS); empty = the field screen offers neither.
+    let gateActionVisits = new Set();
+    const neighborhoodTechActions = require('../config/feature-gates').neighborhoodTechActionsLive();
     try {
       if (require('../config/feature-gates').neighborhoodAccessLive()) {
-        neighborhoodGateByVisit = await require('../services/neighborhood-access').neighborhoodGateEntriesForVisits(db, services);
+        const neighborhoodAccess = require('../services/neighborhood-access');
+        neighborhoodGateByVisit = await neighborhoodAccess.neighborhoodGateEntriesForVisits(db, services);
+        if (neighborhoodTechActions) gateActionVisits = await neighborhoodAccess.gateActionVisitIds(db, services);
       }
     } catch (err) {
       logger.warn(`[admin-schedule] neighborhood gate lookup failed (${err.code || err.name || 'error'})`);
@@ -6116,6 +6123,7 @@ router.get('/', async (req, res, next) => {
         servicePreferences: s.service_preferences,
         normalizedServiceType: normalizedType,
         neighborhoodGate: neighborhoodGateByVisit.get(s.id) || null,
+        neighborhoodActions: gateActionVisits.has(s.id),
       });
 
       const zone = s.zone || getZone(s.city, s.zip);
@@ -6390,6 +6398,7 @@ router.get('/', async (req, res, next) => {
         materialsNeeded: s.materials_needed ? (typeof s.materials_needed === 'string' ? JSON.parse(s.materials_needed) : s.materials_needed) : [],
         materialsLoaded: s.materials_loaded_confirmed,
         propertyAlerts: alerts,
+        ...(gateActionVisits.has(s.id) ? { neighborhoodGateActions: true } : {}),
         isNewCustomer: genuinelyNew,                    // FIX #1: computed from service_records
         lastServiceDate: safeDate(lastService?.service_date),   // FIX #3: safe date
         lastServiceType: lastService ? normalizeServiceType(lastService.service_type) : null,
@@ -19348,7 +19357,7 @@ async function rideLawnExtension(ctx) {
   // visit that is actually still booked: at least the rule's minimum gap after
   // it (never, say, D168 next to a kept off-cadence D160).
   const after = dateOnly(latest.scheduled_date);
-  const gapFloor = Preview._internals.addDaysStr(after, Preview.MIN_GAP_DAYS);
+  const gapFloor = Preview._internals.addDaysStr(after, Preview.riderGapsFor(parent.recurring_pattern).min);
   const date = plan.insert.find((d) => d >= plan.planFloor && d >= gapFloor && !existingDates.has(d) && (!opts.maxDate || d <= opts.maxDate));
   // No lawn occurrence on the date (the rule's own +84 fallback) is not a ride.
   const host = date && plan.hostRows.find((r) => dateOnly(r.scheduled_date) === date);

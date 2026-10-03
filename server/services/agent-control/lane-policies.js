@@ -146,6 +146,8 @@ const LANE_RUNTIME = {
   contact_dictation: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'transcription_contact' },
   address_recovery: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'structured_extraction' },
   tech_dictation: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'audio', fallback_class: 'offline', eval_family: 'transcription_contact' },
+  // Speech to text for Fast Complete voice fill: one provider, no stored output (the words live only inside the request).
+  voice_fill_transcription: { side_effect_class: 'draft_for_human', ledger: 'unrecordable', unrecordable_reason: 'audio', fallback_class: 'offline', eval_family: 'transcription_contact' },
   parse_when: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction' },
 
   // ── Voice AI agent ──
@@ -187,6 +189,10 @@ const LANE_RUNTIME = {
   plant_id_app: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
   pest_id_app: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
   plant_id_referee: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
+  // SMS scheduling decide step (GATE_SMS_SCHEDULING_DECIDE, dark): shadow only — reads a customer's reply to a
+  // recorded offer and records what it would book in sms_offer_decisions. Never a send, move or booking; a miss
+  // records an error row and the text stays with staff. No queue, no fallback provider.
+  sms_scheduling_decide: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', maturity: 'M0' },
   // TypeSafe Jev typed decisions (GATE_TYPED_DECISIONS, dark): shadow-only yes/no/choice answers recorded for review,
   // never customer-visible and never a send. A miss leaves each caller on its existing path; no queue, no fallback provider.
   typed_decisions: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', maturity: 'M0' },
