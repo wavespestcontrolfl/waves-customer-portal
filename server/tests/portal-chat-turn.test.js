@@ -19,6 +19,8 @@ jest.mock('../models/db', () => {
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+const mockRecordGap = jest.fn(async () => []);
+jest.mock('../services/agent-gap-reports', () => ({ recordGap: (...args) => mockRecordGap(...args) }));
 
 const mockCreate = jest.fn();
 const mockListPayments = jest.fn(async () => ({ payments: [] }));
@@ -204,7 +206,7 @@ test('a portal escalation checkpoints its exact handoff and completed cards insi
     { id: 'conv-1', customer_id: 'cust-1', channel: 'portal_chat' },
     'Please help with this charge',
     'Customer needs billing help',
-    { gap: false, topic: 'billing', turn },
+    { gap: true, topic: 'billing', turn },
   );
 
   expect(turn.persistCommittedResult).toHaveBeenCalledWith(trx, expect.objectContaining({
@@ -216,6 +218,9 @@ test('a portal escalation checkpoints its exact handoff and completed cards insi
     cards,
   }));
   expect(turn.rememberCommittedResult).toHaveBeenCalledWith(expect.objectContaining({ escalated: true, cards }));
+  expect(mockRecordGap).toHaveBeenCalledWith(expect.objectContaining({
+    source: 'texting-ai', summary: 'Customer needs billing help',
+  }), trx);
   expect(result).toEqual(expect.objectContaining({ escalated: true, actions, cards }));
   notify.mockRestore();
 });
@@ -261,6 +266,40 @@ test('a card built before the model call fails still shows under the fallback te
   expect(result.cards).toHaveLength(1);
   expect(result.actions).toEqual([{ type: 'tab', label: 'Open Billing', tab: 'billing' }]);
   expect(fallbackExtras()).toEqual(expect.objectContaining({ actions: result.actions, cards: result.cards }));
+});
+
+test.each([
+  ['fresh message', true, true],
+  ['replayed message', false, false],
+])('a coordinated %s increments the session count only when its user message inserts', async (_label, inserted, increments) => {
+  wire('portal_chat', 'cust-1');
+  const queries = [];
+  const rows = db.__rows;
+  db.__rows = (query) => {
+    queries.push(query.sql);
+    if (inserted && /insert into "agent_messages".*returning "id"/.test(query.sql)) return [{ id: 'message-1' }];
+    return rows(query);
+  };
+  mockCreate.mockResolvedValue({ content: [{ type: 'text', text: 'Happy to help.' }] });
+  const turn = {
+    requestRowId: 'request-row-replay',
+    query: (query) => query,
+    transaction: (_stage, work) => work(db),
+    assertActive: jest.fn(),
+    providerOptions: () => undefined,
+    registerFallbackExtras: jest.fn(),
+    persistCommittedResult: async (_executor, result) => result,
+    rememberCommittedResult: (result) => result,
+  };
+
+  await assistant.processMessage({
+    message: 'Hi', channel: 'portal_chat', channelIdentifier: 'sess-1', customerId: 'cust-1', turn,
+  });
+
+  expect(queries).toEqual(expect.arrayContaining([
+    expect.stringMatching(/insert into "agent_messages".*returning "id"/),
+  ]));
+  expect(queries.some((sql) => /update "agent_sessions" set "message_count"/.test(sql))).toBe(increments);
 });
 
 test('GATE_PORTAL_CHAT_VISIT_FACTS on: structured facts to the model, the summary on a card, and the gates compose', async () => {

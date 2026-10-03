@@ -17,11 +17,13 @@ const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../../constants/business');
 const { recordGap } = require('../agent-gap-reports');
 
 // One texting-AI gap report for an escalation its caller marked as the
-// assistant not knowing how to help. Fire-and-forget; never throws.
-function recordEscalationGap(customerMessage, reason) {
+// assistant not knowing how to help. Legacy calls fire-and-forget; a portal
+// turn supplies its bounded executor. Never throws.
+function recordEscalationGap(customerMessage, reason, database) {
   const summary = (reason && String(reason).trim()) || customerMessage;
   const attempted = customerMessage && customerMessage !== reason ? `Customer text: ${customerMessage}` : 'Escalated to staff';
-  return recordGap({ source: 'texting-ai', summary, attempted }).catch(() => {});
+  const gap = { source: 'texting-ai', summary, attempted };
+  return recordGap(gap, database).catch(() => {});
 }
 
 async function escalationCustomer(customerId, executor = db) {
@@ -416,13 +418,19 @@ class WavesAssistant {
     // 3. Save the user message
     try {
       const persist = async (executor) => {
-        await executor('agent_messages').insert({
+        const messageInsert = executor('agent_messages').insert({
           conversation_id: conversation.id,
           role: 'user',
           content: message,
           channel,
           ...(turn ? { portal_chat_request_id: turn.requestRowId } : {}),
         }).onConflict().ignore();
+        if (turn) {
+          const inserted = await messageInsert.returning('id');
+          if (!inserted.length) return;
+        } else {
+          await messageInsert;
+        }
         await executor('agent_sessions').where('id', conversation.id).update({
           message_count: (conversation.message_count || 0) + 1,
           last_activity_at: new Date(),
@@ -916,7 +924,7 @@ class WavesAssistant {
 
     if (gap) {
       try {
-        await waitFor(() => recordEscalationGap(customerMessage, reason), turn, 'gap persistence');
+        await turn.transaction('gap persistence', (database) => recordEscalationGap(customerMessage, reason, database));
       } catch { /* gap reports remain best-effort after the escalation commits */ }
     }
 
