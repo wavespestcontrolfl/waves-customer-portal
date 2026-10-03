@@ -38,13 +38,14 @@ function fakeKnex({ recap, firstName, isCallback = false }) {
 }
 
 describe('recap greeting re-render', () => {
-  test('an old render for a no-first-name customer needs a re-render; a stamped one or a named customer does not', async () => {
-    const old = { id: 1, scheduled_service_id: SVC, status: 'ready', greeting_version: null };
-    expect(await recapNeedsGreetingRerender(old, fakeKnex({ recap: old, firstName: '' }).knex)).toBe(true);
-    expect(await recapNeedsGreetingRerender(old, fakeKnex({ recap: old, firstName: null }).knex)).toBe(true);
-    expect(await recapNeedsGreetingRerender(old, fakeKnex({ recap: old, firstName: 'Sample' }).knex)).toBe(false);
-    const stamped = { ...old, greeting_version: RECAP_GREETING_VERSION };
-    expect(await recapNeedsGreetingRerender(stamped, fakeKnex({ recap: stamped, firstName: '' }).knex)).toBe(false);
+  test('every unsent recap rendered before the rule needs one re-render, whatever the live name; a stamped or sent one does not', async () => {
+    const old = { id: 1, scheduled_service_id: SVC, status: 'ready', greeting_version: null, sent_at: null };
+    expect(await recapNeedsGreetingRerender(old)).toBe(true);
+    // the renderer used the completion-time snapshot; a live first name filled in since is no reason to skip
+    expect(await recapNeedsGreetingRerender(old, fakeKnex({ recap: old, firstName: 'Sample' }).knex)).toBe(true);
+    expect(await recapNeedsGreetingRerender({ ...old, greeting_version: RECAP_GREETING_VERSION })).toBe(false);
+    expect(await recapNeedsGreetingRerender({ ...old, sent_at: new Date() })).toBe(false);
+    expect(await recapNeedsGreetingRerender(null)).toBe(false);
   });
 
   test('approve re-queues a stale ready recap instead of approving it', async () => {
@@ -56,9 +57,9 @@ describe('recap greeting re-render', () => {
     expect(updates.some((u) => u.patch.status === 'approved')).toBe(false);
   });
 
-  test('approve proceeds for a named customer', async () => {
-    const recap = { id: 1, scheduled_service_id: SVC, status: 'ready', greeting_version: null, sent_at: null };
-    const { knex, updates } = fakeKnex({ recap, firstName: 'Sample' });
+  test('approve proceeds for a recap rendered under the current rule', async () => {
+    const recap = { id: 1, scheduled_service_id: SVC, status: 'ready', greeting_version: RECAP_GREETING_VERSION, sent_at: null };
+    const { knex, updates } = fakeKnex({ recap, firstName: '' });
     const result = await approveRecap(SVC, { knex });
     expect(result.ok).toBe(true);
     expect(updates.some((u) => u.patch.status === 'approved')).toBe(true);

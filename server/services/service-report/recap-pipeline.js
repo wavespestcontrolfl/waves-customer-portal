@@ -57,23 +57,13 @@ async function callbackRecapRetired(scheduledServiceId, knex = db) {
 // 1 = a customer with no first name is greeted "there", never by the surname.
 const RECAP_GREETING_VERSION = 1;
 
-// True when this recap's video was rendered before the current greeting rule AND the
-// visit's customer has no first name — its baked-in intro greets them by the surname,
-// so it must be re-rendered, never approved or sent (codex #5674 r1). A customer with
-// a first name renders identically under both rules, so their recaps are left alone.
-// Lookup failure keeps today's behavior (no re-render).
-async function recapNeedsGreetingRerender(recap, knex = db) {
-  if (!recap || Number(recap.greeting_version || 0) >= RECAP_GREETING_VERSION) return false;
-  try {
-    const row = await knex('service_records')
-      .where({ 'service_records.scheduled_service_id': recap.scheduled_service_id })
-      .leftJoin('customers', 'service_records.customer_id', 'customers.id')
-      .orderBy('service_records.created_at', 'desc')
-      .first('customers.first_name');
-    return !!row && String(row.first_name || '').trim() === '';
-  } catch {
-    return false;
-  }
+// True when this unsent recap's video was rendered before the current greeting rule. Its
+// baked-in intro may greet a customer with no first name by their SURNAME, and the name
+// the renderer used is the completion-time identity snapshot (not the live customer row),
+// so EVERY such recap is re-rendered once rather than guessing who it affects (codex
+// #5674 r1 + pre-push audit). A one-time cost for recaps awaiting approval at deploy.
+async function recapNeedsGreetingRerender(recap) {
+  return !!recap && !recap.sent_at && Number(recap.greeting_version || 0) < RECAP_GREETING_VERSION;
 }
 
 // Queue (or re-queue) a recap render. force=true regenerates a ready/failed one.
