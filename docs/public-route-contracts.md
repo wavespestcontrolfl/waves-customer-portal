@@ -1729,7 +1729,10 @@ answers:
   RESERVATION TRANSACTION FOR SHARE NOWAIT (held to commit, so a staff edit of the lone candidate cannot land before
   the hold insert); NOWAIT because a customer edit's fan-out locks customer then estimate while this transaction
   already holds the estimate row, so a row another writer holds right now answers the accept's existing retryable
-  `CUSTOMER_BUSY_RETRY` 409 instead of waiting. On the park path `POST /recurring-card-intent` also retires a
+  `CUSTOMER_BUSY_RETRY` 409 instead of waiting (extend skips the recheck instead and carries on). The locked read runs inside a
+  SAVEPOINT: a NOWAIT failure (55P03) aborts the whole PostgreSQL transaction, so it is rolled back to the savepoint
+  before the refusal or skip, leaving the reservation transaction usable; a savepoint that succeeds is RELEASED and
+  keeps its share lock to the outer commit (real-Postgres suite `slot-park-lock-contention-postgres.test.js`). On the park path `POST /recurring-card-intent` also retires a
   submitted `replaceSetupIntentId` (the intent a replace-payment-method request abandons) BEFORE the 409, with the
   accept's own helper and the same 503 `RECURRING_CARD_RETIRE_FAILED` when Stripe cannot confirm;
   `/card-hold-intent` has no such field. If the client's slot-hold release fails during the transition it retries

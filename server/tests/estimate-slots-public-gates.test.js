@@ -457,7 +457,7 @@ describe('B18 park: a parked estimate (its phone belongs to another customer) ca
   });
 
   describe('the reserve / extend locked callback reads the phone candidate on the reservation transaction, FOR SHARE NOWAIT', () => {
-    const TRX = { isTransaction: true };
+    const TRX = { isTransaction: true, raw: jest.fn(async () => ({})) }; // raw: the SAVEPOINT statements
     const lockedRow = { ...PARKED_ESTIMATE, estimate_data: {} };
     const capture = async () => {
       let predicate;
@@ -480,8 +480,13 @@ describe('B18 park: a parked estimate (its phone belongs to another customer) ca
 
     test('a customer row another writer holds right now (55P03) is the accept\'s existing retryable refusal, not a wait and not a pass', async () => {
       const predicate = await capture();
+      TRX.raw.mockClear();
       estimatePublicBlockingState.mockRejectedValueOnce(Object.assign(new Error('could not obtain lock'), { code: '55P03' }));
       await expect(predicate(lockedRow, TRX)).resolves.toMatchObject({ status: 409, body: { code: 'CUSTOMER_BUSY_RETRY' } });
+      // The locked read ran in a SAVEPOINT that was rolled back to (waves-db 5b), so the outer transaction survives.
+      const statements = TRX.raw.mock.calls.map((c) => String(c[0]));
+      expect(statements[0]).toMatch(/^SAVEPOINT scope_/);
+      expect(statements.some((q) => /^ROLLBACK TO SAVEPOINT scope_/.test(q))).toBe(true);
       // Any other failure still propagates (the route's own 500).
       estimatePublicBlockingState.mockRejectedValueOnce(new Error('db down'));
       await expect(predicate(lockedRow, TRX)).rejects.toThrow('db down');
@@ -509,7 +514,7 @@ describe('B18 park: a parked estimate (its phone belongs to another customer) ca
       currentEstimate = PARKED_ESTIMATE;
       estimatePublicBlockingState.mockResolvedValueOnce(null);
       slotReservation.reserveSlot.mockImplementationOnce(async (args) => {
-        const refusal = await args.revalidateEstimate({ ...PARKED_ESTIMATE, estimate_data: {} }, { isTransaction: true });
+        const refusal = await args.revalidateEstimate({ ...PARKED_ESTIMATE, estimate_data: {} }, { isTransaction: true, raw: async () => ({}) });
         const err = new Error('estimate cannot be self-booked'); err.code = 'ESTIMATE_NO_BOOKING'; err.response = refusal; throw err;
       });
       estimatePublicBlockingState.mockResolvedValueOnce(PARKED);
@@ -525,7 +530,7 @@ describe('B18 park: a parked estimate (its phone belongs to another customer) ca
       // extend, locked row
       estimatePublicBlockingState.mockResolvedValueOnce(null);
       slotReservation.extendReservation.mockImplementationOnce(async (args) => {
-        const refusal = await args.revalidateEstimate({ ...PARKED_ESTIMATE, estimate_data: {} }, { isTransaction: true });
+        const refusal = await args.revalidateEstimate({ ...PARKED_ESTIMATE, estimate_data: {} }, { isTransaction: true, raw: async () => ({}) });
         const err = new Error('estimate cannot be self-booked'); err.code = 'ESTIMATE_NO_BOOKING'; err.response = refusal; throw err;
       });
       estimatePublicBlockingState.mockResolvedValueOnce(PARKED);
@@ -542,7 +547,7 @@ describe('B18 park: a parked estimate (its phone belongs to another customer) ca
   });
 
   describe('EXTEND never discards a valid hold over a briefly held customer row; RESERVE keeps the retryable refusal', () => {
-    const TRX = { isTransaction: true };
+    const TRX = { isTransaction: true, raw: jest.fn(async () => ({})) }; // raw: the SAVEPOINT statements
     test('55P03 on the extend predicate extends (null), on the reserve predicate it is CUSTOMER_BUSY_RETRY', async () => {
       currentEstimate = PARKED_ESTIMATE;
       let extendPredicate;

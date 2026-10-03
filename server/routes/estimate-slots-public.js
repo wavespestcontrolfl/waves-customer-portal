@@ -81,6 +81,7 @@ const TRENCHING_REVIEW_409 = {
   reason: 'termite_trenching_review',
 };
 const { buildEstimateMembershipContext } = require('../services/estimate-membership-context');
+const { savepointScope } = require('../utils/savepoint-read');
 const { commercialLowConfidenceRange } = require('../services/estimate-delivery-options');
 const {
   createCardHoldSetupIntentForEstimate,
@@ -262,9 +263,18 @@ const CUSTOMER_BUSY_REFUSAL = {
   // The sentence and code the accept already answers a busy customer with (no new wording).
   body: { error: 'This account is being updated right now \u2014 please retry your acceptance in a moment.', code: 'CUSTOMER_BUSY_RETRY' },
 };
+//
+// A failed FOR SHARE NOWAIT (55P03) ABORTS the whole PostgreSQL transaction (waves-db 5b: catching the JS error does
+// not restore it - the next statement would fail 25P02). So the locked read runs inside a SAVEPOINT on the
+// reservation transaction (savepointScope): a 55P03 rolls back ONLY the savepoint, the error is caught after that
+// rollback, and the outer transaction stays usable (extend goes on to extend; reserve returns its refusal and the
+// route rolls back or continues cleanly). On success the savepoint is RELEASED, not rolled back, so the share lock
+// is kept to the outer commit.
 async function lockedContactReviewRefusal(row, trx, { skipOnBusy = false } = {}) {
   try {
-    const state = await contactReviewState(row, { database: trx, lock: !!trx });
+    const state = trx
+      ? await savepointScope(trx, (scoped) => contactReviewState(row, { database: scoped, lock: true }))
+      : await contactReviewState(row, {});
     return state
       ? { status: 409, body: acceptOfficeReviewBody(), park: { rejectedCustomerId: state.rejectedCustomerId } }
       : null;
@@ -1341,4 +1351,4 @@ async function offerableEstimateSlots(estimateId, customerId, { fresh = false } 
 }
 
 module.exports = router;
-module.exports._internals = { offerableEstimateSlots, pageDefaultSlotSelection };
+module.exports._internals = { offerableEstimateSlots, pageDefaultSlotSelection, lockedContactReviewRefusal };
