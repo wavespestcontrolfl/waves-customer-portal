@@ -864,7 +864,10 @@ describe('anniversary and tenure', () => {
     expect(body).toMatch(/\$\{ADDON_LINE_IS_PLAN_SQL\}/);
     expect(body).toMatch(/\$\{LIVE_STATUS_SQL\}/);
     // the signup-fee add-on (one-time whatever its pattern column says) is not a program
-    expect(body).toMatch(/scheduled_service_addons\.service_key, ''\) NOT IN \(\$\{oneTimeAddonKeys\}\)/);
+    // the add-on's key is service_key_snapshot, else the catalog row via service_id (there is no addons.service_key column)
+    expect(body).toMatch(/COALESCE\(scheduled_service_addons\.service_key_snapshot, asv\.service_key, ''\) NOT IN \(\$\{oneTimeAddonKeys\}\)/);
+    expect(body).toMatch(/LEFT JOIN services asv ON asv\.id = scheduled_service_addons\.service_id/);
+    expect(body).not.toMatch(/scheduled_service_addons\.service_key[^_]/);
     expect(P.ONE_TIME_ADDON_SERVICE_KEYS).toEqual(['waveguard_membership']);
     const sched = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-schedule.js'), 'utf8');
     expect(sched).toMatch(/const ONE_TIME_ADDON_SERVICE_KEYS = new Set\(\['waveguard_membership'\]\)/); // the mirror stays in step

@@ -1668,8 +1668,9 @@ async function loadAccountActivity(dbh, customerIds, { today }) {
        OR EXISTS (SELECT 1 FROM scheduled_services s WHERE s.customer_id = c.id AND s.status = 'completed')
        OR EXISTS (SELECT 1 FROM service_records sr WHERE sr.customer_id = c.id AND sr.status = 'completed')
        OR EXISTS (SELECT 1 FROM scheduled_services s JOIN scheduled_service_addons ON scheduled_service_addons.scheduled_service_id = s.id
+                  LEFT JOIN services asv ON asv.id = scheduled_service_addons.service_id
                   WHERE s.customer_id = c.id AND ${LIVE_STATUS_SQL} AND s.scheduled_date >= ? AND ${ADDON_LINE_IS_PLAN_SQL}
-                    AND COALESCE(scheduled_service_addons.service_key, '') NOT IN (${oneTimeAddonKeys}))
+                    AND COALESCE(scheduled_service_addons.service_key_snapshot, asv.service_key, '') NOT IN (${oneTimeAddonKeys}))
       ) AS account_activity
     FROM customers c WHERE c.id = ANY(?::uuid[])
   `, [today, customerIds]);
