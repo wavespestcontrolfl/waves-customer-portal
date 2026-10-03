@@ -1269,16 +1269,19 @@ const PLAN_ROW_SQL = `((s.is_recurring = true OR (s.is_recurring IS NULL AND s.r
 // with no parent — 7 imported pre-April history, 7 admin-booked since —
 // so the October batch held 12 of its 25 no_anniversary lines although
 // the work was done). A standalone row counts only when nothing marks it
-// a one-time service: not a parented booster, callback or included
-// follow-up; its catalog service is not billed one_time; and its name is
-// not an inspection / assessment / WDO (a same-family one-time — a WDO
+// a one-time service AND something marks it recurring: not a parented
+// booster, callback or included follow-up; its catalog service is billed
+// `recurring`, or — no catalog row at all (imported history) — its name
+// carries a cadence (Quarterly / Bi-Monthly / Semiannual / Monthly /
+// Annual / Every N); and its name is not an inspection / assessment / WDO (a same-family one-time — a WDO
 // inspection sits in the termite family — must not date a termite
 // program or set the account's import baseline). Revenue and $/hr keep
 // PLAN_ROW_SQL (loadCompletedVisitRows).
 const DATING_ROW_SQL = `(${PLAN_ROW_SQL} OR (
     s.is_recurring IS FALSE AND s.recurring_parent_id IS NULL
     AND COALESCE(s.is_callback, false) = false AND COALESCE(s.followup_included, false) = false
-    AND COALESCE(sv.billing_type, '') <> 'one_time'
+    AND (sv.billing_type = 'recurring'
+      OR (sv.id IS NULL AND COALESCE(s.service_type, '') ~* '(quarterly|bi-?monthly|semi-?annual|monthly|annual|every [0-9]|recurring)'))
     AND COALESCE(s.service_type, '') NOT ILIKE '%inspection%'
     AND COALESCE(s.service_type, '') NOT ILIKE '%assessment%'
     AND COALESCE(s.service_type, '') NOT ILIKE '%wdo%'))`;

@@ -1194,7 +1194,14 @@ describe('engine replay guards', () => {
     // recurring catalog service that is not an inspection / assessment / WDO
     expect(P.DATING_ROW_SQL.startsWith(`(${P.PLAN_ROW_SQL} OR (`)).toBe(true);
     expect(P.DATING_ROW_SQL).toMatch(/s\.is_recurring IS FALSE AND s\.recurring_parent_id IS NULL/);
-    expect(P.DATING_ROW_SQL).toMatch(/COALESCE\(sv\.billing_type, ''\) <> 'one_time'/);
+    // positive recurring evidence: the catalog says recurring, or (no catalog row) the name carries a cadence —
+    // a service_id-less "One-Time Pest Control" row passes neither
+    expect(P.DATING_ROW_SQL).toMatch(/sv\.billing_type = 'recurring'/);
+    expect(P.DATING_ROW_SQL).toMatch(/sv\.id IS NULL AND COALESCE\(s\.service_type, ''\) ~\* '\(quarterly\|bi-\?monthly\|semi-\?annual\|monthly\|annual\|every \[0-9\]\|recurring\)'/);
+    expect(P.DATING_ROW_SQL).not.toMatch(/<> 'one_time'/);
+    const cadence = /(quarterly|bi-?monthly|semi-?annual|monthly|annual|every [0-9]|recurring)/i;
+    for (const name of ['Quarterly Pest Control Service', 'Bi-Monthly Tree & Shrub Care Service', 'Semiannual Pest Control Service', 'Bi-Monthly Pest Control']) expect(cadence.test(name)).toBe(true);
+    for (const name of ['One-Time Pest Control', 'Termite Control Service', 'WDO Inspection', 'Waves Assessment']) expect(cadence.test(name)).toBe(false);
     for (const word of ['inspection', 'assessment', 'wdo']) expect(P.DATING_ROW_SQL).toMatch(new RegExp(`NOT ILIKE '%${word}%'`));
     expect(P.DATING_ROW_SQL).not.toMatch(/is_recurring = false/);
     // the standalone arm carries its own callback / follow-up exclusions (PLAN_ROW_SQL's do not reach it)
