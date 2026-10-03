@@ -115,7 +115,19 @@ describe('lane voice fill on Generate', () => {
     expect(screen.queryByText(/treated the master bedroom/)).toBeNull();
   });
 
-  it('the unclear asks follow the latest Generate: a later read that answers nothing clears them', async () => {
+  it('the unclear asks follow the latest Generate: a later read that leaves nothing unclear clears them', async () => {
+    laneAnswer = () => ({ ok: true, json: async () => ({ ...READ, findings: READ.findings.filter((entry) => entry.group !== 'bed_bug_prep'), unclearGroups: ['bed_bug_prep'] }) });
+    await openForm(BED_BUG);
+    await generate();
+    await waitFor(() => expect(screen.getAllByText('The notes didn’t make this clear. Pick one.').length).toBeGreaterThan(0));
+    laneAnswer = () => ({ ok: true, json: async () => READ });
+    await waitFor(() => expect(screen.getAllByRole('button', { name: /generate ai/i })[0].disabled).toBe(false));
+    await act(async () => fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]));
+    await waitFor(() => expect(calls.filter((call) => call.kind === 'lane')).toHaveLength(2));
+    await waitFor(() => expect(screen.queryByText('The notes didn’t make this clear. Pick one.')).toBeNull());
+  });
+
+  it('a read the model failed answers nothing: the asks an earlier read left stay asked', async () => {
     laneAnswer = () => ({ ok: true, json: async () => ({ ...READ, findings: READ.findings.filter((entry) => entry.group !== 'bed_bug_prep'), unclearGroups: ['bed_bug_prep'] }) });
     await openForm(BED_BUG);
     await generate();
@@ -124,7 +136,8 @@ describe('lane voice fill on Generate', () => {
     await waitFor(() => expect(screen.getAllByRole('button', { name: /generate ai/i })[0].disabled).toBe(false));
     await act(async () => fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]));
     await waitFor(() => expect(calls.filter((call) => call.kind === 'lane')).toHaveLength(2));
-    await waitFor(() => expect(screen.queryByText('The notes didn’t make this clear. Pick one.')).toBeNull());
+    await waitFor(() => expect(calls.filter((call) => call.kind === 'generate')).toHaveLength(2));
+    expect(screen.getAllByText('The notes didn’t make this clear. Pick one.').length).toBeGreaterThan(0);
   });
 
   it('a request that fails answers nothing: the asks an earlier read left stay asked', async () => {
