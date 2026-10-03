@@ -64,8 +64,9 @@ describe('recordPaymentDrop', () => {
     await Drafts.recordPaymentDrop(seq, { step: 2, hold: 'overdue_invoice', heldSince: '2026-10-01T14:00:00.000Z' }, database);
     expect(inserts[0]).toMatchObject({ customer_id: 'cust-9', sequence_id: 'seq-9', sequence_step: 2, channel: 'email', outcome: 'held', reason: 'payment_hold_dropped', body: null });
     expect(JSON.parse(inserts[0].evidence)).toEqual({ hold: { step: 2, hold: 'overdue_invoice', heldSince: '2026-10-01T14:00:00.000Z' } });
+    // it is written inside the step advance's transaction, so a failed write throws to it
     const failing = jest.fn(() => ({ insert: async () => { throw new Error('down'); } }));
-    await expect(Drafts.recordPaymentDrop(seq, { step: 2 }, failing)).resolves.toBeUndefined();
+    await expect(Drafts.recordPaymentDrop(seq, { step: 2 }, failing)).rejects.toThrow('down');
   });
 });
 
@@ -78,6 +79,8 @@ function readDb(tables) {
     for (const m of ['leftJoin', 'where', 'whereIn', 'whereRaw', 'orderBy', 'limit']) {
       q[m] = (...args) => { calls.push([name, m, ...args]); return q; };
     }
+    q.where = (...args) => { calls.push([name, 'where', ...args]); if (typeof args[0] === 'function') args[0](q); return q; };
+    q.orWhereIn = (...args) => { calls.push([name, 'orWhereIn', ...args]); return q; };
     q.select = async () => tables[name] || [];
     return q;
   });
@@ -171,6 +174,29 @@ describe('listRecent: whether THIS outcome went out', () => {
     const personalized = await listWith([draftRow({ id: 9, outcome: 'fallback', reason: 'out_of_time' })],
       [request({ custom_body: 'A personalized ask', sms_sent_at: new Date('2026-10-02T15:32:00Z') })]);
     expect(personalized.drafts[0].sentAt).toBeNull();
+  });
+
+  test('a draft too long for the full review link: the fixed text is the send, the draft is marked replaced', async () => {
+    const { database, calls } = readDb({
+      review_ask_drafts: [
+        draftRow({ id: 20, outcome: 'drafted', body: 'A long draft' }),
+        // recorded at send time, after its request was made
+        draftRow({ id: 21, outcome: 'fallback', reason: 'long_link', evidence: { requestId: 'rr-1' }, created_at: new Date('2026-10-02T15:02:00Z') }),
+      ],
+      // the sender cleared the draft off the request before it sent the fixed text
+      review_requests: [request({ sms_sent_at: new Date('2026-10-02T15:03:00Z') })],
+    });
+    const out = await Drafts.listRecent({ database });
+    expect(out.drafts.find((d) => d.id === 20)).toMatchObject({ sentAt: null, replacedByFixedText: true });
+    expect(out.drafts.find((d) => d.id === 21)).toMatchObject({ outcome: 'fallback', reason: 'long_link', sentAt: new Date('2026-10-02T15:03:00Z'), replacedByFixedText: false });
+    // the named request is read even when the touch has no cadence
+    expect(calls).toContainEqual(['review_requests', 'orWhereIn', 'id', ['rr-1']]);
+    // a long-link row whose request still carries a draft (the stamp never landed) is not a fixed send
+    const unstamped = await listWith(
+      [draftRow({ id: 22, outcome: 'fallback', reason: 'long_link', evidence: { requestId: 'rr-1' } })],
+      [request({ custom_body: 'A long draft', sms_sent_at: new Date() })],
+    );
+    expect(unstamped.drafts[0].sentAt).toBeNull();
   });
 
   test('a text the provider accepted whose stamp write failed is sent by the sender\'s own delivery evidence', async () => {

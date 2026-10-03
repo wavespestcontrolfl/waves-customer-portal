@@ -30,6 +30,7 @@ const FALLBACK_REASONS = {
   draft_error: "drafting hit an error",
   no_draft: "no draft passed",
 };
+const LONG_LINK = "long_link";
 
 const HOLD_TEXT = {
   overdue_invoice: "overdue bill",
@@ -75,7 +76,12 @@ function DraftCard({ d }) {
           {withLink(d.body)}
         </p>
       )}
-      {d.outcome === "fallback" && (
+      {d.reason === LONG_LINK && (
+        <p className="text-ui-body text-zinc-700">
+          The review link could not be shortened and the draft would not fit with the full link, so this step sent the fixed text.
+        </p>
+      )}
+      {d.outcome === "fallback" && d.reason !== LONG_LINK && (
         <p className="text-ui-body text-zinc-700">
           No draft passed, so this step uses the fixed text: {FALLBACK_REASONS[d.reason] || String(d.reason || "no reason recorded").replace(/_/g, " ")}.
         </p>
@@ -110,7 +116,11 @@ function DraftCard({ d }) {
       )}
       <p className="text-ui-caption text-zinc-500">
         {d.reason === PAYMENT_DROP ? "Dropped" : "Drafted"} {fmtET(d.createdAt)}
-        {d.outcome === "held" ? " · not sent" : d.sentAt ? ` · sent ${fmtET(d.sentAt)}` : " · not sent yet"}
+        {d.outcome === "held"
+          ? " · not sent"
+          : d.replacedByFixedText
+            ? " · not sent, the fixed text went instead"
+            : d.sentAt ? ` · sent ${fmtET(d.sentAt)}` : " · not sent yet"}
       </p>
     </Card>
   );
@@ -141,7 +151,9 @@ export default function ReviewDraftsPanel() {
         <h2 className="text-16 font-medium text-zinc-900 mr-auto">Tech-voice review texts</h2>
         <UiSelect
           value={days}
-          onChange={(e) => setDays(e.target.value)}
+          // The listed texts belong to the window they were loaded for: clear
+          // them so another window never shows under this selection.
+          onChange={(e) => { setData(null); setDays(e.target.value); }}
           aria-label="Time window"
           className="w-auto bg-white border-hairline border-zinc-200 rounded-md text-zinc-900 text-ui-body cursor-pointer"
         >

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import ReviewDraftsPanel from "./ReviewDraftsPanel";
 
@@ -62,6 +62,36 @@ describe("Tech-voice review texts panel", () => {
     expect(screen.getByText(/the payment hold \(overdue bill\) outlasted its 3-day window/)).toBeInTheDocument();
     // more texts than are listed is said so
     expect(screen.getByText(/Showing the newest 4 in this window/)).toBeInTheDocument();
+  });
+
+  it("a draft that went out as the fixed text (full link too long) says so on both cards", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => response({
+      days: 14,
+      drafts: [
+        { id: 6, customerName: "Lena K", step: 0, channel: "sms", outcome: "fallback", reason: "long_link", body: null, sentences: [], repeat: null, createdAt: "2026-10-02T15:02:00Z", sentAt: "2026-10-02T15:03:00Z" },
+        { id: 5, customerName: "Lena K", step: 0, channel: "sms", outcome: "drafted", reason: null, body: "A long draft {review_url}", sentences: [], repeat: null, createdAt: "2026-10-02T15:00:00Z", sentAt: null, replacedByFixedText: true },
+      ],
+      paymentHolds: [],
+    })));
+    render(<ReviewDraftsPanel />);
+    expect(await screen.findByText(/would not fit with the full link, so this step sent the fixed text/)).toBeInTheDocument();
+    expect(screen.getByText(/not sent, the fixed text went instead/)).toBeInTheDocument();
+    expect(screen.queryByText(/not sent yet/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/No draft passed/)).not.toBeInTheDocument();
+  });
+
+  it("another window never shows the texts loaded for the last one, loading or failed", async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(response({ days: 14, drafts: [{ id: 1, customerName: "Marta R", step: 0, channel: "sms", outcome: "fallback", reason: "no_draft", body: null, sentences: [], repeat: null, createdAt: "2026-10-02T15:00:00Z" }], paymentHolds: [] }))
+      .mockResolvedValueOnce(response({ error: "Server error" }, 500));
+    vi.stubGlobal("fetch", fetch);
+    render(<ReviewDraftsPanel />);
+    expect(await screen.findByText("Marta R")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Time window"), { target: { value: "60" } });
+    expect(screen.queryByText("Marta R")).not.toBeInTheDocument();
+    expect(await screen.findByText(/Could not load the texts/)).toBeInTheDocument();
+    await waitFor(() => expect(fetch.mock.calls[1][0]).toContain("days=60"));
+    expect(screen.queryByText("Marta R")).not.toBeInTheDocument();
   });
 
   it("says when nothing has been drafted yet", async () => {

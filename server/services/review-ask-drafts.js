@@ -8,16 +8,22 @@
  *                      lines the fact check cited per sentence, a draft held
  *                      as a repeat of an earlier touch, or why it fell back
  *                      to the fixed text.
+ *                      Also the sender's own fallback: a draft that would
+ *                      not fit with the full review link (reason 'long_link',
+ *                      evidence.requestId = the request that carried the
+ *                      fixed text instead).
  *   recordPaymentDrop  one row when a payment-held step is dropped (outcome
  *                      'held', reason 'payment_hold_dropped'): the sequence's
  *                      decision is only its latest one, and the next step
- *                      overwrites it.
+ *                      overwrites it. Throws: the step runner writes it in
+ *                      the transaction that advances the step.
  *   listRecent         the page's read: those rows for the last N days, each
  *                      with whether its touch went out, plus the cadences a
  *                      payment hold is holding right now
  *                      (review_sequences.decision).
  *
- * Both writers are best effort: a failed write is logged, never thrown.
+ * Both are best effort for the send: a failed write is logged (recordDraft
+ * here, the payment drop by its caller) and never blocks a touch.
  */
 
 const db = require('../models/db');
@@ -26,6 +32,7 @@ const logger = require('./logger');
 const MAX_DAYS = 60;
 const MAX_ROWS = 200;
 const PAYMENT_DROP_REASON = 'payment_hold_dropped';
+const LONG_LINK_REASON = 'long_link';
 
 function dateOnly(value) {
   if (!value) return null;
@@ -55,7 +62,9 @@ async function recordDraft({ customer, sequenceId = null, sequenceStep = null, c
       outcome: result.outcome,
       reason: result.reason ? String(result.reason).slice(0, 80) : (result.outcome === 'held' ? 'repeat' : null),
       body: result.body || null,
-      evidence: result.outcome === 'fallback' ? null : JSON.stringify({ sentences: result.sentences || [], ...(result.repeat ? { repeat: result.repeat } : {}) }),
+      evidence: result.outcome === 'fallback'
+        ? (result.requestId ? JSON.stringify({ requestId: result.requestId }) : null)
+        : JSON.stringify({ sentences: result.sentences || [], ...(result.repeat ? { repeat: result.repeat } : {}) }),
       technician_name: techName ? String(techName).slice(0, 80) : null,
       service_type: serviceType ? String(serviceType).slice(0, 120) : null,
       service_date: dateOnly(serviceDate),
@@ -67,50 +76,63 @@ async function recordDraft({ customer, sequenceId = null, sequenceStep = null, c
 
 // `seq` is the review_sequences row whose current step is being dropped;
 // `detail` is the hold's own ({ step, hold, heldSince, invoiceId? }).
+// `database` is the caller's transaction; a failed write throws to it.
 async function recordPaymentDrop(seq, detail, database = db) {
-  try {
-    const step = Number.isInteger(detail?.step) ? detail.step : seq.current_step;
-    await database('review_ask_drafts').insert({
-      customer_id: seq.customer_id,
-      sequence_id: seq.id,
-      sequence_step: step,
-      channel: (parseJson(seq.plan) || [])[step]?.channel === 'email' ? 'email' : 'sms',
-      outcome: 'held',
-      reason: PAYMENT_DROP_REASON,
-      body: null,
-      evidence: JSON.stringify({ hold: detail || null }),
-      service_type: seq.service_type ? String(seq.service_type).slice(0, 120) : null,
-    });
-  } catch (err) {
-    warnWrite('payment drop record', seq?.customer_id, seq?.id, err);
-  }
+  const step = Number.isInteger(detail?.step) ? detail.step : seq.current_step;
+  await database('review_ask_drafts').insert({
+    customer_id: seq.customer_id,
+    sequence_id: seq.id,
+    sequence_step: step,
+    channel: (parseJson(seq.plan) || [])[step]?.channel === 'email' ? 'email' : 'sms',
+    outcome: 'held',
+    reason: PAYMENT_DROP_REASON,
+    body: null,
+    evidence: JSON.stringify({ hold: detail || null }),
+    service_type: seq.service_type ? String(seq.service_type).slice(0, 120) : null,
+  });
 }
 
 function customerName(row) {
   return [row.first_name, row.last_name].filter(Boolean).join(' ') || null;
 }
 
-// The requests that could have carried THIS outcome to the customer, oldest
-// first (a same-day retry reuses the persisted draft, so one outcome can have
-// a failed attempt followed by a successful one). A drafted
-// text is the request with exactly its body (a retry on a later day drafts
-// afresh, so the step alone would credit every draft). A fallback is the
-// first fixed-text request (no drafted body) of its step. A held step sends
-// nothing. Only a request made inside this outcome's own window counts: from
-// when it was recorded until the next outcome of the same step and channel,
-// so neither an earlier send nor a later retry's send is credited to it.
-function requestsFor(row, requests, rows) {
-  if (row.outcome === 'held') return [];
-  const sameTouch = (r) => r.sequence_id === row.sequence_id && r.sequence_step === row.sequence_step && r.channel === row.channel;
+// The request the sender switched to the fixed text because the draft would
+// not fit with the full review link (recordDraft's long_link row), or null.
+function longLinkRequestId(row) {
+  return row.reason === LONG_LINK_REASON ? (parseJson(row.evidence)?.requestId || null) : null;
+}
+
+const sameTouch = (a, b) => a.sequence_id === b.sequence_id && a.sequence_step === b.sequence_step && a.channel === b.channel;
+
+// The requests of this outcome's touch made inside its own window, oldest
+// first: from when it was recorded until the next outcome of the same step
+// and channel, so neither an earlier send nor a later retry's send is
+// credited to it.
+function requestsInWindow(row, requests, rows) {
   const from = new Date(row.created_at);
   const until = rows
-    .filter((o) => o !== row && sameTouch(o) && new Date(o.created_at) > from)
+    .filter((o) => o !== row && sameTouch(o, row) && new Date(o.created_at) > from)
     .map((o) => new Date(o.created_at))
     .sort((a, b) => a - b)[0] || null;
-  const inWindow = requests
-    .filter((r) => sameTouch(r) && new Date(r.created_at) >= from && (!until || new Date(r.created_at) < until))
+  return requests
+    .filter((r) => sameTouch(r, row) && new Date(r.created_at) >= from && (!until || new Date(r.created_at) < until))
     .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-  return inWindow.filter((r) => (row.outcome === 'drafted' ? r.custom_body === row.body : !r.custom_body));
+}
+
+// The requests that could have carried THIS outcome to the customer (a
+// same-day retry reuses the persisted draft, so one outcome can have a failed
+// attempt followed by a successful one). A drafted text is the request with
+// exactly its body (a retry on a later day drafts afresh, so the step alone
+// would credit every draft). A fallback is the first fixed-text request (no
+// drafted body) of its step; a long-link fallback is recorded at send time,
+// after its request was made, so it names that request. A held step sends
+// nothing.
+function requestsFor(row, requests, rows) {
+  if (row.outcome === 'held') return [];
+  const named = longLinkRequestId(row);
+  if (named) return requests.filter((r) => r.id === named && !r.custom_body);
+  return requestsInWindow(row, requests, rows)
+    .filter((r) => (row.outcome === 'drafted' ? r.custom_body === row.body : !r.custom_body));
 }
 
 // When one of those requests reached the customer: its own send stamp, else
@@ -145,9 +167,10 @@ async function listRecent({ days = 14, database = db } = {}) {
     .select('d.*', 'c.first_name', 'c.last_name');
   const rows = found.slice(0, MAX_ROWS);
   const sequenceIds = [...new Set(rows.map((r) => r.sequence_id).filter(Boolean))];
-  const requests = sequenceIds.length
+  const namedIds = rows.map(longLinkRequestId).filter(Boolean);
+  const requests = sequenceIds.length || namedIds.length
     ? await database('review_requests')
-      .whereIn('sequence_id', sequenceIds)
+      .where((q) => q.whereIn('sequence_id', sequenceIds).orWhereIn('id', namedIds))
       .select('id', 'customer_id', 'sequence_id', 'sequence_step', 'channel', 'custom_body', 'created_at', 'sms_sent_at', 'sent_at')
     : [];
   const holds = await database('review_sequences as s')
@@ -161,6 +184,9 @@ async function listRecent({ days = 14, database = db } = {}) {
   const drafts = [];
   for (const r of rows) {
     const evidence = parseJson(r.evidence) || {};
+    // A draft whose request went out as the fixed text instead (the long-link
+    // row says so): it will never send, so the page must not say "not yet".
+    const replaced = r.outcome === 'drafted' && requestsInWindow(r, requests, rows).some((q) => namedIds.includes(q.id));
     drafts.push({
       id: r.id,
       customerId: r.customer_id,
@@ -179,6 +205,7 @@ async function listRecent({ days = 14, database = db } = {}) {
       serviceDate: r.service_date ? dateOnly(r.service_date) : null,
       createdAt: r.created_at,
       sentAt: await sentAtOf(requestsFor(r, requests, rows)),
+      replacedByFixedText: replaced,
     });
   }
   return {
@@ -204,4 +231,4 @@ async function listRecent({ days = 14, database = db } = {}) {
   };
 }
 
-module.exports = { recordDraft, recordPaymentDrop, listRecent, MAX_DAYS, MAX_ROWS, PAYMENT_DROP_REASON };
+module.exports = { recordDraft, recordPaymentDrop, listRecent, warnWrite, MAX_DAYS, MAX_ROWS, PAYMENT_DROP_REASON, LONG_LINK_REASON };
