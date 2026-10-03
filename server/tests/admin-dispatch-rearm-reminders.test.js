@@ -425,15 +425,19 @@ describe('reschedule route sync→capture→emit ordering (source)', () => {
     // notice (and its guarded snapshot semantics) live inside
     // sendRescheduleNoticeForVisit, which captures its own guards, rechecks
     // the slot at the provider handoff, and re-arms on any non-send.
-    const single = src.slice(src.indexOf('await SmartRebooker.reschedule(req.params.serviceId', seriesEnd));
-    const syncIdx = single.indexOf('await syncRescheduleReminder(req.params.serviceId');
+    // The single path is moveVisitForStaff (the route and Edit appointment
+    // both call it); it sits above the route in the file.
+    const fnStart = src.indexOf('async function moveVisitForStaff(');
+    expect(fnStart).toBeGreaterThan(-1);
+    const single = src.slice(src.indexOf('await SmartRebooker.reschedule(serviceId', fnStart), src.indexOf("router.post('/:serviceId/reschedule'", fnStart));
+    const syncIdx = single.indexOf('await syncRescheduleReminder(serviceId');
     const helperIdx = single.indexOf('sendRescheduleNoticeForVisit(');
     expect(syncIdx).toBeGreaterThan(-1);
     expect(helperIdx).toBeGreaterThan(syncIdx);
     // The old inline machinery must stay gone — its unguarded send/mark was
     // the bug the helper replaced.
-    expect(single).not.toContain('await captureReminderGuards(req.params.serviceId)');
-    expect(single).not.toContain('markRescheduleReminderNotified(req.params.serviceId)');
+    expect(single).not.toContain('await captureReminderGuards(');
+    expect(single).not.toContain('markRescheduleReminderNotified(');
     expect(single).not.toContain('formatRescheduleTemplateVars(');
   });
 });

@@ -1585,7 +1585,7 @@ describe('caller wiring (source)', () => {
     expect(read('../services/rebooker.js')).toContain('const blackout = await getBlackoutDates(sorted[0], sorted[sorted.length - 1], trx);');
     expect(disp).toContain("const closeScope = () => (markers.source_surface === 'quick_move'");
     expect(disp).toContain('await ensureObservedAnchor(req.params.serviceId, observedAnchor);');
-    expect(disp).toContain('await ensureObservedAnchor(req.params.serviceId, observedForMove);');
+    expect(disp).toContain('await ensureObservedAnchor(serviceId, observedForMove);');
     const plan = sched.indexOf('const seriesMovePlan = await planCollectiveEditDateMove(req);', handler);
     const destructure = sched.indexOf('} = req.body;', handler);
     const commit = sched.indexOf('seriesMove = await seriesMovePlan.commit();', handler);
