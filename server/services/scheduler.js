@@ -3390,6 +3390,39 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 4:10AM ET — Call incident adjudicator (correction loop for calls,
+  // Part B wave 1). After the 03:40 self-audit: each new field disagreement
+  // becomes an ai_incidents row, confirmed only when a second model on the
+  // OpenAI leg reaches the auditor's answer blind. Shadow data; dark behind
+  // GATE_CALL_INCIDENTS (needs GATE_CALL_SELF_AUDIT); CALL_INCIDENT_BATCH=0
+  // stops it. The gate is read inside the job.
+  // =========================================================================
+  cron.schedule('10 4 * * *', async () => {
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { adjudicateCallFindings } = require('./call-incidents');
+      await runExclusive('call-incidents-adjudicate', () => adjudicateCallFindings());
+    } catch (err) {
+      logger.error(`Call incident adjudicator failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // WEEKLY SUN 4:50AM ET — Correction-loop fix proposals for calls, same
+  // rules as SMS, on the latest extraction prompt version. No model call.
+  // Gate read inside the job (GATE_CALL_INCIDENTS).
+  // =========================================================================
+  cron.schedule('50 4 * * 0', async () => {
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { proposeCallFixes } = require('./call-incidents');
+      await runExclusive('call-fix-proposals', () => proposeCallFixes());
+    } catch (err) {
+      logger.error(`Call fix proposals failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WEEKLY SUN 4:45AM ET — Correction-loop fix proposals (owner 10-02). A
   // cell with enough DISTINCT confirmed ai_incidents on the live prompt
   // version gets one pending ai_fix_proposals row with its dev/holdout

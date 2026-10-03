@@ -549,6 +549,7 @@ const LANES = [
   L('wiki_compiler', 'Wiki compiler + agronomic wiki', 'knowledge/wiki-compiler.js, agronomic-wiki.js', 'deep', T('DEEP'), P('deepAnalysis', 'fallback')),
   L('quarantine_arbiter', 'Contact quarantine arbiter', 'contact-quarantine-arbiter.js', 'deep', T('DEEP'), P('deepAnalysis', 'fallback'), { inbound: true }),
   L('call_self_audit', 'Call self-audit', 'call-self-audit.js', 'deep', T('DEEP'), P('deepAnalysis', 'fallback'), { inbound: true }),
+  L('call_incidents', 'Call self-audit second reader', 'call-incidents.js', 'fastText', P('fastStructured', 'primary'), null, { inbound: true, note: 'OpenAI leg only; GATE_CALL_INCIDENTS' }),
   L('voice_relay_judge', 'Voice relay eval judge', 'eval/voice-relay-judge.js', 'deep', P('voiceJudge', 'primary'), P('voiceJudge', 'fallback'), { inbound: true, note: 'grades synthetic manual replay transcripts when --judge is selected' }),
   L('wdo_appt_brief', 'WDO appointment brief', 'appointment-tagger.js', 'deep', P('deepAnalysis', 'primary'), P('deepAnalysis', 'fallback')),
   L('voice_profile', 'Voice-profile distiller (weekly)', 'voice-profile-distiller.js', 'deep', T('DEEP'), P('deepAnalysis', 'fallback')),
@@ -643,6 +644,7 @@ const LANE_AREA = {
   contact_pass: 'calls',
   call_sentiment: 'calls',
   call_self_audit: 'calls',
+  call_incidents: 'calls',
   // Shadow typed decisions ride the nightly call self-audit (and inbound texts
   // in PR 2); one area per lane, so it sits with the audit it is scored against.
   typed_decisions: 'calls',
@@ -804,6 +806,7 @@ const LANE_DESCRIBE = {
   contact_pass: 'Second listen for spelled emails and addresses',
   call_sentiment: 'Reads how the caller sounds',
   call_self_audit: 'Audits the extraction against the transcript',
+  call_incidents: 'Second opinion that confirms a self-audit disagreement',
   lead_synopsis: 'Summarises a new lead from the call',
   call_commitments: 'Records what Waves promised on the call (dark: GATE_CALL_COMMITMENTS)',
   csr_coach: 'Coaches the office on how the call went',
