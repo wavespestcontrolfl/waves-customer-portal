@@ -719,14 +719,19 @@ const EMAIL_WORDS = new RegExp(EMAIL_ADDRESS, 'g');
 const EMAIL_WHOLE_WORDS = new RegExp(`(?<![A-Za-z0-9.!#$%&'*+/=?^_\`{|}~@-])${EMAIL_ADDRESS}(?=$|\\s|[,;:!?)\\]>"/]|\\.(?![A-Za-z0-9]))`, 'g');
 // What the account can hold: customers.email is varchar(150).
 const EMAIL_MAX_CHARS = 150;
+// `hand_off`: the email request needs the team. assistant.js names it on an
+// escalate that runs in the same response (for another request), which
+// would otherwise end the turn before the model could hand this one off.
 const EMAIL_TOO_LONG = {
   sent: false,
+  hand_off: true,
   instruction: 'This address is longer than the account can hold. Do not read it back. Use the escalate tool with topic account_change so the team follows up.',
 };
 // Messages of the chat read for the check, newest first.
 const EMAIL_CHANGE_MESSAGES = 40;
 const EMAIL_HAND_OFF = {
   sent: false,
+  hand_off: true,
   instruction: 'The email change could not be checked right now. Use the escalate tool with topic account_change so the team follows up.',
 };
 const EMAIL_NOT_AN_ADDRESS = {

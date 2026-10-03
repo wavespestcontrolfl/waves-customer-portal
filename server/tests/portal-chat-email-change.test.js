@@ -230,6 +230,25 @@ test('the lane\'s fallback hand-off is saved as an account change, and only unde
   expect(db.__bindings[1]).toContain('schedule_change');
 });
 
+test('an address too long for the account beside another hand-off: that hand-off names the email request', async () => {
+  const long = `${'a'.repeat(140)}@example.com`;
+  const message = `Change my email to ${long} and quote the mosquito add-on`;
+  chat = [{ role: 'user', content: message }];
+  mockCreate.mockResolvedValueOnce({ content: [
+    { type: 'tool_use', id: 't0', name: 'escalate', input: { reason: 'wants mosquito service quoted', topic: 'add_service' } },
+    { type: 'tool_use', id: 't1', name: 'request_email_change', input: { new_email: long, customer_confirmed: false } },
+  ] });
+
+  const result = await say(message);
+
+  expect(result.escalated).toBe(true);
+  expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  const [, headline, , opts] = NotificationService.notifyAdmin.mock.calls[0];
+  expect(headline).toBe('Comms — Reply to a portal chat request');
+  expect(opts.detail).toBe(`The customer also asked to change their email, and the chat could not take the new address: it is in the message below\n\nCustomer's message: ${message}`);
+  expect(db.__bindings[0].some((value) => String(value).includes('wants mosquito service quoted. The customer also asked to change their email'))).toBe(true);
+});
+
 test('a second need handed off beside the confirmed change rides on the same bell and saved row', async () => {
   mockCreate.mockResolvedValueOnce({ content: [
     { type: 'tool_use', id: 't0', name: 'escalate', input: { reason: 'wants mosquito service quoted', topic: 'add_service' } },
@@ -256,7 +275,7 @@ test('an address longer than the account can hold is handed off, never read back
     { emailChange: true, conversationId: 'conv-1', customerMessage: `Change it to ${long.slice(2)}` });
 
   expect(long.length).toBe(152);
-  expect(result).toEqual(expect.objectContaining({ sent: false, instruction: expect.stringMatching(/longer than the account can hold/) }));
+  expect(result).toEqual(expect.objectContaining({ sent: false, hand_off: true, instruction: expect.stringMatching(/longer than the account can hold/) }));
   expect(result).not.toHaveProperty('read_back');
   expect(fits.read_back).toBe(long.slice(2));
 });
