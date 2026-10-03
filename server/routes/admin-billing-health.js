@@ -331,25 +331,12 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
     // An accepted bank payment is not evidence of a completed charge.
     if (payment?.status !== 'paid') return res.json({ success: true, payment });
 
-    // B16: this month's dues are now collected by hand. The customer's still-open failed
-    // rows for THIS obligation (a charge parked on card authentication, or a ladder that
-    // ran out) are no longer owed — supersede them like the retry sweep does for an armed
-    // row, and close the office alert that told us to collect. Best-effort: the money is
-    // already taken, so a bookkeeping failure is logged and never fails the response.
-    if (isMonthlyCollection) {
-      try {
-        const { year, month } = etParts(new Date());
-        const monthKey = `${year}-${String(month).padStart(2, '0')}`;
-        const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
-        await require('../services/autopay-sca-parked').resolveParkedMonthlyRows(
-          customerId,
-          { monthKey, monthStart: `${monthKey}-01`, monthEnd: `${monthKey}-${String(lastDay).padStart(2, '0')}` },
-          payment.id,
-        );
-      } catch (resolveErr) {
-        logger.error(`[admin-billing-health] charge-now collected payment ${payment?.id} but could not resolve the customer's parked failed rows: ${resolveErr.message}`);
-      }
-    }
+    // B16: a paid collection clears what the "autopay parked on card authentication" alert
+    // asked for. One shared step (also run by the Stripe succeeded hook when an ACH
+    // replacement settles later): it recognizes a monthly dues payment by its persisted
+    // billed_month stamp, supersedes the customer's parked failed rows for that month and
+    // closes their alerts. Best-effort and never throws: the money is already taken.
+    await require('../services/autopay-sca-parked').settleParkedForPaidPayment(payment);
 
     // Send receipt SMS
     let receiptUrl = null;

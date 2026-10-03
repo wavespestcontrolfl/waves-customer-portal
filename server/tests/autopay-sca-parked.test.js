@@ -135,3 +135,67 @@ describe('closeScaParkedAlerts', () => {
     await expect(Sca.closeScaParkedAlerts([{ id: 'p', customer_id: 'c', stripe_payment_intent_id: 'pi' }], 'x')).resolves.toBe(0);
   });
 });
+
+// The ONE entry point for "a payment is now paid": Charge now (paid at once) and the Stripe
+// succeeded hook (an ACH Charge now replacement moving processing -> paid) both call it.
+describe('settleParkedForPaidPayment', () => {
+  // What an ACH Charge now replacement row looks like AFTER the succeeded webhook flipped it:
+  // billed_month persisted from the charge, payment_date restamped to the (later) settlement day.
+  const settledAchReplacement = (overrides = {}) => ({
+    id: 'pay-ach-new', customer_id: 'cust-1', status: 'paid', stripe_payment_intent_id: 'pi_ach_new',
+    payment_date: '2026-11-02', description: 'Manual charge — WaveGuard Silver',
+    metadata: JSON.stringify({ billed_month: '2026-10', payment_state: 'paid', settled_event_at: '2026-11-02T14:00:00.000Z' }),
+    ...overrides,
+  });
+
+  test('processing -> paid settlement of an ACH replacement: supersedes the parked row for ITS month and closes the ORIGINAL alert', async () => {
+    mockState.resolvedRows = [{ id: 'pay-sca-1', customer_id: 'cust-1', stripe_payment_intent_id: 'pi_sca_orig' }];
+    const resolved = await Sca.settleParkedForPaidPayment(settledAchReplacement());
+
+    expect(resolved).toHaveLength(1);
+    expect(mockState.updates).toEqual([expect.objectContaining({ superseded_by_payment_id: 'pay-ach-new' })]);
+    // the month comes from the persisted billed_month, never from the settlement date (November)
+    expect(mockState.wheres).toEqual(expect.arrayContaining([
+      ['whereRaw', "metadata->>'billed_month' = ?", ['2026-10']],
+      ['andWhere', 'payment_date', '>=', '2026-10-01'],
+      ['andWhere', 'payment_date', '<=', '2026-10-31'],
+      ['whereNot', { id: 'pay-ach-new' }],
+    ]));
+    const closedKeys = closeAdminAlertKeys.mock.calls.flatMap((c) => c[1]);
+    expect(closedKeys).toEqual(expect.arrayContaining(['autopay-sca-parked:cust-1:pi_sca_orig', 'autopay-sca-parked:cust-1:pay-sca-1']));
+  });
+
+  test('a webhook replay is a no-op: nothing left to supersede, so no further close of resolved rows and no error', async () => {
+    mockState.resolvedRows = [{ id: 'pay-sca-1', customer_id: 'cust-1', stripe_payment_intent_id: 'pi_sca_orig' }];
+    await Sca.settleParkedForPaidPayment(settledAchReplacement());
+    closeAdminAlertKeys.mockClear();
+    mockState.resolvedRows = []; // the update (whereNull superseded_by_payment_id) now matches no row
+    await expect(Sca.settleParkedForPaidPayment(settledAchReplacement())).resolves.toEqual([]);
+    const closedKeys = closeAdminAlertKeys.mock.calls.flatMap((c) => c[1]);
+    expect(closedKeys).not.toContain('autopay-sca-parked:cust-1:pi_sca_orig');
+  });
+
+  test.each([
+    ['a non-monthly payment (no billed_month stamp)', { metadata: JSON.stringify({ payment_state: 'paid' }) }],
+    ['a payment with a malformed billed_month', { metadata: JSON.stringify({ billed_month: 'October' }) }],
+    ['a payment with no metadata', { metadata: null }],
+  ])('%s settling supersedes nothing (it only closes an alert keyed to its own PI)', async (_label, overrides) => {
+    mockState.resolvedRows = [{ id: 'pay-sca-1', customer_id: 'cust-1', stripe_payment_intent_id: 'pi_sca_orig' }];
+    await expect(Sca.settleParkedForPaidPayment(settledAchReplacement(overrides))).resolves.toEqual([]);
+    expect(mockState.updates).toHaveLength(0);
+    expect(closeAdminAlertKeys.mock.calls.flatMap((c) => c[1])).not.toContain('autopay-sca-parked:cust-1:pi_sca_orig');
+  });
+
+  test('a payment that is not paid (still processing, failed) does nothing', async () => {
+    await expect(Sca.settleParkedForPaidPayment(settledAchReplacement({ status: 'processing' }))).resolves.toEqual([]);
+    expect(mockState.updates).toHaveLength(0);
+    expect(closeAdminAlertKeys).not.toHaveBeenCalled();
+  });
+
+  test('a failure in the step never throws (it cannot fail the settlement or the charge)', async () => {
+    const db = require('../models/db');
+    db.mockImplementationOnce(() => { throw new Error('db down'); });
+    await expect(Sca.settleParkedForPaidPayment(settledAchReplacement())).resolves.toEqual([]);
+    expect(logger.error.mock.calls.some((c) => /could not resolve parked rows/.test(String(c[0])))).toBe(true);
+  });
+});

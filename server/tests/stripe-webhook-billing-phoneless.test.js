@@ -67,8 +67,8 @@ const mockHandleAutopayFailure = jest.fn(async () => {});
 jest.mock('../services/invoice-followups', () => ({
   handleAutopayFailure: (...a) => mockHandleAutopayFailure(...a),
 }));
-const mockCloseAdminAlertKeys = jest.fn(async () => 1);
-jest.mock('../services/admin-alert-episodes', () => ({ closeAdminAlertKeys: (...a) => mockCloseAdminAlertKeys(...a) }));
+const mockSettleParked = jest.fn(async () => []);
+jest.mock('../services/autopay-sca-parked', () => ({ settleParkedForPaidPayment: (...a) => mockSettleParked(...a) }));
 jest.mock('../services/payment-method-consents', () => ({
   findConsentedChargeableCard: jest.fn(async () => null),
 }));
@@ -132,7 +132,7 @@ jest.mock('../models/db', () => {
 const {
   _handleAchFailure: handleAchFailure,
   _handlePaymentIntentRequiresAction: handlePaymentIntentRequiresAction,
-  _closeScaParkedAlertForIntent: closeScaParkedAlertForIntent,
+  _settleParkedAutopayForIntent: settleParkedAutopayForIntent,
   _handleSetupIntentFailed: handleSetupIntentFailed,
   _sendBillingSms: sendBillingSms,
 } = require('../routes/stripe-webhook');
@@ -228,27 +228,28 @@ describe('sendBillingSms — held-notice queueing (REPLAY_HOLD_CODES)', () => {
   });
 });
 
-// B16: the original PaymentIntent of an autopay charge parked on card authentication settles
-// -> the office alert (key: customer + PI) closes. Never throws into the webhook.
-describe('closeScaParkedAlertForIntent', () => {
-  test('a settled PI with a paid ledger row closes its customer + PI alert key', async () => {
-    mockState.paymentRow = { id: 'pay-1', customer_id: 'cust-1', stripe_payment_intent_id: 'pi_sca_1' };
-    await closeScaParkedAlertForIntent({ id: 'pi_sca_1' });
-    expect(mockCloseAdminAlertKeys).toHaveBeenCalledTimes(1);
-    expect(mockCloseAdminAlertKeys.mock.calls[0][1]).toEqual(expect.arrayContaining(['autopay-sca-parked:cust-1:pi_sca_1']));
-    expect(mockCloseAdminAlertKeys.mock.calls[0][2]).toBe('charge_collected');
+// B16: a settled payment (an ACH Charge now replacement moving processing -> paid arrives
+// here as payment_intent.succeeded) runs the shared "payment is paid" step with its ledger
+// row, so the parked rows + alerts of the same month clear. Never throws into the webhook.
+describe('settleParkedAutopayForIntent', () => {
+  test('a settled PI hands its paid ledger row (id, customer, persisted metadata) to the shared step', async () => {
+    mockState.paymentRow = { id: 'pay-ach-1', customer_id: 'cust-1', stripe_payment_intent_id: 'pi_ach_repl', status: 'paid',
+      metadata: JSON.stringify({ billed_month: '2026-10', payment_state: 'paid' }) };
+    await settleParkedAutopayForIntent({ id: 'pi_ach_repl' });
+    expect(mockSettleParked).toHaveBeenCalledTimes(1);
+    expect(mockSettleParked).toHaveBeenCalledWith(expect.objectContaining({ id: 'pay-ach-1', customer_id: 'cust-1', status: 'paid' }));
   });
 
-  test('no paid ledger row for the PI: nothing is closed', async () => {
+  test('no paid ledger row for the PI (quarantined, still processing): the step is not run', async () => {
     mockState.paymentRow = null;
-    await closeScaParkedAlertForIntent({ id: 'pi_other' });
-    expect(mockCloseAdminAlertKeys).not.toHaveBeenCalled();
+    await settleParkedAutopayForIntent({ id: 'pi_other' });
+    expect(mockSettleParked).not.toHaveBeenCalled();
   });
 
-  test('a close failure never throws into the webhook', async () => {
-    mockState.paymentRow = { id: 'pay-1', customer_id: 'cust-1', stripe_payment_intent_id: 'pi_sca_1' };
-    mockCloseAdminAlertKeys.mockRejectedValueOnce(new Error('db down'));
-    await expect(closeScaParkedAlertForIntent({ id: 'pi_sca_1' })).resolves.toBeUndefined();
+  test('a failure in the step never throws into the webhook', async () => {
+    mockState.paymentRow = { id: 'pay-1', customer_id: 'cust-1', stripe_payment_intent_id: 'pi_x', status: 'paid', metadata: '{}' };
+    mockSettleParked.mockRejectedValueOnce(new Error('db down'));
+    await expect(settleParkedAutopayForIntent({ id: 'pi_x' })).resolves.toBeUndefined();
   });
 });
 

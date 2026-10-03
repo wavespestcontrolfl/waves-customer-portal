@@ -543,20 +543,22 @@ async function recordAppointmentCardNoShowFeePayment(paymentIntent) {
 }
 
 // B16: billing-cron raises one office alert per autopay charge parked on card
-// authentication, keyed on customer + PaymentIntent. When that PI settles (its ledger
-// row is paid) the condition the alert was about has cleared, so close it. The
-// emitter's own lifecycle (docs/admin-notifications.md); never throws, since a bell
-// close must not fail the webhook.
-async function closeScaParkedAlertForIntent(paymentIntent) {
+// authentication (key: customer + PaymentIntent). When a payment settles, the shared step
+// (autopay-sca-parked.js, also run by Charge now for an immediate collection) closes the
+// alert of the settled PI itself and, if the payment is a monthly dues payment (persisted
+// billed_month stamp: e.g. an ACH Charge now replacement moving processing -> paid),
+// resolves the customer's parked rows for that month and closes THEIR alerts. Idempotent
+// under webhook replay and never throws, since a bell close must not fail the webhook.
+async function settleParkedAutopayForIntent(paymentIntent) {
   try {
     if (!paymentIntent?.id) return;
     const row = await db('payments')
       .where({ stripe_payment_intent_id: paymentIntent.id, status: 'paid' })
-      .first('id', 'customer_id', 'stripe_payment_intent_id');
+      .first('id', 'customer_id', 'stripe_payment_intent_id', 'status', 'metadata');
     if (!row?.customer_id) return;
-    await require('../services/autopay-sca-parked').closeScaParkedAlerts([row], 'charge_collected');
+    await require('../services/autopay-sca-parked').settleParkedForPaidPayment(row);
   } catch (err) {
-    logger.warn(`[stripe-webhook] could not close the parked-autopay alert for PI ${paymentIntent?.id}: ${err.message}`);
+    logger.warn(`[stripe-webhook] could not settle parked-autopay state for PI ${paymentIntent?.id}: ${err.message}`);
   }
 }
 
@@ -958,9 +960,9 @@ router.post(
           // 'autopay_final_failure' pauses, compare-and-swaps so a newer
           // pause is never wiped, and requires the settlement moment.
           await maybeAutoClearBillingPauseForIntent(event.data.object, event.created);
-          // B16: the original PaymentIntent of an autopay charge parked on card
-          // authentication settled — close the office alert that asked us to collect it.
-          await closeScaParkedAlertForIntent(event.data.object);
+          // B16: a settled payment clears the parked-autopay alert and rows it answers
+          // (see settleParkedAutopayForIntent).
+          await settleParkedAutopayForIntent(event.data.object);
           break;
 
         case 'payment_intent.processing':
@@ -8673,4 +8675,4 @@ module.exports._handlePaymentIntentSucceeded = handlePaymentIntentSucceeded;
 module.exports._handleSetupIntentSucceeded = handleSetupIntentSucceeded;
 module.exports._sendBillingSms = sendBillingSms;
 module.exports._handlePaymentIntentRequiresAction = handlePaymentIntentRequiresAction;
-module.exports._closeScaParkedAlertForIntent = closeScaParkedAlertForIntent;
+module.exports._settleParkedAutopayForIntent = settleParkedAutopayForIntent;

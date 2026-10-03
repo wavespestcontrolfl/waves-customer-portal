@@ -30,7 +30,7 @@ jest.mock('../services/sms-template-renderer', () => ({
   renderRequiredSmsTemplate: jest.fn(async () => 'receipt body'),
 }));
 jest.mock('../services/autopay-log', () => ({ logAutopay: jest.fn(async () => undefined) }));
-jest.mock('../services/autopay-sca-parked', () => ({ resolveParkedMonthlyRows: jest.fn(async () => []) }));
+jest.mock('../services/autopay-sca-parked', () => ({ settleParkedForPaidPayment: jest.fn(async () => []) }));
 // B10: staff-ordered charge-now passes the operator override (exempt from the
 // collections dispute-hold guard) plus an audit trail naming the admin + route.
 const CHARGE_NOW_OVERRIDE = expect.objectContaining({
@@ -51,7 +51,7 @@ const express = require('express');
 const db = require('../models/db');
 const StripeService = require('../services/stripe');
 const { logAutopay } = require('../services/autopay-log');
-const { resolveParkedMonthlyRows } = require('../services/autopay-sca-parked');
+const { settleParkedForPaidPayment } = require('../services/autopay-sca-parked');
 const router = require('../routes/admin-billing-health');
 
 const CUSTOMER = {
@@ -253,44 +253,26 @@ describe('charge-now already-collected guard', () => {
   });
 
   // B16: the office follows the "autopay parked on card authentication" alert and collects the
-  // month with an amount-less Charge now. The customer's open failed rows for THAT month must
-  // leave the overdue balance (superseded by the new payment) and the alert must close.
-  describe('B16: a paid monthly collection resolves the customer\'s parked rows for the month', () => {
+  // month with an amount-less Charge now. A payment that is paid at once runs the SAME shared
+  // step the Stripe succeeded hook runs for an ACH replacement that settles later (which
+  // recognizes monthly dues by the persisted billed_month and resolves the parked rows).
+  describe('B16: a paid Charge now runs the shared paid-payment step', () => {
     const post = (baseUrl, body = '{}') => fetch(`${baseUrl}/admin/customers/cust-1/charge-now`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body,
     });
 
-    test('paid amount-less charge: resolves this ET month\'s rows against the new payment', async () => {
-      chargeMock.mockResolvedValue({ id: 'pay-new', status: 'paid', amount: '89.00', metadata: null });
+    test('paid: hands the recorded payment to the shared step', async () => {
+      const row = { id: 'pay-new', customer_id: 'cust-1', status: 'paid', amount: '89.00', metadata: JSON.stringify({ billed_month: '2026-10' }) };
+      chargeMock.mockResolvedValue(row);
       await withServer(async (baseUrl) => { expect((await post(baseUrl)).status).toBe(200); });
-      expect(resolveParkedMonthlyRows).toHaveBeenCalledTimes(1);
-      expect(resolveParkedMonthlyRows).toHaveBeenCalledWith('cust-1', expect.objectContaining({
-        monthKey: expect.stringMatching(/^\d{4}-\d{2}$/),
-        monthStart: expect.stringMatching(/^\d{4}-\d{2}-01$/),
-        monthEnd: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
-      }), 'pay-new');
+      expect(settleParkedForPaidPayment).toHaveBeenCalledTimes(1);
+      expect(settleParkedForPaidPayment).toHaveBeenCalledWith(row);
     });
 
-    test('a bank payment still processing is not collected money: nothing is resolved', async () => {
+    test('a bank payment still processing is not collected money: the step is NOT run here (the succeeded webhook runs it at settlement)', async () => {
       chargeMock.mockResolvedValue({ id: 'pay-new', status: 'processing', amount: '89.00', metadata: null });
       await withServer(async (baseUrl) => { expect((await post(baseUrl)).status).toBe(200); });
-      expect(resolveParkedMonthlyRows).not.toHaveBeenCalled();
-    });
-
-    test('an explicit amount is not the monthly obligation: nothing is resolved', async () => {
-      chargeOneTimeMock.mockResolvedValue({ id: 'pay-one', status: 'paid', amount: '25.00', metadata: null });
-      await withServer(async (baseUrl) => { expect((await post(baseUrl, JSON.stringify({ amount: 25 }))).status).toBe(200); });
-      expect(resolveParkedMonthlyRows).not.toHaveBeenCalled();
-    });
-
-    test('a bookkeeping failure never fails a charge that already took the money', async () => {
-      chargeMock.mockResolvedValue({ id: 'pay-new', status: 'paid', amount: '89.00', metadata: null });
-      resolveParkedMonthlyRows.mockRejectedValueOnce(new Error('db unavailable'));
-      await withServer(async (baseUrl) => {
-        const res = await post(baseUrl);
-        expect(res.status).toBe(200);
-        expect((await res.json()).success).toBe(true);
-      });
+      expect(settleParkedForPaidPayment).not.toHaveBeenCalled();
     });
   });
 });

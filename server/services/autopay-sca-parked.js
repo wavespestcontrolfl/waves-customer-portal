@@ -8,10 +8,12 @@
 // whole lifecycle (docs/admin-notifications.md: the emitter that raises a row owns
 // clearing it):
 //   - alertAutopayScaParked: raise it (billing-cron's two parked branches);
-//   - resolveParkedMonthlyRows: when the month is collected by hand (Customer 360
-//     Charge now), take the parked rows out of the overdue balance and close the alert;
-//   - closeScaParkedAlerts: close it (also used when the original PaymentIntent
-//     later succeeds, from the Stripe webhook).
+//   - settleParkedForPaidPayment: the one entry point when a payment becomes paid
+//     (Charge now collecting at once, or the Stripe succeeded hook for an ACH that
+//     settles later): close the alert of the payment's own PaymentIntent, and when it is
+//     a monthly dues payment take the customer's parked rows for that month out of the
+//     overdue balance (resolveParkedMonthlyRows) and close their alerts
+//     (closeScaParkedAlerts).
 const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
@@ -137,4 +139,43 @@ async function resolveParkedMonthlyRows(customerId, { monthKey, monthStart, mont
   return resolved || [];
 }
 
-module.exports = { KEY_PREFIX, scaParkedAlertKey, alertAutopayScaParked, closeScaParkedAlerts, resolveParkedMonthlyRows };
+const parseMetadata = (raw) => {
+  if (!raw) return {};
+  if (typeof raw === 'object') return raw;
+  try { return JSON.parse(raw) || {}; } catch { return {}; }
+};
+
+// THE entry point for "a payment is now PAID": Charge now when it collects at once, and the
+// Stripe payment_intent.succeeded hook for everything that settles later (an ACH Charge now
+// replacement moves processing -> paid there). It does two things, both idempotent and
+// best-effort (it never throws, so it can never fail a charge or a settlement):
+//   1. closes the alert keyed to THIS payment's own PaymentIntent (the original parked PI
+//      itself settling);
+//   2. if the payment is recognizably a MONTHLY DUES payment, resolves the customer's parked
+//      rows for that month (resolveParkedMonthlyRows) and closes their alerts. "Recognizably
+//      monthly dues" = it carries the persisted metadata.billed_month stamp that every dues
+//      collection writes (chargeMonthly, the retry rungs, Charge now) and nothing else does.
+//      Its description is NOT used (Charge now's own row reads "Manual charge — WaveGuard
+//      <tier>") and the month is NEVER inferred from payment_date: the settle path restamps
+//      that to the settlement day, so a late-settling ACH would land in the wrong month.
+// A replay finds no unsuperseded row left and an alert already cleared: a no-op.
+async function settleParkedForPaidPayment(payment, { conn = db } = {}) {
+  try {
+    if (!payment?.customer_id || String(payment.status) !== 'paid') return [];
+    await closeScaParkedAlerts([payment], 'charge_collected', { conn });
+    const billedMonth = parseMetadata(payment.metadata).billed_month;
+    const match = /^(\d{4})-(\d{2})$/.exec(String(billedMonth || ''));
+    if (!match) return [];
+    const lastDay = new Date(Date.UTC(Number(match[1]), Number(match[2]), 0)).getUTCDate();
+    return await resolveParkedMonthlyRows(payment.customer_id, {
+      monthKey: billedMonth,
+      monthStart: `${billedMonth}-01`,
+      monthEnd: `${billedMonth}-${String(lastDay).padStart(2, '0')}`,
+    }, payment.id, { conn });
+  } catch (err) {
+    logger.error(`[autopay-sca] could not resolve parked rows for paid payment ${payment?.id}: ${err.message}`);
+    return [];
+  }
+}
+
+module.exports = { KEY_PREFIX, scaParkedAlertKey, alertAutopayScaParked, closeScaParkedAlerts, resolveParkedMonthlyRows, settleParkedForPaidPayment };
