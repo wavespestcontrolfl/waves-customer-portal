@@ -109,6 +109,12 @@ describe("comboMove 'together'", () => {
     }));
   });
 
+  test('a time-only or technician-only move reads the stored date as Postgres returns it (a Date)', async () => {
+    mockRow = { ...ROW, scheduled_date: new Date(`${FUTURE}T00:00:00.000Z`) };
+    await planComboEditMove(request({ windowStart: '11:00', windowEnd: '12:00', comboMove: 'together' }));
+    expect(mockDispatch.planVisitMoveForStaff).toHaveBeenCalledWith(expect.objectContaining({ newDate: FUTURE, newWindow: { start: '11:00', end: '12:00' } }));
+  });
+
   test('a stop with no stored time takes the start only', async () => {
     mockRow = { ...ROW, window_start: null, window_end: null };
     await planComboEditMove(request({ windowStart: '10:00', windowEnd: '11:00', comboMove: 'together' }));

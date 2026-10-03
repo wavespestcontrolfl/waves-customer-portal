@@ -11056,7 +11056,8 @@ async function planComboTogetherMove(req, row, changes, shown) {
   if (body.propertyId !== undefined) {
     refuse(422, 'A different address takes this service off the shared stop. Save that change on its own, or choose Separate.', 'COMBO_ADDRESS_CHANGE');
   }
-  const newDate = validScheduleDate(changes.date ? body.scheduledDate : row.scheduled_date);
+  // The stored date is a Date from Postgres: normalized before validation.
+  const newDate = validScheduleDate(changes.date ? body.scheduledDate : dateOnly(row.scheduled_date));
   if (!newDate) refuse(400, 'That date is not a current or future date.');
   const newWindow = comboMoveWindow(row, changes);
   // A text is about a new date or time (or a repeat of one), never about a
