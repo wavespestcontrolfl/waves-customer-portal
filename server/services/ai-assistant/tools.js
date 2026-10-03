@@ -179,20 +179,38 @@ const OFFER_RESERVICE_LAWN_TOOL = {
     additionalProperties: false,
   },
 };
+// GATE_PORTAL_CHAT_EMAIL_CHANGE: an email change is a confirmed hand-off
+// (owner ruling 2026-10-02). The chat reads the new address back, and the
+// confirmed address goes to the office on one bell beside the address on
+// file; staff make the change. Nothing here writes the customer row.
+const REQUEST_EMAIL_CHANGE_TOOL = {
+  name: 'request_email_change',
+  description: 'For a customer who wants the email on their account changed. Call it first with customer_confirmed false: you are told to read the address back. Call it again with customer_confirmed true only after the customer confirms that address in their next message: the confirmed address then goes to the team, who make the change. You cannot change the email yourself.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      new_email: { type: 'string', description: 'The new email address, copied exactly as the customer typed it in this chat. Never guess, complete or correct one.' },
+      customer_confirmed: { type: 'boolean', description: 'true ONLY when the customer\'s message this turn confirms the address you read back in your last reply. false when they have only just given it, corrected it, or are unsure.' },
+    },
+    required: ['new_email', 'customer_confirmed'],
+    additionalProperties: false,
+  },
+};
 // The portal tool set for the gates that are live: the four base tools, the
 // fact and action tools, then escalate last.
-function portalToolsFor({ payments = false, visits = false, reservice = false, reserviceLawn = false } = {}) {
+function portalToolsFor({ payments = false, visits = false, reservice = false, reserviceLawn = false, emailChange = false } = {}) {
   return [
     ...PORTAL_TOOLS.slice(0, 4),
     ...(payments ? [SHOW_RECENT_PAYMENTS_TOOL] : []),
     ...(visits ? [GET_RECENT_VISITS_TOOL] : []),
     ...(reservice ? [reserviceLawn ? OFFER_RESERVICE_LAWN_TOOL : OFFER_RESERVICE_TOOL] : []),
+    ...(emailChange ? [REQUEST_EMAIL_CHANGE_TOOL] : []),
     PORTAL_TOOLS[4],
   ];
 }
 const PORTAL_FACTS_TOOLS = portalToolsFor({ payments: true });
 
-const CUSTOMER_SCOPED_TOOLS = new Set(['get_upcoming_services', 'offer_reschedule_link', 'show_recent_payments', 'get_recent_visits', 'offer_reservice']);
+const CUSTOMER_SCOPED_TOOLS = new Set(['get_upcoming_services', 'offer_reschedule_link', 'show_recent_payments', 'get_recent_visits', 'offer_reservice', 'request_email_change']);
 
 // One button per target. No count cap is needed, and none may refuse a
 // button a tool then reports as shown: the distinct targets are the portal
@@ -208,7 +226,9 @@ function addAction(actions, action) {
 // under the reply and `cards` the fact cards; callers that cannot render
 // them leave both out. `context.secondaryProperty`: the portal session is
 // scoped to a non-primary saved property (or its scope could not be read);
-// `context.customerMessage`: the customer's message this turn.
+// `context.customerMessage`: the customer's message this turn;
+// `context.emailChange` / `context.conversationId`: the email-change lane is
+// live, and the chat whose messages it checks.
 async function executeToolCall(toolName, input, contextCustomerId, actions = null, cards = null, context = {}) {
   try {
     input = input && typeof input === 'object' ? input : {};
@@ -240,6 +260,8 @@ async function executeToolCall(toolName, input, contextCustomerId, actions = nul
         return await getRecentVisits(contextCustomerId, actions, cards);
       case 'offer_reservice':
         return await offerReservice(contextCustomerId, input, actions, context);
+      case 'request_email_change':
+        return await requestEmailChange(contextCustomerId, input, context);
       case 'escalate':
         // Handled in assistant.js before reaching here
         return { escalated: true, reason: input.reason };
@@ -631,6 +653,80 @@ async function offerReservice(customerId, input, actions, { secondaryProperty = 
     offered: true,
     instruction: `The customer's plan covers a free ${RESERVICE_LINE_WORDS[line]} re-service, and a button that opens its booking page is now shown under your reply. Acknowledge what they are seeing, tell them the visit is free under their plan, and tell them to tap the button to book it. Do not say whether times are open or promise a time: the page shows what is open, and says how to reach the team when nothing is. The free visit covers ${RESERVICE_COVERS[line]} only: never say it covers rodents, termites, mosquitoes or a tree and shrub problem.`,
   };
+}
+
+// The model judges whether the customer confirmed; the code only verifies
+// what can be checked: the address is one the customer typed in this chat,
+// and the assistant's last reply read that same address back, so this turn's
+// message answers it. No list of confirmation wording lives here.
+const EMAIL_SHAPE = /^[^\s@<>()[\],;:"]+@[^\s@<>()[\],;:"]+\.[A-Za-z]{2,}$/;
+const EMAIL_MAX_CHARS = 254;
+// Messages of the chat read for the check, newest first.
+const EMAIL_CHANGE_MESSAGES = 40;
+const EMAIL_HAND_OFF = {
+  sent: false,
+  instruction: 'The email change could not be checked right now. Use the escalate tool with topic account_change so the team follows up.',
+};
+const EMAIL_NOT_AN_ADDRESS = {
+  sent: false,
+  instruction: 'That is not a complete email address. Ask the customer to type their full new email address.',
+};
+const EMAIL_NOT_TYPED = {
+  sent: false,
+  instruction: 'This address is not in the customer\'s own messages in this chat. Ask the customer to type their new email address, and never guess, complete or correct one. If they cannot, use the escalate tool with topic account_change.',
+};
+const EMAIL_UNCHANGED = {
+  sent: false,
+  instruction: 'This is already the email on the account. Tell the customer no change is needed.',
+};
+const emailReadBack = (address) => ({
+  sent: false,
+  read_back: address,
+  instruction: `Nothing is sent yet. Read the address back to the customer exactly as ${address} and ask them to confirm it is right. Do not say it has been changed or sent. Call this tool again with customer_confirmed true only after their next message confirms it.`,
+});
+// The email-shaped words of a message, with the punctuation a sentence or
+// markdown puts around them removed.
+function emailsIn(text) {
+  return (String(text || '').match(/[^\s@<>()[\],;:"]+@[^\s@<>()[\],;:"]+/g) || [])
+    .map((word) => word.replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, ''));
+}
+const sameEmail = (a, b) => String(a).toLowerCase() === String(b).toLowerCase();
+
+async function requestEmailChange(customerId, input, { emailChange = false, conversationId, customerMessage = '' } = {}) {
+  // Only under its gate: the tool is not in any other lane's set.
+  if (emailChange !== true) return { error: 'Unknown tool: request_email_change' };
+  if (!customerId || !conversationId) return EMAIL_HAND_OFF;
+  const asked = emailsIn(input.new_email)[0] || '';
+  if (!asked || asked.length > EMAIL_MAX_CHARS || !EMAIL_SHAPE.test(asked)) return EMAIL_NOT_AN_ADDRESS;
+  let rows;
+  let customer;
+  try {
+    rows = await db('agent_messages')
+      .where('conversation_id', conversationId)
+      .whereIn('role', ['user', 'assistant'])
+      .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
+      .limit(EMAIL_CHANGE_MESSAGES)
+      .select('role', 'content');
+    customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('email');
+  } catch (err) {
+    logger.warn(`[ai-assistant] email change check failed for ${customerId}: ${err.message}`);
+    return EMAIL_HAND_OFF;
+  }
+  if (!customer) return EMAIL_HAND_OFF;
+  // The address as the customer typed it (this turn's message first: its row
+  // is saved best-effort).
+  const typed = [customerMessage, ...rows.filter((r) => r.role === 'user').map((r) => r.content)]
+    .flatMap(emailsIn)
+    .find((address) => sameEmail(address, asked));
+  if (!typed) return EMAIL_NOT_TYPED;
+  if (sameEmail(typed, String(customer.email || '').trim())) return EMAIL_UNCHANGED;
+  if (input.customer_confirmed !== true) return emailReadBack(typed);
+  // Confirmed means this turn's message answers a read-back: the assistant's
+  // last reply must carry this same address.
+  const lastReply = rows.find((r) => r.role === 'assistant');
+  if (!lastReply || !emailsIn(lastReply.content).some((address) => sameEmail(address, typed))) return emailReadBack(typed);
+  // Not a tool result the model sees: assistant.js hands off on it.
+  return { confirmed_email: typed };
 }
 
 function openPortalSection(section, actions) {
