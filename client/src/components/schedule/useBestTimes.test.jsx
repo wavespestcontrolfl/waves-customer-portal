@@ -199,3 +199,24 @@ it('a past date never asks for a summary', async () => {
   await waitFor(() => expect(fetch).toHaveBeenCalledOnce());
   expect(JSON.parse(fetch.mock.calls[0][1].body).summary).toBeUndefined();
 });
+
+it('a re-check for the same visit holds the last summary as stale instead of clearing it', async () => {
+  let release;
+  const fetch = vi.fn()
+    .mockResolvedValueOnce({ ok: true, json: async () => summaryAnswer })
+    .mockImplementationOnce(() => new Promise((resolve) => { release = () => resolve({ ok: true, json: async () => summaryAnswer }); }));
+  vi.stubGlobal('fetch', fetch);
+  const props = { summary: true, date: '2035-01-05', serviceId: 'fixture', technicianId: 'tech' };
+  const { result, rerender } = renderHook((p) => useBestTimes(p), { initialProps: { ...props, pickedStart: '14:00' } });
+  await waitFor(() => expect(result.current.availability).not.toBeNull());
+  expect(result.current.availability.stale).toBeUndefined();
+  rerender({ ...props, pickedStart: '15:00' });
+  await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+  expect(result.current.availability).toMatchObject({ stale: true });
+  release();
+  await waitFor(() => expect(result.current.availability.stale).toBeUndefined());
+  // A different visit never inherits the previous one's days.
+  rerender({ ...props, serviceId: 'other-fixture', pickedStart: '15:00' });
+  expect(result.current.availability).toBeNull();
+});
+

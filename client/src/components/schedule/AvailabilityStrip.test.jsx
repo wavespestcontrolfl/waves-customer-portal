@@ -152,3 +152,33 @@ describe('AvailabilityStrip', () => {
     expect(screen.getAllByTestId('availability-hour')[0].textContent).toBe('9 AMno added drive · Fixture Tech');
   });
 });
+
+describe('calendar facts on the days', () => {
+  const closedDay = { date: '2035-01-03', status: 'open', closed: true, hours: [hour('2035-01-03', '09:00', 1)] };
+  const offDay = { date: '2035-01-02', status: 'off', hours: [] };
+  const openDay = { date: '2035-01-05', status: 'open', hours: [hour('2035-01-05', '10:00', 30)] };
+
+  it('a closed day is labelled, keeps its hours, and is never the "closest" suggestion', () => {
+    const availability = answer(null, [offDay, closedDay, openDay]);
+    const v = availabilityVerdict(availability, at('2035-01-02', '09:00'));
+    // Jan 3 is nearer and cheaper, but closed: Jan 5 is offered.
+    expect(v).toMatchObject({ tone: 'warn', text: 'The technician is off Tue Jan 2.', lead: 'Closest:' });
+    expect(starts(v)).toEqual(['05 10:00']);
+    render(<AvailabilityStrip availability={availability} currentDate="2035-01-02" currentStart="09:00" onPick={() => {}} />);
+    expect(screen.getAllByTestId('availability-day').map((pill) => pill.textContent)).toEqual(['Tue2off', 'Wed3closed', 'Fri51 open']);
+    fireEvent.click(screen.getAllByTestId('availability-day')[1]);
+    expect(screen.getByText('Wed Jan 3 (closed day)')).toBeTruthy();
+  });
+
+  it('a pick on a closed day says so in the verdict', () => {
+    const availability = answer({ start: '09:00', fits: true, reason: null, detourMinutes: 1 }, [closedDay]);
+    expect(availabilityVerdict(availability, at('2035-01-03', '09:00')).detail).toBe('+1 min drive. Wed Jan 3 is a closed day.');
+  });
+
+  it('a held answer during a re-check shows "Checking…" and still covers the route warning', () => {
+    const stale = { ...answer({ start: '14:00', fits: false, reason: 'arrival_window', detourMinutes: null }), stale: true };
+    expect(availabilityVerdict(stale, at('2035-01-02', '15:00'))).toMatchObject({ tone: 'ok', text: 'Checking…', offers: [] });
+    expect(stripCoversRouteWarning(stale, at('2035-01-02', '15:00'))).toBe(true);
+  });
+});
+

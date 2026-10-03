@@ -26,7 +26,7 @@
 // and is not asked again for SUMMARY_RETRY_MS, so a dark gate costs one
 // extra request per ten minutes, not one per keystroke.
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { etDateString } from '../../lib/timezone';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -91,6 +91,7 @@ export function normalizeAvailability(data, { date, scopedToTech }) {
     days: days.map((day) => ({
       date: day.date,
       status: day.status || (day.hours?.length ? 'open' : 'full'),
+      ...(day.closed === true ? { closed: true } : {}),
       hours: (day.hours || []).map((h) => ({
         date: day.date,
         start: h.start_time,
@@ -162,15 +163,24 @@ export function useBestTimes({
   // is scored over the whole window, like the live conflict check.
   const pickedEndKey = /^\d{2}:\d{2}(:\d{2})?$/.test(String(pickedEnd || '')) ? String(pickedEnd).slice(0, 5) : '';
   const rangeKey = YMD.test(String(rangeFrom || '')) ? String(rangeFrom) : '';
+  // Who the last summary was for. A re-check for the SAME visit/customer and
+  // place keeps the previous days on screen, marked stale, so the strip (and
+  // the route warning it replaces) does not blink off and on with every pick.
+  const subjectKey = [serviceId, customerId, propertyId, address, lat, lng].map((v) => v ?? '').join('|');
+  const lastSubject = useRef(null);
   useEffect(() => {
     setBestTimes([]);
     setPicked(null);
     setBestInRange(null);
-    setAvailability(null);
     if (!enabled || (!customerId && !serviceId) || !YMD.test(String(date || '')) || Date.now() < hintsGatedUntil) {
+      setAvailability(null);
       setChecking(false);
       return undefined;
     }
+    const summaryExpected = summary && date >= etDateString() && Date.now() >= summaryUnavailableUntil;
+    const sameSubject = lastSubject.current === subjectKey;
+    lastSubject.current = subjectKey;
+    setAvailability((prev) => (prev && summaryExpected && sameSubject ? { ...prev, stale: true } : null));
     const controller = new AbortController();
     setChecking(true);
     const timer = setTimeout(async () => {
@@ -242,6 +252,8 @@ export function useBestTimes({
           // Answered, but with no summary: the gate is off. A failed
           // request (null) says nothing about the gate — ask again next time.
           if (data) summaryUnavailableUntil = Date.now() + SUMMARY_RETRY_MS;
+          // No summary this time: a held (stale) one must not outlive it.
+          setAvailability(null);
           // Hints gated altogether: the fallbacks would be gated too.
           if (Date.now() < hintsGatedUntil) { setChecking(false); return; }
         }
@@ -255,7 +267,11 @@ export function useBestTimes({
         setBestTimes(normalized.bestTimes);
         setPicked(normalized.picked);
         setBestInRange(range?.slots?.length ? mapSlot(range.slots[0], scoped) : null);
-      } catch { /* advisory only — a failed search just shows no hint */ }
+      } catch {
+        // Advisory only — a failed search just shows no hint (and drops a
+        // held summary, unless a newer pick already owns the state).
+        if (!controller.signal.aborted) setAvailability(null);
+      }
       if (!controller.signal.aborted) setChecking(false);
     }, 300);
     return () => { clearTimeout(timer); controller.abort(); };
