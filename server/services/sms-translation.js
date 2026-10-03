@@ -882,16 +882,19 @@ async function usuallyWritesEnglish(customerId, smsLogId) {
   try {
     const trigger = db('sms_log').where({ id: smsLogId }).select('created_at');
     const rows = await db('sms_log').where({ customer_id: customerId, direction: 'inbound' }).whereNot({ id: smsLogId })
-      .where('created_at', '<', trigger).orderBy('created_at', 'desc').limit(10).select('message_body');
-    const outbound = (await db('sms_log').where({ customer_id: customerId, direction: 'outbound' })
-      .where('created_at', '<', trigger).orderBy('created_at', 'desc').limit(50).select('message_body')).map((r) => r.message_body);
+      .where('created_at', '<', trigger).orderBy('created_at', 'desc').limit(10).select('message_body', 'created_at');
+    // each reply is matched only against our texts sent BEFORE it (a reaction quotes a text it has seen)
+    const outbound = await db('sms_log').where({ customer_id: customerId, direction: 'outbound' })
+      .where('created_at', '<', trigger).orderBy('created_at', 'desc').limit(50).select('message_body', 'created_at');
+    const sentBefore = (at) => outbound.filter((o) => new Date(o.created_at) < new Date(at)).map((o) => o.message_body);
     const { isSmsReaction } = require('./sms-intent');
     const { isEnglishInbound, hasUnknownShortWord } = require('./sms-label-facts');
     // a reaction in any phone language ("Liked “…”", "Понравилось «…»", "Le gustó “…”") quotes our text: not a vote
     // contact details are not language: an email, a link and an address span are set aside, and a reply with no
     // words left does not vote
-    const bodies = rows.map((r) => r.message_body)
-      .filter((b) => typeof b === 'string' && b.trim() && !isSmsReaction(b) && !isReactionToOurText(b, outbound))
+    const bodies = rows.filter((r) => typeof r.message_body === 'string' && r.message_body.trim()
+        && !isSmsReaction(r.message_body) && !isReactionToOurText(r.message_body, sentBefore(r.created_at)))
+      .map((r) => r.message_body)
       .map((b) => b.replace(/\S*(?:@|:\/\/|\p{L}\.\p{L})\S*/gu, ' ').replace(ADDRESS_SPAN_RE, ' ').trim())
       .filter((b) => /\p{L}/u.test(b));
     // a short foreign reply ("Perfecto", "Vale") reads as English to the majority check: the short-word signal counts it foreign

@@ -18,7 +18,11 @@ jest.mock('../models/db', () => jest.fn(() => {
   const q = {
     insert: (row) => { mockInsert(row); return { onConflict: () => ({ ignore: async () => [] }) }; },
     where: (w) => { if (w && typeof w === 'object' && w.direction) q.direction = w.direction; return q; }, whereNot: () => q, whereNotNull: () => q, orderBy: () => q, limit: () => q,
-    select: (...cols) => (cols[0] === 'message_body' ? (q.direction === 'outbound' ? mockOutbound() : mockEarlier()) : cols[0] === 'created_at' ? q : mockPrior()),
+    // history rows default to a time after every outbound row unless a test dates them
+    select: (...cols) => (cols[0] === 'message_body'
+      ? (q.direction === 'outbound' ? mockOutbound().then((r) => r.map((o) => ({ created_at: '2026-01-01T00:00:00Z', ...o })))
+        : mockEarlier().then((r) => r.map((o) => ({ created_at: '2026-06-01T00:00:00Z', ...o }))))
+      : cols[0] === 'created_at' ? q : mockPrior()),
     first: () => mockTrigger(),
   };
   return q;
@@ -599,6 +603,16 @@ describe('runTranslationTrial', () => {
     mockEarlier.mockResolvedValueOnce([{ message_body: '2 hours works' }, { message_body: 'Ok thanks' }, { message_body: 'Gracias' }]);
     scriptModels({ inbound: { ...SPANISH_INBOUND, english: 'Thank you' } });
     expect(await runTranslationTrial({ inboundMessage: 'Gracias', customer, smsLogId: 's1' })).toBeNull();
+  });
+
+  test('a reply is matched only against our texts sent before it: a later text cannot make it a reaction', async () => {
+    mockOutbound.mockResolvedValueOnce([{ message_body: 'Thursday works for us, see you then.', created_at: '2026-07-01T00:00:00Z' }]);
+    mockEarlier.mockResolvedValueOnce([
+      { message_body: 'Dije “Thursday works”', created_at: '2026-06-01T00:00:00Z' }, { message_body: 'Vale', created_at: '2026-06-02T00:00:00Z' },
+      { message_body: 'Ok thanks', created_at: '2026-06-03T00:00:00Z' },
+    ]);
+    scriptModels({ inbound: SPANISH_INBOUND });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' })).toMatchObject({ verdict: 'ready' });
   });
 
   test('only the address span is set aside: "123 Main St. Hasta luego" still votes foreign', async () => {
