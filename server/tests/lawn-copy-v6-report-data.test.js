@@ -567,6 +567,17 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
       expect(await sigWith([visit('2026-11-11')])).toBe(booked);
       expect(await sigWith([visit('2026-11-18')])).not.toBe(booked);
       expect(await sigWith([visit('2026-11-11', 'cancelled')])).not.toBe(booked);
+      // A corrected address behind a linked property (same ids and dates) moves the key.
+      const linked = (address) => resolveCanonicalLawnRender({ ...svc, scheduled_service_id: 'ss-cur' }, makeKnex({
+        ...fixtures(),
+        service_records: [],
+        scheduled_services: [
+          { id: 'ss-cur', customer_id: CUSTOMER, scheduled_date: '2026-09-30', status: 'completed', service_type: 'Lawn Care Treatment Program', service_address_line1: '100 Test Palm Way', service_address_city: 'Bradenton', service_address_zip: '34201' },
+          { id: 'ss-next', customer_id: CUSTOMER, scheduled_date: '2026-11-11', status: 'confirmed', service_type: 'Lawn Care Treatment Program', property_id: 'prop-2' },
+        ],
+        customer_properties: [{ id: 'prop-2', address_line1: address, city: 'Bradenton', zip: '34201' }],
+      })).then((r) => r.signature);
+      expect(await linked('100 Test Palm Way')).not.toBe(await linked('200 Sample Oak Ln'));
       const failedA = await sigWith(FAIL);
       expect(failedA).not.toBe(booked);
       expect(await sigWith(FAIL)).not.toBe(failedA);

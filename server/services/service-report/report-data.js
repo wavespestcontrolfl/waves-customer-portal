@@ -2679,7 +2679,15 @@ async function lawnUpcomingVisitsStamp(service, knex) {
         const iso = raw instanceof Date ? raw.toISOString().slice(0, 10) : String(raw).slice(0, 10);
         return `${iso}@${PROPERTY_SCOPE_COLUMNS.map((column) => row[column] ?? '').join('~')}`;
       });
-    return `:nv=${crypto.createHash('sha1').update(days.join('|')).digest('hex').slice(0, 8)}`;
+    // ... and the visit the render's own resolver picks for this report, so a
+    // corrected address behind a linked property (same ids, same dates) moves
+    // the key too. A failed lookup inside it is unknown: non-reusable.
+    const failures = new Set();
+    const picked = await lawnNextVisitAtProperty(service, svcIso && svcIso > todayIso ? svcIso : todayIso, knex, failures);
+    if (failures.size) return `:nv=err${crypto.randomBytes(4).toString('hex')}`;
+    const pickedRaw = picked.state === 'scheduled' ? picked.row.scheduled_date : null;
+    const pickedIso = pickedRaw ? (pickedRaw instanceof Date ? pickedRaw.toISOString().slice(0, 10) : String(pickedRaw).slice(0, 10)) : '';
+    return `:nv=${crypto.createHash('sha1').update(`${days.join('|')}#${picked.state}:${pickedIso}`).digest('hex').slice(0, 8)}`;
   } catch {
     return `:nv=err${crypto.randomBytes(4).toString('hex')}`;
   }
