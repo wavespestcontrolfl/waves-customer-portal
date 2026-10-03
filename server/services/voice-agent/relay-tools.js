@@ -803,7 +803,10 @@ async function executeTool(name, input = {}, ctx = {}) {
       }
       if (name === 'get_today_eta') {
         const { todayEtaText } = require('./relay-visit');
-        return await todayEtaText(targetCustomerId, { tier });
+        // The caller's OWN number matched this account (directly or through a
+        // ref that resolves back to it) — as opposed to an account they looked up.
+        const recognisedContact = Boolean(ctx.customerId) && targetCustomerId === ctx.customerId;
+        return await todayEtaText(targetCustomerId, { tier, recognisedContact });
       }
       if (name === 'get_open_estimates') {
         const { openEstimatesText } = require('./relay-money');

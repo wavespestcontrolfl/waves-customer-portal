@@ -1071,6 +1071,10 @@ describe('GATE ON — disclosure tiers (enforced in tool output, not prompt lang
     // The system block itself drops the amount and the arrival window.
     expect(ctx.block).not.toContain('$231.75');
     expect(ctx.block).toMatch(/NOT as that account holder's own/i);
+    // Sandy P1: the account holder's name never reaches a recognised-only
+    // session — a model that never sees it cannot say it to a spouse or tenant.
+    expect(ctx.block).not.toMatch(/First name/);
+    expect(ctx.block).not.toContain(CONTACT_SLOT_CUSTOMER.first_name);
   });
 
   test('a contact-slot ANI cannot reach a full-tier surface', async () => {

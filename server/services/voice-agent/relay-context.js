@@ -898,7 +898,12 @@ function buildKnownCallerBlock({ customer, services, nextAppointment, lastVisit,
   // Every DB-sourced free-text field below is customer-influenced and is landing
   // in the SYSTEM role — systemBlockSafe drops directive lines AND smuggled
   // price/guarantee/policy claims (an empty result is simply omitted).
-  const first = systemBlockSafe(customer.first_name, 40);
+  // ⭐ THE ACCOUNT HOLDER'S NAME NEVER REACHES A RECOGNISED-ONLY SESSION. The
+  // caller there is a spouse, tenant or prior occupant, not the person the
+  // name belongs to: a model that never sees it cannot greet them by it or
+  // say it back ("is this Elena's account?"). A name the caller states is
+  // confirmed through lookup_customer, same as any other detail.
+  const first = redacted ? '' : systemBlockSafe(customer.first_name, 40);
   if (first) lines.push(`First name: ${first}`);
   const sinceYear = customer.member_since ? new Date(customer.member_since).getUTCFullYear() : null;
   if (Number.isFinite(sinceYear)) lines.push(`Customer since: ${sinceYear}`);
