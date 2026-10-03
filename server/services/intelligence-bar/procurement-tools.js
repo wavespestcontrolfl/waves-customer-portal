@@ -1790,7 +1790,7 @@ async function getStockMovements(input) {
 async function getRestockQueue(input, actionContext) {
   const status = input.status || 'active';
   const { requests } = await require('../inventory-restock-queue').listRestockRequests({
-    status, limit: input.limit || 50, showSpend: actionContext.isAdmin === true, requestId: input.request_id,
+    status, limit: input.limit || 50, showSpend: actionContext.isAdmin === true, officeDetail: actionContext.isAdmin === true, requestId: input.request_id,
   });
   return { requests: requests.map(row => ({
     id: row.id, product_id: row.productId, product: row.productName, category: row.productCategory,
