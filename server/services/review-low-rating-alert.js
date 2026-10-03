@@ -16,8 +16,9 @@
  * "Needs an answer": 1 to 3 stars, no published reply (an unpublished
  * '[DRAFT] …' reply does not count, review-reply/draft-prefix.js), not
  * dismissed, still on Google (no missing_since), and written at or after this
- * lane's first live run (`activationBoundary`, stored once in system_settings),
- * so turning the gate on never rings a backlog.
+ * lane's activation boundary (`activationBoundary`: stored once in
+ * system_settings at the start of the first gated sync, two hours back), so
+ * turning the gate on never rings a backlog.
  *
  * Rules only (the Clef replay found about two such reviews a year, too few to
  * justify a model). Internal only: nothing is sent to the reviewer. The item
@@ -79,12 +80,18 @@ function composeForReview(review) {
   }
 }
 
-// The first instant this lane ran live: read once, written once (the DATABASE
-// clock, insert-if-absent, so racing pods agree and a restart never moves it).
+// The lane's activation boundary: written once (insert-if-absent, the DATABASE
+// clock, so racing pods agree and a restart never moves it) at the START of
+// the first gated review sync, before it pulls anything (Codex #5659 r4), and
+// set ACTIVATION_GRACE_HOURS earlier. The gate's flip redeploys the service
+// and the first hourly sync can run up to an hour later, so the grace covers a
+// review written between the flip and that first pull; at about two such
+// reviews a year it admits no backlog worth the name.
+const ACTIVATION_GRACE_HOURS = 2;
 async function activationBoundary(conn = db) {
   const existing = await conn('system_settings').where({ key: ACTIVATION_SETTINGS_KEY }).first('value');
   if (existing?.value) return new Date(existing.value);
-  const { rows } = await conn.raw('SELECT now() AS now');
+  const { rows } = await conn.raw(`SELECT now() - interval '${ACTIVATION_GRACE_HOURS} hours' AS now`);
   const now = rows[0].now;
   await conn('system_settings').insert({
     key: ACTIVATION_SETTINGS_KEY, value: new Date(now).toISOString(), category: 'reviews',
@@ -122,6 +129,18 @@ function keyIndex(openMetadata) {
   return (review) => byReviewId.get(String(review.id))
     || (review.google_review_id ? byGoogleId.get(String(review.google_review_id)) : null)
     || keyFor(review.id);
+}
+
+// Called at the start of every review sync: fixes the boundary on the first
+// gated one, before its pull. Gate off = nothing. Never throws.
+async function recordActivation(conn = db) {
+  if (!reviewLowRatingAlertLive()) return null;
+  try {
+    return await activationBoundary(conn);
+  } catch (err) {
+    logger.warn(`[review-alert] activation boundary not recorded: ${err.message}`);
+    return null;
+  }
 }
 
 /**
@@ -212,4 +231,4 @@ async function reconcile(conn, now, out) {
   return out;
 }
 
-module.exports = { lowRatingAlertSpec, composeForReview, syncLowRatingReviewAlerts, activationBoundary, needsAnswerQuery, CATEGORY, KEY_PREFIX, MAX_STARS };
+module.exports = { lowRatingAlertSpec, composeForReview, syncLowRatingReviewAlerts, activationBoundary, recordActivation, ACTIVATION_GRACE_HOURS, needsAnswerQuery, CATEGORY, KEY_PREFIX, MAX_STARS };

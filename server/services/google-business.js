@@ -1684,6 +1684,10 @@ class GoogleBusinessService {
   // REVIEW SYNC - GBP Reviews API primary; Places kept for stats/fallback.
   // =========================================================================
   async syncAllReviews() {
+    // Bad-review bell (GATE_REVIEW_ALERT): fix its activation boundary BEFORE
+    // the first gated pull, so a review that pull stores is never older than
+    // it by accident. A no-op once recorded or while the gate is off.
+    await require('./review-low-rating-alert').recordActivation();
     // Order the whole fleet observation before any Places/GBP fetch. Arrival
     // at the later escalation lock does not identify which cycle is newer.
     const observedAt = new Date().toISOString();

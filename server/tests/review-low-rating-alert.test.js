@@ -51,7 +51,7 @@ function fakeConn({ reviews = [], boundary = BOUNDARY, recheck = null } = {}) {
       };
       return b;
     };
-    conn.raw = async () => ({ rows: [{ now: new Date(BOUNDARY) }] });
+    conn.raw = async (sql) => { seen.rawSql = sql; return { rows: [{ now: new Date(BOUNDARY) }] }; };
     conn.transaction = async (fn) => fn(make(true));
     return conn;
   };
@@ -121,6 +121,8 @@ describe('syncLowRatingReviewAlerts', () => {
     await syncLowRatingReviewAlerts({ conn: first.conn });
     expect(first.seen.settingsInserts).toHaveLength(1);
     expect(first.seen.settingsInserts[0]).toMatchObject({ key: 'review_low_rating_alert_activated_at' });
+    // two hours back: a review written between the gate flip and the first pull still counts
+    expect(first.seen.rawSql).toMatch(/now\(\) - interval '2 hours'/);
     const later = fakeConn();
     await syncLowRatingReviewAlerts({ conn: later.conn });
     expect(later.seen.settingsInserts).toHaveLength(0);
@@ -223,6 +225,20 @@ describe('syncLowRatingReviewAlerts', () => {
     await expect(syncLowRatingReviewAlerts({ conn })).resolves.toMatchObject({ failed: 1 });
     mockEpisodes.raiseAdminAlertWithReopen.mockResolvedValue({ id: 'n2', rang: true });
     await expect(syncLowRatingReviewAlerts({ conn })).resolves.toMatchObject({ raised: 1, failed: 0 });
+  });
+
+  test('recordActivation: fixes the boundary while the gate is on, does nothing while it is off, never throws', async () => {
+    const { recordActivation } = require('../services/review-low-rating-alert');
+    const on = fakeConn({ boundary: null });
+    await recordActivation(on.conn);
+    expect(on.seen.settingsInserts).toHaveLength(1);
+    delete process.env.GATE_REVIEW_ALERT;
+    const off = fakeConn({ boundary: null });
+    await expect(recordActivation(off.conn)).resolves.toBeNull();
+    expect(off.seen.settingsInserts).toHaveLength(0);
+    process.env.GATE_REVIEW_ALERT = 'true';
+    const broken = () => { throw new Error('db down'); };
+    await expect(recordActivation(broken)).resolves.toBeNull();
   });
 
   test('the category rings by default and the owner can silence it', () => {

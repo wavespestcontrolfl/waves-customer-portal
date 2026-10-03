@@ -2570,6 +2570,7 @@ describe('bad-review bell (GATE_REVIEW_ALERT): one pass after every review sync'
   let db;
   let service;
   let syncLowRatingReviewAlerts;
+  let recordActivation;
 
   beforeEach(() => {
     jest.resetModules();
@@ -2577,7 +2578,8 @@ describe('bad-review bell (GATE_REVIEW_ALERT): one pass after every review sync'
     db = createDbMock();
     jest.doMock('../models/db', () => db);
     syncLowRatingReviewAlerts = jest.fn(async () => ({ raised: 1, failed: 0, closed: 0 }));
-    jest.doMock('../services/review-low-rating-alert', () => ({ syncLowRatingReviewAlerts }));
+    recordActivation = jest.fn(async () => null);
+    jest.doMock('../services/review-low-rating-alert', () => ({ syncLowRatingReviewAlerts, recordActivation }));
     service = require('../services/google-business');
     service._clients = {};
     service._getHeaders = jest.fn(async () => ({ Authorization: 'Bearer test' }));
@@ -2592,10 +2594,15 @@ describe('bad-review bell (GATE_REVIEW_ALERT): one pass after every review sync'
       }
       return { json: async () => ({ status: 'OK', result: { rating: 4, user_ratings_total: 31 } }) };
     });
+    let storedAtActivation = null;
+    recordActivation.mockImplementation(async () => { storedAtActivation = db.__state.rows.google_reviews.some((r) => r.reviewer_name === 'New Person'); return null; });
     let storedWhenCalled = null;
     syncLowRatingReviewAlerts.mockImplementation(async () => { storedWhenCalled = db.__state.rows.google_reviews.some((r) => r.reviewer_name === 'New Person'); return {}; });
     await service.syncAllReviews();
     expect(syncLowRatingReviewAlerts).toHaveBeenCalledTimes(1);
     expect(storedWhenCalled).toBe(true);
+    // the boundary is fixed BEFORE the pull stores anything
+    expect(recordActivation).toHaveBeenCalledTimes(1);
+    expect(storedAtActivation).toBe(false);
   });
 });
