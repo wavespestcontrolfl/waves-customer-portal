@@ -543,6 +543,19 @@ describe('GATE ON — caller recognition', () => {
     const block = ctx.block;
     expect(block).toContain('KNOWN CALLER');
     expect(block).toContain('First name: Pat');
+    // Benchmark 10-03 (angry-complaint, 5 of 6): the agent asked a known
+    // customer for her service address and email three times and filed
+    // nothing — the intake rule had no exception for a caller already on file.
+    expect(block).toMatch(/Do NOT ask for any of those/);
+    expect(block).toMatch(/call the tool for it right away/);
+    // Every benchmark fixture's known-caller block opens with the live header
+    // for its tier, so a wording change here always reaches the benchmark.
+    const header = (b) => b.slice(0, b.indexOf('<<<KNOWN CALLER DATA'));
+    const fixtureBlocks = require('../fixtures/voice-relay-eval/scenarios.json').scenarios
+      .map((sc) => sc.caller && sc.caller.context).filter((c) => c && c.block);
+    const fullTier = fixtureBlocks.filter((c) => c.tier === 'full');
+    expect(fullTier.length).toBeGreaterThan(10);
+    for (const c of fullTier) expect(header(c.block)).toBe(header(block));
     expect(block).toContain('Customer since: 2023');
     expect(block).toContain('Pest Control; Lawn Care');
     expect(block).toContain('Next appointment: Tuesday August 18 — Pest Control');
