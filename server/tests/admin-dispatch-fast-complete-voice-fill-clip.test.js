@@ -182,6 +182,37 @@ describe('POST fast-complete/voice-fill/clip', () => {
     for (const secret of ['7731', 'Taurus', 'perimeter', 'gate code', 'ants']) expect(everything).not.toContain(secret);
   });
 
+  describe('a silent clip, through the real transcriber adapter', () => {
+    const savedKey = process.env.OPENAI_API_KEY;
+    const savedFetch = global.fetch;
+    const provider = (status, body) => {
+      global.fetch = jest.fn(async () => ({ ok: status === 200, status, headers: { get: () => 'application/json' }, json: async () => body, text: async () => JSON.stringify(body) }));
+    };
+    beforeEach(() => {
+      process.env.OPENAI_API_KEY = 'test-key';
+      transcribeWithOpenAI.mockImplementation(jest.requireActual('../services/call-recording-processor').transcribeWithOpenAI);
+    });
+    afterEach(() => {
+      if (savedKey === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = savedKey;
+      global.fetch = savedFetch;
+    });
+
+    test('the provider answers with no words: nothing heard (200), not unavailable', async () => {
+      provider(200, { text: '' });
+      const res = await invoke();
+      expect(res.statusCode).toBe(200);
+      expect(res.body).toMatchObject({ enabled: true, heardNothing: true, products: [] });
+      expect(callAnthropic).not.toHaveBeenCalled();
+    });
+
+    test('the provider fails: still 502, keep typing', async () => {
+      provider(500, { error: 'upstream' });
+      const res = await invoke();
+      expect(res.statusCode).toBe(502);
+      expect(callAnthropic).not.toHaveBeenCalled();
+    });
+  });
+
   test('a transcript past the cap is refused, never cut: say it in shorter pieces', async () => {
     transcribeWithOpenAI.mockResolvedValue({ text: `${'Treated the garage. '.repeat(260)}Actually it was five ounces of Taurus.` });
     const res = await invoke({ body: { sheet: 'pest_reservice', duration_seconds: '900' } });

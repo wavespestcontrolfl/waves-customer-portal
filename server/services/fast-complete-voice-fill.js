@@ -1533,6 +1533,8 @@ async function voiceFillFromClip({ serviceId, sheet, audio, mimeType, filename, 
       prompt: transcriptionPrompt(loaded.context),
       mimeType,
       filename,
+      // silence is an answer (nothing_heard), not a provider failure
+      emptyOk: true,
     });
   } catch (err) {
     logger.warn(`[voice-fill] transcription threw: ${err?.name || 'Error'}`);
