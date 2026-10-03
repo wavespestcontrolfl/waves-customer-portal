@@ -688,6 +688,11 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     expect(spoke).toContain('- Conversation with the customer: The customer was home. I talked with them in person; we spoke during the visit.');
     expect(spoke).not.toContain('tech_home_spoke_with_them');
     expect(await text('not_home_full_access')).toContain('The customer was not home, so I missed them. I had full access to the property.');
+    // a recorded concern says nothing about who was home
+    const concern = await text('customer_specific_concern');
+    expect(concern).toContain('- Conversation with the customer: The customer had a specific concern for this visit.');
+    expect(concern).not.toMatch(/Conversation with the customer:[^\n]*\bhome\b/);
+    expect(await text('not_home_partial_access')).toContain('I had only partial access to the property.');
     // an unknown code is still shown, as words
     expect(await text('left_note_on_door')).toContain('- Conversation with the customer: left note on door');
     const { detailSupportedByQuote } = Drafter.__private;

@@ -461,7 +461,8 @@ const INTERACTION_TEXT = {
   tech_home_spoke_with_them: "The customer was home. I talked with them in person; we spoke during the visit.",
   not_home_full_access: "The customer was not home, so I missed them. I had full access to the property.",
   not_home_partial_access: "The customer was not home, so I missed them. I had only partial access to the property.",
-  customer_specific_concern: "The customer was home and raised a specific concern with me.",
+  // Says nothing about who was home: only that a concern was recorded.
+  customer_specific_concern: "The customer had a specific concern for this visit.",
 };
 function interactionText(value) {
   const code = String(value || "").trim();
