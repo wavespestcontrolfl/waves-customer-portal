@@ -360,12 +360,7 @@ const OUTCOME_TERM_RE = /^(?:behind (?:you|us|them)|success(?:ful(?:ly)?)?|relie
 const CREDENTIAL_CLAIM_RE = /\b(?:certified|licen[cs]ed|insured|bonded|background[- ]checked|vetted|accredited|award[- ]winning|trained|state[- ]licen[cs]ed|screened|degreed|qualified|experts?|specialists?|master|veteran|senior|lead|head|top[- ]rated)\b/gi;
 // Visit-experience claims (timeliness, speed, communication) — only the
 // reviewer can vouch for these.
-// "kind" in a thank-you aimed at the reviewer is not a claim (owner
-// 2026-10-03). Exactly three shapes pass: "kind of you", "your kind
-// <words|review|note|...>", and "thanks / thank you for the kind words".
-// Any other "kind" (staff, the service, "our team had kind words") still
-// needs the reviewer's own words (codex #5788 r1, r2).
-const EXPERIENCE_CLAIM_RE = /\b(?:stop(?:ped|s)? by|came out|come out|coming out|came by|dropped by|swung by|on[- ]site|was there|were there|made it out|got out to|sent (?:someone|a tech\w*|the tech\w*|our tech\w*)|respect\w*|left (?:everything|it|things|the (?:place|house|home|yard)|no mess)|as (?:we|they) found (?:it|them)|put (?:everything|things|it) back|cleaned up|tidied|booties|shoe covers|no mess|spotless|helpful|honest|efficient(?:ly)?|reliable|dependable|careful(?:ly)?|patient(?:ly)?|kind(?!\s+of\s+you\b)(?<!\byour\s+kind(?=\s+(?:words|review|note|feedback|comments?|remarks?|message|recommendation|referral)\b))(?<!\b(?:thank\s+you|thanks)\s+(?:so\s+much\s+)?for\s+(?:the|those|these|such)\s+kind(?=\s+words\b))|attentive|responsive|detailed|diligent|hard-?working|trustworthy|affordable|fair|reasonable|excellent|outstanding|amazing|wonderful|fantastic|great|awesome|superb|effective(?:ly)?|spotless|tidy|neat|on[- ]time|arrived|arrival|showed up|show up|quick(?:ly)?|fast|prompt(?:ly)?|same[- ]day|next[- ]day|right away|punctual|early|explain(?:ed|ing|s)?|walked (?:you|them) through|answered|communicat\w*|kept (?:you|them) (?:informed|updated|posted)|thorough(?:ly)?|professional(?:ism|ly)?|courteous|polite|friendly|respectful|knowledgeable|clean(?:ed)? up)\b/gi;
+const EXPERIENCE_CLAIM_RE = /\b(?:stop(?:ped|s)? by|came out|come out|coming out|came by|dropped by|swung by|on[- ]site|was there|were there|made it out|got out to|sent (?:someone|a tech\w*|the tech\w*|our tech\w*)|respect\w*|left (?:everything|it|things|the (?:place|house|home|yard)|no mess)|as (?:we|they) found (?:it|them)|put (?:everything|things|it) back|cleaned up|tidied|booties|shoe covers|no mess|spotless|helpful|honest|efficient(?:ly)?|reliable|dependable|careful(?:ly)?|patient(?:ly)?|kind|attentive|responsive|detailed|diligent|hard-?working|trustworthy|affordable|fair|reasonable|excellent|outstanding|amazing|wonderful|fantastic|great|awesome|superb|effective(?:ly)?|spotless|tidy|neat|on[- ]time|arrived|arrival|showed up|show up|quick(?:ly)?|fast|prompt(?:ly)?|same[- ]day|next[- ]day|right away|punctual|early|explain(?:ed|ing|s)?|walked (?:you|them) through|answered|communicat\w*|kept (?:you|them) (?:informed|updated|posted)|thorough(?:ly)?|professional(?:ism|ly)?|courteous|polite|friendly|respectful|knowledgeable|clean(?:ed)? up)\b/gi;
 // A narrow companion to EXPERIENCE_CLAIM_RE — "visit" is deliberately the
 // only term left here (2026-09-25 round-4 fix: explain/answered/communicat*/
 // walked…through moved INTO EXPERIENCE_CLAIM_RE above, where the normal
@@ -766,6 +761,23 @@ function checkServiceClaims(ctx) {
 // complexity reason as checkServiceClaims (round-4 P2); returns a reject
 // object, or null when every experience claim (and the interaction gate) is
 // clear.
+// "kind" in a thank-you aimed at the reviewer is not a claim (owner
+// 2026-10-03). Exactly three AFFIRMATIVE shapes pass: "kind of you", "your
+// kind <words|review|note|...>", and "thanks / thank you for the kind words".
+// Any other "kind" (staff, the service, "our team had kind words", a negated
+// "not kind of you") still needs the reviewer's own words (codex #5788 r1-r3).
+const KIND_THANKS_BEFORE_RE = /(?:\byour\s+$|\b(?:thank\s+you|thanks)\s+(?:so\s+much\s+)?for\s+(?:the|those|these|such)\s+$)/;
+const KIND_NOUN_AFTER_RE = /^kind\s+(?:words|review|note|feedback|comments?|remarks?|message|recommendation|referral)\b/;
+function isReviewerThanksKind(bodyLower, idx, bodyNeg) {
+  if (isNegatedAt(idx, bodyNeg)) return false;
+  const after = bodyLower.slice(idx);
+  if (/^kind\s+of\s+you\b/.test(after)) return true;
+  const before = bodyLower.slice(Math.max(0, idx - 40), idx);
+  const m = before.match(KIND_THANKS_BEFORE_RE);
+  if (!m || !KIND_NOUN_AFTER_RE.test(after)) return false;
+  // "your kind <noun>" takes any listed noun; the thanks-for shape is "kind words" only.
+  return /your\s+$/.test(m[0]) || /^kind\s+words\b/.test(after);
+}
 function checkExperienceClaims(ctx) {
   const {
     body, grounding, reviewWords, reviewLower, canonReview, reviewNeg, canonNeg,
@@ -779,6 +791,7 @@ function checkExperienceClaims(ctx) {
     const t = term.toLowerCase().replace(/\s+/g, ' ');
     const stem = stemOf(t.replace(/[- ]/g, ' '));
     const flat = t.replace(/[- ]+/g, ' ');
+    if (t === 'kind' && isReviewerThanksKind(bodyLower, termIdx, bodyNeg)) continue;
     const support = (() => {
       const lit = allOccurrencesNegated(reviewLower.replace(/[- ]+/g, ' '), flat, negationIndex(reviewLower.replace(/[- ]+/g, ' ')));
       const can = allOccurrencesNegated(canonReview, canonPhrase(t), canonNeg);

@@ -597,6 +597,10 @@ describe('verifyReplyText — public-surface safety net', () => {
     for (const line of ['our team had kind words for you', 'our team wrote a kind note', 'the team sent a kind message']) {
       expect(verify(good(`Hello there, ${line}. Thanks for the rating.`), g)).toBe('unlisted_experience_claim');
     }
+    // A negated shape is not a thank-you (codex #5788 r3).
+    for (const line of ['that was not kind of you', "we don't think that was kind of you", 'we never got your kind words']) {
+      expect(verify(good(`Hello there, ${line}. Thanks for the rating.`), g)).toBe('unlisted_experience_claim');
+    }
     for (const line of ['thank you for your kind review', 'thank you so much for the kind words', 'we appreciate your kind words']) {
       expect(verify(good(`Hello there, ${line}. We are glad to help.`), g)).toBeNull();
     }
