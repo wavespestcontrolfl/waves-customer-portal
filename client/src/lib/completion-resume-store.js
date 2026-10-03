@@ -22,6 +22,7 @@ const DB_VERSION = 1;
 const DRAFT_DB_NAME = "waves-completion-drafts";
 const draftOperations = new Map();
 const fastCompletionOperations = new Map();
+const FAST_COMPLETION_DB_NAME = "waves-fast-completion-attempts";
 const FAST_COMPLETION_PREFIX = "fast-complete:";
 
 // Drafts are private field work: photos, captions and notes a technician
@@ -142,7 +143,7 @@ function withFastCompletionAttempt(serviceId, operatorId, operation) {
 // transaction lock and the mutation predicate are what keep another tab's
 // newer idempotency key from being overwritten or deleted by a late result.
 function mutateFastCompletionRow(key, mutate) {
-  return withFastCompletionKey(key, () => openDb(DB_NAME).then((db) => {
+  return withFastCompletionKey(key, () => openDb(FAST_COMPLETION_DB_NAME).then((db) => {
     if (!db) return false;
     return new Promise((resolve) => {
       let settled = false;
@@ -180,8 +181,8 @@ function mutateFastCompletionRow(key, mutate) {
 }
 
 // Fast Complete's final request is a committed retry attempt, not an editable
-// form draft. It lives beside the full completion's large bodies so inline
-// photos fit, but its namespaced key keeps it operator-private on a shared
+// form draft. Its separate database is unreachable by older tabs' legacy
+// completion pruner; its scoped key keeps it operator-private on a shared
 // field device. Reads report storage availability separately from "no row" so
 // the sheet can warn when a reload-safe retry cannot be guaranteed.
 export function putFastCompletionAttempt(serviceId, operatorId, attempt, now = Date.now()) {
@@ -209,7 +210,7 @@ export function getFastCompletionAttempt(serviceId, operatorId) {
   if (!key) return Promise.resolve({ available: false, attempt: null });
   const unavailable = {};
   return withFastCompletionAttempt(serviceId, operatorId, (scopedKey) => (
-    withStore(DB_NAME, "readonly", unavailable, (store) => store.get(scopedKey))
+    withStore(FAST_COMPLETION_DB_NAME, "readonly", unavailable, (store) => store.get(scopedKey))
   )).then((record) => {
     if (record === unavailable) return { available: false, attempt: null };
     const matches = record?.version === 1
@@ -230,7 +231,7 @@ export function deleteFastCompletionAttempt(serviceId, operatorId, expectedIdemp
 }
 
 export function pruneFastCompletionAttempts(now = Date.now(), maxAgeMs = DRAFT_RETENTION_MS) {
-  return withStore(DB_NAME, "readonly", [], (store) => store.getAllKeys())
+  return withStore(FAST_COMPLETION_DB_NAME, "readonly", [], (store) => store.getAllKeys())
     .then((keys) => Promise.all(
       (Array.isArray(keys) ? keys : [])
         .map((key) => String(key))
@@ -365,7 +366,6 @@ export function pruneCompletionResumeBodies(isOwed, now = Date.now()) {
     .then((keys) => Promise.all(
       (Array.isArray(keys) ? keys : [])
         .map((key) => String(key))
-        .filter((key) => !key.startsWith(FAST_COMPLETION_PREFIX))
         .filter((key) => !isOwed(key))
         .map((key) => rowFor(key).then((row) => (
           row && now - Number(row.storedAt || 0) < PRUNE_GRACE_MS

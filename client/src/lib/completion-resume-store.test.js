@@ -49,7 +49,7 @@ const committedBody = () => ({
   completionPhotos: [photo(1), photo(2)],
 });
 
-const FAST_DB = "waves-completion-resume";
+const FAST_DB = "waves-fast-completion-attempts";
 const FAST_STORE = "bodies";
 const fastKey = (serviceId, operatorId) => `fast-complete:${operatorId}:${serviceId}`;
 
@@ -107,6 +107,18 @@ describe("completion resume store (IndexedDB)", () => {
     expect(await getFastCompletionAttempt("svc-2", "tech-a")).toEqual({ available: true, attempt: null });
     expect(await deleteFastCompletionAttempt("svc-1", "tech-a", attempt.body.idempotencyKey)).toBe(true);
     expect((await getFastCompletionAttempt("svc-1", "tech-a")).attempt).toBeNull();
+  });
+
+  it("survives the legacy unmarked-body pruner in an older open tab", async () => {
+    const past = Date.now() - PRUNE_GRACE_MS - 1000;
+    const attempt = { body: committedBody(), summary: "saved retry" };
+    await putFastCompletionAttempt("svc-1", "tech-a", attempt, past);
+    // The legacy pruner is deliberately key-agnostic, exactly as in the
+    // previous release. Prove it deletes even a prefixed legacy row.
+    await putCompletionResumeBody(fastKey("svc-legacy", "tech-a"), attempt.body, past);
+    expect(await pruneCompletionResumeBodies(() => false)).toBe(1);
+    expect(await getCompletionResumeBody(fastKey("svc-legacy", "tech-a"))).toBeNull();
+    expect((await getFastCompletionAttempt("svc-1", "tech-a")).attempt).toMatchObject(attempt);
   });
 
   it("uses the idempotency key as a cross-tab compare-and-set fence", async () => {
