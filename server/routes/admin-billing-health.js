@@ -245,6 +245,10 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
             details: { source: 'manual_charge', billed_month: monthKey, admin_id: req.technicianId || null },
           }).catch(() => {});
           return {
+            // B16: the month is already collected, so a click here is also the office's
+            // reachable retry for parked-row / alert cleanup that failed when that payment
+            // settled (neither a redelivered Stripe event nor anything else re-runs it).
+            collected: existingCharge,
             response: {
               status: 409,
               body: {
@@ -311,6 +315,11 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
         throw err;
       });
 
+      if (lockOutcome.collected) {
+        // The shared step acts only on a PAID monthly payment (a still-processing ACH is left
+        // for its settlement), is idempotent, and never throws or changes this response.
+        await require('../services/autopay-sca-parked').settleParkedForPaidPayment(lockOutcome.collected);
+      }
       if (lockOutcome.response) return res.status(lockOutcome.response.status).json(lockOutcome.response.body);
       payment = lockOutcome.payment;
     } else {

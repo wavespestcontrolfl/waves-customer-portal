@@ -31,6 +31,8 @@ jest.mock('../services/sms-template-renderer', () => ({
 }));
 jest.mock('../services/autopay-log', () => ({ logAutopay: jest.fn(async () => undefined) }));
 jest.mock('../services/autopay-sca-parked', () => ({ settleParkedForPaidPayment: jest.fn(async () => []) }));
+const mockCloseAdminAlertKeys = jest.fn(async () => 1);
+jest.mock('../services/admin-alert-episodes', () => ({ closeAdminAlertKeys: (...a) => mockCloseAdminAlertKeys(...a) }));
 // B10: staff-ordered charge-now passes the operator override (exempt from the
 // collections dispute-hold guard) plus an audit trail naming the admin + route.
 const CHARGE_NOW_OVERRIDE = expect.objectContaining({
@@ -120,6 +122,8 @@ describe('charge-now already-collected guard', () => {
       const body = await res.json();
       expect(body.already_collected).toBe(true);
       expect(body.payment_id).toBe('pay-cron');
+      // B16: the already-collected path hands that paid payment to the shared cleanup step
+      expect(settleParkedForPaidPayment).toHaveBeenCalledWith(expect.objectContaining({ id: 'pay-cron' }));
       expect(chargeMock).not.toHaveBeenCalled();
       expect(chargeOneTimeMock).not.toHaveBeenCalled();
       expect(logAutopay).toHaveBeenCalledWith('cust-1', 'skipped_already_paid', expect.objectContaining({
@@ -273,6 +277,94 @@ describe('charge-now already-collected guard', () => {
       chargeMock.mockResolvedValue({ id: 'pay-new', status: 'processing', amount: '89.00', metadata: null });
       await withServer(async (baseUrl) => { expect((await post(baseUrl)).status).toBe(200); });
       expect(settleParkedForPaidPayment).not.toHaveBeenCalled();
+    });
+  });
+
+  // B16: a webhook redelivery is skipped by the event-id dedupe, and a second Charge now used to
+  // answer already_collected before reaching any cleanup. So cleanup that failed when the month
+  // was collected (here: the alert close threw after the supersede committed) is retried by
+  // pressing Charge now again, which now reconciles from the already-collected path.
+  describe('B16: already-collected Charge now retries parked-row cleanup (real route + real shared step)', () => {
+    const { settleParkedForPaidPayment: mockedSettle } = require('../services/autopay-sca-parked');
+    const actualSettle = jest.requireActual('../services/autopay-sca-parked').settleParkedForPaidPayment;
+    const PARKED = { id: 'pay-sca-1', customer_id: 'cust-1', stripe_payment_intent_id: 'pi_sca_orig' };
+    const PAID = { id: 'pay-new', customer_id: 'cust-1', status: 'paid', amount: '89.00', metadata: JSON.stringify({ billed_month: '2026-10' }) };
+    let ledger;
+
+    // A payments builder with the ledger behaviour the shared step needs: the supersede update
+    // returns the open parked rows once, and the "already superseded by this payment" read
+    // returns them after that.
+    function ledgerQB() {
+      const qb = {};
+      ['where', 'whereIn', 'whereRaw', 'whereNull', 'whereNot', 'orWhere', 'andWhere', 'orderBy', 'limit'].forEach((m) => {
+        qb[m] = jest.fn((...args) => { if (typeof args[0] === 'function') args[0].call(qb, qb); return qb; });
+      });
+      qb.first = jest.fn(() => Promise.resolve(ledger.firstResult));
+      qb.update = jest.fn(() => { ledger.updated += 1; return qb; });
+      qb.returning = jest.fn(() => Promise.resolve(ledger.updated === 1 ? [PARKED] : []));
+      qb.select = jest.fn(() => qb);
+      qb.then = (resolve, reject) => Promise.resolve(ledger.updated >= 1 ? [PARKED] : []).then(resolve, reject);
+      return qb;
+    }
+
+    beforeEach(() => {
+      ledger = { firstResult: null, updated: 0 };
+      mockedSettle.mockImplementation(actualSettle);
+      mockCloseAdminAlertKeys.mockReset();
+      mockCloseAdminAlertKeys.mockResolvedValue(1);
+      db.mockImplementation((table) => {
+        if (table === 'customers') return makeQB({ first: CUSTOMER });
+        if (table === 'payments') return ledgerQB();
+        if (table === 'stripe_orphan_charges') return makeQB({ first: null });
+        throw new Error(`unexpected table ${table}`);
+      });
+    });
+    afterEach(() => { mockedSettle.mockImplementation(async () => []); });
+
+    const post = (baseUrl) => fetch(`${baseUrl}/admin/customers/cust-1/charge-now`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    });
+
+    test('first call: supersede commits, alert close fails (swallowed, 200). Second call: already_collected -> the close is retried and succeeds', async () => {
+      chargeMock.mockResolvedValue(PAID);
+      mockCloseAdminAlertKeys.mockRejectedValueOnce(new Error('notifications down')); // the FIRST close attempt
+      await withServer(async (baseUrl) => {
+        const first = await post(baseUrl);
+        expect(first.status).toBe(200);
+        expect(ledger.updated).toBe(1); // the parked row was superseded
+        const closedAfterFirst = mockCloseAdminAlertKeys.mock.calls.filter((c) => c[1].includes('autopay-sca-parked:cust-1:pi_sca_orig'));
+        expect(closedAfterFirst).toHaveLength(1); // attempted, and it threw
+        mockCloseAdminAlertKeys.mockClear();
+
+        // the month is now collected; the supersede above will not match again
+        ledger.firstResult = PAID;
+        const second = await post(baseUrl);
+        expect(second.status).toBe(409);
+        expect((await second.json()).already_collected).toBe(true);
+        expect(ledger.updated).toBe(2); // the update ran again and matched no new rows
+        const retried = mockCloseAdminAlertKeys.mock.calls.flatMap((c) => c[1]);
+        expect(retried).toEqual(expect.arrayContaining(['autopay-sca-parked:cust-1:pi_sca_orig', 'autopay-sca-parked:cust-1:pay-sca-1']));
+      });
+    });
+
+    test('an already-collected month whose payment is still PROCESSING (ACH not settled) cleans up nothing and still answers 409', async () => {
+      ledger.firstResult = { ...PAID, status: 'processing' };
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl);
+        expect(res.status).toBe(409);
+      });
+      expect(ledger.updated).toBe(0);
+      expect(mockCloseAdminAlertKeys).not.toHaveBeenCalled();
+    });
+
+    test('a cleanup failure on the already-collected path never changes the 409 response', async () => {
+      ledger.firstResult = PAID;
+      mockCloseAdminAlertKeys.mockRejectedValue(new Error('down'));
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl);
+        expect(res.status).toBe(409);
+        expect(await res.json()).toMatchObject({ already_collected: true, payment_id: 'pay-new' });
+      });
     });
   });
 });
