@@ -134,19 +134,25 @@ export function useDispatchAlerts() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
+  // Read the open queue and merge it into state (the mount, and again after a
+  // card decision). `isCancelled`: the mount's unmount guard.
+  const hydrate = useCallback(async (isCancelled = () => false) => {
+    const res = await fetch(
+      `${API_BASE}/admin/dispatch/alerts?unresolved=true`,
+      { headers: adminAuthHeaders() }
+    );
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (isCancelled()) return;
+    const fetched = Array.isArray(data.alerts) ? data.alerts : [];
+    setAlerts((prev) => mergeHydration(prev, fetched, resolvedIdsRef.current));
+  }, []);
+
   // ---- initial hydration ----
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch(
-          `${API_BASE}/admin/dispatch/alerts?unresolved=true`,
-          { headers: adminAuthHeaders() }
-        );
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        if (cancelled) return;
-        const fetched = Array.isArray(data.alerts) ? data.alerts : [];
         // Merge with current state instead of overwriting. The socket
         // subscription mounts concurrently with this fetch, so a
         // dispatch:alert broadcast can land while the GET is in
@@ -156,7 +162,8 @@ export function useDispatchAlerts() {
         //
         // Dedupe by id — see mergeHydration (live fields win over the
         // enriched snapshot; resolved cards stay gone).
-        setAlerts((prev) => mergeHydration(prev, fetched, resolvedIdsRef.current));
+        await hydrate(() => cancelled);
+        if (cancelled) return;
         setLoading(false);
       } catch (err) {
         if (cancelled) return;
@@ -167,7 +174,7 @@ export function useDispatchAlerts() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [hydrate]);
 
   // ---- socket subscription ----
   useEffect(() => {
@@ -259,8 +266,14 @@ export function useDispatchAlerts() {
       throw new Error(data.error || `HTTP ${res.status}`);
     }
     markResolved([alert.id]);
+    // A decision can put a NEW card up (a confirmed miss; the visit's other open
+    // flagged row). It arrives over the socket; re-read the queue as well, so a
+    // dropped socket cannot hide a card that still needs a person.
+    try {
+      await hydrate();
+    } catch { /* the socket broadcast or the next mount still delivers it */ }
     return res.json();
-  }, [markResolved]);
+  }, [markResolved, hydrate]);
 
   return { alerts, loading, error, resolveAlert, clearAlerts, decideNotClosedOut };
 }
