@@ -5,6 +5,12 @@ import { beforeEach, afterEach, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import TechServicePhotosModal from './TechServicePhotosModal';
 
+const VISIT = {
+  customerId: 'customer-a', propertyId: 'property-a', technicianId: 'tech-a',
+  catalogServiceId: 'catalog-pest', serviceType: 'Pest Control',
+  scheduledDate: '2026-10-02', status: 'on_site', revision: 'visit-revision-a',
+};
+
 beforeEach(() => { vi.spyOn(window, 'scrollTo').mockImplementation(() => {}); });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
@@ -21,7 +27,7 @@ it.each([false, true])('ignores an older photo refresh after the next upload (ol
       await pending;
       return { ok: !oldError, json: async () => oldError ? { error: 'Stale photo error' } : { photos: [first] } };
     }
-    return { ok: true, json: async () => ({ photos: read === 1 ? [] : [first, second] }) };
+    return { ok: true, json: async () => ({ photos: read === 1 ? [] : [first, second], visit: VISIT }) };
   }));
   render(<TechServicePhotosModal serviceId="visit-a" onClose={vi.fn()} />);
   await screen.findByText('No photos yet.');
@@ -45,7 +51,7 @@ it('allows closing after upload succeeds while the photo refresh is still pendin
     if (url.endsWith('photo-marks')) return { ok: true, json: async () => ({ supported: false }) };
     if (options?.method === 'POST') return { ok: true, json: async () => ({ photo: { id: 'photo-a' } }) };
     if (++reads > 1) await pending;
-    return { ok: true, json: async () => ({ photos: [] }) };
+    return { ok: true, json: async () => ({ photos: [], visit: VISIT }) };
   }));
   render(<TechServicePhotosModal serviceId="visit-a" onClose={close} />);
   await screen.findByText('No photos yet.');
@@ -61,6 +67,7 @@ it('allows closing after upload succeeds while the photo refresh is still pendin
 
 it('retries the same failed photo with its original caption and type, and protects it while pending', async () => {
   const writes = [], close = vi.fn();
+  const visit = VISIT;
   let release;
   const pending = new Promise((resolve) => { release = resolve; });
   vi.stubGlobal('fetch', vi.fn(async (url, options) => {
@@ -69,7 +76,7 @@ it('retries the same failed photo with its original caption and type, and protec
       if (writes.length === 1) { await pending; return { ok: false, json: async () => ({ error: 'Example upload failed.' }) }; }
       return { ok: true, json: async () => ({ photo: { id: 'photo-a', staged: true } }) };
     }
-    return { ok: true, json: async () => url.endsWith('photo-marks') ? { supported: false } : { photos: [] } };
+    return { ok: true, json: async () => url.endsWith('photo-marks') ? { supported: false } : { photos: [], visit } };
   }));
   render(<TechServicePhotosModal serviceId="visit-a" customerName="Avery Example" onClose={close} />);
   await screen.findByText('No photos yet.');
@@ -89,7 +96,67 @@ it('retries the same failed photo with its original caption and type, and protec
     expect(body.get('caption')).toBe('Example caption');
     expect(body.get('photoType')).toBe('before');
     expect(body.get('capturedAt')).toBe(new Date(1234567890).toISOString());
+    expect(JSON.parse(body.get('expectedVisit'))).toEqual(visit);
   }
+});
+
+it('pins the snapshot to selected bytes and uses a refreshed visit for the next photo', async () => {
+  const visits = [
+    { ...VISIT, revision: 'revision-a' },
+    { ...VISIT, propertyId: 'property-b', scheduledDate: '2026-10-03', status: 'confirmed', revision: 'revision-b' },
+  ];
+  const writes = [];
+  let reads = 0;
+  vi.stubGlobal('fetch', vi.fn(async (url, options) => {
+    if (url.endsWith('photo-marks')) return { ok: true, json: async () => ({ supported: false }) };
+    if (options?.method === 'POST') {
+      writes.push(options.body);
+      return { ok: true, json: async () => ({ photo: { id: `photo-${writes.length}` } }) };
+    }
+    const visit = visits[Math.min(reads, visits.length - 1)];
+    reads += 1;
+    return { ok: true, json: async () => ({ photos: [], visit }) };
+  }));
+  render(<TechServicePhotosModal serviceId="visit-a" onClose={vi.fn()} />);
+  await screen.findByText('No photos yet.');
+  const input = screen.getByLabelText('Choose service photo');
+  fireEvent.change(input, { target: { files: [new File(['one'], 'one.png', { type: 'image/png' })] } });
+  await waitFor(() => expect(reads).toBe(2));
+  await waitFor(() => expect(input).toBeEnabled());
+  fireEvent.change(input, { target: { files: [new File(['two'], 'two.png', { type: 'image/png' })] } });
+  await waitFor(() => expect(writes).toHaveLength(2));
+  expect(JSON.parse(writes[0].get('expectedVisit'))).toEqual(visits[0]);
+  expect(JSON.parse(writes[1].get('expectedVisit'))).toEqual(visits[1]);
+});
+
+it('refreshes a rejected visit snapshot before another photo can be selected', async () => {
+  const refreshedVisit = { ...VISIT, propertyId: 'property-b', revision: 'visit-revision-b' };
+  const writes = [];
+  let reads = 0;
+  vi.stubGlobal('fetch', vi.fn(async (url, options) => {
+    if (url.endsWith('photo-marks')) return { ok: true, json: async () => ({ supported: false }) };
+    if (options?.method === 'POST') {
+      writes.push(options.body);
+      if (writes.length === 1) {
+        return { ok: false, status: 409, json: async () => ({ error: 'Visit changed', code: 'visit_identity_changed' }) };
+      }
+      return { ok: true, json: async () => ({ photo: { id: 'photo-b' } }) };
+    }
+    reads += 1;
+    return { ok: true, json: async () => ({ photos: [], visit: reads === 1 ? VISIT : refreshedVisit }) };
+  }));
+  render(<TechServicePhotosModal serviceId="visit-a" onClose={vi.fn()} />);
+  await screen.findByText('No photos yet.');
+  const input = screen.getByLabelText('Choose service photo');
+  fireEvent.change(input, { target: { files: [new File(['one'], 'one.png', { type: 'image/png' })] } });
+  await screen.findByText('Visit changed');
+  await waitFor(() => expect(reads).toBe(2));
+  fireEvent.click(screen.getByRole('button', { name: 'Discard selected photo' }));
+  await waitFor(() => expect(input).toBeEnabled());
+  fireEvent.change(input, { target: { files: [new File(['two'], 'two.png', { type: 'image/png' })] } });
+  await waitFor(() => expect(writes).toHaveLength(2));
+  expect(JSON.parse(writes[0].get('expectedVisit'))).toEqual(VISIT);
+  expect(JSON.parse(writes[1].get('expectedVisit'))).toEqual(refreshedVisit);
 });
 
 it('does not report an empty photo list after a load failure and can retry the read', async () => {
@@ -99,7 +166,7 @@ it('does not report an empty photo list after a load failure and can retry the r
     reads += 1;
     return reads === 1
       ? { ok: false, json: async () => ({ error: 'Example photo list unavailable.' }) }
-      : { ok: true, json: async () => ({ photos: [{ id: 'photo-a', url: '/example.jpg', photo_type: 'before', caption: 'Existing example photo' }] }) };
+      : { ok: true, json: async () => ({ photos: [{ id: 'photo-a', url: '/example.jpg', photo_type: 'before', caption: 'Existing example photo' }], visit: VISIT }) };
   }));
   render(<TechServicePhotosModal serviceId="visit-a" onClose={vi.fn()} />);
   await screen.findByText('Example photo list unavailable.');
@@ -115,7 +182,7 @@ it('keeps successful upload feedback when its photo-list refresh fails', async (
   vi.stubGlobal('fetch', vi.fn(async (url, options) => {
     if (url.endsWith('photo-marks')) return { ok: true, json: async () => ({ supported: false }) };
     if (options?.method === 'POST') return { ok: true, json: async () => ({ photo: { id: 'photo-a', staged: true } }) };
-    if (++reads === 1) return { ok: true, json: async () => ({ photos: [] }) };
+    if (++reads === 1) return { ok: true, json: async () => ({ photos: [], visit: VISIT }) };
     return { ok: false, json: async () => ({ error: 'Refresh unavailable.' }) };
   }));
   render(<TechServicePhotosModal serviceId="visit-a" onClose={vi.fn()} />);
@@ -132,7 +199,7 @@ it('keeps nested photo marking focus and Escape inside the photo manager', async
   vi.stubGlobal('scrollTo', vi.fn());
   vi.stubGlobal('fetch', vi.fn(async (url) => ({ ok: true, json: async () => url.endsWith('photo-marks')
     ? { supported: true, kinds: [{ kind: 'foam_injection', label: 'Drilled & foamed' }], marksByS3Key: {} }
-    : { photos: [{ id: 'photo-a', s3_key: 'example.jpg', url: '/example.jpg', photo_type: 'after' }] },
+    : { photos: [{ id: 'photo-a', s3_key: 'example.jpg', url: '/example.jpg', photo_type: 'after' }], visit: VISIT },
   })));
   render(<TechServicePhotosModal serviceId="visit-a" onClose={close} />);
   const opener = await screen.findByRole('button', { name: 'Mark spots', exact: true });

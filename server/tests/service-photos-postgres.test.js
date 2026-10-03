@@ -30,7 +30,11 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
   let upload;
   let validatePhotoChain;
   const customerId = randomUUID();
+  const technicianId = randomUUID();
   const recordId = randomUUID();
+  const completedVisitId = randomUUID();
+  const stagedVisitId = randomUUID();
+  let visitDate;
   beforeAll(async () => {
     const expected = `/waves_qa_${(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
     if (process.env.WAVES_LOCAL_DEV !== '1' || !process.env.WAVES_WORKTREE_ID || new URL(process.env.DATABASE_URL).pathname !== expected) {
@@ -39,14 +43,28 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
     db = require('../models/db');
     upload = require('../services/service-photos').uploadServicePhotoBuffer;
     validatePhotoChain = require('../services/service-report/photo-chain').validatePhotoChain;
+    visitDate = require('../utils/datetime-et').etDateString();
     await db.transaction(async trx => {
+      await trx('technicians').insert({
+        id: technicianId, name: 'QA photo technician', email: `qa-photo-tech-${technicianId}@example.invalid`,
+        role: 'technician', active: true, employment_status: 'active', auth_token_version: 1,
+        must_change_password: false,
+      });
       await trx('customers').insert({ id: customerId, first_name: 'QA', phone: '+19415550100', email: `qa-photo-${customerId}@example.invalid` });
+      await trx('scheduled_services').insert([
+        { id: completedVisitId, customer_id: customerId, technician_id: technicianId, scheduled_date: visitDate, service_type: 'QA completed photo guard', status: 'on_site' },
+        { id: stagedVisitId, customer_id: customerId, technician_id: technicianId, scheduled_date: visitDate, service_type: 'QA staged photo guard', status: 'on_site' },
+      ]);
       await trx('service_records').insert({ id: recordId, customer_id: customerId,
-        service_date: require('../utils/datetime-et').etDateString(), service_type: 'QA photo integrity' });
+        scheduled_service_id: completedVisitId, technician_id: technicianId,
+        service_date: visitDate, service_type: 'QA photo integrity' });
     });
   }, 30000);
   beforeEach(async () => {
     await db('service_photos').where({ service_record_id: recordId }).del();
+    await db('scheduled_service_photo_staging').whereIn('scheduled_service_id', [completedVisitId, stagedVisitId]).del();
+    await db('scheduled_services').where({ id: completedVisitId }).update({ technician_id: technicianId, scheduled_date: visitDate, status: 'on_site' });
+    await db('scheduled_services').where({ id: stagedVisitId }).update({ technician_id: technicianId, scheduled_date: visitDate, status: 'on_site' });
     mockObjects.clear();
     mockExpectedUploads = 1;
     mockUploadCount = 0;
@@ -56,7 +74,9 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
     if (!db) return;
     try {
       await db('service_records').where({ id: recordId, customer_id: customerId }).del();
+      await db('scheduled_services').whereIn('id', [completedVisitId, stagedVisitId]).del();
       await db('customers').where({ id: customerId, email: `qa-photo-${customerId}@example.invalid` }).del();
+      await db('technicians').where({ id: technicianId }).del();
       expect(await db('service_records').where({ id: recordId })).toHaveLength(0);
       expect(await db('customers').where({ id: customerId })).toHaveLength(0);
     } finally { await db.destroy(); }
@@ -92,6 +112,59 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
     expect(retried.id).toBeTruthy();
     expect(mockObjects.size).toBe(1);
     expect((await validatePhotoChain(recordId, db)).valid).toBe(true);
+  }, 30000);
+
+  test('a reschedule holding the visit lock wins before upload and rejects the old snapshot without sending bytes', async () => {
+    const photos = require('../services/service-photos');
+    const before = await db('scheduled_services').where({ id: stagedVisitId }).first();
+    const expectedVisit = photos.servicePhotoVisitSnapshot(before);
+    let releaseReschedule;
+    let locked;
+    const hasLock = new Promise(resolve => { locked = resolve; });
+    const release = new Promise(resolve => { releaseReschedule = resolve; });
+    const movedDate = require('../utils/datetime-et').etDateString(require('../utils/datetime-et').addETDays(new Date(), 1));
+    const reschedule = db.transaction(async trx => {
+      await trx('scheduled_services').where({ id: stagedVisitId }).forUpdate().first('id');
+      await trx('scheduled_services').where({ id: stagedVisitId }).update({ scheduled_date: movedDate });
+      locked();
+      await release;
+    });
+    await hasLock;
+
+    let settled = false;
+    const attempt = photos.uploadServicePhotoForVisit({
+      scheduledServiceId: stagedVisitId,
+      actor: { techRole: 'admin', technicianId: null },
+      expectedVisit,
+      ...input,
+      knex: db,
+    }).finally(() => { settled = true; });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(settled).toBe(false);
+    releaseReschedule();
+    await reschedule;
+    await expect(attempt).rejects.toMatchObject({ statusCode: 409, code: 'visit_identity_changed' });
+    expect(mockUploadCount).toBe(0);
+    expect(await db('scheduled_service_photo_staging').where({ scheduled_service_id: stagedVisitId })).toHaveLength(0);
+  }, 30000);
+
+  test('the same identity advancing to completed uploads to its record and requires reconciliation', async () => {
+    const photos = require('../services/service-photos');
+    const before = await db('scheduled_services').where({ id: completedVisitId }).first();
+    const expectedVisit = photos.servicePhotoVisitSnapshot(before);
+    await db('scheduled_services').where({ id: completedVisitId }).update({ status: 'completed' });
+
+    const result = await photos.uploadServicePhotoForVisit({
+      scheduledServiceId: completedVisitId,
+      actor: { techRole: 'admin', technicianId: null },
+      expectedVisit,
+      expectedServiceRecordId: recordId,
+      ...input,
+      knex: db,
+    });
+    expect(result).toMatchObject({ staged: false, reconcileRequired: true, serviceRecordId: recordId });
+    expect(result.visit.status).toBe('completed');
+    expect(await db('service_photos').where({ service_record_id: recordId })).toHaveLength(1);
   }, 30000);
 
   test('promotion leaves a photo staged after its locked selection available for the next pass', async () => {
