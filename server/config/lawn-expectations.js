@@ -271,7 +271,9 @@ const PRODUCT_ROWS = {
     },
     byNextVisit: {
       partial: 'By your next visit, treated weeds should have stopped growing and may be changing color.',
-      visible: 'By your next visit, most treated weeds should be yellowing, browning or both.',
+      // Inside the 1 to 4 week range the label ties the result to the weed and
+      // the conditions, so this line stays conditional.
+      visible: 'By your next visit, treated weeds may be yellowing, browning or both.',
       complete: 'By your next visit, most treated weeds should be yellow, brown or fading.',
     },
     contactTrigger: 'If treated weeds are still green and growing after about 4 weeks, let us know.',
@@ -284,7 +286,9 @@ const PRODUCT_ROWS = {
     family: FAMILY.SPEEDZONE,
     mode: null,
     appliesTo: 'selective weed control',
-    metric: 'weed_suppression',
+    // No metric: nothing on the label to judge a score against, so the progress
+    // engine builds no comparison for this row (not even "holding steady").
+    metric: null,
     // No progress window: the label says death "can occur" in 7 to 14 days,
     // a possibility, so there is no day by which a gain is due.
     metricWindows: {},
@@ -316,7 +320,9 @@ const PRODUCT_ROWS = {
     family: FAMILY.SEDGEHAMMER,
     mode: null,
     appliesTo: 'sedge control',
-    metric: 'weed_suppression',
+    // No metric: nothing on the label to judge a score against, so the progress
+    // engine builds no comparison for this row (not even "holding steady").
+    metric: null,
     // No progress window: the label says when symptoms show and when a second
     // treatment may be needed, not when the sedge is controlled, so this row is
     // never judged ahead of or behind a schedule.
@@ -351,7 +357,9 @@ const PRODUCT_ROWS = {
     family: FAMILY.SEDGE,
     mode: null,
     appliesTo: 'sedge control',
-    metric: 'weed_suppression',
+    // No metric: nothing on the label to judge a score against, so the progress
+    // engine builds no comparison for this row (not even "holding steady").
+    metric: null,
     metricWindows: {},
     transient: false,
     judgedByAbsence: false,
