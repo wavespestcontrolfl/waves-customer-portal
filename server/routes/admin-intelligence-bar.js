@@ -1197,6 +1197,9 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       if (!current) return { failed: true, modelResult: { error: 'Customer no longer exists' } };
       const before = String(current.crm_notes ?? '').trim();
       preview = { ...preview, notes_replaced: { before: before || null } };
+      // Pinned on every path, task or not, so a stale card (legacy or
+      // platform) can never replace notes written after it (Codex r2).
+      params._ib_customer_version = current.version;
       notesReadVersion = current.version;
     }
     if (toolUse.name === 'create_appointment' && params.customer_id) {
@@ -3002,11 +3005,6 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
             result = { error: IB_WRITES_DISABLED_MESSAGE };
             failed = true;
             errorMessage = result.error;
-          } else if (directCapped.has(toolUse.name) && OwnerDirect.mayExecuteWithoutCard(toolUse.name, toolUse.input)) {
-            // Three or more same-tool edits: one bulk card, not a fan-out.
-            result = { ...OwnerDirect.BULK_LIMIT_RESULT };
-            failed = true;
-            errorMessage = result.error;
           } else {
           try {
             const proposed = await proposePendingWrite({
@@ -3021,6 +3019,16 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
             if (proposed.failed) {
               failed = true;
               errorMessage = result.error || 'proposal failed';
+            } else if (proposed.clientPayload && ownerDirectCommits && directCapped.has(toolUse.name)
+              && OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input, proposed.modelResult)) {
+              // Three or more same-tool edits that would run direct: refused
+              // as a set, pointing at the bulk tool (one card), and the
+              // approval just minted is released. Judged after the preview,
+              // so an edit the preview cards still reaches its card (Codex r2).
+              await Promise.resolve().then(() => PendingActions.cancelPendingAction(proposed.clientPayload.id, getAdminActorId(req))).catch(() => {});
+              result = { ...OwnerDirect.BULK_LIMIT_RESULT };
+              failed = true;
+              errorMessage = result.error;
             } else if (proposed.clientPayload && ownerDirectCommits && OwnerDirect.executesWithoutCard(toolUse.name, toolUse.input, proposed.modelResult)) {
               // Owner-direct internal edit: no card. The pending action just
               // minted is committed now through the same path a Confirm

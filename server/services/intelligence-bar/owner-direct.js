@@ -148,10 +148,13 @@ function executesWithoutCard(toolName, input = {}, preview = null) {
 // so "mark these leads lost" cannot fan a bulk change out into card-free
 // single calls. Counted from direct commits the request already made (seeded
 // from the task's consumed actions, so a resumed task keeps its count) plus
-// this model message's calls that could run direct, judged before any of them
-// runs: when the total reaches the cap, every such call in the message is
-// refused with a pointer to the bulk tool (one card), never minted as
-// separate cards the write frontier would cut to one (Codex r1 on #5675).
+// this model message's calls that could run direct, decided once before any
+// of them runs. A call of a capped tool whose preview says it would run
+// direct is refused with a pointer to the bulk tool (one card), never minted
+// as separate cards the write frontier would cut to one (Codex r1 on
+// #5675); a call the preview cards (notes over existing notes, a grouped
+// stop) still reaches its card (Codex r2). A preview-dependent call counts
+// in the message plan, so the cap errs toward the bulk card.
 const DIRECT_CAP = 3;
 const SEED_FAILED = Symbol('seed_failed');
 

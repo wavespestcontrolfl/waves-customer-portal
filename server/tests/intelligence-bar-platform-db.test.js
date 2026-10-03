@@ -816,7 +816,22 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
       expect(triple.body.pendingActions).toEqual([]);
       expect(JSON.stringify(mockModel.mock.calls)).toContain('owner_direct_bulk_limit');
       expect((await db('customers').where('id', customerA).first('lead_source')).lead_source).toBe('referral');
-      expect(await db('ib_pending_actions').where('task_id', triple.body.taskId).count('* as count').first()).toEqual({ count: '0' });
+      // Each minted approval was released: nothing is left to confirm.
+      expect(await db('ib_pending_actions').where('task_id', triple.body.taskId).whereNot('status', 'cancelled').count('* as count').first()).toEqual({ count: '0' });
+
+      // A capped tool's call that the preview cards (notes over existing
+      // notes) still reaches its card; only the would-be-direct calls are
+      // refused (Codex r2 on #5675).
+      const notesOver = { type: 'tool_use', name: 'update_customer', input: { customer_id: customerA, updates: { notes: `${note} over` } }, id: 'n' };
+      mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'update customer fields' }, 'discover'))
+        .mockResolvedValueOnce({ content: [notesOver, source('google', 'x'), source('yelp', 'y')], usage: {} })
+        .mockResolvedValueOnce(answer('Tap Confirm.'));
+      const mixed = await api('/query', request(`Update ${nameA}`, { session_id: crypto.randomUUID() }), ownerToken);
+      expect(mixed.body.pendingActions).toHaveLength(1);
+      expect(mixed.body.pendingActions[0].tool).toBe('update_customer');
+      expect(JSON.stringify(mockModel.mock.calls)).toContain('owner_direct_bulk_limit');
+      expect(await db('customers').where('id', customerA).first('crm_notes', 'lead_source')).toEqual({ crm_notes: note, lead_source: 'referral' });
+      await db('ib_pending_actions').where('id', mixed.body.pendingActions[0].id).update({ status: 'cancelled' });
     } finally {
       delete process.env.IB_FULL_ACCESS_EMAILS;
       delete process.env.GATE_IB_OWNER_DIRECT;
