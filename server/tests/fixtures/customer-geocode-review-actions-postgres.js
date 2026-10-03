@@ -28,6 +28,7 @@ module.exports = async function createActionSchema(trx) {
   await trx.schema.createTable('property_preferences', table => {
     table.uuid('customer_id').primary(); table.timestamp('irrigation_home_changed_at', { useTz: true });
     table.jsonb('irrigation_confirmed_fields');
+    table.date('sod_laid_on');
   });
   await trx.schema.createTable('leads', table => {
     table.uuid('id').primary(); table.uuid('customer_id'); table.string('status');
