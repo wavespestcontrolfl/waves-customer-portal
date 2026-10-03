@@ -870,6 +870,17 @@ postgres('annual prepay charged after the first visit', () => {
       }
     });
 
+    it('a bill raised above the approval goes to the pay link without auto-applying credit (pre-push audit P0)', async () => {
+      const f = await deferredAccept({ jobPatch: { authorized_invoice_total_cents: TOTAL_CENTS } });
+      await perform(f.parentId, f.customerId);
+      expect(await release()).toMatchObject({ released: 1 });
+      await trx('invoices').where({ id: f.invoiceId }).update({ total: 520, subtotal: 520 });
+      const StripeService = require('../services/stripe');
+      StripeService.chargeInvoiceWithSavedCard.mockRejectedValueOnce(new Error('Invoice exceeds the customer-accepted amount. Review before charging.'));
+      await sweep();
+      expect(require('../services/invoice').sendViaSMSAndEmail).toHaveBeenCalledWith(f.invoiceId, { skipAccountCreditAutoApply: true });
+    });
+
     it('a closeout that starts after the release holds the charge until it finishes (Codex r13)', async () => {
       const f = await deferredAccept();
       await perform(f.parentId, f.customerId);

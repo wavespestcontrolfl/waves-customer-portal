@@ -2125,7 +2125,20 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       let fallbackSettled = false;
       let fallbackCreditCovered = false;
       try {
-        const fencedDelivery = await withJobFence(async () => require('./invoice').sendViaSMSAndEmail(job.invoice_id));
+        // A deferred year whose bill is now above what the customer approved
+        // (the charge's pre-credit cap refused it) goes out WITHOUT the
+        // sender's automatic credit apply, so customer credit never settles an
+        // amount nobody approved (pre-push audit P0).
+        let fallbackOptions = null;
+        if (deferredToFirstVisit && Number.isInteger(job.authorized_invoice_total_cents)) {
+          const capRow = await db('invoices').where({ id: job.invoice_id }).first('total');
+          if (Math.round(Number(capRow?.total || 0) * 100) > job.authorized_invoice_total_cents) {
+            fallbackOptions = { skipAccountCreditAutoApply: true };
+          }
+        }
+        const fencedDelivery = fallbackOptions
+          ? await withJobFence(async () => require('./invoice').sendViaSMSAndEmail(job.invoice_id, fallbackOptions))
+          : await withJobFence(async () => require('./invoice').sendViaSMSAndEmail(job.invoice_id));
         if (fencedDelivery.ceded) {
           logger.warn(`[recurring-cof] prepay sweep ceding estimate ${row.id}: claim superseded before fallback delivery`);
           continue;
