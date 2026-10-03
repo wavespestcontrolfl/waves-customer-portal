@@ -701,6 +701,7 @@ describe('dispute reopen takes the card surcharge back out of invoices.total (B0
   const { computeChargeAmount } = jest.requireActual('../services/stripe-pricing');
   const { invoiceAmountDue } = jest.requireActual('../services/invoice-helpers');
   let tables;
+  let beforeTransaction;
 
   // Stateful stand-in for the two tables the dispute handlers touch; every other
   // table reads empty. Enough query surface for handleDisputeCreated/Closed.
@@ -751,7 +752,10 @@ describe('dispute reopen takes the card surcharge back out of invoices.total (B0
     jest.clearAllMocks();
     jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue(undefined);
     db.mockImplementation((table) => query(table));
+    beforeTransaction = null;
     db.transaction.mockImplementation(async (cb) => {
+      // Lets a test land a concurrent writer between a handler's unlocked read and its transaction.
+      if (beforeTransaction) { const hook = beforeTransaction; beforeTransaction = null; hook(); }
       const trx = (table) => query(table);
       trx.raw = jest.fn(async () => undefined);
       trx.fn = { now: () => 'NOW' };
@@ -851,5 +855,45 @@ describe('dispute reopen takes the card surcharge back out of invoices.total (B0
     await handleDisputeClosed({ ...dispute, status: 'won' });
     expect(row('invoices', 'inv_1')).toMatchObject({ status: 'paid', stripe_payment_intent_id: 'pi_new' });
     expect(total()).toBe(1029);
+  });
+
+  // A replacement card payment settles (invoice paid again under a new PI, total 1029 = 1000 + the
+  // surcharge on the corrected base) after the handler's unlocked read, before its transaction locks the row.
+  const replacementSettles = () => Object.assign(row('invoices', 'inv_1'), {
+    status: 'paid', stripe_payment_intent_id: 'pi_new', stripe_charge_id: 'ch_new', total: '1029.00', paid_at: '2026-10-02T00:00:00Z',
+  });
+  const replacementOwnsInvoice = () => {
+    expect(row('invoices', 'inv_1')).toMatchObject({ status: 'paid', stripe_payment_intent_id: 'pi_new', stripe_charge_id: 'ch_new', paid_at: '2026-10-02T00:00:00Z' });
+    expect(total()).toBe(1029);
+  };
+
+  test('won: a replacement that settles between the read and the transaction keeps its PI and total — no old surcharge added', async () => {
+    seed();
+    await handleDisputeCreated(dispute);
+    expect(meta(row('payments', 'pay_1'))).toMatchObject({ surcharge_removed_from_invoice_cents: 2900 });
+
+    beforeTransaction = replacementSettles;
+    await handleDisputeClosed({ ...dispute, status: 'won' });
+    replacementOwnsInvoice();
+    // The stamp is not consumed by a restore that never happened, and a replay changes nothing.
+    expect(meta(row('payments', 'pay_1'))).toMatchObject({ surcharge_removed_from_invoice_cents: 2900, dispute_final: 'won' });
+    await handleDisputeClosed({ ...dispute, status: 'won' });
+    replacementOwnsInvoice();
+  });
+
+  test('created: an invoice a replacement payment took after the read is not reopened or reduced', async () => {
+    seed();
+    beforeTransaction = replacementSettles;
+    await handleDisputeCreated(dispute);
+    replacementOwnsInvoice();
+    expect(meta(row('payments', 'pay_1'))).not.toHaveProperty('surcharge_removed_from_invoice_cents');
+  });
+
+  test('lost: an invoice a replacement payment took after the read is not reopened or reduced', async () => {
+    seed();
+    beforeTransaction = replacementSettles;
+    await handleDisputeClosed({ ...dispute, status: 'lost' });
+    replacementOwnsInvoice();
+    expect(meta(row('payments', 'pay_1'))).not.toHaveProperty('surcharge_removed_from_invoice_cents');
   });
 });

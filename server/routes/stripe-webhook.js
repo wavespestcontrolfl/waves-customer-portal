@@ -6853,7 +6853,12 @@ async function findInvoiceForPayment(payment) {
 //     rows (their invoices are never re-totalled) are untouched.
 // What was removed is stamped on the payment row so a WON dispute can put it
 // back with the invoice (reinstateCardSurchargeOnWonInvoice).
-// Runs inside the caller's reopen transaction, after the invoice reopen write.
+// Money lock discipline: every caller takes the invoice row FOR UPDATE, re-reads
+// it and re-checks that the disputed payment still owns it BEFORE any write to
+// it, and hands that locked row in. Lock order is invoice -> payments, the order
+// settlement takes them in; nothing here (or after the invoice lock at the three
+// sites) touches `customers`, so it never waits on a customer lock while holding
+// an invoice lock.
 const SURCHARGE_REMOVED_META_KEY = 'surcharge_removed_from_invoice_cents';
 
 function parsePaymentMeta(row) {
@@ -6862,22 +6867,30 @@ function parsePaymentMeta(row) {
   } catch { return {}; }
 }
 
-async function removeCardSurchargeFromReopenedInvoice(trx, { invoiceId, payment }) {
-  const surchargeCents = Math.max(0, Math.round(Number(payment?.surcharge_amount_cents) || 0));
-  if (!invoiceId || !payment?.id || surchargeCents <= 0) return false;
-  const paymentRow = await trx('payments').where({ id: payment.id }).forUpdate().first();
-  if (!paymentRow) return false;
-  const meta = parsePaymentMeta(paymentRow);
-  if (meta.combined_payment) return false;
-  const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
-  if (!invoice) return false;
+// A locked invoice row the disputed payment (still) settles: status paid /
+// processing under exactly the disputed PI. Anything else — a replacement
+// payment now owns it, or it left the settled shape — means do not reopen.
+function lockedInvoiceStillBacksDispute(invoice, disputedPi) {
+  return !!invoice && !!disputedPi && ['paid', 'processing'].includes(invoice.status)
+    && !!invoice.stripe_payment_intent_id && String(invoice.stripe_payment_intent_id) === disputedPi;
+}
 
+// A locked invoice row a WON dispute may restore: reopened (never terminal) and
+// either unbound (the reopen cleared the PI) or still bound to the disputed PI.
+function lockedInvoiceOwedToWonDispute(invoice, disputedPi) {
+  if (!invoice || invoice.status === 'paid' || INVOICE_TERMINAL_PAYMENT_STATUSES.includes(invoice.status)) return false;
+  const pi = invoice.stripe_payment_intent_id ? String(invoice.stripe_payment_intent_id) : null;
+  return !pi || (!!disputedPi && pi === disputedPi);
+}
+
+// Cents to take out of the locked invoice's total; 0 = leave it alone.
+function surchargeCentsToRemove(invoice, paymentRow, meta) {
+  const surchargeCents = Math.max(0, Math.round(Number(paymentRow.surcharge_amount_cents) || 0));
+  if (surchargeCents <= 0 || meta.combined_payment) return 0;
   const totalCents = Math.round((Number(invoice.total) || 0) * 100);
   const creditCents = Math.round((Number(invoice.credit_applied) || 0) * 100);
-  const cashCents = Math.round((Number(paymentRow.amount) || 0) * 100);
   // Not the settle's own rewrite (never inflated, or already restored).
-  if (totalCents !== cashCents + creditCents) return false;
-
+  if (totalCents !== Math.round((Number(paymentRow.amount) || 0) * 100) + creditCents) return 0;
   const restoredCents = totalCents - surchargeCents;
   // Never below what the invoice's line items bill, nor below the credit
   // already applied (amount due would go negative).
@@ -6885,34 +6898,46 @@ async function removeCardSurchargeFromReopenedInvoice(trx, { invoiceId, payment 
     - (Number(invoice.discount_amount) || 0) + (Number(invoice.tax_amount) || 0)) * 100);
   if (restoredCents <= 0 || restoredCents < creditCents
     || (invoice.subtotal != null && restoredCents < lineFloorCents)) {
-    logger.warn(`[stripe-webhook] invoice ${invoiceId}: surcharge ${surchargeCents}c not removed on reopen — restored total ${restoredCents}c would fall below its line items / applied credit`);
-    return false;
+    logger.warn(`[stripe-webhook] invoice ${invoice.id}: surcharge ${surchargeCents}c not removed on reopen — restored total ${restoredCents}c would fall below its line items / applied credit`);
+    return 0;
   }
+  return surchargeCents;
+}
 
-  await trx('invoices').where({ id: invoiceId }).update({ total: restoredCents / 100, updated_at: trx.fn.now() });
+// `invoice` = the row the caller locked FOR UPDATE and re-checked before its
+// reopen write (its total is still the settled one: the reopen never touches it).
+async function removeCardSurchargeFromReopenedInvoice(trx, { invoice, payment }) {
+  if (!invoice?.id || !payment?.id || !(Number(payment.surcharge_amount_cents) > 0)) return false;
+  const paymentRow = await trx('payments').where({ id: payment.id }).forUpdate().first();
+  if (!paymentRow) return false;
+  const meta = parsePaymentMeta(paymentRow);
+  const removedCents = surchargeCentsToRemove(invoice, paymentRow, meta);
+  if (!removedCents) return false;
+  const totalCents = Math.round((Number(invoice.total) || 0) * 100);
+  await trx('invoices').where({ id: invoice.id }).update({ total: (totalCents - removedCents) / 100, updated_at: trx.fn.now() });
   await trx('payments').where({ id: payment.id })
-    .update({ metadata: JSON.stringify({ ...meta, [SURCHARGE_REMOVED_META_KEY]: surchargeCents }) });
-  logger.info(`[stripe-webhook] invoice ${invoiceId}: removed ${surchargeCents}c card surcharge from total on reopen (${totalCents}c -> ${restoredCents}c)`);
+    .update({ metadata: JSON.stringify({ ...meta, [SURCHARGE_REMOVED_META_KEY]: removedCents }) });
+  logger.info(`[stripe-webhook] invoice ${invoice.id}: removed ${removedCents}c card surcharge from total on reopen (${totalCents}c -> ${totalCents - removedCents}c)`);
   return true;
 }
 
 // Dispute WON: the original card payment stands again, so the invoice goes
 // back to the paid state that payment left it in (total = cash + credit). Only
 // when the reopen above removed a surcharge; the stamp is cleared in the same
-// transaction so a replay adds nothing twice.
-async function reinstateCardSurchargeOnWonInvoice(trx, { invoiceId, payment }) {
-  if (!invoiceId || !payment?.id) return false;
+// transaction so a replay adds nothing twice. `invoice` = the locked,
+// re-checked row (lockedInvoiceOwedToWonDispute) whose restore the caller just
+// wrote in this transaction.
+async function reinstateCardSurchargeOnWonInvoice(trx, { invoice, payment }) {
+  if (!invoice?.id || !payment?.id) return false;
   const paymentRow = await trx('payments').where({ id: payment.id }).forUpdate().first();
   const meta = parsePaymentMeta(paymentRow);
   const removedCents = Math.max(0, Math.round(Number(meta[SURCHARGE_REMOVED_META_KEY]) || 0));
   if (removedCents <= 0) return false;
-  const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
-  if (!invoice) return false;
   const totalCents = Math.round((Number(invoice.total) || 0) * 100);
-  await trx('invoices').where({ id: invoiceId }).update({ total: (totalCents + removedCents) / 100, updated_at: trx.fn.now() });
+  await trx('invoices').where({ id: invoice.id }).update({ total: (totalCents + removedCents) / 100, updated_at: trx.fn.now() });
   const { [SURCHARGE_REMOVED_META_KEY]: _removed, ...rest } = meta;
   await trx('payments').where({ id: payment.id }).update({ metadata: JSON.stringify(rest) });
-  logger.info(`[stripe-webhook] invoice ${invoiceId}: dispute won — card surcharge ${removedCents}c back in total (${totalCents}c -> ${totalCents + removedCents}c)`);
+  logger.info(`[stripe-webhook] invoice ${invoice.id}: dispute won — card surcharge ${removedCents}c back in total (${totalCents}c -> ${totalCents + removedCents}c)`);
   return true;
 }
 
@@ -7550,12 +7575,25 @@ async function handleDisputeCreated(dispute) {
       // sees suspended-term + reopened-invoice together. No .catch —
       // critical-write discipline, a rollback fails the event and Stripe
       // retries it.
+      try {
       await db.transaction(async (trx) => {
         // Chokepoint B (Codex #4971 pre-push lock order): the gate first.
         await require('../services/annual-prepay-renewals').acquireTermiteGateAtEntry(trx, { invoiceIds: [invoice.id] });
         await require('../services/annual-prepay-renewals')
           .suspendActiveTermsForDisputedInvoice(invoice.id, trx);
 
+        // Lock + re-read BEFORE any write to the invoice and re-check that
+        // this payment still settles it (B05): the pre-transaction read above
+        // is stale by now. Taken after the term suspension on purpose — that
+        // step's billing-mode reset locks the customer, and the lock order
+        // must stay term -> customer -> invoice, never invoice -> customer.
+        const lockedInvoice = await trx('invoices').where({ id: invoice.id }).forUpdate().first();
+        if (!lockedInvoiceStillBacksDispute(lockedInvoice, disputedPi)) {
+          // Throw to roll back the term suspension above: a suspended term
+          // beside an invoice that was never reopened is the half-state this
+          // transaction exists to prevent. Caught right outside.
+          throw Object.assign(new Error('invoice no longer settled by the disputed payment'), { disputeReopenSuperseded: true });
+        }
         await trx('invoices').where({ id: invoice.id }).update({
           status: 'overdue',
           paid_at: null,
@@ -7569,8 +7607,12 @@ async function handleDisputeCreated(dispute) {
         });
         // B05: the chargeback returned the surcharge too — it must not stay
         // in the reopened invoice's total as principal.
-        await removeCardSurchargeFromReopenedInvoice(trx, { invoiceId: invoice.id, payment });
+        await removeCardSurchargeFromReopenedInvoice(trx, { invoice: lockedInvoice, payment });
       });
+      } catch (reopenErr) {
+        if (!reopenErr?.disputeReopenSuperseded) throw reopenErr;
+        logger.warn(`[stripe-webhook] dispute ${dispute.id}: invoice ${invoice.id} no longer settled by disputed PI ${disputedPi} at reopen — not reopening`);
+      }
     }
     }
   }
@@ -8381,6 +8423,16 @@ async function handleDisputeClosed(dispute) {
         // One transaction with the surcharge put-back (B05): the invoice is
         // never paid-again with the surcharge still out of its total.
         await db.transaction(async (trx) => {
+          // Lock + re-read FIRST and re-run the replacement-owner guard on the
+          // locked row: a replacement card payment can settle between the read
+          // above and here, and flipping it back to the disputed PI (or adding
+          // the old surcharge to ITS total) would be a money error. The flip
+          // below was an unconditional write on the stale read before B05.
+          const lockedWonInvoice = await trx('invoices').where({ id: invoice.id }).forUpdate().first();
+          if (!lockedInvoiceOwedToWonDispute(lockedWonInvoice, wonDisputedPi)) {
+            logger.warn(`[stripe-webhook] dispute ${dispute.id} won: invoice ${invoice.id} changed before restore (status ${lockedWonInvoice?.status}, PI ${lockedWonInvoice?.stripe_payment_intent_id || 'none'}) — not restoring`);
+            return;
+          }
           await trx('invoices').where({ id: invoice.id }).update({
             status: 'paid',
             paid_at: new Date().toISOString(),
@@ -8389,7 +8441,7 @@ async function handleDisputeClosed(dispute) {
             stripe_payment_intent_id: payment.stripe_payment_intent_id || null,
             stripe_charge_id: payment.stripe_charge_id || null,
           });
-          await reinstateCardSurchargeOnWonInvoice(trx, { invoiceId: invoice.id, payment });
+          await reinstateCardSurchargeOnWonInvoice(trx, { invoice: lockedWonInvoice, payment });
         });
       }
       // Restored settlement completes any plan created while the dispute had
@@ -8469,6 +8521,13 @@ async function handleDisputeClosed(dispute) {
         // termite parent's paid evidence when this is its prepay invoice.
         await db.transaction(async (trx) => {
           await require('../services/annual-prepay-renewals').acquireTermiteGateAtEntry(trx, { invoiceIds: [lostInvoice.id] });
+          // Lock + re-read before any write, re-checking ownership (B05): a
+          // replacement payment may have settled since the read above.
+          const lockedLostInvoice = await trx('invoices').where({ id: lostInvoice.id }).forUpdate().first();
+          if (!lockedInvoiceStillBacksDispute(lockedLostInvoice, lostDisputedPi)) {
+            logger.warn(`[stripe-webhook] dispute ${dispute.id} lost: invoice ${lostInvoice.id} no longer settled by disputed PI ${lostDisputedPi} at reopen (status ${lockedLostInvoice?.status}) — not reopening`);
+            return;
+          }
           await trx('invoices').where({ id: lostInvoice.id }).update({
             status: 'overdue',
             paid_at: null,
@@ -8480,7 +8539,7 @@ async function handleDisputeClosed(dispute) {
           });
           // B05: same surcharge take-back as dispute-created (idempotent —
           // created normally did it already).
-          await removeCardSurchargeFromReopenedInvoice(trx, { invoiceId: lostInvoice.id, payment });
+          await removeCardSurchargeFromReopenedInvoice(trx, { invoice: lockedLostInvoice, payment });
         });
       }
       // Annual-prepay claw-back: lost = the money is gone for good — the
