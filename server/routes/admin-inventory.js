@@ -2958,8 +2958,17 @@ router.post('/waveguard-forecast/:productId/restock-request', async (req, res, n
       // choice: the job card's tank helper lets them pick any stocked product.
       const standard = await require('../services/job-card').standardOrderFor(req.params.productId, { dbh: db });
       if (!standard) return res.status(404).json({ error: 'Product not found' });
+      if (standard.unavailable) return res.status(409).json({ error: 'This product cannot be ordered from the job card right now. Tell the office.', code: 'order_unavailable' });
+      // The card's quantity is in the unit the card showed. A unit changed
+      // since (an office unit fix) makes that number stale: refuse rather
+      // than save it against the new unit. No unit sent = the standard order.
+      const sentUnit = typeof body.unit === 'string' ? body.unit.trim().toLowerCase() : '';
+      const currentUnit = String(standard.unit || '').trim().toLowerCase();
+      if (sentUnit && sentUnit !== currentUnit) {
+        return res.status(409).json({ error: 'This product changed since the job card loaded. Reopen the job card and try again.', code: 'order_unit_changed' });
+      }
       const asked = Number(body.requestedQuantity);
-      const quantity = Number.isFinite(asked) && asked > 0 ? Math.min(asked, standard.quantity * TECH_RESTOCK_MAX_PACKS) : standard.quantity;
+      const quantity = sentUnit && Number.isFinite(asked) && asked > 0 ? Math.min(asked, standard.quantity * TECH_RESTOCK_MAX_PACKS) : standard.quantity;
       const result = await inventoryOperations.createRestockRequest(req.params.productId, {
         requestedQuantity: quantity, ...(standard.unit ? { unit: standard.unit } : {}),
         priority: 'high', allowDuplicate: false,
