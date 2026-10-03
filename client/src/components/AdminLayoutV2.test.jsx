@@ -1,18 +1,22 @@
 // @vitest-environment jsdom
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import AdminLayoutV2 from "./AdminLayoutV2";
 import { adminFetch } from "../utils/admin-fetch";
 import { loadEmailDrafts, updateEmailDrafts } from "../lib/emailDrafts";
 import { registerLeaveGuard } from "../lib/navigation-guard";
+import TechNavigationLock, { useTechNavigationLock } from "./tech/TechNavigationLock";
 
-vi.mock("../hooks/useIsMobile", () => ({ default: () => false }));
+const viewport = vi.hoisted(() => ({ mobile: false }));
+vi.mock("../hooks/useIsMobile", () => ({ default: () => viewport.mobile }));
+const fieldWorkspace = vi.hoisted(() => ({ enabled: true }));
 vi.mock("../hooks/useFeatureFlag", () => ({
   refetchFlags: vi.fn(() => Promise.resolve()),
   useFeatureFlag: vi.fn(() => false),
+  useFeatureFlagReady: () => ({ enabled: fieldWorkspace.enabled, ready: true }),
 }));
 vi.mock("../utils/admin-fetch", async (importOriginal) => ({ ...(await importOriginal()), adminFetch: vi.fn() }));
 vi.mock("./NotificationBell", () => ({ default: () => null }));
@@ -55,6 +59,8 @@ describe("AdminLayoutV2", () => {
   });
 
   afterEach(() => {
+    viewport.mobile = false;
+    fieldWorkspace.enabled = true;
     cleanup();
     vi.clearAllMocks();
     vi.unstubAllGlobals();
@@ -81,7 +87,7 @@ describe("AdminLayoutV2", () => {
     render(<MemoryRouter initialEntries={[`/admin/${path}?id=fixture#context`]}>
       <Routes><Route element={<AdminLayoutV2 />}>
         <Route path={`/admin/${path}`} element={<ForbiddenChild />} />
-        <Route path="/admin/schedule" element={<div>Authorized schedule</div>} />
+        <Route path="/admin/today" element={<div>Authorized schedule</div>} />
       </Route></Routes>
     </MemoryRouter>);
     expect(await screen.findByText("Authorized schedule")).toBeInTheDocument();
@@ -97,12 +103,59 @@ describe("AdminLayoutV2", () => {
       render(<MemoryRouter initialEntries={[`/admin/${path}?source=fixture`]}>
         <Routes><Route element={<AdminLayoutV2 />}>
           <Route path={`/admin/${path}`} element={<ForbiddenChild />} />
-          <Route path="/admin/schedule" element={<div>Authorized schedule</div>} />
+          <Route path="/admin/today" element={<div>Authorized schedule</div>} />
         </Route></Routes></MemoryRouter>);
       expect(await screen.findByText("Authorized schedule")).toBeInTheDocument();
       expect(ForbiddenChild).not.toHaveBeenCalled();
     },
   );
+
+  it("lands a technician deep link to an owner-only page on /admin/today", async () => {
+    adminFetch.mockResolvedValue({ id: 2, name: "Fixture technician", role: "technician" });
+    render(<MemoryRouter initialEntries={["/admin/dashboard"]}><Routes><Route element={<AdminLayoutV2 />}>
+      <Route path="/admin/dashboard" element={<div>Owner dashboard</div>} />
+      <Route path="/admin/today" element={<div>Field workspace</div>} />
+    </Route></Routes></MemoryRouter>);
+    expect(await screen.findByText("Field workspace")).toBeInTheDocument();
+    expect(screen.queryByText("Owner dashboard")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["/admin/today", true, false],
+    ["/admin/today/tools", true, false],
+    ["/admin/schedule", true, true],
+    // Field-workspace flag off: /admin/today shows the legacy route UI, which
+    // has no navigation of its own, so the admin chrome must stay.
+    ["/admin/today", false, true],
+  ])("on mobile at %s (field workspace flag %s) the admin top bar and tab bar are present: %s", async (path, flagOn, chrome) => {
+    viewport.mobile = true;
+    fieldWorkspace.enabled = flagOn;
+    adminFetch.mockResolvedValue({ id: 2, name: "Fixture technician", role: "technician" });
+    render(<MemoryRouter initialEntries={[path]}><Routes><Route element={<AdminLayoutV2 />}>
+      <Route path="/admin/today/*" element={<div>Today content</div>} />
+      <Route path="/admin/schedule" element={<div>Schedule content</div>} />
+    </Route></Routes></MemoryRouter>);
+    await screen.findByText(path.startsWith("/admin/schedule") ? "Schedule content" : "Today content");
+    expect(Boolean(screen.queryByRole("button", { name: "Open menu" }))).toBe(chrome);
+    expect(Boolean(screen.queryByRole("navigation", { name: "Primary" }))).toBe(chrome);
+    if (chrome) {
+      const tabs = within(screen.getByRole("navigation", { name: "Primary" })).getAllByRole("link").map((link) => link.textContent);
+      expect(tabs).toEqual(["Today", "Schedule", "Customers", "Messages", "Settings"]);
+    }
+    const padding = document.getElementById("admin-main").style;
+    if (chrome) expect(padding.paddingTop).not.toBe("0px");
+    else expect([padding.paddingTop, padding.paddingBottom, padding.paddingLeft, padding.paddingRight]).toEqual(["0px", "0px", "0px", "0px"]);
+  });
+
+  it("keeps Dashboard (not Today) in the mobile tab bar for an admin", async () => {
+    viewport.mobile = true;
+    render(<MemoryRouter initialEntries={["/admin/schedule"]}><Routes><Route element={<AdminLayoutV2 />}>
+      <Route path="/admin/schedule" element={<div>Schedule content</div>} />
+    </Route></Routes></MemoryRouter>);
+    await screen.findByText("Schedule content");
+    const tabs = within(screen.getByRole("navigation", { name: "Primary" })).getAllByRole("link").map((link) => link.textContent);
+    expect(tabs).toEqual(["Dashboard", "Schedule", "Customers", "Messages", "Settings"]);
+  });
 
   it("explicit sign-out clears local Email recovery and invalidates pending callbacks", async () => {
     const session = loadEmailDrafts(1);
@@ -203,5 +256,38 @@ describe("AdminLayoutV2", () => {
       "/manifest.json",
     );
     expect(document.title).toBe("Waves Customer Portal");
+  });
+
+  it("holds the sidebar, sign-out and palette while a field action is in flight (TechNavigationLock)", async () => {
+    function BusyChild() {
+      const { setNavigationBusy } = useTechNavigationLock();
+      const location = useLocation();
+      return <>
+        <button type="button" onClick={() => setNavigationBusy(true)}>Start contact</button>
+        <output data-testid="where">{location.pathname}</output>
+      </>;
+    }
+    render(
+      <TechNavigationLock>
+        <MemoryRouter initialEntries={["/admin/today"]}>
+          <Routes>
+            <Route element={<AdminLayoutV2 />}>
+              <Route path="/admin/today" element={<BusyChild />} />
+              <Route path="/admin/customers" element={<div>Customers page</div>} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      </TechNavigationLock>,
+    );
+    await screen.findByRole("button", { name: "Start contact" });
+    fireEvent.click(screen.getByRole("button", { name: "Start contact" }));
+    const sidebar = document.getElementById("admin-sidebar");
+    expect(sidebar).toHaveAttribute("aria-busy", "true");
+    const customersLink = within(sidebar).getAllByRole("link", { name: /Customers/ })[0];
+    fireEvent.click(customersLink);
+    expect(screen.getByTestId("where")).toHaveTextContent("/admin/today");
+    expect(screen.queryByText("Customers page")).not.toBeInTheDocument();
+    // ⌘K is swallowed while busy (fireEvent returns false when default was prevented).
+    expect(fireEvent.keyDown(window, { key: "k", metaKey: true })).toBe(false);
   });
 });

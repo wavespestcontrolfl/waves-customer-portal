@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import {
   applyAdminBookmarkMeta,
+  applyFieldBookmarkMeta,
   restoreBookmarkMeta,
   snapshotBookmarkMeta,
 } from "../lib/adminBookmarkMeta";
@@ -18,13 +19,20 @@ import {
  * rendered admin meta + html.admin-app — restore then falls back to the
  * customer defaults).
  */
-export default function useAdminBookmarkMeta(active) {
+// `field` (the /admin/today subtree) swaps in the field PWA identity instead
+// of the admin one while staying inside the admin tree; the snapshot is taken
+// once on entering /admin and restored once on leaving it.
+export default function useAdminBookmarkMeta(active, field = false) {
   useEffect(() => {
     if (!active || typeof document === "undefined") return undefined;
     const snapshot = snapshotBookmarkMeta();
-    applyAdminBookmarkMeta();
     return () => {
       restoreBookmarkMeta(snapshot);
     };
   }, [active]);
+  useEffect(() => {
+    if (!active || typeof document === "undefined") return;
+    if (field) applyFieldBookmarkMeta();
+    else applyAdminBookmarkMeta();
+  }, [active, field]);
 }
