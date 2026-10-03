@@ -847,8 +847,12 @@ function GeoGridTab() {
       const t = setInterval(async () => {
         n += 1;
         const s = await adminFetch("/admin/seo/geo-grid").catch(() => null);
-        if (!s?.scanning || n > 18) {
-          clearInterval(t);
+        const done = !s?.scanning;
+        // The button gives up after about six minutes (tick 19), but a large
+        // grid can run longer and only a finished scan counts: keep checking
+        // for up to 30 more minutes and reload once the server says it is done.
+        if (done || n > 108) clearInterval(t);
+        if (done || n === 19) {
           setRunning(false);
           loadNamed();
           // Only reload if the user hasn't switched office/keyword since starting.

@@ -70,8 +70,8 @@ export default function NamedSearchesTable({ data }) {
         show up. Lower is better.{" "}
         {data?.gated
           ? anyScan
-            ? "The weekly scan is off (GATE_GEO_GRID), so these numbers will not update."
-            : "The weekly scan is off (GATE_GEO_GRID), so there is nothing to show yet."
+            ? "The weekly scan is off (it needs GATE_GEO_GRID and GATE_SEO_INTELLIGENCE), so these numbers will not update."
+            : "The weekly scan is off (it needs GATE_GEO_GRID and GATE_SEO_INTELLIGENCE), so there is nothing to show yet."
           : anyScan
             ? ""
             : "No scan has finished yet."}

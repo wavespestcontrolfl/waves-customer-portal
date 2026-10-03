@@ -44,7 +44,7 @@ describe("NamedSearchesTable", () => {
         data={{ searches: [search({ current: null, baseline: null, positionChange: null })], gated: true }}
       />,
     );
-    expect(screen.getByText(/weekly scan is off \(GATE_GEO_GRID\)/)).toBeInTheDocument();
+    expect(screen.getByText(/weekly scan is off \(it needs GATE_GEO_GRID and GATE_SEO_INTELLIGENCE\)/)).toBeInTheDocument();
     expect(screen.getByText("Not scanned yet")).toBeInTheDocument();
   });
 
@@ -98,6 +98,6 @@ describe("stale rows", () => {
 
   it("says the scan is off even when earlier scans are on the page", () => {
     render(<NamedSearchesTable data={{ searches: [search()], gated: true }} />);
-    expect(screen.getByText(/weekly scan is off \(GATE_GEO_GRID\), so these numbers will not update/)).toBeInTheDocument();
+    expect(screen.getByText(/weekly scan is off \(it needs GATE_GEO_GRID and GATE_SEO_INTELLIGENCE\), so these numbers will not update/)).toBeInTheDocument();
   });
 });
