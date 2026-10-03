@@ -581,7 +581,18 @@ function paoParcelIdFrom(parcelId) {
   return /^\d+$/.test(raw) ? raw : null;
 }
 
-async function queryCountyLayer(county, lat, lng, timeoutMs) {
+function recordGisDiagError(diag, county, err, aborted) {
+  if (!diag) return;
+  if (!Array.isArray(diag.errors)) diag.errors = [];
+  diag.errors.push({ county, aborted, error: err?.message || String(err) });
+}
+
+// `diag` is an optional out-param ({ errors: [] }) for read-only tooling
+// (scripts/property-lookup-replay.js): every failure mode here returns null,
+// the same as "no parcel at this point", so without it a replay cannot tell a
+// county outage / WAF rejection from a genuine roll miss. Never read by the
+// live lookup.
+async function queryCountyLayer(county, lat, lng, timeoutMs, diag = null) {
   const layer = COUNTY_LAYERS[county];
   if (!layer) return null;
 
@@ -683,6 +694,7 @@ async function queryCountyLayer(county, lat, lng, timeoutMs) {
     return parcel;
   } catch (err) {
     const aborted = err?.name === 'AbortError' || err?.code === 'ABORT_ERR';
+    recordGisDiagError(diag, county, err, aborted);
     logger.warn('[county-parcel-gis] lookup failed', {
       county,
       latApprox: coarseCoord(lat),
@@ -766,9 +778,12 @@ async function lookupCountyParcelByPoint(lat, lng, options = {}) {
       logger.info('[county-parcel-gis] budget exhausted before all counties tried — degrading', {
         remainingMs,
       });
+      // Untried counties are no evidence of a miss: tell a diag reader (the
+      // replay harness) so a partial search reads as an outage, not "none".
+      recordGisDiagError(options.diag, county, new Error('point query budget exhausted before this county'), true);
       break;
     }
-    const parcel = await queryCountyLayer(county, lat, lng, remainingMs).catch(() => null);
+    const parcel = await queryCountyLayer(county, lat, lng, remainingMs, options.diag).catch(() => null);
     if (parcel) return parcel;
   }
   return null;
@@ -894,7 +909,7 @@ async function queryStreetSitusAddresses(county, streetText, options = {}) {
   const deadline = Date.now() + timeoutMsFor(options);
   const merged = { situs: [], zips: [], truncated: false };
   for (const variant of routeSpellingVariants(text)) {
-    const result = await querySitusLike(county, layerUrl, fields, `${numberPrefix}${variant}`, deadline - Date.now());
+    const result = await querySitusLike(county, layerUrl, fields, `${numberPrefix}${variant}`, deadline - Date.now(), options.diag);
     if (result === null) return null;
     merged.situs.push(...result.situs);
     merged.zips.push(...result.zips);
@@ -903,9 +918,14 @@ async function queryStreetSitusAddresses(county, streetText, options = {}) {
   return merged;
 }
 
-// One situs LIKE request. Null on any failure, including a spent budget.
-async function querySitusLike(county, layerUrl, fields, likeBody, timeoutMs) {
-  if (timeoutMs <= 0) return null;
+// One situs LIKE request. Null on any failure, including a spent budget;
+// `diag` (the replay harness's out-param) records why, so an outage is never
+// read as a roll miss.
+async function querySitusLike(county, layerUrl, fields, likeBody, timeoutMs, diag) {
+  if (timeoutMs <= 0) {
+    recordGisDiagError(diag, county, new Error(`${county} street GIS budget spent`), true);
+    return null;
+  }
   const zipField = SITUS_ZIP_FIELDS[county];
   const params = new URLSearchParams({
     f: 'json',
@@ -940,9 +960,11 @@ async function querySitusLike(county, layerUrl, fields, likeBody, timeoutMs) {
     });
     return { situs, zips, truncated };
   } catch (err) {
+    const aborted = err?.name === 'AbortError';
+    recordGisDiagError(diag, county, err, aborted);
     // County + error only — no street/address values in logs (PII rule).
     logger.warn('[county-parcel-gis] street situs query failed', {
-      county, aborted: err?.name === 'AbortError', error: err?.message || String(err), elapsedMs: Date.now() - t0,
+      county, aborted, error: err?.message || String(err), elapsedMs: Date.now() - t0,
     });
     return null;
   } finally {
