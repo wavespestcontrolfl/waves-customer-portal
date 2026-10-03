@@ -73,13 +73,22 @@ describe('same-name grouping', () => {
   });
 
   test('a blank, placeholder or one-letter name never keys, so such rows never pair', () => {
-    for (const bad of [null, '', '   ', 'Unknown', 'unknown', 'N/A', 'na', 'J', 'j.']) {
+    for (const bad of [null, '', '   ', 'Unknown', 'unknown', 'N/A', 'na', 'J', 'j.', 'Unknown.', 'N.A.', 'n/a.', 'UNKNOWN,', ' unknown. ', 'Na,']) {
       expect(sameNameKey(cust({ first_name: bad }))).toBeNull();
       expect(sameNameKey(cust({ last_name: bad }))).toBeNull();
       expect(buildSameNameGroups({ customers: [cust({ first_name: bad }), cust({ first_name: bad })] })).toEqual([]);
       expect(buildSameNameGroups({ customers: [cust({ last_name: bad }), cust({ last_name: bad })] })).toEqual([]);
     }
     expect(sameNameKey(cust({ first_name: 'Sam', last_name: 'Lee' }))).toBe('sam|lee');
+  });
+
+  test('a punctuated placeholder in one name never groups the rows on the other name alone', () => {
+    for (const bad of ['Unknown.', 'N.A.', 'n/a.', 'UNKNOWN,']) {
+      expect(buildSameNameGroups({ customers: [cust({ first_name: bad, last_name: 'Smithson' }), cust({ first_name: bad, last_name: 'Smithson' })] })).toEqual([]);
+      expect(buildSameNameGroups({ customers: [cust({ first_name: 'Pat', last_name: bad }), cust({ first_name: 'Pat', last_name: bad })] })).toEqual([]);
+    }
+    expect(dedupe._test.sameNamePart('N.A.')).toBe('');
+    expect(dedupe._test.sameNamePart('Mary  Ann.')).toBe('mary ann');
   });
 
   test('a first-name-only match (or last-name-only match) is not a pair', () => {

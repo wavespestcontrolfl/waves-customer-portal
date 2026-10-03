@@ -77,6 +77,28 @@ maybeDescribe('findSameNameGroups (TEMP tables)', () => {
     expect(evidence.addresses.winner.address_line1).toMatch(/Example Loop/);
   });
 
+  test.each([['Unknown.'], ['N.A.'], ['n/a.'], ['UNKNOWN,']])('a punctuated placeholder (%s) in a name never groups or admits the pair', async (bad) => {
+    const a = await customer({ pipeline_stage: 'active_customer', first_name: bad, last_name: 'Smithson' });
+    const b = await customer({ first_name: bad, last_name: 'Smithson' });
+    const c = await customer({ first_name: 'Pat', last_name: bad });
+    const d = await customer({ first_name: 'Pat', last_name: bad });
+    expect(await dedupe.findSameNameGroups(conn)).toEqual([]);
+    expect((await dedupe.duplicatePairEligibility(a, b, conn, { kind: 'same_name' })).code).toBe('not_in_queue');
+    expect((await dedupe.duplicatePairEligibility(c, d, conn, { kind: 'same_name' })).code).toBe('not_in_queue');
+  });
+
+  test('the whole-group reload finds twins whatever their spacing, case and punctuation, and never drops one the JS key would keep', async () => {
+    const strong = await customer({ first_name: 'Pat', last_name: 'Oneil', pipeline_stage: 'active_customer', stripe_customer_id: 'cus_syn_s' });
+    const b = await customer({ first_name: 'pat', last_name: 'O.NEIL' });
+    // A non-breaking space and a stray comma are the same name to the JS key.
+    const c = await customer({ first_name: 'Pat\u00a0', last_name: 'O,neil' });
+    const groups = await dedupe.findSameNameGroups(conn);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].winner.id).toBe(strong);
+    expect((await dedupe.duplicatePairEligibility(strong, b, conn, { kind: 'same_name' })).code).toBe('eligible');
+    expect((await dedupe.duplicatePairEligibility(b, c, conn, { kind: 'same_name' })).code).toBe('not_in_queue');
+  });
+
   test('a missing phone or address on one side is still listed', async () => {
     const a = await customer();
     const b = await customer({ phone: '', address_line1: null, city: null, zip: null });
@@ -431,6 +453,112 @@ maybeDescribe('same-name merge: both actions, phone carried under the consent ho
     expect((await db('customers').where({ id: extraId }).first()).deleted_at).toBeNull();
     const result = await mergeSameName(strong.winnerId, extraId);
     expect(result.journalId).toBeTruthy();
+  });
+
+  describe('the whole name group is serialized inside the merge transaction', () => {
+    const nameKeyOf = (first, last) => dedupe._test.sameNameKey({ first_name: first, last_name: last });
+    const lockSql = 'SELECT pg_advisory_xact_lock(hashtext(?))';
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    // W (kept), B (candidate) and a THIRD same-name customer C that is renamed in/out of the group.
+    async function group() {
+      const pair = await namedPair();
+      const thirdId = randomUUID();
+      made.customers.push(thirdId);
+      await db('customers').insert({
+        id: thirdId, first_name: pair.first, last_name: pair.last, phone: `+1941666${String(uniq()).padStart(4, '0').slice(-4)}`,
+        address_line1: `${uniq()} ${digits(uniq())} Way`, city: 'Venice', state: 'FL', zip: '34285', pipeline_stage: 'new_lead', active: true,
+      });
+      return { ...pair, thirdId, key: nameKeyOf(pair.first, pair.last) };
+    }
+    // Hold the name-group advisory lock on its own connection until release() is called.
+    async function holdNameLock(key) {
+      let release;
+      const held = new Promise((resolve) => { release = resolve; });
+      let ready;
+      const locked = new Promise((resolve) => { ready = resolve; });
+      const tx = db.transaction(async (trx) => {
+        await trx.raw(lockSql, [`customer-duplicate-name-group:${key}`]);
+        ready();
+        await held;
+      });
+      await locked;
+      return { release: () => { release(); return tx; } };
+    }
+    const settled = (promise) => {
+      const state = { done: false };
+      promise.then(() => { state.done = true; }, () => { state.done = true; });
+      return state;
+    };
+
+    test('a same-name merge waits on the name-group lock (the lock key is the canonical name key) and then completes', async () => {
+      const g = await group();
+      await db('customers').where({ id: g.thirdId }).update({ last_name: `Elsewhere${digits(uniq())}` });
+      const holder = await holdNameLock(g.key);
+      const merge = mergeSameName(g.winnerId, g.loserId);
+      const state = settled(merge);
+      await sleep(800);
+      expect(state.done).toBe(false);
+      expect((await db('customers').where({ id: g.loserId }).first()).deleted_at).toBeNull();
+      await holder.release();
+      expect((await merge).journalId).toBeTruthy();
+      expect((await db('customers').where({ id: g.loserId }).first()).deleted_at).not.toBeNull();
+    });
+
+    test('a stronger third twin renamed INTO the group while the merge waits is seen by the re-check: the merge refuses', async () => {
+      const g = await group();
+      await db('customers').where({ id: g.thirdId }).update({
+        last_name: `Elsewhere${digits(uniq())}`, pipeline_stage: 'active_customer', stripe_customer_id: `cus_syn_${uniq()}`, password_hash: 'x',
+      });
+      expect((await dedupe.duplicatePairEligibility(g.winnerId, g.loserId, undefined, { kind: 'same_name' })).code).toBe('eligible');
+      const holder = await holdNameLock(g.key);
+      const merge = mergeSameName(g.winnerId, g.loserId);
+      const outcome = merge.then(() => 'merged', (e) => e.message);
+      await sleep(500);
+      await db('customers').where({ id: g.thirdId }).update({ last_name: g.last });
+      await holder.release();
+      expect(await outcome).toMatch(/no longer mergeable/);
+      expect((await db('customers').where({ id: g.loserId }).first()).deleted_at).toBeNull();
+    });
+
+    test('a stronger third member renamed OUT of the group before the lock is seen too: the merge goes through', async () => {
+      const g = await group();
+      await db('customers').where({ id: g.thirdId }).update({ pipeline_stage: 'active_customer', stripe_customer_id: `cus_syn_${uniq()}`, password_hash: 'x' });
+      expect((await dedupe.duplicatePairEligibility(g.winnerId, g.loserId, undefined, { kind: 'same_name' })).code).toBe('not_in_queue');
+      const holder = await holdNameLock(g.key);
+      const merge = mergeSameName(g.winnerId, g.loserId);
+      const outcome = merge.then(() => 'merged', (e) => e.message);
+      await sleep(500);
+      await db('customers').where({ id: g.thirdId }).update({ last_name: `Elsewhere${digits(uniq())}` });
+      await holder.release();
+      expect(await outcome).toBe('merged');
+    });
+
+    test('two concurrent merges of the same pair in a three-member group: one wins, the other waits then re-decides on fresh state and refuses', async () => {
+      const g = await group();
+      const results = await Promise.allSettled([mergeSameName(g.winnerId, g.loserId), mergeSameName(g.winnerId, g.loserId)]);
+      expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+      const refused = results.find((r) => r.status === 'rejected');
+      expect(refused.reason.message).toMatch(/no longer mergeable|not found|deleted customer/);
+    });
+
+    test('two concurrent merges of DIFFERENT candidates into the same winner both complete (serialized, no deadlock)', async () => {
+      const g = await group();
+      const results = await Promise.allSettled([mergeSameName(g.winnerId, g.loserId), mergeSameName(g.winnerId, g.thirdId)]);
+      expect(results.map((r) => r.status)).toEqual(['fulfilled', 'fulfilled']);
+    });
+
+    test('a member row is locked for the life of the merge: a rename of the third member waits for the merge', async () => {
+      const g = await group();
+      const holder = await holdNameLock(g.key);
+      const merge = mergeSameName(g.winnerId, g.loserId);
+      const outcome = merge.then(() => 'merged', (e) => e.message);
+      await sleep(300);
+      await holder.release();
+      expect(await outcome).toBe('merged');
+      // After the commit the row is free again (the lock was transaction-scoped).
+      await db('customers').where({ id: g.thirdId }).update({ last_name: `Renamed${digits(uniq())}` });
+    });
   });
 
   test('the executor refuses a same-name pair in auto mode, and without the locked queue pair', async () => {

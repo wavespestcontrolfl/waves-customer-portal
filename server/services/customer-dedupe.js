@@ -850,8 +850,13 @@ const SAME_NAME_PHONE_SHARED_REASON = 'same_name_phone_shared';
 // The bucket key: first AND last name, after normName (so 'Unknown' / 'N/A' /
 // 'NA' placeholders are blank), periods and commas dropped and spaces squashed.
 // A one-letter side (an initial) is not a name: no key, never paired.
+// The placeholder check (normName's: unknown / n/a / na) runs AFTER the
+// punctuation is stripped, so "Unknown.", "N.A.", "n/a." and "UNKNOWN," are as
+// blank as "Unknown": none of them can key a group on the other name alone.
+const SAME_NAME_PLACEHOLDERS = ['unknown', 'n/a', 'na'];
 function sameNamePart(raw) {
-  return normName(raw).replace(/[.,]/g, '').replace(/\s+/g, ' ').trim();
+  const part = String(raw || '').trim().toLowerCase().replace(/[.,]/g, '').replace(/\s+/g, ' ').trim();
+  return normName(part) === '' || SAME_NAME_PLACEHOLDERS.includes(part) ? '' : part;
 }
 
 function sameNameKey(row) {
@@ -861,10 +866,29 @@ function sameNameKey(row) {
   return `${first}|${last}`;
 }
 
-// The SAME normalization in SQL (the merge-time recheck reloads the whole name
-// group by it). Any drift between the two only ever drops a member from the
-// reload, which refuses the pair: it fails closed.
-const sameNamePartSql = (col) => `btrim(regexp_replace(regexp_replace(lower(btrim(${col})), '[.,]', '', 'g'), '\\s+', ' ', 'g'))`;
+// The SAME normalization in SQL, placeholder rule included, kept for reference
+// and tests. The merge-time reload does NOT filter on it (see sameNameLooseSql):
+// whitespace classes and unicode case mapping can differ between JS and
+// Postgres, and a member the SQL silently dropped would be a hidden stronger
+// twin.
+const sameNamePartSql = (col) => {
+  const canon = `btrim(regexp_replace(regexp_replace(lower(btrim(${col})), '[.,]', '', 'g'), '\\s+', ' ', 'g'))`;
+  return `(CASE WHEN ${canon} IN ('unknown', 'n/a', 'na') THEN '' ELSE ${canon} END)`;
+};
+
+// A deliberately LOOSER SQL form used only to fetch a SUPERSET of a name group:
+// ASCII letters and digits only, so any two names the JS key calls equal (a
+// difference of case, spacing, periods or commas) also match here whatever the
+// whitespace class or unicode form. The exact test is always the JS key,
+// applied to what this returns (sameNameGroupSql). Over-fetching is harmless
+// (it is filtered, and for the merge lock it only locks a few extra rows).
+const sameNameLooseSql = (col) => `regexp_replace(lower(${col}), '[^a-z0-9]', '', 'g')`;
+const sameNameLooseJs = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+function sameNameGroupSql(query, first, last) {
+  return query
+    .whereRaw(`${sameNameLooseSql('c.first_name')} = ?`, [sameNameLooseJs(first)])
+    .whereRaw(`${sameNameLooseSql('c.last_name')} = ?`, [sameNameLooseJs(last)]);
+}
 
 // ONE name comparison for the whole same-name kind. The key (above) treats
 // "O.Neil" and "ONeil" as one name, but classifyPair's normName keeps the
@@ -1021,12 +1045,16 @@ async function readSameNameRows(database, ids = null, group = null) {
     // The whole name group of a pair: every live customer whose normalized
     // first AND last name equal the pair's, plus the pair itself.
     customerQuery.where((q) => q.whereIn('c.id', group.ids)
-      .orWhere((n) => n.whereRaw(`${sameNamePartSql('c.first_name')} = ?`, [group.first])
-        .whereRaw(`${sameNamePartSql('c.last_name')} = ?`, [group.last])));
+      .orWhere((n) => sameNameGroupSql(n, group.first, group.last)));
   } else if (ids) {
     customerQuery.whereIn('c.id', ids);
   }
-  const customers = await customerQuery.select(...customerColumns);
+  let customers = await customerQuery.select(...customerColumns);
+  // The SQL read above is a superset; the JS key is the exact test.
+  if (group) {
+    const groupKey = `${group.first}|${group.last}`;
+    customers = customers.filter((r) => group.ids.some((id) => String(id) === String(r.id)) || sameNameKey(r) === groupKey);
+  }
   // Only customers with a name twin need their properties read.
   const keyCounts = new Map();
   for (const row of customers) {
@@ -2675,6 +2703,58 @@ async function lockSeriesCreateForMerge(trx, winnerId, loserId) {
   return keys;
 }
 
+// Same-name merges only: serialize the COMPLETE name group before the
+// eligibility re-check accepts a winner (Codex #5858 round 2). LOCK ORDER, for
+// every same-name merge: (1) the transaction-scoped advisory lock on the
+// canonical name key (hashtext of 'customer-duplicate-name-group:<key>', the
+// same hashing as acquirePairAdjudicationLock), then (2) the customer rows of
+// the WHOLE name group in ONE id-ordered FOR UPDATE statement (winner and loser
+// included), then, further down executeMerge, the series / payment-method locks
+// and (3) the pair adjudication lock, then the eligibility re-check on the
+// locked rows. The name lock comes first because it is taken by same-name
+// merges only: two of them in one group serialize on it before touching any
+// row, and the ordered row statement keeps same-name merges from deadlocking
+// each other. The pair lock stays AFTER the row locks, exactly where every
+// other merge and the dismissal sweeps already have it. A merge of another
+// kind (which locks just its two rows) can in theory meet this statement in
+// the opposite row order; Postgres then aborts one of them as a deadlock, it
+// never hangs.
+//
+// What this does and does not cover: it blocks renames, deletes and
+// deactivations of any group member for the life of the merge, and makes a
+// second same-name merge in the group wait and then re-decide on fresh state.
+// It does NOT stop a brand-new same-name customer being inserted, or activity
+// rows (visits, invoices) landing on a third member, while the merge runs; no
+// customer-creation or activity writer takes this lock. The consequence is only
+// that the page lists the remaining pair on its next load, and every merge is
+// journaled and can be undone.
+//
+// The unlocked read at the top only derives the key; the key is re-derived from
+// the LOCKED rows, and a pair that was renamed while the locks were being
+// taken refuses instead of running on a group it did not lock.
+async function lockSameNameGroupRows(trx, winnerId, loserId) {
+  const stale = () => {
+    const err = new Error('executeMerge: the pair is no longer mergeable (not_in_queue) — review a fresh proposal');
+    err.previewChanged = true;
+    return err;
+  };
+  const seed = await trx('customers').whereIn('id', [winnerId, loserId]).select('id', 'first_name', 'last_name');
+  const seedWinner = seed.find((r) => r.id === winnerId);
+  const seedLoser = seed.find((r) => r.id === loserId);
+  if (!seedWinner || !seedLoser) return [];
+  const key = sameNameKey(seedWinner);
+  if (!key || key !== sameNameKey(seedLoser)) throw stale();
+  await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`customer-duplicate-name-group:${key}`]);
+  const members = await sameNameGroupSql(trx('customers as c').whereNull('c.deleted_at'), sameNamePart(seedWinner.first_name), sameNamePart(seedWinner.last_name))
+    .select('c.id');
+  const ids = [...new Set([winnerId, loserId, ...members.map((r) => r.id)])].sort();
+  const rows = await trx('customers').whereIn('id', ids).orderBy('id').forUpdate().select('*', trx.raw('updated_at::text AS version'));
+  const lockedWinner = rows.find((r) => r.id === winnerId);
+  const lockedLoser = rows.find((r) => r.id === loserId);
+  if (lockedWinner && lockedLoser && (sameNameKey(lockedWinner) !== key || sameNameKey(lockedLoser) !== key)) throw stale();
+  return rows;
+}
+
 /**
  * Merge `loserId` into `winnerId`. Everything runs in one transaction; any
  * conflict aborts the whole merge (the pair stays in the review queue).
@@ -2790,7 +2870,12 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     }
     // updated_at::text rides with the lock: the full-precision version an
     // approved snapshot (expectedVersions) is validated against below.
-    const locked = await trx('customers').whereIn('id', [winnerId, loserId]).forUpdate().select('*', trx.raw('updated_at::text AS version'));
+    // A same-name pair locks its WHOLE name group first (see
+    // lockSameNameGroupRows for the order and its limits); every other kind
+    // locks just the two rows, exactly as before.
+    const locked = pairKind === SAME_NAME_KIND
+      ? await lockSameNameGroupRows(trx, winnerId, loserId)
+      : await trx('customers').whereIn('id', [winnerId, loserId]).forUpdate().select('*', trx.raw('updated_at::text AS version'));
     const winner = locked.find((r) => r.id === winnerId);
     const loser = locked.find((r) => r.id === loserId);
     winnerBeforeMerge = winner;
@@ -6963,6 +7048,8 @@ module.exports = {
     SAME_ADDRESS_PHONE_SHARED_REASON,
     buildSameNameGroups,
     sameNameKey,
+    sameNamePart,
+    sameNamePartSql,
     classifySameNamePair,
     SAME_NAME_REASON,
     SAME_NAME_PHONE_MISSING_REASON,
