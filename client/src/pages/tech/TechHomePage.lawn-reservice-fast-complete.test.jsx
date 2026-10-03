@@ -52,11 +52,11 @@ const row = (id, overrides = {}) => ({
 let rows;
 let assign;
 
-function mount(path = '/tech/tools', { fieldWorkspace = true } = {}) {
+function mount(path = '/admin/today/tools', { fieldWorkspace = true } = {}) {
   localStorage.setItem('waves_admin_token', 'fixture-only');
   localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'tech-fixture', name: 'Fixture Technician', role: 'technician' }));
   return render(<MemoryRouter initialEntries={[path]}><Routes>
-    <Route path="/tech" element={<Outlet context={{ fieldWorkspace, setNavigationBusy: mocks.navigationBusy }} />}>
+    <Route path="/admin/today" element={<Outlet context={{ fieldWorkspace, setNavigationBusy: mocks.navigationBusy }} />}>
       <Route index element={<TechHomePage />} />
       <Route path="tools" element={<TechHomePage section="tools" />} />
     </Route>
@@ -119,7 +119,7 @@ it('keeps a completed re-service on the Dispatch route (nothing to complete) eve
   const alertMock = vi.fn();
   vi.stubGlobal('alert', alertMock);
   rows = [row('svc-lawn-done', { lawnReserviceFastCompleteEnabled: true, status: 'completed' })];
-  mount('/tech/tools', { fieldWorkspace: false });
+  mount('/admin/today/tools', { fieldWorkspace: false });
   fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
   expect(alertMock).toHaveBeenCalledWith('This visit is already completed — nothing to complete.');
   expect(screen.queryByText(/Lawn re-service sheet/)).not.toBeInTheDocument();

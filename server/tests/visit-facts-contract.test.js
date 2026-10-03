@@ -607,9 +607,26 @@ describe('visit facts contract registry', () => {
 });
 
 describe('the typed forms the Fast Complete sheet records (GATE_TYPED_VOICE_FILL)', () => {
-  test('are exactly the forms the typed reader reads', () => {
-    const { VOICE_TYPES } = require('../services/visit-typed-facts');
-    expect([...FAST_COMPLETE_TYPED_FORMS].sort()).toEqual(Object.keys(VOICE_TYPES).sort());
+  test('are exactly the forms the typed reader reads whose sheet is built', () => {
+    const { VOICE_TYPES, SHEET_PENDING_TYPES } = require('../services/visit-typed-facts');
+    expect([...FAST_COMPLETE_TYPED_FORMS].sort()).toEqual(Object.keys(VOICE_TYPES).filter((type) => !SHEET_PENDING_TYPES.has(type)).sort());
+  });
+
+  test('a tap-only typed field (the state\'s notice questions) is registered tap-only with a reason and never read from the note', () => {
+    const { VOICE_TYPES, voiceFieldsFor } = require('../services/visit-typed-facts');
+    const { PROJECT_TYPES } = require('../services/project-types');
+    const tapOnly = Object.entries(PROJECT_TYPES).flatMap(([form, cfg]) => (cfg.findingsFields || [])
+      .filter((field) => field.tapOnly).map((field) => [form, field.key]));
+    expect(tapOnly).toEqual([['termite_inspection', 'inspection_notice_affixed'], ['termite_treatment', 'posted_notice']]);
+    const facts = Object.values(VISIT_FACTS_CONTRACT).flatMap((line) => line.facts || []);
+    for (const [form, key] of tapOnly) {
+      for (const fact of facts.filter((f) => f.typedForm === form && f.key === key)) {
+        expect(fact).toMatchObject({ capture: ['tap'], tapOnly: true });
+        expect(fact.reason).toMatch(/always a tap/);
+      }
+      expect(facts.some((f) => f.typedForm === form && f.key === key)).toBe(true);
+      if (VOICE_TYPES[form]) expect(voiceFieldsFor(form).map((field) => field.key)).not.toContain(key);
+    }
   });
 
   test('the sheet writes each one\'s card fields, and the activity score only where the tech sets it', () => {

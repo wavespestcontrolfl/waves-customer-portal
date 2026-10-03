@@ -250,3 +250,114 @@ describe('counts and the technician\'s rating (step 4)', () => {
     expect(gauge().value).toBe('');
   });
 });
+
+// Step 5: a termite treatment's record. Target, method and solution strength
+// come from the notes; the products, their EPA numbers, the gallons and the
+// traced feet come from the visit itself; the treatment notice is always a
+// tap.
+describe('the termite treatment record (step 5)', () => {
+  const TERMITE_SCHEMA = {
+    type: 'termite_treatment',
+    fields: [
+      { key: 'target_termite', label: 'Target termite / WDO', type: 'select', options: ['Subterranean termites', 'Formosan subterranean termites', 'Drywood termites', 'Unknown / preventive'], required: true },
+      { key: 'treatment_method', label: 'Treatment method', type: 'select', options: ['Spot treatment', 'Liquid perimeter', 'Trenching', 'Rodding'], required: true },
+      { key: 'products_used', label: 'Products used', type: 'textarea', required: true },
+      { key: 'percent_solution', label: '% solution', type: 'text', placeholder: 'e.g. 0.06%' },
+      { key: 'epa_registration', label: 'EPA reg. no.', type: 'text', required: true },
+      { key: 'linear_feet_or_stations', label: 'Linear feet / stations', type: 'textarea', required: true },
+      { key: 'gallons_or_amount', label: 'Gallons / amount applied', type: 'textarea', required: true },
+      { key: 'posted_notice', label: 'Posted notice placed (exterior / perimeter applications)', type: 'select', options: ['Yes', 'No', 'Not applicable'], required: true, tapOnly: true },
+    ],
+    activity: { indicatorKey: 'termite_activity', label: 'Termite Activity', deriveField: null, deriveScores: null },
+  };
+  const TRENCH = {
+    id: 'termite-visit', customerId: 'typed-customer', customerName: 'Synthetic Customer',
+    serviceType: 'Termite Trenching', status: 'confirmed', scheduledDate: '2099-01-01', estimatedPrice: 900,
+    completionProfile: { serviceKey: 'termite_trenching', findingsType: 'termite_treatment' },
+    findingsSchema: TERMITE_SCHEMA,
+    typedVoiceFillEnabled: true,
+  };
+  const TERMIDOR = {
+    id: 'termidor', name: 'Termidor SC', category: 'termiticide', default_rate: '0.8', default_unit: 'fl_oz/gal', epa_reg_number: '7969-210',
+  };
+  const TRENCH_READ = {
+    available: true,
+    status: 'read',
+    type: 'termite_treatment',
+    values: { target_termite: 'Subterranean termites', treatment_method: 'Trenching', percent_solution: '0.06%' },
+    heard: {
+      target_termite: [{ value: 'Subterranean termites', quote: 'subterranean. trenched' }],
+      treatment_method: [{ value: 'Trenching', quote: 'trenched the back wall' }],
+      percent_solution: [{ value: '0.06%', quote: 'point zero six percent' }],
+    },
+    unclearFields: [],
+    scoreUnclear: true,
+  };
+  const field = (key) => document.getElementById(`typed-finding-termite_treatment-${key}`);
+  let traced;
+  beforeEach(() => {
+    traced = null;
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation(async (url, options = {}) => (String(url).includes('/treatment-zone')
+      ? { ok: true, json: async () => ({ enabled: true, treatmentZone: traced }) }
+      : base(url, options)));
+  });
+  async function openTrench(service = TRENCH, catalog = []) {
+    await act(async () => {
+      render(<CompletionPanel service={service} products={catalog} onClose={() => {}} onSubmit={vi.fn().mockResolvedValue({})} />);
+    });
+    await waitFor(() => expect(document.querySelector('textarea')).toBeTruthy(), { timeout: 10000 });
+  }
+  async function pick(product) {
+    fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: product.name } });
+    fireEvent.click(await screen.findByText(product.name));
+  }
+  const gallonsInput = () => document.querySelector('input[placeholder="Gal"]');
+
+  it('Generate fills target, method and solution strength with their words; the notice stays a tap', async () => {
+    typedAnswer = () => ({ ok: true, json: async () => TRENCH_READ });
+    await openTrench();
+    fireEvent.change(document.querySelector('textarea'), { target: { value: 'Subterranean. Trenched the back wall, point zero six percent Termidor.' } });
+    await generate();
+    expect(field('target_termite').value).toBe('Subterranean termites');
+    expect(field('treatment_method').value).toBe('Trenching');
+    expect(field('percent_solution').value).toBe('0.06%');
+    expect(screen.getAllByText('Heard: “point zero six percent”').length).toBeGreaterThan(0);
+    expect(field('posted_notice').value).toBe('');
+    expect(screen.getAllByText('Always a tap: never filled from the notes.').length).toBeGreaterThan(0);
+  });
+
+  it('the products, their EPA number, the gallons mixed and the traced feet fill the record, each saying where it came from', async () => {
+    traced = { linear_ft: 181.6, capture_mode: 'perimeter' };
+    await openTrench(TRENCH, [TERMIDOR]);
+    await pick(TERMIDOR);
+    fireEvent.change(gallonsInput(), { target: { value: '80' } });
+    await waitFor(() => expect(field('gallons_or_amount').value).toBe('80 gal'));
+    expect(field('products_used').value).toBe('Termidor SC');
+    expect(field('epa_registration').value).toBe('7969-210');
+    expect(field('linear_feet_or_stations').value).toBe('182 ft');
+    expect(screen.getAllByText('From the product').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('From the products').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('From the trace').length).toBeGreaterThan(0);
+  });
+
+  it('a hand edit always wins: the field keeps it while the rest still follow the products', async () => {
+    await openTrench(TRENCH, [TERMIDOR]);
+    await pick(TERMIDOR);
+    await waitFor(() => expect(field('epa_registration').value).toBe('7969-210'));
+    fireEvent.change(field('epa_registration'), { target: { value: '7969-210 (lot 42)' } });
+    fireEvent.change(gallonsInput(), { target: { value: '60' } });
+    await waitFor(() => expect(field('gallons_or_amount').value).toBe('60 gal'));
+    expect(field('epa_registration').value).toBe('7969-210 (lot 42)');
+    expect(screen.queryByText('From the product')).toBeNull();
+  });
+
+  it('with voice fill off (a pre-treat visit, or the gate off) the record is the person\'s alone', async () => {
+    await openTrench({ ...TRENCH, typedVoiceFillEnabled: false }, [TERMIDOR]);
+    await pick(TERMIDOR);
+    fireEvent.change(gallonsInput(), { target: { value: '80' } });
+    expect(field('products_used').value).toBe('');
+    expect(field('epa_registration').value).toBe('');
+    expect(screen.queryByText('Always a tap: never filled from the notes.')).toBeNull();
+  });
+});

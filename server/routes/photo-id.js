@@ -817,9 +817,12 @@ const LAWN_PARTIAL_RESULT = {
 // and tree/shrub/palm Photo ID also read with the plant engine's Gemini-only
 // workup and send its `v2` object, which the app's workup card renders. Palm
 // has no route of its own: the app posts it to /tree_shrub with subject
-// 'palm'. The v1 scores keep being computed and stored (owner 2026-09-28,
-// decision 3), in parallel. A v2 failure answers the same 503 as a v1 miss,
-// never a silent v1-only card.
+// 'palm'. A v2 failure answers the same 503 as a v1 miss, never a silent
+// v1-only card. With the gate on the v1 scorers no longer run (owner
+// 2026-10-02, superseding 09-28 decision 3): the app renders only the
+// workup, and reports and property scores read tech-confirmed rows, never
+// these customer rows. The v1 columns stay empty and the v1 twin reads
+// unclear, so a gate rollback shows those rows as the partial card.
 function plantSubjectFor(type, body) {
   if (type === 'lawn') return 'lawn';
   return body && body.subject === 'palm' ? 'palm' : 'tree_shrub';
@@ -890,7 +893,7 @@ async function handleLawn(req, res, { note, location, propertyId, isSecondary })
     ...(grassContext && grassContext.irrigationSystem ? { irrigation_type: grassContext.irrigationSystem } : {}),
   };
   const [analyses, v2Result] = await Promise.all([
-    Promise.all(photoInputs.map((photo) => lawnAssessment
+    v2Enabled ? [] : Promise.all(photoInputs.map((photo) => lawnAssessment
       .analyzePhoto(photo.data, photo.mimeType, context)
       .catch((err) => { logger.warn(`[photo-id] lawn analyzePhoto failed: ${err.message}`); return null; }))),
     v2Enabled ? runPlantV2(req, 'lawn', plantContext) : null,
@@ -906,7 +909,7 @@ async function handleLawn(req, res, { note, location, propertyId, isSecondary })
   // instead — see lawnRawResultHasEvidence.
   const withEvidence = analyses.filter((a) => a && (lawnRawResultHasEvidence(a.claude) || lawnRawResultHasEvidence(a.gemini)));
   const composites = withEvidence.map(lawnSanitizeScoreFields).filter(Boolean);
-  // With v2 answering, missing v1 scores only leave the stored scores empty.
+  // With v2 answering (the v1 scorers skipped), the stored scores stay empty.
   if (!composites.length && !v2Result) {
     return res.status(503).json({ error: `Photo analysis is briefly unavailable. Please try again in a few minutes or call ${OFFICE_PHONE}.` });
   }
@@ -1079,7 +1082,7 @@ async function handleTreeShrub(req, res, { note, location, propertyId, isSeconda
   const photoInputs = req._photoInputs;
   const v2Enabled = isEnabled('photoIdV2');
   const [scoredPreview, v2Result] = await Promise.all([
-    previewTreeShrubWithEvidence(photoInputs)
+    v2Enabled ? null : previewTreeShrubWithEvidence(photoInputs)
       .catch((err) => { logger.warn(`[photo-id] tree-shrub preview failed: ${err.message}`); return null; }),
     v2Enabled ? runPlantV2(req, 'tree_shrub') : null,
   ]);
@@ -1087,7 +1090,7 @@ async function handleTreeShrub(req, res, { note, location, propertyId, isSeconda
   if ((v2Result && !v2Result.ok) || (!scoredPreview && !v2Result)) {
     return res.status(503).json({ error: `Photo analysis is briefly unavailable. Please try again in a few minutes or call ${OFFICE_PHONE}.` });
   }
-  // With v2 answering, missing v1 scores only leave the stored scores empty
+  // With v2 answering (the v1 scorer skipped), the stored scores stay empty
   // (and the v1 twin unreliable).
   const preview = scoredPreview || {
     scores: {}, observations: null, plantGroups: [], scoredCount: 0, photoCount: photoInputs.length, trackingCount: 0,

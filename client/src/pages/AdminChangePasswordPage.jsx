@@ -70,7 +70,7 @@ export default function AdminChangePasswordPage() {
       }
       navigate(
         data.user?.role === 'technician'
-          ? '/tech'
+          ? '/admin/today'
           : '/admin/settings?passwordChanged=1',
         { replace: true },
       );
