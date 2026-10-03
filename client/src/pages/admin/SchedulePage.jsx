@@ -1248,6 +1248,18 @@ function completionDraftTombstoneKey(serviceId) {
   return `${completionDraftKey(serviceId)}_discarded`;
 }
 
+function completionDraftTombstoneMatches(tombstone, draftId) {
+  if (tombstone === null) return false;
+  if (!tombstone) return true;
+  if (tombstone === String(draftId)) return true;
+  try {
+    const ids = JSON.parse(tombstone);
+    return Array.isArray(ids) && ids.map(String).includes(String(draftId));
+  } catch {
+    return tombstone === draftId;
+  }
+}
+
 // The signed-in admin's id. Unsubmitted drafts (photos, captions, notes) are
 // stored under it so a shared tablet never offers one operator's field work
 // to the next: the IndexedDB row is keyed by it and the localStorage
@@ -15020,10 +15032,14 @@ export function CompletionPanel({
   }
 
   function clearSavedDraft() {
-    const discardedId = draftSnapshotRef.current?.draftId || savedDraft?.draftId || "";
+    const discarded = draftSnapshotRef.current || savedDraft;
+    const discardedIds = [...new Set([
+      discarded?.draftId, discarded?.discardedPhotoDraftId,
+    ].filter(Boolean).map(String))];
+    const tombstone = discardedIds.length > 1 ? JSON.stringify(discardedIds) : discardedIds[0] || "";
     draftSnapshotRef.current = null;
     try {
-      localStorage.setItem(completionDraftTombstoneKey(service.id), discardedId);
+      localStorage.setItem(completionDraftTombstoneKey(service.id), tombstone);
       localStorage.removeItem(completionDraftKey(service.id));
     } catch { /* unavailable */ }
     void deleteCompletionDraft(service.id, completionDraftScope()).then((deleted) => {
@@ -15068,7 +15084,7 @@ export function CompletionPanel({
       let stored = loaded;
       // A residual row whose delete never committed (page killed mid-discard)
       // is not a draft: drop it and finish the delete now.
-      if (stored && tombstone !== null && (!tombstone || tombstone === stored.draftId)) {
+      if (stored && completionDraftTombstoneMatches(tombstone, stored.draftId)) {
         stored = null;
         void deleteCompletionDraft(service.id, scope).then((deleted) => {
           if (!deleted) return;
@@ -17566,6 +17582,7 @@ export function CompletionPanel({
       const owed = {
         ...draft,
         draftId: crypto.randomUUID(),
+        discardedPhotoDraftId: draft.draftId,
         savedAt: new Date().toISOString(),
         servicePhotos: [],
         generationPhotoCount: 0,

@@ -31,8 +31,8 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('completion photos in an unsubmitted draft', () => {
-  async function seed() {
-    const draft = { serviceId: service.id, draftId: 'draft-one', savedAt: '2099-01-01T12:00:00Z',
+  async function seed(draftId = 'draft-one') {
+    const draft = { serviceId: service.id, draftId, savedAt: '2099-01-01T12:00:00Z',
       notes: 'Exterior inspected', generationPhotoCount: 1, servicePhotos: photos, sendSms: false };
     const { servicePhotos: _photos, ...metadata } = draft;
     localStorage.setItem(key, JSON.stringify(metadata));
@@ -86,17 +86,17 @@ describe('completion photos in an unsubmitted draft', () => {
   });
 
   it('does not offer a discarded draft whose IndexedDB delete never committed (Codex #4091 P2)', async () => {
-    await seed();
+    await seed('123');
     const first = await mount();
     // The delete is issued but the page dies before it commits: the full
     // photo-bearing row survives with no metadata.
     vi.spyOn(completionStore, 'deleteCompletionDraft').mockResolvedValue(false);
     fireEvent.click(screen.getByRole('button', { name: 'Discard', exact: true }));
     expect(localStorage.getItem(key)).toBeNull();
-    expect(localStorage.getItem(`${key}_discarded`)).toBe('draft-one');
+    expect(localStorage.getItem(`${key}_discarded`)).toBe('123');
     first.unmount();
     vi.restoreAllMocks();
-    expect(await getCompletionDraft(service.id)).toMatchObject({ draftId: 'draft-one' });
+    expect(await getCompletionDraft(service.id)).toMatchObject({ draftId: '123' });
     await mount();
     expect(screen.queryByRole('button', { name: 'Restore', exact: true })).toBeNull();
     await waitFor(async () => expect(await getCompletionDraft(service.id)).toBeNull());
@@ -470,6 +470,47 @@ describe('completion photos in an unsubmitted draft', () => {
     expect(JSON.parse(reconciles[0].body)).toEqual({ abandonMissingPhotos: false, expectedServiceRecordId: 'record-1' });
     expect(completionResumeOwed(service.id)).toBe(false);
     view.unmount();
+  });
+
+  it('does not resurrect discarded photos when the photo-free write and final delete are interrupted', async () => {
+    const draft = {
+      serviceId: service.id, draftId: 'photo-revision', savedAt: '2020-01-01T12:03:00Z',
+      generationPhotoCount: 1, servicePhotos: photos, reconcileOwed: true,
+      pendingPhotoCompletion: { serviceRecordId: 'record-1', completionPhotoUpload: { failed: 1 } },
+    };
+    const { servicePhotos: _photos, ...metadata } = draft;
+    localStorage.setItem(key, JSON.stringify(metadata));
+    localStorage.setItem(completionResumeOwedKey(service.id), '1');
+    await putCompletionDraft(service.id, draft);
+    const first = await mount(vi.fn());
+    const lostPhotoFreeWrite = vi.spyOn(completionStore, 'putCompletionDraft').mockResolvedValue(true);
+    await act(async () => fireEvent.click(await screen.findByRole('button', { name: 'Discard retained photos' })));
+    const photoFreeMetadata = JSON.parse(localStorage.getItem(key));
+    expect(photoFreeMetadata).toMatchObject({
+      discardedPhotoDraftId: 'photo-revision', reconcileOwed: true,
+    });
+    expect(photoFreeMetadata).not.toHaveProperty('servicePhotos');
+    expect(photoFreeMetadata.draftId).not.toBe('photo-revision');
+    expect(await getCompletionDraft(service.id)).toMatchObject({ draftId: 'photo-revision', servicePhotos: photos });
+
+    first.unmount();
+    lostPhotoFreeWrite.mockRestore();
+    const reopenedRecovery = await mount(vi.fn());
+    expect(await screen.findByRole('button', { name: 'Finish report update' })).toBeTruthy();
+    const interruptedDelete = vi.spyOn(completionStore, 'deleteCompletionDraft').mockResolvedValue(false);
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Finish report update' })));
+    expect(JSON.parse(localStorage.getItem(`${key}_discarded`))).toEqual(
+      expect.arrayContaining([photoFreeMetadata.draftId, 'photo-revision']),
+    );
+    reopenedRecovery.unmount();
+    interruptedDelete.mockRestore();
+    expect(await getCompletionDraft(service.id)).toMatchObject({ draftId: 'photo-revision' });
+
+    await mount(vi.fn());
+    expect(screen.queryByRole('button', { name: 'Restore', exact: true })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Retry photo uploads' })).toBeNull();
+    await waitFor(async () => expect(await getCompletionDraft(service.id)).toBeNull());
+    await waitFor(() => expect(localStorage.getItem(`${key}_discarded`)).toBeNull());
   });
 
   it('dismisses local recovery after inaccessible report repair is handed to the office', async () => {
