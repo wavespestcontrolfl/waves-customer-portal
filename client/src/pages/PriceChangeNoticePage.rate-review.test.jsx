@@ -67,4 +67,30 @@ describe('PriceChangeNoticePage v2', () => {
     renderWith(legacy);
     expect(await screen.findByRole('heading', { level: 1, name: 'An update to your recurring service' })).toBeInTheDocument();
   });
+
+  it.each([
+    ['per application', { unit: 'application', firstLabel: 'First application at the new rate', first: 'on or after December 10, 2026' }, /Any application completed before the new-rate date is billed at your current rate\./],
+    ['monthly dues', { unit: 'month', firstLabel: 'First month at the new rate', first: 'on or after December 15, 2026' }, /Your monthly dues stay at your current amount through the month before the new-rate date\./],
+    ['prepaid until renewal', { unit: 'year', firstLabel: 'Your current prepaid year', first: 'unchanged through May 14, 2027', perApplicationCurrent: '$117', perApplicationNext: '$121' }, /Your prepaid plan stays exactly as it is until it renews\./],
+  ])('the assurance is true for %s: copy by billing unit', async (_lane, line, expected) => {
+    renderWith({
+      ...legacy,
+      review: { firstName: 'Testcust', costBlock: 'Costs.', hasPrepay: line.unit === 'year', lines: [{ service: 'Pest control', current: '$117', next: '$121', change: '$4', effectiveDate: 'December 10, 2026', why: 'Reason.', ...line }] },
+    });
+    await screen.findByRole('heading', { level: 1 });
+    expect(document.body.textContent).toMatch(expected);
+    if (line.unit !== 'application') expect(document.body.textContent).not.toMatch(/Any application completed before the new-rate date/);
+  });
+
+  it('a mixed letter (several lanes) gets the one sentence true for all three', async () => {
+    renderWith({
+      ...legacy,
+      review: { firstName: 'Testcust', costBlock: 'Costs.', hasPrepay: true, lines: [
+        { service: 'Pest control', unit: 'application', current: '$117', next: '$121', change: '$4', effectiveDate: 'December 10, 2026', why: 'R.', firstLabel: 'f', first: 'x' },
+        { service: 'Lawn care', unit: 'month', current: '$40', next: '$44', change: '$4', effectiveDate: 'December 15, 2026', why: 'R.', firstLabel: 'f', first: 'x' },
+      ] },
+    });
+    await screen.findByRole('heading', { level: 1 });
+    expect(document.body.textContent).toMatch(/applications completed before it are billed at your current rate, monthly dues stay at your current amount through the month before it, and a prepaid plan stays exactly as it is until it renews/);
+  });
 });

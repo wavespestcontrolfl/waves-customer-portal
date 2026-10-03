@@ -86,4 +86,29 @@ describe('RateReviewSendPanel', () => {
     expect(await screen.findByRole('button', { name: 'Prepare 2 notices' })).toBeInTheDocument();
     expect(mockAdminFetch).toHaveBeenCalledTimes(2);
   });
+
+  it.each([
+    ['stoppedByGate', { stoppedByGate: 2 }, /2 stopped because the rate review was switched off mid-send/],
+    ['inFlight', { inFlight: 1 }, /1 not sent: held or changed since the preview/],
+    ['failed', { failed: 1 }, /1 failed/],
+    ['uncertain', { uncertain: 1 }, /1 held: outcome uncertain/],
+    ['unreachable', { unreachable: 1 }, /1 unreachable/],
+  ])('an incomplete send (%s) is never reported as a success', async (_k, counters, text) => {
+    mockAdminFetch.mockImplementation(async (path, opts) => (opts?.method === 'POST' ? { ok: false, sent: 1, emailed: 1, texted: 0, ...counters } : preview()));
+    render(<RateReviewSendPanel batchKey="2026-12" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Send 1 letter' }));
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Send 1 letter' })).at(-1));
+    const msg = await screen.findByText(text);
+    expect(msg.closest('[role="alert"]') || msg).toBeTruthy();
+    expect(msg.textContent).toMatch(/1 letter sent/); // what DID go out is still stated
+    expect(screen.queryByText(/^1 letter sent \(1 emailed, 0 texted\)\.$/)).not.toBeInTheDocument();
+  });
+
+  it('a complete send (ok: true, nothing incomplete) is the plain success message', async () => {
+    mockAdminFetch.mockImplementation(async (path, opts) => (opts?.method === 'POST' ? { ok: true, sent: 1, emailed: 1, texted: 1 } : preview()));
+    render(<RateReviewSendPanel batchKey="2026-12" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Send 1 letter' }));
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Send 1 letter' })).at(-1));
+    expect(await screen.findByText('1 letter sent (1 emailed, 1 texted).')).toBeInTheDocument();
+  });
 });

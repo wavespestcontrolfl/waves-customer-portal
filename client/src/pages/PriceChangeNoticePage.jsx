@@ -74,6 +74,16 @@ function rateLine(line, which) {
 // old and new rate, the change and the effective date, then the reason,
 // the year's costs and what stays the same. Every value is the server's
 // frozen copy; nothing is computed here but layout.
+// Copy by billing unit: a letter of per-application lines says applications; a
+// monthly-dues or prepaid line (alone or mixed) gets the sentence true for all three.
+function assuranceFor(lines) {
+  const units = new Set((lines || []).map((l) => l.unit));
+  if (units.size === 1 && units.has('application')) return 'Any application completed before the new-rate date is billed at your current rate.';
+  if (units.size === 1 && units.has('month')) return 'Your monthly dues stay at your current amount through the month before the new-rate date.';
+  if (units.size === 1 && units.has('year')) return 'Your prepaid plan stays exactly as it is until it renews.';
+  return 'Until the new-rate date shown above nothing changes: applications completed before it are billed at your current rate, monthly dues stay at your current amount through the month before it, and a prepaid plan stays exactly as it is until it renews.';
+}
+
 function RateReviewNotice({ data }) {
   const { review } = data;
   const lines = review.lines || [];
@@ -132,7 +142,7 @@ function RateReviewNotice({ data }) {
       <h2 style={H2}>What stays the same</h2>
       <p style={BODY}>
         Same team, same products, same guarantee: activity between applications means we come back at no charge.
-        Your schedule does not change. Any application completed before the new-rate date is billed at your current rate.
+        Your schedule does not change. {assuranceFor(lines)}
         {review.hasPrepay ? ' Your prepaid year stays exactly as it is; the new amount applies only when your plan renews.' : ''}
       </p>
 

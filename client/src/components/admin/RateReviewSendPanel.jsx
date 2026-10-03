@@ -144,8 +144,17 @@ export default function RateReviewSendPanel({ batchKey, disabled = false, refres
     setFeedback(null);
     try {
       const data = await adminFetch(`/admin/rate-review/batches/${batchKey}/send`, { method: "POST", body: JSON.stringify({ expectedDigest: preview?.digest || "" }) });
-      const extra = [data.unreachable && `${data.unreachable} unreachable`, data.uncertain && `${data.uncertain} held: outcome uncertain, check the email log`, data.failed && `${data.failed} failed`].filter(Boolean).join(", ");
-      setFeedback({ ok: !data.failed && !data.uncertain, text: `${plural(data.sent || 0, "letter")} sent (${data.emailed || 0} emailed, ${data.texted || 0} texted)${extra ? `; ${extra}` : ""}.` });
+      // Success only when the server says so AND nothing is incomplete: every counter that
+      // means "not everything went out" is named, and a nonzero one is never a success.
+      const extra = [
+        data.stoppedByGate && `${data.stoppedByGate} stopped because the rate review was switched off mid-send`,
+        data.inFlight && `${data.inFlight} not sent: held or changed since the preview, send again`,
+        data.unreachable && `${data.unreachable} unreachable`,
+        data.uncertain && `${data.uncertain} held: outcome uncertain, check the email log`,
+        data.failed && `${data.failed} failed`,
+      ].filter(Boolean).join(", ");
+      const incomplete = !!(data.stoppedByGate || data.inFlight || data.unreachable || data.uncertain || data.failed);
+      setFeedback({ ok: data.ok === true && !incomplete, text: `${plural(data.sent || 0, "letter")} sent (${data.emailed || 0} emailed, ${data.texted || 0} texted)${extra ? `; ${extra}` : ""}.` });
     } catch (e) {
       setFeedback({ ok: false, text: e.message || "Could not send the letters." });
     } finally {
