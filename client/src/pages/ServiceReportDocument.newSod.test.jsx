@@ -178,3 +178,94 @@ describe('new-sod mode: both documents from the enforced maximal payload', () =>
     expect(collectRenderedImageUrls(payload)).not.toContain('https://img.example.test/gauge.jpg');
   });
 });
+
+// Visit-shape sweep: every shape a new-sod visit can take, in every layout the report has, on BOTH documents.
+// The two fixed sentences print exactly once per document, whatever else is present or missing.
+describe('visit-shape sweep', () => {
+  const PHOTO_SET = [
+    { url: 'https://img.example.test/set-front.jpg', shot: 'front', label: 'Front yard' },
+    { url: 'https://img.example.test/set-back.jpg', shot: 'back', label: 'Back yard' },
+  ];
+  const EXPECT_LINE = 'Once the sod has rooted, you can start mowing and we can begin your regular lawn care.';
+  const LAYOUTS = {
+    'lead off': undefined,
+    'lead on, v6 off': { headline: 'Stable', applied: 'We applied a fertilizer to feed the lawn.', yourPart: [], next: null },
+    'lead on, v6 on': { headline: 'Stable', applied: 'We applied a fertilizer to feed the lawn.', whatToExpect: EXPECT_LINE, yourPart: [], next: null },
+  };
+  const SHAPES = {
+    'normal treatment visit': () => {},
+    'inspection-only: no applications, false treatment verdicts': (p) => {
+      p.applications = [];
+      p.treatmentPerformed = false;
+      p.applicationMade = false;
+      p.reportV2.treatment = null;
+      p.reportV2.aftercare = { watering: 'No special watering is needed because of today’s treatment — keep your normal schedule unless your technician advised otherwise.', neutral: true, waterInRequired: false };
+    },
+    'water-in product with creditableWaterIn': (p) => { p.applicationMade = true; p.treatmentPerformed = true; },
+    'no products readable (load failed)': (p) => {
+      p.applications = [];
+      p.applicationMade = null;
+      p.reportV2.treatment = null;
+    },
+    'no rain or irrigation readings at all': (p) => {
+      Object.assign(p.reportV2.water, { rainInches: null, irrigationInches: null, totalInches: null, scheduleOnFile: true });
+      p.lawnAssessment.waterContext.rainfallInches7d = null;
+      p.lawnAssessment.waterContext.irrigationInchesPerWeek = null;
+    },
+    'rain known, irrigation missing': (p) => {
+      Object.assign(p.reportV2.water, { rainInches: 2.1, irrigationInches: 0, totalInches: 2.1, scheduleOnFile: false });
+    },
+    'height of cut captured': (p) => { p.mowingHeight.heightIn = 2.5; },
+    'a photo set present beside the new-sod block': (p) => {
+      p.reportV2.photoSet = PHOTO_SET;
+      p.photos = [{ id: 'lawn-1', url: 'https://img.example.test/p1.jpg' }];
+    },
+  };
+
+  const build = (shape, layout) => {
+    const payload = maximalLawnPayload();
+    SHAPES[shape](payload);
+    const enforced = enforceNewSodPayload(payload);
+    if (LAYOUTS[layout]) enforced.reportV2.lead = { ...LAYOUTS[layout] };
+    return enforced;
+  };
+  const occurrences = (text, sentence) => text.split(sentence).length - 1;
+  const cases = Object.keys(SHAPES).flatMap((shape) => Object.keys(LAYOUTS).map((layout) => [shape, layout]));
+
+  it.each(cases)('web section — %s — %s: each fixed sentence once, nothing forbidden', (shape, layout) => {
+    const enforced = build(shape, layout);
+    const { container } = render(
+      <div>
+        <LawnWateringBanner banner={enforced.reportV2.banner} />
+        <LawnReportV2Section data={enforced.reportV2} />
+      </div>,
+    );
+    const text = visibleText(container);
+    for (const sentence of FIXED) expect([sentence, occurrences(text, sentence)]).toEqual([sentence, 1]);
+    for (const [pattern, label] of FORBIDDEN) expect([label, pattern.test(text)]).toEqual([label, false]);
+    if (shape.startsWith('a photo set')) {
+      expect(container.querySelector('img[src="https://img.example.test/set-front.jpg"]')).not.toBeNull();
+    }
+  });
+
+  it.each(cases)('pdf document — %s — %s: each fixed sentence once, nothing forbidden', (shape, layout) => {
+    const enforced = build(shape, layout);
+    const { container } = render(<ServiceReportDocument data={enforced} token="tok-newsod" />);
+    const text = visibleText(container);
+    for (const sentence of FIXED) expect([sentence, occurrences(text, sentence)]).toEqual([sentence, 1]);
+    for (const [pattern, label] of FORBIDDEN) expect([label, pattern.test(text)]).toEqual([label, false]);
+    expect(container.querySelector('[data-testid="doc-new-sod"]')).not.toBeNull();
+    expect(document.querySelector('img[src="https://img.example.test/gauge.jpg"]')).toBeNull();
+    if (shape.startsWith('a photo set')) {
+      expect(container.querySelector('img[src="https://img.example.test/set-front.jpg"]')).not.toBeNull();
+    }
+  });
+
+  it('the pdf block is driven by the banner alone: no applications, no aftercare, no plan, no water card', () => {
+    const payload = { ...maximalLawnPayload(), applications: [], treatmentPerformed: false, applicationMade: false };
+    payload.reportV2 = { banner: { state: 'new_sod', lines: FIXED }, snapshot: { overallScore: 80, statusHeadline: 'Looking healthy' } };
+    const { container } = render(<ServiceReportDocument data={payload} token="tok-newsod" />);
+    const text = visibleText(container);
+    for (const sentence of FIXED) expect([sentence, occurrences(text, sentence)]).toEqual([sentence, 1]);
+  });
+});

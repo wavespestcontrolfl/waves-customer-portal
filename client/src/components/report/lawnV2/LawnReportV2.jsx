@@ -1041,7 +1041,9 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
   const axisMax = Math.max(hasTotal ? total : 0, stackedExtent, hasTarget ? target : 0) * 1.25 || 2;
   const pctOf = (v) => `${clamp((v / axisMax) * 100)}%`;
   const explanationShown = Boolean(water.explanation && !(water.weekPlan && water.weekPlan.title) && !(!irrOnFile && /irrigat|schedul|sprinkler|total|combined/i.test(water.explanation)));
-  const afterNote = Boolean(aftercare && aftercare.watering);
+  // New-sod mode: the banner and the plan card own the watering words; the aftercare block keeps only the pet
+  // re-entry note, so the fixed sentences print once.
+  const afterNote = Boolean(aftercare && (newSodCard ? aftercare.reentry : aftercare.watering));
 
   return (
     <Card>
@@ -1126,7 +1128,7 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
           {explanationShown ? <p style={{ margin: '8px 0 0', fontSize: 14, color: BODY, lineHeight: 1.55 }}>{water.explanation}</p> : null}
           {afterNote ? (
             <div className="lawn-callout-after" style={{ marginTop: 10, fontSize: 14.5, color: BODY, lineHeight: 1.5 }}>
-              <strong style={{ color: TEXT }}>After today’s visit:</strong> {aftercare.watering}
+              {newSodCard ? null : <><strong style={{ color: TEXT }}>After today’s visit:</strong> {aftercare.watering}</>}
               {aftercare.reentry ? <div style={{ marginTop: 4, fontSize: 14, color: MUTED }}>{aftercare.reentry}</div> : null}
             </div>
           ) : null}
@@ -1141,7 +1143,7 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
       {/* Watering after today, from the product label (or a safe default). */}
       {!lead && afterNote ? (
         <div className="lawn-callout-after" style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${BORDER}`, fontSize: 14.5, color: BODY, lineHeight: 1.5 }}>
-          <strong style={{ color: TEXT }}>After today’s visit:</strong> {aftercare.watering}
+          {newSodCard ? null : <><strong style={{ color: TEXT }}>After today’s visit:</strong> {aftercare.watering}</>}
           {aftercare.reentry ? <div style={{ marginTop: 4, fontSize: 14, color: MUTED }}>{aftercare.reentry}</div> : null}
         </div>
       ) : null}

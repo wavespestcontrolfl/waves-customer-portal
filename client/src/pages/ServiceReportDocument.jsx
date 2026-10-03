@@ -392,6 +392,9 @@ export default function ServiceReportDocument({ data, token }) {
   // watering-in notes from the payload; the document ALSO never prints them (nor a label irrigation-hold
   // bullet from the re-entry context, which is added after the payload is built) for such a visit.
   const newSodReport = data.reportV2?.banner?.state === 'new_sod';
+  const newSodLines = newSodReport
+    ? (Array.isArray(data.reportV2.banner.lines) ? data.reportV2.banner.lines : []).filter((line) => typeof line === 'string' && line.trim())
+    : [];
   // Older records store the aliases the web report's conditionRows accepts
   // (temp / humidity / wind / cloudCover) — normalize before deciding the
   // visit recorded nothing.
@@ -811,7 +814,10 @@ export default function ServiceReportDocument({ data, token }) {
   // today's treatment" when there were NO applications — printing it on an
   // inspection-only lawn visit claims a treatment that didn't happen (5th
   // variant of this class: defaults read as evidence).
-  if (hasActualTreatment) pushRec(data.reportV2?.aftercare?.watering);
+  // New-sod mode prints its two fixed lines in its OWN block below (driven by the banner), whatever the
+  // treatment verdicts say, so an inspection-only visit still carries them and no other module's absence
+  // can drop them. The aftercare copy of the same lines is therefore not pushed here (once per document).
+  if (hasActualTreatment && !newSodReport) pushRec(data.reportV2?.aftercare?.watering);
   // A visit with a server watering instruction (banner: hold / water-in) prints
   // it ONCE, through aftercare.watering above. The hero task, follow-up and
   // insight actions restate banner lines verbatim (a hold-then-water-in hero
@@ -1324,6 +1330,15 @@ export default function ServiceReportDocument({ data, token }) {
             {hasActualTreatment && sanitizeReentryCopy(data.reportV2?.aftercare?.reentry) && (
               <Bullet>{sanitizeReentryCopy(data.reportV2.aftercare.reentry)}</Bullet>
             )}
+          </div>
+        )}
+
+        {/* New-sod mode (GATE_LAWN_NEW_SOD_MODE): the visit's watering and mowing instructions. Driven by the
+            banner alone, never by treatment verdicts, aftercare, the week plan or any other module. */}
+        {newSodReport && newSodLines.length > 0 && (
+          <div className="doc-keep" data-testid="doc-new-sod">
+            <SectionHeader>Caring for your new sod</SectionHeader>
+            {newSodLines.map((line) => <Bullet key={line}>{line}</Bullet>)}
           </div>
         )}
 
