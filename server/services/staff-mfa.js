@@ -310,18 +310,26 @@ async function startSetup(tech, { conn = db } = {}) {
     throw Object.assign(new Error('Two-step sign-in cannot be set up: no encryption key is configured.'), { status: 503 });
   }
   const secret = generateSecret();
-  await conn('staff_mfa_totp')
-    .insert({
-      technician_id: tech.id,
-      pending_secret_enc: encryptedSecretRaw(conn, secret),
-      pending_created_at: conn.fn.now(),
-    })
-    .onConflict('technician_id')
-    .merge({
-      pending_secret_enc: encryptedSecretRaw(conn, secret),
-      pending_created_at: conn.fn.now(),
-      updated_at: conn.fn.now(),
-    });
+  try {
+    await conn('staff_mfa_totp')
+      .insert({
+        technician_id: tech.id,
+        pending_secret_enc: encryptedSecretRaw(conn, secret),
+        pending_created_at: conn.fn.now(),
+      })
+      .onConflict('technician_id')
+      .merge({
+        pending_secret_enc: encryptedSecretRaw(conn, secret),
+        pending_created_at: conn.fn.now(),
+        updated_at: conn.fn.now(),
+      });
+  } catch (e) {
+    // knex puts bindings (the new secret AND the key) in its error message;
+    // only a sanitized error with the database code leaves this function.
+    const err = new Error(`staff MFA setup failed: database error${e && e.code != null ? ` ${String(e.code)}` : ''}`);
+    err.code = e && e.code != null ? String(e.code) : undefined;
+    throw err;
+  }
   return { secret, otpauthUrl: otpauthUri(secret, tech.email) };
 }
 

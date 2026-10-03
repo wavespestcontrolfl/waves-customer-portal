@@ -183,4 +183,11 @@ postgres('staff two-step sign-in on migrated PostgreSQL', () => {
       delete process.env.DATA_HYGIENE_VAULT_KEY;
     }
   });
+  test('a failed setup write never carries the secret or the key in its error', async () => {
+    await mockDatabase('technicians').where({ id: techId }).del();
+    const err = await staffMfa.startSetup(tech).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toMatch(/^staff MFA setup failed: database error/);
+    expect(`${err.message}\n${err.stack}`).not.toContain(process.env.STAFF_MFA_KEY);
+  });
 });
