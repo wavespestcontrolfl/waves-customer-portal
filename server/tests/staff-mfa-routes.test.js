@@ -30,7 +30,7 @@ const db = require('../models/db');
 const staffMfa = require('../services/staff-mfa');
 const { adminAuthenticate, verifyStaffBearer } = require('../middleware/admin-auth');
 const {
-  login, loginMfa, mfaConfirm, mfaDisable, mfaRegenerateRecoveryCodes, mfaSetup, resetPassword,
+  changePassword, login, loginMfa, mfaConfirm, mfaDisable, mfaRegenerateRecoveryCodes, mfaSetup, resetPassword,
 } = require('../routes/admin-auth')._handlers;
 
 const SECRET = 'test-secret';
@@ -164,7 +164,7 @@ describe('POST /login/mfa', () => {
     expect(res.statusCode).toBe(200);
     expect(staffMfa.verifySecondFactor).toHaveBeenCalledWith('tech-1', '123456');
     expect(jwt.verify(res.body.token, SECRET)).toMatchObject({ technicianId: 'tech-1', type: 'access', tokenVersion: 3, mfa: true });
-    expect(jwt.verify(res.body.token, SECRET).mfaVia).toBeUndefined();
+    expect(jwt.verify(res.body.token, SECRET).mfaRecoveryUntil).toBeUndefined();
     expect(res.body.user.twoStep).toEqual({ enabled: true, enrollmentRequired: false });
     expect(res.cookie).toHaveBeenCalledWith('waves_admin', expect.any(String), expect.any(Object));
   });
@@ -174,7 +174,10 @@ describe('POST /login/mfa', () => {
     db.mockReturnValueOnce(builder());
     staffMfa.verifySecondFactor.mockResolvedValue({ ok: true, method: 'recovery' });
     const res = await invoke(loginMfa, { body: { challengeToken: challenge(), code: 'AAAA-BBBB-CCCC-DDDD' } });
-    expect(jwt.verify(res.body.token, SECRET)).toMatchObject({ mfa: true, mfaVia: 'recovery' });
+    const claims = jwt.verify(res.body.token, SECRET);
+    expect(claims.mfa).toBe(true);
+    expect(claims.mfaRecoveryUntil - claims.iat).toBeGreaterThanOrEqual(29 * 60);
+    expect(claims.mfaRecoveryUntil - claims.iat).toBeLessThanOrEqual(30 * 60);
   });
 
   test.each([
@@ -315,6 +318,24 @@ describe('self-service routes', () => {
     expect(res.body.code).toBe('TOKEN_REVOKED');
   });
 
+  test('a password change keeps the recovery window of the session, never extends it', async () => {
+    bcrypt.compare.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    bcrypt.hash.mockResolvedValue('$2a$12$new');
+    const enrolled = staffRow({ mfa_enabled_at: new Date() });
+    db.transaction = jest.fn(async (fn) => {
+      const trx = jest.fn(() => builder({ returning: [{ ...enrolled, auth_token_version: 4 }] }));
+      trx.fn = { now: () => 'now()' };
+      return fn(trx);
+    });
+    const until = Math.floor(Date.now() / 1000) + 600;
+    const res = await invoke(changePassword, {
+      technician: enrolled,
+      staffToken: { mfa: true, mfaRecoveryUntil: until },
+      body: { currentPassword: 'Old-Password-1234', newPassword: 'Brand-new-Password-42' },
+    });
+    expect(jwt.verify(res.body.token, SECRET)).toMatchObject({ mfa: true, mfaRecoveryUntil: until, tokenVersion: 4 });
+  });
+
   test('new recovery codes are fenced on the session version', async () => {
     staffMfa.verifySecondFactor.mockResolvedValue({ ok: true, method: 'totp' });
     staffMfa.regenerateRecoveryCodes.mockResolvedValue({ ok: false, reason: 'revoked' });
@@ -329,12 +350,12 @@ describe('self-service routes', () => {
     staffMfa.startSetup.mockResolvedValue({ ok: true, secret: 'ABC', otpauthUrl: 'otpauth://totp/x' });
     const enrolled = staffRow({ mfa_enabled_at: new Date() });
     const now = Math.floor(Date.now() / 1000);
-    let res = await invoke(mfaSetup, { technician: enrolled, staffToken: { mfa: true, mfaVia: 'recovery', iat: now }, body: { currentPassword: 'right' } });
+    let res = await invoke(mfaSetup, { technician: enrolled, staffToken: { mfa: true, mfaRecoveryUntil: now + 60 }, body: { currentPassword: 'right' } });
     expect(res.body.secret).toBe('ABC');
     expect(staffMfa.verifySecondFactor).not.toHaveBeenCalled();
 
     staffMfa.startSetup.mockClear();
-    res = await invoke(mfaSetup, { technician: enrolled, staffToken: { mfa: true, mfaVia: 'recovery', iat: now - 31 * 60 }, body: { currentPassword: 'right' } });
+    res = await invoke(mfaSetup, { technician: enrolled, staffToken: { mfa: true, mfaRecoveryUntil: now - 1 }, body: { currentPassword: 'right' } });
     expect(res.statusCode).toBe(400);
     expect(staffMfa.startSetup).not.toHaveBeenCalled();
   });

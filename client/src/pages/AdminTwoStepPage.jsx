@@ -358,8 +358,12 @@ export default function AdminTwoStepPage() {
     try {
       data = await call('/totp/confirm', { method: 'POST', body: { code: form.code.trim() } });
     } catch (err) {
-      if (err.status === 409) show('setup');
-      throw err;
+      if (err.status !== 409) throw err;
+      // The setup expired: back to its first step, with the reason shown there.
+      setSetup(null);
+      show('setup');
+      setFailure({ at: 'setup', message: err.message });
+      return;
     }
     // The server signed out every earlier session; this one continues on the
     // fresh two-step token.

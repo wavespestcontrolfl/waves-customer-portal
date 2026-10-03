@@ -105,7 +105,7 @@ function staffUser(tech) {
 // `mfa: true` marks an access token issued after the two-step code passed
 // (GATE_ADMIN_MFA); the claim is omitted otherwise, so gate-off tokens are
 // unchanged.
-function mintStaffTokens(tech, { mfa = false, mfaVia = null } = {}) {
+function mintStaffTokens(tech, { mfa = false, mfaRecoveryUntil = null } = {}) {
   const tokenVersion = staffTokenVersion(tech);
   return {
     token: jwt.sign({
@@ -115,9 +115,9 @@ function mintStaffTokens(tech, { mfa = false, mfaVia = null } = {}) {
       type: 'access',
       tokenVersion,
       ...(mfa ? { mfa: true } : {}),
-      // 'recovery' lets this session replace a lost authenticator without
-      // a second code for a short window (staff-mfa.js).
-      ...(mfa && mfaVia === 'recovery' ? { mfaVia } : {}),
+      // Epoch seconds until which this recovery-code session may replace a
+      // lost authenticator without a second code (staff-mfa.js).
+      ...(mfa && Number.isFinite(mfaRecoveryUntil) ? { mfaRecoveryUntil } : {}),
     }, config.jwt.secret, { expiresIn: '30d' }),
     refreshToken: jwt.sign({
       technicianId: tech.id,
@@ -276,7 +276,10 @@ async function loginMfa(req, res, next) {
     const result = await staffMfa.verifySecondFactor(tech.id, code);
     if (!result.ok) return mfaFailureResponse(res, result);
 
-    const { token, refreshToken } = mintStaffTokens(tech, { mfa: true, mfaVia: result.method });
+    const { token, refreshToken } = mintStaffTokens(tech, {
+      mfa: true,
+      mfaRecoveryUntil: result.method === 'recovery' ? staffMfa.recoveryReplaceDeadline() : null,
+    });
     await db('technicians').where({ id: tech.id }).update({ last_login_at: db.fn.now() });
     setAdminMarkerCookie(res, tech.id);
     return res.json({ token, refreshToken, user: staffUser(tech) });
@@ -622,7 +625,11 @@ async function changePassword(req, res, next) {
     disconnectRevokedStaffSessions(updated.id, 'password_changed');
     // The replacement session keeps the two-step mark of the session that
     // changed the password (adminAuthenticate already required it).
-    const { token, refreshToken } = mintStaffTokens(updated, { mfa: req.staffToken?.mfa === true });
+    // A recovery-code session keeps its replacement window, never extended.
+    const { token, refreshToken } = mintStaffTokens(updated, {
+      mfa: req.staffToken?.mfa === true,
+      mfaRecoveryUntil: staffMfa.recoverySessionCanReplace(req.staffToken) ? req.staffToken.mfaRecoveryUntil : null,
+    });
     setAdminMarkerCookie(res, updated.id);
     res.json({ token, refreshToken, user: staffUser(updated) });
   } catch (err) { next(err); }

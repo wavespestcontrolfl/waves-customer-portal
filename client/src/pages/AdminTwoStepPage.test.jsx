@@ -116,6 +116,20 @@ describe('AdminTwoStepPage', () => {
     expect(screen.getByAltText('QR code for your authenticator app')).toBeInTheDocument();
     expect(store.get('waves_admin_token')).toBe('old-jwt');
   });
+  it('an expired setup goes back to the password step and says why', async () => {
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(reply(200, { available: true, enabled: false, enrollmentRequired: false, enforced: false, recoveryCodesRemaining: 0 }))
+      .mockResolvedValueOnce(reply(200, { secret: 'JBSWY3DPEHPK3PXP', otpauthUrl: 'otpauth://totp/x', expiresInMinutes: 15 }))
+      .mockResolvedValueOnce(reply(409, { error: 'This setup expired. Start again to get a new QR code.', code: 'MFA_SETUP_EXPIRED' })));
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Current password'), { target: { value: 'pw' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    fireEvent.change(await screen.findByLabelText('Code from the app'), { target: { value: '123456' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Turn on two-step sign-in' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('This setup expired');
+    expect(screen.getByLabelText('Current password')).toBeInTheDocument();
+  });
+
   it('right after a recovery-code sign-in, replacing the authenticator asks for the password only', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(reply(200, { available: true, enabled: true, enrollmentRequired: false, enforced: true, recoveryCodesRemaining: 0, replaceWithoutCode: true }))

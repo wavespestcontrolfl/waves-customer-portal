@@ -433,13 +433,18 @@ async function disable(technicianId, { expectedTokenVersion } = {}) {
   });
 }
 
-// True while a session that signed in with a recovery code (`mfaVia:
-// 'recovery'` on its access token) is still inside the replacement window.
+// The `mfaRecoveryUntil` (epoch seconds) a recovery-code sign-in stamps on
+// its access token; a password change carries it over unchanged.
+function recoveryReplaceDeadline(nowMs = Date.now()) {
+  return Math.floor((nowMs + RECOVERY_SESSION_REPLACE_MS) / 1000);
+}
+
+// True while a session that signed in with a recovery code is still inside
+// its replacement window.
 function recoverySessionCanReplace(decoded, nowMs = Date.now()) {
   return decoded?.mfa === true
-    && decoded.mfaVia === 'recovery'
-    && Number.isFinite(decoded.iat)
-    && nowMs - decoded.iat * 1000 < RECOVERY_SESSION_REPLACE_MS;
+    && Number.isFinite(decoded.mfaRecoveryUntil)
+    && nowMs < decoded.mfaRecoveryUntil * 1000;
 }
 
 async function status(tech, decoded) {
@@ -479,6 +484,7 @@ module.exports = {
   mfaEnabled,
   normalizeRecoveryCode,
   otpauthUri,
+  recoveryReplaceDeadline,
   recoverySessionCanReplace,
   regenerateRecoveryCodes,
   sessionMfaBlock,
