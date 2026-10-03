@@ -577,6 +577,41 @@ describe('runner', () => {
     expect(calls[0].photos.map((p) => p.zone)).toEqual(['front', 'back', 'close_up']);
   });
 
+  test('the case shape a stored assessment produces (jsonb photos array, real photo keys) is analyzed with the shot-list vocabulary', async () => {
+    // Same shapes the database hands back: `photos` already parsed, photo rows with s3 keys.
+    const stored = row({
+      id: 'stored-shape',
+      photos: [
+        { filename: 'lawn_a_0.jpg', uploadedAt: '2026-10-03T14:00:00.000Z', photoVocabulary: 'shot_list_v1' },
+        { filename: 'lawn_a_1.jpg', uploadedAt: '2026-10-03T14:00:00.000Z', photoVocabulary: 'shot_list_v1' },
+        { filename: 'lawn_a_2.jpg', uploadedAt: '2026-10-03T14:00:00.000Z', photoVocabulary: 'shot_list_v1' },
+      ],
+    });
+    const photoRows = ['front', 'back', 'close_up'].map((zone, i) => ({ id: `r${i}`, s3_key: `lawn/r${i}.jpg`, mime_type: 'image/jpeg', photo_order: i, zone }));
+    const testCase = evalLib.fixtureCase(stored, photoRows, {});
+    expect(testCase.incompletePhotos).toBe(false);
+    expect(testCase.photoVocabulary).toBe('shot_list_v1');
+    const seen = [];
+    const out = await evalLib.runEval([testCase], {
+      analyzeVisit: async (input) => { seen.push(input); return { status: 'unavailable' }; },
+      loadPhoto: async () => ({ data: 'YQ==', mimeType: 'image/jpeg' }),
+    });
+    expect(out.skipped).toEqual([]);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].shotList).toBe(true);
+    expect(seen[0].photos.map((p) => p.zone)).toEqual(['front', 'back', 'close_up']);
+  });
+
+  test('a row whose photos are still `pending/` keys (no S3 upload) is skipped as incomplete, marked or not', async () => {
+    const stored = row({ id: 'pending-shape', photos: [{ filename: 'a', photoVocabulary: 'shot_list_v1' }] });
+    const testCase = evalLib.fixtureCase(stored, [{ id: 'p0', s3_key: 'pending/pending-shape/a', photo_order: 0, zone: 'front' }], {});
+    expect(testCase.incompletePhotos).toBe(true);
+    const analyze = jest.fn();
+    const out = await evalLib.runEval([testCase], { analyzeVisit: analyze, loadPhoto: async () => ({ data: 'YQ==' }) });
+    expect(analyze).not.toHaveBeenCalled();
+    expect(out.skipped).toEqual([{ assessmentId: 'pending-shape', reason: 'incomplete stored photo set' }]);
+  });
+
   test('a case without the marker (gate off, or a pre-marker row) falls back to the zones: back/side replay legacy, shade still replays as shot list', async () => {
     const unmarked = evalLib.fixtureCase(row({ id: 'plain', photos: JSON.stringify([{ filename: 'a' }, { filename: 'b' }]) }), [
       { id: 'u1', s3_key: 'k1', photo_order: 0, zone: 'front' },

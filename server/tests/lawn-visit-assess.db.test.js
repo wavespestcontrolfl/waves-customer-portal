@@ -187,10 +187,17 @@ jest.mock('../services/service-report/application-conditions', () => ({ fetchRec
       expect(stored.photos.map((meta) => meta.photoVocabulary)).toEqual(['shot_list_v1', 'shot_list_v1', 'shot_list_v1']);
       const rows = await mockKnex('lawn_assessment_photos').where({ assessment_id: stored.id }).orderBy('photo_order');
       expect(rows.map((row) => row.zone)).toEqual(['front', 'back', 'close_up']);
-      const testCase = evalLib.fixtureCase(stored, rows, {});
+      // This harness has no S3, so the route stored `pending/...` keys, which the
+      // eval (rightly) treats as an incomplete photo set and skips. Give the rows
+      // the keys a captured visit has, as the exporter would see them.
+      expect(rows.every((row) => row.s3_key.startsWith('pending/'))).toBe(true);
+      const testCase = evalLib.fixtureCase(stored, rows.map((row) => ({ ...row, s3_key: `lawn/${row.id}.jpg` })), {});
+      expect(testCase.incompletePhotos).toBe(false);
       expect(testCase.photoVocabulary).toBe('shot_list_v1');
       const seen = [];
-      await evalLib.runEval([testCase], { analyzeVisit: async (input) => { seen.push(input); return { status: 'unavailable' }; }, loadPhoto: async () => ({ data: 'YQ==', mimeType: 'image/jpeg' }) });
+      const out = await evalLib.runEval([testCase], { analyzeVisit: async (input) => { seen.push(input); return { status: 'unavailable' }; }, loadPhoto: async () => ({ data: 'YQ==', mimeType: 'image/jpeg' }) });
+      expect(out.skipped).toEqual([]);
+      expect(seen).toHaveLength(1);
       expect(seen[0].shotList).toBe(true);
       expect(seen[0].photos.map((p) => p.zone)).toEqual(['front', 'back', 'close_up']);
     } finally {
