@@ -588,6 +588,9 @@ describe('voicemail triage evidence (voicemail.v1: every inbound voicemail besid
     const calls = seen.call_log || [];
     expect(calls.map((a) => String(a[0]))).toContain("COALESCE(direction, '') NOT LIKE 'outbound%'");
     expect(calls.find((a) => a[0] === 'created_at')[2]).toEqual(new Date('2026-09-26T08:00:00Z'));
+    // quiet: processed at least 30 minutes ago and no processing claim held (the callback claim lands after the terminal status)
+    expect(calls.find((a) => a[0] === 'updated_at')).toEqual(['updated_at', '<', new Date('2026-10-03T07:30:00Z')]);
+    expect(calls).toContainEqual(['null', 'processing_token']);
     expect(calls.find((a) => a[0] === 'processing_status')[1]).toEqual(['voicemail', 'processed', 'spam', 'lead_creation_failed', 'extraction_failed']);
     // a rejected transcription (the hallucination guard's sentinel) is never evidence
     expect(calls).toContainEqual(['transcription_status', 'rejected']);

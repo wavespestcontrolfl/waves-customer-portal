@@ -156,115 +156,134 @@ function gateCheckBaselines(call, wavesPromiseCallIds) {
 // counted, never asked (as for the gate checks). Never throws; evidence only.
 const VOICEMAIL_STATUSES = ['voicemail', 'processed', 'spam', 'lead_creation_failed', 'extraction_failed'];
 const VOICEMAIL_LOOKBACK_DAYS = 7;
+// The processor commits a terminal status before its post-terminal side
+// effects (the callback alert's claim comes later in the same pass), so a
+// voicemail is read only once its row has been quiet this long and nobody
+// holds its processing claim (Codex #5655 r5).
+const VOICEMAIL_QUIET_MINUTES = 30;
+
+// Phase 1: terminal inbound voicemails of the lookback with usable words.
+async function loadVoicemailCandidates(now) {
+  const { CALL_EXTRACTION_MAX_ATTEMPTS } = require('../config/call-extraction-retry');
+  const rows = await db('call_log')
+    .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb))
+    .whereRaw(INBOUND_DIRECTION_SQL)
+    .whereIn('processing_status', VOICEMAIL_STATUSES)
+    .where('created_at', '>', new Date(now.getTime() - VOICEMAIL_LOOKBACK_DAYS * 24 * 60 * 60 * 1000))
+    .whereNull('processing_token')
+    .where('updated_at', '<', new Date(now.getTime() - VOICEMAIL_QUIET_MINUTES * 60 * 1000))
+    .whereRaw("LENGTH(TRIM(COALESCE(transcription, ''))) > 0")
+    // A rejected transcription stores an internal sentinel, not the caller's
+    // words (Codex #5655 r4): never evidence.
+    .where((q) => q.whereNull('transcription_status').orWhereNot('transcription_status', 'rejected'))
+    .orderBy('created_at', 'asc')
+    .select('id', 'twilio_call_sid', 'direction', 'processing_status', 'answered_by', 'call_outcome', 'extraction_attempts',
+      'voicemail_callback_alerted_at', 'transcription', 'ai_extraction', 'ai_extraction_enriched', 'v2_extraction_status', 'duration_seconds');
+  return rows.filter((c) => isTerminalVoicemail(c, CALL_EXTRACTION_MAX_ATTEMPTS));
+}
+
+// A lead-path voicemail ends 'processed' (or 'lead_creation_failed'); only the
+// extraction says it was a voicemail. An extraction_failed row is terminal only
+// once its retry budget is spent (a retry can still mint the lead, alert or
+// spam verdict the baselines read), and then the voice webhook's durable
+// channel fields decide (Codex #5655 r3/r4).
+function isTerminalVoicemail(c, maxAttempts) {
+  if (c.processing_status === 'extraction_failed') {
+    if (!(Number(c.extraction_attempts) >= maxAttempts)) return false;
+    return safeParse(c.ai_extraction).is_voicemail === true || c.answered_by === 'voicemail' || c.call_outcome === 'voicemail';
+  }
+  return c.processing_status === 'voicemail' || safeParse(c.ai_extraction).is_voicemail === true;
+}
+
+// Phase 2: which enabled providers are done with each voicemail. Done = an
+// answer on the CURRENT transcript (subject_hash), or rows that can no longer
+// be re-answered (labeled or held out). Also the current answers, the siblings
+// a retried leg is compared with.
+async function loadProviderState(candidates, currentHash) {
+  const rows = await db('decision_reviews').where({ capability: 'voicemail', subject_type: 'call_log' })
+    .whereIn('subject_id', candidates.map((c) => c.id))
+    .select('subject_id', 'provider', 'question_id', 'jev_answer', 'subject_hash', 'label_status', 'sampled_for');
+  const done = new Map();
+  const stale = new Map();
+  const storedAnswers = new Map();
+  const add = (map, key, value) => { if (!map.has(key)) map.set(key, new Set()); map.get(key).add(value); };
+  for (const r of rows) {
+    const key = String(r.subject_id);
+    const current = Boolean(r.subject_hash) && r.subject_hash === currentHash.get(key);
+    if (!current && r.label_status === 'unreviewed' && r.sampled_for !== 'heldout') { add(stale, key, r.provider); continue; }
+    add(done, key, r.provider);
+    if (!current) continue;
+    if (!storedAnswers.has(key)) storedAnswers.set(key, {});
+    const byQuestion = storedAnswers.get(key);
+    (byQuestion[r.question_id] = byQuestion[r.question_id] || []).push(safeParse(r.jev_answer));
+  }
+  // A provider with any stale, re-answerable row is not done.
+  for (const [key, providers] of stale) for (const p of providers) done.get(key)?.delete(p);
+  return { done, storedAnswers };
+}
+
+// Phase 3: what production decided, read once for the voicemails to ask.
+async function loadReachedPerson(voicemails) {
+  const sids = voicemails.map((c) => c.twilio_call_sid).filter(Boolean);
+  const [leads, triage] = await Promise.all([
+    sids.length ? db('leads').whereIn('twilio_call_sid', sids).select('twilio_call_sid') : [],
+    db('triage_items').whereIn('call_log_id', voicemails.map((c) => c.id)).distinct('call_log_id'),
+  ]);
+  return { leadSids: new Set(leads.map((r) => r.twilio_call_sid)), triaged: new Set(triage.map((r) => String(r.call_log_id))) };
+}
+
+// The production baselines for one voicemail (see the header).
+function voicemailBaselines(call, { leadSids, triaged }) {
+  const ex = safeParse(call.ai_extraction);
+  const v2 = call.v2_extraction_status === 'valid' ? safeParse(call.ai_extraction_enriched) : {};
+  // vendor_or_partner is a pitch only when V2's spam verdict did not clear the
+  // content (extraction-compat's rule): a cleared partner is not.
+  const vendorPitch = v2.call_nature === 'vendor_or_partner' && v2.spam_verdict?.is_spam_content !== false;
+  return {
+    callback_requested: { production: Boolean(call.voicemail_callback_alerted_at) || leadSids.has(call.twilio_call_sid) || triaged.has(String(call.id)) },
+    is_vendor_or_spam: { production: call.processing_status === 'spam' || ex.is_spam === true || vendorPitch },
+  };
+}
+
+// Counts one voicemail's asked legs: Jev on the main tally, Clef under .clef.
+function tallyLegs(tally, only, outcome) {
+  for (const provider of only) {
+    const t = provider === 'typesafe' ? tally : (tally.clef = tally.clef || { asked: 0, recorded: 0, failed: 0 });
+    t.asked++;
+    if (outcome[provider] === 'recorded') t.recorded++; else t.failed++;
+  }
+}
+
 async function shadowVoicemails({ now = new Date() } = {}) {
   const tally = { asked: 0, recorded: 0, failed: 0, skippedLong: 0 };
   if (!typedDecisionsLive()) return tally;
   try {
-    const rows = await db('call_log')
-      .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb))
-      .whereRaw(INBOUND_DIRECTION_SQL)
-      .whereIn('processing_status', VOICEMAIL_STATUSES)
-      .where('created_at', '>', new Date(now.getTime() - VOICEMAIL_LOOKBACK_DAYS * 24 * 60 * 60 * 1000))
-      .whereRaw("LENGTH(TRIM(COALESCE(transcription, ''))) > 0")
-      // A rejected transcription stores an internal sentinel, not the caller's
-      // words (Codex #5655 r4): never evidence.
-      .where((q) => q.whereNull('transcription_status').orWhereNot('transcription_status', 'rejected'))
-      .orderBy('created_at', 'asc')
-      .select('id', 'twilio_call_sid', 'direction', 'processing_status', 'answered_by', 'call_outcome', 'extraction_attempts', 'voicemail_callback_alerted_at', 'transcription', 'ai_extraction', 'ai_extraction_enriched', 'v2_extraction_status', 'duration_seconds');
-    // A lead-path voicemail ends 'processed' (or 'lead_creation_failed'); only
-    // the extraction says it was a voicemail. One whose extraction kept failing
-    // ('extraction_failed') has no extraction to say so, so the voice
-    // webhook's own durable channel fields decide (Codex #5655 r3).
-    // Only once its retry budget is spent (Codex #5655 r4): before that the
-    // processor retries it, and a retry can still mint the lead, alert or spam
-    // verdict the baselines read.
-    const { CALL_EXTRACTION_MAX_ATTEMPTS } = require('../config/call-extraction-retry');
-    const extractionExhausted = (c) => Number(c.extraction_attempts) >= CALL_EXTRACTION_MAX_ATTEMPTS;
-    // Any extraction_failed row still inside its budget is skipped FIRST, even
-    // one carrying a partial extraction that says voicemail (pre-push audit P1).
-    const isVoicemail = (c) => {
-      if (c.processing_status === 'extraction_failed' && !extractionExhausted(c)) return false;
-      return c.processing_status === 'voicemail' || safeParse(c.ai_extraction).is_voicemail === true
-        || (c.processing_status === 'extraction_failed' && (c.answered_by === 'voicemail' || c.call_outcome === 'voicemail'));
-    };
-    const candidates = rows.filter(isVoicemail);
+    const candidates = await loadVoicemailCandidates(now);
     if (!candidates.length) return tally;
     const { callSubjectHash } = require('./typed-decisions/subject-hash');
     const currentHash = new Map(candidates.map((c) => [String(c.id), callSubjectHash(c.transcription)]));
-    // Which enabled providers have already answered each voicemail.
+    const { done, storedAnswers } = await loadProviderState(candidates, currentHash);
     const clef = typedDecisionsClefLive();
     const enabled = clef ? ['typesafe', 'cloudflare'] : ['typesafe'];
-    const answeredRows = await db('decision_reviews').where({ capability: 'voicemail', subject_type: 'call_log' })
-      .whereIn('subject_id', candidates.map((c) => c.id)).select('subject_id', 'provider', 'question_id', 'jev_answer', 'subject_hash', 'label_status', 'sampled_for');
-    // A provider is done with a voicemail when its answer was given on the
-    // CURRENT transcript (subject_hash), or when none of its rows can be
-    // re-answered any more (labeled or held out: the recorder passes those
-    // over). A reprocessed voicemail's stale, unreviewed answer is asked again
-    // (Codex #5655 r3).
-    const answered = new Map();
-    const stale = new Map();
-    // subject -> question -> [answers on the current transcript], the siblings a retried leg compares against.
-    const storedAnswers = new Map();
-    for (const r of answeredRows) {
-      const key = String(r.subject_id);
-      const current = r.subject_hash && r.subject_hash === currentHash.get(key);
-      const reanswerable = r.label_status === 'unreviewed' && r.sampled_for !== 'heldout';
-      if (!current && reanswerable) {
-        if (!stale.has(key)) stale.set(key, new Set());
-        stale.get(key).add(r.provider);
-        continue;
-      }
-      if (!answered.has(key)) answered.set(key, new Set());
-      answered.get(key).add(r.provider);
-      if (!current) continue;
-      if (!storedAnswers.has(key)) storedAnswers.set(key, {});
-      const byQuestion = storedAnswers.get(key);
-      (byQuestion[r.question_id] = byQuestion[r.question_id] || []).push(safeParse(r.jev_answer));
-    }
-    // A provider with any stale re-answerable row is not done.
-    for (const [key, providers] of stale) for (const p of providers) answered.get(key)?.delete(p);
-    const missingFor = (call) => enabled.filter((p) => !(answered.get(String(call.id)) || new Set()).has(p));
-    // Cohort reconciliation is idempotent and runs for every voicemail two
-    // providers have answered, so a reconcile that failed once is retried next
-    // pass (Codex #5655 r3). No model call.
-    const reconcileAll = async (list) => {
-      for (const call of list) if ((answered.get(String(call.id)) || new Set()).size > 1) await reconcileVoicemailCohorts(call.id, currentHash.get(String(call.id)));
-    };
-    const voicemails = candidates.filter((c) => missingFor(c).length > 0);
-    if (!voicemails.length) { await reconcileAll(candidates); return tally; }
-    const ids = voicemails.map((c) => c.id);
-    const sids = voicemails.map((c) => c.twilio_call_sid).filter(Boolean);
-    const [leads, triage] = await Promise.all([
-      sids.length ? db('leads').whereIn('twilio_call_sid', sids).select('twilio_call_sid') : [],
-      db('triage_items').whereIn('call_log_id', ids).distinct('call_log_id'),
-    ]);
-    const leadSids = new Set(leads.map((r) => r.twilio_call_sid));
-    const triaged = new Set(triage.map((r) => String(r.call_log_id)));
-    for (const call of voicemails) {
+    const missingFor = (call) => enabled.filter((p) => !(done.get(String(call.id)) || new Set()).has(p));
+    const toAsk = candidates.filter((c) => missingFor(c).length > 0);
+    const reached = toAsk.length ? await loadReachedPerson(toAsk) : null;
+    for (const call of toAsk) {
       if (String(call.transcription || '').length > CALL_TRANSCRIPT_CHARS) { tally.skippedLong++; continue; }
-      const ex = safeParse(call.ai_extraction);
-      const v2 = call.v2_extraction_status === 'valid' ? safeParse(call.ai_extraction_enriched) : {};
-      const baselines = {
-        callback_requested: { production: Boolean(call.voicemail_callback_alerted_at) || leadSids.has(call.twilio_call_sid) || triaged.has(String(call.id)) },
-        // vendor_or_partner is a pitch only when V2's spam verdict did not clear
-        // the content (extraction-compat's rule): a cleared partner is not.
-        is_vendor_or_spam: { production: call.processing_status === 'spam' || ex.is_spam === true || (v2.call_nature === 'vendor_or_partner' && v2.spam_verdict?.is_spam_content !== false) },
-      };
       const only = missingFor(call);
-      const stored = storedAnswers.get(String(call.id)) || null;
-      const outcome = await askAndRecord(call, { packageId: 'voicemail.v1', baselines, only, storedSiblings: stored }, clef);
-      // A provider recorded now joins the answered set for the reconcile below.
-      for (const p of only) if (outcome[p] === 'recorded') { if (!answered.has(String(call.id))) answered.set(String(call.id), new Set()); answered.get(String(call.id)).add(p); }
-      // Per provider actually asked: Jev on the main counts, Clef under .clef.
-      for (const provider of only) {
-        const t = provider === 'typesafe' ? tally : (tally.clef = tally.clef || { asked: 0, recorded: 0, failed: 0 });
-        t.asked++;
-        if (outcome[provider] === 'recorded') t.recorded++; else t.failed++;
-      }
+      const outcome = await askAndRecord(call, {
+        packageId: 'voicemail.v1', baselines: voicemailBaselines(call, reached), only, storedSiblings: storedAnswers.get(String(call.id)) || null,
+      }, clef);
+      tallyLegs(tally, only, outcome);
+      const recorded = only.filter((p) => outcome[p] === 'recorded');
+      if (recorded.length) done.set(String(call.id), new Set([...(done.get(String(call.id)) || []), ...recorded]));
     }
-    // A retried leg's rows were written beside rows recorded earlier, so a
-    // disagreement only visible now must queue both (pre-push audit P1).
-    await reconcileAll(candidates);
+    // Idempotent, no model call: every voicemail two providers answered is
+    // reconciled each pass, so a disagreement only visible after a retried leg
+    // queues both rows, and a reconcile that failed once is retried.
+    for (const call of candidates) {
+      if ((done.get(String(call.id)) || new Set()).size > 1) await reconcileVoicemailCohorts(call.id, currentHash.get(String(call.id)));
+    }
   } catch (err) {
     logger.warn(`[self-audit] voicemail shadow failed: ${err.message}`);
   }
