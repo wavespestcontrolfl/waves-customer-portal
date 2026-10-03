@@ -9,7 +9,7 @@ const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const BillingRetryEmail = require('./billing-retry-email-obligation');
 const AccountMembershipEmail = require('./account-membership-email');
 const AnnualPrepayRenewals = require('./annual-prepay-renewals');
-const { resolveBillingLane } = require('./billing-lane');
+const { resolveBillingLane, findLiveStampedDuesInvoice } = require('./billing-lane');
 const {
   REASONS: RETRY_REASONS,
   DISPOSITIONS: RETRY_DISPOSITIONS,
@@ -195,8 +195,8 @@ const MONTHLY_LOCK_RETRY_DELAY_MS = 3000;
 // (billed_month stamp), payment_date window + description marker as the
 // legacy fallback; exactly the dedupe charge-now and the retry classifier
 // (retry-collectibility.js) apply.
-function findCollectedMonthlyPayment(customerId, { monthKey, monthStart, monthEnd }) {
-  return db('payments')
+async function findCollectedMonthlyPayment(customerId, { monthKey, monthStart, monthEnd }) {
+  const payment = await db('payments')
     .where({ customer_id: customerId })
     .whereIn('status', ['paid', 'processing'])
     .where(function () {
@@ -209,6 +209,12 @@ function findCollectedMonthlyPayment(customerId, { monthKey, monthStart, monthEn
         });
     })
     .first();
+  if (payment) return payment;
+  // A live completion-minted dues invoice (paid, processing or still open)
+  // IS this month's bill — an unpaid one is collected by the invoice
+  // follow-up ladder, never by a second charge. No payment row to name.
+  const duesInvoice = await findLiveStampedDuesInvoice(db, customerId, monthKey);
+  return duesInvoice ? { id: null, dues_invoice_id: duesInvoice.id } : undefined;
 }
 
 // Run fn() under the per-customer collection lock; the lock closes the
@@ -1046,7 +1052,11 @@ const BillingCron = {
       // RESOLUTION: obligation month already collected through another door
       // — resolve the row against the collecting payment.
       if (verdict.reason === RETRY_REASONS.ALREADY_COLLECTED) {
-        const collectedId = verdict.collectedByPaymentId;
+        // A month billed on a live membership-dues invoice with no payment
+        // row of its own (still open) resolves the failed row against ITSELF —
+        // the self-supersede convention — so it stops counting as a balance
+        // beside the invoice that bills the month.
+        const collectedId = verdict.collectedByPaymentId || payment.id;
         await db('payments')
           .where({ id: payment.id })
           .update({
@@ -1288,7 +1298,7 @@ const BillingCron = {
             if (obligationMonth) {
               const recheck = await classifyFailedPaymentRetry({ payment, customer, ctx });
               if (recheck.reason === RETRY_REASONS.ALREADY_COLLECTED) {
-                return { alreadyCollected: recheck.collectedByPaymentId };
+                return { alreadyCollected: recheck.collectedByPaymentId || payment.id };
               }
               if (recheck.disposition !== RETRY_DISPOSITIONS.CHARGE) {
                 // Codex round-2 P0: the recheck's verdict changed to

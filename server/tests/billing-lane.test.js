@@ -593,6 +593,8 @@ describe('membershipDuesCoverVisit — dues already collected this month', () =>
         whereRaw(sql, bindings) {
           if (sql.includes('billed_month') && bindings) state.monthKey = bindings[0];
           if (sql.includes('line_items') && bindings) state.dueMonth = JSON.parse(bindings[0])[0].membership_dues_month;
+          if (/status NOT IN/.test(sql)) state.statusNotIn = bindings;
+          if (/status IN/.test(sql) && !/NOT IN/.test(sql)) state.statusIn = bindings;
           return builder;
         },
         orWhere(fn) { fn.call(builder); return builder; },

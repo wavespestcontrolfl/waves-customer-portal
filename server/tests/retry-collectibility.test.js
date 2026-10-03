@@ -7,6 +7,8 @@ let mockCollectedRow = null;
 let mockPaidMonthlyRow = null;
 let mockOrphanRow = null;
 let mockAmbiguousSiblingRow = null;
+let mockDuesInvoiceRow = null;
+let mockDuesPaymentRow = null;
 let mockCalls = [];
 
 jest.mock('../models/db', () => {
@@ -32,6 +34,12 @@ jest.mock('../models/db', () => {
         const scopedToNoInvoice = b._wheres.some(([m, a]) => m === 'whereNull' && a === 'invoice_id');
         if (mockOrphanRow && scopedToNoInvoice && mockOrphanRow.invoice_id) return Promise.resolve(null);
         return Promise.resolve(mockOrphanRow);
+      }
+      // The completion-minted membership-dues invoice lookup (B08) and the
+      // payment row that paid it.
+      if (table === 'invoices') return Promise.resolve(mockDuesInvoiceRow);
+      if (b._wheres.some(([m, a]) => m === 'whereRaw' && String(a).includes("metadata->>'invoice_id'"))) {
+        return Promise.resolve(mockDuesPaymentRow);
       }
       const ambiguousSiblingLookup = b._wheres.some(([m, a]) => m === 'whereRaw' && String(a).includes('ambiguous_outcome'));
       if (ambiguousSiblingLookup) return Promise.resolve(mockAmbiguousSiblingRow);
@@ -81,6 +89,8 @@ beforeEach(() => {
   mockPaidMonthlyRow = null;
   mockOrphanRow = null;
   mockAmbiguousSiblingRow = null;
+  mockDuesInvoiceRow = null;
+  mockDuesPaymentRow = null;
   mockCalls = [];
   jest.clearAllMocks();
   prepay.getActivelyCoveredCustomerIds.mockResolvedValue(new Set());
@@ -105,6 +115,28 @@ describe('classifyFailedPaymentRetry — guard chain in the sweep order', () => 
     mockCollectedRow = { id: 'pay-collector' };
     const v = await classify(monthlyRow());
     expect(v).toMatchObject({ reason: REASONS.ALREADY_COLLECTED, disposition: DISPOSITIONS.SUPERSEDE_BY_COLLECTOR, collectedByPaymentId: 'pay-collector' });
+  });
+
+  // B08: a live completion-minted membership-dues invoice IS the month's bill.
+  test('a PAID stamped dues invoice for the obligation month → supersede by the payment that paid it', async () => {
+    mockDuesInvoiceRow = { id: 'inv-dues', status: 'paid' };
+    mockDuesPaymentRow = { id: 'pay-of-invoice' };
+    expect(await classify(monthlyRow())).toMatchObject({
+      reason: REASONS.ALREADY_COLLECTED, disposition: DISPOSITIONS.SUPERSEDE_BY_COLLECTOR,
+      collectedByPaymentId: 'pay-of-invoice', collectedByInvoiceId: 'inv-dues',
+    });
+  });
+
+  test('an OPEN stamped dues invoice (no payment row) → same resolution, no payment id (the sweep self-supersedes)', async () => {
+    mockDuesInvoiceRow = { id: 'inv-dues', status: 'sent' };
+    expect(await classify(monthlyRow())).toMatchObject({
+      reason: REASONS.ALREADY_COLLECTED, disposition: DISPOSITIONS.SUPERSEDE_BY_COLLECTOR,
+      collectedByPaymentId: null, collectedByInvoiceId: 'inv-dues',
+    });
+  });
+
+  test('no live stamped dues invoice → the row is still collectible', async () => {
+    expect(await classify(monthlyRow())).toMatchObject({ collectible: true, disposition: DISPOSITIONS.CHARGE });
   });
 
   test('absorbed by prepay coverage on the OBLIGATION date → self-supersede', async () => {
@@ -217,7 +249,7 @@ describe('classifyFailedPaymentRetry — guard chain in the sweep order', () => 
     // stripe_orphan_charges: the sibling-unresolved-outcome read
     // (hasUnresolvedSiblingStripeOutcome) — still read-only, still no
     // payment_methods, still no write (insert/update throw in this mock).
-    expect(new Set(mockCalls)).toEqual(new Set(['payments', 'stripe_orphan_charges']));
+    expect(new Set(mockCalls)).toEqual(new Set(['payments', 'invoices', 'stripe_orphan_charges']));
   });
 });
 

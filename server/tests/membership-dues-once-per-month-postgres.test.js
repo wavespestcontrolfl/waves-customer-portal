@@ -19,7 +19,7 @@ jest.mock('../models/marker-db', () => () => require('../models/db'));
 jest.mock('../models/db', () => {
   const db = (table, ...args) => mockPg(table, ...args);
   for (const name of ['raw', 'transaction', 'queryBuilder', 'ref']) db[name] = (...args) => mockPg[name](...args);
-  for (const name of ['schema', 'fn']) Object.defineProperty(db, name, { get: () => mockPg[name] });
+  for (const name of ['schema', 'fn', 'client']) Object.defineProperty(db, name, { get: () => mockPg[name] });
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -400,6 +400,98 @@ postgres('membership dues are owed once per ET month (B08)', () => {
       const lawn = await seedVisit(f, { label: 'Lawn Care' });
       await complete(f, lawn);
       expect(await invoicesFor(f)).toHaveLength(2);
+    } finally { await cleanup(f); }
+  });
+});
+
+// The collectors (monthly cron, retry sweep, Charge now) and the completion's
+// dues mint must agree on one bill per customer + month. The collectors hold a
+// SESSION lock across the Stripe charge, so the completion never waits on it:
+// it claims the same key without blocking and, if a collector holds it,
+// refuses retryably.
+postgres('completion dues mint vs the monthly collectors (B08)', () => {
+  const { withCustomerBillingLock } = require('../utils/customer-billing-lock');
+  const { classifyFailedPaymentRetry, loadRetryContext, REASONS, DISPOSITIONS } = require('../services/retry-collectibility');
+  beforeAll(() => { mockPg = knex({ client: 'pg', connection, pool: { min: 0, max: 8 } }); });
+  afterAll(async () => { if (mockPg) await mockPg.destroy(); });
+
+  test('a collector mid-collection for the customer → the completion mints nothing and is retryable; once released the retry mints exactly once', async () => {
+    const f = await seedMember();
+    try {
+      const lawn = await seedVisit(f, { label: 'Lawn Care' });
+      const key = randomUUID();
+      let during;
+      await withCustomerBillingLock(f.customerId, async () => {
+        during = await complete(f, lawn, {}, key);
+      });
+      expect(during).toMatchObject({ status: 503, body: { code: 'membership_dues_coverage_unverified' } });
+      expect(await invoicesFor(f)).toHaveLength(0);
+      expect(await complete(f, lawn, {}, key)).toMatchObject({ status: 200 });
+      expect(await invoicesFor(f)).toHaveLength(1);
+    } finally { await cleanup(f); }
+  });
+
+  test('a completion mid-mint holds the collectors\' key: a collector refuses (held elsewhere) instead of charging past it', async () => {
+    const { tryClaimCustomerCollectionInTrx } = require('../utils/customer-billing-lock');
+    const f = await seedMember();
+    const trx = await mockPg.transaction();
+    try {
+      expect(await tryClaimCustomerCollectionInTrx(trx, f.customerId)).toBe(true);
+      await expect(withCustomerBillingLock(f.customerId, async () => 'charged'))
+        .rejects.toMatchObject({ code: 'BILLING_CLAIM_HELD_ELSEWHERE' });
+      await trx.commit();
+      await expect(withCustomerBillingLock(f.customerId, async () => 'charged')).resolves.toBe('charged');
+    } finally { await trx.rollback().catch(() => {}); await cleanup(f); }
+  });
+
+  // Invoice paid -> autopay restored -> the armed monthly retry for the same
+  // month. Real rows, real classifier.
+  async function armedMonthlyRow(f) {
+    const id = randomUUID();
+    await mockPg('payments').insert({ id, customer_id: f.customerId, amount: 49, status: 'failed', retry_count: 1,
+      next_retry_at: new Date(), stripe_payment_intent_id: `pi_${id.slice(0, 8)}`, payment_date: etDateString(),
+      description: 'Silver WaveGuard Monthly — Fixture DuesMember — FAILED',
+      metadata: JSON.stringify({ type: 'monthly_autopay', billed_month: monthOf(etDateString()) }) });
+    return mockPg('payments').where({ id }).first();
+  }
+  async function duesInvoice(f, status) {
+    const id = randomUUID();
+    await mockPg('invoices').insert({ id, token: randomUUID().replace(/-/g, ''), invoice_number: `B08-${id.slice(0, 8)}`,
+      customer_id: f.customerId, status, total: 49, subtotal: 49,
+      line_items: JSON.stringify([{ description: 'Lawn Care', quantity: 1, unit_price: 49, amount: 49, membership_dues_month: monthOf(etDateString()) }]) });
+    return id;
+  }
+  const classify = async (f, row) => {
+    const customer = await mockPg('customers').where({ id: f.customerId }).first();
+    return classifyFailedPaymentRetry({ payment: row, customer, ctx: loadRetryContext() });
+  };
+
+  test('stamped dues invoice PAID, autopay restored → the armed monthly retry is resolved against the payment that paid it, never charged', async () => {
+    const f = await seedMember({ autopay: true });
+    try {
+      const row = await armedMonthlyRow(f);
+      const invoiceId = await duesInvoice(f, 'paid');
+      const paymentId = randomUUID();
+      await mockPg('payments').insert({ id: paymentId, customer_id: f.customerId, amount: 49, status: 'paid', payment_date: etDateString(),
+        description: 'Lawn Care', metadata: JSON.stringify({ invoice_id: invoiceId }) });
+      expect(await classify(f, row)).toMatchObject({
+        reason: REASONS.ALREADY_COLLECTED, disposition: DISPOSITIONS.SUPERSEDE_BY_COLLECTOR,
+        collectedByPaymentId: paymentId, collectedByInvoiceId: invoiceId,
+      });
+    } finally { await cleanup(f); }
+  });
+
+  test('stamped dues invoice OPEN → the retry is resolved too (no payment id: the sweep self-supersedes); VOID → collectible again', async () => {
+    const f = await seedMember({ autopay: true });
+    try {
+      const row = await armedMonthlyRow(f);
+      const invoiceId = await duesInvoice(f, 'sent');
+      expect(await classify(f, row)).toMatchObject({
+        reason: REASONS.ALREADY_COLLECTED, disposition: DISPOSITIONS.SUPERSEDE_BY_COLLECTOR,
+        collectedByPaymentId: null, collectedByInvoiceId: invoiceId,
+      });
+      await mockPg('invoices').where({ id: invoiceId }).update({ status: 'void' });
+      expect(await classify(f, row)).toMatchObject({ collectible: true, disposition: DISPOSITIONS.CHARGE });
     } finally { await cleanup(f); }
   });
 });

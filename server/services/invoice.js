@@ -1753,6 +1753,22 @@ async function stampMembershipDuesUnderLock(conn, { customerId, scheduledService
     return lineItems;
   }
   await acquireMembershipDuesMonthLock(conn, customerId, month);
+  // The monthly cron, its retry sweep and Charge now hold the per-customer
+  // collection lock (a SESSION lock held across the Stripe charge): never wait
+  // on it. Claim the same key for this transaction without blocking; while a
+  // collector holds it the month may be mid-collection, so refuse retryably
+  // (same release-for-resume path as an unreadable coverage read). Taken after
+  // the dues-month lock, which only completions wait on, so waiting here can
+  // never form a cycle with a collector.
+  const { tryClaimCustomerCollectionInTrx } = require("../utils/customer-billing-lock");
+  if (!(await tryClaimCustomerCollectionInTrx(conn, customerId))) {
+    const e = new Error(`Membership dues for ${month} may be mid-collection by the billing run — no dues invoice was created; retry.`);
+    e.status = 503;
+    e.statusCode = 503;
+    e.code = "MEMBERSHIP_DUES_COVERAGE_UNVERIFIED";
+    e.reason = "collection_in_progress";
+    throw e;
+  }
   let covered;
   try {
     const { savepointRead } = require("../utils/savepoint-read");

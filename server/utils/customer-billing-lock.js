@@ -261,4 +261,20 @@ async function withCustomerBillingLock(customerId, fn, { excludeJobLocks } = {})
   return run;
 }
 
-module.exports = { withCustomerBillingLock };
+// Non-blocking, TRANSACTION-scoped claim on the SAME key the cross-process
+// layer above holds (cron-lock.js's `cron:<name>` namespace) — for a writer
+// that must not run while a collector is mid-collection for this customer but
+// must never WAIT on it: the collectors hold their lock (a session lock on a
+// pinned connection) across the whole Stripe charge. Returns false when a
+// collector holds it. While the caller's transaction holds it, a collector's
+// own try-lock refuses (BILLING_CLAIM_HELD_ELSEWHERE) and defers, so the
+// caller's check-then-write sees no collection land in between.
+async function tryClaimCustomerCollectionInTrx(trx, customerId) {
+  const res = await trx.raw(
+    'SELECT pg_try_advisory_xact_lock(hashtext(?)) AS acquired',
+    [`cron:${crossProcessLockName(customerId)}`],
+  );
+  return res?.rows?.[0]?.acquired === true;
+}
+
+module.exports = { withCustomerBillingLock, tryClaimCustomerCollectionInTrx };

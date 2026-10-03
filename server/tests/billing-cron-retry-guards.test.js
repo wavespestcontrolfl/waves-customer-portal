@@ -22,6 +22,7 @@ let mockFailedPayments = [];
 let mockCustomer = null;
 let mockCollectedRow = null;
 let mockOrphanRow = null;
+let mockDuesInvoiceRow = null;
 let mockPaymentUpdates = [];
 let mockHoldSkipLogged = null;
 
@@ -42,6 +43,7 @@ jest.mock('../models/db', () => {
       if (table === 'customers') return Promise.resolve(mockCustomer);
       if (table === 'payments') return Promise.resolve(mockCollectedRow);
       if (table === 'stripe_orphan_charges') return Promise.resolve(mockOrphanRow);
+      if (table === 'invoices') return Promise.resolve(mockDuesInvoiceRow);
       if (table === 'autopay_log') return Promise.resolve(mockHoldSkipLogged);
       return Promise.resolve(null);
     };
@@ -126,6 +128,7 @@ beforeEach(() => {
   mockCustomer = { ...CUSTOMER };
   mockCollectedRow = null;
   mockOrphanRow = null;
+  mockDuesInvoiceRow = null;
   mockPaymentUpdates = [];
   mockHoldSkipLogged = null;
   jest.clearAllMocks();
@@ -293,6 +296,35 @@ describe('processPaymentRetries — suppression guards', () => {
         paymentId: 'pay-failed-1',
         details: expect.objectContaining({ collected_by_payment_id: 'pay-collector', billed_month: '2026-06' }),
       }));
+  });
+
+  // B08: a live completion-minted membership-dues invoice IS the month's bill.
+  // The member's card expired, they got and are paying (or about to pay) the
+  // dues invoice, then restored autopay: the armed monthly retry must not
+  // charge the same month. An open invoice has no payment row to point at, so
+  // the failed row resolves against itself (the self-supersede convention) and
+  // stops counting as a balance beside the invoice.
+  test('a live stamped dues invoice bills the obligation month: no charge, rung resolved against itself', async () => {
+    mockDuesInvoiceRow = { id: 'inv-dues', status: 'sent', scheduled_service_id: 'visit-1' };
+    mockFailedPayments = [monthlyFailedPayment()];
+
+    await BillingCron.processPaymentRetries();
+
+    expect(StripeService.charge).not.toHaveBeenCalled();
+    expect(StripeService.chargeOneTime).not.toHaveBeenCalled();
+    expect(StripeService.chargeMonthly).not.toHaveBeenCalled();
+    expect(mockPaymentUpdates).toHaveLength(1);
+    expect(mockPaymentUpdates[0].next_retry_at).toBeNull();
+    expect(mockPaymentUpdates[0].superseded_by_payment_id).toBe('pay-failed-1');
+    expect(logAutopay).toHaveBeenCalledWith('cust-1', 'skipped_already_paid',
+      expect.objectContaining({ paymentId: 'pay-failed-1', details: expect.objectContaining({ billed_month: '2026-06', ladder_stopped: true }) }));
+  });
+
+  test('without a live stamped dues invoice the same rung still charges (nothing else changed)', async () => {
+    mockFailedPayments = [monthlyFailedPayment()];
+    const charge = StripeService.charge.mockResolvedValue({ id: 'pay-new', status: 'paid', amount: '33.00', metadata: '{}' });
+    await BillingCron.processPaymentRetries();
+    expect(charge).toHaveBeenCalled();
   });
 
   test('already-collected resolution runs BEFORE the disabled state guard — row superseded, not stranded', async () => {

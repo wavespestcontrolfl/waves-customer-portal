@@ -983,19 +983,39 @@ async function monthlyDuesCollected(dbConn, customerId, now = new Date(), {
     })
     .first('id');
   if (row) return true;
+  return !!(await findLiveStampedDuesInvoice(dbConn, customerId, monthKey, { excludeScheduledServiceId, openInvoiceCovers }));
+}
+
+// The live completion-minted dues invoice for a customer + ET month, or null
+// (row: id, status, scheduled_service_id). The ONE definition every collector
+// shares — completion, the monthly cron, the retry sweep's classifier — so a
+// month a stamped invoice already bills is never charged a second time.
+// `openInvoiceCovers: false` keeps only invoices that are paid / prepaid /
+// processing.
+async function findLiveStampedDuesInvoice(dbConn, customerId, monthKey, {
+  excludeScheduledServiceId = null,
+  openInvoiceCovers = true,
+} = {}) {
   // Lazy, like the status vocabulary below: invoice.js requires this module.
   const { CANCELLED_SERVICE_RESOLVED_STATUSES } = require('./invoice');
   const invoiceQuery = dbConn('invoices')
     .where({ customer_id: customerId })
     .whereRaw('line_items::jsonb @> ?::jsonb', [JSON.stringify([{ [MEMBERSHIP_DUES_LINE_KEY]: monthKey }])]);
-  if (openInvoiceCovers) invoiceQuery.whereNotIn('status', CANCELLED_SERVICE_RESOLVED_STATUSES);
-  else invoiceQuery.whereIn('status', ['paid', 'prepaid', 'processing']);
+  // Raw status predicate (not whereNotIn/whereIn): the collectors' unit-test
+  // doubles model a thinner builder, and the vocabulary is a fixed literal.
+  const placeholders = (list) => list.map(() => '?').join(', ');
+  if (openInvoiceCovers) {
+    invoiceQuery.whereRaw(`status NOT IN (${placeholders(CANCELLED_SERVICE_RESOLVED_STATUSES)})`, CANCELLED_SERVICE_RESOLVED_STATUSES);
+  } else {
+    const paid = ['paid', 'prepaid', 'processing'];
+    invoiceQuery.whereRaw(`status IN (${placeholders(paid)})`, paid);
+  }
   if (excludeScheduledServiceId) {
     invoiceQuery.where(function otherVisits() {
       this.whereNull('scheduled_service_id').orWhereNot('scheduled_service_id', excludeScheduledServiceId);
     });
   }
-  return !!(await invoiceQuery.first('id'));
+  return (await invoiceQuery.first('id', 'status', 'scheduled_service_id')) || null;
 }
 
 // Reasons a no_charge prediction is a MONEY GAP rather than a deliberately
@@ -1702,6 +1722,7 @@ module.exports = {
   MEMBERSHIP_DUES_LINE_KEY,
   predictCompletionBilling,
   monthlyDuesCollected,
+  findLiveStampedDuesInvoice,
   siblingCoverageForSchedule,
   collectionStateForCoveredInvoice,
   siblingInvoiceCoverageVerdict,

@@ -18,7 +18,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
-const { resolveBillingLane } = require('./billing-lane');
+const { resolveBillingLane, findLiveStampedDuesInvoice } = require('./billing-lane');
 
 // Lazy: annual-prepay-renewals consumes this module for the card-expiry
 // exemption, so a top-level require would be circular. Resolved through the
@@ -383,6 +383,24 @@ async function classifyFailedPaymentRetry({
     if (collected) {
       return verdict(REASONS.ALREADY_COLLECTED, DISPOSITIONS.SUPERSEDE_BY_COLLECTOR, {
         collectedByPaymentId: collected.id,
+      });
+    }
+    // A live completion-minted membership-dues invoice for the obligation
+    // month (paid, processing or still open) IS that month's bill — same
+    // resolution, one shared lookup with completion and the monthly cron. A
+    // paid one names its payment row when there is one; an open one has none
+    // (collectedByPaymentId null: the sweep resolves the row against itself).
+    const duesInvoice = await findLiveStampedDuesInvoice(conn, payment.customer_id, obligationMonth);
+    if (duesInvoice) {
+      const duesPayment = await conn('payments')
+        .where({ customer_id: payment.customer_id })
+        .whereNot({ id: payment.id })
+        .whereIn('status', ['paid', 'processing'])
+        .whereRaw("metadata->>'invoice_id' = ?", [String(duesInvoice.id)])
+        .first('id');
+      return verdict(REASONS.ALREADY_COLLECTED, DISPOSITIONS.SUPERSEDE_BY_COLLECTOR, {
+        collectedByPaymentId: duesPayment?.id || null,
+        collectedByInvoiceId: duesInvoice.id,
       });
     }
     // RESOLUTION GUARD (Codex round-2 P0): a SIBLING attempt for this SAME
