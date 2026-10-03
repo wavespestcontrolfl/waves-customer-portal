@@ -366,7 +366,7 @@ describe('searchReportBlogPosts', () => {
     // The deployed frontmatter's title and description are read, and its title shown.
     const titled = { ...merged, metadata: { astro: { frontmatter: { title: 'Ghost Ants After Rain' } } } };
     expect(await searchReportBlogPosts(recordingKnex({ content_registry: [titled] }), 'ghost ants'))
-      .toEqual([{ id: titled.id, title: 'Ghost Ants After Rain', url: titled.live_url }]);
+      .toEqual([{ id: titled.id, title: 'Ghost Ants After Rain', url: titled.live_url, exact: true }]);
     const described = { ...merged, metadata: { frontmatter: { title: '', description: 'Why ghost ants trail inside after a storm.' } } };
     expect((await searchReportBlogPosts(recordingKnex({ content_registry: [described] }), 'ghost ants')).map((post) => post.title)).toEqual(['Spring Yard Checklist']);
     // The search's SQL never reads the columns.
@@ -441,7 +441,7 @@ describe('searchReportBlogPosts', () => {
 
   test('a plural finds the singular: "ghost ants" finds a Ghost Ant post, at its live URL', async () => {
     const knex = recordingKnex({ content_registry: [REGISTRY_LIVE] });
-    expect(await searchReportBlogPosts(knex, 'ghost ants')).toEqual([{ id: REGISTRY_LIVE.id, title: REGISTRY_LIVE.title, url: REGISTRY_LIVE.live_url }]);
+    expect(await searchReportBlogPosts(knex, 'ghost ants')).toEqual([{ id: REGISTRY_LIVE.id, title: REGISTRY_LIVE.title, url: REGISTRY_LIVE.live_url, exact: true }]);
   });
 
   test('every word first, then most; a title before a summary; newest first among equals', async () => {
@@ -467,6 +467,21 @@ describe('searchReportBlogPosts', () => {
       ],
     });
     expect((await searchReportBlogPosts(knex, 'tick control'))[0].title).toBe('Ticks on Dogs After a Walk');
+  });
+
+  test('each post says whether it holds every word: with none, the closest still come back, none exact', async () => {
+    const knex = recordingKnex({
+      content_registry: [
+        registryRow('aaaaaaaa-0000-4000-8000-000000000021', 'What Dollarweed Tells You About Your Lawn\'s Water'),
+        registryRow('aaaaaaaa-0000-4000-8000-000000000022', 'Mosquitoes Breed in Standing Water'),
+      ],
+    });
+    expect((await searchReportBlogPosts(knex, 'standing water')).map((post) => [post.title, post.exact])).toEqual([
+      ['Mosquitoes Breed in Standing Water', true],
+      ['What Dollarweed Tells You About Your Lawn\'s Water', false],
+    ]);
+    const near = recordingKnex({ content_registry: [registryRow('aaaaaaaa-0000-4000-8000-000000000021', 'What Dollarweed Tells You About Your Lawn\'s Water')] });
+    expect((await searchReportBlogPosts(near, 'standing water')).every((post) => post.exact === false)).toBe(true);
   });
 
   test('a word matches only whole: "rat" never finds "Rates"', async () => {
@@ -496,7 +511,7 @@ describe('searchReportBlogPosts', () => {
     // The registry's row for it is offered, as the registry's.
     const synced = registryRow('66666666-6666-4666-8666-666666666666', 'How to Get Rid of Ghost Ants in Sarasota', { db_blog_id: LIVE.id, live_url: LIVE.astro_live_url, canonical_url: LIVE.astro_live_url });
     expect(await searchReportBlogPosts(recordingKnex({ content_registry: [synced], blog_posts: [LIVE] }), 'ghost ants'))
-      .toEqual([{ id: synced.id, title: synced.title, url: LIVE.astro_live_url }]);
+      .toEqual([{ id: synced.id, title: synced.title, url: LIVE.astro_live_url, exact: true }]);
   });
 
   test('a registry row the link rule refuses is never offered (GitHub Codex P1 r5 on #5652; P1s on 8c57183332)', async () => {
@@ -729,7 +744,7 @@ describe('GET /:serviceId/blog-posts', () => {
     const roofRats = registryRow('88888888-8888-4888-8888-888888888888', 'Roof Rats in Sarasota Attics');
     mockDbCurrent = scriptedDb(service, [LIVE], [], [roofRats]);
     const res = await invoke({ serviceId: 'svc-1' }, { q: 'roof rats' }, { techRole: 'technician', technicianId: 'tech-1' });
-    expect(res.body).toEqual({ available: true, posts: [{ id: roofRats.id, title: roofRats.title, url: roofRats.live_url }] });
+    expect(res.body).toEqual({ available: true, posts: [{ id: roofRats.id, title: roofRats.title, url: roofRats.live_url, exact: true }], suggest: false });
     expect(mockResolveProfile).toHaveBeenCalledWith(service);
   });
 
@@ -738,10 +753,10 @@ describe('GET /:serviceId/blog-posts', () => {
     const calls = [];
     mockDbCurrent = scriptedDb(SERVICE, [LIVE], calls, [REGISTRY_LIVE, { ...REGISTRY_LIVE, id: '2', live_status: 'not_found' }]);
     const res = await invoke({ serviceId: 'svc-1' }, { q: 'ghost ants' }, { techRole: 'technician', technicianId: 'tech-1' });
-    expect(res.body).toEqual({ available: true, posts: [{ id: REGISTRY_LIVE.id, title: REGISTRY_LIVE.title, url: REGISTRY_LIVE.live_url }] });
+    expect(res.body).toEqual({ available: true, posts: [{ id: REGISTRY_LIVE.id, title: REGISTRY_LIVE.title, url: REGISTRY_LIVE.live_url, exact: true }], suggest: false });
     calls.length = 0;
     const probe = await invoke({ serviceId: 'svc-1' }, {}, { techRole: 'technician', technicianId: 'tech-1' });
-    expect(probe.body).toEqual({ available: true, posts: [] });
+    expect(probe.body).toEqual({ available: true, posts: [], suggest: false });
     expect(calls).toEqual(['scheduled_services']);
   });
 });

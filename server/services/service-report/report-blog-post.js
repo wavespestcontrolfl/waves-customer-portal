@@ -267,7 +267,8 @@ const pathKey = (url) => {
 };
 
 /**
- * The site's live hub posts that answer a search, best first, at most eight:
+ * The site's live hub posts that answer a search, best first, at most eight,
+ * each marked `exact` when it holds every word:
  * those holding every word first, then those holding the rarest of the
  * words, a word in the title or headline before one only in the keyword or
  * summary, newest first among equals. No usable words, no results. Read from the
@@ -303,7 +304,10 @@ async function searchReportBlogPosts(knex, query) {
   return entries
     .sort((a, b) => Number(every(b)) - Number(every(a)) || specific(b) - specific(a) || b.placed - a.placed || b.when - a.when)
     .slice(0, MAX_RESULTS)
-    .map((entry) => entry.post);
+    // `exact`: the post holds every word. With none exact, the forms say no
+    // post covers the search, show these as the closest, and offer to
+    // suggest one (owner mockup approval 2026-10-03).
+    .map((entry) => ({ ...entry.post, exact: every(entry) }));
 }
 
 /**

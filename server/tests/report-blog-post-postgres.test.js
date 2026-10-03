@@ -120,7 +120,8 @@ postgres('report blog search on Postgres', () => {
     const rare = registryRow('Tick Season Guide for Florida Yards', { daysAgo: 2000 });
     await mockPg.batchInsert('content_registry', [...common, rare], 200);
     const posts = await searchReportBlogPosts(mockPg, 'tick control');
-    expect(posts[0]).toEqual({ id: rare.id, title: rare.title, url: rare.live_url });
+    // It holds "tick" but not "control": the closest post, not an exact one.
+    expect(posts[0]).toEqual({ id: rare.id, title: rare.title, url: rare.live_url, exact: false });
     expect(posts).toHaveLength(8);
     // Among equals, newest first.
     expect(posts.slice(1).map((post) => post.title)).toEqual(Array.from({ length: 7 }, (_, i) => `Weed Control Tips ${i}`));

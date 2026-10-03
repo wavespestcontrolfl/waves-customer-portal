@@ -541,33 +541,80 @@ async function loadPreviousRecommendations({ customerId, serviceType, serviceId,
 // the completion's own rule), so any other visit answers { available: false }
 // too. Read-only; off = the answer is { available: false } with no database
 // read.
+// The visit a blog search or suggestion is for: a technician only their own
+// current visit, admins office-wide (the completion routes' rule), with
+// whether it carries a blog post at all (the completion's own rule for
+// keeping a pick, complete-scheduled-service). Null once an error answered.
+async function blogPostVisit(req, res) {
+  const svc = await db('scheduled_services')
+    .where({ id: req.params.serviceId })
+    .first('id', 'technician_id', 'status', 'scheduled_date', 'service_type', 'service_id', 'service_key_snapshot', 'is_recurring');
+  if (!svc) {
+    res.status(404).json({ error: 'Service not found' });
+    return null;
+  }
+  const ownershipError = completionOwnershipError({
+    role: req.techRole,
+    actorTechnicianId: req.technicianId,
+    assignedTechnicianId: svc.technician_id,
+  });
+  if (ownershipError) {
+    res.status(ownershipError.status).json(ownershipError.payload);
+    return null;
+  }
+  if (!technicianVisitRowInScope(req, svc)) {
+    res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
+    return null;
+  }
+  const { blogPostAllowedFor } = require('../services/service-report/report-blog-post');
+  const profile = await resolveCompletionProfileForScheduledService(svc);
+  return { svc, allowed: blogPostAllowedFor({ serviceType: svc.service_type, profile }) };
+}
+
 router.get('/:serviceId/blog-posts', async (req, res, next) => {
   try {
-    if (!require('../config/feature-gates').reportBlogPostLive()) {
+    const gates = require('../config/feature-gates');
+    if (!gates.reportBlogPostLive()) {
       return res.json({ available: false, posts: [] });
     }
-    const svc = await db('scheduled_services')
-      .where({ id: req.params.serviceId })
-      .first('id', 'technician_id', 'status', 'scheduled_date', 'service_type', 'service_id', 'service_key_snapshot', 'is_recurring');
-    if (!svc) return res.status(404).json({ error: 'Service not found' });
-    // A technician searches only from their own current visit; admins keep
-    // office-wide reach (the completion routes' rule).
-    const ownershipError = completionOwnershipError({
-      role: req.techRole,
-      actorTechnicianId: req.technicianId,
-      assignedTechnicianId: svc.technician_id,
-    });
-    if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
-    if (!technicianVisitRowInScope(req, svc)) {
-      return res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
-    }
-    // The completion's own rule for keeping a pick (complete-scheduled-service).
-    const { blogPostAllowedFor, searchReportBlogPosts } = require('../services/service-report/report-blog-post');
-    const profile = await resolveCompletionProfileForScheduledService(svc);
-    if (!blogPostAllowedFor({ serviceType: svc.service_type, profile })) return res.json({ available: false, posts: [] });
+    const visit = await blogPostVisit(req, res);
+    if (!visit) return undefined;
+    if (!visit.allowed) return res.json({ available: false, posts: [] });
+    const { searchReportBlogPosts } = require('../services/service-report/report-blog-post');
     const posts = await searchReportBlogPosts(db, req.query?.q);
-    res.json({ available: true, posts });
+    // `suggest`: whether a search no post covers can be suggested as a new
+    // post (GATE_BLOG_SEARCH_SUGGEST).
+    res.json({ available: true, posts, suggest: gates.blogSearchSuggestLive() });
   } catch (err) { next(err); }
+});
+
+// POST /api/admin/dispatch/:serviceId/blog-suggestions { phrase } — "Suggest
+// a post" from the completion forms' blog search (GATE_BLOG_SEARCH_SUGGEST
+// with GATE_REPORT_BLOG_POST; owner mockup approval 2026-10-03, straight into
+// the autonomous blog queue). The visit's reach and blog rule are the
+// search's own. Answers 201 { status: 'queued' }, 200 { status:
+// 'already_queued' }, 409 { status: 'covered' } when a live post now holds
+// every word, 422 { error: 'not_a_topic' }, 429 { error:
+// 'too_many_suggestions' }. Never logs the phrase.
+router.post('/:serviceId/blog-suggestions', async (req, res, next) => {
+  try {
+    const gates = require('../config/feature-gates');
+    if (!gates.reportBlogPostLive() || !gates.blogSearchSuggestLive()) return res.status(404).json({ enabled: false });
+    const visit = await blogPostVisit(req, res);
+    if (!visit) return undefined;
+    if (!visit.allowed) return res.status(409).json({ error: 'not_available' });
+    const { suggestReportBlogPost } = require('../services/service-report/report-blog-suggestion');
+    const answer = await suggestReportBlogPost(db, {
+      phrase: req.body?.phrase,
+      actorId: req.technicianId || null,
+      scheduledServiceId: visit.svc.id,
+    });
+    if (answer.error === 'too_many_suggestions') return res.status(429).json(answer);
+    if (answer.error) return res.status(422).json(answer);
+    if (answer.status === 'covered') return res.status(409).json(answer);
+    logger.info(`[blog-suggest] ${answer.status} from service ${visit.svc.id}`);
+    return res.status(answer.status === 'queued' ? 201 : 200).json(answer);
+  } catch (err) { return next(err); }
 });
 
 // GET /api/admin/dispatch/:serviceId/tech-tips — the completion screen's
