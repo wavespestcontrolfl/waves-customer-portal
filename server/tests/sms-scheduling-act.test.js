@@ -48,6 +48,7 @@ function fakeDeps(over = {}) {
       ...(over.reschedulePublic || {}),
     },
     loadBookingConfig: jest.fn(async () => ({})),
+    notice: { visitInsideMoveNoticeWindow: jest.fn(() => false), violatesSelfServeNotice: jest.fn(() => false), ...(over.notice || {}) },
     rebooker: { reschedule: jest.fn(async () => ({})), rescheduleSeries: jest.fn(async () => ({ seriesMoveId: 'series-1' })), ...(over.rebooker || {}) },
     reminders: { handleReschedule: jest.fn(async () => null) },
     emitDispatchJobUpdate: jest.fn(async () => null),
@@ -132,6 +133,22 @@ describe('gate on', () => {
     const { result } = await run({}, deps, fakeDb({ marked: false }));
     expect(result).toMatchObject({ executed: false, status: 'refused', reason: 'guard_not_run' });
     expect(deps.reminders.handleReschedule).not.toHaveBeenCalled();
+  });
+
+  test("the link's notice rules are checked again inside the mover, for the visit and for the new time", async () => {
+    for (const notice of [{ visitInsideMoveNoticeWindow: () => true }, { violatesSelfServeNotice: () => true }]) {
+      // A mover that runs its beforeMove hook, as the real one does under its locks.
+      const reschedule = jest.fn(async (...args) => { await args[5].beforeMove(); return {}; });
+      const deps = fakeDeps({ notice, rebooker: { reschedule } });
+      const { result } = await run({}, deps);
+      expect(reschedule).toHaveBeenCalledTimes(1);
+      expect(result).toMatchObject({ executed: false, status: 'refused', reason: 'self_serve_notice' });
+      expect(deps.reminders.handleReschedule).not.toHaveBeenCalled();
+    }
+    // A missed visit is being rebooked: its own past start does not refuse it.
+    const deps = fakeDeps({ notice: { visitInsideMoveNoticeWindow: () => true }, reschedulePublic: { pageEligibility: jest.fn(async () => ({ ok: true, missed: true })) },
+      rebooker: { reschedule: jest.fn(async (...args) => { await args[5].beforeMove(); return {}; }) } });
+    expect((await run({}, deps)).result).toMatchObject({ executed: true });
   });
 
   test('an unexpected error is recorded as failed and never thrown', async () => {

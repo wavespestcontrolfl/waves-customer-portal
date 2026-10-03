@@ -165,11 +165,19 @@ async function moveVisit({ dbh, decisionId, offer, slot, visit, repliedAt, now, 
   // visits with it (owner rulings 2026-07-13 and 2026-07-30); anything else
   // moves this one visit and keeps the picker's route placement.
   const series = page.shouldReanchor(svc, slot.date);
+  // The link's notice rules again under the mover's locks, on the clock as it
+  // reads then: a request that waited across the cutoff is refused, as the
+  // link refuses it. A missed visit is being rebooked; its own start is past.
+  const notice = deps.notice || require('./scheduling/self-serve-notice');
+  const beforeMove = async () => {
+    if (!eligible.missed && notice.visitInsideMoveNoticeWindow(svc)) throw guardError('self_serve_notice');
+    if (notice.violatesSelfServeNotice({ date: slot.date, startTime: window.start })) throw guardError('self_serve_notice');
+  };
   const moveGuard = buildMoveGuard({ decisionId, offer, visitId: svc.id, customerId: svc.customer_id, now, target });
   // Customer-facing move: the offer was built under the travel-gap rule.
   // operationKey: this decision's own, so the series mover never answers with
   // an earlier move to the same time (a replay would skip the guard).
-  const shared = { technicianId: open.technician_id, sourceSurface: SOURCE_SURFACE, travelGap: true, moveGuard, operationKey: `sms_offer:${decisionId}` };
+  const shared = { technicianId: open.technician_id, sourceSurface: SOURCE_SURFACE, travelGap: true, beforeMove, moveGuard, operationKey: `sms_offer:${decisionId}` };
   const rebooker = deps.rebooker || require('./rebooker');
   let result;
   try {
@@ -206,7 +214,9 @@ async function moveVisit({ dbh, decisionId, offer, slot, visit, repliedAt, now, 
 
 /**
  * Carry out one recorded would-move. `visit` is the visit row the decide step
- * checked; `repliedAt` is when the customer's text arrived.
+ * checked; `repliedAt` is when the customer's text arrived; `now` is the
+ * clock when the executor starts (after the model answered), not the
+ * webhook's.
  * → { executed: true, status: 'moved', date, start, end }
  *   or { executed: false, status?, reason }. Never throws.
  */

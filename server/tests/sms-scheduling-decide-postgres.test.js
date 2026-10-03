@@ -212,7 +212,9 @@ describeOrSkip('sms_offer_decisions on PostgreSQL', () => {
         expect(on).toMatchObject({ recorded: true, outcome: 'would_move', executed: true });
         expect(executeMove).toHaveBeenCalledTimes(1);
         const call = executeMove.mock.calls[0][0];
-        expect(call).toMatchObject({ decisionId: on.id, slot: { date: '2040-03-06', start: '10:00' }, now: NOW, dbh: trx });
+        expect(call).toMatchObject({ decisionId: on.id, slot: { date: '2040-03-06', start: '10:00' }, dbh: trx });
+        // The executor reads its own clock: the decide step's is from before the model's wait.
+        expect(call.now).toBeUndefined();
         expect(call.offer.scheduled_service_id).toBe(visitId);
         expect(call.visit.id).toBe(visitId);
         // The moment the customer's text arrived, not when it was decided.
