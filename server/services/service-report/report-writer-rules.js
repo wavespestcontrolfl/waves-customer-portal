@@ -362,7 +362,13 @@ const LAWN_NUMERIC_DATE_RE = /\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/;
 // A result tied to the next visit ("should fade by your next visit"); a plan
 // at it ("we will recheck at your next visit") passes.
 const LAWN_BY_NEXT_VISIT_RE = /\b(?:by|until|before)\s+(?:your|the|our)\s+next\s+(?:visit|treatment|application|service|appointment)\b/i;
-const LAWN_NAMED_TIMING_RE = /\bover\s+time\b|\b(?:soon|shortly|eventually|later|tomorrow|tonight|overnight)\b/i;
+const LAWN_NAMED_TIMING_RE = /\bover\s+time\b|\b(?:soon|shortly|eventually|later|tomorrow|tonight|overnight|immediately|instantly)\b|\bright\s+away\b|\b(?:by|until|before|in|this|next|come)\s+(?:the\s+)?(?:spring|summer|fall|autumn|winter)\b/i;
+// A sentence that is history, not a promise: past or perfect tense and no
+// future or expectation word ("The lawn has been browning for three days",
+// "Three weeks of dry weather stressed the lawn before our visit"). A
+// sentence with a future word still fails on any duration.
+const LAWN_PAST_SENTENCE_RE = /\b(?:has|have|had)\s+been\b|\b(?:was|were|did|ago)\b|\bbefore\s+(?:our|the|this|today'?s)\s+(?:visit|service|treatment)\b/i;
+const LAWN_FUTURE_WORD_RE = /\b(?:will|should|may|might|can|could|would|expect\w*|going\s+to|begin\w*|start\w*|continue\w*|keep\w*|until|soon)\b|'ll\b/i;
 function lawnResultTimingViolation(text) {
   const copy = String(text || '');
   if (TIMEFRAME_RE.test(copy) || LAWN_NAMED_TIMING_RE.test(copy) || LAWN_BY_NEXT_VISIT_RE.test(copy)
@@ -372,6 +378,7 @@ function lawnResultTimingViolation(text) {
       const after = sentence.slice(m.index + m[0].length, m.index + m[0].length + 20);
       const before = sentence.slice(Math.max(0, m.index - 30), m.index);
       if (PAST_AFTER_RE.test(after) || PAST_BEFORE_RE.test(before)) continue;
+      if (LAWN_PAST_SENTENCE_RE.test(sentence) && !LAWN_FUTURE_WORD_RE.test(sentence)) continue;
       return true;
     }
   }
