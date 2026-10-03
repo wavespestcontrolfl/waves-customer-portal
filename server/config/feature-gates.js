@@ -117,6 +117,7 @@
  *   GATE_TYPED_DECISIONS=true (typed yes/no decisions from TypeSafe Jev, pinned model ROUTES.typedDecision; services/typed-decisions/jev.js askPackage answers a registered decision package or returns {ok:false, reason:'gate_off'}; shadow/evidence only, no customer sends; ships DARK, read at call time via typedDecisionsLive(); unset = off)
  *   GATE_CALL_INCIDENTS=true (correction loop for calls: the nightly 04:10 ET job turns each self-audit field disagreement into an ai_incidents row, confirmed only when a second model on the other provider from the auditor's, reading the call blind, reaches the auditor's answer and both readers' excerpts are in the transcript (unknown auditor provider or a truncated call stays a lead); Sunday 04:50 fix proposals for calls; services/call-incidents.js. Adds about one fast-tier OpenAI call per finding; shadow data only, no customer sends; honoured only while GATE_CALL_SELF_AUDIT is on; ships DARK, read at call time via callIncidentsLive(); unset = off)
  *   GATE_TYPED_DECISIONS_CLEF=true (the same decision packages put to Cloudflare Clef on Workers AI as a second provider, ROUTES.typedDecisionClef, model MODEL_CLOUDFLARE_CLEF default clef-flash; askPackage(..., { provider: 'cloudflare' }); honoured only while GATE_TYPED_DECISIONS is live; shadow/evidence only, no customer sends; ships DARK, read at call time via typedDecisionsClefLive(); unset = off)
+ *   GATE_PHOTO_PRIVACY=shadow (photo privacy check, Clef second wave idea 3: each technician social post's photo is put to Cloudflare Clef as photo_privacy.v1 (face, person, readable address text, license plate, child, pet) AFTER the post is published and logged, and the answers land in decision_reviews for labeling; services/typed-decisions/photo-privacy-shadow.js. SHADOW ONLY: nothing is held, changed or shown to the technician; `shadow` is the only value honoured (anything else = off) and only while GATE_TYPED_DECISIONS_CLEF is live; ships DARK, read at call time via photoPrivacyMode(); unset = off)
  *   GATE_REPORT_PRODUCT_COPY=true (owner-approved 2026-09-28 wording page: three short customer-facing lines per applied product on the service report — "How it works", "Also labeled for", "Pets & kids" — matched to the applied catalog product by EPA registration number primarily, an explicit name-alias list otherwise; server/config/report-product-copy.js. Unmatched products get NO copy — fail closed, never guessed. Customer display, plus the "How it works" line as grounding for the AI report writer under GATE_REPORT_WRITER_RULES (owner "ok go" 2026-10-01: the writer explains why the work fits, never where it was applied). Off unless exactly 'true', read at call time via reportProductCopyGateOn() in report-product-copy.js; the gates-map entry below is for logGateStatus only)
  *   GATE_VAN_SCENE=true (the "look for this van" scene under the appointment header card and on the booking confirmation step; dev-open (every non-production NODE_ENV renders it regardless), prod dark; prod kill = unset)
  *   GATE_SLOT_TRAVEL_GAP=true (every customer-facing picker + commit gate requires modeled drive time + SLOT_TRAVEL_BUFFER_MINUTES (default 15) between consecutive stops; read at call time; unset = pure-overlap legacy)
@@ -798,6 +799,10 @@ const gates = {
   // enforces: with GATE_TYPED_DECISIONS off the lane is dark whatever this
   // variable says, and the status must not read as enabled (Codex r1 on #5557).
   typedDecisionsClef: gateEnvValue('GATE_TYPED_DECISIONS') && gateEnvValue('GATE_TYPED_DECISIONS_CLEF'),
+  // Photo privacy shadow: ships DARK. CALL-TIME reader is photoPrivacyMode()
+  // below; this entry is for logGateStatus only and carries the reader's
+  // prerequisites, so it never reads as enabled while the Clef leg is dark.
+  photoPrivacy: gateEnvValue('GATE_TYPED_DECISIONS') && gateEnvValue('GATE_TYPED_DECISIONS_CLEF') && String(process.env.GATE_PHOTO_PRIVACY || '').toLowerCase() === 'shadow',
   // Estimated AI spend: ships DARK. CALL-TIME reader is llmCostTrackingLive()
   // below; this entry is for logGateStatus only.
   llmCostTracking: process.env.GATE_LLM_COST_TRACKING === 'true',
@@ -4254,6 +4259,16 @@ function typedDecisionsClefLive() {
   return typedDecisionsLive() && gateEnvValue('GATE_TYPED_DECISIONS_CLEF');
 }
 
+// GATE_PHOTO_PRIVACY read at CALL time: 'shadow' while the variable says
+// shadow AND the Clef typed-decision leg is live (the photo questions go to
+// Clef only), otherwise 'off'. `suggest` and `act` are not built: any other
+// value is off, so a later mode can never switch on by a typo. Unset is the
+// kill, no redeploy.
+function photoPrivacyMode() {
+  if (!typedDecisionsClefLive()) return 'off';
+  return String(process.env.GATE_PHOTO_PRIVACY || '').toLowerCase() === 'shadow' ? 'shadow' : 'off';
+}
+
 // GATE_REPORT_WRITER_RULES read at CALL time — off unless exactly 'true'.
 // On, POST /generate-report (admin-schedule.js) gives every report writer
 // except lawn and tree/shrub/palm the owner rules block, withholds product
@@ -5225,6 +5240,7 @@ module.exports.portalChatReserviceLawnLive = portalChatReserviceLawnLive;
 module.exports.typedDecisionsLive = typedDecisionsLive;
 module.exports.callIncidentsLive = callIncidentsLive;
 module.exports.typedDecisionsClefLive = typedDecisionsClefLive;
+module.exports.photoPrivacyMode = photoPrivacyMode;
 module.exports.tsFastCompleteLive = tsFastCompleteLive;
 module.exports.tsTechFindingsCopyLive = tsTechFindingsCopyLive;
 module.exports.lawnReserviceFastCompleteLive = lawnReserviceFastCompleteLive;
