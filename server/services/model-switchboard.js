@@ -152,7 +152,6 @@ const POLICY_SELECTOR = {
   photoIdPlantV2: { primary: 'GEMINI_PHOTO_ID_PLANT', fallback: 'OPENAI_PLANT_ID' },
   plantIdVision: { primary: 'GEMINI_VISION_BEST', fallback: 'OPENAI_PLANT_ID' },
   visitBrief: { primary: 'WORKHORSE', fallback: 'OPENAI_BALANCED' },
-  jobCardParagraph: { primary: 'OPENAI_FAST', fallback: 'FAST' },
   deepAnalysis: { primary: 'DEEP', fallback: 'OPENAI_REPORT_WRITER' },
   imageScreen: { primary: 'OPENAI_IMAGE_SCREEN', fallback: 'VISION' },
   voiceJudge: { primary: 'VOICE_JUDGE', fallback: 'OPENAI_REPORT_WRITER' },
@@ -480,7 +479,6 @@ const LANES = [
   L('newsletter', 'Newsletter drafts + autopilot rerank', 'newsletter-draft.js, newsletter-autopilot.js, routes/admin-newsletter.js', 'voice', P('newsletterWriter', 'primary'), P('newsletterWriter', 'fallback'), { note: 'owner ruling 2026-09-27: Opus 5.5 effort max; the admin Compose UI overrides effort to high per-call so an interactive draft cannot hang the request' }),
   L('content_misc', 'Content ideas, scheduler copy, automation emails', 'routes/admin-content-v2.js, content-scheduler.js, routes/admin-automations.js', 'voice', P('contentDraft', 'primary'), P('contentDraft', 'fallback')),
   L('previsit_brief', 'Pre-visit brief', 'previsit-brief.js', 'voice', P('visitBrief', 'primary'), P('visitBrief', 'fallback')),
-  L('job_card_paragraph', 'Job card customer paragraph', 'job-card.js', 'voice', P('jobCardParagraph', 'primary'), P('jobCardParagraph', 'fallback'), { note: 'GATE_JOB_CARD_LLM, dark' }),
   // Inbound Sandy calls resolve their own env chain — VOICE_RELAY_INBOUND_MODEL
   // (pinned once per session at conversation construction), else the shared
   // VOICE_RELAY_MODEL, else the VOICE tier. Collections reads VOICE_RELAY_MODEL
@@ -700,7 +698,6 @@ const LANE_AREA = {
   completion_recap: 'reports',
   lawn_visit_narratives: 'reports',
   previsit_brief: 'reports',
-  job_card_paragraph: 'reports',
   visit_voice_facts: 'reports',
   visit_lane_facts: 'reports',
   visit_typed_facts: 'reports',
@@ -862,7 +859,6 @@ const LANE_DESCRIBE = {
   completion_recap: 'Writes the short recap the customer gets',
   lawn_visit_narratives: 'Writes lawn and visit summaries',
   previsit_brief: 'Briefs the tech before a visit',
-  job_card_paragraph: 'Writes the job card\'s customer paragraph',
   visit_voice_facts: 'Reads where the technician treated and the pests they named from their visit note',
   visit_lane_facts: 'Reads a specialty visit\'s places and findings from the technician\'s visit note',
   visit_typed_facts: 'Reads a typed visit\'s findings from the technician\'s visit note',
