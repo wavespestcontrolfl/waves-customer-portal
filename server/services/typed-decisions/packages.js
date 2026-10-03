@@ -13,7 +13,7 @@
  *
  * An optional `imageSlots` (an integer 1..MAX_IMAGE_SLOTS = 4, Clef's per-request
  * maximum) lets a package take that many photos on the Clef provider only
- * (askPackage `{ images }`); none declares it yet. A registered package with any
+ * (askPackage `{ images }`); photo_privacy.v1 is the first. A registered package with any
  * other value fails at load.
  *
  * Question ids are the keys of `questions` (Jev answers by id). A `noul`
@@ -184,9 +184,9 @@ const VOICEMAIL = {
 // (./visit-access-shadow.js) for today's and tomorrow's visits. Nothing in
 // production makes these judgments today, so only two questions have a
 // baseline (the structured pet count and whether any code is on file); the
-// rest are label-only rows. The state never holds a code: `structured` says
-// only WHETHER codes are on file, and every free-text field passes
-// redactAccessCodes plus a digit-run mask before it is built. Yes/no only
+// rest are label-only rows. The state never holds a saved code: `structured`
+// says only WHETHER codes are on file, and a text that mentions access leaves
+// only as a closed-vocabulary marker (visit-access-shadow.js). Yes/no only
 // (the Clef replay showed multi-way choices are weak). Evidence only: no card,
 // brief, bell or customer text changes.
 const VISIT_ACCESS = {
@@ -224,6 +224,32 @@ const VISIT_ACCESS = {
   },
 };
 
+// What a photo shows that should not be public (Clef second wave, idea 3;
+// owner CW-D5 2026-10-02). One photo per request, Clef only (Jev takes no
+// images). The first caller is the technician social post (routes/tech-social.js),
+// in shadow: the publish path has no image check today. Every question asks the
+// positive ("does it show ..."), never a negation. This is not identification:
+// nothing here names a pest, plant or person. `surface` is where the photo is
+// headed (social | report | blog_hero); `caption` is the text published with it.
+// The wording is the draft measured on 39 report photos (2026-10-02 replay).
+const PHOTO_PRIVACY = {
+  id: 'photo_privacy.v1',
+  capability: 'photo_privacy',
+  version: 1,
+  description: 'Six yes/no reads of one photo before it is public: a face, a person, readable address text, a license plate, a child, a pet.',
+  stateShape: ['surface', 'caption'],
+  imageSlots: 1,
+  thresholds: { ...THRESHOLDS },
+  questions: {
+    shows_face: noul('Does the photo show a recognizable human face?'),
+    shows_person: noul('Does the photo show any person, including from behind or at a distance?'),
+    shows_address_text: noul('Does the photo show a readable house number, street sign or address text?'),
+    shows_license_plate: noul('Does the photo show a readable vehicle license plate?'),
+    shows_child: noul('Does the photo show a child?'),
+    shows_pet: noul('Does the photo show a pet or domestic animal?'),
+  },
+};
+
 const PACKAGES = deepFreeze({
   [CALL_JUDGE.id]: CALL_JUDGE,
   [CALL_GATE_CHECKS.id]: CALL_GATE_CHECKS,
@@ -231,6 +257,7 @@ const PACKAGES = deepFreeze({
   [SMS_RESCHEDULE.id]: SMS_RESCHEDULE,
   [SMS_SOLICITATION.id]: SMS_SOLICITATION,
   [VOICEMAIL.id]: VOICEMAIL,
+  [PHOTO_PRIVACY.id]: PHOTO_PRIVACY,
   [VISIT_ACCESS.id]: VISIT_ACCESS,
 });
 

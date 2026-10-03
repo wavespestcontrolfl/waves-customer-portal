@@ -48,3 +48,43 @@ describe('ProductLabelReview decisions', () => {
     expect(JSON.parse(posts()[0][1].body)).toEqual({ candidateId: 'candidate-1', decision: 'reject' });
   });
 });
+
+// The rate review is the same component on its own route, with rate lines
+// shown as the label states them.
+describe('ProductLabelReview rates', () => {
+  const rateDraft = {
+    id: 'rate-candidate-1',
+    source: { productName: 'Synthetic product', registration: 'TEST-100', url: 'https://example.test/label.pdf' },
+    facts: { directions: [
+      { useSite: 'Outdoor perimeter', targets: 'Ants, spiders', method: 'Coarse spray', quote: 'Synthetic label: 1/3 to 2/3 fl oz per 1,000 board feet.', page: 4 },
+      { useSite: 'Turf', targets: 'Listed pests', method: '', quote: 'Synthetic label: see rate table.', page: 7 },
+    ] },
+  };
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn(async (url, options) => ({ ok: true, json: async () => (options.method === 'POST' ? {} : { review: { draft: rateDraft } }) })));
+  });
+  const mountRates = () => render(<UiSurface density="comfortable"><ProductLabelReview product={product} kind="rates" /></UiSurface>);
+
+  it('shows each label passage as quoted, with its site, pests and source page', async () => {
+    mountRates();
+    expect(await screen.findByText('Synthetic label: 1/3 to 2/3 fl oz per 1,000 board feet.')).toBeInTheDocument();
+    expect(screen.getByText('Ants, spiders · Coarse spray')).toBeInTheDocument();
+    expect(screen.getAllByText('LABEL PASSAGE')).toHaveLength(2);
+    expect(screen.getByRole('link', { name: 'Source page 4' })).toHaveAttribute('href', 'https://example.test/label.pdf#page=4');
+    expect(fetch.mock.calls[0][0]).toBe('/api/admin/inventory/fixture-product/label-rate-review');
+  });
+
+  it('approves on the rate route only after source confirmation', async () => {
+    mountRates();
+    const approve = await screen.findByRole('button', { name: 'Approve rate lines' });
+    expect(approve).toBeDisabled();
+    fireEvent.click(screen.getByRole('checkbox'));
+    fireEvent.click(approve);
+    await screen.findByText('Review saved.');
+    const sent = fetch.mock.calls.filter(([, options]) => options.method === 'POST');
+    expect(sent).toHaveLength(1);
+    expect(sent[0][0]).toBe('/api/admin/inventory/fixture-product/label-rate-review/decision');
+    expect(JSON.parse(sent[0][1].body)).toEqual({ candidateId: 'rate-candidate-1', decision: 'approve', identityConfirmed: true });
+  });
+});
+

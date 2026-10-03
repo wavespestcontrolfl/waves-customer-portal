@@ -14,7 +14,7 @@
  * is confined to computeStackedDocumentDiscountLines — the GATE-ON path
  * — only. GATE_DISCOUNT_STACKING ships dark, and this PR's whole
  * ship-safety argument rests on "gate off = every document-stack path
- * byte-identical to main" (CLAUDE.md). The gate-OFF branch of
+ * byte-identical to main" (docs/gates-and-env.md). The gate-OFF branch of
  * calculateUpdateFinancials was briefly given the SAME $0 override too,
  * which broke that contract — reverted back to main's unconditional
  * frozen-value replay. Gate OFF now keeps the pre-existing quirk this

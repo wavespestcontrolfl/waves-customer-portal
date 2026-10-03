@@ -145,7 +145,13 @@ function EntryRow({ entry, busyKey, editing, formError, onAction, onEdit, onCanc
         )}
         <div className="mt-1 text-ui-body text-ink-secondary">
           {entry.lastConfirmedAt ? `Last confirmed ${fmtDate(entry.lastConfirmedAt)}` : "Never confirmed"}
+          {entry.addedBy ? ` · Added on a visit by ${entry.addedBy}` : ""}
         </div>
+        {entry.markedWrongAt && (
+          <div className="mt-1 text-ui-body text-ink-secondary">
+            Reported wrong on a visit by {entry.markedWrongBy}, {fmtDate(entry.markedWrongAt)}
+          </div>
+        )}
       </div>
       {!retired && (
         <div className="flex shrink-0 flex-wrap items-center gap-2">

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import "fake-indexeddb/auto";
-import { IDBFactory } from "fake-indexeddb";
-import { beforeEach, describe, expect, it } from "vitest";
+import { IDBFactory, IDBObjectStore } from "fake-indexeddb";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   deleteCompletionResumeBody,
@@ -17,6 +17,11 @@ import {
   putRecapClipDraft,
   getRecapClipDraft,
   DRAFT_RETENTION_MS,
+  deleteFastCompletionAttempt,
+  getFastCompletionAttempt,
+  listFastCompletionAttempts,
+  pruneFastCompletionAttempts,
+  putFastCompletionAttempt,
   deleteVisitCompletionDraft,
   getVisitCompletionDraft,
   putVisitCompletionDraft,
@@ -45,6 +50,37 @@ const committedBody = () => ({
   completionPhotos: [photo(1), photo(2)],
 });
 
+const FAST_DB = "waves-fast-completion-attempts";
+const FAST_STORE = "bodies";
+const fastKey = (serviceId, operatorId) => `fast-complete:${operatorId}:${serviceId}`;
+
+function openSecondConnection() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(FAST_DB, 2);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+function rawPut(connection, key, record) {
+  return new Promise((resolve, reject) => {
+    const tx = connection.transaction(FAST_STORE, "readwrite");
+    tx.objectStore(FAST_STORE).put(record, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+
+const fastRecord = (serviceId, operatorId, body, summary, storedAt = Date.now()) => ({
+  version: 1,
+  operatorId,
+  serviceId,
+  body,
+  summary,
+  storedAt,
+});
+
 beforeEach(() => {
   // Fresh database AND fresh marker per test.
   globalThis.indexedDB = new IDBFactory();
@@ -52,6 +88,156 @@ beforeEach(() => {
 });
 
 describe("completion resume store (IndexedDB)", () => {
+  it("keeps Fast Complete attempts exact and private to operator plus service", async () => {
+    const attempt = {
+      body: committedBody(),
+      summary: "Taurus SC · Ants",
+    };
+    expect(await putFastCompletionAttempt("svc-1", "tech-a", attempt)).toBe(true);
+    expect(await getFastCompletionAttempt("svc-1", "tech-a")).toEqual({
+      available: true,
+      attempt: expect.objectContaining({
+        version: 1,
+        operatorId: "tech-a",
+        serviceId: "svc-1",
+        body: attempt.body,
+        summary: attempt.summary,
+      }),
+    });
+    expect(await getFastCompletionAttempt("svc-1", "tech-b")).toEqual({ available: true, attempt: null });
+    expect(await getFastCompletionAttempt("svc-2", "tech-a")).toEqual({ available: true, attempt: null });
+    expect(await deleteFastCompletionAttempt("svc-1", "tech-a", attempt.body)).toBe(true);
+    expect((await getFastCompletionAttempt("svc-1", "tech-a")).attempt).toBeNull();
+  });
+
+  it("survives the legacy unmarked-body pruner in an older open tab", async () => {
+    const past = Date.now() - PRUNE_GRACE_MS - 1000;
+    const attempt = { body: committedBody(), summary: "saved retry" };
+    await putFastCompletionAttempt("svc-1", "tech-a", attempt, past);
+    // The legacy pruner is deliberately key-agnostic, exactly as in the
+    // previous release. Prove it deletes even a prefixed legacy row.
+    await putCompletionResumeBody(fastKey("svc-legacy", "tech-a"), attempt.body, past);
+    expect(await pruneCompletionResumeBodies(() => false)).toBe(1);
+    expect(await getCompletionResumeBody(fastKey("svc-legacy", "tech-a"))).toBeNull();
+    expect((await getFastCompletionAttempt("svc-1", "tech-a")).attempt).toMatchObject(attempt);
+  });
+
+  it("discovers only the current operator's attempts without needing today's route IDs", async () => {
+    await putFastCompletionAttempt("prior-day", "tech-a", { body: committedBody(), summary: "Earlier visit" });
+    await putFastCompletionAttempt("moved-visit", "tech-a", { body: committedBody(), summary: "Moved visit" });
+    await putFastCompletionAttempt("private-visit", "tech-b", { body: committedBody(), summary: "Other operator" });
+    const reads = ["get", "getAll", "openCursor"].map((method) => vi.spyOn(IDBObjectStore.prototype, method));
+    const result = await listFastCompletionAttempts("tech-a");
+    for (const read of reads) { expect(read).not.toHaveBeenCalled(); read.mockRestore(); }
+    expect(result.available).toBe(true);
+    expect(result.attempts.map((row) => row.serviceId).sort()).toEqual(["moved-visit", "prior-day"]);
+    expect(result.attempts.every((row) => row.operatorId === "tech-a")).toBe(true);
+    expect(result.attempts.every((row) => !("body" in row))).toBe(true);
+    expect(await listFastCompletionAttempts("tech-c")).toEqual({ available: true, attempts: [] });
+    globalThis.indexedDB = undefined;
+    expect(await listFastCompletionAttempts("tech-a")).toEqual({ available: false, attempts: [] });
+  });
+
+  it("uses the idempotency key as a cross-tab compare-and-set fence", async () => {
+    const first = { ...committedBody(), idempotencyKey: "attempt-a" };
+    const newer = { ...committedBody(), idempotencyKey: "attempt-b", technicianNotes: "New tab" };
+    await putFastCompletionAttempt("svc-1", "tech-a", { body: first, summary: "Attempt A" });
+    const secondConnection = await openSecondConnection();
+    await rawPut(secondConnection, fastKey("svc-1", "tech-a"), fastRecord("svc-1", "tech-a", newer, "Attempt B"));
+
+    expect(await putFastCompletionAttempt("svc-1", "tech-a", {
+      body: { ...first, reportRulesConfirmed: true }, summary: "Late A",
+    })).toBe(false);
+    expect(await deleteFastCompletionAttempt("svc-1", "tech-a", first)).toBe(false);
+    expect((await getFastCompletionAttempt("svc-1", "tech-a")).attempt).toMatchObject({
+      body: newer,
+      summary: "Attempt B",
+    });
+    expect(await deleteFastCompletionAttempt("svc-1", "tech-a", newer)).toBe(true);
+    secondConnection.close();
+  });
+
+  it("fences confirmation updates and stale deletes even under the same request key", async () => {
+    const original = committedBody();
+    const confirmed = { ...original, reportRulesConfirmed: true };
+    await putFastCompletionAttempt("svc-1", "tech-a", { body: original, summary: "Original" });
+    expect(await putFastCompletionAttempt("svc-1", "tech-a", {
+      body: confirmed, expectedBody: original, summary: "Confirmed",
+    })).toBe(true);
+    expect(await putFastCompletionAttempt("svc-1", "tech-a", {
+      body: original, expectedBody: original, summary: "Stale tab",
+    })).toBe(false);
+    expect(await deleteFastCompletionAttempt("svc-1", "tech-a", original)).toBe(false);
+    expect((await getFastCompletionAttempt("svc-1", "tech-a")).attempt.body).toEqual(confirmed);
+    expect(await deleteFastCompletionAttempt("svc-1", "tech-a", confirmed)).toBe(true);
+    expect(await putFastCompletionAttempt("svc-1", "tech-a", {
+      body: confirmed, expectedBody: confirmed, summary: "Discarded tab",
+    })).toBe(false);
+  });
+
+  it("lists lightweight metadata after upgrading existing Fast Complete rows", async () => {
+    const db = await new Promise((resolve) => {
+      const open = indexedDB.open(FAST_DB, 1);
+      open.onupgradeneeded = () => open.result.createObjectStore(FAST_STORE);
+      open.onsuccess = () => resolve(open.result);
+    });
+    await rawPut(db, fastKey("old-visit", "tech-a"), fastRecord("old-visit", "tech-a", committedBody(), "Existing visit"));
+    db.close();
+    const result = await listFastCompletionAttempts("tech-a");
+    expect(result).toEqual({ available: true, attempts: [{
+      operatorId: "tech-a", serviceId: "old-visit", storedAt: expect.any(Number), summary: "Existing visit",
+    }] });
+    expect((await getFastCompletionAttempt("old-visit", "tech-a")).attempt.body).toEqual(committedBody());
+  });
+
+  it("prunes only Fast Complete attempts past the 14-day retention window", async () => {
+    const old = Date.now() - DRAFT_RETENTION_MS - 1000;
+    await putFastCompletionAttempt("svc-old", "tech-a", { body: committedBody(), summary: "old" }, old);
+    await putFastCompletionAttempt("svc-live", "tech-a", { body: committedBody(), summary: "live" });
+    await putCompletionResumeBody("regular-completion", committedBody(), old);
+
+    expect(await pruneFastCompletionAttempts()).toBe(1);
+    expect((await getFastCompletionAttempt("svc-old", "tech-a")).attempt).toBeNull();
+    expect((await getFastCompletionAttempt("svc-live", "tech-a")).attempt).not.toBeNull();
+    expect(await getCompletionResumeBody("regular-completion")).toEqual(committedBody());
+  });
+
+  it("atomically rechecks age so a second connection's refresh survives prune", async () => {
+    const old = Date.now() - DRAFT_RETENTION_MS - 1000;
+    const body = { ...committedBody(), idempotencyKey: "refresh-key" };
+    await putFastCompletionAttempt("svc-race", "tech-a", { body, summary: "stale" }, old);
+    const secondConnection = await openSecondConnection();
+    const target = fastKey("svc-race", "tech-a");
+    const storePrototype = Object.getPrototypeOf(secondConnection.transaction(FAST_STORE, "readonly").objectStore(FAST_STORE));
+    const originalGet = storePrototype.get;
+    let refresh = null;
+    const getSpy = vi.spyOn(storePrototype, "get").mockImplementation(function get(key) {
+      const request = originalGet.call(this, key);
+      if (String(key) === target && !refresh) {
+        request.addEventListener("success", () => {
+          refresh = rawPut(secondConnection, target, fastRecord("svc-race", "tech-a", body, "refreshed"));
+        }, { once: true });
+      }
+      return request;
+    });
+
+    expect(await pruneFastCompletionAttempts()).toBe(1);
+    await refresh;
+    getSpy.mockRestore();
+    expect((await getFastCompletionAttempt("svc-race", "tech-a")).attempt).toMatchObject({
+      summary: "refreshed",
+      body,
+    });
+    secondConnection.close();
+  });
+
+  it("reports unavailable Fast Complete storage separately from an empty scope", async () => {
+    globalThis.indexedDB = undefined;
+    expect(await getFastCompletionAttempt("svc-1", "tech-a")).toEqual({ available: false, attempt: null });
+    expect(await putFastCompletionAttempt("svc-1", "tech-a", { body: committedBody(), summary: "visit" })).toBe(false);
+    expect(await deleteFastCompletionAttempt("svc-1", "tech-a", committedBody())).toBe(false);
+  });
+
   it("keeps prepared visit forms outside the store an older completion panel prunes", async () => {
     const draft = { visitId: 'visit-1', key: 'visit-key', forms: { 'svc-1': { body: committedBody() } } };
     const past = Date.now() - PRUNE_GRACE_MS * 10;

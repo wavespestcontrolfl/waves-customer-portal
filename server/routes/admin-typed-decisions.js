@@ -25,7 +25,7 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { recordAuditEvent } = require('../services/audit-log');
 const { typedDecisionsLive } = require('../config/feature-gates');
 const { packageFor, answerInDomain, providerLabel } = require('../services/typed-decisions/packages');
-const { callSubjectHash, callTranscriptSpan, smsSubjectHash } = require('../services/typed-decisions/subject-hash');
+const { callSubjectHash, callTranscriptSpan, smsSubjectHash, socialPostCaption, socialPostSubjectHash } = require('../services/typed-decisions/subject-hash');
 const { readLastOutboundBody } = require('../services/typed-decisions/sms-shadow');
 
 router.use(adminAuthenticate, requireAdmin);
@@ -37,6 +37,7 @@ router.use((_req, res, next) => (typedDecisionsLive() ? next() : res.status(404)
 const TABLE = 'decision_reviews';
 const SMS_SUBJECT = 'sms_log';
 const CALL_SUBJECT = 'call_log';
+const SOCIAL_POST_SUBJECT = 'social_post';
 const VISIT_SUBJECT = 'scheduled_services';
 const LABEL_STATUSES = ['unreviewed', 'suspected_error', 'confirmed_error', 'disagreement', 'confirmed_correct'];
 const SAMPLED_FOR = ['disagreement', 'random_audit', 'heldout'];
@@ -61,7 +62,11 @@ function csv(value) {
 }
 
 // A stable identifier for who labeled: the admin's email, else their id.
+// A request the labeler-token router verified (routes/typed-decisions-labeler.js)
+// carries req.machineLabeler; it is stamped with this fixed name.
+const MACHINE_LABELER = 'claude-labeler';
 function labeler(req) {
+  if (req.machineLabeler) return MACHINE_LABELER;
   return String(req.technician?.email || req.technicianId || 'admin').slice(0, 120);
 }
 
@@ -114,6 +119,7 @@ async function loadSubjects(rows) {
   const subjectIds = (type) => [...new Set(rows.filter((r) => r.subject_type === type).map((r) => r.subject_id))];
   const smsIds = subjectIds(SMS_SUBJECT);
   const callIds = subjectIds(CALL_SUBJECT);
+  const postIds = subjectIds(SOCIAL_POST_SUBJECT);
   try {
     if (smsIds.length) {
       const texts = await db('sms_log').whereIn('id', smsIds).modify(excludeUnresolvedSendReservations)
@@ -137,6 +143,18 @@ async function loadSubjects(rows) {
       for (const c of calls) {
         subjects.set(`call_log:${c.id}`, {
           type: 'call_log', direction: c.direction || null, text: callTranscriptSpan(c.transcription) || null, at: c.created_at, hash: callSubjectHash(c.transcription),
+        });
+      }
+    }
+    if (postIds.length) {
+      // A social post's photo question: the reviewer sees the hosted photo and
+      // the caption the model was given (photo-privacy-shadow.js builds both
+      // the same way).
+      const posts = await db('social_media_posts').whereIn('id', postIds).select('id', 'image_url', 'published_content', 'created_at');
+      for (const p of posts) {
+        subjects.set(`${SOCIAL_POST_SUBJECT}:${p.id}`, {
+          type: SOCIAL_POST_SUBJECT, text: socialPostCaption(p.published_content) || null, imageUrl: p.image_url || null, at: p.created_at,
+          hash: socialPostSubjectHash({ imageUrl: p.image_url, captions: p.published_content }),
         });
       }
     }
@@ -235,8 +253,8 @@ function correctValueFor(target, { verdict, seen }, value) {
 // Why a guarded update matched no row: gone (404), already confirmed without
 // force, or the Jev answer / transcript version moved since the page loaded (409, by code).
 // The subject changed after Jev answered: the live digest (a call's transcript,
-// or a text plus the previous Waves text, rebuilt exactly as the shadow built
-// Jev's state) no longer matches the one stored with the decision, so a label
+// a text plus the previous Waves text, or a social post's photo URL and
+// caption, rebuilt exactly as the shadow built the model's state) no longer matches the one stored with the decision, so a label
 // would confirm an answer against content Jev never saw.
 async function liveSubjectHash(target) {
   if (target.subject_type === CALL_SUBJECT) {
@@ -249,6 +267,13 @@ async function liveSubjectHash(target) {
       .storedVisitAccess([{ subjectId: target.subject_id, subjectHash: target.subject_hash }], db);
     return stored.has(`${target.subject_id}:${target.subject_hash}`) ? target.subject_hash : null;
   }
+  if (target.subject_type === SOCIAL_POST_SUBJECT) {
+    const post = await db('social_media_posts').where({ id: target.subject_id }).first('image_url', 'published_content');
+    return post ? socialPostSubjectHash({ imageUrl: post.image_url, captions: post.published_content }) : null;
+  }
+  // A subject type this route cannot read back has no live digest: a row that
+  // stored one is then refused (subject_changed), never judged as a text.
+  if (target.subject_type !== SMS_SUBJECT) return null;
   const text = await db('sms_log').where({ id: target.subject_id }).modify(excludeUnresolvedSendReservations)
     .first('from_phone', 'to_phone', 'message_body', 'created_at');
   if (!text) return null;
@@ -263,16 +288,22 @@ async function subjectMoved(target) {
   return (await liveSubjectHash(target)) !== target.subject_hash;
 }
 
-async function unwrittenLabel(id, force) {
+async function unwrittenLabel(id, force, machine = false) {
   const existing = await db(TABLE).where({ id }).first('id', 'label_status');
   if (!existing) return [404, { error: 'Review not found' }];
+  if (machine && existing.label_status !== 'unreviewed') {
+    return [409, { error: 'A person has already labeled this review', code: 'already_labeled', labelStatus: existing.label_status }];
+  }
   if (!force && CONFIRMED.includes(existing.label_status)) {
     return [409, { error: 'This review already has a confirmed label; send force: true to replace it', code: 'already_confirmed', labelStatus: existing.label_status }];
   }
   return [409, { error: "This review's answer or transcript changed since it was loaded; reload it", code: 'answer_changed', labelStatus: existing.label_status }];
 }
 
-router.post('/reviews/:id/label', async (req, res, next) => {
+// One label write for both callers: a signed-in admin (this router) and the
+// labeler token (routes/typed-decisions-labeler.js, narrower: no force, only
+// rows still unreviewed).
+async function labelReview(req, res, next) {
   try {
     const { id } = req.params;
     if (!UUID_RE.test(id)) return res.status(404).json({ error: 'Review not found' });
@@ -287,6 +318,9 @@ router.post('/reviews/:id/label', async (req, res, next) => {
       return res.status(409).json({ error: 'This message or call changed after Jev answered; it is not what Jev judged', code: 'subject_changed' });
     }
     const { verdict, seen, seenSubject, note, reason, force } = request;
+    // The machine labeler never replaces a label: no force, and only a row
+    // still unreviewed (a person's 'unclear' stays a person's).
+    if (req.machineLabeler && force) return res.status(403).json({ error: 'The labeler token cannot replace a label', code: 'labeler_no_force' });
     const labelStatus = VERDICT_STATUS[verdict];
 
     const update = db(TABLE).where({ id }).update({
@@ -297,23 +331,24 @@ router.post('/reviews/:id/label', async (req, res, next) => {
     });
     // A confirmed label is only replaced on purpose.
     if (!force) update.whereNotIn('label_status', CONFIRMED);
+    if (req.machineLabeler) update.where('label_status', 'unreviewed');
     update.whereRaw('jev_answer = ?::jsonb', [JSON.stringify(seen)]);
     // ...and the same transcript version: a nightly re-record after a
     // reprocess can replace subject_hash while leaving an identical answer.
     update.whereRaw('subject_hash IS NOT DISTINCT FROM ?', [seenSubject]);
     const [row] = await update.returning('*');
     if (!row) {
-      const [status, payload] = await unwrittenLabel(id, force);
+      const [status, payload] = await unwrittenLabel(id, force, req.machineLabeler);
       return res.status(status).json(payload);
     }
 
     await recordAuditEvent({
-      actor_type: 'technician',
-      actor_id: req.technicianId || null,
+      actor_type: req.machineLabeler ? 'system' : 'technician',
+      actor_id: req.machineLabeler ? null : (req.technicianId || null),
       action: 'typed_decision.labeled',
       resource_type: 'decision_review',
       resource_id: id,
-      metadata: { capability: row.capability, question_id: row.question_id, verdict, reason, label_status: labelStatus, forced: force, has_correct_value: correct.correctValue !== null },
+      metadata: { capability: row.capability, question_id: row.question_id, verdict, reason, label_status: labelStatus, forced: force, has_correct_value: correct.correctValue !== null, labeled_by: labeler(req) },
       ip_address: req.ip,
       user_agent: req.get('user-agent') || null,
     });
@@ -324,6 +359,8 @@ router.post('/reviews/:id/label', async (req, res, next) => {
   } catch (err) {
     next(err);
   }
-});
+}
+router.post('/reviews/:id/label', labelReview);
 
 module.exports = router;
+module.exports.labelReview = labelReview;

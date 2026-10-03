@@ -8,7 +8,7 @@ describe('typed-decision packages', () => {
   const ids = Object.keys(PACKAGES);
 
   test('ships the three foundation packages', () => {
-    expect(ids.sort()).toEqual(['call_gate_checks.v1', 'call_judge.v2', 'sms_courtesy.v1', 'sms_reschedule.v1', 'sms_solicitation.v1', 'visit_access.v1', 'voicemail.v1']);
+    expect(ids.sort()).toEqual(['call_gate_checks.v1', 'call_judge.v2', 'photo_privacy.v1', 'sms_courtesy.v1', 'sms_reschedule.v1', 'sms_solicitation.v1', 'visit_access.v1', 'voicemail.v1']);
   });
 
   test.each(ids)('%s: id is <capability>.v<version> and shape is complete', (id) => {
@@ -22,6 +22,17 @@ describe('typed-decision packages', () => {
     for (const q of Object.values(pkg.questions)) {
       expect(['noul', 'choice', 'score']).toContain(q.type);
       expect(q.instructions).toEqual(expect.any(String));
+    }
+  });
+
+  test('photo_privacy.v1 takes one photo and asks six positive yes/no questions', () => {
+    const pkg = PACKAGES['photo_privacy.v1'];
+    expect(pkg.imageSlots).toBe(1);
+    expect(pkg.stateShape).toEqual(['surface', 'caption']);
+    expect(Object.keys(pkg.questions)).toEqual(['shows_face', 'shows_person', 'shows_address_text', 'shows_license_plate', 'shows_child', 'shows_pet']);
+    for (const q of Object.values(pkg.questions)) {
+      expect(q.type).toBe('noul');
+      expect(q.instructions).toMatch(/^Does the photo show /);
     }
   });
 

@@ -106,6 +106,9 @@ jest.mock('../services/sms-suggest-mode', () => ({
 // which itself calls the real AvailabilityEngine — stub the engine here so
 // each recheck test controls what is "currently offered" without a DB.
 jest.mock('../services/availability', () => ({ getAvailableSlots: jest.fn() }));
+const mockTranslationClaim = jest.fn(async () => 'ok');
+const mockTranslationFacts = jest.fn(async () => ({ reason: null }));
+jest.mock('../services/sms-translation', () => ({ inboxAssistFor: jest.fn(async () => null), claimTranslationReplyForSend: (...a) => mockTranslationClaim(...a), translationReplySendChecks: (...a) => mockTranslationFacts(...a) }));
 // Inert auto-send executor: the /sms route checks for an in-flight autonomous
 // reply under the park lock. Default to "none in flight" so the send tests
 // proceed; the executor's own behavior is covered by sms-auto-send.test.js.
@@ -412,6 +415,105 @@ describe('admin communications SMS route', () => {
     }
   });
 
+  // Use Reply on the translation card (GATE_SMS_ANY_LANGUAGE_INBOX): the reply is re-checked and claimed
+  // under the thread lock, and refused rather than sent stale or twice.
+  test.each([
+    ['stale', /out of date/],
+    ['claimed', /already sent or is being sent/],
+  ])('a suggested reply whose claim reads %s is refused with 409 and nothing is sent', async (claim, words) => {
+    mockTranslationClaim.mockResolvedValueOnce(claim);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: '+15551234567', body: 'Su visita es el martes.', messageType: 'manual', translationTrialId: 7 }),
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(words);
+      expect(suggestMode.lockSuggestThread).toHaveBeenCalled();
+      // on the thread-lock transaction's own connection (a second pooled connection could deadlock a pool of 2)
+      expect(mockTranslationClaim).toHaveBeenCalledWith(expect.objectContaining({ trialId: 7, to: '+15551234567', dbi: expect.anything() }));
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a suggested reply whose facts changed is refused with 409 before the thread lock, and nothing is sent', async () => {
+    mockTranslationFacts.mockResolvedValueOnce({ reason: 'open-times stale (slot_taken)' });
+    mockTranslationClaim.mockClear();
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: '+15551234567', body: 'Su visita es el martes.', messageType: 'manual', translationTrialId: 7 }),
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/facts in this suggested reply have changed/);
+      expect(mockTranslationClaim).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  test('an edited suggested reply is refused with its own words', async () => {
+    mockTranslationFacts.mockResolvedValueOnce({ reason: 'body_edited' });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: '+15551234567', body: 'Su visita es el miércoles.', messageType: 'manual', translationTrialId: 7 }),
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/was edited/);
+      expect(mockTranslationFacts).toHaveBeenLastCalledWith(expect.objectContaining({ trialId: 7, outgoingBody: 'Su visita es el miércoles.' }));
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a suggested reply that passes carries the trial\'s fact checks to the provider boundary', async () => {
+    const providerPreSendCheck = jest.fn(async () => ({ ok: true }));
+    mockTranslationFacts.mockResolvedValueOnce({ reason: null, providerPreSendCheck });
+    sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM1', deliveryOutcome: 'accepted' });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: '+15551234567', body: 'Su visita es el martes.', messageType: 'manual', translationTrialId: 7 }),
+      });
+      expect(res.status).toBe(200);
+      expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ body: 'Su visita es el martes.', providerPreSendCheck }));
+    });
+  });
+
+  test('a suggested reply never goes out on the applicant rail (which runs none of its checks)', async () => {
+    const { isRecruitingPhone } = require('../utils/recruiting-thread-scope');
+    isRecruitingPhone.mockResolvedValue(true);
+    mockTranslationFacts.mockClear(); mockTranslationClaim.mockClear();
+    try {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+          method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to: '+15551234567', body: 'Su visita es el martes.', messageType: 'manual', translationTrialId: 7 }),
+        });
+        expect(res.status).toBe(409);
+        expect((await res.json()).error).toMatch(/job applicant thread/);
+        expect(mockTranslationFacts).not.toHaveBeenCalled();
+        expect(mockTranslationClaim).not.toHaveBeenCalled();
+        expect(sendCustomerMessage).not.toHaveBeenCalled();
+      });
+    } finally {
+      isRecruitingPhone.mockResolvedValue(false);
+    }
+  });
+
+  test('a suggested reply is never also an Agent Review draft, and is never scheduled', async () => {
+    await withServer(async (baseUrl) => {
+      const post = (path, body) => fetch(`${baseUrl}/admin/communications/${path}`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      const both = await post('sms', { to: '+15551234567', body: 'x', messageType: 'manual', translationTrialId: 7, agentDecisionId: 'd1', agentDraft: 'x' });
+      expect(both.status).toBe(400);
+      const later = await post('schedule-sms', { to: '+15551234567', body: 'x', scheduledFor: new Date(Date.now() + 3600e3).toISOString(), translationTrialId: 7 });
+      expect(later.status).toBe(409);
+      expect((await later.json()).error).toMatch(/can only be sent now/);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+
   test('returns a readable error when policy blocks a send', async () => {
     sendCustomerMessage.mockResolvedValue({
       sent: false,
@@ -441,7 +543,9 @@ describe('admin communications SMS route', () => {
       expect(body.error).toBe('Body contains emoji "👍" but audience="lead" forbids it. Customer/lead-facing messages must be emoji-free.');
       expect(body.code).toBe('EMOJI_FOR_CUSTOMER');
     });
-  });
+  // The first test here to reach the send route: it pays the handler's cold
+  // module load (4 to 5 s on a CI runner), which the 5 s default does not cover.
+  }, 20000);
 
   test('a VALIDATED customerId is explicit customer context: an active applicant phone attached to that customer takes the ordinary path, not the recruiting rail (Codex r16 P1)', async () => {
     const { isRecruitingPhone } = require('../utils/recruiting-thread-scope');

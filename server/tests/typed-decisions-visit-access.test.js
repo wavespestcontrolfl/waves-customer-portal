@@ -134,7 +134,7 @@ describe('visit access shadow: rules that need no database', () => {
       neighborhood_id uuid, active boolean DEFAULT true)`, [schema]);
     await database.raw(`CREATE TABLE ??.neighborhoods (id uuid PRIMARY KEY, active boolean)`, [schema]);
     await database.raw(`CREATE TABLE ??.neighborhood_access (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), neighborhood_id uuid, gate_label text,
-      access_type text, code text, instructions text, status text)`, [schema]);
+      access_type text, code text, instructions text, status text, flagged_wrong_at timestamptz)`, [schema]);
     await database.raw(`CREATE TABLE ??.estimates (id uuid PRIMARY KEY, address text)`, [schema]);
     await database.raw(`CREATE TABLE ??.property_preferences (customer_id uuid PRIMARY KEY, pet_count integer, pet_details text,
       pets_secured_plan text, contact_preference text, away_mode_until date, side_gate_access varchar(200), neighborhood_gate_code varchar(50),
