@@ -808,10 +808,39 @@ describe('anniversary and tenure', () => {
     expect(P.resolveAnniversary({ ...imported, accountCreatedAt: null, onlyActiveFamily: true })).toMatchObject({ date: null, source: null });
     // any completed visit on the account takes the ordinary rules (not the import exception)
     expect(P.resolveAnniversary({ ...imported, onlyActiveFamily: true, accountFirstVisit: '2026-05-01' })).toMatchObject({ date: null, source: null });
+    // an accepted estimate ANYWHERE on the account (even one the open visits no longer link): not an import
+    expect(P.resolveAnniversary({ ...imported, onlyActiveFamily: true, accountHasAcceptedEstimate: true })).toMatchObject({ date: null, source: null });
     expect(P.isImportedAccount('2025-06-06', '2026-04-06')).toBe(true);
     expect(P.isImportedAccount('2026-03-10', '2026-04-06')).toBe(false); // 27 days < IMPORTED_ACCOUNT_LEAD_DAYS
     expect(P.isImportedAccount('2026-03-07', '2026-04-06')).toBe(true); // exactly 30
     expect(P.informationalFlags({ anniversarySource: 'member_since_import', unknownInteractionVisits: 0, capturedConversationVisits: 0, duesAttributedVisits: 0, compositeVisits: 0 })).toContain('anniversary_from_membership');
+  });
+  test('a stale no_anniversary carry dies once the line is dated outside the window (Fix B)', () => {
+    const latest = { status: 'exception', flags: JSON.stringify(['no_anniversary']), review_date: null, computed_at: '2026-10-02T10:20:00Z', batch_key: '2026-10' };
+    const dated = { anniversary: { date: '2025-06-06' } };
+    const win = { from: '2026-12-06', to: '2027-01-05', carryFloor: '2026-08-03' };
+    expect(P.reviewOccurrence(dated, latest, win)).toBeNull(); // not carried on computed_at
+    expect(P.reviewOccurrence(dated, { ...latest, flags: JSON.stringify(['past_due']), review_date: '2026-11-20' }, win)).toMatchObject({ reviewDate: '2026-11-20', carriedFrom: '2026-10' }); // a dated hold still carries
+    expect(P.reviewOccurrence({ anniversary: { date: null } }, latest, win)).toMatchObject({ reviewDate: null }); // still undated: listed as before
+    expect(P.reviewOccurrence({ anniversary: { date: '2025-12-20' } }, latest, win)).toMatchObject({ reviewDate: '2026-12-20', carriedFrom: null }); // dated inside the window: its anniversary
+  });
+  test('"only program" counts plan lines and service keys, not consolidated families (Fix B)', () => {
+    const now = new Date('2026-10-01T10:20:00Z');
+    const customer = { id: 'c1', member_since: '2025-06-06', created_at: '2026-04-06T14:00:00Z' };
+    const mk = (planLine, serviceKeys) => ({ customer, familyKey: 'tree_shrub', planLine, serviceKeys, first: null, acceptedAt: null, visitsPerYear: 6 });
+    const win = { from: '2026-11-05', to: '2026-12-05', now, latestByLine: new Map() };
+    const one = mk({ account_lines: 1 }, ['tree_shrub']);
+    P.selectReviewEntries([one], win);
+    expect(one.anniversary).toMatchObject({ date: '2025-06-06', source: 'member_since_import' });
+    const bundled = mk({ account_lines: 1 }, ['tree_shrub', 'palm_injection']); // two programs in one family entry
+    P.selectReviewEntries([bundled], win);
+    expect(bundled.anniversary).toMatchObject({ date: null });
+    const twoLines = mk({ account_lines: 2 }, ['tree_shrub']);
+    P.selectReviewEntries([twoLines], win);
+    expect(twoLines.anniversary).toMatchObject({ date: null });
+    const accepted = mk({ account_lines: 1 }, ['tree_shrub']);
+    P.selectReviewEntries([accepted], { ...win, acceptedCustomers: new Set(['c1']) });
+    expect(accepted.anniversary).toMatchObject({ date: null });
   });
   test('a portal-sold line on an account that predates it by > 90 days is flagged, not held', () => {
     const out = P.resolveAnniversary({ firstCompletedVisit: '2026-09-05', acceptedAt: '2026-09-01T15:00:00Z', memberSince: '2024-05-11' });
@@ -1359,7 +1388,7 @@ describe('engine replay guards', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
     expect(src).toMatch(/accountFirstVisit: accountFirst\.get\(entry\.customer\.id\) \|\| null,\n\s+presenceWindowDays: presenceWindowFor\(entry\.visitsPerYear\),/);
     // the account's earliest visit comes from the COMPLETE completed history, cancelled programs included — never just the active book
-    expect(src).toMatch(/selectReviewEntries\(book, \{ from, to, now, latestByLine, firstVisits: inputs\.firstVisits \}\)/);
+    expect(src).toMatch(/selectReviewEntries\(book, \{ from, to, now, latestByLine, firstVisits: inputs\.firstVisits, acceptedCustomers: inputs\.acceptedCustomers \|\| new Set\(\) \}\)/);
     const history = new Map([['c|lawn_care', { customer_id: 'c', line: 'lawn_care', first_visit: '2026-01-05' }], ['c|tree_shrub', { customer_id: 'c', line: 'tree_shrub', first_visit: '2026-08-20' }]]);
     expect(P.accountFirstVisits(history, []).get('c')).toBe('2026-01-05');
     expect(P.accountFirstVisits(null, [{ customer: { id: 'c' }, first: { first_visit: '2026-08-20' } }]).get('c')).toBe('2026-08-20');

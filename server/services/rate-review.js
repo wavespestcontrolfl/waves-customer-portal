@@ -815,7 +815,7 @@ function presenceWindowFor(visitsPerYear) {
 function isImportedAccount(member, accountCreatedDay) {
   return !!(member && accountCreatedDay) && (ymdToUtcMs(accountCreatedDay) - ymdToUtcMs(member)) / DAY_MS >= IMPORTED_ACCOUNT_LEAD_DAYS;
 }
-function resolveAnniversary({ firstCompletedVisit, acceptedAt, memberSince, accountFirstVisit = null, presenceWindowDays = IMPORT_PRESENCE_DAYS, accountCreatedAt = null, onlyActiveFamily = false }) {
+function resolveAnniversary({ firstCompletedVisit, acceptedAt, memberSince, accountFirstVisit = null, presenceWindowDays = IMPORT_PRESENCE_DAYS, accountCreatedAt = null, onlyActiveFamily = false, accountHasAcceptedEstimate = false }) {
   const firstVisit = dateColumn(firstCompletedVisit);
   const accepted = etDay(acceptedAt);
   const member = dateColumn(memberSince);
@@ -835,9 +835,11 @@ function resolveAnniversary({ firstCompletedVisit, acceptedAt, memberSince, acco
   // an IMPORTED account (membership ≥ 30 days older than its portal
   // record) whose ONLY active program this is came in with that program —
   // its history simply was not loaded — so member_since dates the line.
-  // A second program on the account, or any completed visit, takes the
-  // rules above.
-  else if (member && !accountFirst && onlyActiveFamily && isImportedAccount(member, etDay(accountCreatedAt))) { date = member; source = 'member_since_import'; }
+  // A second program on the account (counted on the underlying plan lines
+  // and service keys, not the consolidated family — tree/shrub + palm is
+  // two programs in one entry), an accepted estimate anywhere on the
+  // account, or any completed visit, takes the rules above.
+  else if (member && !accountFirst && onlyActiveFamily && !accountHasAcceptedEstimate && isImportedAccount(member, etDay(accountCreatedAt))) { date = member; source = 'member_since_import'; }
   let conflict = false;
   if (date && member && source !== 'member_since') {
     conflict = (ymdToUtcMs(date) - ymdToUtcMs(member)) / DAY_MS > 90;
@@ -1623,6 +1625,20 @@ async function loadEstimates(dbh, estimateIds) {
   return new Map(rows.map((r) => [r.id, r]));
 }
 
+// Customers with ANY accepted estimate on the account (not only the ones the
+// open visits link): the import exception in resolveAnniversary requires
+// that none exists — a cancelled earlier quote still says the account did
+// business through the portal, so its sole program is not an import.
+async function loadAcceptedEstimateCustomers(dbh, customerIds) {
+  if (!customerIds.length) return new Set();
+  const rows = await dbh('estimates')
+    .whereIn('customer_id', customerIds)
+    .whereNotNull('accepted_at')
+    .select('customer_id');
+  const ids = new Set(customerIds.map(String));
+  return new Set(rows.map((r) => String(r.customer_id)).filter((id) => ids.has(id)));
+}
+
 async function loadLiveTerms(dbh, customerIds, { today }) {
   if (!customerIds.length) return new Map();
   const { coveredTermsAsOf } = require('./annual-prepay-renewals');
@@ -2004,6 +2020,7 @@ async function loadBookInputs(dbh, { today, sinceYmd }) {
   const settledDues = await loadSettledDues(dbh, monthlyIds, { sinceYmd });
   const estimateIds = [...new Set(planLines.flatMap((p) => p.source_estimate_ids || []))];
   const estimates = await loadEstimates(dbh, estimateIds);
+  const acceptedCustomers = await loadAcceptedEstimateCustomers(dbh, customerIds);
   const visitsByLine = new Map();
   for (const row of completedRows) {
     const key = `${row.customer_id}|${row.line}`;
@@ -2013,7 +2030,7 @@ async function loadBookInputs(dbh, { today, sinceYmd }) {
   // Conversation allowances per line, from the whole book's completed
   // visits — stored on the batch row so every snapshot is reproducible.
   const allowances = computeLineAllowances(completedRows);
-  return { planLines, customerIds, customers, firstVisits, visitsByLine, liveTerms, ledger, settledDues, estimates, allowances };
+  return { planLines, customerIds, customers, firstVisits, visitsByLine, liveTerms, ledger, settledDues, estimates, allowances, acceptedCustomers };
 }
 
 // Stage 2 — one book entry per plan line: current rate per lane, duration /
@@ -2178,22 +2195,29 @@ function reviewOccurrence(entry, latest, { from, to, carryFloor }) {
   // next anniversary (or a catch-up build), as the screen says. Consecutive
   // windows share their boundary day, so the occurrence the owner skipped is
   // not listed again by the next window either.
-  const ownerSkipped = !!latest && (parseJson(latest.flags) || []).includes('admin_skipped');
+  const latestFlags = latest ? (parseJson(latest.flags) || []) : [];
+  const ownerSkipped = latestFlags.includes('admin_skipped');
   if (!entry.anniversary.date) return ownerSkipped ? null : { reviewDate: null, carriedFrom: null };
   const inWindow = anniversaryInWindow(entry.anniversary.date, from, to);
   if (inWindow) return ownerSkipped && dateColumn(latest.review_date) === inWindow ? null : { reviewDate: inWindow, carriedFrom: null };
   if (!latest || !CARRY_FORWARD_STATUSES.includes(latest.status) || ownerSkipped) return null;
+  // An earlier batch listed the line undated (no_anniversary, review_date
+  // NULL). Now that it has a date, that carry has nothing to anchor: the
+  // line is reviewed at its anniversary's next occurrence, never at the old
+  // batch's computed_at (the apply would trust that as the review date).
+  if (latestFlags.includes('no_anniversary') && !dateColumn(latest.review_date)) return null;
   const anchor = dateColumn(latest.review_date) || etDay(latest.computed_at);
   if (!anchor || anchor < carryFloor || anchor > to) return null;
   return { reviewDate: anchor, carriedFrom: latest.batch_key };
 }
 
-function selectReviewEntries(book, { from, to, now, latestByLine, firstVisits = null }) {
+function selectReviewEntries(book, { from, to, now, latestByLine, firstVisits = null, acceptedCustomers = new Set() }) {
   const carryFloor = daysAgoYmd(now, CARRY_FORWARD_MAX_DAYS_PAST);
   const accountFirst = accountFirstVisits(firstVisits, book);
-  // active families per account (the book is one entry per customer × family)
-  const familiesPerAccount = new Map();
-  for (const entry of book) familiesPerAccount.set(entry.customer.id, (familiesPerAccount.get(entry.customer.id) || 0) + 1);
+  // active PROGRAMS per account: plan lines (account_lines) and, within a
+  // consolidated family entry, its service keys — one program means exactly
+  // one plan line carrying at most one service key
+  const onlyProgramFor = (entry) => Number(entry.planLine && entry.planLine.account_lines) === 1 && (entry.serviceKeys || []).length <= 1;
   const selected = [];
   for (const entry of book) {
     entry.anniversary = resolveAnniversary({
@@ -2204,7 +2228,8 @@ function selectReviewEntries(book, { from, to, now, latestByLine, firstVisits = 
       accountFirstVisit: accountFirst.get(entry.customer.id) || null,
       presenceWindowDays: presenceWindowFor(entry.visitsPerYear),
       accountCreatedAt: entry.customer.created_at,
-      onlyActiveFamily: familiesPerAccount.get(entry.customer.id) === 1,
+      onlyActiveFamily: onlyProgramFor(entry),
+      accountHasAcceptedEstimate: !!entry.acceptedAt || acceptedCustomers.has(String(entry.customer.id)),
     });
     const occurrence = reviewOccurrence(entry, latestByLine.get(`${entry.customer.id}|${entry.familyKey}`), { from, to, carryFloor });
     if (!occurrence) continue;
@@ -2390,7 +2415,7 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, windowAnch
   const refs = computeLineReferences(book);
   const { lineRphStats } = refs;
   const latestByLine = await loadLatestSnapshots(dbh, inputs.customerIds, { batchKey });
-  const selected = selectReviewEntries(book, { from, to, now, latestByLine, firstVisits: inputs.firstVisits });
+  const selected = selectReviewEntries(book, { from, to, now, latestByLine, firstVisits: inputs.firstVisits, acceptedCustomers: inputs.acceptedCustomers || new Set() });
   const reviewFacts = await loadReviewFacts(dbh, selected, { now, config, batchKey });
   const manualEditCutoff = monthsAgoYmd(now, config.exception_manual_edit_months);
   const rows = selected.map((entry) => rankEntry(entry, { refs, reviewFacts, batchKey, today, config, manualEditCutoff }));
@@ -3139,7 +3164,7 @@ module.exports = {
     isMultiProgramLine,
     trimmedMedian, median, quartiles, modeCents, monthsBetween, monthsAgoYmd, monthKeyMinus, anniversaryInWindow, reviewWindowFor, dateColumn, etDay,
     isBatchKey, assertBatchKey, assertYmd, firstCompletedVisitFor, selectReviewEntries, loadLatestSnapshots, engineItemLowConfidence, windowLabel, syncPricingConstants, daysAgoYmd, qualifyingKeyForLine,
-    PLAN_ROW_SQL, DATING_ROW_SQL, LIVE_STATUS_SQL, isImportedAccount, IMPORTED_ACCOUNT_LEAD_DAYS, informationalFlags,
+    PLAN_ROW_SQL, DATING_ROW_SQL, LIVE_STATUS_SQL, isImportedAccount, IMPORTED_ACCOUNT_LEAD_DAYS, informationalFlags, loadAcceptedEstimateCustomers, reviewOccurrence,
     CARRY_FORWARD_STATUSES, CARRY_FORWARD_MAX_DAYS_PAST, REVIEW_WINDOW_FROM_DAYS, REVIEW_WINDOW_TO_DAYS, CALLBACK_LANE_FOR_FAMILY,
     visitsPerYearFor,
     conversationMinutesFor, interactionFor, wallMinutesFor, treatmentMinutesFor, computeLineAllowances, allowanceFor, lineDurationStats, visitRevenueCents,
