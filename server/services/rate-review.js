@@ -1694,14 +1694,20 @@ async function loadAccountActivity(dbh, customerIds, { today }) {
       ) AS account_activity,
       (SELECT COALESCE(array_agg(DISTINCT ${LINE_SQL} || '|' || COALESCE(s.service_key_snapshot, sv.service_key, '')), '{}')
         FROM scheduled_services s LEFT JOIN services sv ON sv.id = s.service_id
-        WHERE s.customer_id = c.id AND NOT (${LIVE_STATUS_SQL} AND s.scheduled_date >= ?)) AS non_live_lines
+        WHERE s.customer_id = c.id AND NOT (${LIVE_STATUS_SQL} AND s.scheduled_date >= ?)) AS non_live_lines,
+      (SELECT COALESCE(array_agg(DISTINCT COALESCE(asv.category, 'other') || '|' || COALESCE(scheduled_service_addons.service_key_snapshot, asv.service_key, '')), '{}')
+        FROM scheduled_services s JOIN scheduled_service_addons ON scheduled_service_addons.scheduled_service_id = s.id
+        LEFT JOIN services asv ON asv.id = scheduled_service_addons.service_id
+        WHERE s.customer_id = c.id AND NOT (${LIVE_STATUS_SQL} AND s.scheduled_date >= ?) AND ${ADDON_LINE_IS_PLAN_SQL}
+          AND COALESCE(scheduled_service_addons.service_key_snapshot, asv.service_key, '') NOT IN (${oneTimeAddonKeys})) AS non_live_addons
     FROM customers c WHERE c.id = ANY(?::uuid[])
-  `, [today, today, customerIds]);
+  `, [today, today, today, customerIds]);
   const ids = new Set(customerIds.map(String));
   const out = new Map();
   for (const r of rows) {
     if (!ids.has(String(r.customer_id))) continue;
-    const lines = Array.isArray(r.non_live_lines) ? r.non_live_lines.map(String) : [];
+    // a recurring add-on on a non-live visit (a cancelled pest visit that carried a palm add-on) is program history too
+    const lines = [...(Array.isArray(r.non_live_lines) ? r.non_live_lines : []), ...(Array.isArray(r.non_live_addons) ? r.non_live_addons : [])].map(String);
     out.set(String(r.customer_id), { accountActivity: r.account_activity === true, nonLivePrograms: [...new Set(lines.flatMap(programsForNonLiveLine))] });
   }
   return out;

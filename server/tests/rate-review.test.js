@@ -875,7 +875,9 @@ describe('anniversary and tenure', () => {
     // non-live rows are aggregated as family|catalog-key and normalized to PROGRAM identities (palm ≠ tree/shrub; composites split)
     expect(body).toMatch(/array_agg\(DISTINCT \$\{LINE_SQL\} \|\| '\|' \|\| COALESCE\(s\.service_key_snapshot, sv\.service_key, ''\)\)/);
     expect(body).toMatch(/NOT \(\$\{LIVE_STATUS_SQL\} AND s\.scheduled_date >= \?\)\) AS non_live_lines/);
-    expect(body).toMatch(/\[today, today, customerIds\]/); // two date bindings, in order
+    // recurring add-ons on non-live visits are program history too (minus the one-time signup-fee key)
+    expect(body).toMatch(/AND \$\{ADDON_LINE_IS_PLAN_SQL\}\n\s+AND COALESCE\(scheduled_service_addons\.service_key_snapshot, asv\.service_key, ''\) NOT IN \(\$\{oneTimeAddonKeys\}\)\) AS non_live_addons/);
+    expect(body).toMatch(/\[today, today, today, customerIds\]/); // three date bindings, in order
     expect(P.programsForNonLiveLine('tree_shrub|palm_injection')).toEqual(['palm']);
     expect(P.programsForNonLiveLine('tree_shrub|tree_shrub_bimonthly')).toEqual(['tree_shrub']);
     expect(P.programsForNonLiveLine('tree_shrub|')).toEqual(['tree_shrub']);
