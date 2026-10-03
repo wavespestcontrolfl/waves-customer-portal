@@ -4,7 +4,7 @@
 // dark gate is "unavailable", never an error.
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { act, renderHook } from '@testing-library/react';
-import useVoiceFill, { VOICE_FILL_ERROR, VOICE_FILL_NOTHING_HEARD } from './useVoiceFill';
+import useVoiceFill, { VOICE_FILL_ERROR, VOICE_FILL_NOTHING_HEARD, VOICE_FILL_TOO_LONG } from './useVoiceFill';
 
 const setup = () => renderHook(() => useVoiceFill({ serviceId: 'svc-1', sheet: 'pest_reservice' }));
 
@@ -53,6 +53,13 @@ describe('useVoiceFill.fillFromClip', () => {
     const { result } = setup();
     await act(async () => { expect(await result.current.fillFromClip(clip(), 3)).toBeNull(); });
     expect(result.current.error).toBe(VOICE_FILL_NOTHING_HEARD);
+  });
+
+  test('too long to fill at once asks for shorter pieces', async () => {
+    answer(413, { error: 'x', code: 'clip_too_long' });
+    const { result } = setup();
+    await act(async () => { expect(await result.current.fillFromClip(clip(), 600)).toBeNull(); });
+    expect(result.current.error).toBe(VOICE_FILL_TOO_LONG);
   });
 
   test('an empty recording asks for nothing', async () => {

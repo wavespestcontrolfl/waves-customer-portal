@@ -1528,7 +1528,8 @@ function transcriptionPrompt(ctx) {
 /**
  * Fill one sheet from a recorded clip.
  * Returns { ok: true, fill, chars } or { ok: false, reason }: voiceFill's reasons,
- * plus transcription_failed | transcription_unreliable | nothing_heard.
+ * plus transcription_failed | transcription_unreliable | nothing_heard |
+ * clip_too_long.
  * `transcribe` is injectable for tests (defaults to the shared OpenAI transcriber).
  */
 async function voiceFillFromClip({ serviceId, sheet, audio, mimeType, filename, durationSeconds = 0, knex = db, call = callAnthropic, transcribe = null }) {
@@ -1554,7 +1555,10 @@ async function voiceFillFromClip({ serviceId, sheet, audio, mimeType, filename, 
   // hold is a fabricated transcript. Unknown duration fails open.
   if (isImplausibleTranscript(text, Number(durationSeconds) || 0)) return { ok: false, reason: 'transcription_unreliable' };
   if (!text) return { ok: false, reason: 'nothing_heard' };
-  const result = await fillFromContext(loaded.context, text.slice(0, MAX_TRANSCRIPT_CHARS), call);
+  // Never cut: a correction near the end would be lost. Too long is refused, as on
+  // the transcript route, and the tech says it in shorter pieces.
+  if (text.length > MAX_TRANSCRIPT_CHARS) return { ok: false, reason: 'clip_too_long' };
+  const result = await fillFromContext(loaded.context, text, call);
   return result.ok ? { ...result, chars: text.length } : result;
 }
 

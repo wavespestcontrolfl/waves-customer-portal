@@ -4633,6 +4633,7 @@ router.post('/:serviceId/fast-complete/voice-fill/clip', fastCompleteVoiceFillGa
     if (!result.ok) {
       logger.info(`[voice-fill] clip service=${req.params.serviceId} tech=${req.technicianId} sheet=${sheet} ${size} ok=false reason=${result.reason}`);
       if (VOICE_FILL_CLIP_UNAVAILABLE.has(result.reason)) return res.status(502).json({ error: 'Voice fill is unavailable right now. Keep typing.' });
+      if (result.reason === 'clip_too_long') return res.status(413).json({ error: 'That was too long to fill at once. Say it in shorter pieces.', code: 'clip_too_long' });
       // Nothing was said: an empty fill, so the sheet simply stays as it is.
       if (result.reason === 'nothing_heard') return res.json({ enabled: true, heardNothing: true, products: [], visit: null, customerNote: '', officeNote: '', unclear: [] });
       const status = result.reason === 'not_pest_re_service' || result.reason === 'not_eligible' ? 409 : recapStatusForReason(result.reason);

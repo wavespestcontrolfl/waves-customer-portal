@@ -182,4 +182,13 @@ describe('POST fast-complete/voice-fill/clip', () => {
     expect(audit[0]).toContain('products=1');
     for (const secret of ['7731', 'Taurus', 'perimeter', 'gate code', 'ants']) expect(everything).not.toContain(secret);
   });
+
+  test('a transcript past the cap is refused, never cut: say it in shorter pieces', async () => {
+    transcribeWithOpenAI.mockResolvedValue({ text: `${'Treated the garage. '.repeat(260)}Actually it was five ounces of Taurus.` });
+    const res = await invoke({ body: { sheet: 'pest_reservice', duration_seconds: '900' } });
+    expect(res.statusCode).toBe(413);
+    expect(res.body.code).toBe('clip_too_long');
+    expect(callAnthropic).not.toHaveBeenCalled();
+  });
 });
+

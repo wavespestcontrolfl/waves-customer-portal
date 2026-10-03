@@ -16,6 +16,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 export const VOICE_FILL_ERROR = "Couldn't fill from your words — tap the answers instead";
 export const VOICE_FILL_NOTHING_HEARD = "Didn't catch anything — tap the mic and try again";
+export const VOICE_FILL_TOO_LONG = 'That was too long to fill at once — say it in shorter pieces';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const clipExtension = (type) => (type.includes('mp4') ? 'mp4' : type.includes('ogg') ? 'ogg' : type.includes('wav') ? 'wav' : type.includes('mpeg') ? 'mp3' : 'webm');
@@ -51,6 +52,10 @@ export default function useVoiceFill({ serviceId, sheet }) {
       // Gate off: 404 { enabled: false }. Not an error.
       if (response.status === 404 || result?.enabled === false) {
         setState({ ...IDLE, unavailable: true });
+        return null;
+      }
+      if (response.status === 413 && result?.code === 'clip_too_long') {
+        setState((prev) => ({ ...prev, status: 'error', error: VOICE_FILL_TOO_LONG }));
         return null;
       }
       if (!response.ok || !result) throw new Error(`voice fill failed (${response.status})`);
