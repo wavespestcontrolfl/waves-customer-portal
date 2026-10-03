@@ -621,6 +621,42 @@ postgres('portal chat durable turns (PostgreSQL)', () => {
       .toBe('completed');
   });
 
+  test('recovery reads a durable response after another request completes its receipt', async () => {
+    const requestId = randomUUID();
+    const nextId = randomUUID();
+    const durable = {
+      reply: 'durable answer before acknowledgement loss',
+      conversationId: null,
+      escalated: false,
+      generated: true,
+    };
+    let markCheckpointed;
+    const checkpointed = new Promise((resolve) => { markCheckpointed = resolve; });
+    let releaseFirst;
+    const secondClaimed = new Promise((resolve) => { releaseFirst = resolve; });
+
+    const first = runPortalTurn(args(requestId, async (turn) => {
+      await turn.transaction('durable response before acknowledgement loss', async (trx) => {
+        await turn.persistCommittedResult(trx, durable);
+      });
+      markCheckpointed();
+      await secondClaimed;
+      throw new Error('synthetic response acknowledgement loss');
+    }));
+    await checkpointed;
+
+    const next = runPortalTurn(args(nextId, async () => {
+      releaseFirst();
+      return { reply: 'next answer after cleanup', escalated: false };
+    }, { message: 'next question' }));
+
+    const [firstResponse, nextResponse] = await Promise.all([first, next]);
+    expect(firstResponse).toEqual({ ...durable, requestId });
+    expect(nextResponse).toMatchObject({ reply: 'next answer after cleanup', requestId: nextId });
+    expect(await mockApp('portal_chat_requests').where({ request_id: requestId }).first())
+      .toMatchObject({ state: 'completed', attempt_id: null, response: expect.objectContaining(durable) });
+  });
+
   test('a resolved fallback cannot overwrite a handoff checkpoint after a lost commit acknowledgement', async () => {
     const requestId = randomUUID();
     const handoff = {
