@@ -40,6 +40,20 @@
 //                                counties has a parcel at the point
 //   no_parcel_at_point           county known, no parcel at the stored point
 //
+// KNOWN LIMITATIONS (owner ruling 2026-10-03: this read-only tool merges with
+// these documented rather than adding more live-table columns):
+//   - The geocoder's county hint is not persisted. The replay hints the point
+//     query with the stored record county, which the live address-search
+//     fallback can set to a county other than the geocoder's; such a row may
+//     query a different point layer than the live call did.
+//   - Attempt provenance (payload_attempt_id / last_attempt_id) is written by
+//     current code only. A pre-provenance process writing the same address
+//     during a rolling deploy or a rollback leaves both ids untouched, so a
+//     stale payload can read as attempt-scoped. Legacy rows (both NULL) use a
+//     timing window.
+//   Treat single-row recoveries/regressions as leads to check, and the
+//   summary counts as the measurement.
+//
 // Regression flag (--status=sample-clean): `true` = the live lookup resolved the row and the replay
 // no longer keeps the same parcel; `false` = it still does (or the row never resolved); `n/a` = not
 // comparable, because the replay does not run what produced the stored parcel: the FDOR statewide
@@ -704,8 +718,15 @@ async function main(argv = process.argv.slice(2), env = process.env) {
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
   // Addresses and exact coordinates: owner-only, whatever the umask, and an
   // existing file named by --out is tightened before it is overwritten.
-  fs.writeFileSync(outPath, formatTsv(results), { mode: 0o600 });
-  fs.chmodSync(outPath, 0o600);
+  // Tightened BEFORE any data is written (an existing file keeps its old
+  // mode on open), and never through a symlink.
+  const fd = fs.openSync(outPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | fs.constants.O_NOFOLLOW, 0o600);
+  try {
+    fs.fchmodSync(fd, 0o600);
+    fs.writeFileSync(fd, formatTsv(results));
+  } finally {
+    fs.closeSync(fd);
+  }
   const summary = summarizeResults(results);
   console.log('');
   console.log(formatSummary(summary));
