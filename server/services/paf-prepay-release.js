@@ -557,7 +557,21 @@ async function isFirstHeldVisitOfUnpaidYear(svc, conn = db) {
   if (!term || String(term.status || '') !== 'payment_pending' || !term.source_estimate_id) return false;
   const others = (await performedVisitCandidates(term.source_estimate_id, svc.customer_id))
     .filter((v) => String(v.id) !== String(svc.id) && String(v.paf_held_term_id || '') === String(term.id));
-  return others.length === 0;
+  if (others.length) return false;
+  // Two held visits closing at once both see no other performed visit; one
+  // atomic claim on the year's job picks exactly one (a retry of the same
+  // visit keeps it). GitHub Codex #5640 r12.
+  const claimed = await conn('estimates')
+    .where({ id: term.source_estimate_id })
+    .whereRaw(`${JOB} ->> 'deferred_to_first_visit' = 'true'`)
+    .whereRaw(`coalesce(${JOB} ->> 'first_visit_text_visit_id', ?) = ?`, [String(svc.id), String(svc.id)])
+    .update({
+      estimate_data: conn.raw(
+        "jsonb_set(estimate_data, '{prepayAutoChargeJob}', (estimate_data -> 'prepayAutoChargeJob') || ?::jsonb)",
+        [JSON.stringify({ first_visit_text_visit_id: String(svc.id) })],
+      ),
+    });
+  return claimed === 1;
 }
 
 module.exports = {

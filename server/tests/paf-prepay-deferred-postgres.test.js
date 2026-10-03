@@ -480,6 +480,18 @@ postgres('annual prepay charged after the first visit', () => {
       expect(await Release.isFirstHeldVisitOfUnpaidYear(await trx('scheduled_services').where({ id: f.parentId }).first(), trx)).toBe(false);
     });
 
+    it('two held visits closing at once: exactly one claims the first-visit text (GitHub Codex #5640 r12)', async () => {
+      const f = await deferredAccept();
+      await trx('scheduled_services').whereIn('id', [f.parentId, f.childId]).update({ paf_held_term_id: f.termId });
+      const Release = require('../services/paf-prepay-release');
+      const parent = await trx('scheduled_services').where({ id: f.parentId }).first();
+      const child = await trx('scheduled_services').where({ id: f.childId }).first();
+      expect(await Release.isFirstHeldVisitOfUnpaidYear(parent, trx)).toBe(true);
+      expect(await Release.isFirstHeldVisitOfUnpaidYear(child, trx)).toBe(false);
+      // A retry of the claiming visit keeps the text.
+      expect(await Release.isFirstHeldVisitOfUnpaidYear(parent, trx)).toBe(true);
+    });
+
     it('a disabled neutral template falls back to the regular annual-prepay text', async () => {
       const f = await deferredAccept();
       await trx('sms_templates').where({ template_key: 'service_complete_annual_prepay_after_first_visit' }).update({ is_active: false });
