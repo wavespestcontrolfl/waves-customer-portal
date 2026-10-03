@@ -11,6 +11,10 @@ export const WAVES_FDACS_LICENSE_NUMBER = normalizeFdacsLicense(
 );
 export const WAVES_FL_LICENSE_LINE = `FL License #${WAVES_FDACS_LICENSE_NUMBER}`;
 
+// Ownership line — keep in sync with WAVES_OWNERSHIP_LINE in
+// server/constants/business.js (the client bundle can't import it).
+export const WAVES_OWNERSHIP_LINE = 'Locally owned. Not private equity.';
+
 export const WAVES_SUPPORT_PHONE_DISPLAY = '(941) 297-5749';
 export const WAVES_SUPPORT_PHONE_TEL = 'tel:+19412975749';
 export const WAVES_SUPPORT_SMS_TEL = 'sms:+19412975749';

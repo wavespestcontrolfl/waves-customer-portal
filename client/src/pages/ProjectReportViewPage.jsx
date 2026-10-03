@@ -14,6 +14,7 @@ import PoisonControlCopy, { applicatorIdLine } from '../components/report/Poison
 import { useGlassSurface } from '../glass/glass-engine';
 import { WAVES_FDACS_LICENSE_NUMBER, WAVES_PRODUCTS_SAFETY_URL } from '../constants/business';
 import { INTERNAL_FINDING_KEYS } from '../lib/wdoReportFields';
+import { reportGreetingFirstName } from '../lib/reportGreeting';
 
 /**
  * Public project-report viewer (WDO, termite, pest, rodent, bed bug).
@@ -513,7 +514,7 @@ export default function ProjectReportViewPage() {
       .filter(([, value]) => value !== null && value !== undefined && value !== '')
     : [];
   const atAGlanceRows = buildAtAGlance({ data, typeLabel });
-  const firstName = String(data.customerName || '').trim().split(/\s+/)[0] || 'there';
+  const firstName = reportGreetingFirstName(data) || 'there';
   // The certificate headline mirrors the full type label (owner directive
   // 2026-07-04) — same wording as the kicker, not the bare short form.
   // Owner ruling 2026-07-16: every report headline starts "Hi" and ends "!".

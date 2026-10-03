@@ -298,6 +298,7 @@ export function VisitNote({ note, onChange, onDictated, onDictationPending, serv
       className="tech-visit-control"
       rows={3}
       value={note}
+      disabled={locked}
       onChange={(e) => onChange(e.target.value)}
       placeholder="What you treated, where, and what you saw"
     />
