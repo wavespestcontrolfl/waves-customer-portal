@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React, { StrictMode } from 'react';
 import '@testing-library/jest-dom/vitest';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import EquipmentPage from './EquipmentPage';
@@ -13,7 +13,9 @@ const ok = (rows = [mix], key = 'tank_mixes') => ({ ok: true, json: async () => 
 let handler;
 beforeEach(() => { handler = async () => ok(); vi.stubGlobal('fetch', vi.fn((...args) => handler(...args))); });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
-const mount = (strict = false) => render(<MemoryRouter initialEntries={['/?tab=tank-mixes']}>{strict ? <StrictMode><EquipmentPage /></StrictMode> : <EquipmentPage />}</MemoryRouter>);
+// Recalculation is an owner-only write, so the page is mounted in an admin shell.
+const AdminShell = () => <Outlet context={{ user: { role: 'admin' } }} />;
+const mount = (strict = false) => render(<MemoryRouter initialEntries={['/?tab=tank-mixes']}><Routes><Route element={<AdminShell />}><Route path="/" element={strict ? <StrictMode><EquipmentPage /></StrictMode> : <EquipmentPage />} /></Route></Routes></MemoryRouter>);
 it.each(['http', 'network'])('reports %s failure and retries to true empty', async kind => {
  handler = async () => { if (kind === 'network') throw Error('offline'); return { ok: false, status: 503 }; };
  mount(); await screen.findByRole('alert'); expect(screen.queryByText(/No tank mixes configured/)).not.toBeInTheDocument();

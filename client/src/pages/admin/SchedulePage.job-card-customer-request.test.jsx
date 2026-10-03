@@ -3,9 +3,9 @@
 // Job card "Why they booked" box (GATE_JOB_CARD_CUSTOMER_CONTEXT, owner
 // "ok go" 2026-10-03). Typed and texted words are quoted; a call's AI
 // summary and the office's wording are not; nothing recorded renders nothing.
-import { cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { JobCardCustomerRequest } from './SchedulePage';
+import { JobCardCustomerRequest, JobCardCustomerTexts, JobCardPrepPhotos } from './SchedulePage';
 
 vi.mock('../../hooks/useFeatureFlag', () => ({
   useFeatureFlagReady: () => ({ enabled: false, ready: true }),
@@ -35,5 +35,70 @@ describe('JobCardCustomerRequest', () => {
     expect(container.textContent).toBe('');
     const empty = render(<JobCardCustomerRequest D={D} request={{ text: null, source: 'office', pests: [] }} />);
     expect(empty.container.textContent).toBe('');
+  });
+});
+
+describe('JobCardCustomerTexts', () => {
+  it('quotes each text with its date', () => {
+    render(<JobCardCustomerTexts D={D} texts={[{ date: '2026-09-02', text: 'Ants are back by the pool' }]} />);
+    expect(screen.getByText('Customer texts (last 14 days)')).toBeTruthy();
+    expect(screen.getByText('\u201CAnts are back by the pool\u201D')).toBeTruthy();
+    expect(screen.getByText('2026-09-02:', { exact: false })).toBeTruthy();
+  });
+
+  it('says so when the history could not be read, and shows nothing for none or gate off', () => {
+    render(<JobCardCustomerTexts D={D} texts={null} />);
+    expect(screen.getByText('Text history unavailable right now.')).toBeTruthy();
+    cleanup();
+    expect(render(<JobCardCustomerTexts D={D} texts={[]} />).container.textContent).toBe('');
+    expect(render(<JobCardCustomerTexts D={D} />).container.textContent).toBe('');
+  });
+});
+
+describe('JobCardPrepPhotos', () => {
+  const submissions = [{ topic: 'pest', locationOnProperty: 'back_yard', note: 'Nest by the lanai', photoIds: ['p1', 'p2'] }];
+
+  it('shows where, the note and thumbnails from the scoped photo endpoint', async () => {
+    const request = vi.fn(async () => ({ photos: [{ id: 'p1', url: 'https://example.test/p1.jpg' }] }));
+    render(<JobCardPrepPhotos D={D} serviceId="svc-1" submissions={submissions} request={request} />);
+    expect(screen.getByText('Photos the customer sent')).toBeTruthy();
+    expect(screen.getByText('Back yard · Pest')).toBeTruthy();
+    expect(screen.getByText('\u201CNest by the lanai\u201D')).toBeTruthy();
+    expect(request).toHaveBeenCalledWith('/admin/schedule/svc-1/visit-prep-photos');
+    await waitFor(() => expect(screen.getByAltText('Customer photo 1').getAttribute('src')).toBe('https://example.test/p1.jpg'));
+    // A photo the endpoint did not sign stays a placeholder.
+    expect(screen.getByLabelText('Customer photo 2 loading')).toBeTruthy();
+  });
+
+  it('withholds expired links on resume and fetches fresh ones (Codex r2)', async () => {
+    const request = vi.fn(async () => ({ photos: [{ id: 'p1', url: 'https://example.test/old.jpg' }] }));
+    render(<JobCardPrepPhotos D={D} serviceId="svc-1" submissions={submissions} request={request} />);
+    await waitFor(() => expect(screen.getByAltText('Customer photo 1')).toBeTruthy());
+    // The phone was locked past the one-hour signed links.
+    const later = Date.now() + 61 * 60 * 1000;
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(later);
+    request.mockImplementationOnce(async () => ({ photos: [{ id: 'p1', url: 'https://example.test/new.jpg' }] }));
+    try {
+      act(() => { window.dispatchEvent(new Event('focus')); });
+      expect(screen.queryByAltText('Customer photo 1')?.getAttribute('src')).not.toBe('https://example.test/old.jpg');
+      await waitFor(() => expect(screen.getByAltText('Customer photo 1').getAttribute('src')).toBe('https://example.test/new.jpg'));
+    } finally { clock.mockRestore(); }
+  });
+
+  it('a failed photo fetch still shows the note; nothing sent renders nothing', async () => {
+    const request = vi.fn(async () => { throw new Error('404'); });
+    render(<JobCardPrepPhotos D={D} serviceId="svc-1" submissions={submissions} request={request} />);
+    await waitFor(() => expect(screen.getByText('Photos unavailable right now.', { exact: false })).toBeTruthy());
+    expect(screen.getByText('\u201CNest by the lanai\u201D')).toBeTruthy();
+    expect(screen.getByLabelText('Customer photo 1 unavailable')).toBeTruthy();
+    // Retry fetches again at once; a success clears the notice.
+    request.mockImplementationOnce(async () => ({ photos: [{ id: 'p1', url: 'https://example.test/p1.jpg' }] }));
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(screen.getByAltText('Customer photo 1')).toBeTruthy());
+    expect(screen.queryByText('Photos unavailable right now.', { exact: false })).toBeNull();
+    cleanup();
+    const none = vi.fn();
+    expect(render(<JobCardPrepPhotos D={D} serviceId="svc-1" submissions={null} request={none} />).container.textContent).toBe('');
+    expect(none).not.toHaveBeenCalled();
   });
 });

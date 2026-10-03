@@ -15,6 +15,10 @@ import TokensTab from "./knowledge-base/TokensTab";
 
 const KB_TAB_KEYS = new Set(["browse", "create", "field", "audit", "tokens"]);
 
+// The knowledge base is READ-ONLY for a technician (staff allow-list,
+// 2026-10-02): Create, Audit and Tokens need admin-only routes.
+const OWNER_ONLY_KB_TABS = ["create", "audit", "tokens"];
+
 function knowledgeBaseTabs(isAdminRole) {
   const tabs = [
     {
@@ -35,7 +39,9 @@ function knowledgeBaseTabs(isAdminRole) {
       { key: "tokens", label: "Tokens", Icon: Gauge },
     );
   }
-  return tabs;
+  return isAdminRole
+    ? tabs
+    : tabs.filter(({ key }) => !OWNER_ONLY_KB_TABS.includes(key));
 }
 
 function staffRole() {
@@ -65,7 +71,7 @@ export default function KnowledgeBasePage({ embedded = false }) {
   const queryKey = embedded ? "kbTab" : "tab";
   const requestedTab = searchParams.get(queryKey);
   const allowedTab = KB_TAB_KEYS.has(requestedTab)
-    && (isAdminRole || !["audit", "tokens"].includes(requestedTab));
+    && (isAdminRole || !OWNER_ONLY_KB_TABS.includes(requestedTab));
   const tab = allowedTab ? requestedTab : "browse";
 
   useRenderedTabBeacon("/admin/knowledge", embedded ? tab : null, [searchParams]);
@@ -148,6 +154,7 @@ export default function KnowledgeBasePage({ embedded = false }) {
           showFeedback={showFeedback}
           onRefresh={loadStats}
           isMobile={isMobile}
+          canEdit={isAdminRole}
         />
       )}
       {tab === "create" && (

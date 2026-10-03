@@ -811,3 +811,156 @@ describe('transactional email provider retry classification', () => {
     });
   });
 });
+
+// B15: a correction of the customer's email stops the provider-block retries
+// still addressed to the replaced address. The SQL itself is proven against
+// Postgres in transactional-email-provider-retry-postgres.test.js; these pin
+// what the stop writes and which rows it reaches.
+describe('stopRetriesForReplacedEmail', () => {
+  let chain;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    chain = {};
+    for (const method of ['where', 'whereRaw', 'whereIn', 'orWhere', 'orWhereIn', 'orWhereRaw', 'orWhereNot', 'whereNull', 'whereNotNull', 'forUpdate', 'update']) {
+      chain[method] = jest.fn((arg) => { if (typeof arg === 'function') arg(chain); return chain; });
+    }
+    chain.select = jest.fn(async () => [message({ status: 'failed', send_attempt_token: 'attempt-1', provider_retry_next_at: new Date() })]);
+    chain.returning = jest.fn(async () => [message({ status: 'failed' })]);
+    db.mockReturnValue(chain);
+  });
+
+  test('stops a scheduled retry to the replaced address without a provider request', async () => {
+    const stopped = await retry.stopRetriesForReplacedEmail(db, { customerId: 'cust-1', oldEmail: ' Old.Typo@Example.com ' });
+
+    expect(stopped).toBe(1);
+    expect(chain.whereRaw).toHaveBeenCalledWith('LOWER(TRIM(recipient_email_snapshot)) = ?', ['old.typo@example.com']);
+    expect(chain.forUpdate).toHaveBeenCalled();
+    // The write is a compare-and-set on the row it read: a claim that moved it wins.
+    expect(chain.where).toHaveBeenCalledWith({ id: 'message-1', send_attempt_token: 'attempt-1', status: 'failed' });
+    // `failed`, never `blocked`: a blocked row makes the library dedupe the idempotency key, so the
+    // owning sender's re-issue to the corrected address would never go out.
+    expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'failed',
+      error_message: 'Customer email was corrected; retry to the replaced address stopped.',
+      provider_retry_next_at: null,
+      provider_retry_exhausted_at: expect.any(Date),
+    }));
+    expect(chain.update).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'blocked' }));
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(sendgrid.clearBlockedAddress).not.toHaveBeenCalled();
+  });
+
+  test('reaches only scheduled or claimed-but-unsent rows and never a visit summary', async () => {
+    await retry.stopRetriesForReplacedEmail(db, { customerId: 'cust-1', oldEmail: 'old@example.com' });
+
+    // A visit summary keeps its own re-authorization fence.
+    expect(chain.orWhereNot).toHaveBeenCalledWith('template_key', 'service.visit_summary');
+    // Claimed rows count only with positive pre-request evidence (pending phase).
+    expect(chain.whereRaw).toHaveBeenCalledWith(expect.stringContaining('provider_handoff_phase = ANY(?::text[])'), [['pending'], 'provider_handoff_pending', true]);
+    expect(chain.where).toHaveBeenCalledWith({ status: 'queued' });
+    expect(chain.whereNull).toHaveBeenCalledWith('provider_message_id');
+    expect(chain.whereNull).toHaveBeenCalledWith('sent_at');
+  });
+
+  test('clears the acceptance-time sent_at only for an attempt the provider rejected, never delivery evidence', async () => {
+    const blocked = message({ status: 'failed', send_attempt_token: 'attempt-1', provider_handoff_attempt_token: 'attempt-1',
+      provider_handoff_phase: 'rejected', sent_at: new Date(), delivered_at: null });
+    chain.select.mockImplementation(async (column) => (column === '*' ? [blocked] : []));
+    await retry.stopRetriesForReplacedEmail(db, { customerId: 'cust-1', oldEmail: 'old@example.com' });
+    expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', sent_at: null }));
+
+    chain.update.mockClear();
+    chain.select.mockImplementation(async (column) => (column === '*' ? [{ ...blocked, delivered_at: new Date() }] : []));
+    await retry.stopRetriesForReplacedEmail(db, { customerId: 'cust-1', oldEmail: 'old@example.com' });
+    expect(chain.update.mock.calls.find(([patch]) => patch.status === 'failed')[0]).not.toHaveProperty('sent_at');
+
+    chain.update.mockClear();
+    chain.select.mockImplementation(async (column) => (column === '*' ? [{ ...blocked, provider_handoff_phase: null }] : []));
+    await retry.stopRetriesForReplacedEmail(db, { customerId: 'cust-1', oldEmail: 'old@example.com' });
+    expect(chain.update.mock.calls.find(([patch]) => patch.status === 'failed')[0]).not.toHaveProperty('sent_at');
+  });
+
+  test('a row naming another customer is never theirs, whatever it links to', async () => {
+    await retry.stopRetriesForReplacedEmail(db, { customerId: 'cust-1', oldEmail: 'old@example.com' });
+
+    expect(chain.where).toHaveBeenCalledWith('recipient_id', 'cust-1');
+    // The lead / estimate fallback applies only to a row that names nobody, or the lead itself.
+    expect(chain.whereNull).toHaveBeenCalledWith('recipient_id');
+    expect(chain.orWhereRaw).toHaveBeenCalledWith('recipient_id = lead_id::text');
+    expect(chain.whereIn).toHaveBeenCalledWith('lead_id', expect.anything());
+    expect(chain.orWhereIn).toHaveBeenCalledWith('estimate_id', expect.anything());
+    expect(chain.orWhereIn).not.toHaveBeenCalledWith('lead_id', expect.anything());
+    // A lead-typed row whose recipient is one of the customer's leads is theirs even with a null lead_id.
+    expect(chain.where).toHaveBeenCalledWith('recipient_type', 'lead');
+    expect(chain.whereIn).toHaveBeenCalledWith('recipient_id', expect.anything());
+    expect(db.raw).toHaveBeenCalledWith('id::text');
+  });
+
+  test('stamps every row still awaiting a provider verdict so a later block event cannot re-arm the replaced address', async () => {
+    await retry.stopRetriesForReplacedEmail(db, { customerId: 'cust-1', oldEmail: 'old@example.com' });
+
+    expect(chain.whereIn).toHaveBeenCalledWith('status', ['queued', 'sent', 'failed']);
+    expect(chain.whereRaw).toHaveBeenCalledWith(expect.stringContaining('NOT jsonb_exists'), ['recipient_replaced']);
+    expect(chain.update).toHaveBeenCalledWith({
+      categories: { sql: expect.stringContaining('|| to_jsonb(?::text)'), bindings: ['recipient_replaced'] },
+    });
+  });
+
+  test('a sender-rendered notice keeps its own settlement and is not stopped here', async () => {
+    const rows = [message({ template_key: 'invoice.followup_7_day', status: 'failed', send_attempt_token: 'attempt-1' })];
+    chain.select.mockImplementation(async (column) => (column === '*' ? rows : []));
+    await expect(retry.stopRetriesForReplacedEmail(db, { customerId: 'cust-1', oldEmail: 'old@example.com' })).resolves.toBe(0);
+    expect(chain.returning).not.toHaveBeenCalled();
+  });
+
+  test('a row another worker settled first is not counted', async () => {
+    chain.returning.mockResolvedValueOnce([]);
+    await expect(retry.stopRetriesForReplacedEmail(db, { customerId: 'cust-1', oldEmail: 'old@example.com' })).resolves.toBe(0);
+  });
+
+  test('does nothing without a customer or a replaced address', async () => {
+    await expect(retry.stopRetriesForReplacedEmail(db, { customerId: null, oldEmail: 'old@example.com' })).resolves.toBe(0);
+    await expect(retry.stopRetriesForReplacedEmail(db, { customerId: 'cust-1', oldEmail: '  ' })).resolves.toBe(0);
+    expect(db).not.toHaveBeenCalled();
+  });
+});
+
+describe('a row stamped as addressed to a replaced email', () => {
+  const stamped = (overrides = {}) => message({
+    categories: ['email_template', 'recipient_replaced'], send_attempt_token: 'attempt-9', ...overrides,
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.raw = jest.fn((sql) => sql);
+    db.transaction = jest.fn(async (cb) => cb(db));
+  });
+
+  test('is never scheduled by a provider block', () => {
+    expect(retry.isTransactionalRetryEligible(stamped())).toBe(false);
+    expect(retry.retryStateForProviderBlock(stamped(), new Date())).toEqual({
+      provider_handoff_phase: 'rejected', provider_handoff_attempt_token: 'attempt-9',
+    });
+    expect(retry.isTransactionalRetryEligible(message())).toBe(true);
+  });
+
+  test('is stopped before any provider request if it was scheduled anyway', async () => {
+    const chain = {};
+    chain.where = jest.fn(() => chain);
+    chain.update = jest.fn(() => chain);
+    chain.returning = jest.fn(async () => [{ id: 'message-1', status: 'failed' }]);
+    db.mockReturnValue(chain);
+
+    const result = await retry.retryOne(stamped());
+
+    expect(result).toMatchObject({ sent: false, stopped: true });
+    expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'failed', provider_retry_next_at: null,
+      error_message: 'Customer email was corrected; retry to the replaced address stopped.',
+    }));
+    expect(emailTemplates.activeSuppressionFor).not.toHaveBeenCalled();
+    expect(sendgrid.clearBlockedAddress).not.toHaveBeenCalled();
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+});

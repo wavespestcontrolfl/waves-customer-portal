@@ -122,8 +122,23 @@ describe('wiring', () => {
     expect(block).toMatch(/options\.capacityPlacement === true && target\.technicianId\s*\?\s*\{ technicianId: target\.technicianId \}/);
   });
 
+  // Owner ruling 2026-10-03: with two technicians, staff booking or moving a
+  // visit for one technician are not warned about the OTHER technician's
+  // customer. admin-schedule.js therefore passes the row's technician to its
+  // advisory probes (create, recurring children/boosters, the series
+  // destination guard); occupancy.js still ignores it unless the gate and
+  // capacity mode are on. The callers below were not ruled on and stay
+  // tech-blind.
+  test('admin create and series probes pass the row technician (advisory, gate-scoped in occupancy.js)', () => {
+    const src = read('routes/admin-schedule.js');
+    for (const pin of ['technicianId: insertData.technician_id || null', 'technicianId: childData.technician_id || null',
+      'technicianId: boosterData.technician_id || null', 'technicianId: row.technician_id || null']) {
+      expect(src).toContain(pin);
+    }
+  });
+
   test('callers that must stay tech-blind never pass technicianId', () => {
-    for (const p of ['routes/admin-schedule.js', 'routes/admin-leads.js', 'services/scheduling/window-rules.js',
+    for (const p of ['routes/admin-leads.js', 'services/scheduling/window-rules.js',
       'services/availability.js', 'services/slot-reservation.js', 'services/voice-agent/relay-booking.js',
       'services/call-booking-catalog.js', 'services/visit-groups.js', 'services/completion-followup-booking.js',
       'services/annual-prepay-renewals.js']) {
