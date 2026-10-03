@@ -4,9 +4,22 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const VisitGroups = require('./visit-groups');
 const { portalUrl } = require('../utils/portal-url');
-const { getServiceReportEmailRecipients, withAccountPrimaryContact } = require('./customer-contact');
+const { getPrimaryContact, getServiceReportEmailRecipients, withAccountPrimaryContact } = require('./customer-contact');
 // The summary text waits for a contact's own YES (recipient-optin.js).
 const { resolveServiceContactSmsRecipient } = require('./recipient-optin');
+const ContactReportText = require('./contact-report-text');
+
+// Who gets the summary text. GATE_CONTACT_REPORT_TEXT on: the account holder
+// (the text can carry a pay link), and each confirmed contact gets the plain
+// report text instead (contact-report-text.js). An account holder with no
+// phone, or the gate off: the slot-1 contact rule, unchanged.
+async function summarySmsRecipient(customer, opts) {
+  if (ContactReportText.enabled()) {
+    const primary = getPrimaryContact(customer);
+    if (primary.phone) return primary;
+  }
+  return resolveServiceContactSmsRecipient(customer, opts);
+}
 const { invoiceAmountDue, isInvoiceCollectibleStatus, isQueueSendClaimToken, SUMMARY_TEXT_PLANNED_ERROR } = require('./invoice-helpers');
 const { createDefaultCustomerRows } = require('./customer-default-rows');
 
@@ -163,7 +176,7 @@ async function deferredSummaryRecipient(meta, database = db, { customer: heldCus
   const row = heldCustomer || await database('customers').where({ id: meta.customer_id }).whereNull('deleted_at').first();
   if (!row) return { eligible: false, reason: 'visit_summary_unavailable' };
   const customer = heldCustomer || await withAccountPrimaryContact(row, { db: database, rethrow: true, forShare: Boolean(database.isTransaction) });
-  const recipient = await resolveServiceContactSmsRecipient(customer, { dbh: database });
+  const recipient = await summarySmsRecipient(customer, { dbh: database });
   // Contact saves keep their formatting and the canonical sender normalizes
   // before Twilio, so the frozen number and the live one are compared by
   // destination identity, not by string.
@@ -404,7 +417,7 @@ async function planSummaryBillingLink(packetId, token, database = db) {
     const context = await summaryDeliveryContext(packetId, token, database);
     const { visit, customer, visible, requested, summaryUrl } = context;
     if (!visible || !requested || !summaryUrl || visit.billing_hold) return null;
-    const recipient = await resolveServiceContactSmsRecipient(customer, { dbh: database });
+    const recipient = await summarySmsRecipient(customer, { dbh: database });
     if (!recipient?.phone) return null;
     const invoice = await database('invoices').where({ visit_completion_packet_id: packetId }).first();
     if (!invoice?.token || invoice.customer_id !== visit.customer_id || invoice.payer_id || invoice.payer_statement_id) return null;
@@ -574,7 +587,16 @@ async function summaryBillingLinkText(link) {
 async function sendSummarySms({ visit, member, customer, summaryUrl, requested, billingLink = null }) {
   const claim = await VisitGroups.claimVisitNotification(member, 'completion_sms');
   if (claim?.state !== 'owner') return;
-  const recipient = await resolveServiceContactSmsRecipient(customer);
+  const recipient = await summarySmsRecipient(customer);
+  // On-location contacts get a plain report text when this summary goes out
+  // (contact-report-text.js; never throws; a repeat queues nothing). Not the
+  // summary's own recipient (Contact 1 when the account holder has no
+  // phone). The queued text is sent only while this summary token is live.
+  const notifyContacts = (notBefore = null) => ContactReportText.notifyContactsReportReady({
+    customerId: customer.id, sourceKey: `visit:${visit.id}`, reportUrl: summaryUrl, scheduledServiceId: member.id,
+    notBefore, excludePhone: recipient?.phone || null,
+    source: { visitId: visit.id, summaryTokenHash: visit.summary_token_hash },
+  });
   let dispatched = false;
   try {
     if (!requested || !recipient?.phone) {
@@ -612,7 +634,7 @@ async function sendSummarySms({ visit, member, customer, summaryUrl, requested, 
           authorized: async (current, currentPrefs, trx) => {
             const allowed = currentPrefs.sms_enabled !== false
               && currentPrefs.service_completed !== false
-              && sameSmsDestination((await resolveServiceContactSmsRecipient(current, { dbh: trx })).phone, recipient.phone);
+              && sameSmsDestination((await summarySmsRecipient(current, { dbh: trx })).phone, recipient.phone);
             if (!allowed || !link) return allowed;
             // Under the held customer row (payer and consent writers commit under it).
             if (await summaryLinkStillValid(trx, link, visit.id, recipient.phone)) return true;
@@ -635,6 +657,7 @@ async function sendSummarySms({ visit, member, customer, summaryUrl, requested, 
       // The queued text carries the link (the invoice's own text no longer exists);
       // it is judged again when it goes out.
       await deferSummarySms({ visit, member, customer, recipient, body, plainBody, link, claim, nextAllowedAt: result.nextAllowedAt });
+      await notifyContacts(new Date(result.nextAllowedAt));
       return;
     }
     // Once handed to a non-idempotent provider, every failure is ambiguous
@@ -651,6 +674,9 @@ async function sendSummarySms({ visit, member, customer, summaryUrl, requested, 
     const retryable = result.retryable || result.code === 'CONSENT_LOOKUP_FAILED';
     const outcome = result.sent ? 'sent' : retryable ? 'retry' : 'suppressed';
     if (outcome === 'sent') await recordSummaryLinkTextAccepted(link).catch(() => {});
+    // Before the finalize write: one that throws lands in the catch, which
+    // settles the summary and does not come back.
+    if (outcome === 'sent') await notifyContacts();
     await VisitGroups.finalizeVisitNotification(visit.id, 'completion_sms', outcome, new Date(), claim.token);
   } catch {
     await VisitGroups.finalizeVisitNotification(visit.id, 'completion_sms', dispatched ? 'unknown_delivery' : 'retry', new Date(), claim.token);
@@ -1268,7 +1294,7 @@ async function deliverVisitCompletionSummary(packetId, token, database = db) {
   const recorded = require('./visit-completion-packets').packetPayload(packet).summaryBillingLink;
   let billingLink = null;
   if (recorded?.invoiceId) {
-    const recipient = await resolveServiceContactSmsRecipient(context.customer, { dbh: database });
+    const recipient = await summarySmsRecipient(context.customer, { dbh: database });
     const link = { kind: recorded.kind, invoiceId: recorded.invoiceId };
     const valid = context.requested && recipient?.phone
       && await summaryLinkStillValid(database, link, visit.id, recipient.phone).catch(() => false);
@@ -1294,7 +1320,7 @@ async function deliverVisitCompletionSummary(packetId, token, database = db) {
   return { state: pending || stampOwed ? 'delivery_pending' : unknown ? 'delivery_review' : 'delivered' };
 }
 
-module.exports = { VISIT_SUMMARY_TOKEN_RE, planSummaryBillingLink, summaryLinkTextStarted, ensureVisitSummaryToken, packetHasPublishableSummary, getVisitCompletionSummary,
+module.exports = { summarySmsRecipient, VISIT_SUMMARY_TOKEN_RE, planSummaryBillingLink, summaryLinkTextStarted, ensureVisitSummaryToken, packetHasPublishableSummary, getVisitCompletionSummary,
   deliverVisitCompletionSummary, reconcileSummaryEmailBounce, reconcileSummaryEmailRecovery, summaryRetryAuthorized,
   recheckDeferredSummarySms, beginDeferredSummarySms, finalizeDeferredSummarySms, terminalDeferredSummarySms,
   retrySummaryThroughHandoff, parkVisitReviewOutreach, resumeVisitReviewOutreach, visitSummaryUncertainForRecord,
