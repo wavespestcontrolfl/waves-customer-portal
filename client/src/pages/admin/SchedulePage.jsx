@@ -17768,7 +17768,7 @@ export function CompletionPanel({
     const failedPhotos = [];
     let retryPermanentlyBlocked = false;
     try {
-      const photos = draft.servicePhotos || [];
+      const photos = draft.servicePhotos;
       for (const [index, photo] of photos.entries()) {
         try {
           const form = buildPhotoRetryFormBody(
@@ -19518,15 +19518,16 @@ export function CompletionPanel({
       </p>
       {photoRetryError && <p>{photoRetryError}</p>}
       {draftStorageStatus}
-      {photoRetryConflict ? (
-        <button type="button" onClick={discardRetainedCompletionPhotos}
-          style={{ padding: "12px 16px", borderRadius: 24, border: "none", background: "#111111", color: "#FFFFFF", fontSize: 14 }}>
-          Discard retained photos
-        </button>
-      ) : (
+      {!photoRetryConflict && (
         <button type="button" onClick={retryCompletionPhotos} disabled={photoRetrying}
           style={{ padding: "12px 16px", borderRadius: 24, border: "none", background: "#111111", color: "#FFFFFF", fontSize: 14 }}>
           {photoRetrying ? (photoReconcileOwed ? "Updating report…" : "Uploading photos…") : (photoReconcileOwed ? "Finish report update" : "Retry photo uploads")}
+        </button>
+      )}
+      {!photoReconcileOwed && (
+        <button type="button" onClick={discardRetainedCompletionPhotos}
+          style={{ marginLeft: photoRetryConflict ? 0 : 8, padding: "12px 16px", borderRadius: 24, border: "none", background: "#111111", color: "#FFFFFF", fontSize: 14 }}>
+          Discard retained photos
         </button>
       )}
       <button type="button" onClick={() => onClose(true)} style={{ marginLeft: 8, padding: 12, border: "none", background: "transparent", color: "#111111", fontSize: 14 }}>

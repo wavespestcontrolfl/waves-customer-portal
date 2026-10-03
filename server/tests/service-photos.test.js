@@ -82,11 +82,12 @@ function makeVisitUploadKnex({
   serviceRecordId = null,
   committedTable = null,
   cleanupQueryError = null,
+  visitStatus = 'on_site',
 } = {}) {
   const visit = {
     id: 'visit-1', customer_id: 'customer-1', property_id: 'property-1',
     technician_id: 'tech-1', service_id: 'catalog-1', service_type: 'Pest Control',
-    scheduled_date: '2026-10-02', status: 'on_site',
+    scheduled_date: '2026-10-02', status: visitStatus,
   };
   let insertPayload = null;
   let transactionSettled = false;
@@ -212,6 +213,8 @@ describe('service photo uploads', () => {
     // Old clients omit expectedVisit entirely and retain the deployed API.
     expect(parseExpectedServicePhotoVisit(undefined)).toBeNull();
     expect(servicePhotoVisitChanged(null, { ...visit, property_id: 'property-2' })).toBe(false);
+    expect(servicePhotoVisitChanged(null, { ...visit, status: 'cancelled' })).toBe(true);
+    expect(servicePhotoVisitChanged(null, { ...visit, status: 'rescheduled' })).toBe(true);
   });
 
   test('metadata-read fallback retains the object when INSERT returns only its id', async () => {
@@ -220,6 +223,21 @@ describe('service photo uploads', () => {
     expect(photo).toEqual({ id: 'photo-1' });
     expect(mockS3Send).toHaveBeenCalledTimes(1);
     expect(mockS3Send.mock.calls[0][0].constructor.name).toBe('PutObjectCommand');
+  });
+
+  test.each(['cancelled', 'rescheduled'])('rejects a %s visit when a legacy caller omits the snapshot', async (status) => {
+    const { uploadServicePhotoForVisit } = require('../services/service-photos');
+    const knex = makeVisitUploadKnex({ visitStatus: status });
+
+    await expect(uploadServicePhotoForVisit({
+      scheduledServiceId: knex.visit.id,
+      actor: { techRole: 'admin', technicianId: 'tech-1' },
+      buffer: Buffer.from('legacy photo'),
+      originalName: 'legacy.jpg',
+      mimeType: 'image/jpeg',
+      knex,
+    })).rejects.toMatchObject({ statusCode: 409, code: 'visit_identity_changed' });
+    expect(mockS3Send).not.toHaveBeenCalled();
   });
 
   test('uploads completion data-url photos into service_photos rows', async () => {

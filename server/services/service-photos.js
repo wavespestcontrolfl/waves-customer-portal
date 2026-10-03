@@ -130,8 +130,11 @@ const SERVICE_PHOTO_LIVE_STATUSES = new Set([
   'pending', 'confirmed', 'en_route', 'on_site', 'completed',
 ]);
 function servicePhotoVisitChanged(expected, visit) {
-  if (!expected) return false;
   const live = servicePhotoVisitSnapshot(visit);
+  // Lifecycle eligibility is authoritative even for older callers that omit
+  // the optional identity snapshot.
+  if (!SERVICE_PHOTO_LIVE_STATUSES.has(String(live.status || ''))) return true;
+  if (!expected) return false;
   if (!sameVisitValue(expected.customerId, live.customerId)
     || !sameVisitValue(expected.propertyId, live.propertyId)
     || !sameVisitValue(expected.technicianId, live.technicianId)
@@ -142,7 +145,7 @@ function servicePhotoVisitChanged(expected, visit) {
   // Lifecycle can advance while a selected file is waiting or retrying. The
   // identity fields above still bind the bytes to the same visit; only a
   // cancelled/skipped/rescheduled or an unknown terminal state closes uploads.
-  return !SERVICE_PHOTO_LIVE_STATUSES.has(String(live.status || ''));
+  return false;
 }
 
 function safePhotoName(value, fallback = 'service-photo.jpg') {

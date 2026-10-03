@@ -260,7 +260,7 @@ describe('completion photos in an unsubmitted draft', () => {
     const completion = vi.fn().mockResolvedValue({
       serviceRecordId: 'record-1', servicePhotoVisit, completionPhotoUpload: { failed: 1 },
     });
-    await mount(completion);
+    const first = await mount(completion);
     fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
     await act(async () => fireEvent.click(submitButton()));
     await screen.findByRole('button', { name: 'Retry photo uploads' });
@@ -294,6 +294,10 @@ describe('completion photos in an unsubmitted draft', () => {
     expect(uploads).toHaveLength(1);
     expect(reconciles).toHaveLength(0);
 
+    first.unmount();
+    fetch.mockRejectedValue(new Error('offline'));
+    await mount(vi.fn());
+    expect(await screen.findByRole('button', { name: 'Discard retained photos' })).toBeTruthy();
     await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Discard retained photos' })));
     expect(completionResumeOwed(service.id)).toBe(false);
     await waitFor(async () => expect(await getCompletionDraft(service.id)).toBeNull());
