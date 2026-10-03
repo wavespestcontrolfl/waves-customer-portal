@@ -5910,7 +5910,9 @@ async function planVisitMoveForStaff({ serviceId, newDate, newWindow, notifyCust
   // 409ing (owner ruling 2026-08-25 — see rebooker.overlapAdvisory).
   rescheduleOptions.overlapAdvisory = true;
   rescheduleOptions.adminWindowRules = !keepSlot;
-  if (keepSlot) rescheduleOptions.keepStatus = true;
+  // ...and a service already under way (en route / on site) is not rewound:
+  // a move may override a live visit, a reassignment may not.
+  if (keepSlot) Object.assign(rescheduleOptions, { keepStatus: true, allowLive: false });
   rescheduleOptions.sourceSurface = sourceSurface;
   rescheduleOptions.notifyRequested = notifyCustomer !== false;
   if (operationKey) rescheduleOptions.operationKey = operationKey;

@@ -11105,6 +11105,10 @@ async function comboTargetElapsed(row, changes, newDate, newWindow) {
   const vg = require('../services/visit-groups');
   const members = await vg.openMembers(db, row.visit_id);
   if (!(changes.date || changes.start)) {
+    // A technician-only change never rewinds a visit that is under way.
+    if (members.some((m) => ['en_route', 'on_site'].includes(String(m.status)))) {
+      return 'A service on this stop is already under way, so the stop cannot be reassigned as a whole. Choose Separate to reassign only this service.';
+    }
     return members.some((m) => sameDayWindowElapsed(newDate, m.window_end || m.window_start))
       ? "This stop's time has already passed today, so it cannot be reassigned as a whole. Choose Separate to reassign only this service."
       : null;

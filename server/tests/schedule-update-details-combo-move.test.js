@@ -148,6 +148,10 @@ describe("comboMove 'together'", () => {
     mockVisitGroups.openMembers.mockResolvedValue([{ id: 'svc-a', window_start: '00:00:00', window_end: '00:01:00' }, { id: 'svc-b', window_start: '00:01:00', window_end: '00:02:00' }]);
     await expect(planComboEditMove(request({ technicianId: 'tech-2', comboMove: 'together' }))).rejects.toMatchObject({ statusCode: 409, code: 'SLOT_TAKEN' });
     expect(mockDispatch.planVisitMoveForStaff).not.toHaveBeenCalled();
+    // A technician-only change with a service already under way is refused the same way.
+    mockRow = { ...ROW };
+    mockVisitGroups.openMembers.mockResolvedValue([{ id: 'svc-a', status: 'confirmed' }, { id: 'svc-b', status: 'on_site' }]);
+    await expect(planComboEditMove(request({ technicianId: 'tech-2', comboMove: 'together' }))).rejects.toMatchObject({ statusCode: 409, code: 'SLOT_TAKEN', message: expect.stringContaining('already under way') });
     // A date move to today: the tapped service's window is still ahead, an earlier sibling's has passed.
     mockRow = { ...ROW, window_start: '23:58:00', window_end: '23:59:00' };
     mockVisitGroups.openMembers.mockResolvedValue([

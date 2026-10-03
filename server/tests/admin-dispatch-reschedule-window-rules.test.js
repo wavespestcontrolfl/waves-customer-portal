@@ -288,7 +288,7 @@ test('keepSlot (a technician-only change on a shared stop): the stored window is
   const actor = { techRole: 'admin', technicianId: 'staff-1' };
   const planned = await planVisitMoveForStaff({ serviceId: 'svc-1', newDate: TARGET, notifyCustomer: false, body: { technicianId: 'tech-2' }, actor, sourceSurface: 'edit_modal', keepSlot: true });
   expect(planned.plan).toMatchObject({ effectiveWindow: null });
-  expect(planned.plan.rescheduleOptions).toMatchObject({ adminWindowRules: false, keepStatus: true, technicianId: 'tech-2', sourceSurface: 'edit_modal' });
+  expect(planned.plan.rescheduleOptions).toMatchObject({ adminWindowRules: false, keepStatus: true, allowLive: false, technicianId: 'tech-2', sourceSurface: 'edit_modal' });
   SmartRebooker.reschedule.mockResolvedValue({ success: true, visitMove: { visitId: 'visit-1', moved: ['svc-1', 'svc-2'], failed: [] } });
   AppointmentReminders.handleReschedule.mockClear();
   const out = await runPlannedVisitMove({ plan: planned.plan, serviceId: 'svc-1', newDate: TARGET, notifyCustomer: false, actor });
