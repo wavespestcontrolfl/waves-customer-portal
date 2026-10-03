@@ -2634,6 +2634,7 @@ export default function EstimateToolViewV2({
   function forgetScopeAnswer() {
     occupancyRef.current = { address: "", answer: "" };
     setScopePending(null);
+    setScopeConflict("");
   }
   const scopeUnresolved = enrichedProfile?.serviceScopeDecision === "scope_unresolved"
     && !enrichedProfile?.occupancyAnswer;

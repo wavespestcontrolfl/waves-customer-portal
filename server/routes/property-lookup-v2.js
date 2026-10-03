@@ -35,6 +35,7 @@ const {
   buildBusinessScopeContext,
   effectiveSuiteUnitKey,
   UNAVAILABLE_IDENTITY,
+  profileCarriesBusinessScope,
   businessIdentified,
   normalizeOccupancyAnswer,
   assertScopeAnswered,
@@ -2003,7 +2004,13 @@ function resolveCommercialSuiteScope(rc, lookupAddress, commercialSubtype, optio
   // suite measurement.
   const sqftVerifiedRaw = rc?._fieldEvidence?.squareFootage?.sourceType === 'verified'
     || (Array.isArray(rc?._verifiedFields) && rc._verifiedFields.includes('squareFootage'));
-  const sqftVerified = sqftVerifiedRaw && verifiedSqftLooksSuiteScoped(rc);
+  // A suite known only from staff's answer about the listed business (no
+  // unit typed) shares its address with every other tenant at the number,
+  // and a verified size is keyed by address: one tenant's measurement must
+  // not become the next tenant's. There it is never applied; it is surfaced
+  // for reconfirmation like any other distrusted verified size.
+  const businessOnlySuite = options.businessScope?.decision === BUSINESS_SCOPE.SUITE && !suiteUnitKey(lookupAddress);
+  const sqftVerified = sqftVerifiedRaw && !businessOnlySuite && verifiedSqftLooksSuiteScoped(rc);
   // Distrusted (not suite-scoped) — surfaced by the caller as a fieldVerify
   // flag so the operator reconfirms rather than the lookup silently keeping
   // the old figure.
@@ -4827,6 +4834,16 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   // (GATE_LOOKUP_BUSINESS_IDENTITY, scope_unresolved with no occupancy
   // answer) is never priced: 409 COMMERCIAL_SCOPE_UNRESOLVED with the
   // question. Profiles without a business verdict carry no such field.
+  // The gate is the kill switch for pricing too: a profile still carrying a
+  // business scope (an open tab, a saved estimate) after the gate went off
+  // is not priced on it — a fresh lookup is required, as for suite sizing.
+  if (!lookupBusinessIdentityLive() && profileCarriesBusinessScope(p)) {
+    const err = new Error('Business identity is off. Re-run the property lookup before pricing this address.');
+    err.statusCode = 409;
+    err.code = 'BUSINESS_IDENTITY_OFF';
+    err.failClosed = true;
+    throw err;
+  }
   assertScopeAnswered(p);
   if (p.suiteSize) {
     const associationJob = isAssociationCommercialJob({ commercialRiskType, commercialSubtype });

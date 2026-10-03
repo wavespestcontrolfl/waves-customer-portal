@@ -289,6 +289,15 @@ function unresolvedScopeError(profile) {
   return err;
 }
 
+// True when a profile carries anything the business-identity leg put there:
+// an open or decided scope, a staff answer, or the staff-confirmed source.
+function profileCarriesBusinessScope(profile) {
+  if (!profile || typeof profile !== 'object') return false;
+  return Boolean(profile.serviceScopeDecision)
+    || Boolean(normalizeOccupancyAnswer(profile.occupancyAnswer))
+    || profile.commercialDetectionSource === BUSINESS_DETECTION_SOURCE;
+}
+
 function assertScopeAnswered(profile) {
   const err = unresolvedScopeError(profile);
   if (err) throw err;
@@ -297,6 +306,7 @@ function assertScopeAnswered(profile) {
 module.exports = {
   SCOPE,
   unresolvedScopeError,
+  profileCarriesBusinessScope,
   assertScopeAnswered,
   OCCUPANCY_QUESTION,
   UNAVAILABLE_IDENTITY,

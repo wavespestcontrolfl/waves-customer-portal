@@ -231,6 +231,27 @@ describe('gate on', () => {
     expect((await run({ occupancyAnswer: 'building' })).enriched.fieldVerifyFlags.some((f) => /verified size is saved/.test(f.reason))).toBe(false);
   });
 
+  test('one tenant\'s verified size is not the next tenant\'s: a suite known only from the staff answer never applies an address-wide verified size', async () => {
+    lookupPropertyFromAITrio.mockImplementation(async () => ({ ...noCountyRecord(), squareFootage: 2400, _verifiedFields: ['squareFootage'] }));
+    const p = (await run({ occupancyAnswer: 'suite' })).enriched;
+    expect(p.serviceScopeDecision).toBe('commercial_suite');
+    // Sized by the type default, not the 2,400 verified under this shared address.
+    expect(p.homeSqFt).toBe(1200);
+    expect(p.suiteSize).toMatchObject({ source: 'suite_type_default' });
+    expect(p.fieldVerifyFlags.some((f) => f.field === 'squareFootage' && /2,?400/.test(f.reason))).toBe(true);
+  });
+
+  test('the gate is the kill switch at pricing too: a business-scope profile is refused once the gate is off', async () => {
+    const answered = (await run({ occupancyAnswer: 'suite' })).enriched;
+    const notThis = (await run({ occupancyAnswer: 'none' })).enriched;
+    delete process.env.GATE_LOOKUP_BUSINESS_IDENTITY;
+    const plain = (await run()).enriched;
+    for (const p of [answered, notThis]) {
+      expect(() => translateV2CallToV1Input(p, ['PEST'], {})).toThrow(expect.objectContaining({ code: 'BUSINESS_IDENTITY_OFF', statusCode: 409, failClosed: true }));
+    }
+    expect(() => translateV2CallToV1Input(plain, ['PEST'], {})).not.toThrow(expect.objectContaining({ code: 'BUSINESS_IDENTITY_OFF' }));
+  });
+
   test('staff answer "none" (not this business): the gate-off profile, nothing asked, pricing allowed, the listing still shown', async () => {
     const baseline = await gateOffBaseline();
     const p = (await run({ occupancyAnswer: 'none' })).enriched;
@@ -593,6 +614,7 @@ describe('the pricing boundary refuses an unanswered scope (409 COMMERCIAL_SCOPE
     serviceScopeDecision: 'scope_unresolved', serviceScopeQuestion: QUESTION, occupancyAnswer: null, ...over,
   });
   const translate = (profile) => translateV2CallToV1Input(profile, ['pest'], {});
+  beforeEach(() => { process.env.GATE_LOOKUP_BUSINESS_IDENTITY = 'true'; });
 
   test('an unanswered profile throws a fail-closed 409 carrying the question, even with a typed size', () => {
     let caught;
