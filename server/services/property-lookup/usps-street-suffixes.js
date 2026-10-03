@@ -163,4 +163,8 @@ const STREET_SUFFIX_CANON_OVERRIDES = {
   VIS: 'VISTA',
 };
 
+// USPS's own C1 table lists "ANEX" in its primary-name column for ANX; the
+// word a roll (or a person) writes is ANNEX.
+USPS_PRIMARY_BY_STANDARD.ANX = 'ANNEX';
+
 module.exports = { USPS_STREET_SUFFIXES, USPS_PRIMARY_BY_STANDARD, STREET_SUFFIX_CANON_OVERRIDES };

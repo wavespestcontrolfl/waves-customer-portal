@@ -61,4 +61,24 @@ function routeSpellingVariants(text) {
   return spellings.map((spelling) => `${prefix}${spelling}`);
 }
 
-module.exports = { routeSpellingVariants };
+// The other spelling of an ORDINARY street's terminal suffix, for parcel
+// searches that match a candidate by exact equality (Charlotte): "100 PALM
+// ISLAND" ↔ "100 PALM IS", "100 EXAMPLE LK" → "100 EXAMPLE LAKE". The
+// long-standing suffixes every roll abbreviates (ST, AVE, DR, …) are left
+// alone — a spelled "DRIVE" candidate would only add requests.
+const ROLL_ABBREVIATED_SUFFIXES = new Set(['AVE', 'BLVD', 'CIR', 'CT', 'DR', 'LN', 'PKWY', 'PL', 'RD', 'ST', 'TER', 'TRL', 'HWY', 'WAY', 'LOOP']);
+// Direction form first: a greedy single pattern would read the trailing
+// direction itself as the suffix word ("… LK E" → word "E").
+const TERMINAL_WITH_DIRECTION_RE = /^(.*\s)([A-Z]+)(\s+(?:NE|NW|SE|SW|N|S|E|W))$/;
+const TERMINAL_PLAIN_RE = /^(.*\s)([A-Z]+)()$/;
+function terminalSuffixVariant(street) {
+  const m = TERMINAL_WITH_DIRECTION_RE.exec(street) || TERMINAL_PLAIN_RE.exec(street);
+  if (!m) return null;
+  const word = m[2];
+  if (ABBREVIATION_BY_SPELLED_KEY[word]) return `${m[1]}${ABBREVIATION_BY_SPELLED_KEY[word]}${m[3] || ''}`;
+  const primary = USPS_STREET_SUFFIXES[word] === word ? USPS_PRIMARY_BY_STANDARD[word] : null;
+  if (!primary || primary === word || ROLL_ABBREVIATED_SUFFIXES.has(word)) return null;
+  return `${m[1]}${primary}${m[3] || ''}`;
+}
+
+module.exports = { routeSpellingVariants, terminalSuffixVariant };

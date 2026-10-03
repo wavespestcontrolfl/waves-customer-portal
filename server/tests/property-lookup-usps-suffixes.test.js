@@ -286,3 +286,19 @@ describe('codex r3: directional city vs the wider suffix set', () => {
     expect(norm('4506 45th Street West Bradenton FL 34209')).toBe('4506 45TH ST W');
   });
 });
+
+describe('codex r4: terminal suffix variants on ordinary streets', () => {
+  const { routeSpellingVariants, terminalSuffixVariant } = require('../services/property-lookup/route-spellings');
+  test('exact-match parcel search gets the other spelling of a multiword street\'s suffix', () => {
+    expect(_private.countyAddressSearchCandidates('100 Palm Island, Port Charlotte, FL 33948')).toEqual(expect.arrayContaining(['100 PALM ISLAND', '100 PALM IS']));
+    expect(_private.countyAddressSearchCandidates('100 Example Lk E, Port Charlotte, FL 33948')).toEqual(expect.arrayContaining(['100 EXAMPLE LK E', '100 EXAMPLE LAKE E']));
+  });
+  test('the suffixes every roll abbreviates add no spelled candidate', () => {
+    expect(terminalSuffixVariant('100 EXAMPLE DR')).toBeNull();
+    expect(terminalSuffixVariant('123 17TH ST E')).toBeNull();
+    expect(terminalSuffixVariant('4867 TOBERMORY WAY')).toBeNull();
+  });
+  test('ANX expands to ANNEX (the USPS table\'s own primary column says "ANEX")', () => {
+    expect(routeSpellingVariants('100 W ANX')).toEqual(['100 W ANX', '100 W ANNEX']);
+  });
+});

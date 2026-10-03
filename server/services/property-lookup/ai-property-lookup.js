@@ -23,7 +23,7 @@ const MODELS = require('../../config/models');
 const { lookupParcelByPoint, parcelGisTimeoutMs } = require('./parcel-gis');
 const { condoUnitFolioLive } = require('../../config/feature-gates');
 const { lookupCountyParcelByPoint, unitParcelFromAggregate, unitParcelFromAggregateRow, normalizeUnitId, lookupCountyParcelAttributesById, queryStreetSitusAddresses, countyUseDescToPropertyType, dorMajorCategory, normalizeCountyName } = require('./county-parcel-gis');
-const { routeSpellingVariants } = require('./route-spellings');
+const { routeSpellingVariants, terminalSuffixVariant } = require('./route-spellings');
 const { USPS_STREET_SUFFIXES, STREET_SUFFIX_CANON_OVERRIDES } = require('./usps-street-suffixes');
 
 const DEFAULT_TIMEOUT_MS = 30000;
@@ -2743,7 +2743,7 @@ function routeSearchCandidates(street) {
 function streetSpellingCandidates(address, street) {
   const typed = stripCountyLocationSuffix(String(address || '').split(',')[0]
     .toUpperCase().replace(/[^A-Z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim());
-  return [...routeSpellingVariants(street), ...routeSearchCandidates(street), normalizeCountyStreetBase(address), typed];
+  return [...routeSpellingVariants(street), ...routeSearchCandidates(street), terminalSuffixVariant(street), normalizeCountyStreetBase(address), typed].filter(Boolean);
 }
 
 function manateeAddressSearchCandidates(address) {
