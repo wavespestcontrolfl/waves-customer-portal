@@ -507,7 +507,8 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const text = json(await read('get_customer_invoices', { customer_id: Q, limit: 50 }));
     expect(text).not.toMatch(/4111|378282|1234567890123|1234 5678/);
     expect((text.match(/Paid with \[number\] thanks/g) || []).length).toBe(masked.length);
-    expect(text).toContain('Visit 2026-10-02 14:05:10 invoice 12.50 id 12345678-1234-4123-8123-123456789012 ok');
+    expect(text).toContain('Visit 2026-10-02 14:05:10 invoice 12.50 id [id] ok');
+    expect(text).not.toContain('12345678-1234-4123-8123-123456789012 ok');
   });
 
   test('a dispute hold is stated for that customer only, and a failed per-invoice lookup is unknown (null), never false', async () => {
@@ -625,7 +626,8 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     expect(detail).toContain('Link [link] and [link] sent');
     expect(detail).toContain('see [link] or [link] or [link]');
     expect(detail).toContain('"category":"[link]"');
-    expect(detail).toContain(`token [token] id ${uuid} done`);
+    expect(detail).toContain('token [token] id [id] done');
+    expect(detail).not.toContain(uuid);
   });
 
   test('every URL is replaced with [link], whatever its route shape; a slash inside a word is not a path', async () => {
@@ -651,7 +653,34 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     expect(text).toContain('See [link] for it');
     expect(text).toContain('Open [link] ok');
     // An ordinary sentence with a slash, a bare UUID and a date are left intact.
-    expect(text).toContain(`Service lawn/shrub care for ${stepUuid} and 10/02/2026`);
+    expect(text).toContain('Service lawn/shrub care for [id] and 10/02/2026');
+  });
+
+  test('a UUID pasted into free text is masked (it can be a bearer value) while every structural id field stays intact', async () => {
+    const Q = await customer(`Uuids${run}`, `Free${run}`);
+    const secretUuid = '9f8e7d6c-5b4a-4321-8abc-0123456789ab';
+    const row = await invoice('q_uuid_free', Q, { total: 5, title: `Preview token ${secretUuid}`, payment_reference: `ref ${secretUuid}`, service_type: secretUuid,
+      line_items: JSON.stringify([{ description: `desc ${secretUuid}`, name: secretUuid, category: secretUuid, quantity: 1, unit_price: 5, amount: 5 }]) });
+    await db('payments').insert({ customer_id: Q, payment_date: day(0), amount: 5, status: 'paid', description: `note ${secretUuid}`, metadata: json({ invoice_id: row.id, payment_method: secretUuid }) });
+    await db('payment_plans').insert({ customer_id: Q, invoice_id: row.id, total_balance: 5, payment_amount: 5, payment_frequency: secretUuid, plan_start_date: day(0), next_payment_date: day(7) });
+    const list = await read('get_customer_invoices', { customer_id: Q });
+    const detail = await read('get_invoice_detail', { invoice_id: row.id });
+    expect(json([list, detail])).not.toContain(secretUuid);
+    expect(detail.invoice.title).toBe('Preview token [id]');
+    expect(detail.invoice.payment_reference).toBe('ref [id]');
+    expect(detail.invoice.service_type).toBe('[id]');
+    expect(detail.line_items[0]).toMatchObject({ description: 'desc [id]', category: '[id]' });
+    expect(detail.recorded_payments[0].method).toBe('[id]');
+    // Structural ids are intact, and the list -> detail round trip works.
+    expect(list.customer.id).toBe(Q);
+    expect(list.invoices[0].id).toBe(row.id);
+    expect(detail.invoice.id).toBe(row.id);
+    expect(detail.customer.id).toBe(Q);
+    expect(detail.recorded_payments[0].id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(detail.payment_plan.active.id).toMatch(/^[0-9a-f-]{36}$/);
+    const prepay = await read('get_invoice_detail', { invoice_id: inv.t_prepay.id });
+    expect(prepay.annual_prepay.term_id).toBe(inv.prepayTermId);
+    expect((await read('get_invoice_detail', { invoice_id: list.invoices[0].id })).error).toBeUndefined();
   });
 
   test('line items are bounded at 50 with a truncation flag, a warning, and a bounded discounts block', async () => {
@@ -674,7 +703,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     await invoice('q_uuid_email', Q, { total: 5, title: 'Sent to 123e4567-e89b-12d3-a456-426614174000@example.com for id 123e4567-e89b-12d3-a456-426614174001 ok' });
     const text = json(await read('get_customer_invoices', { customer_id: Q }));
     expect(text).not.toMatch(/@|example\.com|426614174000/);
-    expect(text).toContain('Sent to [email] for id 123e4567-e89b-12d3-a456-426614174001 ok');
+    expect(text).toContain('Sent to [email] for id [id] ok');
   });
 
   test('DATE columns round-trip to the same YYYY-MM-DD whatever the process time zone (the canonical datetime-et reader)', async () => {

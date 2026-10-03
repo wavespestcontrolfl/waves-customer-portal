@@ -158,15 +158,16 @@ const LINK_RES = [
 const maskLinks = (text) => LINK_RES.reduce((out, re) => out.replace(re, '[link]'), text);
 const LONG_TOKEN_RE = /[A-Za-z0-9_-]{32,}/g;
 const maskTokens = (text) => text.replace(LONG_TOKEN_RE, (run) => (/\d/.test(run) ? '[token]' : run));
-// Emails and card numbers are masked; record ids (UUIDs) pass through untouched, so a digit-heavy id still works in
-// the follow-up read, and the text around them is masked.
-// Order: exact known tokens, every link (UUIDs inside a URL go with it), complete emails (an address may have a UUID
-// local part), THEN standalone UUIDs are exempted from the card and long-token passes.
+// Emails, links, card numbers, tokens and UUIDs are masked in every string. A UUID in free text can be a bearer value
+// (an automation preview_token is one), so a UUID is only left alone in a STRUCTURAL id field, which the egress
+// scrubber exempts by key (STRUCTURAL_ID_KEYS below), never by pattern.
+// Order: exact known tokens, every link, complete emails (an address may have a UUID local part), standalone UUIDs
+// ([id]), then card numbers and long tokens.
 function maskSensitive(text, secrets = []) {
   let out = String(text);
   for (const secret of secrets) if (secret) out = out.split(String(secret)).join('[token]');
-  out = maskLinks(out).replace(EMAIL_RE, '[email]');
-  return out.split(UUID_IN_TEXT_RE).map((part, at) => (at % 2 ? part : maskCardNumbers(maskTokens(part)))).join('');
+  out = maskLinks(out).replace(EMAIL_RE, '[email]').replace(UUID_IN_TEXT_RE, '[id]');
+  return maskCardNumbers(maskTokens(out));
 }
 // Free text (a decline message, a manual-payment note, a ledger note) can echo
 // an email or a card number: both are masked before anything leaves.
@@ -179,10 +180,13 @@ function scrub(value, max = 240) {
 // THE egress scrubber: every string that leaves either tool (any free-text column, a reason built from row data, a
 // payer or customer name) passes through it once, at the single exit (executeBillingReaderTool), so a field added
 // later cannot bypass it. The per-field scrub() above also trims and truncates; this one only masks.
-function scrubEgress(value, secrets = []) {
-  if (typeof value === 'string') return maskSensitive(value, secrets);
-  if (Array.isArray(value)) return value.map((inner) => scrubEgress(inner, secrets));
-  if (value && typeof value === 'object' && !(value instanceof Date)) return Object.fromEntries(Object.entries(value).map(([key, inner]) => [key, scrubEgress(inner, secrets)]));
+// The fields the tools return as record references (what a follow-up read needs): invoice, customer, payment, plan,
+// term and statement ids. Only these keys keep a UUID.
+const STRUCTURAL_ID_KEYS = new Set(['id', 'invoice_id', 'customer_id', 'payment_id', 'plan_id', 'term_id', 'statement_id']);
+function scrubEgress(value, secrets = [], key = null) {
+  if (typeof value === 'string') return STRUCTURAL_ID_KEYS.has(key) && UUID_RE.test(value) ? value : maskSensitive(value, secrets);
+  if (Array.isArray(value)) return value.map((inner) => scrubEgress(inner, secrets, key));
+  if (value && typeof value === 'object' && !(value instanceof Date)) return Object.fromEntries(Object.entries(value).map(([inner, innerValue]) => [inner, scrubEgress(innerValue, secrets, inner)]));
   return value;
 }
 
