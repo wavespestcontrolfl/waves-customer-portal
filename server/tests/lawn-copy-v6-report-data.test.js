@@ -560,7 +560,15 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
     try {
       process.env.GATE_LAWN_REPORT_COPY_V6 = 'true';
       process.env.GATE_LAWN_REPORT_LEAD = 'true';
-      const svc = { id: 'svc-cur', customer_id: CUSTOMER, service_line: 'lawn', service_date: '2026-09-30' };
+      // A row that already carries its premise (as the full render's does).
+      const svc = {
+        id: 'svc-cur', customer_id: CUSTOMER, service_line: 'lawn', service_date: '2026-09-30',
+        address_line1: '100 Test Palm Way', address_line2: null, city: 'Bradenton', zip: '34201', stamped_address_diverges: false,
+      };
+      // A partial row whose premise cannot be read is unknown: it never matches.
+      const bare = { id: 'svc-cur', customer_id: CUSTOMER, service_line: 'lawn', service_date: '2026-09-30' };
+      const bareSig = () => resolveCanonicalLawnRender(bare, makeKnex({ ...fixtures(), service_records: [] })).then((r) => r.signature);
+      expect(await bareSig()).not.toBe(await bareSig());
       const sigWith = async (scheduled) => (await resolveCanonicalLawnRender(svc, makeKnex({ ...fixtures(), service_records: [], scheduled_services: scheduled }))).signature;
       const visit = (date, status = 'confirmed') => ({ id: `ss-${date}`, customer_id: CUSTOMER, scheduled_date: date, status, service_type: 'Lawn Care Treatment Program' });
       const booked = await sigWith([visit('2026-11-11')]);

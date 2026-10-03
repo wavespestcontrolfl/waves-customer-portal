@@ -2782,7 +2782,16 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   if (featureGates.lawnReportLeadLive()) irrigationStamp += ':lead=1';
   // The v6 copy writer (GATE_LAWN_REPORT_COPY_V6) changes the lead's words, so
   // its PDF key moves with it; the stamp rides only while the gate is live.
-  if (featureGates.lawnReportCopyV6Live()) irrigationStamp += `:copyv6=1${await lawnUpcomingVisitsStamp(service, knex)}`;
+  // The premise is resolved as the full render resolves it (a cache-lookup
+  // caller passes a partial row with no address, and the single-premises
+  // fallback in lawnNextVisitAtProperty reads it): both must key the same.
+  if (featureGates.lawnReportCopyV6Live()) {
+    // An unreadable premise is unknown, never "no address": non-reusable.
+    const premise = await loadServicePremise(service, knex).catch(() => null);
+    irrigationStamp += premise
+      ? `:copyv6=1${await lawnUpcomingVisitsStamp(premise, knex)}`
+      : `:copyv6=1:nv=err${crypto.randomBytes(4).toString('hex')}`;
+  }
 
   const assessment = await loadLinkedLawnAssessment(service, knex, { failClosed: true, propertyHistoryEnabled });
   const lawnHistory = propertyHistoryEnabled
