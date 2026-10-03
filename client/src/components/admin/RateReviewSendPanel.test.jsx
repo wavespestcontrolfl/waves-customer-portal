@@ -124,4 +124,11 @@ describe('RateReviewSendPanel', () => {
     expect(await screen.findByText('waiting for another line')).toBeInTheDocument();
     expect(screen.getByText('Another approved line for this customer is not prepared yet')).toBeInTheDocument();
   });
+
+  it('shows the held-by-another-line bucket next to the waiting one', async () => {
+    mockAdminFetch.mockResolvedValue(preview({ counts: { letters: 1, lines: 1, email: 1, sms: 1, suppressedCustomers: 2, suppressedLines: 3, awaitingLines: 1, heldLines: 2, alreadySent: 0 } }));
+    render(<RateReviewSendPanel batchKey="2026-12" />);
+    expect(await screen.findByText('held by another line')).toBeInTheDocument();
+    expect(screen.getByText('held by another line').parentElement).toHaveTextContent('2 held by another line');
+  });
 });

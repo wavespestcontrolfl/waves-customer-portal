@@ -54,7 +54,7 @@ function SendRow({ customer }) {
   );
 }
 
-const COUNT_LABELS = [["letters", "letters"], ["email", "by email"], ["sms", "by text"], ["suppressedLines", "held back"], ["awaitingLines", "waiting for another line"], ["alreadySent", "already sent"]];
+const COUNT_LABELS = [["letters", "letters"], ["email", "by email"], ["sms", "by text"], ["suppressedLines", "held back"], ["awaitingLines", "waiting for another line"], ["heldLines", "held by another line"], ["alreadySent", "already sent"]];
 
 // One place for the preview's defaults, so the render never re-guards them.
 function normalizePreview(preview) {
