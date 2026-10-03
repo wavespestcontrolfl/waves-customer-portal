@@ -477,6 +477,55 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).not.toMatch(/hash-chained/);
   });
 
+  describe('lawn photo set (GATE_LAWN_REPORT_PHOTO_SET)', () => {
+    const SET = [
+      { url: 'https://cdn.example.com/set-front.jpg', shot: 'front', label: 'Front yard' },
+      { url: 'https://cdn.example.com/set-back.jpg', shot: 'back', label: 'Back yard' },
+      { url: 'https://cdn.example.com/set-close.jpg', shot: 'close_up', label: 'Close-up' },
+      { url: 'https://cdn.example.com/set-trouble.jpg', shot: 'trouble', label: 'Trouble spot' },
+    ];
+    // The gallery the server already builds for a lawn visit: a quality-ordered
+    // copy of the turf photos (lawn- ids), the V2 strip, and a real service photo.
+    const lawnData = (extra = {}) => ({
+      ...BASE_DATA,
+      serviceLine: 'lawn',
+      photos: [
+        { id: 'p1', url: 'https://cdn.example.com/service-photo.jpg', caption: 'Gate latch fixed' },
+        { id: 'lawn-1', url: 'https://cdn.example.com/other-trouble.jpg', caption: 'raw vision text' },
+        { id: 'lawn-2', url: 'https://cdn.example.com/other-front.jpg', caption: 'raw vision text' },
+      ],
+      reportV2: {
+        snapshot: { overallScore: 86, statusHeadline: 'Lawn looking strong' },
+        photos: [{ url: 'https://cdn.example.com/strip-front.jpg', label: 'Front yard' }],
+        ...extra,
+      },
+    });
+    const srcs = (container) => [...container.querySelectorAll('figure img')].map((img) => img.getAttribute('src'));
+
+    it('prints the set in shot order with its labels, in place of the lawn gallery copies', () => {
+      const { container } = render(<ServiceReportDocument data={lawnData({ photoSet: SET })} token="tok123" />);
+      expect(srcs(container)).toEqual(['https://cdn.example.com/service-photo.jpg', ...SET.map((p) => p.url)]);
+      for (const label of ['Front yard', 'Back yard', 'Close-up', 'Trouble spot']) expect(screen.getByText(label)).toBeInTheDocument();
+      expect(container.querySelector('a[href*="cdn.example.com"]')).toBeNull();
+      expect(screen.queryByText('raw vision text')).toBeNull();
+    });
+
+    it('without a photoSet the gallery is exactly as it was', () => {
+      const { container } = render(<ServiceReportDocument data={lawnData()} token="tok123" />);
+      expect(srcs(container)).toEqual([
+        'https://cdn.example.com/service-photo.jpg', 'https://cdn.example.com/other-trouble.jpg',
+        'https://cdn.example.com/other-front.jpg', 'https://cdn.example.com/strip-front.jpg',
+      ]);
+    });
+
+    it('keeps approved moments and the gauge photo beside the set', () => {
+      const data = { ...lawnData({ photoSet: SET }), proofMoments: [{ id: 'm1', mediaUrl: 'https://cdn.example.com/moment.jpg', mediaType: 'image', customerCaption: 'Entry point sealed' }], mowingHeight: { heightIn: 3.5, photoUrl: 'https://cdn.example.com/gauge.jpg' } };
+      const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+      expect(srcs(container)).toEqual(expect.arrayContaining(['https://cdn.example.com/moment.jpg', 'https://cdn.example.com/gauge.jpg']));
+      expect(srcs(container).slice(1, 5)).toEqual(SET.map((p) => p.url));
+    });
+  });
+
   it('reads legacy weather aliases and canonical interaction outcomes', () => {
     const data = {
       ...BASE_DATA,

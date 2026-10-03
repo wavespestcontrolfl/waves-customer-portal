@@ -28,6 +28,7 @@
 
 const logger = require('../logger');
 const { validateAddress, STATUSES } = require('./index');
+const { callRouteSpellingRetryLive } = require('../../config/feature-gates');
 
 const GOOGLE_KEY = () => process.env.GOOGLE_ADDRESS_VALIDATION_API_KEY
   || process.env.GOOGLE_API_KEY
@@ -85,6 +86,49 @@ const cityKey = (city) => String(city || '').toLowerCase().replace(/[^a-z]/g, ''
 // makes multi-ordinal candidate sets the normal case, so this is live rather
 // than theoretical.
 const premiseKey = (street) => String(street || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+// ── Numbered-route respelling (GATE_CALL_ROUTE_SPELLING_RETRY) ─────────
+// Callers SAY the direction first ("East State Road 64"); Google's own form
+// puts it last ("FL-64 E"). Given the spoken order plus a unit, Address
+// Validation can resolve a different premise on the same route (the unit read
+// as the house number). That is not a mis-hearing, so the phases below are the
+// wrong tool: Autocomplete returns the right route among several numbered
+// streets and the uniqueness rule then hands the call to the office.
+//
+// The county-roll key from the property lookup already canonicalizes every
+// spelling of a numbered route to "<house> SR|US|CR <n> [dir]". It is a roll
+// key, not an address, so it is used ONLY when it has exactly that shape and
+// ONLY for wording that names the route class. A bare "Highway 64" is left
+// alone: the key reads it as US 64, which is a guess.
+const NUMBERED_ROUTE_KEY_RE = /^(\d+) (SR|US|CR) (\d{1,4}[A-Z]?)(?: (N|S|E|W|NE|NW|SE|SW))?$/;
+const SPOKEN_ROUTE_CLASS_RE = /\b(?:state\s+(?:road|rd|route|rte)|s\.?r\.?|florida|fl|u\.?s\.?|county\s+(?:road|rd)|c\.?r\.?)[\s-]*(?:highway\s+|hwy\s+)?\d/i;
+const STREET_LINE_UNIT_WORD_RE = /\b(?:apt|apartment|unit|ste|suite|bldg|building|floor|lot|spc|space|rm|room|trailer|trlr|no|number)\b/i;
+
+function numberedRouteKey(street) {
+  // Lazy: the lookup module is large and only this gated path needs it.
+  const { normalizeCountyStreetLine } = require('../property-lookup/ai-property-lookup');
+  const key = normalizeCountyStreetLine(String(street || ''));
+  return NUMBERED_ROUTE_KEY_RE.test(key) ? key : null;
+}
+
+/** "14360 East State Road 64" → "14360 SR 64 E"; null when not a named numbered route. */
+function numberedRouteRespelling(street) {
+  const spoken = String(street || '').trim();
+  // The roll key is LOSSY: it drops everything after a comma and a trailing
+  // five-digit number, so "… Road 64, Unit 4" and "… Road 64 #12345" would
+  // both come back as the bare building and the retry would adopt an address
+  // without the caller's unit. Judge the SPOKEN line first: no punctuation
+  // that can carry a second field, no unit word, and exactly two numbers
+  // (the house and the route).
+  if (/[,#;/]/.test(spoken) || STREET_LINE_UNIT_WORD_RE.test(spoken)) return null;
+  if ((spoken.match(/\d+/g) || []).length !== 2) return null;
+  if (!SPOKEN_ROUTE_CLASS_RE.test(spoken)) return null;
+  const key = numberedRouteKey(spoken);
+  if (!key) return null;
+  // Already in canonical order: Google has judged this exact line.
+  if (premiseKey(key) === premiseKey(spoken)) return null;
+  return key;
+}
 
 /** Places Autocomplete → array of prediction descriptions ([] on zero results, null on API failure). */
 async function fetchAutocompletePredictions(input, { deadline = newDeadline() } = {}) {
@@ -231,6 +275,27 @@ async function recoverStreetAddress({ extracted = {}, avStatus, extraStreetCandi
   });
 
   try {
+    // Phase 0 (gate): the same route in canonical order. One request, one
+    // verdict. Adopted only when Google accepts a premise with the caller's
+    // house number, the caller's ZIP or city, AND a street that reduces to
+    // the same route key — a verdict on any other street falls through to the
+    // phases below unchanged.
+    if (callRouteSpellingRetryLive() && !outOfBudget('route respelling')) {
+      const respelled = numberedRouteRespelling(street);
+      if (respelled) {
+        const hit = await confirmPrediction(`${respelled}, ${locality}`, { houseNumber, callerZip, callerCity }, validate);
+        if (hit && numberedRouteKey(hit.street_line_1) === respelled) {
+          return {
+            attempted: true,
+            recovered: { address_line1: hit.street_line_1, city: hit.city, state: hit.state, zip: hit.postal_code },
+            candidates: [respelled],
+            method: 'route_spelling',
+            avResult: hit.avResult,
+          };
+        }
+      }
+    }
+
     // Phase 1: the street as heard — Autocomplete's own fuzzy matching.
     let method = 'autocomplete';
     let predictions = distinct((await autocomplete(`${street}, ${locality}`, { deadline }) || []).filter(matchesHouse));
@@ -298,6 +363,7 @@ async function recoverStreetAddress({ extracted = {}, avStatus, extraStreetCandi
 module.exports = {
   premiseKey,
   recoverStreetAddress,
+  numberedRouteRespelling,
   fetchAutocompletePredictions,
   fetchPhoneticStreetCandidates,
   confirmPrediction,

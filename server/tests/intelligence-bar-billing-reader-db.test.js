@@ -51,6 +51,11 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   const admin = { role: 'admin', context: 'platform', actionContext: { isAdmin: true } };
   const read = (name, input, actionContext = {}) => execute(name, input, { ...admin, actionContext: { isAdmin: true, ...actionContext } });
   const json = (value) => JSON.stringify(value);
+  // Record ids are random UUIDs, and one can hold "4111" by chance (a v4
+  // UUID's third group opens with 4: "…-4111-…", CI 2026-10-03). The PAN
+  // checks read the result with its ids set aside; a card number in free
+  // text is never UUID-shaped.
+  const withoutIds = (text) => text.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<id>');
   const by = (result, key) => result.invoices.find((i) => i.id === inv[key].id);
 
   async function snapshot() {
@@ -513,7 +518,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     for (const [n, number] of masked.entries()) await invoice(`q_card_${n}`, Q, { total: 5, title: `Paid with ${number} thanks` });
     await invoice('q_kept', Q, { total: 5, title: 'Visit 2026-10-02 14:05:10 invoice 12.50 id 12345678-1234-4123-8123-123456789012 ok' });
     const text = json(await read('get_customer_invoices', { customer_id: Q, limit: 50 }));
-    expect(text).not.toMatch(/4111|378282|1234567890123|1234 5678/);
+    expect(withoutIds(text)).not.toMatch(/4111|378282|1234567890123|1234 5678/);
     expect((text.match(/Paid with \[number\] thanks/g) || []).length).toBe(masked.length);
     expect(text).toContain('Visit 2026-10-02 14:05:10 invoice 12.50 id [id] ok');
     expect(text).not.toContain('12345678-1234-4123-8123-123456789012 ok');
@@ -594,7 +599,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const detail = await read('get_invoice_detail', { invoice_id: inv.l_leak.id });
     const text = json([list, detail]);
     expect(text).not.toContain('@');
-    expect(text).not.toMatch(/4111/);
+    expect(withoutIds(text)).not.toMatch(/4111/);
     expect(text).toContain('[email]');
     expect(text).toContain('[number]');
     // The fields really were read (so the test proves the scrubber, not an empty projection).
@@ -722,7 +727,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     expect(detail.line_items[1]).toMatchObject({ quantity: 1, unit_price: null, amount: 5 });
     expect(detail.line_items[2]).toMatchObject({ amount: null, is_discount: false });
     expect(detail.line_items[3]).toMatchObject({ quantity: 2, unit_price: 12.5, amount: 25 });
-    expect(json(detail)).not.toMatch(/4111/);
+    expect(withoutIds(json(detail))).not.toMatch(/4111/);
     expect(detail.unknowns.join(' ')).toMatch(/implausible line-item number withheld/);
     expect((await read('get_invoice_detail', { invoice_id: inv.credited.id })).unknowns.join(' ')).not.toMatch(/implausible/);
   });
