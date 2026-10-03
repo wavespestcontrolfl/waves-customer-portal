@@ -118,7 +118,7 @@ async function listPortalPayments(customerId, {
   // ONE shared payer predicate (services/payer-linkage.js, also used by the SMS payment facts): every linkage the receipt
   // resolution below understands, the payer_billed withdrawal stamp, statement-accrued children, and the direct ledger stamps
   // (payments.payer_id / metadata.payer_id).
-  const { failed: payerLookupFailed, payerInvoiceIds, isPayerLinked } = await loadPayerLinkage(customerId, database);
+  const { failed: payerLookupFailed, payerInvoiceIds, isPayerLinked } = await loadPayerLinkage(customerId, database, { propagateCancellation: database !== db });
   // `total` counts exactly the rows pagination will serve: the same
   // hold-deferral exclusion and the same payer predicate. The direct payer
   // stamps (payments.payer_id, metadata.payer_id) are SQL, so the common

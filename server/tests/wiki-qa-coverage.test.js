@@ -140,3 +140,18 @@ test('forwards a standalone abort signal to both knowledge model requests', asyn
     expect(options).not.toHaveProperty('timeoutMs');
   }
 });
+
+test.each([{ code: 'PORTAL_CHAT_DEADLINE' }, { code: '57014' }, { name: 'AbortError' }])('a cancelled query-log write cannot return a successful answer: %j', async (identity) => {
+  dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { paths: [] } });
+  const failure = Object.assign(new Error('cancelled'), identity);
+  await expect(WikiQA.query('ants', { source: 'lead_agent' }, {
+    write: async () => { throw failure; },
+  })).rejects.toBe(failure);
+});
+
+test('ordinary query logging failure stays best effort for a scoped caller', async () => {
+  dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { paths: [] } });
+  await expect(WikiQA.query('ants', { source: 'lead_agent' }, {
+    write: async () => { throw new Error('logging unavailable'); },
+  })).resolves.toHaveProperty('answer');
+});

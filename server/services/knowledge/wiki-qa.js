@@ -373,6 +373,9 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
         ...(coverage ? { coverage } : {}),
       }), 'knowledge query log');
     } catch (err) {
+      if (typeof execution.write === 'function' && (execution.signal?.aborted
+        || ['PORTAL_CHAT_DEADLINE', 'ABORT_ERR', '57014'].includes(err?.code)
+        || ['AbortError', 'KnexTimeoutError'].includes(err?.name))) throw err;
       logger.error(`Log knowledge query failed: ${err.message}`);
     }
   }

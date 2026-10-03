@@ -19,6 +19,7 @@ function reader(failure) {
   };
 }
 beforeEach(() => {
+  stripe.getPaymentHistory.mockClear();
   stripe.getPaymentHistory.mockResolvedValue([{
     id: 'payment-1', amount: 50, status: 'paid', stripe_payment_intent_id: 'pi_fixture',
   }]);
@@ -43,4 +44,15 @@ test('an ordinary scoped receipt lookup failure remains best effort', async () =
   const result = await listPortalPayments('customer-1', { database: reader(new Error('lookup failed')) });
   expect(result.payments).toHaveLength(1);
   expect(result.payments[0].receiptUrl).toBeNull();
+});
+
+test('cancellation on the first payer read cannot start count or payment queries', async () => {
+  const failure = Object.assign(new Error('cancelled'), { code: '57014' });
+  const database = jest.fn(reader(failure));
+  require('../services/payer-linkage').loadPayerLinkage.mockImplementationOnce(
+    jest.requireActual('../services/payer-linkage').loadPayerLinkage,
+  );
+  await expect(listPortalPayments('customer-1', { database })).rejects.toBe(failure);
+  expect(database.mock.calls).toEqual([['invoices']]);
+  expect(stripe.getPaymentHistory).not.toHaveBeenCalled();
 });
