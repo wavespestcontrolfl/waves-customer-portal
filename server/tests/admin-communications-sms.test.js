@@ -441,7 +441,9 @@ describe('admin communications SMS route', () => {
       expect(body.error).toBe('Body contains emoji "👍" but audience="lead" forbids it. Customer/lead-facing messages must be emoji-free.');
       expect(body.code).toBe('EMOJI_FOR_CUSTOMER');
     });
-  });
+  // The first test here to reach the send route: it pays the handler's cold
+  // module load (4 to 5 s on a CI runner), which the 5 s default does not cover.
+  }, 20000);
 
   test('a VALIDATED customerId is explicit customer context: an active applicant phone attached to that customer takes the ordinary path, not the recruiting rail (Codex r16 P1)', async () => {
     const { isRecruitingPhone } = require('../utils/recruiting-thread-scope');
