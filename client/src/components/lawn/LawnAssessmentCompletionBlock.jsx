@@ -5,10 +5,10 @@
 // review (LawnVisitReview) and Confirm assessment, with the optional mowing
 // height reading. Moved out of pages/admin/SchedulePage.jsx unchanged so the
 // full completion form and the lawn Fast Complete sheet share ONE
-// implementation. Differences from the code as it stood in SchedulePage, all
-// inert by default: the fetcher is the `request` prop (SchedulePage passes its
-// own adminFetch), and sizes under 14px pass through px(), which only raises
-// them when a host sets `textFloor`.
+// implementation. Two differences from the code as it stood in SchedulePage:
+// the fetcher is the `request` prop (SchedulePage passes its own adminFetch),
+// and the text that was 12 or 13px is now 14px (the portal brand gate allows
+// nothing smaller on a new file).
 import React, { useEffect, useRef, useState } from "react";
 import lawnScores from '@lawn-scores';
 import LawnVisitReview, { createVisitReview, visitReviewPayload } from "./LawnVisitReview";
@@ -169,9 +169,6 @@ export default function LawnAssessmentCompletionBlock({
   // page's own admin fetch (it returns the parsed body and throws an Error
   // carrying .status and .code).
   request,
-  // Smallest text size in px. 0 (the default) leaves every size as the full
-  // completion form has always shown it; the Fast Complete sheet passes 14.
-  textFloor = 0,
   disabled,
   onConfirmed,
   // Fires false while the existing-assessment lookup is in flight and true
@@ -186,7 +183,6 @@ export default function LawnAssessmentCompletionBlock({
   // so the AI photo analysis can factor them in alongside the images.
   technicianNotes = "",
 }) {
-  const px = (size) => Math.max(size, textFloor);
   const [photos, setPhotosState] = useState([]);
   // The photo list's source of truth is this ref: every change goes through
   // setPhotos below, which computes from the latest list and mirrors it into
@@ -507,7 +503,7 @@ export default function LawnAssessmentCompletionBlock({
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       {loading && (
-        <div style={{ fontSize: px(12), color: D.muted }}>Checking existing assessment...</div>
+        <div style={{ fontSize: 14, color: D.muted }}>Checking existing assessment...</div>
       )}
       {/* Capture row — always visible so the mowing-height reading can be
           added even after the assessment is analyzed (Codex P1). "Add turf photos" +
@@ -535,7 +531,7 @@ export default function LawnAssessmentCompletionBlock({
                 border: `1px solid ${D.border}`,
                 background: D.white,
                 color: D.heading,
-                fontSize: px(13),
+                fontSize: 14,
                 fontWeight: 500,
                 cursor: disabled || photos.length >= photoCap || analyzing || !modeKnown ? "not-allowed" : "pointer",
                 opacity: disabled || photos.length >= photoCap || analyzing || !modeKnown ? 0.55 : 1,
@@ -543,13 +539,13 @@ export default function LawnAssessmentCompletionBlock({
             >
               Add turf photos
             </button>
-            <span style={{ fontSize: px(12), color: D.muted }}>{photos.length}/{photoCap}</span>
+            <span style={{ fontSize: 14, color: D.muted }}>{photos.length}/{photoCap}</span>
             {!modeKnown && <span role="status" data-testid="lawn-photo-mode-pending" style={{ fontSize: 14, color: D.muted }}>Checking photo options…</span>}
           </>
         )}
             {showGaugeReading && (
               <>
-                <span style={{ fontSize: px(12), color: D.muted, fontWeight: 500 }}>Lawn length</span>
+                <span style={{ fontSize: 14, color: D.muted, fontWeight: 500 }}>Lawn length</span>
                 <input
                   type="number"
                   inputMode="decimal"
@@ -568,10 +564,10 @@ export default function LawnAssessmentCompletionBlock({
                     border: `1px solid ${D.border}`,
                     background: D.white,
                     color: D.heading,
-                    fontSize: px(13),
+                    fontSize: 14,
                   }}
                 />
-                <span style={{ fontSize: px(12), color: D.muted }}>inches</span>
+                <span style={{ fontSize: 14, color: D.muted }}>inches</span>
               </>
             )}
           </div>
@@ -692,7 +688,7 @@ export default function LawnAssessmentCompletionBlock({
               border: "none",
               background: D.green,
               color: "#fff",
-              fontSize: px(13),
+              fontSize: 14,
               fontWeight: 500,
               cursor: disabled || photos.length === 0 || analyzing ? "not-allowed" : "pointer",
               opacity: disabled || photos.length === 0 || analyzing ? 0.55 : 1,
@@ -756,7 +752,7 @@ export default function LawnAssessmentCompletionBlock({
                         border: `1px solid ${D.border}`,
                         background: D.white,
                         color: D.heading,
-                        fontSize: px(13),
+                        fontSize: 14,
                         textAlign: "center",
                         boxSizing: "border-box",
                       }}
@@ -781,7 +777,7 @@ export default function LawnAssessmentCompletionBlock({
                   borderRadius: 8,
                   background: `${D.green}14`,
                   color: D.green,
-                  fontSize: px(13),
+                  fontSize: 14,
                   fontWeight: 500,
                   textAlign: "center",
                 }}
@@ -800,7 +796,7 @@ export default function LawnAssessmentCompletionBlock({
                   border: "none",
                   background: D.green,
                   color: "#fff",
-                  fontSize: px(13),
+                  fontSize: 14,
                   fontWeight: 500,
                   cursor: disabled || confirming ? "not-allowed" : "pointer",
                   opacity: disabled || confirming ? 0.55 : 1,
@@ -828,7 +824,7 @@ export default function LawnAssessmentCompletionBlock({
                 border: `1px solid ${D.border}`,
                 background: D.white,
                 color: D.text,
-                fontSize: px(13),
+                fontSize: 14,
                 fontWeight: 500,
                 cursor: disabled || analyzing || confirming ? "not-allowed" : "pointer",
                 opacity: disabled || analyzing || confirming ? 0.55 : 1,

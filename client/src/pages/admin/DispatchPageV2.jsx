@@ -1941,6 +1941,8 @@ export default function DispatchPageV2({
             timeLabel: serviceWindowLabel(lawnFastService) || "",
             // One-time lawn visits carry typed findings the server requires.
             findingsType: lawnFastService.completionProfile?.findingsType || null,
+            // Decides whether a zero stock holds Complete (WaveGuard lawn visits may go negative).
+            waveguardTier: lawnFastService.waveguardTier || null,
             // The visit the user opened, checked against the live context.
             routedCustomerId: lawnFastService.customerId || lawnFastService.customer_id || null,
             routedScheduledDate: lawnFastService.scheduledDate || lawnFastService.scheduled_date || null,

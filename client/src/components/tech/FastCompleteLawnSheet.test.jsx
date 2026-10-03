@@ -88,6 +88,7 @@ let previewAnswer;
 let lookup;
 let planArea;
 let tips;
+let catalogAnswer;
 
 // A stub of the whole admin API the sheet talks to.
 function makeRequest({ ctx = context(), contextError = null } = {}) {
@@ -108,7 +109,11 @@ function makeRequest({ ctx = context(), contextError = null } = {}) {
       return planArea;
     }
     if (path.endsWith('/tech-tips')) return tips;
-    if (path.includes('/lawn-assessment/service/')) return lookup;
+    if (path === '/admin/dispatch/products/catalog') return catalogAnswer;
+    if (path.includes('/lawn-assessment/service/')) {
+      if (lookup instanceof Error) throw lookup;
+      return lookup;
+    }
     if (path.endsWith('/lawn-assessment/assess')) {
       return { success: true, assessment: ASSESSED, visitAssessment: REVIEW, adjustedScores: SCORES, observations: 'Synthetic observation' };
     }
@@ -145,6 +150,7 @@ beforeEach(() => {
   lookup = { shotListEnabled: true, assessment: null };
   planArea = { plan: { completionDefaults: { lawnSqft: 6400, items: [{ product: { id: P_TALAK }, mix: { treatedSqft: 6000 } }] } } };
   tips = { available: false, groups: [] };
+  catalogAnswer = { products: CATALOG };
   vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
   vi.stubGlobal('FileReader', FixtureFileReader);
   vi.stubGlobal('Image', FixtureImage);
@@ -568,5 +574,242 @@ describe('text size', () => {
     const sized = Array.from(document.querySelectorAll('[style]')).filter((el) => el.style.fontSize);
     expect(sized.length).toBeGreaterThan(10);
     for (const el of sized) expect(parseFloat(el.style.fontSize)).toBeGreaterThanOrEqual(14);
+  });
+});
+
+// ── Codex round 1 on #5824 ──────────────────────────────────────────────────
+const plannedOne = (applicationMethod, extra = {}) => context({
+  plannedProducts: { source: 'plan', items: [{ productId: P_TALAK, name: 'Talak 7.9%', applicationMethod, amount: 2, amountUnit: 'fl_oz', ...extra }] },
+});
+const areaInput = (label) => within(editorFor('Talak 7.9%')).queryByLabelText(label);
+
+describe('what /complete requires per application method', () => {
+  // [method as the plan or catalog spells it, the unit the server wants or null, the box label]
+  const TABLE = [
+    ['perimeter_spray', 'linear_ft', 'Linear feet treated'],
+    ['Perimeter Band', 'linear_ft', 'Linear feet treated'],
+    ['broadcast_spray', 'sqft', 'Area treated (sq ft)'],
+    ['Broadcast', 'sqft', 'Area treated (sq ft)'],
+    ['granular_broadcast', 'sqft', 'Area treated (sq ft)'],
+    ['spot_treatment', null],
+    ['soil_drench', null],
+    ['foliar_spray', null],
+    ['bait_placement', null],
+    ['station_check', null],
+    ['fog_ulv', null],
+    ['trunk_injection', null],
+    ['pin_stream', null],
+  ];
+
+  test.each(TABLE)('%s needs %s', async (method, unit, label) => {
+    planArea = new Error('none');
+    await openSheet({ request: makeRequest({ ctx: plannedOne(method) }) });
+    await confirmAssessment();
+    if (!unit) {
+      expect(areaInput(/treated/)).toBeNull();
+      await waitFor(() => expect(completeButton().disabled).toBe(false));
+      await submit();
+      expect(completeCalls()[0].body.products[0]).not.toHaveProperty('areaValue');
+      expect(completeCalls()[0].body.products[0]).not.toHaveProperty('areaUnit');
+      return;
+    }
+    const noun = unit === 'linear_ft' ? 'linear feet' : 'square feet';
+    await waitFor(() => expect(footerReason()).toBe(`Enter the ${noun} treated for Talak 7.9%.`));
+    expect(completeButton().disabled).toBe(true);
+    fireEvent.change(areaInput(label), { target: { value: '120' } });
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    expect(completeCalls()[0].body.products[0]).toMatchObject({ areaValue: 120, areaUnit: unit });
+  });
+
+  test('a perimeter row is never seeded with the lawn\'s square feet', async () => {
+    await openSheet({ request: makeRequest({ ctx: plannedOne('perimeter_spray') }) });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(areaInput('Linear feet treated').value).toBe('');
+  });
+
+  test('switching a row from a perimeter spray to a spray drops the linear feet it held', async () => {
+    await openSheet({ request: makeRequest({ ctx: plannedOne('perimeter_spray') }) });
+    fireEvent.change(areaInput('Linear feet treated'), { target: { value: '90' } });
+    fireEvent.click(within(editorFor('Talak 7.9%')).getByRole('button', { name: 'Broadcast spray' }));
+    // Square feet now: the plan's, never the 90 linear feet.
+    await waitFor(() => expect(areaInput('Area treated (sq ft)').value).toBe('6000'));
+  });
+
+  test('the context\'s own treatedSqft is used first and the plan read is not made', async () => {
+    const request = makeRequest({ ctx: plannedOne('broadcast_spray', { treatedSqft: 4100, areaUnit: 'sqft' }) });
+    await openSheet({ request });
+    expect(areaInput('Area treated (sq ft)').value).toBe('4100');
+    expect(request.mock.calls.some(([path]) => path.includes('/treatment-plans/'))).toBe(false);
+  });
+
+  test('the server\'s linear_ft_required gets plain words', () => {
+    expect(plainRefusalMessage({ code: 'linear_ft_required' })).toBe('Enter the linear feet treated for each perimeter product.');
+  });
+});
+
+describe('a visit type that could not be read', () => {
+  test.each([
+    ['unknown type', { visitType: 'unknown', readFailures: ['billing_mode'] }],
+    ['billing read failure listed', { readFailures: ['billing_mode'] }],
+    ['no type at all', { visitType: null }],
+  ])('%s shows the retry state and no form', async (_label, overrides) => {
+    const request = makeRequest({ ctx: context(overrides) });
+    const onFullForm = vi.fn();
+    render(<FastCompleteLawnSheet service={SERVICE} request={request} catalog={CATALOG} onClose={() => {}} onFullForm={onFullForm} />);
+    await screen.findByText('Couldn’t load this visit. Try again.');
+    expect(screen.queryByRole('heading', { name: 'Lawn photos' })).toBeNull();
+    expect(onFullForm).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Open the full form' }));
+    expect(onFullForm).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(request.mock.calls.filter(([path]) => path.endsWith('/lawn-fast/context'))).toHaveLength(2));
+  });
+
+  test.each(['photo_status', 'turf_height_flag', 'planned_products', 'assessment'])('an advisory %s failure still opens the sheet', async (failure) => {
+    await openSheet({ request: makeRequest({ ctx: context({ readFailures: [failure] }) }) });
+    expect(screen.getByRole('heading', { name: 'Lawn photos' })).toBeTruthy();
+  });
+});
+
+describe('zero stock', () => {
+  const EMPTY_CATALOG = [{ ...CATALOG[0], inventory_on_hand: '0.0000', inventory_unit: 'fl_oz' }, CATALOG[1], CATALOG[2]];
+  const open = (props = {}, ctx = plannedOne('spot_treatment')) => openSheet({ request: makeRequest({ ctx }), props: { catalog: EMPTY_CATALOG, ...props } });
+
+  test('holds Complete on a non-member visit, says so, and a stock refresh releases it', async () => {
+    await open();
+    await confirmAssessment();
+    await waitFor(() => expect(footerReason()).toBe('Talak 7.9% shows 0 in stock. Update inventory, then tap Check stock.'));
+    expect(completeButton().disabled).toBe(true);
+    catalogAnswer = { products: [{ ...EMPTY_CATALOG[0], inventory_on_hand: '40.0000' }] };
+    fireEvent.click(screen.getByRole('button', { name: 'Check stock' }));
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    expect(footerReason()).toBe('');
+  });
+
+  test('does not hold a product with no amount (the server deducts nothing)', async () => {
+    await open({}, plannedOne('spot_treatment', { amount: null }));
+    await confirmAssessment();
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+  });
+
+  test('does not hold a real WaveGuard tier lawn visit (the server lets stock go negative)', async () => {
+    await open({ service: { ...SERVICE, waveguardTier: 'Gold' } });
+    await confirmAssessment();
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+  });
+
+  test('holds a tier the server does not count (Commercial, or none)', async () => {
+    await open({ service: { ...SERVICE, waveguardTier: 'Commercial' } });
+    await confirmAssessment();
+    await waitFor(() => expect(footerReason()).toMatch(/shows 0 in stock/));
+  });
+
+  test('the context\'s stockAdvisory wins over the schedule row, both ways', async () => {
+    await open({ service: { ...SERVICE, waveguardTier: 'Gold' } }, { ...plannedOne('spot_treatment'), stockAdvisory: false });
+    await confirmAssessment();
+    await waitFor(() => expect(footerReason()).toMatch(/shows 0 in stock/));
+    cleanup();
+    await open({}, { ...plannedOne('spot_treatment'), stockAdvisory: true });
+    await confirmAssessment();
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+  });
+
+  test('waveguard_inventory_lockout from the server reads as a correctable stock message with Check stock offered', async () => {
+    completeErrors.push(refusal(400, 'waveguard_inventory_lockout', 'Talak requires 2 fl_oz, but only 1 fl_oz is on hand.'));
+    await openSheet({ request: makeRequest({ ctx: plannedOne('spot_treatment') }) });
+    await confirmAssessment();
+    await submit();
+    await screen.findByText('A product is out of stock. Update inventory, tap Check stock, then complete again.');
+    expect(screen.getByRole('button', { name: 'Check stock' })).toBeTruthy();
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(completeCalls()).toHaveLength(2));
+    expect(completeCalls()[1].body.idempotencyKey).not.toBe(completeCalls()[0].body.idempotencyKey);
+  });
+});
+
+describe('a confirmed assessment when the detail lookup fails', () => {
+  const confirmedContext = (assessment = {}) => context({ assessment: { exists: true, id: 'assessment-ctx', confirmed: true, unusableReason: null, ...assessment } });
+
+  test('the context\'s confirmed id stands, so Complete stays on and sends it', async () => {
+    lookup = new Error('lookup down');
+    await openSheet({ request: makeRequest({ ctx: confirmedContext() }) });
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    expect(completeCalls()[0].body.lawnAssessmentId).toBe('assessment-ctx');
+  });
+
+  test('a retake that starts (a new photo) ends it', async () => {
+    lookup = new Error('lookup down');
+    await openSheet({ request: makeRequest({ ctx: confirmedContext() }) });
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    const input = screen.getByLabelText('Add turf photos');
+    await waitFor(() => expect(screen.queryByTestId('lawn-photo-mode-pending')).toBeNull());
+    fireEvent.change(input, { target: { files: [new File(['a'], 'a.jpg', { type: 'image/jpeg' })] } });
+    await waitFor(() => expect(completeButton().disabled).toBe(true));
+    // The new confirmed id then replaces it.
+    await screen.findByLabelText('Slot for photo 1');
+    fireEvent.click(screen.getByRole('button', { name: 'Analyze lawn' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm assessment' }));
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    expect(completeCalls()[0].body.lawnAssessmentId).toBe('assessment-1');
+  });
+
+  test.each([
+    ['unusable (another property)', { confirmed: true, unusableReason: 'property_scope' }],
+    ['unusable (check failed)', { confirmed: true, unusableReason: 'property_check_failed' }],
+    ['not confirmed', { confirmed: false }],
+  ])('is never used when the context says %s', async (_label, assessment) => {
+    lookup = new Error('lookup down');
+    await openSheet({ request: makeRequest({ ctx: confirmedContext(assessment) }) });
+    await waitFor(() => expect(footerReason()).toMatch(/confirm the assessment/));
+    expect(completeButton().disabled).toBe(true);
+  });
+
+  test('a lookup that succeeds with no assessment does not fall back to the context\'s id', async () => {
+    lookup = { shotListEnabled: true, assessment: null };
+    await openSheet({ request: makeRequest({ ctx: confirmedContext() }) });
+    await waitFor(() => expect(footerReason()).toMatch(/confirm the assessment/));
+  });
+
+  test('the property-check wording differs from the property-scope wording', async () => {
+    lookup = { shotListEnabled: true, assessment: { ...ASSESSED, confirmed_by_tech: true }, visitAssessment: REVIEW };
+    await openSheet({ request: makeRequest({ ctx: confirmedContext({ id: 'assessment-1', unusableReason: 'property_check_failed' }) }) });
+    await waitFor(() => expect(footerReason()).toBe('We could not check this lawn assessment against this visit. Try again, or retake the photos and confirm again.'));
+  });
+});
+
+describe('the saved-photo advisory', () => {
+  const WARNING = 'Aim for at least 4 photos: front, back or side, canopy close-up, and blade and crown. Still needed: Back overview or Side overview. This is a guide only, and Analyze lawn works at any time.';
+  const withWarning = (assessment) => context({ assessment, photoStatus: { soft: true, basis: 'shot_list', count: 1, minPhotos: 4, meetsFloor: false, missing: ['Back overview or Side overview'], warning: WARNING } });
+
+  test('shows once, non-blocking, beside a saved confirmed assessment', async () => {
+    lookup = { shotListEnabled: true, assessment: { ...ASSESSED, confirmed_by_tech: true }, visitAssessment: REVIEW };
+    await openSheet({ request: makeRequest({ ctx: withWarning({ exists: true, id: 'assessment-1', confirmed: true, unusableReason: null }) }) });
+    await screen.findByText('Assessment confirmed');
+    expect(await screen.findAllByText(WARNING)).toHaveLength(1);
+    expect(screen.queryByTestId('lawn-shot-list-hint')).toBeNull();
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+  });
+
+  test('is not shown while the photo step\'s own hint is up, so it never reads twice', async () => {
+    lookup = { shotListEnabled: true, assessment: null };
+    await openSheet({ request: makeRequest({ ctx: withWarning({ exists: false, id: null, confirmed: false }) }) });
+    const input = await screen.findByLabelText('Add turf photos');
+    await waitFor(() => expect(screen.queryByTestId('lawn-photo-mode-pending')).toBeNull());
+    fireEvent.change(input, { target: { files: [new File(['a'], 'a.jpg', { type: 'image/jpeg' })] } });
+    await screen.findByLabelText('Slot for photo 1');
+    expect(screen.getAllByText(/Aim for at least 4 photos/)).toHaveLength(1);
+    expect(screen.getByTestId('lawn-shot-list-hint')).toBeTruthy();
+  });
+
+  test('goes once the technician starts a retake', async () => {
+    lookup = { shotListEnabled: true, assessment: { ...ASSESSED, confirmed_by_tech: true }, visitAssessment: REVIEW };
+    await openSheet({ request: makeRequest({ ctx: withWarning({ exists: true, id: 'assessment-1', confirmed: true, unusableReason: null }) }) });
+    await screen.findAllByText(WARNING);
+    fireEvent.click(screen.getByRole('button', { name: 'Retake' }));
+    await waitFor(() => expect(screen.queryByText(WARNING)).toBeNull());
   });
 });
