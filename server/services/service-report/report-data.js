@@ -3374,9 +3374,17 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   // shows its photos as a labeled set in shot order. Built from the same
   // signed URLs as `photos` above, so it is minted fresh on every view and
   // never stored. No gate, no marker or no resolvable photo = no key at all.
-  const photoSet = photoSetEligible
-    ? buildLawnPhotoSet(latestPhotos.map((photo, index) => ({ url: photos[index].url, zone: photo.zone, photoOrder: photo.photo_order })))
+  // ALL OR NOTHING: if any photo of the set would not sign, the set is not sent
+  // at all (the old strip and gallery rules apply, as with the gate off), and the
+  // count rides out on a non-enumerable `photoSetUnresolved` so the report counts
+  // it as an image-resolution failure and no PDF of this view is cached. A
+  // partial set would hide the one photo whose second signing may succeed in the
+  // gallery copy the document suppresses.
+  const photoSetRows = photoSetEligible
+    ? latestPhotos.map((photo, index) => ({ url: photos[index].url, zone: photo.zone, photoOrder: photo.photo_order }))
     : [];
+  const photoSetUnresolved = photoSetRows.filter((row) => !row.url).length;
+  const photoSet = photoSetUnresolved ? [] : buildLawnPhotoSet(photoSetRows);
   // GATE_LAWN_VISIT_MEMORY (P13): the progress engine's score inputs, handed
   // out through the same internal out-param (never the payload). The prior is
   // the property-scoped history row selectPriorVisit chose; confidence is read
@@ -3745,7 +3753,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   // The week's rain / ET₀ (water insights) could not be fetched or frozen.
   if (readFailures && weekWeatherUnfrozen) readFailures.add('week_weather');
   const droughtStress = parseJsonObject(assessment.composite_scores).drought_stress;
-  return {
+  const lawnAssessmentPayload = {
     assessmentId: assessment.id,
     serviceRecordId: assessment.service_record_id || null,
     serviceId: assessment.service_id || null,
@@ -3820,6 +3828,10 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     customerSummary: snapshot?.summary || defaultCustomerSummary,
     trendSummary: defaultCustomerSummary,
   };
+  if (photoSetUnresolved) {
+    Object.defineProperty(lawnAssessmentPayload, 'photoSetUnresolved', { value: photoSetUnresolved, enumerable: false });
+  }
+  return lawnAssessmentPayload;
 }
 
 // GATE_LAWN_WATERING_RULE: the visit's one watering instruction, built from
@@ -4407,6 +4419,10 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     ...(visitMemoryLive ? { visitMemoryOut } : {}),
     readFailures,
   });
+  // A photo-set photo that would not sign (the set was withheld, all or nothing):
+  // the document cannot see the photo it lost, so count it where the PDF store
+  // paths already refuse to cache on image-resolution failures.
+  imageResolutionFailures += Number(lawnAssessment?.photoSetUnresolved) || 0;
   // Render-time treatment reconciliation (codex P1 r19): the completion SMS
   // links this report immediately — a customer can open it BEFORE the
   // grounded regen or stored-copy sanitize lands, and nothing shown can be

@@ -215,14 +215,28 @@ describe('GATE_LAWN_REPORT_PHOTO_SET on the lawn report payload', () => {
     expect(Object.prototype.hasOwnProperty.call(data.reportV2, 'photoSet')).toBe(false);
   });
 
-  test('a photo whose link would not sign is left out, the rest still show', async () => {
+  test('one photo that will not sign withholds the whole set and counts as an image failure (all or nothing)', async () => {
+    const photoService = require('../services/photos');
+    const baseline = await render();
     process.env.GATE_LAWN_REPORT_PHOTO_SET = 'true';
-    require('../services/photos').getViewUrl.mockImplementation(async (key) => {
-      if (key === 'lawn/ph-2.jpg') throw new Error('sign failed');
-      return `https://example.test/${key}`;
+    // Fails only for the set's own signing pass; the gallery pass for the same
+    // photo may succeed, which is exactly why the count must not rely on it.
+    let failedOnce = false;
+    photoService.getViewUrl.mockImplementation(async (key) => {
+      if (key === 'lawn/ph-2.jpg' && !failedOnce) { failedOnce = true; throw new Error('sign failed'); }
+      return `https://example.test/signed/${key}?sig=fresh`;
     });
     const data = await render();
-    expect(data.reportV2.photoSet.map((p) => p.shot)).toEqual(['back', 'close_up', 'blade_crown', 'trouble', 'trouble']);
+    expect(Object.prototype.hasOwnProperty.call(data.reportV2, 'photoSet')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(data.lawnAssessment, 'photoSet')).toBe(false);
+    expect(data.imageResolutionFailures).toBeGreaterThanOrEqual(1);
+    // The failure count never reaches the public payload as a key of its own.
+    expect(Object.keys(data.lawnAssessment)).not.toContain('photoSetUnresolved');
+    // A clean render counts nothing.
+    photoService.getViewUrl.mockImplementation(async (key) => `https://example.test/signed/${key}?sig=fresh`);
+    const clean = await render();
+    expect(clean.reportV2.photoSet).toHaveLength(CAPTURE.length);
+    expect(clean.imageResolutionFailures).toBe(baseline.imageResolutionFailures);
   });
 
   describe('with the capture gate (GATE_LAWN_SHOT_LIST) off or rolled back', () => {

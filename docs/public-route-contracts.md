@@ -2380,8 +2380,11 @@ visit's customer-visible photos in shot order (the order of
 untagged photo last). `label` is the fixed customer wording (the `reportLabel`
 values listed above, or "Lawn photo" for an untagged photo); `shot` is the shot
 key or `null`. Each `url` is a signed link built on every view (the same
-24-hour link as `photos`); nothing stores it, and the key is absent when the
-photo read fails or no photo has a link. The set is read with the eight-photo
+24-hour link as `photos`); nothing stores it. The set is all or nothing: the
+key is absent when the photo read fails or when any one photo of the visit will
+not sign (the old strip and gallery rules then apply, as with the gate off), and
+an unsigned photo counts into `imageResolutionFailures` so the PDF of that view
+is not cached. The set is read with the eight-photo
 cap whenever the gate is live and the visit carries the marker, even if
 `GATE_LAWN_SHOT_LIST` is off. Two components draw it. The live web report and the
 static build (`LawnReportV2Section`, `LawnPhotoStrip`) show the set as a labeled
@@ -2390,7 +2393,9 @@ and none in print. The PDF (`?mode=pdf`, which the download, the share sheet and
 the email attachment all serve) is `ServiceReportDocument`, whose "Service
 photos" gallery prints the set in shot order with its labels and leaves out the
 `lawn-` turf copies and the `reportV2.photos` strip copies of the same photos;
-service photos, approved moments and the turf-height gauge photo stay. The lawn
+service photos, approved moments and the turf-height gauge photo stay. The
+server probe of the printed photos (`collectRenderedImageUrls`) mirrors this: it
+checks the set URLs and not the suppressed copies. The lawn
 PDF cache signature gains `:photoset=1` only while the gate is live AND the
 visit's assessment carries the marker, so a legacy visit keeps its stored PDF.
 With the gate off, or on a visit without the marker, the payload and the
