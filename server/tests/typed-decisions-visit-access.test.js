@@ -241,6 +241,18 @@ describe('visit access shadow: rules that need no database', () => {
     expect(built.state.recent_texts).toContain('Great, the cat stays inside');
   });
 
+  test('an access question sent just before the window still withholds the reply inside it', async () => {
+    await visit({ scheduled_date: '2026-09-01', status: 'completed' });
+    // The window starts at Eastern midnight 09-01 (04:00Z).
+    await text('What is the code for the side gate?', '2026-09-01T02:00:00Z', { direction: 'outbound', status: 'delivered' });
+    await text('sesame', '2026-09-01T12:00:00Z');
+    await text('See you then', '2026-09-03T12:00:00Z');
+    const visitId = await visit();
+    const built = await access.buildVisitAccessState(await database('scheduled_services').where({ id: visitId }).first(), database);
+    expect(built.state.recent_texts).not.toContain('sesame');
+    expect(built.state.recent_texts).toContain('See you then');
+  });
+
   test('the access fields never leave as written, whatever they say', async () => {
     await database('property_preferences').insert({ customer_id: customerId, access_notes: 'sesame', side_gate_access: 'bluebird' });
     const visitId = await visit();

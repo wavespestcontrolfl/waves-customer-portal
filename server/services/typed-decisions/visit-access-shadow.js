@@ -14,12 +14,17 @@
  * brief or a customer record, belled or sent. The rows are evidence for the
  * later card flags.
  *
- * No code leaves: the state says only WHETHER codes are on file
- * (`structured.has_codes`), and every free-text field passes redactForState:
- * a text or note naming any access point or credential is replaced whole by a marker
- * built from closed vocabularies (which access points; whether a problem is
- * reported), a text sent just after one is withheld with it, and in any other
- * text digit-bearing and code-shaped tokens are masked.
+ * What leaves, exactly. The saved codes never do: the state says only
+ * WHETHER codes are on file (`structured.has_codes`). The two fields whose
+ * purpose is how to get in (access notes, side gate) always leave as a
+ * closed-vocabulary marker. Every other note and customer text passes
+ * redactForState: one that mentions access is replaced whole by that marker
+ * (which access points; whether a problem is reported), a customer text that
+ * follows one, or follows a Waves text about access, is withheld with it, and
+ * in the rest digit-bearing and code-shaped tokens are masked. Known limit: a
+ * customer text holding a bare word with no access context at all is sent as
+ * written, as every inbound customer text already is by the SMS shadow
+ * (sms-shadow.js; owner ruling 2026-10-01, texts may go to these providers).
  *
  * property_preferences is the primary home's row, so a visit stamped at
  * another address (stamped-address.js) is left out: its pets, codes and
@@ -228,15 +233,21 @@ async function buildVisitAccessState(svc, dbh) {
   // Both directions are read, but only the customer's own texts enter the
   // state: a Waves text is there solely so a reply to an access question
   // ("What is your gate password?" / "sesame") is withheld with it.
+  // The read starts a reply-window BEFORE the evidence floor, so an access
+  // question sent just before it still withholds its reply; those earlier
+  // rows are context only.
+  const TEXT_READ_LIMIT = 120;
   const texts = await excludeUnresolvedSendReservations(dbh('sms_log').where({ customer_id: svc.customer_id }))
     .whereIn('direction', ['inbound', 'outbound'])
-    .where('created_at', '>=', floor)
+    .where('created_at', '>=', new Date(floor.getTime() - ACCESS_REPLY_MS))
     .where('created_at', '<', cutoff)
     .orderBy('created_at', 'desc')
-    .limit(80)
+    .limit(TEXT_READ_LIMIT)
     .select('created_at', 'direction', 'message_body', 'message_type');
   // Oldest first, so a text that follows an access-bearing one is seen as such.
-  let withholdUntil = 0;
+  // A truncated read hides what came before its oldest row: fail closed and
+  // withhold a full reply-window from there.
+  let withholdUntil = texts.length >= TEXT_READ_LIMIT ? new Date(texts[texts.length - 1].created_at).getTime() + ACCESS_REPLY_MS : 0;
   const recentTexts = texts
     .filter((row) => row.message_type !== 'sms_reaction' && !isSmsReaction(row.message_body))
     .reverse()
@@ -247,9 +258,10 @@ async function buildVisitAccessState(svc, dbh) {
         if (access) withholdUntil = Math.max(withholdUntil, at + ACCESS_REPLY_MS);
         return null;
       }
-      if (access) { withholdUntil = Math.max(withholdUntil, at + ACCESS_FOLLOW_UP_MS); return redactForState(row.message_body); }
-      if (at <= withholdUntil) { withholdUntil = Math.max(withholdUntil, at + ACCESS_FOLLOW_UP_MS); return FOLLOW_UP_MARKER; }
-      return compact(redactForState(row.message_body), TEXT_CHARS);
+      const evidence = at >= floor.getTime();
+      if (access) { withholdUntil = Math.max(withholdUntil, at + ACCESS_FOLLOW_UP_MS); return evidence ? redactForState(row.message_body) : null; }
+      if (at <= withholdUntil) { withholdUntil = Math.max(withholdUntil, at + ACCESS_FOLLOW_UP_MS); return evidence ? FOLLOW_UP_MARKER : null; }
+      return evidence ? compact(redactForState(row.message_body), TEXT_CHARS) : null;
     })
     .filter(Boolean)
     .reverse()
