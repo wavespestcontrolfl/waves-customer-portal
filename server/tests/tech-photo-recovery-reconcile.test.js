@@ -36,12 +36,25 @@ function mockChain(table) {
       updates.push({ table, where: state.where, patch });
       return 1;
     }),
+    then: (resolve, reject) => Promise.resolve(
+      (tables[table] || []).filter((r) => !state.where
+        || Object.entries(state.where).every(([k, v]) => r[k] === v))
+    ).then(resolve, reject),
   };
   return c;
 }
 
 jest.mock('../models/db', () => jest.fn((table) => mockChain(table)));
+jest.mock('../config', () => ({
+  ...jest.requireActual('../config'),
+  s3: { bucket: 'photo-route-test', region: 'us-east-1' },
+}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+const mockUploadServicePhotoForVisit = jest.fn();
+jest.mock('../services/service-photos', () => ({
+  ...jest.requireActual('../services/service-photos'),
+  uploadServicePhotoForVisit: (...args) => mockUploadServicePhotoForVisit(...args),
+}));
 const mockEnqueue = jest.fn();
 jest.mock('../services/service-report/pdf-queue', () => ({ enqueuePdfRenderJob: (...a) => mockEnqueue(...a) }));
 const mockAlert = jest.fn();
@@ -108,6 +121,53 @@ describe('POST /:id/photos/reconcile', () => {
     await withServer(async (baseUrl) => {
       expect((await reconcile(baseUrl, 'other')).status).toBe(403);
       expect((await reconcile(baseUrl, 'admin')).status).toBe(200);
+    });
+  });
+
+  test('the photo list receipt is accepted unchanged by the upload route', async () => {
+    tables.scheduled_services[0] = {
+      ...tables.scheduled_services[0],
+      property_id: 'property-1',
+      service_id: 'catalog-pest',
+      service_type: 'Pest Control',
+      status: 'on_site',
+    };
+    tables.service_records = [];
+    tables.scheduled_service_photo_staging = [];
+    mockUploadServicePhotoForVisit.mockImplementationOnce(async (input) => ({
+      photo: { id: 'photo-1', s3_key: 'staged/photo-1.jpg' },
+      staged: true,
+      reconcileRequired: false,
+      serviceRecordId: null,
+      visit: require('../services/service-photos').servicePhotoVisitSnapshot(tables.scheduled_services[0]),
+      received: input,
+    }));
+
+    await withServer(async (baseUrl) => {
+      const read = await fetch(`${baseUrl}/api/tech/services/svc-1/photos`, {
+        headers: { Authorization: 'Bearer admin' },
+      });
+      expect(read.status).toBe(200);
+      const snapshot = (await read.json()).visit;
+      expect(snapshot).toMatchObject({ propertyId: 'property-1', catalogServiceId: 'catalog-pest' });
+
+      const form = new FormData();
+      form.append('photo', new Blob(['route-photo'], { type: 'image/jpeg' }), 'route.jpg');
+      form.append('expectedVisit', JSON.stringify(snapshot));
+      const write = await fetch(`${baseUrl}/api/tech/services/svc-1/photos`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin' },
+        body: form,
+      });
+      expect(write.status).toBe(200);
+      expect(mockUploadServicePhotoForVisit).toHaveBeenCalledWith(expect.objectContaining({
+        scheduledServiceId: 'svc-1',
+        expectedVisit: JSON.stringify(snapshot),
+      }));
+      expect(await write.json()).toMatchObject({
+        photo: { id: 'photo-1', staged: true },
+        visit: { propertyId: 'property-1', revision: snapshot.revision },
+      });
     });
   });
 
