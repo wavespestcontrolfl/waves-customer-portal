@@ -395,9 +395,14 @@ async function commitVoiceBooking({
         if (dayCount >= maxPerDay) return { status: 'day_full' };
       }
 
-      // The GLOBAL, tech-blind occupancy probe the contract requires of every
-      // rung-1 holder. Excludes this customer's own rows only via the dedupe
-      // above — a clash here is somebody ELSE's committed visit or live hold.
+      // The GLOBAL occupancy probe the contract requires of every rung-1
+      // holder. Excludes this customer's own rows only via the dedupe above —
+      // a clash here is somebody ELSE's committed visit or live hold. The
+      // offer came from the per-technician /book engine, so the probe is
+      // scoped to the technician the row is written with (technicianId below):
+      // with GATE_MULTI_TECH_CONFIRM + capacity mode on, another technician's
+      // overlapping stop is not a clash, while an UNASSIGNED row still is;
+      // gate off or no technician on the offer → tech-blind, as before.
       const clash = await findConflictingVisits({
         db: trx, date: dateStr, windowStart, windowEnd: endTime,
         // ⭐ INACTIVE ROWS ARE NOT OCCUPANCY. The helper's default excludes only
@@ -407,6 +412,7 @@ async function commitVoiceBooking({
         // slot the office just freed report slot_taken to its replacement.
         excludeStatuses: ['cancelled', 'skipped', 'rescheduled'],
         travel: { lat: coords?.lat ?? null, lng: coords?.lng ?? null },
+        technicianId: insertRow.technician_id || null, // tech-aware scope, gate-dark (occupancy.js header)
       });
       if (clash.length) return { status: 'slot_taken' };
 

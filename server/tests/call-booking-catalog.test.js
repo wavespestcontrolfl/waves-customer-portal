@@ -1475,6 +1475,19 @@ describe('shiftCallFollowUpsForParentMove (shared parent-move child shift)', () 
     expect(occupancy.acquireOccupancyLocks).not.toHaveBeenCalled();
   });
 
+  test('the destination probe carries the child\'s own technician (null when unassigned) — the write CASes on that same value', async () => {
+    const kids = [
+      { id: 'kid-1', technician_id: 't1', day: '2026-07-16', new_day: '2026-07-19', window_start: '09:00:00', window_end: null, estimated_duration_minutes: 60 },
+      { id: 'kid-2', technician_id: null, day: '2026-07-16', new_day: '2026-07-19', window_start: '11:00:00', window_end: null, estimated_duration_minutes: 60 },
+    ];
+    const { conn, log } = fakeConn({ kids, updatedCount: 1 });
+    await shiftCallFollowUpsForParentMove({ conn, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05' });
+    expect(occupancy.findConflictingVisits.mock.calls.map(([a]) => [a.excludeServiceIds[0], a.technicianId]))
+      .toEqual([['kid-1', 't1'], ['kid-2', null]]);
+    expect(log.wheres).toContainEqual(expect.objectContaining({ technician_id: 't1' }));
+    expect(log.wheres).toContainEqual(expect.objectContaining({ technician_id: null }));
+  });
+
   test('a child whose destination block is already booked is NOT written onto it — it keeps its date and is reported; a windowless child is not probed', async () => {
     const kids = [
       { id: 'kid-1', technician_id: 't1', day: '2026-07-16', new_day: '2026-07-19', window_start: '09:00:00', window_end: null, estimated_duration_minutes: 90 },
