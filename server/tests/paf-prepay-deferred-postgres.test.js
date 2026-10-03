@@ -850,6 +850,26 @@ postgres('annual prepay charged after the first visit', () => {
       expect(StripeService.chargeInvoiceWithSavedCard).toHaveBeenCalledWith(f.invoiceId, f.pmId, expect.objectContaining({ maxAuthorizedInvoiceTotalCents: TOTAL_CENTS, selfPayAccountScope: true }));
     });
 
+    it('a deferred year whose account gains a payer is re-routed at account scope by the recovery handler (pre-push audit)', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      expect(await release()).toMatchObject({ released: 1 });
+      const payer = require('../services/payer');
+      const credit = require('../services/customer-credit');
+      const stampSpy = jest.spyOn(credit, 'reverseCreditAndStampPayer').mockResolvedValue({ reversed: 0 });
+      // An account payer only (the held visit itself is self-pay).
+      payer.resolveForInvoice.mockImplementation(async ({ scheduledServiceId }) => ({ payerId: scheduledServiceId ? null : 7 }));
+      const StripeService = require('../services/stripe');
+      StripeService.chargeInvoiceWithSavedCard.mockRejectedValueOnce(Object.assign(new Error('payer'), { code: 'PAYER_BILLED_GUARD' }));
+      try {
+        await sweep();
+        expect(stampSpy).toHaveBeenCalledWith(expect.objectContaining({ invoiceId: f.invoiceId, payerId: 7 }));
+      } finally {
+        payer.resolveForInvoice.mockImplementation(async () => ({ payerId: null }));
+        stampSpy.mockRestore();
+      }
+    });
+
     it('a closeout that starts after the release holds the charge until it finishes (Codex r13)', async () => {
       const f = await deferredAccept();
       await perform(f.parentId, f.customerId);
