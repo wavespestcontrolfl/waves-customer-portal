@@ -24,7 +24,13 @@ const { explicitBillingChannels } = require("./billing-delivery-channels");
 const PhotoService = require("./photos");
 const config = require("../config");
 const { customerSafeServiceNotes } = require("./project-types");
-const { hasAuthoritativeZeroPrice, MEMBERSHIP_DUES_LINE_KEY } = require("./billing-lane");
+const {
+  hasAuthoritativeZeroPrice,
+  MEMBERSHIP_DUES_LINE_KEY,
+  membershipDuesProvenanceHolds,
+  acquireMembershipDuesMonthLock,
+  monthlyDuesCollected,
+} = require("./billing-lane");
 const {
   SEND_CLAIMABLE_STATUSES,
   SEND_FINALIZABLE_STATUSES,
@@ -1717,6 +1723,56 @@ function buildDiscountLineItem({
     use_stored_discount: true,
     stored_discount_source: "scheduled_service",
   };
+}
+
+// The ONE place a membership-dues stamp is written (B08). `month` is only the
+// caller's REQUEST ("this mint may be that ET month's dues"); whether it is
+// true is judged here, from the visit and customer rows this transaction
+// holds locked and the line being written, so no caller can pass a stale
+// flag (a visit repriced between the completion's decision and the lock
+// mints a plain invoice with no stamp). For a real dues mint the per
+// customer + month lock is then taken (held through the insert — the line
+// items built here are what create() writes in this same transaction) and
+// coverage is re-read under it: a month a concurrent plan visit's dues
+// invoice (or the cron) has since covered refuses this mint with
+// MEMBERSHIP_DUES_COVERED, which the completion treats exactly like dues
+// that were covered before the mint (no invoice, the visit completes).
+async function stampMembershipDuesUnderLock(conn, { customerId, scheduledServiceId, month, lineItems }) {
+  const duesLine = lineItems.find((li) => li._kind !== "discount" && Number(li.amount) > 0);
+  if (!duesLine) return lineItems;
+  const { acquireScheduledMintLockChain } = require("./scheduled-invoice-mint");
+  const visit = await acquireScheduledMintLockChain(conn, {
+    scheduledServiceId,
+    customerId,
+    visitColumns: ["id", "estimated_price", "primary_line_price", "is_callback"],
+  });
+  const customer = await conn("customers")
+    .where({ id: customerId })
+    .first("billing_mode", "monthly_rate", "waveguard_tier");
+  if (!membershipDuesProvenanceHolds({ visit, customer, lineAmount: duesLine.amount })) {
+    return lineItems;
+  }
+  await acquireMembershipDuesMonthLock(conn, customerId, month);
+  let covered = false;
+  try {
+    const { savepointRead } = require("../utils/savepoint-read");
+    covered = await savepointRead(conn, (k) => monthlyDuesCollected(
+      k, customerId, new Date(`${month}-15T12:00:00Z`), { excludeScheduledServiceId: scheduledServiceId },
+    ));
+  } catch (err) {
+    // An unreadable month never loses the bill: mint (and stamp) as before.
+    logger.warn(`[invoice] dues-coverage recheck failed for visit ${scheduledServiceId}: ${err.message}`);
+  }
+  if (covered) {
+    const e = new Error(`Membership dues for ${month} are already covered — no second dues invoice was created.`);
+    e.status = 409;
+    e.statusCode = 409;
+    e.code = "MEMBERSHIP_DUES_COVERED";
+    throw e;
+  }
+  return lineItems.map((li) => (
+    li === duesLine ? { ...li, [MEMBERSHIP_DUES_LINE_KEY]: month } : li
+  ));
 }
 
 async function buildScheduledServiceInvoiceLines(
@@ -5917,13 +5973,13 @@ const InvoiceService = {
               category: sr.service_type,
             },
           ];
-      if (membershipDuesMonth) {
-        const duesLine = lineItems.find((li) => li._kind !== "discount" && Number(li.amount) > 0);
-        if (duesLine) {
-          lineItems = lineItems.map((li) => (
-            li === duesLine ? { ...li, [MEMBERSHIP_DUES_LINE_KEY]: membershipDuesMonth } : li
-          ));
-        }
+      if (membershipDuesMonth && conn && sr.scheduled_service_id) {
+        lineItems = await stampMembershipDuesUnderLock(conn, {
+          customerId: sr.customer_id,
+          scheduledServiceId: sr.scheduled_service_id,
+          month: membershipDuesMonth,
+          lineItems,
+        });
       }
       // Retention offer (cancel-flow C1, 15% × 2 charges / $75 cap): a
       // GRANTED offer discounts the VISIT's recurring lines only — computed

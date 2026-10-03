@@ -909,6 +909,45 @@ function completionInvoiceIsMembershipDues(args) {
     && completionInvoiceAmount({ ...args, monthlyRate: 0 }) === 0;
 }
 
+// Does a dues invoice about to be written still earn its stamp? Judged by the
+// caller from the rows it holds LOCKED for THAT mint (the visit, the
+// customer) and the amount of the line actually being written — never from
+// the completion's earlier decision: a visit repriced between the decision
+// and the lock (the SCHEDULED_PRICE_MOVED retry re-mints at the new price)
+// is no longer a dues visit, and a stamp on it would hide the month's real
+// dues from every later plan visit. Same predicate as the decision
+// (completionInvoiceIsMembershipDues) plus the membership lane and "the
+// line IS monthly_rate".
+function membershipDuesProvenanceHolds({ visit, customer, lineAmount }) {
+  if (!visit || !customer) return false;
+  const member = customer.billing_mode === 'monthly_membership'
+    || (!customer.billing_mode && isMembershipTier(customer.waveguard_tier));
+  if (!member) return false;
+  const cents = (v) => Math.round(Number(v) * 100);
+  return completionInvoiceIsMembershipDues({
+    estimatedPrice: visit.estimated_price,
+    isCallback: !!visit.is_callback,
+    perApplicationBilling: false,
+    perApplicationFee: null,
+    monthlyRate: customer.monthly_rate,
+    billingMode: customer.billing_mode,
+    primaryLinePrice: visit.primary_line_price ?? null,
+  }) && cents(lineAmount) === cents(customer.monthly_rate);
+}
+
+// Serializes the "is this month's dues covered? then mint" decision per
+// customer + ET month. House pattern: transaction-scoped two-key advisory
+// lock, dotted namespace + id text. Taken inside the mint transaction AFTER
+// the visit-scoped chain (mint advisory → customer KEY SHARE → visit row)
+// and held through the invoice insert, so a second plan visit's mint waits,
+// then re-reads coverage and sees the first one's committed invoice.
+async function acquireMembershipDuesMonthLock(trx, customerId, month) {
+  await trx.raw(
+    'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+    ['membership.dues_month', `${customerId}:${month}`],
+  );
+}
+
 // Is THIS ET month's membership dues covered? Mirrors the monthly cron's
 // already-charged check: the metadata.billed_month stamp on a paid /
 // processing payment is authoritative (month-of-obligation attribution — a
@@ -1658,6 +1697,8 @@ module.exports = {
   membershipDuesCoverVisit,
   completionInvoiceAmount,
   completionInvoiceIsMembershipDues,
+  membershipDuesProvenanceHolds,
+  acquireMembershipDuesMonthLock,
   MEMBERSHIP_DUES_LINE_KEY,
   predictCompletionBilling,
   monthlyDuesCollected,

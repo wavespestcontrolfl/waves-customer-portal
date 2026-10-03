@@ -369,4 +369,15 @@ describe('completion route wires dues-collected coverage', () => {
     expect(source).toMatch(/\? serviceDateOnly\(svc\.scheduled_date\)\.slice\(0, 7\)/);
     expect(source).toMatch(/if \(membershipDuesMonth\) mintOptions\.membershipDuesMonth = membershipDuesMonth;/);
   });
+
+  // B08 race: a dues month covered while the mint waited on the per
+  // customer-month lock is the SAME outcome as dues covered before the mint —
+  // not the manual-billing bell, not a release-for-resume.
+  test('MEMBERSHIP_DUES_COVERED under the dues lock takes the covered path, never the failure bell', () => {
+    expect(source).toMatch(/const duesCoveredUnderLock = invErr\?\.code === 'MEMBERSHIP_DUES_COVERED' && !invoice\?\.id;/);
+    expect(source).toMatch(/if \(duesCoveredUnderLock\) \{\s*\n\s*membershipDuesCoveredAtMint = true;[\s\S]{0,400}\} else if \(!coveredByCombined && !setupFeeInFlight && backfillReviewMintRequired && !invoice\?\.id\) \{/);
+    expect(source).toMatch(/\} else if \(!duesCoveredUnderLock\) \{\s*\n\s*logger\.error\(`\[dispatch\] Auto-invoice failed \(non-blocking\)/);
+    // The covered visit reads like one covered before the mint at every later reader.
+    expect((source.match(/membershipDuesCoveredAtMint/g) || []).length).toBeGreaterThanOrEqual(5);
+  });
 });

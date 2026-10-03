@@ -686,6 +686,36 @@ describe('membershipDuesCoverVisit — dues already collected this month', () =>
   });
 });
 
+describe('membershipDuesProvenanceHolds — the stamp describes the invoice actually written', () => {
+  const { membershipDuesProvenanceHolds, acquireMembershipDuesMonthLock } = require('../services/billing-lane');
+  const customer = { billing_mode: 'monthly_membership', monthly_rate: 49, waveguard_tier: 'Silver' };
+  const visit = { estimated_price: null, primary_line_price: null, is_callback: false };
+  test('an unpriced visit whose line IS the monthly rate keeps its stamp (explicit and legacy-null lane)', () => {
+    expect(membershipDuesProvenanceHolds({ visit, customer, lineAmount: 49 })).toBe(true);
+    expect(membershipDuesProvenanceHolds({ visit: { ...visit, estimated_price: 0 }, customer, lineAmount: 49 })).toBe(true);
+    expect(membershipDuesProvenanceHolds({ visit, customer: { ...customer, billing_mode: null }, lineAmount: 49 })).toBe(true);
+  });
+  test('a visit repriced after the decision (locked row now priced) loses it, even when the line equals the rate', () => {
+    expect(membershipDuesProvenanceHolds({ visit: { ...visit, estimated_price: 85 }, customer, lineAmount: 85 })).toBe(false);
+    expect(membershipDuesProvenanceHolds({ visit: { ...visit, estimated_price: 49 }, customer, lineAmount: 49 })).toBe(false);
+  });
+  test('a line that is not the monthly rate, a callback, a non-member lane, or missing rows never stamp', () => {
+    expect(membershipDuesProvenanceHolds({ visit, customer, lineAmount: 85 })).toBe(false);
+    expect(membershipDuesProvenanceHolds({ visit: { ...visit, is_callback: true }, customer, lineAmount: 49 })).toBe(false);
+    expect(membershipDuesProvenanceHolds({ visit, customer: { ...customer, billing_mode: 'per_visit' }, lineAmount: 49 })).toBe(false);
+    expect(membershipDuesProvenanceHolds({ visit, customer: { billing_mode: null, monthly_rate: 49, waveguard_tier: 'Commercial' }, lineAmount: 49 })).toBe(false);
+    expect(membershipDuesProvenanceHolds({ visit: null, customer, lineAmount: 49 })).toBe(false);
+  });
+  test('the dues lock is a transaction-scoped two-key advisory lock on customer + month', async () => {
+    const calls = [];
+    await acquireMembershipDuesMonthLock({ raw: async (sql, bindings) => { calls.push([sql, bindings]); } }, 'cust-1', '2026-09');
+    expect(calls).toEqual([[
+      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['membership.dues_month', 'cust-1:2026-09'],
+    ]]);
+  });
+});
+
 describe('completionInvoiceIsMembershipDues — monthly_rate is what put the number on the invoice', () => {
   const { completionInvoiceIsMembershipDues } = require('../services/billing-lane');
   const unpriced = {

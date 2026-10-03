@@ -136,12 +136,12 @@ async function cleanup(f) {
   await mockPg('customers').where({ id: f.customerId }).del().catch(() => {});
 }
 
-async function complete(f, serviceId) {
+async function complete(f, serviceId, overrides = {}) {
   const { completeScheduledService } = require('../services/complete-scheduled-service');
   return completeScheduledService({ serviceId, idempotencyKey: randomUUID(),
     actor: { techRole: 'admin', technicianId: f.techId, technician: null },
     body: { customerRecap: 'Visit closed out.', visitOutcome: 'completed', products: [], areasServiced: [],
-      sendCompletionSms: false, requestReview: false } });
+      sendCompletionSms: false, requestReview: false, ...overrides } });
 }
 
 const invoicesFor = (f) => mockPg('invoices').where({ customer_id: f.customerId }).orderBy('created_at', 'asc');
@@ -151,9 +151,10 @@ const liveInvoicesFor = (f) => mockPg('invoices').where({ customer_id: f.custome
 postgres('membership dues are owed once per ET month (B08)', () => {
   beforeAll(async () => {
     process.env.DATA_HYGIENE_VAULT_KEY = 'synthetic-visit-summary-test-key';
-    mockPg = knex({ client: 'pg', connection, pool: { min: 0, max: 4 } });
+    mockPg = knex({ client: 'pg', connection, pool: { min: 0, max: 8 } });
   });
   afterAll(async () => { if (mockPg) await mockPg.destroy(); });
+  afterEach(() => { jest.restoreAllMocks(); });
 
   test('(a) dead-autopay member: the first unpriced plan visit mints the month\'s dues, the second mints nothing', async () => {
     const f = await seedMember();
@@ -242,6 +243,80 @@ postgres('membership dues are owed once per ET month (B08)', () => {
       await complete(f, lawn);
       await complete(f, pest);
       expect(await invoicesFor(f)).toHaveLength(0);
+    } finally { await cleanup(f); }
+  });
+
+  // Two plan visits of one customer completing at the same instant: the mint
+  // locks are visit-scoped, so both used to pass the pre-lock coverage read
+  // and each mint the full monthly rate. The barrier holds BOTH completions
+  // at the mint (after their pre-lock decisions, before any lock), so the
+  // per customer + month dues lock is what decides.
+  test('concurrent completions of two plan visits in one month mint exactly ONE dues invoice, and the loser still completes', async () => {
+    const InvoiceService = require('../services/invoice');
+    const original = InvoiceService.createFromService;
+    const f = await seedMember();
+    try {
+      const lawn = await seedVisit(f, { label: 'Lawn Care' });
+      const pest = await seedVisit(f, { label: 'Pest Control' });
+      let arrived = 0;
+      let release;
+      const barrier = new Promise((resolve) => { release = resolve; });
+      jest.spyOn(InvoiceService, 'createFromService').mockImplementation(async (...args) => {
+        arrived += 1;
+        if (arrived === 2) release();
+        await Promise.race([barrier, new Promise((resolve) => setTimeout(resolve, 8000))]);
+        return original.apply(InvoiceService, args);
+      });
+      const [first, second] = await Promise.all([
+        complete(f, lawn, { sendCompletionSms: true }),
+        complete(f, pest, { sendCompletionSms: true }),
+      ]);
+      expect(arrived).toBe(2);
+      expect(first).toMatchObject({ status: 200 });
+      expect(second).toMatchObject({ status: 200 });
+      const rows = await invoicesFor(f);
+      expect(rows).toHaveLength(1);
+      expect(Number(rows[0].total)).toBe(49);
+      expect(rows[0].line_items.find((li) => li.membership_dues_month)).toBeTruthy();
+      // Both visits closed out; only one carries the dues invoice.
+      const records = await mockPg('service_records').where({ customer_id: f.customerId });
+      expect(records).toHaveLength(2);
+      const visits = await mockPg('scheduled_services').whereIn('id', [lawn, pest]);
+      expect(visits.map((v) => v.status)).toEqual(['completed', 'completed']);
+    } finally { await cleanup(f); }
+  });
+
+  // The SCHEDULED_PRICE_MOVED retry re-mints at the moved price. The stamp
+  // must describe the invoice actually written, so provenance is judged under
+  // the mint lock from the locked rows — not from the pre-lock decision.
+  test('a visit repriced between the decision and the mint (SCHEDULED_PRICE_MOVED retry) mints an UNSTAMPED invoice; the next plan visit still mints the month\'s dues', async () => {
+    const InvoiceService = require('../services/invoice');
+    const original = InvoiceService.createFromService;
+    const f = await seedMember();
+    try {
+      // estimated_price 0 with no primary line price reads as "unpriced": the
+      // decision bills the monthly rate and requests a dues stamp.
+      const lawn = await seedVisit(f, { label: 'Lawn Care', estimatedPrice: 0 });
+      const pest = await seedVisit(f, { label: 'Pest Control' });
+      let firstCall = true;
+      jest.spyOn(InvoiceService, 'createFromService').mockImplementation(async (...args) => {
+        if (firstCall) {
+          firstCall = false;
+          await mockPg('scheduled_services').where({ id: lawn }).update({ estimated_price: 85 });
+        }
+        return original.apply(InvoiceService, args);
+      });
+      expect(await complete(f, lawn)).toMatchObject({ status: 200 });
+      const rows = await invoicesFor(f);
+      expect(rows).toHaveLength(1);
+      expect(Number(rows[0].total)).toBe(85);
+      expect(rows[0].line_items.some((li) => li.membership_dues_month)).toBe(false);
+      jest.restoreAllMocks();
+      expect(await complete(f, pest)).toMatchObject({ status: 200 });
+      const after = await invoicesFor(f);
+      expect(after).toHaveLength(2);
+      const dues = after.find((r) => Number(r.total) === 49);
+      expect(dues.line_items.find((li) => li.membership_dues_month)).toMatchObject({ membership_dues_month: monthOf(etDateString()) });
     } finally { await cleanup(f); }
   });
 

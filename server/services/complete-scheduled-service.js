@@ -10942,6 +10942,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
         setupFeeClaimInFlight = true;
       }
     }
+    // Set when the mint is refused because a concurrent plan visit's dues
+    // invoice covered the month (MEMBERSHIP_DUES_COVERED): the visit then reads
+    // exactly like one dues covered before the mint (autopayCoversVisit).
+    let membershipDuesCoveredAtMint = false;
     if (shouldInvoice) {
       try {
         if (setupFeeClaimInFlight) {
@@ -11397,6 +11401,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // #5237, refuseCoveredMemberMintInTrx): handled by its own
         // release-for-resume below, never the manual-billing bell.
         const coveredByCombined = invErr?.code === 'FIRST_APPLICATION_COVERED' && !invoice?.id;
+        // The month's dues were covered by a concurrent plan visit's invoice
+        // (or the cron) between the pre-lock decision and the mint lock — a
+        // clean refusal under the per-customer-month lock, nothing written.
+        // Take exactly the path "dues were already covered before the mint"
+        // takes: no invoice, no bell, no release-for-resume, the visit
+        // completes and its text reads as covered. Never an error.
+        const duesCoveredUnderLock = invErr?.code === 'MEMBERSHIP_DUES_COVERED' && !invoice?.id;
         // Refused before any mint because a fresh setup-fee claim on the series
         // is still in flight (see setupFeeClaimInFlight): release for resume on
         // every lane, never a finalize without the fee.
@@ -11424,7 +11435,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             serviceRecordId: record.id,
           } });
         }
-        if (!coveredByCombined && !setupFeeInFlight && backfillReviewMintRequired && !invoice?.id) {
+        if (duesCoveredUnderLock) {
+          membershipDuesCoveredAtMint = true;
+          logger.info(`[dispatch] visit ${svc.id}: membership dues for ${serviceDateOnly(svc.scheduled_date).slice(0, 7)} were covered while this completion waited on the dues lock — no second dues invoice minted`);
+        } else if (!coveredByCombined && !setupFeeInFlight && backfillReviewMintRequired && !invoice?.id) {
           logger.error(`[dispatch] REQUIRED completion-invoice mint FAILED for ${svc.id} (${isBackfillCompletion ? 'backfill review' : 'live typed one-time'}) — closeout NOT finalized: ${invErr.message}`);
           // Reprice refusal refreshes the FROZEN money (codex #3344 r5 P1):
           // the resume this release promises mints the frozen cents with
@@ -11559,7 +11573,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
             serviceRecordId: record.id,
           } });
-        } else {
+        } else if (!duesCoveredUnderLock) {
           logger.error(`[dispatch] Auto-invoice failed (non-blocking): ${invErr.message}`);
           // Exception-based (CLAUDE.md rule 14): a LIVE mint failure used to
           // be a log line only — the visit completed, the customer got the
@@ -12611,6 +12625,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       && coveredVisitCollectible
       && !alreadyPaid
       && !autopayCoversVisit
+      && !membershipDuesCoveredAtMint
       // Collectible statuses only: a crash-resumed completion reloads the
       // invoice through the existing-invoice path with invoiceCreated/
       // payUrl set for any non-paid status — a 'processing' invoice (ACH
@@ -13357,6 +13372,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           && (alreadyPaid
           || prepaidCovered
           || autopayCoversVisit
+          || membershipDuesCoveredAtMint
           || ['paid', 'prepaid'].includes(String(invoice?.status || '').toLowerCase()));
         // The trace/applications lookup that used to feed this call is gone
         // with the re-entry line. It existed so the SMS could apply the same
@@ -14496,6 +14512,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       && coveredVisitCollectible
       && !alreadyPaid
       && !autopayCoversVisit
+      && !membershipDuesCoveredAtMint
       && !suppressCompletionInvoiceLink
       // Third-party Bill-To: never open the in-person payment sheet for a
       // payer-billed invoice — the tech must not collect the AP's invoice from
