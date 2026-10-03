@@ -107,6 +107,17 @@ function handOffReply(escResult, lane) {
   if (lane.actions) lane.actions.splice(0, lane.actions.length, ...lane.actions.filter((a) => !String(a.href || '').startsWith('/reservice/')));
   return { ...escResult, ...laneExtras(lane) };
 }
+const ESCALATE_AFTER_READ_BACK = {
+  escalated: false,
+  instruction: 'Not handed off: the email address has to be read back to the customer first, so do that now. If the customer also needs the team for something else, call escalate again after they answer.',
+};
+// An escalate call in a response that also asked for a read-back: answered,
+// not run. True when this call was that escalate.
+function answeredInsteadOfRun(toolUse, toolResults) {
+  if (toolUse.name !== 'escalate') return false;
+  toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id, content: JSON.stringify(ESCALATE_AFTER_READ_BACK) });
+  return true;
+}
 // Tools that end the turn run last, in this order (every other tool first).
 const HAND_OFF_ORDER = ['request_email_change', 'escalate'];
 
@@ -565,7 +576,12 @@ class WavesAssistant {
       // A confirmed email change is a hand-off too, and it goes before a
       // plain escalate so the turn rings one bell, the one with the address.
       const ordered = [...toolUses].sort((a, b) => HAND_OFF_ORDER.indexOf(a.name) - HAND_OFF_ORDER.indexOf(b.name));
+      // An address this response asked to have read back. A plain escalate
+      // in the same response would end the turn before the customer saw it,
+      // so that call is answered instead of run.
+      let readBackAsked = false;
       for (const toolUse of ordered) {
+        if (readBackAsked && answeredInsteadOfRun(toolUse, toolResults)) continue;
         // Check if it's an escalation
         if (toolUse.name === 'escalate') {
           const escResult = await this.escalate(conversation, message, toolUse.input.reason || 'AI-initiated escalation',
@@ -585,9 +601,12 @@ class WavesAssistant {
           tool_results: JSON.stringify(result),
         }).catch(e => logger.error(`[ai-assistant] Failed to log tool use: ${e.message}`));
 
+        // Only the email-change tool returns these two fields.
+        readBackAsked = readBackAsked || Boolean(result.read_back);
+
         // The email-change check passed: the confirmed address goes to the
         // team, and the turn ends with the hand-off reply.
-        if (toolUse.name === 'request_email_change' && result.confirmed_email) {
+        if (result.confirmed_email) {
           const escResult = await this.escalate(conversation, message, 'Customer confirmed a new email address in portal chat',
             { topic: 'account_change', newEmail: result.confirmed_email });
           return handOffReply(escResult, lane);
@@ -767,7 +786,7 @@ class WavesAssistant {
     const [escalation] = await db('ai_escalations').insert({
       conversation_id: conversation.id,
       customer_id: conversation.customer_id,
-      reason: this.savedReason(customerMessage, newEmail),
+      reason: this.savedReason(customerMessage, { newEmail, topic, channel: conversation.channel }),
       summary: escalationSummary(reason, customer, { newEmail, emailReadBack }),
       customer_message: customerMessage,
       ai_draft_response: null,
@@ -878,11 +897,14 @@ class WavesAssistant {
     }
   }
 
-  // The reason a hand-off is saved under. A confirmed email change is an
-  // account change whatever the confirming message says ("yes, change it"
-  // is not a schedule change).
-  savedReason(message, newEmail) {
-    return newEmail ? 'account_change' : this.classifyEscalation(message);
+  // The reason a hand-off is saved under. Under the email-change lane an
+  // account change (a confirmed email change, or the lane's own fallback to
+  // escalate with that topic) is saved as one, whatever the message says:
+  // "please change my email" is not a schedule change.
+  savedReason(message, { newEmail, topic, channel } = {}) {
+    const accountChange = newEmail || (topic === 'account_change' && portalSelfServe(channel)
+      && require('../../config/feature-gates').portalChatEmailChangeLive());
+    return accountChange ? 'account_change' : this.classifyEscalation(message);
   }
 
   classifyEscalation(message) {

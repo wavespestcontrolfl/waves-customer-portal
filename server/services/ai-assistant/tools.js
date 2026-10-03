@@ -670,9 +670,10 @@ const EMAIL_ADDRESS = "[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\\.[A-Za
 const EMAIL_SHAPE = new RegExp(`^${EMAIL_ADDRESS}$`);
 const EMAIL_WORDS = new RegExp(EMAIL_ADDRESS, 'g');
 // An address shown or typed as a whole: nothing an address can hold (or a
-// second @) in front of it, and after it the end, a space, or sentence
-// punctuation, never more of a longer token.
-const EMAIL_WHOLE_WORDS = new RegExp(`(?<![A-Za-z0-9.!#$%&'*+/=?^_\`{|}~@-])${EMAIL_ADDRESS}(?=$|\\s|[.,;:!?)\\]>"](?:\\s|$))`, 'g');
+// second @) in front of it, and after it the end, a space, or a character
+// no domain holds and no longer token continues with (a comma, a slash, a
+// full stop that ends the sentence). "a@b.com_x.net" is a longer token.
+const EMAIL_WHOLE_WORDS = new RegExp(`(?<![A-Za-z0-9.!#$%&'*+/=?^_\`{|}~@-])${EMAIL_ADDRESS}(?=$|\\s|[,;:!?)\\]>"/]|\\.(?![A-Za-z0-9]))`, 'g');
 const EMAIL_MAX_CHARS = 254;
 // Messages of the chat read for the check, newest first.
 const EMAIL_CHANGE_MESSAGES = 40;

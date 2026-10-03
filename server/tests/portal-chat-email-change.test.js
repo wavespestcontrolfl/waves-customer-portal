@@ -189,6 +189,44 @@ test('a keyword hand-off with no read-back waiting is the plain hand-off', async
   expect(NotificationService.notifyAdmin.mock.calls[0][3].detail).toBe('cancel my service');
 });
 
+test('an address typed right before a comma or a slash is still the address', async () => {
+  chat = [{ role: 'user', content: `change it to ${NEW},thanks` }];
+  mockCreate
+    .mockResolvedValueOnce(ask({ new_email: NEW, customer_confirmed: false }))
+    .mockResolvedValueOnce(text(`I have ${NEW} . Is that right?`));
+
+  await say(`change it to ${NEW},thanks`);
+
+  expect(toolResult()).toEqual(expect.objectContaining({ sent: false, read_back: NEW }));
+});
+
+test('a first read-back and an escalate call in one reply: the read-back wins, nothing is handed off', async () => {
+  chat = [{ role: 'user', content: `Please change my email to ${NEW}` }];
+  mockCreate
+    .mockResolvedValueOnce({ content: [
+      { type: 'tool_use', id: 't0', name: 'escalate', input: { reason: 'email change', topic: 'account_change' } },
+      { type: 'tool_use', id: 't1', name: 'request_email_change', input: { new_email: NEW, customer_confirmed: false } },
+    ] })
+    .mockResolvedValueOnce(text(`I have ${NEW} . Is that right?`));
+
+  const result = await say(`Please change my email to ${NEW}`);
+
+  expect(result.escalated).toBe(false);
+  expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  const results = mockCreate.mock.calls[1][0].messages.at(-1).content.map((r) => JSON.parse(r.content));
+  expect(results).toEqual([expect.objectContaining({ read_back: NEW }), expect.objectContaining({ escalated: false })]);
+});
+
+test('the lane\'s fallback hand-off is saved as an account change, and only under the gate', async () => {
+  const conv = { id: 'conv-1', customer_id: 'cust-1', channel: 'portal_chat' };
+  await assistant.escalate(conv, 'please change my email', 'could not check', { topic: 'account_change' });
+  delete process.env[GATE];
+  await assistant.escalate(conv, 'please change my email', 'could not check', { topic: 'account_change' });
+
+  expect(db.__bindings[0]).toContain('account_change');
+  expect(db.__bindings[1]).toContain('schedule_change');
+});
+
 test('a confirmed change and an escalate call in one reply ring one bell, the one with the address', async () => {
   mockCreate.mockResolvedValueOnce({ content: [
     { type: 'tool_use', id: 't0', name: 'escalate', input: { reason: 'email change', topic: 'account_change' } },
