@@ -1278,8 +1278,9 @@ function awaitingInstallationRows(conn) {
 //   - the visit's own newest closeout does not say the work was not performed
 //     (inspection only / customer declined / incomplete / backfill): that
 //     visit is not the installation;
-//   - no OTHER live visit already carries this plan's stamp: one installation
-//     per plan, so a later bait/station job bills normally;
+//   - no OTHER completed visit already carries this plan's stamp: one
+//     installation per plan, so a later installation-named job bills
+//     normally;
 //   - the visit is not billed to a third-party payer.
 // A visit paid another way (prepaid_method) never reaches here, and the
 // closeout clears a stamp from a payer-billed or separately paid visit. So an
@@ -1297,7 +1298,13 @@ async function deferredInstallHoldingTerm(visit, terms, conn, { claim = false } 
     const ids = terms.map((t) => t.id);
     if (ids.length) await trx('annual_prepay_terms').whereIn('id', ids).orderBy('id').forUpdate().select('id');
     const term = await findDeferredInstallHoldingTerm(visit, terms, trx);
-    if (term) await trx('scheduled_services').where({ id: visit.id }).update({ paf_held_term_id: term.id });
+    if (term) {
+      // The plan has ONE stamp: a reopened visit's stale one goes as this
+      // visit takes it.
+      await trx('scheduled_services').where({ paf_held_term_id: term.id }).whereNot({ id: visit.id })
+        .whereNot({ status: 'completed' }).update({ paf_held_term_id: null });
+      await trx('scheduled_services').where({ id: visit.id }).update({ paf_held_term_id: term.id });
+    }
     return term;
   });
 }
@@ -1328,10 +1335,15 @@ async function findDeferredInstallHoldingTerm(visit, terms, conn) {
       .first('status', 'structured_notes');
     const notes = parseJsonish(closeout?.structured_notes) || {};
     if (closeout && (NOT_PERFORMED_OUTCOMES.includes(String(notes.visitOutcome || '')) || String(notes.backfill || '') === 'true')) continue;
+    // Only a COMPLETED visit holds the plan's one stamp. A stamped visit
+    // that was reopened (confirmed / en route / cancelled ...) is no longer
+    // the installation: it must not block the real one, and the charge guard
+    // refuses it anyway (GitHub Codex #5816 r4). The closeout marks a visit
+    // completed before it asks, so two visits closing at once are both
+    // 'completed' here and the term lock picks one.
     const other = await conn('scheduled_services')
-      .where({ paf_held_term_id: term.id })
+      .where({ paf_held_term_id: term.id, status: 'completed' })
       .whereNot({ id: visit.id })
-      .whereNotIn('status', DEAD_VISIT_STATUSES)
       .first('id');
     if (other) continue;
     // Same resolver, same strictness, as the prepay hold: a payer-billed

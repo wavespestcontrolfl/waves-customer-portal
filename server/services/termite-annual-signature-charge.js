@@ -407,6 +407,9 @@ async function runClaimedCharge({ conn, ctx, trigger, installation = null }) {
       // Serialize against an Auto Pay pause/opt-out committing mid-charge.
       requireAutopayForCustomerId: invoice.customer_id,
       requireSelfPayCustomerId: invoice.customer_id,
+      // The agreement read above is re-checked, locked, inside the charge
+      // transaction: a contract cancelled in between authorizes nothing.
+      requireSignedContractId: contract.id,
       // After installation: the eligibility read under our claim is bound
       // again INSIDE the charge transaction, under the visit's lock — still
       // self-pay, still completed, its current closeout still performed, and
@@ -438,6 +441,11 @@ async function runClaimedCharge({ conn, ctx, trigger, installation = null }) {
     // link beside a visit that is no longer this plan's installation.
     if (installation && err?.code === 'VISIT_NOT_COMPLETED') {
       return { release: true, reason: 'installation_no_longer_eligible' };
+    }
+    // The agreement stopped being signed before money moved (pre-Stripe):
+    // nothing authorizes a charge or a pay link. Staff own it.
+    if (err?.code === 'CONTRACT_NOT_SIGNED') {
+      return { status: 'deferred', reason: 'agreement_no_longer_signed', detail: 'the signed agreement was cancelled before the charge; nothing was charged' };
     }
     if (isCollectionHoldRefusal(err)) {
       await ringBell('charge_deferred', { ...ctx, reason: 'the customer has an active collections billing hold (or it could not be checked); the daily sweep will retry once the office releases it' });
@@ -663,8 +671,13 @@ async function installationStillAwaitsCharge(term, conn = db) {
 // plan unstamped, so the next sweep rings again. Two sweeps racing both
 // reach the bell, and its dedupeKey keeps that to one alert.
 async function alertNeverInstalled({ estimateId, invoiceId, conn = db }) {
+  // Revalidated HERE, at the alert boundary: the sweep's scan can be
+  // outrun by the installation's closeout (then a stamped, performed
+  // installation exists and the charge is on its way) or by another sweep's
+  // claim. Either way the alert would be false (GitHub Codex #5816 r4).
   const state = await readChargeState(conn, estimateId);
   if (state?.status !== AWAITING_INSTALLATION || state.never_installed_alerted_at) return false;
+  if (await installedAndOwed({ conn, estimateId, invoiceId })) return false;
   if (!(await ringBell('never_installed', { estimateId, invoiceId, afterInstall: true }))) return false;
   await conn('estimates')
     .where({ id: estimateId })

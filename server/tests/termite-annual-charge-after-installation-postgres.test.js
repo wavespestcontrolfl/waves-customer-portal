@@ -409,6 +409,7 @@ describeOrSkip('termite annual charge after installation — real Postgres', () 
       requireCompletedVisit: true,
       requirePerformedVisit: true,
       requireHeldTermId: ids.termId,
+      requireSignedContractId: ids.contractId,
     }));
     expect(await chargeState(db)).toMatchObject({ status: 'paid', trigger: 'installation_complete', contract_id: ids.contractId });
     const consents = await db('payment_method_consents');
@@ -491,6 +492,48 @@ describeOrSkip('termite annual charge after installation — real Postgres', () 
       expect(await sweep()).toMatchObject({ installChargeScanned: 1, installCharged: 0, installPayLinked: 0, installChargeHeld: 1 });
       expect(sendViaSMSAndEmail).not.toHaveBeenCalled();
       expect(await chargeState(db)).toEqual(waiting);
+    });
+
+    test('the agreement was cancelled before money moved: nothing charged, no pay link, the office owns it', async () => {
+      const { atSigning, sweep, sendViaSMSAndEmail, notifyAdmin, db } = load({
+        chargeImpl: async () => { throw Object.assign(new Error('The signed agreement that authorizes this charge is no longer signed.'), { code: 'CONTRACT_NOT_SIGNED' }); },
+      });
+      await atSigning();
+      await addInstall(db);
+
+      expect(await sweep()).toMatchObject({ installChargeScanned: 1, installCharged: 0, installPayLinked: 0, installChargeHeld: 1 });
+      expect(sendViaSMSAndEmail).not.toHaveBeenCalled();
+      expect(await chargeState(db)).toMatchObject({ status: 'deferred', reason: 'agreement_no_longer_signed' });
+      expect(bellTitles(notifyAdmin)).toContain('Termite annual plan — after-installation charge not attempted');
+    });
+
+    test('a stamped installation reopened before the charge does not block the real one: the replacement takes the stamp and releases the charge', async () => {
+      const { atSigning, sweep, chargeInvoiceWithSavedCard, db } = load();
+      await atSigning();
+      const first = await addInstall(db);
+      expect(await stampOf(db, first)).toBe(ids.termId);
+      await db('scheduled_services').where({ id: first.id }).update({ status: 'confirmed' }); // reopened
+
+      expect((await sweep()).installChargeScanned).toBe(0);
+
+      const replacement = await addInstall(db, { scheduled_date: dayOffset(1) });
+      expect(await stampOf(db, replacement)).toBe(ids.termId);
+      expect(await stampOf(db, first)).toBeNull();
+      expect(await sweep()).toMatchObject({ installChargeScanned: 1, installCharged: 1 });
+      expect(chargeInvoiceWithSavedCard).toHaveBeenCalledTimes(1);
+      expect(chargeInvoiceWithSavedCard.mock.calls[0][2]).toMatchObject({ requireSelfPayScheduledServiceId: replacement.id });
+    });
+
+    test('the never-released alert is re-checked at the alert itself: an installation that closed out after the scan rings nothing', async () => {
+      const { atSigning, notifyAdmin, db } = load();
+      const SignatureCharge = require('../services/termite-annual-signature-charge');
+      await atSigning();
+      await signedDaysAgo(db, 15);
+      await addInstall(db); // closed out after the sweep's stale scan picked the plan
+
+      expect(await SignatureCharge.alertNeverInstalled({ estimateId: ids.estimateId, invoiceId: ids.invoiceId, conn: db })).toBe(false);
+      expect(notifyAdmin).not.toHaveBeenCalled();
+      expect((await chargeState(db)).never_installed_alerted_at).toBeUndefined();
     });
 
     test('two installation visits of one plan closing at the same moment: exactly one is stamped', async () => {
