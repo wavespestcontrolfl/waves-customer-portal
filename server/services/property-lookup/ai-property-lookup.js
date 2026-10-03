@@ -3043,7 +3043,23 @@ function escapeAuditRegex(value) {
 // removeStreetSuffix; designators are the USPS secondary-unit set we see in
 // typed/spoken addresses.
 const AUDIT_UNIT_DESIGNATOR_RE = /\s+(?:APT|APARTMENT|UNIT|STE|SUITE|BLDG|BUILDING|LOT|TRLR|RM|FL|#)\s*#?\s*[A-Z0-9-]+\s*$/i;
-function stripUnitDesignators(street) {
+// A bare unit token with NO designator word: the Sarasota roll writes condo
+// units as "<number> <STREET> DR 10A" and a Manatee row can end "CT E 2".
+// Only a digit-led token that FOLLOWS a street suffix (optionally one
+// post-direction) is a unit — "5TH ST" has its number BEFORE the suffix, and
+// a numbered route ("US 41", "SR 70 E") has no suffix in front of its number.
+// Suffixes that routinely precede a ROUTE number ("OLD TAMPA HWY 41",
+// "SOMETHING RD 70") are left out so the route number is never peeled.
+const BARE_UNIT_SUFFIXES = COUNTY_STREET_SUFFIXES.split('|')
+  .filter((suffix) => !['HWY', 'RD', 'TRL', 'PKWY'].includes(suffix))
+  .join('|');
+const AUDIT_BARE_UNIT_RE = new RegExp(
+  `(\\b(?:${BARE_UNIT_SUFFIXES})(?:\\s+(?:[NS][EW]|[NSEW]))?)\\s+\\d[A-Z0-9-]*$`,
+);
+// `bareUnit` is opt-in: the condo-unit folio matchers (typedDwellingUnit,
+// aggregateUnitDesignatorMatch) read a bare trailing number off the line
+// stripUnitDesignators returns, so their default must keep it.
+function stripUnitDesignators(street, { bareUnit = false } = {}) {
   let s = String(street || '').trim();
   // Peel repeatedly — "STE 200 BLDG C" carries two designators.
   for (let i = 0; i < 3; i += 1) {
@@ -3055,6 +3071,7 @@ function stripUnitDesignators(street) {
   // bare-# pre-strip ate the value out of "Apt #4") is not a street token
   // either.
   s = s.replace(/\s+(?:APT|APARTMENT|UNIT|STE|SUITE|BLDG|BUILDING|LOT|TRLR|RM)$/i, '').trim();
+  if (bareUnit) s = s.replace(AUDIT_BARE_UNIT_RE, '$1').trim();
   return s;
 }
 
@@ -3149,7 +3166,7 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
       if (typedM) houseNumber = parseInt(typedM[1], 10);
     }
     // "123 MAIN ST APT 4" must audit MAIN ST, not a street named MAIN ST APT 4.
-    const streetLabel = stripUnitDesignators(m[2].trim());
+    const streetLabel = stripUnitDesignators(m[2].trim(), { bareUnit: true });
     if (streetLabel.length < 3) return null;
     // Query WITHOUT the suffix for recall (counties abbreviate differently),
     // then extract numbers with the full street tokens for precision.
@@ -3222,7 +3239,7 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
           // Roll rows can carry their own secondary designator ('123 MAIN ST
           // APT 4') — strip it like the typed side, or the end-pinned
           // patterns reject a street that IS on the roll.
-          const norm = stripUnitDesignators(normalizeCountyStreetLine(piece));
+          const norm = stripUnitDesignators(normalizeCountyStreetLine(piece), { bareUnit: true });
           if (!norm) continue;
           for (const hit of norm.matchAll(pattern)) {
             const n = parseInt(hit[1], 10);
@@ -5634,6 +5651,7 @@ module.exports = {
     addressHasSubpremise,
     FL_FLOOR_RE,
     normalizeCountyStreetLine,
+    stripUnitDesignators,
     resolveAggregateUnitParcel,
     aggregateUnitDesignatorMatch,
     typedDwellingUnit,
