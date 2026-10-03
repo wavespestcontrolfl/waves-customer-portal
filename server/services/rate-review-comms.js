@@ -327,12 +327,17 @@ async function linesGoneFor(dbh, notices, { snapshots, today }) {
   const gone = new Map();
   // An active plan hold that still covers the start day: the apply answers
   // plan_on_hold (every lane), so no start date is announced until it clears.
-  const { planHoldCovers } = require('./rate-review-apply')._private;
+  const { planHoldCovers, addDaysYmd } = require('./rate-review-apply')._private;
   const customerIds = [...new Set(notices.map((n) => n.customer_id))];
   try {
     const holds = customerIds.length ? await dbh('plan_holds').whereIn('customer_id', customerIds).where({ status: 'active' }).select('customer_id', 'resume_on') : [];
     for (const n of notices) {
-      if (holds.some((h) => String(h.customer_id) === String(n.customer_id) && planHoldCovers(h, ymd(n.effective_date)))) gone.set(String(n.id), 'plan_on_hold');
+      // A prepaid amount is recorded the night after delivery and must be on the
+      // term before the 30-day renewal reminder goes out (after that the apply
+      // refuses with renewal_notice_already_sent), so a hold blocks it if it
+      // lasts to that reminder day; every other lane starts on its effective date.
+      const coverDay = n.billing_lane === 'annual_prepay' ? addDaysYmd(ymd(n.effective_date), -(MIN_NOTICE_DAYS + 1)) : ymd(n.effective_date);
+      if (holds.some((h) => String(h.customer_id) === String(n.customer_id) && planHoldCovers(h, coverDay))) gone.set(String(n.id), 'plan_on_hold');
     }
   } catch (err) {
     logger.warn(`[rate-review-comms] plan holds unreadable: ${err.message}`);

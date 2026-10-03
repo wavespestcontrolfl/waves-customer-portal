@@ -822,6 +822,23 @@ describe('customer surfaces', () => {
     expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toEqual([]);
   });
 
+  test('plan hold + prepaid: a hold that lasts to the 30-day renewal reminder blocks the letter (the amount could not be recorded in time); one that clears sooner does not', async () => {
+    const prepay = draft(1, {
+      billing_lane: 'annual_prepay', cadence_label: 'year', effective_date: '2027-05-15',
+      current_amount_cents: 46800, new_amount_cents: 48400, noticed_current_cents: 46800, noticed_new_cents: 48400,
+      metadata: { source: 'rate_review', batch_key: BATCH_KEY, term_id: 'term-1', coverage_visits: 4, per_application_current_cents: 11700, term_end: '2027-05-14' },
+    });
+    const b = book({ customers: [customer(1, { billing_mode: 'annual_prepay' })], notices: [prepay] });
+    b.annual_prepay_terms = [{ id: 'term-1', customer_id: CUSTOMER(1), status: 'active', prepay_amount: '468.00', coverage_visit_count: 4, term_start: '2026-05-15', term_end: '2027-05-14', renewal_decision: null }];
+    b.plan_holds = [{ id: 'h1', customer_id: CUSTOMER(1), status: 'active', family_key: 'pest_control', resume_on: '2027-04-20' }]; // reminder day is 2027-04-15
+    mockDb.reset(b);
+    const out = await comms.sendPreview(BATCH_KEY, { now: NOW });
+    expect(out.counts.letters).toBe(0);
+    expect(out.customers[0].suppressedLines[0]).toMatchObject({ reason: 'apply_hold', applyReason: 'plan_on_hold' });
+    mockDb.store.plan_holds[0].resume_on = '2027-04-14'; // back before the reminder: recorded in time
+    expect((await comms.sendPreview(BATCH_KEY, { now: NOW })).counts.letters).toBe(1);
+  });
+
   test('greeting: a distinct billing contact name is the one in the preview, the frozen letter and the email', async () => {
     const b = book();
     b.notification_prefs = [{ customer_id: CUSTOMER(1), billing_email: 'billing1@example.com', billing_contact_name: 'Billy Contact' }];
