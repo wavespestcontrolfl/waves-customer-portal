@@ -212,6 +212,25 @@ describe('server-side evidence rules (shot-list captures only)', () => {
     });
   });
 
+  describe('the cap applies only when the name ASSERTS a cause (existing negation-aware clauses)', () => {
+    const zones = ['front', 'close_up', 'close_up'];
+    test.each([
+      ['Thinning turf; no chinch bugs observed', 'moderate', false],
+      ['Possible chinch bug damage', 'high', true],
+      ['Chinch bugs ruled out, drought stress', 'moderate', true], // drought is a governed cause in the same parser
+      ['Chinch bugs ruled out, thinning turf', 'moderate', false],
+      ['Large patch', 'high', true],
+      ['Chinch bugs ruled out; large patch present', 'high', true], // two causes, one negated: the asserted one caps
+      ['No evidence of chinch bugs or large patch', 'high', false],
+      ['Weed pressure; no nutsedge', 'moderate', false],
+      ['Nutsedge pressure', 'moderate', true],
+    ])('%s (%s) capped=%s', (name, confidence, capped) => {
+      const f = run(zones, { name, confidence, photo_refs: [1] }, ON);
+      expect(f.confidence).toBe(capped ? 'low' : confidence);
+      expect(f.confidence_cap).toBe(capped ? 'named_cause_without_close_up' : undefined);
+    });
+  });
+
   test('without the shot-list option the same answer is untouched: no cap, no marker', () => {
     const f = run(['front', 'close_up', 'blade_crown'], { name: 'Chinch bug damage', confidence: 'high', photo_refs: [2] });
     expect(f.confidence).toBe('high');
@@ -246,5 +265,63 @@ describe('eval replay picks the prompt variant from the stored capture mode', ()
     expect(payload).toMatchObject({ system: input.SYSTEM_PROMPT, promptVersion: 'lawn-visit-v1' });
     expect(out.results[0].promptVersion).toBe('lawn-visit-v1');
     expect(out.results[0].inputHash).toBe(out.results[0].contextHash);
+  });
+});
+
+describe('eval report provenance follows the prompt variants actually run', () => {
+  const evalLib = require('../services/eval/lawn-visit-assessment-eval');
+  const rows = (zones) => zones.map((zone, i) => ({ id: `p${i}`, s3_key: `k${i}`, photo_order: i, zone }));
+  const marked = (id) => evalLib.fixtureCase({ id, customer_id: 'c', scheduled_date: '2026-10-01', composite_scores: {}, photos: [{ photoVocabulary: 'shot_list_v1' }, { photoVocabulary: 'shot_list_v1' }] }, rows(['front', 'close_up']), {});
+  const legacy = (id) => evalLib.fixtureCase({ id, customer_id: 'c', scheduled_date: '2026-10-01', composite_scores: {}, photos: [{}, {}] }, rows(['front', 'close_up']), {});
+  const run = async (cases) => {
+    dispatchWithFallback.mockReset();
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: answer(), provider: 'gemini', model: MODELS.GEMINI_VISION_BEST, fallbackUsed: false, usage: null, failures: [] });
+    const out = await evalLib.runEval(cases, { analyzeVisit, loadPhoto: async () => ({ data: 'YQ==', mimeType: 'image/jpeg' }) });
+    return out.results;
+  };
+  const legacyDigest = input.PROMPT_DIGEST;
+  const shotDigest = input.SHOT_LIST_PROMPT_DIGEST;
+
+  test('legacy only: the report is exactly what renderMarkdown always printed, with the legacy version and digest', async () => {
+    const results = await run([legacy('l1'), legacy('l2')]);
+    const report = evalLib.renderReport(results, { titleSuffix: ' · thinking LOW', propertyHistory: true });
+    expect(report).toBe(evalLib.renderMarkdown(evalLib.summarize(results), results, {
+      title: 'Lawn visit assessment eval — lawn-visit-v1 · thinking LOW', promptVersion: 'lawn-visit-v1', promptDigest: legacyDigest, propertyHistory: true,
+    }));
+    expect(report).toContain(`prompt lawn-visit-v1 · digest ${legacyDigest} · fixture property history on`);
+    expect(report).not.toMatch(/\| prompt \|/);
+    // A result with no recorded version (an older run) is a legacy result.
+    const bare = results.map(({ promptVersion, ...rest }) => rest);
+    expect(evalLib.renderReport(bare, { titleSuffix: ' · thinking LOW', propertyHistory: true })).toBe(report);
+  });
+
+  test('shot-list only: the shot-list version and digest, and the variant on every row', async () => {
+    const results = await run([marked('s1'), marked('s2')]);
+    const report = evalLib.renderReport(results, { propertyHistory: false });
+    expect(report).toContain('## Lawn visit assessment eval — lawn-visit-v1-shot-list');
+    expect(report).toContain(`prompt lawn-visit-v1-shot-list · digest ${shotDigest} · fixture property history off`);
+    expect(report).not.toContain(legacyDigest);
+    expect(report).not.toMatch(/MIXED/);
+    expect(report.match(/\| lawn-visit-v1-shot-list \|$/gm)).toHaveLength(4); // two result rows + two hash rows
+    expect(report).toMatch(/\| prompt \|\n/);
+  });
+
+  test('mixed: one section per prompt version with its own digest and counts, nothing pooled, variant on each row', async () => {
+    const results = await run([legacy('l1'), marked('s1'), marked('s2')]);
+    const report = evalLib.renderReport(results, { propertyHistory: true });
+    expect(report).toContain('MIXED prompt variants');
+    expect(report).toContain('lawn-visit-v1 (1 run), lawn-visit-v1-shot-list (2 runs)');
+    const sections = report.split(/\n(?=## Lawn visit assessment eval — lawn-visit-v1)/);
+    expect(sections).toHaveLength(3); // intro + two sections
+    const [, legacySection, shotSection] = sections;
+    expect(legacySection).toContain(`prompt lawn-visit-v1 · digest ${legacyDigest}`);
+    expect(legacySection).toContain('runs 1 ·');
+    expect(legacySection).not.toContain('shot-list');
+    expect(shotSection).toContain(`prompt lawn-visit-v1-shot-list · digest ${shotDigest}`);
+    expect(shotSection).toContain('runs 2 ·');
+    expect(shotSection).not.toContain(legacyDigest);
+    expect(report.match(/\| lawn-visit-v1 \|$/gm)).toHaveLength(2);
+    expect(report.match(/\| lawn-visit-v1-shot-list \|$/gm)).toHaveLength(4);
+    expect(evalLib.promptVariants(results).map((v) => [v.promptVersion, v.results.length, v.summary.runs])).toEqual([['lawn-visit-v1', 1, 1], ['lawn-visit-v1-shot-list', 2, 2]]);
   });
 });

@@ -1,7 +1,7 @@
 /** Normalize lawn visit evidence and keep unrated photos out of customer delivery. */
 const Ajv = require('ajv');
 const { RESPONSE_SCHEMA, PHOTO_QUALITY, CONFIDENCE, SEVERITY_LEVELS, THATCH_LEVELS, SIGNAL_LEVELS } = require('./lawn-visit-input');
-const { normalizeFindings, safeConditionLabel, SUMMARY_CAUSE_RE } = require('./lawn-diagnostic-report');
+const { normalizeFindings, safeConditionLabel, namesAssertedCause } = require('./lawn-diagnostic-report');
 const { normalizeGrassType } = require('./lawn-grass-context');
 const shotList = require('./lawn-photo-shots');
 
@@ -68,8 +68,9 @@ function zoneFromRefs(photoRefs, photoZones = []) {
 //   - localized: it rests on photos and every one is a detail shot (close_up,
 //     blade_crown, trouble), so it speaks for one spot, never the whole lawn.
 //   - named-cause cap: a finding naming a specific disease, insect or weed
-//     (the report lane's governed-cause lexicon) with no blade_crown or trouble
-//     photo among its evidence stays at low confidence at most; its customer
+//     (the report lane's governed-cause lexicon, read through the naming gate's
+//     negation-aware clauses, so a ruled-out cause is not asserted) with no
+//     blade_crown or trouble photo among its evidence stays at low confidence at most; its customer
 //     label follows through the naming gate.
 // A photo counts as evidence for either rule only when the same answer rated it
 // usable (adequate or limited, the standard the per-finding poor-photo gate and
@@ -85,8 +86,7 @@ function withShotEvidence(findings, photoZones, usable) {
   return findings.map((finding) => {
     const zones = evidenceZones(finding.photo_refs, photoZones, usable);
     const localized = zones.length > 0 && zones.every(shotList.isDetailShot);
-    const namesCause = safeConditionLabel(finding.name) !== NO_STRESS_LABEL && SUMMARY_CAUSE_RE.test(String(finding.name || ''));
-    const capped = namesCause && !zones.some(shotList.supportsNamedCause) && CONFIDENCE_RANK[finding.confidence] > CONFIDENCE_RANK.low;
+    const capped = namesAssertedCause(finding.name) && !zones.some(shotList.supportsNamedCause) && CONFIDENCE_RANK[finding.confidence] > CONFIDENCE_RANK.low;
     if (!capped) return { ...finding, localized };
     return { ...finding, localized, confidence: 'low', confidence_cap: 'named_cause_without_close_up', label: safeConditionLabel(finding.name, 'low') };
   });
