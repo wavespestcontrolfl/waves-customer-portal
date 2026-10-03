@@ -58,4 +58,18 @@ describe('RateReviewSendPanel', () => {
     const { container } = render(<RateReviewSendPanel batchKey="2026-12" />);
     await waitFor(() => expect(container).toBeEmptyDOMElement());
   });
+
+  it('page busy disables Send; its own send reports busy, then tells the page the batch changed', async () => {
+    mockAdminFetch.mockImplementation(async (path, opts) => (opts?.method === 'POST' ? { ok: true, sent: 1, emailed: 1, texted: 1, failed: 0 } : preview()));
+    const { rerender } = render(<RateReviewSendPanel batchKey="2026-12" disabled />);
+    expect(await screen.findByRole('button', { name: 'Send 1 letter' })).toBeDisabled();
+    const onBusyChange = vi.fn();
+    const onChanged = vi.fn();
+    rerender(<RateReviewSendPanel batchKey="2026-12" onBusyChange={onBusyChange} onChanged={onChanged} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Send 1 letter' }));
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Send 1 letter' })).at(-1));
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
+    expect(onBusyChange).toHaveBeenCalledWith(true);
+    expect(onBusyChange).toHaveBeenLastCalledWith(false);
+  });
 });

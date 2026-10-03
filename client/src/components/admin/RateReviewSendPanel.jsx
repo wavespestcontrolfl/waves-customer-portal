@@ -91,7 +91,11 @@ function PanelBody({ state, error, view, onRetry }) {
   );
 }
 
-export default function RateReviewSendPanel({ batchKey }) {
+// disabled: the page has another write in flight (one save at a time).
+// onBusyChange(true|false): this panel's own request is in flight, so the page
+// disables its row controls. onChanged(): a prepare or send finished, so the
+// page re-reads the batch (rows move approved → sent).
+export default function RateReviewSendPanel({ batchKey, disabled = false, onBusyChange, onChanged }) {
   const [preview, setPreview] = useState(null);
   const [state, setState] = useState("loading"); // loading | ready | off | error
   const [error, setError] = useState("");
@@ -113,6 +117,10 @@ export default function RateReviewSendPanel({ batchKey }) {
   }, [batchKey]);
 
   useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    if (onBusyChange) onBusyChange(busy);
+    return () => { if (onBusyChange && busy) onBusyChange(false); };
+  }, [busy, onBusyChange]);
 
   const scheduleDrafts = async () => {
     setBusy(true);
@@ -125,6 +133,7 @@ export default function RateReviewSendPanel({ batchKey }) {
     } finally {
       setBusy(false);
       load();
+      if (onChanged) onChanged();
     }
   };
 
@@ -141,6 +150,7 @@ export default function RateReviewSendPanel({ batchKey }) {
       setBusy(false);
       setConfirming(false);
       load();
+      if (onChanged) onChanged();
     }
   };
 
@@ -162,9 +172,9 @@ export default function RateReviewSendPanel({ batchKey }) {
           </div>
           <div className="flex gap-2">
             {view.unscheduled > 0 && (
-              <Button variant="secondary" onClick={scheduleDrafts} disabled={busy}>Prepare {plural(view.unscheduled, "notice")}</Button>
+              <Button variant="secondary" onClick={scheduleDrafts} disabled={busy || disabled}>Prepare {plural(view.unscheduled, "notice")}</Button>
             )}
-            <Button onClick={() => setConfirming(true)} disabled={!canSend || busy}>Send {lettersLabel}</Button>
+            <Button onClick={() => setConfirming(true)} disabled={!canSend || busy || disabled}>Send {lettersLabel}</Button>
           </div>
         </div>
         {feedback && <ActionFeedback error={!feedback.ok}>{feedback.text}</ActionFeedback>}
@@ -185,7 +195,7 @@ export default function RateReviewSendPanel({ batchKey }) {
         </DialogBody>
         <DialogFooter>
           <Button variant="ghost" onClick={() => setConfirming(false)} disabled={busy}>Cancel</Button>
-          <Button onClick={send} loading={busy}>Send {lettersLabel}</Button>
+          <Button onClick={send} loading={busy} disabled={disabled}>Send {lettersLabel}</Button>
         </DialogFooter>
       </Dialog>
     </Card>

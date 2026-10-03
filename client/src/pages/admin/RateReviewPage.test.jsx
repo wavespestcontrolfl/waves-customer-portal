@@ -1,10 +1,20 @@
 // @vitest-environment jsdom
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import RateReviewPage, { useRateReviewAvailable } from "./RateReviewPage";
+
+// The send panel has its own tests (RateReviewSendPanel.test.jsx); here it is a
+// stub that shows what the page hands it.
+const panelProps = vi.hoisted(() => ({ current: null }));
+vi.mock("../../components/admin/RateReviewSendPanel", () => ({
+  default: (props) => {
+    panelProps.current = props;
+    return <div data-testid="send-panel" data-batch-key={props.batchKey} data-disabled={String(!!props.disabled)} />;
+  },
+}));
 
 // Every id, name and number here is invented.
 const ROW_A = "a1a1a1a1-1111-4111-8111-111111111111";
@@ -264,7 +274,7 @@ describe("RateReviewPage", () => {
     expect(within(dialog).getByText(/earliest Jan 6, 2027/)).toBeInTheDocument();
 
     fireEvent.click(within(dialog).getByRole("button", { name: "Approve 3 notices" }));
-    await screen.findByText("Batch approved: 2 notices marked approved (+$111 per year). Nothing has been sent — the comms lane sends approved rows.");
+    await screen.findByText("Batch approved: 2 notices marked approved (+$111 per year). Nothing has been sent yet — use Send letters below the table.");
     const post = calls.find((c) => c.method === "POST");
     expect(post.path).toMatch(/\/admin\/rate-review\/batches\/2027-01\/approve$/);
     expect(post.body).toEqual({ expectedDigest: DIGEST });
@@ -369,7 +379,7 @@ describe("RateReviewPage", () => {
     batchGetStatusAfterFirst = 500;
     fireEvent.click(screen.getByRole("button", { name: "Approve batch · send 3 notices" }));
     fireEvent.click(await screen.findByRole("button", { name: "Approve 3 notices" }));
-    await screen.findByText("Batch approved: 2 notices marked approved (+$111 per year). Nothing has been sent — the comms lane sends approved rows. The batch could not be reloaded — use Try again.");
+    await screen.findByText("Batch approved: 2 notices marked approved (+$111 per year). Nothing has been sent yet — use Send letters below the table. The batch could not be reloaded — use Try again.");
     expect(screen.getByText("Could not read the rate review batch")).toBeInTheDocument();
     expect(screen.queryByText("Fixture Whitfield")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^Approve batch/ })).toBeDisabled();
@@ -472,13 +482,35 @@ describe("RateReviewPage", () => {
     expect(calls.find((c) => c.method === "PUT").body).toEqual({ status: "skipped", includeException: true });
   });
 
-  it("the letter preview says the comms PR brings it while the route 404s", async () => {
+  it("the letter preview says the row has no letter yet while the route 404s", async () => {
     await renderLoaded();
     fireEvent.click(screen.getByRole("button", { name: "Letter for Fixture Whitfield" }));
     const sheet = await screen.findByRole("dialog", { name: "Letter preview" });
-    await within(sheet).findByText("Letter preview arrives with the comms PR.");
+    await within(sheet).findByText("No letter for this row yet. Approve the batch, then use Prepare notices in the Send letters panel below the table.");
     expect(within(sheet).getByText("Letter · Fixture Whitfield")).toBeInTheDocument();
     expect(calls.find((c) => /letter-preview$/.test(c.path)).path).toMatch(new RegExp(`/batches/2027-01/rows/${ROW_A}/letter-preview$`));
+  });
+
+  it("mounts the Send letters panel under the table for the loaded batch only", async () => {
+    panelProps.current = null;
+    renderPage();
+    expect(screen.queryByTestId("send-panel")).not.toBeInTheDocument();
+    const panel = await screen.findByTestId("send-panel");
+    expect(panel).toHaveAttribute("data-batch-key", "2027-01");
+    expect(panel).toHaveAttribute("data-disabled", "false");
+    const table = screen.getByRole("table", { name: "Rate review rows" });
+    expect(table.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("the panel's request blocks the page's writes and its changes re-read the batch", async () => {
+    await renderLoaded();
+    const before = batchGets;
+    await act(async () => { panelProps.current.onBusyChange(true); });
+    expect(screen.getByLabelText("Include Fixture Whitfield")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Approve batch · send 3 notices" })).toBeDisabled();
+    await act(async () => { panelProps.current.onBusyChange(false); panelProps.current.onChanged(); });
+    await waitFor(() => expect(batchGets).toBe(before + 1));
+    expect(screen.getByLabelText("Include Fixture Whitfield")).toBeEnabled();
   });
 
   it("Preview letters opens the first letter in the table", async () => {

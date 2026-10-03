@@ -5,14 +5,15 @@
 //
 // Dark behind GATE_RATE_REVIEW: every /api/admin/rate-review route answers
 // 404 while the gate is off, the hub probes once (useRateReviewAvailable)
-// and never shows the area. Nothing here sends a customer anything: Approve
-// marks green rows 'approved' against a digest of the batch; the notices
-// themselves (and the letter preview) arrive with the comms lane. "Email me
-// this batch" is the owner digest (the ranking's POST …/digest), never a
-// customer send.
+// and never shows the area. Approve only records the decision: it marks green
+// rows 'approved' against a digest of the batch. Customers are written to
+// from the Send letters panel under the table (RateReviewSendPanel: prepare
+// notices, review who gets what, confirm, send). "Email me this batch" is the
+// owner digest (the ranking's POST …/digest), never a customer send.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { adminFetch } from "../../utils/admin-fetch";
+import RateReviewSendPanel from "../../components/admin/RateReviewSendPanel";
 import {
   ActionFeedback, Badge, Button, Card, CardBody, Checkbox, Dialog, DialogBody, DialogFooter, DialogHeader, DialogTitle,
   Field, Input, Select, Sheet, SheetBody, SheetHeader, Table, TBody, TD, TH, THead, TR, Textarea, UiSurface,
@@ -588,7 +589,7 @@ function ApproveDialog({ open, onClose, batchKey, totals, earliest, approvalDige
           that account holds and shows up here. Exceptions stay untouched.
         </p>
         <p className="text-ink-secondary m-0">
-          In this build, approving records your decision on the green rows; the letters go out once the comms lane ships.
+          Approving only records your decision on the green rows. Nothing goes to a customer until you press Send in the Send letters panel below the table.
         </p>
       </DialogBody>
       <DialogFooter>
@@ -612,7 +613,7 @@ function LetterSheet({ letter, onClose, onRetry }) {
       </SheetHeader>
       <SheetBody className="flex flex-col min-h-0">
         {letter?.state === "loading" && <Loading>Loading letter…</Loading>}
-        {letter?.state === "pending" && <div className="text-ui-body text-ink-secondary py-10 text-center">Letter preview arrives with the comms PR.</div>}
+        {letter?.state === "pending" && <div className="text-ui-body text-ink-secondary py-10 text-center">No letter for this row yet. Approve the batch, then use Prepare notices in the Send letters panel below the table.</div>}
         {letter?.state === "error" && <ActionFeedback error onRetry={onRetry}>{letter.error}</ActionFeedback>}
         {letter?.state === "ready" && (
           <iframe title={`Letter preview for ${name}`} sandbox="" srcDoc={letter.html} className="w-full flex-1 min-h-[70vh] border-hairline border-zinc-200 rounded-sm bg-white" />
@@ -639,13 +640,15 @@ function BatchStage({ loadError, batches, onRetry }) {
 
 // The selected batch: its load error, its loading state, or the stat cards,
 // the table and the exceptions.
-function BatchBody({ batch, batchError, loadingBatch, onRetry, totals, tableRows, visibleRows, exceptionRows, unpricedCount, liveConfig, rowProps, exceptionProps }) {
+function BatchBody({ batch, batchError, loadingBatch, onRetry, totals, tableRows, visibleRows, exceptionRows, unpricedCount, liveConfig, rowProps, exceptionProps, sendProps }) {
   if (batchError) return <ActionFeedback error onRetry={onRetry}>{batchError}</ActionFeedback>;
   if (!batch) return loadingBatch ? <Loading>Loading batch…</Loading> : null;
   return (
     <>
       <StatCards totals={totals} />
       <BatchTable batch={batch} totals={totals} tableRows={tableRows} visibleRows={visibleRows} unpricedCount={unpricedCount} liveConfig={liveConfig} rowProps={rowProps} />
+      {/* Keyed by batch: switching batches remounts the panel so a preview never outlives its batch. */}
+      <RateReviewSendPanel key={batch.batchKey} batchKey={batch.batchKey} {...sendProps} />
       <ExceptionsCard rows={exceptionRows} {...exceptionProps} />
     </>
   );
@@ -682,6 +685,7 @@ export default function RateReviewPage({ embedded = false } = {}) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsDraft, setSettingsDraft] = useState(settingsDraftFrom(null));
   const [savingSettings, setSavingSettings] = useState(false);
+  const [sending, setSending] = useState(false); // the send panel has a request in flight
   const [settingsFeedback, setSettingsFeedback] = useState(null);
   const costBlockRef = useRef(null);
   const batchSeq = useRef(0);
@@ -767,7 +771,7 @@ export default function RateReviewPage({ embedded = false } = {}) {
   );
   const batchLocked = totals.sent > 0;
   const earliestAnniversary = useMemo(() => rows.filter(hasLetter).map(reviewDate).filter(Boolean).sort()[0] || null, [rows]);
-  const saving = busyRow != null;
+  const saving = busyRow != null || sending;
   const ready = !!batch && !loadingBatch;
   const primary = approveAction(totals, { ready, saving, batchLocked });
 
@@ -865,7 +869,7 @@ export default function RateReviewPage({ embedded = false } = {}) {
     setApproveOpen(false);
     try {
       if (!stillSelected(key)) return;
-      const text = `Batch approved: ${noticeCount(data.approved)} marked approved (${signedDollars(data.annual_delta_cents)} per year). Nothing has been sent — the comms lane sends approved rows.`;
+      const text = `Batch approved: ${noticeCount(data.approved)} marked approved (${signedDollars(data.annual_delta_cents)} per year). Nothing has been sent yet — use Send letters below the table.`;
       const reloaded = await reloadAfterWrite(key);
       if (stillSelected(key)) setFeedback({ ok: true, text: reloaded ? text : `${text} ${RELOAD_FAILED}` });
     } finally {
@@ -960,6 +964,8 @@ export default function RateReviewPage({ embedded = false } = {}) {
     onLetter: openLetter,
   });
 
+  // The panel's prepare/send change row states (approved → sent): re-read the batch.
+  const reloadSelected = () => { if (selectedKeyRef.current) reloadAfterWrite(selectedKeyRef.current); };
   const closeApprove = () => { if (!approving) setApproveOpen(false); };
   const retryLetter = () => { if (letter) openLetter(letter.row); };
   const retryBatch = () => { if (selectedKey) loadBatch(selectedKey); };
@@ -1010,6 +1016,7 @@ export default function RateReviewPage({ embedded = false } = {}) {
         liveConfig={config}
         rowProps={rowProps}
         exceptionProps={{ disabled: batchLocked || saving, busyRow, onInclude: includeException, onSkip: skipException }}
+        sendProps={{ disabled: busyRow != null || approving || savingSettings, onBusyChange: setSending, onChanged: reloadSelected }}
       />
 
       {/* Settings stand on their own: the knobs and the cost block are set before the first batch exists. */}
