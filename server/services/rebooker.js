@@ -2092,6 +2092,8 @@ class SmartRebooker {
           service_type: service.service_type ?? null,
           service_id: service.service_id ?? null,
           property_id: service.property_id ?? null,
+          // the account the log row is filed under (a racing customer merge repoints it)
+          customer_id: service.customer_id ?? null,
         })
         // Ungrouped at the pre-read ⇒ must still be ungrouped at the write
         // (knex renders null as IS NULL); see membershipFenced above.

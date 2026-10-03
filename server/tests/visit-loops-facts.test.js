@@ -773,6 +773,24 @@ describe('missedVisit (logged customer no-shows)', () => {
     expect((await run([noshow({ original_window: '11:00:00-12:00:00', window_start: '11:00:00' })])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
   });
 
+  test('overnight windows stay hidden until they close; same-day replacements must start after the missed slot (Codex #5610 r11)', async () => {
+    // NOW 12:00 ET 10-01. A 23:00 start on 09-30 promised 23:00-01:00: closed by now -> listed
+    expect((await run([noshow({ original_date: '2026-09-30', ss_scheduled_date: '2026-09-30', original_window: '23:00:00-23:30:00', window_start: '23:00:00' })])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
+    // the same miss at 00:30 ET 10-01 is still inside its window -> hidden
+    const early = await loadVisitLoops({ customerId: 'c1', now: new Date('2026-10-01T04:30:00Z'), deriveWindow, conn: fakeConn({
+      reschedule_log: () => [noshow({ original_date: '2026-09-30', ss_scheduled_date: '2026-09-30', original_window: '23:00:00-23:30:00', window_start: '23:00:00' })],
+      services: () => CATALOG, scheduled_services: () => [],
+    }) });
+    expect(early.missedVisit).toBeNull();
+    // replacement on the missed day: before the slot or with no start does not count; after it does
+    const repl = (over) => ({ service_id: null, service_type: 'Pest Control', status: 'confirmed', track_state: null, source_action: null, customer_confirmed: null, parent_service_id: null, followup_source_service_id: null, scheduled_date: '2026-09-29', ...over });
+    const miss = noshow({ status: 'no_show' }); // missed 09:00 on 09-29
+    expect((await run([miss], [repl({ window_start: '08:00:00' })])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
+    expect((await run([miss], [repl({ window_start: null })])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
+    expect((await run([miss], [repl({ window_start: '13:00:00' })])).out.missedVisit).toBeNull();
+    expect((await run([miss], [repl({ scheduled_date: '2026-10-03', window_start: null })])).out.missedVisit).toBeNull();
+  });
+
   test('a page of followed-up misses never hides an older open one', async () => {
     const done = Array.from({ length: 10 }, (_, i) => noshow({ id: `rl-d${i}`, new_date: '2026-10-03' }));
     const { out } = await run([...done, noshow({ id: 'rl-old', original_date: '2026-09-25', ss_scheduled_date: '2026-09-25' })]);
