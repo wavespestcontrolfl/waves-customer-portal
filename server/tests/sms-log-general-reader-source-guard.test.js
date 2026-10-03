@@ -477,6 +477,11 @@ const ALLOWLIST = [
     reason: 'status filtered to a set that excludes \'sending\' — an unresolved reservation cannot match (once promoted to \'sent\' it is real delivery evidence by design, not a reservation).',
   },
   {
+    file: 'services/review-request.js',
+    snippet: 'const accepted = await db("sms_log")',
+    reason: 'the review page\'s batch form of the delivery-evidence lookup above (#5682): status filtered to sent / delivered, which excludes \'sending\' — an unresolved reservation cannot match.',
+  },
+  {
     file: 'services/sms-additional-properties.js',
     snippet: 'const message = await conn(\'sms_log\').where({ id: smsLogId }).first();',
     reason: 'single-row lookup by id — not a list read.',

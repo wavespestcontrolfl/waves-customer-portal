@@ -27,6 +27,8 @@ const {
 const { etCalendarDayOf } = require('../utils/datetime-et');
 const PhotoService = require('./photos');
 const { normalizeTreeShrubPhotoSlot } = require('../config/tree-shrub-photo-slots');
+const { watchListForMonth } = require('../config/tree-shrub-watch-list');
+const { tsWatchListLive, visitWatchMonth } = require('./tree-shrub-watch-items');
 
 const ROTATION_WINDOW_DAYS = 60;
 // Palm spacing = the shared three-calendar-month rule (owner program, #5089).
@@ -420,7 +422,16 @@ async function buildTreeShrubFastContext(serviceId, knex = db) {
     lastVisitPhotos: await loadLastVisitPhotos(history, knex, serviceId),
     warnings,
     ...(warningsUnavailable && { warningsUnavailable: true }),
+    // GATE_TS_WATCH_LIST: this visit's month on the seasonal watch list. Gate
+    // off = no key at all.
+    ...(tsWatchListLive() && { watchList: watchListForVisit(svc.scheduled_date) }),
   };
+}
+
+// The sheet's watch list for the visit month: key, label, signal, referOnly.
+function watchListForVisit(scheduledDate) {
+  return watchListForMonth(visitWatchMonth(scheduledDate))
+    .map(({ key, label, signal, referOnly }) => ({ key, label, signal, referOnly }));
 }
 
 module.exports = {

@@ -4,7 +4,9 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const VisitGroups = require('./visit-groups');
 const { portalUrl } = require('../utils/portal-url');
-const { getServiceContactSmsRecipient, getServiceReportEmailRecipients, withAccountPrimaryContact } = require('./customer-contact');
+const { getServiceReportEmailRecipients, withAccountPrimaryContact } = require('./customer-contact');
+// The summary text waits for a contact's own YES (recipient-optin.js).
+const { resolveServiceContactSmsRecipient } = require('./recipient-optin');
 const { invoiceAmountDue, isInvoiceCollectibleStatus, isQueueSendClaimToken, SUMMARY_TEXT_PLANNED_ERROR } = require('./invoice-helpers');
 const { createDefaultCustomerRows } = require('./customer-default-rows');
 
@@ -161,7 +163,7 @@ async function deferredSummaryRecipient(meta, database = db, { customer: heldCus
   const row = heldCustomer || await database('customers').where({ id: meta.customer_id }).whereNull('deleted_at').first();
   if (!row) return { eligible: false, reason: 'visit_summary_unavailable' };
   const customer = heldCustomer || await withAccountPrimaryContact(row, { db: database, rethrow: true, forShare: Boolean(database.isTransaction) });
-  const recipient = getServiceContactSmsRecipient(customer);
+  const recipient = await resolveServiceContactSmsRecipient(customer, { dbh: database });
   // Contact saves keep their formatting and the canonical sender normalizes
   // before Twilio, so the frozen number and the live one are compared by
   // destination identity, not by string.
@@ -402,7 +404,7 @@ async function planSummaryBillingLink(packetId, token, database = db) {
     const context = await summaryDeliveryContext(packetId, token, database);
     const { visit, customer, visible, requested, summaryUrl } = context;
     if (!visible || !requested || !summaryUrl || visit.billing_hold) return null;
-    const recipient = getServiceContactSmsRecipient(customer);
+    const recipient = await resolveServiceContactSmsRecipient(customer, { dbh: database });
     if (!recipient?.phone) return null;
     const invoice = await database('invoices').where({ visit_completion_packet_id: packetId }).first();
     if (!invoice?.token || invoice.customer_id !== visit.customer_id || invoice.payer_id || invoice.payer_statement_id) return null;
@@ -572,7 +574,7 @@ async function summaryBillingLinkText(link) {
 async function sendSummarySms({ visit, member, customer, summaryUrl, requested, billingLink = null }) {
   const claim = await VisitGroups.claimVisitNotification(member, 'completion_sms');
   if (claim?.state !== 'owner') return;
-  const recipient = getServiceContactSmsRecipient(customer);
+  const recipient = await resolveServiceContactSmsRecipient(customer);
   let dispatched = false;
   try {
     if (!requested || !recipient?.phone) {
@@ -610,7 +612,7 @@ async function sendSummarySms({ visit, member, customer, summaryUrl, requested, 
           authorized: async (current, currentPrefs, trx) => {
             const allowed = currentPrefs.sms_enabled !== false
               && currentPrefs.service_completed !== false
-              && sameSmsDestination(getServiceContactSmsRecipient(current).phone, recipient.phone);
+              && sameSmsDestination((await resolveServiceContactSmsRecipient(current, { dbh: trx })).phone, recipient.phone);
             if (!allowed || !link) return allowed;
             // Under the held customer row (payer and consent writers commit under it).
             if (await summaryLinkStillValid(trx, link, visit.id, recipient.phone)) return true;
@@ -1266,7 +1268,7 @@ async function deliverVisitCompletionSummary(packetId, token, database = db) {
   const recorded = require('./visit-completion-packets').packetPayload(packet).summaryBillingLink;
   let billingLink = null;
   if (recorded?.invoiceId) {
-    const recipient = getServiceContactSmsRecipient(context.customer);
+    const recipient = await resolveServiceContactSmsRecipient(context.customer, { dbh: database });
     const link = { kind: recorded.kind, invoiceId: recorded.invoiceId };
     const valid = context.requested && recipient?.phone
       && await summaryLinkStillValid(database, link, visit.id, recipient.phone).catch(() => false);
