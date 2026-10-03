@@ -4143,7 +4143,7 @@ function pafPrepayJobHolds(job) {
 // activation skips completed rows, so completion asks whether the visit is
 // one the now-paid year bought (canonical paid coverage, coveredTermsAsOf)
 // and stamps it, instead of billing it beside the year.
-async function pafDeferredHoldingTerm(scheduledService, conn, { throwOnError = false, activated = false } = {}) {
+async function pafDeferredHoldingTerm(scheduledService, conn, { throwOnError = false, activated = false, claim = false } = {}) {
   if (scheduledService.prepaid_method) return null;
   if (!scheduledService.customer_id) return null;
   try {
@@ -4178,7 +4178,8 @@ async function pafDeferredHoldingTerm(scheduledService, conn, { throwOnError = f
     // charge release and the first-visit text all read the stamp. The termite
     // rule (which visit, which plan, one visit only, never payer-billed)
     // lives in termite-annual-activation.js.
-    const termiteTerm = await require('./termite-annual-activation').deferredInstallHoldingTerm(scheduledService, terms, conn);
+    // `claim` (closeout only): decide and stamp in one locked step.
+    const termiteTerm = await require('./termite-annual-activation').deferredInstallHoldingTerm(scheduledService, terms, conn, { claim });
     if (termiteTerm) return termiteTerm;
     let estimateId = scheduledService.source_estimate_id || null;
     if (scheduledService.recurring_parent_id) {

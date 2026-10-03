@@ -15717,6 +15717,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         bookingUrl,
         billingTerm,
         annualPrepayAmount: annualPrepayQuotedAmount,
+        // The office notice names the same charge timing as the agreement
+        // this accept is about to issue (none is issued yet here, so this is
+        // "what would be issued now": gate + active wording).
+        annualChargeAfterInstallation: invoiceKind === 'annual_prepay_deferred'
+          && await require('../services/termite-program-agreement').annualAgreementChargesAfterInstallation({ estimateId: estimate.id }),
         // 'ambiguous' keeps its own value (Codex r6 P1): the attempt may
         // have been a CARD, so the copy must stay tender-neutral — never
         // assert a bank debit; the one thing all three outcomes share is
@@ -21203,6 +21208,9 @@ function buildAcceptNotificationCopy({
   // GATE_PAF_SETUP_FEE: the accept stamped the setup fee on the first visit
   // instead of minting a payable invoice — nothing is due or sent today.
   setupFeeDeferred = false,
+  // GATE_PAF_TERMITE: the agreement being issued charges after the station
+  // installation, not at signature.
+  annualChargeAfterInstallation = false,
 } = {}) {
   // Sign-before-pay (codex round-3 P2 on #4819): the durable notifications
   // must send the customer to the signature, never read as "approved,
@@ -21212,7 +21220,7 @@ function buildAcceptNotificationCopy({
     const amountText = annualPrepayAmount != null ? ` (${fmtMoney(annualPrepayAmount)})` : '';
     return {
       adminTitle: `Estimate accepted — signature pending: ${customerName}`,
-      adminBody: `Termite annual protection plan${amountText} accepted, waiting on the customer's signature on the annual agreement. Nothing is billed or booked until they sign; at signature the saved payment method is charged, or the pay link sent. The 12-month coverage year begins on the installation date.`,
+      adminBody: `Termite annual protection plan${amountText} accepted, waiting on the customer's signature on the annual agreement. Nothing is billed or booked until they sign; ${annualChargeAfterInstallation ? 'nothing is charged at signature either: after the station installation is completed the saved payment method is charged, or the pay link sent' : 'at signature the saved payment method is charged, or the pay link sent'}. The 12-month coverage year begins on the installation date.`,
       adminNext: 'Waiting on their signature; nothing is billed yet',
       customerTitle: 'Next step: sign your plan agreement',
       // Codex #4819 r6: signing starts the plan and its billing; the

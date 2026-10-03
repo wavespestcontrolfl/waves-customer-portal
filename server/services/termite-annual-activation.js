@@ -464,6 +464,16 @@ async function activateTermiteAnnualPlanForSignedContract({ contractId, conn = d
         renewal_charge_consent_at: contract.signed_at || new Date(),
       });
 
+      // An agreement that charges after installation records its wait HERE,
+      // in the activation transaction: the term never becomes visible to a
+      // closeout without it (an installation closing at the same moment
+      // would otherwise find no wait, go unstamped and strand the plan's
+      // invoice — GitHub Codex #5816 r2). A failure rolls the activation
+      // back; the daily sweep retries it.
+      await require('./termite-annual-signature-charge').recordInstallationWait({
+        conn: trx, estimateId, contract, invoiceId: conversion.draftInvoiceId, trigger,
+      });
+
       return {
         activated: true,
         termId: conversion.annualPrepayTermId,
@@ -1277,7 +1287,22 @@ function awaitingInstallationRows(conn) {
 // the automatic charge, and reaches the office through the never-released
 // alert.
 const DEAD_PLAN_INVOICE_STATUSES = ['void', 'voided', 'canceled', 'cancelled', 'refunded'];
-async function deferredInstallHoldingTerm(visit, terms, conn) {
+// `claim` (the closeout passes it): the one-installation decision and the
+// stamp write are ONE step under the term's row lock, so two installation
+// visits of a plan closing at once cannot both be held (GitHub Codex #5816
+// r2). Without it (a billing preview) this only reads.
+async function deferredInstallHoldingTerm(visit, terms, conn, { claim = false } = {}) {
+  if (!claim) return findDeferredInstallHoldingTerm(visit, terms, conn);
+  return conn.transaction(async (trx) => {
+    const ids = terms.map((t) => t.id);
+    if (ids.length) await trx('annual_prepay_terms').whereIn('id', ids).orderBy('id').forUpdate().select('id');
+    const term = await findDeferredInstallHoldingTerm(visit, terms, trx);
+    if (term) await trx('scheduled_services').where({ id: visit.id }).update({ paf_held_term_id: term.id });
+    return term;
+  });
+}
+
+async function findDeferredInstallHoldingTerm(visit, terms, conn) {
   if (!visit?.id || !visit.customer_id) return null;
   let serviceType = visit.service_type;
   if (serviceType === undefined) {
@@ -1320,11 +1345,17 @@ async function deferredInstallHoldingTerm(visit, terms, conn) {
   return null;
 }
 
-// The service-type half of the installation rule, for a caller holding the
-// visit row (a cheap pre-check before any query).
+// The STAMP's service identity is narrower than the anchor's
+// (whereTermiteInstallationServiceType also takes any bait/station job): only
+// a service named as a termite INSTALLATION may release the plan's charge —
+// "Termite Installation Setup" (admin-schedule.js termite_installation_setup),
+// "Termite Bait Station Installation". A maintenance job ("Termite Bait
+// Station Cartridge Replacement", "Annual Termite Active Bait Station
+// Service") and the liquid "Termite Bora-Care Install" are not it (GitHub
+// Codex #5816 r2).
 function isTermiteInstallationServiceType(serviceType) {
   const type = String(serviceType || '').toLowerCase();
-  return type.includes('termite') && (type.includes('bait') || type.includes('station') || type.includes('installation setup'));
+  return type.includes('termite') && type.includes('installation');
 }
 
 // A 'completed' visit is not always performed work: a closeout recorded as

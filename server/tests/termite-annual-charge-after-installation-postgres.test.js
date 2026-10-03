@@ -332,8 +332,8 @@ describeOrSkip('termite annual charge after installation — real Postgres', () 
   const closeoutStamp = async (db, visit) => {
     const Renewals = jest.requireActual('../services/annual-prepay-renewals');
     const row = await db('scheduled_services').where({ id: visit.id }).first();
-    const held = await Renewals.pafDeferredHoldingTerm(row, db, { throwOnError: true })
-      || await Renewals.pafDeferredHoldingTerm(row, db, { throwOnError: true, activated: true });
+    const held = await Renewals.pafDeferredHoldingTerm(row, db, { throwOnError: true, claim: true })
+      || await Renewals.pafDeferredHoldingTerm(row, db, { throwOnError: true, activated: true, claim: true });
     await db('scheduled_services').where({ id: visit.id }).update({ paf_held_term_id: held?.id || null });
     return held?.id || null;
   };
@@ -392,7 +392,7 @@ describeOrSkip('termite annual charge after installation — real Postgres', () 
   test('once the installation is completed the sweep charges once, capped at the signed total, on the signed agreement as consent', async () => {
     const { atSigning, sweep, chargeInvoiceWithSavedCard, sendViaSMSAndEmail, notifyAdmin, db, resolvedMethod } = load();
     await atSigning();
-    await addInstall(db);
+    const installed = await addInstall(db);
 
     const counts = await sweep();
 
@@ -404,6 +404,11 @@ describeOrSkip('termite annual charge after installation — real Postgres', () 
       maxAuthorizedChargeCents: FROZEN_TOTAL * 100,
       maxAuthorizedTotalCents: FROZEN_TOTAL * 100,
       requireAutopayForCustomerId: ids.customerId,
+      // Bound again inside the charge transaction, under the visit's lock.
+      requireSelfPayScheduledServiceId: installed.id,
+      requireCompletedVisit: true,
+      requirePerformedVisit: true,
+      requireHeldTermId: ids.termId,
     }));
     expect(await chargeState(db)).toMatchObject({ status: 'paid', trigger: 'installation_complete', contract_id: ids.contractId });
     const consents = await db('payment_method_consents');
@@ -475,11 +480,85 @@ describeOrSkip('termite annual charge after installation — real Postgres', () 
       expect(await stampCovers(db, visit)).toBe(true);
     });
 
+    test('the charge transaction refuses a visit that stopped being the installation (reopened, payer, paid another way): back to waiting, no pay link', async () => {
+      const { atSigning, sweep, sendViaSMSAndEmail, db } = load({
+        chargeImpl: async () => { throw Object.assign(new Error('The visit is no longer held by this annual prepay. Review before charging.'), { code: 'VISIT_NOT_COMPLETED' }); },
+      });
+      await atSigning();
+      const waiting = await chargeState(db);
+      await addInstall(db);
+
+      expect(await sweep()).toMatchObject({ installChargeScanned: 1, installCharged: 0, installPayLinked: 0, installChargeHeld: 1 });
+      expect(sendViaSMSAndEmail).not.toHaveBeenCalled();
+      expect(await chargeState(db)).toEqual(waiting);
+    });
+
+    test('two installation visits of one plan closing at the same moment: exactly one is stamped', async () => {
+      const { atSigning, db } = load();
+      await atSigning();
+      const visits = [];
+      for (const day of [0, 1]) {
+        const [visit] = await db('scheduled_services').insert({
+          customer_id: ids.customerId, status: 'completed', service_type: 'Termite Installation Setup', scheduled_date: dayOffset(day),
+        }).returning('*');
+        await db('service_records').insert({ scheduled_service_id: visit.id, status: 'completed', structured_notes: JSON.stringify({}) });
+        visits.push(visit);
+      }
+
+      const held = await Promise.all(visits.map((visit) => closeoutStamp(db, visit)));
+
+      expect(held.filter(Boolean)).toEqual([ids.termId]);
+      const stamped = await db('scheduled_services').whereNotNull('paf_held_term_id');
+      expect(stamped).toHaveLength(1);
+    });
+
+    test.each([
+      ['Termite Bait Station Cartridge Replacement'],
+      ['Annual Termite Active Bait Station Service'],
+      ['Quarterly Termite Active Bait Station Service'],
+    ])('a maintenance job (%s) completed first is not the installation: not stamped, no charge', async (serviceType) => {
+      const { atSigning, sweep, chargeInvoiceWithSavedCard, db } = load();
+      await atSigning();
+      const job = await addInstall(db, { service_type: serviceType });
+
+      expect(await stampOf(db, job)).toBeNull();
+      expect((await sweep()).installChargeScanned).toBe(0);
+      expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    });
+
+    test('"Termite Bait Station Installation" is an installation', async () => {
+      const { atSigning, db } = load();
+      await atSigning();
+      expect(await stampOf(db, await addInstall(db, { service_type: 'Termite Bait Station Installation' }))).toBe(ids.termId);
+    });
+
+    test('the wait is recorded inside the activation transaction, so a closeout never sees the term without it', async () => {
+      const { db } = load();
+      const SignatureCharge = require('../services/termite-annual-signature-charge');
+      const contract = await db('customer_contracts').where({ id: ids.contractId }).first();
+
+      await db.transaction(async (trx) => {
+        expect(await SignatureCharge.recordInstallationWait({
+          conn: trx, estimateId: ids.estimateId, contract, invoiceId: ids.invoiceId, trigger: 'signature',
+        })).toEqual({ agreed: true });
+      });
+      expect(await chargeState(db)).toMatchObject({ status: 'awaiting_installation', contract_id: ids.contractId, signed_at: SIGNED_AT });
+      // An installation closing right now is stamped, with no sign-time entry having run.
+      expect(await stampOf(db, await addInstall(db))).toBe(ids.termId);
+
+      // The at-signing wording records nothing.
+      await db('estimates').where({ id: ids.estimateId }).update({ annual_plan_signature_charge: null });
+      expect(await SignatureCharge.recordInstallationWait({
+        conn: db, estimateId: ids.estimateId, contract: { ...contract, contract_text_snapshot: r3.TEMPLATE_V3_ANNUAL_R3_BODY }, invoiceId: ids.invoiceId,
+      })).toEqual({ agreed: false });
+      expect(await chargeState(db)).toBeNull();
+    });
+
     test('one installation per plan: a later bait/station job is not stamped and bills normally', async () => {
       const { atSigning, sweep, db } = load();
       await atSigning();
       const install = await addInstall(db);
-      const later = await addInstall(db, { scheduled_date: dayOffset(30), service_type: 'Termite Bait Station Cartridge Replacement' });
+      const later = await addInstall(db, { scheduled_date: dayOffset(30), service_type: 'Termite Installation Setup' });
 
       expect(await stampOf(db, install)).toBe(ids.termId);
       expect(await stampOf(db, later)).toBeNull();

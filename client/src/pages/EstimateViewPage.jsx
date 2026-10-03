@@ -4199,7 +4199,7 @@ export function SuccessCard({ acceptResult, appointmentLabel = null, recurring =
         <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
           We'll send you the signing link. Signing starts your plan; your 12-month coverage begins on your installation date.
           {acceptResult?.annualChargeAfterInstallation
-            ? ' Nothing is charged when you sign. Your payment method on file is charged after your station installation is completed.'
+            ? ' Nothing is charged when you sign. After your station installation is completed, we charge your payment method on file, or send a payment link if there is none.'
             : ''}
         </div>
       </div>

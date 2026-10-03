@@ -1817,7 +1817,8 @@ gate: an agreement issued while the gate was on keeps the field after the gate g
 that customer's document still says so. Only when no agreement is issued yet does the gate apply:
 the field is then present when the gate is on AND the ACTIVE annual agreement version carries the
 after-installation wording. The React success card then adds: "Nothing is charged when you sign.
-Your payment method on file is charged after your station installation is completed." While the
+After your station installation is completed, we charge your payment method on file, or send a
+payment link if there is none." The office accept notification names the same timing. While the
 gate has never been on, no agreement carries that wording, so the field is absent and the card is
 byte-identical to before. No message is sent because of this field.
 
