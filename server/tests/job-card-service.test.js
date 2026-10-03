@@ -1151,6 +1151,42 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
     ]);
   });
 
+  describe('new sod note (GATE_LAWN_NEW_SOD_MODE)', () => {
+    const deps = { getRecentCalls: async () => [], getHourly: async () => null, protocols: { programs: [] } };
+    const lawnVisit = (over = {}) => ({ ...visit(false), service_type: 'Lawn Care Treatment Program', scheduled_date: '2026-10-05', ...over });
+    const load = (row, sod = '2026-10-01') => jobCard.loadJobCardFacts('svc1', factsDb({
+      'scheduled_services as ss': row,
+      property_preferences: { ...prefs, sod_laid_on: sod },
+    }), deps);
+    afterEach(() => { delete process.env.GATE_LAWN_NEW_SOD_MODE; });
+
+    test('off: no key, and the paragraph is byte-identical with the date set', async () => {
+      const withDate = await load(lawnVisit());
+      const without = await load(lawnVisit(), null);
+      expect(withDate.facts).not.toHaveProperty('newSod');
+      expect(jobCard.buildTemplateParagraph(withDate.facts, { isLawn: true })).toBe(jobCard.buildTemplateParagraph(without.facts, { isLawn: true }));
+    });
+
+    test('on, inside the window: "New sod laid Oct 1" rides the lawn paragraph', async () => {
+      process.env.GATE_LAWN_NEW_SOD_MODE = 'true';
+      const out = await load(lawnVisit());
+      expect(out.facts.newSod).toBe('New sod laid Oct 1');
+      expect(jobCard.buildTemplateParagraph(out.facts, { isLawn: true })).toMatch(/New sod laid Oct 1/);
+    });
+
+    test('on, but outside the window, before the sod date, no date, or a pest visit: no note', async () => {
+      process.env.GATE_LAWN_NEW_SOD_MODE = 'true';
+      for (const [row, sod] of [[lawnVisit({ scheduled_date: '2026-10-23' }), '2026-10-01'], [lawnVisit({ scheduled_date: '2026-09-30' }), '2026-10-01'], [lawnVisit(), null], [visit(false), '2026-10-01']]) {
+        expect((await load(row, sod)).facts).not.toHaveProperty('newSod');
+      }
+    });
+
+    test('on, a visit at a non-primary address never shows the primary home\'s sod', async () => {
+      process.env.GATE_LAWN_NEW_SOD_MODE = 'true';
+      expect((await load(lawnVisit({ address_diverges: true }))).facts).not.toHaveProperty('newSod');
+    });
+  });
+
   describe('why they booked (GATE_JOB_CARD_CUSTOMER_CONTEXT)', () => {
     const deps = { getRecentCalls: async () => [], getHourly: async () => null, protocols: { programs: [] } };
     const booked = { customer_request: 'Still seeing roaches under the sink, try 4545# at the gate', customer_request_source: 'picker', customer_request_pests: '["german_roach","ant"]' };

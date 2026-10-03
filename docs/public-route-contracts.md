@@ -2194,6 +2194,34 @@ email, the watering text (`lines` only), the hero task and Ask Waves are unchang
 When present on a live payload the displayed one (the note, else the forecast
 sentence) counts toward `reportV2.lead`'s 250-word budget (`leadWords`). No new
 route, query parameter or customer message.
+`GATE_LAWN_NEW_SOD_MODE` (dark, 1/true/on, read at call time; gate off leaves the
+payload, the lawn PDF cache key and every text unchanged, key for key, even when the
+date is set) changes `/api/reports/:token/data` for a LAWN visit only, and only when
+`property_preferences.sod_laid_on` is set and the visit's America/New_York calendar day
+is from that day through day 21 inclusive. The visit's own day is the judge, not the
+clock, so a reopened report reads the same. It adds no key; it replaces the content of
+existing ones with FIXED sentences (no model, no number the business has not stated, no
+"21 days"): `reportV2.banner` becomes `{ state: 'new_sod', lines, holdUntil: null,
+waterInBy: null, expiresAt: null, ruleSource: 'new_sod' }` with `lines` = "Water your
+new sod lightly every day." / "Please hold off on mowing until the sod has rooted." /
+"We are holding weed control until the sod has rooted." (the third line only when the
+visit applied no herbicide or pre-emergent and its products were readable; no `mowHold`,
+`forecastLine` or `observedRain` key is ever present); `reportV2.water.weekPlan` and
+`lawnAssessment.waterContext.weekPlan` become `{ title: 'New sod: water lightly every
+day', detail: 'Keep the sod moist with a light watering each day until it has rooted.',
+action: 'new_sod', visitInPlanWeek: true, prescribesRun: false }` (no `afterHold`,
+`afterTreatment` or `depthInches`); `reportV2.water.status` is `'unknown'`,
+`reportV2.water.explanation` is `null` and `water.coverageWatch` is `false`;
+`reportV2.snapshot.seasonalNote` is "Once the sod has rooted, you can start mowing and we
+can begin your regular lawn care." (no `seasonalNoteSource`), and under the v6 copy gate
+`reportV2.lead.whatToExpect` carries the same sentence; the water/coverage finding cards
+(`insights[].category === 'water'`) and `reportV2.mowing` (null) are withheld for the
+visit. The watering instruction the engine would build is not built, so
+`reportV2.aftercare` is the legacy product-label note, nothing is frozen under
+`structured_notes.lawnWateringFreeze` for the visit, and `GATE_LAWN_WATERING_SMS` /
+`GATE_LAWN_WATERING_FORECAST` produce nothing for it. The lawn PDF cache key gains
+`:sod=<date>` while the gate is on and the date is set. No new route, query parameter
+or customer message.
 `GATE_LAWN_REPORT_LEAD` (dark; gate off leaves the lawn payload unchanged, key for
 key) adds `reportV2.lead` `{ headline, why, applied, yourPart, next }` (plus the
 optional `sinceLast` described under `GATE_LAWN_SINCE_LAST` below) to

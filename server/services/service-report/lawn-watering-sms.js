@@ -24,8 +24,9 @@
  */
 
 const logger = require('../logger');
-const { lawnWateringSmsLive, lawnWateringRuleLive } = require('../../config/feature-gates');
+const { lawnWateringSmsLive, lawnWateringRuleLive, lawnNewSodModeLive } = require('../../config/feature-gates');
 const { etDateString } = require('../../utils/datetime-et');
+const { newSodMode } = require('./lawn-new-sod');
 
 const TEMPLATE_KEY = 'lawn_watering_instruction';
 const PURPOSE = 'lawn_watering_instruction';
@@ -98,6 +99,7 @@ function lawnWateringSmsPlan({
   ruleGateOn = false,
   completedAt = null,
   completionTextRequested = true,
+  newSodActive = false,
   nowMs = Date.now(),
 } = {}) {
   if (!gateOn) return { send: false, reason: 'gate_off' };
@@ -112,6 +114,10 @@ function lawnWateringSmsPlan({
   // that failed or was withheld still gets it (owner 2026-09-30).
   if (!completionTextRequested) return { send: false, reason: 'completion_text_not_requested' };
   if (alreadySent) return { send: false, reason: 'already_sent' };
+  // New-sod mode (GATE_LAWN_NEW_SOD_MODE): the property is watering lightly every
+  // day and not mowing, so no text may tell it to hold or time its watering, and
+  // no "skip watering" style line can reach it. The report banner owns the story.
+  if (newSodActive) return { send: false, reason: 'new_sod' };
   if (!instruction || !SENDABLE_STATES.includes(instruction.state)) {
     return { send: false, reason: 'no_instruction' };
   }
@@ -144,6 +150,22 @@ async function sendLawnWateringSms(args, deps) {
     const { record, svc, notes } = args;
     const instruction = notes?.lawnWateringFreeze?.wateringInstruction || null;
     const completedAt = instruction?.completedAt || null;
+    // New-sod mode, read only with its own gate on. The engine does not build an
+    // instruction for an active new-sod visit, so normally there is nothing to send;
+    // this re-check covers an instruction frozen before the sod date was entered.
+    // FAIL CLOSED: a preference that cannot be read sends nothing (and writes no
+    // marker, so the report banner still carries the instruction).
+    let newSodActive = false;
+    if (typeof lawnNewSodModeLive === 'function' && lawnNewSodModeLive()) {
+      try {
+        const prefs = await deps.db('property_preferences').where({ customer_id: svc.customer_id }).first('sod_laid_on');
+        const visitDay = etDateString(completedAt ? new Date(completedAt) : new Date());
+        newSodActive = newSodMode(prefs, visitDay).active;
+      } catch (prefErr) {
+        logger.warn(`[lawn-watering-sms] new-sod preference unreadable for service_record ${record.id}; no text sent: ${prefErr.message}`);
+        return { status: 'skip_new_sod_unreadable' };
+      }
+    }
     const plan = lawnWateringSmsPlan({
       instruction,
       isBackfill: args.isBackfill === true,
@@ -155,6 +177,7 @@ async function sendLawnWateringSms(args, deps) {
       ruleGateOn,
       completedAt,
       completionTextRequested: args.completionTextRequested === true,
+      newSodActive,
       nowMs: Date.now(),
     });
     if (!plan.send) return { status: `skip_${plan.reason}` };

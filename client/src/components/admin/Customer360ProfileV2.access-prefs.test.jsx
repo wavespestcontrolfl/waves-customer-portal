@@ -229,6 +229,40 @@ describe('Customer 360 → Property → Access & Preferences', () => {
     expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument();
   });
 
+  it('shows the new-sod date, and Edit sends sodLaidOn as a plain date (or null to clear it)', async () => {
+    const bodies = [];
+    let prefsOverride = { sod_laid_on: '2026-10-01T00:00:00.000Z' };
+    vi.stubGlobal('fetch', vi.fn((url, options) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/admin/customers/customer-a/property-preferences')) {
+        const body = JSON.parse(options.body);
+        bodies.push(body);
+        prefsOverride = { sod_laid_on: body.sodLaidOn };
+        return response({ success: true, saved: true, preferences: { ...BASE_PREFS, ...prefsOverride } });
+      }
+      if (path.endsWith('/admin/customers/customer-a')) return response(customerDetail(prefsOverride));
+      return response({});
+    }));
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findAllByText('Avery Customer');
+    await openPropertyTab();
+    await screen.findByText('Access & Preferences');
+    expect(screen.getByText('New Sod Laid')).toBeInTheDocument();
+    expect(screen.getByText('2026-10-01')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Access & Preferences' }));
+    const input = (await screen.findByText('New Sod Laid On')).closest('label').querySelector('input');
+    expect(input).toHaveAttribute('type', 'date');
+    expect(input.value).toBe('2026-10-01');
+    fireEvent.change(input, { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    // Only the field that changed is sent; clearing is null, never ''.
+    expect(bodies[0]).toEqual({ sodLaidOn: null });
+  });
+
   it('shows structured pets in the portal shape (type / indoor / temperament)', async () => {
     vi.stubGlobal('fetch', vi.fn((url) => {
       const path = String(url);

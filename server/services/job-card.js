@@ -20,7 +20,8 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { gateEnvValue } = require('../config/feature-gates');
+const { gateEnvValue, lawnNewSodModeLive } = require('../config/feature-gates');
+const { newSodMode, sodLaidLabel } = require('./service-report/lawn-new-sod');
 const { treeShrubFieldGuide } = require('./tree-shrub-field-guide');
 const { resolveCatalogProductForName } = require('./completion-product-defaults');
 const { reviewedWeather, checkReviewedWeatherSources } = require('./product-label-weather');
@@ -547,6 +548,16 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}, { displayContext
 
   const alternateAddress = Boolean(svc.address_diverges);
   const propertyPrefs = alternateAddress ? null : prefs;
+  // GATE_LAWN_NEW_SOD_MODE (P35): a short "New sod laid <date>" note on a lawn
+  // visit inside the property's new-sod window, so the technician knows the
+  // report says daily light watering and no mowing. The primary home's row only
+  // (propertyPrefs is null at an alternate address). Gate off: no key at all.
+  const newSodNote = serviceLine === 'lawn' && typeof lawnNewSodModeLive === 'function' && lawnNewSodModeLive()
+    ? (() => {
+      const sod = newSodMode(propertyPrefs, etCalendarDayOf(svc.scheduled_date));
+      return sod.active ? sodLaidLabel(sod.laidOn) : null;
+    })()
+    : null;
   // Every code on file is scrubbed from the facts even when none is shown:
   // a primary-home code pasted into a visit note must not surface on an
   // alternate-address card.
@@ -618,6 +629,7 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}, { displayContext
       calls,
       irrigation: serviceLine === 'lawn' ? wateringLine(propertyPrefs) : null,
       rain7d: alternateAddress ? null : rain7d,
+      ...(newSodNote ? { newSod: newSodNote } : {}),
     }, knownCodes),
   };
 }
@@ -667,6 +679,7 @@ function buildTemplateParagraph(facts, { isLawn = false } = {}) {
   add(2, facts.instructions, 3);
 
   if (isLawn) {
+    if (facts.newSod) add(3, facts.newSod);
     add(3, facts.irrigation ? `Irrigation ${facts.irrigation}` : 'No irrigation on file — ask the customer');
     if (facts.rain7d != null) add(3, `${facts.rain7d}" rain in the last 7 days`, 1);
   }

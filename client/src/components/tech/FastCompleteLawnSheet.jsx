@@ -843,6 +843,10 @@ function WateringPreview({ base, request, productIds }) {
     const lines = data.sentence ? [data.sentence] : [];
     body = (
       <>
+        {/* New-sod mode: the report prints its fixed new-sod lines, so say why. */}
+        {typeof data.newSod?.note === 'string' && data.newSod.note && (
+          <p className="tech-visit-muted" data-testid="lawn-fast-new-sod-note">{data.newSod.note}</p>
+        )}
         {lines.map((line) => <p key={line} className="tech-visit-promise-text">{line}</p>)}
         {data.mowHold?.line && <p className="tech-visit-promise-text">{data.mowHold.line}</p>}
         {Array.isArray(data.provisional) && data.provisional.includes('completionTime') && (

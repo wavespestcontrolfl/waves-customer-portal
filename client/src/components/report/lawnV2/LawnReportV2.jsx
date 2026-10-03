@@ -838,7 +838,7 @@ export function LawnWateringBanner({ banner, style = null }) {
     <Card style={{ ...(hold ? { background: COLORS.sand } : {}), ...(style || {}) }}>
       <div data-testid="lawn-watering-banner" data-state={banner.state ?? 'mow'} data-ended={ended ? 'true' : 'false'}>
         <div data-gt="eyebrow" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6 }}>
-          {watering ? 'Watering after today’s visit' : 'Mowing after today’s visit'}
+          {banner.state === 'new_sod' ? 'Caring for your new sod' : (watering ? 'Watering after today’s visit' : 'Mowing after today’s visit')}
         </div>
         {ended ? (
           <div data-testid="lawn-watering-banner-ended" style={{ fontSize: 14, color: MUTED, lineHeight: 1.5 }}>

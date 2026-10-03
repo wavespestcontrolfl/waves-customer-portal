@@ -529,6 +529,19 @@ describe('watering preview', () => {
     expect(screen.queryByText('Times are if completed now.')).toBeNull();
   });
 
+  test('a new-sod visit shows the "New sod laid" note above the lines the report prints', async () => {
+    previewAnswer = {
+      products: [], state: 'new_sod',
+      lines: ['Water your new sod lightly every day.', 'Please hold off on mowing until the sod has rooted.'],
+      sentence: 'Water your new sod lightly every day. Please hold off on mowing until the sod has rooted.',
+      mowHold: null, provisional: [], omitted: [], newSod: { laidOn: '2026-10-01', note: 'New sod laid Oct 1' },
+    };
+    await openSheet();
+    expect(await screen.findByText('New sod laid Oct 1')).toBeTruthy();
+    expect(screen.getByText(/Water your new sod lightly every day\./)).toBeTruthy();
+    expect(screen.queryByText('Times are if completed now.')).toBeNull();
+  });
+
   test('shows nothing but a neutral note when the server omitted part of it, even if it sent a sentence', async () => {
     previewAnswer = { products: [], state: 'hold', lines: ['Guess'], sentence: 'Guess', mowHold: null, provisional: [], omitted: ['week_plan'] };
     await openSheet();

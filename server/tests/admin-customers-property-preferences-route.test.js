@@ -346,3 +346,50 @@ describe('codex r3 — enum columns validate on value', () => {
     expect(mockState.prefsRow).toMatchObject({ preferred_day: 'tuesday', preferred_time: 'early_morning', contact_preference: null });
   });
 });
+
+describe('sodLaidOn — the staff-only new-sod date (lawn report rebuild P35)', () => {
+  const { etDateString, addETDays } = require('../utils/datetime-et');
+  const daysAgo = (n) => etDateString(addETDays(new Date(), -n));
+
+  it('saves a real recent day as the plain YYYY-MM-DD string and records only the field name', async () => {
+    const day = daysAgo(3);
+    const result = await putPrefs({ sodLaidOn: day });
+    expect(result.status).toBe(200);
+    expect(mockState.prefsRow.sod_laid_on).toBe(day);
+    expect(typeof mockState.prefsRow.sod_laid_on).toBe('string');
+    const audit = recordAuditEvent.mock.calls[0][0];
+    expect(audit.metadata).toEqual({ fields: ['sod_laid_on'] });
+  });
+
+  it('null and an empty string both clear it to null', async () => {
+    mockState.prefsRow = { id: 'pref-1', customer_id: 'cust-1', sod_laid_on: daysAgo(5) };
+    expect((await putPrefs({ sodLaidOn: null })).status).toBe(200);
+    expect(mockState.prefsRow.sod_laid_on).toBeNull();
+    mockState.prefsRow = { id: 'pref-1', customer_id: 'cust-1', sod_laid_on: daysAgo(5) };
+    expect((await putPrefs({ sodLaidOn: '' })).status).toBe(200);
+    expect(mockState.prefsRow.sod_laid_on).toBeNull();
+  });
+
+  it('a future day, a day over a year old and a non-date are rejected by field; the rest of the batch still saves', async () => {
+    const future = etDateString(addETDays(new Date(), 2));
+    let res = await putPrefs({ sodLaidOn: future, accessNotes: 'Side gate' });
+    expect(res.status).toBe(200);
+    expect(res.body.rejected).toEqual([{ field: 'sodLaidOn', message: 'Sod date cannot be in the future.' }]);
+    expect(mockState.prefsRow.sod_laid_on).toBeUndefined();
+    expect(mockState.prefsRow.access_notes).toBe('Side gate');
+
+    res = await putPrefs({ sodLaidOn: daysAgo(400) });
+    expect(res.status).toBe(400);
+    expect(res.body.rejected).toEqual([{ field: 'sodLaidOn', message: 'Sod date cannot be more than a year ago.' }]);
+
+    res = await putPrefs({ sodLaidOn: '2026-02-30' });
+    expect(res.status).toBe(400);
+    expect(res.body.rejected[0].field).toBe('sodLaidOn');
+  });
+
+  it('the customer portal schema does not know the field (staff only)', () => {
+    const { PREFS_FIELD_SCHEMAS, ALLOWED_FIELDS } = require('../services/property-preferences-schema');
+    expect(PREFS_FIELD_SCHEMAS).not.toHaveProperty('sodLaidOn');
+    expect(ALLOWED_FIELDS).not.toContain('sod_laid_on');
+  });
+});
