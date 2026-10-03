@@ -111,8 +111,8 @@ const FILLER_WORDS = new Set([
   'from', 'about', 'this', 'that', 'our', 'out', 'into', 'its', 'any', 'all', 'not',
 ]);
 // Plurals no suffix rule makes, as [singular, plural] (GitHub Codex P2 r2 on
-// #5652: "mice" never found a "mouse" post).
-const IRREGULAR_FORMS = new Map([['mouse', 'mice'], ['louse', 'lice'], ['goose', 'geese']]
+// #5652: "mice" never found a "mouse" post; r5: mosquito "larvae").
+const IRREGULAR_FORMS = new Map([['mouse', 'mice'], ['louse', 'lice'], ['goose', 'geese'], ['larva', 'larvae'], ['pupa', 'pupae']]
   .flatMap((pair) => [[pair[0], pair], [pair[1], pair]]));
 // A word's singular ("roaches" -> roach, "flies" -> fly, "mosquitoes" ->
 // mosquito, "ants" -> ant, "mice" -> mouse), and the forms a post may use for

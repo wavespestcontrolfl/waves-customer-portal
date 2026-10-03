@@ -212,6 +212,11 @@ describe('searchTerms', () => {
     expect(searchTerms('mice mouse')).toHaveLength(1);
   });
 
+  test('mosquito larvae and larva find each other (GitHub Codex P2 r5 on #5652)', () => {
+    expect(searchTerms('larvae')).toEqual([{ word: 'larva', forms: ['larva', 'larvae'] }]);
+    expect(searchTerms('mosquito larva')[1]).toEqual({ word: 'larva', forms: ['larva', 'larvae'] });
+  });
+
   test('each word carries the forms a post may use for it', () => {
     expect(searchTerms('roaches')[0].forms).toEqual(expect.arrayContaining(['roach', 'roaches']));
     expect(searchTerms('fly')[0].forms).toEqual(expect.arrayContaining(['fly', 'flies']));
