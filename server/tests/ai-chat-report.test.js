@@ -3,6 +3,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.mock('../models/db', () => {
   const fn = jest.fn();
   fn.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+  fn.raw = jest.fn((sql) => sql);
   return fn;
 });
 jest.mock('../services/logger', () => ({
@@ -86,9 +87,21 @@ function mockReportTables({ session, customer, property } = {}) {
   };
   const sessionQuery = {
     where: jest.fn().mockReturnThis(),
+    clone: jest.fn().mockReturnThis(),
+    whereExists: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
     first: jest.fn().mockResolvedValue(session || null),
   };
+  const messageExistsQuery = {
+    select: jest.fn().mockReturnThis(),
+    from: jest.fn().mockReturnThis(),
+    whereRaw: jest.fn().mockReturnThis(),
+    where: jest.fn().mockReturnThis(),
+  };
+  sessionQuery.whereExists.mockImplementation((build) => {
+    build.call(messageExistsQuery);
+    return sessionQuery;
+  });
   const propertyQuery = {
     where: jest.fn().mockReturnThis(),
     first: jest.fn().mockResolvedValue(property || null),
@@ -107,7 +120,9 @@ function mockReportTables({ session, customer, property } = {}) {
     if (table === 'operator_inbox_items') return { insert: inboxInsert };
     throw new Error(`Unexpected table ${table}`);
   });
-  return { customersQuery, propertyQuery, sessionQuery, escalationInsert, inboxInsert };
+  return {
+    customersQuery, propertyQuery, sessionQuery, messageExistsQuery, escalationInsert, inboxInsert,
+  };
 }
 
 function customerToken(customerId = 'cust-1', claims = {}) {
@@ -186,12 +201,6 @@ describe('POST /ai/chat/report', () => {
         body: JSON.stringify({ sessionId: 'chat-123', conversationId: olderId.toUpperCase(), messageContent: 'Older AI reply' }),
       });
       expect(selected.status).toBe(200);
-      const legacy = await fetch(`${baseUrl}/ai/chat/report`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ sessionId: 'chat-123', messageContent: 'Latest AI reply' }),
-      });
-      expect(legacy.status).toBe(200);
     });
 
     expect(sessionQuery.where.mock.calls[0][0]).toEqual({
@@ -200,8 +209,76 @@ describe('POST /ai/chat/report', () => {
       channel_identifier: 'chat-123',
       customer_id: 'cust-1',
     });
-    expect(sessionQuery.orderBy).toHaveBeenCalledTimes(2);
-    expect(escalationInsert.mock.calls.map(([row]) => row.conversation_id)).toEqual([olderId, newerId]);
+    expect(sessionQuery.clone).not.toHaveBeenCalled();
+    expect(sessionQuery.first).toHaveBeenCalledTimes(1);
+    expect(escalationInsert).toHaveBeenCalledWith(expect.objectContaining({ conversation_id: olderId }));
+  });
+
+  test('a legacy report links each exact assistant reply even when the newer conversation is inactive', async () => {
+    const customerId = 'legacy-match-cust';
+    const older = {
+      id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', customer_id: customerId,
+      channel: 'portal_chat', channel_identifier: 'chat-123', status: 'active', created_at: '2026-10-01',
+    };
+    const newer = {
+      id: '22222222-2222-4222-8222-222222222222', customer_id: customerId,
+      channel: 'portal_chat', channel_identifier: 'chat-123', status: 'inactive', created_at: '2026-10-02',
+    };
+    const { sessionQuery, messageExistsQuery, escalationInsert } = mockReportTables({
+      customer: { id: customerId, active: true },
+    });
+    let reportedContent = null;
+    messageExistsQuery.where.mockImplementation((predicate) => {
+      reportedContent = predicate['reported_message.content'];
+      return messageExistsQuery;
+    });
+    sessionQuery.first.mockImplementation(async () => (
+      reportedContent === 'Older AI reply' ? older : newer
+    ));
+
+    await withServer(async (baseUrl) => {
+      const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken(customerId)}` };
+      for (const messageContent of ['Older AI reply', 'Newer AI reply']) {
+        const res = await fetch(`${baseUrl}/ai/chat/report`, {
+          method: 'POST', headers,
+          body: JSON.stringify({ sessionId: 'chat-123', messageContent }),
+        });
+        expect(res.status).toBe(200);
+      }
+    });
+
+    expect(messageExistsQuery.whereRaw).toHaveBeenCalledWith(
+      'reported_message.conversation_id = agent_sessions.id',
+    );
+    expect(messageExistsQuery.where).toHaveBeenCalledWith(expect.objectContaining({
+      'reported_message.role': 'assistant',
+    }));
+    expect(escalationInsert.mock.calls.map(([row]) => row.conversation_id)).toEqual([older.id, newer.id]);
+  });
+
+  test('a legacy report falls back to the newest scoped conversation when no assistant content matches', async () => {
+    const customerId = 'legacy-fallback-cust';
+    const newest = {
+      id: '22222222-2222-4222-8222-222222222222', customer_id: customerId,
+      channel: 'portal_chat', channel_identifier: 'chat-123', status: 'inactive', created_at: '2026-10-02',
+    };
+    const { sessionQuery, escalationInsert } = mockReportTables({
+      customer: { id: customerId, active: true },
+    });
+    sessionQuery.first.mockResolvedValueOnce(null).mockResolvedValueOnce(newest);
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/ai/chat/report`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken(customerId)}` },
+        body: JSON.stringify({ sessionId: 'chat-123', messageContent: 'Reply absent from history' }),
+      });
+      expect(res.status).toBe(200);
+    });
+
+    expect(sessionQuery.clone).toHaveBeenCalledTimes(1);
+    expect(sessionQuery.first).toHaveBeenCalledTimes(2);
+    expect(escalationInsert).toHaveBeenCalledWith(expect.objectContaining({ conversation_id: newest.id }));
   });
 
   test('the authenticated property claim scopes the conversation lookup', async () => {
@@ -301,7 +378,7 @@ describe('POST /ai/chat/report', () => {
 
   test("a supplied conversation owned by another customer is not linked or replaced with the latest", async () => {
     const conversationId = '44444444-4444-4444-8444-444444444444';
-    const { escalationInsert } = mockReportTables({
+    const { sessionQuery, escalationInsert } = mockReportTables({
       session: {
         id: conversationId,
         customer_id: 'someone-else',
@@ -322,6 +399,8 @@ describe('POST /ai/chat/report', () => {
         customer_id: 'cust-1',
       }));
     });
+    expect(sessionQuery.clone).not.toHaveBeenCalled();
+    expect(sessionQuery.first).toHaveBeenCalledTimes(1);
   });
 
   test('rejects an invalid supplied conversation id without touching the queue', async () => {

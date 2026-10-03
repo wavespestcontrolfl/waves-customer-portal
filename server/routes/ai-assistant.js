@@ -223,8 +223,25 @@ router.post('/chat/report', requireAiContentReport, chatReportLimiter, authentic
         channel_identifier: channelIdentifier,
         customer_id: customerId,
       };
-      if (conversationId) scope.id = conversationId;
-      conversation = await db('agent_sessions').where(scope).orderBy('created_at', 'desc').first();
+      if (conversationId) {
+        scope.id = conversationId;
+        conversation = await db('agent_sessions').where(scope).orderBy('created_at', 'desc').first();
+      } else {
+        const conversations = db('agent_sessions').where(scope);
+        conversation = await conversations.clone()
+          .whereExists(function reportedAssistantMessage() {
+            this.select(db.raw('1'))
+              .from('agent_messages as reported_message')
+              .whereRaw('reported_message.conversation_id = agent_sessions.id')
+              .where({
+                'reported_message.role': 'assistant',
+                'reported_message.content': messageContent,
+              });
+          })
+          .orderBy('created_at', 'desc')
+          .first();
+        if (!conversation) conversation = await conversations.orderBy('created_at', 'desc').first();
+      }
       // Keep a second check at the trust boundary even though the SQL is
       // scoped; it protects against future query refactors and mock/adapter
       // mistakes returning a row outside the predicate.
