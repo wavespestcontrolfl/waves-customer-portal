@@ -1745,39 +1745,9 @@
       {
         "visit": 1,
         "month": "Any",
-        "primary": "Treated exterior perimeter band\nApplied repellent solution with surfactant to perimeter\nApplied non-repellent solution to perimeter (6-ft band + crack & crevice)\nTreated interior cracks & crevices (activity present)\nSwept eaves, window frames, door frames, and lanai",
-        "secondary": "Applied WDG or granular bait in landscape beds\nPlaced glue boards in garage or utility areas\nDocumented moisture, exclusion, or sanitation conditions",
+        "primary": "Swept eaves, window frames, door frames, and lanai\nApplied non-repellent band to foundation (1 ft up, 1 ft out)\nTreated exterior perimeter band\nTreated eaves, lanai or pool cage, and garage\nTreated interior cracks & crevices (activity present)",
+        "secondary": "Placed glue boards in garage or utility areas\nDocumented moisture, exclusion, or sanitation conditions",
         "lineMeta": {
-          "Treated exterior perimeter band": {
-            "scope": "exterior",
-            "treatmentApplied": true,
-            "catalogProductHints": [
-              "Demand CS",
-              "Talstar P"
-            ]
-          },
-          "Applied repellent solution with surfactant to perimeter": {
-            "scope": "exterior",
-            "treatmentApplied": true,
-            "catalogProductHints": [
-              "Talstar P",
-              "Demand CS"
-            ]
-          },
-          "Applied non-repellent solution to perimeter (6-ft band + crack & crevice)": {
-            "scope": "exterior",
-            "treatmentApplied": true,
-            "catalogProductHints": [
-              "Alpine WSG"
-            ]
-          },
-          "Treated interior cracks & crevices (activity present)": {
-            "scope": "interior",
-            "treatmentApplied": true,
-            "catalogProductHints": [
-              "Alpine WSG"
-            ]
-          },
           "Swept eaves, window frames, door frames, and lanai": {
             "scope": "exterior",
             "treatmentApplied": false,
@@ -1785,11 +1755,32 @@
               "Webster"
             ]
           },
-          "Applied WDG or granular bait in landscape beds": {
+          "Applied non-repellent band to foundation (1 ft up, 1 ft out)": {
             "scope": "exterior",
             "treatmentApplied": true,
             "catalogProductHints": [
-              "Advion WDG Granular"
+              "Taurus SC"
+            ]
+          },
+          "Treated exterior perimeter band": {
+            "scope": "exterior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Atticus Talak 7.9 F"
+            ]
+          },
+          "Treated eaves, lanai or pool cage, and garage": {
+            "scope": "exterior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Atticus Talak 7.9 F"
+            ]
+          },
+          "Treated interior cracks & crevices (activity present)": {
+            "scope": "interior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Alpine WSG"
             ]
           },
           "Placed glue boards in garage or utility areas": {

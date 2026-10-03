@@ -699,7 +699,9 @@ function canonicalProductName(value) {
 function protocolContainsProduct(serviceKey, lawnTrack, productName) {
   const result = getProtocol({ service_type: serviceKey, lawn_track: lawnTrack });
   if (!result?.protocol) return null;
-  const protocolText = canonicalProductName(JSON.stringify(result.protocol));
+  // Field rules are prose ("Do not add LESCO 90/10"): a product a rule
+  // forbids must not read as one the protocol uses.
+  const protocolText = canonicalProductName(JSON.stringify(result.protocol, (key, value) => (key === 'field_rules' ? undefined : value)));
   const requested = canonicalProductName(productName);
   if (!requested) return false;
   const tokens = requested.split(' ').filter(Boolean);

@@ -59,3 +59,21 @@ describe('pest field rules', () => {
     expect(entries[0].content).toBe('Q?\nDo it.');
   });
 });
+
+describe('routine pest visit checklist agrees with the field rules', () => {
+  const visit = protocols.pest.visits[0];
+  const text = `${visit.primary}\n${visit.secondary}`;
+  const exteriorHints = Object.values(visit.lineMeta)
+    .filter((m) => m.scope === 'exterior' && m.treatmentApplied)
+    .flatMap((m) => m.catalogProductHints || []);
+
+  test('no surfactant, granules or Alpine outside', () => {
+    expect(text).not.toMatch(/surfactant|granul/i);
+    expect(exteriorHints).not.toContain('Alpine WSG');
+    expect(exteriorHints).not.toContain('Demand CS');
+  });
+
+  test('outside is the Taurus band and Talak', () => {
+    expect([...new Set(exteriorHints)].sort()).toEqual(['Atticus Talak 7.9 F', 'Taurus SC']);
+  });
+});
