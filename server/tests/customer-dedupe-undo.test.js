@@ -260,6 +260,7 @@ describe('executeMerge repointed_ids journal record', () => {
     expect(recorded.winner_note_appends).toBe(null);
   });
 
+
   it("journals the winner's PRE-FOLD notes with the applied concatenation when the merge appends loser notes", async () => {
     const winner = {
       id: WINNER, first_name: 'Winner', last_name: 'Testcase', phone: '+15550000001',
@@ -1112,6 +1113,41 @@ describe('revertMerge', () => {
     expect(stamped.result.skipped).toEqual(expect.arrayContaining([
       expect.objectContaining({ key: 'customers.last_seen_at', reason: 'winner_value_changed_since_merge' }),
     ]));
+  });
+
+  describe('undo restores the new-sod date the merge cleared on the moved preferences row (P35)', () => {
+    const journalWithSod = () => {
+      const journal = baseJournal();
+      journal.repointed_ids.tables['property_preferences.customer_id'] = ['pp-1'];
+      journal.repointed_ids.moved_pref_sod_laid_on = { row_id: 'pp-1', before: '2026-10-01' };
+      return journal;
+    };
+    const tablesFor = () => ({
+      leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+      invoices: { stillOnWinner: ['inv-1'] },
+      property_preferences: { stillOnWinner: ['pp-1'] },
+    });
+    const sodRestores = (state) => state.flagRestores.filter((r) => r.table === 'property_preferences' && 'sod_laid_on' in r.payload);
+
+    it('puts the original date back on the row the undo returns to the loser', async () => {
+      const { trx, state } = buildRevertTrx({ journal: journalWithSod(), winner: baseWinner(), loser: baseLoser(), tables: tablesFor() });
+      db.transaction.mockImplementation(async (fn) => fn(trx));
+      const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+      // The row moves back first (plain repoint) ...
+      expect(state.repointedBack.find((r) => r.table === 'property_preferences')).toMatchObject({ ids: ['pp-1'], payload: { customer_id: LOSER } });
+      // ... then the date returns, only to the loser's row and only while it is still the merge-written null.
+      expect(sodRestores(state)).toEqual([{ table: 'property_preferences', where: { id: 'pp-1', customer_id: LOSER }, payload: { sod_laid_on: '2026-10-01' } }]);
+      expect(result.skipped.filter((x) => x.key === 'property_preferences.sod_laid_on')).toEqual([]);
+    });
+
+    it('a journal with no cleared date restores nothing', async () => {
+      const journal = journalWithSod();
+      journal.repointed_ids.moved_pref_sod_laid_on = null;
+      const { trx, state } = buildRevertTrx({ journal, winner: baseWinner(), loser: baseLoser(), tables: tablesFor() });
+      db.transaction.mockImplementation(async (fn) => fn(trx));
+      await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+      expect(sodRestores(state)).toEqual([]);
+    });
   });
 
   it('restores the irrigation weekly delivery identity (trigger_event_id) for exactly the journaled rows (hook P1 on 47b0a3146)', async () => {

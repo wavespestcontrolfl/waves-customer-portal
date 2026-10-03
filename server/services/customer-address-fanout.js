@@ -191,8 +191,9 @@ function snapshotMatchesLine1(snapshot, line1) {
 // clearSodLaidOn (default true): also clears the new-sod date (P35) in the same
 // stamp. The customer merge passes false: it has no before-image for the stamp
 // fields (an undo leaves the stamp in place), so clearing there could not be
-// undone. The merge instead keeps the winner's own date and never copies the
-// loser's (mergeSingletonPrefRow).
+// undone. The merge instead keeps the winner's own date, never copies the loser's
+// (mergeSingletonPrefRow), and clears a moved-whole loser row's date itself with a
+// journaled before-image (executeMerge / revertMerge).
 async function markSprinklerSettingsMoved(customerId, conn = db, { clearSodLaidOn = true } = {}) {
   if (!customerId) return 0;
   // Same customer-scoped lock the prefs PUT serializes on: an autosave begun

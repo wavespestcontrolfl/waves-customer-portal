@@ -2714,6 +2714,8 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // journal lists WHICH handlers ran (collision_handlers) and the revert
     // endpoint refuses any merge where one did.
     const repointedIds = {};
+    // The loser's moved preferences row whose new-sod date the merge cleared ({ row_id, before }), for the undo.
+    let movedPrefSodLaidOn = null;
     const collisionHandlers = [];
     // email_messages ids whose irrigation weekly trigger identity was
     // rewritten loser→winner (row ids, or { count } over the cap — the undo
@@ -3104,11 +3106,32 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     if (fanout.addressMatchKey(winner?.address_line1) && fanout.addressMatchKey(loser?.address_line1) && fanout.homesDiffer(winner, loser)) {
       try {
         await trx.transaction(async (sp) => {
-          // sod_laid_on is NOT cleared here: the merge journals no before-image for the stamp (an undo
-          // leaves it in place), so a clear could not be undone. The winner's own date stands (its
-          // home did not move) and the loser's is never copied (mergeSingletonPrefRow).
+          // The STAMP never clears sod_laid_on on a merge (it has no before-image: an undo leaves the
+          // stamp in place). The winner's own date stands (its home did not move) and the loser's is
+          // never copied by the field fill (mergeSingletonPrefRow). The one case where the loser's
+          // date does reach the winner is below, journaled and cleared with a before-image.
           const n = await fanout.markSprinklerSettingsMoved(winnerId, sp, { clearSodLaidOn: false });
           if (n) repointed['property_preferences.irrigation_home_changed_at'] = n;
+          // The winner had NO preferences row, so the FK sweep moved the loser's whole row (a plain,
+          // row-level-journaled repoint). Its new-sod date describes the LOSER's home, which is not
+          // the winner's: clear it on the moved row, and journal the original value so an undo (which
+          // moves the row back) restores it losslessly. Two rows colliding go through the field fill,
+          // which never copies the date (and whose merges are never auto-undone).
+          if (typeof repointed['property_preferences.customer_id'] === 'number') {
+            try {
+              await sp.transaction(async (sod) => {
+                const moved = await sod('property_preferences').where({ customer_id: winnerId }).forUpdate().first('id', 'sod_laid_on');
+                if (moved && moved.sod_laid_on) {
+                  await sod('property_preferences').where({ id: moved.id }).update({ sod_laid_on: null });
+                  movedPrefSodLaidOn = { row_id: moved.id, before: require('../utils/datetime-et').dateOnlyString(moved.sod_laid_on) };
+                  repointed['property_preferences.sod_laid_on_cleared'] = 1;
+                }
+              });
+            } catch (sodErr) {
+              // Before the sod_laid_on migration there is no date to clear (42703); anything else aborts the merge.
+              if (!(sodErr && sodErr.code === '42703')) throw sodErr;
+            }
+          }
         });
       } catch (e) {
         throw new Error(`executeMerge: sprinkler-settings move stamp failed: ${e.message}`);
@@ -3516,6 +3539,10 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         // rewrites exactly these back so the restored loser's customer-week
         // record follows the returned rows (hook P1 on 47b0a3146).
         irrigation_trigger_ids: irrigationTriggerIds,
+        // The new-sod date the merge cleared from the loser's preferences row that moved whole to a
+        // winner with none ({ row_id, before }); the undo puts it back while the row is returned and
+        // the date is still the merge-written null. null = nothing was cleared.
+        moved_pref_sod_laid_on: movedPrefSodLaidOn,
         // The winner's ORIGINAL customer-level autopay fields for the exact
         // columns the most-restrictive block overwrote ({ before, applied }),
         // or null when the merge left the winner's autopay alone.
@@ -5240,6 +5267,19 @@ async function revertMerge({ journalId, performedBy, performedById }) {
         skipped.push({ key: plan.key, reason: 'rows_changed_during_revert', count: plan.ids.length - count });
       }
       if (count) repointedBack[plan.key] = count;
+    }
+
+    // The merge cleared the new-sod date on the loser's preferences row it moved to a winner that had
+    // none (the date described the loser's home). The row just moved back with the others; restore
+    // the journaled date, only where the row is the loser's again and the date is still the
+    // merge-written null (a date entered since stays put and is reported).
+    const sodCleared = recorded.moved_pref_sod_laid_on || null;
+    if (sodCleared && sodCleared.row_id && sodCleared.before) {
+      const restored = await trx('property_preferences')
+        .where({ id: sodCleared.row_id, customer_id: loserId })
+        .whereNull('sod_laid_on')
+        .update({ sod_laid_on: sodCleared.before });
+      if (!restored) skipped.push({ key: 'property_preferences.sod_laid_on', reason: 'value_changed_since_merge' });
     }
 
     // Operator call links the merge rewrote to the winner go back to the

@@ -2207,9 +2207,10 @@ source estimate, matched to the primary address; a visit with none counts only o
 proven single-premises account); a visit at another property, or one that cannot be
 proven, gets the normal report; a move of the primary home (address edit or removal,
 primary-property promotion) clears the sod date in the same transaction, so the next
-visit at the new home is the normal report (the different-homes customer merge does not
-clear it: it never copies the loser's date onto the winner and leaves the winner's own
-date, because the winner's home did not move); a failed read of the visit gives the normal report
+visit at the new home is the normal report (the different-homes customer merge never copies the
+loser's date onto the winner and leaves the winner's own date, because the winner's home
+did not move; when the loser's whole preferences row moves to a winner with none, the
+date is cleared on it and journaled, and the merge undo restores it); a failed read of the visit gives the normal report
 too, uncacheable, with an emailed PDF deferred. One resolver
 (`lawn-new-sod-visit.js`) serves the report, the Fast Complete sheet, the job card and
 the watering text. It adds no key; it replaces the content of
