@@ -6,6 +6,8 @@ const mockEpisodes = { raiseAdminAlertWithReopen: jest.fn(), openAdminAlertKeys:
 jest.mock('../services/admin-alert-episodes', () => mockEpisodes);
 const mockLock = { held: false, fail: false };
 jest.mock('../utils/cron-lock', () => ({ runExclusive: async (name, fn) => { if (mockLock.fail) throw new Error('advisory lock query failed'); return mockLock.held ? { skipped: true, reason: 'lease_held' } : fn(); } }));
+const mockBell = { allowed: true };
+jest.mock('../services/notification-bell-policy', () => ({ ...jest.requireActual('../services/notification-bell-policy'), bellAllowed: async () => mockBell.allowed }));
 jest.mock('../services/internal-test-customers', () => ({ isInternalTestCustomerId: (id) => id === 'test-cust' }));
 
 const { composeAdminAlert } = require('../services/admin-alert-compose');
@@ -29,7 +31,7 @@ function fakeConn({ reviews = [], boundary = BOUNDARY, recheck = null } = {}) {
       let shared = false;
       const b = {
         where(...a) {
-          if (typeof a[0] === 'function') a[0](b);
+          if (typeof a[0] === 'function') a[0].call(b, b);
           else if (a[0] === 'id') idFilter = a[1];
           else if (table === 'google_reviews' && !inTrx) seen.reviewWheres.push(a);
           return b;
@@ -37,6 +39,9 @@ function fakeConn({ reviews = [], boundary = BOUNDARY, recheck = null } = {}) {
         whereBetween(...a) { if (!inTrx) seen.reviewWheres.push(['between', ...a]); return b; },
         whereNull(...a) { if (!inTrx) seen.reviewWheres.push(['null', ...a]); return b; },
         orWhereNull() { return b; }, orWhereNot() { return b; },
+        orWhere(...a) { if (!inTrx) seen.reviewWheres.push(['or', ...a]); return b; },
+        whereIn(...a) { if (table === 'google_reviews' && !inTrx) seen.reviewWheres.push(['in', ...a]); return b; },
+        modify(fn) { fn(b); return b; },
         whereRaw(...a) { if (!inTrx) seen.reviewWheres.push(['raw', ...a]); return b; },
         forShare() { shared = true; return b; },
         first: async () => (table === 'system_settings' ? settings : null),
@@ -113,7 +118,10 @@ describe('syncLowRatingReviewAlerts', () => {
     expect(seen.reviewWheres).toContainEqual(['between', 'star_rating', [1, 3]]);
     expect(seen.reviewWheres).toContainEqual(['review_created_at', '>=', new Date(BOUNDARY)]);
     expect(seen.reviewWheres).toContainEqual(['null', 'missing_since']);
-    expect(seen.reviewWheres.find((w) => w[0] === 'raw')[1]).toMatch(/\[DRAFT\]/);
+    // the Reviews page's own needs-a-real-reply rule and active locations
+    expect(seen.reviewWheres).toContainEqual(['null', 'review_reply']);
+    expect(seen.reviewWheres).toContainEqual(['or', 'review_reply', 'like', '[DRAFT]%']);
+    expect(seen.reviewWheres).toContainEqual(['in', 'location_id', ['bradenton', 'parrish', 'sarasota', 'venice']]);
   });
 
   test('the first live run stores its instant once; a later run reuses it', async () => {
@@ -262,6 +270,17 @@ describe('syncLowRatingReviewAlerts', () => {
       spy.mockRestore();
       if (was === undefined) delete process.env.ALERT_EPISODES; else process.env.ALERT_EPISODES = was;
     }
+  });
+
+  test('the owner silenced the category: nothing is raised (not even a reopen) and standing items close', async () => {
+    mockBell.allowed = false;
+    try {
+      mockEpisodes.openAdminAlertKeys.mockResolvedValue([`review-low-rating:${R1}`]);
+      const { conn } = fakeConn({ reviews: [{ id: R1, google_review_id: 'g-1', star_rating: 1, reviewer_name: 'Pat', customer_id: null }] });
+      await syncLowRatingReviewAlerts({ conn });
+      expect(mockEpisodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+      expect(mockEpisodes.closeAdminAlertKeys).toHaveBeenCalledWith(conn, [`review-low-rating:${R1}`], 'review answered', expect.any(Object));
+    } finally { mockBell.allowed = true; }
   });
 
   test('the category rings by default and the owner can silence it', () => {

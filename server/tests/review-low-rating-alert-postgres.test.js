@@ -1,6 +1,7 @@
 // The bad-review bell's "needs an answer" query on a real PostgreSQL: 1-3
-// stars, written since the boundary, not dismissed, still on Google, and no
-// published reply (blank or an unpublished '[DRAFT] …' counts as none).
+// stars, written since the boundary, at an active location, not dismissed,
+// still on Google, and no real reply by the Reviews page's own rule (none, or
+// an unpublished '[DRAFT] …').
 // Every row is written inside one transaction that is rolled back.
 const { randomUUID } = require('node:crypto');
 
@@ -33,6 +34,7 @@ jest.setTimeout(60000);
       gone: row('Left Google', { missing_since: new Date('2026-10-02T13:00:00Z') }),
       fourStar: row('Four Star', { star_rating: 4 }),
       before: row('Before Boundary', { review_created_at: '2026-09-30T23:00:00Z' }),
+      retired: row('Retired Location', { location_id: 'retired-location' }),
     };
     await trx('google_reviews').insert(Object.values(rows));
     const found = await needsAnswerQuery(trx, since).whereIn('id', Object.values(rows).map((r) => r.id));

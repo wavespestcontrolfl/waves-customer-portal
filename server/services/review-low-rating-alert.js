@@ -102,16 +102,21 @@ async function activationBoundary(conn = db) {
   return new Date(settled?.value || now);
 }
 
-// The reviews that need an answer now (see the header).
+// The reviews that need an answer now (see the header), on the Reviews page's
+// own terms (Codex #5659 r6): its active locations only (a retired location is
+// never synced again, so its review could never settle), and its own
+// needs-a-real-reply rule (review-reply/draft-prefix.js whereNeedsRealReply).
 function needsAnswerQuery(conn, since) {
+  const { WAVES_LOCATIONS } = require('../config/locations');
+  const { whereNeedsRealReply } = require('./review-reply/draft-prefix');
   return conn('google_reviews')
+    .whereIn('location_id', WAVES_LOCATIONS.map((l) => l.id))
     .whereBetween('star_rating', [1, MAX_STARS])
     .where((q) => q.whereNull('reviewer_name').orWhereNot('reviewer_name', '_stats'))
     .where('review_created_at', '>=', since)
     .where((q) => q.where('dismissed', false).orWhereNull('dismissed'))
     .whereNull('missing_since')
-    // No published reply: blank, or our own unpublished '[DRAFT] …' text.
-    .whereRaw("(TRIM(COALESCE(review_reply, '')) = '' OR LEFT(TRIM(review_reply), 7) = '[DRAFT]')")
+    .modify((q) => whereNeedsRealReply(q))
     .select('id', 'google_review_id', 'star_rating', 'reviewer_name', 'customer_id');
 }
 
@@ -176,7 +181,13 @@ async function reconcile(conn, now, out) {
     // the office: left out of the live set, so an item it already has (raised
     // while it was still unlinked) is closed below (Codex #5659 r2).
     const eligible = (review) => !(review.customer_id && isInternalTestCustomerId(review.customer_id));
-    const reviews = (await needsAnswerQuery(conn, since)).filter(eligible);
+    // The owner silenced the category (Push settings): nothing rings, not
+    // even a reopen (raiseAdminAlertWithReopen re-rings a cleared row, and the
+    // category override is only read on a fresh insert), and standing items
+    // close below (Codex #5659 r6).
+    const bellPolicy = require('./notification-bell-policy');
+    const silenced = !(await bellPolicy.bellAllowed({ category: CATEGORY }));
+    const reviews = silenced ? [] : (await needsAnswerQuery(conn, since)).filter(eligible);
     // ALERT_EPISODES killed (Codex #5659 r5): the shared kill switch's contract
     // is no close pass and no reopen, the emitter's plain deduped raise. Each
     // review still rings once on its own key; nothing is auto-closed.
