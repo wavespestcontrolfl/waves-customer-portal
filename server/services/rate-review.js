@@ -1669,9 +1669,11 @@ async function loadEstimates(dbh, estimateIds) {
 //     ONE_TIME_ADDON_SERVICE_KEYS treats as one-time whatever their
 //     pattern column says — waveguard_membership is the signup fee, not
 //     a program): a second program the plan-line count cannot see.
-// Per-FAMILY signal: a non-live row (cancelled — a program swept before its
-// first completion keeps status cancelled, cancellation-processor.js —
-// skipped, or simply past) in a family OTHER than the line's own. The same
+// Per-PROGRAM signal: a non-live row (cancelled — a program swept before
+// its first completion keeps status cancelled, cancellation-processor.js —
+// skipped, or simply past) of a program OTHER than the line's own, judged
+// on normalized identities (palm ≠ tree/shrub; a composite key is each
+// family it names). The same
 // family's cancelled rows are that one program being rescheduled (prod
 // read 2026-10-03: every one of the 10 no-history import accounts carries
 // cancelled 2026 pest series and nothing else), not a second program.
@@ -1690,23 +1692,39 @@ async function loadAccountActivity(dbh, customerIds, { today }) {
                   WHERE s.customer_id = c.id AND ${LIVE_STATUS_SQL} AND s.scheduled_date >= ? AND ${ADDON_LINE_IS_PLAN_SQL}
                     AND COALESCE(scheduled_service_addons.service_key_snapshot, asv.service_key, '') NOT IN (${oneTimeAddonKeys}))
       ) AS account_activity,
-      (SELECT COALESCE(array_agg(DISTINCT ${LINE_SQL}), '{}') FROM scheduled_services s LEFT JOIN services sv ON sv.id = s.service_id
-        WHERE s.customer_id = c.id AND NOT (${LIVE_STATUS_SQL} AND s.scheduled_date >= ?)) AS non_live_families
+      (SELECT COALESCE(array_agg(DISTINCT ${LINE_SQL} || '|' || COALESCE(s.service_key_snapshot, sv.service_key, '')), '{}')
+        FROM scheduled_services s LEFT JOIN services sv ON sv.id = s.service_id
+        WHERE s.customer_id = c.id AND NOT (${LIVE_STATUS_SQL} AND s.scheduled_date >= ?)) AS non_live_lines
     FROM customers c WHERE c.id = ANY(?::uuid[])
   `, [today, today, customerIds]);
   const ids = new Set(customerIds.map(String));
   const out = new Map();
   for (const r of rows) {
     if (!ids.has(String(r.customer_id))) continue;
-    out.set(String(r.customer_id), { accountActivity: r.account_activity === true, nonLiveFamilies: Array.isArray(r.non_live_families) ? r.non_live_families.map(String) : [] });
+    const lines = Array.isArray(r.non_live_lines) ? r.non_live_lines.map(String) : [];
+    out.set(String(r.customer_id), { accountActivity: r.account_activity === true, nonLivePrograms: [...new Set(lines.flatMap(programsForNonLiveLine))] });
   }
   return out;
 }
-// The gate for ONE line: account-wide activity, or a non-live row in another family.
-function accountActiveFor(activity, customerId, familyKey) {
+// A non-live row's normalized program identities, from its family and
+// catalog key: palm is its own program inside the tree_shrub family, a
+// composite key is every family it names, anything else is its family.
+function programsForNonLiveLine(encoded) {
+  const [family, key = ''] = String(encoded).split('|');
+  if (!family) return [];
+  if (isCompositeCatalogKey(key)) {
+    const named = KEY_FAMILY_TOKENS.filter(([, re]) => re.test(key.toLowerCase())).map(([name]) => name);
+    return named.length ? named : [family];
+  }
+  if (family === 'tree_shrub') return [isPalmServiceKey(key) ? 'palm' : 'tree_shrub'];
+  return [family];
+}
+// The gate for ONE line: account-wide activity, or a non-live row of
+// another PROGRAM (a cancelled palm series is not a tree/shrub reschedule).
+function accountActiveFor(activity, customerId, lineProgram) {
   const a = activity && activity.get ? activity.get(String(customerId)) : null;
   if (!a) return false;
-  return a.accountActivity || a.nonLiveFamilies.some((f) => f !== familyKey);
+  return a.accountActivity || a.nonLivePrograms.some((p) => p !== lineProgram);
 }
 
 async function loadLiveTerms(dbh, customerIds, { today }) {
@@ -2306,7 +2324,7 @@ function selectReviewEntries(book, { from, to, now, latestByLine, firstVisits = 
       presenceWindowDays: presenceWindowFor(entry.visitsPerYear),
       accountCreatedAt: entry.customer.created_at,
       onlyActiveFamily: onlyProgramFor(entry),
-      accountHasActivity: !!entry.acceptedAt || accountActiveFor(activeAccounts, entry.customer.id, entry.familyKey),
+      accountHasActivity: !!entry.acceptedAt || accountActiveFor(activeAccounts, entry.customer.id, linePrograms({ familyKey: entry.familyKey, serviceKeys: entry.serviceKeys })[0] || entry.familyKey),
     });
     const occurrence = reviewOccurrence(entry, latestByLine.get(`${entry.customer.id}|${entry.familyKey}`), { from, to, carryFloor });
     if (!occurrence) continue;
@@ -3241,7 +3259,7 @@ module.exports = {
     isMultiProgramLine,
     trimmedMedian, median, quartiles, modeCents, monthsBetween, monthsAgoYmd, monthKeyMinus, anniversaryInWindow, reviewWindowFor, dateColumn, etDay,
     isBatchKey, assertBatchKey, assertYmd, firstCompletedVisitFor, selectReviewEntries, loadLatestSnapshots, engineItemLowConfidence, windowLabel, syncPricingConstants, daysAgoYmd, qualifyingKeyForLine,
-    PLAN_ROW_SQL, DATING_ROW_SQL, LIVE_STATUS_SQL, isImportedAccount, IMPORTED_ACCOUNT_LEAD_DAYS, informationalFlags, loadAccountActivity, accountActiveFor, reviewOccurrence, isCompositeCatalogKey, ONE_TIME_ADDON_SERVICE_KEYS,
+    PLAN_ROW_SQL, DATING_ROW_SQL, LIVE_STATUS_SQL, isImportedAccount, IMPORTED_ACCOUNT_LEAD_DAYS, informationalFlags, loadAccountActivity, accountActiveFor, programsForNonLiveLine, reviewOccurrence, isCompositeCatalogKey, ONE_TIME_ADDON_SERVICE_KEYS,
     CARRY_FORWARD_STATUSES, CARRY_FORWARD_MAX_DAYS_PAST, REVIEW_WINDOW_FROM_DAYS, REVIEW_WINDOW_TO_DAYS, CALLBACK_LANE_FOR_FAMILY,
     visitsPerYearFor,
     conversationMinutesFor, interactionFor, wallMinutesFor, treatmentMinutesFor, computeLineAllowances, allowanceFor, lineDurationStats, visitRevenueCents,

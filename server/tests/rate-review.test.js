@@ -850,16 +850,20 @@ describe('anniversary and tenure', () => {
     P.selectReviewEntries([pest], win);
     expect(pest.anniversary).toMatchObject({ date: '2025-06-06', source: 'member_since_import' });
     const accepted = mk({ account_lines: 1 }, ['tree_shrub']);
-    P.selectReviewEntries([accepted], { ...win, activeAccounts: new Map([['c1', { accountActivity: true, nonLiveFamilies: [] }]]) });
+    P.selectReviewEntries([accepted], { ...win, activeAccounts: new Map([['c1', { accountActivity: true, nonLivePrograms: [] }]]) });
     expect(accepted.anniversary).toMatchObject({ date: null });
     const churned = mk({ account_lines: 1 }, ['tree_shrub']);
-    P.selectReviewEntries([churned], { ...win, activeAccounts: new Map([['c1', { accountActivity: false, nonLiveFamilies: ['tree_shrub'] }]]) });
+    P.selectReviewEntries([churned], { ...win, activeAccounts: new Map([['c1', { accountActivity: false, nonLivePrograms: ['tree_shrub'] }]]) });
     expect(churned.anniversary).toMatchObject({ date: '2025-06-06', source: 'member_since_import' }); // same-family cancelled rows = rescheduling
     const other = mk({ account_lines: 1 }, ['tree_shrub']);
-    P.selectReviewEntries([other], { ...win, activeAccounts: new Map([['c1', { accountActivity: false, nonLiveFamilies: ['pest_control'] }]]) });
+    P.selectReviewEntries([other], { ...win, activeAccounts: new Map([['c1', { accountActivity: false, nonLivePrograms: ['pest_control'] }]]) });
+    expect(other.anniversary).toMatchObject({ date: null });
+    const palmChurn = mk({ account_lines: 1 }, ['tree_shrub']);
+    P.selectReviewEntries([palmChurn], { ...win, activeAccounts: new Map([['c1', { accountActivity: false, nonLivePrograms: ['palm'] }]]) });
+    expect(palmChurn.anniversary).toMatchObject({ date: null }); // a cancelled palm program on a new tree/shrub line = second program
     expect(other.anniversary).toMatchObject({ date: null }); // another family's cancelled series = a second program
     const accepted2 = mk({ account_lines: 1 }, ['tree_shrub']);
-    P.selectReviewEntries([accepted2], { ...win, activeAccounts: new Map([['c1', { accountActivity: true, nonLiveFamilies: [] }]]) });
+    P.selectReviewEntries([accepted2], { ...win, activeAccounts: new Map([['c1', { accountActivity: true, nonLivePrograms: [] }]]) });
     expect(accepted.anniversary).toMatchObject({ date: null });
   });
   test('the account-activity gate is ONE query: accepted by status or timestamp, any completed visit, a live recurring add-on', () => {
@@ -868,14 +872,23 @@ describe('anniversary and tenure', () => {
     expect(body).toMatch(/e\.accepted_at IS NOT NULL OR e\.status = 'accepted'/);
     expect(body).toMatch(/s\.status = 'completed'\)/); // any completed visit, any family / kind
     // per-family: non-live rows (cancelled / skipped / past) are listed by family; another family's = a second program
-    expect(body).toMatch(/array_agg\(DISTINCT \$\{LINE_SQL\}\)/);
-    expect(body).toMatch(/NOT \(\$\{LIVE_STATUS_SQL\} AND s\.scheduled_date >= \?\)\) AS non_live_families/);
+    // non-live rows are aggregated as family|catalog-key and normalized to PROGRAM identities (palm ≠ tree/shrub; composites split)
+    expect(body).toMatch(/array_agg\(DISTINCT \$\{LINE_SQL\} \|\| '\|' \|\| COALESCE\(s\.service_key_snapshot, sv\.service_key, ''\)\)/);
+    expect(body).toMatch(/NOT \(\$\{LIVE_STATUS_SQL\} AND s\.scheduled_date >= \?\)\) AS non_live_lines/);
     expect(body).toMatch(/\[today, today, customerIds\]/); // two date bindings, in order
-    const act = new Map([['c1', { accountActivity: false, nonLiveFamilies: ['pest_control'] }], ['c2', { accountActivity: false, nonLiveFamilies: ['pest_control', 'lawn_care'] }], ['c3', { accountActivity: true, nonLiveFamilies: [] }]]);
+    expect(P.programsForNonLiveLine('tree_shrub|palm_injection')).toEqual(['palm']);
+    expect(P.programsForNonLiveLine('tree_shrub|tree_shrub_bimonthly')).toEqual(['tree_shrub']);
+    expect(P.programsForNonLiveLine('tree_shrub|')).toEqual(['tree_shrub']);
+    expect(P.programsForNonLiveLine('pest_control|pest_rodent_quarterly').sort()).toEqual(['pest', 'rodent']);
+    expect(P.programsForNonLiveLine('pest_control|quarterly_pest_control')).toEqual(['pest_control']);
+    expect(P.programsForNonLiveLine('|')).toEqual([]);
+    const act = new Map([['c1', { accountActivity: false, nonLivePrograms: ['pest_control'] }], ['c2', { accountActivity: false, nonLivePrograms: ['pest_control', 'lawn_care'] }], ['c3', { accountActivity: true, nonLivePrograms: [] }], ['c4', { accountActivity: false, nonLivePrograms: ['palm'] }]]);
     expect(P.accountActiveFor(act, 'c1', 'pest_control')).toBe(false); // the same program rescheduled
     expect(P.accountActiveFor(act, 'c1', 'lawn_care')).toBe(true); // a cancelled pest series = another program
     expect(P.accountActiveFor(act, 'c2', 'pest_control')).toBe(true);
     expect(P.accountActiveFor(act, 'c3', 'pest_control')).toBe(true);
+    expect(P.accountActiveFor(act, 'c4', 'tree_shrub')).toBe(true); // a cancelled palm program is not a tree/shrub reschedule
+    expect(P.accountActiveFor(act, 'c4', 'palm')).toBe(false);
     expect(P.accountActiveFor(act, 'c9', 'pest_control')).toBe(false);
     expect(body).toMatch(/FROM service_records sr WHERE sr\.customer_id = c\.id AND sr\.status = 'completed'/); // imported history often lives only there
     expect(body).toMatch(/FROM scheduled_services s WHERE s\.customer_id = c\.id AND s\.status = 'completed'\)/); // the completed clause carries no family filter
