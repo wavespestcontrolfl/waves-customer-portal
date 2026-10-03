@@ -581,6 +581,10 @@ describe('verifyReplyText — public-surface safety net', () => {
     // The old fixed "pest and lawn team" line can never post again (2026-09-24
     // fix): it is now a banned stock phrase, not a passing no_text reply.
     expect(verify(good('Hello there, thanks for the rating. Glad to be your pest and lawn team locally.'), g)).toBe('stock_phrase');
+    // Owner 2026-10-03: "kind" is fine. A 5-star review parked after two
+    // drafts failed on that one word; "kind words" stays a stock phrase.
+    expect(verify(good('Hello there, that is kind of you. Thanks for the rating.'), g)).toBeNull();
+    expect(verify(good('Hello there, thanks for the kind words and the rating.'), g)).toBe('stock_phrase');
     expect(verify(good('Hello there, thank you for the rating.'), g)).toBeNull();
   });
   test('quantified tenure needs the whole phrase in the review', () => {
