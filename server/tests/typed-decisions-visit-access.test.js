@@ -21,7 +21,7 @@ const access = require('../services/typed-decisions/visit-access-shadow');
 
 jest.setTimeout(60000);
 
-const GATES = ['GATE_TYPED_DECISIONS', 'GATE_TYPED_DECISIONS_CLEF', 'GATE_VISIT_ACCESS_FLAGS'];
+const GATES = ['GATE_TYPED_DECISIONS', 'GATE_TYPED_DECISIONS_CLEF', 'GATE_VISIT_ACCESS_FLAGS', 'GATE_NEIGHBORHOOD_ACCESS'];
 const saved = {};
 beforeAll(() => { for (const k of GATES) saved[k] = process.env[k]; });
 afterAll(() => { for (const k of GATES) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; } });
@@ -129,7 +129,11 @@ describe('visit access shadow: rules that need no database', () => {
     await database.raw(`CREATE TABLE ??.scheduled_services (id uuid PRIMARY KEY, customer_id uuid, service_type varchar(200),
       scheduled_date date, window_start time, status text, notes text, customer_request text, completed_at timestamptz, service_address_line1 text, service_address_line2 text, service_address_zip text, service_address_city text,
       property_id uuid, source_estimate_id uuid)`, [schema]);
-    await database.raw(`CREATE TABLE ??.customer_properties (id uuid PRIMARY KEY, customer_id uuid, address_line1 text, address_line2 text, city text, zip text)`, [schema]);
+    await database.raw(`CREATE TABLE ??.customer_properties (id uuid PRIMARY KEY, customer_id uuid, address_line1 text, address_line2 text, city text, zip text,
+      neighborhood_id uuid, active boolean DEFAULT true)`, [schema]);
+    await database.raw(`CREATE TABLE ??.neighborhoods (id uuid PRIMARY KEY, active boolean)`, [schema]);
+    await database.raw(`CREATE TABLE ??.neighborhood_access (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), neighborhood_id uuid, gate_label text,
+      access_type text, code text, instructions text, status text)`, [schema]);
     await database.raw(`CREATE TABLE ??.estimates (id uuid PRIMARY KEY, address text)`, [schema]);
     await database.raw(`CREATE TABLE ??.property_preferences (customer_id uuid PRIMARY KEY, pet_count integer, pet_details text,
       pets_secured_plan text, contact_preference text, away_mode_until date, side_gate_access varchar(200), neighborhood_gate_code varchar(50),
@@ -159,7 +163,7 @@ describe('visit access shadow: rules that need no database', () => {
     gates(true);
     mockAsk.mockReset();
     mockAsk.mockResolvedValue(reply());
-    for (const t of ['decision_reviews', 'sms_log', 'service_records', 'property_preferences', 'scheduled_services', 'customer_properties']) await database(t).del();
+    for (const t of ['decision_reviews', 'sms_log', 'service_records', 'property_preferences', 'scheduled_services', 'customer_properties', 'neighborhood_access', 'neighborhoods']) await database(t).del();
   });
 
   test('the migration keeps a value another migration added, and its down refuses while a visit row exists', async () => {
@@ -193,7 +197,7 @@ describe('visit access shadow: rules that need no database', () => {
     await text('Please text before you come, the baby naps at noon.', '2026-10-01T15:00:00Z');
     await text('The garage one changed', '2026-10-01T16:00:00Z');
     await text('nine zero four two', '2026-10-01T16:02:00Z');
-    await text('Also we got a second dog', '2026-10-01T18:00:00Z');
+    await text('Also we got a second dog', '2026-10-03T18:00:00Z');
     await text('Liked "Your visit is confirmed"', '2026-10-02T15:00:00Z', { message_type: 'sms_reaction' });
     await text('Before the last pest visit', '2026-07-01T15:00:00Z');
     await text('After the visit started', '2026-10-06T14:00:00Z');
@@ -206,7 +210,7 @@ describe('visit access shadow: rules that need no database', () => {
     expect(JSON.stringify(built.state)).not.toMatch(/latch sticks/);
     expect(built.state).toMatchObject({
       service_line: 'pest', visit_count: 2,
-      structured: { pet_count: 2, has_codes: true, contact_preference: 'text', away_mode: true, side_gate: true, chemical_sensitivity: true },
+      structured: { pet_count: 2, has_codes: true, contact_preference: 'text', away_mode: true, side_gate: true, chemical_sensitivity: true, neighborhood_gate: false },
       last_tech_notes: '[access detail withheld: mentions gate; reports a problem getting in]',
     });
     expect(built.state.recent_texts).toContain('the baby naps at noon');
@@ -427,6 +431,33 @@ describe('visit access shadow: rules that need no database', () => {
     expect(built.state.visit_count).toBe(231);
     expect(built.state.recent_texts).toContain('Ants are back in the lanai');
     expect(built.state.recent_texts).not.toContain('Please knock today');
+  });
+
+  test('a credential split over texts an hour apart is withheld; a failed Waves text opens no window', async () => {
+    await text('My gate code is', '2026-10-02T15:00:00Z');
+    await text('bluebird', '2026-10-02T16:10:00Z');
+    await text('What is the garage code?', '2026-09-28T15:00:00Z', { direction: 'outbound', status: 'failed' });
+    await text('The dog will be loose', '2026-09-28T16:00:00Z');
+    const built = await build(await visit());
+    expect(built.state.recent_texts).not.toContain('bluebird');
+    expect(built.state.recent_texts).toContain('The dog will be loose');
+  });
+
+  test('scheduler audit text never enters the notes', async () => {
+    const built = await build(await visit({ notes: 'Please use the back patio. recurring_align_2026_06: moved from Tue to Wed. No SMS sent.' }));
+    expect(built.state.notes_text).not.toMatch(/recurring_align|No SMS sent/);
+  });
+
+  test('a shared neighborhood gate entry counts as a code on file, and its code never leaves', async () => {
+    process.env.GATE_NEIGHBORHOOD_ACCESS = 'true';
+    const neighborhoodId = randomUUID();
+    await database('neighborhoods').insert({ id: neighborhoodId, active: true });
+    await database('neighborhood_access').insert({ neighborhood_id: neighborhoodId, gate_label: 'Main', access_type: 'keypad', code: '6612', status: 'active' });
+    await database('customer_properties').insert({ id: randomUUID(), customer_id: customerId, address_line1: '100 Example St', city: 'Bradenton', zip: '34200', neighborhood_id: neighborhoodId });
+    const built = await build(await visit());
+    expect(built.state.structured).toMatchObject({ has_codes: true, neighborhood_gate: true });
+    expect(built.baselines.needs_code_key_or_person).toEqual({ rules: true });
+    expect(JSON.stringify(built.state)).not.toContain('6612');
   });
 
   test('a provider that is down does not keep later visits from their first answer', async () => {

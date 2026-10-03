@@ -136,13 +136,12 @@ function redactForState(text) {
   }).join(' ');
 }
 
-// A customer can split a credential over two texts ("gate code is" / "four
-// five four five"): a text sent within this long after an access-bearing one
-// is withheld with it.
-const ACCESS_FOLLOW_UP_MS = 15 * 60 * 1000;
-// And a reply to a Waves text that asked about access can come much later:
-// every customer text within this long after such a Waves text is withheld.
-const ACCESS_REPLY_MS = 24 * 60 * 60 * 1000;
+// A customer can split a credential over two texts ("my gate code is" / an
+// hour later "bluebird"), and a reply to a Waves text that asked about access
+// can come much later: every customer text within this long after an
+// access-bearing text, either direction, is withheld with it.
+const ACCESS_FOLLOW_UP_MS = 24 * 60 * 60 * 1000;
+const ACCESS_REPLY_MS = ACCESS_FOLLOW_UP_MS;
 const FOLLOW_UP_MARKER = '[follow-up to an access detail withheld]';
 
 function dayString(value) {
@@ -210,10 +209,16 @@ async function loadSavedFacts(svc, dbh, day) {
     'neighborhood_gate_code', 'property_gate_code', 'garage_code', 'lockbox_code',
     'access_notes', 'parking_notes', 'special_instructions', 'chemical_sensitivities', 'chemical_sensitivity_details',
   ) || {};
-  const hasCodes = Boolean(prefs.neighborhood_gate_code || prefs.property_gate_code || prefs.garage_code || prefs.lockbox_code);
+  // The neighborhood gate directory (GATE_NEIGHBORHOOD_ACCESS) shows a
+  // technician a shared gate entry for a customer with no code of their own:
+  // the same reader the day feed uses says WHETHER one applies. Never its code.
+  const neighborhoodGate = require('../../config/feature-gates').neighborhoodAccessLive()
+    && (await require('../neighborhood-access').neighborhoodGateEntriesForVisits(dbh, [svc])).has(svc.id);
+  const hasCodes = Boolean(prefs.neighborhood_gate_code || prefs.property_gate_code || prefs.garage_code || prefs.lockbox_code || neighborhoodGate);
   const petCount = Number.isInteger(prefs.pet_count) ? prefs.pet_count : 0;
   const notes = [
-    labelled('Visit note', svc.notes, NOTE_CHARS),
+    // Scheduler audit segments are not property notes (utils/visit-notes.js).
+    labelled('Visit note', require('../../utils/visit-notes').stripSchedulerAuditText(svc.notes), NOTE_CHARS),
     // What the customer told Waves about THIS visit when it was booked.
     labelled('Customer request for this visit', svc.customer_request, NOTE_CHARS),
     prefs.chemical_sensitivities ? labelled('Chemical sensitivity', prefs.chemical_sensitivity_details || 'yes', NOTE_CHARS) : null,
@@ -232,6 +237,7 @@ async function loadSavedFacts(svc, dbh, day) {
       away_mode: Boolean(prefs.away_mode_until && dayString(prefs.away_mode_until) >= day),
       side_gate: Boolean(String(prefs.side_gate_access || '').trim()),
       chemical_sensitivity: Boolean(prefs.chemical_sensitivities),
+      neighborhood_gate: Boolean(neighborhoodGate),
     },
     notes: notes || null,
     baselines: { dog_on_property: { rules: petCount > 0 }, needs_code_key_or_person: { rules: hasCodes } },
@@ -287,7 +293,7 @@ async function loadCustomerTexts(svc, dbh, floor, cutoff) {
     .where('created_at', '<', cutoff)
     .orderBy('created_at', 'desc')
     .limit(TEXT_READ_LIMIT)
-    .select('created_at', 'direction', 'message_body', 'message_type');
+    .select('created_at', 'direction', 'message_body', 'message_type', 'status');
   // A truncated read hides what came before its oldest row: fail closed and
   // withhold a full reply-window from there.
   let withholdUntil = texts.length >= TEXT_READ_LIMIT ? new Date(texts[texts.length - 1].created_at).getTime() + ACCESS_REPLY_MS : 0;
@@ -299,11 +305,17 @@ async function loadCustomerTexts(svc, dbh, floor, cutoff) {
       const at = new Date(row.created_at).getTime();
       const access = mentionsAccess(row.message_body);
       if (row.direction !== 'inbound') {
-        if (access) withholdUntil = Math.max(withholdUntil, at + ACCESS_REPLY_MS);
+        // Only a Waves text the customer received opens a reply window
+        // (sms-shadow readLastOutboundBody's rule): not a failed or cancelled
+        // send, not an internal alert.
+        const received = ['queued', 'sent', 'delivered'].includes(row.status) && row.message_type !== 'internal_alert';
+        if (access && received) withholdUntil = Math.max(withholdUntil, at + ACCESS_REPLY_MS);
         return null;
       }
       const held = access || at <= withholdUntil;
-      if (held) withholdUntil = Math.max(withholdUntil, at + ACCESS_FOLLOW_UP_MS);
+      // Only an access-bearing text opens or extends the window; a withheld
+      // follow-up does not, or one chatty day would withhold everything after.
+      if (access) withholdUntil = Math.max(withholdUntil, at + ACCESS_FOLLOW_UP_MS);
       if (at < floor.getTime()) return null;
       if (access) return redactForState(row.message_body);
       return held ? FOLLOW_UP_MARKER : compact(redactForState(row.message_body), TEXT_CHARS);
@@ -348,6 +360,8 @@ async function buildVisitAccessState(svc, dbh) {
 
 const VISIT_COLUMNS = [
   's.id', 's.customer_id', 's.service_type', 's.scheduled_date', 's.window_start', 's.notes', 's.customer_request',
+  // What the neighborhood gate reader keys on.
+  's.property_id', 's.service_address_line1', 's.service_address_zip',
   // The primary address and the multi-home flag singlePremises reads.
   'c.address_line1 as customer_address_line1', 'c.address_line2 as customer_address_line2', 'c.zip as customer_zip', 'c.city as customer_city',
   'c.has_multi_home',
@@ -516,7 +530,7 @@ function renderVisitAccessState(state) {
   const s = state.structured || {};
   return [
     `Service line: ${state.service_line || 'unknown'}. Completed visits before this one: ${state.visit_count}.`,
-    `On file: pets ${s.pet_count}; codes ${s.has_codes ? 'yes' : 'no'}; contact preference ${s.contact_preference || 'none'}; away mode ${s.away_mode ? 'yes' : 'no'}; side gate noted ${s.side_gate ? 'yes' : 'no'}; chemical sensitivity ${s.chemical_sensitivity ? 'yes' : 'no'}.`,
+    `On file: pets ${s.pet_count}; codes ${s.has_codes ? 'yes' : 'no'}; contact preference ${s.contact_preference || 'none'}; away mode ${s.away_mode ? 'yes' : 'no'}; side gate noted ${s.side_gate ? 'yes' : 'no'}; neighborhood gate entry ${s.neighborhood_gate ? 'yes' : 'no'}; chemical sensitivity ${s.chemical_sensitivity ? 'yes' : 'no'}.`,
     `Notes:\n${state.notes_text || '(none)'}`,
     `Customer texts since the last visit on this line:\n${state.recent_texts || '(none)'}`,
     `Last technician note:\n${state.last_tech_notes || '(none)'}`,
