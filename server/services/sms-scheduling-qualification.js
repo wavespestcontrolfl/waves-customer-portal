@@ -17,7 +17,15 @@ const crypto = require('node:crypto');
 const REVIEW_KIND = 'independent_manual_review';
 const EXPECTED_ACTIONS = new Set(['accept_slot', 'decline', 'asks_other_time', 'unclear', 'unsupported']);
 const EXPECTED_OUTCOMES = new Set(['move', 'book', 'confirm_only', 'staff', 'no_action', 'unsupported']);
+const ACCEPTED_SLOT_OUTCOMES = new Set(['move', 'book', 'confirm_only', 'staff']);
 const PLANNED_DECISION_OUTCOMES = new Set(['would_move', 'would_book', 'confirm_only', 'staff']);
+const DECISION_OUTCOMES_BY_ACTION = new Map([
+  ['accept_slot', PLANNED_DECISION_OUTCOMES],
+  ['decline', new Set(['no_action'])],
+  ['asks_other_time', new Set(['no_action'])],
+  ['unclear', new Set(['no_action'])],
+  ['unsupported', new Set(['unsupported'])],
+]);
 const HASH_RE = /^[0-9a-f]{64}$/;
 const OFFSET_ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/;
 
@@ -86,6 +94,11 @@ function currentBodyMatches(ref, smsBodiesById) {
 function decisionMatchesRow(decision, row) {
   if (!decision || decision.model !== row.model || decision.promptVersion !== row.prompt_version) return false;
   if (!isNonblankString(decision.servedModel) || decision.servedModel !== row.model) return false;
+  const permittedOutcomes = DECISION_OUTCOMES_BY_ACTION.get(decision.action);
+  if (!permittedOutcomes?.has(decision.outcome)) return false;
+  if (decision.action === 'accept_slot') {
+    if (!Number.isInteger(decision.slotNumber) || decision.slotNumber < 1) return false;
+  } else if (decision.slotNumber != null) return false;
   if (decision.action !== row.action || decision.slotNumber !== row.slot_number || decision.outcome !== row.outcome) return false;
   const persistedWouldHave = parsePersisted(row.would_have);
   if (!persistedWouldHave.ok) return false;
@@ -176,6 +189,7 @@ function expectedVerdict(adjudication, found) {
     if (['move', 'book', 'confirm_only'].includes(expected.outcome)) return null;
     return { action: expected.action, outcome: expected.outcome, offer: null, slot: null, move: null };
   }
+  if (!ACCEPTED_SLOT_OUTCOMES.has(expected.outcome)) return null;
   const pick = numberedPick(expected, found.offers);
   if (!pick) return null;
   if (expected.outcome !== 'move') return nonMoveExpectedVerdict(expected, pick);
@@ -352,7 +366,9 @@ function summarizeQualification(decisions = [], input = null, smsBodiesById = ne
   if (!source.valid) reasons.push('missing_or_invalid_operator_adjudication_provenance');
   if (epochs.length !== 1) reasons.push(epochs.length ? 'multiple_model_or_prompt_epochs_not_pooled' : 'no_decisions');
   if (source.valid && epochs.length === 1) reasons.push(...epochs[0].reasons);
+  if (extras) reasons.push('adjudications_without_matching_decisions');
   if (!source.valid) status = 'inconclusive';
+  if (extras) status = 'inconclusive';
   return { status, reasons: [...new Set(reasons)], source, cohort: { decisions: decisions.length, adjudicationsProvided: supplied.length, extras, conflicts: conflicts.size }, epochs };
 }
 

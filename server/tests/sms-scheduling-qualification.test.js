@@ -217,6 +217,40 @@ test('duplicate or blank offer ids cannot identify one linked selected offer', (
     .toMatchObject({ status: 'inconclusive', epochs: [{ incompleteEvidence: 1 }] });
 });
 
+test('adjudications without matching decisions make the whole cohort inconclusive', () => {
+  const c = cohort();
+  c.rows.pop();
+  const result = summarizeQualification(c.rows, { ...source, adjudications: c.adjudications }, c.bodies);
+  expect(result).toMatchObject({
+    status: 'inconclusive',
+    reasons: expect.arrayContaining(['adjudications_without_matching_decisions']),
+    cohort: { decisions: 40, adjudicationsProvided: 41, extras: 1 },
+    epochs: [{ status: 'qualified' }],
+  });
+});
+
+test.each(['no_action', 'unsupported'])(
+  'an accepted-slot review cannot use the non-operational %s outcome',
+  (outcome) => {
+    const c = cohort();
+    c.adjudications[0].expected = {
+      action: 'accept_slot', outcome, offerId: 'offer-0', slotNumber: 1,
+    };
+    expect(summarizeQualification(c.rows, { ...source, adjudications: c.adjudications }, c.bodies))
+      .toMatchObject({ status: 'inconclusive', epochs: [{ invalidOrConflictingReviews: 1 }] });
+  },
+);
+
+test.each([
+  ['future_action', 'no_action'],
+  ['decline', 'future_outcome'],
+  ['decline', 'would_move'],
+])('unknown or invalid model decision pairing %s/%s is incomplete evidence', (action, outcome) => {
+  const c = cohort(new Map([[1, { action, outcome }]]));
+  expect(summarizeQualification(c.rows, { ...source, adjudications: c.adjudications }, c.bodies))
+    .toMatchObject({ status: 'inconclusive', epochs: [{ incompleteEvidence: 1 }] });
+});
+
 test('qualification compares exact recall counts instead of the rounded report value', () => {
   const overrides = new Map();
   for (let i = 0; i < 4005; i += 1) {
@@ -253,8 +287,8 @@ test('one missed repeated accept misses that offer, and any wrong would-move fai
   expect(summarizeQualification(wrongTarget.rows, { ...source, adjudications: wrongTarget.adjudications }, wrongTarget.bodies)
     .epochs[0].wrongProposedMoves).toBe(1);
 
-  const staleVisit = cohort(new Map([[0, { expectedOutcome: 'no_action' }]]));
-  expect(summarizeQualification(staleVisit.rows, { ...source, adjudications: staleVisit.adjudications }, staleVisit.bodies)
+  const unexpectedMove = cohort(new Map([[0, { expectedOutcome: 'staff' }]]));
+  expect(summarizeQualification(unexpectedMove.rows, { ...source, adjudications: unexpectedMove.adjudications }, unexpectedMove.bodies)
     .epochs[0]).toMatchObject({ wrongProposedMoves: 1, trueAccepts: { caughtDecisions: 1, offerRecall: 0 } });
 
   // The first 40 decisions retain 40 distinct, correctly scored move offers.
