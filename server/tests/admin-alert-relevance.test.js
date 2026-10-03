@@ -326,6 +326,47 @@ describe('class rules', () => {
     expect((await reasonFor(note({ category: 'alert', metadata: { dedupeKey: 'visit-promise-marks:x' } }))).reason).toBeNull();
   });
 
+  test('promise chaser: settled once the promise it chases is closed; a missing promise or another missed-call bell is never judged (owner 2026-10-03)', async () => {
+    const P = uid(520);
+    const chaser = (over = {}) => note({
+      category: 'missed_call',
+      metadata: { triggerKey: 'promise_chaser', dedupeKey: `promise_chaser:${P}:0:2026-09-27`, payload: { commitmentId: P, what: 'quote', customerId: CUST }, ...over },
+    });
+    mockTables.call_commitments = [{ id: P, status: 'open', human_state: null }];
+    expect(await reasonFor(chaser())).toEqual({ cls: 'promise_chaser', reason: null });
+    // Kept, dismissed, or dismissed by staff while the status stays open.
+    for (const closed of [{ status: 'fulfilled' }, { status: 'dismissed' }, { status: 'open', human_state: 'dismissed' }]) {
+      mockTables.call_commitments = [{ id: P, human_state: null, ...closed }];
+      expect((await reasonFor(chaser())).reason).toBe('The promise was closed');
+    }
+    // The promise row is gone: unknown, not closed.
+    mockTables.call_commitments = [];
+    expect((await reasonFor(chaser())).reason).toBeNull();
+    // An ordinary missed-call bell is not this class, whatever it carries.
+    expect(classify(note({ category: 'missed_call', metadata: { triggerKey: 'missed_call', payload: { commitmentId: P } } }))).toBeNull();
+  });
+
+  test('portal chat about adding a service: settled only by an estimate sent to that customer after the bell; other topics are never judged (owner 2026-10-03)', async () => {
+    const chat = (topic) => note({
+      category: 'alert', link: `/admin/customers?customerId=${CUST}`,
+      metadata: { dedupeKey: 'portal-chat-escalation:esc-1', customerId: CUST, escalationId: 'esc-1', ...(topic ? { topic } : {}) },
+    });
+    const row = chat('add_service');
+    expect(await reasonFor(row)).toEqual({ cls: 'portal_chat_add_service', reason: null });
+    // A draft, an estimate sent before the question, and one sent to someone else.
+    mockTables.estimates = [
+      { id: uid(530), customer_id: CUST, sent_at: null },
+      { id: uid(531), customer_id: CUST, sent_at: BEFORE_BELL },
+      { id: uid(532), customer_id: uid(599), sent_at: AFTER_BELL },
+    ];
+    expect((await reasonFor(row)).reason).toBeNull();
+    mockTables.estimates.push({ id: uid(533), customer_id: CUST, sent_at: AFTER_BELL });
+    expect((await reasonFor(row)).reason).toBe('Estimate was sent');
+    // A cancellation or a complaint is not answered by an estimate, and a bell
+    // from before the topic was stored is left to a person.
+    for (const other of [chat('cancellation'), chat('complaint'), chat(null)]) expect(classify(other)).toBeNull();
+  });
+
   const move = (metadata = {}) => note({
     category: 'schedule_conflict', link: '/admin/dispatch?tab=schedule',
     metadata: { scheduledServiceId: VISIT, seriesMoveId: 'move-1', conflicts: [], overlapDates: ['2026-10-05'], preservedOccurrences: [], ...metadata },
