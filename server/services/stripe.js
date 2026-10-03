@@ -1696,9 +1696,10 @@ const StripeService = {
       // PaymentIntents can land in `requires_action` when the cardholder's
       // bank demands 3DS — Stripe surfaces it as code/decline_code
       // 'authentication_required' on the thrown error and the PI exists in
-      // requires_action state. The customer SMS path is already wired via
-      // payment_intent.requires_action in the webhook handler; the cron
-      // just needs to NOT schedule a retry against the same wall.
+      // requires_action state. No customer text is wired for a card (the
+      // requires_action webhook only acts on an ACH micro-deposit step);
+      // the cron NOT scheduling a retry against the same wall is paired
+      // with an office alert from billing-cron (alertAutopayScaParked).
       const authCode = err.code || err.raw?.code || err.decline_code || err.raw?.decline_code;
       const requiresAction = authCode === 'authentication_required';
       const piIdFromErr = err.payment_intent?.id || err.raw?.payment_intent?.id || null;

@@ -239,6 +239,41 @@ describe('stripe-webhook call sites no longer gate on customer.phone', () => {
     expect(mockSendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ to: null, customerId: 'cust-1' }));
   });
 
+  test('B16: an ACH micro-deposit requires_action still renders the bank-verification notice', async () => {
+    mockState.customer = { id: 'cust-1', first_name: 'Pat', phone: '+19415550101' };
+    await handlePaymentIntentRequiresAction({ id: 'pi_ach_1', next_action: { type: 'verify_with_microdeposits' } }, 'evt_2');
+    expect(mockRenderTemplate).toHaveBeenCalledWith('bank_verification_incomplete', expect.any(Object), expect.any(Object));
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
+  // B16: the bank-verification copy is ACH-only. A card needing 3D Secure gets no
+  // customer notice from this handler and raises no office alert here (an off-session
+  // autopay parked on 3DS is alerted by billing-cron; an on-session payer authenticates
+  // in their own browser).
+  test.each([
+    ['use_stripe_sdk', 'a machine-initiated autopay card charge', { type: 'monthly_autopay' }],
+    ['use_stripe_sdk', 'a customer-initiated pay-page card payment', { type: 'one_time', initiated_by: 'customer' }],
+    ['redirect_to_url', 'a customer-initiated card payment', { type: 'one_time', initiated_by: 'customer' }],
+    [undefined, 'an event with no next_action', {}],
+  ])('B16: requires_action %s on %s sends no customer notice and no office alert', async (actionType, _label, metadata) => {
+    const NotificationService = require('../services/notification-service');
+    const notifySpy = jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue({ id: 1 });
+    try {
+      mockState.customer = { id: 'cust-1', first_name: 'Pat', phone: '+19415550101' };
+      await handlePaymentIntentRequiresAction({
+        id: 'pi_card_1',
+        metadata,
+        payment_method_types: ['card'],
+        ...(actionType ? { next_action: { type: actionType } } : {}),
+      }, 'evt_card');
+      expect(mockRenderTemplate).not.toHaveBeenCalled();
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      expect(notifySpy).not.toHaveBeenCalled();
+    } finally {
+      notifySpy.mockRestore();
+    }
+  });
+
   test('setup_intent.setup_failed (bank_verification_failed) reaches sendBillingSms for a phone-less customer', async () => {
     mockState.customer = { id: 'cust-1', first_name: 'Pat', phone: null };
     const setupIntent = { id: 'seti_1', payment_method: 'pm_1', metadata: { waves_customer_id: 'cust-1' },

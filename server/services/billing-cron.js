@@ -449,6 +449,57 @@ async function insertHealthAlert(customerId, row, label) {
   }
 }
 
+// An off-session autopay charge that the cardholder's bank answered with a
+// 3D Secure demand is parked with no retry (a retry would hit the same wall),
+// and nothing else tells anyone: the requires_action webhook texts the
+// customer only for an ACH micro-deposit step (and that bank-verification
+// text is switched off), and no page can finish a card authentication. This
+// is the one place both parked branches (the monthly charge and the retry
+// ladder) call, so the office hears once per PaymentIntent. The cron path is
+// machine-initiated by construction; a customer paying on the pay page
+// authenticates in their own browser and never reaches here. Raised through
+// the canonical admin-alert path (docs/admin-notifications.md); best-effort,
+// so a bell failure never aborts the collection loop. Same PI on a replay or
+// a second tick = same dedupeKey = no second bell.
+async function alertAutopayScaParked(customer, err, { amount, source }) {
+  try {
+    const { raiseAdminAlert } = require('./admin-alert-compose');
+    const { fullName, fitAction } = require('./admin-alert-names');
+    const customerId = String(customer.id);
+    const paymentIntentId = err.stripePaymentIntentId || err.paymentRecord?.stripe_payment_intent_id || null;
+    const attemptId = err.paymentRecord?.id || null;
+    const owed = parseFloat(err.paymentRecord?.amount ?? amount);
+    const dollars = Number.isFinite(owed)
+      ? `$${owed.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+      : '';
+    const name = fullName(customer) || 'this customer';
+    await raiseAdminAlert('billing', {
+      area: 'Billing',
+      action: fitAction('Billing', name, [
+        (who) => `collect ${who}'s autopay by hand`,
+        (who) => `collect ${who}'s autopay`,
+      ]),
+      why: `The bank must approve this ${dollars ? `${dollars} ` : ''}card charge; it was not collected and will not retry on its own.`,
+      severity: 'needs-you',
+      link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
+      subject: { type: 'customer', id: customerId },
+      doneWhen: 'charge_collected',
+      who: 'person',
+    }, {
+      detail: `Autopay for ${name} (${dollars || 'amount unknown'}) was declined for customer authentication (3D Secure): the cardholder's bank has to approve the charge, and an automatic charge cannot do that. It was not collected and no retry is scheduled, so it will not collect on its own. No message was sent to the customer. Reach the customer to approve it with their bank, or collect it another way. Stripe PaymentIntent ${paymentIntentId || 'unknown'}${attemptId ? `, payment record ${attemptId}` : ''}.`,
+      dedupeKey: `autopay-sca-parked:${customerId}:${paymentIntentId || attemptId || etDateString().slice(0, 7)}`,
+      metadata: {
+        customer_id: customerId,
+        stripe_payment_intent_id: paymentIntentId,
+        payment_id: attemptId,
+        source,
+      },
+    });
+  } catch (alertErr) {
+    logger.error(`[billing-cron] SCA-parked office alert failed for customer ${customer.id}: ${alertErr.message}`);
+  }
+}
+
 const BillingCron = {
   // =========================================================================
   // MONTHLY BILLING — 1st at 8 AM
@@ -788,12 +839,12 @@ const BillingCron = {
         }
 
         // STRIPE_REQUIRES_ACTION — cardholder bank requires 3DS / step-up
-        // auth. The PI lands in requires_action state and Stripe fires
-        // payment_intent.requires_action, which the webhook handler
-        // already turns into a customer SMS asking them to log in and
-        // authenticate. Do NOT schedule a retry — the next cron tick
-        // would hit the exact same SCA wall and burn the retry slot
-        // without ever reaching a card-update path.
+        // auth. An off-session charge cannot complete it, and nothing
+        // texts the customer: the requires_action webhook only acts on an
+        // ACH micro-deposit step, and no page finishes a card
+        // authentication. Do NOT schedule a retry — the next cron tick
+        // would hit the exact same SCA wall. The month is parked, so the
+        // office is told (one bell per PaymentIntent) to collect it.
         if (err.code === 'STRIPE_REQUIRES_ACTION') {
           await logAutopay(customer.id, 'sca_required', {
             amountCents: Math.round(parseFloat(customer.monthly_rate) * 100),
@@ -801,7 +852,8 @@ const BillingCron = {
             paymentId: err.paymentRecord?.id || null,
             details: { source: 'autopay', stripe_payment_intent_id: err.stripePaymentIntentId },
           }).catch(() => {});
-          logger.warn(`[billing-cron] SCA required for customer id=${customer.id} — webhook handles SMS, skipping retry`);
+          await alertAutopayScaParked(customer, err, { amount: customer.monthly_rate, source: 'autopay' });
+          logger.warn(`[billing-cron] SCA required for customer id=${customer.id} — parked, no retry, office alerted`);
           continue;
         }
 
@@ -1454,12 +1506,12 @@ const BillingCron = {
           continue;
         }
 
-        // STRIPE_REQUIRES_ACTION — the bank demands 3DS step-up. The
-        // requires_action webhook already texts the customer a link to
-        // authenticate; burning the remaining retry slots against the
-        // same SCA wall only generates repeat "payment failed" SMS.
-        // Park the ladder; collection resumes through the customer's
-        // authenticated payment.
+        // STRIPE_REQUIRES_ACTION — the bank demands 3DS step-up. No
+        // customer text goes out (the requires_action webhook only acts on
+        // an ACH micro-deposit step), and burning the remaining retry
+        // slots against the same SCA wall only generates repeat "payment
+        // failed" SMS. Park the ladder and tell the office (one bell per
+        // PaymentIntent); the amount stays collectible by hand.
         if (err.code === 'STRIPE_REQUIRES_ACTION') {
           await db('payments')
             .where({ id: payment.id })
@@ -1477,14 +1529,15 @@ const BillingCron = {
               superseded_by_payment_id: (err.paymentRecord?.id && err.paymentRecord.id !== payment.id)
                 ? err.paymentRecord.id
                 : null,
-              failure_reason: 'Customer authentication required (3DS) — webhook prompted customer',
+              failure_reason: 'Customer authentication required (3DS) — parked, office alerted',
             }).catch(() => {});
           await logAutopay(payment.customer_id, 'sca_required', {
             amountCents: Math.round(parseFloat(payment.amount) * 100),
             paymentId: payment.id,
             details: { source: 'autopay_retry', stripe_payment_intent_id: err.stripePaymentIntentId },
           }).catch(() => {});
-          logger.warn(`[billing-cron] SCA required on retry for customer id=${customer.id} — ladder parked, webhook handles customer SMS`);
+          await alertAutopayScaParked(customer, err, { amount: payment.amount, source: 'autopay_retry' });
+          logger.warn(`[billing-cron] SCA required on retry for customer id=${customer.id} — ladder parked, office alerted`);
           continue;
         }
 

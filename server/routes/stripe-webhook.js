@@ -6677,13 +6677,23 @@ async function sweepUnacknowledgedAchProcessingAcks({ limit = 25 } = {}) {
 }
 
 /**
- * payment_intent.requires_action — Customer must complete a step (e.g. micro-
- * deposit verification for ACH). Notify customer to finish setup.
+ * payment_intent.requires_action — Customer must complete a step. Only the
+ * ACH micro-deposit case has a customer notice (bank verification
+ * incomplete). Any other next_action (card 3DS: use_stripe_sdk,
+ * redirect_to_url, ...) gets none: the bank-verification copy is wrong for a
+ * card customer, an on-session payer completes 3DS in their own browser, and
+ * an off-session autopay charge parked on 3DS is reported to the office by
+ * billing-cron (alertAutopayScaParked), not here.
  */
 async function handlePaymentIntentRequiresAction(paymentIntent, eventId) {
   const piId = paymentIntent.id;
   const nextAction = paymentIntent.next_action?.type || 'unknown';
   logger.warn(`[stripe-webhook] PaymentIntent requires action: ${piId} (${nextAction})`);
+
+  if (nextAction !== 'verify_with_microdeposits') {
+    logger.info(`[stripe-webhook] requires_action ${piId} (${nextAction}) is not an ACH micro-deposit step — no customer notice`);
+    return;
+  }
 
   try {
     const payment = await db('payments').where({ stripe_payment_intent_id: piId }).first();

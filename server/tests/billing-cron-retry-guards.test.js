@@ -59,6 +59,8 @@ jest.mock('../models/db', () => {
 });
 
 jest.mock('../services/logger', () => ({ info() {}, warn() {}, error() {}, debug() {} }));
+// raiseAdminAlert is real (it validates the copy under NODE_ENV=test); only the ring is faked.
+jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(() => Promise.resolve({ id: 'n-1' })) }));
 jest.mock('../services/autopay-log', () => ({ logAutopay: jest.fn(() => Promise.resolve()) }));
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn(() => Promise.resolve()) }));
 jest.mock('../services/messaging/send-customer-message', () => ({
@@ -639,5 +641,67 @@ describe('retry settlement reporting', () => {
     expect(logAutopay).toHaveBeenCalledWith('cust-1', status === 'paid' ? 'retry_success' : 'retry_processing', expect.objectContaining({ amountCents: 3396, paymentId: 'pay-state' }));
     const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
     expect(sendCustomerMessage).toHaveBeenCalledTimes(status === 'paid' ? 1 : 0);
+  });
+});
+
+// B16: a retry rung that the cardholder's bank answers with 3D Secure parks the ladder.
+// No customer text goes out (the requires_action webhook only acts on an ACH
+// micro-deposit step), so the office is told once, keyed on the retry's PaymentIntent.
+describe('B16: retry ladder parked on card authentication (3DS)', () => {
+  const NotificationService = require('../services/notification-service');
+  const scaErr = () => Object.assign(new Error('Customer authentication required'), {
+    code: 'STRIPE_REQUIRES_ACTION',
+    stripePaymentIntentId: 'pi_retry_sca',
+    paymentRecord: { id: 'pay-retry-sca', amount: '33.00', stripe_payment_intent_id: 'pi_retry_sca' },
+  });
+  const rejectAllCharges = (err) => {
+    StripeService.charge.mockRejectedValue(err);
+    StripeService.chargeOneTime.mockRejectedValue(err);
+    StripeService.chargeMonthly.mockRejectedValue(err);
+  };
+
+  test('parks the ladder (unchanged) and raises ONE office alert; no customer message', async () => {
+    mockFailedPayments = [monthlyFailedPayment()];
+    rejectAllCharges(scaErr());
+
+    await BillingCron.processPaymentRetries();
+
+    // parked exactly as before: no further rung armed, the attempt row is the collectible one
+    const parked = mockPaymentUpdates.find((u) => /Customer authentication required \(3DS\)/.test(u.failure_reason || ''));
+    expect(parked).toMatchObject({ next_retry_at: null, superseded_by_payment_id: 'pay-retry-sca' });
+    expect(logAutopay).toHaveBeenCalledWith('cust-1', 'sca_required', expect.objectContaining({ paymentId: 'pay-failed-1' }));
+
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    const [category, title, body, opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(category).toBe('billing');
+    expect(title).toBe("Billing — collect Test Retry's autopay by hand");
+    expect(body).toBe('The bank must approve this $33.00 card charge; it was not collected and will not retry on its own.');
+    expect(opts).toMatchObject({
+      link: '/admin/customers?customerId=cust-1',
+      dedupeKey: 'autopay-sca-parked:cust-1:pi_retry_sca',
+      metadata: expect.objectContaining({ subject: { type: 'customer', id: 'cust-1' }, source: 'autopay_retry' }),
+    });
+
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    const TwilioService = require('../services/twilio');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+  });
+
+  test('a replayed rung (same PaymentIntent) carries the SAME dedupe key — no second bell', async () => {
+    mockFailedPayments = [monthlyFailedPayment()];
+    rejectAllCharges(scaErr());
+    await BillingCron.processPaymentRetries();
+    await BillingCron.processPaymentRetries();
+
+    expect(NotificationService.notifyAdmin.mock.calls.map((c) => c[3].dedupeKey))
+      .toEqual(['autopay-sca-parked:cust-1:pi_retry_sca', 'autopay-sca-parked:cust-1:pi_retry_sca']);
+  });
+
+  test('a decline on the retry is not an SCA park: no SCA office alert', async () => {
+    mockFailedPayments = [monthlyFailedPayment()];
+    rejectAllCharges(Object.assign(new Error('declined'), { paymentRecord: { id: 'pay-d' } }));
+    await BillingCron.processPaymentRetries();
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 });

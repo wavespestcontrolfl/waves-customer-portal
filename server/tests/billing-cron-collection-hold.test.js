@@ -10,6 +10,9 @@
  * the hold, and the sweep leaves that row armed while the hold is active.
  *
  * Mirrors billing-cron-monthly-lock-contention.test.js's harness.
+ *
+ * B16 (the bottom describe) reuses it for the monthly charge that the cardholder's
+ * bank parks on 3D Secure: no retry, no customer message, one office alert.
  */
 let mockCustomers = [];
 let mockPaymentsInserts = [];
@@ -66,6 +69,8 @@ jest.mock('../models/db', () => {
 });
 
 jest.mock('../services/logger', () => ({ info() {}, warn() {}, error() {}, debug() {} }));
+// raiseAdminAlert is real (it validates the copy under NODE_ENV=test); only the ring is faked.
+jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(() => Promise.resolve({ id: 'n-1' })) }));
 jest.mock('../services/autopay-log', () => ({ logAutopay: jest.fn() }));
 jest.mock('../services/twilio', () => ({ sendSms: jest.fn(), sendSMS: jest.fn() }));
 jest.mock('../services/messaging/send-customer-message', () => ({
@@ -225,4 +230,85 @@ describe('a hold deferral that cannot persist is never reported complete (billin
     await BillingCron.processMonthlyBilling();
     expect(StripeService.chargeMonthly).not.toHaveBeenCalled();
   }, 30000);
+});
+
+// B16: the cardholder's bank demands 3D Secure on the off-session monthly charge.
+// An automatic charge cannot complete it and no customer text goes out (the
+// requires_action webhook only acts on an ACH micro-deposit step), so the month is
+// parked with NO retry and the office is told once, by one stable key per PaymentIntent.
+describe('B16: monthly autopay parked on card authentication (3DS)', () => {
+  const NotificationService = require('../services/notification-service');
+  beforeEach(() => { logAutopay.mockResolvedValue(undefined); });
+  afterEach(() => { StripeService.chargeMonthly.mockReset(); logAutopay.mockReset(); });
+  const scaErr = (overrides = {}) => Object.assign(new Error('Customer authentication required'), {
+    code: 'STRIPE_REQUIRES_ACTION',
+    stripePaymentIntentId: 'pi_sca_1',
+    paymentRecord: { id: 'pay-sca-1', amount: '89.00', stripe_payment_intent_id: 'pi_sca_1' },
+    ...overrides,
+  });
+
+  test('raises ONE office alert; no customer message, no retry row, no raw admin SMS', async () => {
+    StripeService.chargeMonthly.mockRejectedValueOnce(scaErr());
+
+    const result = await BillingCron.processMonthlyBilling();
+
+    expect(result.charged).toBe(0);
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    const [category, title, body, opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(category).toBe('billing');
+    expect(title).toBe("Billing — collect Held Dispute's autopay by hand");
+    expect(body).toBe('The bank must approve this $89.00 card charge; it was not collected and will not retry on its own.');
+    expect(opts).toMatchObject({
+      link: '/admin/customers?customerId=cust-held',
+      dedupeKey: 'autopay-sca-parked:cust-held:pi_sca_1',
+      metadata: expect.objectContaining({
+        area: 'Billing', severity: 'needs-you', who: 'person', doneWhen: 'charge_collected',
+        subject: { type: 'customer', id: 'cust-held' },
+        stripe_payment_intent_id: 'pi_sca_1', payment_id: 'pay-sca-1', source: 'autopay',
+      }),
+    });
+    expect(opts.detail).toMatch(/No message was sent to the customer/);
+
+    // parked exactly as before: sca_required event, nothing armed, nobody texted or emailed
+    expect(logAutopay).toHaveBeenCalledWith('cust-held', 'sca_required', expect.anything());
+    expect(mockPaymentsInserts).toHaveLength(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(TwilioService.sendSms).not.toHaveBeenCalled();
+    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+    expect(PaymentLifecycleEmail.sendChargeFailed).not.toHaveBeenCalled();
+  }, 15000);
+
+  test('the same PaymentIntent replayed (idempotent re-charge) carries the SAME dedupe key, so notifyAdmin collapses it to one row', async () => {
+    StripeService.chargeMonthly.mockRejectedValue(scaErr());
+    await BillingCron.processMonthlyBilling();
+    await BillingCron.processMonthlyBilling();
+
+    const keys = NotificationService.notifyAdmin.mock.calls.map((c) => c[3].dedupeKey);
+    expect(keys).toEqual(['autopay-sca-parked:cust-held:pi_sca_1', 'autopay-sca-parked:cust-held:pi_sca_1']);
+  }, 15000);
+
+  test('a different PaymentIntent is a different episode (different key)', async () => {
+    StripeService.chargeMonthly.mockRejectedValueOnce(scaErr({
+      stripePaymentIntentId: 'pi_sca_2', paymentRecord: { id: 'pay-sca-2', amount: '89.00' },
+    }));
+    await BillingCron.processMonthlyBilling();
+    expect(NotificationService.notifyAdmin.mock.calls[0][3].dedupeKey).toBe('autopay-sca-parked:cust-held:pi_sca_2');
+  }, 15000);
+
+  test('a bell failure never aborts the loop: the month is still parked and counted', async () => {
+    NotificationService.notifyAdmin.mockRejectedValueOnce(new Error('notifications down'));
+    StripeService.chargeMonthly.mockRejectedValueOnce(scaErr());
+
+    const result = await BillingCron.processMonthlyBilling();
+
+    expect(result.failed).toBe(1);
+    expect(logAutopay).toHaveBeenCalledWith('cust-held', 'sca_required', expect.anything());
+    expect(mockPaymentsInserts).toHaveLength(0);
+  }, 15000);
+
+  test('an ordinary decline is not an SCA park: no SCA office alert', async () => {
+    StripeService.chargeMonthly.mockRejectedValueOnce(Object.assign(new Error('declined'), { paymentRecord: { id: 'pay-d' } }));
+    await BillingCron.processMonthlyBilling();
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  }, 15000);
 });
