@@ -126,7 +126,11 @@ function SuggestBlock({ phrase, suggestion, disabled, buttonStyle, muted }) {
         onClick={suggestion.send}
         disabled={disabled || settled || suggestion.status === "sending"}
         aria-live="polite"
-        style={{ ...buttonStyle, marginTop: 8, borderStyle: done ? "solid" : "dashed", fontWeight: 500, cursor: disabled || settled ? "default" : "pointer" }}
+        style={{
+          ...buttonStyle, marginTop: 8, borderStyle: done ? "solid" : "dashed", fontWeight: 500, cursor: disabled || settled ? "default" : "pointer",
+          // A refused phrase reads as inactive at a glance, not as a live button.
+          ...(suggestion.status === "refused" ? { color: muted } : {}),
+        }}
       >
         {copy.button(phrase)}
       </button>
