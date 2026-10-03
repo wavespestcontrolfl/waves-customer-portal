@@ -17,7 +17,7 @@ const { hashCompletionRequest, withoutPhotoBytes, isOperatorTimeOnSite } = requi
 const { dateOnly, lockStop, stopBaseKey } = require('./visit-groups');
 const { parseETDateTime } = require('../utils/datetime-et');
 const { RETAINED_HISTORY_STATUSES } = require('./visit-context/statuses');
-const { cleanupUploadedServicePhotoObjects } = require('./service-photos');
+const { withTrackedServicePhotoTransaction } = require('./service-photos');
 const { finiteDate, firstFiniteDate } = require('../utils/service-duration-capture');
 const { minutesFromElapsed } = require('../utils/duration-minutes');
 const { parseJsonObject } = require('./job-costing');
@@ -351,9 +351,11 @@ async function saveVisitCompletionPacket(input, database = db) {
   if (request.error) return request.error;
   const actor = input.actor || {};
   const uploadedPhotoRows = [];
-  let readyToCommit = false;
   try {
-    return await database.transaction(async (trx) => {
+    return await withTrackedServicePhotoTransaction({
+      knex: database,
+      newlyUploadedObjects: uploadedPhotoRows,
+    }, async (trx) => {
       const peek = await trx('service_visits').where({ id: request.visitId }).first();
       if (!peek) return failure(404, 'visit_not_found', 'Visit not found.');
       // Baseline confirmation and canonical completion take this fence before
@@ -512,16 +514,9 @@ async function saveVisitCompletionPacket(input, database = db) {
         await require('./job-costing').calculateJobCost(retained.serviceId, trx);
       }
       const billing = await require('./visit-completion-invoice').createVisitCompletionInvoice(packet.id, trx);
-      readyToCommit = true;
       return recordsResult(packet, recorded, billing);
     });
   } catch (err) {
-    // S3 objects are external to PostgreSQL. Earlier successful members must
-    // have their uploads removed too when a later form or the outer commit fails.
-    // After the callback returned, a connection failure can leave COMMIT's
-    // outcome unknown. Retain those objects for recovery rather than delete
-    // photos that a committed packet may already reference.
-    if (!readyToCommit && uploadedPhotoRows.length) await cleanupUploadedServicePhotoObjects(uploadedPhotoRows);
     if (err.completionResult) return err.completionResult;
     if (err.code === '23505' && err.constraint === 'visit_completion_packets_idempotency_key_unique') {
       return failure(409, 'visit_closeout_key_reused', 'The idempotency key belongs to another visit.');

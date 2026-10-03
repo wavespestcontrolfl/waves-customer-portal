@@ -569,6 +569,7 @@ async function uploadServicePhotoDataUrls({
   photos = [],
   photoType = 'after',
   maxBytes = MAX_COMPLETION_PHOTO_DATA_URL_BYTES,
+  newlyUploadedObjects,
   knex = db,
 }) {
   const rows = [];
@@ -593,6 +594,7 @@ async function uploadServicePhotoDataUrls({
         appVersion: photo.appVersion,
         aiTags: withPhotoSlot(photo.aiTags, photo.slot),
         annotation: photo.annotation,
+        newlyUploadedObjects,
         knex,
       });
       rows.push(row);

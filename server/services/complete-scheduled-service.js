@@ -99,10 +99,10 @@ const { buildNoActivityFinding } = require('../services/service-report/no-activi
 const { buildServiceRecordCompletionTimingFields } = require('../services/service-report/service-record-timing');
 const {
   MAX_COMPLETION_PHOTO_DATA_URL_BYTES,
-  cleanupUploadedServicePhotoObjects,
   decodeDataUrlPhoto,
   promoteStagedServicePhotos,
   uploadServicePhotoDataUrls,
+  withTrackedServicePhotoTransaction,
 } = require('../services/service-photos');
 const { hashBuffer } = require('../services/service-report/photo-chain');
 const {
@@ -2934,6 +2934,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     let completionPhotoUploadResult = { uploaded: 0, failed: 0, errors: [] };
     let completionPhotosUploadedBeforeCommit = false;
     let preCommitCompletionPhotoRows = [];
+    const newlyUploadedObjects = packetRecords ? packetContext.uploadedPhotoRows : [];
     const promotedPhotoIds = new Set();
     let completionReviewDelayMinutes;
     let customerRequestedReview = null;
@@ -7169,6 +7170,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
                   serviceRecordId: record.id,
                   photos: [gaugePhoto],
                   photoType: 'progress',
+                  newlyUploadedObjects,
                   knex: sp,
                 });
                 gaugePhotoId = gaugeUpload?.photos?.[0]?.id || null;
@@ -7666,6 +7668,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             serviceRecordId: record.id,
             photos: completionPhotos,
             photoType: 'after',
+            newlyUploadedObjects,
             knex: trx,
           });
           // Cumulative (concat, not assign) so an earlier-registered turf-height
@@ -7851,7 +7854,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // Pass the outer handle to the status/alert writers so their broadcasts
         // cannot escape if a later member rejects the closeout.
         if (packetRecords) await persistRecord(db);
-        else await db.transaction(persistRecord);
+        else await withTrackedServicePhotoTransaction({
+          knex: db,
+          newlyUploadedObjects,
+        }, persistRecord);
         if (packetRecords) {
           packetContext.uploadedPhotoRows.push(...preCommitCompletionPhotoRows.filter((photo) => !promotedPhotoIds.has(photo.id)));
           return { status: 202, body: { serviceRecordId: record.id } };
@@ -7891,10 +7897,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
         }
       }
       } catch (err) {
-        if (preCommitCompletionPhotoRows.length) {
-          await cleanupUploadedServicePhotoObjects(preCommitCompletionPhotoRows.filter((photo) => !promotedPhotoIds.has(photo.id)));
-          preCommitCompletionPhotoRows = [];
-        }
         if (err && err.message && err.message.includes('not in state')) {
           await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
           return ({ status: 409, body: {
