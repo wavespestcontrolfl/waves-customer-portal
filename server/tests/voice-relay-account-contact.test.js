@@ -28,6 +28,7 @@ jest.mock('../routes/booking', () => ({
   },
 }));
 jest.mock('../services/scheduling/parse-when', () => ({ parseWhen: jest.fn(), summarizeWindow: jest.fn() }));
+jest.mock('../services/call-recording-processor', () => ({ resolveCallBookingPropertyLinkage: jest.fn() }));
 jest.mock('../services/lead-from-extraction', () => ({
   createLeadFromExtraction: jest.fn(),
   surfaceEstimateRequestForCustomer: jest.fn(async () => ({ persisted: true, suppressed: false })),
@@ -203,16 +204,23 @@ describe('a known customer\'s open times are for the property on their account',
 describe('a written estimate for an established customer: ONE yes/no question (owner ruling 2026-10-03)', () => {
   const { createLeadFromExtraction, surfaceEstimateRequestForCustomer } = require('../services/lead-from-extraction');
   const HOLDER = { first_name: 'Dana', last_name: 'Sample', email: 'dana@example.com', address_line1: '12 Test Street', city: 'Bradenton', zip: '34205', pipeline_stage: 'active_customer' };
+  const { resolveCallBookingPropertyLinkage } = require('../services/call-recording-processor');
   let holder;
-  let properties;
+  let properties; // ACTIVE property rows
+  let everHadProperties; // rows of any state
+  // A card FILED (or rewritten) as deliverable. An incomplete capture also
+  // calls the writer, revise-only (stillMissing), which files nothing new.
+  const filedCards = () => surfaceEstimateRequestForCustomer.mock.calls.filter((c) => !((c[2] || {}).stillMissing || []).length);
   const estimateCtx = (over = {}) => fullTier({ markCaptured: jest.fn(), ...over });
   const ask = (input = {}, ctx = estimateCtx()) => executeTool('capture_lead', { call_summary: 'Wants a written estimate for lawn care.', estimate_requested: true, ...input }, ctx);
   beforeEach(() => {
     holder = { ...HOLDER };
     properties = 1;
+    everHadProperties = 1;
+    resolveCallBookingPropertyLinkage.mockResolvedValue({ propertyId: 'p-1', address: { line1: '12 Test Street', city: 'Bradenton', zip: '34205' } });
     createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: 'c-1', created: false });
     db.mockImplementation((table) => (table === 'customer_properties'
-      ? { where: () => ({ count: () => ({ first: async () => ({ count: String(properties) }) }) }) }
+      ? { where: (w) => ({ count: () => ({ first: async () => ({ count: String(w.active === true ? properties : everHadProperties) }) }) }) }
       : { where: () => ({ whereNull: () => ({ first: async () => { customerReads += 1; return holder; } }) }) }));
   });
 
@@ -222,7 +230,7 @@ describe('a written estimate for an established customer: ONE yes/no question (o
     expect(out).toMatch(/ask ONE question — "Should it go to the email and service address on your account\?"/);
     expect(out).toMatch(/use_account_details: true/);
     expect(out).not.toMatch(/dana@example\.com|12 Test Street/); // never recited
-    expect(surfaceEstimateRequestForCustomer).not.toHaveBeenCalled();
+    expect(filedCards()).toEqual([]);
     expect(createLeadFromExtraction.mock.calls[0][0]).toMatchObject({ email: null, address_line1: null });
   });
 
@@ -230,7 +238,7 @@ describe('a written estimate for an established customer: ONE yes/no question (o
     const noteEstimateFields = jest.fn();
     const out = await ask({ use_account_details: true }, estimateCtx({ noteEstimateFields }));
     expect(out).toMatch(/IS on the office queue/);
-    const [customerId, details, opts] = surfaceEstimateRequestForCustomer.mock.calls[0];
+    const [customerId, details, opts] = filedCards()[0];
     expect(customerId).toBe('c-1');
     expect(details).toMatchObject({ first_name: 'Dana', last_name: 'Sample', email: 'dana@example.com', address_line1: '12 Test Street', city: 'Bradenton', zip: '34205' });
     expect(opts.accountDetailsConfirmed).toEqual(['name', 'email', 'address']);
@@ -243,7 +251,7 @@ describe('a written estimate for an established customer: ONE yes/no question (o
     await ask({ use_account_details: true, email: 'other@example.com', city: 'Venice' });
     const out = await ask({ use_account_details: true, email: 'other@example.com', city: 'Venice' });
     expect(out).toMatch(/still missing: address_line1/); // a stated city is that property: the account's street does not complete it
-    expect(surfaceEstimateRequestForCustomer).not.toHaveBeenCalled();
+    expect(filedCards()).toEqual([]);
     expect(createLeadFromExtraction.mock.calls[0][0]).toMatchObject({ first_name: 'Dana', email: 'other@example.com', city: 'Venice', address_line1: null });
   });
 
@@ -264,7 +272,7 @@ describe('a written estimate for an established customer: ONE yes/no question (o
     const ctx = estimateCtx(store);
     expect(await ask({ use_account_details: true }, ctx)).toMatch(/still missing: email/);
     expect(await ask({ email: 'dana@work.example.com' }, ctx)).toMatch(/IS on the office queue/);
-    const [, details, opts] = surfaceEstimateRequestForCustomer.mock.calls[0];
+    const [, details, opts] = filedCards()[0];
     expect(details).toMatchObject({ email: 'dana@work.example.com', address_line1: '12 Test Street' });
     expect(opts.accountDetailsConfirmed).toEqual(['name', 'address']); // the address is still the account's, the email is theirs
   });
@@ -282,7 +290,7 @@ describe('a written estimate for an established customer: ONE yes/no question (o
     expect(garbled).toMatch(/still missing: email, address_line1/); // the account's email does not stand in
     expect(store.bag().email).toBeUndefined();
     expect(store.bag().details_from_account).toBe('name');
-    expect(surfaceEstimateRequestForCustomer).not.toHaveBeenCalled();
+    expect(filedCards()).toEqual([]);
   });
 
   test('the account has no last name: the caller adding it keeps the confirmed first name and completes the request', async () => {
@@ -291,7 +299,7 @@ describe('a written estimate for an established customer: ONE yes/no question (o
     const ctx = estimateCtx(store);
     expect(await ask({ use_account_details: true }, ctx)).toMatch(/still missing: last_name/);
     expect(await ask({ last_name: 'Sample' }, ctx)).toMatch(/IS on the office queue/);
-    const [, details, opts] = surfaceEstimateRequestForCustomer.mock.calls[0];
+    const [, details, opts] = filedCards()[0];
     expect(details).toMatchObject({ first_name: 'Dana', last_name: 'Sample', email: 'dana@example.com', address_line1: '12 Test Street' });
     expect(opts.accountDetailsConfirmed).toEqual(['name', 'email', 'address']);
   });
@@ -308,13 +316,13 @@ describe('a written estimate for an established customer: ONE yes/no question (o
     expect(store.bag()).toMatchObject({ first_name: 'Robin', last_name: 'Other', details_from_account: 'none' });
     expect(store.bag().email).toBeUndefined();
     expect(store.bag().address_line1).toBeUndefined();
-    expect(surfaceEstimateRequestForCustomer).not.toHaveBeenCalled();
+    expect(filedCards()).toEqual([]);
   });
 
   test('an unreadable email given on the capture is not replaced by the account\'s', async () => {
     const out = await ask({ use_account_details: true, email: 'dana at work dot' });
     expect(out).toMatch(/still missing: email/);
-    expect(surfaceEstimateRequestForCustomer).not.toHaveBeenCalled();
+    expect(filedCards()).toEqual([]);
   });
 
   test.each([
@@ -328,7 +336,7 @@ describe('a written estimate for an established customer: ONE yes/no question (o
     expect(out).toMatch(/still missing: /);
     expect(out).toMatch(/email, address_line1/);
     expect(out).not.toMatch(/ONE question/);
-    expect(surfaceEstimateRequestForCustomer).not.toHaveBeenCalled();
+    expect(filedCards()).toEqual([]);
   });
 
   test.each([
@@ -339,7 +347,72 @@ describe('a written estimate for an established customer: ONE yes/no question (o
     customerReads = 0;
     await ask({ use_account_details: true }, estimateCtx(over));
     expect(customerReads).toBe(0);
-    expect(surfaceEstimateRequestForCustomer).not.toHaveBeenCalled();
+    expect(filedCards()).toEqual([]);
+  });
+
+  test('the address is the account\'s one resolvable ACTIVE property, not the customers-row mirror', async () => {
+    // The primary was retired; the one active property is a different address.
+    resolveCallBookingPropertyLinkage.mockResolvedValue({ propertyId: 'p-2', address: { line1: '40 Active Ave', city: 'Parrish', zip: '34219' } });
+    expect(await ask({ use_account_details: true })).toMatch(/IS on the office queue/);
+    expect(filedCards()[0][1]).toMatchObject({ address_line1: '40 Active Ave', city: 'Parrish', zip: '34219' });
+  });
+
+  test.each([
+    ['one active property the linkage cannot resolve', () => { resolveCallBookingPropertyLinkage.mockResolvedValue(null); }],
+    ['every property retired', () => { properties = 0; everHadProperties = 2; }],
+  ])('%s has no address to confirm: the ordinary intake', async (_label, arrange) => {
+    arrange();
+    const out = await ask({ use_account_details: true });
+    expect(out).toMatch(/still missing: /);
+    expect(out).not.toMatch(/ONE question/);
+    expect(filedCards()).toEqual([]);
+  });
+
+  test('a legacy account with no property rows at all uses the address on the customer record', async () => {
+    properties = 0; everHadProperties = 0;
+    expect(await ask({ use_account_details: true })).toMatch(/IS on the office queue/);
+    expect(filedCards()[0][1]).toMatchObject({ address_line1: '12 Test Street' });
+    expect(resolveCallBookingPropertyLinkage).not.toHaveBeenCalled();
+  });
+
+  test('ONE question means asked once: after the offer, a caller giving their own details is not asked again', async () => {
+    const store = callStore();
+    const ctx = estimateCtx(store);
+    expect(await ask({}, ctx)).toMatch(/ONE question/);
+    const next = await ask({ email: 'own@example.com' }, ctx); // they said no and gave their own email
+    expect(next).toMatch(/still missing: first_name, last_name, address_line1/);
+    expect(next).not.toMatch(/ONE question/);
+    // A yes that comes later is still honoured.
+    expect(await ask({ use_account_details: true }, ctx)).toMatch(/IS on the office queue/);
+    expect(filedCards()[0][1]).toMatchObject({ email: 'own@example.com', address_line1: '12 Test Street' });
+  });
+
+  test('a correction after the card is queued rewrites the card, keeps the promise and its timing, and is fenced to the session', async () => {
+    const promises = new Map();
+    const notePromise = jest.fn((k, verdict, extra) => promises.set(k, { verdict, expectation: extra && extra.expectation }));
+    const store = callStore();
+    const ctx = estimateCtx({ ...store, sessionKey: 'sk-1', notePromise, getPromise: (k) => promises.get(k) || null, officeOpenNow: () => true });
+    const saved = process.env.VOICE_RELAY_CONTEXT_ENABLED;
+    process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true';
+    try {
+      expect(await ask({ use_account_details: true }, ctx)).toMatch(/usually goes out in about 15 minutes/);
+      expect(notePromise).toHaveBeenLastCalledWith('send_estimate', true, { expectation: 'about_15_minutes' });
+      // The office has closed by the time the caller corrects the email.
+      ctx.officeOpenNow = () => false;
+      // Incomplete correction: the standing card is revised, the promise is not withdrawn.
+      expect(await ask({ city: 'Venice' }, ctx)).toMatch(/still missing: address_line1/);
+      const revise = surfaceEstimateRequestForCustomer.mock.calls.at(-1);
+      expect(revise[1]).toMatchObject({ city: 'Venice', address_line1: null });
+      expect(revise[2]).toMatchObject({ stillMissing: ['address_line1'], sessionKey: 'sk-1', callSid: 'CA-acct-1', spokenExpectation: 'about_15_minutes' });
+      // Completed correction: the card is rewritten with the new address, same promise, same timing.
+      expect(await ask({ address_line1: '9 Rental Rd', city: 'Venice' }, ctx)).toMatch(/usually goes out in about 15 minutes/);
+      const rewrite = surfaceEstimateRequestForCustomer.mock.calls.at(-1);
+      expect(rewrite[1]).toMatchObject({ address_line1: '9 Rental Rd', city: 'Venice', email: 'dana@example.com' });
+      expect(rewrite[2]).toMatchObject({ sessionKey: 'sk-1', spokenExpectation: 'about_15_minutes', accountDetailsConfirmed: ['name', 'email'] });
+      expect(notePromise).toHaveBeenCalledTimes(1); // never overwritten, never re-timed
+    } finally {
+      if (saved === undefined) delete process.env.VOICE_RELAY_CONTEXT_ENABLED; else process.env.VOICE_RELAY_CONTEXT_ENABLED = saved;
+    }
   });
 
   test('use_account_details is a capture_lead input only while the caller-context lane is on', () => {

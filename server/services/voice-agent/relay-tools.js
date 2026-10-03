@@ -682,9 +682,10 @@ function availabilityResultToText(res, ctx = {}) {
  * who is an established customer speaking for themselves: a row still in the
  * lead pipeline, or a caller who gave a different first name, opens a LEAD
  * under the lead writer's own rules (isLeadStage, nameConflicts) and gets the
- * ordinary intake. An account with more than one property has no single
- * "service address on your account" to confirm. Fail-soft: an unanswerable
- * read is null.
+ * ordinary intake. The address is the account's one resolvable active
+ * property (see below); an account without one has no single "service
+ * address on your account" to confirm. Fail-soft: an unanswerable read is
+ * null.
  */
 async function accountDetailsForEstimate(ctx = {}, stated = {}) {
   if (!ctx.customerId || ctx.callerVerified !== true || matchedCallerTier(ctx) !== 'full') return null;
@@ -695,9 +696,21 @@ async function accountDetailsForEstimate(ctx = {}, stated = {}) {
     if (!row) return null;
     const { isLeadStage, nameConflicts } = require('../lead-from-extraction');
     if (isLeadStage(row.pipeline_stage) || nameConflicts({ first_name: stated.first_name }, row)) return null;
-    const properties = await db('customer_properties').where({ customer_id: ctx.customerId, active: true })
-      .count('* as count').first().then((r) => parseInt((r && r.count) || 0, 10));
-    return properties > 1 ? null : row;
+    // WHICH address is "the service address on your account": the customers
+    // row mirrors the primary property, which can be retired while another
+    // stays active. One active property the call pipeline's own linkage
+    // resolves → that property's address. No property rows at all (a legacy
+    // account) → the mirror. Anything else (several active, none active but
+    // some retired, one the linkage cannot resolve) has no single address to
+    // confirm.
+    const count = (where) => db('customer_properties').where(where).count('* as count').first()
+      .then((r) => parseInt((r && r.count) || 0, 10));
+    const active = await count({ customer_id: ctx.customerId, active: true });
+    if (active > 1) return null;
+    if (active === 0) return (await count({ customer_id: ctx.customerId })) === 0 ? row : null;
+    const linkage = await require('../call-recording-processor').resolveCallBookingPropertyLinkage(ctx.customerId, {}, db);
+    if (!(linkage && linkage.propertyId && linkage.address && linkage.address.line1)) return null;
+    return { ...row, address_line1: linkage.address.line1, city: linkage.address.city || null, zip: linkage.address.zip || null };
   } catch (err) {
     logger.warn(`[voice-relay] account details for an estimate could not be read callSid=${ctx.callSid || 'n/a'}: ${err.message}`);
     return null;
@@ -1134,10 +1147,16 @@ async function executeTool(name, input = {}, ctx = {}) {
           if (acctLocation) { Object.assign(estimateFields, acctLocation); detailsFromAccount.push('address'); }
         }
       }
+      // ONE question means asked once: the offer is made on the first
+      // incomplete capture the account could complete and remembered, so a
+      // caller who said no (and is giving their own details) is not asked
+      // again on the next capture.
+      const offerAccountQuestion = accountCouldFill && input.use_account_details !== true
+        && REQUIRED.some((k) => !estimateFields[k]) && priorEstimateFields.account_question_offered !== 'true';
       // The provenance rides with the fields ('none' because the store only
       // keeps non-empty values, so an emptied list must still overwrite).
       if (typeof ctx.noteEstimateFields === 'function') {
-        ctx.noteEstimateFields({ ...estimateFields, details_from_account: detailsFromAccount.join(',') || 'none' });
+        ctx.noteEstimateFields({ ...estimateFields, details_from_account: detailsFromAccount.join(',') || 'none', ...(offerAccountQuestion ? { account_question_offered: 'true' } : {}) });
       }
       // The accumulated fields ALSO ride the lead write (hook P1): identity
       // resolution (email match) and fill-forward must see the name/email/
@@ -1157,9 +1176,18 @@ async function executeTool(name, input = {}, ctx = {}) {
       // proves the office is open right now may say it.
       const { isContextEnabled: contextOn } = require('./relay-context');
       const officeOpen = contextOn() && typeof ctx.officeOpenNow === 'function' ? ctx.officeOpenNow() : null;
-      const spokenExpectation = officeOpen === true
-        ? 'about_15_minutes'
-        : (officeOpen === false ? 'when_office_opens' : 'as_soon_as_possible');
+      // ⭐ A PROMISE ALREADY SPOKEN ON THIS CALL STANDS, WITH ITS OWN TIMING.
+      // An estimate an earlier capture queued was promised aloud: a later
+      // capture that corrects the details (even one that leaves them
+      // incomplete, or whose card write fails) does not withdraw it, and it
+      // does not restart its clock or reword its turnaround.
+      const priorPromise = typeof ctx.getPromise === 'function' ? ctx.getPromise('send_estimate') : null;
+      const promiseStands = estimateRequested && Boolean(priorPromise && priorPromise.verdict === true);
+      const spokenExpectation = promiseStands && priorPromise.expectation
+        ? priorPromise.expectation
+        : (officeOpen === true
+          ? 'about_15_minutes'
+          : (officeOpen === false ? 'when_office_opens' : 'as_soon_as_possible'));
       if (estimateRequested) {
         extracted.quote_requested = true;
         extracted.quote_promised = estimateMissing.length === 0;
@@ -1733,13 +1761,22 @@ async function executeTool(name, input = {}, ctx = {}) {
       let estimateQueued = null; // null = not requested; true/false = requested and (not) persisted
       if (estimateRequested && estimateMissing.length) {
         estimateQueued = false;
+        // A card an earlier capture on this call queued must not keep details
+        // the caller has since replaced: revise it, and say what the call
+        // still lacks. Revise-only — with no card standing nothing is filed.
+        if (!leadCreated && leadResult && leadResult.customerId) {
+          const { surfaceEstimateRequestForCustomer } = require('../lead-from-extraction');
+          if (typeof surfaceEstimateRequestForCustomer === 'function') {
+            await surfaceEstimateRequestForCustomer(leadResult.customerId, { ...extracted, ...estimateFields }, { callSid: ctx.callSid || null, sessionKey: ctx.sessionKey || null, phone: callerPhone || null, spokenExpectation, accountDetailsConfirmed: detailsFromAccount, stillMissing: estimateMissing });
+          }
+        }
       } else if (estimateRequested) {
         if (leadCreated) {
           estimateQueued = true;
         } else if (leadResult && leadResult.customerId) {
           const { surfaceEstimateRequestForCustomer } = require('../lead-from-extraction');
           const surfaced = typeof surfaceEstimateRequestForCustomer === 'function'
-            ? await surfaceEstimateRequestForCustomer(leadResult.customerId, { ...extracted, ...estimateFields }, { callSid: ctx.callSid || null, phone: callerPhone || null, spokenExpectation, accountDetailsConfirmed: detailsFromAccount })
+            ? await surfaceEstimateRequestForCustomer(leadResult.customerId, { ...extracted, ...estimateFields }, { callSid: ctx.callSid || null, sessionKey: ctx.sessionKey || null, phone: callerPhone || null, spokenExpectation, accountDetailsConfirmed: detailsFromAccount })
             : { persisted: false };
           estimateQueued = surfaced && surfaced.persisted === true;
         } else {
@@ -1748,7 +1785,9 @@ async function executeTool(name, input = {}, ctx = {}) {
       }
       // The session records the promise the caller will hear: a queued
       // estimate becomes an owed commitment at close (call-commitments).
-      if (estimateQueued !== null && typeof ctx.notePromise === 'function') ctx.notePromise('send_estimate', estimateQueued === true, { expectation: spokenExpectation });
+      if (!promiseStands) {
+        if (estimateQueued !== null && typeof ctx.notePromise === 'function') ctx.notePromise('send_estimate', estimateQueued === true, { expectation: spokenExpectation });
+      }
       const expectationCopy = {
         about_15_minutes: 'The office is open: tell the caller the written estimate usually goes out in about 15 minutes.',
         when_office_opens: 'The office is closed: tell the caller the written estimate goes out when the office opens — do not name a time.',
@@ -1764,7 +1803,7 @@ async function executeTool(name, input = {}, ctx = {}) {
               + 'WITHOUT estimate_requested (the estimate is dropped), tell them a Waves team member will follow up, '
               + 'and end the call normally.'
               // The one-question path, offered only when it would actually help.
-              + (accountCouldFill && input.use_account_details !== true
+              + (offerAccountQuestion
                 ? ' This caller is an established customer, so instead you may ask ONE question — "Should it go to '
                   + 'the email and service address on your account?" — and on a YES call capture_lead again with '
                   + 'estimate_requested: true and use_account_details: true. On a no, ask for the ones they want. '
