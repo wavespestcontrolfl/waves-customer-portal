@@ -177,7 +177,7 @@ async function translateInbound(inbound) {
 async function translateReply({ englishReply, language }) {
   const out = await callJson(MODELS.TEXT_POLICIES.customerCopy, {
     laneId: 'sms_translation',
-    system: `Translate a text message from a pest control company into ${language}. Keep the same meaning, tone and length; do not add, drop or soften anything. Keep every number, date, price, phone number, link, email and name exactly as written, and write every number as digits (\"two\" -> 2). Write every clock time in 24-hour form (2 PM -> 14:00, 9:30 AM -> 9:30). A \"re-service\" is a free return visit to treat the property again between regular visits: translate it as a return visit to treat again, never as a new or additional service. Return only the translation. ${DATA_NOTE}`,
+    system: `Translate a text message from a pest control company into ${language}. Keep the same meaning, tone and length; do not add, drop or soften anything. Keep every number, date, price, phone number, link, email and name exactly as written, and write every number as digits (\"two\" -> 2). Write every clock time in 24-hour form (2 PM -> 14:00, 9:30 AM -> 9:30). A \"re-service\" is a return visit to treat the property again between regular visits: translate it as a return visit to treat again, never as a new or additional service, and keep \"free\" wherever the message says it is free. Return only the translation. ${DATA_NOTE}`,
     text: dataBlock(englishReply),
     jsonSchema: TRANSLATE_SCHEMA,
   });
@@ -245,7 +245,7 @@ function sameWrittenLanguage(asked, written) {
 async function meaningCheck({ englishReply, backTranslation }) {
   const out = await callJson(MODELS.TEXT_POLICIES.customerCopy, {
     laneId: 'sms_translation',
-    system: `Compare two English versions of one text message to a customer. ORIGINAL is what the company approved; BACK is a translation of the translated message. Answer same_meaning true only if BACK makes the same promises, states the same facts (days, times, prices, products, safety and timing advice, who will do what) and asks the same questions as ORIGINAL. Wording may differ. A "re-service" in ORIGINAL is a free return visit to treat again: "re-treatment visit" or "return visit to treat again" in BACK is the same thing, while "new service" or "another service" is not. How strongly a courtesy is worded ("sorry" / "very sorry", "thanks" / "thank you very much") is not a difference. List every difference that changes meaning; an empty list when there are none. ${DATA_NOTE}`,
+    system: `Compare two English versions of one text message to a customer. ORIGINAL is what the company approved; BACK is a translation of the translated message. Answer same_meaning true only if BACK makes the same promises, states the same facts (days, times, prices, products, safety and timing advice, who will do what) and asks the same questions as ORIGINAL. Wording may differ. A "re-service" in ORIGINAL is a return visit to treat again: "re-treatment visit" or "return visit to treat again" in BACK is the same thing for that noun only, while "new service" or "another service" is not. When ORIGINAL says it is free, BACK must say so too (free, no charge, at no cost): a dropped "free" is a difference. How strongly a courtesy is worded ("sorry" / "very sorry", "thanks" / "thank you very much") is not a difference. List every difference that changes meaning; an empty list when there are none. ${DATA_NOTE}`,
     text: `ORIGINAL:\n${dataBlock(englishReply)}\n\nBACK:\n${dataBlock(backTranslation)}`,
     jsonSchema: MEANING_SCHEMA,
   });
@@ -315,7 +315,7 @@ const EMAIL_RE = /[^\s<>"'@]+@[^\s<>"'@]+\.(?:\p{L}{2,}|xn--[a-z0-9-]+)/giu;
 const NUMBER_RE = /\d+(?:[.,:]\d+)*/g;
 // Chinese / Japanese / Korean write the hour with a suffix: 14点, 14時, 14시
 // (Vietnamese "9 giờ", Haitian Creole "9 è" / "9è", Russian "9 часов")
-const HOUR_WORD_RE = /^\s*(?:h\b|horas?\b|heures?\b|uhr\b|gi\u1EDD(?!\p{L})|\u00E8(?!\p{L})|\u0447\u0430\u0441(?:\u0430|\u043E\u0432)?(?!\p{L})|[時시点點])/iu;
+const HOUR_WORD_RE = /^\s*(?:h\b|horas?\b|heures?\b|uhr\b|gi\u1EDD(?!\p{L})|\u00E8(?!\p{L})|\u0447\u0430\u0441(?:\u0430\u043C|\u0430|\u043E\u0432)?(?!\p{L})|[時시点點])/iu;
 // a clock marker only: "2 horas" / "2 heures" are durations, not 2 o'clock
 const CLOCK_MARK_RE = /^\s*(?:h\b|uhr\b|[時시点點])/iu;
 const PM_RE = /^\s*(?:pm\b|p\.\s?m\.)/i;
@@ -331,7 +331,7 @@ const AM_RE = /^\s*(?:am\b|a\.\s?m\.)/i;
 // afternoon only in that form.
 const END = '(?![\\p{L}\\p{N}])';
 const CLOCK_GAP = '(?:(?:h|gi\\u1EDD|\\u00E8)\\s+)?';
-const DURATION_GAP = '(?:horas?|heures?|\\u0447\\u0430\\u0441(?:\\u0430|\\u043E\\u0432)?)\\s+';
+const DURATION_GAP = '(?:horas?|heures?|\\u0447\\u0430\\u0441(?:\\u0430\\u043C|\\u0430|\\u043E\\u0432)?)\\s+';
 const CLOCK_PREP_RE = /(?<![\p{L}\p{N}])(?:a\s+las?|[aà]s|à|в|к)\s*$/iu;
 const PM_WORDS = [
   'de\\s+la\\s+(?:tarde|noche)', 'da\\s+(?:tarde|noite)', "de\\s+l['\\u2019]apr[e\\u00E8]s-midi", 'du\\s+soir',
@@ -350,7 +350,7 @@ const HOURS_PM_RE = new RegExp(`^\\s*${DURATION_GAP}(?:${PM_WORDS}|\\u0434\\u043
 const HOURS_AM_RE = new RegExp(`^\\s*${DURATION_GAP}(?:${AM_WORDS})${END}`, 'iu');
 // Russian "2 часа дня", "9 часов утра", "7 часов вечера": the hour word followed by its day part is a clock
 // time on its own (a duration takes another form, "2 часа днём"), so it needs no preposition.
-const RU_HOUR_WORD = '\\u0447\\u0430\\u0441(?:\\u0430|\\u043E\\u0432)?\\s+';
+const RU_HOUR_WORD = '\\u0447\\u0430\\u0441(?:\\u0430\\u043C|\\u0430|\\u043E\\u0432)?\\s+';
 const RU_PM_RE = new RegExp(`^\\s*${RU_HOUR_WORD}(?:\\u0434\\u043D\\u044F|\\u0432\\u0435\\u0447\\u0435\\u0440\\u0430)${END}`, 'iu');
 const RU_AM_RE = new RegExp(`^\\s*${RU_HOUR_WORD}\\u0443\\u0442\\u0440\\u0430${END}`, 'iu');
 function localHalf(before, after) {
@@ -778,7 +778,9 @@ function calendarTokens(text) {
       // ...and its day with it ("Oct 1", "October 1st", "October the 1st", "1 Oct", "1st of October"): "Oct 1" is not "October"
       const after = /^\.?\s*(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)?(?![\d:])/.exec(str.slice(m.index + m[0].length));
       const before = /(?<![\d:])(\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?$/.exec(str.slice(0, m.index));
-      const day = after?.[1] || before?.[1];
+      // a number that counts something ("2 October services") is not that month's day
+      const counted = /^\.?\s+(?:visit|service|treatment|appointment|payment|application|invoice|charge)s?\b/i.test(str.slice(m.index + m[0].length));
+      const day = after?.[1] || (counted ? null : before?.[1]);
       if (day) out.push(`md:${i + 1}/${Number(day)}`);
     }
   });

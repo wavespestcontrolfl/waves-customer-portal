@@ -94,6 +94,7 @@ describe('tokenParity', () => {
     // the Russian hour word with its day part is a clock time with no preposition
     expect(loose('2 PM', '2 часа дня').ok).toBe(true);
     expect(loose('9 AM', '9 часов утра').ok).toBe(true);
+    expect(loose('Come by 9 AM', 'Приходите к 9 часам утра').ok).toBe(true);
     // "дня" is also "days": only after the hour word is it the afternoon
     expect(loose('Can you come in 2 days?', 'Вы можете приехать через 2 дня?').ok).toBe(true);
     // the usual hour word may sit between the number and the half (Portuguese, French)
@@ -589,6 +590,9 @@ describe('runTranslationTrial', () => {
     scriptModels({ inbound: SPANISH_INBOUND, translated: 'Nuestra primera visita de octubre está programada.', back: 'Our first visit in October is scheduled.' });
     mockDraft.mockResolvedValueOnce({ parsed: { reply: 'Our first October visit is scheduled.' }, converged: true, passes: 1 });
     expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's7' })).not.toMatchObject({ hold_reason: 'date_name_changed_in_translation' });
+    scriptModels({ inbound: SPANISH_INBOUND, translated: 'Tiene 2 servicios en octubre.', back: 'You have 2 services in October.' });
+    mockDraft.mockResolvedValueOnce({ parsed: { reply: 'You have 2 October services.' }, converged: true, passes: 1 });
+    expect(await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's8' })).not.toMatchObject({ hold_reason: 'date_name_changed_in_translation' });
     // the faithful one passes the date check, day before or after the month
     scriptModels({ inbound: SPANISH_INBOUND, translated: 'Veo un pago el 1 de octubre.', back: 'I see a payment on the 1st of October.' });
     mockDraft.mockResolvedValueOnce({ parsed: { reply }, converged: true, passes: 1 });
@@ -814,10 +818,12 @@ describe('runTranslationTrial', () => {
     scriptModels({ inbound: SPANISH_INBOUND });
     await runTranslationTrial({ inboundMessage: SPANISH, customer, smsLogId: 's1' });
     const translate = mockDispatch.mock.calls.find(([, p]) => p.system.startsWith('Translate a text message'))[1].system;
-    expect(translate).toContain('free return visit to treat the property again');
+    expect(translate).toContain('return visit to treat the property again');
+    expect(translate).toContain('keep "free" wherever the message says it is free');
     expect(translate).toContain('never as a new or additional service');
     const meaning = mockDispatch.mock.calls.find(([, p]) => p.system.startsWith('Compare two English versions'))[1].system;
     expect(meaning).toContain('"new service" or "another service" is not');
+    expect(meaning).toContain('a dropped "free" is a difference');
     expect(meaning).toContain('How strongly a courtesy is worded');
   });
 
