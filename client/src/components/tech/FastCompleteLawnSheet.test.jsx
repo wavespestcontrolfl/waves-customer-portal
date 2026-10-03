@@ -922,6 +922,49 @@ describe('a product the plan lists twice', () => {
   });
 });
 
+// ── tips from the lawn library (owner 2026-09-29, scope round 3c) ──────────
+// The sheet offers the same searchable tip picker as the pest sheet. The server
+// ranks the lawn list by the visit's confirmed assessment, so the sheet reads
+// it again once the tech confirms, and a tip already picked stays picked.
+describe('tips from your technician', () => {
+  const tipRead = (path) => path.endsWith('/tech-tips');
+  const lib = (labels) => ({ available: true, groups: [{ id: 'lawn', tips: labels.map((label) => ({ id: `tip-${label.toLowerCase().replace(/\W+/g, '-')}`, label, copy: `Copy ${label}.`, keywords: [label.toLowerCase()] })) }] });
+
+  test('offers the search box and finds a tip by keyword', async () => {
+    tips = lib(['Mow high', 'Dollarweed', 'Sedge']);
+    await openSheet();
+    const search = await screen.findByLabelText('Search tips');
+    fireEvent.change(search, { target: { value: 'sedge' } });
+    expect(screen.getByRole('button', { name: /Sedge/ })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Mow high/ })).toBeNull();
+  });
+
+  test('reads the list again once the assessment is confirmed, and keeps the tip already picked', async () => {
+    tips = lib(['Mow high', 'Dollarweed']);
+    await openSheet();
+    fireEvent.click(await screen.findByRole('button', { name: /Mow high/ }));
+    expect(requests.filter((r) => tipRead(r.path))).toHaveLength(1);
+    tips = lib(['Dollarweed', 'Mow high']);
+    await confirmAssessment();
+    await waitFor(() => expect(requests.filter((r) => tipRead(r.path))).toHaveLength(2));
+    await waitFor(() => {
+      const names = screen.getAllByRole('button', { name: /Mow high|Dollarweed/ }).map((b) => b.textContent);
+      expect(names[0]).toMatch(/Dollarweed/);
+    });
+    expect(screen.getByRole('button', { name: /Mow high/ }).getAttribute('aria-pressed')).toBe('true');
+  });
+
+  test('a failed re-read keeps the tips on screen', async () => {
+    tips = lib(['Mow high']);
+    await openSheet();
+    await screen.findByRole('button', { name: /Mow high/ });
+    tips = { available: false, groups: [] };
+    await confirmAssessment();
+    await waitFor(() => expect(requests.filter((r) => tipRead(r.path))).toHaveLength(2));
+    expect(screen.getByRole('button', { name: /Mow high/ })).toBeTruthy();
+  });
+});
+
 // ── pre-push P1: planned rates in the completion record ─────────────────────
 // No rate is typed on this sheet. An untouched planned row records the plan's
 // rate exactly as given; every other row records none, so no unit can be wrong.

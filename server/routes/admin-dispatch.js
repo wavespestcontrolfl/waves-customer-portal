@@ -51,7 +51,7 @@ const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-p
 const { customerHasPriorVisitOnLine } = require('../services/pest-pressure/first-visit');
 const { resolveLabel: resolvePestPressureLabel } = require('../services/pest-pressure/label');
 
-const { tipsForVisit } = require('../services/service-report/tip-library');
+const { tipsForVisit, registryLineFor, lawnFindingsFromAssessment } = require('../services/service-report/tip-library');
 
 const {
   IRRIGATION_SIZING_FIELDS,
@@ -718,10 +718,22 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
         .catch(() => null),
       addonServiceKeys(svc.id),
     ]);
+    const serviceLine = detectServiceLine(svc.service_type);
+    // A lawn visit's tips are ranked by what the tech has CONFIRMED on this
+    // visit's assessment (nothing until they confirm; the sheet asks again
+    // once it does). Ranking only; a failed read just loses the lift.
+    const lawnAssessment = registryLineFor(serviceLine) === 'lawn' && svc.customer_id
+      ? await db('lawn_assessments')
+        .where({ service_id: svc.id, customer_id: svc.customer_id, confirmed_by_tech: true })
+        .orderBy('created_at', 'desc')
+        .first('confirmed_by_tech', 'fungus_control', 'thatch_level', 'weed_suppression', 'stress_flags')
+        .catch(() => null)
+      : null;
     const library = tipsForVisit({
-      serviceLine: detectServiceLine(svc.service_type),
+      serviceLine,
       serviceKey,
       serviceKeys: addonKeys,
+      findings: lawnFindingsFromAssessment(lawnAssessment),
       date: /^\d{4}-\d{2}-\d{2}$/.test(visitDay || '') ? visitDay : new Date(),
     });
     // The 90-day window is ET calendar days: the database's own current

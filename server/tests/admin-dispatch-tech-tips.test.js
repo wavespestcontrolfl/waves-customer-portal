@@ -88,7 +88,7 @@ function invoke(params = {}, actor = { techRole: 'admin', technicianId: 'admin-1
 // A scripted db: scheduled_services → the visit; service_records → optional
 // recommendation history then prior frozen tips; property_preferences → the
 // irrigation flag.
-function scriptedDb({ service, recommendationRows = null, sentRows = [], prefs = null, addons = [], calls }) {
+function scriptedDb({ service, recommendationRows = null, sentRows = [], prefs = null, addons = [], lawnAssessment = null, calls }) {
   return (table) => {
     calls.push(table);
     const chain = {};
@@ -110,7 +110,7 @@ function scriptedDb({ service, recommendationRows = null, sentRows = [], prefs =
       }
       return chain;
     };
-    chain.first = async () => (table === 'scheduled_services' ? service : table === 'property_preferences' ? prefs : null);
+    chain.first = async () => (table === 'scheduled_services' ? service : table === 'property_preferences' ? prefs : table === 'lawn_assessments' ? lawnAssessment : null);
     chain.then = (resolve) => {
       if (table === 'scheduled_service_addons') return Promise.resolve(addons).then(resolve);
       if (table !== 'service_records') return Promise.resolve([]).then(resolve);
@@ -280,6 +280,32 @@ describe('GET /:serviceId/tech-tips', () => {
       const res = await invoke({ serviceId: 'svc-1' });
       expect(res.body.conditions).toEqual({ irrigation_on_file: true });
     }
+  });
+
+  test('a lawn visit ranks its tips by the tech-confirmed assessment and the month; other visits read no assessment', async () => {
+    process.env.GATE_TECH_TIPS = 'true';
+    mockResolveProfile.mockResolvedValue({ serviceKey: 'lawn_care' });
+    const lawn = { ...SERVICE, service_type: 'Lawn Care Treatment', scheduled_date: '2026-10-05' };
+    const lawnIds = (res) => res.body.groups.find((group) => group.id === 'lawn').tips.map((tip) => tip.id);
+
+    const plainCalls = [];
+    mockDbCurrent = scriptedDb({ service: lawn, calls: plainCalls });
+    const plain = await invoke({ serviceId: 'svc-1' });
+    expect(plainCalls).toContain('lawn_assessments');
+    expect(lawnIds(plain).slice(0, 2)).not.toContain('lawn_thatch_half_inch');
+
+    mockDbCurrent = scriptedDb({
+      service: lawn, calls: [],
+      lawnAssessment: { confirmed_by_tech: true, fungus_control: 95, thatch_level: 40, weed_suppression: 99, stress_flags: {} },
+    });
+    const ranked = await invoke({ serviceId: 'svc-1' });
+    expect(lawnIds(ranked)[0]).toBe('lawn_thatch_half_inch');
+    expect([...lawnIds(ranked)].sort()).toEqual([...lawnIds(plain)].sort());
+
+    const calls = [];
+    mockDbCurrent = scriptedDb({ service: SERVICE, calls });
+    await invoke({ serviceId: 'svc-1' });
+    expect(calls).not.toContain('lawn_assessments');
   });
 
   test('gate on: a service with no customer skips the per-customer reads', async () => {

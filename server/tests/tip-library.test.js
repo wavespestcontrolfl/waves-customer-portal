@@ -15,6 +15,8 @@ const {
   MAX_TIPS_PER_VISIT,
   MAX_CUSTOM_TIP_CHARS,
   seasonForDate,
+  LAWN_FINDINGS,
+  lawnFindingsFromAssessment,
   registryLineFor,
   tipsForVisit,
   resolveTipIds,
@@ -378,5 +380,91 @@ describe('resolveTipIds', () => {
   test('tolerates non-array input', () => {
     expect(resolveTipIds(undefined)).toEqual([]);
     expect(resolveTipIds('light_warm_bulbs')).toEqual([]);
+  });
+});
+
+// Lawn library (owner 2026-09-29, scope round 3c): ~20 advice tips keyed to the
+// seasonal watch list. The metadata only reorders the picker.
+describe('lawn tip library', () => {
+  const LAWN = TIPS.filter((t) => t.group === 'lawn');
+  const ids = (opts) => tipsForVisit({ serviceLine: 'lawn', ...opts }).groups.find((g) => g.id === 'lawn').tips.map((t) => t.id);
+
+  test('has about twenty lawn tips and every finding and month key is a real one', () => {
+    expect(LAWN.length).toBeGreaterThanOrEqual(20);
+    const families = new Set(Object.values(LAWN_FINDINGS));
+    for (const tip of LAWN) {
+      for (const key of tip.findings || []) expect(Object.keys(LAWN_FINDINGS)).toContain(key);
+      for (const month of tip.months || []) expect(Number.isInteger(month) && month >= 1 && month <= 12).toBe(true);
+    }
+    expect(families.size).toBeGreaterThan(0);
+  });
+
+  // Owner rulings: no sod install, no aeration upsell, no product result
+  // timelines, no watering or mowing-height numbers beyond the seed's two
+  // (a third; half an inch), and the business is Waves Pest Control.
+  // (The portal tip is the pre-existing, separately approved one: "about two minutes" is the form, not a result.)
+  test.each(LAWN.filter((t) => t.id !== 'lawn_irrigation_portal').map((t) => [t.id, t.copy]))('%s keeps to the lawn copy rulings', (id, copy) => {
+    expect(copy).not.toMatch(/\b(?:sod(?!\s+webworm)|aerat\w*|dethatch\w*|track [A-D]|Lawn Care)\b/i);
+    expect(copy).not.toMatch(/\b\d+(?:\.\d+)?\s*(?:-|to)?\s*\d*\s*(?:days?|weeks?|months?|hours?|minutes?|inch(?:es)?|in\b|")/i);
+    expect(copy).not.toMatch(/\b(?:two|three|four|five|six|seven|ten|fourteen|twenty)\s+(?:days?|weeks?|months?|hours?|minutes?)\b/i);
+  });
+
+  test('without findings or a seed month the lawn order is the registry order, in-season first', () => {
+    const wet = ids({ date: '2026-08-15' });
+    expect(wet.indexOf('lawn_water_morning')).toBeLessThan(wet.indexOf('lawn_bag_clippings'));
+    const dry = ids({ date: '2026-01-15' });
+    expect(dry.indexOf('lawn_irrigation_portal')).toBeLessThan(dry.indexOf('lawn_water_morning'));
+  });
+
+  test('the month lifts its tips: October leads with the watch-list tips, February with the spring tip', () => {
+    const oct = ids({ date: '2026-10-05' });
+    expect(oct.slice(0, 3).every((id) => LAWN.find((t) => t.id === id).months?.includes(10))).toBe(true);
+    expect(oct.indexOf('lawn_cooler_nights')).toBeLessThan(oct.indexOf('lawn_early_spring_low_mow'));
+    expect(ids({ date: '2026-02-10' })[0]).toBe('lawn_early_spring_low_mow');
+  });
+
+  test('a confirmed finding lifts its tips above the month and the season', () => {
+    const disease = ids({ date: '2026-10-05', findings: ['disease'] });
+    expect(disease.slice(0, 5)).toEqual(expect.arrayContaining(['lawn_bag_clippings', 'lawn_shade_dry_between', 'lawn_skip_extra_nitrogen', 'lawn_water_morning']));
+    const thatch = ids({ date: '2026-08-15', findings: ['thatch'] });
+    expect(thatch[0]).toBe('lawn_thatch_half_inch');
+    // a named finding lifts only its own tips
+    const webworm = ids({ date: '2026-08-15', findings: ['sod_webworm'] });
+    expect(webworm[0]).toBe('lawn_moths_at_dusk');
+    expect(webworm.indexOf('lawn_digging_animals')).toBeGreaterThan(webworm.indexOf('lawn_moths_at_dusk'));
+  });
+
+  test('ranking never hides or adds a tip, and unknown findings change nothing', () => {
+    const base = ids({ date: '2026-10-05' });
+    expect([...ids({ date: '2026-10-05', findings: ['disease', 'weeds'] })].sort()).toEqual([...base].sort());
+    expect(ids({ date: '2026-10-05', findings: ['not_a_finding', 7, null] })).toEqual(base);
+    expect(ids({ date: '2026-10-05', findings: 'disease' })).toEqual(base);
+  });
+
+  test('other lines keep their order when findings are passed', () => {
+    const order = (opts) => tipsForVisit({ serviceLine: 'pest', date: '2026-01-20', ...opts }).groups.flatMap((g) => g.tips.map((t) => t.id));
+    expect(order({ findings: ['disease'] })).toEqual(order({}));
+  });
+
+  describe('lawnFindingsFromAssessment', () => {
+    test('reads only a tech-confirmed assessment', () => {
+      expect(lawnFindingsFromAssessment(null)).toEqual([]);
+      expect(lawnFindingsFromAssessment({ confirmed_by_tech: false, fungus_control: 20, thatch_level: 20 })).toEqual([]);
+    });
+
+    test('low confirmed scores and tech stress flags become coarse finding keys', () => {
+      expect(lawnFindingsFromAssessment({
+        confirmed_by_tech: true, fungus_control: 75, thatch_level: 60, weed_suppression: 90,
+        stress_flags: { shade_stress: true, drought_stress: false, recent_scalp: true },
+      }).sort()).toEqual(['disease', 'scalping', 'shade', 'thatch', 'weeds']);
+      expect(lawnFindingsFromAssessment({
+        confirmed_by_tech: true, fungus_control: 95, thatch_level: 85, weed_suppression: 98,
+        stress_flags: JSON.stringify({ disease_suspicion: true, drought_stress: true }),
+      }).sort()).toEqual(['disease', 'drought']);
+    });
+
+    test('a blank score or unreadable flags add nothing', () => {
+      expect(lawnFindingsFromAssessment({ confirmed_by_tech: true, fungus_control: null, thatch_level: '', weed_suppression: undefined, stress_flags: '{not json' })).toEqual([]);
+    });
   });
 });

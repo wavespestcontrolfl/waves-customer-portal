@@ -611,12 +611,14 @@ function LawnFastForm({ service, request, catalog, ctx, submission, locked, dict
   const appendNote = useCallback((text) => {
     setForm((prev) => ({ ...prev, note: prev.note.trim() ? `${prev.note.trimEnd()} ${text}` : text }));
   }, []);
-  const tips = useTipLibrary({ base, request });
-  const tipsAvailable = !!tips;
 
   // The photo step reports back: the confirmed assessment's id (null until
   // there is one) and whether a lookup, analysis or confirm is in flight.
   const { assessmentId, assessmentReady, retaking, onConfirmed, onReady } = useConfirmedAssessment(ctx.assessment);
+  // The tips are ranked by the confirmed assessment, so they are read again
+  // once there is one.
+  const tips = useTipLibrary({ base, request, refreshKey: assessmentId });
+  const tipsAvailable = !!tips;
   const [gaugeHeightIn, setGaugeHeightIn] = useState(null);
   const blockService = useMemo(() => ({ id: service?.id, customerId: ctx.raw?.customerId ?? service?.routedCustomerId ?? null }), [service?.id, service?.routedCustomerId, ctx.raw?.customerId]);
   // A confirmed assessment the report would reject (made for the visit's
