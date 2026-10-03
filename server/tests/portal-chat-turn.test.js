@@ -420,6 +420,56 @@ test('a crash retry bounds newest history at its immutable ask even after many l
   expect(mockCreate.mock.calls[0][0].messages.at(-1).role).toBe('user');
 });
 
+test('a crash retry forks its request transcript when a later user already occupies the active session', async () => {
+  const originalAsk = 'Was the kitchen baseboard treated?';
+  const originalId = '00000000-0000-4000-8000-000000000040';
+  const source = {
+    id: 'conv-source', customer_id: 'cust-1', channel: 'portal_chat',
+    channel_identifier: 'property-scoped-session', status: 'active',
+    timeout_at: new Date(Date.now() + 60_000), message_count: 5,
+    context_snapshot: { version: 2, firstName: 'Pat' },
+  };
+  const fork = { ...source, id: 'conv-recovered', status: 'timeout', message_count: 1 };
+  const queries = [];
+  db.__rows = (query) => {
+    queries.push(query);
+    if (query.sql.includes('inner join "agent_sessions" as "conversation"')) {
+      return [{ ...source, portal_turn_message_id: originalId, portal_turn_message_content: originalAsk }];
+    }
+    if (query.sql.includes('from "agent_messages"') && query.sql.includes('for update')) {
+      return [{ id: originalId, conversation_id: source.id, role: 'user', content: originalAsk,
+        created_at: new Date('2026-10-03T12:00:00.123Z') }];
+    }
+    if (query.sql.includes('from "agent_sessions"') && query.sql.includes('for update')) return [source];
+    if (query.sql.includes('"created_at" > (select "created_at"')) {
+      return [{ id: '00000000-0000-4000-8000-000000000050' }];
+    }
+    if (query.sql.includes('insert into "agent_sessions"')) return [fork];
+    return [];
+  };
+  mockCreate.mockResolvedValue({ content: [{ type: 'text', text: 'Yes, it was treated.' }] });
+
+  const result = await assistant.processMessage({
+    message: 'different retry text', channel: 'portal_chat',
+    channelIdentifier: 'property-scoped-session', customerId: 'cust-1',
+    turn: coordinatedTurn('request-row-fork'),
+  });
+
+  expect(result.conversationId).toBe(fork.id);
+  expect(JSON.stringify(mockCreate.mock.calls[0][0].messages)).toContain(originalAsk);
+  expect(JSON.stringify(mockCreate.mock.calls[0][0].messages)).not.toContain('different retry text');
+  const move = queries.find((query) => /update "agent_messages" set "conversation_id"/.test(query.sql));
+  expect(move.bindings).toEqual(expect.arrayContaining([fork.id, source.id, 'request-row-fork']));
+  expect(move.sql).not.toMatch(/"role" =|"content" =|"created_at" =/);
+  const sourceUpdate = queries.find((query) => /update "agent_sessions" set "message_count"/.test(query.sql));
+  expect(sourceUpdate.bindings).toContain(source.id);
+  expect(sourceUpdate.sql).not.toMatch(/"status" =|"last_activity_at" =|"timeout_at" =/);
+  const receiptUpdate = queries.find((query) => /update "portal_chat_requests" set "conversation_id"/.test(query.sql));
+  expect(receiptUpdate.bindings).toEqual(expect.arrayContaining([fork.id, 'request-row-fork']));
+  const replyInsert = queries.filter((query) => /insert into "agent_messages"/.test(query.sql)).at(-1);
+  expect(replyInsert.bindings).toContain(fork.id);
+});
+
 test('a retry on an active legacy-context session isolates the immutable ask', async () => {
   const originalAsk = 'Was the garage included?';
   let historyRead = false;

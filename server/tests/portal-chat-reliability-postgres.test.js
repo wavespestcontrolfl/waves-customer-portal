@@ -218,6 +218,8 @@ postgres('portal chat durable turns (PostgreSQL)', () => {
     const requestId = randomUUID();
     let firstTimeout;
     let secondTimeout;
+    let savepointFirstTimeout;
+    let savepointSecondTimeout;
     let cancelOnTimeout;
     const response = await runPortalTurn(args(requestId, async (turn) => {
       await turn.transaction('method-style bounded query', async (trx) => {
@@ -229,6 +231,15 @@ postgres('portal chat durable turns (PostgreSQL)', () => {
         const second = trx.select(mockApp.raw('2 AS value'));
         secondTimeout = second._timeout;
         await second;
+        await trx.transaction(async (savepoint) => {
+          const savepointFirst = savepoint.select(mockApp.raw('3 AS value'));
+          savepointFirstTimeout = savepointFirst._timeout;
+          await savepointFirst;
+          await pause(150);
+          const savepointSecond = savepoint.select(mockApp.raw('4 AS value'));
+          savepointSecondTimeout = savepointSecond._timeout;
+          await savepointSecond;
+        });
       });
       return { reply: 'bounded', escalated: false };
     }, { budgetMs: 2_500 }));
@@ -236,6 +247,8 @@ postgres('portal chat durable turns (PostgreSQL)', () => {
     expect(response).toMatchObject({ reply: 'bounded', requestId });
     expect(firstTimeout).toBeGreaterThan(0);
     expect(secondTimeout).toBeLessThan(firstTimeout);
+    expect(savepointFirstTimeout).toBeLessThan(secondTimeout);
+    expect(savepointSecondTimeout).toBeLessThan(savepointFirstTimeout);
     expect(cancelOnTimeout).toBe(true);
   });
 
