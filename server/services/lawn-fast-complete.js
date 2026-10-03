@@ -30,9 +30,6 @@ const { ASSESSMENT_EXPERIENCE_KEYS } = require('../config/completion-lane-regist
 const shotList = require('./lawn-photo-shots');
 
 const LAWN_CATEGORY = 'lawn_care';
-// The lawn re-service (free between-visit callback) has its own sheet and gate
-// (GATE_LAWN_RESERVICE_FAST_COMPLETE); it never opens here.
-const RESERVICE_KEY = 'lawn_re_service';
 // 'rescheduled' is the phantom row a legacy customer reschedule leaves behind
 // (both schedule feeds hide it); /complete does not refuse it, so this does.
 const TERMINAL_STATUSES = new Set(['completed', 'cancelled', 'skipped', 'no_show', 'incomplete', 'rescheduled']);
@@ -97,7 +94,12 @@ function lawnFastVisitType(profile, billingMode, isCallback = false) {
 function lawnFastIneligibleReason({ svc, profile, hasVisitGroup = false, visitGroupStatus = null, allowStatuses = [] }) {
   if (!profile) return 'profile_unavailable';
   if (profile.category !== LAWN_CATEGORY) return 'not_lawn';
-  if (profile.serviceKey === RESERVICE_KEY) return 'lawn_re_service';
+  // The three lawn_care sheets partition the visits: the lawn re-service and Tree & Shrub
+  // (which shares the lawn_care category) are decided by their OWN sheets' predicates, and
+  // the Waves Assessment visit is its own diagnostic lane. Derived from the completion
+  // profile, never the client.
+  if (require('./lawn-reservice-fast-context').isLawnReserviceProfile(profile)) return 'lawn_re_service';
+  if (require('./tree-shrub-fast-context').isTreeShrubFastProfile(profile)) return 'tree_shrub';
   if (ASSESSMENT_EXPERIENCE_KEYS.includes(profile.serviceKey)) return 'assessment_visit';
   if (profile.projectBacked || profile.requiresProject) return 'project_backed';
   if (Array.isArray(profile.companions) && profile.companions.length) return 'has_companions';
@@ -511,6 +513,14 @@ async function loadPlannedProducts(svc, knex, visitType, readFailures) {
           applicationMethod: item.applicationMethod || null,
           amount: item.mix?.amount ?? null,
           amountUnit: item.mix?.amountUnit ?? null,
+          // The treated area and planned rate exactly as the full form's completion defaults
+          // prefill them (lawnPlanSelections reads mix.treatedSqft in square feet and
+          // mix.ratePer1000 / mix.rateUnit): the same plan item, nothing computed here. null
+          // when the plan carries none (never invented); /complete then asks for the area.
+          treatedSqft: item.mix?.treatedSqft ?? null,
+          areaUnit: item.mix?.treatedSqft != null ? 'sqft' : null,
+          ratePer1000: item.mix?.ratePer1000 ?? null,
+          rateUnit: item.mix?.rateUnit ?? null,
           approvedForReport: entry.approvedForReport,
           wateringRule: entry.rule,
           wateringSummary: entry.ruleSummary,
@@ -596,6 +606,9 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null 
     visitType,
     service,
     visitDate: etCalendarDayOf(svc.scheduled_date),
+    // The completion profile's typed findings form (null when it has none). A one-time lawn
+    // visit carries 'one_time_lawn_treatment', and /complete then requires lawn_condition.
+    findingsType: profile.findingsType || null,
     // The height-of-cut capture is a lawn-visit feature the typed lawn form
     // never renders (mirrors /complete's turfHeightApplicable).
     turfHeightCapture,
