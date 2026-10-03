@@ -132,14 +132,17 @@ const BELL_COPY = {
 async function ringBell(kind, ctx) {
   try {
     const { title, body } = BELL_COPY[kind](ctx);
-    await require('./notification-service').notifyAdmin('billing', title, body, {
+    // notifyAdmin resolves null (it does not throw) when its own insert or
+    // dedupe transaction fails: only a persisted or deduped row is a landed
+    // bell.
+    const landed = await require('./notification-service').notifyAdmin('billing', title, body, {
       icon: '⚠️',
       link: `/admin/estimates?estimateId=${ctx.estimateId}`,
       bell: true,
       dedupeKey: `termite-annual-signature-charge:${ctx.estimateId}:${kind}`,
       metadata: { estimateId: ctx.estimateId, invoiceId: ctx.invoiceId, reason: ctx.reason },
     });
-    return true;
+    return !!landed;
   } catch (err) {
     logger.error(`[termite-annual-charge] bell failed for estimate ${ctx.estimateId}: ${err.message}`);
     return false;
@@ -524,7 +527,14 @@ async function deferToInstallationIfAgreed({ conn, ctx, trigger }) {
       .whereNull('annual_plan_signature_charge')
       .update({
         annual_plan_signature_charge: JSON.stringify({
-          status: AWAITING_INSTALLATION, invoice_id: invoiceId, contract_id: contract.id, trigger, deferred_at: new Date().toISOString(),
+          status: AWAITING_INSTALLATION,
+          invoice_id: invoiceId,
+          contract_id: contract.id,
+          trigger,
+          deferred_at: new Date().toISOString(),
+          // The never-installed clock runs from the SIGNATURE, not from this
+          // (possibly retried, days-later) activation.
+          signed_at: contract.signed_at ? new Date(contract.signed_at).toISOString() : null,
         }),
       });
   } catch (err) {
@@ -586,15 +596,16 @@ async function chargeAnnualInvoiceAfterInstallation({ estimateId, invoiceId, con
 }
 
 // The plan behind `estimateId` still owes `invoiceId` and its installation
-// visit is completed (termite-annual-activation.js's one installation rule).
+// visit was PERFORMED (termite-annual-activation.js's one installation rule
+// plus its performed-closeout rule).
 async function installedAndOwed({ conn, estimateId, invoiceId }) {
   const term = await conn('annual_prepay_terms')
     .where({ source_estimate_id: estimateId, prepay_invoice_id: invoiceId, status: 'payment_pending' })
     .whereNull('renewed_from_term_id')
     .first('id', 'customer_id', 'source_estimate_id', 'term_start', 'created_at');
   if (!term) return false;
-  const { earliestCompletedInstallation } = require('./termite-annual-activation');
-  return !!(await earliestCompletedInstallation(term, conn));
+  const { earliestPerformedInstallation } = require('./termite-annual-activation');
+  return !!(await earliestPerformedInstallation(term, conn));
 }
 
 // One office alert for a plan signed NEVER_INSTALLED_ALERT_DAYS ago whose

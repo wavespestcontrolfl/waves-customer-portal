@@ -123,6 +123,46 @@ describeOrSkip('20261003130000_termite_annual_v3_charge_after_installation_claus
     expect(await currentBody(db)).toBe(r3.TEMPLATE_V3_ANNUAL_R3_BODY);
   });
 
+  describe('lockActiveVersionForIssue — the shared issue boundary (admin issue route, bulk send)', () => {
+    async function publishAndLoad(db) {
+      const version = await db('document_template_versions').first('id', 'template_id');
+      await db('document_template_versions').where({ id: version.id }).update({ published_at: db.fn.now() });
+      await db('document_templates').where({ id: version.template_id }).update({ status: 'active', active_version_id: version.id });
+      return { template: { id: version.template_id }, activeVersion: { id: version.id } };
+    }
+    function locker(db, { termite }) {
+      process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
+      if (termite) process.env.GATE_PAF_TERMITE = 'true';
+      jest.doMock('../models/db', () => db);
+      jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+      const { lockActiveVersionForIssue } = require('../services/document-template-library');
+      return (loaded) => db.transaction((trx) => lockActiveVersionForIssue(trx, loaded));
+    }
+
+    test('gate off: the after-installation wording cannot be issued', async () => {
+      const { db } = fixture;
+      await seedThroughR3(db);
+      await revision.up(db);
+      const loaded = await publishAndLoad(db);
+      await expect(locker(db, { termite: false })(loaded)).rejects.toMatchObject({ status: 409, code: 'TERMITE_AFTER_INSTALL_GATE_OFF' });
+    });
+
+    test('gate on: it issues', async () => {
+      const { db } = fixture;
+      await seedThroughR3(db);
+      await revision.up(db);
+      const loaded = await publishAndLoad(db);
+      await expect(locker(db, { termite: true })(loaded)).resolves.toMatchObject({ status: 'active' });
+    });
+
+    test('gate off: the at-signing wording still issues', async () => {
+      const { db } = fixture;
+      await seedThroughR3(db);
+      const loaded = await publishAndLoad(db);
+      await expect(locker(db, { termite: false })(loaded)).resolves.toMatchObject({ status: 'active' });
+    });
+  });
+
   describe('annualAgreementChargesAfterInstallation (the estimate page\'s charge-timing sentence)', () => {
     async function publish(db) {
       const version = await db('document_template_versions').first('id', 'template_id');

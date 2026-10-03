@@ -1220,8 +1220,9 @@ async function anchorInstalledTerms({ conn, limit, counts }) {
 // An agreement signed on the charge-after-installation wording records
 // 'awaiting_installation' at signing (termite-annual-signature-charge.js):
 // no charge, no pay link. This pass collects it once the plan's
-// installation visit is COMPLETED — the same completed-visit rule the anchor
-// uses (whereInstallationVisitForPlan), read by the same daily sweep for the
+// installation visit is PERFORMED — the anchor's installation rule
+// (whereInstallationVisitForPlan) plus a performed, non-backfill closeout
+// (wherePerformedCloseout), read by the same daily sweep for the
 // same reason (every completion writer is covered by one reader). The charge
 // is at most a day behind the installation.
 //
@@ -1246,8 +1247,40 @@ function awaitingInstallationRows(conn) {
     .whereNotIn('inv.status', INVOICE_UNCOLLECTIBLE_STATUSES);
 }
 
+// A 'completed' visit is not always performed work: a closeout recorded as
+// inspection only, customer declined or incomplete, and a quiet backfill
+// (which must move no money), all leave scheduled_services.status
+// 'completed'. Same rule as the deferred prepay release
+// (paf-prepay-release.js): the visit's CURRENT closeout record decides.
+const NOT_PERFORMED_OUTCOMES = ['inspection_only', 'customer_declined', 'incomplete'];
+function wherePerformedCloseout(builder) {
+  return builder.whereRaw(`EXISTS (
+    SELECT 1 FROM service_records r
+    WHERE r.id = (
+      SELECT r2.id FROM service_records r2
+      WHERE r2.scheduled_service_id = ss.id
+      ORDER BY r2.created_at DESC, r2.id DESC LIMIT 1
+    )
+      AND r.status = 'completed'
+      AND COALESCE(r.structured_notes ->> 'visitOutcome', '') <> ALL(?::text[])
+      AND COALESCE(r.structured_notes ->> 'backfill', '') <> 'true'
+  )`, [NOT_PERFORMED_OUTCOMES]);
+}
+
+// The plan's earliest PERFORMED installation (see wherePerformedCloseout).
+async function earliestPerformedInstallation(term, conn) {
+  const estimate = term.source_estimate_id
+    ? await conn('estimates').where({ id: term.source_estimate_id }).first('property_id')
+    : null;
+  return wherePerformedCloseout(whereInstallationVisitForPlan(
+    conn('scheduled_services as ss').where('ss.status', 'completed'),
+    installationPlanFor(term, estimate),
+  )).orderBy('ss.scheduled_date', 'asc').first('ss.id', 'ss.scheduled_date');
+}
+
 function completedInstallationForRow(conn) {
   return function completedInstallation() {
+    wherePerformedCloseout(this);
     whereInstallationVisitForPlan(
       this.select(conn.raw('1')).from('scheduled_services as ss').where('ss.status', 'completed'),
       {
@@ -1306,8 +1339,10 @@ async function chargeInstalledTerms({ conn, limit, counts }) {
       .whereRaw("e.annual_plan_signature_charge ->> 'never_installed_alerted_at' IS NULL")
       // CASE, not two ANDed predicates: the cast must never run on a value
       // the shape check has not passed.
-      .whereRaw(`(CASE WHEN (e.annual_plan_signature_charge ->> 'deferred_at') ~ '${CASTABLE_ISO_INSTANT}'
-        THEN (e.annual_plan_signature_charge ->> 'deferred_at')::timestamptz END)
+      // The clock starts at the signature (signed_at); a record without one
+      // falls back to when the wait was recorded.
+      .whereRaw(`(CASE WHEN COALESCE(e.annual_plan_signature_charge ->> 'signed_at', e.annual_plan_signature_charge ->> 'deferred_at') ~ '${CASTABLE_ISO_INSTANT}'
+        THEN COALESCE(e.annual_plan_signature_charge ->> 'signed_at', e.annual_plan_signature_charge ->> 'deferred_at')::timestamptz END)
         < now() - interval '${SignatureCharge.NEVER_INSTALLED_ALERT_DAYS} days'`)
       .orderBy('inv.created_at', 'asc')
       .select('e.id as estimate_id', 'inv.id as invoice_id')
@@ -1323,6 +1358,7 @@ async function chargeInstalledTerms({ conn, limit, counts }) {
     }
   } catch (err) {
     logger.error(`[termite-annual-activation] never-installed scan failed: ${err.message}`);
+    counts.neverInstalledScanError = err.message;
   }
 }
 
@@ -1721,7 +1757,7 @@ module.exports = {
   anchorTermToInstallation,
   reconcileTermiteAnnualActivations,
   whereTermHasCompletedInstallation,
-  earliestCompletedInstallation,
+  earliestPerformedInstallation,
   installationTermWindowForTerm,
   ANNUAL_TEMPLATE_KEY,
   ANNUAL_SIGNATURE_ABANDON_DAYS,

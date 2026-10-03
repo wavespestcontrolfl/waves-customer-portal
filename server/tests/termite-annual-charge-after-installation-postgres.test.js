@@ -134,6 +134,15 @@ async function createScratchDb() {
     service_type text,
     scheduled_date date
   )`);
+  // The visit's closeout records: the newest one says whether the work was
+  // performed (wherePerformedCloseout).
+  await db.raw(`CREATE TABLE service_records (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    scheduled_service_id uuid,
+    status text,
+    structured_notes jsonb,
+    created_at timestamptz NOT NULL DEFAULT now()
+  )`);
   await db.raw(`CREATE TABLE annual_prepay_terms (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     customer_id uuid NOT NULL,
@@ -302,9 +311,24 @@ describeOrSkip('termite annual charge after installation — real Postgres', () 
   }
 
   const chargeState = async (db) => (await db('estimates').where({ id: ids.estimateId }).first()).annual_plan_signature_charge;
-  const addInstall = (db, fields = {}) => db('scheduled_services').insert({
-    customer_id: ids.customerId, status: 'completed', service_type: 'Termite Installation Setup', scheduled_date: '2026-10-14', ...fields,
-  }).returning('*').then(([row]) => row);
+  // A completed installation visit with a performed closeout record, unless
+  // `closeout` says otherwise (null = no record at all).
+  const addInstall = async (db, fields = {}, closeout = {}) => {
+    const [visit] = await db('scheduled_services').insert({
+      customer_id: ids.customerId, status: 'completed', service_type: 'Termite Installation Setup', scheduled_date: '2026-10-14', ...fields,
+    }).returning('*');
+    if (closeout && visit.status === 'completed') {
+      await db('service_records').insert({
+        scheduled_service_id: visit.id, status: 'completed', structured_notes: JSON.stringify(closeout),
+      });
+    }
+    return visit;
+  };
+  const signedDaysAgo = (db, days) => db('estimates').where({ id: ids.estimateId }).update({
+    annual_plan_signature_charge: db.raw('annual_plan_signature_charge || ?::jsonb', [
+      JSON.stringify({ signed_at: new Date(Date.now() - days * 86400e3).toISOString() }),
+    ]),
+  });
   const bellTitles = (notifyAdmin) => notifyAdmin.mock.calls.map((call) => call[1]);
 
   test('signing an after-installation agreement charges nothing and sends no pay link; a replay changes nothing', async () => {
@@ -312,7 +336,9 @@ describeOrSkip('termite annual charge after installation — real Postgres', () 
 
     expect(await atSigning()).toEqual({ status: 'awaiting_installation', reason: null, deliverPayLink: false });
     const state = await chargeState(db);
-    expect(state).toMatchObject({ status: 'awaiting_installation', invoice_id: ids.invoiceId, contract_id: ids.contractId });
+    expect(state).toMatchObject({
+      status: 'awaiting_installation', invoice_id: ids.invoiceId, contract_id: ids.contractId, signed_at: '2026-10-05T15:59:00.000Z',
+    });
     expect(await atSigning({ trigger: 'sweep' })).toEqual({ status: 'awaiting_installation', reason: null, deliverPayLink: false });
     expect(await chargeState(db)).toEqual(state);
     expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
@@ -397,6 +423,34 @@ describeOrSkip('termite annual charge after installation — real Postgres', () 
     expect(await sweep()).toMatchObject({ installChargeScanned: 1, installCharged: 1 });
     expect(chargeInvoiceWithSavedCard).toHaveBeenCalledTimes(1);
     expect((await chargeState(db)).status).toBe('paid');
+  });
+
+  test.each([
+    ['closed as inspection only', { visitOutcome: 'inspection_only' }],
+    ['closed as customer declined', { visitOutcome: 'customer_declined' }],
+    ['closed as incomplete', { visitOutcome: 'incomplete' }],
+    ['a quiet backfill closeout', { backfill: 'true' }],
+    ['completed with no closeout record', null],
+  ])('an installation visit %s is not a performed installation: no charge', async (_label, closeout) => {
+    const { atSigning, afterInstall, sweep, chargeInvoiceWithSavedCard, db } = load();
+    await atSigning();
+    await addInstall(db, {}, closeout);
+
+    expect((await sweep()).installChargeScanned).toBe(0);
+    expect(await afterInstall()).toMatchObject({ status: 'awaiting_installation', reason: 'not_installed_or_not_owed' });
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+  });
+
+  test('a visit re-closed as performed after an inspection-only closeout is charged (the newest closeout decides)', async () => {
+    const { atSigning, sweep, chargeInvoiceWithSavedCard, db } = load();
+    await atSigning();
+    const visit = await addInstall(db, {}, { visitOutcome: 'inspection_only' });
+    await db('service_records').insert({
+      scheduled_service_id: visit.id, status: 'completed', structured_notes: JSON.stringify({}), created_at: new Date(Date.now() + 60000),
+    });
+
+    expect(await sweep()).toMatchObject({ installChargeScanned: 1, installCharged: 1 });
+    expect(chargeInvoiceWithSavedCard).toHaveBeenCalledTimes(1);
   });
 
   test('the direct entry re-checks the installation under its claim and hands the wait back untouched', async () => {
@@ -503,11 +557,7 @@ describeOrSkip('termite annual charge after installation — real Postgres', () 
 
     expect((await sweep()).neverInstalledAlerted).toBe(0);
 
-    await db('estimates').where({ id: ids.estimateId }).update({
-      annual_plan_signature_charge: db.raw('annual_plan_signature_charge || ?::jsonb', [
-        JSON.stringify({ deferred_at: new Date(Date.now() - 15 * 86400e3).toISOString() }),
-      ]),
-    });
+    await signedDaysAgo(db, 15);
     expect((await sweep()).neverInstalledAlerted).toBe(1);
     expect((await sweep()).neverInstalledAlerted).toBe(0);
     expect(bellTitles(notifyAdmin).filter((title) => title === 'Termite annual plan — signed, not installed, not charged')).toHaveLength(1);
@@ -515,17 +565,34 @@ describeOrSkip('termite annual charge after installation — real Postgres', () 
     expect((await chargeState(db)).status).toBe('awaiting_installation');
   });
 
-  test('a never-installed alert that fails to land is not recorded: the next sweep rings it', async () => {
+  test('the 14 days count from the signature, not from a delayed activation', async () => {
+    const { atSigning, sweep, db } = load();
+    // Signed 20 days ago; the activation (and so the wait record) only landed now.
+    await db('customer_contracts').where({ id: ids.contractId }).update({ signed_at: new Date(Date.now() - 20 * 86400e3) });
+    await atSigning();
+
+    expect((await sweep()).neverInstalledAlerted).toBe(1);
+  });
+
+  test('an installation visit closed as inspection only still counts as never installed for the alert', async () => {
+    const { atSigning, sweep, db } = load();
+    await atSigning();
+    await signedDaysAgo(db, 15);
+    await addInstall(db, {}, { visitOutcome: 'inspection_only' });
+
+    expect((await sweep()).neverInstalledAlerted).toBe(1);
+  });
+
+  test.each([
+    ['throws', async () => { throw new Error('notification store down'); }],
+    ['resolves null (its own insert failed)', async () => null],
+  ])('a never-installed alert that %s is not recorded: the next sweep rings it', async (_label, failing) => {
     let fail = true;
     const { atSigning, sweep, db } = load({
-      notifyAdminImpl: async () => { if (fail) throw new Error('notification store down'); return { id: randomUUID(), deduped: false }; },
+      notifyAdminImpl: async () => (fail ? failing() : { id: randomUUID(), deduped: false }),
     });
     await atSigning();
-    await db('estimates').where({ id: ids.estimateId }).update({
-      annual_plan_signature_charge: db.raw('annual_plan_signature_charge || ?::jsonb', [
-        JSON.stringify({ deferred_at: new Date(Date.now() - 15 * 86400e3).toISOString() }),
-      ]),
-    });
+    await signedDaysAgo(db, 15);
 
     expect((await sweep()).neverInstalledAlerted).toBe(0);
     expect((await chargeState(db)).never_installed_alerted_at).toBeUndefined();
