@@ -76,7 +76,9 @@ function sentAtFor(row, sent, rows) {
     .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
   const match = row.outcome === 'drafted'
     ? after.find((r) => r.custom_body === row.body)
-    : after.find((r) => !/_tech_voice$/.test(String(r.template_key || '')));
+    // The fixed text carries no drafted body (a personalized or tech-voice
+    // request does).
+    : after.find((r) => !r.custom_body);
   return match ? (match.sms_sent_at || match.sent_at) : null;
 }
 
@@ -135,7 +137,10 @@ async function listRecent({ days = 14, database = db } = {}) {
         sentAt: sentAtFor(r, sent, rows),
       };
     }),
-    paymentHolds: holds.map((h) => {
+    // A waiting hold is only real on a cadence still running: a completed or
+    // stopped row can keep an old payment_hold decision. A dropped step is
+    // history and shows whatever the cadence did next.
+    paymentHolds: holds.filter((h) => h.status === 'active' || parseJson(h.decision)?.reason === 'ask_dropped_payment_hold').map((h) => {
       const decision = parseJson(h.decision) || {};
       const step = Number.isInteger(decision.detail?.step) ? decision.detail.step : h.current_step;
       return {

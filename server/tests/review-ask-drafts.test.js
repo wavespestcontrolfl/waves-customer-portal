@@ -133,6 +133,10 @@ describe('listRecent: whether THIS outcome went out', () => {
     ], [{ sequence_id: 'seq-1', sequence_step: 1, channel: 'sms', custom_body: null, template_key: 'soft_reminder', created_at: new Date('2026-10-02T15:31:00Z'), sms_sent_at: new Date('2026-10-02T15:32:00Z') }]);
     expect(retried.drafts.find((d) => d.id === 7).sentAt).toBeNull();
     expect(retried.drafts.find((d) => d.id === 8).sentAt).toEqual(new Date('2026-10-02T15:32:00Z'));
+    // a later PERSONALIZED request (the switch turned off meanwhile) is not the fixed text going out
+    const personalized = await listWith([draftRow({ id: 9, outcome: 'fallback', reason: 'out_of_time' })],
+      [{ sequence_id: 'seq-1', sequence_step: 1, channel: 'sms', custom_body: 'A personalized ask', template_key: 'soft_reminder_personalized', created_at: new Date('2026-10-02T15:31:00Z'), sms_sent_at: new Date('2026-10-02T15:32:00Z') }]);
+    expect(personalized.drafts[0].sentAt).toBeNull();
   });
 });
 
@@ -144,6 +148,7 @@ test('a dropped payment hold names the step it held, not the step the cadence mo
     q.select = async () => (name === 'review_sequences'
       ? [
         { id: 's-1', customer_id: 'c', status: 'completed', current_step: 1, plan: JSON.stringify([{ day: 0, channel: 'sms' }]), updated_at: new Date(), decision: { reason: 'ask_dropped_payment_hold', detail: { step: 0, hold: 'overdue_invoice' } } },
+        { id: 's-3', customer_id: 'c', status: 'completed', current_step: 3, plan: [], updated_at: new Date(), decision: { reason: 'payment_hold', detail: { step: 2, hold: 'overdue_invoice' } } },
         { id: 's-2', customer_id: 'c', status: 'active', current_step: 2, plan: [{ day: 0, channel: 'sms' }, { day: 4, channel: 'sms' }, { day: 7, channel: 'email' }], updated_at: new Date(), decision: { reason: 'payment_hold', detail: { step: 2, hold: 'overdue_invoice' } } },
       ]
       : []);
@@ -153,4 +158,6 @@ test('a dropped payment hold names the step it held, not the step the cadence mo
   expect(holds[0]).toMatchObject({ step: 0, channel: 'sms', reason: 'ask_dropped_payment_hold' });
   // an email step held for payment is labelled an email
   expect(holds[1]).toMatchObject({ step: 2, channel: 'email' });
+  // a completed cadence still carrying an old payment_hold decision is not waiting
+  expect(holds.map((h) => h.sequenceId)).toEqual(['s-1', 's-2']);
 });
