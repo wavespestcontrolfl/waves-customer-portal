@@ -277,9 +277,10 @@ describe('MobileDispatchList open hours', () => {
     );
     vi.useRealTimers();
 
-    expect(screen.getByText('· 7 open', { exact: false })).toBeInTheDocument();
+    expect(screen.getByText('· 10 open', { exact: false })).toBeInTheDocument();
     const rows = screen.getAllByRole('button', { name: /^Book open hour/ });
     expect(rows.map((b) => b.getAttribute('aria-label'))).toEqual([
+      'Book open hour 7–8 AM',
       'Book open hour 9–10 AM',
       'Book open hour 11 AM–12 PM',
       'Book open hour 12–1 PM',
@@ -287,9 +288,11 @@ describe('MobileDispatchList open hours', () => {
       'Book open hour 2–3 PM',
       'Book open hour 3–4 PM',
       'Book open hour 4–5 PM',
+      'Book open hour 5–6 PM',
+      'Book open hour 6–7 PM',
     ]);
     // The 9 AM block sits between the 8 AM and 10 AM visits.
-    const nineAm = rows[0];
+    const nineAm = rows[1];
     const names = screen.getAllByText('Pat Sample');
     expect(names[0].compareDocumentPosition(nineAm) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(nineAm.compareDocumentPosition(names[1]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();

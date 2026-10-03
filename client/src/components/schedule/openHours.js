@@ -7,8 +7,9 @@
 
 import { etDateString, etParts } from '../../lib/timezone';
 
-export const OPEN_HOURS_START = 8;
-export const OPEN_HOURS_END = 17;
+// 7 AM to 7 PM (owner 2026-10-03).
+export const OPEN_HOURS_START = 7;
+export const OPEN_HOURS_END = 19;
 
 // A cancelled or skipped visit frees its hour.
 const NOT_OCCUPYING = new Set(['cancelled', 'skipped']);

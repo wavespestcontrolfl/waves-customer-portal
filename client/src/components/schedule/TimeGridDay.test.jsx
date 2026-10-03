@@ -360,10 +360,10 @@ describe('TimeGridDay open hours', () => {
     expect(screen.queryByText(/^Open · /)).toBeNull();
     rerender(<TimeGridDay {...props} onCreateSlot={vi.fn()} />);
     vi.useRealTimers();
-    // SERVICES book 8–9 and 10–11 AM: 7 of the 9 hours from 8 AM to 5 PM stay open.
+    // SERVICES book 8–9 and 10–11 AM: 10 of the 12 hours from 7 AM to 7 PM stay open.
     expect(screen.queryByText('Open · 8–9 AM')).toBeNull();
     expect(screen.getByText('Open · 9–10 AM')).toBeInTheDocument();
-    expect(screen.getAllByText(/^Open · /)).toHaveLength(7);
+    expect(screen.getAllByText(/^Open · /)).toHaveLength(10);
   });
 
   it('counts an unassigned booking as filling its hour', () => {
@@ -383,6 +383,6 @@ describe('TimeGridDay open hours', () => {
     );
     vi.useRealTimers();
     expect(screen.queryByText('Open · 9–10 AM')).toBeNull();
-    expect(screen.getAllByText(/^Open · /)).toHaveLength(6);
+    expect(screen.getAllByText(/^Open · /)).toHaveLength(9);
   });
 });
