@@ -387,6 +387,38 @@ describe('B18 park: a parked estimate (its phone belongs to another customer) ca
     expect(estimatePublicBlockingState).toHaveBeenCalledWith(PARKED_ESTIMATE, expect.objectContaining({ estData: expect.anything() }));
   });
 
+  test('reserve hands the service a locked-row predicate (trenching review, then contact_review) and maps its refusal to the SAME 409 the route check returns', async () => {
+    currentEstimate = PARKED_ESTIMATE;
+    // The route's own pre-transaction check passes (the estimate was not parked yet) ...
+    estimatePublicBlockingState.mockResolvedValueOnce(null);
+    // ... then the locked row inside the service says contact_review.
+    slotReservation.reserveSlot.mockImplementationOnce(async (args) => {
+      const refusal = await args.revalidateEstimate({ ...PARKED_ESTIMATE, estimate_data: {} });
+      const err = new Error('estimate cannot be self-booked');
+      err.code = 'ESTIMATE_NO_BOOKING';
+      err.response = refusal;
+      throw err;
+    });
+    estimatePublicBlockingState.mockResolvedValueOnce(PARKED);
+    const res = await post('reserve', { slotId: '2030-01-01_09-00_unassigned' });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW', reviewBeforeBooking: true, reason: 'contact_review' });
+    expect(slotReservation.reserveSlot).toHaveBeenCalledWith(expect.objectContaining({ estimateId: 'est-parked', revalidateEstimate: expect.any(Function) }));
+  });
+
+  test('the reserve predicate also carries the existing trenching refusal and passes a clean row', async () => {
+    const { estimateTrenchingReviewRequired } = require('../routes/estimate-public');
+    currentEstimate = PARKED_ESTIMATE;
+    let predicate;
+    slotReservation.reserveSlot.mockImplementationOnce(async (args) => { predicate = args.revalidateEstimate; return { scheduledServiceId: 'ss-1', expiresAt: null }; });
+    const ok = await post('reserve', { slotId: '2030-01-01_09-00_unassigned' });
+    expect(ok.status).toBe(201);
+    estimatePublicBlockingState.mockResolvedValue(null);
+    await expect(predicate({ ...PARKED_ESTIMATE, estimate_data: {} })).resolves.toBeNull();
+    estimateTrenchingReviewRequired.mockReturnValueOnce(true);
+    await expect(predicate({ ...PARKED_ESTIMATE, estimate_data: {} })).resolves.toMatchObject({ status: 409, body: { reason: 'termite_trenching_review' } });
+  });
+
   test('available-slots answers the review shape (no times) and never reaches the slot service', async () => {
     currentEstimate = PARKED_ESTIMATE;
     estimatePublicBlockingState.mockResolvedValueOnce(PARKED);

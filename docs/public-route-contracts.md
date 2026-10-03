@@ -1721,9 +1721,16 @@ answers:
   Stripe call. `GET /:token/data` answers such an estimate with `cta.reviewBeforeBooking: true`,
   `cta.reviewReason: 'contact_review'` and `cta.canAccept: false` (the page's existing review state).
   `POST /:token/card-hold-intent`, `/recurring-card-intent` and `/reserve` (and an `extend`) answer the same
-  409 without minting a SetupIntent or holding a slot; `available-slots` and `find-slots` answer an empty
+  409 without minting a SetupIntent or holding a slot - `/reserve` also re-judges the trenching and
+  `contact_review` states on the estimate row `reserveSlot` locks, through the same optional
+  `revalidateEstimate` callback `extendReservation` takes, before any hold is inserted (a refusal there
+  returns the same status and body as the route's own check; the system caller that reserves for its own
+  linked draft, one-tap purchase, omits it); `available-slots` and `find-slots` answer an empty
   review shape (`reviewBeforeBooking: true`, `reason: 'contact_review'`, no times); the reminder sweep skips
-  it. A stale tab handles the 409 from the accept and from both card intents through one transition (drop the
+  it. The legacy server-rendered estimate page is never served for such an estimate: `handleEstimateView` forces it to
+the React page (the `/estimate/` mount falls through to the SPA, the `/api/estimates/` mount redirects to the
+React URL, GrowthBook never reassigns it), the same way it forces a contact-gap estimate. A stale tab handles the
+409 from the accept and from both card intents through one transition (drop the
   captured cards, release the slot hold, refetch `/data`). The estimate's own phone is left as staff typed
   it, so its follow-up texts are unchanged until the office fixes the number. Several phone candidates, or
   a lone candidate that agrees on email or address, behave as before. A one-time card-hold SetupIntent a

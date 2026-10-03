@@ -350,6 +350,41 @@ describe('slot reservation helpers', () => {
     }
   });
 
+  test('reserveSlot runs the caller\'s revalidateEstimate on the LOCKED row before any hold: a refusal throws ESTIMATE_NO_BOOKING with the route\'s response and mints nothing; null lets it through (B18 park)', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    try {
+      const build = () => {
+        const estimateBuilder = makeEstimateBuilder({ id: 'estimate-456', status: 'sent', service_interest: 'Generic estimate service', customer_id: null, customer_phone: '(941) 555-0123' });
+        const insertBuilder = makeInsertBuilder({ id: 'scheduled-123', reservation_expires_at: '2027-05-20T13:15:00.000Z' });
+        const scheduledBuilders = [makeLiveHoldsBuilder([]), makeConflictBuilder(null), makeGlobalProbeBuilder([]), insertBuilder];
+        const trx = makeTrx({ estimateBuilder, technicianBuilder: makeTechnicianBuilder(), scheduledBuilders });
+        db.transaction = jest.fn(async (callback) => callback(trx));
+        return { insertBuilder, estimateBuilder };
+      };
+      const slotId = signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '09:00', techId: 'tech-1', durationMinutes: 90 });
+      const refusal = { status: 409, body: { code: 'ACCEPT_NEEDS_OFFICE_REVIEW', reviewBeforeBooking: true, reason: 'contact_review' } };
+
+      // The estimate turned contradictory after the route's read: the refusal rides the callback.
+      const refused = build();
+      const revalidate = jest.fn(async () => refusal);
+      await expect(slotReservation.reserveSlot({ estimateId: 'estimate-456', slotId, selectedFrequency: 'quarterly', revalidateEstimate: revalidate }))
+        .rejects.toMatchObject({ code: 'ESTIMATE_NO_BOOKING', response: refusal });
+      expect(refused.insertBuilder.insert).not.toHaveBeenCalled();
+      // It was handed the LOCKED row (the one this transaction read FOR UPDATE), before the insert.
+      expect(revalidate).toHaveBeenCalledWith(expect.objectContaining({ id: 'estimate-456', customer_phone: '(941) 555-0123' }));
+      expect(refused.estimateBuilder.forUpdate).toHaveBeenCalled();
+
+      // A null verdict (and an absent callback, every other caller) reserves exactly as before.
+      const allowed = build();
+      await expect(slotReservation.reserveSlot({ estimateId: 'estimate-456', slotId, selectedFrequency: 'quarterly', revalidateEstimate: async () => null }))
+        .resolves.toEqual({ scheduledServiceId: 'scheduled-123', expiresAt: '2027-05-20T13:15:00.000Z' });
+      expect(allowed.insertBuilder.insert).toHaveBeenCalledTimes(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('reserveSlot labels a one-time pest accept "Pest Control" and pins is_recurring=false', async () => {
     jest.useFakeTimers();
     jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));

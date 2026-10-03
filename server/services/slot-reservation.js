@@ -762,6 +762,12 @@ async function reserveSlot({
   serviceMode = 'recurring',
   selectedFrequency = '',
   serviceCadences = null,
+  // Optional caller-supplied no-booking revalidation, run on the LOCKED estimate row before any hold is
+  // minted - the SAME name and contract as extendReservation's: `(estimateRow) => null | { status, body }`
+  // (may be async). The public /reserve route passes it so a state that appeared after its pre-transaction
+  // read (trenching review, the contact_review park) cannot consume capacity. Staff / system callers that
+  // reserve for an estimate that cannot be parked (one-tap-purchase's own linked draft) omit it.
+  revalidateEstimate = null,
 }) {
   // One booking_config read (lunch interval + day-end override, 60s TTL) for
   // every synchronous lunch/day-end check below — see
@@ -1033,6 +1039,18 @@ async function reserveSlot({
             err.code = 'ESTIMATE_NOT_FOUND';
             throw err;
           }
+        }
+      }
+
+      // Caller-supplied no-booking revalidation on the LOCKED row, before the profile resolve, any capacity
+      // check and the hold insert (see the parameter's comment). The route owns the predicate and the bodies.
+      if (typeof revalidateEstimate === 'function') {
+        const refusal = await revalidateEstimate(estimate);
+        if (refusal) {
+          const err = new Error('estimate cannot be self-booked');
+          err.code = 'ESTIMATE_NO_BOOKING';
+          err.response = refusal;
+          throw err;
         }
       }
 

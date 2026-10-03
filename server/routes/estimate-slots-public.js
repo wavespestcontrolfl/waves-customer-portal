@@ -596,6 +596,14 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
         estimateId: estimate.id,
         slotId,
         ...slotOpts,
+        // The same blocking states the checks above refuse, re-judged on the LOCKED row inside the service
+        // (an estimate that turned trenching-review or contact_review after the pre-transaction read must
+        // not consume capacity).
+        revalidateEstimate: async (row) => {
+          if (estimateTrenchingReviewRequired(parseEstimateData(row))) return { status: 409, body: TRENCHING_REVIEW_409 };
+          if (await contactReviewHold(row)) return { status: 409, body: acceptOfficeReviewBody() };
+          return null;
+        },
       });
       return res.status(201).json({
         scheduledServiceId,
@@ -611,6 +619,10 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
       }
       if (svcErr.code === 'ESTIMATE_TERMINAL') {
         return res.status(409).json({ error: 'Estimate is no longer active' });
+      }
+      if (svcErr.code === 'ESTIMATE_NO_BOOKING' && svcErr.response) {
+        // The locked revalidation refused: the same status and body the route's own checks above return.
+        return res.status(svcErr.response.status).json(svcErr.response.body);
       }
       if (svcErr.code === 'SLOT_UNAVAILABLE') {
         // Refresh slot availability for the estimate so the caller can

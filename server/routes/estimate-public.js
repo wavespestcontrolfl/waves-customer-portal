@@ -9110,13 +9110,28 @@ async function handleEstimateView(req, res, next) {
         logger.warn(`[estimate-view] contact-gap routing check failed, forcing the React view: ${e.message}`);
       }
     }
+    // B18 park: an accept-active, unlinked estimate whose lone phone candidate it contradicts is shown the review
+    // state, which only the React page renders (cta.reviewBeforeBooking, reviewReason 'contact_review'); the legacy
+    // page's booking flow would end in a permanently refused accept. Decided by the ONE blocking-state helper, and
+    // forced to React exactly like the contact-gap case (including the explicit-V1 and /api/estimates mounts, which
+    // redirect). A failed lookup fails toward React, which re-decides on its own /data.
+    let parkedForcesReactView = false;
+    if (isEstimateAcceptActive(estimate) && !estimate.customer_id && estimate.customer_phone) {
+      try {
+        parkedForcesReactView = (await estimatePublicBlockingState(estimate))?.state === 'contact_review';
+      } catch (e) {
+        parkedForcesReactView = true;
+        logger.warn(`[estimate-view] phone-park routing check failed, forcing the React view: ${e.message}`);
+      }
+    }
     let shouldUseReactEstimateView = estimate.use_v2_view === true
       || effectiveInvoiceMode
       || cardHoldForcesReactView
       || recurringCardForcesReactView
       || estimatePdfRenderPass
       || acceptanceTermsForcesReactView
-      || contactGapsForceReactView;
+      || contactGapsForceReactView
+      || parkedForcesReactView;
 
     // Estimate-view v1/v2 holdback experiment (GATE_GROWTHBOOK). Only the plain
     // v2-by-default population is eligible: published, not an admin preview, not
@@ -9141,6 +9156,7 @@ async function handleEstimateView(req, res, next) {
       && !estimatePdfRenderPass
       && !acceptanceTermsForcesReactView
       && !contactGapsForceReactView
+      && !parkedForcesReactView
       && !adminPreviewRequested
       // Only estimates that can still convert: isEstimateAcceptActive excludes
       // unpublished, terminal (accepted/declined/expired/send_failed), archived,
@@ -9173,7 +9189,7 @@ async function handleEstimateView(req, res, next) {
     // the React URL for the same estimate instead of a dead-end 409. After
     // the expired carve-out: an expired estimate cannot accept, so it keeps
     // its personalized SSR expired page.
-    if (acceptanceTermsForcesReactView || contactGapsForceReactView || pafExistingForcesReactView) {
+    if (acceptanceTermsForcesReactView || contactGapsForceReactView || pafExistingForcesReactView || parkedForcesReactView) {
       const qs = req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '';
       return res.redirect(302, `/estimate/${encodeURIComponent(estimate.token)}${qs}`);
     }
