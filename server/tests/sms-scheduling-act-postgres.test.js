@@ -61,7 +61,8 @@ describeOrSkip('sms scheduling move guard on PostgreSQL', () => {
       action: 'accept_slot', slot_number: 1, outcome: 'would_move', refusals: '[]', execution_status: executionStatus,
     }).returning('id');
     const decisionId = row.id || row;
-    const guard = act.buildMoveGuard({ decisionId, offer: { id: offerId, sent_at: SENT }, visitId, customerId, now: NOW, target: TARGET });
+    const guard = act.buildMoveGuard({ decisionId, offer: { id: offerId, sent_at: SENT }, visitId, customerId, now: NOW, target: TARGET,
+      expected: { date: '2040-03-05', start: '08:00', end: '10:00', status: 'confirmed' } });
     return { customerId, visitId, offerId, decisionId, guard };
   }
 
@@ -80,6 +81,8 @@ describeOrSkip('sms scheduling move guard on PostgreSQL', () => {
 
   test('each fence refuses and writes nothing', async () => {
     const cases = {
+      // An Edit appointment save: no move is logged, only the row differs.
+      visit_changed: (trx, s) => trx('scheduled_services').where({ id: s.visitId }).update({ window_end: '11:00' }),
       offer_closed: (trx, s) => trx('sms_offers').where({ id: s.offerId }).update({ status: 'superseded', closed_at: NOW }),
       moved_since_offer: (trx, s) => trx('reschedule_log').insert({ scheduled_service_id: s.visitId, customer_id: s.customerId,
         original_date: '2040-03-05', reason_code: 'customer_request', initiated_by: 'admin', created_at: new Date('2040-03-01T14:00:00Z') }),
@@ -90,7 +93,9 @@ describeOrSkip('sms scheduling move guard on PostgreSQL', () => {
         original_date: '2040-03-05', reason_code: 'weather_rain', initiated_by: 'weather_auto', created_at: new Date('2040-03-01T12:00:00Z'),
         notes: JSON.stringify({ option1: { date: '2040-03-07' }, option2: { date: '2040-03-08' } }) }),
     };
-    for (const [reason, arrange] of Object.entries(cases)) {
+    cases['visit_changed (status)'] = (trx, s) => trx('scheduled_services').where({ id: s.visitId }).update({ status: 'pending' });
+    for (const [name, arrange] of Object.entries(cases)) {
+      const reason = name.split(' ')[0];
       await inTrx(async (trx) => {
         const s = await seed(trx);
         await arrange(trx, s);

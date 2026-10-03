@@ -76,15 +76,23 @@ async function closeClaim(dbh, decisionId, status, execution) {
 
 /**
  * The checks the move runs under its own locks, and the two writes that
- * commit with it. `service` is the visit row the mover holds.
+ * commit with it. `expected` is the visit as the decide step checked it.
  */
-function buildMoveGuard({ decisionId, offer, visitId, customerId, now, target }) {
+function buildMoveGuard({ decisionId, offer, visitId, customerId, now, target, expected }) {
   return async ({ trx }) => {
     const fences = require('./call-reschedule-apply');
     // The visit's own row lock: the portal request route holds it while it
     // files a schedule-change request, so that request is either visible
     // below or starts after this move.
-    await trx('scheduled_services').where({ id: visitId }).forUpdate().first('id');
+    const row = await trx('scheduled_services').where({ id: visitId }).forUpdate()
+      .first('scheduled_date', 'window_start', 'window_end', 'status', 'customer_id', 'visit_id');
+    // The locked visit is still the one the decide step checked: an Edit
+    // appointment save logs no move, and the series mover pins only date and
+    // start, so the comparison is made here for both movers.
+    const unchanged = row && dateOnlyString(row.scheduled_date) === expected.date
+      && hhmm(row.window_start) === expected.start && hhmm(row.window_end) === expected.end
+      && row.status === expected.status && String(row.customer_id) === String(customerId) && !row.visit_id;
+    if (!unchanged) throw guardError('visit_changed');
     const current = await trx('sms_offers').where({ id: offer.id }).forUpdate().first('id', 'status');
     if (!current || current.status !== 'open') throw guardError('offer_closed');
     const moved = await trx('reschedule_log').where({ scheduled_service_id: visitId })
@@ -173,7 +181,10 @@ async function moveVisit({ dbh, decisionId, offer, slot, visit, repliedAt, now, 
     if (!eligible.missed && notice.visitInsideMoveNoticeWindow(svc)) throw guardError('self_serve_notice');
     if (notice.violatesSelfServeNotice({ date: slot.date, startTime: window.start })) throw guardError('self_serve_notice');
   };
-  const moveGuard = buildMoveGuard({ decisionId, offer, visitId: svc.id, customerId: svc.customer_id, now, target });
+  const moveGuard = buildMoveGuard({
+    decisionId, offer, visitId: svc.id, customerId: svc.customer_id, now, target,
+    expected: { date: dateOnlyString(svc.scheduled_date), start: hhmm(svc.window_start), end: hhmm(svc.window_end), status: svc.status },
+  });
   // Customer-facing move: the offer was built under the travel-gap rule.
   // operationKey: this decision's own, so the series mover never answers with
   // an earlier move to the same time (a replay would skip the guard).
