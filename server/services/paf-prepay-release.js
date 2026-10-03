@@ -550,6 +550,7 @@ async function releaseDeferredPrepayCharges({ pageSize = 200, now = new Date() }
 module.exports = {
   AWAITING,
   planHasUnfinishedCompletion,
+  termStillCovered,
   visitStillPerformed,
   STALE_DAYS,
   releaseDeferredPrepayCharges,

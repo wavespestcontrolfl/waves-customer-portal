@@ -919,6 +919,22 @@ postgres('annual prepay charged after the first visit', () => {
       }
     });
 
+    it('a failed deferred eligibility read leaves the job for the next pass, never a pay link (pre-push audit)', async () => {
+      const f = await deferredAccept();
+      await perform(f.parentId, f.customerId);
+      expect(await release()).toMatchObject({ released: 1 });
+      const Release = require('../services/paf-prepay-release');
+      const spy = jest.spyOn(Release, 'visitStillPerformed').mockRejectedValueOnce(new Error('synthetic read failure'));
+      try {
+        await sweep();
+        expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+        expect(require('../services/invoice').sendViaSMSAndEmail).not.toHaveBeenCalled();
+        expect((await jobOf(f)).status).not.toBe('delivered_fallback');
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it('a closeout that starts after the release holds the charge until it finishes (Codex r13)', async () => {
       const f = await deferredAccept();
       await perform(f.parentId, f.customerId);
