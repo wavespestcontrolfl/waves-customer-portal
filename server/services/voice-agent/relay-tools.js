@@ -698,19 +698,16 @@ async function accountDetailsForEstimate(ctx = {}, stated = {}) {
     if (isLeadStage(row.pipeline_stage) || nameConflicts({ first_name: stated.first_name }, row)) return null;
     // WHICH address is "the service address on your account": the customers
     // row mirrors the primary property, which can be retired while another
-    // stays active. One active property the call pipeline's own linkage
-    // resolves → that property's address. No property rows at all (a legacy
-    // account) → the mirror. Anything else (several active, none active but
-    // some retired, one the linkage cannot resolve) has no single address to
-    // confirm.
-    const count = (where) => db('customer_properties').where(where).count('* as count').first()
-      .then((r) => parseInt((r && r.count) || 0, 10));
-    const active = await count({ customer_id: ctx.customerId, active: true });
-    if (active > 1) return null;
-    if (active === 0) return (await count({ customer_id: ctx.customerId })) === 0 ? row : null;
-    const linkage = await require('../call-recording-processor').resolveCallBookingPropertyLinkage(ctx.customerId, {}, db);
-    if (!(linkage && linkage.propertyId && linkage.address && linkage.address.line1)) return null;
-    return { ...row, address_line1: linkage.address.line1, city: linkage.address.city || null, zip: linkage.address.zip || null };
+    // stays active. Exactly one ACTIVE property row → that row's own address
+    // (read directly; never matched through the mirror). No property rows at
+    // all (a legacy account) → the mirror. Several active, or none active
+    // but some retired, has no single address to confirm.
+    const properties = await db('customer_properties').where({ customer_id: ctx.customerId })
+      .select('address_line1', 'city', 'zip', 'active');
+    const active = properties.filter((prop) => prop.active === true);
+    if (active.length > 1) return null;
+    if (active.length === 0) return properties.length === 0 ? row : null;
+    return { ...row, address_line1: active[0].address_line1 || null, city: active[0].city || null, zip: active[0].zip || null };
   } catch (err) {
     logger.warn(`[voice-relay] account details for an estimate could not be read callSid=${ctx.callSid || 'n/a'}: ${err.message}`);
     return null;
@@ -1068,41 +1065,12 @@ async function executeTool(name, input = {}, ctx = {}) {
         logger.info(`[voice-relay] capture_lead dropped an invalid email (${String(extracted.email).length} chars) callSid=${ctx.callSid || 'n/a'}`);
         extracted.email = null;
       }
-      // Which remembered details are the ACCOUNT'S (confirmed with a yes on an
-      // earlier capture) rather than the caller's own words. The caller
-      // replacing one drops the account's copy first — whole, for a location —
-      // so it is never mixed with, or kept in place of, what they now say.
       const LOCATION = ['address_line1', 'city', 'zip'];
-      const detailsFromAccount = String(priorEstimateFields.details_from_account || '').split(',')
-        .filter((k) => ['name', 'email', 'address'].includes(k));
-      const dropAccountDetail = (kind, keys) => {
-        const at = detailsFromAccount.indexOf(kind);
-        if (at < 0) return;
-        detailsFromAccount.splice(at, 1);
-        for (const k of keys) delete priorEstimateFields[k];
-        if (typeof ctx.clearEstimateFields === 'function') ctx.clearEstimateFields(keys);
-      };
-      if (LOCATION.some((k) => nz(extracted[k]))) dropAccountDetail('address', LOCATION);
-      if (nz(input.email)) dropAccountDetail('email', ['email']); // readable or not: they named another
-      // A name is not dropped here: a part the caller states simply wins
-      // below, the other part stays (the account's first name with the last
-      // name they add), and a first name that is a DIFFERENT person's fails
-      // the re-proof just after, which takes everything back.
-      // …and details kept from an earlier yes are re-proven on every capture
-      // that still relies on them: a different person's name given now, or an
-      // account that is no longer eligible, takes ALL of them back.
-      let accountDetails = null;
-      let accountRead = false;
-      if (estimateRequested && detailsFromAccount.length) {
-        const statedFirstName = nz(extracted.first_name) || (detailsFromAccount.includes('name') ? null : nz(priorEstimateFields.first_name));
-        accountDetails = await accountDetailsForEstimate(ctx, { first_name: statedFirstName });
-        accountRead = true;
-        if (!accountDetails) {
-          dropAccountDetail('address', LOCATION);
-          dropAccountDetail('email', ['email']);
-          dropAccountDetail('name', ['first_name', 'last_name']);
-        }
-      }
+      const REQUIRED = ['first_name', 'last_name', 'email', 'address_line1'];
+      // An email the caller GAVE but that could not be read is not "no email
+      // given": they named another address, so the account's never stands in
+      // for it. Remembered for the call until a readable one arrives.
+      const emailUnreadable = !emailNow && (Boolean(nz(input.email)) || priorEstimateFields.email_unreadable === 'true');
       const estimateFields = {
         first_name: nz(extracted.first_name) || nz(priorEstimateFields.first_name),
         last_name: nz(extracted.last_name) || nz(priorEstimateFields.last_name),
@@ -1118,30 +1086,33 @@ async function executeTool(name, input = {}, ctx = {}) {
       };
       // ⭐ ONE YES/NO QUESTION INSTEAD OF AN INTAKE (owner ruling 2026-10-03).
       // An established customer who answers yes to "should it go to the email
-      // and service address on your account?" has CONFIRMED those details on
-      // the call, so from here they are treated exactly like details the
-      // caller stated: remembered for the call, written with the capture, on
-      // the office card (labelled as confirmed, not as said). Without the
-      // yes nothing is taken from the account.
-      const REQUIRED = ['first_name', 'last_name', 'email', 'address_line1'];
-      if (!accountRead && estimateRequested && REQUIRED.some((k) => !estimateFields[k])) {
-        accountDetails = await accountDetailsForEstimate(ctx, estimateFields);
-      }
+      // and service address on your account?" has confirmed those details.
+      //
+      // ⭐ THE CALL REMEMBERS ONLY WHAT THE CALLER SAID, PLUS THE YES. The
+      // account's details are never stored with the call's fields: they are
+      // read fresh on every capture and fill only what the caller has not
+      // stated by then. So nothing borrowed can outlive a correction — a new
+      // email, a location, a different person's name simply win on the next
+      // capture — and there is nothing to delete, on this socket or after a
+      // reconnect (the store only adds).
+      const statedFields = { ...estimateFields };
+      const accountConfirmed = input.use_account_details === true || priorEstimateFields.account_details_confirmed === 'true';
+      const accountDetails = estimateRequested && REQUIRED.some((k) => !estimateFields[k])
+        ? await accountDetailsForEstimate(ctx, statedFields) : null;
+      const detailsFromAccount = [];
       let accountCouldFill = false;
       if (accountDetails) {
         const acct = {
           first_name: nz(accountDetails.first_name),
           last_name: nz(accountDetails.last_name),
-          // An email given on THIS capture that could not be read is the
-          // caller naming another address: the account's does not stand in.
-          email: !nz(input.email) && nz(accountDetails.email) && isValidEmail(nz(accountDetails.email)) ? nz(accountDetails.email) : null,
+          email: !emailUnreadable && nz(accountDetails.email) && isValidEmail(nz(accountDetails.email)) ? nz(accountDetails.email) : null,
         };
         // An address is one thing: the account's is used whole, and only when
         // the caller stated no part of a location and it is a full address.
         const acctLocation = !LOCATION.some((k) => estimateFields[k]) && nz(accountDetails.address_line1) && (nz(accountDetails.city) || nz(accountDetails.zip))
           ? Object.fromEntries(LOCATION.map((k) => [k, nz(accountDetails[k])])) : null;
         accountCouldFill = ['first_name', 'last_name', 'email'].some((k) => !estimateFields[k] && acct[k]) || Boolean(acctLocation);
-        if (input.use_account_details === true) {
+        if (accountConfirmed) {
           for (const k of ['first_name', 'last_name']) if (!estimateFields[k] && acct[k]) { estimateFields[k] = acct[k]; if (!detailsFromAccount.includes('name')) detailsFromAccount.push('name'); }
           if (!estimateFields.email && acct.email) { estimateFields.email = acct.email; detailsFromAccount.push('email'); }
           if (acctLocation) { Object.assign(estimateFields, acctLocation); detailsFromAccount.push('address'); }
@@ -1151,12 +1122,15 @@ async function executeTool(name, input = {}, ctx = {}) {
       // incomplete capture the account could complete and remembered, so a
       // caller who said no (and is giving their own details) is not asked
       // again on the next capture.
-      const offerAccountQuestion = accountCouldFill && input.use_account_details !== true
+      const offerAccountQuestion = accountCouldFill && !accountConfirmed
         && REQUIRED.some((k) => !estimateFields[k]) && priorEstimateFields.account_question_offered !== 'true';
-      // The provenance rides with the fields ('none' because the store only
-      // keeps non-empty values, so an emptied list must still overwrite).
       if (typeof ctx.noteEstimateFields === 'function') {
-        ctx.noteEstimateFields({ ...estimateFields, details_from_account: detailsFromAccount.join(',') || 'none', ...(offerAccountQuestion ? { account_question_offered: 'true' } : {}) });
+        ctx.noteEstimateFields({
+          ...statedFields,
+          ...(emailUnreadable && !statedFields.email ? { email_unreadable: 'true' } : {}),
+          ...(input.use_account_details === true && accountDetails ? { account_details_confirmed: 'true' } : {}),
+          ...(offerAccountQuestion ? { account_question_offered: 'true' } : {}),
+        });
       }
       // The accumulated fields ALSO ride the lead write (hook P1): identity
       // resolution (email match) and fill-forward must see the name/email/
@@ -1798,10 +1772,18 @@ async function executeTool(name, input = {}, ctx = {}) {
         : (estimateQueued === false
           ? (estimateMissing.length
             ? ` IMPORTANT: the estimate request is NOT queued yet — still missing: ${estimateMissing.join(', ')}. `
-              + 'Do NOT promise a written estimate yet; ask for what is missing and call capture_lead again with '
-              + 'estimate_requested: true. If the caller declines to give it, respect that: call capture_lead again '
-              + 'WITHOUT estimate_requested (the estimate is dropped), tell them a Waves team member will follow up, '
-              + 'and end the call normally.'
+              + (promiseStands
+                // An estimate already promised on this call is still owed: the
+                // office card now says the details need confirming, so the
+                // caller is never told it was dropped.
+                ? 'The estimate already promised on this call stays on the office queue, marked that these '
+                  + 'details need confirming. Ask for what is missing and call capture_lead again with '
+                  + 'estimate_requested: true. If the caller declines to give it, respect that: tell them a Waves '
+                  + 'team member will call you back to confirm where to send it, and end the call normally.'
+                : 'Do NOT promise a written estimate yet; ask for what is missing and call capture_lead again with '
+                  + 'estimate_requested: true. If the caller declines to give it, respect that: call capture_lead again '
+                  + 'WITHOUT estimate_requested (the estimate is dropped), tell them a Waves team member will follow up, '
+                  + 'and end the call normally.')
               // The one-question path, offered only when it would actually help.
               + (offerAccountQuestion
                 ? ' This caller is an established customer, so instead you may ask ONE question — "Should it go to '

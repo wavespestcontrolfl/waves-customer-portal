@@ -2766,13 +2766,6 @@ class RelayConversation {
       getContactFollowUp: () => ({ ...(convo._contactFollowUp || {}) }),
       noteContactFollowUp: (fields = {}) => { convo._contactFollowUp = { ...fields }; },
       getEstimateFields: () => ({ ...(convo._estimateFields || {}) }),
-      // noteEstimateFields only adds; a detail the caller REPLACED (one taken
-      // from the account earlier on the call) is dropped here first.
-      clearEstimateFields: (keys = []) => {
-        const next = { ...(convo._estimateFields || {}) };
-        for (const k of keys) delete next[k];
-        convo._estimateFields = next;
-      },
       noteEstimateFields: (fields = {}) => {
         const kept = Object.fromEntries(Object.entries(fields).filter(([, v]) => v != null && String(v).trim() !== ''));
         convo._estimateFields = { ...(convo._estimateFields || {}), ...kept };

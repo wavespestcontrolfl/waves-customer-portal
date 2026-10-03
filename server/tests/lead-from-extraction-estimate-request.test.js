@@ -71,7 +71,7 @@ describe('a later capture on the same call rewrites the card', () => {
   const trx = Object.assign(jest.fn(), { marker: 'trx' });
   beforeEach(() => { db.transaction = jest.fn(async (cb) => cb(trx)); });
 
-  test('it refreshes in place, and rings again only when what the office acts on changed or it was marked done', async () => {
+  test('it refreshes in place, and rings again only when what the office acts on changed', async () => {
     notifyAdmin.mockResolvedValue({ id: 'n-1' });
     await surfaceEstimateRequestForCustomer('c-1', { first_name: 'Pat', email: 'pat@example.com', address_line1: '9 Rental Rd', city: 'Venice', zip: '34285', requested_service: 'mosquito' }, { callSid: 'CA1', phone: '+19415551234' });
     const { refreshOnDedupe, ringOnRefresh } = optsOf();
@@ -82,7 +82,9 @@ describe('a later capture on the same call rewrites the card', () => {
     expect(ringOnRefresh({ done_at: null }, { ...same, requested_service: 'termite' })).toBe(true);
     expect(ringOnRefresh({ done_at: null }, { ...same, phone: '+19415550000' })).toBe(true);
     expect(ringOnRefresh({ done_at: null }, { ...same, still_missing: ['address_line1'] })).toBe(true);
-    expect(ringOnRefresh({ done_at: '2026-10-03T12:00:00Z' }, same)).toBe(true);
+    // The same details again are not new work, even on a card marked done; a change on one rings (and reopens it).
+    expect(ringOnRefresh({ done_at: '2026-10-03T12:00:00Z' }, same)).toBe(false);
+    expect(ringOnRefresh({ done_at: '2026-10-03T12:00:00Z' }, { ...same, email: 'old@example.com' })).toBe(true);
   });
 
   test('a correction that leaves the request incomplete revises the standing card and says what to confirm; with no card standing it files nothing', async () => {
@@ -114,8 +116,13 @@ describe('a later capture on the same call rewrites the card', () => {
     expect(await surfaceEstimateRequestForCustomer('c-1', { first_name: 'Pat', email: 'stale@example.com' }, { callSid: 'CA1', sessionKey: 'sk-old' })).toEqual({ persisted: false, suppressed: false, superseded: true });
     expect(notifyAdmin).not.toHaveBeenCalled();
 
+    // A failed write inside the fence is not persisted, never throws, and logs the code only:
+    // a failed UPDATE's message can carry the caller's name, email and address as bindings.
+    const logger = require('../services/logger');
     claimOwnedElsewhere.mockResolvedValue(false);
-    notifyAdmin.mockRejectedValue(new Error('boom'));
-    expect(await surfaceEstimateRequestForCustomer('c-1', {}, { callSid: 'CA1', sessionKey: 'sk-1' })).toEqual({ persisted: false, suppressed: false });
+    notifyAdmin.mockRejectedValue(Object.assign(new Error('update "notifications" set "body" = pat@example.com, 12 Shell Dr'), { code: '23505' }));
+    expect(await surfaceEstimateRequestForCustomer('c-1', { email: 'pat@example.com' }, { callSid: 'CA1', sessionKey: 'sk-1' })).toEqual({ persisted: false, suppressed: false });
+    expect(logger.error.mock.calls.map((c) => c[0]).join(' ')).toMatch(/FAILED for customer c-1: 23505/);
+    expect(logger.error.mock.calls.map((c) => c[0]).join(' ')).not.toMatch(/pat@example\.com|12 Shell Dr/);
   });
 });

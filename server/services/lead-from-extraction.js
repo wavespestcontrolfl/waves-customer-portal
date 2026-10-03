@@ -407,11 +407,11 @@ async function surfaceEstimateRequestForCustomer(customerId, extracted = {}, opt
         ...(opts.trx && dedupeKey ? { trx: opts.trx } : {}),
         // A later capture on the same call rewrites the card in place. It
         // rings again only when what the office must act on changed (where
-        // the estimate goes, what it is for, the number to call), or the
-        // office had already marked it done. A longer summary stays quiet.
+        // the estimate goes, what it is for, the number to call) — a ringing
+        // refresh also reopens a card already marked done. A longer summary
+        // stays quiet, and the same details again are not new work.
         refreshOnDedupe: true,
-        ringOnRefresh: (existing, existingMeta) => Boolean(existing && existing.done_at)
-          || Object.entries({
+        ringOnRefresh: (existing, existingMeta) => Object.entries({
             email: extracted.email || null, address_line1: extracted.address_line1 || null, city: extracted.city || null,
             zip: extracted.zip || null, requested_service: service, phone: opts.phone || null,
           }).some(([k, v]) => ((existingMeta || {})[k] ?? null) !== v)
@@ -452,7 +452,9 @@ async function surfaceEstimateRequestForCustomer(customerId, extracted = {}, opt
   } catch (err) {
     // Inside the fence's transaction a swallowed error would leave it aborted.
     if (opts.throwOnError) throw err;
-    logger.error(`[voice-agent-lead] estimate request surfacing FAILED for customer ${customerId}: ${err.message}`);
+    // The code only: a failed card UPDATE's message can carry its bindings
+    // (the caller's name, email and street address).
+    logger.error(`[voice-agent-lead] estimate request surfacing FAILED for customer ${customerId}: ${err.code || err.name || 'error'}`);
     return { persisted: false, suppressed: false };
   }
 }

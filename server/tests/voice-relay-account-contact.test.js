@@ -28,7 +28,6 @@ jest.mock('../routes/booking', () => ({
   },
 }));
 jest.mock('../services/scheduling/parse-when', () => ({ parseWhen: jest.fn(), summarizeWindow: jest.fn() }));
-jest.mock('../services/call-recording-processor', () => ({ resolveCallBookingPropertyLinkage: jest.fn() }));
 jest.mock('../services/lead-from-extraction', () => ({
   createLeadFromExtraction: jest.fn(),
   surfaceEstimateRequestForCustomer: jest.fn(async () => ({ persisted: true, suppressed: false })),
@@ -204,23 +203,29 @@ describe('a known customer\'s open times are for the property on their account',
 describe('a written estimate for an established customer: ONE yes/no question (owner ruling 2026-10-03)', () => {
   const { createLeadFromExtraction, surfaceEstimateRequestForCustomer } = require('../services/lead-from-extraction');
   const HOLDER = { first_name: 'Dana', last_name: 'Sample', email: 'dana@example.com', address_line1: '12 Test Street', city: 'Bradenton', zip: '34205', pipeline_stage: 'active_customer' };
-  const { resolveCallBookingPropertyLinkage } = require('../services/call-recording-processor');
+  const HOME = { address_line1: '12 Test Street', city: 'Bradenton', zip: '34205', active: true };
   let holder;
-  let properties; // ACTIVE property rows
-  let everHadProperties; // rows of any state
+  let properties; // the account's customer_properties rows
   // A card FILED (or rewritten) as deliverable. An incomplete capture also
   // calls the writer, revise-only (stillMissing), which files nothing new.
   const filedCards = () => surfaceEstimateRequestForCustomer.mock.calls.filter((c) => !((c[2] || {}).stillMissing || []).length);
+  // The call's real store (relay-conversation): it only ADDS non-empty fields.
+  const callStore = () => {
+    let bag = {};
+    return {
+      bag: () => bag,
+      getEstimateFields: () => ({ ...bag }),
+      noteEstimateFields: (f) => { bag = { ...bag, ...Object.fromEntries(Object.entries(f).filter(([, v]) => v != null && String(v).trim() !== '')) }; },
+    };
+  };
   const estimateCtx = (over = {}) => fullTier({ markCaptured: jest.fn(), ...over });
   const ask = (input = {}, ctx = estimateCtx()) => executeTool('capture_lead', { call_summary: 'Wants a written estimate for lawn care.', estimate_requested: true, ...input }, ctx);
   beforeEach(() => {
     holder = { ...HOLDER };
-    properties = 1;
-    everHadProperties = 1;
-    resolveCallBookingPropertyLinkage.mockResolvedValue({ propertyId: 'p-1', address: { line1: '12 Test Street', city: 'Bradenton', zip: '34205' } });
+    properties = [{ ...HOME }];
     createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: 'c-1', created: false });
     db.mockImplementation((table) => (table === 'customer_properties'
-      ? { where: (w) => ({ count: () => ({ first: async () => ({ count: String(w.active === true ? properties : everHadProperties) }) }) }) }
+      ? { where: () => ({ select: async () => properties }) }
       : { where: () => ({ whereNull: () => ({ first: async () => { customerReads += 1; return holder; } }) }) }));
   });
 
@@ -234,39 +239,19 @@ describe('a written estimate for an established customer: ONE yes/no question (o
     expect(createLeadFromExtraction.mock.calls[0][0]).toMatchObject({ email: null, address_line1: null });
   });
 
-  test('after a yes the account\'s name, email and address complete the request, and the card says they were confirmed', async () => {
-    const noteEstimateFields = jest.fn();
-    const out = await ask({ use_account_details: true }, estimateCtx({ noteEstimateFields }));
+  test('after a yes the account\'s name, email and address complete the request, the card says they were confirmed, and the call stores only the yes', async () => {
+    const store = callStore();
+    const out = await ask({ use_account_details: true }, estimateCtx(store));
     expect(out).toMatch(/IS on the office queue/);
     const [customerId, details, opts] = filedCards()[0];
     expect(customerId).toBe('c-1');
     expect(details).toMatchObject({ first_name: 'Dana', last_name: 'Sample', email: 'dana@example.com', address_line1: '12 Test Street', city: 'Bradenton', zip: '34205' });
     expect(opts.accountDetailsConfirmed).toEqual(['name', 'email', 'address']);
-    // Confirmed details are remembered and written like stated ones.
-    expect(noteEstimateFields).toHaveBeenCalledWith(expect.objectContaining({ email: 'dana@example.com', address_line1: '12 Test Street' }));
-    expect(createLeadFromExtraction.mock.calls[0][0]).toMatchObject({ email: 'dana@example.com', address_line1: '12 Test Street' });
+    // Nothing of the account's is remembered as something the caller said.
+    expect(store.bag()).toEqual({ account_details_confirmed: 'true' });
   });
 
-  test('what the caller said on the call wins: only what they did not give comes from the account, and a location is never mixed', async () => {
-    await ask({ use_account_details: true, email: 'other@example.com', city: 'Venice' });
-    const out = await ask({ use_account_details: true, email: 'other@example.com', city: 'Venice' });
-    expect(out).toMatch(/still missing: address_line1/); // a stated city is that property: the account's street does not complete it
-    expect(filedCards()).toEqual([]);
-    expect(createLeadFromExtraction.mock.calls[0][0]).toMatchObject({ first_name: 'Dana', email: 'other@example.com', city: 'Venice', address_line1: null });
-  });
-
-  // The call's real store (relay-conversation): adds non-empty fields, drops on request.
-  const callStore = () => {
-    let bag = {};
-    return {
-      bag: () => bag,
-      getEstimateFields: () => ({ ...bag }),
-      noteEstimateFields: (f) => { bag = { ...bag, ...Object.fromEntries(Object.entries(f).filter(([, v]) => v != null && String(v).trim() !== '')) }; },
-      clearEstimateFields: (keys) => { for (const k of keys) delete bag[k]; },
-    };
-  };
-
-  test('a request completed over two captures keeps saying which details were the account\'s', async () => {
+  test('the yes carries to later captures on the call without the flag being passed again', async () => {
     holder.email = null; // the account has no email: the yes fills the name and address only
     const store = callStore();
     const ctx = estimateCtx(store);
@@ -274,61 +259,60 @@ describe('a written estimate for an established customer: ONE yes/no question (o
     expect(await ask({ email: 'dana@work.example.com' }, ctx)).toMatch(/IS on the office queue/);
     const [, details, opts] = filedCards()[0];
     expect(details).toMatchObject({ email: 'dana@work.example.com', address_line1: '12 Test Street' });
-    expect(opts.accountDetailsConfirmed).toEqual(['name', 'address']); // the address is still the account's, the email is theirs
+    expect(opts.accountDetailsConfirmed).toEqual(['name', 'address']); // the address is the account's, the email is theirs
   });
 
-  test('a detail the caller replaces after the yes drops the account\'s copy: a new city never keeps the account\'s street, a new email never keeps the account\'s', async () => {
+  test('what the caller says wins, on that capture and every later one: a new city never gets the account\'s street, a named email never becomes the account\'s', async () => {
     const store = callStore();
     const ctx = estimateCtx(store);
     expect(await ask({ use_account_details: true }, ctx)).toMatch(/IS on the office queue/);
     surfaceEstimateRequestForCustomer.mockClear();
-    const moved = await ask({ city: 'Venice' }, ctx);
-    expect(moved).toMatch(/still missing: address_line1/);
-    expect(store.bag()).toMatchObject({ city: 'Venice', email: 'dana@example.com', details_from_account: 'name,email' });
-    expect(store.bag().address_line1).toBeUndefined();
-    const garbled = await ask({ email: 'dana at work dot' }, ctx);
-    expect(garbled).toMatch(/still missing: email, address_line1/); // the account's email does not stand in
-    expect(store.bag().email).toBeUndefined();
-    expect(store.bag().details_from_account).toBe('name');
+    expect(await ask({ city: 'Venice' }, ctx)).toMatch(/still missing: address_line1/);
+    expect(await ask({ email: 'dana at work dot' }, ctx)).toMatch(/still missing: email, address_line1/);
+    expect(await ask({}, ctx)).toMatch(/still missing: email, address_line1/); // neither comes back
     expect(filedCards()).toEqual([]);
+    expect(store.bag()).toEqual({ city: 'Venice', account_details_confirmed: 'true', email_unreadable: 'true' });
+    // The same after a reconnect, which restores the call's fields by merging them: there is nothing to un-delete.
+    const resumed = callStore();
+    resumed.noteEstimateFields(store.bag());
+    expect(await ask({}, estimateCtx(resumed))).toMatch(/still missing: email, address_line1/);
   });
 
-  test('the account has no last name: the caller adding it keeps the confirmed first name and completes the request', async () => {
+  test('the account has no last name: the caller adding it completes the request', async () => {
     holder.last_name = null;
-    const store = callStore();
-    const ctx = estimateCtx(store);
+    const ctx = estimateCtx(callStore());
     expect(await ask({ use_account_details: true }, ctx)).toMatch(/still missing: last_name/);
     expect(await ask({ last_name: 'Sample' }, ctx)).toMatch(/IS on the office queue/);
-    const [, details, opts] = filedCards()[0];
-    expect(details).toMatchObject({ first_name: 'Dana', last_name: 'Sample', email: 'dana@example.com', address_line1: '12 Test Street' });
-    expect(opts.accountDetailsConfirmed).toEqual(['name', 'email', 'address']);
+    expect(filedCards()[0][1]).toMatchObject({ first_name: 'Dana', last_name: 'Sample', email: 'dana@example.com', address_line1: '12 Test Street' });
   });
 
-  test('a different person\'s name given after the yes takes back every detail kept from the account', async () => {
-    holder.last_name = null; // the yes leaves the last name missing, so the call goes on
-    const store = callStore();
-    const ctx = estimateCtx(store);
+  test('a different person\'s name given after the yes gets none of the account\'s details', async () => {
+    holder.last_name = null;
+    const ctx = estimateCtx(callStore());
     expect(await ask({ use_account_details: true }, ctx)).toMatch(/still missing: last_name/);
-    expect(store.bag()).toMatchObject({ email: 'dana@example.com', address_line1: '12 Test Street' });
     const out = await ask({ first_name: 'Robin', last_name: 'Other' }, ctx);
     expect(out).toMatch(/still missing: email, address_line1/);
     expect(out).not.toMatch(/ONE question/);
-    expect(store.bag()).toMatchObject({ first_name: 'Robin', last_name: 'Other', details_from_account: 'none' });
-    expect(store.bag().email).toBeUndefined();
-    expect(store.bag().address_line1).toBeUndefined();
     expect(filedCards()).toEqual([]);
   });
 
-  test('an unreadable email given on the capture is not replaced by the account\'s', async () => {
-    const out = await ask({ use_account_details: true, email: 'dana at work dot' });
-    expect(out).toMatch(/still missing: email/);
-    expect(filedCards()).toEqual([]);
+  test('the address is the account\'s one ACTIVE property, read directly — not the customers-row mirror of a retired primary', async () => {
+    properties = [{ ...HOME, active: false }, { address_line1: '40 Active Ave', city: 'Parrish', zip: '34219', active: true }];
+    expect(await ask({ use_account_details: true })).toMatch(/IS on the office queue/);
+    expect(filedCards()[0][1]).toMatchObject({ address_line1: '40 Active Ave', city: 'Parrish', zip: '34219' });
+  });
+
+  test('a legacy account with no property rows at all uses the address on the customer record', async () => {
+    properties = [];
+    expect(await ask({ use_account_details: true })).toMatch(/IS on the office queue/);
+    expect(filedCards()[0][1]).toMatchObject({ address_line1: '12 Test Street' });
   });
 
   test.each([
     ['a customer still in the lead pipeline', () => { holder.pipeline_stage = 'estimate_sent'; }, {}],
     ['a different person on the account\'s line', () => {}, { first_name: 'Robin' }],
-    ['an account with more than one property', () => { properties = 2; }, {}],
+    ['an account with more than one active property', () => { properties = [{ ...HOME }, { ...HOME, address_line1: '9 Rental Rd' }]; }, {}],
+    ['an account whose properties are all retired', () => { properties = [{ ...HOME, active: false }]; }, {}],
     ['a deleted account', () => { holder = undefined; }, {}],
   ])('%s gets the ordinary intake: the flag is ignored and the question is not offered', async (_label, arrange, input) => {
     arrange();
@@ -350,34 +334,8 @@ describe('a written estimate for an established customer: ONE yes/no question (o
     expect(filedCards()).toEqual([]);
   });
 
-  test('the address is the account\'s one resolvable ACTIVE property, not the customers-row mirror', async () => {
-    // The primary was retired; the one active property is a different address.
-    resolveCallBookingPropertyLinkage.mockResolvedValue({ propertyId: 'p-2', address: { line1: '40 Active Ave', city: 'Parrish', zip: '34219' } });
-    expect(await ask({ use_account_details: true })).toMatch(/IS on the office queue/);
-    expect(filedCards()[0][1]).toMatchObject({ address_line1: '40 Active Ave', city: 'Parrish', zip: '34219' });
-  });
-
-  test.each([
-    ['one active property the linkage cannot resolve', () => { resolveCallBookingPropertyLinkage.mockResolvedValue(null); }],
-    ['every property retired', () => { properties = 0; everHadProperties = 2; }],
-  ])('%s has no address to confirm: the ordinary intake', async (_label, arrange) => {
-    arrange();
-    const out = await ask({ use_account_details: true });
-    expect(out).toMatch(/still missing: /);
-    expect(out).not.toMatch(/ONE question/);
-    expect(filedCards()).toEqual([]);
-  });
-
-  test('a legacy account with no property rows at all uses the address on the customer record', async () => {
-    properties = 0; everHadProperties = 0;
-    expect(await ask({ use_account_details: true })).toMatch(/IS on the office queue/);
-    expect(filedCards()[0][1]).toMatchObject({ address_line1: '12 Test Street' });
-    expect(resolveCallBookingPropertyLinkage).not.toHaveBeenCalled();
-  });
-
   test('ONE question means asked once: after the offer, a caller giving their own details is not asked again', async () => {
-    const store = callStore();
-    const ctx = estimateCtx(store);
+    const ctx = estimateCtx(callStore());
     expect(await ask({}, ctx)).toMatch(/ONE question/);
     const next = await ask({ email: 'own@example.com' }, ctx); // they said no and gave their own email
     expect(next).toMatch(/still missing: first_name, last_name, address_line1/);
@@ -390,17 +348,19 @@ describe('a written estimate for an established customer: ONE yes/no question (o
   test('a correction after the card is queued rewrites the card, keeps the promise and its timing, and is fenced to the session', async () => {
     const promises = new Map();
     const notePromise = jest.fn((k, verdict, extra) => promises.set(k, { verdict, expectation: extra && extra.expectation }));
-    const store = callStore();
-    const ctx = estimateCtx({ ...store, sessionKey: 'sk-1', notePromise, getPromise: (k) => promises.get(k) || null, officeOpenNow: () => true });
+    const ctx = estimateCtx({ ...callStore(), sessionKey: 'sk-1', notePromise, getPromise: (k) => promises.get(k) || null, officeOpenNow: () => true });
     const saved = process.env.VOICE_RELAY_CONTEXT_ENABLED;
     process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true';
     try {
       expect(await ask({ use_account_details: true }, ctx)).toMatch(/usually goes out in about 15 minutes/);
       expect(notePromise).toHaveBeenLastCalledWith('send_estimate', true, { expectation: 'about_15_minutes' });
-      // The office has closed by the time the caller corrects the email.
+      // The office has closed by the time the caller corrects the address.
       ctx.officeOpenNow = () => false;
-      // Incomplete correction: the standing card is revised, the promise is not withdrawn.
-      expect(await ask({ city: 'Venice' }, ctx)).toMatch(/still missing: address_line1/);
+      // Incomplete correction: the standing card is revised and the caller is NOT told the estimate was dropped.
+      const incomplete = await ask({ city: 'Venice' }, ctx);
+      expect(incomplete).toMatch(/still missing: address_line1/);
+      expect(incomplete).toMatch(/stays on the office queue[\s\S]*will call you back to confirm where to send it/);
+      expect(incomplete).not.toMatch(/the estimate is dropped/);
       const revise = surfaceEstimateRequestForCustomer.mock.calls.at(-1);
       expect(revise[1]).toMatchObject({ city: 'Venice', address_line1: null });
       expect(revise[2]).toMatchObject({ stillMissing: ['address_line1'], sessionKey: 'sk-1', callSid: 'CA-acct-1', spokenExpectation: 'about_15_minutes' });
