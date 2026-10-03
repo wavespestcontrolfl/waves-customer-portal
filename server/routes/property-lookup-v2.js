@@ -1282,7 +1282,12 @@ router.post('/property-lookup', async (req, res) => {
     // A whole-property (association) lookup skips the business check. The
     // tool is told so it can ask for a fresh lookup if the business type
     // later stops being an association. Absent while the gate is off.
-    if (businessIdentityBypassed(wholeProperty)) result.meta.businessIdentityBypassed = true;
+    // On the profile too (our own boolean, saved with the estimate), so a
+    // reopened estimate still knows.
+    if (businessIdentityBypassed(wholeProperty)) {
+      result.meta.businessIdentityBypassed = true;
+      if (result.enriched) result.enriched.businessIdentityBypassed = true;
+    }
     res.json(result);
   } catch (err) {
     logger.error(`[property-lookup] ${err.message}`);
@@ -3178,6 +3183,13 @@ async function applyCommercialSuiteSize(profile, opts = {}) {
       commercialRiskType: null,
       commercialSubtype: candidate.commercialSubtype,
     }, opts);
+    // The listing's name was a hint for the match only. Unless a public
+    // record (a license row) vouched for the result, the resolver just echoes
+    // the hint back as businessName — and the suite size is stored, so the
+    // echo is dropped: nothing from Places is saved.
+    if (suiteSize && candidate.businessNameHint && !PERSISTED_SUITE_SIZE_SOURCES.has(suiteSize.source)) {
+      suiteSize.businessName = null;
+    }
     if (suiteSize && Number(suiteSize.value) > 0) {
       profile.homeSqFt = suiteSize.value;
       // The suite's own ground-floor footprint — a single in-line strip/

@@ -433,6 +433,14 @@ describe("scope question", { timeout: 20000 }, () => {
     expect(screen.getByRole("button", { name: "Generate Estimate", exact: true })).toBeEnabled();
   });
 
+  it("the skipped-business-check marker on the profile alone (a reopened estimate has no lookup meta) also asks for a fresh lookup", async () => {
+    lookupReply = () => ({ ...answeredProfile("building"), businessIdentity: undefined, serviceScopeDecision: undefined, serviceScopeQuestion: undefined, occupancyAnswer: undefined, businessIdentityBypassed: true });
+    await lookUp();
+    expect(screen.getByRole("region", { name: "Scope question" })).toHaveTextContent("The business type changed. Run Property Lookup again before pricing.");
+    pickPest();
+    expect(screen.getByRole("button", { name: "Generate Estimate", exact: true })).toBeDisabled();
+  });
+
   it("a server 409 COMMERCIAL_SCOPE_UNRESOLVED shows the same prompt and blocks the buttons", async () => {
     // The client believed the scope was settled (no business on the profile).
     lookupReply = () => ({ ...answeredProfile("suite"), businessIdentity: undefined, serviceScopeDecision: undefined, occupancyAnswer: undefined });

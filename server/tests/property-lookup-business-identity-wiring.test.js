@@ -269,6 +269,18 @@ describe('gate on', () => {
       expect.objectContaining({ address: expect.objectContaining({ unit: '103' }), businessNameHint: 'Example Nail Bar' }),
       expect.anything(),
     );
+    // The resolver echoes the hint back as businessName on a type-default
+    // result; that echo never reaches the profile. A license-backed name does.
+    resolveCommercialSuiteSize.mockImplementationOnce(async ({ businessNameHint }) => ({
+      value: 1200, source: 'suite_type_default', confidence: 'low', businessName: businessNameHint, businessType: null, evidence: [],
+    }));
+    const echoed = (await run({ occupancyAnswer: 'suite' })).enriched;
+    expect(echoed.suiteSize.businessName).toBeNull();
+    expect(JSON.stringify(echoed.suiteSize)).not.toMatch(/Example Nail Bar/);
+    resolveCommercialSuiteSize.mockImplementationOnce(async () => ({
+      value: 1800, source: 'license_seats', confidence: 'high', businessName: 'EXAMPLE NAIL BAR LLC', businessType: null, evidence: [],
+    }));
+    expect((await run({ occupancyAnswer: 'suite' })).enriched.suiteSize.businessName).toBe('EXAMPLE NAIL BAR LLC');
     resolveCommercialSuiteSize.mockClear();
     placesReply = () => ({ ok: true, json: async () => ({ places: [placeAt()] }) });
     await performPropertyLookup('100 Example Plaza Dr Ste 3, Examplecity, FL 00000', {

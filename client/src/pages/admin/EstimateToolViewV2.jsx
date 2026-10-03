@@ -2663,7 +2663,8 @@ export default function EstimateToolViewV2({
   // fresh lookup is required before pricing.
   const formIsWholeProperty = ["hoa_common_area", "multifamily"].includes(form.commercialRiskType)
     || /^(?:hoa|multifamily)/.test(String(form.commercialSubtype || ""));
-  const scopeLookupStale = !!enrichedProfile && lookupMeta?.businessIdentityBypassed === true && !formIsWholeProperty;
+  const scopeLookupStale = !!enrichedProfile && !formIsWholeProperty
+    && (lookupMeta?.businessIdentityBypassed === true || enrichedProfile.businessIdentityBypassed === true);
   const scopeQuestion = scopeUnresolved
     ? (enrichedProfile.serviceScopeQuestion || SCOPE_QUESTION)
     : (scopeAnswerPending ? SCOPE_QUESTION : (scopeLookupStale ? SCOPE_STALE_NOTICE : scopeConflict));
