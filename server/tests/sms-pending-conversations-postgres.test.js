@@ -200,7 +200,7 @@ postgres('pending SMS conversation query (PostgreSQL)', () => {
     phone = '+19415550100', ours = '+19415550190', direction = 'inbound', status = 'completed',
     answeredBy = direction === 'inbound' ? 'human' : null, duration = 99,
     source = direction === 'outbound' ? 'admin-click' : null,
-    extraction = 'valid', voicemail = false, customerLeg = null, startedSecondsAgo = 0,
+    extraction = 'valid', voicemail = false, customerLeg = null, metadata = null, startedSecondsAgo = 0,
   } = {}) {
     const createdAt = new Date(tick.getTime() - startedSecondsAgo * 1000);
     tick = new Date(tick.getTime() + 1000);
@@ -210,7 +210,7 @@ postgres('pending SMS conversation query (PostgreSQL)', () => {
       to_phone: direction === 'inbound' ? ours : phone,
       v2_extraction_status: direction === 'outbound' ? extraction : null,
       ai_extraction_enriched: direction === 'outbound' ? JSON.stringify({ meta: { is_voicemail: String(voicemail) } }) : null,
-      metadata: customerLeg ? JSON.stringify({ customer_leg: customerLeg }) : null,
+      metadata: customerLeg || metadata ? JSON.stringify({ ...(customerLeg ? { customer_leg: customerLeg } : {}), ...metadata }) : null,
       created_at: createdAt,
     });
   }
@@ -238,19 +238,22 @@ postgres('pending SMS conversation query (PostgreSQL)', () => {
     await expect(pendingCount()).resolves.toEqual(none);
   });
 
-  test('an outbound call ends at its recorded customer leg, not at insert time plus the staff-leg duration', async () => {
+  test.each([
+    ['inbound, stamped by /call-status', { }, (at) => ({ ended_at: at })],
+    ['an office click, stamped by /call-status', { direction: 'outbound' }, (at) => ({ ended_at: at })],
+    ['a callback card, its recorded customer leg', { direction: 'outbound', source: 'admin-callback' },
+      (at) => ({ customer_leg: { status: 'completed', duration_seconds: 95, ended_at: at } })],
+  ])('a call ends at its recorded end, not at insert time plus one leg\'s duration: %s', async (_label, call, metadata) => {
     const callStart = tick;
-    // Staff answered 30 s after the row was inserted and talked for 100 s, so
-    // the customer leg ended at +130 s. A text at +115 s was during the call.
-    const customerLeg = (endedAt) => ({ status: 'completed', duration_seconds: 95, ended_at: endedAt });
+    // The phone rang for 30 s, then 100 s of talk: the call ended at +130 s.
+    // A text at +115 s arrived during the conversation.
     tick = new Date(callStart.getTime() + 115 * 1000);
     await seed({ body: 'Here is the gate code' });
     tick = callStart;
-    await seedCall({ direction: 'outbound', source: 'admin-callback', duration: 100, customerLeg: customerLeg('not a time') });
+    await seedCall({ ...call, duration: 100, metadata: metadata('not a time') });
     await expect(pendingCount()).resolves.toEqual(one);
     tick = callStart;
-    await seedCall({ direction: 'outbound', source: 'admin-callback', duration: 100,
-      customerLeg: customerLeg(new Date(callStart.getTime() + 130 * 1000).toISOString()) });
+    await seedCall({ ...call, duration: 100, metadata: metadata(new Date(callStart.getTime() + 130 * 1000).toISOString()) });
     await expect(pendingCount()).resolves.toEqual(none);
   });
 
@@ -284,6 +287,8 @@ postgres('pending SMS conversation query (PostgreSQL)', () => {
     // is the staff cell rather than the prospect.
     await seedCall({ direction: 'outbound', source: 'collections_voice' });
     await seedCall({ direction: 'outbound', source: 'lead-webhook-auto-bridge' });
+    // A sandbox test call is never customer contact.
+    await seedCall({ source: 'voice_relay_sandbox' });
     // A real conversation with someone else.
     await seedCall({ phone: '+19415550101' });
     await expect(pendingCount()).resolves.toEqual(one);

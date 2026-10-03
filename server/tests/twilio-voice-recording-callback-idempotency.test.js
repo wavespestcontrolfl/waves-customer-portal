@@ -125,6 +125,11 @@ function makeDb(tables) {
           row[k] = (before.transcription_status === 'rejected' && before[k] === 'voicemail') ? null : before[k];
           continue;
         }
+        if (v.sql.startsWith("jsonb_build_object('ended_at', ?::text) ||")) {
+          // /call-status's end stamp: the row's existing key wins.
+          row.metadata = { ended_at: v.bindings[0], ...metaOf(row) };
+          continue;
+        }
         const meta = metaOf(row);
         const appended = JSON.parse(v.bindings[0]);
         if (v.sql.includes("'{superseded_recordings}'")) {
@@ -838,6 +843,19 @@ describe('nextCallStatus (pure) and POST /call-status', () => {
     await post('/call-status', { CallSid: PARENT, CallStatus: 'completed', CallDuration: '61', Direction: 'outbound-api', From: '+15555550100', To: '+15555550101' });
     expect(tables.call_log[0].status).toBe('completed');
     expect(tables.call_log[0].duration_seconds).toBe(61);
+  });
+
+  test('the first terminal callback stamps when the call ended; a ringing event and a retry leave it alone', async () => {
+    tables.call_log.push({ id: 'c1', twilio_call_sid: PARENT, direction: 'outbound-api', status: 'initiated', duration_seconds: 0 });
+    const event = (CallStatus) => post('/call-status', { CallSid: PARENT, CallStatus, CallDuration: '61', Direction: 'outbound-api', From: '+15555550100', To: '+15555550101' });
+    await event('ringing');
+    expect(tables.call_log[0].metadata).toBeUndefined();
+    await event('completed');
+    const endedAt = tables.call_log[0].metadata.ended_at;
+    expect(new Date(endedAt).toISOString()).toBe(endedAt);
+    tables.call_log[0].metadata.ended_at = '2026-10-03T15:52:00.000Z';
+    await event('completed');
+    expect(tables.call_log[0].metadata.ended_at).toBe('2026-10-03T15:52:00.000Z');
   });
 });
 

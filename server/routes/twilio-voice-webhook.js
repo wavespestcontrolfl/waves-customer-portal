@@ -3560,6 +3560,14 @@ router.post('/call-status', async (req, res) => {
         await trx('call_log').where('twilio_call_sid', CallSid).update({
           status,
           duration_seconds: duration,
+          // When the call actually ended, stamped once by the first terminal
+          // callback (the existing key wins). created_at is written before
+          // any ringing and duration_seconds is one leg's, so their sum is
+          // not the end; sms-pending-conversations.js reads this to tell
+          // whether a text arrived before the conversation was over.
+          ...(TERMINAL_CALL_STATUSES.has(CallStatus) ? {
+            metadata: trx.raw("jsonb_build_object('ended_at', ?::text) || COALESCE(metadata, '{}'::jsonb)", [new Date().toISOString()]),
+          } : {}),
           updated_at: new Date(),
         });
         return;
