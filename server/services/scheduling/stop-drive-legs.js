@@ -6,13 +6,14 @@
 // Order is the one the day list shows: the tie-proximity displayOrder when
 // stamped, else window start, then route_order. Rows of one physical stop (a
 // visit group, or two services at the same coordinates) share their legs and
-// never get a leg between each other. A cancelled or skipped row is not a
-// stop. A missing coordinate yields null on its legs — never a 0 that would
+// never get a leg between each other. A cancelled, skipped or no-show row is
+// not a stop. A missing coordinate yields null on its legs — never a 0 that would
 // read as "next door".
 
 const { driveMin } = require('../auto-dispatch/geo');
 
-const NOT_A_STOP = new Set(['cancelled', 'skipped']);
+// Visits the tech will not drive to.
+const NOT_A_STOP = new Set(['cancelled', 'skipped', 'no_show']);
 
 function minutesOf(hhmm) {
   const m = /^(\d{1,2}):(\d{2})/.exec(String(hhmm || ''));

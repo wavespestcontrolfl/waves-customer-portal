@@ -26,6 +26,7 @@ describe('attachDriveLegs', () => {
       stop('b1', '10:00', B, { visitId: 'v1' }),
       stop('b2', '10:00', B, { visitId: 'v1' }),
       stop('x', '11:00', A, { status: 'cancelled' }),
+      stop('ns', '12:00', A, { status: 'no_show' }),
       stop('c', '13:00', C),
     ];
     attachDriveLegs(services);
@@ -34,6 +35,7 @@ describe('attachDriveLegs', () => {
     expect(by.b1).toMatchObject({ driveFromPrevMin: driveMin(A, B), driveToNextMin: driveMin(B, C) });
     expect(by.b2).toMatchObject({ driveFromPrevMin: null, driveToNextMin: null, firstStop: false, lastStop: false });
     expect(by.x).toMatchObject({ driveFromPrevMin: null, driveToNextMin: null, firstStop: false, lastStop: false });
+    expect(by.ns).toMatchObject({ driveFromPrevMin: null, driveToNextMin: null, firstStop: false, lastStop: false });
   });
 
   it('leaves a leg null, never 0, when a stop has no coordinates', () => {
