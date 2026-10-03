@@ -3701,11 +3701,6 @@ const StripeService = {
     // Side effects past this point never mask the successful refund as
     // "Refund processing failed" — each degrades on its own.
     if (isFullRefund) {
-      try {
-        await require('./annual-prepay-renewals').syncTermForRefundedPayment(payment);
-      } catch (syncErr) {
-        logger.error(`[annual-prepay] refund sync failed for payment ${paymentId}: ${syncErr.message}`);
-      }
       // Return any applied account credit to the customer's balance — a full
       // refund gives back the cash, so the credit they used must return too
       // (else it stays consumed). Idempotent vs the charge.refunded webhook.
@@ -3722,6 +3717,21 @@ const StripeService = {
         }
       } catch (creditErr) {
         logger.error(`[stripe] refund credit-restore failed for payment ${paymentId}: ${creditErr.message}`);
+      }
+      // Annual-prepay claw-back, AFTER the credit restore on purpose (B03):
+      // that restore terminalizes the invoice this PI owns to 'refunded'
+      // under its row lock, and a refunded invoice is refused by every
+      // replacement-settlement path — so the ownership read
+      // syncTermForRefundedPayment makes next cannot be flipped by a
+      // replacement payment before the term is cancelled. (The restore finds
+      // the invoice by this payment's PI, i.e. only an invoice it still
+      // owns.) A restore that throws is logged above and never skips this:
+      // the sync runs regardless, as it always has, just on a read that is
+      // then not pinned by the terminal status.
+      try {
+        await require('./annual-prepay-renewals').syncTermForRefundedPayment(payment);
+      } catch (syncErr) {
+        logger.error(`[annual-prepay] refund sync failed for payment ${paymentId}: ${syncErr.message}`);
       }
     }
 

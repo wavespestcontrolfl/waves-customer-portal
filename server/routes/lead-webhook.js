@@ -392,8 +392,12 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       logger.warn(`[lead-webhook] Lead source lookup failed: ${e.message}`);
     }
 
-    // Check for existing customer
-    const existing = await db('customers').where({ phone: phoneFormatted }).first();
+    // Check for existing customer. Archived (soft-deleted) rows keep their
+    // phone, so they must not match: an archived customer's submission has to
+    // take the new-lead path (lead row, bell) instead of writing a note onto a
+    // row no admin list shows. Same filter as findAccountByContact and
+    // attachOpenCallLeadByPhone.
+    const existing = await db('customers').where({ phone: phoneFormatted }).whereNull('deleted_at').first();
 
     // Dedup: if this customer already submitted a form within the last 5 minutes,
     // skip the heavy notification work below. Protects against accidental

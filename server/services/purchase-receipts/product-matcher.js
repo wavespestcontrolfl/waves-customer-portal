@@ -44,23 +44,40 @@ function containsWholeWords(haystackNorm, needleNorm) {
 // its (active) product row. Split from the match itself so the read-only
 // replay (ops/agents/inventory-agent-replay.js) can match against the
 // catalog plus the changes it has proposed so far, with the same rules.
-async function loadMatchCatalog(conn = db) {
-  const aliasRows = await conn('product_aliases as pa')
+// Each alias joined to its ACTIVE product row.
+async function loadActiveAliasRows(conn = db) {
+  return conn('product_aliases as pa')
     .join('products_catalog as pc', 'pc.id', 'pa.product_id')
     .where('pc.active', true)
     .select('pa.alias_name', 'pc.*');
+}
+
+async function loadMatchCatalog(conn = db) {
+  const aliasRows = await loadActiveAliasRows(conn);
   const products = await conn('products_catalog').where({ active: true }).select('*');
   return { aliasRows, products };
+}
+
+// The active products an alias names exactly (case/space/punctuation-
+// insensitive), one row per product. The one alias rule, shared by the
+// purchase matcher below and the tech Intelligence Bar's product lookup.
+function activeProductsForAlias(title, aliasRows) {
+  const normTitle = normalizeForMatch(title);
+  if (!normTitle) return [];
+  const byId = new Map();
+  for (const row of aliasRows || []) {
+    if (normalizeForMatch(row.alias_name) === normTitle && !byId.has(row.id)) byId.set(row.id, row);
+  }
+  return [...byId.values()];
 }
 
 function matchTitleInCatalog(title, { aliasRows, products }) {
   const normTitle = normalizeForMatch(title);
   if (!normTitle) return { matched: false, reason: 'empty_title' };
 
-  const aliasHits = aliasRows.filter((row) => normalizeForMatch(row.alias_name) === normTitle);
-  const aliasProductIds = [...new Set(aliasHits.map((row) => row.id))];
-  if (aliasProductIds.length === 1) return { matched: true, product: aliasHits[0], matchType: 'alias' };
-  if (aliasProductIds.length > 1) return { matched: false, reason: 'ambiguous', matchType: 'alias', candidates: aliasProductIds };
+  const aliasProducts = activeProductsForAlias(title, aliasRows);
+  if (aliasProducts.length === 1) return { matched: true, product: aliasProducts[0], matchType: 'alias' };
+  if (aliasProducts.length > 1) return { matched: false, reason: 'ambiguous', matchType: 'alias', candidates: aliasProducts.map((row) => row.id) };
 
   const containmentHits = products.filter((product) => containsWholeWords(normTitle, normalizeForMatch(product.name)));
   if (containmentHits.length === 1) return { matched: true, product: containmentHits[0], matchType: 'containment' };
@@ -76,4 +93,4 @@ async function matchTitleToProduct(title, conn = db) {
   return matchTitleInCatalog(title, await loadMatchCatalog(conn));
 }
 
-module.exports = { matchTitleToProduct, matchTitleInCatalog, loadMatchCatalog, normalizeForMatch, containsWholeWords };
+module.exports = { matchTitleToProduct, matchTitleInCatalog, loadMatchCatalog, loadActiveAliasRows, activeProductsForAlias, normalizeForMatch, containsWholeWords };

@@ -47,7 +47,7 @@ const CATALOG = [
   },
 ];
 
-function makeRequest({ existingProducts = [], products = CATALOG } = {}) {
+function makeRequest({ existingProducts = [], products = CATALOG, catalogLoadFailed = false } = {}) {
   const calls = [];
   const request = vi.fn(async (path, options) => {
     calls.push({ path, options });
@@ -58,6 +58,7 @@ function makeRequest({ existingProducts = [], products = CATALOG } = {}) {
         service: { id: 'svc-1', customerName: 'Pat Jones', hasPhone: false },
         timeline: [],
         products,
+        catalogLoadFailed,
         existingRecord: existingProducts.length
           ? { id: 'rec-1', technician_notes: 'prior note', status: 'completed', products: existingProducts }
           : null,
@@ -121,6 +122,16 @@ const MIX_CATALOG = [
 ];
 
 describe('ServiceRecapModal application rates', () => {
+  test.each([true, false])('empty catalog with load failure %s preserves the correct selection authority', async (catalogLoadFailed) => {
+    const request = makeRequest({ products: [], catalogLoadFailed });
+    render(<ServiceRecapModal service={{ id: 'svc-1' }} request={request} onClose={() => {}} />);
+    await screen.findByText(catalogLoadFailed ? /Product list unavailable/ : 'No products in catalog.');
+    fireEvent.click(screen.getByRole('button', { name: 'Complete Service' }));
+    await waitFor(() => expect(request.calls.some((c) => c.options?.method === 'POST')).toBe(true));
+    const submit = request.calls.find((c) => c.options?.method === 'POST');
+    expect(JSON.parse(submit.options.body)).toMatchObject({ products: [], productsConfirmed: !catalogLoadFailed });
+  });
+
   test('selecting a product prefills an editable rate from the catalog default', async () => {
     const request = makeRequest();
     render(<ServiceRecapModal service={{ id: 'svc-1' }} request={request} onClose={() => {}} />);

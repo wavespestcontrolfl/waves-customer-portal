@@ -164,7 +164,7 @@ describe('relay-recovery module', () => {
     const { db } = primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_lead_id: 'L1', relay_segments: [{ generation: 1, text: 'Caller: ants' }] } } });
     expect(await recovery.loadResumeState(db, 'CA-1', { sessionKey: 'other-nonce' })).toBeNull(); // not this socket's claim ⇒ nothing (hook P0)
     expect(await recovery.loadResumeState(db, 'CA-1')).toBeNull(); // no key ⇒ nothing
-    expect(await recovery.loadResumeState(db, 'CA-1', { sessionKey: 'nonce-2' })).toEqual({ reconnects: 1, predecessorsComplete: false, reconnectMs: null, segmentsText: 'Caller: ants', relayLeadId: 'L1', reserviceFiled: false, noLeadCreated: false, leadCaptured: false, lookupsUsed: 0, lookupRefs: [], lookupResults: [], slotRefs: [], startedAtMs: null, holdOpen: false, estimateFields: null, modelFailures: 0, toolFailures: 0, promises: [], callerTurns: ['ants'], modelSwitch: null, priorModel: null });
+    expect(await recovery.loadResumeState(db, 'CA-1', { sessionKey: 'nonce-2' })).toEqual({ reconnects: 1, predecessorsComplete: false, reconnectMs: null, segmentsText: 'Caller: ants', relayLeadId: 'L1', reserviceFiled: false, noLeadCreated: false, leadCaptured: false, lookupsUsed: 0, lookupRefs: [], lookupResults: [], slotRefs: [], startedAtMs: null, holdOpen: false, estimateFields: null, contactFollowUp: null, modelFailures: 0, toolFailures: 0, promises: [], callerTurns: ['ants'], modelSwitch: null, priorModel: null });
     // An earlier leg's OpenAI → Claude switch rides its versions stamp into the resumed leg (codex r1 P2 on #5209).
     const sw = { from: 'gpt-6-luna', to: 'claude-sonnet-5', reason: 'provider_error', turn: 2 };
     primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_segments: [{ generation: 1, text: 'Caller: ants', versions: { model: 'claude-sonnet-5', model_switch: sw } }] } } });
@@ -231,6 +231,32 @@ describe('relay-recovery module', () => {
     const state = await recovery.loadResumeState(db, 'CA-1', { sessionKey: 'nonce-2' });
     expect(state.promises).toEqual([{ kind: 'send_estimate', verdict: false, expectation: null, at: '2026-09-05T02:05:00.000Z' }]); // generation 2 wins
     expect(state.callerTurns).toEqual(['ants', 'thanks', 'later']);
+  });
+
+  // Owner ruling 2026-10-03 (recognised contact → office bell): how the caller
+  // asked to be reached survives a reconnect, so a capture on the resumed leg
+  // cannot revert the callback number or drop a restriction.
+  test('a recognised contact\'s follow-up details ride the segment and merge across legs: latest text wins, a flag once set stays', async () => {
+    const seg = segmentStore.buildSegment({ generation: 1, text: 'Caller: hi', contactFollowUp: { callbackPhone: '+19415550199', method: 'email', preference: ' email only ', restricted: true, textsStopped: false, junk: 'dropped' } });
+    expect(seg.contact_followup).toEqual({ callbackPhone: '+19415550199', method: 'email', preference: 'email only', restricted: true });
+    expect(segmentStore.buildSegment({ generation: 1, text: 'x' }).contact_followup).toBeNull();
+    const { db } = primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_segments: [
+      { generation: 2, text: 'Caller: later', contact_followup: { method: 'text', estimateAsked: true } },
+      seg,
+    ] } } });
+    const state = await recovery.loadResumeState(db, 'CA-1', { sessionKey: 'nonce-2' });
+    expect(state.contactFollowUp).toEqual({ callbackPhone: '+19415550199', method: 'text', preference: 'email only', restricted: true, estimateAsked: true });
+  });
+
+  test('capture → reconnect → capture: the resumed leg\'s tool ctx starts from the earlier leg\'s follow-up details', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_segments: [{ generation: 1, text: 'Caller: hi', contact_followup: { callbackPhone: '+19415550199', restricted: true } }] } } });
+    const convo = resumedConvo({ callSid: 'CA-contact-resume' });
+    await convo._resumeReady;
+    const ctx = convo._buildToolCtx();
+    expect(ctx.getContactFollowUp()).toEqual({ callbackPhone: '+19415550199', restricted: true });
+    ctx.noteContactFollowUp({ ...ctx.getContactFollowUp(), method: 'email' });
+    expect(convo._contactFollowUp).toEqual({ callbackPhone: '+19415550199', restricted: true, method: 'email' });
   });
 
   test('an incomplete estimate capture rides the segment (hold + the fields given) and is restored from the LATEST leg, fields accumulated across legs (codex r2 P1)', async () => {
@@ -1117,7 +1143,7 @@ describe('the conversation side', () => {
     primeDb({ firstRow: { metadata: { ...OWNED, relay_segment_owners: ['nonce-1', 'nonce-2'], relay_reconnects: 1, relay_lead_id: 'L1', relay_segments: [{ generation: 1, session_key: 'nonce-1', text: 'Caller: my ants are back\nAgent: Sorry to hear that.' }] } } });
     const convo = resumedConvo({ callSid: 'CA-res', sessionGeneration: 2 });
     await convo._resumeReady;
-    expect(convo._resume).toEqual({ reconnects: 1, predecessorsComplete: true, reconnectMs: null, segmentsText: 'Caller: my ants are back\nAgent: Sorry to hear that.', relayLeadId: 'L1', reserviceFiled: false, noLeadCreated: false, leadCaptured: false, lookupsUsed: 0, lookupRefs: [], lookupResults: [], slotRefs: [], startedAtMs: null, holdOpen: false, estimateFields: null, modelFailures: 0, toolFailures: 0, promises: [], callerTurns: ['my ants are back'], modelSwitch: null, priorModel: null });
+    expect(convo._resume).toEqual({ reconnects: 1, predecessorsComplete: true, reconnectMs: null, segmentsText: 'Caller: my ants are back\nAgent: Sorry to hear that.', relayLeadId: 'L1', reserviceFiled: false, noLeadCreated: false, leadCaptured: false, lookupsUsed: 0, lookupRefs: [], lookupResults: [], slotRefs: [], startedAtMs: null, holdOpen: false, estimateFields: null, contactFollowUp: null, modelFailures: 0, toolFailures: 0, promises: [], callerTurns: ['my ants are back'], modelSwitch: null, priorModel: null });
     await convo._runLoop('where were we').catch(() => {}); // no Anthropic client in tests: the seeding half runs
     const seeded = convo.messages.filter((m) => typeof m.content === 'string' && m.content.includes('[Earlier in this call, before the line dropped'));
     expect(seeded).toHaveLength(1);
@@ -1213,7 +1239,7 @@ describe('the conversation side', () => {
     const { builder } = primeDb({ firstRow: { metadata: { ...OWNED, relay_segment_owners: ['nonce-1', 'nonce-2'], relay_reconnects: 1 } } }); // proven, but no segment yet
     const convo = resumedConvo({ callSid: 'CA-race' });
     await convo._resumeReady;
-    expect(convo._resume).toEqual({ reconnects: 1, predecessorsComplete: false, reconnectMs: null, segmentsText: '', relayLeadId: null, reserviceFiled: false, noLeadCreated: false, leadCaptured: false, lookupsUsed: 0, lookupRefs: [], lookupResults: [], slotRefs: [], startedAtMs: null, holdOpen: false, estimateFields: null, modelFailures: 0, toolFailures: 0, promises: [], callerTurns: [], modelSwitch: null, priorModel: null });
+    expect(convo._resume).toEqual({ reconnects: 1, predecessorsComplete: false, reconnectMs: null, segmentsText: '', relayLeadId: null, reserviceFiled: false, noLeadCreated: false, leadCaptured: false, lookupsUsed: 0, lookupRefs: [], lookupResults: [], slotRefs: [], startedAtMs: null, holdOpen: false, estimateFields: null, contactFollowUp: null, modelFailures: 0, toolFailures: 0, promises: [], callerTurns: [], modelSwitch: null, priorModel: null });
     await convo._runLoop('hello').catch(() => {});
     expect(convo.messages.some((m) => typeof m.content === 'string' && m.content.includes('[Earlier in this call'))).toBe(false);
     builder.first = jest.fn(async () => ({ metadata: { ...OWNED, relay_segment_owners: ['nonce-1', 'nonce-2'], relay_reconnects: 1, relay_lead_id: 'L9', relay_segments: [{ generation: 1, session_key: 'nonce-1', text: 'Caller: my ants are back', promises: [{ kind: 'send_estimate', verdict: true, expectation: 'about_15_minutes', at: '2026-09-05T02:00:00.000Z' }] }] } })); // the old socket's append landed

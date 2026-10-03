@@ -3950,6 +3950,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   );
   const { conflicts: slotConflicts } = useSlotConflicts({
     date: apptDate ? String(apptDate).split('T')[0] : null,
+    // The chosen technician scopes the overlap warning to that route (server
+    // side, only with GATE_MULTI_TECH_CONFIRM); auto mode stays tech-blind.
+    technicianId: techMode === 'choose' && techId ? techId : undefined,
     windowStart,
     windowEnd: windowStart && slotCheckDuration > 0
       ? computeWindowEnd(windowStart, slotCheckDuration)

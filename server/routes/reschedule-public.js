@@ -1108,6 +1108,7 @@ module.exports = router;
 // load the visit, take the page's eligibility verdict, and build availability
 // over the page's own booking range — never a mirror of any of them.
 module.exports._internals = {
+  TOKEN_RE,
   loadById,
   pageEligibility,
   bookingRange,
