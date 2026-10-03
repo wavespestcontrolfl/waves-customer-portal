@@ -13,6 +13,14 @@ jest.mock('../services/logger', () => ({
 jest.mock('../services/ai-assistant/assistant', () => ({
   processMessage: jest.fn(),
 }));
+const mockPortalTurn = jest.fn(async (args) => ({
+  ...await args.processTurn({ requestRowId: 'portal-request-row' }),
+  requestId: args.requestId,
+}));
+jest.mock('../services/ai-assistant/portal-turn', () => ({
+  portalConversationIdentifier: (identifier, propertyId) => (propertyId ? `property:${propertyId}:${identifier}` : identifier),
+  runPortalTurn: (...args) => mockPortalTurn(...args),
+}));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(),
 }));
@@ -61,7 +69,7 @@ async function withServer(fn) {
 // The report route uses the REAL customer authenticate middleware, which
 // looks the customer up in db('customers') — the mock has to serve that
 // chain alongside the report's own tables.
-function mockReportTables({ session, customer } = {}) {
+function mockReportTables({ session, customer, property } = {}) {
   const customersQuery = {
     where: jest.fn().mockReturnThis(),
     whereNull: jest.fn().mockReturnThis(),
@@ -74,6 +82,10 @@ function mockReportTables({ session, customer } = {}) {
     orderBy: jest.fn().mockReturnThis(),
     first: jest.fn().mockResolvedValue(session || null),
   };
+  const propertyQuery = {
+    where: jest.fn().mockReturnThis(),
+    first: jest.fn().mockResolvedValue(property || null),
+  };
   const escalationInsert = jest.fn().mockReturnValue({
     returning: jest.fn().mockResolvedValue([{ id: 'esc-1' }]),
   });
@@ -82,26 +94,29 @@ function mockReportTables({ session, customer } = {}) {
   });
   db.mockImplementation((table) => {
     if (table === 'customers') return customersQuery;
+    if (table === 'customer_properties') return propertyQuery;
     if (table === 'agent_sessions') return sessionQuery;
     if (table === 'ai_escalations') return { insert: escalationInsert };
     if (table === 'operator_inbox_items') return { insert: inboxInsert };
     throw new Error(`Unexpected table ${table}`);
   });
-  return { customersQuery, sessionQuery, escalationInsert, inboxInsert };
+  return { customersQuery, propertyQuery, sessionQuery, escalationInsert, inboxInsert };
 }
 
-function customerToken(customerId = 'cust-1') {
-  return jwt.sign({ customerId }, process.env.JWT_SECRET);
+function customerToken(customerId = 'cust-1', claims = {}) {
+  return jwt.sign({ customerId, ...claims }, process.env.JWT_SECRET);
 }
 
 describe('POST /ai/chat/report', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     delete process.env.GATE_AI_CONTENT_REPORT;
+    delete process.env.GATE_APP_PROPERTY_SCOPE;
   });
 
   afterAll(() => {
     delete process.env.GATE_AI_CONTENT_REPORT;
+    delete process.env.GATE_APP_PROPERTY_SCOPE;
   });
 
   test('files an ai_escalations row plus an operator-inbox mirror for the admin hub', async () => {
@@ -246,13 +261,17 @@ describe('POST /ai/chat/report', () => {
 });
 
 describe('POST /ai/chat canReport flag', () => {
+  const requestId = '11a7ca3e-8392-4e2b-92b0-c3125b3e6c48';
+
   beforeEach(() => {
     jest.clearAllMocks();
     delete process.env.GATE_AI_CONTENT_REPORT;
+    delete process.env.GATE_APP_PROPERTY_SCOPE;
   });
 
   afterAll(() => {
     delete process.env.GATE_AI_CONTENT_REPORT;
+    delete process.env.GATE_APP_PROPERTY_SCOPE;
   });
 
   test('model-generated replies advertise canReport for authenticated customers (gate default on)', async () => {
@@ -263,11 +282,11 @@ describe('POST /ai/chat canReport flag', () => {
       const res = await fetch(`${baseUrl}/ai/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken()}` },
-        body: JSON.stringify({ message: 'hello', sessionId: 'chat-123' }),
+        body: JSON.stringify({ message: 'hello', sessionId: 'chat-123', requestId }),
       });
       const body = await res.json();
       expect(res.status).toBe(200);
-      expect(body).toEqual({ reply: 'Hi there', escalated: false, generated: true, canReport: true });
+      expect(body).toEqual({ reply: 'Hi there', escalated: false, generated: true, requestId, canReport: true });
     });
   });
 
@@ -279,13 +298,30 @@ describe('POST /ai/chat canReport flag', () => {
       const res = await fetch(`${baseUrl}/ai/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: 'hello', sessionId: 'chat-123' }),
+        body: JSON.stringify({ message: 'hello', sessionId: 'chat-123', requestId }),
       });
       const body = await res.json();
       expect(res.status).toBe(401);
       expect(body).toEqual({ error: 'Authentication required' });
       expect(WavesAssistant.processMessage).not.toHaveBeenCalled();
     });
+  });
+
+  test('rejects a malformed request id before coordinating or invoking the model', async () => {
+    mockReportTables();
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/ai/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken()}` },
+        body: JSON.stringify({ message: 'hello', sessionId: 'chat-123', requestId: '../repeat' }),
+      });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: 'Invalid requestId' });
+    });
+
+    expect(mockPortalTurn).not.toHaveBeenCalled();
+    expect(WavesAssistant.processMessage).not.toHaveBeenCalled();
   });
 
   test('uses only the authenticated customer identity, ignoring body customer claims', async () => {
@@ -299,6 +335,7 @@ describe('POST /ai/chat canReport flag', () => {
         body: JSON.stringify({
           message: 'hello',
           sessionId: 'shared-session',
+          requestId,
           customerId: 'victim-customer',
         }),
       });
@@ -313,8 +350,50 @@ describe('POST /ai/chat canReport flag', () => {
       customerPhone: '+19415550100',
       // GATE_PORTAL_CHAT_RESERVICE off: no scope read, the re-service button withheld.
       secondaryProperty: true,
+      turn: { requestRowId: 'portal-request-row' },
     });
     expect(mockResolveScope).not.toHaveBeenCalled();
+    expect(mockPortalTurn).toHaveBeenCalledWith(expect.objectContaining({
+      requestId,
+      customerId: 'cust-1',
+      propertyId: null,
+      channelIdentifier: 'shared-session',
+    }));
+  });
+
+  test('the authenticated property claim scopes the coordinator and conversation, ignoring body property claims', async () => {
+    process.env.GATE_APP_PROPERTY_SCOPE = 'true';
+    mockReportTables({
+      customer: { id: 'cust-1', active: true, phone: '+19415550100' },
+      property: { id: 'prop-1', customer_id: 'cust-1', active: true },
+    });
+    WavesAssistant.processMessage.mockResolvedValue({ reply: 'Hi there', escalated: false, generated: true });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/ai/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${customerToken('cust-1', { propertyId: 'prop-1' })}`,
+        },
+        body: JSON.stringify({
+          message: 'hello', sessionId: 'shared-session', requestId, propertyId: 'prop-other',
+        }),
+      });
+      expect(res.status).toBe(200);
+    });
+
+    expect(mockPortalTurn).toHaveBeenCalledWith(expect.objectContaining({
+      requestId,
+      customerId: 'cust-1',
+      propertyId: 'prop-1',
+      channelIdentifier: 'property:prop-1:shared-session',
+    }));
+    expect(WavesAssistant.processMessage).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'cust-1',
+      channelIdentifier: 'property:prop-1:shared-session',
+      turn: { requestRowId: 'portal-request-row' },
+    }));
   });
 
   describe('GATE_PORTAL_CHAT_RESERVICE on: the session property scope decides the re-service button', () => {
@@ -392,7 +471,7 @@ describe('POST /ai/chat canReport flag', () => {
       const res = await fetch(`${baseUrl}/ai/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken()}` },
-        body: JSON.stringify({ message: 'hello', sessionId: 'chat-123' }),
+        body: JSON.stringify({ message: 'hello', sessionId: 'chat-123', requestId }),
       });
       const body = await res.json();
       expect(body.canReport).toBe(false);
@@ -408,7 +487,7 @@ describe('POST /ai/chat canReport flag', () => {
       const res = await fetch(`${baseUrl}/ai/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken()}` },
-        body: JSON.stringify({ message: 'hello', sessionId: 'chat-123' }),
+        body: JSON.stringify({ message: 'hello', sessionId: 'chat-123', requestId }),
       });
       const body = await res.json();
       expect(body.canReport).toBe(false);

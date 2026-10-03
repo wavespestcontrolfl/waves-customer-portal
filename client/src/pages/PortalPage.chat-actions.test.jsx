@@ -159,3 +159,102 @@ describe('hand-off notice', () => {
     expect(screen.getByText(NOTIFIED_LINE)).toBeInTheDocument();
   });
 });
+
+describe('durable chat retry', () => {
+  it('reuses the request id and user bubble after an ambiguous transport failure', async () => {
+    api.request
+      .mockRejectedValueOnce(new Error('connection lost'))
+      .mockResolvedValueOnce({ reply: 'Your request was already received.', escalated: false });
+    render(<ChatWidget
+      customer={customer}
+      initialQuestion="Please cancel my service"
+      onClose={() => {}}
+      onNavigate={() => {}}
+    />);
+    await settle();
+
+    expect(screen.getByLabelText('Chat message')).toHaveValue('Please cancel my service');
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+    await settle();
+
+    const chatCalls = api.request.mock.calls.filter(([path]) => path === '/ai/chat');
+    expect(chatCalls).toHaveLength(2);
+    const firstBody = JSON.parse(chatCalls[0][1].body);
+    const retryBody = JSON.parse(chatCalls[1][1].body);
+    expect(firstBody.requestId).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(retryBody).toEqual(firstBody);
+    expect(screen.getAllByText('Please cancel my service')).toHaveLength(1);
+    expect(screen.getByText('Your request was already received.')).toBeInTheDocument();
+  });
+
+  it('reuses the request id when the coordinator asks the client to retry', async () => {
+    api.request
+      .mockResolvedValueOnce({ reply: 'Still working on that request.', retryable: true })
+      .mockResolvedValueOnce({ reply: 'Your request was already received.', escalated: false });
+    render(<ChatWidget
+      customer={customer}
+      initialQuestion="Please cancel my service"
+      onClose={() => {}}
+      onNavigate={() => {}}
+    />);
+    await settle();
+
+    expect(screen.getByLabelText('Chat message')).toHaveValue('Please cancel my service');
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+    await settle();
+
+    const chatCalls = api.request.mock.calls.filter(([path]) => path === '/ai/chat');
+    expect(chatCalls).toHaveLength(2);
+    expect(JSON.parse(chatCalls[1][1].body)).toEqual(JSON.parse(chatCalls[0][1].body));
+    expect(screen.getAllByText('Please cancel my service')).toHaveLength(1);
+    expect(screen.getByText('Still working on that request.')).toBeInTheDocument();
+    expect(screen.getByText('Your request was already received.')).toBeInTheDocument();
+  });
+
+  it('times out a request stalled in the actual refresh Web Lock and retains its request id', async () => {
+    vi.useFakeTimers();
+    const originalFetch = globalThis.fetch;
+    const locksDescriptor = Object.getOwnPropertyDescriptor(navigator, 'locks');
+    try {
+      const { ApiClient } = await vi.importActual('../utils/api');
+      const stalledClient = new ApiClient();
+      stalledClient.token = 'expired-access';
+      stalledClient.refreshToken = 'refresh-token';
+      globalThis.fetch = vi.fn().mockResolvedValue({ status: 401 });
+      const lockRequest = vi.fn(() => new Promise(() => {}));
+      Object.defineProperty(navigator, 'locks', {
+        configurable: true,
+        value: { request: lockRequest },
+      });
+      api.request.mockImplementation((...args) => stalledClient.request(...args));
+
+      render(<ChatWidget
+        customer={customer}
+        initialQuestion="Please cancel my service"
+        onClose={() => {}}
+        onNavigate={() => {}}
+      />);
+      await act(async () => { await Promise.resolve(); });
+      expect(lockRequest).toHaveBeenCalledWith('waves-customer-refresh', { mode: 'exclusive' }, expect.any(Function));
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(17_000); });
+      expect(screen.getByLabelText('Chat message')).toHaveValue('Please cancel my service');
+      expect(screen.getByText(/Connection issue/)).toBeInTheDocument();
+
+      api.request.mockResolvedValueOnce({ reply: 'Your request was already received.', escalated: true });
+      fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+      await act(async () => { await Promise.resolve(); });
+
+      const chatCalls = api.request.mock.calls.filter(([path]) => path === '/ai/chat');
+      expect(chatCalls).toHaveLength(2);
+      expect(JSON.parse(chatCalls[1][1].body)).toEqual(JSON.parse(chatCalls[0][1].body));
+      expect(screen.getAllByText('Please cancel my service')).toHaveLength(1);
+      expect(screen.getByText('Your request was already received.')).toBeInTheDocument();
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (locksDescriptor) Object.defineProperty(navigator, 'locks', locksDescriptor);
+      else delete navigator.locks;
+      vi.useRealTimers();
+    }
+  });
+});

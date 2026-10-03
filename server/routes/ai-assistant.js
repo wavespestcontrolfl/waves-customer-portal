@@ -1,4 +1,5 @@
 const express = require('express');
+const crypto = require('crypto');
 const { gateEnvValue, portalChatReserviceLive, portalChatSelfServeLive } = require('../config/feature-gates');
 const rateLimit = require('express-rate-limit');
 const router = express.Router();
@@ -7,6 +8,7 @@ const { rateLimitKey } = require('../middleware/rate-limit-key');
 const { authenticate } = require('../middleware/auth');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const WavesAssistant = require('../services/ai-assistant/assistant');
+const { portalConversationIdentifier, runPortalTurn } = require('../services/ai-assistant/portal-turn');
 const logger = require('../services/logger');
 const { resolveSessionScope, isSecondarySelection } = require('../services/account-properties');
 const assistantTools = require('../services/ai-assistant/tools');
@@ -96,8 +98,13 @@ router.post('/chat', authenticate, async (req, res, next) => {
   try {
     const message = String(req.body?.message || '').trim();
     const sessionId = String(req.body?.sessionId || '').trim().slice(0, 120);
-    if (!message) return res.status(400).json({ error: 'Message required' });
-    if (message.length > 4000) return res.status(400).json({ error: 'Message is too long' });
+    const suppliedRequestId = String(req.body?.requestId || '').trim();
+    const validationError = [
+      [!message, 'Message required'],
+      [message.length > 4000, 'Message is too long'],
+      [suppliedRequestId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(suppliedRequestId), 'Invalid requestId'],
+    ].find(([failed]) => failed)?.[1];
+    if (validationError) return res.status(400).json({ error: validationError });
 
     // The authenticated middleware is the sole source of portal identity.
     // Never trust a body claim or decode a second, optional token here: doing
@@ -105,6 +112,9 @@ router.post('/chat', authenticate, async (req, res, next) => {
     // authenticated as.
     const customerId = req.customerId;
     const customerPhone = req.customer.phone || null;
+    const requestId = suppliedRequestId || crypto.randomUUID();
+    const rawChannelIdentifier = sessionId || customerId;
+    const channelIdentifier = portalConversationIdentifier(rawChannelIdentifier, req.propertyId);
 
     // The free re-service button books at the account's primary address, so
     // it is withheld when the session is looking at another saved property
@@ -120,13 +130,21 @@ router.post('/chat', authenticate, async (req, res, next) => {
       }
     }
 
-    const result = await WavesAssistant.processMessage({
+    const result = await runPortalTurn({
+      requestId,
       message,
-      channel: 'portal_chat',
-      channelIdentifier: sessionId || customerId,
       customerId,
-      customerPhone,
-      secondaryProperty,
+      propertyId: req.propertyId || null,
+      channelIdentifier,
+      processTurn: (turn) => WavesAssistant.processMessage({
+        message,
+        channel: 'portal_chat',
+        channelIdentifier,
+        customerId,
+        customerPhone,
+        secondaryProperty,
+        turn,
+      }),
     });
 
     // Only true model output is reportable — canned fallbacks and the
@@ -180,10 +198,11 @@ router.post('/chat/report', requireAiContentReport, chatReportLimiter, authentic
 
     let conversation = null;
     if (sessionId) {
+      const channelIdentifier = portalConversationIdentifier(sessionId, req.propertyId);
       conversation = await db('agent_sessions')
         .where({
           channel: 'portal_chat',
-          channel_identifier: sessionId,
+          channel_identifier: channelIdentifier,
           customer_id: customerId,
         })
         .orderBy('created_at', 'desc')
