@@ -86,11 +86,23 @@ describe('sender-line lookup is scoped for a technician (codex #5683 r1)', () =>
   });
 });
 
-describe('technician restock requests stay deduplicated (codex #5683 r3)', () => {
-  test('allowDuplicate is honoured for an admin only', () => {
-    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes/admin-inventory.js'), 'utf8');
-    const handler = src.slice(src.indexOf("router.post('/waveguard-forecast/:productId/restock-request'"));
-    expect(handler.slice(0, 1200)).toMatch(/allowDuplicate: req\.techRole === 'admin' \? body\.allowDuplicate : false,/);
-    expect(handler.slice(0, 1200)).not.toMatch(/allowDuplicate: body\.allowDuplicate,/);
+describe('technician restock requests: own visit, job-card fields only (codex #5683 r3, #5733 r2)', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes/admin-inventory.js'), 'utf8');
+  const handler = src.slice(src.indexOf("router.post('/waveguard-forecast/:productId/restock-request'")).slice(0, 2600);
+
+  test('a non-admin needs an owned current visit before the request is created', () => {
+    const guard = handler.indexOf('if (!isAdminCaller) {');
+    const create = handler.indexOf('inventoryOperations.createRestockRequest(');
+    expect(guard).toBeGreaterThan(-1);
+    expect(guard).toBeLessThan(create);
+    const block = handler.slice(guard, create);
+    expect(block).toMatch(/technicianCurrentVisitFilter\(\s*\{ techRole: 'technician', technicianId: req\.technicianId \},/);
+    expect(block).toMatch(/if \(!owned\) return res\.status\(403\)/);
+  });
+
+  test('planning fields, priority and allowDuplicate are the office\'s only', () => {
+    expect(handler).toMatch(/\} : \{ priority: 'high', allowDuplicate: false \};/);
+    expect(handler).toMatch(/const officeFields = isAdminCaller \? \{[\s\S]*allowDuplicate: body\.allowDuplicate,[\s\S]*neededBy: body\.neededBy/);
+    expect(handler).toMatch(/requestedQuantity: body\.requestedQuantity, unit: body\.unit, reason: body\.reason,\s*\.\.\.officeFields,/);
   });
 });
