@@ -421,4 +421,21 @@ describe('TimeGridDay open hours', () => {
     expect(screen.getByRole('button', { name: 'Book open hour 9–10 AM for Alex Tech' })).not.toHaveClass('pointer-events-none');
     expect(screen.getByRole('button', { name: 'Book open hour 11 AM–12 PM for Alex Tech' })).toHaveClass('pointer-events-none');
   });
+
+  it("gives no open hours to a column kept only for a non-rostered tech's visits", () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-07-15T10:00:00Z'));
+    render(
+      <TimeGridDay
+        date="2026-07-15"
+        services={[...SERVICES, { id: 'svc-gone', customerName: 'Leftover', status: 'confirmed', windowStart: '12:00', windowEnd: '13:00', technicianId: 'tech-gone', technicianName: 'Former Tech' }]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+        onChange={vi.fn()}
+        onCreateSlot={vi.fn()}
+      />,
+    );
+    vi.useRealTimers();
+    expect(screen.queryByRole('button', { name: /for Former Tech$/ })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Book open hour 9–10 AM for Alex Tech' })).toBeInTheDocument();
+  });
 });

@@ -31,7 +31,7 @@ import {
   seriesMoveSummary,
 } from './seriesMove';
 import { useBulkSlotConflicts } from './useSlotConflicts';
-import { openHoursForDay, formatOpenHour, hourToHHMM, useHourClock } from './openHours';
+import { openHoursForDay, formatOpenHour, hourToHHMM, useHourClock, NOT_OCCUPYING } from './openHours';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -648,7 +648,7 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
 
   // Hours an open marker shares with a skipped/cancelled block.
   const freedHours = useMemo(() => new Set(openHours.filter((h) => services.some((svc) => {
-    if (!['cancelled', 'skipped'].includes(svc.status)) return false;
+    if (!NOT_OCCUPYING.has(svc.status)) return false;
     const start = parseHHMM(svc.windowStart);
     return start != null && start < (h + 1) * 60 && start + effectiveDuration(svc) > h * 60;
   }))), [openHours, services]);
@@ -1169,6 +1169,8 @@ export default function TimeGridDay({
   // Open-hour blocks are a booking prompt: only for staff who can create
   // appointments (POST /admin/schedule is admin-only).
   showOpenHours = true,
+  // The server's enforced booking hours (day feed `bookingHours`), if any.
+  bookingHours = null,
 }) {
   const todayIso = toISODate(new Date());
   const hourClock = useHourClock();
@@ -1209,7 +1211,7 @@ export default function TimeGridDay({
     const seen = new Set();
     const list = [];
     (technicians || []).forEach((t) => {
-      if (t?.id && !seen.has(t.id)) { seen.add(t.id); list.push({ id: t.id, name: t.name, outToday: t.outToday === true }); }
+      if (t?.id && !seen.has(t.id)) { seen.add(t.id); list.push({ id: t.id, name: t.name, outToday: t.outToday === true, rostered: true }); }
     });
     allServices.forEach((s) => {
       if (s.technicianId && !seen.has(s.technicianId)) {
@@ -1673,8 +1675,10 @@ export default function TimeGridDay({
                     // any tech may end up taking it.
                     // A tech marked out for the day gets none (the booking
                     // would be refused).
-                    openHours={onCreateSlot && showOpenHours && !tech.outToday
-                      ? openHoursForDay(date, [...(byTech[tech.id] || []), ...unassignedInRail], { now: hourClock })
+                    // Only rostered (assignable) techs: a column kept for a
+                    // deactivated tech's leftover visits takes no booking.
+                    openHours={onCreateSlot && showOpenHours && !tech.outToday && tech.rostered
+                      ? openHoursForDay(date, [...(byTech[tech.id] || []), ...unassignedInRail], { now: hourClock, bookingHours })
                       : []}
                   />
                 ))}

@@ -8,12 +8,15 @@
 import { useEffect, useState } from 'react';
 import { etDateString, etParts } from '../../lib/timezone';
 
-// 7 AM to 7 PM (owner 2026-10-03).
+// 7 AM to 7 PM (owner 2026-10-03), narrowed to the booking hours the server
+// enforces when the feed sends them (`bookingHours`, capacity mode: 8 AM–6 PM;
+// owner 2026-10-03: "match the server").
 export const OPEN_HOURS_START = 7;
 export const OPEN_HOURS_END = 19;
 
-// A cancelled or skipped visit frees its hour.
-const NOT_OCCUPYING = new Set(['cancelled', 'skipped']);
+// Statuses that free their hour — the admin occupancy rule
+// (ADMIN_OCCUPANCY_EXCLUDE_STATUSES, server scheduling/window-rules.js).
+export const NOT_OCCUPYING = new Set(['cancelled', 'completed', 'skipped', 'no_show']);
 
 function parseHHMM(s) {
   if (!s || typeof s !== 'string') return null;
@@ -38,7 +41,7 @@ function occupiedRange(svc) {
  * occupying visit overlaps it. Past days have none; today drops hours that
  * have already started (ET).
  */
-export function openHoursForDay(dateStr, services, { now = new Date() } = {}) {
+export function openHoursForDay(dateStr, services, { now = new Date(), bookingHours = null } = {}) {
   const today = etDateString(now);
   if (!dateStr || dateStr < today) return [];
   const { hour, minute } = etParts(now);
@@ -48,7 +51,9 @@ export function openHoursForDay(dateStr, services, { now = new Date() } = {}) {
     .map(occupiedRange)
     .filter(Boolean);
   const open = [];
-  for (let h = OPEN_HOURS_START; h < OPEN_HOURS_END; h += 1) {
+  const first = bookingHours ? Math.max(OPEN_HOURS_START, Math.ceil(bookingHours.startMinutes / 60)) : OPEN_HOURS_START;
+  const end = bookingHours ? Math.min(OPEN_HOURS_END, Math.floor(bookingHours.endMinutes / 60)) : OPEN_HOURS_END;
+  for (let h = first; h < end; h += 1) {
     const from = h * 60;
     // An hour that has begun (10:00 itself included) is no longer open.
     if (from <= nowMin) continue;

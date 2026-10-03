@@ -23,6 +23,12 @@ describe('openHoursForDay', () => {
     expect(openHoursForDay('2026-10-04', services, { now: EARLY })).toEqual([7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18]);
   });
 
+  it('narrows to the booking hours the server enforces, and frees completed visits', () => {
+    const services = [{ windowStart: '09:00', windowEnd: '10:00', status: 'completed' }];
+    expect(openHoursForDay('2026-10-04', services, { now: EARLY, bookingHours: { startMinutes: 480, endMinutes: 1080 } }))
+      .toEqual([8, 9, 10, 11, 12, 13, 14, 15, 16, 17]);
+  });
+
   it('reads a start-only visit by its stored duration', () => {
     const services = [{ windowStart: '08:00', estimatedDuration: 120, status: 'confirmed' }];
     expect(openHoursForDay('2026-10-04', services, { now: EARLY })).toEqual([7, 10, 11, 12, 13, 14, 15, 16, 17, 18]);

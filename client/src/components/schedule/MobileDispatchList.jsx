@@ -435,7 +435,7 @@ function withOpenHours(sorted, openHours) {
   return rows;
 }
 
-function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh, onCreateSlot, outTechIds }) {
+function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh, onCreateSlot, outTechIds, bookingHours }) {
   const sorted = useMemo(() => sortByWindow(services || []), [services]);
   const now = useHourClock();
   // Techs marked out for the day can't take a booking; with the whole roster
@@ -444,8 +444,8 @@ function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtoc
   const working = (technicians || []).filter((t) => (outTechIds ? !outTechIds.includes(t.id) : !t.outToday));
   const allOut = (technicians || []).length > 0 && working.length === 0;
   const openHours = useMemo(
-    () => (onCreateSlot && !allOut ? openHoursForDay(dateStr, services || [], { now }) : []),
-    [onCreateSlot, allOut, dateStr, services, now],
+    () => (onCreateSlot && !allOut ? openHoursForDay(dateStr, services || [], { now, bookingHours }) : []),
+    [onCreateSlot, allOut, dateStr, services, now, bookingHours],
   );
   const rows = useMemo(() => withOpenHours(sorted, openHours), [sorted, openHours]);
   // One working tech on the roster: the open hour is theirs.
@@ -528,7 +528,7 @@ function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtoc
   );
 }
 
-export default function MobileDispatchList({ mode, date, services, rainChance, refreshKey, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh, onCreateSlot }) {
+export default function MobileDispatchList({ mode, date, services, rainChance, refreshKey, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh, onCreateSlot, bookingHours }) {
   const [weekData, setWeekData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -589,6 +589,7 @@ export default function MobileDispatchList({ mode, date, services, rainChance, r
           onQuickAction={onQuickAction}
           onRefresh={onRefresh}
           onCreateSlot={onCreateSlot}
+          bookingHours={bookingHours}
         />
       </div>
     );
@@ -628,6 +629,7 @@ export default function MobileDispatchList({ mode, date, services, rainChance, r
           // A week still loading shows the previous week's rows: no booking from them.
           onCreateSlot={loading ? undefined : onCreateSlot}
           outTechIds={d.outTechIds || []}
+          bookingHours={weekData?.bookingHours || null}
         />
       ))}
     </div>

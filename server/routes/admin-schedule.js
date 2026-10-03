@@ -6537,6 +6537,10 @@ router.get('/', async (req, res, next) => {
       techSummary: Object.values(byTech),
       unassigned,
       technicians,
+      // The booking hours the office's create check enforces (capacity mode:
+      // the shift), so the day list's Open blocks never offer a refused hour.
+      // null = no shift bound.
+      bookingHours: require('../services/scheduling/policy').schedulingPolicyForDisplay(),
       weather,
       rainChance,
       ...(zoneRain ? { zoneRain } : {}),
@@ -7017,7 +7021,7 @@ router.get('/week', async (req, res, next) => {
       }
     } catch { /* absences are optional here */ }
 
-    res.json({ startDate, days, visitCloseout: visitCloseoutEnabled });
+    res.json({ startDate, days, visitCloseout: visitCloseoutEnabled, bookingHours: require('../services/scheduling/policy').schedulingPolicyForDisplay() });
   } catch (err) { next(err); }
 });
 
