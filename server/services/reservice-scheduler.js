@@ -752,6 +752,39 @@ function isActivePestReport(text) {
     && (kept.some((clause) => RESERVICE_PEST_NOUN_UNBOUND_RE.test(clause)) || pronounReturnAntecedents(facts).length > 0);
 }
 
+// An ACTIVE lawn report (owner ruling 2026-10-02, portal chat re-service offer): the pest test above is
+// pest-noun shaped, so "weeds all over my lawn" or "the grass is looking bad again" never counts there. This
+// reads the SAME clauses (reservicePestReportFacts: questions, negated / resolved and historical clauses
+// already out) and needs, in one clause, a lawn problem: weeds or a turf insect back / spreading / everywhere,
+// the turf itself in bad shape, or a lawn treatment that is not working. A negator just before the problem
+// word ("the grass isn't brown", "no weeds") does not count. Turf insects are also caught by the pest test.
+const RESERVICE_LAWN_INVADER = `(?:weeds?|${TURF_INSECT_NOUN_SOURCES.join('|')})`;
+const RESERVICE_LAWN_TURF = '(?:lawn|grass|turf|sod|yard)';
+const RESERVICE_LAWN_SPREAD = '(?:back|again|still|everywhere|all\\s+over|taking\\s+over|(?:coming|came|come|popping|showing|growing)\\s+(?:back|up|in)|spread(?:ing|s)?|keep\\s+(?:coming|growing|popping|spreading)|(?:killing|eating|destroying|damaging|ruining))';
+const RESERVICE_LAWN_CONDITION = '(?:brown(?:ing)?|yellow(?:ing)?|dying|dead|dried\\s+(?:out|up)|thin(?:ning)?|bare|patch(?:y|es)|spots|(?:looks?|looking)\\s+(?:bad|rough|terrible|awful|sick|worse|horrible)|getting\\s+worse|not\\s+(?:green|growing))';
+const RESERVICE_LAWN_FAILURE_RE = new RegExp(
+  `\\b(?:${RESERVICE_LAWN_TURF}|weeds?|fertili[sz]\\w*)\\s+(?:treatment|application|service|spray(?:ing)?|program|control)s?\\b`
+  + `(?:\\W+[\\w'’-]+){0,3}?\\W+(?:(?:did|does|do|is|was|has|have)\\s*n[o'’]?t|not|never|stopped)\\s+(?:work(?:ed|ing|s)?|help(?:ed|ing|s)?|do(?:ing)?\\s+anything)\\b`,
+  'i',
+);
+const RESERVICE_LAWN_PROBLEM_RES = [
+  new RegExp(`\\b${RESERVICE_LAWN_INVADER}\\b(?:\\W+[\\w'’-]+){0,4}?\\W+${RESERVICE_LAWN_SPREAD}\\b`, 'i'),
+  new RegExp(`\\b${RESERVICE_LAWN_SPREAD}\\W+(?:[\\w'’-]+\\W+){0,3}?${RESERVICE_LAWN_INVADER}\\b`, 'i'),
+  new RegExp(`\\b${RESERVICE_LAWN_TURF}\\b(?:\\W+[\\w'’-]+){0,4}?\\W+${RESERVICE_LAWN_CONDITION}\\b`, 'i'),
+  new RegExp(`\\b${RESERVICE_LAWN_CONDITION}\\W+(?:[\\w'’-]+\\W+){0,3}?${RESERVICE_LAWN_TURF}\\b`, 'i'),
+];
+const RESERVICE_LAWN_NEGATED_RE = new RegExp(
+  `\\b${RESERVICE_NEG}\\b(?:\\W+[\\w'’-]+){0,2}?\\W+(?:${RESERVICE_LAWN_SPREAD}|${RESERVICE_LAWN_CONDITION}|${RESERVICE_LAWN_INVADER})\\b`,
+  'i',
+);
+function isActiveLawnReport(text) {
+  const { asserted } = reservicePestReportFacts(text);
+  return asserted.some((clause) => !reserviceClauseIsHistorical(clause) && (
+    RESERVICE_LAWN_FAILURE_RE.test(clause)
+    || (!RESERVICE_LAWN_NEGATED_RE.test(clause) && RESERVICE_LAWN_PROBLEM_RES.some((re) => re.test(clause)))
+  ));
+}
+
 // Codex round-24 P2: does the message AFFIRM a term (a hand-off word, an anger word)? A clause that mentions
 // it behind a negator ("I don't need a refund", "I don't want to cancel", "not angry") does not count.
 function mentionsAffirmed(text, termRe) {
@@ -973,6 +1006,7 @@ module.exports = {
   reportedReserviceLanes,
   reportedReserviceExcludedSpecialty,
   isActivePestReport,
+  isActiveLawnReport,
   namesOtherService,
   mentionsAffirmed,
   openReserviceCallbacks,

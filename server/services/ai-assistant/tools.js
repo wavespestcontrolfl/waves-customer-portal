@@ -515,13 +515,16 @@ async function bookedReserviceResult(customerId, line, booked, actions) {
 // What is covered is read from the customer's own words with the texting
 // AI's classifier, never from the line the model picked: a separately priced
 // specialty anywhere in them means no free offer, and so does anything short
-// of an active report (isActivePestReport, the SMS flow's own predicate) in
-// this line: "Do you cover ants?" names a line but reports nothing.
+// of an active report in this line ("Do you cover ants?" names a line but
+// reports nothing): isActivePestReport (the SMS flow's own predicate) for
+// pest; for lawn, isActiveLawnReport (weeds back, turf in bad shape, a lawn
+// treatment not working) or a turf insect the pest test catches.
 function reportRefusal(customerWords, line) {
-  const { reportedReserviceLanes, reportedReserviceExcludedSpecialty, isActivePestReport } = require('../reservice-scheduler');
+  const { reportedReserviceLanes, reportedReserviceExcludedSpecialty, isActivePestReport, isActiveLawnReport } = require('../reservice-scheduler');
   const words = (Array.isArray(customerWords) ? customerWords : []).map((w) => String(w || '')).filter(Boolean);
   if (words.some((w) => reportedReserviceExcludedSpecialty(w))) return RESERVICE_SPECIALTY;
-  if (!words.some((w) => isActivePestReport(w) && reportedReserviceLanes(w).includes(line))) return RESERVICE_HAND_OFF;
+  const active = (w) => isActivePestReport(w) || (line === 'lawn' && isActiveLawnReport(w));
+  if (!words.some((w) => active(w) && reportedReserviceLanes(w).includes(line))) return RESERVICE_HAND_OFF;
   return null;
 }
 
@@ -545,11 +548,11 @@ async function offerReservice(customerId, serviceLine, actions, { secondaryPrope
     return null;
   });
   const token = String(customer?.reservice_token || '');
-  if (!/^[A-Za-z0-9_-]+$/.test(token)) return RESERVICE_HAND_OFF;
-  // The /reservice page's own verdict for this token (its customer load, lane
-  // catalog, coverage and open re-services), so the chat offers exactly what
-  // the page would show. Any failure hands off.
+  // The /reservice page's own token format and verdict for this token (its
+  // customer load, lane catalog, coverage and open re-services), so the chat
+  // offers exactly what the page would show. Any failure hands off.
   const page = require('../../routes/reservice-public')._internals;
+  if (!page.TOKEN_RE.test(token)) return RESERVICE_HAND_OFF;
   const state = await page.pageLaneState(token).catch((err) => {
     logger.warn(`[ai-assistant] re-service page state failed, no button: ${err.message}`);
     return null;

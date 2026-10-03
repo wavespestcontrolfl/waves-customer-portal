@@ -6,7 +6,7 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../routes/reschedule-public', () => ({ _internals: { loadById: jest.fn(), pageEligibility: jest.fn() } }));
-const mockPage = { pageLaneState: jest.fn(), reserviceLocationReviewRequired: jest.fn() };
+const mockPage = { TOKEN_RE: /^[a-f0-9]{64}$/, pageLaneState: jest.fn(), reserviceLocationReviewRequired: jest.fn() };
 jest.mock('../routes/reservice-public', () => ({ _internals: mockPage }));
 jest.mock('../services/portal-payment-history', () => ({ listPortalPayments: jest.fn() }));
 jest.mock('../services/portal-service-history', () => ({ listPortalServiceHistory: jest.fn() }));
@@ -21,6 +21,7 @@ jest.mock('../services/reservice-scheduler', () => {
     reportedReserviceLanes: actual.reportedReserviceLanes,
     reportedReserviceExcludedSpecialty: actual.reportedReserviceExcludedSpecialty,
     isActivePestReport: actual.isActivePestReport,
+    isActiveLawnReport: actual.isActiveLawnReport,
     reserviceSelfServeEnabled: (...a) => mockSelfServe(...a),
     openReserviceCallbacks: (...a) => mockOpen(...a),
   };
@@ -50,7 +51,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockGates.reserviceStreamline = true;
   mockSelfServe.mockReturnValue(true);
-  tokenRow = { reservice_token: 'tok_rs_1' };
+  tokenRow = { reservice_token: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' };
   bookedRow = { id: 'svc-callback-1' };
   db.mockImplementation((table) => {
     const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), first: jest.fn(async () => (table === 'customers' ? tokenRow : bookedRow)) };
@@ -77,15 +78,15 @@ test('the tool is in the set only when its gate is on, and escalate stays last',
 test('a lane the page would book: a booking button the server built, and the model is told the visit is free', async () => {
   const { result, actions } = await offer('pest');
 
-  expect(mockPage.pageLaneState).toHaveBeenCalledWith('tok_rs_1');
+  expect(mockPage.pageLaneState).toHaveBeenCalledWith('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
   expect(mockPage.reserviceLocationReviewRequired).toHaveBeenCalledWith(CUSTOMER);
-  expect(actions).toEqual([{ type: 'link', label: 'Book your free re-service', href: '/reservice/tok_rs_1' }]);
+  expect(actions).toEqual([{ type: 'link', label: 'Book your free re-service', href: '/reservice/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' }]);
   expect(result.offered).toBe(true);
   expect(result.instruction).toMatch(/rodents, termites, mosquitoes/);
   // The page computes open times on its own load; the offer never promises one.
   expect(result.instruction).toMatch(/Do not say whether times are open or promise a time/);
   expect(result.instruction).not.toMatch(/pick a time/);
-  expect(JSON.stringify(result)).not.toMatch(/tok_rs_1/);
+  expect(JSON.stringify(result)).not.toMatch(/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/);
 });
 
 test('a second offer call in one turn adds no second button', async () => {
@@ -95,7 +96,7 @@ test('a second offer call in one turn adds no second button', async () => {
   await executeToolCall('offer_reservice', { service_line: 'pest' }, 'cust-1', actions, null, context);
   await executeToolCall('offer_reservice', { service_line: 'lawn' }, 'cust-1', actions, null, context);
 
-  expect(actions).toEqual([{ type: 'link', label: 'Book your free re-service', href: '/reservice/tok_rs_1' }]);
+  expect(actions).toEqual([{ type: 'link', label: 'Book your free re-service', href: '/reservice/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' }]);
 });
 
 test.each([
@@ -109,6 +110,7 @@ test.each([
   ['the address review read fails', () => mockPage.reserviceLocationReviewRequired.mockRejectedValue(new Error('db down'))],
   ['the customer has no token', () => { tokenRow = { reservice_token: null }; }],
   ['the token fails the link shape', () => { tokenRow = { reservice_token: '../admin' }; }],
+  ['the token is link-safe but not the page\'s format (a 404 there)', () => { tokenRow = { reservice_token: 'tok_imported_1' }; }],
   ['the token read fails', () => { tokenRow = Promise.reject(new Error('db down')); tokenRow.catch(() => {}); }],
 ])('%s: no button and no free offer', async (_label, arrange) => {
   arrange();
@@ -214,6 +216,23 @@ describe('the customer\'s own words decide what is covered, not the line the mod
 
     expect(mockPage.pageLaneState).not.toHaveBeenCalled();
     expect(actions).toEqual([]);
+    expect(result.offered).toBe(false);
+  });
+
+  test.each([
+    'Weeds are coming back all over the lawn',
+    'the grass is looking bad again',
+    'my yard treatment did not work',
+  ])('an active lawn report opens the lawn offer: %s', async (text) => {
+    const { result, actions } = await offer('lawn', { secondaryProperty: false, customerWords: [text] });
+
+    expect(result.offered).toBe(true);
+    expect(result.instruction).toMatch(/lawn care re-service/);
+    expect(actions).toEqual([{ type: 'link', label: 'Book your free re-service', href: '/reservice/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' }]);
+  });
+
+  test('a lawn report never opens a pest offer', async () => {
+    const { result } = await offer('pest', { secondaryProperty: false, customerWords: ['weeds all over my lawn'] });
     expect(result.offered).toBe(false);
   });
 

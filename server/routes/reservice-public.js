@@ -889,7 +889,7 @@ router.post(
 );
 
 // For the portal assistant's re-service offer: the page's own verdict.
-router._internals = { pageLaneState, reserviceLocationReviewRequired };
+router._internals = { TOKEN_RE, pageLaneState, reserviceLocationReviewRequired };
 
 router._test = {
   TOKEN_RE,

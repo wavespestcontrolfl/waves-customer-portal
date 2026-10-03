@@ -31,13 +31,14 @@ jest.mock('../services/reservice-scheduler', () => {
     reportedReserviceLanes: actual.reportedReserviceLanes,
     reportedReserviceExcludedSpecialty: actual.reportedReserviceExcludedSpecialty,
     isActivePestReport: actual.isActivePestReport,
+    isActiveLawnReport: actual.isActiveLawnReport,
     reserviceSelfServeEnabled: () => true,
     openReserviceCallbacks: async () => ({}),
   };
 });
 // The /reservice page's own verdict: pest bookable for cust-1.
 const mockPageState = jest.fn(async () => ({ customer: { id: 'cust-1' }, laneCatalog: {}, lanes: [{ key: 'pest', alreadyBooked: null }], bookableLanes: ['pest'] }));
-jest.mock('../routes/reservice-public', () => ({ _internals: { pageLaneState: (...a) => mockPageState(...a), reserviceLocationReviewRequired: async () => false } }));
+jest.mock('../routes/reservice-public', () => ({ _internals: { TOKEN_RE: /^[a-f0-9]{64}$/, pageLaneState: (...a) => mockPageState(...a), reserviceLocationReviewRequired: async () => false } }));
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({ messages: { create: mockCreate } })));
 
 const db = require('../models/db');
@@ -244,7 +245,7 @@ describe('GATE_PORTAL_CHAT_RESERVICE', () => {
     wire('portal_chat', 'cust-1');
     db.__rows = (q) => {
       if (q.sql.includes('from "agent_sessions"')) return [conversationFor('portal_chat', 'cust-1')];
-      if (q.sql.includes('"reservice_token" from "customers"')) return [{ reservice_token: 'tok_rs' }];
+      if (q.sql.includes('"reservice_token" from "customers"')) return [{ reservice_token: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' }];
       if (q.sql.includes('from "agent_messages"')) return mockRecentWords(q);
       return [];
     };
@@ -268,12 +269,12 @@ describe('GATE_PORTAL_CHAT_RESERVICE', () => {
     expect(toolNames(first)).toEqual(['get_upcoming_services', 'get_pest_advice', 'offer_reschedule_link', 'open_portal_section', 'offer_reservice', 'escalate']);
     expect(first.system[0].text).toMatch(/PESTS BACK BETWEEN VISITS:/);
     expect(first.system[0].text).toMatch(/\(offer_reservice\)/);
-    expect(mockPageState).toHaveBeenCalledWith('tok_rs');
+    expect(mockPageState).toHaveBeenCalledWith('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
     // The one plan fact this lane may state is the tool's.
     expect(first.system[0].text).toMatch(/plan details \(apart from what offer_reservice tells you\)/);
-    expect(result.actions).toEqual([{ type: 'link', label: 'Book your free re-service', href: '/reservice/tok_rs' }]);
+    expect(result.actions).toEqual([{ type: 'link', label: 'Book your free re-service', href: '/reservice/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' }]);
     const toolResult = mockCreate.mock.calls[1][0].messages.at(-1).content[0].content;
-    expect(toolResult).not.toMatch(/tok_rs/);
+    expect(toolResult).not.toMatch(/bbbbbbbb/);
   });
 
   test.each([
@@ -312,7 +313,7 @@ describe('GATE_PORTAL_CHAT_RESERVICE', () => {
     const sent = mockCreate.mock.calls[0][0].messages;
     const textOf = (m) => (typeof m.content === 'string' ? m.content : m.content.map((b) => b.text).join(''));
     expect(sent.map(textOf)).toEqual(['The ants are back in the kitchen', 'Sorry to hear that. Want me to check your plan?', 'yes please']);
-    expect(result.actions).toEqual([{ type: 'link', label: 'Book your free re-service', href: '/reservice/tok_rs' }]);
+    expect(result.actions).toEqual([{ type: 'link', label: 'Book your free re-service', href: '/reservice/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' }]);
   });
 
   test('a newest-20 window that opens on an assistant row starts at the customer turn after it', async () => {
