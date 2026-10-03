@@ -173,12 +173,17 @@ async function shadowVoicemails({ now = new Date() } = {}) {
     const clef = typedDecisionsClefLive();
     const enabled = clef ? ['typesafe', 'cloudflare'] : ['typesafe'];
     const answeredRows = await db('decision_reviews').where({ capability: 'voicemail', subject_type: 'call_log' })
-      .whereIn('subject_id', candidates.map((c) => c.id)).distinct('subject_id', 'provider');
+      .whereIn('subject_id', candidates.map((c) => c.id)).select('subject_id', 'provider', 'question_id', 'jev_answer');
     const answered = new Map();
+    // subject -> question -> [answers recorded earlier], the siblings a retried leg compares against.
+    const storedAnswers = new Map();
     for (const r of answeredRows) {
       const key = String(r.subject_id);
       if (!answered.has(key)) answered.set(key, new Set());
       answered.get(key).add(r.provider);
+      if (!storedAnswers.has(key)) storedAnswers.set(key, {});
+      const byQuestion = storedAnswers.get(key);
+      (byQuestion[r.question_id] = byQuestion[r.question_id] || []).push(safeParse(r.jev_answer));
     }
     const missingFor = (call) => enabled.filter((p) => !(answered.get(String(call.id)) || new Set()).has(p));
     const voicemails = candidates.filter((c) => missingFor(c).length > 0);
@@ -200,7 +205,12 @@ async function shadowVoicemails({ now = new Date() } = {}) {
         is_vendor_or_spam: { production: call.processing_status === 'spam' || ex.is_spam === true || v2.call_nature === 'vendor_or_partner' },
       };
       const only = missingFor(call);
-      const outcome = await askAndRecord(call, { packageId: 'voicemail.v1', baselines, only }, clef);
+      const stored = storedAnswers.get(String(call.id)) || null;
+      const outcome = await askAndRecord(call, { packageId: 'voicemail.v1', baselines, only, storedSiblings: stored }, clef);
+      // A retry of a missing provider: the earlier provider's rows were written
+      // alone, so a disagreement only visible now must queue them too
+      // (pre-push audit P1). No model call.
+      if (stored && only.some((p) => outcome[p] === 'recorded')) await reconcileVoicemailCohorts(call.id);
       // Per provider actually asked: Jev on the main counts, Clef under .clef.
       for (const provider of only) {
         const t = provider === 'typesafe' ? tally : (tally.clef = tally.clef || { asked: 0, recorded: 0, failed: 0 });
@@ -212,6 +222,33 @@ async function shadowVoicemails({ now = new Date() } = {}) {
     logger.warn(`[self-audit] voicemail shadow failed: ${err.message}`);
   }
   return tally;
+}
+
+// After a retried provider leg is recorded beside an earlier one: every
+// question where the providers' recorded answers now differ goes to the
+// disagreement cohort on rows that have no cohort yet (a random-audit row keeps
+// its audit; a labeled or held-out row is never touched), so both rows reach
+// the reviewer together, as a same-run pair would have.
+async function reconcileVoicemailCohorts(callId) {
+  try {
+    const { siblingDisagrees } = require('./typed-decisions/shadow-recorder');
+    const rows = await db('decision_reviews').where({ capability: 'voicemail', subject_type: 'call_log', subject_id: callId })
+      .select('question_id', 'provider', 'jev_answer');
+    const byQuestion = new Map();
+    for (const r of rows) {
+      if (!byQuestion.has(r.question_id)) byQuestion.set(r.question_id, []);
+      byQuestion.get(r.question_id).push(safeParse(r.jev_answer));
+    }
+    const split = [...byQuestion.entries()]
+      .filter(([, answers]) => answers.length > 1 && answers.some((a, i) => siblingDisagrees(a, answers.filter((_, j) => j !== i))))
+      .map(([questionId]) => questionId);
+    if (!split.length) return;
+    await db('decision_reviews').where({ capability: 'voicemail', subject_type: 'call_log', subject_id: callId, label_status: 'unreviewed' })
+      .whereIn('question_id', split).whereNull('sampled_for')
+      .update({ sampled_for: 'disagreement' });
+  } catch (err) {
+    logger.warn(`[self-audit] voicemail cohort reconcile failed for ${callId}: ${err.message}`);
+  }
 }
 
 // The sampled calls that carry a live AI-extracted Waves promise. null when
@@ -251,8 +288,10 @@ function productionAnswers(call) {
 // One call to every live provider, then one record per provider that
 // answered, each handed the others' answers. Returns { typesafe, cloudflare }
 // as 'recorded' | 'failed' (cloudflare only when asked).
-async function askAndRecord(call, { packageId, baselines, only = null }, clef = false) {
+async function askAndRecord(call, { packageId, baselines, only = null, storedSiblings = null }, clef = false) {
   // `only`: ask just these providers (a voicemail one provider already answered).
+  // `storedSiblings`: { questionId: [answer] } recorded earlier by the providers
+  // not asked now, handed to each new row like this run's own siblings.
   const providers = (clef ? ['typesafe', 'cloudflare'] : ['typesafe']).filter((p) => !only || only.includes(p));
   const outcome = Object.fromEntries(providers.map((p) => [p, 'failed']));
   try {
@@ -281,6 +320,9 @@ async function askAndRecord(call, { packageId, baselines, only = null }, clef = 
     await Promise.all(answered.map(async ({ provider, result }) => {
       try {
         const siblingAnswers = {};
+        for (const [questionId, list] of Object.entries(storedSiblings || {})) {
+          siblingAnswers[questionId] = [...list];
+        }
         for (const other of answered) {
           if (other.provider === provider) continue;
           for (const [questionId, answer] of Object.entries(other.result.answers || {})) {

@@ -5,7 +5,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), typedDecisionsLive: jest.fn(() => false), typedDecisionsClefLive: jest.fn(() => false) }));
 jest.mock('../services/llm/deep', () => ({ createDeepMessage: jest.fn() }));
 jest.mock('../services/typed-decisions/jev', () => ({ askPackage: jest.fn() }));
-jest.mock('../services/typed-decisions/shadow-recorder', () => ({ recordDecisions: jest.fn() }));
+jest.mock('../services/typed-decisions/shadow-recorder', () => ({ recordDecisions: jest.fn(), siblingDisagrees: jest.requireActual('../services/typed-decisions/shadow-recorder').siblingDisagrees }));
 
 const db = require('../models/db');
 const { createDeepMessage } = require('../services/llm/deep');
@@ -421,8 +421,11 @@ describe('voicemail triage evidence (voicemail.v1: every inbound voicemail besid
   const JEV = { ok: true, answers: { callback_requested: { p: 0.9, yes: true, confident: true } }, packageHash: 'h', servedModel: 'jev-1.13.0' };
   const VM = (over = {}) => ({ id: 'vm-1', twilio_call_sid: 'CA_vm1', direction: 'inbound', processing_status: 'voicemail', disposition: null, voicemail_callback_alerted_at: null, transcription: 'Hi, this is about my termites, please call me back.', ai_extraction: JSON.stringify({ is_voicemail: true }), duration_seconds: 21, ...over });
 
-  function vmDb({ rows = [], leadSids = [], triageIds = [], answered = [] } = {}) {
-    const seen = {};
+  function vmDb({ rows = [], leadSids = [], triageIds = [], answered = [], stored = null } = {}) {
+    const seen = { updates: [] };
+    // decision_reviews rows: [subject_id, provider] pairs, or full rows via `stored`.
+    const reviewRows = stored || answered.map(([subject_id, provider]) => ({ subject_id, provider, question_id: 'callback_requested', jev_answer: { p: 0.9, yes: true } }));
+    seen.reviewRows = reviewRows;
     db.raw = (sql) => sql;
     db.mockImplementation((table) => {
       const push = (a) => { (seen[table] = seen[table] || []).push(a); };
@@ -433,13 +436,12 @@ describe('voicemail triage evidence (voicemail.v1: every inbound voicemail besid
         select: async () => {
           if (table === 'call_log') return rows;
           if (table === 'leads') return leadSids.map((sid) => ({ twilio_call_sid: sid }));
+          if (table === 'decision_reviews') return reviewRows;
           return [];
         },
-        distinct: async () => {
-          if (table === 'triage_items') return triageIds.map((id) => ({ call_log_id: id }));
-          if (table === 'decision_reviews') return answered.map(([subject_id, provider]) => ({ subject_id, provider }));
-          return [];
-        },
+        whereNull(...a) { push(['null', ...a]); return b; },
+        update: async (patch) => { seen.updates.push([table, patch, (seen[table] || []).slice(-3)]); return 1; },
+        distinct: async () => (table === 'triage_items' ? triageIds.map((id) => ({ call_log_id: id })) : []),
       };
       return b;
     });
@@ -510,6 +512,27 @@ describe('voicemail triage evidence (voicemail.v1: every inbound voicemail besid
       expect(asked.sort()).toEqual(['cloudflare', 'cloudflare', 'typesafe']); // vm-half: Clef only; vm-new: both; vm-done: none
       expect(Object.keys(bySubject()).sort()).toEqual(['vm-half', 'vm-new']);
       expect(tally).toMatchObject({ asked: 1, recorded: 1, clef: { asked: 2, recorded: 2 } });
+    } finally { typedDecisionsClefLive.mockReturnValue(false); }
+  });
+
+  test('a retried provider is handed the stored answers, and a disagreement only visible now queues the earlier row too', async () => {
+    typedDecisionsClefLive.mockReturnValue(true);
+    try {
+      const JEV_YES = { p: 0.9, yes: true, confident: true };
+      const CLEF_NO = { p: 0.1, yes: false, confident: true };
+      const stored = [{ subject_id: 'vm-1', provider: 'typesafe', question_id: 'callback_requested', jev_answer: JEV_YES }];
+      const seen = vmDb({ rows: [VM({ id: 'vm-1' })], stored });
+      askPackage.mockImplementation(async () => ({ ok: true, answers: { callback_requested: CLEF_NO }, packageHash: 'h', servedModel: 'clef-flash' }));
+      // the Clef row lands beside the stored Jev row
+      recordDecisions.mockImplementation(async (args) => { stored.push({ subject_id: args.subjectId, provider: args.provider, question_id: 'callback_requested', jev_answer: CLEF_NO }); return { recorded: 1 }; });
+      await shadowVoicemails();
+      expect(asksFor('voicemail.v1').map((c) => c[2] && c[2].provider)).toEqual(['cloudflare']);
+      expect(recordsFor('voicemail.v1')[0][0]).toMatchObject({ provider: 'cloudflare', siblingAnswers: { callback_requested: [JEV_YES] } });
+      // both rows of the split question go to the disagreement cohort (only rows without one, only unreviewed)
+      const [table, patch] = seen.updates[0];
+      expect([table, patch]).toEqual(['decision_reviews', { sampled_for: 'disagreement' }]);
+      expect(seen.decision_reviews).toContainEqual(['null', 'sampled_for']);
+      expect(seen.decision_reviews).toContainEqual(['question_id', ['callback_requested']]);
     } finally { typedDecisionsClefLive.mockReturnValue(false); }
   });
 
