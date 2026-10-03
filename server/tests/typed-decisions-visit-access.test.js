@@ -482,6 +482,42 @@ describe('visit access shadow: rules that need no database', () => {
     expect(JSON.stringify(built.state)).not.toMatch(/sesame|job portal|Reminder/);
   });
 
+  test('the primary provider being down does not keep later visits from being asked either', async () => {
+    process.env.GATE_TYPED_DECISIONS_CLEF = 'true';
+    mockAsk.mockImplementation(async (_id, _state, opts) => (opts && opts.provider === 'cloudflare' ? reply() : { ok: false, reason: 'error' }));
+    const first = await visit();
+    await sweep();
+    const second = await visit();
+    expect(await sweep()).toMatchObject({ askedVisits: 1, retryVisits: 1 });
+    expect((await rows(second)).filter((r) => r.provider === 'cloudflare')).toHaveLength(Object.keys(pkg.questions).length);
+    expect((await rows(first)).filter((r) => r.provider === 'typesafe')).toHaveLength(0);
+  });
+
+  test('an earlier visit the same day is history, and of two on one day the later one starts the text window', async () => {
+    // Visit under test: 10-06 at 13:00 Eastern (17:00Z).
+    await visit({ scheduled_date: '2026-10-06', window_start: '08:00', status: 'completed', completed_at: new Date('2026-10-06T13:30:00Z') });
+    await visit({ scheduled_date: '2026-09-10', status: 'completed', completed_at: new Date('2026-09-10T14:00:00Z') });
+    await visit({ scheduled_date: '2026-09-10', status: 'completed', completed_at: new Date('2026-09-10T19:00:00Z') });
+    await database('service_records').insert({ customer_id: customerId, status: 'completed', service_type: 'Quarterly Pest Control', service_date: '2026-10-06', technician_notes: 'Dog was out back this morning.' });
+    await text('Between the two September visits', '2026-09-10T16:00:00Z');
+    await text('Please knock this morning', '2026-10-06T12:00:00Z');
+    await text('Come back this afternoon please', '2026-10-06T15:00:00Z');
+    const built = await build(await visit({ scheduled_date: '2026-10-06', window_start: '13:00' }));
+    expect(built.state.visit_count).toBe(3);
+    expect(built.state.last_tech_notes).toBe('Dog was out back this morning.');
+    expect(built.state.recent_texts).toContain('Come back this afternoon please');
+    expect(built.state.recent_texts).not.toMatch(/Please knock this morning|Between the two/);
+  });
+
+  test('an unchanged visit whose stored state was pruned gets it back before its rows are requeued', async () => {
+    const visitId = await visit();
+    await sweep();
+    await database('visit_access_states').del();
+    expect(await sweep()).toMatchObject({ unchanged: 1, asked: 0 });
+    const hash = (await rows(visitId))[0].subject_hash;
+    expect((await access.storedVisitAccess([{ subjectId: visitId, subjectHash: hash }], database)).size).toBe(1);
+  });
+
   test('a provider that is down does not keep later visits from their first answer', async () => {
     process.env.GATE_TYPED_DECISIONS_CLEF = 'true';
     mockAsk.mockImplementation(async (_id, _state, opts) => (opts && opts.provider === 'cloudflare' ? { ok: false, reason: 'error' } : reply()));
