@@ -496,6 +496,8 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/invoices/:id/attachments/:attachmentId/url` | admin-invoices (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/invoices/:id/credit-context` | admin-invoices (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/invoices/:id/followup` | admin-invoices (router exemption gate: admin-only unless its named staff exemption applies) |
+| GET | `/api/admin/invoices/:id/receipt-address` | admin-invoices (router exemption gate: admin-only unless its named staff exemption applies) |
+| PUT | `/api/admin/invoices/:id/receipt-address` | admin-invoices (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/invoices/customers/search` | admin-invoices (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/invoices/service-records/:customerId` | admin-invoices (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/job-forms/submissions` | admin-job-forms |

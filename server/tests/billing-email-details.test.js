@@ -217,6 +217,24 @@ describe('property address (full street address, never a nickname)', () => {
     expect(await Details.invoicePropertyAddress(invoice, customer)).toBe('55 Rental Court, Sarasota, FL 34236');
   });
 
+  test('a staff-corrected invoice address outranks the visit and packet links (resent receipt agrees with its PDF)', async () => {
+    mockTables({
+      scheduled_services: [{
+        service_address_line1: '55 Rental Court', service_address_line2: null,
+        service_address_city: 'Sarasota', service_address_state: 'FL', service_address_zip: '34236',
+      }],
+    });
+    const corrected = { address_line1: '12 Corrected Way Apt 2', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34203', corrected_at: '2026-10-03T15:00:00.000Z' };
+    for (const link of [{ scheduled_service_id: 'ss-1' }, { visit_completion_packet_id: 'pkt-1' }]) {
+      expect(await Details.invoicePropertyAddress({ id: 'inv-1', customer_id: 'c', ...link, customer_address_snapshot: corrected }, customer))
+        .toBe('12 Corrected Way Apt 2, Bradenton, FL 34203');
+    }
+    // A creation-time snapshot (no corrected_at) keeps the visit link's precedence.
+    const { corrected_at: _unused, ...frozen } = corrected;
+    expect(await Details.invoicePropertyAddress({ id: 'inv-1', customer_id: 'c', scheduled_service_id: 'ss-1', customer_address_snapshot: frozen }, customer))
+      .toBe('55 Rental Court, Sarasota, FL 34236');
+  });
+
   test('a customer with only a nickname and a city gets NO Property row, not "Primary"', async () => {
     mockTables({});
     expect(await Details.invoicePropertyAddress(
