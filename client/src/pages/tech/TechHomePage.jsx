@@ -397,6 +397,8 @@ export default function TechHomePage({ section = 'today' }) {
   staffRef.current = staff;
   const [searchParams, setSearchParams] = useSearchParams();
   const selectedVisitKey = fieldWorkspace ? searchParams.get('visit') : null;
+  // The inline schedule-change feed has loaded (TechScheduleChanges onReady).
+  const [scheduleFeedReady, setScheduleFeedReady] = useState(false);
   const visitSearch = selectedVisitKey ? `?visit=${encodeURIComponent(selectedVisitKey)}` : '';
   const [recapRecoveryStore] = useState(() => ({ failedDrafts: new Map(), latestAttempts: new Map(), inFlightAttempts: new Map(), discardedMedia: new Set(), refreshServices: new Set(), nextAttempt: 0 }));
   const [recapRecoveryRevision, setRecapRecoveryRevision] = useState(0);
@@ -942,9 +944,10 @@ export default function TechHomePage({ section = 'today' }) {
     <div style={{ maxWidth: fieldWorkspace ? undefined : 480, margin: '0 auto' }}>
       <GeofenceArrivalPrompt
         // The field workspace's Today overview shows schedule changes in the
-        // page (TechScheduleChanges); Tools, More and an open visit do not
-        // render it, so those keep the floating cards (pre-push audit P1).
-        inlineScheduleChanges={fieldWorkspace && section === 'today' && !selectedVisitKey}
+        // page (TechScheduleChanges) once its feed has loaded; Tools, More, an
+        // open visit, or a feed that has not loaded keep the floating cards
+        // (pre-push audit P1, Codex #5786 P2).
+        inlineScheduleChanges={fieldWorkspace && section === 'today' && !selectedVisitKey && scheduleFeedReady}
         onStormReview={(payload) => {
           // Storm-watch nudge → open the Quick Move sheet for that job.
           // Prefer the live row from today's schedule; fall back to a
@@ -965,7 +968,7 @@ export default function TechHomePage({ section = 'today' }) {
           onRetry={fetchSchedule} onOpen={openFieldVisit} busy={navigationBusy}
           tools={fieldTools}
           followThrough={<TechFollowThroughCards fieldWorkspace />}
-          scheduleChanges={<TechScheduleChanges canOpenDispatch={techRole === 'admin'} />}
+          scheduleChanges={<TechScheduleChanges canOpenDispatch={techRole === 'admin'} onReady={setScheduleFeedReady} />}
           timeClock={<TechTimeTrackingCard variant="field" nextStop={fieldNextStop?.primary} />}
           timekeeping={<>
             <div className="tf-existing"><TimecardSignoffCard techName={techName} /></div>

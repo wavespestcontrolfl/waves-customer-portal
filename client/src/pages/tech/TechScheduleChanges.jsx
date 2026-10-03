@@ -43,7 +43,9 @@ function swapPartners(changes) {
   for (const a of changes) {
     const pa = a.payload || {};
     if (a.type !== 'visit_rescheduled' || !pa.previous_when) continue;
+    // A different visit: one visit moved A→B and back B→A is not a swap.
     const b = changes.find((c) => c !== a && c.type === 'visit_rescheduled'
+      && String(c.payload?.visit_id) !== String(pa.visit_id)
       && c.payload?.when === pa.previous_when && c.payload?.previous_when === pa.when);
     if (b) partners.set(a.id, b.payload?.customer_name || 'another visit');
   }
@@ -134,9 +136,15 @@ function ReviewList({ changes, summary, onClearAll, onBack, busy, canOpenDispatc
               <li key={c.id} className="tf-change-row">
                 <div className="tf-change-head"><strong>{p.customer_name || 'Customer'}</strong>{dir && <span className="tf-dir">{dir}</span>}</div>
                 {c.type === 'visit_rescheduled' && p.previous_when
-                  ? <div className="tf-change-when"><span className="tf-struck">{p.previous_when}</span><span aria-hidden="true"> → </span><strong>{p.when}</strong></div>
-                  : <div className="tf-change-when">{p.headline}{p.when ? ` · ${p.when}` : ''}</div>}
-                <div className="tf-muted">{[p.service_type, partners.has(c.id) && `Swapped with ${partners.get(c.id)}`].filter(Boolean).join(' · ')}</div>
+                  ? <>
+                    <div className="tf-change-when"><span className="tf-struck">{p.previous_when}</span><span aria-hidden="true"> → </span><strong>{p.when}</strong></div>
+                    <div className="tf-muted">{[p.service_type, partners.has(c.id) && `Swapped with ${partners.get(c.id)}`].filter(Boolean).join(' · ')}</div>
+                  </>
+                  : <>
+                    {/* Same details the card itself shows: where a new visit is, who holds a removed one, who acted. */}
+                    <div className="tf-change-when">{p.headline}</div>
+                    {detailLines(c).map((line, i) => <div key={i} className={line.struck ? 'tf-muted tf-struck' : 'tf-muted'}>{line.text}</div>)}
+                  </>}
               </li>
             );
           })}
@@ -153,7 +161,9 @@ function ReviewList({ changes, summary, onClearAll, onBack, busy, canOpenDispatc
   );
 }
 
-export default function TechScheduleChanges({ canOpenDispatch = false }) {
+// onReady(true) once a read has succeeded: until then the floating cards stay
+// up as the fallback (Codex #5786 P2); onReady(false) when this unmounts.
+export default function TechScheduleChanges({ canOpenDispatch = false, onReady = null }) {
   const [changes, setChanges] = useState([]);
   const [feed, setFeed] = useState({ laterTotal: 0, asOf: null });
   const [reviewing, setReviewing] = useState(false);
@@ -165,6 +175,7 @@ export default function TechScheduleChanges({ canOpenDispatch = false }) {
       const data = await api('/schedule-changes');
       setChanges(Array.isArray(data.changes) ? data.changes : []);
       setFeed({ laterTotal: Number(data.later_total) || 0, asOf: data.as_of || null });
+      onReady?.(true);
     } catch {
       // A failed poll keeps what is on screen; the next one retries.
     }
@@ -176,6 +187,7 @@ export default function TechScheduleChanges({ canOpenDispatch = false }) {
     window.addEventListener('focus', load);
     return () => { clearInterval(id); window.removeEventListener('focus', load); };
   }, [load]);
+  useEffect(() => () => onReady?.(false), [onReady]);
 
   const soon = changes.filter((c) => c.soon);
   const later = changes.filter((c) => !c.soon);

@@ -11,7 +11,7 @@ import TechScheduleChanges from './TechScheduleChanges';
 const SVC = 'Quarterly Pest Control Service';
 const move = (id, name, { when, previous_when, date, previous_date, actor = 'by auto-dispatch', soon = false }) => ({
   id, type: 'visit_rescheduled', soon,
-  payload: { headline: 'Visit moved', customer_name: name, service_type: SVC, when, previous_when, date, previous_date, actor },
+  payload: { visit_id: `visit-${name}`, headline: 'Visit moved', customer_name: name, service_type: SVC, when, previous_when, date, previous_date, actor },
 });
 
 // Two auto-dispatch moves that traded slots (Dec 10 ↔ Dec 15), plus one
@@ -128,6 +128,49 @@ describe('TechScheduleChanges', () => {
     await renderChanges();
     fireEvent.click(await screen.findByRole('button', { name: 'Review moves' }));
     expect(screen.queryByRole('link', { name: 'Open in Dispatch' })).not.toBeInTheDocument();
+  });
+
+  it('one visit moved A→B and back B→A is not a swap', async () => {
+    const there = move('00000000-0000-4000-8000-00000000000d', 'Lee', {
+      previous_when: 'Thu Dec 10, 2–3 PM', when: 'Tue Dec 15, 9–10 AM', previous_date: '2026-12-10', date: '2026-12-15',
+    });
+    const back = { ...move('00000000-0000-4000-8000-00000000000e', 'Lee', {
+      previous_when: 'Tue Dec 15, 9–10 AM', when: 'Thu Dec 10, 2–3 PM', previous_date: '2026-12-15', date: '2026-12-10',
+    }) };
+    stubApi([there, back]);
+    await renderChanges();
+    fireEvent.click(await screen.findByRole('button', { name: 'Review moves' }));
+    expect(screen.getByTestId('schedule-changes-review')).not.toHaveTextContent('Swapped with');
+  });
+
+  it('Review keeps a non-move change\'s details: where a new visit is, who holds a removed one, who acted', async () => {
+    stubApi([
+      { id: '00000000-0000-4000-8000-00000000000f', type: 'visit_assigned', soon: false,
+        payload: { headline: 'New visit on your route', customer_name: 'Diaz', service_type: SVC, when: 'Thu Dec 10, 9–10 AM', date: '2026-12-10', address: '12 Palm Ave, Bradenton', actor: 'by Virginia' } },
+      { id: '00000000-0000-4000-8000-000000000010', type: 'visit_unassigned', soon: false,
+        payload: { headline: 'Moved off your route', customer_name: 'Ng', service_type: SVC, when: 'Fri Dec 11, 1–2 PM', date: '2026-12-11', now_with: 'Tech Two', actor: 'by Virginia' } },
+    ]);
+    await renderChanges();
+    fireEvent.click(await screen.findByRole('button', { name: 'Review changes' }));
+    const [assigned, removed] = within(screen.getByTestId('schedule-changes-review')).getAllByRole('listitem');
+    expect(assigned).toHaveTextContent('12 Palm Ave, Bradenton');
+    expect(assigned).toHaveTextContent('Assigned by Virginia');
+    expect(removed).toHaveTextContent('Now with Tech Two');
+    expect(removed).toHaveTextContent('Reassigned by Virginia');
+  });
+
+  it('onReady(true) only after a read succeeds (the floating cards stay up until then); onReady(false) on unmount', async () => {
+    const onReady = vi.fn();
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 500, json: async () => ({}) })));
+    await renderChanges({ onReady });
+    expect(onReady).not.toHaveBeenCalledWith(true);
+    cleanup();
+    expect(onReady).toHaveBeenLastCalledWith(false);
+
+    onReady.mockClear();
+    stubApi([]);
+    await renderChanges({ onReady });
+    expect(onReady).toHaveBeenCalledWith(true);
   });
 
   it('renders nothing when there are no schedule changes', async () => {
