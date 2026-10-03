@@ -29,6 +29,7 @@ const { DEFAULTS } = require('../../config/models');
 const { applySeasonalAdjustment, getSeason } = require('../lawn-assessment');
 const { deriveLegacyScores, adjustAvailableScores } = require('../lawn-visit-scores');
 const { contextHash, normalizePhotoZone } = require('../lawn-visit-input');
+const { PHOTO_VOCABULARY, capturedUnderShotList, maxPerShot } = require('../lawn-photo-shots');
 const { SUMMARY_CAUSE_RE } = require('../lawn-diagnostic-report');
 const { CAUSE_PATTERNS } = require('./lawn-diagnostic-naming-gate');
 
@@ -107,6 +108,10 @@ function fixtureCase(row, photos = [], context = {}) {
   const submitted = parseJson(row.photos, []);
   const incompletePhotos = photos.some((photo) => photo && String(photo.s3_key || '').startsWith('pending/'))
     || (Array.isArray(submitted) && submitted.length > photos.filter(Boolean).length);
+  // The capture mode the route stored beside each photo (absent: gate off, or a
+  // row captured before the marker existed).
+  const photoVocabulary = Array.isArray(submitted) && submitted.some((meta) => meta?.photoVocabulary === PHOTO_VOCABULARY)
+    ? PHOTO_VOCABULARY : null;
   return {
     assessmentId: row.id,
     customerId: row.customer_id,
@@ -117,6 +122,7 @@ function fixtureCase(row, photos = [], context = {}) {
     confirmed: Object.fromEntries(SCORE_KEYS.map((key) => [key, numberOrNull(row[key])])),
     legacyAi: Object.fromEntries(SCORE_KEYS.map((key) => [key, numberOrNull(composite[key])])),
     incompletePhotos,
+    ...(photoVocabulary ? { photoVocabulary } : {}),
     photos: (incompletePhotos ? [] : photos)
       .filter((photo) => photo && photo.s3_key)
       .sort((a, b) => (a.photo_order ?? 0) - (b.photo_order ?? 0))
@@ -447,14 +453,25 @@ async function runEval(cases, deps, { repeat = 1, concurrency = 2, thinkingLevel
       const testCase = queue.shift();
       if (testCase.incompletePhotos) { skipped.push({ assessmentId: testCase.assessmentId, reason: 'incomplete stored photo set' }); continue; }
       let photos;
+      // A replay uses the zone vocabulary the stored photos were captured under
+      // (derived from the stored zones, never the live gate): a shot-list capture
+      // keeps back/side/shade/hot_edge/blade_crown, an older one the three slots.
+      // The stored marker decides; only a case without one (captured before the
+      // marker, or with the gate off) falls back to inferring from the zones.
+      const shotListMode = testCase.photoVocabulary === PHOTO_VOCABULARY
+        || capturedUnderShotList(testCase.photos.map((photo) => photo.zone));
       try {
-        // Retired zones (back/side, pre 2026-09-24) and any Front after the
-        // first replay as unlabeled, so historical cases still validate
-        // instead of being skipped.
-        let frontSeen = false;
+        // Retired zones (back/side, pre 2026-09-24) and any repeat of a
+        // one-photo shot after the first replay as unlabeled, so historical
+        // cases still validate instead of being skipped.
+        const seen = new Map();
         photos = await Promise.all(testCase.photos.map(async (photo) => {
-          let zone = normalizePhotoZone(photo.zone);
-          if (zone === 'front') { if (frontSeen) zone = null; frontSeen = true; }
+          let zone = normalizePhotoZone(photo.zone, { shotList: shotListMode });
+          if (zone && (zone === 'front' || shotListMode)) {
+            const count = (seen.get(zone) || 0) + 1;
+            seen.set(zone, count);
+            if (count > (shotListMode ? maxPerShot(zone) : 1)) zone = null;
+          }
           return { ...(await deps.loadPhoto(photo.s3Key)), zone };
         }));
       } catch (err) {
@@ -463,12 +480,12 @@ async function runEval(cases, deps, { repeat = 1, concurrency = 2, thinkingLevel
         continue;
       }
       if (!photos.length) { skipped.push({ assessmentId: testCase.assessmentId, reason: 'no stored photos' }); continue; }
-      const photoZones = photos.map((photo) => normalizePhotoZone(photo.zone));
+      const photoZones = photos.map((photo) => normalizePhotoZone(photo.zone, { shotList: shotListMode }));
       const visionContext = contextFor(testCase);
       for (let i = 0; i < repeat; i += 1) {
         let analysis;
         try {
-          analysis = await deps.analyzeVisit({ photos, visionContext, thinkingLevel });
+          analysis = await deps.analyzeVisit({ photos, visionContext, thinkingLevel, ...(shotListMode ? { shotList: true } : {}) });
         } catch (err) {
           skipped.push({ assessmentId: testCase.assessmentId, repeatIndex: i, reason: `analysis failed: ${err.message}` });
           log(`skip ${testCase.assessmentId} run ${i + 1}/${repeat}: ${err.message}`);

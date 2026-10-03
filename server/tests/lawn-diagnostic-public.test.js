@@ -262,6 +262,89 @@ describe('buildPublicLawnReport whitelisting', () => {
     expect(report.confidence).toBe('low');
   });
 
+  test('a stored weed or insect line with a day or week count is swapped for the current line at egress (P16)', () => {
+    const diag = sentDiagnostic({
+      report_contract: JSON.stringify({
+        diagnosis: {
+          primary_finding: 'Weed pressure',
+          confidence: 'moderate',
+          findings: [
+            { name: 'Weed pressure', confidence: 'moderate', severity: 'moderate' },
+            { name: 'Chinch bug pressure', confidence: 'moderate', severity: 'moderate' },
+          ],
+        },
+        expectations: {
+          weeds: 'Visible weed response often takes 10-14 days and may need follow-up depending on weed type.',
+          insects: 'The key sign is whether the damaged edge stops expanding over the next week.',
+          fungus: 'Disease treatments are aimed at stopping spread first.',
+        },
+        watering: {},
+        customer_summary: 'An area worth keeping an eye on.',
+      }),
+    });
+    const report = buildPublicLawnReport(diag);
+    expect(report.expectations.weeds).toBeTruthy();
+    expect(report.expectations.insects).toBeTruthy();
+    expect(`${report.expectations.weeds} ${report.expectations.insects}`).not.toMatch(/\d|days?|weeks?/i);
+  });
+
+  test('weed and insect expectations are computed at serve time, whatever the contract stored (P16)', () => {
+    const { PRODUCT_ROWS } = require('../config/lawn-expectations');
+    const row = PRODUCT_ROWS.herbicide_broadleaf;
+    const current = `${row.visibleChange} ${row.secondApp.line}`;
+    const failClosed = 'How fast weeds respond depends on the weed and the weather.';
+    const serve = (expectations) => buildPublicLawnReport(sentDiagnostic({
+      report_contract: JSON.stringify({
+        diagnosis: {
+          primary_finding: 'Weed pressure',
+          confidence: 'moderate',
+          findings: [
+            { name: 'Weed pressure', confidence: 'moderate', severity: 'moderate' },
+            { name: 'Chinch bug pressure', confidence: 'moderate', severity: 'moderate' },
+          ],
+        },
+        expectations,
+        watering: {},
+        customer_summary: 'An area worth keeping an eye on.',
+      }),
+    })).expectations;
+    // A stored v0.7 contract carrying the approved row text.
+    expect(serve({ weeds: current }).weeds).toBe(current);
+    // The row is later withdrawn: the stored text is no longer shown.
+    const was = row.approved;
+    row.approved = false;
+    try {
+      const out = serve({ weeds: current, insects: 'Stored insects line.' });
+      expect(out.weeds).toBe(failClosed);
+      expect(JSON.stringify(out)).not.toContain(row.visibleChange);
+      expect(out.insects).toBe('The key sign is whether the damaged edge stops expanding.');
+    } finally {
+      row.approved = was;
+    }
+    // A stored pre-v0.7 line becomes the current line.
+    expect(serve({ weeds: 'Visible weed response often takes 10-14 days.' }).weeds).toBe(current);
+    // No weeds key stored: none served.
+    expect(serve({ insects: 'x' }).weeds).toBeNull();
+  });
+
+  test('a stored pre-v0.7 summary loses only its timing sentence at egress (P16)', () => {
+    const base = {
+      diagnosis: { primary_finding: 'Weed pressure', confidence: 'moderate', findings: [{ name: 'Weed pressure', confidence: 'moderate', severity: 'moderate' }] },
+      watering: {},
+    };
+    const timed = buildPublicLawnReport(sentDiagnostic({
+      report_contract: JSON.stringify({ ...base, customer_summary: 'We saw weed pressure along the sunny edge. Visible weed response often takes 10-14 days. We will keep an eye on it.' }),
+    }));
+    expect(timed.summary).toBe('We saw weed pressure along the sunny edge. We will keep an eye on it.');
+    const clean = 'We saw weed pressure along the sunny edge and will keep an eye on it.';
+    expect(buildPublicLawnReport(sentDiagnostic({ report_contract: JSON.stringify({ ...base, customer_summary: clean }) })).summary).toBe(clean);
+    const all = buildPublicLawnReport(sentDiagnostic({
+      report_contract: JSON.stringify({ ...base, customer_summary: 'Color should return in 2-3 weeks. Density takes 60-90 days.' }),
+    }));
+    expect(all.summary).toMatch(/^Your lawn shows an area worth keeping an eye on\./);
+    expect(all.summary).not.toMatch(/\d/);
+  });
+
   test('cause-specific expectations are suppressed below moderate confidence at egress', () => {
     const diag = sentDiagnostic({
       report_contract: JSON.stringify({

@@ -208,7 +208,7 @@ describe('draftTechVoice', () => {
     const ungrounded = { ...GOOD, details: [{ text: 'had to get to work', source_quote: 'words nobody said' }] };
     mockDispatch.mockResolvedValueOnce(reply(ungrounded)).mockResolvedValueOnce(reply(GOOD));
     expect(await Drafter.draftTechVoice(INPUT)).toBe(GOOD.body);
-    expect(mockDispatch.mock.calls[1][1].system).toContain('REJECTED (ungrounded detail)');
+    expect(mockDispatch.mock.calls[1][1].system).toContain('REJECTED (ungrounded detail: ');
 
     mockDispatch.mockReset().mockResolvedValue(reply(ungrounded));
     expect(await Drafter.draftTechVoice(INPUT)).toBeNull();
@@ -296,7 +296,7 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     judge([{ ask_only: false, supported: true, quotes: ['I need to go to work'] }, { ask_only: false, supported: false, quotes: [] }, { ask_only: true, supported: false, quotes: [] }]);
     expect(await Drafter.draftTechVoice(INPUT)).toBeNull();
     expect(mockDispatch).toHaveBeenCalledTimes(2);
-    expect(mockDispatch.mock.calls[1][1].system).toContain('REJECTED (unsupported sentence)');
+    expect(mockDispatch.mock.calls[1][1].system).toContain('REJECTED (unsupported sentence: ');
   });
 
   test('the checker cannot vouch with a quote that is not in the record', async () => {
@@ -463,6 +463,36 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     expect(isGreetingOnlySentence("It's Adam.", new Set(['marta', 'adam']), new Set(['adam']))).toBe(true);
   });
 
+  test('replay 10-03: the customer greeted by name before the introduction is still only a greeting', () => {
+    const { isGreetingOnlySentence } = Drafter.__private;
+    const names = new Set(['kevin', 'adam']);
+    const tech = new Set(['adam']);
+    expect(isGreetingOnlySentence("Kevin, it's Adam.", names, tech)).toBe(true);
+    expect(isGreetingOnlySentence("Hi Kevin, it's Adam.", names, tech)).toBe(true);
+    expect(isGreetingOnlySentence('Kevin, Adam here.', names, tech)).toBe(false);
+    // the introduction must still name the technician, and nothing else may ride along
+    expect(isGreetingOnlySentence("Adam, it's Kevin.", names, tech)).toBe(false);
+    expect(isGreetingOnlySentence("Kevin, I'm here.", names, tech)).toBe(false);
+    expect(isGreetingOnlySentence("Kevin, it's Adam with the new deck.", names, tech)).toBe(false);
+  });
+
+  test('replay 10-03: the writer is told which places a detail may come from, and a refused draft is told the rule it broke', () => {
+    const { buildTechVoiceSystemPrompt, redraftNote, buildTechVoiceFacts } = Drafter.__private;
+    const system = buildTechVoiceSystemPrompt('day0', 0);
+    expect(system).toContain('SOURCES (mandatory)');
+    expect(system).toContain('texts marked [customer]');
+    expect(system).toContain('lines that start with "Caller:" in a call transcript marked inbound');
+    expect(system).toContain('PHONE CALLS summaries, texts marked [waves]');
+    expect(redraftNote('ungrounded_detail')).toMatch(/^YOUR PREVIOUS DRAFT WAS REJECTED \(ungrounded detail: a source_quote was not copied exactly from a SOURCE/);
+    expect(redraftNote('off_limits_topic')).toBe('YOUR PREVIOUS DRAFT WAS REJECTED (off limits topic). Write a new one that follows every rule.');
+    // the transcript says whether its Caller lines can be a source
+    const call = (direction) => buildTechVoiceFacts({ firstName: 'Kevin', serviceType: 'Pest Control', techName: 'Adam', serviceDaysAgo: 0, termite: false,
+      ctx: { report: [], sms: [], emails: [], priorTouches: [], calls: [{ direction, created_at: new Date('2026-10-01T15:00:00Z'), call_summary: 'x', transcript: 'Caller: hi' }] } });
+    expect(call('inbound')).toMatch(/NEWEST CALL TRANSCRIPT \(inbound, /);
+    expect(call('outbound-api')).toMatch(/NEWEST CALL TRANSCRIPT \(outbound, /);
+    expect(call(null)).toMatch(/NEWEST CALL TRANSCRIPT \(outbound, /);
+  });
+
   test("GitHub r1: the writer's answer is read from the dispatcher's tolerant parse", async () => {
     mockDispatch.mockResolvedValueOnce({ ok: true, text: 'Here you go:\n```json\n{"body": "x",}\n```', json: { ...GOOD } });
     expect(await Drafter.draftTechVoice(INPUT)).toBe(GOOD.body);
@@ -484,7 +514,7 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     const ungrounded = { ...GOOD, details: [{ text: 'had to get to work', source_quote: 'words nobody said' }] };
     mockDispatch.mockResolvedValueOnce(reply(ungrounded)).mockResolvedValueOnce(reply(GOOD));
     await Drafter.draftTechVoice(INPUT);
-    expect(mockDispatch.mock.calls[1][1].system).toContain('REJECTED (ungrounded detail)');
+    expect(mockDispatch.mock.calls[1][1].system).toContain('REJECTED (ungrounded detail: ');
     expect(mockDispatch.mock.calls[1][1].text).not.toContain('REJECTED');
   });
 
@@ -517,7 +547,7 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     // The checker wrongly vouches for the invented sentence with a real but unrelated line.
     judge([{ ask_only: false, supported: true, quotes: ['I need to go to work'] }, { ask_only: false, supported: true, quotes: ['I need to go to work'] }, { ask_only: true, supported: false, quotes: [] }]);
     expect(await Drafter.draftTechVoice(INPUT)).toBeNull();
-    expect(mockDispatch.mock.calls[1][1].system).toContain('REJECTED (unsupported sentence)');
+    expect(mockDispatch.mock.calls[1][1].system).toContain('REJECTED (unsupported sentence: ');
   });
 
   test('#5524 r1: the visit bound is applied in the query, before the row limit', async () => {
@@ -644,6 +674,30 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     const text = mockDispatch.mock.calls[0][1].text;
     expect(text).not.toMatch(/Areas treated/);
     expect(text).toContain('Moisture under the kitchen sink');
+  });
+
+  test('replay 10-03: the closeout\'s customer-interaction code reaches the writer as words a detail can cite', async () => {
+    const text = async (customerInteraction) => {
+      mockDispatch.mockReset();
+      mockTables.service_records = [{ structured_notes: JSON.stringify({ ...REPORT, customerInteraction }) }];
+      mockDispatch.mockResolvedValueOnce(reply(GOOD));
+      await Drafter.draftTechVoice(INPUT);
+      return mockDispatch.mock.calls[0][1].text;
+    };
+    const spoke = await text('tech_home_spoke_with_them');
+    expect(spoke).toContain('- Conversation with the customer: The customer was home. I talked with them in person; we spoke during the visit.');
+    expect(spoke).not.toContain('tech_home_spoke_with_them');
+    expect(await text('not_home_full_access')).toContain('The customer was not home, so I missed them. I had full access to the property.');
+    // a recorded concern says nothing about who was home
+    const concern = await text('customer_specific_concern');
+    expect(concern).toContain('- Conversation with the customer: The customer had a specific concern for this visit.');
+    expect(concern).not.toMatch(/Conversation with the customer:[^\n]*\bhome\b/);
+    expect(await text('not_home_partial_access')).toContain('I had only partial access to the property.');
+    // an unknown code is still shown, as words
+    expect(await text('left_note_on_door')).toContain('- Conversation with the customer: left note on door');
+    const { detailSupportedByQuote } = Drafter.__private;
+    expect(detailSupportedByQuote('Good talking with you', 'I talked with them in person')).toBe(true);
+    expect(detailSupportedByQuote('Sorry I missed you', 'so I missed them')).toBe(true);
   });
 
   test('#5524 r11: third-person or office narration is not the technician\'s voice', () => {

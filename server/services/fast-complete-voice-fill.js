@@ -27,10 +27,14 @@
  * negation, grounded notes, safety and company-name screens); how the tech
  * phrased something is settled by that confirm tap, not by more server rules.
  *
- * Only `pest_reservice` is built here. A sheet is one registry entry: its
- * completion-profile service key and a context loader that returns the choice
- * lists, so lawn_reservice / tree_shrub plug in later without touching the
- * schema, prompt or validator.
+ * Two readers share the product rules above. The pest re-service sheet's whole
+ * fill (`voiceFillFromClip`: products, visit taps and both notes from a clip),
+ * and the report flow's product read (`voiceProductsFromNote`: any untyped pest
+ * visit, a regular visit or a re-service; products only, read from the note the
+ * tech dictated, since that flow already reads where, pests and how through
+ * visit-voice-facts.js). `transcribeVisitClip` is the report flow's note mic:
+ * the same transcriber, primed with the same product names, answering the words
+ * for the note box.
  *
  * Privacy: the transcript and both notes are never logged or stored here; the
  * route's audit line carries counts only.
@@ -178,10 +182,14 @@ async function loadProductAliases(knex, productIds) {
   }
 }
 
-async function loadPestReserviceContext(serviceId, knex = db) {
+// `anyPestVisit`: the report flow's readers take every untyped pest visit the
+// sheet opens for (pest-recap's eligibility: a pest_control profile that is not
+// typed and not project-backed); the re-service sheet's fill takes only a pest
+// re-service.
+async function loadPestContext(serviceId, knex = db, { anyPestVisit = false } = {}) {
   const { ok, reason, svc, profile, eligible } = await resolveEligibility(serviceId, knex);
   if (!ok) return { ok: false, reason };
-  if (profile?.serviceKey !== 'pest_re_service') return { ok: false, reason: 'not_pest_re_service' };
+  if (!anyPestVisit && profile?.serviceKey !== 'pest_re_service') return { ok: false, reason: 'not_pest_re_service' };
   if (!eligible) return { ok: false, reason: 'not_eligible' };
   const catalog = (await loadRecapCatalogProducts(knex).catch(() => []))
     .filter((row) => row && row.id != null && String(row.name || '').trim() && !HIDDEN_CATEGORIES.has(categoryKey(row)));
@@ -213,6 +221,7 @@ async function loadPestReserviceContext(serviceId, knex = db) {
     ok: true,
     context: {
       sheet: 'pest_reservice',
+      label: profile?.serviceKey === 'pest_re_service' ? SHEET_LABEL : PEST_VISIT_LABEL,
       products,
       pests: [...PEST_SHEET_PESTS],
       areas: [...PEST_SHEET_AREAS],
@@ -222,6 +231,8 @@ async function loadPestReserviceContext(serviceId, knex = db) {
     },
   };
 }
+
+const loadPestReserviceContext = (serviceId, knex = db) => loadPestContext(serviceId, knex);
 
 // The method a product's row offers on the pest sheet, derived EXACTLY as the
 // sheet does (client product-rate-prefill.js defaultApplicationMethodForLine on
@@ -263,6 +274,7 @@ function catalogMethodOf(row) {
 // and validator beside this one rather than a registry the first sheet doesn't need.
 const SHEET = 'pest_reservice';
 const SHEET_LABEL = 'pest re-service';
+const PEST_VISIT_LABEL = 'pest visit';
 
 // ── Structured-output schema ─────────────────────────────────────────────
 // No numeric minimum/maximum (Anthropic rejects them) and no nullable types:
@@ -349,7 +361,7 @@ function productLine(product) {
 
 function buildPrompt(ctx, transcript) {
   return [
-    `SHEET: ${SHEET_LABEL}`,
+    `SHEET: ${ctx.label || SHEET_LABEL}`,
     '',
     'PRODUCTS (id | name | units):',
     ...ctx.products.map(productLine),
@@ -1463,6 +1475,23 @@ function validateFill(raw, ctx, transcript) {
   };
 }
 
+// The report flow's product read: the same product rules, and only the model's
+// own Checks that are about a product. The visit fields and notes the model also
+// returns are not this reader's (the report flow reads them from the note itself).
+const PRODUCT_UNCLEAR_REASONS = new Set(['ambiguous_product', 'unknown_product', 'unclear_amount', 'unclear_unit']);
+function validateProductFill(raw, ctx, transcript) {
+  const input = raw && typeof raw === 'object' ? raw : {};
+  const normTranscript = norm(transcript);
+  const unclear = [];
+  const products = validateProducts(input.products, ctx, normTranscript, unclear, transcript, transcriptWorld(ctx, transcript));
+  for (const item of Array.isArray(input.unclear) ? input.unclear : []) {
+    if (item && typeof item === 'object' && PRODUCT_UNCLEAR_REASONS.has(item.reason) && heardInTranscript(item.heard, normTranscript)) {
+      pushUnclear(unclear, item.heard, item.reason);
+    }
+  }
+  return { products, unclear: unclear.slice(0, CAPS.unclear) };
+}
+
 // The customer/office split, enforced here rather than trusted to the model.
 // Every customer-note sentence must be the tech's own words: a whole clause of
 // the transcript, word for word ("Treated the kitchen for roaches" from "Treated
@@ -1622,11 +1651,12 @@ function fillCounts(fill) {
 }
 
 /**
- * The fill for words already in hand, against a loaded sheet context.
+ * The fill for words already in hand, against a loaded sheet context
+ * (`validate`: the whole sheet's fill, or the report flow's products only).
  * Returns { ok: true, fill } or { ok: false, reason: catalog_unavailable | model_failed }.
  * `call` is injectable for tests (defaults to the shared Anthropic adapter).
  */
-async function fillFromContext(context, text, call) {
+async function fillFromContext(context, text, call, validate = validateFill) {
   let result;
   try {
     result = await call({
@@ -1650,7 +1680,7 @@ async function fillFromContext(context, text, call) {
     logger.warn(`[voice-fill] model failed: ${result?.reason || 'no_json'}`);
     return { ok: false, reason: 'model_failed' };
   }
-  return { ok: true, fill: validateFill(result.json, context, text) };
+  return { ok: true, fill: validate(result.json, context, text) };
 }
 
 // ── Voice fill from a recorded clip ───────────────────────────────────────
@@ -1677,22 +1707,17 @@ function transcriptionPrompt(ctx) {
 }
 
 /**
- * Fill one sheet from a recorded clip.
- * Returns { ok: true, fill, chars } or { ok: false, reason }: the context and
- * model reasons, plus transcription_failed | transcription_unreliable | nothing_heard |
- * clip_too_long.
- * `transcribe` is injectable for tests (defaults to the shared OpenAI transcriber).
+ * A recorded clip as words, heard with the sheet's own product names.
+ * Returns { ok: true, text } or { ok: false, reason: transcription_failed |
+ * transcription_unreliable | nothing_heard }.
  */
-async function voiceFillFromClip({ serviceId, sheet, audio, mimeType, filename, durationSeconds = 0, knex = db, call = callAnthropic, transcribe = null }) {
-  if (sheet !== SHEET) return { ok: false, reason: 'unknown_sheet' };
-  const loaded = await loadPestReserviceContext(serviceId, knex);
-  if (!loaded.ok) return { ok: false, reason: loaded.reason };
+async function hearClip(context, { audio, mimeType, filename, durationSeconds = 0 }, transcribe) {
   const { transcribeWithOpenAI, isImplausibleTranscript } = require('./call-recording-processor');
   let heard;
   try {
     heard = await (transcribe || transcribeWithOpenAI)(audio, {
       model: process.env.OPENAI_VOICE_FILL_TRANSCRIBE_MODEL || VOICE_FILL_TRANSCRIBE_MODEL,
-      prompt: transcriptionPrompt(loaded.context),
+      prompt: transcriptionPrompt(context),
       mimeType,
       filename,
       // silence is an answer (nothing_heard), not a provider failure
@@ -1707,11 +1732,59 @@ async function voiceFillFromClip({ serviceId, sheet, audio, mimeType, filename, 
   // Same guard as field dictation: far more characters than the clip's seconds can
   // hold is a fabricated transcript. Unknown duration fails open.
   if (isImplausibleTranscript(text, Number(durationSeconds) || 0)) return { ok: false, reason: 'transcription_unreliable' };
-  if (!text) return { ok: false, reason: 'nothing_heard' };
+  return text ? { ok: true, text } : { ok: false, reason: 'nothing_heard' };
+}
+
+/**
+ * Fill one sheet from a recorded clip.
+ * Returns { ok: true, fill, chars } or { ok: false, reason }: the context and
+ * model reasons, plus transcription_failed | transcription_unreliable | nothing_heard |
+ * clip_too_long.
+ * `transcribe` is injectable for tests (defaults to the shared OpenAI transcriber).
+ */
+async function voiceFillFromClip({ serviceId, sheet, audio, mimeType, filename, durationSeconds = 0, knex = db, call = callAnthropic, transcribe = null }) {
+  if (sheet !== SHEET) return { ok: false, reason: 'unknown_sheet' };
+  const loaded = await loadPestReserviceContext(serviceId, knex);
+  if (!loaded.ok) return { ok: false, reason: loaded.reason };
+  const heard = await hearClip(loaded.context, { audio, mimeType, filename, durationSeconds }, transcribe);
+  if (!heard.ok) return heard;
   // Never cut: a correction near the end would be lost. Too long is refused, and
   // the tech says it in shorter pieces.
-  if (text.length > MAX_TRANSCRIPT_CHARS) return { ok: false, reason: 'clip_too_long' };
-  const result = await fillFromContext(loaded.context, text, call);
+  if (heard.text.length > MAX_TRANSCRIPT_CHARS) return { ok: false, reason: 'clip_too_long' };
+  const result = await fillFromContext(loaded.context, heard.text, call);
+  return result.ok ? { ...result, chars: heard.text.length } : result;
+}
+
+// ── The report flow (any untyped pest visit) ──────────────────────────────
+// That sheet's note is the tech's own words, on the screen and editable, so its
+// mic answers the words (`transcribeVisitClip`) and the products are read from the
+// note when the report is written (`voiceProductsFromNote`).
+
+/**
+ * The report flow's note mic: one clip as words for the note box.
+ * Returns { ok: true, text } or { ok: false, reason }: the context reasons plus
+ * transcription_failed | transcription_unreliable | nothing_heard.
+ */
+async function transcribeVisitClip({ serviceId, audio, mimeType, filename, durationSeconds = 0, knex = db, transcribe = null }) {
+  const loaded = await loadPestContext(serviceId, knex, { anyPestVisit: true });
+  if (!loaded.ok) return { ok: false, reason: loaded.reason };
+  return hearClip(loaded.context, { audio, mimeType, filename, durationSeconds }, transcribe);
+}
+
+/**
+ * The products a note names, as taps for the report flow's product rows.
+ * Returns { ok: true, fill: { products, unclear }, chars } or { ok: false, reason }:
+ * the context and model reasons, plus note_too_long. An empty note is an empty fill
+ * and no model call.
+ */
+async function voiceProductsFromNote({ serviceId, note, knex = db, call = callAnthropic }) {
+  const text = typeof note === 'string' ? note.trim() : '';
+  const loaded = await loadPestContext(serviceId, knex, { anyPestVisit: true });
+  if (!loaded.ok) return { ok: false, reason: loaded.reason };
+  if (!text) return { ok: true, fill: { products: [], unclear: [] }, chars: 0 };
+  // Never cut: a correction near the end would be lost.
+  if (text.length > MAX_TRANSCRIPT_CHARS) return { ok: false, reason: 'note_too_long' };
+  const result = await fillFromContext(loaded.context, text, call, validateProductFill);
   return result.ok ? { ...result, chars: text.length } : result;
 }
 
@@ -1730,10 +1803,14 @@ module.exports = {
   UNITS_BY_MEASURE,
   productMeasure,
   loadPestReserviceContext,
+  loadPestContext,
   buildSchema,
   buildPrompt,
   validateFill,
+  validateProductFill,
   fillCounts,
   voiceFillFromClip,
+  transcribeVisitClip,
+  voiceProductsFromNote,
   transcriptionPrompt,
 };
