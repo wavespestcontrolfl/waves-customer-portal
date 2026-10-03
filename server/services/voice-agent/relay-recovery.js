@@ -162,6 +162,8 @@ async function loadResumeState(db, callSid, { sessionKey = null, timeoutMs = RES
         // estimate fields accumulated across every leg, later legs winning.
         holdOpen: latest?.hold_open === true,
         estimateFields: nonEmptyFields(Object.assign({}, ...[...legs].sort((a, b) => (Number(a.generation) || 0) - (Number(b.generation) || 0)).map((seg) => nonEmptyFields(seg.estimate_fields) || {}))),
+        // A recognised contact's follow-up details across every leg, in order.
+        contactFollowUp: require('./relay-segments').mergeContactFollowUp(...[...legs].sort((a, b) => (Number(a.generation) || 0) - (Number(b.generation) || 0)).map((seg) => seg.contact_followup)),
         // The seed keeps the TAIL (the most recent turns matter most).
         segmentsText: full.length > RESUME_SEED_MAX_CHARS ? `[…]${full.slice(-RESUME_SEED_MAX_CHARS)}` : full,
         relayLeadId: meta.relay_lead_id ? String(meta.relay_lead_id) : ([...legs].reverse().find((seg) => seg.lead_id)?.lead_id || null),
