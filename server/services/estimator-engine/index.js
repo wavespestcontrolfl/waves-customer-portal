@@ -493,6 +493,7 @@ function commercialHint(context) {
 }
 
 const { sameStreetAddress, addressAddsLocality, addressCompletesGatheredStreet } = require('./address-compare');
+const { applyBusinessCommercialVerdict, stampBusinessScope } = require('./business-scope-engine');
 
 // Property lookup + (when the county roll is unassessed) the
 // subdivision-median dig. Both fail-open.
@@ -2450,6 +2451,18 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     // re-gathered signals carry their OWN audit, so a corrected address is
     // judged on its own lookup, not the original one's.
     const effectiveParcelOk = parcelSignalsDescribeGatheredAddress(effectiveSignals);
+    // GATE_LOOKUP_BUSINESS_IDENTITY: the lookup's business verdict (a matched
+    // operating business, suite vs whole building vs ask-the-CSR) applied to
+    // the draft — a commercial lead enters the commercial / suite path, a
+    // caller who lives there stays residential with a review flag. null (and
+    // no effect anywhere below) without a verdict.
+    const businessVerdict = applyBusinessCommercialVerdict({
+      intent,
+      enriched: effectiveSignals.enriched,
+      parcelOk: effectiveParcelOk,
+      extraction: context.extraction,
+      crossProperty: crossPropertyRegather,
+    });
     propertyFacts = resolvePropertyFacts({
       // Caller-stated facts (extraction) describe the property discussed on
       // THIS call — they stay.
@@ -2464,7 +2477,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       // draft to review.
       subdivisionMedian: effectiveSignals.subdivisionMedian,
     });
-    result.propertyFacts = propertyFacts;
+    result.propertyFacts = stampBusinessScope(propertyFacts, businessVerdict);
 
     // Facts view for the SCOPE classifiers on a true property switch: the
     // arbitration deliberately keeps the call's caller-stated facts (they
@@ -2545,6 +2558,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       // its county area as wrong-scope (codex r21/r22 P1s).
       propertyFacts: scopeFacts,
       address: intent.address || result.addressUsed || address,
+      businessScope: businessVerdict,
     });
     result.propertyFactsV2 = propertyFactsV2;
     if (propertyFactsV2 && propertyFactsV2Enabled()) {
@@ -2577,6 +2591,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
         intent,
         propertyFacts: scopeFacts,
         address: intent.address || result.addressUsed || address,
+        businessScope: businessVerdict,
       });
       if (crossPropertyRegather) unitScope.crossPropertyExtraction = true;
       propertyFacts.unitScope = unitScope;

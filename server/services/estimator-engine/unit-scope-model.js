@@ -40,6 +40,7 @@
 
 const { lotApplicabilityFor } = require('../property-lookup/property-facts-v2');
 const { _private: shadowPrivate } = require('./property-facts-shadow');
+const { businessSuiteSignals, BUSINESS_DETECTION_SOURCE } = require('./business-scope-engine');
 
 function unitScopeGuardrailsEnabled() {
   const flag = process.env.GATE_UNIT_SCOPE_GUARDRAILS;
@@ -298,7 +299,7 @@ function resolveCustomerRelationship(extraction) {
  * Compose the unit-scope model from signals the engine already gathered.
  * Pure; never throws on missing inputs (every field degrades to 'unknown').
  */
-function resolveUnitScopeModel({ propertyRecord, extraction, intent, propertyFacts, address }) {
+function resolveUnitScopeModel({ propertyRecord, extraction, intent, propertyFacts, address, businessScope }) {
   const isCommercial = intent?.is_commercial === true;
   const tenant = propertyFacts?.tenant === true
     || resolveCustomerRelationship(extraction) === 'tenant';
@@ -314,21 +315,27 @@ function resolveUnitScopeModel({ propertyRecord, extraction, intent, propertyFac
   // when the string variant wasn't recognized.)
   const relationship = resolveCustomerRelationship(extraction);
   const modelAddress = address || propertyRecord?.formattedAddress || intent?.address;
-  const unitSignal = shadowPrivate.hasUnitSignal({
-    tenant,
-    address: modelAddress,
-    extraction,
-    // This module IS the lane — it always uses the enhanced parse (its
-    // pricing-affecting apply is separately gated).
-    enhanced: true,
-  });
   const subpremiseSignal = shadowPrivate.hasSubpremiseSignal({ address: modelAddress, extraction });
-  // One shared predicate with the V2 path (codex r39 P1) so a whole-building
-  // commercial tenant keeps building scope on BOTH.
-  const partBuildingEvidence = shadowPrivate.hasPartBuildingEvidence({
-    subpremiseSignal, aggregated, propertyType,
-    landUseDescription: parcel.landUseDescription || propertyRecord?._raw?.landUse || null,
-  });
+  // A business the lookup identified as ONE suite (GATE_LOOKUP_BUSINESS_IDENTITY,
+  // a business-identified unit with no typed suite number) stands in for the
+  // unit signal AND the part-building evidence; with no business verdict this
+  // passes both through unchanged.
+  const { unitSignal, partBuilding: partBuildingEvidence } = businessSuiteSignals({
+    unitSignal: shadowPrivate.hasUnitSignal({
+      tenant,
+      address: modelAddress,
+      extraction,
+      // This module IS the lane — it always uses the enhanced parse (its
+      // pricing-affecting apply is separately gated).
+      enhanced: true,
+    }),
+    // One shared predicate with the V2 path (codex r39 P1) so a whole-building
+    // commercial tenant keeps building scope on BOTH.
+    partBuilding: shadowPrivate.hasPartBuildingEvidence({
+      subpremiseSignal, aggregated, propertyType,
+      landUseDescription: parcel.landUseDescription || propertyRecord?._raw?.landUse || null,
+    }),
+  }, businessScope);
   // This module IS the unit-scope lane, so owner-unit suites are always on
   // for the model it composes (its pricing-affecting apply is separately
   // gated); the V2 shadow path opts out by default — see inferServiceScope.
@@ -459,6 +466,10 @@ function lookupCategoryConflict({
 }) {
   if (isCommercialIntent === true) return null;
   if (String(enrichedCategory || '').toUpperCase() !== 'COMMERCIAL') return null;
+  // A commercial verdict that came from the Places business match (not the
+  // county record) is the engine's own to resolve: it promotes the lead or
+  // keeps it residential with a review flag (business-scope-engine.js).
+  if (commercialDetectionSource === BUSINESS_DETECTION_SOURCE) return null;
   // inferServiceScope labels EVERY condo/apartment-typed job
   // 'residential_unit' without needing occupancy evidence, so the
   // exemption additionally requires positive unit-occupant evidence

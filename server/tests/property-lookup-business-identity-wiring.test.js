@@ -380,3 +380,30 @@ describe('suite stamp unit key', () => {
     expect(scope('business:places/EXAMPLE2')).toMatchObject({ applies: true, sizeSource: 'candidate' });
   });
 });
+
+describe('the admin route body and the coalescing key', () => {
+  test('the occupancy body field becomes a lookup option only when it is one of the two answers', () => {
+    const { occupancyOption } = _private;
+    expect(occupancyOption('suite')).toEqual({ occupancyAnswer: 'suite' });
+    expect(occupancyOption(' Building ')).toEqual({ occupancyAnswer: 'building' });
+    expect(occupancyOption('maybe')).toEqual({});
+    expect(occupancyOption(undefined)).toEqual({});
+    expect(occupancyOption({ x: 1 })).toEqual({});
+  });
+
+  test('gate off: keys are exactly what they were; gate on: the CSR answer joins the key so answers never share a run', () => {
+    const { lookupCoalesceKey } = _private;
+    const base = { prioritizeAccuracy: true, commercialSuiteSizing: true };
+    const off = lookupCoalesceKey(ADDRESS, base);
+    expect(off).toMatch(/:full-analysis:suite-sizing$/);
+    expect(lookupCoalesceKey(ADDRESS, { ...base, occupancyAnswer: 'suite' })).toBe(off);
+    process.env.GATE_LOOKUP_BUSINESS_IDENTITY = 'true';
+    const asked = lookupCoalesceKey(ADDRESS, base);
+    const suite = lookupCoalesceKey(ADDRESS, { ...base, occupancyAnswer: 'suite' });
+    const building = lookupCoalesceKey(ADDRESS, { ...base, occupancyAnswer: 'building' });
+    expect(new Set([off, asked, suite, building]).size).toBe(4);
+    // Public callers never opt in, so their key never moves.
+    expect(lookupCoalesceKey(ADDRESS, { prioritizeAccuracy: true })).toBe(lookupCoalesceKey(ADDRESS, { prioritizeAccuracy: true }));
+    expect(lookupCoalesceKey(ADDRESS, { prioritizeAccuracy: true })).not.toMatch(/business-identity/);
+  });
+});

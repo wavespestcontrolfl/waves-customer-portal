@@ -36,6 +36,7 @@ const {
 const { FALLBACK_SQFT_SOURCES, SQFT_SOURCES, _private: { pricingSafePropertyType } } = require('./source-arbitration');
 const { PRICING_BASIS: UNIT_BAND_PRICING_BASIS } = require('../pricing-engine/unit-band-pricing');
 const { sameStreetAddress } = require('./address-compare');
+const { scopeUnresolvedVerdict, businessReviewReasons } = require('./business-scope-engine');
 const {
   unitScopeGuardrailsEnabled,
   hasPrimaryStreetNumber,
@@ -581,6 +582,29 @@ function verifyEvidenceQuotes(intent, context) {
   return { total: quotes.length, unverified: unverified.length };
 }
 
+// The red verdicts decided from facts stamped before pricing, in order: an
+// unanswered business scope (GATE_LOOKUP_BUSINESS_IDENTITY: no price until
+// the CSR says "just your space or the whole building"), then the category
+// conflict (read only with unit-scope guardrails on).
+function scopeRedVerdict(propertyFacts, guardrailsOn) {
+  const unresolved = scopeUnresolvedVerdict(propertyFacts);
+  if (unresolved) return { lane: LANES.RED, ...unresolved };
+  // The call positively typed the premises commercial while the draft
+  // stayed residential: reclassifying is the composer's job, so a
+  // conflict here means one of them is wrong — no automated price until
+  // an operator resolves which (owner ruling: category conflicts red).
+  // Read from the stamp index.js resolved with the re-gather in view —
+  // the raw primary-property extraction must not judge a re-gathered
+  // secondary property (codex r3 P1).
+  const conflictType = guardrailsOn ? (propertyFacts?.categoryConflict || null) : null;
+  if (!conflictType) return null;
+  return {
+    lane: LANES.RED,
+    reasons: [`call describes a commercial premises (${conflictType}) but the draft is residential — resolve the category before quoting`],
+    causes: ['category_conflict'],
+  };
+}
+
 // ── Lane classification ───────────────────────────────────────
 function classifyLane({ intent, propertyFacts, engineResult, engineInput = null, totals, comps, calibration, context }) {
   const reasons = [];
@@ -606,22 +630,9 @@ function classifyLane({ intent, propertyFacts, engineResult, engineInput = null,
         causes: ['incomplete_address'],
       };
     }
-    // The call positively typed the premises commercial while the draft
-    // stayed residential: reclassifying is the composer's job, so a
-    // conflict here means one of them is wrong — no automated price until
-    // an operator resolves which (owner ruling: category conflicts red).
-    // Read from the stamp index.js resolved with the re-gather in view —
-    // the raw primary-property extraction must not judge a re-gathered
-    // secondary property (codex r3 P1).
-    const conflictType = propertyFacts?.categoryConflict || null;
-    if (conflictType) {
-      return {
-        lane: LANES.RED,
-        reasons: [`call describes a commercial premises (${conflictType}) but the draft is residential — resolve the category before quoting`],
-        causes: ['category_conflict'],
-      };
-    }
   }
+  const scopeRed = scopeRedVerdict(propertyFacts, unitScopeGuardrailsEnabled());
+  if (scopeRed) return scopeRed;
 
   const lines = engineResult?.lineItems || [];
   const pricedLines = lines.filter((l) => !lineRequiresReview(l));
@@ -673,6 +684,7 @@ function classifyLane({ intent, propertyFacts, engineResult, engineInput = null,
   // in FALLBACK_SQFT_SOURCES), but it is still an INFERENCE, not a
   // measurement, so it parks yellow with a reason the operator can verify
   // on site.
+  reasons.push(...businessReviewReasons(propertyFacts));
   const suiteSize = propertyFacts?.commercialSuiteSize;
   if (usesHomeSqft && suiteSize
     && (suiteSize.source === SQFT_SOURCES.LICENSE_SEATS

@@ -6015,6 +6015,7 @@ module.exports._private = {
   resolveCommercialSuiteScope,
   buildResultFromCachedLookup,
   suiteUnitKeyForProfile,
+  occupancyOption,
   cachedAggregateResolvesToOwnUnit,
   cachedUnitFolioStale,
   subdivisionMedianEstimate,
