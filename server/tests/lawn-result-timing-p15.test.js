@@ -127,6 +127,23 @@ describe('lawn treatment paragraph: no timing', () => {
   });
 });
 
+describe('the unreviewed paragraph gets no care-plan exemption; the technician draft does', () => {
+  const { lawnResultTimingViolation } = require('../services/service-report/report-writer-rules');
+  const PROMISE = 'The lawn should green up within two weeks with regular watering.';
+  const PLAN = 'Water twice a week on your assigned days.';
+  test('paragraph: a watering-phrased result promise fails (deterministic summary served)', () => {
+    expect(validateNarrative(PROMISE, [], [], { noTiming: true })).toBe('lawn_timing');
+    expect(lawnResultTimingViolation(PROMISE, { carePlanExempt: false })).toBe(true);
+  });
+  test('paragraph: past rainfall history still passes without the exemption', () => {
+    expect(validateNarrative('Rain fell in the seven days before the visit, and the feed was applied to the turf.', [], [], { noTiming: true })).toBeNull();
+  });
+  test('draft: the approved watering plan passes; the known same-clause gap is the draft\'s alone', () => {
+    expect(lawnResultTimingViolation(PLAN)).toBe(false);
+    expect(lawnResultTimingViolation(PROMISE)).toBe(false);
+  });
+});
+
 describe('lawnResultTimingViolation: a closed world on durations', () => {
   const { lawnResultTimingViolation } = require('../services/service-report/report-writer-rules');
   test.each([

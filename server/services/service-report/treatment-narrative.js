@@ -134,7 +134,7 @@ function validateNarrative(text, productNames = [], activeIngredients = [], { no
   // Lawn under GATE_LAWN_REPORT_COPY_V6: any forward result timing fails (the
   // writer-rules timeframe screen; "today", "peak season" and past windows
   // pass), and the timing-free deterministic summary is served instead.
-  if (noTiming && lawnResultTimingViolation(t)) return 'lawn_timing';
+  if (noTiming && lawnResultTimingViolation(t, { carePlanExempt: false })) return 'lawn_timing';
   // Brand-name echo check: any distinctive token of a recorded product name
   // appearing in the copy fails the actives-only contract (codex P3).
   // The prompt REQUIRES actives language, and many catalog names embed the

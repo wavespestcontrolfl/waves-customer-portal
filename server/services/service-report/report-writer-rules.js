@@ -379,9 +379,13 @@ const LAWN_FUTURE_WORD_RE = /\b(?:will|should|may|might|can|could|would|expect\w
 // still fails on its second clause. History is judged per clause too.
 const LAWN_CARE_PLAN_CLAUSE_RE = /water|irrigat|sprinkl|\bmow|\brain/i;
 const LAWN_CLAUSE_SPLIT_RE = /(?<=[.!?])\s+|\n+|[,;:]\s*|\s(?:and|but|so|then)\s/;
-function lawnResultTimingViolation(text) {
+// `carePlanExempt` (default true) is for the technician draft, which repeats
+// the approved watering plan and is read by a person before it saves. The
+// unreviewed "What we applied today" paragraph passes false: it has no
+// watering schedule to repeat, so every clause is screened.
+function lawnResultTimingViolation(text, { carePlanExempt = true } = {}) {
   for (const clause of String(text || '').split(LAWN_CLAUSE_SPLIT_RE)) {
-    if (!clause || LAWN_CARE_PLAN_CLAUSE_RE.test(clause)) continue;
+    if (!clause || (carePlanExempt && LAWN_CARE_PLAN_CLAUSE_RE.test(clause))) continue;
     if (TIMEFRAME_RE.test(clause) || LAWN_NAMED_TIMING_RE.test(clause) || LAWN_BY_NEXT_VISIT_RE.test(clause)
       || LAWN_WEEKDAY_RE.test(clause) || LAWN_MONTH_DAY_RE.test(clause) || LAWN_NUMERIC_DATE_RE.test(clause)) return true;
     const history = LAWN_PAST_SENTENCE_RE.test(clause) && !LAWN_FUTURE_WORD_RE.test(clause);
