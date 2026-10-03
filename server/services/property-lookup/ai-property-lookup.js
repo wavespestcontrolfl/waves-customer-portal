@@ -2002,11 +2002,13 @@ function parentParcelEnabled() {
     && typeof commercialSuiteSizingLive === 'function' && commercialSuiteSizingLive() === true;
 }
 
-// `optIn`: the caller's own commercial-suite-sizing opt-in (the admin estimate
-// tool's lookup and the estimator engine). Public and ordinary lookups never
-// pass it, so they keep nothing and behave exactly as before.
-function parentParcelContext(parcel, { address, gisPrecision, point, optIn = false }) {
-  if (optIn !== true || !parentParcelEnabled() || !parcel || gisPrecision !== 'rooftop') return null;
+// Kept by EVERY live lookup while the gates are on, whoever asked: the cache
+// row is shared by all callers, so what it holds must not depend on which
+// caller filled it. Only the opted-in callers (the admin estimate tool's
+// lookup, the estimator engine) ever read it; the route strips it from every
+// other caller's response (property-lookup-v2.js).
+function parentParcelContext(parcel, { address, gisPrecision, point }) {
+  if (!parentParcelEnabled() || !parcel || gisPrecision !== 'rooftop') return null;
   if (TYPED_DWELLING_UNIT_RE.test(String(address || ''))) return null;
   const major = parseInt(dorMajorCategory(parcel.dorUseCode), 10);
   if (!Number.isFinite(major) || major < PARENT_PARCEL_DOR_MIN || major > PARENT_PARCEL_DOR_MAX) return null;
@@ -2291,7 +2293,7 @@ function aiRecordHouseNumberMismatch(record, typedAddress) {
 // out-param; no network. Returns the surviving parcel (possibly a unit parcel
 // resolved out of an aggregate), the park marker when one survives, and
 // dropReason (null when the parcel was kept or there was none to judge).
-function applyGisParcelGuards(inputParcel, { searchAddress, address, gisPrecision, diag = null, point = null, parentParcelOptIn = false }) {
+function applyGisParcelGuards(inputParcel, { searchAddress, address, gisPrecision, diag = null, point = null }) {
   let parcel = inputParcel;
   let parkParcelSignal = null;
   let parentParcel = null;
@@ -2364,7 +2366,7 @@ function applyGisParcelGuards(inputParcel, { searchAddress, address, gisPrecisio
     logger.warn('[county-property] GIS parcel situs house number disagrees with typed address — degrading to address search');
     // The parcel's facts are dropped; which commercial parcel the point
     // sits in may still be kept as context (parentParcelContext).
-    parentParcel = parentParcelContext(parcel, { address, gisPrecision, point, optIn: parentParcelOptIn });
+    parentParcel = parentParcelContext(parcel, { address, gisPrecision, point });
     parcel = null;
     dropReason = 'situs_house_number_mismatch';
   } else if (parcel && gisPrecision === 'interpolated'
@@ -2441,7 +2443,6 @@ async function lookupPropertyFromAITrio(address, geoContext = null, diag = null,
     }
     const guarded = applyGisParcelGuards(parcel, {
       searchAddress, address, gisPrecision, diag, point: { lat: geoContext.lat, lng: geoContext.lng },
-      parentParcelOptIn: options.commercialSuiteSizing === true,
     });
     parcel = guarded.parcel;
     parkParcelSignal = guarded.parkParcelSignal;
@@ -2532,7 +2533,9 @@ async function lookupPropertyFromAITrio(address, geoContext = null, diag = null,
   ].filter(Boolean);
 
   if (!records.length) {
-    if (!parkParcelSignal && parentParcel) {
+    // Opted-in callers only: for everyone else a lookup with no record stays
+    // exactly the null it was.
+    if (!parkParcelSignal && parentParcel && options.commercialSuiteSizing === true) {
       // Every fact provider failed or found nothing — the usual state of an
       // unlisted storefront, the case the parent parcel exists for. Ship a
       // facts-free record carrying only that context. Its source stays the

@@ -562,6 +562,12 @@ describe('guard gates at startup', () => {
 describe('applyGisParcelGuards (extracted from lookupPropertyFromAITrio)', () => {
   const ctx = (over = {}) => ({ searchAddress: '9117 SR 99, BRADENTON, FL 34203', address: '9117 SR 99, BRADENTON, FL 34203', gisPrecision: 'rooftop', ...over });
 
+  test('the replay TSV has a column for a kept parent parcel', () => {
+    const replay = require('../scripts/property-lookup-replay');
+    expect(replay.TSV_COLUMNS).toContain('point_parent_parcel');
+    expect(replay.TSV_COLUMNS.indexOf('point_parent_parcel')).toBe(replay.TSV_COLUMNS.indexOf('point_drop_reason') + 1);
+  });
+
   test('no parcel in, nothing out', () => {
     expect(applyGisParcelGuards(null, ctx())).toEqual({ parcel: null, parkParcelSignal: null, dropReason: null, parentParcel: null });
   });

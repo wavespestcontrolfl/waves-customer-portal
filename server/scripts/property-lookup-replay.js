@@ -32,7 +32,8 @@
 //   gis_error                    a county query failed/timed out (never a roll verdict)
 //   address_text_miss            the street is not on the roll under the typed spelling
 //   number_not_on_roll           the street exists, the typed house number does not
-//   point_parcel_dropped:<why>   a parcel sits at the point but a guard dropped it
+//   point_parcel_dropped:<why>   a parcel sits at the point but a guard dropped it; "+parent_parcel_kept"
+//                                when the drop kept the parcel as parent-parcel context
 //   no_coordinates               the row stores no lat/lng, so no point query was made: inconclusive
 //                                (the roll audit above still ranks first when it speaks)
 //   point_lookup_unsupported     county has no point layer (Hillsborough): inconclusive
@@ -413,7 +414,6 @@ async function pointStep(address, geo, countyHint, deps) {
     // The parent-parcel decision (GATE_LOOKUP_BUSINESS_IDENTITY) needs the
     // point; the replay measures the opted-in (admin / engine) lookup.
     point: { lat: geo.lat, lng: geo.lng },
-    parentParcelOptIn: true,
   });
   // A kept parcel may be a unit parcel resolved out of an aggregate; a dropped
   // one is reported as the parcel the point found.
@@ -461,7 +461,9 @@ const STOP_RULES = [
   { stop: 'gis_error', when: (r) => (r.point.status === 'error' || r.audit.status === 'error') && !pointDropped(r) },
   { stop: 'address_text_miss', when: (r) => auditRan(r) && !r.audit.streetExists },
   { stop: 'number_not_on_roll', when: (r) => auditRan(r) && r.audit.streetExists && !r.audit.hasExactMatch },
-  { stop: 'point_parcel_dropped', detail: (r) => r.point.dropReason, when: pointDropped },
+  // A dropped parcel kept as parent-parcel context reads as its own stop, so
+  // the summary counts it apart from a plain drop.
+  { stop: 'point_parcel_dropped', detail: (r) => `${r.point.dropReason}${r.point.parentParcel ? '+parent_parcel_kept' : ''}`, when: pointDropped },
   { stop: 'no_coordinates', when: (r) => r.point.reason === 'no_coordinates' },
   { stop: 'point_lookup_unsupported', when: (r) => r.point.reason === 'point_lookup_unsupported_county' },
   { stop: 'county_unknown', when: (r) => !r.countyUsed },
@@ -596,7 +598,7 @@ function formatSummary(summary) {
 const TSV_COLUMNS = [
   'address', 'lat', 'lng', 'stop', 'parcel_recovered', 'regression', 'stored_status', 'stored_parcel_id', 'county_used',
   'audit_status', 'street_exists', 'exact_number', 'nearest_numbers', 'audit_county',
-  'point_status', 'point_drop_reason', 'point_parcel_id', 'point_situs',
+  'point_status', 'point_drop_reason', 'point_parent_parcel', 'point_parcel_id', 'point_situs',
   'is_commercial', 'commercial_source', 'commercial_subtype', 'unit_scoped', 'category', 'field_verify_flags',
   'stored_audit_street_exists', 'created_at', 'case_name', 'expected', 'expect_ok', 'errors',
 ];
@@ -633,6 +635,7 @@ function resultToTsvRow(r) {
     audit_county: audit.county,
     point_status: point.status,
     point_drop_reason: point.dropReason,
+    point_parent_parcel: point.parentParcel === true ? true : '',
     point_parcel_id: point.parcelId,
     point_situs: point.situs,
     is_commercial: snap.isCommercial === true ? 'true' : snap.isCommercial === false ? 'false' : '',

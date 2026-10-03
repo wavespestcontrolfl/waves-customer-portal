@@ -341,9 +341,9 @@ async function performPropertyLookup(address, options = {}) {
   if (existing) {
     const shared = await existing;
     try {
-      return structuredClone(shared);
+      return withoutParentParcelUnlessOptedIn(structuredClone(shared), options);
     } catch {
-      return shared;
+      return withoutParentParcelUnlessOptedIn(shared, options);
     }
   }
   // One id per attempt, shared by every stamp this attempt writes and by the
@@ -366,7 +366,17 @@ async function performPropertyLookup(address, options = {}) {
     // surfacing an unhandled rejection (callers still see the original).
     run.finally(() => inFlightLookups.delete(key)).catch(() => {});
   }
-  return run;
+  return run.then((result) => withoutParentParcelUnlessOptedIn(result, options));
+}
+
+// The parent parcel (address-match PR 6) sits on the shared cached record so
+// every caller's cache row is the same, but only the opted-in callers read
+// it. Everyone else's response carries the record without it — a copy, so
+// the coalesced result other callers share is not touched.
+function withoutParentParcelUnlessOptedIn(result, options) {
+  if (options.commercialSuiteSizing === true || !result?.propertyRecord || !('_parentParcel' in result.propertyRecord)) return result;
+  const { _parentParcel: _dropped, ...record } = result.propertyRecord;
+  return { ...result, propertyRecord: record };
 }
 
 // A cached stacked-association aggregate that the live path would now
@@ -1139,7 +1149,7 @@ async function performPropertyLookupCore(address, options = {}, attemptId) {
       // path that must not read as no_parcel (codex r7 P2).
       || record._raw?.parcelId || hasCountyEvidence(record))) {
       status = 'resolved';
-    } else if (record) {
+    } else if (record && record._contextOnly !== true) {
       status = 'no_parcel';
     } else if ((lookupDiag.providerTimeouts || []).length
       || result.errors.some((e) => /timeout|timed out|abort/i.test(String(e.message)))
@@ -6129,6 +6139,7 @@ module.exports._private = {
   buildResultFromCachedLookup,
   suiteUnitKeyForProfile,
   occupancyOption,
+  withoutParentParcelUnlessOptedIn,
   businessIdentityBypassed,
   prepareBusinessIdentity,
   cachedAggregateResolvesToOwnUnit,

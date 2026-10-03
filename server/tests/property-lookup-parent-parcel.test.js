@@ -49,7 +49,7 @@ const plazaParcel = (over = {}) => ({
 
 const TYPED = '100 Example Plaza Dr, Examplecity, FL 00000';
 const guard = (parcel, over = {}) => applyGisParcelGuards(parcel, {
-  searchAddress: TYPED, address: TYPED, gisPrecision: 'rooftop', point: { lat: LAT, lng: LNG }, parentParcelOptIn: true, ...over,
+  searchAddress: TYPED, address: TYPED, gisPrecision: 'rooftop', point: { lat: LAT, lng: LNG }, ...over,
 });
 
 beforeEach(() => { process.env.GATE_COMMERCIAL_SUITE_SIZING = 'true'; });
@@ -111,14 +111,7 @@ describe('the situs guard and the parent parcel', () => {
       expect(JSON.stringify(parentParcel)).not.toMatch(/600000|50000/);
     });
 
-    test('a caller that did not opt in to suite sizing (public and ordinary lookups) keeps nothing', () => {
-      expect(guard(plazaParcel(), { parentParcelOptIn: false }).parentParcel).toBeNull();
-      expect(applyGisParcelGuards(plazaParcel(), {
-        searchAddress: TYPED, address: TYPED, gisPrecision: 'rooftop', point: { lat: LAT, lng: LNG },
-      }).parentParcel).toBeNull();
-    });
-
-    test('the suite-sizing gate off keeps nothing, even opted in', () => {
+    test('the suite-sizing gate off keeps nothing', () => {
       delete process.env.GATE_COMMERCIAL_SUITE_SIZING;
       expect(guard(plazaParcel()).parentParcel).toBeNull();
     });
@@ -223,5 +216,27 @@ describe('the whole lookup when every fact provider fails', () => {
   test('gate off: no record at all, as before', async () => {
     lookupCountyParcelByPoint.mockResolvedValue(plazaParcel());
     expect(await lookupPropertyFromAITrio(TYPED, geo, null, { commercialSuiteSizing: true })).toBeNull();
+  });
+});
+
+describe('who sees the parent parcel', () => {
+  const { _private: route } = require('../routes/property-lookup-v2');
+  const result = () => ({ propertyRecord: { squareFootage: 0, _parentParcel: { parcelId: 'EXAMPLE-PARCEL' } }, enriched: {}, meta: {} });
+
+  test('an opted-in caller keeps it; every other caller gets a copy of the record without it', () => {
+    const shared = result();
+    expect(route.withoutParentParcelUnlessOptedIn(shared, { commercialSuiteSizing: true })).toBe(shared);
+    const publicView = route.withoutParentParcelUnlessOptedIn(shared, {});
+    expect(publicView.propertyRecord).not.toHaveProperty('_parentParcel');
+    expect(publicView.propertyRecord.squareFootage).toBe(0);
+    // The shared result (and the cache row behind it) is not touched.
+    expect(shared.propertyRecord._parentParcel).toEqual({ parcelId: 'EXAMPLE-PARCEL' });
+  });
+
+  test('a record with no parent parcel, or no record, passes through as it is', () => {
+    const plain = { propertyRecord: { squareFootage: 2000 } };
+    expect(route.withoutParentParcelUnlessOptedIn(plain, {})).toBe(plain);
+    const none = { propertyRecord: null };
+    expect(route.withoutParentParcelUnlessOptedIn(none, {})).toBe(none);
   });
 });
