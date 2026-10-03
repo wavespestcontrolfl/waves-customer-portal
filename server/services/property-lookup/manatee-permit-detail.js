@@ -184,15 +184,23 @@ function pageNamesPermit(html, permitNo) {
  * run(fn): waits until at least minGap has passed since the previous request
  * FINISHED, then runs fn. One throttle per run, shared by every request.
  */
-function createThrottle({ gapMs, sleep, now }) {
+// The run's wall-clock budget is enforced HERE, before every request (not
+// only between permits): one permit can be a dozen hops, each with its own
+// timeout, and the cron lease is held throughout. Past the deadline the hop
+// is never sent (BudgetExhausted → a budget stop, not a permit error); a
+// sent hop gets the remaining budget as its ceiling.
+class BudgetExhausted extends Error {}
+function createThrottle({ gapMs, sleep, now, deadline = Infinity }) {
   let last = null;
   return async function run(fn) {
     if (last !== null) {
       const wait = gapMs - (now() - last);
       if (wait > 0) await sleep(wait);
     }
+    const remainingMs = deadline - now();
+    if (remainingMs <= 0) throw new BudgetExhausted('permit detail run budget spent');
     try {
-      return await fn();
+      return await fn(remainingMs);
     } finally {
       last = now();
     }
@@ -214,7 +222,9 @@ async function politeFetch(polite, url, opts) {
   let target = url;
   let request = opts;
   for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
-    const out = await polite(() => fetchWithSession(target, { ...request, redirect: 'manual' }));
+    const out = await polite((remainingMs) => fetchWithSession(target, {
+      ...request, timeoutMs: Math.min(request.timeoutMs, remainingMs), redirect: 'manual',
+    }));
     const location = out.res.status >= 300 && out.res.status < 400 ? out.res.headers.get('location') : null;
     if (!location) return out;
     target = new URL(location, target).toString();
@@ -375,9 +385,9 @@ async function syncPermitDetails({ sleep, now } = {}) {
   const clock = now || Date.now;
   const nap = sleep || ((ms) => new Promise((resolve) => { setTimeout(resolve, ms); }));
   const t0 = clock();
-  const polite = createThrottle({ gapMs: minGapMs(), sleep: nap, now: clock });
   const limit = cap();
   const budget = budgetMs();
+  const polite = createThrottle({ gapMs: minGapMs(), sleep: nap, now: clock, deadline: t0 + budget });
 
   const candidates = await selectCandidates(limit, t0);
   const out = { candidates: candidates.length, attempted: 0, ok: 0, noFields: 0, notFound: 0, errors: 0, stopped: null };
@@ -389,7 +399,10 @@ async function syncPermitDetails({ sleep, now } = {}) {
     let result;
     try {
       result = await fetchPermitDetail(candidate.permit_no, { polite });
-    } catch {
+    } catch (err) {
+      // Budget spent mid-permit: nothing is recorded for it (it stays a
+      // candidate) and the run stops as a budget stop.
+      if (err instanceof BudgetExhausted) { out.attempted -= 1; out.stopped = 'budget'; break; }
       // Any transport or parse failure: the permit is recorded as `error` and the run moves on.
       result = { status: 'error', facts: null };
     }

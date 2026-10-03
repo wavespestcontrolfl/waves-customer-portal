@@ -459,9 +459,26 @@ describe('syncPermitDetails', () => {
     expect(b.whereRaw.mock.calls.some(([sql]) => /NOT IN \('canceled', 'withdrawn'\)/.test(sql))).toBe(true);
   });
 
+  test('the budget is enforced before every hop: a permit spanning the deadline stops mid-way, unrecorded', async () => {
+    process.env.GATE_PERMIT_DETAIL_SYNC = 'true';
+    process.env.PERMIT_DETAIL_SYNC_BUDGET_MS = '9000';
+    const clock = fakeClock();
+    const pn = 'BLD9801-0611';
+    const b = stubDb([cand(pn)]);
+    const calls = fakeAca({ [pn]: { pages: [...Array.from({ length: 6 }, () => noFieldsPage(pn)), okPage(pn)] } }, { clock, tickMs: 1000 });
+    const out = await syncPermitDetails({ now: clock, sleep: clock.sleep });
+    expect(out).toMatchObject({ stopped: 'budget', attempted: 0 });
+    // Every request that went out started before the deadline.
+    expect(calls.every((c) => c.at < 1_700_000_000_000 + 9000)).toBe(true);
+    expect(calls.length).toBeLessThan(9);
+    // Nothing recorded for the interrupted permit — it stays a candidate.
+    expect(b.update).not.toHaveBeenCalled();
+  });
+
   test('the time budget stops the run between permits', async () => {
     process.env.GATE_PERMIT_DETAIL_SYNC = 'true';
-    process.env.PERMIT_DETAIL_SYNC_BUDGET_MS = '5000';
+    // One full permit (3 hops of 3 s plus the gaps, ~14 s) fits; the next does not.
+    process.env.PERMIT_DETAIL_SYNC_BUDGET_MS = '15000';
     const clock = fakeClock();
     stubDb([cand('BLD9801-0601'), cand('BLD9801-0602'), cand('BLD9801-0603')]);
     fakeAca({
