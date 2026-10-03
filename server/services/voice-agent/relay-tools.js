@@ -474,7 +474,7 @@ async function accountContactFor(ctx = {}) {
   try {
     const db = require('../../models/db');
     const row = await db('customers').where({ id: ctx.customerId }).whereNull('deleted_at')
-      .first('first_name', 'last_name', 'email', 'address_line1', 'city', 'zip');
+      .first('first_name', 'last_name', 'email', 'address_line1', 'city', 'zip', 'pipeline_stage');
     return row || null;
   } catch (err) {
     logger.warn(`[voice-relay] account contact read failed callSid=${ctx.callSid || 'n/a'}: ${err.message}`);
@@ -969,7 +969,15 @@ async function executeTool(name, input = {}, ctx = {}) {
       // twice: whatever the caller has not given on this call comes from their
       // own account (full tier only), read fresh on every capture, so only
       // what is genuinely absent there is reported missing below.
-      const account = estimateRequested ? await accountContactFor(ctx) : null;
+      // ONLY in the lane where the office card is the artifact: that card is
+      // rewritten when the caller corrects a default. A capture that opens a
+      // LEAD (a customer still in the lead pipeline, or a different person on
+      // the account's line — the lead writer's own two rules) gets no
+      // defaults: a lead keeps what it is first given, so those callers are
+      // asked, as before.
+      const { isLeadStage, nameConflicts } = require('../lead-from-extraction');
+      const accountRow = estimateRequested ? await accountContactFor(ctx) : null;
+      const account = accountRow && !isLeadStage(accountRow.pipeline_stage) && !nameConflicts(statedFields, accountRow) ? accountRow : null;
       let locationFromAccount = false;
       let emailFromAccount = false;
       if (account) {

@@ -7,6 +7,8 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/lead-from-extraction', () => ({
   createLeadFromExtraction: jest.fn(),
   surfaceEstimateRequestForCustomer: jest.fn(async () => ({ persisted: true, suppressed: false })),
+  isLeadStage: jest.requireActual('../services/lead-from-extraction').isLeadStage,
+  nameConflicts: jest.requireActual('../services/lead-from-extraction').nameConflicts,
 }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn() }));
 jest.mock('../routes/booking', () => ({
@@ -182,6 +184,18 @@ describe('a written estimate for a customer on file asks for nothing twice', () 
     expect(notePromise).toHaveBeenCalledTimes(1);
     const third = await executeTool('capture_lead', { call_summary: 'Send it to my work email instead.', estimate_requested: true }, ctx);
     expect(third).toMatch(/still missing: email/); // the account email does not come back
+  });
+
+  test('a capture that opens a LEAD gets no account defaults: a customer still in the lead pipeline, or a different person on the line, is asked', async () => {
+    createLeadFromExtraction.mockResolvedValue({ leadId: 'l-1', customerId: 'c-1', created: true });
+    db.mockImplementation(() => ({ where: () => ({ whereNull: () => ({ first: async () => ({ ...ACCOUNT, pipeline_stage: 'estimate_sent' }) }) }) }));
+    const lead = await executeTool('capture_lead', { call_summary: 'Wants an estimate.', estimate_requested: true }, fullTier());
+    expect(lead).toMatch(/still missing: first_name, last_name, email, address_line1/);
+    expect(createLeadFromExtraction.mock.calls[0][0]).toMatchObject({ email: null, address_line1: null, quote_promised: false });
+
+    db.mockImplementation(() => ({ where: () => ({ whereNull: () => ({ first: async () => ({ ...ACCOUNT, pipeline_stage: 'active_customer' }) }) }) }));
+    const other = await executeTool('capture_lead', { call_summary: 'Their tenant wants an estimate.', estimate_requested: true, first_name: 'Robin' }, fullTier());
+    expect(other).toMatch(/still missing: last_name, email, address_line1/);
   });
 
   test('a recognised-only caller gets nothing filled, and an ordinary capture never reads the account', async () => {
