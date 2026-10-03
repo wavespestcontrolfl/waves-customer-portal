@@ -247,6 +247,44 @@ describe('a written estimate for an established customer: ONE yes/no question (o
     expect(createLeadFromExtraction.mock.calls[0][0]).toMatchObject({ first_name: 'Dana', email: 'other@example.com', city: 'Venice', address_line1: null });
   });
 
+  // The call's real store (relay-conversation): adds non-empty fields, drops on request.
+  const callStore = () => {
+    let bag = {};
+    return {
+      bag: () => bag,
+      getEstimateFields: () => ({ ...bag }),
+      noteEstimateFields: (f) => { bag = { ...bag, ...Object.fromEntries(Object.entries(f).filter(([, v]) => v != null && String(v).trim() !== '')) }; },
+      clearEstimateFields: (keys) => { for (const k of keys) delete bag[k]; },
+    };
+  };
+
+  test('a request completed over two captures keeps saying which details were the account\'s', async () => {
+    holder.email = null; // the account has no email: the yes fills the name and address only
+    const store = callStore();
+    const ctx = estimateCtx(store);
+    expect(await ask({ use_account_details: true }, ctx)).toMatch(/still missing: email/);
+    expect(await ask({ email: 'dana@work.example.com' }, ctx)).toMatch(/IS on the office queue/);
+    const [, details, opts] = surfaceEstimateRequestForCustomer.mock.calls[0];
+    expect(details).toMatchObject({ email: 'dana@work.example.com', address_line1: '12 Test Street' });
+    expect(opts.accountDetailsConfirmed).toEqual(['name', 'address']); // the address is still the account's, the email is theirs
+  });
+
+  test('a detail the caller replaces after the yes drops the account\'s copy: a new city never keeps the account\'s street, a new email never keeps the account\'s', async () => {
+    const store = callStore();
+    const ctx = estimateCtx(store);
+    expect(await ask({ use_account_details: true }, ctx)).toMatch(/IS on the office queue/);
+    surfaceEstimateRequestForCustomer.mockClear();
+    const moved = await ask({ city: 'Venice' }, ctx);
+    expect(moved).toMatch(/still missing: address_line1/);
+    expect(store.bag()).toMatchObject({ city: 'Venice', email: 'dana@example.com', details_from_account: 'name,email' });
+    expect(store.bag().address_line1).toBeUndefined();
+    const garbled = await ask({ email: 'dana at work dot' }, ctx);
+    expect(garbled).toMatch(/still missing: email, address_line1/); // the account's email does not stand in
+    expect(store.bag().email).toBeUndefined();
+    expect(store.bag().details_from_account).toBe('name');
+    expect(surfaceEstimateRequestForCustomer).not.toHaveBeenCalled();
+  });
+
   test('an unreadable email given on the capture is not replaced by the account\'s', async () => {
     const out = await ask({ use_account_details: true, email: 'dana at work dot' });
     expect(out).toMatch(/still missing: email/);

@@ -1055,6 +1055,23 @@ async function executeTool(name, input = {}, ctx = {}) {
         logger.info(`[voice-relay] capture_lead dropped an invalid email (${String(extracted.email).length} chars) callSid=${ctx.callSid || 'n/a'}`);
         extracted.email = null;
       }
+      // Which remembered details are the ACCOUNT'S (confirmed with a yes on an
+      // earlier capture) rather than the caller's own words. The caller
+      // replacing one drops the account's copy first — whole, for a location —
+      // so it is never mixed with, or kept in place of, what they now say.
+      const LOCATION = ['address_line1', 'city', 'zip'];
+      const detailsFromAccount = String(priorEstimateFields.details_from_account || '').split(',')
+        .filter((k) => ['name', 'email', 'address'].includes(k));
+      const dropAccountDetail = (kind, keys) => {
+        const at = detailsFromAccount.indexOf(kind);
+        if (at < 0) return;
+        detailsFromAccount.splice(at, 1);
+        for (const k of keys) delete priorEstimateFields[k];
+        if (typeof ctx.clearEstimateFields === 'function') ctx.clearEstimateFields(keys);
+      };
+      if (LOCATION.some((k) => nz(extracted[k]))) dropAccountDetail('address', LOCATION);
+      if (nz(input.email)) dropAccountDetail('email', ['email']); // readable or not: they named another
+      if (nz(extracted.first_name) || nz(extracted.last_name)) dropAccountDetail('name', ['first_name', 'last_name']);
       const estimateFields = {
         first_name: nz(extracted.first_name) || nz(priorEstimateFields.first_name),
         last_name: nz(extracted.last_name) || nz(priorEstimateFields.last_name),
@@ -1078,7 +1095,6 @@ async function executeTool(name, input = {}, ctx = {}) {
       const REQUIRED = ['first_name', 'last_name', 'email', 'address_line1'];
       const accountDetails = estimateRequested && REQUIRED.some((k) => !estimateFields[k])
         ? await accountDetailsForEstimate(ctx, estimateFields) : null;
-      const detailsFromAccount = [];
       let accountCouldFill = false;
       if (accountDetails) {
         const acct = {
@@ -1090,7 +1106,6 @@ async function executeTool(name, input = {}, ctx = {}) {
         };
         // An address is one thing: the account's is used whole, and only when
         // the caller stated no part of a location and it is a full address.
-        const LOCATION = ['address_line1', 'city', 'zip'];
         const acctLocation = !LOCATION.some((k) => estimateFields[k]) && nz(accountDetails.address_line1) && (nz(accountDetails.city) || nz(accountDetails.zip))
           ? Object.fromEntries(LOCATION.map((k) => [k, nz(accountDetails[k])])) : null;
         accountCouldFill = ['first_name', 'last_name', 'email'].some((k) => !estimateFields[k] && acct[k]) || Boolean(acctLocation);
@@ -1100,7 +1115,11 @@ async function executeTool(name, input = {}, ctx = {}) {
           if (acctLocation) { Object.assign(estimateFields, acctLocation); detailsFromAccount.push('address'); }
         }
       }
-      if (typeof ctx.noteEstimateFields === 'function') ctx.noteEstimateFields(estimateFields);
+      // The provenance rides with the fields ('none' because the store only
+      // keeps non-empty values, so an emptied list must still overwrite).
+      if (typeof ctx.noteEstimateFields === 'function') {
+        ctx.noteEstimateFields({ ...estimateFields, details_from_account: detailsFromAccount.join(',') || 'none' });
+      }
       // The accumulated fields ALSO ride the lead write (hook P1): identity
       // resolution (email match) and fill-forward must see the name/email/
       // address the FIRST capture gave, not just this retry's new piece.
