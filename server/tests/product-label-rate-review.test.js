@@ -140,6 +140,8 @@ describe('rate direction validation', () => {
     '2 2/3 oz per gallon',
     '\u2153 fl oz per gallon',
     '0.03% to 0.06%',
+    'one packet per acre',
+    'one-half to one pint per acre',
   ])('%s is kept exactly as the label prints it', (rateText) => {
     expect(error([printed(rateText)])).toBeNull();
   });
@@ -157,7 +159,6 @@ describe('rate direction validation', () => {
     ['no quote', [direction({ quote: ' ' })], 'missing_label_evidence'],
     ['a blank use site', [direction({ useSite: '  ' })], 'missing_label_evidence'],
     ['a rate with no amount text', [direction({ rateText: ' ' })], 'missing_label_value'],
-    ['a rate with no number in it', [direction({ rateText: 'fl oz per gallon of water' })], 'missing_label_value'],
     ['a rate that is not in the quote', [direction({ rateText: '0.2 to 0.9 fl oz per gallon of water' })], 'rate_not_in_quote'],
     ['a converted fraction', [direction({ rateText: '0.33 fl oz per gallon', quote: 'Synthetic label: mix 1/3 fl oz per gallon.' })], 'rate_not_in_quote'],
     ['a reworded denominator', [direction({ rateText: '0.2 to 0.8 fl oz per gal' , quote: 'Synthetic label: mix 0.2 to 0.8 fl oz per 10 gallons.' })], 'rate_not_in_quote'],

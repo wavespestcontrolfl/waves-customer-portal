@@ -58,7 +58,6 @@ function sameRateProduct(product, snapshot) {
 const labelText = (value) => String(value).replace(/[‐-―−]/g, '-').replace(/\s+/g, ' ').trim().toLowerCase();
 
 const DIGIT = '[\\d\\u00bc-\\u00be\\u2150-\\u215e]';
-const NUM = new RegExp(DIGIT);
 // A copied run that starts or stops part-way through the printed rate is a
 // different rate: "2 fl oz" out of "0.2 fl oz", "3 fl oz" out of "1/3 fl oz",
 // "2/3 oz" out of "2 2/3 oz", one end of a range, a rate without its
@@ -93,7 +92,10 @@ function rateFactsError(facts, pageCount) {
       if (rateText) return 'unscoped_label_value';
       continue;
     }
-    if (!NUM.test(rateText)) return 'missing_label_value';
+    // No test for "looks like an amount": a label may print it in words ("one
+    // packet per acre"). The text is the label's own, a person approves it,
+    // and a reader that does math refuses what it cannot parse.
+    if (!rateText) return 'missing_label_value';
     // The amount is evidence only as the label's own words.
     if (!wholeRateInQuote(labelText(direction.quote), rateText)) return 'rate_not_in_quote';
   }
