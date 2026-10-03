@@ -1041,7 +1041,7 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
         });
       }
       return res.status(409).json({
-        error: bound.status ?`Invoice is ${bound.status}` : 'Invoice not found',
+        error: bound.status ? `Invoice is ${bound.status}` : 'Invoice not found',
         code: 'invoice_status_changed',
       });
     }
