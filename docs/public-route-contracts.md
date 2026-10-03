@@ -4296,10 +4296,13 @@ the public `POST /login/mfa` (same `authLimiter` by prefix, plus a 5-wrong-code
 per-account lockout) takes that challenge plus an authenticator or recovery
 code and is the only path that mints an access token carrying `mfa: true`;
 `/reset-password` on an enrolled account returns `{ passwordReset,
-signInRequired }` with no session. The native WavesPay `/login` caller does
-not handle the challenge yet (an enrolled account signs in there only through
-the tech-portal handoff). The `/mfa*` self-service routes require the staff
-bearer and 404 while the gate is off. OAuth callbacks validate a one-time `state` nonce, never bearer (see
+signInRequired }` with no session. The native WavesPay app (`ios/WavesPay`,
+`API.login` / `API.loginMfa`) decodes the challenge and asks for the code; an
+older WavesPay build cannot sign an enrolled account in. A session that signed
+in with a recovery code carries `mfaVia: 'recovery'` and may replace the
+authenticator without a second code for 30 minutes. The `/mfa*` self-service
+routes require the staff bearer, are fenced on the session's credential
+version, and 404 while the gate is off. OAuth callbacks validate a one-time `state` nonce, never bearer (see
 the AGENTS.md admin OAuth rule).
 `/.well-known/apple-app-site-association` + `/.well-known/assetlinks.json`
 (static universal-link association JSON for the native app shell — no auth,

@@ -30,6 +30,10 @@ const RECOVERY_CODE_COUNT = 10;
 const RECOVERY_CODE_BYTES = 10; // 80 bits → 16 base32 characters.
 const MAX_FAILED_ATTEMPTS = 5;
 const LOCKOUT_MS = 15 * 60 * 1000;
+// A session that signed in with a recovery code may replace the authenticator
+// without a second code for this long (the lost-phone path: the last code
+// must not leave the account unrecoverable).
+const RECOVERY_SESSION_REPLACE_MS = 30 * 60 * 1000;
 const ISSUER = 'Waves Pest Control';
 const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
 
@@ -344,11 +348,7 @@ async function startSetup(tech, { conn = db } = {}) {
 // Returns { ok: true, recoveryCodes, technician } or { ok: false, reason }.
 async function confirmSetup(tech, code, { expectedTokenVersion, nowMs = Date.now() } = {}) {
   return db.transaction(async (trx) => {
-    const account = await trx('technicians')
-      .where({ id: tech.id, auth_token_version: expectedTokenVersion })
-      .forUpdate()
-      .first();
-    if (!account) return { ok: false, reason: 'revoked' };
+    if (!await lockAccountAtVersion(trx, tech.id, expectedTokenVersion)) return { ok: false, reason: 'revoked' };
     const row = await trx('staff_mfa_totp').where({ technician_id: tech.id }).forUpdate().first();
     if (!row || !row.pending_secret_enc || !row.pending_created_at) return { ok: false, reason: 'no_pending' };
     if (new Date(row.pending_created_at).getTime() + PENDING_SETUP_TTL_MS < nowMs) return { ok: false, reason: 'expired' };
@@ -387,25 +387,50 @@ async function confirmSetup(tech, code, { expectedTokenVersion, nowMs = Date.now
   });
 }
 
-// The factor row is locked first, so two concurrent regenerations replace the
-// codes one after the other instead of both deleting the old batch and
-// leaving two new ones valid.
-async function regenerateRecoveryCodes(technicianId) {
+// Locks the account on the session's credential version, the same fence
+// enrollment uses: a factor replacement or password change that landed after
+// the request authenticated (both move the version) wins, so an in-flight
+// request from a revoked session changes nothing.
+async function lockAccountAtVersion(trx, technicianId, expectedTokenVersion) {
+  return trx('technicians')
+    .where({ id: technicianId, auth_token_version: expectedTokenVersion })
+    .forUpdate()
+    .first();
+}
+
+// The account and factor rows are locked first, so two concurrent
+// regenerations replace the codes one after the other instead of both
+// deleting the old batch and leaving two new ones valid.
+// Returns { ok: true, recoveryCodes } or { ok: false, reason: 'revoked' }.
+async function regenerateRecoveryCodes(technicianId, { expectedTokenVersion } = {}) {
   return db.transaction(async (trx) => {
+    if (!await lockAccountAtVersion(trx, technicianId, expectedTokenVersion)) return { ok: false, reason: 'revoked' };
     await trx('staff_mfa_totp').where({ technician_id: technicianId }).forUpdate().first();
-    return replaceRecoveryCodes(trx, technicianId);
+    return { ok: true, recoveryCodes: await replaceRecoveryCodes(trx, technicianId) };
   });
 }
 
-async function disable(technicianId) {
-  await db.transaction(async (trx) => {
+// Returns { ok: true } or { ok: false, reason: 'revoked' }.
+async function disable(technicianId, { expectedTokenVersion } = {}) {
+  return db.transaction(async (trx) => {
+    if (!await lockAccountAtVersion(trx, technicianId, expectedTokenVersion)) return { ok: false, reason: 'revoked' };
     await trx('staff_mfa_recovery_codes').where({ technician_id: technicianId }).del();
     await trx('staff_mfa_totp').where({ technician_id: technicianId }).del();
     await trx('technicians').where({ id: technicianId }).update({ mfa_enabled_at: null, updated_at: trx.fn.now() });
+    return { ok: true };
   });
 }
 
-async function status(tech) {
+// True while a session that signed in with a recovery code (`mfaVia:
+// 'recovery'` on its access token) is still inside the replacement window.
+function recoverySessionCanReplace(decoded, nowMs = Date.now()) {
+  return decoded?.mfa === true
+    && decoded.mfaVia === 'recovery'
+    && Number.isFinite(decoded.iat)
+    && nowMs - decoded.iat * 1000 < RECOVERY_SESSION_REPLACE_MS;
+}
+
+async function status(tech, decoded) {
   let remaining = 0;
   if (mfaEnabled(tech)) {
     const row = await db('staff_mfa_recovery_codes')
@@ -421,6 +446,8 @@ async function status(tech) {
     enrollmentRequired: enrollmentRequired(tech),
     enforced: adminMfaLive() && adminMfaEnforceLive() && tech?.role === 'admin',
     recoveryCodesRemaining: remaining,
+    // The page asks for no current code when replacing from such a session.
+    replaceWithoutCode: mfaEnabled(tech) && recoverySessionCanReplace(decoded),
   };
 }
 
@@ -440,6 +467,7 @@ module.exports = {
   mfaEnabled,
   normalizeRecoveryCode,
   otpauthUri,
+  recoverySessionCanReplace,
   regenerateRecoveryCodes,
   sessionMfaBlock,
   startSetup,

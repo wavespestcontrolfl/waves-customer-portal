@@ -105,7 +105,7 @@ function staffUser(tech) {
 // `mfa: true` marks an access token issued after the two-step code passed
 // (GATE_ADMIN_MFA); the claim is omitted otherwise, so gate-off tokens are
 // unchanged.
-function mintStaffTokens(tech, { mfa = false } = {}) {
+function mintStaffTokens(tech, { mfa = false, mfaVia = null } = {}) {
   const tokenVersion = staffTokenVersion(tech);
   return {
     token: jwt.sign({
@@ -115,6 +115,9 @@ function mintStaffTokens(tech, { mfa = false } = {}) {
       type: 'access',
       tokenVersion,
       ...(mfa ? { mfa: true } : {}),
+      // 'recovery' lets this session replace a lost authenticator without
+      // a second code for a short window (staff-mfa.js).
+      ...(mfa && mfaVia === 'recovery' ? { mfaVia } : {}),
     }, config.jwt.secret, { expiresIn: '30d' }),
     refreshToken: jwt.sign({
       technicianId: tech.id,
@@ -273,7 +276,7 @@ async function loginMfa(req, res, next) {
     const result = await staffMfa.verifySecondFactor(tech.id, code);
     if (!result.ok) return mfaFailureResponse(res, result);
 
-    const { token, refreshToken } = mintStaffTokens(tech, { mfa: true });
+    const { token, refreshToken } = mintStaffTokens(tech, { mfa: true, mfaVia: result.method });
     await db('technicians').where({ id: tech.id }).update({ last_login_at: db.fn.now() });
     setAdminMarkerCookie(res, tech.id);
     return res.json({ token, refreshToken, user: staffUser(tech) });
@@ -297,13 +300,14 @@ async function currentPasswordMatches(tech, currentPassword) {
 
 async function mfaStatus(req, res, next) {
   try {
-    return res.json(await staffMfa.status(req.technician));
+    return res.json(await staffMfa.status(req.technician, req.staffToken));
   } catch (err) { return next(err); }
 }
 
 // Starts (or, with the current code, replaces) an authenticator. Always asks
 // for the account password, so a borrowed session alone cannot bind an
-// authenticator to the account.
+// authenticator to the account. A session that just signed in with a
+// recovery code (the lost-phone path) may replace it without another code.
 async function mfaSetup(req, res, next) {
   try {
     const tech = req.technician;
@@ -311,7 +315,7 @@ async function mfaSetup(req, res, next) {
     if (!(await currentPasswordMatches(tech, currentPassword))) {
       return res.status(400).json({ error: 'Current password is incorrect' });
     }
-    if (staffMfa.mfaEnabled(tech)) {
+    if (staffMfa.mfaEnabled(tech) && !staffMfa.recoverySessionCanReplace(req.staffToken)) {
       if (typeof code !== 'string' || !code.trim() || code.length > 64) {
         return res.status(400).json({ error: 'Enter a code from your current authenticator app to replace it.' });
       }
@@ -365,8 +369,9 @@ async function mfaRegenerateRecoveryCodes(req, res, next) {
     }
     const result = await staffMfa.verifySecondFactor(tech.id, code);
     if (!result.ok) return mfaFailureResponse(res, result, 400);
-    const recoveryCodes = await staffMfa.regenerateRecoveryCodes(tech.id);
-    return res.json({ recoveryCodes });
+    const regenerated = await staffMfa.regenerateRecoveryCodes(tech.id, { expectedTokenVersion: staffTokenVersion(tech) });
+    if (!regenerated.ok) return res.status(401).json({ error: 'Session has been revoked', code: 'TOKEN_REVOKED' });
+    return res.json({ recoveryCodes: regenerated.recoveryCodes });
   } catch (err) { return next(err); }
 }
 
@@ -386,7 +391,8 @@ async function mfaDisable(req, res, next) {
     }
     const result = await staffMfa.verifySecondFactor(tech.id, code);
     if (!result.ok) return mfaFailureResponse(res, result, 400);
-    await staffMfa.disable(tech.id);
+    const disabled = await staffMfa.disable(tech.id, { expectedTokenVersion: staffTokenVersion(tech) });
+    if (!disabled.ok) return res.status(401).json({ error: 'Session has been revoked', code: 'TOKEN_REVOKED' });
     return res.json({ ok: true });
   } catch (err) { return next(err); }
 }

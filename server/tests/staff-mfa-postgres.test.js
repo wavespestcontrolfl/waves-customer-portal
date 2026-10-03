@@ -147,12 +147,15 @@ postgres('staff two-step sign-in on migrated PostgreSQL', () => {
 
   test('regenerating replaces every recovery code; turning it off removes the factor and the stamp', async () => {
     const { recoveryCodes } = await enroll();
-    const fresh = await staffMfa.regenerateRecoveryCodes(techId);
+    // enroll() moved the credential version from 1 to 2.
+    expect(await staffMfa.regenerateRecoveryCodes(techId, { expectedTokenVersion: 1 })).toEqual({ ok: false, reason: 'revoked' });
+    expect(await staffMfa.disable(techId, { expectedTokenVersion: 1 })).toEqual({ ok: false, reason: 'revoked' });
+    const { recoveryCodes: fresh } = await staffMfa.regenerateRecoveryCodes(techId, { expectedTokenVersion: 2 });
     expect(fresh).toHaveLength(10);
     expect(await staffMfa.verifySecondFactor(techId, recoveryCodes[0])).toMatchObject({ ok: false });
     expect(await staffMfa.verifySecondFactor(techId, fresh[0])).toEqual({ ok: true, method: 'recovery' });
 
-    await staffMfa.disable(techId);
+    expect(await staffMfa.disable(techId, { expectedTokenVersion: 2 })).toEqual({ ok: true });
     expect(await mockDatabase('staff_mfa_totp').where({ technician_id: techId }).first()).toBeUndefined();
     expect(await mockDatabase('staff_mfa_recovery_codes').where({ technician_id: techId })).toHaveLength(0);
     expect((await mockDatabase('technicians').where({ id: techId }).first()).mfa_enabled_at).toBeNull();

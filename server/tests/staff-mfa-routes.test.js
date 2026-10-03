@@ -30,7 +30,7 @@ const db = require('../models/db');
 const staffMfa = require('../services/staff-mfa');
 const { adminAuthenticate, verifyStaffBearer } = require('../middleware/admin-auth');
 const {
-  login, loginMfa, mfaConfirm, mfaDisable, mfaSetup, resetPassword,
+  login, loginMfa, mfaConfirm, mfaDisable, mfaRegenerateRecoveryCodes, mfaSetup, resetPassword,
 } = require('../routes/admin-auth')._handlers;
 
 const SECRET = 'test-secret';
@@ -164,8 +164,17 @@ describe('POST /login/mfa', () => {
     expect(res.statusCode).toBe(200);
     expect(staffMfa.verifySecondFactor).toHaveBeenCalledWith('tech-1', '123456');
     expect(jwt.verify(res.body.token, SECRET)).toMatchObject({ technicianId: 'tech-1', type: 'access', tokenVersion: 3, mfa: true });
+    expect(jwt.verify(res.body.token, SECRET).mfaVia).toBeUndefined();
     expect(res.body.user.twoStep).toEqual({ enabled: true, enrollmentRequired: false });
     expect(res.cookie).toHaveBeenCalledWith('waves_admin', expect.any(String), expect.any(Object));
+  });
+
+  test('a recovery-code sign-in marks the session so a lost phone can be replaced', async () => {
+    db.mockReturnValueOnce(builder({ first: staffRow({ mfa_enabled_at: new Date() }) }));
+    db.mockReturnValueOnce(builder());
+    staffMfa.verifySecondFactor.mockResolvedValue({ ok: true, method: 'recovery' });
+    const res = await invoke(loginMfa, { body: { challengeToken: challenge(), code: 'AAAA-BBBB-CCCC-DDDD' } });
+    expect(jwt.verify(res.body.token, SECRET)).toMatchObject({ mfa: true, mfaVia: 'recovery' });
   });
 
   test.each([
@@ -288,9 +297,40 @@ describe('self-service routes', () => {
     expect(res.statusCode).toBe(400);
     expect(staffMfa.disable).not.toHaveBeenCalled();
     staffMfa.verifySecondFactor.mockResolvedValue({ ok: true, method: 'totp' });
+    staffMfa.disable.mockResolvedValue({ ok: true });
     res = await invoke(mfaDisable, { technician: staffRow({ mfa_enabled_at: new Date() }), body: { currentPassword: 'x', code: '123456' } });
     expect(res.body).toEqual({ ok: true });
-    expect(staffMfa.disable).toHaveBeenCalledWith('tech-1');
+    expect(staffMfa.disable).toHaveBeenCalledWith('tech-1', { expectedTokenVersion: 3 });
+
+    // A factor replacement or password change that landed first wins.
+    staffMfa.disable.mockResolvedValue({ ok: false, reason: 'revoked' });
+    res = await invoke(mfaDisable, { technician: staffRow({ mfa_enabled_at: new Date() }), body: { currentPassword: 'x', code: '123456' } });
+    expect(res.statusCode).toBe(401);
+    expect(res.body.code).toBe('TOKEN_REVOKED');
+  });
+
+  test('new recovery codes are fenced on the session version', async () => {
+    staffMfa.verifySecondFactor.mockResolvedValue({ ok: true, method: 'totp' });
+    staffMfa.regenerateRecoveryCodes.mockResolvedValue({ ok: false, reason: 'revoked' });
+    const res = await invoke(mfaRegenerateRecoveryCodes, { technician: staffRow({ mfa_enabled_at: new Date() }), body: { code: '123456' } });
+    expect(staffMfa.regenerateRecoveryCodes).toHaveBeenCalledWith('tech-1', { expectedTokenVersion: 3 });
+    expect(res.statusCode).toBe(401);
+    expect(res.body.recoveryCodes).toBeUndefined();
+  });
+
+  test('a session that signed in with a recovery code may replace the authenticator without another code, briefly', async () => {
+    bcrypt.compare.mockResolvedValue(true);
+    staffMfa.startSetup.mockResolvedValue({ secret: 'ABC', otpauthUrl: 'otpauth://totp/x' });
+    const enrolled = staffRow({ mfa_enabled_at: new Date() });
+    const now = Math.floor(Date.now() / 1000);
+    let res = await invoke(mfaSetup, { technician: enrolled, staffToken: { mfa: true, mfaVia: 'recovery', iat: now }, body: { currentPassword: 'right' } });
+    expect(res.body.secret).toBe('ABC');
+    expect(staffMfa.verifySecondFactor).not.toHaveBeenCalled();
+
+    staffMfa.startSetup.mockClear();
+    res = await invoke(mfaSetup, { technician: enrolled, staffToken: { mfa: true, mfaVia: 'recovery', iat: now - 31 * 60 }, body: { currentPassword: 'right' } });
+    expect(res.statusCode).toBe(400);
+    expect(staffMfa.startSetup).not.toHaveBeenCalled();
   });
 });
 

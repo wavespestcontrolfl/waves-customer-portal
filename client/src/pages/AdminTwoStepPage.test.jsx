@@ -116,4 +116,17 @@ describe('AdminTwoStepPage', () => {
     expect(screen.getByAltText('QR code for your authenticator app')).toBeInTheDocument();
     expect(store.get('waves_admin_token')).toBe('old-jwt');
   });
+  it('right after a recovery-code sign-in, replacing the authenticator asks for the password only', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(reply(200, { available: true, enabled: true, enrollmentRequired: false, enforced: true, recoveryCodesRemaining: 0, replaceWithoutCode: true }))
+      .mockResolvedValueOnce(reply(200, { secret: 'JBSWY3DPEHPK3PXP', otpauthUrl: 'otpauth://totp/x', expiresInMinutes: 15 }));
+    vi.stubGlobal('fetch', fetchMock);
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'Replace authenticator (new phone)' }));
+    expect(screen.queryByLabelText('Code from your current authenticator')).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Current password'), { target: { value: 'pw' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    expect(await screen.findByLabelText('Code from the app')).toBeInTheDocument();
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ currentPassword: 'pw' });
+  });
 });

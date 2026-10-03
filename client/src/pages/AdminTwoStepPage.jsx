@@ -213,14 +213,14 @@ const SETUP_COPY = {
   },
 };
 
-function SetupCard({ replacing, form, setField, error, busy, onSubmit, onCancel }) {
+function SetupCard({ replacing, needsCode, form, setField, error, busy, onSubmit, onCancel }) {
   const copy = SETUP_COPY[replacing ? 'replace' : 'first'];
   return (
     <form onSubmit={onSubmit} style={cardStyle}>
       <h2 style={headingStyle}>{copy.title}</h2>
       <p style={introStyle}>{copy.intro}</p>
       <PasswordField id="two-step-setup-password" value={form.password} onChange={setField('password')} />
-      {replacing && <CodeField id="two-step-setup-code" label="Code from your current authenticator" allowRecovery value={form.code} onChange={setField('code')} />}
+      {needsCode && <CodeField id="two-step-setup-code" label="Code from your current authenticator" allowRecovery value={form.code} onChange={setField('code')} />}
       <ErrorBox message={error} />
       <button type="submit" disabled={busy} style={primaryButton(busy)}>{busy ? 'Starting…' : 'Continue'}</button>
       {replacing && <button type="button" onClick={onCancel} style={{ ...linkButton, color: D.muted }}>Cancel</button>}
@@ -341,10 +341,13 @@ export default function AdminTwoStepPage() {
     }
   };
 
+  // Replacing asks for the current code, except right after a recovery-code
+  // sign-in (the lost-phone path; the server allows it for a short window).
+  const replaceNeedsCode = Boolean(status?.enabled && !status.replaceWithoutCode);
   const startSetup = submit('setup', async () => {
     const data = await call('/totp/setup', {
       method: 'POST',
-      body: { currentPassword: form.password, ...(status.enabled ? { code: form.code.trim() } : {}) },
+      body: { currentPassword: form.password, ...(replaceNeedsCode ? { code: form.code.trim() } : {}) },
     });
     setSetup(data);
     show('scan');
@@ -436,6 +439,7 @@ export default function AdminTwoStepPage() {
       return (
         <SetupCard
           replacing={status.enabled}
+          needsCode={replaceNeedsCode}
           form={form}
           setField={setField}
           error={errorFor('setup')}
