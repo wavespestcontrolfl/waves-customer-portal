@@ -27,6 +27,7 @@ const featureGates = require('../config/feature-gates');
 const { resolveEligibility, recapServiceIdentity, RECAP_COMPARED_IDENTITY_KEYS } = require('./pest-recap');
 const { etCalendarDayOf } = require('../utils/datetime-et');
 const { ASSESSMENT_EXPERIENCE_KEYS } = require('../config/completion-lane-registry');
+const shotList = require('./lawn-photo-shots');
 
 const LAWN_CATEGORY = 'lawn_care';
 // The lawn re-service (free between-visit callback) has its own sheet and gate
@@ -49,15 +50,14 @@ const isUuid = (value) => typeof value === 'string' && UUID_RE.test(value);
 // The customer's billing lane could not be read: the visit type is unknown.
 const BILLING_MODE_UNKNOWN = Symbol('billing_mode_unknown');
 
-// Advisory photo floor, interim until the shared shot list lands: at least this
-// many usable photos, one wide shot and one close-up (the assessment prompt
-// needs both before confidence can exceed low). 'back' and 'side' are the
-// legacy wide zones (lawn-visit-input.js).
-const PHOTO_FLOOR = Object.freeze({
-  minPhotos: 3,
-  wideZones: Object.freeze(['front', 'back', 'side']),
-  closeUpZones: Object.freeze(['close_up', 'trouble']),
-});
+// LEGACY advisory photo rule, for an assessment NOT captured under the shot list
+// (GATE_LAWN_SHOT_LIST off at capture): at least this many usable photos, one wide
+// shot and one close-up (the assessment prompt needs both before confidence can
+// exceed low). The zones come from the shared shot definitions: the wide shots are
+// the pairable overviews (front, back, side) and the close-ups are the detail
+// shots, which for a legacy capture are only close_up and trouble. A capture under
+// the shot list uses the shared minimum instead (evaluatePhotoFloor).
+const LEGACY_PHOTO_FLOOR = Object.freeze({ minPhotos: 3 });
 
 /**
  * Which kind of lawn visit this APPOINTMENT is: 'recurring' (a recurring lawn
@@ -359,31 +359,78 @@ async function buildLawnFastWateringPreview({ serviceId, productIds, knex = db, 
 
 // ── photos and assessment ───────────────────────────────────────────────────
 
+// The hint the technician's photo step shows (client/src/lib/lawn-photo-shots.js
+// shotListHint), word for word, so the sheet's warning and the photo step never
+// disagree. server/tests/lawn-fast-complete-photo-status.test.js pins the two.
+const shotListWarning = (missing) => `Aim for at least ${shotList.SHOT_MINIMUM} photos: front, back or side, canopy close-up, and blade and crown. Still needed: ${missing.join(', ')}. This is a guide only, and Analyze lawn works at any time.`;
+
+const zoneOf = (photo) => String(photo?.zone || '').trim().toLowerCase();
+
 /**
- * Advisory photo status for an assessment. Never a refusal: `warning` is text
- * for the sheet, null when the floor is met.
+ * Advisory photo status. Never a refusal: `warning` is text for the sheet, null
+ * when the minimum is met. `basis` says which rule judged it.
+ *   shot list (the assessment was captured under it, or the gate is on and there is
+ *   no assessment yet): the SHARED minimum (shared/lawn-photo-shots.json): `missing`
+ *   are the shared helper's unmet minimum slots, by label, and the warning is the
+ *   photo step's own hint.
+ *   legacy: the interim rule (LEGACY_PHOTO_FLOOR), expressed with the shared zone sets.
  */
-function evaluatePhotoFloor(photos) {
+function evaluatePhotoFloor(photos, { shotList: underShotList = false } = {}) {
   const usable = (Array.isArray(photos) ? photos : []).filter((p) => p && p.quality_gate_passed !== false);
-  const zoneOf = (p) => String(p.zone || '').trim().toLowerCase();
-  const hasWide = usable.some((p) => PHOTO_FLOOR.wideZones.includes(zoneOf(p)));
-  const hasCloseUp = usable.some((p) => PHOTO_FLOOR.closeUpZones.includes(zoneOf(p)));
+  if (underShotList) {
+    const missing = shotList.missingMinimumSlots(usable.map(zoneOf));
+    return {
+      soft: true,
+      basis: 'shot_list',
+      count: usable.length,
+      minPhotos: shotList.SHOT_MINIMUM,
+      meetsFloor: missing.length === 0,
+      missing,
+      warning: missing.length ? shotListWarning(missing) : null,
+    };
+  }
+  const hasWide = usable.some((p) => shotList.PAIRABLE_SHOT_ZONES.includes(zoneOf(p)));
+  const hasCloseUp = usable.some((p) => shotList.NON_PAIRABLE_SHOT_ZONES.includes(zoneOf(p)));
   const missing = [];
-  if (usable.length < PHOTO_FLOOR.minPhotos) missing.push('photos');
+  if (usable.length < LEGACY_PHOTO_FLOOR.minPhotos) missing.push('photos');
   if (!hasWide) missing.push('wide');
   if (!hasCloseUp) missing.push('close_up');
   const parts = [];
-  if (missing.includes('photos')) parts.push(`${usable.length} of ${PHOTO_FLOOR.minPhotos} photos`);
+  if (missing.includes('photos')) parts.push(`${usable.length} of ${LEGACY_PHOTO_FLOOR.minPhotos} photos`);
   if (missing.includes('wide')) parts.push('no wide shot');
   if (missing.includes('close_up')) parts.push('no close-up');
   return {
     soft: true,
+    basis: 'legacy',
     count: usable.length,
-    minPhotos: PHOTO_FLOOR.minPhotos,
+    minPhotos: LEGACY_PHOTO_FLOOR.minPhotos,
     meetsFloor: missing.length === 0,
     missing,
     warning: missing.length ? `Photo set is light (${parts.join(', ')}). You can still finish; more photos make a stronger read.` : null,
   };
+}
+
+// Whether the assessment was captured under the shot list: the marker the assess
+// route stores beside each photo (lawn_assessments.photos[].photoVocabulary), or,
+// for a row captured before the marker existed, the shared zone-vocabulary
+// fallback. With no assessment yet, the gate decides.
+function capturedUnderShotListRow(assessmentRow, photos) {
+  if (!assessmentRow) return featureGates.gateEnvValue('GATE_LAWN_SHOT_LIST');
+  let stored = assessmentRow.photos;
+  if (typeof stored === 'string') {
+    try { stored = JSON.parse(stored); } catch { stored = null; }
+  }
+  if (Array.isArray(stored) && stored.some((meta) => meta?.photoVocabulary === shotList.PHOTO_VOCABULARY)) return true;
+  return shotList.capturedUnderShotList((Array.isArray(photos) ? photos : []).map(zoneOf));
+}
+
+// The context's photoStatus. No assessment yet: with the shot list live, the shared
+// minimum as the target (nothing captured); with it off, null (as before). A failed
+// photo read on an existing assessment reads as no status (recorded upstream).
+function photoStatusFor(assessmentRow, photos) {
+  if (!assessmentRow) return featureGates.gateEnvValue('GATE_LAWN_SHOT_LIST') ? evaluatePhotoFloor([], { shotList: true }) : null;
+  if (!photos) return null;
+  return evaluatePhotoFloor(photos, { shotList: capturedUnderShotListRow(assessmentRow, photos) });
 }
 
 async function loadLatestAssessment(svc, knex) {
@@ -567,9 +614,9 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null 
       unusableReason: assessmentUnusable,
       readFailed: assessmentReadFailed,
     },
-    // Advisory only: a light photo set is a warning, never a refusal. null when
-    // there is no assessment yet (no photos analyzed) or the read failed.
-    photoStatus: photos ? evaluatePhotoFloor(photos) : null,
+    // Advisory only: a light photo set is a warning, never a refusal. null when the
+    // photo read failed, or there is no assessment yet and the shot list is off.
+    photoStatus: photoStatusFor(assessmentRow, photos),
     // Same-spot pairing needs the previous visit's front photo; no shared
     // lookup for lawn photos exists yet, so the context carries none.
     previousFrontPhoto: null,
@@ -703,7 +750,7 @@ async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = 
 }
 
 module.exports = {
-  PHOTO_FLOOR,
+  LEGACY_PHOTO_FLOOR,
   isUuid,
   BILLING_MODE_UNKNOWN,
   lawnFastVisitType,
