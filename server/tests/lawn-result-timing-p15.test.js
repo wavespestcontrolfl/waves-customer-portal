@@ -75,6 +75,29 @@ describe('lawn treatment paragraph: no timing', () => {
     }
   });
 
+  test('with the record\'s line, the PDF signature reads only that line\'s active version (either toggle order)', async () => {
+    const seen = [];
+    const c = {
+      where() { return c; },
+      whereIn(col, vals) { seen.push(vals); return c; },
+      orderBy() { return c; },
+      first: async () => ({ status: 'ready', generated_at: '2026-10-02T12:00:00Z' }),
+    };
+    live();
+    await treatmentNarrativePdfSignature('svc-1', () => c, { serviceLine: 'lawn' });
+    await treatmentNarrativePdfSignature('svc-1', () => c, { serviceLine: 'tree_shrub' });
+    delete process.env.GATE_LAWN_REPORT_COPY_V6;
+    await treatmentNarrativePdfSignature('svc-1', () => c, { serviceLine: 'lawn' });
+    expect(seen).toEqual([[LAWN_NO_TIMING_PROMPT_VERSION], [PROMPT_VERSION], [PROMPT_VERSION]]);
+  });
+
+  test('both PDF-signature callers pass the record\'s line, resolved as report-data resolves it', () => {
+    const fs = require('fs'); const path = require('path');
+    for (const file of ['../services/service-report/pdf-queue.js', '../routes/reports-public.js']) {
+      expect(fs.readFileSync(path.join(__dirname, file), 'utf8')).toMatch(/treatmentNarrativePdfSignature\(service\.id, \w+, \{ serviceLine: service\.service_line \|\| detectServiceLine\(service\.service_type\) \}\)/);
+    }
+  });
+
   test('its own prompt version, and the PDF signature reads only the versions a render can read', async () => {
     expect(LAWN_NO_TIMING_PROMPT_VERSION).not.toBe(PROMPT_VERSION);
     const sigCalls = async () => {
@@ -114,7 +137,12 @@ describe('lawnResultTimingViolation: a closed world on durations', () => {
     'The weeds should fade next week.',
     'You will see improvement tomorrow.',
     'Results build over weeks.',
-  ])('any forward duration fails: %s', (text) => {
+    'Weeds should yellow by Friday.',
+    'Improvement will appear later this week.',
+    'Color should return by October 10.',
+    'You will see it this weekend.',
+    'Expect greener turf in a month or two.',
+  ])('any forward duration or calendar deadline fails: %s', (text) => {
     expect(lawnResultTimingViolation(text)).toBe(true);
   });
   test.each([
@@ -125,6 +153,7 @@ describe('lawnResultTimingViolation: a closed world on durations', () => {
     'Over the last two weeks the lawn browned.',
     'We will recheck at your next visit.',
     'We apply this once a week in summer.',
+    'The lawn may need a feeding every few weeks.',
   ])('past windows, frequency and "next visit" pass: %s', (text) => {
     expect(lawnResultTimingViolation(text)).toBe(false);
   });

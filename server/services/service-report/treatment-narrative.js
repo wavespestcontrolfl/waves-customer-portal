@@ -287,16 +287,20 @@ async function buildTreatmentNarrative({
  * once the final text exists. status+generated_at of the LATEST row for this
  * record changes exactly then.
  */
-async function treatmentNarrativePdfSignature(serviceRecordId, knex = db) {
+async function treatmentNarrativePdfSignature(serviceRecordId, knex = db, { serviceLine } = {}) {
   try {
     if (!serviceRecordId) return '';
     const row = await knex('service_report_ai_summaries')
       .where({ service_record_id: serviceRecordId })
-      // Only versions a render can read now: gate off, every line reads v5
-      // (a newer lawn no-timing row is inactive and must not key the PDF).
-      .whereIn('prompt_version', require('../../config/feature-gates').lawnReportCopyV6Live()
-        ? [PROMPT_VERSION, LAWN_NO_TIMING_PROMPT_VERSION]
-        : [PROMPT_VERSION])
+      // Only the version this record's render reads now (the caller resolves
+      // the line exactly as report-data does), so a row of the inactive
+      // version, newer after a gate toggle either way, never keys the PDF.
+      // A caller with no line falls back to every version a render could read.
+      .whereIn('prompt_version', serviceLine
+        ? [promptVersionFor(serviceLine)]
+        : (require('../../config/feature-gates').lawnReportCopyV6Live()
+          ? [PROMPT_VERSION, LAWN_NO_TIMING_PROMPT_VERSION]
+          : [PROMPT_VERSION]))
       .orderBy('generated_at', 'desc')
       .first('status', 'generated_at');
     // Sentinel, not '': a cached pre-narrative PDF must MISS so the render
