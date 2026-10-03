@@ -245,11 +245,14 @@ describe('POST /:id/photos/reconcile', () => {
   });
 
   test('reconciles the persisted completion record even when a newer record exists', async () => {
-    const receipt = {
-      customerId: 'cust-1', propertyId: 'property-1', technicianId: 'tech-1',
-      catalogServiceId: 'catalog-pest', serviceType: 'Pest Control',
-      scheduledDate: tables.scheduled_services[0].scheduled_date, status: 'on_site', revision: 'same-visit',
+    tables.scheduled_services[0] = {
+      ...tables.scheduled_services[0], property_id: 'property-1', service_id: 'catalog-pest',
+      service_type: 'Pest Control', status: 'completed',
     };
+    const receipt = require('../services/service-photos').servicePhotoVisitSnapshot({
+      ...tables.scheduled_services[0], status: 'on_site',
+    });
+    const uploadReceipt = { ...receipt, status: 'completed' };
     tables.service_records = [
       { id: 'rec-newer', scheduled_service_id: 'svc-1', service_line: 'pest', structured_notes: { servicePhotoVisit: receipt } },
       { id: 'rec-1', scheduled_service_id: 'svc-1', service_line: 'pest', structured_notes: { servicePhotoVisit: receipt } },
@@ -264,7 +267,7 @@ describe('POST /:id/photos/reconcile', () => {
     ];
     await withServer(async (baseUrl) => {
       const response = await reconcile(baseUrl, 'tech', {
-        abandonMissingPhotos: false, expectedVisit: receipt, expectedServiceRecordId: 'rec-1',
+        abandonMissingPhotos: false, expectedVisit: uploadReceipt, expectedServiceRecordId: 'rec-1',
       });
       expect(response.status).toBe(200);
       expect((await response.json()).serviceRecordId).toBe('rec-1');

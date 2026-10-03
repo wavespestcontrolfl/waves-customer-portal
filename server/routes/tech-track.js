@@ -871,27 +871,44 @@ function parseJsonColumn(value) {
 }
 
 const PHOTO_RECONCILIATION_HANDOFF = 'service_photo_reconciliation_required';
-const VISIT_RECEIPT_FIELDS = [
+const VISIT_RECEIPT_IDENTITY_FIELDS = [
   'customerId', 'propertyId', 'technicianId', 'catalogServiceId', 'serviceType',
-  'scheduledDate', 'status', 'revision',
+  'scheduledDate', 'revision',
 ];
-function recoveryReceiptMatchesRecord(record, rawExpectedVisit) {
+const sameReceiptValue = (left, right) => String(left ?? '') === String(right ?? '');
+function receiptIdentityMatches(left, right) {
+  return !!left && !!right
+    && VISIT_RECEIPT_IDENTITY_FIELDS.every((field) => sameReceiptValue(left[field], right[field]));
+}
+function legacyRecordOwnsReceipt(record, expectedVisit, expectedServiceRecordId, svc) {
+  if (!record || !expectedVisit || !expectedServiceRecordId || !svc) return false;
+  return sameReceiptValue(record.id, expectedServiceRecordId)
+    && sameReceiptValue(record.scheduled_service_id, svc.id)
+    && sameReceiptValue(record.customer_id, expectedVisit.customerId);
+}
+function recoveryReceiptMatchesRecord(record, rawExpectedVisit, { expectedServiceRecordId = null, svc = null } = {}) {
   if (rawExpectedVisit == null || rawExpectedVisit === '') return true;
   let expectedVisit = null;
   try { expectedVisit = parseExpectedServicePhotoVisit(rawExpectedVisit); } catch { return false; }
   const storedVisit = parseJsonColumn(record?.structured_notes)?.servicePhotoVisit;
-  return !!expectedVisit
-    && VISIT_RECEIPT_FIELDS.every((field) => String(expectedVisit[field] ?? '') === String(storedVisit?.[field] ?? ''));
+  if (storedVisit) return receiptIdentityMatches(expectedVisit, storedVisit);
+  // Records completed before servicePhotoVisit was persisted can still be
+  // reconciled from the upload response, but only when its exact record id
+  // and the record/current-visit composite prove the same immutable owner.
+  return legacyRecordOwnsReceipt(record, expectedVisit, expectedServiceRecordId, svc)
+    && receiptIdentityMatches(expectedVisit, servicePhotoVisitSnapshot(svc));
 }
-function recoveryReceiptOwnedBy(record, rawExpectedVisit, actorId) {
+function recoveryReceiptOwnedBy(record, rawExpectedVisit, actorId, options = {}) {
   if (rawExpectedVisit == null || rawExpectedVisit === '') {
     return String(record?.technician_id || '') === String(actorId || '');
   }
   let expectedVisit = null;
   try { expectedVisit = parseExpectedServicePhotoVisit(rawExpectedVisit); } catch { return false; }
-  return !!expectedVisit
-    && String(expectedVisit.technicianId || '') === String(actorId || '')
-    && recoveryReceiptMatchesRecord(record, expectedVisit);
+  if (!expectedVisit || !sameReceiptValue(expectedVisit.technicianId, actorId)) return false;
+  const storedVisit = parseJsonColumn(record?.structured_notes)?.servicePhotoVisit;
+  if (storedVisit) return receiptIdentityMatches(expectedVisit, storedVisit);
+  return legacyRecordOwnsReceipt(record, expectedVisit, options.expectedServiceRecordId, options.svc)
+    && sameReceiptValue(record.technician_id, actorId);
 }
 
 async function loadPhotoRecoveryRecord(serviceId, expectedServiceRecordId, columns) {
@@ -912,7 +929,7 @@ async function photoRecoveryRecordFailure({ record, expectedServiceRecordId, exp
   if (!record) {
     source = 'photo_recovery_record_missing';
     message = 'The completion record saved for recovered photos is no longer available. The office must reconcile the report.';
-  } else if (!recoveryReceiptMatchesRecord(record, expectedVisit)) {
+  } else if (!recoveryReceiptMatchesRecord(record, expectedVisit, { expectedServiceRecordId, svc })) {
     source = 'photo_recovery_identity_changed';
     message = 'Recovered photos belong to an older completion record. The office must reconcile the correct report.';
   } else {
@@ -1109,15 +1126,18 @@ router.post('/:id/photos/reconcile', async (req, res, next) => {
   try {
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'customer_id', 'technician_id', 'status', 'scheduled_date');
+      .first('id', 'customer_id', 'property_id', 'technician_id', 'service_id',
+        'service_type', 'status', 'scheduled_date');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
     const expectedServiceRecordId = String(req.body?.expectedServiceRecordId || '').trim() || null;
     let record = null;
     if (!technicianVisitRowInScope(req, svc)) {
       record = await loadPhotoRecoveryRecord(
-        svc.id, expectedServiceRecordId, ['id', 'technician_id', 'structured_notes'],
+        svc.id, expectedServiceRecordId,
+        ['id', 'scheduled_service_id', 'customer_id', 'technician_id', 'structured_notes'],
       );
-      if (record && recoveryReceiptOwnedBy(record, req.body?.expectedVisit, req.technicianId)) {
+      if (record && recoveryReceiptOwnedBy(record, req.body?.expectedVisit, req.technicianId,
+        { expectedServiceRecordId, svc })) {
         const { createAlertOnce } = require('../services/dispatch-alerts');
         await createAlertOnce({
           type: PHOTO_RECONCILIATION_HANDOFF,
@@ -1141,7 +1161,8 @@ router.post('/:id/photos/reconcile', async (req, res, next) => {
     }
     record = await loadPhotoRecoveryRecord(
       svc.id, expectedServiceRecordId,
-      ['id', 'technician_id', 'service_line', 'service_data', 'structured_notes'],
+      ['id', 'scheduled_service_id', 'customer_id', 'technician_id',
+        'service_line', 'service_data', 'structured_notes'],
     );
     const recordFailure = await photoRecoveryRecordFailure({
       record, expectedServiceRecordId, expectedVisit: req.body?.expectedVisit, svc,

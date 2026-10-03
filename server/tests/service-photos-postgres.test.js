@@ -93,6 +93,30 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
     } finally { await db.destroy(); }
   }, 30000);
   const input = { serviceRecordId: recordId, buffer: Buffer.from('synthetic photo bytes'), mimeType: 'image/png', originalName: 'qa.png', photoType: 'after' };
+  async function reconcileUploadReceipt(uploadResult) {
+    const express = require('express');
+    const jwt = require('jsonwebtoken');
+    const config = require('../config');
+    const router = require('../routes/tech-track');
+    const app = express();
+    app.use(express.json());
+    app.use('/api/tech/services', router);
+    app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: err.message }));
+    const server = app.listen(0);
+    const token = jwt.sign({ type: 'access', tokenVersion: 1, technicianId: adminId }, config.jwt.secret);
+    try {
+      return await fetch(`http://127.0.0.1:${server.address().port}/api/tech/services/${completedVisitId}/photos/reconcile`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          expectedVisit: uploadResult.visit,
+          expectedServiceRecordId: uploadResult.serviceRecordId,
+        }),
+      });
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  }
 
   test('six uploads that all miss the first dedupe read commit one photo and retain one object', async () => {
     mockExpectedUploads = 6;
@@ -159,10 +183,16 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
     expect(await db('scheduled_service_photo_staging').where({ scheduled_service_id: stagedVisitId })).toHaveLength(0);
   }, 30000);
 
-  test('the same identity advancing to completed uploads to its record and requires reconciliation', async () => {
+  test.each([
+    ['modern record stored while on site', true],
+    ['legacy record without a stored snapshot', false],
+  ])('the actual completed upload receipt reconciles its exact %s', async (_label, storesSnapshot) => {
     const photos = require('../services/service-photos');
     const before = await db('scheduled_services').where({ id: completedVisitId }).first();
     const expectedVisit = photos.servicePhotoVisitSnapshot(before);
+    await db('service_records').where({ id: recordId }).update({
+      structured_notes: JSON.stringify(storesSnapshot ? { servicePhotoVisit: expectedVisit } : {}),
+    });
     await db('scheduled_services').where({ id: completedVisitId }).update({ status: 'completed' });
 
     const result = await photos.uploadServicePhotoForVisit({
@@ -175,6 +205,10 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
     });
     expect(result).toMatchObject({ staged: false, reconcileRequired: true, serviceRecordId: recordId });
     expect(result.visit.status).toBe('completed');
+    expect(result.visit.revision).toBe(expectedVisit.revision);
+    const reconciled = await reconcileUploadReceipt(result);
+    expect(reconciled.status).toBe(200);
+    expect(await reconciled.json()).toMatchObject({ ok: true, serviceRecordId: recordId });
     expect(await db('service_photos').where({ service_record_id: recordId })).toHaveLength(1);
   }, 30000);
 
