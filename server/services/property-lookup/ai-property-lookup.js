@@ -2858,6 +2858,10 @@ const TERMINAL_ONLY_SUFFIX_ALIASES = {
   POINTE: 'PT',
   SQUARE: 'SQ',
   TRACE: 'TRCE',
+  // Customers and Google write Way as "Wy"; the Manatee, Sarasota and
+  // Charlotte rolls spell WAY out and never use WY (live GIS reads 10-02), so
+  // "<street> Wy" read as street-not-found.
+  WY: 'WAY',
 };
 const TERMINAL_ONLY_SUFFIX_RE = new RegExp(
   `\\b(${Object.keys(TERMINAL_ONLY_SUFFIX_ALIASES).join('|')})`
