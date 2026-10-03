@@ -12,6 +12,7 @@ const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { effectiveServiceAddress } = require('../stamped-address');
 const { TERMINAL_APPOINTMENT_STATUSES } = require('./proposal-pins');
 const { formatAddress } = require('../../utils/address-normalizer');
+const { fetchPropertyForecast, SERVICE_AREA_DEFAULT_LOCATION } = require('../service-report/application-conditions');
 const { getProtocol: readProtocol } = require('../protocol-reader');
 const { openInvoiceFacts } = require('../visit-context/balance');
 const { baseQuantityUnit, normalizeInventoryUnit } = require('../inventory-units');
@@ -636,28 +637,34 @@ async function getWeatherConditions() {
     // Hard 6s budget: a hanging weather API must degrade to the error shape,
     // not dangle the tool — in the field that hang is a tech staring at a
     // spinner, and in CI it blows the contract smoke's 10s budget and reds
-    // the whole server check (2026-08-01).
-    const res = await fetch('https://api.open-meteo.com/v1/forecast?latitude=27.40&longitude=-82.40&current=temperature_2m,wind_speed_10m,wind_gusts_10m,precipitation_probability,weather_code&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=America/New_York', {
-      signal: AbortSignal.timeout(6000),
+    // the whole server check (2026-08-01). The tool has no property in hand
+    // ("the service area"), so it passes the named service-area point
+    // explicitly to the shared property-forecast module.
+    const forecast = await fetchPropertyForecast({
+      latitude: SERVICE_AREA_DEFAULT_LOCATION.latitude,
+      longitude: SERVICE_AREA_DEFAULT_LOCATION.longitude,
+      timeoutMs: 6000,
     });
-    if (!res.ok) return { error: 'Weather API unavailable' };
-    const data = await res.json();
-    const c = data.current || {};
+    if (forecast.status !== 'ok') {
+      return { error: forecast.reason === 'http_error' ? 'Weather API unavailable' : 'Could not fetch weather' };
+    }
+    const c = forecast.current;
+    if (!c) return { error: 'Weather API unavailable' };
 
-    const windOk = (c.wind_speed_10m || 0) < 15;
-    const rainOk = (c.precipitation_probability || 0) < 40;
+    const windOk = (c.wind_mph || 0) < 15;
+    const rainOk = (c.precipitation_probability_pct || 0) < 40;
 
     return {
-      temperature: Math.round(c.temperature_2m || 0),
-      wind_speed: Math.round(c.wind_speed_10m || 0),
-      wind_gusts: Math.round(c.wind_gusts_10m || 0),
-      rain_probability: c.precipitation_probability || 0,
+      temperature: Math.round(c.temperature_f || 0),
+      wind_speed: Math.round(c.wind_mph || 0),
+      wind_gusts: Math.round(c.wind_gust_mph || 0),
+      rain_probability: c.precipitation_probability_pct || 0,
       spray_conditions: windOk && rainOk ? 'good' : !windOk ? 'too_windy' : 'rain_likely',
       recommendation: windOk && rainOk
         ? 'Good spray conditions. Proceed normally.'
         : !windOk
-          ? `Wind at ${Math.round(c.wind_speed_10m)}mph — consider delaying liquid applications or switching to granular.`
-          : `${c.precipitation_probability}% rain chance — check timing. Avoid spraying if rain expected within 2 hours.`,
+          ? `Wind at ${Math.round(c.wind_mph || 0)}mph — consider delaying liquid applications or switching to granular.`
+          : `${c.precipitation_probability_pct}% rain chance — check timing. Avoid spraying if rain expected within 2 hours.`,
     };
   } catch {
     return { error: 'Could not fetch weather' };
