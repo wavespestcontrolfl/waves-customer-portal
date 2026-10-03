@@ -105,46 +105,73 @@ router.get('/', async (req, res, next) => {
 // 2026-10-03). The main feed above returns 20 rows, too few for a nightly
 // auto-dispatch run, so these have their own read.
 const SCHEDULE_CHANGE_TYPES = ['visit_assigned', 'visit_unassigned', 'visit_rescheduled', 'visit_cancelled'];
+// Rows the Review list shows; the summary's count and "clear all" cover the
+// whole open set, past this cap (Codex #5783 P2).
 const SCHEDULE_CHANGE_LIMIT = 300;
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const UUID_PATTERN = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
 
-// GET /schedule-changes
+// The open schedule-change cards for one tech, with the visit row joined on
+// its uuid primary key (the payload id is pattern-checked before the cast,
+// so a malformed one joins nothing instead of failing the read).
+function openScheduleChanges(technicianId) {
+  return db('tech_notifications as n')
+    .leftJoin('scheduled_services as s', function joinVisit() {
+      this.on('s.id', '=', db.raw(`CASE WHEN n.payload->>'visit_id' ~* '${UUID_PATTERN}' THEN (n.payload->>'visit_id')::uuid END`));
+    })
+    .where('n.technician_id', technicianId)
+    .whereNull('n.dismissed_at')
+    .whereIn('n.type', SCHEDULE_CHANGE_TYPES);
+}
+
+// `soon` in SQL: the card's new or previous day is today or tomorrow (ET);
+// a card written before the ISO days existed falls back to the visit's day.
+function soonSql() {
+  const { etDateString, addETDays } = require('../utils/datetime-et');
+  const now = new Date();
+  const days = [etDateString(now), etDateString(addETDays(now, 1))];
+  return {
+    sql: "COALESCE(n.payload->>'date' IN (?, ?) OR n.payload->>'previous_date' IN (?, ?)"
+      + " OR (n.payload->>'date' IS NULL AND to_char(s.scheduled_date, 'YYYY-MM-DD') IN (?, ?)), false)",
+    bindings: [...days, ...days, ...days],
+  };
+}
+
+// GET /schedule-changes — soon cards first (never cut off by the cap), then
+// newest; `later_total` counts every open non-soon card; `as_of` bounds a
+// following clear-all to what this read could have shown.
 router.get('/schedule-changes', async (req, res, next) => {
   try {
-    const { etDateString, addETDays } = require('../utils/datetime-et');
-    const now = new Date();
-    const soonDays = new Set([etDateString(now), etDateString(addETDays(now, 1))]);
-    const rows = await db('tech_notifications as n')
-      .leftJoin('scheduled_services as s', db.raw("s.id::text = n.payload->>'visit_id'"))
-      .where('n.technician_id', req.technicianId)
-      .whereNull('n.dismissed_at')
-      .whereIn('n.type', SCHEDULE_CHANGE_TYPES)
-      .orderBy('n.created_at', 'desc')
-      .limit(SCHEDULE_CHANGE_LIMIT)
-      .select('n.id', 'n.type', 'n.message', 'n.payload', 'n.created_at',
-        db.raw("to_char(s.scheduled_date, 'YYYY-MM-DD') as visit_date"));
-    const changes = rows.map(({ visit_date: visitDate, ...row }) => {
-      const parsed = parseRow(row);
-      // Cards written before the ISO days were added carry only the display
-      // text; the visit's current day stands in for them.
-      const days = [parsed.payload.date || visitDate, parsed.payload.previous_date].filter(Boolean);
-      return { ...parsed, soon: days.some((day) => soonDays.has(day)) };
-    });
-    res.json({ changes });
+    const soon = soonSql();
+    const asOf = new Date();
+    const [rows, totals] = await Promise.all([
+      openScheduleChanges(req.technicianId)
+        .orderByRaw(`${soon.sql} DESC`, soon.bindings)
+        .orderBy('n.created_at', 'desc')
+        .limit(SCHEDULE_CHANGE_LIMIT)
+        .select('n.id', 'n.type', 'n.message', 'n.payload', 'n.created_at', db.raw(`${soon.sql} as soon`, soon.bindings)),
+      openScheduleChanges(req.technicianId)
+        .whereRaw(`NOT ${soon.sql}`, soon.bindings)
+        .count('* as n'),
+    ]);
+    const changes = rows.map((row) => ({ ...parseRow(row), soon: row.soon === true }));
+    res.json({ changes, later_total: Number(totals[0]?.n) || 0, as_of: asOf.toISOString() });
   } catch (err) { next(err); }
 });
 
-// POST /dismiss-batch { ids } — "Got it, clear all" on the summary card.
-// Only this tech's own schedule-change cards are cleared.
+// POST /dismiss-batch { as_of } — "Got it, clear all" on the summary card:
+// every open NON-soon schedule-change card of this tech written by `as_of`
+// (the read the tech was looking at). Soon cards keep their own Got it.
 router.post('/dismiss-batch', async (req, res, next) => {
   try {
-    const raw = Array.isArray(req.body?.ids) ? req.body.ids.map(String) : [];
-    const ids = raw.filter((id) => UUID_RE.test(id));
-    if (ids.length !== raw.length || !ids.length || ids.length > SCHEDULE_CHANGE_LIMIT) return res.status(400).json({ error: `Send 1–${SCHEDULE_CHANGE_LIMIT} ids` });
+    const asOf = new Date(req.body?.as_of);
+    if (Number.isNaN(asOf.getTime())) return res.status(400).json({ error: 'as_of is required' });
+    const soon = soonSql();
+    const ids = openScheduleChanges(req.technicianId)
+      .where('n.created_at', '<=', asOf)
+      .whereRaw(`NOT ${soon.sql}`, soon.bindings)
+      .select('n.id');
     const dismissed = await db('tech_notifications')
-      .where({ technician_id: req.technicianId })
       .whereIn('id', ids)
-      .whereIn('type', SCHEDULE_CHANGE_TYPES)
       .whereNull('dismissed_at')
       .update({ read: true, dismissed_at: new Date(), updated_at: new Date() });
     res.json({ success: true, dismissed });
