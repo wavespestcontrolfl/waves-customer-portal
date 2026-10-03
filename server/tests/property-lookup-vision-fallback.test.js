@@ -68,7 +68,7 @@ function mockNetwork({ gemini = ANALYSIS, openai = ANALYSIS, onGemini } = {}) {
     const target = String(url);
     if (target.includes('/geocode/')) return {
       ok: true,
-      json: async () => ({ status: 'OK', results: [{ formatted_address: ADDRESS, geometry: { location: { lat: 27.4, lng: -82.4 }, location_type: 'ROOFTOP' } }] }),
+      json: async () => ({ status: 'OK', results: [{ formatted_address: ADDRESS, types: ['street_address'], geometry: { location: { lat: 27.4, lng: -82.4 }, location_type: 'ROOFTOP' } }] }),
     };
     if (target.includes('staticmap')) return { ok: true, arrayBuffer: async () => Buffer.from('test-image') };
     const body = JSON.parse(options.body);
