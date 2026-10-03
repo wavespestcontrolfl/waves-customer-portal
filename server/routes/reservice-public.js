@@ -343,19 +343,28 @@ async function resolveLaneState(customer, laneCatalog) {
   };
 }
 
+// The page's lane verdict for a token: the customer row it loads, its lane
+// catalog, and which lanes are held, booked or bookable. null for an unknown
+// token. The GET below and the portal assistant's re-service offer both read
+// it, so the chat never offers what this page would refuse.
+async function pageLaneState(token) {
+  const customer = await loadByToken(token);
+  if (!customer) return null;
+  const laneCatalog = await loadLaneCatalog();
+  return { customer, laneCatalog, ...await resolveLaneState(customer, laneCatalog) };
+}
+
 router.get('/:token', async (req, res, next) => {
   if (!reserviceSelfServeEnabled() || !TOKEN_RE.test(req.params.token || '')) {
     return res.status(404).json({ error: 'Not found' });
   }
 
   try {
-    const customer = await loadByToken(req.params.token);
-    if (!customer) return res.status(404).json({ error: 'Not found' });
+    const pageState = await pageLaneState(req.params.token);
+    if (!pageState) return res.status(404).json({ error: 'Not found' });
+    const { customer, laneCatalog, lanes, bookableLanes } = pageState;
     // Customer-page-view log (bots/staff skipped, deduped, never blocks).
     void recordPageView({ req, page: 'reservice', customerId: customer.id, subjectType: 'customer', subjectId: customer.id });
-
-    const laneCatalog = await loadLaneCatalog();
-    const { lanes, bookableLanes } = await resolveLaneState(customer, laneCatalog);
 
     const base = {
       state: lanes.length === 0
@@ -878,6 +887,9 @@ router.post(
     }
   },
 );
+
+// For the portal assistant's re-service offer: the page's own verdict.
+router._internals = { TOKEN_RE, pageLaneState, reserviceLocationReviewRequired };
 
 router._test = {
   TOKEN_RE,

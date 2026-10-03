@@ -428,6 +428,7 @@ async function promoteStagedServicePhotos({ scheduledServiceId, serviceRecordId,
 
     await trx('scheduled_service_photo_staging')
       .where({ scheduled_service_id: scheduledServiceId })
+      .whereIn('id', staged.map((photo) => photo.id))
       .del();
     return promoted;
   });

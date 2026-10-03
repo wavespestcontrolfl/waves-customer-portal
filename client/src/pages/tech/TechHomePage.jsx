@@ -130,6 +130,10 @@ function isFastCompleteReportEligible(service) {
     // yard treatment such as tick control, under trace eligibility) keeps its
     // existing path, whose tracer draws that outline (codex local r15).
     && service?.traceVariant !== 'outline'
+    // A linked-project lookup that failed is not "no project": the visit
+    // keeps its existing path (a lane visit filed under pest control would
+    // otherwise fall through to here and complete on its own record).
+    && service?.linkedProjectLookupFailed !== true
     // A closed visit stays on the recap editor, which updates the existing
     // record (/complete would answer service_already_completed).
     && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));
@@ -148,10 +152,12 @@ function isLaneReportEligible(service) {
     && completesOnOwnRecord(service);
 }
 // A visit the report-flow sheet may complete on its own record: open, its
-// profile read, and not completing through a project.
+// profile and linked-project reads answered, and not completing through a
+// project.
 function completesOnOwnRecord(service) {
   const profile = service?.completionProfile;
   return service?.completionProfileLookupFailed !== true
+    && service?.linkedProjectLookupFailed !== true
     && !profile?.projectBacked && !profile?.requiresProject && !service?.linkedProject?.id
     && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));
 }
@@ -1440,6 +1446,9 @@ export default function TechHomePage({ section = 'today' }) {
             lng: fastCompleteService.lng ?? null,
           }}
           request={techRequest}
+          // GATE_FAST_COMPLETE_VOICE_FILL rides the same schedule row: only an
+          // exact true shows the mic, the Check chips and the office note.
+          voiceFillEnabled={fastCompleteService.fastCompleteVoiceFillEnabled === true}
           onClose={(options) => {
             setFastCompleteService(null);
             // A sheet blocked on a stale row asks for a refresh, so reopening

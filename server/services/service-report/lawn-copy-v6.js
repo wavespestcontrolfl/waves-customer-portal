@@ -8,8 +8,9 @@
  *
  *   field        source
  *   headline     snapshot.statusHeadline (the lawn's status and its top issue)
- *   whatWeDid    buildTreatmentSummary over the recorded products (never the
- *                AI treatment narrative that later overwrites the snapshot's copy)
+ *   whatWeDid    buildTreatmentSummary over the recorded products, with no
+ *                timing clause (never the AI treatment narrative that later
+ *                overwrites the snapshot's copy)
  *   whatToExpect owner-approved expectation rows matched to today's products,
  *                each row's visible-change sentence printed word for word (at most
  *                2 rows, 42 words). No by-next-visit timing: that needs the next
@@ -144,7 +145,7 @@ function buildLawnCopyV6(reportV2, ctx = {}, deps = {}) {
   const fields = emptyFields();
   if (!reportV2 || typeof reportV2 !== 'object') return { fields, expectRows: [] };
   fields.headline = clean(reportV2.snapshot && reportV2.snapshot.statusHeadline);
-  fields.whatWeDid = clean(buildTreatmentSummary(reportV2.treatment));
+  fields.whatWeDid = clean(buildTreatmentSummary(reportV2.treatment, { noTiming: true }));
   fields.watching = buildWatching(reportV2);
   let expectRows = [];
   try {

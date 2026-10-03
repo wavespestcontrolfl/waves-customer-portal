@@ -183,9 +183,9 @@ async function loadPestReserviceContext(serviceId, knex = db) {
   if (!ok) return { ok: false, reason };
   if (profile?.serviceKey !== 'pest_re_service') return { ok: false, reason: 'not_pest_re_service' };
   if (!eligible) return { ok: false, reason: 'not_eligible' };
-  const catalog = (await loadRecapCatalogProducts(knex))
+  const catalog = (await loadRecapCatalogProducts(knex).catch(() => []))
     .filter((row) => row && row.id != null && String(row.name || '').trim() && !HIDDEN_CATEGORIES.has(categoryKey(row)));
-  // The shared loader turns a failed read into []: with no catalog nothing can be
+  // A failed read leaves no usable catalog: with no catalog nothing can be
   // mapped, so this sheet fails closed rather than ask a model to choose from nothing.
   if (!catalog.length) {
     logger.warn(`[voice-fill] product catalog empty or unavailable for ${serviceId}`);

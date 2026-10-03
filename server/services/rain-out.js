@@ -985,15 +985,21 @@ async function loadOccupancy({
 const EMPTY_OCCUPANCY = { rows: [], canName: () => false, nameById: new Map() };
 
 function conflictsForTarget(occupancy, serviceId, date, window, {
-  routeSiblingIds = null, excludeServiceIds = null,
+  routeSiblingIds = null, excludeServiceIds = null, technicianId = null,
 } = {}) {
-  const { windowsOverlap } = require('./scheduling/occupancy');
+  const { windowsOverlap, techScopedConfirmActive } = require('./scheduling/occupancy');
+  // Second technician (GATE_MULTI_TECH_CONFIRM + capacity, dark): with a
+  // technician named, only that route's rows and unassigned rows count —
+  // findConflictingVisits' applyTechScope predicate. Gate off = tech-blind.
+  const scopeTechId = technicianId != null && technicianId !== '' && techScopedConfirmActive()
+    ? String(technicianId) : null;
   const startMin = hhmmToMinutes(window.start);
   const endMin = hhmmToMinutes(window.end);
   if (startMin == null || endMin == null) return [];
   const excluded = new Set((excludeServiceIds || [serviceId]).map(String));
   const rows = occupancy.rows.filter((r) => r.date === date
     && !excluded.has(String(r.id))
+    && (!scopeTechId || r.technician_id == null || String(r.technician_id) === scopeTechId)
     && windowsOverlap(r.startMin, r.endMin, startMin, endMin));
   if (!rows.length) return [];
   // Partition BEFORE the cap. The sheets drop flagged siblings while
@@ -1335,6 +1341,7 @@ async function checkSlots({ targets, caller = null } = {}) {
     return {
       conflicts: conflictsForTarget(occupancyByDate.get(p.date), null, p.date, p.window, {
         excludeServiceIds: p.excludeServiceIds,
+        technicianId: p.technicianId,
       }),
     };
   }));

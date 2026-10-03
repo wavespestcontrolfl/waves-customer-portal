@@ -1377,10 +1377,143 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       expect((await load({ customer_request: 'Ants by the pool', customer_request_source: 'email' })).notes.customerRequest).toEqual({ text: 'Ants by the pool', source: null, pests: [] });
     });
 
+    // factsDb's chain is not awaitable as a list; sms_log gets one that is.
+    const onSite = { status: 'on_site' };
+    const smsReads = { count: 0, until: null, since: null, grouped: [] };
+    beforeEach(() => { smsReads.count = 0; smsReads.until = null; smsReads.since = null; smsReads.grouped = []; });
+    const withTexts = (row, texts) => {
+      const base = factsDb({ 'scheduled_services as ss': { ...visit(false), ...row }, property_preferences: prefs });
+      return Object.assign((table) => {
+        if (table !== 'sms_log') return base(table);
+        const chain = {};
+        for (const m of ['whereRaw', 'select', 'orderBy']) chain[m] = () => chain;
+        let size = Infinity; let skip = 0; let before = Infinity; let after = -Infinity;
+        chain.offset = (n) => { skip = n; return chain; };
+        chain.where = (...args) => {
+          // excludeRecruitingSmsLog's grouped predicate: record that it was applied.
+          if (typeof args[0] === 'function') { smsReads.grouped.push(args[0].name); return chain; }
+          if (args[0] === 'created_at' && args[1] === '<') { before = new Date(args[2]).getTime(); smsReads.until = new Date(args[2]); }
+          if (args[0] === 'created_at' && args[1] === '>=') { after = new Date(args[2]).getTime(); smsReads.since = new Date(args[2]); }
+          return chain;
+        };
+        chain.limit = (n) => { size = n; return chain; };
+        const page = () => texts.map((t, i) => ({ id: `sms-${i}`, ...t })).filter((t) => { const at = Date.parse(t.created_at); return at < before && at >= after; }).slice(skip, skip + size);
+        chain.then = (res, rej) => (texts instanceof Error ? Promise.reject(texts) : Promise.resolve(page())).then(res, rej);
+        smsReads.count += 1;
+        return chain;
+      }, { raw: base.raw });
+    };
+
+    test('on → the customer\'s texts, newest three, tapbacks dropped, codes scrubbed', async () => {
+      process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = 'true';
+      const texts = [
+        { created_at: '2026-09-03T15:00:00Z', message_body: 'Liked "Your visit is confirmed"', message_type: 'sms' },
+        { created_at: '2026-09-02T15:00:00Z', message_body: 'Ants are back by the pool, gate is 4545#', message_type: 'sms' },
+        { created_at: '2026-09-01T15:00:00Z', message_body: 'Thanks', message_type: 'sms_reaction' },
+        { created_at: '2026-08-30T15:00:00Z', message_body: 'Also wasps by the lanai', message_type: 'sms' },
+        { created_at: '2026-08-29T15:00:00Z', message_body: 'See you Thursday', message_type: 'sms' },
+        { created_at: '2026-08-28T15:00:00Z', message_body: 'Fourth one', message_type: 'sms' },
+      ];
+      const out = await jobCard.loadJobCardFacts('svc1', withTexts(onSite, texts), deps);
+      expect(out.notes.customerTexts.map((t) => t.date)).toEqual(['2026-09-02', '2026-08-30', '2026-08-29']);
+      expect(out.notes.customerTexts[0].text).toMatch(/^Ants are back by the pool/);
+      expect(out.notes.customerTexts[0].text).not.toContain('4545');
+      // Texts stay display-only: the paragraph never reads them.
+      expect(JSON.stringify(out.facts)).not.toContain('pool');
+    });
+
+    test('on → a long run of tapbacks never hides the real text before it (Codex r1)', async () => {
+      process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = 'true';
+      // 300 tapbacks only their body gives away: more than any fixed page cap (Codex r2).
+      const tapbacks = Array.from({ length: 300 }, (_, i) => ({ created_at: new Date(Date.parse('2026-09-03T15:00:00Z') - i * 60000).toISOString(), message_body: 'Liked "Your visit is confirmed"', message_type: 'sms' }));
+      const out = await jobCard.loadJobCardFacts('svc1', withTexts(onSite, [...tapbacks, { created_at: '2026-09-01T15:00:00Z', message_body: 'Ants are back by the pool', message_type: 'sms' }]), deps);
+      expect(out.notes.customerTexts).toEqual([{ date: '2026-09-01', text: 'Ants are back by the pool' }]);
+    });
+
+    test('rows sharing one timestamp across a page edge are never skipped (Codex r6)', async () => {
+      process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = 'true';
+      // 30 rows at the SAME instant: 29 tapbacks, then the real text — past the first page of 25.
+      const same = '2026-09-03T15:00:00Z';
+      const rows = [...Array.from({ length: 29 }, () => ({ created_at: same, message_body: 'Liked "Your visit is confirmed"', message_type: 'sms' })), { created_at: same, message_body: 'Wasps by the lanai door', message_type: 'sms' }];
+      const out = await jobCard.loadJobCardFacts('svc1', withTexts(onSite, rows), deps);
+      expect(out.notes.customerTexts).toEqual([{ date: '2026-09-03', text: 'Wasps by the lanai door' }]);
+    });
+
+    test('recruiting rows are excluded by the shared sms_log predicate (Codex r4)', async () => {
+      process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = 'true';
+      await jobCard.loadJobCardFacts('svc1', withTexts(onSite, []), deps);
+      expect(smsReads.grouped).toContain('recruitingSmsLogFilter');
+      // The real predicate drops job_* rows and keeps the rest.
+      const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
+      const sql = excludeRecruitingSmsLog(require('knex')({ client: 'pg' })('sms_log')).toString();
+      expect(sql).toContain('"message_type" is null or "sms_log"."message_type" not like');
+      expect(sql).toContain('job');
+    });
+
+    test('the texts window is the 14 ET days up to the visit day, never past now (owner 2026-10-03)', async () => {
+      const { textsWindow } = jobCard._test;
+      // A past visit: its own day closes the window.
+      const past = textsWindow('2026-09-04', new Date('2026-10-03T12:00:00Z'));
+      expect(past.since.toISOString()).toBe('2026-08-22T04:00:00.000Z');
+      expect(past.until.toISOString()).toBe('2026-09-05T04:00:00.000Z');
+      // Today's visit: up to this read, so a text sent inside the arrival window shows.
+      const now = new Date('2026-09-04T13:30:00Z');
+      expect(textsWindow('2026-09-04', now).until).toEqual(now);
+      // A future visit: still the 14 days before it, ending now.
+      const ahead = textsWindow('2026-09-10', now);
+      expect(ahead.since.toISOString()).toBe('2026-08-28T04:00:00.000Z');
+      expect(ahead.until).toEqual(now);
+      // The read uses exactly that window, whatever the visit's status or stamps.
+      process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = 'true';
+      await jobCard.loadJobCardFacts('svc1', withTexts({ status: 'rescheduled', actual_start_time: '2026-08-20T14:00:00Z' }, []), deps);
+      expect(smsReads.since.toISOString()).toBe('2026-08-22T04:00:00.000Z');
+      expect(smsReads.until.toISOString()).toBe('2026-09-05T04:00:00.000Z');
+    });
+
+    test('readiness builds never read texts or photos (Codex r1)', async () => {
+      process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = 'true';
+      process.env.GATE_VISIT_PREP_PHOTOS = 'true';
+      const spy = jest.spyOn(require('../services/visit-prep'), 'customerFlaggedFacts').mockResolvedValue(null);
+      try {
+        await jobCard.buildJobCard('svc1', { dbh: withTexts({}, []), readinessOnly: true, deps: { ...deps, protocols: {} }, now: new Date('2026-09-04T12:00:00Z') });
+        expect(smsReads.count).toBe(0);
+        expect(spy).not.toHaveBeenCalled();
+      } finally { spy.mockRestore(); delete process.env.GATE_VISIT_PREP_PHOTOS; }
+    });
+
+    test('on → an unreadable text history is null, not an empty list', async () => {
+      process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = 'true';
+      const out = await jobCard.loadJobCardFacts('svc1', withTexts({}, new Error('down')), deps);
+      expect(out.notes.customerTexts).toBeNull();
+    });
+
+    test('photos: only with GATE_VISIT_PREP_PHOTOS too, from the Visit Brief reader; ids and dates never scrubbed', async () => {
+      process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = 'true';
+      const visitPrep = require('../services/visit-prep');
+      const flagged = [{ id: 'sub1', sentAt: '2026-09-03T12:00:00.000Z', topic: 'pest', locationOnProperty: 'back_yard', note: 'Nest by gate 4545#', photoIds: ['aaaa-4545-bbbb'] }];
+      const spy = jest.spyOn(visitPrep, 'customerFlaggedFacts').mockResolvedValue(flagged);
+      try {
+        expect((await load({})).notes).not.toHaveProperty('prepPhotos');
+        expect(spy).not.toHaveBeenCalled();
+        process.env.GATE_VISIT_PREP_PHOTOS = 'true';
+        const out = await load({});
+        expect(out.notes.prepPhotos).toEqual([{ sentAt: '2026-09-03T12:00:00.000Z', topic: 'pest', locationOnProperty: 'back_yard', note: expect.not.stringContaining('4545'), photoIds: ['aaaa-4545-bbbb'] }]);
+        spy.mockRejectedValueOnce(new Error('down'));
+        expect((await load({})).notes).not.toHaveProperty('prepPhotos');
+        spy.mockResolvedValueOnce(null);
+        expect((await load({})).notes.prepPhotos).toBeNull();
+      } finally {
+        spy.mockRestore();
+        delete process.env.GATE_VISIT_PREP_PHOTOS;
+      }
+    });
+
     test('only exactly "true" turns it on', async () => {
       for (const v of ['1', 'TRUE', 'yes']) {
         process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = v;
-        expect((await load(booked)).notes).not.toHaveProperty('customerRequest');
+        const notes = (await load(booked)).notes;
+        expect(notes).not.toHaveProperty('customerRequest');
+        expect(notes).not.toHaveProperty('customerTexts');
       }
     });
   });

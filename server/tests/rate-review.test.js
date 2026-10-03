@@ -798,6 +798,122 @@ describe('anniversary and tenure', () => {
     expect(P.resolveAnniversary({ firstCompletedVisit: '2026-05-20', acceptedAt: null, memberSince: null })).toMatchObject({ date: '2026-05-20', source: 'first_visit' });
     expect(P.resolveAnniversary({ firstCompletedVisit: null, acceptedAt: null, memberSince: null })).toMatchObject({ date: null, source: null });
   });
+  test('imported account, only program, no history: member_since dates the line (Fix B, owner 2026-10-02)', () => {
+    const imported = { firstCompletedVisit: null, acceptedAt: null, memberSince: '2025-06-06', accountCreatedAt: '2026-04-06T14:00:00Z' };
+    expect(P.resolveAnniversary({ ...imported, onlyActiveFamily: true })).toMatchObject({ date: '2025-06-06', source: 'member_since_import', conflict: false });
+    // a second active program on the account: the undated one may be a later add — held
+    expect(P.resolveAnniversary({ ...imported, onlyActiveFamily: false })).toMatchObject({ date: null, source: null });
+    // an account opened in the portal (membership on/near created_at): an admin-booked program can be days old — held
+    expect(P.resolveAnniversary({ ...imported, memberSince: '2026-04-01', onlyActiveFamily: true })).toMatchObject({ date: null, source: null });
+    expect(P.resolveAnniversary({ ...imported, accountCreatedAt: null, onlyActiveFamily: true })).toMatchObject({ date: null, source: null });
+    // any completed visit on the account takes the ordinary rules (not the import exception)
+    expect(P.resolveAnniversary({ ...imported, onlyActiveFamily: true, accountFirstVisit: '2026-05-01' })).toMatchObject({ date: null, source: null });
+    // any portal activity on the account (accepted estimate by status or timestamp, a completed visit of any kind, a recurring add-on): not an import
+    expect(P.resolveAnniversary({ ...imported, onlyActiveFamily: true, accountHasActivity: true })).toMatchObject({ date: null, source: null });
+    expect(P.isImportedAccount('2025-06-06', '2026-04-06')).toBe(true);
+    expect(P.isImportedAccount('2026-03-10', '2026-04-06')).toBe(false); // 27 days < IMPORTED_ACCOUNT_LEAD_DAYS
+    expect(P.isImportedAccount('2026-03-07', '2026-04-06')).toBe(true); // exactly 30
+    expect(P.informationalFlags({ anniversarySource: 'member_since_import', unknownInteractionVisits: 0, capturedConversationVisits: 0, duesAttributedVisits: 0, compositeVisits: 0 })).toContain('anniversary_from_membership');
+  });
+  test('a stale no_anniversary carry dies once the line is dated outside the window (Fix B)', () => {
+    const latest = { status: 'exception', flags: JSON.stringify(['no_anniversary']), review_date: null, computed_at: '2026-10-02T10:20:00Z', batch_key: '2026-10' };
+    const dated = { anniversary: { date: '2025-06-06' } };
+    const win = { from: '2026-12-06', to: '2027-01-05', carryFloor: '2026-08-03' };
+    expect(P.reviewOccurrence(dated, latest, win)).toBeNull(); // not carried on computed_at
+    expect(P.reviewOccurrence(dated, { ...latest, flags: JSON.stringify(['past_due']), review_date: '2026-11-20' }, win)).toMatchObject({ reviewDate: '2026-11-20', carriedFrom: '2026-10' }); // a dated hold still carries
+    expect(P.reviewOccurrence({ anniversary: { date: null } }, latest, win)).toMatchObject({ reviewDate: null }); // still undated: listed as before
+    expect(P.reviewOccurrence({ anniversary: { date: '2025-12-20' } }, latest, win)).toMatchObject({ reviewDate: '2026-12-20', carriedFrom: null }); // dated inside the window: its anniversary
+  });
+  test('"only program" counts plan lines and service keys, not consolidated families (Fix B)', () => {
+    const now = new Date('2026-10-01T10:20:00Z');
+    const customer = { id: 'c1', member_since: '2025-06-06', created_at: '2026-04-06T14:00:00Z' };
+    const mk = (planLine, serviceKeys) => ({ customer, familyKey: 'tree_shrub', planLine, serviceKeys, first: null, acceptedAt: null, visitsPerYear: 6 });
+    const win = { from: '2026-11-05', to: '2026-12-05', now, latestByLine: new Map() };
+    const one = mk({ account_lines: 1 }, ['tree_shrub']);
+    P.selectReviewEntries([one], win);
+    expect(one.anniversary).toMatchObject({ date: '2025-06-06', source: 'member_since_import' });
+    const bundled = mk({ account_lines: 1 }, ['tree_shrub', 'palm_injection']); // two programs in one family entry
+    P.selectReviewEntries([bundled], win);
+    expect(bundled.anniversary).toMatchObject({ date: null });
+    const twoKeysOneProgram = { ...mk({ account_lines: 1 }, ['quarterly_pest_control', 'pest_control_quarterly_legacy']), familyKey: 'pest_control' }; // a frozen legacy key beside the current one
+    P.selectReviewEntries([twoKeysOneProgram], win);
+    expect(twoKeysOneProgram.anniversary).toMatchObject({ date: '2025-06-06', source: 'member_since_import' });
+    const twoLines = mk({ account_lines: 2 }, ['tree_shrub']);
+    P.selectReviewEntries([twoLines], win);
+    expect(twoLines.anniversary).toMatchObject({ date: null });
+    // single-key composites are two programs in one row; a keyless tree_shrub line is of unknown composition
+    for (const key of ['pest_termite_bait_quarterly', 'lawn_tree_shrub_combo', 'pest_rodent_quarterly', 'lawn_mosquito_combo', 'pest_mosquito_bundle']) expect(P.isCompositeCatalogKey(key)).toBe(true);
+    for (const key of ['quarterly_pest_control', 'palm_injection', 'tree_shrub_bimonthly', 'rodent_bait_quarterly', 'lawn_care_9x', '', null]) expect(P.isCompositeCatalogKey(key)).toBe(false);
+    for (const keys of [['pest_termite_bait_quarterly'], ['lawn_tree_shrub_combo'], ['pest_rodent_quarterly'], []]) {
+      const composite = mk({ account_lines: 1 }, keys);
+      P.selectReviewEntries([composite], win);
+      expect(composite.anniversary).toMatchObject({ date: null });
+    }
+    const pest = { ...mk({ account_lines: 1 }, []), familyKey: 'pest_control' }; // a keyless single-program family is one program
+    P.selectReviewEntries([pest], win);
+    expect(pest.anniversary).toMatchObject({ date: '2025-06-06', source: 'member_since_import' });
+    const accepted = mk({ account_lines: 1 }, ['tree_shrub']);
+    P.selectReviewEntries([accepted], { ...win, activeAccounts: new Map([['c1', { accountActivity: true, nonLivePrograms: [] }]]) });
+    expect(accepted.anniversary).toMatchObject({ date: null });
+    const churned = mk({ account_lines: 1 }, ['tree_shrub']);
+    P.selectReviewEntries([churned], { ...win, activeAccounts: new Map([['c1', { accountActivity: false, nonLivePrograms: ['tree_shrub'] }]]) });
+    expect(churned.anniversary).toMatchObject({ date: '2025-06-06', source: 'member_since_import' }); // same-family cancelled rows = rescheduling
+    const other = mk({ account_lines: 1 }, ['tree_shrub']);
+    P.selectReviewEntries([other], { ...win, activeAccounts: new Map([['c1', { accountActivity: false, nonLivePrograms: ['pest_control'] }]]) });
+    expect(other.anniversary).toMatchObject({ date: null });
+    const palmChurn = mk({ account_lines: 1 }, ['tree_shrub']);
+    P.selectReviewEntries([palmChurn], { ...win, activeAccounts: new Map([['c1', { accountActivity: false, nonLivePrograms: ['palm'] }]]) });
+    expect(palmChurn.anniversary).toMatchObject({ date: null }); // a cancelled palm program on a new tree/shrub line = second program
+    expect(other.anniversary).toMatchObject({ date: null }); // another family's cancelled series = a second program
+    const accepted2 = mk({ account_lines: 1 }, ['tree_shrub']);
+    P.selectReviewEntries([accepted2], { ...win, activeAccounts: new Map([['c1', { accountActivity: true, nonLivePrograms: [] }]]) });
+    expect(accepted.anniversary).toMatchObject({ date: null });
+  });
+  test('the account-activity gate is ONE query: accepted by status or timestamp, any completed visit, a live recurring add-on', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
+    const body = src.slice(src.indexOf('async function loadAccountActivity'), src.indexOf('async function loadLiveTerms'));
+    expect(body).toMatch(/e\.accepted_at IS NOT NULL OR e\.status = 'accepted'/);
+    expect(body).toMatch(/s\.status = 'completed'\)/); // any completed visit, any family / kind
+    // per-family: non-live rows (cancelled / skipped / past) are listed by family; another family's = a second program
+    // non-live rows are aggregated as family|catalog-key and normalized to PROGRAM identities (palm ≠ tree/shrub; composites split)
+    expect(body).toMatch(/array_agg\(DISTINCT \$\{LINE_SQL\} \|\| '\|' \|\| COALESCE\(s\.service_key_snapshot, sv\.service_key, ''\)\)/);
+    // only recurring-plan history counts as a prior program (a cancelled one-time job in the family is not one)
+    expect(body).toMatch(/NOT \(\$\{LIVE_STATUS_SQL\} AND s\.scheduled_date >= \?\) AND \$\{DATING_ROW_SQL\}\) AS non_live_lines/);
+    // an add-on's frozen category snapshot outranks the mutable catalog row
+    expect(body).toMatch(/COALESCE\(scheduled_service_addons\.service_category_snapshot, asv\.category, 'other'\)/);
+    // recurring add-ons on non-live visits are program history too (minus the one-time signup-fee key)
+    expect(body).toMatch(/AND \$\{ADDON_LINE_IS_PLAN_SQL\}\n\s+AND COALESCE\(scheduled_service_addons\.service_key_snapshot, asv\.service_key, ''\) NOT IN \(\$\{oneTimeAddonKeys\}\)\) AS non_live_addons/);
+    // a live upcoming standalone recurring row (not a plan row: outside the book) is a program the gate must see
+    expect(body).toMatch(/\$\{LIVE_STATUS_SQL\} AND s\.scheduled_date >= \? AND \$\{DATING_ROW_SQL\} AND NOT \$\{PLAN_ROW_SQL\}\) AS live_standalone_lines/);
+    expect(body).toMatch(/\[today, today, today, today, customerIds\]/); // four date bindings, in order
+    expect(P.programsForNonLiveLine('tree_shrub|palm_injection')).toEqual(['palm']);
+    expect(P.programsForNonLiveLine('tree_shrub|tree_shrub_bimonthly')).toEqual(['tree_shrub']);
+    expect(P.programsForNonLiveLine('tree_shrub|')).toEqual(['tree_shrub']);
+    expect(P.programsForNonLiveLine('pest_control|pest_rodent_quarterly').sort()).toEqual(['pest', 'rodent']);
+    expect(P.programsForNonLiveLine('pest_control|quarterly_pest_control')).toEqual(['pest_control']);
+    expect(P.programsForNonLiveLine('|')).toEqual([]);
+    const act = new Map([['c1', { accountActivity: false, nonLivePrograms: ['pest_control'] }], ['c2', { accountActivity: false, nonLivePrograms: ['pest_control', 'lawn_care'] }], ['c3', { accountActivity: true, nonLivePrograms: [] }], ['c4', { accountActivity: false, nonLivePrograms: ['palm'] }]]);
+    expect(P.accountActiveFor(act, 'c1', 'pest_control')).toBe(false); // the same program rescheduled
+    expect(P.accountActiveFor(act, 'c1', 'lawn_care')).toBe(true); // a cancelled pest series = another program
+    expect(P.accountActiveFor(act, 'c2', 'pest_control')).toBe(true);
+    expect(P.accountActiveFor(act, 'c3', 'pest_control')).toBe(true);
+    expect(P.accountActiveFor(act, 'c4', 'tree_shrub')).toBe(true); // a cancelled palm program is not a tree/shrub reschedule
+    expect(P.accountActiveFor(act, 'c4', 'palm')).toBe(false);
+    expect(P.accountActiveFor(act, 'c9', 'pest_control')).toBe(false);
+    expect(body).toMatch(/FROM service_records sr WHERE sr\.customer_id = c\.id AND sr\.status = 'completed'/); // imported history often lives only there
+    expect(body).toMatch(/FROM scheduled_services s WHERE s\.customer_id = c\.id AND s\.status = 'completed'\)/); // the completed clause carries no family filter
+    expect(body).toMatch(/scheduled_service_addons/);
+    expect(body).toMatch(/\$\{ADDON_LINE_IS_PLAN_SQL\}/);
+    expect(body).toMatch(/\$\{LIVE_STATUS_SQL\}/);
+    // the signup-fee add-on (one-time whatever its pattern column says) is not a program
+    // the add-on's key is service_key_snapshot, else the catalog row via service_id (there is no addons.service_key column)
+    expect(body).toMatch(/COALESCE\(scheduled_service_addons\.service_key_snapshot, asv\.service_key, ''\) NOT IN \(\$\{oneTimeAddonKeys\}\)/);
+    expect(body).toMatch(/LEFT JOIN services asv ON asv\.id = scheduled_service_addons\.service_id/);
+    expect(body).not.toMatch(/scheduled_service_addons\.service_key[^_]/);
+    expect(P.ONE_TIME_ADDON_SERVICE_KEYS).toEqual(['waveguard_membership']);
+    const sched = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+    expect(sched).toMatch(/const ONE_TIME_ADDON_SERVICE_KEYS = new Set\(\['waveguard_membership'\]\)/); // the mirror stays in step
+  });
   test('a portal-sold line on an account that predates it by > 90 days is flagged, not held', () => {
     const out = P.resolveAnniversary({ firstCompletedVisit: '2026-09-05', acceptedAt: '2026-09-01T15:00:00Z', memberSince: '2024-05-11' });
     expect(out).toMatchObject({ date: '2026-09-05', source: 'first_visit', conflict: true });
@@ -1355,7 +1471,7 @@ describe('engine replay guards', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
     expect(src).toMatch(/accountFirstVisit: accountFirst\.get\(entry\.customer\.id\) \|\| null,\n\s+presenceWindowDays: presenceWindowFor\(entry\.visitsPerYear\),/);
     // the account's earliest visit comes from the COMPLETE completed history, cancelled programs included — never just the active book
-    expect(src).toMatch(/selectReviewEntries\(book, \{ from, to, now, latestByLine, firstVisits: inputs\.firstVisits \}\)/);
+    expect(src).toMatch(/selectReviewEntries\(book, \{ from, to, now, latestByLine, firstVisits: inputs\.firstVisits, activeAccounts: inputs\.activeAccounts \|\| new Map\(\) \}\)/);
     const history = new Map([['c|lawn_care', { customer_id: 'c', line: 'lawn_care', first_visit: '2026-01-05' }], ['c|tree_shrub', { customer_id: 'c', line: 'tree_shrub', first_visit: '2026-08-20' }]]);
     expect(P.accountFirstVisits(history, []).get('c')).toBe('2026-01-05');
     expect(P.accountFirstVisits(null, [{ customer: { id: 'c' }, first: { first_visit: '2026-08-20' } }]).get('c')).toBe('2026-08-20');

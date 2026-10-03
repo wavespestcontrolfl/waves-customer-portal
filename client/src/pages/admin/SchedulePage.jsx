@@ -37,6 +37,7 @@ import { isCanonicallyMarkedProvenance } from '@pricing-regime-marker';
 // - RescheduleModal's slot-conflict handling — what happens if the
 //   chosen slot is taken between modal open and submit?
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
+import { useVisitPrepPhotoState } from "../../hooks/useVisitPrepPhotoUrls";
 import useIsMobile from "../../hooks/useIsMobile";
 import useLockBodyScroll from "../../hooks/useLockBodyScroll";
 import { formatLabelRate, formatMeasuredAmount, formatMeasuredRange } from "../../lib/mix-amount";
@@ -2149,9 +2150,25 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     propertyId: selectedPropertyId || undefined,
   });
   const stripCurrent = { currentDate: form.scheduledDate, currentStart: form.windowStart };
+  // The form as it opened: a save that leaves the visit's slot alone (a
+  // price or notes edit) is not overriding anything, even on a day the
+  // strip calls over-booked.
+  // Everything the route check reads: date, the window (HH:MM — stored
+  // values arrive as HH:MM:SS), technician, the summed duration the hint
+  // searches with (add-ons included) and a re-picked Service address.
+  const slotKey = [
+    form.scheduledDate,
+    String(form.windowStart || "").slice(0, 5),
+    String(form.windowEnd || "").slice(0, 5),
+    form.technicianId || "",
+    slotCheckDuration,
+    selectedPropertyId || "",
+  ].join("|");
+  const openedSlotKey = useRef(slotKey).current;
+  const slotEdited = slotKey !== openedSlotKey;
   // A VERIFIED miss only (never "could not check"): Save stays enabled —
   // the strip is advisory — but says what it is about to do.
-  const routeMissVerdict = availabilityVerdict(availability, stripCurrent)?.tone === "miss";
+  const routeMissVerdict = slotEdited && availabilityVerdict(availability, stripCurrent)?.tone === "miss";
   // Estimate provenance: if this appointment was scheduled from an accepted
   // estimate, surface the same quote/deposit/charge card the New Appointment
   // modal and the appointment detail sheet show. The endpoint resolves the
@@ -7176,6 +7193,66 @@ export function JobCardCustomerRequest({ request, D }) {
   );
 }
 
+// The customer's own texts from the 14 days up to the visit's day (same
+// gate). null = the history could not be read — said so, never shown as
+// "no texts".
+export function JobCardCustomerTexts({ texts, D }) {
+  if (texts === undefined || (Array.isArray(texts) && texts.length === 0)) return null;
+  return (
+    <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, padding: "10px 12px", margin: "0 0 14px", fontSize: 14, lineHeight: 1.5, color: D.text }}>
+      <div style={{ fontWeight: 500, marginBottom: 4 }}>Customer texts (last 14 days)</div>
+      {texts === null
+        ? <div style={{ color: D.muted }}>Text history unavailable right now.</div>
+        : texts.map((t, i) => (
+          <div key={i}><span style={{ color: D.muted }}>{t.date}: </span>{`\u201C${t.text}\u201D`}</div>
+        ))}
+    </div>
+  );
+}
+
+const JOB_CARD_PREP_TOPICS = { pest: "Pest", lawn: "Lawn", tree_shrub: "Tree & shrub", other: "Something else" };
+const JOB_CARD_PREP_LOCATIONS = {
+  front_yard: "Front yard", back_yard: "Back yard", side_yard: "Side yard", inside_home: "Inside home",
+  garage_lanai: "Garage / lanai", garden_beds: "Garden beds", other: "Other",
+};
+// Photos the customer sent before the visit. Thumbnails come from the
+// ownership-scoped GET /admin/schedule/:id/visit-prep-photos through the
+// Visit Brief's own link hook: refreshed before the one-hour links expire,
+// withheld on resume once stale. A failed fetch is said, with a Retry; the
+// topic, place and note always show.
+export function JobCardPrepPhotos({ serviceId, submissions, D, request = adminFetch }) {
+  const photoSignature = (submissions || []).flatMap((s) => s.photoIds || []).join(",");
+  const { urls, failed, retry } = useVisitPrepPhotoState(serviceId, !!photoSignature, request, photoSignature, { retryOnFailure: true });
+  if (!submissions?.length) return null;
+  return (
+    <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, padding: "10px 12px", margin: "0 0 14px", fontSize: 14, lineHeight: 1.5, color: D.text }}>
+      <div style={{ fontWeight: 500, marginBottom: 4 }}>Photos the customer sent</div>
+      {failed && (
+        <div style={{ color: D.muted, marginBottom: 6 }}>
+          Photos unavailable right now.{" "}
+          <button type="button" onClick={retry} style={{ background: "none", border: "none", padding: 0, color: D.text, textDecoration: "underline", cursor: "pointer", fontSize: 14 }}>Retry</button>
+        </div>
+      )}
+      {submissions.map((s, i) => {
+        const where = [JOB_CARD_PREP_LOCATIONS[s.locationOnProperty], JOB_CARD_PREP_TOPICS[s.topic]].filter(Boolean).join(" · ");
+        return (
+          <div key={i} style={{ marginBottom: 8 }}>
+            {where && <div style={{ color: D.muted }}>{where}</div>}
+            {s.note && <div>{`\u201C${s.note}\u201D`}</div>}
+            {s.photoIds?.length > 0 && (
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 4 }}>
+                {s.photoIds.map((id, n) => (urls[id]
+                  ? <a key={id} href={urls[id]} target="_blank" rel="noopener noreferrer"><img src={urls[id]} alt={`Customer photo ${n + 1}`} style={{ width: 64, height: 64, objectFit: "cover", borderRadius: 2, border: `1px solid ${D.border}` }} /></a>
+                  : <div key={id} aria-label={`Customer photo ${n + 1} ${failed ? "unavailable" : "loading"}`} style={{ width: 64, height: 64, borderRadius: 2, border: `1px solid ${D.border}` }} />))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function JobCardTab({ card, loading, error, D }) {
   if (loading) {
     return <div style={{ padding: 40, textAlign: "center", color: D.muted }}>Loading job card...</div>;
@@ -7191,6 +7268,8 @@ function JobCardTab({ card, loading, error, D }) {
         <p style={{ fontSize: 14, lineHeight: 1.5, color: D.text, margin: "0 0 14px" }}>{card.paragraph.text}</p>
       )}
       <JobCardCustomerRequest request={card.notes?.customerRequest} D={D} />
+      <JobCardCustomerTexts texts={card.notes?.customerTexts} D={D} />
+      <JobCardPrepPhotos serviceId={card.serviceId} submissions={card.notes?.prepPhotos} D={D} />
       {card.notes?.chemicalSensitivity && (
         <p style={{ fontSize: 14, lineHeight: 1.5, color: D.text, margin: "0 0 8px" }}>Chemical sensitivity: {card.notes.chemicalSensitivity}</p>
       )}
@@ -9519,6 +9598,47 @@ export function restoredActivityScoreState(activity, values, savedScore, savedTo
     score: Number.isInteger(savedScore) ? savedScore : null,
     touched: !!savedTouched,
   };
+}
+
+// The product rows a cockroach report reads its work from, as the completion
+// submits them (each product's id, application method and area): the
+// standard wording preview sends these.
+export function standardWordingProductRows(selectedProducts = [], serviceType = "", areasServiced = []) {
+  return (selectedProducts || []).map((p) => ({
+    productId: p.productId,
+    applicationMethod: productApplicationMethod(p, serviceType),
+    applicationArea: p.applicationArea || (areasServiced.length === 1 ? areasServiced[0] : null),
+  }));
+}
+
+// The standard wording a nothing-found report keeps (GATE_STANDARD_WORDING_
+// PREVIEW, owner mockup approval 2026-10-03): read-only, under the greyed-out
+// Generate AI report, the exact sentences the customer will read.
+export function StandardWordingCard({ wording }) {
+  if (!wording) return null;
+  const text = { margin: 0, fontSize: 14, color: CP_M.ink };
+  return (
+    <div
+      data-testid="standard-wording"
+      style={{
+        border: `1px solid ${CP_M.ink}`,
+        borderRadius: 12,
+        background: CP_M.card,
+        padding: "12px 14px",
+        marginBottom: 20,
+        display: "flex",
+        flexDirection: "column",
+        gap: 8,
+      }}
+    >
+      <div style={{ fontSize: 11, fontWeight: 500, letterSpacing: "0.06em", textTransform: "uppercase", color: CP_M.ink4 }}>
+        Report the customer will see · standard wording
+      </div>
+      {wording.headline && <p style={text}>{wording.headline}</p>}
+      {wording.body && <p style={text}>{wording.body}</p>}
+      <p style={{ ...text, color: CP_M.ink4 }}>Nothing was found, so the report uses its standard wording instead of a write-up.</p>
+    </div>
+  );
 }
 
 export function TypedFindingsSection({
@@ -14316,6 +14436,45 @@ export function CompletionPanel({
   // GATE_TYPED_VOICE_FILL (Fast Complete step 3): Generate first reads the
   // notes for a typed visit's own findings (the schedule row's flag).
   const typedVoiceFill = service.typedVoiceFillEnabled === true && isTypedFindings;
+  // GATE_STANDARD_WORDING_PREVIEW (owner mockup approval 2026-10-03): while
+  // the record says nothing was found (the rule that greys out Generate AI
+  // report), the exact sentences the customer's report keeps, from the
+  // server's own report builder, read again as the record changes. A card
+  // that may be out of date is never shown: it clears until the new answer.
+  const standardWordingWanted = isTypedFindings
+    && typedZeroStateRefusesBody(typedFindingsSchema?.type, findingsValues, typedActivityScore);
+  // Generate AI report is off when the report keeps its standard wording, so
+  // it looks off (the approved mockup); before, it looked on and did nothing.
+  const generateHeldForStandardWording = standardWordingWanted || zeroStateCompanionOnly;
+  const [standardWording, setStandardWording] = useState(null);
+  // The product rows a cockroach report's work comes from, as a text key, so
+  // typing an amount never asks again.
+  const standardWordingProducts = JSON.stringify(
+    standardWordingProductRows(selectedProducts, serviceTypeForArea, completionAreasServiced),
+  );
+  useEffect(() => {
+    setStandardWording(null);
+    if (!standardWordingWanted) return undefined;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      adminFetch(`/admin/dispatch/${service.id}/standard-wording`, {
+        method: "POST",
+        body: JSON.stringify({
+          values: findingsValues,
+          activityScore: typedActivityScore,
+          backfill: backfillEligible && backfillCloseout,
+          products: JSON.parse(standardWordingProducts),
+        }),
+      })
+        .then((data) => {
+          if (!cancelled) {
+            setStandardWording(data?.available === true ? { headline: data.headline || "", body: data.body || "" } : null);
+          }
+        })
+        .catch(() => { if (!cancelled) setStandardWording(null); });
+    }, 300);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [standardWordingWanted, service.id, findingsValues, typedActivityScore, backfillEligible, backfillCloseout, standardWordingProducts]);
   // Fast Complete step 5: a termite treatment's state record fills from the
   // visit's own products and trace (lib termiteRecordFromVisit), each field
   // only while it is empty or still holds what was last filled this way, so
@@ -16735,10 +16894,15 @@ export function CompletionPanel({
         body: JSON.stringify({ note }),
       }).catch(() => null)
       : null;
-    if (heard?.status !== "read") {
-      // A read that answered nothing usable leaves no group unclear: the asks
-      // always reflect the latest Generate (the typed fill's rule, #5632).
-      // Words beside values still standing stay.
+    // A read that failed (the request, or the model behind it) answered
+    // nothing, so it clears nothing: the groups an earlier read left unclear
+    // stay asked. Specialty groups are not required at submission, so
+    // clearing them would let the report go out with the field empty and no
+    // warning (Codex P2 on #5635).
+    if (note && heard?.status !== "read") return;
+    if (!heard) {
+      // No notes to read leaves no group unclear: the asks were about words
+      // that are gone. Words beside values still standing stay.
       setLaneHeard((prev) => (prev?.unclear?.length ? { ...prev, unclear: [] } : prev));
       return;
     }
@@ -20643,7 +20807,8 @@ export function CompletionPanel({
                   ...secondaryPill,
                   marginTop: 4,
                   marginBottom: 20,
-                  opacity: generating ? 0.5 : 1,
+                  opacity: generating ? 0.5 : generateHeldForStandardWording ? 0.45 : 1,
+                  cursor: generateHeldForStandardWording && !generating ? "default" : secondaryPill.cursor,
                 }}
               >
                 {generating ? "Generating…" : "Generate AI report"}
@@ -20673,6 +20838,7 @@ export function CompletionPanel({
                 Include recent customer calls/texts/emails
               </label>
             )}
+            {!quickComplete && <StandardWordingCard wording={standardWording} />}
             {!quickComplete && generatedReportCleared && (
               <div style={{ fontSize: 13, color: "#B45309", marginTop: -12, marginBottom: 16 }}>
                 Findings changed after the AI report was generated — the draft
@@ -23134,7 +23300,8 @@ export function CompletionPanel({
                 color: D.teal,
                 fontSize: 14,
                 fontWeight: 500,
-                cursor: generating ? "wait" : "pointer",
+                cursor: generating ? "wait" : generateHeldForStandardWording ? "default" : "pointer",
+                opacity: generateHeldForStandardWording && !generating ? 0.45 : 1,
                 marginTop: 8,
                 marginBottom: 20,
                 display: "flex",
@@ -23170,6 +23337,7 @@ export function CompletionPanel({
               Include recent customer calls/texts/emails
             </label>
           )}
+          {!quickComplete && <StandardWordingCard wording={standardWording} />}
           {!quickComplete && generatedReportCleared && (
             <div style={{ fontSize: 13, color: "#B45309", marginTop: -14, marginBottom: 18 }}>
               Findings changed after the AI report was generated — the draft

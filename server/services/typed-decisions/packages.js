@@ -11,6 +11,11 @@
  * tests/typed-decisions-packages.test.js pins each id to a hash in
  * fixtures/typed-decisions/package-hashes.json, so an in-place edit fails CI.
  *
+ * An optional `imageSlots` (an integer 1..MAX_IMAGE_SLOTS = 4, Clef's per-request
+ * maximum) lets a package take that many photos on the Clef provider only
+ * (askPackage `{ images }`); none declares it yet. A registered package with any
+ * other value fails at load.
+ *
  * Question ids are the keys of `questions` (Jev answers by id). A `noul`
  * question answers a 0..1 probability that the statement is true.
  */
@@ -141,13 +146,56 @@ const SMS_SOLICITATION = {
   },
 };
 
+// Voicemail triage evidence (Clef second wave, idea 6; owner order
+// 2026-10-02): three yes/no reads of an inbound voicemail, asked nightly by
+// the call self-audit beside what production did with it (a callback bell or
+// a lead = put in front of a person; the extraction's spam call). The gap it
+// measures: voicemails a person should have heard about that rang nothing
+// (~38 a quarter in the Clef replay). Yes/no only (the replay showed
+// multi-way choices are weak). Same state shape as call_judge, so the review
+// route and the labeling tools need nothing new. Evidence only: no bell,
+// priority or text changes.
+const VOICEMAIL = {
+  id: 'voicemail.v1',
+  capability: 'voicemail',
+  version: 1,
+  description: 'Three yes/no reads of an inbound voicemail: callback wanted, needs attention today, vendor or spam.',
+  stateShape: ['call_direction', 'duration_seconds', 'transcript'],
+  thresholds: { ...THRESHOLDS },
+  questions: {
+    callback_requested: noul('Does the caller want Waves to call or text them back, or leave a question or request that needs a person to answer it?', {
+      true: 'They ask for a call or text back, ask a question, or request service or a visit.',
+      false: 'No reply is needed: a thank-you, a hang-up or silence, a robocall, a vendor pitch, or information only.',
+    }),
+    needs_attention_today: noul('Did this voicemail need a person to deal with it the SAME DAY it was left: active pests inside the home, damage, a safety concern (stings, bites, snakes, rodents in the living space), a missed or late appointment, or an upset customer?', {
+      true: 'It describes one of those, so waiting until the next day would have hurt the customer or Waves.',
+      false: 'Nothing in it needs same-day handling (a routine question, a scheduling request with no urgency, or nothing actionable).',
+    }),
+    is_vendor_or_spam: noul('Is this voicemail a robocall, a sales or vendor pitch to Waves, or other junk, rather than a customer or prospect?', {
+      true: 'Automated message, solicitation, or junk.',
+      false: 'A real customer, prospect, or legitimate business contact about service.',
+    }),
+  },
+};
+
 const PACKAGES = deepFreeze({
   [CALL_JUDGE.id]: CALL_JUDGE,
   [CALL_GATE_CHECKS.id]: CALL_GATE_CHECKS,
   [SMS_COURTESY.id]: SMS_COURTESY,
   [SMS_RESCHEDULE.id]: SMS_RESCHEDULE,
   [SMS_SOLICITATION.id]: SMS_SOLICITATION,
+  [VOICEMAIL.id]: VOICEMAIL,
 });
+
+// Clef's per-request image maximum (callWorkersAIDecision CLEF_MAX_IMAGES): a
+// package can never advertise more slots than the provider takes.
+const MAX_IMAGE_SLOTS = 4;
+const validImageSlots = (slots) => Number.isInteger(slots) && slots >= 1 && slots <= MAX_IMAGE_SLOTS;
+for (const pkg of Object.values(PACKAGES)) {
+  if (pkg.imageSlots !== undefined && !validImageSlots(pkg.imageSlots)) {
+    throw new Error(`typed-decisions package ${pkg.id}: imageSlots must be an integer 1..${MAX_IMAGE_SLOTS}`);
+  }
+}
 
 function packageFor(id) {
   return Object.prototype.hasOwnProperty.call(PACKAGES, id) ? PACKAGES[id] : null;
@@ -163,9 +211,14 @@ function canonical(value) {
 }
 
 // sha256 over the parts that define the decision: questions + stateShape +
-// thresholds. The description is prose and may be edited without a new version.
+// thresholds (+ imageSlots, only for a package that declares it: how many
+// photos it is shown is part of the decision, and a package without it hashes
+// exactly as it always did). The description is prose and may be edited
+// without a new version.
 function packageHash(pkg) {
-  const body = canonical({ questions: pkg.questions, stateShape: pkg.stateShape, thresholds: pkg.thresholds });
+  const parts = { questions: pkg.questions, stateShape: pkg.stateShape, thresholds: pkg.thresholds };
+  if (pkg.imageSlots !== undefined) parts.imageSlots = pkg.imageSlots;
+  const body = canonical(parts);
   return crypto.createHash('sha256').update(body).digest('hex');
 }
 
@@ -211,4 +264,4 @@ function providerLabel(provider) {
 // admin review route shows the reviewer the same span.
 const CALL_TRANSCRIPT_CHARS = 5000;
 
-module.exports = { PACKAGES, packageFor, packageHash, OUTCOME_SOURCES, answerInDomain, CALL_TRANSCRIPT_CHARS, DECISION_PROVIDERS, DEFAULT_DECISION_PROVIDER, DECISION_PROVIDER_LABELS, providerLabel };
+module.exports = { PACKAGES, packageFor, packageHash, MAX_IMAGE_SLOTS, validImageSlots, OUTCOME_SOURCES, answerInDomain, CALL_TRANSCRIPT_CHARS, DECISION_PROVIDERS, DEFAULT_DECISION_PROVIDER, DECISION_PROVIDER_LABELS, providerLabel };
