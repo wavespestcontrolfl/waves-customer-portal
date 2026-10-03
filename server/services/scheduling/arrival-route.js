@@ -80,7 +80,9 @@ function comboRouteCheckLive() {
  *  the caller keeps today's answer (`grouped` → route_unverified). */
 function foldVisitUnit(target, stored, siblings) {
   const underWay = row => ['en_route', 'on_site'].includes(row.status);
-  const clean = hasCoords(target) && !underWay(stored) && siblings.every(row => (row.technician_id || null) === (stored.technician_id || null)
+  // Every member needs an arrival promise: a windowless one has nothing to
+  // share, and the day's rows drop windowless stops under capacity.
+  const clean = hasCoords(target) && !underWay(stored) && !!stored.window_start && siblings.every(row => (row.technician_id || null) === (stored.technician_id || null)
     && dateOnly(row.scheduled_date) === dateOnly(stored.scheduled_date)
     && hasCoords(row) && Number(row.lat) === Number(target.lat) && Number(row.lng) === Number(target.lng)
     && String(row.window_start || '').slice(0, 5) === String(stored.window_start || '').slice(0, 5)
