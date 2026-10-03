@@ -8,7 +8,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.fn() }));
 jest.mock('../services/recipient-optin', () => ({
-  filterRecipientsByOptin: jest.fn(async (contacts) => contacts),
+  optinHeldPhoneKeys: jest.fn(async () => new Map()),
   resolveServiceContactSmsRecipient: jest.fn(),
 }));
 // A knex stand-in: each db(table) call returns a chain that records its
@@ -44,7 +44,7 @@ jest.mock('../models/db', () => {
 const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
-const { filterRecipientsByOptin } = require('../services/recipient-optin');
+const { optinHeldPhoneKeys } = require('../services/recipient-optin');
 const ContactReportText = require('../services/contact-report-text');
 
 const CUSTOMER = {
@@ -80,7 +80,7 @@ beforeEach(() => {
   db.mockState.calls = [];
   sendCustomerMessage.mockReset();
   renderSmsTemplate.mockReset().mockResolvedValue('Waves Pest Control: The service report for 12 Example Way is ready: https://portal.example/report/tok');
-  filterRecipientsByOptin.mockReset().mockImplementation(async (contacts) => contacts);
+  optinHeldPhoneKeys.mockReset().mockResolvedValue(new Map());
 });
 afterAll(() => { delete process.env.GATE_CONTACT_REPORT_TEXT; });
 
@@ -119,12 +119,20 @@ describe('queueContactReportTexts', () => {
   });
 
   test('a contact held by an unconfirmed opt-in ask is not queued', async () => {
-    filterRecipientsByOptin.mockImplementation(async (contacts) => contacts.filter((c) => !c.phone.includes('0123')));
+    optinHeldPhoneKeys.mockResolvedValue(new Map([['cust-1', new Set(['9415550123'])]]));
     queue('customers', CUSTOMER);
     queue('contact_report_texts', [{ id: 'row-2' }]);
     const ids = await ContactReportText.queueContactReportTexts({ customerId: 'cust-1', sourceKey: 'record:rec-1', reportUrl: 'https://x/report/t' });
     expect(ids).toEqual(['row-2']);
-    expect(filterRecipientsByOptin).toHaveBeenCalledWith(expect.any(Array), 'cust-1');
+    expect(optinHeldPhoneKeys).toHaveBeenCalledWith(['cust-1']);
+  });
+
+  test('an unreadable opt-in state queues every slot contact; the send decides', async () => {
+    optinHeldPhoneKeys.mockRejectedValue(new Error('connection reset'));
+    queue('customers', CUSTOMER);
+    queue('contact_report_texts', [{ id: 'row-1' }], [{ id: 'row-2' }]);
+    expect(await ContactReportText.queueContactReportTexts({ customerId: 'cust-1', sourceKey: 'record:rec-1', reportUrl: 'https://x/report/t' }))
+      .toEqual(['row-1', 'row-2']);
   });
 
   test('a secondary profile with no phone: the account primary\'s number in a slot is the holder, never a contact', async () => {
@@ -222,6 +230,23 @@ describe('dispatchContactReportText', () => {
     expect(await ContactReportText.dispatchContactReportText('row-1')).toEqual({ state: 'suppressed' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(lastUpdate()).toMatchObject({ status: 'suppressed', status_reason: 'contact_not_confirmed' });
+  });
+
+  test('a contact held by an unconfirmed opt-in ask at the send gets nothing', async () => {
+    queue('contact_report_texts', [ROW]);
+    queue('customers', CUSTOMER);
+    optinHeldPhoneKeys.mockResolvedValue(new Map([['cust-1', new Set(['9415550123'])]]));
+    expect(await ContactReportText.dispatchContactReportText('row-1')).toEqual({ state: 'suppressed' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('an opt-in read that fails at the send releases the row for a retry, never contact_not_confirmed', async () => {
+    queue('contact_report_texts', [ROW]);
+    queue('customers', CUSTOMER);
+    optinHeldPhoneKeys.mockRejectedValue(new Error('connection reset'));
+    expect(await ContactReportText.dispatchContactReportText('row-1')).toEqual({ state: 'error' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(lastUpdate()).toMatchObject({ status: 'pending', status_reason: 'dispatch_error' });
   });
 
   test('a report older than 24 hours is not announced', async () => {

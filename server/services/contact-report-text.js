@@ -9,8 +9,8 @@
 // "Confirmed" is the appointment-text rule, unchanged: a consent-stamped slot
 // phone that is not the account holder's own number, is not on the account's
 // unconsented list, and is not held by an unconfirmed opt-in ask
-// (customer-contact.js getAppointmentContacts + recipient-optin.js
-// filterRecipientsByOptin).
+// (customer-contact.js getAppointmentContacts + the recipient-optin.js hold,
+// read through optinHeldPhoneKeys so a failed read retries).
 //
 // contact_report_texts is the ledger: UNIQUE (source_key, phone_key) makes it
 // one text per contact per report. A row is claimed by a 10-minute lease
@@ -35,15 +35,24 @@ function phoneKey(phone) {
   return String(phone || '').replace(/\D/g, '').slice(-10);
 }
 
-// The contacts who get the report text for this customer row, by the
-// appointment-text rule. The account holder is never in this list.
-async function confirmedContacts(customer) {
+// The consent-stamped slot contacts of this customer row. The account holder
+// is never in this list.
+function slotContacts(customer) {
   const { getAppointmentContacts, isServiceContactRole } = require('./customer-contact');
-  const { filterRecipientsByOptin } = require('./recipient-optin');
-  const slots = getAppointmentContacts(customer, { appointment_notify_primary: false })
+  return getAppointmentContacts(customer, { appointment_notify_primary: false })
     .filter((c) => isServiceContactRole(c.role));
+}
+
+// The contacts who get the report text, by the appointment-text rule. An
+// opt-in read that fails THROWS (filterRecipientsByOptin would drop the
+// contact, which reads the same as a contact who is not confirmed): the
+// caller retries instead of deciding on an unknown.
+async function confirmedContacts(customer) {
+  const slots = slotContacts(customer);
   if (!slots.length) return [];
-  return filterRecipientsByOptin(slots, customer.id);
+  const { optinHeldPhoneKeys } = require('./recipient-optin');
+  const held = (await optinHeldPhoneKeys([customer.id])).get(String(customer.id));
+  return held ? slots.filter((c) => !held.has(phoneKey(c.phone))) : slots;
 }
 
 // The customer row the contact rule reads. A secondary profile with no phone
@@ -62,7 +71,9 @@ async function queueContactReportTexts({ customerId, sourceKey, reportUrl, sched
   if (!enabled() || !customerId || !sourceKey || !reportUrl) return [];
   const customer = await loadCustomer(customerId);
   if (!customer) return [];
-  const contacts = await confirmedContacts(customer);
+  // The opt-in state is decided at the send. Here it only saves rows for
+  // contacts already known to be held; an unreadable state queues them all.
+  const contacts = await confirmedContacts(customer).catch(() => slotContacts(customer));
   const ids = [];
   for (const contact of contacts) {
     const key = phoneKey(contact.phone);
