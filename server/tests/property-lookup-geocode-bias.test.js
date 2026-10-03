@@ -40,7 +40,7 @@ describe('geocodeAddress (property lookup)', () => {
       status: 'OK',
       results: [{
         formatted_address: '100 Example Creek Way, Parrish, FL 34219, USA',
-        geometry: { location: { lat: 27.5, lng: -82.4 }, location_type: 'ROOFTOP' },
+        types: ['street_address'], geometry: { location: { lat: 27.5, lng: -82.4 }, location_type: 'ROOFTOP' },
         address_components: [],
       }],
     });
@@ -74,7 +74,7 @@ describe('geocodeAddress (property lookup)', () => {
       }],
     });
 
-    await expect(geocodeAddress('100 Example Rd, Exampleville, IL 60000')).rejects.toThrow('Geocode failed: OUTSIDE_SERVICE_STATE');
+    await expect(geocodeAddress('100 Example Rd, Exampleville, IL 60000')).rejects.toThrow('Geocode failed: NOT_AN_ADDRESS');
   });
 
   test('a street-level result with types still geocodes', async () => {

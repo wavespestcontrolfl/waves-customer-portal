@@ -466,14 +466,17 @@ const COUNTY_LAYERS = {
   Charlotte: {
     url: 'https://agis3.charlottecountyfl.gov/arcgis/rest/services/Essentials/CCGISLayers/MapServer/27/query',
     outFields: [
-      'ACCOUNT', 'FullPropertyAddress', 'propertyaddress', 'city', 'zipcode',
+      'ACCOUNT', 'FullPropertyAddress', 'propertyaddress',
       'usecode', 'description', 'landuse', 'subneighborhood', 'CONDOID',
     ],
+    // The layer's city / zipcode belong to the owner's MAILING address
+    // (live 10-02) — never the parcel's. No situs city/ZIP here; the PAO
+    // record page's "Property City & Zip" supplies them downstream.
     parse: (g) => ({
       parcelId: cleanStr(g('ACCOUNT')),
       situsAddress: cleanStr(g('FullPropertyAddress')) || cleanStr(g('propertyaddress')),
-      situsCity: cleanStr(g('city')),
-      situsZip: zip5(g('zipcode')),
+      situsCity: null,
+      situsZip: null,
       lotSqft: null, // no land figure in the ownership layer — use polygon area
       livingAreaSqft: null,
       stories: null,

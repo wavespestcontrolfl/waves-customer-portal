@@ -3136,9 +3136,9 @@ const BARE_UNIT_SUFFIXES = UNIT_HEURISTIC_SUFFIXES.split('|')
 // A street NAME word must precede the suffix: "100 AVENUE 2" (a street
 // named Avenue 2) keys "100 AVE 2" — peeling the 2 would make it match
 // "100 AVENUE 1". Neither the house number nor a lone direction ("100 N
-// AVE 2") counts as the name word.
+// AVE 2") counts as the name word; an ordinal ("5TH ST 10A") does.
 const AUDIT_BARE_UNIT_RE = new RegExp(
-  `(\\b(?!(?:N|S|E|W|NE|NW|SE|SW)\\s)[A-Z][A-Z0-9'-]*\\s+(?:${BARE_UNIT_SUFFIXES})(?:\\s+(?:[NS][EW]|[NSEW]))?)\\s+\\d[A-Z0-9-]*$`,
+  `(\\b(?!(?:N|S|E|W|NE|NW|SE|SW)\\s)(?:[A-Z][A-Z0-9'-]*|\\d+(?:ST|ND|RD|TH))\\s+(?:${BARE_UNIT_SUFFIXES})(?:\\s+(?:[NS][EW]|[NSEW]))?)\\s+\\d[A-Z0-9-]*$`,
 );
 // `bareUnit` is opt-in: the condo-unit folio matchers (typedDwellingUnit,
 // aggregateUnitDesignatorMatch) read a bare trailing number off the line
@@ -4215,8 +4215,12 @@ function parseCharlottePaoRecord({ address, search, detailHtml, ownership }) {
   const ownershipAttrs = ownership?.attributes || {};
   const situsAddress = search.situsAddress || extractCharlottePairedValue(detailHtml, 'Property Address');
   const cityZip = extractCharlottePairedValue(detailHtml, 'Property City & Zip');
-  const city = search.city || extractCharlotteCity(cityZip) || cleanHtmlText(ownershipAttrs.city);
-  const zipCode = search.zipCode || extractAddressZip(cityZip) || cleanHtmlText(ownershipAttrs.zipcode);
+  // search.city/zipCode now come only from the address-search row (situs);
+  // the GIS parcel no longer publishes the ownership layer's city/zipcode,
+  // which is the owner's MAILING address (live 10-02) — so it is never a
+  // fallback here either. The record page's "Property City & Zip" is next.
+  const city = search.city || extractCharlotteCity(cityZip) || null;
+  const zipCode = search.zipCode || extractAddressZip(cityZip) || null;
   const currentUse = extractCharlottePairedValue(detailHtml, 'Current Use') || ownershipAttrs.description || ownershipAttrs.landuse;
   const source = charlotteRecordUrl(search.parcelId);
   const propertyType = normalizeCountyPropertyType(`${currentUse || ''} ${primaryBuilding.Description || ''}`);
