@@ -102,17 +102,20 @@ function annualCostWithProtocolMaterial(track, tier, turfSqft) {
 // annual profit still RISES with frequency at every bracket the caps bind on,
 // which is the invariant that sized the discount; collected margin PERCENTAGE
 // falling on the higher cadences is the expected trade and is report-only.
+//
+// UPDATED 2026-10-03 (owner: Torque SC left the residential program, its label
+// is golf course turf only; conditional Medallion SC took the St. Augustine
+// October slot). The always-applied $7.50 Torque line became a quarter-reserve
+// on an $8.90 conditional line, so St. Augustine modeled material FELL and
+// every St. Augustine entry improved. Five now clear target and left the
+// ledger (standard 8,000 and 12,000, enhanced 20,000, premium 10,000 and
+// 12,000); no entry is new or worse. Zoysia is unchanged.
 const KNOWN_BELOW_TARGET_EXPOSURE = [
-  { track: 'st_augustine', tier: 'standard', turfSqft: 8000, annual: 564, annualCost: 371.41, protocolMaterial: 178.91, margin: 0.3415 },
-  { track: 'st_augustine', tier: 'standard', turfSqft: 10000, annual: 648, annualCost: 433.64, protocolMaterial: 223.64, margin: 0.3308 },
-  { track: 'st_augustine', tier: 'standard', turfSqft: 12000, annual: 744, annualCost: 495.86, protocolMaterial: 268.36, margin: 0.3335 },
-  { track: 'st_augustine', tier: 'standard', turfSqft: 15000, annual: 876, annualCost: 589.2, protocolMaterial: 335.45, margin: 0.3274 },
-  { track: 'st_augustine', tier: 'standard', turfSqft: 20000, annual: 1092, annualCost: 744.77, protocolMaterial: 447.27, margin: 0.318 },
-  { track: 'st_augustine', tier: 'enhanced', turfSqft: 20000, annual: 1572, annualCost: 1034.16, protocolMaterial: 613.41, margin: 0.3421 },
-  { track: 'st_augustine', tier: 'premium', turfSqft: 10000, annual: 1188, annualCost: 777.94, protocolMaterial: 408.94, margin: 0.3452 },
-  { track: 'st_augustine', tier: 'premium', turfSqft: 12000, annual: 1368, annualCost: 894.73, protocolMaterial: 490.73, margin: 0.346 },
-  { track: 'st_augustine', tier: 'premium', turfSqft: 15000, annual: 1608, annualCost: 1069.91, protocolMaterial: 613.41, margin: 0.3346 },
-  { track: 'st_augustine', tier: 'premium', turfSqft: 20000, annual: 2004, annualCost: 1361.88, protocolMaterial: 817.88, margin: 0.3204 },
+  { track: 'st_augustine', tier: 'standard', turfSqft: 10000, annual: 648, annualCost: 421.92, protocolMaterial: 211.92, margin: 0.3489 },
+  { track: 'st_augustine', tier: 'standard', turfSqft: 15000, annual: 876, annualCost: 571.63, protocolMaterial: 317.88, margin: 0.3475 },
+  { track: 'st_augustine', tier: 'standard', turfSqft: 20000, annual: 1092, annualCost: 721.34, protocolMaterial: 423.84, margin: 0.3394 },
+  { track: 'st_augustine', tier: 'premium', turfSqft: 15000, annual: 1608, annualCost: 1052.34, protocolMaterial: 595.84, margin: 0.3456 },
+  { track: 'st_augustine', tier: 'premium', turfSqft: 20000, annual: 2004, annualCost: 1338.45, protocolMaterial: 794.45, margin: 0.3321 },
   { track: 'zoysia', tier: 'standard', turfSqft: 8000, annual: 564, annualCost: 404.95, protocolMaterial: 212.45, margin: 0.282 },
   { track: 'zoysia', tier: 'standard', turfSqft: 10000, annual: 672, annualCost: 475.56, protocolMaterial: 265.56, margin: 0.2923 },
   { track: 'zoysia', tier: 'standard', turfSqft: 12000, annual: 756, annualCost: 546.18, protocolMaterial: 318.68, margin: 0.2775 },

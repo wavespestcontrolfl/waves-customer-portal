@@ -9,7 +9,7 @@
         "⚠ K-FLOW ROTATION: Jun + Sep = K-Flow. Aug = Mg/Ca supplement. Do NOT apply K-Flow every blackout m",
         "★ NEW v4: N RATE CONTROL — Explicit lb N/1,000 per visit in Notes. Annual target: Basic/Std 1.5 lb N, Enh/Prem 3.0 lb N.",
         "★ NEW v4: Soil-test branching — P index >80 skip 24-2-11, K >80 ppm skip K-Flow. Chinch IPM ≥20/sq ft threshold + MOA ro",
-        "★ NEW v4: FRAC rotation — Headway (11+3) Jan → Medallion (12) Feb → Velista (7) Oct. SpeedZone Apr weather-gated at 85°F.",
+        "★ NEW v4: FRAC rotation — Headway (11+3) Jan → Medallion (12) Feb if active → Medallion (12) Oct on large patch history (a Feb-treated lawn needs a manager override in Oct). SpeedZone Apr weather-gated at 85°F.",
         "★ NEW v4: Aug drive-by scout + Dec wellness touchpoint for Basic/Std. Thatch measurement V3+V10. Irrigation VWC audit V2",
         "★ ST. AUGUSTINE IS ONE TRACK: Do not split the protocol into full-sun vs shade programs. Use site observations only as condition checks for stress, disease, irrigation, and herbicide safety."
       ],
@@ -162,8 +162,8 @@
           "visit": 10,
           "month": "Oct",
           "primary": "LESCO 24-0-11 75% PolyPlus fert ($8.68)\nChelated Iron Plus ($1.52)",
-          "secondary": "★ Velista (FRAC 7) if large patch history ($67.50)\nHeadway ONLY if severe ($26.13) — resets FRAC 11 clock\nSoil re-test problem props — OPTIONAL on request\n★ THATCH MEASUREMENT #2: compare to Mar",
-          "material_cost": "39.69",
+          "secondary": "★ Medallion SC (FRAC 12) if large patch history ($8.90)\nHeadway ONLY if severe ($26.13) — resets FRAC 11 clock\nSoil re-test problem props — OPTIONAL on request\n★ THATCH MEASUREMENT #2: compare to Mar",
+          "material_cost": "23.02",
           "labor_cost": "26.96",
           "tiers": {
             "bronze": true,
@@ -171,8 +171,8 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "N app final @ 0.75 lb N/1K. ★ Velista (FRAC 7) on large patch history is the October fungicide. Torque is out: its label is golf course turf only, not home lawns. ★ Thatch #2: if >0.75\" or +0.25\" since Mar → dethatch upsell.",
-          "conditional_cost": "6.53"
+          "notes": "N app final @ 0.75 lb N/1K. ★ Medallion SC (FRAC 12) on large patch history is the October fungicide. Torque is out: its label is golf course turf only, not home lawns. ★ Thatch #2: if >0.75\" or +0.25\" since Mar → dethatch upsell.",
+          "conditional_cost": "8.76"
         },
         {
           "visit": 11,
