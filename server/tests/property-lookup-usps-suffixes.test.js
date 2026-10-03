@@ -222,3 +222,29 @@ describe('a street whose name is a suffix word', () => {
     expect(audit).toMatchObject({ streetExists: true, hasExactMatch: true });
   });
 });
+
+describe('round-3 pre-push fixes', () => {
+  const { routeSpellingVariants } = require('../services/property-lookup/route-spellings');
+  const { _private } = require('../services/property-lookup/ai-property-lookup');
+  test('expansion uses the USPS primary name, never a listed misspelling', () => {
+    expect(routeSpellingVariants('W VLG')).toEqual(['W VLG', 'W VILLAGE']);
+    expect(routeSpellingVariants('100 W LK')).toEqual(['100 W LK', '100 W LAKE']);
+  });
+  test('a numbered street name ("Avenue 2") is never peeled as a bare unit', () => {
+    expect(_private.stripUnitDesignators('100 AVE 2', { bareUnit: true })).toBe('100 AVE 2');
+    expect(_private.stripUnitDesignators('100 AVE 2', { bareUnit: true }))
+      .not.toBe(_private.stripUnitDesignators('100 AVE 1', { bareUnit: true }));
+    expect(_private.stripUnitDesignators('100 EXAMPLE DR 10A', { bareUnit: true })).toBe('100 EXAMPLE DR');
+  });
+  test('typed "100 Avenue 2" does not match a roll row "100 AVENUE 1"', async () => {
+    const { auditAddressHouseNumber } = require('../services/property-lookup/ai-property-lookup');
+    const realFetch = global.fetch;
+    global.fetch = jest.fn().mockResolvedValue({ ok: true, json: async () => ({ features: [{ attributes: { SITUS_ADDRESS: '100 AVENUE 1', SITUS_POSTAL_ZIP: '34217' } }] }) });
+    try {
+      const audit = await auditAddressHouseNumber('100 Avenue 2, Bradenton Beach, FL 34217');
+      expect(audit?.hasExactMatch).not.toBe(true);
+    } finally {
+      global.fetch = realFetch;
+    }
+  });
+});

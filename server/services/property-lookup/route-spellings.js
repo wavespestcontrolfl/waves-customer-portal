@@ -15,17 +15,11 @@ const LEADING_AVENUE_RE = /^((?:\d+[A-Z]?\s+)?(?:(?:N|S|E|W|NE|NW|SE|SW)\s+)?)AV
 
 // A street type that is the street's NAME ("100 W LAKE" → key "W LK") cannot
 // be stripped from the query, and a roll may spell it either way. The other
-// spelling of a terminal USPS suffix word (standard → its longest listed
-// name: LK → LAKE, VW → VIEW) rides along as a second query (live audit
+// spelling of a terminal USPS suffix word (standard → its USPS primary
+// name: LK → LAKE, VW → VIEW, VLG → VILLAGE) rides along as a second query (live audit
 // P1 10-02). A word whose two forms are equal adds nothing.
-const { USPS_STREET_SUFFIXES } = require('./usps-street-suffixes');
-const SPELLED_BY_STANDARD = {};
-for (const [word, standard] of Object.entries(USPS_STREET_SUFFIXES)) {
-  // USPS lists some plurals as variants of a singular standard (PARKS →
-  // PARK); a plural is never the spelled form of a singular standard.
-  if (word.endsWith('S') && !standard.endsWith('S')) continue;
-  if (!SPELLED_BY_STANDARD[standard] || word.length > SPELLED_BY_STANDARD[standard].length) SPELLED_BY_STANDARD[standard] = word;
-}
+const { USPS_STREET_SUFFIXES, USPS_PRIMARY_BY_STANDARD } = require('./usps-street-suffixes');
+
 // Only when the suffix word IS the whole name (optional house number and
 // directions around it) — every other street reaches the roll with its
 // suffix already stripped, so it needs no second spelling.
@@ -37,8 +31,9 @@ function otherSuffixSpelling(text) {
   // Only abbreviated → spelled: the normalizer only ever WRITES the
   // abbreviation ("W LK"); a spelled word in the query came from the typed
   // text as-is ("HARBOR" from "Harbor Blvd") and needs no second request.
-  if (m[2] !== standard || SPELLED_BY_STANDARD[standard] === standard) return null;
-  return `${m[1]}${SPELLED_BY_STANDARD[standard]}${m[3] || ''}`;
+  const primary = USPS_PRIMARY_BY_STANDARD[standard];
+  if (m[2] !== standard || !primary || primary === standard) return null;
+  return `${m[1]}${primary}${m[3] || ''}`;
 }
 
 function routeSpellingVariants(text) {

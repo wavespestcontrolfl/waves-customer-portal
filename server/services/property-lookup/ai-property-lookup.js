@@ -3109,8 +3109,11 @@ const AUDIT_UNIT_DESIGNATOR_RE = /\s+(?:APT|APARTMENT|UNIT|STE|SUITE|BLDG|BUILDI
 const BARE_UNIT_SUFFIXES = UNIT_HEURISTIC_SUFFIXES.split('|')
   .filter((suffix) => !['HWY', 'RD', 'TRL', 'PKWY'].includes(suffix))
   .join('|');
+// A street NAME word must precede the suffix: "100 AVENUE 2" (a street
+// named Avenue 2) keys "100 AVE 2" — peeling the 2 would make it match
+// "100 AVENUE 1". The house number never counts as the name word.
 const AUDIT_BARE_UNIT_RE = new RegExp(
-  `(\\b(?:${BARE_UNIT_SUFFIXES})(?:\\s+(?:[NS][EW]|[NSEW]))?)\\s+\\d[A-Z0-9-]*$`,
+  `(\\b[A-Z][A-Z0-9'-]*\\s+(?:${BARE_UNIT_SUFFIXES})(?:\\s+(?:[NS][EW]|[NSEW]))?)\\s+\\d[A-Z0-9-]*$`,
 );
 // `bareUnit` is opt-in: the condo-unit folio matchers (typedDwellingUnit,
 // aggregateUnitDesignatorMatch) read a bare trailing number off the line
