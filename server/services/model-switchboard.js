@@ -549,7 +549,7 @@ const LANES = [
   L('wiki_compiler', 'Wiki compiler + agronomic wiki', 'knowledge/wiki-compiler.js, agronomic-wiki.js', 'deep', T('DEEP'), P('deepAnalysis', 'fallback')),
   L('quarantine_arbiter', 'Contact quarantine arbiter', 'contact-quarantine-arbiter.js', 'deep', T('DEEP'), P('deepAnalysis', 'fallback'), { inbound: true }),
   L('call_self_audit', 'Call self-audit', 'call-self-audit.js', 'deep', T('DEEP'), P('deepAnalysis', 'fallback'), { inbound: true }),
-  L('call_incidents', 'Call self-audit second reader', 'call-incidents.js', 'fastText', P('fastStructured', 'primary'), null, { inbound: true, note: 'OpenAI leg only; GATE_CALL_INCIDENTS' }),
+  L('call_incidents', 'Call self-audit second reader', 'call-incidents.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true, note: 'one leg per call: the provider the audit did NOT answer on (usually the OpenAI primary; the Anthropic fallback when the audit fell back to OpenAI); GATE_CALL_INCIDENTS' }),
   L('voice_relay_judge', 'Voice relay eval judge', 'eval/voice-relay-judge.js', 'deep', P('voiceJudge', 'primary'), P('voiceJudge', 'fallback'), { inbound: true, note: 'grades synthetic manual replay transcripts when --judge is selected' }),
   L('wdo_appt_brief', 'WDO appointment brief', 'appointment-tagger.js', 'deep', P('deepAnalysis', 'primary'), P('deepAnalysis', 'fallback')),
   L('voice_profile', 'Voice-profile distiller (weekly)', 'voice-profile-distiller.js', 'deep', T('DEEP'), P('deepAnalysis', 'fallback')),

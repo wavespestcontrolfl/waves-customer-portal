@@ -257,7 +257,7 @@ async function runSelfAudit(depsIn = {}) {
     .select('id', 'twilio_call_sid', 'created_at', 'direction', 'processing_status', 'transcription', 'ai_extraction', 'disposition',
       // Jev shadow: the call's length is part of call_judge's state; the v2
       // extraction carries two dark call gates' own decisions (gateCheckBaselines).
-      'duration_seconds', 'ai_extraction_enriched', 'v2_extraction_status', 'ai_extraction_prompt_version');
+      'duration_seconds', 'ai_extraction_enriched', 'v2_extraction_status');
   const [inboundRows, outboundRows] = await Promise.all([
     sampleDirection(INBOUND_DIRECTION_SQL),
     sampleDirection(OUTBOUND_DIRECTION_SQL),
@@ -323,9 +323,7 @@ async function runSelfAudit(depsIn = {}) {
           old_value: String(prod[f]),
           new_value: String(Boolean(verdict[f])),
           transcript_excerpt: String(verdict.excerpt || '').slice(0, 300),
-          // The extraction version production's answers came from, as of this
-          // audit: a later reprocess must not move the finding to a newer prompt.
-          detail: JSON.stringify({ diffs, verdict, disposition: call.disposition, auditor_model: auditorModel, extraction_prompt_version: call.ai_extraction_prompt_version || null }),
+          detail: JSON.stringify({ diffs, verdict, disposition: call.disposition, auditor_model: auditorModel }),
         })
         .onConflict(['call_log_id', 'audit_source', 'category', 'field'])
         .merge(['old_value', 'new_value', 'transcript_excerpt', 'detail'])

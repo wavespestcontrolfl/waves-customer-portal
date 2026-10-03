@@ -43,8 +43,8 @@ const TRANSCRIPT_CHARS = 5000; // what the auditor was shown
 const MIN_EXCERPT_CHARS = 12;
 const LOOKBACK_DAYS = 14;
 // finding id + 12 hex of md5(everything the finding says): both values, the
-// excerpt and the whole detail (the auditor's full verdict, its model, the
-// snapshotted extraction version). Any change to any of it is new evidence.
+// excerpt and the whole detail (the auditor's full verdict and its model).
+// Any change to any of it is new evidence.
 const EVIDENCE_KEY_SQL = "(f.id)::text || ':' || left(md5(coalesce(f.old_value, '') || '|' || coalesce(f.new_value, '') || '|' || coalesce(f.transcript_excerpt, '') || '|' || coalesce((f.detail::jsonb)::text, '')), 12)";
 
 const envNum = (name, def) => {
@@ -210,9 +210,11 @@ async function adjudicateOne({ dbi, row, reader }) {
     surface: SURFACE,
     failure_mode: failureModeFor(row.field, prodValue),
     intent: null,
-    // The version production's answers came from at audit time (missing on
-    // findings written before the snapshot existed: unversioned).
-    prompt_version: detail.extraction_prompt_version ? String(detail.extraction_prompt_version).slice(0, 40) : null,
+    // Unversioned: the audited answers come from ai_extraction, which can be
+    // V1, V2-adopted or a mix per field, and nothing records which extractor
+    // produced each one. ai_extraction_prompt_version is the V2 shadow's
+    // provenance only, so it would mislabel V1 answers.
+    prompt_version: null,
     produced_at: row.call_at || null,
     summary: `${row.field}: production said ${prodValue}, the auditor said ${auditorValue}${row.category === 'spam_false_positive' ? ' (spam false positive)' : ''}.`,
     model: reading.model || null,
@@ -246,8 +248,7 @@ async function adjudicateOne({ dbi, row, reader }) {
 /**
  * Nightly: every self-audit finding from the last LOOKBACK_DAYS not yet
  * adjudicated becomes ONE ai_incidents row (idempotent: anti-join + the
- * evidence key). Attribution is by when the CALL happened and the extraction
- * prompt version it was processed under.
+ * evidence key). Attribution is by when the CALL happened; unversioned.
  */
 async function adjudicateCallFindings({ dbi = db, now = new Date(), batchLimit = envNum('CALL_INCIDENT_BATCH', 20), reader = askSecondReader } = {}) {
   const { callIncidentsLive } = require('../config/feature-gates');
@@ -295,23 +296,18 @@ async function adjudicateCallFindings({ dbi = db, now = new Date(), batchLimit =
 }
 
 /**
- * Sunday: fix proposals for calls, counted on the extraction prompt version
- * most recent calls were processed under (the live version).
+ * Sunday: fix proposals for calls. Call incidents are unversioned (see
+ * adjudicateOne), so the count is the unversioned cohort, made fresh by the
+ * proposal watermark: incidents adjudicated since the cell's last proposal.
  */
 async function proposeCallFixes({ dbi = db, now = new Date() } = {}) {
   const { callIncidentsLive } = require('../config/feature-gates');
   if (!callIncidentsLive()) return { skipped: 'gate_off' };
-  const latest = await dbi('call_log')
-    .whereNotNull('ai_extraction_prompt_version')
-    .where('created_at', '>=', new Date(now.getTime() - 7 * 86400 * 1000))
-    .orderBy('created_at', 'desc')
-    .first('ai_extraction_prompt_version');
-  if (!latest) return { proposed: 0, skipped: 'no_recent_version' };
   const { proposeFromIncidents } = require('./ai-incidents/fix-proposals');
   return proposeFromIncidents({
     dbi,
     area: AREA,
-    promptVersion: String(latest.ai_extraction_prompt_version).slice(0, 40),
+    promptVersion: null,
     minEvidence: envNum('CALL_FIX_PROPOSAL_MIN', 5),
     maxCells: envNum('CALL_FIX_PROPOSAL_MAX_CELLS', 3),
     now,

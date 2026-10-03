@@ -83,7 +83,7 @@ describe('the two-model rule for a call finding', () => {
       id, call_log_id: callId, audit_source: 'self_audit', category: 'field_drift', field: 'appointment_agreed',
       old_value: 'false', new_value: 'true', transcript_excerpt: AUDITOR_EXCERPT, created_at: new Date('2026-10-03T07:40:00Z'),
       // The self-audit stores the model that actually answered.
-      detail: JSON.stringify({ auditor_model: 'claude-opus-5-5', verdict: { appointment_agreed: true }, extraction_prompt_version: 'v2-extract-abc' }), ...over,
+      detail: JSON.stringify({ auditor_model: 'claude-opus-5-5', verdict: { appointment_agreed: true } }), ...over,
     });
     return id;
   };
@@ -126,7 +126,7 @@ describe('the two-model rule for a call finding', () => {
     const row = await database('ai_incidents').first();
     expect(row).toMatchObject({
       area: 'calls', evidence_type: 'call_audit_finding', evidence_id: expect.stringMatching(new RegExp(`^${findingId}:[0-9a-f]{12}$`)), incident_key: callId,
-      surface: 'call_extraction', failure_mode: 'appointment_agreed_missed', disposition: 'confirmed_mistake', prompt_version: 'v2-extract-abc',
+      surface: 'call_extraction', failure_mode: 'appointment_agreed_missed', disposition: 'confirmed_mistake', prompt_version: null,
     });
     expect(row.produced_at.toISOString()).toBe('2026-10-02T15:00:00.000Z');
     expect(row.adjudication).toMatchObject({ rule: 'two_models', production: false, auditor: { value: true, provider: 'anthropic', excerpt_verified: true }, second: { provider: 'openai', value: true } });
@@ -135,18 +135,6 @@ describe('the two-model rule for a call finding', () => {
     expect(row.summary).not.toMatch(/kitchen|Thursday/);
 
     expect(await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader: agreeing })).toMatchObject({ adjudicated: 0, candidates: 0 });
-  });
-
-  test('the incident keeps the extraction version of the audit, even after the call is reprocessed', async () => {
-    const callId = await call();
-    const id = await finding(callId);
-    await database('call_log').where({ id: callId }).update({ ai_extraction_prompt_version: 'v2-extract-newer' });
-    await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader: agreeing });
-    expect((await byFinding(id)).prompt_version).toBe('v2-extract-abc');
-    // A finding written before the snapshot existed is unversioned.
-    const old = await finding(await call(), { detail: JSON.stringify({ auditor_model: 'claude-opus-5-5', verdict: { appointment_agreed: true } }) });
-    await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader: agreeing });
-    expect((await byFinding(old)).prompt_version).toBeNull();
   });
 
   test('a disagreeing second reader leaves a lead; an unreachable one stores nothing and is retried', async () => {
@@ -166,27 +154,26 @@ describe('the two-model rule for a call finding', () => {
     const id = await finding(callId);
     await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader: agreeing });
     expect(await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader: agreeing })).toMatchObject({ candidates: 0 });
-    // A later audit of the reprocessed call rewrites the same row.
+    // A later audit rewrites the same row (here: the deep call fell back).
     await database('call_audit_findings').where({ id }).update({
-      detail: JSON.stringify({ auditor_model: 'claude-opus-5-5', verdict: { appointment_agreed: true }, extraction_prompt_version: 'v2-extract-newer' }),
+      detail: JSON.stringify({ auditor_model: 'gpt-6-luna', verdict: { appointment_agreed: true } }),
     });
     const again = await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader: agreeing });
     expect(again).toMatchObject({ candidates: 1, adjudicated: 1 });
     const rows = await database('ai_incidents').orderBy('adjudicated_at');
-    expect(rows.map((r) => r.prompt_version)).toEqual(['v2-extract-abc', 'v2-extract-newer']);
-    // The first row still describes what was adjudicated then.
-    expect(rows[0].adjudication.auditor.model).toBe('claude-opus-5-5');
+    // Each row still describes what was adjudicated then.
+    expect(rows.map((r) => r.adjudication.auditor.model)).toEqual(['claude-opus-5-5', 'gpt-6-luna']);
   });
 
   test('a corrected verdict or excerpt on the same model and version is new evidence too', async () => {
     const callId = await call();
     // First audit: the auditor never answered the field (stored "false" is a coercion).
-    const id = await finding(callId, { old_value: 'true', new_value: 'false', detail: JSON.stringify({ auditor_model: 'claude-opus-5-5', verdict: {}, extraction_prompt_version: 'v2-extract-abc' }) });
+    const id = await finding(callId, { old_value: 'true', new_value: 'false', detail: JSON.stringify({ auditor_model: 'claude-opus-5-5', verdict: {} }) });
     const disagreeing = jest.fn(async () => ({ ok: true, provider: 'openai', model: 's', answer: { appointment_agreed: false, excerpt: 'We can be there Thursday between 2 and 4.' } }));
     await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader: disagreeing });
     expect((await byFinding(id)).adjudication.rule).toBe('auditor_value_missing');
     // A re-audit answers the field explicitly, same model and version.
-    await database('call_audit_findings').where({ id }).update({ detail: JSON.stringify({ auditor_model: 'claude-opus-5-5', verdict: { appointment_agreed: false }, extraction_prompt_version: 'v2-extract-abc' }) });
+    await database('call_audit_findings').where({ id }).update({ detail: JSON.stringify({ auditor_model: 'claude-opus-5-5', verdict: { appointment_agreed: false } }) });
     expect(await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader: disagreeing })).toMatchObject({ candidates: 1, adjudicated: 1 });
     // And a replaced excerpt alone is new evidence as well.
     await database('call_audit_findings').where({ id }).update({ transcript_excerpt: 'My kitchen has ants again, can someone come out?' });
@@ -235,13 +222,13 @@ describe('the two-model rule for a call finding', () => {
     expect(agreeing).not.toHaveBeenCalled();
   });
 
-  test('the Sunday proposer counts distinct confirmed calls on the latest extraction version', async () => {
+  test('the Sunday proposer counts distinct confirmed calls in the unversioned cohort', async () => {
     for (let i = 0; i < 5; i++) await finding(await call());
     await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader: agreeing });
     const out = await calls.proposeCallFixes({ dbi: database, now: new Date('2026-10-04T08:50:00Z') });
     expect(out).toMatchObject({ proposed: 1 });
     expect(await database('ai_fix_proposals').first()).toMatchObject({
-      area: 'calls', surface: 'call_extraction', failure_mode: 'appointment_agreed_missed', prompt_version: 'v2-extract-abc', status: 'pending', evidence_count: 5,
+      area: 'calls', surface: 'call_extraction', failure_mode: 'appointment_agreed_missed', prompt_version: null, status: 'pending', evidence_count: 5,
     });
   });
 });
