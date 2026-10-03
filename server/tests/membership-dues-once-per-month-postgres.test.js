@@ -925,6 +925,117 @@ postgres('membership dues — serialization, reconciled shape, locked month (B08
   });
 });
 
+// Why a requested stamp may not hold is split by cause on the locked visit plus
+// the customer row read in the mint transaction: a visit that is no longer a
+// dues visit mints unstamped (genuine reprice, existing test); a dues visit
+// whose derived amount no longer matches the customer row is refused, retryably.
+postgres('membership dues — stale rate or lane at the mint, and Charge now (B08 round 3)', () => {
+  const InvoiceSvc = require('../services/invoice');
+  beforeAll(() => { mockPg = knex({ client: 'pg', connection, pool: { min: 0, max: 8 } }); });
+  afterAll(async () => { if (mockPg) await mockPg.destroy(); });
+  afterEach(() => { jest.restoreAllMocks(); });
+  const stampedOf = (inv) => (inv.line_items || []).find((li) => li.membership_dues_month);
+
+  function beforeFirstMint(fn) {
+    const original = InvoiceSvc.createFromService;
+    let first = true;
+    jest.spyOn(InvoiceSvc, 'createFromService').mockImplementation(async (...args) => {
+      if (first) { first = false; await fn(); }
+      return original.apply(InvoiceSvc, args);
+    });
+  }
+
+  test('the monthly rate changed between decision and mint → 503 and nothing inserted; the retry mints one stamped invoice at the NEW rate', async () => {
+    const f = await seedMember();
+    try {
+      const lawn = await seedVisit(f, { label: 'Lawn Care' });
+      beforeFirstMint(() => mockPg('customers').where({ id: f.customerId }).update({ monthly_rate: 59 }));
+      const key = randomUUID();
+      expect(await complete(f, lawn, {}, key)).toMatchObject({ status: 503, body: { code: 'membership_dues_coverage_unverified' } });
+      expect(await invoicesFor(f)).toHaveLength(0);
+      jest.restoreAllMocks();
+      expect(await complete(f, lawn, {}, key)).toMatchObject({ status: 200 });
+      const rows = await invoicesFor(f);
+      expect(rows).toHaveLength(1);
+      expect(Number(rows[0].total)).toBe(59);
+      expect(stampedOf(rows[0])).toMatchObject({ membership_dues_month: monthOf(etDateString()), amount: 59 });
+    } finally { await cleanup(f); }
+  });
+
+  test('rate changed AND the month got a stamped invoice meanwhile → the retry finds it covered and mints nothing', async () => {
+    const f = await seedMember();
+    try {
+      const other = await seedVisit(f, { label: 'Pest Control' });
+      const lawn = await seedVisit(f, { label: 'Lawn Care' });
+      beforeFirstMint(async () => {
+        await mockPg('customers').where({ id: f.customerId }).update({ monthly_rate: 59 });
+        await mockPg('invoices').insert({ id: randomUUID(), token: randomUUID().replace(/-/g, ''), invoice_number: `B08-${randomUUID().slice(0, 8)}`,
+          customer_id: f.customerId, scheduled_service_id: other, status: 'sent', total: 49, subtotal: 49,
+          line_items: JSON.stringify([{ description: 'Pest Control', quantity: 1, unit_price: 49, amount: 49, membership_dues_month: monthOf(etDateString()) }]) });
+      });
+      const key = randomUUID();
+      expect(await complete(f, lawn, {}, key)).toMatchObject({ status: 503 });
+      jest.restoreAllMocks();
+      expect(await complete(f, lawn, {}, key)).toMatchObject({ status: 200 });
+      expect(await invoicesFor(f)).toHaveLength(1);
+    } finally { await cleanup(f); }
+  });
+
+  test('the customer left the membership lane between decision and mint → no dues invoice is inserted, and the retry follows the lane that now applies', async () => {
+    const f = await seedMember();
+    try {
+      const lawn = await seedVisit(f, { label: 'Lawn Care' });
+      beforeFirstMint(() => mockPg('customers').where({ id: f.customerId }).update({ billing_mode: 'per_visit' }));
+      const key = randomUUID();
+      expect(await complete(f, lawn, {}, key)).toMatchObject({ status: 503, body: { code: 'membership_dues_coverage_unverified' } });
+      expect(await invoicesFor(f)).toHaveLength(0);
+      jest.restoreAllMocks();
+      // per_visit: an unpriced visit bills nothing on the dues rate.
+      expect(await complete(f, lawn, {}, key)).toMatchObject({ status: 200 });
+      expect(await invoicesFor(f)).toHaveLength(0);
+    } finally { await cleanup(f); }
+  });
+
+  // Charge now's pre-mint can produce a member's dues-shaped invoice; it goes
+  // through the same stamp + coverage check.
+  async function loadSvc(visitId) {
+    return mockPg('scheduled_services').where('scheduled_services.id', visitId)
+      .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+      .select('scheduled_services.*', 'customers.monthly_rate as cust_monthly_rate', 'customers.waveguard_tier as cust_waveguard_tier',
+        'customers.billing_mode as cust_billing_mode', 'customers.property_type as cust_property_type')
+      .first();
+  }
+
+  test('Charge now / prepaid-receipt pre-mint of an unpriced member visit mints a STAMPED dues invoice; the next visit and a second pre-mint see the month covered', async () => {
+    const { mintOrReuseScheduledServiceInvoice } = require('../routes/admin-schedule')._test;
+    const f = await seedMember();
+    try {
+      const lawn = await seedVisit(f, { label: 'Lawn Care' });
+      const pest = await seedVisit(f, { label: 'Pest Control' });
+      const minted = await mintOrReuseScheduledServiceInvoice(await loadSvc(lawn));
+      expect(minted.invoice).toBeTruthy();
+      expect(stampedOf(await mockPg('invoices').where({ id: minted.invoice.id }).first())).toMatchObject({ membership_dues_month: monthOf(etDateString()) });
+      // A second visit's pre-mint is refused as already covered…
+      expect(await mintOrReuseScheduledServiceInvoice(await loadSvc(pest))).toEqual({ invoice: null, reason: 'membership_dues_covered' });
+      // …and its completion mints nothing.
+      expect(await complete(f, pest)).toMatchObject({ status: 200 });
+      expect(await invoicesFor(f)).toHaveLength(1);
+    } finally { await cleanup(f); }
+  });
+
+  test('a priced visit\'s pre-mint is not a dues mint: no stamp', async () => {
+    const { mintOrReuseScheduledServiceInvoice } = require('../routes/admin-schedule')._test;
+    const f = await seedMember();
+    try {
+      const priced = await seedVisit(f, { label: 'Add-on Treatment', estimatedPrice: 85 });
+      await mockPg('scheduled_services').where({ id: priced }).update({ is_recurring: false });
+      const minted = await mintOrReuseScheduledServiceInvoice(await loadSvc(priced));
+      expect(Number(minted.invoice.total)).toBe(85);
+      expect(stampedOf(await mockPg('invoices').where({ id: minted.invoice.id }).first())).toBeUndefined();
+    } finally { await cleanup(f); }
+  });
+});
+
 // The month key itself, straight against the helper: a visit instant late on
 // the last ET day is that month's, even though UTC has already rolled over.
 postgres('monthlyDuesCollected — ET month attribution of a stamped dues invoice (B08)', () => {

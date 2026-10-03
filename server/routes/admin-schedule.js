@@ -45,7 +45,7 @@ const {
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
-const { resolveBillingLane, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, isSiblingCoverageEligibleVisit, sameTripFirstApplicationBreakdown, collectionStateForCoveredInvoice } = require('../services/billing-lane');
+const { resolveBillingLane, isMembershipDuesShapedVisit, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, isSiblingCoverageEligibleVisit, sameTripFirstApplicationBreakdown, collectionStateForCoveredInvoice } = require('../services/billing-lane');
 const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
 const DiscountEngine = require('../services/discount-engine');
 const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
@@ -17000,6 +17000,22 @@ const { loadActiveConfig: loadPestPressureActiveConfig } = require('../services/
 // generatePrepaidReceiptForService already reports through `receipt.reason`
 // for every other refusal here, so the Mark-prepaid modal explains it the
 // same way instead of the caller crashing on an unexpected object.
+// A Charge-now / prepaid-receipt pre-mint whose amount IS a member's monthly dues
+// for an unpriced plan visit asks the mint for the dues stamp + coverage check
+// (the completion mint's own), so that invoice is visible to the month's dedupe.
+function membershipDuesMintRequest(svc, amount) {
+  if (!isMembershipDuesShapedVisit({
+    estimatedPrice: svc.estimated_price,
+    primaryLinePrice: svc.primary_line_price ?? null,
+    isCallback: svc.is_callback,
+    monthlyRate: svc.cust_monthly_rate,
+    billingMode: svc.cust_billing_mode || null,
+    waveguardTier: svc.cust_waveguard_tier,
+    amount,
+  })) return null;
+  return { month: String(svc.scheduled_date instanceof Date ? svc.scheduled_date.toISOString() : svc.scheduled_date).slice(0, 7), amount };
+}
+
 async function mintOrReuseScheduledServiceInvoice(svc) {
   const InvoiceService = require('../services/invoice');
   // ONE canonical per-visit collection verdict, resolved BEFORE this visit's
@@ -17037,9 +17053,12 @@ async function mintOrReuseScheduledServiceInvoice(svc) {
     fallbackAmount: amount,
     fallbackDescription: svc.service_type || 'Service visit',
   });
-  return mintScheduledServiceInvoiceWithDeposit({
+  const duesRequest = membershipDuesMintRequest(svc, amount);
+  try {
+  return await mintScheduledServiceInvoiceWithDeposit({
     svc,
     recheckInTrx: siblingCoverageRecheckInTrx(svc),
+    ...(duesRequest ? { membershipDues: duesRequest } : {}),
     buildCreateParams: () => ({
       customerId: svc.customer_id,
       scheduledServiceId: svc.id,
@@ -17056,6 +17075,15 @@ async function mintOrReuseScheduledServiceInvoice(svc) {
       dueDate: etDateString(),
     }),
   });
+  } catch (err) {
+    // The dues stamp's own refusals read as the receipt flow's usual {reason}
+    // shape instead of an exception the Mark-prepaid modal never expects.
+    if (err?.code === 'MEMBERSHIP_DUES_COVERED') return { invoice: null, reason: 'membership_dues_covered' };
+    if (err?.code === 'MEMBERSHIP_DUES_COVERAGE_UNVERIFIED' || err?.code === 'SCHEDULED_BILLING_SOURCE_MOVED') {
+      return { invoice: null, reason: 'membership_dues_unverified' };
+    }
+    throw err;
+  }
 }
 
 // Send the branded paid receipt (email + SMS) for a fully-paid invoice, exactly
@@ -17883,9 +17911,11 @@ router.post('/:id/invoice', async (req, res, next) => {
     // roll-forward — completion reuses this pre-minted invoice, so skipping the
     // credit here would strand the customer's paid deposit and collect full
     // price on top of it.
+    const duesRequest = membershipDuesMintRequest(svc, amount);
     const minted = await mintScheduledServiceInvoiceWithDeposit({
       svc,
       recheckInTrx: siblingCoverageRecheckInTrx(svc),
+      ...(duesRequest ? { membershipDues: duesRequest } : {}),
       // In-lock ownership recheck: substantial async work happens between
       // the authorized SELECT at the top of this route and the mint
       // transaction — re-verify (row-locked) that the visit is still this

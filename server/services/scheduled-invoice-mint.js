@@ -276,6 +276,11 @@ async function mintScheduledServiceInvoiceWithDeposit({
   // the visit row first waits for this mint, so a throw here is the only
   // race left. A throw carrying a status is terminal for the deposit retry.
   recheckInTrx = null,
+  // { month: 'YYYY-MM', amount } when the mint IS a member's monthly dues for an
+  // unpriced plan visit (Charge now's pre-mint): the lines go through the same
+  // stamp + coverage check the completion mint uses, so the invoice is visible
+  // to the month's dedupe (and refused if the month is already covered).
+  membershipDues = null,
 }) {
   const InvoiceService = require('../services/invoice');
   const {
@@ -331,6 +336,25 @@ async function mintScheduledServiceInvoiceWithDeposit({
             || priceMovedBetween(svc, lockedSvc, 'primary_line_price'))) {
           throw scheduledPriceMovedError(lockedSvc);
         }
+        // Dues stamp + coverage under the dues-month lock — BEFORE the
+        // estimate ledger lock below, the order createFromService's dues mint
+        // also takes them in (dues-month, then estimate ledger), so the two
+        // mint paths can never lock them in opposite orders.
+        let createParams = buildCreateParams();
+        if (membershipDues) {
+          const stamped = await InvoiceService.stampMembershipDuesUnderLock(trx, {
+            customerId: svc.customer_id,
+            scheduledServiceId: svc.id,
+            month: membershipDues.month,
+            lineItems: createParams.lineItems,
+            derivedAmount: membershipDues.amount,
+          });
+          createParams = {
+            ...createParams,
+            lineItems: stamped,
+            ...(stamped.some((li) => li && li.membership_dues_month) ? { trustedMembershipDues: true } : {}),
+          };
+        }
         // Codex round-6 P1: the estimate-scoped ledger lock used to be taken
         // AFTER recheckInTrx. siblingCoverageRecheckInTrx's own lookup
         // (siblingInvoiceCoverageVerdict, lockRows: true → FOR UPDATE OF i)
@@ -375,7 +399,7 @@ async function mintScheduledServiceInvoiceWithDeposit({
           ? await pendingDepositCredit(sourceEstimateId, trx)
           : null;
         const created = await InvoiceService.create({
-          ...buildCreateParams(),
+          ...createParams,
           database: trx,
           ...(depositCredit && Number(depositCredit.amount) > 0
             ? { depositCredit: { amount: depositCredit.amount, estimateId: sourceEstimateId } }

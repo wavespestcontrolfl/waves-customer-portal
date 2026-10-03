@@ -11575,6 +11575,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
             } catch (reconcileErr) {
               logger.error(`[dispatch] frozen Bill-To reconciliation FAILED for ${svc.id} — the resume re-raises the divergence and retries the reconciliation: ${reconcileErr.message}`);
             }
+          } else if (invErr?.reason === 'dues_amount_stale'
+            && Number.isInteger(invErr.currentMonthlyRateCents) && invErr.currentMonthlyRateCents > 0) {
+            // The member's monthly rate moved after the dues amount was frozen:
+            // without a refresh the resume would mint the stale frozen figure
+            // and be refused again forever. Restamp the current rate.
+            try {
+              await mergeRecordNotesKeys(record.id, { backfillMintAmountCents: invErr.currentMonthlyRateCents });
+              logger.warn(`[dispatch] frozen mint amount refreshed to ${invErr.currentMonthlyRateCents}c for ${svc.id} after a monthly-rate change — the resume bills the current dues`);
+            } catch (refreshErr) {
+              logger.error(`[dispatch] frozen dues amount refresh FAILED for ${svc.id}: ${refreshErr.message}`);
+            }
           }
           const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, invErr);
           if (!released) {

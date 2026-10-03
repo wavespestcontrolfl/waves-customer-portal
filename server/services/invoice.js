@@ -28,6 +28,8 @@ const {
   hasAuthoritativeZeroPrice,
   MEMBERSHIP_DUES_LINE_KEY,
   membershipDuesProvenanceHolds,
+  isMembershipDuesLane,
+  isUnpricedPlanVisit,
   acquireMembershipDuesMonthLock,
   tryAcquireMembershipDuesMonthLock,
   monthlyDuesCollected,
@@ -1740,7 +1742,7 @@ function buildDiscountLineItem({
 // invoice (or the cron) has since covered refuses this mint with
 // MEMBERSHIP_DUES_COVERED, which the completion treats exactly like dues
 // that were covered before the mint (no invoice, the visit completes).
-async function stampMembershipDuesUnderLock(conn, { customerId, scheduledServiceId, month, lineItems }) {
+async function stampMembershipDuesUnderLock(conn, { customerId, scheduledServiceId, month, lineItems, derivedAmount = null }) {
   const duesLine = lineItems.find((li) => li._kind !== "discount" && Number(li.amount) > 0);
   if (!duesLine) return lineItems;
   const { acquireScheduledMintLockChain } = require("./scheduled-invoice-mint");
@@ -1752,9 +1754,34 @@ async function stampMembershipDuesUnderLock(conn, { customerId, scheduledService
   const customer = await conn("customers")
     .where({ id: customerId })
     .first("billing_mode", "monthly_rate", "waveguard_tier");
+  // Why a requested stamp may not hold, split by cause on the LOCKED visit row
+  // plus the customer row read in this transaction:
+  //  - the visit is no longer a dues visit (its own estimated_price, an
+  //    authoritative $0, a callback — visit.estimated_price / primary_line_price
+  //    / is_callback): a genuine reprice or a non-dues visit. Mint unstamped.
+  //  - the visit is still an unpriced plan visit but the amount the completion
+  //    DERIVED (derivedAmount) no longer equals what the customer row yields —
+  //    customer.monthly_rate changed, or billing_mode / waveguard_tier moved
+  //    the customer off the membership lane: do NOT insert (it would be an
+  //    invoice no dues check can see). Refuse retryably so the completion
+  //    re-derives from fresh data.
+  if (!isUnpricedPlanVisit(visit)) return lineItems;
+  const rateCents = Math.round(Number(customer?.monthly_rate) * 100);
+  if (!isMembershipDuesLane(customer) || !(rateCents > 0)
+    || (derivedAmount != null && Math.round(Number(derivedAmount) * 100) !== rateCents)) {
+    const e = new Error("The customer's monthly rate or plan changed while minting — no dues invoice was created; retry to bill the current dues.");
+    e.status = 503;
+    e.statusCode = 503;
+    e.code = "MEMBERSHIP_DUES_COVERAGE_UNVERIFIED";
+    e.reason = "dues_amount_stale";
+    e.currentMonthlyRateCents = rateCents > 0 ? rateCents : null;
+    throw e;
+  }
   // Provenance is judged on the RECONCILED dues total — the sum of the set of
   // lines that together represent the visit's charge (membershipDuesLineSet),
   // not on one line — so a top-up / adjustment shape is still the monthly rate.
+  // (A dues visit whose lines are some other shape, e.g. with add-ons, mints
+  // unstamped as it always has.)
   const duesSet = membershipDuesLineSet(lineItems, duesLine);
   if (!membershipDuesProvenanceHolds({ visit, customer, lineAmount: duesSetCents(duesSet) / 100 })) {
     return lineItems;
@@ -6150,6 +6177,7 @@ const InvoiceService = {
           scheduledServiceId: sr.scheduled_service_id,
           month: membershipDuesMonth,
           lineItems,
+          derivedAmount: amount,
         });
         membershipDuesStamped = lineItems.some((li) => li && li[MEMBERSHIP_DUES_LINE_KEY]);
       }
@@ -12886,6 +12914,8 @@ InvoiceService._internals = {
 // decision because the service won't happen.
 InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES = ['void', 'refunded', 'canceled', 'cancelled'];
 InvoiceService.lineIsBaseApplication = lineIsBaseApplication;
+// Shared with the scheduled-invoice mint helper (Charge now's pre-mint).
+InvoiceService.stampMembershipDuesUnderLock = stampMembershipDuesUnderLock;
 
 InvoiceService.rodentSetupRebillMarker = rodentSetupRebillMarker;
 InvoiceService.withDeferredInvoiceProviderHandoff = withDeferredInvoiceProviderHandoff;

@@ -909,6 +909,41 @@ function completionInvoiceIsMembershipDues(args) {
     && completionInvoiceAmount({ ...args, monthlyRate: 0 }) === 0;
 }
 
+// The membership-dues lane, read off a customer row: an explicit
+// monthly_membership, or NULL mode with a real tier (the lane resolver's own
+// inference, minus the rate test).
+function isMembershipDuesLane(customer) {
+  return !!customer && (customer.billing_mode === 'monthly_membership'
+    || (!customer.billing_mode && isMembershipTier(customer.waveguard_tier)));
+}
+
+// VISIT side of "is this a dues visit": unpriced (no own price, no authoritative
+// $0) and not a callback — whatever the customer's rate is. Judged on the
+// locked visit row. A priced visit is a genuine reprice / non-dues visit.
+function isUnpricedPlanVisit(visit) {
+  return !!visit && completionInvoiceIsMembershipDues({
+    estimatedPrice: visit.estimated_price,
+    isCallback: !!visit.is_callback,
+    perApplicationBilling: false,
+    perApplicationFee: null,
+    monthlyRate: 1, // any positive rate: only the visit side is being asked
+    billingMode: 'monthly_membership',
+    primaryLinePrice: visit.primary_line_price ?? null,
+  });
+}
+
+// An invoice amount that IS a member's monthly dues for an unpriced plan
+// visit (member lane, unpriced non-callback visit, amount == monthly_rate):
+// what Charge now's pre-mint requests a dues stamp for.
+function isMembershipDuesShapedVisit({
+  estimatedPrice, primaryLinePrice = null, isCallback, monthlyRate, billingMode, waveguardTier, amount,
+}) {
+  return isMembershipDuesLane({ billing_mode: billingMode, waveguard_tier: waveguardTier })
+    && isUnpricedPlanVisit({ estimated_price: estimatedPrice, primary_line_price: primaryLinePrice, is_callback: isCallback })
+    && Number(monthlyRate) > 0
+    && Math.round(Number(amount) * 100) === Math.round(Number(monthlyRate) * 100);
+}
+
 // Does a dues invoice about to be written still earn its stamp? Judged by the
 // caller from the rows it holds LOCKED for THAT mint (the visit, the
 // customer) and the amount of the line actually being written — never from
@@ -1736,6 +1771,9 @@ module.exports = {
   completionInvoiceAmount,
   completionInvoiceIsMembershipDues,
   membershipDuesProvenanceHolds,
+  isMembershipDuesLane,
+  isUnpricedPlanVisit,
+  isMembershipDuesShapedVisit,
   acquireMembershipDuesMonthLock,
   MEMBERSHIP_DUES_LINE_KEY,
   predictCompletionBilling,
