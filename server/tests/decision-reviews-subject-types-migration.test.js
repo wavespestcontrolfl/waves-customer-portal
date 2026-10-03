@@ -37,7 +37,9 @@ describe('decision_reviews subject types migration', () => {
     // Read from the source: loading the recorder would open the database.
     const source = require('fs').readFileSync(require.resolve('../services/typed-decisions/shadow-recorder'), 'utf8');
     const recorded = JSON.parse(source.match(/const SUBJECT_TYPES = (\[[^\]]+\]);/)[1].replace(/'/g, '"'));
-    expect(recorded).toEqual(narrow.SUBJECT_TYPES);
+    // Later packages widen the CHECK in the migration that ships their writer
+    // and reviewer: scheduled_services is 20261003101500 (visit_access).
+    expect(recorded).toEqual([...narrow.SUBJECT_TYPES, 'scheduled_services']);
   });
 
   test('rolling the second cut back restores exactly what the first cut left', async () => {

@@ -4386,6 +4386,27 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Visit access and safety flags, shadow leg (GATE_VISIT_ACCESS_FLAGS=shadow
+  // on top of GATE_TYPED_DECISIONS): today's and tomorrow's open visits, each
+  // asked once per state, so a repeat pass over an unchanged route is database
+  // reads only. Hourly across the booking day so a same-day add or a new
+  // customer text is picked up; :34 is clear of the :19/:49 brief sweep.
+  cron.schedule('34 5-19 * * *', async () => {
+    try {
+      await runExclusive('visit-access-shadow', async () => {
+        const VisitAccess = require('./typed-decisions/visit-access-shadow');
+        // Retention runs whatever the gate says: stored states are dropped on
+        // schedule even after the shadow is switched off.
+        await VisitAccess.pruneVisitAccessStates();
+        if (!require('../config/feature-gates').visitAccessShadowLive()) return;
+        const result = await VisitAccess.runVisitAccessSweep();
+        logger.info(`Visit access shadow done: ${result.recorded} recorded, ${result.unchanged} unchanged, ${result.skipped} skipped, ${result.failed} failed of ${result.considered}`);
+      });
+    } catch (err) {
+      logger.error(`Visit access shadow failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   cron.schedule('5 10 * * *', async () => {
     logger.info('Running: pre-visit balance reminders');
     try {
