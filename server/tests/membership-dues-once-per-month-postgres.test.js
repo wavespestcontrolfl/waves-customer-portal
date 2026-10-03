@@ -700,6 +700,162 @@ postgres('membership-dues stamp lifetime — void/unvoid and edits (B08)', () =>
   });
 });
 
+// Round 2: covered-skip vs removal serialization, the reconciled dues SET, and
+// the locked visit month.
+postgres('membership dues — serialization, reconciled shape, locked month (B08 round 2)', () => {
+  const InvoiceService = require('../services/invoice');
+  const { acquireMembershipDuesMonthLock } = require('../services/billing-lane');
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  beforeAll(() => { mockPg = knex({ client: 'pg', connection, pool: { min: 0, max: 10 } }); });
+  afterAll(async () => { if (mockPg) await mockPg.destroy(); });
+  // A failing assertion must never strand a held lock (every later test would wait on it).
+  const holds = [];
+  afterEach(async () => {
+    jest.restoreAllMocks();
+    while (holds.length) await holds.pop().rollback().catch(() => {});
+  });
+  async function holdDuesLock(customerId) {
+    const trx = await mockPg.transaction();
+    holds.push(trx);
+    await acquireMembershipDuesMonthLock(trx, customerId, monthOf(etDateString()));
+    return trx;
+  }
+  const stampedOf = (inv) => (inv.line_items || []).find((li) => li.membership_dues_month);
+  const reload = (id) => mockPg('invoices').where({ id }).first();
+  const settled = (p) => Promise.race([p.then(() => 'done', () => 'done'), sleep(700).then(() => 'pending')]);
+
+  async function mintDues(f, label, visitOver = {}) {
+    const visit = await seedVisit(f, { label });
+    if (Object.keys(visitOver).length) await mockPg('scheduled_services').where({ id: visit }).update(visitOver);
+    expect(await complete(f, visit)).toMatchObject({ status: 200 });
+    const rows = await invoicesFor(f);
+    return { visit, invoice: rows.find((r) => r.scheduled_service_id === visit) };
+  }
+
+  // ── Finding 1: removal vs covered-skip ────────────────────────────────────
+  test('a covered completion confirms under the dues-month lock: the stamp stripped before the lock → it mints (one stamped bill)', async () => {
+    const f = await seedMember();
+    try {
+      const a = await mintDues(f, 'Lawn Care');
+      const pest = await seedVisit(f, { label: 'Pest Control' });
+      const hold = await holdDuesLock(f.customerId);
+      // Its pre-lock read sees A's stamp (covered); the confirmation then waits on the lock.
+      const pending = complete(f, pest);
+      expect(await settled(pending)).toBe('pending');
+      // The "edit" wins: coverage removed and committed while the lock is held.
+      await hold('invoices').where({ id: a.invoice.id }).update({
+        line_items: JSON.stringify(a.invoice.line_items.map(({ membership_dues_month: _m, ...li }) => li)),
+      });
+      await hold.commit();
+      expect(await pending).toMatchObject({ status: 200 });
+      const stamped = (await liveInvoicesFor(f)).filter((r) => stampedOf(r));
+      expect(stamped).toHaveLength(1);
+      expect(stamped[0].scheduled_service_id).toBe(pest);
+    } finally { await cleanup(f); }
+  });
+
+  test('the same race with no removal: the covered completion mints nothing and the original stays the one stamped bill', async () => {
+    const f = await seedMember();
+    try {
+      const a = await mintDues(f, 'Lawn Care');
+      const pest = await seedVisit(f, { label: 'Pest Control' });
+      const hold = await holdDuesLock(f.customerId);
+      const pending = complete(f, pest);
+      expect(await settled(pending)).toBe('pending');
+      await hold.commit();
+      expect(await pending).toMatchObject({ status: 200 });
+      const stamped = (await liveInvoicesFor(f)).filter((r) => stampedOf(r));
+      expect(stamped.map((r) => r.id)).toEqual([a.invoice.id]);
+    } finally { await cleanup(f); }
+  });
+
+  test('a stripping edit and a void each WAIT for the dues-month lock (they take it before committing)', async () => {
+    const f = await seedMember();
+    try {
+      const a = await mintDues(f, 'Lawn Care');
+      const hold = await holdDuesLock(f.customerId);
+      const lines = a.invoice.line_items.map((li) => (li.membership_dues_month ? { ...li, unit_price: 60, amount: 60 } : li));
+      const edit = InvoiceService.update(a.invoice.id, { line_items: lines });
+      expect(await settled(edit)).toBe('pending');
+      expect(stampedOf(await reload(a.invoice.id))).toBeDefined();
+      await hold.commit();
+      await edit;
+      expect(stampedOf(await reload(a.invoice.id))).toBeUndefined();
+
+      const b = await mintDues(f, 'Pest Control');
+      const hold2 = await holdDuesLock(f.customerId);
+      const voiding = InvoiceService.voidInvoice(b.invoice.id);
+      expect(await settled(voiding)).toBe('pending');
+      expect((await reload(b.invoice.id)).status).not.toBe('void');
+      await hold2.commit();
+      await voiding;
+      expect((await reload(b.invoice.id)).status).toBe('void');
+    } finally { await cleanup(f); }
+  });
+
+  // ── Finding 2: the reconciled dues set ───────────────────────────────────
+  test.each([
+    ['a stale positive primary line price below the rate (a top-up line reaches the rate)', 30],
+    ['a stale positive primary line price above the rate (a negative adjustment reaches the rate)', 60],
+  ])('%s → mints stamped on the primary line, and the next same-month visit is covered', async (_name, stalePrimary) => {
+    const f = await seedMember();
+    try {
+      const a = await mintDues(f, 'Lawn Care', { primary_line_price: stalePrimary });
+      expect(Number(a.invoice.total)).toBe(49);
+      expect(a.invoice.line_items.length).toBeGreaterThan(1);
+      const stamped = a.invoice.line_items.filter((li) => li.membership_dues_month);
+      expect(stamped).toHaveLength(1);
+      expect(stamped[0].client_id).toMatch(/_primary$/);
+      await mintDues(f, 'Pest Control');
+      expect(await invoicesFor(f)).toHaveLength(1);
+    } finally { await cleanup(f); }
+  });
+
+  test('editing a top-up invoice: the dues set unchanged keeps the stamp (even with a fee added); a changed top-up or primary strips it', async () => {
+    const f = await seedMember();
+    try {
+      const a = await mintDues(f, 'Lawn Care', { primary_line_price: 30 });
+      const base = a.invoice.line_items;
+      await InvoiceService.update(a.invoice.id, { line_items: [...base, { description: 'Gate fee', quantity: 1, unit_price: 10, amount: 10, category: 'Fee' }] });
+      expect(stampedOf(await reload(a.invoice.id))).toBeDefined();
+      const withFee = (await reload(a.invoice.id)).line_items;
+      // change the top-up line's amount
+      await InvoiceService.update(a.invoice.id, {
+        line_items: withFee.map((li) => (/^scheduled_price_topup_/.test(li.client_id || '') ? { ...li, unit_price: 5, amount: 5 } : li)),
+      });
+      expect(stampedOf(await reload(a.invoice.id))).toBeUndefined();
+    } finally { await cleanup(f); }
+  });
+
+  // ── Finding 3: the locked visit's month ──────────────────────────────────
+  test('a visit moved to another month between the decision and the lock → no wrong-month stamp; the retry bills the month the visit is actually in', async () => {
+    const InvoiceSvc = require('../services/invoice');
+    const original = InvoiceSvc.createFromService;
+    const f = await seedMember();
+    try {
+      const lawn = await seedVisit(f, { label: 'Lawn Care' });
+      const moved = previousMonthDay();
+      let first = true;
+      jest.spyOn(InvoiceSvc, 'createFromService').mockImplementation(async (...args) => {
+        if (first) { first = false; await mockPg('scheduled_services').where({ id: lawn }).update({ scheduled_date: moved }); }
+        return original.apply(InvoiceSvc, args);
+      });
+      const key = randomUUID();
+      expect(await complete(f, lawn, {}, key)).toMatchObject({ status: 503, body: { code: 'membership_dues_coverage_unverified' } });
+      expect(await invoicesFor(f)).toHaveLength(0);
+      jest.restoreAllMocks();
+      expect(await complete(f, lawn, {}, key)).toMatchObject({ status: 200 });
+      const rows = await invoicesFor(f);
+      expect(rows).toHaveLength(1);
+      expect(stampedOf(rows[0]).membership_dues_month).toBe(monthOf(moved));
+      // The current month was never stamped or covered: a visit today bills it.
+      await mintDues(f, 'Pest Control');
+      const months = (await invoicesFor(f)).map((r) => stampedOf(r).membership_dues_month).sort();
+      expect(months).toEqual([monthOf(moved), monthOf(etDateString())].sort());
+    } finally { await cleanup(f); }
+  });
+});
+
 // The month key itself, straight against the helper: a visit instant late on
 // the last ET day is that month's, even though UTC has already rolled over.
 postgres('monthlyDuesCollected — ET month attribution of a stamped dues invoice (B08)', () => {

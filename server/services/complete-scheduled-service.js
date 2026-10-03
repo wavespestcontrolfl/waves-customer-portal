@@ -4692,6 +4692,28 @@ async function completeScheduledService(completionInput, packetContext = null) {
       } catch (e) {
         logger.warn(`[dispatch] dues-collected lookup failed on completion for service ${svc.id}: ${e.message}`);
       }
+      // A "covered, skip the mint" verdict is confirmed under the same
+      // customer + month lock that every writer removing coverage (a stripping
+      // edit, a void) and the mint itself take, so the skip and a removal are
+      // never interleaved: if the coverage went away before the lock, this
+      // visit mints. A short transaction — a lock and one read, never across
+      // Stripe. An unreadable confirmation keeps the pre-lock verdict (the
+      // mint, if it happens, re-reads coverage under the lock and fails closed).
+      // (A packet member runs on the outer closeout transaction: a nested lock
+      // there would be held until that whole transaction ends, so it keeps the
+      // pre-lock verdict.)
+      if (duesCollectedThisMonth && !db.isTransaction) {
+        try {
+          const { acquireMembershipDuesMonthLock } = require('../services/billing-lane');
+          const dueMonth = serviceDateOnly(svc.scheduled_date).slice(0, 7);
+          duesCollectedThisMonth = await db.transaction(async (trx) => {
+            await acquireMembershipDuesMonthLock(trx, svc.customer_id, dueMonth);
+            return monthlyDuesCollected(trx, svc.customer_id, new Date(`${dueMonth}-15T12:00:00Z`), { excludeScheduledServiceId: svc.id });
+          });
+        } catch (e) {
+          logger.warn(`[dispatch] locked dues-coverage confirmation failed for service ${svc.id} — keeping the pre-lock verdict: ${e.message}`);
+        }
+      }
     }
     const autopayCoversVisit = membershipDuesCoverVisit({
       visitIsPayerBilled,
@@ -11572,7 +11594,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // unknown month. Retryable on EVERY lane, like the combined-invoice
         // refusal below — a quiet finalize would leave the month's dues
         // unbilled with no bell. The retry re-reads coverage under the lock.
-        if (invErr?.code === 'MEMBERSHIP_DUES_COVERAGE_UNVERIFIED' && !invoice?.id) {
+        if ((invErr?.code === 'MEMBERSHIP_DUES_COVERAGE_UNVERIFIED' || invErr?.code === 'SCHEDULED_BILLING_SOURCE_MOVED') && !invoice?.id) {
           logger.error(`[dispatch] visit ${svc.id}: dues coverage could not be verified under the dues lock — releasing for resume instead of minting or finalizing without the month's dues`);
           const duesReleased = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, invErr);
           if (!duesReleased) {

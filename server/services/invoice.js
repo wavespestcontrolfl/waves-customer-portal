@@ -1747,13 +1747,32 @@ async function stampMembershipDuesUnderLock(conn, { customerId, scheduledService
   const visit = await acquireScheduledMintLockChain(conn, {
     scheduledServiceId,
     customerId,
-    visitColumns: ["id", "estimated_price", "primary_line_price", "is_callback"],
+    visitColumns: ["id", "estimated_price", "primary_line_price", "is_callback", "scheduled_date"],
   });
   const customer = await conn("customers")
     .where({ id: customerId })
     .first("billing_mode", "monthly_rate", "waveguard_tier");
-  if (!membershipDuesProvenanceHolds({ visit, customer, lineAmount: duesLine.amount })) {
+  // Provenance is judged on the RECONCILED dues total — the sum of the set of
+  // lines that together represent the visit's charge (membershipDuesLineSet),
+  // not on one line — so a top-up / adjustment shape is still the monthly rate.
+  const duesSet = membershipDuesLineSet(lineItems, duesLine);
+  if (!membershipDuesProvenanceHolds({ visit, customer, lineAmount: duesSetCents(duesSet) / 100 })) {
     return lineItems;
+  }
+  // The month comes from the LOCKED visit, never the caller's pre-lock
+  // snapshot: a visit rescheduled across months before this lock won would be
+  // stamped (and locked) for the wrong month. Refuse, like the scheduled-date
+  // movement guard, so the completion re-decides on fresh data; checked BEFORE
+  // any month lock so only the month actually stamped is ever locked.
+  const lockedMonth = visit?.scheduled_date
+    ? String(visit.scheduled_date instanceof Date ? visit.scheduled_date.toISOString() : visit.scheduled_date).slice(0, 7)
+    : null;
+  if (lockedMonth && lockedMonth !== month) {
+    const e = new Error("Scheduled service date moved to another month while minting — retry to bill the current month");
+    e.status = 409;
+    e.statusCode = 409;
+    e.code = "SCHEDULED_BILLING_SOURCE_MOVED";
+    throw e;
   }
   await acquireMembershipDuesMonthLock(conn, customerId, month);
   // The monthly cron, its retry sweep and Charge now hold the per-customer
@@ -1821,33 +1840,69 @@ function stripMembershipDuesMarkers(lineItems) {
   });
 }
 
+// THE set of lines that together represent a membership-dues visit's charge,
+// shared by the mint (provenance) and the edit sanitizer ("unchanged"): the
+// marker-bearing PRIMARY line plus the scheduled-line replay's reconciliation
+// lines (client_id scheduled_<visit>_primary, scheduled_price_topup_<visit>,
+// discount_scheduled_price_<visit> — the top-up or negative adjustment that
+// brings a stale primary_line_price to the dues amount). Nothing else: a fee,
+// add-on or real discount line an operator or the mint adds is not part of it.
+// The marker still lives on the primary line alone.
+const DUES_RECONCILIATION_CLIENT_ID = /^(scheduled_.+_primary|scheduled_price_topup_.+|discount_scheduled_price_.+)$/;
+const duesLineCents = (li) => Math.round((Number(li.quantity) || 1) * (Number(li.unit_price) || 0) * 100);
+function membershipDuesLineSet(lineItems, primary) {
+  return lineItems.filter((li) => li && (li === primary || DUES_RECONCILIATION_CLIENT_ID.test(String(li.client_id || ""))));
+}
+const duesSetCents = (set) => set.reduce((sum, li) => sum + duesLineCents(li), 0);
+// What "unchanged" means: the same summed amount over the set, and the same
+// categories (order-independent).
+const duesSetSignature = (set) => `${duesSetCents(set)}|${set.map((li) => String(li.category || "")).sort().join(",")}`;
+
 // Judged against the STORED invoice only — no customer or visit read, so a
 // later rate or lane change cannot erase the month's dedupe evidence and
-// there is no read to fail. A line keeps the marker iff it IS the stored
-// stamped line, unchanged where it matters: same month, same category, same
-// amount (the invoice's own line math, in cents). The description may change
-// (a wording fix keeps the stamp). First such line only; a marker the stored
-// invoice did not carry — or carried for another month — is stripped, so an
-// edit can keep a stamp but never create one. Mint-time provenance
+// there is no read to fail. A marker survives only on the stored stamped line
+// with the same month whose dues SET (membershipDuesLineSet) is unchanged in
+// summed amount and categories; the description may change (a wording fix
+// keeps the stamp). First such line only; a marker the stored invoice did not
+// carry — or carried for another month — is stripped, so an edit can keep a
+// stamp but never create one. Mint-time provenance
 // (stampMembershipDuesUnderLock) stays the only authority for creating it.
 function sanitizeMembershipDuesMarkers(existing, newLines) {
   if (!Array.isArray(newLines) || !newLines.some((li) => li && li[MEMBERSHIP_DUES_LINE_KEY] !== undefined)) {
     return newLines;
   }
-  const stored = parseInvoiceLineItems(existing.line_items).find((li) => li && li[MEMBERSHIP_DUES_LINE_KEY]);
+  const storedLines = parseInvoiceLineItems(existing.line_items);
+  const stored = storedLines.find((li) => li && li[MEMBERSHIP_DUES_LINE_KEY]);
   if (!stored) return stripMembershipDuesMarkers(newLines);
-  const lineCents = (li) => Math.round((Number(li.quantity) || 1) * (Number(li.unit_price) || 0) * 100);
+  const storedSignature = duesSetSignature(membershipDuesLineSet(storedLines, stored));
   let kept = false;
   return newLines.map((li) => {
     if (!li || li[MEMBERSHIP_DUES_LINE_KEY] === undefined) return li;
     const unchanged = !kept
       && li[MEMBERSHIP_DUES_LINE_KEY] === stored[MEMBERSHIP_DUES_LINE_KEY]
-      && String(li.category || "") === String(stored.category || "")
-      && lineCents(li) === lineCents(stored);
+      && duesSetSignature(membershipDuesLineSet(newLines, li)) === storedSignature;
     if (unchanged) { kept = true; return li; }
     const { [MEMBERSHIP_DUES_LINE_KEY]: _dropped, ...rest } = li;
     return rest;
   });
+}
+
+// The month a stamped invoice's marker names, or null.
+function membershipDuesStampMonth(lineItems) {
+  const stamp = parseInvoiceLineItems(lineItems).find((li) => li && li[MEMBERSHIP_DUES_LINE_KEY]);
+  return stamp ? String(stamp[MEMBERSHIP_DUES_LINE_KEY]) : null;
+}
+
+// A writer that REMOVES a month's coverage (a stripping edit, a void, the
+// cancelled-visit void; the invoice row is the writer's own pre-read) holds the dues-month lock while it commits, so it is
+// mutually exclusive with a mint and with a covered completion's locked
+// re-read. FIRST lock of the writer's transaction (before any invoice row
+// lock): the mint takes this lock and then only INSERTS a new invoice, never
+// locking an existing invoice row, and the lock is held only by short
+// transactions (never across Stripe), so a blocking take cannot cycle.
+async function lockMembershipDuesMonthOfInvoice(trx, invoiceRow) {
+  const month = invoiceRow ? membershipDuesStampMonth(invoiceRow.line_items) : null;
+  if (month && invoiceRow.customer_id) await acquireMembershipDuesMonthLock(trx, invoiceRow.customer_id, month);
 }
 
 // Restoring a voided stamped dues invoice re-opens a bill for its month. The
@@ -9553,8 +9608,13 @@ const InvoiceService = {
 
     // The dues stamp survives an edit only on the stored stamped line, unchanged
     // in month, category and amount (see sanitizeMembershipDuesMarkers).
+    let duesStripMonth = null;
     if (updates.line_items) {
       updates = { ...updates, line_items: sanitizeMembershipDuesMarkers(existing, updates.line_items) };
+      // An edit that REMOVES the stored stamp removes the month's coverage: it
+      // commits under the dues-month lock (taken first in runEdit).
+      const storedMonth = membershipDuesStampMonth(existing.line_items);
+      if (storedMonth && membershipDuesStampMonth(updates.line_items) !== storedMonth) duesStripMonth = storedMonth;
     }
     const allowed = INVOICE_UPDATE_ALLOWED_FIELDS;
     const data = { updated_at: new Date() };
@@ -9754,6 +9814,7 @@ const InvoiceService = {
     };
 
     const runEdit = async (client) => {
+      if (duesStripMonth) await acquireMembershipDuesMonthLock(client, existing.customer_id, duesStripMonth);
       // Serialize against in-flight dun sends: lock the invoice row FIRST.
       // fireStep's claim transaction locks this same row before stamping
       // touch_claimed_at, so one of the two strictly precedes the other —
@@ -10052,6 +10113,9 @@ const InvoiceService = {
     // can never run twice for one invoice.
     let invoice = null;
     await db.transaction(async (trx) => {
+      // A stamped dues invoice's void removes the month's coverage: commit
+      // under the dues-month lock (first lock of this transaction).
+      await lockMembershipDuesMonthOfInvoice(trx, current);
       // Codex #4971 pre-push P0 (lock order): voiding a credit-settled
       // ('prepaid') termite annual invoice restores its account credit and
       // COMMITS here, before the term sync below ever runs. A renewal charge
@@ -12317,7 +12381,7 @@ const InvoiceService = {
       }
       const candidates = await candidateQuery
         .select("id", "invoice_number", "stripe_payment_intent_id", "payer_statement_id",
-          "total", "credit_applied", "line_items");
+          "total", "credit_applied", "line_items", "customer_id");
       if (candidates.length === 0) return voided;
       const StripeService = require("./stripe");
       for (const candidate of candidates) {
@@ -12393,6 +12457,9 @@ const InvoiceService = {
 
           // ── Atomic re-check + void (row lock) ──────────────────────────
           const result = await db.transaction(async (trx) => {
+            // A cancelled visit's void of a stamped dues invoice removes the
+            // month's coverage: dues-month lock first.
+            await lockMembershipDuesMonthOfInvoice(trx, candidate);
             // Codex #4971 pre-push P0 (lock order): this void can take a
             // credit-settled ('prepaid') invoice and restore its credit, so
             // a termite renewal parent-decision gate tied to it is this
