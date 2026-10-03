@@ -197,6 +197,11 @@ function addressPremiseKey(raw) {
   return street ? `${street}|${unit || ''}` : null;
 }
 
+// The comparator's own unit key for one address ('' when it names no unit).
+function addressUnitKey(raw) {
+  return addressParts(raw).unit || '';
+}
+
 function sameStreetAddress(rawA, rawB, { requireExactUnit = false, requireNamedUnit = false } = {}) {
   const aa = addressParts(rawA);
   const bb = addressParts(rawB);
@@ -256,6 +261,7 @@ function addressCompletesGatheredStreet(finalAddress, gatheredAddress) {
 module.exports = {
   sameStreetAddress,
   addressPremiseKey,
+  addressUnitKey,
   addressAddsLocality,
   addressCompletesGatheredStreet,
   STREET_TOKEN_ALIASES,

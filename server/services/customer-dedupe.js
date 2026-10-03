@@ -506,6 +506,9 @@ const SAME_ADDRESS_REASON = 'same_address_different_phone';
 // malformed), so "different phone" would be a lie: still listed (a likely
 // duplicate household), labeled plainly.
 const SAME_ADDRESS_PHONE_MISSING_REASON = 'same_address_phone_missing';
+// Same address AND the same phone, but a record is not in the phone queue
+// (not marked active), so this section is the only place the pair shows.
+const SAME_ADDRESS_PHONE_SHARED_REASON = 'same_address_phone_shared';
 
 // Contact-slot columns the carry prediction reads. Selected for same-address
 // rows only so the card can say what the merge will do with the phone; they
@@ -529,6 +532,14 @@ function isCommercialRow(row) {
     || normalizePropertyType(row.waveguard_tier) === 'commercial';
 }
 
+// The phone queue's own live-row rule (findDuplicateGroups: active = true, not
+// deleted, a parseable phone) — ONE predicate so a pair deferred to that queue
+// is really visible there. `active IS NULL` is live for the same-address read
+// but NOT for the phone queue, which this change must leave exactly as it is.
+function qualifiesForPhoneQueue(row) {
+  return row.active === true && !row.deleted_at && !!phone10(row.phone);
+}
+
 // Pure, two stages (buildSameAddressGroups runs both). Stage 1 —
 // sameAddressEdges: customers = live rows (DUPLICATE_GROUP_COLUMNS +
 // property_type, waveguard_tier); properties = active customer_properties rows
@@ -544,33 +555,52 @@ function sameAddressEdges({ customers, properties = [], dismissed = new Set() })
     if (row.active === false || row.deleted_at || isCommercialRow(row)) continue;
     byId.set(String(row.id), row);
   }
+  const { isStackedUnitPropertyType } = require('./estimator-engine/unit-scope-model');
+  // customers.address_* is the MIRROR of the customer's primary property
+  // (is_primary). When that primary row exists and is not a residence (a
+  // rental, a family member's home, a client-managed address, commercial) the
+  // mirrored address is not where the customer lives either, so it must not be
+  // a candidate. No property row at all (legacy): the customer row stays.
+  const primaryProp = new Map();
+  for (const prop of properties) {
+    if (prop.is_primary === true && byId.has(String(prop.customer_id))) primaryProp.set(String(prop.customer_id), prop);
+  }
+  const isResidence = (prop) => !isCommercialRow(prop) && isResidenceProperty(prop);
   const candidates = [];
   for (const row of byId.values()) {
+    const primary = primaryProp.get(String(row.id));
+    if (primary && !isResidence(primary)) continue;
     candidates.push({
       customerId: row.id, matchedVia: 'primary',
       address_line1: row.address_line1, address_line2: row.address_line2, city: row.city, zip: row.zip,
+      // Stacked-building types match only on a named, equal unit.
+      multiUnit: isStackedUnitPropertyType(row.property_type) || (primary ? isStackedUnitPropertyType(primary.property_type) : false),
     });
   }
   for (const prop of properties) {
     // A saved property counts only when it can be where the customer LIVES
     // (customer-properties' own residence rule): a rental, a family member's
     // home or a client-managed address must not pair its owner with whoever
-    // actually lives there. The customer row's own address is unaffected.
-    if (!byId.has(String(prop.customer_id)) || isCommercialRow(prop) || !isResidenceProperty(prop)) continue;
+    // actually lives there.
+    if (!byId.has(String(prop.customer_id)) || !isResidence(prop)) continue;
     candidates.push({
       customerId: prop.customer_id, matchedVia: 'property',
       address_line1: prop.address_line1, address_line2: prop.address_line2, city: prop.city, zip: prop.zip,
+      multiUnit: isStackedUnitPropertyType(prop.property_type) || (!prop.property_type && isStackedUnitPropertyType(byId.get(String(prop.customer_id)).property_type)),
     });
   }
-  // Edges: same premise, NO shared phone (a shared phone is the phone queue's
-  // pair), not dismissed.
+  // Edges: same premise, not dismissed, and not a pair the PHONE queue lists.
+  // A shared phone defers to the phone queue only when BOTH rows actually
+  // qualify for it (qualifiesForPhoneQueue — the phone queue's own live-row
+  // predicate); otherwise the pair would vanish from both, so it stays here,
+  // labeled as sharing a phone.
   const edges = new Map();
   for (const pair of pairCustomersAtSameAddress(candidates)) {
     const a = byId.get(pair.a);
     const b = byId.get(pair.b);
     if (!a || !b) continue;
     const pa = phone10(a.phone);
-    if (pa && pa === phone10(b.phone)) continue;
+    if (pa && pa === phone10(b.phone) && qualifiesForPhoneQueue(a) && qualifiesForPhoneQueue(b)) continue;
     const [lo, hi] = pairKey(a.id, b.id);
     if (dismissed.has(`${lo}:${hi}`)) continue;
     edges.set(`${lo}:${hi}`, {
@@ -613,6 +643,7 @@ function assembleSameAddressGroups({ byId, edges: allEdges }, { blockersById = n
         const { via, matched } = edgeOf(loser.id);
         const phones = { winner: phone10(winner.phone) ? 'usable' : 'none', loser: phone10(loser.phone) ? 'usable' : 'none' };
         const phonesMissing = phones.winner === 'none' || phones.loser === 'none';
+        const phonesShared = !phonesMissing && phone10(winner.phone) === phone10(loser.phone);
         // What a merge would do with the loser's phone — the executor's own
         // prediction, so the confirmation copy can never promise otherwise.
         const { status: carryStatus, slot: carrySlot } = predictWinnerBackfills(winner, loser).phoneCarry;
@@ -620,14 +651,15 @@ function assembleSameAddressGroups({ byId, edges: allEdges }, { blockersById = n
           loser: decorateSameAddress(sanitizeCustomer(loser), loser, upcomingVisits),
           // Review-only by construction: green never leaves this function.
           tier: verdict.tier === 'red' ? 'red' : 'yellow',
-          reasons: [phonesMissing ? SAME_ADDRESS_PHONE_MISSING_REASON : SAME_ADDRESS_REASON, ...verdict.reasons],
+          reasons: [sameAddressLeadReason({ phonesMissing, phonesShared }), ...verdict.reasons],
           evidence: {
             kind: SAME_ADDRESS_KIND,
             // True only when BOTH records have a usable phone and the keys
-            // differ (same key = the phone queue's pair, never listed here).
-            phones_differ: !phonesMissing,
+            // differ. A shared key is normally the phone queue's pair; it is
+            // listed here only when a record is not in that queue.
+            phones_differ: !phonesMissing && !phonesShared,
             phones,
-            phone_state: phones.winner === 'none' && phones.loser === 'none' ? 'both_missing' : (phonesMissing ? 'one_missing' : 'both_usable'),
+            phone_state: phonesShared ? 'shared_phone' : (phones.winner === 'none' && phones.loser === 'none' ? 'both_missing' : (phonesMissing ? 'one_missing' : 'both_usable')),
             phone_carry: { status: carryStatus, slot: carrySlot },
             names_compatible: verdict.namesOk,
             address: verdict.addrStatus,
@@ -657,6 +689,11 @@ function buildSameAddressGroups(input) {
   return assembleSameAddressGroups(sameAddressEdges(input), input);
 }
 
+function sameAddressLeadReason({ phonesMissing, phonesShared }) {
+  if (phonesMissing) return SAME_ADDRESS_PHONE_MISSING_REASON;
+  return phonesShared ? SAME_ADDRESS_PHONE_SHARED_REASON : SAME_ADDRESS_REASON;
+}
+
 function decorateSameAddress(sanitized, row, upcomingVisits) {
   const shipped = { ...sanitized };
   for (const col of SAME_ADDRESS_SLOT_COLUMNS) delete shipped[col];
@@ -676,7 +713,7 @@ function decorateSameAddress(sanitized, row, upcomingVisits) {
 // table (the queue); an id list narrows every leg to those customers (the
 // merge-time pair recheck, which must not rescan the building under locks).
 async function readSameAddressRows(database, ids = null) {
-  const customerColumns = [...DUPLICATE_GROUP_COLUMNS, 'property_type', 'waveguard_tier', ...SAME_ADDRESS_SLOT_COLUMNS].map((c) => `c.${c}`);
+  const customerColumns = [...DUPLICATE_GROUP_COLUMNS, 'active', 'deleted_at', 'property_type', 'waveguard_tier', ...SAME_ADDRESS_SLOT_COLUMNS].map((c) => `c.${c}`);
   const customerQuery = database('customers as c')
     .where((q) => q.where('c.active', true).orWhereNull('c.active'))
     .whereNull('c.deleted_at')
@@ -702,7 +739,7 @@ async function readSameAddressRows(database, ids = null) {
     // relationship / occupancy_type decide whether a saved property is where
     // the customer lives (customer-properties' isResidenceProperty).
     properties = await propertyQuery.select('cp.customer_id', 'cp.address_line1', 'cp.address_line2', 'cp.city', 'cp.zip',
-      'cp.property_type', 'cp.occupancy_type', 'cp.relationship');
+      'cp.property_type', 'cp.occupancy_type', 'cp.relationship', 'cp.is_primary');
   } catch (e) {
     // Best-effort like customer-address-match's property leg: without it only
     // customer-row addresses pair, which under-reports, never over-merges.
@@ -771,7 +808,8 @@ async function sameAddressPairEligibility(winnerId, loserId, database = db) {
   if (pickWinner([winner, loser], businessBoost).id !== winner.id) return gone;
   const verdict = classifyPair(winner, loser, blockersById.get(loser.id) || []);
   const phonesMissing = !phone10(winner.phone) || !phone10(loser.phone);
-  const candidate = { tier: verdict.tier === 'red' ? 'red' : 'yellow', reasons: [phonesMissing ? SAME_ADDRESS_PHONE_MISSING_REASON : SAME_ADDRESS_REASON, ...verdict.reasons] };
+  const phonesShared = !phonesMissing && phone10(winner.phone) === phone10(loser.phone);
+  const candidate = { tier: verdict.tier === 'red' ? 'red' : 'yellow', reasons: [sameAddressLeadReason({ phonesMissing, phonesShared }), ...verdict.reasons] };
   if (candidate.tier === 'red') {
     return { eligible: false, code: 'red_pair', reason: 'This pair looks like two different people and cannot be merged from the queue', candidate };
   }
@@ -2588,7 +2626,9 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
       // The locked queue re-check above re-derived the pair from these same
       // rows: same premise, still no shared phone. A phone that has become
       // shared since belongs to the phone queue — refuse here too.
-      if (winnerPhone && winnerPhone === phone10(loser.phone)) {
+      // Only a pair the PHONE queue lists (both rows qualify) is refused here;
+      // a shared-phone pair with a not-active row is this queue's own.
+      if (winnerPhone && winnerPhone === phone10(loser.phone) && qualifiesForPhoneQueue(winner) && qualifiesForPhoneQueue(loser)) {
         throw new Error('executeMerge: rows now share a phone — refresh the queue');
       }
     } else if (!winnerPhone || winnerPhone !== phone10(loser.phone)) {
@@ -6570,6 +6610,8 @@ module.exports = {
     buildSameAddressGroups,
     SAME_ADDRESS_REASON,
     SAME_ADDRESS_PHONE_MISSING_REASON,
+    SAME_ADDRESS_PHONE_SHARED_REASON,
+    qualifiesForPhoneQueue,
     backfillValueUnchanged,
     classifyPair,
     lockedPairAutoEligibility,

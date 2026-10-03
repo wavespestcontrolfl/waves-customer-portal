@@ -41,6 +41,24 @@ describe('comparator work stays linear', () => {
   });
 });
 
+describe('multi-unit rows need a named, equal unit (the comparator itself is unchanged)', () => {
+  test('two multi-unit rows with no unit are not paired; the same unit is; one-sided is not', () => {
+    expect(pairCustomersAtSameAddress([row('a', '100 Example Loop', { multiUnit: true }), row('b', '100 Example Loop', { multiUnit: true })])).toEqual([]);
+    expect(pairCustomersAtSameAddress([
+      row('a', '100 Example Loop', { multiUnit: true, address_line2: 'Unit 4' }), row('b', '100 Example Loop', { multiUnit: true, address_line2: 'Apt 4' }),
+    ])).toHaveLength(1);
+    expect(pairCustomersAtSameAddress([row('a', '100 Example Loop', { multiUnit: true, address_line2: 'Unit 4' }), row('b', '100 Example Loop', { multiUnit: true })])).toEqual([]);
+  });
+  test('either side multi-unit makes the pair multi-unit; neither keeps today\'s null-equals-null match', () => {
+    expect(pairCustomersAtSameAddress([row('a', '100 Example Loop', { multiUnit: true }), row('b', '100 Example Loop')])).toEqual([]);
+    expect(pairCustomersAtSameAddress([row('a', '100 Example Loop'), row('b', '100 Example Loop')])).toHaveLength(1);
+  });
+  test('sameStreetAddress still treats two unit-less addresses as the same premise for its other callers', () => {
+    const { sameStreetAddress } = jest.requireActual('../services/estimator-engine/address-compare');
+    expect(sameStreetAddress('100 Example Loop, Sarasota, 34231', '100 Example Loop, Sarasota, 34231', { requireExactUnit: true })).toBe(true);
+  });
+});
+
 describe('bucketing never disagrees with the pairwise comparator (property-style)', () => {
   let seed = 20261003;
   // mulberry32: deterministic, full-period within 32-bit integer math.

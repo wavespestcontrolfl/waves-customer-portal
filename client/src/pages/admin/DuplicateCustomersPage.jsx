@@ -24,6 +24,7 @@ const TIER_LABEL = {
 const REASON_LABELS = {
   same_address_different_phone: "Same address, different phone",
   same_address_phone_missing: "Same address — a phone number is missing",
+  same_address_phone_shared: "Same address and the same phone — not in the shared-phone list because a record is not marked active",
   name_conflict: "Names differ",
   address_conflict: "Different addresses",
   address_unit_conflict: "Different units at the same address",
@@ -71,7 +72,7 @@ function visitsText(count) {
 // one plain sentence per carry status. The status is the server's prediction
 // before the click (evidence.phone_carry) and its result after (phoneCarry),
 // so the copy never promises to save a number there is none to save.
-function carrySentence(status, customer, { past }) {
+function carrySentence(status, customer, { past, shared = false }) {
   const name = displayName(customer);
   const phone = fmtPhone(customer?.phone);
   if (status === "carried") {
@@ -84,6 +85,9 @@ function carrySentence(status, customer, { past }) {
       ? `The kept customer has no free contact slot — add ${phone || "that phone number"} to them manually so ${name}’s next call finds this account.`
       : `The kept customer has no free contact slot, so ${name}’s phone number will NOT be saved — add it by hand afterwards.`;
   }
+  if (status === "not_applicable" && shared) {
+    return "They already share a phone number, so there is no number to save.";
+  }
   if (status === "not_applicable") {
     return past ? `${name} had no usable phone number on file, so no number was saved.` : `${name} has no usable phone number on file, so no number is saved.`;
   }
@@ -93,8 +97,8 @@ function carrySentence(status, customer, { past }) {
   return "";
 }
 
-function phoneCarryResult(carry, customer) {
-  const sentence = carrySentence(carry?.status, customer, { past: true });
+function phoneCarryResult(carry, customer, { shared = false } = {}) {
+  const sentence = carrySentence(carry?.status, customer, { past: true, shared });
   if (carry?.status === "no_free_slot") return { error: `Merged, but ${sentence.charAt(0).toLowerCase()}${sentence.slice(1)}`, sentence };
   return { toast: sentence ? `Merged — ${sentence}` : "Merged", sentence };
 }
@@ -105,10 +109,11 @@ function phoneCarryResult(carry, customer) {
 function sameAddressConfirm(customer, winner, evidence) {
   const state = evidence?.phone_state;
   let base = "They are two customers at the same address";
-  if (state === "both_usable" || (!state && evidence?.phones_differ !== false)) base += " with different phones.";
+  if (state === "shared_phone") base += " with the same phone number (one record is not marked active, so they are not in the shared-phone list).";
+  else if (state === "both_usable" || (!state && evidence?.phones_differ !== false)) base += " with different phones.";
   else if (state === "both_missing") base += "; neither has a phone number on file.";
   else base += `; ${displayName(evidence?.phones?.winner === "none" ? winner : customer)} has no phone number on file.`;
-  return `Merge ${displayName(customer)} into ${displayName(winner)}? ${base} All history moves to the kept customer. ${carrySentence(evidence?.phone_carry?.status, customer, { past: false })}`.trim();
+  return `Merge ${displayName(customer)} into ${displayName(winner)}? ${base} All history moves to the kept customer. ${carrySentence(evidence?.phone_carry?.status, customer, { past: false, shared: state === "shared_phone" })}`.trim();
 }
 
 function fmtAddress(addr) {
@@ -298,7 +303,7 @@ export default function DuplicateCustomersPage() {
                           ...(sameAddress
                             ? {
                               onResult: (res) => {
-                                const carry = phoneCarryResult(res?.phoneCarry, customer);
+                                const carry = phoneCarryResult(res?.phoneCarry, customer, { shared: evidence?.phone_state === "shared_phone" });
                                 if (carry.error) setActionError(carry.error);
                                 else setToast(carry.toast);
                               },
@@ -323,7 +328,7 @@ export default function DuplicateCustomersPage() {
                           // fails — never claim the address was saved
                           // unless the server says it was.
                           onResult: (res) => {
-                            const carry = sameAddress ? phoneCarryResult(res?.phoneCarry, customer) : null;
+                            const carry = sameAddress ? phoneCarryResult(res?.phoneCarry, customer, { shared: evidence?.phone_state === "shared_phone" }) : null;
                             if (!res?.propertyLinked) setActionError(`Merged, but the address could NOT be saved as a property — add it to the kept customer manually.${carry?.error ? ` ${carry.error}` : ""}`);
                             else if (carry?.error) setActionError(carry.error);
                             else setToast(carry?.sentence ? `Merged — address saved as a property. ${carry.sentence}` : "Merged — address saved as a property");

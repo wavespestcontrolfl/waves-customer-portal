@@ -26,7 +26,7 @@
 // best-effort (environments without the table skip it); the primary leg's
 // errors propagate so callers choose fail-soft or fail-loud.
 const logger = require('./logger');
-const { sameStreetAddress, addressPremiseKey, canonicalizeLeadingUnit } = require('./estimator-engine/address-compare');
+const { sameStreetAddress, addressPremiseKey, addressUnitKey, canonicalizeLeadingUnit } = require('./estimator-engine/address-compare');
 
 const PER_LEG_LIMIT = 50;
 
@@ -103,7 +103,12 @@ async function findCustomersAtAddress(database, address, { excludeCustomerId = n
 
 /**
  * Pure. `candidates` = [{ customerId, matchedVia, address_line1, address_line2,
- * city, zip }] — one row per address a customer is known at. Returns one entry
+ * city, zip, multiUnit? }] — one row per address a customer is known at.
+ * `multiUnit` (set by the caller from the record's property type) means the
+ * address belongs to a stacked building: such a row matches only a row that
+ * names the SAME unit — two records with no unit at all are a building, not a
+ * household (null === null is not a match). If either side is multi-unit the
+ * pair is. Returns one entry
  * per unordered CUSTOMER pair with at least one address at the same premise:
  * `{ a, b, via: { a, b }, matched: { a: {...address, via}, b: {...} } }` (a < b
  * as strings; `matched` is the address row each side matched on). Rows with no
@@ -129,6 +134,8 @@ function pairCustomersAtSameAddress(candidates) {
       customerId: String(c.customerId),
       matchedVia: c.matchedVia || 'primary',
       text,
+      multiUnit: c.multiUnit === true,
+      unit: addressUnitKey(text),
       address: { address_line1: c.address_line1, address_line2: c.address_line2 || null, city: c.city || null, zip: c.zip || null },
     });
   }
@@ -142,6 +149,8 @@ function pairCustomersAtSameAddress(candidates) {
         const [lo, hi] = x.customerId < y.customerId ? [x, y] : [y, x];
         const pairId = `${lo.customerId}:${hi.customerId}`;
         if (pairs.has(pairId)) continue;
+        // Same bucket = same unit key; a multi-unit pair needs a NAMED one.
+        if ((x.multiUnit || y.multiUnit) && !(x.unit && y.unit)) continue;
         if (!sameStreetAddress(x.text, y.text, { requireExactUnit: true })) continue;
         pairs.set(pairId, {
           a: lo.customerId,

@@ -160,10 +160,100 @@ describe('same-address grouping', () => {
       expect(buildSameAddressGroups({ customers: [o, t], properties: [prop(o, extra)] })).toHaveLength(1);
     });
 
-    test('a customer-row (primary) address is unaffected by the property rules', () => {
+    test('a customer-row address is unaffected when there is no property row at all (legacy)', () => {
+      expect(buildSameAddressGroups({ customers: [cust(), cust()], properties: [] })).toHaveLength(1);
+    });
+
+    test('a NON-primary rental does not touch the customer-row address when the primary is a residence', () => {
       const a = cust();
       const b = cust();
-      expect(buildSameAddressGroups({ customers: [a, b], properties: [prop(a, { relationship: 'rental_owned' })] })).toHaveLength(1);
+      const props = [
+        prop(a, { is_primary: true, relationship: 'own_home' }),
+        { ...prop(a, { is_primary: false, relationship: 'rental_owned' }), address_line1: '777 Rental Way' },
+      ];
+      expect(buildSameAddressGroups({ customers: [a, b], properties: props })).toHaveLength(1);
+    });
+
+    test.each([
+      [{ relationship: 'rental_owned' }], [{ relationship: 'family_home' }], [{ relationship: 'managed_for_client' }],
+      [{ occupancy_type: 'rental_investment' }], [{ occupancy_type: 'family_occupied' }], [{ occupancy_type: 'vacant' }],
+      [{ property_type: 'commercial' }],
+    ])('the mirrored PRIMARY address is not a candidate when its primary property is a non-residence %j', (extra) => {
+      const landlord = cust({ first_name: 'Landlord' });
+      const occupant = cust({ first_name: 'Occupant' });
+      expect(buildSameAddressGroups({
+        customers: [landlord, occupant],
+        properties: [prop(landlord, { is_primary: true, ...extra })],
+      })).toEqual([]);
+    });
+
+    test('a primary non-residence does not hide a residence the same customer lives at (a separate saved property still pairs)', () => {
+      const landlord = cust({ first_name: 'Landlord', address_line1: '999 Elsewhere Rd', zip: '34202' });
+      const occupant = cust({ first_name: 'Occupant' });
+      const props = [
+        { ...prop(landlord, { is_primary: true, relationship: 'managed_for_client' }), address_line1: '999 Elsewhere Rd', zip: '34202' },
+        prop(landlord, { is_primary: false, relationship: 'own_home' }),
+      ];
+      expect(buildSameAddressGroups({ customers: [landlord, occupant], properties: props })).toHaveLength(1);
+    });
+  });
+
+  describe('a shared phone defers to the phone queue only when both rows qualify for it', () => {
+    test('both active = true: only the phone queue lists the pair', () => {
+      expect(buildSameAddressGroups({ customers: [cust({ phone: '+19415550123' }), cust({ phone: '(941) 555-0123' })] })).toEqual([]);
+    });
+
+    test.each([[null], [undefined]])('active = %p on either row: the pair stays here, labeled as a shared phone', (active) => {
+      const a = cust({ phone: '+19415550123', active });
+      const b = cust({ phone: '(941) 555-0123' });
+      const [group] = buildSameAddressGroups({ customers: [a, b] });
+      const cand = group.candidates[0];
+      expect(cand.reasons[0]).toBe(dedupe._test.SAME_ADDRESS_PHONE_SHARED_REASON);
+      expect(cand.evidence).toMatchObject({ phones_differ: false, phone_state: 'shared_phone', phone_carry: { status: 'not_applicable' } });
+      expect(cand.evidence.phones).toEqual({ winner: 'usable', loser: 'usable' });
+    });
+
+    test('the predicate is exactly the phone queue\'s live-row rule', () => {
+      const q = dedupe._test.qualifiesForPhoneQueue;
+      expect(q({ active: true, deleted_at: null, phone: '+19415550123' })).toBe(true);
+      expect(q({ active: null, deleted_at: null, phone: '+19415550123' })).toBe(false);
+      expect(q({ active: true, deleted_at: '2026-09-01', phone: '+19415550123' })).toBe(false);
+      expect(q({ active: true, deleted_at: null, phone: '12345' })).toBe(false);
+    });
+  });
+
+  describe('stacked-building (condo) records match only on a named, equal unit', () => {
+    const condo = (extra = {}) => cust({ property_type: 'condo_ground', ...extra });
+
+    test('two condos at the same building with no units are not paired', () => {
+      expect(buildSameAddressGroups({ customers: [condo(), condo()] })).toEqual([]);
+    });
+    test('the same unit on both is paired', () => {
+      expect(buildSameAddressGroups({ customers: [condo({ address_line2: 'Unit 4' }), condo({ address_line2: 'Apt 4' })] })).toHaveLength(1);
+    });
+    test('a unit on one side only is not paired', () => {
+      expect(buildSameAddressGroups({ customers: [condo({ address_line2: 'Unit 4' }), condo()] })).toEqual([]);
+    });
+    test('different units are not paired', () => {
+      expect(buildSameAddressGroups({ customers: [condo({ address_line2: 'Unit 4' }), condo({ address_line2: 'Unit 5' })] })).toEqual([]);
+    });
+    test('condo_upper and the plain "condo" spelling count too', () => {
+      expect(buildSameAddressGroups({ customers: [cust({ property_type: 'condo_upper' }), cust({ property_type: 'Condominium' })] })).toEqual([]);
+    });
+    test('if EITHER side is a condo the pair is multi-unit: condo with no unit vs single-family with no unit is not paired', () => {
+      expect(buildSameAddressGroups({ customers: [condo(), cust({ property_type: 'single_family' })] })).toEqual([]);
+    });
+    test('two single-family records at one address with no unit are paired (unchanged)', () => {
+      expect(buildSameAddressGroups({ customers: [cust({ property_type: 'single_family' }), cust({ property_type: 'single_family' })] })).toHaveLength(1);
+    });
+    test('an unknown / unrecorded type with no unit signal keeps today\'s behavior', () => {
+      expect(buildSameAddressGroups({ customers: [cust({ property_type: null }), cust({ property_type: null })] })).toHaveLength(1);
+    });
+    test('a condo type on the PRIMARY property row also makes the customer row multi-unit', () => {
+      const a = cust();
+      const b = cust();
+      const p = { customer_id: a.id, is_primary: true, address_line1: '100 Example Loop', city: 'Sarasota', zip: '34231', property_type: 'condo_upper' };
+      expect(buildSameAddressGroups({ customers: [a, b], properties: [p] })).toEqual([]);
     });
   });
 

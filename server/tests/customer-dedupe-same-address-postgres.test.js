@@ -159,6 +159,42 @@ maybeDescribe('findSameAddressGroups (TEMP tables)', () => {
     expect(verdict.candidate.reasons[0]).toBe('same_address_phone_missing');
   });
 
+  test('shared phone: active NULL on a row lists the pair here (labeled shared); both active = true leaves it to the phone queue', async () => {
+    const phone = '+19415559999';
+    const a = await customer({ phone, active: null });
+    const b = await customer({ phone });
+    const [group] = await dedupe.findSameAddressGroups(conn);
+    expect(pairsOf([group])).toEqual([pair(a, b)]);
+    expect(group.candidates[0].evidence).toMatchObject({ phone_state: 'shared_phone', phones_differ: false });
+    expect((await dedupe.duplicatePairEligibility(group.winner.id, group.candidates[0].loser.id, conn, { kind: 'same_address' })).code).toBe('eligible');
+    // The phone queue (unchanged) does not list the NULL-active row...
+    expect(await dedupe.findDuplicateGroups(conn)).toEqual([]);
+    // ...and once both are active = true it does, and this section lets go.
+    await conn('customers').where({ id: a }).update({ active: true });
+    expect(await dedupe.findSameAddressGroups(conn)).toEqual([]);
+    expect(await dedupe.findDuplicateGroups(conn)).toHaveLength(1);
+  });
+
+  test('a customer whose primary property is a rental is not matched by its mirrored address; no property row (legacy) still is', async () => {
+    const landlord = await customer();
+    const occupant = await customer();
+    expect(pairsOf(await dedupe.findSameAddressGroups(conn))).toEqual([pair(landlord, occupant)]);
+    await conn('customer_properties').insert({
+      customer_id: landlord, address_line1: '100 Example Loop', city: 'Sarasota', zip: '34231', active: true, is_primary: true, relationship: 'rental_owned',
+    });
+    expect(await dedupe.findSameAddressGroups(conn)).toEqual([]);
+    await conn('customer_properties').where({ customer_id: landlord }).update({ relationship: 'own_home' });
+    expect(pairsOf(await dedupe.findSameAddressGroups(conn))).toEqual([pair(landlord, occupant)]);
+  });
+
+  test('condo records pair only on a named equal unit', async () => {
+    await customer({ property_type: 'condo_ground' });
+    await customer({ property_type: 'condo_ground' });
+    expect(await dedupe.findSameAddressGroups(conn)).toEqual([]);
+    await conn('customers').update({ address_line2: 'Unit 4' });
+    expect(await dedupe.findSameAddressGroups(conn)).toHaveLength(1);
+  });
+
   test('one bounded read: a fixed handful of queries however many customers there are', async () => {
     for (let i = 0; i < 40; i += 1) await customer({ address_line1: `${200 + i} Sample Row`, zip: '34233' });
     await customer({ address_line1: '200 Sample Row', zip: '34233' });
@@ -341,6 +377,14 @@ maybeDescribe('same-address merge carries the phone, holds consent, and the undo
     expect(result.phoneCarry).toMatchObject({ status: 'not_applicable' });
     const winner = await db('customers').where({ id: winnerId }).first();
     expect(winner.service_contact_phone).toBeNull();
+    expect((await db('customers').where({ id: loserId }).first()).deleted_at).not.toBeNull();
+  });
+
+  test('a shared-phone pair with a not-active (NULL) row is mergeable from this queue', async () => {
+    const { winnerId, loserId, winnerPhone } = await pairAtNewAddress();
+    await db('customers').where({ id: loserId }).update({ phone: winnerPhone, active: null });
+    const result = await mergeSameAddress(winnerId, loserId);
+    expect(result.phoneCarry.status).toBe('not_applicable');
     expect((await db('customers').where({ id: loserId }).first()).deleted_at).not.toBeNull();
   });
 

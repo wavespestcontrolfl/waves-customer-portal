@@ -268,3 +268,21 @@ it.each([
   expect(text).toBeInTheDocument();
   if (status !== "carried") expect(text.textContent).not.toMatch(/saved as a contact/);
 });
+
+it("a same-address pair that shares a phone (kept out of the phone list) says so, never 'different phones', and promises no number", async () => {
+  const list = listWithPhones({ state: "both_usable", carry: "not_applicable", winnerState: "usable", loserState: "usable", loserPhone: "+19415550101" });
+  list.sameAddressGroups[0].candidates[0].reasons = ["same_address_phone_shared"];
+  list.sameAddressGroups[0].candidates[0].evidence.phone_state = "shared_phone";
+  list.sameAddressGroups[0].candidates[0].evidence.phones_differ = false;
+  mockApi({ list, mergeResult: { ok: true, journalId: "j", phoneCarry: { status: "not_applicable" } } });
+  renderPage();
+  expect(await screen.findByText(/Same address and the same phone/)).toBeInTheDocument();
+  const card = screen.getByText("Blake Sample").closest("div.rounded-sm");
+  fireEvent.click(within(card).getByRole("button", { name: "Merge into kept" }));
+  await waitFor(() => expect(window.confirm).toHaveBeenCalled());
+  const text = window.confirm.mock.calls[0][0];
+  expect(text).toMatch(/with the same phone number \(one record is not marked active/);
+  expect(text).toMatch(/They already share a phone number, so there is no number to save\./);
+  expect(text).not.toMatch(/different phones|saved as a contact|no usable phone/);
+  expect(await screen.findByText(/Merged — They already share a phone number/)).toBeInTheDocument();
+});
