@@ -699,16 +699,18 @@ function showsEmail(text, address) {
   }
   return false;
 }
+// The email-shaped words of a text: an address ends at whitespace or at a
+// character no address holds unquoted (a comma, a bracket, a quote mark).
+const EMAIL_WORDS = /[^\s@<>()[\],;:"]+@[^\s@<>()[\],;:"]+/g;
+const withoutEmails = (text) => String(text || '').replace(EMAIL_WORDS, ' ');
 // Whether the customer typed this address: one of their email-shaped words
-// ends with it, with nothing but punctuation in front (a quote, a bracket).
-// Lenient on purpose: it only stops an address nobody typed. What the
-// customer confirms is the read-back.
+// is exactly it, once the sentence punctuation after it is dropped (an
+// address ends in a letter). Nothing in front is dropped: a leading
+// underscore or plus is part of an address.
 function customerTyped(text, address) {
   const needle = address.toLowerCase();
-  return (String(text || '').toLowerCase().match(/\S+@\S+/g) || []).some((word) => {
-    const trimmed = word.replace(/[^a-z0-9]+$/, '');
-    return trimmed.endsWith(needle) && !/[a-z0-9]/.test(trimmed.slice(0, -needle.length));
-  });
+  return (String(text || '').toLowerCase().match(EMAIL_WORDS) || [])
+    .some((word) => word.replace(/[^a-z0-9]+$/, '') === needle);
 }
 // The address this tool told the model to read back in the previous turn,
 // when the assistant's reply that turn shows it. `rows` are newest first.
@@ -788,4 +790,4 @@ async function getPestAdvice(topic) {
   }
 }
 
-module.exports = { TOOLS, PORTAL_TOOLS, PORTAL_FACTS_TOOLS, PORTAL_SECTIONS, portalToolsFor, executeToolCall, reservicePageSwitchesOn };
+module.exports = { TOOLS, PORTAL_TOOLS, PORTAL_FACTS_TOOLS, PORTAL_SECTIONS, portalToolsFor, executeToolCall, reservicePageSwitchesOn, withoutEmails };

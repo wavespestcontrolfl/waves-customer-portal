@@ -11,7 +11,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { TOOLS, portalToolsFor, executeToolCall } = require('./tools');
+const { TOOLS, portalToolsFor, executeToolCall, withoutEmails } = require('./tools');
 const { renderCompanyFactsSection } = require('../sms-company-facts');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../../constants/business');
 const { recordGap } = require('../agent-gap-reports');
@@ -711,7 +711,8 @@ class WavesAssistant {
     let lower = (message || '').toLowerCase();
     // Under the email-change lane an address the customer types is not their
     // words: "homeowner@…" or "adam@…" must not read as asking for the owner.
-    if (portal && require('../../config/feature-gates').portalChatEmailChangeLive()) lower = lower.replace(/\S+@\S+/g, ' ');
+    // Only the address itself is left out, never the words around it.
+    if (portal && require('../../config/feature-gates').portalChatEmailChangeLive()) lower = withoutEmails(lower);
     const triggers = portal ? PORTAL_ESCALATION_TRIGGERS : ESCALATION_TRIGGERS;
     return triggers.find(trigger => lower.includes(trigger)) || null;
   }

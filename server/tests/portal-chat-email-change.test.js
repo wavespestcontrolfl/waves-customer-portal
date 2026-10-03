@@ -223,11 +223,13 @@ test.each([
 test.each([
   ['an address the customer never typed', 'pat.other@example.com', /not in the customer's own messages/],
   ['a shorter address inside the one they typed', 'New@Example.com', /not in the customer's own messages/],
+  ['the address they typed with its leading underscore dropped', 'pat.under@example.com', /not in the customer's own messages/],
   ['something that is not an address', 'pat at example', /not a complete email address/],
   ['the address already on the account', 'pat.old@example.com', /already the email on the account/],
 ])('%s is never sent', async (_name, address, instruction) => {
   afterReadBack('Yes');
   chat.push({ role: 'user', content: 'My email now is pat.old@example.com' });
+  chat.push({ role: 'user', content: 'Or use _pat.under@example.com' });
   mockCreate
     .mockResolvedValueOnce(ask({ new_email: address, customer_confirmed: true }))
     .mockResolvedValueOnce(text('Could you type the new address?'));
@@ -255,6 +257,8 @@ test('an address the customer types is not read as asking for the owner', async 
   const message = 'My new email is homeowner.adam@example.com';
   expect(assistant.matchedEscalationTrigger(message, 'portal_chat')).toBeNull();
   expect(assistant.matchedEscalationTrigger(`${message}, and I want to cancel`, 'portal_chat')).toBe('cancel');
+  // Only the address is left out, not words that touch it.
+  expect(assistant.matchedEscalationTrigger('use pat.new@example.com,cancel my service', 'portal_chat')).toBe('cancel');
   delete process.env[GATE];
   expect(assistant.matchedEscalationTrigger(message, 'portal_chat')).toBe('owner');
 });
