@@ -30,6 +30,8 @@ const REPRESENTATIVE = {
   [FAMILY.SPEEDZONE]: 'SpeedZone Southern',
   [FAMILY.SEDGEHAMMER]: 'SedgeHammer Plus',
   [FAMILY.DISMISS]: 'Dismiss',
+  [FAMILY.DISMISS_NXT]: 'Dismiss NXT',
+  [FAMILY.SEDGE]: 'Sedgehammer Halosulfuron-methyl 75% Post Emergent Soluble Herbicide',
   [FAMILY.PRE_EMERGENT]: 'Prodiamine 65 WDG',
   [FAMILY.GRANULAR_N]: 'LESCO 24-0-11',
   [FAMILY.POTASSIUM]: 'LESCO K-Flow 0-0-25',
@@ -288,7 +290,7 @@ describe('buildLawnExpectations', () => {
       applications: [{ name: 'Celsius WG' }, { name: 'SpeedZone Southern' }, { name: 'SedgeHammer Plus' }, { name: 'Dismiss NXT' }],
     }, PREVIEW);
     expect(out.rows.map((r) => r.id).sort()).toEqual([
-      'herbicide_celsius', 'herbicide_dismiss', 'herbicide_sedgehammer', 'herbicide_speedzone',
+      'herbicide_celsius', 'herbicide_dismiss_nxt', 'herbicide_sedgehammer', 'herbicide_speedzone',
     ]);
     for (const name of ['LESCO Three-Way Selective Herbicide', 'Atrazine 4L']) {
       expect(classifyLawnProduct({ name })).toMatchObject({ family: FAMILY.BROADLEAF });
@@ -361,6 +363,42 @@ describe('buildLawnExpectations', () => {
     });
   });
 
+  describe('label-sourced rows claim only what the label states', () => {
+    it('sedge rows carry no progress window, so none is ever ahead or behind', () => {
+      for (const id of ['herbicide_sedgehammer', 'herbicide_dismiss', 'herbicide_dismiss_nxt', 'herbicide_sedge']) {
+        const row = PRODUCT_ROWS[id];
+        expect(row.metricWindows).toEqual({});
+        for (const d of [0, 14, 30, 71, 400]) {
+          for (const scoreDelta of [-40, 0, 40]) {
+            expect(['behind', 'ahead']).not.toContain(judgeProgress(row, { metric: 'weed_suppression', daysSinceApplication: d, scoreDelta }));
+          }
+        }
+      }
+    });
+
+    it('the 75% SedgeHammer never borrows the SedgeHammer Plus two-week sentence', () => {
+      const out = buildLawnExpectations({
+        ...base, nextVisitGapDays: 28,
+        applications: [{ name: 'Sedgehammer Halosulfuron-methyl 75% Post Emergent Soluble Herbicide' }],
+      }, PREVIEW);
+      expect(out.rows.map((r) => r.id)).toEqual(['herbicide_sedge']);
+      expect(out.lines.join(' ')).not.toMatch(/\d|week|day/i);
+    });
+
+    it('Dismiss and Dismiss NXT each keep their own label word: at least 60 days, up to 60 days', () => {
+      const line = (name) => buildLawnExpectations({ ...base, applications: [{ name }] }, PREVIEW).rows[0].visibleChange;
+      expect(line('Dismiss')).toBe('This treatment generally controls sedge for at least 60 days.');
+      expect(line('Dismiss 64 oz')).toBe(line('Dismiss'));
+      expect(line('Dismiss NXT')).toBe('This treatment generally controls sedge for up to 60 days.');
+    });
+
+    it('SpeedZone by-next-visit lines keep the label\'s "can occur": no line says weeds should have died', () => {
+      const lines = Object.values(PRODUCT_ROWS.herbicide_speedzone.byNextVisit);
+      for (const line of lines) expect(line).not.toMatch(/should (?:be dying|have died)/);
+      expect(PRODUCT_ROWS.herbicide_speedzone.byNextVisit.complete).toMatch(/may have died back/);
+    });
+  });
+
   describe('byNextVisit matrix', () => {
     const state = (rowId, gap) => nextVisitState(
       PRODUCT_ROWS[rowId] || Object.values(ISSUE_ROWS).find((r) => r.id === rowId),
@@ -383,7 +421,7 @@ describe('buildLawnExpectations', () => {
       expect(state('herbicide_celsius', 6)).toBe('partial');
       expect(state('herbicide_celsius', 7)).toBe('visible');
       expect(state('herbicide_celsius', 28)).toBe('complete');
-      // SpeedZone: injury within hours, death in 7 to 14 days.
+      // SpeedZone: injury within hours, death can occur in 7 to 14 days.
       expect(state('herbicide_speedzone', 6)).toBe('partial');
       expect(state('herbicide_speedzone', 7)).toBe('visible');
       expect(state('herbicide_speedzone', 14)).toBe('complete');
@@ -428,13 +466,14 @@ describe('buildLawnExpectations', () => {
     });
 
     it('every row resolves a line for every reachable state (no gap leaves a hole)', () => {
-      // Dismiss is the one row with no by-next-visit line: its label states how
-      // long control lasts, not how fast results show.
+      // Rows with no by-next-visit line: no label-read speed of results (Dismiss
+      // states how long control lasts; the 75% SedgeHammer label was not read).
       const silent = ALL_ROWS.filter((r) => !Object.keys(r.byNextVisit || {}).length).map((r) => r.id);
-      expect(silent).toEqual(['herbicide_dismiss']);
+      expect(silent.sort()).toEqual(['herbicide_dismiss', 'herbicide_dismiss_nxt', 'herbicide_sedge']);
       for (const row of ALL_ROWS) {
         if (silent.includes(row.id)) {
-          const out = buildLawnExpectations({ visitDate: '2026-12-01', nextVisitGapDays: 28, applications: [{ name: 'Dismiss' }] }, PREVIEW);
+          const out = buildLawnExpectations({ visitDate: '2026-12-01', nextVisitGapDays: 28, applications: [{ name: REPRESENTATIVE[row.family] }] }, PREVIEW);
+          expect(out.rows.map((r) => r.id)).toEqual([row.id]);
           expect(out.byNextVisit).toEqual([]);
           expect(out.rows[0].sentences.map((s) => s.key)).not.toContain('byNextVisit');
           continue;
@@ -587,8 +626,7 @@ describe('buildLawnExpectations', () => {
 
     it('covers the rows that can be judged (config-derived, not a hand list)', () => {
       expect(rowsWithWindows.map((r) => r.id).sort()).toEqual([
-        'herbicide_broadleaf', 'herbicide_celsius', 'herbicide_speedzone', 'herbicide_sedgehammer',
-        'herbicide_dismiss', 'granular_fertilizer', 'fungicide_curative',
+        'herbicide_broadleaf', 'herbicide_celsius', 'herbicide_speedzone', 'granular_fertilizer', 'fungicide_curative',
         'insecticide_curative', 'issue_dry_spot', 'issue_chinch', 'issue_large_patch', 'issue_mowed_short',
       ].sort());
     });

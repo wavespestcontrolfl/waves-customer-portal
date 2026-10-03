@@ -68,7 +68,7 @@ describe('rule 1: too_early is never behind', () => {
   ));
 
   it('covers every family that can be judged (config-derived)', () => {
-    expect(families.map(([k]) => k).sort()).toEqual(['broadleaf', 'celsius', 'fungicideCurative', 'granular', 'insecticideCurative', 'sedge', 'sedgeHammer', 'speedZone']);
+    expect(families.map(([k]) => k).sort()).toEqual(['broadleaf', 'celsius', 'fungicideCurative', 'granular', 'insecticideCurative', 'speedZone']);
   });
 
   it.each(families)('%s: no behind on any day up to the close of the metric window, at any delta', (_name, app) => {
@@ -330,8 +330,9 @@ describe('state matrix (verdicts come from P10 judgeProgress, renamed)', () => {
     ['broadleaf', 30, -9, 'weed_suppression', 'behind', 'behind'],
     ['broadleaf', 30, 7, 'weed_suppression', 'behind', 'behind'], // under the band is not a gain
     ['broadleaf', 30, 8, 'weed_suppression', 'on_track', 'on_track'], // the band itself is
-    ['sedge', 10, 0, 'weed_suppression', 'too_early', 'in_window'],
-    ['sedge', 40, 0, 'weed_suppression', 'behind', 'behind'],
+    // Sedge rows carry no progress window (no label efficacy timeline): never early, never behind.
+    ['sedge', 10, 0, 'weed_suppression', 'holding_steady', 'holding_steady'],
+    ['sedge', 40, 0, 'weed_suppression', 'holding_steady', 'holding_steady'],
     ['granular', 10, 9, 'color_health', 'improving', 'ahead'],
     ['granular', 29, 9, 'color_health', 'on_track', 'on_track'],
     ['granular', 29, 0, 'color_health', 'behind', 'behind'],
