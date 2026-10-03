@@ -358,12 +358,14 @@ describe('searchReportBlogPosts', () => {
     expect(posts.slice(1).every((post) => post.exact === false)).toBe(true);
   });
 
-  test('which words of a phrase the live posts use: every word, in one read (GitHub Codex P1 on 45144528b8)', async () => {
-    const knex = recordingKnex({ content_registry: [{ t0: true, t1: false }] });
+  test('which words of a phrase the live posts use: every word, lent only by a post the report may link (GitHub Codex P1 on 45144528b8; P2 on 8a39d94de4)', async () => {
+    const hub = registryRow('aaaaaaaa-0000-4000-8000-000000000081', 'Ghost Ants After Rain');
+    // A spoke-only row passes the SQL filter but not the link rule: its words count for nothing.
+    const spoke = registryRow('aaaaaaaa-0000-4000-8000-000000000082', 'John Deere Lawn Tips', SPOKE_ONLY);
+    const knex = recordingKnex({ content_registry: [hub, spoke] });
     expect((await wordsOnTheSite(knex, 'ants for john')).known).toEqual([true, false]);
-    const [, raw] = knex.calls.find(([name]) => name === 'content_registry select');
-    expect(raw.sql).toMatch(/^bool_or\(.+\) AS t0, bool_or\(.+\) AS t1$/);
-    expect(raw.bindings).toHaveLength(8);
+    // Every word is read (two words, four fields each), from the live rows.
+    expect(knex.calls.filter(([name]) => name === 'content_registry inner orWhereRaw')).toHaveLength(8);
     expect(knex.calls).toEqual(expect.arrayContaining([['content_registry whereIn', 'live_status', ['live', 'live_visible']]]));
     // No words, or more than twelve, knows none and reads nothing.
     for (const phrase of ['how to', Array.from({ length: 13 }, (_, i) => `word${i}`).join(' ')]) {

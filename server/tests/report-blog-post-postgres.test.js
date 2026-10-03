@@ -185,11 +185,14 @@ postgres('report blog search on Postgres', () => {
       registryRow('Standing Water and Mosquitoes'),
       registryRow('Ghost Ant Trails', { metadata: { frontmatter: { description: 'Why ghost ants come in after rain.' } } }),
       registryRow('John Deere Mower Care', { live_status: 'visibility_review' }),
+      // Live, but on a spoke only: the link rule refuses it, so it lends no word.
+      registryRow('Johnson Grass on the Spoke', { live_url: '/blog/johnson-grass/', canonical_url: '/blog/johnson-grass/', metadata: { frontmatter: { domains: ['bradentonfllawncare.com'] } } }),
     ]);
     expect((await wordsOnTheSite(mockPg, 'standing water')).known).toEqual([true, true]);
     expect((await wordsOnTheSite(mockPg, 'ghost ants after rain')).known).toEqual([true, true, true, true]);
     // A name no live post uses is unknown, even where a post not live holds it.
     expect((await wordsOnTheSite(mockPg, 'ants for john')).known).toEqual([true, false]);
+    expect((await wordsOnTheSite(mockPg, 'ants for johnson')).known).toEqual([true, false]);
   });
 
   test('in real SQL, an empty keyword alias never hides a populated one, and the database copy a merged row falls back to is never read (GitHub Codex P2s on d527cd5de1)', async () => {

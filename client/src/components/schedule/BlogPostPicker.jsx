@@ -67,13 +67,14 @@ export function useBlogPostSearch(search) {
 }
 
 // The server's final answer to a suggestion, by its status and code:
-// refused (422), limit (429, the day's cap), unavailable (404 with
-// suggestions off, or 409 not_available), covered (409, a live post now holds
-// every word). Anything else may pass and can be sent again (GitHub Codex P2
-// on 45144528b8).
+// refused (422), limit (429 too_many_suggestions, the day's cap), unavailable
+// (404 with suggestions off, or 409 not_available), covered (409, a live post
+// now holds every word). Anything else may pass and can be sent again: a 429
+// from the API's own rate limiter carries no code and is only a burst (GitHub
+// Codex P2s on 45144528b8 and 8a39d94de4).
 function suggestionAnswer(err) {
   if (err?.status === 422) return "refused";
-  if (err?.status === 429) return "limit";
+  if (err?.status === 429) return err?.code === "too_many_suggestions" ? "limit" : "failed";
   if (err?.status === 404 || err?.code === "not_available") return "unavailable";
   if (err?.status === 409) return "covered";
   return "failed";

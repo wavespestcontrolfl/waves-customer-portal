@@ -247,6 +247,13 @@ function registryMatches(knex, terms) {
       knex.raw("jsonb_build_object('frontmatter', metadata -> 'frontmatter', 'astro', jsonb_build_object('frontmatter', metadata -> 'astro' -> 'frontmatter')) AS metadata"),
     ]);
 }
+// A registry row's deployed words, by where they sit: the title (and the
+// headline), the keyword, and the summary.
+const rowTexts = (row) => ({
+  title: `${deployedText(row, DEPLOYED.title)} ${row.h1 || ''}`,
+  keyword: deployedText(row, DEPLOYED.keyword),
+  summary: deployedText(row, DEPLOYED.summary),
+});
 // Which terms a post's text holds, and where (a title or headline over the
 // keyword over the summary).
 function matchOf(texts, terms) {
@@ -291,13 +298,7 @@ async function searchReportBlogPosts(knex, query) {
     if (found.has(key)) return;
     found.set(key, { post, texts, ...matchOf(texts, terms), when: when ? new Date(when).getTime() || 0 : 0 });
   };
-  for (const row of registryFound) {
-    add(registryLink(row), {
-      title: `${deployedText(row, DEPLOYED.title)} ${row.h1 || ''}`,
-      keyword: deployedText(row, DEPLOYED.keyword),
-      summary: deployedText(row, DEPLOYED.summary),
-    }, row.published_at);
-  }
+  for (const row of registryFound) add(registryLink(row), rowTexts(row), row.published_at);
   const entries = [...found.values()].filter((entry) => entry.held.some(Boolean));
   // A word few posts hold says more than one many hold ("tick" over
   // "control"), so a post that holds some of the words ranks by the rarest:
@@ -323,24 +324,30 @@ async function searchReportBlogPosts(knex, query) {
     .map((entry) => ({ ...entry.post, exact: entry.exact }));
 }
 
-// The most words a suggestion's site-words read checks (one aggregate each).
+// The most words a suggestion's site-words read checks.
 const MAX_SITE_WORDS = 12;
 /**
  * Whether the site's live posts use each word of a phrase, in a deployed
  * title, headline, keyword or summary: every word, not only the first
- * MAX_TERMS the search ranks by. Answers { terms, known }, one boolean per
- * term; a phrase of no words, or more than MAX_SITE_WORDS, knows none.
+ * MAX_TERMS the search ranks by. Only a post the report may link lends a
+ * word: the rows are read and judged by the full link rule, as the search
+ * reads them, so a row the hub never renders (spoke-only) or the rule refuses
+ * lends none (GitHub Codex P2 on 8a39d94de4). Answers { terms, known }, one
+ * boolean per term; a phrase of no words, or more than MAX_SITE_WORDS, knows
+ * none.
  */
 async function wordsOnTheSite(knex, query) {
   const terms = searchTerms(query, Infinity);
-  if (!terms.length || terms.length > MAX_SITE_WORDS) return { terms, known: terms.map(() => false) };
-  const columns = [...REGISTRY_FIELDS.title, ...REGISTRY_FIELDS.keyword, ...REGISTRY_FIELDS.summary];
-  const holds = `(${columns.map((column) => `COALESCE(${column}, '') ~* ?`).join(' OR ')})`;
-  const [row] = await liveRegistryRows(knex).select(knex.raw(
-    terms.map((_, i) => `bool_or(${holds}) AS t${i}`).join(', '),
-    terms.flatMap((term) => columns.map(() => sqlPattern(term))),
-  ));
-  return { terms, known: terms.map((_, i) => row?.[`t${i}`] === true) };
+  const known = terms.map(() => false);
+  if (!terms.length || terms.length > MAX_SITE_WORDS) return { terms, known };
+  const patterns = terms.map(jsPattern);
+  for (const row of await registryMatches(knex, terms)) {
+    if (!registryLink(row)) continue;
+    const texts = Object.values(rowTexts(row)).map((text) => String(text || ''));
+    patterns.forEach((pattern, i) => { if (!known[i]) known[i] = texts.some((text) => pattern.test(text)); });
+    if (known.every(Boolean)) break;
+  }
+  return { terms, known };
 }
 
 /**

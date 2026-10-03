@@ -155,6 +155,19 @@ describe('BlogPostPicker', () => {
       expect(screen.queryByText('That didn’t go through. Try again.')).toBeNull();
     });
 
+    test('a 429 from the API\'s own rate limiter is only a burst: it can be sent again (GitHub Codex P2 on 8a39d94de4)', async () => {
+      const search = vi.fn(async () => ({ posts: [], suggest: true }));
+      const suggest = vi.fn()
+        .mockRejectedValueOnce(Object.assign(new Error('Too many requests'), { status: 429 }))
+        .mockResolvedValueOnce({ status: 'queued' });
+      render(<Harness search={search} suggest={suggest} />);
+      await searchFor('standing water');
+      fireEvent.click(await screen.findByRole('button', { name: 'Suggest a post about “standing water”' }));
+      expect(await screen.findByText('That didn’t go through. Try again.')).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: 'Suggest a post about “standing water”' }));
+      expect(await screen.findByRole('button', { name: 'Suggested: “standing water”' })).toBeTruthy();
+    });
+
     test('a new search starts a new suggestion', async () => {
       const search = vi.fn(async () => ({ posts: [], suggest: true }));
       render(<Harness search={search} suggest={vi.fn(async () => ({ status: 'queued' }))} />);
