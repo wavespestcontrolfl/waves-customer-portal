@@ -100,13 +100,16 @@ function buildWatching(reportV2) {
 
 // Approved rows for today's products, in the engine's order; each row's own
 // visible-change sentence, printed word for word. A row without one is
-// skipped; a sentence that would pass the cap is skipped whole.
-function buildWhatToExpect(reportV2, ctx, deps) {
-  const products = productsOf(reportV2);
-  if (!products.length) return { text: null, rows: [] };
+// skipped; a sentence that would pass the cap is skipped whole. The ONE rule
+// for "approved expectation sentences": the v6 lead copy and the technician
+// draft's grounding (report-copy-context.js) both read it.
+// `products`: [{ name, targets? }] by exact catalog name.
+function approvedExpectationSentences(products, ctx = {}, deps = {}) {
+  const list = (Array.isArray(products) ? products : []).filter((p) => p && p.name);
+  if (!list.length) return { text: null, sentences: [], rows: [] };
   const build = deps.buildExpectations || buildLawnExpectations;
   const built = build({
-    applications: products.map((p) => ({ name: p.name, targets: Array.isArray(p.targets) ? p.targets : [] })),
+    applications: list.map((p) => ({ name: p.name, targets: Array.isArray(p.targets) ? p.targets : [] })),
     issues: [],
     visitDate: ctx.visitDate || null,
     // Not tracked for the report yet: the cap makes a Celsius row print its
@@ -116,7 +119,7 @@ function buildWhatToExpect(reportV2, ctx, deps) {
   });
   const rows = (Array.isArray(built && built.rows) ? built.rows : [])
     .filter((row) => row && row.approved === true && typeof row.id === 'string' && Array.isArray(row.sentences));
-  const pieces = [];
+  const sentences = [];
   const picked = [];
   let words = 0;
   for (const row of rows) {
@@ -126,10 +129,15 @@ function buildWhatToExpect(reportV2, ctx, deps) {
     const w = countWords(sentence.text);
     if (words + w > FIELD_CAPS.whatToExpect) continue;
     words += w;
-    pieces.push(sentence.text.trim());
+    sentences.push(sentence.text.trim());
     picked.push({ id: row.id, keys: [sentence.key] });
   }
-  return { text: pieces.length ? pieces.join(' ') : null, rows: picked };
+  return { text: sentences.length ? sentences.join(' ') : null, sentences, rows: picked };
+}
+
+function buildWhatToExpect(reportV2, ctx, deps) {
+  const out = approvedExpectationSentences(productsOf(reportV2), ctx, deps);
+  return { text: out.text, rows: out.rows };
 }
 
 /**
@@ -257,6 +265,7 @@ module.exports = {
   FREEZE_VERSION,
   FIELD_CAPS,
   buildLawnCopyV6,
+  approvedExpectationSentences,
   resolveLawnCopyV6ForRender,
   storedLawnCopyV6For,
   freezeLawnCopyV6,

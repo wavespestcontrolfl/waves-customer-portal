@@ -14,6 +14,7 @@ const db = require('../../models/db');
 const MODELS = require('../../config/models');
 const { dispatchWithFallback } = require('../llm/call');
 const { buildTreatmentSummary, METHOD_PHRASES } = require('./treatment-summary');
+const { checkTimingLanguage } = require('./lawn-copy-guards');
 const { findBannedCustomerCopy } = require('./activity-indicators');
 
 // v4: active-ingredient tokens exempt from the trade_name echo check (v3's
@@ -21,6 +22,19 @@ const { findBannedCustomerCopy } = require('./activity-indicators');
 // permanently caching every such report as deterministic fallback — the bump
 // re-arms those cache keys so they regenerate on next read).
 const PROMPT_VERSION = 'treatment_narrative_v5';
+// Lawn while GATE_LAWN_REPORT_COPY_V6 is live (P15): the paragraph states no
+// result timing, which reaches the customer only as the owner-approved "What
+// to expect" sentences (owner rulings 2026-10-01 / 10-02). Its own version so
+// pest and tree & shrub rows are untouched, and gate off reads v5 as before.
+const LAWN_NO_TIMING_PROMPT_VERSION = 'treatment_narrative_v6_lawn_no_timing';
+
+function lawnNoTiming(serviceLine) {
+  return serviceLine === 'lawn' && require('../../config/feature-gates').lawnReportCopyV6Live();
+}
+
+function promptVersionFor(serviceLine) {
+  return lawnNoTiming(serviceLine) ? LAWN_NO_TIMING_PROMPT_VERSION : PROMPT_VERSION;
+}
 
 // Request-path budget: a report read ships the deterministic sentence after
 // this long and lets generation finish in the background.
@@ -72,6 +86,10 @@ function productFactLines(products = []) {
 }
 
 function buildTreatmentNarrativePrompt({ serviceLine, products, findingsText, photoSummary }) {
+  const noTiming = lawnNoTiming(serviceLine);
+  const benefit = noTiming
+    ? '- The BENEFIT the customer should expect: what should improve and what they might still see in the meantime. Do NOT say when: no days, weeks, months, "soon", "over the coming weeks" or "over time". The report states timing elsewhere in approved words.'
+    : '- The BENEFIT the customer should expect and roughly when — what should improve over the coming weeks, and what they might still see in the meantime.';
   const lineNoun = serviceLine === 'lawn' ? 'lawn' : serviceLine === 'tree_shrub' ? 'landscape plants (trees, shrubs, palms, and beds)' : 'property';
   return `You are writing the "What we applied today" section of a customer-facing service report for Waves Pest Control in Southwest Florida. The reader is the homeowner; the subject is their ${lineNoun}.
 
@@ -79,8 +97,8 @@ ${HUMAN_PROSE_RULES}
 
 Explain the treatment like a knowledgeable, friendly plant-health professional:
 - WHY each product was chosen, tied directly to what was found on this visit.
-- WHAT each product does, in plain mechanism language (for example: absorbed by the roots and carried through the plant so pests that feed on it are controlled; a contact spray that coats the leaves; stops insects from feeding within days).
-- The BENEFIT the customer should expect and roughly when — what should improve over the coming weeks, and what they might still see in the meantime.
+- WHAT each product does, in plain mechanism language (for example: absorbed by the roots and carried through the plant so pests that feed on it are controlled; a contact spray that coats the leaves${noTiming ? '; stops insects from feeding' : '; stops insects from feeding within days'}).
+${benefit}
 
 Rules:
 - 3 to 5 sentences, one paragraph, plain text only. No headings, bullets, greeting, or sign-off.
@@ -108,11 +126,15 @@ const GENERIC_NAME_TOKENS = new Set([
   'shrub', 'weed', 'grass', 'pest', 'oil', 'emulsion', 'systemic',
 ]);
 
-function validateNarrative(text, productNames = [], activeIngredients = []) {
+function validateNarrative(text, productNames = [], activeIngredients = [], { noTiming = false } = {}) {
   const t = String(text || '').trim();
   if (!t) return 'empty';
   if (t.length > 1200) return 'too_long';
   if (FORBIDDEN.some((re) => re.test(t))) return 'forbidden_copy';
+  // Lawn under GATE_LAWN_REPORT_COPY_V6: any time language (the P11 closed
+  // world: days, weeks, within, soon, next...) fails, and the deterministic
+  // summary is served instead. The prompt asks for none; this is the backstop.
+  if (noTiming && checkTimingLanguage(t).length) return 'lawn_timing';
   // Brand-name echo check: any distinctive token of a recorded product name
   // appearing in the copy fails the actives-only contract (codex P3).
   // The prompt REQUIRES actives language, and many catalog names embed the
@@ -179,7 +201,7 @@ async function buildTreatmentNarrative({
       photoSummary: cleanLine(photoSummary),
     };
     const inputHash = crypto.createHash('sha256').update(stableStringify(facts)).digest('hex');
-    const keyWhere = { service_record_id: serviceRecordId, input_hash: inputHash, prompt_version: PROMPT_VERSION };
+    const keyWhere = { service_record_id: serviceRecordId, input_hash: inputHash, prompt_version: promptVersionFor(serviceLine) };
     const existing = await knex('service_report_ai_summaries')
       .where(keyWhere)
       .first()
@@ -218,10 +240,10 @@ async function buildTreatmentNarrative({
       const generated = await dispatchWithFallback(
         MODELS.TEXT_POLICIES.report,
         { laneId: 'treatment_narrative', text: prompt, jsonMode: false, maxTokens: 400 },
-        { validate: (result) => validateNarrative(result.text, productNames, productActives) },
+        { validate: (result) => validateNarrative(result.text, productNames, productActives, { noTiming: lawnNoTiming(serviceLine) }) },
       );
       const text = generated.ok ? String(generated.text || '').trim() : '';
-      const problem = text ? validateNarrative(text, productNames, productActives) : 'generation_failed';
+      const problem = text ? validateNarrative(text, productNames, productActives, { noTiming: lawnNoTiming(serviceLine) }) : 'generation_failed';
       const finalText = problem ? fallback : text;
       const finalStamp = new Date();
       const finalStatus = problem ? 'fallback' : 'ok';
@@ -267,7 +289,8 @@ async function treatmentNarrativePdfSignature(serviceRecordId, knex = db) {
   try {
     if (!serviceRecordId) return '';
     const row = await knex('service_report_ai_summaries')
-      .where({ service_record_id: serviceRecordId, prompt_version: PROMPT_VERSION })
+      .where({ service_record_id: serviceRecordId })
+      .whereIn('prompt_version', [PROMPT_VERSION, LAWN_NO_TIMING_PROMPT_VERSION])
       .orderBy('generated_at', 'desc')
       .first('status', 'generated_at');
     // Sentinel, not '': a cached pre-narrative PDF must MISS so the render
@@ -284,6 +307,7 @@ async function treatmentNarrativePdfSignature(serviceRecordId, knex = db) {
 module.exports = {
   treatmentNarrativePdfSignature,
   PROMPT_VERSION,
+  LAWN_NO_TIMING_PROMPT_VERSION,
   buildTreatmentNarrative,
   buildTreatmentNarrativePrompt,
   validateNarrative,

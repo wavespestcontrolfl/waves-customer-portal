@@ -826,6 +826,19 @@ async function buildReportCopyContext({
     if (expectationLines.length) {
       sections.push(`EXPECTATIONS (honest, deterministic facts about this treatment — reflect these, never contradict them; never promise elimination or a guarantee):\n${expectationLines.map((l) => `- ${l}`).join('\n')}`);
     }
+  } else if (line === 'lawn' && require('../../config/feature-gates').lawnReportCopyV6Live()) {
+    // Lawn (P15, rides GATE_LAWN_REPORT_COPY_V6): timing reaches customer copy
+    // only as owner-approved sentences (owner rulings 2026-10-01 / 10-02). The
+    // same sentences the report's "What to expect" prints (lawn-copy-v6.js, by
+    // exact catalog name); none approved for today's products = no timing.
+    const { approvedExpectationSentences } = require('./lawn-copy-v6');
+    const { sentences } = approvedExpectationSentences(
+      productSafety.map((p) => ({ name: p.name })),
+      { visitDate: serviceYmd },
+    );
+    sections.push(sentences.length
+      ? `EXPECTATIONS (owner-approved wording on what the customer may see after today's work; the ONLY source for any timeframe or result timing. Quote a sentence word for word or say nothing about timing; never paraphrase, shorten or combine them):\n${sentences.map((l) => `- ${l}`).join('\n')}`
+      : 'EXPECTATIONS: none approved for today\'s products. Say nothing about when results will show (no days, weeks, months or "soon").');
   }
 
   // Product names, actives and re-entry figures only fed re-entry wording,
