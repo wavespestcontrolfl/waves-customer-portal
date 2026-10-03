@@ -2935,11 +2935,7 @@ router.post('/waveguard-forecast/:productId/restock-request', async (req, res, n
     const body = req.body || {};
     const result = await inventoryOperations.createRestockRequest(req.params.productId, {
       requestedQuantity: body.requestedQuantity, unit: body.unit,
-      priority: String(body.priority || 'high').toLowerCase(),
-      // Only the office may force a second open request for a product: a
-      // technician's request always dedupes against the live one, so repeated
-      // posts cannot pile up requests (codex #5683 r3).
-      allowDuplicate: req.techRole === 'admin' ? body.allowDuplicate : false,
+      priority: String(body.priority || 'high').toLowerCase(), allowDuplicate: body.allowDuplicate,
       neededBy: body.neededBy, reason: body.reason, targetStock: body.targetStock,
       forecastDays: body.forecastDays, committedDemand: body.committedDemand,
       projectedRemaining: body.projectedRemaining, firstShortDate: body.firstShortDate,

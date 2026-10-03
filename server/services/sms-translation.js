@@ -766,6 +766,14 @@ async function draftInEnglish({ inboundMessage, fromPhone, customer, smsLogId })
   const inboundMeaning = await inboundMeaningCheck({ original: inboundMessage, english: inbound.english, language: inbound.language });
   if (!inboundMeaning.ok) return { stop: `inbound_meaning_check_failed:${inboundMeaning.reason}`, fields, checks: { inbound_parity: inboundParity } };
   if (!inboundMeaning.same) return { stop: 'meaning_changed_in_inbound_translation', fields, checks: { inbound_parity: inboundParity, inbound_meaning: { differences: inboundMeaning.differences } } };
+  // A foreign-language iPhone reaction ("Понравилось «…»", "Le gustó “…”") reads as one only once it is in
+  // English (the webhook's reaction check is English-only), and only after the translation passed both checks
+  // above. A quiet one is not answered, as an English one is not.
+  // (every quote pair a translation may keep - «…», „…", 「…」 - read as English curly quotes)
+  // (German closes „…“ with U+201C, which is an English opener: that pair is read first)
+  const asEnglishReaction = inbound.english.replace(/\u201e([^\u201c\u201d"]*)\u201c/g, '\u201c$1\u201d')
+    .replace(/[\u00ab\u201e\u300c]/g, '\u201c').replace(/[\u00bb\u300d]/g, '\u201d');
+  if (require('./sms-intent').isQuietSmsReaction(asEnglishReaction)) return { skip: 'reaction', fields, checks: { inbound_parity: inboundParity } };
 
   const thread = await translateThread(liveContext, inboundMessage, inbound.english, customer.id);
   if (!thread.ok) return { stop: `thread_translation_failed:${thread.reason}`, fields };
@@ -845,9 +853,61 @@ async function translateAndCheck({ englishReply, language, languageCode, context
  * Never throws, never sends. Returns the stored row (saved:false when the
  * insert failed) for logging/tests.
  */
+// Owner 2026-10-03: answer in the customer's USUAL language. A customer whose
+// earlier texts (their last 10 that carry language: reactions and contact details left out) are mostly English
+// gets today's English handling for a one-off "Gracias" or "Perfecto, thanks!":
+// no trial. A first text, or one from a customer who mostly writes another
+// language, goes on. A read failure goes on too (the trial sends nothing).
+// A phone's reaction in any language: a quote that is the START of one of our own texts to this customer (a
+// reaction quotes the message it reacts to, from its first word; "On my way" counts), with only a short verb
+// phrase around it - before ("Понравилось «…»") or after ("「…」にいいねしました"), 30 characters at most.
+// "I said “Thursday”" is an ordinary reply: none of our texts starts with "Thursday".
+const REACTION_QUOTE_RE = /[\u00ab\u201c\u201e"\u300c]([\s\S]{2,})[\u00bb\u201d\u201c"\u300d]/u;
+const squash = (t) => String(t || '').replace(/\s+/g, ' ').trim().replace(/(?:\.{3}|\u2026)$/, '').trim();
+function isReactionToOurText(body, outbound) {
+  const text = String(body || '').trim();
+  const m = REACTION_QUOTE_RE.exec(text);
+  if (!m) return false;
+  const around = (text.slice(0, m.index) + text.slice(m.index + m[0].length)).trim();
+  if (!around || around.length > 30) return false;
+  const quote = squash(m[1]);
+  return outbound.some((o) => squash(o).startsWith(quote));
+}
+
+async function usuallyWritesEnglish(customerId, smsLogId) {
+  try {
+    const trigger = db('sms_log').where({ id: smsLogId }).select('created_at');
+    // (unresolved send reservations are placeholders, never a message that was sent or received: left out of both reads)
+    const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
+    const rows = await excludeUnresolvedSendReservations(db('sms_log').where({ customer_id: customerId, direction: 'inbound' })).whereNot({ id: smsLogId })
+      .where('created_at', '<', trigger).orderBy('created_at', 'desc').limit(60).select('message_body', 'created_at');
+    if (!rows.length) return false;
+    // each reply is matched only against our texts sent BEFORE it (a reaction quotes a text it has seen); the
+    // window reaches 30 days before the oldest reply read, whatever the number of our texts in it
+    const oldest = new Date(Math.min(...rows.map((r) => new Date(r.created_at).getTime())) - 30 * 86400000);
+    const outbound = await excludeUnresolvedSendReservations(db('sms_log').where({ customer_id: customerId, direction: 'outbound' }))
+      .where('created_at', '<', trigger).where('created_at', '>=', oldest).orderBy('created_at', 'desc').limit(1000).select('message_body', 'created_at');
+    const sentBefore = (at) => outbound.filter((o) => new Date(o.created_at) < new Date(at)).map((o) => o.message_body);
+    const { isSmsReaction } = require('./sms-intent');
+    const { languageVote } = require('./sms-label-facts');
+    // a reaction in any phone language ("Liked “…”", "Понравилось «…»", "Le gustó “…”") quotes our text: not a vote
+    // each remaining reply votes on its words alone: links, emails, an address (with its unit, state and zip) and
+    // mid-sentence names do not vote (languageVote); a reply with no words left has no vote
+    const votes = rows.filter((r) => typeof r.message_body === 'string' && r.message_body.trim()
+        && !isSmsReaction(r.message_body) && !isReactionToOurText(r.message_body, sentBefore(r.created_at)))
+      .map((r) => languageVote(r.message_body)).filter(Boolean).slice(0, 10); // the 10 newest that carry language
+    const english = votes.filter((v) => v === 'english').length;
+    return english > votes.length - english;
+  } catch (err) {
+    logger.warn(`[sms-translation] earlier texts not read: ${err.code || err.name || 'error'}`);
+    return false;
+  }
+}
+
 async function runTranslationTrial({ inboundMessage, fromPhone, customer, smsLogId, hasMedia = false }) {
   // text only: a photo's caption is answered by the photo lanes, which this trial cannot see
   if (!trialEnabled() || hasMedia || !customer?.id || !smsLogId || !needsTranslation(inboundMessage)) return null;
+  if (await usuallyWritesEnglish(customer.id, smsLogId)) return null;
   const startedAt = Date.now();
   const save = async (verdict, holdReason, fields = {}, checks = undefined) => {
     const row = {
