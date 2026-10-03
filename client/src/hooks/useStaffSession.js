@@ -171,6 +171,15 @@ export default function useStaffSession() {
     if (session.offline && !onField) restart({ user: null, offline: false, status: "checking" });
   }, [session.offline, onField]);
 
+  // GATE_ADMIN_MFA_ENFORCE switched on under an open session answers staff
+  // calls 403 MFA_ENROLLMENT_REQUIRED: the token stays for the setup page;
+  // the offline pass and saved route go. Both guards below carry it, and only
+  // one of them is installed at a time, so their fetch wrappers never stack.
+  const toTwoStep = () => {
+    clearStaffDeviceData();
+    navigate("/admin/two-step", { replace: true });
+  };
+
   // Field workspace only: a 401 from ANY staff API call for the current token
   // ends the session here, so an offline reopen cannot unlock from a session
   // the server already refused. A layout effect, so it is installed before
@@ -181,12 +190,17 @@ export default function useStaffSession() {
     return installStaffSessionGuard({
       getToken: getAdminAuthToken,
       onRejected: () => endSession(adminLoginUrl(locationRef.current)),
-      // GATE_ADMIN_MFA_ENFORCE switched on under an open Today: the token
-      // stays for the setup page, the offline pass and saved route go.
-      onEnrollmentRequired: () => {
-        clearStaffDeviceData();
-        navigate("/admin/two-step", { replace: true });
-      },
+      onEnrollmentRequired: toTwoStep,
+    });
+  }, [navigate, onField]);
+
+  // Every other admin page: only the enrollment hold.
+  useLayoutEffect(() => {
+    if (onField) return undefined;
+    return installStaffSessionGuard({
+      getToken: getAdminAuthToken,
+      onRejected: () => {},
+      onEnrollmentRequired: toTwoStep,
     });
   }, [navigate, onField]);
 

@@ -273,6 +273,36 @@ describe("AdminLayoutV2 field workspace offline fallback", () => {
     expect(screen.queryByText("Saved route content")).not.toBeInTheDocument();
   });
 
+  it("enforcement switched on under an open admin page sends the session to two-step setup", async () => {
+    const ADMIN = { id: "admin-1", name: "Owner", role: "admin" };
+    localStorage.setItem("waves_admin_token", LIVE_TOKEN);
+    // Enforcement is switched on after the page opened.
+    let enforced = false;
+    vi.stubGlobal("fetch", vi.fn(async (url) => {
+      if (String(url).includes("/admin/auth/me") || !enforced) return response(200, String(url).includes("/admin/auth/me") ? ADMIN : {});
+      return { ...response(403, { code: "MFA_ENROLLMENT_REQUIRED" }), clone() { return { json: async () => ({ code: "MFA_ENROLLMENT_REQUIRED" }) }; } };
+    }));
+    render(
+      <TechNavigationLock>
+        <MemoryRouter initialEntries={["/admin/dashboard"]}>
+          <Routes>
+            <Route element={<AdminLayoutV2 />}>
+              <Route path="/admin/dashboard" element={<div>Admin dashboard content</div>} />
+            </Route>
+            <Route path="/admin/two-step" element={<div>Two-step setup page</div>} />
+          </Routes>
+        </MemoryRouter>
+      </TechNavigationLock>,
+    );
+    expect(await screen.findByText("Admin dashboard content")).toBeInTheDocument();
+    enforced = true;
+    await act(async () => {
+      await window.fetch("/api/admin/customers", { headers: { Authorization: `Bearer ${LIVE_TOKEN}` } });
+    });
+    expect(await screen.findByText("Two-step setup page")).toBeInTheDocument();
+    expect(localStorage.getItem("waves_admin_token")).toBe(LIVE_TOKEN);
+  });
+
   it("an admin who still owes two-step setup goes to the setup page, and the offline pass goes (GATE_ADMIN_MFA_ENFORCE)", async () => {
     const ADMIN = { id: "admin-1", name: "Owner", role: "admin" };
     localStorage.setItem("waves_admin_token", LIVE_TOKEN);
