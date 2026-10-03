@@ -3442,7 +3442,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
                   {translationAssist.language ? `Customer wrote in ${translationAssist.language}` : "Customer wrote in another language"}
                 </div>
               </div>
-              {translationAssist.replyTranslated && (
+              {/* not while an approval draft is loaded: that Send revises the draft and never reaches the re-check */}
+              {translationAssist.replyTranslated && !loadedMessageDraft?.id && (
                 <Button
                   size="sm"
                   variant="secondary"

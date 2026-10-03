@@ -4,19 +4,20 @@ let mockGateOn = true;
 const mockLast = jest.fn();
 const mockTrial = jest.fn();
 const mockLater = jest.fn();
+const mockClaim = jest.fn();
 
-jest.mock('../models/db', () => jest.fn((table) => {
+jest.mock('../models/db', () => Object.assign(jest.fn((table) => {
   // sms_log is read twice: the latest inbound (.first) and the outbound rows after it (.select)
-  const q = { where: () => q, whereRaw: () => q, whereIn: () => q, whereNot: () => q, whereNotIn: () => q, whereNull: () => q, orWhereNull: () => q, modify: () => q, orderBy: () => q, limit: () => q, select: () => mockLater(), first: () => (table === 'sms_log' ? mockLast() : mockTrial()) };
+  const q = { where: () => q, whereRaw: () => q, whereIn: () => q, whereNot: () => q, whereNotIn: () => q, whereNull: () => q, orWhereNull: () => q, modify: () => q, orderBy: () => q, limit: () => q, select: () => mockLater(), update: (...a) => mockClaim(...a), first: () => (table === 'sms_log' ? mockLast() : mockTrial()) };
   return q;
-}));
+}), { raw: (...a) => a }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => {
   const actual = jest.requireActual('../config/feature-gates');
   return { ...actual, gateEnvValue: (name) => (name === 'GATE_SMS_ANY_LANGUAGE_INBOX' ? mockGateOn : actual.gateEnvValue(name)) };
 });
 
-const { inboxAssistFor, translationReplyStillCurrent } = require('../services/sms-translation');
+const { inboxAssistFor, claimTranslationReplyForSend } = require('../services/sms-translation');
 
 const NOW = new Date('2026-10-03T15:00:00Z');
 const READY = {
@@ -28,7 +29,8 @@ const READY = {
 
 beforeEach(() => {
   mockGateOn = true;
-  mockLast.mockReset(); mockTrial.mockReset(); mockLater.mockReset();
+  mockLast.mockReset(); mockTrial.mockReset(); mockLater.mockReset(); mockClaim.mockReset();
+  mockClaim.mockResolvedValue(1);
   mockLater.mockResolvedValue([]);
   mockLast.mockResolvedValue({ id: 's1', from_phone: '+19415550100', created_at: new Date('2026-10-03T14:00:00Z') });
   mockTrial.mockResolvedValue(READY);
@@ -66,19 +68,26 @@ describe('inboxAssistFor', () => {
     expect(await inboxAssistFor('c1', NOW)).toMatchObject({ replyTranslated: READY.reply_translated, heldReason: null });
   });
 
-  test('send boundary: the suggested reply is sendable only while its card would still offer it', async () => {
-    jest.useFakeTimers().setSystemTime(NOW);
-    try {
-      expect(await translationReplyStillCurrent({ trialId: 7, customerId: 'c1', to: '+19415550100' })).toBe(true);
-      expect(await translationReplyStillCurrent({ trialId: 6, customerId: 'c1', to: '+19415550100' })).toBe(false); // another text's trial
-      expect(await translationReplyStillCurrent({ trialId: 7, customerId: 'c1', to: '+19415550177' })).toBe(false); // another number
-      expect(await translationReplyStillCurrent({ trialId: 7, customerId: null, to: '+19415550100' })).toBe(false);
-      mockLater.mockResolvedValue([{ message_type: 'manual', status: 'sent', to_phone: '+19415550100' }]);
-      expect(await translationReplyStillCurrent({ trialId: 7, customerId: 'c1', to: '+19415550100' })).toBe(false); // already answered
-      mockLater.mockResolvedValue([]);
-      mockTrial.mockResolvedValue({ ...READY, created_at: new Date('2026-10-02T13:00:00Z') });
-      expect(await translationReplyStillCurrent({ trialId: 7, customerId: 'c1', to: '+19415550100' })).toBe(false); // expired
-    } finally { jest.useRealTimers(); }
+  test('send boundary: sendable only while its card would still offer it, and by one sender', async () => {
+    const claim = (over = {}) => claimTranslationReplyForSend({ trialId: 7, customerId: 'c1', to: '+19415550100', now: NOW, ...over });
+    expect(await claim()).toBe('ok');
+    expect(mockClaim).toHaveBeenCalledTimes(1);
+    // the guarded UPDATE matched no row: a teammate stamped it inside the last two minutes
+    mockClaim.mockResolvedValue(0);
+    expect(await claim()).toBe('claimed');
+    mockClaim.mockClear(); mockClaim.mockResolvedValue(1);
+    expect(await claim({ trialId: 6 })).toBe('stale'); // another text's trial
+    expect(await claim({ to: '+19415550177' })).toBe('stale'); // another number
+    expect(await claim({ customerId: null })).toBe('stale');
+    mockLater.mockResolvedValue([{ message_type: 'manual', status: 'sent', to_phone: '+19415550100' }]);
+    expect(await claim()).toBe('stale'); // already answered
+    mockLater.mockResolvedValue([]);
+    mockTrial.mockResolvedValue({ ...READY, created_at: new Date('2026-10-02T13:00:00Z') });
+    expect(await claim()).toBe('stale'); // expired
+    expect(mockClaim).not.toHaveBeenCalled(); // nothing stale is ever stamped
+    mockTrial.mockResolvedValue(READY);
+    mockClaim.mockRejectedValue(Object.assign(new Error('update ... secreto'), { code: '57014' }));
+    expect(await claim()).toBe('stale');
   });
 
   test('no trial row for the latest text (an English writer), or a skipped one: nothing', async () => {

@@ -664,11 +664,13 @@ router.post('/sms', async (req, res, next) => {
       providerCoordinationCustomerId = trustedCustomerId;
     };
 
-    // A reply taken from the translation card is re-checked here, as an Agent Review draft is below: the
-    // customer may have written again, someone may have answered, or the reply may have expired since the
-    // card was read. Refused rather than sent stale or twice.
-    if (translationTrialId && !(await require('../services/sms-translation').translationReplyStillCurrent({ trialId: translationTrialId, customerId: trustedCustomerId, to }))) {
-      return res.status(409).json({ error: 'This suggested reply is out of date (the customer wrote again, someone answered, or it expired). Clear the message box and refresh the thread before replying.' });
+    // A reply taken from the translation card is re-checked and claimed here, as an Agent Review draft is
+    // below: the customer may have written again, someone may have answered, the reply may have expired, or a
+    // teammate may be sending the same reply right now. Refused rather than sent stale or twice.
+    if (translationTrialId) {
+      const claim = await require('../services/sms-translation').claimTranslationReplyForSend({ trialId: translationTrialId, customerId: trustedCustomerId, to });
+      if (claim === 'claimed') return res.status(409).json({ error: 'A teammate is already sending this suggested reply. Refresh the thread before replying.' });
+      if (claim !== 'ok') return res.status(409).json({ error: 'This suggested reply is out of date (the customer wrote again, someone answered, or it expired). Clear the message box and refresh the thread before replying.' });
     }
 
     let verifiedAgentDecision = null;

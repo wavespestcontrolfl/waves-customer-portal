@@ -963,15 +963,29 @@ const INBOUND_UNCONFIRMED_RE = /^(?:inbound_|figures_changed_in_inbound|meaning_
 const INBOX_REPLY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const INBOX_PENDING_WINDOW_MS = 3 * 60 * 1000;
 
+const SEND_CLAIM_MS = 2 * 60 * 1000;
+
 /**
- * Send boundary for a Use Reply text: the suggested reply is sendable only while the card that offered it would
- * still offer it (same trial, still the customer's latest text, unanswered, not expired, same number). Fails
- * closed: any doubt reads as stale.
+ * Send boundary for a Use Reply text. The suggested reply is sendable only while the card that offered it would
+ * still offer it (same trial, still the customer's latest text, unanswered, not expired, same number), and only
+ * by ONE sender: a single guarded UPDATE stamps checks.send_claimed_at, so of two staff pressing Send together
+ * the second is refused. The stamp lapses after two minutes (a send that failed can be tried again); a send
+ * that went through makes the text answered, which the first check refuses from then on.
+ * Returns 'ok' | 'stale' | 'claimed'. Fails closed: any doubt reads as stale.
  */
-async function translationReplyStillCurrent({ trialId, customerId, to, now = new Date() }) {
-  if (!trialId || !customerId) return false;
-  const assist = await inboxAssistFor(customerId, now, String(to || '').replace(/\D/g, '').slice(-10) || null);
-  return Boolean(assist && !assist.pending && assist.replyTranslated && String(assist.trialId) === String(trialId));
+async function claimTranslationReplyForSend({ trialId, customerId, to, now = new Date() }) {
+  try {
+    if (!trialId || !customerId) return 'stale';
+    const assist = await inboxAssistFor(customerId, now, String(to || '').replace(/\D/g, '').slice(-10) || null);
+    if (!(assist && !assist.pending && assist.replyTranslated && String(assist.trialId) === String(trialId))) return 'stale';
+    const claimed = await db(TRIAL_TABLE).where({ id: assist.trialId, customer_id: customerId, verdict: 'ready' })
+      .whereRaw("COALESCE((checks->>'send_claimed_at')::timestamptz, 'epoch'::timestamptz) < ?", [new Date(now.getTime() - SEND_CLAIM_MS)])
+      .update({ checks: db.raw("jsonb_set(COALESCE(checks, '{}'::jsonb), '{send_claimed_at}', to_jsonb(?::text))", [now.toISOString()]) });
+    return claimed === 1 ? 'ok' : 'claimed';
+  } catch (err) {
+    logger.warn(`[sms-translation] send claim not read: ${err.code || err.name || 'error'}`);
+    return 'stale';
+  }
 }
 
 function quotesLiveEta(replyEnglish, factsBlock) {
@@ -1062,7 +1076,7 @@ async function inboxAssistFor(customerId, now = new Date(), phoneLast10 = null) 
 
 module.exports = {
   runTranslationTrial,
-  inboxAssistFor, translationReplyStillCurrent,
+  inboxAssistFor, claimTranslationReplyForSend,
   inboxAssistEnabled,
   needsTranslation,
   trialEnabled,

@@ -752,6 +752,19 @@ it("an emptied message box drops the suggested reply's anchor: the next text is 
   expect(JSON.parse(request[1].body)).not.toHaveProperty("translationTrialId");
 });
 
+it("offers no Use Reply while an approval draft is loaded (that Send would skip the re-check)", async () => {
+  const owner = "translation-approval-owner";
+  saveDraft(owner, savedApproval);
+  window.history.replaceState({}, "", "/?phone=9415550100");
+  const translation = { trialId: 13, customerId: "customer-a", language: "Spanish", inboundEnglish: "Which day?", replyEnglish: "Tuesday.", replyTranslated: "El martes.", heldReason: null };
+  const originalFetch = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, options) => String(url).includes("/communications/agent-draft?")
+    ? response({ draft: null, translation }) : originalFetch(url, options));
+  setupWithOwner(owner); await tick();
+  expect(screen.getByText("Which day?")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Use Reply" })).not.toBeInTheDocument();
+});
+
 it("drops the suggested reply when its time is up and keeps the translation", async () => {
   const owner = "translation-expiry-owner";
   const translation = { trialId: 10, customerId: "customer-a", language: "Spanish", inboundEnglish: "Which day is my visit?", replyEnglish: "Your visit is Tuesday, Oct 6.", replyTranslated: "Su visita es el martes 6 de oct.", heldReason: null, replyExpiresAt: new Date(Date.now() - 1000).toISOString() };
