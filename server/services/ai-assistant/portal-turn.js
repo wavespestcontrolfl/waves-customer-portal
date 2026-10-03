@@ -5,7 +5,8 @@ const logger = require('../logger');
 
 const TURN_BUDGET_MS = 15_000;
 const FINALIZE_RESERVE_MS = 650;
-const RETRY_POLL_MS = 45;
+const RETRY_POLL_MS = 125;
+const MAX_RETRY_POLL_MS = 750;
 
 const TIMEOUT_REPLY = `I'm having trouble getting that answer right now. Please try again, or call us at ${WAVES_SUPPORT_PHONE_DISPLAY}.`;
 const BUSY_REPLY = "I'm still finishing your earlier question. Please try again in a moment.";
@@ -73,6 +74,12 @@ function timeoutQuery(query, remainingMs) {
     query.timeout(Math.max(1, Math.floor(remainingMs)), { cancel: true });
   }
   return query;
+}
+
+function leaseDeadline(executor, remainingMs) {
+  return executor.raw("CURRENT_TIMESTAMP + (? * INTERVAL '1 millisecond')", [
+    Math.max(1, Math.floor(remainingMs)),
+  ]);
 }
 
 async function withBoundedConnection({ deadlineAt, signal }, stage, fn) {
@@ -274,7 +281,7 @@ function createTurnContext({ row, attemptId, workDeadlineAt, hardDeadlineAt, wor
   return context;
 }
 
-async function ensureRequest({ requestId, customerId, propertyId, channelIdentifier, message, scopeKey, leaseExpiresAt }, root) {
+async function ensureRequest({ requestId, customerId, propertyId, channelIdentifier, message, scopeKey }, root) {
   const row = {
     request_id: requestId,
     customer_id: customerId,
@@ -283,7 +290,7 @@ async function ensureRequest({ requestId, customerId, propertyId, channelIdentif
     scope_key: scopeKey,
     message_hash: hash(message),
     state: 'pending',
-    lease_expires_at: leaseExpiresAt,
+    lease_expires_at: leaseDeadline(db, root.remainingMs()),
   };
   const insert = db('portal_chat_requests').insert(row)
     .onConflict(['customer_id', 'request_id']).ignore();
@@ -304,11 +311,15 @@ async function ensureRequest({ requestId, customerId, propertyId, channelIdentif
   if (existing.state === 'expired') {
     await root.query(db('portal_chat_requests')
       .where({ id: existing.id, state: 'expired' })
-      .update({ state: 'pending', lease_expires_at: leaseExpiresAt, updated_at: db.fn.now() }), 'request revival');
+      .update({
+        state: 'pending',
+        lease_expires_at: leaseDeadline(db, root.remainingMs()),
+        updated_at: db.fn.now(),
+      }), 'request revival');
   } else if (existing.state === 'pending') {
     await root.query(db('portal_chat_requests')
       .where({ id: existing.id, state: 'pending' })
-      .update({ lease_expires_at: leaseExpiresAt, updated_at: db.fn.now() }), 'request lease refresh');
+      .update({ lease_expires_at: leaseDeadline(db, root.remainingMs()), updated_at: db.fn.now() }), 'request lease refresh');
   }
   if (existing.state === 'expired') {
     existing = await root.query(db('portal_chat_requests').where({ id: existing.id }).first(), 'request revival reconciliation');
@@ -316,38 +327,51 @@ async function ensureRequest({ requestId, customerId, propertyId, channelIdentif
   return existing;
 }
 
-async function claimRequest(row, attemptId, leaseExpiresAt, root) {
+async function claimRequest(row, attemptId, root) {
   try {
     return await root.transaction('turn claim', async (trx, connection) => {
       root.assertActive('turn claim');
       await root.queryOnConnection(
         trx('portal_chat_requests')
           .where({ scope_key: row.scope_key, state: 'pending' })
-          .where('lease_expires_at', '<=', new Date())
+          .where('lease_expires_at', '<=', trx.fn.now())
           .update({ state: 'expired', attempt_id: null, updated_at: trx.fn.now() }),
         connection, 'abandoned turn expiry',
       );
-      const active = await root.queryOnConnection(
-        trx('portal_chat_requests').where({ scope_key: row.scope_key, state: 'processing' }).forUpdate().first(),
+      let active = await root.queryOnConnection(
+        trx('portal_chat_requests').where({ scope_key: row.scope_key, state: 'processing' })
+          .select('*', trx.raw('lease_expires_at <= CURRENT_TIMESTAMP AS lease_expired'))
+          .forUpdate().first(),
         connection, 'turn claim',
       );
-      // A retry can begin polling before the owning attempt checkpoints a
-      // committed handoff. Re-read the locked row on every poll: once a
-      // response exists it is the durable outcome, even if the first worker's
-      // final state transition later times out. Never release and reclaim that
-      // row, because doing so would rerun the turn and overwrite the handoff.
-      if (active && String(active.id) === String(row.id)) {
-        const response = parseJson(active.response);
-        if (response) return { kind: 'completed', response };
+      // A retry can begin polling before the owning attempt finishes cleanup.
+      // A response-bearing row is already durable, so complete it under the
+      // scope lock. Its own retry replays the response; a later request can
+      // continue without waiting for an otherwise idle lease to expire.
+      const activeResponse = parseJson(active?.response);
+      if (activeResponse) {
+        await root.queryOnConnection(
+          trx('portal_chat_requests').where({ id: active.id, state: 'processing' })
+            .whereNotNull('response')
+            .update({
+              state: 'completed',
+              attempt_id: null,
+              lease_expires_at: null,
+              updated_at: trx.fn.now(),
+            }),
+          connection, 'completed turn release',
+        );
+        if (String(active.id) === String(row.id)) return { kind: 'completed', response: activeResponse };
+        active = null;
       }
-      if (active && new Date(active.lease_expires_at).getTime() <= Date.now()) {
+      if (active?.lease_expired) {
         const retryingExpiredAttempt = String(active.id) === String(row.id);
         await root.queryOnConnection(
           trx('portal_chat_requests').where({ id: active.id, attempt_id: active.attempt_id, state: 'processing' })
             .update({
               state: retryingExpiredAttempt ? 'pending' : 'expired',
               attempt_id: null,
-              lease_expires_at: retryingExpiredAttempt ? leaseExpiresAt : null,
+              lease_expires_at: retryingExpiredAttempt ? leaseDeadline(trx, root.remainingMs()) : null,
               updated_at: trx.fn.now(),
             }),
           connection, 'expired turn release',
@@ -375,7 +399,7 @@ async function claimRequest(row, attemptId, leaseExpiresAt, root) {
         trx('portal_chat_requests').where({ id: row.id, state: 'pending' }).update({
           state: 'processing',
           attempt_id: attemptId,
-          lease_expires_at: leaseExpiresAt,
+          lease_expires_at: leaseDeadline(trx, root.remainingMs()),
           updated_at: trx.fn.now(),
         }),
         connection, 'turn claim',
@@ -508,13 +532,15 @@ async function reconcileDurableReplay(row, requestId, customerId, root) {
   return durable;
 }
 
-async function waitForClaim({ row, attemptId, leaseExpiresAt, workDeadlineAt, workSignal, root }) {
+async function waitForClaim({ row, attemptId, workDeadlineAt, workSignal, root }) {
   let claim;
+  let pollMs = RETRY_POLL_MS;
   while (Date.now() < workDeadlineAt) {
-    claim = await claimRequest(row, attemptId, leaseExpiresAt, root);
+    claim = await claimRequest(row, attemptId, root);
     if (claim.kind !== 'busy') return claim;
     try {
-      await delay(Math.min(RETRY_POLL_MS, Math.max(1, workDeadlineAt - Date.now())), workSignal);
+      await delay(Math.min(pollMs, Math.max(1, workDeadlineAt - Date.now())), workSignal);
+      pollMs = Math.min(MAX_RETRY_POLL_MS, pollMs * 2);
     } catch (err) {
       if (err?.code !== 'PORTAL_CHAT_DEADLINE') throw err;
       break;
@@ -534,6 +560,9 @@ async function runPortalTurn({ requestId, customerId, propertyId = null, channel
   let turn = null;
   let resolvedResult = null;
   const root = {
+    remainingMs() {
+      return hardDeadlineAt - Date.now();
+    },
     assertActive(stage) {
       if (hardController.signal.aborted || Date.now() >= hardDeadlineAt) throw new PortalTurnDeadlineError(stage);
     },
@@ -546,7 +575,20 @@ async function runPortalTurn({ requestId, customerId, propertyId = null, channel
     },
     async transaction(stage, container) {
       return withBoundedConnection({ deadlineAt: hardDeadlineAt, signal: hardController.signal }, stage,
-        (connection) => db.transaction((trx) => container(trx, connection), { connection }));
+        (connection) => db.transaction(async (trx) => {
+          const refreshDeadline = () => root.queryOnConnection(
+            trx.raw("SELECT set_config('statement_timeout', ?, true)", [`${Math.max(1, root.remainingMs())}ms`]),
+            connection,
+            stage,
+          );
+          root.assertActive(stage);
+          await refreshDeadline();
+          const result = await container(trx, connection);
+          root.assertActive(stage);
+          await refreshDeadline();
+          root.assertActive(stage);
+          return result;
+        }, { connection }));
     },
   };
 
@@ -554,7 +596,6 @@ async function runPortalTurn({ requestId, customerId, propertyId = null, channel
     const scopeKey = turnScopeKey({ customerId, channelIdentifier, propertyId });
     const row = await ensureRequest({
       requestId, customerId, propertyId, channelIdentifier, message, scopeKey,
-      leaseExpiresAt: new Date(hardDeadlineAt),
     }, root);
     const replay = await reconcileDurableReplay(row, requestId, customerId, root);
     if (replay) return replay;
@@ -563,7 +604,6 @@ async function runPortalTurn({ requestId, customerId, propertyId = null, channel
     const claim = await waitForClaim({
       row,
       attemptId,
-      leaseExpiresAt: new Date(hardDeadlineAt),
       workDeadlineAt,
       workSignal: workController.signal,
       root,
