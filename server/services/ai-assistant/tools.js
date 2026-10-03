@@ -669,9 +669,10 @@ async function offerReservice(customerId, input, actions, { secondaryProperty = 
 const EMAIL_ADDRESS = "[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)+";
 const EMAIL_SHAPE = new RegExp(`^${EMAIL_ADDRESS}$`);
 const EMAIL_WORDS = new RegExp(EMAIL_ADDRESS, 'g');
-// An address shown or typed as a whole: followed by the end, a space, or
-// sentence punctuation, never by more of a longer token.
-const EMAIL_WHOLE_WORDS = new RegExp(`${EMAIL_ADDRESS}(?=$|\\s|[.,;:!?)\\]>"](?:\\s|$))`, 'g');
+// An address shown or typed as a whole: nothing an address can hold (or a
+// second @) in front of it, and after it the end, a space, or sentence
+// punctuation, never more of a longer token.
+const EMAIL_WHOLE_WORDS = new RegExp(`(?<![A-Za-z0-9.!#$%&'*+/=?^_\`{|}~@-])${EMAIL_ADDRESS}(?=$|\\s|[.,;:!?)\\]>"](?:\\s|$))`, 'g');
 const EMAIL_MAX_CHARS = 254;
 // Messages of the chat read for the check, newest first.
 const EMAIL_CHANGE_MESSAGES = 40;

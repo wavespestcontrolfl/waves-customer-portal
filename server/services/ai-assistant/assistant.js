@@ -348,6 +348,15 @@ function portalPrompt({ payments, visits, reservice, reserviceLawn, emailChange 
   return PORTAL_PROMPTS.get(key);
 }
 
+// One bell per hand-off. A confirmed email change is one bell per chat and
+// address, so a confirmation the portal sent twice lands on the same bell,
+// and a later change to another address in a chat staff reopened rings its own.
+function bellKey({ escalation, conversation, newEmail }) {
+  return newEmail
+    ? `portal-chat-email-change:${conversation.id}:${newEmail.toLowerCase()}`
+    : `portal-chat-escalation:${escalation.id}`;
+}
+
 // What the durable hand-off row says. A confirmed email change keeps both
 // addresses on it, so the request survives a bell that did not ring. They
 // are not put in `reason`, which is logged.
@@ -758,7 +767,7 @@ class WavesAssistant {
     const [escalation] = await db('ai_escalations').insert({
       conversation_id: conversation.id,
       customer_id: conversation.customer_id,
-      reason: this.classifyEscalation(customerMessage),
+      reason: this.savedReason(customerMessage, newEmail),
       summary: escalationSummary(reason, customer, { newEmail, emailReadBack }),
       customer_message: customerMessage,
       ai_draft_response: null,
@@ -853,9 +862,7 @@ class WavesAssistant {
         who: 'person',
       }, {
         bell: true,
-        // A chat hands off once, so a confirmed email change is one bell per
-        // chat: a confirmation the portal sent twice lands on the same one.
-        dedupeKey: newEmail ? `portal-chat-email-change:${conversation.id}` : `portal-chat-escalation:${escalation.id}`,
+        dedupeKey: bellKey({ escalation, conversation, newEmail }),
         // The customer's own words in full (the chat route caps a message at
         // 4000 characters), read from the bell's "Show full text".
         detail: emailDetail ? `${emailDetail.join('\n')}\n\nCustomer's message: ${String(customerMessage || '')}` : String(customerMessage || ''),
@@ -869,6 +876,13 @@ class WavesAssistant {
       logger.error(`[ai-assistant] escalation bell failed: ${err.message}`, { conversationId: conversation.id });
       return false;
     }
+  }
+
+  // The reason a hand-off is saved under. A confirmed email change is an
+  // account change whatever the confirming message says ("yes, change it"
+  // is not a schedule change).
+  savedReason(message, newEmail) {
+    return newEmail ? 'account_change' : this.classifyEscalation(message);
   }
 
   classifyEscalation(message) {

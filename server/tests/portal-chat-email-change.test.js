@@ -133,7 +133,9 @@ test('confirmed after the read-back: one bell with both addresses, and the reply
   expect(headline).toBe("Customers — Change Pat Sample's email");
   expect(why).toBe('Pat Sample confirmed a new email address in portal chat');
   expect(opts.detail).toBe(`Email on file: pat.old@example.com\nNew email, confirmed by the customer in portal chat: ${NEW}\n\nCustomer's message: Yes, that is right`);
-  expect(opts).toEqual(expect.objectContaining({ bell: true, link: '/admin/customers?customerId=cust-1', dedupeKey: 'portal-chat-email-change:conv-1' }));
+  expect(opts).toEqual(expect.objectContaining({ bell: true, link: '/admin/customers?customerId=cust-1', dedupeKey: 'portal-chat-email-change:conv-1:pat.new@example.com' }));
+  // Saved as an account change, whatever the confirming message says.
+  expect(db.__bindings[0]).toContain('account_change');
   expect(opts.metadata).toEqual(expect.objectContaining({ severity: 'needs-you', who: 'person', doneWhen: 'email_changed', subject: { type: 'customer', id: 'cust-1' } }));
   expect(result).toEqual(expect.objectContaining({ escalated: true, escalationId: 'esc-1', teamNotified: true }));
   expect(result.reply).toMatch(new RegExp(`sent your new email address, ${NEW.replace(/\./g, '\\.')}, to our team`));
@@ -161,7 +163,7 @@ test('a confirmation the portal sent twice still finds the read-back, and both l
   const [first, second] = await Promise.all([say('Yes'), say('Yes')]);
 
   expect(first.escalated && second.escalated).toBe(true);
-  expect(NotificationService.notifyAdmin.mock.calls.map((call) => call[3].dedupeKey)).toEqual(['portal-chat-email-change:conv-1', 'portal-chat-email-change:conv-1']);
+  expect(NotificationService.notifyAdmin.mock.calls.map((call) => call[3].dedupeKey)).toEqual(['portal-chat-email-change:conv-1:pat.new@example.com', 'portal-chat-email-change:conv-1:pat.new@example.com']);
 });
 
 test('a keyword hand-off that answers a read-back carries the address, marked not yet confirmed', async () => {
@@ -263,12 +265,14 @@ test.each([
   ['an address the customer never typed', 'pat.other@example.com', /not in the customer's own messages/],
   ['a shorter address inside the one they typed', 'New@Example.com', /not in the customer's own messages/],
   ['the address they typed with its leading underscore dropped', 'pat.under@example.com', /not in the customer's own messages/],
+  ['the tail of a mistyped token with two @ signs', 'tail@example.com', /not in the customer's own messages/],
   ['something that is not an address', 'pat at example', /not a complete email address/],
   ['the address already on the account', 'pat.old@example.com', /already the email on the account/],
 ])('%s is never sent', async (_name, address, instruction) => {
   afterReadBack('Yes');
   chat.push({ role: 'user', content: 'My email now is pat.old@example.com' });
   chat.push({ role: 'user', content: 'Or use _pat.under@example.com' });
+  chat.push({ role: 'user', content: 'Or old@tail@example.com' });
   mockCreate
     .mockResolvedValueOnce(ask({ new_email: address, customer_confirmed: true }))
     .mockResolvedValueOnce(text('Could you type the new address?'));
