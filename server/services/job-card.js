@@ -344,6 +344,25 @@ function textsCutoff(svc, visitStart, today = etDateString()) {
   return null;
 }
 
+// Where the texts start: the customer's most recent completed visit in
+// this line BEFORE this one. loadLastVisit only looks at earlier DAYS (the
+// paragraph's history), so an earlier visit the same day is found here, by
+// appointment identity, and wins when present. Throws when unreadable — the
+// caller shows the texts as unavailable, never a wider window.
+async function textsSinceInstant(dbh, svc, serviceLine, lastVisit, cutoff) {
+  const day = etCalendarDayOf(svc.scheduled_date);
+  if (!day) return lastVisit?.startedAt || null;
+  const sameDay = await dbh('service_records as sr')
+    .where({ 'sr.customer_id': svc.customer_id, 'sr.status': 'completed', 'sr.service_date': day })
+    .modify((qb) => { if (serviceLine) qb.where('sr.service_line', serviceLine); })
+    .where((q) => q.whereNull('sr.scheduled_service_id').orWhere('sr.scheduled_service_id', '<>', svc.id))
+    .whereNotNull('sr.started_at')
+    .where('sr.started_at', '<', cutoff || new Date())
+    .orderBy('sr.started_at', 'desc')
+    .first('sr.started_at');
+  return sameDay?.started_at || lastVisit?.startedAt || null;
+}
+
 // The customer's own recent texts — since the last visit (else the last 30 days),
 // up to the technician's arrival (textsCutoff). Inbound only; a
 // tapback quotes a Waves text and is never their words; an unresolved
@@ -393,6 +412,20 @@ async function loadTextsSince(dbh, customerId, sinceInstant, untilInstant) {
     logger.warn(`[job-card] texts unavailable for ${customerId}: ${err.code || err.name || 'error'}`);
     return null;
   }
+}
+
+// The card's texts: the window is (previous visit's start, this visit's
+// arrival). Either end unreadable = null, the card's "unavailable".
+async function loadVisitTexts(dbh, svc, serviceLine, lastVisit, visitStart) {
+  const cutoff = textsCutoff(svc, visitStart);
+  let since;
+  try {
+    since = await textsSinceInstant(dbh, svc, serviceLine, lastVisit, cutoff);
+  } catch (err) {
+    logger.warn(`[job-card] texts window unavailable for ${svc.id}: ${err.code || err.name || 'error'}`);
+    return null;
+  }
+  return loadTextsSince(dbh, svc.customer_id, since, cutoff);
 }
 
 // Photos the customer sent before the visit (GATE_VISIT_PREP_PHOTOS's own
@@ -573,7 +606,7 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}, { displayContext
     // An unreadable visit history gives no "since": the texts read as
     // unavailable too, never the first-visit 30-day window.
     customerContext
-      ? (lastVisit?.unavailable ? Promise.resolve(null) : loadTextsSince(dbh, svc.customer_id, lastVisit?.startedAt || null, textsCutoff(svc, visitStart)))
+      ? (lastVisit?.unavailable ? Promise.resolve(null) : loadVisitTexts(dbh, svc, serviceLine, lastVisit, visitStart))
       : Promise.resolve(undefined),
     customerContext ? loadPrepPhotos(dbh, svc) : Promise.resolve(undefined),
   ]);

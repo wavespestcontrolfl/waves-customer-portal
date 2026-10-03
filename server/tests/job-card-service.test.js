@@ -1380,8 +1380,8 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
     // factsDb's chain is not awaitable as a list; sms_log gets one that is.
     // The tech is on site, so the window is the 30 days before that arrival.
     const onSite = { status: 'on_site', arrived_at: '2026-09-04T13:00:00Z' };
-    const smsReads = { count: 0, until: null, grouped: [] };
-    beforeEach(() => { smsReads.count = 0; smsReads.until = null; smsReads.grouped = []; });
+    const smsReads = { count: 0, until: null, since: null, grouped: [] };
+    beforeEach(() => { smsReads.count = 0; smsReads.until = null; smsReads.since = null; smsReads.grouped = []; });
     const withTexts = (row, texts) => {
       const base = factsDb({ 'scheduled_services as ss': { ...visit(false), ...row }, property_preferences: prefs });
       return Object.assign((table) => {
@@ -1394,7 +1394,7 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
           // excludeRecruitingSmsLog's grouped predicate: record that it was applied.
           if (typeof args[0] === 'function') { smsReads.grouped.push(args[0].name); return chain; }
           if (args[0] === 'created_at' && args[1] === '<') { before = new Date(args[2]).getTime(); smsReads.until = new Date(args[2]); }
-          if (args[0] === 'created_at' && args[1] === '>') after = new Date(args[2]).getTime();
+          if (args[0] === 'created_at' && args[1] === '>') { after = new Date(args[2]).getTime(); smsReads.since = new Date(args[2]); }
           return chain;
         };
         chain.limit = (n) => { size = n; return chain; };
@@ -1486,6 +1486,41 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       }, { raw: base.raw });
       const out = await jobCard.loadJobCardFacts('svc1', failing, deps);
       expect(out.facts.lastVisit).toEqual({ unavailable: true });
+      expect(out.notes.customerTexts).toBeNull();
+      expect(smsReads.count).toBe(0);
+    });
+
+    test('an earlier visit the same day starts the texts window (Codex r7)', async () => {
+      process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = 'true';
+      const texts = [
+        { created_at: '2026-09-04T16:00:00Z', message_body: 'They are back already', message_type: 'sms' },
+        { created_at: '2026-09-04T11:00:00Z', message_body: 'Handled this morning', message_type: 'sms' },
+      ];
+      const base = withTexts({ status: 'on_site', arrived_at: '2026-09-04T18:00:00Z' }, texts);
+      // loadLastVisit asks .first() with no args (no earlier DAY); the same-day lookup asks .first('sr.started_at').
+      const dbh = Object.assign((table) => {
+        const chain = base(table);
+        if (table !== 'service_records as sr') return chain;
+        const first = chain.first;
+        chain.first = (...cols) => (cols[0] === 'sr.started_at' ? Promise.resolve({ started_at: new Date('2026-09-04T13:00:00Z') }) : first());
+        return chain;
+      }, { raw: base.raw });
+      const out = await jobCard.loadJobCardFacts('svc1', dbh, deps);
+      expect(smsReads.since.toISOString()).toBe('2026-09-04T13:00:00.000Z');
+      expect(out.notes.customerTexts).toEqual([{ date: '2026-09-04', text: 'They are back already' }]);
+    });
+
+    test('an unreadable same-day lookup makes the texts unavailable (Codex r7)', async () => {
+      process.env.GATE_JOB_CARD_CUSTOMER_CONTEXT = 'true';
+      const base = withTexts(onSite, [{ created_at: '2026-09-02T15:00:00Z', message_body: 'Old', message_type: 'sms' }]);
+      const dbh = Object.assign((table) => {
+        const chain = base(table);
+        if (table !== 'service_records as sr') return chain;
+        const first = chain.first;
+        chain.first = (...cols) => (cols[0] === 'sr.started_at' ? Promise.reject(new Error('down')) : first());
+        return chain;
+      }, { raw: base.raw });
+      const out = await jobCard.loadJobCardFacts('svc1', dbh, deps);
       expect(out.notes.customerTexts).toBeNull();
       expect(smsReads.count).toBe(0);
     });
