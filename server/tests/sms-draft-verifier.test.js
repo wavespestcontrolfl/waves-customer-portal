@@ -9,6 +9,30 @@ const {
   buildReviseAddendum,
 } = require('../services/sms-draft-verifier');
 
+// Independent-review P1 (round 3, PR #5331, finding 6): the payment-method
+// checklist bullet only belongs on a GATE_SMS_REAL_ANSWERS (v12) draft — the
+// Payment options / Recent payments facts it references don't exist in a
+// gate-off facts block at all. A prior round added it UNCONDITIONALLY,
+// changing the gate-off (v11) verifier prompt for every cohort. This hash is
+// pinned from buildVerifierSystemPrompt() as it stands on origin/main (re-pinned after the
+// PR #5334 LIVE ETA verifier change; this lane's own change leaves it untouched) — the same "pinned hash, not
+// gate-unset-vs-gate-false" contract sms-shadow-drafter.test.js already
+// enforces for the drafter's own prompt/facts block.
+const crypto = require('crypto');
+describe('gate-off contract: buildVerifierSystemPrompt() with no args (or {realAnswers:false}) is byte-identical to origin/main', () => {
+  test('matches the pinned pre-#5331-round-3 hash', () => {
+    const p = buildVerifierSystemPrompt();
+    expect(p.length).toBe(3395);
+    expect(crypto.createHash('sha256').update(p).digest('hex'))
+      .toBe('0d344c10327046f48e38984936097ebe867e084b14c8dc9da16db188b1ee33f3');
+    // {realAnswers: false} explicitly must be the SAME byte-identical text —
+    // the default parameter and an explicit false must never diverge.
+    expect(buildVerifierSystemPrompt({ realAnswers: false })).toBe(p);
+    expect(p).not.toMatch(/payment method or contact/i);
+    expect(p).not.toMatch(/RECEIPT confirmation/i);
+  });
+});
+
 describe('verifier — prompt contract', () => {
   test('system prompt enumerates the fabrication classes and pins JSON output', () => {
     const p = buildVerifierSystemPrompt();
@@ -44,6 +68,43 @@ describe('verifier — prompt contract', () => {
     expect(p).toMatch(/billing is high-stakes|billing status/i);
     // quote-the-source requirement
     expect(p).toMatch(/QUOTE the exact/i);
+  });
+
+  test('v6 verifier (real answers on) checks a payment method/contact (Zelle phone/email) against PAYMENT OPTIONS', () => {
+    const p = buildVerifierSystemPrompt({ realAnswers: true });
+    expect(p).toMatch(/payment method or contact/i);
+    expect(p).toMatch(/zelle/i);
+    expect(p).toMatch(/Payment options line in BILLING/i);
+  });
+
+  // A payment / invoice / refund / balance STATUS is grounded only on a verbatim "Payment status sentences" copy.
+  test('real answers on: a payment / invoice / refund / balance STATUS grounds only on a verbatim "Payment status sentences" copy', () => {
+    const p = buildVerifierSystemPrompt({ realAnswers: true });
+    expect(p).toMatch(/STATUS \(.*"you're all paid up"/i);
+    expect(p).toMatch(/word-for-word copy of one "Payment status sentences" line in BILLING/);
+    expect(p).toMatch(/adds a method, date, amount or reason the sentence does not state, is a fabrication/);
+    expect(p).not.toMatch(/Recent payments/);
+  });
+
+  // Codex round-18 P1: COMPANY FACTS ("Paying: technicians accept cards at the visit, never cash. Checks are
+  // mailed to <office>") is a second valid source for how-to-pay claims.
+  test('real answers on: how-to-pay grounds on Payment options OR the COMPANY FACTS payment policy; an unlisted method stays a fabrication', () => {
+    const p = buildVerifierSystemPrompt({ realAnswers: true });
+    expect(p).toMatch(/Payment options line in BILLING exactly OR the owner-approved COMPANY FACTS payment policy/);
+    expect(p).toMatch(/checks mailed to the office, no cash/);
+    expect(p).toMatch(/appears in NEITHER is a fabrication/);
+    expect(p).toMatch(/unlisted method[^)]*stays a fabrication/);
+    // the facts the rule points at really do carry that policy
+    const { renderCompanyFactsSection } = require('../services/sms-company-facts');
+    const facts = renderCompanyFactsSection();
+    expect(facts).toMatch(/technicians accept cards at the visit, never cash/i);
+    expect(facts).toMatch(/Checks are mailed to/);
+  });
+
+  test('gate off (real answers not passed): neither payment-method bullet appears', () => {
+    const p = buildVerifierSystemPrompt();
+    expect(p).not.toMatch(/payment method or contact/i);
+    expect(p).not.toMatch(/RECEIPT confirmation/i);
   });
 
   test('user prompt carries facts, the customer message, and the draft under check', () => {

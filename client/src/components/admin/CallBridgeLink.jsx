@@ -7,7 +7,11 @@
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const DEFAULT_FROM = "+19412975749";
 
-export async function callViaBridge(phone, customerName = "", fromNumber = DEFAULT_FROM) {
+// customerIdHint: the customer this number belongs to, when the caller knows
+// it. The server links the call to them (and presents their home line under
+// GATE_HOME_LINE) only if the dialed number is one of their known numbers;
+// otherwise the call proceeds unlinked — a stale number is never refused.
+export async function callViaBridge(phone, customerName = "", fromNumber = DEFAULT_FROM, customerIdHint = null) {
   if (!phone) return;
   const who = (customerName || "").trim() || "this number";
   const confirmMsg = `Call ${who} at ${phone}?\n\nWaves will call your phone first — press 1 to connect.`;
@@ -19,7 +23,7 @@ export async function callViaBridge(phone, customerName = "", fromNumber = DEFAU
         Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ to: phone, fromNumber: fromNumber || DEFAULT_FROM }),
+      body: JSON.stringify({ to: phone, fromNumber: fromNumber || DEFAULT_FROM, ...(customerIdHint ? { customerIdHint } : {}) }),
     });
     const data = await r.json().catch(() => ({}));
     if (!r.ok || !data.success) {
@@ -48,6 +52,7 @@ export default function CallBridgeLink({
   phone,
   customerName = "",
   fromNumber = DEFAULT_FROM,
+  customerIdHint = null,
   className,
   style,
   // Opt-in for callers that fully style the button via className (e.g. a
@@ -65,7 +70,7 @@ export default function CallBridgeLink({
       type="button"
       onClick={(e) => {
         if (stopPropagation) e.stopPropagation();
-        callViaBridge(phone, customerName, fromNumber);
+        callViaBridge(phone, customerName, fromNumber, customerIdHint);
       }}
       className={className}
       // Default: apply BASE_STYLE so link-style callers keep the inline-tel:

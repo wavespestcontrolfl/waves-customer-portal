@@ -100,10 +100,9 @@ describe('every failed-payment consumer applies the shared predicate', () => {
     ['services/cancellation-resolution/facts.js', 'excludeNeverAttemptedHoldDeferrals'],
     ['services/bi-agent-tools.js', 'excludeNeverAttemptedHoldDeferrals'],
     ['routes/badges.js', 'isNeverAttemptedHoldDeferral'],
-    ['services/context-aggregator.js', 'isNeverAttemptedHoldDeferral'],
-    ['services/context-aggregator.js', 'excludeNeverAttemptedHoldDeferrals'],
+    // the aggregator's failed-payment ledger and the /balance route share services/failed-payments.js (PR #5331)
+    ['services/failed-payments.js', 'isNeverAttemptedHoldDeferral'],
     ['services/customer-health.js', 'isNeverAttemptedHoldDeferral'],
-    ['routes/billing-v2.js', 'isNeverAttemptedHoldDeferral'],
     // The portal payment list (GET /api/billing) lives in this service.
     ['services/portal-payment-history.js', 'excludeHoldDeferralPlaceholders'],
     ['services/stripe.js', 'excludeHoldDeferralPlaceholders'],
@@ -112,6 +111,18 @@ describe('every failed-payment consumer applies the shared predicate', () => {
     const src = fs.readFileSync(path.join(root, file), 'utf8');
     expect(src).toMatch(new RegExp(`${fn}\\(`));
     expect(src).toContain('collections/collection-hold');
+  });
+
+  // The SMS recent-payments window needs EVERY never-attempted placeholder kind (collection_hold AND lock_contention), so it rides the
+  // composed SQL twin in services/failed-payments.js, which itself applies the collection_hold twin (Codex round-38 P1).
+  test.each(['services/context-aggregator.js'])('%s uses the composed excludeNeverAttemptedDeferrals', (file) => {
+    const src = fs.readFileSync(path.join(root, file), 'utf8');
+    expect(src).toMatch(/excludeNeverAttemptedDeferrals\(/);
+    expect(src).toContain("require('./failed-payments')");
+  });
+  test('the composed twin applies the collection_hold twin AND the lock_contention clause', () => {
+    const src = fs.readFileSync(path.join(root, 'services/failed-payments.js'), 'utf8');
+    expect(src).toMatch(/function excludeNeverAttemptedDeferrals[\s\S]*excludeNeverAttemptedHoldDeferrals\(query, alias\)[\s\S]*LOCK_DEFERRAL_REASON/);
   });
 
   test('admin billing health applies it to all five failed-row reads (summary + at-risk lists)', () => {

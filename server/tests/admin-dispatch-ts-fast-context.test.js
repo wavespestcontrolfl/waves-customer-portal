@@ -70,7 +70,7 @@ const dbWithOwner = (technician_id, calls = []) => (table) => {
   calls.push(table);
   const chain = {};
   for (const m of ['where', 'select', 'leftJoin']) chain[m] = () => chain;
-  chain.first = async () => (table === 'scheduled_services' ? { id: 'visit-1', technician_id, service_type: 'Tree & Shrub Care' } : null);
+  chain.first = async () => (table === 'scheduled_services' ? { id: 'visit-1', technician_id, status: 'confirmed', scheduled_date: require('../utils/datetime-et').etDateString(new Date()), service_type: 'Tree & Shrub Care' } : null);
   return chain;
 };
 

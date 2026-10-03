@@ -34,7 +34,9 @@ const makeHandle = ({ visit, held, calls, history = false }) => {
   h.raw = jest.fn(async () => ({}));
   return h;
 };
-const today = '2020-01-06';   // never a future date
+// Today in ET: never a future date, and inside the technician access window
+// the field guards now apply (codex #5568 r8 sweep).
+const today = require('../utils/datetime-et').etDateString();
 const baseVisit = (extra = {}) => ({
   id: 'v1', technician_id: 'tech-1', status: 'pending', customer_confirmed: false, source_action: 'voice_agent',
   scheduled_date: today, customer_id: 'c1', source_call_log_id: 'call-1', ...extra,

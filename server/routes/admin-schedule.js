@@ -71,6 +71,9 @@ const { resolveCompletionProfileForScheduledService } = require('../services/ser
 const { resolveSeriesChildIdentity } = require('../services/service-catalog-names');
 const { detectServiceLine } = require('../services/service-report/service-line-configs');
 const { validateTreeShrubReviewForReport } = require('../services/tree-shrub-assessment');
+const {
+  techFindingsCopyLive, hasTechFindingLines, filterCaptionsForCustomer, summaryForCustomer, PALM_CROWN_PROMPT_RULE,
+} = require('../services/service-report/tree-shrub-tech-findings');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
 const { redactAccessCodes } = require('../services/context-aggregator');
 const { technicianReportCustomerCopy, containsReportAccessCode } = require('../services/service-report/technician-report-copy');
@@ -5144,6 +5147,23 @@ async function loadProjectCompletionContextByServiceId(services) {
       // (services/visit-lane-facts.js voiceLaneFor).
       laneVoiceFillEnabled: require('../config/feature-gates').laneVoiceFillLive()
         && require('../services/visit-lane-facts').voiceLaneFor({ profile: completionProfile, serviceType: service.service_type }) != null,
+      // GATE_TYPED_VOICE_FILL: Generate on the completion form fills a typed
+      // visit's own findings from the notes; only a form the reader reads,
+      // the completion profile's own (services/visit-typed-facts.js
+      // voiceTypeFor).
+      typedVoiceFillEnabled: require('../config/feature-gates').typedVoiceFillLive()
+        && require('../services/visit-typed-facts').voiceTypeFor(completionProfile) != null,
+      // GATE_FAST_COMPLETE_REPORT with GATE_TYPED_VOICE_FILL: TechHomePage
+      // opens a typed visit the sheet reads (visit-typed-facts.js
+      // sheetTypeFor) in the Fast Complete sheet's report flow, its record
+      // read from the note, in place of the typed form
+      // (fastCompleteReportEnabled above stays off for typed forms). Not a
+      // combined service: its companion sections are required at completion
+      // and the sheet has none.
+      typedReportFlowEnabled: require('../config/feature-gates').fastCompleteReportLive()
+        && require('../config/feature-gates').typedVoiceFillLive()
+        && require('../services/visit-typed-facts').sheetTypeFor(completionProfile) != null
+        && !(completionProfile?.companions || []).length,
       // GATE_LAWN_RESERVICE_FAST_COMPLETE: TechHomePage opens the one-screen
       // lawn re-service sheet (instead of the typed Dispatch form) when on.
       // Read at call time; no per-tech flag.
@@ -5890,6 +5910,17 @@ router.get('/', async (req, res, next) => {
 
     const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
     const projectCompletionContextByServiceId = await loadProjectCompletionContextByServiceId(services);
+    // Neighborhood gate-code directory (dark behind GATE_NEIGHBORHOOD_ACCESS):
+    // the shared entry for a visit whose customer has no gate code. A failed
+    // read just shows no fallback.
+    let neighborhoodGateByVisit = new Map();
+    try {
+      if (require('../config/feature-gates').neighborhoodAccessLive()) {
+        neighborhoodGateByVisit = await require('../services/neighborhood-access').neighborhoodGateEntriesForVisits(db, services);
+      }
+    } catch (err) {
+      logger.warn(`[admin-schedule] neighborhood gate lookup failed (${err.code || err.name || 'error'})`);
+    }
 
     // Trace-eligibility flag for the tech portal's per-row "🛰️ Zone"
     // button (GATE_TRACE_ELIGIBILITY, dark): resolved from the catalog key
@@ -6072,6 +6103,7 @@ router.get('/', async (req, res, next) => {
         genuinelyNew,
         servicePreferences: s.service_preferences,
         normalizedServiceType: normalizedType,
+        neighborhoodGate: neighborhoodGateByVisit.get(s.id) || null,
       });
 
       const zone = s.zone || getZone(s.city, s.zip);
@@ -6296,6 +6328,8 @@ router.get('/', async (req, res, next) => {
         fastCompleteReportEnabled: projectCompletionContext.fastCompleteReportEnabled === true,
         noteBoxPhotosEnabled: projectCompletionContext.noteBoxPhotosEnabled === true,
         laneVoiceFillEnabled: projectCompletionContext.laneVoiceFillEnabled === true,
+        typedVoiceFillEnabled: projectCompletionContext.typedVoiceFillEnabled === true,
+        typedReportFlowEnabled: projectCompletionContext.typedReportFlowEnabled === true,
         // A resolver OUTAGE must reach the client's omit-the-field guard
         // (Codex #3178 r34 P2, mirroring the dispatch feed) — without it a
         // hidden credit toggle falls through to a fabricated default
@@ -6896,6 +6930,8 @@ router.get('/week', async (req, res, next) => {
           fastCompleteReportEnabled: projectCompletionContext.fastCompleteReportEnabled === true,
           noteBoxPhotosEnabled: projectCompletionContext.noteBoxPhotosEnabled === true,
           laneVoiceFillEnabled: projectCompletionContext.laneVoiceFillEnabled === true,
+          typedVoiceFillEnabled: projectCompletionContext.typedVoiceFillEnabled === true,
+          typedReportFlowEnabled: projectCompletionContext.typedReportFlowEnabled === true,
           // Resolver-outage marker — same contract as the day view (r34 P2).
           completionProfileLookupFailed: projectCompletionContext.completionProfileLookupFailed === true,
           findingsSchema: projectCompletionContext.findingsSchema || null,
@@ -17495,7 +17531,23 @@ router.post('/:id/invoice', async (req, res, next) => {
 
     const toCents = (value) => Math.max(0, Math.round((Number(value) || 0) * 100));
     const centsToDollars = (cents) => (cents / 100).toFixed(2);
-    const applyPrepaidCredit = async (invoice) => {
+    // In-lock ownership recheck: substantial async work happens between the
+    // authorized SELECT at the top of this route and any invoice write —
+    // re-verify (row-locked) that the visit is still this technician's live
+    // job. Shared by the fresh mint and the reuse branch (codex #5568 r13 P1).
+    const assertTechStillOwnsLiveVisit = async (trx) => {
+      if (!isTechnicianRequest(req)) return;
+      const still = await technicianLiveVisitFilter(
+        req,
+        trx('scheduled_services').where({ 'scheduled_services.id': svc.id }),
+      ).forUpdate().first('scheduled_services.id');
+      if (!still) {
+        const e = new Error('Scheduled service not found');
+        e.status = 404;
+        throw e;
+      }
+    };
+    const applyPrepaidCredit = async (invoice, { assertInTrx = null } = {}) => {
       // Applying annual-prepay coverage to a Charge-Now invoice is deferred to a
       // dedicated follow-up (it needs non-cash accounting, an idempotency marker,
       // and add-on split-billing). This path only applies out-of-band prepayments
@@ -17523,6 +17575,16 @@ router.post('/:id/invoice', async (req, res, next) => {
           .where({ id: invoice.id })
           .forUpdate()
           .first();
+        // Ownership after the invoice lock and the customer KEY SHARE (the
+        // lock the payments FK insert below takes anyway, hoisted as in
+        // scheduled-invoice-mint.js): the billing order invoice → customer →
+        // visit every collection path takes, so a concurrent Terminal handoff
+        // cannot deadlock against it (pre-push P1). The route's own locked
+        // pre-check already ran before this credit.
+        if (assertInTrx) {
+          if (lockedInvoice?.customer_id) await trx.raw('SELECT id FROM customers WHERE id = ? FOR KEY SHARE', [lockedInvoice.customer_id]);
+          await assertInTrx(trx);
+        }
         if (!lockedInvoice) return { invoice, prepaidCredit: 0 };
         if (['paid', 'prepaid'].includes(lockedInvoice.status)) return { invoice: lockedInvoice, prepaidCredit: 0 };
 
@@ -17660,7 +17722,12 @@ router.post('/:id/invoice', async (req, res, next) => {
           error: 'This visit is billed to a third-party payer — do not collect in person. The invoice will be sent to the payer.',
         });
       }
-      const applied = await applyPrepaidCredit(existing);
+      // Reuse changes billing state and returns the bearer token: the former
+      // technician of a visit reassigned meanwhile gets neither. Checked
+      // before any reuse effect (the no-credit path returns the token
+      // directly) and again inside the credit transaction itself.
+      if (isTechnicianRequest(req)) await db.transaction((trx) => assertTechStillOwnsLiveVisit(trx));
+      const applied = await applyPrepaidCredit(existing, { assertInTrx: assertTechStillOwnsLiveVisit });
       existing = applied.invoice;
       // Settled = nothing left to collect. A zero amount due counts too
       // (account credit fully covers an invoice that was never marked paid)
@@ -17800,18 +17867,7 @@ router.post('/:id/invoice', async (req, res, next) => {
       // the authorized SELECT at the top of this route and the mint
       // transaction — re-verify (row-locked) that the visit is still this
       // technician's live job before an invoice is minted or replayed.
-      assertEligibleInTrx: async (trx) => {
-        if (!isTechnicianRequest(req)) return;
-        const still = await technicianLiveVisitFilter(
-          req,
-          trx('scheduled_services').where({ 'scheduled_services.id': svc.id }),
-        ).forUpdate().first('scheduled_services.id');
-        if (!still) {
-          const e = new Error('Scheduled service not found');
-          e.status = 404;
-          throw e;
-        }
-      },
+      assertEligibleInTrx: assertTechStillOwnsLiveVisit,
       buildCreateParams: () => ({
         customerId: svc.customer_id,
         scheduledServiceId: svc.id,
@@ -24764,6 +24820,12 @@ router.post('/generate-report', async (req, res) => {
     const { selectReportCopyPrompt, writerRulesInScope } = require('../services/service-report/lawn-report-copy-prompt');
     const writerRulesGate = reportWriterRulesLive();
 
+    // A technician writes a report only for a visit of their own: the id-less
+    // legacy path (notes/products only) stays for admins, since it would let
+    // any technician run the paid writer chain with no visit (codex #5568 r6 P1).
+    if (!scheduledServiceId && req.techRole !== 'admin') {
+      return res.status(400).json({ error: 'scheduledServiceId required' });
+    }
     if (scheduledServiceId && !(await technicianOwnsScheduledService(req, scheduledServiceId))) {
       return res.status(404).json({ error: 'Scheduled service not found' });
     }
@@ -25161,11 +25223,14 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
     // summary alone never opens this block (mirrors the generation-gate rule
     // above: real, tech-vetted photo text is substantive, a bare count or an
     // unreviewed summary is not).
-    const photoObservationsBlock = cappedPhotoCaptions.length
+    // Built at use time (below) for a tree & shrub visit with GATE_TS_TECH_FINDINGS_COPY
+    // on: a hidden / edited finding withholds the photo-read captions and summary,
+    // so the block never repeats what the technician replaced.
+    const buildPhotoObservationsBlock = (captions, summary) => (captions.length
       ? `\n\nTECHNICIAN PHOTO OBSERVATIONS (tech-reviewed captions; observations only — never a diagnosis or a product claim)\n`
-        + (photoSummaryText ? `Summary: ${photoSummaryText}\n` : '')
-        + cappedPhotoCaptions.map((c, i) => `Photo ${i + 1}: ${c}`).join('\n')
-      : '';
+        + (summary ? `Summary: ${summary}\n` : '')
+        + captions.map((c, i) => `Photo ${i + 1}: ${c}`).join('\n')
+      : '');
     // Pre-push P2 (Codex #5145 r3): the client's generated-draft-invalidation
     // watcher needs to know whether THIS generation actually included the
     // photo block — with the gate off (the default), cappedPhotoCaptions is
@@ -25174,7 +25239,8 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
     // mirrors when photoObservationsBlock is non-empty; reused across every
     // response branch below (a cache hit reuses a prior generation built
     // from this SAME identity, so it carries the same grounding truth).
-    const photoGroundingUsed = cappedPhotoCaptions.length > 0;
+    // Re-derived from the technician-filtered captions once grounding is known.
+    let photoGroundingUsed = cappedPhotoCaptions.length > 0;
 
     // Assemble real, customer-specific grounding (prior visits, pressure trend,
     // weather, product label data, season, household notes). Fail-soft: if it
@@ -25474,6 +25540,23 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
       return true;
     });
     const companionCustomerInput = dedupedCompanionEntries.some((entry) => authorizedCompanionTypes.includes(entry.type) && companionEntryHasInput(entry));
+    // GATE_TS_TECH_FINDINGS_COPY: every photo-read category replaced or hidden
+    // leaves no scores, but the technician's own findings still ground the
+    // report (grounding.techFindings exists only while the gate is on).
+    // GATE_TS_TECH_FINDINGS_COPY: the photo text the writer may use, filtered
+    // BEFORE the input gate below so captions withheld by the technician's
+    // decisions can never hold that gate open on their own.
+    let promptPhotoCaptions = cappedPhotoCaptions;
+    let promptPhotoSummary = photoSummaryText;
+    if (techFindingsCopyLive() && detectServiceLine(groundingServiceType) === 'tree_shrub') {
+      const techDecisions = treeShrubReviewGrounding?.techFindings || [];
+      promptPhotoCaptions = filterCaptionsForCustomer(cappedPhotoCaptions, techDecisions);
+      // The summary was written about the photos as a whole: a replaced finding
+      // withdraws it.
+      promptPhotoSummary = summaryForCustomer(photoSummaryText, techDecisions) || '';
+    }
+    photoGroundingUsed = promptPhotoCaptions.length > 0;
+    const treeShrubTechFindingsGrounded = hasTechFindingLines(treeShrubReviewGrounding?.techFindings);
     const baseHasReportInput = Boolean((serviceNotes || '').trim())
       || productsText.length > 0
       || areas.length > 0 || actions.length > 0 || obs.length > 0 || recs.length > 0
@@ -25484,8 +25567,9 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
       // generic report with none of the submitted findings.
       || primaryTypedConfirmed
       || hasValidLawnAssessment
+      || treeShrubTechFindingsGrounded
       || Object.keys(treeShrubReviewGrounding?.scores || {}).length > 0
-      || cappedPhotoCaptions.length > 0;
+      || promptPhotoCaptions.length > 0;
     // The technician's promise marks, resolved against this customer's open
     // promises (owner "ok yes add these" 2026-10-01): with the writer rules
     // on a grounded visit only. Fail-soft: no record, no mention. Resolved
@@ -25567,6 +25651,14 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
       });
     }
 
+    if (treeShrubTechFindingsGrounded && !contextSignals.hasTreeShrubReviewedPhotoSignals) {
+      return res.status(503).json({
+        error: 'Tree & shrub photo review grounding is unavailable right now — try Generate again in a moment.',
+        code: 'tree_shrub_review_grounding_unavailable',
+        retryable: true,
+      });
+    }
+
     // Scores-only requests live or die by the assessment grounding: when the
     // validated assessment was the ONLY substantive input and the grounding
     // load then failed (or resolved to retake-pending), there is nothing real
@@ -25590,7 +25682,7 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
       // proceed on the photo block even when the assessment load itself
       // fails; only a TRUE assessment-only request (no captions either)
       // still 503s retryable.
-      && !cappedPhotoCaptions.length;
+      && !promptPhotoCaptions.length;
     if (assessmentWasOnlyInput && !contextSignals.hasCurrentLawnAssessment) {
       return res.status(503).json({
         error: 'Lawn assessment grounding is unavailable right now — try again in a moment.',
@@ -25622,11 +25714,19 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
       }
     }
 
-    const effectiveSystemPrompt = selectReportCopyPrompt(
+    const selectedSystemPrompt = selectReportCopyPrompt(
       systemPrompt,
       groundingServiceType,
       writerRulesOn ? { ...reportPromptContext, writerRules: true } : reportPromptContext,
     );
+    // Palm-crown rule (GATE_TS_TECH_FINDINGS_COPY; owner 2026-10-02: the
+    // instruction is THE guard, no word filter). In the system prompt so it
+    // reaches every tree & shrub generation even when the grounding context
+    // fails, and joins the draft cache key with it.
+    const effectiveSystemPrompt = selectedSystemPrompt
+      && techFindingsCopyLive() && detectServiceLine(groundingServiceType) === 'tree_shrub'
+      ? `${selectedSystemPrompt}\n\n${PALM_CROWN_PROMPT_RULE}`
+      : selectedSystemPrompt;
     if (!effectiveSystemPrompt) {
       return res.status(503).json({
         error: 'A report writer could not be matched to this service. Your notes were preserved; review the service profile before generating again.',
@@ -25678,6 +25778,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         if (block) bookedReason = `\n\n${block}`;
       } catch { /* no booked reason: the paragraph leads with the work */ }
     }
+    const photoObservationsBlock = buildPhotoObservationsBlock(promptPhotoCaptions, promptPhotoSummary);
     const fullUserMessage = `${userMessage}${bookedReason}${typedFindingsBlock}${photoObservationsBlock}${contextText}${commsBlock}`;
     // v9: canonical remaining-service modules join the dedicated writers.
     // Both the selected system

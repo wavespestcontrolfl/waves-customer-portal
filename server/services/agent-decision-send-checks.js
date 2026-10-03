@@ -21,6 +21,26 @@ function parseInputSnapshot(inputSnapshot) {
 // Real-answers drafts (prompt family house_voice_v12*) are the ones whose facts
 // carry billing amounts and LABEL FACTS; older drafts are left as they were.
 const isRealAnswersDecision = (decision) => typeof decision.prompt_version === 'string' && decision.prompt_version.startsWith('house_voice_v12');
+// Owner ruling 2026-10-01: a STAFF EDIT is the staff member's own wording, so the payment-status contract does not judge it. Edited =
+// the outgoing body differs (whitespace-normalized) from the AI draft stored on the decision. No stored draft => the body is treated as
+// the AI's: STRICT. Auto-send never carries an edit and never passes this.
+const normalizeBody = (v) => String(v ?? '').replace(/\s+/g, ' ').trim();
+function bodyIsStaffEdited(storedDraft, outgoingBody) {
+  const stored = normalizeBody(storedDraft);
+  return !!stored && normalizeBody(outgoingBody) !== stored;
+}
+
+// The customer's own inbound wording for this decision - what scopes the
+// payment-status detector and names the invoice a Zelle offer is about.
+// `decision.inbound_message` is the linked
+// sms_log row's body (verifyAgentDecisionForSend's own select, joined at
+// query time); input_snapshot's `sms.body` is the same text stashed at
+// draft time and covers a decision the caller selected without that join.
+function resolveInboundMessage(decision) {
+  if (typeof decision?.inbound_message === 'string' && decision.inbound_message) return decision.inbound_message;
+  const fromSnapshot = parseInputSnapshot(decision?.input_snapshot)?.sms?.body;
+  return typeof fromSnapshot === 'string' ? fromSnapshot : null;
+}
 
 // OPEN TIMES: a draft that offered appointment times persists the exact
 // (date, window) pairs; a reviewer-edited body is matched to them pair by
@@ -65,13 +85,61 @@ function followupBlock({ decision, outgoingBody }) {
   return reason ? `follow-up promise unsendable (${reason})` : null;
 }
 
-// AMOUNTS: a real-answers card may carry exact billing figures and can wait
-// through a payment; re-read billing now, same check the scheduler runs at
-// fire time. Older-prompt decisions are untouched.
+// AMOUNTS + PAYMENT STATUS: a real-answers card may carry exact billing figures and payment-status sentences and can wait
+// through a payment; re-read billing now, same check the scheduler runs at fire time. Older-prompt decisions are untouched for
+// both halves.
+//
+// PAYMENT STATUS (owner ruling 2026-10-01): the FINAL body of every real-answers decision may state a payment / invoice / refund /
+// balance status only by copying, verbatim, a sentence its payment_status_snapshot recorded - and each copied sentence must still
+// be one the records render now. An edited sentence, a status typed in, or a status on a decision that copied none is held.
+//
+// Independent-review P1 (round 6, PR #5331): the Zelle recipient-plus-
+// invoice-eligibility half must NOT stay gated behind `realAnswers &&
+// customer_id` the way the amount half is — ZELLE_RECIPIENT is a live env
+// var and the invoice it was drafted against can settle or start a saved-
+// card charge at any time, whatever prompt version drafted the body. The
+// scheduler's own fire-time path (scheduler.js) already reruns
+// outgoingAmountsStale — which runs this same Zelle check first, ahead of
+// its own amount rules — for EVERY agent-decision-linked scheduled reply,
+// human-edited or not, regardless of prompt version; this immediate-send
+// seam now matches it. A body with an affirmative Zelle offer but no
+// customer_id on the decision can never be checked against a real invoice —
+// fail CLOSED (refuse) rather than let an unverifiable Zelle offer out.
 async function amountsBlock({ decision, outgoingBody }) {
-  if (!isRealAnswersDecision(decision) || !decision.customer_id) return null;
-  const { outgoingAmountsStale } = require('./sms-amount-recheck');
-  const amounts = await outgoingAmountsStale({ customerId: decision.customer_id, body: outgoingBody, promptVersion: decision.prompt_version });
+  const realAnswers = isRealAnswersDecision(decision);
+  const { outgoingAmountsStale, bodyNeedsPaymentRecheck } = require('./sms-amount-recheck');
+  // Codex round-23 P2: a Zelle OFFER or DENIAL is rechecked for every decision (an edited pre-v12 body too); v12 decisions always
+  // run the whole recheck.
+  // (any mention of Zelle - the money-sentence contract has no offer / denial grammar)
+  const zelleClaim = /\bzelle\b/i.test(String(outgoingBody || ''));
+  if (!realAnswers && !zelleClaim) return null;
+  // A staff edit's free-text status is theirs: it neither needs the contract's reads nor can the contract fail it. Zelle and amount rules stay.
+  const staffEdited = realAnswers && bodyIsStaffEdited(decision.suggested_message, outgoingBody);
+  if (!decision.customer_id) {
+    // With no customer to re-read billing for, ANY body the recheck would judge (an amount, a Zelle claim, a payment-status
+    // assertion, price grammar) cannot be verified - fail closed. Benign copy ("Your invoice is attached") needs no billing.
+    return (zelleClaim || bodyNeedsPaymentRecheck(outgoingBody, { inboundMessage: resolveInboundMessage(decision), promptVersion: decision.prompt_version, statusVocabulary: !staffEdited })) ? 'amount no longer authorized (amount_recheck_no_customer)' : null;
+  }
+  // Pre-push audit P1 (finding 2): the invoice the drafter's Zelle fact was
+  // built for, so a body carrying a Zelle contact is rechecked against that
+  // SAME invoice's CURRENT eligibility, not just its recipient.
+  const snapshot = parseInputSnapshot(decision.input_snapshot);
+  const amounts = await outgoingAmountsStale({
+    customerId: decision.customer_id,
+    body: outgoingBody,
+    promptVersion: decision.prompt_version,
+    zelleInvoiceId: snapshot?.zelle_invoice_id || null,
+    inboundMessage: resolveInboundMessage(decision),
+    paymentStatusSnapshot: snapshot?.payment_status_snapshot || null,
+    humanEditedBody: staffEdited,
+    // A pre-v12 decision reaches here ONLY for its Zelle claim (above): its amount rules stay untouched.
+    trustOwedAmounts: !realAnswers,
+  });
+  // the invoice a Zelle offer was checked against: the provider-boundary check inspects its live PaymentIntent (Codex round-50 P1)
+  if (!amounts.stale) {
+    // the live Zelle facts the verdict stood on: the provider-boundary check re-reads them (owner ruling 2026-10-01)
+    decision.zelle_boundary = amounts.zelle || null;
+  }
   return amounts.stale ? `amount no longer authorized (${amounts.reason})` : null;
 }
 
@@ -132,11 +200,17 @@ function blockReasonIsLabelInfrastructure(blockReason) {
   const m = /^label timing no longer current \(([a-z_]+)\)$/.exec(String(blockReason || ''));
   return Boolean(m) && isLabelRecheckInfrastructureFailure(m[1]);
 }
+// Codex round-64 P2: a BILLING recheck that could not read the billing / Stripe state says nothing about the message either.
+const BILLING_RECHECK_INFRASTRUCTURE_REASONS = new Set(['amount_recheck_failed', 'payment_status_recheck_failed', 'zelle_recheck_failed']);
+function blockReasonIsBillingInfrastructure(blockReason) {
+  const m = /^amount no longer authorized \(([a-z_]+)\)$/.exec(String(blockReason || ''));
+  return Boolean(m) && BILLING_RECHECK_INFRASTRUCTURE_REASONS.has(m[1]);
+}
 // OPEN LOOPS (PR #5499): an open-loop recheck that could not read its rows is infrastructure too.
 const blockReasonIsOpenLoopsInfrastructure = (blockReason) => String(blockReason || '') === 'open-loop facts stale (open_loops_recheck_failed)';
-/** Any send-time recheck that could not read its state (live ETA, label facts, open loops): refuse, keep the decision retryable. */
-const blockReasonIsRecheckInfrastructure = (blockReason) => blockReasonIsEtaInfrastructure(blockReason)
-  || blockReasonIsLabelInfrastructure(blockReason) || blockReasonIsOpenLoopsInfrastructure(blockReason);
+/** Any send-time recheck that could not read its state (live ETA, label facts, open loops or billing): refuse, keep the decision retryable. */
+const blockReasonIsRecheckInfrastructure = (blockReason) => blockReasonIsEtaInfrastructure(blockReason) || blockReasonIsLabelInfrastructure(blockReason)
+  || blockReasonIsOpenLoopsInfrastructure(blockReason) || blockReasonIsBillingInfrastructure(blockReason);
 
 async function etaBlockReason({ decision, outgoingBody, dbh }) {
   const snapshot = parseInputSnapshot(decision.input_snapshot);
@@ -204,6 +278,34 @@ function etaProviderPreSendCheck({ decisionId, getBody }) {
     };
   };
   return markRepeatable(check);
+}
+
+// BILLING FACTS at the TRUE provider boundary (Codex round-48 P1): the immediate Agent Review send rechecks amounts, payment status
+// and Zelle in verifyAgentDraftDecision, then the route still awaits link / claim / consent / policy steps - a customer paying in that
+// gap could make an approved "Your account balance is $100.00" false before it reaches Twilio. Codex round-49 P1: repeating the full
+// recheck there needs a second pool connection while the handoff holds one, so the route takes the customer's billing FINGERPRINT
+// before the full recheck (billingFingerprintForSend) and the boundary re-reads it in one query on the handoff connection: any change
+// refuses as retryable (the retry reruns the full recheck). Registered only for a body the recheck judges.
+// A staff edit's own status wording is not judged by the contract (owner ruling 2026-10-01) - nor by the boundary (local review P2).
+const billingBoundaryJudged = (decision, body) => {
+  const realAnswers = typeof decision?.prompt_version === 'string' && decision.prompt_version.startsWith('house_voice_v12');
+  const staffEdited = realAnswers && bodyIsStaffEdited(decision?.suggested_message, body);
+  return require('./sms-amount-recheck').bodyNeedsBillingBoundaryCheck(body, {
+    inboundMessage: resolveInboundMessage(decision), promptVersion: decision?.prompt_version, statusVocabulary: !staffEdited,
+  });
+};
+async function billingFingerprintForSend({ decision, outgoingBody }) {
+  if (!decision?.customer_id || !billingBoundaryJudged(decision, String(outgoingBody || ''))) return undefined;
+  return require('./billing-fingerprint').billingFingerprint(decision.customer_id);
+}
+function amountsProviderPreSendCheck({ decision, getBody }) {
+  if (!decision?.id) return undefined;
+  const body = String((typeof getBody === 'function' ? getBody() : getBody) || '');
+  if (!billingBoundaryJudged(decision, body)) return undefined;
+  return require('./billing-fingerprint').billingUnchangedProviderPreSendCheck({
+    customerId: decision.customer_id, fingerprint: decision.billing_fingerprint ?? null,
+    zelle: decision.zelle_boundary ?? null,
+  });
 }
 
 // Snapshot-carrying variant for a caller that already holds the decision's live-ETA
@@ -556,4 +658,4 @@ async function scheduledReserviceBlockReason({ agentDecisionId, outgoingBody, fa
   }
 }
 
-module.exports = { agentDecisionSendBlockReason, scheduledReserviceBlockReason, scheduledOpenLoopsBlockReason, openLoopsBlockReason, openLoopsProviderPreSendCheck, openLoopsDecisionProviderPreSendCheck, gratitudeOpenLoopsProviderPreSendCheck, parseInputSnapshot, labelFactsBlock, scheduledLabelFactsBlock, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, isLabelRecheckInfrastructureFailure, blockReasonIsLabelInfrastructure, blockReasonIsRecheckInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, labelFactsProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, composeProviderPreSendChecks, markRepeatable };
+module.exports = { bodyIsStaffEdited, agentDecisionSendBlockReason, scheduledReserviceBlockReason, scheduledOpenLoopsBlockReason, openLoopsBlockReason, openLoopsProviderPreSendCheck, openLoopsDecisionProviderPreSendCheck, gratitudeOpenLoopsProviderPreSendCheck, parseInputSnapshot, labelFactsBlock, scheduledLabelFactsBlock, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, labelFactsProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, amountsProviderPreSendCheck, billingFingerprintForSend, composeProviderPreSendChecks, markRepeatable, isLabelRecheckInfrastructureFailure, blockReasonIsLabelInfrastructure, blockReasonIsBillingInfrastructure, blockReasonIsRecheckInfrastructure };

@@ -20,6 +20,11 @@ router.post('/', async (req, res, next) => {
     // Get customer info if customerId provided
     let customer = null;
     if (customerId) {
+      // A technician flags a lead only for a customer on their own current or
+      // recent route: their details are copied into the lead (codex #5568
+      // r17 P1). 404 so an id seen elsewhere confirms nothing; admins pass.
+      const { technicianServicesCustomer } = require('../services/technician-visit-scope');
+      if (!(await technicianServicesCustomer(req, customerId))) return res.status(404).json({ error: 'Customer not found' });
       customer = await db('customers').where({ id: customerId }).first();
     }
 

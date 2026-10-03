@@ -115,8 +115,9 @@ describe('changing a staged photo from the notes box', () => {
     locks.length = 0;
     process.env.GATE_NOTE_BOX_PHOTOS = 'true';
     tables.scheduled_services = [
-      { id: VISIT, technician_id: 'tech-1' },
-      { id: OTHER_VISIT, technician_id: 'tech-1' },
+      // Current visits: the field guard applies the access window (#5568).
+      { id: VISIT, technician_id: 'tech-1', status: 'confirmed', scheduled_date: require('../utils/datetime-et').etDateString() },
+      { id: OTHER_VISIT, technician_id: 'tech-1', status: 'confirmed', scheduled_date: require('../utils/datetime-et').etDateString() },
     ];
     tables.service_records = [];
     tables.scheduled_service_photo_staging = [

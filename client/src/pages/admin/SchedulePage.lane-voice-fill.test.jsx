@@ -8,7 +8,7 @@
 // that clashes with a pick is left for a person, and a failed read fills
 // nothing and generates anyway. Off, Generate is exactly as before.
 import { IDBFactory } from 'fake-indexeddb';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CompletionPanel } from './SchedulePage';
 
@@ -90,6 +90,41 @@ describe('lane voice fill on Generate', () => {
     expect(generated().observations).toEqual(expect.arrayContaining(['Initial treatment', 'Live adults', 'Preparation complete']));
     expect(generated().observations).not.toContain('Scheduled follow-up treatment');
     expect(screen.queryByText('Heard: “second treatment”')).toBeNull();
+  });
+
+  it('a person\'s pick drops the words a fill stood on, even when the filled value is picked again', async () => {
+    await openForm(BED_BUG);
+    await generate();
+    expect(screen.getByText('Heard: “live ones on the couch seams”')).toBeTruthy();
+    fireEvent.change(groupSelect('bed_bug_evidence'), { target: { value: 'Live nymphs' } });
+    fireEvent.change(groupSelect('bed_bug_evidence'), { target: { value: 'Live adults' } });
+    await waitFor(() => expect(groupSelect('bed_bug_evidence').value).toBe('Live adults'));
+    expect(screen.queryByText('Heard: “live ones on the couch seams”')).toBeNull();
+    // A group nobody touched keeps its words.
+    expect(screen.getByText('Heard: “they had everything bagged”')).toBeTruthy();
+  });
+
+  it('a person\'s tick drops the words the fill heard for that place', async () => {
+    await openForm(BED_BUG);
+    await generate();
+    const areas = document.getElementById('cp-areas-treated-desktop') || document.getElementById('cp-areas-treated-mobile');
+    fireEvent.click(areas);
+    fireEvent.click(within(areas.parentElement).getByRole('button', { name: 'Primary bedroom', exact: true }));
+    fireEvent.click(within(areas.parentElement).getByRole('button', { name: 'Primary bedroom', exact: true }));
+    await waitFor(() => expect(screen.getByText('Heard: “the living room couch”')).toBeTruthy());
+    expect(screen.queryByText(/treated the master bedroom/)).toBeNull();
+  });
+
+  it('the unclear asks follow the latest Generate: a later read that answers nothing clears them', async () => {
+    laneAnswer = () => ({ ok: true, json: async () => ({ ...READ, findings: READ.findings.filter((entry) => entry.group !== 'bed_bug_prep'), unclearGroups: ['bed_bug_prep'] }) });
+    await openForm(BED_BUG);
+    await generate();
+    await waitFor(() => expect(screen.getAllByText('The notes didn’t make this clear. Pick one.').length).toBeGreaterThan(0));
+    laneAnswer = () => ({ ok: false, status: 500, json: async () => ({ error: 'boom' }) });
+    await waitFor(() => expect(screen.getAllByRole('button', { name: /generate ai/i })[0].disabled).toBe(false));
+    await act(async () => fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]));
+    await waitFor(() => expect(calls.filter((call) => call.kind === 'lane')).toHaveLength(2));
+    await waitFor(() => expect(screen.queryByText('The notes didn’t make this clear. Pick one.')).toBeNull());
   });
 
   it('a value that clashes with a pick is left for a person, with an ask to pick', async () => {

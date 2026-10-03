@@ -17,6 +17,38 @@
  *    watering change off one shrub group — point to coverage in that area.
  */
 
+const { insightOverride, insightHidden } = require('./tree-shrub-tech-findings');
+
+// Card copy for a finding only the technician raised (no photo signal behind it).
+// Documentation only: the decision records an observation, never a treatment or
+// program change, so no line here claims work.
+const TECH_CARD_COPY = {
+  pest_pressure: {
+    headline: 'Pest activity your technician noted',
+    whyItMatters: 'Catching pest pressure early keeps it from spreading across the planting.',
+    wavesAction: 'Documented it for follow-up.',
+    nextVisitPlan: 'Recheck it next visit.',
+  },
+  disease_leaf_spot: {
+    headline: 'Leaf-spot signals your technician noted',
+    whyItMatters: 'Tracking leaf-spot signals early lets us confirm the cause before it spreads.',
+    wavesAction: 'Documented the areas for comparison next visit.',
+    nextVisitPlan: 'Recheck these leaves next visit.',
+  },
+  water_stress: {
+    headline: 'Water or heat stress your technician noted',
+    whyItMatters: 'Stress signals tell us where the planting needs a little extra support.',
+    wavesAction: 'Documented the stressed areas for comparison next visit.',
+    nextVisitPlan: 'Recheck the stressed plants next visit.',
+  },
+  color_vigor: {
+    headline: 'Foliage your technician noted',
+    whyItMatters: 'Plants weaken when they can’t recover between stresses.',
+    wavesAction: 'Documented it for comparison next visit.',
+    nextVisitPlan: 'Recheck fullness and color next visit.',
+  },
+};
+
 // Worst first. Card statuses use the tree-shrub spec vocabulary.
 const STATUS_RANK = { urgent: 0, needs_attention: 1, watch: 2, stable: 3, good: 4 };
 
@@ -38,6 +70,10 @@ function cardStatusFor(catStatus) {
  * @param {Array}  input.plantGroups      [{ key, label, status, finding }] (Phase 2; [] for now)
  * @param {string} input.customerConcern
  * @param {Array}  input.treatmentKinds   ['fungicide','insecticide','miticide','systemic','fertilizer','supplement']
+ * @param {Array|null} [input.techFindings] GATE_TS_TECH_FINDINGS_COPY: the technician's frozen decisions
+ *   [{ key, action, detail }]; null/undefined = gate off, cards exactly as before. A card built on a
+ *   hidden finding is dropped; a confirmed one says the technician confirmed it; an edit uses the
+ *   technician's text.
  * @returns {Array} prioritized TreeShrubInsightCard[]
  */
 function buildTreeShrubInsightCards({
@@ -46,6 +82,7 @@ function buildTreeShrubInsightCards({
   plantGroups = [],
   customerConcern = '',
   treatmentKinds = [],
+  techFindings = null,
 } = {}) {
   const cards = [];
   const has = (kind) => Array.isArray(treatmentKinds) && treatmentKinds.includes(kind);
@@ -192,6 +229,25 @@ function buildTreeShrubInsightCards({
     });
   }
 
+  // ── Technician-confirmed / edited findings with no card of their own ──────────
+  // A confirmed or edited finding on a category the photo read scored clean has
+  // no signal card, but it is a real finding: it gets a card in the technician's
+  // words, and with it the whole-landscape reassurance below cannot appear.
+  if (Array.isArray(techFindings) && techFindings.length) {
+    for (const category of Object.keys(TECH_CARD_COPY)) {
+      if (cards.some((card) => card.category === category)) continue;
+      const said = insightOverride(category, techFindings);
+      if (!said) continue;
+      cards.push({
+        category,
+        status: 'watch',
+        confidence: 'tech_confirmed',
+        ...TECH_CARD_COPY[category],
+        whatWeSaw: said,
+      });
+    }
+  }
+
   // ── Reassurance when nothing needs attention ───────────────────────────────────
   // A hidden/unscored category cannot support whole-landscape reassurance.
   if (!cards.length && categories.length && categories.every((category) => category && category.status !== 'tracking')) {
@@ -212,6 +268,21 @@ function buildTreeShrubInsightCards({
         : 'Completed a full inspection today and documented the visit.',
       nextVisitPlan: 'Keep the program steady and keep monitoring each visit.',
     });
+  }
+
+  // Technician decisions (gate on): drop a card built on a hidden finding, and
+  // let a confirmed / edited finding speak in the technician's voice.
+  if (Array.isArray(techFindings) && techFindings.length) {
+    for (let i = cards.length - 1; i >= 0; i -= 1) {
+      // A shared card (color + fullness) survives a hide on one finding when the
+      // other carries a confirmation or edit; insightHidden knows that.
+      if (insightHidden(cards[i].category, techFindings)) { cards.splice(i, 1); continue; }
+      const said = insightOverride(cards[i].category, techFindings);
+      if (said) {
+        cards[i].whatWeSaw = said;
+        cards[i].confidence = 'tech_confirmed';
+      }
+    }
   }
 
   // Priority: worst status first, then a stable category order.

@@ -170,7 +170,8 @@ describe('buildFactsBlock', () => {
       .replace(`\n${HEADER}\n- none\n`, '\n');
     expect(pre).toContain(HEADER); // only in the thread now
     expect(itemCompatibleWith(pre, currentPromptVersion())).toBe(false);
-    expect(itemCompatibleWith(pre, 'house_voice_v12_real_answers3_cfl')).toBe(true);
+    // (a version with Payment options but no VISIT STATUS & OPEN LOOPS: the thread copy must not violate its forbid)
+    expect(itemCompatibleWith(pre, 'house_voice_v12_real_answers5_cfl_p')).toBe(true);
   });
 });
 
@@ -286,8 +287,8 @@ describe('visitLoopStatus', () => {
 });
 
 describe('identity + sealed-eval marker', () => {
-  test('the identity carries cumulative _cflv and fits the column even with all four category tags', () => {
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers3_cflv');
+  test('the identity carries cumulative cflv (+ payment facts: cflvp) and fits the column even with all four category tags', () => {
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers5_cflvp');
     expect(`${REAL_ANSWERS_PROMPT_VERSION}+bclm`.length).toBeLessThanOrEqual(40);
     process.env[GATE] = 'true';
     for (const c of REAL_ANSWERS_HANDOFF_CATEGORIES) process.env[c.gate] = 'true';
