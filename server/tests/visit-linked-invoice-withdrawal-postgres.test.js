@@ -890,8 +890,9 @@ postgres('payer assignment withdraws visit-linked invoices with no packet', () =
     const plan = await PayCombined.releaseUnconfirmedCombinedSessionsForScheduledServices(mockPg, [f.visitId], { invalidateVisitIds: [f.visitId], pending, deferApply: true });
     expect(plan).toMatchObject({ released: 0, inFlight: 0 });
     expect(typeof plan.apply).toBe('function');
+    // Stripe is untouched; the database stamp is already cleared (it rolls back with a rejected edit).
     expect(cancel).not.toHaveBeenCalled();
-    expect(await invoiceRow(f.invoiceId)).toMatchObject({ stripe_payment_intent_id: 'pi_deferred' });
+    expect(await invoiceRow(f.invoiceId)).toMatchObject({ stripe_payment_intent_id: null });
     expect(await plan.apply()).toMatchObject({ released: 1 });
     expect(cancel).toHaveBeenCalledWith('pi_deferred');
     expect(await invoiceRow(f.invoiceId)).toMatchObject({ stripe_payment_intent_id: null });
@@ -902,6 +903,21 @@ postgres('payer assignment withdraws visit-linked invoices with no packet', () =
     const refused = await PayCombined.releaseUnconfirmedCombinedSessionsForScheduledServices(mockPg, [f.visitId], { invalidateVisitIds: [f.visitId], pending, deferApply: true });
     expect(refused).toEqual({ released: 0, inFlight: 1 });
     expect(cancel).not.toHaveBeenCalled();
+  });
+
+  test('an invoice with APPLIED CREDIT and an unconfirmed checkout activates: the stamp clears first, the credit is returned, and the Stripe cancel runs last', async () => {
+    const Payers = require('../services/payer');
+    const payerId = await payer(false);
+    const f = await fixture({ link: 'record', customerPayerId: payerId, invoice: { stripe_payment_intent_id: 'pi_credit', credit_applied: 10 } });
+    const order = [];
+    jest.spyOn(StripeService, 'cancelPaymentIntent').mockImplementation(async (id) => { order.push(`cancel:${id}`); return {}; });
+    jest.spyOn(StripeService, 'retrievePaymentIntent').mockImplementation(async (id) => ({ id, status: 'requires_payment_method', metadata: {} }));
+    const result = await Payers.updatePayer(payerId, { active: true });
+    expect(result.payer).toMatchObject({ active: true });
+    const after = await invoiceRow(f.invoiceId);
+    expect(after).toMatchObject({ stripe_payment_intent_id: null, scheduled_send_error: `payer_billed:${payerId}` });
+    expect(Number(after.credit_applied)).toBe(0); // the homeowner's credit was returned before the debt changed hands
+    expect(order).toEqual(['cancel:pi_credit']);
   });
 
   test('payer activation cancels no checkout when a step after the release rejects it (the withdrawal throws): Stripe is untouched and the payer stays inactive', async () => {

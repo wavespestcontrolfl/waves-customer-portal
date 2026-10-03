@@ -711,6 +711,14 @@ async function markLinkedSingleInvoiceSessions(database, rows, scope, pending) {
   return rows;
 }
 
+// Clear the invoice stamps of every planned intent that will be (or already was) cancelled.
+async function clearPlannedStamps(database, plan) {
+  for (const { piId, outcome } of plan.intents) {
+    if (outcome === 'kept_single_invoice' || outcome === 'in_flight') continue;
+    await clearPaymentIntentStamps(database, piId);
+  }
+}
+
 /** Plan every side, then cancel only if NOTHING is in flight (Codex #4311
  * r27 P2, the same rule the merge applies to its two sides): a payer change
  * that is about to be refused for in-flight money must not already have
@@ -728,6 +736,10 @@ async function releaseWholeOrNothing(database, rowSets, { deferApply = false } =
     plans.push(plan);
   }
   if (inFlight > 0) return { released: 0, inFlight };
+  // A deferred release still unstamps the planned intents NOW (a database write that rolls back with a
+  // rejected edit): the withdrawal that follows returns the homeowner's applied credit, and the credit
+  // reversal refuses any invoice that still has a PaymentIntent attached. Only the Stripe cancel waits.
+  if (deferApply) for (const plan of plans) await clearPlannedStamps(database, plan);
   const apply = async () => {
     let released = 0;
     for (const plan of plans) released += (await applyStampedSessionRelease(database, plan)).released;
@@ -899,7 +911,10 @@ async function releaseUnconfirmedCombinedSessionsForCustomer(database, customerI
   // refused payer edit, so nothing is cancelled while any intent of the set has money in flight.
   const plan = await planStampedSessionRelease(database, rows, { invalidatedSingleInvoice });
   if (plan.inFlight > 0) return { released: 0, inFlight: plan.inFlight };
-  if (deferApply) return { released: 0, inFlight: 0, apply: () => applyStampedSessionRelease(database, plan) };
+  if (deferApply) {
+    await clearPlannedStamps(database, plan);
+    return { released: 0, inFlight: 0, apply: () => applyStampedSessionRelease(database, plan) };
+  }
   return applyStampedSessionRelease(database, plan);
 }
 
