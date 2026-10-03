@@ -391,7 +391,7 @@ const norm = (text) => String(text ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '
 // occurs in the transcript.
 // Pieces also break at sentence ends and commas: the live model joins separate
 // phrases that way ("Same mix as last time, Talstar"). A product's NAME must still
-// sit inside one piece (productPiece), so scattered words are never assembled
+// sit inside one piece (productPieces), so scattered words are never assembled
 // into a name ("green, guard, pro").
 const HEARD_BREAKS = /\.{3}|…|\s\|\s|\s\/\s|(?<=[.!?;,:])\s+/;
 function heardInTranscript(heard, normTranscript) {
@@ -781,9 +781,10 @@ function hasApplicationContext(run, tokens, breaks, quantities) {
 // own; '' when no single piece does.
 // Among several pieces that name it, the one that names it unambiguously wins
 // ("Alpine, Alpine WSG" is Alpine WSG, not the shorthand both Alpines share).
-function productPiece(product, heard, ctx) {
+function productPieces(product, heard, ctx) {
   const naming = String(heard || '').split(HEARD_BREAKS).filter((piece) => nameEvidence(product, tokensOf(piece)).qualifies);
-  return naming.find((piece) => productEvidenceVerdict(product, heardProducts(ctx, piece)) === null) || naming[0] || '';
+  const clear = naming.filter((piece) => productEvidenceVerdict(product, heardProducts(ctx, piece)) === null);
+  return clear.length ? clear : naming.slice(0, 1);
 }
 
 // Every product's evidence against one heard snippet, computed once per row.
@@ -993,7 +994,7 @@ function mentionQuantities(mention, world) {
 
 // Why a product row cannot be applied at all, as { reason, text } (the words the
 // Check chip shows), or null. Checked in order; the first refusal wins.
-function productRefusal(raw, product, heard, normTranscript, seen, evidence, world, piece = '') {
+function productRefusal(raw, product, heard, normTranscript, seen, evidence, world, pieces = []) {
   if (!product) return { reason: 'not_on_sheet', text: heard || raw.productId };
   if (!heardInTranscript(heard, normTranscript)) return { reason: 'not_heard', text: heard || product.name };
   if (seen.has(product.id)) return { reason: 'duplicate_product', text: heard };
@@ -1009,11 +1010,14 @@ function productRefusal(raw, product, heard, normTranscript, seen, evidence, wor
   // (only the NAME words of the piece: "Taurus" said again positively still counts)
   // Every name run in the piece counts ("Did not use Atticus Talak but used Talstar P"
   // names it twice, once positively).
-  const pieceTokens = tokensOf(piece);
-  const named = nameEvidence(product, pieceTokens).runs.flatMap((run) => {
-    const words = pieceTokens.slice(run.start, run.end);
-    return mentions.filter((m) => world.tokens.some((_, i) => words.every((w, k) => world.tokens[i + k] === w)
-      && m.start < i + words.length && m.end > i));
+  // ...and every unambiguous naming piece of the quote, in any order.
+  const named = pieces.flatMap((piece) => {
+    const pieceTokens = tokensOf(piece);
+    return nameEvidence(product, pieceTokens).runs.flatMap((run) => {
+      const words = pieceTokens.slice(run.start, run.end);
+      return mentions.filter((m) => world.tokens.some((_, i) => words.every((w, k) => world.tokens[i + k] === w)
+        && m.start < i + words.length && m.end > i));
+    });
   });
   return named.length && named.every((m) => isNegatedMention(m, world)) ? { reason: 'negated_product', text: heard } : null;
 }
@@ -1152,9 +1156,9 @@ function validateProducts(rawProducts, ctx, normTranscript, unclear, transcript 
     if (!raw || typeof raw !== 'object') continue;
     const heard = clipHeard(raw.heard);
     const product = byId.get(String(raw.productId ?? '').trim());
-    const piece = product ? productPiece(product, heard, ctx) : '';
-    const evidence = product ? heardProducts(ctx, piece) : null;
-    const refusal = productRefusal(raw, product, heard, normTranscript, seen, evidence, world, piece);
+    const pieces = product ? productPieces(product, heard, ctx) : [];
+    const evidence = product ? heardProducts(ctx, pieces[0] || '') : null;
+    const refusal = productRefusal(raw, product, heard, normTranscript, seen, evidence, world, pieces);
     if (refusal) {
       pushUnclear(unclear, refusal.text, refusal.reason);
       continue;

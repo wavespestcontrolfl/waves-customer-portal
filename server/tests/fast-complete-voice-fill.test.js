@@ -1788,3 +1788,9 @@ describe('Codex #5698 round 6', () => {
     expect(out.products[0].sameAsLast).toBe(true);
   });
 });
+
+test.each(['Atticus Talak … Talstar P', 'Talstar P … Atticus Talak'])('a negated name and a positive alias in separate quote pieces keep the product, in either order (%s)', (heard) => {
+  const t = 'Did not use Atticus Talak. Used Talstar P.';
+  const out = validateFill(answer({ products: [{ productId: 'p-talak', amount: 0, unit: 'not_said', sameAsLast: false, method: '', heard }] }), ctx, t);
+  expect(out.products.map((p) => p.productId)).toEqual(['p-talak']);
+});
