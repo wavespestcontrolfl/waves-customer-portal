@@ -3,7 +3,8 @@ const crypto = require('crypto');
 const { deriveIrrigationInchesPerWeek } = require('@waves/irrigation-runtime');
 const db = require('../../models/db');
 const logger = require('../logger');
-const { pairBeforeAfterPhotos } = require('../lawn-visit-input');
+const { pairBeforeAfterPhotos, photoZoneLabel } = require('../lawn-visit-input');
+const { SHOT_CAP: LAWN_SHOT_LIST_CAP } = require('../lawn-photo-shots');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isProductApplicationRow, isTermiteNoReentryServiceType } = require('./service-line-configs');
 const { isTermiteBaitServiceName, termiteBaitSnapshotOf, recordStage, isMonitoringServiceKey, TERMITE_BAIT_TYPED_TYPE } = require('./termite-report-v2');
@@ -2746,6 +2747,10 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   // The by-next-visit sentences are LIVE-VIEW ONLY (stripLiveOnlyScheduleFields),
   // so a PDF never depends on the customer's bookings and needs no key for them.
   if (featureGates.lawnReportCopyV6Live()) irrigationStamp += ':copyv6=1';
+  // The photo shot list (GATE_LAWN_SHOT_LIST) lets the report carry up to 8
+  // photos with zone labels instead of 5, so a PDF cached before a flip must
+  // never be served after it. The stamp rides only while the gate is live.
+  if (featureGates.gateEnvValue('GATE_LAWN_SHOT_LIST')) irrigationStamp += ':shots=1';
 
   const assessment = await loadLinkedLawnAssessment(service, knex, { failClosed: true, propertyHistoryEnabled });
   const lawnHistory = propertyHistoryEnabled
@@ -3260,12 +3265,16 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   const currentScore = formatLawnAssessmentScore(assessment);
   const initialScore = formatLawnAssessmentScore(initialRow);
 
+  // GATE_LAWN_SHOT_LIST (P18): a visit can carry up to 8 photos, and each
+  // payload photo gains its customer-facing zoneLabel. Off = the 5-photo limit
+  // and the payload shape this report has always had.
+  const shotListLive = featureGates.gateEnvValue('GATE_LAWN_SHOT_LIST');
   const latestPhotos = await knex('lawn_assessment_photos')
     .where({ assessment_id: assessment.id, customer_visible: true })
     .orderBy('is_best_photo', 'desc')
     .orderBy('quality_score', 'desc')
     .orderBy('photo_order', 'asc')
-    .limit(5)
+    .limit(shotListLive ? LAWN_SHOT_LIST_CAP : 5)
     // read-failure-exempt: gallery photos only; no insight or memory entry reads them
     .catch(() => []);
   const photos = await Promise.all(latestPhotos.map(async (photo) => ({
@@ -3273,6 +3282,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     url: await lawnPhotoUrl(photo),
     type: photo.photo_type || 'general',
     zone: photo.zone || null,
+    ...(shotListLive ? { zoneLabel: photoZoneLabel(photo.zone) } : {}),
     isBest: !!photo.is_best_photo,
     qualityScore: photo.quality_score ?? null,
     scores: {
@@ -5561,6 +5571,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         waterSnapshot,
         waterGapHistory,
         mowingTrendFallback,
+        // GATE_LAWN_SHOT_LIST: a visit can carry 8 photos, so the strip does too (6 off).
+        ...(featureGates.gateEnvValue('GATE_LAWN_SHOT_LIST') ? { photoLimit: LAWN_SHOT_LIST_CAP } : {}),
       });
       if (reportV2 && wateringInstruction) {
         const banner = buildWateringBanner(wateringInstruction, lawnAssessment.waterContext?.weekPlan);

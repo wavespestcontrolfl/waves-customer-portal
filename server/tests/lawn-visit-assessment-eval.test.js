@@ -532,6 +532,121 @@ describe('runner', () => {
     expect(seen[0]).toEqual(['front', null, null]);
   });
 
+  test('a shot-list capture replays under the shot-list vocabulary: zones kept, shotList passed, hash over the kept zones', async () => {
+    const { contextHash } = require('../services/lawn-visit-input');
+    const captured = evalLib.fixtureCase(row({ id: 'shots' }), [
+      { id: 's1', s3_key: 'k1', photo_order: 0, zone: 'front' },
+      { id: 's2', s3_key: 'k2', photo_order: 1, zone: 'back' },
+      { id: 's3', s3_key: 'k3', photo_order: 2, zone: 'blade_crown' },
+      { id: 's4', s3_key: 'k4', photo_order: 3, zone: 'hot_edge' },
+      { id: 's5', s3_key: 'k5', photo_order: 4, zone: 'shade' },
+      { id: 's6', s3_key: 'k6', photo_order: 5, zone: 'trouble' },
+      { id: 's7', s3_key: 'k7', photo_order: 6, zone: 'trouble' },
+      { id: 's8', s3_key: 'k8', photo_order: 7, zone: 'trouble' },
+    ], {});
+    const calls = [];
+    const out = await evalLib.runEval([captured], {
+      analyzeVisit: async (input) => { calls.push(input); return { status: 'unavailable', reason: 'mock' }; },
+      loadPhoto: async () => ({ data: 'YQ==', mimeType: 'image/jpeg' }),
+    });
+    expect(out.skipped).toEqual([]);
+    expect(calls[0].shotList).toBe(true);
+    // The third problem-area photo exceeds that shot's maximum of two and replays unlabeled.
+    expect(calls[0].photos.map((p) => p.zone)).toEqual(['front', 'back', 'blade_crown', 'hot_edge', 'shade', 'trouble', 'trouble', null]);
+    expect(out.results[0].inputHash).toBe(contextHash({
+      photos: calls[0].photos,
+      photoZones: ['front', 'back', 'blade_crown', 'hot_edge', 'shade', 'trouble', 'trouble', null],
+      visionContext: calls[0].visionContext,
+    }));
+  });
+
+  test('the stored capture mode decides: a shot-list capture of only front/back/close_up keeps back (no distinctive tag needed)', async () => {
+    const meta = JSON.stringify([{ filename: 'a', photoVocabulary: 'shot_list_v1' }, { filename: 'b', photoVocabulary: 'shot_list_v1' }, { filename: 'c', photoVocabulary: 'shot_list_v1' }]);
+    const captured = evalLib.fixtureCase(row({ id: 'marked', photos: meta }), [
+      { id: 'm1', s3_key: 'k1', photo_order: 0, zone: 'front' },
+      { id: 'm2', s3_key: 'k2', photo_order: 1, zone: 'back' },
+      { id: 'm3', s3_key: 'k3', photo_order: 2, zone: 'close_up' },
+    ], {});
+    expect(captured.photoVocabulary).toBe('shot_list_v1');
+    const calls = [];
+    await evalLib.runEval([captured], {
+      analyzeVisit: async (input) => { calls.push(input); return { status: 'unavailable' }; },
+      loadPhoto: async () => ({ data: 'YQ==', mimeType: 'image/jpeg' }),
+    });
+    expect(calls[0].shotList).toBe(true);
+    expect(calls[0].photos.map((p) => p.zone)).toEqual(['front', 'back', 'close_up']);
+  });
+
+  test('the case shape a stored assessment produces (jsonb photos array, real photo keys) is analyzed with the shot-list vocabulary', async () => {
+    // Same shapes the database hands back: `photos` already parsed, photo rows with s3 keys.
+    const stored = row({
+      id: 'stored-shape',
+      photos: [
+        { filename: 'lawn_a_0.jpg', uploadedAt: '2026-10-03T14:00:00.000Z', photoVocabulary: 'shot_list_v1' },
+        { filename: 'lawn_a_1.jpg', uploadedAt: '2026-10-03T14:00:00.000Z', photoVocabulary: 'shot_list_v1' },
+        { filename: 'lawn_a_2.jpg', uploadedAt: '2026-10-03T14:00:00.000Z', photoVocabulary: 'shot_list_v1' },
+      ],
+    });
+    const photoRows = ['front', 'back', 'close_up'].map((zone, i) => ({ id: `r${i}`, s3_key: `lawn/r${i}.jpg`, mime_type: 'image/jpeg', photo_order: i, zone }));
+    const testCase = evalLib.fixtureCase(stored, photoRows, {});
+    expect(testCase.incompletePhotos).toBe(false);
+    expect(testCase.photoVocabulary).toBe('shot_list_v1');
+    const seen = [];
+    const out = await evalLib.runEval([testCase], {
+      analyzeVisit: async (input) => { seen.push(input); return { status: 'unavailable' }; },
+      loadPhoto: async () => ({ data: 'YQ==', mimeType: 'image/jpeg' }),
+    });
+    expect(out.skipped).toEqual([]);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].shotList).toBe(true);
+    expect(seen[0].photos.map((p) => p.zone)).toEqual(['front', 'back', 'close_up']);
+  });
+
+  test('a row whose photos are still `pending/` keys (no S3 upload) is skipped as incomplete, marked or not', async () => {
+    const stored = row({ id: 'pending-shape', photos: [{ filename: 'a', photoVocabulary: 'shot_list_v1' }] });
+    const testCase = evalLib.fixtureCase(stored, [{ id: 'p0', s3_key: 'pending/pending-shape/a', photo_order: 0, zone: 'front' }], {});
+    expect(testCase.incompletePhotos).toBe(true);
+    const analyze = jest.fn();
+    const out = await evalLib.runEval([testCase], { analyzeVisit: analyze, loadPhoto: async () => ({ data: 'YQ==' }) });
+    expect(analyze).not.toHaveBeenCalled();
+    expect(out.skipped).toEqual([{ assessmentId: 'pending-shape', reason: 'incomplete stored photo set' }]);
+  });
+
+  test('a case without the marker (gate off, or a pre-marker row) falls back to the zones: back/side replay legacy, shade still replays as shot list', async () => {
+    const unmarked = evalLib.fixtureCase(row({ id: 'plain', photos: JSON.stringify([{ filename: 'a' }, { filename: 'b' }]) }), [
+      { id: 'u1', s3_key: 'k1', photo_order: 0, zone: 'front' },
+      { id: 'u2', s3_key: 'k2', photo_order: 1, zone: 'back' },
+    ], {});
+    expect(Object.keys(unmarked)).not.toContain('photoVocabulary');
+    const preMarkerShade = evalLib.fixtureCase(row({ id: 'shade' }), [
+      { id: 's1', s3_key: 'k1', photo_order: 0, zone: 'front' },
+      { id: 's2', s3_key: 'k2', photo_order: 1, zone: 'shade' },
+    ], {});
+    const calls = [];
+    await evalLib.runEval([unmarked, preMarkerShade], {
+      analyzeVisit: async (input) => { calls.push(input); return { status: 'unavailable' }; },
+      loadPhoto: async () => ({ data: 'YQ==', mimeType: 'image/jpeg' }),
+    }, { concurrency: 1 });
+    expect(Object.keys(calls[0])).not.toContain('shotList');
+    expect(calls[0].photos.map((p) => p.zone)).toEqual(['front', null]);
+    expect(calls[1].shotList).toBe(true);
+    expect(calls[1].photos.map((p) => p.zone)).toEqual(['front', 'shade']);
+  });
+
+  test('an older capture replays exactly as before: no shotList key, three-slot vocabulary', async () => {
+    const old = evalLib.fixtureCase(row({ id: 'old' }), [
+      { id: 'o1', s3_key: 'k1', photo_order: 0, zone: 'front' },
+      { id: 'o2', s3_key: 'k2', photo_order: 1, zone: 'close_up' },
+    ], {});
+    const calls = [];
+    await evalLib.runEval([old], {
+      analyzeVisit: async (input) => { calls.push(input); return { status: 'unavailable' }; },
+      loadPhoto: async () => ({ data: 'YQ==', mimeType: 'image/jpeg' }),
+    });
+    expect(Object.keys(calls[0])).not.toContain('shotList');
+    expect(calls[0].photos.map((p) => p.zone)).toEqual(['front', 'close_up']);
+  });
+
   const cases = [
     evalLib.fixtureCase(row({ id: 'a1' }), photos, {}),
     evalLib.fixtureCase(row({ id: 'a2', scheduled_date: '2026-07-01' }), [{ id: 'p9', s3_key: 'broken', photo_order: 0 }], {}),

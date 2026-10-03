@@ -555,7 +555,7 @@ const ISSUE_TOPIC = {
  *   (GATE_LAWN_WATERING_RULE); null = the legacy fail-closed aftercare
  * @returns {object|null} { snapshot, diagnosis, insights, water, mowing, trends } | null
  */
-function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications = [], actions = [], customerConcern = '', waterSnapshot = null, waterGapHistory = [], mowingTrendFallback = null, wateringInstruction = null, nitrogenApplied = null, programVisit = false } = {}) {
+function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications = [], actions = [], customerConcern = '', waterSnapshot = null, waterGapHistory = [], mowingTrendFallback = null, wateringInstruction = null, nitrogenApplied = null, programVisit = false, photoLimit = 6 } = {}) {
   if (!lawnAssessment) return null;
   const scores = lawnAssessment.scores || {};
   const grassLabel = grassLabelFor(lawnAssessment.turfProfile?.grassType);
@@ -680,7 +680,8 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   const allPhotos = Array.isArray(lawnAssessment.photos) ? lawnAssessment.photos.filter((p) => p && p.url) : [];
   const photoList = [...allPhotos]
     .sort((a, b) => (b.isBest ? 1 : 0) - (a.isBest ? 1 : 0) || (Number(b.qualityScore) || 0) - (Number(a.qualityScore) || 0))
-    .slice(0, 6)
+    // GATE_LAWN_SHOT_LIST raises the strip from 6 to 8 (report-data passes photoLimit).
+    .slice(0, photoLimit)
     // Label = WHERE the photo was taken (zone) — "Best view" told the
     // customer nothing (owner 2026-07-21); isBest still drives ordering.
     .map((p) => ({ url: p.url, label: photoZoneLabel(p.zone) }));
