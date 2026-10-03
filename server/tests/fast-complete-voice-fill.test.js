@@ -1742,3 +1742,15 @@ test('the live model\'s stitched product quote ("Same mix as last time, Talstar"
   const out = validateFill(answer({ products: [row('p-taurus', 'Same mix as last time, Taurus'), row('p-talak', 'Same mix as last time, Talstar'), row('p-surf', 'Same mix as last time, the surfactant')] }), ctx, t);
   expect(out.products.map((p) => [p.productId, p.sameAsLast])).toEqual([['p-taurus', true], ['p-talak', true], ['p-surf', true]]);
 });
+
+test('a stitched quote with shorthand then the full name is the full name\'s product', () => {
+  const alpines = { ...ctx, products: [...ctx.products,
+    { id: 'p-alp-wsg', name: 'Alpine WSG', fullName: 'Alpine WSG', aliases: [], measure: 'weight', units: ['g', 'oz', 'lb'] },
+    { id: 'p-alp-pt', name: 'Alpine PT', fullName: 'Alpine PT', aliases: [], measure: 'weight', units: ['g', 'oz', 'lb'] }] };
+  const t = 'Used the Alpine, Alpine WSG, in the kitchen.';
+  const out = validateFill(answer({ products: [{ productId: 'p-alp-wsg', amount: 0, unit: 'not_said', sameAsLast: false, method: '', heard: 'Alpine, Alpine WSG' }] }), alpines, t);
+  expect(out.products.map((p) => p.productId)).toEqual(['p-alp-wsg']);
+  // shorthand alone is still ambiguous
+  const short = validateFill(answer({ products: [{ productId: 'p-alp-wsg', amount: 0, unit: 'not_said', sameAsLast: false, method: '', heard: 'Used the Alpine' }] }), alpines, 'Used the Alpine in the kitchen.');
+  expect(short.products).toEqual([]);
+});

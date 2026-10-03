@@ -779,8 +779,11 @@ function hasApplicationContext(run, tokens, breaks, quantities) {
 
 // The one piece of a (possibly stitched) quote that names this product on its
 // own; '' when no single piece does.
-function productPiece(product, heard) {
-  return String(heard || '').split(HEARD_BREAKS).find((piece) => nameEvidence(product, tokensOf(piece)).qualifies) || '';
+// Among several pieces that name it, the one that names it unambiguously wins
+// ("Alpine, Alpine WSG" is Alpine WSG, not the shorthand both Alpines share).
+function productPiece(product, heard, ctx) {
+  const naming = String(heard || '').split(HEARD_BREAKS).filter((piece) => nameEvidence(product, tokensOf(piece)).qualifies);
+  return naming.find((piece) => productEvidenceVerdict(product, heardProducts(ctx, piece)) === null) || naming[0] || '';
 }
 
 // Every product's evidence against one heard snippet, computed once per row.
@@ -1135,7 +1138,7 @@ function validateProducts(rawProducts, ctx, normTranscript, unclear, transcript 
     if (!raw || typeof raw !== 'object') continue;
     const heard = clipHeard(raw.heard);
     const product = byId.get(String(raw.productId ?? '').trim());
-    const evidence = product ? heardProducts(ctx, productPiece(product, heard)) : null;
+    const evidence = product ? heardProducts(ctx, productPiece(product, heard, ctx)) : null;
     const refusal = productRefusal(raw, product, heard, normTranscript, seen, evidence, world);
     if (refusal) {
       pushUnclear(unclear, refusal.text, refusal.reason);
