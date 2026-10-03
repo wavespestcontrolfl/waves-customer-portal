@@ -1760,6 +1760,51 @@ sent to the customer. The accept notification (customer account feed) says
 nothing is charged today and the fee bills with the first visit. No message is sent
 because of these fields.
 
+Pay after the first visit, annual prepay (PR-D, `GATE_PAF_PREPAY`; live only when
+`GATE_PAY_AFTER_FIRST_VISIT`, `GATE_PAF_PREPAY`, `RECURRING_CARD_ON_FILE` and
+`GATE_PREPAY_CARD_AND_CHARGE` are all on; owner rulings 2026-09-30 / 2026-10-01). It changes
+only the in-lane annual-prepay accept on `PUT /api/estimates/:token/accept` (card rail, not
+the termite sign-before-pay park). (1) The `402 { code: 'PREPAY_CHARGE_QUOTE', quote }`
+round-trip is unchanged except that `quote` gains `chargedAfterFirstVisit: true` and
+`consentVariant: 'after_visit_prepay'` (both present only when the charge is deferred): the
+exact cents and method are still bound, but the card is charged AFTER the first performed
+visit for that total or less (account credit may lower it, never raise it). (2) The resubmit
+must carry, besides the existing `prepayChargeAcknowledgedTotalCents` /
+`prepayChargeAcknowledgedMethodKey` / `prepayChargeConsentAccepted`, the new request field
+`prepayChargeConsentVariant: 'after_visit_prepay'` attesting the tab rendered the
+after-visit authorization; without it the accept re-quotes (402) and commits nothing. It
+must also carry `prepayChargeConsentVersion`, the after-visit text's own version label
+(`consentVersionForVariant('after_visit_prepay')`, currently `v13_2026-10-01`, the
+`AFTER_VISIT_CONSENT_VERSION` the bundle rendered), beside the bundle `consentTextVersion`:
+a missing or different value answers the reloadable `409 { code: 'CONSENT_VERSION_STALE' }`
+before any mutation. A
+charge-now accept (gate off) that sends `prepayChargeConsentVariant: 'after_visit_prepay'` is
+also re-quoted, so the after-visit text is never recorded for a charge at approval; a
+gate-off tab that sends no variant is unchanged. (3) A deferred accept charges nothing and
+sends no pay link: the success payload carries `prepayChargeStatus: 'after_first_visit'`,
+`invoiceSettled: true`, `nextStep: 'confirmed'`, `invoiceMode: false`, no `invoicePayUrl`,
+and `prepayChargedTotal` = the acknowledged total (the amount to be charged after the visit,
+not an amount already charged). The accept records the `after_visit_prepay` consent
+(`v13_2026-10-01`, the attested `prepayChargeConsentVersion`) and persists
+`estimates.estimate_data.prepayAutoChargeJob` with `status: 'awaiting_first_visit'`,
+`deferred_to_first_visit: true` and `consent_variant_version` (that attested version). A year
+minted to, or resolving to, a third-party payer is never deferred: its job stays `pending`
+with `after_visit_attested: true` and follows the existing payer-routing posture. (4) A retry of that
+already-accepted estimate (`alreadyAccepted: true`) while the job still waits rebuilds the
+same posture (`prepayChargeStatus: 'after_first_visit'`, no `/pay/` link, `invoiceMode:
+false`); once released it reads as the existing `pending`/`claimed` sweep posture. A year
+the in-transaction account credit already covered settles exactly as before (no deferral).
+The accept notification (customer account feed) says nothing is charged today and the
+annual prepay is charged to the card on file after the first visit. No message is sent
+because of these fields. (5) PR-E: GET `/api/estimates/:token/data` carries
+`recurringCardPolicy.prepayAfterFirstVisit: true` (present only when true) exactly when an
+in-lane prepay accept would defer (`prepayInLane` plus the gate conjunction above). The React
+estimate page uses it to render the after-visit wording on the plan option, the review step and
+the capture checkbox (`after_visit_prepay` text), renders the quote's `consentVariant` at the
+confirm step, sends `prepayChargeConsentVariant` back, and shows the `after_first_visit` success
+copy. In-lane prepay is React-only (the legacy page redirects), so the legacy renderer is
+unchanged.
+
 GET `/api/estimates/:token/data` narrows to match (2026-09-24): a saved
 estimate's `pricing.frequencies` tree & shrub ladder omits any 4x/Light (and
 12x/Premium) entry, so only Standard 6x / Enhanced 9x cards render. What the
@@ -5945,3 +5990,5 @@ baseline token-route guards, the `/api/reports/:token/*` write rules,
 contract-token burn, and the estimate ask / find-slots gates — live in the
 AGENTS.md P0 rule "Public route surface", not in this document. This
 document holds the per-route entries only.
+
+Report greeting first name (follow-up to #5559 / #5612): the service-report V1 payload (`/api/reports/:token/data`, and the PDF and report-email renders that share `buildReportV1Data`), the legacy-format service-report payload from the same route, and the project report payload (`/api/reports/project/:token/data`) now carry `customerFirstName` beside the unchanged `customerName`: the customer's own trimmed `first_name`, or `null` when it is blank (the call booker's last-name-only customers, where the composed `customerName` is only the surname). The report pages, the report email, and the visit recap greet by it and fall back to "there" when it is `null`; a payload without the key (cached or older frozen payloads) greets by the first token of `customerName` as before. On a service record that carries a completion-time identity snapshot the value comes from the snapshot's first name, the same source as `customerName`, so a frozen report keeps greeting the way it did at completion. It is the customer's own first name only, already shown inside `customerName`: no new exposure, token, eligibility, privacy or rate-limit change, and no display change to the full name. A report-email recipient's own contact name still greets by its first token.

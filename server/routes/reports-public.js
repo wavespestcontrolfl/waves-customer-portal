@@ -1141,6 +1141,9 @@ router.get('/project/:token/data', async (req, res, next) => {
       // the same cue+value scrub as every other free-text field (codex #2817).
       title: scrubText(project.title),
       customerName: `${project.first_name || ''} ${project.last_name || ''}`.trim(),
+      // The greeting uses the customer's own first name (null when blank): the
+      // composed name above is just the surname for a blank-first-name customer.
+      customerFirstName: String(project.first_name || '').trim() || null,
       // Customer email/phone for the hero contact lines — the report hero
       // mirrors the customer estimate, which prints the recipient's own
       // contact block under the headline. Owner EXPLICIT ruling 2026-07-16:
@@ -2652,7 +2655,9 @@ router.get('/:token/data', async (req, res, next) => {
       serviceType: service.service_type,
       serviceDate: service.service_date,
       technicianName: service.technician_name,
-      customerName: `${service.first_name} ${service.last_name}`,
+      customerName: `${service.first_name || ''} ${service.last_name || ''}`.trim(),
+      // Greeting first name (null when blank), same as the v1 payload.
+      customerFirstName: String(service.first_name || '').trim() || null,
       cityState: `${service.city || ''}${service.state ? ', ' + service.state : ''}`.trim().replace(/^,\s*/, ''),
       // technician_notes is internal (owner ruling 2026-07-16): only the
       // reviewed parse may reach the customer, through the one rule every
