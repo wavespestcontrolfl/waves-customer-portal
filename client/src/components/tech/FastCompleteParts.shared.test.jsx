@@ -60,4 +60,17 @@ describe('Fast Complete shared parts', () => {
     expect(tile.textContent).toContain('4 fl oz');
     expect(tile.textContent).toContain('0 in stock');
   });
+
+  // The lawn sheet records no typed rate and gives AmountRow no rate unit; every
+  // other sheet still gets today's rate box, label-max warning and all.
+  it('AmountRow shows its rate box and label-max warning when given a rate unit, and neither when not', () => {
+    const row = { name: 'Taurus SC', totalAmount: '4', amountUnit: 'fl_oz', dimension: 'liquid' };
+    const { unmount } = render(<Parts.AmountRow row={row} rate={{ rate: '0.9', rateUnit: 'fl_oz', max: 0.5 }} onChange={() => {}} />);
+    expect(screen.getByLabelText('Taurus SC rate').value).toBe('0.9');
+    expect(screen.getByText('> label max 0.5')).toBeTruthy();
+    unmount();
+    render(<Parts.AmountRow row={row} rate={{ rate: '', rateUnit: '', max: null }} onChange={() => {}} />);
+    expect(screen.queryByLabelText('Taurus SC rate')).toBeNull();
+    expect(screen.queryByText(/label max/)).toBeNull();
+  });
 });
