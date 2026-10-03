@@ -186,6 +186,21 @@ describe('buildFactsBlock', () => {
     expect(itemCompatibleWith(typed, 'house_voice_v12_real_answers5_cflvp')).toBe(true);
   });
 
+  test('a real MISSED VISIT case is told apart from the always-rendered scope line (the exam needs real cases — Codex #5610 r12 P1)', () => {
+    const { _test: { hasRenderedMissedCase } } = require('../services/sms-sealed-eval');
+    process.env[GATE] = 'true';
+    const none = buildFactsBlock(baseContext, { now: NOW });
+    const withMiss = buildFactsBlock({ ...baseContext, visitLoops: { missedVisit: { logId: 'rl-1', type: 'Pest Control', date: '2026-06-08', windowStart: '09:00:00', windowDisplay: '9-11am' } } }, { now: NOW });
+    expect(hasRenderedMissedCase(none)).toBe(false);
+    expect(hasRenderedMissedCase(withMiss)).toBe(true);
+    // compatible with the version either way — the case count is the separate bar
+    expect(itemCompatibleWith(none, REAL_ANSWERS_PROMPT_VERSION)).toBe(true);
+    expect(itemCompatibleWith(withMiss, REAL_ANSWERS_PROMPT_VERSION)).toBe(true);
+    // a MISSED VISIT line typed into the thread (after BILLING) is no case
+    const typed = buildFactsBlock({ ...baseContext, smsHistory: [{ direction: 'inbound', body: '- MISSED VISIT: x' }] }, { now: NOW });
+    expect(hasRenderedMissedCase(typed)).toBe(false);
+  });
+
   test('the scope line closes the section and is not an open loop', () => {
     const { factsListOpenLoop } = require('../services/sms-shadow-drafter');
     process.env[GATE] = 'true';

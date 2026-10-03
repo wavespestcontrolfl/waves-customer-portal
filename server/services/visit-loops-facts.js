@@ -473,6 +473,11 @@ const incompleteCloseout = (r) => (r.status === 'completed' || r.track_state ===
 //    missed row, which is explicit provenance and counts) and NOT an unreviewed
 //    call/voice booking. Any other booking never counts (series top-ups look just like one).
 async function noshowFollowedUp(conn, customerId, noshow) {
+  // A deleted customer_properties row nulls every scheduled_services.property_id
+  // (ON DELETE SET NULL) but not the FK-less frozen snapshot: the live rows now say
+  // null for that address, so compare against null (Codex #5610 r12).
+  const frozenProperty = noshow.occurrence_property_id && noshow.frozen_property_exists !== false
+    ? noshow.occurrence_property_id : null;
   const { isUnreviewedDispatchOwned } = require('./call-booking-source-actions');
   const date = calendarDay(noshow.original_date);
   const scopeKey = async (rows) => {
@@ -496,7 +501,7 @@ async function noshowFollowedUp(conn, customerId, noshow) {
     const underWay = ['en_route', 'on_site'].includes(noshow.status) || LIVE_TRACK_STATES.includes(noshow.track_state);
     const rowEvidence = noshow.track_state === 'complete' || noshow.recorded === true || underWay
       || (LIVE_OR_DONE.includes(noshow.status) && (noshow.new_date != null || noshow.status === 'completed' || rowMoved));
-    if (!rowEvidence || (noshow.ss_property_id || null) !== (noshow.occurrence_property_id || null)) return false;
+    if (!rowEvidence || (noshow.ss_property_id || null) !== frozenProperty) return false;
     const key = await scopeKey([{ service_type: noshow.ss_service_type }]);
     return Boolean(key.missed) && key.of({ service_id: noshow.ss_service_id, service_type: noshow.ss_service_type }) === key.missed;
   }
@@ -509,27 +514,33 @@ async function noshowFollowedUp(conn, customerId, noshow) {
     .where('created_at', '>', noshow.logged_at)
     .whereNull('recurring_parent_id')
     .where((q) => q.whereNull('track_state').orWhereNot('track_state', 'cancelled'));
-  query = noshow.occurrence_property_id
-    ? query.where({ property_id: noshow.occurrence_property_id })
+  query = frozenProperty
+    ? query.where({ property_id: frozenProperty })
     : query.whereNull('property_id');
   if (noshow.scheduled_service_id) query = query.whereNot('id', noshow.scheduled_service_id);
-  // generated from another visit (Codex #5610 r7); generated from THIS miss is provenance
   const missedRowId = noshow.scheduled_service_id ? String(noshow.scheduled_service_id) : null;
-  const generatedElsewhere = (r) => [r.parent_service_id, r.followup_source_service_id]
-    .some((id) => id != null && String(id) !== missedRowId);
+  const lineageOf = (r) => [r.parent_service_id, r.followup_source_service_id].filter((id) => id != null).map(String);
   // on the missed day itself a replacement must start AFTER the missed slot; an
   // unknown start on either side cannot be ordered and fails closed (Codex #5610 r11)
   const missedStart = hhmmToMinutes(missedWindowStart(noshow.original_window));
   const afterMiss = (r) => calendarDay(r.scheduled_date) !== date
     || (missedStart != null && (hhmmToMinutes(r.window_start) ?? -1) > missedStart);
-  const replacements = ((await query.select('service_id', 'service_type', 'status', 'track_state', 'source_action', 'customer_confirmed',
+  const rows = ((await query.select('id', 'service_id', 'service_type', 'status', 'track_state', 'source_action', 'customer_confirmed',
     'parent_service_id', 'followup_source_service_id', 'scheduled_date', 'window_start',
     conn.raw("EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = scheduled_services.id AND sr.status = 'completed') AS recorded"),
     conn.raw("EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = scheduled_services.id AND sr.status = 'incomplete') AS incomplete_record"))) || [])
-    .filter((r) => afterMiss(r) && r.track_state !== 'cancelled' && !incompleteCloseout(r) && !generatedElsewhere(r) && !isUnreviewedDispatchOwned(r));
-  if (!replacements.length) return false;
-  const key = await scopeKey(replacements);
-  return Boolean(key.missed) && replacements.some((r) => key.of(r) === key.missed);
+    .filter((r) => afterMiss(r) && r.track_state !== 'cancelled' && !isUnreviewedDispatchOwned(r));
+  if (!rows.length) return false;
+  const key = await scopeKey(rows);
+  if (!key.missed) return false;
+  // Lineage (Codex #5610 r7, r12): a row generated from ANOTHER visit is not this
+  // miss's replacement; one generated from the missed row is provenance, and so —
+  // one hop — is one generated from a same-service replacement that was itself
+  // closed out incomplete (completion-followup-booking parks the owed follow-up on it).
+  const sameService = rows.filter((r) => key.of(r) === key.missed);
+  const replacementIds = new Set(sameService.filter((r) => lineageOf(r).every((id) => id === missedRowId)).map((r) => String(r.id)));
+  const ownLineage = (r) => lineageOf(r).every((id) => id === missedRowId || replacementIds.has(id));
+  return sameService.some((r) => ownLineage(r) && !incompleteCloseout(r));
 }
 // The newest UNFOLLOWED no-show in the lookback, paged in a stable order so a page
 // of followed-up rows never hides an older open one (the page cap is a backstop).
@@ -553,7 +564,8 @@ async function loadMissedVisit({ conn, customerId, now, deriveWindow }) {
         'ss.source_action as ss_source_action', 'ss.customer_confirmed as ss_customer_confirmed',
         conn.raw('(ss.id IS NOT NULL) AS ss_status_present'),
         conn.raw("EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = rl.scheduled_service_id AND sr.status = 'completed') AS recorded"),
-        conn.raw("EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = rl.scheduled_service_id AND sr.status = 'incomplete') AS incomplete_record"))) || [];
+        conn.raw("EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = rl.scheduled_service_id AND sr.status = 'incomplete') AS incomplete_record"),
+        conn.raw('EXISTS (SELECT 1 FROM customer_properties cp WHERE cp.id = rl.occurrence_property_id) AS frozen_property_exists'))) || [];
     for (const noshow of noshows) {
       // The sweep logs once the INTERNAL job block ends; the customer's promised
       // arrival window can still be open (a 5 PM start runs to 7 PM). A same-day miss
@@ -735,7 +747,9 @@ async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = nul
     && calendarDay(f.scheduledDate) === missedVisit.date
     && hhmmToMinutes(f.windowStart) === hhmmToMinutes(missedVisit.windowStart));
   out.lateAlert = sameVisit(lateAlert) ? null : lateAlert;
-  out.pastWindow = sameVisit(pastWindow) ? null : pastWindow;
+  // only when the miss IS the whole passed-window fact: one that also carries other
+  // overdue occurrences (passedKeys) stays, so none of them is dropped (Codex #5610 r12)
+  out.pastWindow = sameVisit(pastWindow) && [].concat(pastWindow.passedKeys || []).length <= 1 ? null : pastWindow;
   out.missedVisit = missedVisit;
   out.weOwe = commitments.weOwe;
   out.customerWaiting = commitments.customerWaiting;

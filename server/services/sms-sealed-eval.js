@@ -310,6 +310,19 @@ function hasRenderedMissedScope(facts) {
   const upcoming = head.split(UPCOMING_DELIMITER)[1];
   return typeof upcoming === 'string' && upcoming.includes(MISSED_SCOPE_LINE);
 }
+// The scope line renders on EVERY '6_m' block, so contract compatibility alone never
+// proves the pool exercises the behavior the version was minted for (Codex #5610 r12
+// P1): a version carrying it also needs real MISSED VISIT cases — an item whose
+// rendered section (same span rule) lists a "- MISSED VISIT:" line.
+const MISSED_CASE_LINE = '\n- MISSED VISIT:';
+const SEALED_EVAL_MISSED_CASES_MIN = Math.max(0, envNum('SEALED_EVAL_MISSED_CASES_MIN', 3));
+function hasRenderedMissedCase(facts) {
+  const head = String(facts || '').split(BILLING_DELIMITER)[0];
+  const upcoming = head.split(UPCOMING_DELIMITER)[1];
+  return typeof upcoming === 'string' && upcoming.includes(MISSED_CASE_LINE);
+}
+const versionNeedsMissedCases = (version) => SEALED_EVAL_MISSED_CASES_MIN > 0
+  && requiredFactMarkers(version).includes(MISSED_VISIT_SCOPE_LINE);
 function factsHasMarker(factsBlock, marker) {
   const facts = String(factsBlock || '');
   if (marker === VISIT_LOOPS_MARKER) return hasRenderedVisitLoops(facts);
@@ -437,7 +450,16 @@ async function sealEvalItems({ target = SEALED_EVAL_TARGET, dbi = db } = {}) {
   const reactivated = await restoreCompatibleItems({ dbi, remaining, markers, forbidden });
   remaining -= reactivated;
   const activeAfterRestore = Number(activeCount) + reactivated;
-  if (remaining <= 0) {
+  // Real MISSED VISIT cases the version needs (versionNeedsMissedCases) are sealed
+  // first, even past the target, until the pool holds the minimum: they are rare, and
+  // round-robin by intent alone would almost never pick one.
+  let missedShort = 0;
+  if (versionNeedsMissedCases(sealVersion)) {
+    const held = ((await dbi('sms_sealed_eval_items').where('active', true)
+      .whereRaw(compat.sql, compat.bindings).select('facts_block')) || []).filter((i) => hasRenderedMissedCase(i.facts_block)).length;
+    missedShort = Math.max(0, SEALED_EVAL_MISSED_CASES_MIN - held);
+  }
+  if (remaining <= 0 && !missedShort) {
     // Codex r4: a prior run may have inserted compatible rows and then
     // failed before retiring the displaced pre-v12 ones, leaving an
     // oversized active pool that would otherwise never shrink (and trips
@@ -476,17 +498,23 @@ async function sealEvalItems({ target = SEALED_EVAL_TARGET, dbi = db } = {}) {
     .orderBy('md.created_at', 'desc');
 
   // Stratify: round-robin across intents, newest first within each.
-  const byIntent = new Map();
+  const picked = [];
+  const rest = [];
   for (const c of candidates) {
+    if (missedShort > 0 && hasRenderedMissedCase(c.facts_block)) { picked.push(c); missedShort -= 1; } else rest.push(c);
+  }
+  const byIntent = new Map();
+  for (const c of rest) {
     const key = c.intent || 'GENERAL';
     if (!byIntent.has(key)) byIntent.set(key, []);
     byIntent.get(key).push(c);
   }
-  const picked = [];
   const queues = [...byIntent.values()];
-  while (picked.length < remaining && queues.some((q) => q.length)) {
+  // the regular shortfall still applies; missed-visit cases may push the pool past it
+  const regularCap = Math.max(picked.length, remaining);
+  while (picked.length < regularCap && queues.some((q) => q.length)) {
     for (const q of queues) {
-      if (picked.length >= remaining) break;
+      if (picked.length >= regularCap) break;
       const next = q.shift();
       if (next) picked.push(next);
     }
@@ -848,6 +876,14 @@ async function createExamRun({ providerLeg, baselineRunId, triggeredBy = 'manual
   const needed = Math.max(1, Math.ceil(activeItems.length / 2));
   if (compatible < needed) {
     throw new Error(`no sealed coverage for ${currentVersion}: only ${compatible} of ${activeItems.length} active items ${contractLabel(currentVersion)} (need ${needed}); the rest were frozen under a different fact contract. Seal fresh items under ${currentVersion} before running this exam`);
+  }
+  if (versionNeedsMissedCases(currentVersion)) {
+    const missedCases = activeItems.filter((i) => itemCompatibleWith(i.facts_block, currentVersion) && hasRenderedMissedCase(i.facts_block)).length;
+    if (missedCases < SEALED_EVAL_MISSED_CASES_MIN) {
+      const err = new Error(`no missed-visit coverage for ${currentVersion}: only ${missedCases} compatible active item(s) list a MISSED VISIT (need ${SEALED_EVAL_MISSED_CASES_MIN}); the exam would grade none of the behavior this version adds`);
+      err.code = 'SCENARIO_COVERAGE';
+      throw err;
+    }
   }
 
   // Baseline: an explicit baselineRunId must identify a COMPLETE run on the
@@ -1580,6 +1616,7 @@ module.exports = {
   EXAM_LEG_ROUTES,
   SEALED_EVAL_TARGET,
   _test: {
+    hasRenderedMissedCase,
     mcNemarExact,
     binomHalfPmf,
     parseScores,

@@ -791,6 +791,36 @@ describe('missedVisit (logged customer no-shows)', () => {
     expect((await run([miss], [repl({ scheduled_date: '2026-10-03', window_start: null })])).out.missedVisit).toBeNull();
   });
 
+  test('a logged miss does not drop a passed-window fact that also carries ANOTHER overdue visit (Codex #5610 r12)', async () => {
+    const todayMiss = noshow({ original_date: '2026-10-01', ss_scheduled_date: '2026-10-01', status: 'confirmed' });
+    const out = await loadVisitLoops({ customerId: 'c1', now: new Date('2026-10-01T17:00:00Z'), deriveWindow, conn: fakeConn({
+      reschedule_log: () => [todayMiss],
+      services: () => CATALOG,
+      scheduled_services: (ops) => (isCandidateQuery(ops)
+        ? [todayRow({ id: 'v-late', window_start: '10:00:00', status: 'confirmed' }), todayRow({ status: 'confirmed' })] : []),
+    }) });
+    expect(out.missedVisit).toMatchObject({ visitId: 'visit-1' });
+    expect(out.pastWindow).toMatchObject({ passedKeys: ['visit-1@2026-10-01T09:00:00', 'v-late@2026-10-01T10:00:00'] });
+  });
+
+  test('Codex #5610 r12: lineage one hop through an incomplete replacement; a deleted frozen property', async () => {
+    const repl = (over) => ({ id: 'r-1', service_id: null, service_type: 'Pest Control', status: 'confirmed', track_state: null, source_action: null, customer_confirmed: null, parent_service_id: null, followup_source_service_id: null, scheduled_date: '2026-10-03', window_start: '09:00:00', ...over });
+    const miss = noshow({ status: 'no_show' });
+    // replacement r-1 closed out incomplete + its owed follow-up r-2 (generated from r-1): cleared
+    const incompleteRepl = repl({ status: 'completed', incomplete_record: true, recorded: false });
+    const owed = repl({ id: 'r-2', followup_source_service_id: 'r-1', scheduled_date: '2026-10-08' });
+    expect((await run([miss], [incompleteRepl, owed])).out.missedVisit).toBeNull();
+    // the incomplete replacement alone does not clear it; a child of an unrelated visit never does
+    expect((await run([miss], [incompleteRepl])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
+    expect((await run([miss], [repl({ id: 'r-3', followup_source_service_id: 'visit-other' })])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
+    // the frozen property was deleted (rows now carry null): the moved logged row still resolves it
+    expect((await run([noshow({ new_date: '2026-10-03', ss_property_id: null, frozen_property_exists: false })])).out.missedVisit).toBeNull();
+    // ... and the replacement lookup searches property_id IS NULL
+    const { conn } = await run([noshow({ status: 'no_show', frozen_property_exists: false })], []);
+    const q = conn.calls.find((c) => c.table === 'scheduled_services' && hasOp(c.ops, 'whereNull', (a) => a[0] === 'property_id'));
+    expect(q).toBeTruthy();
+  });
+
   test('a page of followed-up misses never hides an older open one', async () => {
     const done = Array.from({ length: 10 }, (_, i) => noshow({ id: `rl-d${i}`, new_date: '2026-10-03' }));
     const { out } = await run([...done, noshow({ id: 'rl-old', original_date: '2026-09-25', ss_scheduled_date: '2026-09-25' })]);
