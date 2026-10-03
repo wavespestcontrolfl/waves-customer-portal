@@ -122,7 +122,9 @@ const networkErrorCode = (err) => err?.cause?.code || err?.code || err?.name || 
  * lock) forever. Timeouts, network errors, and 429/5xx throw
  * TransientAcaError; the message names the step, never a URL param value.
  */
-async function fetchWithSession(url, { cookies, body, timeoutMs, referer, step }) {
+// `redirect: 'manual'` (permit-detail collector) returns a 3xx response
+// unread instead of following it, so the caller can space each hop.
+async function fetchWithSession(url, { cookies, body, timeoutMs, referer, step, redirect = 'follow' }) {
   const headers = {
     'User-Agent': USER_AGENT,
     Referer: referer,
@@ -140,7 +142,7 @@ async function fetchWithSession(url, { cookies, body, timeoutMs, referer, step }
         method: body ? 'POST' : 'GET',
         headers,
         body,
-        redirect: 'follow',
+        redirect,
         signal: controller.signal,
       });
       if (res.ok) text = await res.text();
@@ -149,7 +151,8 @@ async function fetchWithSession(url, { cookies, body, timeoutMs, referer, step }
         ? new TransientAcaError(`${step} request timed out after ${timeoutMs}ms`)
         : new TransientAcaError(`${step} request failed: ${networkErrorCode(err)}`);
     }
-    if (!res.ok) {
+    const manualRedirect = redirect === 'manual' && res.status >= 300 && res.status < 400;
+    if (!res.ok && !manualRedirect) {
       const msg = `${step} request HTTP ${res.status}`;
       throw res.status === 429 || res.status >= 500 ? new TransientAcaError(msg) : new Error(msg);
     }

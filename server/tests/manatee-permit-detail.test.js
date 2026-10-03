@@ -217,6 +217,10 @@ function fakeAca(permits, { clock, tickMs = 0 } = {}) {
       if (!sc || sc.empty) return response('<html>No records matched.</html>');
       if (sc.fail) throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } });
       if (sc.direct) return response(sc.direct);
+      if (sc.redirectTo) {
+        pagesById.set(`${pn}-r`, sc.redirectTo);
+        return { ok: false, status: 302, text: async () => '', headers: { getSetCookie: () => [], get: (h) => (h.toLowerCase() === 'location' ? `CapDetail.aspx?capID1=A&capID2=B&capID3=${pn}-r` : null) } };
+      }
       const ids = sc.pages.map((html, i) => { const id = `${pn}-${i}`; pagesById.set(id, html); return id; });
       return response(resultsPage(ids.map(linkFor)));
     }
@@ -237,6 +241,25 @@ function fakeClock(start = 1_700_000_000_000) {
   clock.sleep = async (ms) => { t += ms; };
   return clock;
 }
+
+describe('redirect hops', () => {
+  test('a one-hit search redirect is followed through the throttle (≥2 s before the redirected GET), cookies kept', async () => {
+    process.env.GATE_PERMIT_DETAIL_SYNC = 'true';
+    const clock = fakeClock();
+    stubDb([cand('BLD9801-0951')]);
+    const calls = fakeAca({ 'BLD9801-0951': { redirectTo: okPage('BLD9801-0951') } }, { clock });
+    const out = await syncPermitDetails({ now: clock, sleep: clock.sleep });
+    expect(out).toMatchObject({ ok: 1 });
+    const post = calls.findIndex((c) => c.method === 'POST');
+    const hop = calls[post + 1];
+    expect(hop.method).toBe('GET');
+    expect(hop.url).toMatch(/CapDetail\.aspx/);
+    expect(hop.at - calls[post].at).toBeGreaterThanOrEqual(2000);
+    expect(hop.headers.Cookie).toMatch(/ASP\.NET_SessionId/);
+    // fetch itself never follows redirects.
+    expect(global.fetch.mock.calls.every(([, o]) => o.redirect === 'manual')).toBe(true);
+  });
+});
 
 describe('syncPermitDetails', () => {
   test('gate off (unset or anything but "true"): no network, no DB read', async () => {

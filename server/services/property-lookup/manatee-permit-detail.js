@@ -46,7 +46,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { permitDetailSyncLive } = require('../../config/feature-gates');
 const {
-  _private: { fetchWithSession, positiveIntEnv },
+  _private: { fetchWithSession, positiveIntEnv, TransientAcaError },
 } = require('./manatee-permit-sync');
 
 const CAP_BASE = 'https://aca-prod.accela.com/MANATEE/Cap/';
@@ -204,17 +204,35 @@ function createThrottle({ gapMs, sleep, now }) {
  * One permit number → { status, facts }. status is ok | no_fields |
  * not_found; a transport failure throws (the run records it as `error`).
  */
+// Every HTTP hop goes through the throttle — redirects included: the
+// one-hit search answers with a redirect to the record page, and following
+// it inside fetch would send a second request with no gap. Session cookies
+// carry across hops (fetchWithSession appends them).
+const MAX_REDIRECTS = 5;
+async function politeFetch(polite, url, opts) {
+  let target = url;
+  let request = opts;
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
+    const out = await polite(() => fetchWithSession(target, { ...request, redirect: 'manual' }));
+    const location = out.res.status >= 300 && out.res.status < 400 ? out.res.headers.get('location') : null;
+    if (!location) return out;
+    target = new URL(location, target).toString();
+    request = { ...opts, body: undefined, step: `${opts.step} redirect` };
+  }
+  throw new TransientAcaError(`${opts.step} redirected more than ${MAX_REDIRECTS} times`);
+}
+
 async function fetchPermitDetail(permitNo, { polite, timeout = timeoutMs() }) {
   const cookies = [];
   const referer = CAP_HOME_URL;
-  const { text: home } = await polite(() => fetchWithSession(CAP_HOME_URL, { cookies, timeoutMs: timeout, referer, step: 'permit search form' }));
+  const { text: home } = await politeFetch(polite, CAP_HOME_URL, { cookies, timeoutMs: timeout, referer, step: 'permit search form' });
   const form = new URLSearchParams({
     ...hiddenInputs(home),
     [SEARCH_FIELD]: permitNo,
     __EVENTTARGET: SEARCH_TARGET,
     __EVENTARGUMENT: '',
   });
-  const { text: results } = await polite(() => fetchWithSession(CAP_HOME_URL, { cookies, body: form.toString(), timeoutMs: timeout, referer, step: 'permit search' }));
+  const { text: results } = await politeFetch(polite, CAP_HOME_URL, { cookies, body: form.toString(), timeoutMs: timeout, referer, step: 'permit search' });
 
   // A record page that names this permit but lacks the fields is no_fields;
   // a search that reaches no record page at all is not_found.
@@ -232,7 +250,7 @@ async function fetchPermitDetail(permitNo, { polite, timeout = timeoutMs() }) {
   if (direct) return { status: 'ok', facts: direct };
 
   for (const link of links.slice(0, MAX_LINKS_PER_PERMIT)) {
-    const { text: page } = await polite(() => fetchWithSession(`${CAP_BASE}${link}`, { cookies, timeoutMs: timeout, referer: CAP_HOME_URL, step: 'permit record' }));
+    const { text: page } = await politeFetch(polite, `${CAP_BASE}${link}`, { cookies, timeoutMs: timeout, referer: CAP_HOME_URL, step: 'permit record' });
     const facts = judge(page, true);
     if (facts) return { status: 'ok', facts };
   }
