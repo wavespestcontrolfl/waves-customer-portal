@@ -61,12 +61,12 @@ postgres('customer merge defers on a linked invoice that would move to a payer w
     await mockDatabase('customers').insert({ id, first_name: 'Synthetic', last_name: label, phone, payer_id: payerId });
     return id;
   }
-  async function linkedInvoice(customerId, status) {
+  async function linkedInvoice(customerId, status, { selfPay = false } = {}) {
     const visitId = randomUUID();
     const recordId = randomUUID();
     const invoiceId = randomUUID();
     const date = etDateString();
-    await mockDatabase('scheduled_services').insert({ id: visitId, customer_id: customerId, service_type: 'Fixture General Pest Control', scheduled_date: date, status: 'completed' });
+    await mockDatabase('scheduled_services').insert({ id: visitId, customer_id: customerId, service_type: 'Fixture General Pest Control', scheduled_date: date, status: 'completed', self_pay_override: selfPay });
     await mockDatabase('service_records').insert({ id: recordId, customer_id: customerId, scheduled_service_id: visitId, service_type: 'Fixture General Pest Control', service_date: date });
     await mockDatabase('invoices').insert({ id: invoiceId, customer_id: customerId, invoice_number: `QA-${invoiceId.slice(0, 8)}`, token: `tok-${invoiceId}`, status, total: 80, service_record_id: recordId });
     return invoiceId;
@@ -99,6 +99,16 @@ postgres('customer merge defers on a linked invoice that would move to a payer w
     const invoiceId = await linkedInvoice(loserId, 'sending');
     await expect(dedupe.executeMerge({ winnerId, loserId, performedBy: 'test:merge-fence' })).rejects.toThrow(/being sent/);
     expect(await mockDatabase('invoices').where({ id: invoiceId }).first()).toMatchObject({ customer_id: loserId, status: 'sending', scheduled_send_error: null });
+  });
+
+  test('a payerless loser\'s sending invoice on a self-pay-pinned visit does not block a merge into a payer-linked winner (its owner does not move)', async () => {
+    const p = phone();
+    const winnerId = await customer('Winner', p, await payer(true));
+    const loserId = await customer('Loser', p);
+    const invoiceId = await linkedInvoice(loserId, 'sending', { selfPay: true });
+    const result = await dedupe.executeMerge({ winnerId, loserId, performedBy: 'test:merge-fence' });
+    expect(result.journalId).toBeTruthy();
+    expect(await mockDatabase('invoices').where({ id: invoiceId }).first()).toMatchObject({ customer_id: winnerId, status: 'sending', scheduled_send_error: null });
   });
 
   test('records on two DIFFERENT payers (an inactive loser payer included) never reach the sweep: the merge refuses first and nothing moves', async () => {

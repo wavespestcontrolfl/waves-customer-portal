@@ -2436,7 +2436,10 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // Judged here, under the customer locks and BEFORE the FK sweep repoints
     // those invoices to the winner (the send fence keys on customer_id).
     if (winner.payer_id && !loser.payer_id
-        && await require('./visit-completion-packets').packetInvoiceSendInFlight({ customerId: loser.id }, trx)) {
+        && await require('./visit-completion-packets').packetInvoiceSendInFlight({ customerId: loser.id }, trx, {
+          // The loser's records resolve through the winner's payer after the merge.
+          pending: { customerMove: { fromCustomerId: loser.id, toCustomerId: winnerId, toPayerId: winner.payer_id || null } },
+        })) {
       throw new Error('A combined-visit invoice for the merged-away record is being sent and this merge would change its billing owner — retry after it settles');
     }
     // The loser's visit-linked invoices move under the winner and resolve through the winner's default
@@ -2938,7 +2941,10 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
       // covers the repointed loser invoices; this one covers the winner's own
       // before anything is cancelled.
       if (backfills.payer_id && !winner.payer_id
-        && await require('./visit-completion-packets').packetInvoiceSendInFlight({ customerId: winnerId }, trx)) {
+        && await require('./visit-completion-packets').packetInvoiceSendInFlight({ customerId: winnerId }, trx, {
+          // The winner's default payer is about to be backfilled from the loser's.
+          pending: { customerPatch: { customerId: winnerId, payer_id: backfills.payer_id } },
+        })) {
         throw new Error('A combined-visit invoice for the surviving record is being sent and this merge would change its billing owner — retry after it settles');
       }
       // Past every defer: now the Stripe writes.
@@ -2952,7 +2958,10 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // winner's ownership covers the repointed loser invoices too, so this
     // one query fences both records for the loser-payer direction (the
     // winner-payer direction was fenced before the sweep).
-    if (backfills.payer_id && await require('./visit-completion-packets').packetInvoiceSendInFlight({ customerId: winnerId }, trx)) {
+    if (backfills.payer_id && await require('./visit-completion-packets').packetInvoiceSendInFlight({ customerId: winnerId }, trx, {
+          // The winner's default payer is about to be backfilled from the loser's.
+          pending: { customerPatch: { customerId: winnerId, payer_id: backfills.payer_id } },
+        })) {
       throw new Error('A combined-visit invoice for the surviving record is being sent and this merge would change its billing owner — retry after it settles');
     }
     if (Object.keys(backfills).length) {
