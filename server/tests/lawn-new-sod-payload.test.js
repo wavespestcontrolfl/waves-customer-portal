@@ -44,9 +44,12 @@ describe('enforceNewSodPayload', () => {
     });
   });
 
-  test('water card: no target range, status, explanation or schedule CTA; no credit or hold plan fields', () => {
+  test('water card: no target range, status or explanation; the schedule evidence is untouched; no credit or hold plan fields', () => {
     const w = out.reportV2.water;
-    expect(w).toMatchObject({ status: 'unknown', explanation: null, coverageWatch: false, droughtSignal: null, targetInches: null, scheduleOnFile: true, scheduleUnconfirmed: false, rainInches: 3.2, irrigationInches: 1.5 });
+    expect(w).toMatchObject({ status: 'unknown', explanation: null, coverageWatch: false, droughtSignal: null, targetInches: null, rainInches: 3.2, irrigationInches: 1.5, totalInches: 4.7 });
+    // The schedule evidence stays exactly as built (the maximal fixture has no schedule on file).
+    expect(w.scheduleOnFile).toBe(false);
+    expect(w.scheduleUnconfirmed).toBe(true);
     expect(w.weekPlan).toEqual({ title: 'New sod: water lightly every day', detail: 'Keep the sod moist with a light watering each day until it has rooted.', action: 'new_sod', visitInPlanWeek: true, prescribesRun: false });
     for (const key of ['afterHold', 'afterTreatment', 'depthInches']) expect(w.weekPlan).not.toHaveProperty(key);
   });

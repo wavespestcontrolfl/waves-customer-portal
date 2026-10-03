@@ -2239,8 +2239,10 @@ payload of an active visit: top-level `mowingHeight` is `null` (no height, band,
 gauge photo); `applications[].product.irrigation_notes` and `irrigation_required` are
 `null`; `lawnAssessment.waterContext.{irrigationAdvice,targetInchesPerWeek}` and
 `lawnAssessment.droughtStress` are `null` and `overwateringSignal` is `false`;
-`reportV2.water` has `targetInches: null`, `scheduleOnFile: true`,
-`scheduleUnconfirmed: false` (rain / irrigation / total figures stay); `reportV2.mowing`
+`reportV2.water` has `targetInches: null` and keeps `scheduleOnFile`,
+`scheduleUnconfirmed` and the rain / irrigation / total figures exactly as built (they are
+evidence: a rain-only week is never shown as a complete Total; the clients hide the "add your
+schedule" CTA and the move note for a `new_sod` plan); `reportV2.mowing`
 is `null`; `reportV2.trends` has no `waterGap`, `mowing` or `mowingBand`; the water and
 mowing finding cards are gone and the advice-bearing text keys of the snapshot, the other
 cards, `followUp` and `smsSummary` that mention watering or mowing are `null`; and

@@ -1001,6 +1001,9 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
   // closed by hasTotal requiring irrOnFile (codex P2 r9): with the schedule
   // off, the Total row is suppressed alongside the numeric irrigation row.
   const irrOnFile = water.scheduleOnFile !== false;
+  // New-sod mode keeps the schedule EVIDENCE as it is (a rain-only week is never a complete Total) but
+  // says nothing about adding or re-entering a watering schedule.
+  const newSodCard = Boolean(water.weekPlan && water.weekPlan.action === 'new_sod');
   // Nothing measurable → don't draw an empty chart… unless the missing
   // schedule is the reason: the add-schedule CTA + explanation must survive
   // an all-missing payload or the customer never learns how to fix it
@@ -1093,7 +1096,7 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
       {!lead && explanationShown ? (
         <p style={{ margin: '12px 0 0', fontSize: 14, color: BODY, lineHeight: 1.55 }}>{water.explanation}</p>
       ) : null}
-      {water.scheduleUnconfirmed ? (
+      {water.scheduleUnconfirmed && !newSodCard ? (
         <p data-testid="lawn-schedule-unconfirmed" style={{ margin: '10px 0 0', fontSize: 14, color: MUTED, lineHeight: 1.5 }}>
           Your address changed after your sprinkler settings were saved, so they aren’t counted here. Re-enter your zone minutes, watering days and head type (and your weekly inches, if you use them) under Irrigation in your portal to bring your irrigation figure back.
         </p>
@@ -1151,7 +1154,7 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
       {/* Keyed off the same effective irrOnFile as the row above — a card
           showing `Irrigation 1.25"` must not also claim "we don't have your
           watering schedule yet" (codex P2 r4). */}
-      {!irrOnFile && irrigationHref ? (
+      {!irrOnFile && irrigationHref && !newSodCard ? (
         <div className="lawn-water-cta" style={{ marginTop: 14, padding: '13px 15px', background: COLORS.sand, border: `1px solid ${BORDER}`, borderRadius: 12 }}>
           <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14.5, color: TEXT }}>Get a water reading built for your lawn</div>
           <div style={{ fontSize: 14, color: BODY, lineHeight: 1.5, margin: '4px 0 11px' }}>

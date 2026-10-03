@@ -39,7 +39,7 @@ const NEW_SOD_PAYLOAD_RULES = Object.freeze({
   'data.lawnAssessment.droughtStress': 'removed',
   'data.reportV2.banner': 'replaced: the fixed new-sod banner (no forecastLine, observedRain, mowHold)',
   'data.reportV2.water.weekPlan': 'replaced: the fixed new-sod plan (no afterHold, afterTreatment, depthInches, credit fields)',
-  'data.reportV2.water.{status,explanation,coverageWatch,droughtSignal,targetInches,scheduleOnFile,scheduleUnconfirmed}': 'replaced: neutral values (no target range, no schedule CTA or move note)',
+  'data.reportV2.water.{status,explanation,coverageWatch,droughtSignal,targetInches}': 'replaced: neutral values (no target range). scheduleOnFile, scheduleUnconfirmed and the readings stay as evidence; the client hides the schedule CTA and move note for a new_sod plan',
   'data.reportV2.aftercare': 'replaced: the fixed new-sod lines; hold, credit, review and instruction-evidence fields removed; the pet re-entry note stays',
   'data.reportV2.mowing': 'removed',
   'data.reportV2.trends.{waterGap,mowing,mowingBand}': 'removed',
@@ -70,8 +70,10 @@ function enforceReportV2(v2, plan, banner) {
     coverageWatch: false,
     droughtSignal: null,
     targetInches: null,
-    scheduleOnFile: true,
-    scheduleUnconfirmed: false,
+    // scheduleOnFile / scheduleUnconfirmed / the irrigation reading are EVIDENCE and stay exactly as
+    // built: forcing scheduleOnFile true would let the card show a rain-only amount as the complete
+    // weekly Total and a missing-schedule zero as measured irrigation. The "add your schedule" CTA and
+    // the move note are suppressed separately, by the client's new_sod rule.
     weekPlan: plan,
   };
   const oldAftercare = v2.aftercare && typeof v2.aftercare === 'object' ? v2.aftercare : {};

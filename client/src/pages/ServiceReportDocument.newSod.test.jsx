@@ -102,6 +102,53 @@ describe('new-sod mode: both documents from the enforced maximal payload', () =>
     expect(text).toContain(PLAN_TITLE);
   });
 
+  // Rain known, irrigation unknown: the server sends a finite 0 irrigation and scheduleOnFile:false.
+  // The card must not turn that into a complete weekly Total or a measured irrigation figure.
+  describe('rain known, irrigation missing', () => {
+    const rainOnly = () => {
+      const payload = maximalLawnPayload();
+      Object.assign(payload.reportV2.water, { rainInches: 2.1, irrigationInches: 0, totalInches: 2.1, scheduleOnFile: false, scheduleUnconfirmed: false });
+      return enforceNewSodPayload(payload);
+    };
+
+    it('the server keeps the evidence exactly as built', () => {
+      const w = rainOnly().reportV2.water;
+      expect(w).toMatchObject({ scheduleOnFile: false, rainInches: 2.1, irrigationInches: 0, totalInches: 2.1, targetInches: null });
+    });
+
+    it.each([['lead layout', true], ['classic layout', false]])('web section, %s: rain only, "Not on file", no Total, no zero irrigation, no schedule CTA', (_name, lead) => {
+      const text = webText(rainOnly().reportV2, { lead });
+      expect(text).toMatch(/Rain/);
+      expect(text).toMatch(/2\.1/);
+      expect(text).toMatch(/Not on file/);
+      expect(text).not.toMatch(/Total/);
+      expect(text).not.toMatch(/Irrigation\s*0/);
+      expect(text).not.toMatch(/Add your watering schedule|we don’t have your watering schedule/i);
+      expect(text).toContain(PLAN_TITLE);
+    });
+
+    it('web section: the move note is suppressed too (the evidence flag stays true)', () => {
+      const payload = maximalLawnPayload();
+      Object.assign(payload.reportV2.water, { rainInches: 2.1, irrigationInches: null, totalInches: null, scheduleOnFile: false, scheduleUnconfirmed: true });
+      const v2 = enforceNewSodPayload(payload).reportV2;
+      expect(v2.water.scheduleUnconfirmed).toBe(true);
+      expect(webText(v2)).not.toMatch(/sprinkler settings|Re-enter your zone minutes/i);
+    });
+
+    it('the NORMAL card still shows the schedule CTA for the same evidence (the control)', () => {
+      const payload = maximalLawnPayload();
+      Object.assign(payload.reportV2.water, { rainInches: 2.1, irrigationInches: 0, totalInches: 2.1, scheduleOnFile: false });
+      payload.reportV2.water.weekPlan = { title: 'Water twice this week', detail: 'x', action: 'run', visitInPlanWeek: true, prescribesRun: true };
+      expect(webText(payload.reportV2)).toMatch(/Add your watering schedule/);
+    });
+
+    it('pdf document: it prints no Total or measured irrigation figure for the week either', () => {
+      const text = pdfText(rainOnly());
+      expect(text).not.toMatch(/Total water|Irrigation\s*0|Total\s*2\.1/i);
+      for (const sentence of FIXED.map((s) => s.replace(/\.$/, ''))) expect(text).toContain(sentence);
+    });
+  });
+
   it('a new-sod visit with no rain or irrigation reading still shows the plan card', () => {
     const v2 = enforced().reportV2;
     v2.water = { ...v2.water, rainInches: null, irrigationInches: null, totalInches: null };
