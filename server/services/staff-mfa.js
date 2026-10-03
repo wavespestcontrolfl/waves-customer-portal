@@ -365,7 +365,7 @@ async function startSetup(tech, { expectedTokenVersion } = {}) {
 // Returns { ok: true, recoveryCodes, technician } or { ok: false, reason }.
 async function confirmSetup(tech, code, { expectedTokenVersion, nowMs = Date.now() } = {}) {
   return db.transaction(async (trx) => {
-    if (!await lockAccountAtVersion(trx, tech.id, expectedTokenVersion)) return { ok: false, reason: 'revoked' };
+    if (!await lockAccountAtVersion(trx, tech.id, expectedTokenVersion, { writesAccount: true })) return { ok: false, reason: 'revoked' };
     const row = await trx('staff_mfa_totp').where({ technician_id: tech.id }).forUpdate().first();
     if (!row || !row.pending_secret_enc || !row.pending_created_at) return { ok: false, reason: 'no_pending' };
     if (new Date(row.pending_created_at).getTime() + PENDING_SETUP_TTL_MS < nowMs) return { ok: false, reason: 'expired' };
@@ -408,7 +408,13 @@ async function confirmSetup(tech, code, { expectedTokenVersion, nowMs = Date.now
 // enrollment uses: a factor replacement or password change that landed after
 // the request authenticated (both move the version) wins, so an in-flight
 // request from a revoked session changes nothing.
-async function lockAccountAtVersion(trx, technicianId, expectedTokenVersion) {
+// `writesAccount`: the transaction will also UPDATE the technicians row. It
+// then takes the table's ROW EXCLUSIVE lock BEFORE the row lock — the order
+// the staff identity writers use (lockStaffAccountMutations takes SHARE ROW
+// EXCLUSIVE first) — so a password-reset request or Team edit overlapping it
+// waits instead of deadlocking.
+async function lockAccountAtVersion(trx, technicianId, expectedTokenVersion, { writesAccount = false } = {}) {
+  if (writesAccount) await trx.raw('LOCK TABLE technicians IN ROW EXCLUSIVE MODE');
   return trx('technicians')
     .where({ id: technicianId, auth_token_version: expectedTokenVersion })
     .forUpdate()
@@ -433,7 +439,7 @@ async function regenerateRecoveryCodes(technicianId, { expectedTokenVersion } = 
 // Returns { ok: true } or { ok: false, reason: 'revoked' }.
 async function disable(technicianId, { expectedTokenVersion } = {}) {
   return db.transaction(async (trx) => {
-    if (!await lockAccountAtVersion(trx, technicianId, expectedTokenVersion)) return { ok: false, reason: 'revoked' };
+    if (!await lockAccountAtVersion(trx, technicianId, expectedTokenVersion, { writesAccount: true })) return { ok: false, reason: 'revoked' };
     await trx('staff_mfa_totp').where({ technician_id: technicianId }).forUpdate().first();
     await trx('staff_mfa_recovery_codes').where({ technician_id: technicianId }).del();
     await trx('staff_mfa_totp').where({ technician_id: technicianId }).del();

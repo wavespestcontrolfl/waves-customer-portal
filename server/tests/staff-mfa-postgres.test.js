@@ -267,4 +267,24 @@ postgres('staff two-step sign-in on migrated PostgreSQL', () => {
       delete process.env.GATE_ADMIN_MFA_ENFORCE;
     }
   });
+  test('enrolling while a password-reset request holds the staff table lock waits, never deadlocks', async () => {
+    const { secret } = await staffMfa.startSetup(tech, { expectedTokenVersion: 1 });
+    const now = Date.now();
+    let release;
+    const held = new Promise((resolve) => { release = resolve; });
+    // The reset path: SHARE ROW EXCLUSIVE on technicians, then an update of
+    // this account's row, while enrollment is in flight.
+    const reset = mockDatabase.transaction(async (trx) => {
+      await trx.raw('LOCK TABLE technicians IN SHARE ROW EXCLUSIVE MODE');
+      await held;
+      await trx('technicians').where({ id: techId }).update({ updated_at: trx.fn.now() });
+    });
+    const confirm = staffMfa.confirmSetup(tech, codeFor(secret, 0, now), { expectedTokenVersion: 1, nowMs: now });
+    await new Promise((resolve) => { setTimeout(resolve, 200); });
+    release();
+    const [resetResult, confirmResult] = await Promise.allSettled([reset, confirm]);
+    expect(resetResult.status).toBe('fulfilled');
+    expect(confirmResult.status).toBe('fulfilled');
+    expect(confirmResult.value.ok).toBe(true);
+  });
 });
