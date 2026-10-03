@@ -104,6 +104,32 @@ describe('lawn treatment paragraph: no timing', () => {
   });
 });
 
+describe('lawnResultTimingViolation: a closed world on durations', () => {
+  const { lawnResultTimingViolation } = require('../services/service-report/report-writer-rules');
+  test.each([
+    'Treated weeds typically yellow after two weeks.',
+    'Visible improvement develops over several weeks.',
+    'Weeds fade in 3-7 days.',
+    'Color returns in about a week.',
+    'The weeds should fade next week.',
+    'You will see improvement tomorrow.',
+    'Results build over weeks.',
+  ])('any forward duration fails: %s', (text) => {
+    expect(lawnResultTimingViolation(text)).toBe(true);
+  });
+  test.each([
+    'Today we applied a selective weed control.',
+    'Applied to protect against chinch bugs during their peak season.',
+    'In the seven days before the visit it rained.',
+    'You noticed weeds two weeks ago.',
+    'Over the last two weeks the lawn browned.',
+    'We will recheck at your next visit.',
+    'We apply this once a week in summer.',
+  ])('past windows, frequency and "next visit" pass: %s', (text) => {
+    expect(lawnResultTimingViolation(text)).toBe(false);
+  });
+});
+
 describe('the fallback (pending or failed generation) is timing-free for lawn too', () => {
   test('gate live: the systemic clause drops "for several weeks"; gate off keeps it', async () => {
     const { buildTreatmentSummary } = require('../services/service-report/treatment-summary');

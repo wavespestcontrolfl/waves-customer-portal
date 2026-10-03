@@ -343,13 +343,28 @@ const DURATION_PHRASE_RE = new RegExp(
 );
 // Lawn model copy under GATE_LAWN_REPORT_COPY_V6 (P15) states NO result
 // timing: the report's "What to expect" carries it in owner-approved words.
-// The same forward-timeframe screen as the writer rules (a past window, "today"
-// or "peak season" passes), plus the no-number timing words the lawn prompts
-// name.
-const LAWN_NAMED_TIMING_RE = /\bover\s+time\b|\b(?:soon|shortly|eventually|tomorrow)\b|\bwithin\s+(?:days|weeks|months)\b|\bnext\s+(?:week|weekend)\b/i;
+// CLOSED WORLD on durations, not a list of forward phrasings (those never
+// converge): any duration ("two weeks", "several weeks", "3-7 days", "a week")
+// fails unless it is plainly past ("... before the visit", "... ago", "the
+// last two weeks"). On top: the writer-rules forward screen (number-free
+// windows such as "over the coming days") and the number-free words the lawn
+// prompts name. "today", "peak season" and "next visit" pass.
+const LAWN_DURATION_RE = new RegExp(
+  `\\b\\d+\\s*(?:-|–|to)\\s*\\d+\\s*${DURATION_UNIT}\\b|\\b${DURATION_NUMBER}\\s+${DURATION_UNIT}\\b`,
+  'gi',
+);
+const PAST_AFTER_RE = /^\s+(?:before|ago|earlier|prior)\b/i;
+const PAST_BEFORE_RE = /\b(?:last|past|previous|prior|preceding)\s+$/i;
+const LAWN_NAMED_TIMING_RE = /\bover\s+time\b|\b(?:soon|shortly|eventually|tomorrow|overnight)\b|\b(?:over|for|after|within|in)\s+(?:days|weeks|months)\b|\bnext\s+(?:week|weekend)\b/i;
 function lawnResultTimingViolation(text) {
   const copy = String(text || '');
-  return TIMEFRAME_RE.test(copy) || LAWN_NAMED_TIMING_RE.test(copy);
+  if (TIMEFRAME_RE.test(copy) || LAWN_NAMED_TIMING_RE.test(copy)) return true;
+  for (const m of copy.matchAll(LAWN_DURATION_RE)) {
+    const after = copy.slice(m.index + m[0].length, m.index + m[0].length + 20);
+    const before = copy.slice(Math.max(0, m.index - 20), m.index);
+    if (!PAST_AFTER_RE.test(after) && !PAST_BEFORE_RE.test(before)) return true;
+  }
+  return false;
 }
 
 function groundedTimeframePhrases(lines) {
