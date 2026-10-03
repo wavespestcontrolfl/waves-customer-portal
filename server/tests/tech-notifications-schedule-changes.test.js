@@ -51,37 +51,37 @@ function stubDb(results) {
 const ID = (n) => `00000000-0000-4000-8000-00000000000${n}`;
 
 describe('GET /schedule-changes', () => {
-  test('soon is decided in SQL from the new/previous day (today or tomorrow ET), soon rows first; later_total counts every non-soon card', async () => {
+  test('soon cards and folded rows are read apart, each capped, so soon cards never crowd out the folded rows; later_total counts them all', async () => {
     const today = etDateString(new Date());
     const tomorrow = etDateString(addETDays(new Date(), 1));
-    const rows = [
-      { id: ID(2), type: 'visit_rescheduled', payload: JSON.stringify({ previous_date: today }), soon: true },
-      { id: ID(1), type: 'visit_rescheduled', payload: { date: '2026-12-15' }, soon: false },
-    ];
-    const chains = stubDb([rows, [{ n: '412' }]]);
+    const soonRows = [{ id: ID(2), type: 'visit_rescheduled', payload: JSON.stringify({ previous_date: today }) }];
+    const laterRows = [{ id: ID(1), type: 'visit_rescheduled', payload: { date: '2026-12-15' } }];
+    const chains = stubDb([soonRows, laterRows, [{ n: '412' }]]);
     const res = { json: jest.fn(), status: jest.fn().mockReturnThis() };
     await handler('/schedule-changes', 'get')({ technicianId: 't-1' }, res, (e) => { throw e; });
 
-    const [list, count] = chains;
-    expect(list.where[0]).toEqual(['n.technician_id', 't-1']);
-    // Both reads stop at as_of, the bound a following clear-all uses.
-    const asOf = new Date(res.json.mock.calls[0][0].as_of);
-    expect(list.where[1]).toEqual(['n.created_at', '<=', asOf]);
-    expect(count.where[1]).toEqual(['n.created_at', '<=', asOf]);
-    expect(list.whereIn[0]).toEqual(['n.type', ['visit_assigned', 'visit_unassigned', 'visit_rescheduled', 'visit_cancelled']]);
-    // Joined on the uuid primary key, the payload id pattern-checked first.
-    expect(list.on[0]).toBe('s.id');
-    expect(list.on[2].sql).toMatch(/CASE WHEN n\.payload->>'visit_id' ~\* '.+' THEN \(n\.payload->>'visit_id'\)::uuid END/);
-    expect(list.orderByRaw[0][0]).toMatch(/^COALESCE\(.*\) DESC$/);
-    expect(list.orderByRaw[0][1]).toEqual([today, tomorrow, today, tomorrow, today, tomorrow]);
-    expect(list.limit[0]).toEqual([300]);
-    expect(count.whereRaw[0][0]).toMatch(/^NOT COALESCE\(/);
-
+    const [soonQ, laterQ, countQ] = chains;
     const body = res.json.mock.calls[0][0];
+    const asOf = new Date(body.as_of);
+    for (const q of [soonQ, laterQ, countQ]) {
+      expect(q.where[0]).toEqual(['n.technician_id', 't-1']);
+      expect(q.whereIn[0]).toEqual(['n.type', ['visit_assigned', 'visit_unassigned', 'visit_rescheduled', 'visit_cancelled']]);
+      // Every read stops at as_of, the bound a following clear-all uses.
+      expect(q.where[1]).toEqual(['n.created_at', '<=', asOf]);
+      // Joined on the uuid primary key, the payload id pattern-checked first.
+      expect(q.on[0]).toBe('s.id');
+      expect(q.on[2].sql).toMatch(/CASE WHEN n\.payload->>'visit_id' ~\* '.+' THEN \(n\.payload->>'visit_id'\)::uuid END/);
+    }
+    expect(soonQ.whereRaw[0][0]).toMatch(/^COALESCE\(/);
+    expect(soonQ.whereRaw[0][1]).toEqual([today, tomorrow, today, tomorrow, today, tomorrow]);
+    expect(laterQ.whereRaw[0][0]).toMatch(/^NOT COALESCE\(/);
+    expect(countQ.whereRaw[0][0]).toMatch(/^NOT COALESCE\(/);
+    expect(soonQ.limit[0]).toEqual([300]);
+    expect(laterQ.limit[0]).toEqual([300]);
+
     expect(body.changes.map((c) => [c.id, c.soon])).toEqual([[ID(2), true], [ID(1), false]]);
     expect(body.changes[0].payload.previous_date).toBe(today);
     expect(body.later_total).toBe(412);
-    expect(Number.isNaN(Date.parse(body.as_of))).toBe(false);
   });
 });
 

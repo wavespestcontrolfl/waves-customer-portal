@@ -105,8 +105,8 @@ router.get('/', async (req, res, next) => {
 // 2026-10-03). The main feed above returns 20 rows, too few for a nightly
 // auto-dispatch run, so these have their own read.
 const SCHEDULE_CHANGE_TYPES = ['visit_assigned', 'visit_unassigned', 'visit_rescheduled', 'visit_cancelled'];
-// Rows the Review list shows; the summary's count and "clear all" cover the
-// whole open set, past this cap (Codex #5783 P2).
+// Rows per list (soon cards, folded rows); the summary's count and "clear
+// all" cover the whole open set, past this cap (Codex #5783 P2).
 const SCHEDULE_CHANGE_LIMIT = 300;
 const UUID_PATTERN = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
 
@@ -139,27 +139,39 @@ function soonSql(asOf) {
   };
 }
 
-// GET /schedule-changes — soon cards first (never cut off by the cap), then
-// newest; `later_total` counts every open non-soon card. Both reads stop at
-// `as_of`, the same bound a following clear-all uses, so a card written
-// mid-read is neither shown nor cleared — the next read shows it.
+// GET /schedule-changes — the soon cards and the folded (non-soon) rows are
+// read separately, each up to the cap, so a pile of soon cards can never
+// crowd the folded rows out of the response (Codex #5786 P2); `later_total`
+// counts every open folded card. All reads stop at `as_of`, the same bound a
+// following clear-all uses, so a card written mid-read is neither shown nor
+// cleared — the next read shows it.
 router.get('/schedule-changes', async (req, res, next) => {
   try {
     const asOf = new Date();
     const soon = soonSql(asOf);
-    const [rows, totals] = await Promise.all([
+    const columns = ['n.id', 'n.type', 'n.message', 'n.payload', 'n.created_at'];
+    const [soonRows, laterRows, totals] = await Promise.all([
       openScheduleChanges(req.technicianId)
         .where('n.created_at', '<=', asOf)
-        .orderByRaw(`${soon.sql} DESC`, soon.bindings)
+        .whereRaw(soon.sql, soon.bindings)
         .orderBy('n.created_at', 'desc')
         .limit(SCHEDULE_CHANGE_LIMIT)
-        .select('n.id', 'n.type', 'n.message', 'n.payload', 'n.created_at', db.raw(`${soon.sql} as soon`, soon.bindings)),
+        .select(columns),
+      openScheduleChanges(req.technicianId)
+        .where('n.created_at', '<=', asOf)
+        .whereRaw(`NOT ${soon.sql}`, soon.bindings)
+        .orderBy('n.created_at', 'desc')
+        .limit(SCHEDULE_CHANGE_LIMIT)
+        .select(columns),
       openScheduleChanges(req.technicianId)
         .where('n.created_at', '<=', asOf)
         .whereRaw(`NOT ${soon.sql}`, soon.bindings)
         .count('* as n'),
     ]);
-    const changes = rows.map((row) => ({ ...parseRow(row), soon: row.soon === true }));
+    const changes = [
+      ...soonRows.map((row) => ({ ...parseRow(row), soon: true })),
+      ...laterRows.map((row) => ({ ...parseRow(row), soon: false })),
+    ];
     res.json({ changes, later_total: Number(totals[0]?.n) || 0, as_of: asOf.toISOString() });
   } catch (err) { next(err); }
 });
