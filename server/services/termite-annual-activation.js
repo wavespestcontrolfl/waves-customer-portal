@@ -1281,6 +1281,8 @@ function awaitingInstallationRows(conn) {
 //   - no OTHER completed visit already carries this plan's stamp: one
 //     installation per plan, so a later installation-named job bills
 //     normally;
+//   - the visit has no live invoice of its own (Charge Now, Terminal, a
+//     pre-minted invoice);
 //   - the visit is not billed to a third-party payer.
 // A visit paid another way (prepaid_method) never reaches here, and the
 // closeout clears a stamp from a payer-billed or separately paid visit. So an
@@ -1288,6 +1290,23 @@ function awaitingInstallationRows(conn) {
 // the automatic charge, and reaches the office through the never-released
 // alert.
 const DEAD_PLAN_INVOICE_STATUSES = ['void', 'voided', 'canceled', 'cancelled', 'refunded'];
+// Statuses of a visit invoice that no longer bills anything.
+const DEAD_VISIT_INVOICE_STATUSES = ['void', 'voided', 'canceled', 'cancelled'];
+
+// Does the visit have a live invoice of its own, other than the plan's?
+// Linked directly (invoices.scheduled_service_id) or through one of its
+// service records (invoices.service_record_id).
+async function visitHasOwnInvoice(conn, visitId, planInvoiceId) {
+  const own = await conn('invoices')
+    .where(function linkedToVisit() {
+      this.where('scheduled_service_id', visitId)
+        .orWhereIn('service_record_id', conn('service_records').where({ scheduled_service_id: visitId }).select('id'));
+    })
+    .whereNot({ id: planInvoiceId })
+    .whereNotIn('status', DEAD_VISIT_INVOICE_STATUSES)
+    .first('id');
+  return !!own;
+}
 // `claim` (the closeout passes it): the one-installation decision and the
 // stamp write are ONE step under the term's row lock, so two installation
 // visits of a plan closing at once cannot both be held (GitHub Codex #5816
@@ -1335,6 +1354,13 @@ async function findDeferredInstallHoldingTerm(visit, terms, conn) {
       .first('status', 'structured_notes');
     const notes = parseJsonish(closeout?.structured_notes) || {};
     if (closeout && (NOT_PERFORMED_OUTCOMES.includes(String(notes.visitOutcome || '')) || String(notes.backfill || '') === 'true')) continue;
+    // A visit that carries a bill of its own (Charge Now, a Terminal payment,
+    // a pre-minted invoice — linked by the visit or by its service record) is
+    // collected through that bill, with or without a prepaid stamp. The plan
+    // does not hold it, so it never releases the plan's charge beside that
+    // payment (pre-push audit P0 on #5816). The charge transaction repeats
+    // this under the visit lock (requireNoOtherVisitInvoice).
+    if (await visitHasOwnInvoice(conn, visit.id, term.prepay_invoice_id)) continue;
     // Only a COMPLETED visit holds the plan's one stamp. A stamped visit
     // that was reopened (confirmed / en route / cancelled ...) is no longer
     // the installation: it must not block the real one, and the charge guard
@@ -1875,6 +1901,7 @@ module.exports = {
   whereTermHasCompletedInstallation,
   earliestPerformedInstallation,
   deferredInstallHoldingTerm,
+  visitHasOwnInvoice,
   isTermiteInstallationServiceType,
   installationTermWindowForTerm,
   ANNUAL_TEMPLATE_KEY,

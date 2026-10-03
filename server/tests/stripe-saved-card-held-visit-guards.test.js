@@ -19,7 +19,7 @@ describe('chargeInvoiceWithSavedCard — held-visit and signed-agreement guards'
     let chargeAttempt = null;
     const db = jest.fn((table) => {
       const chain = {};
-      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate', 'orderBy'].forEach((method) => {
+      ['where', 'whereNot', 'whereIn', 'orWhereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate', 'orderBy'].forEach((method) => {
         chain[method] = jest.fn((arg) => {
           if (method === 'where' && typeof arg === 'function') arg.call(chain);
           return chain;
@@ -73,6 +73,15 @@ describe('chargeInvoiceWithSavedCard — held-visit and signed-agreement guards'
 
     await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', installationGuards))
       .rejects.toMatchObject({ code: 'VISIT_NOT_COMPLETED', message: expect.stringContaining('paid another way') });
+    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+  });
+
+  test('a held visit that carries an invoice of its own refuses the charge (requireNoOtherVisitInvoice)', async () => {
+    const { StripeService, stripeClient } = load({ visit: heldVisit, contract: { id: 'contract-1', status: 'signed' } });
+
+    // The mock's invoices table answers every lookup with a row, the visit's own invoice included.
+    await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { ...installationGuards, requireNoOtherVisitInvoice: true }))
+      .rejects.toMatchObject({ code: 'VISIT_NOT_COMPLETED', message: expect.stringContaining('invoice of its own') });
     expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
   });
 

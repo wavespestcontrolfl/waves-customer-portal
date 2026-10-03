@@ -421,6 +421,7 @@ async function runClaimedCharge({ conn, ctx, trigger, installation = null }) {
         requireCompletedVisit: true,
         requirePerformedVisit: true,
         requireHeldTermId: installation.termId,
+        requireNoOtherVisitInvoice: true,
       } : {}),
       // The daily sweep is machine-initiated: the charge primitive refuses
       // an active collections dispute hold for it BY DEFAULT (B10). The

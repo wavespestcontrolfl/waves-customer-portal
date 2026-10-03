@@ -2143,7 +2143,7 @@ const StripeService = {
   // 2026-08-29). Default false = machine ('admin_card_on_file' rails:
   // completion/balance sweeps, admin card-on-file, no-show, recurring) —
   // fenced to the 8AM-8PM window like every other schedule-driven send.
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requirePerformedVisit = false, requireHeldTermId = null, requireSignedContractId = null, selfPayAccountScope = false, maxAuthorizedInvoiceTotalCents = null, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, operatorOverride = false, overrideTrail = null, requireVisitCompletionPacketId = null, assertBeforeMoneyMoves = null } = {}) {
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requirePerformedVisit = false, requireHeldTermId = null, requireNoOtherVisitInvoice = false, requireSignedContractId = null, selfPayAccountScope = false, maxAuthorizedInvoiceTotalCents = null, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, operatorOverride = false, overrideTrail = null, requireVisitCompletionPacketId = null, assertBeforeMoneyMoves = null } = {}) {
     // The performed-visit gate runs under the visit lock; asking for it
     // without naming the visit would silently skip it.
     if (requireCompletedVisit && requireSelfPayScheduledServiceId == null) {
@@ -2450,6 +2450,18 @@ const StripeService = {
             // r4).
             if (lockedSvc.prepaid_method) {
               throw Object.assign(new Error('The visit was paid another way. Review before charging.'), { code: 'VISIT_NOT_COMPLETED' });
+            }
+          }
+          // Opt-in (the termite annual plan charged after installation): the
+          // visit must carry no live invoice of its own beside the one being
+          // charged — a Charge Now / Terminal / pre-minted invoice (linked by
+          // the visit or by its service record) already bills that work, with
+          // or without a prepaid stamp. Under the visit lock, like the checks
+          // above.
+          if (requireNoOtherVisitInvoice) {
+            const { visitHasOwnInvoice } = require('./termite-annual-activation');
+            if (await visitHasOwnInvoice(trx, lockedSvc.id, invoiceId)) {
+              throw Object.assign(new Error('The visit has an invoice of its own. Review before charging.'), { code: 'VISIT_NOT_COMPLETED' });
             }
           }
           // Cross-lane exclusion at the money move (hold-rail pre-push r13

@@ -52,6 +52,8 @@ async function createScratchDb() {
     customer_id uuid,
     payer_id uuid,
     payer_statement_id uuid,
+    scheduled_service_id uuid,
+    service_record_id uuid,
     status text,
     payment_method text,
     subtotal numeric(10,2),
@@ -409,6 +411,7 @@ describeOrSkip('termite annual charge after installation — real Postgres', () 
       requireCompletedVisit: true,
       requirePerformedVisit: true,
       requireHeldTermId: ids.termId,
+      requireNoOtherVisitInvoice: true,
       requireSignedContractId: ids.contractId,
     }));
     expect(await chargeState(db)).toMatchObject({ status: 'paid', trigger: 'installation_complete', contract_id: ids.contractId });
@@ -660,6 +663,37 @@ describeOrSkip('termite annual charge after installation — real Postgres', () 
       await signedDaysAgo(db, 15);
       expect((await sweep()).neverInstalledAlerted).toBe(1);
       expect(bellTitles(notifyAdmin)).toContain('Termite annual plan — signed, installation has not released the charge');
+    });
+
+    test.each([
+      ['linked to the visit', (visit) => ({ scheduled_service_id: visit.id })],
+      ['linked to its service record', (_visit, record) => ({ service_record_id: record.id })],
+    ])('an installation with its own paid invoice (%s, no prepaid stamp) is not held: no automatic charge', async (_label, link) => {
+      const { atSigning, sweep, chargeInvoiceWithSavedCard, db } = load();
+      await atSigning();
+      const [visit] = await db('scheduled_services').insert({
+        customer_id: ids.customerId, status: 'completed', service_type: 'Termite Installation Setup', scheduled_date: dayOffset(0),
+      }).returning('*');
+      const [record] = await db('service_records').insert({
+        scheduled_service_id: visit.id, status: 'completed', structured_notes: JSON.stringify({}),
+      }).returning('*');
+      await db('invoices').insert({ customer_id: ids.customerId, status: 'paid', total: 199, subtotal: 199, ...link(visit, record) });
+
+      expect(await closeoutStamp(db, visit)).toBeNull();
+      expect((await sweep()).installChargeScanned).toBe(0);
+      expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    });
+
+    test('a voided visit invoice does not count: the installation is held', async () => {
+      const { atSigning, db } = load();
+      await atSigning();
+      const [visit] = await db('scheduled_services').insert({
+        customer_id: ids.customerId, status: 'completed', service_type: 'Termite Installation Setup', scheduled_date: dayOffset(0),
+      }).returning('*');
+      await db('service_records').insert({ scheduled_service_id: visit.id, status: 'completed', structured_notes: JSON.stringify({}) });
+      await db('invoices').insert({ customer_id: ids.customerId, status: 'void', total: 199, subtotal: 199, scheduled_service_id: visit.id });
+
+      expect(await closeoutStamp(db, visit)).toBe(ids.termId);
     });
 
     test('an installation paid another way (prepaid stamp) is not held: no automatic charge', async () => {
