@@ -136,8 +136,13 @@ describe('a report-flow sheet routed from a stale schedule row', () => {
 async function generate({ note = NOTE, rating = '3, moderate' } = {}) {
   fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: note } });
   if (rating) fireEvent.click(screen.getByRole('button', { name: rating }));
+  // Generate holds (disabled, its reason in the footer) while the visit's
+  // photos and promises load, and a click before then does nothing: wait for
+  // it to be live (the CI flake of 2026-10-03, reproduced with a slow photos
+  // read).
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(false), { timeout: 10000 });
   fireEvent.click(screen.getByRole('button', { name: 'Generate AI report' }));
-  await screen.findByText('Report the customer will see');
+  await screen.findByText('Report the customer will see', {}, { timeout: 10000 });
 }
 
 function conflict(code, message) {

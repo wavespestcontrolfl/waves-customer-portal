@@ -159,6 +159,16 @@ describe('agent-gap-reports', () => {
       expect(insertedRows).toHaveLength(1);
     });
 
+    test('uses a supplied transaction executor instead of the root database', async () => {
+      const { writeGapRows } = load();
+      const boundedExecutor = { transaction: savepointMock };
+      await writeGapRows([{
+        source: 'intelligence-bar', kind: 'missing_capability', summary: 'add a second service address',
+      }], boundedExecutor);
+      expect(savepointMock).toHaveBeenCalled();
+      expect(dbMock.transaction).not.toHaveBeenCalled();
+    });
+
     test('never throws when the insert rejects, and logs only the error code', async () => {
       dbMock.transaction.mockImplementation(async () => { throw Object.assign(new Error('insert into agent_gap_reports ... dana@example.com'), { code: '23505' }); });
       const { writeGapRows } = load();

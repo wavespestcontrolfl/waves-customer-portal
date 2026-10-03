@@ -965,7 +965,7 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
 
     await withServer(async (baseUrl) => {
       const { body } = await postQuery(baseUrl, { prompt: 'book a termite liquid treatment', context: 'schedule' });
-      expect(mockIbBookingProposal).toHaveBeenCalledWith('c1', 'Termite Liquid Treatment Service', undefined);
+      expect(mockIbBookingProposal).toHaveBeenCalledWith('c1', 'Termite Liquid Treatment Service', undefined, undefined);
       expect(mockCreatePendingAction).not.toHaveBeenCalled();
       expect(body.pendingActions).toEqual([]);
 
@@ -992,6 +992,40 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
       const secondCallMessages = mockMessagesCreate.mock.calls[1][0].messages;
       const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
       expect(toolResult.error).toMatch(/Could not work out this visit's price/);
+    });
+  });
+
+  test('create_appointment on a re-service: the reason reaches the proposal check, and the card and the stored params carry it as it will be saved', async () => {
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
+    mockIbBookingProposal.mockResolvedValueOnce({ price: null, source: null, serviceId: 'svc-prs', serviceName: 'Pest Control Re-Service', customerRequest: 'ants back in the kitchen' });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Pest Control Re-Service', customer_request: '  ants back in the kitchen  ' } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'book a re-service, ants back in the kitchen', context: 'schedule' });
+      expect(mockIbBookingProposal).toHaveBeenCalledWith('c1', 'Pest Control Re-Service', undefined, '  ants back in the kitchen  ');
+      const stored = mockCreatePendingAction.mock.calls[0][0];
+      expect(stored.params.customer_request).toBe('ants back in the kitchen');
+      expect(body.pendingActions).toHaveLength(1);
+      expect(body.pendingActions[0].params.customer_request).toBe('ants back in the kitchen');
+    });
+  });
+
+  test('create_appointment with a blank reason: the empty value never reaches the stored params or the card', async () => {
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
+    mockIbBookingProposal.mockResolvedValueOnce({ price: null, source: null, serviceId: 'svc-prs', serviceName: 'Pest Control Re-Service', customerRequest: null });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Pest Control Re-Service', customer_request: '   ' } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'book a re-service', context: 'schedule' });
+      const stored = mockCreatePendingAction.mock.calls[0][0];
+      expect(stored.params).not.toHaveProperty('customer_request');
+      expect(body.pendingActions[0].params).not.toHaveProperty('customer_request');
     });
   });
 
@@ -1031,7 +1065,7 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
 
     await withServer(async (baseUrl) => {
       const { body } = await postQuery(baseUrl, { prompt: 'book flea control for $180', context: 'schedule' });
-      expect(mockIbBookingProposal).toHaveBeenCalledWith('c1', 'Flea Control Service', 180);
+      expect(mockIbBookingProposal).toHaveBeenCalledWith('c1', 'Flea Control Service', 180, undefined);
       const stored = mockCreatePendingAction.mock.calls[0][0];
       expect(stored.params._booking_price).toBe(180);
       expect(stored.params._booking_service_id).toBeNull();

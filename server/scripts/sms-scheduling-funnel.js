@@ -41,6 +41,7 @@ function printReport(since, until, f) {
     lines.push(
       `  Offers recorded                    ${f.offers.sent} (${kinds})`,
       `    open / expired / superseded      ${f.offers.open} / ${f.offers.expired} / ${f.offers.superseded}`,
+      `    accepted (moved by text)         ${f.offers.accepted}`,
       `    followed by a move or booking    ${f.offers.followed_by_change_48h} of ${f.offers.matured} matured`,
       `    with a slot that did not resolve ${f.offers.with_unresolved_slot}`,
     );
@@ -55,6 +56,9 @@ function printReport(since, until, f) {
       `    would-move then moved there <48h ${f.decisions.would_move_matched} of ${f.decisions.would_move_matured} matured (precision; logged moves only)`,
       `    real accepts it caught           ${f.decisions.recall.caught} of ${f.decisions.recall.real_accepts} (recall: offers whose visit moved into an offered time <48h)`,
     );
+    // The move executor's results (GATE_SMS_SCHEDULING_ACT_MOVE); a moved
+    // decision is left out of the precision line above.
+    if (Object.keys(f.decisions.executed || {}).length) lines.push(`    executor took                    ${fmt(f.decisions.executed)}`);
   }
   console.log(lines.join('\n'));
 }

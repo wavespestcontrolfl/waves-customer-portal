@@ -48,6 +48,12 @@ const CLASSIFIER_COLUMNS = [
   'analysis_n', 'analysis_p', 'fertilizer_analysis', 'product_type',
 ];
 
+// The one predicate for "this visit is a Tree & Shrub Fast Complete visit": its completion
+// profile's typed findings form. The lawn Fast Complete eligibility reuses it to exclude
+// these visits (they share the lawn_care category), so the sheets partition the visits.
+const TREE_SHRUB_FINDINGS_TYPE = 'tree_shrub';
+const isTreeShrubFastProfile = (profile) => profile?.findingsType === TREE_SHRUB_FINDINGS_TYPE;
+
 const dayNumber = (day) => {
   const [y, m, d] = String(day).split('-').map(Number);
   return Date.UTC(y, m - 1, d) / 86400000;
@@ -72,7 +78,7 @@ function treeShrubProductFlags(row, { serviceDate, zone }) {
 // cover: companion sections (the retired lawn+T&S combo) and grouped visits.
 async function treeShrubFastIneligibleReason(svc, profile, knex) {
   if (!profile) return 'profile_unavailable';
-  if (profile.findingsType !== 'tree_shrub') return 'not_tree_shrub';
+  if (!isTreeShrubFastProfile(profile)) return 'not_tree_shrub';
   if (profile.projectBacked || profile.requiresProject) return 'project_backed';
   if (Array.isArray(profile.companions) && profile.companions.length) return 'has_companions';
   if (svc.visit_id) {
@@ -439,6 +445,7 @@ module.exports = {
   PALM_FERTILIZER_SPACING_DAYS,
   buildTreeShrubFastContext,
   treeShrubFastIneligibleReason,
+  isTreeShrubFastProfile,
   treeShrubProductFlags,
   buildTreeShrubWarnings,
   buildLastVisit,

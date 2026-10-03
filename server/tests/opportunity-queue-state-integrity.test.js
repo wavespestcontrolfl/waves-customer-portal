@@ -543,6 +543,72 @@ describe('citability_backfill lane fence (kill-switch contract, 2026-09-25)', ()
   });
 });
 
+describe('"Suggest a post" fence (GATE_BLOG_SEARCH_SUGGEST; GitHub Codex P1 on e8a1e9e876)', () => {
+  // The route's gate check fences WRITES; this makes the gate a stop switch
+  // for suggestions already queued: while it is off, rows from source
+  // tech_blog_search are unclaimable and wait. Read at call time
+  // (blogSearchSuggestLive), as the route reads it. Real SQL:
+  // blog-suggest-claim-fence-postgres.test.js.
+  const FENCE = "(signal_metadata->>'source') IS DISTINCT FROM 'tech_blog_search'";
+  const SAVED = process.env.GATE_BLOG_SEARCH_SUGGEST;
+  afterEach(() => {
+    if (SAVED === undefined) delete process.env.GATE_BLOG_SEARCH_SUGGEST;
+    else process.env.GATE_BLOG_SEARCH_SUGGEST = SAVED;
+  });
+  const peekChain = () => {
+    const q = {
+      _filters: [],
+      where: jest.fn(function (...args) { q._filters.push(args); return q; }),
+      whereNot: jest.fn(function (...args) { q._filters.push(['not', ...args]); return q; }),
+      whereRaw: jest.fn(function (...args) { q._filters.push(['raw', ...args]); return q; }),
+      orderBy: jest.fn(() => q),
+      limit: jest.fn(() => q),
+      select: jest.fn(() => Promise.resolve([])),
+    };
+    return q;
+  };
+
+  test.each([[undefined], ['false'], ['1']])('gate %p: claimNext and peek leave queued suggestions out, and only them', async (value) => {
+    if (value === undefined) delete process.env.GATE_BLOG_SEARCH_SUGGEST;
+    else process.env.GATE_BLOG_SEARCH_SUGGEST = value;
+    db.mockImplementation(() => chain());
+    db.raw.mockResolvedValue({ rows: [] });
+    await queue.claimNext({});
+    const [sql] = rawCallContaining('UPDATE opportunity_queue');
+    expect(sql).toContain(`AND ${FENCE}`);
+    expect(sql).not.toContain("bucket <> 'operator_intercept'");
+
+    const q = peekChain();
+    db.mockImplementation(() => q);
+    await queue.peek({});
+    expect(q._filters).toEqual(expect.arrayContaining([['raw', FENCE]]));
+  });
+
+  test('gate on: neither claimNext nor peek fences them', async () => {
+    process.env.GATE_BLOG_SEARCH_SUGGEST = 'true';
+    db.mockImplementation(() => chain());
+    db.raw.mockResolvedValue({ rows: [] });
+    await queue.claimNext({});
+    const [sql] = rawCallContaining('UPDATE opportunity_queue');
+    expect(sql).not.toContain(FENCE);
+
+    const q = peekChain();
+    db.mockImplementation(() => q);
+    await queue.peek({});
+    expect(q._filters).not.toEqual(expect.arrayContaining([['raw', FENCE]]));
+  });
+
+  test('an unreadable gate shuts the lane (fail closed)', () => {
+    const gates = require('../config/feature-gates');
+    const spy = jest.spyOn(gates, 'blogSearchSuggestLive').mockImplementation(() => { throw new Error('unreadable'); });
+    try {
+      expect(queue._internals.blogSearchSuggestLaneOpen()).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
 describe('citability page ownership after a gate-off ordinary refresh', () => {
   test('retires pending work and durably marks claimed/review evidence for resumed claim/publish/merge fences', async () => {
     const rows = [

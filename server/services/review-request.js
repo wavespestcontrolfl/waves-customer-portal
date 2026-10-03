@@ -2113,8 +2113,8 @@ const ReviewService = {
     }
     // Route to the service beneficiary (see services/customer-contact.js) —
     // falls back to the billing phone when no service contact is configured.
-    const { getServiceContactSmsRecipient } = require("./customer-contact");
-    const contact = getServiceContactSmsRecipient(customer);
+    const { resolveServiceContactSmsRecipient } = require("./recipient-optin");
+    const contact = await resolveServiceContactSmsRecipient(customer);
     // W0B pinned recipient at the FINAL recipient read (GH r14 P1): an
     // operator-confirmed card promised a specific number, and this reload
     // re-resolves the recipient — a phone changed between the card's
@@ -4214,7 +4214,7 @@ const ReviewService = {
     let unrecordedDeliveries = 0;
     let unrecordedReleases = 0;
     const sentThisRun = new Set();
-    const { getServiceContactSmsRecipient } = require("./customer-contact");
+    const { resolveServiceContactSmsRecipient } = require("./recipient-optin");
     for (const candidate of eligible) {
       try {
         const held = await require("./review-ask-dispatch").dispatchReviewAsk(candidate.customer_id, async () => {
@@ -4267,7 +4267,7 @@ const ReviewService = {
             suppressed++;
             return;
           }
-          const contact = getServiceContactSmsRecipient(customer);
+          const contact = await resolveServiceContactSmsRecipient(customer);
           if (!contact.phone) {
             // No consented SMS recipient — mark handled so this row can't sit
             // in the 20-row follow-up batch every run and starve later
@@ -4570,8 +4570,10 @@ const ReviewService = {
     // SMS identity is consent-gated; EMAIL identity is not (the #2948
     // artifact covers texting only) — resolve them separately so an
     // unstamped contact still gets the email touch as themselves.
-    const { getServiceContact, getServiceContactSmsRecipient } = require("./customer-contact");
-    const contact = getServiceContactSmsRecipient(customer);
+    const { getServiceContact } = require("./customer-contact");
+    // The SMS identity also waits for a contact's own YES (recipient-optin.js).
+    const { resolveServiceContactSmsRecipient } = require("./recipient-optin");
+    const contact = await resolveServiceContactSmsRecipient(customer);
     const emailContact = getServiceContact(customer);
 
     // Load consent prefs once. Channel resolution is OPT-OUT-AWARE and honors
@@ -6004,8 +6006,8 @@ const ReviewService = {
     if (customer.deleted_at) return { outcome: "archived" };
     if (customer.has_left_google_review) return { outcome: "already_reviewed" };
 
-    const { getServiceContactSmsRecipient } = require("./customer-contact");
-    const contact = getServiceContactSmsRecipient(customer);
+    const { resolveServiceContactSmsRecipient } = require("./recipient-optin");
+    const contact = await resolveServiceContactSmsRecipient(customer);
     if (channel === "sms" && !contact.phone) return { outcome: "no_contact" };
 
     const cid = customer.id;

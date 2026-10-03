@@ -3,8 +3,7 @@ const MODELS = require('../config/models');
 const logger = require('./logger');
 const { dispatchWithFallback } = require('./llm/call');
 const {
-  PROMPT_VERSION, MAX_OUTPUT_TOKENS, SYSTEM_PROMPT, RESPONSE_SCHEMA,
-  buildUserText, photoLabel, validateVisitPhotos, contextHash,
+  MAX_OUTPUT_TOKENS, promptFor, buildUserText, photoLabel, validateVisitPhotos, contextHash,
 } = require('./lawn-visit-input');
 const { validateAssessmentJson, normalizeAssessment, emptyAnalysis } = require('./lawn-visit-result');
 const { withoutNoteInfluencedProse } = require('./lawn-visit-customer-copy');
@@ -13,8 +12,12 @@ const { refereeVisit, skippedReferee } = require('./lawn-visit-referee');
 
 // Invalid input fails before a paid call. Provider misses return an explicit
 // unavailable result with no invented scores. The route owns the feature gate.
-async function analyzeVisit({ photos = [], visionContext = {}, thinkingLevel } = {}) {
-  const { error, zones } = validateVisitPhotos(photos);
+// `shotList` is GATE_LAWN_SHOT_LIST as the route decided it for this request:
+// true widens the photo contract to the eight-shot list (cap 8) and reads the
+// visit under the shot-list prompt variant (shot guide, its own prompt version,
+// server-side evidence rules). Off = unchanged.
+async function analyzeVisit({ photos = [], visionContext = {}, thinkingLevel, shotList = false } = {}) {
+  const { error, zones } = validateVisitPhotos(photos, { shotList });
   if (error) throw Object.assign(new Error(error), { code: 'INVALID_VISIT_PHOTOS', statusCode: 400 });
   const context = visionContext || {};
   const images = photos.map((photo, index) => ({
@@ -22,27 +25,28 @@ async function analyzeVisit({ photos = [], visionContext = {}, thinkingLevel } =
     mimeType: (photo.mimeType || 'image/jpeg').toLowerCase(),
     label: photoLabel(index, zones[index]),
   }));
+  const prompt = promptFor({ shotList });
   const started = Date.now();
   const policy = MODELS.TEXT_POLICIES.lawnVisitAssessment;
   const payload = {
-    system: SYSTEM_PROMPT,
-    text: buildUserText(photos.length, context),
+    system: prompt.system,
+    text: buildUserText(photos.length, context, { shotList, zones }),
     images,
     jsonMode: true,
-    jsonSchema: RESPONSE_SCHEMA,
+    jsonSchema: prompt.schema,
     maxTokens: MAX_OUTPUT_TOKENS,
     ...(thinkingLevel ? { thinkingLevel } : {}),
     reasoningEffort: 'medium',
     laneId: 'lawn_visit_assessment',
-    promptVersion: PROMPT_VERSION,
+    promptVersion: prompt.version,
   };
   const outcome = await dispatchWithFallback(policy, payload, { validate: (result) => validateAssessmentJson(result, photos.length) });
   // GATE_LAWN_ASSESSMENT_REFEREE (owner ruling 2026-09-29), read at call time.
   // Off: nothing below runs and the return shape is exactly what it always was.
   const refereeOn = lawnAssessmentRefereeLive();
   const base = {
-    promptVersion: PROMPT_VERSION,
-    contextHash: contextHash({ photos, photoZones: zones, visionContext: context }),
+    promptVersion: prompt.version,
+    contextHash: contextHash({ photos, photoZones: zones, visionContext: context, shotList }),
     // The stored snapshot intentionally omits notes. The run writer uses this
     // marker to make such a replay ineligible for exact-input comparisons.
     visionContext: contextSnapshot(context),
@@ -84,7 +88,7 @@ async function analyzeVisit({ photos = [], visionContext = {}, thinkingLevel } =
     // `raw` stays the provider's own untouched answer; a settled name tie-break
     // changes only the normalized fields, and `referee` records what moved.
     usage: outcome.usage || null, raw: outcome.json,
-    ...withoutNoteInfluencedProse(normalizeAssessment(assessed, photos.length, zones), context.technicianNotes),
+    ...withoutNoteInfluencedProse(normalizeAssessment(assessed, photos.length, zones, { shotList }), context.technicianNotes),
     // Gate on: latency covers the second opinion and referee calls too.
     ...(refereeOn ? { referee, latencyMs: Date.now() - started } : {}),
   };

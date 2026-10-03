@@ -282,6 +282,7 @@ async function freezeLawnVisitMemory(serviceRecordId, entry, knex) {
  */
 async function resolveVisitMemoryForRender({
   structuredNotes, serviceRecordId, customerId, reportV2, assessmentId, serviceDate, priorVisit, knex, degraded = false,
+  onCreated = null,
 } = {}) {
   const stored = storedVisitMemoryFor(structuredNotes, assessmentId);
   if (stored) return { sinceLast: canonical(stored.sinceLast || null), unfrozen: false };
@@ -307,9 +308,99 @@ async function resolveVisitMemoryForRender({
   // wins: a degraded entry could never be repaired). The prior's frozen block
   // does not depend on this visit's inputs, so it is still served, read-only.
   if (degraded) return { sinceLast: canonical(sinceLast), unfrozen: true };
-  const frozen = await freezeLawnVisitMemory(serviceRecordId, { ...memory, sinceLast }, knex);
+  const entry = { ...memory, sinceLast };
+  const frozen = await freezeLawnVisitMemory(serviceRecordId, entry, knex);
   if (!frozen) return { sinceLast: canonical(sinceLast), unfrozen: true };
+  // `onCreated` (P19b, only passed while GATE_LAWN_PAIRED_RECHECK is live) hears
+  // about the ONE render that won the first-writer race and created the entry,
+  // never about a replay or a lost race (freeze hands back the winner's own
+  // object then). It is a notification: it must not throw into the render.
+  if (typeof onCreated === 'function' && frozen === entry) {
+    try { onCreated({ serviceRecordId, customerId, assessmentId, entry: frozen }); } catch (err) {
+      logger.warn(`[lawn-visit-memory] onCreated failed for ${serviceRecordId}: ${err.message}`);
+    }
+  }
   return { sinceLast: canonical(frozen.sinceLast || null), unfrozen: false };
+}
+
+/**
+ * The block as the PUBLIC report payload carries it (reportV2.sinceLast): the
+ * paired-photo recheck (P19b) is engine input, never payload, so a check's
+ * `recheck` / `recheckOverride` and the block's `photoPairs` are left off. A
+ * block with none of them is returned as is (same object), so every entry that
+ * predates the recheck, and every render with the gate off, is byte-identical.
+ */
+function publicSinceLast(sinceLast) {
+  if (!sinceLast || typeof sinceLast !== 'object') return sinceLast;
+  const checks = Array.isArray(sinceLast.checks) ? sinceLast.checks : [];
+  const carries = checks.some((c) => c && typeof c === 'object' && ('recheck' in c || 'recheckOverride' in c));
+  if (!carries && !('photoPairs' in sinceLast)) return sinceLast;
+  const { photoPairs, ...rest } = sinceLast; // eslint-disable-line no-unused-vars
+  return {
+    ...rest,
+    checks: checks.map((c) => {
+      if (!c || typeof c !== 'object') return c;
+      const { recheck, recheckOverride, ...kept } = c; // eslint-disable-line no-unused-vars
+      return kept;
+    }),
+  };
+}
+
+/**
+ * Write the paired-photo recheck (P19b) onto an ALREADY FROZEN entry's
+ * sinceLast, inside the same store the progress engine reads. Rules, all
+ * enforced here and nowhere else:
+ *   - never creates an entry (no entry for this assessment, or none with a
+ *     sinceLast block, writes nothing: a degraded or missing render froze
+ *     none, and this must not invent one);
+ *   - first writer wins PER CHECK: a check that already carries a `recheck`
+ *     keeps it, whoever wrote it (so an office_review is never replaced by a
+ *     later photo read), and `photoPairs` is set once;
+ *   - the update is compare-and-set on the entry as read (jsonb equality), so a
+ *     concurrent writer on the same entry forces a re-read, never a lost write;
+ *   - nothing else in structured_notes or in the entry changes.
+ * `rechecks` is { [checkKey]: { verdict, source, ... } }; `photoPairs` the
+ * whole-lawn pair verdicts. Returns { written: [checkKey...], photoPairs: bool }
+ * or null when nothing could be stored (the caller only logs it).
+ */
+async function recordPairedRecheck(serviceRecordId, assessmentId, { rechecks = {}, photoPairs = [] } = {}, knex) {
+  if (!serviceRecordId || !assessmentId || !knex) return null;
+  try {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const row = await knex('service_records').where({ id: serviceRecordId }).first('structured_notes');
+      const entry = storedVisitMemoryFor(row?.structured_notes, assessmentId);
+      const sinceLast = entry?.sinceLast;
+      if (!sinceLast || typeof sinceLast !== 'object' || !Array.isArray(sinceLast.checks)) return null;
+
+      const written = [];
+      const checks = sinceLast.checks.map((check) => {
+        const record = check && typeof check === 'object' ? rechecks[check.key] : null;
+        if (!record || check.recheck != null || check.recheckOverride != null) return check;
+        written.push(String(check.key));
+        return { ...check, recheck: record };
+      });
+      const addPairs = !('photoPairs' in sinceLast) && Array.isArray(photoPairs) && photoPairs.length > 0;
+      if (!written.length && !addPairs) return { written: [], photoPairs: false };
+
+      const next = { ...entry, sinceLast: { ...sinceLast, checks, ...(addPairs ? { photoPairs } : {}) } };
+      const updated = await knex('service_records')
+        .where({ id: serviceRecordId })
+        .whereRaw("COALESCE(structured_notes::jsonb, '{}'::jsonb) -> 'lawnVisitMemory' -> ? = ?::jsonb", [assessmentId, JSON.stringify(entry)])
+        .update({
+          structured_notes: knex.raw(
+            "COALESCE(structured_notes::jsonb, '{}'::jsonb) || jsonb_build_object('lawnVisitMemory',"
+            + " COALESCE(COALESCE(structured_notes::jsonb, '{}'::jsonb) -> 'lawnVisitMemory', '{}'::jsonb) || ?::jsonb)",
+            [JSON.stringify({ [assessmentId]: next })],
+          ),
+        });
+      if (updated > 0) return { written, photoPairs: addPairs };
+      // The entry moved between the read and the write: read it again.
+    }
+    return null;
+  } catch (err) {
+    logger.warn(`[lawn-visit-memory] paired recheck write failed for ${serviceRecordId}: ${err.message}`);
+    return null;
+  }
 }
 
 module.exports = {
@@ -322,4 +413,6 @@ module.exports = {
   buildSinceLast,
   freezeLawnVisitMemory,
   resolveVisitMemoryForRender,
+  publicSinceLast,
+  recordPairedRecheck,
 };

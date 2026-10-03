@@ -39,6 +39,10 @@ const LAWN_METHODS = [
   { value: 'trunk_injection', label: 'Trunk injection' },
 ];
 const FINDINGS_TYPE = 'one_time_lawn_treatment';
+// The one predicate for "this visit is the lawn re-service" (its own sheet and gate): the
+// completion profile's service key. The regular lawn Fast Complete reuses it to exclude
+// these visits.
+const isLawnReserviceProfile = (profile) => profile?.serviceKey === SERVICE_KEY;
 const HISTORY_PAGE_SIZE = 50;
 const HISTORY_MAX_ROWS = 300;
 // 'rescheduled' is the phantom row a legacy customer reschedule leaves behind
@@ -238,7 +242,7 @@ async function buildLawnReserviceFastContext(serviceId, knex = db) {
   if (!ok) return { ok: false, reason };
   const service = recapServiceIdentity(svc, profile);
   if (!profile) return { ok: true, eligible: false, reason: 'profile_unavailable', service };
-  if (profile.serviceKey !== SERVICE_KEY) return { ok: false, reason: 'not_lawn_re_service' };
+  if (!isLawnReserviceProfile(profile)) return { ok: false, reason: 'not_lawn_re_service' };
   const ineligibleReason = await lawnReserviceIneligibleReason(svc, profile, knex);
   if (ineligibleReason) return { ok: true, eligible: false, reason: ineligibleReason, service };
 
@@ -275,6 +279,7 @@ async function buildLawnReserviceFastContext(serviceId, knex = db) {
 module.exports = {
   SERVICE_KEY,
   FINDINGS_TYPE,
+  isLawnReserviceProfile,
   LAWN_METHODS,
   lawnMethodChoices,
   buildLawnReserviceFastContext,

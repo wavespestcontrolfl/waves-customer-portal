@@ -533,7 +533,7 @@ export function LawnPhotoStrip({ photos = [], summary = null, embedded = false, 
               <figure key={i} style={{ margin: 0, flex: '0 0 100%', scrollSnapAlign: 'center' }}>
                 {/* Eager on purpose: these are presigned URLs, and lazy
                     deferred the fetch until after they expired — swiped-to
-                    slides rendered blank (owner-reported). ≤5 photos. */}
+                    slides rendered blank (owner-reported). ≤8 photos. */}
                 <img
                   src={p.url}
                   alt={p.label || 'Lawn photo'}
@@ -824,6 +824,16 @@ export function LawnWateringBanner({ banner, style = null }) {
   const ended = watering && !(print || printing) && Number.isFinite(expiresMs) && Date.now() > expiresMs;
   const hold = watering && BANNER_HOLD_STATES.includes(banner.state);
   const mowAsBody = watering && mowLine;
+  // GATE_LAWN_WATERING_FORECAST. Both lines are LIVE-VIEW additions the server
+  // only sends to the live payload (never for a hold); the client also keeps
+  // them off anything printed, off a banner whose note has ended, and off a
+  // hold. The measured-rain note sits UNDER the instruction (never replaces
+  // it: the customer may still need it) and, once it exists, supersedes the
+  // forecast sentence. lawn-report-lead.js leadWords() counts exactly one of
+  // the two with this same rule.
+  const live = watering && !ended && !(print || printing) && !hold;
+  const observedLine = live && typeof banner.observedRain?.line === 'string' && banner.observedRain.line ? banner.observedRain.line : null;
+  const forecastLine = live && !observedLine && typeof banner.forecastLine === 'string' && banner.forecastLine ? banner.forecastLine : null;
   return (
     <Card style={{ ...(hold ? { background: COLORS.sand } : {}), ...(style || {}) }}>
       <div data-testid="lawn-watering-banner" data-state={banner.state ?? 'mow'} data-ended={ended ? 'true' : 'false'}>
@@ -840,6 +850,12 @@ export function LawnWateringBanner({ banner, style = null }) {
             {rest.map((line) => (
               <p key={line} style={{ fontSize: 16, color: BODY, lineHeight: 1.5, margin: '8px 0 0' }}>{line}</p>
             ))}
+            {observedLine && (
+              <p data-testid="lawn-watering-banner-observed" style={{ fontSize: 16, color: BODY, lineHeight: 1.5, margin: '8px 0 0' }}>{observedLine}</p>
+            )}
+            {forecastLine && (
+              <p data-testid="lawn-watering-banner-forecast" style={{ fontSize: 16, color: BODY, lineHeight: 1.5, margin: '8px 0 0' }}>{forecastLine}</p>
+            )}
           </>
         )}
         {mowAsBody && (
