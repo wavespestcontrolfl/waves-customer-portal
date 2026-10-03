@@ -85,7 +85,7 @@ describe('buildSelectionQuery', () => {
     // slack) of last_attempt_at, or when there is no payload at all.
     for (const flags of [[], ['--status=all-failed']]) {
       const { text } = replay.buildSelectionQuery(replay.parseArgs(flags));
-      expect(text).toMatch(/last_attempt_at - data_saved_at <= \(COALESCE\(lookup_ms, 0\)::float8 \/ 1000 \+ 60\) \* interval '1 second'/);
+      expect(text).toMatch(/\(last_attempt_at - data_saved_at\) BETWEEN \(COALESCE\(lookup_ms, 0\)::float8 \/ 1000 - 5\)/);
       expect(text).toMatch(/data_saved_at IS NULL AND property_record IS NULL/);
       // a cache hit is not a refresh: it keeps the payload it served
       expect(text).toMatch(/last_attempt_status = 'cache_hit'/);
@@ -163,7 +163,7 @@ describe('fetchRowsFromDb', () => {
 
 describe('classifyReplay', () => {
   const ran = (over = {}) => ({ status: 'ran', streetExists: true, hasExactMatch: false, nearestNumbers: [], county: 'Manatee', errors: [], ...over });
-  const base = (over = {}) => ({ snapshot: {}, countyUsed: 'Manatee', storedParcelId: null, audit: ran(), point: { status: 'none', errors: [] }, ...over });
+  const base = (over = {}) => ({ snapshot: {}, countyUsed: 'Manatee', storedCounty: 'Manatee', storedParcelId: null, audit: ran(), point: { status: 'none', errors: [] }, ...over });
 
   test('street not on the roll', () => {
     expect(replay.classifyReplay(base({ audit: ran({ streetExists: false }) }))).toBe('address_text_miss');
@@ -277,19 +277,19 @@ describe('finalizeResult', () => {
     const matchedPoint = { status: 'kept', errors: [] };
     const none = { status: 'none', errors: [] };
     const audit = { status: 'no_signal', errors: [] };
-    const recovered = replay.finalizeResult({ storedParcelId: null, countyUsed: 'Manatee', snapshot: {}, audit, point: matchedPoint, expect: 'matched_now' });
+    const recovered = replay.finalizeResult({ storedParcelId: null, countyUsed: 'Manatee', storedCounty: 'Manatee', snapshot: {}, audit, point: matchedPoint, expect: 'matched_now' });
     expect(recovered).toMatchObject({ stop: 'matched_now', parcelRecovered: true, regression: false, expectOk: true });
-    const regressed = replay.finalizeResult({ storedParcelId: '123', countyUsed: 'Manatee', snapshot: {}, audit, point: none });
+    const regressed = replay.finalizeResult({ storedParcelId: '123', countyUsed: 'Manatee', storedCounty: 'Manatee', snapshot: {}, audit, point: none });
     expect(regressed).toMatchObject({ stop: 'no_parcel_at_point', regression: true, expectOk: null });
-    const sameParcel = replay.finalizeResult({ storedParcelId: '12-345', countyUsed: 'Manatee', snapshot: {}, audit, point: { status: 'kept', parcelId: '12345', errors: [] } });
+    const sameParcel = replay.finalizeResult({ storedParcelId: '12-345', countyUsed: 'Manatee', storedCounty: 'Manatee', snapshot: {}, audit, point: { status: 'kept', parcelId: '12345', errors: [] } });
     expect(sameParcel.regression).toBe(false);
-    const otherParcel = replay.finalizeResult({ storedParcelId: '123', countyUsed: 'Manatee', snapshot: {}, audit, point: { status: 'kept', parcelId: '999', errors: [] } });
+    const otherParcel = replay.finalizeResult({ storedParcelId: '123', countyUsed: 'Manatee', storedCounty: 'Manatee', snapshot: {}, audit, point: { status: 'kept', parcelId: '999', errors: [] } });
     expect(otherParcel.regression).toBe(true);
-    const auditOnly = replay.finalizeResult({ storedParcelId: '123', countyUsed: 'Manatee', snapshot: {}, audit: { status: 'ran', streetExists: true, hasExactMatch: true, errors: [] }, point: none });
+    const auditOnly = replay.finalizeResult({ storedParcelId: '123', countyUsed: 'Manatee', storedCounty: 'Manatee', snapshot: {}, audit: { status: 'ran', streetExists: true, hasExactMatch: true, errors: [] }, point: none });
     expect(auditOnly).toMatchObject({ stop: 'matched_now', regression: true });
-    const prefix = replay.finalizeResult({ storedParcelId: null, countyUsed: 'Manatee', snapshot: {}, audit, point: { status: 'dropped', dropReason: 'x', errors: [] }, expect: 'point_parcel_dropped' });
+    const prefix = replay.finalizeResult({ storedParcelId: null, countyUsed: 'Manatee', storedCounty: 'Manatee', snapshot: {}, audit, point: { status: 'dropped', dropReason: 'x', errors: [] }, expect: 'point_parcel_dropped' });
     expect(prefix.expectOk).toBe(true);
-    const wrong = replay.finalizeResult({ storedParcelId: null, countyUsed: 'Manatee', snapshot: {}, audit, point: none, expect: 'matched_now' });
+    const wrong = replay.finalizeResult({ storedParcelId: null, countyUsed: 'Manatee', storedCounty: 'Manatee', snapshot: {}, audit, point: none, expect: 'matched_now' });
     expect(wrong.expectOk).toBe(false);
   });
 });
@@ -297,7 +297,13 @@ describe('finalizeResult', () => {
 describe('regression flag: not comparable when the replay does not run the stored source', () => {
   const audit = { status: 'no_signal', errors: [] };
   const none = { status: 'none', errors: [] };
-  const resolved = (over) => replay.finalizeResult({ storedParcelId: '123', countyUsed: 'Manatee', snapshot: {}, audit, point: none, ...over });
+  test('no stored county: neither a regression nor a recovery can be claimed (the live geocoder hint was not persisted)', () => {
+    const kept = { status: 'kept', parcelId: '999', errors: [] };
+    expect(replay.finalizeResult({ storedParcelId: '123', countyUsed: null, storedCounty: null, snapshot: {}, audit, point: kept }).regression).toBeNull();
+    expect(replay.finalizeResult({ storedParcelId: null, countyUsed: null, storedCounty: null, snapshot: {}, audit, point: kept }).parcelRecovered).toBeNull();
+  });
+
+  const resolved = (over) => replay.finalizeResult({ storedParcelId: '123', countyUsed: 'Manatee', storedCounty: 'Manatee', snapshot: {}, audit, point: none, ...over });
 
   test('a county-GIS stored parcel that the replay loses is still a regression', () => {
     expect(resolved({ snapshot: { storedProviders: ['manatee_gis', 'manatee_pao'] } }).regression).toBe(true);
@@ -386,10 +392,12 @@ describe('replayRow', () => {
       auditAddressHouseNumber: jest.fn().mockResolvedValue({ county: 'Manatee', streetExists: true, hasExactMatch: true, nearestNumbers: [] }),
       lookupCountyParcelByPoint: jest.fn().mockResolvedValue({ ...parcel, situsAddress: '9117 STATE ROAD 99 E' }),
     });
-    const r = replay.finalizeResult(await replay.replayRow(row, deps, {}));
+    const r = replay.finalizeResult(await replay.replayRow({ ...row, county: 'Manatee' }, deps, {}));
     expect(r.point.status).toBe('kept');
     expect(r.stop).toBe('commercial_no_suite_path');
     expect(r.parcelRecovered).toBe(true);
+    // The live point budget is passed through.
+    expect(deps.lookupCountyParcelByPoint.mock.calls[0][2]).toHaveProperty('timeoutMs');
   });
 
   test('missing coordinates skip the point step', async () => {

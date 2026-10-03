@@ -94,11 +94,13 @@ const DEFAULT_LIMIT = 500;
 const MAX_CONCURRENCY = 3;
 const DEFAULT_CONCURRENCY = 2;
 const DEFAULT_DELAY_MS = 250;
-// A payload written by the attempt that stamped the row sits within that
-// attempt's own duration of the stamp (data_saved_at = lookup start,
-// last_attempt_at = its finish, lookup_ms = the duration); this much covers the
-// stamp's own write latency.
-const PAYLOAD_SLACK_SECONDS = 60;
+// A payload written by the attempt that stamped the row sits that attempt's
+// own duration before the stamp (data_saved_at = lookup start,
+// last_attempt_at = its finish, lookup_ms = the duration). Both sides of the
+// window are pinned: a later failed refresh keeps the OLD start and duration,
+// so its stamp lands outside "duration ± slack" unless the refresh itself took
+// under the slack. The slack only covers the stamp's own write latency.
+const PAYLOAD_SLACK_SECONDS = 5;
 
 // Gates the replayed parcel guards read at call time (feature-gates.js
 // condoUnitFolioLive: on only when exactly 'true'). A new gate a guard starts
@@ -196,7 +198,8 @@ function buildSelectionQuery(args) {
   // cache hit is not a refresh, so it keeps the payload it served.
   const currentPayload = `(last_attempt_at IS NULL OR last_attempt_status = 'cache_hit'
     OR (data_saved_at IS NULL AND property_record IS NULL)
-    OR last_attempt_at - data_saved_at <= (COALESCE(lookup_ms, 0)::float8 / 1000 + ${PAYLOAD_SLACK_SECONDS}) * interval '1 second')`;
+    OR (last_attempt_at - data_saved_at) BETWEEN (COALESCE(lookup_ms, 0)::float8 / 1000 - ${PAYLOAD_SLACK_SECONDS}) * interval '1 second'
+      AND (COALESCE(lookup_ms, 0)::float8 / 1000 + ${PAYLOAD_SLACK_SECONDS}) * interval '1 second')`;
 
   if (args.status === 'no_parcel') {
     where.push(`last_attempt_status = ${bind('no_parcel')}`, currentPayload);
@@ -373,7 +376,9 @@ async function pointStep(address, geo, countyHint, deps) {
   const diag = { errors: [] };
   let parcel = null;
   try {
-    parcel = await deps.lookupCountyParcelByPoint(geo.lat, geo.lng, { county: countyHint ?? undefined, diag });
+    // The live point step's own budget (parcelGisTimeoutMs; live also caps it
+    // by what is left of the county budget, which only shortens it).
+    parcel = await deps.lookupCountyParcelByPoint(geo.lat, geo.lng, { county: countyHint ?? undefined, diag, timeoutMs: deps.pointTimeoutMs });
   } catch (err) {
     diag.errors.push({ county: countyHint, aborted: false, error: errText(err) });
   }
@@ -452,14 +457,21 @@ function normalizeParcelId(id) {
 // that was never queried (no coordinates, a county with no point layer), or a
 // county query that failed.
 const POINT_NOT_REPLAYED = new Set(['no_coordinates', 'point_lookup_unsupported_county']);
+// No stored county: the live point query was hinted by the geocoder's county,
+// which is not persisted, so an unhinted replay may search counties the live
+// call never did — neither a regression nor a recovery can be claimed.
 const notComparable = (r) => POINT_NOT_REPLAYED.has(r.point?.reason)
   || r.point?.status === 'error'
+  || !r.storedCounty
   || (Array.isArray(r.snapshot?.storedProviders) && r.snapshot.storedProviders.includes('fdor_cadastral'));
 
 function finalizeResult(r) {
   const stop = classifyReplay(r);
   const matched = stop === 'matched_now' || stop === 'commercial_no_suite_path';
-  const parcelRecovered = !r.storedParcelId && matched;
+  // A point parcel found by an unhinted search (no stored county) may sit in a
+  // county the live call never queried: not claimable as a recovery (null).
+  const unhintedPoint = !r.storedCounty && r.point?.status === 'kept';
+  const parcelRecovered = !r.storedParcelId && matched ? (unhintedPoint ? null : true) : false;
   // Same parcel, not just "some match": a guard or geometry change that keeps
   // a DIFFERENT parcel, or an audit hit with no point parcel, is a regression
   // on the clean side.
@@ -668,6 +680,7 @@ async function main(argv = process.argv.slice(2), env = process.env) {
     // Stored county text varies ("MANATEE", "Manatee County"); the live
     // lookup canonicalizes it the same way before choosing a layer.
     normalizeCountyName: countyGis.normalizeCountyName,
+    pointTimeoutMs: require(path.join(__dirname, '..', 'services', 'property-lookup', 'parcel-gis')).parcelGisTimeoutMs(),
   };
 
   const results = await runReplay(rows, deps, {
