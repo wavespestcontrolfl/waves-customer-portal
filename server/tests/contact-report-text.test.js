@@ -167,6 +167,29 @@ describe('dispatchContactReportText', () => {
     expect(lastUpdate()).toMatchObject({ status: 'sent', claimed_at: null });
   });
 
+  test('every write after the claim is fenced to that claim', async () => {
+    const claimedAt = new Date('2026-10-03T15:00:00Z');
+    queueDispatchReads({ ...ROW, claimed_at: claimedAt });
+    sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, retryable: true, code: 'RATE_LIMITED' });
+    await ContactReportText.dispatchContactReportText('row-1');
+    const writes = opsFor('contact_report_texts').slice(1).filter((c) => c.ops.some((o) => o[0] === 'update'));
+    expect(writes).toHaveLength(2); // the send_started_at stamp, then the release
+    for (const write of writes) {
+      expect(write.ops).toContainEqual(['where', { id: 'row-1', status: 'pending', claimed_at: claimedAt }]);
+    }
+  });
+
+  test('a failure is logged by row id and error code, never the error text', async () => {
+    const logger = require('../services/logger');
+    logger.warn.mockClear();
+    queue('contact_report_texts', [ROW]);
+    queue('customers', Object.assign(new Error('insert into ... values (+19415550123, https://portal.example/report/tok)'), { code: '08006' }));
+    await ContactReportText.dispatchContactReportText('row-1');
+    const logged = logger.warn.mock.calls.map((c) => c[0]).join(' ');
+    expect(logged).toMatch(/row row-1 \(08006\)/);
+    expect(logged).not.toMatch(/9415550123|report\/tok/);
+  });
+
   test('the send is stamped under the claim before the sender is called', async () => {
     queueDispatchReads({ ...ROW, claimed_at: new Date('2026-10-03T15:00:00Z') });
     sendCustomerMessage.mockImplementation(async () => {

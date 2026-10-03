@@ -1655,7 +1655,7 @@ primeGuardrails.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV =
               await require('./services/contact-report-text').sweepContactReportTexts();
             });
           } catch (err) {
-            logger.error(`[cron] contact report text sweep failed: ${err.message}`);
+            logger.error(`[cron] contact report text sweep failed (${err.code || err.name || 'error'})`);
           }
         }, { timezone: 'America/New_York' });
 

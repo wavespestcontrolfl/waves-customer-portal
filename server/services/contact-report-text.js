@@ -81,8 +81,15 @@ async function queueContactReportTexts({ customerId, sourceKey, reportUrl, sched
   return ids;
 }
 
-async function settle(id, status, reason = null, extra = {}) {
-  await db('contact_report_texts').where({ id }).update({
+// Every write after the claim is fenced to it (pending, same claimed_at): a
+// dispatch that stalled past its lease writes nothing over the dispatch that
+// took the row since.
+function claimedRow(row) {
+  return db('contact_report_texts').where({ id: row.id, status: 'pending', claimed_at: row.claimed_at });
+}
+
+async function settle(row, status, reason = null, extra = {}) {
+  await claimedRow(row).update({
     status, status_reason: reason ? String(reason).slice(0, 80) : null, claimed_at: null, updated_at: new Date(), ...extra,
   });
 }
@@ -90,8 +97,8 @@ async function settle(id, status, reason = null, extra = {}) {
 // Back to pending for a later sweep (a retryable block, or the send window).
 // Only for an outcome that proves the provider got nothing.
 async function release(row, reason, notBefore = null) {
-  if (row.attempts >= MAX_ATTEMPTS) return settle(row.id, 'failed', `retries_exhausted:${reason}`);
-  return settle(row.id, 'pending', reason, { not_before: notBefore || null, send_started_at: null });
+  if (row.attempts >= MAX_ATTEMPTS) return settle(row, 'failed', `retries_exhausted:${reason}`);
+  return settle(row, 'pending', reason, { not_before: notBefore || null, send_started_at: null });
 }
 
 async function streetAddress(row, customer) {
@@ -119,9 +126,9 @@ async function dispatchContactReportText(id) {
     row = claimed && claimed[0];
     if (!row) return { state: 'not_claimed' };
 
-    if (!enabled()) { await settle(row.id, 'suppressed', 'gate_off'); return { state: 'suppressed' }; }
+    if (!enabled()) { await settle(row, 'suppressed', 'gate_off'); return { state: 'suppressed' }; }
     if (now.getTime() - new Date(row.created_at).getTime() > EXPIRE_MS) {
-      await settle(row.id, 'suppressed', 'expired');
+      await settle(row, 'suppressed', 'expired');
       return { state: 'suppressed' };
     }
     // The contact list is read again at the send: a contact removed, or one
@@ -129,7 +136,7 @@ async function dispatchContactReportText(id) {
     const customer = await loadCustomer(row.customer_id);
     const stillConfirmed = customer
       && (await confirmedContacts(customer)).some((c) => phoneKey(c.phone) === row.phone_key);
-    if (!stillConfirmed) { await settle(row.id, 'suppressed', 'contact_not_confirmed'); return { state: 'suppressed' }; }
+    if (!stillConfirmed) { await settle(row, 'suppressed', 'contact_not_confirmed'); return { state: 'suppressed' }; }
 
     const { renderSmsTemplate } = require('./sms-template-renderer');
     const body = await renderSmsTemplate(TEMPLATE_KEY, {
@@ -138,13 +145,11 @@ async function dispatchContactReportText(id) {
       // A template read that fails throws (the row is released for a retry);
       // only a missing or inactive row reads as off.
     }, { workflow: TEMPLATE_KEY, entity_type: 'customer', entity_id: row.customer_id }, { throwOnError: true });
-    if (!body) { await settle(row.id, 'suppressed', 'template_off'); return { state: 'suppressed' }; }
+    if (!body) { await settle(row, 'suppressed', 'template_off'); return { state: 'suppressed' }; }
 
     // Stamped under the claim, before the provider can be reached. A claim
     // lost to another dispatch (lease expired meanwhile) sends nothing.
-    const started = await db('contact_report_texts')
-      .where({ id: row.id, status: 'pending', claimed_at: row.claimed_at })
-      .update({ send_started_at: new Date(), updated_at: new Date() });
+    const started = await claimedRow(row).update({ send_started_at: new Date(), updated_at: new Date() });
     if (!started) return { state: 'not_claimed' };
     handedToSender = true;
     const result = await require('./messaging/send-customer-message').sendCustomerMessage({
@@ -157,12 +162,12 @@ async function dispatchContactReportText(id) {
       metadata: { original_message_type: 'contact_report_ready', templateKey: TEMPLATE_KEY, contact_report_text_id: row.id },
     });
     if (result?.sent) {
-      await settle(row.id, 'sent', null, { sent_at: new Date() });
+      await settle(row, 'sent', null, { sent_at: new Date() });
       return { state: 'sent' };
     }
     if (result?.code === 'QUIET_HOURS_HOLD' && result.nextAllowedAt) {
       // The send window: the row waits; this attempt does not count.
-      await db('contact_report_texts').where({ id: row.id }).update({
+      await claimedRow(row).update({
         status: 'pending', status_reason: 'send_window', claimed_at: null, send_started_at: null, attempts: db.raw('GREATEST(attempts - 1, 0)'),
         not_before: new Date(result.nextAllowedAt), updated_at: new Date(),
       });
@@ -174,21 +179,23 @@ async function dispatchContactReportText(id) {
         await release(row, result.code || 'retryable_block');
         return { state: 'retry' };
       }
-      await settle(row.id, 'suppressed', result.code || result.reason || 'blocked');
+      await settle(row, 'suppressed', result.code || result.reason || 'blocked');
       return { state: 'suppressed' };
     }
     if (result?.terminal === true) {
       // A definitive provider rejection: nothing was accepted.
-      await settle(row.id, 'failed', result.providerErrorCode || result.code || 'provider_rejected');
+      await settle(row, 'failed', result.providerErrorCode || result.code || 'provider_rejected');
       return { state: 'failed' };
     }
-    await settle(row.id, 'unknown_delivery', result?.providerErrorCode || result?.code || 'provider_failure');
+    await settle(row, 'unknown_delivery', result?.providerErrorCode || result?.code || 'provider_failure');
     return { state: 'unknown_delivery' };
   } catch (err) {
-    logger.warn(`[contact-report-text] dispatch failed (${err.code || err.name || 'error'}): ${err.message}`);
+    // Ids and an error code only: a query error can carry the bound phone and
+    // the bearer report link.
+    logger.warn(`[contact-report-text] dispatch failed for row ${id} (${err.code || err.name || 'error'})`);
     if (row) {
       // Past the sender call the provider may hold the text: never retry.
-      await (handedToSender ? settle(row.id, 'unknown_delivery', 'sender_threw') : release(row, 'dispatch_error')).catch(() => {});
+      await (handedToSender ? settle(row, 'unknown_delivery', 'sender_threw') : release(row, 'dispatch_error')).catch(() => {});
     }
     return { state: 'error' };
   }
@@ -205,7 +212,7 @@ async function notifyContactsReportReady(args) {
     }
     return ids.length;
   } catch (err) {
-    logger.warn(`[contact-report-text] queue failed for ${args?.sourceKey || 'unknown'}: ${err.message}`);
+    logger.warn(`[contact-report-text] queue failed for ${args?.sourceKey || 'unknown'} (${err.code || err.name || 'error'})`);
     return 0;
   }
 }
