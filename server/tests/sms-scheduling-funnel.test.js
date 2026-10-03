@@ -168,3 +168,15 @@ test('recall counts real accepts (offers whose visit then moved into an offered 
   ];
   expect(summarizeRecall(offers, decisions, moves, new Date('2026-10-05T00:00:00Z'))).toEqual({ real_accepts: 2, caught: 1 });
 });
+
+test('recall counts one accept once when an offer was replaced by one carrying the same time', () => {
+  const { summarizeRecall } = require('../services/sms-scheduling-funnel');
+  const slots = [{ date: '2026-10-06', start: '10:00' }];
+  const offers = [
+    { id: 'old', kind: 'move_visit', scheduled_service_id: 'v1', sent_at: '2026-10-01T13:00:00Z', slots },
+    { id: 'new', kind: 'move_visit', scheduled_service_id: 'v1', sent_at: '2026-10-01T15:00:00Z', slots },
+  ];
+  const moves = new Map([['v1', [{ created_at: '2026-10-01T18:00:00Z', new_date: '2026-10-06', new_window: '10:00-11:00' }]]]);
+  const decisions = [{ sms_offer_id: 'new', outcome: 'would_move', would_have: JSON.stringify({ date: '2026-10-06', start: '10:00' }) }];
+  expect(summarizeRecall(offers, decisions, moves, new Date('2026-10-05T00:00:00Z'))).toEqual({ real_accepts: 1, caught: 1 });
+});
