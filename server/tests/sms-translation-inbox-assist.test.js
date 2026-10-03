@@ -73,12 +73,13 @@ describe('inboxAssistFor', () => {
     expect(await inboxAssistFor('c1', NOW)).toMatchObject({ inboundEnglish: READY.inbound_english, replyTranslated: null, heldReason: 'The suggested reply is more than a day old.' });
   });
 
-  test('a reply quoting an arrival time in minutes is offered for 15 minutes only', async () => {
+  test('a reply quoting an arrival time in minutes is never offered; the translation still shows', async () => {
     const eta = { ...READY, reply_english: 'Adam is on the way. ETA: 9 minutes.', reply_translated: 'Adam va en camino. ETA: 9 minutos.' };
-    mockTrial.mockResolvedValue({ ...eta, created_at: new Date('2026-10-03T14:50:00Z') });
-    expect(await inboxAssistFor('c1', NOW)).toMatchObject({ replyTranslated: eta.reply_translated, heldReason: null, customerId: 'c1', replyExpiresAt: '2026-10-03T15:05:00.000Z' });
-    mockTrial.mockResolvedValue({ ...eta, created_at: new Date('2026-10-03T14:40:00Z') });
-    expect(await inboxAssistFor('c1', NOW)).toMatchObject({ replyTranslated: null, heldReason: 'The arrival time in the suggested reply is out of date.' });
+    mockTrial.mockResolvedValue({ ...eta, created_at: new Date('2026-10-03T14:59:00Z') });
+    expect(await inboxAssistFor('c1', NOW)).toMatchObject({
+      inboundEnglish: READY.inbound_english, replyEnglish: null, replyTranslated: null, replyExpiresAt: null,
+      heldReason: 'The reply quotes a live arrival time, so it needs a person.', customerId: 'c1',
+    });
   });
 
   test('only into the thread the text came in on: another To number gets nothing', async () => {

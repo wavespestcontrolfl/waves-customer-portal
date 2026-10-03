@@ -1697,8 +1697,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     };
   }, [active, toNumber, selectedCustomerId, threadVersion, assistRetry]);
 
-  // The suggested reply is good until the server's stated moment (15 minutes
-  // when it quotes minutes-away, otherwise a day): drop it then, keep the translation.
+  // The suggested reply is good until the server's stated moment (a day after
+  // the text): drop it then, keep the translation.
   useEffect(() => {
     if (!translationAssist?.replyTranslated || !translationAssist.replyExpiresAt) return undefined;
     const { trialId } = translationAssist;

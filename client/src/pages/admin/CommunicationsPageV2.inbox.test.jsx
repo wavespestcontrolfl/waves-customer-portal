@@ -735,13 +735,13 @@ it("shows the translation of a text in another language and sends the suggested 
 
 it("drops the suggested reply when its time is up and keeps the translation", async () => {
   const owner = "translation-expiry-owner";
-  const translation = { trialId: 10, customerId: "customer-a", language: "Spanish", inboundEnglish: "Where is the technician?", replyEnglish: "Adam is 9 minutes away.", replyTranslated: "Adam llega en 9 minutos.", heldReason: null, replyExpiresAt: new Date(Date.now() - 1000).toISOString() };
+  const translation = { trialId: 10, customerId: "customer-a", language: "Spanish", inboundEnglish: "Which day is my visit?", replyEnglish: "Your visit is Tuesday, Oct 6.", replyTranslated: "Su visita es el martes 6 de oct.", heldReason: null, replyExpiresAt: new Date(Date.now() - 1000).toISOString() };
   const originalFetch = fetch.getMockImplementation();
   fetch.mockImplementation(async (url, options) => String(url).includes("/communications/agent-draft?")
     ? response({ draft: null, translation }) : originalFetch(url, options));
   setupWithOwner(owner, { customer: { id: "customer-a", phone: "+19415550100" } }); await tick();
   await tick(10);
-  expect(screen.getByText("Where is the technician?")).toBeInTheDocument();
+  expect(screen.getByText("Which day is my visit?")).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Use Reply" })).not.toBeInTheDocument();
   expect(screen.getByText(/No suggested reply\. The suggested reply is out of date\./)).toBeInTheDocument();
 });

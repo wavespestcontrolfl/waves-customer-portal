@@ -964,7 +964,7 @@ const INBOX_PENDING_WINDOW_MS = 3 * 60 * 1000;
  * in the thread (nobody has answered and they have not written again). null when the gate is off, there is no
  * such row, or the read fails. The translated reply is offered only for a 'ready' row under 24 hours old (it may
  * quote a visit time); the English of the customer's text is shown only when its translation passed its checks.
- * A reply quoting minutes-away is offered for 15 minutes. With phoneLast10, only when the text came from that number.
+ * A reply quoting minutes-away is never offered. With phoneLast10, only when the text came from that number.
  * Read-only: staff send through the ordinary composer.
  */
 async function inboxAssistFor(customerId, now = new Date(), phoneLast10 = null) {
@@ -987,15 +987,14 @@ async function inboxAssistFor(customerId, now = new Date(), phoneLast10 = null) 
     const inboundConfirmed = Boolean(row.inbound_english) && !INBOUND_UNCONFIRMED_RE.test(row.hold_reason || '');
     const ageMs = now.getTime() - new Date(row.created_at).getTime();
     const fresh = row.verdict === 'ready' && Boolean(row.reply_translated) && ageMs >= 0 && ageMs <= INBOX_REPLY_MAX_AGE_MS;
-    // a reply that states an arrival time in minutes ("about 9 minutes away") is good for the live drafter's
-    // own 15-minute window only: after it, the figure is not offered to staff
+    // A reply that states an arrival time in minutes ("about 9 minutes away") is never offered: once Use Reply
+    // copies it into the message box nothing re-checks the figure, and the box can be sent or scheduled much
+    // later. Staff see the translation of the text and answer with the live time themselves.
     const quotesEta = fresh && require('./sms-shadow-drafter').findEtaMinutesClaims(row.reply_english || '').length > 0;
-    const etaStale = quotesEta && ageMs > require('./sms-eta-freshness').ETA_FRESHNESS_WINDOW_MS;
-    const ready = fresh && !etaStale;
-    const replyMaxAgeMs = quotesEta ? require('./sms-eta-freshness').ETA_FRESHNESS_WINDOW_MS : INBOX_REPLY_MAX_AGE_MS;
+    const ready = fresh && !quotesEta;
     if (!inboundConfirmed && !ready) return null;
     const held = row.verdict === 'held' ? (HOLD_WORDS.find(([re]) => re.test(row.hold_reason || '')) || [null, 'The reply did not pass every check.'])[1] : null;
-    const staleWords = etaStale ? 'The arrival time in the suggested reply is out of date.' : 'The suggested reply is more than a day old.';
+    const staleWords = quotesEta ? 'The reply quotes a live arrival time, so it needs a person.' : 'The suggested reply is more than a day old.';
     return {
       trialId: row.id,
       smsLogId: row.sms_log_id,
@@ -1007,7 +1006,7 @@ async function inboxAssistFor(customerId, now = new Date(), phoneLast10 = null) 
       heldReason: ready ? null : (held || (row.verdict === 'ready' ? staleWords : null)),
       customerId,
       // the composer drops the reply at this moment without asking again
-      replyExpiresAt: ready ? new Date(new Date(row.created_at).getTime() + replyMaxAgeMs).toISOString() : null,
+      replyExpiresAt: ready ? new Date(new Date(row.created_at).getTime() + INBOX_REPLY_MAX_AGE_MS).toISOString() : null,
       createdAt: row.created_at,
     };
   } catch (err) {
