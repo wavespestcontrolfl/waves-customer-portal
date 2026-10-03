@@ -10,25 +10,20 @@
  * leg before sweeping. Off = bit-for-bit no-op: no reads beyond the gate
  * check, no writes, no LLM calls.
  *
- * LLM REWRITE IS ITS OWN DARK GATE: GATE_PREVISIT_BRIEF_LLM (also read
- * HERE, at call time). Prod evidence (llm_dispatch_log 2026-09-25..26):
- * the Claude leg was rejected 76 of 77 times and the OpenAI fallback 52
- * of 76 by the grounding validator below, so nearly every brief already
- * ends on templateBriefBody — this gate stops paying both providers for
- * rewrites the validator throws away. Off (default; owner decision
- * 2026-09-26) → every brief is built from templateBriefBody with no
- * provider call at all, and the "template for every brief" rule wins
- * over any PRE-EXISTING cached state: an already-stored LLM brief, or a
- * template stuck 'validator'/'transient' (including one already at the
- * attempt cap), is REPLACED with a gate_off template on its next
- * regeneration rather than kept or left capped (codex #5044 r1 P2-1/P2-2)
- * — the validator-rejection attempt cap itself only applies while the
- * gate is ON. A gate-off template is then a STABLE result — the
- * `unchanged` cache branch treats it like a real cache hit (not
- * re-processed every :19/:49 tick) and its llm_attempts always resets to
- * 0. Flipping the gate back on is read at the next sweep tick and earns
- * every one of those visits a genuine fresh LLM attempt (see the
- * `unchanged` and `validator_capped` checks in generateVisitBrief).
+ * NO MODEL CALL: every brief is built from templateBriefBody. A model
+ * used to rewrite the prose, behind GATE_PREVISIT_BRIEF_LLM (owner
+ * decision 2026-09-26, #5044). Prod evidence then (llm_dispatch_log
+ * 2026-09-25..26): the grounding validator rejected the Claude leg 76 of
+ * 77 times and the OpenAI fallback 52 of 76. The gate was later found on
+ * with no record of the flip (2026-10-02: 96 calls, all 48 Claude legs
+ * rejected), so the gate and the provider call were removed (owner
+ * 2026-10-03). The validator (validateBriefJson and its helpers) stays in
+ * this file with its tests, unused by generation.
+ * A stored template is stamped llm_miss_kind 'gate_off' — the same stamp
+ * the gate-off path wrote, so briefs stored before the removal stay cache
+ * hits. A brief stored any other way (an old model rewrite, or a template
+ * stuck 'validator'/'transient') is replaced with a template on its next
+ * regeneration.
  *
  * Shape (mirrors the WDO skeleton in appointment-tagger.js):
  *   - deterministic grounding assembly reusing existing pieces
@@ -36,10 +31,8 @@
  *     since-last-visit, service_products history joined to
  *     products_catalog, the estimate source, and the shared
  *     nextstop-alerts compiler);
- *   - one LLM pass at the WORKHORSE-equivalent visitBrief text policy
- *     (jsonMode, cross-provider) rewriting PROSE only;
- *   - deterministic template fallback on any LLM miss — the brief must
- *     NEVER block or be required for a visit;
+ *   - the deterministic template (templateBriefBody) as the brief body
+ *     — the brief must NEVER block or be required for a visit;
  *   - stored at scheduled_services.pre_service_brief with
  *     pre_service_brief_type = 'visit_brief_v1'. A WDO brief
  *     ('wdo_inspection' — appointment-tagger.triggerWDOPrep's type) is
@@ -70,8 +63,6 @@
 const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
-const MODELS = require('../config/models');
-const { dispatchWithFallback } = require('./llm/call');
 const { compilePropertyAlerts } = require('./nextstop-alerts');
 // The shared deterministic access-code redactor (context-aggregator's own
 // layer) — re-applied here to EVERY free-text slice at the LLM boundary.
@@ -97,26 +88,6 @@ const WDO_BRIEF_TYPE = 'wdo_inspection';
 // same-hash validator_capped templates so capped visits regenerate (codex
 // #4198 r1 P2).
 const PROMPT_VERSION = 'previsit_brief_v6';
-
-// Deterministic validator rejections repeat on every retry while the
-// grounding (and prompt version) are unchanged — the same facts produce the
-// same ungrounded phrasing, and prod burned ~111 dual-provider calls in one
-// day (08-25) re-failing the same visits every :19/:49 tick. After this many
-// LLM attempts per grounding hash the template stands until the grounding
-// changes. Provider outages/truncation stay retryable (miss kind
-// 'transient').
-const VISIT_BRIEF_LLM_ATTEMPT_CAP = 2;
-
-// The cap is only meaningful for the provider/model pair that produced the
-// rejections — a registry model swap (MODEL_WORKHORSE, OPENAI fallback) must
-// get a fresh run at a capped visit, so the fingerprint rides in the stored
-// template and a mismatch restarts the count (codex #3515 r1).
-function visitBriefPolicyFingerprint() {
-  const policy = MODELS.TEXT_POLICIES?.visitBrief || {};
-  return [policy.primary, policy.fallback]
-    .map((r) => (r ? `${r.provider || '?'}:${r.model || '?'}` : '-'))
-    .join('|');
-}
 
 // Statuses that are no longer an upcoming visit (mirrors
 // PREP_TERMINAL_STATUSES in appointment-tagger.js / the admin-schedule
@@ -156,14 +127,6 @@ const APPROVED_NAME_TERM_RE = /^waves\s+pest\s+control$/;
 
 function briefGateEnabled() {
   return process.env.GATE_PREVISIT_BRIEF === 'true';
-}
-
-// The LLM rewrite is a SEPARATE dark gate from brief generation itself
-// (briefGateEnabled above) — off by default (owner decision 2026-09-26):
-// generateBriefBody skips the provider call entirely and every brief is
-// the deterministic template. Read at call time, same convention.
-function briefLlmGateEnabled() {
-  return process.env.GATE_PREVISIT_BRIEF_LLM === 'true';
 }
 
 // Deterministic visit facts for the tech Visit Brief read path — served by
@@ -972,38 +935,7 @@ async function assembleGrounding(svc, dbh = db) {
   };
 }
 
-// ── LLM pass + deterministic fallback ───────────────────────────────────────
-
-const SYSTEM_PROMPT = `You write an INTERNAL pre-visit pocket-reference brief for a Waves Pest Control technician. It is never shown to customers.
-
-You are given deterministic grounding facts: the visit, the customer's prior visits and reviewed notes, property profile notes, account flags, recent call summaries, open estimate scope, and the deterministic product list for this visit.
-
-Rules:
-- Use ONLY the grounding facts. Never invent field observations, conditions, or history. Never predict what the technician "will find".
-- Products: the product list is fixed. Never add, remove, rename, or rank products; prose may reference them by the given names only.
-- Never name a pest or organism target that is not in the facts. Never mention Ganoderma or Thielaviopsis.
-- Never include gate codes, garage codes, lockbox codes, or any credential — you have not been given them and must not guess.
-- Plain, terse field language. No greetings, no markdown, no headings.
-- Closed vocabulary: copy service names, cadence/plan labels ("one-time", "recurring", "quarterly"), tier names, and status words VERBATIM from the facts — never introduce one that the facts do not literally contain, and never paraphrase a service into a different label. When unsure whether a word appears in the facts, use one that does.
-- mentioned_terms: list EVERY product name and EVERY pest/organism/disease you mention anywhere in your response, lowercased. Empty array only if you mention none. A term you mention but do not list makes the response invalid.
-- If the facts include no prior visit, last_visit_summary MUST be the empty string — never write "no prior visits" prose or describe past work.`;
-
-// Structured-output contract (llm/call.js jsonSchema): the provider constrains
-// the reply to this shape; validateBriefJson below still runs every domain
-// check (grounding, banned genera, self-reported terms) on the result.
-const BRIEF_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['priorities', 'watch_items', 'last_visit_summary', 'open_scope', 'customer_context', 'mentioned_terms'],
-  properties: {
-    priorities: { type: 'array', items: { type: 'string' }, description: 'Up to 3 short action items for this visit' },
-    watch_items: { type: 'array', items: { type: 'string' }, description: 'Known issues/quirks worth a glance, from the facts' },
-    last_visit_summary: { type: 'string', description: '1-2 sentences on the last visit, from the facts, or empty string when the facts include no prior visit' },
-    open_scope: { type: 'string', description: 'Open estimate/quote scope in one sentence, or empty string' },
-    customer_context: { type: 'string', description: '1-2 sentences of customer quirks/preferences from calls, notes, flags' },
-    mentioned_terms: { type: 'array', items: { type: 'string' }, description: 'Every product and pest/organism/disease named in this response, lowercased' },
-  },
-};
+// ── Template body + the (unused) model-output validator ────────────────────
 
 function sanitizeList(value, max, itemMax = 200) {
   const list = Array.isArray(value) ? value : [];
@@ -2490,104 +2422,11 @@ function groundingHashFor(g, promptVersion = PROMPT_VERSION) {
     .digest('hex');
 }
 
-async function generateBriefBody(grounding, deps = {}) {
-  // missKind rides back to the generator so deterministic validator
-  // rejections can be attempt-capped; anything else keeps retrying.
-  const fallback = (missKind = 'transient') => ({ via: 'template', body: templateBriefBody(grounding), missKind });
-  // Dark by default (owner decision 2026-09-26): no provider call at all
-  // until GATE_PREVISIT_BRIEF_LLM is exactly 'true'. missKind 'gate_off'
-  // is a distinct provenance from 'validator'/'transient' — it never
-  // advances the validator-rejection attempt cap (generateVisitBrief) and
-  // the caller treats it as a stable, non-reprocessed result.
-  if (!briefLlmGateEnabled()) return fallback('gate_off');
-  if (!process.env.ANTHROPIC_API_KEY && !process.env.OPENAI_API_KEY) return fallback();
-  // An unreadable catalog means NO response can be validated — fail closed
-  // to the template without spending an LLM call at all.
-  if (!grounding.catalogVocabulary) {
-    logger.warn('[previsit-brief] catalog vocabulary unavailable — output unvalidatable; using deterministic template');
-    return fallback();
-  }
-  // Every verdict the validate hook hands the dispatcher is remembered so
-  // the miss can be classified by PROVENANCE (did OUR validator reject this
-  // leg?) rather than by pattern-matching reason strings — shape rejections
-  // (not_an_object, priorities_not_array, empty_output…) are just as
-  // deterministic as grounding ones (codex #3515 r1).
-  const validatorVerdicts = new Set();
-  const validate = (result) => {
-    if (!result?.json) return 'no_json';
-    const reason = validateBriefJson(result.json, grounding).reason || null;
-    if (reason) validatorVerdicts.add(reason);
-    return reason;
-  };
-  const callModel = deps.callModel
-    || ((payload, opts) => dispatchWithFallback(MODELS.TEXT_POLICIES.visitBrief, {
-      laneId: 'previsit_brief',
-      jsonMode: true,
-      jsonSchema: BRIEF_SCHEMA,
-      // 1000 truncated real responses mid-JSON (prod 08-14/15: 36 empty_json
-      // legs + "not_an_object (response truncated at max_tokens=1000)") —
-      // the body plus mentioned_terms self-report doesn't reliably fit.
-      // 2000 still cut ~1 leg in 7 (anthropic_incomplete, 09-05..07).
-      maxTokens: 3000,
-      // 3000 crosses OPENAI_REASONING_FLOOR_TOKENS, which would silently
-      // flip the GPT fallback from 'none' to default 'low' reasoning on
-      // this high-volume summarization lane (codex #3423 r2) — the raise
-      // is JSON headroom only, never a reasoning upgrade.
-      reasoningEffort: 'none',
-      ...payload,
-    }, opts));
-  const attempt = (rejections) => callModel({
-    system: SYSTEM_PROMPT,
-    text: `Grounding facts:\n${JSON.stringify(grounding.llmFacts, null, 2)}`
-      + (rejections?.length ? `\n\n${repairNote(rejections)}` : ''),
-  }, { validate });
-  // The validator's verdicts on a response: every leg OUR validator
-  // rejected (the dispatcher marks them `validator: true`; the verdict set
-  // is the provenance check for injected call paths), or the
-  // defense-in-depth verdict on a body the caller handed back unvalidated.
-  const validatorRejections = (resp) => (resp?.failures || [])
-    .filter((f) => f?.validator === true || validatorVerdicts.has(String(f?.reason || '')))
-    .map((f) => String(f.reason));
-  try {
-    let resp = await attempt(null);
-    let verdict = resp?.ok && resp.json ? validateBriefJson(resp.json, grounding) : null;
-    let rejections = verdict?.reason ? [verdict.reason] : validatorRejections(resp);
-    // ONE repair round: a validator rejection is deterministic for this
-    // grounding, and the fallback leg re-fails the same way on the same
-    // prompt — ~90% of live briefs fell to the template for ordinary
-    // prose ("one-time", "pets") the facts never literally contain
-    // (09-05..07: 56 of 63 chains). Handing the model the exact rejected
-    // terms fixes the draft in place; a second rejection is final.
-    if (!(resp?.ok && resp.json && !verdict?.reason) && rejections.length) {
-      // Codes only: the term half of a reason is model-derived prose
-      // (mentioned_terms, extracted references) and must not reach logs.
-      logger.info(`[previsit-brief] repair round after validator rejection (${[...new Set(rejections.map((r) => String(r).split(':')[0]))].join(' | ')})`);
-      resp = await attempt(rejections);
-      verdict = resp?.ok && resp.json ? validateBriefJson(resp.json, grounding) : null;
-    }
-    if (!resp || !resp.ok || !resp.json) {
-      logger.warn(`[previsit-brief] LLM miss (${resp?.reason || 'no json'}); using deterministic template`);
-      // Every leg rejected by OUR validator = deterministic for this
-      // grounding; provider errors, no_json and truncation (an
-      // `<provider>_incomplete` leg the adapter fails before any validator
-      // runs — a budget problem) stay transient.
-      const legReasons = (resp?.failures || []).map((f) => String(f?.reason || ''));
-      const fromValidator = (r) => validatorVerdicts.has(r);
-      const deterministic = legReasons.length > 0 && legReasons.every(fromValidator);
-      return fallback(deterministic ? 'validator' : 'transient');
-    }
-    // Defense in depth: the dispatcher already ran this validator per leg,
-    // but injected/mocked call paths may not — never trust an unvalidated
-    // response into the stored brief.
-    if (verdict.reason) {
-      logger.warn(`[previsit-brief] LLM output rejected (${verdict.reason}); using deterministic template`);
-      return fallback('validator');
-    }
-    return { via: 'llm', body: verdict.body };
-  } catch (err) {
-    logger.warn(`[previsit-brief] LLM pass failed: ${err.message}; using deterministic template`);
-    return fallback();
-  }
+// The brief body: always the deterministic template, never a provider
+// call. 'gate_off' is the stamp the removed GATE_PREVISIT_BRIEF_LLM-off path
+// wrote; it is kept so briefs stored before the removal stay cache hits.
+async function generateBriefBody(grounding) {
+  return { via: 'template', body: templateBriefBody(grounding), missKind: 'gate_off' };
 }
 
 // ── Generator ───────────────────────────────────────────────────────────────
@@ -2598,7 +2437,7 @@ async function generateBriefBody(grounding, deps = {}) {
  * { skipped: true, reason } otherwise. Never throws for a per-visit data
  * problem; the sweep and the route both surface `reason`.
  */
-async function generateVisitBrief(scheduledServiceId, { dbh = db, deps = {} } = {}) {
+async function generateVisitBrief(scheduledServiceId, { dbh = db } = {}) {
   if (!briefGateEnabled()) return { skipped: true, reason: 'gate_off' };
 
   const svc = await dbh('scheduled_services')
@@ -2632,69 +2471,28 @@ async function generateVisitBrief(scheduledServiceId, { dbh = db, deps = {} } = 
   const groundingHash = hashOf(grounding);
 
   const existing = parseStoredBrief(svc.pre_service_brief);
-  const llmGateOn = briefLlmGateEnabled();
-  const existingIsTemplate = existing?.generated_via === 'template';
-  // Template-generated briefs are NOT a permanent cache hit while the LLM
-  // gate is ON: they exist because a provider was down or a response was
-  // rejected, and an unchanged grounding would otherwise pin the reduced
-  // template forever — each sweep retries the LLM; a repeat miss just
-  // re-stores the template. That is UNCHANGED here (gate-on rule below is
-  // byte-identical to before this dark gate existed: only a non-template
-  // — i.e. a real LLM — brief is a cache hit).
-  //
-  // While the LLM gate is OFF the rule flips: the owner wants a template
-  // for EVERY brief (2026-09-26), so ONLY a brief already stamped
-  // llm_miss_kind 'gate_off' is a stable, deliberate result worth caching
-  // — a cached LLM brief, or a template stuck there for any other reason
-  // (validator/transient), must fall through and be REPLACED with a fresh
-  // gate_off template (codex r1 P2-1: a pre-existing LLM brief must not
-  // keep serving once the gate goes dark). Falling through also means the
-  // validator_capped branch right below must not fire while the gate is
-  // off (P2-2) — it is gate-on-only so a rollback (gate back to 'true')
-  // is never blocked by a cap earned before the gate went dark.
-  const cacheHit = llmGateOn
-    ? !existingIsTemplate
-    : (existingIsTemplate && existing?.llm_miss_kind === 'gate_off');
+  // Only a template already stamped 'gate_off' is a cache hit. A brief
+  // stored any other way (an old model rewrite, or a template stuck
+  // 'validator'/'transient' from when the rewrite ran) falls through and is
+  // replaced with a fresh template (codex #5044 r1 P2-1).
   if (
     String(svc.pre_service_brief_type || '') === VISIT_BRIEF_TYPE
     && existing?.grounding_hash === groundingHash
-    && cacheHit
+    && existing?.generated_via === 'template'
+    && existing?.llm_miss_kind === 'gate_off'
   ) {
     return { skipped: true, reason: 'unchanged', brief: existing };
   }
-  // Deterministic-rejection cap: a template stored because the validator
-  // rejected every leg re-fails identically while the grounding hash is
-  // unchanged — stop spending dual-provider calls after the cap. A changed
-  // grounding (or PROMPT_VERSION bump) changes the hash and retries fresh;
-  // transient misses (provider down, truncation) never enter this branch.
-  // Gate-on only (see above): while the LLM gate is off no provider call
-  // is made regardless, so this cap must never itself block the rollback
-  // — a visit capped before the gate went dark gets restamped 'gate_off'
-  // below (with llm_attempts reset) and earns a genuine first attempt the
-  // moment the gate is set back to 'true'.
-  const policyFingerprint = visitBriefPolicyFingerprint();
-  const sameCapLineage = existing?.grounding_hash === groundingHash
-    && existingIsTemplate
-    && existing?.llm_policy_fingerprint === policyFingerprint;
-  if (
-    llmGateOn
-    && String(svc.pre_service_brief_type || '') === VISIT_BRIEF_TYPE
-    && sameCapLineage
-    && existing.llm_miss_kind === 'validator'
-    && (existing.llm_attempts || 0) >= VISIT_BRIEF_LLM_ATTEMPT_CAP
-  ) {
-    return { skipped: true, reason: 'validator_capped', brief: existing };
-  }
 
-  const { via, body, missKind } = await generateBriefBody(grounding, deps);
+  const { via, body, missKind } = await generateBriefBody(grounding);
 
-  // The LLM leg can run minutes. The CAS below only defends against
-  // OTHER brief writers — preferences, protocol guidance, or the visit
-  // itself may have changed with no competing write. Re-read the
-  // deterministic grounding and verify the hash right before persisting;
-  // a mismatch means this body was built from obsolete facts (stale
-  // access codes included) — drop it and let the next sweep tick
-  // regenerate from the fresh grounding.
+
+  // The CAS below only defends against OTHER brief writers — preferences,
+  // protocol guidance, or the visit itself may have changed with no
+  // competing write. Re-read the deterministic grounding and verify the
+  // hash right before persisting; a mismatch means this body was built
+  // from obsolete facts (stale access codes included) — drop it and let
+  // the next sweep tick regenerate from the fresh grounding.
   if (via !== 'template' || body) {
     const freshSvc = await dbh('scheduled_services')
       .where({ 'scheduled_services.id': scheduledServiceId })
@@ -2714,21 +2512,10 @@ async function generateVisitBrief(scheduledServiceId, { dbh = db, deps = {} } = 
     version: VISIT_BRIEF_TYPE,
     grounding_hash: groundingHash,
     generated_via: via,
-    // Attempt bookkeeping for the deterministic-rejection cap above:
-    // llm_attempts counts VALIDATOR rejections only, accumulating across
-    // same-hash template re-stores; a transient miss preserves the count
-    // without adding to it, so outages can never walk a visit into the cap.
-    // A gate_off store always RESETS to 0 (never carries sameCapLineage's
-    // count forward) — the LLM gate going dark voids any cap earned before
-    // it did, so a rollback (gate back to 'true') always gets a genuine
-    // first attempt rather than landing pre-capped (codex r1 P2-2).
-    ...(via === 'template' ? {
-      llm_miss_kind: missKind || 'transient',
-      llm_policy_fingerprint: policyFingerprint,
-      llm_attempts: missKind === 'gate_off'
-        ? 0
-        : (sameCapLineage ? (existing.llm_attempts || 0) : 0) + (missKind === 'validator' ? 1 : 0),
-    } : {}),
+    // The stamp the unchanged-hash cache check above keys on. llm_attempts
+    // stays in the stored shape (always 0) for readers of older briefs.
+    llm_miss_kind: missKind,
+    llm_attempts: 0,
     // The ET calendar day and service identity this brief was generated
     // FOR. Any writer can reschedule the visit or rewrite its
     // service_type directly (update-details is only ONE mover; estimate
@@ -2893,7 +2680,6 @@ function briefClearOnReclassification(newTag, storedBriefType) {
 
 module.exports = {
   briefGateEnabled,
-  briefLlmGateEnabled,
   visitFactsGateEnabled,
   deterministicVisitFacts,
   generateVisitBrief,
@@ -2919,7 +2705,6 @@ module.exports = {
     buildAccessBlock,
     safeTargets,
     stableStringify,
-    SYSTEM_PROMPT,
     PROMPT_VERSION,
   },
 };
