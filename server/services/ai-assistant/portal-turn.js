@@ -19,7 +19,10 @@ class PortalTurnDeadlineError extends Error {
 }
 
 function logUnexpectedFailure(err, message, fields) {
-  if (err?.code !== 'PORTAL_CHAT_DEADLINE') logger.error(message, fields);
+  if (err?.code === 'PORTAL_CHAT_DEADLINE') return;
+  const candidate = String(err?.code || err?.name || 'UNEXPECTED').toUpperCase();
+  const errorCode = /^[A-Z0-9_]{1,48}$/.test(candidate) ? candidate : 'UNEXPECTED';
+  logger.error(message, { ...fields, errorCode });
 }
 
 function parseJson(value) {
@@ -500,9 +503,7 @@ async function reconcileDurableReplay(row, requestId, customerId, root) {
         updated_at: db.fn.now(),
       }), 'committed handoff completion');
   } catch (err) {
-    if (err?.code !== 'PORTAL_CHAT_DEADLINE') {
-      logger.error(`[portal-chat] committed response cleanup failed: ${err.message}`, { customerId, requestId });
-    }
+    logUnexpectedFailure(err, '[portal-chat] committed response cleanup failed', { customerId, requestId });
   }
   return durable;
 }
@@ -588,7 +589,7 @@ async function runPortalTurn({ requestId, customerId, propertyId = null, channel
       // prefers any durable response and then returns this exact result.
       resolvedResult = structuredClone({ ...result, requestId });
     } catch (err) {
-      logUnexpectedFailure(err, `[portal-chat] turn failed: ${err.message}`, { customerId, requestId });
+      logUnexpectedFailure(err, '[portal-chat] turn failed', { customerId, requestId });
       result = await recoverCommittedResult(turn)
         || fallbackResult(requestId, TIMEOUT_REPLY, turn.fallbackExtras());
     }
@@ -596,7 +597,7 @@ async function runPortalTurn({ requestId, customerId, propertyId = null, channel
     return await finishRequest(turn);
   } catch (err) {
     if (err?.status === 409) throw err;
-    logUnexpectedFailure(err, `[portal-chat] request coordination failed: ${err.message}`, { customerId, requestId });
+    logUnexpectedFailure(err, '[portal-chat] request coordination failed', { customerId, requestId });
     const committed = await recoverOwnedResult(turn, resolvedResult);
     return committed
       || fallbackResult(requestId, TIMEOUT_REPLY, { ...turn?.fallbackExtras(), retryable: true });
