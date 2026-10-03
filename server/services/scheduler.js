@@ -4387,16 +4387,18 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 5:19AM ET — Lawn pre-day spray check (lawn report rebuild P32). Runs
+  // DAILY 5:41AM ET — Lawn pre-day spray check (lawn report rebuild P32). Runs
   // the job card's spray check on today's lawn visits' planned primary
   // products against the property forecast; a hold writes one quiet
   // lawn_spray_hold card to the Dispatch Action Queue per visit per day.
   // Staff-facing only: no bell, no customer message, no visit moved. DARK
   // unless GATE_LAWN_PREDAY_SPRAY_CHECK=true — checked here too so the dark
-  // path never takes the runExclusive advisory lock. Same minute as the
-  // brief sweep's primary pass; this one is a few forecast reads, no LLM.
+  // path never takes the runExclusive advisory lock. Its own minute: 5:19 is the
+  // brief sweep's primary pass, which can hold the shared pool slot past a
+  // waiter's cron-lock deadline (a once-daily job would then skip the day).
+  // 5:41 has no other cron (5:40 is the visibility sweep, 5:45 the next).
   // =========================================================================
-  cron.schedule('19 5 * * *', async () => {
+  cron.schedule('41 5 * * *', async () => {
     const LawnPredaySprayCheck = require('./lawn-preday-spray-check');
     if (!LawnPredaySprayCheck.enabled()) return;
     logger.info('Running: lawn pre-day spray check');

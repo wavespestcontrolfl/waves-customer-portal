@@ -59,6 +59,8 @@ function socketOrigin() {
 // Window event the tech-out drawer listens to: an overflow card for
 // detail.tech_id appeared, changed, or resolved (any dispatcher).
 export const TECH_OUT_ALERTS_EVENT = 'waves:tech-out-alerts-changed';
+// Card types whose identity (customer, service) only the queue read joins in.
+const REHYDRATE_ON_RECEIPT_TYPES = new Set(['visit_not_closed_out', 'lawn_spray_hold']);
 const TECH_OUT_ALERT_TYPE = 'tech_out_overflow';
 
 function relayTechOutAlertChange(alert) {
@@ -196,9 +198,9 @@ export function useDispatchAlerts() {
       if (payload.resolved_at || resolvedIdsRef.current.has(payload.id)) return;
       setAlerts((prev) => mergeAlertBroadcast(prev, payload, resolvedIdsRef.current));
       relayTechOutAlertChange(payload);
-      // The broadcast is the bare row. A "Visit not closed out" card is told apart
-      // by its customer, which only the queue read joins in: re-read for it.
-      if (payload.type === 'visit_not_closed_out' && !payload.customer_first_name) hydrate().catch(() => {});
+      // The broadcast is the bare row. These cards are told apart by their
+      // customer and service, which only the queue read joins in: re-read for them.
+      if (REHYDRATE_ON_RECEIPT_TYPES.has(payload.type) && !payload.customer_first_name) hydrate().catch(() => {});
     }
 
     function handleResolved(payload) {

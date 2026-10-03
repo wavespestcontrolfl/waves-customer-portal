@@ -1,5 +1,5 @@
 /**
- * Lawn pre-day spray check (P32): the 5:19 AM sweep runs the job card's own
+ * Lawn pre-day spray check (P32): the 5:41 AM sweep runs the job card's own
  * spray check on today's lawn visits' planned primary products against the
  * property forecast and writes ONE quiet dispatch card per visit per day.
  * Forecast and database are faked; no real weather or provider is called.
@@ -19,8 +19,8 @@ const Sweep = require('../services/lawn-preday-spray-check');
 const NotificationService = require('../services/notification-service');
 
 const DAY = '2026-10-03';
-// 5:19 AM ET; the visit's window opens at 9:00 AM ET (13:00Z).
-const NOW = new Date('2026-10-03T09:19:00Z');
+// 5:41 AM ET; the visit's window opens at 9:00 AM ET (13:00Z).
+const NOW = new Date('2026-10-03T09:41:00Z');
 const ARRIVAL = new Date('2026-10-03T13:00:00Z');
 const HOUR = 3600000;
 
@@ -97,7 +97,7 @@ describe('lawn pre-day spray check', () => {
   beforeEach(() => { process.env.GATE_LAWN_PREDAY_SPRAY_CHECK = 'true'; jest.clearAllMocks(); });
   afterEach(() => { delete process.env.GATE_LAWN_PREDAY_SPRAY_CHECK; });
 
-  test('rain hold: one quiet card with measured inches, never a percent, and a move when no alternative is known', async () => {
+  test('rain hold: one quiet card with measured inches, never a percent, and a neutral pointer when no alternative is known', async () => {
     const alerts = [];
     // 0.42 in falls inside the 6 h rain-free interval after the 9 AM arrival.
     const d = deps({ ctx: ctxFor([baseLine(herbicide)]), fc: forecast({ rain: { 3: 0.3, 5: 0.12 }, prob: 80 }), alerts });
@@ -107,7 +107,7 @@ describe('lawn pre-day spray check', () => {
     expect(alerts[0]).toMatchObject({ type: 'lawn_spray_hold', severity: 'warn', job_id: 'visit-1' });
     expect(alerts[0].payload.for_date).toBe(DAY);
     expect(alerts[0].payload.lines).toEqual([
-      'Sample Herbicide: hold. 0.42 in of rain forecast in the 6 h after the 9:00 AM arrival. Move the visit to a clearer window.',
+      'Sample Herbicide: hold. 0.42 in of rain forecast in the 6 h after the 9:00 AM arrival. Check the protocol for an alternative, or move the visit.',
     ]);
     expect(JSON.stringify(alerts[0].payload)).not.toMatch(/%|percent|chance|probab/i);
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
@@ -120,12 +120,12 @@ describe('lawn pre-day spray check', () => {
     const alerts = [];
     const windy = deps({ ctx: ctxFor([baseLine(herbicide)]), fc: forecast({ wind: (i) => (i === 2 ? 21.4 : 8) }), alerts });
     await Sweep.runSweep({ dbh: fakeDb({ alerts }), now: NOW, deps: windy });
-    expect(alerts[0].payload.lines[0]).toBe('Sample Herbicide: hold. Wind forecast up to 21.4 mph in the 4 h after the 9:00 AM arrival (label limit 15 mph). Move the visit to a clearer window.');
+    expect(alerts[0].payload.lines[0]).toBe('Sample Herbicide: hold. Wind forecast up to 21.4 mph in the 4 h after the 9:00 AM arrival (label limit 15 mph). Check the protocol for an alternative, or move the visit.');
 
     const cold = [];
     const chilly = deps({ ctx: ctxFor([baseLine(herbicide)]), fc: forecast({ temp: (i) => (i === 1 ? 44 : 60) }), alerts: cold });
     await Sweep.runSweep({ dbh: fakeDb({ alerts: cold }), now: NOW, deps: chilly });
-    expect(cold[0].payload.lines[0]).toBe('Sample Herbicide: hold. Forecast low 44°F in the 4 h after the 9:00 AM arrival (label minimum 50°F). Move the visit to a clearer window.');
+    expect(cold[0].payload.lines[0]).toBe('Sample Herbicide: hold. Forecast low 44°F in the 4 h after the 9:00 AM arrival (label minimum 50°F). Check the protocol for an alternative, or move the visit.');
   });
 
   test('the plan\'s alternative for the same step is named (granular when it is a dry product)', async () => {
@@ -135,6 +135,17 @@ describe('lawn pre-day spray check', () => {
     await Sweep.runSweep({ dbh: fakeDb({ alerts }), now: NOW, deps: d });
     expect(alerts[0].payload.lines[0]).toMatch(/The plan lists granular Sample Granular for the same step, and its check is clear\.$/);
     expect(alerts[0].payload.holds[0].alternative).toMatchObject({ productName: 'Sample Granular', granular: true });
+  });
+
+  test('a fallback on a SEPARATE protocol line is never guessed from text: the card points at the protocol instead of claiming there is none', async () => {
+    const alerts = [];
+    const celsius = { id: 'p-cel', name: 'Sample Fallback WG', label_verified_at: label, max_wind_mph: 25, application_method: 'granular' };
+    const lines = [baseLine(herbicide), baseLine(celsius, { raw: 'IF forecast >85F use the fallback instead', selected: false, role: 'conditional' })];
+    const d = deps({ ctx: ctxFor(lines), fc: forecast({ wind: 21 }), alerts });
+    await Sweep.runSweep({ dbh: fakeDb({ alerts }), now: NOW, deps: d });
+    expect(alerts[0].payload.lines[0]).toMatch(/Check the protocol for an alternative, or move the visit\.$/);
+    expect(alerts[0].payload.lines[0]).not.toMatch(/Sample Fallback|clearer window/);
+    expect(alerts[0].payload.holds[0].alternative).toBeNull();
   });
 
   test('no hold: no card. A probability with no measured rain, an add-on line and an "if needed" line never make one', async () => {
@@ -234,7 +245,7 @@ describe('rain over a label interval that is not a whole number of hours', () =>
     await Sweep.runSweep({ dbh: fakeDb({ alerts, visits: [{ id: 'visit-1', service_type: 'Lawn Care Visit', window_start: windowStart }] }), now: NOW, deps: d });
     return alerts.map((a) => a.payload.lines[0]);
   }
-  const text = (inches, interval, time = '9:00 AM') => `Sample Herbicide: hold. ${inches} in of rain forecast in the ${interval} after the ${time} arrival. Move the visit to a clearer window.`;
+  const text = (inches, interval, time = '9:00 AM') => `Sample Herbicide: hold. ${inches} in of rain forecast in the ${interval} after the ${time} arrival. Check the protocol for an alternative, or move the visit.`;
 
   test('30 minutes: the slot containing the arrival counts, the next one does not', async () => {
     expect(await run({ minutes: 30, slot: 1 })).toEqual([text('0.2', '30 min')]);

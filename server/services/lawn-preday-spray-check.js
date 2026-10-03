@@ -1,7 +1,7 @@
 /**
  * Lawn pre-day spray check (lawn report rebuild P32). Staff-facing only.
  *
- * The 5:19 AM ET cron runs the job card's own spray check (buildSprayCheck)
+ * The 5:41 AM ET cron runs the job card's own spray check (buildSprayCheck)
  * on each of today's lawn visits' planned PRIMARY products, against the
  * Open-Meteo property forecast for the visit's arrival window. A hold on a
  * primary product writes ONE quiet `lawn_spray_hold` card to the Dispatch
@@ -122,7 +122,13 @@ function describeHold({ product, reason, limits, forecast, rows, arrivalMs, arri
 }
 
 // The plan's alternative for the held step: another product on the SAME
-// protocol line whose own check is clear. Granular (dry) products say so.
+// protocol line (identical `raw` text, the one step identity the resolved
+// lines carry) whose own check is clear. Granular (dry) products say so.
+// A fallback on a SEPARATE line ("IF >85°F → Celsius WG instead") has no step
+// identity in the data (the plan engine's branchGroupId exists only for the
+// May fertilizer branch and the job card's lines do not carry it), so it is
+// never guessed from text: with no same-line alternative the card does not
+// claim there is none, it points the dispatcher at the protocol.
 function alternativeFor(heldLine, lines, verdictOf) {
   const alt = lines.find((l) => l !== heldLine && l.raw && l.raw === heldLine.raw
     && l.product.id !== heldLine.product.id && verdictOf(l.product.id) === 'ok');
@@ -175,7 +181,7 @@ function cardLines(holds) {
     const why = h.parts.map((p) => p.text).join('; ');
     const next = h.alternative
       ? `The plan lists ${h.alternative.granular ? 'granular ' : ''}${h.alternative.productName} for the same step, and its check is clear.`
-      : 'Move the visit to a clearer window.';
+      : 'Check the protocol for an alternative, or move the visit.';
     return `${h.productName}: hold. ${why[0].toUpperCase()}${why.slice(1)}. ${next}`;
   });
 }

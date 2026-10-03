@@ -6377,7 +6377,8 @@ router.get('/alerts', requireAdmin, async (req, res, next) => {
         's.service_type',
         's.scheduled_date',
         's.window_start',
-        's.window_end'
+        's.window_end',
+        's.status as visit_status'
       )
       // Newest first; alerts written in one transaction share created_at
       // (now() is per-transaction), so a tech-out batch orders by its own
@@ -6387,7 +6388,12 @@ router.get('/alerts', requireAdmin, async (req, res, next) => {
 
     if (unresolved) q.whereNull('a.resolved_at');
 
-    const rows = await q;
+    // An open pre-day spray hold whose visit moved, started or closed is left
+    // out and superseded here (every date/time writer, gate on or off).
+    const allRows = await q;
+    const rows = unresolved
+      ? await require('../services/dispatch-alerts').dropInvalidSprayHolds(allRows, etDateString(new Date()))
+      : allRows;
 
     const alerts = rows.map((r) => {
       // Address normalization, same shape as /board and /jobs/:id.

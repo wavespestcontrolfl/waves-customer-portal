@@ -158,3 +158,65 @@ describe('supersedeInvalidSprayHolds', () => {
     expect(dispatchAlerts.OVERDUE_ALERT_TYPES).toEqual(['tech_late', 'unassigned_overdue']);
   });
 });
+
+describe('dropInvalidSprayHolds (the queue read)', () => {
+  const row = (over = {}) => ({ id: 'spray-1', type: 'lawn_spray_hold', job_id: 'visit-1', resolved_at: null,
+    payload: { for_date: '2026-10-03', window_start: '09:00:00' },
+    visit_status: 'confirmed', scheduled_date: '2026-10-03', window_start: '09:00:00', ...over });
+  const other = { id: 'late-1', type: 'tech_late', job_id: 'visit-2', resolved_at: null, payload: {}, visit_status: 'completed', scheduled_date: '2026-09-01' };
+
+  function dbWithResolve() {
+    const { trx, update } = fakeTrx({ updateReturns: [[{ id: 'spray-1', type: 'lawn_spray_hold', payload: {}, resolved_at: 'NOW()' }]] });
+    const db = require('../models/db');
+    db.mockImplementation(trx);
+    db.transaction = async (fn) => fn(trx);
+    return { update, db };
+  }
+
+  test('a placement edit by direct update (date or window changed): the card is left out and superseded, other types untouched', async () => {
+    for (const edit of [{ scheduled_date: '2026-10-08' }, { window_start: '14:00:00' }, { visit_status: 'cancelled' }, { visit_status: null, scheduled_date: null }]) {
+      jest.clearAllMocks();
+      const { update } = dbWithResolve();
+      const rows = [row(edit), other];
+      const out = await dispatchAlerts.dropInvalidSprayHolds(rows, '2026-10-03');
+      expect(out).toEqual([other]);
+      expect(update.mock.calls[0][0].payload).toEqual(expect.objectContaining({ __raw: expect.stringContaining("jsonb_build_object('superseded_at'") }));
+    }
+  });
+
+  test('a past day\'s card is dropped even if its visit never moved', async () => {
+    dbWithResolve();
+    expect(await dispatchAlerts.dropInvalidSprayHolds([row()], '2026-10-04')).toEqual([]);
+  });
+
+  test('a valid card is returned unchanged, with no write', async () => {
+    const { update } = dbWithResolve();
+    const rows = [row(), other];
+    expect(await dispatchAlerts.dropInvalidSprayHolds(rows, '2026-10-03')).toEqual(rows);
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  test('no spray hold in the rows: nothing is read or written', async () => {
+    const { db } = dbWithResolve();
+    const rows = [other];
+    expect(await dispatchAlerts.dropInvalidSprayHolds(rows, '2026-10-03')).toBe(rows);
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('a failed supersede still hides the card; a caller that did not join the visit keeps it', async () => {
+    const db = require('../models/db');
+    db.mockImplementation(() => { throw new Error('write failed'); });
+    db.transaction = async () => { throw new Error('write failed'); };
+    expect(await dispatchAlerts.dropInvalidSprayHolds([row({ scheduled_date: '2026-10-08' })], '2026-10-03')).toEqual([]);
+    const bare = row();
+    delete bare.visit_status;
+    expect(await dispatchAlerts.dropInvalidSprayHolds([bare], '2026-10-03')).toEqual([bare]);
+  });
+
+  test('the list route reads the visit status in its one joined select and filters only the unresolved view', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+    expect(src).toMatch(/'s\.status as visit_status'/);
+    expect(src).toMatch(/unresolved\s*\?\s*await require\('\.\.\/services\/dispatch-alerts'\)\.dropInvalidSprayHolds\(allRows/);
+  });
+});
+
