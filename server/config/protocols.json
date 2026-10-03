@@ -1554,6 +1554,188 @@
   },
   "pest": {
     "name": "Pest Control Protocol",
+    "field_rules": [
+      {
+        "id": "arrive",
+        "ask": "What do I do first at a pest stop?",
+        "rule": "Knock on the door. Then walk around the outside of the home and inspect it.",
+        "source": "Owner walkthrough 2026-10-03"
+      },
+      {
+        "id": "inside-or-outside-first",
+        "ask": "Do I treat inside or outside first?",
+        "rule": "Ask the customer. Do first the part that the customer wants first.",
+        "source": "Owner walkthrough 2026-10-03"
+      },
+      {
+        "id": "outside-order",
+        "ask": "What is the order of work outside?",
+        "rule": "First sweep the webs and the wasp nests. Then apply the Taurus band. Then apply Talak.",
+        "source": "Owner walkthrough 2026-10-03"
+      },
+      {
+        "id": "sweep",
+        "ask": "What do I sweep?",
+        "rule": "Sweep webs and wasp nests from the eaves, doors, windows and lanai. Do this on every visit.",
+        "source": "Owner walkthrough 2026-10-03"
+      },
+      {
+        "id": "outside-sprayer",
+        "ask": "Which sprayer do I use outside?",
+        "rule": "Use the FlowZone backpack for Taurus and for Talak. Use a different backpack for each product. If you have one backpack, rinse it before you change the product.",
+        "source": "Owner walkthrough 2026-10-03"
+      },
+      {
+        "id": "bg-sprayer",
+        "ask": "When do I use the B&G sprayer?",
+        "rule": "Use the B&G sprayer for inside treatment and for mud dauber nests. Do not use it for other outside work.",
+        "source": "Owner walkthrough 2026-10-03"
+      },
+      {
+        "id": "taurus-rate",
+        "ask": "How much Taurus per gallon?",
+        "rule": "Mix 0.8 fl oz Taurus SC in 1 gallon of water. This is 0.06%. Do not mix Taurus and Talak in the same backpack.",
+        "source": "Two-tank ruling 2026-09-28; label EPA 53883-279"
+      },
+      {
+        "id": "taurus-band",
+        "ask": "Where does Taurus go? How much mix?",
+        "rule": "Spray Taurus on the foundation only. Make the band 1 ft up the wall and 1 ft out on the ground. Use 2 quarts of mix for each 160 ft of wall. A home with 200 ft of wall needs about 0.5 fl oz of Taurus.",
+        "source": "Label band volume; owner walkthrough 2026-10-03"
+      },
+      {
+        "id": "taurus-yearly-limit",
+        "ask": "Can I use Taurus again?",
+        "rule": "Apply Taurus a maximum of 2 times each calendar year at each home. Apply it in the rainy season, June to September. After 2 applications, do not apply Taurus at that home until the next year.",
+        "source": "Label cap at 0.06%; two-tank ruling 2026-09-28"
+      },
+      {
+        "id": "talak-rate",
+        "ask": "How much Talak per gallon?",
+        "rule": "Mix Talak 7.9 F at 0.5 fl oz per gallon of water. Do not add LESCO 90/10 or a different surfactant.",
+        "source": "Owner ruling 2026-10-03: no surfactant"
+      },
+      {
+        "id": "talak-band",
+        "ask": "How wide is the Talak band?",
+        "rule": "Spray Talak in a band 6 ft wide around the home. Use a maximum of 10 gallons of mix for each 1,000 sq ft. Wait 7 days or more between applications at the same home.",
+        "source": "Label EPA 91234-145; owner walkthrough 2026-10-03"
+      },
+      {
+        "id": "talak-eaves-lanai-garage",
+        "ask": "What do I spray on the eaves, the lanai and the garage?",
+        "rule": "Use the same Talak mix on the eaves, the lanai or pool cage and the garage. In the garage, spray the door thresholds and the corners. Do this on every visit.",
+        "source": "Owner walkthrough 2026-10-03"
+      },
+      {
+        "id": "talak-ant-trail",
+        "ask": "Can I spray Talak on an ant trail?",
+        "rule": "Do not spray Talak on an ant trail. The spray breaks up the colony and it spreads. Put bait on the trail.",
+        "source": "Two-tank ruling 2026-09-28"
+      },
+      {
+        "id": "talak-rain",
+        "ask": "It is raining. Can I spray Talak?",
+        "rule": "Do not spray Talak in rain.",
+        "source": "Two-tank ruling 2026-09-28"
+      },
+      {
+        "id": "bifenthrin-names",
+        "ask": "Is Talstar P a rotation from Talak?",
+        "rule": "Talak, Talstar P and Bifen I/T are the same chemical, bifenthrin. A change between them is not a rotation. Record all three as Talak.",
+        "source": "Owner ruling 2026-09-11"
+      },
+      {
+        "id": "alpine-outside",
+        "ask": "Can I use Alpine outside?",
+        "rule": "Do not use Alpine WSG outside. The only exception is a mud dauber nest.",
+        "source": "Owner walkthrough 2026-10-03"
+      },
+      {
+        "id": "mud-daubers",
+        "ask": "How do I treat mud daubers?",
+        "rule": "Treat mud dauber nests with Alpine WSG in the B&G sprayer.",
+        "source": "Owner walkthrough 2026-10-03"
+      },
+      {
+        "id": "granules",
+        "ask": "Do I put granules down?",
+        "rule": "Do not apply granules on a normal pest visit.",
+        "source": "Owner walkthrough 2026-10-03"
+      },
+      {
+        "id": "inside-every-visit",
+        "ask": "Do I treat inside?",
+        "rule": "Treat the inside on every pest visit. Do not treat inside if the customer says no.",
+        "source": "Owner ruling 2026-09-29"
+      },
+      {
+        "id": "inside-where",
+        "ask": "Where do I treat inside?",
+        "rule": "Treat the kitchen, the bathrooms, the doors, the windows and other entry points. Also treat each place where the customer reports pests.",
+        "source": "Owner walkthrough 2026-10-03"
+      },
+      {
+        "id": "alpine-inside",
+        "ask": "How do I apply Alpine inside?",
+        "rule": "Inside, apply Alpine WSG with the B&G sprayer. Apply it only to cracks, crevices and voids. Do not fog.",
+        "source": "Owner ruling 2026-10-01; label EPA 499-561"
+      },
+      {
+        "id": "gentrol",
+        "ask": "How much Gentrol?",
+        "rule": "Mix Gentrol at 1 fl oz per gallon. Use it inside only, for roaches. Gentrol does not control ants or fleas.",
+        "source": "Owner ruling 2026-10-01"
+      },
+      {
+        "id": "delta-dust",
+        "ask": "Where does Delta Dust go?",
+        "rule": "Put Delta Dust in wall voids and weep holes. Do not put dust into an active ghost ant nest. The colony splits and spreads.",
+        "source": "Advisor report approved 2026-10-01"
+      },
+      {
+        "id": "nobody-home",
+        "ask": "Nobody is home. What do I do?",
+        "rule": "Treat the outside only. Record that the inside was not treated. A return visit for the inside is not automatic.",
+        "source": "Owner walkthrough 2026-10-03"
+      },
+      {
+        "id": "no-access",
+        "ask": "The gate is locked or a dog is in the yard. What do I do?",
+        "rule": "Treat the areas that you can reach. Record the area that you did not treat and the reason. Do not schedule a return visit.",
+        "source": "Owner walkthrough 2026-10-03"
+      },
+      {
+        "id": "complete-at-stop",
+        "ask": "When do I complete the visit?",
+        "rule": "Complete the visit in the app before you leave the stop.",
+        "source": "Owner walkthrough 2026-10-03"
+      },
+      {
+        "id": "ghost-ant-callback",
+        "ask": "Ghost ants came back. What now?",
+        "rule": "For a ghost ant or white-footed ant callback, use bait. Do not spray more. Put sweet gel or liquid bait at each trail.",
+        "source": "Advisor report approved 2026-10-01"
+      },
+      {
+        "id": "slab-inspection",
+        "ask": "What do I look for at the slab?",
+        "rule": "Find mulch or soil that touches the slab. Tell the customer to keep a dry strip 6 to 12 in wide. Find sprinklers that hit the wall and report them.",
+        "source": "Advisor inspection checklist"
+      },
+      {
+        "id": "ants-on-plants",
+        "ask": "Why are ants on the plants?",
+        "rule": "Look for aphids, scale and whitefly on plants near the home. Their honeydew feeds ants. Record the plant in the service notes.",
+        "source": "Advisor inspection checklist"
+      },
+      {
+        "id": "photos-from-ground",
+        "ask": "Do I need a ladder for photos?",
+        "rule": "Take all photos from the ground. Do not use a ladder. Do not go into a locked gate, a dog yard or a closed lanai for a photo.",
+        "source": "Owner ruling 2026-10-01"
+      }
+    ],
     "notes": [
       "Use these templates as service-line SOPs. Product quantities still come from Inventory service-product usage so estimate pricing stays rule-based while margin checks stay inventory-aware.",
       "Rotate active ingredient classes when a callback shows live activity after the expected control window.",
