@@ -76,7 +76,8 @@ const dbWithOwner = (technician_id, calls = []) => (table) => {
   calls.push(table);
   const chain = {};
   for (const m of ['where', 'whereIn', 'select', 'leftJoin']) chain[m] = () => chain;
-  chain.first = async () => (table === 'scheduled_services' ? { id: 'visit-1', technician_id } : null);
+  // a live visit dated today: technicianVisitRowInScope also checks status and the access window
+  chain.first = async () => (table === 'scheduled_services' ? { id: 'visit-1', technician_id, status: 'scheduled', scheduled_date: new Date().toISOString().slice(0, 10) } : null);
   chain.then = (resolve, reject) => Promise.resolve(table === 'product_aliases' ? [{ product_id: 'p-talak', alias_name: 'Talstar P' }] : []).then(resolve, reject);
   return chain;
 };
