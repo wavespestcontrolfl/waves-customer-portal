@@ -203,8 +203,10 @@ describe('the repeated-miss outreach task follows the confirmation that raised i
       };
       return chain;
     };
-    conn.raw = (sql) => sql;
+    const raws = [];
+    conn.raw = (sql, b) => { raws.push([sql, b]); return sql; };
     expect(await MissedAppointment.evaluateThreshold('c1', 'confirmed_miss', conn, { logId: 'log-9' })).toEqual({ action: 'recommendation_created', skips: 2 });
+    expect(raws[0]).toEqual(['SELECT pg_advisory_xact_lock(hashtext(?))', ['missed_outreach:c1']]);
     expect(JSON.parse(inserts[0].row.metadata)).toEqual({ source: 'missed_appointment_threshold', log_id: 'log-9' });
   });
 
@@ -224,8 +226,10 @@ describe('the repeated-miss outreach task follows the confirmation that raised i
       };
       return chain;
     };
-    sp.raw = (sql) => sql;
+    sp.raw = (sql, b) => { calls.push(['raw', sql, b]); return sql; };
     expect(await MissedAppointment.withdrawOutreachIfBelowThreshold('c1', { transaction: (fn) => fn(sp) })).toEqual({ withdrawn });
+    // the per-customer lock comes first: a concurrent confirmation on another visit counts after this commits
+    expect(calls[0]).toEqual(['raw', 'SELECT pg_advisory_xact_lock(hashtext(?))', ['missed_outreach:c1']]);
     const cancelled = calls.some((c) => c[0] === 'update' && c[1] === 'cancelled');
     expect(cancelled).toBe(withdrawn === 1);
     if (withdrawn) {

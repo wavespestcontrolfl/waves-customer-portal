@@ -69,7 +69,7 @@ class MissedAppointment {
 
   // Write the flagged row (and raise its card). Returns { customerId, logId }, null
   // when the visit or its customer is gone, or STALE_CANDIDATE (nothing written).
-  // The row's id goes on the outreach task it may raise (withdrawOutreachFor).
+  // The row's id goes on the outreach task it may raise, for the record.
   async logSkip(scheduledServiceId, reason, conn, { occurrence = null, lockVisit = false, scanned = null } = {}) {
     const currentQuery = conn('scheduled_services').where({ id: scheduledServiceId });
     if (lockVisit) currentQuery.forUpdate();
@@ -137,6 +137,16 @@ class MissedAppointment {
    * customer_noshow through the rebooker — can run the threshold without
    * inserting the occurrence a second time (codex r2 on #3110).
    */
+  // The outreach count spans ALL of a customer's visits, while a decision locks one
+  // visit. Every count-then-write on the outreach task (raise it, withdraw it) first
+  // takes this per-customer transaction lock, so two decisions on different visits
+  // of one customer run one after the other and each counts what the other
+  // committed. Held to the end of the caller's transaction; on a plain pool
+  // connection it is released at once (the lock-free nightly path, as before).
+  async lockOutreach(customerId, conn) {
+    await conn.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`missed_outreach:${customerId}`]);
+  }
+
   // The customer's distinct missed occurrences in the last 90 days (see evaluateThreshold).
   async countMisses(customerId, conn = db) {
     const personMarkedOnly = require('../not-closed-out').queueEnabled();
@@ -167,6 +177,7 @@ class MissedAppointment {
     // With the office queue on, only person-marked misses count: a row a person
     // confirmed (card or dispatch no-show) or a no-show Quick Move (a person moved
     // it: new_date is set). The nightly check's unconfirmed rows do not.
+    await this.lockOutreach(customerId, conn);
     const totalSkips = await this.countMisses(customerId, conn);
 
     if (totalSkips <= 1) {
@@ -210,6 +221,7 @@ class MissedAppointment {
     if (!customerId || !trx) return { withdrawn: 0 };
     try {
       const withdrawn = await trx.transaction(async (sp) => {
+        await this.lockOutreach(customerId, sp);
         if ((await this.countMisses(customerId, sp)) >= 2) return 0;
         return sp('customer_interactions')
           .where({ customer_id: customerId, interaction_type: 'task', status: 'pending' })
