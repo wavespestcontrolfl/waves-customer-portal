@@ -1196,7 +1196,10 @@ function governingWords(mention, world) {
   const next = Math.min(to, ...inSentence.filter((m) => m.start > mention.start).map((m) => m.start));
   const own = world.tokens.slice(mention.start, next);
   const cut = own.findIndex((token) => CONTRAST_WORDS.has(token));
-  return [...world.tokens.slice(from, firstName), '.', ...(cut === -1 ? own : own.slice(0, cut))].join(' ');
+  // the lead-in covers only the names on its own side of a contrast
+  const crossed = world.tokens.slice(firstName, mention.start).some((token) => CONTRAST_WORDS.has(token));
+  const leadIn = crossed ? [] : world.tokens.slice(from, firstName);
+  return [...leadIn, '.', ...(cut === -1 ? own : own.slice(0, cut))].join(' ');
 }
 
 function productSameAsLast(raw, amount, heard, transcript, unclear, product, world) {

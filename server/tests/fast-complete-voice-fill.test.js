@@ -1885,3 +1885,11 @@ test('a negation in the sentence before does not reach a product that opens the 
   const out2 = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 4, unit: 'fl_oz', sameAsLast: false, method: '', heard: 'Taurus four ounces outside' }] }), ctx, comma);
   expect(out2.products[0]).toMatchObject({ productId: 'p-taurus', amount: 4 });
 });
+
+test('a list lead-in does not carry same-as-last across a "but"', () => {
+  const t = 'Same mix as last time for Taurus, but Talstar was new today.';
+  const out = validateFill(answer({ products: [{ productId: 'p-talak', amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard: 'Talstar was new today' }] }), ctx, t);
+  expect(out.products[0].sameAsLast).toBe(false);
+  const taurus = validateFill(answer({ products: [{ productId: 'p-taurus', amount: 0, unit: 'not_said', sameAsLast: true, method: '', heard: 'Same mix as last time for Taurus' }] }), ctx, t);
+  expect(taurus.products[0].sameAsLast).toBe(true);
+});
