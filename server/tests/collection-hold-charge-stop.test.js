@@ -508,10 +508,12 @@ describe('autoApplyAccountCreditIfEnabled (the automatic seam wrapper) refuses o
     return { credit: require('../services/customer-credit'), fake };
   };
 
-  test('an active dispute hold stops the automatic apply before the customer opt-in read or any balance movement', async () => {
+  test('an active dispute hold stops the automatic apply before any balance movement (the customer row is only locked first, in lock order; its opt-in is never read)', async () => {
     const { credit, fake } = load([{ ...HOLD }]);
     await expect(credit.autoApplyAccountCreditIfEnabled('inv-1')).resolves.toEqual({ applied: 0, skipped: 'dunning_stopped' });
-    expect(fake.mock.calls.map((c) => c[0])).not.toContain('customers');
+    const tables = fake.mock.calls.map((c) => c[0]);
+    expect(tables).not.toContain('customer_credit_ledger');
+    expect(tables).not.toContain('payment_plans');
   });
 
   test('no hold, or a fallback (non-dispute) hold, is not refused for the hold', async () => {

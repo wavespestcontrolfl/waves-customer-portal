@@ -260,8 +260,25 @@ async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fu
     if (requireExtendedCompletionAnchor && requireSelfPayScheduledServiceId == null) {
       return { applied: 0, skipped: 'anchor_unverifiable' };
     }
+    // Customer, then visit, then invoice: the order every Bill-To writer and the saved-card charge take.
+    // The customer and visit rows this apply locks further down (the opt-in read, the self-pay check)
+    // used to come AFTER the invoice row, so an apply holding the invoice and a payer edit or charge
+    // holding the customer waited on each other. Same rows, same locks, only earlier; the invoice's
+    // customer is re-checked once the invoice itself is held.
+    const needsCustomerLock = !customerRequested || requireSelfPayScheduledServiceId != null;
+    const lockOrderRead = await t('invoices').where({ id: invoiceId }).first('customer_id');
+    if (!lockOrderRead) return { applied: 0, skipped: 'not_found' };
+    if (needsCustomerLock && lockOrderRead.customer_id) {
+      await t('customers').where({ id: lockOrderRead.customer_id }).forUpdate().first('id');
+    }
+    if (requireSelfPayScheduledServiceId != null) {
+      await t('scheduled_services').where({ id: requireSelfPayScheduledServiceId }).forUpdate().first('id');
+    }
     const invoice = await t('invoices').where({ id: invoiceId }).forUpdate().first();
     if (!invoice) return { applied: 0, skipped: 'not_found' };
+    if (needsCustomerLock && String(invoice.customer_id) !== String(lockOrderRead.customer_id)) {
+      return { applied: 0, skipped: 'customer_changed' };
+    }
     // An active collections DISPUTE hold (collection-hold.js) stops credit
     // consumption too — implied by refuseWhenDunningStopped, or asked for
     // alone via refuseWhenCollectionHold (the completion route's automatic

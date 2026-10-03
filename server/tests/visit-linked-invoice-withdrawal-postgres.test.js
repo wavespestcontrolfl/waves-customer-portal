@@ -627,6 +627,31 @@ postgres('payer assignment withdraws visit-linked invoices with no packet', () =
     expect(await invoiceRow(packetInvoice)).toMatchObject({ stripe_payment_intent_id: null, scheduled_send_error: expect.stringMatching(new RegExp(`^payer_billed:${activeDefault}`)) });
   });
 
+  test('account-credit apply locks the customer before the invoice, so it queues behind a Bill-To writer without holding the invoice (committed fixture, three connections)', async () => {
+    const { applyAccountCreditToInvoice } = require('../services/customer-credit');
+    const customerId = randomUUID();
+    const invoiceId = randomUUID();
+    await database('customers').insert({ id: customerId, first_name: 'Fixture', last_name: 'Credit', phone: '+12025550122', email: `${customerId}@example.invalid` });
+    await database('invoices').insert({ id: invoiceId, customer_id: customerId, invoice_number: `FIX-${invoiceId.slice(0, 8)}`, token: randomUUID().replace(/-/g, ''), status: 'sent', total: 50 });
+    const billToWriter = await database.transaction();
+    let apply;
+    try {
+      await billToWriter('customers').where({ id: customerId }).forUpdate().first('id'); // a customer Bill-To edit mid-flight
+      const creditTrx = await database.transaction();
+      apply = applyAccountCreditToInvoice({ invoiceId, createdBy: 'test' }, creditTrx)
+        .finally(() => creditTrx.commit().catch(() => {}));
+      // Give the apply time to reach its first lock; it must be waiting on the customer, not holding the invoice.
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      const probe = await database.transaction();
+      try { expect(await probe('invoices').where({ id: invoiceId }).forUpdate().noWait().first('id')).toBeTruthy(); } finally { await probe.rollback(); }
+    } finally {
+      await billToWriter.rollback();
+      if (apply) await apply;
+      await database('invoices').where({ id: invoiceId }).del();
+      await database('customers').where({ id: customerId }).del();
+    }
+  });
+
   test('the fence takes the PENDING payer row FOR SHARE before it reads its active flag, so a concurrent deactivation waits (committed fixture, second connection)', async () => {
     const Linked = require('../services/visit-linked-invoice-withdrawal');
     const customerId = randomUUID();
