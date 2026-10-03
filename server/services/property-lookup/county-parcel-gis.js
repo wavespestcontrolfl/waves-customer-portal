@@ -778,6 +778,9 @@ async function lookupCountyParcelByPoint(lat, lng, options = {}) {
       logger.info('[county-parcel-gis] budget exhausted before all counties tried — degrading', {
         remainingMs,
       });
+      // Untried counties are no evidence of a miss: tell a diag reader (the
+      // replay harness) so a partial search reads as an outage, not "none".
+      recordGisDiagError(options.diag, county, new Error('point query budget exhausted before this county'), true);
       break;
     }
     const parcel = await queryCountyLayer(county, lat, lng, remainingMs, options.diag).catch(() => null);

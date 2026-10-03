@@ -519,3 +519,24 @@ describe('county GIS diag out-param', () => {
     expect(await queryStreetSitusAddresses('Manatee', 'SAMPLE', {})).toBeNull();
   });
 });
+
+describe('county point lookup diag on an exhausted budget', () => {
+  test('a partial unhinted search records an aborted error instead of a silent miss', async () => {
+    const gis = require('../services/property-lookup/county-parcel-gis');
+    const realFetch = global.fetch;
+    const realNow = Date.now;
+    let t = 1_000_000;
+    Date.now = () => t;
+    // The first county answers empty but slowly enough to spend the budget.
+    global.fetch = jest.fn().mockImplementation(async () => { t += 10_000; return { ok: true, json: async () => ({ features: [] }) }; });
+    const diag = { errors: [] };
+    try {
+      const parcel = await gis.lookupCountyParcelByPoint(27.4, -82.5, { timeoutMs: 3500, diag });
+      expect(parcel).toBeNull();
+      expect(diag.errors.some((e) => e.aborted)).toBe(true);
+    } finally {
+      global.fetch = realFetch;
+      Date.now = realNow;
+    }
+  });
+});
