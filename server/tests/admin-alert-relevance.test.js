@@ -334,6 +334,8 @@ describe('class rules', () => {
     expect(await reasonFor(bell)).toEqual({ cls: 'review_low_rating', reason: null });
     review({ review_reply: '   ' });
     expect((await reasonFor(bell)).reason).toBeNull(); // a blank reply is no reply
+    review({ review_reply: '[DRAFT] Thanks for the feedback, Pat.' });
+    expect((await reasonFor(bell)).reason).toBeNull(); // an unpublished draft is not an answer
     review({ review_reply: 'Sorry about that, we are calling you today.' });
     expect((await reasonFor(bell)).reason).toBe('The review has a reply');
     review({ dismissed: true });

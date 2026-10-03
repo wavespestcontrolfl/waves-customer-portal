@@ -345,15 +345,18 @@ function promiseMarksSettled(s) {
 
 // A bad-review bell (review-low-rating-alert.js, one per review, raised only
 // when the review is first stored) is done when the review is answered:
-// a reply on it (ours or one posted on Google, which the sync stores the
-// same way), a person dismissed it on the Reviews page, it left Google
+// a published reply on it (ours or one posted on Google, which the sync
+// stores the same way; an unpublished '[DRAFT] …' reply does not count), a person dismissed it on the Reviews page, it left Google
 // (missing_since), or the row is gone. A bell naming no review is never judged.
 const LOW_RATING_REVIEW_PREFIX = 'review-low-rating:';
 function lowRatingReviewSettled(s) {
   if (!s.refs.reviewId) return null;
   const review = s.review;
   if (!review) return 'The review is gone';
-  if (String(review.review_reply || '').trim()) return 'The review has a reply';
+  // A '[DRAFT] …' reply is ours, unpublished: the review still needs an answer.
+  const { hasRealReply } = require('./review-reply/draft-prefix');
+  const reply = String(review.review_reply || '').trim();
+  if (reply && hasRealReply(reply)) return 'The review has a reply';
   if (review.dismissed === true) return 'The review was dismissed';
   if (review.missing_since) return 'The review left Google';
   return null;
