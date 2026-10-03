@@ -329,7 +329,9 @@ async function resolveLaneState(customer, laneCatalog, database = db) {
   // page renders the friendly not-eligible state with the office contacts.
   // Codex round-11 P2 (PR #5336): the SAME shared computation the SMS promise
   // validators use (reservice-scheduler.reserviceLaneAvailability).
-  const { eligible, open } = await reserviceLaneAvailability(customer, database);
+  // A coordinated read must propagate cancellation before the transaction
+  // becomes unusable. The public page keeps its existing fail-soft verdict.
+  const { eligible, open } = await reserviceLaneAvailability(customer, database, { strict: database !== db });
   const lanes = eligible
     .filter((lane) => laneCatalog[lane])
     .map((lane) => ({
