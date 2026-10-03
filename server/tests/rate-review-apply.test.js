@@ -846,6 +846,43 @@ describe('applyDueRateChanges — per_application', () => {
     expect(JSON.stringify({ v: visits(), c: mockDb.store.customers })).toBe(before);
     expect(mockDb.store.audit_log).toHaveLength(0);
   });
+  // The comms lane's pre-send preflight (rate-review-comms.js linesGoneFor) calls the
+  // apply's own pure predicate, so a letter is held for exactly the structures the
+  // apply refuses. Each case runs BOTH: the apply holds with the reason, and the
+  // comms preflight reports the same reason for the same rows.
+  test.each([
+    ['no open application left', (b) => { b.scheduled_services.forEach((v) => { if (v.status === 'pending') v.status = 'cancelled'; }); }, 'no_future_visit'],
+    ['a target repriced since the notice', (b) => { b.scheduled_services[2].estimated_price = '130.00'; }, 'rate_moved_since_notice'],
+    ['an unpriced visit', (b) => { b.scheduled_services[2].estimated_price = null; }, 'visit_unpriced'],
+    ['an add-on line', (b) => { b.scheduled_service_addons = [{ id: 'ad-1', scheduled_service_id: VISIT(102), estimated_price: '20.00' }]; }, 'visit_has_addons'],
+    ['an appointment discount', (b) => { b.scheduled_services[2].discount_type = 'percent'; b.scheduled_services[2].discount_amount = 10; b.scheduled_services[2].discount_dollars = '11.70'; }, 'visit_has_discount'],
+    ['a structured price that disagrees with the stamp', (b) => { b.scheduled_services[2].primary_line_price = '130.00'; }, 'visit_price_structure'],
+    ['a prepaid visit', (b) => { b.scheduled_services[2].prepaid_amount = '117.00'; }, 'visit_prepaid'],
+    ['a parked reschedule request', (b) => { b.scheduled_services[2].status = 'rescheduled'; }, 'visit_in_reschedule'],
+    ['a NULL-status visit', (b) => { b.scheduled_services.push({ ...b.scheduled_services[1], id: VISIT(510), scheduled_date: '2027-01-10', status: null }); }, 'visit_status_missing'],
+    ['a replaced series', (b) => {
+      const replacement = fixture.pestSeries(1, ['2026-12-12', '2027-03-12']);
+      replacement.all.forEach((v, i) => { v.id = `${VISIT(900 + i)}`; if (v.recurring_parent_id) v.recurring_parent_id = VISIT(900); });
+      b.scheduled_services = b.scheduled_services.map((v) => (v.status === 'pending' ? { ...v, status: 'cancelled' } : v));
+      b.scheduled_services.push(...replacement.all);
+    }, 'plan_replaced'],
+    ['a notice that never recorded its series', (b) => { const meta = { ...b.price_change_notices[0].metadata }; delete meta.series_root_id; b.price_change_notices[0] = { ...b.price_change_notices[0], metadata: meta }; }, 'notice_series_unrecorded'],
+    ['two series on one line', (b) => {
+      const second = fixture.pestSeries(1, ['2026-12-12']);
+      second.all.forEach((v, i) => { v.id = `${VISIT(900 + i)}`; if (v.recurring_parent_id) v.recurring_parent_id = VISIT(900); });
+      b.scheduled_services.push(...second.all);
+    }, 'multiple_series'],
+    ['the named first visit already under way', (b) => { b.price_change_notices[0] = { ...b.price_change_notices[0], metadata: { ...b.price_change_notices[0].metadata, first_visit_id: VISIT(101) } }; b.scheduled_services[1].status = 'en_route'; }, 'effective_visit_started'],
+  ])('comms preflight parity: %s (the apply holds it and the comms lane holds the same reason before sending)', async (_label, mutate, reason) => {
+    const book = sentBook();
+    mutate(book);
+    mockDb.reset(book);
+    const comms = require('../services/rate-review-comms');
+    const gone = await comms._private.linesGoneFor(mockDb, mockDb.store.price_change_notices, { snapshots: mockDb.store.rate_review_snapshots, today: '2026-11-02' });
+    expect([...gone.values()]).toEqual([reason]);
+    const out = await runApply(book);
+    expect(out.holds.map((h) => h.reason)).toEqual([reason]);
+  });
   test('a visit keeping only the audit LINK of a voided/refunded prepay (no live coverage, no prepaid money) is not prepaid — the reprice applies', async () => {
     const book = sentBook();
     book.annual_prepay_terms = [{ id: TERM(1), customer_id: CUSTOMER(1), status: 'refunded', prepay_amount: '400.00', coverage_visit_count: 4, coverage_service_type: 'Lawn Care Program', term_start: '2026-06-01', term_end: '2027-05-31' }];

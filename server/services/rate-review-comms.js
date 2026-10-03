@@ -83,6 +83,7 @@ const REASONS = Object.freeze({
   lane_changed: 'Billing changed since the notice was prepared — prepare it again',
   rate_moved: 'The rate on file is no longer the one in the notice — prepare it again',
   line_gone: 'No open application left on this plan line, or one was repriced since the notice was prepared',
+  apply_hold: 'The plan line has a structure the nightly rate change cannot carry out (add-ons, a discount, prepaid money, a parked reschedule, more than one series, a replaced plan) — fix it before sending',
 });
 
 function badInput(message, status = 400) {
@@ -293,27 +294,40 @@ async function liveMonthlyCents(dbh, n, customer) {
   return cents(customer?.monthly_rate);
 }
 
-// Per-application notices the apply could not carry out any more: the plan
-// line has no open application on or after the effective date (cancelled
-// or emptied since the notice was prepared), or one of those applications
-// was repriced away from the noticed current price. The letter is not sent
-// and nothing is shown as upcoming. Unreadable = treated as gone (held).
-async function linesGoneFor(dbh, notices, { snapshots }) {
-  const { loadLineOpenVisits } = require('./rate-review-apply')._private;
+// Per-application notices the apply could not carry out: the plan line has
+// no open application on or after the effective date, an application was
+// repriced away from the noticed price, or the line's structure is one the
+// apply refuses (a parked reschedule, a statusless visit, add-ons, a
+// discount, prepaid money, several series, a replaced plan, an unrecorded
+// series, a first visit already under way ...). The apply's OWN pure
+// predicate decides (rate-review-apply.js perApplicationStructuralRefusal),
+// so the two cannot drift. Returns Map(noticeId → the apply's hold reason);
+// 'visits_unreadable' when the rows could not be read (held).
+async function linesGoneFor(dbh, notices, { snapshots, today }) {
+  const { loadLineOpenVisits, perApplicationStructuralRefusal } = require('./rate-review-apply')._private;
   const cadenceByNotice = new Map((snapshots || []).map((s) => [String(s.notice_id), s.cadence]));
-  const gone = new Set();
+  const gone = new Map();
   for (const n of notices.filter((x) => x.billing_lane === 'per_application')) {
     try {
-      const visits = await loadLineOpenVisits(dbh, { customerId: n.customer_id, familyKey: n.family_key, cadence: cadenceByNotice.get(String(n.id)) || null, fromDate: ymd(n.effective_date) });
-      const targets = visits.filter((v) => !v.is_callback);
-      if (!targets.length) gone.add(String(n.id));
-      // Every application the apply would reprice must still carry the
-      // noticed current price (its assertFlatTargets refuses the whole
-      // change otherwise) — one repriced occurrence makes the notice moot.
-      else if (targets.some((v) => Math.round(Number(v.estimated_price) * 100) !== noticedCurrent(n))) gone.add(String(n.id));
+      const meta = parseJson(n.metadata, {});
+      const visits = (await loadLineOpenVisits(dbh, { customerId: n.customer_id, familyKey: n.family_key, cadence: cadenceByNotice.get(String(n.id)) || null, fromDate: ymd(n.effective_date) }))
+        .filter((v) => !v.is_callback);
+      const ids = visits.map((v) => v.id);
+      const addonRows = ids.length ? await dbh('scheduled_service_addons').whereIn('scheduled_service_id', ids).select('scheduled_service_id') : [];
+      const addonCounts = new Map();
+      for (const a of addonRows) addonCounts.set(String(a.scheduled_service_id), (addonCounts.get(String(a.scheduled_service_id)) || 0) + 1);
+      const linkedTermIds = [...new Set(visits.map((v) => v.annual_prepay_term_id).filter(Boolean))];
+      const liveTermIds = new Set(linkedTermIds.length
+        ? (await require('./annual-prepay-renewals').coveredTermsAsOf(dbh, today).whereIn('t.id', linkedTermIds).select('t.id')).map((t) => String(t.id))
+        : []);
+      const firstVisit = meta.first_visit_id ? await dbh('scheduled_services').where({ id: meta.first_visit_id }).first('id', 'status') : null;
+      const reason = perApplicationStructuralRefusal({
+        visits, addonCounts, liveTermIds, noticedCurrentCents: noticedCurrent(n), noticedRoot: meta.series_root_id, firstVisit, effectiveDate: ymd(n.effective_date),
+      });
+      if (reason) gone.set(String(n.id), reason);
     } catch (err) {
       logger.warn(`[rate-review-comms] open visits unreadable for notice ${n.id}: ${err.message}`);
-      gone.add(String(n.id));
+      gone.set(String(n.id), 'visits_unreadable');
     }
   }
   return gone;
@@ -365,6 +379,28 @@ async function visitsById(dbh, notices) {
   return new Map(visits.map((v) => [String(v.id), v]));
 }
 
+// Everything the line rules read for a set of notices and their ranking
+// rows, fresh from the database. Used by the preview/send list (the whole
+// batch) and by the send itself (one letter's claimed lines, re-read after
+// the claim).
+async function loadLineContext(dbh, { snapshots, notices, today }) {
+  const customerIds = [...new Set(notices.map((n) => n.customer_id))];
+  const customers = customerIds.length ? await dbh('customers').whereIn('id', customerIds) : [];
+  const prefs = customerIds.length ? await dbh('notification_prefs').whereIn('customer_id', customerIds).catch(() => []) : [];
+  const visitById = await visitsById(dbh, notices);
+  const unsent = notices.filter((n) => !n.sent_at);
+  return {
+    snapshots: new Map(snapshots.map((s) => [String(s.notice_id), s])),
+    notices,
+    customers: new Map(customers.map((c) => [String(c.id), c])),
+    prefs: new Map((prefs || []).map((p) => [String(p.customer_id), p])),
+    declinedTerms: await declinedPrepayTermIds(dbh, notices),
+    liveLanes: await liveLanesFor(dbh, notices, { snapshots, customers, today }),
+    ratesMoved: await ratesMovedFor(dbh, unsent, { customers, visitById }),
+    linesGone: await linesGoneFor(dbh, unsent, { snapshots, today }),
+  };
+}
+
 async function loadBatch(dbh, batchKey, today) {
   const snapshots = await dbh('rate_review_snapshots').where({ batch_key: batchKey }).whereNotNull('notice_id');
   const approvedUnscheduled = await dbh('rate_review_snapshots')
@@ -374,21 +410,7 @@ async function loadBatch(dbh, batchKey, today) {
     .select('id');
   const noticeIds = snapshots.map((s) => s.notice_id);
   const notices = noticeIds.length ? await dbh('price_change_notices').whereIn('id', noticeIds) : [];
-  const customerIds = [...new Set(notices.map((n) => n.customer_id))];
-  const customers = customerIds.length ? await dbh('customers').whereIn('id', customerIds) : [];
-  const prefs = customerIds.length ? await dbh('notification_prefs').whereIn('customer_id', customerIds).catch(() => []) : [];
-  const visitById = await visitsById(dbh, notices);
-  return {
-    snapshots: new Map(snapshots.map((s) => [String(s.notice_id), s])),
-    notices,
-    customers: new Map(customers.map((c) => [String(c.id), c])),
-    prefs: new Map((prefs || []).map((p) => [String(p.customer_id), p])),
-    declinedTerms: await declinedPrepayTermIds(dbh, notices),
-    liveLanes: await liveLanesFor(dbh, notices, { snapshots, customers, today }),
-    ratesMoved: await ratesMovedFor(dbh, notices.filter((n) => !n.sent_at), { customers, visitById }),
-    linesGone: await linesGoneFor(dbh, notices.filter((n) => !n.sent_at), { snapshots }),
-    unscheduled: approvedUnscheduled.length,
-  };
+  return { ...(await loadLineContext(dbh, { snapshots, notices, today })), unscheduled: approvedUnscheduled.length };
 }
 
 // Ordered suppression rules — the first that matches holds the line (or,
@@ -403,7 +425,10 @@ const LINE_RULES = [
   // change the apply refuses.
   ['lane_changed', ({ notice, liveLanes }) => liveLanes.get(String(notice.id)) !== notice.billing_lane],
   ['rate_moved', ({ notice, ratesMoved }) => ratesMoved.has(String(notice.id))],
-  ['line_gone', ({ notice, linesGone }) => linesGone.has(String(notice.id))],
+  ['line_gone', ({ notice, linesGone }) => ['no_future_visit', 'rate_moved_since_notice', 'visits_unreadable'].includes(linesGone.get(String(notice.id)))],
+  // Any other structure the apply's own guards refuse (see linesGoneFor):
+  // the line would be announced and then held, so it is held here instead.
+  ['apply_hold', ({ notice, linesGone }) => linesGone.has(String(notice.id))],
   ['invalid_amount', ({ line }) => !(line.currentCents > 0 && line.newCents > line.currentCents)],
   ['send_uncertain', ({ notice, now }) => sendOutcomeUncertain(notice, now)],
   ['in_flight', ({ notice }) => !SENDABLE_STATUSES.includes(String(notice.status))],
@@ -427,7 +452,7 @@ function planEntry(data, customerId, notices, { today, now }) {
     const snapshot = data.snapshots.get(String(notice.id)) || null;
     const line = lineFor(notice, snapshot, customer);
     const reason = firstMatch(LINE_RULES, { notice, snapshot, line, today, now, declinedTerms: data.declinedTerms, liveLanes: data.liveLanes, ratesMoved: data.ratesMoved, linesGone: data.linesGone });
-    if (reason) entry.suppressedLines.push({ noticeId: notice.id, reason, label: REASONS[reason], service: line.service, effectiveDate: line.effectiveDate });
+    if (reason) entry.suppressedLines.push({ noticeId: notice.id, reason, label: REASONS[reason], service: line.service, effectiveDate: line.effectiveDate, ...(reason === 'apply_hold' ? { applyReason: data.linesGone.get(String(notice.id)) } : {}) });
     else entry.lines.push({ ...line, notice });
   }
   // One order everywhere: the email, the frozen letter and the page.
@@ -665,7 +690,40 @@ async function smsHandoffRefusal(trx, noticeIds, customerId, phone) {
   return null;
 }
 
-async function sendEntry(dbh, entry, { batchKey, costBlock, templateHash, actorId }) {
+// Rules about the notice's send state, not its eligibility: a claimed line
+// is 'sending' by construction.
+const CLAIM_STATE_RULES = new Set(['send_uncertain', 'in_flight']);
+
+// After the claim lands, the line rules run again against the CURRENT rows
+// (the same loaders the preview used): a plan, rate, lane or structure
+// change that committed between the preview read and the claim holds the
+// letter instead of being sent on stale amounts. ok:false → the reason to
+// release the claim with; ok:true → the lines rebuilt from the fresh rows.
+async function revalidateClaimed(dbh, entry, claimed, { today, now }) {
+  const notices = await dbh('price_change_notices').whereIn('id', claimed);
+  const snapshots = await dbh('rate_review_snapshots').whereIn('notice_id', claimed);
+  const ctx = await loadLineContext(dbh, { snapshots, notices, today });
+  const customer = ctx.customers.get(String(entry.customerId)) || null;
+  const rules = LINE_RULES.filter(([name]) => !CLAIM_STATE_RULES.has(name));
+  const lines = [];
+  for (const planned of entry.lines) {
+    const notice = notices.find((n) => String(n.id) === String(planned.noticeId));
+    if (!notice || String(notice.customer_id) !== String(entry.customerId)) return { ok: false, reason: 'notice_repointed' };
+    const snapshot = ctx.snapshots.get(String(notice.id)) || null;
+    const line = lineFor(notice, snapshot, customer);
+    const reason = firstMatch(rules, { notice, snapshot, line, today, now, declinedTerms: ctx.declinedTerms, liveLanes: ctx.liveLanes, ratesMoved: ctx.ratesMoved, linesGone: ctx.linesGone });
+    if (reason) return { ok: false, reason };
+    // The reviewed words: amounts and date must be the ones the owner's
+    // preview digest covered.
+    if (line.currentCents !== planned.currentCents || line.newCents !== planned.newCents || line.effectiveDate !== planned.effectiveDate) return { ok: false, reason: 'line_changed' };
+    lines.push({ ...line, notice });
+  }
+  lines.sort(byEffective);
+  return { ok: true, entry: { ...entry, lines } };
+}
+
+async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash, actorId, today, now }) {
+  let entry = originalEntry;
   const claimed = await claimLines(dbh, entry);
   if (!claimed) return { outcome: 'in_flight' };
   // The recipient is re-read after the claim (a corrected address or phone
@@ -677,6 +735,12 @@ async function sendEntry(dbh, entry, { batchKey, costBlock, templateHash, actorI
     await dbh('price_change_notices').whereIn('id', claimed).where({ status: 'sending' }).update({ status: 'draft', updated_at: new Date() });
     return { outcome: 'in_flight' };
   }
+  const fresh = await revalidateClaimed(dbh, entry, claimed, { today, now });
+  if (!fresh.ok) {
+    await settleLines(dbh, entry, { status: 'draft', keepFrozen: false, frozen: null, hold: fresh.reason });
+    return { outcome: 'in_flight', holdReason: fresh.reason };
+  }
+  entry = fresh.entry;
   const claimKey = claimKeyFor(claimed);
   const payload = letterPayload({ customer, lines: entry.lines.map((l) => ({ ...l, service: [l.serviceLabel, propertyStreetLine(customer)].filter(Boolean).join(' · ') })), costBlock, noticeUrl: noticeUrlFor(entry.lines) });
   const frozen = { key: claimKey, payload, letter: frozenLetter(entry, payload, costBlock) };
@@ -760,32 +824,56 @@ async function sendEntry(dbh, entry, { batchKey, costBlock, templateHash, actorI
     // and sendable again. Attempted (a provider or template failure that
     // may still have delivered): held as send_uncertain with its words, for
     // the owner — never auto-retried, never retired.
-    const attempted = (email.attempted && !emailHold) || sms.attempted;
-    const holdReason = emailHold || smsHold;
+    // A definite rejection from the email library (unconfigured, a hard
+    // provider refusal) is a certain non-send: retryable, not ambiguous.
+    const emailRejected = !!email.definiteNonSend && !emailHold;
+    const attempted = (email.attempted && !emailHold && !emailRejected) || sms.attempted;
+    const holdReason = emailHold || (emailRejected ? 'email_rejected' : null) || smsHold;
     // Nothing reached a provider and a leg was refused inside the fence
     // because the notice moved or the recipient changed: released to draft
     // with the named reason (the preview recomputes who it belongs to) —
     // never parked unreachable.
     if (holdReason && !attempted) {
       await settleLines(dbh, entry, { status: 'draft', keepFrozen: false, frozen, hold: holdReason });
-      return { outcome: 'in_flight', holdReason };
+      return { outcome: emailRejected ? 'rejected' : 'in_flight', holdReason };
     }
     await settleLines(dbh, entry, { status: attempted ? UNCERTAIN : 'unreachable', keepFrozen: attempted, frozen, hold: holdReason });
     return { outcome: attempted ? 'uncertain' : 'unreachable' };
   }
   const sentAt = new Date();
-  // Every line of one letter is stamped together.
+  // Every line of one letter is stamped together, under the customer-comms
+  // fence: a merge or merge undo (which repoints notices under it) either
+  // commits before the stamp, which then sees it, or waits for the stamp.
+  const orphaned = [];
   await dbh.transaction(async (trx) => {
+    await lockCustomerComms(trx, entry.customerId);
     for (const l of entry.lines) {
       const { pending_letter: _p, send_hold: _h, ...meta } = parseJson(l.notice.metadata, {});
       const stamped = await trx('price_change_notices').where({ id: l.noticeId, status: 'sending', customer_id: entry.customerId }).update({
         status: 'sent', sent_at: sentAt, email_sent: !!email.sent, sms_sent: !!sms.sent,
         metadata: JSON.stringify({ ...meta, ...(smsHold ? { sms_withheld: smsHold } : {}), letter: { ...frozen.letter, sent_on: etDateString(sentAt) } }), updated_at: sentAt,
       });
-      if (!stamped) continue; // repointed away mid-send: its ranking row is not this letter's
-      await trx('rate_review_snapshots').where({ notice_id: l.noticeId, status: 'approved' }).update({ status: 'sent', updated_at: sentAt });
+      if (stamped) {
+        await trx('rate_review_snapshots').where({ notice_id: l.noticeId, status: 'approved' }).update({ status: 'sent', updated_at: sentAt });
+      } else {
+        orphaned.push(l);
+      }
+    }
+    // Delivered, but the notice moved to another customer after the provider
+    // took it (a merge undo): never reported sent and never left 'sending' —
+    // held as send_uncertain with the words and the fact recorded, for the owner.
+    for (const l of orphaned) {
+      const { pending_letter: _p, send_hold: _h, ...meta } = parseJson(l.notice.metadata, {});
+      await trx('price_change_notices').where({ id: l.noticeId, status: 'sending' }).update({
+        status: UNCERTAIN, updated_at: sentAt,
+        metadata: JSON.stringify({ ...meta, pending_letter: frozen, delivered_repointed: { at: sentAt.toISOString(), letter_customer_id: String(entry.customerId) } }),
+      });
     }
   });
+  if (orphaned.length) {
+    logger.error(`[rate-review-comms] letter to customer ${entry.customerId} was delivered but ${orphaned.length} notice(s) moved to another customer before the stamp — held as ${UNCERTAIN}`);
+    return { outcome: 'uncertain', holdReason: 'delivered_repointed', delivered: entry.lines.length - orphaned.length };
+  }
   return { outcome: 'sent', email: !!email.sent, sms: !!sms.sent };
 }
 
@@ -812,13 +900,17 @@ async function sendBatch(batchKey, { expectedDigest, actorId = null, dbh = db, n
     await Promise.all(sendable.slice(i, i + SEND_CONCURRENCY).map(async (entry) => {
       if (!rateReviewLive()) { summary.stoppedByGate += 1; return; }
       try {
-        const res = await sendEntry(dbh, entry, { batchKey, costBlock, templateHash, actorId });
+        const res = await sendEntry(dbh, entry, { batchKey, costBlock, templateHash, actorId, today: etDateString(now), now });
         if (res.outcome === 'sent') {
           summary.sent += 1;
           if (res.email) summary.emailed += 1;
           if (res.sms) summary.texted += 1;
         } else if (res.outcome === 'in_flight') summary.inFlight += 1;
-        else if (res.outcome === 'unreachable') summary.unreachable += 1;
+        else if (res.outcome === 'rejected') {
+          // A definite provider refusal: nothing was sent and the lines are back to draft with the reason.
+          summary.failed += 1;
+          logger.error(`[rate-review-comms] email letter rejected for customer ${entry.customerId}: ${res.holdReason}`);
+        } else if (res.outcome === 'unreachable') summary.unreachable += 1;
         else summary.uncertain += 1;
       } catch (err) {
         summary.failed += 1;
@@ -952,7 +1044,11 @@ async function upcomingRateChanges(customerId, { dbh = db, now = new Date() } = 
   // Every lane: the account's live billing lane must still be the notice's
   // (the apply's billing_lane_changed). Read first, so a notice the apply
   // would reject never counts toward another family's cumulative charge.
-  const lanes = await liveLanesFor(dbh, pending, { snapshots: [], customers: customer ? [customer] : [], today, includeSent: true });
+  // The linked ranking rows carry each notice's reviewed cadence: a second
+  // same-family series at another cadence must not hide a delivered notice.
+  const pendingIds = pending.map((n) => n.id);
+  const snapshots = pendingIds.length ? await dbh('rate_review_snapshots').whereIn('notice_id', pendingIds).select('notice_id', 'cadence') : [];
+  const lanes = await liveLanesFor(dbh, pending, { snapshots, customers: customer ? [customer] : [], today, includeSent: true });
   const laneEligible = pending.filter((n) => lanes.get(String(n.id)) === n.billing_lane);
   const monthly = await applicableMonthly(dbh, laneEligible, customer);
   // A change the apply would refuse is not upcoming at all: monthly (rate
@@ -962,7 +1058,7 @@ async function upcomingRateChanges(customerId, { dbh = db, now = new Date() } = 
   const applicable = new Set(monthly.map((n) => String(n.id)));
   const perApp = pending.filter((n) => n.billing_lane === 'per_application');
   const moved = await ratesMovedFor(dbh, perApp, { customers: customer ? [customer] : [], visitById: await visitsById(dbh, perApp) });
-  for (const id of await linesGoneFor(dbh, perApp, { snapshots: [] })) moved.add(id);
+  for (const id of (await linesGoneFor(dbh, perApp, { snapshots, today })).keys()) moved.add(id);
   return pending.filter((n) => lanes.get(String(n.id)) === n.billing_lane
     && (n.billing_lane === 'monthly_membership' ? applicable.has(String(n.id)) : !moved.has(String(n.id)))).map((n) => ({
     service: SERVICE_LABELS[n.family_key] || null,
@@ -1006,5 +1102,5 @@ module.exports = {
   sendBatch,
   publicReview,
   upcomingRateChanges,
-  _private: { whyFor, lineFor, letterPayload, planBatch, digestFor, REASONS, SERVICE_LABELS, LINE_SLOTS },
+  _private: { whyFor, lineFor, letterPayload, planBatch, digestFor, linesGoneFor, REASONS, SERVICE_LABELS, LINE_SLOTS },
 };

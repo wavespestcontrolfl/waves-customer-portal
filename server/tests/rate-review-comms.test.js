@@ -80,10 +80,11 @@ function draft(n, overrides = {}) {
 // One open application per per-application notice on its plan line, on its
 // effective date (the line-open check reads them through the fixture's
 // synthetic _line / _cadence tags).
+const parseJsonMeta = (n) => (typeof n.metadata === 'string' ? JSON.parse(n.metadata) : (n.metadata || {}));
 function openVisitsFor(notices) {
   return notices.filter((n) => (n.billing_lane || 'per_application') === 'per_application').map((n, i) => ({
     id: `70000000-0000-4000-8000-00000000000${i + 1}`, customer_id: n.customer_id, scheduled_date: n.effective_date, status: 'pending', estimated_price: (Number(n.noticed_current_cents ?? 11700) / 100).toFixed(2),
-    is_callback: false, is_recurring: true, recurring_parent_id: null, _line: n.family_key, _cadence: 'quarterly',
+    is_callback: false, is_recurring: true, recurring_parent_id: parseJsonMeta(n).series_root_id || null, _line: n.family_key, _cadence: 'quarterly',
   }));
 }
 
@@ -175,7 +176,7 @@ describe('sendPreview', () => {
   });
 
   test('a rate moved on file since the notice is held (rate_moved), never announced', async () => {
-    const n = draft(1, { metadata: { source: 'rate_review', batch_key: BATCH_KEY, first_visit_id: 'v-1' } });
+    const n = draft(1, { metadata: { source: 'rate_review', batch_key: BATCH_KEY, first_visit_id: 'v-1', series_root_id: fixture.VISIT(100) } });
     const b = book({ notices: [n] });
     b.scheduled_services = [{ id: 'v-1', scheduled_date: '2026-12-10', status: 'pending', estimated_price: '125.00' }];
     mockDb.reset(b);
@@ -192,12 +193,25 @@ describe('sendPreview', () => {
       });
       const data = {
         notices: [notice], snapshots: new Map([[String(notice.id), fixture.snapshotRow(1)]]), customers: new Map([[CUSTOMER(1), customer(1)]]),
-        prefs: new Map(), firstVisits: new Map(), declinedTerms: new Set(), liveLanes: new Map([[String(notice.id), 'annual_prepay']]), ratesMoved: new Set(), linesGone: new Set(),
+        prefs: new Map(), firstVisits: new Map(), declinedTerms: new Set(), liveLanes: new Map([[String(notice.id), 'annual_prepay']]), ratesMoved: new Set(), linesGone: new Map(),
       };
       return comms._private.planBatch(data, { today: '2026-11-02', now: NOW })[0];
     };
     expect(plan('2026-12-03').suppressedLines[0].reason).toBe('too_late'); // 31 days
     expect(plan('2026-12-04').lines).toHaveLength(1); // 32 days
+  });
+
+  test('the 30-day floor is inclusive: exactly 30 days out is sendable, 29 is too late', () => {
+    const plan = (eff) => {
+      const notice = draft(1, { effective_date: eff });
+      const data = {
+        notices: [notice], snapshots: new Map([[String(notice.id), fixture.snapshotRow(1)]]), customers: new Map([[CUSTOMER(1), customer(1)]]),
+        prefs: new Map(), declinedTerms: new Set(), liveLanes: new Map([[String(notice.id), 'per_application']]), ratesMoved: new Set(), linesGone: new Map(),
+      };
+      return comms._private.planBatch(data, { today: '2026-11-02', now: NOW })[0];
+    };
+    expect(plan('2026-12-02').lines).toHaveLength(1); // 30 days
+    expect(plan('2026-12-01').suppressedLines[0].reason).toBe('too_late'); // 29 days
   });
 
   test('a plan line cancelled since the notice was prepared (no open application left) is held (line_gone)', async () => {
@@ -472,7 +486,7 @@ describe('letter wording and order', () => {
   });
 
   test('the first application is stated as the rule ("on or after"), never one visit\'s date', async () => {
-    const n = draft(1, { metadata: { source: 'rate_review', batch_key: BATCH_KEY, first_visit_id: 'v-1' } });
+    const n = draft(1, { metadata: { source: 'rate_review', batch_key: BATCH_KEY, first_visit_id: 'v-1', series_root_id: fixture.VISIT(100) } });
     const b = book({ notices: [n] });
     b.scheduled_services.push({ id: 'v-1', scheduled_date: '2026-12-12', status: 'confirmed', estimated_price: '117.00' });
     mockDb.reset(b);
@@ -604,6 +618,87 @@ describe('customer surfaces', () => {
     expect(smsLeg.mock.calls[0][0].requireAccepted).toBe(true);
   });
 
+  test.each([
+    ['the account\'s billing lane changed', (st) => { st.customers[0].billing_mode = 'monthly_membership'; }, 'lane_changed'],
+    ['the line was repriced', (st) => { st.scheduled_services[0].estimated_price = '130.00'; }, 'line_gone'],
+    ['a discount landed on the series', (st) => { st.scheduled_services[0].discount_type = 'percent'; st.scheduled_services[0].discount_dollars = '11.70'; }, 'apply_hold'],
+    ['the ranking row is no longer approved', (st) => { st.rate_review_snapshots[0].status = 'green'; }, 'not_approved'],
+  ])('send: %s between the preview read and the claim holds the letter — released to draft with the reason, nothing dispatched', async (_label, mutate, reason) => {
+    mockDb.reset(book());
+    const digest = await previewDigest();
+    let fired = false;
+    mockDb.rawHandlers.push([/customer-comms|hashtextextended/, () => { if (!fired) { fired = true; mutate(mockDb.store); } return { rows: [] }; }]);
+    const res = await comms.sendBatch(BATCH_KEY, { expectedDigest: digest, now: NOW });
+    expect(fired).toBe(true);
+    expect(res).toMatchObject({ sent: 0, inFlight: 1 });
+    expect(emailLeg).not.toHaveBeenCalled();
+    expect(smsLeg).not.toHaveBeenCalled();
+    expect(notices()[0]).toMatchObject({ status: 'draft', sent_at: null });
+    expect(JSON.parse(notices()[0].metadata).send_hold.reason).toBe(reason);
+  });
+
+  test('send: an amount changed on the claimed row since the preview is a line_changed hold, never sent on stale words', async () => {
+    mockDb.reset(book());
+    const digest = await previewDigest();
+    let fired = false;
+    mockDb.rawHandlers.push([/customer-comms|hashtextextended/, () => { if (!fired) { fired = true; mockDb.store.price_change_notices[0].noticed_new_cents = 12500; mockDb.store.price_change_notices[0].new_amount_cents = 12500; } return { rows: [] }; }]);
+    expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: digest, now: NOW })).toMatchObject({ sent: 0, inFlight: 1 });
+    expect(emailLeg).not.toHaveBeenCalled();
+    expect(JSON.parse(notices()[0].metadata).send_hold.reason).toBe('line_changed');
+  });
+
+  test('preview: a structure the apply refuses is held with the apply\'s own reason (apply_hold)', async () => {
+    mockDb.reset(book());
+    mockDb.store.scheduled_service_addons = [{ id: 'ad-1', scheduled_service_id: mockDb.store.scheduled_services[0].id, estimated_price: '20.00' }];
+    const out = await comms.sendPreview(BATCH_KEY, { now: NOW });
+    expect(out.counts.letters).toBe(0);
+    expect(out.customers[0].suppressedLines[0]).toMatchObject({ reason: 'apply_hold', applyReason: 'visit_has_addons' });
+  });
+
+  test('send: a definite email rejection (certain non-send) returns the lines to a retryable draft with the reason; an ambiguous failure parks as send_uncertain', async () => {
+    mockDb.reset(book());
+    smsLeg.mockResolvedValue({ sent: false, attempted: false });
+    emailLeg.mockResolvedValue({ sent: false, attempted: true, definiteNonSend: true });
+    const digest = await previewDigest();
+    expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: digest, now: NOW })).toMatchObject({ sent: 0, failed: 1, uncertain: 0, ok: false });
+    expect(notices()[0]).toMatchObject({ status: 'draft', sent_at: null, email_sent: false });
+    expect(JSON.parse(notices()[0].metadata).send_hold.reason).toBe('email_rejected');
+    expect(JSON.parse(notices()[0].metadata).pending_letter).toBeUndefined();
+    // sendable again once the cause is fixed
+    emailLeg.mockResolvedValue({ sent: true, attempted: true });
+    expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).toMatchObject({ sent: 1 });
+    // an ambiguous failure is never retried automatically
+    mockDb.reset(book());
+    emailLeg.mockResolvedValue({ sent: false, attempted: true });
+    expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).toMatchObject({ sent: 0, uncertain: 1 });
+    expect(notices()[0].status).toBe('send_uncertain');
+  });
+
+  test('send: a notice repointed between provider acceptance and the delivery stamp is settled — never reported sent, never left sending; the stamp holds the comms fence', async () => {
+    mockDb.reset(book());
+    const digest = await previewDigest();
+    emailLeg.mockImplementation(async () => { mockDb.store.price_change_notices[0].customer_id = CUSTOMER(9); return { sent: true, attempted: true }; });
+    smsLeg.mockResolvedValue({ sent: false, attempted: false });
+    mockDb.raw.mockClear();
+    const res = await comms.sendBatch(BATCH_KEY, { expectedDigest: digest, now: NOW });
+    expect(res).toMatchObject({ sent: 0, uncertain: 1, ok: false });
+    expect(notices()[0]).toMatchObject({ status: 'send_uncertain', sent_at: null });
+    const meta = JSON.parse(notices()[0].metadata);
+    expect(meta.delivered_repointed).toMatchObject({ letter_customer_id: CUSTOMER(1) });
+    expect(meta.pending_letter).toBeTruthy(); // the delivered words stay behind the token
+    expect(snapshots()[0].status).toBe('approved'); // not moved to sent
+    // the stamp transaction took the customer-comms lock (after the claim and the legs)
+    const locks = mockDb.raw.mock.calls.map((c) => String(c[1] && c[1][0])).filter((k) => k.startsWith('customer-comms:'));
+    expect(locks.length).toBeGreaterThanOrEqual(2);
+  });
+
+  test('portal: a second same-family series at another cadence does not hide a delivered notice (the reviewed cadence is used)', async () => {
+    const b = book({ notices: [draft(1, { status: 'sent', sent_at: NOW })] });
+    b.scheduled_services.push({ ...b.scheduled_services[0], id: '70000000-0000-4000-8000-0000000000aa', recurring_parent_id: '30000000-0000-4000-8000-0000000009aa', estimated_price: '140.00', _cadence: 'monthly' });
+    mockDb.reset(b);
+    expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toHaveLength(1);
+  });
+
   test('send: the locked text handoff dispatches inside the fence when clear, and refuses a number changed since the claim', async () => {
     mockDb.reset(book());
     const dispatch = jest.fn(async () => ({ ok: true }));
@@ -667,7 +762,7 @@ describe('customer surfaces', () => {
   });
 
   test('portal: a per-application change whose first visit was repriced since is not upcoming', async () => {
-    const n = draft(1, { status: 'sent', sent_at: NOW, metadata: { source: 'rate_review', batch_key: BATCH_KEY, first_visit_id: 'v-1' } });
+    const n = draft(1, { status: 'sent', sent_at: NOW, metadata: { source: 'rate_review', batch_key: BATCH_KEY, first_visit_id: 'v-1', series_root_id: fixture.VISIT(100) } });
     const b = book({ notices: [n] });
     b.scheduled_services.push({ id: 'v-1', scheduled_date: '2026-12-10', status: 'pending', estimated_price: '117.00' });
     mockDb.reset(b);
