@@ -73,9 +73,15 @@ describe('source contracts', () => {
     const route = fs.readFileSync(path.join(__dirname, '../routes/admin-invoices.js'), 'utf8');
     expect(route).toMatch(/router\.post\('\/:id\/send-receipt'[\s\S]{0,600}await sendInvoiceReceipt\(req\.params\.id/);
     const source = fs.readFileSync(path.join(__dirname, '../services/invoice-receipt-resend.js'), 'utf8');
-    // After the receipt-job claim (a queued receipt cannot deliver during the
-    // closeout), before either leg.
-    expect(source).toMatch(/receipt can only be sent for paid invoices[\s\S]{0,1800}withReceiptSendLock\(id, async \(owner\) => \{[\s\S]{0,1200}claimReceiptJobForOperatorSend\(id, \{ sawUnsent: sawUnsent \?\? !invoice\.receipt_sent_at \}\)[\s\S]{0,3500}closeOutVisitForIssuedInvoice\(\{ invoiceId: id, trigger: 'paid', actorTechnicianId \}\);[\s\S]{0,1200}else if \(wantsEmail\) \{\s*emailResult = await sendReceiptEmail/);
+    // The send lock wraps the whole locked flow, whose steps run in order: the receipt-job claim (a queued
+    // receipt cannot deliver during the closeout), the approved-version re-check, then delivery — which runs
+    // the closeout ahead of BOTH legs (email-only resends retry it too).
+    expect(source).toMatch(/receipt can only be sent for paid invoices[\s\S]{0,1200}withReceiptSendLock\(invoiceId, \(owner\) => lockedSend\(s, owner\)\)/);
+    expect(source).toMatch(/async function lockedSend\(s, owner\) \{[\s\S]{0,900}await acquireClaim\(s, stillHeld\)[\s\S]{0,500}await verifyApproved\(s, claim\)[\s\S]{0,200}await deliver\(s, claim, stillHeld\)/);
+    expect(source).toMatch(/async function deliver\(s, claim, stillHeld\) \{\s*await runCloseout\(s, stillHeld\);[\s\S]{0,300}await runEmailLeg\(s, claim, stillHeld\);[\s\S]{0,200}await runTextLeg\(s, claim, stillHeld\)/);
+    // The claim is taken before anything else, and the closeout is the paid trigger.
+    expect(source).toMatch(/async function acquireClaim\(s, stillHeld\) \{[\s\S]{0,900}claimReceiptJobForOperatorSend\(s\.id, \{ sawUnsent: s\.sawUnsent \?\? !s\.invoice\.receipt_sent_at \}\)/);
+    expect(source).toMatch(/async function runCloseout\(s, stillHeld\) \{[\s\S]{0,400}closeOutVisitForIssuedInvoice\(\{ invoiceId: s\.id, trigger: 'paid', actorTechnicianId: s\.actorTechnicianId \}\)/);
   });
   test('the recovered-delivery branch of sendViaSMS runs the closeout too — a recovered send is a durable send', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/invoice.js'), 'utf8');

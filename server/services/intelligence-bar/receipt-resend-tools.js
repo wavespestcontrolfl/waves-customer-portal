@@ -91,35 +91,80 @@ function reach(who, via) {
   return parts.join('; ');
 }
 
-// The preview, or the plain refusal. Everything the confirmed run re-checks is
-// in `_version` (hash-bound, hidden from the card): `receipt_state` is the
-// receipt_sent_at the card showed — a key ending in _at is excluded from the
-// fingerprint, so the instant is carried as a value, not a key.
-async function buildPlan(input, { ownClaimToken = null } = {}) {
+const VALID_VIA = ['email', 'sms', 'both'];
+const blocked = (reason, code, invoiceId) => ({ error: reason, code, ...(invoiceId ? { invoice_id: invoiceId } : {}) });
+
+// Eligibility: the invoice, who the receipt reaches, and that the chosen channel has someone to reach.
+// Returns { via, memo, who } or the plain refusal.
+async function checkEligibility(input, ownClaimToken) {
   const via = input.via === undefined || input.via === null ? 'both' : input.via;
-  if (!['email', 'sms', 'both'].includes(via)) return { error: "via must be 'email', 'sms', or 'both'", code: 'invalid_target' };
+  if (!VALID_VIA.includes(via)) return blocked("via must be 'email', 'sms', or 'both'", 'invalid_target');
   const memo = typeof input.memo === 'string' ? input.memo.trim().slice(0, 400) : '';
   const target = await resolveInvoiceId(input);
   if (target.error) return target;
-
   const who = await receiptRecipients(target.id, db, { resend: true, ownClaimToken });
   if (who.blocker) {
-    return { error: `A receipt cannot be sent: ${who.blocker}.`, code: who.blocker === 'invoice not found' ? 'invoice_not_found' : 'resend_blocked', invoice_id: target.id };
+    return blocked(`A receipt cannot be sent: ${who.blocker}.`, who.blocker === 'invoice not found' ? 'invoice_not_found' : 'resend_blocked', target.id);
   }
-  if (via === 'email' && !who.email) return { error: 'A receipt cannot be sent by email: no receipt email on file.', code: 'resend_blocked', invoice_id: target.id };
+  if (via === 'email' && !who.email) return blocked('A receipt cannot be sent by email: no receipt email on file.', 'resend_blocked', target.id);
   if (via === 'sms' && (who.payerBilled || !(who.phone || who.app))) {
-    return { error: `A receipt cannot be sent by text: ${who.payerBilled ? 'a payer-billed receipt is never texted' : 'no phone on file'}.`, code: 'resend_blocked', invoice_id: target.id };
+    return blocked(`A receipt cannot be sent by text: ${who.payerBilled ? 'a payer-billed receipt is never texted' : 'no phone on file'}.`, 'resend_blocked', target.id);
   }
+  return { via, memo, who };
+}
 
-  const { invoice } = who;
-  let closeout;
+// The linked visit the closeout would complete (null = none); a probe that cannot read fails closed.
+async function probeCloseout(invoice) {
   try {
-    closeout = await issuedCloseoutTarget(invoice, { trigger: 'paid' });
+    return { closeout: await issuedCloseoutTarget(invoice, { trigger: 'paid' }) };
   } catch {
-    return { error: 'A receipt cannot be sent: the linked visit\'s closeout could not be checked.', code: 'resend_blocked', invoice_id: target.id };
+    return { error: blocked('A receipt cannot be sent: the linked visit\'s closeout could not be checked.', 'resend_blocked', invoice.id) };
   }
+}
+
+// The card's optional lines: a queued automatic receipt (disclosed, not pinned: the claim settles
+// it) and the visit closeout (backed by issuedCloseoutTarget and the closeout's quiet posture,
+// runQuietCloseout: backfill, no completion text, report, review ask or charge).
+function optionalCardLines({ memo, queuedJob, closeout }) {
+  const closeoutLine = closeout?.resuming
+    ? `Also finishes a closeout already started for the linked visit — ${closeout.serviceType || 'visit'} on ${closeout.date}: completes its remaining steps, even if the receipt itself does not go out; no completion text, report, review request or charge`
+    : `Also completes the linked visit — ${closeout?.serviceType || 'visit'} on ${closeout?.date}: creates its service record, even if the receipt itself does not go out; no completion text, report, review request or charge`;
+  return {
+    ...(memo ? { memo } : {}),
+    ...(queuedJob ? {
+      automatic_receipt: 'An automatic receipt is queued for this invoice. If this send does not deliver the email, it goes back in the queue and will try again on its own; a delivered email closes it.',
+    } : {}),
+    ...(closeout ? { visit_closeout: closeoutLine } : {}),
+  };
+}
+
+// Everything the confirmed run re-checks, hash-bound and hidden from the card: `receipt_state` is the
+// receipt_sent_at the card showed — a key ending in _at is excluded from the fingerprint, so the
+// instant is carried as a value, not a key.
+function approvedVersion({ invoice, via, who, memo, closeout, sentAt }) {
+  return {
+    invoice_id: invoice.id,
+    via,
+    amount: who.amount,
+    recipients_key: receiptRecipientsKey(who),
+    memo,
+    // The linked visit the closeout would complete (null = none).
+    closeout_visit: closeout?.visitId || null,
+    // The instant the card showed (null = unsent): a stamp since is drift.
+    receipt_state: sentAt ? `sent:${sentAt.getTime()}` : 'unsent',
+  };
+}
+
+// The preview, or the plain refusal.
+async function buildPlan(input, { ownClaimToken = null } = {}) {
+  const eligible = await checkEligibility(input, ownClaimToken);
+  if (eligible.error) return eligible;
+  const { via, memo, who } = eligible;
+  const { invoice } = who;
+  const probe = await probeCloseout(invoice);
+  if (probe.error) return probe.error;
+  const { closeout } = probe;
   const sentAt = invoice.receipt_sent_at ? new Date(invoice.receipt_sent_at) : null;
-  // A queued automatic receipt is settled by this send (the release below): disclosed, not pinned.
   const queuedJob = await db('receipt_delivery_jobs').where({ invoice_id: invoice.id }).whereIn('status', ['queued', 'retry_scheduled']).first('id');
   const customer = await db('customers').where({ id: invoice.customer_id }).first('first_name', 'last_name');
   return {
@@ -136,28 +181,8 @@ async function buildPlan(input, { ownClaimToken = null } = {}) {
       : 'No receipt is recorded as sent yet',
     channels: VIA_LABEL[via],
     recipients: reach(who, via),
-    ...(memo ? { memo } : {}),
-    ...(queuedJob ? {
-      automatic_receipt: 'An automatic receipt is queued for this invoice. If this send does not deliver the email, it goes back in the queue and will try again on its own; a delivered email closes it.',
-    } : {}),
-    ...(closeout ? {
-      // Backed by the closeout's own target (issuedCloseoutTarget) and its quiet posture (runQuietCloseout:
-      // backfill, no completion text, no report, no review ask, no charge).
-      visit_closeout: closeout.resuming
-        ? `Also finishes a closeout already started for the linked visit — ${closeout.serviceType || 'visit'} on ${closeout.date}: completes its remaining steps, even if the receipt itself does not go out; no completion text, report, review request or charge`
-        : `Also completes the linked visit — ${closeout.serviceType || 'visit'} on ${closeout.date}: creates its service record, even if the receipt itself does not go out; no completion text, report, review request or charge`,
-    } : {}),
-    _version: {
-      invoice_id: invoice.id,
-      via,
-      amount: who.amount,
-      recipients_key: receiptRecipientsKey(who),
-      memo,
-      // The linked visit the closeout would complete (null = none).
-      closeout_visit: closeout?.visitId || null,
-      // The instant the card showed (null = unsent): a stamp since is drift.
-      receipt_state: sentAt ? `sent:${sentAt.getTime()}` : 'unsent',
-    },
+    ...optionalCardLines({ memo, queuedJob, closeout }),
+    _version: approvedVersion({ invoice, via, who, memo, closeout, sentAt }),
     note: 'PREVIEW ONLY — nothing was sent. Confirm sends exactly this; if anything changed it refuses.',
   };
 }
@@ -212,17 +237,64 @@ function lockNote(lockLost, stampWritten) {
   return `The send lock was lost partway through (${LOCK_LOST_STEP[lockLost] || lockLost}), so the steps after it were not started — a step shown as not sent with "send lock lost" never ran.${stampWritten === false ? ' The receipt went out but its sent-time stamp was not recorded.' : ''}`;
 }
 
-async function commit(input, actionContext) {
-  const pinned = input._verified_receipt_version;
-  if (!pinned) return { error: 'Use the confirmation card to approve this change.' };
-  const plan = await buildPlan(input);
-  if (plan.error) return { error: `Nothing was sent: ${plan.error}`, preview_changed: true };
-  const version = plan._version;
-  if (JSON.stringify(version) !== JSON.stringify(pinned)) {
-    return { error: 'What this receipt would do changed after the card was shown — nothing was sent. Ask again for a fresh confirmation card.', preview_changed: true };
-  }
+// Classify the writer's per-leg report into the tool's own leg statuses.
+function classifyLegs(version, body, delivery) {
+  const email = channelOutcome(version.via !== 'sms', body.email, delivery?.email, { isExpectedSkip: (raw) => expectedEmailSkip({ error: raw }) });
+  const text = channelOutcome(version.via !== 'email', body.sms, delivery?.sms, { reasons: SMS_REASONS, isExpectedSkip: (raw) => EXPECTED_SMS_SKIPS.has(raw) });
+  const legs = [email, text].filter((leg) => leg.status !== 'not_requested');
+  return {
+    email,
+    text,
+    delivered: legs.some((leg) => leg.status === 'sent'),
+    anyUnknown: legs.some((leg) => leg.status === 'unknown'),
+    allExpected: legs.every((leg) => leg.status === 'sent' || (leg.status === 'not_sent' && leg.expected)),
+  };
+}
 
-  const { status, body, closeout, delivery, queue, lockLost, stampWritten } = await sendInvoiceReceipt(version.invoice_id, {
+// The visit closeout that ran ahead of the legs: reported when the card named one or it ran.
+function reportCloseout(version, closeout) {
+  if (!(version.closeout_visit || closeout?.closed)) return null;
+  return closeout?.closed
+    ? { status: 'completed', visit_id: closeout.visitId }
+    : { status: 'not_completed', visit_id: version.closeout_visit, detail: String(closeout?.reason || 'not completed') };
+}
+
+// The headline sentence. Unknown first: a leg whose delivery could not be confirmed is never worded as not sent.
+function headline({ delivered, anyUnknown, clean, closeoutOnly }) {
+  if (anyUnknown) {
+    return delivered
+      ? 'Part of the receipt was sent; delivery of the rest could not be confirmed — see email and text. Check before sending again.'
+      : 'Delivery of the receipt could not be confirmed — it may or may not have gone out; see email and text. Check before sending again.';
+  }
+  if (delivered) return clean ? 'The receipt was sent.' : 'Part of the receipt did not go out — see email and text.';
+  return closeoutOnly
+    ? 'The receipt was not sent, but the linked visit was completed — see email, text and visit_closeout.'
+    : 'The receipt was not sent — see email and text.';
+}
+
+// The result's outcome class (what executionOutcome reads), from the classified legs.
+function outcomeEnvelope({ delivered, anyUnknown, clean, closeoutOnly }) {
+  if (delivered) return clean ? { success: true } : { partial: true };
+  if (anyUnknown) return { outcome_unknown: true, error: 'The receipt outcome is unknown — check before sending again.' };
+  // The closeout is a committed effect of its own: a visit completed with no receipt out is partial, not failed.
+  if (closeoutOnly) return { partial: true };
+  return { error: 'No receipt was sent.', failed: true };
+}
+
+// The verified, pinned plan — or the refusal when anything changed since the card.
+async function verifiedPlan(input) {
+  const pinned = input._verified_receipt_version;
+  if (!pinned) return { refusal: { error: 'Use the confirmation card to approve this change.' } };
+  const plan = await buildPlan(input);
+  if (plan.error) return { refusal: { error: `Nothing was sent: ${plan.error}`, preview_changed: true } };
+  if (JSON.stringify(plan._version) !== JSON.stringify(pinned)) {
+    return { refusal: { error: 'What this receipt would do changed after the card was shown — nothing was sent. Ask again for a fresh confirmation card.', preview_changed: true } };
+  }
+  return { plan, pinned };
+}
+
+function callWriter(version, pinned, actionContext) {
+  return sendInvoiceReceipt(version.invoice_id, {
     memo: version.memo, via: version.via, actorTechnicianId: actionContext?.technicianId || null,
     // An unknown provider outcome parks a claimed automatic job instead of re-queuing it.
     holdUnknownOutcome: true,
@@ -239,36 +311,25 @@ async function commit(input, actionContext) {
       },
     },
   });
+}
+
+async function commit(input, actionContext) {
+  const verified = await verifiedPlan(input);
+  if (verified.refusal) return verified.refusal;
+  const { plan, pinned } = verified;
+  const version = plan._version;
+  const { status, body, closeout, delivery, queue, lockLost, stampWritten } = await callWriter(version, pinned, actionContext);
   if (status === 409) return { error: `Nothing was sent: ${body.error}`, code: body.code, preview_changed: true };
   if (status !== 200) return { error: `Nothing was sent: ${body.error}`, code: 'resend_blocked' };
 
-  const email = channelOutcome(version.via !== 'sms', body.email, delivery?.email, { isExpectedSkip: (raw) => expectedEmailSkip({ error: raw }) });
-  const text = channelOutcome(version.via !== 'email', body.sms, delivery?.sms, { reasons: SMS_REASONS, isExpectedSkip: (raw) => EXPECTED_SMS_SKIPS.has(raw) });
-  const legs = [email, text].filter((leg) => leg.status !== 'not_requested');
-  const delivered = legs.some((leg) => leg.status === 'sent');
-  // The visit closeout that ran ahead of the legs: reported when the card named one or it ran.
-  const visitCloseout = version.closeout_visit || closeout?.closed
-    ? (closeout?.closed
-      ? { status: 'completed', visit_id: closeout.visitId }
-      : { status: 'not_completed', visit_id: version.closeout_visit, detail: String(closeout?.reason || 'not completed') })
-    : null;
-  const clean = legs.every((leg) => leg.status === 'sent' || (leg.status === 'not_sent' && leg.expected))
-    && visitCloseout?.status !== 'not_completed';
+  const { email, text, delivered, anyUnknown, allExpected } = classifyLegs(version, body, delivery);
+  const visitCloseout = reportCloseout(version, closeout);
+  const clean = allExpected && visitCloseout?.status !== 'not_completed';
+  const closeoutOnly = !delivered && visitCloseout?.status === 'completed' && !anyUnknown;
+  const verdict = { delivered, anyUnknown, clean, closeoutOnly };
   logger.info(`[intelligence-bar:resend-receipt] ${version.invoice_id}: email ${email.status}, text ${text.status}, automatic receipt ${queue || 'unreported'}`);
-  const closeoutOnly = !delivered && visitCloseout?.status === 'completed' && !legs.some((leg) => leg.status === 'unknown');
-  // Unknown first: a leg whose delivery could not be confirmed is never worded as not sent.
-  const anyUnknown = legs.some((leg) => leg.status === 'unknown');
-  let what;
-  if (anyUnknown) {
-    what = delivered
-      ? 'Part of the receipt was sent; delivery of the rest could not be confirmed — see email and text. Check before sending again.'
-      : 'Delivery of the receipt could not be confirmed — it may or may not have gone out; see email and text. Check before sending again.';
-  } else if (delivered) {
-    what = clean ? 'The receipt was sent.' : 'Part of the receipt did not go out — see email and text.';
-  } else {
-    what = closeoutOnly ? 'The receipt was not sent, but the linked visit was completed — see email, text and visit_closeout.' : 'The receipt was not sent — see email and text.';
-  }
-  const result = {
+  return {
+    ...outcomeEnvelope(verdict),
     invoice_id: version.invoice_id,
     invoice_number: plan.invoice_number,
     email,
@@ -276,13 +337,8 @@ async function commit(input, actionContext) {
     ...(visitCloseout ? { visit_closeout: visitCloseout } : {}),
     ...(queue ? { automatic_receipt: queue } : {}),
     ...(lockLost ? { send_lock_lost: lockLost, ...(stampWritten === false ? { receipt_stamp_written: false } : {}) } : {}),
-    note: [what, lockNote(lockLost, stampWritten), queueNote(queue, { allDelivered: delivered && clean })].filter(Boolean).join(' '),
+    note: [headline(verdict), lockNote(lockLost, stampWritten), queueNote(queue, { allDelivered: delivered && clean })].filter(Boolean).join(' '),
   };
-  if (delivered) return clean ? { success: true, ...result } : { partial: true, ...result };
-  if (legs.some((leg) => leg.status === 'unknown')) return { outcome_unknown: true, error: 'The receipt outcome is unknown — check before sending again.', ...result };
-  // The closeout is a committed effect of its own: a visit completed with no receipt out is partial, not failed.
-  if (closeoutOnly) return { partial: true, ...result };
-  return { error: 'No receipt was sent.', failed: true, ...result };
 }
 
 async function executeReceiptResendTool(toolName, input = {}, actionContext = {}) {
