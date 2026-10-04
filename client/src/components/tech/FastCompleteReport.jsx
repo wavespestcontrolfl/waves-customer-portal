@@ -22,14 +22,14 @@ import '../../styles/tech-workflow.css';
 
 // The full form's own three customer choices (its fourth, "Customer had
 // specific concern", stays on the full form). The writer reads the full
-// form's wording; the tiles say it shorter. Owner 2026-10-01: "not home —
-// full access" is picked every time the sheet opens.
+// form's wording; the tiles say it shorter. Owner 2026-10-04 (replaces
+// 2026-10-01): "home — spoke with them" is picked every time the sheet opens.
 export const CUSTOMER_HOME_CHOICES = [
   { value: 'tech_home_spoke_with_them', label: 'Home — spoke with them', writerLabel: 'Customer home — spoke with them' },
   { value: 'not_home_full_access', label: 'Not home — full access', writerLabel: 'Customer not home — full access' },
   { value: 'not_home_partial_access', label: 'Not home — partial access', writerLabel: 'Customer not home — partial access' },
 ];
-export const DEFAULT_CUSTOMER_HOME = 'not_home_full_access';
+export const DEFAULT_CUSTOMER_HOME = 'tech_home_spoke_with_them';
 export const customerHomeWriterLabel = (value) => CUSTOMER_HOME_CHOICES.find((choice) => choice.value === value)?.writerLabel || '';
 
 // The pest activity tracker on the full form's 0–5 scale, 1–5 here (owner

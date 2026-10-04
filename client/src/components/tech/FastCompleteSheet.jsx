@@ -45,8 +45,8 @@
 // `service.reportFlow`, the sheet opens for any open untyped pest visit (a
 // re-service or a regular visit) and runs talk, generate the AI report,
 // read it, trace the spray, send. The tech talks into the note, adds photos,
-// taps whether the customer was home (not home, full access, picked every
-// time), the pest activity 1 to 5, one tip and the promise check, then
+// taps whether the customer was home (home, spoke with them, picked every
+// time; owner 2026-10-04), the pest activity 1 to 5, one tip and the promise check, then
 // generates the report (POST /admin/schedule/generate-report, the full
 // form's own request) and reads it before anything goes. Where product went
 // down and the pests named are read from the note (POST
