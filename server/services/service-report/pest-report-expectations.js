@@ -715,6 +715,10 @@ function toExpectationProduct(raw = {}) {
 }
 
 // ── Compose all three blocks ─────────────────────────────────────────────
+// Owner 2026-10-04: the "Rain and your treatment" card is off the pest
+// report (live page and PDF). buildRainExpectation itself is unchanged, so
+// turning this back on restores the card as it was.
+const PEST_RAIN_CARD_ON = false;
 function buildPestExpectations({
   weekWeather = null,
   applications = [],
@@ -724,9 +728,9 @@ function buildPestExpectations({
   forecastHeavyRain = false,
 } = {}) {
   const flatProducts = (applications || []).map(toExpectationProduct);
-  const rain = buildRainExpectation({
-    weekWeather, products: flatProducts, serviceMonth, forecastHeavyRain,
-  });
+  const rain = PEST_RAIN_CARD_ON
+    ? buildRainExpectation({ weekWeather, products: flatProducts, serviceMonth, forecastHeavyRain })
+    : null;
   const spiders = buildSpiderExpectation({ actionLabels, actionEntries, applications });
   const whatToExpect = buildWhatToExpect({ products: flatProducts });
   if (!rain && !spiders && !whatToExpect) return null;

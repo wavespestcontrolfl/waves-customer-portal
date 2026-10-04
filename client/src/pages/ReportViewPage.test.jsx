@@ -1320,6 +1320,47 @@ describe('smartStatusSummary — re-service (callback) branch', () => {
     expect(status.result).toBe('Service completed. Visit details are below.');
   });
 
+  // Owner 2026-10-04: on a routine pest visit "Today's result" says where we
+  // treated and the activity the customer is shown, not the generic line.
+  describe("Today's result on a routine Pest V2 visit", () => {
+    const pestVisit = (overrides = {}) => ({
+      serviceType: 'Quarterly Pest Control Service',
+      isCallback: false,
+      applications: [],
+      pestReportV2: { status: { key: 'protected', label: 'Protected' } },
+      treatmentPerformed: true,
+      dynamicContext: { reentry: { targets: [{ key: 'exterior' }, { key: 'interior' }] } },
+      pestPressure: { enabled: true, showOnCustomerReport: true, label: 'Very Low' },
+      ...overrides,
+    });
+
+    it('names both sides and the activity', () => {
+      expect(smartStatusSummary(pestVisit(), 'static').result)
+        .toBe('We treated outside and inside. Pest activity today: very low.');
+    });
+
+    it('names one side only when only one was treated', () => {
+      expect(smartStatusSummary(pestVisit({ dynamicContext: { reentry: { targets: [{ key: 'exterior' }] } } }), 'static').result)
+        .toBe('We treated outside. Pest activity today: very low.');
+      expect(smartStatusSummary(pestVisit({ dynamicContext: { reentry: { targets: [{ key: 'interior' }] } } }), 'static').result)
+        .toBe('We treated inside. Pest activity today: very low.');
+    });
+
+    it('makes no treatment claim when nothing was treated, and no activity claim when the gauge is hidden', () => {
+      expect(smartStatusSummary(pestVisit({ treatmentPerformed: false }), 'static').result)
+        .toBe('Pest activity today: very low.');
+      expect(smartStatusSummary(pestVisit({ pestPressure: { enabled: true, showOnCustomerReport: false, label: 'Very Low' } }), 'static').result)
+        .toBe('We treated outside and inside.');
+      expect(smartStatusSummary(pestVisit({ treatmentPerformed: false, pestPressure: null }), 'static').result)
+        .toBe('Service completed. Visit details are below.');
+    });
+
+    it('leaves a visit with no Pest V2 block on the generic line', () => {
+      expect(smartStatusSummary(pestVisit({ pestReportV2: null }), 'static').result)
+        .toBe('Service completed. Visit details are below.');
+    });
+  });
+
 });
 
 describe('lawn report lead status card (GATE_LAWN_REPORT_LEAD)', () => {

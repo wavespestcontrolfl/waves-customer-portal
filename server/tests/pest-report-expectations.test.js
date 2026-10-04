@@ -1024,7 +1024,8 @@ describe('buildPestExpectations — composition', () => {
       actionLabels: ['Swept eaves, window frames, door frames, and lanai'],
       serviceMonth: 7,
     });
-    expect(out.rain.lines.length).toBeGreaterThan(0);
+    // Owner 2026-10-04: the rain card is off the pest report.
+    expect(out.rain).toBeUndefined();
     // Action recorded, but the only applied product is Taurus SC (targeted
     // for ants, not spiders, and non_repellent-classified anyway) => de-web
     // wording, not the combined/residual wording.
@@ -1033,27 +1034,24 @@ describe('buildPestExpectations — composition', () => {
     expect(out.whatToExpect.lines[0]).toMatch(/non-repellent/);
   });
 
-  // codex P2 #5137 deferred finding c: a same-day live report with an open
-  // trailing-week window passes weekWeather: null all the way through
-  // buildReportV1Data / reports-public.js's settledWeekWeatherForRender —
-  // the composed `rain` key must still surface the live forecast warning.
-  it('surfaces the rain key from the live forecast signal alone, with no settled weekly total', () => {
+  // Owner 2026-10-04: no rain card on the pest report, whatever the rain
+  // signal (a heavy measured week, or the live forecast alone).
+  it('never composes the rain key, even from a live heavy-rain forecast', () => {
     const out = buildPestExpectations({
-      weekWeather: null,
+      weekWeather: { rainInches: 2, rainConfidence: null },
       applications: [{ product: { name: 'Demand CS' }, targets: [], method: 'perimeter_spray', methodInferred: false }],
       actionLabels: [],
-      serviceMonth: 2,
+      serviceMonth: 7,
       forecastHeavyRain: true,
     });
-    expect(out.rain.lines[0]).toMatch(/Heavy rain soon after an exterior application/);
+    expect(out?.rain).toBeUndefined();
   });
 });
 
 describe('buildPestExpectations — child keys present only with content (codex P0 #5137 r6)', () => {
-  it('only rain → only the rain key', () => {
+  it('only rain → null (owner 2026-10-04: the rain card is off)', () => {
     process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
-    const out = buildPestExpectations({ weekWeather: { rainInches: 0.1, rainConfidence: null, windowClosed: true }, applications: [], serviceMonth: 3 });
-    expect(Object.keys(out)).toEqual(['rain']);
+    expect(buildPestExpectations({ weekWeather: { rainInches: 0.1, rainConfidence: null, windowClosed: true }, applications: [], serviceMonth: 3 })).toBeNull();
   });
 
   it('nothing → null, never an object of nulls', () => {

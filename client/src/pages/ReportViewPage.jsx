@@ -1063,12 +1063,37 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
     heading: 'your service is complete!',
     status: allReady ? 'Ready now' : 'Service complete',
     statusTone: allReady ? 'ready' : 'neutral',
-    result: 'Service completed. Visit details are below.',
+    result: pestVisitResultLine(data) || 'Service completed. Visit details are below.',
     completedLine: completedAreas ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}` : 'Service areas were completed today.',
     detail: data.techVisitCard
       ? ''
       : (completionTime ? `${technician} completed the visit at ${completionTime}.` : `${technician} completed the visit.`),
   };
+}
+
+// "Today's result" on a routine Pest V2 visit (owner 2026-10-04: "Service
+// completed. Visit details are below." says nothing). Two facts the record
+// already carries: where we treated (the re-entry targets, which exist only
+// for a recorded application) and the activity the customer is shown on the
+// pressure gauge. No treatment and no shown pressure => null, and the caller
+// keeps the generic line.
+function pestVisitResultLine(data = {}) {
+  if (!data.pestReportV2) return null;
+  const targets = data.treatmentPerformed === false || !Array.isArray(data.dynamicContext?.reentry?.targets)
+    ? []
+    : data.dynamicContext.reentry.targets;
+  const outside = targets.some((target) => target?.key === 'exterior');
+  const inside = targets.some((target) => target?.key === 'interior');
+  let where = null;
+  if (outside && inside) where = 'We treated outside and inside.';
+  else if (outside) where = 'We treated outside.';
+  else if (inside) where = 'We treated inside.';
+  const pressure = data.pestPressure;
+  const pressureLabel = pressure?.enabled && pressure?.showOnCustomerReport && typeof pressure.label === 'string'
+    ? pressure.label.trim().toLowerCase()
+    : '';
+  const activity = pressureLabel ? `Pest activity today: ${pressureLabel}.` : null;
+  return [where, activity].filter(Boolean).join(' ') || null;
 }
 
 function dynamicHeroSummary(data) {
@@ -2791,7 +2816,11 @@ export function ReserviceReportCard({ data, mode }) {
 
 // "Your plan" section (owner ask 2026-09-28): an active plan member's visit +
 // re-service COUNTS for this year — never a price, owner rule that prices
-// only ever appear on estimate pages. The server sends it for members only.
+// only ever appear on estimate pages, and no "at no charge" claim (a member's
+// callback can still be billed). The server sends it for members only.
+// Owner 2026-10-04: the bare count line "says nothing", so the card also
+// names the membership, the next visit and how to reach us between visits,
+// each only when the payload carries it.
 // Live view only; the payload field itself is stripped from
 // pdf/static/sms_preview renders server-side (stripLiveOnlyScheduleFields),
 // so `mode` is a belt-and-braces check here, same as the other live-only
@@ -2805,8 +2834,13 @@ function PlanSummaryCard({ data, mode }) {
   const visitWord = visits === 1 ? 'visit' : 'visits';
   const reserviceWord = reservices === 1 ? 're-service' : 're-services';
   const yearLine = reservices > 0
-    ? `This year: ${visits} ${visitWord}, including ${reservices} ${reserviceWord}`
-    : `This year: ${visits} ${visitWord}`;
+    ? `We've completed ${visits} ${visitWord} for you this year, including ${reservices} ${reserviceWord}.`
+    : `We've completed ${visits} ${visitWord} for you this year.`;
+  const tier = String(data.waveGuardTier || data.waveguardTier || '').trim();
+  // The upcoming-visits card already lists the dates when it is on the page.
+  const nextVisit = data.upcomingVisitsCard
+    ? null
+    : planNextVisitDateLabel(data.nextSameServiceAppointment || data.nextAppointment);
   return (
     <section data-glass="card" className="sr-section plan-summary-section" id="your-plan">
       {/* h2, not .section-eyebrow: the glass theme hides every
@@ -2814,9 +2848,24 @@ function PlanSummaryCard({ data, mode }) {
           with no visible title (codex P2 on #5177; same fix as
           UpcomingVisitsCard). */}
       <h2>Your plan</h2>
+      {tier && <p className="map-context-copy">You&apos;re a WaveGuard {tier} member.</p>}
       <p className="map-context-copy">{yearLine}</p>
+      {nextVisit && <p className="map-context-copy">Your next visit is {nextVisit}.</p>}
+      {data.reserviceEligible === true && (
+        <p className="map-context-copy">Something come up between visits? Text us and we&apos;ll come back out.</p>
+      )}
     </section>
   );
+}
+
+// "Mon, Jan 4" for the plan card, or null for a missing, unreadable or past
+// date (a report opened months later must not promise a visit that has gone).
+function planNextVisitDateLabel(nextAppointment) {
+  const date = calendarDateFromDateOnlyValue(nextAppointment?.scheduledDate);
+  if (!date) return null;
+  const today = new Date();
+  if (date.getTime() < Date.UTC(today.getFullYear(), today.getMonth(), today.getDate())) return null;
+  return date.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
 }
 
 // "Near you" line on a lawn report (owner ask 2026-09-28, "lawn only",

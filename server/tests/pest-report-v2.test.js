@@ -336,7 +336,8 @@ describe('buildPestReportV2 — expectations wiring (GATE_PEST_REPORT_EXPECTATIO
     expect(JSON.stringify(out)).not.toContain('expectations');
   });
 
-  it('gate on: composes rain, spiders, and what-to-expect from the passed-in facts', () => {
+  // Owner 2026-10-04: the rain card is off the pest report.
+  it('gate on: composes spiders and what-to-expect from the passed-in facts, never rain', () => {
     process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
     const out = buildPestReportV2({
       premiumExperience: premium(),
@@ -345,7 +346,7 @@ describe('buildPestReportV2 — expectations wiring (GATE_PEST_REPORT_EXPECTATIO
       weekWeather: { rainInches: 2, rainConfidence: null },
       serviceMonth: 7,
     });
-    expect(out.expectations.rain.lines.length).toBeGreaterThan(0);
+    expect(out.expectations).not.toHaveProperty('rain');
     expect(out.expectations.spiders.headline).toBe('Spiders');
     expect(out.expectations.whatToExpect.lines[0]).toMatch(/non-repellent/);
   });
@@ -392,7 +393,7 @@ describe('buildPestReportV2 — expectations wiring (GATE_PEST_REPORT_EXPECTATIO
     });
     expect(out).not.toBeNull();
     expect(out.expectations).toBeTruthy();
-    expect(out.expectations.rain.lines.length).toBeGreaterThan(0);
+    expect(out.expectations).not.toHaveProperty('rain');
     // Confirm nothing else kept the shell alive — expectations alone did.
     expect(out.primaryMove).toBeNull();
     expect(out.supportingMetric).toBeFalsy();
@@ -416,17 +417,19 @@ describe('buildPestReportV2 — expectations wiring (GATE_PEST_REPORT_EXPECTATIO
     expect(out).toBeNull();
   });
 
-  it('forecastHeavyRain never reaches the payload unless the caller passes it (PDF/static safety)', () => {
+  it('a rain-only visit carries no expectations block, with or without the live forecast signal', () => {
     process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
-    const out = buildPestReportV2({
-      premiumExperience: premium(),
-      applications: [],
-      actionLabels: [],
-      weekWeather: { rainInches: 0.2, rainConfidence: null },
-      serviceMonth: 2,
-      forecastHeavyRain: false,
-    });
-    expect(out.expectations.rain.lines[0]).not.toMatch(/Heavy rain right after a treatment/);
+    for (const forecastHeavyRain of [false, true]) {
+      const out = buildPestReportV2({
+        premiumExperience: premium(),
+        applications: [],
+        actionLabels: [],
+        weekWeather: { rainInches: 2, rainConfidence: null },
+        serviceMonth: 7,
+        forecastHeavyRain,
+      });
+      expect(out).not.toHaveProperty('expectations');
+    }
   });
 });
 
@@ -434,12 +437,12 @@ describe('pestReportV2PdfSignature — expectations gate suffix', () => {
   const ORIGINAL = process.env.GATE_PEST_REPORT_EXPECTATIONS;
   afterEach(() => { process.env.GATE_PEST_REPORT_EXPECTATIONS = ORIGINAL; });
 
-  it('appends -pex2 to the pest-line key when the gate is on, independent of PEST_REPORT_V2', () => {
+  it('appends -pex3 to the pest-line key when the gate is on, independent of PEST_REPORT_V2', () => {
     process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
     const ORIGINAL_V2 = process.env.PEST_REPORT_V2;
     delete process.env.PEST_REPORT_V2;
     try {
-      expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-pex2');
+      expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-pex3');
     } finally {
       process.env.PEST_REPORT_V2 = ORIGINAL_V2;
     }

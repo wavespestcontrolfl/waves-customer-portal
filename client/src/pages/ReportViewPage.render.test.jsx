@@ -1422,8 +1422,45 @@ describe('ReportViewPage — "Your plan" section (planSummary)', () => {
     expect(section).not.toBeNull();
     expect(section.contains(heading)).toBe(true);
     expect(section.querySelector('.section-eyebrow')).toBeNull();
-    expect(within(section).getByText('This year: 4 visits, including 1 re-service')).toBeInTheDocument();
+    expect(within(section).getByText("We've completed 4 visits for you this year, including 1 re-service.")).toBeInTheDocument();
     expect(within(section).queryByText(/no charge|free|\$/i)).toBeNull();
+  });
+
+  // Owner 2026-10-04: the bare count line "says nothing". The card also
+  // names the membership, the next visit and how to reach us between visits.
+  it('names the membership, the next visit and the between-visits line when the payload carries them', async () => {
+    const payload = structuredClone(legacyLawnReport);
+    payload.planSummary = { year: 2026, visitsThisYear: 2, reservicesThisYear: 0 };
+    payload.waveGuardTier = 'Bronze';
+    payload.reserviceEligible = true;
+    payload.nextAppointment = null;
+    payload.nextSameServiceAppointment = { serviceType: 'Quarterly Pest Control Service', scheduledDate: '2099-01-05', windowStart: null };
+    const { container } = renderReport(payload);
+
+    await screen.findByRole('heading', { name: 'Your plan', level: 2 });
+    const section = container.querySelector('#your-plan');
+    expect(within(section).getByText("You're a WaveGuard Bronze member.")).toBeInTheDocument();
+    expect(within(section).getByText("We've completed 2 visits for you this year.")).toBeInTheDocument();
+    expect(within(section).getByText('Your next visit is Mon, Jan 5.')).toBeInTheDocument();
+    expect(within(section).getByText("Something come up between visits? Text us and we'll come back out.")).toBeInTheDocument();
+    expect(within(section).queryByText(/no charge|free|\$/i)).toBeNull();
+  });
+
+  it('leaves out a next visit that has passed, the membership line with no tier and the between-visits line for a customer who is not eligible', async () => {
+    const payload = structuredClone(legacyLawnReport);
+    payload.planSummary = { year: 2026, visitsThisYear: 2, reservicesThisYear: 0 };
+    payload.waveGuardTier = null;
+    payload.reserviceEligible = false;
+    payload.nextAppointment = null;
+    payload.nextSameServiceAppointment = { serviceType: 'Quarterly Pest Control Service', scheduledDate: '2020-01-06', windowStart: null };
+    const { container } = renderReport(payload);
+
+    await screen.findByRole('heading', { name: 'Your plan', level: 2 });
+    const section = container.querySelector('#your-plan');
+    expect(within(section).getByText("We've completed 2 visits for you this year.")).toBeInTheDocument();
+    expect(within(section).queryByText(/WaveGuard/)).toBeNull();
+    expect(within(section).queryByText(/next visit/i)).toBeNull();
+    expect(within(section).queryByText(/between visits/i)).toBeNull();
   });
 
   it('omits the re-service clause and keeps singular/plural correct when there are no re-services', async () => {
@@ -1433,7 +1470,7 @@ describe('ReportViewPage — "Your plan" section (planSummary)', () => {
 
     await screen.findByText('Your plan');
     const section = container.querySelector('#your-plan');
-    expect(within(section).getByText('This year: 1 visit')).toBeInTheDocument();
+    expect(within(section).getByText("We've completed 1 visit for you this year.")).toBeInTheDocument();
     // Scoped to this section — the page footer separately mentions
     // WaveGuard's free re-service perk, which is unrelated copy.
     expect(within(section).queryByText(/re-service/)).toBeNull();
