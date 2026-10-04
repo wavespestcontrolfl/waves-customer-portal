@@ -1645,6 +1645,15 @@ const gates = {
   // real leads never break. Flip GATE_LEAD_TURNSTILE=true to begin blocking.
   leadTurnstile: process.env.GATE_LEAD_TURNSTILE === 'true',
 
+  // Unverified lead hold (owner 2026-10-04). While leadTurnstile enforces, a
+  // lead form that posts with NO token (the visitor's background check never
+  // finished) is saved as a customer-less lead with a bell for the office
+  // instead of answered 403 with nothing saved. No customer, estimate, text,
+  // email, agent run or bridge call is created for a held lead. Rejected,
+  // oversized and unmapped-host tokens still get the 403. Default on;
+  // GATE_LEAD_UNVERIFIED_HOLD=false restores the plain 403.
+  leadUnverifiedHold: process.env.GATE_LEAD_UNVERIFIED_HOLD !== 'false',
+
   // AutoPay Customer SMS — customer-facing autopay/pre-charge/payment-retry
   // texts are opt-in everywhere until the WaveGuard autopay rollout is
   // verified. This does not affect internal admin alerts.
