@@ -27,6 +27,12 @@ const HOLD_STAGE = 'lead_webhook_unverified';
 // A retry of the same form (the visitor taps the button again) must not mint a
 // second row or ring twice.
 const HOLD_DEDUPE_HOURS = 24;
+// The visitor's own words, kept for the office. Capped like other stored
+// free text; whitespace collapsed so a pasted block reads as one line.
+const MESSAGE_MAX = 1000;
+function holdMessage(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim().slice(0, MESSAGE_MAX);
+}
 const HOLD_WHY = 'The website bot check did not finish, so no automatic reply went out.';
 
 function holdPhone(rawPhone) {
@@ -80,10 +86,12 @@ async function holdUnverifiedLead({ intake, leadSourceId = null, reason = 'missi
 
   const lastName = String(intake.lastName || '').trim();
   const address = intake.normalizedAddress || {};
+  const message = holdMessage(intake.message);
   const stage = {
     stage: HOLD_STAGE,
     verification: { turnstile: reason },
     service_interest: intake.serviceInterest || null,
+    ...(message ? { message } : {}),
     ...(intake.timeline ? { timeline: intake.timeline } : {}),
     attribution: {
       leadSource: intake.leadSource,
@@ -147,7 +155,8 @@ async function holdUnverifiedLead({ intake, leadSourceId = null, reason = 'missi
     await trx('lead_activities').insert({
       lead_id: lead.id,
       activity_type: 'created',
-      description: 'Unverified website request: the bot check did not finish. No automatic reply, customer profile or estimate was created.',
+      description: 'Unverified website request: the bot check did not finish. No automatic reply, customer profile or estimate was created.'
+        + (message ? ` Visitor wrote: "${message}"` : ''),
       performed_by: 'Lead webhook',
     });
     return { lead, deduped: false };

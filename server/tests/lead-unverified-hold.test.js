@@ -113,6 +113,12 @@ describe('holdUnverifiedLead', () => {
     expect(mockRaise).not.toHaveBeenCalled();
   });
 
+  test('the visitor message is kept for the office', async () => {
+    await holdUnverifiedLead({ intake: intakeFor({ ...BODY, message: 'Ants in the  kitchen.\nCall after 3.' }) });
+    expect(JSON.parse(mockState.inserts[0].row.extracted_data).message).toBe('Ants in the kitchen. Call after 3.');
+    expect(mockState.inserts[1].row.description).toContain('Visitor wrote: "Ants in the kitchen. Call after 3."');
+  });
+
   test('a bell failure does not undo the saved lead', async () => {
     mockRaise.mockRejectedValueOnce(new Error('notify down'));
     const out = await holdUnverifiedLead({ intake: intakeFor(BODY) });

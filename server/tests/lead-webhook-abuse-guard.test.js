@@ -68,6 +68,20 @@ describe('verifyTurnstileToken', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  test('no token from a host with no widget → no_widget_match, never missing_token', async () => {
+    // missing_token is the one verdict the lead webhook holds for the office,
+    // so a tokenless direct POST (absent or unmapped host) must not earn it.
+    process.env.TURNSTILE_SECRET_KEY = JSON.stringify([{ secret: 's1', domains: ['wavespestcontrol.com'] }]);
+    fetchSpy = jest.spyOn(global, 'fetch');
+    expect(await verifyTurnstileToken('', '1.2.3.4', 'evil.example'))
+      .toMatchObject({ ok: false, enforced: true, reason: 'no_widget_match' });
+    expect(await verifyTurnstileToken('', '1.2.3.4', ''))
+      .toMatchObject({ ok: false, enforced: true, reason: 'no_widget_match' });
+    expect(await verifyTurnstileToken('', '1.2.3.4', 'www.wavespestcontrol.com'))
+      .toMatchObject({ ok: false, enforced: true, reason: 'missing_token' });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   test('blank / whitespace-only token → fails CLOSED before any network call', async () => {
     process.env.TURNSTILE_SECRET_KEY = 'secret';
     fetchSpy = jest.spyOn(global, 'fetch');
