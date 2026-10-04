@@ -445,13 +445,17 @@ postgres('operator receipt claim on PostgreSQL', () => {
     test('a row the claim created is KEPT (failed) on hold: a later enqueue stays deduped and cannot re-send a receipt the provider may have accepted', async () => {
       const invoiceId = randomUUID();
       const claim = await claimReceiptJobForOperatorSend(invoiceId);
-      // An enqueue blocked behind the release (a delayed Stripe webhook, a closeout repair) lands after it commits.
+      // An enqueue racing the release (a delayed Stripe webhook, a closeout repair). The two are not ordered:
+      // it either lands after the release commits (deduped against the tombstone) or takes the still-running
+      // row over just before it (and the release then holds that row too). Either way the row ends failed.
       const release = releaseOperatorReceiptClaim(claim, { emailDelivered: false, holdForReconciliation: true });
-      const late = enqueueReceiptDelivery({ invoiceId, source: 'stripe_webhook' });
+      const racing = enqueueReceiptDelivery({ invoiceId, source: 'stripe_webhook' });
       expect(await release).toBe('held_for_reconciliation');
-      expect(await late).toMatchObject({ deduped: true, enqueued: false });
+      const raced = await racing;
+      expect(raced.enqueued === true || raced.deduped === true).toBe(true);
+      // Once the release has committed, every enqueue is deduped.
       expect(await enqueueReceiptDelivery({ invoiceId, source: 'ib_closeout_repair' })).toEqual({ enqueued: false, deduped: true });
-      expect(await job(invoiceId)).toMatchObject({ status: 'failed', source: 'operator_send', locked_by: null, last_error: expect.stringMatching(/held for reconciliation/) });
+      expect(await job(invoiceId)).toMatchObject({ status: 'failed', source: raced.enqueued ? 'stripe_webhook' : 'operator_send', locked_by: null, last_error: expect.stringMatching(/held for reconciliation/) });
       // Nothing for the drain, and a later operator send still works (a finished job is simply not claimed).
       expect((await claimDueReceiptDeliveryJobs({ limit: 50 })).map((j) => j.invoice_id)).not.toContain(invoiceId);
       expect(await claimReceiptJobForOperatorSend(invoiceId)).toEqual({ id: null });
