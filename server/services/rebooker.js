@@ -26,7 +26,7 @@ async function assertAssignableSlotTechnician(technicianId, trx, date) {
 const { scheduledServiceTrackTokenExpiry } = require('./track-token-expiry');
 const { clearTechCurrentJob } = require('./tech-status');
 const { shiftCallFollowUpsForParentMove, planCallFollowUpShift } = require('./call-booking-catalog');
-const { findConflictingVisits, acquireOccupancyLock, acquireOccupancyLocks } = require('./scheduling/occupancy');
+const { findConflictingVisits, acquireOccupancyLock, acquireOccupancyLocks, techScopedConfirmActive } = require('./scheduling/occupancy');
 const { lockTechDays } = require('./scheduling/tech-day-lock');
 const { resolveStopCoords } = require('./scheduling/travel-gap');
 const { arrivalWindowRoutingEnabled, prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder } = require('./scheduling/arrival-route');
@@ -2071,9 +2071,18 @@ class SmartRebooker {
       // concurrent-change 409 like every other CAS field.
       const techChangeRequested = Object.prototype.hasOwnProperty.call(updates, 'technician_id')
         && (updates.technician_id || null) !== (service.technician_id || null);
+      // Second technician: a technician-scoped occupancy probe judged keptTechId's
+      // route, taken from the same unlocked pre-read. A reassignment A→B that
+      // committed before this move's locks would have the probe check A's route
+      // while the row is saved on B — so while the scope is in effect the CAS pins
+      // the observed technician too (the same concurrent-change 409). Gate off or
+      // an unscoped probe: no extra predicate, byte for byte.
+      const scopedProbeInEffect = !!(keptTechId && updates.window_start && occupancyGateEnd
+        && options.occupancyTechBlind !== true && techScopedConfirmActive());
       const committedRows = await applyTrackLifecycleCas(
         trx('scheduled_services')
-          .where(techChangeRequested || Object.prototype.hasOwnProperty.call(options, 'expectConflictSnapshot')
+          .where(techChangeRequested || scopedProbeInEffect
+            || Object.prototype.hasOwnProperty.call(options, 'expectConflictSnapshot')
             ? { technician_id: service.technician_id ?? null } : {})
           // The full observed tracker/lifecycle snapshot is in the CAS (see
           // applyTrackLifecycleCas): the lifecycleRewound decision above

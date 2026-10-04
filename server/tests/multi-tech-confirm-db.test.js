@@ -99,10 +99,13 @@ describeDb('tech-aware confirm scope on real PostgreSQL', () => {
   // Owner 2026-10-03, "Moves": the rebooker's move probe scopes to the technician the row is
   // SAVED with, with no capacityPlacement needed. Runs only in CI (needs the database URL).
   describe('rebooker probeMoveConflicts (moves)', () => {
+    // The temp table keeps the real UUID id column: the moving row's id (and the
+    // exclusion list) must be UUIDs or Postgres rejects the query.
+    const MOVING_ROW = '20000000-0000-4000-8000-0000000000f1';
     const move = (technicianId, windowStart, windowEnd, options = {}) => probeMoveConflicts({
       conn: mockConn,
-      target: { id: 'moving-row', date: DAY, windowStart, windowEnd, technicianId },
-      excludeServiceIds: ['moving-row'],
+      target: { id: MOVING_ROW, date: DAY, windowStart, windowEnd, technicianId },
+      excludeServiceIds: [MOVING_ROW],
       options,
     }).then(({ rows }) => rows.map((r) => r.id).sort());
 

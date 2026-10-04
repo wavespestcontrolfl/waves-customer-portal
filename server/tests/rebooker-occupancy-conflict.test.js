@@ -556,6 +556,49 @@ describe('reschedule — shared occupancy conflict gate', () => {
     }));
   });
 
+  // The scoped probe judged the pre-read technician's route; a reassignment A→B that
+  // commits before the move's locks must not let the row save on B unchecked.
+  describe('reassignment race: the CAS pins the technician the scoped probe judged', () => {
+    const KEYS = ['GATE_MULTI_TECH_CONFIRM', 'GATE_SCHEDULING_CAPACITY'];
+    const saved = {};
+    beforeEach(() => { KEYS.forEach((k) => { saved[k] = process.env[k]; delete process.env[k]; }); });
+    afterEach(() => { KEYS.forEach((k) => { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }); });
+    const pinned = (trxScheduled) => trxScheduled.where.mock.calls.some(([arg]) => arg && typeof arg === 'object' && arg.technician_id === 'tech-1');
+
+    test('gate + capacity on: a plain same-technician move pins technician_id; a raced reassignment misses the CAS (409, nothing logged)', async () => {
+      process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+      process.env.GATE_SCHEDULING_CAPACITY = 'true';
+      const ok = wireRescheduleMocks(service({ technician_id: 'tech-1' }));
+      await SmartRebooker.reschedule('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'weather_rain', 'tech', { allowLive: true });
+      expect(pinned(ok.trxScheduled)).toBe(true);
+
+      // The row was reassigned to tech-2 after the pre-read: the pinned UPDATE matches nothing.
+      const raced = wireRescheduleMocks(service({ technician_id: 'tech-1' }));
+      raced.trxScheduled.update.mockImplementation(() => updateResult(0));
+      await expect(SmartRebooker.reschedule(
+        'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'weather_rain', 'tech', { allowLive: true },
+      )).rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining('concurrently') });
+      expect(pinned(raced.trxScheduled)).toBe(true);
+      expect(raced.trx.mock.calls.some((c) => c[0] === 'reschedule_log')).toBe(false);
+    });
+
+    test('gate off, techless row, or occupancyTechBlind: no extra technician predicate (byte for byte)', async () => {
+      const off = wireRescheduleMocks(service({ technician_id: 'tech-1' }));
+      await SmartRebooker.reschedule('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'weather_rain', 'tech', { allowLive: true });
+      expect(pinned(off.trxScheduled)).toBe(false);
+
+      process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+      process.env.GATE_SCHEDULING_CAPACITY = 'true';
+      const blind = wireRescheduleMocks(service({ technician_id: 'tech-1' }));
+      await SmartRebooker.reschedule('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', { occupancyTechBlind: true });
+      expect(pinned(blind.trxScheduled)).toBe(false);
+
+      const techless = wireRescheduleMocks(service({ technician_id: null }));
+      await SmartRebooker.reschedule('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin');
+      expect(techless.trxScheduled.where.mock.calls.some(([arg]) => arg && typeof arg === 'object' && 'technician_id' in arg)).toBe(false);
+    });
+  });
+
   test('a move that CHANGES the technician probes the DESTINATION technician, the one it writes', async () => {
     const { trxScheduled } = wireRescheduleMocks(service({ technician_id: 'tech-1' }));
     await SmartRebooker.reschedule(
