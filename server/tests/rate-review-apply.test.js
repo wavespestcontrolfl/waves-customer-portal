@@ -898,7 +898,7 @@ describe('applyDueRateChanges — per_application', () => {
     expect((await apply._private.prepayNoticesByTerm(mockDb, CUSTOMER(1))).deliveredCents.has('term-1')).toBe(false);
   });
 
-  test('renewal guard evidence: a prepaid letter between its provider handoff and its delivery stamp already counts as told; a claim with no handoff, or one returned to draft, does not', async () => {
+  test('renewal guard evidence: a prepaid letter handed to a provider and not stamped (in flight, or parked uncertain) counts as told; no handoff, or returned to draft, does not', async () => {
     const inFlight = (over = {}) => ({
       customer_id: CUSTOMER(1), billing_lane: 'annual_prepay', family_key: 'pest_control', status: 'sending', sent_at: null, applied_at: null,
       email_sent: false, sms_sent: false, noticed_new_cents: 48400, new_amount_cents: 48400, effective_date: '2027-05-15',
@@ -908,6 +908,9 @@ describe('applyDueRateChanges — per_application', () => {
     expect((await read(inFlight())).deliveredCents.get('term-1')).toMatchObject({ cents: 48400, day: '2027-05-15' });
     expect((await read(inFlight({ metadata: { term_id: 'term-1', coverage_visits: 4, pending_letter: { key: 'k' } } }))).deliveredCents.has('term-1')).toBe(false);
     expect((await read(inFlight({ status: 'draft' }))).deliveredCents.has('term-1')).toBe(false);
+    // parked as uncertain after a handoff: the customer may hold the letter, so it still guards
+    expect((await read(inFlight({ status: 'send_uncertain' }))).deliveredCents.get('term-1')).toMatchObject({ cents: 48400 });
+    expect((await read(inFlight({ status: 'send_uncertain', metadata: { term_id: 'term-1', coverage_visits: 4, pending_letter: { key: 'k' } } }))).deliveredCents.has('term-1')).toBe(false);
     // handed off with less than the 30-day lead the apply requires: guards nothing, as for a delivered notice
     expect((await read(inFlight({ effective_date: '2027-03-20' }))).deliveredCents.has('term-1')).toBe(false);
   });
