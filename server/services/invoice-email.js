@@ -757,6 +757,29 @@ async function resolveReceiptEmailRecipient(invoice, { billingDeliveryCategory =
   return { ok: true, recipient, customer, authorityInput };
 }
 
+// The caller's last check as an email-library provider handoff (see sendReceiptEmail). undefined when there
+// is no check, or on the routed path (the billing email authority owns that boundary).
+function callerReceiptHandoff(beforeProviderHandoff, authorityInput) {
+  if (authorityInput || typeof beforeProviderHandoff !== 'function') return undefined;
+  return async (dispatch) => {
+    await dispatch(undefined, async () => {
+      let proceed = false;
+      try { proceed = (await beforeProviderHandoff()) === true; } catch { proceed = false; }
+      if (!proceed) {
+        const refusal = new Error('Receipt email handoff aborted by the caller');
+        refusal.providerBoundaryBlocked = true;
+        throw refusal;
+      }
+    });
+    return { ok: true };
+  };
+}
+
+// beforeProviderHandoff (optional, async, returns true to proceed): a caller's last check, run through the
+// email library's own provider-boundary hook (sendTemplate withProviderHandoff -> dispatch's providerBoundaryCheck,
+// awaited inside sendOne right before the SendGrid request, after rendering, the PDF and the queued row). Anything
+// but `true` (or a throw) aborts before the request: a definite non-send. Honored on the manual path only (the routed
+// receipt rides the billing email authority's own boundary check); every other caller passes nothing.
 async function sendReceiptEmail(invoiceId, options = {}) {
   let memo = typeof options.memo === 'string' ? options.memo.trim().slice(0, 400) : '';
   // Optional dedupe key. Auto-send paths (Stripe webhook) pass one so a
@@ -910,6 +933,8 @@ async function sendReceiptEmail(invoiceId, options = {}) {
         idempotencyKey,
         categories: ['invoice_receipt'],
         attachments: [pdfAttachment(`receipt-${invoice.invoice_number}.pdf`, pdfBuffer)],
+        // (undefined = sendTemplate's default; the authority spread below replaces it on the routed path)
+        withProviderHandoff: callerReceiptHandoff(options.beforeProviderHandoff, authorityInput),
         ...(authorityInput ? {
           withProviderHandoff: (dispatch) => dispatchUnderBillingEmailAuthority({
             input: authorityInput,

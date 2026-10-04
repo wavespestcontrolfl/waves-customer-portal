@@ -158,6 +158,19 @@ async function legBlockedBy(s, claim, stillHeld, step) {
   return null;
 }
 
+// The provider-handoff guard: the same two checks as legBlockedBy, run by the sender at the point just
+// before the provider request (a long pre-dispatch step — recipient and payment reads, short link, PDF —
+// can outlive the lock's lease). `abortedBy` records why, for the honest per-leg result.
+function handoffGuard(s, claim, stillHeld, step) {
+  const guard = async () => {
+    const why = await legBlockedBy(s, claim, stillHeld, step);
+    if (why) guard.abortedBy = why;
+    return !why;
+  };
+  guard.abortedBy = null;
+  return guard;
+}
+
 async function runEmailLeg(s, claim, stillHeld) {
   const { recordOperatorReceiptDelivered } = require('./receipt-delivery-queue');
   const blocked = await legBlockedBy(s, claim, stillHeld, 'before_email');
@@ -167,7 +180,10 @@ async function runEmailLeg(s, claim, stillHeld) {
     return;
   }
   const { sendReceiptEmail } = require('./invoice-email');
-  s.emailResult = await sendReceiptEmail(s.id, { memo: s.memo }).catch((err) => ({ ok: false, error: err.message }));
+  const guard = handoffGuard(s, claim, stillHeld, 'before_email');
+  s.emailResult = await sendReceiptEmail(s.id, { memo: s.memo, beforeProviderHandoff: guard }).catch((err) => ({ ok: false, error: err.message }));
+  // Vetoed at the provider boundary: a definite non-send, with the guard's own reason.
+  if (guard.abortedBy) s.emailResult = { ok: false, error: guard.abortedBy };
   s.delivery.email = emailDelivery(s.emailResult);
   if (s.emailResult.ok) await recordOperatorReceiptDelivered(claim, 'email');
 }
@@ -181,17 +197,22 @@ async function runTextLeg(s, claim, stillHeld) {
     return;
   }
   const InvoiceService = require('./invoice');
+  const guard = handoffGuard(s, claim, stillHeld, 'before_text');
   // Manual operator resend — pass force:true to override the auto-send idempotency guard
   // (otherwise re-clicking SEND RECEIPT would no-op for invoices already auto-receipted by the
   // Stripe webhook). recordActivity:false because the activity_log row is written once, below,
   // with the memo and channel mix.
   try {
-    const r = await InvoiceService.sendReceipt(s.id, { force: true, recordActivity: false, hasEmailLeg: s.via === 'both', operatorInitiated: true });
+    const r = await InvoiceService.sendReceipt(s.id, {
+      force: true, recordActivity: false, hasEmailLeg: s.via === 'both', operatorInitiated: true, beforeProviderHandoff: guard,
+    });
     s.smsResult = r?.sent ? { ok: true } : { ok: false, error: r?.reason || r?.code || 'not-sent' };
   } catch (err) {
     s.smsResult = { ok: false, error: err.message };
     s.smsThrown = err;
   }
+  // Vetoed at the provider boundary: a definite non-send, with the guard's own reason.
+  if (guard.abortedBy) s.smsResult = { ok: false, error: guard.abortedBy };
   s.delivery.sms = smsDelivery(s.smsResult.ok ? { sent: true } : null, s.smsThrown);
   // A throw AFTER the provider accepted the text (its bookkeeping failed) is a delivered
   // receipt: record, stamp and release as sent, or the "failure" invites a duplicate resend.

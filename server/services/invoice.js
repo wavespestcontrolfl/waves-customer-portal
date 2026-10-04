@@ -9484,7 +9484,10 @@ const InvoiceService = {
       : "0.00";
   },
 
-  async sendReceipt(invoiceId, { force = false, recordActivity = true, hasEmailLeg = false, operatorInitiated = false, customerInitiated = false } = {}) {
+  // beforeProviderHandoff (optional, async, returns true to proceed): the caller's last check, run through the
+  // messaging pipeline's own provider-boundary hook (sendCustomerMessage preProviderCheck, the last callback before
+  // the Twilio request). Anything but `true` blocks the send: a definite non-send.
+  async sendReceipt(invoiceId, { force = false, recordActivity = true, hasEmailLeg = false, operatorInitiated = false, customerInitiated = false, beforeProviderHandoff = null } = {}) {
     const invoice = await db("invoices").where({ id: invoiceId }).first();
     if (!invoice || invoice.status !== "paid")
       return { sent: false, reason: "not-paid" };
@@ -9560,6 +9563,11 @@ const InvoiceService = {
       // open. Callers assert it only from verified provenance (the
       // receipt queue's persisted flag; Pay-route enqueues).
       ...(customerInitiated ? { customerInitiated: true } : {}),
+      ...(typeof beforeProviderHandoff === "function" ? {
+        preProviderCheck: async () => ((await beforeProviderHandoff()) === true
+          ? { ok: true }
+          : { ok: false, code: "RECEIPT_HANDOFF_ABORTED", reason: "receipt handoff aborted by the caller" }),
+      } : {}),
       metadata: {
         original_message_type: "receipt",
         billingDeliveryCategory: "payment_receipt",

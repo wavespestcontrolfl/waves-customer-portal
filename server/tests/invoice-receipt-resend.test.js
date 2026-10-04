@@ -70,9 +70,9 @@ test('both legs: stamps receipt_sent_at with the trimmed, cut memo, writes the a
   const out = await sendInvoiceReceipt(ID, { via: 'both', memo: `  ${'x'.repeat(500)}  `, actorTechnicianId: 'admin-1' });
   expect(out.status).toBe(200);
   expect(out.body).toMatchObject({ ok: true, email: { ok: true }, sms: { ok: true }, invoice: { id: ID } });
-  expect(sendReceiptEmail).toHaveBeenCalledWith(ID, { memo: 'x'.repeat(400) });
+  expect(sendReceiptEmail).toHaveBeenCalledWith(ID, { memo: 'x'.repeat(400), beforeProviderHandoff: expect.any(Function) });
   expect(closeOutVisitForIssuedInvoice).toHaveBeenCalledWith({ invoiceId: ID, trigger: 'paid', actorTechnicianId: 'admin-1' });
-  expect(InvoiceService.sendReceipt).toHaveBeenCalledWith(ID, { force: true, recordActivity: false, hasEmailLeg: true, operatorInitiated: true });
+  expect(InvoiceService.sendReceipt).toHaveBeenCalledWith(ID, { force: true, recordActivity: false, hasEmailLeg: true, operatorInitiated: true, beforeProviderHandoff: expect.any(Function) });
   expect(updates).toContainEqual({ table: 'invoices', patch: { receipt_sent_at: 'now()', receipt_memo: 'x'.repeat(400) } });
   expect(activity[0].row).toMatchObject({ action: 'invoice_receipt_sent', description: expect.stringMatching(/WPC-2026-0900 \(email \+ sms\) — memo: x{80}…/) });
 });
@@ -359,5 +359,56 @@ describe('ownership of the send lock is checked before each effect', () => {
     const out = await sendInvoiceReceipt(ID, { via: 'both' });
     expect(out.lockLost).toBeNull();
     expect(out.stampWritten).toBe(true);
+  });
+});
+
+describe('the provider-handoff guard: lock ownership and the approved recipients + amount are checked again where the sender reaches its provider', () => {
+  afterEach(() => { Object.assign(mockLock, { busy: false, reason: 'busy', lostAfter: Infinity }); });
+  const approved = { recipients_key: 'rk', amount: '129.00', receipt_state: 'unsent' };
+
+  // A sender that does what the real ones do: pre-dispatch work, then ask the guard at the handoff.
+  const emailAsksGuard = () => sendReceiptEmail.mockImplementation(async (_id, opts) => (
+    (await opts.beforeProviderHandoff()) === true ? { ok: true } : { ok: false, code: 'receipt_handoff_aborted' }));
+  const textAsksGuard = () => InvoiceService.sendReceipt.mockImplementation(async (_id, opts) => {
+    if ((await opts.beforeProviderHandoff()) === true) return { sent: true };
+    throw Object.assign(new Error('receipt SMS blocked: PRE_PROVIDER_CHECK_FAILED'), { providerOutcome: { deliveryOutcome: 'not_sent', blocked: true } });
+  });
+
+  test('both guards pass: the receipt goes out', async () => {
+    emailAsksGuard(); textAsksGuard();
+    const out = await sendInvoiceReceipt(ID, { via: 'both', expect: { approved, rederive: async () => ({ ...approved }) } });
+    expect(out.delivery).toEqual({ email: 'sent', sms: 'sent' });
+  });
+
+  test('the lock lost AFTER the early check but before the email request: aborted at the handoff, a definite not_sent', async () => {
+    emailAsksGuard(); textAsksGuard();
+    // checks: claim(1), closeout(2), early email(3) pass; the handoff guard(4) finds it lost.
+    mockLock.lostAfter = 3;
+    const out = await sendInvoiceReceipt(ID, { via: 'email' });
+    expect(sendReceiptEmail).toHaveBeenCalledTimes(1);
+    expect(out.delivery.email).toBe('not_sent');
+    expect(out.body.email).toEqual({ ok: false, error: 'send lock lost' });
+    expect(out.lockLost).toBe('before_email');
+    expect(updates.filter((u) => u.patch.receipt_sent_at)).toHaveLength(0);
+  });
+
+  test('the same for the text: lost after the early check, aborted at the Twilio handoff', async () => {
+    textAsksGuard();
+    mockLock.lostAfter = 3;
+    const out = await sendInvoiceReceipt(ID, { via: 'sms' });
+    expect(out.delivery.sms).toBe('not_sent');
+    expect(out.body.sms).toEqual({ ok: false, error: 'send lock lost' });
+    expect(out.lockLost).toBe('before_text');
+  });
+
+  test('the recipient or amount changing during the long pre-dispatch step is refused at the handoff', async () => {
+    emailAsksGuard();
+    let reads = 0;
+    // re-derivations: the final check (1), the early email check (2) match; the handoff guard (3) sees a new amount.
+    const rederive = async () => ({ ...approved, ...(++reads >= 3 ? { amount: '99.00' } : {}) });
+    const out = await sendInvoiceReceipt(ID, { via: 'email', expect: { approved, rederive } });
+    expect(out.delivery.email).toBe('not_sent');
+    expect(out.body.email).toEqual({ ok: false, error: 'recipient or amount changed after approval' });
+    expect(updates.filter((u) => u.patch.receipt_sent_at)).toHaveLength(0);
   });
 });
