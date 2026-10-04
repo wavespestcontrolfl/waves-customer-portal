@@ -1949,30 +1949,49 @@ async function recordChannelDelivered(trx, notice, channel, at) {
 }
 
 // The existing admin alert path (no new channel); after the event commits.
+// Raised AFTER the failure's own transaction commits, so a "delivered" confirmation can land in
+// between and close the alert key before the alert exists. Each alert is therefore raised
+// under the customer-comms fence (the confirmation closes keys inside its fenced
+// transaction), and only while the notice is still undelivered: a confirmation that committed
+// first is seen here and nothing is raised; one that comes later waits and then closes it.
+async function stillUndelivered(conn, noticeId) {
+  const n = await conn('price_change_notices').where({ id: noticeId }).first('status', 'sent_at', 'email_sent', 'sms_sent', 'metadata');
+  if (!n) return false;
+  const delivered = !!n.sent_at && ['sent', 'viewed'].includes(String(n.status)) && (n.email_sent === true || n.sms_sent === true) && !parseJson(n.metadata, {}).delivery_revoked;
+  return !delivered;
+}
+
 async function raiseDeliveryAlerts(alerts) {
   for (const a of alerts || []) {
     try {
-      const { raiseAdminAlert, composeAdminAlert } = require('./admin-alert-compose');
-      const spec = {
-        area: 'Billing',
-        action: a.rateWritten ? 'check a rate change whose letter bounced' : 'fix the contact and re-send a rate letter',
-        why: a.rateWritten
-          ? 'The rate letter was undelivered after the new rate had already been applied, so check what the customer was told.'
-          : 'The rate letter bounced or was blocked, so the customer was not told. It is back in Rate review, ready to send again once the contact is fixed.',
-        severity: 'needs-you',
-        link: `/admin/customers?customerId=${encodeURIComponent(a.customerId)}`,
-        subject: { type: 'customer', id: String(a.customerId) },
-        doneWhen: 'rate_review_letter_delivered',
-        who: 'person',
-      };
-      const opts = { dedupeKey: `rate-review-delivery-revoked:${a.noticeId}:${a.event}`, refreshOnDedupe: true, metadata: { noticeId: a.noticeId, rateReviewRowId: a.rowId, familyKey: a.familyKey, channel: a.channel, event: a.event } };
-      if (!require('../config/feature-gates').alertEpisodesLive()) { await raiseAdminAlert('billing', spec, opts); continue; }
-      const composed = composeAdminAlert(spec);
-      await require('./admin-alert-episodes').raiseAdminAlertWithReopen('billing', composed.headline, composed.why, { ...opts, link: composed.link, metadata: { ...opts.metadata, ...composed.metadata } });
+      await db.transaction(async (fence) => {
+        await lockCustomerComms(fence, a.customerId);
+        if (await stillUndelivered(fence, a.noticeId)) await raiseDeliveryAlert(a);
+      });
     } catch (err) {
       logger.warn(`[rate-review-comms] delivery alert failed for notice ${a.noticeId}: ${err.message}`);
     }
   }
+}
+
+async function raiseDeliveryAlert(a) {
+  const { raiseAdminAlert, composeAdminAlert } = require('./admin-alert-compose');
+  const spec = {
+    area: 'Billing',
+    action: a.rateWritten ? 'check a rate change whose letter bounced' : 'fix the contact and re-send a rate letter',
+    why: a.rateWritten
+      ? 'The rate letter was undelivered after the new rate had already been applied, so check what the customer was told.'
+      : 'The rate letter bounced or was blocked, so the customer was not told. It is back in Rate review, ready to send again once the contact is fixed.',
+    severity: 'needs-you',
+    link: `/admin/customers?customerId=${encodeURIComponent(a.customerId)}`,
+    subject: { type: 'customer', id: String(a.customerId) },
+    doneWhen: 'rate_review_letter_delivered',
+    who: 'person',
+  };
+  const opts = { dedupeKey: `rate-review-delivery-revoked:${a.noticeId}:${a.event}`, refreshOnDedupe: true, metadata: { noticeId: a.noticeId, rateReviewRowId: a.rowId, familyKey: a.familyKey, channel: a.channel, event: a.event } };
+  if (!require('../config/feature-gates').alertEpisodesLive()) { await raiseAdminAlert('billing', spec, opts); return; }
+  const composed = composeAdminAlert(spec);
+  await require('./admin-alert-episodes').raiseAdminAlertWithReopen('billing', composed.headline, composed.why, { ...opts, link: composed.link, metadata: { ...opts.metadata, ...composed.metadata } });
 }
 
 // The SendGrid event webhook's hook (routes/webhooks-sendgrid.js, inside the

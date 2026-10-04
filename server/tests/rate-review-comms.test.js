@@ -2096,6 +2096,22 @@ describe('customer surfaces', () => {
       expect(mockCloseAlertKeys).toHaveBeenCalledWith(expect.anything(), [`rate-review-delivery-revoked:${notices()[0].id}:bounce`], 'rate_review_resent');
     });
 
+    test('a failure alert is raised only while the notice is still undelivered: a confirmation that committed first leaves nothing to raise', async () => {
+      const compose = require('../services/admin-alert-compose');
+      const gates = require('../config/feature-gates');
+      const raise = jest.spyOn(compose, 'raiseAdminAlert').mockResolvedValue({ id: 'a1' });
+      const live = jest.spyOn(gates, 'alertEpisodesLive').mockReturnValue(false);
+      try {
+        await sendEmailOnly();
+        const alert = { noticeId: notices()[0].id, customerId: CUSTOMER(1), rowId: ROW(1), familyKey: 'pest_control', rateWritten: false, channel: 'email', event: 'bounce' };
+        await comms.raiseDeliveryAlerts([alert]); // delivered and not revoked: the failure was overtaken by a confirmation
+        expect(raise).not.toHaveBeenCalled();
+        await comms.handleEmailDeliveryEvent(mockDb, message(), bounce()); // now really undelivered
+        await comms.raiseDeliveryAlerts([alert]);
+        expect(raise).toHaveBeenCalledTimes(1);
+      } finally { raise.mockRestore(); live.mockRestore(); }
+    });
+
     test('a two-line letter whose early confirmation stamps one line while the other was repointed is reported uncertain, not sent', async () => {
       const lawn = draft(2, { customer_id: CUSTOMER(1), rate_review_row_id: ROW(2), family_key: 'lawn_care', effective_date: '2026-12-20', noticed_current_cents: 6100, noticed_new_cents: 6400, current_amount_cents: 6100, new_amount_cents: 6400 });
       const b = book({ customers: [customer(1), customer(9)], notices: [draft(1), lawn] });
