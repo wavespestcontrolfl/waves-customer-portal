@@ -373,6 +373,18 @@ postgres('resend_receipt on real PostgreSQL: the writer\'s final check and the a
       expect(await job()).toMatchObject({ status: 'completed' });
     });
 
+    test('email outcome unknown and NO automatic job existed: a tombstone (failed) stays, so a delayed enqueue cannot re-send', async () => {
+      await seed({ stamped: true, job: null });
+      mockSendReceiptEmail.mockResolvedValue({ ok: false, error: 'provider response lost', deliveryOutcome: 'uncertain' });
+      const out = await confirm(await preview({ via: 'email' }), { via: 'email' });
+      expect(out.outcome_unknown).toBe(true);
+      expect(out.automatic_receipt).toBe('held_for_reconciliation');
+      expect(await job()).toMatchObject({ status: 'failed', source: 'operator_send' });
+      const Queue = require('../services/receipt-delivery-queue');
+      expect(await Queue.enqueueReceiptDelivery({ invoiceId, source: 'stripe_webhook' })).toEqual({ enqueued: false, deduped: true });
+      expect((await Queue.claimDueReceiptDeliveryJobs({ limit: 50 })).map((j) => j.invoice_id)).not.toContain(invoiceId);
+    });
+
     test('email outcome unknown: the job is held, and the result says the queue will not send it again', async () => {
       await seed({ stamped: true });
       mockSendReceiptEmail.mockResolvedValue({ ok: false, error: 'provider response lost', deliveryOutcome: 'uncertain' });

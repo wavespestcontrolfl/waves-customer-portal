@@ -554,9 +554,13 @@ async function recordOperatorReceiptDelivered(claim, leg) {
 //
 //   1. email delivered by this send        -> completed        (nothing more is owed; no duplicate)
 //   2. holdForReconciliation (outcome of a leg unknown; the IB tool sets it)
-//        a row the claim created, no takeover -> row removed   (no job ever existed to hold)
-//        everything else (prior queued, or any takeover)
-//                                          -> failed ("held")  (never queued: a leg may have gone out)
+//                                          -> failed ("held")  for EVERY row, including the one the claim
+//                                             created: never queued (a leg may have gone out), and kept as the
+//                                             invoice's one job row so a later or concurrent enqueue (a delayed
+//                                             Stripe webhook, a closeout repair) stays deduped instead of
+//                                             inserting a fresh job that re-sends a receipt the provider
+//                                             may already have accepted (enqueueReceiptDelivery only merges
+//                                             into a RUNNING operator_send row, so it never revives a failed one)
 //   3. otherwise (definite failure, or only a text delivered)
 //        taken over by an enqueue          -> queued           (that job is due)
 //        a row the claim created           -> removed
@@ -608,7 +612,6 @@ async function releaseOperatorReceiptClaim(claim, { emailDelivered = false, smsD
       }
       // 2. The outcome of a leg is unknown: never queued.
       if (holdForReconciliation) {
-        if (!prior && !takenOver && await mine().where({ source: 'operator_send' }).del()) return 'removed';
         return settled(await mine().update({
           status: 'failed',
           sms_result: smsResult,

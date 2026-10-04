@@ -368,7 +368,7 @@ postgres('operator receipt claim on PostgreSQL', () => {
   describe('releaseOperatorReceiptClaim: one ordered decision for every claimed job (prior state x takeover x outcome)', () => {
     // The decision table (see releaseOperatorReceiptClaim):
     //   1. email delivered by this send -> completed
-    //   2. hold (a leg's outcome unknown) -> failed ("held"), never queued; a row the claim created with no takeover is removed
+    //   2. hold (a leg's outcome unknown) -> failed ("held") for EVERY row, never queued; the claim-created row is kept too, so a later or concurrent enqueue stays deduped
     //   3. otherwise: takeover -> queued; claim-created row -> removed; prior queued -> back as it was
     // A completed or failed job is never claimed (claim returns { id: null }, release 'none'), so it has no cells here.
     // [prior, takeover, outcome, final job status ('row removed' = no row), disposition]
@@ -377,7 +377,7 @@ postgres('operator receipt claim on PostgreSQL', () => {
       ['queued', 'no', 'unknown / hold', 'failed', 'held_for_reconciliation'],
       ['queued', 'no', 'definite failure', 'retry_scheduled', 'returned_to_queue'],
       ['none', 'no', 'email delivered', 'completed', 'completed'],
-      ['none', 'no', 'unknown / hold', 'row removed', 'removed'],
+      ['none', 'no', 'unknown / hold', 'failed', 'held_for_reconciliation'],
       ['none', 'no', 'definite failure', 'row removed', 'removed'],
       ['none', 'yes', 'email delivered', 'completed', 'completed'],
       ['none', 'yes', 'unknown / hold', 'failed', 'held_for_reconciliation'],
@@ -434,15 +434,27 @@ postgres('operator receipt claim on PostgreSQL', () => {
       expect(await claimReceiptJobForOperatorSend(invoiceId)).toEqual({ id: null });
     });
 
-    test('a job another path enqueued during the claim is held too; a row the claim created alone still goes away', async () => {
+    test('a job another path enqueued during the claim is held too', async () => {
       const taken = randomUUID();
       const claim = await claimReceiptJobForOperatorSend(taken);
       await enqueueReceiptDelivery({ invoiceId: taken, source: 'ib_closeout_repair' });
       await releaseOperatorReceiptClaim(claim, { emailDelivered: false, holdForReconciliation: true });
       expect(await job(taken)).toMatchObject({ status: 'failed', source: 'ib_closeout_repair' });
-      const alone = randomUUID();
-      await releaseOperatorReceiptClaim(await claimReceiptJobForOperatorSend(alone), { emailDelivered: false, holdForReconciliation: true });
-      expect(await job(alone)).toBeUndefined();
+    });
+
+    test('a row the claim created is KEPT (failed) on hold: a later enqueue stays deduped and cannot re-send a receipt the provider may have accepted', async () => {
+      const invoiceId = randomUUID();
+      const claim = await claimReceiptJobForOperatorSend(invoiceId);
+      // An enqueue blocked behind the release (a delayed Stripe webhook, a closeout repair) lands after it commits.
+      const release = releaseOperatorReceiptClaim(claim, { emailDelivered: false, holdForReconciliation: true });
+      const late = enqueueReceiptDelivery({ invoiceId, source: 'stripe_webhook' });
+      expect(await release).toBe('held_for_reconciliation');
+      expect(await late).toMatchObject({ deduped: true, enqueued: false });
+      expect(await enqueueReceiptDelivery({ invoiceId, source: 'ib_closeout_repair' })).toEqual({ enqueued: false, deduped: true });
+      expect(await job(invoiceId)).toMatchObject({ status: 'failed', source: 'operator_send', locked_by: null, last_error: expect.stringMatching(/held for reconciliation/) });
+      // Nothing for the drain, and a later operator send still works (a finished job is simply not claimed).
+      expect((await claimDueReceiptDeliveryJobs({ limit: 50 })).map((j) => j.invoice_id)).not.toContain(invoiceId);
+      expect(await claimReceiptJobForOperatorSend(invoiceId)).toEqual({ id: null });
     });
 
     test('a delivered email still completes the job — hold only applies to an undelivered one', async () => {
