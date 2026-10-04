@@ -413,10 +413,14 @@ const MODEL_TEXT = 'Nutsedge is visible near the front edge.';
     const { assessment } = await seed(COMPLETE, { run: false });
     const first = await request(assessment.id, { adjustedScores: { turf_density: 72 } });
     expect(first.body.assessment).toMatchObject({ confirmed_by_tech: true, turf_density: 72 });
+    await drain();
     const committed = await read(assessment.id);
     const stale = await request(assessment.id, { adjustedScores: { turf_density: 5, stress_damage: 1 }, stress_flags: { drought_stress: true } });
     expect(stale.body).toMatchObject({ success: true, assessment: { confirmed_by_tech: true, turf_density: 72, stress_damage: 85 } });
     expect(await read(assessment.id)).toEqual(committed);
+    // The first confirmation recorded the calibration comparison; the stale one adds none.
+    await drain();
+    expect(intel.recordTechCalibration.mock.calls.filter(([id]) => id === assessment.id)).toHaveLength(1);
     // Two sessions confirming at once: one wins, and the row holds only its scores.
     const { assessment: raced } = await seed(COMPLETE, { run: false });
     await Promise.all([

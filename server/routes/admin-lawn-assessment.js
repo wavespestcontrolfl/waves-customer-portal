@@ -1242,7 +1242,7 @@ async function confirmLegacyAssessment({ assessmentId, adjustedScores, propertyH
       // Scores are editable only until confirmation (owner ruling
       // 2026-10-04). A retry or a stale second session returns the confirmed
       // row; its payload never rewrites it (as visitRuns.confirmLockedRun).
-      if (assessment.confirmed_by_tech) return { assessment, confirmed: true, missingScores: [] };
+      if (assessment.confirmed_by_tech) return { assessment, confirmed: true, alreadyConfirmed: true, missingScores: [] };
       // A blank Fungus/Thatch is settled without an entry only when Condition
       // is a real value (AI-read or entered) or derived from a known
       // component — the 95 fallback of a row with no stressor signal at all
@@ -1419,7 +1419,9 @@ router.post('/confirm', async (req, res, next) => {
           ['turf_density', 'weed_suppression', 'color_health', 'fungus_control', 'thatch_level', 'stress_damage']
             .map((key) => [key, updated?.[key] ?? null]),
         ), confirmation.syntheticSubScores);
-        if (updated) {
+        // The first confirmation recorded the comparison; a retry or stale
+        // session changed nothing and no longer knows the synthetic keys.
+        if (updated && !confirmation.alreadyConfirmed) {
           const calibrationBaseline = assessment.adjusted_scores || assessment.composite_scores;
           const aiScores = calibrationBaseline
             ? (typeof calibrationBaseline === 'string' ? JSON.parse(calibrationBaseline) : calibrationBaseline)
