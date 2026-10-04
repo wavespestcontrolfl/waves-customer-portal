@@ -540,6 +540,33 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     expect((await trx('time_entries').where({ id: shiftId }).first()).status).toBe('active');
   });
 
+  test('a timer stop that failed after the visit closed is retried by the next closeout of the same invoice; a visit someone else completed keeps its timer (pre-push audit P1)', async () => {
+    const techId = randomUUID();
+    await trx('technicians').insert({ id: techId, name: 'Fixture Tech' });
+    const startedAt = new Date(Date.now() - 30 * 60000);
+    await trx('time_entries').insert({ id: randomUUID(), technician_id: techId, entry_type: 'shift', status: 'active', staff_write_generation: ACTIVE_WRITE_GENERATION, clock_in: new Date(startedAt.getTime() - 60000) });
+    const timer = async (jobId) => {
+      const id = randomUUID();
+      await trx('time_entries').insert({ id, technician_id: techId, entry_type: 'job', status: 'active', staff_write_generation: ACTIVE_WRITE_GENERATION, clock_in: startedAt, job_id: jobId });
+      return id;
+    };
+    // The closeout completed this visit and its attempt succeeded, but the
+    // timer stop never ran (failure, or the process exited first).
+    const closed = await visit({ status: 'completed', technician_id: techId });
+    const inv = await invoice({ scheduled_service_id: closed.id, status: 'paid' });
+    await trx('service_completion_attempts').insert({ id: randomUUID(), service_id: closed.id, idempotency_key: `invoice-issued:${inv.id}`, status: 'succeeded', request_hash: 'x' });
+    const leftRunning = await timer(closed.id);
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'paid', conn: trx, today: TODAY })).toMatchObject({ closed: false, reason: 'visit_completed' });
+    expect((await trx('time_entries').where({ id: leftRunning }).first()).status).toBe('completed');
+    expect(mockCompleteScheduledService).not.toHaveBeenCalled();
+
+    // Completed by its technician (no attempt of this closeout): untouched.
+    const theirs = await visit({ status: 'completed', technician_id: techId, date: '2040-03-01' });
+    const theirTimer = await timer(theirs.id);
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: (await invoice({ scheduled_service_id: theirs.id, date: '2040-03-01', status: 'paid' })).id, trigger: 'paid', conn: trx, today: TODAY })).toMatchObject({ closed: false, reason: 'visit_completed' });
+    expect((await trx('time_entries').where({ id: theirTimer }).first()).status).toBe('active');
+  });
+
   test('a refused completion is reported, audited as refused, and never thrown', async () => {
     mockCompleteScheduledService.mockResolvedValueOnce({ status: 409, body: { code: 'already_completed' } });
     const open = await visit();

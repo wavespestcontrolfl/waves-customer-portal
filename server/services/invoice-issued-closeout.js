@@ -356,6 +356,33 @@ async function refuseVoidedInvoice(run) {
   return { closed: false, reason: 'invoice_void', visitId };
 }
 
+// An arrived visit may still have its job timer running (GitHub r9 P1
+// #4127): the quiet closeout completed the visit, so the timer ends with it
+// instead of counting until the technician clocks out. Best-effort, and
+// RECOVERABLE (pre-push audit P1): the completion marks its attempt
+// succeeded before this runs, so a failure or a process exit here would
+// otherwise never be retried — every later closeout of the invoice reads
+// visit_completed. resolveCloseoutTarget therefore runs it again on that
+// refusal when the visit was closed by THIS invoice's closeout. Ending a
+// timer that is already stopped does nothing.
+async function endJobTimerOfClosedVisit(run, visitId) {
+  try {
+    await require('./time-tracking').endActiveJobEntriesForVisit(visitId);
+  } catch (timerErr) {
+    logger.error(`[invoice-issued-closeout] ${run.label} → visit ${visitId} is completed, but its running job timer was NOT ended (the next send / payment / receipt resend of this invoice retries): ${timerErr.message}`);
+  }
+}
+
+// Did THIS invoice's closeout complete the visit? Its attempt is keyed
+// invoice-issued:<invoice id>; a visit completed by its technician, a panel
+// or another invoice has no such attempt and keeps its timer untouched.
+async function closedByThisCloseout(run, visitId) {
+  const attempt = await run.conn('service_completion_attempts')
+    .where({ service_id: visitId, idempotency_key: run.idempotencyKey, status: 'succeeded' })
+    .first('id');
+  return Boolean(attempt);
+}
+
 // Phase 2 — which visit, if any: the linked open visit, or this closeout's
 // OWN resumable attempt on a completed one. A linked visit left open on
 // purpose (already closed, future, grouped, packet-owned, record-linked) is
@@ -374,6 +401,12 @@ async function resolveCloseoutTarget(run) {
     run.svc = resolved.visit;
     run.resuming = true;
     return null;
+  }
+  // The timer-stop retry (see endJobTimerOfClosedVisit): a visit this
+  // invoice's closeout already completed gets its running job timer ended
+  // on every later pass, until none is left.
+  if (resolved.reason === 'visit_completed' && await closedByThisCloseout(run, resolved.visit.id)) {
+    await endJobTimerOfClosedVisit(run, resolved.visit.id);
   }
   if (resolved.visit) {
     logger.info(`[invoice-issued-closeout] ${run.label} → visit ${resolved.visit.id} left open (${resolved.reason})`);
@@ -414,17 +447,7 @@ async function runQuietCloseout(run) {
   const outcome = completionOutcome(result);
   const line = `[invoice-issued-closeout] ${run.label} → visit ${run.svc.id} ${outcome.closed ? `completed${run.resuming ? ' (resumed)' : ''}` : `NOT completed (${outcome.status} ${outcome.code || outcome.error || ''})`}`;
   if (outcome.closed) logger.info(line); else logger.warn(line);
-  // An arrived visit may still have its job timer running (GitHub r9 P1
-  // #4127): the quiet closeout completed the visit, so the timer ends with
-  // it instead of counting until the technician clocks out. Best-effort
-  // after the commit; a resumed closeout runs it again and finds nothing.
-  if (outcome.closed) {
-    try {
-      await require('./time-tracking').endActiveJobEntriesForVisit(run.svc.id);
-    } catch (timerErr) {
-      logger.error(`[invoice-issued-closeout] ${run.label} → visit ${run.svc.id} completed, but its running job timer was NOT ended: ${timerErr.message}`);
-    }
-  }
+  if (outcome.closed) await endJobTimerOfClosedVisit(run, run.svc.id);
   await auditCloseoutOutcome(run, { closed: outcome.closed, visitId: run.svc.id, resumed: run.resuming, status: outcome.status, code: outcome.code });
   return { closed: outcome.closed, reason: outcome.closed ? null : (outcome.code || `status_${outcome.status}`), visitId: run.svc.id, resumed: run.resuming };
 }
