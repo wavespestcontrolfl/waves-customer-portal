@@ -268,7 +268,10 @@ describe('the two-model rule for a call finding', () => {
   test('the Sunday proposer counts distinct confirmed calls in the unversioned cohort', async () => {
     for (let i = 0; i < 5; i++) await finding(await call());
     await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader: agreeing });
-    const out = await calls.proposeCallFixes({ dbi: database, now: new Date('2026-10-04T08:50:00Z') });
+    // The incidents are stamped by the database's own clock (adjudicated_at
+    // defaults to now()), so the proposer's cutoff must be the real clock's:
+    // a fixed 2026-10-04T08:50Z left them all past the cutoff from that hour on.
+    const out = await calls.proposeCallFixes({ dbi: database, now: new Date(Date.now() + 60000) });
     expect(out).toMatchObject({ proposed: 1 });
     expect(await database('ai_fix_proposals').first()).toMatchObject({
       area: 'calls', surface: 'call_extraction', failure_mode: 'appointment_agreed_missed', prompt_version: null, status: 'pending', evidence_count: 5,
