@@ -747,5 +747,6 @@ module.exports = {
   autoAssignParkedAlert,
   autoAssignTechDay,
   MAX_MOVE_ATTEMPTS,
+  blockedBySchedule,
   _test: { fitsWindow, detourForTech, compareCandidates, rankCandidates },
 };

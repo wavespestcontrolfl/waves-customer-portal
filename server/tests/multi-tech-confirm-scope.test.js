@@ -171,6 +171,35 @@ describe('wiring', () => {
     expect(src).toContain('await probeSlotOverlap({ trx, date,');
   });
 
+  test('after-call booking: the picked technician is the one fenced, probed and saved', () => {
+    const src = read('services/call-recording-processor.js');
+    // Fresh insert: pick → fence → probe → insert all use bookingTechnicianId.
+    expect(src).toContain("require('./scheduling/pick-technician').pickTechnicianForVisit({");
+    expect(src).toContain('fenceBookingDay(fenceSp, { date: scheduledDate, techId: bookingTechnicianId || null })');
+    expect(src).toContain('technicianId: bookingTechnicianId || null,');
+    expect(src).toContain('technician_id: bookingTechnicianId,');
+    expect(src).not.toContain('technician_id: defaultTechnicianId,');
+    // Reused unassigned row: the pick excludes the row itself.
+    expect(src).toMatch(/excludeServiceIds: \[existing\.id\],\s+excludeCustomerId: null,/);
+    // …and reads the row's OWN day and window, not the time this call stated.
+    expect(src).toContain('date: callBookingDateOnly(existing.scheduled_date),');
+    expect(src).toContain('followUpProbeEnd(existing.window_start, existing.window_end, existing.estimated_duration_minutes)');
+    expect(src).toContain('let reuseTechId = reuseCandidateTechId;');
+    expect(src).toContain('serviceType: existing.service_type || serviceType,');
+    // A pick taken before the fence is re-made under it when the fenced read clashes.
+    expect(src).toContain('if (bookingTechnicianPicked && bookingTechnicianId && (bookingTimeConflicts.length || pickedTechnicianBlocked)) {');
+    expect(src).toContain('const repick = await pickBookingTechnician();');
+    // A picked technician's capability is re-read under the share lock at save (fresh + reused).
+    expect(src.match(/assertCapabilitiesActive\(trx, (insertData\.technician_id|reuseTechId),/g)).toHaveLength(2);
+    // The reused row's pick is re-read under the tech-day locks, excluding only that row.
+    expect(src).toContain('if (reuseTechId && reuseTechPicked && existing.window_start) {');
+    expect(src).toMatch(/technicianFreeAt\(\{\s+conn: probeSp, technicianId: reuseTechId,[^}]*excludeServiceIds: \[existing\.id\],/);
+    // Post-commit recheck judges each fresh row on its own technician.
+    expect(src).toContain('technicianId: svc.technician_id || null,');
+    expect(src).toContain('technicianId: followUpCreated.technician_id || null,');
+    expect(src).toContain('technicianId: visit.technicianId || null,');
+  });
+
   test('callers that must stay tech-blind never pass technicianId', () => {
     for (const p of ['services/scheduling/window-rules.js',
       'services/availability.js', 'services/slot-reservation.js', 'services/visit-groups.js',
