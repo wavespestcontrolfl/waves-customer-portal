@@ -2506,12 +2506,17 @@ export default function EstimateToolViewV2({
   function applyCustomerLink(c, { adoptAddress }) {
     const name = `${c.firstName || ""} ${c.lastName || ""}`.trim();
     if (!preLinkContactRef.current) {
-      preLinkContactRef.current = {
-        customerName: form.customerName || "",
-        customerPhone: form.customerPhone || "",
-        customerEmail: form.customerEmail || "",
-        isRecurringCustomer: form.isRecurringCustomer,
-      };
+      // What an unlink restores. After a search-picked lead the fields hold
+      // that lead's contact, not something the operator typed, so the
+      // snapshot is blank: unlinking this customer must not bring it back.
+      preLinkContactRef.current = linkedLead
+        ? { customerName: "", customerPhone: "", customerEmail: "", isRecurringCustomer: form.isRecurringCustomer }
+        : {
+          customerName: form.customerName || "",
+          customerPhone: form.customerPhone || "",
+          customerEmail: form.customerEmail || "",
+          isRecurringCustomer: form.isRecurringCustomer,
+        };
     }
     // 'Commercial' is a flat non-member tier — exclude it so a commercial
     // customer doesn't unlock recurring-customer loyalty discounts.
@@ -2532,8 +2537,10 @@ export default function EstimateToolViewV2({
         ? { ...(c.address && c.address !== f.address ? clearedPropertyFields() : {}), address: c.address || f.address }
         : {}),
       customerName: name,
-      customerPhone: c.phone || f.customerPhone || "",
-      customerEmail: c.email || f.customerEmail || "",
+      // After a search-picked lead the fields hold THAT lead's contact: a
+      // value this customer lacks is cleared, never inherited.
+      customerPhone: c.phone || (dropSearchLead ? "" : f.customerPhone || ""),
+      customerEmail: c.email || (dropSearchLead ? "" : f.customerEmail || ""),
       // No plan: the address suggestion resets the loyalty flag (it may have
       // been set for whoever was linked before); the lookup list keeps the
       // operator's own answer, as it always has.

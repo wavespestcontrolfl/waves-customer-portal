@@ -124,6 +124,8 @@ it('picking a customer after a lead drops the lead link', async () => {
   fireEvent.click(await screen.findByRole('button', { name: /Jamie Fixture/ }));
   expect(screen.queryByText(/Linked to lead:/)).not.toBeInTheDocument();
   expect(document.getElementById('estimate-customerName')).toHaveValue('Jamie Fixture');
+  // The customer fixture has no email: the lead's email must not ride along.
+  expect(document.getElementById('estimate-customerEmail')).toHaveValue('');
 });
 
 it('a phone typed before picking a phone-less lead is kept', async () => {
