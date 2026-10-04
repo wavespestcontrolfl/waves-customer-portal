@@ -1890,6 +1890,13 @@ export default function EstimateToolViewV2({
   // pick must clear it, never inherit it. The server links an estimate when
   // either contact matches, so a mixed contact can reach the wrong person.
   const pickedContactRef = useRef({ customerPhone: "", customerEmail: "" });
+  // Every draft/context reset (next estimate, leaving edit mode, a loaded
+  // estimate) starts with no pick: a stale one would make the next pick
+  // treat freshly typed contact as another person's.
+  const resetSearchPick = () => {
+    pickedContactRef.current = { customerPhone: "", customerEmail: "" };
+    setLinkedLead(null);
+  };
   // `picked` is read BEFORE the new pick overwrites the ref: setForm runs its
   // updater later, when the ref already holds the new person's values.
   const typedContact = (f, key, picked) => (f[key] && f[key] !== picked[key] ? f[key] : "");
@@ -2225,6 +2232,7 @@ export default function EstimateToolViewV2({
     setExistingCustomerMatch(null);
     setAddressMatches([]);
     preLinkContactRef.current = null;
+    resetSearchPick();
   }
 
   const previousAddressRef = useRef(form.address);
@@ -2538,7 +2546,7 @@ export default function EstimateToolViewV2({
     // customer now chosen: drop that link and its service hint, or the save
     // would post this customer's contact with the other person's lead id. A
     // lead that came with the page (Leads → Create Estimate) is kept, as before.
-    const dropSearchLead = !!linkedLead;
+    const dropSearchLead = !!linkedLead && form.leadId === linkedLead.id;
     if (dropSearchLead) setLinkedLead(null);
     setForm((f) => ({
       ...f,
@@ -3071,6 +3079,7 @@ export default function EstimateToolViewV2({
     setExistingCustomerMatch(null);
     setAddressMatches([]);
     preLinkContactRef.current = null;
+    resetSearchPick();
     setSatelliteStatus({ type: "", msg: "" });
     setSatelliteData(null);
     // A fresh lead/customer prefill is a new job — never chain it into a
@@ -4708,6 +4717,7 @@ export default function EstimateToolViewV2({
     setExistingCustomerMatch(null);
     setAddressMatches([]);
     preLinkContactRef.current = null;
+    resetSearchPick();
     setSatelliteStatus({ type: "", msg: "" });
     setSatelliteData(null);
     setCustomerSearch("");
