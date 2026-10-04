@@ -168,7 +168,8 @@ it('refreshes a rejected visit snapshot before another photo can be selected', a
   await screen.findByText('No photos yet.');
   const input = screen.getByLabelText('Choose service photo');
   fireEvent.change(input, { target: { files: [new File(['one'], 'one.png', { type: 'image/png' })] } });
-  await screen.findByText('Visit changed');
+  await screen.findByText(/This visit changed since the photo was selected/);
+  expect(screen.getByRole('button', { name: /Add Photo/ })).toBeDisabled();
   await waitFor(() => expect(reads).toBe(2));
   fireEvent.click(screen.getByRole('button', { name: 'Discard selected photo' }));
   await waitFor(() => expect(input).toBeEnabled());
