@@ -339,6 +339,52 @@ async function endJob(technicianId, { lat, lng } = {}) {
 }
 
 /**
+ * End the still-running job timer(s) of ONE visit, whoever owns them.
+ *
+ * The office closes a visit its technician arrived at and never closed out
+ * (invoice-issued closeout). endJob() ends "the technician's active job",
+ * which by then may be a DIFFERENT visit, so this one is keyed by the visit.
+ * Same lock order as endActiveChild (the shift, then the child) and the same
+ * duration rule. Returns the ended entries; an already-stopped timer is not
+ * an error.
+ */
+async function endActiveJobEntriesForVisit(jobId, { now = null } = {}) {
+  if (!jobId) return [];
+  const running = await db('time_entries')
+    .where({ job_id: jobId, entry_type: 'job', status: 'active' })
+    .select('technician_id');
+  const ended = [];
+  for (const technicianId of [...new Set(running.map((row) => row.technician_id))]) {
+    const rows = await db.transaction(async (trx) => {
+      await lockActiveShift(trx, technicianId);
+      const children = await trx('time_entries')
+        .where({ technician_id: technicianId, job_id: jobId, entry_type: 'job', status: 'active' })
+        .forUpdate();
+      // Captured after the locks, like closeActiveShiftAtomically: a start
+      // that held the shift lock must not end before it began.
+      const stoppedAt = now || new Date();
+      const out = [];
+      for (const child of children) {
+        const [row] = await trx('time_entries')
+          .where({ id: child.id, status: 'active' })
+          .update({
+            status: 'completed',
+            clock_out: stoppedAt,
+            duration_minutes: roundCompletedDuration(child.clock_in, stoppedAt),
+            updated_at: stoppedAt,
+          })
+          .returning('*');
+        if (row) out.push(row);
+      }
+      return out;
+    });
+    ended.push(...rows);
+  }
+  if (ended.length) logger.info(`[time-tracking] Ended ${ended.length} running job timer(s) for visit ${jobId}`);
+  return ended;
+}
+
+/**
  * Start a break.
  */
 async function startBreak(technicianId) {
@@ -1198,6 +1244,7 @@ module.exports = {
   clockOut,
   startJob,
   endJob,
+  endActiveJobEntriesForVisit,
   startBreak,
   endBreak,
   reopenStoppedEntry,

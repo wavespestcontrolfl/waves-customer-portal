@@ -1479,6 +1479,7 @@ async function handleCombinedPaymentIntentSucceeded(paymentIntent, eventCreated 
     let reviewNotRecorded = null;
     for (const settledId of combinedSettleOutcome.invoiceIds || []) {
       try {
+        await closeOutVisitAfterPaidInvoice(piId, { invoiceId: settledId });
         await scheduleReviewAfterPaidInvoice(piId, { invoiceId: settledId });
       } catch (err) {
         if (!err.reviewNotRecorded) throw err;
@@ -2239,6 +2240,7 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
   // outer handler only after this returns). Run even when the invoice was
   // already paid so webhook retry after a mid-flight crash can recover.
   // ReviewService.create is idempotent by service_record_id.
+  await closeOutVisitAfterPaidInvoice(piId);
   await scheduleReviewAfterPaidInvoice(piId);
 
   // ── Auto-send payment receipt (SMS + email) ───────────────
@@ -2665,6 +2667,32 @@ async function mirrorSavedMethodForSucceededIntent(paymentIntent) {
       logger.error(`[stripe-webhook] Save-card persist failed for PI ${piId} (pm ${stripePmId}) — rethrowing for Stripe retry: ${err.message}`);
       throw err;
     }
+  }
+}
+
+// Invoice issued ⇒ visit completed (owner ruling 2026-09-07, behind
+// GATE_INVOICE_ISSUED_CLOSES_VISIT): a card or bank payment is money received
+// for the visit the invoice bills, the same proof the cash, check and
+// reconcile rails already close on. Before 2026-10-04 this rail never asked,
+// so an office card-on-file charge or a pay-link payment left its visit open.
+// Every Stripe invoice payment lands here (the office charge, the pay page,
+// Auto Pay, a cleared bank debit), so this is the one call for all of them.
+// The closeout decides whether the visit may close (an unstarted visit today
+// is a prepayment and stays open); a visit already completed refuses quietly.
+// Best-effort by the closeout's own contract: it never throws back into the
+// settled payment. Runs BEFORE the review step, like the reconcile route —
+// the review enrollment reads the record this closeout links.
+async function closeOutVisitAfterPaidInvoice(piId, { invoiceId = null } = {}) {
+  try {
+    const paid = await db('invoices')
+      .where(invoiceId ? { id: invoiceId } : { stripe_payment_intent_id: piId })
+      .whereIn('status', ['paid', 'prepaid'])
+      .first('id');
+    if (!paid) return;
+    const { closeOutVisitForIssuedInvoice } = require('../services/invoice-issued-closeout');
+    await closeOutVisitForIssuedInvoice({ invoiceId: paid.id, trigger: 'paid' });
+  } catch (err) {
+    logger.error(`[stripe-webhook] Paid-invoice visit closeout failed for PI ${piId}: ${err.message}`);
   }
 }
 

@@ -5900,25 +5900,31 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // invoice re-resolves it on its new day.
           if (issuedInvoiceCloseout) {
             const lockedDay = serviceDateOnly(lockedSvcRow?.scheduled_date);
-            const { isLiveVisitStatus, issuedCloseoutServiceDayEligible } = require('../services/invoice-issued-closeout');
-            if (lockedDay !== serviceDateOnly(svc.scheduled_date)
-              || !issuedCloseoutServiceDayEligible(lockedDay, {
+            const { issuedCloseoutVisitRefusal } = require('../services/invoice-issued-closeout');
+            // ONE rule for status and day, re-derived on the LOCKED row — the
+            // same function the wrapper's unlocked resolver used (Codex round
+            // 16 P2 #4131: a NULL status is live in both). An arrived
+            // (on_site) visit closes on a past day or on money received
+            // today; a visit nobody has reached never closes today (owner
+            // ruling 2026-10-04).
+            const lockedRefusal = lockedDay !== serviceDateOnly(svc.scheduled_date)
+              ? 'visit_moved'
+              : issuedCloseoutVisitRefusal(lockedSvcRow?.status, lockedDay, {
                 today: etDateString(),
                 trigger: issuedInvoiceCloseout.trigger,
-              })) {
+              });
+            // A refusal of the DAY (moved, now in the future, or a day the
+            // trigger does not close) keeps its own code: the next send /
+            // payment re-resolves the visit on the day it is then on.
+            if (['visit_moved', 'visit_in_future', 'visit_scheduled_today'].includes(lockedRefusal)) {
               throw Object.assign(new Error('visit rescheduled during the issued-invoice closeout'), { code: 'issued_visit_rescheduled' });
             }
-            // The office-only status set, re-checked on the LOCKED row (pre-push
-            // P1 r9): the wrapper admits pending/confirmed on an unlocked read;
-            // a technician who started the visit in between (en_route /
-            // on_site) owns it — a running timer and a completion of their own
-            // — so the closeout refuses instead of completing over them. Uses
-            // the SAME null-tolerant predicate the resolver does (Codex round
-            // 16 P2 #4131) — a legacy NULL-status visit the resolver had just
-            // admitted used to throw issued_visit_in_progress here on the
-            // string-only check.
-            if (!isLiveVisitStatus(lockedSvcRow?.status)) {
-              throw Object.assign(new Error('visit started by its technician during the issued-invoice closeout'), { code: 'issued_visit_in_progress' });
+            // A refusal of the STATUS (pre-push P1 r9): a technician who set
+            // out for the visit (en_route) between the wrapper's unlocked
+            // read and this lock owns it — the closeout refuses instead of
+            // completing over them.
+            if (lockedRefusal) {
+              throw Object.assign(new Error(`visit state changed during the issued-invoice closeout: ${lockedRefusal}`), { code: 'issued_visit_in_progress' });
             }
             // The LOCKED status is the transition source (GitHub r10 P2
             // #4127): pending → confirmed between the unlocked read and this

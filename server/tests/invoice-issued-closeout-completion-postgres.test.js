@@ -153,11 +153,23 @@ describe('source contracts', () => {
     const completion = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
     expect(completion).toMatch(/code: 'issued_visit_rescheduled' \}\);\s*\}[\s\S]{0,3200}?const lockedProfile = await resolveLockedProfile\(lockedSvcRow, trx, \{ strict: true \}\);\s*if \(lockedProfile\?\.requiresProject \|\| lockedProfile\?\.projectBacked\) \{\s*throw Object\.assign\(new Error\([^)]*\), \{ code: 'project_required_completion' \}\);/);
     expect(completion).toMatch(/if \(err && err\.code === 'project_required_completion' && issuedInvoiceCloseout\) \{\s*await CompletionAttempts\.markCompletionAttemptFailed\(completionAttempt, err, db\);/);
-    // The office-only status set is re-checked on the locked row, ahead of the profile re-resolve.
-    // Codex round 16 P2 #4131: the string-only check was replaced by the
-    // shared null-tolerant isLiveVisitStatus predicate (a legacy NULL-status
-    // visit the resolver had just admitted used to throw here instead).
-    expect(completion).toMatch(/code: 'issued_visit_rescheduled' \}\);\s*\}[\s\S]{0,900}?if \(!isLiveVisitStatus\(lockedSvcRow\?\.status\)\) \{\s*throw Object\.assign\(new Error\([^)]*\), \{ code: 'issued_visit_in_progress' \}\);[\s\S]{0,2350}?const lockedProfile = await resolveLockedProfile/);
+    // The status + day rule is re-derived on the locked row, ahead of the
+    // profile re-resolve, through the ONE function the wrapper's resolver
+    // uses (issuedCloseoutVisitRefusal — Codex round 16 P2 #4131 kept NULL
+    // live in both; owner 2026-10-04 admits an arrived visit in both).
+    expect(completion).toMatch(/issuedCloseoutVisitRefusal\(lockedSvcRow\?\.status, lockedDay, \{[\s\S]{0,200}?trigger: issuedInvoiceCloseout\.trigger,[\s\S]{0,900}?code: 'issued_visit_rescheduled' \}\);\s*\}[\s\S]{0,600}?if \(lockedRefusal\) \{\s*throw Object\.assign\(new Error\([^)]*\), \{ code: 'issued_visit_in_progress' \}\);[\s\S]{0,2350}?const lockedProfile = await resolveLockedProfile/);
+  });
+  test('the Stripe webhook runs the paid closeout for every settled invoice, BEFORE its review step (owner 2026-10-04: card and bank payments close the visit too)', () => {
+    const webhook = fs.readFileSync(path.join(__dirname, '../routes/stripe-webhook.js'), 'utf8');
+    // The helper reads only a SETTLED invoice and asks for the 'paid' trigger.
+    expect(webhook).toMatch(/async function closeOutVisitAfterPaidInvoice\(piId, \{ invoiceId = null \} = \{\}\) \{\s*try \{[\s\S]{0,300}?\.whereIn\('status', \['paid', 'prepaid'\]\)[\s\S]{0,300}?closeOutVisitForIssuedInvoice\(\{ invoiceId: paid\.id, trigger: 'paid' \}\);\s*\} catch \(err\) \{\s*logger\.error/);
+    // Both settle paths: the combined PI (one call per settled invoice) and the single-invoice PI.
+    expect(webhook).toMatch(/await closeOutVisitAfterPaidInvoice\(piId, \{ invoiceId: settledId \}\);\s*await scheduleReviewAfterPaidInvoice\(piId, \{ invoiceId: settledId \}\);/);
+    expect(webhook).toMatch(/await closeOutVisitAfterPaidInvoice\(piId\);\s*await scheduleReviewAfterPaidInvoice\(piId\);/);
+    // Every review call has its closeout in front of it — a new settle path cannot add one without the other.
+    const reviewCalls = webhook.match(/await scheduleReviewAfterPaidInvoice\(/g) || [];
+    const closeoutCalls = webhook.match(/await closeOutVisitAfterPaidInvoice\(/g) || [];
+    expect(closeoutCalls).toHaveLength(reviewCalls.length);
   });
   test('the issued-invoice recheck locks the invoice FIRST — behind the mint advisory lock, ahead of the customer and visit rows (invoice → customer, the reversal paths\' order; GitHub r6 P2)', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
@@ -174,7 +186,7 @@ describe('source contracts', () => {
     // …and the locked visit row's day is re-validated after the visit lock.
     expect(source.indexOf("{ code: 'issued_visit_rescheduled' }", visitLockAt)).toBeGreaterThan(visitLockAt);
     expect(source.slice(visitLockAt, source.indexOf("{ code: 'issued_visit_rescheduled' }", visitLockAt)))
-      .toContain('issuedCloseoutServiceDayEligible(lockedDay');
+      .toContain('issuedCloseoutVisitRefusal(lockedSvcRow?.status, lockedDay');
   });
   test('GitHub r10: the locked status is the transition source; the zero-price conversion takes the mint advisory lock after the occupancy rung and before any row lock; the settled-statement retry runs on the daily statement tick', () => {
     const completion = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
@@ -494,18 +506,39 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
     expect(await closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'sent', actorTechnicianId: f.techId, conn: mockPg })).toMatchObject({ closed: false, reason: 'invoice_void', visitId: f.serviceId });
   });
 
-  test('a technician who starts the visit between the unlocked read and the record transaction wins — the locked status refuses the closeout (pre-push P1 r9)', async () => {
+  test('a technician who sets out for the visit between the unlocked read and the record transaction wins — the locked status refuses the closeout (pre-push P1 r9)', async () => {
     await fixture({ serviceType: 'Fixture Quarterly Pest Control Service' });
     const { completeScheduledService } = require('../services/complete-scheduled-service');
     // The wrapper resolved the visit as 'confirmed'; by the time the record
-    // transaction locks the row the technician is on site.
-    await mockPg('scheduled_services').where({ id: f.serviceId }).update({ status: 'on_site' });
+    // transaction locks the row the technician is on the way.
+    await mockPg('scheduled_services').where({ id: f.serviceId }).update({ status: 'en_route' });
     const result = await completeScheduledService({ serviceId: f.serviceId, idempotencyKey: randomUUID(),
       body: { visitOutcome: 'completed', backfill: true, sendCompletionSms: false, requestReview: false, invoiceAlreadySent: true, idempotencyKey: randomUUID() },
       actor: { techRole: 'admin', technicianId: f.techId, technician: null }, issuedInvoiceCloseout: { invoiceId: f.invoiceId, trigger: 'sent' } });
     expect(result).toMatchObject({ status: 409, body: { code: 'issued_visit_in_progress' } });
-    expect((await mockPg('scheduled_services').where({ id: f.serviceId }).first()).status).toBe('on_site');
+    expect((await mockPg('scheduled_services').where({ id: f.serviceId }).first()).status).toBe('en_route');
     expect(await mockPg('service_records').where({ scheduled_service_id: f.serviceId })).toHaveLength(0);
+  });
+
+  // Owner ruling 2026-10-04. The GPS arrival sets on_site on nearly every
+  // worked visit, and the technician often never closes it out: from the gate
+  // flip to that day the closeout had refused every arrived visit and closed
+  // nothing. A past-day arrived visit now closes like an unstarted one, in
+  // the same quiet posture; its time on site stays unknown (the backfill
+  // duration policy never books the stale arrival-to-closeout span).
+  test('an ARRIVED (on_site) visit on a past day closes quietly on a send, with no fabricated time on site', async () => {
+    await fixture({ serviceType: 'Fixture Quarterly Pest Control Service' });
+    const arrivedAt = new Date(Date.now() - 3 * 86400000);
+    await mockPg('scheduled_services').where({ id: f.serviceId }).update({ status: 'on_site', arrived_at: arrivedAt, check_in_time: arrivedAt });
+    await expectQuietCompletion(await closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'sent', actorTechnicianId: f.techId, conn: mockPg }));
+    const visit = await mockPg('scheduled_services').where({ id: f.serviceId }).first();
+    expect(visit.status).toBe('completed');
+    expect(visit.service_time_minutes).toBeNull();
+    expect(visit.actual_duration_minutes).toBeNull();
+    const records = await mockPg('service_records').where({ scheduled_service_id: f.serviceId });
+    expect(records).toHaveLength(1);
+    expect(records[0].structured_notes).toMatchObject({ backfill: true, issuedInvoiceCloseout: { invoiceId: f.invoiceId, trigger: 'sent' } });
+    expect(await mockPg('invoices').where({ customer_id: f.customerId })).toHaveLength(1);
   });
 
   test('a reschedule that lands between the unlocked read and the record transaction refuses the closeout — the locked day decides (GitHub r6 P2)', async () => {
@@ -522,7 +555,7 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
     expect(await mockPg('audit_log').where({ resource_id: f.serviceId, action: 'visit.completion_on_invoice_issued_refused' }).first()).toMatchObject({ metadata: expect.objectContaining({ code: 'issued_visit_rescheduled' }) });
   });
 
-  test('a sent closeout that loads the visit after it moved to today is refused, while paid still closes today', async () => {
+  test('a closeout that loads the visit after it moved to today is refused on a send, and on a payment until the technician has arrived', async () => {
     await fixture({ serviceType: 'Fixture Quarterly Pest Control Service' });
     await mockPg('scheduled_services').where({ id: f.serviceId }).update({ scheduled_date: etDateString() });
     const { completeScheduledService } = require('../services/complete-scheduled-service');
@@ -538,7 +571,12 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
     expect((await mockPg('scheduled_services').where({ id: f.serviceId }).first()).status).toBe('confirmed');
     expect(await mockPg('service_records').where({ scheduled_service_id: f.serviceId })).toHaveLength(0);
 
+    // Paid, nobody there yet: a prepayment — refused on the locked row too
+    // (owner 2026-10-04). Arrived: the payment closes it.
     await mockPg('invoices').where({ id: f.invoiceId }).update({ status: 'paid', paid_at: new Date() });
+    expect(await request('paid')).toMatchObject({ status: 409, body: { code: 'issued_visit_rescheduled' } });
+    expect((await mockPg('scheduled_services').where({ id: f.serviceId }).first()).status).toBe('confirmed');
+    await mockPg('scheduled_services').where({ id: f.serviceId }).update({ status: 'on_site' });
     expect(await request('paid')).toMatchObject({ status: 200, body: { success: true } });
     expect((await mockPg('scheduled_services').where({ id: f.serviceId }).first()).status).toBe('completed');
   });
@@ -736,10 +774,11 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
   // The rule every fixture above is dated around (Codex P1 r7 #4131). The
   // office picker links a pre-completion invoice to TODAY's open visit and
   // texts it before the tech arrives, so a send proves nothing about that
-  // visit: it stays open, audited with `visit_scheduled_today`. Money in
-  // hand still proves it happened, so 'paid' closes the very same row — the
-  // #4127 contract is narrowed by trigger, not withdrawn.
-  test('a visit scheduled TODAY is left open by a send (visit_scheduled_today) and closed by a payment', async () => {
+  // visit: it stays open, audited with `visit_scheduled_today`. A payment
+  // against a visit nobody has reached is a PREPAYMENT and leaves it open
+  // too (owner 2026-10-04: closing it took the stop from its technician).
+  // Once the technician has ARRIVED, money in hand closes the same row.
+  test('a visit scheduled TODAY: a send leaves it open; a payment leaves it open until the technician has arrived, then closes it', async () => {
     await fixture({ serviceType: 'Fixture Quarterly Pest Control Service', day: etDateString() });
     const sent = await closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'sent', actorTechnicianId: f.techId, conn: mockPg });
     expect(sent).toMatchObject({ closed: false, reason: 'visit_scheduled_today', visitId: f.serviceId });
@@ -751,8 +790,18 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
     expect(await mockPg('audit_log').where({ resource_id: f.serviceId, action: 'visit.completion_on_invoice_issued_refused' }).first())
       .toMatchObject({ metadata: expect.objectContaining({ code: 'visit_scheduled_today' }) });
 
-    // …and the payment that follows closes it, same day, same invoice.
+    // Paid before anyone arrived: a prepayment. The visit stays open.
     await mockPg('invoices').where({ id: f.invoiceId }).update({ status: 'paid', paid_at: new Date() });
+    const prepaid = await closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'paid', actorTechnicianId: f.techId, conn: mockPg });
+    expect(prepaid).toMatchObject({ closed: false, reason: 'visit_scheduled_today', visitId: f.serviceId });
+    expect((await mockPg('scheduled_services').where({ id: f.serviceId }).first()).status).toBe('confirmed');
+    expect(await mockPg('service_records').where({ scheduled_service_id: f.serviceId })).toHaveLength(0);
+
+    // The technician has arrived; a send still closes nothing today…
+    await mockPg('scheduled_services').where({ id: f.serviceId }).update({ status: 'on_site', arrived_at: new Date(Date.now() - 40 * 60000) });
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'sent', actorTechnicianId: f.techId, conn: mockPg }))
+      .toMatchObject({ closed: false, reason: 'visit_scheduled_today' });
+    // …and the payment closes it, same day, same invoice.
     const paid = await closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'paid', actorTechnicianId: f.techId, conn: mockPg });
     expect(paid).toMatchObject({ closed: true, visitId: f.serviceId, resumed: false });
     const visit = await mockPg('scheduled_services').where({ id: f.serviceId }).first();

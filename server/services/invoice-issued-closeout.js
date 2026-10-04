@@ -14,29 +14,34 @@ const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
 
-// A visit that can still be closed out by the OFFICE (job-status.js live
-// vocabulary, minus the in-progress states): a visit whose technician is
-// en route or on site has a running job timer and a completion of its own
-// coming — a quiet backfill closeout would complete it while its
-// time_entries stay open, inflating time-on-site and job cost (GitHub r9
-// P1 #4127). Those stay open for the technician; the invoice's delivery is
-// recorded either way.
+// A visit the technician has NOT started (job-status.js live vocabulary,
+// minus the in-progress states). A NULL status counts too — see
+// isLiveVisitStatus.
 const OPEN_VISIT_STATUSES = ['pending', 'confirmed'];
 
-// ONE null-tolerant predicate for "is this visit still live/open" (Codex
-// round 16 P2 #4131) — a NULL status is a live visit (the repository's live-
-// visit convention; the picker links invoices to such legacy rows), so it
-// must pass exactly like pending/confirmed everywhere this decision is made:
-// the resolver below, and the locked closeout recheck in
-// complete-scheduled-service.js (which re-derives the SAME verdict on the
-// FOR UPDATE row and used to accept only the string statuses, throwing
-// issued_visit_in_progress on a legacy NULL-status visit the resolver had
-// just admitted). The settled-statement sweep's SQL expresses the same
-// OPEN_VISIT_STATUSES + null tolerance directly in its WHERE clause (a JS
-// predicate can't run inside the query) — same source array, so all three
-// can never drift apart.
+// A visit whose technician ARRIVED and never closed it out (owner ruling
+// 2026-10-04). The GPS arrival moves nearly every worked visit to on_site,
+// so refusing on_site left the closeout with nothing to close: from the gate
+// flip (2026-09-24) to 2026-10-04 it closed no visit at all. An arrived visit
+// closes like an unstarted one once its day has passed; on its own day only
+// money received closes it (see issuedCloseoutVisitRefusal). en_route is NOT
+// here: nobody has reached the property, so the visit stays with its
+// technician. The r9 P1 concern (#4127: a quiet closeout leaves the visit's
+// job timer running) is answered where the closeout succeeds — it ends that
+// visit's still-running job timer (endActiveJobEntriesForVisit).
+const ARRIVED_VISIT_STATUSES = ['on_site'];
+
+// ONE null-tolerant predicate for "the technician has not started this
+// visit" (Codex round 16 P2 #4131) — a NULL status is a live visit (the
+// repository's live-visit convention; the picker links invoices to such
+// legacy rows), so it must pass exactly like pending/confirmed everywhere
+// this decision is made.
 function isLiveVisitStatus(status) {
   return status == null || OPEN_VISIT_STATUSES.includes(String(status));
+}
+
+function isArrivedVisitStatus(status) {
+  return status != null && ARRIVED_VISIT_STATUSES.includes(String(status));
 }
 
 function dateOnly(value) {
@@ -46,17 +51,29 @@ function dateOnly(value) {
   return m ? m[1] : null;
 }
 
-// Shared by the unlocked resolver and the canonical completion's locked
-// recheck. Delivery only proves a past visit happened; payment also proves a
-// same-day visit happened. Future or unparseable dates are never eligible.
-// An ALLOWLIST (pre-push audit P1, slice 6): only a proven payment admits
-// today. A send, a missing trigger (a caller that forgot to pass one) or a
-// trigger this module has never heard of all fail CLOSED on a same-day
-// visit — a denylist of just 'sent' would silently re-open the same-day
-// completion this rule exists to prevent the moment a new trigger appeared.
-function issuedCloseoutServiceDayEligible(scheduledDate, { today = etDateString(), trigger = null } = {}) {
+// THE status + day rule, shared by the unlocked resolver, the canonical
+// completion's locked recheck and (as SQL) the settled-statement sweep, so
+// the three can never drift apart. Returns null when the visit may close,
+// else the reason it stays open.
+//  - A past day: an unstarted or an arrived visit closes on a send or a
+//    payment — the invoice went out, so the visit happened.
+//  - Today: only an ARRIVED visit closes, and only on money received. A send
+//    proves nothing about today (the office picker sends pre-completion
+//    invoices before the tech arrives — Codex P1 r7 #4131), and a payment
+//    against a visit nobody has reached is a PREPAYMENT: closing it would
+//    take the stop away from its technician (owner ruling 2026-10-04,
+//    replacing the "payment closes any same-day visit" rule of #4127).
+//  - An ALLOWLIST (pre-push audit P1, slice 6): a missing trigger or one this
+//    module has never heard of fails CLOSED on a same-day visit.
+//  - Future or unparseable dates, en_route and every terminal status never
+//    close.
+function issuedCloseoutVisitRefusal(status, scheduledDate, { today = etDateString(), trigger = null } = {}) {
+  const arrived = isArrivedVisitStatus(status);
+  if (!arrived && !isLiveVisitStatus(status)) return `visit_${status}`;
   const day = dateOnly(scheduledDate);
-  return Boolean(day && day <= today && (day < today || trigger === 'paid'));
+  if (!day || day > today) return 'visit_in_future';
+  if (day < today) return null;
+  return arrived && trigger === 'paid' ? null : 'visit_scheduled_today';
 }
 
 // The visit this invoice names — directly (scheduled_service_id, the only
@@ -123,19 +140,12 @@ async function resolveVisitForIssuedInvoice(conn, invoice, { today = etDateStrin
   if (!linked.svc) return { svc: null, reason: linked.reason, ...(linked.visit ? { visit: linked.visit } : {}) };
   const { svc } = linked;
   const leaveOpen = (reason) => ({ svc: null, reason, visit: svc });
-  // A NULL status is a live visit (the repository's live-visit convention;
-  // the picker links invoices to such legacy rows — Codex P2 r8 #4131), so it
-  // closes out like pending/confirmed instead of being refused as visit_null.
-  if (!isLiveVisitStatus(svc.status)) return leaveOpen(`visit_${svc.status}`);
-  const day = dateOnly(svc.scheduled_date);
-  if (!day || day > today) return leaveOpen('visit_in_future');
-  // A SEND proves nothing about a visit scheduled for today: the office
-  // invoice picker links pre-completion invoices to open visits and sends
-  // them immediately, so a same-day send would create the service record
-  // and complete the visit before the tech arrives (Codex P1 r7 #4131).
-  // Only a visit whose day has passed closes out on a send; money received
-  // (trigger 'paid') still closes a same-day visit, as #4127 intended.
-  if (!issuedCloseoutServiceDayEligible(day, { today, trigger })) return leaveOpen('visit_scheduled_today');
+  // Status and day decide together (issuedCloseoutVisitRefusal): a NULL
+  // status is a live visit (Codex P2 r8 #4131), an arrived visit closes on a
+  // past day or on money received today, and nothing closes a visit nobody
+  // has reached today.
+  const refusedByState = issuedCloseoutVisitRefusal(svc.status, svc.scheduled_date, { today, trigger });
+  if (refusedByState) return leaveOpen(refusedByState);
   if (svc.visit_id) {
     const { openMembers } = require('./visit-groups');
     if ((await openMembers(conn, svc.visit_id)).length >= 2) return leaveOpen('grouped_visit');
@@ -249,7 +259,11 @@ async function retrySettledStatementCloseouts({ conn = db, today = etDateString(
       .where('ps.status', 'paid')
       .where('ps.paid_at', '>=', new Date(Date.now() - sinceDays * 86400000))
       .where((q) => q
-        .where((open) => open.where((live) => live.whereIn('s.status', OPEN_VISIT_STATUSES).orWhereNull('s.status')).where('s.scheduled_date', '<=', today))
+        // The same rule as issuedCloseoutVisitRefusal for trigger 'paid': an
+        // unstarted visit on a past day, or an arrived one through today.
+        .where((open) => open
+          .where((unstarted) => unstarted.where((live) => live.whereIn('s.status', OPEN_VISIT_STATUSES).orWhereNull('s.status')).where('s.scheduled_date', '<', today))
+          .orWhere((arrived) => arrived.whereIn('s.status', ARRIVED_VISIT_STATUSES).where('s.scheduled_date', '<=', today)))
         .orWhere((done) => done.where('s.status', 'completed').whereRaw(OWN_PARKED_ATTEMPT_SQL)))
       .orderBy(['ps.id', 'i.id'])
       .select('ps.id as statement_id', 'i.id as invoice_id', 's.id as visit_id', conn.raw(`${OWN_PARKED_ATTEMPT_SQL} as own_attempt_parked`));
@@ -276,7 +290,9 @@ async function retrySettledStatementCloseouts({ conn = db, today = etDateString(
     if (last) {
       let meta = last.metadata;
       if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = {}; } }
-      if (last.action !== 'visit.completion_on_invoice_issued_refused' || meta?.code !== 'error') continue;
+      // visit_scheduled_today is a refusal of the DAY, not of the visit: the
+      // candidate filter above only returns it once the rule admits it.
+      if (last.action !== 'visit.completion_on_invoice_issued_refused' || !['error', 'visit_scheduled_today'].includes(meta?.code)) continue;
     }
     retried += 1;
     const out = await closeOutVisitForIssuedInvoice({ invoiceId: row.invoice_id, trigger: 'paid', conn, today });
@@ -398,6 +414,17 @@ async function runQuietCloseout(run) {
   const outcome = completionOutcome(result);
   const line = `[invoice-issued-closeout] ${run.label} → visit ${run.svc.id} ${outcome.closed ? `completed${run.resuming ? ' (resumed)' : ''}` : `NOT completed (${outcome.status} ${outcome.code || outcome.error || ''})`}`;
   if (outcome.closed) logger.info(line); else logger.warn(line);
+  // An arrived visit may still have its job timer running (GitHub r9 P1
+  // #4127): the quiet closeout completed the visit, so the timer ends with
+  // it instead of counting until the technician clocks out. Best-effort
+  // after the commit; a resumed closeout runs it again and finds nothing.
+  if (outcome.closed) {
+    try {
+      await require('./time-tracking').endActiveJobEntriesForVisit(run.svc.id);
+    } catch (timerErr) {
+      logger.error(`[invoice-issued-closeout] ${run.label} → visit ${run.svc.id} completed, but its running job timer was NOT ended: ${timerErr.message}`);
+    }
+  }
   await auditCloseoutOutcome(run, { closed: outcome.closed, visitId: run.svc.id, resumed: run.resuming, status: outcome.status, code: outcome.code });
   return { closed: outcome.closed, reason: outcome.closed ? null : (outcome.code || `status_${outcome.status}`), visitId: run.svc.id, resumed: run.resuming };
 }
@@ -458,8 +485,10 @@ module.exports = {
   closeOutVisitsForStatement,
   retrySettledStatementCloseouts,
   OPEN_VISIT_STATUSES,
+  ARRIVED_VISIT_STATUSES,
   isLiveVisitStatus,
-  issuedCloseoutServiceDayEligible,
+  isArrivedVisitStatus,
+  issuedCloseoutVisitRefusal,
   resolveVisitForIssuedInvoice,
   resumableIssuedCloseoutAttempt,
   closeOutVisitForIssuedInvoice,
