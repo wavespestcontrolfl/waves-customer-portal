@@ -1992,6 +1992,210 @@ describe('customer surfaces', () => {
       expect(meta().pending_letter).toBeUndefined();
     });
 
+    test('a "delivered" event for the unknown email releases a letter parked as send_uncertain: stamped at the event time, the rate can apply', async () => {
+      mockDb.reset(book());
+      let claimKey = null;
+      emailLeg.mockImplementation(async (args) => { claimKey = JSON.parse(notices()[0].metadata).pending_letter.key; return emailVia({ sent: false, attempted: true })(args); });
+      smsLeg.mockResolvedValue({ sent: false, attempted: false }); // email only
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      expect(notices()[0].status).toBe('send_uncertain');
+      expect(comms.publicReview(notices()[0])).toEqual({ unavailable: true });
+      const ledger = message({ id: 'em-late', idempotency_key: `rate_review:${BATCH_KEY}:${CUSTOMER(1)}:${claimKey}:abc` });
+      // another attempt's event never releases this one
+      await comms.handleEmailDeliveryEvent(mockDb, message({ id: 'em-old', idempotency_key: `rate_review:${BATCH_KEY}:${CUSTOMER(1)}:other-claim:abc` }), { event: 'delivered', timestamp: 1790000000 });
+      expect(notices()[0].status).toBe('send_uncertain');
+      expect(await comms.handleEmailDeliveryEvent(mockDb, ledger, { event: 'delivered', timestamp: 1790000000 })).toEqual([]);
+      expect(notices()[0]).toMatchObject({ status: 'sent', email_sent: true, sms_sent: false });
+      expect(new Date(notices()[0].sent_at).getTime()).toBe(1790000000 * 1000);
+      expect(meta().pending_letter).toBeUndefined();
+      expect(meta().uncertain_channels).toBeUndefined();
+      expect(snapshots()[0].status).toBe('sent');
+      expect(comms.publicReview(notices()[0])).toMatchObject({ delivered: true, lines: [{ current: '$117', next: '$121' }] });
+      // a redelivered event changes nothing
+      const before = notices()[0].metadata;
+      await comms.handleEmailDeliveryEvent(mockDb, ledger, { event: 'delivered', timestamp: 1790000999 });
+      expect(notices()[0].metadata).toBe(before);
+    });
+
+    test('delivered, then a bounce of the same message: the promotion kept the message id, so the bounce still finds the notice and revokes it', async () => {
+      mockDb.reset(book());
+      let claimKey = null;
+      emailLeg.mockImplementation(async (args) => { claimKey = JSON.parse(notices()[0].metadata).pending_letter.key; return emailVia({ sent: false, attempted: true })(args); });
+      smsLeg.mockResolvedValue({ sent: false, attempted: false });
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      const ledger = message({ id: 'em-late', idempotency_key: `rate_review:${BATCH_KEY}:${CUSTOMER(1)}:${claimKey}:abc` });
+      await comms.handleEmailDeliveryEvent(mockDb, ledger, { event: 'delivered', timestamp: 1790000000 });
+      expect(notices()[0].status).toBe('sent');
+      expect(meta().email_message_id).toBe('em-late');
+      const alerts = await comms.handleEmailDeliveryEvent(mockDb, ledger, bounce());
+      expect(alerts).toHaveLength(1);
+      expect(notices()[0]).toMatchObject({ status: 'draft', email_sent: false, sent_at: null });
+    });
+
+    test('an early "delivered" event does not stamp a notice that was repointed to another customer before the send settled: it parks', async () => {
+      mockDb.reset(book({ customers: [customer(1), customer(9)] }));
+      smsLeg.mockResolvedValue({ sent: false, attempted: false });
+      emailLeg.mockImplementation(async (args) => {
+        const claimKey = JSON.parse(notices()[0].metadata).pending_letter.key;
+        await args.sendOptions.withProviderHandoff(async () => {}, { to: args.recipient.email });
+        await comms.handleEmailDeliveryEvent(mockDb, message({ id: 'em-live', idempotency_key: `rate_review:${BATCH_KEY}:${CUSTOMER(1)}:${claimKey}:abc` }), { event: 'delivered', timestamp: 1790000000 });
+        mockDb.store.price_change_notices[0].customer_id = CUSTOMER(9); // a merge undo
+        return { sent: false, attempted: true };
+      });
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      expect(notices()[0].status).toBe('send_uncertain');
+      expect(notices()[0].sent_at).toBeNull();
+    });
+
+    test('a delivery confirmation cleans up after the earlier failure on every path: bounce flag cleared, its alert closed, the summary counts the email', async () => {
+      // late path: the text fails first (parked, alert raised), then the email's "delivered" arrives
+      mockDb.reset(book());
+      let claimKey = null;
+      emailLeg.mockImplementation(async (args) => { claimKey = JSON.parse(notices()[0].metadata).pending_letter.key; return emailVia({ sent: false, attempted: true })(args); });
+      smsLeg.mockResolvedValue({ sent: true, attempted: true, sid: 'SM1' });
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      mockDb.store.sms_log = [{ twilio_sid: 'SM1', customer_id: CUSTOMER(1) }];
+      await comms.handleSmsDeliveryFailure({ sid: 'SM1', status: 'undelivered' }, { dbh: mockDb });
+      mockCloseAlertKeys.mockClear();
+      await comms.handleEmailDeliveryEvent(mockDb, message({ id: 'em-late', idempotency_key: `rate_review:${BATCH_KEY}:${CUSTOMER(1)}:${claimKey}:abc` }), { event: 'delivered', timestamp: 1790000000 });
+      expect(notices()[0].status).toBe('sent');
+      expect(mockCloseAlertKeys).toHaveBeenCalledWith(expect.anything(), [`rate-review-delivery-revoked:${notices()[0].id}:undelivered`], 'rate_review_resent');
+
+      // a rate already written: the text fails (kept delivered for a hand check, revoked), then the email is confirmed → the revocation is history
+      mockDb.reset(book());
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      Object.assign(notices()[0], { applied_at: NOW });
+      mockDb.store.sms_log = [{ twilio_sid: 'SM1', customer_id: CUSTOMER(1) }];
+      await comms.handleSmsDeliveryFailure({ sid: 'SM1', status: 'undelivered' }, { dbh: mockDb });
+      expect(notices()[0].status).toBe('sent');
+      expect(meta().delivery_revoked).toMatchObject({ channel: 'sms' });
+      expect(JSON.parse(snapshots()[0].flags)).toContain('delivery_bounced');
+      await comms.handleEmailDeliveryEvent(mockDb, message({ id: 'em-late', idempotency_key: `rate_review:${BATCH_KEY}:${CUSTOMER(1)}:${claimKey}:abc` }), { event: 'delivered', timestamp: 1790000000 });
+      expect(notices()[0]).toMatchObject({ status: 'sent', email_sent: true });
+      expect(meta().delivery_revoked).toBeUndefined();
+      expect(meta().delivery_revocations).toHaveLength(1);
+      expect(JSON.parse(snapshots()[0].flags)).not.toContain('delivery_bounced');
+
+      // early path after a bounce: the re-send's "delivered" lands mid-send → flag cleared, alert closed, counted as emailed
+      mockDb.reset(book());
+      smsLeg.mockResolvedValue({ sent: false, attempted: false });
+      emailLeg.mockImplementation(emailVia({ sent: true, attempted: true, messageId: 'em-old' }));
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      await comms.handleEmailDeliveryEvent(mockDb, message({ id: 'em-old' }), bounce());
+      expect(JSON.parse(snapshots()[0].flags)).toContain('delivery_bounced');
+      emailLeg.mockImplementation(async (args) => {
+        const key = JSON.parse(notices()[0].metadata).pending_letter.key;
+        await args.sendOptions.withProviderHandoff(async () => {}, { to: args.recipient.email });
+        await comms.handleEmailDeliveryEvent(mockDb, message({ id: 'em-new', idempotency_key: `rate_review:${BATCH_KEY}:${CUSTOMER(1)}:${key}:abc` }), { event: 'delivered', timestamp: 1790000000 });
+        return { sent: false, attempted: true };
+      });
+      mockCloseAlertKeys.mockClear();
+      const res = await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      expect(res).toMatchObject({ sent: 1, emailed: 1, uncertain: 0 });
+      expect(JSON.parse(snapshots()[0].flags)).not.toContain('delivery_bounced');
+      expect(mockCloseAlertKeys).toHaveBeenCalledWith(expect.anything(), [`rate-review-delivery-revoked:${notices()[0].id}:bounce`], 'rate_review_resent');
+    });
+
+    test('a failure alert is raised only while the notice is still undelivered: a confirmation that committed first leaves nothing to raise', async () => {
+      const compose = require('../services/admin-alert-compose');
+      const gates = require('../config/feature-gates');
+      const raise = jest.spyOn(compose, 'raiseAdminAlert').mockResolvedValue({ id: 'a1' });
+      const live = jest.spyOn(gates, 'alertEpisodesLive').mockReturnValue(false);
+      try {
+        await sendEmailOnly();
+        const alert = { noticeId: notices()[0].id, customerId: CUSTOMER(1), rowId: ROW(1), familyKey: 'pest_control', rateWritten: false, channel: 'email', event: 'bounce' };
+        await comms.raiseDeliveryAlerts([alert]); // delivered and not revoked: the failure was overtaken by a confirmation
+        expect(raise).not.toHaveBeenCalled();
+        await comms.handleEmailDeliveryEvent(mockDb, message(), bounce()); // now really undelivered
+        await comms.raiseDeliveryAlerts([alert]);
+        expect(raise).toHaveBeenCalledTimes(1);
+        expect(raise.mock.calls[0][2].trx).toBeTruthy(); // written on the fence transaction: no second pooled connection
+      } finally { raise.mockRestore(); live.mockRestore(); }
+    });
+
+    test('a two-line letter whose early confirmation stamps one line while the other was repointed is reported uncertain, not sent', async () => {
+      const lawn = draft(2, { customer_id: CUSTOMER(1), rate_review_row_id: ROW(2), family_key: 'lawn_care', effective_date: '2026-12-20', noticed_current_cents: 6100, noticed_new_cents: 6400, current_amount_cents: 6100, new_amount_cents: 6400 });
+      const b = book({ customers: [customer(1), customer(9)], notices: [draft(1), lawn] });
+      b.rate_review_snapshots[1].family_key = 'lawn_care';
+      mockDb.reset(b);
+      smsLeg.mockResolvedValue({ sent: false, attempted: false });
+      emailLeg.mockImplementation(async (args) => {
+        const key = JSON.parse(notices()[0].metadata).pending_letter.key;
+        await args.sendOptions.withProviderHandoff(async () => {}, { to: args.recipient.email });
+        await comms.handleEmailDeliveryEvent(mockDb, message({ id: 'em-live', idempotency_key: `rate_review:${BATCH_KEY}:${CUSTOMER(1)}:${key}:abc` }), { event: 'delivered', timestamp: 1790000000 });
+        mockDb.store.price_change_notices[1].customer_id = CUSTOMER(9); // a merge undo moves one line
+        return { sent: false, attempted: true };
+      });
+      const res = await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      expect(res).toMatchObject({ sent: 0, uncertain: 1 });
+      expect(notices().map((n) => n.status).sort()).toEqual(['send_uncertain', 'sent']);
+    });
+
+    test('bounce → re-send with an ambiguous outcome → delivered → bounce of the NEW message: the new id replaced the old one, so the notice is revoked again', async () => {
+      mockDb.reset(book());
+      smsLeg.mockResolvedValue({ sent: false, attempted: false });
+      emailLeg.mockImplementation(emailVia({ sent: true, attempted: true, messageId: 'em-old' }));
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      await comms.handleEmailDeliveryEvent(mockDb, message({ id: 'em-old' }), bounce());
+      expect(notices()[0].status).toBe('draft');
+      let claimKey = null;
+      emailLeg.mockImplementation(async (args) => { claimKey = JSON.parse(notices()[0].metadata).pending_letter.key; return emailVia({ sent: false, attempted: true })(args); });
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      expect(notices()[0].status).toBe('send_uncertain');
+      expect(meta().email_message_id).toBeUndefined(); // the bounced attempt's id is not carried into the new one
+      const fresh = message({ id: 'em-new', idempotency_key: `rate_review:${BATCH_KEY}:${CUSTOMER(1)}:${claimKey}:abc` });
+      await comms.handleEmailDeliveryEvent(mockDb, fresh, { event: 'delivered', timestamp: 1790000000 });
+      expect(notices()[0].status).toBe('sent');
+      expect(meta().email_message_id).toBe('em-new');
+      // a late event of the OLD message no longer touches the notice
+      expect(await comms.handleEmailDeliveryEvent(mockDb, message({ id: 'em-old' }), bounce({ event: 'dropped' }))).toEqual([]);
+      expect(notices()[0].status).toBe('sent');
+      expect(await comms.handleEmailDeliveryEvent(mockDb, fresh, bounce())).toHaveLength(1);
+      expect(notices()[0]).toMatchObject({ status: 'draft', email_sent: false });
+    });
+
+    test('a "delivered" event that arrives while the send is still running is kept and used: an email of unknown outcome is stamped delivered, not parked', async () => {
+      // email-only: the event lands inside the email leg (after its handoff), the leg then reports an ambiguous error
+      mockDb.reset(book());
+      smsLeg.mockResolvedValue({ sent: false, attempted: false });
+      emailLeg.mockImplementation(async (args) => {
+        const claimKey = JSON.parse(notices()[0].metadata).pending_letter.key;
+        await args.sendOptions.withProviderHandoff(async () => {}, { to: args.recipient.email });
+        await comms.handleEmailDeliveryEvent(mockDb, message({ id: 'em-live', idempotency_key: `rate_review:${BATCH_KEY}:${CUSTOMER(1)}:${claimKey}:abc` }), { event: 'delivered', timestamp: 1790000000 });
+        expect(notices()[0].status).toBe('sending');
+        return { sent: false, attempted: true };
+      });
+      expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).toMatchObject({ sent: 1, uncertain: 0 });
+      expect(notices()[0]).toMatchObject({ status: 'sent', email_sent: true });
+      expect(meta()).toMatchObject({ email_message_id: 'em-live' });
+      expect(meta().early_delivered).toBeUndefined();
+      expect(meta().uncertain_channels).toBeUndefined();
+      expect(snapshots()[0].status).toBe('sent');
+
+      // with a text that is accepted: the stamp counts the early confirmation, so the email is not left unknown
+      mockDb.reset(book());
+      smsLeg.mockResolvedValue({ sent: true, attempted: true, sid: 'SM1' });
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      expect(notices()[0]).toMatchObject({ status: 'sent', email_sent: true, sms_sent: true });
+      expect(meta().uncertain_channels).toBeUndefined();
+      expect(meta().early_delivered).toBeUndefined();
+    });
+
+    test('a "delivered" email after the text failed first: the earlier failure becomes history and the letter stands delivered', async () => {
+      mockDb.reset(book());
+      let claimKey = null;
+      emailLeg.mockImplementation(async (args) => { claimKey = JSON.parse(notices()[0].metadata).pending_letter.key; return emailVia({ sent: false, attempted: true })(args); });
+      smsLeg.mockResolvedValue({ sent: true, attempted: true, sid: 'SM1' });
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      mockDb.store.sms_log = [{ twilio_sid: 'SM1', customer_id: CUSTOMER(1) }];
+      await comms.handleSmsDeliveryFailure({ sid: 'SM1', status: 'undelivered' }, { dbh: mockDb });
+      expect(notices()[0].status).toBe('send_uncertain');
+      await comms.handleEmailDeliveryEvent(mockDb, message({ id: 'em-late', idempotency_key: `rate_review:${BATCH_KEY}:${CUSTOMER(1)}:${claimKey}:abc` }), { event: 'delivered', timestamp: 1790000000 });
+      expect(notices()[0]).toMatchObject({ status: 'sent', email_sent: true, sms_sent: false });
+      expect(meta().delivery_revoked).toBeUndefined();
+      expect(meta().delivery_revocations).toHaveLength(1);
+    });
+
     test('the same when the text fails before the stamp: parked uncertain, not draft', async () => {
       mockDb.reset(book());
       emailLeg.mockImplementation(emailVia({ sent: false, attempted: true }));
