@@ -11,6 +11,11 @@ jest.mock('../models/db', () => {
   return fn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The advisory lock needs a real connection; its own suite is intelligence-bar-receipt-resend-claim-postgres.
+const mockLock = { busy: false };
+jest.mock('../services/receipt-send-lock', () => ({
+  withReceiptSendLock: async (_id, run) => (mockLock.busy ? { acquired: false } : { acquired: true, value: await run() }),
+}));
 jest.mock('../services/invoice-issued-closeout', () => ({ closeOutVisitForIssuedInvoice: jest.fn(async () => null) }));
 jest.mock('../services/invoice-email', () => ({ sendReceiptEmail: jest.fn(async () => ({ ok: true })) }));
 jest.mock('../services/invoice', () => ({ sendReceipt: jest.fn(async () => ({ sent: true })) }));
@@ -196,5 +201,37 @@ describe('expect — the writer owns the final check, under the claim and ahead 
     const out = await sendInvoiceReceipt(ID, { via: 'email' });
     expect(out.queue).toBe('held_for_reconciliation');
     expect(Object.keys(out.body).sort()).toEqual(['email', 'invoice', 'ok', 'sms']);
+  });
+});
+
+describe('one send per invoice at a time (advisory lock)', () => {
+  afterEach(() => { mockLock.busy = false; });
+
+  test('a send that finds the lock held is refused in flight with no effect at all', async () => {
+    mockLock.busy = true;
+    const out = await sendInvoiceReceipt(ID, { via: 'both' });
+    expect(out).toEqual({ status: 409, body: { error: expect.stringMatching(/Another receipt send for this invoice is in progress/), code: 'receipt_delivery_in_flight' } });
+    expect(claimReceiptJobForOperatorSend).not.toHaveBeenCalled();
+    expect(closeOutVisitForIssuedInvoice).not.toHaveBeenCalled();
+    expect(sendReceiptEmail).not.toHaveBeenCalled();
+    expect(InvoiceService.sendReceipt).not.toHaveBeenCalled();
+    expect(releaseOperatorReceiptClaim).not.toHaveBeenCalled();
+    expect(updates).toEqual([]);
+  });
+
+  test('the stamp and the claim release both happen before the lock is released (the second send sees the stamp)', async () => {
+    const order = [];
+    releaseOperatorReceiptClaim.mockImplementationOnce(async () => { order.push('release'); return 'completed'; });
+    db.mockImplementation((table) => {
+      const q = {};
+      q.where = jest.fn(() => q);
+      q.first = jest.fn(async () => invoice);
+      q.update = jest.fn(async (patch) => { order.push(`stamp:${Object.keys(patch).join(',')}`); return 1; });
+      q.insert = jest.fn(() => Promise.resolve());
+      return q;
+    });
+    await sendInvoiceReceipt(ID, { via: 'sms' });
+    // text-only success: stamped, then released; the lock (the callback's return) comes after both.
+    expect(order).toEqual(['stamp:receipt_sent_at,receipt_memo', 'release']);
   });
 });

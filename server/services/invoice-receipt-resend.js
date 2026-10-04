@@ -14,6 +14,10 @@
  * provider outcome is unknown and nothing was recorded delivered, the claimed
  * automatic receipt job is parked for reconciliation instead of handed back to
  * the drain, which would send again (see releaseOperatorReceiptClaim).
+ * One operator send per invoice at a time: everything from the receipt-job claim to its
+ * release runs under a Postgres advisory lock (receipt-send-lock.js, nothing persisted); a
+ * second send meets 409 receipt_delivery_in_flight with no effects, and runs only after the
+ * first has stamped receipt_sent_at and released.
  * `expect` (the IB tool; the route passes none): `{ approved, rederive }` — the
  * version the operator approved and a function that re-derives it. The writer
  * owns the final check: once it holds the claim (so no other operator send or
@@ -30,6 +34,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
+const { withReceiptSendLock } = require('./receipt-send-lock');
 
 // Per leg: 'sent' | 'not_sent' | 'unknown' | 'not_requested' — from the senders'
 // own structured evidence, never from message text.
@@ -67,30 +72,6 @@ async function sendInvoiceReceipt(invoiceId, { memo, via = 'both', actorTechnici
   const { sendReceiptEmail } = require('./invoice-email');
   const { claimReceiptJobForOperatorSend, recordOperatorReceiptDelivered, releaseOperatorReceiptClaim } = require('./receipt-delivery-queue');
 
-  // The invoice's queued receipt job (if any) is claimed before anything
-  // else runs, so it cannot deliver a second receipt around this send.
-  const claim = await claimReceiptJobForOperatorSend(id, { sawUnsent: sawUnsent ?? !invoice.receipt_sent_at });
-  if (claim.inFlight) {
-    return {
-      status: 409,
-      body: {
-        error: claim.byOperator
-          ? 'Another receipt send for this invoice is in progress — refresh in a minute before resending.'
-          : 'The automatic receipt for this invoice is being delivered right now — refresh in a minute before resending.',
-        code: 'receipt_delivery_in_flight',
-      },
-    };
-  }
-  if (claim.alreadySent) {
-    return {
-      status: 409,
-      body: {
-        error: 'This receipt was already sent — refresh the page.',
-        code: 'receipt_already_sent',
-      },
-    };
-  }
-
   let emailResult = { ok: false, skipped: true };
   let smsResult = { ok: false, skipped: true };
   let smsThrown = null;
@@ -99,75 +80,120 @@ async function sendInvoiceReceipt(invoiceId, { memo, via = 'both', actorTechnici
   let queue = 'none';
   const delivery = { email: 'not_requested', sms: 'not_requested' };
 
-  try {
-    // The final check, under the claim and ahead of every effect.
-    if (expect) {
-      let current = null;
-      try {
-        current = await expect.rederive({ ownClaimToken: claim.token || null });
-      } catch (err) {
-        logger.warn(`[invoice-receipt-resend] approved-state re-check failed for ${id}: ${err.message}`);
-      }
-      if (!current || JSON.stringify(current) !== JSON.stringify(expect.approved)) {
-        refused = {
+  // One operator send per invoice at a time (a Postgres advisory lock held on its own
+  // connection for the whole send — see receipt-send-lock.js): claim, the re-check, the
+  // closeout, both legs, the receipt_sent_at stamp and the claim release all run under it,
+  // so a second send starts only after the first has stamped and released.
+  const lock = await withReceiptSendLock(id, async () => {
+    // The invoice's queued receipt job (if any) is claimed before anything
+    // else runs, so it cannot deliver a second receipt around this send.
+    const claim = await claimReceiptJobForOperatorSend(id, { sawUnsent: sawUnsent ?? !invoice.receipt_sent_at });
+    if (claim.inFlight) {
+      return {
+        early: {
           status: 409,
           body: {
-            error: 'What this receipt would do changed after it was approved (or could not be re-checked) — nothing was sent.',
-            code: 'receipt_approval_changed',
+            error: claim.byOperator
+              ? 'Another receipt send for this invoice is in progress — refresh in a minute before resending.'
+              : 'The automatic receipt for this invoice is being delivered right now — refresh in a minute before resending.',
+            code: 'receipt_delivery_in_flight',
           },
-        };
-      }
+        },
+      };
     }
-    if (!refused) {
-      // Invoice issued ⇒ visit completed (owner ruling 2026-09-07, dark behind
-      // GATE_INVOICE_ISSUED_CLOSES_VISIT): the operator's "resend receipt" is
-      // the reachable retry for a payment-triggered closeout that did not
-      // finish (pre-push P1). Runs once here, ahead of BOTH legs, so an
-      // email-only resend retries too; a completed visit refuses quietly.
-      {
-        const { closeOutVisitForIssuedInvoice } = require('./invoice-issued-closeout');
-        closeout = await closeOutVisitForIssuedInvoice({ invoiceId: id, trigger: 'paid', actorTechnicianId });
-      }
+    if (claim.alreadySent) {
+      return {
+        early: {
+          status: 409,
+          body: {
+            error: 'This receipt was already sent — refresh the page.',
+            code: 'receipt_already_sent',
+          },
+        },
+      };
+    }
 
-      if (via === 'email' || via === 'both') {
-        emailResult = await sendReceiptEmail(id, { memo: trimmedMemo }).catch((err) => ({ ok: false, error: err.message }));
-        delivery.email = emailDelivery(emailResult);
-        if (emailResult.ok) await recordOperatorReceiptDelivered(claim, 'email');
-      }
-      if (via === 'sms' || via === 'both') {
-        // Manual operator resend — pass force:true to override the auto-send
-        // idempotency guard (otherwise re-clicking SEND RECEIPT would no-op
-        // for invoices already auto-receipted by the Stripe webhook).
-        // recordActivity:false because this function writes its own activity_log
-        // row below with the memo and channel mix.
+    try {
+      // The final check, under the claim and ahead of every effect.
+      if (expect) {
+        let current = null;
         try {
-          const r = await InvoiceService.sendReceipt(id, { force: true, recordActivity: false, hasEmailLeg: via === 'both', operatorInitiated: true });
-          smsResult = r?.sent ? { ok: true } : { ok: false, error: r?.reason || r?.code || 'not-sent' };
+          current = await expect.rederive({ ownClaimToken: claim.token || null });
         } catch (err) {
-          smsResult = { ok: false, error: err.message };
-          smsThrown = err;
+          logger.warn(`[invoice-receipt-resend] approved-state re-check failed for ${id}: ${err.message}`);
         }
-        delivery.sms = smsDelivery(smsResult.ok ? { sent: true } : null, smsThrown);
-        if (smsResult.ok) await recordOperatorReceiptDelivered(claim, 'sms');
+        if (!current || JSON.stringify(current) !== JSON.stringify(expect.approved)) {
+          refused = {
+            status: 409,
+            body: {
+              error: 'What this receipt would do changed after it was approved (or could not be re-checked) — nothing was sent.',
+              code: 'receipt_approval_changed',
+            },
+          };
+        }
       }
+      if (!refused) {
+        // Invoice issued ⇒ visit completed (owner ruling 2026-09-07, dark behind
+        // GATE_INVOICE_ISSUED_CLOSES_VISIT): the operator's "resend receipt" is
+        // the reachable retry for a payment-triggered closeout that did not
+        // finish (pre-push P1). Runs once here, ahead of BOTH legs, so an
+        // email-only resend retries too; a completed visit refuses quietly.
+        {
+          const { closeOutVisitForIssuedInvoice } = require('./invoice-issued-closeout');
+          closeout = await closeOutVisitForIssuedInvoice({ invoiceId: id, trigger: 'paid', actorTechnicianId });
+        }
 
-      // Stamp receipt metadata whenever at least one channel succeeded. If
-      // both failed, leave receipt_sent_at NULL so the operator can retry.
-      if (emailResult.ok || smsResult.ok) {
-        await db('invoices').where({ id }).update({
-          receipt_sent_at: db.fn.now(),
-          receipt_memo: trimmedMemo || null,
-        });
+        if (via === 'email' || via === 'both') {
+          emailResult = await sendReceiptEmail(id, { memo: trimmedMemo }).catch((err) => ({ ok: false, error: err.message }));
+          delivery.email = emailDelivery(emailResult);
+          if (emailResult.ok) await recordOperatorReceiptDelivered(claim, 'email');
+        }
+        if (via === 'sms' || via === 'both') {
+          // Manual operator resend — pass force:true to override the auto-send
+          // idempotency guard (otherwise re-clicking SEND RECEIPT would no-op
+          // for invoices already auto-receipted by the Stripe webhook).
+          // recordActivity:false because this function writes its own activity_log
+          // row below with the memo and channel mix.
+          try {
+            const r = await InvoiceService.sendReceipt(id, { force: true, recordActivity: false, hasEmailLeg: via === 'both', operatorInitiated: true });
+            smsResult = r?.sent ? { ok: true } : { ok: false, error: r?.reason || r?.code || 'not-sent' };
+          } catch (err) {
+            smsResult = { ok: false, error: err.message };
+            smsThrown = err;
+          }
+          delivery.sms = smsDelivery(smsResult.ok ? { sent: true } : null, smsThrown);
+          if (smsResult.ok) await recordOperatorReceiptDelivered(claim, 'sms');
+        }
+
+        // Stamp receipt metadata whenever at least one channel succeeded. If
+        // both failed, leave receipt_sent_at NULL so the operator can retry.
+        if (emailResult.ok || smsResult.ok) {
+          await db('invoices').where({ id }).update({
+            receipt_sent_at: db.fn.now(),
+            receipt_memo: trimmedMemo || null,
+          });
+        }
       }
+    } finally {
+      const holdForReconciliation = holdUnknownOutcome && emailResult.ok !== true
+        && (delivery.email === 'unknown' || delivery.sms === 'unknown');
+      queue = await releaseOperatorReceiptClaim(claim, {
+        emailDelivered: emailResult.ok === true, smsDelivered: smsResult.ok === true, smsResult, emailResult,
+        ...(holdForReconciliation ? { holdForReconciliation } : {}),
+      });
     }
-  } finally {
-    const holdForReconciliation = holdUnknownOutcome && emailResult.ok !== true
-      && (delivery.email === 'unknown' || delivery.sms === 'unknown');
-    queue = await releaseOperatorReceiptClaim(claim, {
-      emailDelivered: emailResult.ok === true, smsDelivered: smsResult.ok === true, smsResult, emailResult,
-      ...(holdForReconciliation ? { holdForReconciliation } : {}),
-    });
+    return {};
+  });
+  if (!lock.acquired) {
+    return {
+      status: 409,
+      body: {
+        error: 'Another receipt send for this invoice is in progress — refresh in a minute before resending.',
+        code: 'receipt_delivery_in_flight',
+      },
+    };
   }
+  if (lock.value.early) return lock.value.early;
 
   if (refused) return { ...refused, queue };
 

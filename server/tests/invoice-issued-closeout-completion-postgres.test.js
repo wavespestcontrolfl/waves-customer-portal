@@ -75,7 +75,7 @@ describe('source contracts', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/invoice-receipt-resend.js'), 'utf8');
     // After the receipt-job claim (a queued receipt cannot deliver during the
     // closeout), before either leg.
-    expect(source).toMatch(/receipt can only be sent for paid invoices[\s\S]{0,600}claimReceiptJobForOperatorSend\(id, \{ sawUnsent: sawUnsent \?\? !invoice\.receipt_sent_at \}\)[\s\S]{0,3500}closeOutVisitForIssuedInvoice\(\{ invoiceId: id, trigger: 'paid', actorTechnicianId \}\);[\s\S]{0,400}if \(via === 'email' \|\| via === 'both'\) \{\s*emailResult = await sendReceiptEmail/);
+    expect(source).toMatch(/receipt can only be sent for paid invoices[\s\S]{0,1800}withReceiptSendLock\(id, async \(\) => \{[\s\S]{0,400}claimReceiptJobForOperatorSend\(id, \{ sawUnsent: sawUnsent \?\? !invoice\.receipt_sent_at \}\)[\s\S]{0,3500}closeOutVisitForIssuedInvoice\(\{ invoiceId: id, trigger: 'paid', actorTechnicianId \}\);[\s\S]{0,400}if \(via === 'email' \|\| via === 'both'\) \{\s*emailResult = await sendReceiptEmail/);
   });
   test('the recovered-delivery branch of sendViaSMS runs the closeout too — a recovered send is a durable send', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/invoice.js'), 'utf8');

@@ -167,66 +167,104 @@ postgres('resend_receipt on real PostgreSQL: the writer\'s final check and the a
     });
   });
 
-  describe.each([['completed'], ['failed'], [null]])('two concurrent confirmations on a %s automatic job (null = no job): exactly one send', (status) => {
-    const finishedResults = { email_result: JSON.stringify({ ok: true }), sms_result: JSON.stringify({ sent: true }) };
+  describe.each([['completed'], ['failed'], [null]])('two concurrent confirmations on a %s automatic job (null = no job): exactly one send (advisory lock)', (status) => {
     const seedFinished = async () => {
       await seed({ stamped: true, job: status });
-      if (status === 'completed') await db('receipt_delivery_jobs').where({ invoice_id: invoiceId }).update({ ...finishedResults, completed_at: new Date('2026-09-28T13:00:00Z') });
+      if (status === 'completed') await db('receipt_delivery_jobs').where({ invoice_id: invoiceId }).update({ email_result: JSON.stringify({ ok: true }), sms_result: JSON.stringify({ sent: true }), completed_at: new Date('2026-09-28T13:00:00Z') });
     };
-    // delivered: the email went out (a failed or claim-created job is then completed; a completed one
-    // keeps its own results). Not delivered: the job is exactly as it was (no job stays no job).
-    const settledJob = async ({ delivered = true } = {}) => {
-      if (!status && !delivered) return expect(await job()).toBeUndefined();
-      expect(await job()).toMatchObject({ status: delivered && status !== 'completed' ? 'completed' : (status || 'completed'), locked_by: null, locked_at: null });
-      if (status === 'completed') expect(await job()).toMatchObject({ email_result: { ok: true }, sms_result: { sent: true } });
+    // Only this feature's locks: the messaging layer takes its own (unrelated) advisory locks.
+    const advisoryLocks = async () => Number((await db.raw(
+      "select count(*)::int as n from pg_locks where locktype = 'advisory' and objsubid = 2 and classid = ((hashtext('receipt-resend')::bigint & 4294967295)::bigint)::oid",
+    )).rows[0].n);
+    // A finished job is never touched by a send (the claim holds only queued / claim-created rows): byte-identical.
+    const expectJobUntouched = async (snapshot) => {
+      if (!status) return;
+      expect(await job()).toEqual(snapshot);
+    };
+    const gate = () => {
+      let release;
+      const promise = new Promise((resolve) => { release = resolve; });
+      return { promise, release };
     };
 
-    test('the IB tool: one sends, the other is refused and nothing is sent twice', async () => {
+    test('the IB tool: the second confirmation, mid-send, is refused in flight; one email and one text go out', async () => {
       await seedFinished();
+      const snapshot = await job();
       const card = await preview();
-      let releaseEmail;
-      mockSendReceiptEmail.mockReset().mockImplementation(() => new Promise((resolve) => { releaseEmail = () => resolve({ ok: true }); }));
+      const hold = gate();
+      mockSendReceiptEmail.mockReset().mockImplementation(async () => { await hold.promise; return { ok: true }; });
       const first = confirm(card);
       await waitFor(() => mockSendReceiptEmail.mock.calls.length === 1);
-      // The first send holds the claim and is mid-send; the second confirmation arrives now.
       const second = await confirm(card);
+      // Refused before any effect: by the writer's lock (in flight), or — for a claim-created running row —
+      // already by the tool's own check that sees a send in progress.
       expect(second).toEqual(expect.objectContaining({ preview_changed: true }));
       expect(second.error).toMatch(/Nothing was sent/);
-      expect(second.error).toMatch(/in progress|being delivered right now|in-flight/i);
-      releaseEmail();
+      expect(second.error).toMatch(/in progress|being delivered right now/);
+      expect(await advisoryLocks()).toBe(1); // held for the duration of the send
+      hold.release();
       expect(await first).toEqual(expect.objectContaining({ success: true }));
       expect(mockSendReceiptEmail).toHaveBeenCalledTimes(1);
       expect(mockCreate).toHaveBeenCalledTimes(1);
-      await settledJob();
+      await expectJobUntouched(snapshot);
+      expect(await advisoryLocks()).toBe(0);
     });
 
-    test('simultaneous confirmations (whichever check meets the other first): still exactly one send', async () => {
+    test('simultaneous confirmations: exactly one sends, the other is refused (in flight, or approval changed once the first has stamped)', async () => {
       await seedFinished();
+      const snapshot = await job();
       const card = await preview();
       const [a, b] = await Promise.all([confirm(card), confirm(card)]);
-      expect([a, b].filter((r) => r.success)).toHaveLength(1);
-      expect([a, b].find((r) => !r.success)).toEqual(expect.objectContaining({ preview_changed: true }));
+      const winner = [a, b].filter((r) => r.success);
+      const loser = [a, b].filter((r) => !r.success);
+      expect(winner).toHaveLength(1);
+      expect(loser[0]).toEqual(expect.objectContaining({ preview_changed: true }));
+      expect(loser[0].error).toMatch(/Nothing was sent/);
       expect(mockSendReceiptEmail).toHaveBeenCalledTimes(1);
       expect(mockCreate).toHaveBeenCalledTimes(1);
-      await settledJob();
+      await expectJobUntouched(snapshot);
+      expect(await advisoryLocks()).toBe(0);
     });
 
-    test.each([[true], [false]])('the Invoices route\'s writer (no expect), email delivered=%s: the second send gets the in-flight 409 and the job is settled', async (delivered) => {
+    test('after the first send released the lock the second confirmation reads the new stamp and is refused as changed', async () => {
       await seedFinished();
+      const card = await preview();
+      expect(await confirm(card)).toEqual(expect.objectContaining({ success: true }));
+      const second = await confirm(card);
+      expect(second).toEqual(expect.objectContaining({ preview_changed: true }));
+      expect(mockSendReceiptEmail).toHaveBeenCalledTimes(1);
+    });
+
+    test('the Invoices route\'s writer: the second click gets the in-flight 409 and the first send stamps before releasing', async () => {
+      await seedFinished();
+      const snapshot = await job();
       const { sendInvoiceReceipt } = require('../services/invoice-receipt-resend');
-      let releaseEmail;
-      mockSendReceiptEmail.mockReset().mockImplementation(() => new Promise((resolve) => {
-        releaseEmail = () => resolve(delivered ? { ok: true } : { ok: false, error: 'PDF generation failed' });
-      }));
+      const hold = gate();
+      mockSendReceiptEmail.mockReset().mockImplementation(async () => { await hold.promise; return { ok: true }; });
       const first = sendInvoiceReceipt(invoiceId, { via: 'email' });
       await waitFor(() => mockSendReceiptEmail.mock.calls.length === 1);
       const second = await sendInvoiceReceipt(invoiceId, { via: 'email' });
-      expect(second.status).toBe(409);
-      expect(second.body.code).toBe('receipt_delivery_in_flight');
-      releaseEmail();
+      expect(second).toMatchObject({ status: 409, body: { code: 'receipt_delivery_in_flight' } });
+      hold.release();
       expect((await first).status).toBe(200);
-      expect(mockSendReceiptEmail).toHaveBeenCalledTimes(1);
-      await settledJob({ delivered });
+      const stamped = (await invoice()).receipt_sent_at;
+      expect(stamped.getTime()).toBeGreaterThan(SENT_AT.getTime());
+      // A text-only success stamps too, before the lock is released: a send that starts right after sees it.
+      const third = await sendInvoiceReceipt(invoiceId, { via: 'sms' });
+      expect(third.status).toBe(200);
+      expect((await invoice()).receipt_sent_at.getTime()).toBeGreaterThanOrEqual(stamped.getTime());
+      await expectJobUntouched(snapshot);
+      expect(await advisoryLocks()).toBe(0);
+    });
+
+    test('the lock is released when the send throws, and a later send proceeds', async () => {
+      await seedFinished();
+      const { sendInvoiceReceipt } = require('../services/invoice-receipt-resend');
+      mockCloseOut.mockRejectedValueOnce(new Error('closeout blew up'));
+      await expect(sendInvoiceReceipt(invoiceId, { via: 'email' })).rejects.toThrow('closeout blew up');
+      expect(await advisoryLocks()).toBe(0);
+      expect((await sendInvoiceReceipt(invoiceId, { via: 'email' })).status).toBe(200);
+      expect(await advisoryLocks()).toBe(0);
     });
   });
 
