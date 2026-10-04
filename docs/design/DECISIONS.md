@@ -3187,3 +3187,24 @@ straight on the page (visit brief, visual notes, the three tool pages) read
 palette. `.tf-existing` is no longer a dark box. The 11px labels of the Today
 page stay 14px in the sheets (the portal-brand gate bans smaller text in
 `tech-workflow.css`). Visual only: same data, same actions.
+
+## 2026-10-04 — The technician can change the four lawn scores until Confirm
+
+Owner 2026-10-04 (phone screenshot of Complete service → Lawn assessment):
+"the lawn assessment portion should be editable by the tech after it
+renders". This replaces the 2026-09-24 ruling that a score the AI read was
+read-only. In `LawnAssessmentCompletionBlock` (the full completion form and
+the lawn Fast Complete sheet share it) Density, Weed control, Color and
+Condition are number fields after Analyze, pre-filled with the saved score,
+and lock to text when the assessment is confirmed. A changed or emptied score
+shows the AI's own read under it ("AI 80"); an emptied field posts null, which
+the server reads as "back to the AI score". The Fungus control and Thatch
+condition tiles are gone (owner: "four only, drop the two tiles"): when the AI
+left one blank, `/admin/lawn-assessment/confirm` copies the Condition score
+into it on the save that completes the row, and the run's
+`reconciliation.confirmation.copied_from_condition` names the copied keys.
+Server rule (`resolveConfirmScores`, and `legacyConfirmFinalScores` for rows
+with no run): posted number, then the saved row value, then the AI read. The
+run's `scores_adjusted` snapshot stays the AI read, so calibration records the
+technician-versus-AI difference. The standalone admin Lawn assessment page
+(`LawnAssessmentPanel`) is unchanged.

@@ -125,12 +125,10 @@ function responseForRun(run) {
     reviewedFindings: run.reviewed_findings == null ? null : array(run.reviewed_findings),
     addedDetails: run.added_details == null ? null : array(run.added_details),
     reconciliation: parseObject(run.reconciliation), reviewedAt: run.reviewed_at || null,
-    // The run's immutable AI read (owner ruling 2026-09-24: lawn scores are
-    // read-only from photos). A client uses THIS, never the mutable
-    // assessment row, to decide which metrics stay editable — the assessment
-    // row can already hold a technician's earlier fill of a genuinely blank
-    // metric from a prior partial save, which must not look "AI-known" on
-    // reload just because it now has a value (Codex P1 2026-09-24).
+    // The run's immutable AI read. The technician may change a score before
+    // confirming (owner ruling 2026-10-04); a client shows THIS beside a
+    // changed score, never the mutable assessment row, which a partial save
+    // may already have overwritten with the technician's entry.
     aiScores: runAiScores(run),
   };
 }
@@ -222,11 +220,11 @@ async function confirmLockedRun(args, customerId, trx) {
     ...(decision.confirmed ? { confirmed_at: trx.fn.now() } : {}),
     // Both existing clients also read observations from this JSON snapshot.
     // A copied adjustedScores.observations is not evidence of an explicit edit.
-    // stress_damage_explicit persists ONLY whether Stress was ever explicitly
-    // entered by a technician while AI-blank — confirmScores reads it back on
-    // the next partial save so an auto-derived (never explicit) Stress keeps
+    // stress_damage_explicit persists the technician's own Condition entry —
+    // confirmScores reads it back on the next partial save, so an entry
+    // sticks while an auto-derived (never entered) Condition keeps
     // re-deriving from current components instead of freezing stale (Codex
-    // P1 2026-09-24); inert once Stress is AI-known.
+    // P1 2026-09-24).
     adjusted_scores: JSON.stringify({
       ...parseObject(assessment.adjusted_scores), ...decision.finalScores,
       stress_damage_explicit: decision.stressExplicit, observations: assessment.observations,
@@ -253,6 +251,8 @@ async function confirmLockedRun(args, customerId, trx) {
         confirmation: {
           final_scores: decision.finalScores, ai_scores: decision.aiScores,
           calibration_eligible: decision.calibrationEligible,
+          // Fungus/Thatch keys holding a copy of Condition, not a reading.
+          copied_from_condition: decision.copiedFromCondition,
           technician_id: technicianId,
         },
       }),

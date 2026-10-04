@@ -63,10 +63,9 @@ const MODEL_TEXT = 'Nutsedge is visible near the front edge.';
     if (owned) await owned.dispose();
   });
 
-  // The run's immutable scores_adjusted snapshot IS the AI's read (owner
-  // ruling 2026-09-24: lawn scores are read-only from photos) — it mirrors
-  // `scores` by default, exactly like the real /assess writer. A test that
-  // wants an AI-blank (fillable) key passes it as `null` in `scores`.
+  // The run's immutable scores_adjusted snapshot IS the AI's read — it
+  // mirrors `scores` by default, exactly like the real /assess writer. A test
+  // that wants an AI-blank key passes it as `null` in `scores`.
   async function seed(scores = {}, { run = true, service = false } = {}) {
     const f = await fixture(mockKnex);
     const visit = service ? await f.visit() : null;
@@ -352,9 +351,17 @@ const MODEL_TEXT = 'Nutsedge is visible near the front edge.';
   test('clearing an earlier legacy fill (posted as null) removes it', async () => {
     const { assessment } = await seed({ ...COMPLETE, color_health: null, fungus_control: null }, { run: false });
     await request(assessment.id, { adjustedScores: { fungus_control: 60 } });
-    const cleared = await request(assessment.id, { adjustedScores: { fungus_control: null, color_health: 70 } });
-    expect(cleared.body).toMatchObject({ confirmed: false, missingScores: ['fungus_control'] });
+    const cleared = await request(assessment.id, { adjustedScores: { fungus_control: null } });
+    expect(cleared.body).toMatchObject({ confirmed: false, missingScores: ['color_health', 'fungus_control'] });
     expect(cleared.body.assessment.fungus_control).toBeNull();
+  });
+
+  // Owner ruling 2026-10-04: the screen has no Fungus or Thatch field, so a
+  // blank one takes the Condition score once the rest of the row is complete.
+  test('a legacy blank Fungus takes the Condition score on the completing save', async () => {
+    const { assessment } = await seed({ ...COMPLETE, color_health: null, fungus_control: null }, { run: false });
+    const done = await request(assessment.id, { adjustedScores: { color_health: 70, stress_damage: 64 } });
+    expect(done.body.assessment).toMatchObject({ confirmed_by_tech: true, color_health: 70, fungus_control: 64, thatch_level: 90, stress_damage: 64 });
   });
 
   test('legacy reload sends the server AI read, so a partial fill stays editable', async () => {
@@ -380,10 +387,10 @@ const MODEL_TEXT = 'Nutsedge is visible near the front edge.';
     const { assessment } = await seed(COMPLETE, { run: false });
     if (missingTable) await mockKnex.schema.renameTable('lawn_assessment_runs', 'temporarily_missing_runs');
     try {
-      // turf_density is AI-known here (80, from COMPLETE) — the override is
-      // ignored; the free-text observations edit is unaffected.
+      // turf_density was read by the AI (80, from COMPLETE); the technician's
+      // 72 replaces it (owner ruling 2026-10-04).
       const result = await request(assessment.id, { adjustedScores: { turf_density: 72, observations: 'Technician legacy text' } });
-      expect(result.body).toMatchObject({ success: true, assessment: { confirmed_by_tech: true, turf_density: 80, observations: 'Technician legacy text' } });
+      expect(result.body).toMatchObject({ success: true, assessment: { confirmed_by_tech: true, turf_density: 72, observations: 'Technician legacy text' } });
       expect(result.body).not.toHaveProperty('confirmed');
       await drain();
       expect(delivery).not.toHaveBeenCalled();
