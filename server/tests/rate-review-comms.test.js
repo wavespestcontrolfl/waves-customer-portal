@@ -593,6 +593,30 @@ describe('sendBatch', () => {
     } finally { lookup.mockRestore(); }
   });
 
+  test('explicit billing channel choices decide the legs: text-only gets no email, email-only gets no text, app-only holds the letter', async () => {
+    const withChoice = (channels) => { const b = book(); b.notification_prefs = [{ customer_id: CUSTOMER(1), billing_channels: channels, sms_enabled: true }]; mockDb.reset(b); };
+    withChoice(['sms']);
+    let out = await comms.sendPreview(BATCH_KEY, { now: NOW });
+    expect(out.customers[0].channels).toEqual({ email: false, sms: true });
+    await comms.sendBatch(BATCH_KEY, { expectedDigest: out.digest, now: NOW });
+    expect(emailLeg).not.toHaveBeenCalled();
+    expect(smsLeg).toHaveBeenCalledTimes(1);
+    expect(notices()[0]).toMatchObject({ status: 'sent', email_sent: false, sms_sent: true });
+
+    emailLeg.mockClear(); smsLeg.mockClear();
+    withChoice(['email']);
+    out = await comms.sendPreview(BATCH_KEY, { now: NOW });
+    expect(out.customers[0].channels).toEqual({ email: true, sms: false });
+    await comms.sendBatch(BATCH_KEY, { expectedDigest: out.digest, now: NOW });
+    expect(smsLeg).not.toHaveBeenCalled();
+    expect(notices()[0]).toMatchObject({ status: 'sent', email_sent: true, sms_sent: false });
+
+    withChoice(['push']);
+    out = await comms.sendPreview(BATCH_KEY, { now: NOW });
+    expect(out.counts.letters).toBe(0);
+    expect(out.customers[0].reason).toBe('no_contact');
+  });
+
   test('never handed to a provider: parks unreachable without words, and is sendable again', async () => {
     mockDb.reset(book());
     emailLeg.mockResolvedValue({ sent: false, attempted: false });
@@ -833,13 +857,47 @@ describe('customer surfaces', () => {
       mockDb.store.price_change_notices[0].customer_id = CUSTOMER(1);
       return { sent: true, attempted: true };
     });
+    // the text leg's last abort point re-reads ownership the same way, while the letter is still claimed
+    smsLeg.mockImplementation(async (args) => {
+      const check = args.sendOptions.preDispatchCheck;
+      mockDb.store.price_change_notices[0].customer_id = CUSTOMER(9);
+      expect(await check()).toMatchObject({ ok: false, code: 'NOTICE_REPOINTED' });
+      mockDb.store.price_change_notices[0].customer_id = CUSTOMER(1);
+      expect(await check()).toEqual({ ok: true });
+      return { sent: true, attempted: true };
+    });
     await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
-    // the text leg's last abort point re-reads ownership the same way
-    const check = smsLeg.mock.calls[0][0].sendOptions.preDispatchCheck;
-    mockDb.store.price_change_notices[0].customer_id = CUSTOMER(9);
-    expect(await check()).toMatchObject({ ok: false, code: 'NOTICE_REPOINTED' });
-    mockDb.store.price_change_notices[0].customer_id = CUSTOMER(1);
-    expect(await check()).toEqual({ ok: true });
+    expect(smsLeg).toHaveBeenCalledTimes(1);
+    // once the letter is stamped the claim is over: the same check refuses
+    expect(await smsLeg.mock.calls[0][0].sendOptions.preDispatchCheck()).toMatchObject({ ok: false });
+  });
+
+  test('a stalled send whose claim another request took over sends nothing and leaves the other request\'s rows untouched', async () => {
+    mockDb.reset(book());
+    const digest = await previewDigest();
+    const dispatched = jest.fn(async () => {});
+    let takenOver = null;
+    emailLeg.mockImplementation(async (args) => {
+      // this sender stalled in preparation; meanwhile another request reclaimed the row (a new generation, its own frozen letter)
+      const row = mockDb.store.price_change_notices[0];
+      row.metadata = JSON.stringify({ ...JSON.parse(row.metadata), claim_gen: 'another-request', pending_letter: { key: 'theirs', letter: { lines: [] } } });
+      takenOver = row.metadata;
+      const res = await args.sendOptions.withProviderHandoff(dispatched, { to: args.recipient.email });
+      expect(res).toEqual({ ok: false, reason: 'notice_repointed' });
+      return { sent: false, attempted: true };
+    });
+    smsLeg.mockImplementation(async (args) => {
+      expect(await args.sendOptions.preDispatchCheck()).toMatchObject({ ok: false });
+      const refusal = await args.sendOptions.withSmsHandoff(dispatched);
+      expect(refusal).toMatchObject({ ok: false, code: 'NOTICE_REPOINTED' });
+      return { sent: false, attempted: false, blockedCode: refusal.code };
+    });
+    const out = await comms.sendBatch(BATCH_KEY, { expectedDigest: digest, now: NOW });
+    expect(dispatched).not.toHaveBeenCalled(); // no email, no text from the stalled sender
+    expect(out.sent).toBe(0);
+    // the other request's claim is exactly as it left it
+    expect(notices()[0].status).toBe('sending');
+    expect(notices()[0].metadata).toBe(takenOver);
   });
 
   test('send: the text pointer holds the comms + phone fence through dispatch; a notice repointed after the pre-check sends no text and records the hold', async () => {
@@ -1184,7 +1242,7 @@ describe('customer surfaces', () => {
     emailLeg.mockResolvedValue({ sent: false, attempted: true, definiteNonSend: true });
     smsLeg.mockResolvedValue({ sent: false, attempted: false });
     const res = await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
-    expect(smsLeg.mock.calls[0][0].hasEmailLeg).toBe(true);
+    expect(smsLeg).not.toHaveBeenCalled(); // an email-only choice: the text leg is never attempted
     expect(res).toMatchObject({ sent: 0, failed: 1 });
     expect(notices()[0].status).toBe('draft'); // definite rejection: retryable
     expect(JSON.parse(notices()[0].metadata).send_hold.reason).toBe('email_rejected');
@@ -1192,7 +1250,7 @@ describe('customer surfaces', () => {
     mockDb.reset(b);
     emailLeg.mockImplementation(emailVia({ sent: false, attempted: true }));
     expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).toMatchObject({ uncertain: 1 });
-    expect(smsLeg.mock.calls.at(-1)[0].hasEmailLeg).toBe(true);
+    expect(smsLeg).not.toHaveBeenCalled();
     // a customer with no email on file has no email leg to pair with
     mockDb.reset(book({ customers: [customer(1, { email: null })] }));
     await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });

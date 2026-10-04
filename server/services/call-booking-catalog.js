@@ -886,6 +886,7 @@ module.exports = {
   callBookingInvoiceOnComplete,
   callFollowUpBillingShape,
   callBookingDateOnly,
+  followUpProbeEnd,
   sanitizeQuotedCallPrice,
   shiftCallFollowUpsForParentMove,
   planCallFollowUpShift,

@@ -1248,6 +1248,18 @@ function completionDraftTombstoneKey(serviceId) {
   return `${completionDraftKey(serviceId)}_discarded`;
 }
 
+function completionDraftTombstoneMatches(tombstone, draftId) {
+  if (tombstone === null) return false;
+  if (!tombstone) return true;
+  if (tombstone === String(draftId)) return true;
+  try {
+    const ids = JSON.parse(tombstone);
+    return Array.isArray(ids) && ids.map(String).includes(String(draftId));
+  } catch {
+    return tombstone === draftId;
+  }
+}
+
 // The signed-in admin's id. Unsubmitted drafts (photos, captions, notes) are
 // stored under it so a shared tablet never offers one operator's field work
 // to the next: the IndexedDB row is keyed by it and the localStorage
@@ -1397,6 +1409,27 @@ export function buildPhotoRecoveryOutcome({
   };
 }
 
+export function buildPhotoReconcileFailureOutcome(draft, errorCode) {
+  const handedOff = errorCode === "photo_reconciliation_handed_off";
+  const result = {
+    ...draft.pendingPhotoCompletion,
+    completionPhotoUpload: { failed: 0, reconcileOwed: true, handedOff },
+  };
+  return {
+    draft: {
+      ...draft,
+      servicePhotos: [],
+      reconcileOwed: true,
+      reconciliationHandedOff: handedOff,
+      pendingPhotoCompletion: result,
+    },
+    result,
+    message: handedOff
+      ? "Report repair was handed to the office. You can dismiss this recovery on this device."
+      : "Photos uploaded, but the report could not be updated yet. Retry when connected.",
+  };
+}
+
 // Whether the success overlay should auto-dismiss, and after how long. A
 // required follow-up suggestion keeps it open so the tech can act on the
 // CTA — it dismisses via the Done button. Keep the panel open when a pest
@@ -1428,7 +1461,7 @@ export function completionAutoCloseDelay(completion, photosOwed, recapEligible) 
 // from the autosave revision (see buildPhotoRecoveryOutcome above) carry the
 // panel's shape, not the completion body's: derive the body fields the same
 // way.
-export function buildPhotoRetryFormBody(photo, index) {
+export function buildPhotoRetryFormBody(photo, index, expectedVisit = null, expectedServiceRecordId = null) {
   const [header, encoded] = photo.data.split(",");
   const bytes = Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0));
   const form = new FormData();
@@ -1438,6 +1471,11 @@ export function buildPhotoRetryFormBody(photo, index) {
   if (photo.caption) form.append("caption", photo.caption);
   const aiTags = photo.aiTags || (photo.captionSource === "ai" ? { captionSource: "ai" } : null);
   if (aiTags) form.append("aiTags", JSON.stringify(aiTags));
+  // New completion receipts carry the visit identity frozen under the
+  // completion lock. Older persisted drafts predate that receipt; omission
+  // deliberately retains the optional deployed API contract for them.
+  if (expectedVisit) form.append("expectedVisit", JSON.stringify(expectedVisit));
+  if (expectedServiceRecordId) form.append("expectedServiceRecordId", expectedServiceRecordId);
   return form;
 }
 
@@ -13250,6 +13288,7 @@ export function CompletionPanel({
   const [committedReplayReady, setCommittedReplayReady] = useState(false);
   const [photoRetrying, setPhotoRetrying] = useState(false);
   const [photoRetryError, setPhotoRetryError] = useState("");
+  const [photoRetryConflict, setPhotoRetryConflict] = useState(false);
   const photoRetryLockRef = useRef(false);
   // Synchronous lock for the restore await in handleSubmit: `submitting` is
   // state and may not have re-rendered between two quick taps, so without
@@ -14996,10 +15035,14 @@ export function CompletionPanel({
   }
 
   function clearSavedDraft() {
-    const discardedId = draftSnapshotRef.current?.draftId || savedDraft?.draftId || "";
+    const discarded = draftSnapshotRef.current || savedDraft;
+    const discardedIds = [...new Set([
+      discarded?.draftId, discarded?.discardedPhotoDraftId,
+    ].filter(Boolean).map(String))];
+    const tombstone = discardedIds.length > 1 ? JSON.stringify(discardedIds) : discardedIds[0] || "";
     draftSnapshotRef.current = null;
     try {
-      localStorage.setItem(completionDraftTombstoneKey(service.id), discardedId);
+      localStorage.setItem(completionDraftTombstoneKey(service.id), tombstone);
       localStorage.removeItem(completionDraftKey(service.id));
     } catch { /* unavailable */ }
     void deleteCompletionDraft(service.id, completionDraftScope()).then((deleted) => {
@@ -15044,7 +15087,7 @@ export function CompletionPanel({
       let stored = loaded;
       // A residual row whose delete never committed (page killed mid-discard)
       // is not a draft: drop it and finish the delete now.
-      if (stored && tombstone !== null && (!tombstone || tombstone === stored.draftId)) {
+      if (stored && completionDraftTombstoneMatches(tombstone, stored.draftId)) {
         stored = null;
         void deleteCompletionDraft(service.id, scope).then((deleted) => {
           if (!deleted) return;
@@ -17422,25 +17465,51 @@ export function CompletionPanel({
   }
 
   async function retryCompletionPhotos() {
-    if (photoRetryLockRef.current) return;
     const draft = draftSnapshotRef.current;
-    if (!draft?.servicePhotos?.length && !draft?.reconcileOwed) return;
+    if ([
+      photoRetryLockRef.current,
+      ![draft?.servicePhotos?.length, draft?.reconcileOwed].some(Boolean),
+    ].some(Boolean)) return;
     photoRetryLockRef.current = true;
     setPhotoRetrying(true);
     setPhotoRetryError("");
+    setPhotoRetryConflict(false);
     const failedPhotos = [];
+    let reconciliationNeeded = draft.reconcileOwed === true;
+    let retryPermanentlyBlocked = false;
     try {
-      for (const [index, photo] of (draft.servicePhotos || []).entries()) {
+      const { servicePhotos: photos = [], pendingPhotoCompletion = {} } = draft;
+      for (const [index, photo] of photos.entries()) {
         try {
-          const form = buildPhotoRetryFormBody(photo, index);
+          const form = buildPhotoRetryFormBody(
+            photo,
+            index,
+            pendingPhotoCompletion.servicePhotoVisit,
+            pendingPhotoCompletion.serviceRecordId,
+          );
           // Existing attachment route dedupes by image hash. A lost response
           // can safely retry the same bytes without repeating closeout.
           await adminFetch(`/tech/services/${service.id}/photos`, {
             method: "POST", body: form,
             headers: { Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}` },
           });
-        } catch {
+          reconciliationNeeded = true;
+        } catch (error) {
           failedPhotos.push(photo);
+          const uploadDefinitelyRejected = [
+            error?.code === "visit_identity_changed",
+            Number(error?.status) === 403,
+          ].some(Boolean);
+          // A transport/server failure can arrive after the attachment row
+          // committed but before the response reached this device. Preserve
+          // the reconciliation obligation until the server confirms it, so
+          // discarding the local copy cannot leave a stale report behind.
+          reconciliationNeeded = [reconciliationNeeded, !uploadDefinitelyRejected].some(Boolean);
+          if (uploadDefinitelyRejected) {
+            retryPermanentlyBlocked = true;
+            failedPhotos.push(...photos.slice(index + 1));
+            break;
+          }
         }
       }
       if (!failedPhotos.length) {
@@ -17450,39 +17519,98 @@ export function CompletionPanel({
         // until the server reconciles them. Keep the marker (photos already
         // uploaded, reconciliation owed) if that step fails (Codex #4091 P1).
         try {
-          await adminFetch(`/tech/services/${service.id}/photos/reconcile`, { method: "POST" });
-        } catch {
-          const owed = { ...draft, servicePhotos: [], reconcileOwed: true,
-            pendingPhotoCompletion: { ...draft.pendingPhotoCompletion, completionPhotoUpload: { failed: 0, reconcileOwed: true } } };
-          draftSnapshotRef.current = owed;
-          await saveDraftSnapshot(owed);
+          await adminFetch(`/tech/services/${service.id}/photos/reconcile`, {
+            method: "POST",
+            body: JSON.stringify({
+              abandonMissingPhotos: draft.abandonMissingPhotos === true,
+              expectedVisit: pendingPhotoCompletion.servicePhotoVisit,
+              expectedServiceRecordId: pendingPhotoCompletion.serviceRecordId,
+            }),
+          });
+        } catch (error) {
+          const outcome = buildPhotoReconcileFailureOutcome(draft, error?.code);
+          draftSnapshotRef.current = outcome.draft;
+          await saveDraftSnapshot(outcome.draft);
           if (!completionPanelClosedRef.current) {
-            setCompletionResult(owed.pendingPhotoCompletion);
-            setPhotoRetryError("Photos uploaded, but the report could not be updated yet. Retry when connected.");
+            setCompletionResult(outcome.result);
+            setPhotoRetryError(outcome.message);
           }
           return;
         }
         await finishCompletionSuccess({
-          ...draft.pendingPhotoCompletion,
+          ...pendingPhotoCompletion,
           completionPhotoUpload: { failed: 0 },
         });
       } else {
         const result = {
-          ...draft.pendingPhotoCompletion,
+          ...pendingPhotoCompletion,
           completionPhotoUpload: { failed: failedPhotos.length },
         };
-        const remaining = { ...draft, servicePhotos: failedPhotos, reconcileOwed: false, pendingPhotoCompletion: result };
+        // A partially successful retry has already changed the visit's photo
+        // set. Keep that reconciliation obligation beside the failed local
+        // copies so discarding those copies cannot leave the report stale.
+        const remaining = {
+          ...draft,
+          servicePhotos: failedPhotos,
+          reconcileOwed: reconciliationNeeded,
+          pendingPhotoCompletion: result,
+        };
         draftSnapshotRef.current = remaining;
         await saveDraftSnapshot(remaining);
         if (!completionPanelClosedRef.current) {
           setCompletionResult(result);
-          setPhotoRetryError("Some photos still could not upload. Your copies are retained on this device; retry when connected.");
+          setPhotoRetryConflict(retryPermanentlyBlocked);
+          setPhotoRetryError(retryPermanentlyBlocked
+            ? "This visit changed or is no longer accessible, so these photos can’t be attached safely. Your copies remain on this device until you discard them."
+            : "Some photos still could not upload. Your copies are retained on this device; retry when connected.");
         }
       }
     } finally {
       photoRetryLockRef.current = false;
       if (!completionPanelClosedRef.current) setPhotoRetrying(false);
     }
+  }
+
+  function discardRetainedCompletionPhotos() {
+    if (photoRetryLockRef.current) return;
+    const draft = draftSnapshotRef.current;
+    if (draft?.reconcileOwed && !draft?.reconciliationHandedOff) {
+      const result = {
+        ...draft.pendingPhotoCompletion,
+        completionPhotoUpload: { failed: 0, reconcileOwed: true },
+      };
+      // Mint a new photo revision before the asynchronous IndexedDB write.
+      // If the page dies, metadata for this revision cannot reattach the
+      // discarded photos from the older stored revision.
+      const owed = {
+        ...draft,
+        draftId: crypto.randomUUID(),
+        discardedPhotoDraftId: draft.draftId,
+        savedAt: new Date().toISOString(),
+        servicePhotos: [],
+        generationPhotoCount: 0,
+        reconcileOwed: true,
+        abandonMissingPhotos: true,
+        pendingPhotoCompletion: result,
+      };
+      draftSnapshotRef.current = owed;
+      void saveDraftSnapshot(owed);
+      setPhotoRetryConflict(false);
+      setPhotoRetryError("");
+      setCompletionResult(result);
+      return;
+    }
+    clearSavedDraft();
+    clearCompletionResumeOwed(service.id);
+    sideEffectsCommittedRef.current = false;
+    lastSubmitBodyRef.current = null;
+    setCommittedReplayReady(false);
+    setPhotoRetryConflict(false);
+    setPhotoRetryError("");
+    setCompletionResult((current) => current ? {
+      ...current,
+      completionPhotoUpload: { ...current.completionPhotoUpload, failed: 0, reconcileOwed: false, handedOff: false },
+    } : current);
   }
 
   // Terminal SUCCESS for a committed chain resolved under ANOTHER key (see
@@ -19143,20 +19271,37 @@ export function CompletionPanel({
     </div>
   );
   const photoReconcileOwed = completionResult?.completionPhotoUpload?.reconcileOwed === true;
+  const photoReconcileHandedOff = completionResult?.completionPhotoUpload?.handedOff === true;
   const photoRecoveryNotice = (completionResult?.completionPhotoUpload?.failed > 0 || photoReconcileOwed) && (
     <div role="status" style={{ marginTop: 16, padding: 16, width: "100%", maxWidth: 360, boxSizing: "border-box",
       color: "#111111", background: "#FFFFFF", border: "1px solid #E5E5E5", borderRadius: 12, fontSize: 14, lineHeight: 1.5 }}>
       <p style={{ margin: "0 0 12px" }}>
-        {photoReconcileOwed
+        {photoReconcileHandedOff
+          ? "The visit is saved. Report repair was handed to the office because your access changed."
+          : photoReconcileOwed
           ? "The visit is saved and the photos are uploaded. The report still needs updating with them."
           : `The visit is saved. ${completionResult.completionPhotoUpload.failed} ${completionResult.completionPhotoUpload.failed === 1 ? "photo still needs" : "photos still need"} uploading.`}
       </p>
       {photoRetryError && <p>{photoRetryError}</p>}
       {draftStorageStatus}
-      <button type="button" onClick={retryCompletionPhotos} disabled={photoRetrying}
-        style={{ padding: "12px 16px", borderRadius: 24, border: "none", background: "#111111", color: "#FFFFFF", fontSize: 14 }}>
-        {photoRetrying ? (photoReconcileOwed ? "Updating report…" : "Uploading photos…") : (photoReconcileOwed ? "Finish report update" : "Retry photo uploads")}
-      </button>
+      {!photoRetryConflict && !photoReconcileHandedOff && (
+        <button type="button" onClick={retryCompletionPhotos} disabled={photoRetrying}
+          style={{ padding: "12px 16px", borderRadius: 24, border: "none", background: "#111111", color: "#FFFFFF", fontSize: 14 }}>
+          {photoRetrying ? (photoReconcileOwed ? "Updating report…" : "Uploading photos…") : (photoReconcileOwed ? "Finish report update" : "Retry photo uploads")}
+        </button>
+      )}
+      {!photoReconcileOwed && (
+        <button type="button" onClick={discardRetainedCompletionPhotos} disabled={photoRetrying}
+          style={{ marginLeft: photoRetryConflict ? 0 : 8, padding: "12px 16px", borderRadius: 24, border: "none", background: "#111111", color: "#FFFFFF", fontSize: 14 }}>
+          Discard retained photos
+        </button>
+      )}
+      {photoReconcileHandedOff && (
+        <button type="button" onClick={discardRetainedCompletionPhotos}
+          style={{ padding: "12px 16px", borderRadius: 24, border: "none", background: "#111111", color: "#FFFFFF", fontSize: 14 }}>
+          Dismiss local recovery
+        </button>
+      )}
       <button type="button" onClick={() => onClose(true)} style={{ marginLeft: 8, padding: 12, border: "none", background: "transparent", color: "#111111", fontSize: 14 }}>
         Later
       </button>

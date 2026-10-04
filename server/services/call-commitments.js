@@ -1496,6 +1496,33 @@ const ESTIMATE_OWNER_SQL = `COALESCE(estimates.customer_id, (SELECT l.customer_i
   WHERE l.deleted_at IS NULL AND l.customer_id IS NOT NULL
     AND (l.estimate_id = estimates.id OR l.id::text = estimates.estimate_data ->> 'lead_id') LIMIT 1))`;
 
+// The estimates a customer's own record lists (owner 2026-10-03): the ones the
+// customer owns (whereEstimateCustomerOwnership), plus an estimate NOBODY
+// owns — no customer_id and no live lead that belongs to a customer — whose
+// typed phone is this customer's phone. The builder links a customer only
+// when one is picked in Customer Lookup, so an estimate typed with the
+// customer's own phone stayed off their record. This is a READ rule only: it
+// never writes customer_id (pricing, grouping and acceptance all key on that
+// column and keep their own rules), so two customers who share a phone both
+// see the unowned estimate. Phone identity is the canonical one
+// (utils/phone.js phoneIdentityKey and its SQL twin): a number from another
+// country never matches a US customer that only shares its last ten digits,
+// and a carrier placeholder or an incomplete phone ties nothing.
+function whereEstimateOnCustomerRecord(query, customer = {}) {
+  const { phoneMatchDigits, phoneIdentityKey } = require("../utils/phone");
+  const phone = typeof customer.phone === "string" ? customer.phone : "";
+  const phoneKey = phoneMatchDigits(phone).length && !require("./external-phone").isSentinelPhone(phone) ? phoneIdentityKey(phone) : null;
+  return query.where(function onRecord() {
+    this.where(function owned() { whereEstimateCustomerOwnership(this, customer.id); });
+    if (phoneKey) {
+      this.orWhereRaw(
+        `(${ESTIMATE_OWNER_SQL} IS NULL AND ${require("./sms-response-policy").phoneIdentitySql("BTRIM(COALESCE(estimates.customer_phone, ''))")} = ?)`,
+        [phoneKey],
+      );
+    }
+  });
+}
+
 // The basis of a scheduling promise kept by a booking for its promised slot
 // (resolveFulfillment). The visit is found through the call's CUSTOMER and
 // the slot through inputs a reprocess rewrites, so every refresh judges it
@@ -3542,6 +3569,7 @@ module.exports = {
   phoneWhereAny,
   whereEstimateCustomerOwnership,
   whereEstimateOwnedByAny,
+  whereEstimateOnCustomerRecord,
   ESTIMATE_OWNER_SQL,
   handedOffWithin,
   handoffOrder,
