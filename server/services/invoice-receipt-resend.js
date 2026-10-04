@@ -182,9 +182,10 @@ async function runEmailLeg(s, claim, stillHeld) {
   const { sendReceiptEmail } = require('./invoice-email');
   const guard = handoffGuard(s, claim, stillHeld, 'before_email');
   s.emailResult = await sendReceiptEmail(s.id, { memo: s.memo, beforeProviderHandoff: guard }).catch((err) => ({ ok: false, error: err.message }));
-  // Vetoed at the provider boundary: a definite non-send, with the guard's own reason.
-  if (guard.abortedBy) s.emailResult = { ok: false, error: guard.abortedBy };
   s.delivery.email = emailDelivery(s.emailResult);
+  // Vetoed at the provider boundary: the guard's own reason, only when the sender confirms a
+  // definite non-send. Accepted or uncertain evidence is never overridden by a guard refusal.
+  if (guard.abortedBy && s.delivery.email === 'not_sent') s.emailResult = { ok: false, error: guard.abortedBy };
   if (s.emailResult.ok) await recordOperatorReceiptDelivered(claim, 'email');
 }
 
@@ -211,9 +212,11 @@ async function runTextLeg(s, claim, stillHeld) {
     s.smsResult = { ok: false, error: err.message };
     s.smsThrown = err;
   }
-  // Vetoed at the provider boundary: a definite non-send, with the guard's own reason.
-  if (guard.abortedBy) s.smsResult = { ok: false, error: guard.abortedBy };
   s.delivery.sms = smsDelivery(s.smsResult.ok ? { sent: true } : null, s.smsThrown);
+  // Vetoed at the provider boundary: the guard's own reason, only when the sender confirms a
+  // definite non-send. The text leg can reach several App devices and the guard runs per device:
+  // one accepted before a later refusal is a delivered receipt, never reported as not sent.
+  if (guard.abortedBy && s.delivery.sms === 'not_sent') s.smsResult = { ok: false, error: guard.abortedBy };
   // A throw AFTER the provider accepted the text (its bookkeeping failed) is a delivered
   // receipt: record, stamp and release as sent, or the "failure" invites a duplicate resend.
   if (s.delivery.sms === 'sent') s.smsResult = { ok: true };

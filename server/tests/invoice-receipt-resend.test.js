@@ -355,6 +355,29 @@ describe('ownership of the send lock is checked before each effect', () => {
     expect(out.body.email).toEqual({ ok: false, error: 'send lock lost' });
   });
 
+  test('a guard refusal after the sender already delivered (one App device accepted, a later one vetoed) stays sent', async () => {
+    const approved = { receipt_state: 'unsent', amount: '129.00', recipients_key: 'pinned' };
+    let reads = 0;
+    // Approved for the writer's own checks; changed by the time the sender's second handoff asks.
+    const rederive = jest.fn(async () => (++reads <= 3 ? { ...approved } : { ...approved, recipients_key: 'other' }));
+    InvoiceService.sendReceipt.mockImplementationOnce(async (_id, opts) => {
+      expect(await opts.beforeProviderHandoff()).toBe(true); // first device: accepted
+      expect(await opts.beforeProviderHandoff()).toBe(false); // second device: vetoed
+      return { sent: true };
+    });
+    const out = await sendInvoiceReceipt(ID, { via: 'sms', expect: { approved, rederive } });
+    expect(out.delivery.sms).toBe('sent');
+    expect(out.body.sms).toEqual({ ok: true });
+    // Uncertain evidence is kept too.
+    reads = 0;
+    InvoiceService.sendReceipt.mockImplementationOnce(async (_id, opts) => {
+      await opts.beforeProviderHandoff();
+      await opts.beforeProviderHandoff();
+      throw Object.assign(new Error('receipt SMS blocked: PROVIDER_FAILURE'), { providerOutcome: { deliveryOutcome: 'uncertain', blocked: false } });
+    });
+    expect((await sendInvoiceReceipt(ID, { via: 'sms', expect: { approved, rederive } })).delivery.sms).toBe('unknown');
+  });
+
   test('a lock that is never lost changes nothing', async () => {
     const out = await sendInvoiceReceipt(ID, { via: 'both' });
     expect(out.lockLost).toBeNull();
