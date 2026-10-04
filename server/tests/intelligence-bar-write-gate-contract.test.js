@@ -150,6 +150,8 @@ const WRITE_TWO_STEP = [
   'cancel_plan',
   'merge_customers',
   'repair_closeout',
+  'remove_saved_payment_method',
+  'correct_invoice_address',
   'update_lead_contact',
   // Outside-service writes (IB scope expansion item 1, owner ruling
   // 2026-09-28) — full-access-only (write-gates.js
@@ -615,6 +617,27 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     // no report link, so the plan has a publish step and reaches the gate.
     ['closeout-repair-tools', 'executeCloseoutRepairTool', 'repair_closeout', { service_id: '00000000-0000-0000-0000-00000000d001' }, {
       service_records: [{ id: 'rec-closeout', status: 'completed', report_template_version: 'service_report_v1', report_view_token: null, structured_notes: {} }],
+    }],
+    // The billing writes' previews read the customer, saved methods and Auto
+    // Pay state (Auto Pay off here, so the plan is the removal alone) / the
+    // invoice and its displayed address. Neither may write without confirmed.
+    ['billing-write-tools', 'executeBillingWriteTool', 'remove_saved_payment_method', {
+      customer_id: '00000000-0000-0000-0000-00000000f001', payment_method_id: '00000000-0000-0000-0000-00000000f002',
+    }, {
+      customers: [{ id: '00000000-0000-0000-0000-00000000f001', first_name: 'Card', last_name: 'Fixture', email: 'card@example.com', autopay_enabled: false, deleted_at: null }],
+      payment_methods: [{
+        id: '00000000-0000-0000-0000-00000000f002', customer_id: '00000000-0000-0000-0000-00000000f001', method_type: 'card', card_brand: 'Visa',
+        last_four: '4242', exp_month: 12, exp_year: 2032, is_default: true, autopay_enabled: false, processor: 'stripe', stripe_payment_method_id: 'pm_synthetic',
+      }],
+    }],
+    ['billing-write-tools', 'executeBillingWriteTool', 'correct_invoice_address', {
+      invoice_id: '00000000-0000-0000-0000-00000000f003', address_line1: '9 New Street', city: 'Bradenton', state: 'FL', zip: '34203',
+    }, {
+      invoices: [{
+        id: '00000000-0000-0000-0000-00000000f003', invoice_number: 'WPC-2099-0001', status: 'paid', customer_id: '00000000-0000-0000-0000-00000000f001',
+        customer_address_snapshot: { address_line1: '1 Old Street', address_line2: null, city: 'Sarasota', state: 'FL', zip: '34201' },
+      }],
+      customers: [{ id: '00000000-0000-0000-0000-00000000f001', first_name: 'Card', last_name: 'Fixture', address_line1: '55 Live Ave', city: 'Venice', state: 'FL', zip: '34285' }],
     }],
     // Outside-service writes (IB scope expansion item 1) build their preview
     // from a live third-party API call, never the DB — OUTSIDE_WRITE_FIXTURES
