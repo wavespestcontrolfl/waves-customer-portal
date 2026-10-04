@@ -3202,3 +3202,33 @@ visits and reopened a completed pest visit in the recap editor from Project
 Report; the workspace offers no report for a completed visit (its existing
 rule), so that edit is no longer on the Today page. Existing rows in
 `user_feature_flags` for the key are inert.
+
+## 2026-10-04 — The technician can change the four lawn scores until Confirm
+
+Owner 2026-10-04 (phone screenshot of Complete service → Lawn assessment):
+"the lawn assessment portion should be editable by the tech after it
+renders". This replaces the 2026-09-24 ruling that a score the AI read was
+read-only. In `LawnAssessmentCompletionBlock` (the full completion form and
+the lawn Fast Complete sheet share it) Density, Weed control, Color and
+Condition are number fields after Analyze, pre-filled with the saved score,
+and lock to text when the assessment is confirmed. A changed or emptied score
+shows the AI's own read under it ("AI 80"); an emptied field posts null, which
+the server reads as "back to the AI score". The Fungus control and Thatch
+condition tiles are gone (owner: "four only, drop the two tiles"): when the AI
+left one blank, `/admin/lawn-assessment/confirm` writes its "no finding" score
+(Fungus 95, Thatch 85, or the Condition score when that is higher) on the
+save that completes the row, and the run's
+`reconciliation.confirmation.synthetic_sub_scores` names those keys. It is
+never a low Condition: the report and the tips read a low sub-score as
+evidence of disease or thatch, and Condition may be low for drought or
+insects. One more case: when the technician
+enters Condition above a Fungus or Thatch the AI read, that sub-score is
+raised to it on the completing save, so the report and the tips never cite a
+low sub-score against the correction. Neither applies to a sub-score the
+client posted (the standalone page shows those fields), nor to a legacy row
+whose Condition is only the 95 fallback of no stressor signal at all.
+Server rule (`resolveConfirmScores`, and `legacyConfirmFinalScores` for rows
+with no run): posted number, then the saved row value, then the AI read. The
+run's `scores_adjusted` snapshot stays the AI read, so calibration records the
+technician-versus-AI difference. The standalone admin Lawn assessment page
+(`LawnAssessmentPanel`) is unchanged.
