@@ -2408,6 +2408,11 @@ export default function EstimateToolViewV2({
     }
   }, [form.homeSqFt, form.stories, form._storiesEdited, form.svcTermiteBait, form._suiteSizedLookup, form.isCommercial, form.propertyType, form._suiteStoriesVerified]);
 
+  // Read through a ref so a flag change does not refire a search. Same rule
+  // as canChangeLeadLink below.
+  const canChangeLeadLinkRef = useRef(true);
+  canChangeLeadLinkRef.current = !editMode?.id && !groupAnchorId && !savedId;
+
   useEffect(() => {
     const q = customerSearch.trim();
     setCustomers([]);
@@ -2436,7 +2441,7 @@ export default function EstimateToolViewV2({
             `/api/admin/leads?status=open&limit=8&search=${encodeURIComponent(q)}`,
             { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal },
           );
-          if (leadResponse.ok) {
+          if (leadResponse.ok && canChangeLeadLinkRef.current) {
             const leadData = await leadResponse.json();
             leads = (leadData.leads || []).filter((lead) => lead && lead.id && !lead.customer_id);
           }
@@ -2528,6 +2533,7 @@ export default function EstimateToolViewV2({
   // Create Estimate button passes (leadEstimateParams in LeadsTabs.jsx) and
   // ties the estimate to that lead. No customer is linked: a lead has none.
   function applyLeadLink(lead) {
+    if (!canChangeLeadLink) return;
     const name = [lead.first_name, lead.last_name].filter(Boolean).join(" ").trim();
     setForm((f) => ({
       ...f,
@@ -2559,6 +2565,7 @@ export default function EstimateToolViewV2({
   }
 
   function unlinkLead() {
+    if (!canChangeLeadLink) return;
     setLinkedLead(null);
     setForm((f) => ({ ...f, leadId: "" }));
   }
@@ -2567,6 +2574,11 @@ export default function EstimateToolViewV2({
   // PUT keeps the row's customer_id (codex #3768 r1), and a grouped sibling
   // must share the anchor's customer or the save 400s (codex #3768 r3).
   const canUnlink = !editMode?.id && !groupAnchorId;
+  // A lead can be linked or unlinked only where a save will honor it: a NEW,
+  // ungrouped draft that has not been saved yet. A revise sends leadId null
+  // and keeps the row's own linkage, so on a saved or revised estimate the
+  // lead list is not offered and the link line is read-only.
+  const canChangeLeadLink = canUnlink && !savedId;
 
   // Drops the linked customer but keeps the typed contact fields, so a wrong
   // link (address suggestion, deep link, or a mis-click) is one tap to undo.
@@ -5079,7 +5091,7 @@ export default function EstimateToolViewV2({
               </p>
               {customerSearchStatus === "loading" && <p role="status" className="text-14 text-ink-secondary mb-3">Searching customers…</p>}
               {customerSearchStatus === "error" && <p role="alert" className="text-14 text-alert-fg mb-3">Customer search failed. Edit your search to try again.</p>}
-              {customerSearchStatus === "done" && customers.length === 0 && leadMatches.length === 0 && <p role="status" className="text-14 text-ink-secondary mb-3">No customers or leads found. Try a first name, last name, or full name.</p>}
+              {customerSearchStatus === "done" && customers.length === 0 && !(canChangeLeadLink && leadMatches.length > 0) && <p role="status" className="text-14 text-ink-secondary mb-3">No customers or leads found. Try a first name, last name, or full name.</p>}
               {customers.length > 0 && (
                 <div className="mb-3 border-hairline border-zinc-300 rounded-xs bg-white max-h-72 overflow-y-auto">
                   {customers.slice(0, 8).map((c) => {
@@ -5300,7 +5312,7 @@ export default function EstimateToolViewV2({
 
                 </div>
               )}
-              {leadMatches.length > 0 && (
+              {canChangeLeadLink && leadMatches.length > 0 && (
                 <div className="mb-3">
                   <p className="text-14 text-ink-secondary mb-1">Leads with no customer record</p>
                   <div className="border-hairline border-zinc-300 rounded-xs bg-white max-h-72 overflow-y-auto">
@@ -5333,9 +5345,11 @@ export default function EstimateToolViewV2({
                     <span className="inline-block w-1.5 h-1.5 rounded-full bg-zinc-900 mr-1.5 align-middle" />
                     Linked to lead: <strong>{linkedLead.name}</strong>
                   </span>
-                  <button data-ui-text-action type="button" onClick={unlinkLead} className="text-14 underline cursor-pointer">
-                    Remove link
-                  </button>
+                  {canChangeLeadLink && (
+                    <button data-ui-text-action type="button" onClick={unlinkLead} className="text-14 underline cursor-pointer">
+                      Remove link
+                    </button>
+                  )}
                 </div>
               )}
               {existingCustomerMatch && (
