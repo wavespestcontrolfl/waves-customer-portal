@@ -1968,7 +1968,9 @@ async function raiseDeliveryAlerts(alerts) {
     try {
       await db.transaction(async (fence) => {
         await lockCustomerComms(fence, a.customerId);
-        if (await stillUndelivered(fence, a.noticeId)) await raiseDeliveryAlert(a);
+        // ...and written ON the fence transaction (the helpers' own `trx` option): no second
+        // pooled connection is taken while this one is held.
+        if (await stillUndelivered(fence, a.noticeId)) await raiseDeliveryAlert(a, fence);
       });
     } catch (err) {
       logger.warn(`[rate-review-comms] delivery alert failed for notice ${a.noticeId}: ${err.message}`);
@@ -1976,7 +1978,7 @@ async function raiseDeliveryAlerts(alerts) {
   }
 }
 
-async function raiseDeliveryAlert(a) {
+async function raiseDeliveryAlert(a, trx) {
   const { raiseAdminAlert, composeAdminAlert } = require('./admin-alert-compose');
   const spec = {
     area: 'Billing',
@@ -1990,7 +1992,7 @@ async function raiseDeliveryAlert(a) {
     doneWhen: 'rate_review_letter_delivered',
     who: 'person',
   };
-  const opts = { dedupeKey: `rate-review-delivery-revoked:${a.noticeId}:${a.event}`, refreshOnDedupe: true, metadata: { noticeId: a.noticeId, rateReviewRowId: a.rowId, familyKey: a.familyKey, channel: a.channel, event: a.event } };
+  const opts = { trx, dedupeKey: `rate-review-delivery-revoked:${a.noticeId}:${a.event}`, refreshOnDedupe: true, metadata: { noticeId: a.noticeId, rateReviewRowId: a.rowId, familyKey: a.familyKey, channel: a.channel, event: a.event } };
   if (!require('../config/feature-gates').alertEpisodesLive()) { await raiseAdminAlert('billing', spec, opts); return; }
   const composed = composeAdminAlert(spec);
   await require('./admin-alert-episodes').raiseAdminAlertWithReopen('billing', composed.headline, composed.why, { ...opts, link: composed.link, metadata: { ...opts.metadata, ...composed.metadata } });

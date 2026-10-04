@@ -2109,6 +2109,7 @@ describe('customer surfaces', () => {
         await comms.handleEmailDeliveryEvent(mockDb, message(), bounce()); // now really undelivered
         await comms.raiseDeliveryAlerts([alert]);
         expect(raise).toHaveBeenCalledTimes(1);
+        expect(raise.mock.calls[0][2].trx).toBeTruthy(); // written on the fence transaction: no second pooled connection
       } finally { raise.mockRestore(); live.mockRestore(); }
     });
 
