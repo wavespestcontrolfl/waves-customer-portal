@@ -280,17 +280,20 @@ it('sends visit review state from the field panel and adopts saved decisions ret
   expect(second.reviewedFindings[0]).toEqual({ finding_id: 'F1', keep: true, name: null, tech_note: 'Saved note' });
 });
 
-it('shows a confirmed saved review read-only and preserves an explicitly cleared observation', async () => {
+// Owner 2026-10-04: the technician takes photos, the AI reads them and the
+// report is built. The evidence review is not on the Complete service screen;
+// the default review (every finding kept) is still what Confirm sends.
+it('does not show the evidence review while completing a visit, confirmed or not', async () => {
   visitAssessment = savedVisit();
   loadedAssessment = { ...assessment, confirmed_by_tech: true, observations: null };
   render(<CompletionPanel service={service} products={[]} onClose={() => {}} onSubmit={() => {}} />);
   await screen.findByText('Assessment confirmed');
-  const observation = screen.getByLabelText('Observation');
-  expect(observation.value).toBe('');
-  expect(observation.disabled).toBe(true);
-  expect(screen.getByRole('checkbox', { name: 'Keep Possible drought' }).disabled).toBe(true);
-  expect(screen.getByLabelText('Technician detail 1').disabled).toBe(true);
-  expect(screen.getByRole('button', { name: 'Add detail' }).disabled).toBe(true);
+  expect(screen.queryByText('Visit evidence review')).toBeNull();
+  expect(screen.queryByText('Photo quality')).toBeNull();
+  expect(screen.queryByText('Photo findings')).toBeNull();
+  expect(screen.queryByLabelText('Observation')).toBeNull();
+  expect(screen.queryByRole('checkbox', { name: /^Keep / })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Add detail' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'Confirm assessment' })).toBeNull();
 });
 

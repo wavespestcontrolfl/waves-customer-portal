@@ -1,8 +1,8 @@
 // client/src/components/lawn/LawnAssessmentCompletionBlock.jsx
 //
 // The lawn photo, analyze and confirm step of a lawn completion: the shot list
-// (or the three legacy slots), Analyze lawn, the four scores, the evidence
-// review (LawnVisitReview) and Confirm assessment, with the optional mowing
+// (or the three legacy slots), Analyze lawn, the four scores and Confirm
+// assessment (the evidence review is not shown here), with the optional mowing
 // height reading. Moved out of pages/admin/SchedulePage.jsx unchanged so the
 // full completion form and the lawn Fast Complete sheet share ONE
 // implementation. Two differences from the code as it stood in SchedulePage:
@@ -11,7 +11,7 @@
 // nothing smaller on a new file).
 import React, { useEffect, useRef, useState } from "react";
 import lawnScores from '@lawn-scores';
-import LawnVisitReview, { createVisitReview, visitReviewPayload } from "./LawnVisitReview";
+import { createVisitReview, visitReviewPayload } from "./LawnVisitReview";
 import { SHOTS as LAWN_SHOTS, SHOT_CAP as LAWN_SHOT_CAP, addPhotos as addLawnPhotos, assignShotZone, describeAddResult, planFileReads, shotIsFull, shotListHint } from "../../lib/lawn-photo-shots";
 
 // The admin palette values the block uses (same values as SchedulePage's D).
@@ -762,12 +762,12 @@ export default function LawnAssessmentCompletionBlock({
               );
             })}
           </div>
-          <LawnVisitReview
-            visitAssessment={result.visitAssessment}
-            value={visitReview}
-            onChange={setVisitReview}
-            disabled={disabled || confirming || analyzing || confirmed}
-          />
+          {/* The evidence review (photo quality, observation, photo findings,
+              technician details) is not shown while completing a visit (owner
+              2026-10-04: the technician takes photos, the AI reads them, the
+              report is built). Confirm still sends the default review, which
+              keeps every finding, so the report and tip ranking are unchanged.
+              The office can still edit a review on the Lawn assessment page. */}
           <div style={{ display: "flex", gap: 8 }}>
             {confirmed ? (
               <div
