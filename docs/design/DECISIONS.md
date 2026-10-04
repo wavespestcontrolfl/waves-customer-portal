@@ -3202,3 +3202,15 @@ visits and reopened a completed pest visit in the recap editor from Project
 Report; the workspace offers no report for a completed visit (its existing
 rule), so that edit is no longer on the Today page. Existing rows in
 `user_feature_flags` for the key are inert.
+
+## 2026-10-04 — The last navy field pieces take the Waves Admin look
+
+Owner 2026-10-04 ("slice 3", "ok go"): the timecard sign-off card, the Quick
+Move sheet and the Project Report service picker (all in `TechHomePage.jsx`)
+move from the tech-portal navy palette to the admin one: white surface,
+hairline borders, 4px/6px radii, weight 500, 14px text, one ink primary
+button, amber for overtime and a 50%+ rain chance, red only for an error.
+The `--tfx-*` palettes in the visit brief, visual notes and the three tool
+pages keep their tokens but fall back to the same light values (the page
+that needed the navy fallbacks was deleted). Visual only: same data, same
+actions.
