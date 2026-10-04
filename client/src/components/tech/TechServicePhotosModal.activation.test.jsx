@@ -177,3 +177,37 @@ it('uses receipt-aware recovery notices and close protection', async () => {
   );
   expect(close).toHaveBeenCalledTimes(2);
 });
+
+it.each([
+  ['reconciliation_handed_off', 'Dismiss saved notice'],
+  ['upload_failed', 'Discard saved photo'],
+])('clears restored metadata only after successful %s dismissal', async (stage, buttonName) => {
+  const discard = vi.fn().mockResolvedValue(false);
+  recovery.value = controllerValue({
+    pendingPhoto: {
+      serviceId: 'visit-a', file: new File(['old'], 'old.jpg'),
+      photoType: 'issue', caption: 'Old east wall damage', stage,
+    },
+    deviceSaveState: 'saved', restoredPending: true, discard,
+  });
+  render(<TechServicePhotosModal serviceId="visit-a" onClose={vi.fn()} />);
+  const caption = await screen.findByDisplayValue('Old east wall damage');
+  const dismiss = screen.getByRole('button', { name: buttonName });
+  await act(async () => fireEvent.click(dismiss));
+  expect(caption).toHaveValue('Old east wall damage');
+  expect(screen.getByRole('button', { name: 'issue', exact: true })).toHaveAttribute('aria-pressed', 'true');
+
+  const selectPhoto = vi.fn();
+  discard.mockImplementationOnce(async () => {
+    recovery.value = controllerValue({ selectPhoto });
+    return true;
+  });
+  await act(async () => fireEvent.click(dismiss));
+  expect(caption).toHaveValue('');
+  expect(screen.getByRole('button', { name: 'after', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  const input = screen.getByLabelText('Choose service photo');
+  await waitFor(() => expect(input).toBeEnabled());
+  const file = new File(['new'], 'new.jpg');
+  fireEvent.change(input, { target: { files: [file] } });
+  expect(selectPhoto).toHaveBeenCalledWith(file, { photoType: 'after', caption: '' });
+});

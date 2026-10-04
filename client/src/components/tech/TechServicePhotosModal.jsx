@@ -265,7 +265,13 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
             restored={restoredPending}
             discarding={discarding}
             onRetry={retry}
-            onDiscard={discard}
+            onDiscard={async () => {
+              if (await discard()) {
+                setCaption('');
+                setPhotoType('after');
+                setStatusMsg('');
+              }
+            }}
           />
           {errorMsg && <ActionFeedback error className="tech-visit-feedback">{errorMsg}</ActionFeedback>}
           {statusMsg && !errorMsg && <p role="status" className="tech-visit-muted">{statusMsg}</p>}
