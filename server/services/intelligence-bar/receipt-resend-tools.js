@@ -33,7 +33,8 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { UUID_RE } = require('./task-context');
 const { etDateString, formatETTime } = require('../../utils/datetime-et');
-const { receiptRecipients, receiptRecipientsKey, maskEmail, maskPhone } = require('./closeout-repair-tools');
+const { invoiceAmountDue } = require('../invoice-helpers');
+const { receiptRecipients, receiptRecipientsKey, normalizeReceiptEmail, maskEmail, maskPhone } = require('./closeout-repair-tools');
 const { sendInvoiceReceipt } = require('../invoice-receipt-resend');
 const { issuedCloseoutTarget } = require('../invoice-issued-closeout');
 const { expectedEmailSkip } = require('../receipt-delivery-queue');
@@ -155,19 +156,20 @@ function approvedVersion({ invoice, via, who, memo, closeout, sentAt }) {
   };
 }
 
-// The preview, or the plain refusal.
-async function buildPlan(input, { ownClaimToken = null } = {}) {
+// The preview with the resolved reach it was built from: { plan, who, via }. `plan` is the preview, or
+// the plain refusal (an `error` object) with no `who`.
+async function derivePlan(input, { ownClaimToken = null } = {}) {
   const eligible = await checkEligibility(input, ownClaimToken);
-  if (eligible.error) return eligible;
+  if (eligible.error) return { plan: eligible };
   const { via, memo, who } = eligible;
   const { invoice } = who;
   const probe = await probeCloseout(invoice);
-  if (probe.error) return probe.error;
+  if (probe.error) return { plan: probe.error };
   const { closeout } = probe;
   const sentAt = invoice.receipt_sent_at ? new Date(invoice.receipt_sent_at) : null;
   const queuedJob = await db('receipt_delivery_jobs').where({ invoice_id: invoice.id }).whereIn('status', ['queued', 'retry_scheduled']).first('id');
   const customer = await db('customers').where({ id: invoice.customer_id }).first('first_name', 'last_name');
-  return {
+  const plan = {
     preview: true,
     invoice_id: invoice.id,
     invoice_number: who.invoiceNumber,
@@ -184,6 +186,35 @@ async function buildPlan(input, { ownClaimToken = null } = {}) {
     ...optionalCardLines({ memo, queuedJob, closeout }),
     _version: approvedVersion({ invoice, via, who, memo, closeout, sentAt }),
     note: 'PREVIEW ONLY — nothing was sent. Confirm sends exactly this; if anything changed it refuses.',
+  };
+  return { plan, who, via };
+}
+
+// The preview, or the plain refusal.
+async function buildPlan(input, opts) {
+  return (await derivePlan(input, opts)).plan;
+}
+
+// The facts an approved send may hand a provider, compared in memory at the provider boundary (no database
+// read): what the senders report ({ channel, to, amount }) against the resolved reach this plan was built from.
+// The comparison reuses receiptRecipientsKey — the same function that produced the approved recipients_key —
+// with the sender's own value swapped in, so normalization cannot drift from the card's. App delivery
+// resolves its devices inside the pipeline, so the plan can only know that App was part of the approved reach.
+function approvedMatcher({ who, via }) {
+  const sameAmount = (amount, stated = who.amount) => Number(amount).toFixed(2) === Number(stated).toFixed(2);
+  // The email states the invoice's amount due; the text states the receipt amount (net of a recorded refund).
+  // Each leg is held to the figure its own message states, as read when the card was built.
+  const emailStated = who.invoice ? invoiceAmountDue(who.invoice) : who.amount;
+  const sameReach = (swap) => receiptRecipientsKey({ email: who.email, phone: who.phone, app: who.app, ...swap }) === receiptRecipientsKey(who);
+  return (facts) => {
+    if (!facts) return false;
+    if (!sameAmount(facts.amount, facts.channel === 'email' ? emailStated : who.amount)) return false;
+    switch (facts.channel) {
+      case 'email': return via !== 'sms' && Boolean(who.email) && sameReach({ email: normalizeReceiptEmail(facts.to) });
+      case 'sms': return via !== 'email' && !who.payerBilled && Boolean(who.phone) && sameReach({ phone: facts.to });
+      case 'app': return via !== 'email' && !who.payerBilled && who.app === true;
+      default: return false;
+    }
   };
 }
 
@@ -232,9 +263,15 @@ const LOCK_LOST_STEP = {
   before_text: 'before the text',
   before_stamp: 'before the sent-time stamp',
 };
-function lockNote(lockLost, stampWritten) {
+// The stamp sentence comes from the writer's own report (derived after the claim settled): not recorded,
+// or recorded by the queue settlement because the send's own stamp had been skipped.
+function stampSentence(stampWritten, stampBy) {
+  if (stampWritten === false) return ' The receipt went out but its sent-time stamp was not recorded.';
+  return stampBy === 'settlement' ? ' The sent-time stamp was recorded when the automatic receipt job was settled.' : '';
+}
+function lockNote(lockLost, stampWritten, stampBy) {
   if (!lockLost) return null;
-  return `The send lock was lost partway through (${LOCK_LOST_STEP[lockLost] || lockLost}), so the steps after it were not started — a step shown as not sent with "send lock lost" never ran.${stampWritten === false ? ' The receipt went out but its sent-time stamp was not recorded.' : ''}`;
+  return `The send lock was lost partway through (${LOCK_LOST_STEP[lockLost] || lockLost}), so the steps after it were not started — a step shown as not sent with "send lock lost" never ran.${stampSentence(stampWritten, stampBy)}`;
 }
 
 // Classify the writer's per-leg report into the tool's own leg statuses.
@@ -285,15 +322,16 @@ function outcomeEnvelope({ delivered, anyUnknown, clean, closeoutOnly }) {
 async function verifiedPlan(input) {
   const pinned = input._verified_receipt_version;
   if (!pinned) return { refusal: { error: 'Use the confirmation card to approve this change.' } };
-  const plan = await buildPlan(input);
+  const derived = await derivePlan(input);
+  const { plan } = derived;
   if (plan.error) return { refusal: { error: `Nothing was sent: ${plan.error}`, preview_changed: true } };
   if (JSON.stringify(plan._version) !== JSON.stringify(pinned)) {
     return { refusal: { error: 'What this receipt would do changed after the card was shown — nothing was sent. Ask again for a fresh confirmation card.', preview_changed: true } };
   }
-  return { plan, pinned };
+  return { plan, pinned, matches: approvedMatcher(derived) };
 }
 
-function callWriter(version, pinned, actionContext) {
+function callWriter(version, pinned, matches, actionContext) {
   return sendInvoiceReceipt(version.invoice_id, {
     memo: version.memo, via: version.via, actorTechnicianId: actionContext?.technicianId || null,
     // An unknown provider outcome parks a claimed automatic job instead of re-queuing it.
@@ -302,9 +340,11 @@ function callWriter(version, pinned, actionContext) {
     sawUnsent: version.receipt_state === 'unsent',
     // The writer's final check: under its claim, ahead of the closeout and both legs, it re-derives
     // this approved version (receipt_sent_at, recipients, amount, linked visit, channels) and refuses
-    // on any difference.
+    // on any difference; and `matches` binds each sender's resolved recipient and amount to the approved
+    // ones at the provider boundary.
     expect: {
       approved: pinned,
+      matches,
       rederive: async ({ ownClaimToken }) => {
         const again = await buildPlan({ invoice_id: version.invoice_id, via: version.via, memo: version.memo }, { ownClaimToken });
         return again.error ? null : again._version;
@@ -316,9 +356,9 @@ function callWriter(version, pinned, actionContext) {
 async function commit(input, actionContext) {
   const verified = await verifiedPlan(input);
   if (verified.refusal) return verified.refusal;
-  const { plan, pinned } = verified;
+  const { plan, pinned, matches } = verified;
   const version = plan._version;
-  const { status, body, closeout, delivery, queue, lockLost, stampWritten } = await callWriter(version, pinned, actionContext);
+  const { status, body, closeout, delivery, queue, lockLost, stampWritten, stampBy } = await callWriter(version, pinned, matches, actionContext);
   if (status === 409) return { error: `Nothing was sent: ${body.error}`, code: body.code, preview_changed: true };
   if (status !== 200) return { error: `Nothing was sent: ${body.error}`, code: 'resend_blocked' };
 
@@ -336,8 +376,8 @@ async function commit(input, actionContext) {
     text,
     ...(visitCloseout ? { visit_closeout: visitCloseout } : {}),
     ...(queue ? { automatic_receipt: queue } : {}),
-    ...(lockLost ? { send_lock_lost: lockLost, ...(stampWritten === false ? { receipt_stamp_written: false } : {}) } : {}),
-    note: [headline(verdict), lockNote(lockLost, stampWritten), queueNote(queue, { allDelivered: delivered && clean })].filter(Boolean).join(' '),
+    ...(lockLost ? { send_lock_lost: lockLost, ...(stampWritten === false ? { receipt_stamp_written: false } : {}), ...(stampBy === 'settlement' ? { receipt_stamp_by: 'settlement' } : {}) } : {}),
+    note: [headline(verdict), lockNote(lockLost, stampWritten, stampBy), queueNote(queue, { allDelivered: delivered && clean })].filter(Boolean).join(' '),
   };
 }
 
@@ -365,4 +405,4 @@ async function executeReceiptResendTool(toolName, input = {}, actionContext = {}
   }
 }
 
-module.exports = { RECEIPT_RESEND_TOOLS, executeReceiptResendTool };
+module.exports = { RECEIPT_RESEND_TOOLS, executeReceiptResendTool, approvedMatcher };

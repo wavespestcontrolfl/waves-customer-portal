@@ -432,3 +432,100 @@ describe('the provider-handoff guard: lock ownership is checked again where the 
     expect(rederive).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('the provider-handoff guard binds the approved recipient and amount (expect.matches), reading memory only', () => {
+  afterEach(() => { Object.assign(mockLock, { busy: false, reason: 'busy', lostAfter: Infinity }); });
+  const approved = { recipients_key: 'rk', amount: '129.00', receipt_state: 'unsent' };
+  const rederive = async () => ({ ...approved });
+  const mixed = () => {
+    sendReceiptEmail.mockImplementation(async (_id, opts) => (
+      (await opts.beforeProviderHandoff({ channel: 'email', to: 'pat@example.com', amount: '129.00' })) === true
+        ? { ok: true } : { ok: false, code: 'receipt_handoff_aborted' }));
+    InvoiceService.sendReceipt.mockImplementation(async (_id, opts) => {
+      if ((await opts.beforeProviderHandoff({ channel: 'sms', to: '9415550100', amount: '129.00' })) === true) return { sent: true };
+      throw Object.assign(new Error('receipt SMS blocked: PRE_PROVIDER_CHECK_FAILED'), { providerOutcome: { deliveryOutcome: 'not_sent', blocked: true } });
+    });
+  };
+
+  test('the sender\'s own facts reach matches; true on both legs sends both', async () => {
+    mixed();
+    const matches = jest.fn(() => true);
+    const out = await sendInvoiceReceipt(ID, { via: 'both', expect: { approved, rederive, matches } });
+    expect(matches.mock.calls.map(([f]) => f)).toEqual([
+      { channel: 'email', to: 'pat@example.com', amount: '129.00' },
+      { channel: 'sms', to: '9415550100', amount: '129.00' },
+    ]);
+    expect(out.delivery).toEqual({ email: 'sent', sms: 'sent' });
+  });
+
+  test('a recipient or amount that differs at the handoff is a definite not_sent with the drift reason, per leg', async () => {
+    mixed();
+    const out = await sendInvoiceReceipt(ID, { via: 'both', expect: { approved, rederive, matches: (f) => f.channel !== 'email' } });
+    expect(out.delivery).toEqual({ email: 'not_sent', sms: 'sent' });
+    expect(out.body.email).toEqual({ ok: false, error: 'recipient or amount changed after approval' });
+    const out2 = await sendInvoiceReceipt(ID, { via: 'both', expect: { approved, rederive, matches: () => false } });
+    expect(out2.delivery).toEqual({ email: 'not_sent', sms: 'not_sent' });
+    expect(out2.body.sms).toEqual({ ok: false, error: 'recipient or amount changed after approval' });
+  });
+
+  test('a sender that gives no facts is refused (fail closed), and a matches that throws is not a send', async () => {
+    sendReceiptEmail.mockImplementation(async (_id, opts) => (
+      (await opts.beforeProviderHandoff()) === true ? { ok: true } : { ok: false, code: 'receipt_handoff_aborted' }));
+    const out = await sendInvoiceReceipt(ID, { via: 'email', expect: { approved, rederive, matches: (f) => f.channel === 'email' } });
+    expect(out.delivery.email).toBe('not_sent');
+  });
+
+  test('a drift veto after one App device was accepted stays sent (a guard refusal never overrides delivery evidence)', async () => {
+    InvoiceService.sendReceipt.mockImplementationOnce(async (_id, opts) => {
+      expect(await opts.beforeProviderHandoff({ channel: 'app', to: null, amount: '129.00' })).toBe(true);
+      expect(await opts.beforeProviderHandoff({ channel: 'app', to: null, amount: '130.00' })).toBe(false);
+      return { sent: true };
+    });
+    const matches = (f) => f.amount === '129.00';
+    const out = await sendInvoiceReceipt(ID, { via: 'sms', expect: { approved, rederive, matches } });
+    expect(out.delivery.sms).toBe('sent');
+  });
+
+  test('without expect (the route) the guard is the lock check only: any facts proceed', async () => {
+    mixed();
+    const out = await sendInvoiceReceipt(ID, { via: 'both' });
+    expect(out.delivery).toEqual({ email: 'sent', sms: 'sent' });
+  });
+});
+
+describe('the sent-time stamp is reported by who wrote it', () => {
+  beforeEach(() => { // earlier tests install senders that ask the guard (each ask is an ownership check): back to the plain mocks
+    sendReceiptEmail.mockReset().mockResolvedValue({ ok: true });
+    InvoiceService.sendReceipt.mockReset().mockResolvedValue({ sent: true });
+  });
+  afterEach(() => { Object.assign(mockLock, { busy: false, reason: 'busy', lostAfter: Infinity }); });
+  const lockLostBeforeStamp = () => { mockLock.lostAfter = 4; }; // the first four ownership checks pass; the stamp check fails
+
+  test('the send wrote it: stampBy send', async () => {
+    const out = await sendInvoiceReceipt(ID, { via: 'both' });
+    expect(out).toMatchObject({ stampWritten: true, stampBy: 'send' });
+  });
+
+  test('stamp skipped, but the claimed job\'s release stamped the invoice: stampBy settlement, written true', async () => {
+    releaseOperatorReceiptClaim.mockImplementationOnce(async (_claim, evidence) => { evidence.report.stamped = true; return 'completed'; });
+    lockLostBeforeStamp();
+    const out = await sendInvoiceReceipt(ID, { via: 'both' });
+    expect(out.lockLost).toBe('before_stamp');
+    expect(out).toMatchObject({ stampWritten: true, stampBy: 'settlement' });
+  });
+
+  test('stamp skipped and nothing else stamped it: not written', async () => {
+    lockLostBeforeStamp();
+    const out = await sendInvoiceReceipt(ID, { via: 'both' });
+    expect(out.lockLost).toBe('before_stamp');
+    expect(out).toMatchObject({ stampWritten: false, stampBy: null });
+  });
+
+  test('no claimed job (nothing to release): a skipped stamp stays unwritten', async () => {
+    claimReceiptJobForOperatorSend.mockResolvedValueOnce({ id: null });
+    lockLostBeforeStamp();
+    const out = await sendInvoiceReceipt(ID, { via: 'both' });
+    expect(out.lockLost).toBe('before_stamp');
+    expect(out).toMatchObject({ stampWritten: false, stampBy: null });
+  });
+});

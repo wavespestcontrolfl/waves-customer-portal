@@ -95,6 +95,7 @@ function newSend(id, invoice, { memo, via, actorTechnicianId, sawUnsent, holdUnk
     queue: 'none',
     lockLost: null, // the first step that found the send lock's session gone
     stampWritten: null,
+    stampBy: null, // 'send' (stampReceipt) or 'settlement' (the claim release's own stamp)
     delivery: { email: 'not_requested', sms: 'not_requested' },
   };
 }
@@ -158,16 +159,25 @@ async function legBlockedBy(s, claim, stillHeld, step) {
   return null;
 }
 
-// The provider-handoff guard: lock ownership, read by the sender at the point just before the provider
-// request (a long pre-dispatch step — recipient and payment reads, short link, PDF — can outlive the
-// lock's lease). It reads memory only: senders call it while holding their own pooled transaction
-// (App delivery holds one per notification), so a database read here could exhaust a small pool. The
-// approval re-check stays in legBlockedBy, immediately before the sender. `abortedBy` records why.
-function handoffGuard(stillHeld, step) {
-  const guard = async () => {
-    const held = stillHeld(step);
-    if (!held) guard.abortedBy = 'send lock lost';
-    return held;
+// The provider-handoff guard, run by the sender at the point just before the provider request (a long
+// pre-dispatch step — recipient and payment reads, short link, PDF — can outlive the lock's lease and let
+// a contact or payment edit land). It reads MEMORY only: senders call it while holding their own pooled
+// transaction (App delivery holds one per notification), so a database read here could exhaust a small
+// pool. It checks lock ownership, then binds what the sender is about to deliver — the facts it reports,
+// { channel, to, amount } — to the approved recipient and amount (`expect.matches`, supplied by the tool;
+// absent = ownership only, as for the Invoices route). The database re-derivation stays in legBlockedBy,
+// immediately before the sender. `abortedBy` records why.
+function handoffGuard(s, stillHeld, step) {
+  const guard = async (facts) => {
+    if (!stillHeld(step)) {
+      guard.abortedBy = 'send lock lost';
+      return false;
+    }
+    if (s.expect?.matches && !s.expect.matches(facts)) {
+      guard.abortedBy = LEG_DRIFT;
+      return false;
+    }
+    return true;
   };
   guard.abortedBy = null;
   return guard;
@@ -182,7 +192,7 @@ async function runEmailLeg(s, claim, stillHeld) {
     return;
   }
   const { sendReceiptEmail } = require('./invoice-email');
-  const guard = handoffGuard(stillHeld, 'before_email');
+  const guard = handoffGuard(s, stillHeld, 'before_email');
   s.emailResult = await sendReceiptEmail(s.id, { memo: s.memo, beforeProviderHandoff: guard }).catch((err) => ({ ok: false, error: err.message }));
   s.delivery.email = emailDelivery(s.emailResult);
   // Vetoed at the provider boundary: the guard's own reason, only when the sender confirms a
@@ -200,7 +210,7 @@ async function runTextLeg(s, claim, stillHeld) {
     return;
   }
   const InvoiceService = require('./invoice');
-  const guard = handoffGuard(stillHeld, 'before_text');
+  const guard = handoffGuard(s, stillHeld, 'before_text');
   // Manual operator resend — pass force:true to override the auto-send idempotency guard
   // (otherwise re-clicking SEND RECEIPT would no-op for invoices already auto-receipted by the
   // Stripe webhook). recordActivity:false because the activity_log row is written once, below,
@@ -235,6 +245,7 @@ async function stampReceipt(s, stillHeld) {
   }
   await db('invoices').where({ id: s.id }).update({ receipt_sent_at: db.fn.now(), receipt_memo: s.memo || null });
   s.stampWritten = true;
+  s.stampBy = 'send';
 }
 
 // Deliver: closeout, then the requested legs, then the stamp.
@@ -250,13 +261,21 @@ async function settleClaim(s, claim) {
   const { releaseOperatorReceiptClaim } = require('./receipt-delivery-queue');
   const holdForReconciliation = s.holdUnknownOutcome && s.emailResult.ok !== true
     && (s.delivery.email === 'unknown' || s.delivery.sms === 'unknown');
+  const report = {};
   s.queue = await releaseOperatorReceiptClaim(claim, {
     emailDelivered: s.emailResult.ok === true,
     smsDelivered: s.smsResult.ok === true,
     smsResult: s.smsResult,
     emailResult: s.emailResult,
+    report,
     ...(holdForReconciliation ? { holdForReconciliation } : {}),
   });
+  // A delivered leg makes the release stamp an unstamped invoice itself (claimed jobs only). When the
+  // send's own stamp was skipped (lock lost), the stamp may still have been recorded here: say which.
+  if (s.stampWritten === false && report.stamped === true) {
+    s.stampWritten = true;
+    s.stampBy = 'settlement';
+  }
 }
 
 // Everything from the claim to its release, under the send lock. Ownership is checked
@@ -332,9 +351,11 @@ async function sendInvoiceReceipt(invoiceId, { memo, via = 'both', actorTechnici
     delivery: s.delivery,
     queue: s.queue,
     // The first step that found the send lock lost (its remaining steps were not started), and whether
-    // the receipt_sent_at stamp was written (false: skipped for the same reason; null: nothing to stamp).
+    // the receipt_sent_at stamp was written — by the send, or by the claim release's own stamp (stampBy) — (false:
+    // not recorded; null: nothing to stamp).
     lockLost: s.lockLost,
     stampWritten: s.stampWritten,
+    stampBy: s.stampBy,
   };
 }
 

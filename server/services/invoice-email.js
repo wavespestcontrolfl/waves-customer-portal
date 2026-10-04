@@ -757,15 +757,27 @@ async function resolveReceiptEmailRecipient(invoice, { billingDeliveryCategory =
   return { ok: true, recipient, customer, authorityInput };
 }
 
+// The caller's last check, fail closed: allowed only when it returns exactly true (a throw refuses). No
+// check passed = allowed.
+async function callerHandoffAllows(beforeProviderHandoff, facts) {
+  if (typeof beforeProviderHandoff !== 'function') return true;
+  try { return (await beforeProviderHandoff(facts)) === true; } catch { return false; }
+}
+
+// What an email send is about to hand the provider: the recipient and the amount it prints (2 decimals).
+function receiptHandoffFacts(recipient, amountDue) {
+  return { channel: 'email', to: recipient.email, amount: Number.isFinite(amountDue) ? Number(amountDue).toFixed(2) : '0.00' };
+}
+
 // The caller's last check as an email-library provider handoff (see sendReceiptEmail). undefined when there
 // is no check, or on the routed path (the billing email authority owns that boundary).
-function callerReceiptHandoff(beforeProviderHandoff, authorityInput) {
+// `facts` is what this send is about to hand the provider ({ channel: 'email', to, amount }, the recipient and
+// the amount the email prints), passed to the check so the caller can bind them to what it approved.
+function callerReceiptHandoff(beforeProviderHandoff, authorityInput, facts) {
   if (authorityInput || typeof beforeProviderHandoff !== 'function') return undefined;
   return async (dispatch) => {
     await dispatch(undefined, async () => {
-      let proceed = false;
-      try { proceed = (await beforeProviderHandoff()) === true; } catch { proceed = false; }
-      if (!proceed) {
+      if (!(await callerHandoffAllows(beforeProviderHandoff, facts))) {
         const refusal = new Error('Receipt email handoff aborted by the caller');
         refusal.providerBoundaryBlocked = true;
         throw refusal;
@@ -820,6 +832,8 @@ async function sendReceiptEmail(invoiceId, options = {}) {
   const amountDue = refundedAmount > 0
     ? Math.max(0, Number(payment.amount || 0) - refundedAmount)
     : invoiceAmountDue(invoice);
+  // What this send is about to hand the provider, for a caller's handoff check (see sendReceiptEmail).
+  const handoffFacts = receiptHandoffFacts(recipient, amountDue);
 
   const domain = publicPortalUrl();
   const longReceiptUrl = `${domain}/receipt/${invoice.token}`;
@@ -934,7 +948,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
         categories: ['invoice_receipt'],
         attachments: [pdfAttachment(`receipt-${invoice.invoice_number}.pdf`, pdfBuffer)],
         // (undefined = sendTemplate's default; the authority spread below replaces it on the routed path)
-        withProviderHandoff: callerReceiptHandoff(options.beforeProviderHandoff, authorityInput),
+        withProviderHandoff: callerReceiptHandoff(options.beforeProviderHandoff, authorityInput, handoffFacts),
         ...(authorityInput ? {
           withProviderHandoff: (dispatch) => dispatchUnderBillingEmailAuthority({
             input: authorityInput,
@@ -986,10 +1000,8 @@ async function sendReceiptEmail(invoiceId, options = {}) {
 
   // The caller's last check guards this handoff too (same fail-closed rule as
   // callerReceiptHandoff): anything but true is a definite non-send.
-  if (typeof options.beforeProviderHandoff === 'function') {
-    let proceed = false;
-    try { proceed = (await options.beforeProviderHandoff()) === true; } catch { proceed = false; }
-    if (!proceed) return { ok: false, error: 'Receipt email handoff aborted', code: 'receipt_handoff_aborted' };
+  if (!(await callerHandoffAllows(options.beforeProviderHandoff, handoffFacts))) {
+    return { ok: false, error: 'Receipt email handoff aborted', code: 'receipt_handoff_aborted' };
   }
 
   try {

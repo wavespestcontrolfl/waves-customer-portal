@@ -5207,12 +5207,19 @@ async function alertSummaryLinkUndelivered(invoiceId, invoiceNumber, reason) {
 
 // A caller's last check as sendCustomerMessage's provider-boundary hook (preProviderCheck): anything but
 // `true` blocks the send before the provider request — a definite non-send. {} when there is no check.
-function receiptHandoffCheck(beforeProviderHandoff) {
+// The check is handed what this send is about to deliver: { channel: 'sms'|'app'|'email', to, amount } —
+// the phone the text goes to (null for App, whose devices the pipeline resolves) and the amount printed in
+// the body — so the caller can bind them to what it approved, with no database read.
+function receiptHandoffCheck(beforeProviderHandoff, { to = null, amount = null } = {}) {
   if (typeof beforeProviderHandoff !== "function") return {};
+  const LEG_CHANNEL = { push: "app", email: "email" };
   return {
-    preProviderCheck: async () => ((await beforeProviderHandoff()) === true
-      ? { ok: true }
-      : { ok: false, code: "RECEIPT_HANDOFF_ABORTED", reason: "receipt handoff aborted by the caller" }),
+    preProviderCheck: async ({ channel } = {}) => {
+      const leg = LEG_CHANNEL[channel] || "sms";
+      return (await beforeProviderHandoff({ channel: leg, to: leg === "sms" ? to : null, amount })) === true
+        ? { ok: true }
+        : { ok: false, code: "RECEIPT_HANDOFF_ABORTED", reason: "receipt handoff aborted by the caller" };
+    },
   };
 }
 
@@ -9574,7 +9581,7 @@ const InvoiceService = {
       // open. Callers assert it only from verified provenance (the
       // receipt queue's persisted flag; Pay-route enqueues).
       ...(customerInitiated ? { customerInitiated: true } : {}),
-      ...receiptHandoffCheck(beforeProviderHandoff),
+      ...receiptHandoffCheck(beforeProviderHandoff, { to: customer.phone, amount }),
       metadata: {
         original_message_type: "receipt",
         billingDeliveryCategory: "payment_receipt",

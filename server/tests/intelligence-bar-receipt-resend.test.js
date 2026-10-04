@@ -34,7 +34,7 @@ const { resolveReceiptEmailRecipient } = require('../services/invoice-email');
 const { receiptEmailOptOutState } = require('../services/receipt-delivery-queue');
 const { sendInvoiceReceipt } = require('../services/invoice-receipt-resend');
 const { issuedCloseoutTarget } = require('../services/invoice-issued-closeout');
-const { RECEIPT_RESEND_TOOLS, executeReceiptResendTool } = require('../services/intelligence-bar/receipt-resend-tools');
+const { RECEIPT_RESEND_TOOLS, executeReceiptResendTool, approvedMatcher } = require('../services/intelligence-bar/receipt-resend-tools');
 const gates = require('../services/intelligence-bar/write-gates');
 const { executionOutcome } = require('../services/intelligence-bar/outcomes');
 const { buildContract, previewFingerprint } = require('../services/intelligence-bar/authorization-contract');
@@ -44,7 +44,7 @@ const SENT_AT = new Date('2026-10-02T18:14:00Z');
 const CUSTOMER = { id: 'cust-1', first_name: 'Pat', last_name: 'Tester', email: 'pat@example.com', phone: '9415550100' };
 const PAID = {
   id: INV, invoice_number: 'WPC-2026-0900', status: 'paid', receipt_sent_at: null, customer_id: 'cust-1', payer_id: null,
-  paid_at: new Date('2026-10-01T15:00:00Z'),
+  paid_at: new Date('2026-10-01T15:00:00Z'), total: 129,
 };
 
 // Table-keyed fake that honors object `where` filters (the running-job check needs them).
@@ -183,7 +183,7 @@ test('confirmed: sends through the shared writer with the pinned channels, memo 
   // The writer also gets the approved version and a way to re-derive it: its own check, under its claim.
   expect(sendInvoiceReceipt).toHaveBeenCalledWith(INV, {
     memo: 'Thanks for your business', via: 'both', actorTechnicianId: 'admin-1', sawUnsent: true, holdUnknownOutcome: true,
-    expect: { approved: expect.objectContaining({ invoice_id: INV, receipt_state: 'unsent' }), rederive: expect.any(Function) },
+    expect: { approved: expect.objectContaining({ invoice_id: INV, receipt_state: 'unsent' }), rederive: expect.any(Function), matches: expect.any(Function) },
   });
   // No linked visit to close: the card and result say nothing about one.
   expect(result.visit_closeout).toBeUndefined();
@@ -488,6 +488,19 @@ describe('result wording comes only from what the writer reported about the auto
     }
   });
 
+  test('the settlement fallback stamp is reported as recorded (by the job settlement), never as not recorded', async () => {
+    sendInvoiceReceipt.mockResolvedValue({
+      status: 200,
+      body: { ok: true, email: { ok: true }, sms: { ok: false, error: 'send lock lost' } },
+      closeout: null, delivery: { email: 'sent', sms: 'not_sent' }, queue: 'completed', lockLost: 'before_stamp', stampWritten: true, stampBy: 'settlement',
+    });
+    const out = await confirm({});
+    expect(out.receipt_stamp_by).toBe('settlement');
+    expect(out.receipt_stamp_written).not.toBe(false);
+    expect(out.note).toMatch(/stamp was recorded when the automatic receipt job was settled/);
+    expect(out.note).not.toMatch(/was not recorded/);
+  });
+
   test('the writer refusing at its own final check reports changed state and nothing sent', async () => {
     sendInvoiceReceipt.mockResolvedValue({ status: 409, body: { error: 'changed after it was approved', code: 'receipt_approval_changed' }, queue: 'returned_to_queue' });
     const out = await confirm({});
@@ -501,4 +514,72 @@ test('a non-admin actor is refused before anything is read', async () => {
   expect(out).toEqual({ error: 'Receipt re-sends are limited to admin accounts', code: 'permission_denied' });
   expect(db).not.toHaveBeenCalled();
   expect(sendInvoiceReceipt).not.toHaveBeenCalled();
+});
+
+describe('approvedMatcher: what each sender must be about to deliver to match the approved plan (memory only)', () => {
+  const who = { email: 'Pat@Example.com', phone: '9415550100', app: true, payerBilled: false, amount: '129.00' };
+  const m = (over = {}, via = 'both') => approvedMatcher({ who: { ...who, ...over }, via });
+  const email = (to, amount = '129.00') => ({ channel: 'email', to, amount });
+
+  test('email: the address compares after the card\'s own trim and lower-casing; a different address or amount is refused', () => {
+    // The plan holds the already-normalized address (what the card hashed); the sender reports its own spelling.
+    const plan = { email: 'pat@example.com' };
+    expect(m(plan)(email('pat@example.com'))).toBe(true);
+    expect(m(plan)(email('  PAT@Example.com '))).toBe(true);
+    expect(m(plan)(email('other@example.com'))).toBe(false);
+    expect(m(plan)(email('pat@example.com', '130.00'))).toBe(false);
+    expect(m(plan)(email(null))).toBe(false);
+  });
+
+  test('email is held to the invoice amount due the email states, text and App to the receipt amount (net of a refund)', () => {
+    const refunded = { email: 'pat@example.com', amount: '100.00', invoice: { total: 129, subtotal: 129, status: 'paid' } };
+    const plan = m(refunded);
+    expect(plan(email('pat@example.com', '129.00'))).toBe(true);
+    expect(plan(email('pat@example.com', '100.00'))).toBe(false);
+    expect(plan({ channel: 'sms', to: '9415550100', amount: '100.00' })).toBe(true);
+    expect(plan({ channel: 'sms', to: '9415550100', amount: '129.00' })).toBe(false);
+  });
+
+  test('amount: formatting does not matter, value does', () => {
+    const plan = { email: 'pat@example.com' };
+    expect(m(plan)(email('pat@example.com', 129))).toBe(true);
+    expect(m(plan)(email('pat@example.com', '129'))).toBe(true);
+    expect(m(plan)(email('pat@example.com', '129.01'))).toBe(false);
+    expect(m(plan)({ channel: 'email', to: 'pat@example.com' })).toBe(false);
+  });
+
+  test('text: the phone must be the approved one; payer-billed and email-only never text', () => {
+    expect(m()({ channel: 'sms', to: '9415550100', amount: '129.00' })).toBe(true);
+    expect(m()({ channel: 'sms', to: '9415550199', amount: '129.00' })).toBe(false);
+    expect(m()({ channel: 'sms', to: null, amount: '129.00' })).toBe(false);
+    expect(m({ payerBilled: true })({ channel: 'sms', to: '9415550100', amount: '129.00' })).toBe(false);
+    expect(m({}, 'email')({ channel: 'sms', to: '9415550100', amount: '129.00' })).toBe(false);
+  });
+
+  test('app: only when the approved reach included the App, not payer-billed, and not email-only', () => {
+    const app = { channel: 'app', to: null, amount: '129.00' };
+    expect(m()(app)).toBe(true);
+    expect(m({ app: false })(app)).toBe(false);
+    expect(m({ payerBilled: true })(app)).toBe(false);
+    expect(m({}, 'email')(app)).toBe(false);
+    expect(m()({ ...app, amount: '1.00' })).toBe(false);
+  });
+
+  test('email leg when the plan was text-only, an unknown channel, and missing facts all fail closed', () => {
+    expect(m({}, 'sms')(email('pat@example.com'))).toBe(false);
+    expect(m({ email: null })(email('pat@example.com'))).toBe(false);
+    expect(m()({ channel: 'carrier-pigeon', amount: '129.00' })).toBe(false);
+    expect(m()(undefined)).toBe(false);
+    expect(m()(null)).toBe(false);
+  });
+
+  test('the confirmed run hands the writer a matcher built from the approved plan', async () => {
+    sendInvoiceReceipt.mockResolvedValue({ status: 200, body: { ok: true, email: { ok: true }, sms: { ok: true } }, closeout: null, delivery: { email: 'sent', sms: 'sent' }, queue: 'completed', lockLost: null, stampWritten: true, stampBy: 'send' });
+    await confirm({});
+    const { matches } = sendInvoiceReceipt.mock.calls[0][1].expect;
+    expect(matches({ channel: 'email', to: 'pat@example.com', amount: '129.00' })).toBe(true);
+    expect(matches({ channel: 'email', to: 'someone-else@example.com', amount: '129.00' })).toBe(false);
+    expect(matches({ channel: 'sms', to: CUSTOMER.phone, amount: '129.00' })).toBe(true);
+    expect(matches({ channel: 'sms', to: CUSTOMER.phone, amount: '99.00' })).toBe(false);
+  });
 });

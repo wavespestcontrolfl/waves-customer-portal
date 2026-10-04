@@ -576,6 +576,7 @@ async function recordOperatorReceiptDelivered(claim, leg) {
 // holdForReconciliation parks the job as 'failed' (the status the drain and the claim never
 // pick up; closeout status reads it as a failed delivery) for a person to reconcile.
 // Default off: the Invoices route hands the job back as it always did.
+// `report` (optional): an object this fills with `stamped` (see above) beside the returned disposition.
 // Returns what became of the automatic receipt job, for callers that report it
 // (the IB tool states what the queue will actually do from this, never a guess):
 //   'none'                    no job to settle (it was already finished, or never claimed)
@@ -585,14 +586,17 @@ async function recordOperatorReceiptDelivered(claim, leg) {
 //   'held_for_reconciliation' parked as failed; the queue will not send it again
 //   'release_failed'          the release could not be written; stale-claim recovery settles it
 //                             later and may re-queue it
-async function releaseOperatorReceiptClaim(claim, { emailDelivered = false, smsDelivered = false, smsResult = null, emailResult = null, holdForReconciliation = false } = {}) {
+async function releaseOperatorReceiptClaim(claim, { emailDelivered = false, smsDelivered = false, smsResult = null, emailResult = null, holdForReconciliation = false, report = null } = {}) {
   if (!claim?.id) return 'none';
   try {
     // Anything delivered stamps the invoice first (the caller's own stamp may
     // have failed) — before a job is handed back, so its text leg skips. If
     // this write fails too, the claim stays running for recoverStaleLocks.
     if (emailDelivered || smsDelivered) {
-      await db('invoices').where({ id: claim.invoiceId }).whereNull('receipt_sent_at').update({ receipt_sent_at: db.fn.now() });
+      const stamped = await db('invoices').where({ id: claim.invoiceId }).whereNull('receipt_sent_at').update({ receipt_sent_at: db.fn.now() });
+      // `report` (optional, filled in place): whether THIS write stamped receipt_sent_at (it only writes an
+      // unstamped invoice), for a caller that must say honestly whether the stamp was recorded.
+      if (report) report.stamped = stamped > 0;
     }
     return await db.transaction(async (trx) => {
       const mine = () => trx('receipt_delivery_jobs').where({ id: claim.id, status: 'running', locked_by: claim.token });

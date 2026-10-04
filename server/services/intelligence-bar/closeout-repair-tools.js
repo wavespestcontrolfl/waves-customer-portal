@@ -205,9 +205,12 @@ async function receiptInvoiceOrBlocker(invoiceId, knex, { resend = false, ownCla
 // worker could still email someone the card didn't name.
 // resend: the manual send's own resolver call (sendReceiptEmail passes no
 // billing category), so the card names the inbox that send reaches.
+// The one normalization of a receipt recipient address (the key and the card both use it).
+const normalizeReceiptEmail = (address) => String(address).trim().toLowerCase();
+
 async function receiptEmailLeg(invoice, { resend = false } = {}) {
   const resolved = await invoiceEmail().resolveReceiptEmailRecipient(invoice, resend ? {} : { billingDeliveryCategory: 'payment_receipt' });
-  if (resolved.ok) return { email: String(resolved.recipient.email).trim().toLowerCase(), customer: resolved.customer };
+  if (resolved.ok) return { email: normalizeReceiptEmail(resolved.recipient.email), customer: resolved.customer };
   if (!expectedEmailSkip(resolved)) {
     return { blocker: `the receipt email recipient could not be verified (${String(resolved.error || resolved.code || 'unknown').replace(/\.$/, '')})` };
   }
@@ -863,6 +866,7 @@ module.exports = {
   // Shared with the resend_receipt tool (receipt-resend-tools.js).
   receiptRecipients,
   receiptRecipientsKey,
+  normalizeReceiptEmail,
   maskEmail,
   maskPhone,
 };

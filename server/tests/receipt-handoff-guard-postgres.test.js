@@ -49,6 +49,7 @@ postgres('receipt senders: the pre-handoff guard on the real send paths', () => 
     });
   });
   afterEach(async () => {
+    await db('payments').where({ customer_id: customerId }).del().catch(() => {});
     await db('email_messages').where({ recipient_id: customerId }).del().catch(() => {});
     await db('sms_log').where({ customer_id: customerId }).del().catch(() => {});
     await db('invoices').where({ id: invoiceId }).del();
@@ -113,5 +114,89 @@ postgres('receipt senders: the pre-handoff guard on the real send paths', () => 
     expect(mockCreate).toHaveBeenCalledTimes(1);
     expect(await InvoiceService.sendReceipt(invoiceId, { force: true, recordActivity: false, operatorInitiated: true })).toMatchObject({ sent: true });
     expect(mockCreate).toHaveBeenCalledTimes(2);
+  });
+  describe('the approved recipient and amount are bound at the provider boundary (the tool\'s matcher on the real senders)', () => {
+    let approvedMatcher; let receiptRecipients;
+    beforeAll(() => {
+      ({ approvedMatcher } = require('../services/intelligence-bar/receipt-resend-tools'));
+      ({ receiptRecipients } = require('../services/intelligence-bar/closeout-repair-tools'));
+    });
+    // What the card approved: the plan derived from the rows as they are NOW (before any drift).
+    const approve = async (via = 'both') => {
+      const who = await receiptRecipients(invoiceId, db, { resend: true });
+      expect(who.blocker).toBeUndefined();
+      return approvedMatcher({ who, via });
+    };
+    // The writer's guard: the matcher (memory only) behind the same hook the real senders call.
+    const guardFor = (matches) => jest.fn(async (facts) => matches(facts));
+    const sendText = (guard) => InvoiceService.sendReceipt(invoiceId, { force: true, recordActivity: false, operatorInitiated: true, beforeProviderHandoff: guard });
+
+    test('unchanged: both senders pass the matcher and send', async () => {
+      const matches = await approve();
+      const emailGuard = guardFor(matches);
+      expect(await sendReceiptEmail(invoiceId, { beforeProviderHandoff: emailGuard })).toMatchObject({ ok: true });
+      expect(emailGuard.mock.calls[0][0]).toMatchObject({ channel: 'email', to: `${customerId}@example.invalid`, amount: '117.00' });
+      expect(sendgridCalls()).toHaveLength(1);
+      const textGuard = guardFor(matches);
+      expect(await sendText(textGuard)).toMatchObject({ sent: true });
+      expect(textGuard.mock.calls[0][0]).toMatchObject({ channel: 'sms', to: '+19415550142', amount: '117.00' });
+      expect(mockCreate).toHaveBeenCalledTimes(1);
+    });
+
+    test('the customer email changed after approval: no SendGrid request, a definite non-send', async () => {
+      const matches = await approve('email');
+      await db('customers').where({ id: customerId }).update({ email: `changed-${customerId}@example.invalid` });
+      const guard = guardFor(matches);
+      const out = await sendReceiptEmail(invoiceId, { beforeProviderHandoff: guard });
+      expect(guard).toHaveBeenCalledTimes(1);
+      expect(sendgridCalls()).toHaveLength(0);
+      expect(out).toMatchObject({ ok: false, code: 'receipt_handoff_aborted' });
+      expect(out.deliveryOutcome).not.toBe('uncertain');
+    });
+
+    test('an email address that differs only by case or spaces still matches', async () => {
+      const matches = await approve('email');
+      await db('customers').where({ id: customerId }).update({ email: `  ${customerId.toUpperCase()}@Example.Invalid ` });
+      expect(await sendReceiptEmail(invoiceId, { beforeProviderHandoff: guardFor(matches) })).toMatchObject({ ok: true });
+      expect(sendgridCalls()).toHaveLength(1);
+    });
+
+    test('the customer phone changed after approval: no Twilio request, a definite not_sent', async () => {
+      const matches = await approve('sms');
+      await db('customers').where({ id: customerId }).update({ phone: '+19415550199' });
+      const guard = guardFor(matches);
+      let thrown;
+      try { await sendText(guard); } catch (err) { thrown = err; }
+      expect(guard).toHaveBeenCalledTimes(1);
+      expect(mockCreate).not.toHaveBeenCalled();
+      expect(thrown.providerOutcome).toMatchObject({ deliveryOutcome: 'not_sent' });
+    });
+
+    test('the invoice amount changed after approval: the email is not sent', async () => {
+      const matches = await approve('email');
+      await db('invoices').where({ id: invoiceId }).update({ total: 118, subtotal: 118 });
+      const out = await sendReceiptEmail(invoiceId, { beforeProviderHandoff: guardFor(matches) });
+      expect(sendgridCalls()).toHaveLength(0);
+      expect(out).toMatchObject({ ok: false, code: 'receipt_handoff_aborted' });
+    });
+
+    test('a refund recorded after approval changes the text amount: the text is not sent', async () => {
+      const matches = await approve('sms');
+      await db('payments').insert({
+        id: randomUUID(), customer_id: customerId, amount: 117, status: 'paid', refund_amount: 17, payment_date: new Date(),
+        metadata: JSON.stringify({ invoice_id: invoiceId }),
+      });
+      let thrown;
+      try { await sendText(guardFor(matches)); } catch (err) { thrown = err; }
+      expect(mockCreate).not.toHaveBeenCalled();
+      expect(thrown.providerOutcome).toMatchObject({ deliveryOutcome: 'not_sent' });
+      await db('payments').where({ customer_id: customerId }).del();
+    });
+
+    test('the Invoices route passes no guard: both senders are unchanged whatever the rows say', async () => {
+      await db('customers').where({ id: customerId }).update({ email: `changed-${customerId}@example.invalid`, phone: '+19415550199' });
+      expect(await sendReceiptEmail(invoiceId, {})).toMatchObject({ ok: true });
+      expect(await sendText(undefined)).toMatchObject({ sent: true });
+    });
   });
 });

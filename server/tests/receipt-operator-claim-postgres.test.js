@@ -357,6 +357,29 @@ postgres('operator receipt claim on PostgreSQL', () => {
       expect(await releaseOperatorReceiptClaim(await claimReceiptJobForOperatorSend(held), { emailDelivered: false, holdForReconciliation: true })).toBe('held_for_reconciliation');
     });
 
+    test('report.stamped says whether THIS release wrote the invoice stamp (the send\'s own stamp may have been skipped)', async () => {
+      // Delivered email, invoice unstamped: the release stamps it and says so.
+      const unstamped = await seedJob();
+      await mockPg('invoices').insert({ id: unstamped, receipt_sent_at: null });
+      const report = {};
+      expect(await releaseOperatorReceiptClaim(await claimReceiptJobForOperatorSend(unstamped), { emailDelivered: true, report })).toBe('completed');
+      expect(report.stamped).toBe(true);
+      expect((await mockPg('invoices').where({ id: unstamped }).first()).receipt_sent_at).toBeInstanceOf(Date);
+      // Already stamped (by the send itself): the release wrote nothing, so it does not claim the stamp.
+      const stamped = await seedJob();
+      await mockPg('invoices').insert({ id: stamped, receipt_sent_at: new Date('2026-10-02T18:14:00Z') });
+      const report2 = {};
+      await releaseOperatorReceiptClaim(await claimReceiptJobForOperatorSend(stamped), { emailDelivered: true, report: report2 });
+      expect(report2.stamped).toBe(false);
+      // Nothing delivered: no stamp attempted, nothing reported as stamped.
+      const none = await seedJob();
+      await mockPg('invoices').insert({ id: none, receipt_sent_at: null });
+      const report3 = {};
+      await releaseOperatorReceiptClaim(await claimReceiptJobForOperatorSend(none), { emailDelivered: false, report: report3 });
+      expect(report3.stamped).not.toBe(true);
+      expect((await mockPg('invoices').where({ id: none }).first()).receipt_sent_at).toBeNull();
+    });
+
     test('a release that touches no row (the claim was re-owned) is not reported as settled', async () => {
       const invoiceId = await seedJob();
       const claim = await claimReceiptJobForOperatorSend(invoiceId);
