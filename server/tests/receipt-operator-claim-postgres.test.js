@@ -33,6 +33,8 @@ const {
   claimDueReceiptDeliveryJobs,
   enqueueReceiptDelivery,
   recordOperatorReceiptDelivered,
+  effectiveJobStatus,
+  operatorHoldPriorStatus,
   _internals: { recoverStaleLocks },
 } = require('../services/receipt-delivery-queue');
 
@@ -149,13 +151,87 @@ postgres('operator receipt claim on PostgreSQL', () => {
     expect(await job(invoiceId)).toMatchObject({ status: 'retry_scheduled', locked_by: null });
   });
 
-  test('a completed or failed job holds no claim and is not touched', async () => {
-    for (const status of ['completed', 'failed']) {
-      const invoiceId = await seedJob({ status });
-      expect(await claimReceiptJobForOperatorSend(invoiceId)).toEqual({ id: null });
-      await releaseOperatorReceiptClaim({ id: null });
-      expect(await job(invoiceId)).toMatchObject({ status, locked_by: null });
-    }
+  test.each(['completed', 'failed'])('a %s job is held too while an operator sends, and put back exactly as it was', async (status) => {
+    const results = { sms_result: { sent: true }, email_result: { ok: true } };
+    const invoiceId = await seedJob({ status, attempts: 2, last_error: status === 'failed' ? 'gave up' : null, completed_at: status === 'completed' ? new Date('2026-09-28T13:00:00Z') : null, sms_result: JSON.stringify(results.sms_result), email_result: JSON.stringify(results.email_result) });
+    const before = await job(invoiceId);
+    const claim = await claimReceiptJobForOperatorSend(invoiceId);
+    expect(claim).toMatchObject({ id: before.id, prior: { status, finished: true } });
+    // Held as running, with the status it had on the token: not work in flight, not queued work.
+    expect(await job(invoiceId)).toMatchObject({ status: 'running', locked_by: claim.token });
+    expect(operatorHoldPriorStatus(claim.token)).toBe(status);
+    expect(effectiveJobStatus(await job(invoiceId))).toBe(status);
+    expect((await claimDueReceiptDeliveryJobs({ limit: 50 })).map((j) => j.invoice_id)).not.toContain(invoiceId);
+    expect(await releaseOperatorReceiptClaim(claim, { emailDelivered: false })).toBe('none');
+    const after = await job(invoiceId);
+    expect(after).toMatchObject({ status, locked_by: null, locked_at: null, attempts: 2, last_error: before.last_error, sms_result: results.sms_result, email_result: results.email_result });
+    expect(after.completed_at?.toISOString()).toBe(before.completed_at?.toISOString());
+    expect(after.next_attempt_at.toISOString()).toBe(before.next_attempt_at.toISOString());
+    expect((await claimDueReceiptDeliveryJobs({ limit: 50 })).map((j) => j.invoice_id)).not.toContain(invoiceId);
+  });
+
+  test.each([['completed'], ['failed'], [null]])('two operator sends racing on a %s job (null = no job): exactly one holds it, the other meets the in-flight refusal, and the state is restored', async (status) => {
+    const invoiceId = status ? await seedJob({ status }) : randomUUID();
+    const [a, b] = await Promise.all([claimReceiptJobForOperatorSend(invoiceId), claimReceiptJobForOperatorSend(invoiceId)]);
+    const holder = [a, b].find((c) => c.id);
+    const refused = [a, b].find((c) => c.inFlight);
+    expect(holder).toBeDefined();
+    expect(refused).toEqual({ inFlight: true, byOperator: true });
+    expect([a, b].filter((c) => c.id)).toHaveLength(1);
+    expect(await releaseOperatorReceiptClaim(holder, { emailDelivered: false })).toBe(status ? 'none' : 'removed');
+    if (status) expect(await job(invoiceId)).toMatchObject({ status, locked_by: null });
+    else expect(await job(invoiceId)).toBeUndefined();
+  });
+
+  test('a failed job whose email this send delivered becomes completed; a completed one keeps its own recorded results', async () => {
+    const failedId = await seedJob({ status: 'failed', last_error: 'gave up' });
+    await releaseOperatorReceiptClaim(await claimReceiptJobForOperatorSend(failedId), { emailDelivered: true, emailResult: { ok: true } });
+    expect(await job(failedId)).toMatchObject({ status: 'completed', last_error: null, email_result: { ok: true } });
+    const completedId = await seedJob({ status: 'completed', email_result: JSON.stringify({ ok: true, original: true }) });
+    await releaseOperatorReceiptClaim(await claimReceiptJobForOperatorSend(completedId), { emailDelivered: true, emailResult: { ok: true, resend: true } });
+    expect(await job(completedId)).toMatchObject({ status: 'completed', email_result: { ok: true, original: true } });
+  });
+
+  test('an enqueue that took over a held operator_send finished row is queued on release, not lost', async () => {
+    const invoiceId = await seedJob({ status: 'completed', source: 'operator_send' });
+    const claim = await claimReceiptJobForOperatorSend(invoiceId);
+    expect(await enqueueReceiptDelivery({ invoiceId, source: 'ib_closeout_repair' })).toMatchObject({ enqueued: true });
+    expect(await releaseOperatorReceiptClaim(claim, { emailDelivered: false })).toBe('returned_to_queue');
+    expect(await job(invoiceId)).toMatchObject({ status: 'queued', source: 'ib_closeout_repair' });
+  });
+
+  test.each(['completed', 'failed'])('a stale hold on a %s job (the process died) is put back as it was — never requeued, never deleted', async (status) => {
+    // operator_send source: the row the "claim-created, delete it" rule would otherwise remove.
+    const invoiceId = await seedJob({ status, source: 'operator_send' });
+    const claim = await claimReceiptJobForOperatorSend(invoiceId);
+    await mockPg('receipt_delivery_jobs').where({ id: claim.id }).update({ locked_at: new Date(Date.now() - 60 * 60 * 1000) });
+    await recoverStaleLocks();
+    expect(await job(invoiceId)).toMatchObject({ status, locked_by: null, locked_at: null });
+    expect((await claimDueReceiptDeliveryJobs({ limit: 50 })).map((j) => j.invoice_id)).not.toContain(invoiceId);
+    // A fresh hold is not stale and is left alone by recovery.
+    const fresh = await claimReceiptJobForOperatorSend(invoiceId);
+    await recoverStaleLocks();
+    expect(await job(invoiceId)).toMatchObject({ status: 'running', locked_by: fresh.token });
+    await releaseOperatorReceiptClaim(fresh, { emailDelivered: false });
+  });
+
+  test('a stale hold whose own email was recorded is closed (the receipt went out)', async () => {
+    const invoiceId = await seedJob({ status: 'failed' });
+    await mockPg('invoices').insert({ id: invoiceId, receipt_sent_at: null });
+    const claim = await claimReceiptJobForOperatorSend(invoiceId);
+    await recordOperatorReceiptDelivered(claim, 'email');
+    await mockPg('receipt_delivery_jobs').where({ id: claim.id }).update({ locked_at: new Date(Date.now() - 60 * 60 * 1000) });
+    await recoverStaleLocks();
+    expect(await job(invoiceId)).toMatchObject({ status: 'completed', locked_by: null });
+    expect((await mockPg('invoices').where({ id: invoiceId }).first()).receipt_sent_at).toBeInstanceOf(Date);
+  });
+
+  test('closeout status reads a held finished job as finished, and a drain-held running job as running', () => {
+    expect(effectiveJobStatus({ status: 'running', locked_by: 'operator:host:1:abc:completed' })).toBe('completed');
+    expect(effectiveJobStatus({ status: 'running', locked_by: 'operator:host:1:abc:failed' })).toBe('failed');
+    expect(effectiveJobStatus({ status: 'running', locked_by: 'operator:host:1:abc' })).toBe('running');
+    expect(effectiveJobStatus({ status: 'running', locked_by: 'host:123' })).toBe('running');
+    expect(effectiveJobStatus({ status: 'retry_scheduled', locked_by: null })).toBe('retry_scheduled');
   });
 
   test('two operator sends racing on one queued job: exactly one claims it, the other is refused', async () => {
@@ -261,8 +337,10 @@ postgres('operator receipt claim on PostgreSQL', () => {
     await recoverStaleLocks();
     expect(await job(invoiceId)).toMatchObject({ status: 'completed' });
     expect(await claimReceiptJobForOperatorSend(invoiceId, { sawUnsent: true })).toEqual({ alreadySent: true });
-    // An operator who saw it already receipted is resending on purpose.
-    expect(await claimReceiptJobForOperatorSend(invoiceId, { sawUnsent: false })).toEqual({ id: null });
+    // An operator who saw it already receipted is resending on purpose (the finished job is held for the send).
+    const resend = await claimReceiptJobForOperatorSend(invoiceId, { sawUnsent: false });
+    expect(resend).toMatchObject({ id: expect.any(String), prior: { status: 'completed', finished: true } });
+    await releaseOperatorReceiptClaim(resend, { emailDelivered: false });
   });
 
   test('the drain completes the job while the claim waits on its lock: the claim re-reads the stamp after locking and refuses', async () => {
@@ -367,7 +445,11 @@ postgres('operator receipt claim on PostgreSQL', () => {
       await releaseOperatorReceiptClaim(claim, { emailDelivered: false, emailResult: { ok: false, error: 'timeout' }, holdForReconciliation: true });
       expect(await job(invoiceId)).toMatchObject({ status: 'failed', locked_by: null, locked_at: null, email_result: { ok: false, error: 'timeout' }, last_error: expect.stringMatching(/held for reconciliation/) });
       expect((await claimDueReceiptDeliveryJobs({ limit: 50 })).map((j) => j.invoice_id)).not.toContain(invoiceId);
-      expect(await claimReceiptJobForOperatorSend(invoiceId)).toEqual({ id: null });
+      // A new send can hold the failed job (and puts it back); the drain never saw it.
+      const next = await claimReceiptJobForOperatorSend(invoiceId);
+      expect(next).toMatchObject({ id: expect.any(String), prior: { status: 'failed', finished: true } });
+      await releaseOperatorReceiptClaim(next, { emailDelivered: false });
+      expect(await job(invoiceId)).toMatchObject({ status: 'failed' });
     });
 
     test('a job another path enqueued during the claim is held too; a row the claim created alone still goes away', async () => {

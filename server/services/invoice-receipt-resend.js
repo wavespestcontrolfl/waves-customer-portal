@@ -74,7 +74,9 @@ async function sendInvoiceReceipt(invoiceId, { memo, via = 'both', actorTechnici
     return {
       status: 409,
       body: {
-        error: 'The automatic receipt for this invoice is being delivered right now — refresh in a minute before resending.',
+        error: claim.byOperator
+          ? 'Another receipt send for this invoice is in progress — refresh in a minute before resending.'
+          : 'The automatic receipt for this invoice is being delivered right now — refresh in a minute before resending.',
         code: 'receipt_delivery_in_flight',
       },
     };

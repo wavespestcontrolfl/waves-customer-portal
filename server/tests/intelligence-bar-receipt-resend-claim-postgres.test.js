@@ -77,6 +77,10 @@ postgres('resend_receipt on real PostgreSQL: the writer\'s final check and the a
     await db('customers').where({ id: customerId }).del().catch(() => {});
   });
 
+  const waitFor = async (predicate) => {
+    for (let i = 0; i < 200 && !predicate(); i += 1) await new Promise((r) => setTimeout(r, 10));
+    expect(predicate()).toBe(true);
+  };
   const job = () => db('receipt_delivery_jobs').where({ invoice_id: invoiceId }).first();
   const invoice = () => db('invoices').where({ id: invoiceId }).first();
   const preview = (input = {}) => executeReceiptResendTool('resend_receipt', { invoice_id: invoiceId, ...input });
@@ -160,6 +164,69 @@ postgres('resend_receipt on real PostgreSQL: the writer\'s final check and the a
       expect(mockSendReceiptEmail).toHaveBeenCalledTimes(1);
       expect(await job()).toMatchObject({ status: 'completed' });
       expect((await invoice()).receipt_sent_at).toBeInstanceOf(Date);
+    });
+  });
+
+  describe.each([['completed'], ['failed'], [null]])('two concurrent confirmations on a %s automatic job (null = no job): exactly one send', (status) => {
+    const finishedResults = { email_result: JSON.stringify({ ok: true }), sms_result: JSON.stringify({ sent: true }) };
+    const seedFinished = async () => {
+      await seed({ stamped: true, job: status });
+      if (status === 'completed') await db('receipt_delivery_jobs').where({ invoice_id: invoiceId }).update({ ...finishedResults, completed_at: new Date('2026-09-28T13:00:00Z') });
+    };
+    // delivered: the email went out (a failed or claim-created job is then completed; a completed one
+    // keeps its own results). Not delivered: the job is exactly as it was (no job stays no job).
+    const settledJob = async ({ delivered = true } = {}) => {
+      if (!status && !delivered) return expect(await job()).toBeUndefined();
+      expect(await job()).toMatchObject({ status: delivered && status !== 'completed' ? 'completed' : (status || 'completed'), locked_by: null, locked_at: null });
+      if (status === 'completed') expect(await job()).toMatchObject({ email_result: { ok: true }, sms_result: { sent: true } });
+    };
+
+    test('the IB tool: one sends, the other is refused and nothing is sent twice', async () => {
+      await seedFinished();
+      const card = await preview();
+      let releaseEmail;
+      mockSendReceiptEmail.mockReset().mockImplementation(() => new Promise((resolve) => { releaseEmail = () => resolve({ ok: true }); }));
+      const first = confirm(card);
+      await waitFor(() => mockSendReceiptEmail.mock.calls.length === 1);
+      // The first send holds the claim and is mid-send; the second confirmation arrives now.
+      const second = await confirm(card);
+      expect(second).toEqual(expect.objectContaining({ preview_changed: true }));
+      expect(second.error).toMatch(/Nothing was sent/);
+      expect(second.error).toMatch(/in progress|being delivered right now|in-flight/i);
+      releaseEmail();
+      expect(await first).toEqual(expect.objectContaining({ success: true }));
+      expect(mockSendReceiptEmail).toHaveBeenCalledTimes(1);
+      expect(mockCreate).toHaveBeenCalledTimes(1);
+      await settledJob();
+    });
+
+    test('simultaneous confirmations (whichever check meets the other first): still exactly one send', async () => {
+      await seedFinished();
+      const card = await preview();
+      const [a, b] = await Promise.all([confirm(card), confirm(card)]);
+      expect([a, b].filter((r) => r.success)).toHaveLength(1);
+      expect([a, b].find((r) => !r.success)).toEqual(expect.objectContaining({ preview_changed: true }));
+      expect(mockSendReceiptEmail).toHaveBeenCalledTimes(1);
+      expect(mockCreate).toHaveBeenCalledTimes(1);
+      await settledJob();
+    });
+
+    test.each([[true], [false]])('the Invoices route\'s writer (no expect), email delivered=%s: the second send gets the in-flight 409 and the job is settled', async (delivered) => {
+      await seedFinished();
+      const { sendInvoiceReceipt } = require('../services/invoice-receipt-resend');
+      let releaseEmail;
+      mockSendReceiptEmail.mockReset().mockImplementation(() => new Promise((resolve) => {
+        releaseEmail = () => resolve(delivered ? { ok: true } : { ok: false, error: 'PDF generation failed' });
+      }));
+      const first = sendInvoiceReceipt(invoiceId, { via: 'email' });
+      await waitFor(() => mockSendReceiptEmail.mock.calls.length === 1);
+      const second = await sendInvoiceReceipt(invoiceId, { via: 'email' });
+      expect(second.status).toBe(409);
+      expect(second.body.code).toBe('receipt_delivery_in_flight');
+      releaseEmail();
+      expect((await first).status).toBe(200);
+      expect(mockSendReceiptEmail).toHaveBeenCalledTimes(1);
+      await settledJob({ delivered });
     });
   });
 

@@ -186,7 +186,7 @@ async function receiptInvoiceOrBlocker(invoiceId, knex, { resend = false, ownCla
     // ownClaimToken: the resend writer's re-check runs while it holds its own claim (a running row).
     const runningJobs = knex('receipt_delivery_jobs').where({ invoice_id: invoiceId, status: 'running' });
     const running = await (ownClaimToken ? runningJobs.whereNot('locked_by', ownClaimToken) : runningJobs).first('id');
-    if (running) return { blocker: 'the automatic receipt for this invoice is being delivered right now — try again in a minute' };
+    if (running) return { blocker: 'a receipt for this invoice is being delivered right now — try again in a minute' };
   } else {
     if (invoice.receipt_sent_at) return { blocker: 'receipt already sent' };
     const job = await knex('receipt_delivery_jobs').where({ invoice_id: invoiceId }).first('id');

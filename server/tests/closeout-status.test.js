@@ -433,6 +433,10 @@ describe('closeout-status: invoice + invoice delivery', () => {
     expect(run({ receiptJob: { id: 'rj', status: 'retry_scheduled', attempts: 2, next_attempt_at: '2026-08-31T16:00:00Z' } })).toMatchObject({ state: 'pending', reason: 'receipt_retry_scheduled' });
     expect(run({ receiptJob: { id: 'rj', status: 'failed', attempts: 5, last_error: 'to bob@example.com' } })).toMatchObject({ state: 'failed', reason: 'receipt_delivery_exhausted', lastError: 'to [email]' });
     expect(run({ receiptJob: { id: 'rj', status: 'completed', sms_result: { sent: true } } })).toMatchObject({ state: 'done', reason: 'paid_receipt_delivered' });
+    // A finished job an operator re-send is holding (running, token ends with its prior status) is not work in flight.
+    expect(run({ receiptJob: { id: 'rj', status: 'running', locked_by: 'operator:host:1:abc:failed', attempts: 5, last_error: 'gave up' } })).toMatchObject({ state: 'failed', reason: 'receipt_delivery_exhausted' });
+    expect(run({ receiptJob: { id: 'rj', status: 'running', locked_by: 'operator:host:1:abc:completed', sms_result: { sent: true } } })).toMatchObject({ state: 'done', reason: 'paid_receipt_delivered' });
+    expect(run({ receiptJob: { id: 'rj', status: 'running', locked_by: 'host:123' } })).toMatchObject({ state: 'pending', reason: 'receipt_running' });
     expect(run({})).toMatchObject({ state: 'pending', reason: 'paid_receipt_not_sent' });
     // Enqueue grace (#3776 follow-up): paid_at inside 5 min of NOW with no job is the webhook's own window, not a gap.
     expect(run({ liveInvoice: { ...paid, paid_at: '2026-08-31T14:58:00Z' } })).toMatchObject({ state: 'pending', reason: 'paid_receipt_pending_enqueue', paidAt: '2026-08-31T14:58:00.000Z' });

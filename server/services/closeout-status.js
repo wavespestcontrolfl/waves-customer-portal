@@ -469,7 +469,7 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
     const receiptProbe = await probe('receipt_delivery_jobs', unavailable, () => knex('receipt_delivery_jobs')
       .where({ invoice_id: effectiveInvoice.id })
       .orderBy('created_at', 'desc')
-      .first('id', 'status', 'attempts', 'max_attempts', 'last_error', 'next_attempt_at', 'sms_result', 'email_result'));
+      .first('id', 'status', 'locked_by', 'attempts', 'max_attempts', 'last_error', 'next_attempt_at', 'sms_result', 'email_result'));
     inputs.receiptJob = receiptProbe.value || null;
     inputs.receiptJobLookupFailed = Boolean(receiptProbe.error);
   }
@@ -1026,7 +1026,8 @@ function deriveCloseoutFacts(inputs) {
       // Paid ≠ receipted: receipt_sent_at is stamped only on confirmed
       // delivery; the queue row says where an unstamped receipt stands.
       const job = inputs.receiptJob || null;
-      const jobStatus = job ? String(job.status || '').toLowerCase() : null;
+      // A finished job an operator re-send is holding reads as finished, never as running work.
+      const jobStatus = job ? require('./receipt-delivery-queue').effectiveJobStatus(job) : null;
       if (receiptSentAt) invoiceDelivery = fact('done', 'paid_receipt_sent', evidence);
       else if (inputs.receiptJobLookupFailed) invoiceDelivery = fact('unknown', 'receipt_job_lookup_failed', evidence);
       else if (jobStatus === 'completed') {
