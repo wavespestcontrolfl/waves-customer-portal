@@ -2082,6 +2082,57 @@ describe('rain-out service', () => {
       }
     });
 
+    // Second technician (GATE_MULTI_TECH_CONFIRM + capacity, dark; owner
+    // 2026-10-03 "Moves"): commit keeps the visit's technician and the
+    // rebooker's probe counts only that route plus unassigned rows, so the
+    // sheet's warning must not name the OTHER technician's stop. Gate off:
+    // every technician's stop warns, byte for byte.
+    describe.each([
+      ['gate + capacity on', true, [[], ['svc-8']]],
+      ['gate off', false, [['svc-9'], ['svc-8']]],
+    ])('same-day overlap advisory, second technician: %s', (_label, gateOn, expected) => {
+      const keys = ['GATE_MULTI_TECH_CONFIRM', 'GATE_SCHEDULING_CAPACITY'];
+      const saved = {};
+      beforeEach(() => {
+        keys.forEach((k) => { saved[k] = process.env[k]; delete process.env[k]; });
+        if (gateOn) { process.env.GATE_MULTI_TECH_CONFIRM = 'true'; process.env.GATE_SCHEDULING_CAPACITY = 'true'; }
+      });
+      afterEach(() => {
+        keys.forEach((k) => { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; });
+      });
+
+      test('another technician\'s stop does not warn; an unassigned one still does', async () => {
+        const { listOccupiedWindows } = require('../services/scheduling/occupancy');
+        jest.useFakeTimers({ now: new Date('2026-06-11T13:00:00Z') });
+        try {
+          SmartRebooker.findRescheduleOptions.mockResolvedValue([]);
+          listOccupiedWindows.mockResolvedValue(occ('2026-06-11', [
+            { id: 'svc-9', customer_id: 'cust-9', technician_id: 'tech-2', status: 'confirmed', service_type: 'Mosquito Treatment',
+              window_start: '11:00:00', window_end: '12:00:00', estimated_duration_minutes: 60, reservation_expires_at: null },
+            { id: 'svc-8', customer_id: 'cust-8', technician_id: null, status: 'confirmed', service_type: 'Mosquito Treatment',
+              window_start: '13:00:00', window_end: '14:00:00', estimated_duration_minutes: 60, reservation_expires_at: null },
+          ]));
+          wireDb({
+            scheduled_services: [
+              chain({ first: jest.fn().mockResolvedValue({ ...SERVICE, technician_id: 'tech-1' }) }),
+              chain({ rows: [] }),
+            ],
+            customers: [chain({ rows: [] })],
+          });
+
+          const options = await RainOut.getOptions('svc-1', { caller: { isAdmin: true } });
+
+          expect(options.ok).toBe(true);
+          expect(options.sameDay.map((o) => o.window.start)).toEqual(['11:00', '13:00']);
+          expect(options.sameDay.map((o) => o.conflicts.map((c) => c.id))).toEqual(expected);
+        } finally {
+          jest.useRealTimers();
+          listOccupiedWindows.mockReset();
+          listOccupiedWindows.mockResolvedValue([]);
+        }
+      });
+    });
+
     test('another technician\'s stop is never named on the tech-reachable payload', async () => {
       const { listOccupiedWindows } = require('../services/scheduling/occupancy');
       jest.useFakeTimers({ now: new Date('2026-06-11T13:00:00Z') });

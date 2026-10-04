@@ -170,6 +170,11 @@ describe('moveVisitAsUnit', () => {
     expect(sCall[0]).toBe('b'); expect(sCall[2]).toBe('14:00-15:00');
     expect(sCall[5]).toMatchObject({ visitPolicy: 'single', skipVisitSeam: true, expect: { scheduled_date: '2026-08-30', window_start: '10:00', window_end: '11:00', visit_id: 'v1', technician_id: 't1' } });
     expect(sCall[5].expectOccurrenceIds).toBeUndefined();
+    // Second technician: a unit move that NAMES a technician strips it from the member calls and
+    // re-points the rows after, so the members' occupancy probes stay tech-blind (alignMember's
+    // own destination probe is) — never scoped to the technician the row is about to leave.
+    expect(pCall[5]).toMatchObject({ occupancyTechBlind: true });
+    expect(sCall[5]).toMatchObject({ occupancyTechBlind: true });
     // each move hides only the OTHER participating rows from its probes (codex r6)
     expect(rebooker.reschedule.mock.calls[0][5].excludeServiceIds).toEqual(['b']);
     expect(rebooker.reschedule.mock.calls[1][5].excludeServiceIds).toEqual(['a']);
@@ -369,6 +374,8 @@ describe('moveVisitAsUnit', () => {
     const rebooker = fakeRebooker();
     const out = await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { seriesPolicy: 'auto' } });
     expect(rebooker.reschedule.mock.calls[1][5]).toMatchObject({ seriesPolicy: 'single', visitPolicy: 'single' });
+    // No technician named: each member keeps its own, so its probe is scoped to it (rebooker.probeMoveConflicts).
+    expect(rebooker.reschedule.mock.calls.every((c) => c[5].occupancyTechBlind === undefined)).toBe(true);
     const landed = { scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00' };
     expect(out.visitMove.members).toEqual([
       { id: 'a', isPrimary: true, previousStatus: 'confirmed', landed },

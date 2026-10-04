@@ -429,7 +429,8 @@ describe('selection matches the commit policy', () => {
     expect(res).toEqual({ moved: false, alert_id: ALERT_ID, reason: 'window_occupied' });
     expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
     // No exclusions: every live stop — the absent tech's others too — occupies its window.
-    expect(SmartRebooker.previewMoveConflicts).toHaveBeenCalledWith(JOB_ID, DATE, { start: '09:00', end: '11:00' });
+    // The preview stays tech-blind (its target technician is the absent one); the commit probes the destination.
+    expect(SmartRebooker.previewMoveConflicts).toHaveBeenCalledWith(JOB_ID, DATE, { start: '09:00', end: '11:00' }, { occupancyTechBlind: true });
   });
 
   test('a stop reassigned by hand while the probe ran: the early refusal closes the stale card instead of annotating it', async () => {
