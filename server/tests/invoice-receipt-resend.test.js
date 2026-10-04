@@ -340,6 +340,21 @@ describe('ownership of the send lock is checked before each effect', () => {
     expect(out.stampWritten).toBe((ran.email || ran.text) ? false : null);
   });
 
+  test('a lock lost DURING a leg\'s approval re-check: that leg does not start', async () => {
+    // Ownership is read after the awaited re-check, immediately before the sender.
+    const approved = { receipt_state: 'unsent', amount: '129.00', recipients_key: 'pinned' };
+    const rederive = jest.fn()
+      .mockResolvedValueOnce({ ...approved })
+      .mockImplementationOnce(async () => { mockLock.lostAfter = 0; return { ...approved }; });
+    sendReceiptEmail.mockClear();
+    InvoiceService.sendReceipt.mockClear();
+    const out = await sendInvoiceReceipt(ID, { via: 'both', expect: { approved, rederive } });
+    expect(sendReceiptEmail).not.toHaveBeenCalled();
+    expect(InvoiceService.sendReceipt).not.toHaveBeenCalled();
+    expect(out.lockLost).toBe('before_email');
+    expect(out.body.email).toEqual({ ok: false, error: 'send lock lost' });
+  });
+
   test('a lock that is never lost changes nothing', async () => {
     const out = await sendInvoiceReceipt(ID, { via: 'both' });
     expect(out.lockLost).toBeNull();

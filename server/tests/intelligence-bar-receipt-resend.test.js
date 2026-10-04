@@ -273,6 +273,16 @@ describe('honest per-channel results', () => {
     expect(out.text).toEqual({ status: 'not_requested' });
     expect(sendInvoiceReceipt).toHaveBeenCalledTimes(1);
     expect(executionOutcome(out)).toBe('outcome_unknown');
+    // An unknown leg is never worded as not sent.
+    expect(out.note).toMatch(/could not be confirmed/);
+    expect(out.note).not.toMatch(/was not sent|did not go out/);
+  });
+
+  test('one leg sent and one unknown: the summary says unconfirmed, not "did not go out"', async () => {
+    sendInvoiceReceipt.mockResolvedValue({ status: 200, body: { ok: true, email: { ok: true }, sms: { ok: false, error: 'receipt SMS blocked: PROVIDER_FAILURE' } }, closeout: null, delivery: { email: 'sent', sms: 'unknown' } });
+    const out = await confirm({ via: 'both' });
+    expect(out.note).toMatch(/could not be confirmed/);
+    expect(out.note).not.toMatch(/did not go out/);
   });
 
   test('unknown comes from the writer\'s structured delivery verdict, not the error text', async () => {

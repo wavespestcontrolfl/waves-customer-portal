@@ -183,24 +183,28 @@ async function sendInvoiceReceipt(invoiceId, { memo, via = 'both', actorTechnici
           closeout = await closeOutVisitForIssuedInvoice({ invoiceId: id, trigger: 'paid', actorTechnicianId });
         }
 
-        if ((via === 'email' || via === 'both') && !stillHeld('before_email')) {
-          emailResult = { ok: false, error: 'send lock lost' };
-          delivery.email = 'not_sent';
-        } else if ((via === 'email' || via === 'both') && expect && !(await legStillApproved(expect, claim, id))) {
+        // Each leg: the approval re-check first (it awaits database reads), then
+        // lock ownership immediately before the sender is invoked.
+        const wantsEmail = via === 'email' || via === 'both';
+        const wantsText = via === 'sms' || via === 'both';
+        if (wantsEmail && expect && !(await legStillApproved(expect, claim, id))) {
           emailResult = { ok: false, error: LEG_DRIFT };
           delivery.email = 'not_sent';
-        } else if (via === 'email' || via === 'both') {
+        } else if (wantsEmail && !stillHeld('before_email')) {
+          emailResult = { ok: false, error: 'send lock lost' };
+          delivery.email = 'not_sent';
+        } else if (wantsEmail) {
           emailResult = await sendReceiptEmail(id, { memo: trimmedMemo }).catch((err) => ({ ok: false, error: err.message }));
           delivery.email = emailDelivery(emailResult);
           if (emailResult.ok) await recordOperatorReceiptDelivered(claim, 'email');
         }
-        if ((via === 'sms' || via === 'both') && !stillHeld('before_text')) {
-          smsResult = { ok: false, error: 'send lock lost' };
-          delivery.sms = 'not_sent';
-        } else if (expect && !(await legStillApproved(expect, claim, id))) {
+        if (wantsText && expect && !(await legStillApproved(expect, claim, id))) {
           smsResult = { ok: false, error: LEG_DRIFT };
           delivery.sms = 'not_sent';
-        } else if (via === 'sms' || via === 'both') {
+        } else if (wantsText && !stillHeld('before_text')) {
+          smsResult = { ok: false, error: 'send lock lost' };
+          delivery.sms = 'not_sent';
+        } else if (wantsText) {
           // Manual operator resend — pass force:true to override the auto-send
           // idempotency guard (otherwise re-clicking SEND RECEIPT would no-op
           // for invoices already auto-receipted by the Stripe webhook).

@@ -256,9 +256,18 @@ async function commit(input, actionContext) {
     && visitCloseout?.status !== 'not_completed';
   logger.info(`[intelligence-bar:resend-receipt] ${version.invoice_id}: email ${email.status}, text ${text.status}, automatic receipt ${queue || 'unreported'}`);
   const closeoutOnly = !delivered && visitCloseout?.status === 'completed' && !legs.some((leg) => leg.status === 'unknown');
-  const what = delivered
-    ? (clean ? 'The receipt was sent.' : 'Part of the receipt did not go out — see email and text.')
-    : (closeoutOnly ? 'The receipt was not sent, but the linked visit was completed — see email, text and visit_closeout.' : 'The receipt was not sent — see email and text.');
+  // Unknown first: a leg whose delivery could not be confirmed is never worded as not sent.
+  const anyUnknown = legs.some((leg) => leg.status === 'unknown');
+  let what;
+  if (anyUnknown) {
+    what = delivered
+      ? 'Part of the receipt was sent; delivery of the rest could not be confirmed — see email and text. Check before sending again.'
+      : 'Delivery of the receipt could not be confirmed — it may or may not have gone out; see email and text. Check before sending again.';
+  } else if (delivered) {
+    what = clean ? 'The receipt was sent.' : 'Part of the receipt did not go out — see email and text.';
+  } else {
+    what = closeoutOnly ? 'The receipt was not sent, but the linked visit was completed — see email, text and visit_closeout.' : 'The receipt was not sent — see email and text.';
+  }
   const result = {
     invoice_id: version.invoice_id,
     invoice_number: plan.invoice_number,
