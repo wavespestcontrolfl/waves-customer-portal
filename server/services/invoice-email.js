@@ -984,6 +984,14 @@ async function sendReceiptEmail(invoiceId, options = {}) {
   const transporter = getTransporter();
   if (!transporter) return { ok: false, error: 'Email not configured' };
 
+  // The caller's last check guards this handoff too (same fail-closed rule as
+  // callerReceiptHandoff): anything but true is a definite non-send.
+  if (typeof options.beforeProviderHandoff === 'function') {
+    let proceed = false;
+    try { proceed = (await options.beforeProviderHandoff()) === true; } catch { proceed = false; }
+    if (!proceed) return { ok: false, error: 'Receipt email handoff aborted', code: 'receipt_handoff_aborted' };
+  }
+
   try {
     await transporter.sendMail({
       from: '"Waves Pest Control, LLC" <contact@wavespestcontrol.com>',

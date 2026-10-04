@@ -5,6 +5,8 @@
  */
 
 jest.mock('../models/db', () => jest.fn());
+jest.mock('nodemailer', () => ({ createTransport: jest.fn(() => ({ sendMail: jest.fn().mockResolvedValue({}) })) }));
+jest.mock('../services/email-fallback-gate', () => ({ smtpFallbackAllowed: () => true }));
 jest.mock('../services/sendgrid-mail', () => ({
   isConfigured: () => true,
   newsletterGroupId: () => null,
@@ -122,6 +124,27 @@ describe('sendReceiptEmail idempotency', () => {
     expect(await sendReceiptEmail('inv-1')).toEqual({ ok: false, error: 'provider response lost', deliveryOutcome: 'uncertain' });
     EmailTemplates.sendTemplate.mockRejectedValueOnce(new Error('ledger unavailable'));
     expect(await sendReceiptEmail('inv-1')).toEqual({ ok: false, error: 'ledger unavailable', deliveryOutcome: 'not_sent' });
+  });
+
+  test('the SMTP fallback runs the caller\'s handoff guard too: a veto or a throw is a definite non-send', async () => {
+    process.env.GOOGLE_SMTP_PASSWORD = 'synthetic-test-value';
+    const sendMail = () => require('nodemailer').createTransport.mock.results.at(-1)?.value.sendMail;
+    const templateMissing = () => EmailTemplates.sendTemplate.mockRejectedValueOnce(new Error('active template not found'));
+    templateMissing();
+    expect(await sendReceiptEmail('inv-1', { beforeProviderHandoff: async () => false }))
+      .toEqual({ ok: false, error: 'Receipt email handoff aborted', code: 'receipt_handoff_aborted' });
+    templateMissing();
+    expect(await sendReceiptEmail('inv-1', { beforeProviderHandoff: async () => { throw new Error('lock read failed'); } }))
+      .toEqual({ ok: false, error: 'Receipt email handoff aborted', code: 'receipt_handoff_aborted' });
+    if (sendMail()) expect(sendMail()).not.toHaveBeenCalled();
+    // The guard passing, and no guard at all, both reach sendMail.
+    templateMissing();
+    expect((await sendReceiptEmail('inv-1', { beforeProviderHandoff: async () => true })).ok).toBe(true);
+    expect(sendMail()).toHaveBeenCalledTimes(1);
+    templateMissing();
+    expect((await sendReceiptEmail('inv-1')).ok).toBe(true);
+    expect(sendMail()).toHaveBeenCalledTimes(2);
+    delete process.env.GOOGLE_SMTP_PASSWORD;
   });
 
   test('passes null idempotencyKey when caller omits it (manual operator resend)', async () => {
