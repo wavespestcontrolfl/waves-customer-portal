@@ -335,7 +335,9 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
             });
             if (held.held) return res.status(200).json({ success: true });
           } catch (holdErr) {
-            logger.error(`[lead-webhook] unverified hold failed, refusing as before: ${holdErr.message}`);
+            // Code only: a knex error message carries the SQL bindings (the
+            // submitted name, phone, address and message).
+            logger.error(`[lead-webhook] unverified hold failed, refusing as before: ${holdErr.code || holdErr.name || 'error'}`);
           }
         }
         return res.status(403).json({ error: 'Verification failed. Please try again.' });

@@ -64,7 +64,7 @@ async function ringHeldLead({ lead, name, serviceInterest }) {
       metadata: { leadId: lead.id, hold: HOLD_STAGE },
     });
   } catch (err) {
-    logger.warn(`[lead-unverified-hold] bell failed for lead=${lead.id}: ${err.message}`);
+    logger.warn(`[lead-unverified-hold] bell failed for lead=${lead.id}: ${err.code || err.name || 'error'}`);
   }
 }
 
