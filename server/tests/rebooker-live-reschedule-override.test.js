@@ -408,7 +408,7 @@ describe('live-status reschedule override (allowLive)', () => {
       snapshot: { date: TARGET, windowStart: '09:00', windowEnd: '11:00' },
       // The old slot rides along: a move off today/tomorrow is still a
       // today/tomorrow change for the tech who loses it (Codex #5783 P2).
-      previous: { date: '2026-10-13', windowStart: '09:00:00', windowEnd: '11:00:00' },
+      previous: { date: BASE, windowStart: '09:00:00', windowEnd: '11:00:00' },
     });
   });
 
