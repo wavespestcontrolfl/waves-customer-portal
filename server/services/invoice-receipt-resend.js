@@ -53,7 +53,7 @@ function smsDelivery(result, err) {
   if (result?.sent) return 'sent';
   if (!err?.providerOutcome) return 'not_sent';
   const { classifyDeliveryCertainty } = require('./messaging/send-customer-message');
-  return classifyDeliveryCertainty(err.providerOutcome) === 'unknown' ? 'unknown' : 'not_sent';
+  return classifyDeliveryCertainty(err.providerOutcome);
 }
 const emailDelivery = (result) => (result?.ok ? 'sent' : result?.deliveryOutcome === 'uncertain' ? 'unknown' : 'not_sent');
 
@@ -190,6 +190,10 @@ async function sendInvoiceReceipt(invoiceId, { memo, via = 'both', actorTechnici
             smsThrown = err;
           }
           delivery.sms = smsDelivery(smsResult.ok ? { sent: true } : null, smsThrown);
+          // A throw AFTER the provider accepted the text (its bookkeeping
+          // failed) is a delivered receipt: record, stamp and release as sent,
+          // or the "failure" invites a duplicate resend.
+          if (delivery.sms === 'sent') smsResult = { ok: true };
           if (smsResult.ok) await recordOperatorReceiptDelivered(claim, 'sms');
         }
 

@@ -134,6 +134,17 @@ describe('holdUnknownOutcome — only the tool opts in; the route keeps handing 
     expect((await sendInvoiceReceipt(ID, { via: 'email' })).delivery).toEqual({ email: 'sent', sms: 'not_requested' });
   });
 
+  test('a text the provider accepted before its bookkeeping threw is a delivered receipt', async () => {
+    InvoiceService.sendReceipt.mockRejectedValueOnce(
+      Object.assign(new Error('audit write failed'), { providerOutcome: { deliveryOutcome: 'accepted', blocked: false } }),
+    );
+    const out = await sendInvoiceReceipt(ID, { via: 'sms' });
+    expect(out.delivery).toEqual({ email: 'not_requested', sms: 'sent' });
+    expect(out.status).toBe(200);
+    expect(out.body.ok).toBe(true);
+    expect(out.body.sms).toEqual({ ok: true });
+  });
+
   test('default (the route): the claim is released with no hold flag at all, and the body keeps its shape', async () => {
     unknownEmail();
     const out = await sendInvoiceReceipt(ID, { via: 'email' });
