@@ -556,11 +556,12 @@ describe('searchReportBlogPosts', () => {
       const posts = await searchReportBlogPosts(recordingKnex({ content_registry: rows() }), 'ghost con');
       expect(posts.map((post) => [post.title, post.exact, post.starts])).toEqual([
         ['Ghost Ant Control That Works', false, true],
-        ['Pest Control Rates Explained', false, undefined],
+        ['Pest Control Rates Explained', false, false],
       ]);
       // A first word is never read by its start.
       expect(await searchReportBlogPosts(recordingKnex({ content_registry: rows() }), 'cockr kitchen'))
         .toEqual([expect.objectContaining({ title: 'German Cockroaches in the Kitchen', exact: false })]);
+      expect((await searchReportBlogPosts(recordingKnex({ content_registry: rows() }), 'cockr kitchen'))[0]).not.toHaveProperty('starts');
     });
 
     test('a post holds it whole: nothing is read by its start, so "rat" still never finds "Rates"', async () => {
@@ -577,7 +578,7 @@ describe('searchReportBlogPosts', () => {
       for (const query of ['co ', 'co.', 'ghost co in', 'ghost ant chinch bugs co']) {
         const knex = recordingKnex({ content_registry: rows() });
         const posts = await searchReportBlogPosts(knex, query);
-        expect(posts.some((post) => post.starts)).toBe(false);
+        expect(posts.some((post) => 'starts' in post)).toBe(false);
         expect(knex.calls.filter(([name]) => name === 'table').length).toBeLessThanOrEqual(1);
       }
     });

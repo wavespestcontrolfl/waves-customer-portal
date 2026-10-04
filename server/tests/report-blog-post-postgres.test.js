@@ -137,8 +137,9 @@ postgres('report blog search on Postgres', () => {
       { id: control.id, title: control.title, url: control.live_url, exact: false, starts: true },
       { id: roach.id, title: roach.title, url: roach.live_url, exact: false, starts: true },
     ]);
-    // Each holds one of the two words: the closest posts, neither starts it.
-    expect((await searchReportBlogPosts(mockPg, 'ghost cockr')).map((post) => [post.id, post.starts])).toEqual([[control.id, undefined], [roach.id, undefined]]);
+    // Each holds one of the two words: the closest posts, neither starts it,
+    // and both say the search was read by a start (GitHub Codex P2 on 7331ef2402).
+    expect((await searchReportBlogPosts(mockPg, 'ghost cockr')).map((post) => [post.id, post.starts])).toEqual([[control.id, false], [roach.id, false]]);
     expect(await searchReportBlogPosts(mockPg, 'rat')).toEqual([{ id: rat.id, title: rat.title, url: rat.live_url, exact: true }]);
   });
 

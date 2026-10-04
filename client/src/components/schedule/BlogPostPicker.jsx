@@ -70,8 +70,11 @@ export function useBlogPostSearch(search) {
   // The posts that hold every word; with none, those that hold every word
   // with the last still being typed (its start); with none, the closest.
   const exact = results.filter((post) => post.exact === true);
-  const starting = exact.length ? [] : results.filter((post) => post.starts === true);
-  return { query, setQuery, results, status, covered: exact.length > 0, typing: starting.length > 0, shown: exact.length ? exact : starting.length ? starting : results, canSuggest };
+  const starting = results.filter((post) => post.starts === true);
+  // The server read the last word by its start (every post then says whether
+  // it `starts` the search): the word is on no post whole.
+  const typing = results.some((post) => typeof post.starts === "boolean");
+  return { query, setQuery, results, status, covered: exact.length > 0, typing, shown: exact.length ? exact : starting.length ? starting : results, canSuggest };
 }
 
 // The server's final answer to a suggestion, by its status and code:
@@ -173,9 +176,10 @@ export default function BlogPostPicker({ search, suggest = null, value = null, o
   const suggestion = useBlogSuggestion(suggest, query);
   const phrase = query.trim();
   // No post holds every word: say so, show the closest, offer a suggestion.
-  // Never while the last word is still being typed: its posts are the list,
-  // and the server refuses a phrase with a word no live post holds whole
-  // (GitHub Codex P2 on 67df0afca0).
+  // Never while the last word is still being typed: its posts (or, with
+  // none holding every word, the closest) are the list, and the server
+  // refuses a phrase with a word no live post holds whole (GitHub Codex P2s
+  // on 67df0afca0 and 7331ef2402).
   const uncovered = status === "done" && !covered && !typing && canSuggest && typeof suggest === "function";
   const ink = tokens.ink || "#111";
   const muted = tokens.muted || "#525252";

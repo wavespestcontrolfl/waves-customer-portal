@@ -314,7 +314,7 @@ async function linkableEntries(knex, terms) {
  * summary, newest first among equals. No usable words, no results. Read from the
  * content registry's verified-live posts (each URL once). When no post holds
  * the last word and it is still being typed, that word matches by its start
- * (wordBeingTyped) and the posts holding every word so are marked `starts`.
+ * (wordBeingTyped) and every post says whether it `starts` the search so.
  */
 async function searchReportBlogPosts(knex, query) {
   let terms = searchTerms(query);
@@ -357,10 +357,12 @@ async function searchReportBlogPosts(knex, query) {
     .slice(0, MAX_RESULTS)
     // `exact`: the post holds every word. With none exact, the forms say no
     // post covers the search, show these as the closest, and offer to
-    // suggest one (owner mockup approval 2026-10-03). `starts`: it holds
-    // every word, the last by its start; the forms show these as the matches
-    // for a word still being typed.
-    .map((entry) => ({ ...entry.post, exact: entry.exact, ...(entry.starts ? { starts: true } : {}) }));
+    // suggest one (owner mockup approval 2026-10-03). `starts`, on every post
+    // of a search read by its last word's start: whether the post holds every
+    // word that way. The forms show those as the matches for a word still
+    // being typed, and with the field present offer no suggestion (the word
+    // is on no post whole; GitHub Codex P2 on 7331ef2402).
+    .map((entry) => ({ ...entry.post, exact: entry.exact, ...(started ? { starts: entry.starts } : {}) }));
 }
 
 // The most words a suggestion's site-words read checks.
