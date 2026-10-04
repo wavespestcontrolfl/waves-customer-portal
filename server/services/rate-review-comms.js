@@ -1722,107 +1722,178 @@ async function noticesForDispatch(dbh, customerId, key, value, { claimKey = null
 // re-send. Duplicate or late events (flag already off, already revoked) do
 // nothing: the first hard failure wins and a later 'delivered' never undoes it.
 // Returns an alert descriptor when the notice was revoked, else null.
-async function recordChannelFailure(trx, notice, channel, detail) {
+// ── delivery state transitions (pure) ───────────────────────────────────
+// A notice's delivery state is its status, its two channel flags and, in metadata, the
+// channels of unknown outcome and the failures recorded. Each provider event is one
+// transition over that state; the functions below compute it and touch nothing.
+
+const CHANNEL_FLAG = Object.freeze({ email: 'email_sent', sms: 'sms_sent' });
+const OTHER_FLAG = Object.freeze({ email: 'sms_sent', sms: 'email_sent' });
+
+// Metadata with one channel no longer unknown.
+function withoutUnknown(meta, channel) {
+  const { uncertain_channels: unknown = {}, uncertain_claim_key: claimKey, ...rest } = meta;
+  const left = Object.fromEntries(Object.entries(unknown).filter(([ch]) => ch !== channel));
+  return Object.keys(left).length ? { ...rest, uncertain_channels: left, uncertain_claim_key: claimKey } : rest;
+}
+
+// A channel failed. Returns { kind, patch, meta }:
+//   ignore        the event changes nothing (a duplicate, a channel that never delivered)
+//   early         the send is still running: remembered for its stamp (first failure wins)
+//   channel_only  the other channel still stands: this one is recorded, the notice stays delivered
+//   undelivered   no delivered channel is left: settleUndelivered decides what the notice becomes
+function channelFailureTransition(live, channel, failure) {
+  const meta = parseJson(live.metadata, {});
+  const status = String(live.status);
+  if (status === 'sending') {
+    const early = meta.early_failures || {};
+    return early[channel] ? { kind: 'ignore' } : { kind: 'early', patch: {}, meta: { ...meta, early_failures: { ...early, [channel]: failure } } };
+  }
+  // A late failure of a channel whose outcome was UNKNOWN is evidence too, though its flag
+  // was never set; otherwise only a channel still flagged delivered on an unrevoked notice.
+  const wasUnknown = !!(meta.uncertain_channels || {})[channel];
+  const counts = wasUnknown
+    ? ['sent', 'viewed', UNCERTAIN].includes(status) && !(meta.channel_failures || {})[channel]
+    : !meta.delivery_revoked && live[CHANNEL_FLAG[channel]] === true;
+  if (!counts) return { kind: 'ignore' };
+  const next = { ...withoutUnknown(meta, channel), channel_failures: { ...(meta.channel_failures || {}), [channel]: failure } };
+  const patch = { [CHANNEL_FLAG[channel]]: false };
+  if (live[OTHER_FLAG[channel]] === true) return { kind: 'channel_only', patch, meta: next };
+  return { kind: 'undelivered', patch, meta: { ...next, delivery_revoked: meta.delivery_revoked || failure } };
+}
+
+// What an undelivered notice becomes. rateWritten (a per-application / monthly rate already
+// applied, or a prepaid renewal already recorded) cannot be un-written: the notice keeps its
+// status and is flagged for a hand check. Otherwise it is parked as send_uncertain while a
+// channel of unknown outcome is still out there, or returns to a re-sendable draft.
+function settleUndelivered(live, meta, { rateWritten }) {
+  if (rateWritten) return { outcome: 'hand_check', patch: {}, meta };
+  // A channel with failure evidence on the row is no longer unknown, whatever recorded it.
+  const failed = meta.channel_failures || {};
+  if (Object.keys(meta.uncertain_channels || {}).some((ch) => !failed[ch])) {
+    // An attempt already parked keeps the words it froze. A delivered notice parked now was
+    // handed to a provider (it was stamped): its words keep their handoff record.
+    const pending = meta.pending_letter || { key: meta.uncertain_claim_key || null, letter: meta.letter || null, handoff_at: new Date(live.sent_at || Date.now()).toISOString() };
+    return { outcome: 'parked', patch: { status: UNCERTAIN, sent_at: null }, meta: { ...meta, pending_letter: pending } };
+  }
+  const { pending_letter: _p, uncertain_channels: _u, uncertain_claim_key: _k, ...rest } = meta;
+  return { outcome: 'draft', patch: { status: 'draft', sent_at: null }, meta: rest };
+}
+
+// A provider confirmed delivery on a channel whose outcome was unknown. Returns
+// { patch, meta, promoted } or null when the event changes nothing. A notice parked as
+// send_uncertain becomes delivered (stamped at the event's time, from the letter it froze);
+// a notice already delivered on its other channel just gains this one.
+function channelDeliveredTransition(live, channel, at) {
+  const meta = parseJson(live.metadata, {});
+  const status = String(live.status);
+  if (!(meta.uncertain_channels || {})[channel] || !['sent', 'viewed', UNCERTAIN].includes(status)) return null;
+  const next = withoutUnknown(meta, channel);
+  if (status !== UNCERTAIN) return { promoted: false, patch: { [CHANNEL_FLAG[channel]]: true }, meta: next };
+  const { pending_letter: pending, delivery_revoked: revoked, ...rest } = next;
+  if (!pending || !pending.letter) return null; // no frozen words to stand behind the stamp
+  return {
+    promoted: true,
+    patch: { status: 'sent', sent_at: at, [CHANNEL_FLAG[channel]]: true },
+    meta: {
+      ...rest,
+      // The other channel's earlier failure is history: the letter did arrive.
+      ...(revoked ? { delivery_revocations: [...(rest.delivery_revocations || []), revoked] } : {}),
+      letter: { ...pending.letter, sent_on: etDateString(at), ...(pending.payload ? { payload: pending.payload } : {}) },
+    },
+  };
+}
+
+// ── delivery reconciliation (effects) ───────────────────────────────────
+
+// The notice's row, locked under the customer-comms fence, if the event still belongs to it.
+async function lockMatchedNotice(trx, notice) {
   await lockCustomerComms(trx, notice.customer_id);
   const live = await trx('price_change_notices').where({ id: notice.id }).forUpdate().first();
   if (!live) return null;
   // The attempt this event belongs to must still be the notice's, on the LOCKED row.
   if (notice.__match && (String(live.customer_id) !== String(notice.customer_id)
     || !noticeMatchesDispatch(live, notice.__match.key, notice.__match.value, notice.__match.claimKey))) return null;
-  const meta = parseJson(live.metadata, {});
-  const flag = channel === 'email' ? 'email_sent' : 'sms_sent';
-  const otherFlag = channel === 'email' ? 'sms_sent' : 'email_sent';
-  const at = (detail.at instanceof Date ? detail.at : new Date()).toISOString();
-  const failure = { event: String(detail.event || ''), channel, at, reason: String(detail.reason || '').slice(0, 300) };
-  // The failure beat the delivery stamp (the send is still running its other
-  // leg): remembered on the claimed row; the stamp, under this same fence,
-  // counts it. The first failure per channel wins.
-  if (String(live.status) === 'sending') {
-    const early = meta.early_failures || {};
-    if (early[channel]) return null;
-    await trx('price_change_notices').where({ id: live.id }).update({ metadata: JSON.stringify({ ...meta, early_failures: { ...early, [channel]: failure } }), updated_at: new Date() });
-    return null;
-  }
-  // A late failure of a channel whose outcome was UNKNOWN (an ambiguous email, now bounced) is
-  // evidence too, though its flag was never set: it settles that channel, and may settle the whole
-  // letter (stamped, or parked as send_uncertain).
-  const wasUnknown = !!(meta.uncertain_channels || {})[channel];
-  if (wasUnknown ? !['sent', 'viewed', UNCERTAIN].includes(String(live.status)) : (meta.delivery_revoked || live[flag] !== true)) return null;
-  if (wasUnknown && meta.channel_failures && meta.channel_failures[channel]) return null; // already recorded
-  const next = { ...meta, channel_failures: { ...(meta.channel_failures || {}), [channel]: failure } };
-  if (wasUnknown) {
-    const rest = { ...meta.uncertain_channels };
-    delete rest[channel];
-    if (Object.keys(rest).length) next.uncertain_channels = rest; else { delete next.uncertain_channels; delete next.uncertain_claim_key; }
-  }
-  const patch = { [flag]: false, updated_at: new Date() };
-  if (live[otherFlag] === true) {
-    await trx('price_change_notices').where({ id: live.id }).update({ ...patch, metadata: JSON.stringify(next) });
-    return null;
-  }
-  next.delivery_revoked = meta.delivery_revoked || failure;
-  const prepay = live.billing_lane === 'annual_prepay';
-  // A prepaid renewal already RECORDED (a successor term exists, possibly invoiced at the
-  // increased amount) cannot be reversed here: flagged for a hand check, as a written rate is.
-  let prepayTerm = null;
-  let renewalRecorded = false;
-  if (prepay && meta.term_id) {
-    prepayTerm = await trx('annual_prepay_terms').where({ id: meta.term_id }).forUpdate().first();
-    if (prepayTerm) renewalRecorded = await require('./rate-review-apply')._private.successorTermExists(trx, prepayTerm, live.family_key);
-  }
-  const rateWritten = (!!live.applied_at && !prepay) || renewalRecorded;
-  // A channel of unknown outcome is still out there: not a clean failure.
-  // Re-evaluated on the live row: a channel with failure evidence (channel_failures, or the one
-  // failing now) is no longer unknown. No unknown channel left and none delivered → a clean,
-  // retryable draft with the revocation recorded.
-  const failedChannels = new Set(Object.keys(next.channel_failures || {}));
-  const stillUnknown = Object.keys(next.uncertain_channels || {}).filter((ch) => !failedChannels.has(ch));
-  const parked = !rateWritten && stillUnknown.length > 0;
-  if (parked) {
-    patch.status = UNCERTAIN;
-    patch.sent_at = null;
-    // An attempt already parked keeps the words it froze. A delivered notice parked now
-    // was handed to a provider (it was stamped): its words keep their handoff record.
-    next.pending_letter = meta.pending_letter || { key: meta.uncertain_claim_key || null, letter: meta.letter || null, handoff_at: new Date(live.sent_at || Date.now()).toISOString() };
-  } else if (!rateWritten) {
-    patch.status = 'draft';
-    patch.sent_at = null;
-    delete next.pending_letter; // a parked attempt that is now definitively over keeps no pending words
-    delete next.uncertain_channels;
-    delete next.uncertain_claim_key;
-  }
-  // Either way (clean failure or parked as uncertain) the customer holds no confirmed
-  // notice, so a prepaid increase the apply staged from this notice goes with it —
-  // even after the 30-day reminder (which does not quote the new amount): a retained
-  // amount would be enforced at renewal as an increase the customer never received.
-  if (!rateWritten && live.applied_at && prepay) {
-    const term = prepayTerm;
-    if (term && term.next_term_prepay_amount != null && Math.round(Number(term.next_term_prepay_amount) * 100) === Number(live.noticed_new_cents)) {
-      await trx('annual_prepay_terms').where({ id: term.id }).update({ next_term_prepay_amount: null, updated_at: new Date() });
-      next.prepay_unstaged = true;
-    }
-    Object.assign(patch, { applied_at: null, apply_hold_reason: null, applies_from_visit_id: null });
-  }
-  await trx('price_change_notices').where({ id: live.id }).update({ ...patch, metadata: JSON.stringify(next) });
-  const snap = await trx('rate_review_snapshots').where({ notice_id: live.id }).first();
-  if (snap) {
-    const flags = flagList(snap.flags);
-    if (!parked && !flags.includes(DELIVERY_BOUNCED_FLAG)) flags.push(DELIVERY_BOUNCED_FLAG);
-    await trx('rate_review_snapshots').where({ id: snap.id }).update({
-      flags: JSON.stringify(flags), ...(rateWritten ? {} : { status: 'approved' }), updated_at: new Date(),
-    });
-  }
+  return live;
+}
+
+// A prepaid notice's term (locked) and whether its renewal is already recorded.
+async function prepayRenewalState(trx, live, meta) {
+  if (live.billing_lane !== 'annual_prepay' || !meta.term_id) return { term: null, renewalRecorded: false };
+  const term = await trx('annual_prepay_terms').where({ id: meta.term_id }).forUpdate().first();
+  const renewalRecorded = term ? await require('./rate-review-apply')._private.successorTermExists(trx, term, live.family_key) : false;
+  return { term, renewalRecorded };
+}
+
+// The customer holds no confirmed notice, so a prepaid increase the apply staged from this
+// notice goes with it — even after the 30-day reminder (which does not quote the new
+// amount): a retained amount would be enforced at renewal as an increase the customer
+// never received. Returns { patch, unstaged }.
+async function unstagePrepaidIncrease(trx, live, term) {
+  if (!live.applied_at || live.billing_lane !== 'annual_prepay') return { patch: {}, unstaged: false };
+  const staged = term && term.next_term_prepay_amount != null && Math.round(Number(term.next_term_prepay_amount) * 100) === Number(live.noticed_new_cents);
+  if (staged) await trx('annual_prepay_terms').where({ id: term.id }).update({ next_term_prepay_amount: null, updated_at: new Date() });
+  return { patch: { applied_at: null, apply_hold_reason: null, applies_from_visit_id: null }, unstaged: !!staged };
+}
+
+async function logDeliveryRevoked(trx, live, failure, { rateWritten, unstaged }) {
   try {
     await trx.transaction(async (sp) => sp('activity_log').insert({
       customer_id: live.customer_id,
       action: 'rate_review_delivery_revoked',
-      description: `Rate review notice undelivered (${channel} ${failure.event}): ${rateWritten ? 'the new rate was already applied — check it by hand' : 'back to ready to send'}.`,
-      metadata: JSON.stringify({ notice_id: live.id, ...failure, rate_written: rateWritten, prepay_unstaged: !!next.prepay_unstaged }),
+      description: `Rate review notice undelivered (${failure.channel} ${failure.event}): ${rateWritten ? 'the new rate was already applied — check it by hand' : 'back to ready to send'}.`,
+      metadata: JSON.stringify({ notice_id: live.id, ...failure, rate_written: rateWritten, prepay_unstaged: unstaged }),
     }));
   } catch (err) {
     logger.warn(`[rate-review-comms] activity log failed for revoked notice ${live.id}: ${err.message}`);
   }
+}
+
+async function recordChannelFailure(trx, notice, channel, detail) {
+  const live = await lockMatchedNotice(trx, notice);
+  if (!live) return null;
+  const at = (detail.at instanceof Date ? detail.at : new Date()).toISOString();
+  const failure = { event: String(detail.event || ''), channel, at, reason: String(detail.reason || '').slice(0, 300) };
+  const step = channelFailureTransition(live, channel, failure);
+  if (step.kind === 'ignore') return null;
+  const write = (patch, meta) => trx('price_change_notices').where({ id: live.id }).update({ ...patch, metadata: JSON.stringify(meta), updated_at: new Date() });
+  if (step.kind !== 'undelivered') {
+    await write(step.patch, step.meta);
+    return null;
+  }
+  const { term, renewalRecorded } = await prepayRenewalState(trx, live, step.meta);
+  const rateWritten = (!!live.applied_at && live.billing_lane !== 'annual_prepay') || renewalRecorded;
+  const settled = settleUndelivered(live, step.meta, { rateWritten });
+  const prepaid = rateWritten ? { patch: {}, unstaged: false } : await unstagePrepaidIncrease(trx, live, term);
+  await write({ ...step.patch, ...settled.patch, ...prepaid.patch }, { ...settled.meta, ...(prepaid.unstaged ? { prepay_unstaged: true } : {}) });
+  const snap = await trx('rate_review_snapshots').where({ notice_id: live.id }).first();
+  if (snap) {
+    const flags = flagList(snap.flags);
+    if (settled.outcome !== 'parked' && !flags.includes(DELIVERY_BOUNCED_FLAG)) flags.push(DELIVERY_BOUNCED_FLAG);
+    await trx('rate_review_snapshots').where({ id: snap.id }).update({ flags: JSON.stringify(flags), ...(rateWritten ? {} : { status: 'approved' }), updated_at: new Date() });
+  }
+  await logDeliveryRevoked(trx, live, failure, { rateWritten, unstaged: prepaid.unstaged });
   return { noticeId: live.id, customerId: live.customer_id, rowId: live.rate_review_row_id, familyKey: live.family_key, rateWritten, channel, event: failure.event };
+}
+
+// A provider confirmed delivery (SendGrid 'delivered') for a channel whose outcome was
+// unknown: a letter parked as send_uncertain is stamped delivered, so its rate can apply.
+// Returns true when the notice was promoted.
+async function recordChannelDelivered(trx, notice, channel, at) {
+  const live = await lockMatchedNotice(trx, notice);
+  if (!live) return false;
+  const step = channelDeliveredTransition(live, channel, at);
+  if (!step) return false;
+  await trx('price_change_notices').where({ id: live.id }).update({ ...step.patch, metadata: JSON.stringify(step.meta), updated_at: new Date() });
+  if (step.promoted) {
+    const snap = await trx('rate_review_snapshots').where({ notice_id: live.id }).first();
+    if (snap) {
+      await trx('rate_review_snapshots').where({ id: snap.id }).update({
+        status: 'sent', flags: JSON.stringify(flagList(snap.flags).filter((f) => f !== DELIVERY_BOUNCED_FLAG)), updated_at: new Date(),
+      });
+    }
+  }
+  return step.promoted;
 }
 
 // The existing admin alert path (no new channel); after the event commits.
@@ -1856,12 +1927,18 @@ async function raiseDeliveryAlerts(alerts) {
 // event's own transaction, for a ledger row the event matched): a rate review
 // letter that did not reach the mailbox. Returns alerts to raise after commit.
 async function handleEmailDeliveryEvent(trx, emailMessage, ev) {
-  if (!emailMessage || emailMessage.template_key !== TEMPLATE_KEY || !isEmailUndelivered(ev)) return [];
+  const delivered = String(ev?.event || '').trim().toLowerCase() === 'delivered';
+  if (!emailMessage || emailMessage.template_key !== TEMPLATE_KEY || !(delivered || isEmailUndelivered(ev))) return [];
   // rate_review:<batch>:<customer>:<claimKey>:<recipient hash>
   const claimKey = String(emailMessage.idempotency_key || '').split(':')[3] || null;
   const notices = await noticesForDispatch(trx, emailMessage.recipient_id, 'email_message_id', emailMessage.id, { claimKey });
   const alerts = [];
   const at = ev.timestamp ? new Date(Number(ev.timestamp) * 1000) : new Date();
+  if (delivered) {
+    // Positive evidence for an email of unknown outcome: no alert to raise.
+    for (const notice of notices) await recordChannelDelivered(trx, notice, 'email', at);
+    return alerts;
+  }
   for (const notice of notices) {
     const alert = await recordChannelFailure(trx, notice, 'email', { event: ev.event, at, reason: ev.reason || ev.response || ev.type });
     if (alert) alerts.push(alert);
