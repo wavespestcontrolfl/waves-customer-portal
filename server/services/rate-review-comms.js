@@ -902,7 +902,9 @@ async function settleAttempted(dbh, entry, { frozen, emailUnknown, smsUnknown, d
       // The email's own "delivered" event arrived while the send was still running (kept on
       // the claimed row): the unknown email is confirmed, so the letter is stamped delivered
       // through the same transition a late event takes, instead of being parked.
-      const confirmed = emailStill && earlyDelivered.email
+      // ...unless the notice moved to another customer meanwhile (a merge undo): its current
+      // owner was not the one notified, so it parks, as the stamp parks a repointed notice.
+      const confirmed = emailStill && earlyDelivered.email && String(live.customer_id) === String(entry.customerId)
         ? channelDeliveredTransition({ ...live, status: UNCERTAIN, metadata: parkedMeta }, 'email', new Date(earlyDelivered.email.at), earlyDelivered.email.id) : null;
       if (confirmed && confirmed.promoted) {
         await trx('price_change_notices').where({ id: live.id }).update({ ...confirmed.patch, metadata: JSON.stringify(confirmed.meta), updated_at: new Date() });

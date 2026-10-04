@@ -2032,6 +2032,21 @@ describe('customer surfaces', () => {
       expect(notices()[0]).toMatchObject({ status: 'draft', email_sent: false, sent_at: null });
     });
 
+    test('an early "delivered" event does not stamp a notice that was repointed to another customer before the send settled: it parks', async () => {
+      mockDb.reset(book({ customers: [customer(1), customer(9)] }));
+      smsLeg.mockResolvedValue({ sent: false, attempted: false });
+      emailLeg.mockImplementation(async (args) => {
+        const claimKey = JSON.parse(notices()[0].metadata).pending_letter.key;
+        await args.sendOptions.withProviderHandoff(async () => {}, { to: args.recipient.email });
+        await comms.handleEmailDeliveryEvent(mockDb, message({ id: 'em-live', idempotency_key: `rate_review:${BATCH_KEY}:${CUSTOMER(1)}:${claimKey}:abc` }), { event: 'delivered', timestamp: 1790000000 });
+        mockDb.store.price_change_notices[0].customer_id = CUSTOMER(9); // a merge undo
+        return { sent: false, attempted: true };
+      });
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      expect(notices()[0].status).toBe('send_uncertain');
+      expect(notices()[0].sent_at).toBeNull();
+    });
+
     test('bounce → re-send with an ambiguous outcome → delivered → bounce of the NEW message: the new id replaced the old one, so the notice is revoked again', async () => {
       mockDb.reset(book());
       smsLeg.mockResolvedValue({ sent: false, attempted: false });
