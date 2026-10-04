@@ -73,7 +73,7 @@ it('lists an open lead that has no customer record, and picking it fills the con
   mount();
   fireEvent.change(input(), { target: { value: 'Dana' } });
   fireEvent.click(await screen.findByRole('button', { name: /Dana Sample.*Lead/ }));
-  expect(leadSearch.mock.calls[0][0]).toBe('/api/admin/leads?status=open&limit=8&search=Dana');
+  expect(leadSearch.mock.calls[0][0]).toBe('/api/admin/leads?status=open&no_customer=1&limit=8&search=Dana');
   // A lead that already has a customer record is found through the customer.
   expect(screen.queryByRole('button', { name: /Linked Sample/ })).not.toBeInTheDocument();
   expect(document.getElementById('estimate-customerName')).toHaveValue('Dana Sample');

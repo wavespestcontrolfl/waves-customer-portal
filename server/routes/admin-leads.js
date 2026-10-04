@@ -735,7 +735,7 @@ router.get('/', async (req, res, next) => {
   try {
     const {
       status, source, source_name, channel, search, sort = 'first_contact_at',
-      order = 'desc', page = 1, limit = 50, start_date, end_date, id,
+      order = 'desc', page = 1, limit = 50, start_date, end_date, id, no_customer,
     } = req.query;
     if (id && Joi.string().uuid().validate(id).error) return res.status(400).json({ error: 'Invalid lead id' });
 
@@ -783,6 +783,11 @@ router.get('/', async (req, res, next) => {
     if (startDt && !isNaN(startDt)) query = query.where('leads.first_contact_at', '>=', startDt);
     if (endDt && !isNaN(endDt)) query = query.where('leads.first_contact_at', '<=', endDt);
     if (search) query.modify(applyLeadSearch, search);
+    // The estimate tool's lookup lists only leads with no customer record (a
+    // lead that has one is found through that customer). Filtered here, before
+    // LIMIT, so a page of customer-linked matches cannot hide an eligible lead.
+    const customerLessOnly = no_customer === '1' || no_customer === 'true';
+    if (customerLessOnly) query = query.whereNull('leads.customer_id');
 
     const validSorts = {
       first_contact_at: 'leads.first_contact_at',
@@ -835,6 +840,7 @@ router.get('/', async (req, res, next) => {
       excludeInternal(countQuery);
     }
     if (search) countQuery.modify(applyLeadSearch, search);
+    if (customerLessOnly) countQuery.whereNull('leads.customer_id');
     const { count } = await countQuery.count('* as count').first();
 
     const leads = await query

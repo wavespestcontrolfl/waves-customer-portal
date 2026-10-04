@@ -2434,11 +2434,12 @@ export default function EstimateToolViewV2({
         const data = await response.json();
         // Leads ride along best-effort: a failed lead search must not cost
         // the customer results. A lead that already has a customer record is
-        // found through that customer, so only customer-less leads are listed.
+        // found through that customer, so only customer-less leads are asked
+        // for (no_customer=1, applied server-side before the limit).
         let leads = [];
         try {
           const leadResponse = await fetch(
-            `/api/admin/leads?status=open&limit=8&search=${encodeURIComponent(q)}`,
+            `/api/admin/leads?status=open&no_customer=1&limit=8&search=${encodeURIComponent(q)}`,
             { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal },
           );
           if (leadResponse.ok && canChangeLeadLinkRef.current) {
