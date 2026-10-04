@@ -89,6 +89,21 @@ describe('BlogPostPicker', () => {
     expect(blogPostPath('not a url')).toBe('');
   });
 
+  // Owner 2026-10-04: typing "Co" read "No post covers “Co” yet".
+  test('a word still being typed lists the posts that start with it, with no "No post covers" line', async () => {
+    const starting = { ...POST, id: 'post-3', title: 'German Cockroaches in the Kitchen', exact: false, starts: true };
+    const search = vi.fn(async () => ({ posts: [starting, NEAR], suggest: true }));
+    render(<Harness search={search} suggest={vi.fn()} />);
+    await searchFor('Co');
+    expect(await screen.findByRole('button', { name: /German Cockroaches/ })).toBeTruthy();
+    expect(screen.queryByText(/No post covers/)).toBeNull();
+    expect(screen.queryByText('Closest posts')).toBeNull();
+    // Only the posts that start the search, never the closest ones under them.
+    expect(screen.queryByRole('button', { name: /Dollarweed/ })).toBeNull();
+    // The word may be whole and new to the blog: it can still be suggested.
+    expect(screen.getByRole('button', { name: 'Suggest a post about “Co”' })).toBeTruthy();
+  });
+
   describe('a search no post covers', () => {
     test('says so, shows the closest posts, and suggests the search as a new post', async () => {
       const search = vi.fn(async () => ({ posts: [NEAR], suggest: true }));

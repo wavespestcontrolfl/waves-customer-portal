@@ -127,6 +127,21 @@ postgres('report blog search on Postgres', () => {
     expect(posts.slice(1).map((post) => post.title)).toEqual(Array.from({ length: 7 }, (_, i) => `Weed Control Tips ${i}`));
   });
 
+  test('in real SQL, a word still being typed matches the start of a word, only when no post holds it whole (owner 2026-10-04)', async () => {
+    const roach = registryRow('German Cockroaches in the Kitchen', { daysAgo: 3 });
+    const control = registryRow('Ghost Ant Control That Works', { daysAgo: 2 });
+    const rates = registryRow('Pest Rates Explained', { daysAgo: 1 });
+    const rat = registryRow('Roof Rat Season in Bradenton', { daysAgo: 5 });
+    await mockPg('content_registry').insert([roach, control, rates, rat]);
+    expect(await searchReportBlogPosts(mockPg, 'co')).toEqual([
+      { id: control.id, title: control.title, url: control.live_url, exact: false, starts: true },
+      { id: roach.id, title: roach.title, url: roach.live_url, exact: false, starts: true },
+    ]);
+    // Each holds one of the two words: the closest posts, neither starts it.
+    expect((await searchReportBlogPosts(mockPg, 'ghost cockr')).map((post) => [post.id, post.starts])).toEqual([[control.id, undefined], [roach.id, undefined]]);
+    expect(await searchReportBlogPosts(mockPg, 'rat')).toEqual([{ id: rat.id, title: rat.title, url: rat.live_url, exact: true }]);
+  });
+
   test('a post holding every word outranks the rare word alone; the title outranks the summary', async () => {
     const both = registryRow('Weed Control Around the Lanai', { daysAgo: 300, metadata: { frontmatter: { meta_description: 'Keeping ticks off the lanai too.' } } });
     const tick = registryRow('Tick Season Guide', { daysAgo: 1 });

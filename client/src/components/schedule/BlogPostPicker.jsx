@@ -4,8 +4,10 @@ import React, { useCallback, useEffect, useId, useRef, useState } from "react";
 // 2026-10-01): search the live Waves blog the way Quick Links searches links,
 // and pick one post. The pick goes on the customer's report as "From the
 // Waves blog". Optional. `search(query)` answers { posts: [{ id, title, url,
-// exact }], suggest } (GET /admin/dispatch/:serviceId/blog-posts?q=); `value`
-// is the picked post. When no post holds every word of the search, the
+// exact, starts }], suggest } (GET /admin/dispatch/:serviceId/blog-posts?q=);
+// `value` is the picked post. While the last word is still being typed, the
+// posts that hold a word starting with it (`starts`) are the matches (owner
+// 2026-10-04: "Co" read as no post). When no post holds every word of the search, the
 // picker says so, shows the closest posts, and (with the server's `suggest`
 // on) offers to suggest a post on it: `suggest(phrase)` answers { status:
 // 'queued' | 'already_queued' } or a refusal (POST .../blog-suggestions;
@@ -61,9 +63,11 @@ export function useBlogPostSearch(search) {
     }, SEARCH_DELAY_MS);
     return () => clearTimeout(timer);
   }, [query, search]);
-  // The posts that hold every word; with none, the results are the closest.
+  // The posts that hold every word; with none, those that hold every word
+  // with the last still being typed (its start); with none, the closest.
   const exact = results.filter((post) => post.exact === true);
-  return { query, setQuery, results, status, covered: exact.length > 0, shown: exact.length ? exact : results, canSuggest };
+  const starting = exact.length ? [] : results.filter((post) => post.starts === true);
+  return { query, setQuery, results, status, covered: exact.length > 0, typing: starting.length > 0, shown: exact.length ? exact : starting.length ? starting : results, canSuggest };
 }
 
 // The server's final answer to a suggestion, by its status and code:
@@ -118,12 +122,14 @@ export const SUGGESTION_COPY = {
 
 // The search's status lines: searching, failed, nothing found, or (no post
 // holds every word) that no post covers the search yet, above the closest.
-function SearchStatusLines({ status, results, uncovered, phrase, ink, muted }) {
+// Posts matching a word still being typed stand with no line above them.
+function SearchStatusLines({ status, results, uncovered, typing, phrase, ink, muted }) {
   const line = (text, color = muted) => <p style={{ margin: "6px 0 0", fontSize: 14, color }}>{text}</p>;
   if (status === "searching") return line("Searching…");
   if (status === "failed") return line("The blog search didn’t answer. Try again.");
   if (status !== "done") return null;
   if (!uncovered) return results.length ? null : line("No live posts match.");
+  if (typing) return null;
   return (
     <>
       {line(`No post covers “${phrase}” yet.`, ink)}
@@ -161,7 +167,7 @@ function SuggestBlock({ phrase, suggestion, disabled, buttonStyle, muted }) {
 
 export default function BlogPostPicker({ search, suggest = null, value = null, onChange, disabled = false, tokens = {} }) {
   const inputId = useId();
-  const { query, setQuery, results, status, covered, shown, canSuggest } = useBlogPostSearch(search);
+  const { query, setQuery, results, status, covered, typing, shown, canSuggest } = useBlogPostSearch(search);
   const suggestion = useBlogSuggestion(suggest, query);
   const phrase = query.trim();
   // No post holds every word: say so, show the closest, offer a suggestion.
@@ -213,7 +219,7 @@ export default function BlogPostPicker({ search, suggest = null, value = null, o
             disabled={disabled}
             style={{ ...(tokens.inputStyle || {}), width: "100%", boxSizing: "border-box" }}
           />
-          <SearchStatusLines status={status} results={results} uncovered={uncovered} phrase={phrase} ink={ink} muted={muted} />
+          <SearchStatusLines status={status} results={results} uncovered={uncovered} typing={typing} phrase={phrase} ink={ink} muted={muted} />
           {(status === "done" ? shown : results).map((post) => (
             <button key={post.id} type="button" disabled={disabled} onClick={() => onChange(post)} style={rowStyle(false)}>
               <span style={{ display: "block", fontWeight: 500, lineHeight: 1.35 }}>{post.title}</span>
