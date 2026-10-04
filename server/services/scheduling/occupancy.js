@@ -23,9 +23,16 @@
  * pass it (owner 2026-10-03: the /book commit, the public-reschedule probe,
  * admin-schedule.js create/series, the phone agent's commit, call follow-up
  * re-spacing, staff lead booking, and the completion follow-up dry-run) do so
- * only where the row being saved already carries its technician; callers that
- * never pass it (rebooker series, availability.js, slot-reservation.js,
- * visit-groups.js, the completion follow-up write) are unaffected by the gate. Concurrency is unchanged: every writer behind this
+ * only where the row being saved already carries its technician. Moves too
+ * (owner 2026-10-03, "Moves"): rebooker.js probeMoveConflicts passes the
+ * technician the moved row is SAVED with (kept, or the destination of a
+ * reassignment) for the single move, the series sweep/preview, the day-option
+ * builder and the series disclosure check; a grouped-visit move that names a
+ * technician, and the tech-out preview, opt out (`occupancyTechBlind`) and
+ * stay tech-blind. Callers that never pass it (availability.js,
+ * slot-reservation.js, visit-groups.js' own destination probe, the completion
+ * follow-up write, auto-dispatch's all-day candidate read) are unaffected by
+ * the gate. Concurrency is unchanged: every writer behind this
  * probe takes the date-wide rung-1 lock (`occupancy:<date>`, below) first, so
  * two confirms for DIFFERENT technicians — or one assigned and one unassigned
  * — still serialize per calendar date, and an unassigned row can never be

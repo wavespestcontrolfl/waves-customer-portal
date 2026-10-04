@@ -26,7 +26,7 @@ async function assertAssignableSlotTechnician(technicianId, trx, date) {
 const { scheduledServiceTrackTokenExpiry } = require('./track-token-expiry');
 const { clearTechCurrentJob } = require('./tech-status');
 const { shiftCallFollowUpsForParentMove, planCallFollowUpShift } = require('./call-booking-catalog');
-const { findConflictingVisits, acquireOccupancyLock, acquireOccupancyLocks } = require('./scheduling/occupancy');
+const { findConflictingVisits, acquireOccupancyLock, acquireOccupancyLocks, techScopedConfirmActive } = require('./scheduling/occupancy');
 const { lockTechDays } = require('./scheduling/tech-day-lock');
 const { resolveStopCoords } = require('./scheduling/travel-gap');
 const { arrivalWindowRoutingEnabled, prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder } = require('./scheduling/arrival-route');
@@ -184,14 +184,23 @@ async function probeMoveConflicts({
     excludeServiceIds,
     excludeStatuses: [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
     ...(travel !== undefined ? { travel } : {}),
-    // Second technician (GATE_MULTI_TECH_CONFIRM + capacity mode, dark): the
-    // PUBLIC self-serve reschedule alone opts into capacityPlacement (see
-    // reschedule-public.js), and its picker offers slots with the same
-    // tech-aware occupancy mirror /book uses — so its commit probe counts only
-    // the kept technician's rows plus unassigned ones. Every other caller
-    // (admin, rain-out, SMS, auto-dispatch) omits capacityPlacement and stays
-    // tech-blind; the occupancy probe ignores the option while the gate is off.
-    ...(options.capacityPlacement === true && target.technicianId
+    // Second technician (GATE_MULTI_TECH_CONFIRM + capacity mode, dark; owner
+    // 2026-10-03, "Moves"): a move judges the route of the technician the row
+    // is SAVED with — every caller builds `target.technicianId` from the
+    // technician its own write carries (the kept one, the destination of a
+    // reassignment, a swept occurrence's own) — so the technician's own
+    // stops plus unassigned rows count and another technician's stop does
+    // not. Unassigned (null) targets stay tech-blind. The scope is no longer
+    // tied to capacityPlacement (which also switches on insertion placement):
+    // the public reschedule's offers are tech-aware, and so is its commit
+    // either way. `occupancyTechBlind` opts a caller out where the row does
+    // NOT end on target.technicianId: the grouped-visit mover strips
+    // technicianId from its members' moves and re-points them afterwards, so
+    // a reassigning unit move probes tech-blind here exactly as its own
+    // destination check does; the tech-out preview is likewise a deliberately
+    // tech-blind selection gate. The occupancy probe ignores the option
+    // while the gate is off.
+    ...(options.occupancyTechBlind !== true && target.technicianId
       ? { technicianId: target.technicianId } : {}),
     ...(useArrivalWindows ? { arrivalWindow: {
       serviceId: target.id,
@@ -1306,7 +1315,7 @@ class SmartRebooker {
 
       // Skip candidates whose committed block would deterministically 409:
       // the picker submits window.start + the visit's own duration, so test
-      // exactly that span with the same tech-blind occupancy predicate
+      // exactly that span with the same occupancy predicate
       // reschedule() enforces. Without this, busy days surface suggestions
       // that can never be selected.
       const effDuration = (() => {
@@ -1346,6 +1355,11 @@ class SmartRebooker {
           // survive the commit's own probe. Admin reschedule-options stay
           // overlap-only — staff saves are advisory (GH codex #3803 r3 P2).
           ...(opts.travelGap === true ? { travel: { lat: service.lat ?? null, lng: service.lng ?? null } } : {}),
+          // Second technician (gate-scoped inside the probe): every committer
+          // of these days (rain-out, the admin picker) keeps the visit's own
+          // technician, and commit probes that technician's route — so the
+          // option is judged on the same route and offer == commit.
+          technicianId: service.technician_id || null,
         });
         if (clash.length) continue;
       } catch (err) {
@@ -2057,9 +2071,18 @@ class SmartRebooker {
       // concurrent-change 409 like every other CAS field.
       const techChangeRequested = Object.prototype.hasOwnProperty.call(updates, 'technician_id')
         && (updates.technician_id || null) !== (service.technician_id || null);
+      // Second technician: a technician-scoped occupancy probe judged keptTechId's
+      // route, taken from the same unlocked pre-read. A reassignment A→B that
+      // committed before this move's locks would have the probe check A's route
+      // while the row is saved on B — so while the scope is in effect the CAS pins
+      // the observed technician too (the same concurrent-change 409). Gate off or
+      // an unscoped probe: no extra predicate, byte for byte.
+      const scopedProbeInEffect = !!(keptTechId && updates.window_start && occupancyGateEnd
+        && options.occupancyTechBlind !== true && techScopedConfirmActive());
       const committedRows = await applyTrackLifecycleCas(
         trx('scheduled_services')
-          .where(techChangeRequested || Object.prototype.hasOwnProperty.call(options, 'expectConflictSnapshot')
+          .where(techChangeRequested || scopedProbeInEffect
+            || Object.prototype.hasOwnProperty.call(options, 'expectConflictSnapshot')
             ? { technician_id: service.technician_id ?? null } : {})
           // The full observed tracker/lifecycle snapshot is in the CAS (see
           // applyTrackLifecycleCas): the lifecycleRewound decision above
@@ -3241,6 +3264,10 @@ class SmartRebooker {
               excludeServiceIds: probeExcludeIds,
               excludeStatuses: [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
               travel: seriesTravel,
+              // Same route the sweep's own probe judges below (a follower keeps
+              // its own technician), so this disclosure and the write agree on
+              // which occurrences clash and park windowless.
+              technicianId: row.technician_id || null,
             });
             if (clash.length && !siblingClashWithinHorizon(date) && clash.every(isSeededPlaceholderRow)) {
               disclosed.to_start = null;

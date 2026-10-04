@@ -35,9 +35,19 @@ const PII = {
 };
 
 let currentRow;
-mockDb.mockImplementation(() => ({
-  where: () => ({ first: async () => currentRow }),
-}));
+// Phone candidates the accept's phone match (matchAcceptCustomerByPhone) sweeps; none by default.
+let phoneCandidates = [];
+const defaultDb = (table) => {
+  if (table === 'customers') {
+    const chain = {};
+    ['where', 'whereNull', 'orderBy', 'orderByRaw', 'orWhereRaw'].forEach((m) => { chain[m] = () => chain; });
+    chain.first = async () => null;
+    chain.then = (resolve, reject) => Promise.resolve(phoneCandidates).then(resolve, reject);
+    return chain;
+  }
+  return { where: () => ({ first: async () => currentRow }) };
+};
+mockDb.mockImplementation(defaultDb);
 
 function makeReq(path) {
   return {
@@ -181,8 +191,42 @@ describe('handleEstimateView — SSR viewability gate', () => {
       expect(next).toHaveBeenCalledTimes(1);
       expect(res.sent).toBe(false);
     } finally {
-      mockDb.mockImplementation(() => ({ where: () => ({ first: async () => currentRow }) }));
+      mockDb.mockImplementation(defaultDb);
     }
+  });
+
+  // B18 park: the legacy page's booking flow would end in a permanently refused accept, so a parked estimate (its
+  // phone belongs to another customer) goes to the React page, which renders the existing review state.
+  describe('a parked estimate (its lone phone candidate is contradicted) is never served the legacy booking page', () => {
+    const BOB = { id: 'cust-bob', phone: '(941) 555-7777', email: 'bob@example.com', address_line1: '9 Other St' };
+    const PARKED_ROW = { status: 'sent', expires_at: FUTURE, use_v2_view: false, sent_at: PAST, customer_id: null, customer_email: 'pat@example.com', token: 'tok-ssr-gate' };
+    afterEach(() => { phoneCandidates = []; });
+
+    test('explicit-v1 row on the /estimate/ mount falls through to the React view', async () => {
+      phoneCandidates = [BOB];
+      const { res, next } = await runView(PARKED_ROW, ESTIMATE_MOUNT);
+      expect(next).toHaveBeenCalledTimes(1);
+      expect(res.sent).toBe(false);
+    });
+
+    test('the /api/estimates mount redirects to the React URL instead of rendering the legacy page', async () => {
+      phoneCandidates = [BOB];
+      const { res, next } = await runView(PARKED_ROW, API_MOUNT);
+      expect(next).not.toHaveBeenCalled();
+      expect(res.statusCode).toBe(302);
+      expect(res.redirectUrl).toBe('/estimate/tok-ssr-gate');
+      expect(res.sent).toBe(false);
+    });
+
+    test('a failed park lookup fails toward the React view (the React page re-decides on its own /data)', async () => {
+      mockDb.mockImplementation((table) => (table === 'customers'
+        ? { where: () => { throw new Error('lookup boom'); } }
+        : { where: () => ({ first: async () => currentRow }) }));
+      try {
+        const failed = await runView(PARKED_ROW, ESTIMATE_MOUNT);
+        expect(failed.next).toHaveBeenCalledTimes(1);
+      } finally { mockDb.mockImplementation(defaultDb); }
+    });
   });
 
   test('unknown token still gets the generic not-found shell', async () => {

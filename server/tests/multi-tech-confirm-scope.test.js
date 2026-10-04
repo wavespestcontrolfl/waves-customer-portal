@@ -115,11 +115,42 @@ describe('wiring', () => {
     expect(src.slice(probeIdx, probeIdx + 700)).toContain('technicianId: technician_id || null');
   });
 
-  test('public reschedule probe opts in only via capacityPlacement (the public reschedule flag)', () => {
+  // Owner 2026-10-03, "Moves": the move probe is scoped to the technician the row is SAVED with
+  // (every caller builds target.technicianId from its own write), no longer only under
+  // capacityPlacement (which also switches on insertion placement and stays as it was). The
+  // grouped-visit mover and the tech-out preview opt out with occupancyTechBlind.
+  test('move probe scopes to target.technicianId unless the caller opts out via occupancyTechBlind', () => {
     const src = read('services/rebooker.js');
     const idx = src.indexOf('async function probeMoveConflicts');
-    const block = src.slice(idx, idx + 3200);
-    expect(block).toMatch(/options\.capacityPlacement === true && target\.technicianId\s*\?\s*\{ technicianId: target\.technicianId \}/);
+    const block = src.slice(idx, idx + 4800);
+    expect(block).toMatch(/options\.occupancyTechBlind !== true && target\.technicianId\s*\?\s*\{ technicianId: target\.technicianId \}/);
+    // The scope no longer rides capacityPlacement (insertion placement keeps its own switch).
+    expect(block).not.toContain('capacityPlacement === true && target.technicianId');
+    expect(src).toContain("options.capacityPlacement === true && placementWindowChanged && keptTechId");
+  });
+
+  test('move paths hand the probe the technician they WRITE: day options, series disclosure, unit move, tech-out, rain-out advisory', () => {
+    const rebooker = read('services/rebooker.js');
+    // Day-option builder: the visit's own technician (rain-out and the admin picker keep it).
+    const optIdx = rebooker.indexOf('async findRescheduleOptions');
+    expect(rebooker.slice(optIdx, optIdx + 9000)).toContain('technicianId: service.technician_id || null,');
+    // Series disclosure check = the follower's own technician, like the sweep probe.
+    const discIdx = rebooker.indexOf('const clash = await findConflictingVisits({', rebooker.indexOf('const needsReviewedOccurrences'));
+    expect(rebooker.slice(discIdx, discIdx + 900)).toContain('technicianId: row.technician_id || null,');
+    // A grouped unit move that names a technician keeps member probes tech-blind.
+    const groups = read('services/visit-groups.js');
+    expect(groups).toMatch(/techProbeOpts = Object\.prototype\.hasOwnProperty\.call\(options, 'technicianId'\)\s*\? \{ occupancyTechBlind: true \} : \{\}/);
+    expect(groups).toContain('...noticeOpts, ...techProbeOpts, expect: primaryExpect');
+    expect(groups).toContain('...noticeOpts, ...techProbeOpts, expect: { ...target.expect, ...optOutFence }');
+    // Tech-out's preview targets the ABSENT technician, so it stays the tech-blind selection gate.
+    expect(read('services/tech-out-auto-move.js')).toContain('previewMoveConflicts(stop.id, date, window, { occupancyTechBlind: true })');
+    // Auto-dispatch's all-day candidate read stays tech-blind (explicit null): its commit may be
+    // more permissive than the offer, never stricter.
+    expect(read('services/auto-dispatch/candidate-slots.js')).toMatch(/windowEnd: FULL_DAY_PROBE_WINDOW\.end,\s*technicianId: null,/);
+    // Rain-out's Quick Move advisory judges the same route commit probes.
+    const rain = read('services/rain-out.js');
+    expect(rain).toContain('technicianId: service.technician_id');
+    expect((rain.match(/technicianId: service\.technician_id/g) || []).length).toBe(3); // getOptions presets, checkTarget, route-scope probe
   });
 
   // Owner ruling 2026-10-03: with two technicians, staff booking or moving a

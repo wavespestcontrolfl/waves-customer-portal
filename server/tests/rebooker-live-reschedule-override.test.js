@@ -46,6 +46,8 @@ jest.mock('../services/scheduling/occupancy', () => ({
   // scheduling-occupancy) stubbed inert here too.
   acquireOccupancyLock: jest.fn().mockResolvedValue(undefined),
   acquireOccupancyLocks: jest.fn().mockResolvedValue(undefined),
+  // The move's CAS pins the technician only while the scoped probe is live.
+  techScopedConfirmActive: jest.fn(() => false),
 }));
 
 const db = require('../models/db');

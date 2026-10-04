@@ -335,3 +335,40 @@ describe('date availability failures', () => {
     expect(fetchMock.mock.calls[2][0]).toContain('date=2099-06-11');
   });
 });
+
+describe('SlotPicker (B18: an estimate parked for the office)', () => {
+  const REVIEW_BODY = { primary: [], expander: [], availableSlots: [], summary: null, reviewBeforeBooking: true, reason: 'contact_review', message: 'parked' };
+
+  it('hands the review shape to the page (onContactReview) instead of rendering it as an empty slot list', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(REVIEW_BODY)));
+    const onContactReview = vi.fn();
+    render(<SlotPicker token="tok" selectedSlotId={null} onSelect={vi.fn()} refreshSignal={0} onContactReview={onContactReview} />);
+    await waitFor(() => expect(onContactReview).toHaveBeenCalledTimes(1));
+    expect(onContactReview).toHaveBeenCalledWith(expect.objectContaining({ reason: 'contact_review' }));
+  });
+
+  it('the trenching-style review shape (another reason) is NOT treated as a park', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ ...REVIEW_BODY, reason: undefined })));
+    const onContactReview = vi.fn();
+    render(<SlotPicker token="tok" selectedSlotId={null} onSelect={vi.fn()} refreshSignal={0} onContactReview={onContactReview} />);
+    await waitFor(() => expect(global.fetch).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 20));
+    expect(onContactReview).not.toHaveBeenCalled();
+  });
+
+  it('a rejecting page transition never surfaces as an unhandled rejection from the slot read', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(REVIEW_BODY)));
+    const onContactReview = vi.fn(() => Promise.reject(new Error('refetch failed')));
+    const unhandled = [];
+    const onUnhandled = (e) => unhandled.push(e);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      render(<SlotPicker token="tok" selectedSlotId={null} onSelect={vi.fn()} refreshSignal={0} onContactReview={onContactReview} />);
+      await waitFor(() => expect(onContactReview).toHaveBeenCalledTimes(1));
+      await new Promise((r) => setTimeout(r, 20));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+});

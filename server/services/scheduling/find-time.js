@@ -128,8 +128,16 @@ async function findArrivalWindowSlots(opts) {
       const context = await loadArrivalRouteContext({
         serviceId: opts.arrivalWindow.serviceId, date, technicianId: tech.id,
         excludeServiceIds: opts.excludeServiceIds, changes: opts.arrivalWindow.changes, now,
+        // The staff availability box asks for the whole stop, or for this
+        // service alone when the operator chose to separate it
+        // (GATE_COMBO_ROUTE_CHECK; ignored when off or when the visit is alone).
+        unit: opts.arrivalWindow.unit === true, alone: opts.arrivalWindow.alone === true,
       });
       if (!context) continue;
+      // A whole visit: the technician must be able to do every service on it
+      // (the capacity path below applies the same filter).
+      if (context.target.memberServices && (await require('../technician-capabilities')
+        .inactiveCapabilitiesForServices(db, [tech.id], context.target.memberServices)).length) continue;
       const floor = Math.max(DAY_START_HOUR * 60, date === today ? parts.hour * 60 + parts.minute + 30 : 0);
       const candidates = enumerateArrivalPlacements(context, { durationMinutes, earliestStartMin: floor, latestServiceEndMin: ADMIN_DAY_END_MINUTES });
       evaluated += candidates.evaluated;
@@ -216,12 +224,16 @@ async function findCapacitySlots(opts) {
         excludeEstimateId: opts.excludeEstimateId,
         ...(opts.arrivalWindow?.serviceId ? {
           serviceId: opts.arrivalWindow.serviceId, changes: opts.arrivalWindow.changes,
+          // Same as the non-capacity path above.
+          unit: opts.arrivalWindow.unit === true, alone: opts.arrivalWindow.alone === true,
         } : { prospective: { lat: opts.lat, lng: opts.lng, estimated_duration_minutes: durationMinutes,
           service_type: opts.serviceType || opts.serviceKey || requestedServices.map(row => row.service_type).join(' ') } }),
       });
       if (!context) continue;
       if (opts.arrivalWindow?.serviceId && (await require('../technician-capabilities')
-        .inactiveCapabilitiesForServices(db, [tech.id], [context.target])).length) continue;
+        // A whole visit carries every member's service: the technician must
+        // be able to do all of them.
+        .inactiveCapabilitiesForServices(db, [tech.id], context.target.memberServices || [context.target])).length) continue;
       const floor = Math.max(SHIFT.startMinutes, startFloorFor(date, opts.earliestStartMin, opts.startFloorByDate),
         date === today ? parts.hour * 60 + parts.minute + 30 : 0);
       // Enumerate every on-the-hour start through the shift close and let

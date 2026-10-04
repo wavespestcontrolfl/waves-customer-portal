@@ -4615,7 +4615,11 @@ function ReviewBeforeBookingCard({ reason }) {
         Call Waves to confirm — {WAVES_PHONE_DISPLAY}
       </a>
       <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 12, lineHeight: 1.5 }}>
-        Prefer we reach out? We’ll follow up to confirm and schedule your visit. You pay on service day; no card or deposit now.
+        Prefer we reach out? We’ll follow up to confirm and schedule your visit.
+        {/* The payment-timing sentence stays for the trenching review only. A contact_review estimate (its phone belongs to
+            another customer) can be an invoice-only guarantee renewal or a recurring plan that may prepay, so "you pay on
+            service day" is not known to be true: that one sentence is simply not shown (no new wording). */}
+        {reason === 'contact_review' ? '' : ' You pay on service day; no card or deposit now.'}
       </div>
     </div>
   );
@@ -6450,6 +6454,14 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           return 'limit_reached';
         }
         if (r.status === 409 && body.code === 'SLOT_UNAVAILABLE') return 'slot_unavailable';
+        // B18: the phone turned contradictory while the hold was being extended - the route answers the coded
+        // office-review 409 and has released the hold. The ONE transition (like every other park call site) commits
+        // the review state locally from this body, then refreshes best effort; it never rejects. The callers' own
+        // guards stop on the cleared reservation, so no generic dead-hold recovery runs over it.
+        if (r.status === 409 && body.code === 'ACCEPT_NEEDS_OFFICE_REVIEW') {
+          await enterContactReviewRef.current(body);
+          return 'contact_review';
+        }
         // The route's specialized no-booking bodies (codex r7 P2): staff can
         // reshape an estimate mid-checkout into a commercial-manual,
         // guarantee-only or trenching-review contract, and /extend preserves
@@ -6507,6 +6519,45 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       method: 'DELETE',
     }).then((r) => r.ok || r.status === 404).catch(() => false);
   }, [token, readOnlyPreview]);
+
+  // B18: the server parked this estimate for the office (ACCEPT_NEEDS_OFFICE_REVIEW: its phone belongs to another
+  // customer) - answered by the accept PUT AND by both card-intent routes. ONE transition for all three call sites:
+  // drop every captured or minted card (Auto Pay card, one-time hold, open modals), release the slot hold the way the
+  // accept recovery does, and refetch /data, which now answers with the page's existing review-before-booking state
+  // (cta.reviewBeforeBooking, reviewReason 'contact_review'). Returns the sentence to show. A ref, assigned every
+  // render, so the handlers need no dependency on it.
+  const enterContactReviewRef = useRef(null);
+  enterContactReviewRef.current = async (body) => {
+    recurringCardSetupIntentIdRef.current = null;
+    setInlineCardIntent(null);
+    recurringCardIntentOpenRef.current = false;
+    setRecurringCardIntent(null);
+    cardHoldSetupIntentIdRef.current = null;
+    setCardHoldIntent(null);
+    const heldId = reservationRef.current?.scheduledServiceId || null;
+    setReservation(null);
+    setSelectedSlotId(null);
+    setSelectedSlotMeta(null);
+    setPaymentPreference(null);
+    // The review state is committed HERE, from the 409 body, before any network call: `data.cta` otherwise still
+    // carries the old bookable payload until the /data refetch lands, and a refetch that fails would send the customer
+    // back to a stale booking UI that only ever answers the same 409. These are the cta fields the page reads for
+    // its review card (the same ones /data sets for a contact_review park); the server's sentence is the one returned.
+    const sentence = body?.error || 'A Waves specialist reviews this quote with you and schedules your visit.';
+    setData((prev) => (prev ? {
+      ...prev,
+      cta: { ...(prev.cta || {}), canAccept: false, reviewBeforeBooking: true, reviewReason: 'contact_review', reviewMessage: sentence },
+    } : prev));
+    // A release that fails (network / 5xx) leaves the hold live and its id otherwise lost: retry once, and if it
+    // still fails keep the id in the page's existing pending-recovery ref - the same one recoverFromDeadHold
+    // sets before its release and falls back to on a retry - rather than dropping it.
+    let released = await releaseHeldReservation(heldId);
+    if (!released) released = await releaseHeldReservation(heldId);
+    if (!released && heldId) pendingRecoveryHoldRef.current = heldId;
+    // The refetch only refreshes the rest of the page and is best effort: the review state is already on screen.
+    try { await loadEstimate({ preserveSelection: true }); } catch { /* the local review state stands */ }
+    return sentence;
+  };
 
   // The ONE recovery for a hold that is definitively gone (codex r3 P1).
   // Clearing `reservation` alone was not enough: `data.estimate.acceptance`
@@ -7147,7 +7198,19 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       if (r.status === 409) {
         const body = await r.json().catch(() => ({}));
         if (reserveAttemptRef.current !== attemptId) return;
+        if (body.code === 'ACCEPT_NEEDS_OFFICE_REVIEW') {
+          // Parked for the office (B18): leave the booking UI for the review state, same transition as the accept.
+          await enterContactReviewRef.current(body);
+          return;
+        }
         const message = body.error || 'Unable to reserve this slot.';
+        if (body.code === 'CUSTOMER_BUSY_RETRY') {
+          // The matched customer row was being updated for a moment (nothing was reserved): retryable, with the
+          // server's own sentence - the customer's picked slot and payment choice stay, so they just tap again.
+          setError(message);
+          setCtaPhase('configure');
+          return;
+        }
         setPaymentPreference(null);
         setSelectedSlotId(null);
         setSelectedSlotMeta(null);
@@ -7497,6 +7560,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           throw new Error(body.error || 'Save a card for Auto Pay to confirm your recurring plan.');
         }
         if (r.status === 409) {
+          if (body.code === 'ACCEPT_NEEDS_OFFICE_REVIEW') {
+            throw new Error(await enterContactReviewRef.current(body));
+          }
           if (body.code === 'PAYMENT_TIMING_REFRESH') {
             // The server bills this selection now (afterVisitDeferred false) or
             // after the visit (true): show that timing for it, drop the
@@ -7713,6 +7779,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           body: JSON.stringify({ serviceMode, paymentMethodPreference: paymentPreference }),
         });
         const body = await r.json().catch(() => ({}));
+        if (r.status === 409 && body.code === 'ACCEPT_NEEDS_OFFICE_REVIEW') {
+          throw new Error(await enterContactReviewRef.current(body));
+        }
         if (r.status === 409 && body.exemptReason) {
           // Policy says no hold owed — fall through to accept. 'saved_method'
           // means the hold still stands (a saved card backs it); any other
@@ -7814,6 +7883,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           body: JSON.stringify({ serviceMode, paymentMethodPreference: paymentPreference }),
         });
         const body = await r.json().catch(() => ({}));
+        if (r.status === 409 && body.code === 'ACCEPT_NEEDS_OFFICE_REVIEW') {
+          throw new Error(await enterContactReviewRef.current(body));
+        }
         if (r.status === 409 && body.exemptReason) {
           // Policy says no card owed — fall through to the deposit/accept.
           // Only saved_method_consented / autopay_already_active keep the
@@ -8046,6 +8118,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         body: JSON.stringify({ serviceMode, paymentMethodPreference: paymentPreference, replaceSetupIntentId: setupIntentId }),
       });
       const body = await r.json().catch(() => ({}));
+      if (r.status === 409 && body.code === 'ACCEPT_NEEDS_OFFICE_REVIEW') {
+        await enterContactReviewRef.current(body);
+        return false;
+      }
       if (!r.ok || !body?.clientSecret) return false;
       if (recurringCardIntentOpenRef.current) {
         setRecurringCardIntent(body);
@@ -8152,6 +8228,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           body: JSON.stringify({ serviceMode, paymentMethodPreference: paymentPreference }),
         });
         const body = await r.json().catch(() => ({}));
+        // Parked for the office (B18): the page leaves checkout for the review state whatever the staleness below says.
+        if (r.status === 409 && body.code === 'ACCEPT_NEEDS_OFFICE_REVIEW') {
+          await enterContactReviewRef.current(body);
+          return;
+        }
         // Staleness re-check at RESOLVE time (r3 P2): a confirm tapped before
         // this pre-mint resolved fell back to the modal path with its own
         // intent — accepting this late response would render the inline
@@ -9732,6 +9813,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                   serviceCadences={serviceCadences}
                   onFirstSlotDate={setFirstSlotDate}
                   cityLabel={estimateCity}
+                  onContactReview={(body) => enterContactReviewRef.current(body).catch(() => {})}
                 />
               </div>
             ) : (
