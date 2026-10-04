@@ -10,10 +10,7 @@ jest.mock('../config/feature-gates', () => ({
   isEnabled: (name) => !!mockGates[name],
 }));
 const mockVerify = jest.fn();
-jest.mock('../utils/turnstile', () => ({
-  ...jest.requireActual('../utils/turnstile'),
-  verifyTurnstileToken: (...args) => mockVerify(...args),
-}));
+jest.mock('../utils/turnstile', () => ({ verifyTurnstileToken: (...args) => mockVerify(...args) }));
 const mockHold = jest.fn();
 // The commercial verdict itself is covered by the readiness suites; here it is
 // stubbed so the test pins only that the route hands it to the hold.
@@ -39,14 +36,7 @@ const post = async (body, headers = SITE) => {
   await postHandler()({ body, headers, ip: '203.0.113.9' }, res);
   return res;
 };
-const ORIGINAL_SECRET = process.env.TURNSTILE_SECRET_KEY;
-beforeAll(() => {
-  process.env.TURNSTILE_SECRET_KEY = JSON.stringify([{ secret: 's1', domains: ['wavespestcontrol.com'] }]);
-});
-afterAll(() => {
-  if (ORIGINAL_SECRET === undefined) delete process.env.TURNSTILE_SECRET_KEY;
-  else process.env.TURNSTILE_SECRET_KEY = ORIGINAL_SECRET;
-});
+
 const BODY = { first_name: 'Dana', last_name: 'Sample', phone: '9415550142', source: 'astro-quote' };
 
 beforeEach(() => {
@@ -82,6 +72,13 @@ describe('POST /api/leads — unverified hold', () => {
     const spoofed = { ...BODY, page_url: 'https://www.wavespestcontrol.com/', domain: 'wavespestcontrol.com' };
     expect((await post(spoofed, {})).statusCode).toBe(403);
     expect((await post(spoofed, { origin: 'https://evil.example' })).statusCode).toBe(403);
+    expect(mockHold).not.toHaveBeenCalled();
+  });
+
+  test('a non-string token field → 403, never held (the verifier reads it as missing)', async () => {
+    mockVerify.mockResolvedValue({ ok: false, enforced: true, reason: 'missing_token' });
+    expect((await post({ ...BODY, turnstile_token: {} })).statusCode).toBe(403);
+    expect((await post({ ...BODY, 'cf-turnstile-response': [] })).statusCode).toBe(403);
     expect(mockHold).not.toHaveBeenCalled();
   });
 

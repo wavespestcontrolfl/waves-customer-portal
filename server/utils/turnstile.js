@@ -144,8 +144,7 @@ function selectSecretForHost(widgets, host) {
  *   - siteverify errors / times out / 5xx            → verify_error / http_5xx
  *   - the owning secret is misconfigured             → config_error
  * Fails CLOSED (ok:false, enforced:true) only on a definitive negative:
- *   - secret set but token missing/blank, from a     → missing_token
- *     host that owns a widget
+ *   - secret set but token missing/blank             → missing_token
  *   - token longer than Cloudflare's 2048 cap        → malformed_token
  *   - host maps to no configured widget (forged/     → no_widget_match
  *     absent Origin, or an unmapped domain)
@@ -170,18 +169,6 @@ async function verifyTurnstileToken(token, remoteip, hostname) {
   }
   const trimmedToken = typeof token === 'string' ? token.trim() : '';
   if (!trimmedToken) {
-    // The host is judged FIRST: `missing_token` must mean "a form on one of
-    // our widget domains posted without a token", because the lead webhook
-    // holds that case for the office (services/lead-unverified-hold). A
-    // tokenless POST from an absent or unmapped host is a direct POST, not a
-    // slow widget, and reports no_widget_match like its tokened twin below.
-    // A host is REQUIRED here even in single-secret mode (whose catch-all
-    // widget matches any host, including none): a browser form always sends
-    // Origin on this cross-origin POST, so no host at all is a direct POST.
-    if (!String(hostname || '').trim() || !selectSecretForHost(widgets, hostname)) {
-      logger.info(`[turnstile] no widget matched host "${hostname || ''}"`);
-      return { ok: false, enforced: true, reason: 'no_widget_match' };
-    }
     // Secret is set → we intend to enforce → a missing/blank token is a real
     // failure. Reject here rather than letting siteverify return
     // missing-input-response (which would otherwise have to be caught below).
@@ -209,12 +196,4 @@ async function verifyTurnstileToken(token, remoteip, hostname) {
   return verifyOneSecret(secret, trimmedToken, remoteip);
 }
 
-// True when `hostname` is non-empty and a configured widget owns it. The lead
-// webhook asks this of the HEADER host before it holds a tokenless form.
-function hostOwnsTurnstileWidget(hostname) {
-  const host = String(hostname || '').trim();
-  if (!host) return false;
-  return !!selectSecretForHost(parseWidgetSecrets(process.env.TURNSTILE_SECRET_KEY), host);
-}
-
-module.exports = { verifyTurnstileToken, hostOwnsTurnstileWidget };
+module.exports = { verifyTurnstileToken };

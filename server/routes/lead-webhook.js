@@ -31,8 +31,8 @@ const { verifyLeadPrefillToken } = require('../utils/lead-prefill-token');
 const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
 const { cleanEmail, cleanText } = require('../utils/intake-normalize');
 const { properCase } = require('../utils/name-case');
-const { verifyTurnstileToken, hostOwnsTurnstileWidget } = require('../utils/turnstile');
-const { isHoneypotTripped, resolveSubmitHost, resolveHeaderHost } = require('../utils/lead-abuse');
+const { verifyTurnstileToken } = require('../utils/turnstile');
+const { isHoneypotTripped, resolveSubmitHost, isHoldableTokenlessPost } = require('../utils/lead-abuse');
 const { holdUnverifiedLead } = require('../services/lead-unverified-hold');
 const {
   blockIfAutomatedEstimateDuplicate,
@@ -325,11 +325,11 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         // That is usually a real visitor on a slow phone, so the request is
         // held for the office instead of dropped: a customer-less lead and a
         // bell, none of the fan-out below (services/lead-unverified-hold).
-        // Eligibility comes from the browser-set Origin/Referer only: the
-        // body's page_url / domain are caller-supplied and must not make a
-        // direct POST look like one of our forms.
+        // Eligibility (utils/lead-abuse isHoldableTokenlessPost): the token
+        // fields are genuinely absent and the browser-set Origin/Referer
+        // names a fleet site. It does not depend on the secret configuration.
         if (turnstile.reason === 'missing_token' && isEnabled('leadUnverifiedHold')
-          && hostOwnsTurnstileWidget(resolveHeaderHost(req))) {
+          && isHoldableTokenlessPost(req)) {
           try {
             const heldIntake = buildLeadWebhookIntake(body);
             const held = await holdUnverifiedLead({

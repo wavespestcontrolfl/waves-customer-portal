@@ -8,6 +8,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const { _test } = require('../routes/lead-webhook');
 const { isHoneypotTripped } = _test;
 const { verifyTurnstileToken } = require('../utils/turnstile');
+const { isHoldableTokenlessPost } = require('../utils/lead-abuse');
 
 describe('isHoneypotTripped', () => {
   test('absent honeypot field passes (old cached pages omit it)', () => {
@@ -63,33 +64,15 @@ describe('verifyTurnstileToken', () => {
   test('secret set but token missing → fails CLOSED, no network call', async () => {
     process.env.TURNSTILE_SECRET_KEY = 'secret';
     fetchSpy = jest.spyOn(global, 'fetch');
-    const r = await verifyTurnstileToken('', '1.2.3.4', 'www.wavespestcontrol.com');
+    const r = await verifyTurnstileToken('', '1.2.3.4');
     expect(r).toMatchObject({ ok: false, enforced: true, reason: 'missing_token' });
-    // Single-secret mode matches any host, but NO host at all is a direct
-    // POST: it must not earn the holdable missing_token verdict.
-    expect(await verifyTurnstileToken('', '1.2.3.4'))
-      .toMatchObject({ ok: false, enforced: true, reason: 'no_widget_match' });
-    expect(fetchSpy).not.toHaveBeenCalled();
-  });
-
-  test('no token from a host with no widget → no_widget_match, never missing_token', async () => {
-    // missing_token is the one verdict the lead webhook holds for the office,
-    // so a tokenless direct POST (absent or unmapped host) must not earn it.
-    process.env.TURNSTILE_SECRET_KEY = JSON.stringify([{ secret: 's1', domains: ['wavespestcontrol.com'] }]);
-    fetchSpy = jest.spyOn(global, 'fetch');
-    expect(await verifyTurnstileToken('', '1.2.3.4', 'evil.example'))
-      .toMatchObject({ ok: false, enforced: true, reason: 'no_widget_match' });
-    expect(await verifyTurnstileToken('', '1.2.3.4', ''))
-      .toMatchObject({ ok: false, enforced: true, reason: 'no_widget_match' });
-    expect(await verifyTurnstileToken('', '1.2.3.4', 'www.wavespestcontrol.com'))
-      .toMatchObject({ ok: false, enforced: true, reason: 'missing_token' });
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   test('blank / whitespace-only token → fails CLOSED before any network call', async () => {
     process.env.TURNSTILE_SECRET_KEY = 'secret';
     fetchSpy = jest.spyOn(global, 'fetch');
-    const r = await verifyTurnstileToken('   ', '1.2.3.4', 'www.wavespestcontrol.com');
+    const r = await verifyTurnstileToken('   ', '1.2.3.4');
     expect(r).toMatchObject({ ok: false, enforced: true, reason: 'missing_token' });
     expect(fetchSpy).not.toHaveBeenCalled();
   });
@@ -244,5 +227,38 @@ describe('verifyTurnstileToken', () => {
     const r = await verifyTurnstileToken('tok', '1.2.3.4', 'anything.example.com');
     expect(r).toMatchObject({ ok: true, enforced: true, reason: 'verified' });
     expect(String(fetchSpy.mock.calls[0][1].body)).toContain('secret=lone-secret');
+  });
+});
+
+describe('isHoldableTokenlessPost — who the unverified lead hold accepts', () => {
+  const SITE = { origin: 'https://www.wavespestcontrol.com' };
+  const req = (body, headers = SITE) => ({ body, headers });
+
+  test('a fleet-site Origin (or Referer) with no token is holdable', () => {
+    expect(isHoldableTokenlessPost(req({}))).toBe(true);
+    expect(isHoldableTokenlessPost(req({ turnstile_token: '' }))).toBe(true);
+    expect(isHoldableTokenlessPost(req({ turnstile_token: '  ', 'cf-turnstile-response': null }))).toBe(true);
+    expect(isHoldableTokenlessPost(req({}, { referer: 'https://wavespestcontrol.com/pest-control/' }))).toBe(true);
+  });
+
+  test('a foreign or absent Origin is never holdable, whatever the secret format', () => {
+    // Independent of TURNSTILE_SECRET_KEY: a single catch-all secret "owns"
+    // every host, so the widget map cannot decide this.
+    expect(isHoldableTokenlessPost(req({}, { origin: 'https://evil.example' }))).toBe(false);
+    expect(isHoldableTokenlessPost(req({}, {}))).toBe(false);
+    expect(isHoldableTokenlessPost(req({}, { origin: 'https://wavespestcontrol.com.evil.example' }))).toBe(false);
+  });
+
+  test('body fields never make a direct POST look like a fleet form', () => {
+    const body = { page_url: 'https://www.wavespestcontrol.com/', landing_url: 'https://www.wavespestcontrol.com/', domain: 'wavespestcontrol.com' };
+    expect(isHoldableTokenlessPost(req(body, {}))).toBe(false);
+  });
+
+  test('a non-string or non-blank token field is a crafted credential, not an absent one', () => {
+    expect(isHoldableTokenlessPost(req({ turnstile_token: {} }))).toBe(false);
+    expect(isHoldableTokenlessPost(req({ turnstile_token: [] }))).toBe(false);
+    expect(isHoldableTokenlessPost(req({ turnstile_token: 0 }))).toBe(false);
+    expect(isHoldableTokenlessPost(req({ 'cf-turnstile-response': { a: 1 } }))).toBe(false);
+    expect(isHoldableTokenlessPost(req({ turnstile_token: 'x' }))).toBe(false);
   });
 });

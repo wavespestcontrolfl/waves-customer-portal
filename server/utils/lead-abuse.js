@@ -32,14 +32,32 @@ function resolveSubmitHost(req) {
     || (typeof body.domain === 'string' ? body.domain.toLowerCase() : '');
 }
 
-// The submitting host from the browser-set headers ONLY. resolveSubmitHost's
-// body fallbacks (page_url, landing_url, domain) are caller-supplied, so they
-// may pick which widget secret checks a token, but they must never make a
-// tokenless direct POST look like one of our forms: the unverified lead hold
-// (services/lead-unverified-hold) takes its eligibility from this.
-function resolveHeaderHost(req) {
+// Is this tokenless lead POST one the webhook may HOLD for the office
+// (services/lead-unverified-hold) instead of refusing? Both conditions are
+// independent of the Turnstile secret configuration:
+//
+//   1. The token is genuinely ABSENT: both token fields are missing, null or
+//      a blank string. A non-string value ({} / [] / a number) is a crafted
+//      credential, not a slow widget, even though the verifier reads it as
+//      empty.
+//   2. The browser-set Origin (else Referer) header names a site in the
+//      explicit fleet list. Body fields (page_url, landing_url, domain) are
+//      caller-supplied and never count, and a catch-all single-secret widget
+//      "owning" every host does not count either.
+//
+// A non-browser client can still forge Origin; what that buys is one
+// customer-less lead and one bell per phone per day, inside the rate limits.
+function tokenFieldAbsent(value) {
+  return value === undefined || value === null || (typeof value === 'string' && value.trim() === '');
+}
+function isHoldableTokenlessPost(req) {
+  const body = (req && req.body) || {};
+  if (!tokenFieldAbsent(body.turnstile_token) || !tokenFieldAbsent(body['cf-turnstile-response'])) return false;
   const headers = (req && req.headers) || {};
-  return hostFromUrl(headers.origin) || hostFromUrl(headers.referer);
+  const host = (hostFromUrl(headers.origin) || hostFromUrl(headers.referer)).replace(/^www\./, '');
+  // Lazy: spoke-sites pulls the content-astro config, not needed at load.
+  const { SPOKE_SITE_KEYS } = require('../services/content-astro/spoke-sites');
+  return !!host && SPOKE_SITE_KEYS.includes(host);
 }
 
-module.exports = { isHoneypotTripped, resolveSubmitHost, resolveHeaderHost };
+module.exports = { isHoneypotTripped, resolveSubmitHost, isHoldableTokenlessPost };

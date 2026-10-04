@@ -2971,12 +2971,15 @@ guards on both endpoints: honeypot silent-200, then Turnstile, enforced
 under `GATE_LEAD_TURNSTILE`. An enforced Turnstile failure answers 403
 `{ error: 'Verification failed. Please try again.' }` with no write, with
 ONE exception, the unverified hold (`GATE_LEAD_UNVERIFIED_HOLD`, default
-on, `false` = no exception): when the verdict is `missing_token` — no
-token — AND the browser-set `Origin` (else `Referer`) header names a host
-that owns a configured widget (the body's `page_url` / `landing_url` /
-`domain` are caller-supplied and never count toward hold eligibility; a
-tokenless POST with no host at all, single-secret mode included, or from an
-unmapped host is `no_widget_match`), and the
+on, `false` = no exception): when the verdict is `missing_token` AND
+`isHoldableTokenlessPost` (`server/utils/lead-abuse.js`) passes — both
+token fields (`turnstile_token`, `cf-turnstile-response`) are genuinely
+absent, null or a blank string (a non-string value is a crafted credential
+and keeps the 403), and the browser-set `Origin` (else `Referer`) header
+names a site in the explicit fleet list (`SPOKE_SITE_KEYS`, with or without
+`www.`). That check does not read the Turnstile secret configuration, so a
+single catch-all secret cannot make a foreign host eligible, and the body's
+`page_url` / `landing_url` / `domain` never count — and the
 submission carries a 10-digit phone and no unit conflict,
 `server/services/lead-unverified-hold.js` writes exactly one customer-less
 `leads` row (`lead_type 'form_submission'`, `status 'new'`, `customer_id`
@@ -2998,7 +3001,8 @@ lead after confirming them with the person), one
 `customers` row, never drafts an estimate, never texts, emails or calls the
 visitor, and never starts the Lead Response Agent, the drip or the
 auto-bridge. A repeat from the same phone inside 24 hours returns the same
-200 and writes nothing. A rejected, oversized or unmapped-host token, a
+200 and writes nothing. A rejected or oversized token, a foreign or absent
+Origin/Referer, a non-string token field, a
 hold that declines or fails, and the gate set `false` all keep the 403. A
 diff that lets a held submission reach any customer-facing or paid side
 effect, that stores a held submission's phone or email in `leads.phone` /
