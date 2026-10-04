@@ -39,6 +39,7 @@ const { composeAdminAlert } = jest.requireActual('../services/admin-alert-compos
 const { holdUnverifiedLead, HOLD_STAGE } = require('../services/lead-unverified-hold');
 const { _test } = require('../routes/lead-webhook');
 const { CUSTOMER_ORIGINATED_LEAD_CHANNELS } = require('../services/collections/consent-provenance');
+const { urgencyForTimeline } = require('../services/lead-timeline');
 
 const intakeFor = (body) => _test.buildLeadWebhookIntake(body);
 const BODY = {
@@ -126,6 +127,25 @@ describe('holdUnverifiedLead', () => {
     await holdUnverifiedLead({ intake: intakeFor({ ...BODY, message: 'Ants in the  kitchen.\nCall after 3.' }) });
     expect(JSON.parse(mockState.inserts[0].row.extracted_data).message).toBe('Ants in the kitchen. Call after 3.');
     expect(mockState.inserts[1].row.description).toContain('Visitor wrote: "Ants in the kitchen. Call after 3."');
+  });
+
+  test('timeline, sign host, extra properties and the commercial verdict reach the row and the note', async () => {
+    await holdUnverifiedLead({
+      intake: intakeFor({ ...BODY, timeline: 'now', sign_host: '12 Sample Sign Ct' }),
+      commercialFields: { is_commercial: true, is_residential: false },
+    });
+    const lead = mockState.inserts[0].row;
+    expect(lead.urgency).toBe(urgencyForTimeline('now'));
+    expect(lead).toMatchObject({ is_commercial: true, is_residential: false });
+    expect(mockState.inserts[1].row.description).toContain('Saw our yard sign at: 12 Sample Sign Ct');
+  });
+
+  test('a long message is cut by code point, never mid-emoji', async () => {
+    await holdUnverifiedLead({ intake: intakeFor({ ...BODY, message: `${'a'.repeat(999)}\u{1F41C}\u{1F41C}` }) });
+    const kept = JSON.parse(mockState.inserts[0].row.extracted_data).message;
+    expect(Array.from(kept)).toHaveLength(1000);
+    expect(kept.endsWith('\u{1F41C}')).toBe(true);
+    expect(kept.isWellFormed()).toBe(true);
   });
 
   test('a bell failure does not undo the saved lead', async () => {

@@ -209,4 +209,12 @@ async function verifyTurnstileToken(token, remoteip, hostname) {
   return verifyOneSecret(secret, trimmedToken, remoteip);
 }
 
-module.exports = { verifyTurnstileToken };
+// True when `hostname` is non-empty and a configured widget owns it. The lead
+// webhook asks this of the HEADER host before it holds a tokenless form.
+function hostOwnsTurnstileWidget(hostname) {
+  const host = String(hostname || '').trim();
+  if (!host) return false;
+  return !!selectSecretForHost(parseWidgetSecrets(process.env.TURNSTILE_SECRET_KEY), host);
+}
+
+module.exports = { verifyTurnstileToken, hostOwnsTurnstileWidget };

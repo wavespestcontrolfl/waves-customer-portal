@@ -31,6 +31,8 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { zipToCity } = require('../utils/zip-to-city');
+const { urgencyForTimeline } = require('./lead-timeline');
+const { formatAddress } = require('../utils/address-normalizer');
 
 const HOLD_STAGE = 'lead_webhook_unverified';
 // Deliberately not one of the customer-originated channels the consent probes
@@ -43,7 +45,9 @@ const HOLD_DEDUPE_HOURS = 24;
 // free text; whitespace collapsed so a pasted block reads as one line.
 const MESSAGE_MAX = 1000;
 function holdMessage(value) {
-  return String(value || '').replace(/\s+/g, ' ').trim().slice(0, MESSAGE_MAX);
+  // Cut by code point: a UTF-16 slice can split an emoji and leave a lone
+  // surrogate, which jsonb rejects.
+  return Array.from(String(value || '').replace(/\s+/g, ' ').trim()).slice(0, MESSAGE_MAX).join('').trim();
 }
 const HOLD_WHY = 'The website bot check did not finish, so no automatic reply went out.';
 
@@ -85,10 +89,11 @@ async function ringHeldLead({ lead, name, serviceInterest }) {
  * @param {object} args.intake        buildLeadWebhookIntake(body)
  * @param {?string} args.leadSourceId resolved lead_sources id, or null
  * @param {string} args.reason        the Turnstile failure reason being held
+ * @param {object} [args.commercialFields] is_commercial / is_residential from the route's commercial verdict
  * @returns {Promise<{held: boolean, leadId?: string, deduped?: boolean, reason?: string}>}
  *   held:false means the submission is not holdable and the caller keeps its 403.
  */
-async function holdUnverifiedLead({ intake, leadSourceId = null, reason = 'missing_token' }) {
+async function holdUnverifiedLead({ intake, leadSourceId = null, reason = 'missing_token', commercialFields = {} }) {
   const phone = holdPhone(intake.rawPhone);
   const firstName = String(intake.firstName || '').trim();
   // Same floor the verified path enforces before it writes: a reachable phone
@@ -99,6 +104,17 @@ async function holdUnverifiedLead({ intake, leadSourceId = null, reason = 'missi
   const lastName = String(intake.lastName || '').trim();
   const address = intake.normalizedAddress || {};
   const message = holdMessage(intake.message);
+  // The visitor's declared timeline sets urgency, as on the verified path.
+  const declaredUrgency = urgencyForTimeline(intake.timeline);
+  // Staff-visible lines the verified path puts on its Customer 360 note. No
+  // admin lead UI renders extracted_data, so they ride on the activity note.
+  const extraProperties = intake.additionalProperties || [];
+  const noteLines = [
+    intake.signHost ? `Saw our yard sign at: ${intake.signHost} (neighbor page; that home gets a $25 thank-you credit after a new customer's first service).` : '',
+    extraProperties.length
+      ? `Visitor also asked to cover: ${extraProperties.map((p) => formatAddress({ line1: p.address_line1, line2: p.address_line2, city: p.city, state: p.state, zip: p.zip })).join('; ')}.`
+      : '',
+  ].filter(Boolean);
   const stage = {
     stage: HOLD_STAGE,
     verification: { turnstile: reason },
@@ -150,6 +166,7 @@ async function holdUnverifiedLead({ intake, leadSourceId = null, reason = 'missi
       lead_source_id: leadSourceId,
       lead_type: 'form_submission',
       service_interest: intake.serviceInterest || null,
+      ...(declaredUrgency ? { urgency: declaredUrgency } : {}),
       extracted_data: JSON.stringify(stage),
       first_contact_at: new Date(),
       first_contact_channel: HOLD_CHANNEL,
@@ -164,6 +181,7 @@ async function holdUnverifiedLead({ intake, leadSourceId = null, reason = 'missi
       heard_about: intake.heardAbout || null,
       heard_about_prompt: intake.heardAboutPrompt || null,
       is_residential: true,
+      ...commercialFields,
     }).returning('*');
 
     await trx('lead_activities').insert({
@@ -171,6 +189,7 @@ async function holdUnverifiedLead({ intake, leadSourceId = null, reason = 'missi
       activity_type: 'created',
       description: 'Unverified website request: the bot check did not finish. No automatic reply, customer profile or estimate was created.'
         + ` Submitted contact, not verified: phone ${phone}; email ${intake.email || 'none'}. Add them to the lead after you confirm them with the person.`
+        + (noteLines.length ? ` ${noteLines.join(' ')}` : '')
         + (message ? ` Visitor wrote: "${message}"` : ''),
       performed_by: 'Lead webhook',
     });

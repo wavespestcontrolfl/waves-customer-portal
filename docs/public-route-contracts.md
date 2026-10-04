@@ -2972,15 +2972,20 @@ under `GATE_LEAD_TURNSTILE`. An enforced Turnstile failure answers 403
 `{ error: 'Verification failed. Please try again.' }` with no write, with
 ONE exception, the unverified hold (`GATE_LEAD_UNVERIFIED_HOLD`, default
 on, `false` = no exception): when the verdict is `missing_token` — no
-token, from a NAMED host that owns a configured widget; a tokenless POST
-with no host at all (single-secret mode included) or from an unmapped host
-is `no_widget_match` and keeps the 403 — and the
+token — AND the browser-set `Origin` (else `Referer`) header names a host
+that owns a configured widget (the body's `page_url` / `landing_url` /
+`domain` are caller-supplied and never count toward hold eligibility; a
+tokenless POST with no host at all, single-secret mode included, or from an
+unmapped host is `no_widget_match`), and the
 submission carries a 10-digit phone and no unit conflict,
 `server/services/lead-unverified-hold.js` writes exactly one customer-less
 `leads` row (`lead_type 'form_submission'`, `status 'new'`, `customer_id`
 NULL, `first_contact_channel 'form_unverified'`,
 `extracted_data.stage = 'lead_webhook_unverified'`, the visitor's
-`message` capped at 1000 characters in `extracted_data.message`; `phone`
+`message` capped at 1000 code points in `extracted_data.message`; `timeline`
+mapped onto `leads.urgency` and the commercial verdict onto
+`is_commercial` / `is_residential` exactly as on the verified path;
+`sign_host` and any additional properties quoted on the activity note; `phone`
 and `email` are NULL on the row and the submitted values live only in
 `extracted_data.unverified_contact` and the activity note, because every
 reader that trusts a lead's contact — ad audiences, the email

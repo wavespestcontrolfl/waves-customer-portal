@@ -31,8 +31,8 @@ const { verifyLeadPrefillToken } = require('../utils/lead-prefill-token');
 const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
 const { cleanEmail, cleanText } = require('../utils/intake-normalize');
 const { properCase } = require('../utils/name-case');
-const { verifyTurnstileToken } = require('../utils/turnstile');
-const { isHoneypotTripped, resolveSubmitHost } = require('../utils/lead-abuse');
+const { verifyTurnstileToken, hostOwnsTurnstileWidget } = require('../utils/turnstile');
+const { isHoneypotTripped, resolveSubmitHost, resolveHeaderHost } = require('../utils/lead-abuse');
 const { holdUnverifiedLead } = require('../services/lead-unverified-hold');
 const {
   blockIfAutomatedEstimateDuplicate,
@@ -325,11 +325,22 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         // That is usually a real visitor on a slow phone, so the request is
         // held for the office instead of dropped: a customer-less lead and a
         // bell, none of the fan-out below (services/lead-unverified-hold).
-        if (turnstile.reason === 'missing_token' && isEnabled('leadUnverifiedHold')) {
+        // Eligibility comes from the browser-set Origin/Referer only: the
+        // body's page_url / domain are caller-supplied and must not make a
+        // direct POST look like one of our forms.
+        if (turnstile.reason === 'missing_token' && isEnabled('leadUnverifiedHold')
+          && hostOwnsTurnstileWidget(resolveHeaderHost(req))) {
           try {
             const heldIntake = buildLeadWebhookIntake(body);
             const held = await holdUnverifiedLead({
               intake: heldIntake,
+              // Same deterministic commercial verdict the verified path
+              // records on its lead row.
+              commercialFields: commercialLeadFields(evaluateLeadEstimateAutomationReadiness({
+                intake: heldIntake,
+                body,
+                serviceInterest: heldIntake.serviceInterest,
+              })),
               leadSourceId: await resolveLeadSourceId(heldIntake.leadSource, heldIntake.utmContent),
               reason: turnstile.reason,
             });

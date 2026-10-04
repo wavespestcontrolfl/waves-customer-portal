@@ -32,4 +32,14 @@ function resolveSubmitHost(req) {
     || (typeof body.domain === 'string' ? body.domain.toLowerCase() : '');
 }
 
-module.exports = { isHoneypotTripped, resolveSubmitHost };
+// The submitting host from the browser-set headers ONLY. resolveSubmitHost's
+// body fallbacks (page_url, landing_url, domain) are caller-supplied, so they
+// may pick which widget secret checks a token, but they must never make a
+// tokenless direct POST look like one of our forms: the unverified lead hold
+// (services/lead-unverified-hold) takes its eligibility from this.
+function resolveHeaderHost(req) {
+  const headers = (req && req.headers) || {};
+  return hostFromUrl(headers.origin) || hostFromUrl(headers.referer);
+}
+
+module.exports = { isHoneypotTripped, resolveSubmitHost, resolveHeaderHost };
