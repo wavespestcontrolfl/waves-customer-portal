@@ -101,13 +101,25 @@ async function queueContactReportTexts({ customerId, sourceKey, reportUrl, sched
   const profile = await loadCustomer(customerId);
   if (!profile || !slotContacts(profile).length) return 0;
   const { renderSmsTemplate } = require('./sms-template-renderer');
-  // A template read that fails throws; a missing or inactive row, or an
-  // edited body that lost {report_url}, is "off" (the link is the message).
-  const body = await renderSmsTemplate(TEMPLATE_KEY, {
-    street_address: await streetAddress(db, scheduledServiceId, profile),
-    report_url: reportUrl,
-  }, { workflow: TEMPLATE_KEY, entity_type: 'customer', entity_id: customerId }, { throwOnError: true, requiredVars: ['report_url'] });
-  if (!body || !body.includes(reportUrl)) return 0;
+  const { firstNameFrom, getServiceContactSlots } = require('./customer-contact');
+  // The slot's OWN name: the contact list falls back to the account holder's
+  // name for a nameless slot, and a contact must not be greeted by it.
+  const slotName = (phone) => getServiceContactSlots(profile).find((slot) => phoneKey(slot.phone) === phoneKey(phone))?.name || '';
+  const street = await streetAddress(db, scheduledServiceId, profile);
+  // One body per slot contact (the greeting names the CONTACT, never the
+  // account holder), keyed by phone. A template read that fails throws; a
+  // missing or inactive row, or an edited body that lost {report_url}, is
+  // "off" (the link is the message).
+  const bodyByPhone = new Map();
+  for (const contact of slotContacts(profile)) {
+    const body = await renderSmsTemplate(TEMPLATE_KEY, {
+      first_name: firstNameFrom(slotName(contact.phone)) || 'there',
+      street_address: street,
+      report_url: reportUrl,
+    }, { workflow: TEMPLATE_KEY, entity_type: 'customer', entity_id: customerId }, { throwOnError: true, requiredVars: ['report_url'] });
+    if (!body || !body.includes(reportUrl)) return 0;
+    bodyByPhone.set(phoneKey(contact.phone), body);
+  }
   return db.transaction(async (trx) => {
     // The contact-save lock (routes/notifications.js): the contact list
     // cannot change between this read and the queue rows.
@@ -119,6 +131,10 @@ async function queueContactReportTexts({ customerId, sourceKey, reportUrl, sched
     const fromPhone = require('../config/twilio-numbers').getOutboundNumber();
     let queued = 0;
     for (const contact of contacts) {
+      // A contact added after the bodies were rendered has none: skipped
+      // (they were not a contact when this visit's text went out).
+      const body = bodyByPhone.get(phoneKey(contact.phone));
+      if (!body) continue;
       const reportKey = `${sourceKey}:${phoneKey(contact.phone)}`;
       const existing = await trx('sms_log')
         .where({ customer_id: customerId, message_type: MESSAGE_TYPE })

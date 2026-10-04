@@ -52,7 +52,7 @@ const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const { optinHeldPhoneKeys } = require('../services/recipient-optin');
 const ContactReportText = require('../services/contact-report-text');
 
-const BODY = 'Waves Pest Control: The service report for 12 Example Way is ready: https://portal.example/report/tok';
+const BODY = 'Hello Riley! The Waves service report for 12 Example Way is ready: https://portal.example/report/tok\n\nQuestions or requests? Reply here.';
 const CUSTOMER = {
   id: 'cust-1', first_name: 'Dana', phone: '+19415550100', address_line1: '99 Profile Rd',
   service_contact_name: 'Riley Tenant', service_contact_phone: '(941) 555-0123',
@@ -124,10 +124,18 @@ describe('queueContactReportTexts', () => {
     expect(meta.refresh_customer_phone).toBeUndefined();
     expect(meta.useCustomerChannel).toBeUndefined();
     expect(renderSmsTemplate).toHaveBeenCalledWith('contact_report_ready',
-      { street_address: '12 Example Way', report_url: 'https://portal.example/report/tok' }, expect.any(Object),
+      { first_name: 'Riley', street_address: '12 Example Way', report_url: 'https://portal.example/report/tok' }, expect.any(Object),
       { throwOnError: true, requiredVars: ['report_url'] });
     // A worker that predates the registry entry refuses the row.
     expect(meta.requires_registered_dispatch).toBe(true);
+  });
+
+  test('each contact is greeted by their own first name; a nameless contact is never greeted by the account holder\'s', async () => {
+    const customer = { ...CUSTOMER, service_contact2_name: null };
+    queueReads(customer);
+    renderSmsTemplate.mockImplementation(async (_key, vars) => `Hello ${vars.first_name}! The Waves service report for ${vars.street_address} is ready: ${vars.report_url}`);
+    expect(await ContactReportText.queueContactReportTexts(ARGS)).toBe(2);
+    expect(inserts().map((r) => r.message_body.split('!')[0])).toEqual(['Hello Riley', 'Hello there']);
   });
 
   test('the body is rendered before the transaction opens (the template read uses the root pool)', async () => {
@@ -364,13 +372,27 @@ describe('registry entry contact_report_ready_deferred', () => {
 describe('the approved wording and the hooks', () => {
   const read = (rel) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
 
-  test('the template is the owner-approved text, GSM-7, with no STOP line', () => {
-    const { TEMPLATE } = require('../models/migrations/20261003150000_contact_report_ready_template');
-    expect(TEMPLATE.body).toBe('Waves Pest Control: The service report for {street_address} is ready: {report_url}');
-    expect(TEMPLATE.variables).toEqual(['street_address', 'report_url']);
-     
-    expect(TEMPLATE.body).toMatch(/^[\x00-\x7F]+$/);
-    expect(TEMPLATE.body).not.toMatch(/STOP/);
+  test('the template is in the house voice: "Hello {first_name}!", "Waves", the link, the standard closing; no STOP line', () => {
+    const seed = require('../models/migrations/20261003150000_contact_report_ready_template');
+    const voice = require('../models/migrations/20261004090000_contact_report_ready_house_voice');
+    expect(voice.BODY).toBe('Hello {first_name}! The Waves service report for {street_address} is ready: {report_url}\n\nQuestions or requests? Reply here.');
+    expect(voice.VARIABLES).toEqual(['first_name', 'street_address', 'report_url']);
+    // GSM-7: plain ASCII only.
+    expect([...voice.BODY].every((ch) => ch.charCodeAt(0) < 128)).toBe(true);
+    expect(voice.BODY).not.toMatch(/STOP|Pest Control/);
+    // Only the seeded wording is replaced (an admin edit is kept).
+    expect(voice.SEEDED_BODY).toBe(seed.TEMPLATE.body);
+  });
+
+  test('the wording migration replaces only the seeded body, and its down restores it', async () => {
+    const voice = require('../models/migrations/20261004090000_contact_report_ready_house_voice');
+    const calls = [];
+    const knex = (table) => ({ where: (cond) => ({ update: async (patch) => { calls.push({ table, cond, patch }); return 1; } }) });
+    knex.schema = { hasTable: async () => true };
+    await voice.up(knex);
+    await voice.down(knex);
+    expect(calls[0]).toMatchObject({ table: 'sms_templates', cond: { template_key: 'contact_report_ready', body: voice.SEEDED_BODY }, patch: { body: voice.BODY } });
+    expect(calls[1]).toMatchObject({ cond: { template_key: 'contact_report_ready', body: voice.BODY }, patch: { body: voice.SEEDED_BODY } });
   });
 
   test('the closeout queues it only with a real report link, on sent, on a send-window hold and in the accepted-send recovery', () => {
