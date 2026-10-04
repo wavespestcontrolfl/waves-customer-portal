@@ -2453,11 +2453,12 @@ export default function EstimateToolViewV2({
       if (!askLeads) return;
       (async () => {
         try {
-          // A lead that already has a customer record is found through that
-          // customer, so only customer-less leads are asked for (no_customer=1,
-          // applied server-side before the limit).
+          // Only leads a new estimate can attach to: no customer record (that
+          // person is found through the customer), no estimate yet, and a
+          // phone or an email (estimate_attachable=1, applied server-side
+          // before the limit).
           const response = await fetch(
-            `/api/admin/leads?status=open&no_customer=1&limit=8&search=${encodeURIComponent(q)}`,
+            `/api/admin/leads?status=open&estimate_attachable=1&limit=8&search=${encodeURIComponent(q)}`,
             { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal },
           );
           if (!response.ok) throw new Error("Lead search failed");
@@ -2564,8 +2565,9 @@ export default function EstimateToolViewV2({
       ...(lead.address && lead.address !== f.address ? clearedPropertyFields() : {}),
       address: lead.address || f.address,
       customerName: name || f.customerName || "",
-      customerPhone: lead.phone || "",
-      customerEmail: lead.email || "",
+      // A value the lead does not have keeps what the operator typed.
+      customerPhone: lead.phone || f.customerPhone || "",
+      customerEmail: lead.email || f.customerEmail || "",
       leadServiceInterest: lead.service_interest || "",
       // A lead is not a recurring customer; the loyalty flag may have been set
       // for whoever was linked before.
@@ -5108,12 +5110,12 @@ export default function EstimateToolViewV2({
                 />
               </Field>
               <p id="customer-search-help" className="text-14 text-ink-secondary mb-3">
-                Search by first name, last name, or full name. Phone, email, and address also work. Leads with no customer record are listed too.
+                Search by first name, last name, or full name. Phone, email, and address also work.{canChangeLeadLink ? " Leads with no customer record are listed too." : ""}
               </p>
               {customerSearchStatus === "loading" && <p role="status" className="text-14 text-ink-secondary mb-3">Searching customers…</p>}
               {customerSearchStatus === "error" && <p role="alert" className="text-14 text-alert-fg mb-3">Customer search failed. Edit your search to try again.</p>}
               {canChangeLeadLink && leadSearchStatus === "error" && <p role="status" className="text-14 text-ink-secondary mb-3">Lead search failed. Customer results are not affected. Edit your search to try again.</p>}
-              {customerSearchStatus === "done" && customers.length === 0 && !(canChangeLeadLink && (leadSearchStatus === "loading" || leadSearchStatus === "error" || leadMatches.length > 0)) && <p role="status" className="text-14 text-ink-secondary mb-3">No customers or leads found. Try a first name, last name, or full name.</p>}
+              {customerSearchStatus === "done" && customers.length === 0 && !(canChangeLeadLink && (leadSearchStatus === "loading" || leadSearchStatus === "error" || leadMatches.length > 0)) && <p role="status" className="text-14 text-ink-secondary mb-3">{canChangeLeadLink ? "No customers or leads found." : "No customers found."} Try a first name, last name, or full name.</p>}
               {customers.length > 0 && (
                 <div className="mb-3 border-hairline border-zinc-300 rounded-xs bg-white max-h-72 overflow-y-auto">
                   {customers.slice(0, 8).map((c) => {
@@ -5138,6 +5140,33 @@ export default function EstimateToolViewV2({
                       </button>
                     );
                   })}
+                </div>
+              )}
+              {canChangeLeadLink && leadMatches.length > 0 && (
+                <div className="mb-3">
+                  <p className="text-14 text-ink-secondary mb-1">Leads with no customer record</p>
+                  <div className="border-hairline border-zinc-300 rounded-xs bg-white max-h-72 overflow-y-auto">
+                    {leadMatches.slice(0, 8).map((lead) => {
+                      const name = [lead.first_name, lead.last_name].filter(Boolean).join(" ").trim() || "(no name)";
+                      return (
+                        <button data-ui-text-action
+                          key={lead.id}
+                          type="button"
+                          onClick={() => applyLeadLink(lead)}
+                          className="w-full text-left px-3 py-2 border-b-hairline border-zinc-200 last:border-b-0 hover:bg-zinc-50 cursor-pointer"
+                        >
+                          <div className="text-14 text-zinc-900 font-medium">
+                            {name} <span className="font-normal text-ink-secondary">· Lead</span>
+                          </div>
+                          <div className="text-14 text-ink-secondary">
+                            {lead.address || "no address on file"}
+                            {lead.phone ? ` · ${lead.phone}` : ""}
+                            {lead.email ? ` · ${lead.email}` : ""}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
               )}
             </div>
@@ -5332,33 +5361,6 @@ export default function EstimateToolViewV2({
                     </div>
                   ))}
 
-                </div>
-              )}
-              {canChangeLeadLink && leadMatches.length > 0 && (
-                <div className="mb-3">
-                  <p className="text-14 text-ink-secondary mb-1">Leads with no customer record</p>
-                  <div className="border-hairline border-zinc-300 rounded-xs bg-white max-h-72 overflow-y-auto">
-                    {leadMatches.slice(0, 8).map((lead) => {
-                      const name = [lead.first_name, lead.last_name].filter(Boolean).join(" ").trim() || "(no name)";
-                      return (
-                        <button data-ui-text-action
-                          key={lead.id}
-                          type="button"
-                          onClick={() => applyLeadLink(lead)}
-                          className="w-full text-left px-3 py-2 border-b-hairline border-zinc-200 last:border-b-0 hover:bg-zinc-50 cursor-pointer"
-                        >
-                          <div className="text-14 text-zinc-900 font-medium">
-                            {name} <span className="font-normal text-ink-secondary">· Lead</span>
-                          </div>
-                          <div className="text-14 text-ink-secondary">
-                            {lead.address || "no address on file"}
-                            {lead.phone ? ` · ${lead.phone}` : ""}
-                            {lead.email ? ` · ${lead.email}` : ""}
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
                 </div>
               )}
               {linkedLead && form.leadId === linkedLead.id && (

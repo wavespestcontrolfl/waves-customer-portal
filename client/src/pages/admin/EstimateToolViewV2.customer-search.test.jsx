@@ -73,7 +73,7 @@ it('lists an open lead that has no customer record, and picking it fills the con
   mount();
   fireEvent.change(input(), { target: { value: 'Dana' } });
   fireEvent.click(await screen.findByRole('button', { name: /Dana Sample.*Lead/ }));
-  expect(leadSearch.mock.calls[0][0]).toBe('/api/admin/leads?status=open&no_customer=1&limit=8&search=Dana');
+  expect(leadSearch.mock.calls[0][0]).toBe('/api/admin/leads?status=open&estimate_attachable=1&limit=8&search=Dana');
   // A lead that already has a customer record is found through the customer.
   expect(screen.queryByRole('button', { name: /Linked Sample/ })).not.toBeInTheDocument();
   expect(document.getElementById('estimate-customerName')).toHaveValue('Dana Sample');
@@ -124,4 +124,25 @@ it('picking a customer after a lead drops the lead link', async () => {
   fireEvent.click(await screen.findByRole('button', { name: /Jamie Fixture/ }));
   expect(screen.queryByText(/Linked to lead:/)).not.toBeInTheDocument();
   expect(document.getElementById('estimate-customerName')).toHaveValue('Jamie Fixture');
+});
+
+it('a phone typed before picking a phone-less lead is kept', async () => {
+  search.mockResolvedValue(response([]));
+  leadSearch.mockResolvedValue(leadResponse([lead]));
+  mount();
+  fireEvent.change(document.getElementById('estimate-customerPhone'), { target: { value: '9415550142' } });
+  fireEvent.change(input(), { target: { value: 'Dana' } });
+  fireEvent.click(await screen.findByRole('button', { name: /Dana Sample.*Lead/ }));
+  expect(document.getElementById('estimate-customerPhone').value).toMatch(/941.*555.*0142/);
+  expect(document.getElementById('estimate-customerEmail')).toHaveValue('dana.sample@example.com');
+});
+
+it('lead matches render directly under the customer search, before the service property block', async () => {
+  search.mockResolvedValue(response([]));
+  leadSearch.mockResolvedValue(leadResponse([lead]));
+  mount();
+  fireEvent.change(input(), { target: { value: 'Dana' } });
+  const leadButton = await screen.findByRole('button', { name: /Dana Sample.*Lead/ });
+  const address = screen.getByRole('textbox', { name: 'Service address' });
+  expect(leadButton.compareDocumentPosition(address) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 });
