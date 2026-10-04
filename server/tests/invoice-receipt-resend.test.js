@@ -195,6 +195,7 @@ describe('expect — the writer owns the final check, under the claim and ahead 
     const pinned = { ...approved, recipients_key: 'pinned' };
     const rederive = jest.fn()
       .mockResolvedValueOnce({ ...pinned })
+      .mockResolvedValueOnce({ ...pinned })
       .mockResolvedValueOnce({ ...pinned, ...change });
     InvoiceService.sendReceipt.mockClear();
     const out = await sendInvoiceReceipt(ID, { via: 'both', expect: { approved: pinned, rederive } });
@@ -203,16 +204,30 @@ describe('expect — the writer owns the final check, under the claim and ahead 
     expect(out.body.sms).toEqual({ ok: false, error: 'recipient or amount changed after approval' });
     expect(InvoiceService.sendReceipt).not.toHaveBeenCalled();
     // The second re-check sits between the two legs.
-    expect(sendReceiptEmail.mock.invocationCallOrder.at(-1)).toBeLessThan(rederive.mock.invocationCallOrder[1]);
+    expect(sendReceiptEmail.mock.invocationCallOrder.at(-1)).toBeLessThan(rederive.mock.invocationCallOrder[2]);
   });
 
   test('a linked visit the closeout just completed does not block the text leg', async () => {
     const pinned = { ...approved, recipients_key: 'pinned', closeout_visit_id: 'visit-1' };
     const rederive = jest.fn()
       .mockResolvedValueOnce({ ...pinned })
-      .mockResolvedValueOnce({ ...pinned, closeout_visit_id: null });
+      .mockResolvedValue({ ...pinned, closeout_visit_id: null });
     const out = await sendInvoiceReceipt(ID, { via: 'both', expect: { approved: pinned, rederive } });
     expect(out.delivery).toEqual({ email: 'sent', sms: 'sent' });
+  });
+
+  test.each(['email', 'sms', 'both'])('recipients changing during the closeout (via %s): no leg sends, nothing is stamped', async (via) => {
+    const pinned = { ...approved, recipients_key: 'pinned' };
+    const rederive = jest.fn()
+      .mockResolvedValueOnce({ ...pinned })
+      .mockResolvedValue({ ...pinned, recipients_key: 'other' });
+    sendReceiptEmail.mockClear();
+    InvoiceService.sendReceipt.mockClear();
+    const out = await sendInvoiceReceipt(ID, { via, expect: { approved: pinned, rederive } });
+    expect(sendReceiptEmail).not.toHaveBeenCalled();
+    expect(InvoiceService.sendReceipt).not.toHaveBeenCalled();
+    expect(out.body.ok).toBe(false);
+    expect(Object.values(out.delivery)).not.toContain('sent');
   });
 
   test.each([
