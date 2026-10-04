@@ -157,6 +157,8 @@ it('uses receipt-aware recovery notices and close protection', async () => {
   });
   rerender(<TechServicePhotosModal serviceId="visit-a" onClose={close} />);
   expect(screen.getByText(/pending report update notice is not saved on this device/i)).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /Discard/ })).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Retry upload' })).toBeInTheDocument();
   fireEvent.click(closeButton);
   expect(close).toHaveBeenCalledTimes(1);
   expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/pending report update notice is not saved/i));

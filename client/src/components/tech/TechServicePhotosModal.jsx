@@ -70,7 +70,7 @@ function PendingPhotoRecovery({ photo, serviceId, uploading, deviceSaveState, re
       <p className="tech-visit-muted">{photo.file.name}</p>
       {!uploading && <div className="tech-visit-actions">
         {!handedOff && <Button className="tech-visit-action tech-visit-primary" onClick={onRetry} disabled={discarding}>Retry upload</Button>}
-        <Button variant="secondary" className="tech-visit-action" onClick={onDiscard} loading={discarding}>{handedOff ? 'Dismiss saved notice' : deviceSaveState === 'saved' ? 'Discard saved photo' : 'Discard selected photo'}</Button>
+        {(handedOff || !hasUploadReceipt(photo)) && <Button variant="secondary" className="tech-visit-action" onClick={onDiscard} loading={discarding}>{handedOff ? 'Dismiss saved notice' : deviceSaveState === 'saved' ? 'Discard saved photo' : 'Discard selected photo'}</Button>}
       </div>}
     </div>
     {handedOff && <p role="status" className="tech-visit-muted">The photo remains attached to this visit. The office owns the remaining report updates. Dismiss removes only this saved notice from this device.</p>}
