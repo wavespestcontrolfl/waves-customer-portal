@@ -2557,6 +2557,7 @@ export default function EstimateToolViewV2({
   function applyLeadLink(lead) {
     if (!canChangeLeadLink) return;
     const name = [lead.first_name, lead.last_name].filter(Boolean).join(" ").trim();
+    const hadSelection = !!(form.customerId || form.leadId || linkedLead || existingCustomerMatch);
     setForm((f) => ({
       ...f,
       leadId: lead.id,
@@ -2565,9 +2566,13 @@ export default function EstimateToolViewV2({
       ...(lead.address && lead.address !== f.address ? clearedPropertyFields() : {}),
       address: lead.address || f.address,
       customerName: name || f.customerName || "",
-      // A value the lead does not have keeps what the operator typed.
-      customerPhone: lead.phone || f.customerPhone || "",
-      customerEmail: lead.email || f.customerEmail || "",
+      // A value the lead does not have keeps what the operator typed — but
+      // only when no other person was selected before. After a customer or
+      // another lead, the fields may hold THAT person's phone or email, and
+      // the server links on either one matching: a mixed contact could send
+      // this estimate to the wrong person.
+      customerPhone: lead.phone || (hadSelection ? "" : f.customerPhone || ""),
+      customerEmail: lead.email || (hadSelection ? "" : f.customerEmail || ""),
       leadServiceInterest: lead.service_interest || "",
       // A lead is not a recurring customer; the loyalty flag may have been set
       // for whoever was linked before.

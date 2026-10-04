@@ -146,3 +146,19 @@ it('lead matches render directly under the customer search, before the service p
   const address = screen.getByRole('textbox', { name: 'Service address' });
   expect(leadButton.compareDocumentPosition(address) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 });
+
+it('switching from one person to a lead never carries the first person\'s phone or email', async () => {
+  const first = { ...lead, id: 'lead-a', first_name: 'Avery', email: 'avery.sample@example.com', phone: '+19415550111' };
+  const second = { ...lead, id: 'lead-b', first_name: 'Blake', email: null, phone: '+19415550122' };
+  search.mockResolvedValue(response([]));
+  leadSearch.mockResolvedValueOnce(leadResponse([first])).mockResolvedValueOnce(leadResponse([second]));
+  mount();
+  fireEvent.change(input(), { target: { value: 'Avery' } });
+  fireEvent.click(await screen.findByRole('button', { name: /Avery Sample.*Lead/ }));
+  expect(document.getElementById('estimate-customerEmail')).toHaveValue('avery.sample@example.com');
+  fireEvent.change(input(), { target: { value: 'Blake' } });
+  fireEvent.click(await screen.findByRole('button', { name: /Blake Sample.*Lead/ }));
+  expect(document.getElementById('estimate-customerName')).toHaveValue('Blake Sample');
+  expect(document.getElementById('estimate-customerEmail')).toHaveValue('');
+  expect(document.getElementById('estimate-customerPhone').value).toMatch(/0122/);
+});
