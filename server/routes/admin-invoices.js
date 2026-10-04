@@ -2537,24 +2537,9 @@ router.get('/:id/receipt-address', async (req, res, next) => {
 // The before/after audit row commits with the change.
 router.put('/:id/receipt-address', async (req, res, next) => {
   try {
-    const { correctInvoiceAddress } = require('../services/invoice-address');
-    const { recordAuditEvent } = require('../services/audit-log');
-    const result = await db.transaction(async (trx) => {
-      const corrected = await correctInvoiceAddress(trx, req.params.id, req.body || {});
-      if (!corrected) return null;
-      await recordAuditEvent({
-        actor_type: 'technician',
-        actor_id: req.technicianId || null,
-        action: 'invoice.address.correct',
-        resource_type: 'invoice',
-        resource_id: corrected.invoice.id,
-        metadata: { customerId: corrected.invoice.customer_id, before: corrected.before, after: corrected.after },
-        ip_address: req.ip,
-        user_agent: req.get('user-agent') || null,
-        critical: true,
-        trx,
-      });
-      return corrected;
+    const { correctInvoiceAddressAudited } = require('../services/invoice-address');
+    const result = await correctInvoiceAddressAudited(db, req.params.id, req.body || {}, {
+      actorId: req.technicianId || null, ip: req.ip, userAgent: req.get('user-agent') || null,
     });
     if (!result) return res.status(404).json({ error: 'Invoice not found' });
     res.json({ address: result.after });

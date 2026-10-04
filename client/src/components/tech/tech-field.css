@@ -15,7 +15,7 @@
   /* Tokens for the inline-styled field panels (VisitBriefPanel, VisualNotesPanel,
      the protocol, lawn-diagnostic and social-post tools). Each reads
      var(--tfx-*, <tech-portal dark value>), so inside the workspace it takes the
-     admin look and the flag-off page, which has no .tech-field, keeps its palette. */
+     admin look. */
   --tfx-bg: #fafaf9;
   --tfx-card: #ffffff;
   --tfx-border: #d6d3d1;

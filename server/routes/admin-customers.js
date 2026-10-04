@@ -2667,6 +2667,7 @@ router.get('/:id/payment-methods/:methodId/removal-preview', requireAdmin, async
 router.delete('/:id/payment-methods/:methodId', requireAdmin, async (req, res, next) => {
   try {
     const { removePaymentMethod } = require('../services/payment-method-removal');
+    const { auditStaffPaymentMethodRemoval } = require('../services/payment-method-removal-audit');
     const { status, body, removedMethod } = await removePaymentMethod({
       customerId: req.params.id,
       methodId: req.params.methodId,
@@ -2676,11 +2677,9 @@ router.delete('/:id/payment-methods/:methodId', requireAdmin, async (req, res, n
     if (removedMethod) {
       // The detach is already final at Stripe — a lost audit row must not
       // turn a completed removal into an error.
-      void auditCustomerMutation(req, 'customer.payment_method.remove', req.params.id, {
-        paymentMethodId: removedMethod.id,
-        methodType: removedMethod.method_type || null,
-        brand: removedMethod.card_brand || removedMethod.bank_name || null,
-        lastFour: removedMethod.last_four || removedMethod.bank_last_four || null,
+      void auditStaffPaymentMethodRemoval({
+        actorId: req.technicianId, ip: req.ip, userAgent: req.get('user-agent') || null,
+        customerId: req.params.id, removedMethod,
       }).catch(() => {});
     }
     res.status(status).json(body);

@@ -3188,6 +3188,21 @@ palette. `.tf-existing` is no longer a dark box. The 11px labels of the Today
 page stay 14px in the sheets (the portal-brand gate bans smaller text in
 `tech-workflow.css`). Visual only: same data, same actions.
 
+## 2026-10-03 — The old dark Today page is deleted; the `tech-field-workspace` flag is gone
+
+Owner 2026-10-03 (phone screenshots of the navy page inside Waves Admin, "this
+should have been deprecated in favor of the Waves Admin UI"; "ok go"): the
+per-user `tech-field-workspace` flag and its flag-off page are removed.
+`/admin/today` renders the field workspace for every staff login, with no
+flag read (so a failed flag fetch in a dead zone can no longer fall back to
+the old page). On a phone the admin top bar and tab bar always step aside on
+`/admin/today`; the workspace's own Menu tab leads back to the rest of Waves
+Admin. One behavior difference from the deleted page: it listed completed
+visits and reopened a completed pest visit in the recap editor from Project
+Report; the workspace offers no report for a completed visit (its existing
+rule), so that edit is no longer on the Today page. Existing rows in
+`user_feature_flags` for the key are inert.
+
 ## 2026-10-04 — The technician can change the four lawn scores until Confirm
 
 Owner 2026-10-04 (phone screenshot of Complete service → Lawn assessment):

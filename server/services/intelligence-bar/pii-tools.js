@@ -24,6 +24,10 @@ const REVIEWED_PII_TOOL_NAMES = new Set([
   'cancel_plan',
   // repair_closeout previews name the customer and masked recipients.
   'repair_closeout',
+  // The billing writes name the customer, a card's last four, and an invoice's
+  // printed address (before and after).
+  'remove_saved_payment_method',
+  'correct_invoice_address',
   'get_stop_details',
   'get_recent_completions',
   'get_unanswered_threads',

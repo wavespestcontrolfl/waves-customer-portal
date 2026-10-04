@@ -44,11 +44,11 @@ let briefStatus;
 let fetchMock;
 let followThrough;
 
-function mount(path = '/admin/today', { enabled = true, role = 'technician' } = {}) {
+function mount(path = '/admin/today', { role = 'technician' } = {}) {
   localStorage.setItem('waves_admin_token', 'fixture-only');
   localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'tech-fixture', name: 'Fixture Technician', role }));
   return render(<MemoryRouter initialEntries={[path]}><Routes>
-    <Route path="/admin/today" element={<Outlet context={{ fieldWorkspace: enabled, setNavigationBusy: mocks.navigationBusy }} />}>
+    <Route path="/admin/today" element={<Outlet context={{ setNavigationBusy: mocks.navigationBusy }} />}>
       <Route index element={<TechHomePage />} />
       <Route path="tools" element={<TechHomePage section="tools" />} />
       <Route path="more" element={<TechHomePage section="more" />} />
@@ -401,9 +401,4 @@ describe('Tech field workspace uses the existing route workflow', () => {
     await waitFor(() => expect(screen.getByTestId('floating-notices')).toHaveAttribute('data-inline', inline));
   });
 
-  it('keeps the legacy route when the workspace flag is off', async () => {
-    mount('/admin/today/tools', { enabled: false });
-    expect(await screen.findByRole('heading', { name: 'Quick Actions' })).toBeInTheDocument();
-    expect(screen.queryByRole('heading', { name: 'Tools' })).not.toBeInTheDocument();
-  });
 });
