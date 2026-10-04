@@ -203,8 +203,23 @@ function searchTerms(query, limit = MAX_TERMS) {
   return terms.slice(0, limit);
 }
 // The whole-word pattern for a term: Postgres (\m \M) and JavaScript (\b).
-const sqlPattern = (term) => `\\m(?:${term.forms.join('|')})\\M`;
-const jsPattern = (term) => new RegExp(`\\b(?:${term.forms.join('|')})\\b`, 'i');
+// A term still being typed (`start`) matches the start of a word instead.
+const sqlPattern = (term) => `\\m(?:${term.forms.join('|')})${term.start ? '' : '\\M'}`;
+const jsPattern = (term) => new RegExp(`\\b(?:${term.forms.join('|')})${term.start ? '' : '\\b'}`, 'i');
+// The word still being typed: the search's last word when the text ends in
+// it, as a term that matches the start of a word ("co" finds "cockroach",
+// "control"). Null when the text ends in a space or punctuation, in a filler
+// word, in a word an earlier one already covers, or past the words the read
+// uses. The search turns to it only when no post holds that word whole
+// (owner 2026-10-04: typing "Co" answered "No post covers “Co” yet" with 58
+// live posts holding a word that starts with it), so "rat" still never finds
+// "rates" while a rat post exists.
+function wordBeingTyped(query, terms) {
+  const typed = (String(query || '').toLowerCase().match(/[a-z0-9]+$/) || [])[0];
+  const last = terms[terms.length - 1];
+  if (!typed || !last || terms.length > MAX_TERMS || last.forms[0] !== typed) return null;
+  return { word: typed, forms: [typed], start: true };
+}
 
 // Rows of a source whose text holds any of the terms, at most MAX_READ:
 // those holding the most terms first, newest first among them, id last (a
@@ -274,32 +289,49 @@ const pathKey = (url) => {
   }
 };
 
+// The posts a report may link that hold any of the terms (each URL once),
+// each with the terms it holds and where.
+async function linkableEntries(knex, terms) {
+  const registryFound = await registryMatches(knex, terms);
+  if (registryFound.length >= MAX_READ) logger.warn(`[report-blog-post] the registry search read reached ${MAX_READ} rows; rows past it were not ranked`);
+  const found = new Map();
+  for (const row of registryFound) {
+    const post = registryLink(row);
+    if (!post) continue;
+    const key = pathKey(post.url);
+    if (found.has(key)) continue;
+    const texts = rowTexts(row);
+    found.set(key, { post, texts, ...matchOf(texts, terms), when: row.published_at ? new Date(row.published_at).getTime() || 0 : 0 });
+  }
+  return [...found.values()].filter((entry) => entry.held.some(Boolean));
+}
+
 /**
  * The site's live hub posts that answer a search, best first, at most eight,
  * each marked `exact` when it holds every word:
  * those holding every word first, then those holding the rarest of the
  * words, a word in the title or headline before one only in the keyword or
  * summary, newest first among equals. No usable words, no results. Read from the
- * content registry's verified-live posts (each URL once).
+ * content registry's verified-live posts (each URL once). When no post holds
+ * the last word and it is still being typed, that word matches by its start
+ * (wordBeingTyped) and every post says whether it `starts` the search so.
  */
 async function searchReportBlogPosts(knex, query) {
-  const terms = searchTerms(query);
+  let terms = searchTerms(query);
   if (!terms.length) return [];
   // Every word of the search, not only the first MAX_TERMS the read and the
   // ranking use: a post is exact only when it holds them all (GitHub Codex
   // P2 on 45144528b8).
   const allTerms = searchTerms(query, Infinity);
-  const registryFound = await registryMatches(knex, terms);
-  if (registryFound.length >= MAX_READ) logger.warn(`[report-blog-post] the registry search read reached ${MAX_READ} rows; rows past it were not ranked`);
-  const found = new Map();
-  const add = (post, texts, when) => {
-    if (!post) return;
-    const key = pathKey(post.url);
-    if (found.has(key)) return;
-    found.set(key, { post, texts, ...matchOf(texts, terms), when: when ? new Date(when).getTime() || 0 : 0 });
-  };
-  for (const row of registryFound) add(registryLink(row), rowTexts(row), row.published_at);
-  const entries = [...found.values()].filter((entry) => entry.held.some(Boolean));
+  let entries = await linkableEntries(knex, terms);
+  // No post holds the last word whole and it is still being typed: read
+  // again with it as the start of a word.
+  const typing = wordBeingTyped(query, allTerms);
+  const started = !!typing && !entries.some((entry) => entry.held[terms.length - 1]);
+  if (started) {
+    terms = [...terms.slice(0, -1), typing];
+    entries = await linkableEntries(knex, terms);
+  }
   // A word few posts hold says more than one many hold ("tick" over
   // "control"), so a post that holds some of the words ranks by the rarest:
   // counted over the posts a report may link, every one read (GitHub Codex
@@ -311,7 +343,12 @@ async function searchReportBlogPosts(knex, query) {
     const pattern = jsPattern(term);
     return [entry.texts.title, entry.texts.keyword, entry.texts.summary].some((text) => pattern.test(String(text || '')));
   });
-  for (const entry of entries) entry.exact = holdsAll(entry);
+  // Exact is every word whole, so a word matched only by its start is never
+  // exact: such a post `starts` the search instead.
+  for (const entry of entries) {
+    entry.exact = !started && holdsAll(entry);
+    entry.starts = started && every(entry);
+  }
   // A post holding every word of the whole search ranks first, so the eight
   // shown, and the coverage a suggestion checks, never drop it for newer
   // posts holding only the first words (pre-push P1 on d1f230dfa2).
@@ -320,8 +357,12 @@ async function searchReportBlogPosts(knex, query) {
     .slice(0, MAX_RESULTS)
     // `exact`: the post holds every word. With none exact, the forms say no
     // post covers the search, show these as the closest, and offer to
-    // suggest one (owner mockup approval 2026-10-03).
-    .map((entry) => ({ ...entry.post, exact: entry.exact }));
+    // suggest one (owner mockup approval 2026-10-03). `starts`, on every post
+    // of a search read by its last word's start: whether the post holds every
+    // word that way. The forms show those as the matches for a word still
+    // being typed, and with the field present offer no suggestion (the word
+    // is on no post whole; GitHub Codex P2 on 7331ef2402).
+    .map((entry) => ({ ...entry.post, exact: entry.exact, ...(started ? { starts: entry.starts } : {}) }));
 }
 
 // The most words a suggestion's site-words read checks.
