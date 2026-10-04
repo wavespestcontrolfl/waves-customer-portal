@@ -3203,6 +3203,12 @@ condition tiles are gone (owner: "four only, drop the two tiles"): when the AI
 left one blank, `/admin/lawn-assessment/confirm` copies the Condition score
 into it on the save that completes the row, and the run's
 `reconciliation.confirmation.copied_from_condition` names the copied keys.
+Condition speaks for the two sub-scores in one more case: when the technician
+enters Condition above a Fungus or Thatch the AI read, that sub-score is
+raised to it on the completing save, so the report and the tips never cite a
+low sub-score against the correction. Neither applies to a sub-score the
+client posted (the standalone page shows those fields), nor to a legacy row
+whose Condition is only the 95 fallback of no stressor signal at all.
 Server rule (`resolveConfirmScores`, and `legacyConfirmFinalScores` for rows
 with no run): posted number, then the saved row value, then the AI read. The
 run's `scores_adjusted` snapshot stays the AI read, so calibration records the

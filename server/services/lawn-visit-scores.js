@@ -167,17 +167,32 @@ function resolveConfirmScores(assessment, adjustedScores, scoreValue, { stressFl
 }
 
 // Owner ruling 2026-10-04: the completion screen shows four scores and no
-// longer asks for Fungus or Thatch. When the AI left one of those blank and
-// nobody entered it, it takes the Condition score (Condition is the worst of
-// the stressors, so the copy never contradicts it) — but only when that makes
-// the row complete. A row that stays pending keeps its blanks, so a later
-// Condition change is not left beside a stale copy. `copied` names the keys
-// that hold a copy rather than a reading.
-function fillFromCondition(scores) {
-  const copied = ['fungus_control', 'thatch_level'].filter((key) => !known(scores?.[key]));
-  if (!copied.length || !known(scores?.stress_damage)) return { scores, copied: [] };
-  const filled = { ...scores, ...Object.fromEntries(copied.map((key) => [key, scores.stress_damage])) };
-  return scoresComplete(filled) ? { scores: filled, copied } : { scores, copied: [] };
+// longer asks for Fungus or Thatch, so Condition speaks for both:
+//   - a Fungus/Thatch the AI left blank and nobody entered takes the
+//     Condition score (Condition is the worst of the stressors, so the copy
+//     never contradicts it). A key in `posted` was sent by the client, blank
+//     or not: that client shows the field (the standalone Lawn assessment
+//     page), so its blank stays a blank the technician must fill;
+//   - when Condition is the technician's own entry (`conditionEntered`), a
+//     Fungus/Thatch read BELOW it is raised to it. Report and tip readers
+//     treat a low sub-score as confirmed evidence of disease or thatch, and
+//     would otherwise contradict the technician's correction. A sub-score
+//     posted as a number in this request is the technician's too and stays.
+// Both apply only on the save that completes the row. A row that stays
+// pending keeps its own values, so a later Condition change is not left
+// beside a stale copy. `copied` names the keys that hold the Condition score
+// rather than a reading.
+function alignWithCondition(scores, { posted = {}, conditionEntered = false } = {}) {
+  const sent = posted && typeof posted === 'object' ? posted : {};
+  const condition = scores?.stress_damage;
+  if (!known(condition)) return { scores, copied: [] };
+  const copied = ['fungus_control', 'thatch_level'].filter((key) => {
+    if (Object.prototype.hasOwnProperty.call(sent, key)) return false;
+    return !known(scores[key]) || (conditionEntered && scores[key] < condition);
+  });
+  if (!copied.length) return { scores, copied };
+  const aligned = { ...scores, ...Object.fromEntries(copied.map((key) => [key, condition])) };
+  return scoresComplete(aligned) ? { scores: aligned, copied } : { scores, copied: [] };
 }
 
 function scoreVisit(analysis, { seasonAdjust, calculateOverallScore }) {
@@ -230,11 +245,11 @@ function confirmScores(assessment, run, adjustedScores, { scoreValue, calculateO
   const stressExplicit = numericOverride(adjusted.stress_damage)
     ? scoreValue(adjusted.stress_damage)
     : (!stressCleared && known(previousExplicit) ? previousExplicit : null);
-  const { scores: finalScores, copied: copiedFromCondition } = fillFromCondition(resolveConfirmScores(assessment, adjusted, scoreValue, {
+  const { scores: finalScores, copied: copiedFromCondition } = alignWithCondition(resolveConfirmScores(assessment, adjusted, scoreValue, {
     ...(run?.status === 'complete' ? { stressFloor: independentStressFloor(run) } : {}),
     aiScores,
     stressExplicit,
-  }));
+  }), { posted: adjusted, conditionEntered: known(stressExplicit) });
   const confirmed = scoresComplete(finalScores);
   return {
     finalScores,
@@ -276,7 +291,7 @@ module.exports = {
   assessmentScoreFields,
   independentStressFloor,
   resolveConfirmScores,
-  fillFromCondition,
+  alignWithCondition,
   scoreVisit,
   overallScoreFor,
   confirmScores,

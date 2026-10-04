@@ -386,6 +386,24 @@ const MODEL_TEXT = 'Nutsedge is visible near the front edge.';
     expect(second.body.assessment).toMatchObject({ confirmed_by_tech: true, color_health: 70, stress_damage: 40 });
   });
 
+  test('a legacy row with no stressor signal stays pending until Condition is entered: the 95 fallback is never copied', async () => {
+    const { assessment } = await seed({ ...COMPLETE, fungus_control: null, thatch_level: null, stress_damage: null }, { run: false });
+    const empty = await request(assessment.id, { adjustedScores: {} });
+    expect(empty.body).toMatchObject({ confirmed: false, missingScores: ['stress_damage', 'fungus_control', 'thatch_level'] });
+    expect(empty.body.assessment).toMatchObject({ confirmed_by_tech: false, stress_damage: null, fungus_control: null, thatch_level: null });
+    const entered = await request(assessment.id, { adjustedScores: { stress_damage: 70 } });
+    expect(entered.body.assessment).toMatchObject({ confirmed_by_tech: true, stress_damage: 70, fungus_control: 70, thatch_level: 70 });
+  });
+
+  test('a legacy Condition corrected upward lifts the lower Fungus read with it; a posted blank stays blank', async () => {
+    const { assessment } = await seed({ ...COMPLETE, fungus_control: 20, stress_damage: 20 }, { run: false });
+    const done = await request(assessment.id, { adjustedScores: { stress_damage: 80 } });
+    expect(done.body.assessment).toMatchObject({ confirmed_by_tech: true, stress_damage: 80, fungus_control: 80, thatch_level: 90 });
+    const { assessment: panel } = await seed({ ...COMPLETE, fungus_control: null }, { run: false });
+    const blank = await request(panel.id, { adjustedScores: { ...COMPLETE, fungus_control: null } });
+    expect(blank.body).toMatchObject({ confirmed: false, missingScores: ['fungus_control'] });
+  });
+
   test('a confirmed legacy assessment is final: a retry or a stale second session cannot rewrite its scores', async () => {
     const { assessment } = await seed(COMPLETE, { run: false });
     const first = await request(assessment.id, { adjustedScores: { turf_density: 72 } });

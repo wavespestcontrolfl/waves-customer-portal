@@ -135,8 +135,13 @@ describe('confirm scores: a technician entry wins over the AI read', () => {
       const second = visit.confirmScores(saved, run, { color_health: 70 }, options);
       expect(second).toMatchObject({
         confirmed: true, missing: [], calibrationEligible: true,
-        finalScores: { turf_density: 90, weed_suppression: 80, color_health: 70, fungus_control: 75, thatch_level: 60, stress_damage: 65 },
+        // Thatch read 60, below the technician's Condition 65: raised to it on
+        // the completing save, so no report reads it as a worse finding.
+        finalScores: { turf_density: 90, weed_suppression: 80, color_health: 70, fungus_control: 75, thatch_level: 65, stress_damage: 65 },
+        copiedFromCondition: ['thatch_level'],
       });
+      // While the row was pending, the sub-score kept its own reading.
+      expect(first.finalScores.thatch_level).toBe(60);
       // Calibration still compares against what the AI read.
       expect(second.aiScores).toMatchObject({ turf_density: 72, stress_damage: 50 });
       const restored = visit.confirmScores(saved, run, { color_health: 70, turf_density: null, stress_damage: null }, options);
@@ -176,6 +181,35 @@ describe('confirm scores: a technician entry wins over the AI read', () => {
         confirmed: false, copiedFromCondition: [], missing: ['color_health', 'fungus_control', 'thatch_level'],
         finalScores: { fungus_control: null, thatch_level: null },
       });
+    });
+
+    test('a blank sub-score the client posted stays blank: that client shows the field (standalone Lawn assessment page)', () => {
+      const ai = { turf_density: 70, weed_suppression: 80, color_health: 70, fungus_control: null, thatch_level: null, stress_damage: 95 };
+      const run = { status: 'complete', severities: JSON.stringify({ insect_damage: sig('none') }), scores_adjusted: JSON.stringify(ai) };
+      const options = { scoreValue, calculateOverallScore: () => 77 };
+      const posted = { turf_density: 70, weed_suppression: 80, color_health: 70, fungus_control: null, thatch_level: null };
+      expect(visit.confirmScores({ ...ai }, run, posted, options)).toMatchObject({
+        confirmed: false, missing: ['fungus_control', 'thatch_level'], copiedFromCondition: [],
+        finalScores: { fungus_control: null, thatch_level: null },
+      });
+      expect(visit.confirmScores({ ...ai }, run, { ...posted, fungus_control: 40, thatch_level: 80 }, options))
+        .toMatchObject({ confirmed: true, copiedFromCondition: [], finalScores: { fungus_control: 40, thatch_level: 80, stress_damage: 95 } });
+    });
+
+    test('a Condition the technician entered lifts a lower Fungus/Thatch read; the AI\'s own Condition never does', () => {
+      const ai = { turf_density: 70, weed_suppression: 80, color_health: 70, fungus_control: 20, thatch_level: 85, stress_damage: 20 };
+      const run = { status: 'complete', severities: JSON.stringify({ fungal_activity: sig('severe') }), scores_adjusted: JSON.stringify(ai) };
+      const options = { scoreValue, calculateOverallScore: () => 77 };
+      expect(visit.confirmScores({ ...ai }, run, {}, options)).toMatchObject({ copiedFromCondition: [], finalScores: { fungus_control: 20, stress_damage: 20 } });
+      // Corrected up to 80: the low fungus read no longer stands as evidence;
+      // thatch (85) was already above it and keeps its reading.
+      expect(visit.confirmScores({ ...ai }, run, { stress_damage: 80 }, options)).toMatchObject({
+        confirmed: true, copiedFromCondition: ['fungus_control'],
+        finalScores: { fungus_control: 80, thatch_level: 85, stress_damage: 80 },
+      });
+      // A sub-score the technician posted in the same request is theirs and stays.
+      expect(visit.confirmScores({ ...ai }, run, { stress_damage: 80, fungus_control: 30 }, options).finalScores)
+        .toMatchObject({ fungus_control: 30, stress_damage: 80 });
     });
 
     test('a fully AI-blank run derives stress_damage from the technician-filled components and the run\'s independent stressors', () => {

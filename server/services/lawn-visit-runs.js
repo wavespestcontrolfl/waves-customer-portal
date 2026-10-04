@@ -251,7 +251,7 @@ async function confirmLockedRun(args, customerId, trx) {
         confirmation: {
           final_scores: decision.finalScores, ai_scores: decision.aiScores,
           calibration_eligible: decision.calibrationEligible,
-          // Fungus/Thatch keys holding a copy of Condition, not a reading.
+          // Fungus/Thatch keys holding the Condition score, not a reading.
           copied_from_condition: decision.copiedFromCondition,
           technician_id: technicianId,
         },

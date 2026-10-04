@@ -1243,8 +1243,19 @@ async function confirmLegacyAssessment({ assessmentId, adjustedScores, propertyH
       // 2026-10-04). A retry or a stale second session returns the confirmed
       // row; its payload never rewrites it (as visitRuns.confirmLockedRun).
       if (assessment.confirmed_by_tech) return { assessment, confirmed: true, missingScores: [] };
-      // Blank Fungus/Thatch take the Condition score when that completes the row.
-      const { scores: finalScores } = visitScores.fillFromCondition(legacyConfirmFinalScores(assessment, adjustedScores));
+      // Condition speaks for a blank Fungus/Thatch only when it is a real
+      // value (AI-read or entered) or derived from a known component — the
+      // 95 fallback of a row with no stressor signal at all is neither, and
+      // the screen shows that Condition as an empty field. It is the
+      // technician's entry when it is real and not the AI's own read.
+      const resolved = legacyConfirmFinalScores(assessment, adjustedScores);
+      const conditionReal = legacyStressIsFixed(assessment, adjustedScores);
+      const { scores: finalScores } = conditionReal || resolved.fungus_control != null || resolved.thatch_level != null
+        ? visitScores.alignWithCondition(resolved, {
+          posted: adjustedScores,
+          conditionEntered: conditionReal && resolved.stress_damage !== legacyAiScores(assessment).stress_damage,
+        })
+        : { scores: { ...resolved, stress_damage: null } };
       const missingScores = visitScores.missingScores(finalScores);
       const pending = missingScores.length > 0;
       const textUpdate = adjustedScores?.observations != null ? { observations: adjustedScores.observations } : {};
