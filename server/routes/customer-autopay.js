@@ -20,6 +20,7 @@ const { etDateString } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
 const { computeChargeAmount, isCardMethodType } = require('../services/stripe-pricing');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
+const { AUTOPAY_OFF_UPDATES, disableAutopayInTransaction, sendAutopayDisabledNotice } = require('../services/autopay-disable');
 
 router.use(authenticate);
 
@@ -358,10 +359,7 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
       updates.autopay_enabled = autopay_enabled;
       events.push({ type: autopay_enabled ? 'autopay_enabled' : 'autopay_disabled', details: {} });
       // Clear pause when disabling/enabling
-      if (!autopay_enabled) {
-        updates.autopay_paused_until = null;
-        updates.autopay_pause_reason = null;
-      }
+      if (!autopay_enabled) Object.assign(updates, AUTOPAY_OFF_UPDATES);
     }
 
     if (autopay_payment_method_id !== undefined && autopay_payment_method_id !== current.autopay_payment_method_id) {
@@ -447,32 +445,24 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
 
     let selectedGone = false;
     // True only for the request that performs the enabled→disabled
-    // transition under the lock: two overlapping disables both read
-    // "enabled" before either locks, and the second must not send a
-    // second Auto Pay-off email (GH codex r1 P2).
+    // transition under the lock (see disableAutopayInTransaction).
     let disabledTransition = false;
     let disabledMethodId = null;
     await db.transaction(async (trx) => {
+      if (updates.autopay_enabled === false) {
+        // The shared disable path (services/autopay-disable.js) — the same
+        // one staff turn Auto Pay off through. It locks the customer row
+        // first, writes the flags, and commits the opt-out event with them.
+        ({ transition: disabledTransition, methodId: disabledMethodId } = await disableAutopayInTransaction(
+          trx, req.customerId, { updates, details: {} },
+        ));
+        return;
+      }
       // Lock order = CUSTOMER first, then the method row (pre-push r2 P1:
       // every Auto Pay mutation — enrollment, removal, set-default, the
       // detached webhook — takes the same order, so removal vs replacement
       // can never deadlock).
-      const locked = await trx('customers').where({ id: req.customerId }).forUpdate().first('id', 'autopay_enabled', 'autopay_payment_method_id');
-      // Nullable flag: only explicit false is "off" (customerOnAutopay
-      // parity, GH codex r3 P2) — a NULL-flag customer turning Auto Pay off
-      // IS a transition and gets the notice.
-      disabledTransition = updates.autopay_enabled === false && locked?.autopay_enabled !== false;
-      // The method the notice names = the one in charge immediately before
-      // the disable, read under the lock — the pre-lock `current` read can
-      // be stale if a switch landed in between (GH codex r2 P2).
-      disabledMethodId = locked?.autopay_payment_method_id || null;
-      if (disabledTransition && !disabledMethodId) {
-        // Legacy enrollment without a pointer: the method in charge is the
-        // default+enabled fallback collection would bill — resolve it under
-        // the lock BEFORE the flags are cleared below (GH codex r4 P2).
-        const fallback = await getChargeableAutopayMethod({ id: req.customerId, ...locked }, trx);
-        disabledMethodId = fallback?.id || null;
-      }
+      await trx('customers').where({ id: req.customerId }).forUpdate().first('id');
       // Re-verify the method under lock (pre-push r1 P0 — shared protocol
       // with DELETE /cards/:id, which holds the row FOR UPDATE across its
       // detach): pointing Auto Pay at a row a concurrent removal just
@@ -487,21 +477,6 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
 
       if (Object.keys(updates).length > 0) {
         await trx('customers').where({ id: req.customerId }).update(updates);
-      }
-
-      if (updates.autopay_enabled === false) {
-        await trx('payment_methods').where({ customer_id: req.customerId }).update({ autopay_enabled: false });
-        // The opt-out EVENT commits with the opt-out STATE: this row is what
-        // enrollConsentedMethod's opted_out_after_authorization guard reads,
-        // so a post-commit best-effort write left a gap where a delayed
-        // webhook enrollment could land after the disable committed but
-        // before (or without) the event row — overwriting a real opt-out.
-        await logAutopay(req.customerId, 'autopay_disabled', {
-          details: {},
-          db: trx,
-          required: true,
-        });
-        return;
       }
 
       if (shouldMirrorAutopayMethod) {
@@ -535,16 +510,8 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
       : (selectedPaymentMethod?.id || current.autopay_payment_method_id || null);
 
     if (updates.autopay_enabled === false) {
-      // Negative counterpart of the enabled notice (gated inside the
-      // sender); the pointer that was in charge names the method. Only the
-      // request that actually flipped the flag under the lock sends.
-      if (disabledTransition) void PaymentLifecycleEmail.sendAutopayDisabled({
-        customerId: req.customerId,
-        paymentMethodId: disabledMethodId,
-        disabledAt: new Date(),
-      }).catch((emailErr) => {
-        logger.warn(`[customer-autopay] autopay disabled email failed for customer ${req.customerId}: ${emailErr.message}`);
-      });
+      // Only the request that actually flipped the flag under the lock sends.
+      if (disabledTransition) void sendAutopayDisabledNotice({ customerId: req.customerId, paymentMethodId: disabledMethodId });
     } else if (enabledEvent && activePaymentMethodId) {
       PaymentLifecycleEmail.sendAutopayEnabled({
         customerId: req.customerId,
