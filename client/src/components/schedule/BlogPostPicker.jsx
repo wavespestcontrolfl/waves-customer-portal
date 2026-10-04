@@ -126,14 +126,12 @@ export const SUGGESTION_COPY = {
 
 // The search's status lines: searching, failed, nothing found, or (no post
 // holds every word) that no post covers the search yet, above the closest.
-// Posts matching a word still being typed stand with no line above them.
-function SearchStatusLines({ status, results, uncovered, typing, phrase, ink, muted }) {
+function SearchStatusLines({ status, results, uncovered, phrase, ink, muted }) {
   const line = (text, color = muted) => <p style={{ margin: "6px 0 0", fontSize: 14, color }}>{text}</p>;
   if (status === "searching") return line("Searching…");
   if (status === "failed") return line("The blog search didn’t answer. Try again.");
   if (status !== "done") return null;
   if (!uncovered) return results.length ? null : line("No live posts match.");
-  if (typing) return null;
   return (
     <>
       {line(`No post covers “${phrase}” yet.`, ink)}
@@ -175,7 +173,10 @@ export default function BlogPostPicker({ search, suggest = null, value = null, o
   const suggestion = useBlogSuggestion(suggest, query);
   const phrase = query.trim();
   // No post holds every word: say so, show the closest, offer a suggestion.
-  const uncovered = status === "done" && !covered && canSuggest && typeof suggest === "function";
+  // Never while the last word is still being typed: its posts are the list,
+  // and the server refuses a phrase with a word no live post holds whole
+  // (GitHub Codex P2 on 67df0afca0).
+  const uncovered = status === "done" && !covered && !typing && canSuggest && typeof suggest === "function";
   const ink = tokens.ink || "#111";
   const muted = tokens.muted || "#525252";
   const border = tokens.border || "#E5E5E5";
@@ -223,7 +224,7 @@ export default function BlogPostPicker({ search, suggest = null, value = null, o
             disabled={disabled}
             style={{ ...(tokens.inputStyle || {}), width: "100%", boxSizing: "border-box" }}
           />
-          <SearchStatusLines status={status} results={results} uncovered={uncovered} typing={typing} phrase={phrase} ink={ink} muted={muted} />
+          <SearchStatusLines status={status} results={results} uncovered={uncovered} phrase={phrase} ink={ink} muted={muted} />
           {(status === "done" ? shown : results).map((post) => (
             <button key={post.id} type="button" disabled={disabled} onClick={() => onChange(post)} style={rowStyle(false)}>
               <span style={{ display: "block", fontWeight: 500, lineHeight: 1.35 }}>{post.title}</span>

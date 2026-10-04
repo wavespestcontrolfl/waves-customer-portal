@@ -90,7 +90,7 @@ describe('BlogPostPicker', () => {
   });
 
   // Owner 2026-10-04: typing "Co" read "No post covers “Co” yet".
-  test('a word still being typed lists the posts that start with it, with no "No post covers" line', async () => {
+  test('a word still being typed lists the posts that start with it, with no "No post covers" line and no suggestion', async () => {
     const starting = { ...POST, id: 'post-3', title: 'German Cockroaches in the Kitchen', exact: false, starts: true };
     const search = vi.fn(async () => ({ posts: [starting, NEAR], suggest: true }));
     render(<Harness search={search} suggest={vi.fn()} />);
@@ -100,8 +100,9 @@ describe('BlogPostPicker', () => {
     expect(screen.queryByText('Closest posts')).toBeNull();
     // Only the posts that start the search, never the closest ones under them.
     expect(screen.queryByRole('button', { name: /Dollarweed/ })).toBeNull();
-    // The word may be whole and new to the blog: it can still be suggested.
-    expect(screen.getByRole('button', { name: 'Suggest a post about “Co”' })).toBeTruthy();
+    // No suggestion: the server refuses a word no live post holds whole
+    // (GitHub Codex P2 on 67df0afca0).
+    expect(screen.queryByRole('button', { name: /Suggest a post/ })).toBeNull();
   });
 
   test('a space after the last word is sent, so the server reads the word as finished (pre-push P1 on 63db0f3ccc)', async () => {
