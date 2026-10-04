@@ -188,11 +188,10 @@ function legacyConfirmFinalScores(assessment, adjustedScores) {
     finalScores.stress_damage = scoreValue(adjustedScores.stress_damage);
     return finalScores;
   }
-  // A stored Stress is real when the AI read one (the column then holds that
-  // read or the technician's change to it), or while the row is pending: a
-  // pending save stores Stress only when it is real (legacyStressIsFixed). A
-  // confirmed row's Stress the AI never read may be a derivation: re-derive.
-  if (saved('stress_damage') != null && (aiKnown('stress_damage') || !assessment.confirmed_by_tech)) {
+  // A stored Stress is real: the AI's read, or the technician's entry. A
+  // pending save stores Stress only when it is real (legacyStressIsFixed),
+  // and a confirmed row never reaches here (confirmLegacyAssessment).
+  if (saved('stress_damage') != null) {
     finalScores.stress_damage = saved('stress_damage');
     return finalScores;
   }
@@ -1240,6 +1239,10 @@ async function confirmLegacyAssessment({ assessmentId, adjustedScores, propertyH
     await lawnAssessment.lockCustomerBaseline(original.customer_id, trx);
     const write = async (conn) => {
       const assessment = await conn('lawn_assessments').where({ id: assessmentId }).forUpdate().first();
+      // Scores are editable only until confirmation (owner ruling
+      // 2026-10-04). A retry or a stale second session returns the confirmed
+      // row; its payload never rewrites it (as visitRuns.confirmLockedRun).
+      if (assessment.confirmed_by_tech) return { assessment, confirmed: true, missingScores: [] };
       // Blank Fungus/Thatch take the Condition score when that completes the row.
       const { scores: finalScores } = visitScores.fillFromCondition(legacyConfirmFinalScores(assessment, adjustedScores));
       const missingScores = visitScores.missingScores(finalScores);

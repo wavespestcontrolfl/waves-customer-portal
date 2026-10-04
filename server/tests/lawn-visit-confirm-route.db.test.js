@@ -339,13 +339,16 @@ const MODEL_TEXT = 'Nutsedge is visible near the front edge.';
   });
 
   test('two concurrent legacy fills of different blanks both survive', async () => {
-    const { assessment } = await seed({ ...COMPLETE, color_health: null, fungus_control: null, thatch_level: null }, { run: false });
+    // Two of the four on-screen scores are blank, so neither save alone
+    // completes the row (a blank Fungus/Thatch would copy Condition and
+    // confirm on the first save).
+    const { assessment } = await seed({ ...COMPLETE, color_health: null, turf_density: null }, { run: false });
     await Promise.all([
       request(assessment.id, { adjustedScores: { color_health: 70 } }),
-      request(assessment.id, { adjustedScores: { fungus_control: 60 } }),
+      request(assessment.id, { adjustedScores: { turf_density: 60 } }),
     ]);
     const row = await read(assessment.id);
-    expect(row).toMatchObject({ color_health: 70, fungus_control: 60 });
+    expect(row).toMatchObject({ color_health: 70, turf_density: 60, confirmed_by_tech: true });
   });
 
   test('clearing an earlier legacy fill (posted as null) removes it', async () => {
@@ -381,6 +384,24 @@ const MODEL_TEXT = 'Nutsedge is visible near the front edge.';
     expect(first.body).toMatchObject({ confirmed: false, missingScores: ['color_health'] });
     const second = await request(assessment.id, { adjustedScores: { color_health: 70 } });
     expect(second.body.assessment).toMatchObject({ confirmed_by_tech: true, color_health: 70, stress_damage: 40 });
+  });
+
+  test('a confirmed legacy assessment is final: a retry or a stale second session cannot rewrite its scores', async () => {
+    const { assessment } = await seed(COMPLETE, { run: false });
+    const first = await request(assessment.id, { adjustedScores: { turf_density: 72 } });
+    expect(first.body.assessment).toMatchObject({ confirmed_by_tech: true, turf_density: 72 });
+    const committed = await read(assessment.id);
+    const stale = await request(assessment.id, { adjustedScores: { turf_density: 5, stress_damage: 1 }, stress_flags: { drought_stress: true } });
+    expect(stale.body).toMatchObject({ success: true, assessment: { confirmed_by_tech: true, turf_density: 72, stress_damage: 85 } });
+    expect(await read(assessment.id)).toEqual(committed);
+    // Two sessions confirming at once: one wins, and the row holds only its scores.
+    const { assessment: raced } = await seed(COMPLETE, { run: false });
+    await Promise.all([
+      request(raced.id, { adjustedScores: { turf_density: 40 } }),
+      request(raced.id, { adjustedScores: { color_health: 30 } }),
+    ]);
+    const row = await read(raced.id);
+    expect([[40, 76], [80, 30]]).toContainEqual([row.turf_density, row.color_health]);
   });
 
   test.each([false, true])('legacy confirmation works when the optional run table is missing: %s', async (missingTable) => {
