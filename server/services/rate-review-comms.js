@@ -941,9 +941,11 @@ async function settleAttempted(dbh, entry, { frozen, emailUnknown, smsUnknown, d
     }
     alerts.push({ noticeId: live.id, customerId: live.customer_id, rowId: live.rate_review_row_id, familyKey: live.family_key, rateWritten: false, channel: early.email ? 'email' : 'sms', event: failure.event });
   }
+  // Closed INSIDE the fenced transaction: a later failure of the same letter waits on the
+  // fence and reopens its alert after this, never before it.
+  await closeDeliveryAlerts(trx, settledAlertKeys, `customer ${entry.customerId}`);
   });
   if (alerts.length) await raiseDeliveryAlerts(alerts);
-  await closeDeliveryAlerts(dbh, settledAlertKeys, `customer ${entry.customerId}`);
   return { retryable, holdReason, delivered: promoted > 0 && parked === 0 };
 }
 
@@ -1398,6 +1400,9 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
         metadata: JSON.stringify({ ...meta, pending_letter: livePending || frozen, delivered_repointed: { at: sentAt.toISOString(), letter_customer_id: String(entry.customerId) } }),
       });
     }
+    // Closed INSIDE the fenced stamp transaction (as the settlement does): a later failure of
+    // this letter waits on the fence and reopens its alert after this, never before it.
+    if (!undeliveredEarly.length && !orphaned.length) await closeDeliveryAlerts(trx, resolvedAlertKeys, `customer ${entry.customerId}`);
   });
   if (reclaimed) return { outcome: 'in_flight' };
   if (orphaned.length) {
@@ -1408,7 +1413,6 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
     await raiseDeliveryAlerts(undeliveredEarly);
     return { outcome: 'rejected', holdReason: 'delivery_failed_before_stamp' };
   }
-  await closeDeliveryAlerts(dbh, resolvedAlertKeys, `customer ${entry.customerId}`);
   return { outcome: 'sent', email: !!email.sent || emailConfirmed, sms: !!sms.sent };
   };
   try {
