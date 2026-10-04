@@ -340,7 +340,7 @@ const MODEL_TEXT = 'Nutsedge is visible near the front edge.';
 
   test('two concurrent legacy fills of different blanks both survive', async () => {
     // Two of the four on-screen scores are blank, so neither save alone
-    // completes the row (a blank Fungus/Thatch would copy Condition and
+    // completes the row (a blank Fungus/Thatch would take its no-finding score and
     // confirm on the first save).
     const { assessment } = await seed({ ...COMPLETE, color_health: null, turf_density: null }, { run: false });
     await Promise.all([
@@ -360,11 +360,12 @@ const MODEL_TEXT = 'Nutsedge is visible near the front edge.';
   });
 
   // Owner ruling 2026-10-04: the screen has no Fungus or Thatch field, so a
-  // blank one takes the Condition score once the rest of the row is complete.
-  test('a legacy blank Fungus takes the Condition score on the completing save', async () => {
+  // blank one takes its no-finding score (never a low Condition) once the
+  // rest of the row is complete.
+  test('a legacy blank Fungus takes its no-finding score on the completing save', async () => {
     const { assessment } = await seed({ ...COMPLETE, color_health: null, fungus_control: null }, { run: false });
     const done = await request(assessment.id, { adjustedScores: { color_health: 70, stress_damage: 64 } });
-    expect(done.body.assessment).toMatchObject({ confirmed_by_tech: true, color_health: 70, fungus_control: 64, thatch_level: 90, stress_damage: 64 });
+    expect(done.body.assessment).toMatchObject({ confirmed_by_tech: true, color_health: 70, fungus_control: 95, thatch_level: 90, stress_damage: 64 });
   });
 
   test('legacy reload sends the server AI read, so a partial fill stays editable', async () => {
@@ -386,13 +387,13 @@ const MODEL_TEXT = 'Nutsedge is visible near the front edge.';
     expect(second.body.assessment).toMatchObject({ confirmed_by_tech: true, color_health: 70, stress_damage: 40 });
   });
 
-  test('a legacy row with no stressor signal stays pending until Condition is entered: the 95 fallback is never copied', async () => {
+  test('a legacy row with no stressor signal stays pending until Condition is entered: the 95 fallback confirms nothing', async () => {
     const { assessment } = await seed({ ...COMPLETE, fungus_control: null, thatch_level: null, stress_damage: null }, { run: false });
     const empty = await request(assessment.id, { adjustedScores: {} });
     expect(empty.body).toMatchObject({ confirmed: false, missingScores: ['stress_damage', 'fungus_control', 'thatch_level'] });
     expect(empty.body.assessment).toMatchObject({ confirmed_by_tech: false, stress_damage: null, fungus_control: null, thatch_level: null });
     const entered = await request(assessment.id, { adjustedScores: { stress_damage: 70 } });
-    expect(entered.body.assessment).toMatchObject({ confirmed_by_tech: true, stress_damage: 70, fungus_control: 70, thatch_level: 70 });
+    expect(entered.body.assessment).toMatchObject({ confirmed_by_tech: true, stress_damage: 70, fungus_control: 95, thatch_level: 85 });
   });
 
   test('a legacy Condition corrected upward lifts the lower Fungus read with it; a posted blank stays blank', async () => {

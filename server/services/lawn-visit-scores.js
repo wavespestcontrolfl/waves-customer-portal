@@ -166,41 +166,51 @@ function resolveConfirmScores(assessment, adjustedScores, scoreValue, { stressFl
   return final;
 }
 
+// The "no finding" score of each sub-score's own scale: what the AI writes
+// when it looked and saw no fungal activity / low thatch. Read at call time,
+// like every other use of these maps here (lawn-assessment loads this module
+// while it is still loading).
+const noFinding = () => ({ fungus_control: FUNGUS_DISPLAY.none, thatch_level: THATCH_DISPLAY.low });
+
 // Owner ruling 2026-10-04: the completion screen shows four scores and no
-// longer asks for Fungus or Thatch, so Condition speaks for both:
-//   - a Fungus/Thatch the AI left blank and nobody entered takes the
-//     Condition score (Condition is the worst of the stressors, so the copy
-//     never contradicts it). A key in `posted` was sent by the client, blank
-//     or not: that client shows the field (the standalone Lawn assessment
-//     page), so its blank stays a blank the technician must fill;
+// longer asks for Fungus or Thatch. Report and tip readers treat a LOW
+// sub-score as confirmed evidence of disease or thatch, so a sub-score nobody
+// read must never come out low:
+//   - a Fungus/Thatch the AI left blank and nobody entered takes its "no
+//     finding" score, or the Condition score when that is higher — never a
+//     low Condition, which may be low for drought or insects and would
+//     publish a diagnosis the assessment never made. A key in `posted` was
+//     sent by the client, blank or not: that client shows the field (the
+//     standalone Lawn assessment page), so its blank stays a blank the
+//     technician must fill;
 //   - when Condition is the technician's own entry (`conditionEntered`), a
-//     Fungus/Thatch read BELOW it is raised to it. Report and tip readers
-//     treat a low sub-score as confirmed evidence of disease or thatch, and
-//     would otherwise contradict the technician's correction. A sub-score
-//     posted as a number in this request is the technician's too and stays.
+//     Fungus/Thatch read BELOW it is raised to it, so the AI's low read does
+//     not contradict the technician's correction. A sub-score posted as a
+//     number in this request is the technician's too and stays.
 // Both apply only on the save that completes the row. A row that stays
 // pending keeps its own values, so a later Condition change is not left
-// beside a stale copy. `copied` names the keys that hold the Condition score
-// rather than a reading.
+// beside a stale value. `synthetic` names the keys that hold no reading.
 function alignWithCondition(scores, { posted = {}, conditionEntered = false } = {}) {
   const sent = posted && typeof posted === 'object' ? posted : {};
   const condition = scores?.stress_damage;
-  if (!known(condition)) return { scores, copied: [] };
-  const copied = ['fungus_control', 'thatch_level'].filter((key) => {
+  if (!known(condition)) return { scores, synthetic: [] };
+  const floor = noFinding();
+  const value = (key) => (known(scores[key]) ? condition : Math.max(floor[key], condition));
+  const synthetic = Object.keys(floor).filter((key) => {
     if (Object.prototype.hasOwnProperty.call(sent, key)) return false;
     return !known(scores[key]) || (conditionEntered && scores[key] < condition);
   });
-  if (!copied.length) return { scores, copied };
-  const aligned = { ...scores, ...Object.fromEntries(copied.map((key) => [key, condition])) };
-  return scoresComplete(aligned) ? { scores: aligned, copied } : { scores, copied: [] };
+  if (!synthetic.length) return { scores, synthetic };
+  const aligned = { ...scores, ...Object.fromEntries(synthetic.map((key) => [key, value(key)])) };
+  return scoresComplete(aligned) ? { scores: aligned, synthetic } : { scores, synthetic: [] };
 }
 
 // What calibration compares against the AI read: the technician's scores,
-// without the Fungus/Thatch keys that only hold the Condition score. Those
-// are one Condition entry, already counted under stress_damage — counted
-// again they would triple its weight in avg_delta and bias_direction.
-function calibrationScores(finalScores, copied) {
-  const skip = Array.isArray(copied) ? copied : [];
+// without the Fungus/Thatch keys that hold no reading (alignWithCondition).
+// The technician did not score those: counted, one Condition entry would
+// weigh up to three times in avg_delta and bias_direction.
+function calibrationScores(finalScores, synthetic) {
+  const skip = Array.isArray(synthetic) ? synthetic : [];
   return { ...finalScores, ...Object.fromEntries(skip.map((key) => [key, null])) };
 }
 
@@ -254,7 +264,7 @@ function confirmScores(assessment, run, adjustedScores, { scoreValue, calculateO
   const stressExplicit = numericOverride(adjusted.stress_damage)
     ? scoreValue(adjusted.stress_damage)
     : (!stressCleared && known(previousExplicit) ? previousExplicit : null);
-  const { scores: finalScores, copied: copiedFromCondition } = alignWithCondition(resolveConfirmScores(assessment, adjusted, scoreValue, {
+  const { scores: finalScores, synthetic: syntheticSubScores } = alignWithCondition(resolveConfirmScores(assessment, adjusted, scoreValue, {
     ...(run?.status === 'complete' ? { stressFloor: independentStressFloor(run) } : {}),
     aiScores,
     stressExplicit,
@@ -262,7 +272,7 @@ function confirmScores(assessment, run, adjustedScores, { scoreValue, calculateO
   const confirmed = scoresComplete(finalScores);
   return {
     finalScores,
-    copiedFromCondition,
+    syntheticSubScores,
     overallScore: overallScoreFor(finalScores, calculateOverallScore),
     confirmed,
     missing: missingScores(finalScores),

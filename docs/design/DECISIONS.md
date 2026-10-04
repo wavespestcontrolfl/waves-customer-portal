@@ -3200,10 +3200,13 @@ and lock to text when the assessment is confirmed. A changed or emptied score
 shows the AI's own read under it ("AI 80"); an emptied field posts null, which
 the server reads as "back to the AI score". The Fungus control and Thatch
 condition tiles are gone (owner: "four only, drop the two tiles"): when the AI
-left one blank, `/admin/lawn-assessment/confirm` copies the Condition score
-into it on the save that completes the row, and the run's
-`reconciliation.confirmation.copied_from_condition` names the copied keys.
-Condition speaks for the two sub-scores in one more case: when the technician
+left one blank, `/admin/lawn-assessment/confirm` writes its "no finding" score
+(Fungus 95, Thatch 85, or the Condition score when that is higher) on the
+save that completes the row, and the run's
+`reconciliation.confirmation.synthetic_sub_scores` names those keys. It is
+never a low Condition: the report and the tips read a low sub-score as
+evidence of disease or thatch, and Condition may be low for drought or
+insects. One more case: when the technician
 enters Condition above a Fungus or Thatch the AI read, that sub-score is
 raised to it on the completing save, so the report and the tips never cite a
 low sub-score against the correction. Neither applies to a sub-score the

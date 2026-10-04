@@ -138,7 +138,7 @@ describe('confirm scores: a technician entry wins over the AI read', () => {
         // Thatch read 60, below the technician's Condition 65: raised to it on
         // the completing save, so no report reads it as a worse finding.
         finalScores: { turf_density: 90, weed_suppression: 80, color_health: 70, fungus_control: 75, thatch_level: 65, stress_damage: 65 },
-        copiedFromCondition: ['thatch_level'],
+        syntheticSubScores: ['thatch_level'],
       });
       // While the row was pending, the sub-score kept its own reading.
       expect(first.finalScores.thatch_level).toBe(60);
@@ -159,26 +159,29 @@ describe('confirm scores: a technician entry wins over the AI read', () => {
         .toMatchObject({ stressExplicit: 5, finalScores: { fungus_control: 20, stress_damage: 5 } });
     });
 
-    test('a blank Fungus or Thatch takes the Condition score, but only when that completes the row', () => {
+    test('a blank Fungus or Thatch takes its no-finding score (never a low Condition), but only when that completes the row', () => {
       const ai = { turf_density: 70, weed_suppression: 80, color_health: 70, fungus_control: null, thatch_level: null, stress_damage: 95 };
       const run = { status: 'complete', severities: JSON.stringify({ insect_damage: sig('none') }), scores_adjusted: JSON.stringify(ai) };
       const options = { scoreValue, calculateOverallScore: () => 77 };
       expect(visit.confirmScores({ ...ai }, run, {}, options)).toMatchObject({
-        confirmed: true, missing: [], copiedFromCondition: ['fungus_control', 'thatch_level'],
+        confirmed: true, missing: [], syntheticSubScores: ['fungus_control', 'thatch_level'],
+        // Thatch's own no-finding score is 85; Condition 95 is higher, and a
+        // sub-score never sits below Condition.
         finalScores: { fungus_control: 95, thatch_level: 95, stress_damage: 95 },
       });
-      // The technician's own Condition is what gets copied.
-      expect(visit.confirmScores({ ...ai }, run, { stress_damage: 60 }, options).finalScores)
-        .toMatchObject({ fungus_control: 60, thatch_level: 60, stress_damage: 60 });
-      // A reading is never replaced by a copy.
+      // A low Condition (drought, insects) is never written into a sub-score
+      // nobody read: the report would cite it as fungus or thatch evidence.
+      expect(visit.confirmScores({ ...ai }, run, { stress_damage: 40 }, options).finalScores)
+        .toMatchObject({ fungus_control: 95, thatch_level: 85, stress_damage: 40 });
+      // A reading is never replaced.
       const fungusRead = { ...ai, fungus_control: 75, stress_damage: 75 };
       expect(visit.confirmScores(fungusRead, { ...run, scores_adjusted: JSON.stringify(fungusRead) }, {}, options))
-        .toMatchObject({ copiedFromCondition: ['thatch_level'], finalScores: { fungus_control: 75, thatch_level: 75 } });
+        .toMatchObject({ syntheticSubScores: ['thatch_level'], finalScores: { fungus_control: 75, thatch_level: 85 } });
       // Still pending (Color blank): the blanks stay blank, so a later
-      // Condition change is not left beside a stale copy.
+      // Condition change is not left beside a stale value.
       const colorBlank = { ...ai, color_health: null };
       expect(visit.confirmScores(colorBlank, { ...run, scores_adjusted: JSON.stringify(colorBlank) }, {}, options)).toMatchObject({
-        confirmed: false, copiedFromCondition: [], missing: ['color_health', 'fungus_control', 'thatch_level'],
+        confirmed: false, syntheticSubScores: [], missing: ['color_health', 'fungus_control', 'thatch_level'],
         finalScores: { fungus_control: null, thatch_level: null },
       });
     });
@@ -189,22 +192,22 @@ describe('confirm scores: a technician entry wins over the AI read', () => {
       const options = { scoreValue, calculateOverallScore: () => 77 };
       const posted = { turf_density: 70, weed_suppression: 80, color_health: 70, fungus_control: null, thatch_level: null };
       expect(visit.confirmScores({ ...ai }, run, posted, options)).toMatchObject({
-        confirmed: false, missing: ['fungus_control', 'thatch_level'], copiedFromCondition: [],
+        confirmed: false, missing: ['fungus_control', 'thatch_level'], syntheticSubScores: [],
         finalScores: { fungus_control: null, thatch_level: null },
       });
       expect(visit.confirmScores({ ...ai }, run, { ...posted, fungus_control: 40, thatch_level: 80 }, options))
-        .toMatchObject({ confirmed: true, copiedFromCondition: [], finalScores: { fungus_control: 40, thatch_level: 80, stress_damage: 95 } });
+        .toMatchObject({ confirmed: true, syntheticSubScores: [], finalScores: { fungus_control: 40, thatch_level: 80, stress_damage: 95 } });
     });
 
     test('a Condition the technician entered lifts a lower Fungus/Thatch read; the AI\'s own Condition never does', () => {
       const ai = { turf_density: 70, weed_suppression: 80, color_health: 70, fungus_control: 20, thatch_level: 85, stress_damage: 20 };
       const run = { status: 'complete', severities: JSON.stringify({ fungal_activity: sig('severe') }), scores_adjusted: JSON.stringify(ai) };
       const options = { scoreValue, calculateOverallScore: () => 77 };
-      expect(visit.confirmScores({ ...ai }, run, {}, options)).toMatchObject({ copiedFromCondition: [], finalScores: { fungus_control: 20, stress_damage: 20 } });
+      expect(visit.confirmScores({ ...ai }, run, {}, options)).toMatchObject({ syntheticSubScores: [], finalScores: { fungus_control: 20, stress_damage: 20 } });
       // Corrected up to 80: the low fungus read no longer stands as evidence;
       // thatch (85) was already above it and keeps its reading.
       expect(visit.confirmScores({ ...ai }, run, { stress_damage: 80 }, options)).toMatchObject({
-        confirmed: true, copiedFromCondition: ['fungus_control'],
+        confirmed: true, syntheticSubScores: ['fungus_control'],
         finalScores: { fungus_control: 80, thatch_level: 85, stress_damage: 80 },
       });
       // A sub-score the technician posted in the same request is theirs and stays.
@@ -212,11 +215,11 @@ describe('confirm scores: a technician entry wins over the AI read', () => {
         .toMatchObject({ fungus_control: 30, stress_damage: 80 });
     });
 
-    test('calibration leaves out a sub-score that only holds the Condition score, so one Condition entry counts once', () => {
+    test('calibration leaves out a sub-score that holds no reading, so one Condition entry counts once', () => {
       const ai = { turf_density: 70, weed_suppression: 80, color_health: 70, fungus_control: 20, thatch_level: 85, stress_damage: 20 };
       const run = { status: 'complete', severities: JSON.stringify({ fungal_activity: sig('severe') }), scores_adjusted: JSON.stringify(ai) };
       const decision = visit.confirmScores({ ...ai }, run, { stress_damage: 80 }, { scoreValue, calculateOverallScore: () => 77 });
-      expect(visit.calibrationScores(decision.finalScores, decision.copiedFromCondition))
+      expect(visit.calibrationScores(decision.finalScores, decision.syntheticSubScores))
         .toEqual({ turf_density: 70, weed_suppression: 80, color_health: 70, fungus_control: null, thatch_level: 85, stress_damage: 80 });
       // The saved row keeps the raised value; only the comparison drops it.
       expect(decision.finalScores.fungus_control).toBe(80);

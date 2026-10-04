@@ -32,7 +32,7 @@ const D = {
 // assesses the underlying fungus/thatch/insect/drought/mechanical signals — those
 // stay on the assessment row for analytics + folding into stress_damage — but the
 // tech corrects one "Condition" score directly. There are no separate Fungus or
-// Thatch fields: one the AI left blank takes the Condition score at confirm.
+// Thatch fields: one the AI left blank takes its "no finding" score at confirm.
 export const LAWN_ASSESSMENT_METRICS = [
   { key: "turf_density", label: "Density" },
   { key: "weed_suppression", label: "Weed control" },

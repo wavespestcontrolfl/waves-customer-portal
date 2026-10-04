@@ -55,7 +55,7 @@ test('calibration for a run leaves out the sub-scores that only hold the Conditi
   const final = { turf_density: 70, weed_suppression: 80, color_health: 70, fungus_control: 80, thatch_level: 85, stress_damage: 80 };
   const ai = { ...final, fungus_control: 20, stress_damage: 20 };
   const run = (extra) => ({ reconciliation: JSON.stringify({ confirmation: { final_scores: final, ai_scores: ai, calibration_eligible: true, technician_id: 't1', ...extra } }) });
-  expect(calibrationForRun({}, run({ copied_from_condition: ['fungus_control'] })))
+  expect(calibrationForRun({}, run({ synthetic_sub_scores: ['fungus_control'] })))
     .toEqual({ aiScores: ai, finalScores: { ...final, fungus_control: null }, technicianId: 't1' });
   // A confirmation saved before the key existed compares every score, as before.
   expect(calibrationForRun({}, run({})).finalScores).toEqual(final);

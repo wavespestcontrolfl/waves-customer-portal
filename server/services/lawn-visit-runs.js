@@ -251,8 +251,8 @@ async function confirmLockedRun(args, customerId, trx) {
         confirmation: {
           final_scores: decision.finalScores, ai_scores: decision.aiScores,
           calibration_eligible: decision.calibrationEligible,
-          // Fungus/Thatch keys holding the Condition score, not a reading.
-          copied_from_condition: decision.copiedFromCondition,
+          // Fungus/Thatch keys that hold no reading (alignWithCondition).
+          synthetic_sub_scores: decision.syntheticSubScores,
           technician_id: technicianId,
         },
       }),
@@ -467,7 +467,7 @@ function calibrationForRun(assessment, run) {
   const snapshot = parseObject(run?.reconciliation)?.confirmation;
   const technicianId = snapshot?.technician_id || assessment?.technician_id;
   if (snapshot?.calibration_eligible !== true || !technicianId) return null;
-  return { aiScores: snapshot.ai_scores, finalScores: calibrationScores(snapshot.final_scores, snapshot.copied_from_condition), technicianId };
+  return { aiScores: snapshot.ai_scores, finalScores: calibrationScores(snapshot.final_scores, snapshot.synthetic_sub_scores), technicianId };
 }
 
 // A confirmation snapshot is the only record of what the technician changed. A

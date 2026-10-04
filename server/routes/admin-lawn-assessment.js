@@ -1243,14 +1243,15 @@ async function confirmLegacyAssessment({ assessmentId, adjustedScores, propertyH
       // 2026-10-04). A retry or a stale second session returns the confirmed
       // row; its payload never rewrites it (as visitRuns.confirmLockedRun).
       if (assessment.confirmed_by_tech) return { assessment, confirmed: true, missingScores: [] };
-      // Condition speaks for a blank Fungus/Thatch only when it is a real
-      // value (AI-read or entered) or derived from a known component — the
-      // 95 fallback of a row with no stressor signal at all is neither, and
-      // the screen shows that Condition as an empty field. It is the
-      // technician's entry when it is real and not the AI's own read.
+      // A blank Fungus/Thatch is settled without an entry only when Condition
+      // is a real value (AI-read or entered) or derived from a known
+      // component — the 95 fallback of a row with no stressor signal at all
+      // is neither, and the screen shows that Condition as an empty field.
+      // Condition is the technician's entry when it is real and not the AI's
+      // own read.
       const resolved = legacyConfirmFinalScores(assessment, adjustedScores);
       const conditionReal = legacyStressIsFixed(assessment, adjustedScores);
-      const { scores: finalScores, copied: copiedFromCondition = [] } = conditionReal || resolved.fungus_control != null || resolved.thatch_level != null
+      const { scores: finalScores, synthetic: syntheticSubScores = [] } = conditionReal || resolved.fungus_control != null || resolved.thatch_level != null
         ? visitScores.alignWithCondition(resolved, {
           posted: adjustedScores,
           conditionEntered: conditionReal && resolved.stress_damage !== legacyAiScores(assessment).stress_damage,
@@ -1283,7 +1284,7 @@ async function confirmLegacyAssessment({ assessmentId, adjustedScores, propertyH
         ? await lawnAssessment.installConfirmedBaseline({ assessmentId, updateData }, { knex: conn })
         : (await conn('lawn_assessments').where({ id: assessmentId }).update(updateData).returning('*'))[0];
       if (persistChecks) await persistChecks(updated, conn);
-      return { assessment: updated, confirmed: !pending, missingScores, copiedFromCondition };
+      return { assessment: updated, confirmed: !pending, missingScores, syntheticSubScores };
     };
     if (propertyHistoryEnabled || persistChecks) {
       const { withTurfProfileFence } = require('../services/customer-pricing-ai');
@@ -1413,11 +1414,11 @@ router.post('/confirm', async (req, res, next) => {
         // 3. Tech calibration — record AI vs tech score differences. The
         // drawer posts only typed keys now, so compare against the FINAL saved
         // scores (the confirmed row), never the sparse request payload.
-        // Fungus/Thatch keys that only hold the Condition score are left out.
+        // Fungus/Thatch keys that hold no reading are left out.
         const confirmedScores = visitScores.calibrationScores(Object.fromEntries(
           ['turf_density', 'weed_suppression', 'color_health', 'fungus_control', 'thatch_level', 'stress_damage']
             .map((key) => [key, updated?.[key] ?? null]),
-        ), confirmation.copiedFromCondition);
+        ), confirmation.syntheticSubScores);
         if (updated) {
           const calibrationBaseline = assessment.adjusted_scores || assessment.composite_scores;
           const aiScores = calibrationBaseline

@@ -71,7 +71,7 @@ const SCORING = {
     expect(result).toMatchObject({ confirmed: true, missingScores: [] });
     expect(result.assessment).toMatchObject({ confirmed_by_tech: true, is_baseline: true, turf_density: 68 });
     expect(result.run.reviewed_at).toBeInstanceOf(Date);
-    expect(result.run.reconciliation.confirmation).toEqual({ final_scores: { ...COMPLETE, turf_density: 68 }, ai_scores: AI_PARTIAL, calibration_eligible: true, copied_from_condition: [], technician_id: null });
+    expect(result.run.reconciliation.confirmation).toEqual({ final_scores: { ...COMPLETE, turf_density: 68 }, ai_scores: AI_PARTIAL, calibration_eligible: true, synthetic_sub_scores: [], technician_id: null });
     expect(result.run.scores_adjusted).toEqual(AI_PARTIAL);
   });
 
@@ -134,17 +134,17 @@ const SCORING = {
   });
 
   // Owner ruling 2026-10-04: any score the AI read can be changed before
-  // confirming, and a blank Fungus/Thatch takes the Condition score.
-  test('a changed AI score is saved, the AI read is kept for comparison, and blank sub-scores copy Condition', async () => {
+  // confirming, and a blank Fungus/Thatch takes its no-finding score.
+  test('a changed AI score is saved, the AI read is kept for comparison, and blank sub-scores take their no-finding score', async () => {
     const AI = { ...COMPLETE, fungus_control: null, thatch_level: null };
     const { assessment } = await seed(AI);
     const result = await save(assessment.id, { adjustedScores: { turf_density: 41 }, review: { reviewedFindings: [] } });
     expect(result).toMatchObject({ confirmed: true, missingScores: [] });
-    expect(result.assessment).toMatchObject({ turf_density: 41, fungus_control: COMPLETE.stress_damage, thatch_level: COMPLETE.stress_damage, stress_damage: COMPLETE.stress_damage });
+    expect(result.assessment).toMatchObject({ turf_density: 41, fungus_control: 95, thatch_level: 85, stress_damage: COMPLETE.stress_damage });
     expect(result.run.scores_adjusted).toEqual(AI);
     expect(result.run.reconciliation.confirmation).toMatchObject({
       ai_scores: AI, final_scores: { turf_density: 41 }, calibration_eligible: true,
-      copied_from_condition: ['fungus_control', 'thatch_level'],
+      synthetic_sub_scores: ['fungus_control', 'thatch_level'],
     });
   });
 
