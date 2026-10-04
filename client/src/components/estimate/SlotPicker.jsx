@@ -72,6 +72,9 @@ function toAvailability(slots) {
   return { days, ...pickerRange(days) };
 }
 
+// The review shape the slot reads answer for an estimate parked for the office (B18).
+const isContactReview = (body) => body?.reviewBeforeBooking === true && body?.reason === 'contact_review';
+
 export default function SlotPicker({
   website = false,
   token,
@@ -91,7 +94,14 @@ export default function SlotPicker({
   serviceCadences = null,
   onFirstSlotDate = null,
   cityLabel = null,
+  // B18: the server parked this estimate for the office - its slot reads answer an empty review shape
+  // (reviewBeforeBooking + reason 'contact_review'). The page owns the transition to its review state.
+  onContactReview = null,
 }) {
+  // The page's transition is async: its rejection must never surface as an unhandled one from a slot read.
+  const reportContactReview = (body) => {
+    try { Promise.resolve(onContactReview?.(body)).catch(() => {}); } catch { /* the page owns the transition */ }
+  };
   const [data, setData] = useState(null);
   // Report the first open slot date up (hero {date} token).
   const [loading, setLoading] = useState(true);
@@ -202,7 +212,12 @@ export default function SlotPicker({
     const query = params.toString();
     fetch(`${API_BASE}/public/estimates/${token}/available-slots${query ? `?${query}` : ''}`)
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error('slot fetch failed'))))
-      .then((body) => { if (!cancelled) { setData(body); setLoading(false); } })
+      .then((body) => {
+        if (cancelled) return;
+        if (isContactReview(body)) { setLoading(false); reportContactReview(body); return; }
+        setData(body);
+        setLoading(false);
+      })
       .catch((err) => { if (!cancelled) { setError(err.message); setLoading(false); } });
     return () => { cancelled = true; };
   }, [token, preview, refreshSignal, serviceMode, selectedFrequency, serviceCadences]);
@@ -280,6 +295,7 @@ export default function SlotPicker({
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(body.error || 'search failed');
+    if (isContactReview(body)) { reportContactReview(body); return { summary: null }; }
     if (glass) body.summary = glassRewriteSlotSummary(body.summary, query);
     latestPickedRequestRef.current += 1;
     setPickedDate(null);
@@ -324,6 +340,7 @@ export default function SlotPicker({
       if (!res.ok) throw new Error('slot fetch failed');
       const body = await res.json();
       if (latestPickedRequestRef.current !== requestId) return;
+      if (isContactReview(body)) { reportContactReview(body); return; }
       setPickedData(body);
     } catch {
       if (latestPickedRequestRef.current !== requestId) return;
