@@ -26,11 +26,13 @@ const D = {
   heading: "#0F172A",
 };
 
-// The four scores the tech reviews/adjusts, matching the customer report's
+// The four scores the tech reviews and may change until the assessment is
+// confirmed (owner ruling 2026-10-04), matching the customer report's
 // consolidated diagnosis (Density / Weeds / Color / Stress-Damage). The AI still
 // assesses the underlying fungus/thatch/insect/drought/mechanical signals — those
 // stay on the assessment row for analytics + folding into stress_damage — but the
-// tech now corrects one "Stress" score directly instead of separate Fungus/Thatch.
+// tech corrects one "Condition" score directly. There are no separate Fungus or
+// Thatch fields: one the AI left blank takes its "no finding" score at confirm.
 export const LAWN_ASSESSMENT_METRICS = [
   { key: "turf_density", label: "Density" },
   { key: "weed_suppression", label: "Weed control" },
@@ -107,8 +109,7 @@ function parseAssessmentScores(row = {}) {
   const turf_density = lawnScores.lawnScoreValue(row.turf_density ?? row.turfDensity);
   const weed_suppression = lawnScores.lawnScoreValue(row.weed_suppression ?? row.weedSuppression);
   const color_health = lawnScores.lawnScoreValue(row.color_health ?? row.colorHealth);
-  // Preserve known AI components. Missing components get explicit controls
-  // during confirmation so unknown values never become invented scores.
+  // Preserve known AI components.
   const fungus_control = lawnScores.lawnScoreValue(row.fungus_control ?? row.fungusControl);
   const thatch_level = lawnScores.lawnScoreValue(row.thatch_level ?? row.thatchLevel);
   // Legacy assessments (created before the stress_damage column) have a null
@@ -125,29 +126,14 @@ function parseAssessmentScores(row = {}) {
   return { turf_density, weed_suppression, color_health, fungus_control, thatch_level, stress_damage };
 }
 
-// The AI's own read — used ONLY to decide which metrics stay editable, never
-// what's displayed (that's techScores/scoreSource, which may already hold a
-// technician's earlier fill of a genuinely blank metric from a prior partial
-// save). Run-backed: the run's immutable scores_adjusted snapshot
-// (visitAssessment.aiScores from the server), which a save never touches —
-// so a metric a technician already filled correctly stays editable instead
-// of looking "AI-known" just because it now has a value (Codex P1
-// 2026-09-24). Legacy (no run, visitAssessment null): the assessment row's
-// own RAW columns, mirroring the server's legacy /confirm rule exactly —
-// including that stress_damage is read raw, never parseAssessmentScores's
-// derived worst-of-fungus/thatch guess, which could already be non-null
-// while the server still considers Stress unknown.
-// Locked metrics always show the AI's own read. A row adjusted before the
-// read-only ruling can still carry an old technician value in its columns;
-// only AI-blank metrics keep the saved technician fill.
-function withAiScores(scores, aiScores) {
-  const out = { ...(scores || {}) };
-  for (const [key, value] of Object.entries(aiScores || {})) {
-    if (lawnScores.lawnScoreValue(value) != null) out[key] = value;
-  }
-  return out;
-}
-
+// The AI's own read — shown beside a score the technician changed, never
+// what's displayed (that's techScores/scoreSource, which may already hold the
+// technician's entry from a prior partial save). Run-backed: the run's
+// immutable scores_adjusted snapshot (visitAssessment.aiScores from the
+// server), which a save never touches. Legacy (no run, visitAssessment null):
+// the server's own read sent by the reload route, else the assessment row's
+// RAW columns — stress_damage is read raw, never parseAssessmentScores's
+// derived worst-of-fungus/thatch guess.
 function resolveAiScores(assessment = {}, visitAssessment, serverAiScores) {
   if (visitAssessment?.aiScores) return visitAssessment.aiScores;
   // Legacy rows: the reload route sends the server's own AI read.
@@ -214,8 +200,9 @@ export default function LawnAssessmentCompletionBlock({
   const [visitReview, setVisitReview] = useState(null);
   const [techScores, setTechScores] = useState(null);
   // Keys the technician actually typed this session. Only these are posted:
-  // the server ignores AI-known keys anyway, and resending a server-derived
-  // value (e.g. Stress) would read as an explicit entry and freeze it.
+  // the server keeps the saved value of an omitted key, and resending a
+  // server-derived value (e.g. Stress) would read as an explicit entry and
+  // freeze it.
   const [typedKeys, setTypedKeys] = useState(() => new Set());
   const [confirmedId, setConfirmedId] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -260,9 +247,9 @@ export default function LawnAssessmentCompletionBlock({
           aiScores: resolveAiScores(assessment, data.visitAssessment, data.aiScores),
           observations: assessment.observations || "",
         });
-        // A confirmed row shows exactly what was saved (and what the customer
-        // report uses); only a pending row shows the AI read for locked keys.
-        setTechScores(assessment.confirmed_by_tech ? scores : withAiScores(scores, resolveAiScores(assessment, data.visitAssessment, data.aiScores)));
+        // The row holds what was saved: the AI read, or the technician's
+        // entry from an earlier save.
+        setTechScores(scores);
         setTypedKeys(new Set());
         setVisitReview(createVisitReview(data.visitAssessment, assessment.observations));
         if (assessment.confirmed_by_tech) {
@@ -372,11 +359,9 @@ export default function LawnAssessmentCompletionBlock({
     });
   }
 
-  // Owner ruling 2026-09-24: lawn health scores are read-only from photos.
-  // The only manual entry allowed is filling a metric the AI left blank —
-  // this never touches a metric the AI already scored (the server enforces
-  // the same rule independently; this just keeps the tech from typing into
-  // a metric that won't take effect).
+  // Owner ruling 2026-10-04: the tech may change any of the four scores until
+  // the assessment is confirmed. An emptied field posts null, which the
+  // server reads as "back to the AI's score".
   function fillScore(key, rawValue) {
     setTypedKeys((prev) => new Set(prev).add(key));
     setTechScores((prev) => {
@@ -459,7 +444,7 @@ export default function LawnAssessmentCompletionBlock({
       // Show what the server actually saved.
       if (savedAssessment) {
         const saved = parseAssessmentScores(savedAssessment);
-        setTechScores(savedAssessment.confirmed_by_tech ? saved : withAiScores(saved, result.aiScores));
+        setTechScores(saved);
         setTypedKeys(new Set());
       }
       if (visitAssessment) {
@@ -488,18 +473,6 @@ export default function LawnAssessmentCompletionBlock({
   const scoreSource = techScores || result?.adjustedScores || result?.displayScores || null;
   const hasResult = !!result?.assessment?.id;
   const confirmed = !!confirmedId;
-  // Keep the usual four controls; expose underlying scores only when the
-  // saved assessment lacks them. Keep them editable until the save completes.
-  // Same rule as the aiValue check below: whether an underlying signal is
-  // AI-blank comes from result.aiScores (the immutable read), never the
-  // mutable assessment row — otherwise a prior save's fill of a genuinely
-  // blank Fungus/Thatch would hide the tile entirely on reload instead of
-  // keeping it open for correction (Codex P1 2026-09-24).
-  const metrics = [...LAWN_ASSESSMENT_METRICS, ...[
-    { key: "fungus_control", label: "Fungus control" },
-    { key: "thatch_level", label: "Thatch condition" },
-  ].filter((metric) => !confirmed && lawnScores.lawnScoreValue(result?.aiScores?.[metric.key]) == null)];
-
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       {loading && (
@@ -701,18 +674,12 @@ export default function LawnAssessmentCompletionBlock({
       {hasResult && (
         <>
           <div style={{ display: "grid", gridTemplateColumns: `repeat(${LAWN_ASSESSMENT_METRICS.length}, minmax(0, 1fr))`, gap: 6 }}>
-            {metrics.map((metric) => {
+            {LAWN_ASSESSMENT_METRICS.map((metric) => {
               const value = lawnScores.lawnScoreValue(scoreSource?.[metric.key]);
-              // Whether the AI itself knew this metric — from result.aiScores
-              // (the run's immutable snapshot, or the assessment's raw
-              // columns for a legacy no-run row; see resolveAiScores), never
-              // from scoreSource or the mutable assessment row a reload
-              // reads back. A prior save's tech fill of a genuinely blank
-              // metric must not look "AI-known" just because it now has a
-              // value (Codex P1 2026-09-24) — and a fill-in input stays open
-              // (still editable, still shows what was typed) once the tech
-              // starts typing, instead of collapsing to read-only the moment
-              // it first has a value.
+              // The AI's own read, from result.aiScores (the run's immutable
+              // snapshot, or the server's read for a legacy no-run row; see
+              // resolveAiScores) — shown under a score the tech changed or
+              // emptied, so the original stays in view.
               const aiValue = lawnScores.lawnScoreValue(result?.aiScores?.[metric.key]);
               return (
                 <div
@@ -726,37 +693,40 @@ export default function LawnAssessmentCompletionBlock({
                     minWidth: 0,
                   }}
                 >
-                  <div style={{ fontSize: 15, fontWeight: 500, color: value == null ? D.muted : lawnScoreColor(value), lineHeight: 1.1 }}>
-                    {value == null ? "—" : `${value}/100`}
-                  </div>
-                  <div style={{ fontSize: 14, color: D.muted, marginTop: 3 }}>{metric.label}</div>
-                  {/* AI-known scores are read-only (owner ruling 2026-09-24).
-                      A metric the AI left blank (aiValue == null) is the one
-                      the tech can fill — the server enforces this too. */}
-                  {!confirmed && aiValue == null && (
+                  {confirmed ? (
+                    <div style={{ fontSize: 15, fontWeight: 500, color: value == null ? D.muted : lawnScoreColor(value), lineHeight: 1.1 }}>
+                      {value == null ? "—" : `${value}/100`}
+                    </div>
+                  ) : (
                     <input
                       type="number"
                       inputMode="numeric"
                       min={0}
                       max={100}
                       value={techScores?.[metric.key] ?? ""}
-                      aria-label={`Enter ${metric.label}`}
+                      disabled={disabled || confirming}
+                      aria-label={`${metric.label} score`}
                       placeholder="0-100"
                       onChange={(e) => fillScore(metric.key, e.target.value)}
                       style={{
                         width: "100%",
-                        marginTop: 6,
-                        height: 28,
-                        padding: "0 6px",
+                        height: 36,
+                        padding: "0 4px",
                         borderRadius: 6,
                         border: `1px solid ${D.border}`,
                         background: D.white,
-                        color: D.heading,
-                        fontSize: 14,
+                        color: value == null ? D.heading : lawnScoreColor(value),
+                        // 16px keeps iOS Safari from zooming the page on focus.
+                        fontSize: 16,
+                        fontWeight: 500,
                         textAlign: "center",
                         boxSizing: "border-box",
                       }}
                     />
+                  )}
+                  <div style={{ fontSize: 14, color: D.muted, marginTop: 3 }}>{metric.label}</div>
+                  {!confirmed && aiValue != null && aiValue !== value && (
+                    <div data-testid={`lawn-ai-score-${metric.key}`} style={{ fontSize: 14, color: D.muted, marginTop: 2 }}>AI {aiValue}</div>
                   )}
                 </div>
               );
