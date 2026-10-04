@@ -561,7 +561,7 @@ async function claimReceiptJobForOperatorSend(invoiceId, { sawUnsent = false } =
       await trx('receipt_delivery_jobs')
         .where({ id: job.id })
         .update({ status: 'running', locked_at: trx.fn.now(), locked_by: token, updated_at: trx.fn.now() });
-      return { id: job.id, invoiceId, token, prior: { status: job.status, next_attempt_at: job.next_attempt_at } };
+      return { id: job.id, invoiceId, token, prior: { status: job.status, next_attempt_at: job.next_attempt_at, source: job.source } };
     });
   } catch (err) {
     if (err === ALREADY_SENT) return { alreadySent: true };
@@ -586,22 +586,34 @@ async function recordOperatorReceiptDelivered(claim, leg) {
     .catch((err) => logger.warn(`[receipt-delivery-queue] operator receipt ${leg} evidence failed for job ${claim.id}: ${err.message}`));
 }
 
-// After the operator send: a delivered receipt EMAIL completes the job (the
-// queued job would only repeat it; its text leg already skips once
-// receipt_sent_at is stamped). Otherwise the queued job goes back exactly as
-// it was — it still owes the email — and a row the claim itself created is
-// removed, or queued if an enqueue took it over. Scoped to this claim's
-// token; a failure logs and leaves the row to recoverStaleLocks.
-// holdForReconciliation (the IB resend_receipt tool, when a leg's provider
-// outcome is unknown): nothing was recorded as delivered, but a leg may have
-// gone out, so the job is NOT handed back to the drain — it is parked as
-// 'failed' (the status the drain and the claim never pick up; closeout status
-// reads it as a failed delivery) for a person to reconcile. Default off: the
-// Invoices route hands the job back as it always did.
+// After the operator send, the claim is released. ONE ordered decision, for every
+// held job whatever its prior state or takeover. A "takeover" is an enqueue that
+// changed the held row's source meanwhile (enqueueReceiptDelivery merges into a
+// running operator_send row): someone wants that receipt delivered.
+//
+//   1. email delivered by this send        -> completed        (nothing more is owed; no duplicate)
+//   2. holdForReconciliation (outcome of a leg unknown; the IB tool sets it)
+//        a row the claim created, no takeover -> row removed   (no job ever existed to hold)
+//        everything else (prior queued / completed / failed, or any takeover)
+//                                          -> failed ("held")  (never queued: a leg may have gone out)
+//   3. otherwise (definite failure, or only a text delivered)
+//        taken over by an enqueue          -> queued           (that job is due)
+//        a row the claim created           -> removed
+//        prior queued / retry_scheduled    -> back as it was   (it still owes the email)
+//        prior completed                   -> completed        (as it was)
+//        prior failed                      -> failed           (as it was)
+//
+// The decision and its writes run in one transaction under the row lock, so an
+// enqueue cannot land between reading the row and settling it.
+// A delivered email completes a queued job (it would only repeat the email; its text leg
+// already skips once receipt_sent_at is stamped); a completed job keeps its own recorded
+// results. Scoped to this claim's token; a failure logs and leaves the row to recoverStaleLocks.
+// holdForReconciliation parks the job as 'failed' (the status the drain and the claim never
+// pick up; closeout status reads it as a failed delivery) for a person to reconcile.
+// Default off: the Invoices route hands the job back as it always did.
 // Returns what became of the automatic receipt job, for callers that report it
 // (the IB tool states what the queue will actually do from this, never a guess):
-//   'none'                    no job to settle (it was already finished — and is put back
-//                             as it was — or never claimed)
+//   'none'                    a finished job was put back as it was — nothing is queued
 //   'completed'               a delivered email closed the job — nothing more is queued
 //   'removed'                 the claim created the row itself: no automatic receipt exists
 //   'returned_to_queue'       the job is queued again and WILL be delivered automatically
@@ -610,16 +622,6 @@ async function recordOperatorReceiptDelivered(claim, leg) {
 //                             later and may re-queue it
 async function releaseOperatorReceiptClaim(claim, { emailDelivered = false, smsDelivered = false, smsResult = null, emailResult = null, holdForReconciliation = false } = {}) {
   if (!claim?.id) return 'none';
-  const mine = () => db('receipt_delivery_jobs').where({ id: claim.id, status: 'running', locked_by: claim.token });
-  const heldForReconciliation = {
-    status: 'failed',
-    sms_result: smsResult,
-    email_result: emailResult,
-    last_error: 'operator receipt send outcome unknown — held for reconciliation, not retried automatically',
-    locked_at: null,
-    locked_by: null,
-    updated_at: db.fn.now(),
-  };
   try {
     // Anything delivered stamps the invoice first (the caller's own stamp may
     // have failed) — before a job is handed back, so its text leg skips. If
@@ -627,50 +629,42 @@ async function releaseOperatorReceiptClaim(claim, { emailDelivered = false, smsD
     if (emailDelivered || smsDelivered) {
       await db('invoices').where({ id: claim.invoiceId }).whereNull('receipt_sent_at').update({ receipt_sent_at: db.fn.now() });
     }
-    // A write that touched no row means the row was re-owned since: not settled here.
-    const settled = (rows, outcome) => (rows ? outcome : 'release_failed');
-    // A finished job the claim held goes back as it was (nothing is queued by it). Only a
-    // failed job whose email this send delivered becomes completed; a completed job keeps
-    // its own recorded results. An enqueue that took over a held operator_send row
-    // meanwhile is a job that is now due.
-    if (claim.prior?.finished && !(emailDelivered && claim.prior.status === 'failed')) {
-      const row = await mine().first('source');
+    return await db.transaction(async (trx) => {
+      const mine = () => trx('receipt_delivery_jobs').where({ id: claim.id, status: 'running', locked_by: claim.token });
+      const unlock = { locked_at: null, locked_by: null, updated_at: trx.fn.now() };
+      // A write that touched no row means the row was re-owned since: not settled here.
+      const settled = (rows, outcome) => (rows ? outcome : 'release_failed');
+      const row = await mine().forUpdate().first('source');
       if (!row) return 'release_failed';
-      if (claim.prior.source === 'operator_send' && row.source !== 'operator_send') {
-        return settled(await mine().update({ status: 'queued', locked_at: null, locked_by: null, updated_at: db.fn.now() }), 'returned_to_queue');
+      const prior = claim.prior; // null = the claim created the row
+      // (a prior without a recorded source — an older caller's claim shape — is never read as taken over)
+      const takenOver = prior ? (prior.source !== undefined && row.source !== prior.source) : row.source !== 'operator_send';
+
+      // 1. This send delivered the email.
+      if (emailDelivered) {
+        return settled(await mine().update(prior?.finished && prior.status === 'completed'
+          ? { status: 'completed', ...unlock }
+          : {
+            status: 'completed', sms_result: smsResult, email_result: emailResult, completed_at: trx.fn.now(), last_error: null, ...unlock,
+          }), 'completed');
       }
-      return settled(await mine().update({ status: claim.prior.status, locked_at: null, locked_by: null, updated_at: db.fn.now() }), 'none');
-    }
-    if (emailDelivered) {
-      return settled(await mine().update({
-        status: 'completed',
-        sms_result: smsResult,
-        email_result: emailResult,
-        completed_at: db.fn.now(),
-        locked_at: null,
-        locked_by: null,
-        last_error: null,
-        updated_at: db.fn.now(),
-      }), 'completed');
-    }
-    if (!claim.prior) {
-      // A row the claim created goes away — unless an enqueue took it over
-      // meanwhile (source no longer 'operator_send'): that job is now due
-      // (or held, when the outcome of this send is unknown).
-      const removed = await mine().where({ source: 'operator_send' }).del();
-      if (removed) return 'removed';
-      return holdForReconciliation
-        ? settled(await mine().update(heldForReconciliation), 'held_for_reconciliation')
-        : settled(await mine().update({ status: 'queued', locked_at: null, locked_by: null, updated_at: db.fn.now() }), 'returned_to_queue');
-    }
-    if (holdForReconciliation) return settled(await mine().update(heldForReconciliation), 'held_for_reconciliation');
-    return settled(await mine().update({
-      status: claim.prior.status,
-      next_attempt_at: claim.prior.next_attempt_at,
-      locked_at: null,
-      locked_by: null,
-      updated_at: db.fn.now(),
-    }), 'returned_to_queue');
+      // 2. The outcome of a leg is unknown: never queued.
+      if (holdForReconciliation) {
+        if (!prior && !takenOver && await mine().where({ source: 'operator_send' }).del()) return 'removed';
+        return settled(await mine().update({
+          status: 'failed',
+          sms_result: smsResult,
+          email_result: emailResult,
+          last_error: 'operator receipt send outcome unknown — held for reconciliation, not retried automatically',
+          ...unlock,
+        }), 'held_for_reconciliation');
+      }
+      // 3. Everything else.
+      if (takenOver) return settled(await mine().update({ status: 'queued', ...unlock }), 'returned_to_queue');
+      if (!prior) return (await mine().where({ source: 'operator_send' }).del()) ? 'removed' : 'release_failed';
+      if (prior.finished) return settled(await mine().update({ status: prior.status, ...unlock }), 'none');
+      return settled(await mine().update({ status: prior.status, next_attempt_at: prior.next_attempt_at, ...unlock }), 'returned_to_queue');
+    });
   } catch (err) {
     logger.warn(`[receipt-delivery-queue] operator receipt claim release failed for job ${claim.id}: ${err.message}`);
     return 'release_failed';

@@ -438,6 +438,88 @@ postgres('operator receipt claim on PostgreSQL', () => {
     });
   });
 
+  describe('releaseOperatorReceiptClaim: one ordered decision for every held job (prior state x takeover x outcome)', () => {
+    // The decision table (see releaseOperatorReceiptClaim):
+    //   1. email delivered by this send -> completed
+    //   2. hold (a leg's outcome unknown) -> failed ("held"), never queued; a row the claim created with no takeover is removed
+    //   3. otherwise: takeover -> queued; claim-created row -> removed; prior queued -> as it was; completed -> completed; failed -> failed
+    // [prior, takeover, outcome, final job status ('row removed' = no row), disposition]
+    const CELLS = [
+      ['queued', 'no', 'email delivered', 'completed', 'completed'],
+      ['queued', 'no', 'unknown / hold', 'failed', 'held_for_reconciliation'],
+      ['queued', 'no', 'definite failure', 'retry_scheduled', 'returned_to_queue'],
+      ['completed', 'no', 'email delivered', 'completed', 'completed'],
+      ['completed', 'no', 'unknown / hold', 'failed', 'held_for_reconciliation'],
+      ['completed', 'no', 'definite failure', 'completed', 'none'],
+      ['completed', 'yes', 'email delivered', 'completed', 'completed'],
+      ['completed', 'yes', 'unknown / hold', 'failed', 'held_for_reconciliation'],
+      ['completed', 'yes', 'definite failure', 'queued', 'returned_to_queue'],
+      ['failed', 'no', 'email delivered', 'completed', 'completed'],
+      ['failed', 'no', 'unknown / hold', 'failed', 'held_for_reconciliation'],
+      ['failed', 'no', 'definite failure', 'failed', 'none'],
+      ['failed', 'yes', 'email delivered', 'completed', 'completed'],
+      ['failed', 'yes', 'unknown / hold', 'failed', 'held_for_reconciliation'],
+      ['failed', 'yes', 'definite failure', 'queued', 'returned_to_queue'],
+      ['none', 'no', 'email delivered', 'completed', 'completed'],
+      ['none', 'no', 'unknown / hold', 'row removed', 'removed'],
+      ['none', 'no', 'definite failure', 'row removed', 'removed'],
+      ['none', 'yes', 'email delivered', 'completed', 'completed'],
+      ['none', 'yes', 'unknown / hold', 'failed', 'held_for_reconciliation'],
+      ['none', 'yes', 'definite failure', 'queued', 'returned_to_queue'],
+    ];
+    const OUTCOMES = {
+      'email delivered': { emailDelivered: true, emailResult: { ok: true, resend: true } },
+      'unknown / hold': { emailDelivered: false, holdForReconciliation: true, emailResult: { ok: false, error: 'lost' } },
+      'definite failure': { emailDelivered: false, emailResult: { ok: false, error: 'PDF generation failed' } },
+    };
+
+    test.each(CELLS)('prior %s, takeover %s, %s -> job %s, disposition %s', async (prior, takeover, outcome, finalStatus, disposition) => {
+      // A takeover needs the held row's source to be 'operator_send' (enqueue merges only into those):
+      // a claim-created row, or a finished job an earlier operator send created.
+      const seeded = {
+        queued: () => seedJob({ status: 'retry_scheduled', source: 'stripe_webhook' }),
+        completed: () => seedJob({ status: 'completed', source: takeover === 'yes' ? 'operator_send' : 'stripe_webhook', email_result: JSON.stringify({ ok: true, original: true }) }),
+        failed: () => seedJob({ status: 'failed', source: takeover === 'yes' ? 'operator_send' : 'stripe_webhook', last_error: 'gave up' }),
+        none: async () => randomUUID(),
+      };
+      const invoiceId = await seeded[prior]();
+      const before = await job(invoiceId);
+      const claim = await claimReceiptJobForOperatorSend(invoiceId);
+      expect(claim.id).toEqual(expect.any(String));
+      if (takeover === 'yes') {
+        expect(await enqueueReceiptDelivery({ invoiceId, source: 'ib_closeout_repair' })).toMatchObject({ enqueued: true });
+        expect(await job(invoiceId)).toMatchObject({ status: 'running', source: 'ib_closeout_repair' });
+      }
+      expect(await releaseOperatorReceiptClaim(claim, OUTCOMES[outcome])).toBe(disposition);
+      const after = await job(invoiceId);
+      if (finalStatus === 'row removed') {
+        expect(after).toBeUndefined();
+        return;
+      }
+      expect(after).toMatchObject({ status: finalStatus, locked_by: null, locked_at: null });
+      // Never left queued for the drain after a confirmed or uncertain delivery.
+      if (outcome !== 'definite failure') expect(['completed', 'failed']).toContain(after.status);
+      if (finalStatus === 'failed' && outcome === 'unknown / hold') expect(after.last_error).toMatch(/held for reconciliation/);
+      if (prior === 'completed' && outcome === 'email delivered') expect(after.email_result).toEqual({ ok: true, original: true });
+      // "As it was": a finished job's results and a queued job's schedule are untouched.
+      if (disposition === 'none' || (prior === 'queued' && outcome === 'definite failure')) {
+        expect(after.next_attempt_at.toISOString()).toBe(before.next_attempt_at.toISOString());
+        expect(after.email_result).toEqual(before.email_result);
+      }
+      // The drain only ever picks up what the table queued.
+      const drained = (await claimDueReceiptDeliveryJobs({ limit: 50 })).map((j) => j.invoice_id);
+      expect(drained.includes(invoiceId)).toBe(['queued', 'retry_scheduled'].includes(finalStatus));
+    });
+
+    test('prior queued x takeover cannot occur: an enqueue only merges into a running operator_send row, and a queued job never has that source', async () => {
+      const invoiceId = await seedJob({ status: 'queued', source: 'stripe_webhook' });
+      const claim = await claimReceiptJobForOperatorSend(invoiceId);
+      expect(await enqueueReceiptDelivery({ invoiceId, source: 'ib_closeout_repair' })).toEqual({ enqueued: false, deduped: true });
+      expect(await job(invoiceId)).toMatchObject({ source: 'stripe_webhook' });
+      await releaseOperatorReceiptClaim(claim, { emailDelivered: false });
+    });
+  });
+
   describe('holdForReconciliation — an unknown provider outcome never goes back to the drain', () => {
     test('a queued job the operator claimed is parked as failed, not re-queued; the drain and a new claim leave it alone', async () => {
       const invoiceId = await seedJob({ status: 'retry_scheduled' });
