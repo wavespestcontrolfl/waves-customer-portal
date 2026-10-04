@@ -1884,6 +1884,15 @@ export default function EstimateToolViewV2({
   const [leadSearchStatus, setLeadSearchStatus] = useState("idle");
   // The lead picked from that list, for the "Linked to lead" line.
   const [linkedLead, setLinkedLead] = useState(null);
+  // Contact provenance: the phone and email the LAST search pick (customer or
+  // lead) put in the form. A field still holding that value belongs to that
+  // person, not to the operator's typing, and it outlives an unlink: the next
+  // pick must clear it, never inherit it. The server links an estimate when
+  // either contact matches, so a mixed contact can reach the wrong person.
+  const pickedContactRef = useRef({ customerPhone: "", customerEmail: "" });
+  // `picked` is read BEFORE the new pick overwrites the ref: setForm runs its
+  // updater later, when the ref already holds the new person's values.
+  const typedContact = (f, key, picked) => (f[key] && f[key] !== picked[key] ? f[key] : "");
   const [generating, setGenerating] = useState(false);
   const [saving, setSaving] = useState(false);
   const [sending, setSending] = useState(false);
@@ -2546,6 +2555,7 @@ export default function EstimateToolViewV2({
       // operator's own answer, as it always has.
       isRecurringCustomer: hasActivePlan ? "YES" : adoptAddress ? f.isRecurringCustomer : "NO",
     }));
+    pickedContactRef.current = { customerPhone: c.phone || "", customerEmail: c.email || "" };
     setExistingCustomerMatch(c);
     setAddressMatches([]);
     setCustomerSearch("");
@@ -2565,6 +2575,7 @@ export default function EstimateToolViewV2({
     if (!canChangeLeadLink) return;
     const name = [lead.first_name, lead.last_name].filter(Boolean).join(" ").trim();
     const hadSelection = !!(form.customerId || form.leadId || linkedLead || existingCustomerMatch);
+    const previousPick = pickedContactRef.current;
     setForm((f) => ({
       ...f,
       leadId: lead.id,
@@ -2573,19 +2584,19 @@ export default function EstimateToolViewV2({
       ...(lead.address && lead.address !== f.address ? clearedPropertyFields() : {}),
       address: lead.address || f.address,
       customerName: name || f.customerName || "",
-      // A value the lead does not have keeps what the operator typed — but
-      // only when no other person was selected before. After a customer or
-      // another lead, the fields may hold THAT person's phone or email, and
-      // the server links on either one matching: a mixed contact could send
-      // this estimate to the wrong person.
-      customerPhone: lead.phone || (hadSelection ? "" : f.customerPhone || ""),
-      customerEmail: lead.email || (hadSelection ? "" : f.customerEmail || ""),
+      // A value the lead does not have keeps what the operator TYPED, and
+      // nothing else: not while another person is selected (hadSelection),
+      // and not a value an earlier pick left behind after its link was
+      // removed (typedContact / pickedContactRef).
+      customerPhone: lead.phone || (hadSelection ? "" : typedContact(f, "customerPhone", previousPick)),
+      customerEmail: lead.email || (hadSelection ? "" : typedContact(f, "customerEmail", previousPick)),
       leadServiceInterest: lead.service_interest || "",
       // A lead is not a recurring customer; the loyalty flag may have been set
       // for whoever was linked before.
       isRecurringCustomer: "NO",
     }));
     preLinkContactRef.current = null;
+    pickedContactRef.current = { customerPhone: lead.phone || "", customerEmail: lead.email || "" };
     setExistingCustomerMatch(null);
     setLinkedLead({ id: lead.id, name: name || "(no name)" });
     setAddressMatches([]);
@@ -2599,6 +2610,8 @@ export default function EstimateToolViewV2({
     setSavedViewUrl(null);
   }
 
+  // Drops the link and keeps the fields. pickedContactRef is NOT reset: the
+  // phone and email are still that lead's, and the next pick clears them.
   function unlinkLead() {
     if (!canChangeLeadLink) return;
     setLinkedLead(null);

@@ -164,3 +164,19 @@ it('switching from one person to a lead never carries the first person\'s phone 
   expect(document.getElementById('estimate-customerEmail')).toHaveValue('');
   expect(document.getElementById('estimate-customerPhone').value).toMatch(/0122/);
 });
+
+it('select, remove the link, select another lead: the first lead\'s contact does not ride along', async () => {
+  const first = { ...lead, id: 'lead-a', first_name: 'Avery', email: 'avery.sample@example.com', phone: '+19415550111' };
+  const second = { ...lead, id: 'lead-b', first_name: 'Blake', email: null, phone: '+19415550122' };
+  search.mockResolvedValue(response([]));
+  leadSearch.mockResolvedValueOnce(leadResponse([first])).mockResolvedValueOnce(leadResponse([second]));
+  mount();
+  fireEvent.change(input(), { target: { value: 'Avery' } });
+  fireEvent.click(await screen.findByRole('button', { name: /Avery Sample.*Lead/ }));
+  fireEvent.click(screen.getByRole('button', { name: 'Remove link' }));
+  expect(document.getElementById('estimate-customerEmail')).toHaveValue('avery.sample@example.com');
+  fireEvent.change(input(), { target: { value: 'Blake' } });
+  fireEvent.click(await screen.findByRole('button', { name: /Blake Sample.*Lead/ }));
+  expect(document.getElementById('estimate-customerEmail')).toHaveValue('');
+  expect(document.getElementById('estimate-customerPhone').value).toMatch(/0122/);
+});
