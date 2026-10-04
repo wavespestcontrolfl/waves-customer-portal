@@ -1708,7 +1708,7 @@ answers:
   run that call FIRST: only true viewability refusals (not found, not customer-viewable, call-side block, terminal) stay ahead of it, and
   every no-booking / alternative-payload shortcut (the Bermuda gate, commercial auto, guarantee-only renewal) runs after it, on
   `available-slots`, `find-slots`, `reserve` and `extend` (pre-transaction and locked), so a parked commercial or guarantee-only
-  estimate still gets the park. Main's bodies for those shortcuts are unchanged when the helper reports no state. `card-hold-intent` and `recurring-card-intent` follow the same order (call-side block, accepted, inactive, then the blocking state, then the Bermuda gate): a Bermuda-suppression estimate is never priced for it (`suppressionGated`: its quote requirement is unresolvable, so only the park, which needs the matcher alone, is judged), so a gated AND parked estimate gets the park (alert, hold release, coded 409; a replace intent is retired) and a gated, unparked one gets the gated 409 exactly as before. The slot routes
+  estimate still gets the park. Main's bodies for those shortcuts are unchanged when the helper reports no state. `PUT /accept` follows it too: only the viewability / terminal / inactive refusals stay ahead of the blocking decision (suppression-aware, no pricing for a gated estimate), and the Bermuda gate, the contact validations, the hold / slot / one-time shortcuts and the inline quote-required and trenching answers come after it (the helper puts quote_required and trenching ahead of the park, so they still outrank it); a gated AND parked accept answers the park (retiring a submitted recurring intent first), a gated, unparked one the gated 409 as before. The precedence is pinned for every endpoint by `estimate-blocking-precedence-matrix.test.js` (endpoint x refusal x parked / not parked) and the accept cells in `estimate-public-accept-atomicity.test.js`. `card-hold-intent` and `recurring-card-intent` follow the same order (call-side block, accepted, inactive, then the blocking state, then the Bermuda gate): a Bermuda-suppression estimate is never priced for it (`suppressionGated`: its quote requirement is unresolvable, so only the park, which needs the matcher alone, is judged), so a gated AND parked estimate gets the park (alert, hold release, coded 409; a replace intent is retired) and a gated, unparked one gets the gated 409 exactly as before. The slot routes
   answer EVERY state the helper reports, never "unblocked": a quote-required estimate whose phone is also contradicted
   is refused as quote_required on `available-slots`, `find-slots` and `reserve` (and the locked reserve / extend rechecks) with
   the intent routes' `409 { error: 'Estimate is no longer active' }`, no hold and no alert (the helper reports quote_required only
@@ -1721,7 +1721,10 @@ answers:
   the estimate as having no matched customer and nothing about the other customer can surface. The office
   gets ONE Customers needs-you alert (`accept-phone-contradicted:<estimateId>`, a person acts: fix the
   phone on the estimate or link it to the right customer), raised right after that decision on every
-  attempt and idempotent by its dedupe key. The same 409 comes from the accept transaction when its
+  attempt through the alert-episode helper (`raiseAdminAlertWithReopen`): a standing open row is a silent dedupe (never re-rung
+  by a repeat attempt); a recurrence after the row was completed (marked Done) or auto-cleared reopens it and rings; the episode is
+  versioned by the rejected customer id, so a phone later changed to a different customer's number rings as a new version; with
+  `ALERT_EPISODES` killed it is the plain deduped raise (rings once). The same 409 comes from the accept transaction when its
   authoritative match, or the locked re-read of a reused lone candidate (judged on the pre-fill identity
   snapshot), finds the contradiction the preflight did not see; that transaction rolls back, the existing
   retirement of a captured recurring card runs, and the alert is raised after the rollback. The preflight

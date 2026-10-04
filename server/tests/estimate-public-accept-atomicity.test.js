@@ -4134,6 +4134,11 @@ describe('B18 - an accept whose phone belongs to another customer is parked for 
   // kept reservation, no texts; the office gets ONE alert (deduped per estimate). Multi-candidate phones and
   // lone candidates that agree on email or address behave exactly as before.
   beforeEach(() => EstimateConverter.convertEstimate.mockReset());
+  // These cases read the alert through the notifyAdmin seam with the plain deduped raise (ALERT_EPISODES kill switch =
+  // the alert's original shape); the episode / reopen path has its own cases in estimate-public-parked-data.test.js.
+  const prevEpisodes = process.env.ALERT_EPISODES;
+  beforeAll(() => { process.env.ALERT_EPISODES = 'off'; });
+  afterAll(() => { if (prevEpisodes === undefined) delete process.env.ALERT_EPISODES; else process.env.ALERT_EPISODES = prevEpisodes; });
 
   const SHARED_PHONE = '(941) 555-0123';
   const sharedPhoneRow = (overrides) => ({
@@ -4215,6 +4220,70 @@ describe('B18 - an accept whose phone belongs to another customer is parked for 
     expect(parkedAlertKeys().size).toBe(1);
     expect(filed.size).toBe(1);
     notifyAdmin.mockImplementation(async () => ({}));
+  });
+
+  // r11: PUT /accept x every OTHER refusal it can give for a viewable estimate, parked and not parked (the accept's cells of the
+  // precedence matrix in estimate-blocking-precedence-matrix.test.js): quote_required and trenching outrank the park; the park
+  // outranks the Bermuda gate and the hold / slot shortcuts; only viewability / terminal / inactive stay ahead of all of them.
+  describe('accept precedence matrix: parked x {Bermuda gate, quote-required, trenching, expired-hold shortcut}', () => {
+    const BERMUDA_409 = { error: 'This estimate includes an option that is temporarily unavailable. Please contact our office and we will refresh your quote.', code: 'BERMUDA_SUPPRESSION_GATED' };
+    const withData = (id, patch) => {
+      const base = recurringPestEstimate({ id, token: `tok-${id}-x0123456789` });
+      return { ...base, estimate_data: JSON.stringify({ ...JSON.parse(base.estimate_data), ...patch }) };
+    };
+    const parkedAttempt = async (estimate, body = {}) => {
+      resetStore(estimate);
+      db.__state.tables.customers.push(sharedPhoneRow());
+      db.__state.tables.customer_accounts = [{ id: 'acct-bob' }];
+      return putAccept(`tok-${estimate.id}-x0123456789`, body);
+    };
+    const unparkedAttempt = async (estimate, body = {}) => {
+      resetStore(estimate); // no phone candidate at all
+      return putAccept(`tok-${estimate.id}-x0123456789`, body);
+    };
+    const isPark = (res) => res.status === 409 && res.data.code === 'ACCEPT_NEEDS_OFFICE_REVIEW';
+
+    test('Bermuda-gated AND parked -> the park (alert, coded 409, nothing written); gated, NOT parked -> main\'s gated 409 exactly', async () => {
+      const parked = await parkedAttempt(withData('est-mx-bermuda-1', { engineRequest: { options: { bermudaSuppression: true } } }));
+      expect(isPark(parked)).toBe(true);
+      expect(parkedAlertKeys().size).toBe(1); // (the fake records every attempt; one alert key)
+      expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+      const clean = await unparkedAttempt(withData('est-mx-bermuda-2', { engineRequest: { options: { bermudaSuppression: true } } }));
+      expect([clean.status, clean.data]).toEqual([409, BERMUDA_409]);
+    });
+
+    test('quote-required AND parked -> quote_required wins (not the park, no alert); trenching AND parked -> trenching wins', async () => {
+      const quote = await parkedAttempt(withData('est-mx-quote-1', { proposal: { enabled: true } }));
+      expect(quote.status).toBe(409);
+      expect(isPark(quote)).toBe(false);
+      const trench = await parkedAttempt(withData('est-mx-trench-1', {
+        result: { recurring: { services: [] }, oneTime: { items: [{ service: 'trenching', name: 'Termite Trenching', price: 2210 }], specItems: [] } },
+      }));
+      expect(trench.status).toBe(409);
+      expect(isPark(trench)).toBe(false);
+      expect(JSON.stringify(trench.data)).toMatch(/trenching/i);
+      expect(parkedAlertCalls()).toHaveLength(0);
+      // Not parked: the same two answers (the park changes neither).
+      const quoteClean = await unparkedAttempt(withData('est-mx-quote-2', { proposal: { enabled: true } }));
+      expect([quoteClean.status, quoteClean.data.code]).toEqual([quote.status, quote.data.code]);
+      const trenchClean = await unparkedAttempt(withData('est-mx-trench-2', {
+        result: { recurring: { services: [] }, oneTime: { items: [{ service: 'trenching', name: 'Termite Trenching', price: 2210 }], specItems: [] } },
+      }));
+      expect(trenchClean.data).toEqual(trench.data);
+    });
+
+    test('a parked accept that also names an expired / missing hold gets the park, not the hold shortcut', async () => {
+      const parked = await parkedAttempt(withData('est-mx-hold-1', {}), { slotId: '2030-01-01_09-00_unassigned' });
+      expect(isPark(parked)).toBe(true);
+      expect(parked.data.code).not.toBe('RESERVATION_EXPIRED');
+    });
+
+    test('only viewability / terminal refusals stay ahead of the park: an archived parked estimate is the generic 409/404, never the park', async () => {
+      const archived = { ...withData('est-mx-arch-1', {}), archived_at: '2026-07-01T00:00:00Z' };
+      const res = await parkedAttempt(archived);
+      expect(isPark(res)).toBe(false);
+      expect(parkedAlertCalls()).toHaveLength(0);
+    });
   });
 
   // r8 P1: a customer-unlinked GROUPED estimate is resolved by the accept through its accepted SIBLING before any phone

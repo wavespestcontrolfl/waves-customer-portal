@@ -36,6 +36,12 @@ jest.mock('../services/admin-alert-compose', () => ({
   ...jest.requireActual('../services/admin-alert-compose'),
   raiseAdminAlert: (...a) => mockRaiseAdminAlert(...a),
 }));
+// The episode (reopen) raise is asserted at its seam too.
+const mockRaiseWithReopen = jest.fn(async () => ({ id: 'alert-1', rang: true }));
+jest.mock('../services/admin-alert-episodes', () => ({
+  ...jest.requireActual('../services/admin-alert-episodes'),
+  raiseAdminAlertWithReopen: (...a) => mockRaiseWithReopen(...a),
+}));
 const mockReleaseEstimateHolds = jest.fn(async () => ({ released: 1 }));
 jest.mock('../services/slot-reservation', () => ({
   ...jest.requireActual('../services/slot-reservation'),
@@ -63,7 +69,9 @@ function chainFor(result) {
 // A grouped estimate's accepted sibling (the accept's - and the shared owner resolver's - lookup: same group, another
 // estimate, customer_id set). null = no accepted sibling.
 let siblingEstimate = null;
+let priorNotification = null; // the standing park alert row (notifications), if any
 db.mockImplementation((table) => {
+  if (table === 'notifications') return chainFor(priorNotification);
   if (table === 'customers') {
     // The phone sweep awaits the chain itself (a list); other customers reads end in .first().
     const c = chainFor(siblingEstimate ? { id: siblingEstimate.customer_id } : null);
@@ -119,7 +127,7 @@ async function getData(estimate, { headers = {}, query = '' } = {}) {
 }
 const ctaOf = (r) => JSON.parse(r.text).cta;
 
-beforeEach(() => { phoneCandidates = []; siblingEstimate = null; mockRaiseAdminAlert.mockClear(); mockReleaseEstimateHolds.mockClear(); });
+beforeEach(() => { priorNotification = null; process.env.ALERT_EPISODES = 'off'; mockRaiseWithReopen.mockClear(); phoneCandidates = []; siblingEstimate = null; mockRaiseAdminAlert.mockClear(); mockReleaseEstimateHolds.mockClear(); });
 
 test('a contradicted lone phone candidate: the page gets the existing review state (no accept, no card step) and no word about the other customer', async () => {
   phoneCandidates = [BOB];
@@ -363,6 +371,70 @@ describe('suppressionGated: a suppression-shaped estimate is never priced for th
     // Not parked: nothing to report (and still no pricing).
     phoneCandidates = [];
     expect(await estimatePublicBlockingState(broken, { estData: {}, suppressionGated: true, fresh: true })).toBeNull();
+  });
+});
+
+describe('the park alert is an episode (r11): a recurrence after Done / auto-clear reopens and rings; a standing open row is never re-rung', () => {
+  const { refuseParkedWrite } = estimatePublicRouter;
+  beforeEach(() => { delete process.env.ALERT_EPISODES; }); // ships live; the kill switch is covered below
+  afterEach(() => { process.env.ALERT_EPISODES = 'off'; });
+  const raised = () => mockRaiseWithReopen.mock.calls.map(([category, headline, why, opts]) => ({ category, headline, why, opts }));
+
+  test('first raise: through raiseAdminAlertWithReopen, versioned by the rejected customer id, refreshing, with the same key / detail / metadata', async () => {
+    const est = makeEstimate();
+    await refuseParkedWrite(est, 'cust-bob');
+    expect(mockRaiseAdminAlert).not.toHaveBeenCalled();
+    expect(raised()).toHaveLength(1);
+    const { category, headline, why, opts } = raised()[0];
+    expect(category).toBe('estimate');
+    expect(headline).toMatch(/estimate phone$/);
+    expect(why).toBe('The phone on their estimate is another customer\u2019s, so self-booking is held.');
+    expect(opts).toMatchObject({ bell: true, dedupeKey: `accept-phone-contradicted:${est.id}`, dedupeVersion: 'rejected:cust-bob::e0', refreshOnDedupe: true, link: `/admin/estimates?estimateId=${est.id}` });
+    expect(opts.metadata).toMatchObject({ estimateId: est.id, rejectedCustomerId: 'cust-bob', parkEpisode: 0, area: 'Customers', severity: 'needs-you', doneWhen: 'phone_corrected' });
+    expect(opts.detail).toContain('customer id cust-bob');
+  });
+
+  test('a standing OPEN row keeps its episode: every later attempt sends the SAME version (a silent dedupe: no re-ring)', async () => {
+    priorNotification = { metadata: { parkEpisode: 2 }, done_at: null };
+    await refuseParkedWrite(makeEstimate(), 'cust-bob');
+    await refuseParkedWrite(makeEstimate(), 'cust-bob');
+    expect(raised().map((r) => r.opts.dedupeVersion)).toEqual(['rejected:cust-bob::e2', 'rejected:cust-bob::e2']);
+    expect(raised().every((r) => r.opts.metadata.parkEpisode === 2)).toBe(true);
+  });
+
+  test('a row a person COMPLETED (Done) while the estimate is still parked: the next attempt is the next episode (new version -> refresh + ring)', async () => {
+    priorNotification = { metadata: { parkEpisode: 0, dedupeVersion: 'rejected:cust-bob::e0' }, done_at: '2026-10-03T12:00:00.000Z' };
+    await refuseParkedWrite(makeEstimate(), 'cust-bob');
+    expect(raised()[0].opts).toMatchObject({ dedupeVersion: 'rejected:cust-bob::e1', metadata: expect.objectContaining({ parkEpisode: 1 }) });
+  });
+
+  test('an AUTO-CLEARED row is the helper\'s own reopen (it bumps its recurrence generation): this call does not also bump the episode', async () => {
+    priorNotification = { metadata: { parkEpisode: 0, autoCleared: true }, done_at: '2026-10-03T12:00:00.000Z' };
+    await refuseParkedWrite(makeEstimate(), 'cust-bob');
+    expect(raised()[0].opts.dedupeVersion).toBe('rejected:cust-bob::e0');
+  });
+
+  test('the phone later changed to a DIFFERENT customer\'s number is a new version', async () => {
+    priorNotification = { metadata: { parkEpisode: 0 }, done_at: null };
+    await refuseParkedWrite(makeEstimate(), 'cust-bob');
+    await refuseParkedWrite(makeEstimate(), 'cust-other');
+    const versions = raised().map((r) => r.opts.dedupeVersion);
+    expect(versions).toEqual(['rejected:cust-bob::e0', 'rejected:cust-other::e0']);
+    expect(new Set(versions).size).toBe(2);
+  });
+
+  test('ALERT_EPISODES killed: the plain deduped raise it always had (no reopen helper)', async () => {
+    process.env.ALERT_EPISODES = 'off';
+    await refuseParkedWrite(makeEstimate(), 'cust-bob');
+    expect(mockRaiseWithReopen).not.toHaveBeenCalled();
+    expect(mockRaiseAdminAlert).toHaveBeenCalledTimes(1);
+    expect(mockRaiseAdminAlert.mock.calls[0][2]).toMatchObject({ dedupeVersion: 'v1' });
+  });
+
+  test('a failed raise is retried once and never throws', async () => {
+    mockRaiseWithReopen.mockRejectedValueOnce(new Error('alerts down'));
+    await expect(refuseParkedWrite(makeEstimate(), 'cust-bob')).resolves.toMatchObject({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW' });
+    expect(mockRaiseWithReopen).toHaveBeenCalledTimes(2);
   });
 });
 

@@ -716,17 +716,23 @@ async function refuseParkedWrite(estimate, rejectedCustomerId) {
   return acceptOfficeReviewBody();
 }
 
-// The ONE office alert for a parked accept (Customers, needs-you, a person acts), deduped per estimate so
-// every repeat attempt re-raises idempotently. Never throws; two attempts. Called by the accept PUT AFTER it
-// has decided to answer 409 (the preflight park: once per attempt, no transaction exists; the in-transaction
-// drift: after the rollback), never from inside a transaction.
+// The ONE office alert for a parked accept (Customers, needs-you, a person acts), one standing row per estimate. Never
+// throws; two attempts. Called after the decision to answer 409 (the preflight park: once per attempt, no transaction
+// exists; the in-transaction drift: after the rollback), and by a customer view of a parked estimate - never from inside
+// a transaction. Raised through the repo's alert-episode helper (raiseAdminAlertWithReopen, as the review-low-rating and
+// hot-estimate alerts are): a STANDING open row is a silent dedupe on every later attempt (never re-rung), while a
+// recurrence after the row was completed (marked Done) or auto-cleared reopens it and rings. The episode is versioned by the
+// rejected customer id, so a phone later changed to a DIFFERENT customer's number is a new version that refreshes and rings.
+// ALERT_EPISODES killed (the shared kill switch): the plain deduped raise this alert always had (rings once per estimate).
 async function raiseAcceptParkedAlert({ estimate, rejectedCustomerId }) {
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     try {
       const { fitAction } = require('../services/admin-alert-names');
+      const alertCompose = require('../services/admin-alert-compose');
       const rejected = await db('customers').where({ id: rejectedCustomerId }).first('id', 'first_name', 'last_name');
       const rejectedName = [rejected?.first_name, rejected?.last_name].filter(Boolean).join(' ') || 'another customer';
-      const filed = await require('../services/admin-alert-compose').raiseAdminAlert('estimate', {
+      const dedupeKey = `accept-phone-contradicted:${estimate.id}`;
+      const spec = {
         area: 'Customers',
         action: fitAction('Customers', estimate.customer_name || 'this customer', [
           (n) => `fix ${n}'s estimate phone`,
@@ -738,15 +744,39 @@ async function raiseAcceptParkedAlert({ estimate, rejectedCustomerId }) {
         subject: { type: 'estimate', id: String(estimate.id) },
         doneWhen: 'phone_corrected',
         who: 'person',
-      }, {
-        bell: true,
-        dedupeKey: `accept-phone-contradicted:${estimate.id}`,
-        dedupeVersion: 'v1',
-        detail: `The phone number on this estimate belongs to ${rejectedName} (customer id ${rejectedCustomerId}), `
-          + 'whose email and address do not match the estimate, so online accepting and booking are held for the office: no customer was created or changed, no card was taken and no time is held. '
-          + 'Fix the phone on the estimate, or link the estimate to the right customer, and then they can accept.',
-        metadata: { estimateId: String(estimate.id), rejectedCustomerId: String(rejectedCustomerId) },
-      });
+      };
+      const detail = `The phone number on this estimate belongs to ${rejectedName} (customer id ${rejectedCustomerId}), `
+        + 'whose email and address do not match the estimate, so online accepting and booking are held for the office: no customer was created or changed, no card was taken and no time is held. '
+        + 'Fix the phone on the estimate, or link the estimate to the right customer, and then they can accept.';
+      const metadata = { estimateId: String(estimate.id), rejectedCustomerId: String(rejectedCustomerId) };
+      let filed;
+      let composed = null;
+      if (require('../config/feature-gates').alertEpisodesLive()) {
+        // A rule violation falls back to the plain raise below (which handles it as every live emitter does).
+        try { composed = alertCompose.composeAdminAlert(spec); } catch { composed = null; }
+      }
+      if (composed) {
+        // Which episode of this estimate's park this is. The helper reopens a row it auto-cleared; a row a PERSON completed
+        // (done_at set, still carrying the version it rang under) is a completed episode too, so a recurrence is the NEXT
+        // episode: a new version, which refreshes the row, clears its Done stamps and rings. A standing open row keeps
+        // its episode number, so the same version is a silent dedupe.
+        const prior = await db('notifications').where({ recipient_type: 'admin' })
+          .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).orderBy('created_at', 'desc').first('metadata', 'done_at');
+        let priorMeta = prior?.metadata;
+        if (typeof priorMeta === 'string') { try { priorMeta = JSON.parse(priorMeta); } catch { priorMeta = null; } }
+        const episode = (Number(priorMeta?.parkEpisode) || 0) + (prior?.done_at && priorMeta?.autoCleared !== true ? 1 : 0);
+        filed = await require('../services/admin-alert-episodes').raiseAdminAlertWithReopen('estimate', composed.headline, composed.why, {
+          bell: true,
+          link: composed.link,
+          dedupeKey,
+          dedupeVersion: `rejected:${rejectedCustomerId}::e${episode}`,
+          refreshOnDedupe: true,
+          detail,
+          metadata: { ...metadata, ...composed.metadata, parkEpisode: episode },
+        });
+      } else {
+        filed = await alertCompose.raiseAdminAlert('estimate', spec, { bell: true, dedupeKey, dedupeVersion: 'v1', detail, metadata });
+      }
       // Only a result with a real id is filed (an existing standing row counts: dedupe returns it).
       if (filed && filed.id != null && filed.suppressed !== true) return true;
       logger.warn(`[estimate-accept] parked-accept office alert attempt ${attempt} for estimate ${estimate.id} was not filed (${filed && filed.suppressed ? 'suppressed' : 'no row'})`);
@@ -9822,16 +9852,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // without re-entering priceLawnCare, so a save-then-gate-off sequence
     // would otherwise charge a disabled add-on (codex #3272 r2). Retries of
     // an ALREADY-accepted estimate stay untouched (that acceptance happened).
-    if (estimate.status !== 'accepted') {
-      const { estimateDataCarriesBermudaSuppression } = require('../services/pricing-engine/v1-legacy-mapper');
-      if (estimateDataCarriesBermudaSuppression(estimate.estimate_data)
-        && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
-        return res.status(409).json({
-          error: 'This estimate includes an option that is temporarily unavailable. Please contact our office and we will refresh your quote.',
-          code: 'BERMUDA_SUPPRESSION_GATED',
-        });
-      }
-    }
+    // (The Bermuda gate itself now answers AFTER the blocking-state decision below - see "ORDER" after the inactive check.)
     if (estimate.status === 'accepted') {
       // An archived accepted estimate is no longer customer-viewable (the
       // /:token/data gate rejects archived_at outright), so never rebuild
@@ -9894,6 +9915,56 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     if (!isEstimateAcceptActive(estimate)) {
       const zeroRowStatus = await zeroRowMutationStatus(estimate.id);
       return res.status(zeroRowStatus).json(zeroRowMutationBody(zeroRowStatus));
+    }
+    // ORDER (the same as /data, the slot routes and both card-intent routes): only the viewability / terminal / inactive
+    // refusals above stay ahead of the ONE blocking-state decision; every other refusal below - the Bermuda gate, the
+    // contact validations, hold / slot / one-time / invoice-mode shortcuts, and the inline quote-required and trenching
+    // answers (the helper puts those first, so they still outrank the park) - comes after it.
+    // B18 park: an unlinked estimate whose lone phone candidate it contradicts (email AND address both differ) cannot
+    // complete self-serve: the helper's contact_review state, decided BEFORE any contact fill, card, hold, prepay quote or
+    // write. The verdict is cached per request (the ONE preflight identity; the accept transaction re-resolves it and
+    // aborts on any difference) and every match reader already sees NO match for it. The office alert is raised here, once
+    // per attempt (episode-deduped), after the decision with no transaction open. A failed lookup just leaves no verdict:
+    // the in-transaction match decides. A Bermuda-suppression estimate (refused below with its own gated 409) is never
+    // priced for it (`suppressionGated`: only the park is judged).
+    const bermudaSuppressionGated = (() => {
+      const { estimateDataCarriesBermudaSuppression } = require('../services/pricing-engine/v1-legacy-mapper');
+      return !!(estimateDataCarriesBermudaSuppression(estimate.estimate_data)
+        && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION'));
+    })();
+    if (!estimate.customer_id && estimate.customer_phone) {
+      let blocking = null;
+      try { blocking = await estimatePublicBlockingState(estimate, { suppressionGated: bermudaSuppressionGated }); } catch { /* the authoritative in-transaction match decides */ }
+      if (blocking?.state === 'contact_review') {
+        // A stale tab can have captured a recurring SetupIntent before the customer record turned
+        // contradictory. Retire the one this request submits with main's own helper - the same one the
+        // in-transaction park runs after its rollback (it touches only an intent that belongs to THIS
+        // estimate) - BEFORE the 409, since the client drops the id on this 409 and an unbound intent would
+        // stay eligible for later recovery. Stripe unable to confirm = the existing 503 and the tab keeps its
+        // intent; the alert is then NOT raised on this response (the retry parks again and raises it), exactly
+        // like the in-transaction path. No submitted intent = no Stripe call.
+        const parkedSetupIntentId = typeof req.body?.recurringCardSetupIntentId === 'string'
+          ? req.body.recurringCardSetupIntentId.trim() : '';
+        if (parkedSetupIntentId) {
+          try {
+            await retireOrDenyDroppedCapture(estimate, parkedSetupIntentId);
+          } catch (retireErr) {
+            return res.status(503).json({ error: retireErr.message, code: retireErr.code || 'RECURRING_CARD_RETIRE_FAILED' });
+          }
+        }
+        return res.status(409).json(await refuseParkedWrite(estimate, blocking.rejectedCustomerId));
+      }
+    }
+    // Fresh ACCEPT of a persisted bermuda-suppression estimate requires the
+    // gate to still be live — acceptance bills/schedules from stored rows
+    // without re-entering priceLawnCare, so a save-then-gate-off sequence
+    // would otherwise charge a disabled add-on (codex #3272 r2). Retries of
+    // an ALREADY-accepted estimate stay untouched (that acceptance happened).
+    if (bermudaSuppressionGated) {
+      return res.status(409).json({
+        error: 'This estimate includes an option that is temporarily unavailable. Please contact our office and we will refresh your quote.',
+        code: 'BERMUDA_SUPPRESSION_GATED',
+      });
     }
     // Missing-contact capture (owner ruling 2026-09-27): the accept card
     // asks for whatever's actually missing — last name and/or email — right
@@ -10298,37 +10369,6 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         reviewBeforeBooking: true,
         reason: 'termite_trenching_review',
       });
-    }
-    // B18 park, decided right after the existing review states (quote-required above, trenching review here) so the
-    // accept reports the same blocking state /data and the intent routes do, and BEFORE any contact fill, card,
-    // hold, prepay quote or write. An unlinked estimate whose lone phone candidate it contradicts (email AND
-    // address both differ) cannot complete self-serve: the helper's contact_review state. The verdict is cached
-    // per request (the ONE preflight identity; the accept transaction re-resolves it and aborts on any
-    // difference) and every match reader already sees NO match for it. The office alert is raised here, once
-    // per attempt (idempotent by dedupe key), after the decision with no transaction open. A failed lookup just
-    // leaves no verdict: the in-transaction match decides.
-    if (!estimate.customer_id && estimate.customer_phone) {
-      let blocking = null;
-      try { blocking = await estimatePublicBlockingState(estimate, { estData, quoteRequirement }); } catch { /* the authoritative in-transaction match decides */ }
-      if (blocking?.state === 'contact_review') {
-        // A stale tab can have captured a recurring SetupIntent before the customer record turned
-        // contradictory. Retire the one this request submits with main's own helper - the same one the
-        // in-transaction park runs after its rollback (it touches only an intent that belongs to THIS
-        // estimate) - BEFORE the 409, since the client drops the id on this 409 and an unbound intent would
-        // stay eligible for later recovery. Stripe unable to confirm = the existing 503 and the tab keeps its
-        // intent; the alert is then NOT raised on this response (the retry parks again and raises it), exactly
-        // like the in-transaction path. No submitted intent = no Stripe call.
-        const parkedSetupIntentId = typeof req.body?.recurringCardSetupIntentId === 'string'
-          ? req.body.recurringCardSetupIntentId.trim() : '';
-        if (parkedSetupIntentId) {
-          try {
-            await retireOrDenyDroppedCapture(estimate, parkedSetupIntentId);
-          } catch (retireErr) {
-            return res.status(503).json({ error: retireErr.message, code: retireErr.code || 'RECURRING_CARD_RETIRE_FAILED' });
-          }
-        }
-        return res.status(409).json(await refuseParkedWrite(estimate, blocking.rejectedCustomerId));
-      }
     }
     if (estimate.show_one_time_option && recurringSvcList.some((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service))) {
       recurringSvcList = recurringSvcList.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service));
