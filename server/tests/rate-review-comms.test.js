@@ -2032,6 +2032,29 @@ describe('customer surfaces', () => {
       expect(notices()[0]).toMatchObject({ status: 'draft', email_sent: false, sent_at: null });
     });
 
+    test('bounce → re-send with an ambiguous outcome → delivered → bounce of the NEW message: the new id replaced the old one, so the notice is revoked again', async () => {
+      mockDb.reset(book());
+      smsLeg.mockResolvedValue({ sent: false, attempted: false });
+      emailLeg.mockImplementation(emailVia({ sent: true, attempted: true, messageId: 'em-old' }));
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      await comms.handleEmailDeliveryEvent(mockDb, message({ id: 'em-old' }), bounce());
+      expect(notices()[0].status).toBe('draft');
+      let claimKey = null;
+      emailLeg.mockImplementation(async (args) => { claimKey = JSON.parse(notices()[0].metadata).pending_letter.key; return emailVia({ sent: false, attempted: true })(args); });
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      expect(notices()[0].status).toBe('send_uncertain');
+      expect(meta().email_message_id).toBeUndefined(); // the bounced attempt's id is not carried into the new one
+      const fresh = message({ id: 'em-new', idempotency_key: `rate_review:${BATCH_KEY}:${CUSTOMER(1)}:${claimKey}:abc` });
+      await comms.handleEmailDeliveryEvent(mockDb, fresh, { event: 'delivered', timestamp: 1790000000 });
+      expect(notices()[0].status).toBe('sent');
+      expect(meta().email_message_id).toBe('em-new');
+      // a late event of the OLD message no longer touches the notice
+      expect(await comms.handleEmailDeliveryEvent(mockDb, message({ id: 'em-old' }), bounce({ event: 'dropped' }))).toEqual([]);
+      expect(notices()[0].status).toBe('sent');
+      expect(await comms.handleEmailDeliveryEvent(mockDb, fresh, bounce())).toHaveLength(1);
+      expect(notices()[0]).toMatchObject({ status: 'draft', email_sent: false });
+    });
+
     test('a "delivered" event that arrives while the send is still running is kept and used: an email of unknown outcome is stamped delivered, not parked', async () => {
       // email-only: the event lands inside the email leg (after its handoff), the leg then reports an ambiguous error
       mockDb.reset(book());

@@ -884,7 +884,9 @@ async function settleAttempted(dbh, entry, { frozen, emailUnknown, smsUnknown, d
   for (const l of entry.lines) {
     const live = await trx('price_change_notices').where({ id: l.noticeId, status: 'sending' }).forUpdate().first();
     if (!live || !ownsClaim(live, entry.claimGen)) continue;
-    const { pending_letter: livePending, send_hold: _h, early_failures: early = {}, early_delivered: earlyDelivered = {}, delivery_revoked: priorRevoked, uncertain_channels: _u, uncertain_claim_key: _k, ...meta } = parseJson(live.metadata, {});
+    // (the provider ids of an EARLIER attempt are dropped, as at the stamp: only this attempt's
+    // ids, in dispatchMeta, may match its events)
+    const { pending_letter: livePending, send_hold: _h, early_failures: early = {}, early_delivered: earlyDelivered = {}, delivery_revoked: priorRevoked, uncertain_channels: _u, uncertain_claim_key: _k, email_message_id: _e, sms_sid: _s, ...meta } = parseJson(live.metadata, {});
     const handoff = (livePending && livePending.handoff) || {};
     const emailStill = emailUnknown && !!handoff.email && !early.email;
     const smsStill = smsUnknown && !!handoff.sms && !early.sms;
@@ -1813,7 +1815,8 @@ function channelDeliveredTransition(live, channel, at, messageId = null) {
   }
   if (!(meta.uncertain_channels || {})[channel] || !['sent', 'viewed', UNCERTAIN].includes(status)) return null;
   const idKey = channel === 'email' ? 'email_message_id' : 'sms_sid';
-  const next = { ...withoutUnknown(meta, channel), ...(messageId && !meta[idKey] ? { [idKey]: String(messageId) } : {}) };
+  // The confirming event's id replaces any id an earlier attempt left on the notice.
+  const next = { ...withoutUnknown(meta, channel), ...(messageId ? { [idKey]: String(messageId) } : {}) };
   if (status !== UNCERTAIN) return { promoted: false, patch: { [CHANNEL_FLAG[channel]]: true }, meta: next };
   const { pending_letter: pending, delivery_revoked: revoked, ...rest } = next;
   if (!pending || !pending.letter) return null; // no frozen words to stand behind the stamp
