@@ -352,6 +352,10 @@ const CUSTOMER_BUSY_REFUSAL = {
 // rollback, and the outer transaction stays usable (extend goes on to extend; reserve returns its refusal and the
 // route rolls back or continues cleanly). On success the savepoint is RELEASED, not rolled back, so the share lock
 // is kept to the outer commit.
+// Contention can only cost the contact_review verdict: estimatePublicBlockingState establishes trenching (estimate data) and a
+// quote requirement (resolved when the estimate looks parked, via a plain read) BEFORE it ever attempts the NOWAIT candidate
+// lock, so by the time a 55P03 can be raised nothing of higher priority is outstanding, and skipping on busy (extend) or
+// answering the retryable refusal (reserve) loses nothing but the park decision itself.
 async function lockedContactReviewRefusal(row, trx, { skipOnBusy = false } = {}) {
   try {
     return trx

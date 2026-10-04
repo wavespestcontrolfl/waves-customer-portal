@@ -649,8 +649,6 @@ async function estimatePublicBlockingState(estimate, { estData, quoteRequirement
   const data = estData || parseEstimateDataSafe(estimate);
   if (quoteRequirement?.quoteRequired) return { state: 'quote_required' };
   const trenching = estimateTrenchingReviewRequired(data);
-  const parked = trenching ? null : await acceptPhoneParkedVerdict(estimate, { database, lock, fresh });
-  if (!trenching && !parked) return null;
   // A caller that did not resolve the quote requirement never skips that precedence level: it is resolved HERE (the
   // same resolver /data uses), and only when one of the review states below would otherwise be reported, so the
   // common clean estimate costs nothing extra. Quote-required wins over both.
@@ -659,7 +657,7 @@ async function estimatePublicBlockingState(estimate, { estData, quoteRequirement
   // requirement is unresolvable, so the helper reports only the state it CAN establish (the same posture as a trenching
   // estimate whose pricing lookup fails). The slot / intent routes then answer contact_review (the park) or their own gated 409.
   if (quote === undefined && suppressionGated) quote = null;
-  if (quote === undefined) {
+  const resolveQuote = async () => {
     try {
       quote = resolveEstimateQuoteRequirement(await buildPricingBundle(estimate), data);
     } catch (err) {
@@ -669,7 +667,27 @@ async function estimatePublicBlockingState(estimate, { estData, quoteRequirement
       logger.warn(`[estimate-public] quote requirement lookup failed for trenching-review estimate ${estimate.id}: ${err.message}`);
       quote = null;
     }
+  };
+  let parked = null;
+  if (!trenching) {
+    // ORDER (the locked slot recheck, `lock`): every state that does NOT need the phone candidate is established BEFORE the
+    // candidate is read FOR SHARE NOWAIT, so contention (55P03) can only ever cost the contact_review verdict, never a
+    // higher-priority state. Trenching is known from the estimate data above (it never reads the candidate). Whether the
+    // quote requirement matters depends on whether the estimate is parked, so a plain (unlocked, never-blocking) read of
+    // the candidate decides that first: only a parked-looking estimate pays for pricing, and a quote-required one is
+    // answered right there, before any lock is attempted. A clean estimate pays one extra plain candidate read on the
+    // locked path (and no pricing); the locked read below stays the authority for contact_review.
+    if (lock && quote === undefined) {
+      const peek = await acceptPhoneParkedVerdict(estimate, { database, lock: false, fresh });
+      if (peek) {
+        await resolveQuote();
+        if (quote?.quoteRequired) return { state: 'quote_required' };
+      }
+    }
+    parked = await acceptPhoneParkedVerdict(estimate, { database, lock, fresh });
   }
+  if (!trenching && !parked) return null;
+  if (quote === undefined) await resolveQuote();
   if (quote?.quoteRequired) return { state: 'quote_required' };
   if (trenching) return { state: 'termite_trenching_review' };
   return { state: 'contact_review', rejectedCustomerId: parked.rejectedCustomerId };

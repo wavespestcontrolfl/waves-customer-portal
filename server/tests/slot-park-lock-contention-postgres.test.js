@@ -116,6 +116,22 @@ postgres('reserve / extend park recheck: FOR SHARE NOWAIT contention (real Postg
     }
   });
 
+  test('r12: a TRENCHING-review estimate with the candidate row held is refused as trenching (it never needs the candidate: no lock attempted, no 25P02, the transaction stays usable)', async () => {
+    const locker = await holdRowForUpdate();
+    const reserveTrx = await pool.transaction();
+    try {
+      const trenching = { ...estimateRow, estimate_data: { result: { recurring: { services: [] }, oneTime: { items: [{ service: 'trenching', name: 'Termite Trenching', price: 2210 }], specItems: [] } } } };
+      for (const opts of [{ skipOnBusy: true }, {}]) {
+        await expect(lockedContactReviewRefusal(trenching, reserveTrx, opts)).resolves.toMatchObject({ status: 409, body: { reason: 'termite_trenching_review' } });
+      }
+      await expect(reserveTrx.raw('SELECT 1 AS ok')).resolves.toMatchObject({ rows: [{ ok: 1 }] });
+      await reserveTrx.commit();
+    } finally {
+      await reserveTrx.rollback().catch(() => {});
+      await locker.rollback();
+    }
+  });
+
   test('no contention: the savepoint is RELEASED and the share lock is KEPT to the outer commit (a writer waits until then)', async () => {
     const reserveTrx = await pool.transaction();
     try {

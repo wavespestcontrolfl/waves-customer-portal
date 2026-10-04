@@ -87,10 +87,16 @@ function chainFor(result) {
   };
   return chain;
 }
+let candidateQueue = []; // one-shot answers for the next PLAIN candidate reads (then `phoneCandidates`)
+let customerRowBusy = false; // another writer holds the candidate row: a FOR SHARE NOWAIT read raises 55P03
 db.mockImplementation((table) => {
   if (table === 'customers') {
     const c = chainFor(null);
-    c.then = (resolve, reject) => Promise.resolve(phoneCandidates).then(resolve, reject);
+    let locked = false;
+    c.noWait = jest.fn(() => { locked = true; return c; });
+    c.then = (resolve, reject) => (locked && customerRowBusy
+      ? Promise.reject(Object.assign(new Error('could not obtain lock on row in relation "customers"'), { code: '55P03' })).then(resolve, reject)
+      : Promise.resolve(!locked && candidateQueue.length ? candidateQueue.shift() : phoneCandidates).then(resolve, reject));
     return c;
   }
   return chainFor(table === 'estimates' ? estimateRow : undefined);
@@ -156,6 +162,8 @@ beforeAll((done) => {
 afterAll((done) => { server.close(done); });
 beforeEach(() => {
   phoneCandidates = [];
+  customerRowBusy = false;
+  candidateQueue = [];
   [mockRaiseAdminAlert, mockReleaseEstimateHolds, mockReserveSlot, mockExtendReservation, mockGetAvailableSlots, mockFindEstimateSlots].forEach((m) => m.mockClear());
   process.env.ALERT_EPISODES = 'off';
 });
@@ -213,6 +221,78 @@ const SLOT_CELLS = [
   ['recurring-card-intent', 'trenching', is(409, TRENCH_409), is(409, TRENCH_409)],
   ['recurring-card-intent', 'quote', is(409, INACTIVE_409), is(409, INACTIVE_409)],
 ];
+
+// The locked recheck inside extendReservation, driven as the real service drives it: it hands the route's predicate the LOCKED
+// estimate row and a transaction handle. A busy candidate row (55P03) may only cost the contact_review verdict.
+describe('extend, locked recheck, customer row BUSY (55P03): contention only ever costs contact_review (r12)', () => {
+  const trx = Object.assign((...a) => db(...a), { isTransaction: true, raw: db.raw, fn: db.fn });
+  let extended;
+  beforeEach(() => {
+    extended = false;
+    mockExtendReservation.mockImplementation(async (args) => {
+      const refusal = await args.revalidateEstimate(estimateRow, trx);
+      if (refusal) throw Object.assign(new Error('estimate cannot be self-booked'), { code: 'ESTIMATE_NO_BOOKING', response: refusal });
+      extended = true;
+      return { scheduledServiceId: 'ss-1', expiresAt: null };
+    });
+  });
+  afterEach(() => mockExtendReservation.mockImplementation(async () => ({ scheduledServiceId: 'ss-1', expiresAt: null })));
+  // Each case queues one clean answer for the pre-transaction read (the staff edit that makes the candidate contradictory is what
+  // holds its row), so only the LOCKED recheck can decide: the plain read it starts with sees the committed contradictory candidate.
+  const extendLocked = async () => {
+    const res = await fetch(`${base}/slots/${estimateRow.token}/reserve/${HOLD}/extend`, { method: 'POST' });
+    return { status: res.status, body: await res.json() };
+  };
+
+  test('quote-required AND parked, candidate row busy -> quote_required (the hold is NOT extended, no park alert)', async () => {
+    estimateRow = CONDITIONS.quote();
+    phoneCandidates = [BOB];
+    candidateQueue = [[]]; // the pre-transaction read saw no contradictory candidate yet: only the locked recheck can decide
+    customerRowBusy = true;
+    const res = await extendLocked();
+    expect([res.status, res.body]).toEqual([409, INACTIVE_409]);
+    expect(extended).toBe(false);
+    expect(mockRaiseAdminAlert).not.toHaveBeenCalled();
+  });
+
+  test('trenching, candidate row busy -> trenching (it never needs the candidate); the hold is NOT extended', async () => {
+    estimateRow = CONDITIONS.trenching();
+    phoneCandidates = [BOB];
+    customerRowBusy = true;
+    const res = await extendLocked();
+    expect([res.status, res.body]).toEqual([409, TRENCH_409]);
+    expect(extended).toBe(false);
+  });
+
+  test('parked only (no higher state), candidate row busy -> the contact_review verdict is the only thing lost: extended as before (skipOnBusy)', async () => {
+    estimateRow = makeEstimate({});
+    phoneCandidates = [BOB];
+    candidateQueue = [[]];
+    customerRowBusy = true;
+    const res = await extendLocked();
+    expect(res.status).toBe(200);
+    expect(extended).toBe(true);
+  });
+
+  test('clean estimate, candidate row busy -> extended exactly as now, with no pricing work for it', async () => {
+    estimateRow = makeEstimate({});
+    phoneCandidates = [];
+    customerRowBusy = true;
+    const res = await extendLocked();
+    expect(res.status).toBe(200);
+    expect(extended).toBe(true);
+    expect(mockRaiseAdminAlert).not.toHaveBeenCalled();
+  });
+
+  test('not busy: the same quote-required + parked estimate is still quote_required (the order is not what decides it)', async () => {
+    estimateRow = CONDITIONS.quote();
+    phoneCandidates = [BOB];
+    candidateQueue = [[]];
+    const res = await extendLocked();
+    expect([res.status, res.body]).toEqual([409, INACTIVE_409]);
+    expect(extended).toBe(false);
+  });
+});
 
 describe('blocking-state precedence matrix: endpoint x condition x parked / not parked (HTTP-driven)', () => {
   describe.each(SLOT_CELLS)('%s x %s', (endpoint, condition, whenParked, whenNotParked) => {

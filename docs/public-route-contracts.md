@@ -1743,7 +1743,7 @@ answers:
   RESERVATION TRANSACTION FOR SHARE NOWAIT (held to commit, so a staff edit of the lone candidate cannot land before
   the hold insert); NOWAIT because a customer edit's fan-out locks customer then estimate while this transaction
   already holds the estimate row, so a row another writer holds right now answers the accept's existing retryable
-  `CUSTOMER_BUSY_RETRY` 409 instead of waiting (extend skips the recheck instead and carries on). The locked read runs inside a
+  `CUSTOMER_BUSY_RETRY` 409 instead of waiting (extend skips the recheck instead and carries on). Contention only ever costs the contact_review verdict: the blocking-state helper establishes trenching (estimate data) and, for an estimate that looks parked on a plain read, the quote requirement BEFORE it attempts the NOWAIT candidate lock, so a busy customer row can never hide a quote-required or trenching refusal (a clean estimate pays one extra plain candidate read on the locked path, and no pricing). The locked read runs inside a
   SAVEPOINT: a NOWAIT failure (55P03) aborts the whole PostgreSQL transaction, so it is rolled back to the savepoint
   before the refusal or skip, leaving the reservation transaction usable; a savepoint that succeeds is RELEASED and
   keeps its share lock to the outer commit (real-Postgres suite `slot-park-lock-contention-postgres.test.js`). On the park path `POST /recurring-card-intent` also retires a
