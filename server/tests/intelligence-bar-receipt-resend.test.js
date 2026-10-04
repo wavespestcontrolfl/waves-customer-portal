@@ -531,11 +531,11 @@ describe('approvedMatcher: what each sender must be about to deliver to match th
     expect(m(plan)(email(null))).toBe(false);
   });
 
-  test('email is held to the invoice amount due the email states, text and App to the receipt amount (net of a refund)', () => {
+  test('a refunded receipt: every leg is held to the net amount the card previews, never the gross', () => {
     const refunded = { email: 'pat@example.com', amount: '100.00', invoice: { total: 129, subtotal: 129, status: 'paid' } };
     const plan = m(refunded);
-    expect(plan(email('pat@example.com', '129.00'))).toBe(true);
-    expect(plan(email('pat@example.com', '100.00'))).toBe(false);
+    expect(plan(email('pat@example.com', '100.00'))).toBe(true);
+    expect(plan(email('pat@example.com', '129.00'))).toBe(false);
     expect(plan({ channel: 'sms', to: '9415550100', amount: '100.00' })).toBe(true);
     expect(plan({ channel: 'sms', to: '9415550100', amount: '129.00' })).toBe(false);
   });

@@ -33,7 +33,6 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { UUID_RE } = require('./task-context');
 const { etDateString, formatETTime } = require('../../utils/datetime-et');
-const { invoiceAmountDue } = require('../invoice-helpers');
 const { receiptRecipients, receiptRecipientsKey, normalizeReceiptEmail, maskEmail, maskPhone } = require('./closeout-repair-tools');
 const { sendInvoiceReceipt } = require('../invoice-receipt-resend');
 const { issuedCloseoutTarget } = require('../invoice-issued-closeout');
@@ -201,14 +200,13 @@ async function buildPlan(input, opts) {
 // with the sender's own value swapped in, so normalization cannot drift from the card's. App delivery
 // resolves its devices inside the pipeline, so the plan can only know that App was part of the approved reach.
 function approvedMatcher({ who, via }) {
-  const sameAmount = (amount, stated = who.amount) => Number(amount).toFixed(2) === Number(stated).toFixed(2);
-  // The email states the invoice's amount due; the text states the receipt amount (net of a recorded refund).
-  // Each leg is held to the figure its own message states, as read when the card was built.
-  const emailStated = who.invoice ? invoiceAmountDue(who.invoice) : who.amount;
+  // Every leg states the receipt amount the card previews: net of a recorded refund, otherwise the
+  // amount due (sendReceiptEmail and receiptAmountFor apply the same rule).
+  const sameAmount = (amount) => Number(amount).toFixed(2) === Number(who.amount).toFixed(2);
   const sameReach = (swap) => receiptRecipientsKey({ email: who.email, phone: who.phone, app: who.app, ...swap }) === receiptRecipientsKey(who);
   return (facts) => {
     if (!facts) return false;
-    if (!sameAmount(facts.amount, facts.channel === 'email' ? emailStated : who.amount)) return false;
+    if (!sameAmount(facts.amount)) return false;
     switch (facts.channel) {
       case 'email': return via !== 'sms' && Boolean(who.email) && sameReach({ email: normalizeReceiptEmail(facts.to) });
       case 'sms': return via !== 'email' && !who.payerBilled && Boolean(who.phone) && sameReach({ phone: facts.to });
