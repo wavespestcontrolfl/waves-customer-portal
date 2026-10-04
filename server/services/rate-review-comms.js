@@ -1857,8 +1857,10 @@ async function applyChannelDelivered(trx, live, step) {
 // Close the office alerts an earlier delivery failure raised (best effort; episodes gate).
 async function closeDeliveryAlerts(conn, keys, context) {
   if (!keys.length || !require('../config/feature-gates').alertEpisodesLive()) return;
+  // In a nested transaction (a savepoint when `conn` is one): a failed cleanup statement is
+  // rolled back on its own and never aborts the delivery reconciliation it runs inside.
   try {
-    await require('./admin-alert-episodes').closeAdminAlertKeys(conn, keys, 'rate_review_resent');
+    await conn.transaction(async (sp) => require('./admin-alert-episodes').closeAdminAlertKeys(sp, keys, 'rate_review_resent'));
   } catch (err) {
     logger.warn(`[rate-review-comms] delivery alerts not closed (${context}): ${err.message}`);
   }
