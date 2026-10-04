@@ -2503,8 +2503,15 @@ export default function EstimateToolViewV2({
     // customer doesn't unlock recurring-customer loyalty discounts.
     const hasActivePlan =
       c.tier && c.tier !== "null" && c.tier !== "Commercial" && c.monthlyRate > 0;
+    // A lead picked from this search belongs to someone else than the
+    // customer now chosen: drop that link and its service hint, or the save
+    // would post this customer's contact with the other person's lead id. A
+    // lead that came with the page (Leads → Create Estimate) is kept, as before.
+    const dropSearchLead = !!linkedLead;
+    if (dropSearchLead) setLinkedLead(null);
     setForm((f) => ({
       ...f,
+      ...(dropSearchLead && f.leadId === linkedLead.id ? { leadId: "", leadServiceInterest: "" } : {}),
       customerId: c.id || "",
       propertyId: "",
       ...(adoptAddress

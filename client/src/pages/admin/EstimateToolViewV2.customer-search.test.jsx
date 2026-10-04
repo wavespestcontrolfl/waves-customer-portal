@@ -91,3 +91,16 @@ it('a failed lead search still shows the customer results', async () => {
   await screen.findByRole('button', { name: /Jamie Fixture/ });
   expect(screen.queryByRole('alert')).not.toBeInTheDocument();
 });
+
+it('picking a customer after a lead drops the lead link', async () => {
+  search.mockResolvedValueOnce(response([]));
+  leadSearch.mockResolvedValueOnce(leadResponse([lead]));
+  mount();
+  fireEvent.change(input(), { target: { value: 'Dana' } });
+  fireEvent.click(await screen.findByRole('button', { name: /Dana Sample.*Lead/ }));
+  expect(screen.getByText(/Linked to lead:/)).toBeInTheDocument();
+  fireEvent.change(input(), { target: { value: 'Jamie' } });
+  fireEvent.click(await screen.findByRole('button', { name: /Jamie Fixture/ }));
+  expect(screen.queryByText(/Linked to lead:/)).not.toBeInTheDocument();
+  expect(document.getElementById('estimate-customerName')).toHaveValue('Jamie Fixture');
+});
