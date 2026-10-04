@@ -2972,13 +2972,22 @@ under `GATE_LEAD_TURNSTILE`. An enforced Turnstile failure answers 403
 `{ error: 'Verification failed. Please try again.' }` with no write, with
 ONE exception, the unverified hold (`GATE_LEAD_UNVERIFIED_HOLD`, default
 on, `false` = no exception): when the verdict is `missing_token` — no
-token, from a host that owns a configured widget; a tokenless POST from an
-absent or unmapped host is `no_widget_match` and keeps the 403 — and the
+token, from a NAMED host that owns a configured widget; a tokenless POST
+with no host at all (single-secret mode included) or from an unmapped host
+is `no_widget_match` and keeps the 403 — and the
 submission carries a 10-digit phone and no unit conflict,
 `server/services/lead-unverified-hold.js` writes exactly one customer-less
 `leads` row (`lead_type 'form_submission'`, `status 'new'`, `customer_id`
-NULL, `extracted_data.stage = 'lead_webhook_unverified'`, the visitor's
-`message` capped at 1000 characters in `extracted_data.message`), one
+NULL, `first_contact_channel 'form_unverified'`,
+`extracted_data.stage = 'lead_webhook_unverified'`, the visitor's
+`message` capped at 1000 characters in `extracted_data.message`; `phone`
+and `email` are NULL on the row and the submitted values live only in
+`extracted_data.unverified_contact` and the activity note, because every
+reader that trusts a lead's contact — ad audiences, the email
+spam-blocker's known-lead bypass, the outbound-call and collections
+consent probes, call/SMS lead matching — keys on those two columns or on a
+customer-originated `first_contact_channel`; the office adds them to the
+lead after confirming them with the person), one
 `lead_activities` row and one Leads bell, and the response is 200
 `{ success: true }` (no `customerId`). The hold never creates or updates a
 `customers` row, never drafts an estimate, never texts, emails or calls the
@@ -2987,7 +2996,9 @@ auto-bridge. A repeat from the same phone inside 24 hours returns the same
 200 and writes nothing. A rejected, oversized or unmapped-host token, a
 hold that declines or fails, and the gate set `false` all keep the 403. A
 diff that lets a held submission reach any customer-facing or paid side
-effect, or that widens the hold beyond `missing_token`, is a P0),
+effect, that stores a held submission's phone or email in `leads.phone` /
+`leads.email`, that gives it a customer-originated `first_contact_channel`,
+or that widens the hold beyond `missing_token`, is a P0),
 `/api/public/newsletter/*` (subscribe, confirm, unsubscribe, posts,
 posts/by-slug/:slug, rss, quiz/:token/:quizId/:answer,
 feedback/:token/:reaction, e/:token/:eventId (event click-through:

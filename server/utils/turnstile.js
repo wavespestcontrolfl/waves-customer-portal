@@ -175,7 +175,10 @@ async function verifyTurnstileToken(token, remoteip, hostname) {
     // holds that case for the office (services/lead-unverified-hold). A
     // tokenless POST from an absent or unmapped host is a direct POST, not a
     // slow widget, and reports no_widget_match like its tokened twin below.
-    if (!selectSecretForHost(widgets, hostname)) {
+    // A host is REQUIRED here even in single-secret mode (whose catch-all
+    // widget matches any host, including none): a browser form always sends
+    // Origin on this cross-origin POST, so no host at all is a direct POST.
+    if (!String(hostname || '').trim() || !selectSecretForHost(widgets, hostname)) {
       logger.info(`[turnstile] no widget matched host "${hostname || ''}"`);
       return { ok: false, enforced: true, reason: 'no_widget_match' };
     }

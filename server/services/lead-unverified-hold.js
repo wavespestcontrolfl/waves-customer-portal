@@ -15,6 +15,15 @@
  * side effects the Turnstile gate exists to keep bots away from, so they stay
  * behind a verified token. A person decides what happens to a held lead.
  *
+ * The submitted phone and email are NOT proven to belong to the submitter, so
+ * they never land in leads.phone / leads.email: every reader that trusts a
+ * lead's contact (ad audiences, the email spam-blocker's "known lead" bypass,
+ * the outbound-call and collections consent probes, call/SMS lead matching)
+ * keys on those columns. They are kept in extracted_data.unverified_contact
+ * and quoted on the lead activity; the office types them onto the lead after
+ * it has confirmed them with the person. first_contact_channel is
+ * 'form_unverified', which no customer-originated-contact allowlist contains.
+ *
  * Only `missing_token` is held. A token Cloudflare rejected, an oversized token
  * and a host with no widget are forged or spent credentials and keep the 403.
  */
@@ -24,6 +33,9 @@ const logger = require('./logger');
 const { zipToCity } = require('../utils/zip-to-city');
 
 const HOLD_STAGE = 'lead_webhook_unverified';
+// Deliberately not one of the customer-originated channels the consent probes
+// allowlist (collections/consent-provenance, outbound-call-reason).
+const HOLD_CHANNEL = 'form_unverified';
 // A retry of the same form (the visitor taps the button again) must not mint a
 // second row or ring twice.
 const HOLD_DEDUPE_HOURS = 24;
@@ -60,7 +72,7 @@ async function ringHeldLead({ lead, name, serviceInterest }) {
     }, {
       bell: true,
       dedupeKey: `lead-unverified-hold:${lead.id}`,
-      detail: `Unverified website request${serviceInterest ? ` for ${serviceInterest}` : ''}. No customer profile, estimate, text or email was created. Confirm the request with the person before quoting.`,
+      detail: `Unverified website request${serviceInterest ? ` for ${serviceInterest}` : ''}. No customer profile, estimate, text or email was created. The submitted phone and email are on the lead's activity note; confirm them with the person, then add them to the lead.`,
       metadata: { leadId: lead.id, hold: HOLD_STAGE },
     });
   } catch (err) {
@@ -90,6 +102,7 @@ async function holdUnverifiedLead({ intake, leadSourceId = null, reason = 'missi
   const stage = {
     stage: HOLD_STAGE,
     verification: { turnstile: reason },
+    unverified_contact: { phone, email: intake.email || null },
     service_interest: intake.serviceInterest || null,
     ...(message ? { message } : {}),
     ...(intake.timeline ? { timeline: intake.timeline } : {}),
@@ -118,18 +131,19 @@ async function holdUnverifiedLead({ intake, leadSourceId = null, reason = 'missi
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lead-unverified-hold:${phone}`]);
     const since = new Date(Date.now() - HOLD_DEDUPE_HOURS * 60 * 60 * 1000);
     const prior = await trx('leads')
-      .where({ phone })
       .whereNull('deleted_at')
       .where('created_at', '>=', since)
       .whereRaw("extracted_data->>'stage' = ?", [HOLD_STAGE])
+      .whereRaw("extracted_data->'unverified_contact'->>'phone' = ?", [phone])
       .first('id');
     if (prior) return { lead: prior, deduped: true };
 
     const [lead] = await trx('leads').insert({
       first_name: firstName,
       last_name: lastName,
-      phone,
-      email: intake.email || null,
+      // Unverified contact stays out of the identity columns (see header).
+      phone: null,
+      email: null,
       address: intake.fullAddress || '',
       // Free-text addresses arrive with no city; recover it from the ZIP.
       city: address.city || zipToCity(address.zip) || '',
@@ -138,7 +152,7 @@ async function holdUnverifiedLead({ intake, leadSourceId = null, reason = 'missi
       service_interest: intake.serviceInterest || null,
       extracted_data: JSON.stringify(stage),
       first_contact_at: new Date(),
-      first_contact_channel: 'form',
+      first_contact_channel: HOLD_CHANNEL,
       status: 'new',
       gclid: intake.gclid || null,
       wbraid: intake.wbraid || null,
@@ -156,6 +170,7 @@ async function holdUnverifiedLead({ intake, leadSourceId = null, reason = 'missi
       lead_id: lead.id,
       activity_type: 'created',
       description: 'Unverified website request: the bot check did not finish. No automatic reply, customer profile or estimate was created.'
+        + ` Submitted contact, not verified: phone ${phone}; email ${intake.email || 'none'}. Add them to the lead after you confirm them with the person.`
         + (message ? ` Visitor wrote: "${message}"` : ''),
       performed_by: 'Lead webhook',
     });
@@ -173,4 +188,4 @@ async function holdUnverifiedLead({ intake, leadSourceId = null, reason = 'missi
   return { held: true, leadId: result.lead.id, deduped: result.deduped };
 }
 
-module.exports = { holdUnverifiedLead, HOLD_STAGE };
+module.exports = { holdUnverifiedLead, HOLD_STAGE, HOLD_CHANNEL };

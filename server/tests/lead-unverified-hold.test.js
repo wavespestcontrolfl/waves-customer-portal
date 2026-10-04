@@ -38,6 +38,7 @@ jest.mock('../services/admin-alert-compose', () => ({
 const { composeAdminAlert } = jest.requireActual('../services/admin-alert-compose');
 const { holdUnverifiedLead, HOLD_STAGE } = require('../services/lead-unverified-hold');
 const { _test } = require('../routes/lead-webhook');
+const { CUSTOMER_ORIGINATED_LEAD_CHANNELS } = require('../services/collections/consent-provenance');
 
 const intakeFor = (body) => _test.buildLeadWebhookIntake(body);
 const BODY = {
@@ -68,13 +69,21 @@ describe('holdUnverifiedLead', () => {
     expect(lead).toMatchObject({
       first_name: 'Dana',
       last_name: 'Sample',
-      phone: '+19415550142',
-      email: 'dana.sample@example.com',
       lead_source_id: 'src-1',
       lead_type: 'form_submission',
-      first_contact_channel: 'form',
       status: 'new',
     });
+    // The contact is not proven to be the submitter's. It stays out of the
+    // identity columns every trust reader keys on (ad audiences, the spam
+    // blocker's known-lead bypass, the consent probes) and rides as a note.
+    expect(lead.phone).toBeNull();
+    expect(lead.email).toBeNull();
+    expect(lead.first_contact_channel).toBe('form_unverified');
+    expect(CUSTOMER_ORIGINATED_LEAD_CHANNELS).not.toContain(lead.first_contact_channel);
+    expect(JSON.parse(lead.extracted_data).unverified_contact)
+      .toEqual({ phone: '+19415550142', email: 'dana.sample@example.com' });
+    expect(mockState.inserts[1].row.description)
+      .toContain('Submitted contact, not verified: phone +19415550142; email dana.sample@example.com.');
     // No proven identity: the hold never links a customer profile.
     expect(lead).not.toHaveProperty('customer_id');
     expect(JSON.parse(lead.extracted_data)).toMatchObject({
@@ -101,7 +110,7 @@ describe('holdUnverifiedLead', () => {
     expect(mockState.inserts).toEqual([]);
     expect(mockRaise).not.toHaveBeenCalled();
     // The lookup is keyed on the phone and on the hold stage only.
-    expect(mockState.wheres).toContainEqual(['leads', { phone: '+19415550142' }]);
+    expect(mockState.wheres).toContainEqual(['leads', "extracted_data->'unverified_contact'->>'phone' = ?", ['+19415550142']]);
     expect(mockState.wheres).toContainEqual(['leads', "extracted_data->>'stage' = ?", [HOLD_STAGE]]);
     expect(mockState.raws[0][1]).toEqual(['lead-unverified-hold:+19415550142']);
   });

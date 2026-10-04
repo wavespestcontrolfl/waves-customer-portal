@@ -63,8 +63,12 @@ describe('verifyTurnstileToken', () => {
   test('secret set but token missing → fails CLOSED, no network call', async () => {
     process.env.TURNSTILE_SECRET_KEY = 'secret';
     fetchSpy = jest.spyOn(global, 'fetch');
-    const r = await verifyTurnstileToken('', '1.2.3.4');
+    const r = await verifyTurnstileToken('', '1.2.3.4', 'www.wavespestcontrol.com');
     expect(r).toMatchObject({ ok: false, enforced: true, reason: 'missing_token' });
+    // Single-secret mode matches any host, but NO host at all is a direct
+    // POST: it must not earn the holdable missing_token verdict.
+    expect(await verifyTurnstileToken('', '1.2.3.4'))
+      .toMatchObject({ ok: false, enforced: true, reason: 'no_widget_match' });
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -85,7 +89,7 @@ describe('verifyTurnstileToken', () => {
   test('blank / whitespace-only token → fails CLOSED before any network call', async () => {
     process.env.TURNSTILE_SECRET_KEY = 'secret';
     fetchSpy = jest.spyOn(global, 'fetch');
-    const r = await verifyTurnstileToken('   ', '1.2.3.4');
+    const r = await verifyTurnstileToken('   ', '1.2.3.4', 'www.wavespestcontrol.com');
     expect(r).toMatchObject({ ok: false, enforced: true, reason: 'missing_token' });
     expect(fetchSpy).not.toHaveBeenCalled();
   });
