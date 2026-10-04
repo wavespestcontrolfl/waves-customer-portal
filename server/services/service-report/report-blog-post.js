@@ -88,18 +88,19 @@ const ABSOLUTE_URL_RE = '^https?://';
 const HUB_URL_RE = `^https?://(www\\.)?${SITE_HOST.replace(/\./g, '\\.')}(/|$)`;
 
 // Which visits a post may ride (owner ruling 2026-10-02: every service but
-// WDO, termite pre-treat, lawn and tree, shrub & palm). The search route and
-// the completion judge it the same way, from the visit's label and its
-// completion profile: never a WDO inspection or a termite pre-treat (by
+// WDO, termite pre-treat, and tree, shrub & palm; lawn joined 2026-10-04 with
+// the lawn Fast Complete sheet, whose report prints the same card). The search
+// route and the completion judge it the same way, from the visit's label and
+// its completion profile: never a WDO inspection or a termite pre-treat (by
 // service key, project type, or the label of a visit with no catalog link),
-// never the lawn or tree, shrub & palm lines (another lane owns those
+// never the tree, shrub & palm lines (another lane owns those
 // completions), and never a visit that completes through a project
 // (/complete refuses it). Nor a visit whose completion sends the customer no
 // report (an internal-only consultation such as the Waves Assessment, or a
 // profile whose delivery is internal-only or disabled): the post could
 // never be seen. That posture is the completion's own
 // (resolveCompletionDeliveryPosture, from the same profile).
-const NO_POST_LINES = new Set(['lawn', 'tree_shrub', 'palm']);
+const NO_POST_LINES = new Set(['tree_shrub', 'palm']);
 const NO_POST_SERVICE_KEYS = new Set(['wdo_inspection', 'termite_pretreatment', 'termite_slab_pretreat']);
 const NO_POST_PROJECT_TYPES = new Set(['wdo_inspection', 'pre_treatment_termite_certificate']);
 const NO_POST_LABEL_RE = /\bwdo\b|wood[\s-]*destroying|\bpre[\s-]*(?:treat|slab)|new[\s-]*construction/i;

@@ -1,15 +1,25 @@
 // @vitest-environment jsdom
-// Lawn Fast Complete (GATE_LAWN_FAST_COMPLETE): the sheet opens from the
-// server's context, takes the lawn photos through the shared assessment step,
-// and completes through the full /complete with the `lawnFast` block. Nothing
-// blocks Complete but what the server enforces; every refusal the server names
-// reads in plain words and sorts through the shared submit hook. Synthetic
-// data only; no real provider is ever called (every request is a stub).
+// Lawn Fast Complete (GATE_LAWN_FAST_COMPLETE), the one-screen fast lane
+// (owner 2026-10-04): note, photos (Analyze lawn, the four editable scores,
+// Confirm assessment), the plan's products already on, tips, a blog post, the
+// treatment zone map, and one Complete button. Nothing blocks Complete but what
+// the server enforces (plus one product); every refusal the server names reads
+// in plain words and sorts through the shared submit hook. Synthetic data only;
+// no real provider is ever called (every request is a stub).
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import FastCompleteLawnSheet, { LAWN_CONDITION_OPTIONS, plainRefusalMessage } from './FastCompleteLawnSheet';
 import { PROJECT_TYPES } from '../../../../server/services/project-types.js';
+
+vi.mock('./TechTreatmentZoneModal', () => ({
+  default: ({ onClose, onSaved, lawnMode, serviceId }) => (
+    <div role="dialog" aria-label="Tracer" data-lawn={String(!!lawnMode)} data-service={serviceId}>
+      <button type="button" onClick={() => onSaved({ id: 'zone-1' })}>Save trace</button>
+      <button type="button" onClick={onClose}>Close tracer</button>
+    </div>
+  ),
+}));
 
 // Each test mounts the whole sheet and taps through it: slow on a busy runner.
 vi.setConfig({ testTimeout: 30000 });
@@ -76,19 +86,25 @@ const context = (overrides = {}) => ({
   ...overrides,
 });
 const ONE_TIME = () => context({ visitType: 'one_time', plannedProducts: { source: null, items: [] } });
+const plannedOne = (applicationMethod, extra = {}) => context({
+  plannedProducts: { source: 'plan', items: [{ productId: P_TALAK, name: 'Talak 7.9%', applicationMethod, amount: 2, amountUnit: 'fl_oz', ...extra }] },
+});
 
 const SCORES = { turf_density: 80, weed_suppression: 70, color_health: 60, stress_damage: 50 };
 const ASSESSED = { id: 'assessment-1', confirmed_by_tech: false, ...SCORES };
-const REVIEW = { status: 'complete', findings: [], photoQuality: [] };
+const REVIEW = { status: 'complete', findings: [{ finding_id: 'f-1', name: 'Dollarweed', confidence: 'high' }], photoQuality: [] };
 
 const refusal = (status, code, message, details = {}) => Object.assign(new Error(message), { status, code, details: { code, error: message, ...details } });
 
 let requests;
 let completeErrors;
-let previewAnswer;
 let lookup;
+let turfProfile;
 let tips;
+let blogAnswer;
 let catalogAnswer;
+let assessAnswer;
+let confirmAnswer;
 
 // A stub of the whole admin API the sheet talks to.
 function makeRequest({ ctx = context(), contextError = null } = {}) {
@@ -99,22 +115,19 @@ function makeRequest({ ctx = context(), contextError = null } = {}) {
       if (contextError) throw contextError;
       return ctx;
     }
-    if (path.endsWith('/lawn-fast/watering-preview')) {
-      const answer = typeof previewAnswer === 'function' ? previewAnswer(body) : previewAnswer;
-      if (answer instanceof Error) throw answer;
-      return answer;
-    }
+    if (path.includes('/turf-profile')) { if (turfProfile instanceof Error) throw turfProfile; return turfProfile; }
     if (path.endsWith('/tech-tips')) { if (tips instanceof Error) throw tips; return tips; }
+    if (path.includes('/blog-posts')) { if (blogAnswer instanceof Error) throw blogAnswer; return typeof blogAnswer === 'function' ? blogAnswer(path) : blogAnswer; }
     if (path === '/admin/dispatch/products/catalog') return catalogAnswer;
     if (path.includes('/lawn-assessment/service/')) {
       if (lookup instanceof Error) throw lookup;
       return lookup;
     }
-    if (path.endsWith('/lawn-assessment/assess')) {
-      return { success: true, assessment: ASSESSED, visitAssessment: REVIEW, adjustedScores: SCORES, observations: 'Synthetic observation' };
-    }
+    if (path.endsWith('/lawn-assessment/assess')) return assessAnswer;
     if (path.endsWith('/lawn-assessment/confirm')) {
-      return { success: true, confirmed: true, assessment: { ...ASSESSED, confirmed_by_tech: true }, visitAssessment: REVIEW };
+      const answer = typeof confirmAnswer === 'function' ? confirmAnswer(body) : confirmAnswer;
+      if (answer instanceof Error) throw answer;
+      return answer;
     }
     if (path.endsWith('/complete')) {
       const error = completeErrors.shift();
@@ -142,10 +155,13 @@ class FixtureImage {
 beforeEach(() => {
   requests = [];
   completeErrors = [];
-  previewAnswer = { products: [], state: null, lines: [], sentence: null, mowHold: null, asOf: '2026-10-04T14:00:00.000Z', provisional: [], omitted: [] };
   lookup = { shotListEnabled: true, assessment: null };
+  turfProfile = { profile: { lawn_sqft: 5000 } };
   tips = { available: false, groups: [] };
+  blogAnswer = { available: false, posts: [] };
   catalogAnswer = { products: CATALOG };
+  assessAnswer = { success: true, assessment: ASSESSED, visitAssessment: REVIEW, adjustedScores: SCORES, observations: 'Synthetic observation' };
+  confirmAnswer = { success: true, confirmed: true, assessment: { ...ASSESSED, confirmed_by_tech: true }, visitAssessment: REVIEW };
   vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
   vi.stubGlobal('FileReader', FixtureFileReader);
   vi.stubGlobal('Image', FixtureImage);
@@ -164,30 +180,48 @@ async function openSheet({ request = makeRequest(), props = {} } = {}) {
   return { request, onFullForm, onCompleted };
 }
 
-// Photos in, Analyze, then confirm what the read found.
-async function confirmAssessment() {
+async function addPhoto() {
   const input = await screen.findByLabelText('Add turf photos');
   await waitFor(() => expect(screen.queryByTestId('lawn-photo-mode-pending')).toBeNull());
   fireEvent.change(input, { target: { files: [new File(['a'], 'a.jpg', { type: 'image/jpeg' })] } });
   await screen.findByLabelText('Slot for photo 1');
+}
+// Photos in, then Analyze lawn: the four scores show (each a box). Nothing is confirmed yet.
+async function analyzeOnly() {
+  await addPhoto();
   fireEvent.click(screen.getByRole('button', { name: 'Analyze lawn' }));
-  fireEvent.click(await screen.findByRole('button', { name: 'Confirm assessment' }));
-  await screen.findByText('Assessment confirmed');
+  await screen.findByLabelText('Density score');
 }
 
-const completeButton = () => screen.getByRole('button', { name: /^(Complete lawn visit|Retry)$/ });
+const completeButton = () => document.querySelector('.tech-visit-footer .tech-visit-complete');
 const completeCalls = () => requests.filter((r) => r.path.endsWith('/complete'));
-const tile = (name) => screen.getByRole('button', { name: new RegExp(`^${name}`) });
+const confirmCalls = () => requests.filter((r) => r.path.endsWith('/lawn-assessment/confirm'));
 const editorFor = (name) => screen.getByRole('group', { name });
-const footerReason = () => document.querySelector('.tech-visit-footer [role="status"]')?.textContent || '';
+const footerNote = () => document.querySelector('.tech-visit-footer [role="status"]')?.textContent || '';
 
 async function submit() {
   fireEvent.click(completeButton());
   await waitFor(() => expect(completeCalls().length).toBeGreaterThan(0));
 }
+// Confirm assessment: the button the full form has too.
+async function confirm() {
+  fireEvent.click(await screen.findByRole('button', { name: 'Confirm assessment' }));
+  await screen.findByText('Assessment confirmed');
+}
+// Photos, Analyze lawn, Confirm assessment.
+async function analyze() {
+  await analyzeOnly();
+  await confirm();
+}
+// ... then Complete.
+async function analyzeAndComplete() {
+  await analyze();
+  await waitFor(() => expect(completeButton().disabled).toBe(false));
+  await submit();
+}
 
 describe('opening the sheet', () => {
-  test('a visit the server calls ineligible opens the full form, once', async () => {
+  test('a visit the server calls ineligible is handed to the parent once, with no button on the sheet', async () => {
     const request = makeRequest({ ctx: context({ eligible: false, reason: 'has_companions' }) });
     const onFullForm = vi.fn();
     render(<FastCompleteLawnSheet service={SERVICE} request={request} catalog={CATALOG} onClose={() => {}} onFullForm={onFullForm} />);
@@ -195,22 +229,22 @@ describe('opening the sheet', () => {
     expect(screen.queryByRole('heading', { name: 'Lawn photos' })).toBeNull();
   });
 
-  test.each([404, 409])('a %s on the context (gate off, visit gone) opens the full form', async (status) => {
+  test.each([404, 409])('a %s on the context (gate off, visit gone) is handed to the parent', async (status) => {
     const request = makeRequest({ contextError: Object.assign(new Error('x'), { status }) });
     const onFullForm = vi.fn();
     render(<FastCompleteLawnSheet service={SERVICE} request={request} catalog={CATALOG} onClose={() => {}} onFullForm={onFullForm} />);
     await waitFor(() => expect(onFullForm).toHaveBeenCalledTimes(1));
   });
 
-  test('a failed read shows the error with Try again and a way to the full form, and does not leave on its own', async () => {
+  test('a failed read shows the error with Try again, and no way to a full form', async () => {
     const request = makeRequest({ contextError: Object.assign(new Error('Network down'), { status: 503 }) });
     const onFullForm = vi.fn();
     render(<FastCompleteLawnSheet service={SERVICE} request={request} catalog={CATALOG} onClose={() => {}} onFullForm={onFullForm} />);
     await screen.findByText('Network down');
     expect(onFullForm).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('button', { name: 'Open the full form' }));
-    expect(onFullForm).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole('button', { name: 'Try again' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /full form/i })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(request.mock.calls.filter(([path]) => path.endsWith('/lawn-fast/context'))).toHaveLength(2));
   });
 
   test('a visit that changed since the schedule loaded is named, not completed', async () => {
@@ -221,130 +255,409 @@ describe('opening the sheet', () => {
   });
 });
 
-describe('the rainfast re-check line (GATE_LAWN_RAINFAST_WATCH)', () => {
-  const LINE = "Re-check last visit's treatment: weather data showed rain soon after it (Test Iron).";
+describe('the screen', () => {
+  test('shows the note first, then the photos, then the products, and one Complete button', async () => {
+    await openSheet();
+    expect(screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent)).toEqual(['Tell me about the visit', 'Lawn photos', 'Products used', 'Treatment zone map']);
+    expect(document.querySelectorAll('.tech-visit-footer .tech-visit-complete')).toHaveLength(1);
+    expect(screen.getByRole('dialog').querySelector('header h2').textContent).toBe('Complete lawn visit');
+  });
 
-  test('the server\'s line shows on the sheet as sent, readable (14px muted note class), and does not block Complete', async () => {
-    await openSheet({ request: makeRequest({ ctx: context({ reCheck: { line: LINE } }) }) });
-    const note = screen.getByText(LINE);
-    expect(note.getAttribute('role')).toBe('status');
-    expect(note.className).toContain('tech-visit-muted');
-    expect(screen.getByRole('button', { name: /^Complete lawn visit$/ })).toBeTruthy();
+  test('has no Full form button, watering preview, lawn length box or area box, and asks for none of them', async () => {
+    const { request } = await openSheet({ request: makeRequest({ ctx: context({ turfHeightCapture: true }) }) });
+    await analyze();
+    expect(screen.queryByRole('button', { name: /full form/i })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Watering after this visit' })).toBeNull();
+    expect(screen.queryByText('Lawn length')).toBeNull();
+    expect(screen.queryByPlaceholderText('e.g. 4')).toBeNull();
+    expect(screen.queryByLabelText(/Area treated|Linear feet/)).toBeNull();
+    expect(screen.queryByText(/Re-check last visit/)).toBeNull();
+    expect(screen.queryByText('Photo findings')).toBeNull();
+    expect(request.mock.calls.some(([path]) => /watering-preview/.test(path))).toBe(false);
+    // The only buttons in the header: Close.
+    expect(within(screen.getByRole('dialog').querySelector('header')).getAllByRole('button').map((b) => b.getAttribute('aria-label'))).toEqual(['Close']);
+  });
+
+  test('before the read: the shot list with its one-line guides and one Analyze lawn button, nothing else in the photo block', async () => {
+    await openSheet();
+    expect(screen.getByTestId('lawn-shot-list')).toBeTruthy();
+    expect(screen.getByTestId('lawn-shot-front').textContent).toMatch(/\S+/);
+    expect(screen.getByRole('button', { name: 'Analyze lawn' }).disabled).toBe(true);
+    expect(screen.queryByLabelText('Density score')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Retake' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Confirm assessment' })).toBeNull();
+  });
+
+  test('Analyze lawn works at one photo, with the guide hint showing', async () => {
+    await openSheet({ request: makeRequest({ ctx: ONE_TIME() }) });
+    await addPhoto();
+    expect(screen.getByTestId('lawn-shot-list-hint').textContent).toMatch(/This is a guide only/);
+    expect(screen.getByRole('button', { name: 'Analyze lawn' }).disabled).toBe(false);
+  });
+
+  test('after the read: the four scores in one row, each a box with the AI read, then Confirm assessment and Retake; neither extra tile', async () => {
+    await openSheet();
+    await analyzeOnly();
+    for (const [label, value] of [['Density', '80'], ['Weed control', '70'], ['Color', '60'], ['Condition', '50']]) {
+      expect(screen.getByText(label)).toBeTruthy();
+      expect(screen.getByLabelText(`${label} score`).value).toBe(value);
+    }
+    // The read left fungus and thatch blank; the full form would offer them. The sheet never does.
+    expect(screen.queryByText('Fungus control')).toBeNull();
+    expect(screen.queryByText('Thatch condition')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Confirm assessment' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Retake' })).toBeTruthy();
+    // The photo slots are gone with the Analyze button.
+    expect(screen.queryByRole('button', { name: 'Analyze lawn' })).toBeNull();
+    expect(screen.queryByTestId('lawn-shot-list')).toBeNull();
+    expect(screen.queryByText(/^AI \d+$/)).toBeNull();
+  });
+
+  test('the tech can change any of the four; the AI read stays in view; Confirm posts only what was typed', async () => {
+    await openSheet();
+    await analyzeOnly();
+    fireEvent.change(screen.getByLabelText('Density score'), { target: { value: '65' } });
+    expect(screen.getByTestId('lawn-ai-score-turf_density').textContent).toBe('AI 80');
+    fireEvent.change(screen.getByLabelText('Condition score'), { target: { value: '' } });
+    await confirm();
+    expect(confirmCalls()).toHaveLength(1);
+    expect(confirmCalls()[0].body.adjustedScores).toEqual({ turf_density: 65, stress_damage: null });
+    // Confirmed: the scores are plain text again.
+    expect(screen.queryByLabelText('Density score')).toBeNull();
+  });
+
+  test('a score the read left blank takes a typed value too, and it rides the Confirm', async () => {
+    assessAnswer = { ...assessAnswer, assessment: { ...ASSESSED, color_health: null }, adjustedScores: { ...SCORES, color_health: null } };
+    await openSheet();
+    await analyzeOnly();
+    expect(screen.getByLabelText('Color score').value).toBe('');
+    fireEvent.change(screen.getByLabelText('Color score'), { target: { value: '55' } });
+    await confirm();
+    expect(confirmCalls()[0].body.adjustedScores).toEqual({ color_health: 55 });
+  });
+
+  test('Retake goes back to the photo slots, and Complete says Add a photo', async () => {
+    await openSheet();
+    await analyzeOnly();
+    fireEvent.click(screen.getByRole('button', { name: 'Retake' }));
+    await screen.findByTestId('lawn-shot-list');
+    expect(completeButton().textContent).toBe('Add a photo');
+    expect(completeButton().disabled).toBe(true);
+  });
+});
+
+describe('what Complete says while it is off', () => {
+  test('Add a photo, Analyze the photos, Confirm the assessment, then it turns on; one thing at a time, in the button', async () => {
+    await openSheet();
+    expect(completeButton().textContent).toBe('Add a photo');
+    expect(completeButton().disabled).toBe(true);
+    await addPhoto();
+    expect(completeButton().textContent).toBe('Analyze the photos');
+    expect(completeButton().disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Analyze lawn' }));
+    await screen.findByLabelText('Density score');
+    await waitFor(() => expect(completeButton().textContent).toBe('Confirm the assessment'));
+    expect(completeButton().disabled).toBe(true);
+    await confirm();
+    await waitFor(() => expect(completeButton().textContent).toBe('Complete lawn visit'));
+    expect(completeButton().disabled).toBe(false);
+    // The reason is the button, not a line above it.
+    expect(footerNote()).toBe('');
+  });
+
+  test('with no products on, Add the products applied; adding one turns it on', async () => {
+    await openSheet({ request: makeRequest({ ctx: ONE_TIME() }) });
+    await analyze();
+    await waitFor(() => expect(completeButton().textContent).toBe('Add the products applied'));
+    expect(completeButton().disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
+    fireEvent.click(await screen.findByText('Iron Plus'));
+    await waitFor(() => expect(completeButton().textContent).toBe('Complete lawn visit'));
+    expect(completeButton().disabled).toBe(false);
+  });
+
+  test('removing every planned product asks for the products again', async () => {
+    await openSheet();
+    await analyze();
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    fireEvent.click(within(editorFor('Talak 7.9%')).getByRole('button', { name: 'Remove' }));
+    fireEvent.click(within(editorFor('Iron Plus')).getByRole('button', { name: 'Remove' }));
+    await waitFor(() => expect(completeButton().textContent).toBe('Add the products applied'));
+  });
+});
+
+describe('Confirm assessment, then Complete', () => {
+  test('Confirm sends the scores as shown and the default keep-all review; Complete then sends the confirmed id', async () => {
+    await openSheet();
+    await analyzeAndComplete();
+    expect(confirmCalls()).toHaveLength(1);
+    expect(confirmCalls()[0].body).toEqual({
+      assessmentId: 'assessment-1',
+      adjustedScores: {},
+      reviewedFindings: [{ finding_id: 'f-1', keep: true, name: null, tech_note: null }],
+      addedDetails: [],
+    });
+    expect(completeCalls()[0].body.lawnAssessmentId).toBe('assessment-1');
+    const order = requests.map((r) => r.path).filter((path) => /\/lawn-assessment\/confirm$|\/complete$/.test(path));
+    expect(order).toEqual(['/admin/lawn-assessment/confirm', '/admin/dispatch/svc-lawn/complete']);
+  });
+
+  test('a failed confirm shows the error, leaves Complete off, and Confirm can be tapped again', async () => {
+    confirmAnswer = Object.assign(new Error('Could not save the scores'), { status: 500 });
+    await openSheet();
+    await analyzeOnly();
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm assessment' }));
+    await screen.findByText('Could not save the scores');
+    expect(completeButton().textContent).toBe('Confirm the assessment');
+    expect(completeButton().disabled).toBe(true);
+    expect(completeCalls()).toHaveLength(0);
+  });
+
+  test('a confirm that leaves the assessment unconfirmed says why and Complete stays off', async () => {
+    confirmAnswer = { success: true, confirmed: false, missingScores: ['fungus_control'], assessment: ASSESSED, visitAssessment: REVIEW };
+    await openSheet();
+    await analyzeOnly();
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm assessment' }));
+    await screen.findByText('The photos did not give a full read. Fill any blank score, or tap Retake and analyze again.');
+    expect(completeButton().disabled).toBe(true);
+  });
+
+  test('a visit that already has a confirmed assessment completes without confirming', async () => {
+    lookup = { shotListEnabled: true, assessment: { ...ASSESSED, confirmed_by_tech: true }, visitAssessment: REVIEW };
+    await openSheet({ request: makeRequest({ ctx: context({ assessment: { exists: true, id: 'assessment-1', confirmed: true, unusableReason: null } }) }) });
+    await screen.findByText('Assessment confirmed');
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    expect(confirmCalls()).toHaveLength(0);
+    expect(requests.some((r) => r.path.endsWith('/lawn-assessment/assess'))).toBe(false);
+    expect(completeCalls()[0].body.lawnAssessmentId).toBe('assessment-1');
+  });
+
+  test('a confirmed assessment the report would reject (another property) does not count until redone', async () => {
+    lookup = { shotListEnabled: true, assessment: { ...ASSESSED, confirmed_by_tech: true }, visitAssessment: REVIEW };
+    await openSheet({ request: makeRequest({ ctx: context({ assessment: { exists: true, id: 'assessment-1', confirmed: false, unusableReason: 'property_scope' } }) }) });
+    await screen.findByText('Assessment confirmed');
+    await waitFor(() => expect(footerNote()).toBe('This lawn check was made for a different property than this visit. Retake the photos, then analyze and confirm again.'));
+    expect(completeButton().disabled).toBe(true);
+  });
+
+  test('the property-check wording differs from the property-scope wording', async () => {
+    lookup = { shotListEnabled: true, assessment: { ...ASSESSED, confirmed_by_tech: true }, visitAssessment: REVIEW };
+    await openSheet({ request: makeRequest({ ctx: context({ assessment: { exists: true, id: 'assessment-1', confirmed: true, unusableReason: 'property_check_failed' } }) }) });
+    await waitFor(() => expect(footerNote()).toBe('We could not check this lawn assessment against this visit. Try again, or retake the photos and confirm again.'));
+  });
+});
+
+describe('a confirmed assessment when the detail lookup fails', () => {
+  const confirmedContext = (assessment = {}) => context({ assessment: { exists: true, id: 'assessment-ctx', confirmed: true, unusableReason: null, ...assessment } });
+
+  test('the context\'s confirmed id stands, so Complete stays on and sends it without confirming', async () => {
+    lookup = new Error('lookup down');
+    await openSheet({ request: makeRequest({ ctx: confirmedContext() }) });
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    expect(completeCalls()[0].body.lawnAssessmentId).toBe('assessment-ctx');
+    expect(confirmCalls()).toHaveLength(0);
+  });
+
+  test('a retake that starts (a new photo) ends it; the new assessment is confirmed, then Complete sends its id', async () => {
+    lookup = new Error('lookup down');
+    await openSheet({ request: makeRequest({ ctx: confirmedContext() }) });
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    const input = screen.getByLabelText('Add turf photos');
+    await waitFor(() => expect(screen.queryByTestId('lawn-photo-mode-pending')).toBeNull());
+    fireEvent.change(input, { target: { files: [new File(['a'], 'a.jpg', { type: 'image/jpeg' })] } });
+    await waitFor(() => expect(completeButton().disabled).toBe(true));
+    await screen.findByLabelText('Slot for photo 1');
+    fireEvent.click(screen.getByRole('button', { name: 'Analyze lawn' }));
+    await screen.findByLabelText('Density score');
+    expect(completeButton().disabled).toBe(true);
+    await confirm();
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    expect(confirmCalls()).toHaveLength(1);
+    expect(completeCalls()[0].body.lawnAssessmentId).toBe('assessment-1');
   });
 
   test.each([
-    ['gate off (no key)', context()],
-    ['no prior check (null)', context({ reCheck: null })],
-    ['an unexpected shape', context({ reCheck: { line: 42 } })],
-    ['an empty line', context({ reCheck: { line: '   ' } })],
-  ])('%s: no note is shown', async (_label, ctx) => {
-    await openSheet({ request: makeRequest({ ctx }) });
-    expect(screen.queryByText(/Re-check last visit/)).toBeNull();
+    ['unusable (another property)', { confirmed: true, unusableReason: 'property_scope' }],
+    ['unusable (check failed)', { confirmed: true, unusableReason: 'property_check_failed' }],
+    ['not confirmed', { confirmed: false }],
+  ])('is never used when the context says %s', async (_label, assessment) => {
+    lookup = new Error('lookup down');
+    await openSheet({ request: makeRequest({ ctx: confirmedContext(assessment) }) });
+    await waitFor(() => expect(completeButton().textContent).toBe('Add a photo'));
+    expect(completeButton().disabled).toBe(true);
+  });
+
+  test('a lookup that succeeds with no assessment does not fall back to the context\'s id', async () => {
+    lookup = { shotListEnabled: true, assessment: null };
+    await openSheet({ request: makeRequest({ ctx: confirmedContext() }) });
+    await waitFor(() => expect(completeButton().textContent).toBe('Add a photo'));
   });
 });
 
 describe('products', () => {
-  test('a recurring visit opens with the plan\'s products on and their amounts filled', async () => {
+  test('a recurring visit opens with the plan\'s products on: name, method, amount, and the whole-lawn area as text', async () => {
     await openSheet();
-    expect(tile('Talak 7.9%').getAttribute('aria-pressed')).toBe('true');
-    expect(tile('Iron Plus').getAttribute('aria-pressed')).toBe('true');
-    expect(within(editorFor('Talak 7.9%')).getByLabelText('Talak 7.9%').value).toBe('6.4');
-    expect(within(editorFor('Talak 7.9%')).getByText('Planned amount')).toBeTruthy();
+    const talak = editorFor('Talak 7.9%');
+    expect(within(talak).getByText('Broadcast spray · whole lawn, 6,000 sq ft')).toBeTruthy();
+    expect(within(talak).getByLabelText('Talak 7.9%').value).toBe('6.4');
+    expect(within(talak).getByLabelText('Unit for Talak 7.9%').value).toBe('fl_oz');
+    const iron = editorFor('Iron Plus');
+    expect(within(iron).getByText('Spot treatment')).toBeTruthy();
     // The plan had no quantity for this one: blank, and said so, never invented.
-    expect(within(editorFor('Iron Plus')).getByLabelText('Iron Plus').value).toBe('');
-    expect(within(editorFor('Iron Plus')).getByText('No amount entered. It is recorded without one.')).toBeTruthy();
+    expect(within(iron).getByLabelText('Iron Plus').value).toBe('');
+    expect(within(iron).getByText('No amount entered. It is recorded without one.')).toBeTruthy();
   });
 
-  test('a one-time visit opens with no products and still completes', async () => {
+  test('no area box and no rate box, and no way to change the method', async () => {
+    await openSheet();
+    expect(screen.queryByLabelText(/Area treated|Linear feet/)).toBeNull();
+    expect(screen.queryByLabelText(/ rate$/)).toBeNull();
+    expect(screen.queryByLabelText(/label max/)).toBeNull();
+    expect(within(editorFor('Talak 7.9%')).queryByRole('button', { name: /Broadcast spray|Granular|Spot treatment/ })).toBeNull();
+  });
+
+  test('a visit with no planned products shows the empty state and the add control only', async () => {
     const request = makeRequest({ ctx: ONE_TIME() });
     await openSheet({ request });
-    expect(screen.queryByRole('button', { name: /^Talak/ })).toBeNull();
-    expect(screen.getByText('No products yet. Add what you applied, or none if you applied nothing.')).toBeTruthy();
+    expect(screen.queryByRole('group', { name: 'Talak 7.9%' })).toBeNull();
+    expect(screen.getByText('No products yet. Add what you applied.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '+ Other product' })).toBeTruthy();
     expect(request.mock.calls.some(([path]) => path.includes('/treatment-plans/'))).toBe(false);
-    await confirmAssessment();
-    await submit();
-    expect(completeCalls()[0].body.products).toEqual([]);
-    expect(completeCalls()[0].body.lawnFast).toEqual({ visitType: 'one_time' });
+    await analyze();
+    expect(completeButton().textContent).toBe('Add the products applied');
   });
 
-  test('turning a planned product off sends it as skipped, the way the full form does', async () => {
+  test('a planned product the tech removes is sent as skipped, the way the full form does', async () => {
     await openSheet();
-    fireEvent.click(tile('Iron Plus'));
+    fireEvent.click(within(editorFor('Iron Plus')).getByRole('button', { name: 'Remove' }));
     expect(screen.queryByRole('group', { name: 'Iron Plus' })).toBeNull();
-    await confirmAssessment();
-    await submit();
+    await analyzeAndComplete();
     const { body } = completeCalls()[0];
     expect(body.products.map((p) => p.productId)).toEqual([P_TALAK]);
     expect(body.lawnProtocolCompletion).toEqual({ skippedProducts: [{ productId: P_IRON, productName: 'Iron Plus' }] });
   });
 
-  test('a sprayed product takes its area from the lawn plan, and Complete waits for one when there is none', async () => {
-    // The plan has no area for it (treatedSqft null): the box is the technician's.
-    await openSheet({ request: makeRequest({ ctx: plannedOne('broadcast_spray', { treatedSqft: null, areaUnit: null }) }) });
-    await confirmAssessment();
-    // Talak is a broadcast spray with no area yet.
-    await waitFor(() => expect(footerReason()).toBe('Enter the square feet treated for Talak 7.9%.'));
-    expect(completeButton().disabled).toBe(true);
-    fireEvent.change(within(editorFor('Talak 7.9%')).getByLabelText('Area treated (sq ft)'), { target: { value: '5000' } });
-    await waitFor(() => expect(completeButton().disabled).toBe(false));
-    await submit();
-    expect(completeCalls()[0].body.products[0]).toMatchObject({ productId: P_TALAK, applicationMethod: 'broadcast_spray', areaValue: 5000, areaUnit: 'sqft' });
-  });
-
-  test('the plan\'s area fills the box, labeled', async () => {
-    await openSheet();
-    const area = await waitFor(() => {
-      const input = within(editorFor('Talak 7.9%')).getByLabelText('Area treated (sq ft)');
-      expect(input.value).toBe('6000');
-      return input;
-    });
-    expect(area).toBeTruthy();
-    expect(within(editorFor('Talak 7.9%')).getByText('from the lawn plan')).toBeTruthy();
-  });
-
-  test('a product added from the picker joins as an applied row on its own default method', async () => {
+  test('a product added from the picker joins on its own default method, with Remove', async () => {
     await openSheet({ request: makeRequest({ ctx: ONE_TIME() }) });
     fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
     fireEvent.click(await screen.findByText('Iron Plus'));
     const editor = editorFor('Iron Plus');
     expect(within(editor).getByText(/added by you/)).toBeTruthy();
-    expect(within(editor).getByRole('button', { name: 'Broadcast spray' }).getAttribute('aria-pressed')).toBe('true');
+    expect(within(editor).getByText(/^Broadcast spray/)).toBeTruthy();
+    fireEvent.click(within(editor).getByRole('button', { name: 'Remove' }));
+    expect(screen.queryByRole('group', { name: 'Iron Plus' })).toBeNull();
+  });
+
+  test('a sprayed product the tech adds goes down on the lawn area the plan gives; nobody types one', async () => {
+    await openSheet();
+    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
+    fireEvent.click(await screen.findByText('Green Granules'));
+    expect(within(editorFor('Green Granules')).getByText(/whole lawn, 6,000 sq ft/)).toBeTruthy();
+    await analyzeAndComplete();
+    expect(completeCalls()[0].body.products.find((p) => p.productId === P_GRANULE)).toMatchObject({ areaValue: 6000, areaUnit: 'sqft' });
+  });
+
+  test('a plan with no area uses the lawn area on the customer\'s turf profile', async () => {
+    await openSheet({ request: makeRequest({ ctx: plannedOne('broadcast_spray') }) });
+    expect(await within(editorFor('Talak 7.9%')).findByText('Broadcast spray · whole lawn, 5,000 sq ft')).toBeTruthy();
+    await analyzeAndComplete();
+    expect(completeCalls()[0].body.products[0]).toMatchObject({ areaValue: 5000, areaUnit: 'sqft' });
+  });
+
+  test.each([
+    ['has none', { profile: { lawn_sqft: null } }],
+    ['cannot be read', new Error('down')],
+  ])('a plan with no area and a profile that %s holds Complete in words, and invents none', async (_label, answer) => {
+    turfProfile = answer;
+    await openSheet({ request: makeRequest({ ctx: plannedOne('broadcast_spray') }) });
+    await analyze();
+    await waitFor(() => expect(footerNote()).toBe('The lawn area is not on file for Talak 7.9%. Tell the office.'));
+    expect(completeButton().disabled).toBe(true);
+    expect(completeCalls()).toHaveLength(0);
+  });
+
+  test('a perimeter product is held in words: this sheet has no linear-feet entry', async () => {
+    await openSheet({ request: makeRequest({ ctx: plannedOne('perimeter_spray', { treatedSqft: 6000, areaUnit: 'sqft' }) }) });
+    await analyze();
+    await waitFor(() => expect(footerNote()).toBe('Talak 7.9% needs linear feet, which this sheet does not take. Tell the office.'));
+    expect(completeButton().disabled).toBe(true);
+  });
+
+  // [method as the plan or catalog spells it, the unit the server wants or null]
+  test.each([
+    ['broadcast_spray', 'sqft'],
+    ['Broadcast', 'sqft'],
+    ['granular_broadcast', 'sqft'],
+    ['spot_treatment', null],
+    ['soil_drench', null],
+    ['foliar_spray', null],
+    ['bait_placement', null],
+    ['station_check', null],
+    ['fog_ulv', null],
+    ['trunk_injection', null],
+    ['pin_stream', null],
+  ])('%s sends %s as /complete needs it', async (method, unit) => {
+    await openSheet({ request: makeRequest({ ctx: plannedOne(method, { treatedSqft: 4100, areaUnit: 'sqft' }) }) });
+    await analyzeAndComplete();
+    const sent = completeCalls()[0].body.products[0];
+    if (unit) expect(sent).toMatchObject({ areaValue: 4100, areaUnit: unit });
+    else {
+      expect(sent).not.toHaveProperty('areaValue');
+      expect(sent).not.toHaveProperty('areaUnit');
+    }
+  });
+
+  test('the server\'s area refusals get plain words with no button to follow', () => {
+    expect(plainRefusalMessage({ code: 'area_sqft_required' })).toBe('The lawn area is missing for a sprayed or spread product. Tell the office.');
+    expect(plainRefusalMessage({ code: 'linear_ft_required' })).toBe('A perimeter product needs linear feet, which this sheet does not take. Tell the office.');
   });
 });
 
-describe('Complete', () => {
-  test('is off until the assessment is confirmed, and says why in plain words', async () => {
-    await openSheet({ request: makeRequest({ ctx: ONE_TIME() }) });
-    await waitFor(() => expect(footerReason()).toBe('Take your photos, tap Analyze lawn, then confirm the assessment. Complete turns on after that.'));
-    expect(completeButton().disabled).toBe(true);
-    await confirmAssessment();
-    await waitFor(() => expect(completeButton().disabled).toBe(false));
-    expect(footerReason()).toBe('');
+describe('a product the plan lists twice', () => {
+  const twice = () => context({
+    plannedProducts: {
+      source: 'plan',
+      items: [
+        { productId: P_TALAK, name: 'Talak 7.9%', applicationMethod: 'spot_treatment', amount: 3, amountUnit: 'fl_oz' },
+        { productId: P_TALAK.toUpperCase(), name: 'Talak 7.9%', applicationMethod: 'spot_treatment', amount: 5, amountUnit: 'fl_oz' },
+        { productId: P_IRON, name: 'Iron Plus', applicationMethod: 'spot_treatment', amount: 1, amountUnit: 'fl_oz' },
+      ],
+    },
   });
 
-  test('the photo hint never blocks: one photo, hint showing, assessment confirmed, Complete on', async () => {
-    await openSheet({ request: makeRequest({ ctx: ONE_TIME() }) });
-    await confirmAssessment();
-    expect(completeButton().disabled).toBe(false);
+  test('is one row with the first amount (as the full form keeps the first)', async () => {
+    await openSheet({ request: makeRequest({ ctx: twice() }) });
+    expect(screen.getAllByRole('group', { name: /^Talak/ })).toHaveLength(1);
+    expect(within(editorFor('Talak 7.9%')).getByLabelText('Talak 7.9%').value).toBe('3');
+    await analyzeAndComplete();
+    const { body } = completeCalls()[0];
+    expect(body.products.map((p) => p.productId)).toEqual([P_TALAK, P_IRON]);
+    expect(body).not.toHaveProperty('lawnProtocolCompletion');
   });
 
-  test('the shot-list hint is shown with a single photo and Analyze works at any time', async () => {
-    await openSheet({ request: makeRequest({ ctx: ONE_TIME() }) });
-    const input = await screen.findByLabelText('Add turf photos');
-    await waitFor(() => expect(screen.queryByTestId('lawn-photo-mode-pending')).toBeNull());
-    fireEvent.change(input, { target: { files: [new File(['a'], 'a.jpg', { type: 'image/jpeg' })] } });
-    await screen.findByLabelText('Slot for photo 1');
-    expect(screen.getByTestId('lawn-shot-list-hint').textContent).toMatch(/This is a guide only/);
-    expect(screen.getByRole('button', { name: 'Analyze lawn' }).disabled).toBe(false);
-    expect(completeButton().disabled).toBe(true);
+  test('removed, it is one skipped entry, so /complete\'s unique-list rule holds', async () => {
+    await openSheet({ request: makeRequest({ ctx: twice() }) });
+    fireEvent.click(within(editorFor('Talak 7.9%')).getByRole('button', { name: 'Remove' }));
+    await analyzeAndComplete();
+    const { body } = completeCalls()[0];
+    expect(body.lawnProtocolCompletion.skippedProducts).toEqual([{ productId: P_TALAK, productName: 'Talak 7.9%' }]);
+    expect(body.products.map((p) => p.productId)).toEqual([P_IRON]);
   });
+});
 
-  test('a one-time lawn visit asks for the lawn condition the server requires, and sends it as typed findings', async () => {
+describe('the one-time lawn condition (a server requirement)', () => {
+  test('a one-time lawn visit asks for the lawn condition, after the products, and sends it as typed findings', async () => {
     const request = makeRequest({ ctx: { ...ONE_TIME(), findingsType: 'one_time_lawn_treatment' } });
     await openSheet({ request });
-    await confirmAssessment();
-    await waitFor(() => expect(footerReason()).toBe('Pick the lawn condition.'));
+    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
+    fireEvent.click(await screen.findByText('Iron Plus'));
+    await analyze();
+    await waitFor(() => expect(footerNote()).toBe('Pick the lawn condition.'));
     expect(completeButton().disabled).toBe(true);
+    expect(screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent)).toEqual(['Tell me about the visit', 'Lawn photos', 'Products used', 'Lawn condition', 'Treatment zone map']);
     fireEvent.click(screen.getByRole('button', { name: 'Good' }));
     await waitFor(() => expect(completeButton().disabled).toBe(false));
     await submit();
@@ -353,8 +666,7 @@ describe('Complete', () => {
 
   test('a recurring visit sends no typed findings', async () => {
     await openSheet();
-    await confirmAssessment();
-    await submit();
+    await analyzeAndComplete();
     expect(completeCalls()[0].body).not.toHaveProperty('structuredFindings');
   });
 
@@ -362,72 +674,34 @@ describe('Complete', () => {
     const field = PROJECT_TYPES.one_time_lawn_treatment.findingsFields.find((f) => f.key === 'lawn_condition');
     expect(LAWN_CONDITION_OPTIONS).toEqual(field.options);
   });
-});
 
-describe('turf height', () => {
-  test('is asked only when the context says so, sent when entered, and held to the server\'s range', async () => {
-    const request = makeRequest({ ctx: context({ turfHeightCapture: true }) });
-    await openSheet({ request });
-    await confirmAssessment();
-    const input = screen.getByPlaceholderText('e.g. 4');
-    fireEvent.change(input, { target: { value: '12' } });
-    await waitFor(() => expect(footerReason()).toBe('Lawn length must be between 0.5 and 8 inches.'));
-    expect(completeButton().disabled).toBe(true);
-    fireEvent.change(input, { target: { value: '3.5' } });
-    await waitFor(() => expect(completeButton().disabled).toBe(false));
-    await submit();
-    expect(completeCalls()[0].body.manualHeightIn).toBe(3.5);
+  test('typed findings come from the context only: null there means no row, whatever the schedule row says', async () => {
+    await openSheet({ request: makeRequest({ ctx: ONE_TIME() }), props: { service: { ...SERVICE, findingsType: 'one_time_lawn_treatment' } } });
+    expect(screen.queryByRole('heading', { name: 'Lawn condition' })).toBeNull();
   });
 
-  test('with no reading the capture is optional and sends none, and without the flag there is no input or key', async () => {
-    const withFlag = await openSheet({ request: makeRequest({ ctx: context({ turfHeightCapture: true }) }) });
-    await confirmAssessment();
-    await submit();
-    expect(completeCalls()[0].body.manualHeightIn).toBeNull();
-    expect(withFlag.request).toBeTruthy();
+  test('the key absent (an older server) is handed to the parent instead of guessed; a findings type that is not the lawn one too', async () => {
+    const { findingsType: _omit, ...older } = ONE_TIME();
+    const onFullForm = vi.fn();
+    render(<FastCompleteLawnSheet service={SERVICE} request={makeRequest({ ctx: older })} catalog={CATALOG} onClose={() => {}} onFullForm={onFullForm} />);
+    await waitFor(() => expect(onFullForm).toHaveBeenCalledTimes(1));
     cleanup();
-    requests = [];
-    await openSheet();
-    expect(screen.queryByPlaceholderText('e.g. 4')).toBeNull();
-    await confirmAssessment();
-    await submit();
-    expect(completeCalls()[0].body).not.toHaveProperty('manualHeightIn');
-  });
-});
-
-describe('resume', () => {
-  test('a visit that already has a confirmed assessment picks it up and uploads nothing', async () => {
-    lookup = { shotListEnabled: true, assessment: { ...ASSESSED, confirmed_by_tech: true }, visitAssessment: REVIEW };
-    await openSheet({ request: makeRequest({ ctx: context({ assessment: { exists: true, id: 'assessment-1', confirmed: true, unusableReason: null } }) }) });
-    await screen.findByText('Assessment confirmed');
-    await waitFor(() => expect(completeButton().disabled).toBe(false));
-    await submit();
-    expect(completeCalls()[0].body.lawnAssessmentId).toBe('assessment-1');
-    expect(requests.some((r) => r.path.endsWith('/lawn-assessment/assess'))).toBe(false);
-  });
-
-  test('a confirmed assessment the report would reject (another property) does not count until redone', async () => {
-    lookup = { shotListEnabled: true, assessment: { ...ASSESSED, confirmed_by_tech: true }, visitAssessment: REVIEW };
-    await openSheet({ request: makeRequest({ ctx: context({ assessment: { exists: true, id: 'assessment-1', confirmed: false, unusableReason: 'property_scope' } }) }) });
-    await screen.findByText('Assessment confirmed');
-    await waitFor(() => expect(footerReason()).toBe('This lawn check was made for a different property than this visit. Retake the photos, then analyze and confirm again.'));
-    expect(completeButton().disabled).toBe(true);
+    const second = vi.fn();
+    render(<FastCompleteLawnSheet service={SERVICE} request={makeRequest({ ctx: context({ findingsType: 'tree_shrub' }) })} catalog={CATALOG} onClose={() => {}} onFullForm={second} />);
+    await waitFor(() => expect(second).toHaveBeenCalledTimes(1));
   });
 });
 
 describe('the submit body', () => {
-  test('echoes the context: the whole service object, the visit type, the assessment id, a fresh key, the full form\'s text defaults', async () => {
-    await openSheet();
-    await confirmAssessment();
+  test('echoes the context and sends no mowing height or watering token', async () => {
+    await openSheet({ request: makeRequest({ ctx: context({ turfHeightCapture: true }) }) });
     fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: 'Synthetic note' } });
     fireEvent.change(within(editorFor('Iron Plus')).getByLabelText('Iron Plus'), { target: { value: '2' } });
-    await submit();
+    await analyzeAndComplete();
     const { body } = completeCalls()[0];
     expect(body.expectedVisit).toEqual(VISIT);
     // Every key, nulls included.
     expect(Object.keys(body.expectedVisit).sort()).toEqual(Object.keys(VISIT).sort());
-    expect(body.expectedVisit.technicianId).toBeNull();
-    expect(body.expectedVisit.catalogServiceId).toBeNull();
     expect(body.lawnFast).toEqual({ visitType: 'recurring' });
     expect(body.lawnAssessmentId).toBe('assessment-1');
     expect(typeof body.idempotencyKey).toBe('string');
@@ -436,6 +710,9 @@ describe('the submit body', () => {
       visitOutcome: 'completed', technicianNotes: 'Synthetic note', techTips: null,
       sendCompletionSms: true, requestReview: true, includePayLink: true, reviewTiming: 'auto',
     });
+    expect(body).not.toHaveProperty('manualHeightIn');
+    expect(body).not.toHaveProperty('blogPostId');
+    expect(JSON.stringify(body)).not.toMatch(/watering/i);
     expect(body.products).toEqual([
       { productId: P_TALAK, applicationMethod: 'broadcast_spray', totalAmount: 6.4, amountUnit: 'fl_oz', rate: 1.07, rateUnit: 'fl_oz', applicationArea: 'Front yard, Back yard, Side yards', areaValue: 6000, areaUnit: 'sqft', targets: [] },
       { productId: P_IRON, applicationMethod: 'spot_treatment', totalAmount: 2, amountUnit: 'fl_oz', applicationArea: 'Front yard, Back yard, Side yards', targets: [] },
@@ -443,33 +720,203 @@ describe('the submit body', () => {
     expect(body).not.toHaveProperty('lawnProtocolCompletion');
   });
 
+  test('the note typed before Analyze rides along to the photo read', async () => {
+    await openSheet();
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: 'Chinch bugs by the curb' } });
+    await analyze();
+    expect(requests.find((r) => r.path.endsWith('/lawn-assessment/assess')).body.technicianNotes).toBe('Chinch bugs by the curb');
+  });
+
   test('a successful save shows the saved view and hands the response up', async () => {
     const { onCompleted } = await openSheet();
-    await confirmAssessment();
-    await submit();
+    await analyzeAndComplete();
     await screen.findByText('Next stop');
     fireEvent.click(screen.getByRole('button', { name: 'Next stop' }));
     expect(onCompleted).toHaveBeenCalledWith({ success: true, invoiceId: null });
   });
 });
 
+describe('application rate on the product rows', () => {
+  const planned = (extra = {}, method = 'broadcast_spray') => plannedOne(method, { treatedSqft: 6000, areaUnit: 'sqft', ratePer1000: 1.07, rateUnit: 'fl_oz', ...extra });
+  const sentRow = () => completeCalls()[0].body.products[0];
+  const noRateKeys = () => { expect(sentRow()).not.toHaveProperty('rate'); expect(sentRow()).not.toHaveProperty('rateUnit'); };
+  const run = async (ctx, before) => {
+    await openSheet({ request: makeRequest({ ctx }) });
+    if (before) before();
+    await analyzeAndComplete();
+  };
+
+  test('an untouched planned row sends the plan rate and unit exactly as given', async () => {
+    await run(planned());
+    expect(sentRow()).toMatchObject({ rate: 1.07, rateUnit: 'fl_oz', totalAmount: 2, amountUnit: 'fl_oz', areaValue: 6000 });
+  });
+
+  test.each([
+    ['the amount', () => fireEvent.change(within(editorFor('Talak 7.9%')).getByLabelText('Talak 7.9%'), { target: { value: '3' } })],
+    ['the amount unit', () => fireEvent.change(within(editorFor('Talak 7.9%')).getByLabelText('Unit for Talak 7.9%'), { target: { value: 'gal' } })],
+  ])('a change to %s sends no rate keys', async (_label, change) => {
+    await run(planned(), change);
+    noRateKeys();
+  });
+
+  test.each(['ml', 'percent_solution'])('a plan rate in %s (a unit /complete does not accept) is not sent', async (rateUnit) => {
+    await run(planned({ rateUnit }));
+    noRateKeys();
+  });
+
+  test('a plan with no rate sends none', async () => {
+    await run(planned({ ratePer1000: null, rateUnit: null }));
+    noRateKeys();
+  });
+
+  test('an added product sends no rate keys, even with a catalog default rate', async () => {
+    const catalog = [{ ...CATALOG[0], default_unit: 'fl_oz', default_rate_per_1000: 2, max_label_rate_per_1000: 1 }, CATALOG[1], CATALOG[2]];
+    await openSheet({ request: makeRequest({ ctx: plannedOne('spot_treatment') }), props: { catalog } });
+    fireEvent.click(within(editorFor('Talak 7.9%')).getByRole('button', { name: 'Remove' }));
+    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
+    fireEvent.click(await screen.findByText('Talak 7.9%'));
+    fireEvent.change(within(editorFor('Talak 7.9%')).getByLabelText('Talak 7.9%'), { target: { value: '2' } });
+    await analyzeAndComplete();
+    noRateKeys();
+  });
+});
+
+// ── tips, the blog post and the treatment zone map (owner 2026-10-04) ───────
+const lib = (labels) => ({ available: true, groups: [{ id: 'lawn', tips: labels.map((label) => ({ id: `tip-${label.toLowerCase().replace(/\W+/g, '-')}`, label, copy: `Copy ${label}.`, keywords: [label.toLowerCase()] })) }] });
+const tipRead = (path) => path.endsWith('/tech-tips');
+const POST = { id: '99999999-9999-4999-8999-999999999999', title: 'Why St. Augustine Thins in Summer', url: 'https://www.wavespestcontrol.com/lawn-care/st-augustine-summer-thinning/' };
+
+describe('tips from your tech', () => {
+  test('sits after the products, finds a tip by keyword, and sends the pick', async () => {
+    tips = lib(['Mow high', 'Dollarweed', 'Sedge']);
+    await openSheet();
+    expect(screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent)).toEqual(['Tell me about the visit', 'Lawn photos', 'Products used', 'Tip for the customer', 'Treatment zone map']);
+    fireEvent.change(await screen.findByLabelText('Search tips'), { target: { value: 'sedge' } });
+    expect(screen.queryByRole('button', { name: /Mow high/ })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /Sedge/ }));
+    await analyzeAndComplete();
+    expect(completeCalls()[0].body.techTips).toEqual({ ids: ['tip-sedge'], custom: null });
+  });
+
+  test('no tip library, no section, and techTips is null', async () => {
+    await openSheet();
+    expect(screen.queryByLabelText('Search tips')).toBeNull();
+    await analyzeAndComplete();
+    expect(completeCalls()[0].body.techTips).toBeNull();
+  });
+
+  test('reads the list again once the assessment settles, and keeps the tip already picked', async () => {
+    tips = lib(['Mow high', 'Dollarweed']);
+    await openSheet();
+    fireEvent.click(await screen.findByRole('button', { name: /Mow high/ }));
+    expect(requests.filter((r) => tipRead(r.path))).toHaveLength(1);
+    tips = lib(['Dollarweed', 'Mow high']);
+    await analyze();
+    // the open, the analysis settling, the confirm settling
+    await waitFor(() => expect(requests.filter((r) => tipRead(r.path))).toHaveLength(3));
+    await waitFor(() => {
+      const names = screen.getAllByRole('button', { name: /Mow high|Dollarweed/ }).map((b) => b.textContent);
+      expect(names[0]).toMatch(/Dollarweed/);
+    });
+    expect(screen.getByRole('button', { name: /Mow high/ }).getAttribute('aria-pressed')).toBe('true');
+  });
+
+  test('a re-read that answers unavailable clears the tips (the server would drop the pick)', async () => {
+    tips = lib(['Mow high']);
+    await openSheet();
+    await screen.findByRole('button', { name: /Mow high/ });
+    tips = { available: false, groups: [] };
+    await analyze();
+    await waitFor(() => expect(screen.queryByRole('button', { name: /Mow high/ })).toBeNull());
+  });
+});
+
+describe('the blog post for the customer', () => {
+  test('is offered only while the server says it is available (GATE_REPORT_BLOG_POST), after the tips', async () => {
+    await openSheet();
+    expect(screen.queryByRole('heading', { name: 'Blog post for the customer' })).toBeNull();
+    cleanup();
+    tips = lib(['Mow high']);
+    blogAnswer = { available: true, posts: [] };
+    await openSheet();
+    await screen.findByRole('heading', { name: 'Blog post for the customer' });
+    expect(screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent)).toEqual(['Tell me about the visit', 'Lawn photos', 'Products used', 'Tip for the customer', 'Blog post for the customer', 'Treatment zone map']);
+  });
+
+  test('a failed availability read is no section', async () => {
+    blogAnswer = new Error('down');
+    await openSheet();
+    await analyze();
+    expect(screen.queryByRole('heading', { name: 'Blog post for the customer' })).toBeNull();
+  });
+
+  test('searches the Waves blog, and the pick rides /complete as blogPostId', async () => {
+    blogAnswer = (path) => (path.includes('?q=') ? { available: true, posts: [POST] } : { available: true, posts: [] });
+    await openSheet();
+    fireEvent.change(await screen.findByLabelText('Search the Waves blog'), { target: { value: 'augustine' } });
+    fireEvent.click(await screen.findByRole('button', { name: new RegExp(POST.title) }));
+    expect(screen.getByText('1 picked')).toBeTruthy();
+    await analyzeAndComplete();
+    expect(completeCalls()[0].body.blogPostId).toBe(POST.id);
+  });
+
+  test('with no pick, no blogPostId is sent', async () => {
+    blogAnswer = { available: true, posts: [] };
+    await openSheet();
+    await screen.findByRole('heading', { name: 'Blog post for the customer' });
+    await analyzeAndComplete();
+    expect(completeCalls()[0].body).not.toHaveProperty('blogPostId');
+  });
+});
+
+describe('the treatment zone map', () => {
+  test('is one closed, optional row after the rest; it never blocks Complete', async () => {
+    await openSheet();
+    const row = screen.getByRole('region', { name: 'Treatment zone map' });
+    expect(within(row).getByText('Optional')).toBeTruthy();
+    expect(screen.queryByRole('dialog', { name: 'Tracer' })).toBeNull();
+    await analyzeAndComplete();
+    expect(completeCalls()).toHaveLength(1);
+  });
+
+  test('opens the lawn tracer over the sheet for this visit, makes the sheet inert, and marks it saved', async () => {
+    await openSheet();
+    fireEvent.click(screen.getByRole('button', { name: 'Outline the treated lawn' }));
+    const tracer = await screen.findByRole('dialog', { name: 'Tracer' });
+    expect(tracer.getAttribute('data-lawn')).toBe('true');
+    expect(tracer.getAttribute('data-service')).toBe('svc-lawn');
+    expect(document.querySelector('section[role="dialog"][aria-hidden="true"]')).not.toBeNull();
+    fireEvent.click(within(tracer).getByRole('button', { name: 'Save trace' }));
+    fireEvent.click(within(tracer).getByRole('button', { name: 'Close tracer' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Tracer' })).toBeNull());
+    const row = screen.getByRole('region', { name: 'Treatment zone map' });
+    expect(within(row).getByText('Saved')).toBeTruthy();
+    expect(within(row).getByRole('button', { name: 'Change the treated lawn outline' })).toBeTruthy();
+  });
+
+  test('a visit the schedule says cannot be traced shows no row', async () => {
+    await openSheet({ props: { service: { ...SERVICE, traceEligible: false } } });
+    expect(screen.queryByRole('region', { name: 'Treatment zone map' })).toBeNull();
+  });
+});
+
 describe('what the server refuses', () => {
   // [status, code, words from the server, extra body, the plain words shown]
   const TERMINAL = [
-    [409, 'lawn_fast_disabled', 'Lawn Fast Complete is not available. Use the full completion form.', {}, 'The quick lawn sheet is off right now. Open the full form.'],
-    [409, 'lawn_fast_not_eligible', 'This visit cannot be completed on the quick sheet. Use the full completion form.', { reason: 'grouped_visit' }, 'This visit needs the full form.'],
+    [409, 'lawn_fast_disabled', 'Lawn Fast Complete is not available. Use the full completion form.', {}, 'The quick lawn sheet is off right now. Close it and tell the office.'],
+    [409, 'lawn_fast_not_eligible', 'This visit cannot be completed on the quick sheet. Use the full completion form.', { reason: 'grouped_visit' }, 'This visit cannot be completed on this sheet. Close it and tell the office.'],
     [409, 'visit_identity_changed', 'This visit changed since it was opened.', { reason: 'visit_type_changed' }, 'This visit changed since you opened it. Close it and open it again from the schedule.'],
   ];
 
-  test.each(TERMINAL)('%i %s is terminal: the words show, Complete stays off, the full form is offered', async (status, code, serverText, extra, shown) => {
+  test.each(TERMINAL)('%i %s is terminal: the words show, Complete stays off, and no full form is offered', async (status, code, serverText, extra, shown) => {
     completeErrors.push(refusal(status, code, serverText, extra));
-    const { onFullForm } = await openSheet({ request: makeRequest({ ctx: ONE_TIME() }) });
-    await confirmAssessment();
-    await submit();
+    await openSheet({ request: makeRequest({ ctx: ONE_TIME() }) });
+    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
+    fireEvent.click(await screen.findByText('Iron Plus'));
+    await analyzeAndComplete();
     await screen.findByText(shown);
     expect(completeButton().disabled).toBe(true);
-    fireEvent.click(screen.getByRole('button', { name: 'Open the full form' }));
-    expect(onFullForm).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('button', { name: /full form/i })).toBeNull();
     // Nothing is sent again.
     expect(completeCalls()).toHaveLength(1);
   });
@@ -483,9 +930,8 @@ describe('what the server refuses', () => {
 
   test.each(CORRECTABLE)('%i %s is correctable: the words show and the next try goes under a new key', async (status, code, serverText, extra, shown) => {
     completeErrors.push(refusal(status, code, serverText, extra));
-    await openSheet({ request: makeRequest({ ctx: ONE_TIME() }) });
-    await confirmAssessment();
-    await submit();
+    await openSheet();
+    await analyzeAndComplete();
     await screen.findByText(shown);
     await waitFor(() => expect(completeButton().disabled).toBe(false));
     fireEvent.click(completeButton());
@@ -500,9 +946,8 @@ describe('what the server refuses', () => {
 
   test.each(RETRY)('%i %s is a retry: the same body goes again under the same key', async (status, code, serverText) => {
     completeErrors.push(refusal(status, code, serverText));
-    await openSheet({ request: makeRequest({ ctx: ONE_TIME() }) });
-    await confirmAssessment();
-    await submit();
+    await openSheet();
+    await analyzeAndComplete();
     await screen.findByText(/We could not check this visit type\. We couldn't confirm it saved\. Tap Retry/);
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     await waitFor(() => expect(completeCalls()).toHaveLength(2));
@@ -512,155 +957,6 @@ describe('what the server refuses', () => {
   test('a code the sheet has no words for keeps the server\'s own message', () => {
     expect(plainRefusalMessage({ code: 'something_else', message: 'x' })).toBeNull();
     expect(plainRefusalMessage({ code: 'lawn_fast_assessment_required', reason: 'property_scope' })).toMatch(/different property/);
-  });
-});
-
-describe('watering preview', () => {
-  test('asks once after the product set settles, shows the sentence, and labels the times "if completed now"', async () => {
-    previewAnswer = {
-      products: [], state: 'hold', lines: ['Do not water until Thu 3 PM.'], sentence: 'Do not water until Thu 3 PM.',
-      mowHold: { days: 2, untilDate: '2026-10-06', untilLabel: 'Tue', line: 'Hold off mowing until Tuesday.' },
-      asOf: '2026-10-04T14:00:00.000Z', provisional: ['completionTime', 'assessment'], omitted: [],
-    };
-    const { request } = await openSheet();
-    // Two quick changes inside the pause: one read.
-    fireEvent.click(tile('Iron Plus'));
-    fireEvent.click(tile('Iron Plus'));
-    await screen.findByText('Do not water until Thu 3 PM.');
-    expect(screen.getByText('Hold off mowing until Tuesday.')).toBeTruthy();
-    expect(screen.getByText('Times are if completed now.')).toBeTruthy();
-    await new Promise((resolve) => setTimeout(resolve, 700));
-    const previews = request.mock.calls.filter(([path]) => path.endsWith('/lawn-fast/watering-preview'));
-    expect(previews).toHaveLength(1);
-    expect(previews[0][1].method).toBe('POST');
-    expect(JSON.parse(previews[0][1].body).productIds.sort()).toEqual([P_TALAK, P_IRON].sort());
-  });
-
-  test('asks again, with the new set, when a product is turned off', async () => {
-    previewAnswer = (body) => ({ products: [], state: 'hold', lines: [`Set of ${body.productIds.length}`], sentence: `Set of ${body.productIds.length}`, mowHold: null, provisional: [], omitted: [] });
-    await openSheet();
-    await screen.findByText('Set of 2');
-    fireEvent.click(tile('Iron Plus'));
-    await screen.findByText('Set of 1');
-  });
-
-  test('shows no times label when none are provisional', async () => {
-    previewAnswer = { products: [], state: 'hold', lines: ['Water in by Fri.'], sentence: 'Water in by Fri.', mowHold: null, provisional: [], omitted: [] };
-    await openSheet();
-    await screen.findByText('Water in by Fri.');
-    expect(screen.queryByText('Times are if completed now.')).toBeNull();
-  });
-
-  test('shows nothing but a neutral note when the server omitted part of it, even if it sent a sentence', async () => {
-    previewAnswer = { products: [], state: 'hold', lines: ['Guess'], sentence: 'Guess', mowHold: null, provisional: [], omitted: ['week_plan'] };
-    await openSheet();
-    await screen.findByText('The watering instruction is not shown here. The customer report has its own.');
-    expect(screen.queryByText('Guess')).toBeNull();
-  });
-
-  test('a failed read gets the same neutral note and never blocks Complete', async () => {
-    previewAnswer = new Error('boom');
-    await openSheet({ request: makeRequest({ ctx: ONE_TIME() }) });
-    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
-    fireEvent.click(await screen.findByText('Iron Plus'));
-    await screen.findByText('The watering instruction is not shown here. The customer report has its own.');
-    await confirmAssessment();
-    fireEvent.change(within(editorFor('Iron Plus')).getByLabelText('Area treated (sq ft)'), { target: { value: '100' } });
-    await waitFor(() => expect(completeButton().disabled).toBe(false));
-  });
-
-  test('asks nothing, and shows no panel, with no products on', async () => {
-    const { request } = await openSheet({ request: makeRequest({ ctx: ONE_TIME() }) });
-    await new Promise((resolve) => setTimeout(resolve, 600));
-    expect(request.mock.calls.some(([path]) => path.endsWith('/lawn-fast/watering-preview'))).toBe(false);
-    expect(screen.queryByRole('heading', { name: 'Watering after this visit' })).toBeNull();
-  });
-
-  test('shows no panel when the server has no instruction for these products', async () => {
-    await openSheet();
-    await new Promise((resolve) => setTimeout(resolve, 700));
-    await act(async () => {});
-    expect(screen.queryByRole('heading', { name: 'Watering after this visit' })).toBeNull();
-  });
-});
-
-describe('text size', () => {
-  test('no text on the sheet, including the shared photo step, is set under 14px', async () => {
-    await openSheet({ request: makeRequest({ ctx: context({ turfHeightCapture: true }) }) });
-    await confirmAssessment();
-    const sized = Array.from(document.querySelectorAll('[style]')).filter((el) => el.style.fontSize);
-    expect(sized.length).toBeGreaterThan(10);
-    for (const el of sized) expect(parseFloat(el.style.fontSize)).toBeGreaterThanOrEqual(14);
-  });
-});
-
-// ── Codex round 1 on #5824 ──────────────────────────────────────────────────
-const plannedOne = (applicationMethod, extra = {}) => context({
-  plannedProducts: { source: 'plan', items: [{ productId: P_TALAK, name: 'Talak 7.9%', applicationMethod, amount: 2, amountUnit: 'fl_oz', ...extra }] },
-});
-const areaInput = (label) => within(editorFor('Talak 7.9%')).queryByLabelText(label);
-
-describe('what /complete requires per application method', () => {
-  // [method as the plan or catalog spells it, the unit the server wants or null, the box label]
-  const TABLE = [
-    ['perimeter_spray', 'linear_ft', 'Linear feet treated'],
-    ['Perimeter Band', 'linear_ft', 'Linear feet treated'],
-    ['broadcast_spray', 'sqft', 'Area treated (sq ft)'],
-    ['Broadcast', 'sqft', 'Area treated (sq ft)'],
-    ['granular_broadcast', 'sqft', 'Area treated (sq ft)'],
-    ['spot_treatment', null],
-    ['soil_drench', null],
-    ['foliar_spray', null],
-    ['bait_placement', null],
-    ['station_check', null],
-    ['fog_ulv', null],
-    ['trunk_injection', null],
-    ['pin_stream', null],
-  ];
-
-  test.each(TABLE)('%s needs %s', async (method, unit, label) => {
-    await openSheet({ request: makeRequest({ ctx: plannedOne(method) }) });
-    await confirmAssessment();
-    if (!unit) {
-      expect(areaInput(/treated/)).toBeNull();
-      await waitFor(() => expect(completeButton().disabled).toBe(false));
-      await submit();
-      expect(completeCalls()[0].body.products[0]).not.toHaveProperty('areaValue');
-      expect(completeCalls()[0].body.products[0]).not.toHaveProperty('areaUnit');
-      return;
-    }
-    const noun = unit === 'linear_ft' ? 'linear feet' : 'square feet';
-    await waitFor(() => expect(footerReason()).toBe(`Enter the ${noun} treated for Talak 7.9%.`));
-    expect(completeButton().disabled).toBe(true);
-    fireEvent.change(areaInput(label), { target: { value: '120' } });
-    await waitFor(() => expect(completeButton().disabled).toBe(false));
-    await submit();
-    expect(completeCalls()[0].body.products[0]).toMatchObject({ areaValue: 120, areaUnit: unit });
-  });
-
-  test('a perimeter row is never seeded with the plan\'s square feet', async () => {
-    await openSheet({ request: makeRequest({ ctx: plannedOne('perimeter_spray', { treatedSqft: 6000, areaUnit: 'sqft' }) }) });
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(areaInput('Linear feet treated').value).toBe('');
-  });
-
-  test('switching a row from a perimeter spray to a spray drops the linear feet it held', async () => {
-    await openSheet({ request: makeRequest({ ctx: plannedOne('perimeter_spray', { treatedSqft: 6000, areaUnit: 'sqft' }) }) });
-    fireEvent.change(areaInput('Linear feet treated'), { target: { value: '90' } });
-    fireEvent.click(within(editorFor('Talak 7.9%')).getByRole('button', { name: 'Broadcast spray' }));
-    // Square feet now: the plan's, never the 90 linear feet.
-    await waitFor(() => expect(areaInput('Area treated (sq ft)').value).toBe('6000'));
-  });
-
-  test('the plan\'s treatedSqft seeds the box and no treatment-plan read is made', async () => {
-    const request = makeRequest({ ctx: plannedOne('broadcast_spray', { treatedSqft: 4100, areaUnit: 'sqft' }) });
-    await openSheet({ request });
-    expect(areaInput('Area treated (sq ft)').value).toBe('4100');
-    expect(request.mock.calls.some(([path]) => path.includes('/treatment-plans/'))).toBe(false);
-  });
-
-  test('the server\'s linear_ft_required gets plain words', () => {
-    expect(plainRefusalMessage({ code: 'linear_ft_required' })).toBe('Enter the linear feet treated for each perimeter product.');
   });
 });
 
@@ -676,8 +972,7 @@ describe('a visit type that could not be read', () => {
     await screen.findByText('Couldn’t load this visit. Try again.');
     expect(screen.queryByRole('heading', { name: 'Lawn photos' })).toBeNull();
     expect(onFullForm).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('button', { name: 'Open the full form' }));
-    expect(onFullForm).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('button', { name: /full form/i })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     await waitFor(() => expect(request.mock.calls.filter(([path]) => path.endsWith('/lawn-fast/context'))).toHaveLength(2));
   });
@@ -685,199 +980,6 @@ describe('a visit type that could not be read', () => {
   test.each(['photo_status', 'turf_height_flag', 'planned_products', 'assessment'])('an advisory %s failure still opens the sheet', async (failure) => {
     await openSheet({ request: makeRequest({ ctx: context({ readFailures: [failure] }) }) });
     expect(screen.getByRole('heading', { name: 'Lawn photos' })).toBeTruthy();
-  });
-});
-
-describe('zero stock', () => {
-  const EMPTY_CATALOG = [{ ...CATALOG[0], inventory_on_hand: '0.0000', inventory_unit: 'fl_oz' }, CATALOG[1], CATALOG[2]];
-  const open = (props = {}, ctx = plannedOne('spot_treatment')) => openSheet({ request: makeRequest({ ctx }), props: { catalog: EMPTY_CATALOG, ...props } });
-
-  test('holds Complete on a non-member visit, says so, and a stock refresh releases it', async () => {
-    await open();
-    await confirmAssessment();
-    await waitFor(() => expect(footerReason()).toBe('Talak 7.9% shows 0 in stock. Update inventory, then tap Check stock.'));
-    expect(completeButton().disabled).toBe(true);
-    catalogAnswer = { products: [{ ...EMPTY_CATALOG[0], inventory_on_hand: '40.0000' }] };
-    fireEvent.click(screen.getByRole('button', { name: 'Check stock' }));
-    await waitFor(() => expect(completeButton().disabled).toBe(false));
-    expect(footerReason()).toBe('');
-  });
-
-  test('does not hold a product with no amount (the server deducts nothing)', async () => {
-    await open({}, plannedOne('spot_treatment', { amount: null }));
-    await confirmAssessment();
-    await waitFor(() => expect(completeButton().disabled).toBe(false));
-  });
-
-  test('does not hold a real WaveGuard tier lawn visit (the server lets stock go negative)', async () => {
-    await open({ service: { ...SERVICE, waveguardTier: 'Gold' } });
-    await confirmAssessment();
-    await waitFor(() => expect(completeButton().disabled).toBe(false));
-  });
-
-  test('holds a tier the server does not count (Commercial, or none)', async () => {
-    await open({ service: { ...SERVICE, waveguardTier: 'Commercial' } });
-    await confirmAssessment();
-    await waitFor(() => expect(footerReason()).toMatch(/shows 0 in stock/));
-  });
-
-  test('the context\'s stockAdvisory wins over the schedule row, both ways', async () => {
-    await open({ service: { ...SERVICE, waveguardTier: 'Gold' } }, { ...plannedOne('spot_treatment'), stockAdvisory: false });
-    await confirmAssessment();
-    await waitFor(() => expect(footerReason()).toMatch(/shows 0 in stock/));
-    cleanup();
-    await open({}, { ...plannedOne('spot_treatment'), stockAdvisory: true });
-    await confirmAssessment();
-    await waitFor(() => expect(completeButton().disabled).toBe(false));
-  });
-
-  test('waveguard_inventory_lockout from the server reads as a correctable stock message with Check stock offered', async () => {
-    completeErrors.push(refusal(400, 'waveguard_inventory_lockout', 'Talak requires 2 fl_oz, but only 1 fl_oz is on hand.'));
-    await openSheet({ request: makeRequest({ ctx: plannedOne('spot_treatment') }) });
-    await confirmAssessment();
-    await submit();
-    await screen.findByText('A product is out of stock. Update inventory, tap Check stock, then complete again.');
-    expect(screen.getByRole('button', { name: 'Check stock' })).toBeTruthy();
-    await waitFor(() => expect(completeButton().disabled).toBe(false));
-    fireEvent.click(completeButton());
-    await waitFor(() => expect(completeCalls()).toHaveLength(2));
-    expect(completeCalls()[1].body.idempotencyKey).not.toBe(completeCalls()[0].body.idempotencyKey);
-  });
-});
-
-describe('a confirmed assessment when the detail lookup fails', () => {
-  const confirmedContext = (assessment = {}) => context({ assessment: { exists: true, id: 'assessment-ctx', confirmed: true, unusableReason: null, ...assessment } });
-
-  test('the context\'s confirmed id stands, so Complete stays on and sends it', async () => {
-    lookup = new Error('lookup down');
-    await openSheet({ request: makeRequest({ ctx: confirmedContext() }) });
-    await waitFor(() => expect(completeButton().disabled).toBe(false));
-    await submit();
-    expect(completeCalls()[0].body.lawnAssessmentId).toBe('assessment-ctx');
-  });
-
-  test('a retake that starts (a new photo) ends it', async () => {
-    lookup = new Error('lookup down');
-    await openSheet({ request: makeRequest({ ctx: confirmedContext() }) });
-    await waitFor(() => expect(completeButton().disabled).toBe(false));
-    const input = screen.getByLabelText('Add turf photos');
-    await waitFor(() => expect(screen.queryByTestId('lawn-photo-mode-pending')).toBeNull());
-    fireEvent.change(input, { target: { files: [new File(['a'], 'a.jpg', { type: 'image/jpeg' })] } });
-    await waitFor(() => expect(completeButton().disabled).toBe(true));
-    // The new confirmed id then replaces it.
-    await screen.findByLabelText('Slot for photo 1');
-    fireEvent.click(screen.getByRole('button', { name: 'Analyze lawn' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Confirm assessment' }));
-    await waitFor(() => expect(completeButton().disabled).toBe(false));
-    await submit();
-    expect(completeCalls()[0].body.lawnAssessmentId).toBe('assessment-1');
-  });
-
-  test.each([
-    ['unusable (another property)', { confirmed: true, unusableReason: 'property_scope' }],
-    ['unusable (check failed)', { confirmed: true, unusableReason: 'property_check_failed' }],
-    ['not confirmed', { confirmed: false }],
-  ])('is never used when the context says %s', async (_label, assessment) => {
-    lookup = new Error('lookup down');
-    await openSheet({ request: makeRequest({ ctx: confirmedContext(assessment) }) });
-    await waitFor(() => expect(footerReason()).toMatch(/confirm the assessment/));
-    expect(completeButton().disabled).toBe(true);
-  });
-
-  test('a lookup that succeeds with no assessment does not fall back to the context\'s id', async () => {
-    lookup = { shotListEnabled: true, assessment: null };
-    await openSheet({ request: makeRequest({ ctx: confirmedContext() }) });
-    await waitFor(() => expect(footerReason()).toMatch(/confirm the assessment/));
-  });
-
-  test('the property-check wording differs from the property-scope wording', async () => {
-    lookup = { shotListEnabled: true, assessment: { ...ASSESSED, confirmed_by_tech: true }, visitAssessment: REVIEW };
-    await openSheet({ request: makeRequest({ ctx: confirmedContext({ id: 'assessment-1', unusableReason: 'property_check_failed' }) }) });
-    await waitFor(() => expect(footerReason()).toBe('We could not check this lawn assessment against this visit. Try again, or retake the photos and confirm again.'));
-  });
-});
-
-describe('the saved-photo advisory', () => {
-  const WARNING = 'Aim for at least 4 photos: front, back or side, canopy close-up, and blade and crown. Still needed: Back overview or Side overview. This is a guide only, and Analyze lawn works at any time.';
-  const withWarning = (assessment) => context({ assessment, photoStatus: { soft: true, basis: 'shot_list', count: 1, minPhotos: 4, meetsFloor: false, missing: ['Back overview or Side overview'], warning: WARNING } });
-
-  test('shows once, non-blocking, beside a saved confirmed assessment', async () => {
-    lookup = { shotListEnabled: true, assessment: { ...ASSESSED, confirmed_by_tech: true }, visitAssessment: REVIEW };
-    await openSheet({ request: makeRequest({ ctx: withWarning({ exists: true, id: 'assessment-1', confirmed: true, unusableReason: null }) }) });
-    await screen.findByText('Assessment confirmed');
-    expect(await screen.findAllByText(WARNING)).toHaveLength(1);
-    expect(screen.queryByTestId('lawn-shot-list-hint')).toBeNull();
-    await waitFor(() => expect(completeButton().disabled).toBe(false));
-  });
-
-  test('is not shown while the photo step\'s own hint is up, so it never reads twice', async () => {
-    lookup = { shotListEnabled: true, assessment: null };
-    await openSheet({ request: makeRequest({ ctx: withWarning({ exists: false, id: null, confirmed: false }) }) });
-    const input = await screen.findByLabelText('Add turf photos');
-    await waitFor(() => expect(screen.queryByTestId('lawn-photo-mode-pending')).toBeNull());
-    fireEvent.change(input, { target: { files: [new File(['a'], 'a.jpg', { type: 'image/jpeg' })] } });
-    await screen.findByLabelText('Slot for photo 1');
-    expect(screen.getAllByText(/Aim for at least 4 photos/)).toHaveLength(1);
-    expect(screen.getByTestId('lawn-shot-list-hint')).toBeTruthy();
-  });
-
-  test('goes once the technician starts a retake', async () => {
-    lookup = { shotListEnabled: true, assessment: { ...ASSESSED, confirmed_by_tech: true }, visitAssessment: REVIEW };
-    await openSheet({ request: makeRequest({ ctx: withWarning({ exists: true, id: 'assessment-1', confirmed: true, unusableReason: null }) }) });
-    await screen.findAllByText(WARNING);
-    fireEvent.click(screen.getByRole('button', { name: 'Retake' }));
-    await waitFor(() => expect(screen.queryByText(WARNING)).toBeNull());
-  });
-});
-
-// ── Codex round 2 on #5824 ──────────────────────────────────────────────────
-describe('the original method stays on offer', () => {
-  test('a perimeter row: tap Broadcast, the perimeter chip is still there, tap it, linear feet are required again', async () => {
-    await openSheet({ request: makeRequest({ ctx: plannedOne('perimeter_spray') }) });
-    const how = () => within(editorFor('Talak 7.9%'));
-    const names = () => how().getAllByRole('button').map((b) => b.textContent).filter((t) => /spray|Granular|Spot/.test(t));
-    expect(names()).toEqual(['Broadcast spray', 'Granular', 'Spot treatment', 'Perimeter spray']);
-    fireEvent.click(how().getByRole('button', { name: 'Broadcast spray' }));
-    expect(names()).toEqual(['Broadcast spray', 'Granular', 'Spot treatment', 'Perimeter spray']);
-    expect(how().getByRole('button', { name: 'Perimeter spray' }).getAttribute('aria-pressed')).toBe('false');
-    fireEvent.click(how().getByRole('button', { name: 'Perimeter spray' }));
-    expect(how().getByRole('button', { name: 'Perimeter spray' }).getAttribute('aria-pressed')).toBe('true');
-    expect(areaInput('Linear feet treated')).toBeTruthy();
-    expect(areaInput('Linear feet treated').value).toBe('');
-  });
-});
-
-describe('typed findings come from the context only', () => {
-  test('the schedule row says recurring but the context says one-time: the condition is required and sent', async () => {
-    const request = makeRequest({ ctx: { ...ONE_TIME(), findingsType: 'one_time_lawn_treatment' } });
-    await openSheet({ request, props: { service: { ...SERVICE, findingsType: null } } });
-    await confirmAssessment();
-    await waitFor(() => expect(footerReason()).toBe('Pick the lawn condition.'));
-    fireEvent.click(screen.getByRole('button', { name: 'Fair' }));
-    await submit();
-    expect(completeCalls()[0].body.structuredFindings).toEqual({ type: 'one_time_lawn_treatment', values: { lawn_condition: 'Fair' } });
-  });
-
-  test('context findingsType null: no condition row and no typed findings, whatever the schedule row says', async () => {
-    await openSheet({ request: makeRequest({ ctx: ONE_TIME() }), props: { service: { ...SERVICE, findingsType: 'one_time_lawn_treatment' } } });
-    expect(screen.queryByRole('heading', { name: 'Lawn condition' })).toBeNull();
-    await confirmAssessment();
-    await submit();
-    expect(completeCalls()[0].body).not.toHaveProperty('structuredFindings');
-  });
-
-  test('the key absent (an older server) hands off to the full form instead of guessing; null is not absent', async () => {
-    const { findingsType: _omit, ...older } = ONE_TIME();
-    const onFullForm = vi.fn();
-    render(<FastCompleteLawnSheet service={SERVICE} request={makeRequest({ ctx: older })} catalog={CATALOG} onClose={() => {}} onFullForm={onFullForm} />);
-    await waitFor(() => expect(onFullForm).toHaveBeenCalledTimes(1));
-    expect(screen.queryByRole('heading', { name: 'Lawn photos' })).toBeNull();
-  });
-
-  test('a findings type that is not the lawn one hands off too', async () => {
-    const onFullForm = vi.fn();
-    render(<FastCompleteLawnSheet service={SERVICE} request={makeRequest({ ctx: context({ findingsType: 'tree_shrub' }) })} catalog={CATALOG} onClose={() => {}} onFullForm={onFullForm} />);
-    await waitFor(() => expect(onFullForm).toHaveBeenCalledTimes(1));
   });
 
   test.each([
@@ -894,218 +996,69 @@ describe('typed findings come from the context only', () => {
   });
 });
 
-describe('a product the plan lists twice', () => {
-  const twice = () => context({
-    plannedProducts: {
-      source: 'plan',
-      items: [
-        { productId: P_TALAK, name: 'Talak 7.9%', applicationMethod: 'spot_treatment', amount: 3, amountUnit: 'fl_oz' },
-        { productId: P_TALAK.toUpperCase(), name: 'Talak 7.9%', applicationMethod: 'spot_treatment', amount: 5, amountUnit: 'fl_oz' },
-        { productId: P_IRON, name: 'Iron Plus', applicationMethod: 'spot_treatment', amount: 1, amountUnit: 'fl_oz' },
-      ],
-    },
-  });
+describe('zero stock', () => {
+  const EMPTY_CATALOG = [{ ...CATALOG[0], inventory_on_hand: '0.0000', inventory_unit: 'fl_oz' }, CATALOG[1], CATALOG[2]];
+  const open = (props = {}, ctx = plannedOne('spot_treatment')) => openSheet({ request: makeRequest({ ctx }), props: { catalog: EMPTY_CATALOG, ...props } });
 
-  test('is one tile; on, it is one product row with the first amount (as the full form keeps the first)', async () => {
-    await openSheet({ request: makeRequest({ ctx: twice() }) });
-    expect(screen.getAllByRole('button', { name: /^Talak/ })).toHaveLength(1);
-    expect(within(editorFor('Talak 7.9%')).getByLabelText('Talak 7.9%').value).toBe('3');
-    await confirmAssessment();
-    await submit();
-    const { body } = completeCalls()[0];
-    expect(body.products.map((p) => p.productId)).toEqual([P_TALAK, P_IRON]);
-    expect(body).not.toHaveProperty('lawnProtocolCompletion');
-  });
-
-  test('off, it is one skipped entry, so /complete\'s unique-list rule holds', async () => {
-    await openSheet({ request: makeRequest({ ctx: twice() }) });
-    fireEvent.click(tile('Talak'));
-    await confirmAssessment();
-    await submit();
-    const { body } = completeCalls()[0];
-    expect(body.lawnProtocolCompletion.skippedProducts).toEqual([{ productId: P_TALAK, productName: 'Talak 7.9%' }]);
-    expect(body.products.map((p) => p.productId)).toEqual([P_IRON]);
-  });
-
-  test('every array in the body is unique where the server needs it', async () => {
-    tips = { available: true, groups: [{ tips: [{ id: 'tip-a', label: 'Tip A', copy: 'Copy A' }] }] };
-    await openSheet({ request: makeRequest({ ctx: twice() }) });
-    fireEvent.click(tile('Iron Plus'));
-    fireEvent.click(tile('Talak'));
-    fireEvent.click(await screen.findByRole('button', { name: /Tip A/ }));
-    await confirmAssessment();
-    await submit();
-    const { body } = completeCalls()[0];
-    const skipped = body.lawnProtocolCompletion.skippedProducts.map((p) => p.productId);
-    expect(new Set(skipped).size).toBe(skipped.length);
-    expect(skipped.every((id) => id === id.toLowerCase())).toBe(true);
-    expect(body.techTips).toEqual({ ids: ['tip-a'], custom: null });
-    expect(body.products.every((p) => p.targets.length === 0)).toBe(true);
-  });
-});
-
-// ── tips from the lawn library (owner 2026-09-29, scope round 3c) ──────────
-// The sheet offers the same searchable tip picker as the pest sheet. The server
-// ranks the lawn list by the visit's confirmed assessment, so the sheet reads
-// it again once the tech confirms, and a tip already picked stays picked.
-describe('tips from your technician', () => {
-  const tipRead = (path) => path.endsWith('/tech-tips');
-  const lib = (labels) => ({ available: true, groups: [{ id: 'lawn', tips: labels.map((label) => ({ id: `tip-${label.toLowerCase().replace(/\W+/g, '-')}`, label, copy: `Copy ${label}.`, keywords: [label.toLowerCase()] })) }] });
-
-  test('offers the search box and finds a tip by keyword', async () => {
-    tips = lib(['Mow high', 'Dollarweed', 'Sedge']);
-    await openSheet();
-    const search = await screen.findByLabelText('Search tips');
-    fireEvent.change(search, { target: { value: 'sedge' } });
-    expect(screen.getByRole('button', { name: /Sedge/ })).toBeTruthy();
-    expect(screen.queryByRole('button', { name: /Mow high/ })).toBeNull();
-  });
-
-  test('reads the list again once the assessment is confirmed, and keeps the tip already picked', async () => {
-    tips = lib(['Mow high', 'Dollarweed']);
-    await openSheet();
-    fireEvent.click(await screen.findByRole('button', { name: /Mow high/ }));
-    expect(requests.filter((r) => tipRead(r.path))).toHaveLength(1);
-    tips = lib(['Dollarweed', 'Mow high']);
-    await confirmAssessment();
-    // the open, the analysis settling, the confirm settling
-    await waitFor(() => expect(requests.filter((r) => tipRead(r.path))).toHaveLength(3));
-    await waitFor(() => {
-      const names = screen.getAllByRole('button', { name: /Mow high|Dollarweed/ }).map((b) => b.textContent);
-      expect(names[0]).toMatch(/Dollarweed/);
-    });
-    expect(screen.getByRole('button', { name: /Mow high/ }).getAttribute('aria-pressed')).toBe('true');
-  });
-
-  test('a failed re-read keeps the tips on screen', async () => {
-    tips = lib(['Mow high']);
-    await openSheet();
-    await screen.findByRole('button', { name: /Mow high/ });
-    tips = new Error('network');
-    await confirmAssessment();
-    await waitFor(() => expect(requests.filter((r) => tipRead(r.path))).toHaveLength(3));
-    expect(screen.getByRole('button', { name: /Mow high/ })).toBeTruthy();
-  });
-
-  // Codex r1 P1: the server drops a pick when the tips gate is off, so an
-  // explicit "unavailable" answer must take the picker away.
-  test('a re-read that answers unavailable clears the tips', async () => {
-    tips = lib(['Mow high']);
-    await openSheet();
-    await screen.findByRole('button', { name: /Mow high/ });
-    tips = { available: false, groups: [] };
-    await confirmAssessment();
-    await waitFor(() => expect(requests.filter((r) => tipRead(r.path))).toHaveLength(3));
-    await waitFor(() => expect(screen.queryByRole('button', { name: /Mow high/ })).toBeNull());
-  });
-
-  // Codex r3 P2: on a retake the server still sees the old confirmed row until
-  // /assess inserts the new one, so the read that matters is the one after the
-  // analysis settles, before any confirm.
-  test('a retake drops the old lift when the new analysis settles, not at confirm', async () => {
-    lookup = { shotListEnabled: true, assessment: { ...ASSESSED, confirmed_by_tech: true }, visitAssessment: REVIEW };
-    tips = lib(['Dollarweed', 'Mow high']);
-    await openSheet({ request: makeRequest({ ctx: context({ assessment: { exists: true, id: 'assessment-1', confirmed: true, unusableReason: null } }) }) });
-    await screen.findByRole('button', { name: /Dollarweed/ });
-    const reads = () => requests.filter((r) => tipRead(r.path)).length;
-    const order = () => screen.getAllByRole('button', { name: /Mow high|Dollarweed/ }).map((b) => b.textContent.split(/Copy/)[0].trim());
-    expect(order()[0]).toMatch(/Dollarweed/);
-    fireEvent.click(screen.getByRole('button', { name: 'Retake' }));
-    // the server has no new row yet: a read here would still show the old lift
-    const afterRetake = reads();
-    tips = lib(['Mow high', 'Dollarweed']);
-    const input = await screen.findByLabelText('Add turf photos');
-    fireEvent.change(input, { target: { files: [new File(['a'], 'a.jpg', { type: 'image/jpeg' })] } });
-    await screen.findByLabelText('Slot for photo 1');
-    expect(reads()).toBe(afterRetake);
-    fireEvent.click(screen.getByRole('button', { name: 'Analyze lawn' }));
-    await screen.findByRole('button', { name: 'Confirm assessment' });
-    await waitFor(() => expect(reads()).toBe(afterRetake + 1));
-    await waitFor(() => expect(order()[0]).toMatch(/Mow high/));
-  });
-});
-
-// ── pre-push P1: planned rates in the completion record ─────────────────────
-// No rate is typed on this sheet. An untouched planned row records the plan's
-// rate exactly as given; every other row records none, so no unit can be wrong.
-describe('application rate on the product rows', () => {
-  const planned = (extra = {}, method = 'broadcast_spray') => plannedOne(method, { treatedSqft: 6000, areaUnit: 'sqft', ratePer1000: 1.07, rateUnit: 'fl_oz', ...extra });
-  const sentRow = () => completeCalls()[0].body.products[0];
-  const noRateKeys = () => { expect(sentRow()).not.toHaveProperty('rate'); expect(sentRow()).not.toHaveProperty('rateUnit'); };
-  const run = async (ctx, after, props) => {
-    await openSheet({ request: makeRequest({ ctx }), props });
-    if (after) await after();
-    await confirmAssessment();
+  test('holds Complete on a non-member visit, says so, and a stock refresh releases it', async () => {
+    await open();
+    await analyze();
+    await waitFor(() => expect(footerNote()).toBe('Talak 7.9% shows 0 in stock. Update inventory, then tap Check stock.'));
+    expect(completeButton().disabled).toBe(true);
+    catalogAnswer = { products: [{ ...EMPTY_CATALOG[0], inventory_on_hand: '40.0000' }] };
+    fireEvent.click(screen.getByRole('button', { name: 'Check stock' }));
     await waitFor(() => expect(completeButton().disabled).toBe(false));
-    await submit();
-  };
-  const planLine = () => within(editorFor('Talak 7.9%')).queryByText(/^Planned rate:/);
-
-  test('an untouched planned row sends the plan rate and unit, and shows it as plain text with no box', async () => {
-    await run(planned(), async () => {
-      expect(planLine().textContent).toBe('Planned rate: 1.07 fl oz per 1,000 sq ft');
-      expect(within(editorFor('Talak 7.9%')).queryByLabelText('Talak 7.9% rate')).toBeNull();
-    });
-    expect(sentRow()).toMatchObject({ rate: 1.07, rateUnit: 'fl_oz', totalAmount: 2, amountUnit: 'fl_oz', areaValue: 6000 });
+    expect(footerNote()).toBe('');
   });
 
-  test.each([
-    ['the amount', () => fireEvent.change(within(editorFor('Talak 7.9%')).getByLabelText('Talak 7.9%'), { target: { value: '3' } })],
-    ['the amount unit', () => fireEvent.change(within(editorFor('Talak 7.9%')).getByLabelText('Unit for Talak 7.9%'), { target: { value: 'gal' } })],
-    ['the plan\'s area', () => fireEvent.change(within(editorFor('Talak 7.9%')).getByLabelText('Area treated (sq ft)'), { target: { value: '4000' } })],
-    ['the method', () => fireEvent.click(within(editorFor('Talak 7.9%')).getByRole('button', { name: 'Granular' }))],
-  ])('a change to %s sends no rate keys and removes the line', async (_label, change) => {
-    await run(planned(), async () => {
-      change();
-      await waitFor(() => expect(planLine()).toBeNull());
-    });
-    noRateKeys();
+  test('does not hold a product with no amount (the server deducts nothing)', async () => {
+    await open({}, plannedOne('spot_treatment', { amount: null }));
+    await analyze();
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
   });
 
-  test('putting the method back does not bring the rate back', async () => {
-    await run(planned(), async () => {
-      fireEvent.click(within(editorFor('Talak 7.9%')).getByRole('button', { name: 'Granular' }));
-      fireEvent.click(within(editorFor('Talak 7.9%')).getByRole('button', { name: 'Broadcast spray' }));
-      expect(planLine()).toBeNull();
-    });
-    noRateKeys();
+  test('does not hold a real WaveGuard tier lawn visit (the server lets stock go negative)', async () => {
+    await open({ service: { ...SERVICE, waveguardTier: 'Gold' } });
+    await analyze();
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
   });
 
-  test.each(['ml', 'percent_solution'])('a plan rate in %s (a unit /complete does not accept) is neither shown nor sent', async (rateUnit) => {
-    await run(planned({ rateUnit }), async () => expect(planLine()).toBeNull());
-    noRateKeys();
+  test('holds a tier the server does not count (Commercial, or none)', async () => {
+    await open({ service: { ...SERVICE, waveguardTier: 'Commercial' } });
+    await analyze();
+    await waitFor(() => expect(footerNote()).toMatch(/shows 0 in stock/));
   });
 
-  test('a plan with no rate sends none', async () => {
-    await run(planned({ ratePer1000: null, rateUnit: null }), async () => expect(planLine()).toBeNull());
-    noRateKeys();
+  test('the context\'s stockAdvisory wins over the schedule row, both ways', async () => {
+    await open({ service: { ...SERVICE, waveguardTier: 'Gold' } }, { ...plannedOne('spot_treatment'), stockAdvisory: false });
+    await analyze();
+    await waitFor(() => expect(footerNote()).toMatch(/shows 0 in stock/));
+    cleanup();
+    await open({}, { ...plannedOne('spot_treatment'), stockAdvisory: true });
+    await analyze();
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
   });
 
-  test('an untouched perimeter row sends the plan rate with its linear feet', async () => {
-    await run(plannedOne('perimeter_spray', { ratePer1000: 0.5, rateUnit: 'fl_oz' }), async () => {
-      fireEvent.change(areaInput('Linear feet treated'), { target: { value: '150' } });
-    });
-    expect(sentRow()).toMatchObject({ rate: 0.5, rateUnit: 'fl_oz', areaValue: 150, areaUnit: 'linear_ft' });
+  test('waveguard_inventory_lockout from the server reads as a correctable stock message with Check stock offered', async () => {
+    completeErrors.push(refusal(400, 'waveguard_inventory_lockout', 'Talak requires 2 fl_oz, but only 1 fl_oz is on hand.'));
+    await openSheet({ request: makeRequest({ ctx: plannedOne('spot_treatment') }) });
+    await analyzeAndComplete();
+    await screen.findByText('A product is out of stock. Update inventory, tap Check stock, then complete again.');
+    expect(screen.getByRole('button', { name: 'Check stock' })).toBeTruthy();
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(completeCalls()).toHaveLength(2));
+    expect(completeCalls()[1].body.idempotencyKey).not.toBe(completeCalls()[0].body.idempotencyKey);
+    expect(confirmCalls()).toHaveLength(1);
   });
+});
 
-  test('an added product has no rate box and sends no rate keys, even with a catalog default rate', async () => {
-    const catalog = [{ ...CATALOG[0], default_unit: 'fl_oz', default_rate_per_1000: 2, max_label_rate_per_1000: 1 }, CATALOG[1], CATALOG[2]];
-    await openSheet({ request: makeRequest({ ctx: ONE_TIME() }), props: { catalog } });
-    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
-    fireEvent.click(await screen.findByText('Talak 7.9%'));
-    expect(within(editorFor('Talak 7.9%')).queryByLabelText('Talak 7.9% rate')).toBeNull();
-    expect(planLine()).toBeNull();
-    fireEvent.change(within(editorFor('Talak 7.9%')).getByLabelText('Talak 7.9%'), { target: { value: '2' } });
-    fireEvent.change(within(editorFor('Talak 7.9%')).getByLabelText('Area treated (sq ft)'), { target: { value: '1000' } });
-    await confirmAssessment();
-    await submit();
-    noRateKeys();
-  });
-
-  test('no rate box and no label-max warning, even for a planned row over the label maximum', async () => {
-    const catalog = [{ ...CATALOG[0], rate_unit: 'fl_oz', default_unit: 'fl_oz', max_label_rate_per_1000: 0.5 }, CATALOG[1], CATALOG[2]];
-    await openSheet({ request: makeRequest({ ctx: planned() }), props: { catalog } });
-    expect(screen.queryByText(/label max/)).toBeNull();
-    expect(screen.queryByLabelText(/ rate$/)).toBeNull();
+describe('text size', () => {
+  test('no text on the sheet, including the shared photo step, is set under 14px', async () => {
+    await openSheet();
+    await analyze();
+    const sized = Array.from(document.querySelectorAll('[style]')).filter((el) => el.style.fontSize);
+    expect(sized.length).toBeGreaterThan(5);
+    for (const el of sized) expect(parseFloat(el.style.fontSize)).toBeGreaterThanOrEqual(14);
   });
 });

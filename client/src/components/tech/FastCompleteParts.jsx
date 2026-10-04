@@ -142,7 +142,8 @@ export function FastCompleteFrame({ isMobile, dialogRef, titleId, onDismiss, hid
   );
 }
 
-export function SheetHeader({ titleId, title, service, visit, done, locked, dictationPending, submitting, onFullForm, onClose }) {
+// `noFullForm` (the lawn sheet): the header has no Full form button.
+export function SheetHeader({ titleId, title, service, visit, done, locked, dictationPending, submitting, onFullForm, noFullForm = false, onClose }) {
   const address = liveAddressLine(visit?.address);
   return (
     <header className="tech-visit-header">
@@ -153,7 +154,7 @@ export function SheetHeader({ titleId, title, service, visit, done, locked, dict
         </p>
         {address && <p className="tech-visit-muted">{address}</p>}
       </div>
-      {!done && (
+      {!done && !noFullForm && (
         <Button variant="ghost" className="tech-visit-action" onClick={onFullForm} disabled={locked || dictationPending}>Full form</Button>
       )}
       <Button variant="ghost" className="tech-visit-action tech-visit-close" onClick={onClose} disabled={submitting} aria-label="Close">×</Button>
@@ -376,11 +377,13 @@ export function useProductPicker({ products, commonProducts, rows, locked, isMob
 
 // The reason sits above full-width actions, so neither squeezes the other on
 // a phone or beside an extra action (`children`, e.g. "Check stock").
-export function CompleteFooter({ submission, missingReason, warn, label, onSubmit, coverProps, children }) {
+// `reasonInButton` (the lawn sheet): a short reason is the disabled button's
+// own label instead of a line above it.
+export function CompleteFooter({ submission, missingReason, warn, label, onSubmit, coverProps, children, reasonInButton = false }) {
   return (
     <footer className="tech-visit-footer tech-visit-footer--stacked" {...coverProps}>
       {submission.error && <ActionFeedback error className="tech-visit-feedback tech-visit-error-banner">{submission.error}</ActionFeedback>}
-      {missingReason && !submission.failure && (
+      {missingReason && !submission.failure && !reasonInButton && (
         <p className={cn('tech-visit-muted', warn && 'tech-visit-status--warn')} role="status">{missingReason}</p>
       )}
       <div className="tech-visit-actions">
@@ -391,7 +394,7 @@ export function CompleteFooter({ submission, missingReason, warn, label, onSubmi
           loading={submission.submitting}
           disabled={submission.failure === 'terminal' || (!!missingReason && !submission.retryPending)}
         >
-          {submission.retryPending ? 'Retry' : label}
+          {submission.retryPending ? 'Retry' : reasonInButton && missingReason && !submission.failure ? missingReason : label}
         </Button>
       </div>
     </footer>

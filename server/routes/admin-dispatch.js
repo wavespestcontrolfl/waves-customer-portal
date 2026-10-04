@@ -537,7 +537,7 @@ async function loadPreviousRecommendations({ customerId, serviceType, serviceId,
 // hub posts matching every typed word, newest first, at most eight, each as
 // { id, title, url } under the one link rule (report-blog-post.js). The pick
 // rides /complete as blogPostId and is frozen there for every service but
-// WDO, termite pre-treat, lawn and tree, shrub & palm (blogPostAllowedFor,
+// WDO, termite pre-treat, and tree, shrub & palm (blogPostAllowedFor,
 // the completion's own rule), so any other visit answers { available: false }
 // too. Read-only; off = the answer is { available: false } with no database
 // read.

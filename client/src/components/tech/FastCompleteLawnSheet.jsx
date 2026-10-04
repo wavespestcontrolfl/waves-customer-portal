@@ -1,39 +1,55 @@
 // client/src/components/tech/FastCompleteLawnSheet.jsx
 //
 // Fast Complete for LAWN visits (GATE_LAWN_FAST_COMPLETE; lawn report rebuild
-// Phase 5, plan PR-D). A lawn visit is a quick job: photos, one pass, done.
-// It shares its frame, header, saved view, note, tip picker, amount rows,
-// product picker and footer with the pest, Tree & Shrub and lawn re-service
-// sheets (FastCompleteParts.jsx) and their /complete submit
-// (hooks/useFastCompleteSubmit.js).
+// Phase 5, plan PR-D). A lawn visit is a quick job: talk, photos, one tap.
+// Owner 2026-10-04, working real visits: the technician speaks the note,
+// takes the photos, the planned products are already on, and one tap completes.
+// The screen, top to bottom:
+//  1. "Tell me about the visit": the note with the mic (shared VisitNote);
+//  2. Lawn photos: the shot list and Analyze lawn; after the read, the four
+//     scores in one row (each one the technician may change until Confirm),
+//     Confirm assessment and Retake (the shared LawnAssessmentCompletionBlock
+//     in its compact mode: no Fungus control / Thatch condition tiles, no lawn
+//     length box, no evidence review). Confirm sends the default keep-all
+//     review, as the full form's button does;
+//  3. Products used: the plan's products, each with its method and amount
+//     (change the amount, remove, or add one from the catalog). No area box:
+//     every lawn visit treats the whole lawn, so a sprayed or spread product
+//     goes down on the lawn area the plan gives (/complete requires it);
+//  4. Tips from your tech (optional, one tip);
+//  5. Blog post for the customer (optional, GATE_REPORT_BLOG_POST);
+//  6. Treatment zone map (optional, a closed row that opens the tracer);
+//  7. one Complete lawn visit button. While it is off, its label says the one
+//     thing missing: Add a photo, Analyze the photos, Confirm the assessment,
+//     Add the products applied.
+// No Full form button, watering preview, lawn length box, findings picker or
+// evidence review: the report prints its own watering instructions, and
+// /complete takes a visit with none of them. The submit shares its frame,
+// header, saved view, note, tip picker, amount rows, product picker and footer
+// with the pest, Tree & Shrub and lawn re-service sheets (FastCompleteParts.jsx)
+// and their /complete submit (hooks/useFastCompleteSubmit.js).
 //
-// Admin Dispatch mounts it (the technician portal is being retired). Every
-// lawn visit type may open it. A recurring program visit starts with the
-// plan's products already on, amounts filled; any other visit starts with no
-// products. The sheet sends no customer message of its own: completion runs
-// the existing flow with the full form's default text flags.
+// Admin Dispatch mounts it. Every lawn visit type may open it. A recurring
+// program visit starts with the plan's products on, amounts filled; any other
+// visit starts with no products. The sheet sends no customer message of its
+// own: completion runs the existing flow with the full form's default text
+// flags.
 //
-// What blocks Complete is only what the server enforces, said in plain words
-// at the foot of the sheet:
-//  - a CONFIRMED lawn assessment (photos, Analyze lawn, then confirm what the
-//    read found: the shared LawnAssessmentCompletionBlock, the same step the
-//    full form uses, including its evidence review);
-//  - square feet for a sprayed or spread product (the server refuses a
-//    broadcast row without them);
+// What blocks Complete is only what the server enforces, said in plain words:
+//  - a CONFIRMED lawn assessment (photos, Analyze lawn, Confirm assessment);
+//  - at least one product, a rule of this sheet (Add the products applied);
+//  - the lawn area for a sprayed or spread product (the server refuses a
+//    broadcast row without square feet; the plan carries it);
 //  - the lawn condition on a one-time lawn visit (typed findings the server
-//    requires);
-//  - a mowing height outside 0.5 to 8 inches when one is typed.
-// The photo minimum is a hint only. A product with no amount is noted, never
-// blocked.
+//    requires).
+// A product with no amount is noted, never blocked.
 //
 // The submit echoes the context back (GET /admin/dispatch/:id/lawn-fast/
 // context): `expectedVisit` is the context's WHOLE `service` object,
 // `lawnFast.visitType` its visit type, `lawnAssessmentId` the confirmed
 // assessment. A visit the server calls ineligible (or 404/409 on the context)
-// hands over to the full form, as it always opened before.
-//
-// Watering: POST .../lawn-fast/watering-preview, debounced, shows what the
-// customer report would say for the products picked.
+// is handed to the parent once through `onFullForm`; the sheet itself never
+// shows a Full form button.
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
@@ -45,14 +61,16 @@ import { detectServiceCategory } from '../../lib/service-colors';
 import { LAWN_DEFAULT_AREAS } from '../../lib/lawn-completion';
 import { defaultApplicationMethodForLine, normalizeApplicationMethod } from '../../lib/product-rate-prefill';
 import {
-  UNIT_CHOICES, amountText, categoryLabel, hasAmount, measureUnit, productUnits, seededAmount, stockHolds,
+  UNIT_CHOICES, categoryLabel, hasAmount, measureUnit, productUnits, seededAmount, stockHolds,
 } from '../../lib/fast-complete-products';
 import { submittedAmount } from '../../lib/measure-units';
 import {
-  AmountRow, CLOSED_VISIT_STATUSES, isSendableRateUnit, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, ProductTileButton,
-  SavedView, SheetHeader, TipSection, VisitNote, methodLabel, techTipsOf, unitLabel, useProductPicker, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
+  AmountRow, CLOSED_VISIT_STATUSES, isSendableRateUnit, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton,
+  SavedView, SheetHeader, TipSection, VisitNote, methodLabel, techTipsOf, useProductPicker, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
 } from './FastCompleteParts';
-import { Button, ActionFeedback, Input } from '../ui';
+import { BlogPostSection, useBlogPostOffer } from './FastCompleteReport';
+import TechTreatmentZoneModal from './TechTreatmentZoneModal';
+import { Button, ActionFeedback } from '../ui';
 import '../../styles/tech-workflow.css';
 
 // The one-time lawn form's condition list (project-types.js
@@ -60,13 +78,6 @@ import '../../styles/tech-workflow.css';
 // server's list.
 export const LAWN_CONDITION_OPTIONS = ['Excellent', 'Good', 'Fair', 'Poor', 'Recovering', 'Stressed'];
 
-// How a lawn product went down, as the "How" chips offer it. A row can also
-// carry another method from the plan or the catalog; it shows as its own chip.
-const METHOD_CHOICES = [
-  { value: 'broadcast_spray', label: 'Broadcast spray' },
-  { value: 'granular_broadcast', label: 'Granular' },
-  { value: 'spot_treatment', label: 'Spot treatment' },
-];
 // THE table of what /complete requires per application method for a lawn
 // product (complete-scheduled-service.js, the service_products loop):
 //  - perimeter_spray: positive linear feet, areaUnit 'linear_ft'
@@ -76,24 +87,18 @@ const METHOD_CHOICES = [
 //  - every other method (spot_treatment, soil_drench, foliar_spray, bait_placement,
 //    station_check, fog_ulv, trunk_injection, pin_stream): nothing.
 // A row's method is normalized the way the server normalizes it, so a raw
-// catalog value ("Broadcast", "perimeter band") lands on the same entry. The
-// footer reason, the area box and the body all read this one table.
+// catalog value ("Broadcast", "perimeter band") lands on the same entry.
 export const METHOD_REQUIREMENTS = {
-  perimeter_spray: { unit: 'linear_ft', label: 'Linear feet treated', noun: 'linear feet' },
-  broadcast_spray: { unit: 'sqft', label: 'Area treated (sq ft)', noun: 'square feet' },
-  granular_broadcast: { unit: 'sqft', label: 'Area treated (sq ft)', noun: 'square feet' },
+  perimeter_spray: { unit: 'linear_ft', noun: 'linear feet' },
+  broadcast_spray: { unit: 'sqft', noun: 'square feet' },
+  granular_broadcast: { unit: 'sqft', noun: 'square feet' },
 };
 export const requirementOf = (row) => METHOD_REQUIREMENTS[normalizeApplicationMethod(row.method)] || null;
-const needsArea = (row) => requirementOf(row) !== null;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 // Real WaveGuard member tiers (complete-scheduled-service.js isWaveGuardLawnCompletion).
 const WAVEGUARD_TIERS = new Set(['Bronze', 'Silver', 'Gold', 'Platinum']);
-
-// Mowing height the server accepts (turf_height_invalid outside it).
-const MIN_HEIGHT_IN = 0.5;
-const MAX_HEIGHT_IN = 8;
 
 // The completion text the full form posts by default (SchedulePage: send the
 // text, ask for the review on its automatic timing, include the pay link).
@@ -102,12 +107,14 @@ const CUSTOMER_TEXT_FLAGS = { sendCompletionSms: true, requestReview: true, incl
 // ── plain words for the server's refusals ───────────────────────────────────
 // The shared submit hook sorts each failure (saved, correctable, retry,
 // terminal) by status and code; these only replace the words the tech reads.
+// The sheet has no Full form button, so none of them points to one.
 const PROPERTY_CHECK_MESSAGE = 'We could not check this lawn assessment against this visit. Try again, or retake the photos and confirm again.';
 const STOCK_LOCKOUT_MESSAGE = 'A product is out of stock. Update inventory, tap Check stock, then complete again.';
 const PROPERTY_SCOPE_MESSAGE = 'This lawn check was made for a different property than this visit. Retake the photos, then analyze and confirm again.';
+const NOT_ON_THIS_SHEET_MESSAGE = 'This visit cannot be completed on this sheet. Close it and tell the office.';
 const REFUSAL_MESSAGES = {
-  lawn_fast_disabled: 'The quick lawn sheet is off right now. Open the full form.',
-  lawn_fast_not_eligible: 'This visit needs the full form.',
+  lawn_fast_disabled: 'The quick lawn sheet is off right now. Close it and tell the office.',
+  lawn_fast_not_eligible: NOT_ON_THIS_SHEET_MESSAGE,
   visit_identity_changed: 'This visit changed since you opened it. Close it and open it again from the schedule.',
   lawn_fast_expected_visit_required: 'Close this sheet and open the visit again from the schedule. The sheet must confirm it is the same visit.',
   lawn_fast_assessment_required: 'Analyze the lawn photos and confirm the assessment first.',
@@ -115,9 +122,9 @@ const REFUSAL_MESSAGES = {
   completion_profile_lookup_failed: 'We could not check this visit type.',
   lawn_fast_visit_type_unavailable: 'We could not check this visit type.',
   lawn_fast_not_found: 'This visit was not found. Close the sheet and reload the schedule.',
-  typed_findings_required: 'This visit needs the full form.',
-  area_sqft_required: 'Enter the square feet treated for each sprayed or spread product.',
-  linear_ft_required: 'Enter the linear feet treated for each perimeter product.',
+  typed_findings_required: NOT_ON_THIS_SHEET_MESSAGE,
+  area_sqft_required: 'The lawn area is missing for a sprayed or spread product. Tell the office.',
+  linear_ft_required: 'A perimeter product needs linear feet, which this sheet does not take. Tell the office.',
   waveguard_inventory_lockout: STOCK_LOCKOUT_MESSAGE,
 };
 
@@ -150,7 +157,7 @@ const RETRYABLE_REASONS = new Set(['profile_unavailable']);
 
 const EMPTY_CONTEXT = {
   loading: true, loadError: '', blockedReason: '', handoff: false, visit: null, raw: null,
-  visitType: null, turfHeightCapture: false, planned: [], plannedUnavailable: null, assessment: null, photoStatus: null, reCheck: '',
+  visitType: null, planned: [], plannedUnavailable: null, assessment: null,
   findingsType: null, stockAdvisory: undefined,
 };
 
@@ -178,7 +185,7 @@ const LOAD_ERROR = 'Couldn’t load this visit. Try again.';
 //    it and asks for a retake.
 //  - planned_products: the planned list is empty and `plannedProductsUnavailable`
 //    says so; the sheet shows a note and the technician adds what was applied.
-//  - photo_status and turf_height_flag: advisory only (no photo hint; no height box).
+//  - photo_status and turf_height_flag: advisory only, and the sheet shows neither.
 // Every other failure is a thrown read (HTTP 500) and is a load error already.
 function visitTypeUnreadable(data) {
   const failures = Array.isArray(data?.readFailures) ? data.readFailures : [];
@@ -188,7 +195,7 @@ function visitTypeUnreadable(data) {
 // `findingsType` decides the lawn-condition requirement, from the context ONLY.
 // null means "no typed findings" (a recurring visit) and is a real answer; the
 // KEY being absent (`'findingsType' in data` is false) means an older server
-// during a deploy, and the sheet cannot decide, so the full form opens.
+// during a deploy, and the sheet cannot decide, so the visit is handed over.
 // `stockAdvisory`, when the context carries it, wins over the schedule row.
 const findingsTypeUndecidable = (data) => !('findingsType' in data)
   || (data.findingsType !== null && data.findingsType !== LAWN_FINDINGS_TYPE);
@@ -213,7 +220,7 @@ function contextFrom(data, service) {
     return { ...EMPTY_CONTEXT, loading: false, loadError: LOAD_ERROR };
   }
   const blockedReason = blockedReasonFor(data, service);
-  // The server says this visit does not use the quick sheet: the full form opens.
+  // The server says this visit does not use the quick sheet: the parent opens the full form.
   if (data?.eligible !== true && !blockedReason) return { ...EMPTY_CONTEXT, loading: false, handoff: true };
   // An older server that does not say the findings type: hand over, never guess.
   if (!blockedReason && data?.eligible === true && findingsTypeUndecidable(data)) return { ...EMPTY_CONTEXT, loading: false, handoff: true };
@@ -227,13 +234,9 @@ function contextFrom(data, service) {
     // The context's whole `service` object, echoed back as `expectedVisit`.
     raw: data?.service || null,
     visitType: data?.visitType ?? null,
-    turfHeightCapture: data?.turfHeightCapture === true,
     planned: plannedItemsOf(data),
     plannedUnavailable: data?.plannedProductsUnavailable || null,
     assessment: assessmentOf(data),
-    photoStatus: data?.photoStatus || null,
-    // The prior visit's rainfast re-check line (GATE_LAWN_RAINFAST_WATCH), shown as sent.
-    reCheck: typeof data?.reCheck?.line === 'string' ? data.reCheck.line.trim() : '',
     ...optionalContextFields(data),
   };
 }
@@ -249,7 +252,7 @@ function useLawnFastContext({ base, request, service }) {
       .then((data) => { if (active) setCtx(contextFrom(data, service)); })
       .catch((err) => {
         if (!active) return;
-        // 404 (gate off, visit gone) and 409: the full form opens, as it always did.
+        // 404 (gate off, visit gone) and 409: handed to the parent, as it always was.
         if (err?.status === 404 || err?.status === 409) setCtx({ ...EMPTY_CONTEXT, loading: false, handoff: true });
         else setCtx({ ...EMPTY_CONTEXT, loading: false, loadError: err?.message || 'Failed to load this visit' });
       });
@@ -284,26 +287,20 @@ function productRow(product, { planned = null, added = false }) {
     name: product.name,
     added,
     planned: !!planned,
-    // A planned product starts applied; the tech turns off what was not.
-    active: !!planned,
     method,
-    // The planned or catalog method stays on offer for the life of the row.
-    originalMethod: method,
     dimension,
     totalAmount: seeded.amount,
     amountUnit: seeded.unit,
     fromPlan: seeded.amount !== '',
-    area: '',
-    areaFrom: '',
     // The plan's own rate (ratePer1000 in rateUnit), only in a unit /complete
     // accepts. Nobody types a rate on this sheet: an untouched planned row sends
-    // this exactly as the plan gave it, and the first change to the row's amount,
-    // amount unit, method or plan-seeded area (rateChanged) drops it.
+    // this exactly as the plan gave it, and the first change to the row's amount
+    // or amount unit (rateChanged) drops it.
     planRate: planned && Number(planned.ratePer1000) > 0 && isSendableRateUnit(planned.rateUnit)
       ? { rate: Number(planned.ratePer1000), unit: String(planned.rateUnit).trim() }
       : null,
     rateChanged: false,
-    // The square feet the context's planned item carries (preferred), if any.
+    // The square feet the context's planned item carries, if any.
     plannedSqft: planned && Number(planned.treatedSqft) > 0 && (!planned.areaUnit || planned.areaUnit === 'sqft') ? Number(planned.treatedSqft) : null,
   };
 }
@@ -315,24 +312,46 @@ function productRow(product, { planned = null, added = false }) {
 // units /complete does not accept all record none.
 const plannedRateOf = (row) => (row.planned && !row.rateChanged ? row.planRate : null);
 
-// Read-only, on an untouched planned row: "Planned rate: 0.4 fl oz per 1,000 sq ft".
-const plannedRateText = (rate) => `Planned rate: ${rate.rate} ${unitLabel(rate.unit)} per 1,000 sq ft`;
-
 // AmountRow shows a rate box only when it is given a rate unit; this sheet never does.
 const NO_RATE = { rate: '', rateUnit: '', max: null };
 
-// A sprayed or spread row with no area yet starts from the square feet the
-// context's planned item carries (the server sends `treatedSqft` whenever the
-// plan has one; null leaves the box for the technician). Linear feet are never
-// seeded. Nothing else is filled in, and the tech's own entry is never replaced.
-function withAreaSeed(row) {
-  if (requirementOf(row)?.unit !== 'sqft' || row.area !== '') return row;
-  return row.plannedSqft > 0 ? { ...row, area: String(row.plannedSqft), areaFrom: 'from the lawn plan' } : row;
+// Every lawn visit treats the whole lawn (owner 2026-10-04), so nobody types an
+// area. /complete still requires square feet for a sprayed or spread row: the
+// row's own plan figure, else the lawn area any planned product of this visit
+// carries (the same lawn), else the lawn area on the customer's turf profile
+// (what the full form prefills from). null when none is on file; the sheet then
+// says so and never invents one. Linear feet (perimeter) are never known here.
+const lawnSqftOf = (planned) => {
+  const item = (planned || []).find((entry) => Number(entry?.treatedSqft) > 0 && (!entry.areaUnit || entry.areaUnit === 'sqft'));
+  return item ? Number(item.treatedSqft) : null;
+};
+// The lawn area on the customer's turf profile, read once for a visit whose plan
+// gives none (a one-time visit, or a plan without a figure). A failed read is no
+// figure.
+function useProfileLawnSqft({ request, customerId, needed }) {
+  const [sqft, setSqft] = useState(null);
+  useEffect(() => {
+    if (!needed || !customerId) return undefined;
+    let active = true;
+    request(`/admin/customers/${customerId}/turf-profile`)
+      .then((data) => {
+        const n = Number(data?.profile?.lawn_sqft);
+        if (active) setSqft(Number.isFinite(n) && n > 0 ? n : null);
+      })
+      .catch(() => { if (active) setSqft(null); });
+    return () => { active = false; };
+  }, [request, customerId, needed]);
+  return sqft;
 }
+const areaOf = (row, lawnSqft) => {
+  const requirement = requirementOf(row);
+  if (requirement?.unit !== 'sqft') return null;
+  return row.plannedSqft || lawnSqft || null;
+};
 
 // One id, one planned product, however the plan lists it: the FIRST entry wins
 // (the full form's lawnPlanSelections keeps the first too). Ids compare
-// lower-case, as the server lowercases them. The rendered tiles and the skipped
+// lower-case, as the server lowercases them. The rendered rows and the skipped
 // list both come from this, so they can never disagree.
 export function uniquePlanned(items) {
   const seen = new Set();
@@ -346,10 +365,10 @@ export function uniquePlanned(items) {
 
 function plannedRows(ctx, catalog) {
   const byId = new Map((catalog || []).map((product) => [String(product.id).toLowerCase(), product]));
-  return uniquePlanned(ctx.planned).map((item) => withAreaSeed(productRow(
+  return uniquePlanned(ctx.planned).map((item) => productRow(
     byId.get(String(item.productId).toLowerCase()) || { id: item.productId, name: item.name || 'Planned product' },
     { planned: item },
-  )));
+  ));
 }
 
 function useProductRows(ctx, catalog) {
@@ -357,28 +376,19 @@ function useProductRows(ctx, catalog) {
   const updateRow = useCallback((productId, patch) => {
     setRows((prev) => prev.map((row) => {
       if (row.productId !== productId) return row;
-      const next = {
+      return {
         ...row,
         ...patch,
-        // An amount the tech changed is no longer the plan's; an area the tech
-        // typed is no longer a fact the sheet filled in.
-        ...('totalAmount' in patch || 'amountUnit' in patch ? { fromPlan: false } : {}),
-        ...('area' in patch ? { areaFrom: '' } : {}),
-        // The plan's rate no longer describes the row once its amount, unit, method
-        // or plan-seeded area moves. (An area the plan never gave, typed for the
-        // first time, changes nothing the rate stood on.)
-        ...(['totalAmount', 'amountUnit', 'method'].some((key) => key in patch) || ('area' in patch && row.areaFrom) ? { rateChanged: true } : {}),
+        // An amount the tech changed is no longer the plan's, and the plan's
+        // rate no longer describes the row.
+        ...('totalAmount' in patch || 'amountUnit' in patch ? { fromPlan: false, rateChanged: true } : {}),
       };
-      if (!('method' in patch)) return next;
-      // An area belongs to the unit of the method it was entered for.
-      const moved = requirementOf(row)?.unit !== requirementOf(next)?.unit;
-      return withAreaSeed(moved ? { ...next, area: '', areaFrom: '' } : next);
     }));
   }, []);
   const addProduct = useCallback((product) => {
     setRows((prev) => (prev.some((row) => row.productId === product.id) ? prev : [
       ...prev,
-      { ...withAreaSeed(productRow(product, { added: true })), active: true },
+      productRow(product, { added: true }),
     ]));
   }, []);
   const removeRow = useCallback((productId) => setRows((prev) => prev.filter((row) => row.productId !== productId)), []);
@@ -389,67 +399,49 @@ function useProductRows(ctx, catalog) {
   return { rows, updateRow, addProduct, removeRow, applyStock };
 }
 
-// ── watering preview ────────────────────────────────────────────────────────
-
-const PREVIEW_DELAY_MS = 400;
-
-// What the customer report would say about watering for these products. Asked
-// again, after a short pause, whenever the product set changes.
-function useWateringPreview({ base, request, productIds }) {
-  const key = productIds.join(',');
-  const [state, setState] = useState({ status: 'idle', data: null });
-  useEffect(() => {
-    if (!key) {
-      setState({ status: 'idle', data: null });
-      return undefined;
-    }
-    let active = true;
-    setState({ status: 'loading', data: null });
-    const timer = setTimeout(() => {
-      request(`${base}/lawn-fast/watering-preview`, { method: 'POST', body: JSON.stringify({ productIds: key.split(',') }) })
-        .then((data) => { if (active) setState({ status: 'ready', data }); })
-        .catch(() => { if (active) setState({ status: 'failed', data: null }); });
-    }, PREVIEW_DELAY_MS);
-    return () => { active = false; clearTimeout(timer); };
-  }, [key, base, request]);
-  return state;
-}
-
 // ── what is missing, and the body ───────────────────────────────────────────
 
-const unusableMessage = (reason) => (reason === 'property_check_failed' ? PROPERTY_CHECK_MESSAGE : PROPERTY_SCOPE_MESSAGE);
-const heightProblem = (height) => height != null && !(height >= MIN_HEIGHT_IN && height <= MAX_HEIGHT_IN);
+// The three reasons that read as the button's own label (owner 2026-10-04).
+export const ADD_PHOTO = 'Add a photo';
+export const ANALYZE_PHOTOS = 'Analyze the photos';
+export const CONFIRM_ASSESSMENT = 'Confirm the assessment';
+export const ADD_PRODUCTS = 'Add the products applied';
+const LABEL_REASONS = new Set([ADD_PHOTO, ANALYZE_PHOTOS, CONFIRM_ASSESSMENT, ADD_PRODUCTS]);
 
-function missingRequirement({ form, rows, ctx, assessmentId, assessmentReady, unusable, gaugeHeightIn, typed, dictationPending, stockRow }) {
-  const active = rows.filter((row) => row.active);
-  // From the one methods table: a method that needs an area needs a positive one.
-  const missingArea = active.find((row) => needsArea(row) && !(Number(row.area) > 0));
+const unusableMessage = (reason) => (reason === 'property_check_failed' ? PROPERTY_CHECK_MESSAGE : PROPERTY_SCOPE_MESSAGE);
+
+function missingRequirement({ form, rows, lawnSqft, photos, assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow }) {
+  // A method that needs an area needs a positive one, from the plan.
+  const missingArea = rows.find((row) => requirementOf(row) && !(areaOf(row, lawnSqft) > 0));
   const [, reason = ''] = [
     // A recorded clip still being taken or transcribed would miss the save.
     [dictationPending, 'Finish dictating before you complete.'],
     [assessmentReady === false, 'Wait for the lawn check to finish.'],
     [unusable, unusableMessage(ctx.assessment?.unusableReason)],
-    [!assessmentId, 'Take your photos, tap Analyze lawn, then confirm the assessment. Complete turns on after that.'],
-    [ctx.turfHeightCapture && heightProblem(gaugeHeightIn), `Lawn length must be between ${MIN_HEIGHT_IN} and ${MAX_HEIGHT_IN} inches.`],
-    [missingArea, missingArea && `Enter the ${requirementOf(missingArea).noun} treated for ${missingArea.name}.`],
+    [!assessmentId && !assessed && photos === 0, ADD_PHOTO],
+    [!assessmentId && !assessed, ANALYZE_PHOTOS],
+    [!assessmentId, CONFIRM_ASSESSMENT],
+    [!rows.length, ADD_PRODUCTS],
+    [missingArea, missingArea && (requirementOf(missingArea).unit === 'linear_ft'
+      ? `${missingArea.name} needs linear feet, which this sheet does not take. Tell the office.`
+      : `The lawn area is not on file for ${missingArea.name}. Tell the office.`)],
     [stockRow, stockRow && `${stockRow.name} shows 0 in stock. Update inventory, then tap Check stock.`],
     [typed && !form.condition, 'Pick the lawn condition.'],
   ].find(([missing]) => missing) || [];
   return reason;
 }
 
-function completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, typed, tipsAvailable }) {
-  const active = rows.filter((row) => row.active);
-  // Plan defaults the tech turned off or removed: the lawn actuals ledger
-  // records them as skipped (id and name only, no reason asked).
+function completionBody({ form, rows, ctx, assessmentId, lawnSqft, typed, tipsAvailable }) {
+  // Plan defaults the tech removed: the lawn actuals ledger records them as
+  // skipped (id and name only, no reason asked).
   // The server wants each product once (ids lower-case), a uuid, and a name of
   // at most 180 characters.
-  const on = new Set(active.map((row) => String(row.productId).toLowerCase()));
+  const on = new Set(rows.map((row) => String(row.productId).toLowerCase()));
   const skipped = uniquePlanned(ctx.planned)
     .filter((item) => !on.has(String(item.productId).toLowerCase()))
     .map((item) => ({
       productId: String(item.productId).toLowerCase(),
-      productName: String(item.name || rows.find((row) => String(row.productId).toLowerCase() === String(item.productId).toLowerCase())?.name || '').trim().slice(0, 180),
+      productName: String(item.name || '').trim().slice(0, 180),
     }))
     .filter((item) => item.productName && UUID_RE.test(item.productId));
   return {
@@ -458,9 +450,10 @@ function completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, typed, t
     expectedVisit: ctx.raw,
     lawnFast: { visitType: ctx.visitType },
     lawnAssessmentId: assessmentId,
-    products: active.map((row) => {
+    products: rows.map((row) => {
       const { totalAmount, amountUnit } = submittedAmount(row.totalAmount, row.amountUnit);
       const planRate = plannedRateOf(row);
+      const requirement = requirementOf(row);
       return {
         productId: row.productId,
         applicationMethod: row.method,
@@ -468,20 +461,24 @@ function completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, typed, t
         ...(planRate ? { rate: planRate.rate, rateUnit: planRate.unit } : {}),
         // A plan product goes on the plan's default areas, as the full form sends it.
         ...(row.planned ? { applicationArea: LAWN_DEFAULT_AREAS.join(', ') } : {}),
-        ...(needsArea(row) ? { areaValue: Number(row.area), areaUnit: requirementOf(row).unit } : {}),
+        ...(requirement ? { areaValue: areaOf(row, lawnSqft), areaUnit: requirement.unit } : {}),
         targets: [],
       };
     }),
     ...(skipped.length ? { lawnProtocolCompletion: { skippedProducts: skipped } } : {}),
-    ...(ctx.turfHeightCapture ? { manualHeightIn: gaugeHeightIn } : {}),
     ...(typed ? { structuredFindings: { type: LAWN_FINDINGS_TYPE, values: { lawn_condition: form.condition } } } : {}),
     technicianNotes: form.note.trim(),
     techTips: techTipsOf(form, tipsAvailable),
+    // The blog post for the customer: its id; the server checks it is live and
+    // freezes its title and link on the report.
+    ...(form.blogPost ? { blogPostId: form.blogPost.id } : {}),
     ...CUSTOMER_TEXT_FLAGS,
   };
 }
 
 // ── the sheet ───────────────────────────────────────────────────────────────
+
+const INERT = { 'aria-hidden': true, inert: '' };
 
 export default function FastCompleteLawnSheet({ service, request, catalog = [], onClose, onCompleted, onFullForm }) {
   const isMobile = useIsMobile();
@@ -494,12 +491,14 @@ export default function FastCompleteLawnSheet({ service, request, catalog = [], 
   const submitRequest = useMemo(() => plainErrors(request), [request]);
   const submission = useFastCompleteSubmit({ base, request: submitRequest });
   const { submitting, done } = submission;
-  // A recorded dictation clip is still being taken or transcribed. The full
-  // form is another page and carries nothing over, so Full form and "+ Other
-  // product" wait for it, like Complete.
+  // A recorded dictation clip is still being taken or transcribed. "+ Other
+  // product" and Complete wait for it, so the words are not missed.
   const [dictationPending, setDictationPending] = useState(false);
+  // The treatment zone tracer opens over the sheet, which is inert meanwhile.
+  const [overlay, setOverlay] = useState(null);
 
-  // The server says this visit needs the full form: open it, once.
+  // The server says this visit does not use this sheet: the parent opens the
+  // full form, once. (No button on the sheet leads there.)
   const handedOff = useRef(false);
   useEffect(() => {
     if (ctx.handoff && !handedOff.current) {
@@ -519,19 +518,18 @@ export default function FastCompleteLawnSheet({ service, request, catalog = [], 
     else onClose?.(ctx.blockedReason || submission.failure ? { refresh: true } : undefined);
   }, [submitting, done, ctx.blockedReason, submission.failure, onClose, onCompleted]);
   closeRef.current = close;
-  // Nothing is editable while a save is in flight, unresolved or refused for
-  // good; the full form can't resume a /complete attempt.
+  // Nothing is editable while a save is in flight, unresolved or refused for good.
   const locked = submitting || submission.failure !== null;
 
   return (
-    <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} onDismiss={close}>
-      <SheetHeader titleId={titleId} title={done ? 'Lawn visit complete' : 'Complete lawn visit'} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending} submitting={submitting} onFullForm={onFullForm} onClose={close} />
-      <SheetBody service={service} request={request} catalog={catalog} ctx={ctx} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} />
+    <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} onDismiss={close} hiddenProps={overlay ? INERT : undefined} overlay={overlay}>
+      <SheetHeader titleId={titleId} title={done ? 'Lawn visit complete' : 'Complete lawn visit'} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending} submitting={submitting} noFullForm onClose={close} />
+      <SheetBody service={service} request={request} catalog={catalog} ctx={ctx} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onOverlay={setOverlay} onCompleted={onCompleted} isMobile={isMobile} />
     </FastCompleteFrame>
   );
 }
 
-function SheetBody({ service, request, catalog, ctx, submission, locked, dictationPending, onDictationPending, onCompleted, onFullForm, isMobile }) {
+function SheetBody({ service, request, catalog, ctx, submission, locked, dictationPending, onDictationPending, onOverlay, onCompleted, isMobile }) {
   if (submission.done) return <SavedView service={service} summary={submission.done.summary} onCompleted={() => onCompleted?.(submission.done.response || null)} />;
   if (ctx.loading) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Loading…</ActionFeedback>;
   if (ctx.handoff) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Opening the full form…</ActionFeedback>;
@@ -541,13 +539,12 @@ function SheetBody({ service, request, catalog, ctx, submission, locked, dictati
         <ActionFeedback error className="tech-visit-feedback tech-visit-loading">{ctx.loadError}</ActionFeedback>
         <div className="tech-visit-actions">
           <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" onClick={ctx.retry}>Try again</Button>
-          <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" onClick={onFullForm}>Open the full form</Button>
         </div>
       </div>
     );
   }
   if (ctx.blockedReason) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">{ctx.blockedReason}</ActionFeedback>;
-  return <LawnFastForm service={service} request={request} catalog={catalog} ctx={ctx} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={onDictationPending} onFullForm={onFullForm} isMobile={isMobile} />;
+  return <LawnFastForm service={service} request={request} catalog={catalog} ctx={ctx} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={onDictationPending} onOverlay={onOverlay} isMobile={isMobile} />;
 }
 
 // The photo step's report of the confirmed assessment, plus the context's own
@@ -579,20 +576,20 @@ function useConfirmedAssessment(ctxAssessment) {
   }, []);
   const contextId = ctxAssessment?.confirmed === true && ctxAssessment.id && !ctxAssessment.unusableReason ? ctxAssessment.id : null;
   const assessmentId = blockId || (!retaking && ready === 'failed' ? contextId : null);
-  return { assessmentId, assessmentReady: ready, retaking, settles, onConfirmed, onReady };
+  return { assessmentId, assessmentReady: ready, settles, onConfirmed, onReady };
 }
 
 // Zero stock holds Complete unless the server is known to let it through:
 // negative inventory is allowed only for a real WaveGuard tier lawn completion
 // (isWaveGuardLawnCompletion). The context's answer wins; else the schedule row.
-// A product with no amount deducts nothing, so it never holds. Check stock reads
-// the catalog again for a product restocked while the sheet is open.
+// A product with no amount deducts nothing, so it never holds. Check stock
+// reads the catalog again for a product restocked while the sheet is open.
 function useStockHold({ ctx, service, rows, products, request }) {
   const stockAdvisory = typeof ctx.stockAdvisory === 'boolean'
     ? ctx.stockAdvisory
     : WAVEGUARD_TIERS.has(service?.waveguardTier) && detectServiceCategory(service?.serviceType) === 'lawn';
   const stockRow = !stockAdvisory
-    && rows.find((row) => row.active && hasAmount(row) && stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
+    && rows.find((row) => hasAmount(row) && stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
   const [checkingStock, setCheckingStock] = useState(false);
   const checkStock = async () => {
     setCheckingStock(true);
@@ -607,13 +604,16 @@ function useStockHold({ ctx, service, rows, products, request }) {
   return { stockRow, checkingStock, checkStock };
 }
 
-function LawnFastForm({ service, request, catalog, ctx, submission, locked, dictationPending, onDictationPending, onFullForm, isMobile }) {
+function LawnFastForm({ service, request, catalog, ctx, submission, locked, dictationPending, onDictationPending, onOverlay, isMobile }) {
   const base = `/admin/dispatch/${service?.id}`;
   // From the context's findingsType only (the live profile), never the schedule row.
   const typed = ctx.findingsType === LAWN_FINDINGS_TYPE;
   const products = useProductRows(ctx, catalog);
   const { rows } = products;
-  const [form, setForm] = useState({ note: '', condition: '', tipId: '', customTip: '' });
+  const planSqft = useMemo(() => lawnSqftOf(ctx.planned), [ctx.planned]);
+  const profileSqft = useProfileLawnSqft({ request, customerId: ctx.raw?.customerId ?? service?.routedCustomerId ?? null, needed: planSqft == null });
+  const lawnSqft = planSqft ?? profileSqft;
+  const [form, setForm] = useState({ note: '', condition: '', tipId: '', customTip: '', blogPost: null });
   const setField = useCallback((key, value) => setForm((prev) => ({ ...prev, [key]: value })), []);
   // Each dictated chunk joins what is already in the box.
   const appendNote = useCallback((text) => {
@@ -621,24 +621,21 @@ function LawnFastForm({ service, request, catalog, ctx, submission, locked, dict
   }, []);
 
   // The photo step reports back: the confirmed assessment's id (null until
-  // there is one) and whether a lookup, analysis or confirm is in flight.
-  const { assessmentId, assessmentReady, retaking, settles, onConfirmed, onReady } = useConfirmedAssessment(ctx.assessment);
+  // there is one), whether a lookup, analysis or confirm is in flight, and how
+  // many photos are held / whether an analysis result is on screen.
+  const { assessmentId, assessmentReady, settles, onConfirmed, onReady } = useConfirmedAssessment(ctx.assessment);
+  const [progress, setProgress] = useState({ photos: 0, assessed: false });
   // The tips are ranked by this visit's assessment, so they are read again each
-  // time an analysis or confirm settles: a retake's new unconfirmed row drops
-  // the old lift at once, and the confirm brings in the new one.
+  // time an analysis or confirm settles.
   const tips = useTipLibrary({ base, request, refreshKey: settles });
   const tipsAvailable = !!tips;
-  const [gaugeHeightIn, setGaugeHeightIn] = useState(null);
+  // The blog post search is offered while the server answers available.
+  const blog = useBlogPostOffer({ base, request });
   const blockService = useMemo(() => ({ id: service?.id, customerId: ctx.raw?.customerId ?? service?.routedCustomerId ?? null }), [service?.id, service?.routedCustomerId, ctx.raw?.customerId]);
   // A confirmed assessment the report would reject (made for the visit's
   // former property) does not count until the tech analyzes again.
   const unusable = !!assessmentId && !!ctx.assessment?.unusableReason && String(assessmentId) === String(ctx.assessment.id);
-  // The server's own warning for a saved assessment below the photo minimum. The
-  // photo step hides its hint once an assessment is confirmed, so it shows here;
-  // never while the step's own hint is up (no assessment, or a retake).
-  const photoAdvisory = !retaking && !!assessmentId && String(assessmentId) === String(ctx.assessment?.id)
-    ? ctx.photoStatus?.warning || ''
-    : '';
+  const [traced, setTraced] = useState(false);
 
   const { stockRow, checkingStock, checkStock } = useStockHold({ ctx, service, rows, products, request });
 
@@ -649,26 +646,38 @@ function LawnFastForm({ service, request, catalog, ctx, submission, locked, dict
     rows,
     locked: locked || dictationPending,
     isMobile,
-    onFullForm,
     onPick: products.addProduct,
   });
 
-  const missingReason = missingRequirement({ form, rows, ctx, assessmentId, assessmentReady, unusable, gaugeHeightIn, typed, dictationPending, stockRow });
+  const missingReason = missingRequirement({ form, rows, lawnSqft, photos: progress.photos, assessed: progress.assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow });
   const submit = () => {
     if (missingReason && !submission.hasPendingBody()) return;
-    const names = rows.filter((row) => row.active).map((row) => row.name).join(', ');
+    const names = rows.map((row) => row.name).join(', ');
     submission.submit(
-      () => completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, typed, tipsAvailable }),
+      () => completionBody({ form, rows, ctx, assessmentId, lawnSqft, typed, tipsAvailable }),
       [names, 'Lawn assessment confirmed'].filter(Boolean).join(' · '),
     );
   };
-  const activeIds = useMemo(() => rows.filter((row) => row.active).map((row) => String(row.productId)).sort(), [rows]);
+  // The tracer opens over the sheet, as the pest sheet's does.
+  const openTracer = () => onOverlay(
+    <TechTreatmentZoneModal
+      serviceId={service.id}
+      expectedPropertyId={ctx.visit && 'propertyId' in ctx.visit ? ctx.visit.propertyId : undefined}
+      customerName={ctx.visit?.customerName || service?.customerName || 'Customer'}
+      address={service.routedAddress || service.address || ''}
+      lat={service.lat}
+      lng={service.lng}
+      lawnMode
+      onClose={() => onOverlay(null)}
+      onSaved={() => setTraced(true)}
+    />,
+  );
 
   return (
     <div className="tech-visit-form-area">
       <div className="tech-visit-body" {...picker.coverProps}>
         <fieldset className="tech-visit-form" disabled={locked}>
-          {ctx.reCheck && <p className="tech-visit-muted tech-visit-status--warn" role="status">{ctx.reCheck}</p>}
+          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked} />
           <section className="tech-visit-choice-section">
             <div className="tech-visit-section-head">
               <h3 className="tech-visit-section-title">Lawn photos</h3>
@@ -676,21 +685,18 @@ function LawnFastForm({ service, request, catalog, ctx, submission, locked, dict
             </div>
             <div className="tech-visit-light-card">
               <LawnAssessmentCompletionBlock
+                compact
                 service={blockService}
                 request={request}
                 disabled={locked || dictationPending}
                 onConfirmed={onConfirmed}
                 onReady={onReady}
-                showGaugeReading={ctx.turfHeightCapture}
-                gaugeHeightIn={gaugeHeightIn}
-                onGaugeHeight={setGaugeHeightIn}
+                onProgress={setProgress}
                 technicianNotes={form.note}
               />
             </div>
-            {photoAdvisory && <p className="tech-visit-muted" role="status">{photoAdvisory}</p>}
           </section>
-          <ProductsSection ctx={ctx} products={products} locked={locked || dictationPending} other={picker.button} popover={picker.popover} />
-          <WateringPreview base={base} request={request} productIds={activeIds} />
+          <ProductsSection ctx={ctx} products={products} lawnSqft={lawnSqft} locked={locked || dictationPending} other={picker.button} popover={picker.popover} />
           {typed && (
             <ChoiceSection title="Lawn condition" columns={3}>
               {LAWN_CONDITION_OPTIONS.map((label) => (
@@ -698,7 +704,6 @@ function LawnFastForm({ service, request, catalog, ctx, submission, locked, dict
               ))}
             </ChoiceSection>
           )}
-          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked} />
           {tipsAvailable && (
             <TipSection
               library={tips}
@@ -709,12 +714,27 @@ function LawnFastForm({ service, request, catalog, ctx, submission, locked, dict
               onCustom={(value) => setForm((prev) => ({ ...prev, customTip: value, tipId: value.trim() ? '' : prev.tipId }))}
             />
           )}
+          {blog.available && (
+            <BlogPostSection search={blog.search} value={form.blogPost} locked={locked} onChange={(post) => setField('blogPost', post)} />
+          )}
+          {service.traceEligible !== false && (
+            <section className="tech-visit-choice-section" aria-label="Treatment zone map">
+              <div className="tech-visit-section-head">
+                <h3 className="tech-visit-section-title">Treatment zone map</h3>
+                <span className="tech-visit-muted">{traced ? 'Saved' : 'Optional'}</span>
+              </div>
+              <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" disabled={locked || dictationPending} onClick={openTracer}>
+                {traced ? 'Change the treated lawn outline' : 'Outline the treated lawn'}
+              </Button>
+            </section>
+          )}
         </fieldset>
         {submission.submitting && <ActionFeedback className="tech-visit-feedback">Saving completion…</ActionFeedback>}
       </div>
       <CompleteFooter
         submission={submission}
         missingReason={missingReason}
+        reasonInButton={LABEL_REASONS.has(missingReason)}
         warn={!!stockRow}
         label="Complete lawn visit"
         onSubmit={submit}
@@ -722,9 +742,6 @@ function LawnFastForm({ service, request, catalog, ctx, submission, locked, dict
       >
         {(stockRow || submission.error === STOCK_LOCKOUT_MESSAGE) && !locked && (
           <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={checkingStock} onClick={checkStock}>Check stock</Button>
-        )}
-        {submission.failure === 'terminal' && (
-          <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" onClick={onFullForm}>Open the full form</Button>
         )}
       </CompleteFooter>
       {picker.sheet}
@@ -734,143 +751,49 @@ function LawnFastForm({ service, request, catalog, ctx, submission, locked, dict
 
 // ── products ────────────────────────────────────────────────────────────────
 
-function ProductsSection({ ctx, products, locked, other, popover }) {
+// Each product on the sheet: the plan's, or one the tech added. The amount can
+// change and any product can go (a removed plan product is recorded as
+// skipped). No area and no rate box.
+function ProductsSection({ ctx, products, lawnSqft, locked, other, popover }) {
   const { rows, updateRow, removeRow } = products;
-  const planned = rows.some((row) => row.planned);
-  let hint = 'Add what you applied';
-  if (planned) hint = 'Planned products are on. Turn off what you did not use';
   return (
     <section className="tech-visit-choice-section">
       <div className="tech-visit-section-head">
         <h3 className="tech-visit-section-title">Products used</h3>
-        <span className="tech-visit-muted">{hint}</span>
+        <span className="tech-visit-muted">{rows.some((row) => row.planned) ? 'Planned products are on' : 'Add what you applied'}</span>
       </div>
-      {ctx.plannedUnavailable && !planned && (
+      {ctx.plannedUnavailable && !rows.some((row) => row.planned) && (
         <p className="tech-visit-muted" role="status">The planned products could not be loaded. Add what you applied.</p>
       )}
       {!rows.length && !ctx.plannedUnavailable && (
-        <p className="tech-visit-muted">No products yet. Add what you applied, or none if you applied nothing.</p>
+        <p className="tech-visit-muted">No products yet. Add what you applied.</p>
       )}
-      <div className="tech-visit-tile-grid">
-        {rows.map((row) => (
-          <ProductTile key={row.productId} row={row} locked={locked} onClick={() => updateRow(row.productId, { active: !row.active })} />
-        ))}
-      </div>
-      {rows.filter((row) => row.active).map((row) => (
-        <ProductEditor key={row.productId} row={row} locked={locked} onChange={(patch) => updateRow(row.productId, patch)} onRemove={() => removeRow(row.productId)} />
+      {rows.map((row) => (
+        <ProductEditor key={row.productId} row={row} lawnSqft={lawnSqft} locked={locked} onChange={(patch) => updateRow(row.productId, patch)} onRemove={() => removeRow(row.productId)} />
       ))}
       <OtherProductButton {...other} popover={popover} />
     </section>
   );
 }
 
-function ProductTile({ row, locked, onClick }) {
-  let detail = 'Tap if applied';
-  if (row.active) detail = hasAmount(row) ? amountText(row.totalAmount, row.amountUnit) : 'No amount yet';
-  return (
-    <ProductTileButton
-      row={row}
-      detail={detail}
-      off={!row.active}
-      added={row.added && row.active}
-      ariaProps={{ 'aria-pressed': row.active }}
-      disabled={locked}
-      onClick={onClick}
-    />
-  );
-}
-
-// An applied product: the amount, how it went down, and the square feet when
-// the way it went down needs them.
-function ProductEditor({ row, locked, onChange, onRemove }) {
+// A product: its name, how it goes down (and the whole-lawn area when the way
+// it goes down needs one), the amount, and Remove.
+function ProductEditor({ row, lawnSqft, locked, onChange, onRemove }) {
   const nameId = useId();
-  const areaId = useId();
-  const methodId = useId();
-  // The row's original method (planned or catalog) is always among the choices,
-  // last when it is not one of the three, so a mis-tap can be undone.
-  const choices = METHOD_CHOICES.some((choice) => choice.value === row.originalMethod)
-    ? METHOD_CHOICES
-    : [...METHOD_CHOICES, { value: row.originalMethod, label: methodLabel(row.originalMethod) }];
+  const area = areaOf(row, lawnSqft);
+  const how = [methodLabel(row.method), area ? `whole lawn, ${area.toLocaleString('en-US')} sq ft` : null].filter(Boolean).join(' · ');
   return (
     <div role="group" aria-labelledby={nameId} className="tech-product-editor">
       <div className="tech-product-editor-head">
         <h4 id={nameId} className="tech-product-editor-name">{row.name}</h4>
         <span className="tech-visit-muted">{[categoryLabel(row.product), row.added ? 'added by you' : 'planned'].filter(Boolean).join(' · ')}</span>
       </div>
-      <div>
-        <AmountRow row={row} rate={NO_RATE} onChange={onChange} />
-        {row.fromPlan && <p className="tech-visit-muted">Planned amount</p>}
-        {plannedRateOf(row) && <p className="tech-visit-muted">{plannedRateText(plannedRateOf(row))}</p>}
-        {!hasAmount(row) && <p className="tech-visit-muted" role="status">No amount entered. It is recorded without one.</p>}
-        <div>
-          <span id={methodId} className="tech-product-editor-label">How</span>
-          <div role="group" aria-labelledby={methodId} className="tech-visit-tile-grid">
-            {choices.map((choice) => (
-              <Chip disabled={locked} key={choice.value} label={choice.label} pressed={row.method === choice.value} onClick={() => onChange({ method: choice.value })} />
-            ))}
-          </div>
-        </div>
-        {needsArea(row) && (
-          <div>
-            <label htmlFor={areaId} className="tech-product-editor-label">{requirementOf(row).label}</label>
-            <Input
-              id={areaId}
-              className="tech-visit-control tech-product-amount-input"
-              type="number"
-              inputMode="decimal"
-              min="0"
-              step="any"
-              disabled={locked}
-              value={row.area}
-              onChange={(e) => onChange({ area: e.target.value })}
-            />
-            {row.areaFrom && <p className="tech-visit-muted">{row.areaFrom}</p>}
-          </div>
-        )}
-        {row.added && (
-          <div className="tech-product-editor-actions">
-            <Button type="button" variant="secondary" className="tech-visit-action tech-product-remove" disabled={locked} onClick={onRemove}>Remove</Button>
-          </div>
-        )}
+      <p className="tech-visit-muted">{how}</p>
+      <AmountRow row={row} rate={NO_RATE} onChange={onChange} />
+      {!hasAmount(row) && <p className="tech-visit-muted" role="status">No amount entered. It is recorded without one.</p>}
+      <div className="tech-product-editor-actions">
+        <Button type="button" variant="secondary" className="tech-visit-action tech-product-remove" disabled={locked} onClick={onRemove}>Remove</Button>
       </div>
     </div>
-  );
-}
-
-// ── watering ────────────────────────────────────────────────────────────────
-
-// What the customer report would say about watering. Times are labeled "if
-// completed now" while the visit is still open. When the server could not build
-// the instruction (`omitted`), nothing is guessed: a neutral note stands in.
-function WateringPreview({ base, request, productIds }) {
-  const preview = useWateringPreview({ base, request, productIds });
-  if (preview.status === 'idle') return null;
-  const data = preview.data;
-  let body;
-  if (preview.status === 'loading') {
-    body = <p className="tech-visit-muted" role="status">Checking the watering instruction…</p>;
-  } else if (preview.status === 'failed' || (Array.isArray(data?.omitted) && data.omitted.length > 0)) {
-    body = <p className="tech-visit-muted" role="status">The watering instruction is not shown here. The customer report has its own.</p>;
-  } else if (data?.sentence || data?.mowHold?.line) {
-    const lines = data.sentence ? [data.sentence] : [];
-    body = (
-      <>
-        {lines.map((line) => <p key={line} className="tech-visit-promise-text">{line}</p>)}
-        {data.mowHold?.line && <p className="tech-visit-promise-text">{data.mowHold.line}</p>}
-        {Array.isArray(data.provisional) && data.provisional.includes('completionTime') && (
-          <p className="tech-visit-muted">Times are if completed now.</p>
-        )}
-      </>
-    );
-  } else {
-    return null;
-  }
-  return (
-    <section className="tech-visit-choice-section" aria-label="Watering after this visit">
-      <div className="tech-visit-section-head">
-        <h3 className="tech-visit-section-title">Watering after this visit</h3>
-      </div>
-      {body}
-    </section>
   );
 }

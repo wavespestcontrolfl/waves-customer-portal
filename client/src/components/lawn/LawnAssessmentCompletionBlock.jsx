@@ -182,6 +182,15 @@ export default function LawnAssessmentCompletionBlock({
   // The tech's free-text visit notes (owned by CompletionPanel) — passed through
   // so the AI photo analysis can factor them in alongside the images.
   technicianNotes = "",
+  // The Fast Complete sheet's one-screen mode (owner 2026-10-04): only the
+  // four scores (the Fungus control and Thatch condition tiles never show),
+  // each one the technician may change until the assessment is confirmed
+  // (an input prefilled with the AI read, "AI n" under a changed one), then
+  // Confirm assessment and Retake as ever. onProgress reports { photos,
+  // assessed } so the sheet can say what is missing. The full completion form
+  // passes neither and is unchanged.
+  compact = false,
+  onProgress,
 }) {
   const [photos, setPhotosState] = useState([]);
   // The photo list's source of truth is this ref: every change goes through
@@ -262,7 +271,7 @@ export default function LawnAssessmentCompletionBlock({
         });
         // A confirmed row shows exactly what was saved (and what the customer
         // report uses); only a pending row shows the AI read for locked keys.
-        setTechScores(assessment.confirmed_by_tech ? scores : withAiScores(scores, resolveAiScores(assessment, data.visitAssessment, data.aiScores)));
+        setTechScores(assessment.confirmed_by_tech || compact ? scores : withAiScores(scores, resolveAiScores(assessment, data.visitAssessment, data.aiScores)));
         setTypedKeys(new Set());
         setVisitReview(createVisitReview(data.visitAssessment, assessment.observations));
         if (assessment.confirmed_by_tech) {
@@ -459,7 +468,7 @@ export default function LawnAssessmentCompletionBlock({
       // Show what the server actually saved.
       if (savedAssessment) {
         const saved = parseAssessmentScores(savedAssessment);
-        setTechScores(savedAssessment.confirmed_by_tech ? saved : withAiScores(saved, result.aiScores));
+        setTechScores(savedAssessment.confirmed_by_tech || compact ? saved : withAiScores(saved, result.aiScores));
         setTypedKeys(new Set());
       }
       if (visitAssessment) {
@@ -469,7 +478,9 @@ export default function LawnAssessmentCompletionBlock({
       setConfirmedId(assessmentId);
       onConfirmed?.(assessmentId);
       onReady?.(true);
-      setError(assessmentId ? "" : "Scores saved. Complete the missing scores before confirming.");
+      setError(assessmentId ? "" : compact
+        ? "The photos did not give a full read. Fill any blank score, or tap Retake and analyze again."
+        : "Scores saved. Complete the missing scores before confirming.");
     } catch (err) {
       setError(err.message || "Confirm failed");
       // A definitive 4xx rejection means the write did NOT commit — null is
@@ -488,6 +499,9 @@ export default function LawnAssessmentCompletionBlock({
   const scoreSource = techScores || result?.adjustedScores || result?.displayScores || null;
   const hasResult = !!result?.assessment?.id;
   const confirmed = !!confirmedId;
+  useEffect(() => {
+    onProgress?.({ photos: photos.length, assessed: hasResult });
+  }, [photos.length, hasResult]);
   // Keep the usual four controls; expose underlying scores only when the
   // saved assessment lacks them. Keep them editable until the save completes.
   // Same rule as the aiValue check below: whether an underlying signal is
@@ -495,10 +509,11 @@ export default function LawnAssessmentCompletionBlock({
   // mutable assessment row — otherwise a prior save's fill of a genuinely
   // blank Fungus/Thatch would hide the tile entirely on reload instead of
   // keeping it open for correction (Codex P1 2026-09-24).
-  const metrics = [...LAWN_ASSESSMENT_METRICS, ...[
+  // The one-screen sheet never shows those two extra tiles.
+  const metrics = [...LAWN_ASSESSMENT_METRICS, ...(compact ? [] : [
     { key: "fungus_control", label: "Fungus control" },
     { key: "thatch_level", label: "Thatch condition" },
-  ].filter((metric) => !confirmed && lawnScores.lawnScoreValue(result?.aiScores?.[metric.key]) == null)];
+  ].filter((metric) => !confirmed && lawnScores.lawnScoreValue(result?.aiScores?.[metric.key]) == null))];
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -543,7 +558,7 @@ export default function LawnAssessmentCompletionBlock({
             {!modeKnown && <span role="status" data-testid="lawn-photo-mode-pending" style={{ fontSize: 14, color: D.muted }}>Checking photo options…</span>}
           </>
         )}
-            {showGaugeReading && (
+            {showGaugeReading && !compact && (
               <>
                 <span style={{ fontSize: 14, color: D.muted, fontWeight: 500 }}>Lawn length</span>
                 <input
@@ -726,14 +741,48 @@ export default function LawnAssessmentCompletionBlock({
                     minWidth: 0,
                   }}
                 >
-                  <div style={{ fontSize: 15, fontWeight: 500, color: value == null ? D.muted : lawnScoreColor(value), lineHeight: 1.1 }}>
-                    {value == null ? "—" : `${value}/100`}
-                  </div>
+                  {compact && !confirmed ? (
+                    // The sheet's tile (owner 2026-10-04): the tech may change
+                    // any of the four until Confirm. An emptied field posts null,
+                    // which goes back to the AI's score.
+                    <input
+                      type="number"
+                      inputMode="numeric"
+                      min={0}
+                      max={100}
+                      value={techScores?.[metric.key] ?? ""}
+                      disabled={disabled || confirming}
+                      aria-label={`${metric.label} score`}
+                      placeholder="0-100"
+                      onChange={(e) => fillScore(metric.key, e.target.value)}
+                      style={{
+                        width: "100%",
+                        height: 36,
+                        padding: "0 4px",
+                        borderRadius: 6,
+                        border: `1px solid ${D.border}`,
+                        background: D.white,
+                        color: value == null ? D.heading : lawnScoreColor(value),
+                        // 16px keeps iOS Safari from zooming the page on focus.
+                        fontSize: 16,
+                        fontWeight: 500,
+                        textAlign: "center",
+                        boxSizing: "border-box",
+                      }}
+                    />
+                  ) : (
+                    <div style={{ fontSize: 15, fontWeight: 500, color: value == null ? D.muted : lawnScoreColor(value), lineHeight: 1.1 }}>
+                      {value == null ? "—" : `${value}/100`}
+                    </div>
+                  )}
                   <div style={{ fontSize: 14, color: D.muted, marginTop: 3 }}>{metric.label}</div>
+                  {compact && !confirmed && aiValue != null && aiValue !== value && (
+                    <div data-testid={`lawn-ai-score-${metric.key}`} style={{ fontSize: 14, color: D.muted, marginTop: 2 }}>AI {aiValue}</div>
+                  )}
                   {/* AI-known scores are read-only (owner ruling 2026-09-24).
                       A metric the AI left blank (aiValue == null) is the one
                       the tech can fill — the server enforces this too. */}
-                  {!confirmed && aiValue == null && (
+                  {!compact && !confirmed && aiValue == null && (
                     <input
                       type="number"
                       inputMode="numeric"
