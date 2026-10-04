@@ -1351,6 +1351,11 @@ describe('smartStatusSummary — re-service (callback) branch', () => {
         .toBe('Pest activity today: very low.');
       expect(smartStatusSummary(pestVisit({ pestPressure: { enabled: true, showOnCustomerReport: false, label: 'Very Low' } }), 'static').result)
         .toBe('We treated outside and inside.');
+      // null = the product load failed: re-entry timers stay, the claim does not.
+      expect(smartStatusSummary(pestVisit({ treatmentPerformed: null }), 'static').result)
+        .toBe('Pest activity today: very low.');
+      expect(smartStatusSummary(pestVisit({ treatmentPerformed: undefined }), 'static').result)
+        .toBe('Pest activity today: very low.');
       expect(smartStatusSummary(pestVisit({ treatmentPerformed: false, pestPressure: null }), 'static').result)
         .toBe('Service completed. Visit details are below.');
     });

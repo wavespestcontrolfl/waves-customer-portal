@@ -141,6 +141,23 @@ is the pure builder.
 The PDF prints `youToldUs` and `whatWeDid`; its cache key gains `-rcd1` only
 when the card is present.
 
+**Owner 2026-10-04: the `rain` key is no longer emitted.** The "Rain and your
+treatment" card is off the pest report, on the live page and the PDF.
+`buildPestExpectations` composes only `spiders` and `whatToExpect`
+(`PEST_RAIN_CARD_ON = false` in
+`server/services/service-report/pest-report-expectations.js`), so
+`data.pestReportV2.expectations` carries at most those two keys, and a visit
+whose only expectation was rain carries no `expectations` key at all. The
+pest PDF cache key suffix moved from `-pex2` to `-pex3`, so cached PDFs
+re-render once without the section. Everything below that describes
+`rain.lines` is the behavior that returns if the constant is turned back on.
+The same day the live page changed two client-only lines from fields it
+already receives: "Today's result" on a routine Pest V2 visit (re-entry
+targets with `treatmentPerformed === true`, plus the shown `pestPressure`
+label), and the "Your plan" card (`planSummary` counts as a sentence,
+`waveGuardTier`, the next same-service visit date, `reserviceEligible`). No
+payload field was added for either.
+
 Pest Report V2 "expectations" blocks (owner-approved 2026-09-27/28,
 `GATE_PEST_REPORT_EXPECTATIONS` — dark, off unless exactly `'true'`, read at
 call time, no redeploy to flip): on the pest-line service-report payload

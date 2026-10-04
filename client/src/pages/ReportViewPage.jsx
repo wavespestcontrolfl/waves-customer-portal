@@ -1073,15 +1073,17 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
 
 // "Today's result" on a routine Pest V2 visit (owner 2026-10-04: "Service
 // completed. Visit details are below." says nothing). Two facts the record
-// already carries: where we treated (the re-entry targets, which exist only
-// for a recorded application) and the activity the customer is shown on the
+// already carries: where we treated (the re-entry targets of a visit the
+// server confirms was treated) and the activity the customer is shown on the
 // pressure gauge. No treatment and no shown pressure => null, and the caller
 // keeps the generic line.
 function pestVisitResultLine(data = {}) {
   if (!data.pestReportV2) return null;
-  const targets = data.treatmentPerformed === false || !Array.isArray(data.dynamicContext?.reentry?.targets)
-    ? []
-    : data.dynamicContext.reentry.targets;
+  // Only on the server's affirmative verdict: null (product load failed)
+  // keeps its advisory re-entry timers, and those are not proof of treatment.
+  const targets = data.treatmentPerformed === true && Array.isArray(data.dynamicContext?.reentry?.targets)
+    ? data.dynamicContext.reentry.targets
+    : [];
   const outside = targets.some((target) => target?.key === 'exterior');
   const inside = targets.some((target) => target?.key === 'interior');
   let where = null;
