@@ -2099,6 +2099,10 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       // (no property_id on this insert ⇒ inert until linkage; explicit so
       // every booking path answers the stamping audit).
       await require('../services/visit-groups').maybeGroupRow(appt.id, { database: trx, createdBy: 'dispatch' });
+      // Two-treatment package (cockroach / flea): visit 2 books with visit 1
+      // — gate-dark, savepoint-isolated, no-op for every other service
+      // (package-followup-booking.js).
+      await require('../services/package-followup-booking').ensurePackageFollowUpVisit({ trx, primary: appt, cols });
 
       // Inspection credit: mark the qualifying booking IN-TRANSACTION so
       // the evidence commits with the booking (Codex #3178 P1). Dark behind

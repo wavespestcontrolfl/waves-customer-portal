@@ -862,6 +862,37 @@ describe('callBookingInvoiceOnComplete', () => {
 describe('resolveCallFollowUpPlan', () => {
   const roach = CATALOG[0];
 
+  describe('two-treatment package rows (GATE_PACKAGE_FOLLOWUP_AUTOBOOK)', () => {
+    const prior = process.env.GATE_PACKAGE_FOLLOWUP_AUTOBOOK;
+    afterEach(() => {
+      if (prior === undefined) delete process.env.GATE_PACKAGE_FOLLOWUP_AUTOBOOK;
+      else process.env.GATE_PACKAGE_FOLLOWUP_AUTOBOOK = prior;
+    });
+
+    test('gate on: a cockroach_control booking plans visit 2 with no transcript mention', () => {
+      process.env.GATE_PACKAGE_FOLLOWUP_AUTOBOOK = 'true';
+      const plan = resolveCallFollowUpPlan({
+        extracted: {},
+        catalogRow: roach,
+        parentDate: '2026-07-02',
+        parentWindowStart: '08:00',
+      });
+      expect(plan).toEqual({ scheduledDate: '2026-07-16', windowStart: '08:00' });
+    });
+
+    test('gate on: a non-package row still needs the mention', () => {
+      process.env.GATE_PACKAGE_FOLLOWUP_AUTOBOOK = 'true';
+      expect(resolveCallFollowUpPlan({ extracted: {}, catalogRow: CATALOG[2], parentDate: '2026-07-02' })).toBeNull();
+    });
+
+    test('gate off (unset / not exactly true): byte-identical — no mention, no plan', () => {
+      delete process.env.GATE_PACKAGE_FOLLOWUP_AUTOBOOK;
+      expect(resolveCallFollowUpPlan({ extracted: {}, catalogRow: roach, parentDate: '2026-07-02' })).toBeNull();
+      process.env.GATE_PACKAGE_FOLLOWUP_AUTOBOOK = 'TRUE';
+      expect(resolveCallFollowUpPlan({ extracted: {}, catalogRow: roach, parentDate: '2026-07-02' })).toBeNull();
+    });
+  });
+
   test('mention with no date -> parent date + catalog interval, parent window', () => {
     const plan = resolveCallFollowUpPlan({
       extracted: { follow_up_visit_mentioned: true },
@@ -1447,12 +1478,13 @@ describe('shiftCallFollowUpsForParentMove (shared parent-move child shift)', () 
     });
     expect(shifted).toBe(1);
     expect(log.table).toBe('scheduled_services');
-    // Narrow filter: only the AI-call child, still pending, never confirmed.
-    expect(log.where).toEqual({
-      parent_service_id: 'svc-parent',
-      source_action: 'ai_call_pipeline_followup',
-      status: 'pending',
-      customer_confirmed: false,
+    // Narrow filter: the parent's never-customer-confirmed linked children —
+    // the AI-call child while still pending, the package auto-book child
+    // (booked confirmed) while pending or confirmed. Nothing else.
+    expect(log.where).toEqual({ parent_service_id: 'svc-parent', customer_confirmed: false });
+    expect(log.wheres).toContainEqual({
+      sql: "((source_action = ? AND status = 'pending') OR (source_action = ? AND status IN ('pending', 'confirmed')))",
+      bindings: ['ai_call_pipeline_followup', 'package_followup_auto'],
     });
     // Delta applied in SQL: scheduled_date + (to - from).
     expect(log.raws.some((r) => Array.isArray(r.bindings) && r.bindings[0] === '2026-07-05' && r.bindings[1] === '2026-07-02')).toBe(true);
@@ -1640,6 +1672,7 @@ describe('cancelCallFollowUpsForParentCancel (shared parent-cancel child cascade
       log.table = table;
       const chain = {
         where: (arg) => { log.selectWhere = arg; return chain; },
+        whereRaw: (sql, bindings) => { log.selectWhereRaw = { sql, bindings }; return chain; },
         select: () => Promise.resolve(children),
       };
       return chain;
@@ -1665,17 +1698,19 @@ describe('cancelCallFollowUpsForParentCancel (shared parent-cancel child cascade
   });
 
   test('cancels each pending, never-confirmed child through transitionJobStatus + tracking columns', async () => {
-    const { conn, log } = fakeConn({ children: [{ id: 'child-1' }, { id: 'child-2' }] });
+    const { conn, log } = fakeConn({ children: [{ id: 'child-1', status: 'pending' }, { id: 'child-2', status: 'confirmed' }] });
     const cancelled = await cancelCallFollowUpsForParentCancel({ conn, parentServiceId: 'svc-parent' });
     expect(cancelled).toBe(2);
-    // Narrow filter: only the AI-call child, still pending, never confirmed.
-    expect(log.selectWhere).toEqual({
-      parent_service_id: 'svc-parent',
-      source_action: 'ai_call_pipeline_followup',
-      status: 'pending',
-      customer_confirmed: false,
+    // Narrow filter: the parent's never-customer-confirmed linked children
+    // (AI-call child while pending; package auto-book child pending or confirmed).
+    expect(log.selectWhere).toEqual({ parent_service_id: 'svc-parent', customer_confirmed: false });
+    expect(log.selectWhereRaw).toEqual({
+      sql: "((source_action = ? AND status = 'pending') OR (source_action = ? AND status IN ('pending', 'confirmed')))",
+      bindings: ['ai_call_pipeline_followup', 'package_followup_auto'],
     });
     expect(transitionJobStatus).toHaveBeenCalledTimes(2);
+    // Each flip starts from the child's OWN status (a confirmed package child is not 'pending').
+    expect(transitionJobStatus.mock.calls[1][0]).toMatchObject({ jobId: 'child-2', fromStatus: 'confirmed', toStatus: 'cancelled' });
     expect(transitionJobStatus.mock.calls[0][0]).toMatchObject({
       jobId: 'child-1',
       fromStatus: 'pending',

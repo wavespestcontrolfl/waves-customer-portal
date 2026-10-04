@@ -3124,6 +3124,10 @@ async function createAppointment(input, actionContext = {}) {
     // (savepoint on the trx; a grouping failure never poisons the booking;
     // the IB write-gate confirm boundary is upstream and unaffected).
     await require('../visit-groups').maybeGroupRow(created.id, { database: trx, createdBy: 'dispatch' });
+    // Two-treatment package (cockroach / flea): visit 2 books with visit 1 —
+    // gate-dark, savepoint-isolated, no-op for every other service; part of
+    // the same card-confirmed write (package-followup-booking.js).
+    await require('../package-followup-booking').ensurePackageFollowUpVisit({ trx, primary: created });
     // W0B authorization pin: a card-confirmed booking is approved as
     // credit-FREE (credit-bearing bookings are refused at proposal). Verify
     // inside the booking transaction — if an open credit appeared since the

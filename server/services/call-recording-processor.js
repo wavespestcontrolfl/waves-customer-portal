@@ -17510,8 +17510,10 @@ const CallRecordingProcessor = {
                 const displayH = hh % 12 || 12;
                 windowDisplay = `${displayH}:${String(mm).padStart(2, '0')} ${ampm}`;
               }
-              // Follow-up visit plan — only when the call specifically
-              // discussed a second/follow-up treatment (transcript-driven);
+              // Follow-up visit plan — when the call specifically discussed
+              // a second/follow-up treatment (transcript-driven), or the
+              // booked service is a two-treatment package (cockroach / flea;
+              // GATE_PACKAGE_FOLLOWUP_AUTOBOOK, owner ruling 2026-10-04);
               // date from the transcript when agreed, else parent date + the
               // service's catalog interval (default 14 days). Never for a
               // covered re-service (codex #3222 r2): the re-service IS the

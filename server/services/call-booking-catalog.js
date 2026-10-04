@@ -550,7 +550,13 @@ function resolveCallFollowUpPlan({ extracted = {}, catalogRow = null, parentDate
   const raw = String(extracted.follow_up_date_time || '').trim();
   const m = raw.match(/^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}))?/);
   const statedFutureDate = !!(m && isValidCalendarDate(m[1]) && m[1] > parentDate);
-  const mentioned = extracted.follow_up_visit_mentioned === true || statedFutureDate;
+  // A two-treatment package (cockroach / flea, owner ruling 2026-10-04) owes
+  // visit 2 whether or not the caller brought it up — behind the same gate
+  // the other booking paths use (package-followup-booking.js).
+  const { packageFollowupAutobookLive } = require('../config/feature-gates');
+  const { isPackageFollowUpServiceKey } = require('./package-followup-booking');
+  const packageRow = packageFollowupAutobookLive() && isPackageFollowUpServiceKey(catalogRow?.service_key);
+  const mentioned = extracted.follow_up_visit_mentioned === true || statedFutureDate || packageRow;
   if (!mentioned) return null;
 
   let scheduledDate = null;
@@ -595,12 +601,16 @@ function callBookingDateOnly(value) {
 // Callers invoke this best-effort outside their transaction: a failed
 // shift leaves the child where it was, and dispatch confirms follow-up
 // dates with the customer before dispatch anyway.
-const pendingCallFollowUpFilter = (parentServiceId) => ({
-  parent_service_id: parentServiceId,
-  source_action: 'ai_call_pipeline_followup',
-  status: 'pending',
-  customer_confirmed: false,
-});
+// Two child kinds ride a parent: the call pipeline's (pending until the
+// office confirms the time) and the package auto-book's
+// (package-followup-booking.js — booked CONFIRMED by owner ruling
+// 2026-10-04, so its confirmed state still means "spaced from visit 1").
+// Both stop following the parent once the CUSTOMER confirmed the date.
+const PACKAGE_FOLLOWUP_SOURCE_ACTION = 'package_followup_auto';
+const LINKED_FOLLOWUP_KIND_SQL = "((source_action = ? AND status = 'pending') OR (source_action = ? AND status IN ('pending', 'confirmed')))";
+const applyCallFollowUpFilter = (q, parentServiceId) => q
+  .where({ parent_service_id: parentServiceId, customer_confirmed: false })
+  .whereRaw(LINKED_FOLLOWUP_KIND_SQL, ['ai_call_pipeline_followup', PACKAGE_FOLLOWUP_SOURCE_ACTION]);
 
 // The still-pending, never-confirmed call-created children of a parent and
 // the day each lands on after the parent's delta — what the shift writes
@@ -612,8 +622,7 @@ async function planCallFollowUpShift({ conn, parentServiceId, fromDate, toDate }
   const fromStr = callBookingDateOnly(fromDate);
   const toStr = callBookingDateOnly(toDate);
   if (!parentServiceId || !fromStr || !toStr || fromStr === toStr) return [];
-  return conn('scheduled_services')
-    .where(pendingCallFollowUpFilter(parentServiceId))
+  return applyCallFollowUpFilter(conn('scheduled_services'), parentServiceId)
     .select('id', 'technician_id', 'window_start', 'window_end', 'estimated_duration_minutes', 'recurring_dispatch_due_date',
       conn.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"),
       conn.raw("to_char(scheduled_date + (?::date - ?::date), 'YYYY-MM-DD') as new_day", [toStr, fromStr]));
@@ -653,7 +662,6 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
   const toStr = callBookingDateOnly(toDate);
   if (!parentServiceId || !fromStr || !toStr || fromStr === toStr) return 0;
   const noticeRows = [];
-  const filter = pendingCallFollowUpFilter(parentServiceId);
   // Tech-day membership fence + route_order clear (uncapped audit r26 P1):
   // a date shift moves the child between tech-days, so it must hold the
   // same 'slot-reserve' fence every other date/tech writer holds — an
@@ -734,9 +742,7 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
           continue;
         }
       }
-      const wrote = await trx('scheduled_services')
-        .where({ id: k.id })
-        .where(filter)
+      const wrote = await applyCallFollowUpFilter(trx('scheduled_services').where({ id: k.id }), parentServiceId)
         // CAS on the locked read (knex object form renders null as IS NULL).
         .where({
           technician_id: k.technician_id ?? null,
@@ -780,8 +786,8 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
           const kept = skipped.filter((k) => k.reason !== 'changed' && k.id && /^\d{4}-\d{2}-\d{2}$/.test(String(k.day))).sort((a, b) => String(a.day).localeCompare(String(b.day)))[0];
           await NotificationService.notifyAdmin(
             'schedule_conflict',
-            'Call-booked follow-up visit kept its date',
-            `The primary visit moved, but ${skipped.length} call-booked follow-up visit(s) kept their date (${skipped.map((k) => `${k.day} → ${k.newDay}${k.reason === 'changed' ? ' — changed meanwhile' : (k.reason === 'added' ? ' — added meanwhile' : ' — slot booked')}`).join(', ')}). Re-space them from dispatch.`,
+            'Follow-up visit kept its date',
+            `The primary visit moved, but ${skipped.length} linked follow-up visit(s) kept their date (${skipped.map((k) => `${k.day} → ${k.newDay}${k.reason === 'changed' ? ' — changed meanwhile' : (k.reason === 'added' ? ' — added meanwhile' : ' — slot booked')}`).join(', ')}). Re-space them from dispatch.`,
             // The earliest follow-up proven to still sit on its day (slot booked or added meanwhile).
             { link: kept ? `/admin/dispatch?tab=schedule&date=${kept.day}&appointment=${encodeURIComponent(kept.id)}` : '/admin/dispatch?tab=schedule',
               metadata: { parentServiceId, skipped } },
@@ -835,21 +841,15 @@ async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId, actor
   if (!parentServiceId) return 0;
   const { transitionJobStatus } = require('./job-status');
   const now = new Date();
-  const children = await conn('scheduled_services')
-    .where({
-      parent_service_id: parentServiceId,
-      source_action: 'ai_call_pipeline_followup',
-      status: 'pending',
-      customer_confirmed: false,
-    })
-    .select('id');
+  const children = await applyCallFollowUpFilter(conn('scheduled_services'), parentServiceId)
+    .select('id', 'status');
   let cancelled = 0;
   for (const child of children) {
     try {
       await conn.transaction(async (trx) => {
         await transitionJobStatus({
           jobId: child.id,
-          fromStatus: 'pending',
+          fromStatus: child.status,
           toStatus: 'cancelled',
           transitionedBy: actorId || null,
           notes: `Cancelled with parent call booking ${parentServiceId}`,
@@ -865,7 +865,7 @@ async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId, actor
           });
       });
       cancelled += 1;
-      logger.info(`[call-booking] cancelled call-created follow-up ${child.id} with parent ${parentServiceId}`);
+      logger.info(`[call-booking] cancelled linked follow-up ${child.id} with parent ${parentServiceId}`);
     } catch (childErr) {
       logger.error(`[call-booking] call follow-up cancel cascade failed for child ${child.id} of ${parentServiceId}: ${childErr.message}`);
     }
@@ -891,5 +891,6 @@ module.exports = {
   shiftCallFollowUpsForParentMove,
   planCallFollowUpShift,
   cancelCallFollowUpsForParentCancel,
+  applyCallFollowUpFilter,
   DEFAULT_FOLLOW_UP_INTERVAL_DAYS,
 };
