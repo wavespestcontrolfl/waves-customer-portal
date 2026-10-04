@@ -2514,6 +2514,7 @@ export default function EstimateToolViewV2({
   // suggestion keeps the address the operator just looked up.
   function applyCustomerLink(c, { adoptAddress }) {
     const name = `${c.firstName || ""} ${c.lastName || ""}`.trim();
+    const previousPick = pickedContactRef.current;
     if (!preLinkContactRef.current) {
       // What an unlink restores. After a search-picked lead the fields hold
       // that lead's contact, not something the operator typed, so the
@@ -2522,8 +2523,10 @@ export default function EstimateToolViewV2({
         ? { customerName: "", customerPhone: "", customerEmail: "", isRecurringCustomer: form.isRecurringCustomer }
         : {
           customerName: form.customerName || "",
-          customerPhone: form.customerPhone || "",
-          customerEmail: form.customerEmail || "",
+          // Only what the operator typed: a phone or email an earlier pick
+          // left behind (its link since removed) is not restored either.
+          customerPhone: typedContact(form, "customerPhone", previousPick),
+          customerEmail: typedContact(form, "customerEmail", previousPick),
           isRecurringCustomer: form.isRecurringCustomer,
         };
     }
@@ -2546,10 +2549,10 @@ export default function EstimateToolViewV2({
         ? { ...(c.address && c.address !== f.address ? clearedPropertyFields() : {}), address: c.address || f.address }
         : {}),
       customerName: name,
-      // After a search-picked lead the fields hold THAT lead's contact: a
-      // value this customer lacks is cleared, never inherited.
-      customerPhone: c.phone || (dropSearchLead ? "" : f.customerPhone || ""),
-      customerEmail: c.email || (dropSearchLead ? "" : f.customerEmail || ""),
+      // A value this customer lacks keeps what the operator TYPED, never a
+      // phone or email an earlier pick (a lead or another customer) put there.
+      customerPhone: c.phone || (dropSearchLead ? "" : typedContact(f, "customerPhone", previousPick)),
+      customerEmail: c.email || (dropSearchLead ? "" : typedContact(f, "customerEmail", previousPick)),
       // No plan: the address suggestion resets the loyalty flag (it may have
       // been set for whoever was linked before); the lookup list keeps the
       // operator's own answer, as it always has.

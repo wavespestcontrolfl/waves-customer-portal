@@ -180,3 +180,17 @@ it('select, remove the link, select another lead: the first lead\'s contact does
   expect(document.getElementById('estimate-customerEmail')).toHaveValue('');
   expect(document.getElementById('estimate-customerPhone').value).toMatch(/0122/);
 });
+
+it('lead, remove the link, then a customer with no email: the lead\'s email does not ride along', async () => {
+  search.mockResolvedValueOnce(response([])).mockResolvedValue(response([customer]));
+  leadSearch.mockResolvedValueOnce(leadResponse([lead])).mockResolvedValue(leadResponse([]));
+  mount();
+  fireEvent.change(input(), { target: { value: 'Dana' } });
+  fireEvent.click(await screen.findByRole('button', { name: /Dana Sample.*Lead/ }));
+  fireEvent.click(screen.getByRole('button', { name: 'Remove link' }));
+  expect(document.getElementById('estimate-customerEmail')).toHaveValue('dana.sample@example.com');
+  fireEvent.change(input(), { target: { value: 'Jamie' } });
+  fireEvent.click(await screen.findByRole('button', { name: /Jamie Fixture/ }));
+  expect(document.getElementById('estimate-customerName')).toHaveValue('Jamie Fixture');
+  expect(document.getElementById('estimate-customerEmail')).toHaveValue('');
+});
