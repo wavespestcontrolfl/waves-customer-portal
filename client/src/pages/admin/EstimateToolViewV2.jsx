@@ -1875,6 +1875,12 @@ export default function EstimateToolViewV2({
   const [customerSearch, setCustomerSearch] = useState("");
   const [customerSearchStatus, setCustomerSearchStatus] = useState("idle");
   const [customers, setCustomers] = useState([]);
+  // Open leads with no customer record that match the same search. A lead
+  // (a call, an email inquiry, a held or hand-entered request) is not in the
+  // customers list, so without this the operator could not find the person.
+  const [leadMatches, setLeadMatches] = useState([]);
+  // The lead picked from that list, for the "Linked to lead" line.
+  const [linkedLead, setLinkedLead] = useState(null);
   const [generating, setGenerating] = useState(false);
   const [saving, setSaving] = useState(false);
   const [sending, setSending] = useState(false);
@@ -2405,6 +2411,7 @@ export default function EstimateToolViewV2({
   useEffect(() => {
     const q = customerSearch.trim();
     setCustomers([]);
+    setLeadMatches([]);
     if (q.length < 2) {
       setCustomerSearchStatus("idle");
       return;
@@ -2420,8 +2427,25 @@ export default function EstimateToolViewV2({
         );
         if (!response.ok) throw new Error("Customer search failed");
         const data = await response.json();
+        // Leads ride along best-effort: a failed lead search must not cost
+        // the customer results. A lead that already has a customer record is
+        // found through that customer, so only customer-less leads are listed.
+        let leads = [];
+        try {
+          const leadResponse = await fetch(
+            `/api/admin/leads?status=open&limit=8&search=${encodeURIComponent(q)}`,
+            { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal },
+          );
+          if (leadResponse.ok) {
+            const leadData = await leadResponse.json();
+            leads = (leadData.leads || []).filter((lead) => lead && lead.id && !lead.customer_id);
+          }
+        } catch {
+          leads = [];
+        }
         if (active) {
           setCustomers(data.customers || data || []);
+          setLeadMatches(leads);
           setCustomerSearchStatus("done");
         }
       } catch {
@@ -2492,11 +2516,51 @@ export default function EstimateToolViewV2({
     setAddressMatches([]);
     setCustomerSearch("");
     setCustomers([]);
+    setLeadMatches([]);
     // isRecurringCustomer is a pricing input — a preview or saved row priced
     // before the link is stale.
     setEstimate(null);
     setSavedId(null);
     setSavedViewUrl(null);
+  }
+
+  // Picking a lead from the search fills the same fields the Leads page's
+  // Create Estimate button passes (leadEstimateParams in LeadsTabs.jsx) and
+  // ties the estimate to that lead. No customer is linked: a lead has none.
+  function applyLeadLink(lead) {
+    const name = [lead.first_name, lead.last_name].filter(Boolean).join(" ").trim();
+    setForm((f) => ({
+      ...f,
+      leadId: lead.id,
+      customerId: "",
+      propertyId: "",
+      ...(lead.address && lead.address !== f.address ? clearedPropertyFields() : {}),
+      address: lead.address || f.address,
+      customerName: name || f.customerName || "",
+      customerPhone: lead.phone || "",
+      customerEmail: lead.email || "",
+      leadServiceInterest: lead.service_interest || "",
+      // A lead is not a recurring customer; the loyalty flag may have been set
+      // for whoever was linked before.
+      isRecurringCustomer: "NO",
+    }));
+    preLinkContactRef.current = null;
+    setExistingCustomerMatch(null);
+    setLinkedLead({ id: lead.id, name: name || "(no name)" });
+    setAddressMatches([]);
+    setCustomerSearch("");
+    setCustomers([]);
+    setLeadMatches([]);
+    // isRecurringCustomer is a pricing input — a preview priced before the
+    // link is stale.
+    setEstimate(null);
+    setSavedId(null);
+    setSavedViewUrl(null);
+  }
+
+  function unlinkLead() {
+    setLinkedLead(null);
+    setForm((f) => ({ ...f, leadId: "" }));
   }
 
   // Unlink is offered only where a save can actually honor it: the revise
@@ -5011,11 +5075,11 @@ export default function EstimateToolViewV2({
                 />
               </Field>
               <p id="customer-search-help" className="text-14 text-ink-secondary mb-3">
-                Search by first name, last name, or full name. Phone, email, and address also work.
+                Search by first name, last name, or full name. Phone, email, and address also work. Leads with no customer record are listed too.
               </p>
               {customerSearchStatus === "loading" && <p role="status" className="text-14 text-ink-secondary mb-3">Searching customers…</p>}
               {customerSearchStatus === "error" && <p role="alert" className="text-14 text-alert-fg mb-3">Customer search failed. Edit your search to try again.</p>}
-              {customerSearchStatus === "done" && customers.length === 0 && <p role="status" className="text-14 text-ink-secondary mb-3">No customers found. Try a first name, last name, or full name.</p>}
+              {customerSearchStatus === "done" && customers.length === 0 && leadMatches.length === 0 && <p role="status" className="text-14 text-ink-secondary mb-3">No customers or leads found. Try a first name, last name, or full name.</p>}
               {customers.length > 0 && (
                 <div className="mb-3 border-hairline border-zinc-300 rounded-xs bg-white max-h-72 overflow-y-auto">
                   {customers.slice(0, 8).map((c) => {
@@ -5234,6 +5298,44 @@ export default function EstimateToolViewV2({
                     </div>
                   ))}
 
+                </div>
+              )}
+              {leadMatches.length > 0 && (
+                <div className="mb-3">
+                  <p className="text-14 text-ink-secondary mb-1">Leads with no customer record</p>
+                  <div className="border-hairline border-zinc-300 rounded-xs bg-white max-h-72 overflow-y-auto">
+                    {leadMatches.slice(0, 8).map((lead) => {
+                      const name = [lead.first_name, lead.last_name].filter(Boolean).join(" ").trim() || "(no name)";
+                      return (
+                        <button data-ui-text-action
+                          key={lead.id}
+                          type="button"
+                          onClick={() => applyLeadLink(lead)}
+                          className="w-full text-left px-3 py-2 border-b-hairline border-zinc-200 last:border-b-0 hover:bg-zinc-50 cursor-pointer"
+                        >
+                          <div className="text-14 text-zinc-900 font-medium">
+                            {name} <span className="font-normal text-ink-secondary">· Lead</span>
+                          </div>
+                          <div className="text-14 text-ink-secondary">
+                            {lead.address || "no address on file"}
+                            {lead.phone ? ` · ${lead.phone}` : ""}
+                            {lead.email ? ` · ${lead.email}` : ""}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+              {linkedLead && form.leadId === linkedLead.id && (
+                <div role="status" className="mb-2.5 px-3 py-2 bg-zinc-50 border-hairline border-zinc-300 rounded-xs text-14 text-zinc-900 flex items-center gap-2">
+                  <span className="flex-1 min-w-0">
+                    <span className="inline-block w-1.5 h-1.5 rounded-full bg-zinc-900 mr-1.5 align-middle" />
+                    Linked to lead: <strong>{linkedLead.name}</strong>
+                  </span>
+                  <button data-ui-text-action type="button" onClick={unlinkLead} className="text-14 underline cursor-pointer">
+                    Remove link
+                  </button>
                 </div>
               )}
               {existingCustomerMatch && (
