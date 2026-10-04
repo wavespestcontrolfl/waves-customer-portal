@@ -145,8 +145,14 @@ describe('loadArrivalRouteContext({ unit })', () => {
     expect(context.grouped).toBe(false);
     expect(context.target.memberIds).toBeUndefined();
     expect(context.target.siblingWorkMinutes).toBeUndefined();
+    // Its own service rides along, so the capability checks cover the separated service.
+    expect(context.target.memberServices).toEqual([{ service_type: undefined, service_id: undefined }]);
     // Its sibling is not folded away: it stays whatever it is on the day.
     expect(context.rows.map((row) => row.id)).toEqual(['b']);
+    // Three or more services: the remainder is still a shared stop, so this stays unverified.
+    const three = await load(fakeConn({ target: stop('a'), siblings: [stop('b'), stop('c')] }), { alone: true });
+    expect(three.grouped).toBe(true);
+    expect(three.target.memberServices).toBeUndefined();
   });
 
   test('a visit with no live sibling is not grouped and is untouched by unit', async () => {

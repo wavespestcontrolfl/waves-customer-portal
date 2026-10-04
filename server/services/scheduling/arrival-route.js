@@ -120,10 +120,26 @@ async function loadVisitSiblings(conn, target, serviceId) {
   }));
 }
 
-/** The whole visit as one target, or null (gate off, or not one clean stop). */
-async function resolveVisitUnit(conn, target, stored, serviceId) {
+/** What a grouped target becomes for a caller that says how it moves: the
+ *  whole visit as one target (`unit`), the tapped service split off
+ *  (`alone`), or null — gate off, neither asked, or not certifiable — which
+ *  leaves it `grouped`. */
+async function resolveMovedVisitTarget(conn, { target, stored, serviceId, unit, alone }) {
   if (!comboRouteCheckLive()) return null;
-  return foldVisitUnit(target, stored, await loadVisitSiblings(conn, target, serviceId));
+  if (unit) return foldVisitUnit(target, stored, await loadVisitSiblings(conn, target, serviceId));
+  return alone ? resolveSeparatedTarget(conn, target, serviceId) : null;
+}
+
+/** The tapped service as a single visit once it is split off, or null (gate
+ *  off, or the visit would still hold two or more services afterwards: the
+ *  remainder is then a shared stop of its own, which this check does not
+ *  model, so the answer stays unverified). It carries its own service as
+ *  `memberServices`, so the technician capability checks cover it. */
+async function resolveSeparatedTarget(conn, target, serviceId) {
+  const others = await conn('scheduled_services').where({ visit_id: target.visit_id })
+    .whereNot('id', serviceId).whereNotIn('status', TERMINAL_ROW_STATUSES).select('id');
+  if (others.length !== 1) return null;
+  return { ...target, memberServices: [{ service_type: target.service_type, service_id: target.service_id }] };
 }
 
 async function loadArrivalRouteContext({
@@ -193,15 +209,15 @@ async function loadArrivalRouteContext({
     .whereNotIn('status', TERMINAL_ROW_STATUSES).first('id'));
   // A caller moving the WHOLE visit: its members leave the day's rows and
   // ride the target as one stop. Not one clean stop = `grouped` stands.
-  const unitTarget = hasLiveSibling && unit && !prospective
-    ? await resolveVisitUnit(conn, target, stored, serviceId) : null;
   // `alone`: the caller is about to split this service off its visit and
   // move only it ("Separate" in Edit appointment), so it is an ordinary
   // single visit for this check. Same gate; off, a grouped row is unverified.
-  const grouped = hasLiveSibling && !unitTarget && !(alone && !prospective && comboRouteCheckLive());
-  (unitTarget?.memberIds || []).forEach(id => excluded.add(String(id)));
+  const movedTarget = hasLiveSibling && !prospective
+    ? await resolveMovedVisitTarget(conn, { target, stored, serviceId, unit, alone }) : null;
+  const grouped = hasLiveSibling && !movedTarget;
+  (movedTarget?.memberIds || []).forEach(id => excluded.add(String(id)));
   const activeTarget = dateOnly(stored.scheduled_date) === date && ['en_route', 'on_site'].includes(stored.status);
-  return { target: unitTarget || target, rows: rows.filter(row => !excluded.has(String(row.id))
+  return { target: movedTarget || target, rows: rows.filter(row => !excluded.has(String(row.id))
     && (!capacity || row.window_start || row.time_window || ['completed', 'en_route', 'on_site'].includes(row.status))
     && !(excludeEstimateId && row.source_estimate_id === excludeEstimateId && row.reservation_expires_at)),
   date, now, grouped, activeTarget, prospective: !!prospective,
