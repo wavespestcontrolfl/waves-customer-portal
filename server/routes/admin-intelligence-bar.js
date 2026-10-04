@@ -64,6 +64,7 @@ const { BILLING_READER_TOOLS, executeBillingReaderTool } = require('../services/
 const { CLOSEOUT_TOOLS, executeCloseoutTool } = require('../services/intelligence-bar/closeout-tools');
 const { CLOSEOUT_REPAIR_TOOLS, executeCloseoutRepairTool } = require('../services/intelligence-bar/closeout-repair-tools');
 const { RECEIPT_RESEND_TOOLS, executeReceiptResendTool } = require('../services/intelligence-bar/receipt-resend-tools');
+const { BILLING_WRITE_TOOLS, executeBillingWriteTool } = require('../services/intelligence-bar/billing-write-tools');
 const { CALL_RESEARCH_TOOLS, executeCallResearchTool } = require('../services/intelligence-bar/call-research-tools');
 const { CUSTOMER_LIFECYCLE_TOOLS, executeCustomerLifecycleTool, mergeCustomersEnabled } = require('../services/intelligence-bar/customer-lifecycle-tools');
 const {
@@ -152,6 +153,7 @@ const JOB_HEALTH_TOOL_NAMES = new Set(JOB_HEALTH_TOOLS.map(t => t.name));
 const NEEDS_ME_TOOL_NAMES = new Set(NEEDS_ME_TOOLS.map(t => t.name));
 const BILLING_READER_TOOL_NAMES = new Set(BILLING_READER_TOOLS.map(t => t.name));
 const RECEIPT_RESEND_TOOL_NAMES = new Set(RECEIPT_RESEND_TOOLS.map(t => t.name));
+const BILLING_WRITE_TOOL_NAMES = new Set(BILLING_WRITE_TOOLS.map(t => t.name));
 const CALL_RESEARCH_TOOL_NAMES = new Set(CALL_RESEARCH_TOOLS.map(t => t.name));
 const CUSTOMER_LIFECYCLE_TOOL_NAMES = new Set(CUSTOMER_LIFECYCLE_TOOLS.map(t => t.name));
 // Every infra module loads with EVERY admin context (any admin page can ask
@@ -175,6 +177,9 @@ const INFRA_TOOLS = [
   // Resend a paid receipt: the Invoices page button as a carded write, offered
   // beside the invoice readers on every admin context (admin-only below).
   ...RECEIPT_RESEND_TOOLS,
+  // Saved-card removal (with the Auto Pay-off step) and invoice address
+  // correction: admin-only writes, both always behind the confirm card.
+  ...BILLING_WRITE_TOOLS,
   // The sitemap submit is advertised with the other outside-service writes in
   // the global infrastructure prompt, so it rides the global infra set too —
   // not only the seo/blog contexts' SEO_TOOLS (Codex r4 on #5275).
@@ -217,6 +222,9 @@ const ADMIN_ONLY_TOOL_NAMES = new Set([
   // Billing readers show invoices, balances and payment evidence: admin only,
   // like the requireAdmin invoice routes they mirror.
   ...BILLING_READER_TOOLS.map(t => t.name),
+  // Mirror requireAdmin /api/admin/customers/:id/payment-methods/:methodId and
+  // /api/admin/invoices/:id/receipt-address.
+  ...BILLING_WRITE_TOOL_NAMES,
   // Closeout repair queues customer report emails / receipts — admin only,
   // like the closeout reads it builds on.
   ...CLOSEOUT_REPAIR_TOOL_NAMES,
@@ -822,6 +830,23 @@ const PINNED_DISPLAY_BUILDERS = {
       to: preview.recipients,
       ...(preview.memo ? { memo: preview.memo } : {}),
       ...(preview.visit_closeout ? { visit: preview.visit_closeout } : {}),
+    }
+    : null),
+  // The billing writes: the card names the customer, the method or invoice and
+  // the before/after — never raw ids (the steps and notices ride the contract).
+  remove_saved_payment_method: (params, preview) => (preview?.preview === true && preview.method
+    ? {
+      customer: preview.customer_name || preview.customer_id,
+      method: preview.method.label,
+      auto_pay: preview.autopay.uses_this_method ? `${preview.autopay.state}, using this method` : preview.autopay.state,
+    }
+    : null),
+  correct_invoice_address: (params, preview) => (preview?.preview === true && preview.invoice_number
+    ? {
+      invoice: `${preview.invoice_number} (${preview.invoice_status})`,
+      customer: preview.customer_name || preview.customer_id,
+      printed_now: preview.printed_now_text,
+      corrected_to: preview.after_correction_text,
     }
     : null),
   // Feature switches (Codex r1 on #5489): the card must show the live facts
@@ -1712,6 +1737,16 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   if (toolUse.name === 'set_estimate_presentation' && preview?.estimate_id) {
     params.estimate_identifier = String(preview.estimate_id);
   }
+  // The billing writes resolve their target in the preview (a lone saved
+  // method; an invoice number): pin the resolved ids so the confirmed run
+  // acts on exactly those, and task-context validates the invoice by id.
+  if (toolUse.name === 'remove_saved_payment_method' && preview?.method?.id) {
+    params.payment_method_id = String(preview.method.id);
+  }
+  if (toolUse.name === 'correct_invoice_address' && preview?.invoice_id) {
+    params.invoice_id = String(preview.invoice_id);
+    delete params.invoice_number;
+  }
 
   if (task) {
     const invalidTarget = await TaskContext.validateRecordTarget(params, taskContext, { toolName: toolUse.name })
@@ -2552,6 +2587,9 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   }
   if (RECEIPT_RESEND_TOOL_NAMES.has(toolName)) {
     return executeReceiptResendTool(toolName, input, actionContext);
+  }
+  if (BILLING_WRITE_TOOL_NAMES.has(toolName)) {
+    return executeBillingWriteTool(toolName, input, actionContext);
   }
   if (CALL_RESEARCH_TOOL_NAMES.has(toolName)) {
     return executeCallResearchTool(toolName, input);
@@ -3923,6 +3961,14 @@ async function commitPendingAction(req, { id, contractHash }) {
         // re-plan differs (pre-push P1: never add a step the card lacked).
         if (action.tool_name === 'repair_closeout' && Array.isArray(livePreview?.steps)) {
           execParams._verified_repair_steps = livePreview.steps;
+        }
+        // The billing writes: the verified preview IS the approved plan — the
+        // executor re-plans and refuses if its own plan differs.
+        if (action.tool_name === 'remove_saved_payment_method' && Array.isArray(livePreview?.steps)) {
+          execParams._verified_removal_plan = livePreview;
+        }
+        if (action.tool_name === 'correct_invoice_address' && livePreview?.invoice_id) {
+          execParams._verified_address_correction = livePreview;
         }
         // set_estimate_presentation: the verified preview's previous-name
         // snapshot rides to the executor to re-assert under the estimate

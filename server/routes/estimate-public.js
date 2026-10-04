@@ -491,15 +491,49 @@ function normalizeAddressForMatch(value) {
   return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
+// B18: when the estimate is for a LONE phone candidate that the estimate contradicts - the estimate's
+// email AND its service address both provably differ from that profile's - the phone is almost certainly
+// someone else's (a staff typo, a landlord or relative's line), and reusing that profile would hand the person
+// accepting THEIR saved card / Auto Pay exemption. The accept is parked for the office instead (see
+// acceptPhoneParkedVerdict). Contradiction needs data on BOTH sides, and is judged in memory only:
+//   - email: the estimate carries one, the candidate carries one, and they differ (blank or equal cannot contradict);
+//   - address: the repository's canonical comparator (sameStreetAddress: suffix / directional / unit / route
+//     normalization, city and ZIP) decides alone - "123 Main Street" and "123 Main St, Bradenton, FL 34205"
+//     agree; a different street, house number, explicit unit, city or ZIP differs. What it cannot decide is NOT
+//     a contradiction: both sides need a primary street number, and a unit, city or ZIP missing on either side
+//     is not a mismatch.
+function acceptAddressProvablyDiffers(estimateAddress, candidate) {
+  const { hasPrimaryStreetNumber } = require('../services/estimator-engine/unit-scope-model');
+  const { sameStreetAddress } = require('../services/estimator-engine/address-compare');
+  const estAddress = String(estimateAddress || '').trim();
+  const line1 = String(candidate.address_line1 || '').trim();
+  if (!hasPrimaryStreetNumber(estAddress) || !hasPrimaryStreetNumber(line1)) return false;
+  // Street-first with the unit appended by a space (a comma would read "Apt 2" as the city).
+  const candidateAddress = [[line1, candidate.address_line2].filter((part) => String(part || '').trim()).join(' '), candidate.city, candidate.zip]
+    .filter((part) => String(part || '').trim()).join(', ');
+  return !sameStreetAddress(estAddress, candidateAddress);
+}
+
+function acceptLoneCandidateContradicted(candidate, estimate) {
+  const email = String(estimate.customer_email || '').trim().toLowerCase();
+  const candEmail = String(candidate.email || '').trim().toLowerCase();
+  if (!email || !candEmail || candEmail === email) return false;
+  return acceptAddressProvablyDiffers(estimate.address, candidate);
+}
+
 // Multiple live profiles can legitimately share a phone (landlord + rental
 // property via quick-add). Only reuse one when the match is unambiguous: a
 // single phone hit, or — among several — a unique email or service-address
 // match. Otherwise return null so the accept creates a fresh profile;
 // attaching the tier/monthly_rate/schedules to a guessed profile splits the
-// real customer's history.
+// real customer's history. A lone hit the estimate contradicts is NOT a match for
+// ANY reader (every payload, policy and billing-lane projection then reads the
+// estimate as having no matched customer, so nothing about the rejected profile
+// can surface): the verdict carries `contradicted` + `rejectedCustomerId` for the
+// park decision and the office alert only.
 function pickAcceptCustomerMatch(candidates, estimate) {
   if (!candidates.length) return null;
-  if (candidates.length === 1) return candidates[0];
+  if (candidates.length === 1) return acceptLoneCandidateContradicted(candidates[0], estimate) ? null : candidates[0];
   let pool = candidates;
   const email = String(estimate.customer_email || '').trim().toLowerCase();
   if (email) {
@@ -521,16 +555,34 @@ function pickAcceptCustomerMatch(candidates, estimate) {
   return null;
 }
 
-// The accept-time customer resolution for UNLINKED estimates, shared with the
-// recurring-card resolver (Codex #2680 r3: /data and /recurring-card-intent
-// must see the same customer accept will land on, or an existing customer
-// with a saved consented card / active Auto Pay is re-asked for a card the
-// auto-satisfy contract says they never re-enter). Read-only; pass the accept
-// transaction as `database` to keep the in-trx behavior identical.
-async function matchAcceptCustomerByPhone(estimate, database = db) {
+// One verdict per accept request for the preflight consumers (B18): the card policy, hold auto-satisfy and
+// prepay quote each call this on the root handle, and the accept transaction then re-resolves authoritatively
+// under its own handle. The first root-handle verdict for an estimate object is kept (WeakMap, request-scoped
+// by object identity) so every preflight decision sees the SAME identity, and the transaction compares its
+// fresh verdict to it (acceptPhoneVerdictDrifted), aborting for a reload on any difference. The
+// transaction's own call passes { authoritative: true } and is never cached. `estimate` may be a plain
+// { customer_phone, customer_email, address } identity snapshot.
+const acceptPhoneVerdicts = new WeakMap();
+
+function acceptPhoneVerdictDrifted(estimate, fresh) {
+  const pre = acceptPhoneVerdicts.get(estimate);
+  if (!pre) return false;
+  return (pre.match?.id || null) !== (fresh.match?.id || null)
+    || (pre.contradicted === true) !== (fresh.contradicted === true);
+}
+
+// Read-only. Pass the accept transaction as `database` to keep the in-trx behavior identical.
+// `lockShare` (a transaction handle): the candidate rows are read FOR SHARE NOWAIT, held to that transaction's end -
+// a staff edit of the lone candidate's email / address waits for the transaction instead of slipping in after the
+// read, and a row another writer already holds fails fast (Postgres 55P03) instead of waiting, because the callers
+// (the slot reserve / extend revalidation) already hold the estimate row and a customer-edit fan-out locks customer
+// then estimate - a blocking take could cycle. Never cached.
+async function matchAcceptCustomerByPhone(estimate, database = db, { authoritative = false, lockShare = false, afterSiblingResolution = false } = {}) {
   if (!estimate?.customer_phone) return { match: null, candidateCount: 0 };
+  const cacheable = database === db && !authoritative && !lockShare && typeof estimate === 'object';
+  if (cacheable && acceptPhoneVerdicts.has(estimate)) return acceptPhoneVerdicts.get(estimate);
   const matchDigits = phoneLast10(estimate.customer_phone);
-  const candidates = await database('customers')
+  let candidateQuery = database('customers')
     .where((q) => {
       q.where({ phone: estimate.customer_phone });
       if (matchDigits) {
@@ -540,7 +592,218 @@ async function matchAcceptCustomerByPhone(estimate, database = db) {
     .whereNull('deleted_at')
     .orderByRaw('(phone = ?) DESC NULLS LAST', [estimate.customer_phone])
     .orderBy('updated_at', 'desc');
-  return { match: pickAcceptCustomerMatch(candidates, estimate), candidateCount: candidates.length };
+  if (lockShare) candidateQuery = candidateQuery.forShare().noWait();
+  const candidates = await candidateQuery;
+  let contradicted = candidates.length === 1 && acceptLoneCandidateContradicted(candidates[0], estimate);
+  // The accept resolves a customer-unlinked GROUPED estimate through its accepted sibling BEFORE it ever matches by
+  // phone (the sibling is the deterministic owner; a second property's address naturally differs), so that estimate
+  // never reaches the phone match this contradiction rule guards: it is not parked, and every reader of the matcher
+  // sees what main showed (the lone candidate). `afterSiblingResolution` is set only by the accept transaction's own
+  // phone match, which runs after its sibling lookup already found no owner. The lookup is the shared read-only
+  // owner resolver (RecurringCards.resolveGroupedEstimateOwnerId, the accept's sibling query minus its advisory
+  // lock) and it throws on an unreadable owner: an unknown owner is not guessed either way (callers decide).
+  if (contradicted && !afterSiblingResolution && estimate.estimate_group_id
+    && await require('../services/recurring-card-on-file').resolveGroupedEstimateOwnerId(estimate, database, { throwOnError: true })) {
+    contradicted = false;
+  }
+  const verdict = {
+    match: candidates.length === 1 && !contradicted ? candidates[0] : pickAcceptCustomerMatch(candidates, estimate),
+    candidateCount: candidates.length,
+    ...(contradicted ? { contradicted: true, rejectedCustomerId: candidates[0].id } : {}),
+  };
+  if (cacheable) acceptPhoneVerdicts.set(estimate, verdict);
+  return verdict;
+}
+
+// B18 park: the accept cannot complete self-serve when the estimate's phone belongs to another customer, so
+// nothing is created, taken or captured; the office is told and the person sees the page's EXISTING
+// review-before-booking state ("A Waves specialist reviews this quote with you ..."), whose sentence is reused
+// verbatim as the error text below (client ReviewBeforeBookingCard, generic branch).
+const ACCEPT_NEEDS_OFFICE_REVIEW = 'ACCEPT_NEEDS_OFFICE_REVIEW';
+const ACCEPT_OFFICE_REVIEW_MESSAGE = 'A Waves specialist reviews this quote with you and schedules your visit \u2014 it can\u2019t be self-booked online.';
+const ACCEPT_OFFICE_REVIEW_REASON = 'contact_review';
+
+function acceptOfficeReviewBody() {
+  return { error: ACCEPT_OFFICE_REVIEW_MESSAGE, code: ACCEPT_NEEDS_OFFICE_REVIEW, reviewBeforeBooking: true, reason: ACCEPT_OFFICE_REVIEW_REASON };
+}
+
+// Preflight verdict for an UNLINKED, phone-bearing estimate (root handle, cached for this request): null, or
+// { rejectedCustomerId } when its lone phone candidate is contradicted. Throws on a failed lookup (callers decide).
+// `fresh` skips the request's cached preflight verdict (an authoritative re-read, e.g. just before a client secret is returned).
+async function acceptPhoneParkedVerdict(estimate, { database = db, lock = false, fresh = false } = {}) {
+  if (!estimate || estimate.customer_id || !estimate.customer_phone) return null;
+  const verdict = await matchAcceptCustomerByPhone(estimate, database, { lockShare: lock, authoritative: fresh });
+  return verdict.contradicted ? { rejectedCustomerId: verdict.rejectedCustomerId } : null;
+}
+
+// THE public blocking state of an estimate, in precedence order, used by every surface that must agree on it
+// (GET /data, the accept, both card-intent routes, slot browsing / find / reserve / extend and the texting
+// scheduler's slot gate, and the payment-step reminder recheck): the existing review states first (quote-required
+// from the pricing resolver, termite-trenching review from the estimate data), then contact_review from the
+// park verdict. `quoteRequirement` is optional for callers that never resolve it (a surface that doesn't
+// refuse quote-required today keeps not refusing it). Returns null, or { state, ... } with state one of
+// 'quote_required' | 'termite_trenching_review' | 'contact_review' (the last carries rejectedCustomerId, for the
+// office alert only). `database` + `lock` (a transaction handle, FOR SHARE NOWAIT) are for the slot reserve / extend
+// revalidation on the locked estimate row. Throws on a failed phone lookup, like acceptPhoneParkedVerdict (callers decide).
+async function estimatePublicBlockingState(estimate, { estData, quoteRequirement, database, lock, fresh, suppressionGated = false } = {}) {
+  const data = estData || parseEstimateDataSafe(estimate);
+  if (quoteRequirement?.quoteRequired) return { state: 'quote_required' };
+  const trenching = estimateTrenchingReviewRequired(data);
+  // A caller that did not resolve the quote requirement never skips that precedence level: it is resolved HERE (the
+  // same resolver /data uses), and only when one of the review states below would otherwise be reported, so the
+  // common clean estimate costs nothing extra. Quote-required wins over both.
+  let quote = quoteRequirement;
+  // `suppressionGated` (a Bermuda-suppression estimate the caller refuses anyway): never build its pricing bundle - the quote
+  // requirement is unresolvable, so the helper reports only the state it CAN establish (the same posture as a trenching
+  // estimate whose pricing lookup fails). The slot / intent routes then answer contact_review (the park) or their own gated 409.
+  if (quote === undefined && suppressionGated) quote = null;
+  const resolveQuote = async () => {
+    try {
+      quote = resolveEstimateQuoteRequirement(await buildPricingBundle(estimate), data);
+    } catch (err) {
+      // A trenching-review estimate is refused either way and the slot routes used to refuse it with no pricing work at
+      // all: a pricing failure must not turn that refusal into an error. A parked estimate still fails closed.
+      if (!trenching) throw err;
+      logger.warn(`[estimate-public] quote requirement lookup failed for trenching-review estimate ${estimate.id}: ${err.message}`);
+      quote = null;
+    }
+  };
+  let parked = null;
+  if (!trenching) {
+    // ORDER (the locked slot recheck, `lock`): every state that does NOT need the phone candidate is established BEFORE the
+    // candidate is read FOR SHARE NOWAIT, so contention (55P03) can only ever cost the contact_review verdict, never a
+    // higher-priority state. Trenching is known from the estimate data above (it never reads the candidate). Whether the
+    // quote requirement matters depends on whether the estimate is parked, so a plain (unlocked, never-blocking) read of
+    // the candidate decides that first: only a parked-looking estimate pays for pricing, and a quote-required one is
+    // answered right there, before any lock is attempted. A clean estimate pays one extra plain candidate read on the
+    // locked path (and no pricing); the locked read below stays the authority for contact_review.
+    if (lock && quote === undefined) {
+      const peek = await acceptPhoneParkedVerdict(estimate, { database, lock: false, fresh });
+      if (peek) {
+        await resolveQuote();
+        if (quote?.quoteRequired) return { state: 'quote_required' };
+      }
+    }
+    parked = await acceptPhoneParkedVerdict(estimate, { database, lock, fresh });
+  }
+  if (!trenching && !parked) return null;
+  if (quote === undefined) await resolveQuote();
+  if (quote?.quoteRequired) return { state: 'quote_required' };
+  if (trenching) return { state: 'termite_trenching_review' };
+  return { state: 'contact_review', rejectedCustomerId: parked.rejectedCustomerId };
+}
+
+// What a PUBLIC WRITE path does when it refuses a parked estimate (the accept, both card-intent routes, reserve and
+// extend), through this ONE function: the deduped office alert (so a stale tab that parks at a pre-accept step, and
+// then leaves booking for the review card, still files it), and the server-side release of any live slot hold of the
+// estimate (capacity is returned as soon as ANY request observes the park). Never throws. GET /data calls it too -
+// the page shows the review card on a plain view and tells the customer a specialist will follow up, so the alert
+// must exist for that promise. Slot reads, the texting scheduler's gate and the reminder recheck do not (they are
+// never what the customer is promised against, and /data accompanies every page load).
+async function parkSideEffects(estimate, rejectedCustomerId) {
+  try { await raiseAcceptParkedAlert({ estimate, rejectedCustomerId }); } catch { /* never throws; logged inside */ }
+  try { await releaseHoldsIfStillParked(estimate); } catch (e) {
+    logger.warn(`[estimate-accept] parked-estimate hold release failed for estimate ${estimate.id}: ${e.message}`);
+  }
+}
+// The bulk hold release, judged on the estimate as it is NOW. Staff can fix or link the estimate between the unlocked
+// read that said "parked" and this delete, and a concurrent tab's hold taken against the corrected estimate is valid.
+// So it runs in one short transaction that locks the estimate row FOR UPDATE first - the same row, and the same
+// order (estimate row, then its holds), that reserveSlot and extendReservation take - so a reserve either committed
+// before (and its hold is judged here) or waits for this transaction and then re-validates on the corrected row;
+// re-reads the estimate; re-runs the blocking-state helper fresh on that row (the phone candidate FOR SHARE NOWAIT on
+// this transaction, like the reserve recheck: a busy customer row throws, deletes nothing, and the next observer of
+// the park retries); and deletes the holds only while the estimate is still contact_review. Anything else deletes
+// nothing. The office alert is filed OUTSIDE this transaction (parkSideEffects).
+async function releaseHoldsIfStillParked(estimate) {
+  const slotReservation = require('../services/slot-reservation');
+  return db.transaction(async (trx) => {
+    const row = await trx('estimates').where({ id: estimate.id }).forUpdate().first();
+    if (!row) return { released: 0 };
+    // A Bermuda-suppression estimate (gate off) is never priced: its park was decided with suppressionGated, so
+    // the recheck uses the same semantics, or the gate-disabled pricing path throws and the hold is never released.
+    const suppressionGated = !!(require('../services/pricing-engine/v1-legacy-mapper').estimateDataCarriesBermudaSuppression(row.estimate_data)
+      && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION'));
+    const state = await estimatePublicBlockingState(row, { database: trx, lock: true, fresh: true, suppressionGated });
+    if (state?.state !== 'contact_review') return { released: 0 };
+    return slotReservation.releaseEstimateHolds({ estimateId: estimate.id, database: trx });
+  });
+}
+async function refuseParkedWrite(estimate, rejectedCustomerId) {
+  await parkSideEffects(estimate, rejectedCustomerId);
+  return acceptOfficeReviewBody();
+}
+
+// The ONE office alert for a parked accept (Customers, needs-you, a person acts), one standing row per estimate. Never
+// throws; two attempts. Called after the decision to answer 409 (the preflight park: once per attempt, no transaction
+// exists; the in-transaction drift: after the rollback), and by a customer view of a parked estimate - never from inside
+// a transaction. Raised through the repo's alert-episode helper (raiseAdminAlertWithReopen, as the review-low-rating and
+// hot-estimate alerts are): a STANDING open row is a silent dedupe on every later attempt (never re-rung), while a
+// recurrence after the row was completed (marked Done) or auto-cleared reopens it and rings. The episode is versioned by the
+// rejected customer id, so a phone later changed to a DIFFERENT customer's number is a new version that refreshes and rings.
+// ALERT_EPISODES killed (the shared kill switch): the plain deduped raise this alert always had (rings once per estimate).
+async function raiseAcceptParkedAlert({ estimate, rejectedCustomerId }) {
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      const { fitAction } = require('../services/admin-alert-names');
+      const alertCompose = require('../services/admin-alert-compose');
+      const rejected = await db('customers').where({ id: rejectedCustomerId }).first('id', 'first_name', 'last_name');
+      const rejectedName = [rejected?.first_name, rejected?.last_name].filter(Boolean).join(' ') || 'another customer';
+      const dedupeKey = `accept-phone-contradicted:${estimate.id}`;
+      const spec = {
+        area: 'Customers',
+        action: fitAction('Customers', estimate.customer_name || 'this customer', [
+          (n) => `fix ${n}'s estimate phone`,
+          (n) => `fix ${n}'s phone`,
+        ]),
+        why: 'The phone on their estimate is another customer\u2019s, so self-booking is held.',
+        severity: 'needs-you',
+        link: `/admin/estimates?estimateId=${encodeURIComponent(estimate.id)}`,
+        subject: { type: 'estimate', id: String(estimate.id) },
+        doneWhen: 'phone_corrected',
+        who: 'person',
+      };
+      const detail = `The phone number on this estimate belongs to ${rejectedName} (customer id ${rejectedCustomerId}), `
+        + 'whose email and address do not match the estimate, so online accepting and booking are held for the office: no customer was created or changed, no card was taken and no time is held. '
+        + 'Fix the phone on the estimate, or link the estimate to the right customer, and then they can accept.';
+      const metadata = { estimateId: String(estimate.id), rejectedCustomerId: String(rejectedCustomerId) };
+      let filed;
+      let composed = null;
+      if (require('../config/feature-gates').alertEpisodesLive()) {
+        // A rule violation falls back to the plain raise below (which handles it as every live emitter does).
+        try { composed = alertCompose.composeAdminAlert(spec); } catch { composed = null; }
+      }
+      if (composed) {
+        // Which episode of this estimate's park this is. The helper reopens a row it auto-cleared; a row a PERSON completed
+        // (done_at set, still carrying the version it rang under) is a completed episode too, so a recurrence is the NEXT
+        // episode: a new version, which refreshes the row, clears its Done stamps and rings. A standing open row keeps
+        // its episode number, so the same version is a silent dedupe.
+        const prior = await db('notifications').where({ recipient_type: 'admin' })
+          .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).orderBy('created_at', 'desc').first('metadata', 'done_at');
+        let priorMeta = prior?.metadata;
+        if (typeof priorMeta === 'string') { try { priorMeta = JSON.parse(priorMeta); } catch { priorMeta = null; } }
+        const episode = (Number(priorMeta?.parkEpisode) || 0) + (prior?.done_at && priorMeta?.autoCleared !== true ? 1 : 0);
+        filed = await require('../services/admin-alert-episodes').raiseAdminAlertWithReopen('estimate', composed.headline, composed.why, {
+          bell: true,
+          link: composed.link,
+          dedupeKey,
+          dedupeVersion: `rejected:${rejectedCustomerId}::e${episode}`,
+          refreshOnDedupe: true,
+          detail,
+          metadata: { ...metadata, ...composed.metadata, parkEpisode: episode },
+        });
+      } else {
+        filed = await alertCompose.raiseAdminAlert('estimate', spec, { bell: true, dedupeKey, dedupeVersion: 'v1', detail, metadata });
+      }
+      // Only a result with a real id is filed (an existing standing row counts: dedupe returns it).
+      if (filed && filed.id != null && filed.suppressed !== true) return true;
+      logger.warn(`[estimate-accept] parked-accept office alert attempt ${attempt} for estimate ${estimate.id} was not filed (${filed && filed.suppressed ? 'suppressed' : 'no row'})`);
+    } catch (e) {
+      logger.error(`[estimate-accept] parked-accept office alert attempt ${attempt} failed for estimate ${estimate.id}: ${e.message}`);
+    }
+  }
+  logger.error(`[estimate-accept] parked-accept office alert NOT filed for estimate ${estimate.id} after 2 attempts; the next accept attempt re-raises it`);
+  return false;
 }
 
 // Tiny cookie-header parser — avoids pulling in cookie-parser for one read.
@@ -8979,13 +9242,28 @@ async function handleEstimateView(req, res, next) {
         logger.warn(`[estimate-view] contact-gap routing check failed, forcing the React view: ${e.message}`);
       }
     }
+    // B18 park: an accept-active, unlinked estimate whose lone phone candidate it contradicts is shown the review
+    // state, which only the React page renders (cta.reviewBeforeBooking, reviewReason 'contact_review'); the legacy
+    // page's booking flow would end in a permanently refused accept. Decided by the ONE blocking-state helper, and
+    // forced to React exactly like the contact-gap case (including the explicit-V1 and /api/estimates mounts, which
+    // redirect). A failed lookup fails toward React, which re-decides on its own /data.
+    let parkedForcesReactView = false;
+    if (isEstimateAcceptActive(estimate) && !estimate.customer_id && estimate.customer_phone) {
+      try {
+        parkedForcesReactView = (await estimatePublicBlockingState(estimate))?.state === 'contact_review';
+      } catch (e) {
+        parkedForcesReactView = true;
+        logger.warn(`[estimate-view] phone-park routing check failed, forcing the React view: ${e.message}`);
+      }
+    }
     let shouldUseReactEstimateView = estimate.use_v2_view === true
       || effectiveInvoiceMode
       || cardHoldForcesReactView
       || recurringCardForcesReactView
       || estimatePdfRenderPass
       || acceptanceTermsForcesReactView
-      || contactGapsForceReactView;
+      || contactGapsForceReactView
+      || parkedForcesReactView;
 
     // Estimate-view v1/v2 holdback experiment (GATE_GROWTHBOOK). Only the plain
     // v2-by-default population is eligible: published, not an admin preview, not
@@ -9010,6 +9288,7 @@ async function handleEstimateView(req, res, next) {
       && !estimatePdfRenderPass
       && !acceptanceTermsForcesReactView
       && !contactGapsForceReactView
+      && !parkedForcesReactView
       && !adminPreviewRequested
       // Only estimates that can still convert: isEstimateAcceptActive excludes
       // unpublished, terminal (accepted/declined/expired/send_failed), archived,
@@ -9042,7 +9321,7 @@ async function handleEstimateView(req, res, next) {
     // the React URL for the same estimate instead of a dead-end 409. After
     // the expired carve-out: an expired estimate cannot accept, so it keeps
     // its personalized SSR expired page.
-    if (acceptanceTermsForcesReactView || contactGapsForceReactView || pafExistingForcesReactView) {
+    if (acceptanceTermsForcesReactView || contactGapsForceReactView || pafExistingForcesReactView || parkedForcesReactView) {
       const qs = req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '';
       return res.redirect(302, `/estimate/${encodeURIComponent(estimate.token)}${qs}`);
     }
@@ -9591,16 +9870,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // without re-entering priceLawnCare, so a save-then-gate-off sequence
     // would otherwise charge a disabled add-on (codex #3272 r2). Retries of
     // an ALREADY-accepted estimate stay untouched (that acceptance happened).
-    if (estimate.status !== 'accepted') {
-      const { estimateDataCarriesBermudaSuppression } = require('../services/pricing-engine/v1-legacy-mapper');
-      if (estimateDataCarriesBermudaSuppression(estimate.estimate_data)
-        && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
-        return res.status(409).json({
-          error: 'This estimate includes an option that is temporarily unavailable. Please contact our office and we will refresh your quote.',
-          code: 'BERMUDA_SUPPRESSION_GATED',
-        });
-      }
-    }
+    // (The Bermuda gate itself now answers AFTER the blocking-state decision below - see "ORDER" after the inactive check.)
     if (estimate.status === 'accepted') {
       // An archived accepted estimate is no longer customer-viewable (the
       // /:token/data gate rejects archived_at outright), so never rebuild
@@ -9664,7 +9934,56 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       const zeroRowStatus = await zeroRowMutationStatus(estimate.id);
       return res.status(zeroRowStatus).json(zeroRowMutationBody(zeroRowStatus));
     }
-
+    // ORDER (the same as /data, the slot routes and both card-intent routes): only the viewability / terminal / inactive
+    // refusals above stay ahead of the ONE blocking-state decision; every other refusal below - the Bermuda gate, the
+    // contact validations, hold / slot / one-time / invoice-mode shortcuts, and the inline quote-required and trenching
+    // answers (the helper puts those first, so they still outrank the park) - comes after it.
+    // B18 park: an unlinked estimate whose lone phone candidate it contradicts (email AND address both differ) cannot
+    // complete self-serve: the helper's contact_review state, decided BEFORE any contact fill, card, hold, prepay quote or
+    // write. The verdict is cached per request (the ONE preflight identity; the accept transaction re-resolves it and
+    // aborts on any difference) and every match reader already sees NO match for it. The office alert is raised here, once
+    // per attempt (episode-deduped), after the decision with no transaction open. A failed lookup just leaves no verdict:
+    // the in-transaction match decides. A Bermuda-suppression estimate (refused below with its own gated 409) is never
+    // priced for it (`suppressionGated`: only the park is judged).
+    const bermudaSuppressionGated = (() => {
+      const { estimateDataCarriesBermudaSuppression } = require('../services/pricing-engine/v1-legacy-mapper');
+      return !!(estimateDataCarriesBermudaSuppression(estimate.estimate_data)
+        && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION'));
+    })();
+    if (!estimate.customer_id && estimate.customer_phone) {
+      let blocking = null;
+      try { blocking = await estimatePublicBlockingState(estimate, { suppressionGated: bermudaSuppressionGated }); } catch { /* the authoritative in-transaction match decides */ }
+      if (blocking?.state === 'contact_review') {
+        // A stale tab can have captured a recurring SetupIntent before the customer record turned
+        // contradictory. Retire the one this request submits with main's own helper - the same one the
+        // in-transaction park runs after its rollback (it touches only an intent that belongs to THIS
+        // estimate) - BEFORE the 409, since the client drops the id on this 409 and an unbound intent would
+        // stay eligible for later recovery. Stripe unable to confirm = the existing 503 and the tab keeps its
+        // intent; the alert is then NOT raised on this response (the retry parks again and raises it), exactly
+        // like the in-transaction path. No submitted intent = no Stripe call.
+        const parkedSetupIntentId = typeof req.body?.recurringCardSetupIntentId === 'string'
+          ? req.body.recurringCardSetupIntentId.trim() : '';
+        if (parkedSetupIntentId) {
+          try {
+            await retireOrDenyDroppedCapture(estimate, parkedSetupIntentId);
+          } catch (retireErr) {
+            return res.status(503).json({ error: retireErr.message, code: retireErr.code || 'RECURRING_CARD_RETIRE_FAILED' });
+          }
+        }
+        return res.status(409).json(await refuseParkedWrite(estimate, blocking.rejectedCustomerId));
+      }
+    }
+    // Fresh ACCEPT of a persisted bermuda-suppression estimate requires the
+    // gate to still be live — acceptance bills/schedules from stored rows
+    // without re-entering priceLawnCare, so a save-then-gate-off sequence
+    // would otherwise charge a disabled add-on (codex #3272 r2). Retries of
+    // an ALREADY-accepted estimate stay untouched (that acceptance happened).
+    if (bermudaSuppressionGated) {
+      return res.status(409).json({
+        error: 'This estimate includes an option that is temporarily unavailable. Please contact our office and we will refresh your quote.',
+        code: 'BERMUDA_SUPPRESSION_GATED',
+      });
+    }
     // Missing-contact capture (owner ruling 2026-09-27): the accept card
     // asks for whatever's actually missing — last name and/or email — right
     // above the Accept button. Only sanitize/validate here (a malformed
@@ -11785,6 +12104,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // insert's own defaults (pipeline_stage 'active_customer' + the quoted
       // monthly_rate) are never read as a pre-existing monthly membership.
       let customerCreatedThisAccept = false;
+      // The identity fields (phone, email, address) the authoritative phone match judged, copied before any
+      // contact fill mutates `estimate`: the final re-read of a reused candidate judges THESE, never the
+      // contact-filled estimate. And the id of a LONE candidate this accept reused, for that re-read.
+      let acceptedPhoneIdentity = null;
+      let loneCandidateReusedId = null;
       // Already-linked customer: fill its last_name/email ONLY if blank/the
       // 'Customer' placeholder (the fill helpers re-check that under this
       // same lock — lockCustomerComms(trx, acceptPreLockedCommsId) above
@@ -11858,12 +12182,35 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // profile whose email/address uniquely matches — splitting the
         // estimate off the existing account. pickAcceptCustomerMatch needs the
         // full set to judge ambiguity.
-        const { match: existing, candidateCount } = await matchAcceptCustomerByPhone(estimate, trx);
+        acceptedPhoneIdentity = { customer_phone: estimate.customer_phone, customer_email: estimate.customer_email, address: estimate.address };
+        const { match: existing, candidateCount, contradicted: phoneContradicted, rejectedCustomerId: phoneRejectedCustomerId } = await matchAcceptCustomerByPhone(acceptedPhoneIdentity, trx, { authoritative: true, afterSiblingResolution: true });
+        // B18: the card policy, hold auto-satisfy and prepay quote were decided on the PREFLIGHT identity. A
+        // contradiction here the preflight did not see (the candidate or the phone's candidate set moved in
+        // between) parks the accept after all; any other identity difference aborts for a reload. Either way
+        // nothing commits (this transaction rolls back), and a card the tab captured is retired by the
+        // existing droppedCaptureToRetire path after the rollback.
+        if (phoneContradicted) {
+          if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId) {
+            droppedCaptureToRetire = { estimate, setupIntentId: recurringCardVerification.setupIntentId };
+          }
+          throw Object.assign(new Error(ACCEPT_OFFICE_REVIEW_MESSAGE), {
+            status: 409, isOperational: true, code: ACCEPT_NEEDS_OFFICE_REVIEW, parkedRejectedCustomerId: phoneRejectedCustomerId, parkedEstimate: estimate,
+          });
+        }
+        if (acceptPhoneVerdictDrifted(estimate, { match: existing, contradicted: false })) {
+          if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId) {
+            droppedCaptureToRetire = { estimate, setupIntentId: recurringCardVerification.setupIntentId };
+          }
+          throw Object.assign(new Error('Your account just changed. Please reload the page and confirm again.'), {
+            status: 409, isOperational: true, code: 'ACCEPT_BILLING_CHANGED',
+          });
+        }
         if (!existing && candidateCount > 1) {
           logger.warn(`[estimate-accept] ${candidateCount} live customers share phone for estimate ${estimate.id}; no unique email/address match — creating a new profile`);
         }
         if (existing) {
           customerId = existing.id;
+          if (candidateCount === 1) loneCandidateReusedId = existing.id;
           // Re-resolve under the pre-taken lock (r22): the normal case is
           // customerId === acceptPreLockedCommsId — already fenced by the
           // blocking acquire above. A DIFFERENT id means a merge/undo
@@ -13741,6 +14088,33 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         }
         branchErr.setupFeePromise = false;
         throw branchErr;
+      }
+
+      // B18: the phone match above was an unlocked read. Re-judge a REUSED lone candidate against its row LOCKED
+      // now (FOR UPDATE - the mode convertEstimate takes on that row; held to commit), on the pre-fill identity
+      // snapshot (never the contact-filled estimate): an admin edit of its email / address that committed after
+      // the match would otherwise leave the plan and its saved-card / Auto Pay policy on a customer the estimate
+      // now contradicts. Lock order: scheduling rungs -> customer-comms advisory -> [convertEstimate's locks] ->
+      // this row last (re-entrant when the converter already holds it). A contradiction parks the accept; the
+      // row gone, deleted or moved off the phone aborts for a reload. Nothing commits either way.
+      if (loneCandidateReusedId) {
+        const lockedMatch = await trx('customers').where({ id: loneCandidateReusedId }).forUpdate().first();
+        const lockedDigits = phoneLast10(acceptedPhoneIdentity.customer_phone);
+        const lockedStillOnPhone = !!lockedMatch && (lockedMatch.phone === acceptedPhoneIdentity.customer_phone
+          || (!!lockedDigits && String(lockedMatch.phone || '').replace(/\D/g, '').endsWith(lockedDigits)));
+        const nowContradicted = !!lockedMatch && !lockedMatch.deleted_at && lockedStillOnPhone
+          && acceptLoneCandidateContradicted(lockedMatch, acceptedPhoneIdentity);
+        if (!lockedMatch || lockedMatch.deleted_at || !lockedStillOnPhone || nowContradicted) {
+          if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId) {
+            droppedCaptureToRetire = { estimate, setupIntentId: recurringCardVerification.setupIntentId };
+          }
+          throw Object.assign(new Error(nowContradicted ? ACCEPT_OFFICE_REVIEW_MESSAGE : 'Your account just changed. Please reload the page and confirm again.'), {
+            status: 409,
+            isOperational: true,
+            code: nowContradicted ? ACCEPT_NEEDS_OFFICE_REVIEW : 'ACCEPT_BILLING_CHANGED',
+            ...(nowContradicted ? { parkedRejectedCustomerId: lockedMatch.id, parkedEstimate: estimate } : {}),
+          });
+        }
       }
 
       return {
@@ -15717,6 +16091,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         bookingUrl,
         billingTerm,
         annualPrepayAmount: annualPrepayQuotedAmount,
+        // The office notice names the same charge timing as the agreement
+        // this accept is about to issue (none is issued yet here, so this is
+        // "what would be issued now": gate + active wording).
+        annualChargeAfterInstallation: invoiceKind === 'annual_prepay_deferred'
+          && await require('../services/termite-program-agreement').annualAgreementChargesAfterInstallation({ estimateId: estimate.id, customerId: estimate.customer_id }),
         // 'ambiguous' keeps its own value (Codex r6 P1): the attempt may
         // have been a CARD, so the copy must stay tender-neutral — never
         // assert a bank debit; the one thing all three outcomes share is
@@ -15820,6 +16199,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       prepayCoveredByCredit: prepayAutoCharge?.coveredByCredit === true,
       setupFeeAfterFirstVisit: txResult.setupFeeDeferredToFirstVisit === true,
       }),
+      // The agreement this customer was just issued (or, with none issued,
+      // the one GATE_PAF_TERMITE would issue) charges after the station
+      // installation, not at signing. Present only when true (gate-off
+      // payload byte-identical).
+      ...(invoiceKind === 'annual_prepay_deferred'
+        && await require('../services/termite-program-agreement').annualAgreementChargesAfterInstallation({ estimateId: estimate.id, customerId: estimate.customer_id })
+        ? { annualChargeAfterInstallation: true } : {}),
     });
   } catch (err) {
     // Translate user-visible 4xx errors thrown from inside the transaction
@@ -15833,6 +16219,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       } catch (retireErr) {
         return res.status(503).json({ error: retireErr.message, code: retireErr.code || 'RECURRING_CARD_RETIRE_FAILED' });
       }
+    }
+    // B18: an in-transaction park (the authoritative match or the locked re-read found the lone phone candidate
+    // contradicted): the transaction has rolled back and the dropped capture (if any) is retired above. The
+    // office alert is raised HERE, after the decision and outside any transaction, then the same coded 409 the
+    // preflight park returns.
+    if (err && err.code === ACCEPT_NEEDS_OFFICE_REVIEW && err.parkedRejectedCustomerId && err.parkedEstimate) {
+      return res.status(409).json(await refuseParkedWrite(err.parkedEstimate, err.parkedRejectedCustomerId));
     }
     if (err && err.code === 'RECURRING_CARD_RETIRE_FAILED' && err.status === 503) {
       return res.status(503).json({ error: err.message, code: err.code });
@@ -20922,6 +21315,28 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
   // — no pay link, and the copy says the card is charged after that visit.
   const prepayAwaitingFirstVisit = !!prepayTerm && !!invoice
     && !!prepayJobStamp && String(prepayJobStamp.status || '') === 'awaiting_first_visit';
+  // GATE_PAF_TERMITE: a signed, activated termite annual plan whose charge
+  // waits for the station installation (or is being taken right after it) is
+  // not owed now either. Signing mints the term and invoice, so this retry
+  // reads as 'annual_prepay' — without this it would hand the customer the
+  // /pay link and the prepay_invoice step before installation (GitHub Codex
+  // #5816 r3). The wait record on the estimate decides.
+  let termiteChargeState = estimate.annual_plan_signature_charge || null;
+  if (typeof termiteChargeState === 'string') {
+    try { termiteChargeState = JSON.parse(termiteChargeState); } catch { termiteChargeState = null; }
+  }
+  const termiteAwaitingInstallation = !!prepayTerm && !!invoice && !!termiteChargeState
+    && (termiteChargeState.status === 'awaiting_installation'
+      || (termiteChargeState.status === 'claimed' && termiteChargeState.trigger === 'installation_complete'));
+  // Every OTHER state of that record that is not a pay-link outcome is
+  // staff-owned or still moving, and termite-annual-signature-charge.js sends
+  // no pay link for it: a charge in flight (claimed), one that may have gone
+  // through (ambiguous), one held for the office (deferred — an edited
+  // invoice, a cancelled agreement). The retry must not hand the customer the
+  // pay rail the charge path withheld (GitHub Codex #5816 r5). Only
+  // 'declined' and 'skipped' return to the pay link.
+  const termiteChargeStaffOwned = !!prepayTerm && !!invoice && !!termiteChargeState && !termiteAwaitingInstallation
+    && ['claimed', 'ambiguous', 'deferred'].includes(String(termiteChargeState.status || ''));
   // Never hand the homeowner a payer's bearer /pay token — nor ANY /pay token
   // for a settled invoice (nothing is owed), nor a pay-now link for a
   // card-lane accept whose invoice completion will auto-charge.
@@ -20931,7 +21346,7 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
   const prepayFallbackOwed = !!prepayTerm && !!invoice && prepayJobStamp?.deferred_to_first_visit === true
     && String(prepayJobStamp?.status || '') === 'delivered_fallback';
   const invoicePayUrl = invoice && !invoiceSettled && !payerBilled && (!recurringCardLaneRetry || prepayFallbackOwed) && !prepaySweepPending
-    && !prepayAwaitingFirstVisit && invoice.token
+    && !prepayAwaitingFirstVisit && !termiteAwaitingInstallation && !termiteChargeStaffOwned && invoice.token
     ? `/pay/${invoice.token}`
     : null;
   const invoiceNotes = String(invoice?.notes || '');
@@ -20995,7 +21410,8 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
       // no consumer (including the client's legacy invoiceMode fallback) can
       // route the customer to a pay step for it. Card-lane retries likewise
       // stay out of the pay step (see recurringCardLaneRetry above).
-      invoiceMode: !!invoice && !invoiceSettled && !recurringCardLaneRetry && !prepaySweepPending && !prepayAwaitingFirstVisit,
+      invoiceMode: !!invoice && !invoiceSettled && !recurringCardLaneRetry && !prepaySweepPending && !prepayAwaitingFirstVisit
+        && !termiteAwaitingInstallation && !termiteChargeStaffOwned,
       invoiceLinkDelivered: !!(invoice?.sent_at || invoice?.sms_sent_at),
       invoiceId: invoice?.id || null,
       invoiceAmount,
@@ -21022,12 +21438,19 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
       // deferral released the claim) → 'deferred' copy; a 'claimed' stamp
       // may have an executor mid-charge → tender-neutral 'ambiguous'
       // "we're confirming your payment" copy (Codex r26 P2).
-      invoiceSettled: invoiceSettled || prepaySweepPending || prepayAwaitingFirstVisit,
+      invoiceSettled: invoiceSettled || prepaySweepPending || prepayAwaitingFirstVisit || termiteAwaitingInstallation || termiteChargeStaffOwned,
       prepayChargeStatus: retryPrepayChargeStatus || (prepaySweepPending
         ? (String(prepayJobStamp?.status || '') === 'pending' ? 'deferred' : 'ambiguous')
-        : (prepayAwaitingFirstVisit ? 'after_first_visit' : null)),
+        : (prepayAwaitingFirstVisit
+          ? 'after_first_visit'
+          // Staff-owned: the tender-neutral "we're confirming" copy, which
+          // asserts neither a charge nor its absence.
+          : (termiteAwaitingInstallation ? 'after_installation' : (termiteChargeStaffOwned ? 'ambiguous' : null)))),
       prepayCoveredByCredit: retryPrepayCoveredByCredit,
     }),
+    ...(invoiceKind === 'annual_prepay_deferred'
+      && await require('../services/termite-program-agreement').annualAgreementChargesAfterInstallation({ estimateId: estimate.id, customerId: estimate.customer_id })
+      ? { annualChargeAfterInstallation: true } : {}),
     alreadyAccepted: true,
   };
 }
@@ -21193,6 +21616,9 @@ function buildAcceptNotificationCopy({
   // GATE_PAF_SETUP_FEE: the accept stamped the setup fee on the first visit
   // instead of minting a payable invoice — nothing is due or sent today.
   setupFeeDeferred = false,
+  // GATE_PAF_TERMITE: the agreement being issued charges after the station
+  // installation, not at signature.
+  annualChargeAfterInstallation = false,
 } = {}) {
   // Sign-before-pay (codex round-3 P2 on #4819): the durable notifications
   // must send the customer to the signature, never read as "approved,
@@ -21202,7 +21628,7 @@ function buildAcceptNotificationCopy({
     const amountText = annualPrepayAmount != null ? ` (${fmtMoney(annualPrepayAmount)})` : '';
     return {
       adminTitle: `Estimate accepted — signature pending: ${customerName}`,
-      adminBody: `Termite annual protection plan${amountText} accepted, waiting on the customer's signature on the annual agreement. Nothing is billed or booked until they sign; at signature the saved payment method is charged, or the pay link sent. The 12-month coverage year begins on the installation date.`,
+      adminBody: `Termite annual protection plan${amountText} accepted, waiting on the customer's signature on the annual agreement. Nothing is billed or booked until they sign; ${annualChargeAfterInstallation ? 'nothing is charged at signature either: after the station installation is completed the saved payment method is charged, or the pay link sent' : 'at signature the saved payment method is charged, or the pay link sent'}. The 12-month coverage year begins on the installation date.`,
       adminNext: 'Waiting on their signature; nothing is billed yet',
       customerTitle: 'Next step: sign your plan agreement',
       // Codex #4819 r6: signing starts the plan and its billing; the
@@ -28694,6 +29120,11 @@ async function composeEstimateDataPayload(estimate, {
   // ?refresh=1 re-fetch (the client keeps the first load's offer) and never
   // a non-page projection such as the Intelligence Bar's estimate detail.
   includeConsultationOffer = false,
+  // The composer is a PURE READ unless a caller opts in here: the park side effects (office alert + hold release for
+  // a parked estimate) belong to the customer's own page load only, so ONLY the public GET /:token/data handler sets
+  // this, after deciding it is a real customer view (not a draft/staff preview, not a PDF/render pass). The
+  // Intelligence Bar's estimate projection and every other caller leave it false and get no side effect.
+  runParkSideEffects = false,
   // Internal: the served-evidence result of a document render pass whose
   // composition was restarted from the row that pass found frozen under it
   // (set only by the restart below — never recurses twice).
@@ -28722,7 +29153,7 @@ async function composeEstimateDataPayload(estimate, {
       const evidence = await require('../services/estimate-proposal-billing').ensureRateReviewTermsEvidenceBeforeRender(estimate);
       if (evidence.estimate !== estimate) {
         return composeEstimateDataPayload(evidence.estimate, {
-          adminDraftPreview, isPdfRenderPass, docRenderPin, verifiedStaffPreview, currentViewRecorded, isInternalRefresh, includeConsultationOffer,
+          adminDraftPreview, isPdfRenderPass, docRenderPin, verifiedStaffPreview, currentViewRecorded, isInternalRefresh, includeConsultationOffer, runParkSideEffects,
           customerView, documentEvidence: evidence,
         });
       }
@@ -28823,6 +29254,22 @@ async function composeEstimateDataPayload(estimate, {
       return null;
     })();
     const ctaTerminalState = terminalState || (quoteRequirement.quoteRequired ? 'quote_required' : null);
+    // B18 park: an open, unlinked estimate whose lone phone candidate it contradicts is shown the page's existing
+    // review-before-booking state (reviewReason 'contact_review') - no slot picker, no card step, no accept - and
+    // the card-intent endpoints and the accept refuse it too. The lookup shares this request's one cached verdict;
+    // a failed lookup is not a park here (the intent endpoints and the accept re-check and fail closed).
+    let phoneReviewHold = false;
+    if (terminalState === null && !adminDraftPreview) {
+      try {
+        const blockingState = await estimatePublicBlockingState(estimate, { estData: estimateDataForIntelligence, quoteRequirement });
+        phoneReviewHold = blockingState?.state === 'contact_review';
+        // The page is about to tell the customer a specialist will follow up: file the (deduped) alert and return any
+        // live hold's capacity. Not for a staff preview or a PDF render pass, which are not a customer view.
+        if (phoneReviewHold && runParkSideEffects) await parkSideEffects(estimate, blockingState.rejectedCustomerId);
+      } catch (parkErr) {
+        logger.warn(`[estimate-data] phone-contradiction lookup failed for estimate ${estimate.id}: ${parkErr.message}`);
+      }
+    }
 
     const membership = await buildEstimateMembershipContext(estimate);
 
@@ -29655,12 +30102,14 @@ async function composeEstimateDataPayload(estimate, {
         // no slot or Stripe intent is ever created for a quote /accept would reject.
         // A terminal estimate (accepted/declined/expired) never advertises the
         // review state — the terminal card always wins on the client.
-        canAccept: terminalState === null && !quoteRequirement.quoteRequired && !trenchingReviewBeforeBooking,
+        canAccept: terminalState === null && !quoteRequirement.quoteRequired && !trenchingReviewBeforeBooking && !phoneReviewHold,
         terminalState: ctaTerminalState,
         quoteRequired: quoteRequirement.quoteRequired,
         quoteRequiredReason: quoteRequirement.reason || null,
-        reviewBeforeBooking: terminalState === null && trenchingReviewBeforeBooking,
-        reviewReason: terminalState === null && trenchingReviewBeforeBooking ? 'termite_trenching_review' : null,
+        reviewBeforeBooking: terminalState === null && (trenchingReviewBeforeBooking || phoneReviewHold),
+        reviewReason: terminalState === null && trenchingReviewBeforeBooking
+          ? 'termite_trenching_review'
+          : (phoneReviewHold ? ACCEPT_OFFICE_REVIEW_REASON : null),
         // Proposal-aware fields so the React view renders the formal-proposal
         // state (PDF + account-manager follow-up), not the generic
         // "inspection required" quote-required copy — and is channel-aware
@@ -29911,6 +30360,12 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       isInternalRefresh,
       customerView: customerViewEligible,
       includeConsultationOffer: true,
+      // A real customer view only, by the SAME verdict the view counter uses (shouldCountView: sent, not expired, no bot
+      // UA, no admin marker, no admin IP), and never a draft/staff preview or a PDF/render pass. An INTERNAL REFRESH
+      // (the page's own ?refresh=1 re-fetch) is deliberately NOT excluded the way the counter excludes it: the park can
+      // arise mid-sitting (staff edit the phone while a tab is open), the re-fetch after that tab's blocked action is
+      // what shows the review card, and the alert (deduped per estimate) and the locked hold release are idempotent.
+      runParkSideEffects: !adminDraftPreview && !verifiedStaffPreview && !isPdfRenderPass && shouldCountView(req, ip, estimate),
     })));
   } catch (err) { next(err); }
 });
@@ -30290,6 +30745,13 @@ module.exports.pricingBundleMissingRequiredSetupFee = pricingBundleMissingRequir
 module.exports.pricingBundleHasStaleTermiteRow = pricingBundleHasStaleTermiteRow;
 module.exports.cleanStoredName = cleanStoredName;
 module.exports.matchAcceptCustomerByPhone = matchAcceptCustomerByPhone;
+module.exports.acceptPhoneParkedVerdict = acceptPhoneParkedVerdict;
+module.exports.estimatePublicBlockingState = estimatePublicBlockingState;
+module.exports.retireOrDenyDroppedCapture = retireOrDenyDroppedCapture;
+module.exports.refuseParkedWrite = refuseParkedWrite;
+module.exports.ACCEPT_OFFICE_REVIEW_MESSAGE = ACCEPT_OFFICE_REVIEW_MESSAGE;
+module.exports.acceptOfficeReviewBody = acceptOfficeReviewBody;
+module.exports.acceptLoneCandidateContradicted = acceptLoneCandidateContradicted;
 module.exports.resolveEstimateContactFields = resolveEstimateContactFields;
 module.exports.resolveEstimateGreetingFirstName = resolveEstimateGreetingFirstName;
 module.exports.applySelectedTermiteBondToEstimateData = applySelectedTermiteBondToEstimateData;

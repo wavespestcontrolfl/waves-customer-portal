@@ -404,6 +404,12 @@ async function followupPreview({ date, insertData, technicianOverride }) {
     ? await findConflictingVisits({
       db, date: String(date), windowStart: insertData.window_start, windowEnd: insertData.window_end,
       excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+      // The technician the write would land with (wouldTechnicianId, after
+      // the assignability fallback above). Gate-dark (occupancy.js header).
+      // The write's own advisory probe (commitFollowup → probeSlotOverlap)
+      // still runs tech-blind, so with the gate on this preview can read
+      // "no overlap" where the write warns.
+      technicianId: wouldTechnicianId || null,
     })
     : [];
   return reply(200, {

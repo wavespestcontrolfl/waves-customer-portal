@@ -633,7 +633,10 @@ async function autoAssignParkedAlert({ alertId, actorId, qualityDates = null } =
   // them will really leave that window (Codex r3–r5 on #4759), so a window
   // any other live stop overlaps stays parked for a human.
   const window = { start: stop.window_start, end: stop.window_end };
-  const conflicts = await SmartRebooker.previewMoveConflicts(stop.id, date, window);
+  // occupancyTechBlind: the preview's target technician is the ABSENT one (the
+  // stop's own), not the candidate the move will land on, so it stays the
+  // deliberately tech-blind gate it was; the commit probes the destination.
+  const conflicts = await SmartRebooker.previewMoveConflicts(stop.id, date, window, { occupancyTechBlind: true });
   if (conflicts.length) return refuseOrClose(alertId, 'window_occupied', stop.id, absentTechId, date);
 
   const ranked = await eligibleRankedCandidates(stop, absentTechId, date);
@@ -747,5 +750,6 @@ module.exports = {
   autoAssignParkedAlert,
   autoAssignTechDay,
   MAX_MOVE_ATTEMPTS,
+  blockedBySchedule,
   _test: { fitsWindow, detourForTech, compareCandidates, rankCandidates },
 };

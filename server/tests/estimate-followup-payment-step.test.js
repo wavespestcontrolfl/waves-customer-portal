@@ -61,6 +61,13 @@ jest.mock('../routes/estimate-public', () => ({
   buildPricingBundle: jest.fn(async () => ({})),
   resolveEstimateQuoteRequirement: jest.fn(() => ({ quoteRequired: false })),
   estimateTrenchingReviewRequired: jest.fn(() => false),
+  // The ONE blocking-state helper (routes/estimate-public.js): quote-required / trenching review / contact_review.
+  // This fake mirrors its precedence over the mocked pieces; the real one is pinned in the park suites.
+  estimatePublicBlockingState: jest.fn(async (est, { estData, quoteRequirement } = {}) => {
+    if (quoteRequirement?.quoteRequired) return { state: 'quote_required' };
+    if (require('../routes/estimate-public').estimateTrenchingReviewRequired(estData)) return { state: 'termite_trenching_review' };
+    return require('../routes/estimate-public').__parked ? { state: 'contact_review' } : null;
+  }),
   reconcileFrozenMembershipSnapshot: jest.fn(async () => {}),
   resolveAcceptOneTimeTotal: jest.fn(() => 149),
   commercialAcceptDepositExempt: jest.fn(() => false),
@@ -353,6 +360,21 @@ describe('checkPaymentStepAbandoned', () => {
     expect(sent).toBe(0);
     expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
     expect(rawClaims).toHaveLength(0);
+  });
+
+  test('B18: a parked estimate (its phone belongs to another customer) skips - the card intents always refuse it; fail closed when the park lookup throws', async () => {
+    estimatePublic.__parked = true;
+    try {
+      enqueueHappyPath(baseEstimate());
+      expect(await _private.checkPaymentStepAbandoned(NOW)).toBe(0);
+      expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+      expect(rawClaims).toHaveLength(0);
+      estimatePublic.__parked = false;
+      estimatePublic.estimatePublicBlockingState.mockRejectedValueOnce(new Error('phone lookup down'));
+      enqueueHappyPath(baseEstimate());
+      expect(await _private.checkPaymentStepAbandoned(NOW)).toBe(0);
+      expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+    } finally { estimatePublic.__parked = false; }
   });
 
   test('recurring events with no linked customer and no phone skip — accept is phone-keyed', async () => {

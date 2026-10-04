@@ -86,6 +86,7 @@ function recordingReadyAt(row) {
 
 module.exports = {
   POST_CALL_ROW_SOURCES,
+  TERMINAL_CALL_STATUSES,
   callStartedAt,
   recordingReadyAt,
   callDurationSeconds,

@@ -74,18 +74,33 @@ afterEach(() => {
 });
 
 describe('inventory product detail', () => {
-  it('hides price, refresh and stock-adjustment writes from a technician but keeps the read-only data', async () => {
+  it('hides price, refresh and stock-adjustment writes from a technician but keeps the stock data', async () => {
     mount(`tab=products&search=Synthetic&productId=${productId}`, 'technician');
-    await screen.findByText('Movement History');
-    expect(screen.getByText('Synthetic Vendor')).toBeInTheDocument();
+    await screen.findByText(/Stock:/);
     expect(screen.queryByRole('button', { name: 'Add Price' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Refresh' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Apply Adjustment' })).not.toBeInTheDocument();
   });
 
+  // Owner 2026-10-03, "narrow": vendors, vendor prices and stock movements
+  // (rows carry costUsed) are off a technician's allow-list, so the screen
+  // neither shows them nor asks for them on load.
+  it('shows a technician no vendor prices or movement history and never requests vendors or movements', async () => {
+    mount(`tab=products&search=Synthetic&productId=${productId}`, 'technician');
+    await screen.findByText(/Stock:/);
+    expect(screen.queryByText('Synthetic Vendor')).not.toBeInTheDocument();
+    expect(screen.queryByText('Vendor Prices')).not.toBeInTheDocument();
+    expect(screen.queryByText('Movement History')).not.toBeInTheDocument();
+    const urls = fetch.mock.calls.map(([url]) => String(url));
+    expect(urls.some((u) => u.includes('/inventory?'))).toBe(true);
+    expect(urls.some((u) => u.includes('/inventory/vendors'))).toBe(false);
+    expect(urls.some((u) => u.includes('/movements'))).toBe(false);
+  });
+
   it('still offers those writes to an admin', async () => {
     mount(`tab=products&search=Synthetic&productId=${productId}`, 'admin');
     await screen.findByText('Movement History');
+    expect(screen.getByText('Synthetic Vendor', { selector: 'span' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Add Price' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Refresh' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Apply Adjustment' })).toBeInTheDocument();

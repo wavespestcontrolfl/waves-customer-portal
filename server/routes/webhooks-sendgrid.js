@@ -412,7 +412,10 @@ async function handleEvent(ev) {
       if (providerRetry.isProviderBlockedEvent(ev)) {
         providerRetry.alertIfProviderRetriesExhausted(emailMessage, ev)
           .catch((err) => logger.error(`[sendgrid-webhook] provider-retry alert failed for ${messageId}: ${err.message}`));
-      } else if (bounceRecovery.isHardBounceEvent(ev)) {
+      } else if (bounceRecovery.isHardBounceEvent(ev) && !isRateReview) {
+        // A rate review letter is reconciled on its notice above, with its own alert that a
+        // delivered re-send closes: the generic recovery (and its "needs a correct address"
+        // alert, which nothing would close) is not run for it.
         bounceRecovery.attemptRecovery(emailMessage, ev)
           .then((result) => {
             // Recovery handles DOMAIN typos; when it re-sent (`resent:

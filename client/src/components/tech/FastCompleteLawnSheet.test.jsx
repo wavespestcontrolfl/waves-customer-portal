@@ -221,6 +221,28 @@ describe('opening the sheet', () => {
   });
 });
 
+describe('the rainfast re-check line (GATE_LAWN_RAINFAST_WATCH)', () => {
+  const LINE = "Re-check last visit's treatment: weather data showed rain soon after it (Test Iron).";
+
+  test('the server\'s line shows on the sheet as sent, readable (14px muted note class), and does not block Complete', async () => {
+    await openSheet({ request: makeRequest({ ctx: context({ reCheck: { line: LINE } }) }) });
+    const note = screen.getByText(LINE);
+    expect(note.getAttribute('role')).toBe('status');
+    expect(note.className).toContain('tech-visit-muted');
+    expect(screen.getByRole('button', { name: /^Complete lawn visit$/ })).toBeTruthy();
+  });
+
+  test.each([
+    ['gate off (no key)', context()],
+    ['no prior check (null)', context({ reCheck: null })],
+    ['an unexpected shape', context({ reCheck: { line: 42 } })],
+    ['an empty line', context({ reCheck: { line: '   ' } })],
+  ])('%s: no note is shown', async (_label, ctx) => {
+    await openSheet({ request: makeRequest({ ctx }) });
+    expect(screen.queryByText(/Re-check last visit/)).toBeNull();
+  });
+});
+
 describe('products', () => {
   test('a recurring visit opens with the plan\'s products on and their amounts filled', async () => {
     await openSheet();

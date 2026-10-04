@@ -62,6 +62,7 @@ const MODULES = [
   ['gap-report-tools', 'GAP_REPORT_TOOLS', 'executeGapReportTool'],
   ['needs-me-tools', 'NEEDS_ME_TOOLS', 'executeNeedsMeTool'],
   ['billing-reader-tools', 'BILLING_READER_TOOLS', 'executeBillingReaderTool'],
+  ['billing-write-tools', 'BILLING_WRITE_TOOLS', 'executeBillingWriteTool'],
 ];
 
 const ajv = new Ajv({ strict: false, allErrors: true, coerceTypes: false });

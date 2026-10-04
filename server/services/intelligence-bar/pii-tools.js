@@ -26,6 +26,10 @@ const REVIEWED_PII_TOOL_NAMES = new Set([
   'repair_closeout',
   // resend_receipt previews name the customer and masked recipients.
   'resend_receipt',
+  // The billing writes name the customer, a card's last four, and an invoice's
+  // printed address (before and after).
+  'remove_saved_payment_method',
+  'correct_invoice_address',
   'get_stop_details',
   'get_recent_completions',
   'get_unanswered_threads',

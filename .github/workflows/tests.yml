@@ -335,7 +335,8 @@ jobs:
         env:
           RESERVATION_ARRIVAL_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
           RESERVATION_HOLD_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/reservation-arrival-postgres.test.js tests/reservation-hold-grace-postgres.test.js
+          SLOT_PARK_LOCK_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/reservation-arrival-postgres.test.js tests/reservation-hold-grace-postgres.test.js tests/slot-park-lock-contention-postgres.test.js
       - name: Staff arrival-window transaction tests
         working-directory: server
         env:

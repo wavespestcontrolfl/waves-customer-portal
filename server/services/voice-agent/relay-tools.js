@@ -418,6 +418,21 @@ const BOOKING_TOOLS = [
  * GATE_VOICE_AI_BOOKING (both checked at call time, not module load, so an
  * env flip takes effect without a restart of the test/process).
  */
+// capture_lead's one account-aware input. It exists only while the
+// caller-context lane is on (a known caller needs that lane), so the gate-off
+// tool surface stays exactly as it was.
+const USE_ACCOUNT_DETAILS_PROPERTY = {
+  type: 'boolean',
+  description: 'ONLY with estimate_requested, and ONLY after the caller answered YES to "Should it go to the '
+    + 'email and service address on your account?". The tool then uses the name, email and service address '
+    + 'on their account for whatever they did not give on the call. Never set it without that yes, and '
+    + 'never read the account\'s details aloud.',
+};
+const TOOLS_WITH_ACCOUNT_DETAILS = TOOLS.map((tool) => (tool.name !== 'capture_lead' ? tool : {
+  ...tool,
+  input_schema: { ...tool.input_schema, properties: { ...tool.input_schema.properties, use_account_details: USE_ACCOUNT_DETAILS_PROPERTY } },
+}));
+
 function activeTools({ officeOpen = null } = {}) {
   const { isContextEnabled } = require('./relay-context');
   // PR 2A: transfer_to_office rides every tool set — it needs no account
@@ -426,7 +441,9 @@ function activeTools({ officeOpen = null } = {}) {
   const transfer = isTransferAvailable(officeOpen) ? TRANSFER_TOOLS : [];
   if (!isContextEnabled()) return [...TOOLS, ...transfer];
   const { isBookingEnabled } = require('./relay-booking');
-  return isBookingEnabled() ? [...TOOLS, ...CONTEXT_TOOLS, ...BOOKING_TOOLS, ...transfer] : [...TOOLS, ...CONTEXT_TOOLS, ...transfer];
+  return isBookingEnabled()
+    ? [...TOOLS_WITH_ACCOUNT_DETAILS, ...CONTEXT_TOOLS, ...BOOKING_TOOLS, ...transfer]
+    : [...TOOLS_WITH_ACCOUNT_DETAILS, ...CONTEXT_TOOLS, ...transfer];
 }
 
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -994,9 +1011,6 @@ async function executeTool(name, input = {}, ctx = {}) {
       // An email must be DELIVERABLE, not merely non-empty (hook P1): an
       // ASR-garbled or syntactically invalid address is reported as missing.
       const { isValidEmail } = require('../../utils/internal-email-recipients');
-      // Fields accumulate across captures on this call (hook P1): a retry that
-      // supplies only the missing piece keeps what earlier captures gave.
-      const priorEstimateFields = typeof ctx.getEstimateFields === 'function' ? (ctx.getEstimateFields() || {}) : {};
       // Whitespace-only is EMPTY (hook P1): a field must carry real text to
       // count toward a deliverable request.
       const nz = (v) => (v != null && String(v).trim() !== '' ? String(v).trim() : null);
@@ -1009,29 +1023,19 @@ async function executeTool(name, input = {}, ctx = {}) {
         logger.info(`[voice-relay] capture_lead dropped an invalid email (${String(extracted.email).length} chars) callSid=${ctx.callSid || 'n/a'}`);
         extracted.email = null;
       }
-      const estimateFields = {
-        first_name: nz(extracted.first_name) || nz(priorEstimateFields.first_name),
-        last_name: nz(extracted.last_name) || nz(priorEstimateFields.last_name),
-        email: emailNow || nz(priorEstimateFields.email),
-        address_line1: nz(extracted.address_line1) || nz(priorEstimateFields.address_line1),
-        city: nz(extracted.city) || nz(priorEstimateFields.city),
-        zip: nz(extracted.zip) || nz(priorEstimateFields.zip),
-        // Service context accumulates too (hook P1): a retry that only adds
-        // the email must not file a card that has forgotten what they asked
-        // about.
-        requested_service: nz(extracted.requested_service) || nz(priorEstimateFields.requested_service),
-        pain_points: nz(extracted.pain_points) || nz(priorEstimateFields.pain_points),
-      };
-      if (typeof ctx.noteEstimateFields === 'function') ctx.noteEstimateFields(estimateFields);
+      // What this request has, and where each part came from: what the caller
+      // said on the call, plus — after a yes to the one question — the
+      // details on an established customer's account (relay-estimate-details).
+      const estimateDetails = require('./relay-estimate-details');
+      const { estimateFields, detailsFromAccount, estimateMissing, offerAccountQuestion, callbackPhone: estimateCallbackPhone } = await estimateDetails.resolveEstimateDetails({
+        input, extracted, emailNow, estimateRequested, callerPhone, callerPhoneValid: isLikelyE164(callerPhone), isValidEmail, ctx,
+      });
       // The accumulated fields ALSO ride the lead write (hook P1): identity
       // resolution (email match) and fill-forward must see the name/email/
       // address the FIRST capture gave, not just this retry's new piece.
-      for (const k of ['first_name', 'last_name', 'email', 'address_line1', 'city', 'zip', 'requested_service', 'pain_points']) {
+      for (const k of estimateDetails.CARRIED) {
         if (!extracted[k] && estimateFields[k]) extracted[k] = estimateFields[k];
       }
-      const estimateMissing = estimateRequested
-        ? ['first_name', 'last_name', 'email', 'address_line1'].filter((k) => !estimateFields[k])
-        : [];
       // The spoken turnaround is decided HERE, from the office clock, and
       // travels with the artifact (hook P1): open ⇒ "usually about 15
       // minutes" (urgent for staff); closed ⇒ "when the office opens";
@@ -1041,9 +1045,18 @@ async function executeTool(name, input = {}, ctx = {}) {
       // proves the office is open right now may say it.
       const { isContextEnabled: contextOn } = require('./relay-context');
       const officeOpen = contextOn() && typeof ctx.officeOpenNow === 'function' ? ctx.officeOpenNow() : null;
-      const spokenExpectation = officeOpen === true
-        ? 'about_15_minutes'
-        : (officeOpen === false ? 'when_office_opens' : 'as_soon_as_possible');
+      // ⭐ A PROMISE ALREADY SPOKEN ON THIS CALL STANDS, WITH ITS OWN TIMING.
+      // An estimate an earlier capture queued was promised aloud: a later
+      // capture that corrects the details (even one that leaves them
+      // incomplete, or whose card write fails) does not withdraw it, and it
+      // does not restart its clock or reword its turnaround.
+      const priorPromise = typeof ctx.getPromise === 'function' ? ctx.getPromise('send_estimate') : null;
+      const promiseStands = estimateRequested && Boolean(priorPromise && priorPromise.verdict === true);
+      const spokenExpectation = promiseStands && priorPromise.expectation
+        ? priorPromise.expectation
+        : (officeOpen === true
+          ? 'about_15_minutes'
+          : (officeOpen === false ? 'when_office_opens' : 'as_soon_as_possible'));
       if (estimateRequested) {
         extracted.quote_requested = true;
         extracted.quote_promised = estimateMissing.length === 0;
@@ -1609,47 +1622,36 @@ async function executeTool(name, input = {}, ctx = {}) {
       // the call as before once the agent is done.
       const holdOpen = estimateRequested && estimateMissing.length > 0;
       if (typeof ctx.markCaptured === 'function') ctx.markCaptured({ leadCreated, holdOpen });
-      // ⭐ A PROMISED ESTIMATE NEEDS AN ARTIFACT (codex #3569). A new lead IS
-      // the artifact (the office works it). A lifecycle customer gets no lead,
-      // so the promise would otherwise rest on a call summary nobody is paged
-      // about — file the estimate-request card, and let the result below tell
-      // the model whether the promise may be spoken.
-      let estimateQueued = null; // null = not requested; true/false = requested and (not) persisted
-      if (estimateRequested && estimateMissing.length) {
-        estimateQueued = false;
-      } else if (estimateRequested) {
-        if (leadCreated) {
-          estimateQueued = true;
-        } else if (leadResult && leadResult.customerId) {
-          const { surfaceEstimateRequestForCustomer } = require('../lead-from-extraction');
-          const surfaced = typeof surfaceEstimateRequestForCustomer === 'function'
-            ? await surfaceEstimateRequestForCustomer(leadResult.customerId, { ...extracted, ...estimateFields }, { callSid: ctx.callSid || null, phone: callerPhone || null, spokenExpectation })
-            : { persisted: false };
-          estimateQueued = surfaced && surfaced.persisted === true;
-        } else {
-          estimateQueued = false;
-        }
+      // The artifact behind the promise: the lead, or the office card (filed,
+      // or revised when a correction leaves the request incomplete).
+      const { estimateQueued, cardRevised, superseded: cardSuperseded } = await estimateDetails.fileEstimateRequest({
+        estimateRequested,
+        estimateMissing,
+        leadCreated,
+        customerId: (leadResult && leadResult.customerId) || null,
+        details: { ...extracted, ...estimateFields },
+        cardOpts: { callSid: ctx.callSid || null, sessionKey: ctx.sessionKey || null, phone: estimateCallbackPhone, spokenExpectation, accountDetailsConfirmed: detailsFromAccount },
+      });
+      // The card write re-proves call ownership (its fence). A reconnect that
+      // took the call between the lead write and here gets the same hard stop
+      // as a superseded lead write: this socket says and starts nothing more.
+      if (cardSuperseded) {
+        return 'This session was superseded by a reconnect — NOTHING was saved. Do NOT call any more '
+          + 'tools and do not answer account questions; say goodbye briefly.';
       }
       // The session records the promise the caller will hear: a queued
       // estimate becomes an owed commitment at close (call-commitments).
-      if (estimateQueued !== null && typeof ctx.notePromise === 'function') ctx.notePromise('send_estimate', estimateQueued === true, { expectation: spokenExpectation });
+      if (!promiseStands) {
+        if (estimateQueued !== null && typeof ctx.notePromise === 'function') ctx.notePromise('send_estimate', estimateQueued === true, { expectation: spokenExpectation });
+      }
       const expectationCopy = {
         about_15_minutes: 'The office is open: tell the caller the written estimate usually goes out in about 15 minutes.',
         when_office_opens: 'The office is closed: tell the caller the written estimate goes out when the office opens — do not name a time.',
         as_soon_as_possible: 'Office hours are unknown right now: tell the caller the written estimate will be sent as soon as possible — do not name a time.',
       }[spokenExpectation];
-      const estimateNote = estimateQueued === true
-        ? ` The estimate request IS on the office queue. ${expectationCopy}`
-        : (estimateQueued === false
-          ? (estimateMissing.length
-            ? ` IMPORTANT: the estimate request is NOT queued yet — still missing: ${estimateMissing.join(', ')}. `
-              + 'Do NOT promise a written estimate yet; ask for what is missing and call capture_lead again with '
-              + 'estimate_requested: true. If the caller declines to give it, respect that: call capture_lead again '
-              + 'WITHOUT estimate_requested (the estimate is dropped), tell them a Waves team member will follow up, '
-              + 'and end the call normally.'
-            : ' IMPORTANT: the estimate request could NOT be queued — do NOT promise a written estimate. Say a '
-              + 'Waves team member will follow up, nothing stronger.')
-          : '');
+      const estimateNote = estimateDetails.estimateResultNote({
+        estimateQueued, estimateMissing, promiseStands, cardRevised, offerAccountQuestion, expectationCopy,
+      }, ctx);
       logger.info(
         `[voice-relay] capture_lead ${leadCreated ? 'saved' : 'recorded with NO lead (existing customer)'} `
         + `callSid=${ctx.callSid || 'n/a'}`
