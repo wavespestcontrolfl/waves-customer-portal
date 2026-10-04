@@ -68,7 +68,8 @@ async function legStillApproved(expect, claim, id) {
     const current = await expect.rederive({ ownClaimToken: claim.token || null });
     return Boolean(current)
       && current.recipients_key === expect.approved.recipients_key
-      && current.amount === expect.approved.amount;
+      && current.amount === expect.approved.amount
+      && current.paid === expect.approved.paid;
   } catch (err) {
     logger.warn(`[invoice-receipt-resend] text-leg re-check failed for ${id}: ${err.message}`);
     return false;
@@ -159,25 +160,48 @@ async function legBlockedBy(s, claim, stillHeld, step) {
   return null;
 }
 
+// Where a provider request starts, keep what protects it alive for as long as it can be in flight: the
+// send lock's lease is re-armed and the operator claim's locked_at is refreshed, for the provider
+// client's own timeout plus a margin (receipt-handoff-window.js). Without it a request that starts near
+// the end of the lease or of the claim's staleness window can still be running when the lock drops or
+// stale recovery settles the claim, and another send then repeats a request the provider may have
+// accepted. The refresh runs on the lock's own session, never the pool: the App path calls the guard
+// while it holds a pooled transaction, and DB_POOL_MAX=2 leaves no slot to wait on. Returns the reason
+// the request must not start, or null.
+async function keepAliveAtHandoff(s, channel) {
+  const { handoffWindowMs } = require('./receipt-handoff-window');
+  const { heartbeatOperatorReceiptClaim } = require('./receipt-delivery-queue');
+  if (!s.owner.extendLease(handoffWindowMs(channel))) return 'send lock lost';
+  const beat = await heartbeatOperatorReceiptClaim(s.claim, s.owner.query).catch((err) => {
+    logger.warn(`[invoice-receipt-resend] claim heartbeat failed for ${s.id}: ${err.message}`);
+    return false;
+  });
+  return beat ? null : 'receipt claim lost';
+}
+
 // The provider-handoff guard, run by the sender at the point just before the provider request (a long
 // pre-dispatch step — recipient and payment reads, short link, PDF — can outlive the lock's lease and let
-// a contact or payment edit land). It reads MEMORY only: senders call it while holding their own pooled
-// transaction (App delivery holds one per notification), so a database read here could exhaust a small
-// pool. It checks lock ownership, then binds what the sender is about to deliver — the facts it reports,
-// { channel, to, amount } — to the approved recipient and amount (`expect.matches`, supplied by the tool;
-// absent = ownership only, as for the Invoices route). The database re-derivation stays in legBlockedBy,
-// immediately before the sender. `abortedBy` records why.
+// a contact or payment edit land). It makes no pooled database read: senders call it while holding their
+// own pooled transaction (App delivery holds one per notification), so a pooled read here could exhaust a
+// small pool. In order: lock ownership; then what the sender is about to deliver — the facts it reports,
+// { channel, to, amount, paid } — bound to the approved recipient, amount and paid date (`expect.matches`,
+// supplied by the tool; absent = no binding, as for the Invoices route); then the lock lease and the
+// claim are kept alive for the request (keepAliveAtHandoff), and ownership is read once more. The database
+// re-derivation stays in legBlockedBy, immediately before the sender. `abortedBy` records why.
 function handoffGuard(s, stillHeld, step) {
   const guard = async (facts) => {
-    if (!stillHeld(step)) {
-      guard.abortedBy = 'send lock lost';
-      return false;
+    const refuse = (reason) => { guard.abortedBy = reason; return false; };
+    if (!stillHeld(step)) return refuse('send lock lost');
+    if (s.expect?.matches && !s.expect.matches(facts)) return refuse(LEG_DRIFT);
+    let kept;
+    try {
+      kept = await keepAliveAtHandoff(s, facts?.channel);
+    } catch (err) {
+      logger.warn(`[invoice-receipt-resend] handoff keep-alive failed for ${s.id}: ${err.message}`);
+      kept = 'send lock lost';
     }
-    if (s.expect?.matches && !s.expect.matches(facts)) {
-      guard.abortedBy = LEG_DRIFT;
-      return false;
-    }
-    return true;
+    if (kept) return refuse(kept);
+    return stillHeld(step) ? true : refuse('send lock lost');
   };
   guard.abortedBy = null;
   return guard;
@@ -292,6 +316,8 @@ async function lockedSend(s, owner) {
   const acquired = await acquireClaim(s, stillHeld);
   if (acquired.early) return acquired;
   const { claim } = acquired;
+  s.owner = owner;
+  s.claim = claim;
   try {
     await verifyApproved(s, claim);
     if (!s.refused) await deliver(s, claim, stillHeld);

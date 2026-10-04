@@ -135,7 +135,7 @@ postgres('receipt senders: the pre-handoff guard on the real send paths', () => 
       const matches = await approve();
       const emailGuard = guardFor(matches);
       expect(await sendReceiptEmail(invoiceId, { beforeProviderHandoff: emailGuard })).toMatchObject({ ok: true });
-      expect(emailGuard.mock.calls[0][0]).toMatchObject({ channel: 'email', to: `${customerId}@example.invalid`, amount: '117.00' });
+      expect(emailGuard.mock.calls[0][0]).toMatchObject({ channel: 'email', to: `${customerId}@example.invalid`, amount: '117.00', paid: expect.any(Number) });
       expect(sendgridCalls()).toHaveLength(1);
       const textGuard = guardFor(matches);
       expect(await sendText(textGuard)).toMatchObject({ sent: true });
@@ -178,6 +178,18 @@ postgres('receipt senders: the pre-handoff guard on the real send paths', () => 
       const out = await sendReceiptEmail(invoiceId, { beforeProviderHandoff: guardFor(matches) });
       expect(sendgridCalls()).toHaveLength(0);
       expect(out).toMatchObject({ ok: false, code: 'receipt_handoff_aborted' });
+    });
+
+    test('the paid date rewritten after approval (a refund or dispute restoration): the email, which states it, is not sent; the text states none and still goes', async () => {
+      const matches = await approve('both');
+      await db('invoices').where({ id: invoiceId }).update({ paid_at: new Date('2026-09-20T12:00:00Z') });
+      const emailGuard = guardFor(matches);
+      const out = await sendReceiptEmail(invoiceId, { beforeProviderHandoff: emailGuard });
+      expect(emailGuard.mock.calls[0][0].paid).toBe(new Date('2026-09-20T12:00:00Z').getTime());
+      expect(sendgridCalls()).toHaveLength(0);
+      expect(out).toMatchObject({ ok: false, code: 'receipt_handoff_aborted' });
+      expect(await sendText(guardFor(matches))).toMatchObject({ sent: true });
+      expect(mockCreate).toHaveBeenCalledTimes(1);
     });
 
     test('a refund recorded after approval changes the text amount: the text is not sent', async () => {

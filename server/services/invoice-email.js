@@ -765,8 +765,14 @@ async function callerHandoffAllows(beforeProviderHandoff, facts) {
 }
 
 // What an email send is about to hand the provider: the recipient and the amount it prints (2 decimals).
-function receiptHandoffFacts(recipient, amountDue) {
-  return { channel: 'email', to: recipient.email, amount: Number.isFinite(amountDue) ? Number(amountDue).toFixed(2) : '0.00' };
+function receiptHandoffFacts(recipient, amountDue, invoice) {
+  return {
+    channel: 'email',
+    to: recipient.email,
+    amount: Number.isFinite(amountDue) ? Number(amountDue).toFixed(2) : '0.00',
+    // The paid instant (ms) the email and its PDF state, as loaded by this send.
+    paid: invoice?.paid_at ? new Date(invoice.paid_at).getTime() : null,
+  };
 }
 
 // The caller's last check as an email-library provider handoff (see sendReceiptEmail). undefined when there
@@ -833,7 +839,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
     ? Math.max(0, Number(payment.amount || 0) - refundedAmount)
     : invoiceAmountDue(invoice);
   // What this send is about to hand the provider, for a caller's handoff check (see sendReceiptEmail).
-  const handoffFacts = receiptHandoffFacts(recipient, amountDue);
+  const handoffFacts = receiptHandoffFacts(recipient, amountDue, invoice);
 
   const domain = publicPortalUrl();
   const longReceiptUrl = `${domain}/receipt/${invoice.token}`;

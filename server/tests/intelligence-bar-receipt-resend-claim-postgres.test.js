@@ -24,6 +24,18 @@ jest.mock('../services/invoice-issued-closeout', () => ({
   closeOutVisitForIssuedInvoice: (...a) => mockCloseOut(...a),
   issuedCloseoutTarget: (...a) => mockCloseoutTarget(...a),
 }));
+// The REAL send lock, with a recorder on owner.extendLease (the handoff keep-alive).
+const mockExtended = [];
+jest.mock('../services/receipt-send-lock', () => {
+  const real = jest.requireActual('../services/receipt-send-lock');
+  return {
+    ...real,
+    withReceiptSendLock: (id, run, opts) => real.withReceiptSendLock(id, (owner) => run({
+      ...owner,
+      extendLease: (ms) => { mockExtended.push(ms); return owner.extendLease(ms); },
+    }), opts),
+  };
+});
 jest.mock('../services/invoice-email', () => ({
   ...jest.requireActual('../services/invoice-email'),
   sendReceiptEmail: (...a) => mockSendReceiptEmail(...a),
@@ -394,6 +406,76 @@ postgres('resend_receipt on real PostgreSQL: the writer\'s final check and the a
       expect(out.note).toMatch(/held, not re-queued: the queue will not send it again/);
       expect(out.note).not.toMatch(/back in the queue/);
       expect(await job()).toMatchObject({ status: 'failed' });
+    });
+  });
+  describe('the provider handoff keeps the send lock and the claim alive for the request (Codex #5880 r3 P1)', () => {
+    const PAID_AT = new Date('2026-10-01T15:00:00Z');
+    const nineMinutesIn = () => db('receipt_delivery_jobs').where({ invoice_id: invoiceId })
+      .update({ locked_at: db.raw("now() - interval '9 minutes'") });
+    const lockRows = async () => (await db.raw(
+      "select pid from pg_locks where locktype = 'advisory' and objsubid = 2 and classid = ((hashtext('receipt-resend')::bigint & 4294967295)::bigint)::oid",
+    )).rows.length;
+    beforeEach(() => { mockExtended.length = 0; });
+
+    test('email at minute 9 of the claim: the claim is refreshed, stale recovery during the request leaves it, the lock stays held, and the lease is re-armed past the SendGrid timeout', async () => {
+      await seed();
+      const card = await preview({ via: 'email' });
+      mockCloseOut.mockImplementationOnce(async () => { await nineMinutesIn(); return { closed: false, reason: 'gate_off' }; }); // rendering used most of the window
+      const seen = {};
+      mockSendReceiptEmail.mockImplementation(async (_id, opts) => {
+        seen.allowed = await opts.beforeProviderHandoff({ channel: 'email', to: `${customerId}@example.invalid`, amount: '117.00', paid: PAID_AT.getTime() });
+        seen.lockedAgeMs = Date.now() - new Date((await job()).locked_at).getTime();
+        // The request is in flight; part of the window passes and the drain's stale recovery runs.
+        await db('receipt_delivery_jobs').where({ invoice_id: invoiceId }).update({ locked_at: db.raw("now() - interval '3 minutes'") });
+        await Queue._internals.recoverStaleLocks();
+        seen.job = await job();
+        seen.lockSessions = await lockRows();
+        return { ok: true };
+      });
+      const out = await confirm(card, { via: 'email' });
+      expect(out.failed).not.toBe(true);
+      expect(seen.allowed).toBe(true);
+      expect(seen.lockedAgeMs).toBeLessThan(30_000);
+      expect(seen.job).toMatchObject({ status: 'running' });
+      expect(seen.job.locked_by).toMatch(/^operator:/);
+      expect(seen.lockSessions).toBe(1);
+      const { REQUEST_TIMEOUT_MS } = jest.requireActual('../services/sendgrid-mail');
+      expect(mockExtended).toEqual([REQUEST_TIMEOUT_MS + 30_000]);
+      expect(await job()).toMatchObject({ status: 'completed' });
+    });
+
+    test('text (the real sender): the claim is refreshed before the Twilio request, and the lease is re-armed past the SDK\'s own timeout', async () => {
+      await seed();
+      const card = await preview({ via: 'sms' });
+      mockCloseOut.mockImplementationOnce(async () => { await nineMinutesIn(); return { closed: false, reason: 'gate_off' }; });
+      const seen = {};
+      mockCreate.mockImplementation(async () => {
+        seen.lockedAgeMs = Date.now() - new Date((await job()).locked_at).getTime();
+        seen.lockSessions = await lockRows();
+        return { sid: 'SM_accepted', status: 'queued' };
+      });
+      await confirm(card, { via: 'sms' });
+      expect(mockCreate).toHaveBeenCalledTimes(1);
+      expect(seen.lockedAgeMs).toBeLessThan(30_000);
+      expect(seen.lockSessions).toBe(1);
+      const RequestClient = jest.requireActual('twilio/lib/base/RequestClient');
+      expect(mockExtended).toEqual([new RequestClient().defaultTimeout + 30_000]);
+    });
+
+    test('a claim that stale recovery already took (no longer this send\'s): no Twilio request is made, a definite not-sent', async () => {
+      await seed();
+      const card = await preview({ via: 'sms' });
+      // After the leg's own database re-check, while the text is being prepared (before the provider handoff).
+      const InvoiceService = require('../services/invoice');
+      const actualFacts = InvoiceService.receiptSmsFacts.bind(InvoiceService);
+      jest.spyOn(InvoiceService, 'receiptSmsFacts').mockImplementationOnce(async (inv) => {
+        await db('receipt_delivery_jobs').where({ invoice_id: invoiceId }).update({ locked_by: 'drain:other' });
+        return actualFacts(inv);
+      });
+      const out = await confirm(card, { via: 'sms' });
+      expect(mockCreate).not.toHaveBeenCalled();
+      expect(out.sent).not.toBe(true);
+      expect(out.text).toEqual(expect.objectContaining({ status: 'not_sent', detail: 'receipt claim lost' }));
     });
   });
 });

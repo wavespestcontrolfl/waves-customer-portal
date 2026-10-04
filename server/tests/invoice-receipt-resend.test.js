@@ -13,18 +13,30 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 // The advisory lock needs a real connection; its own suite is intelligence-bar-receipt-resend-claim-postgres.
 // lostAfter = how many ownership checks pass before the lock's session reads as lost.
-const mockLock = { busy: false, reason: 'busy', lostAfter: Infinity, checks: 0 };
+const mockLock = { busy: false, reason: 'busy', lostAfter: Infinity, checks: 0, extended: [], extendOk: true, queries: [] };
 jest.mock('../services/receipt-send-lock', () => ({
   withReceiptSendLock: async (_id, run) => {
     if (mockLock.busy) return { acquired: false, reason: mockLock.reason };
     mockLock.checks = 0;
-    return { acquired: true, value: await run({ lost: () => mockLock.checks++ >= mockLock.lostAfter }) };
+    mockLock.extended = [];
+    mockLock.queries = [];
+    return {
+      acquired: true,
+      value: await run({
+        lost: () => mockLock.checks++ >= mockLock.lostAfter,
+        extendLease: (ms) => { mockLock.extended.push(ms); return mockLock.extendOk; },
+        query: async (sql, params) => { mockLock.queries.push({ sql, params }); return { rowCount: 1 }; },
+      }),
+    };
   },
 }));
 jest.mock('../services/invoice-issued-closeout', () => ({ closeOutVisitForIssuedInvoice: jest.fn(async () => null) }));
 jest.mock('../services/invoice-email', () => ({ sendReceiptEmail: jest.fn(async () => ({ ok: true })) }));
 jest.mock('../services/invoice', () => ({ sendReceipt: jest.fn(async () => ({ sent: true })) }));
+// The handoff window's own values are covered in receipt-handoff-window.test.js; here only that it is applied.
+jest.mock('../services/receipt-handoff-window', () => ({ handoffWindowMs: (channel) => ({ email: 150000, sms: 60000, app: 46000 }[channel] ?? 150000) }));
 jest.mock('../services/receipt-delivery-queue', () => ({
+  heartbeatOperatorReceiptClaim: jest.fn(async () => true),
   claimReceiptJobForOperatorSend: jest.fn(async () => ({ id: 'job-1', token: 'claim-1', prior: null })),
   recordOperatorReceiptDelivered: jest.fn(async () => undefined),
   releaseOperatorReceiptClaim: jest.fn(async () => undefined),
@@ -33,7 +45,7 @@ jest.mock('../services/receipt-delivery-queue', () => ({
 const db = require('../models/db');
 const InvoiceService = require('../services/invoice');
 const { sendReceiptEmail } = require('../services/invoice-email');
-const { claimReceiptJobForOperatorSend, releaseOperatorReceiptClaim } = require('../services/receipt-delivery-queue');
+const { claimReceiptJobForOperatorSend, releaseOperatorReceiptClaim, heartbeatOperatorReceiptClaim } = require('../services/receipt-delivery-queue');
 const { closeOutVisitForIssuedInvoice } = require('../services/invoice-issued-closeout');
 const { sendInvoiceReceipt } = require('../services/invoice-receipt-resend');
 
@@ -527,5 +539,86 @@ describe('the sent-time stamp is reported by who wrote it', () => {
     const out = await sendInvoiceReceipt(ID, { via: 'both' });
     expect(out.lockLost).toBe('before_stamp');
     expect(out).toMatchObject({ stampWritten: false, stampBy: null });
+  });
+});
+
+describe('the provider handoff keeps the send lock and the operator claim alive for the request (Codex #5880 r3 P1)', () => {
+  beforeEach(() => {
+    sendReceiptEmail.mockReset().mockResolvedValue({ ok: true });
+    InvoiceService.sendReceipt.mockReset().mockResolvedValue({ sent: true });
+    heartbeatOperatorReceiptClaim.mockReset().mockResolvedValue(true);
+    mockLock.extendOk = true;
+  });
+  afterEach(() => { Object.assign(mockLock, { busy: false, reason: 'busy', lostAfter: Infinity, extendOk: true }); });
+  const approved = { recipients_key: 'rk', amount: '129.00', receipt_state: 'unsent' };
+  const rederive = async () => ({ ...approved });
+  const emailFacts = { channel: 'email', to: 'pat@example.com', amount: '129.00' };
+  const textFacts = { channel: 'sms', to: '9415550100', amount: '129.00' };
+  const asksWith = (facts) => async (_id, opts) => ((await opts.beforeProviderHandoff(facts)) === true ? { ok: true, sent: true } : { ok: false, code: 'receipt_handoff_aborted' });
+
+  test('each handoff re-arms the lease for its own channel\'s window and refreshes the claim on the lock\'s own session', async () => {
+    sendReceiptEmail.mockImplementation(asksWith(emailFacts));
+    InvoiceService.sendReceipt.mockImplementation(asksWith(textFacts));
+    const out = await sendInvoiceReceipt(ID, { via: 'both' });
+    expect(out.delivery).toEqual({ email: 'sent', sms: 'sent' });
+    expect(mockLock.extended).toEqual([150000, 60000]);
+    // The heartbeat gets the claim and the lock session's query function, never the pool.
+    expect(heartbeatOperatorReceiptClaim).toHaveBeenCalledTimes(2);
+    expect(heartbeatOperatorReceiptClaim).toHaveBeenCalledWith(expect.objectContaining({ id: 'job-1', token: 'claim-1' }), expect.any(Function));
+    const query = heartbeatOperatorReceiptClaim.mock.calls[0][1];
+    await query('select 1', []);
+    expect(mockLock.queries).toEqual([{ sql: 'select 1', params: [] }]);
+  });
+
+  test('no facts (the channel is unknown) get the longest window', async () => {
+    sendReceiptEmail.mockImplementation(async (_id, opts) => ((await opts.beforeProviderHandoff()) === true ? { ok: true } : { ok: false }));
+    await sendInvoiceReceipt(ID, { via: 'email' });
+    expect(mockLock.extended).toEqual([150000]);
+  });
+
+  test('order: ownership, then the approved facts, then the keep-alive — a veto before it extends and refreshes nothing', async () => {
+    sendReceiptEmail.mockImplementation(asksWith(emailFacts));
+    const out = await sendInvoiceReceipt(ID, { via: 'email', expect: { approved, rederive, matches: () => false } });
+    expect(out.delivery.email).toBe('not_sent');
+    expect(mockLock.extended).toEqual([]);
+    expect(heartbeatOperatorReceiptClaim).not.toHaveBeenCalled();
+    mockLock.lostAfter = 3; // closeout, claim checks pass; the guard's own ownership read finds the lock gone
+    sendReceiptEmail.mockImplementation(asksWith(emailFacts));
+    await sendInvoiceReceipt(ID, { via: 'email' });
+    expect(mockLock.extended).toEqual([]);
+  });
+
+  test('a claim that is no longer this send\'s (the heartbeat touches no row): the request is not made — a definite not_sent', async () => {
+    heartbeatOperatorReceiptClaim.mockResolvedValue(false);
+    sendReceiptEmail.mockImplementation(asksWith(emailFacts));
+    const out = await sendInvoiceReceipt(ID, { via: 'email' });
+    expect(out.delivery.email).toBe('not_sent');
+    expect(out.body.email).toEqual({ ok: false, error: 'receipt claim lost' });
+  });
+
+  test('a heartbeat that throws, or a lease that can no longer be extended, also stops the request', async () => {
+    heartbeatOperatorReceiptClaim.mockRejectedValue(new Error('connection terminated'));
+    sendReceiptEmail.mockImplementation(asksWith(emailFacts));
+    expect((await sendInvoiceReceipt(ID, { via: 'email' })).body.email).toEqual({ ok: false, error: 'receipt claim lost' });
+    heartbeatOperatorReceiptClaim.mockResolvedValue(true);
+    mockLock.extendOk = false;
+    expect((await sendInvoiceReceipt(ID, { via: 'email' })).body.email).toEqual({ ok: false, error: 'send lock lost' });
+    expect(heartbeatOperatorReceiptClaim).toHaveBeenCalledTimes(1);
+  });
+
+  test('the Invoices route (no expect) gets the same protection', async () => {
+    sendReceiptEmail.mockImplementation(asksWith(emailFacts));
+    await sendInvoiceReceipt(ID, { via: 'email' });
+    expect(heartbeatOperatorReceiptClaim).toHaveBeenCalledTimes(1);
+  });
+
+  test('delivery evidence still wins: a keep-alive refusal on a later App device never turns an accepted one into not sent', async () => {
+    InvoiceService.sendReceipt.mockImplementationOnce(async (_id, opts) => {
+      expect(await opts.beforeProviderHandoff({ channel: 'app', to: null, amount: '129.00' })).toBe(true);
+      heartbeatOperatorReceiptClaim.mockResolvedValue(false);
+      expect(await opts.beforeProviderHandoff({ channel: 'app', to: null, amount: '129.00' })).toBe(false);
+      return { sent: true };
+    });
+    expect((await sendInvoiceReceipt(ID, { via: 'sms' })).delivery.sms).toBe('sent');
   });
 });

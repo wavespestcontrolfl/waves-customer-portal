@@ -150,4 +150,77 @@ postgres('withReceiptSendLock', () => {
     expect(lostAfterLease).toBe(true);
     expect(_slots.openCount()).toBe(0);
   });
+  describe('the lease is extended from the provider handoff (a request started late in the lease is not cut off)', () => {
+    test('a handoff near the end of the lease re-arms it: the session and lock survive past the original deadline, and still end at the extended one', async () => {
+      const id = randomUUID();
+      const hold = gate();
+      const states = {};
+      const first = withReceiptSendLock(id, async (owner) => {
+        await sleep(200); // "minute 9" of a 300 ms lease
+        states.extended = owner.extendLease(700); // the provider request starts: keep the lock for its window
+        await sleep(300); // past the ORIGINAL deadline (300 ms)
+        states.heldPastOriginal = !owner.lost();
+        states.rowsPastOriginal = (await lockRows()).length;
+        await hold.promise;
+        states.lostAtEnd = owner.lost();
+        return 'done';
+      }, { leaseMs: 300 });
+      await waitFor(async () => states.rowsPastOriginal !== undefined);
+      expect(states).toMatchObject({ extended: true, heldPastOriginal: true, rowsPastOriginal: 1 });
+      // No resolution at all: the bounded window ends and the lock is dropped, as before.
+      await waitFor(async () => (await lockRows()).length === 0);
+      hold.release();
+      expect(await first).toMatchObject({ acquired: true, value: 'done', lost: true });
+      expect(states.lostAtEnd).toBe(true);
+      expect(_slots.openCount()).toBe(0);
+    });
+
+    test('extending never shortens the lease, and an extension after the session is gone says so', async () => {
+      const id = randomUUID();
+      const hold = gate();
+      let shortExtend; let afterLoss;
+      const first = withReceiptSendLock(id, async (owner) => {
+        shortExtend = owner.extendLease(1); // a window shorter than what is left changes nothing
+        await sleep(100);
+        expect(owner.lost()).toBe(false);
+        await hold.promise;
+        afterLoss = owner.extendLease(60000);
+        return 'x';
+      }, { leaseMs: 400 });
+      await waitFor(async () => (await lockRows()).length === 1);
+      await waitFor(async () => (await lockRows()).length === 0); // the original 400 ms deadline held
+      hold.release();
+      await first;
+      expect(shortExtend).toBe(true);
+      expect(afterLoss).toBe(false);
+    });
+
+    test('owner.query runs on the lock\'s own session while every pooled connection is busy (DB_POOL_MAX=2): no deadlock, no pool slot', async () => {
+      const id = randomUUID();
+      const out = await withReceiptSendLock(id, async (owner) => {
+        const [{ pid }] = await lockRows();
+        // Occupy both pooled connections, as the App path does inside its transaction.
+        const hold = gate();
+        const busy = [db.transaction(async (trx) => { await trx.raw('select 1'); await hold.promise; }), db.transaction(async (trx) => { await trx.raw('select 1'); await hold.promise; })];
+        await sleep(100);
+        const res = await owner.query('select pg_backend_pid() as pid');
+        hold.release();
+        await Promise.all(busy);
+        return { samePid: res.rows[0].pid === pid };
+      });
+      expect(out).toMatchObject({ acquired: true, value: { samePid: true } });
+    });
+
+    test('owner.query on a session that is gone rejects', async () => {
+      const id = randomUUID();
+      let outer;
+      await withReceiptSendLock(id, async (owner) => {
+        const [{ pid }] = await lockRows();
+        await db.raw('select pg_terminate_backend(?)', [pid]);
+        await waitFor(async () => (await lockRows()).length === 0);
+        outer = await owner.query('select 1').then(() => 'ran', (err) => err.message || 'rejected');
+      });
+      expect(outer).not.toBe('ran');
+    });
+  });
 });

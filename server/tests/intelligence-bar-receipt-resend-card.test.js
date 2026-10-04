@@ -31,11 +31,13 @@ describe('resend_receipt card', () => {
     const card = confirmationDisplayParams('resend_receipt', { invoice_id: 'x' }, {
       ...base,
       memo: 'Thanks',
+      memo_note: 'The note appears in the receipt email only; the text receipt does not carry it.',
       visit_closeout: 'Also completes the linked visit — Pest Control on 2026-09-30',
       automatic_receipt: 'An automatic receipt is queued for this invoice. If this send does not deliver the email, it goes back in the queue and will try again on its own; a delivered email closes it.',
     });
     expect(card).toMatchObject({
       memo: 'Thanks',
+      memo_note: expect.stringMatching(/email only/),
       visit: 'Also completes the linked visit — Pest Control on 2026-09-30',
       automatic_receipt: expect.stringMatching(/automatic receipt is queued/),
     });

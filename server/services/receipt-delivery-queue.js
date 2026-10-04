@@ -530,6 +530,31 @@ async function claimReceiptJobForOperatorSend(invoiceId, { sawUnsent = false } =
   }
 }
 
+// Keep an operator claim alive (Codex #5880 r3 P1): recoverStaleLocks settles a
+// running operator claim whose locked_at is older than STALE_LOCK_MINUTES, which can happen while its
+// provider request is still in flight (rendering used most of the window). The send refreshes locked_at
+// at the provider handoff, so stale recovery cannot take the claim for the length of that request.
+// Keyed by the claim's token (locked_by) and still `running`: false when the row is no longer this
+// claim's (settled, re-owned), and the caller must not hand the request to the provider.
+// `query` (optional, async (sql, params) => pg result): run the one UPDATE on a caller-supplied session
+// instead of the pool. The handoff guard runs while the App path holds a pooled transaction, and with
+// DB_POOL_MAX=2 another pooled statement there could wait on a slot the caller itself holds.
+// A claim that holds no job (id null: the job was already finished) has nothing to keep alive: true.
+async function heartbeatOperatorReceiptClaim(claim, query = null) {
+  if (!claim?.id) return true;
+  if (typeof query === 'function') {
+    const res = await query(
+      "UPDATE receipt_delivery_jobs SET locked_at = now(), updated_at = now() WHERE id = $1 AND locked_by = $2 AND status = 'running'",
+      [claim.id, claim.token],
+    );
+    return res.rowCount > 0;
+  }
+  const touched = await db('receipt_delivery_jobs')
+    .where({ id: claim.id, locked_by: claim.token, status: 'running' })
+    .update({ locked_at: db.fn.now(), updated_at: db.fn.now() });
+  return touched > 0;
+}
+
 // Right after an operator leg delivers ('email' | 'sms'): claim-specific
 // evidence on the row, so a claim that is never released (a failed release,
 // or a process that dies before it) is settled by recoverStaleLocks without
@@ -682,6 +707,7 @@ module.exports = {
   scheduleReceiptDeliveryDrain,
   claimReceiptJobForOperatorSend,
   recordOperatorReceiptDelivered,
+  heartbeatOperatorReceiptClaim,
   releaseOperatorReceiptClaim,
   markTextCarriedBySummary,
   resumeDeferredReceiptDelivery,

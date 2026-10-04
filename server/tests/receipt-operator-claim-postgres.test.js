@@ -19,7 +19,24 @@ jest.mock('../models/db', () => {
 // The send lock needs the real db module's raw connections (its own suites: receipt-send-lock-postgres and
 // intelligence-bar-receipt-resend-claim-postgres); here db is a schema-scoped knex, so the lock is a passthrough.
 jest.mock('../services/receipt-send-lock', () => ({
-  withReceiptSendLock: async (_id, run) => ({ acquired: true, value: await run({ lost: () => false }) }),
+  withReceiptSendLock: async (_id, run) => ({
+    acquired: true,
+    // The owner's other two functions (the handoff keep-alive): a lease that always extends, and a statement
+    // on a connection of its own (not the pool), as the real lock session does.
+    value: await run({
+      lost: () => false,
+      extendLease: () => true,
+      query: async (sql, params) => {
+        const conn = await mockPg.client.acquireRawConnection();
+        try {
+          await conn.query(`SET search_path TO ${mockPg.client.config.searchPath[0]}`);
+          return await conn.query(sql, params);
+        } finally {
+          await new Promise((resolve) => { conn.end(resolve); });
+        }
+      },
+    }),
+  }),
 }));
 // The shared resend writer runs on the REAL queue below; only its senders are stubbed.
 const mockSendReceiptEmail = jest.fn();
@@ -38,6 +55,7 @@ const {
   claimDueReceiptDeliveryJobs,
   enqueueReceiptDelivery,
   recordOperatorReceiptDelivered,
+  heartbeatOperatorReceiptClaim,
   _internals: { recoverStaleLocks },
 } = require('../services/receipt-delivery-queue');
 
@@ -331,6 +349,66 @@ postgres('operator receipt claim on PostgreSQL', () => {
     expect(await claimReceiptJobForOperatorSend(operatorHeld)).toEqual({ inFlight: true, byOperator: true });
     const drainHeld = await seedJob({ status: 'running', locked_at: new Date(), locked_by: 'host:123' });
     expect(await claimReceiptJobForOperatorSend(drainHeld)).toEqual({ inFlight: true, byOperator: false });
+  });
+
+  describe('heartbeatOperatorReceiptClaim keeps a claim from being settled while its provider request is in flight (Codex #5880 r3 P1)', () => {
+    const minutesAgo = (id, minutes) => mockPg('receipt_delivery_jobs').where({ id })
+      .update({ locked_at: mockPg.raw(`now() - interval '${minutes} minutes'`) });
+    const rawQuery = async (sql, params) => {
+      const conn = await mockPg.client.acquireRawConnection();
+      try {
+        await conn.query(`SET search_path TO ${schema}`);
+        return await conn.query(sql, params);
+      } finally {
+        await new Promise((resolve) => { conn.end(resolve); });
+      }
+    };
+
+    test.each([['the pool', undefined], ['a session of its own (the lock\'s)', rawQuery]])('handoff at minute 9 via %s: the claim is refreshed and stale recovery leaves it', async (_label, query) => {
+      const invoiceId = await seedJob({ status: 'retry_scheduled' });
+      const claim = await claimReceiptJobForOperatorSend(invoiceId);
+      await minutesAgo(claim.id, 9);
+      expect(await heartbeatOperatorReceiptClaim(claim, query)).toBe(true);
+      const row = await job(invoiceId);
+      expect(Date.now() - new Date(row.locked_at).getTime()).toBeLessThan(30_000);
+      // Ten minutes after the ORIGINAL claim, i.e. one minute after the handoff: still not stale.
+      await minutesAgo(claim.id, 1);
+      await recoverStaleLocks();
+      expect(await job(invoiceId)).toMatchObject({ status: 'running', locked_by: claim.token });
+    });
+
+    test('without the heartbeat the same claim IS settled past the window — and with it, a request that never resolves still ages out', async () => {
+      const stale = await seedJob({ status: 'retry_scheduled' });
+      const staleClaim = await claimReceiptJobForOperatorSend(stale);
+      await minutesAgo(staleClaim.id, 11);
+      await recoverStaleLocks();
+      expect((await job(stale)).status).toBe('retry_scheduled');
+      // Heartbeat at the handoff, then nothing resolves: past the staleness window from the handoff it is settled as before.
+      const created = randomUUID();
+      const createdClaim = await claimReceiptJobForOperatorSend(created);
+      await minutesAgo(createdClaim.id, 9);
+      expect(await heartbeatOperatorReceiptClaim(createdClaim)).toBe(true);
+      await recoverStaleLocks();
+      expect(await job(created)).toMatchObject({ status: 'running' });
+      await minutesAgo(createdClaim.id, 11);
+      await recoverStaleLocks();
+      expect(await job(created)).toBeUndefined(); // a claim-created row goes away, as before
+    });
+
+    test('a claim that is no longer this send\'s is not refreshed (settled, or re-owned); a claim that holds no job has nothing to keep', async () => {
+      const invoiceId = await seedJob();
+      const claim = await claimReceiptJobForOperatorSend(invoiceId);
+      await mockPg('receipt_delivery_jobs').where({ id: claim.id }).update({ locked_by: 'someone-else' });
+      expect(await heartbeatOperatorReceiptClaim(claim)).toBe(false);
+      expect(await heartbeatOperatorReceiptClaim(claim, rawQuery)).toBe(false);
+      await mockPg('receipt_delivery_jobs').where({ id: claim.id }).update({ locked_by: claim.token });
+      await releaseOperatorReceiptClaim(claim, { emailDelivered: false });
+      expect(await heartbeatOperatorReceiptClaim(claim)).toBe(false); // released: no longer running
+      const finished = await seedJob({ status: 'completed' });
+      const none = await claimReceiptJobForOperatorSend(finished);
+      expect(none.id).toBeNull();
+      expect(await heartbeatOperatorReceiptClaim(none)).toBe(true);
+    });
   });
 
   describe('releaseOperatorReceiptClaim reports what became of the automatic job (the IB tool words its result from this)', () => {

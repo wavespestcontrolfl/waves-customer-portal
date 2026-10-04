@@ -107,6 +107,35 @@ test('an unsent invoice previews amount, paid date, channels and masked recipien
   expect(executionOutcome(preview)).toBe('awaiting_approval');
 });
 
+describe('the memo is part of the receipt EMAIL only (neither the text, the PDF nor the receipt page carries it)', () => {
+  test('a memo with a text-only send is refused with a plain reason, before anything is read or sent', async () => {
+    const out = await run({ via: 'sms', memo: 'Thanks for your business' });
+    expect(out).toEqual(expect.objectContaining({ code: 'memo_needs_email' }));
+    expect(out.error).toMatch(/email only.*Send by email or both/);
+    expect(out.preview).toBeUndefined();
+    expect(db).not.toHaveBeenCalled();
+    expect(sendInvoiceReceipt).not.toHaveBeenCalled();
+    // A blank memo is no memo.
+    expect((await run({ via: 'sms', memo: '   ' })).preview).toBe(true);
+  });
+
+  test('with email or both the card says the note appears in the email only', async () => {
+    for (const via of ['email', 'both']) {
+      const preview = await run({ via, memo: 'Thanks' });
+      expect(preview.memo).toBe('Thanks');
+      expect(preview.memo_note).toMatch(/receipt email only.*text receipt does not carry it/);
+    }
+    expect((await run({ via: 'both' })).memo_note).toBeUndefined();
+  });
+
+  test('the description and the field say so', () => {
+    const [tool] = RECEIPT_RESEND_TOOLS;
+    expect(tool.description).toMatch(/memo is an optional note that appears in the receipt EMAIL only/);
+    expect(tool.description).not.toMatch(/printed on the receipt/);
+    expect(tool.input_schema.properties.memo.description).toMatch(/email only.*Not allowed with via sms/);
+  });
+});
+
 test('an invoice whose receipt already went out previews as a RE-SEND with when it was sent', async () => {
   db.mockImplementation(fakeDb({ invoices: [{ ...PAID, receipt_sent_at: SENT_AT }] }));
   const preview = await run({});
@@ -223,6 +252,20 @@ describe('drift between the card and the click refuses — nothing sent', () => 
     const amount = await driftAfterPreview(() => Invoice.receiptAmountFor.mockResolvedValue('99.00'));
     expect(amount.preview_changed).toBe(true);
     expect(sendInvoiceReceipt).not.toHaveBeenCalled();
+  });
+
+  test('the paid date rewritten after the card (a refund or dispute restoration) is drift: nothing sent', async () => {
+    const out = await driftAfterPreview(() => db.mockImplementation(fakeDb({ invoices: [{ ...PAID, paid_at: new Date('2026-10-03T15:00:00Z') }] })));
+    expect(out).toEqual(expect.objectContaining({ preview_changed: true }));
+    expect(sendInvoiceReceipt).not.toHaveBeenCalled();
+  });
+
+  test('the approved version carries the paid instant, and the per-leg re-derive returns it', async () => {
+    const preview = await run({});
+    expect(preview._version.paid).toBe(PAID.paid_at.getTime());
+    await run({ confirmed: true, _verified_receipt_version: preview._version }, { technicianId: 'admin-1' });
+    const { expect: expectArg } = sendInvoiceReceipt.mock.calls[0][1];
+    expect((await expectArg.rederive({ ownClaimToken: null })).paid).toBe(PAID.paid_at.getTime());
   });
 
   test('the automatic receipt started delivering after the card', async () => {
@@ -540,6 +583,17 @@ describe('approvedMatcher: what each sender must be about to deliver to match th
     expect(plan({ channel: 'sms', to: '9415550100', amount: '129.00' })).toBe(false);
   });
 
+  test('email is held to the approved paid date (the email and PDF state it); the text states none, so it is not bound', () => {
+    const paid = new Date('2026-10-01T15:00:00Z').getTime();
+    const plan = m({ email: 'pat@example.com', invoice: { paid_at: new Date(paid) } });
+    expect(plan({ ...email('pat@example.com'), paid })).toBe(true);
+    expect(plan({ ...email('pat@example.com'), paid: paid + 86400000 })).toBe(false);
+    expect(plan({ ...email('pat@example.com'), paid: null })).toBe(false);
+    expect(plan(email('pat@example.com'))).toBe(false); // a sender that does not report it: refused
+    expect(plan({ channel: 'sms', to: '9415550100', amount: '129.00' })).toBe(true);
+    expect(plan({ channel: 'app', to: null, amount: '129.00' })).toBe(true);
+  });
+
   test('amount: formatting does not matter, value does', () => {
     const plan = { email: 'pat@example.com' };
     expect(m(plan)(email('pat@example.com', 129))).toBe(true);
@@ -577,8 +631,9 @@ describe('approvedMatcher: what each sender must be about to deliver to match th
     sendInvoiceReceipt.mockResolvedValue({ status: 200, body: { ok: true, email: { ok: true }, sms: { ok: true } }, closeout: null, delivery: { email: 'sent', sms: 'sent' }, queue: 'completed', lockLost: null, stampWritten: true, stampBy: 'send' });
     await confirm({});
     const { matches } = sendInvoiceReceipt.mock.calls[0][1].expect;
-    expect(matches({ channel: 'email', to: 'pat@example.com', amount: '129.00' })).toBe(true);
-    expect(matches({ channel: 'email', to: 'someone-else@example.com', amount: '129.00' })).toBe(false);
+    const paid = PAID.paid_at.getTime();
+    expect(matches({ channel: 'email', to: 'pat@example.com', amount: '129.00', paid })).toBe(true);
+    expect(matches({ channel: 'email', to: 'someone-else@example.com', amount: '129.00', paid })).toBe(false);
     expect(matches({ channel: 'sms', to: CUSTOMER.phone, amount: '129.00' })).toBe(true);
     expect(matches({ channel: 'sms', to: CUSTOMER.phone, amount: '99.00' })).toBe(false);
   });

@@ -828,7 +828,7 @@ const PINNED_DISPLAY_BUILDERS = {
       receipt: preview.receipt_status,
       send_by: preview.channels,
       to: preview.recipients,
-      ...(preview.memo ? { memo: preview.memo } : {}),
+      ...(preview.memo ? { memo: preview.memo, memo_note: preview.memo_note } : {}),
       ...(preview.visit_closeout ? { visit: preview.visit_closeout } : {}),
       // What a queued automatic receipt will do when this send settles it (the card must say it).
       ...(preview.automatic_receipt ? { automatic_receipt: preview.automatic_receipt } : {}),

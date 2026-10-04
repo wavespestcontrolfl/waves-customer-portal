@@ -44,8 +44,8 @@ const RECEIPT_RESEND_TOOLS = [
   {
     name: 'resend_receipt',
     description: `Send (or re-send) the paid receipt for ONE invoice to the customer, exactly as the Invoices page "Resend receipt" button does. The first call returns a PREVIEW and sends nothing: the invoice, the amount the receipt states, the paid date, whether a receipt was already sent and when (then the card says plainly it is a RE-SEND), the channels, and who it reaches (masked). The operator approves on the confirmation card; the confirmed run re-checks all of it, refuses if anything changed, and reports email and text separately (sent, not sent with the reason, or unknown when the provider did not answer), the outcome of the visit closeout, and what became of a queued automatic receipt for the invoice (back in the queue and will deliver on its own, held for reconciliation, or none) — say only what those fields report.
-Refused with the reason: invoice not found, not paid, a receipt for this invoice is being delivered right now, the customer opted out of payment receipts, no recipient on file, amount unverifiable.
-Takes invoice_id OR invoice_number (e.g. WPC-2026-0534), exactly one. via is email, sms or both (default both). memo is an optional note printed on the receipt — only include it when the operator gave you the words. The customer is contacted. Admin-only.
+Refused with the reason: a memo with a text-only send, invoice not found, not paid, a receipt for this invoice is being delivered right now, the customer opted out of payment receipts, no recipient on file, amount unverifiable.
+Takes invoice_id OR invoice_number (e.g. WPC-2026-0534), exactly one. via is email, sms or both (default both). memo is an optional note that appears in the receipt EMAIL only (the receipt text, the receipt PDF and the receipt page do not carry it), so it needs via email or both: a memo with via sms is refused — only include a memo when the operator gave you the words. The customer is contacted. Admin-only.
 Use for: "resend the receipt for invoice X", "send the paid receipt again", "the customer never got their receipt". To know whether a receipt already went out, read receipt_sent_at from get_invoice_detail / get_customer_invoices; never guess.`,
     input_schema: {
       type: 'object',
@@ -53,7 +53,7 @@ Use for: "resend the receipt for invoice X", "send the paid receipt again", "the
         invoice_id: { type: 'string', format: 'uuid', description: 'The paid invoice (from get_customer_invoices)' },
         invoice_number: { type: 'string', description: 'The invoice number, e.g. WPC-2026-0534 (use instead of invoice_id)' },
         via: { type: 'string', enum: ['email', 'sms', 'both'], description: 'Which channels to send on (default both)' },
-        memo: { type: 'string', description: 'Optional note printed on the receipt (up to 400 characters; longer is cut)' },
+        memo: { type: 'string', description: 'Optional note that appears in the receipt email only, never in the text (up to 400 characters; longer is cut). Not allowed with via sms.' },
       },
     },
     _sideEffects: true,
@@ -100,6 +100,10 @@ async function checkEligibility(input, ownClaimToken) {
   const via = input.via === undefined || input.via === null ? 'both' : input.via;
   if (!VALID_VIA.includes(via)) return blocked("via must be 'email', 'sms', or 'both'", 'invalid_target');
   const memo = typeof input.memo === 'string' ? input.memo.trim().slice(0, 400) : '';
+  // Refused before anything is read: the note is printed in the email only, never in the text.
+  if (via === 'sms' && memo) {
+    return blocked('A note appears in the receipt email only — the text receipt does not carry it. Send by email or both, or leave the note off.', 'memo_needs_email');
+  }
   const target = await resolveInvoiceId(input);
   if (target.error) return target;
   const who = await receiptRecipients(target.id, db, { resend: true, ownClaimToken });
@@ -130,7 +134,7 @@ function optionalCardLines({ memo, queuedJob, closeout }) {
     ? `Also finishes a closeout already started for the linked visit — ${closeout.serviceType || 'visit'} on ${closeout.date}: completes its remaining steps, even if the receipt itself does not go out; no completion text, report, review request or charge`
     : `Also completes the linked visit — ${closeout?.serviceType || 'visit'} on ${closeout?.date}: creates its service record, even if the receipt itself does not go out; no completion text, report, review request or charge`;
   return {
-    ...(memo ? { memo } : {}),
+    ...(memo ? { memo, memo_note: 'The note appears in the receipt email only; the text receipt does not carry it.' } : {}),
     ...(queuedJob ? {
       automatic_receipt: 'An automatic receipt is queued for this invoice. If this send does not deliver the email, it goes back in the queue and will try again on its own; a delivered email closes it.',
     } : {}),
@@ -141,11 +145,17 @@ function optionalCardLines({ memo, queuedJob, closeout }) {
 // Everything the confirmed run re-checks, hash-bound and hidden from the card: `receipt_state` is the
 // receipt_sent_at the card showed — a key ending in _at is excluded from the fingerprint, so the
 // instant is carried as a value, not a key.
+// The paid instant the receipt email states (its text and PDF are built from invoice.paid_at): a refund or
+// dispute restoration that rewrites it changes what the customer is sent. Milliseconds, as the email sender
+// reports them in its handoff facts (null = no paid date).
+const paidKey = (invoice) => (invoice?.paid_at ? new Date(invoice.paid_at).getTime() : null);
+
 function approvedVersion({ invoice, via, who, memo, closeout, sentAt }) {
   return {
     invoice_id: invoice.id,
     via,
     amount: who.amount,
+    paid: paidKey(invoice),
     recipients_key: receiptRecipientsKey(who),
     memo,
     // The linked visit the closeout would complete (null = none).
@@ -208,7 +218,9 @@ function approvedMatcher({ who, via }) {
     if (!facts) return false;
     if (!sameAmount(facts.amount)) return false;
     switch (facts.channel) {
-      case 'email': return via !== 'sms' && Boolean(who.email) && sameReach({ email: normalizeReceiptEmail(facts.to) });
+      // The email (and its PDF) state the paid date; the text states none, so only the email is bound to it.
+      case 'email': return via !== 'sms' && Boolean(who.email) && (facts.paid ?? null) === paidKey(who.invoice)
+        && sameReach({ email: normalizeReceiptEmail(facts.to) });
       case 'sms': return via !== 'email' && !who.payerBilled && Boolean(who.phone) && sameReach({ phone: facts.to });
       case 'app': return via !== 'email' && !who.payerBilled && who.app === true;
       default: return false;
