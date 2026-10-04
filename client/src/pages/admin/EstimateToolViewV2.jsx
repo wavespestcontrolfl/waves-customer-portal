@@ -1879,6 +1879,9 @@ export default function EstimateToolViewV2({
   // (a call, an email inquiry, a held or hand-entered request) is not in the
   // customers list, so without this the operator could not find the person.
   const [leadMatches, setLeadMatches] = useState([]);
+  // The lead request has its own status: a failed lead search must not read
+  // as "no leads match".
+  const [leadSearchStatus, setLeadSearchStatus] = useState("idle");
   // The lead picked from that list, for the "Linked to lead" line.
   const [linkedLead, setLinkedLead] = useState(null);
   const [generating, setGenerating] = useState(false);
@@ -2419,44 +2422,54 @@ export default function EstimateToolViewV2({
     setLeadMatches([]);
     if (q.length < 2) {
       setCustomerSearchStatus("idle");
+      setLeadSearchStatus("idle");
       return;
     }
     let active = true;
     const controller = new AbortController();
     setCustomerSearchStatus("loading");
-    const timer = setTimeout(async () => {
-      try {
-        const response = await fetch(
-          `/api/admin/customers?search=${encodeURIComponent(q)}`,
-          { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal },
-        );
-        if (!response.ok) throw new Error("Customer search failed");
-        const data = await response.json();
-        // Leads ride along best-effort: a failed lead search must not cost
-        // the customer results. A lead that already has a customer record is
-        // found through that customer, so only customer-less leads are asked
-        // for (no_customer=1, applied server-side before the limit).
-        let leads = [];
+    // Leads are asked for only where a pick can be saved (a new, unsaved draft).
+    const askLeads = canChangeLeadLinkRef.current;
+    setLeadSearchStatus(askLeads ? "loading" : "idle");
+    const timer = setTimeout(() => {
+      // Two independent requests: the customer results never wait for the
+      // lead request, and each reports its own failure.
+      (async () => {
         try {
-          const leadResponse = await fetch(
+          const response = await fetch(
+            `/api/admin/customers?search=${encodeURIComponent(q)}`,
+            { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal },
+          );
+          if (!response.ok) throw new Error("Customer search failed");
+          const data = await response.json();
+          if (active) {
+            setCustomers(data.customers || data || []);
+            setCustomerSearchStatus("done");
+          }
+        } catch {
+          if (active) setCustomerSearchStatus("error");
+        }
+      })();
+      if (!askLeads) return;
+      (async () => {
+        try {
+          // A lead that already has a customer record is found through that
+          // customer, so only customer-less leads are asked for (no_customer=1,
+          // applied server-side before the limit).
+          const response = await fetch(
             `/api/admin/leads?status=open&no_customer=1&limit=8&search=${encodeURIComponent(q)}`,
             { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal },
           );
-          if (leadResponse.ok && canChangeLeadLinkRef.current) {
-            const leadData = await leadResponse.json();
-            leads = (leadData.leads || []).filter((lead) => lead && lead.id && !lead.customer_id);
+          if (!response.ok) throw new Error("Lead search failed");
+          const data = await response.json();
+          if (active) {
+            setLeadMatches((data.leads || []).filter((lead) => lead && lead.id && !lead.customer_id));
+            setLeadSearchStatus("done");
           }
         } catch {
-          leads = [];
+          if (active) setLeadSearchStatus("error");
         }
-        if (active) {
-          setCustomers(data.customers || data || []);
-          setLeadMatches(leads);
-          setCustomerSearchStatus("done");
-        }
-      } catch {
-        if (active) setCustomerSearchStatus("error");
-      }
+      })();
     }, 300);
     return () => {
       active = false;
@@ -5099,7 +5112,8 @@ export default function EstimateToolViewV2({
               </p>
               {customerSearchStatus === "loading" && <p role="status" className="text-14 text-ink-secondary mb-3">Searching customers…</p>}
               {customerSearchStatus === "error" && <p role="alert" className="text-14 text-alert-fg mb-3">Customer search failed. Edit your search to try again.</p>}
-              {customerSearchStatus === "done" && customers.length === 0 && !(canChangeLeadLink && leadMatches.length > 0) && <p role="status" className="text-14 text-ink-secondary mb-3">No customers or leads found. Try a first name, last name, or full name.</p>}
+              {canChangeLeadLink && leadSearchStatus === "error" && <p role="status" className="text-14 text-ink-secondary mb-3">Lead search failed. Customer results are not affected. Edit your search to try again.</p>}
+              {customerSearchStatus === "done" && customers.length === 0 && !(canChangeLeadLink && (leadSearchStatus === "loading" || leadSearchStatus === "error" || leadMatches.length > 0)) && <p role="status" className="text-14 text-ink-secondary mb-3">No customers or leads found. Try a first name, last name, or full name.</p>}
               {customers.length > 0 && (
                 <div className="mb-3 border-hairline border-zinc-300 rounded-xs bg-white max-h-72 overflow-y-auto">
                   {customers.slice(0, 8).map((c) => {

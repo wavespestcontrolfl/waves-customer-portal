@@ -84,12 +84,33 @@ it('lists an open lead that has no customer record, and picking it fills the con
   expect(screen.queryByText(/Linked to lead:/)).not.toBeInTheDocument();
 });
 
-it('a failed lead search still shows the customer results', async () => {
+it('a failed lead search still shows the customer results and says the lead search failed', async () => {
   leadSearch.mockResolvedValue({ ok: false });
   mount();
   fireEvent.change(input(), { target: { value: 'Jamie' } });
   await screen.findByRole('button', { name: /Jamie Fixture/ });
   expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  expect(await screen.findByText(/Lead search failed/)).toBeInTheDocument();
+});
+
+it('a failed lead search is not reported as no matches', async () => {
+  search.mockResolvedValue(response([]));
+  leadSearch.mockResolvedValue({ ok: false });
+  mount();
+  fireEvent.change(input(), { target: { value: 'Dana' } });
+  expect(await screen.findByText(/Lead search failed/)).toBeInTheDocument();
+  expect(screen.queryByText(/No customers or leads found/)).not.toBeInTheDocument();
+});
+
+it('customer results show without waiting for a slow lead request', async () => {
+  let finishLeads;
+  leadSearch.mockImplementationOnce(() => new Promise((resolve) => { finishLeads = resolve; }));
+  mount();
+  fireEvent.change(input(), { target: { value: 'Jamie' } });
+  await screen.findByRole('button', { name: /Jamie Fixture/ });
+  expect(finishLeads).toBeTypeOf('function');
+  await act(async () => finishLeads(leadResponse([lead])));
+  expect(await screen.findByRole('button', { name: /Dana Sample.*Lead/ })).toBeInTheDocument();
 });
 
 it('picking a customer after a lead drops the lead link', async () => {
