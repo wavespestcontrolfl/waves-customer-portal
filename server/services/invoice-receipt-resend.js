@@ -57,6 +57,21 @@ function smsDelivery(result, err) {
 }
 const emailDelivery = (result) => (result?.ok ? 'sent' : result?.deliveryOutcome === 'uncertain' ? 'unknown' : 'not_sent');
 
+// Re-read, just before the text leg, the approved facts that leg depends on.
+// The full approved version is not compared here: the closeout and the email
+// leg above have legitimately moved the rest (linked visit, job state).
+async function textLegStillApproved(expect, claim, id) {
+  try {
+    const current = await expect.rederive({ ownClaimToken: claim.token || null });
+    return Boolean(current)
+      && current.recipients_key === expect.approved.recipients_key
+      && current.amount === expect.approved.amount;
+  } catch (err) {
+    logger.warn(`[invoice-receipt-resend] text-leg re-check failed for ${id}: ${err.message}`);
+    return false;
+  }
+}
+
 async function sendInvoiceReceipt(invoiceId, { memo, via = 'both', actorTechnicianId = null, sawUnsent, holdUnknownOutcome = false, expect = null } = {}) {
   const id = invoiceId;
   if (!['email', 'sms', 'both'].includes(via)) {
@@ -175,6 +190,12 @@ async function sendInvoiceReceipt(invoiceId, { memo, via = 'both', actorTechnici
         }
         if ((via === 'sms' || via === 'both') && !stillHeld('before_text')) {
           smsResult = { ok: false, error: 'send lock lost' };
+          delivery.sms = 'not_sent';
+        } else if (via === 'both' && expect && !(await textLegStillApproved(expect, claim, id))) {
+          // The email leg took time and the send lock excludes other receipt
+          // sends, not contact edits: the text goes only to the recipients
+          // (and for the amount) the card showed.
+          smsResult = { ok: false, error: 'recipient or amount changed after approval' };
           delivery.sms = 'not_sent';
         } else if (via === 'sms' || via === 'both') {
           // Manual operator resend — pass force:true to override the auto-send

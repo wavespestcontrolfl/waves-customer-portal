@@ -189,6 +189,33 @@ describe('expect — the writer owns the final check, under the claim and ahead 
   });
 
   test.each([
+    ['the recipients', { recipients_key: 'other' }],
+    ['the amount', { amount: '99.00' }],
+  ])('%s changing while the email leg runs: the email went, the text is not sent, the receipt is stamped', async (_label, change) => {
+    const pinned = { ...approved, recipients_key: 'pinned' };
+    const rederive = jest.fn()
+      .mockResolvedValueOnce({ ...pinned })
+      .mockResolvedValueOnce({ ...pinned, ...change });
+    InvoiceService.sendReceipt.mockClear();
+    const out = await sendInvoiceReceipt(ID, { via: 'both', expect: { approved: pinned, rederive } });
+    expect(out.status).toBe(200);
+    expect(out.delivery).toEqual({ email: 'sent', sms: 'not_sent' });
+    expect(out.body.sms).toEqual({ ok: false, error: 'recipient or amount changed after approval' });
+    expect(InvoiceService.sendReceipt).not.toHaveBeenCalled();
+    // The second re-check sits between the two legs.
+    expect(sendReceiptEmail.mock.invocationCallOrder.at(-1)).toBeLessThan(rederive.mock.invocationCallOrder[1]);
+  });
+
+  test('a linked visit the closeout just completed does not block the text leg', async () => {
+    const pinned = { ...approved, recipients_key: 'pinned', closeout_visit_id: 'visit-1' };
+    const rederive = jest.fn()
+      .mockResolvedValueOnce({ ...pinned })
+      .mockResolvedValueOnce({ ...pinned, closeout_visit_id: null });
+    const out = await sendInvoiceReceipt(ID, { via: 'both', expect: { approved: pinned, rederive } });
+    expect(out.delivery).toEqual({ email: 'sent', sms: 'sent' });
+  });
+
+  test.each([
     ['a changed value (recipients, amount, linked visit or a receipt stamped since)', async () => ({ ...approved, amount: '99.00' })],
     ['a blocker (null)', async () => null],
     ['a re-check that throws', async () => { throw new Error('read failed'); }],
