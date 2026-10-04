@@ -3071,13 +3071,22 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     const unitTechChanges = Object.prototype.hasOwnProperty.call(options, 'technicianId')
       && (options.technicianId || null) !== (target.expect.technician_id || null);
     const noticeOpts = unitTechChanges ? { suppressTechNotice: true } : {};
+    // Second technician: a member's rebooker probe is scoped to the row's
+    // CURRENT technician when the move keeps it, but a unit move that names a
+    // technician strips it from the member calls and re-points the row after
+    // (alignMember, whose own destination probe is tech-blind). Scoping the
+    // member probe to the OLD technician there would let a move through that
+    // the re-point then refuses, stranding the member moved-but-unassigned —
+    // so a naming move keeps the member probe tech-blind, as today.
+    const techProbeOpts = Object.prototype.hasOwnProperty.call(options, 'technicianId')
+      ? { occupancyTechBlind: true } : {};
     const memberOpts = target.isPrimary
-      ? { ...primaryBase, ...noticeOpts, expect: primaryExpect, visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect }
+      ? { ...primaryBase, ...noticeOpts, ...techProbeOpts, expect: primaryExpect, visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect }
       // A sibling is ALWAYS a single-row move (codex r4): the dispatch
       // surface previewed/acknowledged series scope for the tapped row
       // only, so a recurring sibling must never shift its own future
       // series undisclosed.
-      : { ...siblingBase, ...noticeOpts, expect: { ...target.expect, ...optOutFence }, seriesPolicy: 'single', visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect };
+      : { ...siblingBase, ...noticeOpts, ...techProbeOpts, expect: { ...target.expect, ...optOutFence }, seriesPolicy: 'single', visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect };
     // Callers sync reminders for the tapped row only (r2): every moved
     // sibling gets its reminder row synced here, notice suppressed — the
     // visit's one reminder text is the primary's. A sibling's own series

@@ -15,6 +15,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const knex = require('knex');
 const { findConflictingVisits } = require('../services/scheduling/occupancy');
+const { probeMoveConflicts } = require('../services/rebooker');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 
 const connection = process.env.BOOK_CAPACITY_COMMIT_TEST_DATABASE_URL;
@@ -93,6 +94,32 @@ describeDb('tech-aware confirm scope on real PostgreSQL', () => {
     scopeOn();
     await expect(probe('09:00', '10:00')).resolves.toEqual([ROW_A]);
     await expect(probe('15:00', '16:00')).resolves.toEqual([ROW_B]);
+  });
+
+  // Owner 2026-10-03, "Moves": the rebooker's move probe scopes to the technician the row is
+  // SAVED with, with no capacityPlacement needed. Runs only in CI (needs the database URL).
+  describe('rebooker probeMoveConflicts (moves)', () => {
+    const move = (technicianId, windowStart, windowEnd, options = {}) => probeMoveConflicts({
+      conn: mockConn,
+      target: { id: 'moving-row', date: DAY, windowStart, windowEnd, technicianId },
+      excludeServiceIds: ['moving-row'],
+      options,
+    }).then(({ rows }) => rows.map((r) => r.id).sort());
+
+    test('gate on + capacity: a move that keeps technician B is not blocked by technician A\'s stop; unassigned still blocks', async () => {
+      scopeOn();
+      await expect(move(TECH_B, '09:00', '10:00')).resolves.toEqual([]);
+      await expect(move(TECH_A, '09:00', '10:00')).resolves.toEqual([ROW_A]);
+      await expect(move(TECH_B, '13:00', '14:00')).resolves.toEqual([ROW_UNASSIGNED]);
+      // A move that unassigns the row (no technician) or opts out stays tech-blind.
+      await expect(move(null, '09:00', '10:00')).resolves.toEqual([ROW_A]);
+      await expect(move(TECH_B, '09:00', '10:00', { occupancyTechBlind: true })).resolves.toEqual([ROW_A]);
+    });
+
+    test('gate off: tech-blind whatever technician the row keeps (current behavior)', async () => {
+      process.env.GATE_SCHEDULING_CAPACITY = 'true';
+      await expect(move(TECH_B, '09:00', '10:00')).resolves.toEqual([ROW_A]);
+    });
   });
 
   test('gate on but capacity mode off: scope is not applied (offer side is tech-blind too)', async () => {

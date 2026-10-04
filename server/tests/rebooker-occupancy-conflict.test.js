@@ -542,6 +542,63 @@ describe('reschedule — shared occupancy conflict gate', () => {
     ]);
   });
 
+  // Second technician (GATE_MULTI_TECH_CONFIRM + capacity, dark; owner
+  // 2026-10-03 "Moves"): the mocked probe records what the move hands it —
+  // occupancy.js turns the technician into the "same technician or unassigned"
+  // predicate only while the gate is on (multi-tech-confirm-scope.test.js).
+  test('a move that keeps its technician probes that technician (no capacityPlacement needed)', async () => {
+    const { trx } = wireRescheduleMocks(service({ technician_id: 'tech-1' }));
+    await SmartRebooker.reschedule(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'weather_rain', 'tech', { allowLive: true },
+    );
+    expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
+      db: trx, technicianId: 'tech-1', date: TARGET,
+    }));
+  });
+
+  test('a move that CHANGES the technician probes the DESTINATION technician, the one it writes', async () => {
+    const { trxScheduled } = wireRescheduleMocks(service({ technician_id: 'tech-1' }));
+    await SmartRebooker.reschedule(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'auto_dispatch', 'auto_dispatch', { technicianId: 'tech-2' },
+    );
+    expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({ technicianId: 'tech-2' }));
+    expect(trxScheduled.update).toHaveBeenCalledWith(expect.objectContaining({ technician_id: 'tech-2' }));
+  });
+
+  test('a move that UNASSIGNS the row, or a techless row, stays tech-blind', async () => {
+    wireRescheduleMocks(service({ technician_id: 'tech-1' }));
+    await SmartRebooker.reschedule(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', { technicianId: null, overlapAdvisory: true },
+    );
+    expect(findConflictingVisits.mock.calls[0][0]).not.toHaveProperty('technicianId');
+
+    findConflictingVisits.mockClear();
+    wireRescheduleMocks(service({ technician_id: null }));
+    await SmartRebooker.reschedule('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin');
+    expect(findConflictingVisits.mock.calls[0][0]).not.toHaveProperty('technicianId');
+  });
+
+  test('occupancyTechBlind (grouped unit move that names a technician) keeps the probe tech-blind', async () => {
+    wireRescheduleMocks(service({ technician_id: 'tech-1' }));
+    await SmartRebooker.reschedule(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', { occupancyTechBlind: true },
+    );
+    expect(findConflictingVisits.mock.calls[0][0]).not.toHaveProperty('technicianId');
+  });
+
+  test('previewMoveConflicts judges the row\'s technician, or the one the move names, like the commit does', async () => {
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(service({ technician_id: 'tech-1' })) });
+      throw new Error(`Unexpected db table ${table}`);
+    });
+    await SmartRebooker.previewMoveConflicts('svc-1', TARGET, { start: '09:00', end: '11:00' }, { overlapAdvisory: true });
+    expect(findConflictingVisits).toHaveBeenLastCalledWith(expect.objectContaining({ technicianId: 'tech-1' }));
+    await SmartRebooker.previewMoveConflicts('svc-1', TARGET, { start: '09:00', end: '11:00' }, { technicianId: 'tech-2' });
+    expect(findConflictingVisits).toHaveBeenLastCalledWith(expect.objectContaining({ technicianId: 'tech-2' }));
+    await SmartRebooker.previewMoveConflicts('svc-1', TARGET, { start: '09:00', end: '11:00' }, { occupancyTechBlind: true });
+    expect(findConflictingVisits.mock.calls.at(-1)[0]).not.toHaveProperty('technicianId');
+  });
+
   test('different-tech concurrent writers serialize on ONE shared date key (their tech locks differ)', async () => {
     // The P1 this round closes: the occupancy check is tech-blind, but its
     // only guard was the tech-scoped lock — writers moving DIFFERENT techs
@@ -566,6 +623,33 @@ describe('reschedule — shared occupancy conflict gate', () => {
     expect(keysB).toEqual([`occupancy:${TARGET}`, `unassigned:${TARGET}`]);
     expect(keysA[0]).toBe(`occupancy:${TARGET}`);
     expect(keysB[0]).toBe(keysA[0]);
+  });
+});
+
+// Second technician: the day-option builder (rain-out sheet, admin picker)
+// judges each candidate day on the route commit will probe — the visit's own
+// technician — so a day offered is a day that saves. occupancy.js narrows the
+// probe only while GATE_MULTI_TECH_CONFIRM + capacity are on.
+describe('findRescheduleOptions — candidate days are probed on the visit\'s technician', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    findConflictingVisits.mockReset().mockResolvedValue([]);
+    jest.spyOn(require('../services/scheduling/blackout-dates'), 'getBlackoutDates').mockResolvedValue(new Set());
+  });
+  afterEach(() => { jest.restoreAllMocks(); });
+
+  test.each([['tech-1', 'tech-1'], [null, null]])('visit technician %s is passed to the probe as %s', async (techId, expected) => {
+    const svc = { ...service({ technician_id: techId }), zip: '34202', city: 'Bradenton', count: '0' };
+    db.raw = rawFactory('db.raw');
+    // One builder serves the visit read (.first), the day-load count (.first)
+    // and the nearby-services read (awaited as rows).
+    db.mockImplementation(() => chain({
+      first: jest.fn().mockResolvedValue(svc),
+      then: (resolve, reject) => Promise.resolve([]).then(resolve, reject),
+    }));
+    await SmartRebooker.findRescheduleOptions('svc-1', 'weather_rain', { probeSpanMinutes: 60 });
+    expect(findConflictingVisits).toHaveBeenCalled();
+    for (const [call] of findConflictingVisits.mock.calls) expect(call.technicianId).toBe(expected);
   });
 });
 
@@ -671,6 +755,11 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     // The KEY invariant: the overlapping sibling is NEVER written — no
     // unassigned-but-overlapping row commits; the whole trx rolls back.
     expect(sibUpdate.update).not.toHaveBeenCalled();
+    // Second technician: the techless anchor probes tech-blind, the follower
+    // probes its OWN technician (the one it keeps; occupancy.js applies the
+    // scope only while GATE_MULTI_TECH_CONFIRM + capacity are on).
+    expect(findConflictingVisits.mock.calls[0][0]).not.toHaveProperty('technicianId');
+    expect(findConflictingVisits.mock.calls[1][0]).toMatchObject({ technicianId: 'tech-9' });
   });
 
   test.each(['staff_deferred', 'sms_deferred', 'web_gate_off_deferred', 'staff_timed_marker', 'staff', 'customer', 'customer_sms', 'customer_locked', 'customer_confirmed', 'customer_rescheduled', 'customer_grouped', 'customer_reminder_race', 'customer_anchor_taken', 'customer_stale_disclosure'])('%s: quarterly move honors disclosed future-placement scope', async (actor) => {

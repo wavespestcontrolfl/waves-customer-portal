@@ -1300,6 +1300,47 @@ describe('previewSeriesMove', () => {
     }
   });
 
+  test('second technician: every probe of a follower (preview, disclosure check, sweep) names the follower\'s OWN technician; the techless anchor stays tech-blind', async () => {
+    // Offer/commit parity: the disclosure check that decides which far
+    // placeholder clashes park windowless must judge the same route as the
+    // sweep and the preview, or the disclosed set and the written set drift.
+    const anchor = anchorRow({ recurring_pattern: 'custom', recurring_interval_days: 90 });
+    const rows = [{ ...anchor }, { id: 'svc-2', status: 'pending', scheduled_date: dayOffset(100),
+      window_start: '09:00:00', window_end: '11:00:00', technician_id: 'tech-9',
+      is_recurring: true, recurring_parent_id: 'svc-1' }];
+    const placeholder = { id: 'other-plan-placeholder', is_recurring: true, recurring_parent_id: 'plan-2',
+      status: 'pending', customer_confirmed: false, reservation_expires_at: null };
+    const queries = [chain({ first: jest.fn().mockResolvedValue(anchor) }),
+      chain({ first: jest.fn().mockResolvedValue(anchor) }), chain({ select: jest.fn().mockResolvedValue(rows) })];
+    db.mockImplementation((table) => table === 'scheduled_services' ? queries.shift() : chain({ first: jest.fn().mockResolvedValue(null) }));
+    findConflictingVisits.mockReset().mockResolvedValueOnce([]).mockResolvedValueOnce([placeholder]);
+    const preview = await SmartRebooker.previewSeriesMove('svc-1', TARGET, { start: '09:00', end: '11:00' });
+    expect(preview.occurrences[1]).toMatchObject({ to_start: null, to_end: null });
+    const previewCalls = findConflictingVisits.mock.calls.map((c) => c[0]);
+    expect(previewCalls[0]).not.toHaveProperty('technicianId');
+    expect(previewCalls[1]).toMatchObject({ technicianId: 'tech-9' });
+
+    const { updates } = wireSeriesMocks(rows, { anchor });
+    const AppointmentReminders = require('../services/appointment-reminders');
+    const preclose = jest.spyOn(AppointmentReminders, 'precloseWindowlessReminderInTx').mockResolvedValue(undefined);
+    // The anchor's day is clear; the far follower's day holds a seeded placeholder.
+    findConflictingVisits.mockReset().mockImplementation(async ({ date }) => (date === TARGET ? [] : [placeholder]));
+    try {
+      await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_self_serve', {
+        expectOccurrenceIds: preview.occurrenceIds, expectOccurrences: preview.occurrences,
+      });
+      expect(updates[1].update.mock.calls[0][0]).toMatchObject({ window_start: null, window_end: null });
+      const followerCalls = findConflictingVisits.mock.calls.map((c) => c[0]).filter((c) => c.date !== TARGET);
+      expect(followerCalls.length).toBeGreaterThanOrEqual(2); // disclosure check + sweep probe
+      for (const call of followerCalls) expect(call.technicianId).toBe('tech-9');
+      for (const call of findConflictingVisits.mock.calls.map((c) => c[0]).filter((c) => c.date === TARGET)) {
+        expect(call).not.toHaveProperty('technicianId');
+      }
+    } finally {
+      preclose.mockRestore();
+    }
+  });
+
   test('admin preview rejects a future occurrence whose stored window cannot pass Apply rules', async () => {
     const anchor = anchorRow();
     const rows = [
