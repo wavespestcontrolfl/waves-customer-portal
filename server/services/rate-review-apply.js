@@ -1519,7 +1519,17 @@ async function prepayNoticesByTerm(dbh, customerId) {
     // notice_too_recent rule): a notice the apply refuses guards nothing.
     // ...and a text-only notice whose text Twilio already reported failed (sms_log, or the
     // kept early failure) told the customer nothing, even before its reconciliation lands.
-    const told = wasDelivered(n) && daysBetweenYmd(etDateString(new Date(n.sent_at)), day) >= MIN_NOTICE_DAYS && !(await smsDeliveryFailure(dbh, n))
+    // A letter handed to a provider and not stamped delivered counts as told from that
+    // handoff (recorded before the request, inside the renewal lock): while the send is
+    // between its handoff and its stamp ('sending'), and while its outcome is uncertain
+    // ('send_uncertain' — the customer may hold the letter, so a renewal at another amount
+    // needs a person's decision). The send holds the renewal lock only inside each handoff,
+    // so without this a renewal written after it would not see the amount the customer is
+    // being told. A send that is settled as not delivered returns the notice to draft and
+    // the guard goes with it.
+    const handedOffAt = ['sending', 'send_uncertain'].includes(String(n.status)) ? (meta.pending_letter && meta.pending_letter.handoff_at) || null : null;
+    const toldAt = wasDelivered(n) ? n.sent_at : handedOffAt;
+    const told = toldAt && daysBetweenYmd(etDateString(new Date(toldAt)), day) >= MIN_NOTICE_DAYS && !(await smsDeliveryFailure(dbh, n))
       ? Number(n.noticed_new_cents ?? n.new_amount_cents) : 0;
     if (told > 0) {
       familyByTerm.set(key, n.family_key);
