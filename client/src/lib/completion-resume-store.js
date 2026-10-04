@@ -435,6 +435,20 @@ export function getServicePhotoDraft(serviceId, operatorScope) {
   return getCompletionDraft(serviceId, servicePhotoDraftScope(operatorScope));
 }
 
+// Ownership checks before a cross-tab upload must distinguish a missing row
+// (another tab completed/deleted it) from an unavailable IndexedDB read. A
+// null-only read cannot safely make that decision.
+export function inspectServicePhotoDraft(serviceId, operatorScope) {
+  const unavailable = {};
+  const scope = servicePhotoDraftScope(operatorScope);
+  return withDraft(serviceId, scope, (key) => (
+    withStore(DRAFT_DB_NAME, "readonly", unavailable, (store) => store.get(key))
+  )).then((row) => ({
+    available: row !== unavailable,
+    draft: row && row !== unavailable && typeof row.draft === "object" ? row.draft : null,
+  }));
+}
+
 export function deleteServicePhotoDraft(serviceId, operatorScope) {
   return deleteCompletionDraft(serviceId, servicePhotoDraftScope(operatorScope));
 }
