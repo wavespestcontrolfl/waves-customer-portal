@@ -12,9 +12,14 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 // The advisory lock needs a real connection; its own suite is intelligence-bar-receipt-resend-claim-postgres.
-const mockLock = { busy: false };
+// lostAfter = how many ownership checks pass before the lock's session reads as lost.
+const mockLock = { busy: false, reason: 'busy', lostAfter: Infinity, checks: 0 };
 jest.mock('../services/receipt-send-lock', () => ({
-  withReceiptSendLock: async (_id, run) => (mockLock.busy ? { acquired: false } : { acquired: true, value: await run() }),
+  withReceiptSendLock: async (_id, run) => {
+    if (mockLock.busy) return { acquired: false, reason: mockLock.reason };
+    mockLock.checks = 0;
+    return { acquired: true, value: await run({ lost: () => mockLock.checks++ >= mockLock.lostAfter }) };
+  },
 }));
 jest.mock('../services/invoice-issued-closeout', () => ({ closeOutVisitForIssuedInvoice: jest.fn(async () => null) }));
 jest.mock('../services/invoice-email', () => ({ sendReceiptEmail: jest.fn(async () => ({ ok: true })) }));
@@ -205,7 +210,7 @@ describe('expect — the writer owns the final check, under the claim and ahead 
 });
 
 describe('one send per invoice at a time (advisory lock)', () => {
-  afterEach(() => { mockLock.busy = false; });
+  afterEach(() => { Object.assign(mockLock, { busy: false, reason: 'busy', lostAfter: Infinity }); });
 
   test('a send that finds the lock held is refused in flight with no effect at all', async () => {
     mockLock.busy = true;
@@ -233,5 +238,58 @@ describe('one send per invoice at a time (advisory lock)', () => {
     await sendInvoiceReceipt(ID, { via: 'sms' });
     // text-only success: stamped, then released; the lock (the callback's return) comes after both.
     expect(order).toEqual(['stamp:receipt_sent_at,receipt_memo', 'release']);
+  });
+});
+
+describe('ownership of the send lock is checked before each effect', () => {
+  afterEach(() => { Object.assign(mockLock, { busy: false, reason: 'busy', lostAfter: Infinity }); });
+
+  test('no lock session could be had (slots exhausted / connect failed): refused like in flight, no effects', async () => {
+    Object.assign(mockLock, { busy: true, reason: 'unavailable' });
+    const out = await sendInvoiceReceipt(ID, { via: 'both' });
+    expect(out).toEqual({ status: 409, body: { error: expect.stringMatching(/could not start.*nothing was sent/), code: 'receipt_delivery_in_flight' } });
+    expect(claimReceiptJobForOperatorSend).not.toHaveBeenCalled();
+    expect(sendReceiptEmail).not.toHaveBeenCalled();
+  });
+
+  // The checks run in this order: claim (1), closeout (2), email (3), text (4), stamp (5).
+  test.each([
+    [0, 'before_claim', { claim: 0, closeout: 0, email: 0, text: 0, stamp: 0 }],
+    [1, 'before_closeout', { claim: 1, closeout: 0, email: 0, text: 0, stamp: 0 }],
+    [2, 'before_email', { claim: 1, closeout: 1, email: 0, text: 0, stamp: 0 }],
+    [3, 'before_text', { claim: 1, closeout: 1, email: 1, text: 0, stamp: 0 }], // the stamp check then finds the lock lost too
+    [4, 'before_stamp', { claim: 1, closeout: 1, email: 1, text: 1, stamp: 0 }],
+  ])('lost after %i passing check(s) (%s): nothing later starts', async (lostAfter, step, ran) => {
+    mockLock.lostAfter = lostAfter;
+    const out = await sendInvoiceReceipt(ID, { via: 'both' });
+    expect(claimReceiptJobForOperatorSend).toHaveBeenCalledTimes(ran.claim);
+    expect(closeOutVisitForIssuedInvoice).toHaveBeenCalledTimes(ran.closeout);
+    expect(sendReceiptEmail).toHaveBeenCalledTimes(ran.email);
+    expect(InvoiceService.sendReceipt).toHaveBeenCalledTimes(ran.text);
+    expect(updates.filter((u) => u.patch.receipt_sent_at)).toHaveLength(ran.stamp);
+    if (step === 'before_claim') {
+      expect(out).toMatchObject({ status: 409, body: { code: 'receipt_delivery_in_flight' } });
+      expect(releaseOperatorReceiptClaim).not.toHaveBeenCalled();
+      return;
+    }
+    // Reported honestly: legs that never ran are not sent ("send lock lost"), what ran keeps its verdict.
+    expect(out.status).toBe(200);
+    expect(out.lockLost).toBe(step);
+    expect(out.delivery).toEqual({
+      email: ran.email ? 'sent' : 'not_sent',
+      sms: ran.text ? 'sent' : 'not_sent',
+    });
+    if (!ran.email) expect(out.body.email).toEqual({ ok: false, error: 'send lock lost' });
+    if (!ran.text) expect(out.body.sms).toEqual({ ok: false, error: 'send lock lost' });
+    // Our own claim is still handed back (cleanup, not a new effect).
+    expect(releaseOperatorReceiptClaim).toHaveBeenCalledTimes(1);
+    // Only a stamp for a receipt that went out can be skipped.
+    expect(out.stampWritten).toBe((ran.email || ran.text) ? false : null);
+  });
+
+  test('a lock that is never lost changes nothing', async () => {
+    const out = await sendInvoiceReceipt(ID, { via: 'both' });
+    expect(out.lockLost).toBeNull();
+    expect(out.stampWritten).toBe(true);
   });
 });

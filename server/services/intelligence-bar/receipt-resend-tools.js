@@ -199,6 +199,19 @@ function queueNote(queue, { allDelivered }) {
   }
 }
 
+// What was lost with the send lock (the writer's own report): the step that found its session gone.
+const LOCK_LOST_STEP = {
+  before_claim: 'before anything started',
+  before_closeout: 'before the visit closeout',
+  before_email: 'before the email',
+  before_text: 'before the text',
+  before_stamp: 'before the sent-time stamp',
+};
+function lockNote(lockLost, stampWritten) {
+  if (!lockLost) return null;
+  return `The send lock was lost partway through (${LOCK_LOST_STEP[lockLost] || lockLost}), so the steps after it were not started — a step shown as not sent with "send lock lost" never ran.${stampWritten === false ? ' The receipt went out but its sent-time stamp was not recorded.' : ''}`;
+}
+
 async function commit(input, actionContext) {
   const pinned = input._verified_receipt_version;
   if (!pinned) return { error: 'Use the confirmation card to approve this change.' };
@@ -209,7 +222,7 @@ async function commit(input, actionContext) {
     return { error: 'What this receipt would do changed after the card was shown — nothing was sent. Ask again for a fresh confirmation card.', preview_changed: true };
   }
 
-  const { status, body, closeout, delivery, queue } = await sendInvoiceReceipt(version.invoice_id, {
+  const { status, body, closeout, delivery, queue, lockLost, stampWritten } = await sendInvoiceReceipt(version.invoice_id, {
     memo: version.memo, via: version.via, actorTechnicianId: actionContext?.technicianId || null,
     // An unknown provider outcome parks a claimed automatic job instead of re-queuing it.
     holdUnknownOutcome: true,
@@ -253,7 +266,8 @@ async function commit(input, actionContext) {
     text,
     ...(visitCloseout ? { visit_closeout: visitCloseout } : {}),
     ...(queue ? { automatic_receipt: queue } : {}),
-    note: [what, queueNote(queue, { allDelivered: delivered && clean })].filter(Boolean).join(' '),
+    ...(lockLost ? { send_lock_lost: lockLost, ...(stampWritten === false ? { receipt_stamp_written: false } : {}) } : {}),
+    note: [what, lockNote(lockLost, stampWritten), queueNote(queue, { allDelivered: delivered && clean })].filter(Boolean).join(' '),
   };
   if (delivered) return clean ? { success: true, ...result } : { partial: true, ...result };
   if (legs.some((leg) => leg.status === 'unknown')) return { outcome_unknown: true, error: 'The receipt outcome is unknown — check before sending again.', ...result };

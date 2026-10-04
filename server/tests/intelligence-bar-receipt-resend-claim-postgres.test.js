@@ -268,6 +268,68 @@ postgres('resend_receipt on real PostgreSQL: the writer\'s final check and the a
     });
   });
 
+  describe('the lock session lost mid-send (killed by the server): no further effect starts, and the result says so', () => {
+    const lockPids = async () => (await db.raw(
+      "select pid from pg_locks where locktype = 'advisory' and objsubid = 2 and classid = ((hashtext('receipt-resend')::bigint & 4294967295)::bigint)::oid",
+    )).rows.map((r) => r.pid);
+    const waitForAsync = async (predicate) => {
+      for (let i = 0; i < 300 && !(await predicate()); i += 1) await new Promise((r) => setTimeout(r, 10));
+      expect(await predicate()).toBe(true);
+    };
+
+    test('writer: the email already in flight finishes, the text is not started, the stamp is not written; a second send takes the lock at once', async () => {
+      await seed({ stamped: true, job: 'completed' });
+      const stampBefore = (await invoice()).receipt_sent_at.toISOString();
+      const { sendInvoiceReceipt } = require('../services/invoice-receipt-resend');
+      let releaseEmail;
+      mockSendReceiptEmail.mockReset()
+        .mockImplementationOnce(() => new Promise((resolve) => { releaseEmail = () => resolve({ ok: true }); }))
+        .mockResolvedValue({ ok: true });
+      const first = sendInvoiceReceipt(invoiceId, { via: 'both' });
+      await waitFor(() => mockSendReceiptEmail.mock.calls.length === 1);
+      const [pid] = await lockPids();
+      await db.raw('select pg_terminate_backend(?)', [pid]);
+      await waitForAsync(async () => (await lockPids()).length === 0);
+      // The lock is gone, so another send may proceed while the first is still mid-email.
+      const second = await sendInvoiceReceipt(invoiceId, { via: 'email' });
+      expect(second.status).toBe(200);
+      expect(mockSendReceiptEmail).toHaveBeenCalledTimes(2);
+      const stampAfterSecond = (await invoice()).receipt_sent_at.toISOString();
+      expect(stampAfterSecond).not.toBe(stampBefore);
+      releaseEmail();
+      const out = await first;
+      // What already happened is reported; nothing further started for the first send.
+      expect(out.status).toBe(200);
+      expect(out.lockLost).toBe('before_text');
+      expect(out.delivery).toEqual({ email: 'sent', sms: 'not_sent' });
+      expect(out.body.sms).toEqual({ ok: false, error: 'send lock lost' });
+      expect(out.stampWritten).toBe(false);
+      expect(mockCreate).not.toHaveBeenCalled();
+      expect((await invoice()).receipt_sent_at.toISOString()).toBe(stampAfterSecond);
+      expect(await lockPids()).toHaveLength(0);
+    });
+
+    test('the IB tool says what never ran', async () => {
+      await seed({ stamped: true, job: 'completed' });
+      const card = await preview();
+      let releaseEmail;
+      mockSendReceiptEmail.mockReset().mockImplementationOnce(() => new Promise((resolve) => { releaseEmail = () => resolve({ ok: true }); }));
+      const first = confirm(card);
+      await waitFor(() => mockSendReceiptEmail.mock.calls.length === 1);
+      const [pid] = await lockPids();
+      await db.raw('select pg_terminate_backend(?)', [pid]);
+      await waitForAsync(async () => (await lockPids()).length === 0);
+      releaseEmail();
+      const out = await first;
+      expect(out).toEqual(expect.objectContaining({ partial: true, send_lock_lost: 'before_text', receipt_stamp_written: false }));
+      expect(out.email).toEqual({ status: 'sent' });
+      expect(out.text).toEqual(expect.objectContaining({ status: 'not_sent', detail: 'send lock lost' }));
+      expect(out.note).toMatch(/send lock was lost partway through \(before the text\)/);
+      expect(out.note).toMatch(/sent-time stamp was not recorded/);
+      expect(mockCreate).not.toHaveBeenCalled();
+    });
+  });
+
   describe('each disposition of the automatic receipt job reaches the result wording', () => {
     const emailFailed = () => mockSendReceiptEmail.mockResolvedValue({ ok: false, error: 'PDF generation failed' });
 

@@ -457,6 +457,27 @@ describe('result wording comes only from what the writer reported about the auto
     }
   });
 
+  test.each([
+    ['before_text', { email: 'sent', sms: 'not_sent' }, /lost partway through \(before the text\).*not sent with "send lock lost" never ran/],
+    ['before_email', { email: 'not_sent', sms: 'not_sent' }, /before the email/],
+  ])('the send lock lost %s: per-leg verdicts stay honest and the wording says what never ran', async (step, delivery, mustMatch) => {
+    const emailOk = delivery.email === 'sent';
+    sendInvoiceReceipt.mockResolvedValue({
+      status: 200,
+      body: { ok: emailOk, email: emailOk ? { ok: true } : { ok: false, error: 'send lock lost' }, sms: { ok: false, error: 'send lock lost' } },
+      closeout: null, delivery, queue: 'returned_to_queue', lockLost: step, stampWritten: emailOk ? false : null,
+    });
+    const out = await confirm({});
+    expect(out.send_lock_lost).toBe(step);
+    expect(out.text).toEqual(expect.objectContaining({ status: 'not_sent', detail: 'send lock lost' }));
+    expect(out.note).toMatch(mustMatch);
+    expect(out.partial === true || out.failed === true).toBe(true);
+    if (emailOk) {
+      expect(out.receipt_stamp_written).toBe(false);
+      expect(out.note).toMatch(/sent-time stamp was not recorded/);
+    }
+  });
+
   test('the writer refusing at its own final check reports changed state and nothing sent', async () => {
     sendInvoiceReceipt.mockResolvedValue({ status: 409, body: { error: 'changed after it was approved', code: 'receipt_approval_changed' }, queue: 'returned_to_queue' });
     const out = await confirm({});

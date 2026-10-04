@@ -16,6 +16,11 @@ jest.mock('../models/db', () => {
   return db;
 });
 
+// The send lock needs the real db module's raw connections (its own suites: receipt-send-lock-postgres and
+// intelligence-bar-receipt-resend-claim-postgres); here db is a schema-scoped knex, so the lock is a passthrough.
+jest.mock('../services/receipt-send-lock', () => ({
+  withReceiptSendLock: async (_id, run) => ({ acquired: true, value: await run({ lost: () => false }) }),
+}));
 // The shared resend writer runs on the REAL queue below; only its senders are stubbed.
 const mockSendReceiptEmail = jest.fn();
 jest.mock('../services/invoice-email', () => ({ sendReceiptEmail: (...a) => mockSendReceiptEmail(...a) }));

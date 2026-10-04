@@ -27,6 +27,8 @@
  * claim handed back untouched. `rederive({ownClaimToken})` must ignore the
  * caller's own claim row.
  * Besides `{status, body}` the result carries what the caller must not guess:
+ * `lockLost` / `stampWritten` (the send lock's session ended mid-send: which step found it,
+ * and whether the stamp was written),
  * `closeout` (what the visit closeout ahead of the legs reported), `delivery`
  * (per-leg certainty, see smsDelivery / emailDelivery) and `queue` (what became
  * of the automatic receipt job, from releaseOperatorReceiptClaim) — never part
@@ -78,13 +80,33 @@ async function sendInvoiceReceipt(invoiceId, { memo, via = 'both', actorTechnici
   let closeout = null;
   let refused = null;
   let queue = 'none';
+  let lockLost = null; // the first step that found the send lock's session gone
+  let stampWritten = null;
   const delivery = { email: 'not_requested', sms: 'not_requested' };
 
   // One operator send per invoice at a time (a Postgres advisory lock held on its own
   // connection for the whole send — see receipt-send-lock.js): claim, the re-check, the
   // closeout, both legs, the receipt_sent_at stamp and the claim release all run under it,
   // so a second send starts only after the first has stamped and released.
-  const lock = await withReceiptSendLock(id, async () => {
+  const lock = await withReceiptSendLock(id, async (owner) => {
+    // Ownership is checked before each effect: once the lock's session is gone another send
+    // may hold the lock, so nothing further starts (the claim release below is cleanup of
+    // our own claim, not a new effect, and still runs).
+    const stillHeld = (step) => {
+      if (owner.lost()) {
+        lockLost = lockLost || step;
+        return false;
+      }
+      return true;
+    };
+    if (!stillHeld('before_claim')) {
+      return {
+        early: {
+          status: 409,
+          body: { error: 'The send lock was lost before anything was sent — nothing was sent. Try again in a minute.', code: 'receipt_delivery_in_flight' },
+        },
+      };
+    }
     // The invoice's queued receipt job (if any) is claimed before anything
     // else runs, so it cannot deliver a second receipt around this send.
     const claim = await claimReceiptJobForOperatorSend(id, { sawUnsent: sawUnsent ?? !invoice.receipt_sent_at });
@@ -138,17 +160,23 @@ async function sendInvoiceReceipt(invoiceId, { memo, via = 'both', actorTechnici
         // the reachable retry for a payment-triggered closeout that did not
         // finish (pre-push P1). Runs once here, ahead of BOTH legs, so an
         // email-only resend retries too; a completed visit refuses quietly.
-        {
+        if (stillHeld('before_closeout')) {
           const { closeOutVisitForIssuedInvoice } = require('./invoice-issued-closeout');
           closeout = await closeOutVisitForIssuedInvoice({ invoiceId: id, trigger: 'paid', actorTechnicianId });
         }
 
-        if (via === 'email' || via === 'both') {
+        if ((via === 'email' || via === 'both') && !stillHeld('before_email')) {
+          emailResult = { ok: false, error: 'send lock lost' };
+          delivery.email = 'not_sent';
+        } else if (via === 'email' || via === 'both') {
           emailResult = await sendReceiptEmail(id, { memo: trimmedMemo }).catch((err) => ({ ok: false, error: err.message }));
           delivery.email = emailDelivery(emailResult);
           if (emailResult.ok) await recordOperatorReceiptDelivered(claim, 'email');
         }
-        if (via === 'sms' || via === 'both') {
+        if ((via === 'sms' || via === 'both') && !stillHeld('before_text')) {
+          smsResult = { ok: false, error: 'send lock lost' };
+          delivery.sms = 'not_sent';
+        } else if (via === 'sms' || via === 'both') {
           // Manual operator resend — pass force:true to override the auto-send
           // idempotency guard (otherwise re-clicking SEND RECEIPT would no-op
           // for invoices already auto-receipted by the Stripe webhook).
@@ -167,11 +195,14 @@ async function sendInvoiceReceipt(invoiceId, { memo, via = 'both', actorTechnici
 
         // Stamp receipt metadata whenever at least one channel succeeded. If
         // both failed, leave receipt_sent_at NULL so the operator can retry.
-        if (emailResult.ok || smsResult.ok) {
+        if ((emailResult.ok || smsResult.ok) && stillHeld('before_stamp')) {
           await db('invoices').where({ id }).update({
             receipt_sent_at: db.fn.now(),
             receipt_memo: trimmedMemo || null,
           });
+          stampWritten = true;
+        } else if (emailResult.ok || smsResult.ok) {
+          stampWritten = false;
         }
       }
     } finally {
@@ -188,7 +219,9 @@ async function sendInvoiceReceipt(invoiceId, { memo, via = 'both', actorTechnici
     return {
       status: 409,
       body: {
-        error: 'Another receipt send for this invoice is in progress — refresh in a minute before resending.',
+        error: lock.reason === 'unavailable'
+          ? 'A receipt send could not start (the send lock is busy or unavailable) — nothing was sent; try again in a minute.'
+          : 'Another receipt send for this invoice is in progress — refresh in a minute before resending.',
         code: 'receipt_delivery_in_flight',
       },
     };
@@ -219,6 +252,10 @@ async function sendInvoiceReceipt(invoiceId, { memo, via = 'both', actorTechnici
     closeout,
     delivery,
     queue,
+    // The first step that found the send lock lost (its remaining steps were not started), and whether
+    // the receipt_sent_at stamp was written (false: skipped for the same reason; null: nothing to stamp).
+    lockLost,
+    stampWritten,
   };
 }
 

@@ -23,9 +23,14 @@ jest.mock('../middleware/admin-auth', () => ({
   requireTechOrAdmin: (_req, _res, next) => next(),
 }));
 // The advisory lock needs a real connection; its own suite is intelligence-bar-receipt-resend-claim-postgres.
-const mockLock = { busy: false };
+// lostAfter = how many ownership checks pass before the lock's session reads as lost.
+const mockLock = { busy: false, reason: 'busy', lostAfter: Infinity, checks: 0 };
 jest.mock('../services/receipt-send-lock', () => ({
-  withReceiptSendLock: async (_id, run) => (mockLock.busy ? { acquired: false } : { acquired: true, value: await run() }),
+  withReceiptSendLock: async (_id, run) => {
+    if (mockLock.busy) return { acquired: false, reason: mockLock.reason };
+    mockLock.checks = 0;
+    return { acquired: true, value: await run({ lost: () => mockLock.checks++ >= mockLock.lostAfter }) };
+  },
 }));
 jest.mock('../services/invoice-issued-closeout', () => ({ closeOutVisitForIssuedInvoice: jest.fn(async () => null) }));
 jest.mock('../services/invoice-email', () => ({ sendReceiptEmail: jest.fn(async () => ({ ok: true })) }));
