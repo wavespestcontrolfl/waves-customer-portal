@@ -1250,7 +1250,7 @@ async function confirmLegacyAssessment({ assessmentId, adjustedScores, propertyH
       // technician's entry when it is real and not the AI's own read.
       const resolved = legacyConfirmFinalScores(assessment, adjustedScores);
       const conditionReal = legacyStressIsFixed(assessment, adjustedScores);
-      const { scores: finalScores } = conditionReal || resolved.fungus_control != null || resolved.thatch_level != null
+      const { scores: finalScores, copied: copiedFromCondition = [] } = conditionReal || resolved.fungus_control != null || resolved.thatch_level != null
         ? visitScores.alignWithCondition(resolved, {
           posted: adjustedScores,
           conditionEntered: conditionReal && resolved.stress_damage !== legacyAiScores(assessment).stress_damage,
@@ -1283,7 +1283,7 @@ async function confirmLegacyAssessment({ assessmentId, adjustedScores, propertyH
         ? await lawnAssessment.installConfirmedBaseline({ assessmentId, updateData }, { knex: conn })
         : (await conn('lawn_assessments').where({ id: assessmentId }).update(updateData).returning('*'))[0];
       if (persistChecks) await persistChecks(updated, conn);
-      return { assessment: updated, confirmed: !pending, missingScores };
+      return { assessment: updated, confirmed: !pending, missingScores, copiedFromCondition };
     };
     if (propertyHistoryEnabled || persistChecks) {
       const { withTurfProfileFence } = require('../services/customer-pricing-ai');
@@ -1413,10 +1413,11 @@ router.post('/confirm', async (req, res, next) => {
         // 3. Tech calibration — record AI vs tech score differences. The
         // drawer posts only typed keys now, so compare against the FINAL saved
         // scores (the confirmed row), never the sparse request payload.
-        const confirmedScores = Object.fromEntries(
+        // Fungus/Thatch keys that only hold the Condition score are left out.
+        const confirmedScores = visitScores.calibrationScores(Object.fromEntries(
           ['turf_density', 'weed_suppression', 'color_health', 'fungus_control', 'thatch_level', 'stress_damage']
             .map((key) => [key, updated?.[key] ?? null]),
-        );
+        ), confirmation.copiedFromCondition);
         if (updated) {
           const calibrationBaseline = assessment.adjusted_scores || assessment.composite_scores;
           const aiScores = calibrationBaseline

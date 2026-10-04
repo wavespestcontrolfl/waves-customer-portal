@@ -1,6 +1,6 @@
 /** Lawn visit provenance, review/confirmation transactions, and delivery ownership. */
 const { randomUUID } = require('crypto');
-const { SCORE_KEYS, confirmScores, runAiScores } = require('./lawn-visit-scores');
+const { SCORE_KEYS, confirmScores, runAiScores, calibrationScores } = require('./lawn-visit-scores');
 const lawnAssessment = require('./lawn-assessment');
 const { validateReview } = require('./lawn-visit-review-input');
 const { buildReview } = require('./lawn-visit-review-evidence');
@@ -467,7 +467,7 @@ function calibrationForRun(assessment, run) {
   const snapshot = parseObject(run?.reconciliation)?.confirmation;
   const technicianId = snapshot?.technician_id || assessment?.technician_id;
   if (snapshot?.calibration_eligible !== true || !technicianId) return null;
-  return { aiScores: snapshot.ai_scores, finalScores: snapshot.final_scores, technicianId };
+  return { aiScores: snapshot.ai_scores, finalScores: calibrationScores(snapshot.final_scores, snapshot.copied_from_condition), technicianId };
 }
 
 // A confirmation snapshot is the only record of what the technician changed. A

@@ -212,6 +212,17 @@ describe('confirm scores: a technician entry wins over the AI read', () => {
         .toMatchObject({ fungus_control: 30, stress_damage: 80 });
     });
 
+    test('calibration leaves out a sub-score that only holds the Condition score, so one Condition entry counts once', () => {
+      const ai = { turf_density: 70, weed_suppression: 80, color_health: 70, fungus_control: 20, thatch_level: 85, stress_damage: 20 };
+      const run = { status: 'complete', severities: JSON.stringify({ fungal_activity: sig('severe') }), scores_adjusted: JSON.stringify(ai) };
+      const decision = visit.confirmScores({ ...ai }, run, { stress_damage: 80 }, { scoreValue, calculateOverallScore: () => 77 });
+      expect(visit.calibrationScores(decision.finalScores, decision.copiedFromCondition))
+        .toEqual({ turf_density: 70, weed_suppression: 80, color_health: 70, fungus_control: null, thatch_level: 85, stress_damage: 80 });
+      // The saved row keeps the raised value; only the comparison drops it.
+      expect(decision.finalScores.fungus_control).toBe(80);
+      expect(visit.calibrationScores(decision.finalScores, undefined)).toEqual(decision.finalScores);
+    });
+
     test('a fully AI-blank run derives stress_damage from the technician-filled components and the run\'s independent stressors', () => {
       const assessment = { turf_density: null, weed_suppression: null, color_health: null, fungus_control: null, thatch_level: null, stress_damage: null };
       const insects = {

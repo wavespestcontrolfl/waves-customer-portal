@@ -195,6 +195,15 @@ function alignWithCondition(scores, { posted = {}, conditionEntered = false } = 
   return scoresComplete(aligned) ? { scores: aligned, copied } : { scores, copied: [] };
 }
 
+// What calibration compares against the AI read: the technician's scores,
+// without the Fungus/Thatch keys that only hold the Condition score. Those
+// are one Condition entry, already counted under stress_damage — counted
+// again they would triple its weight in avg_delta and bias_direction.
+function calibrationScores(finalScores, copied) {
+  const skip = Array.isArray(copied) ? copied : [];
+  return { ...finalScores, ...Object.fromEntries(skip.map((key) => [key, null])) };
+}
+
 function scoreVisit(analysis, { seasonAdjust, calculateOverallScore }) {
   const mergedComposite = compositeFor(analysis);
   const displayScores = deriveLegacyScores(analysis);
@@ -292,6 +301,7 @@ module.exports = {
   independentStressFloor,
   resolveConfirmScores,
   alignWithCondition,
+  calibrationScores,
   scoreVisit,
   overallScoreFor,
   confirmScores,

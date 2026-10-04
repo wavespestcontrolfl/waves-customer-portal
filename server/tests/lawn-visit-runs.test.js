@@ -1,4 +1,4 @@
-const { billedUsage, runRowFor, replayContextForRun, responseForRun } = require('../services/lawn-visit-runs');
+const { billedUsage, runRowFor, replayContextForRun, responseForRun, calibrationForRun } = require('../services/lawn-visit-runs');
 
 test('failed billed legs contribute tokens even when neither provider returns an answer', () => {
   expect(billedUsage({ failures: [{ usage: { input_tokens: 5, output_tokens: 1 } }, { reason: 'timeout' }], usage: null }))
@@ -49,4 +49,14 @@ test('responseForRun carries the immutable AI read alongside the review payload'
   expect(responseForRun({ status: 'pending' }).aiScores).toEqual({});
   expect(responseForRun({ status: 'complete', scores_adjusted: null }).aiScores).toEqual({});
   expect(responseForRun(null)).toBeNull();
+});
+
+test('calibration for a run leaves out the sub-scores that only hold the Condition score', () => {
+  const final = { turf_density: 70, weed_suppression: 80, color_health: 70, fungus_control: 80, thatch_level: 85, stress_damage: 80 };
+  const ai = { ...final, fungus_control: 20, stress_damage: 20 };
+  const run = (extra) => ({ reconciliation: JSON.stringify({ confirmation: { final_scores: final, ai_scores: ai, calibration_eligible: true, technician_id: 't1', ...extra } }) });
+  expect(calibrationForRun({}, run({ copied_from_condition: ['fungus_control'] })))
+    .toEqual({ aiScores: ai, finalScores: { ...final, fungus_control: null }, technicianId: 't1' });
+  // A confirmation saved before the key existed compares every score, as before.
+  expect(calibrationForRun({}, run({})).finalScores).toEqual(final);
 });

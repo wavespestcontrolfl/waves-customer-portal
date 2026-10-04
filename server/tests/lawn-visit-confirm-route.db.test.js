@@ -399,6 +399,10 @@ const MODEL_TEXT = 'Nutsedge is visible near the front edge.';
     const { assessment } = await seed({ ...COMPLETE, fungus_control: 20, stress_damage: 20 }, { run: false });
     const done = await request(assessment.id, { adjustedScores: { stress_damage: 80 } });
     expect(done.body.assessment).toMatchObject({ confirmed_by_tech: true, stress_damage: 80, fungus_control: 80, thatch_level: 90 });
+    // Calibration compares the Condition entry once: the raised Fungus is left out.
+    await drain();
+    const [, , techScores] = intel.recordTechCalibration.mock.calls.at(-1);
+    expect(techScores).toMatchObject({ stress_damage: 80, fungus_control: null, thatch_level: 90 });
     const { assessment: panel } = await seed({ ...COMPLETE, fungus_control: null }, { run: false });
     const blank = await request(panel.id, { adjustedScores: { ...COMPLETE, fungus_control: null } });
     expect(blank.body).toMatchObject({ confirmed: false, missingScores: ['fungus_control'] });
