@@ -224,3 +224,15 @@ it('a re-check for the same visit holds the last summary as stale instead of cle
   expect(result.current.availability).toBeNull();
 });
 
+it('the move choice on a shared stop rides the request, and changing it searches again', async () => {
+  const fetch = vi.fn().mockImplementation(async () => ({ ok: true, json: async () => ({ slots: [daySlot] }) }));
+  vi.stubGlobal('fetch', fetch);
+  const { rerender } = renderHook(({ moveScope }) => useBestTimes({ date: '2035-01-02', serviceId: 'combo-fixture', technicianId: 'tech', arrivalWindows: true, moveScope }), { initialProps: { moveScope: 'together' } });
+  // Only this hook's own requests (an earlier test's debounce can still fire).
+  const scopes = () => fetch.mock.calls.map((c) => JSON.parse(c[1].body)).filter((body) => body.serviceId === 'combo-fixture').map((body) => body.moveScope);
+  await waitFor(() => expect(scopes().length).toBeGreaterThan(0));
+  expect([...new Set(scopes())]).toEqual(['together']);
+  rerender({ moveScope: 'separate' });
+  await waitFor(() => expect(scopes()).toContain('separate'));
+});
+

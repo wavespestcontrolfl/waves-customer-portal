@@ -208,8 +208,11 @@ router.post('/', async (req, res) => {
       topN,
       hint, serviceId, arrivalWindows, excludeServiceIds, slotStepMinutes,
       pickedStart, pickedEnd, sameDayFloorMin, propertyId, durationEdit,
-      summary, pickedDate,
+      summary, pickedDate, moveScope,
     } = req.body || {};
+    // Edit appointment's choice on a shared stop: 'separate' = the save
+    // splits this service off and moves only it.
+    const moveAlone = moveScope === 'separate';
     let { technicianId } = req.body || {};
 
     const isTech = isTechnicianRequest(req);
@@ -350,7 +353,10 @@ router.post('/', async (req, res) => {
       excludeServiceIds,
       // Existing-visit staff hints share their route check with the edit
       // and rebooker save probes. Other consumers retain their slot contract.
-      ...(hint && serviceId && arrivalWindows === true ? { arrivalWindow: { serviceId, changes: hintChanges } } : {}),
+      // unit: the staff screens this hint feeds move a shared stop as a
+      // whole, unless the operator chose to separate this service (alone).
+      // GATE_COMBO_ROUTE_CHECK decides; for a visit alone, neither matters.
+      ...(hint && serviceId && arrivalWindows === true ? { arrivalWindow: { serviceId, changes: hintChanges, unit: !moveAlone, alone: moveAlone } } : {}),
       slotStepMinutes: plan.step,
       // Staff tool: blackout days stay visible — admin manual scheduling is
       // deliberately unblocked (Settings blackouts gate CUSTOMER surfaces).
@@ -377,7 +383,7 @@ router.post('/', async (req, res) => {
       ? await scorePickedHour({
         rawSlots, from: plan.verdictDate, today, sameDayFloorMin, useArrivalWindows, pickedStart, pickedEnd, spanMin,
         serviceId, technicianId: technicianId || undefined, excludeServiceIds, excluded, changes: hintChanges,
-        withReason: plan.summary,
+        withReason: plan.summary, moveAlone,
       })
       : undefined;
 

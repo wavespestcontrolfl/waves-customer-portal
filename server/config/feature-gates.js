@@ -3303,6 +3303,17 @@ const gates = {
   // the plain three-line hint, so pickers render exactly as today.
   rescheduleAvailability: gateEnvValue('GATE_RESCHEDULE_AVAILABILITY'),
 
+  // Combo route check (owner 2026-10-03): a visit shared by two or more
+  // services answers `route_unverified` on every arrival check, because
+  // certifying one half alone under-counts the work at the stop. On, a
+  // caller that moves the WHOLE visit (`unit: true` on
+  // loadArrivalRouteContext) gets it placed as one stop with the members'
+  // summed work. OFF in every environment; arrival-route.js reads it through
+  // gateEnvValue() at call time (comboRouteCheckLive). Kill switch: unset —
+  // `unit` is ignored and a combo is unverified exactly as today. This entry
+  // is for logGateStatus only.
+  comboRouteCheck: gateEnvValue('GATE_COMBO_ROUTE_CHECK'),
+
   // Staff existing-visit picker + save checks use complete-route arrival
   // simulation within the existing two-hour customer promises. Advisory;
   // never changes neighbours' promises or sends notifications. Call-time
