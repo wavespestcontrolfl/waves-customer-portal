@@ -873,7 +873,11 @@ async function settleLines(root, entry, { status, keepFrozen, frozen, hold = nul
 // send_uncertain. Returns { retryable, holdReason }.
 async function settleAttempted(dbh, entry, { frozen, emailUnknown, smsUnknown, dispatchMeta }) {
   let retryable = true;
-  let delivered = false;
+  // Lines stamped delivered from an early confirmation, and lines parked: the letter counts
+  // as sent only when every line of it was stamped.
+  let promoted = 0;
+  let parked = 0;
+  const settledAlertKeys = [];
   let holdReason = 'pre_dispatch_error';
   const alerts = [];
   // Under the customer-comms fence and the row lock the delivery callbacks take
@@ -907,11 +911,11 @@ async function settleAttempted(dbh, entry, { frozen, emailUnknown, smsUnknown, d
       const confirmed = emailStill && earlyDelivered.email && String(live.customer_id) === String(entry.customerId)
         ? channelDeliveredTransition({ ...live, status: UNCERTAIN, metadata: parkedMeta }, 'email', new Date(earlyDelivered.email.at), earlyDelivered.email.id) : null;
       if (confirmed && confirmed.promoted) {
-        await trx('price_change_notices').where({ id: live.id }).update({ ...confirmed.patch, metadata: JSON.stringify(confirmed.meta), updated_at: new Date() });
-        await trx('rate_review_snapshots').where({ notice_id: live.id, status: 'approved' }).update({ status: 'sent', updated_at: new Date() });
-        delivered = true;
+        settledAlertKeys.push(...await applyChannelDelivered(trx, live, confirmed));
+        promoted += 1;
         continue;
       }
+      parked += 1;
       await trx('price_change_notices').where({ id: live.id }).update({ status: UNCERTAIN, updated_at: new Date(), metadata: JSON.stringify(parkedMeta) });
       continue;
     }
@@ -939,7 +943,8 @@ async function settleAttempted(dbh, entry, { frozen, emailUnknown, smsUnknown, d
   }
   });
   if (alerts.length) await raiseDeliveryAlerts(alerts);
-  return { retryable, holdReason, delivered };
+  await closeDeliveryAlerts(dbh, settledAlertKeys, `customer ${entry.customerId}`);
+  return { retryable, holdReason, delivered: promoted > 0 && parked === 0 };
 }
 
 // gen: this send's claim generation — the rows must still be in ITS claim (not settled,
@@ -1309,6 +1314,7 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
   const undeliveredEarly = [];
   let reclaimed = false;
   const resolvedAlertKeys = [];
+  let emailConfirmed = false; // an email of unknown outcome that its own "delivered" event confirmed
   await dbh.transaction(async (trx) => {
     await lockCustomerComms(trx, entry.customerId);
     // Twilio's verdict on this letter's text (its callback may already be in sms_log or
@@ -1338,6 +1344,7 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
       // row): an email of otherwise unknown outcome is confirmed. A failure still wins.
       const emailConfirmedEarly = !!earlyDelivered.email && !!email.attempted && !email.sent && !email.definiteNonSend && !emailHold && !!handoff.email;
       const emailOk = (!!email.sent || emailConfirmedEarly) && !early.email;
+      if (emailConfirmedEarly && emailOk) emailConfirmed = true;
       const smsOk = !!sms.sent && !early.sms;
       // A channel whose outcome is unknown (a timeout, a provider error that may have
       // delivered) is remembered: it is neither confirmed nor failed. A channel whose failure
@@ -1401,14 +1408,8 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
     await raiseDeliveryAlerts(undeliveredEarly);
     return { outcome: 'rejected', holdReason: 'delivery_failed_before_stamp' };
   }
-  if (resolvedAlertKeys.length && require('../config/feature-gates').alertEpisodesLive()) {
-    try {
-      await require('./admin-alert-episodes').closeAdminAlertKeys(dbh, resolvedAlertKeys, 'rate_review_resent');
-    } catch (err) {
-      logger.warn(`[rate-review-comms] delivery alerts not closed for customer ${entry.customerId}: ${err.message}`);
-    }
-  }
-  return { outcome: 'sent', email: !!email.sent, sms: !!sms.sent };
+  await closeDeliveryAlerts(dbh, resolvedAlertKeys, `customer ${entry.customerId}`);
+  return { outcome: 'sent', email: !!email.sent || emailConfirmed, sms: !!sms.sent };
   };
   try {
     return await stamp();
@@ -1819,19 +1820,48 @@ function channelDeliveredTransition(live, channel, at, messageId = null) {
   const idKey = channel === 'email' ? 'email_message_id' : 'sms_sid';
   // The confirming event's id replaces any id an earlier attempt left on the notice.
   const next = { ...withoutUnknown(meta, channel), ...(messageId ? { [idKey]: String(messageId) } : {}) };
-  if (status !== UNCERTAIN) return { promoted: false, patch: { [CHANNEL_FLAG[channel]]: true }, meta: next };
+  // The other channel's earlier failure is history: the letter did arrive. (`restored` tells
+  // the effects to clear the bounce flag and close the alerts that failure raised.)
   const { pending_letter: pending, delivery_revoked: revoked, ...rest } = next;
+  const sameEvent = (r) => r.at === revoked.at && r.event === revoked.event && r.channel === revoked.channel;
+  // (a settlement may already have archived that same revocation: it is not listed twice)
+  const history = revoked && !(rest.delivery_revocations || []).some(sameEvent) ? { delivery_revocations: [...(rest.delivery_revocations || []), revoked] } : {};
+  // Delivered by its other channel, or kept delivered for a hand check (a rate already written).
+  if (status !== UNCERTAIN) {
+    return { promoted: false, restored: !!revoked, patch: { [CHANNEL_FLAG[channel]]: true }, meta: { ...rest, ...history, ...(pending ? { pending_letter: pending } : {}) } };
+  }
   if (!pending || !pending.letter) return null; // no frozen words to stand behind the stamp
   return {
     promoted: true,
+    restored: !!revoked,
     patch: { status: 'sent', sent_at: at, [CHANNEL_FLAG[channel]]: true },
-    meta: {
-      ...rest,
-      // The other channel's earlier failure is history: the letter did arrive.
-      ...(revoked ? { delivery_revocations: [...(rest.delivery_revocations || []), revoked] } : {}),
-      letter: { ...pending.letter, sent_on: etDateString(at), ...(pending.payload ? { payload: pending.payload } : {}) },
-    },
+    meta: { ...rest, ...history, letter: { ...pending.letter, sent_on: etDateString(at), ...(pending.payload ? { payload: pending.payload } : {}) } },
   };
+}
+
+// The ONE writer of a delivery confirmation (a late event, or one consumed at settlement):
+// the notice, its ranking row (sent; the bounce flag cleared) and the keys of the office
+// alerts its earlier failures raised, for the caller to close.
+async function applyChannelDelivered(trx, live, step) {
+  await trx('price_change_notices').where({ id: live.id }).update({ ...step.patch, metadata: JSON.stringify(step.meta), updated_at: new Date() });
+  if (!step.promoted && !step.restored) return [];
+  const snap = await trx('rate_review_snapshots').where({ notice_id: live.id }).first();
+  if (snap) {
+    await trx('rate_review_snapshots').where({ id: snap.id }).update({
+      ...(step.promoted ? { status: 'sent' } : {}), flags: JSON.stringify(flagList(snap.flags).filter((f) => f !== DELIVERY_BOUNCED_FLAG)), updated_at: new Date(),
+    });
+  }
+  return [...new Set((step.meta.delivery_revocations || []).map((r) => `rate-review-delivery-revoked:${live.id}:${r.event}`))];
+}
+
+// Close the office alerts an earlier delivery failure raised (best effort; episodes gate).
+async function closeDeliveryAlerts(conn, keys, context) {
+  if (!keys.length || !require('../config/feature-gates').alertEpisodesLive()) return;
+  try {
+    await require('./admin-alert-episodes').closeAdminAlertKeys(conn, keys, 'rate_review_resent');
+  } catch (err) {
+    logger.warn(`[rate-review-comms] delivery alerts not closed (${context}): ${err.message}`);
+  }
 }
 
 // ── delivery reconciliation (effects) ───────────────────────────────────
@@ -1914,15 +1944,7 @@ async function recordChannelDelivered(trx, notice, channel, at) {
   if (!live) return false;
   const step = channelDeliveredTransition(live, channel, at, notice.__match ? notice.__match.value : null);
   if (!step) return false;
-  await trx('price_change_notices').where({ id: live.id }).update({ ...step.patch, metadata: JSON.stringify(step.meta), updated_at: new Date() });
-  if (step.promoted) {
-    const snap = await trx('rate_review_snapshots').where({ notice_id: live.id }).first();
-    if (snap) {
-      await trx('rate_review_snapshots').where({ id: snap.id }).update({
-        status: 'sent', flags: JSON.stringify(flagList(snap.flags).filter((f) => f !== DELIVERY_BOUNCED_FLAG)), updated_at: new Date(),
-      });
-    }
-  }
+  await closeDeliveryAlerts(trx, await applyChannelDelivered(trx, live, step), `notice ${live.id}`);
   return step.promoted;
 }
 
