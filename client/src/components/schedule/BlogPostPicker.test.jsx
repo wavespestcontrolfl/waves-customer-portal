@@ -104,6 +104,14 @@ describe('BlogPostPicker', () => {
     expect(screen.getByRole('button', { name: 'Suggest a post about “Co”' })).toBeTruthy();
   });
 
+  test('a space after the last word is sent, so the server reads the word as finished (pre-push P1 on 63db0f3ccc)', async () => {
+    const search = vi.fn(async () => ({ posts: [], suggest: true }));
+    render(<Harness search={search} suggest={vi.fn()} />);
+    await searchFor('  Co ');
+    expect(await screen.findByText('No post covers “Co” yet.')).toBeTruthy();
+    expect(search).toHaveBeenCalledWith('Co ');
+  });
+
   describe('a search no post covers', () => {
     test('says so, shows the closest posts, and suggests the search as a new post', async () => {
       const search = vi.fn(async () => ({ posts: [NEAR], suggest: true }));

@@ -45,9 +45,13 @@ export function useBlogPostSearch(search) {
       return undefined;
     }
     setStatus("searching");
+    // The text goes as typed at its end: a space after the last word says the
+    // word is finished, so the server never reads it as one still being
+    // typed (pre-push P1 on 63db0f3ccc).
+    const sent = query.trimStart();
     const timer = setTimeout(() => {
       Promise.resolve()
-        .then(() => search(q))
+        .then(() => search(sent))
         .then((data) => {
           if (current !== sequence.current) return;
           setResults(Array.isArray(data?.posts) ? data.posts : []);
