@@ -799,7 +799,7 @@ async function claimLines(dbh, entry, now = new Date()) {
         // A new attempt starts with no failures remembered from an earlier one.
         const claimedRow = await trx('price_change_notices').where({ id: l.noticeId }).first('metadata');
         // ...nor a letter frozen by a claim that died before its handoff.
-        const { early_failures: _gone, pending_letter: _stale, ...rest } = parseJson(claimedRow && claimedRow.metadata, {});
+        const { early_failures: _gone, early_delivered: _seen, pending_letter: _stale, ...rest } = parseJson(claimedRow && claimedRow.metadata, {});
         await trx('price_change_notices').where({ id: l.noticeId }).update({ metadata: JSON.stringify({ ...rest, claim_gen: gen }) });
         claimed.push(l.noticeId);
       }
@@ -854,7 +854,7 @@ async function settleLines(root, entry, { status, keepFrozen, frozen, hold = nul
     // (a bounce, a failed text) may have written early_failures onto it meanwhile.
     const live = await dbh('price_change_notices').where({ id: l.noticeId }).forUpdate().first('metadata');
     if (live && !ownsClaim(live, entry.claimGen)) continue; // reclaimed by another request: not this send's row
-    const { pending_letter: livePending, send_hold: _h, early_failures: early, ...meta } = parseJson(live ? live.metadata : l.notice.metadata, {});
+    const { pending_letter: livePending, send_hold: _h, early_failures: early, early_delivered: _seen, ...meta } = parseJson(live ? live.metadata : l.notice.metadata, {});
     // The failures belong to the attempt that is ending: kept only while it is parked uncertain.
     const next = { ...meta, ...(status === UNCERTAIN && early ? { early_failures: early } : {}), ...extra, ...(keepFrozen ? { pending_letter: livePending || frozen } : {}), ...(hold ? { send_hold: { reason: hold, at: new Date().toISOString(), ...(holdError ? { error: holdError } : {}) } } : {}) };
     await dbh('price_change_notices').where({ id: l.noticeId, status: 'sending' }).update({
@@ -873,6 +873,7 @@ async function settleLines(root, entry, { status, keepFrozen, frozen, hold = nul
 // send_uncertain. Returns { retryable, holdReason }.
 async function settleAttempted(dbh, entry, { frozen, emailUnknown, smsUnknown, dispatchMeta }) {
   let retryable = true;
+  let delivered = false;
   let holdReason = 'pre_dispatch_error';
   const alerts = [];
   // Under the customer-comms fence and the row lock the delivery callbacks take
@@ -883,7 +884,7 @@ async function settleAttempted(dbh, entry, { frozen, emailUnknown, smsUnknown, d
   for (const l of entry.lines) {
     const live = await trx('price_change_notices').where({ id: l.noticeId, status: 'sending' }).forUpdate().first();
     if (!live || !ownsClaim(live, entry.claimGen)) continue;
-    const { pending_letter: livePending, send_hold: _h, early_failures: early = {}, delivery_revoked: priorRevoked, uncertain_channels: _u, uncertain_claim_key: _k, ...meta } = parseJson(live.metadata, {});
+    const { pending_letter: livePending, send_hold: _h, early_failures: early = {}, early_delivered: earlyDelivered = {}, delivery_revoked: priorRevoked, uncertain_channels: _u, uncertain_claim_key: _k, ...meta } = parseJson(live.metadata, {});
     const handoff = (livePending && livePending.handoff) || {};
     const emailStill = emailUnknown && !!handoff.email && !early.email;
     const smsStill = smsUnknown && !!handoff.sms && !early.sms;
@@ -892,13 +893,22 @@ async function settleAttempted(dbh, entry, { frozen, emailUnknown, smsUnknown, d
     const history = priorRevoked ? { delivery_revocations: [...(meta.delivery_revocations || []), priorRevoked] } : {};
     if (emailStill || smsStill) {
       retryable = false;
-      await trx('price_change_notices').where({ id: live.id }).update({
-        status: UNCERTAIN, updated_at: new Date(),
-        metadata: JSON.stringify({ ...meta, ...history, ...(priorRevoked ? { delivery_revoked: priorRevoked } : {}), ...dispatchMeta, ...(Object.keys(early).length ? { early_failures: early } : {}),
-          // the channels whose outcome is still unknown, so a late bounce can settle them
-          uncertain_channels: { ...(emailStill ? { email: true } : {}), ...(smsStill ? { sms: true } : {}) },
-          uncertain_claim_key: (livePending || frozen).key, pending_letter: livePending || frozen }),
-      });
+      const parkedMeta = { ...meta, ...history, ...(priorRevoked ? { delivery_revoked: priorRevoked } : {}), ...dispatchMeta, ...(Object.keys(early).length ? { early_failures: early } : {}),
+        // the channels whose outcome is still unknown, so a late bounce can settle them
+        uncertain_channels: { ...(emailStill ? { email: true } : {}), ...(smsStill ? { sms: true } : {}) },
+        uncertain_claim_key: (livePending || frozen).key, pending_letter: livePending || frozen };
+      // The email's own "delivered" event arrived while the send was still running (kept on
+      // the claimed row): the unknown email is confirmed, so the letter is stamped delivered
+      // through the same transition a late event takes, instead of being parked.
+      const confirmed = emailStill && earlyDelivered.email
+        ? channelDeliveredTransition({ ...live, status: UNCERTAIN, metadata: parkedMeta }, 'email', new Date(earlyDelivered.email.at), earlyDelivered.email.id) : null;
+      if (confirmed && confirmed.promoted) {
+        await trx('price_change_notices').where({ id: live.id }).update({ ...confirmed.patch, metadata: JSON.stringify(confirmed.meta), updated_at: new Date() });
+        await trx('rate_review_snapshots').where({ notice_id: live.id, status: 'approved' }).update({ status: 'sent', updated_at: new Date() });
+        delivered = true;
+        continue;
+      }
+      await trx('price_change_notices').where({ id: live.id }).update({ status: UNCERTAIN, updated_at: new Date(), metadata: JSON.stringify(parkedMeta) });
       continue;
     }
     const failure = early.email || early.sms;
@@ -925,7 +935,7 @@ async function settleAttempted(dbh, entry, { frozen, emailUnknown, smsUnknown, d
   }
   });
   if (alerts.length) await raiseDeliveryAlerts(alerts);
-  return { retryable, holdReason };
+  return { retryable, holdReason, delivered };
 }
 
 // gen: this send's claim generation — the rows must still be in ITS claim (not settled,
@@ -1276,6 +1286,7 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
         emailUnknown: !!email.attempted && !emailHold && !emailRejected,
         smsUnknown: !!sms.attempted && !smsNotPrepared,
       });
+      if (settled.delivered) return { outcome: 'sent', email: true, sms: false };
       return settled.retryable ? { outcome: 'rejected', holdReason: settled.holdReason } : { outcome: 'uncertain' };
     }
     await settleLines(dbh, entry, { status: 'unreachable', keepFrozen: false, frozen, hold: holdReason, extra: { ...dispatchMeta, ...noSendAttemptMeta(entry.lines) } });
@@ -1311,7 +1322,7 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
       if (!live) { orphaned.push(l); continue; }
       // A re-send after a bounce: the earlier revocation is history, and the old
       // provider ids must not match this send's events.
-      const { pending_letter: livePending, send_hold: _h, delivery_revoked: priorRevoked, channel_failures: priorFailures, email_message_id: _e, sms_sid: _s, early_failures: earlyRecorded = {}, uncertain_channels: _u, uncertain_claim_key: _k, ...meta } = parseJson(live.metadata, {});
+      const { pending_letter: livePending, send_hold: _h, delivery_revoked: priorRevoked, channel_failures: priorFailures, email_message_id: _e, sms_sid: _s, early_failures: earlyRecorded = {}, early_delivered: earlyDelivered = {}, uncertain_channels: _u, uncertain_claim_key: _k, ...meta } = parseJson(live.metadata, {});
       const handoff = (livePending && livePending.handoff) || {};
       const early = { ...earlyRecorded };
       // Twilio's verdict may already be in sms_log (its callback beat this stamp):
@@ -1319,17 +1330,20 @@ async function sendEntry(dbh, originalEntry, { batchKey, costBlock, templateHash
       // One text serves every line of the letter: the shared verdict (read once, below)
       // applies to each of them.
       if (smsSidVerdict && !early.sms) early.sms = { event: smsSidVerdict, channel: 'sms', at: sentAt.toISOString(), reason: 'status callback before the stamp' };
-      const emailOk = !!email.sent && !early.email;
+      // The email's "delivered" event arrived while the send was running (kept on the claimed
+      // row): an email of otherwise unknown outcome is confirmed. A failure still wins.
+      const emailConfirmedEarly = !!earlyDelivered.email && !!email.attempted && !email.sent && !email.definiteNonSend && !emailHold && !!handoff.email;
+      const emailOk = (!!email.sent || emailConfirmedEarly) && !early.email;
       const smsOk = !!sms.sent && !early.sms;
       // A channel whose outcome is unknown (a timeout, a provider error that may have
       // delivered) is remembered: it is neither confirmed nor failed. A channel whose failure
       // a callback has already proven (early evidence on the live row, read under this fence)
       // is no longer unknown, so it is left out.
       const uncertainChannels = {
-        ...(email.attempted && !email.sent && !email.definiteNonSend && !emailHold && handoff.email && !early.email ? { email: true } : {}),
+        ...(email.attempted && !email.sent && !email.definiteNonSend && !emailHold && handoff.email && !early.email && !emailConfirmedEarly ? { email: true } : {}),
         ...(sms.attempted && !sms.sent && !sms.definiteNonSend && !smsHold && handoff.sms && !early.sms ? { sms: true } : {}),
       };
-      const base = { ...meta, ...(priorRevoked ? { delivery_revocations: [...(meta.delivery_revocations || []), priorRevoked] } : {}), ...dispatchMeta, ...(Object.keys(uncertainChannels).length ? { uncertain_channels: uncertainChannels, uncertain_claim_key: frozen.key } : {}) };
+      const base = { ...meta, ...(priorRevoked ? { delivery_revocations: [...(meta.delivery_revocations || []), priorRevoked] } : {}), ...(emailConfirmedEarly && earlyDelivered.email.id ? { email_message_id: String(earlyDelivered.email.id) } : {}), ...dispatchMeta, ...(Object.keys(uncertainChannels).length ? { uncertain_channels: uncertainChannels, uncertain_claim_key: frozen.key } : {}) };
       if (!emailOk && !smsOk) {
         // Every confirmed channel failed before the stamp. With an UNKNOWN channel left the
         // letter may still have arrived: parked as send_uncertain with its words. Otherwise
@@ -1784,11 +1798,22 @@ function settleUndelivered(live, meta, { rateWritten }) {
 // { patch, meta, promoted } or null when the event changes nothing. A notice parked as
 // send_uncertain becomes delivered (stamped at the event's time, from the letter it froze);
 // a notice already delivered on its other channel just gains this one.
-function channelDeliveredTransition(live, channel, at) {
+// messageId: the provider message the event belongs to. It is kept on the notice, because a
+// channel of unknown outcome may have matched through its claim key alone, and a later bounce
+// of the same message must still find the notice.
+function channelDeliveredTransition(live, channel, at, messageId = null) {
   const meta = parseJson(live.metadata, {});
   const status = String(live.status);
+  // The send is still running its other leg: remembered on the claimed row for its stamp or
+  // settlement (first event wins; a failure recorded there takes precedence).
+  if (status === 'sending') {
+    const seen = meta.early_delivered || {};
+    if (seen[channel]) return null;
+    return { promoted: false, patch: {}, meta: { ...meta, early_delivered: { ...seen, [channel]: { at: new Date(at).toISOString(), id: messageId } } } };
+  }
   if (!(meta.uncertain_channels || {})[channel] || !['sent', 'viewed', UNCERTAIN].includes(status)) return null;
-  const next = withoutUnknown(meta, channel);
+  const idKey = channel === 'email' ? 'email_message_id' : 'sms_sid';
+  const next = { ...withoutUnknown(meta, channel), ...(messageId && !meta[idKey] ? { [idKey]: String(messageId) } : {}) };
   if (status !== UNCERTAIN) return { promoted: false, patch: { [CHANNEL_FLAG[channel]]: true }, meta: next };
   const { pending_letter: pending, delivery_revoked: revoked, ...rest } = next;
   if (!pending || !pending.letter) return null; // no frozen words to stand behind the stamp
@@ -1882,7 +1907,7 @@ async function recordChannelFailure(trx, notice, channel, detail) {
 async function recordChannelDelivered(trx, notice, channel, at) {
   const live = await lockMatchedNotice(trx, notice);
   if (!live) return false;
-  const step = channelDeliveredTransition(live, channel, at);
+  const step = channelDeliveredTransition(live, channel, at, notice.__match ? notice.__match.value : null);
   if (!step) return false;
   await trx('price_change_notices').where({ id: live.id }).update({ ...step.patch, metadata: JSON.stringify(step.meta), updated_at: new Date() });
   if (step.promoted) {

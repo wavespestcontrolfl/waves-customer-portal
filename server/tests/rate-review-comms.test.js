@@ -2017,6 +2017,48 @@ describe('customer surfaces', () => {
       expect(notices()[0].metadata).toBe(before);
     });
 
+    test('delivered, then a bounce of the same message: the promotion kept the message id, so the bounce still finds the notice and revokes it', async () => {
+      mockDb.reset(book());
+      let claimKey = null;
+      emailLeg.mockImplementation(async (args) => { claimKey = JSON.parse(notices()[0].metadata).pending_letter.key; return emailVia({ sent: false, attempted: true })(args); });
+      smsLeg.mockResolvedValue({ sent: false, attempted: false });
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      const ledger = message({ id: 'em-late', idempotency_key: `rate_review:${BATCH_KEY}:${CUSTOMER(1)}:${claimKey}:abc` });
+      await comms.handleEmailDeliveryEvent(mockDb, ledger, { event: 'delivered', timestamp: 1790000000 });
+      expect(notices()[0].status).toBe('sent');
+      expect(meta().email_message_id).toBe('em-late');
+      const alerts = await comms.handleEmailDeliveryEvent(mockDb, ledger, bounce());
+      expect(alerts).toHaveLength(1);
+      expect(notices()[0]).toMatchObject({ status: 'draft', email_sent: false, sent_at: null });
+    });
+
+    test('a "delivered" event that arrives while the send is still running is kept and used: an email of unknown outcome is stamped delivered, not parked', async () => {
+      // email-only: the event lands inside the email leg (after its handoff), the leg then reports an ambiguous error
+      mockDb.reset(book());
+      smsLeg.mockResolvedValue({ sent: false, attempted: false });
+      emailLeg.mockImplementation(async (args) => {
+        const claimKey = JSON.parse(notices()[0].metadata).pending_letter.key;
+        await args.sendOptions.withProviderHandoff(async () => {}, { to: args.recipient.email });
+        await comms.handleEmailDeliveryEvent(mockDb, message({ id: 'em-live', idempotency_key: `rate_review:${BATCH_KEY}:${CUSTOMER(1)}:${claimKey}:abc` }), { event: 'delivered', timestamp: 1790000000 });
+        expect(notices()[0].status).toBe('sending');
+        return { sent: false, attempted: true };
+      });
+      expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).toMatchObject({ sent: 1, uncertain: 0 });
+      expect(notices()[0]).toMatchObject({ status: 'sent', email_sent: true });
+      expect(meta()).toMatchObject({ email_message_id: 'em-live' });
+      expect(meta().early_delivered).toBeUndefined();
+      expect(meta().uncertain_channels).toBeUndefined();
+      expect(snapshots()[0].status).toBe('sent');
+
+      // with a text that is accepted: the stamp counts the early confirmation, so the email is not left unknown
+      mockDb.reset(book());
+      smsLeg.mockResolvedValue({ sent: true, attempted: true, sid: 'SM1' });
+      await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+      expect(notices()[0]).toMatchObject({ status: 'sent', email_sent: true, sms_sent: true });
+      expect(meta().uncertain_channels).toBeUndefined();
+      expect(meta().early_delivered).toBeUndefined();
+    });
+
     test('a "delivered" email after the text failed first: the earlier failure becomes history and the letter stands delivered', async () => {
       mockDb.reset(book());
       let claimKey = null;
