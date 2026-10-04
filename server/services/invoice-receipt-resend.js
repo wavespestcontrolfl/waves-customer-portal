@@ -158,14 +158,16 @@ async function legBlockedBy(s, claim, stillHeld, step) {
   return null;
 }
 
-// The provider-handoff guard: the same two checks as legBlockedBy, run by the sender at the point just
-// before the provider request (a long pre-dispatch step — recipient and payment reads, short link, PDF —
-// can outlive the lock's lease). `abortedBy` records why, for the honest per-leg result.
-function handoffGuard(s, claim, stillHeld, step) {
+// The provider-handoff guard: lock ownership, read by the sender at the point just before the provider
+// request (a long pre-dispatch step — recipient and payment reads, short link, PDF — can outlive the
+// lock's lease). It reads memory only: senders call it while holding their own pooled transaction
+// (App delivery holds one per notification), so a database read here could exhaust a small pool. The
+// approval re-check stays in legBlockedBy, immediately before the sender. `abortedBy` records why.
+function handoffGuard(stillHeld, step) {
   const guard = async () => {
-    const why = await legBlockedBy(s, claim, stillHeld, step);
-    if (why) guard.abortedBy = why;
-    return !why;
+    const held = stillHeld(step);
+    if (!held) guard.abortedBy = 'send lock lost';
+    return held;
   };
   guard.abortedBy = null;
   return guard;
@@ -180,7 +182,7 @@ async function runEmailLeg(s, claim, stillHeld) {
     return;
   }
   const { sendReceiptEmail } = require('./invoice-email');
-  const guard = handoffGuard(s, claim, stillHeld, 'before_email');
+  const guard = handoffGuard(stillHeld, 'before_email');
   s.emailResult = await sendReceiptEmail(s.id, { memo: s.memo, beforeProviderHandoff: guard }).catch((err) => ({ ok: false, error: err.message }));
   s.delivery.email = emailDelivery(s.emailResult);
   // Vetoed at the provider boundary: the guard's own reason, only when the sender confirms a
@@ -198,7 +200,7 @@ async function runTextLeg(s, claim, stillHeld) {
     return;
   }
   const InvoiceService = require('./invoice');
-  const guard = handoffGuard(s, claim, stillHeld, 'before_text');
+  const guard = handoffGuard(stillHeld, 'before_text');
   // Manual operator resend — pass force:true to override the auto-send idempotency guard
   // (otherwise re-clicking SEND RECEIPT would no-op for invoices already auto-receipted by the
   // Stripe webhook). recordActivity:false because the activity_log row is written once, below,

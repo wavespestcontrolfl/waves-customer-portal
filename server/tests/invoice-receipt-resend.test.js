@@ -356,26 +356,25 @@ describe('ownership of the send lock is checked before each effect', () => {
   });
 
   test('a guard refusal after the sender already delivered (one App device accepted, a later one vetoed) stays sent', async () => {
-    const approved = { receipt_state: 'unsent', amount: '129.00', recipients_key: 'pinned' };
-    let reads = 0;
-    // Approved for the writer's own checks; changed by the time the sender's second handoff asks.
-    const rederive = jest.fn(async () => (++reads <= 3 ? { ...approved } : { ...approved, recipients_key: 'other' }));
     InvoiceService.sendReceipt.mockImplementationOnce(async (_id, opts) => {
       expect(await opts.beforeProviderHandoff()).toBe(true); // first device: accepted
-      expect(await opts.beforeProviderHandoff()).toBe(false); // second device: vetoed
+      mockLock.lostAfter = 0;
+      expect(await opts.beforeProviderHandoff()).toBe(false); // second device: lock lost, vetoed
       return { sent: true };
     });
-    const out = await sendInvoiceReceipt(ID, { via: 'sms', expect: { approved, rederive } });
+    const out = await sendInvoiceReceipt(ID, { via: 'sms' });
     expect(out.delivery.sms).toBe('sent');
     expect(out.body.sms).toEqual({ ok: true });
     // Uncertain evidence is kept too.
-    reads = 0;
+    mockLock.lostAfter = Infinity;
+    mockLock.checks = 0;
     InvoiceService.sendReceipt.mockImplementationOnce(async (_id, opts) => {
       await opts.beforeProviderHandoff();
+      mockLock.lostAfter = 0;
       await opts.beforeProviderHandoff();
       throw Object.assign(new Error('receipt SMS blocked: PROVIDER_FAILURE'), { providerOutcome: { deliveryOutcome: 'uncertain', blocked: false } });
     });
-    expect((await sendInvoiceReceipt(ID, { via: 'sms', expect: { approved, rederive } })).delivery.sms).toBe('unknown');
+    expect((await sendInvoiceReceipt(ID, { via: 'sms' })).delivery.sms).toBe('unknown');
   });
 
   test('a lock that is never lost changes nothing', async () => {
@@ -385,7 +384,7 @@ describe('ownership of the send lock is checked before each effect', () => {
   });
 });
 
-describe('the provider-handoff guard: lock ownership and the approved recipients + amount are checked again where the sender reaches its provider', () => {
+describe('the provider-handoff guard: lock ownership is checked again where the sender reaches its provider', () => {
   afterEach(() => { Object.assign(mockLock, { busy: false, reason: 'busy', lostAfter: Infinity }); });
   const approved = { recipients_key: 'rk', amount: '129.00', receipt_state: 'unsent' };
 
@@ -424,14 +423,12 @@ describe('the provider-handoff guard: lock ownership and the approved recipients
     expect(out.lockLost).toBe('before_text');
   });
 
-  test('the recipient or amount changing during the long pre-dispatch step is refused at the handoff', async () => {
+  test('the handoff guard reads lock ownership only — no database read while the sender holds its own transaction', async () => {
     emailAsksGuard();
-    let reads = 0;
-    // re-derivations: the final check (1), the early email check (2) match; the handoff guard (3) sees a new amount.
-    const rederive = async () => ({ ...approved, ...(++reads >= 3 ? { amount: '99.00' } : {}) });
+    const rederive = jest.fn(async () => ({ ...approved }));
     const out = await sendInvoiceReceipt(ID, { via: 'email', expect: { approved, rederive } });
-    expect(out.delivery.email).toBe('not_sent');
-    expect(out.body.email).toEqual({ ok: false, error: 'recipient or amount changed after approval' });
-    expect(updates.filter((u) => u.patch.receipt_sent_at)).toHaveLength(0);
+    expect(out.delivery.email).toBe('sent');
+    // The final check and the check immediately before the sender; none at the handoff.
+    expect(rederive).toHaveBeenCalledTimes(2);
   });
 });
