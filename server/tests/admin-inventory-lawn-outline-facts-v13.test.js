@@ -33,7 +33,9 @@ const v13 = require('../config/lawn-protocol-v13.json');
 const RECIPE_NAMES = (() => {
   const names = new Set();
   for (const visit of v13.st_augustine.visits) {
-    for (const line of `${visit.primary}\n${visit.secondary}`.split('\n')) if (line.includes(' — ')) names.add(line.split(' — ')[0]);
+    // A cadence variant's step (April on the 9x plan) names products the program uses too.
+    const steps = [visit.primary, visit.secondary, ...Object.values(visit.cadenceVariants || {}).map((variant) => variant.primary)];
+    for (const line of steps.join('\n').split('\n')) if (line.includes(' — ')) names.add(line.split(' — ')[0]);
   }
   return [...names].sort();
 })();
@@ -89,4 +91,12 @@ test('gate off: the legacy list, with no v13-only product', async () => {
   expect(labels).not.toContain('Tetrino Insecticide');
   expect(labels).not.toContain('LESCO Nutra-TECH T&O Micronutrient Package');
   expect(body.facts.every((row) => !row.key.startsWith('v13_'))).toBe(true);
+});
+
+test('gate on: the 9x April product (Dimension 18-0-10, named only in the April cadence variant) is attributed to April', async () => {
+  process.env.GATE_LAWN_V13 = 'true';
+  const body = await getFacts();
+  const dimension = body.facts.find((row) => row.needle === 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer');
+  expect(dimension.referenceCount).toBeGreaterThan(0);
+  expect(dimension.product?.name).toBe(dimension.needle);
 });

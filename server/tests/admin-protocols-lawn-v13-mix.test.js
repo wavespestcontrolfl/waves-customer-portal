@@ -70,8 +70,10 @@ async function lawnMix(query) {
 
 const itemFor = (body, name) => body.items.find((item) => item.product?.name === name);
 
+let visitRows = [];
 beforeEach(() => {
   jest.clearAllMocks();
+  visitRows = [];
   process.env.GATE_LAWN_V13 = 'true';
   operatingLayer.getProtocolWindowContext.mockResolvedValue({ protocol: { version: LAWN_V13_VERSION } });
   operatingLayer.summarizeProtocolContext.mockReturnValue(V13_SUMMARY);
@@ -81,6 +83,7 @@ beforeEach(() => {
     }
     if (table === 'products_catalog') return readQuery(CATALOG);
     if (table === 'product_aliases') return readQuery([]);
+    if (table === 'scheduled_services') return readQuery(visitRows);
     throw new Error(`Unexpected table: ${table}`);
   });
 });
@@ -120,6 +123,35 @@ test('April on a 12x plan keeps the 24-0-11; with no plan given it keeps it too 
   expect(unknown.warnings.find((w) => w.code === 'lawn_v13_plan_cadence_unknown').message).toContain(DIMENSION);
   // Months with one step never ask.
   expect((await lawnMix({ month: '1' })).warnings.map((w) => w.code)).not.toContain('lawn_v13_plan_cadence_unknown');
+});
+
+describe('the April step follows the visit the sheet is opened from (?scheduledServiceId=)', () => {
+  const VISIT = '3f2c1d4e-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
+  const selected = (body) => body.selectedItems.map((item) => item.product.name);
+
+  test('a visit whose series runs every 6 weeks (9x) gets Dimension without the caller sending a cadence', async () => {
+    visitRows = [{ service_id: null, service_type: 'Lawn Care', recurring_pattern: 'every_6_weeks', recurring_interval_days: null }];
+    const body = await lawnMix({ month: '4', scheduledServiceId: VISIT });
+    expect(selected(body)).toEqual([DIMENSION]);
+    expect(body.warnings.map((w) => w.code)).not.toContain('lawn_v13_plan_cadence_unknown');
+  });
+
+  test('a monthly visit keeps the 24-0-11; an explicit ?visitsPerYear outranks the visit', async () => {
+    visitRows = [{ service_id: null, service_type: 'Lawn Care', recurring_pattern: 'monthly', recurring_interval_days: null }];
+    expect(selected(await lawnMix({ month: '4', scheduledServiceId: VISIT }))).toEqual([F24]);
+    expect(selected(await lawnMix({ month: '4', scheduledServiceId: VISIT, visitsPerYear: '9' }))).toEqual([DIMENSION]);
+  });
+
+  test('a visit that states no plan, an unknown id and a malformed id all keep the 24-0-11 and warn', async () => {
+    visitRows = [{ service_id: null, service_type: 'Lawn Care', recurring_pattern: null, recurring_interval_days: null }];
+    for (const scheduledServiceId of [VISIT, 'not-a-uuid']) {
+      const body = await lawnMix({ month: '4', scheduledServiceId });
+      expect(selected(body)).toEqual([F24]);
+      expect(body.warnings.map((w) => w.code)).toContain('lawn_v13_plan_cadence_unknown');
+    }
+    visitRows = [];
+    expect((await lawnMix({ month: '4', scheduledServiceId: VISIT })).warnings.map((w) => w.code)).toContain('lawn_v13_plan_cadence_unknown');
+  });
 });
 
 test('gate off: no structured read, the catalog rate answers for the old program', async () => {

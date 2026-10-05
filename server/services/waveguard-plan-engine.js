@@ -1123,21 +1123,38 @@ function findNutrientProductsMissingConversions(items) {
   });
 }
 
+// The applications a year of a lawn visit's series, from the recurrence the
+// scheduler places its visits by (`recurring_pattern`, plus `recurring_interval_days`
+// for a 'custom' gap; every_6_weeks is the 42-day gap). null for any other recurrence.
+const RECURRENCE_VISITS = { every_6_weeks: 9, monthly: 12, monthly_nth_weekday: 12, bimonthly: 6 };
+function lawnVisitsFromRecurrence(pattern, intervalDays) {
+  const key = String(pattern || '').toLowerCase();
+  if (RECURRENCE_VISITS[key]) return RECURRENCE_VISITS[key];
+  const days = Number(intervalDays);
+  if (key !== 'custom' || !(days > 0)) return null;
+  return [[38, 46, 9], [28, 33, 12], [56, 65, 6]].find(([min, max]) => days >= min && days <= max)?.[2] ?? null;
+}
+
 // The applications a year (6, 9 or 12) of the lawn plan this visit belongs to, or
-// null when neither source states one. The catalog service the visit is booked
-// under comes first (its key and name are the authoritative cadence text), then
-// the visit's own service name, both through the one resolver the plan sync uses.
-// The resolver's catch-all ("Lawn Care Program", quarterly) is not a stated plan.
+// null when no source states one. Ranked by authority: the catalog service the
+// visit is booked under (its key and name are the plan's own identity; the
+// codebase already trusts it over stale labels), then the series' recurrence (what
+// actually dates the visits, and what a generic "Lawn Care" booking carries), then
+// the visit's own service name. All text goes through the one resolver the plan
+// sync uses; its catch-all ("Lawn Care Program", quarterly) is not a stated plan.
+// `service` needs service_id, recurring_pattern, recurring_interval_days, service_type.
 async function lawnVisitsPerYear(knex, service) {
   const { resolveLawnCareRecurringPlan } = require('./self-booking-plan-sync');
+  const stated = (text) => {
+    const plan = text ? resolveLawnCareRecurringPlan(text) : null;
+    return plan && plan.planKey !== 'lawn_care' && Number(plan.visitsPerYear) > 0 ? Number(plan.visitsPerYear) : null;
+  };
   const catalog = service.service_id
     ? await savepointRead(knex, (k) => k('services').where({ id: service.service_id }).first('service_key', 'name')).catch(() => null)
     : null;
-  for (const text of [catalog && `${catalog.service_key} ${catalog.name}`, service.service_type]) {
-    const plan = text ? resolveLawnCareRecurringPlan(text) : null;
-    if (plan && plan.planKey !== 'lawn_care' && Number(plan.visitsPerYear) > 0) return Number(plan.visitsPerYear);
-  }
-  return null;
+  return stated(catalog && `${catalog.service_key} ${catalog.name}`)
+    ?? lawnVisitsFromRecurrence(service.recurring_pattern, service.recurring_interval_days)
+    ?? stated(service.service_type);
 }
 
 function selectProtocolVisit(profile, serviceDate, legacyGrass = null, { month: assignedMonth, requireKnownGrass } = {}) {
@@ -2142,6 +2159,7 @@ module.exports = {
   v13ApplyAloneBlocks,
   v13SelectionBlocks,
   v13LineState,
+  lawnVisitsPerYear,
   calculateNutrientLedgerFromRows,
   calculateNutrients,
   summarizeAnnualN,

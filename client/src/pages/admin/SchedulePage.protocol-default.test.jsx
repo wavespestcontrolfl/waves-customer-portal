@@ -82,6 +82,13 @@ it.each([
   await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.includes(`/protocols/lawn-mix?track=${track}&`))).toBe(true));
 });
 
+it('sends the visit id with the tank-sheet request so the server reads the visit\'s own plan (9x April step)', async () => {
+  const fetchMock = vi.fn(async (url) => ({ ok: true, json: async () => url.includes('turf-profile') ? { profile: { grass_type: 'zoysia', lawn_sqft: 5000 } } : {} }));
+  vi.stubGlobal('fetch', fetchMock);
+  render(<ProtocolPanel service={{ id: 'test-visit', customerId: 'test-property', serviceType: 'Lawn Care', lawnSqft: 5000 }} onClose={() => {}} />);
+  await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.includes('/protocols/lawn-mix?') && url.includes('&scheduledServiceId=test-visit'))).toBe(true));
+});
+
 it('does not load a default protocol after a failed profile lookup', async () => {
   const fetchMock = vi.fn().mockRejectedValue(new Error('Profile unavailable'));
   vi.stubGlobal('fetch', fetchMock);

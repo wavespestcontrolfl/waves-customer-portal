@@ -602,8 +602,8 @@ function advisorySafeMessage(text) {
 // Advisory messages recorded on a completion, flattened for the closeout
 // success view — the operator must see a recorded overrun/exception at
 // completion time, not only later in Customer 360.
-function completionAdvisoryMessages({ blackout, nLimit, manager, calibration, inventory }) {
-  return [blackout, nLimit, manager, calibration, inventory]
+function completionAdvisoryMessages({ blackout, nLimit, manager, calibration, inventory, limit }) {
+  return [blackout, nLimit, manager, calibration, inventory, limit]
     .filter((record) => record && record.advisory)
     .flatMap((record) => (Array.isArray(record.blocks) ? record.blocks : []))
     .map((block) => block && block.message)
@@ -3001,6 +3001,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
     let waveguardManagerApproval = null;
     let waveguardCalibrationAdvisory = null;
     let waveguardInventoryAdvisory = null;
+    // A yearly cap shared across formulations (prodiamine) that this visit's products
+    // crossed: an advisory in the response and one dispatch alert. The work is done;
+    // the completion is never blocked.
+    let applicationLimitAdvisory = null;
     let waveguardCalibrationCleared = false;
     let waveguardTankCleanout = null;
     let waveguardPlan = null;
@@ -8913,6 +8917,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           ? svc.scheduled_date
           : new Date(`${svc.scheduled_date}T12:00:00`);
         const alertedMoa = new Set();
+        const alertedCap = new Set();
         for (const p of products) {
           if (!p.productId) continue;
           const result = await LimitChecker.checkLimits(svc.customer_id, p.productId, proposedDate, connection);
@@ -8927,11 +8932,47 @@ async function completeScheduledService(completionInput, packetContext = null) {
             ...result.warnings.map((v) => ({ ...v, alertSeverity: 'warn' })),
           ];
           for (const v of violations) {
-            // Only the MOA-rotation family of limit violations
-            // produces moa_violation alerts. Other limit types
-            // (annual_max_apps, seasonal_blackout, etc.) are
-            // operationally distinct and would belong to other
-            // alert kinds.
+            // The shared active-ingredient yearly cap is the one non-MOA limit this
+            // path reports: the tech already applied the product, so the response
+            // carries an advisory and one application_limit alert goes to dispatch.
+            // Other limit types (annual_max_apps, seasonal_blackout, etc.) are
+            // operationally distinct and would belong to other alert kinds.
+            if (v.type === 'annual_max_rate' && v.matchType === 'active_ingredient' && v.alertSeverity === 'critical') {
+              if (!alertedCap.has(v.matchValue)) {
+                alertedCap.add(v.matchValue);
+                const capProduct = await connection('products_catalog').where({ id: p.productId }).first();
+                applicationLimitAdvisory = {
+                  advisory: true,
+                  blocks: [...(applicationLimitAdvisory?.blocks || []), { code: 'application_limit_active_ingredient', message: v.message }],
+                };
+                if (!(packetEffects && await connection('dispatch_alerts')
+                  .where({ type: 'application_limit', job_id: svc.id })
+                  .whereRaw("payload->>'active_ingredient' = ?", [v.matchValue]).first('id'))) {
+                  try {
+                    await createAlert({
+                      type: 'application_limit',
+                      severity: 'critical',
+                      techId: svc.technician_id,
+                      jobId: svc.id,
+                      payload: {
+                        limit_type: v.type,
+                        active_ingredient: v.matchValue,
+                        product_name: capProduct?.name || null,
+                        current: v.current,
+                        max: v.max,
+                        message: v.message,
+                      },
+                      trx,
+                    });
+                  } catch (alertErr) {
+                    if (packetEffects) throw alertErr;
+                    logger.error(`[dispatch] application_limit createAlert failed: ${alertErr.message}`);
+                  }
+                }
+              }
+              continue;
+            }
+            // Only the MOA-rotation family of limit violations produces moa_violation alerts.
             if (!['moa_rotation_max', 'consecutive_use_max'].includes(v.type)) continue;
             const productCatalog = await connection('products_catalog').where({ id: p.productId }).first();
             const moaGroup = productCatalog?.moa_group;
@@ -9330,6 +9371,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           manager: waveguardManagerApproval,
           calibration: waveguardCalibrationAdvisory,
           inventory: waveguardInventoryAdvisory,
+          limit: applicationLimitAdvisory,
         }),
         ...(completionTimerSync.corrected != null ? { timeEntryCorrected: completionTimerSync.corrected } : {}),
         ...(completionTimerSync.blocked ? { timeEntryCorrectionBlocked: completionTimerSync.blocked } : {}),
@@ -15122,6 +15164,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         manager: waveguardManagerApproval,
         calibration: waveguardCalibrationAdvisory,
         inventory: waveguardInventoryAdvisory,
+        limit: applicationLimitAdvisory,
       }),
       ...(completionTimerSync.corrected != null ? { timeEntryCorrected: completionTimerSync.corrected } : {}),
       ...(completionTimerSync.blocked ? { timeEntryCorrectionBlocked: completionTimerSync.blocked } : {}),

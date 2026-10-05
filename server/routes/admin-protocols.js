@@ -19,6 +19,7 @@ const {
   planLineFields,
   v13SelectedGateWarnings,
   v13SelectionBlocks,
+  lawnVisitsPerYear,
 } = require('../services/waveguard-plan-engine');
 const { matchServiceProtocol } = require('../services/protocol-matcher');
 const jobCard = require('../services/job-card');
@@ -963,9 +964,19 @@ router.get('/lawn-mix', async (req, res, next) => {
     const month = monthAbbr(req.query.month);
     const recipeVisit = track.visits?.find((v) => v.month === month);
     if (!recipeVisit) return res.status(404).json({ error: 'Protocol visit not found for month' });
-    // A step that depends on the plan's applications a year (v13 April, 9x): the sheet
-    // takes ?visitsPerYear=9|12, the plan's own choice; none keeps the 12x step and warns.
-    const { visit, unknownCadence } = visitForCadence(recipeVisit, Number(req.query.visitsPerYear) > 0 ? Number(req.query.visitsPerYear) : null);
+    // A step that depends on the plan's applications a year (v13 April, 9x) follows the
+    // visit's own plan: the sheet resolves ?scheduledServiceId= through the plan's
+    // lawnVisitsPerYear (so a caller that sends its visit needs nothing more).
+    // ?visitsPerYear=9|12 is an explicit override. With neither (the reference tab,
+    // no visit) the sheet keeps the 12x step and warns.
+    let visitsPerYear = Number(req.query.visitsPerYear) > 0 ? Number(req.query.visitsPerYear) : null;
+    const visitId = String(req.query.scheduledServiceId || '');
+    if (visitsPerYear == null && recipeVisit.cadenceVariants && UUID_RE.test(visitId)) {
+      const scheduled = await db('scheduled_services').where({ id: visitId })
+        .first('service_id', 'service_type', 'recurring_pattern', 'recurring_interval_days');
+      if (scheduled) visitsPerYear = await lawnVisitsPerYear(db, scheduled);
+    }
+    const { visit, unknownCadence } = visitForCadence(recipeVisit, visitsPerYear);
 
     const areaSqft = Math.max(0, Number(req.query.lawnSqft || 10000));
     const calibration = await getActiveCalibration(req.query.equipmentSystemId || null);

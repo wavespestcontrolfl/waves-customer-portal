@@ -1811,6 +1811,57 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(Number((await mockPg('products_catalog').where({ id: fixture.productId }).first()).inventory_on_hand)).toBe(8);
   });
 
+  test('a prodiamine application that crosses the yearly cap still completes: the response carries the advisory and dispatch gets one application_limit alert', async () => {
+    await mockPg('products_catalog').where({ id: fixture.productId }).update({ active_ingredient: 'Prodiamine', rate_unit: 'oz', default_rate_per_1000: 0.5 });
+    await mockPg('product_limits').insert({ product_id: fixture.productId, match_type: 'active_ingredient', match_value: 'prodiamine',
+      limit_type: 'annual_max_rate', limit_value: 1, limit_unit: 'oz/1000sf/year', severity: 'hard_block' });
+    const childId = randomUUID();
+    try {
+      await mockPg('scheduled_services').insert({ id: childId, customer_id: fixture.customerId, technician_id: fixture.techId,
+        service_id: fixture.catalogId, service_type: 'Fixture General Pest Control', scheduled_date: etDateString(),
+        window_start: '14:00', window_end: '15:00', status: 'on_site', estimated_price: 60, estimated_duration_minutes: 60 });
+      const body = { ...submission().items[0].body, sendCompletionSms: false, requestReview: false,
+        products: [{ productId: fixture.productId, rate: 1.2, rateUnit: 'oz', totalAmount: 1, amountUnit: 'oz',
+          applicationMethod: 'broadcast', areaValue: 1000, areaUnit: 'sqft' }] };
+      const result = await completeScheduledService({ serviceId: childId, idempotencyKey: randomUUID(), actor: submission().actor, body });
+      expect(result.status).toBe(200);
+      expect(result.body.completionAdvisories).toEqual([expect.stringMatching(/prodiamine across all products this year is 120% of the yearly label cap — LIMIT REACHED/)]);
+      expect(await mockPg('scheduled_services').where({ id: childId }).first('status')).toMatchObject({ status: 'completed' });
+      const alerts = await mockPg('dispatch_alerts').where({ type: 'application_limit', job_id: childId });
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0]).toMatchObject({ severity: 'critical' });
+      expect(alerts[0].payload).toMatchObject({ limit_type: 'annual_max_rate', active_ingredient: 'prodiamine', max: 100 });
+    } finally {
+      await mockPg('dispatch_alerts').where({ job_id: childId }).del().catch(() => {});
+      await mockPg('service_records').where({ scheduled_service_id: childId }).update({ scheduled_service_id: null }).catch(() => {});
+      await mockPg('invoices').where({ scheduled_service_id: childId }).update({ scheduled_service_id: null }).catch(() => {});
+      await mockPg('scheduled_services').where({ id: childId }).del().catch(() => {});
+    }
+  });
+
+  test('a prodiamine application inside the yearly cap completes with no advisory and no alert', async () => {
+    await mockPg('products_catalog').where({ id: fixture.productId }).update({ active_ingredient: 'Prodiamine', rate_unit: 'oz', default_rate_per_1000: 0.5 });
+    await mockPg('product_limits').insert({ product_id: fixture.productId, match_type: 'active_ingredient', match_value: 'prodiamine',
+      limit_type: 'annual_max_rate', limit_value: 1, limit_unit: 'oz/1000sf/year', severity: 'hard_block' });
+    const childId = randomUUID();
+    try {
+      await mockPg('scheduled_services').insert({ id: childId, customer_id: fixture.customerId, technician_id: fixture.techId,
+        service_id: fixture.catalogId, service_type: 'Fixture General Pest Control', scheduled_date: etDateString(),
+        window_start: '14:00', window_end: '15:00', status: 'on_site', estimated_price: 60, estimated_duration_minutes: 60 });
+      const body = { ...submission().items[0].body, sendCompletionSms: false, requestReview: false,
+        products: [{ productId: fixture.productId, rate: 0.4, rateUnit: 'oz', totalAmount: 1, amountUnit: 'oz',
+          applicationMethod: 'broadcast', areaValue: 1000, areaUnit: 'sqft' }] };
+      const result = await completeScheduledService({ serviceId: childId, idempotencyKey: randomUUID(), actor: submission().actor, body });
+      expect(result.status).toBe(200);
+      expect(result.body.completionAdvisories).toEqual([]);
+      expect(await mockPg('dispatch_alerts').where({ type: 'application_limit', job_id: childId })).toHaveLength(0);
+    } finally {
+      await mockPg('service_records').where({ scheduled_service_id: childId }).update({ scheduled_service_id: null }).catch(() => {});
+      await mockPg('invoices').where({ scheduled_service_id: childId }).update({ scheduled_service_id: null }).catch(() => {});
+      await mockPg('scheduled_services').where({ id: childId }).del().catch(() => {});
+    }
+  });
+
   test.each(['per_application', 'monthly_membership', 'annual_prepay'])('%s recap-only records need no invoice or billing hold', async (billingMode) => {
     await mockPg('customers').where({ id: fixture.customerId }).update({ billing_mode: billingMode });
     const input = submission();

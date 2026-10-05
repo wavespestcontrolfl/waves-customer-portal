@@ -94,7 +94,7 @@ class ApplicationLimitChecker {
       const check = await this.evaluateLimit(limit, history, moaHistory, proposedDate, product, database, { customerId, yearStart, ...opts });
 
       if (check.violated) {
-        const entry = { type: limit.limit_type, message: check.message, description: limit.description, current: check.current, max: check.max };
+        const entry = { type: limit.limit_type, matchType: limit.match_type || null, matchValue: limit.match_value || null, message: check.message, description: limit.description, current: check.current, max: check.max };
         if (limit.severity === 'hard_block') {
           results.blocks.push(entry);
           results.allowed = false;

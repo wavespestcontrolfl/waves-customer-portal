@@ -7779,7 +7779,7 @@ export function ProtocolPanel({ service, onClose }) {
           : Promise.resolve(null),
         isLawn && trackKey && lawnSqft
           ? adminFetch(
-              `/admin/protocols/lawn-mix?track=${trackKey}&month=${month}&lawnSqft=${encodeURIComponent(lawnSqft)}`,
+              `/admin/protocols/lawn-mix?track=${trackKey}&month=${month}&lawnSqft=${encodeURIComponent(lawnSqft)}${service.id ? `&scheduledServiceId=${encodeURIComponent(service.id)}` : ""}`,
             )
           : Promise.resolve(null),
         !isLawn && protocolProgram

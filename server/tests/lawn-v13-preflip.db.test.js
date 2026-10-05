@@ -8,7 +8,7 @@
 //    visit's plan picks Dimension 0.21% 18-0-10 (9x) or the 24-0-11 (12x), the
 //    same way in the plan, the completion defaults and the tank sheet.
 const { createLawnHistoryDb, fixture } = require('./helpers/lawn-history-db');
-const { buildPlanForService } = require('../services/waveguard-plan-engine');
+const { buildPlanForService, lawnVisitsPerYear } = require('../services/waveguard-plan-engine');
 const applicationLimits = require('../services/application-limits');
 const capMigration = require('../models/migrations/20261006140000_lawn_v13_prodiamine_year_cap');
 const aprilMigration = require('../models/migrations/20261006150000_lawn_v13_april_9x_branch');
@@ -41,6 +41,39 @@ describe('prodiamine cap derivation (no database)', () => {
 
   test('the v13 season (January 4FL, October granular) is under the cap by design', () => {
     expect((0.5 / 1.1019) + (4.02 / 8.0082)).toBeLessThan(1);
+  });
+});
+
+describe('lawnVisitsPerYear: the visit\'s plan from the catalog service, then the series recurrence, then the service name (no database)', () => {
+  const knexWith = (catalog) => () => ({ where: () => ({ first: async () => catalog }) });
+  const visits = (service, catalog = null) => lawnVisitsPerYear(knexWith(catalog), { service_id: catalog ? 'svc' : null, ...service });
+
+  test('a generic "Lawn Care" booking reads its cadence from the recurrence the scheduler dates it by', async () => {
+    const generic = { service_type: 'Lawn Care' };
+    expect(await visits({ ...generic, recurring_pattern: 'every_6_weeks' })).toBe(9);
+    expect(await visits({ ...generic, recurring_pattern: 'custom', recurring_interval_days: 42 })).toBe(9);
+    expect(await visits({ ...generic, recurring_pattern: 'monthly' })).toBe(12);
+    expect(await visits({ ...generic, recurring_pattern: 'monthly_nth_weekday' })).toBe(12);
+    expect(await visits({ ...generic, recurring_pattern: 'custom', recurring_interval_days: 30 })).toBe(12);
+    expect(await visits({ ...generic, recurring_pattern: 'bimonthly' })).toBe(6);
+    expect(await visits({ ...generic, recurring_pattern: 'custom', recurring_interval_days: 60 })).toBe(6);
+  });
+
+  test('no stated cadence stays unknown: a one-off visit, a quarterly recurrence, a custom gap that matches no plan', async () => {
+    expect(await visits({ service_type: 'Lawn Care' })).toBeNull();
+    expect(await visits({ service_type: 'Lawn Care', recurring_pattern: 'quarterly' })).toBeNull();
+    expect(await visits({ service_type: 'Lawn Care', recurring_pattern: 'custom', recurring_interval_days: 90 })).toBeNull();
+    expect(await visits({ service_type: 'Lawn Care', recurring_pattern: 'custom' })).toBeNull();
+  });
+
+  test('ranking: a cadence-specific catalog service outranks the recurrence, the recurrence outranks a service name', async () => {
+    const monthlyCatalog = { service_key: 'lawn_care_monthly', name: 'Monthly Lawn Care Service' };
+    expect(await visits({ service_type: 'Lawn Care', recurring_pattern: 'every_6_weeks' }, monthlyCatalog)).toBe(12);
+    // A generic catalog row (no cadence in its key or name) defers to the recurrence.
+    const genericCatalog = { service_key: 'lawn_fertilization', name: 'Lawn Fertilization & Weed Control Service' };
+    expect(await visits({ service_type: 'Lawn Care', recurring_pattern: 'every_6_weeks' }, genericCatalog)).toBe(9);
+    expect(await visits({ service_type: 'Monthly Lawn Care Service', recurring_pattern: 'every_6_weeks' })).toBe(9);
+    expect(await visits({ service_type: 'Monthly Lawn Care Service' })).toBe(12);
   });
 });
 
@@ -285,6 +318,24 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
       const { scheduled } = await visit('2026-04-14', { service_type: 'Lawn Care', service_id: nine.id });
       const result = await plan(scheduled);
       expect(result.mixCalculator.items.filter((entry) => entry.selected && entry.product).map((entry) => entry.product.name)).toEqual([DIMENSION]);
+    });
+
+    test.each([[{ recurring_pattern: 'every_6_weeks' }], [{ recurring_pattern: 'custom', recurring_interval_days: 42 }]])(
+      'a generic "Lawn Care" visit on a %j series plans the 9x step',
+      async (recurrence) => {
+        setGates();
+        const { scheduled } = await visit('2026-04-14', { service_type: 'Lawn Care', is_recurring: true, ...recurrence });
+        const result = await plan(scheduled);
+        expect(result.mixCalculator.items.filter((entry) => entry.selected && entry.product).map((entry) => entry.product.name)).toEqual([DIMENSION]);
+        expect(warningCodes(result)).not.toContain('lawn_v13_plan_cadence_unknown');
+      });
+
+    test('a generic "Lawn Care" visit on a monthly series plans the 12x step without a warning', async () => {
+      setGates();
+      const { scheduled } = await visit('2026-04-14', { service_type: 'Lawn Care', is_recurring: true, recurring_pattern: 'monthly' });
+      const result = await plan(scheduled);
+      expect(result.mixCalculator.items.filter((entry) => entry.selected && entry.product).map((entry) => entry.product.name)).toEqual([F24]);
+      expect(warningCodes(result)).not.toContain('lawn_v13_plan_cadence_unknown');
     });
 
     test('an unknown plan keeps the 12x step (24-0-11) and the plan says so, naming the 9x product', async () => {
