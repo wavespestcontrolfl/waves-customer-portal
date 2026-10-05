@@ -623,9 +623,16 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     // 13. refused under the lock because the visit was reassigned / reclassified mid-closeout (issued_visit_identity_changed) → retried on a fresh read
     const v13 = await visit({ status: 'on_site' }); const i13 = await paid(v13); await auditRow(v13.id, i13.id, refused, 'issued_visit_identity_changed');
 
+    // 14. the completion RETURNED a 503 (a failed profile read, its own code) → retried: any 5xx is an outage
+    const v14 = await visit({ status: 'on_site' }); const i14 = await paid(v14);
+    await trx('audit_log').insert({ actor_type: 'system', action: refused, resource_type: 'scheduled_services', resource_id: v14.id, metadata: JSON.stringify({ invoiceId: i14.id, trigger: 'paid', status: 503, code: 'completion_profile_lookup_failed' }) });
+    // 15. the completion returned a 409 with an unlisted code → its verdict on the visit, left alone
+    const v15 = await visit({ status: 'on_site' }); const i15 = await paid(v15);
+    await trx('audit_log').insert({ actor_type: 'system', action: refused, resource_type: 'scheduled_services', resource_id: v15.id, metadata: JSON.stringify({ invoiceId: i15.id, trigger: 'paid', status: 409, code: 'project_required_completion' }) });
+
     const out = await retryFailedPaidInvoiceCloseouts({ conn: trx, today: TODAY });
-    expect(out).toEqual({ candidates: 9, retried: 7, closed: 7 });
-    expect(mockCompleteScheduledService.mock.calls.map(([args]) => args.serviceId).sort()).toEqual([v1.id, v2.id, v3.id, v8.id, v11.id, v12.id, v13.id].sort());
+    expect(out).toEqual({ candidates: 11, retried: 8, closed: 8 });
+    expect(mockCompleteScheduledService.mock.calls.map(([args]) => args.serviceId).sort()).toEqual([v1.id, v2.id, v3.id, v8.id, v11.id, v12.id, v13.id, v14.id].sort());
     for (const [args] of mockCompleteScheduledService.mock.calls) {
       expect(args.actor).toEqual({ techRole: 'admin', technicianId: null, technician: null });
       expect(args.issuedInvoiceCloseout.trigger).toBe('paid');

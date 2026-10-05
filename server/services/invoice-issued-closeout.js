@@ -296,6 +296,16 @@ function retryableVisitFilter(q, today) {
 // so nothing is retried forever.
 const TRANSIENT_REFUSAL_CODES = ['error', 'visit_scheduled_today', 'visit_timer_running', 'issued_visit_in_progress', 'issued_visit_rescheduled', 'issued_visit_identity_changed'];
 
+// …and every 5xx the canonical completion RETURNED rather than threw (a
+// failed profile / prepay / setup-fee read answers 503 with its own code):
+// the audit row carries the HTTP status, and a server-side failure is an
+// outage whatever it is called, so no list of codes has to keep up with the
+// completion (pre-push audit P1). A 4xx is the completion's verdict on the
+// visit and is retried only when its code is listed above.
+function isTransientRefusal(meta) {
+  return TRANSIENT_REFUSAL_CODES.includes(meta?.code) || Number(meta?.status) >= 500;
+}
+
 // Shared retry loop. `retryWhenNeverRan`: a candidate with NO paid-trigger
 // audit row is retried too (statement children — their settlement is the only
 // trigger they get). Card and bank payments pass false: with no audit row
@@ -322,7 +332,7 @@ async function retryCloseoutRows(rows, { conn, today, label, retryWhenNeverRan }
       if (last) {
         let meta = last.metadata;
         if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = {}; } }
-        if (last.action !== 'visit.completion_on_invoice_issued_refused' || !TRANSIENT_REFUSAL_CODES.includes(meta?.code)) continue;
+        if (last.action !== 'visit.completion_on_invoice_issued_refused' || !isTransientRefusal(meta)) continue;
       }
     }
     retried += 1;
