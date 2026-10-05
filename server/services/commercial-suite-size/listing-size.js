@@ -135,6 +135,15 @@ function hostMatches(host, list) {
   return Boolean(host) && list.some((h) => host === h || host.endsWith(`.${h}`));
 }
 
+function normalizeUnitValue(raw) {
+  const value = String(raw || '').trim()
+    .replace(/^(?:suites?|ste\.?|units?|apt\.?|apartment|bays?|spaces?|spc\.?|rm\.?|room)\b\.?\s*/i, '')
+    .replace(/^#\s*/, '')
+    .replace(/\s+/g, '')
+    .toUpperCase();
+  return /^[A-Z0-9][A-Z0-9/&+–—-]*$/.test(value) ? value : null;
+}
+
 // Street number + first street word off the suite address parts.
 function addressAnchors(address = {}) {
   const street = String(address.street || '').trim();
@@ -151,7 +160,11 @@ function addressAnchors(address = {}) {
   const route = streetLine.match(/^(?:(?:N|S|E|W|NE|NW|SE|SW)\s+)?(?:SR|US|CR|FL|FL-|STATE\s+ROAD|STATE\s+RD|HIGHWAY|HWY|US\s+HWY|COUNTY\s+ROAD)\s*-?\s*(\d{1,4}[A-Za-z]?)\b/i);
   const streetWord = route ? route[1]
     : (words.find((w) => !/^(n|s|e|w|ne|nw|se|sw|north|south|east|west)$/i.test(w)) || words[0]);
-  const unit = String(address.unit || '').replace(/^#/, '').trim() || null;
+  // The production parser (suiteAddressParts) returns the unit WITH its
+  // designator ("Suite 103", "#12b", "Unit B", "Ste 103-104"): compare on
+  // the value alone, in the same form unitMentions yields (a combined typed
+  // unit keeps its separators, so it only ever matches the same combination).
+  const unit = normalizeUnitValue(address.unit);
   // The typed street as the county roll spells it ("SR 70 E", "TEST
   // COMMONS PKWY"), leading/trailing directions dropped: every remaining
   // word must follow the number on the text, in order.

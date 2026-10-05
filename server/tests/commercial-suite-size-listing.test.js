@@ -201,6 +201,28 @@ describe('defaultFetchText — untrusted search-result URLs', () => {
   });
 });
 
+describe('the production address parser\'s unit form', () => {
+  const { suiteAddressParts } = require('../services/commercial-suite-size/address-parts');
+  test('"Suite 103", "#12b", "Unit B" compare on the value alone and query once', () => {
+    const a = P.addressAnchors(suiteAddressParts('14617 SR 70 E Suite 103, Bradenton, FL 34202'));
+    expect(a.unit).toBe('103');
+    expect(P.buildQueries(a)[0]).toContain('"suite 103"');
+    expect(P.buildQueries(a)[0]).not.toMatch(/suite suite/i);
+    expect(P.extractSuiteSizes('14617 SR 70 E, Bradenton, FL 34202. Suite 103 — 1,350 SF; Suite 105 2,000 SF', a)).toEqual([1350]);
+    expect(P.addressAnchors(suiteAddressParts('4400 Test Commons Pkwy #12B, Bradenton, FL 34202')).unit).toBe('12B');
+    const b = P.addressAnchors(suiteAddressParts('4400 Test Commons Pkwy Unit B, Bradenton, FL 34202'));
+    expect(b.unit).toBe('B');
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy, Unit B — 1,100 SF', b)).toEqual([1100]);
+  });
+
+  test('a typed combined unit matches only the same combination, never one of its suites', () => {
+    const combo = P.addressAnchors(suiteAddressParts('4400 Test Commons Pkwy Ste 103-104, Bradenton, FL'));
+    expect(combo.unit).toBe('103-104');
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103-104: 3,000 SF', combo)).toEqual([3000]);
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103: 1,350 SF', combo)).toEqual([]);
+  });
+});
+
 describe('resolveViaListing', () => {
   test('reads a LoopNet snippet without ever fetching LoopNet, and returns the listing source with the link', async () => {
     const serp = serpWith([
