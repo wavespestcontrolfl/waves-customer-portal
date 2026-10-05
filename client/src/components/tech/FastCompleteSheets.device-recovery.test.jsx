@@ -50,6 +50,34 @@ for (const [name, Sheet, reportFlow] of [
     expect(completed).toHaveBeenCalledTimes(1);
   });
 
+  test(`${name} closes while a stalled device read is still checking (GitHub Codex P2 on #5972)`, async () => {
+    // A storage open that never answers: the check never settles.
+    globalThis.indexedDB = { open: () => ({}) };
+    const onClose = vi.fn();
+    const request = vi.fn(async () => { throw Object.assign(new Error('Context unavailable'), { status: 503 }); });
+    render(<Sheet service={{ id: `visit-stall-${name}`, reportFlow }} operatorId="tech-stall" request={request}
+      onClose={onClose} onCompleted={vi.fn()} onFullForm={vi.fn()} />);
+    expect(await screen.findByText(/Checking for an unfinished completion/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(request.mock.calls.filter(([path]) => path.endsWith('/complete'))).toHaveLength(0);
+  });
+
+  test(`${name} keeps the server's refusal on screen when the visit cannot load and the copy cleared (GitHub Codex P2 on #5972)`, async () => {
+    const body = { idempotencyKey: 'saved-key', technicianNotes: 'Retained exact work' };
+    await putFastCompletionAttempt('visit-a', 'tech-a', { body, summary: 'Retained visit summary' });
+    const request = vi.fn(async (path) => {
+      if (!path.endsWith('/complete')) throw Object.assign(new Error('Context unavailable'), { status: 503 });
+      throw Object.assign(new Error('Changed'), { status: 409, code: 'idempotency_key_mismatch' });
+    });
+    render(<Sheet service={{ id: 'visit-a', reportFlow }} operatorId="tech-a" request={request}
+      onClose={vi.fn()} onCompleted={vi.fn()} onFullForm={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry', exact: true }));
+    expect(await screen.findByText(/Another completion for this visit/)).toBeInTheDocument();
+    await waitFor(async () => expect((await getFastCompletionAttempt('visit-a', 'tech-a')).attempt).toBeNull());
+    expect(screen.getByText(/Another completion for this visit/)).toBeInTheDocument();
+  });
+
   test(`${name} shows a refused copy found after a reload to discard only, then a fresh form (GitHub Codex P2 on #5967)`, async () => {
     const body = { idempotencyKey: 'refused-key', technicianNotes: 'Refused work' };
     await putFastCompletionAttempt('visit-a', 'tech-a', { body, summary: 'Refused visit', refused: true });

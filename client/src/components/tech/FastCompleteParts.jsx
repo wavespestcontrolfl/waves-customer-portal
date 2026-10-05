@@ -424,6 +424,15 @@ export function submissionHolds(submission) {
   return submission.recovering || submission.submitting || submission.failure !== null;
 }
 
+// A refusal the server gave a recovered attempt stays on screen when the
+// visit's live details cannot be shown (loading, unreadable or blocked);
+// once they load, the form's footer carries it (GitHub Codex P2 on #5972).
+export function refusalWithoutContext(submission, ctx) {
+  if (submission.failure !== 'terminal' || !submission.error) return null;
+  if (!(ctx.loading || ctx.loadError || ctx.blockedReason)) return null;
+  return <ActionFeedback error className="tech-visit-feedback tech-visit-loading">{submission.error}</ActionFeedback>;
+}
+
 // A reload may recover a committed request before (or even when) its live
 // context can be read. The retry does not rebuild from that context: this
 // compact view sends only the exact stored body when the tech taps Retry.

@@ -50,7 +50,7 @@ import {
   LAWN_TARGET_SUGGESTIONS, NUTRITION_TARGET_SUGGESTIONS, productControlsTargets, productTargetsNutrition,
 } from '../../lib/lawn-targets';
 import {
-  AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, RecoveredCompletion, submissionHolds, ProductTileButton, SavedView,
+  AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, RecoveredCompletion, refusalWithoutContext, submissionHolds, ProductTileButton, SavedView,
   SheetHeader, VisitNote, isSendableRateUnit, toggleInSet, useProductPicker, visitChangedSinceSchedule,
 } from './FastCompleteParts';
 import {
@@ -473,7 +473,7 @@ export default function FastCompleteLawnReserviceSheet({ service, request, opera
   const base = `/admin/dispatch/${service?.id}`;
   const ctx = useLawnContext({ base, request, service });
   const submission = useFastCompleteSubmit({ base, request, serviceId: service?.id, operatorId });
-  const { recovering, submitting, done } = submission;
+  const { submitting, done } = submission;
   // A recorded dictation clip is still being taken or transcribed. The full
   // form is another page and carries nothing over, so Full form and "+ Other
   // product" wait for it, like Complete.
@@ -483,10 +483,10 @@ export default function FastCompleteLawnReserviceSheet({ service, request, opera
   // sheet blocked on a stale or changed visit, or an attempt whose outcome is
   // unknown or refused (it may have saved).
   const close = useCallback(() => {
-    if (recovering || submitting) return;
+    if (submitting) return;
     if (done) onCompleted?.();
     else onClose?.(ctx.blockedReason || submission.failure ? { refresh: true } : undefined);
-  }, [recovering, submitting, done, ctx.blockedReason, submission.failure, onClose, onCompleted]);
+  }, [submitting, done, ctx.blockedReason, submission.failure, onClose, onCompleted]);
   closeRef.current = close;
   // Nothing is editable while a save is in flight, unresolved or refused for
   // good; the full form can't resume a /complete attempt.
@@ -504,6 +504,8 @@ function SheetBody({ service, request, ctx, submission, locked, dictationPending
   if (submission.done) return <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={onCompleted} />;
   if (submission.recovering) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Checking for an unfinished completion…</ActionFeedback>;
   if (submission.restored) return <RecoveredCompletion submission={submission} />;
+  const refusal = refusalWithoutContext(submission, ctx);
+  if (refusal) return refusal;
   if (ctx.loading) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Loading…</ActionFeedback>;
   if (ctx.loadError) {
     return (
