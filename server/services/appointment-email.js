@@ -131,6 +131,16 @@ const PROPERTY_PREFS_UNAVAILABLE = 'PROPERTY_PREFS_UNAVAILABLE';
 async function resolveRecipients(customer, { scheduledServiceId = null } = {}) {
   let prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => PREFS_UNAVAILABLE);
   const unreadable = (p) => p === PREFS_UNAVAILABLE || p?.__prefsUnavailable === true;
+  // The on-site flow's caller demotion (GATE_ONSITE_CALLER_DEMOTE) switches
+  // the holder's appointment TEXTS off; their emails are untouched. A false
+  // it wrote on the ACCOUNT row (and the holder has not since made their own)
+  // reads as true here, BEFORE the property overlay below: a saved property's
+  // own chosen false still wins, and an inheriting property inherits true.
+  // The holder's own opt-out stays an opt-out.
+  if (!unreadable(prefs) && prefs?.appointment_notify_primary === false
+    && await require('./recipient-optin').callerDemotedForTextsOnly(customer.id)) {
+    prefs = { ...prefs, appointment_notify_primary: true };
+  }
   if (!unreadable(prefs) && scheduledServiceId) {
     try {
       prefs = await require('./property-notification-prefs').prefsForVisit(prefs, customer.id, scheduledServiceId, 'email_recipients');
@@ -171,15 +181,7 @@ async function resolveRecipients(customer, { scheduledServiceId = null } = {}) {
   // skipConsentGate: the consent artifact attests to receiving TEXTS; email
   // routing follows notification prefs alone (see the recipient spec in
   // tests/appointment-email-recipients.test.js).
-  // The on-site flow's caller demotion (GATE_ONSITE_CALLER_DEMOTE) switches
-  // the holder's appointment TEXTS off; their emails are untouched. A false it
-  // wrote (and the holder has not since made their own) reads as true here.
-  // The holder's own opt-out stays an opt-out.
-  const emailPrefs = (prefs?.appointment_notify_primary === false
-    && await require('./recipient-optin').callerDemotedForTextsOnly(customer.id))
-    ? { ...prefs, appointment_notify_primary: true }
-    : (prefs || {});
-  for (const c of getAppointmentContacts(customer, emailPrefs, { skipConsentGate: true })) {
+  for (const c of getAppointmentContacts(customer, prefs || {}, { skipConsentGate: true })) {
     const ownEmail = slotEmailByRole.has(c.role) ? slotEmailByRole.get(c.role) : c.email;
     if (ownEmail) add(ownEmail, c.name);
     else add(primary.email, primary.name);

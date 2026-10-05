@@ -82,6 +82,14 @@ describe('appointment email recipient resolution (fan-out to appointment contact
     expect(to).toEqual(['primary@example.com', 'sue@service.com']);
   });
 
+  test('the texts-only override applies to the account row BEFORE the property overlay (a property\'s own false still wins)', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/appointment-email.js'), 'utf8');
+    const override = src.indexOf("callerDemotedForTextsOnly(customer.id)");
+    const overlay = src.indexOf("prefsForVisit(prefs, customer.id, scheduledServiceId, 'email_recipients')");
+    expect(override).toBeGreaterThan(0);
+    expect(override).toBeLessThan(overlay);
+  });
+
   test('the holder\'s OWN opt-out (no flow marker) still keeps them off the email', async () => {
     mockDb({
       customer: {
