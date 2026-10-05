@@ -31,7 +31,7 @@ Timings from the scripted run (median 7 ms to the first tool result, 29 ms to a 
 | W8 Lawn estimate, change cadence | 7 | 2 | 1 |
 | W9 What they owe | 3 | 1 | 6 |
 | W10 Record stock that arrived | 3 | 7 | 0 |
-| **Total** | **66** | **21** | **13** |
+| **Total** | **67** | **20** | **13** |
 
 **Not runnable** means the manifest says the case's target behavior needs a capability that does not exist on this branch: its `requires` array names a gap key from `CAPABILITY_GAPS` (`server/tests/fixtures/ib-workflows/execution-matrix.js`). It is never counted as a pass or a fail, and the case is still probed with the nearest existing tools so the report shows what the path does today. The reason recorded for each case is the gap key itself: `invoice_payment_reader` 6 (W9, PR 3a, `#5586`), `reschedule_notice_send` 5 (W6, PR 3c), `series_reschedule_writer` 1 (W6-dev-06, also needs the notice), `secondary_number_customer_link` 1 (W7-dev-03), `estimate_measurement_selector` 1 (W8-dev-05). When a gap lands, add its key to `BUILT_GAPS` in `server/tests/helpers/ib-workflow-capability.js`; its cases are scored from then on and the snapshot diff shows what changed.
 
