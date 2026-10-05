@@ -19,7 +19,9 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString, dateOnlyString } = require('../utils/datetime-et');
-const { scopeToAssessmentBookings, isAssessmentBooking } = require('./assessment-booking');
+const {
+  scopeToAssessmentBookings, isAssessmentBooking, ASSESSMENT_DISPLAY_NAME, ASSESSMENT_SERVICE_KEY,
+} = require('./assessment-booking');
 
 const gateLive = () => require('../config/feature-gates').estimateSentClosesAssessmentLive();
 
@@ -28,6 +30,9 @@ const STARTED_STATUSES = ['en_route', 'on_site'];
 // Nobody is known to have gone. A NULL status is a live visit (the
 // repository's legacy live-visit convention).
 const UNSTARTED_STATUSES = ['pending', 'confirmed'];
+
+// Visits that never happened: an estimate is never matched to one.
+const DEAD_STATUSES = ['cancelled', 'no_show', 'skipped', 'rescheduled'];
 
 const AUDIT_CLOSED = 'visit.assessment_closed_on_estimate_sent';
 const AUDIT_REFUSED = 'visit.assessment_close_on_estimate_sent_refused';
@@ -46,6 +51,7 @@ const identityValue = (visit, field) => (field === 'scheduled_date'
   ? (visit && visit.scheduled_date ? dateOnlyString(visit.scheduled_date) : null)
   : String((visit && visit[field]) ?? ''));
 
+const CLOCK_ROLLED_OVER = 'clock_rolled_over';
 const KEY_PREFIX = 'assessment-estimate:';
 const idempotencyKeyFor = (visitId, posture) => `${KEY_PREFIX}${visitId}:${posture}`;
 const postureOfKey = (key) => (String(key || '').split(':')[2] === 'backfill' ? 'backfill' : 'live');
@@ -78,12 +84,18 @@ function validTime(value) {
 //  - UNSTARTED: nobody is known to have gone, so the estimate must have been
 //    sent on a LATER ET day than the visit. An estimate sent on or before the
 //    visit day is a quote ahead of the walkthrough and closes nothing.
-//  - A future visit, and every terminal status, never close.
+//  - A future visit, every terminal status, and an assessment that carries a
+//    price or a prepayment never close.
 function assessmentEstimateCloseRefusal(visit, estimateSentAt, { today = etDateString() } = {}) {
   const started = isStarted(visit.status);
   if (!started && !isUnstarted(visit.status)) return `visit_${visit.status}`;
   const day = visit.scheduled_date ? dateOnlyString(visit.scheduled_date) : null;
   if (!day || day > today) return 'visit_in_future';
+  // An assessment is a free walkthrough. One that carries money (a visit
+  // price, a recorded prepayment) is not the ordinary case and is left to a
+  // person: this close never bills, so it must not be the one to decide that
+  // nothing is owed. (A linked invoice is the third form: liveRefusal.)
+  if (Number(visit.estimated_price) > 0 || Number(visit.prepaid_amount) > 0) return 'assessment_has_charge';
   const sentTime = validTime(estimateSentAt);
   if (sentTime == null) return 'estimate_not_sent';
   const sentDay = etDateString(new Date(sentTime));
@@ -146,6 +158,16 @@ function candidateVisits(conn, { today, now }) {
             .whereNotNull('e.sent_at')
             .whereNot('e.status', 'draft')
             .where('e.sent_at', '>=', estimateSince)
+            // One estimate, one assessment (matchedAssessmentId): no newer
+            // assessment of this customer on or before the estimate's day.
+            .whereRaw(`NOT EXISTS (
+              SELECT 1 FROM scheduled_services s2 LEFT JOIN services svc2 ON svc2.id = s2.service_id
+              WHERE s2.customer_id = s.customer_id AND s2.id <> s.id
+                AND (s2.status IS NULL OR s2.status NOT IN (${DEAD_STATUSES.map(() => '?').join(', ')}))
+                AND s2.scheduled_date <= ${SENT_DAY_SQL}
+                AND (s2.scheduled_date > s.scheduled_date OR (s2.scheduled_date = s.scheduled_date AND s2.id > s.id))
+                AND (LOWER(TRIM(s2.service_type)) = ? OR svc2.service_key = ? OR LOWER(TRIM(svc2.name)) = ?))`,
+            [...DEAD_STATUSES, ASSESSMENT_DISPLAY_NAME.toLowerCase(), ASSESSMENT_SERVICE_KEY, ASSESSMENT_DISPLAY_NAME.toLowerCase()])
             .where((rule) => rule
               .where((started) => started.whereIn('s.status', STARTED_STATUSES)
                 .whereRaw(`${SENT_DAY_SQL} >= s.scheduled_date`)
@@ -153,6 +175,11 @@ function candidateVisits(conn, { today, now }) {
               .orWhere((unstarted) => unstarted
                 .where((live) => live.whereIn('s.status', UNSTARTED_STATUSES).orWhereNull('s.status'))
                 .whereRaw(`${SENT_DAY_SQL} > s.scheduled_date`)));
+        })
+        // Money is a person's: no visit price, no prepayment, no linked invoice.
+        .whereRaw('COALESCE(s.estimated_price, 0) <= 0 AND COALESCE(s.prepaid_amount, 0) <= 0')
+        .whereNotExists(function linkedInvoice() {
+          this.select(conn.raw('1')).from('invoices as inv').whereRaw('inv.scheduled_service_id = s.id').whereNot('inv.status', 'void');
         })
         .whereNotExists(function resting() {
           this.select(conn.raw('1')).from('audit_log as al')
@@ -182,10 +209,34 @@ async function audit(action, { visitId, estimateId, code = null, status = null, 
   }
 }
 
-// Reads beyond the visit row that keep it open: its technician's job timer is
-// still running (they are working it right now), or it is one stop of a
-// grouped visit (the whole visit closes together).
-async function liveRefusal(conn, visit) {
+// ONE estimate closes ONE assessment: the newest assessment of that customer
+// on or before the day the estimate was sent — the walkthrough the estimate
+// came out of. An older assessment still open behind it (abandoned, then
+// rebooked) is not closed by the same estimate, whether the newer one is
+// still open or already completed (GitHub r1 P1 #5903). Newest = latest
+// scheduled day, then id; the candidate query applies the same order in SQL.
+async function matchedAssessmentId(conn, customerId, estimateSentAt) {
+  const sentDay = etDateString(new Date(estimateSentAt));
+  const query = conn('scheduled_services as s')
+    .leftJoin('services as svc', 'svc.id', 's.service_id')
+    .where('s.customer_id', customerId)
+    .where('s.scheduled_date', '<=', sentDay)
+    .where((q) => q.whereNotIn('s.status', DEAD_STATUSES).orWhereNull('s.status'))
+    .orderBy([{ column: 's.scheduled_date', order: 'desc' }, { column: 's.id', order: 'desc' }])
+    .first('s.id');
+  const newest = await scopeToAssessmentBookings(query, 's', 'svc');
+  return newest ? newest.id : null;
+}
+
+// Reads beyond the visit row that keep it open: another assessment is the
+// one this estimate came out of, an invoice is linked to it (money: a
+// person's), its technician's job timer is still running (they are working
+// it right now), or it is one stop of a grouped visit (the whole visit
+// closes together).
+async function liveRefusal(conn, visit, estimate) {
+  if (String(await matchedAssessmentId(conn, visit.customer_id, estimate.sent_at)) !== String(visit.id)) return 'estimate_matches_another_assessment';
+  const invoice = await conn('invoices').where({ scheduled_service_id: visit.id }).whereNot('status', 'void').first('id');
+  if (invoice) return 'assessment_has_invoice';
   const { visitJobTimerRunning } = require('./invoice-issued-closeout');
   if (await visitJobTimerRunning(conn, visit.id)) return 'visit_timer_running';
   if (visit.visit_id) {
@@ -201,7 +252,10 @@ async function liveRefusal(conn, visit) {
 async function closeAssessment(visit, { today, now, resumeKey = null }) {
   const { completeScheduledService } = require('./complete-scheduled-service');
   const resuming = Boolean(resumeKey);
-  const pastDay = resuming ? postureOfKey(resumeKey) === 'backfill' : dateOnlyString(visit.scheduled_date) < today;
+  // The posture is read from the clock NOW, not from the sweep's `today`: a
+  // sweep that started before ET midnight and reaches this visit after it
+  // must ask for the backfill posture the completion will expect.
+  const pastDay = resuming ? postureOfKey(resumeKey) === 'backfill' : dateOnlyString(visit.scheduled_date) < etDateString();
   const key = resumeKey || idempotencyKeyFor(visit.id, pastDay ? 'backfill' : 'live');
   const result = await completeScheduledService({
     serviceId: visit.id,
@@ -214,6 +268,10 @@ async function closeAssessment(visit, { today, now, resumeKey = null }) {
       ...(pastDay ? { backfill: true } : {}),
     },
     actor: { techRole: 'admin', technicianId: null, technician: null },
+    // Nobody's work and nobody's bill: no invoice is minted (so nothing can
+    // be charged), and no "<technician> completed" activity line or
+    // job_complete notification is written for the assigned technician.
+    systemQuietCloseout: true,
     // The WHOLE decision once more, on the visit row the completion has
     // LOCKED, from that row alone: still an assessment, still on the side of
     // midnight this request's posture assumes, an estimate sent to the
@@ -233,11 +291,15 @@ async function closeAssessment(visit, { today, now, resumeKey = null }) {
       if (IDENTITY_FIELDS.some((field) => identityValue(lockedVisit, field) !== identityValue(loadedVisit, field))) return 'visit_changed';
       if (!(await isAssessmentBooking(lockedVisit, trx))) return 'not_assessment';
       const lockedToday = etDateString();
-      if ((dateOnlyString(lockedVisit.scheduled_date) < lockedToday) !== pastDay) return 'visit_moved';
+      // The visit did not move (checked above), so a posture mismatch here
+      // is the clock alone: ET midnight passed between this request being
+      // built and this lock. Not a refusal of the visit — the next tick
+      // asks again in the backfill posture (see closeOne: no audit, no rest).
+      if ((dateOnlyString(lockedVisit.scheduled_date) < lockedToday) !== pastDay) return CLOCK_ROLLED_OVER;
       const estimate = await newestSentEstimate(trx, lockedVisit.customer_id, { now });
       if (!estimate) return 'estimate_not_sent';
       return assessmentEstimateCloseRefusal(lockedVisit, estimate.sent_at, { today: lockedToday })
-        || await liveRefusal(trx, lockedVisit);
+        || await liveRefusal(trx, lockedVisit, estimate);
     },
   });
   const body = (result && result.body) || {};
@@ -269,7 +331,7 @@ async function closeOne(conn, row, { today, now }) {
       // Not this rule's to decide, or not yet: no audit row, nothing to rest.
       const byRule = assessmentEstimateCloseRefusal(visit, estimate.sent_at, { today });
       if (byRule) return { closed: false, reason: byRule };
-      const live = await liveRefusal(conn, visit);
+      const live = await liveRefusal(conn, visit, estimate);
       if (live) {
         await audit(AUDIT_REFUSED, { visitId, estimateId: estimate.id, code: live });
         return { closed: false, reason: live };
@@ -283,6 +345,9 @@ async function closeOne(conn, row, { today, now }) {
       return { closed: true, reason: null };
     }
     const reason = outcome.code || `status_${outcome.status}`;
+    // Midnight passed mid-request: nothing about the visit was refused, so
+    // nothing is audited and the visit does not rest — the next tick closes it.
+    if (reason === CLOCK_ROLLED_OVER) return { closed: false, reason };
     logger.warn(`[assessment-estimate-closeout] visit ${visitId} NOT completed (${outcome.status} ${reason})`);
     await audit(AUDIT_REFUSED, { visitId, estimateId, code: reason, status: outcome.status });
     return { closed: false, reason };

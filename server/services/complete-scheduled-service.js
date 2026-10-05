@@ -3471,6 +3471,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // before anything is written (409 locked_visit_guard_refused). Never
     // read from a request body — only an in-process caller can pass a function.
     const lockedVisitGuard = typeof completionInput.lockedVisitGuard === 'function' ? completionInput.lockedVisitGuard : null;
+    // A system closeout that is nobody's work and nobody's bill
+    // (assessment-estimate-closeout.js): the completion mints no invoice
+    // (so nothing can be charged for it) and writes neither the
+    // "<technician> completed …" activity line nor the tech-visible
+    // job_complete notification — the same two suppressions the
+    // issued-invoice closeout gets. In-process callers only; strictly `true`.
+    const systemQuietCloseout = completionInput.systemQuietCloseout === true;
     const typedFindingsType = issuedInvoiceCloseout ? null : (completionProfile?.findingsType || null);
     const typedIndicator = typedFindingsType
       ? ActivityIndicators.getActivityIndicator(typedFindingsType)
@@ -4806,7 +4813,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // NOT-required — no mint was ever owed for it.
     const backfillMintRequiredAtCommit = backfillExpectedMintAtCommit({
       isBackfillCompletion,
-      issuedInvoiceCloseout: !!issuedInvoiceCloseout,
+      // "This mode never mints": the issued-invoice closeout, and a system
+      // quiet closeout.
+      issuedInvoiceCloseout: !!issuedInvoiceCloseout || systemQuietCloseout,
       recapReviewOnly,
       autopayCoversVisit,
       createInvoiceOnComplete: svc.create_invoice_on_complete,
@@ -5996,6 +6005,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
             if (guardReason) {
               throw Object.assign(new Error(`visit refused by its caller's locked recheck: ${guardReason}`), { code: 'locked_visit_guard_refused', guardReason: String(guardReason) });
             }
+            // The guard admitted the LOCKED row, so its status is the
+            // transition source (as for the issued-invoice closeout, GitHub
+            // r10 P2 #4127): pending → confirmed, or en_route → on_site,
+            // between the load and this lock is still the visit the guard
+            // judged, and transitionJobStatus needs the exact current status.
+            fromStatus = lockedSvcRow.status;
           }
           if (completionPricingPlan) {
             await require('../services/completion-pricing').commitCompletionPricingReview(trx, completionPricingPlan, {
@@ -9896,7 +9911,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // Hoisted so the terminal-invoice alert below can re-ask the SAME gate
     // with only the terminal flag cleared (deciding-reason check).
     const completionInvoiceGateInput = {
-      issuedInvoiceCloseout: !!issuedInvoiceCloseout,
+      // "This mode never mints": the issued-invoice closeout, and a system
+      // quiet closeout.
+      issuedInvoiceCloseout: !!issuedInvoiceCloseout || systemQuietCloseout,
       recapReviewOnly,
       alreadyPaid,
       prepaidCovered,
@@ -14684,7 +14701,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // activity line and the tech-visible job_complete notification would
     // both attribute it to the visit's assigned technician. The closeout's
     // own audit rows (visit.completed_on_invoice_issued) are its record.
-    if ((!resumingCommittedCompletion || packetEffects) && !issuedInvoiceCloseout) {
+    // A system quiet closeout likewise (GitHub r1 P2 #5903): its own audit
+    // row is its record.
+    if ((!resumingCommittedCompletion || packetEffects) && !issuedInvoiceCloseout && !systemQuietCloseout) {
       try {
         const writeActivity = async (trx = null) => {
           const connection = trx || db;

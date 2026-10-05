@@ -13,6 +13,7 @@ jest.mock('../services/recap-visit-context', () => ({ buildRecapVisitContext: je
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../services/stripe', () => ({ chargeInvoiceWithSavedCard: jest.fn() }));
 jest.mock('../services/feature-flags', () => ({ isUserFeatureEnabled: jest.fn(async () => false) }));
+jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => null) }));
 // Race injection: a test may run a hook right before the completion claim
 // (after the sweep's own reads, before the record transaction's locks).
 const mockRace = { beforeClaim: null };
@@ -44,6 +45,7 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const { chargeInvoiceWithSavedCard } = require('../services/stripe');
 const ReviewService = require('../services/review-request');
 const Completion = require('../services/complete-scheduled-service');
+const { triggerNotification } = require('../services/notification-triggers');
 const { ACTIVE_WRITE_GENERATION } = require('../constants/staff-time');
 const {
   assessmentEstimateCloseRefusal,
@@ -94,6 +96,15 @@ describe('assessmentEstimateCloseRefusal — "sent after the assessment", from d
     }
   });
 
+  test('an assessment that carries a price or a prepayment is left to a person', () => {
+    const visit = { status: 'on_site', arrived_at: at('2040-03-03T18:00:00Z') };
+    const sent = at('2040-03-03T18:09:00Z');
+    expect(rule(visit, sent)).toBeNull();
+    expect(rule({ ...visit, estimated_price: '0.00' }, sent)).toBeNull();
+    expect(rule({ ...visit, estimated_price: '75.00' }, sent)).toBe('assessment_has_charge');
+    expect(rule({ ...visit, prepaid_amount: '20.00' }, sent)).toBe('assessment_has_charge');
+  });
+
   test('a future visit, a terminal status and a missing send never close', () => {
     expect(assessmentEstimateCloseRefusal({ status: 'on_site', scheduled_date: '2040-03-05' }, at('2040-03-04T15:00:00Z'), { today })).toBe('visit_in_future');
     expect(assessmentEstimateCloseRefusal({ status: 'confirmed', scheduled_date: null }, at('2040-03-04T15:00:00Z'), { today })).toBe('visit_in_future');
@@ -112,6 +123,12 @@ describe('source contracts', () => {
     const scheduler = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
     expect(scheduler).toMatch(/cron\.schedule\('4-59\/10 \* \* \* \*', async \(\) => \{\s*try \{\s*await runExclusive\('assessment-estimate-closeout', async \(\) => \{\s*const sweep = await require\('\.\/assessment-estimate-closeout'\)\.closeAssessmentsWithSentEstimates\(\);/);
     expect(scheduler.match(/closeAssessmentsWithSentEstimates\(/g)).toHaveLength(1);
+  });
+  test('ET midnight passing mid-request is not a refusal of the visit: the posture is read from the live clock, and a rollover seen under the lock is neither audited nor rested', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../services/assessment-estimate-closeout.js'), 'utf8');
+    expect(source).toMatch(/const pastDay = resuming \? postureOfKey\(resumeKey\) === 'backfill' : dateOnlyString\(visit\.scheduled_date\) < etDateString\(\);/);
+    expect(source).toMatch(/if \(\(dateOnlyString\(lockedVisit\.scheduled_date\) < lockedToday\) !== pastDay\) return CLOCK_ROLLED_OVER;/);
+    expect(source).toMatch(/if \(reason === CLOCK_ROLLED_OVER\) return \{ closed: false, reason \};\s*logger\.warn\(/);
   });
   test('the gate is strict and read at call time', () => {
     const gates = fs.readFileSync(path.join(__dirname, '../config/feature-gates.js'), 'utf8');
@@ -494,6 +511,78 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     for (const id of [correctedVisit, reassigned]) {
       expect(await audits(id, AUDIT_REFUSED)).toEqual([expect.objectContaining({ metadata: expect.objectContaining({ code: 'visit_changed' }) })]);
     }
+  });
+
+  test('ONE estimate closes ONE assessment: the newest one on or before the estimate — an older one still open behind it stays open, whether the newer is open or already completed', async () => {
+    const twoDaysAgo = etDateString(addETDays(new Date(), -2));
+    // An abandoned, never-started assessment, then the one that produced the estimate.
+    const customerId = await customer();
+    const abandoned = await visit(customerId, { status: 'confirmed', day: twoDaysAgo });
+    const real = await visit(customerId);
+    await estimate(customerId);
+    expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 1, closed: 1 });
+    expect((await row(real)).status).toBe('completed');
+    expect((await row(abandoned)).status).toBe('confirmed');
+    // The newer one is completed now: the older one still does not close on that estimate, and is not even a candidate.
+    expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 0, closed: 0 });
+    expect(await mockPg('service_records').where({ scheduled_service_id: abandoned })).toHaveLength(0);
+    expect(await audits(abandoned, AUDIT_REFUSED)).toHaveLength(0);
+    // A CANCELLED newer assessment never happened: the older one is the match.
+    const other = await customer();
+    const older = await visit(other, { day: YESTERDAY, en_route_at: minutesAgo(60 * 26), arrived_at: minutesAgo(60 * 25), check_in_time: minutesAgo(60 * 25) });
+    await visit(other, { status: 'cancelled' });
+    await estimate(other, { sentAt: minutesAgo(60 * 24) });
+    expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 1, closed: 1 });
+    expect((await row(older)).status).toBe('completed');
+  });
+
+  test('money is a person\'s: a priced assessment, a prepaid one and one with a linked invoice are never candidates', async () => {
+    const priced = await customer();
+    const pricedVisit = await visit(priced, { estimated_price: 75 });
+    await estimate(priced);
+    const prepaid = await customer();
+    const prepaidVisit = await visit(prepaid, { prepaid_amount: 20 });
+    await estimate(prepaid);
+    const invoiced = await customer();
+    const invoicedVisit = await visit(invoiced);
+    await estimate(invoiced);
+    await mockPg('invoices').insert({ id: randomUUID(), customer_id: invoiced, scheduled_service_id: invoicedVisit, invoice_number: `TST-${randomUUID().slice(0, 8)}`,
+      token: randomUUID().replace(/-/g, ''), status: 'draft', total: 50, subtotal: 50, service_date: startDay(), service_type: 'Waves Assessment', line_items: JSON.stringify([]) });
+    expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 0, closed: 0 });
+    for (const id of [pricedVisit, prepaidVisit, invoicedVisit]) expect((await row(id)).status).toBe('on_site');
+    expect(Completion.completeScheduledService).not.toHaveBeenCalled();
+  });
+
+  test('the close bills nothing and is nobody\'s work: no invoice or charge for an Auto Pay per-application customer whose visit is flagged to invoice, no "<tech> completed" activity line, no job_complete notification', async () => {
+    const customerId = await customer();
+    await mockPg('customers').where({ id: customerId }).update({ billing_mode: 'per_application', autopay_enabled: true, monthly_rate: 45, waveguard_tier: 'Gold' });
+    const visitId = await visit(customerId, { create_invoice_on_complete: true });
+    await estimate(customerId);
+    expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 1, closed: 1 });
+    expect((await row(visitId)).status).toBe('completed');
+    await expectQuiet(customerId, visitId);
+    expect(await mockPg('payments').where({ customer_id: customerId })).toHaveLength(0);
+    expect(await mockPg('activity_log').where({ customer_id: customerId, action: 'service_completed' })).toHaveLength(0);
+    expect(triggerNotification.mock.calls.filter(([type]) => type === 'job_complete')).toHaveLength(0);
+    expect(Completion.completeScheduledService.mock.calls[0][0].systemQuietCloseout).toBe(true);
+  });
+
+  test('a status that moves between two eligible states after the completion loaded the visit (confirmed → pending, en_route → on_site with an earlier arrival) still closes — the locked status is the transition source', async () => {
+    const unstarted = await customer();
+    const unstartedVisit = await visit(unstarted, { status: 'confirmed', day: YESTERDAY });
+    await estimate(unstarted, { sentAt: new Date() });
+    mockRace.beforeClaim = async () => { await mockPg('scheduled_services').where({ id: unstartedVisit }).update({ status: 'pending' }); };
+    expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 1, closed: 1 });
+    expect((await row(unstartedVisit)).status).toBe('completed');
+
+    const started = await customer();
+    const startedVisit = await visit(started, { status: 'en_route' });
+    await estimate(started);
+    // A delayed GPS update: arrived 40 minutes ago, before the estimate went out 10 minutes ago.
+    mockRace.beforeClaim = async () => { await mockPg('scheduled_services').where({ id: startedVisit }).update({ status: 'on_site', arrived_at: minutesAgo(40), check_in_time: minutesAgo(40) }); };
+    expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 1, closed: 1 });
+    expect((await row(startedVisit)).status).toBe('completed');
+    expect(await audits(startedVisit, AUDIT_REFUSED)).toHaveLength(0);
   });
 
   test('gate off: nothing is read and nothing closes', async () => {
