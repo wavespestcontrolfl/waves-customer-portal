@@ -1478,6 +1478,9 @@ describe('shiftCallFollowUpsForParentMove (shared parent-move child shift)', () 
     expect(spaced).toBeTruthy();
     expect(spaced.sql.startsWith('(source_action <> ? OR ')).toBe(true);
     expect(spaced.bindings).toEqual(['package_followup_auto', '2026-07-02', 14]);
+    // …and never once the child has a reschedule_log row of its own (a
+    // customer's same-day time change included).
+    expect(spaced.sql).toMatch(/NOT EXISTS \(SELECT 1 FROM reschedule_log rl WHERE rl\.scheduled_service_id = scheduled_services\.id\)/);
   });
 
   test('shifts the still-pending, never-confirmed child by the parent delta', async () => {
