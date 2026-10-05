@@ -16,7 +16,7 @@ jest.mock('../models/db', () => {
       whereILike: (col, pat) => { filters.ilike = pat; return q; },
       whereIn: (col, vals) => { filters.in = vals; return q; },
       first: async () => {
-        if (table === 'expenses') return mockState.duplicate;
+        if (table === 'expenses') { mockState.lastDuplicateFilter = { ...filters }; return mockState.duplicate; }
         if (table === 'expense_categories') return mockState.categories.find((c) => filters.ilike && c.name.toLowerCase().includes(filters.ilike.replace(/%/g, '').toLowerCase())) || null;
         return null;
       },
@@ -89,4 +89,10 @@ test('an unknown vendor is never treated as a duplicate (unrelated senders share
   extraction({ invoice_number: '1001', invoice_date: '2026-09-01', total: 50 });
   await processVendorInvoice({ id: 'e6', gmail_id: 'g', from_address: 'a@unmapped.example', subject: 'Invoice' }, { extracted: {} });
   expect(inserted()).toEqual(expect.objectContaining({ vendor_name: 'Unknown Vendor', amount: 50 }));
+});
+
+test('the duplicate lookup compares the whole description, so a longer invoice number never matches', async () => {
+  extraction({ vendor_name: 'Google', invoice_number: '12', invoice_date: '2026-09-01', total: 16.8 });
+  await processVendorInvoice({ id: 'e7', gmail_id: 'g', from_address: 'p@google.com', subject: 'Invoice' }, { extracted: {} });
+  expect(mockState.lastDuplicateFilter).toEqual(expect.objectContaining({ vendor_name: 'Google', amount: 16.8, description: 'Google Invoice #12 — via email' }));
 });

@@ -125,11 +125,16 @@ function nameOrNull(v) {
 // mailed twice (two inboxes, a forward, a re-send). Without an invoice
 // number, or with no known vendor ("Unknown Vendor" groups unrelated
 // senders), there is nothing safe to match on, so no row is a duplicate.
+// The description is compared WHOLE (the exact string the insert below
+// writes), so invoice 12 never matches invoice 12-A or 112.
+function expenseDescription(vendorName, invoiceNumber) {
+  return `${vendorName} Invoice${invoiceNumber ? ` #${invoiceNumber}` : ''} — via email`.slice(0, 300);
+}
+
 async function findDuplicateExpense(vendorName, invoiceNumber, amount) {
   if (!invoiceNumber || vendorName === 'Unknown Vendor') return null;
   return db('expenses')
-    .where({ vendor_name: String(vendorName).slice(0, 200), amount })
-    .where('description', 'like', `%Invoice #${String(invoiceNumber).replace(/[%_\\]/g, '\\$&')} %`)
+    .where({ vendor_name: String(vendorName).slice(0, 200), amount, description: expenseDescription(vendorName, invoiceNumber) })
     .first('id');
 }
 
@@ -286,7 +291,7 @@ async function processVendorInvoice(email, classification) {
         // Column limits (description varchar 300, vendor_name varchar 200): the
         // vendor name and the classifier's own invoice number are not bounded
         // upstream, so clip here rather than fail the insert.
-        description: `${vendorName} Invoice${invoiceNumber ? ` #${invoiceNumber}` : ''} — via email`.slice(0, 300),
+        description: expenseDescription(vendorName, invoiceNumber),
         amount,
         tax_deductible_amount: deductibleAmount,
         category_id: categoryRow?.id || null,
