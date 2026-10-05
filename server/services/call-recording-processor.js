@@ -20521,7 +20521,7 @@ const CallRecordingProcessor = {
                         // replay in flight owns the text ('busy'); otherwise
                         // the fan-out holds the row claim across its send.
                         const followUpClaim = await require('./recipient-optin').claimFollowUpForFanOut(customerId, contact.phone, scheduledServiceId);
-                        if (followUpClaim === 'busy') continue;
+                        if (followUpClaim === 'busy' || followUpClaim === 'sent') continue;
                         // `result` = the send's outcome: an accepted or
                         // uncertain handoff is stamped on the row with the
                         // release, so the replay never follows it even where

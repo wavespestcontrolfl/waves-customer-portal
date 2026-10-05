@@ -369,9 +369,17 @@ async function settleCustomerFollowUps(customerId, { replyPhoneKey = null } = {}
   let settled = 0;
   for (const row of claimed || []) {
     // End (done) or release (retry later) THIS claim; bound to its visit.
-    const finish = (done) => db('recipient_optin')
+    // `texted`: this visit's confirmation was accepted (or may have reached
+    // the person) — stamped on the row (fanout_confirmed_at holds it for
+    // either sender) so the call fan-out never sends on top of it, even where
+    // the best-effort sms_log write was lost.
+    const finish = (done, { texted = false } = {}) => db('recipient_optin')
       .where({ customer_id: customerId, phone_key: row.phone_key, visit_id: row.visit_id })
-      .update(done ? { followup_done_at: new Date(), followup_claimed_at: null } : { followup_claimed_at: null })
+      .update({
+        followup_claimed_at: null,
+        ...(done ? { followup_done_at: new Date() } : {}),
+        ...(texted ? { fanout_confirmed_at: new Date() } : {}),
+      })
       .catch(() => {});
     try {
       // The cap runs from the YES, or from the booking that re-armed the row.
@@ -384,6 +392,11 @@ async function settleCustomerFollowUps(customerId, { replyPhoneKey = null } = {}
       if (state !== 'live') { await finish(false); continue; }
       const customer = await db('customers').where({ id: customerId }).first();
       if (!customer) { await finish(true); continue; }
+      // The caller's own booking confirmation is still pending (held for the
+      // send window or a move): wait. Demoting now would drop the caller from
+      // that send, and the owner's rule is that the caller gets it.
+      const reminder = await db('appointment_reminders').where({ scheduled_service_id: row.visit_id }).first('confirmation_sent');
+      if (reminder && reminder.confirmation_sent === false) { await finish(false); continue; }
       let demoted = 'already';
       if (!row.caller_demoted_at) {
         demoted = await demoteCallerForPhone(customer, row.phone_key).catch((err) => {
@@ -416,7 +429,7 @@ async function settleCustomerFollowUps(customerId, { replyPhoneKey = null } = {}
       });
       const final = result.sent || REPLAY_TERMINAL_REASONS.has(result.reason);
       // A demotion that errored retries too (the replay's own dedupe stops a resend).
-      await finish(final && demoted !== 'error');
+      await finish(final && demoted !== 'error', { texted: !!result.sent || result.reason === 'delivery_uncertain' });
       settled += 1;
       logger.info(`[recipient-optin] on-site follow-up for ***${row.phone_key.slice(-4)}: caller ${demoted}, confirmation ${result.sent ? 'sent' : `not sent (${result.reason}${final ? '' : ', will retry'})`}`);
     } catch (err) {
@@ -517,6 +530,7 @@ async function rearmOnSiteFollowUp(customerId, phoneKey, visitId) {
 // then sees the send in sms_log:
 //   'claimed' — the fan-out holds it: send, then releaseFanOutFollowUpClaim.
 //   'busy'    — the replay is in flight for this visit: it owns the text; skip.
+//   'sent'    — this visit's confirmation already went to this phone; skip.
 //   'none'    — no unfinished follow-up for this phone + visit (or dark):
 //               nothing to coordinate with; send as before.
 // A claim never released (a crash) expires with the 10-minute lease. A failed
@@ -525,6 +539,12 @@ async function claimFollowUpForFanOut(customerId, phone, visitId) {
   const phoneKey = recipientPhoneKey(phone);
   if (!customerId || !phoneKey || !visitId || !isOnSiteFollowUpLive()) return 'none';
   try {
+    // Either sender already texted this visit's confirmation to this phone.
+    const texted = await db('recipient_optin')
+      .where({ customer_id: customerId, phone_key: phoneKey, visit_id: visitId })
+      .whereNotNull('fanout_confirmed_at')
+      .first('phone_key');
+    if (texted) return 'sent';
     const open = () => db('recipient_optin')
       .where({ customer_id: customerId, phone_key: phoneKey, visit_id: visitId, status: 'confirmed' })
       .whereNull('followup_done_at');

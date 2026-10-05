@@ -444,7 +444,7 @@ describe('one sender at a time: the call fan-out takes the replay\'s row claim',
 
   test('wiring: the fan-out skips a busy contact, holds the claim across its send and releases it', () => {
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor.js'), 'utf8');
-    expect(src).toContain("claimFollowUpForFanOut(customerId, contact.phone, scheduledServiceId);\n                        if (followUpClaim === 'busy') continue;");
+    expect(src).toContain("claimFollowUpForFanOut(customerId, contact.phone, scheduledServiceId);\n                        if (followUpClaim === 'busy' || followUpClaim === 'sent') continue;");
     // The replay check runs AFTER the claim settles (a replay that finished in between is seen).
     expect(src).toContain("require('./recipient-optin').isOnSiteFollowUpLive() && await require('./appointment-reminders').confirmationLoggedForVisitPhone({\n                          scheduledServiceId, phone: contact.phone,\n                        })");
     expect(src.indexOf('confirmationLoggedForVisitPhone({')).toBeGreaterThan(src.indexOf('claimFollowUpForFanOut(customerId, contact.phone, scheduledServiceId)'));
@@ -534,7 +534,8 @@ describe('round-3 rules', () => {
     state.optin[0].status = 'confirmed';
     expect(await optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY })).toBe(1);
     expect(state.prefs[0].appointment_notify_primary).toBe(false);
-    expect(sendReplay).toHaveBeenCalledTimes(2);
+    // The visit's confirmation already reached this phone: it is not sent again.
+    expect(sendReplay).toHaveBeenCalledTimes(1);
   });
 
   test('the fan-out stamps an accepted send with its release: the replay is not sent on top, the demotion still runs', async () => {
@@ -559,6 +560,40 @@ describe('round-3 rules', () => {
     const portal = fs.readFileSync(require.resolve('../routes/notifications.js'), 'utf8');
     expect(portal.split('noteHolderSetNotifyPrimary(trx,').length - 1).toBe(2);
     expect(fs.readFileSync(require.resolve('../routes/admin-customers.js'), 'utf8')).toContain('noteHolderSetNotifyPrimary(trx, req.params.id)');
+  });
+});
+
+describe('ordering with the caller\'s own confirmation and the fan-out', () => {
+  test('the caller\'s booking confirmation is still pending: no demotion and no replay yet; both run once it has gone out', async () => {
+    const { optin, state, sendReplay, dbMock } = load({ rows: [row()], customer: spouse() });
+    const base = dbMock.getMockImplementation();
+    let pending = true;
+    dbMock.mockImplementation((table) => (table === 'appointment_reminders'
+      ? { where() { return this; }, first: async () => ({ confirmation_sent: !pending }) }
+      : base(table)));
+    expect(await optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY })).toBe(0);
+    expect(state.prefs).toEqual([]);
+    expect(sendReplay).not.toHaveBeenCalled();
+    expect(state.optin[0].followup_done_at).toBeNull();
+    pending = false;
+    expect(await optin.sweepOnSiteFollowUps()).toEqual({ settled: 1 });
+    expect(state.prefs[0].appointment_notify_primary).toBe(false);
+    expect(sendReplay).toHaveBeenCalledTimes(1);
+  });
+
+  test('a replay that was sent (or may have been) is stamped on the row: the fan-out then reads "sent" and skips', async () => {
+    const { optin, state } = load({ rows: [row()], customer: spouse() });
+    await optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY });
+    expect(state.optin[0].fanout_confirmed_at).toBeInstanceOf(Date);
+    expect(await optin.claimFollowUpForFanOut('c1', '+15550100123', 'v1')).toBe('sent');
+
+    const uncertain = load({ rows: [row()], customer: spouse(), replay: jest.fn(async () => ({ sent: false, reason: 'delivery_uncertain' })) });
+    await uncertain.optin.settleOnSiteFollowUps(['c1']);
+    expect(await uncertain.optin.claimFollowUpForFanOut('c1', '+15550100123', 'v1')).toBe('sent');
+
+    const held = load({ rows: [row()], customer: spouse(), replay: jest.fn(async () => ({ sent: false, reason: 'not_sent' })) });
+    await held.optin.settleOnSiteFollowUps(['c1']);
+    expect(held.state.optin[0].fanout_confirmed_at).toBeNull();
   });
 });
 
