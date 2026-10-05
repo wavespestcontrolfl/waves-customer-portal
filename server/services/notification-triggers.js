@@ -469,6 +469,25 @@ const TRIGGER_REGISTRY = {
       };
     },
   },
+  // Sandy (the AI phone agent) took a real call, the caller spoke, and the
+  // call ended with no booking, no lead and no transfer — gated by
+  // GATE_RELAY_UNBOOKED_HANDOFF. See services/voice-agent/relay-unbooked-handoff.js.
+  relay_unbooked_call: {
+    label: 'Sandy call ended without a booking',
+    category: 'missed_call',
+    priority: 'high',
+    group: 'Communication',
+    // Same owner ruling as the voicemail bell: a callback number must be
+    // dialable. The payload is built by the hand-off module from the
+    // PAN-scrubbed call summary, not free model text.
+    allowContactDetails: true,
+    build: (p) => ({
+      title: 'Sandy call ended without a booking',
+      body: [p.phone ? `Caller: ${p.phone}` : null, p.summary ? String(p.summary).slice(0, 400) : 'The caller spoke with Sandy, then the call ended.']
+        .filter(Boolean).join(' - '),
+      link: callLink(p),
+    }),
+  },
   // Fired by estimate-converter when a paid acceptance deposit could not be
   // credited to the first invoice — the money sits on the deposit ledger
   // until someone reconciles it manually.
@@ -955,6 +974,9 @@ function pushTagFor(triggerKey, payload = {}) {
   if (triggerKey === 'sms_reply') {
     const thread = payload.threadId || 'unknown-thread';
     return `waves-sms_reply-${thread}-${crypto.randomUUID()}`;
+  }
+  if (triggerKey === 'relay_unbooked_call') {
+    return `waves-relay_unbooked_call-${payload.callSid || payload.callLogId || 'unknown-call'}`;
   }
   if (triggerKey === 'customer_missed_call') {
     return `waves-customer_missed_call-${payload.callLogId || crypto.randomUUID()}`;

@@ -4215,6 +4215,38 @@ class RelayConversation {
           }
           await this._recordCommitments({ transcript: commitmentsTranscript, sessionKey: this.sessionKey || null });
         }
+        // Sandy unbooked-call hand-off (GATE_RELAY_UNBOOKED_HANDOFF, dark): a
+        // production call that reconciled to ai_handled THIS statement (0 rows
+        // = a failure outcome / foreign owner won — nothing to do), with caller
+        // speech and no booking, lead or transfer, rings the office once and
+        // enters the lead pipeline. Awaited inside the close's own try so a
+        // failure is logged here; the module never throws.
+        if (updated && !this.sandbox) {
+          await require('./relay-unbooked-handoff').runUnbookedHandoff({
+            db,
+            callSid: this.callSid,
+            from: this.from,
+            to: this.to,
+            sandbox: this.sandbox === true,
+            sessionKey: this.sessionKey || null,
+            callerVerified: this._callerVerified === true,
+            language: this._provedLanguage || null,
+            callerTurnCount: this._userTurns.length + priorCallerTurns.length,
+            bookingRequested: this._bookingRequested === true,
+            reserviceFiled: this._reserviceFiled === true,
+            transferRequested: this._transferRequested === true,
+            // A write that outlived the bounded drain (capture_lead, request_reservice,
+            // a booking, the capture floor) IS this call's artifact once it lands:
+            // the hand-off stands down rather than race it.
+            pendingWrites: this._inFlightWrites.size > 0 || detachedWrites.length > 0 || Boolean(this._captureFloorWrite),
+            // The floor's "ran, wrote NO lead" (an existing customer) latches leadCaptured to
+            // stand down, but it is not an artifact: the office still gets the bell.
+            leadCaptured: this.leadCaptured === true && this._floorNoLead !== true,
+            leadId: this._leadId || null,
+            estimateFields: this._estimateFields || null,
+            fence: fenceOwner,
+          });
+        }
     } catch (err) {
       logger.warn(`[voice-relay] outcome reconcile failed callSid=${this.callSid}: ${err.message}`);
     } finally {
@@ -4522,7 +4554,7 @@ class RelayConversation {
         }
         const floorLeadId = result && result.leadId;
         this.leadCaptured = true;
-        if (!floorLeadId) this._noLeadCreated = true;
+        if (!floorLeadId) { this._noLeadCreated = true; this._floorNoLead = true; }
         logger.info(
           `[voice-relay] capture-floor ${floorLeadId ? 'lead written' : 'ran with NO lead (existing customer)'} `
           + `callSid=${this.callSid} reason=${reason || 'end'}`
