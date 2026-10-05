@@ -989,7 +989,7 @@ describe('the submit body', () => {
     expect(body).toMatchObject({
       visitOutcome: 'completed', technicianNotes: 'Synthetic note', techTips: null,
       sendCompletionSms: true, requestReview: true, includePayLink: true, reviewTiming: 'auto',
-      customerInteraction: 'not_home_full_access',
+      customerInteraction: 'tech_home_spoke_with_them',
     });
     expect(body).not.toHaveProperty('manualHeightIn');
     expect(body).not.toHaveProperty('blogPostId');
@@ -1001,20 +1001,21 @@ describe('the submit body', () => {
     expect(body).not.toHaveProperty('lawnProtocolCompletion');
   });
 
-  test('Customer is preset to not home, full access, sits after the products before the tips, and rides /complete as customerInteraction', async () => {
+  // Owner 2026-10-04: customer home is the default (replaces 2026-10-01).
+  test('Customer is preset to home, spoke with them, sits after the products before the tips, and rides /complete as customerInteraction', async () => {
     await openSheet();
     const chips = within(screen.getByRole('heading', { name: 'Customer' }).closest('section')).getAllByRole('button');
     expect(chips.map((b) => b.textContent)).toEqual(['Home — spoke with them', 'Not home — full access', 'Not home — partial access']);
-    expect(screen.getByRole('button', { name: 'Not home — full access' }).getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByRole('button', { name: 'Home — spoke with them' }).getAttribute('aria-pressed')).toBe('true');
     await analyzeAndComplete();
-    expect(completeCalls()[0].body.customerInteraction).toBe('not_home_full_access');
+    expect(completeCalls()[0].body.customerInteraction).toBe('tech_home_spoke_with_them');
   });
 
   test('a different customer choice is the one sent', async () => {
     await openSheet();
-    fireEvent.click(screen.getByRole('button', { name: 'Home — spoke with them' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Not home — partial access' }));
     await analyzeAndComplete();
-    expect(completeCalls()[0].body.customerInteraction).toBe('tech_home_spoke_with_them');
+    expect(completeCalls()[0].body.customerInteraction).toBe('not_home_partial_access');
   });
 
   test('the note typed before Analyze rides along to the photo read', async () => {
