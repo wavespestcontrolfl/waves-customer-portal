@@ -102,6 +102,7 @@ let lookup;
 let turfProfile;
 let tips;
 let blogAnswer;
+let customerAnswer;
 let catalogAnswer;
 let assessAnswer;
 let confirmAnswer;
@@ -116,6 +117,7 @@ function makeRequest({ ctx = context(), contextError = null } = {}) {
       return ctx;
     }
     if (path.includes('/turf-profile')) { if (turfProfile instanceof Error) throw turfProfile; return turfProfile; }
+    if (/^\/admin\/customers\/[^/]+$/.test(path)) return customerAnswer;
     if (path.endsWith('/tech-tips')) { if (tips instanceof Error) throw tips; return tips; }
     if (path.includes('/blog-posts')) { if (blogAnswer instanceof Error) throw blogAnswer; return typeof blogAnswer === 'function' ? blogAnswer(path) : blogAnswer; }
     if (path === '/admin/dispatch/products/catalog') return catalogAnswer;
@@ -159,6 +161,7 @@ beforeEach(() => {
   turfProfile = { profile: { lawn_sqft: 5000 } };
   tips = { available: false, groups: [] };
   blogAnswer = { available: false, posts: [] };
+  customerAnswer = { customer: { email: '' } };
   catalogAnswer = { products: CATALOG };
   assessAnswer = { success: true, assessment: ASSESSED, visitAssessment: REVIEW, adjustedScores: SCORES, observations: 'Synthetic observation' };
   confirmAnswer = { success: true, confirmed: true, assessment: { ...ASSESSED, confirmed_by_tech: true }, visitAssessment: REVIEW };
@@ -176,7 +179,7 @@ async function openSheet({ request = makeRequest(), props = {} } = {}) {
   const onFullForm = props.onFullForm || vi.fn();
   const onCompleted = props.onCompleted || vi.fn();
   render(<FastCompleteLawnSheet service={SERVICE} request={request} catalog={CATALOG} onClose={() => {}} onCompleted={onCompleted} onFullForm={onFullForm} {...props} />);
-  await screen.findByRole('heading', { name: 'Lawn photos' });
+  await screen.findByRole('heading', { name: 'Lawn assessment' });
   return { request, onFullForm, onCompleted };
 }
 
@@ -226,7 +229,7 @@ describe('opening the sheet', () => {
     const onFullForm = vi.fn();
     render(<FastCompleteLawnSheet service={SERVICE} request={request} catalog={CATALOG} onClose={() => {}} onFullForm={onFullForm} />);
     await waitFor(() => expect(onFullForm).toHaveBeenCalledTimes(1));
-    expect(screen.queryByRole('heading', { name: 'Lawn photos' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Lawn assessment' })).toBeNull();
   });
 
   test.each([404, 409])('a %s on the context (gate off, visit gone) is handed to the parent', async (status) => {
@@ -251,16 +254,16 @@ describe('opening the sheet', () => {
     const request = makeRequest({ ctx: context({ service: { ...VISIT, propertyId: 'prop-other' } }) });
     render(<FastCompleteLawnSheet service={SERVICE} request={request} catalog={CATALOG} onClose={() => {}} />);
     await screen.findByText('This visit changed since your schedule loaded. Close and reopen it from the schedule.');
-    expect(screen.queryByRole('heading', { name: 'Lawn photos' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Lawn assessment' })).toBeNull();
   });
 });
 
 describe('the screen', () => {
   test('shows the note first, then the photos, then the products, and one Complete button', async () => {
     await openSheet();
-    expect(screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent)).toEqual(['Tell me about the visit', 'Lawn photos', 'Products used', 'Treatment zone map']);
+    expect(screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent)).toEqual(['Tell me about the visit', 'Lawn assessment', 'Products used', 'Treatment zone map']);
     expect(document.querySelectorAll('.tech-visit-footer .tech-visit-complete')).toHaveLength(1);
-    expect(screen.getByRole('dialog').querySelector('header h2').textContent).toBe('Complete lawn visit');
+    expect(screen.getByRole('dialog').querySelector('header h2').textContent).toBe('Complete service');
   });
 
   test('has no Full form button, watering preview, lawn length box or area box, and asks for none of them', async () => {
@@ -274,8 +277,8 @@ describe('the screen', () => {
     expect(screen.queryByText(/Re-check last visit/)).toBeNull();
     expect(screen.queryByText('Photo findings')).toBeNull();
     expect(request.mock.calls.some(([path]) => /watering-preview/.test(path))).toBe(false);
-    // The only buttons in the header: Close.
-    expect(within(screen.getByRole('dialog').querySelector('header')).getAllByRole('button').map((b) => b.getAttribute('aria-label'))).toEqual(['Close']);
+    // The only button in the header without a Details handler: the round Back arrow (no X).
+    expect(within(screen.getByRole('dialog').querySelector('header')).getAllByRole('button').map((b) => b.getAttribute('aria-label'))).toEqual(['Back']);
   });
 
   test('before the read: the shot list with its one-line guides and one Analyze lawn button, nothing else in the photo block', async () => {
@@ -359,7 +362,7 @@ describe('what Complete says while it is off', () => {
     await waitFor(() => expect(completeButton().textContent).toBe('Confirm the assessment'));
     expect(completeButton().disabled).toBe(true);
     await confirm();
-    await waitFor(() => expect(completeButton().textContent).toBe('Complete lawn visit'));
+    await waitFor(() => expect(completeButton().textContent).toBe('Complete service'));
     expect(completeButton().disabled).toBe(false);
     // The reason is the button, not a line above it.
     expect(footerNote()).toBe('');
@@ -368,11 +371,11 @@ describe('what Complete says while it is off', () => {
   test('with no products on, Add the products applied; adding one turns it on', async () => {
     await openSheet({ request: makeRequest({ ctx: ONE_TIME() }) });
     await analyze();
-    await waitFor(() => expect(completeButton().textContent).toBe('Add the products applied'));
+    await waitFor(() => expect(completeButton().textContent).toBe('Products applied required'));
     expect(completeButton().disabled).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
     fireEvent.click(await screen.findByText('Iron Plus'));
-    await waitFor(() => expect(completeButton().textContent).toBe('Complete lawn visit'));
+    await waitFor(() => expect(completeButton().textContent).toBe('Complete service'));
     expect(completeButton().disabled).toBe(false);
   });
 
@@ -382,7 +385,7 @@ describe('what Complete says while it is off', () => {
     await waitFor(() => expect(completeButton().disabled).toBe(false));
     fireEvent.click(within(editorFor('Talak 7.9%')).getByRole('button', { name: 'Remove' }));
     fireEvent.click(within(editorFor('Iron Plus')).getByRole('button', { name: 'Remove' }));
-    await waitFor(() => expect(completeButton().textContent).toBe('Add the products applied'));
+    await waitFor(() => expect(completeButton().textContent).toBe('Products applied required'));
   });
 });
 
@@ -527,7 +530,7 @@ describe('products', () => {
     expect(screen.getByRole('button', { name: '+ Other product' })).toBeTruthy();
     expect(request.mock.calls.some(([path]) => path.includes('/treatment-plans/'))).toBe(false);
     await analyze();
-    expect(completeButton().textContent).toBe('Add the products applied');
+    expect(completeButton().textContent).toBe('Products applied required');
   });
 
   test('a planned product the tech removes is sent as skipped, the way the full form does', async () => {
@@ -657,7 +660,7 @@ describe('the one-time lawn condition (a server requirement)', () => {
     await analyze();
     await waitFor(() => expect(footerNote()).toBe('Pick the lawn condition.'));
     expect(completeButton().disabled).toBe(true);
-    expect(screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent)).toEqual(['Tell me about the visit', 'Lawn photos', 'Products used', 'Lawn condition', 'Treatment zone map']);
+    expect(screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent)).toEqual(['Tell me about the visit', 'Lawn assessment', 'Products used', 'Lawn condition', 'Treatment zone map']);
     fireEvent.click(screen.getByRole('button', { name: 'Good' }));
     await waitFor(() => expect(completeButton().disabled).toBe(false));
     await submit();
@@ -790,7 +793,7 @@ describe('tips from your tech', () => {
   test('sits after the products, finds a tip by keyword, and sends the pick', async () => {
     tips = lib(['Mow high', 'Dollarweed', 'Sedge']);
     await openSheet();
-    expect(screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent)).toEqual(['Tell me about the visit', 'Lawn photos', 'Products used', 'Tip for the customer', 'Treatment zone map']);
+    expect(screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent)).toEqual(['Tell me about the visit', 'Lawn assessment', 'Products used', 'Tip for the customer', 'Treatment zone map']);
     fireEvent.change(await screen.findByLabelText('Search tips'), { target: { value: 'sedge' } });
     expect(screen.queryByRole('button', { name: /Mow high/ })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: /Sedge/ }));
@@ -840,7 +843,7 @@ describe('the blog post for the customer', () => {
     blogAnswer = { available: true, posts: [] };
     await openSheet();
     await screen.findByRole('heading', { name: 'Blog post for the customer' });
-    expect(screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent)).toEqual(['Tell me about the visit', 'Lawn photos', 'Products used', 'Tip for the customer', 'Blog post for the customer', 'Treatment zone map']);
+    expect(screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent)).toEqual(['Tell me about the visit', 'Lawn assessment', 'Products used', 'Tip for the customer', 'Blog post for the customer', 'Treatment zone map']);
   });
 
   test('a failed availability read is no section', async () => {
@@ -970,7 +973,7 @@ describe('a visit type that could not be read', () => {
     const onFullForm = vi.fn();
     render(<FastCompleteLawnSheet service={SERVICE} request={request} catalog={CATALOG} onClose={() => {}} onFullForm={onFullForm} />);
     await screen.findByText('Couldn’t load this visit. Try again.');
-    expect(screen.queryByRole('heading', { name: 'Lawn photos' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Lawn assessment' })).toBeNull();
     expect(onFullForm).not.toHaveBeenCalled();
     expect(screen.queryByRole('button', { name: /full form/i })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
@@ -979,7 +982,7 @@ describe('a visit type that could not be read', () => {
 
   test.each(['photo_status', 'turf_height_flag', 'planned_products', 'assessment'])('an advisory %s failure still opens the sheet', async (failure) => {
     await openSheet({ request: makeRequest({ ctx: context({ readFailures: [failure] }) }) });
-    expect(screen.getByRole('heading', { name: 'Lawn photos' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Lawn assessment' })).toBeTruthy();
   });
 
   test.each([
@@ -992,7 +995,7 @@ describe('a visit type that could not be read', () => {
 
   test('the same service type (any case) and a matching catalog id open the sheet', async () => {
     await openSheet({ request: makeRequest({ ctx: context({ service: { ...VISIT, catalogServiceId: 'cat-1' } }) }), props: { service: { ...SERVICE, routedServiceType: 'lawn care', routedCatalogServiceId: 'cat-1' } } });
-    expect(screen.getByRole('heading', { name: 'Lawn photos' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Lawn assessment' })).toBeTruthy();
   });
 });
 
@@ -1073,13 +1076,14 @@ describe('text size and look', () => {
     expect(screen.getByRole('button', { name: 'Retake' }).className).toContain('bg-white');
     await confirm();
     // The confirmed state is a neutral row, not a green box.
-    expect(screen.getByText('Assessment confirmed').className).toContain('bg-zinc-50');
+    expect(screen.getByText('Assessment confirmed').className).toContain('bg-[#F5F5F5]');
     expect(document.body.innerHTML).not.toMatch(/green|emerald|#16A34A|#10B981|rgba?\(22, 163, 74/i);
   });
 
-  test('the lawn sheet marks its form so a selected tile is soft (the style is scoped to .tech-lawn-fast)', async () => {
+  test('the sheet wears the full form\'s page look: the dialog carries the scoped class', async () => {
     await openSheet();
-    expect(document.querySelector('.tech-visit-form-area.tech-lawn-fast')).not.toBeNull();
+    expect(document.querySelector('section[role="dialog"].tech-lawn-sheet')).not.toBeNull();
+    expect(document.querySelector('.tech-visit-footer .tech-visit-complete')).not.toBeNull();
   });
 
   test('each of the four scores has Lower and Raise buttons in the sheet too', async () => {
@@ -1099,5 +1103,46 @@ describe('text size and look', () => {
     await analyze();
     expect(screen.queryByText(/\$\d/)).toBeNull();
     expect(screen.queryByText(/estimate|pricing/i)).toBeNull();
+  });
+});
+
+// ── the full form's mobile page look: header, Details, customer block ───────
+describe('header and customer block, as on the full form\'s Complete service page', () => {
+  test('the title is Complete service, with a round Back arrow that closes, and no X', async () => {
+    const onClose = vi.fn();
+    await openSheet({ props: { onClose } });
+    expect(screen.getByRole('heading', { name: 'Complete service' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Close' })).toBeNull();
+    expect(screen.queryByText('×')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  test('a Details pill shows only when the parent can open the details, and opens them', async () => {
+    await openSheet();
+    expect(screen.queryByRole('button', { name: 'Details' })).toBeNull();
+    cleanup();
+    const onViewDetails = vi.fn();
+    await openSheet({ props: { onViewDetails } });
+    fireEvent.click(screen.getByRole('button', { name: 'Details' }));
+    expect(onViewDetails).toHaveBeenCalledTimes(1);
+  });
+
+  test('the customer block: the name links to the customer, then directions, call and email links', async () => {
+    customerAnswer = { customer: { email: 'pat@example.com' } };
+    await openSheet({ props: { service: { ...SERVICE, customerId: 'cust-1', fullAddress: '123 Main St, Bradenton, FL 34205', customerPhone: '+19415550100' } } });
+    expect(screen.getByRole('link', { name: 'Pat Jones' }).getAttribute('href')).toBe('/admin/customers?customerId=cust-1');
+    const maps = screen.getByRole('link', { name: '123 Main St, Bradenton, FL 34205' });
+    expect(maps.getAttribute('href')).toBe('https://www.google.com/maps/dir/?api=1&destination=123%20Main%20St%2C%20Bradenton%2C%20FL%2034205');
+    expect(maps.getAttribute('target')).toBe('_blank');
+    expect(screen.getByRole('link', { name: '+19415550100' }).getAttribute('href')).toBe('tel:+19415550100');
+    expect((await screen.findByRole('link', { name: 'pat@example.com' })).getAttribute('href')).toBe('mailto:pat@example.com');
+  });
+
+  test('the bottom pill reads Complete service when ready, and the page\'s own wording while off', async () => {
+    await openSheet();
+    expect(completeButton().textContent).toBe('Add a photo');
+    await analyze();
+    await waitFor(() => expect(completeButton().textContent).toBe('Complete service'));
   });
 });

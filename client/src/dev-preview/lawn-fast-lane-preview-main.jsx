@@ -12,6 +12,8 @@
  *                   picked, products on: Complete is on
  *   empty-products  a visit whose plan lists no products
  *
+ * The sheet wears the full form's mobile Complete service page (header with a
+ * back arrow and a Details pill, the customer block, white cards, pill buttons).
  * The page loads the same global stylesheets the admin app entry loads
  * (index.css, brand-tokens.css; the sheet imports tech-workflow.css itself) and
  * marks <html> as the admin app does, so type and colors match Dispatch.
@@ -77,6 +79,9 @@ const SERVICE = {
   customerName: 'Jordan Sample',
   serviceType: 'Every 6 Weeks Lawn Care Service',
   address: '100 Sample Street, Bradenton',
+  customerId: 'cust-preview',
+  fullAddress: '100 Sample Street, Bradenton, FL 34205',
+  customerPhone: '+19415550100',
   timeLabel: '9:00 AM',
   routedCustomerId: 'cust-preview',
   routedScheduledDate: '2026-10-05',
@@ -147,6 +152,7 @@ async function request(path, options = {}) {
   }
   if (path.endsWith('/tech-tips')) return TIPS;
   if (path.includes('/blog-posts')) return path.includes('?q=') ? { available: true, posts: POSTS } : { available: true, posts: [] };
+  if (path === '/admin/customers/cust-preview') return { customer: { email: 'jordan.sample@example.com' } };
   if (path.includes('/turf-profile')) return { profile: { lawn_sqft: LAWN_SQFT } };
   if (path === '/admin/dispatch/products/catalog') return { products: CATALOG };
   if (path.endsWith('/complete')) {
@@ -237,6 +243,7 @@ function Preview() {
       onClose={() => setClosed('Closed without completing.')}
       onCompleted={() => setClosed('Visit completed (preview: nothing was saved).')}
       onFullForm={() => setClosed('The server would open the full form for this visit.')}
+      onViewDetails={() => setClosed('Details: Dispatch would open the appointment details sheet here.')}
     />
   );
 }

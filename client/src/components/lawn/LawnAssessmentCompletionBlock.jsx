@@ -13,6 +13,14 @@ import React, { useEffect, useRef, useState } from "react";
 import lawnScores from '@lawn-scores';
 import { createVisitReview, visitReviewPayload } from "./LawnVisitReview";
 import { Button, Input, Select, UiSurface } from "../ui";
+
+// The full form's mobile page tokens (SchedulePage CompletionPanel): buttons are
+// 999px pills, uppercase with 0.3px spacing, the secondary one an ink outline;
+// fields are 12px-radius with a 1px #E5E5E5 hairline; cards 16px. The shared
+// primitives are zinc, so these override (!) their radius, border and case.
+const PILL = "!rounded-full !uppercase !tracking-[0.3px]";
+const PILL_OUTLINE = `${PILL} !border !border-[#111111]`;
+const FIELD = "!rounded-[12px] !border !border-[#E5E5E5]";
 import { SHOTS as LAWN_SHOTS, SHOT_CAP as LAWN_SHOT_CAP, addPhotos as addLawnPhotos, assignShotZone, describeAddResult, planFileReads, shotIsFull, shotListHint } from "../../lib/lawn-photo-shots";
 
 // The four scores the tech reviews and may change until the assessment is
@@ -537,6 +545,7 @@ export default function LawnAssessmentCompletionBlock({
           <>
             <Button
               variant="secondary"
+              className={PILL_OUTLINE}
               onClick={() => { pendingShotRef.current = null; fileRef.current?.click(); }}
               disabled={disabled || photos.length >= photoCap || analyzing || !modeKnown}
             >
@@ -559,7 +568,7 @@ export default function LawnAssessmentCompletionBlock({
               disabled={disabled || analyzing}
               placeholder="e.g. 4"
               onChange={(e) => onGaugeHeight?.(e.target.value === "" ? null : Number(e.target.value))}
-              className="!w-20"
+              className={`!w-20 ${FIELD}`}
             />
             <span className="text-14 text-zinc-500">inches</span>
           </>
@@ -577,7 +586,7 @@ export default function LawnAssessmentCompletionBlock({
                   <li
                     key={shot.key}
                     data-testid={`lawn-shot-${shot.key}`}
-                    className={`flex items-start gap-2 rounded-sm border-hairline px-3 py-2 ${added ? "border-zinc-900 bg-zinc-50" : "border-zinc-200 bg-white"}`}
+                    className={`flex items-start gap-2 rounded-[12px] border px-3 py-2 ${added ? "border-[#111111] bg-[#F5F5F5]" : "border-[#E5E5E5] bg-white"}`}
                   >
                     <div className="min-w-0 flex-1">
                       <div className="text-14 font-medium text-zinc-900">
@@ -588,6 +597,7 @@ export default function LawnAssessmentCompletionBlock({
                     </div>
                     <Button
                       variant="secondary"
+                      className={PILL_OUTLINE}
                       aria-label={`Add photo for ${shot.label}`}
                       disabled={disabled || analyzing || photos.length >= photoCap || shotIsFull(photos, shot.key) || readingShots.includes(shot.key)}
                       onClick={() => { pendingShotRef.current = shot.key; fileRef.current?.click(); }}
@@ -606,7 +616,7 @@ export default function LawnAssessmentCompletionBlock({
                   <img
                     src={photo.preview}
                     alt=""
-                    className="block h-20 w-28 rounded-sm border-hairline border-zinc-200 object-cover"
+                    className="block h-20 w-28 rounded-[12px] border border-[#E5E5E5] object-cover"
                   />
                   <button
                     type="button"
@@ -623,7 +633,7 @@ export default function LawnAssessmentCompletionBlock({
                     disabled={disabled || analyzing}
                     onChange={(e) => setPhotoZone(index, e.target.value || null)}
                     aria-label={`Slot for photo ${index + 1}`}
-                    className="mt-1 !pl-2 !pr-6 !text-14"
+                    className={`mt-1 !pl-2 !pr-6 !text-14 ${FIELD}`}
                   >
                     <option value="">No slot</option>
                     {(shotList ? LAWN_SHOTS.map((shot) => ({ value: shot.key, label: shot.label })) : LAWN_PHOTO_ZONES).map((zone) => (
@@ -649,6 +659,7 @@ export default function LawnAssessmentCompletionBlock({
             </div>
           )}
           <Button
+            className={PILL}
             onClick={analyze}
             disabled={disabled || photos.length === 0 || analyzing}
           >
@@ -658,7 +669,7 @@ export default function LawnAssessmentCompletionBlock({
       )}
       {hasResult && (
         <>
-          <ul aria-label="Lawn scores" className="m-0 list-none divide-y divide-zinc-200 rounded-sm border-hairline border-zinc-200 bg-white p-0">
+          <ul aria-label="Lawn scores" className="m-0 list-none divide-y divide-[#E5E5E5] rounded-[16px] border border-[#E5E5E5] bg-white p-0">
             {LAWN_ASSESSMENT_METRICS.map((metric) => {
               const value = lawnScores.lawnScoreValue(scoreSource?.[metric.key]);
               // The AI's own read, from result.aiScores (the run's immutable
@@ -685,7 +696,7 @@ export default function LawnAssessmentCompletionBlock({
                         variant="secondary"
                         aria-label={`Lower ${metric.label} score`}
                         disabled={busy}
-                        className="ui-icon-action !text-18"
+                        className={`ui-icon-action !text-18 ${PILL_OUTLINE}`}
                         {...holdToRepeat(metric.key, -1)}
                       >
                         {"\u2212"}
@@ -700,13 +711,13 @@ export default function LawnAssessmentCompletionBlock({
                         aria-label={`${metric.label} score`}
                         placeholder="0-100"
                         onChange={(e) => fillScore(metric.key, e.target.value)}
-                        className="!w-[72px] text-center font-medium [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                        className={`!w-[72px] ${FIELD} text-center font-medium [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none`}
                       />
                       <Button
                         variant="secondary"
                         aria-label={`Raise ${metric.label} score`}
                         disabled={busy}
-                        className="ui-icon-action !text-18"
+                        className={`ui-icon-action !text-18 ${PILL_OUTLINE}`}
                         {...holdToRepeat(metric.key, 1)}
                       >
                         +
@@ -725,13 +736,13 @@ export default function LawnAssessmentCompletionBlock({
               The office can still edit a review on the Lawn assessment page. */}
           <div className="flex gap-2">
             {confirmed ? (
-              <div className="flex min-h-[44px] flex-1 items-center justify-center gap-2 rounded-sm border-hairline border-zinc-200 bg-zinc-50 px-3 text-14 font-medium text-zinc-900">
+              <div className="flex min-h-[44px] flex-1 items-center justify-center gap-2 rounded-[12px] border border-[#E5E5E5] bg-[#F5F5F5] px-3 text-14 font-medium text-zinc-900">
                 <span aria-hidden="true">{"\u2713"}</span>
                 Assessment confirmed
               </div>
             ) : (
               <Button
-                className="flex-1"
+                className={`flex-1 ${PILL}`}
                 onClick={confirm}
                 disabled={disabled || confirming}
               >
@@ -740,6 +751,7 @@ export default function LawnAssessmentCompletionBlock({
             )}
             <Button
               variant="secondary"
+              className={PILL_OUTLINE}
               onClick={() => {
                 setPhotos([]);
                 setResult(null);

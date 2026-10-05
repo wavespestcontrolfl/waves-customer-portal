@@ -116,7 +116,8 @@ export function customerNameOf(visit, service) {
 // width. A tap on the backdrop dismisses it. `overlay` renders beside the
 // dialog (a photo manager opened over the sheet); `hiddenProps` makes the
 // dialog inert while it is up.
-export function FastCompleteFrame({ isMobile, dialogRef, titleId, onDismiss, hiddenProps, overlay, children }) {
+// `dialogClassName` (the lawn sheet): a class on the dialog, for its scoped look.
+export function FastCompleteFrame({ isMobile, dialogRef, titleId, onDismiss, hiddenProps, overlay, dialogClassName, children }) {
   const fieldPortalClass = useFieldPortalClass();
   return createPortal(
     <>
@@ -130,7 +131,7 @@ export function FastCompleteFrame({ isMobile, dialogRef, titleId, onDismiss, hid
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className={cn('tech-visit-dialog', isMobile && 'tech-visit-dialog--fullscreen')}
+        className={cn('tech-visit-dialog', isMobile && 'tech-visit-dialog--fullscreen', dialogClassName)}
         {...hiddenProps}
       >
         {children}
@@ -142,8 +143,7 @@ export function FastCompleteFrame({ isMobile, dialogRef, titleId, onDismiss, hid
   );
 }
 
-// `noFullForm` (the lawn sheet): the header has no Full form button.
-export function SheetHeader({ titleId, title, service, visit, done, locked, dictationPending, submitting, onFullForm, noFullForm = false, onClose }) {
+export function SheetHeader({ titleId, title, service, visit, done, locked, dictationPending, submitting, onFullForm, onClose }) {
   const address = liveAddressLine(visit?.address);
   return (
     <header className="tech-visit-header">
@@ -154,7 +154,7 @@ export function SheetHeader({ titleId, title, service, visit, done, locked, dict
         </p>
         {address && <p className="tech-visit-muted">{address}</p>}
       </div>
-      {!done && !noFullForm && (
+      {!done && (
         <Button variant="ghost" className="tech-visit-action" onClick={onFullForm} disabled={locked || dictationPending}>Full form</Button>
       )}
       <Button variant="ghost" className="tech-visit-action tech-visit-close" onClick={onClose} disabled={submitting} aria-label="Close">×</Button>
