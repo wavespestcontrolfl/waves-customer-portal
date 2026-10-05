@@ -503,29 +503,55 @@ function lawnV13PlanBlock({ trackKey, service, structuredProtocol }) {
 }
 
 // What a staged v13 product row's gates mean in the field, for the plan item the
-// panel and job card show. 'required' = a condition the tech must meet or check
-// before applying (the plan has no evidence to clear it); 'note' = an instruction.
-// Gates the plan CAN judge are evaluated: novToMarOnly against the service month,
-// northPortBlocked against the visit's resolved municipality, spreaderVisitOnly
-// against the window's production mode. Keys not listed carry no field text.
-function v13GateNotes(gates, { monthNumber = null, municipality = null, productionMode = null } = {}) {
+// panel and job card show: one table, one loop. `required` = a condition the tech
+// must meet or check before applying (the plan has no evidence to clear it);
+// otherwise an instruction. `when` is the extra test for a gate the plan CAN judge
+// from its context: novToMarOnly against the service month, northPortBlocked
+// against the visit's resolved municipality, spreaderVisitOnly against the window's
+// production mode. Keys not in the table carry no field text. Order is display order.
+const NOV_TO_MAR = (month) => month > 3 && month < 11;
+const V13_GATE_NOTES = [
+  { key: 'minDistanceFromWaterFt', required: true, text: (ft) => `Keep ${ft} ft from ponds, lakes and canals; skip that strip.` },
+  { key: 'holdForTropicalWatch', required: true, text: () => 'Hold the application if a tropical storm or hurricane is forecast.' },
+  { key: 'novToMarOnly', required: true, when: (ctx) => ctx.monthNumber != null && NOV_TO_MAR(ctx.monthNumber), text: () => 'Use only from November through March; this visit is outside that season.' },
+  { key: 'spreaderVisitOnly', required: true, when: (ctx) => /hose|reel/i.test(String(ctx.productionMode || '')), text: () => 'Granular product: apply on a spreader visit, not from the hose pass.' },
+  { key: 'northPortBlocked', required: true, when: (ctx) => /north\s*port/i.test(String(ctx.municipality || '')), text: () => 'Not allowed in North Port this month; skip this product.' },
+  { key: 'applyAlone', text: () => 'Apply alone: no other product in the tank.' },
+  { key: 'delayWateringHours', text: (hours) => `Delay watering for ${hours} hours.` },
+  { key: 'noWaterIn', text: () => 'Do not water this in.' },
+  { key: 'tankMixWith', text: (product) => `Tank mix with ${product}.` },
+  { key: 'concentration', text: (value) => `Concentration ${value}.` },
+  { key: 'paleTurfRate', text: (rate) => `Pale turf rate: ${rate}.` },
+  { key: 'rateRange', text: (range) => `Label rate range ${range}.` },
+  { key: 'sunnyTurfOnly', text: () => 'Sunny turf only; the amount covers the sunny share of the lawn.' },
+];
+
+function v13GateNotes(gates, context = {}) {
   const g = gates && typeof gates === 'object' ? gates : {};
-  const notes = [];
-  const add = (key, severity, text) => notes.push({ key, severity, text });
-  if (g.minDistanceFromWaterFt) add('minDistanceFromWaterFt', 'required', `Keep ${g.minDistanceFromWaterFt} ft from ponds, lakes and canals; skip that strip.`);
-  if (g.holdForTropicalWatch) add('holdForTropicalWatch', 'required', 'Hold the application if a tropical storm or hurricane is forecast.');
-  if (g.novToMarOnly && monthNumber != null && monthNumber > 3 && monthNumber < 11) add('novToMarOnly', 'required', 'Use only from November through March; this visit is outside that season.');
-  if (g.spreaderVisitOnly && /hose|reel/i.test(String(productionMode || ''))) add('spreaderVisitOnly', 'required', 'Granular product: apply on a spreader visit, not from the hose pass.');
-  if (g.northPortBlocked && /north\s*port/i.test(String(municipality || ''))) add('northPortBlocked', 'required', 'Not allowed in North Port this month; skip this product.');
-  if (g.applyAlone) add('applyAlone', 'note', 'Apply alone: no other product in the tank.');
-  if (g.delayWateringHours) add('delayWateringHours', 'note', `Delay watering for ${g.delayWateringHours} hours.`);
-  if (g.noWaterIn) add('noWaterIn', 'note', 'Do not water this in.');
-  if (g.tankMixWith) add('tankMixWith', 'note', `Tank mix with ${g.tankMixWith}.`);
-  if (g.concentration) add('concentration', 'note', `Concentration ${g.concentration}.`);
-  if (g.paleTurfRate) add('paleTurfRate', 'note', `Pale turf rate: ${g.paleTurfRate}.`);
-  if (g.rateRange) add('rateRange', 'note', `Label rate range ${g.rateRange}.`);
-  if (g.sunnyTurfOnly) add('sunnyTurfOnly', 'note', 'Sunny turf only; the amount covers the sunny share of the lawn.');
-  return notes;
+  return V13_GATE_NOTES
+    .filter((entry) => g[entry.key] && (!entry.when || entry.when(context)))
+    .map((entry) => ({ key: entry.key, severity: entry.required ? 'required' : 'note', text: entry.text(g[entry.key]) }));
+}
+
+// The selected items' required gate notes as plan warnings, and an apply-alone
+// product selected beside any other product as a block. Shared by the plan and
+// the tank sheet so the two never disagree. Items need { product, gateNotes }.
+function v13SelectedGateWarnings(selectedItems) {
+  return selectedItems.flatMap((item) => (item.gateNotes || []).filter((note) => note.severity === 'required').map((note) => ({
+    code: 'lawn_v13_product_gate', severity: 'warning', gate: note.key,
+    productId: item.product?.id || null, productName: item.product?.name || null,
+    message: `${item.product?.name || 'Product'}: ${note.text}`,
+  })));
+}
+
+function v13ApplyAloneBlocks(selectedItems) {
+  return selectedItems
+    .filter((item) => item.product && item.gateNotes?.some((note) => note.key === 'applyAlone')
+      && selectedItems.some((other) => other !== item && other.product))
+    .map((item) => ({
+      code: 'lawn_v13_apply_alone', severity: 'block', productId: item.product.id, productName: item.product.name,
+      message: `${item.product.name} is applied alone, but other products are selected with it. Remove them from the mix or apply them separately.`,
+    }));
 }
 
 // The same rows for a reader with no visit (the tank sheet, the cost audit): one
@@ -1428,6 +1454,91 @@ async function customerBillingModeColumnExists(knex) {
   }
 }
 
+// ── Plan item projection (buildPlanForService) ──────────────────────────────
+// The approved substitute carries the visit's own rate over its catalog default.
+function substitutedProduct(substitution) {
+  return {
+    ...substitution.substitute,
+    default_rate_per_1000: substitution.rate_per_1000 != null
+      ? substitution.rate_per_1000
+      : substitution.substitute.default_rate_per_1000,
+    rate_unit: substitution.rate_unit || substitution.substitute.rate_unit,
+  };
+}
+
+// The protocol line's own fields, as the panel shows them.
+function planLineFields(item) {
+  return {
+    raw: item.raw,
+    role: item.role,
+    conditional: item.conditional,
+    scope: item.scope,
+    conditionFlag: item.conditionFlag,
+    branchGroupId: item.branchGroupId,
+    branch: item.branch || null,
+    areaFactorDefault: item.areaFactorDefault,
+    areaFactorClean: item.areaFactorClean,
+    areaFactorHeavy: item.areaFactorHeavy,
+    areaFactorBroadcast: item.areaFactorBroadcast,
+    selectionReason: item.selectionReason,
+    selected: item.selected,
+  };
+}
+
+// The staged v13 row's gates and what they mean in the field (null and empty for
+// every other plan), carried so the panel and job card can show them.
+function v13ItemFields(v13Row, gateContext) {
+  return {
+    gates: v13Row?.gates && Object.keys(v13Row.gates).length ? v13Row.gates : null,
+    gateNotes: v13Row ? v13GateNotes(v13Row.gates, gateContext) : [],
+  };
+}
+
+const nullableNumber = (value) => (value != null ? Number(value) : null);
+
+function planProductSnapshot(product, mix) {
+  if (!product) return null;
+  return {
+    id: product.id,
+    name: product.name,
+    category: product.category,
+    activeIngredient: product.active_ingredient,
+    active: product.active !== false,
+    groups: getProductGroups(product),
+    labelVerifiedAt: product.label_verified_at,
+    applicationMethod: product.application_method,
+    formulation: product.formulation,
+    analysis_n: product.analysis_n,
+    analysis_p: product.analysis_p,
+    analysis_k: product.analysis_k,
+    bestPrice: nullableNumber(product.best_price),
+    costPerUnit: nullableNumber(product.cost_per_unit),
+    costUnit: product.cost_unit || null,
+    containerSize: product.container_size || null,
+    unitSizeOz: nullableNumber(product.unit_size_oz),
+    needsPricing: product.needs_pricing === true,
+    mixing_order_category: product.mixing_order_category,
+    mixing_instructions: product.mixing_instructions,
+    inventory: buildProductInventorySnapshot(product, mix),
+  };
+}
+
+function planSubstitutionSnapshot(substitution) {
+  if (!substitution) return null;
+  return {
+    id: substitution.id,
+    originalProductId: substitution.original_product_id,
+    originalProductName: substitution.original_product_name,
+    substituteProductId: substitution.substitute_product_id,
+    substituteProductName: substitution.substitute_product_name,
+    reason: substitution.reason || null,
+    approvedByName: substitution.approved_by_name || null,
+    approvedAt: substitution.approved_at || null,
+    ratePer1000: nullableNumber(substitution.rate_per_1000),
+    rateUnit: substitution.rate_unit || null,
+  };
+}
+
 async function buildPlanForService(serviceId, options = {}) {
   const knex = options.db || db;
   const now = options.now || new Date();
@@ -1549,92 +1660,41 @@ async function buildPlanForService(serviceId, options = {}) {
   // GATE_LAWN_V13 with the staged v13 protocol resolved: each matched product's
   // own protocol row supplies its rate and its sunny-turf limit.
   const v13Rows = v13ProtocolRows(structuredProtocol);
+  // What every line's area factor and gate text share, built once.
+  const areaContext = {
+    sunExposure: profile?.sun_exposure,
+    plan: options.plan || service.waveguard_tier,
+    weedPressure: options.weedPressure,
+    conditionFlags: options.conditionFlags,
+    propertyFlags: options.propertyFlags,
+    stressFlags,
+    isFirstYear: options.isFirstYear,
+  };
+  const gateContext = {
+    monthNumber: MONTH_ABBR.indexOf(month) + 1 || null,
+    municipality: resolvedOrdinanceCity,
+    productionMode: structuredProtocol?.window?.productionMode,
+  };
   const planItems = candidateItems.map((item) => {
+    // One product per line: the approved substitute when one is on the visit,
+    // else the matched catalog row. Only an unsubstituted match reads a v13 row.
     const substitution = item.product ? substitutions.get(String(item.product.id)) : null;
+    const plannedProduct = substitution ? substitutedProduct(substitution) : item.product;
     const v13Row = !substitution && item.product ? v13Rows.get(String(item.product.id)) : null;
-    const plannedProduct = substitution
-      ? {
-          ...substitution.substitute,
-          default_rate_per_1000: substitution.rate_per_1000 != null
-            ? substitution.rate_per_1000
-            : substitution.substitute.default_rate_per_1000,
-          rate_unit: substitution.rate_unit || substitution.substitute.rate_unit,
-        }
-      : item.product;
     const mix = plannedProduct ? calculateProductAmount({
       product: plannedProduct,
       lawnSqft,
       carrierGalPer1000: carrier,
-      areaFactor: effectiveAreaFactor(v13Row?.gates?.sunnyTurfOnly ? { ...item, sunnyTurfOnly: true } : item, {
-        sunExposure: profile?.sun_exposure,
-        plan: options.plan || service.waveguard_tier,
-        weedPressure: options.weedPressure,
-        conditionFlags: options.conditionFlags,
-        propertyFlags: options.propertyFlags,
-        stressFlags,
-        isFirstYear: options.isFirstYear,
-      }),
+      areaFactor: effectiveAreaFactor(v13Row?.gates?.sunnyTurfOnly ? { ...item, sunnyTurfOnly: true } : item, areaContext),
       ...nutrientTargets,
       ...v13RateOptions(v13Row),
     }) : null;
     return {
-      raw: item.raw,
-      role: item.role,
-      conditional: item.conditional,
-      scope: item.scope,
-      conditionFlag: item.conditionFlag,
-      branchGroupId: item.branchGroupId,
-      branch: item.branch || null,
-      areaFactorDefault: item.areaFactorDefault,
-      areaFactorClean: item.areaFactorClean,
-      areaFactorHeavy: item.areaFactorHeavy,
-      areaFactorBroadcast: item.areaFactorBroadcast,
-      selectionReason: item.selectionReason,
-      selected: item.selected,
-      // The staged v13 row's gates and what they mean in the field (empty for
-      // every other plan), carried so the panel and job card can show them.
-      gates: v13Row?.gates && Object.keys(v13Row.gates).length ? v13Row.gates : null,
-      gateNotes: v13Row ? v13GateNotes(v13Row.gates, {
-        monthNumber: MONTH_ABBR.indexOf(month) + 1 || null,
-        municipality: resolvedOrdinanceCity,
-        productionMode: structuredProtocol?.window?.productionMode,
-      }) : [],
+      ...planLineFields(item),
+      ...v13ItemFields(v13Row, gateContext),
       matched: !!plannedProduct,
-      product: plannedProduct ? {
-        id: plannedProduct.id,
-        name: plannedProduct.name,
-        category: plannedProduct.category,
-        activeIngredient: plannedProduct.active_ingredient,
-        active: plannedProduct.active !== false,
-        groups: getProductGroups(plannedProduct),
-        labelVerifiedAt: plannedProduct.label_verified_at,
-        applicationMethod: plannedProduct.application_method,
-        formulation: plannedProduct.formulation,
-        analysis_n: plannedProduct.analysis_n,
-        analysis_p: plannedProduct.analysis_p,
-        analysis_k: plannedProduct.analysis_k,
-        bestPrice: plannedProduct.best_price != null ? Number(plannedProduct.best_price) : null,
-        costPerUnit: plannedProduct.cost_per_unit != null ? Number(plannedProduct.cost_per_unit) : null,
-        costUnit: plannedProduct.cost_unit || null,
-        containerSize: plannedProduct.container_size || null,
-        unitSizeOz: plannedProduct.unit_size_oz != null ? Number(plannedProduct.unit_size_oz) : null,
-        needsPricing: plannedProduct.needs_pricing === true,
-        mixing_order_category: plannedProduct.mixing_order_category,
-        mixing_instructions: plannedProduct.mixing_instructions,
-        inventory: buildProductInventorySnapshot(plannedProduct, mix),
-      } : null,
-      substitution: substitution ? {
-        id: substitution.id,
-        originalProductId: substitution.original_product_id,
-        originalProductName: substitution.original_product_name,
-        substituteProductId: substitution.substitute_product_id,
-        substituteProductName: substitution.substitute_product_name,
-        reason: substitution.reason || null,
-        approvedByName: substitution.approved_by_name || null,
-        approvedAt: substitution.approved_at || null,
-        ratePer1000: substitution.rate_per_1000 != null ? Number(substitution.rate_per_1000) : null,
-        rateUnit: substitution.rate_unit || null,
-      } : null,
+      product: planProductSnapshot(plannedProduct, mix),
+      substitution: planSubstitutionSnapshot(substitution),
       mix,
     };
   });
@@ -1672,17 +1732,9 @@ async function buildPlanForService(serviceId, options = {}) {
   // Restored v13 product gates on the selected items: a condition the plan cannot
   // clear is a visible warning; an apply-alone product selected beside any other
   // product holds the mix.
-  for (const item of plannedItems) {
-    for (const note of item.gateNotes || []) {
-      if (note.severity !== 'required') continue;
-      warnings.push({ code: 'lawn_v13_product_gate', severity: 'warning', gate: note.key, productId: item.product?.id || null, productName: item.product?.name || null, message: `${item.product?.name || 'Product'}: ${note.text}` });
-    }
-  }
-  const applyAloneConflicts = plannedItems.filter((item) => item.product && item.gateNotes?.some((note) => note.key === 'applyAlone')
-    && plannedItems.some((other) => other !== item && other.product));
-  for (const item of applyAloneConflicts) {
-    blocks.push({ code: 'lawn_v13_apply_alone', severity: 'block', productId: item.product.id, productName: item.product.name, message: `${item.product.name} is applied alone, but other products are selected with it. Remove them from the mix or apply them separately.` });
-  }
+  warnings.push(...v13SelectedGateWarnings(plannedItems));
+  const applyAloneBlocks = v13ApplyAloneBlocks(plannedItems);
+  blocks.push(...applyAloneBlocks);
   if (completionDefaultsEnabled && !matchesLawnCompletionProtocol(structuredProtocol, {
     protocolKey: service.lawn_protocol_key, protocolVersion: service.lawn_protocol_version, windowKey: service.lawn_protocol_window_key,
   }, trackKey)) {
@@ -1902,7 +1954,7 @@ async function buildPlanForService(serviceId, options = {}) {
       assignedAt: service.lawn_protocol_assigned_at || null,
     },
     // An apply-alone conflict holds the mix: no combined order is offered.
-    mixingOrder: applyAloneConflicts.length ? [] : buildMixOrder(plannedItems),
+    mixingOrder: applyAloneBlocks.length ? [] : buildMixOrder(plannedItems),
     closeout: {
       requiredPhotos: ['before', 'after'],
       captureActualProductAmounts: true,
@@ -1935,6 +1987,9 @@ module.exports = {
   loadV13RowsForMonth,
   lawnV13PlanBlock,
   v13GateNotes,
+  v13ItemFields,
+  v13SelectedGateWarnings,
+  v13ApplyAloneBlocks,
   calculateNutrientLedgerFromRows,
   calculateNutrients,
   summarizeAnnualN,

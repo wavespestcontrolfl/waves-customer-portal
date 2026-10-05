@@ -40,4 +40,19 @@ function isServingProtocol(protocol) {
   return protocol?.status === 'staged' && protocol.version === LAWN_V13_VERSION && featureGates.lawnV13Live?.() === true;
 }
 
-module.exports = { lawnProtocols, LAWN_V13_VERSION, isServingProtocol };
+// getProtocolWindowContext options for a live visit's own assignment: its window
+// key AND its protocol key and version, so a visit pinned to an older version gets
+// that version's context and never a newer version's window by key collision.
+// Unpinned, those fields are null and the planning lookup picks the protocol.
+function visitProtocolQuery({ serviceDate, grassTrack, scheduledService }) {
+  return {
+    serviceDate,
+    grassTrack,
+    windowKey: scheduledService?.lawn_protocol_window_key || null,
+    protocolKey: scheduledService?.lawn_protocol_key || null,
+    protocolVersion: scheduledService?.lawn_protocol_version || null,
+    planning: true,
+  };
+}
+
+module.exports = { lawnProtocols, LAWN_V13_VERSION, isServingProtocol, visitProtocolQuery };

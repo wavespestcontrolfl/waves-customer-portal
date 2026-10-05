@@ -5,7 +5,10 @@
 // its sunny-turf limit. Synthetic data only.
 const { createLawnHistoryDb, fixture } = require('./helpers/lawn-history-db');
 const { buildPlanForService } = require('../services/waveguard-plan-engine');
-const { LAWN_V13_VERSION } = require('../services/lawn-program');
+const { LAWN_V13_VERSION, visitProtocolQuery } = require('../services/lawn-program');
+const { getProtocolWindowContext } = require('../services/lawn-protocol-operating-layer');
+const fs = require('fs');
+const path = require('path');
 const { buildLawnProtocolReportContext } = require('../services/service-report/dynamic-context');
 
 const describeDb = process.env.DATABASE_URL ? describe : describe.skip;
@@ -200,6 +203,33 @@ describeDb('the v13 plan through PostgreSQL', () => {
         expect(item.gates).toBeNull();
         expect(item.gateNotes).toEqual([]);
       }
+    });
+  });
+
+  describe('the live assessment reads the visit\'s own assignment (visitProtocolQuery)', () => {
+    const contextFor = (visit) => getProtocolWindowContext(knex, visitProtocolQuery({ serviceDate: new Date('2026-05-12T16:00:00Z'), grassTrack: 'bermuda', scheduledService: visit }));
+
+    test('pinned to an older version: that version, never v13, even when its window key collides with a v13 window key', async () => {
+      setGates();
+      for (const windowKey of ['fixture_5', 'may_v13']) {
+        const visit = await plannedVisit({ lawn_protocol_key: KEY, lawn_protocol_version: OLD_VERSION, lawn_protocol_window_key: windowKey });
+        const context = await contextFor(visit);
+        expect(context.protocol.version).toBe(OLD_VERSION);
+        expect(context.window?.window_key ?? null).toBe(windowKey === 'fixture_5' ? 'fixture_5' : null);
+      }
+    });
+
+    test('pinned to v13: v13; unpinned: the planning lookup takes the staged v13 version', async () => {
+      setGates();
+      expect((await contextFor(await plannedVisit({ lawn_protocol_key: KEY, lawn_protocol_version: LAWN_V13_VERSION, lawn_protocol_window_key: 'may_v13' }))).protocol.version).toBe(LAWN_V13_VERSION);
+      const unpinned = await contextFor(await plannedVisit());
+      expect(unpinned.protocol.version).toBe(LAWN_V13_VERSION);
+      expect(unpinned.window.window_key).toBe('may_v13');
+    });
+
+    test('the route builds its lookup from the helper, not from the window key alone', () => {
+      const source = fs.readFileSync(path.join(__dirname, '../routes/admin-lawn-assessment.js'), 'utf8');
+      expect(source).toMatch(/getProtocolWindowContext\(db, visitProtocolQuery\(\{ serviceDate: visitDate, grassTrack: track, scheduledService \}\)\)/);
     });
   });
 });

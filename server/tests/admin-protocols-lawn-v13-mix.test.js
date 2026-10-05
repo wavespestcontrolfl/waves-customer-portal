@@ -27,6 +27,7 @@ const CATALOG = [
   { id: 'nt', name: NUTRA, aliases: [], default_rate_per_1000: 12, rate_unit: 'fl oz', cost_per_unit: 1, cost_unit: 'fl oz' },
   { id: 'stw', name: STONEWALL, aliases: [], default_rate_per_1000: null, rate_unit: 'fl oz', cost_per_unit: 1, cost_unit: 'fl oz' },
   { id: 'tet', name: TETRINO, aliases: [], default_rate_per_1000: 0.367, rate_unit: 'fl oz', cost_per_unit: 1, cost_unit: 'fl oz' },
+  { id: 'are', name: 'Arena 50 WDG', aliases: [], default_rate_per_1000: 0.29, rate_unit: 'oz', cost_per_unit: 1, cost_unit: 'oz' },
   { id: 'f24', name: F24, aliases: [], analysis_n: 24, analysis_k: 11, default_rate_per_1000: 4.2, rate_unit: 'lb', cost_per_unit: 1, cost_unit: 'lb' },
 ];
 const V13_SUMMARY = {
@@ -116,4 +117,29 @@ test('May Tetrino is sunny-turf-only: 10,000 sq ft with no turf profile is the h
   expect(itemFor(body, TETRINO).jobMix).toMatchObject({ ratePer1000: 0.367, rateSource: 'protocol_rate', amount: 1.835 });
   // A row without the flag is whole-lawn: January Nutra-TECH is still the full 60.
   expect(itemFor(await lawnMix({ month: '1' }), NUTRA).jobMix.amount).toBe(60);
+});
+
+test('May Tetrino alone: its gate notes ride the item, the water-distance warning shows, no block, a mixing order stands', async () => {
+  const body = await lawnMix({ month: '5' });
+  const item = itemFor(body, TETRINO);
+  expect(item.gates).toEqual({ sunnyTurfOnly: true, minDistanceFromWaterFt: 25, applyAlone: true });
+  expect(item.gateNotes.map((n) => `${n.severity}:${n.key}`)).toEqual(['required:minDistanceFromWaterFt', 'note:applyAlone', 'note:sunnyTurfOnly']);
+  expect(body.warnings.find((w) => w.code === 'lawn_v13_product_gate')).toMatchObject({ gate: 'minDistanceFromWaterFt', message: 'Tetrino Insecticide: Keep 25 ft from ponds, lakes and canals; skip that strip.' });
+  expect(body.blocks).toEqual([]);
+  expect(body.mixingOrder).toHaveLength(1);
+});
+
+test('May Tetrino with Arena selected beside it: the plan engine\'s apply-alone rule, a block and no combined mixing order', async () => {
+  const body = await lawnMix({ month: '5', selectedConditionalProductNames: 'Arena 50 WDG' });
+  expect(body.selectedItems.map((i) => i.product.name).sort()).toEqual(['Arena 50 WDG', TETRINO]);
+  expect(body.blocks).toHaveLength(1);
+  expect(body.blocks[0]).toMatchObject({ code: 'lawn_v13_apply_alone', productName: TETRINO });
+  expect(body.mixingOrder).toEqual([]);
+});
+
+test('gate off: no gate notes, no blocks, the mixing order is built as before', async () => {
+  delete process.env.GATE_LAWN_V13;
+  const body = await lawnMix({ month: '5', track: 'st_augustine' });
+  expect(body.blocks).toEqual([]);
+  expect(body.items.every((i) => i.gates === null && i.gateNotes.length === 0)).toBe(true);
 });

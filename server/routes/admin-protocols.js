@@ -14,6 +14,9 @@ const {
   summarizeMaterialCost,
   loadV13RowsForMonth,
   v13RateOptions,
+  v13ItemFields,
+  v13SelectedGateWarnings,
+  v13ApplyAloneBlocks,
 } = require('../services/waveguard-plan-engine');
 const { matchServiceProtocol } = require('../services/protocol-matcher');
 const jobCard = require('../services/job-card');
@@ -956,6 +959,7 @@ router.get('/lawn-mix', async (req, res, next) => {
       if (err.code === 'lawn_v13_protocol_missing') return res.status(409).json({ error: 'The v13 lawn protocol is not loaded for this track', code: err.code });
       throw err;
     }
+    const gateContext = { monthNumber: MONTH_ABBR.indexOf(month) + 1 || null };
     const items = resolvedLines.map((line) => {
       const product = line.product;
       const selected = line.selected;
@@ -1011,6 +1015,9 @@ router.get('/lawn-mix', async (req, res, next) => {
         areaFactorBroadcast: line.areaFactorBroadcast,
         selectionReason: line.selectionReason,
         selected,
+        // The staged v13 row's gates and their field text (null / empty otherwise):
+        // the same notes the plan item carries.
+        ...v13ItemFields(v13Row, gateContext),
         matched: !!product,
         // Scout/task/expectation lines carry no "($N)" cost tag and never
         // resolve to a catalog row by design — flag them so the UI can render
@@ -1085,6 +1092,12 @@ router.get('/lawn-mix', async (req, res, next) => {
       });
     }
 
+    // The plan's own v13 rules, from the shared helpers: required gate notes on
+    // selected items are warnings; an apply-alone product selected beside another
+    // product is a block and the tank sheet offers no combined mixing order.
+    warnings.push(...v13SelectedGateWarnings(selectedItems));
+    const blocks = v13ApplyAloneBlocks(selectedItems);
+
     const seesPricing = viewerSeesPricing(req);
     const payload = {
       track: { key: trackKey, name: track.name },
@@ -1118,11 +1131,12 @@ router.get('/lawn-mix', async (req, res, next) => {
       materialCostSummary: seesPricing ? materialCostSummary : null,
       items: seesPricing ? items : items.map(stripLawnMixItemPricing),
       selectedItems: seesPricing ? selectedItems : selectedItems.map(stripLawnMixItemPricing),
-      mixingOrder: buildMixOrder(selectedItems.map((item) => ({
+      mixingOrder: blocks.length ? [] : buildMixOrder(selectedItems.map((item) => ({
         raw: item.raw,
         product: products.find((p) => String(p.id) === String(item.product?.id)) || null,
       }))),
       warnings,
+      blocks,
     };
     res.json(seesPricing ? payload : deepStripPriceTokens(payload));
   } catch (err) { next(err); }
