@@ -397,7 +397,11 @@ function pestReportV2PdfSignature(service = {}) {
   // '-rain1' joins it while the rain card is on (PEST_RAIN_CARD), so a flip
   // either way re-renders cached documents once.
   const pexSuffix = pestReportExpectationsGateOn() ? `-pex3${pestRainCardOn() ? '-rain1' : ''}` : '';
-  if (process.env.PEST_REPORT_V2 !== 'true') return `${tonSuffix}${pexSuffix}`;
+  // '-noarea1' rides every pest-line key, gate or not: the pest PDF dropped
+  // its Areas serviced section and per-product Areas / Target lines (owner
+  // 2026-10-05), so PDFs cached before that re-render once.
+  const areaSuffix = '-noarea1';
+  if (process.env.PEST_REPORT_V2 !== 'true') return `${tonSuffix}${pexSuffix}${areaSuffix}`;
   // Cockroach-family typed reports dropped the V2 dashboard entirely (owner
   // 2026-07-27) — their PDFs compose from the typed record instead, so a
   // cockroach PDF cached under '-pestv2b' would keep serving the perimeter
@@ -406,7 +410,7 @@ function pestReportV2PdfSignature(service = {}) {
     const data = typeof service.service_data === 'string'
       ? JSON.parse(service.service_data)
       : service.service_data;
-    if (isCockroachTypedReportType(data?.typedReportSnapshot?.type)) return `-roachtyped2${tonSuffix}${pexSuffix}`;
+    if (isCockroachTypedReportType(data?.typedReportSnapshot?.type)) return `-roachtyped2${tonSuffix}${pexSuffix}${areaSuffix}`;
   } catch { /* fall through to the line suffix */ }
   // 'c' = the trust-fix composition (codex P2 #3043): the customer-concern
   // card, softened no-activity copy, facts-only weather, and property-gated
@@ -415,7 +419,7 @@ function pestReportV2PdfSignature(service = {}) {
   // ('b' was the typed-activity composition, owner ruling 2026-07-14.)
   // Bump this suffix whenever the pest-line report COMPOSITION changes —
   // each pest PDF re-renders once on next view.
-  return `-pestv2c${tonSuffix}${pexSuffix}`;
+  return `-pestv2c${tonSuffix}${pexSuffix}${areaSuffix}`;
 }
 
 // codex P1 2026-09-29 round 3: pestWeekWeatherUncacheableForPdf (and its

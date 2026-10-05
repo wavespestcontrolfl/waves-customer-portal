@@ -164,9 +164,9 @@ describe('service report PDF Pest Pressure cache config', () => {
       Buffer.from('%PDF-1.4'),
       // '-tn0' = the narrative sentinel for payloads that rendered no
       // narrative (mocked data carries none).
-      { visibilitySignature: 'sig-current-tn0' },
+      { visibilitySignature: 'sig-current-noarea1-tn0' },
     );
-    expect(result.key).toBe('reports/service-1/report-sig-current-tn0.pdf');
+    expect(result.key).toBe('reports/service-1/report-sig-current-noarea1-tn0.pdf');
   });
 
   test('queued renders carry the Termite V2 dashboard under the termite cache signature (same composer as the route)', async () => {
@@ -209,7 +209,8 @@ describe('service report PDF Pest Pressure cache config', () => {
     expect(mockLoadActiveConfig).toHaveBeenCalledTimes(2);
     expect(mockReportPdfStorageKey).toHaveBeenCalledWith(
       'service-1',
-      { visibilitySignature: 'sig-current' },
+      // '-noarea1': the pest line's area-removal suffix (owner 2026-10-05).
+      { visibilitySignature: 'sig-current-noarea1' },
     );
     expect(mockBuildReportV1Data).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'service-1' }),
@@ -219,7 +220,7 @@ describe('service report PDF Pest Pressure cache config', () => {
     );
     expect(mockGetHealthyStoredReportPdf).not.toHaveBeenCalled();
     expect(result.rendered).toBe(true);
-    expect(result.key).toBe('reports/service-1/report-sig-current-tn0.pdf');
+    expect(result.key).toBe('reports/service-1/report-sig-current-noarea1-tn0.pdf');
   });
 
   test.each([
@@ -293,8 +294,8 @@ describe('service report PDF Pest Pressure cache config', () => {
     expect(mockPutReportPdf).toHaveBeenCalledWith(
       'service-1',
       Buffer.from('%PDF-1.4'),
-      { visibilitySignature: 'sig-second-tn0' },
+      { visibilitySignature: 'sig-second-noarea1-tn0' },
     );
-    expect(result.key).toBe('reports/service-1/report-sig-second-tn0.pdf');
+    expect(result.key).toBe('reports/service-1/report-sig-second-noarea1-tn0.pdf');
   });
 });
