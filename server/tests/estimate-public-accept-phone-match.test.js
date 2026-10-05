@@ -273,6 +273,22 @@ describe('a phone typed by the customer never resolves to an existing customer',
     expect(res.candidateCount).toBe(2);
   });
 
+  it('a grouped estimate with an accepted sibling does not clear the contradiction for a typed phone', async () => {
+    // For an office-supplied phone the grouped-owner rule un-parks a contradicted lone candidate; a typed phone
+    // must stay parked, or that candidate's saved card could read as covering the booking.
+    const recurringCards = require('../services/recurring-card-on-file');
+    const spy = jest.spyOn(recurringCards, 'resolveGroupedEstimateOwnerId').mockResolvedValue('cust-sibling-owner');
+    try {
+      mockDbFixtures['customers:list'] = [BOB];
+      const res = await matchAcceptCustomerByPhone(typed({ estimate_group_id: 'group-1' }));
+      expect(res.contradicted).toBe(true);
+      expect(res.match).toBeNull();
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('no candidate: an ordinary no-match, so the accept creates the new customer', async () => {
     mockDbFixtures['customers:list'] = [];
     const res = await matchAcceptCustomerByPhone(typed());

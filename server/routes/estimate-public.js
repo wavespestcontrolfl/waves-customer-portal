@@ -612,7 +612,10 @@ async function matchAcceptCustomerByPhone(estimate, database = db, { authoritati
   // phone match, which runs after its sibling lookup already found no owner. The lookup is the shared read-only
   // owner resolver (RecurringCards.resolveGroupedEstimateOwnerId, the accept's sibling query minus its advisory
   // lock) and it throws on an unreadable owner: an unknown owner is not guessed either way (callers decide).
-  if (contradicted && !afterSiblingResolution && estimate.estimate_group_id
+  // A typed phone is never un-contradicted by the grouped-owner rule: its candidates stay parked for every reader
+  // (the group's owner is the sibling, not whoever holds the typed number, and a candidate's saved card must never
+  // read as covering this booking).
+  if (contradicted && !typedPhone && !afterSiblingResolution && estimate.estimate_group_id
     && await require('../services/recurring-card-on-file').resolveGroupedEstimateOwnerId(estimate, database, { throwOnError: true })) {
     contradicted = false;
   }
@@ -787,7 +790,8 @@ async function raiseAcceptTypedPhoneMatchAlert({ estimate, typedPhone, candidate
       dedupeKey: `accept-typed-phone-match:${estimate.id}`,
       dedupeVersion: 'v1',
       detail: `The estimate had no phone. On the accept card the customer typed ${typedPhone}, which matches ${candidateCount} customer record${candidateCount === 1 ? '' : 's'} on file. `
-        + 'Nothing was saved to the estimate, no customer was created or changed, no card was taken and no time is held. '
+        + 'Nothing was saved to the estimate, no customer was created or changed and no card was taken. '
+        + 'A visit time they picked before this step stays on hold until that hold runs out; it is not booked. '
         + 'Confirm who this is, then link the estimate to the right customer or put the phone on the estimate, and they can accept.',
       metadata: { estimateId: String(estimate.id), typedPhoneMatches: candidateCount },
     });
