@@ -127,6 +127,11 @@ if ! grep -q 'waves: iOS floor' ios/App/Podfile; then
   '
 fi
 echo "==> iOS deployment target set to ${IOS_MIN} (Xcode 27 minimum) ✓"
+# The template turns on Xcode's user-script sandbox, which blocks CocoaPods'
+# "Embed Pods Frameworks" script from reading its own file list
+# (Pods-App-frameworks.sh: "Sandbox: bash deny file-read-data"), so archive
+# fails. CocoaPods does not support that sandbox; turn it off for the App.
+sed -i '' 's/ENABLE_USER_SCRIPT_SANDBOXING = YES;/ENABLE_USER_SCRIPT_SANDBOXING = NO;/g' ios/App/App.xcodeproj/project.pbxproj
 
 echo "==> 4/5  Syncing web + plugins into the iOS project…"
 npx cap sync ios
