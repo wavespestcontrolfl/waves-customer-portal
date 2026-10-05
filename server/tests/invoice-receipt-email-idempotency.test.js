@@ -163,7 +163,7 @@ describe('sendReceiptEmail idempotency', () => {
     expect(seen).toEqual([expect.objectContaining({ channel: 'email', optedOut: true })]);
     // An unreadable setting is reported as null, never as "not opted out".
     db.mockImplementation((table) => (table === 'notification_prefs'
-      ? { where: () => ({ first: async () => { throw new Error('pool timeout'); } }) } : base(table)));
+      ? { where: () => ({ first: () => Promise.reject(new Error('pool timeout')) }) } : base(table)));
     EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
       await withProviderHandoff(async (_database, check) => { await check(); });
       return { sent: true, message: { provider_message_id: 'sg-4' } };

@@ -769,13 +769,14 @@ async function callerHandoffAllows(beforeProviderHandoff, facts, invoice) {
   } catch { return false; }
 }
 
-// The payment_receipt=false opt-out as it stands now (receiptEmailOptOutState's rule: a payer-billed
-// receipt is never opted out by the homeowner's settings). null when the settings cannot be read.
+// The payment-receipt opt-out as it stands now, through the queue's own reader (receiptEmailOptOutState,
+// required lazily: that module requires this one). null when the settings cannot be read.
 async function receiptOptedOutNow(invoice) {
-  if (!invoice || invoice.payer_id) return false;
+  if (!invoice) return null;
   try {
-    const prefs = await db('notification_prefs').where({ customer_id: invoice.customer_id }).first('payment_receipt');
-    return prefs?.payment_receipt === false;
+    const { receiptEmailOptOutState } = require('./receipt-delivery-queue');
+    const state = await receiptEmailOptOutState(invoice);
+    return state.prefsLookupFailed ? null : state.receiptKillSwitch === true;
   } catch { return null; }
 }
 

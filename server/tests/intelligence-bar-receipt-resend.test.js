@@ -547,6 +547,22 @@ describe('result wording comes only from what the writer reported about the auto
     receiptEmailOptOutState.mockResolvedValue({ receiptKillSwitch: false, prefsLookupFailed: false });
   });
 
+  test.each([
+    ['opted back in during the send (card showed the opt-out)', true, { receiptKillSwitch: false, prefsLookupFailed: false }, /back in the queue and will try again on its own/, /close without sending/],
+    ['opted out during the send (card showed none)', false, { receiptKillSwitch: true, prefsLookupFailed: false }, /opted out of payment receipts, so it will close without sending/, /try again on its own/],
+    ['settings unreadable after the send', false, { receiptKillSwitch: false, prefsLookupFailed: true }, /depends on the customer's receipt settings, which could not be read/, /try again on its own|close without sending/],
+  ])('queue wording follows the opt-out read after the send, not the card: %s', async (_label, cardOptedOut, afterSend, mustMatch, mustNotMatch) => {
+    receiptEmailOptOutState.mockResolvedValue({ receiptKillSwitch: cardOptedOut, prefsLookupFailed: false });
+    sendInvoiceReceipt.mockImplementation(async () => {
+      receiptEmailOptOutState.mockResolvedValue(afterSend);
+      return { ...emailFailed, queue: 'returned_to_queue' };
+    });
+    const out = await confirm({});
+    expect(out.note).toMatch(mustMatch);
+    expect(out.note).not.toMatch(mustNotMatch);
+    receiptEmailOptOutState.mockResolvedValue({ receiptKillSwitch: false, prefsLookupFailed: false });
+  });
+
   test('no result sentence promises "not retried" / "not re-sent" unconditionally', async () => {
     for (const queue of ['returned_to_queue', 'removed', 'none', 'completed', 'held_for_reconciliation', 'release_failed', undefined]) {
       for (const r of [sent, emailFailed, emailFailedTextSent, unknownEmail]) {

@@ -36,7 +36,7 @@ const { etDateString, formatETTime } = require('../../utils/datetime-et');
 const { receiptRecipients, receiptRecipientsKey, normalizeReceiptEmail, maskEmail, maskPhone } = require('./closeout-repair-tools');
 const { sendInvoiceReceipt } = require('../invoice-receipt-resend');
 const { issuedCloseoutTarget } = require('../invoice-issued-closeout');
-const { expectedEmailSkip } = require('../receipt-delivery-queue');
+const { expectedEmailSkip, receiptEmailOptOutState } = require('../receipt-delivery-queue');
 
 const VIA_LABEL = { email: 'email only', sms: 'text only', both: 'email and text' };
 
@@ -269,15 +269,19 @@ function channelOutcome(requested, result, certainty, { reasons = {}, isExpected
 
 // What the queue will actually do, from the writer's own report of the automatic
 // receipt job (releaseOperatorReceiptClaim) — never a guess.
+// optedOut: the customer's payment-receipt opt-out read AFTER the send (it may have changed since the
+// card), true / false, or null when it could not be read.
 function queueNote(queue, { allDelivered, optedOut = false }) {
+  const willClose = 'but the customer opted out of payment receipts, so it will close without sending. Nothing else will send this receipt.';
+  const unknown = "whether it sends depends on the customer's receipt settings, which could not be read just now.";
   switch (queue) {
-    case 'returned_to_queue': return optedOut
-      ? 'The automatic receipt job is back in the queue, but the customer opted out of payment receipts, so it will close without sending. Nothing else will send this receipt.'
-      : 'The automatic receipt for this invoice is back in the queue and will try again on its own (it can email the customer the receipt), so a manual resend is not needed for that.';
+    case 'returned_to_queue': return optedOut === null ? `The automatic receipt job is back in the queue; ${unknown}`
+      : optedOut ? `The automatic receipt job is back in the queue, ${willClose}`
+        : 'The automatic receipt for this invoice is back in the queue and will try again on its own (it can email the customer the receipt), so a manual resend is not needed for that.';
     case 'held_for_reconciliation': return 'The automatic receipt for this invoice was held, not re-queued: the queue will not send it again. Check whether the customer got the receipt before sending again.';
-    case 'release_failed': return optedOut
-      ? 'The automatic receipt job could not be settled here; the queue recovers it on its own, but the customer opted out of payment receipts, so it will close without sending. Nothing else will send this receipt.'
-      : 'The automatic receipt job could not be settled here; the queue recovers it on its own and may email the customer the receipt again.';
+    case 'release_failed': return optedOut === null ? `The automatic receipt job could not be settled here; the queue recovers it on its own, and ${unknown}`
+      : optedOut ? `The automatic receipt job could not be settled here; the queue recovers it on its own, ${willClose}`
+        : 'The automatic receipt job could not be settled here; the queue recovers it on its own and may email the customer the receipt again.';
     case 'none':
     case 'removed': return allDelivered ? null : 'No automatic receipt is waiting in the queue, so nothing else will send this receipt.';
     default: return null; // 'completed' (closed by this send) or not reported
@@ -382,6 +386,18 @@ function callWriter(version, pinned, matches, actionContext) {
   });
 }
 
+// The opt-out the queue will read when it runs the job again — read now, after the send, never the
+// card's (it can change during the send). Only a job the queue will run again needs it.
+async function optedOutAfterSend(queue, invoiceId) {
+  if (!['returned_to_queue', 'release_failed'].includes(queue)) return false;
+  try {
+    const invoice = await db('invoices').where({ id: invoiceId }).first('id', 'customer_id', 'payer_id');
+    if (!invoice) return null;
+    const state = await receiptEmailOptOutState(invoice);
+    return state.prefsLookupFailed ? null : state.receiptKillSwitch === true;
+  } catch { return null; }
+}
+
 async function commit(input, actionContext) {
   const verified = await verifiedPlan(input);
   if (verified.refusal) return verified.refusal;
@@ -406,7 +422,7 @@ async function commit(input, actionContext) {
     ...(visitCloseout ? { visit_closeout: visitCloseout } : {}),
     ...(queue ? { automatic_receipt: queue } : {}),
     ...(lockLost ? { send_lock_lost: lockLost, ...(stampWritten === false ? { receipt_stamp_written: false } : {}), ...(stampBy === 'settlement' ? { receipt_stamp_by: 'settlement' } : {}) } : {}),
-    note: [headline(verdict), lockNote(lockLost, stampWritten, stampBy), queueNote(queue, { allDelivered: delivered && clean, optedOut: version.opted_out === true })].filter(Boolean).join(' '),
+    note: [headline(verdict), lockNote(lockLost, stampWritten, stampBy), queueNote(queue, { allDelivered: delivered && clean, optedOut: await optedOutAfterSend(queue, version.invoice_id) })].filter(Boolean).join(' '),
   };
 }
 
