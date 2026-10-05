@@ -19,6 +19,7 @@ jest.mock('../models/db', () => {
       whereRaw: (sql, binds) => { filters.raw = [sql, binds]; return q; },
       join: () => q, whereNot: () => q, forUpdate: () => q,
       first: async () => {
+        if (table === 'expenses' && filters.id) return mockState.existingExpenseIds?.includes(filters.id) ? { id: filters.id } : null;
         if (table === 'expenses') { mockState.lastDuplicateFilter = { ...filters }; return mockState.duplicate; }
         if (table === 'expenses as x') { mockState.copyFilter = { ...filters }; return mockState.copy || null; }
         if (table === 'emails') return mockState.me || null;
@@ -54,6 +55,7 @@ beforeEach(() => {
   mockState.lastDuplicateFilter = undefined;
   mockState.copy = null;
   mockState.me = null;
+  mockState.existingExpenseIds = [];
   mockState.categories = [{ id: 'cat-sw', name: 'Software & Technology' }];
 });
 
@@ -235,7 +237,16 @@ test('a parsed PDF with no total falls back to the classifier amount and keeps t
 test('a reprocessed email that already booked an expense keeps it and inserts nothing', async () => {
   noPdf();
   mockState.me = { from_address: 'billing@acme-cloud.example', received_at: new Date('2026-01-15T10:00:00Z'), expense_id: 'exp-already' };
+  mockState.existingExpenseIds = ['exp-already'];
   await processVendorInvoice({ id: 'e22', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject: 'Receipt' },
     { extracted: { invoice_amount: '$12.00', invoice_date: '2026-01-15' } });
   expect(inserted()).toBeUndefined();
+});
+
+test('a stale link to a deleted expense does not block booking the email again', async () => {
+  noPdf();
+  mockState.me = { from_address: 'billing@acme-cloud.example', received_at: new Date('2026-01-15T10:00:00Z'), expense_id: 'exp-deleted' };
+  await processVendorInvoice({ id: 'e23', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject: 'Receipt' },
+    { extracted: { invoice_amount: '$12.00', invoice_date: '2026-01-15' } });
+  expect(inserted()).toEqual(expect.objectContaining({ amount: 12 }));
 });

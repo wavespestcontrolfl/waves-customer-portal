@@ -270,7 +270,11 @@ async function bookExpense(email, { vendorName, vendorSource, expenseCategory, p
       // A reprocessed email (reclassify, replay) that already booked an
       // expense keeps it: no second row, no orphaned first one.
       const current = await trx('emails').where({ id: email.id }).forUpdate().first('expense_id');
-      if (current?.expense_id) return { alreadyBooked: current.expense_id };
+      // Only a link to a row that still exists counts: an expense an admin
+      // deleted leaves a stale id, and that email books again.
+      if (current?.expense_id && await trx('expenses').where({ id: current.expense_id }).first('id')) {
+        return { alreadyBooked: current.expense_id };
+      }
       // Same clipping guard as duplicateKey: a clipped description is no identity.
       const fullDescriptionFits = fullExpenseDescription(vendorName, invoiceNumber).length <= 300 && String(vendorName).length <= 200;
       if (amountFromClassifier && fullDescriptionFits) {
