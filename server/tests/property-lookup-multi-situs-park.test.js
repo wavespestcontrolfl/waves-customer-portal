@@ -362,3 +362,35 @@ describe('park parcel verify flag', () => {
     expect(flags.find((f) => f.field === 'parkParcel')).toBeUndefined();
   });
 });
+
+describe('shared-parcel flag copy: a commercial profile is never told it is a mobile-home park', () => {
+  const { buildFieldVerifyFlags } = require('../routes/property-lookup-v2')._private;
+  const record = (extra = {}) => ({ squareFootage: null, lotSize: null, propertyType: null, _raw: { multiSitusParcel: { situsCount: 24 } }, ...extra });
+  const flagOf = (rc, ai, opts) => buildFieldVerifyFlags(rc, ai, null, opts).find((f) => f.field === 'parkParcel');
+
+  test('a commercial read on a 24-address parcel states only what is known: several addresses, one parcel', () => {
+    const flag = flagOf(record({ propertyType: 'Commercial' }), { propertyType: 'COMMERCIAL', isCommercial: true });
+    expect(flag.priority).toBe('HIGH');
+    expect(flag.reason).toContain('one of 24 addresses on a single county parcel');
+    expect(flag.reason).not.toMatch(/homes|land-lease|mobile-home/);
+  });
+
+  test('the resolved category counts: a staff-confirmed business on an untyped record gets the same copy', () => {
+    expect(flagOf(record(), null).reason).toContain('land-lease community');
+    const flag = flagOf(record(), null, { commercialProfile: true });
+    expect(flag.reason).toContain('one of 24 addresses on a single county parcel');
+    expect(flag.reason).not.toMatch(/homes|land-lease|mobile-home/);
+  });
+
+  test('a supplied resolved category is authoritative: a commercial-looking record resolved residential keeps the residential copy', () => {
+    const rc = record({ propertyType: 'Commercial' });
+    const ai = { propertyType: 'COMMERCIAL', isCommercial: true };
+    expect(flagOf(rc, ai, { commercialProfile: false }).reason).toContain('land-lease community');
+    expect(flagOf(rc, ai).reason).toContain('one of 24 addresses on a single county parcel');
+  });
+
+  test('a roll-confirmed park keeps the park copy, whatever the category', () => {
+    const confirmed = record({ propertyType: 'Commercial', _raw: { multiSitusParcel: { situsCount: 24, parkConfirmed: true } } });
+    expect(flagOf(confirmed, { propertyType: 'COMMERCIAL', isCommercial: true }, { commercialProfile: true }).reason).toContain('land-lease community');
+  });
+});
