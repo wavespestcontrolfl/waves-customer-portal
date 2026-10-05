@@ -273,11 +273,18 @@ function isLive(r, now = new Date()) {
 
 async function fileFoundItems(conn, { message, properties }, items, receipt) {
   return conn.transaction(async (trx) => {
-    const customer = await trx('customers').where({ id: message.customer_id }).whereNull('deleted_at').first('id');
-    if (!customer) {
-      await recordExtractionAttempt({ ...receipt, trx, status: 'no_fields' });
-      return 0;
-    }
+    // The model call ran outside any lock. Before a write: the gate and its
+    // activation time still hold, the customer is locked (the same order as
+    // the office writers), and the text still belongs to that customer with
+    // the same words. A merge or an edit in between leaves no receipt, so the
+    // next pass reads the text again from its current state.
+    const since = gateEnvTimestamp('GATE_ACCESS_CODES_SECTION_SINCE');
+    if (!enabled() || !since || new Date(message.created_at) < since) return 0;
+    if (!(await lockCustomer(trx, message.customer_id))) return 0;
+    const live = await trx('sms_log').where({ id: message.id }).forUpdate().first('customer_id', 'direction', 'message_body');
+    if (!live || live.customer_id !== message.customer_id || live.direction !== 'inbound'
+      || hashExtractionSource(live.message_body) !== receipt.source_hash) return 0;
+    const customer = { id: message.customer_id };
     let toInsert = [];
     if (items.length) {
       const prefs = await trx('property_preferences').where({ customer_id: customer.id }).first() || {};

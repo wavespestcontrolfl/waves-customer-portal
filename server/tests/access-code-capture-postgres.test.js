@@ -288,6 +288,28 @@ postgres('access codes section', () => {
       expect((await rows(c.id))[0]).toMatchObject({ code: '#4821', instructions: 'press 2 first', status: 'found' });
     });
 
+    test('a gate turned off during the model call files nothing and leaves no receipt', async () => {
+      const c = await customer();
+      await text(c.id, 'The gate code is #4821');
+      const read = jest.fn(async () => { delete process.env.GATE_ACCESS_CODES_SECTION; return { items: [gateItem()] }; });
+      expect(await sweep(read)).toMatchObject({ found: 0 });
+      expect(await rows(c.id)).toHaveLength(0);
+      expect(await trx('data_hygiene_source_extractions').where({ extractor_version: 'access-net-v1' })).toHaveLength(0);
+    });
+
+    test('a text moved to another customer during the model call files nothing for the old owner', async () => {
+      const c = await customer();
+      const other = await customer();
+      await text(c.id, 'The gate code is #4821');
+      const read = jest.fn(async () => {
+        await trx('sms_log').where({ customer_id: c.id }).update({ customer_id: other.id });
+        return { items: [gateItem()] };
+      });
+      expect(await sweep(read)).toMatchObject({ found: 0 });
+      expect(await rows(c.id)).toHaveLength(0);
+      expect(await rows(other.id)).toHaveLength(0);
+    });
+
     test('a retired value the customer sends again comes back as found', async () => {
       const c = await customer();
       const existing = await found(c.id);
