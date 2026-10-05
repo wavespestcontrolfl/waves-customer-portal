@@ -1317,12 +1317,17 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // already existed (warning only) but refuses one that is NEW since
       // this card, so the operator sees a fresh card first. Set
       // unconditionally: a model-supplied value can never stand in. A
-      // windowless or invalid-window booking has nothing to probe: no pin.
+      // windowless or invalid-window booking has nothing to probe: no pin;
+      // neither does one whose probe could not be read.
       let overlapNow = null;
       try {
         overlapNow = await ibBookingOverlapProposal(params.scheduled_date, params.time_window);
-      } catch {
-        return { failed: true, modelResult: { error: 'Could not check whether another visit already overlaps this time — try again in a moment. Nothing was changed.' } };
+      } catch (err) {
+        // A transient read error is less than a conflict, and a staff save
+        // never blocks on a conflict (owner 2026-08-25): no pin, so the
+        // executor keeps the warn-only behavior.
+        logger.warn(`[intelligence-bar] booking overlap pin unavailable for customer ${params.customer_id}: ${err.message}`);
+        overlapNow = null;
       }
       if (overlapNow == null) delete params._booking_overlap;
       else params._booking_overlap = overlapNow;

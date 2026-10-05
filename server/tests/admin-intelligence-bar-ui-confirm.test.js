@@ -1164,20 +1164,22 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
     });
   });
 
-  test('create_appointment: an unreadable schedule fails the proposal closed', async () => {
+  test('create_appointment: an unreadable schedule pins nothing and still shows a normal card (a staff save never blocks)', async () => {
     mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
     mockIbBookingOverlapProposal.mockRejectedValueOnce(new Error('connection terminated'));
     scriptModelTurns([
-      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Pest Control', time_window: '10:00 AM' } }],
-      [{ type: 'text', text: 'Could not.' }],
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Pest Control', time_window: '10:00 AM', _booking_overlap: false } }],
+      [{ type: 'text', text: 'Proposed.' }],
     ]);
 
     await withServer(async (baseUrl) => {
-      await postQuery(baseUrl, { prompt: 'book pest at 10', context: 'schedule' });
-      expect(mockCreatePendingAction).not.toHaveBeenCalled();
-      const secondCallMessages = mockMessagesCreate.mock.calls[1][0].messages;
-      const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
-      expect(toolResult.error).toMatch(/whether another visit already overlaps/);
+      const { body } = await postQuery(baseUrl, { prompt: 'book pest at 10', context: 'schedule' });
+      expect(mockCreatePendingAction).toHaveBeenCalledTimes(1);
+      const stored = mockCreatePendingAction.mock.calls[0][0];
+      expect(stored.params).not.toHaveProperty('_booking_overlap');
+      expect(body.pendingActions).toHaveLength(1);
+      const labels = (body.pendingActions[0].contract?.effects || []).map((e) => e.label);
+      expect(labels.some((l) => /already overlaps this time/.test(l))).toBe(false);
     });
   });
 
