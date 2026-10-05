@@ -203,8 +203,10 @@ function techInitials(name) {
   return parts.map((p) => p[0]).join('').slice(0, 3).toUpperCase() || '?';
 }
 
-// The day's drive, each leg counted once: "~2h 10m".
+// The day's drive, each leg counted once: "~2h 10m". Hidden when any leg
+// could not be measured: a partial sum would read as the whole day.
 function dayDriveLabel(services) {
+  if (services.some((s) => s.driveLegUnknown)) return null;
   const total = services.reduce((sum, s) => (s.driveInShown && Number.isFinite(s.driveFromPrevMin) ? sum + s.driveFromPrevMin : sum), 0);
   if (total <= 0) return null;
   const h = Math.floor(total / 60);
@@ -472,12 +474,12 @@ function OpenHourRow({ hour, onBook, free }) {
               <span
                 key={t.id}
                 className="inline-flex items-center justify-center rounded-full bg-zinc-900 text-white font-medium u-nums"
-                style={{ minWidth: 24, height: 22, padding: '0 5px', fontSize: 11 }}
+                style={{ minWidth: 28, height: 24, padding: '0 6px', fontSize: 14 }}
               >
                 {techInitials(t.name)}
               </span>
             ))}
-            {free.length > 3 && <span className="text-ink-tertiary" style={{ fontSize: 12 }}>+{free.length - 3}</span>}
+            {free.length > 3 && <span className="text-ink-tertiary" style={{ fontSize: 14 }}>+{free.length - 3}</span>}
           </span>
         )}
         <span className="text-ink-tertiary" style={{ fontSize: 14 }}>Open</span>
@@ -581,7 +583,7 @@ function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtoc
           {openHours.length > 0 && (
             <span className="text-zinc-900 font-medium" style={{ fontSize: 14 }}> · {openHours.length} open</span>
           )}
-          {driveLabel && <span> · {driveLabel} driving</span>}
+          {driveLabel && <span style={{ fontSize: 14 }}> · {driveLabel} driving</span>}
         </span>
       </header>
       {rows.length === 0 ? (

@@ -384,6 +384,23 @@ describe('MobileDispatchList drive legs', () => {
     expect(screen.getByText(/~1h 15m driving/)).toBeInTheDocument();
   });
 
+  it('hides the day total when a leg could not be measured', () => {
+    render(
+      <MobileDispatchList
+        mode="day"
+        date="2026-07-15"
+        services={[
+          { ...SERVICE, customerName: 'Sample One', firstStop: true },
+          { ...SERVICE, id: 'svc-2', customerName: 'Sample Two', windowStart: '10:00', windowEnd: '11:00', driveInShown: true, drivePrevName: 'Sample One', driveFromPrevMin: 14 },
+          { ...SERVICE, id: 'svc-3', customerName: 'Sample Three', windowStart: '13:00', windowEnd: '14:00', driveLegUnknown: true, driveFromPrevMin: null },
+        ]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+      />,
+    );
+    expect(screen.getByText('~14 min drive from Sample One')).toBeInTheDocument();
+    expect(screen.queryByText(/driving/)).toBeNull();
+  });
+
   it('turns the line red with the 2-hour window when the tech would land late', () => {
     render(
       <MobileDispatchList

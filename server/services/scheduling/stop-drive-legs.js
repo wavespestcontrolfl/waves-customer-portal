@@ -39,14 +39,26 @@ function workMinutes(s) {
   return Number.isFinite(dur) && dur > 0 ? dur : 60;
 }
 
-// When the tech leaves a stop: one crew works its rows one after another
-// (arrival-route.js groupRouteStops sums a visit's work the same way), so
-// two 60-minute rows booked at 09:00 leave at 11:00, not 10:00.
+// When the tech leaves a stop. A visit group's rows run one after another
+// (arrival-route.js groupRouteStops sums a visit's work), so two 60-minute
+// rows of one visit booked at 09:00 leave at 11:00. Ungrouped rows merged
+// only by sharing a pin keep their own planned end: a span-only row's
+// window is not work to add (route-reorder-window-fit.js coVisitWork's
+// phantom hour), so the late warning never fires on a doubled hour.
 function departure(rows) {
-  const starts = rows.map((m) => minutesOf(m.windowStart));
-  const summed = Math.min(...starts) + rows.reduce((sum, m) => sum + workMinutes(m), 0);
-  const latest = Math.max(...rows.map((m, i) => starts[i] + workMinutes(m)));
-  return Math.max(summed, latest);
+  const ends = [];
+  const groups = new Map();
+  for (const m of rows) {
+    if (!m.visitId) { ends.push(minutesOf(m.windowStart) + workMinutes(m)); continue; }
+    if (!groups.has(m.visitId)) groups.set(m.visitId, []);
+    groups.get(m.visitId).push(m);
+  }
+  for (const g of groups.values()) {
+    const starts = g.map((m) => minutesOf(m.windowStart));
+    const summed = Math.min(...starts) + g.reduce((sum, m) => sum + workMinutes(m), 0);
+    ends.push(Math.max(summed, ...g.map((m, i) => starts[i] + workMinutes(m))));
+  }
+  return Math.max(...ends);
 }
 
 // Visits the tech has not reached yet: only these can still run late.
@@ -70,7 +82,8 @@ function stopOrder(a, b) {
  * in is also stamped once (`driveInShown`, on the stop's first card) with
  * the stop it comes from (`drivePrevName`) and `driveLateMin`: the minutes
  * past the customer's 2-hour arrival window (start + 120) the tech lands if
- * the previous stop ends as planned, else null.
+ * the previous stop ends as planned, else null. A leg that cannot be
+ * measured marks its stop's first card `driveLegUnknown`.
  */
 function attachDriveLegs(services) {
   // A stop with no start time (the grid's all-day strip) has no place in
@@ -84,6 +97,7 @@ function attachDriveLegs(services) {
     s.driveInShown = false;
     s.drivePrevName = null;
     s.driveLateMin = null;
+    s.driveLegUnknown = false;
   }
   // A visit group is one stop wherever its rows sort (route-model.js
   // physicalStops groups every visit_id the same way): placed at its
@@ -125,7 +139,8 @@ function attachDriveLegs(services) {
     const leg = hasGeo(prev.anchor) && hasGeo(cur.anchor) ? Math.max(1, driveMin(prev.anchor, cur.anchor)) : null;
     prev.legs.forEach((s) => { s.driveToNextMin = leg; });
     cur.legs.forEach((s) => { s.driveFromPrevMin = leg; });
-    if (leg == null) continue;
+    // A leg without coordinates: the day total cannot claim to be whole.
+    if (leg == null) { cur.legs[0].driveLegUnknown = true; continue; }
     const first = cur.legs[0];
     first.driveInShown = true;
     first.drivePrevName = String(prev.legs[0].customerName || '').trim() || null;

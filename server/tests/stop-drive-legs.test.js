@@ -149,4 +149,22 @@ describe('attachDriveLegs', () => {
     // Two 60-minute rows leave at 11:00, not 10:00.
     expect(services[2].driveLateMin).toBe(11 * 60 + leg - (9 * 60 + 120));
   });
+
+  it('keeps ungrouped rows at one pin on their own planned end (no phantom hour)', () => {
+    const services = [
+      stop('r1', '09:00', A, { windowEnd: '10:00' }),
+      stop('r2', '09:00', A, { windowEnd: '10:00' }),
+      stop('c', '09:00', C),
+    ];
+    attachDriveLegs(services);
+    const leg = services[2].driveFromPrevMin;
+    const late = 10 * 60 + leg - (9 * 60 + 120);
+    expect(services[2].driveLateMin).toBe(late > 0 ? late : null);
+  });
+
+  it('marks a leg it cannot measure', () => {
+    const services = [stop('a', '08:00', A), stop('b', '10:00', null), stop('c', '13:00', C)];
+    attachDriveLegs(services);
+    expect(services.map((s) => s.driveLegUnknown)).toEqual([false, true, true]);
+  });
 });
