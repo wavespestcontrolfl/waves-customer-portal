@@ -503,7 +503,15 @@ async function classifyListingSuiteByLicense(suiteSize, { addressLine, phone, co
       address: suiteAddressParts(addressLine), phone, businessNameHint: null, commercialRiskType, commercialSubtype,
     }, { skipWebSearch: true, skipListing: true });
     if (license && license.source === SQFT_SOURCES.LICENSE_SEATS) {
-      return { ...suiteSize, licenseBacked: true, businessType: 'restaurant_food', businessName: license.businessName || suiteSize.businessName || null, ...(license.seats != null ? { seats: license.seats } : {}) };
+      return {
+        ...suiteSize,
+        licenseBacked: true,
+        businessType: 'restaurant_food',
+        businessName: license.businessName || suiteSize.businessName || null,
+        ...(license.seats != null ? { seats: license.seats } : {}),
+        // The license record that justified the classification rides with the result.
+        evidence: [...(suiteSize.evidence || []), ...(license.evidence || [])],
+      };
     }
   } catch (err) {
     logger.warn(`[estimator-engine] listing suite license classification failed: ${err.message}`);

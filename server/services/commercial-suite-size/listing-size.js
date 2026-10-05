@@ -448,7 +448,9 @@ function streetLineMatches(line, anchors) {
     const { normalizeCountyStreetLine } = require('../property-lookup/ai-property-lookup');
     words = normalizeCountyStreetLine(line).split(' ').slice(1);
   } catch { words = line.toUpperCase().split(' ').slice(1); }
-  const stop = words.findIndex((w) => /^(?:SUITE|STE|UNIT|BAY|SPACE|#)$/.test(w) || /^#/.test(w));
+  // The street line ends at a unit designator, or at the typed unit value
+  // itself ("# 103" loses its hash in normalization).
+  const stop = words.findIndex((w) => /^(?:SUITE|STE|UNIT|BAY|SPACE|#)$/.test(w) || /^#/.test(w) || (anchors.unit && w === anchors.unit));
   const scope = stop >= 0 ? words.slice(0, stop) : words;
   // The street words must follow the number CONTIGUOUSLY (directions aside):
   // "4400 Test Other St" is not "4400 Test St".
@@ -457,6 +459,10 @@ function streetLineMatches(line, anchors) {
   for (let i = 0; i < anchors.streetWords.length; i += 1) {
     if (core[i] !== anchors.streetWords[i]) return false;
   }
+  // And END there: "Test St Ext" / "Test St Bypass" are other roads. Only a
+  // city, state or ZIP (the rest of the address) may follow the street.
+  const trailing = core.slice(anchors.streetWords.length);
+  if (trailing.length && !trailingIsAddressTail(trailing, anchors)) return false;
   // A stated direction that is not the typed one: another property. The
   // text's direction tokens are read only through the last street word.
   let seen = 0;
@@ -480,6 +486,13 @@ function zipsIn(text, ownNumber) {
     while ((z = re.exec(text))) if (z[1] !== ownNumber) zips.push(z[1]);
   }
   return zips;
+}
+
+// What may follow the street words inside the street line: the typed city
+// (any of its words), a state, a ZIP. Anything else is another road.
+function trailingIsAddressTail(words, anchors) {
+  const city = new Set(String(anchors.city || '').toUpperCase().split(/\s+/).filter(Boolean));
+  return words.every((w) => city.has(w) || w === 'FL' || w === 'FLORIDA' || /^\d{5}(?:-\d{4})?$/.test(w) || w === 'USA');
 }
 
 function otherAddressBetween(text, from, to, anchors) {
