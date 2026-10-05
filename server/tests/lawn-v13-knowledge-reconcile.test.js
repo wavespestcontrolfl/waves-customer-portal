@@ -58,14 +58,17 @@ const tagsOf = (row) => (typeof row.tags === 'string' ? JSON.parse(row.tags) : r
 beforeEach(() => { jest.clearAllMocks(); });
 
 describe('the lawn protocol knowledge follows GATE_LAWN_V13 both ways', () => {
-  test('lawnKnowledgeStale: stored program vs the gate; nothing stored is not stale', async () => {
+  test('lawnKnowledgeStale: stored program vs the gate; nothing stored is not stale, a partial set is', async () => {
     const tables = { knowledge_base: [] };
     makeDb(tables);
     expect(await withGate('true', () => KB.lawnKnowledgeStale())).toBe(false);
     tables.knowledge_base.push({ slug: slugOf('bermuda'), tags: JSON.stringify(['lawn', 'bermuda', 'lawn-v13']) });
+    // A partial set (one of the four) is stale either way: the next sync completes it.
+    expect(await withGate('true', () => KB.lawnKnowledgeStale())).toBe(true);
+    for (const track of TRACKS.filter((t) => t !== 'bermuda')) tables.knowledge_base.push({ slug: slugOf(track), tags: JSON.stringify(['lawn', track, 'lawn-v13']) });
     expect(await withGate('true', () => KB.lawnKnowledgeStale())).toBe(false);
     expect(await withGate(undefined, () => KB.lawnKnowledgeStale())).toBe(true);
-    tables.knowledge_base[0].tags = JSON.stringify(['lawn', 'bermuda']);
+    for (const row of tables.knowledge_base) row.tags = JSON.stringify(['lawn']);
     expect(await withGate(undefined, () => KB.lawnKnowledgeStale())).toBe(false);
     expect(await withGate('true', () => KB.lawnKnowledgeStale())).toBe(true);
   });
@@ -258,6 +261,29 @@ describe('a corpus failure after the entries were rewritten is retried, not forg
     expect(await withGate('true', () => KB.lawnKnowledgeStale())).toBe(true);
     await withGate('true', () => KB.reconcileLawnProtocolKnowledge());
     expect(tables.system_settings.find((r) => r.key === 'lawn_knowledge.kb_corpus').value).toBe('v13');
+  });
+
+  test('a lawn entry whose insert fails: the reconcile stops before the corpora and the partial set stays stale', async () => {
+    // Codex r6 on #5996: a non-duplicate insert failure reported 'skipped' and the kb corpus advanced on three entries.
+    const tables = {
+      knowledge_base: [], knowledge_embeddings: [{ id: 'seed', source: 'protocol', source_id: 'x', chunk_index: 0, content_hash: 'h' }, { id: 'seed-kb', source: 'kb', source_id: 'y', chunk_index: 0, content_hash: 'h' }],
+    };
+    makeDb(tables);
+    const realImpl = db.getMockImplementation();
+    let failOnce = true;
+    db.mockImplementation((table) => {
+      const b = realImpl(table);
+      if (table !== 'knowledge_base') return b;
+      const insert = b.insert;
+      b.insert = (r) => (failOnce && r.slug === slugOf('zoysia') ? (failOnce = false, Promise.reject(new Error('connection reset'))) : insert(r));
+      return b;
+    });
+    await expect(withGate('true', () => KB.reconcileLawnProtocolKnowledge())).rejects.toThrow('lawn KB entries incomplete');
+    expect((tables.system_settings || []).length).toBe(0);
+    expect(await withGate('true', () => KB.lawnKnowledgeStale())).toBe(true);
+    await withGate('true', () => KB.reconcileLawnProtocolKnowledge());
+    expect(TRACKS.every((track) => kbRow(tables, slugOf(track)))).toBe(true);
+    expect(await withGate('true', () => KB.lawnKnowledgeStale())).toBe(false);
   });
 
   test('the index not in use: markers are ignored (stale only by the entry tags)', async () => {

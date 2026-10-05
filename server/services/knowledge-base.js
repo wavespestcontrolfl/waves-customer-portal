@@ -1003,17 +1003,21 @@ const KnowledgeBaseService = {
     for (const entry of lawnProtocolEntries()) {
       tally[await upsertKnowledgeEntry(entry.slug, entry.title, entry.content, entry.category, entry.tags)] += 1;
     }
+    // An insert that failed reports 'skipped': never advance the corpora on a partial set.
+    const stored = await db('knowledge_base').whereIn('slug', LAWN_TRACK_SLUGS).select('slug');
+    if (stored.length < LAWN_TRACK_SLUGS.length) throw new Error(`lawn KB entries incomplete (${stored.length} of ${LAWN_TRACK_SLUGS.length})`);
     return tally;
   },
 
   // True when the stored lawn knowledge holds the other program than the one
   // GATE_LAWN_V13 selects now: a KB entry tagged for the other program, or (only while the
   // knowledge index is in use) an index corpus whose last finished sync was for the other
-  // program. No entry yet is not stale: the nightly sync creates it. Two small reads
-  // when nothing changed.
+  // program. No entry yet is not stale: the nightly sync creates it; a partial set (some of
+  // the four missing) is. Two small reads when nothing changed.
   async lawnKnowledgeStale() {
     const gateOn = require('../config/feature-gates').lawnV13Live?.() === true;
     const rows = await db('knowledge_base').whereIn('slug', LAWN_TRACK_SLUGS).select('slug', 'tags');
+    if (rows.length && rows.length < LAWN_TRACK_SLUGS.length) return true;
     if (rows.some((row) => normalizeTags(row.tags).includes(LAWN_V13_TAG) !== gateOn)) return true;
     return (await staleCorpora(gateOn)).length > 0;
   },
@@ -1024,7 +1028,7 @@ const KnowledgeBaseService = {
   async lawnCorpusProgram(source) {
     if (source === 'protocol') return require('../config/feature-gates').lawnV13Live?.() === true ? 'v13' : 'legacy';
     const rows = await db('knowledge_base').whereIn('slug', LAWN_TRACK_SLUGS).select('slug', 'tags');
-    return rows.length && rows.every((row) => normalizeTags(row.tags).includes(LAWN_V13_TAG)) ? 'v13' : 'legacy';
+    return rows.length === LAWN_TRACK_SLUGS.length && rows.every((row) => normalizeTags(row.tags).includes(LAWN_V13_TAG)) ? 'v13' : 'legacy';
   },
 
   // Called by syncCorpus for the 'protocol' and 'kb' corpora after a sync that really ran
