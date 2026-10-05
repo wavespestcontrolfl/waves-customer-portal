@@ -162,7 +162,7 @@ async function liveChildOf(trx, primaryId) {
   return trx('scheduled_services')
     .where({ followup_source_service_id: primaryId })
     .whereNotIn('status', FOLLOWUP_CHILD_INACTIVE_STATUSES)
-    .first('id', 'scheduled_date', 'status', 'technician_id', 'source_action', 'customer_confirmed');
+    .first('id', 'scheduled_date', 'status', 'technician_id', 'source_action', 'customer_confirmed', 'window_start', 'window_end');
 }
 
 // An outbound-callback booking's visit 2 was written by the call pipeline
@@ -170,8 +170,12 @@ async function liveChildOf(trx, primaryId) {
 // customer-hidden, "confirm the time". Once the office confirms visit 1 the
 // owner ruling applies to it too (nobody confirms visit 2): flip it to
 // confirmed through the canonical status writer and hand it the package
-// marker, so the customer sees it and the move/cancel hooks carry it.
-async function promotePendingCallChild(sp, child) {
+// marker, so the customer sees it and the move/cancel hooks carry it. It
+// also takes the package child's own shape: the $0 included billing fields
+// (the call writer leaves an unpriced child billable, which would let its
+// completion bill or owe a third visit) and the full treatment block from
+// its agreed start (the call writer books a bare hour).
+async function promotePendingCallChild(sp, child, { primary, catalogRow }) {
   const { CALL_FOLLOWUP_SOURCE_ACTION } = require('./call-booking-source-actions');
   if (child.source_action !== CALL_FOLLOWUP_SOURCE_ACTION || child.status !== 'pending' || child.customer_confirmed) return child;
   await require('./job-status').transitionJobStatus({
@@ -179,8 +183,21 @@ async function promotePendingCallChild(sp, child) {
     notes: 'Package visit 2 confirmed with visit 1', trx: sp,
   });
   const now = new Date();
-  await sp('scheduled_services').where({ id: child.id })
-    .update({ source_action: PACKAGE_FOLLOWUP_SOURCE_ACTION, confirmed_at: now, updated_at: now });
+  const patch = {
+    source_action: PACKAGE_FOLLOWUP_SOURCE_ACTION, confirmed_at: now, updated_at: now,
+    estimated_price: 0, followup_included: true, create_invoice_on_complete: false,
+  };
+  const toMin = (v) => { const t = hhmm(v); return t ? Number(t.slice(0, 2)) * 60 + Number(t.slice(3)) : null; };
+  const start = toMin(child.window_start);
+  const pStart = toMin(primary.window_start);
+  const pEnd = toMin(primary.window_end);
+  if (start != null) {
+    const blockMin = Math.max(60, pStart != null && pEnd != null && pEnd > pStart ? pEnd - pStart : 0, Number(catalogRow.default_duration_minutes) || 0);
+    const endMin = Math.min(start + blockMin, 23 * 60 + 59);
+    const curEnd = toMin(child.window_end);
+    if (curEnd == null || endMin > curEnd) patch.window_end = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
+  }
+  await sp('scheduled_services').where({ id: child.id }).update(patch);
   logger.info(`[package-followup] pending call-booked visit 2 ${child.id} confirmed with its package visit 1`);
   return { ...child, status: 'confirmed', source_action: PACKAGE_FOLLOWUP_SOURCE_ACTION };
 }
@@ -308,7 +325,7 @@ async function bookInSavepoint(sp, outerTrx, primary, cols, { promotePendingCall
   const catalogRow = await resolvePackageCatalogRow(sp, primary);
   if (!catalogRow) return null;
   const existing = await liveChildOf(sp, primary.id);
-  if (existing) return promotePendingCallFollowUp ? promotePendingCallChild(sp, existing) : existing;
+  if (existing) return promotePendingCallFollowUp ? promotePendingCallChild(sp, existing, { primary, catalogRow }) : existing;
   const date = packageFollowUpDate(primary.scheduled_date, catalogRow.follow_up_interval_days);
   if (!date) return null;
   const columns = cols || await sp('scheduled_services').columnInfo();

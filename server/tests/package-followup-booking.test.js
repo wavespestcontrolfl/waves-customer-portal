@@ -250,7 +250,7 @@ describe('ensurePackageFollowUpVisit', () => {
 
   test('office confirm promotes a pending call-booked visit 2 to a confirmed package child; other callers leave it', async () => {
     const { transitionJobStatus } = require('../services/job-status');
-    const pendingCallChild = { id: 'child-call', scheduled_date: '2026-10-19', status: 'pending', technician_id: 'tech-1', source_action: 'ai_call_pipeline_followup', customer_confirmed: false };
+    const pendingCallChild = { id: 'child-call', scheduled_date: '2026-10-19', status: 'pending', technician_id: 'tech-1', source_action: 'ai_call_pipeline_followup', customer_confirmed: false, window_start: '13:00:00', window_end: '14:00:00' };
     const left = fakeTrx({ existingChild: pendingCallChild });
     expect(await ensurePackageFollowUpVisit({ trx: left.trx, primary: PRIMARY, cols: COLS })).toBe(pendingCallChild);
     expect(transitionJobStatus).not.toHaveBeenCalled();
@@ -260,9 +260,13 @@ describe('ensurePackageFollowUpVisit', () => {
     const base = promoted.trx;
     const trx = (table) => ({ ...base(table), where: (arg) => ({ ...base(table).where(arg), update: async (patch) => { updates.push({ arg, patch }); return 1; } }) });
     trx.transaction = async (fn) => fn(trx);
-    const out = await ensurePackageFollowUpVisit({ trx, primary: PRIMARY, cols: COLS, promotePendingCallFollowUp: true });
+    const out = await ensurePackageFollowUpVisit({ trx, primary: { ...PRIMARY, service_id: 'svc-bedbug' }, cols: COLS, promotePendingCallFollowUp: true });
     expect(transitionJobStatus).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'child-call', fromStatus: 'pending', toStatus: 'confirmed', trx }));
-    expect(updates).toEqual([{ arg: { id: 'child-call' }, patch: expect.objectContaining({ source_action: PACKAGE_FOLLOWUP_SOURCE_ACTION }) }]);
+    // Package shape on promotion: $0 included, and the full treatment block
+    // from its agreed start (bed bug catalog duration 120 min → 13:00–15:00).
+    expect(updates).toEqual([{ arg: { id: 'child-call' }, patch: expect.objectContaining({
+      source_action: PACKAGE_FOLLOWUP_SOURCE_ACTION, estimated_price: 0, followup_included: true, create_invoice_on_complete: false, window_end: '15:00',
+    }) }]);
     expect(out).toMatchObject({ id: 'child-call', status: 'confirmed', source_action: PACKAGE_FOLLOWUP_SOURCE_ACTION });
     expect(createScheduledService).not.toHaveBeenCalled();
   });
