@@ -198,6 +198,14 @@ describe('pricing bundle offer tiers', () => {
     expect(bestCombo.perServiceTreatments.map((r) => r.service).sort()).toEqual(['lawn_care', 'pest_control']);
     expect(bestCombo.monthly).toBeCloseTo(84.08, 2);
     expect(best.serviceCadenceCombos.every((c) => c.perServiceTreatments.some((r) => r.service === 'lawn_care'))).toBe(true);
+    // The page renders Best's section cards and summary from the tier itself
+    // (`sections`, beside the `services` key list); the bundle's own sections
+    // stay the pest-only view.
+    expect(best.services).toEqual(['pest_control', 'lawn_care']);
+    expect(best.sections.map((s) => s.key)).toEqual(['pest_control', 'lawn_care']);
+    expect(best.combinedRecurring).toBeTruthy();
+    expect(best.waveGuardTier).toBe('Silver');
+    expect(bundle.services.some((s) => s.key === 'lawn_care')).toBe(false);
   });
 
   test('gate off: byte-identical bundle, no tier fields', async () => {
@@ -216,6 +224,8 @@ describe('pricing bundle offer tiers', () => {
     expect(best).toBeTruthy();
     const view = OfferTiers.acceptedBestPricingView(bundle, accepted.estimate_data);
     expect(view.frequencies.find((f) => f.key === 'quarterly').monthly).toBeCloseTo(84.08, 2);
+    expect(view.services.map((s) => s.key)).toEqual(['pest_control', 'lawn_care']);
+    expect(view.combinedRecurring).toBeTruthy();
     expect(view.acceptedOfferTier).toBe('best');
     expect(view.offerTiers).toBeUndefined();
   });

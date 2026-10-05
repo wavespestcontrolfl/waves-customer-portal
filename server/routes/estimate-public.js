@@ -26911,10 +26911,40 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}, opts =
   // Presentation relabels apply LAST — attachPublicPricingContract rebuilds
   // the section list via buildPricingServices, so an earlier rename pass
   // would be overwritten for recomputed bundles (codex P2 on #2947 round 3).
-  const withContract = applyPresentationOverridesToBundle(
+  const withContractBase = applyPresentationOverridesToBundle(
     hideFlooredLawnCadencesFromBundle(attachPublicPricingContract(withQuoteState, estimate, estData), estData),
     estData,
   );
+  // Good / Better / Best: the page renders the Best tier's sections, combined
+  // summary and WaveGuard tier from the tier itself, so give it the same
+  // contract view the bundle gets (built through the SAME attach / floor-hide
+  // / presentation chain, from the tier's own ladder). The tier object is
+  // replaced, not mutated: the payload's array can be a cached bundle's.
+  // `services` stays the key list; the page's section objects ride on
+  // `sections`.
+  const bestOfferTier = OfferTiers.offerTiersOf(withContractBase).find((tier) => tier && tier.key === 'best');
+  let withContract = withContractBase;
+  if (bestOfferTier) {
+    const bestView = applyPresentationOverridesToBundle(
+      hideFlooredLawnCadencesFromBundle(attachPublicPricingContract(
+        OfferTiers.pricingBundleForOfferTier({ ...withContractBase, offerTiers: undefined }, bestOfferTier),
+        estimate,
+        estData,
+      ), estData),
+      estData,
+    );
+    withContract = {
+      ...withContractBase,
+      offerTiers: withContractBase.offerTiers.map((tier) => (tier === bestOfferTier
+        ? {
+          ...tier,
+          sections: bestView.services,
+          combinedRecurring: bestView.combinedRecurring ?? null,
+          waveGuardTier: bestView.waveGuardTier ?? withContractBase.waveGuardTier ?? null,
+        }
+        : tier)),
+    };
+  }
   const quoteState = resolveEstimateQuoteRequirement(withContract, estData);
   return {
     ...withContract,
