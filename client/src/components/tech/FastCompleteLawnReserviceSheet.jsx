@@ -50,7 +50,7 @@ import {
   LAWN_TARGET_SUGGESTIONS, NUTRITION_TARGET_SUGGESTIONS, productControlsTargets, productTargetsNutrition,
 } from '../../lib/lawn-targets';
 import {
-  AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, ProductTileButton, SavedView,
+  AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, RecoveredCompletion, submissionHolds, ProductTileButton, SavedView,
   SheetHeader, VisitNote, isSendableRateUnit, toggleInSet, useProductPicker, visitChangedSinceSchedule,
 } from './FastCompleteParts';
 import {
@@ -464,7 +464,7 @@ function completionBody({ form, rows, ctx }) {
   };
 }
 
-export default function FastCompleteLawnReserviceSheet({ service, request, onClose, onCompleted, onFullForm, voiceFillEnabled = false }) {
+export default function FastCompleteLawnReserviceSheet({ service, request, operatorId, onClose, onCompleted, onFullForm, voiceFillEnabled = false }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
   const dialogRef = useModalFocus(true, () => closeRef.current?.());
@@ -472,8 +472,8 @@ export default function FastCompleteLawnReserviceSheet({ service, request, onClo
   const titleId = useId();
   const base = `/admin/dispatch/${service?.id}`;
   const ctx = useLawnContext({ base, request, service });
-  const submission = useFastCompleteSubmit({ base, request });
-  const { submitting, done } = submission;
+  const submission = useFastCompleteSubmit({ base, request, serviceId: service?.id, operatorId });
+  const { recovering, submitting, done } = submission;
   // A recorded dictation clip is still being taken or transcribed. The full
   // form is another page and carries nothing over, so Full form and "+ Other
   // product" wait for it, like Complete.
@@ -483,14 +483,14 @@ export default function FastCompleteLawnReserviceSheet({ service, request, onClo
   // sheet blocked on a stale or changed visit, or an attempt whose outcome is
   // unknown or refused (it may have saved).
   const close = useCallback(() => {
-    if (submitting) return;
+    if (recovering || submitting) return;
     if (done) onCompleted?.();
     else onClose?.(ctx.blockedReason || submission.failure ? { refresh: true } : undefined);
-  }, [submitting, done, ctx.blockedReason, submission.failure, onClose, onCompleted]);
+  }, [recovering, submitting, done, ctx.blockedReason, submission.failure, onClose, onCompleted]);
   closeRef.current = close;
   // Nothing is editable while a save is in flight, unresolved or refused for
   // good; the full form can't resume a /complete attempt.
-  const locked = submitting || submission.failure !== null;
+  const locked = submissionHolds(submission);
 
   return (
     <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} onDismiss={close}>
@@ -501,7 +501,9 @@ export default function FastCompleteLawnReserviceSheet({ service, request, onClo
 }
 
 function SheetBody({ service, request, ctx, submission, locked, dictationPending, onDictationPending, onCompleted, onFullForm, isMobile, voiceFillEnabled }) {
-  if (submission.done) return <SavedView service={service} summary={submission.done.summary} onCompleted={onCompleted} />;
+  if (submission.done) return <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={onCompleted} />;
+  if (submission.recovering) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Checking for an unfinished completion…</ActionFeedback>;
+  if (submission.restored) return <RecoveredCompletion submission={submission} />;
   if (ctx.loading) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Loading…</ActionFeedback>;
   if (ctx.loadError) {
     return (
