@@ -3542,6 +3542,10 @@ async function rescheduleAppointment(input, actionContext = {}) {
       // would strand its siblings and parent at the old stop. Throws an
       // operational 409 the executor surfaces as the tool error.
       await require('../visit-groups').assertRowMovableAlone(trx, appointment_id, appt.visit_id);
+      // Package visit 2 recheck, atomic with this write (the preflight
+      // above is only a fast refusal).
+      await require('../package-followup-booking').assertNoLivePackageChildLocked(trx, [appointment_id],
+        'This visit has a linked second treatment (a two-treatment package visit 2), and moving it here would not show that visit on the card. Move it from the Schedule screen, which moves both. Nothing was changed.');
       const committed = await applyTrackLifecycleCas(
         trx('scheduled_services')
           .where('id', appointment_id)

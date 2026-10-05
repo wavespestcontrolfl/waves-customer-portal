@@ -461,9 +461,25 @@ async function hasLivePackageChild(conn, parentIds = []) {
   return !!row;
 }
 
+// The same check, made atomic with a move: lock the parent rows FOR UPDATE
+// (a child INSERT's foreign-key check on parent_service_id takes FOR KEY
+// SHARE on the parent, which conflicts), then re-read. A child committed
+// first is seen; one being written waits for this move. Call right before
+// the parent row write, after the caller's wider locks. Throws an
+// operational 409 the Intelligence Bar executors surface as the tool error.
+async function assertNoLivePackageChildLocked(trx, parentIds = [], message) {
+  const ids = parentIds.filter(Boolean).map(String);
+  if (!ids.length) return;
+  await trx('scheduled_services').whereIn('id', ids).orderBy('id').forUpdate().select('id');
+  if (await hasLivePackageChild(trx, ids)) {
+    throw Object.assign(new Error(message), { statusCode: 409, code: 'PACKAGE_CHILD_PRESENT', isOperational: true });
+  }
+}
+
 module.exports = {
   ensurePackageFollowUpVisit,
   hasLivePackageChild,
+  assertNoLivePackageChildLocked,
   mirrorPrimaryAddressOntoPackageChildren,
   warnOnOverlap,
   isPackageFollowUpServiceKey,

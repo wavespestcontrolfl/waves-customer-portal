@@ -1370,6 +1370,9 @@ async function moveStopsToDay(input, actionContext = {}) {
       // Grouped/frozen refusal under the stop lock, AFTER the tech-day
       // fence (lock order; codex #3609 r29 P1) — here it ABORTS the batch.
       await require('../visit-groups').assertRowMovableAlone(trx, s.id, s.visit_id);
+      // Package visit 2 recheck, atomic with this stop's write; aborts the batch.
+      await require('../package-followup-booking').assertNoLivePackageChildLocked(trx, [s.id],
+        'One of these stops has a linked second treatment (a two-treatment package visit 2) that this card does not show. Move that stop from the Schedule screen, which moves both. Nothing was moved.');
       const committedRows = await applyTrackLifecycleCas(
         trx('scheduled_services')
           .where('id', s.id)
@@ -1428,6 +1431,7 @@ async function moveStopsToDay(input, actionContext = {}) {
       }
     }
   } catch (err) {
+    if (err && err.code === 'PACKAGE_CHILD_PRESENT') return { error: err.message };
     if (err && (err.code === 'MOVE_SET_CHANGED' || err.code === 'VISIT_EDIT_SCHEDULE_UNSUPPORTED' || err.code === 'VISIT_FROZEN_MOVE_UNSUPPORTED')) {
       return {
         error: 'One of the approved stops changed (status, schedule, or grouped-visit state) while the move was pending — NOTHING was moved. Ask again for a fresh confirmation card.',

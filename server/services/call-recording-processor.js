@@ -17780,6 +17780,18 @@ const CallRecordingProcessor = {
                           followUpTechId = null;
                         }
                       }
+                      // A confirmed package visit 2 is customer-visible and arms
+                      // reminders, so the tech must be free on ITS date too
+                      // (dated absences), same check the package helper runs.
+                      if (followUpTechId && packageFollowUp) {
+                        try {
+                          await require('./technician-eligibility').assertAssignableTechnician(followUpTechId, { conn: sp, date: fuPlan.scheduledDate });
+                        } catch (eligErr) {
+                          if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
+                          logger.warn(`[call-proc] package visit 2 technician ${followUpTechId} not assignable on ${fuPlan.scheduledDate}; seeding unassigned`);
+                          followUpTechId = null;
+                        }
+                      }
                       // Same bounded fence for the child's own date + tech
                       // (the child usually lands on a different date than the
                       // primary, so the primary's fence does not cover it).
@@ -18153,7 +18165,10 @@ const CallRecordingProcessor = {
                   }
                   if (isAttachedManualBooking) {
                     attachedManualBookingId = primaryRow.id;
-                    attachSkippedFollowUpPlan = !!callFollowUpPlan;
+                    // A package-only plan (nobody discussed visit 2) asks for no
+                    // task when the booking already has its linked visit 2.
+                    attachSkippedFollowUpPlan = !!callFollowUpPlan && !(callFollowUpPlan.packageOnly
+                      && await trx('scheduled_services').where({ followup_source_service_id: primaryRow.id }).first('id'));
                     // Codex round-4 P1 (PR #4807): this row's source_call_log_id
                     // linkage may itself be durable from an earlier pass (a
                     // reprocess landing here via the `linked` lookup in
@@ -18386,7 +18401,10 @@ const CallRecordingProcessor = {
                   }
                   reusedExistingSchedule = true;
                   attachedManualBookingId = attachable.row.id;
-                  attachSkippedFollowUpPlan = !!callFollowUpPlan;
+                  // A package-only plan asks for no task when the booking
+                  // already has its linked visit 2.
+                  attachSkippedFollowUpPlan = !!callFollowUpPlan && !(callFollowUpPlan.packageOnly
+                    && await trx('scheduled_services').where({ followup_source_service_id: attachable.row.id }).first('id'));
                   // Codex round-4 P1 (PR #4807): the update just above stamped
                   // source_call_log_id onto this human-created booking — the
                   // ONLY linkage the hold stamp keys on — but this attach path

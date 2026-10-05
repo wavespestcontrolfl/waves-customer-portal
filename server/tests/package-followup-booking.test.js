@@ -156,6 +156,25 @@ describe('hasLivePackageChild (Intelligence Bar move refusal)', () => {
   });
 });
 
+describe('assertNoLivePackageChildLocked (IB move, atomic with the write)', () => {
+  const { assertNoLivePackageChildLocked } = require('../services/package-followup-booking');
+  test('locks the parent rows FOR UPDATE, then refuses with PACKAGE_CHILD_PRESENT when a child exists', async () => {
+    const order = [];
+    const mk = (child) => () => {
+      const q = {
+        whereIn: () => q, where: () => q, orderBy: () => q,
+        forUpdate: () => { order.push('lock'); return q; },
+        select: async () => { order.push('select'); return []; },
+        first: async () => { order.push('recheck'); return child; },
+      };
+      return q;
+    };
+    await expect(assertNoLivePackageChildLocked(mk({ id: 'c' }), ['p1'], 'refused')).rejects.toMatchObject({ code: 'PACKAGE_CHILD_PRESENT', statusCode: 409, message: 'refused' });
+    expect(order).toEqual(['lock', 'select', 'recheck']);
+    await expect(assertNoLivePackageChildLocked(mk(null), ['p1'], 'refused')).resolves.toBeUndefined();
+  });
+});
+
 describe('ensurePackageFollowUpVisit', () => {
   test('gate off: nothing is read, nothing is booked', async () => {
     delete process.env.GATE_PACKAGE_FOLLOWUP_AUTOBOOK;

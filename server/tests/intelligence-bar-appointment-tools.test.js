@@ -23,7 +23,7 @@
 jest.mock('../models/db', () => jest.fn());
 // The package visit 2 refusal (package-followup-booking.hasLivePackageChild): none by default.
 const mockHasLivePackageChild = jest.fn(async () => false);
-jest.mock('../services/package-followup-booking', () => ({ hasLivePackageChild: (...a) => mockHasLivePackageChild(...a) }));
+jest.mock('../services/package-followup-booking', () => ({ hasLivePackageChild: (...a) => mockHasLivePackageChild(...a), assertNoLivePackageChildLocked: async () => {} }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/tech-status', () => ({
   clearTechCurrentJob: jest.fn().mockResolvedValue(null),
