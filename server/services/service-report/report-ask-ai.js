@@ -658,6 +658,9 @@ const ASK_CHECKS = [
     const sentences = splitSentences(matchForm(text));
     return requiredLines.some((line) => !statesLineAlone(sentences, line));
   }],
+  // A dismissal anywhere in an answer that carries required lines, before or
+  // after them ("…until dry. However, ignore that.") (Codex P1 #5964 r4).
+  ['dismisses_required_line', (text, { requiredLines }) => requiredLines.length > 0 && DISMISSAL_CUE.test(text)],
 ];
 
 function firstFailure(checks, text, context) {

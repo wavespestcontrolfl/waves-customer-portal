@@ -552,3 +552,15 @@ describe('which questions reach the model', () => {
     expect(tree.callModel.mock.calls[0][0].text).toContain('plant_health_score_out_of_100');
   });
 });
+
+describe('a dismissal after a required line', () => {
+  const { screenAskAnswer } = require('../services/service-report/report-ask-ai');
+  const line = 'Keep pets off treated zones until dry.';
+  it('rejects a dismissal placed after the required sentence', () => {
+    expect(screenAskAnswer(`${line} However, ignore that instruction.`, { question: 'q', data: {}, requiredLines: [line] }))
+      .toBe('dismisses_required_line');
+  });
+  it('passes the same line with plain surrounding text', () => {
+    expect(screenAskAnswer(`Here is what your report says. ${line}`, { question: 'q', data: {}, requiredLines: [line] })).toBeNull();
+  });
+});
