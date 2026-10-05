@@ -1508,6 +1508,17 @@ cadence, visit count, cadence wording, catalog key, or an explicit tier field
 grandfathered and untouched by this gate; it only blocks a NEW self-serve
 accept from landing on the retired cadence.
 
+Lethal bronzing injection disclosure (owner ruling 2026-10-05). In GET
+`/api/estimates/:token/data` and the server-rendered estimate page, the
+`palm_injection` supplement row may carry a `scopeNote` string. It is set only
+when the palm treatment is the Lethal Bronzing Preventive OTC program
+(`pricePalmInjection` → `results.injection.scopeNote` → the supplement row);
+no other palm treatment or service row gets one. The text is fixed customer
+copy: "Each injection leaves a small permanent hole in the trunk. We offer this
+only for healthy palms or palms next to an affected palm." The card renders it
+under the treatment row. It carries no pricing, no customer data and no
+internal cost basis.
+
 Missing-contact capture (owner ruling 2026-09-27). GET
 `/api/estimates/:token/data` carries `contactGaps: { firstName, lastName, email, phone }` —
 booleans only — while the estimate is accept-active (never on
