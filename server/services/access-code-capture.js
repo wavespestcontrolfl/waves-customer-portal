@@ -419,6 +419,7 @@ async function runAccessCodeNet({ now = new Date(), conn = db, read = readAccess
   const since = gateEnvTimestamp('GATE_ACCESS_CODES_SECTION_SINCE');
   if (!since) return { skipped: 'activation_time_required' };
   return runExclusive('access-code-net', async () => {
+    const movedRetired = await retireMovedSources(conn);
     const candidates = await conn('sms_log as s')
       .where('s.direction', 'inbound').whereNotNull('s.customer_id')
       // A blank text is still selected when it filed something earlier, so the
@@ -449,7 +450,7 @@ async function runAccessCodeNet({ now = new Date(), conn = db, read = readAccess
       })
       .orderBy('s.created_at').orderBy('s.id').limit(BATCH)
       .select(...SOURCE_COLUMNS.map((column) => `s.${column}`));
-    const tally = { scanned: candidates.length, read: 0, found: 0, failed: 0, skipped: 0 };
+    const tally = { scanned: candidates.length, read: 0, found: 0, failed: 0, skipped: 0, movedRetired };
     for (const message of candidates) {
       if (!enabled()) break;
       const receipt = { source_type: 'message', source_id: message.id, extractor_version: VERSION,
@@ -758,22 +759,10 @@ async function decide(conn, id, { from, to, action, adminUserId }) {
 
 const dismiss = (conn, id, { adminUserId = null } = {}) => decide(conn, id, { from: 'found', to: 'dismissed', action: 'access_code.dismissed', adminUserId });
 
-// Retire an active code. A standing gate, lockbox or garage code may also sit
-// in its profile field (accept and addByStaff fill an empty one): the same
-// value there is cleared under the preference lock, so existing profile
-// readers stop showing a dead code and its replacement can fill the field. A
-// field that holds a different value is left alone. The shared neighborhood
-// directory entry is not touched: other homes rely on it, and the office
-// retires it on the Gate codes page.
-async function retire(conn, id, { adminUserId = null } = {}) {
-  if (!UUID_RE.test(String(id))) return fail(404, 'not_found');
-  const head = await conn('customer_access_codes').where({ id }).first('customer_id');
-  if (!head) return fail(404, 'not_found');
-  return officeTransaction(conn, async (trx) => {
-    if (!(await lockCustomer(trx, head.customer_id))) return fail(404, 'customer_not_found');
-    const row = await trx('customer_access_codes').where({ id }).forUpdate().first();
-    if (!row) return fail(404, 'not_found');
-    if (row.status !== 'active') return fail(409, 'not_active');
+// The retire step on a row already locked with its customer: the code leaves
+// the live list, and its value leaves the profile field when the field holds
+// it (another active standing code of the kind takes the field over).
+async function retireLocked(trx, row, { adminUserId = null, action }) {
     let clearedField = null;
     let promoted = false;
     const field = PROFILE_FIELD[row.kind];
@@ -792,13 +781,55 @@ async function retire(conn, id, { adminUserId = null } = {}) {
         promoted = !!heir;
       }
     }
-    const [updated] = await trx('customer_access_codes').where({ id }).update({
+    const [updated] = await trx('customer_access_codes').where({ id: row.id }).update({
       status: 'retired', decided_by: adminUserId || null, decided_at: trx.fn.now(), updated_at: trx.fn.now(),
     }).returning('*');
-    await audit(trx, adminUserId, 'access_code.retired', id, {
+    await audit(trx, adminUserId, action, row.id, {
       customer_id: row.customer_id, kind: row.kind, life: row.life, profile_field_cleared: clearedField, profile_field_promoted: promoted,
     });
     return { ok: true, row: serialize(updated), clearedField, promoted };
+}
+
+// A merge undo moves a text back to its first customer but knows nothing of
+// codes derived from it, nor of the profile copy an office accept made. Each
+// sweep retires an active code whose text now belongs to someone else, which
+// also takes its value out of the profile field that accept filled, so
+// dispatch and visit readers stop showing it on the wrong account.
+async function retireMovedSources(conn, { limit = BATCH } = {}) {
+  const moved = await conn('customer_access_codes as a')
+    .where('a.status', 'active').where('a.source_type', 'sms').whereNotNull('a.source_id')
+    .whereRaw(`NOT ${OWNED_SOURCE_SQL}`)
+    .orderBy('a.updated_at').limit(limit).select('a.id', 'a.customer_id');
+  let retired = 0;
+  for (const head of moved) {
+    await conn.transaction(async (trx) => {
+      if (!(await lockCustomer(trx, head.customer_id))) return;
+      const row = await trx('customer_access_codes').where({ id: head.id }).forUpdate().first();
+      if (!row || row.status !== 'active' || await sourceStillOwned(trx, row)) return;
+      await retireLocked(trx, row, { action: 'access_code.source_moved' });
+      retired += 1;
+    });
+  }
+  return retired;
+}
+
+// Retire an active code. A standing gate, lockbox or garage code may also sit
+// in its profile field (accept and addByStaff fill an empty one): the same
+// value there is cleared under the preference lock, so existing profile
+// readers stop showing a dead code and its replacement can fill the field. A
+// field that holds a different value is left alone. The shared neighborhood
+// directory entry is not touched: other homes rely on it, and the office
+// retires it on the Gate codes page.
+async function retire(conn, id, { adminUserId = null } = {}) {
+  if (!UUID_RE.test(String(id))) return fail(404, 'not_found');
+  const head = await conn('customer_access_codes').where({ id }).first('customer_id');
+  if (!head) return fail(404, 'not_found');
+  return officeTransaction(conn, async (trx) => {
+    if (!(await lockCustomer(trx, head.customer_id))) return fail(404, 'customer_not_found');
+    const row = await trx('customer_access_codes').where({ id }).forUpdate().first();
+    if (!row) return fail(404, 'not_found');
+    if (row.status !== 'active') return fail(409, 'not_active');
+    return retireLocked(trx, row, { adminUserId, action: 'access_code.retired' });
   });
 }
 

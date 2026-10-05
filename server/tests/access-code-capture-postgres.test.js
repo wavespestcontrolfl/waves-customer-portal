@@ -796,6 +796,21 @@ postgres('access codes section', () => {
       expect(await access.addByStaff(trx, { customerId: winner.id, kind: 'door', life: 'standing', code: '2468' })).toMatchObject({ ok: true });
     });
 
+    test('after a merge undo the next sweep retires the moved code and clears its profile copy', async () => {
+      const winner = await customer();
+      const loser = await customer();
+      const id = await text(winner.id, 'The garage code is 1357');
+      await sweep(stub([gateItem({ kind: 'garage', code: '1357', quote: 'The garage code is 1357' })]));
+      const [row] = await rows(winner.id);
+      await access.accept(trx, row.id, {});
+      expect((await trx('property_preferences').where({ customer_id: winner.id }).first()).garage_code).toBe('1357');
+      await trx('sms_log').where({ id }).update({ customer_id: loser.id });
+      const out = await sweep(stub([]));
+      expect(out.movedRetired).toBe(1);
+      expect((await trx('customer_access_codes').where({ id: row.id }).first()).status).toBe('retired');
+      expect((await trx('property_preferences').where({ customer_id: winner.id }).first()).garage_code).toBeNull();
+    });
+
     test('a refused accept leaves the active twin untouched', async () => {
       const winner = await customer();
       const loser = await customer();
