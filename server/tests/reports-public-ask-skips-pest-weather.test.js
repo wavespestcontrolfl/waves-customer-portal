@@ -202,7 +202,10 @@ describe('POST /reports/:token/ask never resolves pest expectations weather', ()
     const { buildServiceReportV1ResponseData } = reportsRouter;
 
     await buildServiceReportV1ResponseData(service, VALID_TOKEN, { mode: 'live', pestExpectationsWeather: true });
-    expect(mockGetDailyRainOutlookBounded).toHaveBeenCalledTimes(1);
+    // Owner 2026-10-04: the rain card, the forecast's one reader, is off, so
+    // even the opted-in render makes no forecast lookup. The opt-in still
+    // reaches buildReportV1Data.
+    expect(mockGetDailyRainOutlookBounded).not.toHaveBeenCalled();
     expect(buildReportV1Data.mock.calls[0][3].pestWeekWeather).toBe(true);
 
     mockGetDailyRainOutlookBounded.mockClear();

@@ -1435,8 +1435,9 @@ describe('ReportViewPage — "Your plan" section (planSummary)', () => {
     payload.planSummary = { year: 2026, visitsThisYear: 2, reservicesThisYear: 0, tier: 'Gold' };
     payload.waveGuardTier = 'Bronze';
     payload.reserviceEligible = true;
-    payload.nextAppointment = null;
-    payload.nextSameServiceAppointment = { serviceType: 'Quarterly Pest Control Service', scheduledDate: '2099-01-05', windowStart: null };
+    // The account-wide pick, not the property-scoped one (Codex P2 r2 #5888).
+    payload.nextAppointment = { serviceType: 'Quarterly Pest Control Service', scheduledDate: '2099-01-05', windowStart: null };
+    payload.nextSameServiceAppointment = { serviceType: 'Quarterly Pest Control Service', scheduledDate: '2099-03-02', windowStart: null };
     const { container } = renderReport(payload);
 
     await screen.findByRole('heading', { name: 'Your plan', level: 2 });
@@ -1444,7 +1445,7 @@ describe('ReportViewPage — "Your plan" section (planSummary)', () => {
     expect(within(section).getByText("You're a WaveGuard Gold member.")).toBeInTheDocument();
     expect(within(section).getByText("We've completed 2 visits for you this year.")).toBeInTheDocument();
     expect(within(section).getByText('Your next Quarterly Pest Control visit is Mon, Jan 5.')).toBeInTheDocument();
-    expect(within(section).getByText("Something come up between visits? Text us and we'll come back out.")).toBeInTheDocument();
+    expect(within(section).getByText("Something come up between visits? Text us.")).toBeInTheDocument();
     expect(within(section).queryByText(/no charge|free|\$/i)).toBeNull();
   });
 
@@ -1453,8 +1454,8 @@ describe('ReportViewPage — "Your plan" section (planSummary)', () => {
     payload.planSummary = { year: 2026, visitsThisYear: 2, reservicesThisYear: 0, tier: null };
     payload.waveGuardTier = 'Bronze';
     payload.reserviceEligible = false;
-    payload.nextAppointment = null;
-    payload.nextSameServiceAppointment = { serviceType: 'Quarterly Pest Control Service', scheduledDate: '2020-01-06', windowStart: null };
+    payload.nextAppointment = { serviceType: 'Quarterly Pest Control Service', scheduledDate: '2020-01-06', windowStart: null };
+    payload.nextSameServiceAppointment = null;
     const { container } = renderReport(payload);
 
     await screen.findByRole('heading', { name: 'Your plan', level: 2 });

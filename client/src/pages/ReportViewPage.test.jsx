@@ -1336,26 +1336,26 @@ describe('smartStatusSummary — re-service (callback) branch', () => {
 
     it('names both sides and the activity', () => {
       expect(smartStatusSummary(pestVisit(), 'static').result)
-        .toBe('We treated outside and inside. Pest activity today: very low.');
+        .toBe('We treated outside and inside. Pest pressure: very low.');
     });
 
     it('names one side only when only one was treated', () => {
       expect(smartStatusSummary(pestVisit({ dynamicContext: { reentry: { targets: [{ key: 'exterior' }] } } }), 'static').result)
-        .toBe('We treated outside. Pest activity today: very low.');
+        .toBe('We treated outside. Pest pressure: very low.');
       expect(smartStatusSummary(pestVisit({ dynamicContext: { reentry: { targets: [{ key: 'interior' }] } } }), 'static').result)
-        .toBe('We treated inside. Pest activity today: very low.');
+        .toBe('We treated inside. Pest pressure: very low.');
     });
 
     it('makes no treatment claim when nothing was treated, and no activity claim when the gauge is hidden', () => {
       expect(smartStatusSummary(pestVisit({ treatmentPerformed: false }), 'static').result)
-        .toBe('Pest activity today: very low.');
+        .toBe('Pest pressure: very low.');
       expect(smartStatusSummary(pestVisit({ pestPressure: { enabled: true, showOnCustomerReport: false, label: 'Very Low' } }), 'static').result)
         .toBe('We treated outside and inside.');
       // null = the product load failed: re-entry timers stay, the claim does not.
       expect(smartStatusSummary(pestVisit({ treatmentPerformed: null }), 'static').result)
-        .toBe('Pest activity today: very low.');
+        .toBe('Pest pressure: very low.');
       expect(smartStatusSummary(pestVisit({ treatmentPerformed: undefined }), 'static').result)
-        .toBe('Pest activity today: very low.');
+        .toBe('Pest pressure: very low.');
       expect(smartStatusSummary(pestVisit({ treatmentPerformed: false, pestPressure: null }), 'static').result)
         .toBe('Service completed. Visit details are below.');
     });

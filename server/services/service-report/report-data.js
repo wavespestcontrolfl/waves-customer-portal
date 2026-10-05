@@ -44,7 +44,7 @@ const { fetchServiceWeekWeather, toCoordinate } = require('./application-conditi
 const { resolveWateringRule } = require('./lawn-watering-rule');
 const { buildWateringInstruction, composeBannerLines, normalizeMowHoldDays, isValidMowHold } = require('./lawn-watering-instruction');
 const { frozenForecastLine, attachLiveCloseOut } = require('./lawn-watering-forecast');
-const { pestReportExpectationsGateOn } = require('./pest-report-expectations');
+const { pestReportExpectationsGateOn, pestRainCardOn } = require('./pest-report-expectations');
 const { reportProductCopyGateOn, reportProductCopyForApplicationProduct } = require('./report-product-copy');
 const { validatePhotoChainRows } = require('./photo-chain');
 const { buildSatelliteTreatmentMapContext } = require('./satellite-treatment-map');
@@ -3152,7 +3152,10 @@ async function freezePestWeekWeather(serviceRecordId, weekWeather, knex = db) {
 // that could not be written are all treated alike, matching pestWeekWeatherUncacheable's existing
 // contract (docs/public-route-contracts.md).
 async function resolvePestWeekWeather(service, serviceLine, knex = db) {
-  if (serviceLine !== 'pest' || !pestReportExpectationsGateOn()) {
+  // The rain card is the week weather's one reader: while it is off
+  // (owner 2026-10-04) nothing is fetched or pinned, and the report stays
+  // cacheable (Codex P1 r2 #5888).
+  if (serviceLine !== 'pest' || !pestReportExpectationsGateOn() || !pestRainCardOn()) {
     return { weekWeather: null, uncacheable: false, reason: null };
   }
   const stored = storedPestWeekFor(service.structured_notes);

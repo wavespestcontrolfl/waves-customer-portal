@@ -716,9 +716,14 @@ function toExpectationProduct(raw = {}) {
 
 // ── Compose all three blocks ─────────────────────────────────────────────
 // Owner 2026-10-04: the "Rain and your treatment" card is off the pest
-// report (live page and PDF). buildRainExpectation itself is unchanged, so
-// turning this back on restores the card as it was.
-const PEST_RAIN_CARD_ON = false;
+// report (live page and PDF). `PEST_RAIN_CARD=true` (read at call time)
+// brings it back as it was; buildRainExpectation itself is unchanged. The
+// card's two weather lookups (the week's rain and the live forecast) and the
+// PDF no-cache signal they raise read this too, so none of them runs for a
+// card that is not built (Codex P1 r2 #5888).
+function pestRainCardOn() {
+  return process.env.PEST_RAIN_CARD === 'true';
+}
 function buildPestExpectations({
   weekWeather = null,
   applications = [],
@@ -728,7 +733,7 @@ function buildPestExpectations({
   forecastHeavyRain = false,
 } = {}) {
   const flatProducts = (applications || []).map(toExpectationProduct);
-  const rain = PEST_RAIN_CARD_ON
+  const rain = pestRainCardOn()
     ? buildRainExpectation({ weekWeather, products: flatProducts, serviceMonth, forecastHeavyRain })
     : null;
   const spiders = buildSpiderExpectation({ actionLabels, actionEntries, applications });
@@ -745,6 +750,7 @@ function buildPestExpectations({
 
 module.exports = {
   pestReportExpectationsGateOn,
+  pestRainCardOn,
   RAINY_SEASON_MONTHS,
   classifyProductExpectation,
   buildRainExpectation,

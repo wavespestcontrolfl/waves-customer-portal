@@ -51,6 +51,15 @@ const { settledWeekWeatherForRender } = require('../routes/reports-public');
 const SETTLED = { rainInches: 0.6, rainConfidence: 'high', et0Inches: null, dailyRain: null, rainSource: 'open-meteo', windowClosed: true };
 const UNSETTLED = { ...SETTLED, rainInches: 0.2, windowClosed: false };
 
+// Owner 2026-10-04: the rain card is off unless PEST_RAIN_CARD=true, and the
+// weather pipeline this file covers runs only for that card.
+const ORIGINAL_PEST_RAIN_CARD = process.env.PEST_RAIN_CARD;
+beforeAll(() => { process.env.PEST_RAIN_CARD = 'true'; });
+afterAll(() => {
+  if (ORIGINAL_PEST_RAIN_CARD === undefined) delete process.env.PEST_RAIN_CARD;
+  else process.env.PEST_RAIN_CARD = ORIGINAL_PEST_RAIN_CARD;
+});
+
 describe('settledWeekWeatherForRender', () => {
   test('live view keeps a settled week but drops an open one (codex P2 round 5: an open window is a forecast, not a measurement)', () => {
     expect(settledWeekWeatherForRender(SETTLED, 'live')).toBe(SETTLED);

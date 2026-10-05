@@ -150,6 +150,9 @@ function isRecentServiceDate(serviceDateRaw, now = new Date()) {
 }
 
 async function fetchPestRainForecastHeavySafe(service) {
+  // The rain card is the forecast's one reader: off (owner 2026-10-04), no
+  // lookup is made (Codex P1 r2 #5888).
+  if (!require('../services/service-report/pest-report-expectations').pestRainCardOn()) return false;
   try {
     const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
     const lat = service.customer_latitude ?? service.latitude ?? service.lat;

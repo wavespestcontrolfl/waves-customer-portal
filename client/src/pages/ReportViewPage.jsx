@@ -1094,7 +1094,10 @@ function pestVisitResultLine(data = {}) {
   const pressureLabel = pressure?.enabled && pressure?.showOnCustomerReport && typeof pressure.label === 'string'
     ? pressure.label.trim().toLowerCase()
     : '';
-  const activity = pressureLabel ? `Pest activity today: ${pressureLabel}.` : null;
+  // "Pest pressure", the gauge's own name: the score can blend the review
+  // window's reports, re-services and risk factors, so it is not "today's
+  // activity" (Codex P2 r2 #5888).
+  const activity = pressureLabel ? `Pest pressure: ${pressureLabel}.` : null;
   return [where, activity].filter(Boolean).join(' ') || null;
 }
 
@@ -2843,9 +2846,11 @@ function PlanSummaryCard({ data, mode }) {
   // the customer has since left.
   const tier = String(plan.tier || '').trim();
   // The upcoming-visits card already lists the dates when it is on the page.
-  // nextAppointment prefers this report's own service line, so the line names
-  // the service: another line's visit may come sooner.
-  const nextAppointment = data.upcomingVisitsCard ? null : (data.nextSameServiceAppointment || data.nextAppointment);
+  // nextAppointment is the account-wide pick (the plan is account-level) and
+  // prefers this report's own service line, so the line names the service:
+  // another line's visit may come sooner. Not nextSameServiceAppointment,
+  // which is scoped to this property for the "What's next" section.
+  const nextAppointment = data.upcomingVisitsCard ? null : data.nextAppointment;
   const nextVisit = planNextVisitDateLabel(nextAppointment);
   const nextVisitService = String(nextServiceName(nextAppointment?.serviceType) || '').replace(/\s+service$/i, '').trim();
   return (
@@ -2860,8 +2865,10 @@ function PlanSummaryCard({ data, mode }) {
       {nextVisit && nextVisitService && (
         <p className="map-context-copy">Your next {nextVisitService} visit is {nextVisit}.</p>
       )}
+      {/* An invitation only, no promise to come back: reserviceEligible
+          does not say this report's own service line is covered. */}
       {data.reserviceEligible === true && (
-        <p className="map-context-copy">Something come up between visits? Text us and we&apos;ll come back out.</p>
+        <p className="map-context-copy">Something come up between visits? Text us.</p>
       )}
     </section>
   );
