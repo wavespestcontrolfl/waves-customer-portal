@@ -10457,7 +10457,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     }
     // Tier carrier fallback BEFORE the bundle and every one-time-option read
     // below: a carrier row that cannot serve tiers books the full bundle.
-    await suppressOfferTierCarrierIfNeeded(estimate, estData, db);
+    const offerTierCarrierSuppressed = await suppressOfferTierCarrierIfNeeded(estimate, estData, db);
     const estimateForPricing = estData === rawEstData ? estimate : { ...estimate, estimate_data: estData };
     const pricingBundleAsOffered = await buildPricingBundle(estimateForPricing);
     // Offer tiers (GATE_ESTIMATE_OFFER_TIERS, owner 2026-10-05): the
@@ -11906,7 +11906,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           ...(serviceCadences ? { serviceCadences } : {}),
           // Offer tier the customer picked (GATE_ESTIMATE_OFFER_TIERS) —
           // recorded beside the cadence choice for the receipt/admin.
-          ...(offerTier ? { offerTier: offerTier.key } : {}),
+          // A suppressed tier carrier booked the full bundle: recorded as
+          // 'best' so every later read of this accepted row serves what was
+          // booked, never the carrier's pest-only view.
+          ...(offerTier
+            ? { offerTier: offerTier.key }
+            : (offerTierCarrierSuppressed ? { offerTier: 'best', offerTierCarrierFallback: true } : {})),
           selectedAt: new Date().toISOString(),
         };
         // A resolved 'best' tier keeps every quoted program: the pest-only
@@ -11934,10 +11939,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // no selectedFrequency branch to ride, so the chosen tier is recorded
       // here for every tiered accept (the recurring branch above wrote it
       // already for Better / Best; this is idempotent on the same key).
-      if (offerTier && nextEstimateData && nextEstimateData.customerSelection?.offerTier !== offerTier.key) {
+      const recordedOfferTierKey = offerTier
+        ? offerTier.key
+        : (offerTierCarrierSuppressed && !treatAsOneTime ? 'best' : null);
+      if (recordedOfferTierKey && nextEstimateData && nextEstimateData.customerSelection?.offerTier !== recordedOfferTierKey) {
         nextEstimateData.customerSelection = {
           ...(nextEstimateData.customerSelection || {}),
-          offerTier: offerTier.key,
+          offerTier: recordedOfferTierKey,
+          ...(offerTier ? {} : { offerTierCarrierFallback: true }),
           selectedAt: nextEstimateData.customerSelection?.selectedAt || new Date().toISOString(),
         };
         acceptedUpdates.estimate_data = JSON.stringify(nextEstimateData);

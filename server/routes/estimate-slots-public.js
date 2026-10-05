@@ -81,6 +81,15 @@ const featureGates = require('../config/feature-gates');
 // member judgement (linked customer, else the prospective phone match) all
 // allow it (fail-closed). Anything else sizes as today. `database` is the
 // reservation transaction when re-judged under the locked row.
+// A tier carrier that cannot serve tiers for this request (gate off, live
+// member, no longer eligible) books the full bundle at accept, so browsing,
+// search and the hold all size the visit from every quoted program — the
+// same profile on all three, so an advertised slot is never refused at hold.
+async function carrierFullBundleForSlots(estimate) {
+  if (typeof offerTierCarrierSuppressedForRow !== 'function' || !estimate?.id) return false;
+  return offerTierCarrierSuppressedForRow(estimate.id);
+}
+
 async function bestOfferTierForSlots(estimate, raw, database = db) {
   return resolveBestOfferTierForSlots({
     db: database,
@@ -482,6 +491,7 @@ router.get('/:token/available-slots', async (req, res) => {
     }
     const browseOfferTier = await bestOfferTierForSlots(estimate, req.query.offerTier);
     if (browseOfferTier) opts.offerTier = browseOfferTier;
+    else if (await carrierFullBundleForSlots(estimate)) opts.offerTier = 'best';
     // Bundle combo axes arrive JSON-encoded (?serviceCadences={"mosquito":
     // "seasonal9"}): the mosquito tier changes the seasonal filter/horizon
     // while selectedFrequency stays the pest cadence (codex r14 P1).
@@ -650,7 +660,8 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res) => {
       && !Array.isArray(req.body.serviceCadences)
       ? req.body.serviceCadences
       : undefined;
-    const findOfferTier = (await bestOfferTierForSlots(estimate, req.body?.offerTier)) || undefined;
+    const findOfferTier = (await bestOfferTierForSlots(estimate, req.body?.offerTier))
+      || ((await carrierFullBundleForSlots(estimate)) ? 'best' : undefined);
     try {
       const result = await findEstimateSlots(estimate.id, {
         query, serviceMode, selectedFrequency, serviceCadences: findServiceCadences, offerTier: findOfferTier,
@@ -737,8 +748,7 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
     // eligible): the accept books the full bundle, so the hold is sized from
     // every quoted program too — the hold's raw row read would size pest-only.
     let carrierFullBundleHold = false;
-    if (!slotOpts.offerTier && typeof offerTierCarrierSuppressedForRow === 'function'
-      && await offerTierCarrierSuppressedForRow(estimate.id)) {
+    if (!slotOpts.offerTier && await carrierFullBundleForSlots(estimate)) {
       slotOpts.offerTier = 'best';
       carrierFullBundleHold = true;
     }
