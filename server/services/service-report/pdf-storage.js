@@ -114,7 +114,9 @@ const TS_TECH_FINDINGS_PDF_REVISION = 1;
 function treeShrubReviewPdfSignature(service = {}) {
   const line = service.service_line || detectServiceLine(service.service_type);
   if (line !== 'tree_shrub') return '';
-  return `-tsreview2${techFindingsCopyLive() ? `-tsfind${TS_TECH_FINDINGS_PDF_REVISION}` : ''}`;
+  // tsreview3 (2026-10-05): the PDF drops the clean-visit row beside a watch,
+  // needs-attention or urgent V2 item; cached tree and shrub PDFs re-render once.
+  return `-tsreview3${techFindingsCopyLive() ? `-tsfind${TS_TECH_FINDINGS_PDF_REVISION}` : ''}`;
 }
 
 // Time-on-site correction key component (codex P2 #3152): nulling

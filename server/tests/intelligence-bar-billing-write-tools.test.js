@@ -531,11 +531,18 @@ describe('correctInvoiceAddressAudited (the one writer behind the PUT route and 
     expect(recordAuditEvent).not.toHaveBeenCalled();
   });
 
-  test('the PUT route passes no expectation and keeps its behavior (any status, any prior address)', async () => {
-    const { written, conn } = harness({ status: 'void', customer_address_snapshot: { ...OLD, address_line1: 'Anything' } });
+  test('the PUT route passes no expectation: any prior address and any non-void status are corrected', async () => {
+    const { written, conn } = harness({ status: 'sent', customer_address_snapshot: { ...OLD, address_line1: 'Anything' } });
     const result = await InvoiceAddress.correctInvoiceAddressAudited(conn, INV, INPUT);
     expect(result.after.city).toBe('Bradenton');
     expect(written).toHaveLength(1);
     expect(recordAuditEvent).toHaveBeenCalledTimes(1);
+  });
+
+  test('a void invoice is refused on every surface, with or without an expectation: nothing written, no audit row', async () => {
+    const { written, conn } = harness({ status: 'void' });
+    expect(await InvoiceAddress.correctInvoiceAddressAudited(conn, INV, INPUT)).toEqual({ drift: 'void' });
+    expect(written).toHaveLength(0);
+    expect(recordAuditEvent).not.toHaveBeenCalled();
   });
 });

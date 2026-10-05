@@ -3,9 +3,11 @@
 // ("jug (2.5 gal) $299.98", "box (4 x 30g tubes) $26.98") via product-cards.js after load —
 // so optionCardSelector lets the scanner size-match the right variant (parsed by
 // extract.variantsFromOptionCards). Direct product URLs are required: DoMyOwn's search is a
-// client-side Reflektion widget that serves a headless browser only its "Trending Items"
-// recommendations carousel (no real results), so search-by-name is unreliable — curate the
-// product URL in vendor_pricing. URLs are slug-p-<id>.html (category links are -c-).
+// client-side Reflektion (Rfk) widget. The query parameter is `w` (`/search?w=celsius+wg`):
+// with `q` the widget has no keyword and shows only its "Trending Items" carousel, with `w`
+// it injects the real result tiles (`.rfk_product`, ranked by relevance) a few seconds after
+// load (checked 2026-10-05). A curated product URL in vendor_pricing still skips the search.
+// URLs are slug-p-<id>.html (category links are -c-).
 const { makeAdapter, searchQuery } = require('./base');
 
 module.exports = makeAdapter({
@@ -13,7 +15,7 @@ module.exports = makeAdapter({
   priceType: 'public',
   buildSearchUrl: (p) => {
     const q = searchQuery(p);
-    return q ? `https://www.domyown.com/search?q=${encodeURIComponent(q)}` : null;
+    return q ? `https://www.domyown.com/search?w=${encodeURIComponent(q)}` : null;
   },
   productLinkSelectors: [
     '.rfk_product a[href*="-p-"]',

@@ -1,259 +1,131 @@
 /**
- * Good / Better / Best offer tiers for a sent residential pest estimate
- * (owner 2026-10-05, scope ~/gbb-estimates-scope-20261005.md).
+ * Good / Better / Best on a pest + lawn estimate (owner 2026-10-05).
  *
- * A tiered estimate is a show_one_time_option estimate that ALSO carries a
- * companion recurring program (lawn and/or tree & shrub). Today that toggle
- * offers two choices — a single visit, or a pest-only plan (the companions
- * are dropped at accept, docs/public-route-contracts.md "companion
- * exclusion"). The tiers name those two choices and add a third:
+ * The picker is a VIEW over the service opt-out rail
+ * (PUT /api/estimates/:token/service-opt-out), never a second pricing path:
  *
- *   good   — one visit            serviceMode 'one_time'   (today's path)
- *   better — pest-only plan        serviceMode 'recurring'  (today's path)
- *   best   — the full quoted bundle                          (NEW)
+ *   best   — the estimate as quoted: pest + lawn.
+ *   better — lawn removed through the rail. The canonical engine re-prices
+ *            the whole estimate (tier, setup fee, per-application prices).
+ *   good   — the one-time choice on that pest-only row, which the one-time
+ *            option has always supported.
  *
- * Nothing is priced here. The route builds the pest-only ladder for Better
- * and the full-bundle ladder for Best through the SAME shapeFromV1 /
- * buildServiceCadenceCombos calls it already makes, and the accept resolves
- * the customer's `selectedTier` against the stored tiers — the same
- * precompute-then-resolve contract the cadence combos use, so no price is
- * ever trusted from the client.
+ * So the stored row is always an ordinary, valid estimate, and no other
+ * surface (accept, slots, card holds, the text agent, admin, emails) needs
+ * to know tiers exist. Two small things make it work: the office marks a
+ * row for tiers (`estimate_data.offerTiersRequested`, stamped at save), and
+ * the rail turns the one-time option on when lawn is removed from a marked
+ * row and off when it is added back — the option is never on while a
+ * companion program is on the estimate.
  *
- * Dark behind GATE_ESTIMATE_OFFER_TIERS (feature-gates.js
- * estimateOfferTiersLive). Gate off: no tiers are built, the payload omits
- * the field, and `selectedTier` on an accept is refused — byte-identical
- * to today.
+ * Tree & shrub is not a companion here: the rail refuses its removal (its
+ * pricing knobs cannot be replayed on add-back).
+ *
+ * Dark behind GATE_ESTIMATE_OFFER_TIERS; needs GATE_ESTIMATE_SERVICE_OPT_OUT.
  */
 
-const OFFER_TIER_KEYS = ['good', 'better', 'best'];
-const COMPANION_KEYS = ['lawn_care', 'tree_shrub'];
-const DEFAULT_TIER_KEY = 'better';
+const COMPANION_KEY = 'lawn_care';
+const COMPANION_LABEL = 'Lawn Care';
 
-const TIER_LABELS = {
-  good: 'One-time visit',
-  better: 'Pest control plan',
-  best: 'Pest control + companion plan',
-};
+function offerTiersGateLive() {
+  try {
+    const gates = require('../config/feature-gates');
+    return typeof gates.estimateOfferTiersLive === 'function'
+      ? gates.estimateOfferTiersLive()
+      : process.env.GATE_ESTIMATE_OFFER_TIERS === 'true';
+  } catch (_) {
+    return false;
+  }
+}
 
-function normalizeSelectedOfferTier(raw) {
-  if (raw === undefined || raw === null || raw === '') return null;
-  const key = String(raw).trim().toLowerCase();
-  return OFFER_TIER_KEYS.includes(key) ? key : 'invalid';
+function offerTiersRequested(estData) {
+  return !!estData && typeof estData === 'object' && estData.offerTiersRequested === true;
+}
+
+// Recurring service keys on the STORED result (v1 admin-tool shape).
+function storedRecurringKeys(estData) {
+  const rows = Array.isArray(estData?.result?.recurring?.services) ? estData.result.recurring.services : [];
+  const { recurringServiceKey } = require('./estimate-converter');
+  return Array.from(new Set(rows.map((row) => recurringServiceKey(row)).filter(Boolean)));
 }
 
 /**
- * Pure eligibility: every input is a fact the caller already has. Reasons
- * are stable strings for tests and logs; the payload never carries them.
+ * May the office mark this estimate for tiers? Residential, recurring
+ * program is exactly pest + lawn, and no member evidence (a member's offers
+ * are the office's). Stored facts only — the save and the tool's preview
+ * judge the same thing. Reasons are stable strings for tests and logs.
  */
-function offerTierEligibility({
-  gateOn = false,
-  estimate = {},
-  recurringKeys = [],
-  optedOutKeys = [],
-  memberEvidence = false,
-  oneTimeChoicePrice = 0,
-  hasPestLadder = false,
+function optOutRailGateLive() {
+  return process.env.GATE_ESTIMATE_SERVICE_OPT_OUT === 'true';
+}
+
+function offerTiersSaveEligibility({
+  gateOn = offerTiersGateLive(), railGateOn = optOutRailGateLive(), estData = {}, commercial = false, memberEvidence = false,
 } = {}) {
   if (!gateOn) return { eligible: false, reason: 'gate_off' };
-  if (!(estimate.show_one_time_option || estimate.showOneTimeOption)) return { eligible: false, reason: 'no_one_time_option' };
-  if (String(estimate.category || 'RESIDENTIAL').toUpperCase() !== 'RESIDENTIAL') return { eligible: false, reason: 'not_residential' };
-  if (String(estimate.source || '') === 'plan_restart') return { eligible: false, reason: 'plan_restart' };
-  if (!hasPestLadder) return { eligible: false, reason: 'no_pest_ladder' };
-  const keys = Array.isArray(recurringKeys) ? recurringKeys.filter(Boolean) : [];
+  // The picker is a view over the opt-out rail: without it the customer page
+  // can never show the tiles, so the office must not be told it offered them.
+  if (!railGateOn) return { eligible: false, reason: 'opt_out_gate_off' };
+  if (commercial) return { eligible: false, reason: 'not_residential' };
+  let keys;
+  let member = !!memberEvidence || !!estData?.membershipSnapshot?.isExistingCustomer;
+  try {
+    keys = storedRecurringKeys(estData);
+    member = member || !!require('./estimate-service-opt-out').memberEvidenceInEstimateData(estData);
+  } catch (_) {
+    return { eligible: false, reason: 'unreadable' };
+  }
+  if (member) return { eligible: false, reason: 'member' };
   if (!keys.includes('pest_control')) return { eligible: false, reason: 'no_recurring_pest' };
-  if (keys.some((key) => String(key).startsWith('commercial_'))) return { eligible: false, reason: 'commercial_line' };
-  if (!keys.some((key) => COMPANION_KEYS.includes(key))) return { eligible: false, reason: 'no_companion' };
-  if (Array.isArray(optedOutKeys) && optedOutKeys.length) return { eligible: false, reason: 'opted_out_line' };
-  if (memberEvidence) return { eligible: false, reason: 'member' };
-  if (!(Number(oneTimeChoicePrice) > 0)) return { eligible: false, reason: 'no_one_time_price' };
+  if (!keys.includes(COMPANION_KEY)) return { eligible: false, reason: 'no_lawn' };
+  if (keys.length !== 2) return { eligible: false, reason: 'other_recurring_services' };
   return { eligible: true, reason: null };
 }
 
-function offerTierServiceKeys(tierKey, recurringKeys = []) {
-  const keys = Array.isArray(recurringKeys) ? recurringKeys.filter(Boolean) : [];
-  if (tierKey === 'good') return ['one_time_pest'];
-  if (tierKey === 'better') return keys.filter((key) => key === 'pest_control');
-  return keys;
-}
-
 /**
- * The payload block. Better's ladder IS the bundle's own `frequencies`
- * (pest-only, exactly what a show_one_time_option estimate serves today),
- * so it is referenced, not copied. Best carries its own full-bundle ladder
- * and combos; the accept swaps them in for `selectedTier: 'best'`.
+ * The rail's commit asks this what to do with the one-time option. On a row
+ * the office marked for tiers the option FOLLOWS THE LAWN LINE:
+ *  - lawn removed → the row is pest-only, where the option is valid: turn it
+ *    on, when the gate is on and the delivery validator allows it on the
+ *    repriced row;
+ *  - lawn added back (the customer's add-back, or the send path's
+ *    compensation after a failed send) → turn it off, gate or no gate. The
+ *    option must never
+ *    sit on an estimate that carries a companion program, because the
+ *    one-time toggle drops companions at accept.
+ * Returns the column patch for the rail's guarded UPDATE ({} = leave as is).
  */
-function buildOfferTiers({
-  oneTimeChoicePrice,
-  recurringKeys = [],
-  bestFrequencies = [],
-  bestServiceCadenceCombos = null,
+function oneTimeOptionUpdateForMixChange({
+  actor, serviceKey, mode, estData, next = {}, gateOn = offerTiersGateLive(), validate,
 } = {}) {
-  const keys = Array.isArray(recurringKeys) ? recurringKeys.filter(Boolean) : [];
-  const best = {
-    key: 'best',
-    label: TIER_LABELS.best,
-    serviceMode: 'recurring',
-    services: offerTierServiceKeys('best', keys),
-    frequencies: Array.isArray(bestFrequencies) ? bestFrequencies : [],
-    ...(Array.isArray(bestServiceCadenceCombos) && bestServiceCadenceCombos.length
-      ? { serviceCadenceCombos: bestServiceCadenceCombos }
-      : {}),
-  };
-  return {
-    offerTiers: [
-      {
-        key: 'good',
-        label: TIER_LABELS.good,
-        serviceMode: 'one_time',
-        services: offerTierServiceKeys('good', keys),
-        oneTimeTotal: Math.round(Number(oneTimeChoicePrice) * 100) / 100,
-      },
-      {
-        key: 'better',
-        label: TIER_LABELS.better,
-        serviceMode: 'recurring',
-        services: offerTierServiceKeys('better', keys),
-        usesBundleFrequencies: true,
-      },
-      best,
-    ],
-    offerTierDefaultKey: DEFAULT_TIER_KEY,
-  };
-}
-
-function offerTiersOf(pricingBundle) {
-  return Array.isArray(pricingBundle?.offerTiers) ? pricingBundle.offerTiers : [];
-}
-
-/**
- * Accept-side resolution. `raw` is the request's selectedTier. Returns
- * { tier, error } — `tier` null when the client sent none (today's
- * behavior continues), `error` a plain-English 400 message otherwise.
- */
-function resolveSelectedOfferTier(pricingBundle, raw, { serviceMode = 'recurring', gateOn = false } = {}) {
-  const key = normalizeSelectedOfferTier(raw);
-  if (key === null) return { tier: null, error: null };
-  if (key === 'invalid') return { tier: null, error: 'selected tier is not one of good, better, best' };
-  if (!gateOn) return { tier: null, error: 'offer tiers are not available for this estimate' };
-  const tier = offerTiersOf(pricingBundle).find((entry) => entry && entry.key === key) || null;
-  if (!tier) return { tier: null, error: 'offer tiers are not available for this estimate' };
-  const wantsOneTime = serviceMode === 'one_time';
-  if ((tier.serviceMode === 'one_time') !== wantsOneTime) {
-    return { tier: null, error: `selected tier ${key} does not match the requested service mode` };
-  }
-  return { tier, error: null };
-}
-
-/** The bundle view today's accept code understands for the chosen tier. */
-function pricingBundleForOfferTier(pricingBundle, tier) {
-  if (!tier || tier.key !== 'best' || !pricingBundle) return pricingBundle;
-  const { serviceCadenceCombos: _dropped, ...rest } = pricingBundle;
-  return {
-    ...rest,
-    frequencies: Array.isArray(tier.frequencies) ? tier.frequencies : pricingBundle.frequencies,
-    ...(Array.isArray(tier.serviceCadenceCombos) && tier.serviceCadenceCombos.length
-      ? { serviceCadenceCombos: tier.serviceCadenceCombos }
-      : {}),
-    offerTierApplied: 'best',
-  };
-}
-
-/**
- * After a 'best' accept the stored row still reads as a one-time-toggle
- * estimate, so every later bundle build serves the pest-only view. The
- * accepted recap must show what was booked: the Best tier's own ladder,
- * sections and summary, with the tier picker gone.
- */
-function acceptedOfferTierKey(estData) {
-  const key = String(estData?.customerSelection?.offerTier || '').trim().toLowerCase();
-  return OFFER_TIER_KEYS.includes(key) ? key : null;
-}
-
-function acceptedBestPricingView(pricingBundle, estData) {
-  if (acceptedOfferTierKey(estData) !== 'best') return pricingBundle;
-  const best = offerTiersOf(pricingBundle).find((tier) => tier && tier.key === 'best');
-  if (!best) return pricingBundle;
-  const { offerTiers: _tiers, offerTierDefaultKey: _def, ...rest } = pricingBundleForOfferTier(pricingBundle, best);
-  return {
-    ...rest,
-    ...(Array.isArray(best.sections) && best.sections.length ? { services: best.sections } : {}),
-    ...(best.combinedRecurring ? { combinedRecurring: best.combinedRecurring } : {}),
-    ...(best.waveGuardTier ? { waveGuardTier: best.waveGuardTier } : {}),
-    acceptedOfferTier: 'best',
-  };
-}
-
-/**
- * The show_one_time_option "companion exclusion" (pest-only recurring
- * choice) stands for every accept EXCEPT a resolved Best tier.
- */
-function offerTierKeepsCompanions(tier) {
-  return !!tier && tier.key === 'best';
-}
-
-/**
- * Slot routes (`/available-slots`, `/find-slots`, `/reserve`): a requested
- * 'best' changes the visit profile ONLY when the live gate is on, the
- * estimate's stored bundle actually offers the tier, and the linked
- * customer is not a LIVE active member — the same three facts the `/data`
- * projection and the accept check, so a hold can never size a visit the
- * accept will refuse. Fails closed on any read error. The slot handlers
- * load a column subset, so the bundle is built from a fresh full read.
- */
-const OFFER_TIER_ESTIMATE_COLUMNS = [
-  'id', 'status', 'source', 'category', 'customer_id', 'show_one_time_option',
-  'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'waveguard_tier',
-  // The pricing cache keys on these (estimate-pricing-cache.js): without them
-  // the slot read could serve another version's cached bundle.
-  'updated_at', 'pricing_version',
-  // The member block judges the prospective phone match too (route helper):
-  // the matcher reads the phone, the typed-phone mark and the identity
-  // fields it compares a lone candidate against (email, address).
-  'customer_phone', 'customer_phone_typed', 'customer_email', 'address',
-];
-
-async function resolveBestOfferTierForSlots({
-  db,
-  estimateId,
-  raw,
-  gateOn = false,
-  buildPricingBundle,
-  isBlockedMember,
-} = {}) {
-  if (normalizeSelectedOfferTier(raw) !== 'best') return null;
-  if (!gateOn || !db || !estimateId || typeof buildPricingBundle !== 'function') return null;
-  try {
-    const row = await db('estimates').where({ id: estimateId }).first(...OFFER_TIER_ESTIMATE_COLUMNS);
-    if (!row) return null;
-    const bundle = await buildPricingBundle(row);
-    if (!offerTiersOf(bundle).some((tier) => tier && tier.key === 'best')) return null;
-    // The same member judgement /data and the accept make (linked customer,
-    // else the prospective phone match); a missing judge reads as blocked.
-    let blocked = true;
-    try { blocked = typeof isBlockedMember === 'function' ? !!(await isBlockedMember(row)) : true; }
-    catch (_) { blocked = true; }
-    if (blocked) return null;
-    return 'best';
-  } catch (_) {
-    return null;
-  }
+  // Customer moves AND the staff send-time park ("lead with one service",
+  // GATE_ESTIMATE_LEAD_SERVICE_SEND, live): a marked pest + lawn estimate
+  // whose lawn is parked at send arrives pest-only — Better preselected, Best
+  // one tap away — and the one-time option must be on for Good to work.
+  if (!['customer', 'staff'].includes(actor) || serviceKey !== COMPANION_KEY || !offerTiersRequested(estData)) return {};
+  if (mode === 'restore') return { show_one_time_option: false };
+  if (mode !== 'remove' || !gateOn) return {};
+  const validateOption = typeof validate === 'function'
+    ? validate
+    : require('./estimate-delivery-options').validateEstimateDeliveryOptions;
+  const optionError = validateOption({
+    showOneTimeOption: true,
+    billByInvoice: false,
+    onetimeTotal: next.onetimeTotal,
+    monthlyTotal: next.monthlyTotal,
+    annualTotal: next.annualTotal,
+    estimateData: estData,
+  });
+  return optionError ? {} : { show_one_time_option: true };
 }
 
 module.exports = {
-  OFFER_TIER_KEYS,
-  OFFER_TIER_ESTIMATE_COLUMNS,
-  resolveBestOfferTierForSlots,
-  acceptedOfferTierKey,
-  acceptedBestPricingView,
-  COMPANION_KEYS,
-  DEFAULT_TIER_KEY,
-  TIER_LABELS,
-  normalizeSelectedOfferTier,
-  offerTierEligibility,
-  offerTierServiceKeys,
-  buildOfferTiers,
-  offerTiersOf,
-  resolveSelectedOfferTier,
-  pricingBundleForOfferTier,
-  offerTierKeepsCompanions,
+  optOutRailGateLive,
+  oneTimeOptionUpdateForMixChange,
+  COMPANION_KEY,
+  COMPANION_LABEL,
+  offerTiersGateLive,
+  offerTiersRequested,
+  storedRecurringKeys,
+  offerTiersSaveEligibility,
 };

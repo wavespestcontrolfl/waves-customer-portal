@@ -36,8 +36,16 @@ function claimBuilder({ claimedRow, lookupRow }) {
     first: jest.fn(async () => lookupRow),
     update: jest.fn(async () => 1),
   };
+  // The claim first peeks at the row to see whether its tool has a supersede
+  // rule; these tools have none, so the claim then runs the plain UPDATE.
+  const peekChain = {
+    where: jest.fn(() => peekChain),
+    first: jest.fn(async () => (claimedRow || lookupRow
+      ? { tool_name: 'create_customer', params: {}, requested_by: 'admin-1', status: 'pending', expires_at: new Date(Date.now() + 60000) } : undefined)),
+  };
   let call = 0;
-  db.mockImplementation(() => (call++ === 0 ? updateChain : lookupChain));
+  db.mockImplementation(() => [peekChain, updateChain, lookupChain][Math.min(call++, 2)]);
+  db.fn = db.fn || { now: jest.fn(() => 'NOW()') };
   return { updateChain, lookupChain };
 }
 

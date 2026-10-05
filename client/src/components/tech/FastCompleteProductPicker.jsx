@@ -122,6 +122,8 @@ function BrowseLists({ lists, showOther, groupProps, titles }) {
 // The lawn sheet's own search (variant "inline"): a box in the Products section.
 // Typing lists the matching catalog products right under it; one tap adds the
 // product and clears the box. No dialog, so nothing to open and nothing to close.
+// When matches first show for a typed query the list is scrolled into view
+// (nearest edge), so it is not left under the sheet's bottom bar.
 function InlineProductSearch({ line, products, commonProducts, onSheetIds, locked, onPick }) {
   const searchId = useId();
   const [query, setQuery] = useState('');
@@ -129,6 +131,11 @@ function InlineProductSearch({ line, products, commonProducts, onSheetIds, locke
   const lists = useMemo(() => pickerLists(products, commonProducts, lawn ? lawnProductGroup : productGroup), [products, commonProducts, lawn]);
   const q = query.trim().toLowerCase();
   const results = q ? rankProducts(lists.listed, q) : null;
+  const resultsRef = useRef(null);
+  const hasResults = !!results && results.length > 0;
+  useEffect(() => {
+    if (hasResults) resultsRef.current?.scrollIntoView?.({ block: 'nearest' });
+  }, [q, hasResults]);
   return (
     <div className="tech-product-search tech-product-search--inline">
       <label htmlFor={searchId} className="sr-only">Search products</label>
@@ -145,7 +152,7 @@ function InlineProductSearch({ line, products, commonProducts, onSheetIds, locke
         onChange={(event) => setQuery(event.target.value)}
       />
       {results && results.length > 0 && (
-        <div role="group" aria-label="Matching products" className="tech-product-list tech-product-inline-results">
+        <div ref={resultsRef} role="group" aria-label="Matching products" className="tech-product-list tech-product-inline-results">
           {results.map((product) => (
             <ProductOption
               key={product.id}

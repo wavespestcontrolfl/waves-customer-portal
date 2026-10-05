@@ -26,6 +26,7 @@
 // Tech portal style rule (CLAUDE.md): inline styles, no Tailwind, no
 // components/ui.
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { Camera, ClipboardCheck, FileText, Flag, Map, MessageSquare, Phone } from 'lucide-react';
 import { stopPropertyAlerts, TERMINAL_STATUSES } from './routeStops';
 import { canRecordConsultationOutcome } from '../../lib/consultationVisit';
 import { isMlUnit, mlToFlOz } from '../../lib/measure-units';
@@ -62,10 +63,9 @@ const DARK = {
 const sectionLabelStyle = {
   fontSize: 14,
   fontWeight: 500,
-  color: DARK.muted,
-  textTransform: 'uppercase',
-  letterSpacing: 1,
-  margin: '14px 0 6px',
+  lineHeight: 1.4,
+  color: DARK.text,
+  margin: '16px 0 6px',
   fontFamily: "var(--tfx-font, 'Roboto', system-ui, sans-serif)",
 };
 
@@ -87,32 +87,16 @@ function MemberLabel({ service, show }) {
   );
 }
 
-// tel:/sms: anchors styled like ActionBtn — real links so iOS hands them
+// tel:/sms: anchors styled like the visit's .tf-button — real links so iOS hands them
 // to the dialer/Messages without a tap-through.
 function LinkBtn({ href, icon, label, onClick, disabled = false }) {
-  const base = {
-    flex: 1,
-    minHeight: 48,
-    padding: '10px 4px',
-    borderRadius: 4,
-    border: `1px solid ${DARK.border}`,
-    background: 'transparent',
-    color: DARK.text,
-    fontSize: 14,
-    fontWeight: 500,
-    textDecoration: 'none',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 5,
-    cursor: 'pointer',
-  };
+  const style = { flex: 1 };
   if (href) {
-    return <a href={href} style={base}><span style={{ fontSize: 15 }}>{icon}</span> {label}</a>;
+    return <a className="tf-button" href={href} style={style}>{icon} {label}</a>;
   }
   return (
-    <button type="button" onClick={onClick} disabled={disabled} style={{ ...base, opacity: disabled ? 0.6 : 1 }}>
-      <span style={{ fontSize: 15 }}>{icon}</span> {label}
+    <button type="button" className="tf-button" onClick={onClick} disabled={disabled} style={style}>
+      {icon} {label}
     </button>
   );
 }
@@ -221,7 +205,7 @@ const alertRowStyle = (a, split) => {
   return {
     fontSize: 14,
     color: accent || DARK.text,
-    fontWeight: a?.type === 'no_card_on_file' ? 600 : undefined,
+    fontWeight: a?.type === 'no_card_on_file' ? 500 : undefined,
     marginBottom: 3,
     paddingLeft: 8,
     borderLeft: `2px solid ${accent || DARK.teal}`,
@@ -576,7 +560,7 @@ function MemberMoney({ service, estimate, showType }) {
     <>
       <MemberLabel service={service} show={showType} />
       {rows.map(([label, value, accent]) => (
-        <p key={label} style={{ ...factRowStyle, color: accent || DARK.text, fontWeight: accent ? 700 : undefined }}>
+        <p key={label} style={{ ...factRowStyle, color: accent || DARK.text, fontWeight: accent ? 500 : undefined }}>
           <span style={{ color: DARK.muted, fontWeight: 400 }}>{label}: </span>{value}
         </p>
       ))}
@@ -826,7 +810,7 @@ function LastVisitSection({ service, visitBrief, facts, showType }) {
 // completes, until a sale converts it to won.
 function ConsultationOutcomeAction({ service, onOutcome, style }) {
   if (!onOutcome || !canRecordConsultationOutcome(service)) return null;
-  return <button onClick={() => onOutcome(service)} style={style}>📝 Outcome</button>;
+  return <button className="tf-button" onClick={() => onOutcome(service)} style={style}><ClipboardCheck aria-hidden="true" />Outcome</button>;
 }
 
 // Per-service actions keep terminal reports read-only and preserve the
@@ -835,11 +819,7 @@ function ServiceActions({ service, showType, onPhotos, onProject, onZone, onLead
   const closeoutAvailable = !!service.visitCloseoutPacket || recordlessVisitNeedsCloseout(service);
   const reportDisabled = !closeoutAvailable
     && (TERMINAL_STATUSES.has(service.status) || ['sent', 'closed'].includes(service.linkedProject?.status));
-  const btn = {
-    minHeight: 48, minWidth: 48, padding: '8px 10px', borderRadius: 6, fontSize: 14, fontWeight: 500,
-    border: `1px solid ${DARK.border}`, background: 'transparent',
-    color: DARK.teal, cursor: 'pointer',
-  };
+  const btn = { flex: '1 1 auto' };
   return (
     <div style={{ marginTop: 8 }}>
       {showType && (
@@ -853,30 +833,32 @@ function ServiceActions({ service, showType, onPhotos, onProject, onZone, onLead
           </span>
         </p>
       )}
-      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         <button
+          className="tf-button"
           disabled={reportDisabled}
           onClick={(event) => { event.currentTarget.focus(); onProject(service); }}
-          style={{ ...btn, fontSize: 14, ...(reportDisabled ? { color: DARK.muted, cursor: 'default' } : {}) }}
+          style={btn}
         >
+          <FileText aria-hidden="true" />
           {/* A visit with an existing linked report continues it (in-place
               editor) instead of creating a duplicate; a sent/closed report
               or completed visit is terminal (openProjectOrContinue no-ops). */}
           {closeoutAvailable ? 'Open closeout' : service.linkedProject?.status === 'sent'
-            ? '🗂️ Sent'
+            ? 'Sent'
             : service.linkedProject?.status === 'closed' || service.status === 'completed'
-              ? '🗂️ Completed'
-              : service.linkedProject?.id ? '🗂️ Continue' : '🗂️ Report'}
+              ? 'Completed'
+              : service.linkedProject?.id ? 'Continue' : 'Report'}
         </button>
-        <button onClick={(event) => { event.currentTarget.focus(); onPhotos(service); }} style={btn}>📷 Photos</button>
+        <button className="tf-button" onClick={(event) => { event.currentTarget.focus(); onPhotos(service); }} style={btn}><Camera aria-hidden="true" />Photos</button>
         {/* Hidden when the schedule feed marks the service trace-ineligible
             (GATE_TRACE_ELIGIBILITY): nothing is sprayed on bait/trapping/
             inspection stops. Absent flag keeps the button — the write route
             enforces the same registry either way. */}
         {service.traceEligible !== false && (
-          <button onClick={() => onZone(service)} aria-label="Trace treatment zone" style={btn}>🛰️ Zone</button>
+          <button className="tf-button" onClick={() => onZone(service)} aria-label="Trace treatment zone" style={btn}><Map aria-hidden="true" />Zone</button>
         )}
-        <button onClick={() => onLead(service)} aria-label="Flag opportunity" style={{ ...btn, color: DARK.amber }}>🚩</button>
+        <button className="tf-button" onClick={() => onLead(service)} style={btn}><Flag aria-hidden="true" />Flag opportunity</button>
         <ConsultationOutcomeAction service={service} onOutcome={onOutcome} style={btn} />
       </div>
     </div>
@@ -993,7 +975,6 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
       setCallState({ busy: false, note: '', error: String(err?.message || err).slice(0, 160) });
     }
   }
-  const address = service.address || null;
   const alerts = stopPropertyAlerts(stop);
   // The day row marks a member whose neighborhood takes gate codes from the visit.
   const gateVisit = request ? stop.services.find((m) => m.neighborhoodGateActions === true) : null;
@@ -1045,22 +1026,15 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
   const sms = smsHref(phone);
 
   return (
-    <div data-testid="visit-brief-panel" style={{ borderTop: `1px solid ${DARK.border}`, marginTop: 10, paddingTop: 10 }}>
-      {(tel || sms || address) && (
+    <div data-testid="visit-brief-panel">
+      {(tel || sms) && (
         <div style={{ display: 'flex', gap: 8 }}>
           {tel && !lineUnknown && (line
-            ? (line.canCall && <LinkBtn icon="📞" label={callState.busy ? 'Calling…' : 'Call'} disabled={callState.busy} onClick={callFromLine} />)
-            : <LinkBtn href={tel} icon="📞" label="Call" />)}
+            ? (line.canCall && <LinkBtn icon={<Phone aria-hidden="true" />} label={callState.busy ? 'Calling…' : 'Call'} disabled={callState.busy} onClick={callFromLine} />)
+            : <LinkBtn href={tel} icon={<Phone aria-hidden="true" />} label="Call" />)}
           {sms && !lineUnknown && (line
-            ? <LinkBtn icon="💬" label="Text" disabled={textBusy} onClick={() => setComposeOpen((o) => !o)} />
-            : <LinkBtn href={sms} icon="💬" label="Text" />)}
-          {address && (
-            <LinkBtn
-              icon="🗺️"
-              label="Navigate"
-              onClick={() => window.open(`https://maps.google.com/?q=${encodeURIComponent(address)}`, '_blank')}
-            />
-          )}
+            ? <LinkBtn icon={<MessageSquare aria-hidden="true" />} label="Text" disabled={textBusy} onClick={() => setComposeOpen((o) => !o)} />
+            : <LinkBtn href={sms} icon={<MessageSquare aria-hidden="true" />} label="Text" />)}
         </div>
       )}
       {lineUnknown && (tel || sms) && (
@@ -1076,8 +1050,6 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
           onBusyChange={setTextBusy}
         />
       )}
-      {address && <p style={{ ...factMutedStyle, marginTop: 8 }}>{address}</p>}
-
       <AccessSection alerts={alerts} access={access} gate={gateVisit ? { visitId: gateVisit.id, request, onChanged: onGateChanged } : null} />
 
       <CustomerFlaggedSection

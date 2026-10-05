@@ -15,6 +15,7 @@ const {
 } = require('../lawn-protocol-operating-layer');
 const { loadCustomerGrassContext } = require('../lawn-grass-context');
 const { sqlZip5 } = require('../stamped-address');
+const { dateOnlyStamp } = require('./time-format');
 
 async function safeBuild(label, fn) {
   try {
@@ -249,9 +250,10 @@ async function buildLawnProtocolReportContext(record, knex, now) {
   // labelled as a completed protocol visit.
   if (completion && parseJson(completion.metadata, {}).attribution === 'none') return null;
   const assignment = completion ? null : await loadAssignedLawnProtocol(record, knex);
-  const serviceDate = record.service_date
-    ? new Date(`${String(record.service_date).slice(0, 10)}T12:00:00`)
-    : now;
+  // pg hands a DATE column back as a Date: String() of that starts "Mon Oct 05",
+  // which made an Invalid Date and threw "Invalid time value" in the window lookup.
+  const serviceDay = dateOnlyStamp(record.service_date);
+  const serviceDate = serviceDay ? new Date(`${serviceDay}T12:00:00`) : now;
   const windowKey = completion?.window_key || assignment?.lawn_protocol_window_key || null;
   const protocolId = await resolveAssignedProtocolId({ completion, assignment, knex });
   // Resolve the customer's REAL turf track. Do NOT fall back to a default
