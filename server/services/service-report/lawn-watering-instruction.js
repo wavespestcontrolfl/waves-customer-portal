@@ -54,9 +54,14 @@
 const { resolveApplicationRate, normalizeRuntimeInputs } = require('@waves/irrigation-runtime');
 // ET wall-clock extraction lives in the one shared module; only the deadline
 // rounding below is specific to this writer.
-const { etParts, etDateString } = require('../../utils/datetime-et');
+const { etParts, etDateString, parseETDateTime } = require('../../utils/datetime-et');
 
 const HOUR_MS = 3600000;
+// Latest ET wall time a same-day water-in deadline may print ("11 PM tonight"),
+// and the least time it must leave after completion: a full cycle of several
+// rotor zones at about 40 minutes each.
+const SAME_DAY_CUTOFF = '23:00';
+const SAME_DAY_MIN_LEAD_MS = 3 * HOUR_MS;
 
 // Owner table: minutes per zone for a quarter inch. Scaled linearly (rounded
 // to 5) for any other rule depth.
@@ -284,6 +289,25 @@ function emptyInstruction() {
  *                                    explicitInchesPerWeek, unconfirmed }
  * @returns {object}
  */
+// The water-in deadline, or null when no honest one exists.
+// C. It is ALWAYS completion + the rule's window. A hold that reaches it cannot
+// be honoured together with the water-in: no claim, for review, never a
+// manufactured later deadline. A same-day rule (label: water in "the same
+// day") also caps it at SAME_DAY_CUTOFF on the completion's ET day, and when
+// the later of completion and the hold's end leaves less than
+// SAME_DAY_MIN_LEAD before the cutoff, the watering run cannot fit: no claim, never a next-day or impossible deadline.
+function waterInDeadline(at, waterIns, byHours, holdEnd) {
+  let by = deadlineAfter(at, byHours);
+  if (holdEnd && holdEnd.getTime() >= by.getTime()) return null;
+  if (!waterIns.some((r) => r.water_in_same_day === true)) return by;
+  // The run can start only once completion AND any hold are behind it.
+  const start = Math.max(at.getTime(), holdEnd ? holdEnd.getTime() : 0);
+  const cutoff = parseETDateTime(`${etDateString(at)}T${SAME_DAY_CUTOFF}`);
+  if (cutoff.getTime() - start < SAME_DAY_MIN_LEAD_MS) return null;
+  if (cutoff.getTime() < by.getTime()) by = cutoff;
+  return by;
+}
+
 function buildWateringInstruction({ rules, completedAt, runtime = null } = {}) {
   const out = emptyInstruction();
   const list = Array.isArray(rules) ? rules : [];
@@ -345,11 +369,9 @@ function buildWateringInstruction({ rules, completedAt, runtime = null } = {}) {
     const inches = Math.max(...waterIns.map((r) => finitePositive(r.water_in_inches, BASE_INCHES)));
     const byHours = Math.min(...waterIns.map((r) => finitePositive(r.water_in_by_hours, 24)));
     waterInDetail = { inches, byHours, ...minutesFor(runtime, inches) };
-    // C. The deadline is ALWAYS completion + the rule's window. A hold that
-    // reaches it cannot be honoured together with the water-in: no claim, for
-    // review, never a manufactured later deadline.
-    by = deadlineAfter(at, byHours);
-    if (effectiveHoldEnd && effectiveHoldEnd.getTime() >= by.getTime()) return out;
+    // C. See waterInDeadline.
+    by = waterInDeadline(at, waterIns, byHours, effectiveHoldEnd);
+    if (!by) return out;
     out.minutes = waterInDetail.minutes;
     out.waterInInches = inches;
     out.waterInBy = by.toISOString();
