@@ -191,6 +191,12 @@ describe('verifyItems', () => {
     expect(kept).toHaveLength(2);
   });
 
+  test('directions without a code are dropped unless they are a pass (owner 2026-10-05)', () => {
+    const body = 'The resident will put Waves on the gate list, the gate is open';
+    expect(verify([item({ kind: 'property_gate', code: null, instructions: 'the gate is open', quote: 'the gate is open' })], body)).toEqual([]);
+    expect(verify([item({ kind: 'other', code: null, instructions: 'put Waves on the gate list', quote: 'put Waves on the gate list' })], body)).toEqual([]);
+  });
+
   test('a cropped quote cannot strip a symbol or shorten the code', () => {
     const body = 'The gate code is #4821';
     expect(verify([item({ code: '4821', quote: '4821' })], body)).toEqual([]);
@@ -205,7 +211,7 @@ describe('verifyItems', () => {
   });
 
   test('instructions-only items hash the trimmed instructions', () => {
-    const kept = verify([item({ kind: 'call_box', code: null, instructions: ' Press 5 for Waves ', quote: 'press 5' })], 'at the box press 5 for Waves');
+    const kept = verify([item({ kind: 'pass', code: null, instructions: ' Press 5 for Waves ', quote: 'press 5' })], 'at the box press 5 for Waves');
     expect(kept[0].value_hash).toBe(valueHash(null, 'Press 5 for Waves'));
   });
 

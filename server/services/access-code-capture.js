@@ -169,7 +169,10 @@ function verifyItem(item, bodyText, { refuse, phones }) {
     // the message's own numbers too.
     if (digits.length >= 10) return null;
     if (phones.some((phone) => digits.length >= 7 && phone.endsWith(digits))) return null;
-  } else if (!instructions) return null;
+  // Owner 2026-10-05: only real credentials are captured. An item with no code
+  // is kept only for a visitor or QR pass (its link or how to show it); a guard
+  // list, an open gate or other directions without a code are dropped.
+  } else if (!instructions || item.kind !== 'pass') return null;
   return { kind: item.kind, code, instructions, life: item.life, quote, value_hash: valueHash(code, instructions) };
 }
 
@@ -238,7 +241,7 @@ The CURRENT message was sent on ${formatETDay(new Date(message.created_at))}, ${
 
 An item is a code or a way in that a technician needs to reach the property or the door: kind is one of neighborhood_gate (the community gate), property_gate (this property's own gate), door, lockbox, garage, call_box, pass (a visitor, guest or gate pass, QR code or app pass), other.
 - quote: copied word for word from the CURRENT message, the shortest span that holds the whole item. Never from a prior message.
-- code: the code alone, keeping its # or * symbols, with no words around it. A visitor pass, QR code or app pass has code null and instructions. instructions is always a span copied word for word from the CURRENT message (the customer's own words for how to get in or how to show the pass), never a summary; it is null when the message adds nothing a technician must know beyond the code.
+- code: the code alone, keeping its # or * symbols, with no words around it. A visitor pass, QR code or app pass has code null and instructions. Never report a guard list, a name to give at the gate, an open or unlocked gate, or any other direction without a code or a pass. instructions is always a span copied word for word from the CURRENT message (the customer's own words for how to get in or how to show the pass), never a summary; it is null when the message adds nothing a technician must know beyond the code.
 - life: visit for "today", "for this job", "tomorrow only", a one-day code, or a door code for a one-time job at the job site. Otherwise standing.
 - Never report a code the customer calls old, wrong, changed, expired, not working or unsure, and never a code that only appears in a question ("is the gate code 1234?").
 - If the kind is unclear, use other. Never guess a code. Never copy a house number, ZIP code or phone number as a code.
