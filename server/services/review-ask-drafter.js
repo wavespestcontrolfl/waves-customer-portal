@@ -1112,7 +1112,7 @@ function legCapture() {
 // today" failed it against "so I missed them"). One a quote does carry still
 // counts for the clause, as before.
 const NO_CLAIM_STEMS = new Set(`sorry glad good great nice happy know knew let letting went going ahead make made
-  came come took take said say like done visit service treatment appointment quarterly monthly weekly yearly
+  came come took take said say done visit service treatment appointment quarterly monthly weekly yearly
   annual`.split(/\s+/).map(termStem).filter(Boolean));
 const isFiller = (w, nameStems) => isStop(w) || nameStems.has(w) || GREETING_STEMS.has(w) || ASK_STEMS.has(w) || TIME_STEMS.has(w);
 
@@ -1131,38 +1131,43 @@ function quoteSharesContent(sentence, quote, names) {
   if (words.some((w) => GROUNDED_TERMS.has(w) && !quoteWords.has(w))) return false;
   const shared = words.filter((w) => quoteWords.has(w)).length;
   const unbacked = words.filter((w) => !quoteWords.has(w) && !NO_CLAIM_STEMS.has(w)).length;
-  // Nothing left that claims anything ("I went ahead"): no backing needed.
-  if (!shared && !unbacked) return true;
+  // Always at least one word a quote carries: a clause of nothing but
+  // no-claim words ("Glad you came.") is not waved through.
   return shared >= 1 && shared >= unbacked;
 }
 
-// The record words a checker quote copies, or null when it copies none. The
-// checker is asked for the exact words and usually gives them; the production
-// checker also frames them: a section label in front (Visit report: "..."),
-// the copied words inside quotation marks, or two runs joined by "...". Each
-// run that is left must still be in the record word for word, and at least
-// one must be three words or more (a bare heading proves nothing).
+// The record words a checker quote copies, as a list of runs, or null when it
+// copies none. The checker is asked for the exact words and usually gives
+// them; the production checker also frames them: a short label in front with
+// the copy inside one pair of quotation marks (Visit report: "..."), or runs
+// joined by "...". Every run must be in the record word for word and one must
+// be three words or more (a bare heading proves nothing). Nothing inside the
+// copy is skipped: quotation marks nested in it are part of what must match.
+const RESTORED_LEAD = new Set(["we", "i", "you", "they", "it", "and", "the"]);
 function recordWordsOf(quote, normRecord) {
-  const raw = String(quote || "");
+  const raw = String(quote || "").trim();
   // Word for word as given (the usual case, and a record line that itself
   // holds quotation marks): the whole quote is the evidence, as before.
   const whole = normalizeForMatch(raw);
-  if (whole.length >= 3 && normRecord.includes(whole)) return whole;
-  const quoted = [...raw.matchAll(/["\u201c]([^"\u201c\u201d]{3,})["\u201d]/g)].map((m) => m[1]);
-  // Words inside quotation marks are the copy; otherwise the runs between "...".
-  const runs = (quoted.length ? quoted : raw.split(/\.{3,}|\u2026/)).map(normalizeForMatch).filter((r) => r.length >= 3);
+  if (whole.length >= 3 && normRecord.includes(whole)) return [whole];
+  // One outer frame only: a label with no quotation mark in it, then the copy
+  // from the first opening mark to the last closing one.
+  const framed = /^[^"\u201c\u201d]{0,80}[:\]]\s*["\u201c]([\s\S]+)["\u201d]\s*$/.exec(raw);
+  const runs = (framed ? framed[1] : raw).split(/\.{3,}|\u2026/).map(normalizeForMatch).filter((r) => r.length >= 3);
   if (!runs.length) return null;
   const kept = [];
   for (const run of runs) {
-    // The checker sometimes restores a subject the record line left out
-    // ("We spot-treated ..." for "... and spot-treated ..."): one leading
-    // word may be dropped when four or more words still match in a row.
-    const tail = run.split(" ").slice(1);
-    const match = normRecord.includes(run) ? run : (tail.length >= 4 && normRecord.includes(tail.join(" ")) ? tail.join(" ") : null);
+    // The checker sometimes restores a subject the record line left out ("We
+    // spot-treated ..." for "... and spot-treated ..."): that one word may be
+    // dropped, only when it is such a word and four or more still match in a
+    // row. Any other first word is part of the claim and must match.
+    const [lead, ...tail] = run.split(" ");
+    const match = normRecord.includes(run) ? run
+      : (RESTORED_LEAD.has(lead) && tail.length >= 4 && normRecord.includes(tail.join(" ")) ? tail.join(" ") : null);
     if (!match) return null;
     kept.push(match);
   }
-  return kept.some((run) => run.split(" ").length >= 3) ? kept.join(" ") : null;
+  return kept.some((run) => run.split(" ").length >= 3) ? kept : null;
 }
 
 // One checker verdict against the sentence it names. Returns a reject reason
@@ -1289,11 +1294,12 @@ function sentenceVerdictReject(j, sentence, { names, techNames, recordLines = []
   if (j.greeting_only) return isGreetingOnlySentence(sentence, names, techNames) ? null : "fact_check_bad_answer";
   const cited = Array.isArray(j.quotes) ? j.quotes.filter((q) => typeof q === "string") : [];
   if (!j.supported || !cited.length) return "unsupported_sentence";
-  // Each quote is reduced to the record words it copies (recordWordsOf); a
+  // Each quote is reduced to the record runs it copies (recordWordsOf); a
   // quote with none is not evidence. Coverage and timing below read those
-  // words only, never the checker's framing.
-  const quotes = cited.map((q) => recordWordsOf(q, normRecord));
-  if (quotes.some((q) => !q)) return "unsupported_sentence";
+  // runs only, each on its own, never the checker's framing.
+  const copied = cited.map((q) => recordWordsOf(q, normRecord));
+  if (copied.some((q) => !q)) return "unsupported_sentence";
+  const quotes = copied.flat();
   // Every clause must be backed: each one shares a content word (not filler,
   // not a name) with a cited quote, so "ants and your new baby" cannot ride
   // on a quote about the ants alone.

@@ -481,32 +481,36 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     expect(isGreetingOnlySentence("Kevin, it's Adam with the new deck.", names, tech)).toBe(false);
   });
 
-  test('replay 10-04: a checker quote counts by the record words it copies, whatever frames them', () => {
+  test('replay 10-04: a checker quote counts by the record runs it copies, whatever frames them', () => {
     const { recordWordsOf } = Drafter.__private;
     const norm = (t) => String(t).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-    const record = norm('SERVICE REPORT FOR THIS VISIT:\n- Recap: We nourished your turf, and spot-treated areas showing lawn fungus along with weeds.\n- Conversation with the customer: The customer was not home, so I missed them.\n- [customer, 2026-10-01 11:11 ET] I get back in town this Saturday.');
-    // word for word, as before
-    expect(recordWordsOf('so I missed them', record)).toBe('so i missed them');
+    const record = norm('SERVICE REPORT FOR THIS VISIT:\n- Recap: We nourished your turf, and spot-treated areas showing lawn fungus along with weeds.\n- Conversation with the customer: The customer was not home, so I missed them.\n- [customer, 2026-10-01 11:11 ET] I get back in town this Saturday.\n- Kids were playing by the pool.');
+    // word for word as given, as before (two words included)
+    expect(recordWordsOf('so I missed them', record)).toEqual(['so i missed them']);
+    expect(recordWordsOf('lawn fungus', record)).toEqual(['lawn fungus']);
     // a record line that itself holds quotation marks is still the whole evidence
     const said = norm('- Recap: The customer said "thanks" after we treated the ants.');
-    expect(recordWordsOf('The customer said "thanks" after we treated the ants.', said)).toBe('the customer said thanks after we treated the ants');
-    expect(recordWordsOf('after we treated the ants', said)).toBe('after we treated the ants');
+    expect(recordWordsOf('The customer said "thanks" after we treated the ants.', said)).toEqual(['the customer said thanks after we treated the ants']);
     // the production checker's framing: a label and quotation marks, a timestamp, runs joined by "..."
-    expect(recordWordsOf('Visit report: "The customer was not home, so I missed them."', record)).toBe('the customer was not home so i missed them');
-    expect(recordWordsOf('[2026-10-01 11:11 ET] "I get back in town this Saturday."', record)).toBe('2026 10 01 11 11 et i get back in town this saturday');
-    expect(recordWordsOf('Text from the customer: "I get back in town this Saturday."', record)).toBe('i get back in town this saturday');
-    expect(recordWordsOf('Service Report for This Visit: ... We nourished your turf ...', record)).toBe('service report for this visit we nourished your turf');
-    // a restored subject: one leading word may go when four or more still match in a row
-    expect(recordWordsOf('We spot-treated areas showing lawn fungus along with weeds.', record)).toBe('spot treated areas showing lawn fungus along with weeds');
+    expect(recordWordsOf('Visit report: "The customer was not home, so I missed them."', record)).toEqual(['the customer was not home so i missed them']);
+    expect(recordWordsOf('Text from the customer: "I get back in town this Saturday."', record)).toEqual(['i get back in town this saturday']);
+    // each run is kept on its own (the timing check finds each one's record line)
+    expect(recordWordsOf('Service Report for This Visit: ... We nourished your turf ...', record)).toEqual(['service report for this visit', 'we nourished your turf']);
+    expect(recordWordsOf('[customer, 2026-10-01 11:11 ET] ... back in town this Saturday', record)).toEqual(['customer 2026 10 01 11 11 et', 'back in town this saturday']);
+    // a restored subject may go, only that kind of word, when four or more still match in a row
+    expect(recordWordsOf('We spot-treated areas showing lawn fungus along with weeds.', record)).toEqual(['spot treated areas showing lawn fungus along with weeds']);
     expect(recordWordsOf('We missed them', record)).toBeNull();
-    // never a paraphrase, a run that is not in the record, or a bare heading
+    // #5893 r1: a changed first word is part of the claim, never dropped
+    expect(recordWordsOf('Puppies were playing by the pool', record)).toBeNull();
+    // #5893 r1: nothing inside the copy is skipped, nested quotation marks included
+    const kittens = norm('- Recap: The customer said "new kittens" were arriving Saturday.');
+    expect(recordWordsOf('Visit report: "The customer said "new puppies" were arriving Saturday."', kittens)).toBeNull();
+    expect(recordWordsOf('Visit report: "The customer said "new kittens" were arriving Saturday."', kittens)).toEqual(['the customer said new kittens were arriving saturday']);
+    // never a paraphrase, a run that is not in the record, or framing around under three copied words
     expect(recordWordsOf('The customer was away, so the tech missed them', record)).toBeNull();
     expect(recordWordsOf('We nourished your turf ... and treated the new nursery', record)).toBeNull();
     expect(recordWordsOf('Visit report: "the puppies were adorable"', record)).toBeNull();
-    // framing with under three copied words in every run is not evidence
     expect(recordWordsOf('Heading: "your turf"', record)).toBeNull();
-    // two words word for word, as given, were evidence before and still are
-    expect(recordWordsOf('lawn fungus', record)).toBe('lawn fungus');
     expect(recordWordsOf('', record)).toBeNull();
   });
 
@@ -518,7 +522,10 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     expect(covered('Sorry I missed you at the house today.', 'The customer was not home, so I missed them.')).toBe(true);
     expect(covered('Good catching up in person today.', 'I talked with them in person; we spoke during the visit.')).toBe(true);
     expect(covered('Cockroaches were my focus on this quarterly visit.', 'We focused on ants, spiders, and cockroaches')).toBe(true);
-    expect(covered("Thanks for letting me know you're out of town, I went ahead and did the outside like you said.", 'I am out of town but you can do the outside')).toBe(true);
+    expect(covered("Thanks for letting me know you're out of town.", 'I am out of town but you can do the outside')).toBe(true);
+    // #5893 r1: a clause of nothing but no-claim words is not waved through
+    expect(covered('Glad you came.', 'so I missed them at the house')).toBe(false);
+    expect(covered('I missed you at the house, glad you said so.', 'so I missed them at the house')).toBe(false);
     expect(covered('I had full access to the property and got your monthly service done.', 'I had full access to the property. We completed your monthly pest service today')).toBe(true);
     // #5524 r3 / r4: a detail the quotes do not carry still fails its clause
     expect(covered("I saw ants in your new baby's nursery.", 'We focused on ants')).toBe(false);
@@ -536,6 +543,15 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
       record.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim());
     expect(verdict(['Visit report: "The customer was not home, so I missed them."'])).toBeNull();
     expect(verdict(['The customer missed the visit'])).toBe('unsupported_sentence');
+    // #5893 r1: runs joined by "..." are timed one by one against their own record lines
+    const dated = 'Today: 2026-10-05.\n- [customer, 2026-10-05 09:00 ET] I keep seeing ants by the door';
+    jest.useFakeTimers({ now: new Date('2026-10-05T18:00:00Z'), doNotFake: ['nextTick', 'setImmediate'] });
+    try {
+      expect(sentenceVerdictReject(
+        { sentence: 'You mentioned ants by the door today.', ask_only: false, greeting_only: false, off_limits: false, supported: true, quotes: ['[customer, 2026-10-05 09:00 ET] ... ants by the door'] },
+        'You mentioned ants by the door today.', { names, techNames: names, recordLines: dated.split('\n'), visitDay: '2026-10-05' },
+        dated.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim())).toBeNull();
+    } finally { jest.useRealTimers(); }
     expect(verdict([])).toBe('unsupported_sentence');
   });
 
