@@ -10,7 +10,7 @@
  * Staff-only. Codes are shown to the office as typed; nothing here logs or
  * stores one.
  */
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { ActionFeedback, Badge, Button, Input, Select, Textarea, cn } from "../ui";
 
 export const ACCESS_KINDS = [
@@ -73,17 +73,20 @@ export function sourceLabel(row) {
 // The customer's visits a one-visit code may be tied to: not over, and inside
 // the 14 days that start the day the code was sent (the server enforces the
 // same window). `fromAt` is the send time; omit it for "today".
-export function visitChoices(visits, fromAt = null, today = dayKey(new Date())) {
+export function visitChoices(visits, fromAt = null, today = dayKey(new Date()), homes = []) {
+  // On a multi-home account each choice names its home, so two visits on one
+  // day at different homes differ.
+  const homeOf = (v) => (homes.length > 1 ? homes.find((h) => h.id === (v.property_id || v.propertyId))?.label || "Home not set" : null);
   const from = dayKey(fromAt) || today;
   const to = shiftDay(from, VISIT_WINDOW_DAYS);
   return (Array.isArray(visits) ? visits : [])
     .filter((v) => v?.id && !ENDED_VISIT_STATUSES.has(String(v.status || "").toLowerCase()))
-    .map((v) => ({ id: v.id, day: dayKey(v.scheduled_date || v.scheduledDate), type: v.service_type || v.serviceType || "" }))
+    .map((v) => ({ id: v.id, day: dayKey(v.scheduled_date || v.scheduledDate), type: v.service_type || v.serviceType || "", home: homeOf(v) }))
     .filter((v) => v.day && v.day >= from && v.day <= to)
     .sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0))
     .map((v) => ({
       id: v.id,
-      label: [fmtDay(v.day, { weekday: "short", month: "short", day: "numeric" }), v.type].filter(Boolean).join(" · "),
+      label: [fmtDay(v.day, { weekday: "short", month: "short", day: "numeric" }), v.type, v.home].filter(Boolean).join(" · "),
     }));
 }
 
@@ -255,14 +258,10 @@ export function ActiveCodeRow({ row, homes = [], onRetire }) {
 // A code found in a text, waiting for the office. `visits` is the customer's
 // upcoming visits; `renderHeading` names the customer on the page that lists
 // every customer's codes.
-export function FoundCodeCard({ row, visits, homes = null, onSave, onDismiss, onNeedVisits = null, renderHeading = null }) {
+export function FoundCodeCard({ row, visits, homes = null, onSave, onDismiss, renderHeading = null }) {
   const homeList = homes || row.propertyChoices || [];
-  const choices = visitChoices(visits, row.sourceAt);
+  const choices = visitChoices(visits, row.sourceAt, undefined, homeList);
   const [draft, setDraft] = useState(() => draftFromRow(row, choices));
-  // A list that does not carry the customer's visits asks for them once a
-  // one-visit code needs the picker.
-  const needsVisits = draft.life === "visit";
-  useEffect(() => { if (needsVisits) onNeedVisits?.(row.customerId); }, [needsVisits, row.customerId]);
   const { busy, error, run } = useGuarded();
   const typed = draft.code.trim() || draft.instructions.trim();
   return (
@@ -290,7 +289,7 @@ export function FoundCodeCard({ row, visits, homes = null, onSave, onDismiss, on
 
 // The office types a code in itself.
 export function AddCodeForm({ visits, homes = [], onSubmit, onCancel }) {
-  const choices = visitChoices(visits);
+  const choices = visitChoices(visits, null, undefined, homes);
   const [draft, setDraft] = useState(BLANK_DRAFT);
   const { busy, error, run } = useGuarded();
   const typed = draft.code.trim() || draft.instructions.trim();

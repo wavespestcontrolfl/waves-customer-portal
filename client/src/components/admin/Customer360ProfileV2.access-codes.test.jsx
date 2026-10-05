@@ -225,3 +225,15 @@ describe('home picker', () => {
       .toEqual({ kind: 'door', life: 'visit', code: '2468', instructions: null, scheduledServiceId: 'v1' });
   });
 });
+
+describe('visit choices on a multi-home account', () => {
+  it('name the home of each visit', async () => {
+    const { visitChoices } = await import('./AccessCodePanels');
+    const homes = [{ id: 'h1', label: '10 Example Way · Unit 1' }, { id: 'h2', label: '10 Example Way · Unit 2' }];
+    const out = visitChoices([
+      { id: 'v1', scheduled_date: '2040-03-12', status: 'confirmed', service_type: 'Pest control', property_id: 'h1' },
+      { id: 'v2', scheduled_date: '2040-03-12', status: 'confirmed', service_type: 'Pest control', property_id: 'h2' },
+    ], '2040-03-12T14:00:00Z', '2040-03-12', homes);
+    expect(out.map((c) => c.label)).toEqual([expect.stringMatching(/Unit 1$/), expect.stringMatching(/Unit 2$/)]);
+  });
+});

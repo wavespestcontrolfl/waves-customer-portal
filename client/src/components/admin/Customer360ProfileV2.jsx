@@ -7507,6 +7507,7 @@ export function CustomerAccessCodesBlock({ customerId, upcomingScheduled = [] })
         active: Array.isArray(data?.active) ? data.active : [],
         found: Array.isArray(data?.found) ? data.found : [],
         properties: Array.isArray(data?.properties) ? data.properties : [],
+        visits: Array.isArray(data?.visits) ? data.visits : null,
       });
     } catch (err) {
       if (mine !== seq.current || err?.status === 404 || err?.status === 403) return;
@@ -7556,7 +7557,7 @@ export function CustomerAccessCodesBlock({ customerId, upcomingScheduled = [] })
       {adding && (
         <div className="mb-2">
           <AddCodeForm
-            visits={upcomingScheduled}
+            visits={codes?.visits || upcomingScheduled}
             homes={codes?.properties || []}
             onSubmit={(body) => post("", { customerId, ...body })}
             onCancel={() => setAdding(false)}
@@ -7581,7 +7582,7 @@ export function CustomerAccessCodesBlock({ customerId, upcomingScheduled = [] })
               <FoundCodeCard
                 key={row.id}
                 row={row}
-                visits={upcomingScheduled}
+                visits={codes?.visits || upcomingScheduled}
                 homes={codes?.properties || []}
                 onSave={(r, body) => post(`/${r.id}/accept`, body)}
                 onDismiss={(r) => post(`/${r.id}/dismiss`)}

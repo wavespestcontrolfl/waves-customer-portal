@@ -1100,6 +1100,27 @@ postgres('access codes section', () => {
       expect(await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: '2468' })).toMatchObject({ ok: false, code: 'duplicate_active' });
     });
 
+    test('retiring on a multi-home account clears the shared field instead of promoting another home\'s code', async () => {
+      const c = await customer({ properties: 1 });
+      const first = await found(c.id, { kind: 'garage', code: '2468' });
+      await access.accept(trx, first.id, {});
+      expect((await trx('property_preferences').where({ customer_id: c.id }).first()).garage_code).toBe('2468');
+      const [p1] = await trx('customer_properties').where({ customer_id: c.id }).select('*');
+      const p2 = randomUUID();
+      await trx('customer_properties').insert({ ...p1, id: p2, address_line1: '9 Example Ct', is_primary: false, address_key: null });
+      await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: '1357', propertyId: p2 });
+      expect(await access.retire(trx, first.id, {})).toMatchObject({ ok: true, promoted: false, clearedField: 'garage_code' });
+      expect((await trx('property_preferences').where({ customer_id: c.id }).first()).garage_code).toBeNull();
+    });
+
+    test('the customer list carries visits with their home', async () => {
+      const c = await customer({ properties: 2 });
+      const [, b] = await trx('customer_properties').where({ customer_id: c.id }).orderBy('id').select('id');
+      const v = await visit(c.id, etDateString(addETDays(new Date(), 2)));
+      await trx('scheduled_services').where({ id: v }).update({ property_id: b.id });
+      expect((await access.listForCustomer(trx, c.id)).visits).toEqual([expect.objectContaining({ id: v, property_id: b.id })]);
+    });
+
     test('home choices name the unit and the property label', async () => {
       const c = await customer({ properties: 2 });
       const [a, b] = await trx('customer_properties').where({ customer_id: c.id }).orderBy('id').select('id');

@@ -594,6 +594,12 @@ async function listForCustomer(conn, customerId) {
     active: kept.filter((r) => r.status === 'active').map(serialize),
     found: kept.filter((r) => r.status === 'found').map(serialize),
     properties: await homeChoices(conn, [customerId]).then((m) => m.get(customerId) || []),
+    // The visit picker's choices, with the home each visit is at.
+    visits: await conn('scheduled_services').where({ customer_id: customerId })
+      .whereRaw(`COALESCE(status, 'pending') NOT IN (${ENDED_VISIT_STATUSES.map(() => '?').join(', ')})`, ENDED_VISIT_STATUSES)
+      .whereBetween('scheduled_date', [etDateString(new Date()), etDateString(addETDays(new Date(), VISIT_WINDOW_DAYS * 2))])
+      .select('id', conn.raw('scheduled_date::text AS scheduled_date'), 'status', 'service_type', 'property_id')
+      .orderBy('scheduled_date').orderBy('id'),
   };
 }
 
@@ -681,7 +687,7 @@ async function listFound(conn, { limit = 50, offset = 0 } = {}) {
     .whereRaw(`COALESCE(status, 'pending') NOT IN (${ENDED_VISIT_STATUSES.map(() => '?').join(', ')})`, ENDED_VISIT_STATUSES)
     .where('scheduled_date', '>=', today)
     .where('scheduled_date', '<=', etDateString(addETDays(new Date(), VISIT_WINDOW_DAYS)))
-    .select('id', 'customer_id', conn.raw('scheduled_date::text AS scheduled_date'), 'status', 'service_type')
+    .select('id', 'customer_id', conn.raw('scheduled_date::text AS scheduled_date'), 'status', 'service_type', 'property_id')
     .orderBy('scheduled_date').orderBy('id') : [];
   const homes = await homeChoices(conn, customerIds);
   return {
@@ -693,7 +699,7 @@ async function listFound(conn, { limit = 50, offset = 0 } = {}) {
         customerName: [r.first_name, r.last_name].filter(Boolean).join(' ').trim() || r.company_name || null,
         propertyChoices: homes.get(r.customer_id) || [],
         visitChoices: visits.filter((v) => v.customer_id === r.customer_id && v.scheduled_date <= last)
-          .map((v) => ({ id: v.id, scheduled_date: v.scheduled_date, status: v.status, service_type: v.service_type })),
+          .map((v) => ({ id: v.id, scheduled_date: v.scheduled_date, status: v.status, service_type: v.service_type, property_id: v.property_id })),
       };
     }),
   };
@@ -933,7 +939,10 @@ async function retireLocked(trx, row, { adminUserId = null, action }) {
       if (prefs && canonicalLower(prefs[field]) === canonicalLower(row.code)) {
         // Another active standing code of this kind takes the field over (the
         // newest one), so profile readers never lose a code the customer still has.
-        const heir = await trx('customer_access_codes')
+        // Shared profile fields are read at every visit of the customer: only a
+        // one-home account hands the field to another code; otherwise it is cleared.
+        const homeCount = Number((await trx('customer_properties').where({ customer_id: row.customer_id, active: true }).count({ n: '*' }).first())?.n || 0);
+        const heir = homeCount > 1 ? null : await trx('customer_access_codes')
           .where({ customer_id: row.customer_id, kind: row.kind, status: 'active', life: 'standing' })
           .whereNot('id', row.id).whereNotNull('code')
           .whereRaw(OWNED_SOURCE_SQL.replace(/\ba\./g, 'customer_access_codes.'))
