@@ -272,7 +272,9 @@ function queueNote(queue, { allDelivered, optedOut = false }) {
       ? 'The automatic receipt job is back in the queue, but the customer opted out of payment receipts, so it will close without sending. Nothing else will send this receipt.'
       : 'The automatic receipt for this invoice is back in the queue and will try again on its own (it can email the customer the receipt), so a manual resend is not needed for that.';
     case 'held_for_reconciliation': return 'The automatic receipt for this invoice was held, not re-queued: the queue will not send it again. Check whether the customer got the receipt before sending again.';
-    case 'release_failed': return 'The automatic receipt job could not be settled here; the queue recovers it on its own and may email the customer the receipt again.';
+    case 'release_failed': return optedOut
+      ? 'The automatic receipt job could not be settled here; the queue recovers it on its own, but the customer opted out of payment receipts, so it will close without sending. Nothing else will send this receipt.'
+      : 'The automatic receipt job could not be settled here; the queue recovers it on its own and may email the customer the receipt again.';
     case 'none':
     case 'removed': return allDelivered ? null : 'No automatic receipt is waiting in the queue, so nothing else will send this receipt.';
     default: return null; // 'completed' (closed by this send) or not reported

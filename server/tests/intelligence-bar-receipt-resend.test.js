@@ -538,12 +538,12 @@ describe('result wording comes only from what the writer reported about the auto
     expect(out.note).not.toMatch(mustNotMatch);
   });
 
-  test('an opted-out customer: a job back in the queue is said to close without sending, never to email on its own', async () => {
+  test.each(['returned_to_queue', 'release_failed'])('an opted-out customer, job %s: said to close without sending, never to email on its own', async (queue) => {
     receiptEmailOptOutState.mockResolvedValue({ receiptKillSwitch: true, prefsLookupFailed: false });
-    sendInvoiceReceipt.mockResolvedValue({ ...emailFailed, queue: 'returned_to_queue' });
+    sendInvoiceReceipt.mockResolvedValue({ ...emailFailed, queue });
     const out = await confirm({});
     expect(out.note).toMatch(/opted out of payment receipts, so it will close without sending/);
-    expect(out.note).not.toMatch(/try again on its own/);
+    expect(out.note).not.toMatch(/try again on its own|may email the customer/);
     receiptEmailOptOutState.mockResolvedValue({ receiptKillSwitch: false, prefsLookupFailed: false });
   });
 
