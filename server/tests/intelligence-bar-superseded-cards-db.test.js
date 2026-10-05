@@ -1,11 +1,12 @@
-/** Real isolated Postgres tests: a newer card for the same intent in the same
- * conversation cancels the older pending card, so the older one can no longer
- * be confirmed. No model, send or provider is called; every id is synthetic. */
+/** Real isolated Postgres tests: a newer card for the same intent cancels the
+ * older card, whatever chat window or platform path it came from, and a Confirm
+ * on a superseded card is refused. No model, send or provider is called; every
+ * id is synthetic. */
 const crypto = require('crypto');
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 const databaseUrl = process.env.IB_TEST_DATABASE_URL;
 const suite = databaseUrl ? describe : describe.skip;
-jest.setTimeout(30000);
+jest.setTimeout(60000);
 
 suite('IB superseded confirmation cards in isolated Postgres', () => {
   let db, Tasks, Pending;
@@ -13,21 +14,26 @@ suite('IB superseded confirmation cards in isolated Postgres', () => {
   const otherActorId = crypto.randomUUID();
   const customerId = crypto.randomUUID();
   const otherCustomerId = crypto.randomUUID();
-  const leadId = crypto.randomUUID();
-  const otherLeadId = crypto.randomUUID();
+  const serviceId = crypto.randomUUID();
+  let leadId, otherLeadId; // fresh per test: cards of one intent from earlier tests would count as siblings
+  beforeEach(() => { leadId = crypto.randomUUID(); otherLeadId = crypto.randomUUID(); });
   const originalDatabaseUrl = process.env.DATABASE_URL;
   const booking = (extra = {}) => ({ customer_id: customerId, service_type: 'Synthetic Pest Service', scheduled_date: '2030-01-15', time_window: '9:00 AM', price: 149, ...extra });
+  const at = offsetMs => new Date(Date.now() + offsetMs);
 
-  // Each call is a new request (a new task) in the given conversation.
-  async function propose(sessionId, toolName, params, { actor = actorId, task } = {}) {
-    const started = task ? { task } : await Tasks.begin({ actorId: actor, sessionId, requestKey: crypto.randomUUID(), request: { prompt: 'Synthetic request' }, pageContext: {} });
-    const t = started.task;
+  // With a task (GATE_IB_PLATFORM on) or without one (off, the default).
+  // Each call is a new request; `startedAt` is that request's start time.
+  async function propose(toolName, params, { actor = actorId, task, noTask = false, startedAt = new Date() } = {}) {
+    if (noTask) return Pending.createPendingAction({ toolName, requestedBy: actor, params, summary: 'Synthetic proposal only', requestStartedAt: startedAt });
+    const t = task || (await Tasks.begin({ actorId: actor, sessionId: crypto.randomUUID(), requestKey: crypto.randomUUID(), request: { prompt: 'Synthetic request' }, pageContext: {} })).task;
     return Pending.createPendingAction({
       toolName, requestedBy: actor, taskId: t.id, runnerToken: t.runner_token, stepKey: crypto.randomUUID().slice(0, 32),
-      summary: 'Synthetic proposal only', params,
+      summary: 'Synthetic proposal only', params, requestStartedAt: startedAt,
     });
   }
-  const status = id => db('ib_pending_actions').where({ id }).first('status').then(r => r.status);
+  const status = id => db('ib_pending_actions').where({ id }).first('status').then(r => r && r.status);
+  const claim = row => Pending.claimForConfirm(row.id, row.requested_by, { contractHash: row.contract_hash });
+  const bookingLock = (actor = actorId, params = booking()) => Pending.intentLock(actor, 'create_appointment', Pending.intentKey('create_appointment', params));
 
   beforeAll(async () => {
     const parsed = new URL(databaseUrl);
@@ -49,155 +55,212 @@ suite('IB superseded confirmation cards in isolated Postgres', () => {
     else process.env.DATABASE_URL = originalDatabaseUrl;
   });
 
-  test('a revised booking in a later request cancels the older card; the newer card confirms', async () => {
-    const session = crypto.randomUUID();
-    const nine = await propose(session, 'create_appointment', booking());
-    const ten = await propose(session, 'create_appointment', booking({ time_window: '10:00 AM' }));
+  test.each([['with a task (platform on)', false], ['with no task (platform off)', true]])('a revised booking %s cancels the older card; the newer card confirms', async (_label, noTask) => {
+    const nine = await propose('create_appointment', booking({ scheduled_date: noTask ? '2030-01-16' : '2030-01-17' }), { noTask, startedAt: at(-2000) });
+    const ten = await propose('create_appointment', booking({ scheduled_date: noTask ? '2030-01-16' : '2030-01-17', time_window: '10:00 AM' }), { noTask, startedAt: at(-1000) });
     expect(await status(nine.id)).toBe('cancelled');
     expect(await status(ten.id)).toBe('pending');
-    expect(await Pending.claimForConfirm(nine.id, actorId, { contractHash: nine.contract_hash })).toEqual({ error: 'cancelled' });
-    const claimed = await Pending.claimForConfirm(ten.id, actorId, { contractHash: ten.contract_hash });
-    expect(claimed.action.params.time_window).toBe('10:00 AM');
+    expect(await claim(nine)).toEqual({ error: 'cancelled' });
+    expect((await claim(ten)).action.params.time_window).toBe('10:00 AM');
   });
 
-  test('a lead edit that rewrites the same field cancels the older edit card', async () => {
-    const session = crypto.randomUUID();
-    const jay = await propose(session, 'update_lead_contact', { lead_id: leadId, first_name: 'Jay' });
-    const jason = await propose(session, 'update_lead_contact', { lead_id: leadId.toUpperCase(), first_name: 'Jason' });
+  test('the same intent from another chat window or another path still replaces the older card', async () => {
+    const viaTask = await propose('create_appointment', booking({ scheduled_date: '2030-02-01' }), { startedAt: at(-2000) });
+    const viaNoTask = await propose('create_appointment', booking({ scheduled_date: '2030-02-01', time_window: '11:00 AM' }), { noTask: true, startedAt: at(-1000) });
+    expect(await status(viaTask.id)).toBe('cancelled');
+    expect(await status(viaNoTask.id)).toBe('pending');
+  });
+
+  test('two accepted names for one catalog service share an intent; two catalog ids do not', async () => {
+    const day = '2030-02-02';
+    const a = await propose('create_appointment', booking({ scheduled_date: day, service_type: 'Pest Control', _booking_service_id: serviceId }), { noTask: true, startedAt: at(-3000) });
+    const b = await propose('create_appointment', booking({ scheduled_date: day, service_type: 'Quarterly Pest Control Service', _booking_service_id: serviceId.toUpperCase(), time_window: '10:00 AM' }), { noTask: true, startedAt: at(-2000) });
+    expect(await status(a.id)).toBe('cancelled');
+    const c = await propose('create_appointment', booking({ scheduled_date: day, service_type: 'Pest Control', _booking_service_id: crypto.randomUUID() }), { noTask: true, startedAt: at(-1000) });
+    expect(await status(b.id)).toBe('pending');
+    expect(await status(c.id)).toBe('pending');
+  });
+
+  test('a lead edit that rewrites the same field cancels the older edit; other fields or leads stay', async () => {
+    const jay = await propose('update_lead_contact', { lead_id: leadId, first_name: 'Jay' }, { noTask: true, startedAt: at(-5000) });
+    const email = await propose('update_lead_contact', { lead_id: leadId, email: 'synthetic@example.invalid' }, { noTask: true, startedAt: at(-4000) });
+    const otherLead = await propose('update_lead_contact', { lead_id: otherLeadId, first_name: 'Zed' }, { noTask: true, startedAt: at(-3000) });
+    expect(await status(jay.id)).toBe('pending');
+    expect(await status(email.id)).toBe('pending');
+    const jason = await propose('update_lead_contact', { lead_id: leadId.toUpperCase(), first_name: 'Jason' }, { noTask: true, startedAt: at(-2000) });
     expect(await status(jay.id)).toBe('cancelled');
+    expect(await status(email.id)).toBe('pending');
+    expect(await status(otherLead.id)).toBe('pending');
     expect(await status(jason.id)).toBe('pending');
   });
 
-  test('a different target, service, day, tool, actor or conversation leaves the older card pending', async () => {
-    const session = crypto.randomUUID();
-    const base = await propose(session, 'create_appointment', booking());
+  test('a different customer, service, day, tool, actor or an older-than-TTL card is left alone', async () => {
+    const day = '2030-03-01';
+    const base = await propose('create_appointment', booking({ scheduled_date: day }), { noTask: true, startedAt: at(-9000) });
     const others = [
-      await propose(session, 'create_appointment', booking({ customer_id: otherCustomerId })),
-      await propose(session, 'create_appointment', booking({ service_type: 'Synthetic Lawn Service' })),
-      await propose(session, 'create_appointment', booking({ scheduled_date: '2030-02-20' })),
-      await propose(session, 'update_lead_contact', { lead_id: leadId, first_name: 'Pat' }),
-      await propose(crypto.randomUUID(), 'create_appointment', booking({ time_window: '11:00 AM' })),
-      await propose(session, 'create_appointment', booking({ time_window: '1:00 PM' }), { actor: otherActorId }),
+      await propose('create_appointment', booking({ scheduled_date: day, customer_id: otherCustomerId }), { noTask: true }),
+      await propose('create_appointment', booking({ scheduled_date: day, service_type: 'Synthetic Lawn Service' }), { noTask: true }),
+      await propose('create_appointment', booking({ scheduled_date: '2030-03-02' }), { noTask: true }),
+      await propose('update_lead_contact', { lead_id: leadId, last_name: 'Synthetic' }, { noTask: true }),
+      await propose('create_appointment', booking({ scheduled_date: day, time_window: '1:00 PM' }), { noTask: true, actor: otherActorId }),
     ];
     expect(await status(base.id)).toBe('pending');
     for (const row of others) expect(await status(row.id)).toBe('pending');
     // A tool outside the supersede list never cancels an earlier card for the same customer.
-    const first = await propose(session, 'send_sms', { phone: '+15550104321', message: 'Synthetic one; never sent', customer_id: customerId });
-    await propose(session, 'send_sms', { phone: '+15550104321', message: 'Synthetic two; never sent', customer_id: customerId });
+    const sms = { phone: '+15550104321', customer_id: customerId };
+    const first = await propose('send_sms', { ...sms, message: 'Synthetic one; never sent' });
+    await propose('send_sms', { ...sms, message: 'Synthetic two; never sent' });
     expect(await status(first.id)).toBe('pending');
+    // A card from more than one card lifetime ago is not the same proposal.
+    const old = await propose('create_appointment', booking({ scheduled_date: '2030-03-03' }), { noTask: true });
+    await db('ib_pending_actions').where({ id: old.id }).update({ created_at: new Date(Date.now() - 11 * 60 * 1000) });
+    await propose('create_appointment', booking({ scheduled_date: '2030-03-03', time_window: '10:00 AM' }), { noTask: true });
+    expect(await status(old.id)).toBe('pending');
   });
 
-  test('a lead edit of a different field, or another lead, does not cancel the earlier edit', async () => {
-    const session = crypto.randomUUID();
-    const name = await propose(session, 'update_lead_contact', { lead_id: leadId, first_name: 'Jay' });
-    const email = await propose(session, 'update_lead_contact', { lead_id: leadId, email: 'synthetic@example.invalid' });
-    const otherLead = await propose(session, 'update_lead_contact', { lead_id: otherLeadId, first_name: 'Zed' });
-    expect(await status(name.id)).toBe('pending');
-    expect(await status(email.id)).toBe('pending');
-    expect(await status(otherLead.id)).toBe('pending');
-    // Writing both fields now covers the name edit and the email edit.
-    await propose(session, 'update_lead_contact', { lead_id: leadId, first_name: 'Jason', email: 'synthetic2@example.invalid' });
-    expect(await status(name.id)).toBe('cancelled');
-    expect(await status(email.id)).toBe('cancelled');
-    expect(await status(otherLead.id)).toBe('pending');
+  test.each([['with a task', false], ['with no task', true]])('an older request that finishes late %s is stored cancelled and does not cancel the newer card', async (_l, noTask) => {
+    const day = noTask ? '2030-04-01' : '2030-04-02';
+    const newCard = await propose('create_appointment', booking({ scheduled_date: day, time_window: '10:00 AM' }), { noTask, startedAt: at(-1000) });
+    const lateCard = await propose('create_appointment', booking({ scheduled_date: day }), { noTask, startedAt: at(-5000) }); // started earlier, stored later
+    expect(lateCard.superseded_by_newer_request).toBe(true);
+    expect(await status(lateCard.id)).toBe('cancelled');
+    expect(await claim(lateCard)).toEqual({ error: 'cancelled' });
+    expect(await status(newCard.id)).toBe('pending');
+    expect((await claim(newCard)).action.params.time_window).toBe('10:00 AM');
   });
 
-  test('a card already confirmed is never touched, and a retry of the same step cancels nothing', async () => {
-    const session = crypto.randomUUID();
-    const first = await propose(session, 'create_appointment', booking());
-    await Pending.claimForConfirm(first.id, actorId, { contractHash: first.contract_hash });
-    const revised = await propose(session, 'create_appointment', booking({ time_window: '10:00 AM' }));
+  test('a newer card that was cancelled or has expired still shows the older request is stale', async () => {
+    const day = '2030-04-10';
+    const cancelled = await propose('create_appointment', booking({ scheduled_date: day, time_window: '10:00 AM' }), { noTask: true, startedAt: at(-1000) });
+    expect(await Pending.cancelPendingAction(cancelled.id, actorId)).toEqual({ cancelled: true });
+    const late = await propose('create_appointment', booking({ scheduled_date: day }), { noTask: true, startedAt: at(-5000) });
+    expect(late.superseded_by_newer_request).toBe(true);
+    expect(await status(late.id)).toBe('cancelled');
+
+    const day2 = '2030-04-11';
+    const expired = await propose('create_appointment', booking({ scheduled_date: day2, time_window: '10:00 AM' }), { noTask: true, startedAt: at(-1000) });
+    await db('ib_pending_actions').where({ id: expired.id }).update({ expires_at: new Date(Date.now() - 1000) });
+    const late2 = await propose('create_appointment', booking({ scheduled_date: day2 }), { noTask: true, startedAt: at(-5000) });
+    expect(late2.superseded_by_newer_request).toBe(true);
+  });
+
+  test('a Confirm is refused when a newer same-intent card exists, even a cancelled or expired one', async () => {
+    const day = '2030-04-20';
+    const older = await propose('create_appointment', booking({ scheduled_date: day }), { noTask: true, startedAt: at(-5000) });
+    // Simulate the race window: the newer card is stored while the older one is still pending.
+    const newerRow = async (extra) => db('ib_pending_actions').insert({
+      tool_name: 'create_appointment', params: JSON.stringify({ ...booking({ scheduled_date: day, time_window: '10:00 AM' }), _ib_request_started_at: at(-1000).toISOString() }),
+      params_hash: 'x'.repeat(64), requested_by: actorId, expires_at: at(600000), ...extra }).returning('id');
+    const [{ id }] = await newerRow({ status: 'cancelled' });
+    expect(await claim(older)).toEqual({ error: 'cancelled' });
+    expect(await status(older.id)).toBe('cancelled');
+    await db('ib_pending_actions').where({ id }).del();
+
+    const older2 = await propose('create_appointment', booking({ scheduled_date: '2030-04-21' }), { noTask: true, startedAt: at(-5000) });
+    await db('ib_pending_actions').insert({
+      tool_name: 'create_appointment', params: JSON.stringify({ ...booking({ scheduled_date: '2030-04-21', time_window: '10:00 AM' }), _ib_request_started_at: at(-1000).toISOString() }),
+      params_hash: 'x'.repeat(64), requested_by: actorId, status: 'pending', expires_at: at(-1000) });
+    expect(await claim(older2)).toEqual({ error: 'cancelled' });
+  });
+
+  test('a replay of an already confirmed card still reports already_used', async () => {
+    const card = await propose('create_appointment', booking({ scheduled_date: '2030-05-01' }), { noTask: true });
+    expect((await claim(card)).action.id).toBe(card.id);
+    expect(await claim(card)).toEqual({ error: 'already_used' });
+  });
+
+  test('after a booking card was confirmed, a new card for it is refused; a lead edit stays confirmable', async () => {
+    const day = '2030-05-10';
+    const first = await propose('create_appointment', booking({ scheduled_date: day }), { noTask: true, startedAt: at(-3000) });
+    await claim(first); // no result yet: the booking may be running
+    const again = await propose('create_appointment', booking({ scheduled_date: day, time_window: '10:00 AM' }), { noTask: true, startedAt: at(-1000) });
+    expect(again.earlier_card_confirmed).toMatch(/already confirmed/);
+    expect(await db('ib_pending_actions').where({ id: again.id }).first()).toBeUndefined();
     expect(await status(first.id)).toBe('confirmed');
-    expect(await status(revised.id)).toBe('pending');
 
-    // The same step proposed again inside its own task returns the stored card
-    // and does not cancel the earlier request's still-pending card.
-    const s2 = crypto.randomUUID();
-    const older = await propose(s2, 'create_appointment', booking({ scheduled_date: '2030-03-01' }));
-    const { task } = await Tasks.begin({ actorId, sessionId: s2, requestKey: crypto.randomUUID(), request: { prompt: 'Synthetic request' }, pageContext: {} });
-    const stepKey = crypto.randomUUID().slice(0, 32);
-    const call = () => Pending.createPendingAction({ toolName: 'update_lead_contact', requestedBy: actorId, taskId: task.id, runnerToken: task.runner_token, stepKey, params: { lead_id: leadId, first_name: 'Retry' } });
-    const one = await call();
-    expect((await call()).id).toBe(one.id);
-    expect(await status(older.id)).toBe('pending');
+    // A confirmed card whose run failed does not block the operator from trying again.
+    const failed = await propose('create_appointment', booking({ scheduled_date: '2030-05-11' }), { noTask: true, startedAt: at(-3000) });
+    await claim(failed);
+    await Pending.recordResult(failed.id, { error: 'Synthetic refusal' });
+    const retry = await propose('create_appointment', booking({ scheduled_date: '2030-05-11' }), { noTask: true, startedAt: at(-1000) });
+    expect(retry.earlier_card_confirmed).toBeUndefined();
+    expect(await status(retry.id)).toBe('pending');
+
+    const edit = await propose('update_lead_contact', { lead_id: leadId, first_name: 'Ann' }, { noTask: true, startedAt: at(-3000) });
+    await claim(edit);
+    await Pending.recordResult(edit.id, { success: true });
+    const next = await propose('update_lead_contact', { lead_id: leadId, first_name: 'Anna' }, { noTask: true, startedAt: at(-1000) });
+    expect(await status(next.id)).toBe('pending');
+    expect(await status(edit.id)).toBe('confirmed');
   });
 
-  test('one task that holds several cards for different targets keeps all of them confirmable', async () => {
-    const session = crypto.randomUUID();
-    const { task } = await Tasks.begin({ actorId, sessionId: session, requestKey: crypto.randomUUID(), request: { prompt: 'Synthetic request' }, pageContext: {} });
-    const a = await propose(session, 'update_lead_contact', { lead_id: leadId, first_name: 'Alpha' }, { task });
-    await db('ib_pending_actions').where({ id: a.id }).update({ status: 'confirmed', result: JSON.stringify({ success: true }) });
-    const b = await propose(session, 'update_lead_contact', { lead_id: otherLeadId, first_name: 'Beta' }, { task });
-    expect(await status(a.id)).toBe('confirmed');
-    expect(await status(b.id)).toBe('pending');
-    const claimed = await Pending.claimForConfirm(b.id, actorId, { contractHash: b.contract_hash });
-    expect(claimed.action.params.first_name).toBe('Beta');
-  });
-
-  // Requests are ordered by when their task was created, not by who commits first.
-  const beginTask = sessionId => Tasks.begin({ actorId, sessionId, requestKey: crypto.randomUUID(), request: { prompt: 'Synthetic request' }, pageContext: {} }).then(r => r.task);
-  const confirmable = async (rows) => (await db('ib_pending_actions').whereIn('id', rows.map(r => r.id)).where({ status: 'pending' }).select('id')).map(r => r.id);
-
-  test('overlapping proposals for one intent leave exactly one confirmable card, the newest request', async () => {
-    for (let round = 0; round < 8; round++) {
-      const session = crypto.randomUUID();
-      const tasks = [await beginTask(session), await beginTask(session), await beginTask(session)];
-      const rows = await Promise.all(tasks.map((task, i) => propose(session, 'create_appointment', booking({ time_window: `${9 + i}:00 AM` }), { task })));
-      expect(await confirmable(rows)).toEqual([rows[2].id]);
+  // Order 1: the Confirm wins the lock; order 2: the new proposal wins it.
+  test('a Confirm and a new proposal racing in either order commit at most one booking', async () => {
+    for (let round = 0; round < 10; round++) {
+      const day = `2031-01-${String(round + 1).padStart(2, '0')}`;
+      const older = await propose('create_appointment', booking({ scheduled_date: day }), { noTask: round % 2 === 0, startedAt: at(-5000) });
+      const [confirm, proposal] = await Promise.all([
+        claim(older),
+        propose('create_appointment', booking({ scheduled_date: day, time_window: '10:00 AM' }), { noTask: round % 2 === 1, startedAt: at(-1000) }),
+      ]);
+      const oldCommitted = !!confirm.action;
+      const newConfirmable = proposal.earlier_card_confirmed === undefined && (await status(proposal.id)) === 'pending';
+      expect(oldCommitted && newConfirmable).toBe(false); // never both
+      expect(oldCommitted || newConfirmable).toBe(true); // and one of them survives
+      if (!oldCommitted) expect(confirm).toEqual({ error: 'cancelled' });
     }
   });
 
-  test('a proposal waits for the intent lock, then sees the card the lock holder committed', async () => {
-    const session = crypto.randomUUID();
-    const older = await beginTask(session), newer = await beginTask(session);
-    let release;
-    const gate = new Promise(resolve => { release = resolve; });
-    let locked;
-    const lockTaken = new Promise(resolve => { locked = resolve; });
-    // A second connection holds the intent lock and, while holding it, stores the NEWER request's card.
-    const holder = db.transaction(async trx => {
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`ib-supersede:${actorId}:${session}:create_appointment:${[customerId, 'synthetic pest service', '2030-01-15'].join('|')}`]);
+  test('the Confirm and the proposal both wait on the intent lock', async () => {
+    const day = '2031-02-01';
+    const older = await propose('create_appointment', booking({ scheduled_date: day }), { noTask: true, startedAt: at(-5000) });
+    let release; const gate = new Promise(resolve => { release = resolve; });
+    let locked; const lockTaken = new Promise(resolve => { locked = resolve; });
+    const holder = db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [bookingLock(actorId, booking({ scheduled_date: day }))]);
       locked();
       await gate;
-      return trx('ib_pending_actions').insert({ tool_name: 'create_appointment', params: JSON.stringify(booking({ time_window: '10:00 AM' })), params_hash: 'x'.repeat(64),
-        requested_by: actorId, status: 'pending', expires_at: new Date(Date.now() + 600000), task_id: newer.id, step_key: 'gate-step' }).returning('id');
     });
     await lockTaken;
-    let settled = false;
-    const late = propose(session, 'create_appointment', booking(), { task: older }).then(row => { settled = true; return row; });
-    await new Promise(resolve => setTimeout(resolve, 400));
-    const blocked = !settled; // blocked on the advisory lock, not racing past it
-    release(); // always release, so a failed run cannot leave the connection held
+    const states = { claim: false, proposal: false };
+    const claimed = claim(older).then(r => { states.claim = true; return r; });
+    const proposed = propose('create_appointment', booking({ scheduled_date: day, time_window: '10:00 AM' }), { noTask: true, startedAt: at(-1000) }).then(r => { states.proposal = true; return r; });
+    await new Promise(resolve => setTimeout(resolve, 500));
+    const blocked = !states.claim && !states.proposal;
+    release();
+    await holder;
+    const [confirm, proposal] = await Promise.all([claimed, proposed]);
     expect(blocked).toBe(true);
-    const [[held]] = [await holder];
-    const lateRow = await late;
-    expect(lateRow.superseded_by_newer_request).toBe(true);
-    expect(await status(lateRow.id)).toBe('cancelled');
-    expect(await status(held.id)).toBe('pending');
+    expect(!!confirm.action && (await status(proposal.id)) === 'pending').toBe(false);
   });
 
-  test('an older request that finishes late is stored cancelled and does not cancel the newer card', async () => {
-    const session = crypto.randomUUID();
-    const older = await beginTask(session), newer = await beginTask(session);
-    const newCard = await propose(session, 'create_appointment', booking({ time_window: '10:00 AM' }), { task: newer });
-    const lateCard = await propose(session, 'create_appointment', booking(), { task: older });
-    expect(lateCard.superseded_by_newer_request).toBe(true);
-    expect(await status(lateCard.id)).toBe('cancelled');
-    expect(await Pending.claimForConfirm(lateCard.id, actorId, { contractHash: lateCard.contract_hash })).toEqual({ error: 'cancelled' });
-    expect(await status(newCard.id)).toBe('pending');
-    expect((await Pending.claimForConfirm(newCard.id, actorId, { contractHash: newCard.contract_hash })).action.params.time_window).toBe('10:00 AM');
+  test('overlapping proposals for one intent leave exactly one confirmable card, the one that started last', async () => {
+    for (let round = 0; round < 8; round++) {
+      const day = `2031-03-${String(round + 1).padStart(2, '0')}`;
+      const rows = await Promise.all([0, 1, 2].map(i => propose('create_appointment', booking({ scheduled_date: day, time_window: `${9 + i}:00 AM` }),
+        { noTask: round % 2 === 0, startedAt: at(-3000 + i * 1000) })));
+      const pending = (await db('ib_pending_actions').whereIn('id', rows.map(r => r.id)).where({ status: 'pending' }).select('id')).map(r => r.id);
+      expect(pending).toEqual([rows[2].id]);
+    }
   });
 
-  test('a late older request is also stale when the newer card was already confirmed, but a different target is not', async () => {
-    const session = crypto.randomUUID();
-    const older = await beginTask(session), olderToo = await beginTask(session), newer = await beginTask(session);
-    const newCard = await propose(session, 'create_appointment', booking({ time_window: '10:00 AM' }), { task: newer });
-    await Pending.claimForConfirm(newCard.id, actorId, { contractHash: newCard.contract_hash });
-    const lateCard = await propose(session, 'create_appointment', booking(), { task: older });
-    expect(await status(lateCard.id)).toBe('cancelled');
-    expect(await status(newCard.id)).toBe('confirmed');
-    const other = await propose(session, 'create_appointment', booking({ customer_id: otherCustomerId }), { task: olderToo });
-    expect(other.superseded_by_newer_request).toBeUndefined();
-    expect(await status(other.id)).toBe('pending');
+  test('one task that holds several cards for different intents keeps all of them confirmable', async () => {
+    const { task } = await Tasks.begin({ actorId, sessionId: crypto.randomUUID(), requestKey: crypto.randomUUID(), request: { prompt: 'Synthetic request' }, pageContext: {} });
+    const a = await propose('update_lead_contact', { lead_id: leadId, first_name: 'Alpha' }, { task });
+    await db('ib_pending_actions').where({ id: a.id }).update({ status: 'confirmed', result: JSON.stringify({ success: true }) });
+    const b = await propose('update_lead_contact', { lead_id: otherLeadId, first_name: 'Beta' }, { task });
+    expect(await status(a.id)).toBe('confirmed');
+    expect(await status(b.id)).toBe('pending');
+    expect((await claim(b)).action.params.first_name).toBe('Beta');
+  });
+
+  test('a retry of the same step returns the stored card and cancels nothing', async () => {
+    const older = await propose('update_lead_contact', { lead_id: otherLeadId, first_name: 'Keep' }, { noTask: true, startedAt: at(-5000) });
+    const { task } = await Tasks.begin({ actorId, sessionId: crypto.randomUUID(), requestKey: crypto.randomUUID(), request: { prompt: 'Synthetic request' }, pageContext: {} });
+    const stepKey = crypto.randomUUID().slice(0, 32);
+    const call = () => Pending.createPendingAction({ toolName: 'update_lead_contact', requestedBy: actorId, taskId: task.id, runnerToken: task.runner_token, stepKey, params: { lead_id: leadId, first_name: 'Retry' }, requestStartedAt: new Date() });
+    const one = await call();
+    expect((await call()).id).toBe(one.id);
+    expect(await status(older.id)).toBe('pending');
   });
 });

@@ -98,76 +98,97 @@ function legacyStepKey(row) {
 // allowlist, not a guess: a second text to one customer, or an edit of a
 // different field on the same lead, is a different intent and stays pending.
 const idPart = value => (value === undefined || value === null || value === '' ? null : String(value).toLowerCase());
+// One intent per rule. The key is computed from a card's STORED params, so the
+// proposal path and the confirm path always agree on it.
+//   afterConfirmed: what a NEW card for the same intent does when an earlier
+//   card for it was already confirmed and ran (or may be running).
+//     'refuse' - a second card would repeat a one-off effect (a booking): the
+//                new card is refused, the operator moves the visit instead.
+//     'allow'  - a later edit is a legitimate new edit and stays confirmable.
 const SUPERSEDE_RULES = {
-  // A booking is one event: a new proposal for the same customer, service and
-  // day replaces the earlier one (a changed time or price is the revision).
+  // A booking is one event: a new proposal for the same customer, catalog
+  // service and day replaces the earlier one (a changed time or price is the
+  // revision). The preview pins the resolved catalog id (_booking_service_id),
+  // so two accepted names for one service share a key; the raw name is the
+  // fallback when no catalog row was pinned.
   create_appointment: {
     key: p => {
-      const parts = [idPart(p.customer_id ?? p.customerId), idPart(p.service_type), idPart(p.scheduled_date)];
+      const service = idPart(p._booking_service_id) ? `svc:${idPart(p._booking_service_id)}` : (idPart(p.service_type) ? `name:${idPart(p.service_type)}` : null);
+      const parts = [idPart(p.customer_id ?? p.customerId), service, idPart(p.scheduled_date)];
       return parts.every(Boolean) ? parts.join('|') : null;
     },
     covers: () => true,
+    afterConfirmed: 'refuse',
+    confirmedMessage: 'An earlier card for this booking was already confirmed. Nothing was prepared. Tell the operator to move that visit instead of booking it again.',
   },
   // A lead edit replaces an earlier edit only when it writes every field the
   // earlier one wrote ("Jay" then "Jason"); a card for another field stays.
   update_lead_contact: {
     key: p => idPart(p.lead_id ?? p.leadId),
     covers: (newer, older) => {
-      const fields = p => ['first_name', 'last_name', 'phone', 'email'].filter(f => p[f] !== undefined);
+      const fields = x => ['first_name', 'last_name', 'phone', 'email'].filter(f => x[f] !== undefined);
       const written = fields(older);
       return written.length > 0 && written.every(f => newer[f] !== undefined);
     },
+    afterConfirmed: 'allow',
   },
 };
 
-// Decides, under a per-intent advisory lock, how the card being stored relates
-// to this actor's other cards for the same intent in the same conversation:
-//   olderIds - pending cards from OLDER requests that the new card replaces
-//              (cancelled right after the insert, in the same transaction);
-//   stale    - a card from a NEWER request (still pending, or already
-//              confirmed) already covers this one, so this card must not be
-//              confirmable: the caller stores it as cancelled.
-// "Older" and "newer" follow the REQUEST (ib_tasks.created_at, task id as the
-// tie-break), never the commit order, so a request that finishes late cannot
-// cancel the newer request's card.
-// Lock order: the caller already holds its own ib_tasks row (FOR UPDATE), then
-// takes this advisory key. Every proposer takes "own task row, then intent
-// key", and the key is held only to the end of the transaction, so two
-// proposers can wait on each other's key but never on each other's task row.
-async function planSupersession(trx, { task, requestedBy, toolName, params }) {
+const REQUEST_STAMP = '_ib_request_started_at';
+const paramsOf = row => (typeof row.params === 'string' ? JSON.parse(row.params) : (row.params || {}));
+function intentKey(toolName, params) {
   const rule = SUPERSEDE_RULES[toolName];
-  const key = rule && task?.session_id ? rule.key(params || {}) : null;
-  if (!key) return { olderIds: [], stale: false };
-  await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
-    [`ib-supersede:${requestedBy}:${task.session_id}:${toolName}:${key}`]);
-  // Statements after the lock see every card the earlier lock holder committed.
-  const rows = await trx('ib_pending_actions as pa')
-    .join('ib_tasks as t', 't.id', 'pa.task_id')
-    .where('t.session_id', task.session_id)
-    .where('pa.requested_by', String(requestedBy))
-    .where('pa.tool_name', toolName)
-    .whereNot('pa.task_id', task.id)
-    .where(q => q.where('pa.status', 'confirmed')
-      .orWhere(r => r.where('pa.status', 'pending').where('pa.expires_at', '>', trx.fn.now())))
-    .select('pa.id', 'pa.params', 'pa.status',
-      // Compared in SQL against this task's own row: a JS Date would drop microseconds.
-      trx.raw('(t.created_at, t.id::text) > (SELECT o.created_at, o.id::text FROM ib_tasks o WHERE o.id = ?) AS newer', [task.id]));
-  const same = rows.filter(row => rule.key(typeof row.params === 'string' ? JSON.parse(row.params) : (row.params || {})) === key);
-  const priorOf = row => (typeof row.params === 'string' ? JSON.parse(row.params) : (row.params || {}));
-  const stale = same.some(row => row.newer && rule.covers(priorOf(row), params || {}));
-  const olderIds = stale ? [] : same.filter(row => !row.newer && row.status === 'pending'
-    && rule.covers(params || {}, priorOf(row))).map(row => row.id);
-  return { olderIds, stale };
+  return rule ? rule.key(params || {}) : null;
+}
+const intentLock = (actor, toolName, key) => `ib-supersede:${actor}:${toolName}:${key}`;
+
+// WHAT "SAME INTENT" MEANS (owner-visible rule). The same operator proposing
+// the same booking (same customer, same catalog service, same day) or the same
+// lead edit again within one card lifetime IS a replacement, whichever chat
+// window or surface it came from. A wrong cancel costs one re-ask; a missed
+// cancel costs a double booking or a wrong edit. So scope is: same actor
+// (requested_by, set from the admin id on the platform-on and platform-off
+// paths alike) + same tool + same intent key, among cards created within
+// TTL_MINUTES of each other. Evidence is read from ib_pending_actions itself,
+// never from ib_tasks, so it works with GATE_IB_PLATFORM on or off.
+//
+// ORDER: the card's request-start stamp (params._ib_request_started_at, set by
+// the /query route on both paths), else its created_at; ties break on
+// (created_at, id). A request that FINISHES late still carries its early start,
+// so it cannot cancel, or override, a card from a request that started later.
+//
+// LOCK: createPendingAction and claimForConfirm both take
+// pg_advisory_xact_lock(hashtextextended('ib-supersede:<actor>:<tool>:<key>'))
+// before they read or write. Lock order, everywhere: [own ib_tasks row FOR
+// UPDATE, proposals on the platform path only] -> intent advisory lock -> card
+// rows. The confirm path never touches ib_tasks, and nothing takes a card row
+// first and then waits for an advisory lock, so no cycle exists.
+//
+// Reads this card's same-intent siblings (any status) in one query, in SQL so
+// microsecond timestamps are compared exactly.
+async function intentSiblings(q, ownId, toolName, key) {
+  const rule = SUPERSEDE_RULES[toolName];
+  const rows = await q('ib_pending_actions as pa')
+    .join('ib_pending_actions as o', 'o.id', q.raw('?', [ownId]))
+    .whereNot('pa.id', ownId)
+    .whereRaw('pa.requested_by = o.requested_by')
+    .whereRaw('pa.tool_name = o.tool_name')
+    .whereRaw(`pa.created_at >= o.created_at - make_interval(mins => ${Number(TTL_MINUTES)})`)
+    .select('pa.id', 'pa.params', 'pa.status', 'pa.result', 'pa.expires_at',
+      q.raw(`(COALESCE(NULLIF(pa.params->>'${REQUEST_STAMP}', '')::timestamptz, pa.created_at), pa.created_at, pa.id::text)
+        > (COALESCE(NULLIF(o.params->>'${REQUEST_STAMP}', '')::timestamptz, o.created_at), o.created_at, o.id::text) AS newer`));
+  return rows.filter(row => rule.key(paramsOf(row)) === key).map(row => ({ ...row, params: paramsOf(row) }));
 }
 
-async function createPendingAction({ toolName, params, summary, requestedBy, context, contract, contractHash, taskId, stepKey: actionStepKey, runnerToken }) {
+async function createPendingAction({ toolName, params, summary, requestedBy, context, contract, contractHash, taskId, stepKey: actionStepKey, runnerToken, requestStartedAt = null }) {
+  const intent = intentKey(toolName, params);
+  const startedAt = requestStartedAt ? new Date(requestStartedAt) : null;
+  if (intent && startedAt && !Number.isNaN(startedAt.getTime())) params = { ...params, [REQUEST_STAMP]: startedAt.toISOString() };
   const persist = async trx => {
-  let taskRow = null;
   if (taskId) {
     const task = await trx('ib_tasks').where({ id: taskId, actor_id: String(requestedBy), runner_token: runnerToken, state: 'running' })
-      .where('lease_expires_at', '>', trx.fn.now()).forUpdate().first('id', 'session_id');
+      .where('lease_expires_at', '>', trx.fn.now()).forUpdate().first('id');
     if (!task) throw new Error('Task execution was superseded');
-    taskRow = task;
     const previous = await trx('ib_pending_actions').where({ task_id: taskId, requested_by: String(requestedBy) });
     const existing = previous.find(row => row.tool_name === toolName && row.step_key === actionStepKey)
       || previous.find(row => row.tool_name === toolName && row.params?._ib_step_key_version !== 2 && legacyStepKey(row) === actionStepKey);
@@ -187,8 +208,9 @@ async function createPendingAction({ toolName, params, summary, requestedBy, con
     if (scope.error) throw Object.assign(new Error(scope.error), { code: scope.code });
     params = { ...params, _ib_task_context: scope };
   }
-  const plan = taskRow ? await planSupersession(trx, { task: taskRow, requestedBy, toolName, params })
-    : { olderIds: [], stale: false };
+  // Serialize with every other proposal and Confirm for this intent; the lock
+  // is released at commit, after the cancellations below are visible.
+  if (intent) await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [intentLock(requestedBy, toolName, intent)]);
   let insert = trx('ib_pending_actions').insert({
     tool_name: toolName,
     params: JSON.stringify(params || {}),
@@ -196,9 +218,7 @@ async function createPendingAction({ toolName, params, summary, requestedBy, con
     summary: summary || null,
     requested_by: String(requestedBy),
     context: context || null,
-    // A card from an older request that a newer request already covers is
-    // stored cancelled: it is never confirmable.
-    status: plan.stale ? 'cancelled' : 'pending',
+    status: 'pending',
     expires_at: new Date(Date.now() + TTL_MINUTES * 60 * 1000),
     // W0B authorization contract: the structured effect set the card shows;
     // its hash is what the operator's Confirm must echo.
@@ -210,20 +230,38 @@ async function createPendingAction({ toolName, params, summary, requestedBy, con
   const [created] = await insert.returning('*');
   const row = created || await trx('ib_pending_actions').where({ task_id: taskId, step_key: actionStepKey, requested_by: String(requestedBy) }).first();
   if (!row) throw new Error('Pending action could not be recorded');
-  if (created && plan.olderIds.length) {
-    const count = await trx('ib_pending_actions').whereIn('id', plan.olderIds).where({ status: 'pending' })
-      .update({ status: 'cancelled', updated_at: trx.fn.now() });
-    if (count) logger.info(`[intelligence-bar:pending] Cancelled ${count} card(s) superseded by pending action ${row.id}`);
-  }
-  if (created && plan.stale) {
-    logger.info(`[intelligence-bar:pending] Pending action ${row.id} was already superseded by a newer request; stored cancelled`);
-    return { ...row, superseded_by_newer_request: true };
+
+  if (created && intent) {
+    const rule = SUPERSEDE_RULES[toolName];
+    const siblings = await intentSiblings(trx, row.id, toolName, intent);
+    // A newer card that covers this one, in ANY status (pending, confirmed,
+    // cancelled, expired): the operator has moved past this proposal.
+    if (siblings.some(sib => sib.newer && rule.covers(sib.params, params))) {
+      await trx('ib_pending_actions').where({ id: row.id }).update({ status: 'cancelled', updated_at: trx.fn.now() });
+      logger.info(`[intelligence-bar:pending] Pending action ${row.id} was already superseded by a newer request; stored cancelled`);
+      return { ...row, status: 'cancelled', superseded_by_newer_request: true };
+    }
+    // An older card that already ran (or may be running): a one-off effect
+    // must not be repeated by a second confirmable card.
+    if (rule.afterConfirmed === 'refuse' && siblings.some(sib => !sib.newer && sib.status === 'confirmed'
+      && rule.covers(params, sib.params)
+      && !['failed', 'blocked'].includes(executionOutcome(sib.result)))) {
+      await trx('ib_pending_actions').where({ id: row.id }).del();
+      logger.info(`[intelligence-bar:pending] ${toolName} refused: an earlier card for this intent was already confirmed`);
+      return { ...row, status: 'cancelled', earlier_card_confirmed: rule.confirmedMessage };
+    }
+    const olderIds = siblings.filter(sib => !sib.newer && sib.status === 'pending' && rule.covers(params, sib.params)).map(sib => sib.id);
+    if (olderIds.length) {
+      const count = await trx('ib_pending_actions').whereIn('id', olderIds).where({ status: 'pending' })
+        .update({ status: 'cancelled', updated_at: trx.fn.now() });
+      if (count) logger.info(`[intelligence-bar:pending] Cancelled ${count} card(s) superseded by pending action ${row.id}`);
+    }
   }
 
   logger.info(`[intelligence-bar:pending] Proposed ${toolName} as pending action ${row.id}`);
   return row;
   };
-  return taskId ? db.transaction(persist) : persist(db);
+  return taskId || intent ? db.transaction(persist) : persist(db);
 }
 
 async function forTask(taskId, requestedBy) {
@@ -246,18 +284,40 @@ async function forTask(taskId, requestedBy) {
  */
 async function claimForConfirm(id, requestedBy, { contractHash = null } = {}) {
   const echoed = contractHash ? String(contractHash) : null;
-  const [claimed] = await db('ib_pending_actions')
+  // A card for an intent with a supersede rule claims under the intent lock and
+  // is refused when a NEWER card for the same intent exists (any status). Every
+  // other card takes the single-statement claim below, unchanged.
+  const peek = await db('ib_pending_actions').where({ id }).first('tool_name', 'params', 'requested_by', 'status', 'expires_at');
+  const key = peek && peek.status === 'pending' && String(peek.requested_by) === String(requestedBy)
+    && new Date(peek.expires_at).getTime() > Date.now() ? intentKey(peek.tool_name, paramsOf(peek)) : null;
+  if (!key) return claimRow(db, id, requestedBy, echoed);
+  const rule = SUPERSEDE_RULES[peek.tool_name];
+  return db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [intentLock(requestedBy, peek.tool_name, key)]);
+    const siblings = await intentSiblings(trx, id, peek.tool_name, key);
+    if (siblings.some(sib => sib.newer && rule.covers(sib.params, paramsOf(peek)))) {
+      await trx('ib_pending_actions').where({ id, status: 'pending', requested_by: String(requestedBy) })
+        .update({ status: 'cancelled', updated_at: trx.fn.now() });
+      logger.warn(`[intelligence-bar:pending] Confirm on ${id} refused: a newer card for the same intent exists`);
+      return { error: 'cancelled' };
+    }
+    return claimRow(trx, id, requestedBy, echoed);
+  });
+}
+
+async function claimRow(q, id, requestedBy, echoed) {
+  const [claimed] = await q('ib_pending_actions')
     .where({ id, status: 'pending', requested_by: String(requestedBy) })
-    .where('expires_at', '>', db.fn.now())
+    .where('expires_at', '>', q.fn.now())
     .where((qb) => {
       qb.whereNull('contract_hash');
       if (echoed) qb.orWhere('contract_hash', echoed);
     })
-    .update({ status: 'confirmed', consumed_at: db.fn.now(), updated_at: db.fn.now() })
+    .update({ status: 'confirmed', consumed_at: q.fn.now(), updated_at: q.fn.now() })
     .returning('*');
 
   if (!claimed) {
-    const row = await db('ib_pending_actions').where({ id }).first();
+    const row = await q('ib_pending_actions').where({ id }).first();
     if (!row) return { error: 'not_found' };
     if (String(row.requested_by) !== String(requestedBy)) return { error: 'actor_mismatch' };
     if (row.status === 'confirmed') return { error: 'already_used' };
@@ -273,7 +333,7 @@ async function claimForConfirm(id, requestedBy, { contractHash = null } = {}) {
   const params = typeof claimed.params === 'string' ? JSON.parse(claimed.params) : claimed.params;
   if (paramsHash(claimed.tool_name, params) !== claimed.params_hash) {
     // Stored payload no longer matches what the operator approved — refuse.
-    await db('ib_pending_actions').where({ id }).update({ status: 'cancelled', updated_at: db.fn.now() });
+    await q('ib_pending_actions').where({ id }).update({ status: 'cancelled', updated_at: q.fn.now() });
     logger.error(`[intelligence-bar:pending] Hash mismatch on pending action ${id} — cancelled`);
     return { error: 'hash_mismatch' };
   }
@@ -356,6 +416,8 @@ module.exports = {
   stepKey,
   stableStringify,
   createPendingAction,
+  intentKey,
+  intentLock,
   claimForConfirm,
   cancelPendingAction,
   recordResult,
