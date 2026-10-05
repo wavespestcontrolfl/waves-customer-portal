@@ -4,6 +4,8 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
 import ReportViewPage from './ReportViewPage';
 import legacyLawnReport from './__fixtures__/legacy-lawn-report.json';
 import lawnReportV2 from './__fixtures__/lawn-report-v2.json';
@@ -1554,6 +1556,15 @@ describe('ReportViewPage — phone first screen (pick B)', () => {
     expect(card).not.toHaveAttribute('data-report-ask-slim');
     fireEvent.blur(input);
     expect(card).not.toHaveAttribute('data-report-ask-slim');
+  });
+
+  it('the slim ask row keeps the 44px touch floor on phones', () => {
+    const glassThemeCss = fs.readFileSync(path.resolve(process.cwd(), 'src/glass/glass-theme.css'), 'utf8');
+    const slim = glassThemeCss.split('\n').filter((line) => line.includes('[data-report-ask-slim]') && line.includes('min-height'));
+    expect(slim.length).toBeGreaterThan(0);
+    for (const line of slim) {
+      for (const [, px] of line.matchAll(/min-height:\s*(\d+)px/g)) expect(Number(px)).toBeGreaterThanOrEqual(44);
+    }
   });
 
   it('report tools keep their full names for screen readers', async () => {
