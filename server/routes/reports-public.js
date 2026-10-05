@@ -2055,11 +2055,23 @@ router.post('/:token/ask', async (req, res, next) => {
     // resolved for the report display (report-data.js's
     // attachApprovedReportProductFacts) — never a second, ungated live
     // products_catalog lookup.
-    const { answer, topic } = routeServiceReportQuestion({
+    const routed = routeServiceReportQuestion({
       question,
       data,
       nextAppointment,
     });
+    const { topic } = routed;
+    let { answer } = routed;
+    // GATE_REPORT_ASK_AI (dark): Claude Sonnet 5.5 writes the answer from the
+    // report's own facts (report-ask-ai.js). Any miss (model failure, ~8 s
+    // timeout, empty or rejected answer) keeps the fixed-rule answer above, so
+    // the reply shape and the recorded event are the same either way. Off =
+    // the fixed-rule answer alone, no model call.
+    if (require('../config/feature-gates').reportAskAiLive?.() === true) {
+      const { answerReportQuestionWithAI } = require('../services/service-report/report-ask-ai');
+      const ai = await answerReportQuestionWithAI({ question, data, nextAppointment });
+      if (ai) answer = ai.answer;
+    }
     // The question's text is never stored — only its length and the topic
     // the answer came from (report-assistant.js REPORT_QUESTION_TOPICS), so
     // the engagement stats can say what customers ask about per report type.
