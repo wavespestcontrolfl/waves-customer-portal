@@ -33,7 +33,7 @@
  *   1. a needed score is missing                     -> unclear (missing_scores)
  *   2. confidence below moderate, or the metric is one the two models disagreed on
  *                                                    -> unclear (low_confidence)
- *   3. color_health across a cool-season change      -> seasonal
+ *   3. color_health across a cool-season change, moved by the band or more -> seasonal
  *   4. judgeProgress's verdict, renamed
  *
  * Rules the tests pin:
@@ -286,8 +286,17 @@ function itemForMetric({ row, metric, days, cur, prior, gates, band }) {
     state = 'unclear';
     gate = 'low_confidence';
   } else if (metric === 'color_health' && gates.seasonChange) {
-    state = 'seasonal';
-    gate = 'seasonal';
+    // "Mostly seasonal" explains a color CHANGE. A move inside the band is no
+    // change, so it is not called seasonal (owner 2026-10-05: a report said
+    // the color change was mostly seasonal for 70 -> 70). Color across a
+    // season change is still never "behind".
+    if (Math.abs(scoreDelta) >= band) {
+      state = 'seasonal';
+      gate = 'seasonal';
+    } else if (state === 'behind') {
+      state = 'holding_steady';
+      gate = 'seasonal_no_move';
+    }
   } else if (state === 'behind' && (row.transient || row.judgedByAbsence || row.behindEligible === false)) {
     // judgeProgress already withholds behind from rows with no window; this is
     // the invariant stated where a regression would be seen.
