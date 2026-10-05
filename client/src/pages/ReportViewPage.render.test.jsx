@@ -862,6 +862,115 @@ describe('ReportViewPage — legacy lawn fallback (historical tokens, reportV2 n
     expect(within(plainProducts).queryByText('Pets & kids')).toBeNull();
   });
 
+  // Owner 2026-10-05: with approved report_copy the card says how it works,
+  // what the label covers and the pets rule, so the generic filler lines go.
+  it('hides "Why used today", "Safety & re-entry" and "Product note" when the product has report_copy, and shows them without it', async () => {
+    const fillerFacts = {
+      public_summary: 'A synthetic one-line product note.',
+      service_report_summary: 'A synthetic one-line product note.',
+      precaution_summary: 'Keep people and pets off treated areas until sprays have dried.',
+      reentry_summary: 'Re-enter once dry.',
+    };
+    const withCopy = JSON.parse(JSON.stringify(legacyLawnReport));
+    withCopy.applications = [withCopy.applications[0]];
+    Object.assign(withCopy.applications[0].product, fillerFacts, {
+      name: 'Taurus SC',
+      report_copy: {
+        how_it_works: 'Pests can’t detect it, so they walk right through the treated band.',
+        also_labeled_for: 'Labeled for 25+ Bradenton pests',
+        pets_kids: 'Keep people and pets off treated areas until the spray has dried.',
+      },
+    });
+    const { container, unmount } = renderReport(withCopy);
+    await screen.findByText('Visit Summary');
+    const card = within(container.querySelector('#products-applied')).getByRole('heading', { name: 'Taurus SC' }).closest('.applied-product-card');
+    expect(within(card).getByText('How it works')).toBeInTheDocument();
+    expect(within(card).queryByText('Why used today')).toBeNull();
+    expect(within(card).queryByText('Safety & re-entry')).toBeNull();
+    expect(within(card).queryByText('Product note')).toBeNull();
+    unmount();
+
+    const plain = JSON.parse(JSON.stringify(legacyLawnReport));
+    plain.applications = [plain.applications[0]];
+    Object.assign(plain.applications[0].product, fillerFacts, { name: 'Taurus SC' });
+    const { container: plainContainer } = renderReport(plain);
+    await screen.findByText('Visit Summary');
+    const plainCard = within(plainContainer.querySelector('#products-applied')).getByRole('heading', { name: 'Taurus SC' }).closest('.applied-product-card');
+    expect(within(plainCard).getByText('Why used today')).toBeInTheDocument();
+    expect(within(plainCard).getByText('Safety & re-entry')).toBeInTheDocument();
+    expect(within(plainCard).getByText('Product note')).toBeInTheDocument();
+  });
+
+  it('keeps "Why used today" for an approved seasonal substitution even when the product has report_copy', async () => {
+    const swapped = JSON.parse(JSON.stringify(legacyLawnReport));
+    swapped.applications = [swapped.applications[0]];
+    swapped.applications[0].product.name = 'Taurus SC';
+    swapped.applications[0].product.report_copy = {
+      how_it_works: 'Pests can’t detect it, so they walk right through the treated band.',
+      pets_kids: 'Keep people and pets off treated areas until the spray has dried.',
+    };
+    swapped.dynamicContext = {
+      ...(swapped.dynamicContext || {}),
+      lawnProtocol: { application: { substitutions: [{ substituteProductName: 'Taurus SC', originalProductName: 'Planned Product' }] } },
+    };
+    const { container } = renderReport(swapped);
+    await screen.findByText('Visit Summary');
+    const card = within(container.querySelector('#products-applied')).getByRole('heading', { name: 'Taurus SC' }).closest('.applied-product-card');
+    expect(within(card).getByText('Why used today')).toBeInTheDocument();
+    expect(within(card).getByText(/approved seasonal equivalent/)).toBeInTheDocument();
+  });
+
+  // Owner 2026-10-05: "the areas treated needs to be removed from the report".
+  describe('treated areas on a pest report', () => {
+    const zones = [{ id: 'zone-a', label: 'Front perimeter' }, { id: 'zone-b', label: 'Kitchen' }];
+    const coverage = {
+      enabled: true,
+      title: 'Service Coverage',
+      items: [
+        { id: 'c1', areaName: 'Front perimeter', status: 'completed', customerDescription: 'Exterior perimeter service completed.' },
+        { id: 'c2', areaName: 'Kitchen', status: 'completed', customerDescription: 'Interior service completed.' },
+      ],
+      summary: { completedCount: 2 },
+    };
+    const application = {
+      id: 'app-pest-1',
+      product: { name: 'Taurus SC', epa_reg: '53883-279', active_ingredient: 'Fipronil 9.1%' },
+      method: 'broadcast_spray',
+      methodLabel: 'Broadcast spray',
+      zone_ids: ['zone-a'],
+      applicationArea: 'Front perimeter',
+      targets: ['German cockroaches'],
+      rate: '1.000',
+      rateUnit: 'fl_oz',
+    };
+    const pestWithAreas = (line) => ({
+      ...legacyLawnReport,
+      ...pestReportV2,
+      serviceLine: line,
+      applications: [application],
+      zones,
+      serviceCoverage: coverage,
+      dynamicContext: { reentry: { targets: [{ key: 'interior', label: 'Interior', readyAt: '2026-06-25T20:00:00.000Z' }] } },
+    });
+
+    it('prints no "Used in", no area count in "What Waves did today" and no areas Ask Waves suggestion', async () => {
+      const { container } = renderReport(pestWithAreas('pest'));
+      await screen.findByText('Today’s protection status');
+      expect(screen.queryByText('Used in')).toBeNull();
+      expect(container.textContent).not.toMatch(/areas? serviced/i);
+      expect(container.textContent).not.toMatch(/areas? completed/i);
+      expect(screen.queryByText('What areas were treated?')).toBeNull();
+      // The product card itself still renders.
+      expect(within(container.querySelector('#products-applied')).getByRole('heading', { name: 'Taurus SC' })).toBeInTheDocument();
+    });
+
+    it('keeps the area wording on a non-pest line, whose zones are part of the work', async () => {
+      const { container } = renderReport({ ...legacyLawnReport, serviceLine: 'tree_shrub', applications: [application], zones, serviceCoverage: coverage, reportV2: null });
+      await screen.findByText('Visit Summary');
+      expect(within(container.querySelector('#products-applied')).getByText('Used in')).toBeInTheDocument();
+    });
+  });
+
   it('a bait-station check or an unknown verdict gets Poison Control but names no applicator', async () => {
     const rodentBait = { id: 'rb-2', method: 'station_check', product: { name: 'Protecta Rodent Bait Station' } };
     for (const payload of [
@@ -1096,6 +1205,9 @@ describe('ReportViewPage — conversion cards (owner-dictated copy 2026-08-13)',
     expect(screen.getByText('Know someone who could use Waves?')).toBeInTheDocument();
     const crossSellCard = container.querySelector('[data-section="cross-sell"]');
     expect(crossSellCard.querySelector('h3')).toBeNull();
+    // Heading + one line above the button (owner 2026-10-05).
+    expect(within(crossSellCard).getByRole('heading', { level: 2, name: 'Want a quote for pest control?' })).toBeInTheDocument();
+    expect(within(crossSellCard).getByText('Tap below and we\'ll follow up with the details. Nothing is booked or charged.')).toBeInTheDocument();
     expect(crossSellCard.textContent).not.toContain('$114');
     // Cut copy stays cut: no eyebrows, no cadence line, no fine print.
     expect(screen.queryByText(/Complete your protection/i)).toBeNull();

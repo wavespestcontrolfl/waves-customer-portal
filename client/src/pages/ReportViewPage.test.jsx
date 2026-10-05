@@ -95,6 +95,22 @@ describe('ReportViewPage report chrome helpers', () => {
     })).toContain('What does Pest Pressure mean?');
   });
 
+  it('suggests the treated-areas question only off the pest line (owner 2026-10-05)', () => {
+    const data = { serviceCoverage: { enabled: true, items: [{ id: 'c1', areaName: 'Front perimeter', status: 'completed' }] } };
+    expect(reportAskPrompts(data, 'pest')).not.toContain('What areas were treated?');
+    expect(reportAskPrompts(data)).not.toContain('What areas were treated?');
+    expect(reportAskPrompts(data, 'tree_shrub')).toContain('What areas were treated?');
+  });
+
+  it('visitWorkSummary counts serviced areas off the pest line only', () => {
+    const base = {
+      applications: [{ product: { name: 'Taurus SC' }, method: 'broadcast_spray' }],
+      serviceCoverage: { enabled: true, items: [{ id: 'c1', areaName: 'Front perimeter', status: 'completed' }, { id: 'c2', areaName: 'Kitchen', status: 'completed' }] },
+    };
+    expect(visitWorkSummary({ ...base, serviceLine: 'pest' }, 'fallback')).toBe('1 product applied');
+    expect(visitWorkSummary({ ...base, serviceLine: 'tree_shrub' }, 'fallback')).toBe('1 product applied · 2 areas serviced');
+  });
+
   it('does not show a readiness status badge without re-entry context', () => {
     expect(readinessStatusBadge(null)).toBeNull();
   });

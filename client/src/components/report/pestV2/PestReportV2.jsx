@@ -152,7 +152,7 @@ export function PestStatusHero({ status, statusSummary, supportingMetric, aiSumm
         {/* sr-v2-hero-title marks this as the V2 hero so glass hides the
             eyebrow above it (the ReportViewPage :has() rule) — lawn/tree get
             this via a direct-sibling h2; here the h2 sits in a flex wrapper. */}
-        <h2 className="sr-v2-hero-title" style={{ fontFamily: FONTS.serif, fontWeight: 500, fontSize: 25, color: TEXT, margin: 0 }}>{status.label}</h2>
+        <h2 className="sr-v2-hero-title" style={{ fontFamily: FONTS.serif, fontWeight: 500, fontSize: 20, color: TEXT, margin: 0 }}>{status.label}</h2>
       </div>
       {statusSummary ? (
         <p style={{ fontSize: 16, color: BODY, lineHeight: 1.5, margin: '10px 0 0' }}>{statusSummary}</p>
@@ -181,8 +181,8 @@ export function PestStatusHero({ status, statusSummary, supportingMetric, aiSumm
           text={aiSummary.body}
           sections={reportSections}
           nextVisitLabel={nextVisitLabel}
-          style={{ fontSize: 14, color: MUTED, lineHeight: 1.5, margin: '12px 0 0' }}
-          titleStyle={{ color: TEXT }}
+          style={{ fontSize: 16, color: TEXT, lineHeight: 1.55, margin: '12px 0 0' }}
+          titleStyle={{ color: TEXT, fontSize: 18 }}
         />
       ) : null}
       {/* Where we sprayed — the tech-traced application, combined into the

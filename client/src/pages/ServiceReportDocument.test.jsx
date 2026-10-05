@@ -156,8 +156,25 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
   });
 
   it('names only the treated zones, not the whole property, for a partial application', () => {
-    render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
+    // Non-pest lines keep the per-product Areas line (owner 2026-10-05: only
+    // the pest report drops treated areas).
+    render(<ServiceReportDocument data={{ ...BASE_DATA, serviceLine: 'tree_shrub' }} token="tok123" />);
     expect(screen.getByText('Front perimeter')).toBeInTheDocument();
+  });
+
+  it('prints no per-product Areas or Target line on a pest report', () => {
+    const { container } = render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
+    expect(container.textContent).toContain('Alpine WSG');
+    expect(container.textContent).toContain('Active ingredient:');
+    expect(container.textContent).not.toMatch(/Areas:/);
+    expect(container.textContent).not.toMatch(/Target:/);
+    expect(container.textContent).not.toContain('Front perimeter');
+  });
+
+  it('keeps the per-product Target line on a non-pest report', () => {
+    const { container } = render(<ServiceReportDocument data={{ ...BASE_DATA, serviceLine: 'tree_shrub' }} token="tok123" />);
+    expect(container.textContent).toMatch(/Target:\s*German cockroaches/);
+    expect(container.textContent).toMatch(/Areas:/);
   });
 
   it('never publishes a fixed re-entry figure — duration OR computed clock time', () => {
@@ -575,13 +592,14 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
 
   it('keeps a recorded application area when the app has no zones', () => {
     const app = { ...BASE_DATA.applications[0], zone_ids: [], applicationArea: 'Attic and soffit line' };
-    render(<ServiceReportDocument data={{ ...BASE_DATA, applications: [app] }} token="tok123" />);
+    render(<ServiceReportDocument data={{ ...BASE_DATA, serviceLine: 'tree_shrub', applications: [app] }} token="tok123" />);
     expect(screen.getByText('Attic and soffit line')).toBeInTheDocument();
   });
 
   it('records serviced areas with reasons, and never the internal description', () => {
     const data = {
       ...BASE_DATA,
+      serviceLine: 'tree_shrub',
       coverageServiceType: 'pest_control',
       serviceCoverage: {
         enabled: true,
@@ -600,6 +618,21 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(screen.getByText(/Exterior perimeter service completed/)).toBeInTheDocument();
     expect(screen.getByText(/Could not access: vehicle parked inside/)).toBeInTheDocument();
     expect(container.textContent).not.toContain('perimeter dbl-rate');
+  });
+
+  it('prints no Areas serviced section on a pest report, even with coverage rows', () => {
+    const data = {
+      ...BASE_DATA,
+      serviceCoverage: {
+        enabled: true,
+        items: [{ id: 'z1', markerLabel: 'A', areaName: 'Front perimeter', status: 'completed', customerDescription: 'Exterior perimeter service completed.' }],
+        summary: { completedCount: 1 },
+      },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(screen.queryByText('Areas serviced')).toBeNull();
+    expect(container.textContent).not.toMatch(/Exterior perimeter service completed/);
+    expect(container.textContent).not.toMatch(/1 completed/);
   });
 
   it('honours the Pest Pressure visibility flags the PDF cache key is hashed on', () => {
