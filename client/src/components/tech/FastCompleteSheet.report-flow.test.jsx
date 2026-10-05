@@ -551,6 +551,62 @@ describe('generate and read', () => {
   });
 });
 
+// "Swept eaves and webs" (owner 2026-10-05, "sweep on fast form"): the full
+// form's one protocol action, so the report's spider section can read it.
+const SWEEP_LABEL = 'Swept eaves, window frames, door frames, and lanai';
+const sweepBox = () => screen.queryByRole('checkbox', { name: 'Swept eaves and webs' });
+
+describe('the swept eaves and webs box', () => {
+  test('shows once, unchecked, on a regular pest visit', async () => {
+    await openSheet(makeRequest());
+    expect(screen.getAllByRole('checkbox', { name: 'Swept eaves and webs' })).toHaveLength(1);
+    expect(sweepBox().checked).toBe(false);
+  });
+
+  test('shows on a pest re-service too, as it does on the full form', async () => {
+    await openSheet(makeRequest({ service: RESERVICE }), { ...SERVICE, serviceType: 'Pest Control Re-Service' });
+    expect(sweepBox().checked).toBe(false);
+  });
+
+  test('checked: the writer and the completion carry the label with its exterior, no-treatment scope', async () => {
+    const request = makeRequest();
+    await openSheet(request);
+    fireEvent.click(sweepBox());
+    expect(sweepBox().checked).toBe(true);
+    await generate();
+    expect(request.bodies('/generate-report')[0].actionsCompleted).toEqual([SWEEP_LABEL]);
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    const [body] = request.bodies('/complete');
+    expect(body.protocolActionsCompleted).toEqual([SWEEP_LABEL]);
+    expect(body.protocolActionScopesCompleted).toEqual([{ label: SWEEP_LABEL, scope: 'exterior', treatmentApplied: false }]);
+  });
+
+  test('unchecked: no protocol action goes to the writer or the completion', async () => {
+    const request = makeRequest();
+    await openSheet(request);
+    await generate();
+    expect(request.bodies('/generate-report')[0]).not.toHaveProperty('actionsCompleted');
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    const [body] = request.bodies('/complete');
+    expect(body).not.toHaveProperty('protocolActionsCompleted');
+    expect(body).not.toHaveProperty('protocolActionScopesCompleted');
+  });
+
+  test('ticking it after the report was written makes the report stale until it is written again with the action', async () => {
+    const request = makeRequest();
+    await openSheet(request);
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Back to the visit' }));
+    fireEvent.click(sweepBox());
+    expect(screen.queryByRole('button', { name: 'Back to the report' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Write it again' }));
+    await waitFor(() => expect(request.bodies('/generate-report')).toHaveLength(2));
+    expect(request.bodies('/generate-report')[1]).toMatchObject({ actionsCompleted: [SWEEP_LABEL], fresh: true });
+  });
+});
+
 describe('complete and send', () => {
   test('a regular visit posts the full completion with the report, the heard facts and the full form\'s customer text', async () => {
     const request = makeRequest({
