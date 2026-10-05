@@ -307,14 +307,16 @@ describe('gate on', () => {
     lookupGate = new Promise(() => {});
     mount();
     const pending = await screen.findByTestId('lawn-photo-mode-pending');
-    expect(parseFloat(pending.style.fontSize)).toBeGreaterThanOrEqual(14);
+    // The block is styled with classes now (admin type scale): 14px text, never the 11-13px classes.
+    expect(pending.className).toContain('text-14');
   });
 
   it('the shot rows, the hint and the Add buttons render at 14px or larger', async () => {
     mount();
     const row = await screen.findByTestId('lawn-shot-front');
     for (const el of [row.querySelector('div > div'), row.querySelector('div > div + div'), screen.getByTestId('lawn-shot-list-hint'), screen.getByRole('button', { name: 'Add photo for Front overview' })]) {
-      expect(parseFloat(el.style.fontSize)).toBeGreaterThanOrEqual(14);
+      expect(el.className).not.toMatch(/(^|\s)text-(11|12|13)(\s|$)/);
+      expect(el.className).toMatch(/text-14|ui-action/);
     }
   });
 

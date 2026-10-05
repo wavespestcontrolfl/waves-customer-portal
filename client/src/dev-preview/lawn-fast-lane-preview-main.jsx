@@ -12,6 +12,8 @@
  *                   picked, products on: Complete is on
  *   empty-products  a visit whose plan lists no products
  *
+ * The sheet wears the full form's mobile Complete service page (header with a
+ * back arrow and a Details pill, the customer block, white cards, pill buttons).
  * The page loads the same global stylesheets the admin app entry loads
  * (index.css, brand-tokens.css; the sheet imports tech-workflow.css itself) and
  * marks <html> as the admin app does, so type and colors match Dispatch.
