@@ -65,6 +65,7 @@ import MobileDispatchList from "../../components/schedule/MobileDispatchList";
 import useDispatchReadiness from "../../components/schedule/useDispatchReadiness";
 import ScheduleClientSearch from "../../components/schedule/ScheduleClientSearch";
 import MobileAppointmentDetailSheet from "../../components/schedule/MobileAppointmentDetailSheet";
+import { onSiteTimeOf } from "../../lib/on-site-time";
 import MobileCheckoutSheet from "../../components/schedule/MobileCheckoutSheet";
 import MobilePaymentSheet from "../../components/schedule/MobilePaymentSheet";
 import MobileServiceEditModal from "../../components/schedule/MobileServiceEditModal";
@@ -1955,6 +1956,9 @@ export default function DispatchPageV2({
             customerId: lawnFastService.customerId || lawnFastService.customer_id || null,
             fullAddress: typeof lawnFastService.address === "string" ? lawnFastService.address : "",
             customerPhone: lawnFastService.customerPhone || lawnFastService.customer_phone || "",
+            // When the technician checked in (the Time on-site clock), by the full
+            // form's own rule: the on-site status-log entry, else checkInTime.
+            onSiteAt: onSiteTimeOf(lawnFastService) || null,
             timeLabel: serviceWindowLabel(lawnFastService) || "",
             // Server-computed (GATE_TRACE_ELIGIBILITY): false hides the
             // treatment-zone row, since the save route would refuse the trace.

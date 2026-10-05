@@ -73,6 +73,7 @@ import {
 import { BlogPostSection, useBlogPostOffer } from './FastCompleteReport';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
 import PropertyServiceAreas from './PropertyServiceAreas';
+import { elapsedSince } from '../../lib/on-site-time';
 import { Button, ActionFeedback } from '../ui';
 import '../../styles/tech-workflow.css';
 
@@ -573,6 +574,27 @@ function CustomerContact({ service, visit, request }) {
   );
 }
 
+// "Time on-site", as the full form's Complete service page shows it: a small
+// label over the live elapsed time since check-in (h:mm:ss), ticking every
+// second. The page shows the card only when the visit has a check-in time, and so
+// does this: no check-in time, no card. `onSiteAt` is that time (the on-site
+// status-log entry, else checkInTime; see lib/on-site-time.js), passed by Dispatch.
+function TimeOnSite({ since }) {
+  const [elapsed, setElapsed] = useState(() => elapsedSince(since));
+  useEffect(() => {
+    setElapsed(elapsedSince(since));
+    const iv = setInterval(() => setElapsed(elapsedSince(since)), 1000);
+    return () => clearInterval(iv);
+  }, [since]);
+  if (!since) return null;
+  return (
+    <section className="tech-visit-choice-section tech-visit-on-site" aria-label="Time on-site">
+      <h3 className="tech-visit-section-title">Time on-site</h3>
+      <p className="tech-visit-on-site-time">{elapsed}</p>
+    </section>
+  );
+}
+
 export default function FastCompleteLawnSheet({ service, request, catalog = [], onClose, onCompleted, onFullForm, onViewDetails }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
@@ -789,6 +811,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
     <div className="tech-visit-form-area">
       <div className="tech-visit-body" {...picker.coverProps}>
         <CustomerContact service={service} visit={ctx.visit} request={request} />
+        <TimeOnSite since={service?.onSiteAt} />
         <fieldset className="tech-visit-form" disabled={locked}>
           <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked} />
           <section className="tech-visit-choice-section">

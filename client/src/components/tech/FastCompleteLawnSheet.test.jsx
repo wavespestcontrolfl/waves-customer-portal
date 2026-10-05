@@ -8,7 +8,7 @@
 // no real provider is ever called (every request is a stub).
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import FastCompleteLawnSheet, { LAWN_CONDITION_OPTIONS, plainRefusalMessage } from './FastCompleteLawnSheet';
 import { PROJECT_TYPES } from '../../../../server/services/project-types.js';
 
@@ -1346,5 +1346,46 @@ describe('header and customer block', () => {
     await analyze();
     await waitFor(() => expect(footerNote()).toBe(''));
     expect(completeButton().disabled).toBe(false);
+  });
+});
+
+// ── Time on-site, as the full form's Complete service page shows it ─────────
+describe('time on-site', () => {
+  const CHECK_IN = '2026-10-05T13:00:00.000Z';
+  afterEach(() => { vi.useRealTimers(); });
+  const clock = () => screen.getByLabelText('Time on-site');
+
+  test('shows the elapsed time since check-in as h:mm:ss, and ticks every second', async () => {
+    // Real timers stay for the sheet's own waits; only the clock and the tick are faked.
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+    vi.setSystemTime(new Date('2026-10-05T14:19:39.000Z'));
+    await openSheet({ props: { service: { ...SERVICE, onSiteAt: CHECK_IN } } });
+    expect(within(clock()).getByText('Time on-site')).toBeTruthy();
+    expect(within(clock()).getByText('1:19:39')).toBeTruthy();
+    await act(async () => { vi.advanceTimersByTime(1000); });
+    expect(within(clock()).getByText('1:19:40')).toBeTruthy();
+    await act(async () => { vi.advanceTimersByTime(20000); });
+    expect(within(clock()).getByText('1:20:00')).toBeTruthy();
+  });
+
+  test('under an hour it reads m:ss, as the page does', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+    vi.setSystemTime(new Date('2026-10-05T13:07:05.000Z'));
+    await openSheet({ props: { service: { ...SERVICE, onSiteAt: CHECK_IN } } });
+    expect(within(clock()).getByText('7:05')).toBeTruthy();
+  });
+
+  test('with no check-in time there is no card at all, as on the full form', async () => {
+    await openSheet();
+    expect(screen.queryByLabelText('Time on-site')).toBeNull();
+    expect(screen.queryByText('Time on-site')).toBeNull();
+  });
+
+  test('sits after the customer block and before the lawn assessment', async () => {
+    await openSheet({ props: { service: { ...SERVICE, onSiteAt: CHECK_IN, customerId: 'cust-1' } } });
+    const order = Array.from(document.querySelectorAll('.tech-visit-body .tech-visit-contact, .tech-visit-body .tech-visit-on-site, .tech-visit-body h3'))
+      .filter((el) => !el.closest('.tech-visit-on-site') || el.classList.contains('tech-visit-on-site'))
+      .map((el) => (el.classList.contains('tech-visit-contact') ? 'contact' : el.classList.contains('tech-visit-on-site') ? 'time on-site' : el.textContent));
+    expect(order.slice(0, 4)).toEqual(['contact', 'time on-site', 'Tell me about the visit', 'Lawn photos']);
   });
 });
