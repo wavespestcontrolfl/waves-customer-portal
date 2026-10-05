@@ -160,6 +160,11 @@ function candidateVisits(conn, { today, now }) {
           this.select(conn.raw('1')).from('estimates')
             .whereRaw('estimates.customer_id = s.customer_id')
             .whereRaw(`${HANDOFF_SQL} >= ?`, [estimateSince])
+            .whereNotExists(function closedAnother() {
+              this.select(conn.raw('1')).from('audit_log as used')
+                .where('used.action', AUDIT_CLOSED)
+                .whereRaw("used.resource_type = 'scheduled_services' AND used.metadata ->> 'estimateId' = estimates.id::text AND used.resource_id <> s.id");
+            })
             // One estimate, one assessment (matchedAssessmentId): the
             // estimate's explicit booking link when it has one; otherwise
             // (legacy, unlinked) no newer assessment of this customer on or
@@ -219,6 +224,9 @@ async function audit(action, { visitId, estimateId, code = null, status = null, 
       resource_type: 'scheduled_services',
       resource_id: visitId,
       metadata: { estimateId, code, status, ...(error ? { error } : {}) },
+      // Critical, so a failed insert reaches the catch below and is logged:
+      // the closed row is also the estimate's pairing record.
+      critical: true,
     });
   } catch (err) {
     logger.warn(`[assessment-estimate-closeout] audit write failed for visit ${visitId}: ${err.message}`);
@@ -262,6 +270,19 @@ async function matchedAssessmentId(conn, customerId, estimate) {
 // The customer's newest estimate overall may belong to a later assessment —
 // A with E1, then B with E2 — and must not hide E1 from A (pre-push audit P1).
 // The candidate query selects by the same pairing in SQL.
+// An estimate that already closed ONE assessment closes no other (pre-push
+// audit P1): resent, or accepted, after a later assessment it would match
+// that one too under the date heuristic. The pairing is the closed audit row
+// this module writes (metadata.estimateId), read back here and in SQL.
+async function estimateClosedAnother(conn, estimateId, visitId) {
+  const used = await conn('audit_log')
+    .where({ action: AUDIT_CLOSED, resource_type: 'scheduled_services' })
+    .whereRaw("metadata ->> 'estimateId' = ?", [String(estimateId)])
+    .whereNot('resource_id', visitId)
+    .first('id');
+  return Boolean(used);
+}
+
 async function estimateForAssessment(conn, visit, { now }) {
   if (!visit.customer_id) return null;
   const { HANDOFF_COLS, latestHandoffAt } = require('./call-commitments');
@@ -276,6 +297,7 @@ async function estimateForAssessment(conn, visit, { now }) {
     .filter((row) => row.sent_at && row.sent_at.getTime() >= since)
     .sort((x, y) => y.sent_at - x.sent_at);
   for (const estimate of handedOff) {
+    if (await estimateClosedAnother(conn, estimate.id, visit.id)) continue;
     if (String(await matchedAssessmentId(conn, visit.customer_id, estimate)) === String(visit.id)) return estimate;
   }
   return null;

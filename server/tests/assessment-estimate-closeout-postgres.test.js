@@ -680,6 +680,21 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     expect(await audits(visitId, AUDIT_REFUSED)).toEqual([expect.objectContaining({ metadata: expect.objectContaining({ code: 'street_level_hold' }) })]);
   });
 
+  test('an estimate that closed one assessment closes no other — resent after a later assessment, it stays with the first', async () => {
+    const customerId = await customer();
+    const a = await visit(customerId, { day: etDateString(addETDays(new Date(), -3)), en_route_at: minutesAgo(60 * 74), arrived_at: minutesAgo(60 * 73), check_in_time: minutesAgo(60 * 73) });
+    const estimateId = await estimate(customerId, { sentAt: minutesAgo(60 * 72) });
+    expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 1, closed: 1 });
+    expect((await row(a)).status).toBe('completed');
+    // A second assessment, then the SAME estimate is resent after it.
+    const b = await visit(customerId);
+    const resentAt = minutesAgo(5).toISOString();
+    await mockPg('estimates').where({ id: estimateId }).update({ sent_at: resentAt,
+      estimate_data: JSON.stringify({ deliveryState: { firstDeliveredAt: minutesAgo(60 * 72).toISOString(), lastDeliveredAt: resentAt, deliveredAt: [minutesAgo(60 * 72).toISOString(), resentAt] } }) });
+    expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 0, closed: 0 });
+    expect((await row(b)).status).toBe('on_site');
+  });
+
   test('money is a person\'s: a priced assessment, a prepaid one and one with a linked invoice are never candidates', async () => {
     const priced = await customer();
     const pricedVisit = await visit(priced, { estimated_price: 75 });
