@@ -1,5 +1,6 @@
+/* global document */ // page.evaluate callbacks below run in the browser, not Node
 // Generic Shopify storefront adapter — serves ANY Shopify store (Chemical Warehouse, Seed
-// World USA, SeedBarn, GCI Turf Academy, Intermountain Turf, ...). The store's base URL comes
+// World USA, SeedBarn, GCI Turf Academy, Intermountain Turf, Golf Course Lawn Store, Gemplers). The store's base URL comes
 // from vendor.website, so one adapter covers them all.
 //
 // Shopify exposes a clean JSON endpoint per product — /products/<handle>.js — listing every
@@ -59,6 +60,28 @@ function variantsFromShopify(data) {
   }));
 }
 
+// PURE: product handles from Shopify's Predictive Search JSON (/search/suggest.json), in
+// rank order. Needed for storefronts whose /search page is painted client-side by a search
+// app (Gemplers: Boost/Searchspring leave empty skeleton cards in the server HTML), where
+// the DOM has no product links at domcontentloaded. Returns [] for anything unexpected.
+function handlesFromSuggest(json) {
+  const list = json && json.resources && json.resources.results && json.resources.results.products;
+  if (!Array.isArray(list)) return [];
+  return [...new Set(list.map((p) => (p && (p.handle || handleOf(p.url))) || null).filter(Boolean))];
+}
+
+// PURE: does the product state "free shipping" for THIS item? A positive tag ("free shipping",
+// never an `_F` false-valued tag like the vendor's `shipping_*_F` flags) or a description
+// that says FREE SHIPPING without a spend threshold ("free shipping over $99" is a
+// threshold rule, not an item flag). shipping-rules only acts on it for flagged-free vendors.
+function freeShippingFromShopify(data) {
+  if (!data) return false;
+  const tags = Array.isArray(data.tags) ? data.tags : String(data.tags || '').split(',');
+  if (tags.some((t) => /free[\s_-]*shipping/i.test(String(t)) && !/_f(alse)?$/i.test(String(t).trim()))) return true;
+  const text = String(data.description || data.body_html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  return /free\s+shipping(?!\s*(?:on\s+orders?\s+)?(?:over|above|of\s+\$|\$|with|when))/i.test(text);
+}
+
 async function fetchCandidate(page, vendor, product) {
   const timeout = DEFAULT_TIMEOUT;
   const origin = baseOrigin(vendor);
@@ -80,7 +103,16 @@ async function fetchCandidate(page, vendor, product) {
     // scan (25-product batches) turns that into minutes. Read links straight from the DOM;
     // a real no-match returns [] instantly. (Mirrors base.js's no-block-for-server-rendered.)
     await page.goto(`${origin}/search?q=${encodeURIComponent(q)}`, { waitUntil: 'domcontentloaded', timeout });
-    const found = await page.$$eval('a[href*="/products/"]', (els) => [...new Set(els.map((e) => e.getAttribute('href')).filter(Boolean))]).catch(() => []);
+    let found = await page.$$eval('a[href*="/products/"]', (els) => [...new Set(els.map((e) => e.getAttribute('href')).filter(Boolean))]).catch(() => []);
+    // Client-rendered search pages (Gemplers) have no product links in the DOM yet; fall back
+    // to Shopify's predictive-search JSON endpoint, which is theme-independent.
+    if (!found.length) {
+      try {
+        await page.goto(`${origin}/search/suggest.json?q=${encodeURIComponent(q)}&resources%5Btype%5D=product&resources%5Blimit%5D=10`, { waitUntil: 'domcontentloaded', timeout });
+        const txt = await page.evaluate(() => (document.body ? document.body.innerText : ''));
+        found = handlesFromSuggest(JSON.parse(txt)).map((h) => `/products/${h}`);
+      } catch (e) { found = []; }
+    }
     links = selectSearchCandidates(found, product, MAX_CANDIDATES);
   }
 
@@ -125,6 +157,7 @@ async function fetchCandidate(page, vendor, product) {
       price: offer.price, currency: 'USD', availability: offer.availability,
       name: data.title || null, quantity: offer.quantity, source_url: proofUrl, text: bodyText,
       competing_same_size: !!offer.competingSameSize, price_type: 'public', vendor_id: vid, vendor: vname,
+      free_shipping: freeShippingFromShopify(data), // per-item "ships free" flag (flagged-free vendors only)
     };
     const verdict = verifyMatch({ name: cand.name, text: bodyText, quantity: cand.quantity, competingOffers: cand.competing_same_size }, product);
     if (verdict.matched) {
@@ -153,6 +186,8 @@ module.exports = {
   fetchCandidate,
   // exposed for unit tests
   variantsFromShopify,
+  handlesFromSuggest,
+  freeShippingFromShopify,
   handleOf,
   baseOrigin,
   isApprovedShopifyHost,

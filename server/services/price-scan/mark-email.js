@@ -8,12 +8,18 @@
 //      (oz / lb / gal / g), never total-only, so it's apples-to-apples. Savings
 //      are computed on the normalized $/oz-equivalent basis (robust even when the
 //      two vendors list different pack units).
+//   3. DELIVERED pricing — per-unit prices and savings use price + shipping (see
+//      shipping-rules.js), and each line carries a short shipping note ("free
+//      shipping", "incl. ~$15.00 est. shipping") so Mark sees what we'd really pay.
+//      Free / published-rule shipping is stated as firm; an 'estimated' basis is flagged
+//      "shipping estimated" so Mark is never quoted a guess as a fact.
 //
 // No I/O: the wiring layer gathers the week's opportunities and hands them in;
 // the cron/send/recipient resolution lives elsewhere.
 
 const { parsePackSize, convertToOz } = require('../product-costing');
 const { wrapServiceEmail, ctaButton, colors } = require('../email-template');
+const { shippingFor, shippingLabel, shippingProofText } = require('./shipping-rules');
 
 const round = (n, p = 2) => Math.round(Number(n) * 10 ** p) / 10 ** p;
 const fmtMoney = (n) => `$${round(n, 2).toFixed(2)}`;
@@ -35,6 +41,28 @@ function perPackUnit(price, quantity) {
   return { value: p / pack.amount, unit: pack.unit };
 }
 
+// The shipping object for one side of a match: the persisted/forwarded one when present
+// ({ amount, basis }), else the vendor rule looked up from the side's own host (competitor
+// source_url) or name. The SiteOne baseline is free by rule. Never throws.
+function shippingOfSide(side, fallbackVendorHost) {
+  const sh = side && side.shipping;
+  if (sh && Number.isFinite(Number(sh.amount)) && sh.basis) {
+    return { amount: round(sh.amount, 2), basis: sh.basis, note: sh.note || '' };
+  }
+  return shippingFor({
+    vendor: side || {},
+    vendorHost: fallbackVendorHost,
+    vendorName: side && typeof side.vendor === 'string' ? side.vendor : undefined,
+    price: side && side.price,
+    quantity: side && side.quantity,
+    freeShipping: !!(side && (side.free_shipping === true || side.freeShipping === true)),
+  });
+}
+const landedOf = (side, shipping) => {
+  const p = Number(side && side.price);
+  return Number.isFinite(p) ? round(p + shipping.amount, 2) : NaN;
+};
+
 // $/oz-equivalent — the normalized comparison basis for savings.
 function perOzEquiv(price, quantity) {
   const pack = parsePackSize(quantity);
@@ -55,13 +83,15 @@ function fmtPerUnit(pu) {
   return `$${pu.value.toFixed(digits)}/${unitLabel(pu.unit)}`;
 }
 
-// Savings % on the $/oz basis. ALWAYS derived from the persisted baseline /
-// competitor prices being displayed — not a supplied savingsPct that could be
-// stale/inconsistent (supplied is only a fallback if a price won't parse). A
-// negative result means the competitor is actually more expensive.
+// Savings % on the DELIVERED $/oz basis. ALWAYS derived from the persisted baseline /
+// competitor prices (+ shipping) being displayed — not a supplied savingsPct that could be
+// stale/inconsistent (supplied is only a fallback if a price won't parse). A negative
+// result means the competitor is actually more expensive once shipping is counted.
 function savingsPctOf(match) {
-  const base = perOzEquiv(match.baseline && match.baseline.price, match.baseline && match.baseline.quantity);
-  const comp = perOzEquiv(match.competitor && match.competitor.price, match.competitor && match.competitor.quantity);
+  const bShip = shippingOfSide(match.baseline, 'siteone.com');
+  const cShip = shippingOfSide(match.competitor);
+  const base = perOzEquiv(landedOf(match.baseline, bShip), match.baseline && match.baseline.quantity);
+  const comp = perOzEquiv(landedOf(match.competitor, cShip), match.competitor && match.competitor.quantity);
   if (base && comp && base > 0) return (base - comp) / base;
   return Number.isFinite(match.savingsPct) ? match.savingsPct : null;
 }
@@ -71,16 +101,31 @@ function lineFor(match) {
   const b = match.baseline || {};
   const c = match.competitor || {};
   const pct = savingsPctOf(match);
+  const bShip = shippingOfSide(b, 'siteone.com');
+  const cShip = shippingOfSide(c);
+  const siteLanded = landedOf(b, bShip);
+  const compLanded = landedOf(c, cShip);
   return {
     product: match.product || c.name || '(unnamed product)',
     epaReg: match.epaReg || null,
     sitePrice: Number(b.price),
     siteQty: b.quantity || null,
-    sitePerUnit: perPackUnit(b.price, b.quantity),
+    sitePerUnit: perPackUnit(siteLanded, b.quantity), // delivered, per unit
+    siteLanded,
+    siteShipping: bShip,
+    siteShippingNote: shippingLabel(bShip),
     compVendor: c.vendor || 'competitor',
     compPrice: Number(c.price),
     compQty: c.quantity || null,
-    compPerUnit: perPackUnit(c.price, c.quantity),
+    compPerUnit: perPackUnit(compLanded, c.quantity), // delivered, per unit
+    compLanded,
+    compShipping: cShip,
+    shippingNote: shippingLabel(cShip),
+    shippingBasis: cShip.basis,
+    shippingFirm: cShip.basis !== 'estimated',
+    shippingProof: shippingProofText(cShip),
+    siteShippingProof: shippingProofText(bShip),
+    listedName: c.name || null, // the product name exactly as the competitor lists it
     sourceUrl: c.source_url,
     savingsPct: pct,
   };
@@ -140,6 +185,13 @@ function pctLabel(pct) {
   return Number.isFinite(pct) ? `${(pct * 100).toFixed(1)}% per unit` : '—';
 }
 
+// "Delivered $X (free shipping)" sub-line under a price cell.
+function deliveredHtml(landed, note, C) {
+  if (!Number.isFinite(landed)) return '';
+  const tail = note ? ` (${esc(note)})` : '';
+  return `<br><span style="color:${C.MUTED};font-size:12px;">Delivered ${fmtMoney(landed)}${tail}</span>`;
+}
+
 function renderHtml(lines, repName, opts) {
   const C = colors;
   const rows = lines.map((l) => {
@@ -152,10 +204,12 @@ function renderHtml(lines, repName, opts) {
         <td style="padding:10px 8px;border-bottom:1px solid ${C.RULE};vertical-align:top;white-space:nowrap;">
           ${fmtMoney(l.sitePrice)} / ${esc(l.siteQty)}<br>
           <strong>${esc(fmtPerUnit(l.sitePerUnit))}</strong>
+          ${deliveredHtml(l.siteLanded, l.siteShippingProof || l.siteShippingNote, C)}
         </td>
         <td style="padding:10px 8px;border-bottom:1px solid ${C.RULE};vertical-align:top;white-space:nowrap;">
-          ${esc(l.compVendor)}: ${fmtMoney(l.compPrice)} / ${esc(l.compQty)}<br>
+          ${esc(l.compVendor)}: ${fmtMoney(l.compPrice)} / ${esc(l.compQty)}${l.listedName ? `<br><span style="color:${C.MUTED};font-size:12px;">Listed as: ${esc(l.listedName)}</span>` : ''}<br>
           <strong style="color:${C.WAVES_BLUE};">${esc(fmtPerUnit(l.compPerUnit))}</strong>
+          ${deliveredHtml(l.compLanded, l.shippingProof || l.shippingNote, C)}
         </td>
         <td style="padding:10px 8px;border-bottom:1px solid ${C.RULE};vertical-align:top;">${esc(pctLabel(l.savingsPct))}</td>
         <td style="padding:10px 8px;border-bottom:1px solid ${C.RULE};vertical-align:top;">
@@ -166,7 +220,7 @@ function renderHtml(lines, repName, opts) {
 
   const body = `
     <p>Hi ${esc(repName)},</p>
-    <p>We found lower published prices on the products below and would like to keep them on our SiteOne account. Each row shows <strong>your current price per unit</strong> next to the competitor's, with a link to the live listing as proof. Can you match these?</p>
+    <p>We found lower published prices on the products below and would like to keep them on our SiteOne account. Each row shows <strong>your current delivered price per unit</strong> next to the competitor's (price plus shipping), with a link to the live listing as proof. Can you match these?</p>
     <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:collapse;font-size:14px;color:${C.BODY};">
       <tr>
         <th align="left" style="padding:8px;border-bottom:2px solid ${C.RULE};">Product</th>
@@ -177,6 +231,7 @@ function renderHtml(lines, repName, opts) {
       </tr>
       ${rows}
     </table>
+    ${lines.some((l) => !l.shippingFirm) ? `<p style="font-size:12px;color:${C.MUTED};">${esc(ESTIMATE_NOTE)}</p>` : ''}
     <p style="margin-top:18px;">Thanks,<br>Waves Pest Control</p>`;
 
   return wrapServiceEmail({
@@ -186,20 +241,29 @@ function renderHtml(lines, repName, opts) {
   });
 }
 
+// "; delivered $48.55" — appended to a text line.
+function deliveredText(landed, note) {
+  if (!Number.isFinite(landed)) return '';
+  return `; delivered ${fmtMoney(landed)}${note ? ` (${note})` : ''}`;
+}
+
+const ESTIMATE_NOTE = 'Lines marked "shipping estimated" use our own estimate of the freight, not a quote from the vendor; every other shipping figure is free or the vendor\'s published rate.';
+
 function renderText(lines, repName, opts) {
   const rows = lines.map((l) => [
     `• ${l.product}${l.epaReg ? ` (EPA Reg. ${l.epaReg})` : ''}`,
-    `    SiteOne (current): ${fmtMoney(l.sitePrice)} / ${l.siteQty} = ${fmtPerUnit(l.sitePerUnit)}`,
-    `    ${l.compVendor}: ${fmtMoney(l.compPrice)} / ${l.compQty} = ${fmtPerUnit(l.compPerUnit)}  (${pctLabel(l.savingsPct)})`,
+    `    SiteOne (current): ${fmtMoney(l.sitePrice)} / ${l.siteQty}${l.siteShippingProof ? `; ${l.siteShippingProof}` : ''}${deliveredText(l.siteLanded, '')} = ${fmtPerUnit(l.sitePerUnit)}`,
+    `    ${l.compVendor}${l.listedName ? ` (listed as: ${l.listedName})` : ''}: ${fmtMoney(l.compPrice)} / ${l.compQty}${l.shippingProof ? `; ${l.shippingProof}` : ''}${deliveredText(l.compLanded, '')} = ${fmtPerUnit(l.compPerUnit)}  (${pctLabel(l.savingsPct)})`,
     `    Proof: ${l.sourceUrl}`,
   ].join('\n')).join('\n\n');
   return [
     `Hi ${repName},`,
     '',
     'We found lower published prices on the products below and would like to keep them on our SiteOne account. '
-      + "Each line shows your current price per unit next to the competitor's, with a proof link. Can you match these?",
+      + "Each line shows your current delivered price per unit next to the competitor's (price plus shipping), with a proof link. Can you match these?",
     '',
     rows,
+    ...(lines.some((l) => !l.shippingFirm) ? ['', ESTIMATE_NOTE] : []),
     '',
     'Thanks,',
     'Waves Pest Control',
@@ -214,4 +278,5 @@ module.exports = {
   // exported for tests
   lineFor,
   savingsPctOf,
+  shippingOfSide,
 };

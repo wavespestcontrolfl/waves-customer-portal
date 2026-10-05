@@ -44,7 +44,7 @@ const APPROVED_STATES = ['approved', 'auto_approved'];
 // if it's price_scraping_enabled AND resolves to one of these; everything else falls to the
 // generic adapter (direct URL, no search), so it's not driven autonomously. Veseris is a
 // LOGIN adapter — it additionally needs decrypted credentials attached (see LOGIN_ADAPTER_KEYS).
-const SCRAPABLE_ADAPTER_KEYS = ['domyown', 'solutions', 'keystone', 'veseris', 'shopify', 'amazon'];
+const SCRAPABLE_ADAPTER_KEYS = ['domyown', 'solutions', 'keystone', 'veseris', 'shopify', 'amazon', 'diypest', 'forestry'];
 
 // Adapters that authenticate before scraping (account pricing). For these, the weekly scan
 // decrypts the vendor's stored credentials and attaches them to the scan spec.
@@ -247,13 +247,23 @@ function opportunityToMatch(product, scan) {
   return {
     product: product.name,
     epaReg: product.epaReg || null,
-    baseline: { vendor: opp.baseline.vendor || 'SiteOne', price: Number(opp.baseline.price), quantity: opp.baseline.quantity },
+    baseline: {
+      vendor: opp.baseline.vendor || 'SiteOne',
+      price: Number(opp.baseline.price),
+      quantity: opp.baseline.quantity,
+      shipping: opp.baseline.shipping || null,
+    },
     competitor: {
       vendor: best.vendor || 'competitor',
       price: Number(best.price),
       quantity: best.quantity,
       source_url: best.source_url,
       name: best.name || null,
+      // DELIVERED basis the opportunity was ranked on (price + shipping). Carried so the
+      // email / owner copy show the same numbers the scan decided on; an 'estimated'
+      // basis stays labelled all the way to the email line.
+      shipping: best.shipping || null,
+      landedPrice: best.landedPrice != null ? Number(best.landedPrice) : null,
     },
   };
 }

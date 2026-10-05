@@ -101,9 +101,23 @@ describe('opportunityToMatch', () => {
     expect(opportunityToMatch(product, scan)).toEqual({
       product: 'Taurus SC Termiticide',
       epaReg: '53883-279',
-      baseline: { vendor: 'SiteOne', price: 95, quantity: '78 oz' },
-      competitor: { vendor: 'Solutions Pest & Lawn', price: 88, quantity: '78 oz', source_url: 'https://s/p', name: 'Taurus SC 78 oz' },
+      baseline: { vendor: 'SiteOne', price: 95, quantity: '78 oz', shipping: null },
+      competitor: { vendor: 'Solutions Pest & Lawn', price: 88, quantity: '78 oz', source_url: 'https://s/p', name: 'Taurus SC 78 oz', shipping: null, landedPrice: null },
     });
+  });
+  test('carries the delivered basis (shipping + landed price) the opportunity was ranked on', () => {
+    const shipping = { amount: 15, basis: 'estimated', note: '~$15.00 est. shipping' };
+    const scan = {
+      opportunity: {
+        isOpportunity: true,
+        baseline: { vendor: 'SiteOne', price: 95, quantity: '78 oz', shipping: { amount: 0, basis: 'free', note: 'free shipping' } },
+        best: { vendor: 'Solutions Pest & Lawn', price: 70, quantity: '78 oz', source_url: 'https://www.solutionsstores.com/p', shipping, landedPrice: 85 },
+      },
+    };
+    const m = opportunityToMatch(product, scan);
+    expect(m.competitor.shipping).toEqual(shipping);
+    expect(m.competitor.landedPrice).toBe(85);
+    expect(m.baseline.shipping.basis).toBe('free');
   });
   test('null when not an opportunity / no best / no scan', () => {
     expect(opportunityToMatch(product, { opportunity: { isOpportunity: false, best: { price: 1 }, baseline: {} } })).toBeNull();

@@ -520,6 +520,37 @@ describe('priceMatchHeadlineAndSummary', () => {
     expect(summary).toMatch(/^Segment II Herbicide and 3 more, about \$\d+ less per order\. Draft not sent\.$/);
   });
 
+  test('a single line shows the delivered price and a short shipping note', () => {
+    const free = { ...segmentII, compLanded: 800, shippingNote: 'free shipping', compShipping: { amount: 0, basis: 'free' } };
+    expect(priceMatchHeadlineAndSummary([free]).summary)
+      .toBe('Segment II Herbicide at $800.00 delivered (free shipping), about $496 less per order. Draft not sent.');
+    const est = { product: 'Bifen', sitePrice: 100, savingsPct: 0.2, compLanded: 65, shippingNote: 'incl. ~$15.00 est. shipping', compShipping: { amount: 15, basis: 'estimated' } };
+    expect(priceMatchHeadlineAndSummary([est]).summary)
+      .toBe('Bifen at $65.00 delivered (incl. ~$15.00 est. shipping), about $20 less per order. Draft not sent.');
+  });
+
+  test('several lines say the figures are delivered, and flag estimated shipping', () => {
+    const a = { ...segmentII, compLanded: 800, compShipping: { amount: 0, basis: 'free' } };
+    const b = { ...onslaught, compLanded: 440, compShipping: { amount: 15, basis: 'estimated' } };
+    expect(priceMatchHeadlineAndSummary([a, { ...b, compShipping: { amount: 0, basis: 'free' } }]).summary)
+      .toBe('Segment II Herbicide and Onslaught Fastcap (delivered prices), about $551 less per order. Draft not sent.');
+    const shortA = { product: 'Bifen', sitePrice: 100, savingsPct: 0.2, compLanded: 80, compShipping: { amount: 0, basis: 'free' } };
+    const shortB = { product: 'Taurus', sitePrice: 100, savingsPct: 0.1, compLanded: 90, compShipping: { amount: 15, basis: 'estimated' } };
+    expect(priceMatchHeadlineAndSummary([shortA, shortB]).summary)
+      .toBe('Bifen and Taurus (delivered, est. shipping), about $30 less per order. Draft not sent.');
+    // too long for the estimate wording -> keeps the shorter "(delivered)" form inside the 110 guard
+    expect(priceMatchHeadlineAndSummary([a, b]).summary).toBe('Segment II Herbicide and Onslaught Fastcap (delivered), about $551 less per order. Draft not sent.');
+  });
+
+  test('the 110-char guard still holds with delivered text (drops detail rather than overflow)', () => {
+    const long = { product: 'Segment II Herbicide Extra Long Name Edition', sitePrice: 1293.9, savingsPct: 0.383, compLanded: 800.5, shippingNote: 'incl. ~$15.00 est. shipping', compShipping: { amount: 15, basis: 'estimated' } };
+    const { summary } = priceMatchHeadlineAndSummary([long]);
+    expect(summary.length).toBeLessThanOrEqual(110);
+    expect(summary).toContain('$800.50 delivered');
+    const many = Array.from({ length: 4 }, (_, i) => ({ product: `A Very Long Product Name Number ${i}`, sitePrice: 100, savingsPct: 0.1, compLanded: 90, compShipping: { amount: 0, basis: 'free' } }));
+    expect(priceMatchHeadlineAndSummary(many).summary.length).toBeLessThanOrEqual(110);
+  });
+
   test('no comparable savings still names the products and omits the dollar figure', () => {
     const noSavings = { product: 'Break Even Product', sitePrice: 50, savingsPct: 0 };
     const { summary } = priceMatchHeadlineAndSummary([noSavings]);

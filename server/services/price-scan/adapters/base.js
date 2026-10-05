@@ -1,3 +1,4 @@
+/* global document */ // page.evaluate callbacks below run in the browser, not Node
 // Base vendor adapter. A concrete adapter is just a config object (search-URL
 // builder + CSS selectors); makeAdapter wraps it with the shared Playwright flow:
 //
@@ -194,7 +195,67 @@ function collectSnapshot(sel) {
       .slice(0, 24);
   }
 
-  return { jsonLd, title, priceTexts, availabilityText, bodyText: body.slice(0, 4000), variants, optionCardTexts };
+  // Per-size ROWS in the page DOM (opt-in via adapter variantRows: { line, name, price }):
+  // storefronts like Forestry Distributing (nopCommerce grouped product) list each size as
+  // a "product variant" line whose name carries the size ("Bifen I/T Insecticide, 1 Pt.")
+  // and whose price sits in a schema.org price element. Used only when no Magento config
+  // variants were found. Self-contained (page.evaluate) — mirrors readValue/PRICE_VALUE_ATTRS.
+  if (!variants.length && sel.variantRows && sel.variantRows.line) {
+    const vr = sel.variantRows;
+    for (const line of Array.from(document.querySelectorAll(vr.line)).slice(0, 24)) {
+      const nameEl = vr.name ? line.querySelector(vr.name) : null;
+      const priceEl = vr.price ? line.querySelector(vr.price) : null;
+      const nameText = nameEl ? (nameEl.textContent || '').replace(/\s+/g, ' ').trim() : '';
+      const rawPrice = priceEl ? readValue(priceEl, PRICE_VALUE_ATTRS) : '';
+      const price = Number(String(rawPrice).replace(/[^0-9.]/g, ''));
+      if (!nameText || !Number.isFinite(price) || price <= 0) continue;
+      const lineText = (line.textContent || '').replace(/\s+/g, ' ');
+      variants.push({
+        size: nameText,
+        price,
+        availabilityRaw: /out of stock|sold out|unavailable|backorder/i.test(lineText) ? 'OutOfStock' : null,
+      });
+    }
+  }
+
+  // A spec-table cell (opt-in via adapter sizeHintSelector) that states the pack size when
+  // the product title does not (DIY Pest Control: title "QP Bifenthrin I/T 7.9% F
+  // Insecticide", spec row "Packaging: 1 Gallon , Quali-Pro (Mfg. Number: ...)").
+  let sizeHint = '';
+  if (sel.sizeHintSelector) {
+    const hintEl = document.querySelector(sel.sizeHintSelector);
+    sizeHint = hintEl ? (hintEl.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80) : '';
+  }
+
+  return { jsonLd, title, priceTexts, availabilityText, bodyText: body.slice(0, 4000), variants, optionCardTexts, sizeHint };
+}
+
+// PURE: does the page's schema.org markup state free shipping for the offer
+// (shippingDetails.shippingRate.value === 0)? Walks every JSON-LD block. True only on an
+// explicit zero rate; absent/unparseable markup is "unknown" (false), never "free".
+function freeShippingFromJsonLd(jsonLdStrings) {
+  const blocks = Array.isArray(jsonLdStrings) ? jsonLdStrings : [jsonLdStrings];
+  let free = false;
+  const walk = (n) => {
+    if (free || n == null) return;
+    if (Array.isArray(n)) { n.forEach(walk); return; }
+    if (typeof n !== 'object') return;
+    const details = n.shippingDetails;
+    if (details) {
+      for (const d of Array.isArray(details) ? details : [details]) {
+        const rate = d && d.shippingRate;
+        const v = rate && typeof rate === 'object' ? rate.value : null;
+        if (v != null && String(v).trim() !== '' && Number(v) === 0) { free = true; return; }
+      }
+    }
+    for (const k of Object.keys(n)) if (n[k] && typeof n[k] === 'object') walk(n[k]);
+  };
+  for (const raw of blocks) {
+    let parsed = null;
+    try { parsed = typeof raw === 'string' ? JSON.parse(raw) : raw; } catch (e) { parsed = null; }
+    walk(parsed);
+  }
+  return free;
 }
 
 // Find the first product link on a search-results page. Returns an absolute URL
@@ -335,6 +396,17 @@ async function collectResultLinks(page, config) {
   }, sels);
 }
 
+// PURE: when the page title carries no pack size but the adapter's spec cell did, append the
+// spec text to the title so the downstream size gate (JSON-LD single-offer check) and the
+// quantity read can tie the price to that pack. A title that already states a size is left
+// alone. Mutates and returns the snapshot.
+function applySizeHint(snapshot) {
+  if (snapshot && snapshot.sizeHint && !extractSizeToken(snapshot.title)) {
+    snapshot.title = `${snapshot.title || ''} ${snapshot.sizeHint}`.trim();
+  }
+  return snapshot;
+}
+
 function makeAdapter(config) {
   const timeout = config.timeout || DEFAULT_TIMEOUT;
 
@@ -355,8 +427,11 @@ function makeAdapter(config) {
       availabilitySelector: config.availabilitySelector,
       magentoVariants: !!config.magentoVariants, // capture per-variant size+price (Magento jsonConfig)
       optionCardSelector: config.optionCardSelector || null, // capture option-card size+price text (DoMyOwn)
+      variantRows: config.variantRows || null, // capture DOM size rows (Forestry Distributing)
+      sizeHintSelector: config.sizeHintSelector || null, // spec-table pack size when the title omits it (DIY Pest)
     };
     const snapshot = await page.evaluate(collectSnapshot, sel);
+    applySizeHint(snapshot);
 
     // Size-aware JSON-LD first; DOM fallback only when JSON-LD carried no offers
     // (offerFromSnapshot enforces the size gate so a default variant can't be
@@ -396,6 +471,9 @@ function makeAdapter(config) {
       // (the EPA might belong to a different product on the page).
       competing_same_size: !!offer.competingSameSize,
       price_type: config.priceType || 'public',
+      // Page markup states a $0 shipping rate (schema.org shippingDetails). Only
+      // flagged-free vendors (shipping-rules) act on it; everyone else ignores it.
+      free_shipping: freeShippingFromJsonLd(snapshot.jsonLd),
       // The real vendors.id (UUID) the /report worker keys on — a DB vendor row
       // provides `.id`. This is NOT the adapter slug (selectAdapterKey decides that
       // from host/name/url; the two are independent).
@@ -508,6 +586,6 @@ function makeAdapter(config) {
 }
 
 module.exports = {
-  makeAdapter, collectSnapshot, firstProductLink, rankedMatchingLinks, selectSearchCandidates, bestMatchingLink, searchTokens,
+  makeAdapter, collectSnapshot, applySizeHint, freeShippingFromJsonLd, firstProductLink, rankedMatchingLinks, selectSearchCandidates, bestMatchingLink, searchTokens,
   searchQuery, targetOzOf, priceValue, availabilityValue, PRICE_VALUE_ATTRS, AVAILABILITY_VALUE_ATTRS, DEFAULT_TIMEOUT,
 };
