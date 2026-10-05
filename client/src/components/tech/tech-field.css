@@ -52,9 +52,10 @@
 .tf-nav a[aria-current] { color: var(--tf-ink); background: var(--tf-subtle); }
 .tech-field :is(a, button):focus-visible { outline: 2px solid var(--tf-ink); outline-offset: 2px; }
 .tf-page h1, .tf-page h2, .tf-page h3 { font-family: inherit; color: var(--tf-ink); font-weight: 500; }
-.tf-page h1 { font-size: 22px; line-height: 1.3; letter-spacing: -0.015em; margin: 0; }
+.tf-page h1 { font-size: 22px; line-height: 1.3; letter-spacing: 0; margin: 0; }
 .tf-page h2 { font-size: 18px; line-height: 1.35; letter-spacing: -0.005em; margin: 0; }
 .tf-page p { margin: 4px 0 0; }
+@media (max-width: 767px) { .tf-page h1 { font-size: 18px; } }
 .tf-page-heading { display: flex; justify-content: space-between; align-items: end; gap: 16px; margin-bottom: 12px; }
 .tf-muted { color: var(--tf-muted); font-size: 14px; }
 .tf-struck { color: var(--tf-faint); text-decoration: line-through; }
@@ -74,13 +75,13 @@
 .tf-error { background: #fcebeb; color: #a32d2d; }
 .tf-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .tf-actions > * { flex: 1 1 auto; }
-.tf-button { display: inline-flex; justify-content: center; align-items: center; gap: 6px; min-height: 44px; padding: 6px 12px; border: 0.5px solid var(--tf-line-strong); border-radius: 4px; background: transparent; color: var(--tf-ink); font-family: inherit; font-size: 14px; font-weight: 500; cursor: pointer; text-decoration: none; }
+.tf-button { display: inline-flex; justify-content: center; align-items: center; gap: 6px; min-height: 44px; padding: 6px 12px; border: 0.5px solid var(--tf-line-strong); border-radius: 4px; background: var(--tf-surface); color: var(--tf-ink); font-family: inherit; font-size: 14px; font-weight: 500; cursor: pointer; text-decoration: none; }
 .tf-button svg { width: 16px; height: 16px; flex-shrink: 0; }
 .tf-button:hover:not(:disabled) { background: var(--tf-subtle); }
 .tf-button:disabled, .tf-tool:disabled, .tf-stop:disabled { opacity: .5; cursor: not-allowed; }
 .tf-primary { width: 100%; background: var(--tf-ink); border-color: var(--tf-ink); color: #ffffff; }
 .tf-primary:hover:not(:disabled) { background: var(--tf-ink); opacity: .9; }
-.tf-ghost { border-color: transparent; color: var(--tf-muted); }
+.tf-ghost { border-color: transparent; background: transparent; color: var(--tf-muted); }
 .tf-section-title { margin: 24px 0 12px !important; }
 /* An UPPERCASE section label ("Your route"); the visit header's
    .tf-section-title wrapper keeps names and addresses as written (Codex #5794). */
