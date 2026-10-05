@@ -504,55 +504,13 @@ export default function LawnAssessmentCompletionBlock({
       return { ...prev, [key]: Math.max(0, Math.min(100, Math.round(base) + delta)) };
     });
   }
-  const holdRef = useRef({ timer: null, repeated: false });
-  function stopHold() {
-    clearTimeout(holdRef.current.timer);
-    clearInterval(holdRef.current.timer);
-    holdRef.current.timer = null;
-  }
-  // A press that ends off the button (drag away, cancelled touch) fires no
-  // click, so the "swallow the post-hold click" flag must not survive it, or
-  // the next tap on any step button would be discarded (Codex r1 P2).
-  function cancelHold() {
-    stopHold();
-    holdRef.current.repeated = false;
-  }
-  useEffect(() => stopHold, []);
-  // A hold must not outlive the moment its button stops accepting input: a
-  // confirm (or retake, or the parent disabling the block) started with
-  // another finger would otherwise keep stepping the displayed score after
-  // the server saved a different one (Codex r4 P2).
-  const stepsFrozen = disabled || confirming || analyzing || !!confirmedId;
-  useEffect(() => { if (stepsFrozen) cancelHold(); }, [stepsFrozen]);
-  // Handlers for a step button: a tap (or Enter/Space) steps once; holding the
-  // press steps again every 120ms after a short pause, and the click that ends
-  // a hold does not step a second time.
-  function holdToRepeat(key, delta) {
-    return {
-      onClick: () => {
-        if (holdRef.current.repeated) { holdRef.current.repeated = false; return; }
-        stepScore(key, delta);
-      },
-      onPointerDown: (event) => {
-        // Only a primary press (left button / touch) starts a hold: a right or
-        // middle press never clicks, so it must not change a score (Codex r3 P2).
-        if (event.button != null && event.button !== 0) return;
-        // On touch, pointerdown captures the pointer, so pointerleave never
-        // fires while the finger is down and a slide away would keep stepping.
-        // Releasing the capture makes leave/cancel fire as on a mouse (Codex r2 P2).
-        try { event.currentTarget.releasePointerCapture?.(event.pointerId); } catch { /* not captured */ }
-        stopHold();
-        holdRef.current.repeated = false;
-        holdRef.current.timer = setTimeout(() => {
-          holdRef.current.repeated = true;
-          stepScore(key, delta);
-          holdRef.current.timer = setInterval(() => stepScore(key, delta), 120);
-        }, 450);
-      },
-      onPointerUp: stopHold,
-      onPointerLeave: cancelHold,
-      onPointerCancel: cancelHold,
-    };
+  // A step button steps once per tap (or Enter/Space). There is no hold-to-
+  // repeat: a timer that keeps stepping between events outlived every state
+  // change a technician can make with a second finger (confirm, retake, a
+  // slide away), and each review round found another such edge. A tap is
+  // the one gesture the owner asked for ("+ or -").
+  function stepHandlers(key, delta) {
+    return { onClick: () => stepScore(key, delta) };
   }
 
   const scoreSource = techScores || result?.adjustedScores || result?.displayScores || null;
@@ -789,7 +747,7 @@ export default function LawnAssessmentCompletionBlock({
                         aria-label={`Lower ${metric.label} score`}
                         disabled={disabled || confirming}
                         style={stepButtonStyle(disabled || confirming)}
-                        {...holdToRepeat(metric.key, -1)}
+                        {...stepHandlers(metric.key, -1)}
                       >
                         {"\u2212"}
                       </button>
@@ -825,7 +783,7 @@ export default function LawnAssessmentCompletionBlock({
                         aria-label={`Raise ${metric.label} score`}
                         disabled={disabled || confirming}
                         style={stepButtonStyle(disabled || confirming)}
-                        {...holdToRepeat(metric.key, 1)}
+                        {...stepHandlers(metric.key, 1)}
                       >
                         +
                       </button>
