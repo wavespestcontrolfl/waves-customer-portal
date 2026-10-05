@@ -356,8 +356,11 @@ async function fileFoundItems(conn, { message }, items, receipt) {
       // that appointment, and it must still reach the office when the first
       // visit ends. New directions with a known code ("press 2 first") are news
       // too. One text still yields one row per kind and value (unique index).
-      const covered = (item) => existing.some((r) => r.kind === item.kind && r.value_hash === item.value_hash
-        && r.life === 'standing' && normalizeText(r.instructions) === normalizeText(item.instructions));
+      // Only a DECIDED (active) row covers: a waiting row from another text may
+      // still be corrected away, and each text must keep its own evidence.
+      const covered = (item) => existing.some((r) => r.status === 'active' && r.kind === item.kind
+        && r.value_hash === item.value_hash && r.life === 'standing'
+        && normalizeText(r.instructions) === normalizeText(item.instructions));
       toInsert = items.filter((item) => {
         if (covered(item)) return false;
         // Already on the profile: the strict rule saved it, nothing is lost.

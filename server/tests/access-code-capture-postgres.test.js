@@ -391,17 +391,29 @@ postgres('access codes section', () => {
       expect(filed).toEqual([['door', '#4821'], ['garage', '2468']]);
     });
 
-    test('skips a value with a live row for the customer, but a dismissed row does not block it', async () => {
+    test('skips a value with an active standing row, but a waiting or dismissed row does not block it', async () => {
       const c = await customer();
       const existing = await found(c.id);
+      await access.accept(trx, existing.id, {});
       await text(c.id, 'The gate code is #4821');
       const read = stub([gateItem()]);
       expect(await sweep(read)).toMatchObject({ found: 0 });
-      expect(await rows(c.id)).toHaveLength(1);
       await trx('customer_access_codes').where({ id: existing.id }).update({ status: 'dismissed' });
+      // accept also filled the profile field, which on its own covers the value
+      await trx('property_preferences').where({ customer_id: c.id }).update({ neighborhood_gate_code: null });
       await trx('data_hygiene_source_extractions').where({ extractor_version: 'access-net-v1' }).del();
       expect(await sweep(read)).toMatchObject({ found: 1 });
       expect((await rows(c.id)).map((r) => r.status).sort()).toEqual(['dismissed', 'found']);
+    });
+
+    test('each text keeps its own waiting row, so correcting one away leaves the other', async () => {
+      const c = await customer();
+      const a = await text(c.id, 'The gate code is #4821', { at: '2040-03-10T14:00:00Z' });
+      await text(c.id, 'The gate code is #4821');
+      expect(await sweep(stub([gateItem()]))).toMatchObject({ found: 2 });
+      await trx('sms_log').where({ id: a }).update({ message_body: 'See you Tuesday' });
+      await sweep(stub([]));
+      expect((await rows(c.id)).map((r) => r.status)).toEqual(['found']);
     });
 
     test('a live visit code does not hide the same code sent later as a standing code', async () => {
