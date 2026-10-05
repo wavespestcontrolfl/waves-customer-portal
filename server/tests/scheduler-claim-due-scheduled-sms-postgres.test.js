@@ -61,6 +61,15 @@ jest.setTimeout(30000);
     expect(await statusOf(due.id)).toBe('sending');
   });
 
+  test('a canceled row (kept by the Intelligence Bar cancel) is never claimed for sending, even when its time is past', async () => {
+    const kept = row({ status: 'canceled', scheduled_for: new Date(NOW.getTime() - 60 * 1000) });
+    const live = row({ scheduled_for: new Date(NOW.getTime() - 60 * 1000) });
+    await database('sms_log').insert([kept, live]);
+    const claimed = await claimDueScheduledSms(NOW);
+    expect(claimed.map((r) => r.id)).toEqual([live.id]);
+    expect(await statusOf(kept.id)).toBe('canceled');
+  });
+
   test('a voicemail_lead_sms_deferred row queued for QUIET_HOURS_HOLD is claimed NOW even though scheduled_for is hours away', async () => {
     const queuedFor8am = row({
       scheduled_for: new Date(NOW.getTime() + 8 * 60 * 60 * 1000),

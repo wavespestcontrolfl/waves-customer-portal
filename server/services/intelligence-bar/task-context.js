@@ -935,7 +935,11 @@ async function prepareScopedReadInput(params, context, { toolName, schema }) {
     if (resolved.error) return resolved;
     readContext = resolved.readContext;
   }
-  const inherited = inheritTaskCustomer(input, context, schema);
+  // A `scoped` reader is already confined to every task customer by the
+  // task's read scope (readCustomerIds), so its optional customer_id is a
+  // narrower filter the caller may add, never one to inherit: inheriting
+  // would refuse a two-customer task that the read scope serves today.
+  const inherited = scope === 'scoped' ? null : inheritTaskCustomer(input, context, schema);
   if (inherited) return inherited;
   const invalid = await validateRecordTarget(input, readContext, { toolName });
   return invalid || { input };

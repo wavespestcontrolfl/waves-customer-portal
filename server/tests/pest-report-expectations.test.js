@@ -4,16 +4,11 @@
 const {
   pestReportExpectationsGateOn,
   classifyProductExpectation,
-  buildRainExpectation,
   buildSpiderExpectation,
   buildWhatToExpect,
   buildPestExpectations,
   toExpectationProduct,
-  formatRainfastMinutes,
 } = require('../services/service-report/pest-report-expectations');
-
-// An application recorded outside (explicit perimeter method).
-const EXTERIOR_APPLICATION = { name: 'Atticus Talak', method: 'perimeter_spray', methodInferred: false, rainfastMinutes: null };
 
 describe('pestReportExpectationsGateOn', () => {
   const ORIGINAL = process.env.GATE_PEST_REPORT_EXPECTATIONS;
@@ -31,339 +26,6 @@ describe('pestReportExpectationsGateOn', () => {
   });
 });
 
-describe('buildRainExpectation', () => {
-  it('returns null with no rain data and no rainy-season/threshold signal', () => {
-    expect(buildRainExpectation({ weekWeather: null, serviceMonth: 2 })).toBeNull();
-  });
-
-  it('a genuinely unknown rainInches (null) is never rendered as 0" (Number(null) === 0 footgun)', () => {
-    expect(buildRainExpectation({ weekWeather: { rainInches: null, rainConfidence: null }, serviceMonth: 2 })).toBeNull();
-  });
-
-  it('states the weekly rain fact when rainInches is known (normal confidence)', () => {
-    const out = buildRainExpectation({ weekWeather: { rainInches: 0.4, rainConfidence: null }, serviceMonth: 2 });
-    expect(out.lines[0]).toMatch(/Our rain tracker recorded about 0\.4" of rain at your property over the past 7 days\./);
-    expect(out.lines).toHaveLength(1); // Feb, < 1" — no ants-after-rain line
-  });
-
-  it('hedges the number on low-confidence (city-collective fallback) rain', () => {
-    const out = buildRainExpectation({ weekWeather: { rainInches: 2.1, rainConfidence: 'low' }, serviceMonth: 2 });
-    expect(out.lines[0]).toMatch(/Our rain tracker recorded roughly 2\.1" of rain in your area/);
-    expect(out.lines[0]).not.toMatch(/gauge/i);
-  });
-
-  // Owner ruling 2026-09-28, revised: the rain-fast clause appears ONLY
-  // when the catalog has a sourced rainfast_minutes number for an applied
-  // product. There is NO generic fallback sentence — "rain-fast once it
-  // has dried" was itself an unsupported claim (most labels don't state
-  // rain-fastness at all, and some say to avoid rain within a window
-  // instead), so with no sourced number the clause is simply absent.
-  it('states the rain-fast clause ONLY when a product supplies rainfastMinutes (synthetic — prod catalog is NULL today)', () => {
-    const withRainfast = buildRainExpectation({
-      weekWeather: { rainInches: 0.5, rainConfidence: null },
-      products: [{ rainfastMinutes: 30 }],
-      serviceMonth: 2,
-    });
-    expect(withRainfast.lines[0]).toMatch(/rain-fast about 30 min after it dries, per the label\./);
-  });
-
-  it('no rainfast_minutes on any applied product: NO rain-fast wording anywhere (no generic fallback)', () => {
-    const withoutRainfast = buildRainExpectation({
-      weekWeather: { rainInches: 0.5, rainConfidence: null },
-      products: [{ rainfastMinutes: null }],
-      serviceMonth: 2,
-    });
-    expect(withoutRainfast.lines[0]).not.toMatch(/rain-fast/i);
-    expect(withoutRainfast.lines[0]).not.toMatch(/dried/i);
-  });
-
-  it('adds no rain-fast clause at all when no products were applied', () => {
-    const out = buildRainExpectation({
-      weekWeather: { rainInches: 0.5, rainConfidence: null },
-      products: [],
-      serviceMonth: 2,
-    });
-    expect(out.lines[0]).not.toMatch(/rain-fast/i);
-  });
-
-  // codex P2 2026-09-29 (round 2): with several applied products each
-  // carrying a positive rainfastMinutes, the clause must state the LONGEST
-  // one — array order is incidental, never a safety ranking.
-  it('states the LONGER rain-fast interval when two products carry different ones, independent of array order', () => {
-    const shortFirst = buildRainExpectation({
-      weekWeather: { rainInches: 0.5, rainConfidence: null },
-      products: [{ rainfastMinutes: 30 }, { rainfastMinutes: 120 }],
-      serviceMonth: 2,
-    });
-    expect(shortFirst.lines[0]).toMatch(/rain-fast about 2 hr after it dries, per the label\./);
-
-    const longFirst = buildRainExpectation({
-      weekWeather: { rainInches: 0.5, rainConfidence: null },
-      products: [{ rainfastMinutes: 120 }, { rainfastMinutes: 30 }],
-      serviceMonth: 2,
-    });
-    expect(longFirst.lines[0]).toMatch(/rain-fast about 2 hr after it dries, per the label\./);
-  });
-
-  it('formats a >=60min rainfast time in hours', () => {
-    expect(formatRainfastMinutes(120)).toBe('2 hr');
-    expect(formatRainfastMinutes(90)).toBe('1.5 hr');
-    expect(formatRainfastMinutes(30)).toBe('30 min');
-    expect(formatRainfastMinutes(null)).toBeNull();
-  });
-
-  it('adds the forecast heavy-rain caveat only when forecastHeavyRain is true (caller\'s job to gate LIVE-only)', () => {
-    const live = buildRainExpectation({
-      weekWeather: { rainInches: 0.2, rainConfidence: null }, products: [EXTERIOR_APPLICATION], serviceMonth: 2, forecastHeavyRain: true,
-    });
-    expect(live.lines[0]).toMatch(/Heavy rain soon after an exterior application/);
-
-    // A bait at an exterior chip leaves no residual to wash off: no caveat.
-    const baitOutside = buildRainExpectation({
-      weekWeather: { rainInches: 0.2, rainConfidence: null }, products: [{ name: 'Advion Ant Bait Gel', applicationArea: 'Bait stations' }], serviceMonth: 2, forecastHeavyRain: true,
-    });
-    expect(baitOutside.lines.join(' ')).not.toMatch(/Heavy rain soon after an exterior application/);
-
-    // The caveat names an exterior application, so an application with no
-    // exterior method or area on record gets none.
-    const interiorOnly = buildRainExpectation({
-      weekWeather: { rainInches: 0.2, rainConfidence: null }, products: [{ rainfastMinutes: null }], serviceMonth: 2, forecastHeavyRain: true,
-    });
-    expect(interiorOnly.lines.join(' ')).not.toMatch(/Heavy rain soon after an exterior application/);
-
-    // No recorded application (inspection / sweep only): no treatment caveat.
-    const untreated = buildRainExpectation({
-      weekWeather: { rainInches: 0.2, rainConfidence: null }, serviceMonth: 2, forecastHeavyRain: true,
-    });
-    expect(untreated.lines.join(' ')).not.toMatch(/Heavy rain soon after an exterior application/);
-
-    const notLive = buildRainExpectation({
-      weekWeather: { rainInches: 0.2, rainConfidence: null }, serviceMonth: 2, forecastHeavyRain: false,
-    });
-    expect(notLive.lines[0]).not.toMatch(/Heavy rain soon after an exterior application/);
-  });
-
-  // Owner ruling 2026-09-28: never on the calendar month alone — a rain
-  // signal (or the LIVE forecast signal) is required every time.
-  it('does NOT add the ants-after-rain line in rainy season with no rain data and no forecast signal', () => {
-    const out = buildRainExpectation({ weekWeather: null, serviceMonth: 7 });
-    expect(out).toBeNull();
-  });
-
-  it('rainy season (Jun–Oct): the ants line needs >= 0.5" — under the bar is silent, at/over fires', () => {
-    const under = buildRainExpectation({ weekWeather: { rainInches: 0.4, rainConfidence: null }, serviceMonth: 7 });
-    expect(under.lines).toHaveLength(1); // rain line only — no ants line
-    expect(under.lines.join(' ')).not.toMatch(/Heavy rain floods ant nests/);
-
-    const over = buildRainExpectation({ weekWeather: { rainInches: 0.5, rainConfidence: null }, serviceMonth: 7 });
-    expect(over.lines).toHaveLength(2);
-    expect(over.lines[1]).toMatch(/Heavy rain floods ant nests/);
-  });
-
-  it('outside rainy season: the ants line needs >= 1" — 0.5" (the rainy-season bar) is not enough', () => {
-    const halfInch = buildRainExpectation({ weekWeather: { rainInches: 0.5, rainConfidence: null }, serviceMonth: 2 });
-    expect(halfInch.lines).toHaveLength(1);
-    expect(halfInch.lines.join(' ')).not.toMatch(/Heavy rain floods ant nests/);
-
-    const under = buildRainExpectation({ weekWeather: { rainInches: 0.9, rainConfidence: null }, serviceMonth: 2 });
-    expect(under.lines).toHaveLength(1); // rain line only — no ants line
-    const over = buildRainExpectation({ weekWeather: { rainInches: 1, rainConfidence: null }, serviceMonth: 2 });
-    expect(over.lines).toHaveLength(2);
-    expect(over.lines[1]).toMatch(/Heavy rain floods ant nests/);
-  });
-
-  it('low-confidence (city-collective) rain always uses the higher 1" bar, even in rainy season', () => {
-    // 0.6" is over the 0.5" rainy-season bar but under the 1" low-confidence bar.
-    const hedgedUnder = buildRainExpectation({ weekWeather: { rainInches: 0.6, rainConfidence: 'low' }, serviceMonth: 7 });
-    expect(hedgedUnder.lines).toHaveLength(1);
-    expect(hedgedUnder.lines.join(' ')).not.toMatch(/Heavy rain floods ant nests/);
-
-    const hedgedOver = buildRainExpectation({ weekWeather: { rainInches: 1, rainConfidence: 'low' }, serviceMonth: 7 });
-    expect(hedgedOver.lines).toHaveLength(2);
-    expect(hedgedOver.lines[1]).toMatch(/Heavy rain floods ant nests/);
-  });
-
-  // codex P2 #5137 deferred finding c: settledWeekWeatherForRender
-  // (reports-public.js) drops every open trailing-week window, so a
-  // same-day live report always passes weekWeather: null here. The live
-  // forecast warning must still reach the customer as its OWN line rather
-  // than being silently swallowed by the (unrelated) missing settled total.
-  it('the LIVE-only forecast heavy-rain signal alone adds BOTH its own warning line and the ants line, even with no rain data', () => {
-    const out = buildRainExpectation({ weekWeather: null, products: [EXTERIOR_APPLICATION], serviceMonth: 2, forecastHeavyRain: true });
-    expect(out.lines).toHaveLength(2);
-    expect(out.lines[0]).toMatch(/Heavy rain soon after an exterior application/);
-    expect(out.lines[1]).toMatch(/Heavy rain floods ant nests/);
-  });
-
-  it('an inspection- or sweep-only visit gets no treatment caveat from the forecast alone — only the neutral ants line', () => {
-    const out = buildRainExpectation({ weekWeather: null, products: [], serviceMonth: 2, forecastHeavyRain: true });
-    expect(out.lines).toHaveLength(1);
-    expect(out.lines[0]).not.toMatch(/treatment/);
-    expect(out.lines[0]).toMatch(/Heavy rain floods ant nests and pushes foragers indoors for a few days/);
-  });
-
-  it('with no rain data and NO forecast signal, no heavy-rain warning line is invented', () => {
-    const out = buildRainExpectation({ weekWeather: null, serviceMonth: 2, forecastHeavyRain: false });
-    expect(out).toBeNull();
-  });
-
-  it('never claims rain can\'t affect the treatment beyond the label facts', () => {
-    const out = buildRainExpectation({
-      weekWeather: { rainInches: 3, rainConfidence: null },
-      products: [{ rainfastMinutes: 30 }],
-      serviceMonth: 8,
-      forecastHeavyRain: true,
-    });
-    const joined = out.lines.join(' ');
-    expect(joined).not.toMatch(/guarantee/i);
-    expect(joined).not.toMatch(/eliminated\b/i);
-  });
-
-  // codex P1 2026-09-29 (pre-push audit round 2): "moving through the
-  // treated band" is a TREATMENT claim and must never fire from rain alone.
-  // The ants line now requires the SAME confirmed exterior/perimeter
-  // application evidence the pyrethroid barrier sentence requires.
-  describe('ants-after-rain wording requires confirmed perimeter-treatment evidence', () => {
-    const HEAVY_WEEK = { rainInches: 2, rainConfidence: null };
-
-    it('no applications at all (inspection/sweep-only visit): treatment-neutral wording, never "treated band"', () => {
-      const out = buildRainExpectation({ weekWeather: HEAVY_WEEK, products: [], serviceMonth: 7 });
-      expect(out.lines).toHaveLength(2);
-      expect(out.lines[1]).toMatch(/Heavy rain floods ant nests/);
-      expect(out.lines[1]).not.toMatch(/6-foot perimeter band/);
-      expect(out.lines[1]).toMatch(/text us/i);
-    });
-
-    it('an INTERIOR-only application (non_repellent, no exterior evidence): treatment-neutral wording', () => {
-      const out = buildRainExpectation({
-        weekWeather: HEAVY_WEEK,
-        products: [{ name: 'Taurus SC', method: 'spot_treatment', methodInferred: false, applicationArea: 'Kitchen' }],
-        serviceMonth: 7,
-      });
-      expect(out.lines[1]).not.toMatch(/6-foot perimeter band/);
-    });
-
-    it('a product applied with UNKNOWN method/area (nothing recorded): treatment-neutral wording', () => {
-      const out = buildRainExpectation({
-        weekWeather: HEAVY_WEEK,
-        products: [{ name: 'Demand CS' }],
-        serviceMonth: 7,
-      });
-      expect(out.lines[1]).not.toMatch(/6-foot perimeter band/);
-    });
-
-    it('an INFERRED method (the pest-line default guess) is treated as unknown, never confirms perimeter evidence', () => {
-      const out = buildRainExpectation({
-        weekWeather: HEAVY_WEEK,
-        products: [{ name: 'Taurus SC', method: 'perimeter_spray', methodInferred: true }],
-        serviceMonth: 7,
-      });
-      expect(out.lines[1]).not.toMatch(/6-foot perimeter band/);
-    });
-
-    it('an ant bait / roach gel / IGR with confirmed exterior evidence STILL does not earn the band claim (not a perimeter band)', () => {
-      const out = buildRainExpectation({
-        weekWeather: HEAVY_WEEK,
-        products: [{ name: 'Advion Ant Bait Gel', method: 'perimeter_spray', methodInferred: false }],
-        serviceMonth: 7,
-      });
-      expect(out.lines[1]).not.toMatch(/6-foot perimeter band/);
-    });
-
-    it('an EXPLICIT perimeter spray (non_repellent) TAGGED for ants earns the treated-band wording', () => {
-      const out = buildRainExpectation({
-        weekWeather: HEAVY_WEEK,
-        products: [{ name: 'Taurus SC', method: 'perimeter_spray', methodInferred: false, targets: ['Ants'] }],
-        serviceMonth: 7,
-      });
-      expect(out.lines[1]).toMatch(/6-foot perimeter band/);
-    });
-
-    it('an applicationArea naming an exterior/perimeter chip (no explicit method), tagged for ants, also earns the 6-foot band wording', () => {
-      const out = buildRainExpectation({
-        weekWeather: HEAVY_WEEK,
-        products: [{ name: 'Alpine WSG', applicationArea: 'Foundation perimeter', targets: ['ants', 'spiders'] }],
-        serviceMonth: 7,
-      });
-      expect(out.lines[1]).toMatch(/6-foot perimeter band/);
-    });
-
-    it('a repellent barrier sprayed outside for ants never earns the 6-foot band wording (it describes a non-repellent)', () => {
-      const out = buildRainExpectation({
-        weekWeather: HEAVY_WEEK,
-        products: [{ name: 'Demand CS', applicationArea: 'Foundation perimeter', targets: ['ants', 'spiders'] }],
-        serviceMonth: 7,
-      });
-      expect(out.lines[1]).not.toMatch(/6-foot perimeter band/);
-      expect(out.lines[1]).toMatch(/we'll come back out/);
-    });
-
-    // codex P1 2026-09-28 round 4: the colony/trail claim is ANT-specific —
-    // a confirmed perimeter band applied for roaches only, or with no targets
-    // recorded, gets the pest-neutral wording.
-    it('a confirmed perimeter spray tagged ONLY for roaches never earns the treated-band wording', () => {
-      const out = buildRainExpectation({
-        weekWeather: HEAVY_WEEK,
-        products: [{ name: 'Taurus SC', method: 'perimeter_spray', methodInferred: false, targets: ['Roaches'] }],
-        serviceMonth: 7,
-      });
-      expect(out.lines[1]).toMatch(/Heavy rain floods ant nests/);
-      expect(out.lines[1]).not.toMatch(/6-foot perimeter band/);
-    });
-
-    it('a confirmed perimeter spray with NO targets recorded never earns the treated-band wording', () => {
-      const out = buildRainExpectation({
-        weekWeather: HEAVY_WEEK,
-        products: [{ name: 'Taurus SC', method: 'perimeter_spray', methodInferred: false }],
-        serviceMonth: 7,
-      });
-      expect(out.lines[1]).not.toMatch(/6-foot perimeter band/);
-    });
-
-    it('the ant target match is word-bounded ("Giant water bugs" is not an ant tag)', () => {
-      const out = buildRainExpectation({
-        weekWeather: HEAVY_WEEK,
-        products: [{ name: 'Taurus SC', method: 'perimeter_spray', methodInferred: false, targets: ['Giant water bugs', 'pantry pests'] }],
-        serviceMonth: 7,
-      });
-      expect(out.lines[1]).not.toMatch(/6-foot perimeter band/);
-    });
-
-    // codex P1 2026-09-29 (pre-push audit round 3): same collision as the
-    // pyrethroid barrier sentence — "Interior entry points" is a controlled
-    // INTERIOR chip and must never earn the treated-band claim, even though
-    // it contains the substring "entry points".
-    it('the controlled INTERIOR chip "Interior entry points" never earns the treated-band wording', () => {
-      const out = buildRainExpectation({
-        weekWeather: HEAVY_WEEK,
-        products: [{ name: 'Demand CS', method: 'spot_treatment', methodInferred: false, applicationArea: 'Interior entry points' }],
-        serviceMonth: 7,
-      });
-      expect(out.lines[1]).not.toMatch(/6-foot perimeter band/);
-    });
-
-    it('an unrecognized / free-text area string never qualifies as exterior (fail closed, no guessing)', () => {
-      const out = buildRainExpectation({
-        weekWeather: HEAVY_WEEK,
-        products: [{ name: 'Demand CS', applicationArea: 'Somewhere out back, per the tech\'s note' }],
-        serviceMonth: 7,
-      });
-      expect(out.lines[1]).not.toMatch(/6-foot perimeter band/);
-    });
-
-    it('never guarantees/eliminates in the neutral wording either', () => {
-      const out = buildRainExpectation({ weekWeather: HEAVY_WEEK, products: [], serviceMonth: 7 });
-      expect(out.lines[1]).not.toMatch(/guarantee|eliminated\b/i);
-    });
-  });
-});
-
-// Owner ruling 2026-09-28 (P1 audit, 2 rounds of misclassification from the
-// prior heuristic — a category/name-regex classifier would have called an
-// Advion ANT Bait Gel a roach product, since it also matched the generic
-// "bait" category rule): classification is now an EXPLICIT, CLOSED map
-// keyed by the exact catalog product name — active ingredient, moa_group,
-// and category are NEVER consulted. A product not in the map gets no class.
 describe('classifyProductExpectation — explicit product-name map (no heuristics)', () => {
   const cases = [
     [{ name: 'Taurus SC' }, 'non_repellent'],
@@ -804,6 +466,26 @@ describe('buildSpiderExpectation', () => {
   // applying it somewhere else entirely. This is the exact required
   // regression test: no recorded action => no spider section, REGARDLESS
   // of any spider-targeted (even pyrethroid-classified) product.
+  // Owner 2026-10-05: the regular pest completion form's "Swept eaves and
+  // webs" box records exactly this protocol action (scope exterior, no
+  // treatment applied). The label it sends must be the protocol's own sweep
+  // step and must earn the spider section.
+  it('the "Swept eaves and webs" box label is the pest protocol sweep and earns the spider section', () => {
+    const protocols = require('../config/protocols.json');
+    const label = 'Swept eaves, window frames, door frames, and lanai';
+    const visitsWithSweep = protocols.pest.visits.filter((visit) => visit.lineMeta?.[label]);
+    expect(visitsWithSweep.length).toBeGreaterThan(0);
+    const entry = visitsWithSweep[0].lineMeta[label];
+    expect(entry).toMatchObject({ scope: 'exterior', treatmentApplied: false });
+    const out = buildSpiderExpectation({
+      actionLabels: [label],
+      actionEntries: [{ label, scope: entry.scope, treatmentApplied: entry.treatmentApplied }],
+      applications: [],
+    });
+    expect(out.headline).toBe('Spiders');
+    expect(out.whatWeDid).toBe('We swept webs and any egg sacs from your eaves and entry points.');
+  });
+
   it('a spider-targeted product WITHOUT a recorded eave/web/soffit action => NO spider section', () => {
     const out = buildSpiderExpectation({
       actionLabels: ['Treated exterior perimeter band'],
@@ -1011,20 +693,19 @@ describe('buildSpiderExpectation', () => {
 });
 
 describe('buildPestExpectations — composition', () => {
-  it('returns null when rain, spiders, and what-to-expect are all null (no data)', () => {
-    expect(buildPestExpectations({ weekWeather: null, applications: [], actionLabels: [], serviceMonth: 2 })).toBeNull();
+  it('returns null when spiders and what-to-expect are both null (no data)', () => {
+    expect(buildPestExpectations({ applications: [], actionLabels: [] })).toBeNull();
   });
 
-  it('composes all three from realistic applications shape', () => {
+  it('composes both from realistic applications shape', () => {
     const out = buildPestExpectations({
-      weekWeather: { rainInches: 1.5, rainConfidence: null },
       applications: [
         { product: { name: 'Taurus SC', active_ingredient: 'Fipronil', category: 'insecticide', moa_group: null, rainfast_minutes: null }, targets: ['ants'] },
       ],
       actionLabels: ['Swept eaves, window frames, door frames, and lanai'],
-      serviceMonth: 7,
     });
-    expect(out.rain.lines.length).toBeGreaterThan(0);
+    // The rain key was removed for good (owner 2026-10-05).
+    expect(out).not.toHaveProperty('rain');
     // Action recorded, but the only applied product is Taurus SC (targeted
     // for ants, not spiders, and non_repellent-classified anyway) => de-web
     // wording, not the combined/residual wording.
@@ -1032,66 +713,11 @@ describe('buildPestExpectations — composition', () => {
     expect(out.spiders.whatWeDid).toBe('We swept webs and any egg sacs from your eaves and entry points.');
     expect(out.whatToExpect.lines[0]).toMatch(/non-repellent/);
   });
-
-  // codex P2 #5137 deferred finding c: a same-day live report with an open
-  // trailing-week window passes weekWeather: null all the way through
-  // buildReportV1Data / reports-public.js's settledWeekWeatherForRender —
-  // the composed `rain` key must still surface the live forecast warning.
-  it('surfaces the rain key from the live forecast signal alone, with no settled weekly total', () => {
-    const out = buildPestExpectations({
-      weekWeather: null,
-      applications: [{ product: { name: 'Demand CS' }, targets: [], method: 'perimeter_spray', methodInferred: false }],
-      actionLabels: [],
-      serviceMonth: 2,
-      forecastHeavyRain: true,
-    });
-    expect(out.rain.lines[0]).toMatch(/Heavy rain soon after an exterior application/);
-  });
 });
 
 describe('buildPestExpectations — child keys present only with content (codex P0 #5137 r6)', () => {
-  it('only rain → only the rain key', () => {
-    process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
-    const out = buildPestExpectations({ weekWeather: { rainInches: 0.1, rainConfidence: null, windowClosed: true }, applications: [], serviceMonth: 3 });
-    expect(Object.keys(out)).toEqual(['rain']);
-  });
-
   it('nothing → null, never an object of nulls', () => {
-    expect(buildPestExpectations({ weekWeather: null, applications: [], serviceMonth: 3 })).toBeNull();
+    expect(buildPestExpectations({ applications: [] })).toBeNull();
   });
 });
 
-// Owner report review 2026-10-03: the forecast alone fired the ants line
-// right under a light measured week (0.38" in October, under the 0.5"
-// rainy-season bar), and it read as though heavy rain had already fallen.
-describe('ants-after-rain line fired by the forecast alone', () => {
-  const LIGHT_WEEK = { rainInches: 0.38, rainConfidence: 'high' };
-  const ANT_BAND = { name: 'Taurus SC', method: 'perimeter_spray', methodInferred: false, targets: ['Ants'] };
-
-  it('says the rain is still to come, beside a light measured week', () => {
-    const out = buildRainExpectation({ weekWeather: LIGHT_WEEK, products: [], serviceMonth: 10, forecastHeavyRain: true });
-    expect(out.lines).toEqual([
-      'Our rain tracker recorded about 0.38" of rain at your property over the past 7 days.',
-      'Storms or heavy rain are in the forecast for the next few days. Heavy rain floods ant nests and pushes foragers indoors for a few days. If they\'re still coming in about a week after a downpour, text us and we\'ll come back out.',
-    ]);
-  });
-
-  it('the treated-band line says so too', () => {
-    const out = buildRainExpectation({ weekWeather: LIGHT_WEEK, products: [ANT_BAND], serviceMonth: 10, forecastHeavyRain: true });
-    expect(out.lines.at(-1)).toBe('Storms or heavy rain are in the forecast for the next few days. Heavy rain floods ant nests and pushes foragers indoors; trails after a downpour are foragers crossing the 6-foot perimeter band, picking up the active ingredient and carrying it back to the colony.');
-  });
-
-  it('a heavy measured week keeps the line about rain that fell, forecast or not', () => {
-    for (const forecastHeavyRain of [true, false]) {
-      const neutral = buildRainExpectation({ weekWeather: { rainInches: 0.8, rainConfidence: 'high' }, products: [], serviceMonth: 10, forecastHeavyRain });
-      expect(neutral.lines.at(-1)).toBe('Heavy rain floods ant nests and pushes foragers indoors for a few days. If they\'re still coming in after about a week, text us and we\'ll come back out.');
-      const band = buildRainExpectation({ weekWeather: { rainInches: 0.8, rainConfidence: 'high' }, products: [ANT_BAND], serviceMonth: 10, forecastHeavyRain });
-      expect(band.lines.at(-1)).toBe('Heavy rain floods ant nests and pushes foragers indoors. Trails over the next few days are foragers crossing the 6-foot perimeter band, picking up the active ingredient and carrying it back to the colony.');
-    }
-  });
-
-  it('no forecast and a light week: no ants line', () => {
-    const out = buildRainExpectation({ weekWeather: LIGHT_WEEK, products: [], serviceMonth: 10, forecastHeavyRain: false });
-    expect(out.lines.join(' ')).not.toMatch(/ant nests/);
-  });
-});

@@ -5,11 +5,18 @@
 // it keeps that purity while sharing ONE Shopify allowlist with the adapter.)
 const { isApprovedShopifyHost } = require('./shopify-hosts');
 
+// `hosts` (optional) ANCHORS an entry to a parsed hostname: when present, a vendor whose
+// location fields (host/url/website) parse to a hostname routes here only if that hostname is
+// one of `hosts` or a subdomain — so diypestcontrol.com.evil.com is NOT sent to the DIY Pest
+// adapter on the strength of a substring. The `test` regex then only matters for a vendor
+// given as a bare display name with no location at all.
 const HOST_MAP = [
   { test: /domyown\.com|domyown/i, key: 'domyown' },
   { test: /solutionsstores\.com|solutions\s*pest|solutionsstores/i, key: 'solutions' },
   { test: /keystonepestsolutions|keystone\s*pest|keystone/i, key: 'keystone' },
   { test: /veseris\.com|veseris/i, key: 'veseris' },
+  { test: /diy[\s-]*pest[\s-]*control/i, key: 'diypest', hosts: ['diypestcontrol.com'] },
+  { test: /forestry[\s-]*distributing/i, key: 'forestry', hosts: ['forestrydistributing.com'] },
 ];
 
 // Amazon hosts. Anchored to a PARSED hostname (like Shopify) — not a raw substring — so a
@@ -56,7 +63,19 @@ function selectAdapterKey(vendor = {}) {
   if (isAmazonVendor(vendor)) return 'amazon';
   const hay = `${vendor.host || ''} ${vendor.url || ''} ${vendor.website || ''} ${vendor.name || ''}`.trim();
   if (!hay) return 'generic';
-  for (const { test, key } of HOST_MAP) if (test.test(hay)) return key;
+  const locationHosts = [vendor.host, vendor.url, vendor.website].map(hostOf).filter(Boolean);
+  for (const { test, key, hosts } of HOST_MAP) {
+    if (hosts) {
+      // Anchored entry: a parsed location host decides (exact / dot-suffix only); the name
+      // regex is consulted only when the vendor has no location host at all.
+      const hit = locationHosts.length
+        ? locationHosts.some((h) => hosts.some((b) => h === b || h.endsWith(`.${b}`)))
+        : test.test(String(vendor.name || ''));
+      if (hit) return key;
+      continue;
+    }
+    if (test.test(hay)) return key;
+  }
   return 'generic';
 }
 
@@ -67,6 +86,8 @@ const ADAPTER_LOADERS = {
   solutions: () => require('./solutions'),
   keystone: () => require('./keystone'),
   veseris: () => require('./veseris'), // B2B login adapter (account pricing)
+  diypest: () => require('./diypest'), // Magento 2 + Klevu search (free shipping)
+  forestry: () => require('./forestry'), // nopCommerce grouped products (paid freight)
   shopify: () => require('./shopify'), // generic Shopify storefront (base URL from vendor.website)
   amazon: () => require('./amazon-business'), // Amazon Business Product Search API (no browser)
   generic: () => require('./generic'),

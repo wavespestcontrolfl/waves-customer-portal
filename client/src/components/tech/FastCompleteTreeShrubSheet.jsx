@@ -53,7 +53,7 @@ import {
 import { submittedAmount } from '../../lib/measure-units';
 import { WarningIcon } from './FastCompleteProductPicker';
 import {
-  AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, ProductTileButton, SavedView,
+  AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, RecoveredCompletion, refusalWithoutContext, submissionHolds, ProductTileButton, SavedView,
   SheetHeader, TipSection, VisitNote, methodLabel, techTipsOf, toggleInSet, useProductPicker, useTipLibrary,
   visitChangedSinceSchedule,
 } from './FastCompleteParts';
@@ -450,7 +450,7 @@ function completionBody({ form, rows, photos, preview, previewCurrent, ctx, tips
   };
 }
 
-export default function FastCompleteTreeShrubSheet({ service, request, onClose, onCompleted, onFullForm }) {
+export default function FastCompleteTreeShrubSheet({ service, request, operatorId, onClose, onCompleted, onFullForm }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
   const dialogRef = useModalFocus(true, () => closeRef.current?.());
@@ -458,7 +458,7 @@ export default function FastCompleteTreeShrubSheet({ service, request, onClose, 
   const titleId = useId();
   const base = `/admin/dispatch/${service?.id}`;
   const ctx = useTreeShrubContext({ base, request, service });
-  const submission = useFastCompleteSubmit({ base, request });
+  const submission = useFastCompleteSubmit({ base, request, serviceId: service?.id, operatorId });
   const { submitting, done } = submission;
   // A recorded dictation clip is still being taken or transcribed. The full
   // form is another page and carries nothing over, so Full form and "+ Other
@@ -478,7 +478,7 @@ export default function FastCompleteTreeShrubSheet({ service, request, onClose, 
   closeRef.current = close;
   // Nothing is editable while a save is in flight, unresolved or refused for
   // good; the full form can't resume a /complete attempt.
-  const locked = submitting || submission.failure !== null;
+  const locked = submissionHolds(submission);
 
   return (
     <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} onDismiss={close}>
@@ -489,7 +489,11 @@ export default function FastCompleteTreeShrubSheet({ service, request, onClose, 
 }
 
 function SheetBody({ service, request, ctx, submission, locked, dictationPending, onDictationPending, onCompleted, onFullForm, isMobile }) {
-  if (submission.done) return <SavedView service={service} summary={submission.done.summary} onCompleted={() => onCompleted?.(submission.done.response || null)} />;
+  if (submission.done) return <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={() => onCompleted?.(submission.done.response || null)} />;
+  if (submission.recovering) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Checking for an unfinished completion…</ActionFeedback>;
+  if (submission.restored) return <RecoveredCompletion submission={submission} />;
+  const refusal = refusalWithoutContext(submission, ctx);
+  if (refusal) return refusal;
   if (ctx.loading) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Loading…</ActionFeedback>;
   const stop = ctx.loadError || ctx.blockedReason;
   if (ctx.loadError) {

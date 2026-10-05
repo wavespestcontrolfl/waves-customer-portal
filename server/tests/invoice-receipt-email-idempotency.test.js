@@ -147,6 +147,31 @@ describe('sendReceiptEmail idempotency', () => {
     delete process.env.GOOGLE_SMTP_PASSWORD;
   });
 
+  test('the caller\'s handoff guard gets the payment-receipt opt-out as read at the boundary (after the PDF)', async () => {
+    let prefsRow = null;
+    const base = db.getMockImplementation();
+    db.mockImplementation((table) => (table === 'notification_prefs' ? chain({ first: prefsRow }) : base(table)));
+    // The opt-out lands while the email is being built: the boundary read sees it.
+    EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+      prefsRow = { payment_receipt: false };
+      await withProviderHandoff(async (_database, check) => { await check(); });
+      return { sent: true, message: { provider_message_id: 'sg-3' } };
+    });
+    const seen = [];
+    const guard = async (facts) => { seen.push(facts); return facts.optedOut === false; };
+    await sendReceiptEmail('inv-1', { beforeProviderHandoff: guard }).catch(() => null);
+    expect(seen).toEqual([expect.objectContaining({ channel: 'email', optedOut: true })]);
+    // An unreadable setting is reported as null, never as "not opted out".
+    db.mockImplementation((table) => (table === 'notification_prefs'
+      ? { where: () => ({ first: () => Promise.reject(new Error('pool timeout')) }) } : base(table)));
+    EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+      await withProviderHandoff(async (_database, check) => { await check(); });
+      return { sent: true, message: { provider_message_id: 'sg-4' } };
+    });
+    await sendReceiptEmail('inv-1', { beforeProviderHandoff: guard }).catch(() => null);
+    expect(seen[1]).toEqual(expect.objectContaining({ optedOut: null }));
+  });
+
   test('passes null idempotencyKey when caller omits it (manual operator resend)', async () => {
     EmailTemplates.sendTemplate.mockResolvedValueOnce({
       sent: true,

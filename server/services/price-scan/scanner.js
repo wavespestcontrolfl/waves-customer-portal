@@ -149,8 +149,16 @@ function reportItemsFromScan(product, scan) {
     .filter(Boolean);
 }
 
-const DESKTOP_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
-  + 'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+// A desktop Chrome user agent whose version MATCHES the launched Chromium. A fixed stale
+// "Chrome/124" string against a newer Chromium sends mismatched client hints (sec-ch-ua),
+// and Solutions Pest & Lawn's WAF answers every search with 403 Forbidden for that mix
+// (scan 2026-10-05: no_candidate on 20/20; same browser with a matching UA returns 200).
+const FALLBACK_CHROME_MAJOR = '124';
+function desktopUserAgent(browserVersion) {
+  const major = (String(browserVersion || '').match(/^(\d+)\./) || [])[1] || FALLBACK_CHROME_MAJOR;
+  return 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+    + `AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36`;
+}
 
 // Live BATCH entry: launch ONE headless browser and scan many products through it
 // (a shared context, one page per fetch), so a weekly run doesn't pay a browser
@@ -185,7 +193,7 @@ async function runScanMany(specs, opts = {}) {
   try {
     // Create the context INSIDE the try so a newContext() failure still closes the
     // launched browser via finally (otherwise Chromium leaks across retries).
-    if (browser) context = await browser.newContext({ userAgent: opts.userAgent || DESKTOP_UA });
+    if (browser) context = await browser.newContext({ userAgent: opts.userAgent || desktopUserAgent(browser.version()) });
     // API-only adapters (or any adapter when no browser was launched) run with a null
     // page — they make HTTP calls and never touch Chromium.
     const fetchCandidate = async (adapter, vendor, prod) => {
@@ -226,6 +234,7 @@ module.exports = {
   runScanMany,
   specsNeedBrowser,
   hasProof,
+  desktopUserAgent,
   buildReportItem,
   scanProduct,
   reportItemsFromScan,

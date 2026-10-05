@@ -1246,6 +1246,19 @@ router.get('/:id/edit-source', async (req, res, next) => {
       notes: estimate.notes,
       serviceInterest: estimate.service_interest,
       showOneTimeOption: !!estimate.show_one_time_option,
+      // Good / Better / Best (GATE_ESTIMATE_OFFER_TIERS): the saved tier mark
+      // and whether the stored result may carry one, so a reopened estimate
+      // shows its checkbox and a revise keeps the mark without a regenerate.
+      offerTiersRequested: estData?.offerTiersRequested === true,
+      offerTiersAvailable: (() => {
+        try {
+          const OfferTiers = require('../services/estimate-offer-tiers');
+          const { isCommercialEstimateData } = require('../services/estimate-delivery-options');
+          return OfferTiers.offerTiersSaveEligibility({
+            estData, commercial: isCommercialEstimateData(estData),
+          }).eligible === true;
+        } catch (_) { return false; }
+      })(),
       billByInvoice: !!estimate.bill_by_invoice,
       satelliteUrl: estimate.satellite_url,
       propertyId: estimate.property_id || null,
@@ -1763,7 +1776,15 @@ async function applyLeadServiceForSend(estimate, { leadShapeRef = null, preserve
       .flatMap(([key, spec]) => spec.selected.map((t) => [t, key])));
     const selectedOrder = (Array.isArray(estData.engineRequest?.selectedServices) ? estData.engineRequest.selectedServices : [])
       .map((t) => tokenToKey[String(t).toUpperCase()]).filter(Boolean);
-    const leadKey = selectedOrder.find((k) => recurringKeys.includes(k));
+    // Good / Better / Best: an estimate the office marked for tiers leads
+    // with PEST whatever the selection order (the tool lists lawn first), so
+    // lawn is the parked line and the customer lands on the pest plan with
+    // Best one tap away. Parking pest instead would leave a lawn-only quote
+    // and no picker.
+    const leadKey = require('../services/estimate-offer-tiers').offerTiersRequested(estData)
+      && recurringKeys.includes('pest_control')
+      ? 'pest_control'
+      : selectedOrder.find((k) => recurringKeys.includes(k));
     if (!leadKey) return untouched;
     const toPark = recurringKeys.filter((k) => k !== leadKey && removable.has(k));
     if (toPark.length !== 1) return untouched;

@@ -601,6 +601,11 @@ describe('buildLawnPhotoSet', () => {
     expect(set.map((p) => p.label)).toEqual(shots.SHOTS.map((s) => s.reportLabel));
   });
 
+  test('a side photo is captioned Side yard and a back photo keeps Back yard', () => {
+    const set = buildLawnPhotoSet([row('side', 0), row('back', 1)]);
+    expect(set.map((p) => [p.shot, p.label])).toEqual([['back', 'Back yard'], ['side', 'Side yard']]);
+  });
+
   test('an untagged or unknown-zone photo goes last with a plain label', () => {
     const set = buildLawnPhotoSet([row(null, 0), row('mystery', 1), row('close_up', 2)]);
     expect(set.map((p) => p.shot)).toEqual(['close_up', null, null]);

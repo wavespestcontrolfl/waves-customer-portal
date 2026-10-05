@@ -125,6 +125,8 @@
  *   GATE_PORTAL_CHAT_EMAIL_CHANGE=true (portal Waves Assistant confirmed email-change hand-off, owner ruling 2026-10-02: a customer who asks to change their email types the new address, the chat reads it back, and once they confirm it the office gets ONE bell with the address on file and the new one; staff make the change. The chat model judges whether the customer confirmed; the server verifies the address is one the customer typed in that chat, and sends only the exact address its own read-back instruction carried in the previous turn and the assistant's reply showed. Nothing writes the customer row and no self-serve email edit exists. Off unless exactly 'true', read at call time via portalChatEmailChangeLive(); needs PORTAL_CHAT_SELF_SERVE live (default on); independent of the other portal chat gates. Off = byte-identical. Sends nothing to a customer.)
  *   GATE_PORTAL_YARD_CALENDAR=true ("Your yard this month" card in the logged-in portal, owner-approved 2026-10-01: the month's lawn, shrub and weed pressure from the species-catalog yard calendar, filtered to the customer's grass and plan lines, plus the same-city weather and household-pest forecast. Off unless exactly 'true', read at call time via portalYardCalendarLive(); off = GET /api/feed/yard answers {available:false} and the existing Local Conditions card renders exactly as before. Sends nothing to a customer.)
  *   GATE_PERMIT_DETAIL_SYNC=true (Manatee permit detail collection, address-match round 2 / R2-A: after the weekly report sync, a slow sequential pass reads each new-home permit's public ACA record page for conditioned and under-roof square footage, stories, bedrooms and bathrooms into construction_permit_records. Off unless exactly 'true', read at call time via permitDetailSyncLive(); independent of GATE_PERMIT_SYNC. Collects only: nothing reads it for a lookup or a price yet, nothing is sent to a customer. Kill switch: unset.)
+ *   GATE_LOOKUP_LISTING_SIZE=true (address-match PR 5b, owner 2026-10-02: a commercial suite with no caller-stated size is priced off a size a public listing publishes for THAT suite. Plain code reads Google result snippets (DataForSEO; LoopNet and Crexi refuse every server fetch) and fetchable broker pages for a figure next to the typed street number and suite; a range or two different figures never count; no model reaches the number. Ranks below a caller/tech-stated size, above the DBPR license seats and the type default; draft stays yellow with the link. Off unless exactly 'true', read at call time via lookupListingSizeLive(); off = no search, no fetch, byte-identical ladder. Kill switch: unset.)
+ *   GATE_LOOKUP_ADDRESS_STATUS=true (address-match PR 4: the admin estimate tool's property lookup shows one address status line from Google Address Validation, apart from the county roll's own answer: Address confirmed / Building confirmed, unit missing / Address needs confirmation / Outside the service area / Validation unavailable, with Google's business or residential classification. No scope effect: no measurement, flag, cache row or price changes. One validation call per address per 24 h, 4 s cap, fail-open to unavailable; needs ADDRESS_VALIDATION_ENABLED. Off unless exactly 'true', read at call time via lookupAddressStatusLive(); off = no call and a byte-identical response. Kill switch: unset.)
  *   GATE_LOOKUP_BUSINESS_IDENTITY=true (address-match PR 5: the admin estimate lookup and the estimator engine ask Google Places which operating business sits at the street number and read its type and tenant count, so a storefront with its own street number inside a plaza parcel is no longer priced off the whole building or a satellite guess. Needs GATE_COMMERCIAL_SUITE_SIZING and only runs for the opted-in admin lookup and engine, never a public route. A matched business with part-building evidence is one suite; one with none of that is scope_unresolved, no price until the CSR answers "just your space or the whole building?". Deterministic, no AI reaches a size or price. Off unless exactly 'true', read at call time via lookupBusinessIdentityLive(); off = no Places call and byte-identical output. Kill switch: unset.)
  *   GATE_LOOKUP_PERMIT_FACTS=true (address-match round 2 / R2-B: the property lookup reads the home's own Manatee building permit facts (conditioned and under-roof square footage, stories; collected by GATE_PERMIT_DETAIL_SYNC into construction_permit_records) when the county roll has no building for the address, and the admin estimate tool and the estimator engine prefill home sq ft from them as a sourced estimate above the plat median, always flagged for confirmation and never as a measurement. Off unless exactly 'true', read at call time via lookupPermitFactsLive(); off = no permit read, byte-identical lookup, profile and draft. Kill switch: unset.)
  *   GATE_LLM_COST_TRACKING=true (estimated AI spend: a weekly pull of OpenRouter's public per-token prices into llm_model_prices (never hand-typed), estimated cost per lane on the Agents hub Control center from the call ledger's tokens (needs GATE_LLM_CALL_LEDGER for rows to exist), and a daily 7:40 AM ET check that raises ONE admin item when a lane's spend yesterday is at least LLM_COST_ALERT_MIN_USD (default 5) and LLM_COST_ALERT_MULTIPLIER (default 3) times its average day over the week before; services/llm-cost.js; internal only, no customer sends; ships DARK, read at call time via llmCostTrackingLive(); unset = off, the hub shows no cost and nothing is fetched)
@@ -132,6 +134,7 @@
  *   GATE_CALL_INCIDENTS=true (correction loop for calls: the nightly 04:10 ET job turns each self-audit field disagreement into an ai_incidents row, confirmed only when a second model on the other provider from the auditor's, reading the call blind, reaches the auditor's answer and both readers' excerpts are in the transcript (unknown auditor provider or a truncated call stays a lead); Sunday 04:50 fix proposals for calls; services/call-incidents.js. Adds about one fast-tier OpenAI call per finding; shadow data only, no customer sends; honoured only while GATE_CALL_SELF_AUDIT is on; ships DARK, read at call time via callIncidentsLive(); unset = off)
  *   GATE_VISIT_ACCESS_FLAGS=shadow (visit access and safety flags, shadow leg: the hourly :34 sweep 05:34 to 19:34 ET puts visit_access.v1, six yes/no reads, to the typed-decision providers for today's and tomorrow's open visits and records the answers in decision_reviews under subject_type scheduled_services; services/typed-decisions/visit-access-shadow.js; codes never leave: the state says only whether codes are on file and every text is redacted; nothing is shown to a technician, written to a visit or sent; honoured only while GATE_TYPED_DECISIONS is live; ships DARK, read at call time via visitAccessShadowLive(); unset or any other value = off)
  *   GATE_TYPED_DECISIONS_CLEF=true (the same decision packages put to Cloudflare Clef on Workers AI as a second provider, ROUTES.typedDecisionClef, model MODEL_CLOUDFLARE_CLEF default clef-flash; askPackage(..., { provider: 'cloudflare' }); honoured only while GATE_TYPED_DECISIONS is live; shadow/evidence only, no customer sends; ships DARK, read at call time via typedDecisionsClefLive(); unset = off)
+ *   GATE_PREPAY_MINT_PRICE_HOLD=shadow|true (stamp-time price check for every annual prepay, not only a /secure pick: a new term records each covered visit's price when it is created (activity_log annual_prepay_mint_visit_prices); `true` = a visit whose price changed since then is not stamped as covered, bills normally and raises the existing 'repriced visit left uncovered' office alert; `shadow` = the price is recorded and a would-hold is only logged. Termite annual plans are left out. Off = byte-identical to today: nothing recorded, nothing read. Canonical CALL-TIME reader prepayMintPriceHoldMode(). Kill switch: unset.)
  *   GATE_PHOTO_PRIVACY=shadow (photo privacy check, Clef second wave idea 3: each technician social post's photo is put to Cloudflare Clef as photo_privacy.v1 (face, person, readable address text, license plate, child, pet) AFTER the post is published and logged, and the answers land in decision_reviews for labeling; services/typed-decisions/photo-privacy-shadow.js. SHADOW ONLY: nothing is held, changed or shown to the technician; `shadow` is the only value honoured (anything else = off) and only while GATE_TYPED_DECISIONS_CLEF is live; ships DARK, read at call time via photoPrivacyMode(); unset = off)
  *   GATE_REPORT_PRODUCT_COPY=true (owner-approved 2026-09-28 wording page: three short customer-facing lines per applied product on the service report — "How it works", "Also labeled for", "Pets & kids" — matched to the applied catalog product by EPA registration number primarily, an explicit name-alias list otherwise; server/config/report-product-copy.js. Unmatched products get NO copy — fail closed, never guessed. Customer display, plus the "How it works" line as grounding for the AI report writer under GATE_REPORT_WRITER_RULES (owner "ok go" 2026-10-01: the writer explains why the work fits, never where it was applied). Off unless exactly 'true', read at call time via reportProductCopyGateOn() in report-product-copy.js; the gates-map entry below is for logGateStatus only)
  *   GATE_VAN_SCENE=true (the "look for this van" scene under the appointment header card and on the booking confirmation step; dev-open (every non-production NODE_ENV renders it regardless), prod dark; prod kill = unset)
@@ -831,6 +834,10 @@ const gates = {
   // ships DARK. CALL-TIME reader is visitAccessShadowLive() below; this entry
   // is for logGateStatus only and carries the reader's prerequisite.
   visitAccessFlags: gateEnvValue('GATE_TYPED_DECISIONS') && String(process.env.GATE_VISIT_ACCESS_FLAGS || '').trim().toLowerCase() === 'shadow',
+  // Stamp-time price check for every annual prepay mint: ships DARK. CALL-TIME
+  // reader is prepayMintPriceHoldMode() below ('shadow' or 'true'); this entry
+  // is for logGateStatus only.
+  prepayMintPriceHold: ['shadow', 'true'].includes(String(process.env.GATE_PREPAY_MINT_PRICE_HOLD || '').trim().toLowerCase()),
   // Photo privacy shadow: ships DARK. CALL-TIME reader is photoPrivacyMode()
   // below; this entry is for logGateStatus only and carries the reader's
   // prerequisites, so it never reads as enabled while the Clef leg is dark.
@@ -2652,15 +2659,13 @@ const gates = {
   // Enable with GATE_ESTIMATE_SERVICE_ADD=true (with the opt-out gate on).
   estimateServiceAdd: process.env.GATE_ESTIMATE_SERVICE_ADD === 'true',
 
-  // Good / Better / Best offer tiers on a sent residential pest estimate
-  // (owner 2026-10-05): the one-time choice (Good), the pest-only recurring
-  // choice (Better) and — NEW — the full quoted bundle (Best: pest + lawn
-  // and/or tree & shrub) as three server-priced options the customer picks
-  // between. Rides the existing show_one_time_option machinery; the only new
-  // accept behavior is `selectedTier: 'best'`, which keeps the companion
-  // programs the one-time toggle used to drop. Read at call time via
-  // estimateOfferTiersLive() — this map entry is for logGateStatus only.
-  // STRICT opt-in: it changes what the page offers and what accept books.
+  // Good / Better / Best on a pest + lawn estimate (owner 2026-10-05): a
+  // three-tile picker that is a VIEW over the service opt-out rail — Best is
+  // the estimate as quoted, Better is lawn removed through the rail's own
+  // canonical re-price, Good is the one-time choice on that pest-only row.
+  // The stored row is always an ordinary valid estimate. Needs the opt-out
+  // gate. Read at call time via estimateOfferTiersLive(); this map entry is
+  // for logGateStatus only. STRICT opt-in.
   // Enable with GATE_ESTIMATE_OFFER_TIERS=true.
   estimateOfferTiers: process.env.GATE_ESTIMATE_OFFER_TIERS === 'true',
 
@@ -4554,6 +4559,17 @@ function photoPrivacyMode() {
   return String(process.env.GATE_PHOTO_PRIVACY || '').toLowerCase() === 'shadow' ? 'shadow' : 'off';
 }
 
+// GATE_PREPAY_MINT_PRICE_HOLD read at CALL time: 'shadow', 'true' or 'off'.
+// The stamp-time price check (annual-prepay-renewals.js holdPriceDriftedRows)
+// for annual prepay terms that are not a /secure pick. 'shadow' records each
+// covered visit's price when a term is created and only logs a visit the
+// check would hold; 'true' also holds it. Any other value is off: nothing is
+// recorded or read. Unset is the kill, no redeploy.
+function prepayMintPriceHoldMode() {
+  const value = String(process.env.GATE_PREPAY_MINT_PRICE_HOLD || '').trim().toLowerCase();
+  return value === 'shadow' || value === 'true' ? value : 'off';
+}
+
 // GATE_REPORT_WRITER_RULES read at CALL time — off unless exactly 'true'.
 // On, POST /generate-report (admin-schedule.js) gives every report writer
 // except lawn and tree/shrub/palm the owner rules block, withholds product
@@ -4707,8 +4723,7 @@ function autoDispatchSharedModelLive() {
 // reader server/services/estimate-consultation-offer.js uses. The offer
 // additionally requires leadInspectionLinkLive() (the /inspection/:token page
 // itself must be live too) — checked by the builder, not duplicated here.
-// GATE_ESTIMATE_OFFER_TIERS read at CALL time — strict `'true'` only, so an
-// unset variable is the kill switch (no redeploy). See the gates map entry.
+// GATE_ESTIMATE_OFFER_TIERS read at CALL time — strict `'true'` only.
 function estimateOfferTiersLive() {
   return process.env.GATE_ESTIMATE_OFFER_TIERS === 'true';
 }
@@ -5485,6 +5500,22 @@ function lookupBusinessIdentityLive() {
   return process.env.GATE_LOOKUP_BUSINESS_IDENTITY === 'true';
 }
 
+// GATE_LOOKUP_LISTING_SIZE read at CALL time — ships DARK, off unless exactly
+// 'true'. The one reader for the listing-size leg of commercial suite sizing
+// (services/commercial-suite-size/listing-size.js): off, no search and no
+// page fetch, and the sizing ladder is exactly as before.
+function lookupListingSizeLive() {
+  return process.env.GATE_LOOKUP_LISTING_SIZE === 'true';
+}
+
+// GATE_LOOKUP_ADDRESS_STATUS read at CALL time — ships DARK, off unless exactly
+// 'true'. The one reader for the admin lookup's address status line
+// (services/property-lookup/address-status.js): off, no Address Validation
+// call is made for a lookup and the route's response is exactly as before.
+function lookupAddressStatusLive() {
+  return process.env.GATE_LOOKUP_ADDRESS_STATUS === 'true';
+}
+
 // GATE_LOOKUP_PERMIT_FACTS read at CALL time — ships DARK, off unless exactly
 // 'true'. The one reader for the permit-facts leg of the property lookup
 // (routes/property-lookup-v2.js: the _permitBuildingFacts stamp and the
@@ -5711,6 +5742,10 @@ module.exports.estimateSentClosesAssessmentLive = estimateSentClosesAssessmentLi
 module.exports.permitDetailSyncLive = permitDetailSyncLive;
 // GATE_LOOKUP_BUSINESS_IDENTITY reader, on its own line so gate PRs never conflict.
 module.exports.lookupBusinessIdentityLive = lookupBusinessIdentityLive;
+// GATE_LOOKUP_LISTING_SIZE reader, on its own line so gate PRs never conflict.
+module.exports.lookupListingSizeLive = lookupListingSizeLive;
+// GATE_LOOKUP_ADDRESS_STATUS reader, on its own line so gate PRs never conflict.
+module.exports.lookupAddressStatusLive = lookupAddressStatusLive;
 // GATE_LOOKUP_PERMIT_FACTS reader, on its own line so gate PRs never conflict.
 module.exports.lookupPermitFactsLive = lookupPermitFactsLive;
 // GATE_LAWN_RAINFAST_WATCH reader, on its own line so gate PRs never conflict.
@@ -5729,4 +5764,7 @@ module.exports.relayUnbookedHandoffLive = relayUnbookedHandoffLive;
 module.exports.lawnTechParagraphLive = lawnTechParagraphLive;
 // GATE_ONSITE_CALLER_DEMOTE reader, on its own line so gate PRs never conflict.
 module.exports.onSiteCallerDemoteLive = onSiteCallerDemoteLive;
+// GATE_PREPAY_MINT_PRICE_HOLD reader, on its own line so gate PRs never conflict.
+module.exports.prepayMintPriceHoldMode = prepayMintPriceHoldMode;
+// GATE_ESTIMATE_OFFER_TIERS reader, on its own line so gate PRs never conflict.
 module.exports.estimateOfferTiersLive = estimateOfferTiersLive;

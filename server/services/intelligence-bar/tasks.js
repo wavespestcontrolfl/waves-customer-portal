@@ -128,6 +128,15 @@ function exposedTaskState(task, receipts) {
   return outcomes.size === 1 && outcomes.has('canceled') ? 'canceled' : 'failed';
 }
 
+// When the request behind a task started, as epoch milliseconds. A resumed task
+// (/tasks/:id/resume, /tasks/:id/select-target) keeps its ORIGINAL start (the
+// task row's created_at), so a card it proposes late is still ordered as the
+// older request it is; a fresh request starts now.
+function requestStartedAt(resumedTask) {
+  const created = resumedTask?.created_at ? new Date(resumedTask.created_at).getTime() : NaN;
+  return Number.isNaN(created) ? Date.now() : created;
+}
+
 async function get(id, actorId, sessionId) {
   if (!UUID_RE.test(id || '') || !UUID_RE.test(sessionId || '')) return null;
   return db('ib_tasks').where({ id, actor_id: String(actorId), session_id: sessionId }).where('expires_at', '>', db.fn.now()).first();
@@ -172,4 +181,4 @@ async function purgeExpiredTasks() {
     .where('lease_expires_at', '<=', db.fn.now()).del();
 }
 
-module.exports = { REQUEST_KEY_RE, begin, checkpoint, claimResume, get, list, snapshot, requestHash, withoutImages, purgeExpiredTasks };
+module.exports = { REQUEST_KEY_RE, begin, checkpoint, claimResume, get, list, requestStartedAt, snapshot, requestHash, withoutImages, purgeExpiredTasks };

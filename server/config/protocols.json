@@ -1052,7 +1052,7 @@
         "visit_type": "Foliar PHC visit",
         "main_goal": "Clean up scale/mites/whitefly pressure, correct micros, and avoid unnecessary systemics.",
         "primary": "Snapshot 2.5TG: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16); only when due (60+ days since the last, one per quarter)\nLESCO 8-0-12 #511542 palm fertilizer: Waves canopy chart, in lb per palm, only when the last palm feed was 3 or more months ago\nTriTek spray oil: 1.0% standard, 1.5% only with active scale/mites and safe weather ($6.08)\nMn Combo: exact container label needed; no verified dose\nKelp/humates via NutriRoot drench — premium/stressed accounts only ($5.65)",
-        "secondary": "Conserve SC: target-specific label rate; no generic mix range\nSequestar EDDHA: exact container label needed; no verified dose or injector recipe\nFloramite 4-8 fl oz/100 gal for confirmed mites ($6.02)\nLabeled ornamental fungicide only when disease/history warrants ($2.11)\nTriStar 8.5 SL (acetamiprid): armored scale crawlers or whitefly, live finds only; label rate",
+        "secondary": "Conserve SC: target-specific label rate; no generic mix range\nSequestar EDDHA: exact container label needed; no verified dose or injector recipe\nFloramite 4-8 fl oz/100 gal for confirmed mites ($6.02)\nLabeled ornamental fungicide only when disease/history warrants ($2.11)\nTriStar 8.5 SL (acetamiprid): armored scale crawlers or whitefly, live finds only; label rate\nManganese sulfate (Southern Ag): palms with frizzle-top on new fronds only; label size class, spread under the canopy",
         "material_cost": null,
         "labor_cost": "standard",
         "tier_4x": false,
@@ -1081,6 +1081,10 @@
             }
           ],
           "conditional": [
+            {
+              "key": "mnsulfate",
+              "where": "Palm frizzle-top on new fronds"
+            },
             {
               "key": "tritek15",
               "where": "Heavy scale or mites"
@@ -1119,7 +1123,7 @@
         "visit_type": "Foliar/systemic PHC visit",
         "main_goal": "Break whitefly/scale cycles before summer without back-to-back 4A pressure.",
         "primary": "Snapshot 2.5TG: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16); only when due (60+ days since the last, one per quarter)\nLESCO 8-0-12 #511542 palm fertilizer: Waves canopy chart, in lb per palm, only when the last palm feed was 3 or more months ago\nMainspring GNL: 4-8 fl oz/100 gal, IRAC 28 where target pest fits ($26.98)\nDistance IGR: whiteflies 6–8 fl oz/100 gal; listed scales 8–12 fl oz/100 gal ($16.52)\nKPHITE 7LP: verify container label and method; foliar and soil rates differ; FRAC P07",
-        "secondary": "Zylam rescue only for severe documented pressure; log as 4A/neonic pressure and apply pollinator gate ($17.63)\nNutriRoot and Cytogro are premium/stressed-account support, not universal ($10.47)\nInspect ficus and spiraling whitefly undersides, honeydew, and sooty mold\nTriStar 8.5 SL (acetamiprid): armored scale crawlers or whitefly, live finds only; label rate",
+        "secondary": "Zylam rescue only for severe documented pressure; log as 4A/neonic pressure and apply pollinator gate ($17.63)\nNutriRoot and Cytogro are premium/stressed-account support, not universal ($10.47)\nInspect ficus and spiraling whitefly undersides, honeydew, and sooty mold\nTriStar 8.5 SL (acetamiprid): armored scale crawlers or whitefly, live finds only; label rate\nDiPel PRO DF (Bt): young oleander or other leaf-eating caterpillars, live finds only; trees 1–2 tsp/gal, shrubs and beds 0.2–0.7 oz per 1,000 sq ft",
         "material_cost": null,
         "labor_cost": "standard",
         "tier_4x": false,
@@ -1140,6 +1144,10 @@
             }
           ],
           "conditional": [
+            {
+              "key": "dipel",
+              "where": "Young caterpillars, live finds"
+            },
             {
               "key": "mainspring",
               "where": "Whitefly or caterpillars"
@@ -1180,7 +1188,7 @@
         "visit_type": "Granular bed visit + optional targeted foliar",
         "main_goal": "Visible bed cleanup, Q2 nutrition, spring crawler check, and route-speed discipline.",
         "primary": "Snapshot 2.5TG: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16); only when due (60+ days since the last, one per quarter)\nLESCO 8-0-12 #511542 palm fertilizer: Waves canopy chart, in lb per palm, only when the last palm feed was 3 or more months ago\n13-0-13 ornamental fertilizer: exact bag label needed; hold dose",
-        "secondary": "Distance IGR on live crawlers only: whiteflies 6–8 fl oz/100 gal; listed scales 8–12 fl oz/100 gal ($16.52)\nShortstop PGR add-on only on healthy established hedges ($26.56)\nTriTek spray oil 1.0-1.5% only if scale crawlers are active and safe ($6.08)\nConserve or Mainspring for caterpillars where labeled ($4.05)\nTriStar 8.5 SL (acetamiprid): armored scale crawlers or whitefly, live finds only; label rate",
+        "secondary": "Distance IGR on live crawlers only: whiteflies 6–8 fl oz/100 gal; listed scales 8–12 fl oz/100 gal ($16.52)\nShortstop PGR add-on only on healthy established hedges ($26.56)\nTriTek spray oil 1.0-1.5% only if scale crawlers are active and safe ($6.08)\nConserve or Mainspring for caterpillars where labeled ($4.05)\nTriStar 8.5 SL (acetamiprid): armored scale crawlers or whitefly, live finds only; label rate\nDiPel PRO DF (Bt): young oleander or other leaf-eating caterpillars, live finds only; trees 1–2 tsp/gal, shrubs and beds 0.2–0.7 oz per 1,000 sq ft",
         "material_cost": null,
         "labor_cost": "standard",
         "tier_4x": false,
@@ -1205,6 +1213,10 @@
             }
           ],
           "conditional": [
+            {
+              "key": "dipel",
+              "where": "Young caterpillars, live finds"
+            },
             {
               "key": "tritek",
               "where": "Scale crawlers"
@@ -1243,7 +1255,7 @@
         "visit_type": "Nutrition + systemic PHC",
         "main_goal": "Finish legal nutrition before June blackout in Sarasota/Manatee and use non-neonic systemic rotation.",
         "primary": "Snapshot 2.5TG: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16); only when due (60+ days since the last, one per quarter)\nMainspring GNL: 4-8 fl oz/100 gal if target pest/resistance history fits ($26.98)\nMn Combo: exact container label needed; no verified dose\nLESCO 8-0-12 #511542 palm fertilizer: Waves canopy chart, in lb per palm, only when the last palm feed was 3 or more months ago and before the June 1 blackout\n13-0-13 ornamental fertilizer: exact bag label needed; hold dose",
-        "secondary": "Floramite for confirmed mites ($6.02)\nSequestar EDDHA: exact container label needed; no verified dose or injector recipe\nPalm weevil and decline inspection: photo and note crown, trunk-wound, or decline symptoms and refer for diagnosis; quote an injection only after a diagnosis supports it and the palm is eligible\nSuperThrive/root drench only for premium/stressed accounts ($2.50 est)",
+        "secondary": "Floramite for confirmed mites ($6.02)\nSequestar EDDHA: exact container label needed; no verified dose or injector recipe\nPalm weevil and decline inspection: photo and note crown, trunk-wound, or decline symptoms and refer for diagnosis; quote an injection only after a diagnosis supports it and the palm is eligible\nSuperThrive/root drench only for premium/stressed accounts ($2.50 est)\nManganese sulfate (Southern Ag): palms with frizzle-top on new fronds only; label size class, spread under the canopy",
         "material_cost": null,
         "labor_cost": "standard",
         "tier_4x": false,
@@ -1268,6 +1280,10 @@
             }
           ],
           "conditional": [
+            {
+              "key": "mnsulfate",
+              "where": "Palm frizzle-top on new fronds"
+            },
             {
               "key": "floramite",
               "where": "Mites"
@@ -1304,7 +1320,7 @@
         "visit_type": "Foliar PHC + scout",
         "main_goal": "Begin Sarasota/Manatee N/P blackout, manage summer pest/disease pressure, and avoid heat injury.",
         "primary": "Snapshot 2.5TG: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16); only when due (60+ days since the last, one per quarter)\nLESCO 0-0-16 #510513 palm fertilizer: Waves canopy chart, in lb per palm, only when the last palm feed was 3 or more months ago\nTriTek spray oil: 1.0% early morning only when plant/weather safe ($6.08)\nKPHITE 7LP: verify container label and method; foliar and soil rates differ; FRAC P07\nCopper: exact container label needed; separate from oil\nFe/Mn micros: label rate where deficiency symptoms justify ($2.85)",
-        "secondary": "Distance IGR on live crawlers only: whiteflies 6–8 fl oz/100 gal; listed scales 8–12 fl oz/100 gal ($16.52)\nConserve or Mainspring for caterpillars ($4.05)\nFloramite for confirmed mites ($6.02)\nScout/photo/customer note when heat stress makes chemistry the wrong move\nTriStar 8.5 SL (acetamiprid): armored scale crawlers or whitefly, live finds only; label rate",
+        "secondary": "Distance IGR on live crawlers only: whiteflies 6–8 fl oz/100 gal; listed scales 8–12 fl oz/100 gal ($16.52)\nConserve or Mainspring for caterpillars ($4.05)\nFloramite for confirmed mites ($6.02)\nScout/photo/customer note when heat stress makes chemistry the wrong move\nTriStar 8.5 SL (acetamiprid): armored scale crawlers or whitefly, live finds only; label rate\nDiPel PRO DF (Bt): young oleander or other leaf-eating caterpillars, live finds only; trees 1–2 tsp/gal, shrubs and beds 0.2–0.7 oz per 1,000 sq ft\nManganese sulfate (Southern Ag): palms with frizzle-top on new fronds only; label size class, spread under the canopy",
         "material_cost": null,
         "labor_cost": "standard",
         "tier_4x": false,
@@ -1325,6 +1341,14 @@
             }
           ],
           "conditional": [
+            {
+              "key": "dipel",
+              "where": "Young caterpillars, live finds"
+            },
+            {
+              "key": "mnsulfate",
+              "where": "Palm frizzle-top on new fronds"
+            },
             {
               "key": "distance",
               "where": "Whitefly or scale nymphs"
@@ -1368,7 +1392,7 @@
         "visit_type": "Granular Snapshot + scout/spot PHC",
         "main_goal": "Keep beds clean during summer while maintaining a zero-N/P route for Sarasota/Manatee.",
         "primary": "Snapshot 2.5TG: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16); only when due (60+ days since the last, one per quarter)\nScout bed weeds, whitefly, scale crawlers, palm deficiency symptoms, and heat stress\nSarasota/Manatee: zero N/P landscape fertilizer during blackout\nLESCO 0-0-16 #510513 palm fertilizer: Waves canopy chart, in lb per palm, only when the last palm feed was 3 or more months ago",
-        "secondary": "Distance IGR on live crawlers only: whiteflies 6–8 fl oz/100 gal; listed scales 8–12 fl oz/100 gal ($16.52)\nMainspring GNL 4-8 fl oz/100 gal for whitefly/caterpillar pressure ($26.98)\nTriTek spray oil 1.0% only if plant/weather safe ($6.08)\nAzatin O organic option where label/site/pest fit ($37.25)\nTrue 0-N/0-P corrective product only if legal and diagnosis supports it ($3.00 est)\nTriStar 8.5 SL (acetamiprid): armored scale crawlers or whitefly, live finds only; label rate",
+        "secondary": "Distance IGR on live crawlers only: whiteflies 6–8 fl oz/100 gal; listed scales 8–12 fl oz/100 gal ($16.52)\nMainspring GNL 4-8 fl oz/100 gal for whitefly/caterpillar pressure ($26.98)\nTriTek spray oil 1.0% only if plant/weather safe ($6.08)\nAzatin O organic option where label/site/pest fit ($37.25)\nTrue 0-N/0-P corrective product only if legal and diagnosis supports it ($3.00 est)\nTriStar 8.5 SL (acetamiprid): armored scale crawlers or whitefly, live finds only; label rate\nDiPel PRO DF (Bt): young oleander or other leaf-eating caterpillars, live finds only; trees 1–2 tsp/gal, shrubs and beds 0.2–0.7 oz per 1,000 sq ft",
         "material_cost": null,
         "labor_cost": "standard",
         "tier_4x": false,
@@ -1389,6 +1413,10 @@
             }
           ],
           "conditional": [
+            {
+              "key": "dipel",
+              "where": "Young caterpillars, live finds"
+            },
             {
               "key": "mainspring",
               "where": "Whitefly or caterpillars"
@@ -1483,7 +1511,7 @@
         "visit_type": "Foliar PHC + scout",
         "main_goal": "Break late-summer scale/whitefly life cycles and prepare fall nutrition without N/P until October in Sarasota/Manatee.",
         "primary": "Snapshot 2.5TG: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16); only when due (60+ days since the last, one per quarter)\nLESCO 0-0-16 #510513 palm fertilizer: Waves canopy chart, in lb per palm, only when the last palm feed was 3 or more months ago\nDistance IGR: whiteflies 6–8 fl oz/100 gal; listed scales 8–12 fl oz/100 gal ($16.52)\nMn Combo: exact container label needed; no verified dose\nTriTek spray oil: 1.0% only if crawlers are present and safe ($6.08)",
-        "secondary": "Shortstop PGR add-on only on healthy established hedges ($26.56)\n4A/neonic systemic only if documented and annual 4A log allows ($4.25)\nDiagnose palm K/Mg/Mn/Fe before treating\nTriStar 8.5 SL (acetamiprid): armored scale crawlers or whitefly, live finds only; label rate",
+        "secondary": "Shortstop PGR add-on only on healthy established hedges ($26.56)\n4A/neonic systemic only if documented and annual 4A log allows ($4.25)\nDiagnose palm K/Mg/Mn/Fe before treating\nTriStar 8.5 SL (acetamiprid): armored scale crawlers or whitefly, live finds only; label rate\nManganese sulfate (Southern Ag): palms with frizzle-top on new fronds only; label size class, spread under the canopy",
         "material_cost": null,
         "labor_cost": "standard",
         "tier_4x": false,
@@ -1508,6 +1536,10 @@
             }
           ],
           "conditional": [
+            {
+              "key": "mnsulfate",
+              "where": "Palm frizzle-top on new fronds"
+            },
             {
               "key": "tritek",
               "where": "Scale crawlers"
@@ -1599,7 +1631,7 @@
         "visit_type": "Foliar cleanup + root/add-on work",
         "main_goal": "Cool-season cleanup, micronutrient correction, root support, and diagnosed injection add-on opportunities.",
         "primary": "Snapshot 2.5TG: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16); only when due (60+ days since the last, one per quarter)\nLESCO 8-0-12 #511542 palm fertilizer: Waves canopy chart, in lb per palm, only when the last palm feed was 3 or more months ago\nTriTek spray oil: 1.0-1.5% if plant/weather safe ($6.08)\nNutriRoot: label rate where site supports root nutrition ($5.65)\nMn Combo: exact container label needed; no verified dose\nOrganic acidifier (Espoma) only where pH/chlorosis data supports it ($17.72)\nSequestar EDDHA: exact container label needed; no verified dose or injector recipe",
-        "secondary": "Mn-Jet Fe add-on for diagnosed palm Mn/Fe deficiency pattern ($11.50)\nPalm-Jet Mg add-on for diagnosed Mg deficiency ($12.56)\nPropizol only for labeled diagnosed tree disease ($11.83)",
+        "secondary": "Mn-Jet Fe add-on for diagnosed palm Mn/Fe deficiency pattern ($11.50)\nPalm-Jet Mg add-on for diagnosed Mg deficiency ($12.56)\nPropizol only for labeled diagnosed tree disease ($11.83)\nManganese sulfate (Southern Ag): palms with frizzle-top on new fronds only; label size class, spread under the canopy",
         "material_cost": null,
         "labor_cost": "standard",
         "tier_4x": false,
@@ -1624,6 +1656,10 @@
             }
           ],
           "conditional": [
+            {
+              "key": "mnsulfate",
+              "where": "Palm frizzle-top on new fronds"
+            },
             {
               "key": "tritek",
               "where": "Scale or mites"
@@ -1652,7 +1688,7 @@
         "visit_type": "Scout/report + selective nutrition/systemic",
         "main_goal": "Retention, customer proof of value, winter palm nutrition where due, and next-year correction plan.",
         "primary": "Snapshot 2.5TG: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16); only when due (60+ days since the last, one per quarter)\nLESCO 8-0-12 #511542 palm fertilizer: Waves canopy chart, in lb per palm, only when the last palm feed was 3 or more months ago\nCytogro: label rate for premium/stressed accounts ($4.82)\nSequestar EDDHA: exact container label needed; no verified dose or injector recipe\nAnnual health report with photos, IRAC/FRAC history, Snapshot history, fertility dates, pest pressure, and next-year plan",
-        "secondary": "Zylam only if pest history/pressure and 4A log allow ($17.63)\nDo not treat blooming plants with bee-toxic systemic/contact products while bees forage\nInspect declining palms: photo, note, and refer for diagnosis; quote an injection only after a diagnosis supports it and the palm is eligible (see the palm diagnosis note)\nNote soil pH, irrigation water, or salt issues for chronic chlorosis",
+        "secondary": "Zylam only if pest history/pressure and 4A log allow ($17.63)\nDo not treat blooming plants with bee-toxic systemic/contact products while bees forage\nInspect declining palms: photo, note, and refer for diagnosis; quote an injection only after a diagnosis supports it and the palm is eligible (see the palm diagnosis note)\nNote soil pH, irrigation water, or salt issues for chronic chlorosis\nDiPel PRO DF (Bt): young oleander or other leaf-eating caterpillars, live finds only; trees 1–2 tsp/gal, shrubs and beds 0.2–0.7 oz per 1,000 sq ft",
         "material_cost": null,
         "labor_cost": "report",
         "tier_4x": false,
@@ -1673,6 +1709,10 @@
             }
           ],
           "conditional": [
+            {
+              "key": "dipel",
+              "where": "Young caterpillars, live finds"
+            },
             {
               "key": "zylam",
               "where": "Pest history, and the 4A log allows"

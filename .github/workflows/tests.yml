@@ -361,7 +361,7 @@ jobs:
         working-directory: server
         env:
           IB_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/intelligence-bar-task-recovery-db.test.js
+        run: npx jest --ci --silent --runInBand tests/intelligence-bar-task-recovery-db.test.js tests/intelligence-bar-superseded-cards-db.test.js
       - name: Tool contract tests (202 IB/agent tools vs the migrated schema)
         # Blocks on critical only (schema drift, missing tables/columns);
         # execute-smoke warnings (e.g. uuid-typed params fed 'test') are
@@ -401,7 +401,10 @@ jobs:
       - name: Server tests (no DB — golden masters keep in-memory semantics)
         working-directory: server
         # Recycle cumulative worker heaps between suites before V8 exhausts its limit.
-        run: npx jest --ci --silent --maxWorkers=2 --shard=${{ matrix.shard }}/3 --config='{"workerIdleMemoryLimit":"2GB"}'
+        # Three workers on the 4-vCPU runner: shards took 3-7 min against 5-8 with two.
+        # The default 5 s test timeout is raised to 15 s because a third worker slows
+        # cold module loads; a test that sets its own timeout keeps it.
+        run: npx jest --ci --silent --maxWorkers=3 --shard=${{ matrix.shard }}/3 --config='{"workerIdleMemoryLimit":"2GB","testTimeout":15000}'
 
   client:
     runs-on: ubuntu-latest

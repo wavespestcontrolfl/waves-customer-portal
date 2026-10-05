@@ -262,6 +262,13 @@
 .tech-product-search { position: relative; flex-shrink: 0; padding: 2px 18px 0; }
 .tech-product-search > svg { position: absolute; left: 30px; top: calc(50% + 1px); transform: translateY(-50%); color: var(--tech-muted); pointer-events: none; }
 .ui-control.tech-visit-control.tech-product-search-input { padding-left: 42px; font-size: 16px; }
+/* The lawn sheet's input gets 16px side padding from its scoped rule above, which beats the 42px here and put the icon over the placeholder. */
+.tech-lawn-sheet .ui-control.tech-visit-control.tech-product-search-input { padding-left: 46px; }
+/* Inline product search in the Products section: no dialog gutter, the icon pinned to the box (the results list sits under it). */
+.tech-product-search--inline { padding: 0; margin-top: 8px; }
+.tech-product-search--inline > svg { left: 14px; top: 24px; }
+/* About five rows (56px each) and a half, so a longer list shows it scrolls; the list scrolls inside itself. */
+.tech-product-search--inline .tech-product-inline-results { margin-top: 8px; max-height: 308px; overflow-y: auto; overscroll-behavior: contain; }
 .tech-product-picker-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 12px; padding: 10px 18px 12px; }
 .tech-product-group-title { margin: 0 0 4px; color: var(--tech-muted); font-size: 14px; font-weight: 500; letter-spacing: 0.04em; line-height: 1.25; text-transform: uppercase; }
 .tech-product-list { display: flex; flex-direction: column; overflow: hidden; border: 0.5px solid var(--tech-border); border-radius: 6px; background: var(--tech-card); }
@@ -357,7 +364,8 @@
 .tech-lawn-sheet .tech-lawn-details-spacer { flex-shrink: 0; width: 36px; height: 36px; }
 .tech-lawn-sheet .tech-lawn-back:disabled, .tech-lawn-sheet .tech-lawn-details:disabled { opacity: .5; cursor: not-allowed; }
 /* Page body and the customer block. */
-.tech-lawn-sheet .tech-visit-body { padding: 8px 20px 20px; background: #fafafa; }
+/* Bottom padding clears the bar, so the last rows (the inline product results) can scroll fully clear of it. */
+.tech-lawn-sheet .tech-visit-body { padding: 8px 20px 96px; background: #fafafa; }
 .tech-lawn-sheet .tech-lawn-contact { margin-bottom: 20px; line-height: 1.5; }
 .tech-lawn-sheet .tech-lawn-contact a { display: block; margin-top: 2px; color: #111111; font-size: 14px; text-decoration: underline; }
 .tech-lawn-sheet .tech-lawn-contact .tech-lawn-name { margin: 0 0 4px; color: #111111; font-size: 16px; font-weight: 500; }
@@ -379,6 +387,10 @@
 /* Inputs: the page's mInput (48px, 12px radius, 1px hairline, 16px). */
 .tech-lawn-sheet .ui-control.tech-visit-control { min-height: 48px; padding: 0 16px; border: 1px solid #e5e5e5; border-radius: 12px; background: #ffffff; color: #111111; font-size: 16px; font-weight: 400; }
 .tech-lawn-sheet textarea.ui-control.tech-visit-control { padding: 14px; }
+/* The mic inside the note's box (VisitNote micInside): bottom-right corner, with room so words never run under it. */
+.tech-visit-note-row--inside { position: relative; display: block; }
+.tech-visit-note-row--inside .tech-visit-note-mic { position: absolute; right: 8px; bottom: 8px; display: flex; }
+.tech-lawn-sheet .tech-visit-note-row--inside textarea.ui-control.tech-visit-control { padding: 14px 60px 14px 14px; }
 .tech-lawn-sheet .ui-control.tech-visit-control:focus { border-color: #111111; --tw-ring-color: #111111; }
 .tech-lawn-sheet .ui-control.tech-visit-control.tech-product-amount-input { width: 120px; min-height: 48px; font-size: 16px; text-align: right; }
 .tech-lawn-sheet select.ui-control.tech-visit-control { padding: 0 32px 0 16px; }

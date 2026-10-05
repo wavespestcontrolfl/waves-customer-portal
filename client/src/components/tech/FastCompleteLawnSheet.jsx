@@ -10,20 +10,24 @@
 //     scores in one row (each one the technician may change until Confirm),
 //     Confirm assessment and Retake (the shared LawnAssessmentCompletionBlock
 //     in its compact mode: no Fungus control / Thatch condition tiles, no lawn
-//     length box, no evidence review). Confirm sends the default keep-all
+//     evidence review; four named photo slots; the optional Lawn length box
+//     under the photos when the server asks for it). Confirm sends the default keep-all
 //     review, as the full form's button does;
 //  3. Products used: the plan's products, each with its method and amount
-//     (change the amount, remove, or add one from the catalog). No area box:
+//     (change the amount, remove, or add one from the catalog: an inline "Search
+//     products" box, one tap adds the row). No area box:
 //     every lawn visit treats the whole lawn, so a sprayed or spread product
 //     goes down on its own planned area or the visit property's saved
 //     whole-lawn area (/complete requires one);
-//  4. Tips from your tech (optional, one tip);
+//  4. Customer home (the pest sheet's three choices, preset to not home, full
+//     access), then Tips from your tech (optional, one tip);
 //  5. Blog post for the customer (optional, GATE_REPORT_BLOG_POST);
 //  6. Treatment zone map (optional, a closed row that opens the tracer);
 //  7. one Complete lawn visit button. While it is off, its label says the one
 //     thing missing: Add a photo, Analyze the photos, Confirm the assessment,
-//     Add the products applied.
-// No Full form button, watering preview, lawn length box, findings picker or
+//     Add the products applied. The first three it does itself (the photo
+//     step's own handlers, same disabled rules); the rest wait on the tech.
+// No Full form button, watering preview, findings picker or
 // evidence review: the report prints its own watering instructions, and
 // /complete takes a visit with none of them. The submit shares its frame,
 // header, saved view, note, tip picker, amount rows, product picker and footer
@@ -43,7 +47,8 @@
 //    broadcast row without square feet; the planned row's own area, else the
 //    property's saved lawn area);
 //  - the lawn condition on a one-time lawn visit (typed findings the server
-//    requires).
+//    requires);
+//  - a Lawn length the server would refuse (only a typed one, outside 0.5 to 8 in).
 // A product with no amount is noted, never blocked.
 //
 // The submit echoes the context back (GET /admin/dispatch/:id/lawn-fast/
@@ -66,16 +71,21 @@ import {
   UNIT_CHOICES, categoryLabel, hasAmount, measureUnit, productUnits, seededAmount, stockHolds,
 } from '../../lib/fast-complete-products';
 import { submittedAmount } from '../../lib/measure-units';
+import { tipsCalledForByNote } from '../../lib/tech-tips';
 import {
   AmountRow, CLOSED_VISIT_STATUSES, isSendableRateUnit, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton,
   SavedView, TipSection, VisitNote, methodLabel, techTipsOf, useProductPicker, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
 } from './FastCompleteParts';
-import { BlogPostSection, useBlogPostOffer } from './FastCompleteReport';
+import { BlogPostSection, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, useBlogPostOffer } from './FastCompleteReport';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
 import PropertyServiceAreas from './PropertyServiceAreas';
 import { elapsedSince } from '../../lib/on-site-time';
 import { Button, ActionFeedback } from '../ui';
 import '../../styles/tech-workflow.css';
+
+// Mowing height the server accepts (turf_height_invalid outside it).
+const MIN_HEIGHT_IN = 0.5;
+const MAX_HEIGHT_IN = 8;
 
 // The one-time lawn form's condition list (project-types.js
 // one_time_lawn_treatment lawn_condition). The sheet's test pins it to the
@@ -166,7 +176,7 @@ const RETRYABLE_REASONS = new Set(['profile_unavailable']);
 
 const EMPTY_CONTEXT = {
   loading: true, loadError: '', blockedReason: '', handoff: false, visit: null, raw: null,
-  visitType: null, planned: [], plannedUnavailable: null, assessment: null,
+  visitType: null, turfHeightCapture: false, planned: [], plannedUnavailable: null, assessment: null,
   findingsType: null, stockAdvisory: undefined,
 };
 
@@ -243,6 +253,7 @@ function contextFrom(data, service) {
     // The context's whole `service` object, echoed back as `expectedVisit`.
     raw: data?.service || null,
     visitType: data?.visitType ?? null,
+    turfHeightCapture: data?.turfHeightCapture === true,
     planned: plannedItemsOf(data),
     plannedUnavailable: data?.plannedProductsUnavailable || null,
     assessment: assessmentOf(data),
@@ -440,8 +451,41 @@ export const ADD_PRODUCTS = 'Products applied required';
 const LABEL_REASONS = new Set([ADD_PHOTO, ANALYZE_PHOTOS, CONFIRM_ASSESSMENT, ADD_PRODUCTS]);
 
 const unusableMessage = (reason) => (reason === 'property_check_failed' ? PROPERTY_CHECK_MESSAGE : PROPERTY_SCOPE_MESSAGE);
+// Optional: only a typed length outside the server's range holds Complete.
+const heightProblem = (height) => height != null && !(height >= MIN_HEIGHT_IN && height <= MAX_HEIGHT_IN);
 
-function missingRequirement({ form, rows, lawnSqft, areaHold, photos, assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow }) {
+// What the bottom button does while its label is a photo-step the block can do:
+// the block's handle runs the step, and the block's own report (`progress`)
+// says whether the step may run now. While it analyzes or confirms the button
+// shows the in-flow button's busy text and is off. Anything else (a dictation
+// still running, the products, a typed value out of range) is no action: the
+// button keeps its label and stays off, as before.
+// What the footer button is right now. While a step the bar can do stands (and no
+// submit failed or awaits a retry) the button IS that step: its label and click,
+// with no reason held against it; a busy step shows its busy text as the disabled
+// button's label. Otherwise it is Complete, held by the reason as before.
+function footerFor({ barAction, missingReason, submission, submit }) {
+  const complete = { missingReason, reasonInButton: LABEL_REASONS.has(missingReason), label: 'Complete service', onSubmit: submit };
+  if (!barAction || !missingReason || submission.failure || submission.retryPending) return complete;
+  if (barAction.disabled) return { ...complete, missingReason: barAction.label, reasonInButton: true };
+  return { missingReason: null, reasonInButton: false, label: barAction.label, onSubmit: barAction.onClick };
+}
+
+function barActionFor({ missingReason, dictationPending, progress, block }) {
+  if (dictationPending) return null;
+  if (progress.analyzing) return { label: 'Analyzing...', disabled: true };
+  if (progress.confirming) return { label: 'Confirming...', disabled: true };
+  const step = {
+    [ADD_PHOTO]: ['canAddPhoto', 'openPhotoPicker'],
+    [ANALYZE_PHOTOS]: ['canAnalyze', 'analyze'],
+    [CONFIRM_ASSESSMENT]: ['canConfirm', 'confirm'],
+  }[missingReason];
+  if (!step) return null;
+  const [can, run] = step;
+  return { label: missingReason, disabled: !progress[can], onClick: () => block.current?.[run]() };
+}
+
+function missingRequirement({ form, rows, lawnSqft, areaHold, gaugeHeightIn, photos, assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow }) {
   // A method that needs an area needs a positive one, from the plan.
   const missingArea = rows.find((row) => requirementOf(row) && !(areaOf(row, lawnSqft) > 0));
   const [, reason = ''] = [
@@ -457,13 +501,14 @@ function missingRequirement({ form, rows, lawnSqft, areaHold, photos, assessed, 
     [missingArea, missingArea && (requirementOf(missingArea).unit === 'linear_ft'
       ? `${missingArea.name} needs linear feet, which this sheet does not take. Tell the office.`
       : `The lawn area is not on file for ${missingArea.name}. Tell the office.`)],
+    [ctx.turfHeightCapture && heightProblem(gaugeHeightIn), `Lawn length must be between ${MIN_HEIGHT_IN} and ${MAX_HEIGHT_IN} inches.`],
     [stockRow, stockRow && `${stockRow.name} shows 0 in stock. Update inventory, then tap Check stock.`],
     [typed && !form.condition, 'Pick the lawn condition.'],
   ].find(([missing]) => missing) || [];
   return reason;
 }
 
-function completionBody({ form, rows, ctx, assessmentId, lawnSqft, propertyAreas, explicitArea, typed, tipsAvailable }) {
+function completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas, explicitArea, typed, tipsAvailable }) {
   // Plan defaults the tech removed: the lawn actuals ledger records them as
   // skipped (id and name only, no reason asked).
   // The server wants each product once (ids lower-case), a uuid, and a name of
@@ -505,8 +550,11 @@ function completionBody({ form, rows, ctx, assessmentId, lawnSqft, propertyAreas
     ...(propertyAreas?.version && propertyAreas.propertyId && lawnSqft > 0 && detectServiceCategory(ctx.visit?.serviceType) === 'lawn'
       ? { propertyServiceArea: { propertyId: propertyAreas.propertyId, version: propertyAreas.version, kind: 'lawn', treatedSqft: lawnSqft, ...(explicitArea ? { explicitVisitArea: true } : {}) } }
       : {}),
+    ...(ctx.turfHeightCapture ? { manualHeightIn: gaugeHeightIn } : {}),
     ...(typed ? { structuredFindings: { type: LAWN_FINDINGS_TYPE, values: { lawn_condition: form.condition } } } : {}),
     technicianNotes: form.note.trim(),
+    // Who was home, as the pest sheet sends it (the same field, the same values).
+    customerInteraction: form.customerHome,
     techTips: techTipsOf(form, tipsAvailable),
     // The blog post for the customer: its id; the server checks it is live and
     // freezes its title and link on the report.
@@ -733,7 +781,9 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   let areaHold = '';
   if (!propertyAreas.settled) areaHold = 'Checking the lawn area\u2026';
   else if (propertyAreas.refreshing) areaHold = propertyAreas.failed ? 'The property areas did not reload. Tap Retry, then Complete.' : 'Reloading the property areas\u2026';
-  const [form, setForm] = useState({ note: '', condition: '', tipId: '', customTip: '', blogPost: null });
+  const [form, setForm] = useState({ note: '', condition: '', tipId: '', customTip: '', blogPost: null, customerHome: DEFAULT_CUSTOMER_HOME });
+  // The optional lawn length (inches), the full form's own box; null until typed.
+  const [gaugeHeightIn, setGaugeHeightIn] = useState(null);
   const setField = useCallback((key, value) => setForm((prev) => ({ ...prev, [key]: value })), []);
   // Each dictated chunk joins what is already in the box.
   const appendNote = useCallback((text) => {
@@ -745,9 +795,13 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   // many photos are held / whether an analysis result is on screen.
   const { assessmentId, assessmentReady, settles, onConfirmed, onReady } = useConfirmedAssessment(ctx.assessment);
   const [progress, setProgress] = useState({ photos: 0, assessed: false });
+  const block = useRef(null);
   // The tips are ranked by this visit's assessment, so they are read again each
   // time an analysis or confirm settles.
   const tips = useTipLibrary({ base, request, refreshKey: settles });
+  // Tips the note calls for lead the picker: "chinch bugs" in the note lifts the
+  // chinch tip above the photo-finding order the server sent.
+  const noteTipIds = useMemo(() => tipsCalledForByNote((tips?.groups || []).flatMap((g) => g.tips || []), form.note), [tips, form.note]);
   const tipsAvailable = !!tips;
   // The blog post search is offered while the server answers available.
   const blog = useBlogPostOffer({ base, request });
@@ -770,14 +824,17 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
     // plan unavailable) "+ Other product" hands the visit to the full form.
     onFullForm,
     onPick: products.addProduct,
+    // With a catalog the search sits in the Products section: no sheet to open.
+    inline: true,
   });
 
-  const missingReason = missingRequirement({ form, rows, lawnSqft, areaHold, photos: progress.photos, assessed: progress.assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow });
+  const missingReason = missingRequirement({ form, rows, lawnSqft, areaHold, gaugeHeightIn, photos: progress.photos, assessed: progress.assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow });
+  const barAction = barActionFor({ missingReason, dictationPending, progress, block });
   const submit = () => {
     if (missingReason && !submission.hasPendingBody()) return;
     const names = rows.map((row) => row.name).join(', ');
     submission.submit(
-      () => completionBody({ form, rows, ctx, assessmentId, lawnSqft, propertyAreas: propertyAreas.data, explicitArea: propertyAreas.explicit, typed, tipsAvailable }),
+      () => completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas: propertyAreas.data, explicitArea: propertyAreas.explicit, typed, tipsAvailable }),
       [names, 'Lawn assessment confirmed'].filter(Boolean).join(' · '),
     );
   };
@@ -805,12 +862,13 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
         <CustomerContact service={service} visit={ctx.visit} request={request} />
         <TimeOnSite since={service?.onSiteAt} />
         <fieldset className="tech-visit-form" disabled={locked}>
-          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked} />
+          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked} micInside />
           <section className="tech-visit-choice-section">
             <div className="tech-visit-section-head">
               <h3 className="tech-visit-section-title">Lawn assessment</h3>
             </div>
             <LawnAssessmentCompletionBlock
+              ref={block}
               compact
               service={blockService}
               request={request}
@@ -818,10 +876,13 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
               onConfirmed={onConfirmed}
               onReady={onReady}
               onProgress={setProgress}
+              showGaugeReading={ctx.turfHeightCapture}
+              gaugeHeightIn={gaugeHeightIn}
+              onGaugeHeight={setGaugeHeightIn}
               technicianNotes={form.note}
             />
           </section>
-          <ProductsSection ctx={ctx} products={products} lawnSqft={lawnSqft} locked={locked || dictationPending} other={picker.button} popover={picker.popover} />
+          <ProductsSection ctx={ctx} products={products} lawnSqft={lawnSqft} locked={locked || dictationPending} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
           <PropertyServiceAreas
             request={request}
             serviceId={service?.id}
@@ -840,9 +901,13 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
               ))}
             </ChoiceSection>
           )}
+          <CustomerHomeSection value={form.customerHome} locked={locked} onChange={(value) => setField('customerHome', value)} />
           {tipsAvailable && (
             <TipSection
+              quiet
               library={tips}
+              priorityTipIds={noteTipIds}
+              priorityOrdered
               tipId={form.tipId}
               customTip={form.customTip}
               locked={locked}
@@ -851,13 +916,13 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
             />
           )}
           {blog.available && (
-            <BlogPostSection search={blog.search} value={form.blogPost} locked={locked} onChange={(post) => setField('blogPost', post)} />
+            <BlogPostSection quiet search={blog.search} value={form.blogPost} locked={locked} onChange={(post) => setField('blogPost', post)} />
           )}
           {service.traceEligible !== false && (
             <section className="tech-visit-choice-section" aria-label="Treatment zone map">
               <div className="tech-visit-section-head">
                 <h3 className="tech-visit-section-title">Treatment zone map</h3>
-                <span className="tech-visit-muted">{traced ? 'Saved' : 'Optional'}</span>
+                {traced && <span className="tech-visit-muted">Saved</span>}
               </div>
               <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" disabled={locked || dictationPending} onClick={openTracer}>
                 {traced ? 'Change the treated lawn outline' : 'Outline the treated lawn'}
@@ -869,11 +934,8 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
       </div>
       <CompleteFooter
         submission={submission}
-        missingReason={missingReason}
-        reasonInButton={LABEL_REASONS.has(missingReason)}
+        {...footerFor({ barAction, missingReason, submission, submit })}
         warn={!!stockRow}
-        label="Complete service"
-        onSubmit={submit}
         coverProps={picker.coverProps}
       >
         {(stockRow || submission.error === STOCK_LOCKOUT_MESSAGE) && !locked && (
@@ -890,7 +952,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
 // Each product on the sheet: the plan's, or one the tech added. The amount can
 // change and any product can go (a removed plan product is recorded as
 // skipped). No area and no rate box.
-function ProductsSection({ ctx, products, lawnSqft, locked, other, popover }) {
+function ProductsSection({ ctx, products, lawnSqft, locked, other, popover, inlineSearch }) {
   const { rows, updateRow, removeRow } = products;
   return (
     <section className="tech-visit-choice-section">
@@ -900,13 +962,10 @@ function ProductsSection({ ctx, products, lawnSqft, locked, other, popover }) {
       {ctx.plannedUnavailable && !rows.some((row) => row.planned) && (
         <p className="tech-visit-muted" role="status">The planned products could not be loaded. Add what you applied.</p>
       )}
-      {!rows.length && !ctx.plannedUnavailable && (
-        <p className="tech-visit-muted">No products yet. Add what you applied.</p>
-      )}
       {rows.map((row) => (
         <ProductEditor key={row.productId} row={row} lawnSqft={lawnSqft} locked={locked} onChange={(patch) => updateRow(row.productId, patch)} onRemove={() => removeRow(row.productId)} />
       ))}
-      <OtherProductButton {...other} popover={popover} />
+      {inlineSearch || <OtherProductButton {...other} popover={popover} />}
     </section>
   );
 }

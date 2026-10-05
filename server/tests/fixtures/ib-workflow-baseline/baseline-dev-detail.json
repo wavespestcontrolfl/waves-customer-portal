@@ -116,38 +116,22 @@
       "contract_calls": 0
     },
     "W2-dev-01": {
-      "outcome": "fail",
-      "point": "target_resolution",
-      "code": "other_account_facts_in_brief",
-      "failures": [
-        {
-          "point": "target_resolution",
-          "code": "other_account_facts_in_brief",
-          "detail": "Pellham (3 of id, phone, name) appears in the result of get_schedule_view for a brief of Quill Fennimore"
-        }
-      ],
+      "outcome": "pass",
+      "failures": [],
       "timings": {
-        "first_tool_result_ms": 9,
-        "verified_completion_ms": 66
+        "first_tool_result_ms": 21,
+        "verified_completion_ms": 119
       },
       "notes": [],
       "strength": null,
       "contract_calls": 0
     },
     "W2-dev-02": {
-      "outcome": "fail",
-      "point": "target_resolution",
-      "code": "other_account_facts_in_brief",
-      "failures": [
-        {
-          "point": "target_resolution",
-          "code": "other_account_facts_in_brief",
-          "detail": "Pellham (2 of id, phone, name) appears in the result of get_schedule_view for a brief of Quill Fennimore"
-        }
-      ],
+      "outcome": "pass",
+      "failures": [],
       "timings": {
-        "first_tool_result_ms": 9,
-        "verified_completion_ms": 50
+        "first_tool_result_ms": 14,
+        "verified_completion_ms": 95
       },
       "notes": [],
       "strength": null,
@@ -176,19 +160,11 @@
       "contract_calls": 0
     },
     "W2-dev-05": {
-      "outcome": "fail",
-      "point": "tool_result",
-      "code": "schedule_view_window_has_no_end",
-      "failures": [
-        {
-          "point": "tool_result",
-          "code": "schedule_view_window_has_no_end",
-          "detail": "schedule view window \"09:00:00\" carries the start only, seeded 09:00-11:00"
-        }
-      ],
+      "outcome": "pass",
+      "failures": [],
       "timings": {
-        "first_tool_result_ms": 7,
-        "verified_completion_ms": 29
+        "first_tool_result_ms": 17,
+        "verified_completion_ms": 76
       },
       "notes": [],
       "strength": null,
@@ -330,16 +306,11 @@
           "point": "target_resolution",
           "code": "lead_target_not_established",
           "detail": "\"actually put Jason\" with the lead page open: no lead target"
-        },
-        {
-          "point": "confirm",
-          "code": "superseded_pending_card_still_executable",
-          "detail": "confirming the superseded Zed card while the Zane card is pending returned 200"
         }
       ],
       "timings": {
-        "first_tool_result_ms": 13,
-        "verified_completion_ms": 71
+        "first_tool_result_ms": 14,
+        "verified_completion_ms": 93
       },
       "notes": [
         "undeclared update_lead_contact allowed: the gate-off supersede scenario edits a second lead twice (Zed, then Zane) to prove the older pending card cannot be confirmed",
@@ -643,29 +614,11 @@
       "contract_calls": 0
     },
     "W5-dev-07": {
-      "outcome": "fail",
-      "point": "confirm",
-      "code": "obsolete_booking_proposal_still_executable",
-      "failures": [
-        {
-          "point": "confirm",
-          "code": "obsolete_booking_proposal_still_executable",
-          "detail": "confirming the superseded 9 AM card returned 200"
-        },
-        {
-          "point": "read_back",
-          "code": "final_booking_wrong",
-          "detail": "rows 09:00"
-        },
-        {
-          "point": "side_effect",
-          "code": "nine_am_row_exists",
-          "detail": "a 9 AM row was saved"
-        }
-      ],
+      "outcome": "pass",
+      "failures": [],
       "timings": {
-        "first_tool_result_ms": 16,
-        "verified_completion_ms": 967
+        "first_tool_result_ms": 11,
+        "verified_completion_ms": 957
       },
       "notes": [],
       "strength": null,
@@ -990,27 +943,14 @@
       }
     },
     "W7-dev-04": {
-      "outcome": "fail",
-      "point": "read_back",
-      "code": "queued_text_not_canceled",
-      "failures": [
-        {
-          "point": "read_back",
-          "code": "queued_text_not_canceled",
-          "detail": "the scheduled sms_log row no longer exists (deleted, not canceled)"
-        },
-        {
-          "point": "side_effect",
-          "code": "guard_outbound_row_added",
-          "detail": "a case whose manifest says sends 0: outbound sms rows 1 -> 0, messaging audit rows 0 -> 0"
-        }
-      ],
+      "outcome": "pass",
+      "failures": [],
       "timings": {
         "first_tool_result_ms": 8,
-        "verified_completion_ms": 1551
+        "verified_completion_ms": 1537
       },
       "notes": [
-        "queued listing {\"customer_id\":\"d4c1c210-ad4f-44a1-a073-59edb1f50bbe\",\"customer_name\":\"Quill Fennimore\",\"messages\":[{\"message_id\":\"38ed42f8-c8a7-4817-bf52-8a984e9ee7c0\",\"channe; cancel {\"proposal\":true,\"channel\":\"sms\",\"message_id\":\"38ed42f8-c8a7-4817-bf52-8a984e9ee7c0\",\"customer_id\":\"d4c1c210-ad4f-44"
+        "queued listing {\"customer_id\":\"445db724-4195-46dc-b36b-1674e705b5b1\",\"customer_name\":\"Quill Fennimore\",\"messages\":[{\"message_id\":\"925b8359-a8a3-4586-9577-9757ea6d37ef\",\"channe; cancel {\"proposal\":true,\"channel\":\"sms\",\"message_id\":\"925b8359-a8a3-4586-9577-9757ea6d37ef\",\"customer_id\":\"445db724-4195-46"
       ],
       "strength": null,
       "contract_calls": 1
@@ -1607,33 +1547,14 @@
       "contract_calls": 0
     },
     "W10-dev-06": {
-      "outcome": "fail",
-      "point": "target_resolution",
-      "code": "product_target_not_established",
-      "failures": [
-        {
-          "point": "target_resolution",
-          "code": "product_target_not_established",
-          "detail": "\"Received 2 of the Talak.\" names the product but the route asked \"Choose the exact product or restock request for this action.\""
-        },
-        {
-          "point": "tool_result",
-          "code": "missing_unit_not_clarified",
-          "detail": "adjust_stock answered {\"executed\":true,\"outcome\":\"completed\",\"result\":{\"success\":true,\"state\":\"completed\",\"product\":{\"id\":\"9b347fd7-48a3-4319-8cb0-9a29bc131e58\",\"name\":\"Talak\",\"category\":\"insecticide\",\"formulation\":\"SC\",\"sku\":\"IBWF-9b347fd7\",; expected message /unit/i"
-        },
-        {
-          "point": "side_effect",
-          "code": "stock_changed_without_a_unit",
-          "detail": "stock or ledger changed"
-        }
-      ],
+      "outcome": "pass",
+      "failures": [],
       "timings": {
-        "first_tool_result_ms": 14,
-        "verified_completion_ms": 35
+        "first_tool_result_ms": 12,
+        "verified_completion_ms": 18
       },
       "notes": [
-        "adjust_stock: target_clarification_required: Choose the exact product or restock request for this action.",
-        "undeclared adjust_stock allowed: the naive restock with no unit, which the writer must clarify",
+        "adjust_stock: unit_required: The unit is missing, so no stock was changed. Talak is counted in fl_oz (container size 96 fl oz). Ask the operator one short question about",
         "undeclared adjust_stock allowed: the naive restock with no unit, which the writer must clarify"
       ],
       "strength": null,

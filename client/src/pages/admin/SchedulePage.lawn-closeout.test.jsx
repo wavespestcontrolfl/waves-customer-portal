@@ -98,7 +98,9 @@ const mount = () => render(<CompletionPanel service={service} products={catalog}
 const integrityService = {
   ...service,
   id: 'integrity-visit',
-  serviceType: 'Quarterly Pest Control',
+  // Not a regular pest visit (owner 2026-10-04: those take no Protocol actions
+  // field), so the field these marker tests drive is still on the form.
+  serviceType: 'Pest Control Service',
   completionProfile: { serviceKey: 'pest', billingType: 'recurring', requiresProducts: false },
   waveguardTier: null,
 };

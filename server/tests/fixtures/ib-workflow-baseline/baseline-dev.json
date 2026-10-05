@@ -32,20 +32,10 @@
       "outcome": "pass"
     },
     "W2-dev-01": {
-      "outcome": "fail",
-      "point": "target_resolution",
-      "code": "other_account_facts_in_brief",
-      "failures": [
-        "target_resolution:other_account_facts_in_brief"
-      ]
+      "outcome": "pass"
     },
     "W2-dev-02": {
-      "outcome": "fail",
-      "point": "target_resolution",
-      "code": "other_account_facts_in_brief",
-      "failures": [
-        "target_resolution:other_account_facts_in_brief"
-      ]
+      "outcome": "pass"
     },
     "W2-dev-03": {
       "outcome": "pass"
@@ -54,12 +44,7 @@
       "outcome": "pass"
     },
     "W2-dev-05": {
-      "outcome": "fail",
-      "point": "tool_result",
-      "code": "schedule_view_window_has_no_end",
-      "failures": [
-        "tool_result:schedule_view_window_has_no_end"
-      ]
+      "outcome": "pass"
     },
     "W2-dev-06": {
       "outcome": "pass"
@@ -101,8 +86,7 @@
       "point": "target_resolution",
       "code": "lead_target_not_established",
       "failures": [
-        "target_resolution:lead_target_not_established",
-        "confirm:superseded_pending_card_still_executable"
+        "target_resolution:lead_target_not_established"
       ]
     },
     "W3-dev-07": {
@@ -186,14 +170,7 @@
       ]
     },
     "W5-dev-07": {
-      "outcome": "fail",
-      "point": "confirm",
-      "code": "obsolete_booking_proposal_still_executable",
-      "failures": [
-        "confirm:obsolete_booking_proposal_still_executable",
-        "read_back:final_booking_wrong",
-        "side_effect:nine_am_row_exists"
-      ]
+      "outcome": "pass"
     },
     "W5-dev-08": {
       "outcome": "pass"
@@ -298,13 +275,7 @@
       ]
     },
     "W7-dev-04": {
-      "outcome": "fail",
-      "point": "read_back",
-      "code": "queued_text_not_canceled",
-      "failures": [
-        "read_back:queued_text_not_canceled",
-        "side_effect:guard_outbound_row_added"
-      ]
+      "outcome": "pass"
     },
     "W7-dev-05": {
       "outcome": "fail",
@@ -492,14 +463,7 @@
       "outcome": "pass"
     },
     "W10-dev-06": {
-      "outcome": "fail",
-      "point": "target_resolution",
-      "code": "product_target_not_established",
-      "failures": [
-        "target_resolution:product_target_not_established",
-        "tool_result:missing_unit_not_clarified",
-        "side_effect:stock_changed_without_a_unit"
-      ]
+      "outcome": "pass"
     },
     "W10-dev-07": {
       "outcome": "fail",

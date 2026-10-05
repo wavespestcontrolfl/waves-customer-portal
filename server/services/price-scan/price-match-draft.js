@@ -57,12 +57,31 @@ function priceMatchHeadlineAndSummary(lines) {
     }
   }
   const savingsText = anyValid && total > 0 ? `, about $${Math.round(total)} less per order` : '';
-  let summary = `${namesText(names)}${savingsText}. Draft not sent.`;
-  if (summary.length > 110) {
-    // Too many/long names to fit — name the first and count the rest.
-    const shortList = names.length ? [names[0], ...(names.length > 1 ? [`${names.length - 1} more`] : [])] : ['these products'];
-    summary = `${namesText(shortList)}${savingsText}. Draft not sent.`;
+  // Delivered-price note (price + shipping basis). One line: its delivered price and the
+  // short shipping note ("$48.55 delivered, free shipping"). Several lines: the savings
+  // already use delivered prices, so just say so and flag any estimated shipping.
+  let deliveredText = '';
+  let deliveredShort = '';
+  if (n === 1 && Number.isFinite(rows[0].compLanded)) {
+    const note = rows[0].shippingNote;
+    deliveredText = ` at $${rows[0].compLanded.toFixed(2)} delivered${note ? ` (${note})` : ''}`;
+    deliveredShort = ` at $${rows[0].compLanded.toFixed(2)} delivered`;
+  } else if (n > 1 && rows.some((l) => Number.isFinite(l.compLanded))) {
+    const anyEst = rows.some((l) => l.compShipping && l.compShipping.basis === 'estimated');
+    deliveredText = anyEst ? ' (delivered, est. shipping)' : ' (delivered prices)';
+    deliveredShort = ' (delivered)';
   }
+  const MAX = 110;
+  const shortList = names.length ? [names[0], ...(names.length > 1 ? [`${names.length - 1} more`] : [])] : ['these products'];
+  // Most to least detail; first one that fits the 110-char bell guard wins. The last entry
+  // is exactly the pre-delivered-price behaviour, so the guard degrades to what it was.
+  const attempts = [
+    `${namesText(names)}${deliveredText}${savingsText}. Draft not sent.`,
+    `${namesText(names)}${deliveredShort}${savingsText}. Draft not sent.`,
+    `${namesText(shortList)}${deliveredShort}${savingsText}. Draft not sent.`,
+  ];
+  let summary = attempts.find((a) => a.length <= MAX);
+  if (!summary) summary = `${namesText(shortList)}${savingsText}. Draft not sent.`;
   return { headline, summary };
 }
 

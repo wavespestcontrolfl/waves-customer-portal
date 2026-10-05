@@ -165,7 +165,7 @@ const ruleSummary = (rule) => {
   if (rule.mode === 'hold') {
     return rule.hold_until === 'dry' ? 'Hold watering until the treatment has dried' : `Hold watering ${rule.hold_hours} h`;
   }
-  if (rule.mode === 'water_in') return `Water in ${rule.water_in_inches} in within ${rule.water_in_by_hours} h`;
+  if (rule.mode === 'water_in') return `Water in ${rule.water_in_inches} in within ${rule.water_in_by_hours} h${rule.water_in_same_day ? ', same day' : ''}`;
   return 'No watering instruction';
 };
 

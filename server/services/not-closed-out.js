@@ -442,6 +442,7 @@ module.exports = {
   RESOLUTIONS,
   RESOLUTION_BY_STATUS,
   isSameNoShowOccurrence,
+  settlementFromVisit,
   slotChanged,
   raiseCard,
   resolveForService,

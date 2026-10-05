@@ -22,14 +22,14 @@ import '../../styles/tech-workflow.css';
 
 // The full form's own three customer choices (its fourth, "Customer had
 // specific concern", stays on the full form). The writer reads the full
-// form's wording; the tiles say it shorter. Owner 2026-10-01: "not home —
-// full access" is picked every time the sheet opens.
+// form's wording; the tiles say it shorter. Owner 2026-10-04 (replaces
+// 2026-10-01): "home — spoke with them" is picked every time the sheet opens.
 export const CUSTOMER_HOME_CHOICES = [
   { value: 'tech_home_spoke_with_them', label: 'Home — spoke with them', writerLabel: 'Customer home — spoke with them' },
   { value: 'not_home_full_access', label: 'Not home — full access', writerLabel: 'Customer not home — full access' },
   { value: 'not_home_partial_access', label: 'Not home — partial access', writerLabel: 'Customer not home — partial access' },
 ];
-export const DEFAULT_CUSTOMER_HOME = 'not_home_full_access';
+export const DEFAULT_CUSTOMER_HOME = 'tech_home_spoke_with_them';
 export const customerHomeWriterLabel = (value) => CUSTOMER_HOME_CHOICES.find((choice) => choice.value === value)?.writerLabel || '';
 
 // The pest activity tracker on the full form's 0–5 scale, 1–5 here (owner
@@ -336,16 +336,19 @@ function BlogPostOption({ post, pressed = false, locked, onPick }) {
 // One Waves blog post for the customer, searched the way Quick Links searches
 // links. It goes at the bottom of their report as "From the Waves blog".
 // Optional; the server checks the pick is still live when the visit completes.
-export function BlogPostSection({ search, value, locked, onChange }) {
+// `quiet` (the lawn sheet): no "Search the Waves blog" label and no "Pick 1
+// (optional)" hint; the box keeps its name as an aria-label and the section keeps
+// the hint as its aria-description.
+export function BlogPostSection({ search, value, locked, onChange, quiet = false }) {
   // The search's coverage and "Suggest a post" belong to the office form only
   // (owner 2026-10-03: the tech screen is going away and new work goes to the
   // admin UI), so this sheet keeps the plain list it had.
   const { query, setQuery, results, status } = useBlogPostSearch(search);
   return (
-    <section className="tech-visit-choice-section" aria-label="Blog post for the customer">
+    <section className="tech-visit-choice-section" aria-label="Blog post for the customer" {...(quiet ? { 'aria-description': 'Pick 1 (optional)' } : {})}>
       <div className="tech-visit-section-head">
         <h3 className="tech-visit-section-title">Blog post for the customer</h3>
-        <span className="tech-visit-muted">{value ? '1 picked' : 'Pick 1 (optional)'}</span>
+        {(!quiet || value) && <span className="tech-visit-muted">{value ? '1 picked' : 'Pick 1 (optional)'}</span>}
       </div>
       {value ? (
         <>
@@ -358,9 +361,15 @@ export function BlogPostSection({ search, value, locked, onChange }) {
         </>
       ) : (
         <>
-          <Field label="Search the Waves blog" className="tech-visit-field">
-            <Input className="tech-visit-control" type="search" value={query} disabled={locked} onChange={(e) => setQuery(e.target.value)} placeholder="e.g. ghost ants" />
-          </Field>
+          {quiet ? (
+            <div className="ui-field tech-visit-field">
+              <Input className="tech-visit-control" type="search" aria-label="Search the Waves blog" value={query} disabled={locked} onChange={(e) => setQuery(e.target.value)} placeholder="e.g. ghost ants" />
+            </div>
+          ) : (
+            <Field label="Search the Waves blog" className="tech-visit-field">
+              <Input className="tech-visit-control" type="search" value={query} disabled={locked} onChange={(e) => setQuery(e.target.value)} placeholder="e.g. ghost ants" />
+            </Field>
+          )}
           <div className="tech-visit-tip-list">
             {results.map((post) => <BlogPostOption key={post.id} post={post} locked={locked} onPick={() => onChange(post)} />)}
             {status === 'searching' && <p className="tech-visit-muted">Searching…</p>}
@@ -968,14 +977,17 @@ export function StepFooter({ reason, warn, label, onAction, busy, disabled, cove
 
 // A confirmable completion prompt (the edited-report heads-up, a promise
 // that changed after the report was written): the server's own words, then
-// send as is or go back.
-export function ConfirmPrompt({ prompt, onConfirm, onBack, busy }) {
+// send as is or go back. A Go back that could not discard the attempt saved
+// on this device keeps the prompt open, so its error shows here, as on the
+// recovered-completion view.
+export function ConfirmPrompt({ prompt, error, onConfirm, onBack, busy }) {
   return (
     <div className={cn('tech-visit-card', 'tech-report-confirm')} role="alertdialog" aria-label="Before this goes out">
       <p className="tech-visit-section-title">Before this goes out</p>
       {String(prompt.message || '').split('\n').filter(Boolean).map((line) => (
         <p key={line} className="tech-visit-muted">{line}</p>
       ))}
+      {error && <ActionFeedback error className="tech-visit-feedback">{error}</ActionFeedback>}
       <div className="tech-visit-tile-grid">
         <Chip label="Go back" disabled={busy} onClick={onBack} />
         <Chip label="Send as is" disabled={busy} onClick={onConfirm} />

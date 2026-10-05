@@ -422,7 +422,8 @@ describe('MobileDispatchList drive legs', () => {
         mode="day"
         date="2026-07-15"
         services={[
-          { ...SERVICE, id: 'svc-done', status: 'completed', customerName: 'Sample Done', windowStart: '09:00', windowEnd: '10:00', driveInShown: true, drivePrevName: 'Sample One', driveFromPrevMin: 45, driveLateMin: 15 },
+          { ...SERVICE, id: 'svc-done', status: 'completed', customerName: 'Sample Done', windowStart: '09:00', windowEnd: '10:00', driveInShown: true, drivePrevName: 'Sample One', driveFromPrevMin: 45, driveLateMin: 15, driveLateServiceIds: ['svc-open'] },
+          { ...SERVICE, id: 'svc-open', status: 'confirmed', customerName: 'Sample Open', windowStart: '10:00', windowEnd: '11:00' },
         ]}
         technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
       />,
@@ -509,5 +510,43 @@ describe('MobileDispatchList card button labels', () => {
       />,
     );
     expect(screen.getByRole('button', { name: 'Assign technician' })).toHaveTextContent('Assign');
+  });
+});
+
+describe('MobileDispatchList completed visits', () => {
+  it('drops the red at once when the last at-risk visit at the stop is completed', () => {
+    render(
+      <MobileDispatchList
+        mode="day"
+        date="2026-07-15"
+        services={[
+          { ...SERVICE, id: 'svc-first', status: 'completed', customerName: 'Sample First', driveInShown: true, drivePrevName: 'Sample One', driveFromPrevMin: 45, driveLateMin: 15, driveLateServiceIds: ['svc-later'] },
+          { ...SERVICE, id: 'svc-later', status: 'completed', customerName: 'Sample Later', windowStart: '10:00', windowEnd: '11:00' },
+        ]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+      />,
+    );
+    expect(screen.queryByText(/past the 2-hour arrival window/)).toBeNull();
+    expect(screen.queryByText(/~45 min drive/)).toBeNull();
+  });
+
+  it('greys a finished visit, tags it Done and hides the drive into it', () => {
+    render(
+      <MobileDispatchList
+        mode="day"
+        date="2026-07-15"
+        services={[
+          { ...SERVICE, id: 'svc-done', status: 'completed', customerName: 'Sample Done', driveInShown: true, drivePrevName: 'Sample One', driveFromPrevMin: 20 },
+          { ...SERVICE, id: 'svc-next', customerName: 'Sample Next', windowStart: '10:00', windowEnd: '11:00', driveInShown: true, drivePrevName: 'Sample Done', driveFromPrevMin: 12 },
+        ]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+      />,
+    );
+    expect(screen.getByText('Sample Done').className).toContain('text-ink-tertiary');
+    expect(screen.getByText('Sample Next').className).toContain('text-zinc-900');
+    expect(screen.getAllByText('Done')).toHaveLength(1);
+    expect(screen.getByText('Done').className).toContain('text-14');
+    expect(screen.queryByText('~20 min drive from Sample One')).toBeNull();
+    expect(screen.getByText('~12 min drive from Sample Done')).toBeInTheDocument();
   });
 });

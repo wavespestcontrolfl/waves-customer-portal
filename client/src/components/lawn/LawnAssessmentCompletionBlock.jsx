@@ -9,7 +9,7 @@
 // the fetcher is the `request` prop (SchedulePage passes its own adminFetch),
 // and the text that was 12 or 13px is now 14px (the portal brand gate allows
 // nothing smaller on a new file).
-import React, { useEffect, useRef, useState } from "react";
+import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import lawnScores from '@lawn-scores';
 import { createVisitReview, visitReviewPayload } from "./LawnVisitReview";
 import { Button, Input, Select, UiSurface } from "../ui";
@@ -22,6 +22,19 @@ const PILL = "!rounded-full !uppercase !tracking-[0.3px]";
 const PILL_OUTLINE = `${PILL} !border !border-[#111111]`;
 const FIELD = "!rounded-[12px] !border !border-[#E5E5E5]";
 import { SHOTS as LAWN_SHOTS, SHOT_CAP as LAWN_SHOT_CAP, addPhotos as addLawnPhotos, assignShotZone, describeAddResult, planFileReads, shotIsFull, shotListHint } from "../../lib/lawn-photo-shots";
+
+// The lawn sheet's (compact) shot list: four named slots, one short line each
+// (owner 2026-10-05). Each maps onto an existing shot key and the server is not
+// told anything new. "Back or side" tags the back overview; a photo already
+// tagged with the side overview (or any hidden key: older visit, the generic Add
+// turf photos button) still shows in its photo tile and counts as a photo.
+// `keys` are the tags that make a slot read "(added)".
+const COMPACT_SLOTS = [
+  { key: "front", keys: ["front"], label: "Front", instruction: "Whole front lawn from the mailbox or driveway." },
+  { key: "back", keys: ["back", "side"], label: "Back or side", instruction: "Whole back lawn, or one side if gated." },
+  { key: "close_up", keys: ["close_up"], label: "Close-up", instruction: "Straight down, a foot up, typical spot." },
+  { key: "trouble", keys: ["trouble"], label: "Problem area", instruction: "Only when something looks wrong." },
+];
 
 // The four scores the tech reviews and may change until the assessment is
 // confirmed (owner ruling 2026-10-04), matching the customer report's
@@ -139,7 +152,19 @@ function resolveAiScores(assessment = {}, visitAssessment, serverAiScores) {
   };
 }
 
-export default function LawnAssessmentCompletionBlock({
+// What the block's buttons can do right now: one rule for the in-flow buttons,
+// the sheet's bar button and the ref handle. A photo still being read (from any
+// picker) holds Analyze, so it never runs on fewer photos than the tech picked.
+function abilities({ disabled, hasResult, confirmed, analyzing, confirming, modeKnown, photoCount, photoCap, readsInFlight }) {
+  const idle = !disabled && !analyzing;
+  return {
+    addPhoto: !hasResult && idle && modeKnown && photoCount < photoCap,
+    analyze: !hasResult && idle && photoCount > 0 && readsInFlight === 0,
+    confirm: hasResult && !confirmed && !disabled && !confirming,
+  };
+}
+
+function LawnAssessmentCompletionBlock({
   service,
   // The fetcher the lookup, analyze and confirm calls go through: the host
   // page's own admin fetch (it returns the parsed body and throws an Error
@@ -158,16 +183,21 @@ export default function LawnAssessmentCompletionBlock({
   // The tech's free-text visit notes (owned by CompletionPanel) — passed through
   // so the AI photo analysis can factor them in alongside the images.
   technicianNotes = "",
-  // The Fast Complete sheet's one-screen mode (owner 2026-10-04): only the
-  // four scores (the Fungus control and Thatch condition tiles never show),
+  // The Fast Complete sheet's one-screen mode (owner 2026-10-04): the shot list
+  // is the four named slots (COMPACT_SLOTS), the count is a plain "n added",
+  // no minimum-photos hint; only the four scores (the Fungus control and Thatch condition tiles never show),
   // each one the technician may change until the assessment is confirmed
   // (an input prefilled with the AI read, "AI n" under a changed one), then
   // Confirm assessment and Retake as ever. onProgress reports { photos,
-  // assessed } so the sheet can say what is missing. The full completion form
-  // passes neither and is unchanged.
+  // assessed } so the sheet can say what is missing, plus whether each of this
+  // block's own buttons can be pressed right now (canAddPhoto, canAnalyze,
+  // canConfirm) and whether an analysis or confirm is running. The ref's handle
+  // ({ analyze, confirm, openPhotoPicker }) lets the sheet's bottom button run
+  // the same step as the in-flow button, with the same disabled rules. The full
+  // completion form passes neither and is unchanged.
   compact = false,
   onProgress,
-}) {
+}, ref) {
   const [photos, setPhotosState] = useState([]);
   // The photo list's source of truth is this ref: every change goes through
   // setPhotos below, which computes from the latest list and mirrors it into
@@ -191,6 +221,7 @@ export default function LawnAssessmentCompletionBlock({
   // Shots whose photo is still being read: held so a second tap on the same
   // one-photo shot cannot queue a duplicate while the first decode is in flight.
   const [readingShots, setReadingShots] = useState([]);
+  const [readsInFlight, setReadsInFlight] = useState(0); // every picker, tagged or not
   // Photos being decoded right now (total, and per tapped shot): counted so two
   // quick picks cannot each decode a full batch.
   const inFlightRef = useRef({ total: 0, byShot: {} });
@@ -300,6 +331,7 @@ export default function LawnAssessmentCompletionBlock({
     setError(describeAddResult({ rejected: skipped }));
     if (picked.length === 0) { if (fileRef.current) fileRef.current.value = ""; return; }
     if (pendingZone) setReadingShots((prev) => [...prev, pendingZone]);
+    setReadsInFlight((n) => n + 1);
     if (shotList) {
       inFlightRef.current.total += picked.length;
       if (pendingZone) inFlightRef.current.byShot[pendingZone] = (inFlightRef.current.byShot[pendingZone] || 0) + picked.length;
@@ -332,6 +364,7 @@ export default function LawnAssessmentCompletionBlock({
         if (pendingZone) inFlightRef.current.byShot[pendingZone] -= picked.length;
       }
       if (pendingZone) setReadingShots((prev) => { const at = prev.indexOf(pendingZone); return at < 0 ? prev : prev.filter((_, i) => i !== at); });
+      setReadsInFlight((n) => n - 1);
       if (fileRef.current) fileRef.current.value = "";
     }
   }
@@ -498,9 +531,42 @@ export default function LawnAssessmentCompletionBlock({
   const scoreSource = techScores || result?.adjustedScores || result?.displayScores || null;
   const hasResult = !!result?.assessment?.id;
   const confirmed = !!confirmedId;
+  // What each button can do right now: the in-flow buttons' own disabled rules,
+  // reported to the sheet and enforced again by the handle below. A photo still
+  // being read holds Analyze for the sheet's button, so it cannot run on fewer
+  // photos than the tech just added.
+  const can = abilities({ disabled, hasResult, confirmed, analyzing, confirming, modeKnown, photoCount: photos.length, photoCap, readsInFlight });
+  function openPhotoPicker() {
+    pendingShotRef.current = null;
+    fileRef.current?.click();
+  }
+  useImperativeHandle(ref, () => ({
+    analyze: () => { if (can.analyze) analyze(); },
+    confirm: () => { if (can.confirm) confirm(); },
+    openPhotoPicker: () => { if (can.addPhoto) openPhotoPicker(); },
+  }));
   useEffect(() => {
-    onProgress?.({ photos: photos.length, assessed: hasResult });
-  }, [photos.length, hasResult]);
+    onProgress?.({ photos: photos.length, assessed: hasResult, canAddPhoto: can.addPhoto, canAnalyze: can.analyze, canConfirm: can.confirm, analyzing, confirming });
+  }, [photos.length, hasResult, can.addPhoto, can.analyze, can.confirm, analyzing, confirming]);
+  // The lawn sheet (compact, with the shot list) shows lawn length as one more
+  // row under the photo slots; everywhere else it stays beside the photo button.
+  const gaugeInSlots = compact && shotList && !hasResult;
+  const gaugeInput = (
+    <Input
+      type="number"
+      inputMode="decimal"
+      step="0.25"
+      min="0.5"
+      max="8"
+      value={gaugeHeightIn ?? ""}
+      disabled={disabled || analyzing}
+      placeholder="e.g. 4"
+      aria-label="Lawn length in inches"
+      onChange={(e) => onGaugeHeight?.(e.target.value === "" ? null : Number(e.target.value))}
+      className={`!w-20 ${FIELD}`}
+    />
+  );
+
   return (
     <UiSurface density="comfortable" className="flex flex-col gap-3 text-zinc-900">
       {loading && (
@@ -524,30 +590,19 @@ export default function LawnAssessmentCompletionBlock({
             <Button
               variant="secondary"
               className={PILL_OUTLINE}
-              onClick={() => { pendingShotRef.current = null; fileRef.current?.click(); }}
+              onClick={openPhotoPicker}
               disabled={disabled || photos.length >= photoCap || analyzing || !modeKnown}
             >
               Add turf photos
             </Button>
-            <span className="text-14 text-zinc-500">{photos.length}/{photoCap}</span>
+            <span className="text-14 text-zinc-500">{compact ? `${photos.length} added` : `${photos.length}/${photoCap}`}</span>
             {!modeKnown && <span role="status" data-testid="lawn-photo-mode-pending" className="text-14 text-zinc-500">Checking photo options…</span>}
           </>
         )}
-        {showGaugeReading && !compact && (
+        {showGaugeReading && !gaugeInSlots && (
           <>
             <span className="text-14 font-medium text-zinc-500">Lawn length</span>
-            <Input
-              type="number"
-              inputMode="decimal"
-              step="0.25"
-              min="0.5"
-              max="8"
-              value={gaugeHeightIn ?? ""}
-              disabled={disabled || analyzing}
-              placeholder="e.g. 4"
-              onChange={(e) => onGaugeHeight?.(e.target.value === "" ? null : Number(e.target.value))}
-              className={`!w-20 ${FIELD}`}
-            />
+            {gaugeInput}
             <span className="text-14 text-zinc-500">inches</span>
           </>
         )}
@@ -558,8 +613,8 @@ export default function LawnAssessmentCompletionBlock({
               shot's Add button brings the photo in already tagged with it. */}
           {shotList && (
             <ul data-testid="lawn-shot-list" aria-label="Lawn photo shots" className="m-0 flex list-none flex-col gap-2 p-0">
-              {LAWN_SHOTS.map((shot) => {
-                const added = photos.some((photo) => photo.zone === shot.key);
+              {(compact ? COMPACT_SLOTS : LAWN_SHOTS).map((shot) => {
+                const added = photos.some((photo) => (shot.keys || [shot.key]).includes(photo.zone));
                 return (
                   <li
                     key={shot.key}
@@ -585,6 +640,15 @@ export default function LawnAssessmentCompletionBlock({
                   </li>
                 );
               })}
+              {showGaugeReading && gaugeInSlots && (
+                <li data-testid="lawn-length-row" className="flex items-center gap-2 rounded-[12px] border border-[#E5E5E5] bg-white px-3 py-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="text-14 font-medium text-zinc-900">Lawn length</div>
+                    <div className="text-14 leading-snug text-zinc-500">In inches, if you measured it.</div>
+                  </div>
+                  {gaugeInput}
+                </li>
+              )}
             </ul>
           )}
           {photos.length > 0 && (
@@ -626,7 +690,7 @@ export default function LawnAssessmentCompletionBlock({
               "since your last visit" score line needs 2+ usable photos on both
               visits (lawn-progress.js COMPARABLE_LEVELS), so a 1-photo visit
               can never show it. Analyze stays enabled at one photo. */}
-          {shotList && shotListHint(photos) && (
+          {shotList && !compact && shotListHint(photos) && (
             <div data-testid="lawn-shot-list-hint" className="text-14 leading-snug text-zinc-500">
               {shotListHint(photos)}
             </div>
@@ -639,7 +703,7 @@ export default function LawnAssessmentCompletionBlock({
           <Button
             className={PILL}
             onClick={analyze}
-            disabled={disabled || photos.length === 0 || analyzing}
+            disabled={!can.analyze}
           >
             {analyzing ? "Analyzing..." : "Analyze lawn"}
           </Button>
@@ -722,7 +786,7 @@ export default function LawnAssessmentCompletionBlock({
               <Button
                 className={`flex-1 ${PILL}`}
                 onClick={confirm}
-                disabled={disabled || confirming}
+                disabled={!can.confirm}
               >
                 {confirming ? "Confirming..." : "Confirm assessment"}
               </Button>
@@ -750,3 +814,6 @@ export default function LawnAssessmentCompletionBlock({
     </UiSurface>
   );
 }
+
+// A declared function wrapped at export keeps the handler name the IB coverage census records.
+export default forwardRef(LawnAssessmentCompletionBlock);
