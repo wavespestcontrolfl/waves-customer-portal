@@ -2680,7 +2680,7 @@ async function mirrorSavedMethodForSucceededIntent(paymentIntent) {
 // The closeout decides whether the visit may close (an unstarted visit today
 // is a prepayment and stays open); a visit already completed refuses quietly.
 // A refusal, or a failure the closeout AUDITED, ends here: the visit stays
-// open and the daily paid-invoice sweep retries what is retryable. A failure
+// open and the daily paid-invoice sweep retries what is retryable. An outcome
 // with NO audit row (the invoice read here, an early read inside the
 // closeout, or the audit write itself) leaves nothing durable behind, and
 // that sweep only acts on an audit row — so it goes back to Stripe for
@@ -2702,9 +2702,12 @@ async function closeOutVisitAfterPaidInvoice(piId, { invoiceId = null } = {}) {
     logger.error(`[stripe-webhook] Paid-invoice visit closeout failed for PI ${piId} — rethrowing for Stripe retry: ${err.message}`);
     throw err;
   }
-  if (out && out.reason === 'error' && !out.audited) {
-    logger.error(`[stripe-webhook] Paid-invoice visit closeout for PI ${piId} failed with no audit row — rethrowing for Stripe retry: ${out.error}`);
-    throw new Error(`paid-invoice visit closeout was not recorded for retry: ${out.error}`);
+  // ANY outcome that left the visit open without its audit row — a failure
+  // or a refusal alike: the sweep cannot tell a refusal of the moment
+  // (timer running, day not passed) from a final one without the row.
+  if (out && !out.closed && out.audited === false) {
+    logger.error(`[stripe-webhook] Paid-invoice visit closeout for PI ${piId} left its visit open (${out.reason}) with no audit row — rethrowing for Stripe retry`);
+    throw new Error(`paid-invoice visit closeout (${out.reason}) was not recorded for retry`);
   }
 }
 

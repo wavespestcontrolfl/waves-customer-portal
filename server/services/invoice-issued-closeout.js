@@ -437,8 +437,8 @@ async function refuseVoidedInvoice(run) {
   if (!visitId) return { closed: false, reason: 'no_invoice' };
   run.linkedVisitId = visitId;
   logger.info(`[invoice-issued-closeout] ${run.label} → visit ${visitId} left open (invoice_void)`);
-  await auditCloseoutOutcome(run, { closed: false, visitId, code: 'invoice_void' });
-  return { closed: false, reason: 'invoice_void', visitId };
+  const audited = await auditCloseoutOutcome(run, { closed: false, visitId, code: 'invoice_void' });
+  return { closed: false, reason: 'invoice_void', visitId, audited };
 }
 
 // Phase 2 — which visit, if any: the linked open visit, or this closeout's
@@ -462,9 +462,11 @@ async function resolveCloseoutTarget(run) {
   }
   if (resolved.visit) {
     logger.info(`[invoice-issued-closeout] ${run.label} → visit ${resolved.visit.id} left open (${resolved.reason})`);
-    await auditCloseoutOutcome(run, { closed: false, visitId: resolved.visit.id, code: resolved.reason });
+    const audited = await auditCloseoutOutcome(run, { closed: false, visitId: resolved.visit.id, code: resolved.reason });
+    return { closed: false, reason: resolved.reason, visitId: resolved.visit.id, audited };
   }
-  return { closed: false, reason: resolved.reason, visitId: resolved.visit?.id || null };
+  // No linked visit: nothing to audit against, and nothing a sweep could close.
+  return { closed: false, reason: resolved.reason, visitId: null };
 }
 
 // Phase 3 — the canonical completion in its quiet backfill posture: no
@@ -499,8 +501,8 @@ async function runQuietCloseout(run) {
   const outcome = completionOutcome(result);
   const line = `[invoice-issued-closeout] ${run.label} → visit ${run.svc.id} ${outcome.closed ? `completed${run.resuming ? ' (resumed)' : ''}` : `NOT completed (${outcome.status} ${outcome.code || outcome.error || ''})`}`;
   if (outcome.closed) logger.info(line); else logger.warn(line);
-  await auditCloseoutOutcome(run, { closed: outcome.closed, visitId: run.svc.id, resumed: run.resuming, status: outcome.status, code: outcome.code });
-  return { closed: outcome.closed, reason: outcome.closed ? null : (outcome.code || `status_${outcome.status}`), visitId: run.svc.id, resumed: run.resuming };
+  const audited = await auditCloseoutOutcome(run, { closed: outcome.closed, visitId: run.svc.id, resumed: run.resuming, status: outcome.status, code: outcome.code });
+  return { closed: outcome.closed, reason: outcome.closed ? null : (outcome.code || `status_${outcome.status}`), visitId: run.svc.id, resumed: run.resuming, audited };
 }
 
 // The canonical completion's { status, body } read once, in one shape.
@@ -526,11 +528,12 @@ async function loadCloseoutInvoice(run) {
 async function auditCloseoutFailure(run, err) {
   const visitId = run.linkedVisitId || (err && err.linkedVisit && err.linkedVisit.id) || null;
   logger.error(`[invoice-issued-closeout] failed for invoice ${run.invoiceId}${visitId ? ` (visit ${visitId})` : ''}: ${err.message}`);
-  // `audited`: the failure row the retry sweeps look for exists. False when
-  // the failure came before any visit was in hand (the invoice read, the
-  // link read) or the audit write itself failed — then NOTHING durable
-  // records that a closeout is owed, and a caller with a redelivery
-  // mechanism (the Stripe webhook) must use it (pre-push audit P1).
+  // `audited` (on EVERY outcome that has a linked visit — refusals, failures
+  // and completions alike): the audit row exists. The retry sweeps act on
+  // that row, so an outcome that is not closed and not audited has nothing
+  // durable recording that a closeout may still be owed; a caller with a
+  // redelivery mechanism (the Stripe webhook) must use it. False here too
+  // when the failure came before any visit was in hand (pre-push audit P1).
   const audited = visitId
     ? await auditCloseoutOutcome(run, { closed: false, visitId, resumed: run.resuming, code: 'error', error: String(err.message || err).slice(0, 500) })
     : false;

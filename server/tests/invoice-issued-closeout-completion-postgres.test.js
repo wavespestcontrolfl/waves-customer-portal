@@ -166,7 +166,7 @@ describe('source contracts', () => {
     // The helper reads only a SETTLED invoice and asks for the 'paid' trigger.
     expect(webhook).toMatch(/async function closeOutVisitAfterPaidInvoice\(piId, \{ invoiceId = null \} = \{\}\) \{\s*let out;\s*try \{[\s\S]{0,300}?\.whereIn\('status', \['paid', 'prepaid'\]\)[\s\S]{0,300}?out = await closeOutVisitForIssuedInvoice\(\{ invoiceId: paid\.id, trigger: 'paid' \}\);/);
     // A failure with no audit row goes back to Stripe; an audited one is the sweep's.
-    expect(webhook).toMatch(/out = await closeOutVisitForIssuedInvoice\([^)]*\);\s*\} catch \(err\) \{[\s\S]{0,200}?throw err;\s*\}\s*if \(out && out\.reason === 'error' && !out\.audited\) \{[\s\S]{0,260}?throw new Error\(/);
+    expect(webhook).toMatch(/out = await closeOutVisitForIssuedInvoice\([^)]*\);\s*\} catch \(err\) \{[\s\S]{0,200}?throw err;\s*\}[\s\S]{0,300}?if \(out && !out\.closed && out\.audited === false\) \{[\s\S]{0,260}?throw new Error\(/);
     // Both settle paths: the combined PI (one call per settled invoice) and the single-invoice PI.
     expect(webhook).toMatch(/await closeOutVisitAfterPaidInvoice\(piId, \{ invoiceId: settledId \}\);\s*await scheduleReviewAfterPaidInvoice\(piId, \{ invoiceId: settledId \}\);/);
     expect(webhook).toMatch(/await closeOutVisitAfterPaidInvoice\(piId\);\s*await scheduleReviewAfterPaidInvoice\(piId\);/);
@@ -560,6 +560,17 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
     } finally { mockPg = real; }
     expect(out).toMatchObject({ closed: false, reason: 'error', visitId: f.serviceId, audited: false });
     expect(await mockPg('audit_log').where({ resource_id: f.serviceId })).toHaveLength(0);
+    // A REFUSAL whose audit insert fails says so too (a refusal of the moment is retryable only through its row).
+    await real('scheduled_services').where({ id: f.serviceId }).update({ status: 'en_route' });
+    mockPg = auditDown;
+    let refused;
+    try {
+      refused = await closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'paid', actorTechnicianId: f.techId, conn: real });
+    } finally { mockPg = real; }
+    expect(refused).toMatchObject({ closed: false, reason: 'visit_en_route', visitId: f.serviceId, audited: false });
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'paid', actorTechnicianId: f.techId, conn: real })).toMatchObject({ reason: 'visit_en_route', audited: true });
+    await real('scheduled_services').where({ id: f.serviceId }).update({ status: 'on_site' });
+    await real('audit_log').where({ resource_id: f.serviceId }).del();
     // With the audit table reachable the same failure IS recorded.
     expect(await closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'paid', actorTechnicianId: f.techId, conn: flaky })).toMatchObject({ reason: 'error', audited: true });
     expect(await mockPg('audit_log').where({ resource_id: f.serviceId, action: 'visit.completion_on_invoice_issued_refused' }).first()).toMatchObject({ metadata: expect.objectContaining({ code: 'error', trigger: 'paid' }) });
