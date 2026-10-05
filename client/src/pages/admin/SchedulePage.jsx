@@ -61,6 +61,7 @@ import RescheduleDialogView from "../../components/schedule/RescheduleDialogView
 
 import { addETDays, etDateString, etDatetimeLocalToISO, etParts, formatETDateOnly, formatETDateTime } from "../../lib/timezone";
 import { completionDraftKey } from "../../lib/completion-drafts";
+import { elapsedSince, onSiteTimeOf } from "../../lib/on-site-time";
 import { prepareCompletionPhoto } from "../../lib/completion-photo";
 import {
   stackablePresets,
@@ -107,7 +108,7 @@ import {
   specialtyCompletionFor,
   specialtyFindingActionConflict,
 } from "../../lib/service-completion-presets";
-import { LAWN_DEFAULT_AREAS, LAWN_FIELD_ACTIONS, isLawnFindingSelection, lawnPlanSelections, reconcileLawnPlanSelections, lawnPlanActionOptions, previousLawnAssessment, withdrawLawnPlanSuggestions } from "../../lib/lawn-completion";
+import { LAWN_DEFAULT_AREAS, LAWN_FIELD_ACTIONS, isLawnFindingSelection, lawnPlanSelections, reconcileLawnPlanSelections, lawnPlanActionOptions, previousLawnAssessment, recordedLawnArea, withdrawLawnPlanSuggestions } from "../../lib/lawn-completion";
 import LawnFindingPicker from "../../components/tech/LawnFindingPicker";
 import { confirmCardHoldFeeChoice } from "../../lib/cardHoldCancel";
 import { useCancelFeeNotice } from "../../components/schedule/CancelFeeNotice";
@@ -1577,20 +1578,6 @@ function minutesToTime(total) {
   const h = Math.floor(total / 60);
   const m = total % 60;
   return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
-}
-
-function elapsedSince(isoTime) {
-  if (!isoTime) return "0:00";
-  const diff = Math.max(
-    0,
-    Math.floor((Date.now() - new Date(isoTime).getTime()) / 1000),
-  );
-  const m = Math.floor(diff / 60);
-  const s = diff % 60;
-  const h = Math.floor(m / 60);
-  if (h > 0)
-    return `${h}:${String(m % 60).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
-  return `${m}:${String(s).padStart(2, "0")}`;
 }
 
 const btnBase = {
@@ -12278,16 +12265,17 @@ export function CompletionPanel({
   const [lawnPlanReloadKey, setLawnPlanReloadKey] = useState(0);
   const lawnDefaultsEnabled = completionImprovements && lawnCompletionDefaults?.enabled === true && lawnCompletionDefaults.serviceId === service.id;
   const currentLawnPlanReady = lawnPlanReady === service.id;
-  const reviewedLawnArea = currentPropertyAreas?.areas.lawn?.reviewedAt ? currentPropertyAreas.areas.lawn.sqft : undefined;
+  // A lawn visit treats the whole recorded lawn, reviewed or not.
+  const recordedLawnAreaSqft = recordedLawnArea(currentPropertyAreas?.areas.lawn);
   const propertyAreasIdentity = currentPropertyAreas ? `${currentPropertyAreas.propertyId}|${currentPropertyAreas.addressKey ?? ""}` : null;
   // A lawn area entered for one property (e.g. restored from a draft) never
   // applies to another, including the same row at a new address.
   const effectiveLawnAreaOverride = lawnAreaOverride !== undefined
     && (!propertyAreasIdentity || lawnAreaOverrideFor === null || lawnAreaOverrideFor === propertyAreasIdentity)
     ? lawnAreaOverride : undefined;
-  const lawnPlanArea = lawnDefaultsEnabled ? effectiveLawnAreaOverride ?? (currentPropertyAreas ? reviewedLawnArea ?? null : undefined) : undefined;
+  const lawnPlanArea = lawnDefaultsEnabled ? effectiveLawnAreaOverride ?? (currentPropertyAreas ? recordedLawnAreaSqft ?? null : undefined) : undefined;
   const lawnVisitArea = effectiveLawnAreaOverride !== undefined ? effectiveLawnAreaOverride
-    : currentPropertyAreas ? reviewedLawnArea ?? "" : lawnCompletionDefaults?.lawnSqft ?? "";
+    : currentPropertyAreas ? recordedLawnAreaSqft ?? "" : lawnCompletionDefaults?.lawnSqft ?? "";
   useEffect(() => {
     let live = true;
     setLawnSqftForPrefill(null);
@@ -14107,10 +14095,7 @@ export function CompletionPanel({
         ? AREAS_BY_SERVICE.bed_bug
         : (AREAS_BY_SERVICE[serviceCategory] || AREAS_BY_SERVICE.pest))),
   ];
-  const onSiteEntry = (service.statusLog || []).find(
-    (e) => e.status === "on_site",
-  );
-  const onSiteTime = onSiteEntry ? onSiteEntry.at : service.checkInTime;
+  const onSiteTime = onSiteTimeOf(service);
 
   const svcTypeLower = (service.serviceType || "").toLowerCase();
   const isCallback =

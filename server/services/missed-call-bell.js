@@ -60,16 +60,44 @@ function unknownCallerAllowed(row, opts) {
   return true;
 }
 
+// What the recording processor writes when a recording holds no speech: the
+// rejected-transcription sentinel (call-recording-processor.js
+// TRANSCRIPTION_REJECTED_SENTINEL) or the transcriber's own dead-air markers.
+const NO_SPEECH_MARKER_RE = /\[(?:VOICEMAIL|NO SPEECH)\]|\[Recording had no usable speech;[^\]]*\]/gi;
+
+/**
+ * Pure: did the caller reach the voicemail greeting, wait, and hang up
+ * without saying anything? True only when a recording exists AND the
+ * processor has FINISHED with it and found no speech: transcription_status
+ * 'rejected' (an implausible transcript thrown out) with no real text left,
+ * or a 'completed' transcript that is nothing but the no-speech markers.
+ * A recording still awaiting transcription is NOT empty — its voicemail may
+ * yet hold a message — so it stays the voicemail lane's.
+ */
+function isEmptyVoicemailRecording(row) {
+  if (!row || !(row.recording_sid || row.recording_url)) return false;
+  const status = String(row.transcription_status || '').toLowerCase();
+  const text = typeof row.transcription === 'string' ? row.transcription : '';
+  const residue = text.replace(NO_SPEECH_MARKER_RE, '').replace(/[^\p{L}\p{N}]/gu, '');
+  if (status === 'rejected') return residue === '';
+  if (status === 'completed') return text.search(NO_SPEECH_MARKER_RE) !== -1 && residue === '';
+  return false;
+}
+
 /**
  * Pure: is this an inbound call nobody answered that no other lane owns?
  * The call's own shape only — never the bell's delivery state, so
  * missed-call-text-back.js (its own lease/settle keys) can share the rule
  * without the bell's settled alert hiding the call from it.
+ *
+ * `opts.emptyVoicemail` (text-back lane only, behind its own gate): a
+ * recording that held no speech counts as "no message left". The bell never
+ * passes it, so the bell's behavior is unchanged.
  */
 function missedCallShapeEligible(row, opts = {}) {
   if (!row || row.direction !== 'inbound') return false;
   if (!row.customer_id && !unknownCallerAllowed(row, opts)) return false;
-  if (row.recording_sid || row.recording_url) return false;          // voicemail lane owns it
+  if ((row.recording_sid || row.recording_url) && !(opts?.emptyVoicemail && isEmptyVoicemailRecording(row))) return false; // voicemail lane owns it
   if (row.voicemail_callback_alerted_at) return false;                // voicemail lane already rang
   if (row.call_outcome === 'ai_handled' || row.call_outcome === 'ai_transferred') return false; // Sandy handled it / handed it to a person
   if (!outcomeUnanswered(row)) return false;                          // human / ai_agent / unknown-outcome
@@ -256,6 +284,7 @@ async function sweepMissedCalls({ limit = 50 } = {}) {
 module.exports = {
   missedCallEligible,
   missedCallShapeEligible,
+  isEmptyVoicemailRecording,
   ringMissedCallIfUnanswered,
   sweepMissedCalls,
   outcomeUnanswered,

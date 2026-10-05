@@ -33,7 +33,7 @@
  *   1. a needed score is missing                     -> unclear (missing_scores)
  *   2. confidence below moderate, or the metric is one the two models disagreed on
  *                                                    -> unclear (low_confidence)
- *   3. color_health across a cool-season change      -> seasonal
+ *   3. color_health across a cool-season change, moved by the band or more -> seasonal
  *   4. judgeProgress's verdict, renamed
  *
  * Rules the tests pin:
@@ -55,6 +55,23 @@
  *     Precedence: office_review (check.recheckOverride) > photo_pair
  *     (check.recheck); see effectiveRecheck.
  *
+ * Lighting (GATE_LAWN_LIGHTING, owner 2026-10-04): pass `colorGuard` and sun, shade
+ * and cloud stop moving the report's color words. Off (no colorGuard), every line
+ * below is inert. On:
+ *   - color_health is compared only when BOTH visits have a known light read and the
+ *     two are compatible (lawn-lighting.js colorComparability). Otherwise its applied
+ *     items are `unclear` (gate 'light_unknown' / 'light_differs'), which the copy
+ *     leaves unspoken (every color verdict rests on the two color scores, the
+ *     in-window "no clear gain yet" included).
+ *   - a color move smaller than COLOR_NO_CHANGE_POINTS is no change even in
+ *     compatible light: a would-be `behind` from it is withheld
+ *     (`unclear`, gate 'color_dead_band'), never rewritten.
+ *   - the overall direction is the gate-off one, kept only when thickness, weeds and
+ *     stress damage agree with it (overallDirectionByDrivers); a color-driven move or
+ *     a disagreement has no direction (reason 'color_driven') and so no sentence.
+ *   THE RULE: the gate may only remove a sentence gate-off would print, never print a
+ *   different one (pinned by a subset property test).
+ *
  * Thresholds: the band (8 points per category, 4 for the overall) is W5's
  * proposal; tune it with the calibration replay (server/scripts/
  * replay-lawn-progress.js). The confidence levels and the photo-quality cut
@@ -65,6 +82,7 @@
 const { judgeProgress, buildLawnExpectations } = require('./lawn-expectations');
 const { getSeason, crossSeasonNoteFromSeasons } = require('./lawn-seasonality');
 const { etCalendarDayOf } = require('../../utils/datetime-et');
+const { colorComparability, COLOR_NO_CHANGE_POINTS } = require('../lawn-lighting');
 
 const ENGINE_VERSION = 'lawn_progress_v1';
 const PROGRESS_VERSION = 1;
@@ -273,6 +291,21 @@ function appliedRows(applied, priorDate, issues = []) {
   return { rows: built.rows, unmapped: built.unmapped };
 }
 
+// GATE_LAWN_LIGHTING (gates.color exists only then). THE RULE for the whole gate: it
+// may only REMOVE a sentence the gate-off engine would have printed, never print a
+// different one. So an item is either what gate-off says or `unclear`, and
+// `unclear` is withheld by the copy. It withholds a color item (a) when the two
+// visits' light is unknown or different, and (b) in compatible light when the move
+// is under the dead band and gate-off would have said "behind" (a move that small
+// is no change). Returns the gate name, or null to leave it alone.
+function colorGuardGate(metric, gates, state, scoreDelta) {
+  if (metric !== 'color_health' || gates.color == null || state === 'unclear') return null;
+  if (!gates.color.comparable) return gates.color.reason;
+  // Gate-off already stops calling a small color move "mostly seasonal" across a
+  // season change, so the only small-move line left to withhold is "behind".
+  return state === 'behind' && Math.abs(scoreDelta) < gates.color.band ? 'color_dead_band' : null;
+}
+
 function itemForMetric({ row, metric, days, cur, prior, gates, band }) {
   const scoreDelta = delta(scoreOf(cur, metric), scoreOf(prior, metric));
   const rawVerdict = judgeProgress(row, { metric, daysSinceApplication: days, scoreDelta, band });
@@ -286,14 +319,29 @@ function itemForMetric({ row, metric, days, cur, prior, gates, band }) {
     state = 'unclear';
     gate = 'low_confidence';
   } else if (metric === 'color_health' && gates.seasonChange) {
-    state = 'seasonal';
-    gate = 'seasonal';
+    // "Mostly seasonal" explains a color CHANGE. A move inside the band is no
+    // change, so it is not called seasonal (owner 2026-10-05: a report said
+    // the color change was mostly seasonal for 70 -> 70). Color across a
+    // season change is still never "behind".
+    if (Math.abs(scoreDelta) >= band) {
+      state = 'seasonal';
+      gate = 'seasonal';
+    } else if (state === 'behind') {
+      state = 'holding_steady';
+      gate = 'seasonal_no_move';
+    }
   } else if (state === 'behind' && (row.transient || row.judgedByAbsence || row.behindEligible === false)) {
     // judgeProgress already withholds behind from rows with no window; this is
     // the invariant stated where a regression would be seen.
     state = 'holding_steady';
   }
 
+  // GATE_LAWN_LIGHTING: the state gate-off would have given is kept as `legacyState`
+  // wherever the light rules withhold it, so the copy picks its sentence slots
+  // exactly as gate-off would and only then withholds the line.
+  const guarded = colorGuardGate(metric, gates, state, scoreDelta);
+  const legacyState = guarded ? state : null;
+  if (guarded) { state = 'unclear'; gate = guarded; }
   return {
     kind: 'applied',
     rowId: row.id,
@@ -302,6 +350,7 @@ function itemForMetric({ row, metric, days, cur, prior, gates, band }) {
     approved: Boolean(row.approved),
     metric,
     state,
+    ...(legacyState ? { legacyState } : {}),
     gate,
     rawVerdict,
     basis: { daysSinceApplication: Number.isFinite(days) ? days : null, scoreDelta, band },
@@ -367,6 +416,41 @@ function overallDirection({ curOverall, priorOverall, comparable, seasonChange, 
   return { direction: 'flat', delta: d, band, reason: null };
 }
 
+// The overall score without color: thickness 30, weeds 25, stress damage 20 of the
+// four-category blend's weights (shared/lawn-scores.cjs calculateLawnOverallScore),
+// renormalized over those three. Null when any is missing.
+const NON_COLOR_WEIGHTS = [['turf_density', 0.30], ['weed_suppression', 0.25], ['stress_damage', 0.20]];
+function nonColorBlend(scores) {
+  const values = NON_COLOR_WEIGHTS.map(([metric, weight]) => [scoreOf(scores, metric), weight]);
+  if (values.some(([value]) => value == null)) return null;
+  const total = values.reduce((sum, [, weight]) => sum + weight, 0);
+  return values.reduce((sum, [value, weight]) => sum + value * weight, 0) / total;
+}
+
+/**
+ * GATE_LAWN_LIGHTING: color alone can never make the headline direction. THE RULE
+ * (the gate only removes): the direction is first computed exactly as gate-off does
+ * (overallDirection), and is kept only when the no-color blend (thickness, weeds,
+ * stress damage) AGREES with it: up with the blend up a band, down with it down a
+ * band, flat with it inside the band. Anything else, a color-driven move or a
+ * disagreement, is `unknown` ('color_driven') and so prints nothing; it is never
+ * turned into a different direction. A gate-off `unknown` stays as it was.
+ */
+function overallDirectionByDrivers({ current, prior, ...input }) {
+  const legacy = overallDirection(input);
+  if (legacy.direction === 'unknown') return legacy;
+  const curBlend = nonColorBlend(current.scores);
+  const priorBlend = nonColorBlend(prior.scores);
+  if (curBlend == null || priorBlend == null) return { ...legacy, direction: 'unknown', reason: 'missing_scores' };
+  const drivers = Math.round((curBlend - priorBlend) * 10) / 10;
+  const agrees = (legacy.direction === 'up' && drivers >= input.band)
+    || (legacy.direction === 'down' && drivers <= -input.band)
+    || (legacy.direction === 'flat' && Math.abs(drivers) < input.band);
+  // `legacyDirection` is what gate-off would have said: the copy sizes its block by it and
+  // then withholds the line, so withholding never makes room for another sentence.
+  return agrees ? { ...legacy, drivers } : { ...legacy, direction: 'unknown', reason: 'color_driven', drivers, legacyDirection: legacy.direction };
+}
+
 function seasonOf(side) {
   if (side?.season) return String(side.season);
   const day = dayString(side?.date);
@@ -389,7 +473,7 @@ const INELIGIBLE = [
  * delta as unreliable as a noisy current one, so the prior's photo confidence
  * (when the caller has it) and its divergence flags count too.
  */
-function comparisonGates(current, prior) {
+function comparisonGates(current, prior, colorGuard = null) {
   const confidence = normalizeConfidence(current.confidence);
   const priorConfidence = prior.confidence == null ? null : normalizeConfidence(prior.confidence);
   const comparable = [confidence, priorConfidence].every((c) => c == null || COMPARABLE_LEVELS.has(c.level));
@@ -402,6 +486,9 @@ function comparisonGates(current, prior) {
   const curSeason = seasonOf(current);
   const seasonalLine = crossSeasonNoteFromSeasons(priorSeason, curSeason);
   return {
+    // GATE_LAWN_LIGHTING (colorGuard passed): whether color may be compared, and the
+    // dead band. Absent when off, so every other path reads exactly as before.
+    ...(colorGuard ? { color: { ...colorComparability(colorGuard.currentLight, colorGuard.priorLight), band: COLOR_NO_CHANGE_POINTS } } : {}),
     level: confidence.level,
     comparable,
     divergent,
@@ -446,10 +533,12 @@ function sameOverallBasis(current, prior) {
  * @param {number} [input.band] category dead-band (default 8)
  * @param {number} [input.overallBand] overall dead-band (default 4)
  * @param {boolean} [input.photoPair] false = GATE_LAWN_PAIRED_RECHECK is off: stored photo_pair rechecks are ignored (default true)
+ * @param {{currentLight?:string|null, priorLight?:string|null}|null} [input.colorGuard] GATE_LAWN_LIGHTING: when given, color is compared only in
+ *   known, compatible light and the overall direction is decided without color (see the Lighting note above). Absent = unchanged.
  * @returns {object} { v, engineVersion, eligible, reason, daysSincePrior, confidence, season, overall, deltas, items, unmapped }
  */
 function buildLawnProgress({
-  current, prior, sinceLast = null, band = CATEGORY_BAND, overallBand = OVERALL_BAND, photoPair = true,
+  current, prior, sinceLast = null, band = CATEGORY_BAND, overallBand = OVERALL_BAND, photoPair = true, colorGuard = null,
 } = {}) {
   const base = {
     v: PROGRESS_VERSION,
@@ -472,16 +561,17 @@ function buildLawnProgress({
   if (ineligible) return { ...base, reason: ineligible[0] };
 
   const days = curDay - priorDay;
-  const gates = comparisonGates(current, prior);
+  const gates = comparisonGates(current, prior, colorGuard);
   const { items, unmapped } = progressItems({ sinceLast, priorDate, days, current, prior, gates, band, photoPair });
+  const overallInput = {
+    curOverall: scoreOf(current.scores, 'overall'),
+    priorOverall: scoreOf(prior.scores, 'overall'),
+    comparable: gates.comparable,
+    seasonChange: gates.seasonChange,
+    band: overallBand,
+  };
   const overall = sameOverallBasis(current, prior)
-    ? overallDirection({
-      curOverall: scoreOf(current.scores, 'overall'),
-      priorOverall: scoreOf(prior.scores, 'overall'),
-      comparable: gates.comparable,
-      seasonChange: gates.seasonChange,
-      band: overallBand,
-    })
+    ? (colorGuard ? overallDirectionByDrivers({ ...overallInput, current, prior }) : overallDirection(overallInput))
     : { direction: 'unknown', delta: null, band: overallBand, reason: 'incomplete_scores' };
 
   return {
@@ -490,6 +580,7 @@ function buildLawnProgress({
     daysSincePrior: days,
     confidence: { level: gates.level, comparable: gates.comparable, divergentMetrics: [...gates.divergent].sort() },
     season: gates.season,
+    ...(gates.color ? { color: gates.color } : {}),
     overall,
     deltas: Object.fromEntries([...METRICS, 'overall'].map((m) => [m, delta(scoreOf(current.scores, m), scoreOf(prior.scores, m))])),
     items,

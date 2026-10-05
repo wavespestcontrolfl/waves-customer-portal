@@ -111,7 +111,7 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
       }),
       voidInvoice: jest.fn().mockResolvedValue({ id: 'invoice-1', status: 'void' }),
     };
-    const renewals = { createTermForAnnualPrepay };
+    const renewals = { createTermForAnnualPrepay, recordMintVisitPrices: jest.fn().mockResolvedValue(null) };
     const warn = jest.fn();
 
     jest.doMock('../models/db', () => db);
@@ -638,9 +638,27 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
       expect(result.annualPrepayTermId).toBe('term-42');
     });
 
+    test('an accept that reuses an existing term never records a price baseline for it', async () => {
+      // createTermForAnnualPrepay found the term (estimate re-run): it leaves
+      // the deferral object unmarked.
+      const createTermForAnnualPrepay = jest.fn().mockResolvedValue({ id: 'term-99' });
+      const { EstimateConverter, renewals } = setup(termiteAnnualLine, {
+        gateOn: true, estimateUpdate: jest.fn().mockResolvedValue(1), createTermForAnnualPrepay, ...awaiting(),
+      });
+
+      const result = await EstimateConverter.convertEstimate('estimate-1', activationOpts);
+
+      expect(result.annualPrepayTermId).toBe('term-99');
+      expect(renewals.recordMintVisitPrices).not.toHaveBeenCalled();
+    });
+
     test('successful activation: stamps the estimate activated (with annual_plan_activated_at) in the SAME transaction the term/invoice committed in, and returns the term id', async () => {
       const estimateUpdate = jest.fn().mockResolvedValue(1);
-      const createTermForAnnualPrepay = jest.fn().mockResolvedValue({ id: 'term-99' });
+      // A real mint marks the deferral object when it INSERTS the term.
+      const createTermForAnnualPrepay = jest.fn(async ({ deferVisitPriceRecord }) => {
+        deferVisitPriceRecord.termCreated = true;
+        return { id: 'term-99' };
+      });
       const {
         EstimateConverter, invoiceService, renewals,
       } = setup(termiteAnnualLine, {
@@ -651,6 +669,10 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
 
       expect(invoiceService.create).toHaveBeenCalledTimes(1);
       expect(renewals.createTermForAnnualPrepay).toHaveBeenCalledTimes(1);
+      // The accept records the stamp-time price baseline itself, once, after
+      // its own price writes.
+      expect(renewals.recordMintVisitPrices).toHaveBeenCalledTimes(1);
+      expect(renewals.recordMintVisitPrices.mock.calls[0][0]).toBe('term-99');
       expect(result.annualPlanActivationStatus).toBe('activated');
       expect(result.annualPrepayTermId).toBe('term-99');
       expect(result.draftInvoiceId).toBe('invoice-1');

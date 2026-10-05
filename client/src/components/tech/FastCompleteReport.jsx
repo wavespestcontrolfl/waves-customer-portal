@@ -336,16 +336,19 @@ function BlogPostOption({ post, pressed = false, locked, onPick }) {
 // One Waves blog post for the customer, searched the way Quick Links searches
 // links. It goes at the bottom of their report as "From the Waves blog".
 // Optional; the server checks the pick is still live when the visit completes.
-export function BlogPostSection({ search, value, locked, onChange }) {
+// `quiet` (the lawn sheet): no "Search the Waves blog" label and no "Pick 1
+// (optional)" hint; the box keeps its name as an aria-label and the section keeps
+// the hint as its aria-description.
+export function BlogPostSection({ search, value, locked, onChange, quiet = false }) {
   // The search's coverage and "Suggest a post" belong to the office form only
   // (owner 2026-10-03: the tech screen is going away and new work goes to the
   // admin UI), so this sheet keeps the plain list it had.
   const { query, setQuery, results, status } = useBlogPostSearch(search);
   return (
-    <section className="tech-visit-choice-section" aria-label="Blog post for the customer">
+    <section className="tech-visit-choice-section" aria-label="Blog post for the customer" {...(quiet ? { 'aria-description': 'Pick 1 (optional)' } : {})}>
       <div className="tech-visit-section-head">
         <h3 className="tech-visit-section-title">Blog post for the customer</h3>
-        <span className="tech-visit-muted">{value ? '1 picked' : 'Pick 1 (optional)'}</span>
+        {(!quiet || value) && <span className="tech-visit-muted">{value ? '1 picked' : 'Pick 1 (optional)'}</span>}
       </div>
       {value ? (
         <>
@@ -358,9 +361,15 @@ export function BlogPostSection({ search, value, locked, onChange }) {
         </>
       ) : (
         <>
-          <Field label="Search the Waves blog" className="tech-visit-field">
-            <Input className="tech-visit-control" type="search" value={query} disabled={locked} onChange={(e) => setQuery(e.target.value)} placeholder="e.g. ghost ants" />
-          </Field>
+          {quiet ? (
+            <div className="ui-field tech-visit-field">
+              <Input className="tech-visit-control" type="search" aria-label="Search the Waves blog" value={query} disabled={locked} onChange={(e) => setQuery(e.target.value)} placeholder="e.g. ghost ants" />
+            </div>
+          ) : (
+            <Field label="Search the Waves blog" className="tech-visit-field">
+              <Input className="tech-visit-control" type="search" value={query} disabled={locked} onChange={(e) => setQuery(e.target.value)} placeholder="e.g. ghost ants" />
+            </Field>
+          )}
           <div className="tech-visit-tip-list">
             {results.map((post) => <BlogPostOption key={post.id} post={post} locked={locked} onPick={() => onChange(post)} />)}
             {status === 'searching' && <p className="tech-visit-muted">Searching…</p>}

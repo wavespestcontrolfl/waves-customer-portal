@@ -671,6 +671,13 @@ async function validateRecordTarget(params, context = {}, { toolName, forApprova
   const appointmentSelector = params[APPOINTMENT_SELECTORS[toolName]];
   if (appointmentSelector) references.appointment_id = appointmentSelector;
   if (params.estimate_identifier) references.estimate_id = params.estimate_identifier;
+  // resend_receipt may name its invoice by number: bind it as the invoice record so a
+  // customer-scoped task proves the invoice is its own customer's.
+  if (toolName === 'resend_receipt' && params.invoice_number && !params.invoice_id) {
+    const invoice = await db('invoices').where({ invoice_number: String(params.invoice_number).trim().toUpperCase() }).first('id');
+    if (!invoice) return { error: 'A referenced record is unavailable', code: 'record_unavailable' };
+    references.invoice_id = invoice.id;
+  }
   const pair = customerPairIds(params, toolName);
   if (pair.length) references.customer_ids = [...(Array.isArray(params.customer_ids) ? params.customer_ids : []), ...pair];
   const resolved = await readReferences(references);
@@ -928,7 +935,11 @@ async function prepareScopedReadInput(params, context, { toolName, schema }) {
     if (resolved.error) return resolved;
     readContext = resolved.readContext;
   }
-  const inherited = inheritTaskCustomer(input, context, schema);
+  // A `scoped` reader is already confined to every task customer by the
+  // task's read scope (readCustomerIds), so its optional customer_id is a
+  // narrower filter the caller may add, never one to inherit: inheriting
+  // would refuse a two-customer task that the read scope serves today.
+  const inherited = scope === 'scoped' ? null : inheritTaskCustomer(input, context, schema);
   if (inherited) return inherited;
   const invalid = await validateRecordTarget(input, readContext, { toolName });
   return invalid || { input };

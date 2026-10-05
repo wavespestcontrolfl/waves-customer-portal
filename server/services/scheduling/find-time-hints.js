@@ -254,7 +254,7 @@ async function pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, 
 // ceiling. No gap = the hour doesn't fit that day's route; a gap the
 // tech-blind occupancy snapshot vetoes = same answer (fail-open on a
 // snapshot error, like the chips guard).
-async function pickedByGap({ rawSlots, pickedWindow, pickedMin, pickedEndMin, spanMin, from, excluded, withReason }) {
+async function pickedByGap({ rawSlots, pickedWindow, pickedMin, pickedEndMin, spanMin, from, excluded, withReason, technicianId = null, occupancy = null }) {
   const miss = (reason) => ({ start: pickedWindow.start, fits: false, ...(withReason ? { reason } : {}) });
   const gap = rawSlots.find((s) => {
     if (s.date !== from) return false;
@@ -266,7 +266,8 @@ async function pickedByGap({ rawSlots, pickedWindow, pickedMin, pickedEndMin, sp
   let clear = true;
   try {
     clear = conflictsForTarget(
-      await loadOccupancy({ dateFrom: from, dateTo: from }), null, from, pickedWindow, { excludeServiceIds: excluded },
+      occupancy || await loadOccupancy({ dateFrom: from, dateTo: from }), null, from, pickedWindow,
+      { excludeServiceIds: excluded, technicianId },
     ).length === 0;
   } catch (guardErr) {
     logger.warn('[find-time] picked-hour occupancy guard failed (fail-open):', guardErr.message);
@@ -307,6 +308,45 @@ async function scorePickedHour({
   return useArrivalWindows
     ? pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, technicianId, excludeServiceIds, changes, withReason, moveAlone })
     : pickedByGap({ rawSlots, pickedWindow, pickedMin, pickedEndMin, spanMin, from, excluded, withReason });
+}
+
+/**
+ * The picked hour on every technician's route (owner 2026-10-05, the
+ * New appointment "who adds the least drive at this hour" list): the
+ * gap-mode verdict once per technician with a gap on `from`, each against
+ * that tech's own slots. The occupancy check passes the technician, so it
+ * is tech-scoped only where the save is (GATE_MULTI_TECH_CONFIRM); with
+ * that gate off an hour any visit holds fits nobody, as the save refuses
+ * it. Returns the fits only, least added drive first; unknown detours last.
+ */
+async function scorePickedHourByTech({
+  rawSlots, from, today, sameDayFloorMin, pickedStart, pickedEnd, spanMin, excluded,
+}) {
+  const pickedMin = toMin(pickedStart);
+  if (pickedEnd !== undefined && toMin(pickedEnd) <= pickedMin) return [];
+  const pickedEndMin = Math.max(pickedMin + spanMin, pickedEnd !== undefined ? toMin(pickedEnd) : 0);
+  if (pickedUnscorable({ from, today, sameDayFloorMin, pickedMin, pickedEndMin, useArrivalWindows: false })) return [];
+  const pickedWindow = { start: pickedStart, end: toHHMM(pickedEndMin) };
+  const byTech = new Map();
+  for (const slot of rawSlots) {
+    const id = slot.technician?.id;
+    if (slot.date !== from || id == null) continue;
+    if (!byTech.has(String(id))) byTech.set(String(id), []);
+    byTech.get(String(id)).push(slot);
+  }
+  if (!byTech.size) return [];
+  let occupancy = null;
+  try {
+    occupancy = await loadOccupancy({ dateFrom: from, dateTo: from });
+  } catch (err) {
+    logger.warn('[find-time] per-tech occupancy load failed (fail-open):', err.message);
+  }
+  const verdicts = await Promise.all([...byTech].map(([id, slots]) => pickedByGap({
+    rawSlots: slots, pickedWindow, pickedMin, pickedEndMin, spanMin, from, excluded,
+    withReason: false, technicianId: id, occupancy,
+  })));
+  const rank = (v) => (Number.isFinite(v.detour_minutes) ? v.detour_minutes : Infinity);
+  return verdicts.filter((v) => v.fits).sort((a, b) => rank(a) - rank(b));
 }
 
 // Summary mode (GATE_RESCHEDULE_AVAILABILITY): the availability strip shows
@@ -470,6 +510,6 @@ function buildHintSummary(plan, everyStart, { rejectionsByDate, startedAt, close
 }
 
 module.exports = {
-  validateHintParams, markUnknownDetours, guardHintStarts, scorePickedHour,
+  validateHintParams, markUnknownDetours, guardHintStarts, scorePickedHour, scorePickedHourByTech,
   hintSearchPlan, buildHintSummary, summarizeHintDays, summaryRangeEnd, SUMMARY_MAX_DAYS, loadSummaryDayFacts,
 };

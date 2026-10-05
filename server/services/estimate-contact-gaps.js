@@ -1,7 +1,8 @@
 // Missing-contact capture on the public estimate accept card (owner ruling
 // 2026-09-27): when a customer accepts and we're missing their LAST NAME or
 // EMAIL, the accept card asks for whatever's actually missing — last name
-// required, email optional/skippable. This module owns the three pieces
+// required, email optional/skippable. Owner 2026-10-04: a missing PHONE is
+// asked for too, required, on an estimate with no linked customer. This module owns the three pieces
 // shared between the /:token/data payload (contactGaps) and the accept
 // route (sanitize + apply): gap detection, input sanitization/validation,
 // and the guarded "fill an existing customer's blank field" writes.
@@ -87,7 +88,34 @@ function computeContactGaps({ estimate = {}, linkedCustomer = null } = {}) {
   const lastName = (tokens.length < 2 || nameIsLinkedFirstName) && !hasRealLastName(linkedLast);
   const firstName = (tokens.length === 0 || nameIsLinkedLastName) && !hasRealFirstName(linkedFirst);
   const email = !hasEmail(estimate.customer_email) && !hasEmail(linkedCustomer?.email);
-  return { firstName, lastName, email };
+  // gaps.phone (owner 2026-10-04): the estimate has no phone AND no linked
+  // customer. customers.phone is NOT NULL, so a linked profile always has
+  // one; an unlinked estimate with no phone cannot become a customer, and
+  // the accept refuses it (CUSTOMER_CONTACT_REQUIRED) unless the page
+  // collects one.
+  const phone = !estimate.customer_id && !linkedCustomer && !hasPhone(estimate.customer_phone);
+  return { firstName, lastName, email, phone };
+}
+
+function hasPhone(value) {
+  return String(value ?? '').replace(/\D/g, '').length >= 10;
+}
+
+// Returns { value, error } like the other sanitizers. value is E.164
+// (+1XXXXXXXXXX) for a 10-digit US number (an 11-digit one with a leading 1
+// is accepted), null when nothing was typed. Anything else that was typed is
+// an error: a phone is the record's contact key, so a near-miss is refused,
+// never stored. NANP: the area code and the exchange start with 2-9.
+function sanitizeContactPhone(raw) {
+  if (typeof raw !== 'string') return { value: null, error: null };
+  const collapsed = collapseWhitespace(raw) || '';
+  if (!collapsed) return { value: null, error: null };
+  const invalid = { value: null, error: { code: 'CONTACT_PHONE_INVALID', message: 'Please enter a valid 10-digit mobile number.' } };
+  if (CONTROL_CHARS_RE.test(collapsed) || collapsed.length > 32 || !/^[+\d\s().-]+$/.test(collapsed)) return invalid;
+  let digits = collapsed.replace(/\D/g, '');
+  if (digits.length === 11 && digits.startsWith('1')) digits = digits.slice(1);
+  if (!/^[2-9]\d{2}[2-9]\d{6}$/.test(digits)) return invalid;
+  return { value: `+1${digits}`, error: null };
 }
 
 // Returns { value, error }. value is null when nothing usable was supplied
@@ -206,7 +234,102 @@ async function fillExistingCustomerEmail(trx, customerId, email, { expectedName 
   return backfillCustomerEmailInTrx(trx, { customerId, email, source: 'estimate-accept-contact' });
 }
 
+// Provenance of a phone the customer typed on the accept card: the typed
+// number is stored beside the phone, in estimates.customer_phone_typed, by
+// the same UPDATE (migration 20261004230000). The one phone matcher every
+// card and accept route uses (estimate-public matchAcceptCustomerByPhone)
+// reads it here: a typed phone must never resolve to an existing customer,
+// not at the save and not later, when a customer with that number may have
+// appeared. It is a column, not a key in estimate_data, because public
+// routes rewrite that whole blob from a pre-read snapshot and would erase it.
+// The mark holds only while the estimate still carries the typed number: a
+// phone the office later puts on the estimate is the office's, and is
+// trusted as before.
+// `estimate` is a full row, or an identity snapshot that copied the column.
+function last10(value) {
+  return String(value ?? '').replace(/\D/g, '').slice(-10);
+}
+function phoneTypedByCustomer(estimate) {
+  if (!estimate || !hasPhone(estimate.customer_phone)) return false;
+  return hasPhone(estimate.customer_phone_typed)
+    && last10(estimate.customer_phone_typed) === last10(estimate.customer_phone);
+}
+
+// No automated text goes to a typed phone before the estimate is accepted.
+// The customer gave the number on the accept card for appointment reminders
+// and service-day contact; an abandoned page is not consent to sales
+// follow-up texts, and the capture is not the estimate's created_at consent.
+// Email follow-up is unaffected. After the accept the number is the
+// customer's own record and texts as any customer phone does.
+function typedPhoneBlocksPreAcceptSms(estimate) {
+  return phoneTypedByCustomer(estimate) && estimate.status !== 'accepted';
+}
+
+const CALL_OFFICE_REFUSAL = {
+  error: 'We could not complete this booking online — please call the Waves office and we’ll finish setting up your service right away.',
+  code: 'CUSTOMER_CONTACT_REQUIRED',
+};
+
+// The accept-card phone capture behind PUT /api/estimates/:token/contact-phone
+// (the route owns the token, viewability and gate checks; see its comment for
+// why this is a write of its own). Returns { status, body }; never throws for
+// a business outcome.
+//   - estimate already linked or already has a phone → 200 { saved:false,
+//     alreadyOnFile:true }, nothing validated, nothing written;
+//   - nothing usable typed / malformed → 400 CONTACT_PHONE_INVALID;
+//   - the number belongs to ANY customer on file → nothing written,
+//     onExistingCustomerPhone runs (the office bell), 409 "call the office";
+//   - otherwise ONE guarded update saves it with its provenance
+//     (customer_phone_typed) and advances updated_at, so a concurrent
+//     whole-row writer's compare-and-swap loses instead of overwriting it.
+//     The guard: still unlinked, still phone-less, plus the caller's
+//     `guardUpdate(queryBuilder)` — the route's own accept-eligibility
+//     predicates, so a decline, an archive, an expiry or an off-surface
+//     marker that lands after the pre-read refuses the write. Zero rows →
+//     { zeroRows: true }; the route re-reads to tell "gap already closed"
+//     from "no longer eligible". A customer who acquires the number AFTER
+//     this point is handled by the provenance, not here: the matcher parks
+//     the accept for the office instead of reusing that customer.
+async function saveAcceptContactPhone({ estimate, rawPhone, database, countCustomersWithPhone, onExistingCustomerPhone, guardUpdate = null }) {
+  if (estimate.customer_id || hasPhone(estimate.customer_phone)) {
+    return { status: 200, body: { saved: false, alreadyOnFile: true } };
+  }
+  const { value: typedPhone, error } = sanitizeContactPhone(rawPhone);
+  if (error || !typedPhone) {
+    return { status: 400, body: { error: 'Please enter a valid 10-digit mobile number.', code: 'CONTACT_PHONE_INVALID' } };
+  }
+  // The one predicate both outcomes are decided under: this estimate is STILL
+  // unlinked, phone-less and (the caller's guard) accept-eligible.
+  const stillOpen = () => database('estimates').where({ id: estimate.id }).whereNull('customer_id')
+    .whereRaw("length(regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g')) < 10")
+    .modify((qb) => { if (guardUpdate) guardUpdate(qb); });
+  const candidateCount = await countCustomersWithPhone(typedPhone);
+  if (candidateCount > 0) {
+    // Revalidated before the refusal: an accept, a decline, an archive or
+    // another phone save that committed during the lookup must get the
+    // zero-row answer, never a bell and a 409 that says the number is a
+    // customer's for an estimate that is no longer open.
+    if (!(await stillOpen().first('id'))) {
+      return { status: 200, body: { saved: false, alreadyOnFile: true }, zeroRows: true };
+    }
+    if (onExistingCustomerPhone) await onExistingCustomerPhone({ typedPhone, candidateCount });
+    return { status: 409, body: { ...CALL_OFFICE_REFUSAL } };
+  }
+  const saved = await stillOpen()
+    .update({
+      customer_phone: typedPhone,
+      customer_phone_typed: typedPhone,
+      updated_at: database.fn.now(),
+    });
+  return saved
+    ? { status: 200, body: { saved: true } }
+    : { status: 200, body: { saved: false, alreadyOnFile: true }, zeroRows: true };
+}
+
 module.exports = {
+  saveAcceptContactPhone,
+  phoneTypedByCustomer,
+  typedPhoneBlocksPreAcceptSms,
   IDENTITY_MISMATCH,
   capCodePoints,
   hasRealLastName,
@@ -220,6 +343,8 @@ module.exports = {
   computeContactGaps,
   sanitizeContactLastName,
   sanitizeContactEmail,
+  sanitizeContactPhone,
+  hasPhone,
   fillExistingCustomerLastName,
   fillExistingCustomerEmail,
 };

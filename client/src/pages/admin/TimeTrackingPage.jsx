@@ -1877,6 +1877,13 @@ function AnalyticsTab() {
 
   const { serviceTypeStats, utilizationByTech, rpmhByTech, overtimeTrend } =
     data;
+  // Older server responses carry neither field.
+  const efficiencyByTech = data.efficiencyByTech || [];
+  const loadAheadWeeks = (data.loadAhead && data.loadAhead.weeks) || [];
+  const loadAheadTrailing = (data.loadAhead && data.loadAhead.trailing) || null;
+  const effColor = (pct) =>
+    pct >= 70 ? D.green : pct >= 50 ? D.amber : D.red;
+  const hrs = (min) => (parseFloat(min || 0) / 60).toFixed(1);
 
   // Compute RPMH aggregates per tech
   const rpmhMap = {};
@@ -2119,6 +2126,147 @@ function AnalyticsTab() {
           </table>
           </div>
         )}
+      </div>
+      {/* Efficiency (budget / clocked) */}
+      <div
+        style={{
+          fontSize: 15,
+          fontWeight: 500,
+          color: D.heading,
+          marginBottom: 12,
+        }}
+      >
+        Efficiency (budget ÷ clocked)
+      </div>{" "}
+      <div style={sCard}>
+        {efficiencyByTech.length === 0 ? (
+          <div style={{ color: D.muted, fontSize: 14 }}>
+            No efficiency data yet
+          </div>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+          <table
+            style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}
+          >
+            {" "}
+            <thead>
+              {" "}
+              <tr>
+                {[
+                  "Tech",
+                  "Budget hrs",
+                  "Clocked hrs",
+                  "Efficiency %",
+                  "Jobs with a budget",
+                ].map((h) => (
+                  <th key={h} style={thStyle}>
+                    {h}
+                  </th>
+                ))}
+              </tr>{" "}
+            </thead>{" "}
+            <tbody>
+              {efficiencyByTech.map((e) => (
+                <tr
+                  key={e.technician_id}
+                  style={{ borderBottom: `1px solid ${D.border}` }}
+                >
+                  {" "}
+                  <td style={{ ...tdStyle, fontWeight: 500 }}>{e.tech_name}</td>{" "}
+                  <td style={{ ...tdStyle, fontFamily: MONO }}>
+                    {hrs(e.budget_minutes)}
+                  </td>{" "}
+                  <td style={{ ...tdStyle, fontFamily: MONO }}>
+                    {hrs(e.shift_minutes)}
+                  </td>{" "}
+                  <td
+                    style={{
+                      ...tdStyle,
+                      fontFamily: MONO,
+                      color:
+                        e.efficiency_pct == null
+                          ? D.muted
+                          : effColor(e.efficiency_pct),
+                    }}
+                  >
+                    {e.efficiency_pct == null ? "—" : `${e.efficiency_pct}%`}
+                  </td>{" "}
+                  <td style={{ ...tdStyle, fontFamily: MONO }}>
+                    {e.jobs_with_budget || 0} of {e.jobs || 0}
+                  </td>{" "}
+                </tr>
+              ))}
+            </tbody>{" "}
+          </table>
+          </div>
+        )}
+        <div style={{ color: D.muted, fontSize: 14, marginTop: 8 }}>
+          Budget = planned minutes for the stops done. Clocked = whole shift.
+          70–90% is normal, 90%+ is elite, under 50% means half the day is
+          drive, load or waiting.
+        </div>
+      </div>
+      {/* Booked ahead */}
+      <div
+        style={{
+          fontSize: 15,
+          fontWeight: 500,
+          color: D.heading,
+          marginBottom: 12,
+        }}
+      >
+        Booked Ahead
+      </div>{" "}
+      <div style={sCard}>
+        {loadAheadWeeks.length === 0 ? (
+          <div style={{ color: D.muted, fontSize: 14 }}>
+            No booked-ahead data
+          </div>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+          <table
+            style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}
+          >
+            {" "}
+            <thead>
+              {" "}
+              <tr>
+                {["Week of", "Stops", "Planned hours"].map((h) => (
+                  <th key={h} style={thStyle}>
+                    {h}
+                  </th>
+                ))}
+              </tr>{" "}
+            </thead>{" "}
+            <tbody>
+              {loadAheadWeeks.map((w) => (
+                <tr
+                  key={w.week_start}
+                  style={{ borderBottom: `1px solid ${D.border}` }}
+                >
+                  {" "}
+                  <td style={tdStyle}>{w.week_start}</td>{" "}
+                  <td style={{ ...tdStyle, fontFamily: MONO }}>
+                    {w.stops || 0}
+                  </td>{" "}
+                  <td style={{ ...tdStyle, fontFamily: MONO }}>
+                    {hrs(w.planned_minutes)}
+                  </td>{" "}
+                </tr>
+              ))}
+            </tbody>{" "}
+          </table>
+          </div>
+        )}
+        {loadAheadTrailing &&
+          loadAheadTrailing.avg_job_minutes_per_week != null && (
+            <div style={{ color: D.muted, fontSize: 14, marginTop: 8 }}>
+              Last {loadAheadTrailing.weeks || 4} weeks averaged{" "}
+              {hrs(loadAheadTrailing.avg_job_minutes_per_week)} job hours and{" "}
+              {hrs(loadAheadTrailing.avg_shift_minutes_per_week)} shift hours
+              per week.
+            </div>
+          )}
       </div>
       {/* RPMH by Tech */}
       <div

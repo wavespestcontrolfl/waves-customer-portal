@@ -2,7 +2,7 @@ const { recurringDispatchDuePatch } = require('../services/scheduling/recurring-
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { applyAssignable, assertAssignableTechnician, isAssignable } = require('../services/technician-eligibility');
+const { applyAssignable, assertAssignableTechnician, isAssignable, absentTechDays } = require('../services/technician-eligibility');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { acquireOccupancyLock, acquireOccupancyLocks, findConflictingVisits } = require('../services/scheduling/occupancy');
 const TwilioService = require('../services/twilio');
@@ -6401,6 +6401,12 @@ router.get('/', async (req, res, next) => {
         propertySqft: s.property_sqft, lotSqft: s.lot_sqft,
         zone, zoneColor: ZONE_COLORS[zone] || '#94a3b8', zoneLabel: ZONE_LABELS[zone] || zone,
         estimatedDuration: s.estimated_duration_minutes || 60,
+        // The stored estimate before the 60 fill: the drive-line late check
+        // sums real estimates only (stop-drive-legs.js).
+        rawEstimateMinutes: s.estimated_duration_minutes ?? null,
+        // The effective service premise, for the late check's co-visit
+        // rule (premiseStampConflicts reads these canonically).
+        premise: { line1: s.address_line1 || null, line2: s.address_line2 || null, city: s.city || null, zip: s.zip || null },
         materialsNeeded: s.materials_needed ? (typeof s.materials_needed === 'string' ? JSON.parse(s.materials_needed) : s.materials_needed) : [],
         materialsLoaded: s.materials_loaded_confirmed,
         propertyAlerts: alerts,
@@ -6483,7 +6489,8 @@ router.get('/', async (req, res, next) => {
       Object.values(byTech).forEach((tech) => require('../services/schedule-tie-proximity').stampTieProximityDisplayOrder(tech.services));
     }
 
-    // "~N min from last stop / to next" on the day list (display only).
+    // Drive legs, the stop each leg comes from, and late risk against the
+    // 2-hour arrival window, for the day list (display only).
     Object.values(byTech).forEach((tech) => require('../services/scheduling/stop-drive-legs').attachDriveLegs(tech.services));
 
     // Calculate tech summaries
@@ -6503,7 +6510,12 @@ router.get('/', async (req, res, next) => {
     });
 
     // Assignment picker roster: assignable staff only (technician-eligibility.js).
-    const technicians = await applyAssignable(db('technicians')).select('technicians.id', 'technicians.name').orderBy('technicians.name');
+    const roster = await applyAssignable(db('technicians')).select('technicians.id', 'technicians.name').orderBy('technicians.name');
+    // Marked out for this date (GATE_TECH_OUT_REDISTRIBUTE): the day list
+    // shows no open hours for them, since assertAssignableTechnician would
+    // refuse the booking. An unreadable absence table hides nothing.
+    const absent = await absentTechDays(db, { dateFrom: date, dateTo: date }).catch(() => new Set());
+    const technicians = roster.map((t) => ({ ...t, outToday: absent.has(`${t.id}:${date}`) }));
 
     // Fetch live weather for Lakewood Ranch area
     let weather = {};
@@ -6555,6 +6567,10 @@ router.get('/', async (req, res, next) => {
       techSummary: Object.values(byTech),
       unassigned,
       technicians,
+      // The booking hours the office's create check enforces (capacity mode:
+      // the shift), so the day list's Open blocks never offer a refused hour.
+      // null = no shift bound.
+      bookingHours: require('../services/scheduling/policy').schedulingPolicyForDisplay(),
       weather,
       rainChance,
       ...(zoneRain ? { zoneRain } : {}),
@@ -7026,7 +7042,17 @@ router.get('/week', async (req, res, next) => {
       for (const day of days) day.rainChance = null;
     }
 
-    res.json({ startDate, days, visitCloseout: visitCloseoutEnabled });
+    // Techs marked out per day, so the mobile week list offers no open hour
+    // the booking check would refuse. Unreadable = nothing hidden.
+    try {
+      const absent = await absentTechDays(db, { dateFrom: days[0].date, dateTo: days[days.length - 1].date });
+      for (const day of days) {
+        const suffix = `:${day.date}`;
+        day.outTechIds = [...absent].filter((k) => k.endsWith(suffix)).map((k) => k.slice(0, -suffix.length));
+      }
+    } catch { /* absences are optional here */ }
+
+    res.json({ startDate, days, visitCloseout: visitCloseoutEnabled, bookingHours: require('../services/scheduling/policy').schedulingPolicyForDisplay() });
   } catch (err) { next(err); }
 });
 
@@ -8871,6 +8897,10 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // Visit groups (visit-group-scope.md §2): stamp at scheduling —
       // gate-checked + best-effort + self-refusing inside maybeGroupRow.
       await require('../services/visit-groups').maybeGroupRow(svc.id, { database: trx, createdBy: 'dispatch' });
+      // Two-treatment package (cockroach / flea): visit 2 books with visit 1
+      // — gate-dark, savepoint-isolated, no-op for every other service
+      // (package-followup-booking.js).
+      await require('../services/package-followup-booking').ensurePackageFollowUpVisit({ trx, primary: svc, cols });
       createdAppointments.push({ id: svc.id, date: scheduledDate, confirmation: sendConfirmationSms === undefined ? true : !!sendConfirmationSms });
       // Inspection credit: durable in-transaction marker on the series
       // ANCHOR (Codex #3178 P1) — a recurring series is one booking, so
@@ -13682,6 +13712,19 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         }
       }
     }
+    // A package visit 1 with a live visit 2: changing its service would
+    // leave visit 2 as a $0 treatment of the wrong service. Change visit 2
+    // (or cancel it) first.
+    if (serviceEditPosted && await require('../services/package-followup-booking').hasLivePackageChild(db, [req.params.id])) {
+      const cur = await db('scheduled_services').where({ id: req.params.id }).first('service_id', 'service_type');
+      if ((updates.service_id !== undefined && String(updates.service_id || '') !== String(cur?.service_id || ''))
+        || (updates.service_type !== undefined && String(updates.service_type || '') !== String(cur?.service_type || ''))) {
+        return res.status(409).json({
+          error: 'This visit has a linked second treatment (package visit 2). Cancel or change that visit before changing this service.',
+          code: 'PACKAGE_CHILD_PRESENT',
+        });
+      }
+    }
     const addonsReplaced = Array.isArray(replaceAddons);
     const detailsChanged = Object.keys(updates).length > 0;
     // Set by the series-scope propagation block below when a 'following'
@@ -14962,7 +15005,21 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // commit and then sees the invoice in 'sending'. A payer can never
         // land between the claim and the provider request. Recurring children
         // keep inheriting the parent's Bill-To through this update.)
+        // A package visit 2 whose date staff set by hand stops following
+        // visit 1's moves: the reschedule_log row is the marker the parent
+        // shift hook reads (call-booking-catalog).
+        const pkgDateBefore = updates.scheduled_date
+          ? await trx('scheduled_services').where({ id: req.params.id, source_action: 'package_followup_auto' })
+            .first('customer_id', 'scheduled_date')
+          : null;
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
+        if (pkgDateBefore && dateOnly(pkgDateBefore.scheduled_date) !== dateOnly(updates.scheduled_date)) {
+          await trx('reschedule_log').insert({
+            scheduled_service_id: req.params.id, customer_id: pkgDateBefore.customer_id,
+            original_date: dateOnly(pkgDateBefore.scheduled_date), new_date: dateOnly(updates.scheduled_date),
+            reason_code: 'admin_edit', initiated_by: 'admin',
+          });
+        }
         // A job Bill-To edit (payer cleared, self-pay override set) that makes a
         // withdrawn combined-visit invoice self-pay again requeues it here.
         if (updates.payer_id !== undefined || updates.self_pay_override !== undefined) {
@@ -18929,8 +18986,9 @@ async function lockAndLoadHeldPrepayTerms(conn, customerIds) {
   return termsByCustomer;
 }
 
-// True when this save puts an UNSTAMPED visit back at the price the /secure
-// plan was sold at (its per_visit_amount baseline). Such an edit can never
+// True when this save puts an UNSTAMPED visit back at the price the term was
+// sold at for it (the /secure per_visit_amount baseline, or the visit's own
+// mint price under GATE_PREPAY_MINT_PRICE_HOLD). Such an edit can never
 // leave the old-price invoice covering a different price, so the rail lets
 // it through — it is exactly the repair the stamp-time hold's office alert
 // asks for. A visit the term already stamped (prepaid money on it) is never
@@ -18938,8 +18996,8 @@ async function lockAndLoadHeldPrepayTerms(conn, customerIds) {
 async function editRestoresSoldPrice(conn, term, row, proposedPrice) {
   if (proposedPrice === undefined || proposedPrice === null || proposedPrice === '') return false;
   if (row?.prepaid_amount != null && Number(row.prepaid_amount) > 0) return false;
-  const { securePlanSoldPerVisitCents } = require('../services/annual-prepay-renewals');
-  const soldCents = await securePlanSoldPerVisitCents(term, conn);
+  const { soldPriceCentsForVisit } = require('../services/annual-prepay-renewals');
+  const soldCents = await soldPriceCentsForVisit(term, row, conn);
   return soldCents != null && Math.round(Number(proposedPrice) * 100) === soldCents;
 }
 
@@ -21719,6 +21777,8 @@ router.put('/:id/status', async (req, res, next) => {
         // recovery vehicle: re-attempt it directly (dedup-guarded,
         // fire-and-forget; Codex r4). Mirrors admin-dispatch.
         {
+          // The package visit 2 retire (job-status no-show cascade) re-runs too.
+          void require('../services/call-booking-catalog').cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: svc.id, packageOnly: true }).catch(() => {});
           const { handleFollowupChildCancellation } = require('../services/typed-followup-obligation');
           void handleFollowupChildCancellation({ jobId: svc.id, toStatus: 'no_show' }).catch(() => {});
         }

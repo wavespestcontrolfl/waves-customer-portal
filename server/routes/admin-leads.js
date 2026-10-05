@@ -735,7 +735,7 @@ router.get('/', async (req, res, next) => {
   try {
     const {
       status, source, source_name, channel, search, sort = 'first_contact_at',
-      order = 'desc', page = 1, limit = 50, start_date, end_date, id,
+      order = 'desc', page = 1, limit = 50, start_date, end_date, id, estimate_attachable,
     } = req.query;
     if (id && Joi.string().uuid().validate(id).error) return res.status(400).json({ error: 'Invalid lead id' });
 
@@ -783,6 +783,19 @@ router.get('/', async (req, res, next) => {
     if (startDt && !isNaN(startDt)) query = query.where('leads.first_contact_at', '>=', startDt);
     if (endDt && !isNaN(endDt)) query = query.where('leads.first_contact_at', '<=', endDt);
     if (search) query.modify(applyLeadSearch, search);
+    // The estimate tool's lookup lists only leads a NEW estimate can attach to:
+    //   - no customer record (a lead that has one is found through that customer);
+    //   - no estimate yet (a save against a lead already linked to an estimate
+    //     is refused by createOrReuseAdminEstimate);
+    //   - a phone or an email (leadMatchesEstimateContact needs one to match).
+    // Filtered here, before LIMIT, so a page of ineligible matches cannot hide
+    // an eligible lead.
+    const attachableOnly = estimate_attachable === '1' || estimate_attachable === 'true';
+    const whereEstimateAttachable = (qb) => qb
+      .whereNull('leads.customer_id')
+      .whereNull('leads.estimate_id')
+      .whereRaw("(NULLIF(TRIM(COALESCE(leads.phone, '')), '') IS NOT NULL OR NULLIF(TRIM(COALESCE(leads.email, '')), '') IS NOT NULL)");
+    if (attachableOnly) query = whereEstimateAttachable(query);
 
     const validSorts = {
       first_contact_at: 'leads.first_contact_at',
@@ -835,6 +848,7 @@ router.get('/', async (req, res, next) => {
       excludeInternal(countQuery);
     }
     if (search) countQuery.modify(applyLeadSearch, search);
+    if (attachableOnly) whereEstimateAttachable(countQuery);
     const { count } = await countQuery.count('* as count').first();
 
     const leads = await query
@@ -2099,6 +2113,10 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       // (no property_id on this insert ⇒ inert until linkage; explicit so
       // every booking path answers the stamping audit).
       await require('../services/visit-groups').maybeGroupRow(appt.id, { database: trx, createdBy: 'dispatch' });
+      // Two-treatment package (cockroach / flea): visit 2 books with visit 1
+      // — gate-dark, savepoint-isolated, no-op for every other service
+      // (package-followup-booking.js).
+      await require('../services/package-followup-booking').ensurePackageFollowUpVisit({ trx, primary: appt, cols });
 
       // Inspection credit: mark the qualifying booking IN-TRANSACTION so
       // the evidence commits with the booking (Codex #3178 P1). Dark behind

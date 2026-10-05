@@ -14,7 +14,7 @@
  *  - The search is dark with the gate off and reads only the technician's
  *    own current visit.
  *  - The pick is frozen at completion for every service but WDO, termite
- *    pre-treat, lawn and tree, shrub & palm (blogPostAllowedFor, the
+ *    pre-treat, and tree, shrub & palm (blogPostAllowedFor, the
  *    search's rule too), and one that is not live is an actionable 400
  *    before any write.
  *  - The report shows a frozen post only while the gate is on.
@@ -113,8 +113,8 @@ afterEach(() => {
   jest.clearAllMocks();
 });
 
-// Owner ruling 2026-10-02: every service but WDO, termite pre-treat, lawn
-// and tree, shrub & palm.
+// Owner ruling 2026-10-02: every service but WDO, termite pre-treat and tree,
+// shrub & palm; lawn allowed 2026-10-04 (the lawn Fast Complete sheet offers it).
 describe('blogPostAllowedFor', () => {
   test.each([
     ['Quarterly Pest Control', null],
@@ -124,6 +124,7 @@ describe('blogPostAllowedFor', () => {
     ['Termite Bait Station Monitoring', { serviceKey: 'termite_bait_monitoring' }],
     ['Liquid Termite Treatment', { serviceKey: 'termite_liquid', projectType: 'termite_treatment' }],
     ['Termite Inspection', { serviceKey: 'termite_inspection' }],
+    ['Lawn Care', { serviceKey: 'lawn_care' }],
   ])('%s carries a post', (serviceType, profile) => {
     expect(blogPostAllowedFor({ serviceType, profile })).toBe(true);
   });
@@ -135,7 +136,6 @@ describe('blogPostAllowedFor', () => {
     ['Termite Pre-Treatment', { serviceKey: 'termite_pretreatment' }],
     ['WDO Inspection', null],
     ['New Construction Termite Pretreat', null],
-    ['Lawn Care', { serviceKey: 'lawn_care' }],
     ['Tree & Shrub Care', null],
     ['Palm Injection', null],
     ['Pest Control', { serviceKey: 'pest_general', requiresProject: true }],
@@ -529,6 +529,61 @@ describe('searchReportBlogPosts', () => {
     expect((await searchReportBlogPosts(knex, 'rats')).map((post) => post.title)).toEqual(['Roof Rat Season in Bradenton']);
   });
 
+  // Owner 2026-10-04: typing "Co" answered "No post covers “Co” yet" while 58
+  // live posts held a word starting with it.
+  describe('a word still being typed', () => {
+    const rows = () => [
+      registryRow('aaaaaaaa-0000-4000-8000-000000000031', 'German Cockroaches in the Kitchen'),
+      registryRow('aaaaaaaa-0000-4000-8000-000000000032', 'Ghost Ant Control That Works'),
+      registryRow('aaaaaaaa-0000-4000-8000-000000000033', 'Pest Control Rates Explained'),
+      registryRow('aaaaaaaa-0000-4000-8000-000000000034', 'Chinch Bugs in St. Augustine'),
+    ];
+    const lastWordPatterns = (knex) => knex.calls
+      .filter(([name]) => name === 'content_registry inner orWhereRaw')
+      .map(([, , bindings]) => bindings[0]);
+
+    test('no post holds it whole: it matches the start of a word, and those posts start the search, none exact', async () => {
+      const knex = recordingKnex({ content_registry: rows() });
+      const posts = await searchReportBlogPosts(knex, 'Co');
+      expect(posts.map((post) => post.title).sort()).toEqual(['German Cockroaches in the Kitchen', 'Ghost Ant Control That Works', 'Pest Control Rates Explained']);
+      expect(posts.every((post) => post.exact === false && post.starts === true)).toBe(true);
+      // The second read asks the database for the start of a word.
+      expect(lastWordPatterns(knex)).toEqual(expect.arrayContaining(['\\m(?:co|coes|cos)\\M', '\\m(?:co)']));
+      expect((await searchReportBlogPosts(recordingKnex({ content_registry: rows() }), 'cockr')).map((post) => post.title)).toEqual(['German Cockroaches in the Kitchen']);
+    });
+
+    test('only the last word, with the words before it whole: "ghost con" starts with the Ghost Ant Control post', async () => {
+      const posts = await searchReportBlogPosts(recordingKnex({ content_registry: rows() }), 'ghost con');
+      expect(posts.map((post) => [post.title, post.exact, post.starts])).toEqual([
+        ['Ghost Ant Control That Works', false, true],
+        ['Pest Control Rates Explained', false, false],
+      ]);
+      // A first word is never read by its start.
+      expect(await searchReportBlogPosts(recordingKnex({ content_registry: rows() }), 'cockr kitchen'))
+        .toEqual([expect.objectContaining({ title: 'German Cockroaches in the Kitchen', exact: false })]);
+      expect((await searchReportBlogPosts(recordingKnex({ content_registry: rows() }), 'cockr kitchen'))[0]).not.toHaveProperty('starts');
+    });
+
+    test('a post holds it whole: nothing is read by its start, so "rat" still never finds "Rates"', async () => {
+      const knex = recordingKnex({
+        content_registry: [...rows(), registryRow('aaaaaaaa-0000-4000-8000-000000000035', 'Roof Rat Season in Bradenton')],
+      });
+      const posts = await searchReportBlogPosts(knex, 'rat');
+      expect(posts).toEqual([expect.objectContaining({ title: 'Roof Rat Season in Bradenton', exact: true })]);
+      expect(posts[0]).not.toHaveProperty('starts');
+      expect(knex.calls.filter(([name]) => name === 'table')).toHaveLength(1);
+    });
+
+    test('a search that ends in a space, in a filler word, or past the fourth word is never read by a start', async () => {
+      for (const query of ['co ', 'co.', 'ghost co in', 'ghost ant chinch bugs co']) {
+        const knex = recordingKnex({ content_registry: rows() });
+        const posts = await searchReportBlogPosts(knex, query);
+        expect(posts.some((post) => 'starts' in post)).toBe(false);
+        expect(knex.calls.filter(([name]) => name === 'table').length).toBeLessThanOrEqual(1);
+      }
+    });
+  });
+
   test('a post the sweep did not verify live on the hub never comes back', async () => {
     const knex = recordingKnex({
       content_registry: [
@@ -760,7 +815,6 @@ describe('GET /:serviceId/blog-posts', () => {
   test.each([
     ['WDO Inspection (Termite Letter)', { serviceKey: 'wdo_inspection', projectType: 'wdo_inspection' }],
     ['Pre-Slab Termite Treatment', { serviceKey: 'termite_slab_pretreat', projectType: 'pre_treatment_termite_certificate' }],
-    ['Lawn Care', { serviceKey: 'lawn_care' }],
     ['Tree & Shrub Care', { serviceKey: 'tree_shrub_care' }],
   ])('%s answers unavailable, as /complete would drop the pick (owner ruling 2026-10-02)', async (serviceType, profile) => {
     process.env.GATE_REPORT_BLOG_POST = 'true';

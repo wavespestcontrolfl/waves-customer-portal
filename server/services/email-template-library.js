@@ -1988,7 +1988,8 @@ async function sendTemplate({
       }
       return null;
     }).catch((recoveryError) => {
-      if (!webhookAcceptance) throw recoveryError;
+      if (!webhookAcceptance) throw markProviderHandoff(recoveryError, providerHandoffStarted);
+      // (a webhook proved acceptance: the send is reported accepted below)
       // Roll back our temporary failure as well as the failed recovery stamp.
       logger.warn(`[email-template-library] webhook acceptance bookkeeping failed for ${templateKey}: ${recoveryError.message}`);
       return { ...webhookAcceptance, bookkeepingFailed: true };
@@ -2005,11 +2006,29 @@ async function sendTemplate({
       automationRunId,
       idempotencyKey,
     });
-    throw err;
+    throw markProviderHandoff(err, providerHandoffStarted);
   }
 }
 
+// What a throw out of sendTemplate's provider phase says about delivery, for
+// callers that report it (the resend-receipt writer): `providerHandoffStarted`
+// is the library's own durable marker — the request was handed to SendGrid and
+// no acceptance came back. An error without it never reached the handoff.
+function markProviderHandoff(err, started) {
+  if (err && typeof err === 'object') err.providerHandoffStarted = started === true;
+  return err;
+}
+
+// Same rule payment-lifecycle-email applies: a failure AFTER handoff is
+// uncertain unless SendGrid conclusively rejected the request.
+function thrownSendDeliveryOutcome(err) {
+  return err?.providerHandoffStarted === true
+    && err?.code !== 'SENDGRID_NOT_CONFIGURED' && !sendgrid.isDefiniteRejection(err)
+    ? 'uncertain' : 'not_sent';
+}
+
 module.exports = {
+  thrownSendDeliveryOutcome,
   isSendRefusal,
   asArray,
   asObject,

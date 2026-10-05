@@ -236,6 +236,9 @@ async function switchAppointmentProperty(input, actionContext) {
   const { planAppointmentAddress, lockAppointmentAddress, applyAppointmentAddress, refreshAppointmentAddressBriefs } = require('../appointment-address');
   const { previewFingerprint } = require('./authorization-contract');
   const plan = await planAppointmentAddress(db, input.appointment_id, input.property_id, 'visit');
+  // A package visit 1 carries its address to visit 2, which this card does
+  // not show: change it from the Schedule screen.
+  if ((plan.packageChildIds || []).length) return { error: 'This visit has a linked second treatment (package visit 2) that would move to the new address too. Change the address from the Schedule screen. Nothing was changed.' };
   if (input.confirmed !== true) return appointmentPropertyPreview(db, plan);
   if (!actionContext.confirmed || !input._verified_address_fingerprint) return { error: 'Use the confirmation card to approve this change.' };
   const result = await db.transaction(async trx => {
@@ -1332,6 +1335,11 @@ async function moveStopsToDay(input, actionContext = {}) {
         : (s.scheduled_date ? String(s.scheduled_date).slice(0, 10) : null),
     };
   });
+  // A package visit 1 with a live visit 2: the card lists only the stops,
+  // so the bar does not move it (same rule as the single reschedule).
+  if (await require('../package-followup-booking').hasLivePackageChild(db, classified.map((c) => c.s.id))) {
+    return { error: 'One of these stops has a linked second treatment (a two-treatment package visit 2) that this card does not show. Move that stop from the Schedule screen, which moves both. Nothing was moved.' };
+  }
   const { lockTechDays } = require('../scheduling/tech-day-lock');
   const runBatchTrx = async () => db.transaction(async (trx) => {
     const overlappedIds = [];
@@ -1365,6 +1373,9 @@ async function moveStopsToDay(input, actionContext = {}) {
       // Grouped/frozen refusal under the stop lock, AFTER the tech-day
       // fence (lock order; codex #3609 r29 P1) — here it ABORTS the batch.
       await require('../visit-groups').assertRowMovableAlone(trx, s.id, s.visit_id);
+      // Package visit 2 recheck, atomic with this stop's write; aborts the batch.
+      await require('../package-followup-booking').assertNoLivePackageChildLocked(trx, [s.id],
+        'One of these stops has a linked second treatment (a two-treatment package visit 2) that this card does not show. Move that stop from the Schedule screen, which moves both. Nothing was moved.');
       const committedRows = await applyTrackLifecycleCas(
         trx('scheduled_services')
           .where('id', s.id)
@@ -1423,6 +1434,7 @@ async function moveStopsToDay(input, actionContext = {}) {
       }
     }
   } catch (err) {
+    if (err && err.code === 'PACKAGE_CHILD_PRESENT') return { error: err.message };
     if (err && (err.code === 'MOVE_SET_CHANGED' || err.code === 'VISIT_EDIT_SCHEDULE_UNSUPPORTED' || err.code === 'VISIT_FROZEN_MOVE_UNSUPPORTED')) {
       return {
         error: 'One of the approved stops changed (status, schedule, or grouped-visit state) while the move was pending — NOTHING was moved. Ask again for a fresh confirmation card.',
@@ -1432,6 +1444,7 @@ async function moveStopsToDay(input, actionContext = {}) {
     throw err;
   }
   for (const c of classified) movedIds.add(c.s.id);
+
 
   // Tech-facing notices (tech-visit-notifications.js): this writer changes
   // scheduled_date itself, so it tells the holder itself. Post-commit,

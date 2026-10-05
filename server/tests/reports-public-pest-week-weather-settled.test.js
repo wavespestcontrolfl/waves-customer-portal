@@ -564,7 +564,7 @@ describe('pest week-weather lookup is opt-in per caller (source wiring)', () => 
 
   test('buildServiceReportV1ResponseData threads its own pestExpectationsWeather opt-in through to pestWeekWeather (codex P2 #5137 deferred finding a)', () => {
     const src = read('routes/reports-public.js');
-    expect(src).toMatch(/pinnedLawnHistoryIdentity,[^\n]*\bexpectationFactsOut,[\s\S]{0,400}?pestWeekWeather: pestExpectationsWeather,\n\s*\}\);/);
+    expect(src).toMatch(/pinnedLawnHistoryIdentity,[^\n]*\bexpectationFactsOut,[\s\S]{0,450}?pestWeekWeather: pestExpectationsWeather,\n\s*\}\);/);
   });
 
   test('the /data response builder (which also serves the direct PDF route) opts in; the Q&A endpoint (/ask) does not', () => {
