@@ -178,6 +178,8 @@ test.each([
   '$12.00 payment to Example Co was unsuccessful',
   'We could not process your payment of $12.00',
   'Your payment did not go through',
+  'Your payment couldn\u2019t be processed',
+  'We didn\u2019t go through with your charge',
   'We were unable to charge your card',
   'There was a problem with your payment',
   'URGENT: Your Example account couldn\'t be recharged',

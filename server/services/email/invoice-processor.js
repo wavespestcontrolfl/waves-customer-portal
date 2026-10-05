@@ -455,7 +455,7 @@ async function processVendorInvoice(email, classification) {
   const invoiceDate = candidateDate && taxPeriodFor(candidateDate) ? candidateDate : etDateString();
   const { tax_year: taxYear, quarter } = taxPeriodFor(invoiceDate);
 
-  if (amount > 0 && amountFromClassifier && NOT_A_CHARGE_SUBJECT.test(String(email.subject || ''))) {
+  if (amount > 0 && amountFromClassifier && NOT_A_CHARGE_SUBJECT.test(String(email.subject || '').replace(/[\u2018\u2019\u02BC]/g, "'"))) {
     await db('emails').where({ id: email.id }).update({
       auto_action: 'invoice_detected:not_a_charge',
       updated_at: new Date(),
