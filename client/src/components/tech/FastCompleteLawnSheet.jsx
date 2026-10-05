@@ -367,7 +367,10 @@ function productRow(product, { planned = null, added = false, protocol = null })
 // rate, no recomputing: a nutrient rate such as lb N cannot be got back from
 // the product amount). Typed amounts, changed planned rows, plans with no rate
 // and units /complete does not accept all record none.
-const rateOf = (row) => (row.planned && !row.rateChanged ? row.planRate : row.derivedRate || null);
+// A figured amount's own rate comes first: a planned row the plan gave a rate
+// but no quantity for is figured from the catalog, and records THAT rate, never
+// the plan's beside an amount the plan did not give.
+const rateOf = (row) => row.derivedRate || (row.planned && !row.rateChanged ? row.planRate : null);
 
 // AmountRow shows a rate box only when it is given a rate unit; this sheet never does.
 const NO_RATE = { rate: '', rateUnit: '', max: null };

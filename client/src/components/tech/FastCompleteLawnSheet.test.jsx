@@ -958,6 +958,17 @@ describe('products', () => {
     expect(within(editorFor('Iron Plus')).getByText('4 fl oz per 1,000 sq ft × 1,500 sq ft')).toBeTruthy();
   });
 
+  test('a planned row the plan gave a rate but no quantity for records the rate it was figured from, not the plan\'s', async () => {
+    // The plan's rate (1 fl oz) and no amount; the catalog says 2 fl oz per 1,000 on the plan's 6,000 sq ft.
+    const ctx = plannedOne('broadcast_spray', { amount: null, treatedSqft: 6000, areaUnit: 'sqft', ratePer1000: 1, rateUnit: 'fl_oz' });
+    await openSheet({ request: makeRequest({ ctx }), props: { catalog: RATED } });
+    const talak = editorFor('Talak 7.9%');
+    expect(within(talak).getByLabelText('Talak 7.9%').value).toBe('12');
+    await analyze();
+    await submit();
+    expect(completeCalls()[0].body.products[0]).toMatchObject({ totalAmount: 12, amountUnit: 'fl_oz', rate: 2, rateUnit: 'fl_oz', areaValue: 6000 });
+  });
+
   test.each([
     ['a per-gallon rate', { default_rate_per_1000: 2, default_unit: 'fl_oz/gal' }],
     ['a rate in mL', { default_rate_per_1000: 2, default_unit: 'ml' }],
