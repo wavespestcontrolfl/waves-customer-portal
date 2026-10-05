@@ -624,7 +624,15 @@ async function mirrorCustomer(conn, customerId) {
         const canon = canonicalLower(value);
         const others = await live().whereRaw(`NOT (${SAME_CODE})`, [canon]).forUpdate();
         await retireAll(others);
-        const same = await live().whereRaw(SAME_CODE, [canon]).forUpdate().first('id', 'property_id');
+        // Every row with the profile's code: the first is kept, the others are
+        // duplicates of the same credential and go.
+        const matches = await live().whereRaw(SAME_CODE, [canon]).orderBy('created_at').orderBy('id').forUpdate()
+          .select('id', 'property_id', 'value_hash', 'customer_id', 'kind', 'life', 'code', 'status', 'source_type', 'source_id', 'instructions');
+        const same = matches[0] || null;
+        if (matches.length > 1) {
+          const extra = await trx('customer_access_codes').whereIn('id', matches.slice(1).map((r) => r.id)).forUpdate();
+          await retireAll(extra);
+        }
         // An adopted older row with no home is bound to the sole home, so the
         // visit read (which needs an exact home) can still return it.
         if (same && !same.property_id) await trx('customer_access_codes').where({ id: same.id }).update({ property_id: home, updated_at: trx.fn.now() });
@@ -636,7 +644,9 @@ async function mirrorCustomer(conn, customerId) {
           await audit(trx, null, 'access_code.profile_mirrored', row.id, { customer_id: customerId, kind, life: 'standing' });
           out.created += 1;
         }
-        hashes[kind] = hash;
+        // The adopted row's own hash (its spelling may differ in case), so a
+        // later home swap recognises the row the mirror stands for.
+        hashes[kind] = same ? same.value_hash : hash;
       }
     }
     // The sole home rides in the receipt, so a change of it is noticed at once.
@@ -669,7 +679,10 @@ async function mirrorProfileCodes(conn = db, { limit = MIRROR_BATCH } = {}) {
     .join('customers as c', 'c.id', 'p.customer_id').whereNull('c.deleted_at')
     .leftJoin('access_code_profile_mirror as m', 'm.subject_id', 'p.customer_id')
     .where(function hasCode() {
-      this.whereRaw(`(${PROFILE_NONEMPTY_SQL})`).orWhereRaw("(m.hashes - '_home') <> '{}'::jsonb");
+      this.whereRaw(`(${PROFILE_NONEMPTY_SQL})`).orWhereRaw("(m.hashes - '_home') <> '{}'::jsonb")
+        // a live mirrored row always keeps its customer in view, so an emptied
+        // field can retire it even after the hashes were cleared
+        .orWhereRaw("EXISTS (SELECT 1 FROM customer_access_codes x WHERE x.customer_id = p.customer_id AND x.source_type = 'profile' AND x.status = 'active')");
     })
     .where(function due() {
       this.whereNull('m.subject_id')

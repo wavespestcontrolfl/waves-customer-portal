@@ -1730,6 +1730,34 @@ postgres('access codes section', () => {
       expect(fks.rows).toHaveLength(0);
     });
 
+    test('rows that differ only by case collapse to one, and the receipt keeps the adopted row\'s hash', async () => {
+      const c = await customer({ prefs: { garage_code: 'AB12' } });
+      const [a] = c.propertyIds;
+      const one = await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: 'ab12', propertyId: a });
+      const [two] = await trx('customer_access_codes').insert({ customer_id: c.id, property_id: a, kind: 'garage', code: 'Ab12', life: 'standing',
+        status: 'active', source_type: 'staff', value_hash: access.valueHash('Ab12'), created_at: new Date(Date.now() + 1000) }).returning('*');
+      await trx('property_preferences').where({ customer_id: c.id }).update({ garage_code: 'AB12', updated_at: trx.fn.now() });
+      await mirror();
+      expect((await live(c.id)).map((r) => r.id)).toEqual([one.row.id]);
+      expect((await trx('customer_access_codes').where({ id: two.id }).first()).status).toBe('retired');
+      expect((await trx('access_code_profile_mirror').where({ subject_id: c.id }).first()).hashes.garage).toBe(access.valueHash('ab12'));
+    });
+
+    test('a mirrored row stays in view after its hashes were cleared, so an emptied field still retires it', async () => {
+      const c = await customer({ prefs: { garage_code: '2468' } });
+      await mirror();
+      const b = randomUUID();
+      await trx('customer_properties').insert({
+        id: b, customer_id: c.id, label: 'Synthetic', occupancy_type: 'owner_occupied', is_primary: false,
+        address_line1: '810 Other Court', city: 'Lakewood Ranch', zip: '34202', active: true, address_key: randomUUID(),
+      });
+      await mirror();
+      await trx('customer_properties').where({ id: b }).update({ active: false });
+      await trx('property_preferences').where({ customer_id: c.id }).update({ garage_code: null, updated_at: trx.fn.now() });
+      await mirror();
+      expect(await live(c.id)).toEqual([]);
+    });
+
     test('an adopted older row with no home is bound to the sole home', async () => {
       const c = await customer({ prefs: { garage_code: '2468' } });
       const [a] = c.propertyIds;
