@@ -333,14 +333,12 @@ function CloseoutOwedChip({ onClick }) {
   return <span className={className}>Closeout owed</span>;
 }
 
-// "~14 min in · ~9 min out" from the day route's straight-line legs
-// (GET /admin/schedule); null when the payload carries none.
+// "~9 min out" from the day route's straight-line legs (GET /admin/schedule);
+// null when the payload carries none. The leg in repeats the block above's
+// leg out, so it is not shown (owner 2026-10-05).
 function driveLegsLabel(service) {
-  const into = service.firstStop ? 'first stop'
-    : Number.isFinite(service.driveFromPrevMin) ? `~${service.driveFromPrevMin} min in` : null;
-  const out = service.lastStop ? 'last stop'
-    : Number.isFinite(service.driveToNextMin) ? `~${service.driveToNextMin} min out` : null;
-  return [into, out].filter(Boolean).join(' · ') || null;
+  if (service.lastStop || !Number.isFinite(service.driveToNextMin)) return null;
+  return `~${service.driveToNextMin} min out`;
 }
 
 function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, laneCount = 1, onEdit, onResize, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, owesCompletion, isSelected, onToggleSelect, routeOrder, accent, routeStale = false }) {

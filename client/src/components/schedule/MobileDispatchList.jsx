@@ -164,27 +164,20 @@ function headerLabel(dateStr) {
   });
 }
 
-// "~14 min from last stop · ~9 min to next" — straight-line estimates the
-// day route computes (GET /admin/schedule). Absent fields (week view, older
-// payload) render nothing; a missing leg is left out, never shown as 0.
+// "~9 min to next" — the straight-line drive estimate the day route computes
+// (GET /admin/schedule). The leg in is the card above's leg out, so it is not
+// repeated (owner 2026-10-05: "from last stop" was filler). Absent fields
+// (week view, older payload) and a missing leg render nothing, never 0.
 function DriveLegs({ service }) {
-  const chips = [];
-  if (service.firstStop) chips.push({ key: 'in', text: 'First stop', muted: true });
-  else if (Number.isFinite(service.driveFromPrevMin)) chips.push({ key: 'in', text: `~${service.driveFromPrevMin} min from last stop` });
-  if (service.lastStop) chips.push({ key: 'out', text: 'Last stop', muted: true });
-  else if (Number.isFinite(service.driveToNextMin)) chips.push({ key: 'out', text: `~${service.driveToNextMin} min to next` });
-  if (!chips.length) return null;
+  if (service.lastStop || !Number.isFinite(service.driveToNextMin)) return null;
   return (
     <div className="flex flex-wrap gap-1.5" style={{ marginTop: 6 }}>
-      {chips.map((c) => (
-        <span
-          key={c.key}
-          className={'u-nums rounded-full border-hairline border-zinc-200 bg-zinc-50 ' + (c.muted ? 'text-ink-tertiary' : 'text-ink-secondary')}
-          style={{ fontSize: 14, padding: '2px 8px' }}
-        >
-          {c.text}
-        </span>
-      ))}
+      <span
+        className="u-nums rounded-full border-hairline border-zinc-200 bg-zinc-50 text-ink-secondary"
+        style={{ fontSize: 14, padding: '2px 8px' }}
+      >
+        ~{service.driveToNextMin} min to next
+      </span>
     </div>
   );
 }

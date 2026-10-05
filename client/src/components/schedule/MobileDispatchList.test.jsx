@@ -354,7 +354,7 @@ describe('MobileDispatchList open hours with two techs', () => {
 });
 
 describe('MobileDispatchList drive legs', () => {
-  it('shows the drive in and out of each stop, and nothing for a missing leg', () => {
+  it('shows only the drive to the next stop, and nothing for a missing leg', () => {
     render(
       <MobileDispatchList
         mode="day"
@@ -367,14 +367,14 @@ describe('MobileDispatchList drive legs', () => {
         technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
       />,
     );
-    expect(screen.getByText('First stop')).toBeInTheDocument();
     expect(screen.getByText('~14 min to next')).toBeInTheDocument();
-    expect(screen.getByText('~14 min from last stop')).toBeInTheDocument();
-    expect(screen.getByText('~9 min from last stop')).toBeInTheDocument();
-    expect(screen.getByText('Last stop')).toBeInTheDocument();
+    expect(screen.getAllByText(/min to next$/)).toHaveLength(1);
+    // The leg in repeats the card above's leg out: never shown.
+    expect(screen.queryByText(/from last stop/)).toBeNull();
+    expect(screen.queryByText('First stop')).toBeNull();
+    expect(screen.queryByText('Last stop')).toBeNull();
     // svc-2's leg out has no coordinates: no chip, never "~0 min".
     expect(screen.queryByText(/~0 min/)).toBeNull();
-    expect(screen.getAllByText(/min to next$/)).toHaveLength(1);
   });
 });
 
