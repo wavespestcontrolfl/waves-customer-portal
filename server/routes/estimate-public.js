@@ -29539,7 +29539,14 @@ async function composeEstimateDataPayload(estimate, {
     // cta.monthlyBilled below are read by the same page, so resolving twice
     // risks handing it two different answers (pre-push audit P1).
     const monthlyBilledEstimate = await estimateRendersMonthlyBilling(estimate);
-    const pricingBundle = await buildPricingBundle(estimate, { monthlyBilled: monthlyBilledEstimate });
+    const pricingBundleAsBuilt = await buildPricingBundle(estimate, { monthlyBilled: monthlyBilledEstimate });
+    // Offer tiers (GATE_ESTIMATE_OFFER_TIERS): once a 'best' accept is on the
+    // row (customerSelection.offerTier, written with the price lock), every
+    // read serves the Best tier's own view — what was booked — instead of the
+    // one-time toggle's pest-only ladder; the picker fields are dropped.
+    const pricingBundle = (estimate.status === 'accepted' || estimate.price_locked_at)
+      ? OfferTiers.acceptedBestPricingView(pricingBundleAsBuilt, estimateDataForIntelligence)
+      : pricingBundleAsBuilt;
     const {
       defaultServiceMode, quoteRequirement, siteConfirmationHold, guaranteeOnlyAccept, acceptance,
     } = await resolveEstimateAcceptance(estimate, estimateDataForIntelligence, pricingBundle);

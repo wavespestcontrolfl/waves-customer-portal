@@ -159,6 +159,31 @@ function pricingBundleForOfferTier(pricingBundle, tier) {
 }
 
 /**
+ * After a 'best' accept the stored row still reads as a one-time-toggle
+ * estimate, so every later bundle build serves the pest-only view. The
+ * accepted recap must show what was booked: the Best tier's own ladder,
+ * sections and summary, with the tier picker gone.
+ */
+function acceptedOfferTierKey(estData) {
+  const key = String(estData?.customerSelection?.offerTier || '').trim().toLowerCase();
+  return OFFER_TIER_KEYS.includes(key) ? key : null;
+}
+
+function acceptedBestPricingView(pricingBundle, estData) {
+  if (acceptedOfferTierKey(estData) !== 'best') return pricingBundle;
+  const best = offerTiersOf(pricingBundle).find((tier) => tier && tier.key === 'best');
+  if (!best) return pricingBundle;
+  const { offerTiers: _tiers, offerTierDefaultKey: _def, ...rest } = pricingBundleForOfferTier(pricingBundle, best);
+  return {
+    ...rest,
+    ...(Array.isArray(best.sections) && best.sections.length ? { services: best.sections } : {}),
+    ...(best.combinedRecurring ? { combinedRecurring: best.combinedRecurring } : {}),
+    ...(best.waveGuardTier ? { waveGuardTier: best.waveGuardTier } : {}),
+    acceptedOfferTier: 'best',
+  };
+}
+
+/**
  * The show_one_time_option "companion exclusion" (pest-only recurring
  * choice) stands for every accept EXCEPT a resolved Best tier.
  */
@@ -211,6 +236,8 @@ module.exports = {
   OFFER_TIER_KEYS,
   OFFER_TIER_ESTIMATE_COLUMNS,
   resolveBestOfferTierForSlots,
+  acceptedOfferTierKey,
+  acceptedBestPricingView,
   COMPANION_KEYS,
   DEFAULT_TIER_KEY,
   TIER_LABELS,

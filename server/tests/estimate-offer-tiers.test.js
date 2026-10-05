@@ -273,3 +273,23 @@ describe('resolveBestOfferTierForSlots (slot routes)', () => {
     await expect(OfferTiers.resolveBestOfferTierForSlots({ ...base, db: memberDb, isActiveMember: async () => false })).resolves.toBe('best');
   });
 });
+
+describe('accepted Best view', () => {
+  test('a row accepted on best serves the tier view (ladder, sections, summary) with the picker fields dropped; anything else is untouched', () => {
+    const best = { key: 'best', frequencies: [{ key: 'quarterly', monthly: 84.08 }], serviceCadenceCombos: [{ key: 'c' }], sections: [{ key: 'pest_control' }, { key: 'lawn_care' }], combinedRecurring: { monthlySubtotal: 84.08 }, waveGuardTier: 'Silver' };
+    const bundle = { frequencies: [{ key: 'quarterly', monthly: 32.1 }], services: [{ key: 'bundle' }], waveGuardTier: 'Bronze', offerTiers: [{ key: 'good' }, { key: 'better' }, best], offerTierDefaultKey: 'better' };
+    const view = OfferTiers.acceptedBestPricingView(bundle, { customerSelection: { offerTier: 'best' } });
+    expect(view.frequencies[0].monthly).toBe(84.08);
+    expect(view.services.map((s) => s.key)).toEqual(['pest_control', 'lawn_care']);
+    expect(view.combinedRecurring.monthlySubtotal).toBe(84.08);
+    expect(view.waveGuardTier).toBe('Silver');
+    expect(view.acceptedOfferTier).toBe('best');
+    expect(view.offerTiers).toBeUndefined();
+    expect(view.offerTierDefaultKey).toBeUndefined();
+    expect(OfferTiers.acceptedBestPricingView(bundle, { customerSelection: { offerTier: 'better' } })).toBe(bundle);
+    expect(OfferTiers.acceptedBestPricingView(bundle, {})).toBe(bundle);
+    expect(OfferTiers.acceptedBestPricingView({ frequencies: [] }, { customerSelection: { offerTier: 'best' } })).toEqual({ frequencies: [] });
+    expect(OfferTiers.acceptedOfferTierKey({ customerSelection: { offerTier: ' BEST ' } })).toBe('best');
+    expect(OfferTiers.acceptedOfferTierKey({ customerSelection: { offerTier: 'gold' } })).toBeNull();
+  });
+});

@@ -163,7 +163,12 @@ function tileModel(tier, tiers, pricing) {
     const visits = Number(row?.visitsPerYear);
     parts.push(`${COMPANION_SHORT[k] || humanizeKey(k)}${visits > 0 ? ` ${visits}×/yr` : ''}`);
   }
-  const monthly = Number(bestFrequency?.monthly);
+  // Per application is the estimate surface's one billing unit (owner
+  // 2026-07-11); the tile leads with each program's net per-application
+  // figure, never a monthly spread.
+  const perAppParts = rows
+    .map((r) => (Number(r?.displayPrice) > 0 ? Number(r.displayPrice) : (Number(r?.perTreatment) > 0 ? Number(r.perTreatment) : null)))
+    .filter((n) => n != null);
   const pct = discountPctFor(tier);
   const chips = [];
   if (pct > 0) {
@@ -173,8 +178,8 @@ function tileModel(tier, tiers, pricing) {
   return {
     eyebrow: 'BEST',
     name,
-    price: monthly > 0 ? `about ${fmtMoney(monthly)}` : null,
-    unit: monthly > 0 ? '/ month, pay per application' : null,
+    price: perAppParts.length ? perAppParts.map((n) => fmtMoney(n)).join(' + ') : null,
+    unit: perAppParts.length ? '/ application' : null,
     caption: parts.join(' · '),
     chips,
   };

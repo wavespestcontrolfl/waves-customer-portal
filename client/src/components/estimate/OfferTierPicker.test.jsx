@@ -81,12 +81,14 @@ describe('OfferTierPicker', () => {
     expect(better).toHaveTextContent('4 visits a year');
   });
 
-  it('best shows the monthly figure, the cadences and a WaveGuard saving chip for Silver', () => {
+  it('best shows both per-application figures, the cadences and a WaveGuard saving chip for Silver', () => {
     renderPicker({ selectedKey: 'best' });
     const best = screen.getAllByRole('radio')[2];
     expect(best).toHaveAttribute('aria-checked', 'true');
-    expect(best).toHaveTextContent('about $84.08');
-    expect(best).toHaveTextContent('/ month, pay per application');
+    // Per application is the estimate surface's one billing unit: both programs' net figures, never a monthly spread.
+    expect(best).toHaveTextContent('$96.30 + $69.30');
+    expect(best).toHaveTextContent('/ application');
+    expect(best).not.toHaveTextContent('/ month');
     expect(best).toHaveTextContent('4×/yr pest');
     expect(best).toHaveTextContent('lawn 9×/yr');
     expect(best).toHaveTextContent('Save 10% on both');

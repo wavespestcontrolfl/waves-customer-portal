@@ -130,7 +130,7 @@ describe('EstimateViewPage Good / Better / Best', () => {
     const [good, better, best] = screen.getAllByRole('radio');
     expect(better).toHaveAttribute('aria-checked', 'true');
     expect(good).toHaveTextContent('$264.00');
-    expect(best).toHaveTextContent('about $84.08');
+    expect(best).toHaveTextContent('$96.30 + $69.30');
     expect(screen.queryByRole('button', { name: 'Recurring Pest Control' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'One-Time Pest Control' })).not.toBeInTheDocument();
     // Better is the pest-only view: no lawn section.
