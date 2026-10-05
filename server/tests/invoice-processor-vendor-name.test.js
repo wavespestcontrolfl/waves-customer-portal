@@ -38,7 +38,7 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/expense-categorizer', () => ({ autoCategorizeExpense: jest.fn(async () => null), categoryDeductibleAmount: () => null }));
 
-const { processVendorInvoice, senderDomainCandidates } = require('../services/email/invoice-processor');
+const { processVendorInvoice, senderDomainCandidates, senderVendorKeys } = require('../services/email/invoice-processor');
 
 const extraction = (fields) => mockCreate.mockResolvedValue({ stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(fields) }] });
 const inserted = () => mockWrites.find(([t, op]) => t === 'expenses' && op === 'insert')?.[2];
@@ -165,4 +165,20 @@ test('a receipt with no printed date (today fallback) never drives a duplicate m
   await processVendorInvoice({ id: 'e15', gmail_id: 'g', from_address: 'p@payments.example', subject: 'Invoice' }, { extracted: {} });
   expect(inserted()).toEqual(expect.objectContaining({ amount: 12 }));
   expect(mockState.lastDuplicateFilter).toBeUndefined();
+});
+
+test('vendor keys try the exact sender address before the domains', () => {
+  expect(senderVendorKeys('Billing+Acct_1@Pay-Platform.example')).toEqual(['billing+acct_1@pay-platform.example', 'pay-platform.example']);
+  expect(senderVendorKeys('nobody')).toEqual([]);
+});
+
+test('a vendor row for one exact address on a shared billing platform names that vendor only', async () => {
+  mockState.vendors = [{ domain: 'supplier-a@billing-platform.example', vendor_name: 'Supplier A', expense_category: 'Software & Technology' }];
+  extraction({ invoice_number: 'TEST-0026', invoice_date: '2026-01-15', total: 77 });
+  await processVendorInvoice({ id: 'e26', gmail_id: 'g', from_address: 'supplier-a@billing-platform.example', subject: 'Invoice' }, { extracted: {} });
+  expect(inserted()).toEqual(expect.objectContaining({ vendor_name: 'Supplier A', category_id: 'cat-sw' }));
+  mockWrites.length = 0;
+  extraction({ vendor_name: 'Supplier B', invoice_number: 'TEST-0027', invoice_date: '2026-01-15', total: 88 });
+  await processVendorInvoice({ id: 'e27', gmail_id: 'g', from_address: 'supplier-b@billing-platform.example', subject: 'Invoice' }, { extracted: {} });
+  expect(inserted()).toEqual(expect.objectContaining({ vendor_name: 'Supplier B', category_id: null }));
 });
