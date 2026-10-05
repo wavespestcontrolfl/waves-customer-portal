@@ -161,7 +161,7 @@ const { decideDisposition } = require('./call-disposition');
 const { classifyCall, recordVerdict, cnamFromEnvelope } = require('./call-spam-classifier');
 const { enrichFromCall } = require('./call-profile-enrichment');
 const { isV2Extraction, flatView, adoptV2PrimaryFields, callerIdDisclaimedNoteText, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
-const { loadBookableCallServices, loadCallReServiceRows, hasCallReServiceIntent, isReServiceCatalogRow, reServiceLaneForRow, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly } = require('./call-booking-catalog');
+const { loadBookableCallServices, loadCallReServiceRows, hasCallReServiceIntent, isReServiceCatalogRow, reServiceLaneForRow, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly, followUpProbeEnd } = require('./call-booking-catalog');
 const { validateAddress, SERVICE_STATE } = require('./address-validation');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { syncVoiceMessageForCall } = require('./conversations');
@@ -334,6 +334,9 @@ async function recheckCallBookingConflicts({
         // are still excluded via freshRowIds below.
         excludeCustomerId: isPrimary ? excludeCustomerId : null,
         excludeServiceIds: freshRowIds,
+        // The row's own technician (gate-dark, occupancy.js header): the
+        // recheck judges the same route the in-txn probe did.
+        technicianId: visit.technicianId || null,
       });
       for (const row of rows) {
         findings.push({
@@ -17950,7 +17953,45 @@ const CallRecordingProcessor = {
                   if (reuseHeldForAddress) {
                     logger.warn(`[call-proc] reused booking for ${maskSid(callSid)} kept unassigned and without a follow-up: house number disputed (on_file_house_number_conflict)`);
                   }
-                  if (!isAttachedManualBooking && !existing.technician_id && defaultTechnicianId && !reuseHeldForAddress) {
+                  // Two technicians (gate-dark, see the fresh-insert pick
+                  // below): the unassigned reused row goes to the technician
+                  // free at ITS time with the closest route, not the default.
+                  // The row itself is excluded: unassigned, it would otherwise
+                  // read as a clash for every technician.
+                  let reuseCandidateTechId = defaultTechnicianId;
+                  let reuseTechPicked = false;
+                  if (!isAttachedManualBooking && !existing.technician_id && !reuseHeldForAddress) {
+                    try {
+                      const reusePick = await trx.transaction((pickSp) => require('./scheduling/pick-technician').pickTechnicianForVisit({
+                        conn: pickSp,
+                        // The reused row's OWN day and window (a marker or
+                        // idempotency match can sit at a different time than
+                        // this call stated). A windowless row occupies no
+                        // time: the pick declines and the default stands.
+                        date: callBookingDateOnly(existing.scheduled_date),
+                        windowStart: existing.window_start ? String(existing.window_start).slice(0, 5) : null,
+                        windowEnd: existing.window_start
+                          ? followUpProbeEnd(existing.window_start, existing.window_end, existing.estimated_duration_minutes)
+                          : null,
+                        durationMinutes: existing.estimated_duration_minutes || callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES,
+                        lat: existing.lat ?? null,
+                        lng: existing.lng ?? null,
+                        // The row's own service: a replay can extract a
+                        // different one while the appointment stays as booked.
+                        serviceType: existing.service_type || serviceType,
+                        customerId,
+                        excludeServiceIds: [existing.id],
+                        excludeCustomerId: null,
+                      }));
+                      if (reusePick.active) {
+                        reuseCandidateTechId = reusePick.technician?.id || null;
+                        reuseTechPicked = true;
+                      }
+                    } catch (pickErr) {
+                      logger.warn(`[call-proc] technician pick failed for reused booking ${maskSid(callSid)} (default technician kept): ${pickErr.message}`);
+                    }
+                  }
+                  if (!isAttachedManualBooking && !existing.technician_id && reuseCandidateTechId && !reuseHeldForAddress) {
                     // Tech-day membership fence + route_order clear (uncapped
                     // audit r26 P1): unassigned → tech is a tech-day ENTRY,
                     // so it must hold the same 'slot-reserve' fence every
@@ -17964,19 +18005,49 @@ const CallRecordingProcessor = {
                       const { lockTechDays } = require('./scheduling/tech-day-lock');
                       await lockTechDays(trx, [
                         { techId: null, date: dayRow.day },
-                        { techId: defaultTechnicianId, date: dayRow.day },
+                        { techId: reuseCandidateTechId, date: dayRow.day },
                       ]);
                     }
                     // Re-checked FOR SHARE on the writing trx: the default tech was
                     // resolved before this transaction opened. If eligibility
                     // changed, leave the reused row unassigned rather than assign.
-                    let reuseTechId = defaultTechnicianId;
+                    let reuseTechId = reuseCandidateTechId;
                     try {
                       await assertAssignableTechnician(reuseTechId, { conn: trx, date: dayRow?.day });
+                      // A PICKED technician passed the capability filter on a
+                      // plain read; re-read it under the technician share lock
+                      // so an Off saved since cannot receive this visit.
+                      if (reuseTechPicked) {
+                        await require('./technician-capabilities').assertCapabilitiesActive(trx, reuseTechId,
+                          [{ id: existing.id, service_type: existing.service_type || serviceType }],
+                          (rowId, why) => Object.assign(new Error(`technician ${reuseTechId} ${why}`), { code: 'TECH_NOT_ASSIGNABLE' }));
+                      }
                     } catch (eligErr) {
                       if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
                       logger.warn(`[call-proc] default technician ${reuseTechId} is no longer assignable; leaving reused booking unassigned`);
                       reuseTechId = null;
+                    }
+                    // The pick read availability before the tech-day locks above.
+                    // Read it again under them (the row itself excluded): a
+                    // booking or a schedule block that landed while this
+                    // transaction waited leaves the row unassigned for the
+                    // office instead of on a technician who is no longer free.
+                    if (reuseTechId && reuseTechPicked && existing.window_start) {
+                      try {
+                        const reuseStart = String(existing.window_start).slice(0, 5);
+                        const reuseEnd = followUpProbeEnd(existing.window_start, existing.window_end, existing.estimated_duration_minutes);
+                        const stillFree = !!reuseEnd && await trx.transaction((probeSp) => require('./scheduling/pick-technician').technicianFreeAt({
+                          conn: probeSp, technicianId: reuseTechId, date: dayRow.day, windowStart: reuseStart, windowEnd: reuseEnd,
+                          excludeServiceIds: [existing.id],
+                        }));
+                        if (!stillFree) {
+                          logger.info(`[call-proc] picked technician ${reuseTechId} no longer free for reused booking ${maskSid(callSid)}; leaving it unassigned`);
+                          reuseTechId = null;
+                        }
+                      } catch (recheckErr) {
+                        logger.warn(`[call-proc] reused-booking availability recheck failed for ${maskSid(callSid)} (left unassigned): ${recheckErr.message}`);
+                        reuseTechId = null;
+                      }
                     }
                     const [updatedExisting] = reuseTechId
                       ? await trx('scheduled_services')
@@ -18374,9 +18445,43 @@ const CallRecordingProcessor = {
                 // resolved before the txn; if the FOR SHARE recheck below
                 // books unassigned instead, it re-fences the unassigned-day
                 // rung there (codex r1 P2).
+                // Two technicians (GATE_MULTI_TECH_CONFIRM + capacity mode,
+                // owner 2026-10-03): a FRESH call booking goes to the
+                // technician who is free at this time and whose route that day
+                // is closest (scheduling/pick-technician.js), not to the one
+                // default technician. Nobody free → unassigned, and the
+                // tech-blind probe below flags the overlap for the office as
+                // before. Gate off (pick.active false) or a failed pick: the
+                // default technician resolved above, byte for byte. Reads only,
+                // in their own savepoint so a failed read cannot abort `trx`.
+                let bookingTechnicianId = defaultTechnicianId;
+                let bookingTechnicianName = defaultTechnicianName;
+                let bookingTechnicianPicked = false;
+                const pickBookingTechnician = () => trx.transaction((pickSp) => require('./scheduling/pick-technician').pickTechnicianForVisit({
+                  conn: pickSp,
+                  date: scheduledDate,
+                  windowStart: windowStart || '09:00',
+                  windowEnd: windowEnd || '10:00',
+                  durationMinutes: callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES,
+                  lat: propertyLinkage.lat ?? null,
+                  lng: propertyLinkage.lng ?? null,
+                  serviceType,
+                  customerId,
+                }));
+                try {
+                  const pick = await pickBookingTechnician();
+                  if (pick.active) {
+                    bookingTechnicianPicked = true;
+                    bookingTechnicianId = pick.technician?.id || null;
+                    bookingTechnicianName = pick.technician?.name || null;
+                    logger.info(`[call-proc] technician pick for ${maskSid(callSid)} on ${scheduledDate}: ${bookingTechnicianId || 'unassigned'} (${pick.reason})`);
+                  }
+                } catch (pickErr) {
+                  logger.warn(`[call-proc] technician pick failed for ${maskSid(callSid)} (default technician kept): ${pickErr.message}`);
+                }
                 try {
                   const { fenceBookingDay } = require('./scheduling/occupancy');
-                  bookingFence = await trx.transaction((fenceSp) => fenceBookingDay(fenceSp, { date: scheduledDate, techId: defaultTechnicianId || null }));
+                  bookingFence = await trx.transaction((fenceSp) => fenceBookingDay(fenceSp, { date: scheduledDate, techId: bookingTechnicianId || null }));
                   if (!bookingFence.acquired) {
                     logger.warn(`[call-proc] booking fence missed for ${maskSid(callSid)} on ${scheduledDate} (${bookingFence.reason}); booking unfenced, post-commit recheck flags overlaps`);
                   }
@@ -18395,10 +18500,81 @@ const CallRecordingProcessor = {
                     windowStart: windowStart || '09:00',
                     windowEnd: windowEnd || '10:00',
                     excludeCustomerId: customerId,
+                    // The technician this row is saved with: with two
+                    // technicians another technician's stop is no clash
+                    // (gate-dark, occupancy.js header); null stays tech-blind.
+                    technicianId: bookingTechnicianId || null,
                   });
                 } catch (occErr) {
                   logger.warn(`[call-proc] booking occupancy check failed for ${maskSid(callSid)} (booking proceeds unflagged): ${occErr.message}`);
                   bookingTimeConflicts = [];
+                }
+                // The pick ran before the fence. A booking that committed in
+                // between can sit on the picked technician's window: the
+                // fenced read above now sees it. Pick once more under the
+                // fence (the other technician may still be free), fence that
+                // technician's day, and read again. Still a clash, or nobody
+                // free: the visit is saved unassigned and the tech-blind read
+                // flags it for the office. try-locks never wait, so the extra
+                // rung cannot deadlock; each step keeps its own savepoint. The
+                // fenced read does not model schedule blocks, so a block that
+                // landed on the picked technician since the pick is read here
+                // too and takes the same path.
+                let pickedTechnicianBlocked = false;
+                if (bookingTechnicianPicked && bookingTechnicianId && !bookingTimeConflicts.length) {
+                  try {
+                    pickedTechnicianBlocked = !(await trx.transaction((probeSp) => require('./scheduling/pick-technician').technicianFreeAt({
+                      conn: probeSp, technicianId: bookingTechnicianId, date: scheduledDate,
+                      windowStart: windowStart || '09:00', windowEnd: windowEnd || '10:00', excludeCustomerId: customerId,
+                    })));
+                  } catch (freeErr) {
+                    logger.warn(`[call-proc] picked-technician recheck failed for ${maskSid(callSid)} (pick kept): ${freeErr.message}`);
+                  }
+                }
+                if (bookingTechnicianPicked && bookingTechnicianId && (bookingTimeConflicts.length || pickedTechnicianBlocked)) {
+                  let nextTechnician = null;
+                  try {
+                    const repick = await pickBookingTechnician();
+                    nextTechnician = repick.active ? (repick.technician || null) : null;
+                  } catch (pickErr) {
+                    logger.warn(`[call-proc] technician re-pick failed for ${maskSid(callSid)} (booking unassigned): ${pickErr.message}`);
+                  }
+                  logger.info(`[call-proc] picked technician ${bookingTechnicianId} taken before the fence for ${maskSid(callSid)}; now ${nextTechnician?.id || 'unassigned'}`);
+                  bookingTechnicianId = nextTechnician?.id || null;
+                  bookingTechnicianName = nextTechnician?.name || null;
+                  try {
+                    const { fenceBookingDay, findConflictingVisits } = require('./scheduling/occupancy');
+                    try {
+                      bookingFence = await trx.transaction((fenceSp) => fenceBookingDay(fenceSp, { date: scheduledDate, techId: bookingTechnicianId, deadline: bookingFence?.deadline ?? Date.now() }));
+                    } catch (fenceErr) {
+                      bookingFence = { acquired: false, keys: [], reason: 'error' };
+                      logger.warn(`[call-proc] re-pick fence failed for ${maskSid(callSid)} (booking proceeds unfenced): ${fenceErr.message}`);
+                    }
+                    bookingTimeConflicts = await trx.transaction((probeSp) => findConflictingVisits({
+                      db: probeSp,
+                      date: scheduledDate,
+                      windowStart: windowStart || '09:00',
+                      windowEnd: windowEnd || '10:00',
+                      excludeCustomerId: customerId,
+                      technicianId: bookingTechnicianId || null,
+                    }));
+                    if (bookingTechnicianId && bookingTimeConflicts.length) {
+                      // Lost the second technician too: unassigned. The
+                      // findings stand (the office card), and the unassigned-day
+                      // rung is the row's own fence.
+                      bookingTechnicianId = null;
+                      bookingTechnicianName = null;
+                      try {
+                        bookingFence = await trx.transaction((fenceSp) => fenceBookingDay(fenceSp, { date: scheduledDate, techId: null, deadline: bookingFence?.deadline ?? Date.now() }));
+                      } catch (fenceErr) {
+                        bookingFence = { acquired: false, keys: [], reason: 'error' };
+                      }
+                    }
+                  } catch (occErr) {
+                    logger.warn(`[call-proc] re-pick occupancy check failed for ${maskSid(callSid)} (booking unassigned, first findings kept): ${occErr.message}`);
+                    bookingTechnicianId = null;
+                    bookingTechnicianName = null;
+                  }
                 }
                 // Re-service lane dedupe on the FRESH-INSERT path only,
                 // under the reservice-lane advisory lock taken above and
@@ -18520,7 +18696,7 @@ const CallRecordingProcessor = {
                 const insertData = {
                   customer_id: customerId,
                   payer_id: callBookingPayerId || null,
-                  technician_id: defaultTechnicianId,
+                  technician_id: bookingTechnicianId,
                   property_id: propertyLinkage.propertyId,
                   ...(propertyLinkage.lat != null && propertyLinkage.lng != null
                     ? { lat: propertyLinkage.lat, lng: propertyLinkage.lng }
@@ -18575,7 +18751,7 @@ const CallRecordingProcessor = {
                     // internal_notes below.
                     'Booked via phone call.',
                     `Call SID: ${callSid}.`,
-                    defaultTechnicianName ? `Auto-assigned technician: ${defaultTechnicianName}.` : null,
+                    bookingTechnicianName ? `Auto-assigned technician: ${bookingTechnicianName}.` : null,
                     priceInfo.price != null
                       ? `Price ${priceInfo.source === 'transcript' ? 'quoted on call' : 'from service catalog'}: $${priceInfo.price.toFixed(2)}.`
                       : null,
@@ -18628,6 +18804,14 @@ const CallRecordingProcessor = {
                 if (insertData.technician_id) {
                   try {
                     await assertAssignableTechnician(insertData.technician_id, { conn: trx, date: String(scheduledDate).slice(0, 10) });
+                    // A PICKED technician passed the capability filter on a
+                    // plain read; re-read it under the technician share lock
+                    // so an Off saved since cannot receive this visit.
+                    if (bookingTechnicianPicked) {
+                      await require('./technician-capabilities').assertCapabilitiesActive(trx, insertData.technician_id,
+                        [{ id: null, service_type: serviceType }],
+                        (rowId, why) => Object.assign(new Error(`technician ${insertData.technician_id} ${why}`), { code: 'TECH_NOT_ASSIGNABLE' }));
+                    }
                   } catch (eligErr) {
                     if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
                     logger.warn(`[call-proc] default technician ${insertData.technician_id} is no longer assignable; booking unassigned`);
@@ -18653,9 +18837,9 @@ const CallRecordingProcessor = {
                     }
                     // The staff-visible note was built before this recheck; an
                     // unassigned visit must not claim a technician owns it.
-                    if (defaultTechnicianName && typeof insertData.notes === 'string') {
+                    if (bookingTechnicianName && typeof insertData.notes === 'string') {
                       insertData.notes = insertData.notes
-                        .replace(`Auto-assigned technician: ${defaultTechnicianName}.`, '')
+                        .replace(`Auto-assigned technician: ${bookingTechnicianName}.`, '')
                         .replace(/\s{2,}/g, ' ')
                         .trim();
                     }
@@ -19451,6 +19635,7 @@ const CallRecordingProcessor = {
                     scheduledDate,
                     windowStart: windowStart || '09:00',
                     windowEnd: windowEnd || '10:00',
+                    technicianId: svc.technician_id || null,
                   }];
                   if (followUpCreated) {
                     recheckVisits.push({
@@ -19462,6 +19647,7 @@ const CallRecordingProcessor = {
                       scheduledDate: callBookingDateOnly(followUpCreated.scheduled_date),
                       windowStart: followUpCreated.window_start,
                       windowEnd: followUpCreated.window_end,
+                      technicianId: followUpCreated.technician_id || null,
                     });
                   }
                   bookingTimeConflicts = await recheckCallBookingConflicts({

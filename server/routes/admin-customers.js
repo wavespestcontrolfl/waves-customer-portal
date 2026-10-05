@@ -2645,6 +2645,47 @@ router.get('/:id/cards', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/customers/:id/payment-methods/:methodId/removal-preview —
+// read-only facts the Remove dialog discloses before staff confirm: the
+// future secured visit this card holds, if any (same lookup as the portal's
+// removal notice). The verified-bank warning needs no lookup — the dialog
+// reads method_type / ach_status from the row it already has.
+router.get('/:id/payment-methods/:methodId/removal-preview', requireAdmin, async (req, res, next) => {
+  try {
+    const { removalPreview } = require('../services/payment-method-removal');
+    const preview = await removalPreview({ customerId: req.params.id, methodId: req.params.methodId });
+    if (!preview) return res.status(404).json({ error: 'Payment method not found' });
+    res.json(preview);
+  } catch (err) { next(err); }
+});
+
+// DELETE /api/admin/customers/:id/payment-methods/:methodId — staff removal
+// of a saved card/bank. Same removal path as the customer portal, with the
+// Auto Pay guard always on: the method Auto Pay is using → 409
+// autopay_method_in_use (switch or turn off Auto Pay first); staff removal
+// never turns Auto Pay off as a side effect.
+router.delete('/:id/payment-methods/:methodId', requireAdmin, async (req, res, next) => {
+  try {
+    const { removePaymentMethod } = require('../services/payment-method-removal');
+    const { auditStaffPaymentMethodRemoval } = require('../services/payment-method-removal-audit');
+    const { status, body, removedMethod } = await removePaymentMethod({
+      customerId: req.params.id,
+      methodId: req.params.methodId,
+      guard: true,
+      source: 'admin_delete',
+    });
+    if (removedMethod) {
+      // The detach is already final at Stripe — a lost audit row must not
+      // turn a completed removal into an error.
+      void auditStaffPaymentMethodRemoval({
+        actorId: req.technicianId, ip: req.ip, userAgent: req.get('user-agent') || null,
+        customerId: req.params.id, removedMethod,
+      }).catch(() => {});
+    }
+    res.status(status).json(body);
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/customers/:id/dunning-schedule/{send-now,pause,resume,release}
 // — staff controls for the customer's open customer-level overdue reminder
 // schedule (dunning consolidation §8; services/customer-dunning/wiring.js).
@@ -3073,8 +3114,8 @@ router.get('/:id/estimates-summary', async (req, res, next) => {
     }
 
     const [estimates, lastMessage] = await Promise.all([
-      db('estimates')
-        .where({ customer_id: customer.id })
+      // Same list as the customer record (office only here).
+      require('../services/call-commitments').whereEstimateOnCustomerRecord(db('estimates'), customer)
         .orderBy('created_at', 'desc')
         .select(
           'id', 'status', 'token', 'service_interest', 'decline_reason',
@@ -3284,7 +3325,12 @@ router.get('/:id', async (req, res, next) => {
         .select('service_records.*', 'technicians.name as technician_name')
         .orderBy('service_records.service_date', 'desc')
         .limit(20),
-      db('estimates').where({ customer_id: c.id }).orderBy('created_at', 'desc'),
+      // Office: owned estimates, plus an unowned one typed with this
+      // customer's phone. A technician token keeps the linked ones only.
+      (req.techRole === 'technician'
+        ? db('estimates').where({ customer_id: c.id })
+        : require('../services/call-commitments').whereEstimateOnCustomerRecord(db('estimates'), c)
+      ).orderBy('created_at', 'desc'),
       db('payments').where({ 'payments.customer_id': c.id }).leftJoin('payment_methods', 'payments.payment_method_id', 'payment_methods.id').select('payments.*', db.raw('COALESCE(payment_methods.card_brand, payments.card_brand) as card_brand'), db.raw('COALESCE(payment_methods.last_four, payments.card_last_four) as last_four')).orderBy('payment_date', 'desc').limit(20),
       db('payments').where({ customer_id: c.id, status: 'paid' }).first(db.raw('COALESCE(SUM(amount - COALESCE(refund_amount, 0)), 0)::float as net')).catch(e => { logger.warn(`[customers:${c.id}] payments_sum: ${e.message}`); return { net: 0 }; }),
       customerScheduledHistory(db, c.id, { focusServiceId }),

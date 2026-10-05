@@ -4,8 +4,10 @@ import React, { useCallback, useEffect, useId, useRef, useState } from "react";
 // 2026-10-01): search the live Waves blog the way Quick Links searches links,
 // and pick one post. The pick goes on the customer's report as "From the
 // Waves blog". Optional. `search(query)` answers { posts: [{ id, title, url,
-// exact }], suggest } (GET /admin/dispatch/:serviceId/blog-posts?q=); `value`
-// is the picked post. When no post holds every word of the search, the
+// exact, starts }], suggest } (GET /admin/dispatch/:serviceId/blog-posts?q=);
+// `value` is the picked post. While the last word is still being typed, the
+// posts that hold a word starting with it (`starts`) are the matches (owner
+// 2026-10-04: "Co" read as no post). When no post holds every word of the search, the
 // picker says so, shows the closest posts, and (with the server's `suggest`
 // on) offers to suggest a post on it: `suggest(phrase)` answers { status:
 // 'queued' | 'already_queued' } or a refusal (POST .../blog-suggestions;
@@ -43,9 +45,13 @@ export function useBlogPostSearch(search) {
       return undefined;
     }
     setStatus("searching");
+    // The text goes as typed at its end: a space after the last word says the
+    // word is finished, so the server never reads it as one still being
+    // typed (pre-push P1 on 63db0f3ccc).
+    const sent = query.trimStart();
     const timer = setTimeout(() => {
       Promise.resolve()
-        .then(() => search(q))
+        .then(() => search(sent))
         .then((data) => {
           if (current !== sequence.current) return;
           setResults(Array.isArray(data?.posts) ? data.posts : []);
@@ -61,9 +67,14 @@ export function useBlogPostSearch(search) {
     }, SEARCH_DELAY_MS);
     return () => clearTimeout(timer);
   }, [query, search]);
-  // The posts that hold every word; with none, the results are the closest.
+  // The posts that hold every word; with none, those that hold every word
+  // with the last still being typed (its start); with none, the closest.
   const exact = results.filter((post) => post.exact === true);
-  return { query, setQuery, results, status, covered: exact.length > 0, shown: exact.length ? exact : results, canSuggest };
+  const starting = results.filter((post) => post.starts === true);
+  // The server read the last word by its start (every post then says whether
+  // it `starts` the search): the word is on no post whole.
+  const typing = results.some((post) => typeof post.starts === "boolean");
+  return { query, setQuery, results, status, covered: exact.length > 0, typing, shown: exact.length ? exact : starting.length ? starting : results, canSuggest };
 }
 
 // The server's final answer to a suggestion, by its status and code:
@@ -161,11 +172,15 @@ function SuggestBlock({ phrase, suggestion, disabled, buttonStyle, muted }) {
 
 export default function BlogPostPicker({ search, suggest = null, value = null, onChange, disabled = false, tokens = {} }) {
   const inputId = useId();
-  const { query, setQuery, results, status, covered, shown, canSuggest } = useBlogPostSearch(search);
+  const { query, setQuery, results, status, covered, typing, shown, canSuggest } = useBlogPostSearch(search);
   const suggestion = useBlogSuggestion(suggest, query);
   const phrase = query.trim();
   // No post holds every word: say so, show the closest, offer a suggestion.
-  const uncovered = status === "done" && !covered && canSuggest && typeof suggest === "function";
+  // Never while the last word is still being typed: its posts (or, with
+  // none holding every word, the closest) are the list, and the server
+  // refuses a phrase with a word no live post holds whole (GitHub Codex P2s
+  // on 67df0afca0 and 7331ef2402).
+  const uncovered = status === "done" && !covered && !typing && canSuggest && typeof suggest === "function";
   const ink = tokens.ink || "#111";
   const muted = tokens.muted || "#525252";
   const border = tokens.border || "#E5E5E5";

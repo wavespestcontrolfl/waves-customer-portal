@@ -89,6 +89,39 @@ describe('BlogPostPicker', () => {
     expect(blogPostPath('not a url')).toBe('');
   });
 
+  // Owner 2026-10-04: typing "Co" read "No post covers “Co” yet".
+  test('a word still being typed lists the posts that start with it, with no "No post covers" line and no suggestion', async () => {
+    const starting = { ...POST, id: 'post-3', title: 'German Cockroaches in the Kitchen', exact: false, starts: true };
+    const search = vi.fn(async () => ({ posts: [starting, { ...NEAR, starts: false }], suggest: true }));
+    render(<Harness search={search} suggest={vi.fn()} />);
+    await searchFor('Co');
+    expect(await screen.findByRole('button', { name: /German Cockroaches/ })).toBeTruthy();
+    expect(screen.queryByText(/No post covers/)).toBeNull();
+    expect(screen.queryByText('Closest posts')).toBeNull();
+    // Only the posts that start the search, never the closest ones under them.
+    expect(screen.queryByRole('button', { name: /Dollarweed/ })).toBeNull();
+    // No suggestion: the server refuses a word no live post holds whole
+    // (GitHub Codex P2 on 67df0afca0).
+    expect(screen.queryByRole('button', { name: /Suggest a post/ })).toBeNull();
+  });
+
+  test('a word still being typed that no post starts with every other word lists the closest, with no suggestion (GitHub Codex P2 on 7331ef2402)', async () => {
+    const search = vi.fn(async () => ({ posts: [{ ...NEAR, starts: false }], suggest: true }));
+    render(<Harness search={search} suggest={vi.fn()} />);
+    await searchFor('ghost cockr');
+    expect(await screen.findByRole('button', { name: /Dollarweed/ })).toBeTruthy();
+    expect(screen.queryByText(/No post covers/)).toBeNull();
+    expect(screen.queryByRole('button', { name: /Suggest a post/ })).toBeNull();
+  });
+
+  test('a space after the last word is sent, so the server reads the word as finished (pre-push P1 on 63db0f3ccc)', async () => {
+    const search = vi.fn(async () => ({ posts: [], suggest: true }));
+    render(<Harness search={search} suggest={vi.fn()} />);
+    await searchFor('  Co ');
+    expect(await screen.findByText('No post covers “Co” yet.')).toBeTruthy();
+    expect(search).toHaveBeenCalledWith('Co ');
+  });
+
   describe('a search no post covers', () => {
     test('says so, shows the closest posts, and suggests the search as a new post', async () => {
       const search = vi.fn(async () => ({ posts: [NEAR], suggest: true }));

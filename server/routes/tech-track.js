@@ -327,8 +327,9 @@ const {
   sanitizeCustomerFacingPhotoCaption,
   updateStagedServicePhotoCaption,
   deleteStagedServicePhoto,
-  uploadServicePhotoBuffer,
-  uploadStagedServicePhotoBuffer,
+  uploadServicePhotoForVisit,
+  parseExpectedServicePhotoVisit,
+  servicePhotoVisitSnapshot,
   VALID_PHOTO_TYPES,
 } = require('../services/service-photos');
 const {
@@ -782,66 +783,21 @@ router.post('/:id/photos', (req, res, next) => {
         error: `Invalid photoType — must be one of: ${[...VALID_PHOTO_TYPES].join(', ')}`,
       });
     }
+    // Fast refusal for the common unauthorized case. The service repeats this
+    // check on the locked row; this read is never the commit authority.
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'customer_id', 'technician_id', 'status', 'scheduled_date');
-
+      .first('id', 'customer_id', 'property_id', 'technician_id', 'status', 'scheduled_date');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
-
-    // Techs can only attach photos to their own assigned services.
-    // Admin dispatch can attach completion-panel photos for any route row.
     if (!technicianVisitRowInScope(req, svc)) {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
     const caption = sanitizeCustomerFacingPhotoCaption(req.body.caption);
-
-    // Find the service_record for this scheduled_service via the
-    // direct FK (migration 20260427000007). The completion route
-    // (POST /:serviceId/complete, PR #330) populates
-    // scheduled_service_id on the new row so this lookup is
-    // unambiguous — no collisions when a single tech has two
-    // visits for the same customer on the same day.
-    const serviceRecord = await db('service_records')
-      .where({ scheduled_service_id: svc.id })
-      .orderBy('created_at', 'desc')
-      .first('id');
-
-    if (!serviceRecord) {
-      const row = await uploadStagedServicePhotoBuffer({
-        scheduledServiceId: svc.id,
-        technicianId: req.technicianId,
-        buffer: req.file.buffer,
-        originalName: req.file.originalname,
-        mimeType: req.file.mimetype,
-        photoType,
-        sortOrder: req.body.sortOrder,
-        caption,
-        gpsLat: req.body.gpsLat,
-        gpsLng: req.body.gpsLng,
-        capturedAt: req.body.capturedAt,
-      });
-      logger.info(
-        `[tech-track] photo staged service=${svc.id} tech=${req.technicianId} ` +
-        `type=${photoType} size=${req.file.size}`
-      );
-      // Completion may have committed after the record lookup above. Recover
-      // immediately when visible; GET /photos repeats this recovery so an
-      // upload that raced an uncommitted completion cannot remain stranded.
-      const recovery = await promoteStagedPhotosForCompletedVisit({
-        scheduledServiceId: svc.id,
-      });
-      if (recovery) {
-        const promoted = recovery.photos.find((photo) => photo.s3_key === row.s3_key)
-          || await db('service_photos')
-            .where({ service_record_id: recovery.serviceRecordId, s3_key: row.s3_key })
-            .first();
-        return res.json({ photo: promoted || { ...row, staged: true } });
-      }
-      return res.json({ photo: { ...row, staged: true } });
-    }
-
-    const row = await uploadServicePhotoBuffer({
-      serviceRecordId: serviceRecord.id,
+    const result = await uploadServicePhotoForVisit({
+      scheduledServiceId: req.params.id,
+      actor: { techRole: req.techRole, technicianId: req.technicianId },
+      expectedVisit: req.body.expectedVisit,
+      expectedServiceRecordId: req.body.expectedServiceRecordId,
       buffer: req.file.buffer,
       originalName: req.file.originalname,
       mimeType: req.file.mimetype,
@@ -854,9 +810,7 @@ router.post('/:id/photos', (req, res, next) => {
       findingId: req.body.findingId,
       gpsLat: req.body.gpsLat,
       gpsLng: req.body.gpsLng,
-      // Old camera-roll metadata would sort ahead of the existing hash-chain
-      // tail. Post-completion attachments use upload time instead.
-      capturedAt: undefined,
+      capturedAt: req.body.capturedAt,
       device: req.body.device,
       appVersion: req.body.appVersion,
       aiTags: req.body.aiTags,
@@ -864,11 +818,17 @@ router.post('/:id/photos', (req, res, next) => {
     });
 
     logger.info(
-      `[tech-track] photo uploaded service=${svc.id} record=${serviceRecord.id} ` +
-      `tech=${req.technicianId} type=${photoType} size=${req.file.size}`
+      `[tech-track] photo ${result.staged ? 'staged' : 'uploaded'} service=${req.params.id} ` +
+      `record=${result.serviceRecordId || 'pending'} tech=${req.technicianId} ` +
+      `type=${photoType} size=${req.file.size}`
     );
 
-    res.json({ photo: row });
+    res.json({
+      photo: { ...result.photo, ...(result.staged ? { staged: true } : {}) },
+      reconcileRequired: result.reconcileRequired,
+      serviceRecordId: result.serviceRecordId,
+      visit: result.visit,
+    });
   } catch (err) {
     logger.error(`[tech-track] photo upload failed: ${err.message}`);
     next(err);
@@ -910,17 +870,125 @@ function parseJsonColumn(value) {
   try { return JSON.parse(value); } catch { return null; }
 }
 
+const PHOTO_RECONCILIATION_HANDOFF = 'service_photo_reconciliation_required';
+const VISIT_RECEIPT_IDENTITY_FIELDS = [
+  'customerId', 'propertyId', 'technicianId', 'catalogServiceId', 'serviceType',
+  'scheduledDate', 'revision',
+];
+const sameReceiptValue = (left, right) => String(left ?? '') === String(right ?? '');
+function receiptIdentityMatches(left, right) {
+  return !!left && !!right
+    && VISIT_RECEIPT_IDENTITY_FIELDS.every((field) => sameReceiptValue(left[field], right[field]));
+}
+function legacyRecordOwnsReceipt(record, expectedVisit, expectedServiceRecordId, svc) {
+  if (!record || !expectedVisit || !expectedServiceRecordId || !svc) return false;
+  return sameReceiptValue(record.id, expectedServiceRecordId)
+    && sameReceiptValue(record.scheduled_service_id, svc.id)
+    && sameReceiptValue(record.customer_id, expectedVisit.customerId);
+}
+function recoveryReceiptMatchesRecord(record, rawExpectedVisit, { expectedServiceRecordId = null, svc = null } = {}) {
+  if (rawExpectedVisit == null || rawExpectedVisit === '') return true;
+  let expectedVisit = null;
+  try { expectedVisit = parseExpectedServicePhotoVisit(rawExpectedVisit); } catch { return false; }
+  const storedVisit = parseJsonColumn(record?.structured_notes)?.servicePhotoVisit;
+  if (storedVisit) return receiptIdentityMatches(expectedVisit, storedVisit);
+  // Records completed before servicePhotoVisit was persisted can still be
+  // reconciled from the upload response, but only when its exact record id
+  // and the record/current-visit composite prove the same immutable owner.
+  return legacyRecordOwnsReceipt(record, expectedVisit, expectedServiceRecordId, svc)
+    && receiptIdentityMatches(expectedVisit, servicePhotoVisitSnapshot(svc));
+}
+function recoveryReceiptOwnedBy(record, rawExpectedVisit, actorId, options = {}) {
+  if (rawExpectedVisit == null || rawExpectedVisit === '') {
+    return String(record?.technician_id || '') === String(actorId || '');
+  }
+  let expectedVisit = null;
+  try { expectedVisit = parseExpectedServicePhotoVisit(rawExpectedVisit); } catch { return false; }
+  if (!expectedVisit || !sameReceiptValue(expectedVisit.technicianId, actorId)) return false;
+  const storedVisit = parseJsonColumn(record?.structured_notes)?.servicePhotoVisit;
+  if (storedVisit) return receiptIdentityMatches(expectedVisit, storedVisit);
+  return legacyRecordOwnsReceipt(record, expectedVisit, options.expectedServiceRecordId, options.svc)
+    && sameReceiptValue(record.technician_id, actorId);
+}
+
+async function loadPhotoRecoveryRecord(serviceId, expectedServiceRecordId, columns) {
+  const query = db('service_records').where({
+    scheduled_service_id: serviceId,
+    ...(expectedServiceRecordId ? { id: expectedServiceRecordId } : {}),
+  });
+  if (!expectedServiceRecordId) query.orderBy('created_at', 'desc');
+  return query.first(...columns);
+}
+
+async function photoRecoveryRecordFailure({ record, expectedServiceRecordId, expectedVisit, svc }) {
+  if (!record && !expectedServiceRecordId) {
+    return { status: 409, body: { error: 'Visit has no completion record', code: 'not_completed' } };
+  }
+  let source = null;
+  let message = null;
+  if (!record) {
+    source = 'photo_recovery_record_missing';
+    message = 'The completion record saved for recovered photos is no longer available. The office must reconcile the report.';
+  } else if (!recoveryReceiptMatchesRecord(record, expectedVisit, { expectedServiceRecordId, svc })) {
+    source = 'photo_recovery_identity_changed';
+    message = 'Recovered photos belong to an older completion record. The office must reconcile the correct report.';
+  } else {
+    return null;
+  }
+  const { createAlertOnce } = require('../services/dispatch-alerts');
+  await createAlertOnce({
+    type: PHOTO_RECONCILIATION_HANDOFF,
+    severity: 'warn',
+    techId: svc.technician_id || null,
+    jobId: svc.id,
+    payload: {
+      source,
+      serviceRecordId: record?.id || expectedServiceRecordId,
+      message,
+    },
+    existingPayloadSource: source,
+    existingPayloadServiceRecordId: record?.id || expectedServiceRecordId,
+  });
+  return {
+    status: 409,
+    body: {
+      error: 'The saved completion record changed, so report repair was handed to the office.',
+      code: 'photo_reconciliation_handed_off',
+    },
+  };
+}
+
+async function resolvePhotoReconciliationHandoffs(serviceId, serviceRecordId, actorId) {
+  const rows = await db('dispatch_alerts').where({
+    type: PHOTO_RECONCILIATION_HANDOFF,
+    job_id: serviceId,
+    resolved_at: null,
+  }).select('id', 'payload');
+  const { resolveAlert } = require('../services/dispatch-alerts');
+  for (const row of rows) {
+    const payload = parseJsonColumn(row.payload);
+    if (String(payload?.serviceRecordId || '') !== String(serviceRecordId || '')) continue;
+    await resolveAlert({ id: row.id, resolvedBy: actorId, auto: true });
+  }
+}
+
 // Step 1 of the reconcile contract above: restore the parked photo-summary
 // narrative once every closeout photo has landed. Returns { photoSummary }
 // on success (a no-op shape when nothing was pending) or { error: { status,
 // body } } for the fail-closed 409 when photos are still missing.
-async function reconcilePhotoSummary(record) {
+async function reconcilePhotoSummary(record, { abandonMissingPhotos = false } = {}) {
   const {
-    hasPendingPhotoSummary, restorePhotoSummaryAfterRecovery, completionPhotosFullyRecovered,
+    hasPendingPhotoSummary, restorePhotoSummaryAfterRecovery, abandonPhotoSummaryRecovery,
+    completionPhotosFullyRecovered,
   } = require('../services/service-report/photo-summary-recovery');
   const serviceData = parseJsonColumn(record.service_data);
   if (!hasPendingPhotoSummary(serviceData)) {
     return { photoSummary: { pending: false, restored: false } };
+  }
+  if (abandonMissingPhotos) {
+    abandonPhotoSummaryRecovery(serviceData);
+    await db('service_records').where({ id: record.id }).update({ service_data: JSON.stringify(serviceData) });
+    return { photoSummary: { pending: true, restored: false, abandoned: true } };
   }
   // The uploader dedupes on (service_record_id, image_sha256) across
   // every photo_type, so a recovered image whose bytes already exist on
@@ -1058,28 +1126,64 @@ router.post('/:id/photos/reconcile', async (req, res, next) => {
   try {
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'customer_id', 'technician_id', 'status', 'scheduled_date');
+      .first('id', 'customer_id', 'property_id', 'technician_id', 'service_id',
+        'service_type', 'status', 'scheduled_date');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
+    const expectedServiceRecordId = String(req.body?.expectedServiceRecordId || '').trim() || null;
+    let record = null;
     if (!technicianVisitRowInScope(req, svc)) {
+      record = await loadPhotoRecoveryRecord(
+        svc.id, expectedServiceRecordId,
+        ['id', 'scheduled_service_id', 'customer_id', 'technician_id', 'structured_notes'],
+      );
+      if (record && recoveryReceiptOwnedBy(record, req.body?.expectedVisit, req.technicianId,
+        { expectedServiceRecordId, svc })) {
+        const { createAlertOnce } = require('../services/dispatch-alerts');
+        await createAlertOnce({
+          type: PHOTO_RECONCILIATION_HANDOFF,
+          severity: 'warn',
+          techId: svc.technician_id || null,
+          jobId: svc.id,
+          payload: {
+            source: 'photo_recovery_access_lost',
+            serviceRecordId: record.id,
+            message: 'Recovered photos need an office report reconciliation after technician access changed.',
+          },
+          existingPayloadSource: 'photo_recovery_access_lost',
+          existingPayloadServiceRecordId: record.id,
+        });
+        return res.status(409).json({
+          error: 'Report repair was handed to the office after visit access changed.',
+          code: 'photo_reconciliation_handed_off',
+        });
+      }
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
-    const record = await db('service_records')
-      .where({ scheduled_service_id: svc.id })
-      .orderBy('created_at', 'desc')
-      .first('id', 'service_line', 'service_data', 'structured_notes');
-    if (!record) return res.status(409).json({ error: 'Visit has no completion record', code: 'not_completed' });
+    record = await loadPhotoRecoveryRecord(
+      svc.id, expectedServiceRecordId,
+      ['id', 'scheduled_service_id', 'customer_id', 'technician_id',
+        'service_line', 'service_data', 'structured_notes'],
+    );
+    const recordFailure = await photoRecoveryRecordFailure({
+      record, expectedServiceRecordId, expectedVisit: req.body?.expectedVisit, svc,
+    });
+    if (recordFailure) return res.status(recordFailure.status).json(recordFailure.body);
 
-    const summary = await reconcilePhotoSummary(record);
+    const summary = await reconcilePhotoSummary(record, {
+      abandonMissingPhotos: req.body?.abandonMissingPhotos === true,
+    });
     if (summary.error) return res.status(summary.error.status).json(summary.error.body);
 
     const pdfResult = await reconcilePdfReport(record.id);
     if (pdfResult.error) return res.status(pdfResult.error.status).json(pdfResult.error.body);
 
     const treeShrub = await reconcileTreeShrubAssessment(svc, record);
+    await resolvePhotoReconciliationHandoffs(svc.id, record.id, req.technicianId);
 
     logger.info(
       `[tech-track] photo recovery reconciled service=${svc.id} record=${record.id} ` +
-      `tech=${req.technicianId} pdfRequeued=${pdfResult.pdf.requeued} treeShrubFlagged=${!!treeShrub?.flaggedForReview}`
+      `tech=${req.technicianId} abandonedMissing=${summary.photoSummary.abandoned === true} ` +
+      `pdfRequeued=${pdfResult.pdf.requeued} treeShrubFlagged=${!!treeShrub?.flaggedForReview}`
     );
     return res.json({
       ok: true, serviceRecordId: record.id, photoSummary: summary.photoSummary, pdf: pdfResult.pdf, treeShrub,
@@ -1098,7 +1202,10 @@ router.get('/:id/photos', async (req, res, next) => {
   try {
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'customer_id', 'technician_id', 'status', 'scheduled_date');
+      .first(
+        'id', 'customer_id', 'property_id', 'technician_id', 'service_id', 'service_type',
+        'status', 'scheduled_date',
+      );
     if (!svc) return res.status(404).json({ error: 'Service not found' });
     if (!technicianVisitRowInScope(req, svc)) {
       return res.status(403).json({ error: 'Not assigned to this service' });
@@ -1122,7 +1229,7 @@ router.get('/:id/photos', async (req, res, next) => {
           Bucket: config.s3.bucket, Key: p.s3_key,
         }), { expiresIn: 3600 }),
       })));
-      return res.json({ photos, staged: true });
+      return res.json({ photos, staged: true, visit: servicePhotoVisitSnapshot(svc) });
     }
 
     // Recovery for the narrow race where completion inserted its record after
@@ -1146,7 +1253,7 @@ router.get('/:id/photos', async (req, res, next) => {
       return { ...p, url };
     }));
 
-    res.json({ photos: enriched });
+    res.json({ photos: enriched, visit: servicePhotoVisitSnapshot(svc) });
   } catch (err) {
     logger.error(`[tech-track] photos list failed: ${err.message}`);
     next(err);

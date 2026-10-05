@@ -9,7 +9,7 @@ const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer
 const { logAutopay } = require('../services/autopay-log');
 const { etDateString, etParts } = require('../utils/datetime-et');
 const { isPaused, autopayActivePredicate } = require('../services/autopay-eligibility');
-const { MONTHLY_LANE_SQL, resolveBillingLane } = require('../services/billing-lane');
+const { MONTHLY_LANE_SQL, resolveBillingLane, findLiveStampedDuesInvoice } = require('../services/billing-lane');
 const { withCustomerBillingLock } = require('../utils/customer-billing-lock');
 const { hasUnresolvedSiblingStripeOutcome, deriveMonthlyChargeIdempotencyKey } = require('../services/retry-collectibility');
 
@@ -251,6 +251,32 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
                 error: `${monthKey} is already collected for this customer (payment ${existingCharge.id}). To charge something additional on purpose, enter an explicit amount.`,
                 already_collected: true,
                 payment_id: existingCharge.id,
+              },
+            },
+          };
+        }
+
+        // A live completion-minted membership-dues invoice (paid, processing
+        // or still open) IS this month's bill — its payment carries invoice_id,
+        // not billed_month, so the payments check above cannot see it. Same
+        // shared lookup as the cron and the retry sweep.
+        const duesInvoice = await findLiveStampedDuesInvoice(db, customerId, monthKey);
+        if (duesInvoice) {
+          const invoiceLabel = duesInvoice.invoice_number || duesInvoice.id;
+          const settled = ['paid', 'prepaid', 'processing'].includes(duesInvoice.status);
+          await logAutopay(customerId, 'skipped_already_paid', {
+            details: { source: 'manual_charge', billed_month: monthKey, dues_invoice_id: duesInvoice.id, admin_id: req.technicianId || null },
+          }).catch(() => {});
+          return {
+            response: {
+              status: 409,
+              body: {
+                error: settled
+                  ? `${monthKey} is already billed on dues invoice ${invoiceLabel}, which is paid — nothing is owed for the month. To charge something additional on purpose, enter an explicit amount.`
+                  : `${monthKey} is already billed on dues invoice ${invoiceLabel}, which is still open — collect that invoice instead of charging the month again. To charge something additional on purpose, enter an explicit amount.`,
+                already_collected: true,
+                payment_id: null,
+                dues_invoice_id: duesInvoice.id,
               },
             },
           };

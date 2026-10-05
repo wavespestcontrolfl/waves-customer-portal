@@ -88,7 +88,7 @@ describe('lockActiveVersionForIssue (pure)', () => {
     expect(trx.calls).toEqual([
       { table: 'document_templates', where: { id: 'tpl-1' } },
       { table: 'document_templates', forUpdate: true },
-      { table: 'document_templates', first: ['active_version_id', 'status'] },
+      { table: 'document_templates', first: ['active_version_id', 'status', 'template_key'] },
     ]);
   });
 

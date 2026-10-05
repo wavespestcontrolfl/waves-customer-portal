@@ -999,10 +999,17 @@ const NO_PRODUCT_HOLDS = {
 // What still holds the report (generate) or the completion (complete), in
 // screen order, the product whose stock holds it, and the fix the hold
 // offers on the sheet ('remove_trace').
-function reportFlowMissing({ form, active, ratingAllowed, dictationPending, photoHold, photosLoaded, photosFailed, promisesLoaded, stage, mode, voiceHolds = null, ...sendInputs }) {
+// What an empty product list says for this record mode (null: no hold).
+const noProductHold = (mode) => (mode in NO_PRODUCT_HOLDS ? NO_PRODUCT_HOLDS[mode] : 'Select at least one product.');
+
+// `productsFromNote` (voice fill, a note not yet read for products): Generate
+// reads the products out of the note first, so neither an empty list nor a row
+// still missing its amount holds it; both are judged again once the note is read.
+function reportFlowMissing({ form, active, ratingAllowed, dictationPending, photoHold, photosLoaded, photosFailed, promisesLoaded, stage, mode, voiceHolds = null, productsFromNote = false, ...sendInputs }) {
   const outOfStock = active.find((row) => stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
-  const missingAmount = active.find((row) => !hasAmount(row));
-  const noProduct = mode in NO_PRODUCT_HOLDS ? NO_PRODUCT_HOLDS[mode] : 'Select at least one product.';
+  const unread = stage === 'generate' && productsFromNote;
+  const missingAmount = unread ? null : active.find((row) => !hasAmount(row));
+  const noProduct = unread ? null : noProductHold(mode);
   const [, reason = '', stockRow = null, fix = null] = [
     [dictationPending, 'Finish dictating first.'],
     [photoHold, photoHold],
@@ -1517,15 +1524,25 @@ function ReportFlowForm({
   const report = useReportDraft({ request, base, mode });
   const { draft, writing } = report;
   const [step, setStep] = useState('visit');
-  // Voice fill (GATE_FAST_COMPLETE_VOICE_FILL) on a pest visit: the products the
-  // note names are read when the report is written and land as rows the tech
-  // confirms. A lane or typed visit keeps its own read.
-  const pestVoiceFill = voiceFillEnabled === true && !mode;
+  // Voice fill (GATE_FAST_COMPLETE_VOICE_FILL): the products the note names are
+  // read when the report is written and land as rows the tech confirms. On a
+  // plain pest visit a spray's way is the note's own read; on a lane or typed
+  // visit (whose own read fills its record, not its products) no row follows a
+  // How, so each row takes the way said for it.
+  const voiceFill = voiceFillEnabled === true;
+  const productLane = productLaneOf(service);
   const voiceOps = useMemo(() => ({
     ...VOICE_SHEET_OPS,
-    makeRow: (product, extras) => productRow(product, { serviceType: service.serviceType, added: true, ...extras }),
-  }), [service.serviceType]);
-  const productVoice = useProductVoiceFill({ enabled: pestVoiceFill, request, serviceId: service.id, products, ctx, ops: voiceOps });
+    ...(mode ? { followsVisitMethod: () => false } : {}),
+    makeRow: (product, extras) => productRow(product, { serviceType: service.serviceType, added: true, lane: productLane, ...extras }),
+  }), [service.serviceType, mode, productLane]);
+  const productVoice = useProductVoiceFill({ enabled: voiceFill, request, serviceId: service.id, products, ctx, ops: voiceOps, sprayFromNote: !mode });
+  // A sheet with no product on it yet (a lane visit, a first cleanout), or a row
+  // still missing its amount, reads the note for products BEFORE the report.
+  // `readNote` is the note the last read was of: until the note changes, an empty
+  // list or a missing amount holds Generate the way it always has.
+  const [preReading, setPreReading] = useState(false);
+  const [readNote, setReadNote] = useState(null);
 
   const perimeterFeet = perimeterFeetOf(trace.zone);
   const traceAvailable = trace.enabled && service.traceEligible !== false;
@@ -1540,7 +1557,10 @@ function ReportFlowForm({
   const holdInputs = {
     form, active, ratingAllowed, dictationPending, photoHold, photosLoaded: visitPhotos.loaded, photosFailed: visitPhotos.failed, promisesLoaded: visitPromises.loaded, mode,
   };
-  const generateMissing = reportFlowMissing({ ...holdInputs, stage: 'generate' });
+  const noteText = form.note.trim();
+  const generateMissing = reportFlowMissing({
+    ...holdInputs, stage: 'generate', productsFromNote: !!productVoice.read && noteText !== '' && readNote !== noteText,
+  });
   const completeMissing = reportFlowMissing({
     ...holdInputs, stage: 'complete', draft, writing, perimeterFeet, traceAvailable, traceRead: trace, lane, record, typedSchema: recordState.schema, traceOnReport: ctx.traceOnReport,
     voiceHolds: productVoice.enabled ? { confirms: productVoice.confirms.length, checks: productVoice.checks.length } : null,
@@ -1562,15 +1582,34 @@ function ReportFlowForm({
     <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={checkingStock} onClick={checkStock}>Check stock</Button>
   ) : null;
 
-  const write = (fresh) => {
-    if (writing || generateMissing.reason) return;
+  const write = async (fresh) => {
+    if (writing || preReading || generateMissing.reason) return;
+    // What Generate would hold on, were this note not about to be read: no
+    // product where the visit needs one, or a row with no amount. The note is
+    // then read for products first, and the rows it leaves are judged: a note
+    // that settles neither stays on the visit, held as it always was, and no
+    // report is written.
+    const unsettled = (list) => {
+      const on = list.filter((row) => row.active);
+      return (!on.length && !!noProductHold(mode)) || on.some((row) => !hasAmount(row));
+    };
+    let preFilled = null;
+    if (productVoice.read && readNote !== noteText && unsettled(rows)) {
+      setPreReading(true);
+      preFilled = productVoice.settle(await productVoice.read(form.note), DEFAULT_METHOD, form.note);
+      setPreReading(false);
+      setReadNote(noteText);
+      if (unsettled(preFilled)) return;
+    }
     setStep('report');
     // The rows the report is written from: with voice fill, the rows as the
     // note's products leave them (landed once, when the read answers).
-    let filledRows = null;
+    let filledRows = preFilled;
     const rowsFor = (facts, productFill) => {
+      if (filledRows) return filledRows;
       if (!productVoice.read) return rows;
-      filledRows = filledRows || productVoice.settle(productFill, reportSprayMethod(facts), form.note);
+      filledRows = productVoice.settle(productFill, reportSprayMethod(facts), form.note);
+      setReadNote(noteText);
       return filledRows;
     };
     // A lane or typed read first fills the record (only what is empty and
@@ -1586,7 +1625,7 @@ function ReportFlowForm({
       current: recordState.current,
       scoreSet: recordState.scoreSet,
       signature: (facts, productFill) => writerSignature(form, rowsFor(facts, productFill), promiseMarks, visitPhotos.photos, recordState.signaturePart(recordState.recordFor(facts))),
-      extraRead: productVoice.read ? () => productVoice.read(form.note) : null,
+      extraRead: productVoice.read && !preFilled ? () => productVoice.read(form.note) : null,
       fresh,
     });
   };
@@ -1719,20 +1758,20 @@ function ReportFlowForm({
       onPhotoHold={setPhotoHold}
       onPhotosUpdate={visitPhotos.update}
       onPhotosChanged={reloadPhotos}
-      locked={locked}
+      locked={locked || preReading}
       dictationPending={dictationPending}
       onDictationPending={onDictationPending}
       onFullForm={onFullForm}
       isMobile={isMobile}
       onAddProduct={addProduct}
       productVoice={productVoice}
-      noteClipEnabled={pestVoiceFill}
+      noteClipEnabled={voiceFill}
       footer={action
         ? { reason: generateMissing.reason, label: action.label, onAction: () => write(action.fresh) }
         // A photo change in hand (a description open, a change saving, a
         // removal to answer) holds the way back too (codex local r2).
         : { reason: photoHold, label: 'Back to the report', onAction: () => setStep('report') }}
-      writing={writing}
+      writing={writing || preReading}
       warn={!!generateMissing.stockRow}
       stockButton={stockButton}
     />

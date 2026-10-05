@@ -68,11 +68,11 @@ const row = (id, overrides = {}) => ({
 let rows;
 let assign;
 
-function mount(path = '/admin/today/tools', { fieldWorkspace = true } = {}) {
+function mount(path = '/admin/today/tools') {
   localStorage.setItem('waves_admin_token', 'fixture-only');
   localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'tech-fixture', name: 'Fixture Technician', role: 'technician' }));
   return render(<MemoryRouter initialEntries={[path]}><Routes>
-    <Route path="/admin/today" element={<Outlet context={{ fieldWorkspace, setNavigationBusy: mocks.navigationBusy }} />}>
+    <Route path="/admin/today" element={<Outlet context={{ setNavigationBusy: mocks.navigationBusy }} />}>
       <Route index element={<TechHomePage />} />
       <Route path="tools" element={<TechHomePage section="tools" />} />
     </Route>
@@ -147,7 +147,7 @@ it.each([
 it('a completed typed visit never opens the sheet', async () => {
   vi.stubGlobal('alert', vi.fn());
   rows = [row('svc-done', { status: 'completed' })];
-  mount('/admin/today/tools', { fieldWorkspace: false });
+  mount();
   await openFromTools();
   expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
 });

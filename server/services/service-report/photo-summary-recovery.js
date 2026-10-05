@@ -44,6 +44,18 @@ function restorePhotoSummaryAfterRecovery(serviceData) {
   return { changed: true, serviceData };
 }
 
+// The technician can explicitly abandon device copies that still failed
+// after a partial recovery. The photos that did attach stay committed, but
+// the parked narrative described the original full set and must never be
+// restored over that smaller gallery.
+function abandonPhotoSummaryRecovery(serviceData) {
+  if (!hasPendingPhotoSummary(serviceData)) return { changed: false, serviceData };
+  const snapshot = snapshotOf(serviceData);
+  snapshot.photoSummary = null;
+  delete snapshot[PENDING_KEY];
+  return { changed: true, serviceData };
+}
+
 // structured_notes.completionPhotos records what closeout submitted. Uploads
 // dedupe by image hash (the same image selected twice is one row), so the
 // authoritative check is the set of DISTINCT expected image hashes recorded
@@ -83,6 +95,7 @@ module.exports = {
   stripPhotoSummaryForRecovery,
   hasPendingPhotoSummary,
   restorePhotoSummaryAfterRecovery,
+  abandonPhotoSummaryRecovery,
   completionPhotosFullyRecovered,
   expectedImageHashesFor,
 };

@@ -99,55 +99,48 @@ function independentStressFloor(run) {
   return parts.length ? Math.min(...parts) : null;
 }
 
-// Owner ruling 2026-09-24: lawn health scores are READ-ONLY from photos. An
-// override is honored ONLY for a key the AI left unknown (null) — a blank AI
-// read is the one thing a technician may fill in; a key the AI DID determine
-// is authoritative no matter what the client posts. "The AI's value" is the
-// run's immutable `scores_adjusted` snapshot (`aiScores`, from `runAiScores`)
-// when a complete run exists — never the mutable assessment row, which a
-// technician's own earlier fill may already have changed. Without a run
-// (legacy rows, `aiScores` omitted), the assessment row's own stored value
-// stands in for the AI's read, exactly as before this ruling.
+// Owner ruling 2026-10-04 (replaces the 2026-09-24 read-only ruling): the
+// technician may change any score after the AI read renders, until the
+// assessment is confirmed. A score resolves in this order:
+//   1. a number posted in this request (`adjustedScores`);
+//   2. the value already saved on the assessment row — the AI read /assess
+//      wrote, or the technician's entry from an earlier partial save (the
+//      client posts only the keys typed in this session, so an omitted key
+//      must keep an earlier entry);
+//   3. the AI's own read.
+// A key posted as null/blank is an explicit clear: it goes back to the AI's
+// read (unknown when the AI had none). "The AI's read" is the run's immutable
+// `scores_adjusted` snapshot (`aiScores`, from `runAiScores`) when a run
+// exists; without one (`aiScores` omitted) the assessment row's stored value
+// stands in for it. The snapshot is never rewritten, so calibration always
+// compares the technician's final scores against what the AI actually read.
 //
-// `stressFloor`: the run's INDEPENDENT stressors (insect/drought/mechanical),
-// used only when the AI determined NO stress_damage at all (every underlying
-// signal, including fungus/thatch, was unknown) — the one case where
-// stress_damage is itself fillable/derivable rather than AI-fixed.
-// `undefined` (no run) leaves the floor to the stored value below.
-//
-// `stressExplicit`: the ONLY thing that makes a genuinely AI-blank
-// stress_damage stick across a later partial save that doesn't repeat it —
-// a technician's direct entry (this request's `adjustedScores.stress_damage`,
-// or a persisted marker of an earlier one; see confirmScores). Anything else
-// stored on the row (assessment.stress_damage) is never treated as sticky on
-// its own, because it may only be a PREVIOUS auto-derivation from
-// then-current components — using it as a floor/return value would freeze a
-// stale answer and stop a later fungus/thatch correction from ever moving
-// Stress again (Codex P1 2026-09-24). With no explicit fill, Stress is
-// ALWAYS re-derived fresh from the currently-known components + floor.
+// stress_damage (Condition) follows the same order, except that its "saved
+// entry" is `stressExplicit`, never the row column: while the AI left it
+// blank the column may only hold a PREVIOUS auto-derivation from then-current
+// components, and treating that as an entry would freeze a stale answer
+// (Codex P1 2026-09-24). `stressExplicit` is this request's own entry or the
+// persisted marker of an earlier one (see confirmScores). With no entry and
+// no AI read, Condition is re-derived fresh from the known components plus
+// `stressFloor`, the run's INDEPENDENT stressors (insect/drought/mechanical);
+// `undefined` (no run) leaves the floor out.
 function resolveConfirmScores(assessment, adjustedScores, scoreValue, { stressFloor, aiScores, stressExplicit } = {}) {
   const adjusted = adjustedScores && typeof adjustedScores === 'object' ? adjustedScores : {};
   const ai = aiScores && typeof aiScores === 'object' ? aiScores : null;
   const present = (value) => value != null && value !== '';
-  const cleared = (key) => Object.prototype.hasOwnProperty.call(adjusted, key) && !numericOverride(adjusted[key]);
   // An override counts only when it is a finite number (or a non-blank string
-  // that parses to one) — a blank, whitespace or malformed value falls back to
-  // the stored score exactly as the legacy path does, never to 0.
-  // AI-known: read straight off the immutable run snapshot when one is
-  // supplied — that IS the AI's read, so it can never come back null while
-  // still counting as "known". Without a run (legacy path), the assessment
-  // row's own stored value stands in for the AI's read.
+  // that parses to one) — a blank, whitespace or malformed value is a clear,
+  // never a 0.
+  const cleared = (key) => Object.prototype.hasOwnProperty.call(adjusted, key) && !numericOverride(adjusted[key]);
+  const stored = (key) => (present(assessment[key]) ? scoreValue(assessment[key]) : null);
+  const aiRead = (key) => {
+    if (!ai) return stored(key);
+    return known(ai[key]) ? scoreValue(ai[key]) : null;
+  };
   const pick = (key) => {
-    if (ai) {
-      if (known(ai[key])) return scoreValue(ai[key]);
-    } else if (present(assessment[key])) {
-      return scoreValue(assessment[key]);
-    }
     if (numericOverride(adjusted[key])) return scoreValue(adjusted[key]);
-    // A key posted as null/blank is an explicit clear of an earlier fill;
-    // only an omitted key keeps the saved fill.
-    if (cleared(key)) return null;
-    return present(assessment[key]) ? scoreValue(assessment[key]) : null;
+    if (cleared(key)) return aiRead(key);
+    return stored(key) ?? aiRead(key);
   };
   const final = {
     turf_density: pick('turf_density'),
@@ -156,18 +149,14 @@ function resolveConfirmScores(assessment, adjustedScores, scoreValue, { stressFl
     fungus_control: pick('fungus_control'),
     thatch_level: pick('thatch_level'),
   };
-  const stressKnown = ai ? known(ai.stress_damage) : present(assessment.stress_damage);
-  if (stressKnown) {
-    // AI-produced Stress is fixed — never re-derived from a component edit,
-    // since an AI-known fungus/thatch can't be moved either.
-    final.stress_damage = ai ? scoreValue(ai.stress_damage) : scoreValue(assessment.stress_damage);
-  } else if (numericOverride(adjusted.stress_damage)) {
+  if (numericOverride(adjusted.stress_damage)) {
     final.stress_damage = scoreValue(adjusted.stress_damage);
   } else if (known(stressExplicit)) {
-    // A technician's earlier EXPLICIT fill (this key was AI-blank) sticks
-    // across a later partial save that doesn't repeat it. An auto-derived
-    // value that was never explicitly entered is NOT sticky — see below.
+    // An earlier EXPLICIT entry sticks across a later partial save that
+    // doesn't repeat it.
     final.stress_damage = scoreValue(stressExplicit);
+  } else if (aiRead('stress_damage') != null) {
+    final.stress_damage = aiRead('stress_damage');
   } else {
     const floor = stressFloor === undefined ? null : stressFloor;
     const parts = [final.fungus_control, final.thatch_level, floor]
@@ -175,6 +164,54 @@ function resolveConfirmScores(assessment, adjustedScores, scoreValue, { stressFl
     final.stress_damage = parts.length ? Math.min(...parts) : null;
   }
   return final;
+}
+
+// The "no finding" score of each sub-score's own scale: what the AI writes
+// when it looked and saw no fungal activity / low thatch. Read at call time,
+// like every other use of these maps here (lawn-assessment loads this module
+// while it is still loading).
+const noFinding = () => ({ fungus_control: FUNGUS_DISPLAY.none, thatch_level: THATCH_DISPLAY.low });
+
+// Owner ruling 2026-10-04: the completion screen shows four scores and no
+// longer asks for Fungus or Thatch. Report and tip readers treat a LOW
+// sub-score as confirmed evidence of disease or thatch, so a sub-score nobody
+// read must never come out low:
+//   - a Fungus/Thatch the AI left blank and nobody entered takes its "no
+//     finding" score, or the Condition score when that is higher — never a
+//     low Condition, which may be low for drought or insects and would
+//     publish a diagnosis the assessment never made. A key in `posted` was
+//     sent by the client, blank or not: that client shows the field (the
+//     standalone Lawn assessment page), so its blank stays a blank the
+//     technician must fill;
+//   - when Condition is the technician's own entry (`conditionEntered`), a
+//     Fungus/Thatch read BELOW it is raised to it, so the AI's low read does
+//     not contradict the technician's correction. A sub-score posted as a
+//     number in this request is the technician's too and stays.
+// Both apply only on the save that completes the row. A row that stays
+// pending keeps its own values, so a later Condition change is not left
+// beside a stale value. `synthetic` names the keys that hold no reading.
+function alignWithCondition(scores, { posted = {}, conditionEntered = false } = {}) {
+  const sent = posted && typeof posted === 'object' ? posted : {};
+  const condition = scores?.stress_damage;
+  if (!known(condition)) return { scores, synthetic: [] };
+  const floor = noFinding();
+  const value = (key) => (known(scores[key]) ? condition : Math.max(floor[key], condition));
+  const synthetic = Object.keys(floor).filter((key) => {
+    if (Object.prototype.hasOwnProperty.call(sent, key)) return false;
+    return !known(scores[key]) || (conditionEntered && scores[key] < condition);
+  });
+  if (!synthetic.length) return { scores, synthetic };
+  const aligned = { ...scores, ...Object.fromEntries(synthetic.map((key) => [key, value(key)])) };
+  return scoresComplete(aligned) ? { scores: aligned, synthetic } : { scores, synthetic: [] };
+}
+
+// What calibration compares against the AI read: the technician's scores,
+// without the Fungus/Thatch keys that hold no reading (alignWithCondition).
+// The technician did not score those: counted, one Condition entry would
+// weigh up to three times in avg_delta and bias_direction.
+function calibrationScores(finalScores, synthetic) {
+  const skip = Array.isArray(synthetic) ? synthetic : [];
+  return { ...finalScores, ...Object.fromEntries(skip.map((key) => [key, null])) };
 }
 
 function scoreVisit(analysis, { seasonAdjust, calculateOverallScore }) {
@@ -208,16 +245,14 @@ function overallScoreFor(finalScores, calculateOverallScore) {
 function confirmScores(assessment, run, adjustedScores, { scoreValue, calculateOverallScore }) {
   const adjusted = adjustedScores || {};
   const aiScores = runAiScores(run);
-  // The ONLY thing that can make an AI-blank stress_damage stick across a
-  // later partial save: this request's own explicit fill, or a marker of an
-  // earlier one persisted on the assessment row's adjusted_scores snapshot
+  // What makes a technician's Condition entry stick across a later partial
+  // save that doesn't repeat it: this request's own entry, or the marker of
+  // an earlier one persisted on the assessment row's adjusted_scores snapshot
   // (written back by the caller alongside decision.stressExplicit — see
   // confirmLockedRun). Never assessment.stress_damage itself, which may only
   // be a PREVIOUS auto-derivation (Codex P1 2026-09-24).
-  // Rows saved partway before this change carry the entry as the run's
-  // reconciliation.stress_damage_override instead; read it as a fallback so
-  // an in-flight technician entry survives the deploy. Inert once Stress is
-  // AI-known (resolveConfirmScores checks that first).
+  // Rows saved partway before the marker existed carry the entry as the run's
+  // reconciliation.stress_damage_override instead; read it as a fallback.
   // Only an ABSENT marker falls back to the old field; a marker written as
   // null is an explicit clear and must not resurrect the old entry.
   const snapshot = parseJsonObject(assessment?.adjusted_scores) || {};
@@ -229,14 +264,15 @@ function confirmScores(assessment, run, adjustedScores, { scoreValue, calculateO
   const stressExplicit = numericOverride(adjusted.stress_damage)
     ? scoreValue(adjusted.stress_damage)
     : (!stressCleared && known(previousExplicit) ? previousExplicit : null);
-  const finalScores = resolveConfirmScores(assessment, adjusted, scoreValue, {
+  const { scores: finalScores, synthetic: syntheticSubScores } = alignWithCondition(resolveConfirmScores(assessment, adjusted, scoreValue, {
     ...(run?.status === 'complete' ? { stressFloor: independentStressFloor(run) } : {}),
     aiScores,
     stressExplicit,
-  });
+  }), { posted: adjusted, conditionEntered: known(stressExplicit) });
   const confirmed = scoresComplete(finalScores);
   return {
     finalScores,
+    syntheticSubScores,
     overallScore: overallScoreFor(finalScores, calculateOverallScore),
     confirmed,
     missing: missingScores(finalScores),
@@ -274,6 +310,8 @@ module.exports = {
   assessmentScoreFields,
   independentStressFloor,
   resolveConfirmScores,
+  alignWithCondition,
+  calibrationScores,
   scoreVisit,
   overallScoreFor,
   confirmScores,

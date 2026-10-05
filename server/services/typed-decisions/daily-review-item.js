@@ -15,7 +15,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { typedDecisionsLive } = require('../../config/feature-gates');
 const { raiseAdminAlert } = require('../admin-alert-compose');
-const { providerLabel } = require('./packages');
+const { providerLabel, PACKAGES } = require('./packages');
 const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 
 const CATEGORY = 'typed_decisions';
@@ -85,11 +85,26 @@ async function closeIfQueueEmpty({ now = new Date(), conn = db } = {}) {
 async function runDailyReviewItem({ now = new Date(), conn = db } = {}) {
   if (!typedDecisionsLive()) return { raised: false, reason: 'gate_off' };
   const start = windowStart(now);
-  const pick = (sampledFor, limit) => conn('decision_reviews')
-    .where({ label_status: 'unreviewed', sampled_for: sampledFor })
-    .where('created_at', '>=', start)
-    .orderBy('created_at', 'desc').limit(limit)
-    .select('id', 'capability', 'provider', 'question_id', 'jev_answer', 'baseline_answers', 'created_at');
+  // The newest rows of EACH capability, then one from each in turn (the
+  // capability with the newest row first), so a lane that queues many rows a
+  // day (visit_access: about a hundred) never takes every slot from the
+  // others. With one capability waiting this is the plain newest-first pick.
+  const capabilities = [...new Set(Object.values(PACKAGES).map((pkg) => pkg.capability))];
+  const pick = async (sampledFor, limit) => {
+    const lists = (await Promise.all(capabilities.map(async (capability) => (await conn('decision_reviews')
+      .where({ label_status: 'unreviewed', sampled_for: sampledFor, capability })
+      .where('created_at', '>=', start)
+      .orderBy('created_at', 'desc').limit(limit)
+      .select('id', 'capability', 'provider', 'question_id', 'jev_answer', 'baseline_answers', 'created_at'))
+      .filter((row) => row.capability === capability))))
+      .filter((rows) => rows.length)
+      .sort((x, y) => new Date(y[0].created_at) - new Date(x[0].created_at));
+    const picked = [];
+    for (let turn = 0; picked.length < limit && lists.some((rows) => rows[turn]); turn += 1) {
+      for (const rows of lists) if (rows[turn] && picked.length < limit) picked.push(rows[turn]);
+    }
+    return picked;
+  };
   const disagreements = await pick('disagreement', MAX_DISAGREEMENTS);
   const spotChecks = await pick('random_audit', MAX_SPOT_CHECKS);
   const total = disagreements.length + spotChecks.length;
@@ -100,7 +115,7 @@ async function runDailyReviewItem({ now = new Date(), conn = db } = {}) {
 
   const day = etDateString(now);
   const detail = [
-    `Unreviewed shadow decisions from the last ${REVIEW_WINDOW_DAYS} days, newest first (up to ${MAX_DISAGREEMENTS} disagreements and ${MAX_SPOT_CHECKS} spot checks). Nothing acts on these answers; label each as right, wrong or unclear.`,
+    `Unreviewed shadow decisions from the last ${REVIEW_WINDOW_DAYS} days, newest first in turn across capabilities (up to ${MAX_DISAGREEMENTS} disagreements and ${MAX_SPOT_CHECKS} spot checks). Nothing acts on these answers; label each as right, wrong or unclear.`,
     ...disagreements.map((row) => `Disagreement - ${describeRow(row)}`),
     ...spotChecks.map((row) => `Spot check - ${describeRow(row)}`),
     `Review: ${LINK}`,

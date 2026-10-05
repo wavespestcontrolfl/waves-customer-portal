@@ -18,12 +18,15 @@
 // upload so photos categorize correctly for the missed_photo
 // detector / customer-track view downstream.
 import { useCallback, useEffect, useRef, useState, useId } from 'react';
+import { Camera } from 'lucide-react';
 import { useFieldPortalClass } from './fieldPortal';
 import { createPortal } from 'react-dom';
 import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
+import useServicePhotoRecovery, { createServicePhotoDeviceIdentity } from '../../hooks/useServicePhotoRecovery';
 import { getAdminAuthToken } from '../../lib/adminAuth';
+import { ensureCurrentDeviceIdentity, getServicePhotos } from '../../lib/service-photo-recovery';
 import { DVH } from '../../lib/viewportUnits';
 import TechPhotoMarksModal from './TechPhotoMarksModal';
 import { UiSurface, Button, Field, Input, ActionFeedback, cn } from '../ui';
@@ -34,6 +37,47 @@ const PHOTO_TYPES = ['before', 'after', 'progress', 'issue'];
 // Mirrors MARKABLE_PHOTO_TYPES in tech-track.js. 'before' is definitionally
 // pre-treatment, so it can never carry treated-point marks.
 const MARKABLE_PHOTO_TYPES = new Set(['after', 'progress', 'issue']);
+const hasUploadReceipt = photo => Boolean(photo?.uploadReceipt?.photo?.id);
+const closeConfirmationMessage = photo => (hasUploadReceipt(photo)
+  ? 'The photo is attached, but the pending report update notice is not saved on this device. Close anyway?'
+  : 'This photo is not saved on this device. Close and discard the selected photo?');
+const unavailableRecoveryMessage = (photo) => {
+  if (photo.stage === 'reconciliation_handed_off') {
+    return 'This handed-off notice could not be saved on this device. The photo remains attached and the office owns the remaining report updates.';
+  }
+  if (hasUploadReceipt(photo)) {
+    return 'The photo is attached, but this pending report update notice is not saved on this device. Keep the app open until it is resolved.';
+  }
+  return 'This photo is not saved on this device. Keep the app open until upload finishes, or the selected photo may be lost.';
+};
+
+function PendingPhotoRecovery({ photo, serviceId, uploading, deviceSaveState, restored, discarding, onRetry, onDiscard }) {
+  if (!photo) return null;
+  const handedOff = photo.stage === 'reconciliation_handed_off';
+  if (photo.serviceId !== String(serviceId)) return <div className="tech-visit-card">
+    <p role="status" className="tech-visit-muted">{handedOff
+      ? 'This report-update notice belongs to another visit. Return to that visit to dismiss it.'
+      : 'This pending photo belongs to another visit. Return to that visit to retry or discard it.'}</p>
+    <p className="tech-visit-muted">{photo.file.name}</p>
+  </div>;
+  let progress = 'Photo upload is pending.';
+  if (handedOff) progress = 'Photo attached. Report updates were handed to the office.';
+  else if (uploading) progress = deviceSaveState === 'saving' ? 'Saving photo on this device…' : 'Uploading photo…';
+  else if (restored) progress = 'Recovered a photo saved on this device.';
+  return <>
+    <div className="tech-visit-card">
+      <p role="status" className="tech-visit-muted">{progress}</p>
+      <p className="tech-visit-muted">{photo.file.name}</p>
+      {!uploading && <div className="tech-visit-actions">
+        {!handedOff && <Button className="tech-visit-action tech-visit-primary" onClick={onRetry} disabled={discarding}>Retry upload</Button>}
+        {(handedOff || !hasUploadReceipt(photo)) && <Button variant="secondary" className="tech-visit-action" onClick={onDiscard} loading={discarding}>{handedOff ? 'Dismiss saved notice' : deviceSaveState === 'saved' ? 'Discard saved photo' : 'Discard selected photo'}</Button>}
+      </div>}
+    </div>
+    {handedOff && <p role="status" className="tech-visit-muted">The photo remains attached to this visit. The office owns the remaining report updates. Dismiss removes only this saved notice from this device.</p>}
+    {!handedOff && deviceSaveState === 'saved' && <p role="status" className="tech-visit-muted">Saved on this device for this visit. If the app closes, return to Retry or Discard.</p>}
+    {deviceSaveState === 'unavailable' && <ActionFeedback error className="tech-visit-feedback">{unavailableRecoveryMessage(photo)}</ActionFeedback>}
+  </>;
+}
 
 export default function TechServicePhotosModal({ serviceId, customerName, onClose }) {
   const fieldPortalClass = useFieldPortalClass();
@@ -42,12 +86,11 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
   const [loading, setLoading] = useState(true);
   const [photoType, setPhotoType] = useState('after');
   const [caption, setCaption] = useState('');
-  const [uploading, setUploading] = useState(false);
-  const [errorMsg, setErrorMsg] = useState('');
   const [loadError, setLoadError] = useState('');
   const [statusMsg, setStatusMsg] = useState('');
-  const [pendingPhoto, setPendingPhoto] = useState(null);
-  const uploadInFlight = useRef(false);
+  const [visitSnapshot, setVisitSnapshot] = useState(null);
+  const [visitReadReady, setVisitReadReady] = useState(false);
+  const [deviceIdentity] = useState(createServicePhotoDeviceIdentity);
   const loadSequence = useRef(0);
   // Treated-point marking (GATE_PHOTO_MARKS, dark). The probe 404s when the
   // gate is off, which leaves marksSupported false and the affordance absent —
@@ -56,40 +99,82 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
   const [markTarget, setMarkTarget] = useState(null);
   const fileInputRef = useRef(null);
 
-  const close = () => {
-    if (uploadInFlight.current) return;
-    if (pendingPhoto && !window.confirm('This photo has not uploaded. Close and discard the selected photo?')) return;
-    onClose?.();
-  };
-  useEffect(() => {
-    if (!pendingPhoto) return undefined;
-    const warn = (event) => { event.preventDefault(); event.returnValue = ''; };
-    window.addEventListener('beforeunload', warn);
-    return () => window.removeEventListener('beforeunload', warn);
-  }, [pendingPhoto]);
-
   const load = useCallback(async () => {
     const sequence = ++loadSequence.current;
     setLoading(true);
     setLoadError('');
     try {
-      const token = getAdminAuthToken();
-      const res = await fetch(`${API}/api/tech/services/${serviceId}/photos`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || `HTTP ${res.status}`);
+      ensureCurrentDeviceIdentity(deviceIdentity.staffId);
+      const data = await getServicePhotos(serviceId, deviceIdentity.token);
+      if (sequence === loadSequence.current) {
+        setPhotos(data.photos || []);
+        setVisitSnapshot(data.visit || null);
+        setVisitReadReady(true);
       }
-      const data = await res.json();
-      if (sequence === loadSequence.current) setPhotos(data.photos || []);
     } catch (err) {
-      if (sequence === loadSequence.current) setLoadError(err.message || 'Failed to load photos');
+      if (sequence === loadSequence.current) {
+        setVisitReadReady(false);
+        setLoadError(err.message || 'Failed to load photos');
+      }
     }
     if (sequence === loadSequence.current) setLoading(false);
-  }, [serviceId]);
+  }, [deviceIdentity.staffId, deviceIdentity.token, serviceId]);
 
+  useEffect(() => {
+    setVisitReadReady(false);
+    setVisitSnapshot(null);
+  }, [serviceId]);
   useEffect(() => { void load(); return () => { loadSequence.current += 1; }; }, [load]);
+
+  const applyFreshPhotos = useCallback((data) => {
+    setPhotos(data.photos || []);
+    setVisitSnapshot(data.visit || null);
+    setVisitReadReady(true);
+  }, []);
+  const uploadSucceeded = useCallback((data) => {
+    setStatusMsg(data.photo?.staged
+      ? 'Photo saved — it will attach when the visit is completed'
+      : 'Photo uploaded');
+    setCaption('');
+  }, []);
+  const uploadFailed = useCallback(() => setVisitReadReady(false), []);
+  const {
+    pendingPhoto,
+    deviceSaveState,
+    restoring,
+    discarding,
+    restoredPending,
+    uploading,
+    errorMsg,
+    setErrorMsg,
+    selectPhoto,
+    retry,
+    discard,
+    uploadInFlight,
+    closeNeedsConfirmation,
+  } = useServicePhotoRecovery({
+    serviceId,
+    deviceIdentity,
+    visitSnapshot,
+    visitReadReady,
+    onFreshPhotos: applyFreshPhotos,
+    onUploadFailed: uploadFailed,
+    onUploaded: uploadSucceeded,
+    refreshPhotos: load,
+  });
+  useEffect(() => {
+    if (!restoredPending || !pendingPhoto) return;
+    setPhotoType(pendingPhoto.photoType);
+    setCaption(pendingPhoto.caption);
+    setStatusMsg('');
+  }, [pendingPhoto, restoredPending]);
+
+  const close = () => {
+    if (uploadInFlight.current) return;
+    if (closeNeedsConfirmation
+      && !window.confirm(closeConfirmationMessage(pendingPhoto))) return;
+    onClose?.();
+  };
 
   // Probe whether this lane takes treated-point marks. Fail-soft in both
   // directions: gate off returns 404 and any error leaves the affordance
@@ -111,7 +196,7 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
   }, [serviceId]);
 
   const handlePickFile = () => {
-    if (uploadInFlight.current || pendingPhoto) return;
+    if (uploadInFlight.current || pendingPhoto || restoring || !visitReadReady) return;
     setErrorMsg('');
     setStatusMsg('');
     if (fileInputRef.current) {
@@ -120,53 +205,18 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
     }
   };
 
-  const uploadPhoto = async (photo) => {
-    if (!photo || uploadInFlight.current) return;
-    uploadInFlight.current = true;
-    setUploading(true);
-    setErrorMsg('');
-    setStatusMsg('');
-    try {
-      const fd = new FormData();
-      fd.append('photo', photo.file);
-      fd.append('photoType', photo.photoType);
-      fd.append('capturedAt', photo.capturedAt);
-      if (photo.caption) fd.append('caption', photo.caption);
-      const token = getAdminAuthToken();
-      const res = await fetch(`${API}/api/tech/services/${serviceId}/photos`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-        body: fd,
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw new Error(data.error || `HTTP ${res.status}`);
-      }
-      setStatusMsg(data.photo?.staged
-        ? 'Photo saved — it will attach when the visit is completed'
-        : 'Photo uploaded');
-      setPendingPhoto(null);
-      setCaption('');
-      void load();
-    } catch (err) {
-      setErrorMsg(err.message || 'Upload failed');
-    }
-    uploadInFlight.current = false;
-    setUploading(false);
-  };
-
   const handleFileSelected = (event) => {
     const file = event.target.files?.[0];
-    if (!file || uploadInFlight.current || pendingPhoto) return;
-    const photo = { file, photoType, caption: caption.trim(), capturedAt: new Date(file.lastModified || Date.now()).toISOString() };
-    setPendingPhoto(photo);
-    void uploadPhoto(photo);
+    if (!file) return;
+    setStatusMsg('');
+    selectPhoto(file, { photoType, caption });
   };
 
   useLockBodyScroll(true);
   const dialogRef = useModalFocus(true, close);
   const titleId = useId();
-  const locked = uploading || !!pendingPhoto;
+  const locked = [uploading, discarding, pendingPhoto, restoring].some(Boolean);
+  const photoListLoading = [loading, restoring].some(Boolean);
   // DVH is 'dvh' where the engine supports it, 'vh' on pre-15.4 WebKit — see
   // lib/viewportUnits.js. Bridged in as a single CSS custom property so the
   // desktop height cap stays expressed in tech-workflow.css rather than an
@@ -204,21 +254,29 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
               <Input className="tech-visit-control" value={caption} onChange={(event) => setCaption(event.target.value)}
                 placeholder="e.g., Front yard before treatment" disabled={locked} />
             </Field>
-            <Button className="tech-visit-action tech-visit-primary tech-visit-wide" onClick={handlePickFile} loading={uploading} disabled={!!pendingPhoto}>📷 Add Photo</Button>
-            <input ref={fileInputRef} type="file" accept="image/*" onChange={handleFileSelected} className="tech-visit-file-input" aria-label="Choose service photo" />
+            <Button className="tech-visit-action tech-visit-primary tech-visit-wide" onClick={handlePickFile} loading={uploading} disabled={locked || !visitReadReady}><Camera size={18} aria-hidden="true" /> Add Photo</Button>
+            <input ref={fileInputRef} type="file" accept="image/*" onChange={handleFileSelected} disabled={locked || !visitReadReady} className="tech-visit-file-input" aria-label="Choose service photo" />
           </div>
-          {pendingPhoto && <div className="tech-visit-card">
-            <ActionFeedback className="tech-visit-feedback">{uploading ? 'Uploading photo…' : 'Photo not uploaded. Keep this visit open to retry.'}</ActionFeedback>
-            <p className="tech-visit-muted">{pendingPhoto.file.name}</p>
-            {!uploading && <div className="tech-visit-actions">
-              <Button className="tech-visit-action tech-visit-primary" onClick={() => uploadPhoto(pendingPhoto)}>Retry upload</Button>
-              <Button variant="secondary" className="tech-visit-action" onClick={() => { setPendingPhoto(null); setErrorMsg(''); }}>Discard selected photo</Button>
-            </div>}
-          </div>}
+          <PendingPhotoRecovery
+            serviceId={serviceId}
+            photo={pendingPhoto}
+            uploading={uploading}
+            deviceSaveState={deviceSaveState}
+            restored={restoredPending}
+            discarding={discarding}
+            onRetry={retry}
+            onDiscard={async () => {
+              if (await discard()) {
+                setCaption('');
+                setPhotoType('after');
+                setStatusMsg('');
+              }
+            }}
+          />
           {errorMsg && <ActionFeedback error className="tech-visit-feedback">{errorMsg}</ActionFeedback>}
-          {statusMsg && !errorMsg && <ActionFeedback className="tech-visit-feedback">{statusMsg}</ActionFeedback>}
-          <h3 className="tech-visit-section-title">Attached{!loading && !loadError ? ` (${photos.length})` : ''}</h3>
-          {loading ? <ActionFeedback className="tech-visit-feedback">Loading…</ActionFeedback> : loadError ? <>
+          {statusMsg && !errorMsg && <p role="status" className="tech-visit-muted">{statusMsg}</p>}
+          <h3 className="tech-visit-section-title">Attached{!photoListLoading && !loadError ? ` (${photos.length})` : ''}</h3>
+          {photoListLoading ? <ActionFeedback className="tech-visit-feedback">Loading…</ActionFeedback> : loadError ? <>
             <ActionFeedback error className="tech-visit-feedback">{loadError}</ActionFeedback>
             <Button variant="secondary" className="tech-visit-action" onClick={load}>Retry photos</Button>
           </> : photos.length === 0 ? <p className="tech-visit-muted">No photos yet.</p> : (

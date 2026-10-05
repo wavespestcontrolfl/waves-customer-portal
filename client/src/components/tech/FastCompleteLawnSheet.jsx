@@ -150,7 +150,7 @@ const RETRYABLE_REASONS = new Set(['profile_unavailable']);
 
 const EMPTY_CONTEXT = {
   loading: true, loadError: '', blockedReason: '', handoff: false, visit: null, raw: null,
-  visitType: null, turfHeightCapture: false, planned: [], plannedUnavailable: null, assessment: null, photoStatus: null,
+  visitType: null, turfHeightCapture: false, planned: [], plannedUnavailable: null, assessment: null, photoStatus: null, reCheck: '',
   findingsType: null, stockAdvisory: undefined,
 };
 
@@ -232,6 +232,8 @@ function contextFrom(data, service) {
     plannedUnavailable: data?.plannedProductsUnavailable || null,
     assessment: assessmentOf(data),
     photoStatus: data?.photoStatus || null,
+    // The prior visit's rainfast re-check line (GATE_LAWN_RAINFAST_WATCH), shown as sent.
+    reCheck: typeof data?.reCheck?.line === 'string' ? data.reCheck.line.trim() : '',
     ...optionalContextFields(data),
   };
 }
@@ -559,6 +561,11 @@ function useConfirmedAssessment(ctxAssessment) {
   const [ready, setReady] = useState(false);
   const [retaking, setRetaking] = useState(false);
   const settled = useRef(false);
+  // Counts the photo step's settles after its first lookup: each analysis or
+  // confirm that finishes. The server ranks tips from the visit's newest
+  // assessment row, which only changes then (a new unconfirmed row at the end
+  // of an analysis, a confirmed one at confirm), so this is the tips' read key.
+  const [settles, setSettles] = useState(0);
   const onConfirmed = useCallback((id) => {
     setBlockId(id || null);
     // The step clears the id when it mounts too; only a clear after its first
@@ -566,12 +573,13 @@ function useConfirmedAssessment(ctxAssessment) {
     if (!id && settled.current) setRetaking(true);
   }, []);
   const onReady = useCallback((value) => {
+    if (value === true && settled.current) setSettles((n) => n + 1);
     if (value !== false) settled.current = true;
     setReady(value);
   }, []);
   const contextId = ctxAssessment?.confirmed === true && ctxAssessment.id && !ctxAssessment.unusableReason ? ctxAssessment.id : null;
   const assessmentId = blockId || (!retaking && ready === 'failed' ? contextId : null);
-  return { assessmentId, assessmentReady: ready, retaking, onConfirmed, onReady };
+  return { assessmentId, assessmentReady: ready, retaking, settles, onConfirmed, onReady };
 }
 
 // Zero stock holds Complete unless the server is known to let it through:
@@ -611,12 +619,15 @@ function LawnFastForm({ service, request, catalog, ctx, submission, locked, dict
   const appendNote = useCallback((text) => {
     setForm((prev) => ({ ...prev, note: prev.note.trim() ? `${prev.note.trimEnd()} ${text}` : text }));
   }, []);
-  const tips = useTipLibrary({ base, request });
-  const tipsAvailable = !!tips;
 
   // The photo step reports back: the confirmed assessment's id (null until
   // there is one) and whether a lookup, analysis or confirm is in flight.
-  const { assessmentId, assessmentReady, retaking, onConfirmed, onReady } = useConfirmedAssessment(ctx.assessment);
+  const { assessmentId, assessmentReady, retaking, settles, onConfirmed, onReady } = useConfirmedAssessment(ctx.assessment);
+  // The tips are ranked by this visit's assessment, so they are read again each
+  // time an analysis or confirm settles: a retake's new unconfirmed row drops
+  // the old lift at once, and the confirm brings in the new one.
+  const tips = useTipLibrary({ base, request, refreshKey: settles });
+  const tipsAvailable = !!tips;
   const [gaugeHeightIn, setGaugeHeightIn] = useState(null);
   const blockService = useMemo(() => ({ id: service?.id, customerId: ctx.raw?.customerId ?? service?.routedCustomerId ?? null }), [service?.id, service?.routedCustomerId, ctx.raw?.customerId]);
   // A confirmed assessment the report would reject (made for the visit's
@@ -657,6 +668,7 @@ function LawnFastForm({ service, request, catalog, ctx, submission, locked, dict
     <div className="tech-visit-form-area">
       <div className="tech-visit-body" {...picker.coverProps}>
         <fieldset className="tech-visit-form" disabled={locked}>
+          {ctx.reCheck && <p className="tech-visit-muted tech-visit-status--warn" role="status">{ctx.reCheck}</p>}
           <section className="tech-visit-choice-section">
             <div className="tech-visit-section-head">
               <h3 className="tech-visit-section-title">Lawn photos</h3>

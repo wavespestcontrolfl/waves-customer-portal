@@ -69,7 +69,7 @@ const { lawnCompletionDefaultsEnabled, lawnPlanProgramApplies, lawnPlanAttribute
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
-const { membershipDuesCoverVisit, completionInvoiceAmount, isMembershipTier, monthlyDuesCollected, resolveBillingLane, combinedInvoiceVoidedWithoutLiveReplacement, isSiblingCoverageEligibleVisit, hasAuthoritativeZeroPrice } = require('../services/billing-lane');
+const { membershipDuesCoverVisit, completionInvoiceAmount, completionInvoiceIsMembershipDues, isMembershipTier, monthlyDuesCollected, resolveBillingLane, combinedInvoiceVoidedWithoutLiveReplacement, isSiblingCoverageEligibleVisit, hasAuthoritativeZeroPrice } = require('../services/billing-lane');
 const { resolveAppointmentCardLane, resolveExtendedLane, resolveCompletionChargeCap } = require('../services/completion-charge-verdict');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType } = require('../services/service-report/service-line-configs');
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
@@ -4720,17 +4720,50 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // membership visit even when autopay has since lapsed — the cron charged
     // the dues on the 1st, so a mid-month card expiry / autopay pause must
     // not mint a full monthly_rate invoice on every remaining plan visit.
-    // Only looked up where membership coverage is still reachable; a lookup
-    // error falls back to the autopay-only decision (never widens coverage).
+    // Dues are owed once per month: a dues invoice an earlier plan visit's
+    // completion already minted for the month (still live) covers this
+    // visit too — monthlyDuesCollected reads it; this visit's own never
+    // counts. Only looked up where membership coverage is still reachable; a
+    // lookup error falls back to the autopay-only decision (never widens
+    // coverage).
     let duesCollectedThisMonth = false;
     if (!customerAutopayActive && !visitIsPayerBilled && !perApplicationBilling && !annualPrepayBilling
       && (explicitMembershipLane || (!svc.cust_billing_mode && isMembershipTier(svc.cust_waveguard_tier)))) {
       try {
         duesCollectedThisMonth = await savepointRead(db, (k) => monthlyDuesCollected(
           k, svc.customer_id, new Date(`${serviceDateOnly(svc.scheduled_date)}T12:00:00Z`),
+          { excludeScheduledServiceId: svc.id },
         ));
       } catch (e) {
         logger.warn(`[dispatch] dues-collected lookup failed on completion for service ${svc.id}: ${e.message}`);
+      }
+      // An EARLY, short confirmation of a "covered, skip the mint" verdict under
+      // the customer + month lock: if a removal committed meanwhile this visit
+      // mints now instead of being refused at the commit below. It does NOT make
+      // the skip safe on its own (this transaction ends, and the lock with it,
+      // before the verdict is consumed): the authoritative confirmation is the
+      // one inside the completion transaction, just before the status flip. A
+      // short transaction, a lock and one read, never across Stripe. An
+      // unreadable confirmation keeps the pre-lock verdict. (A packet member
+      // runs on the packet's outer transaction and goes straight to that
+      // commit-time confirmation.)
+      if (duesCollectedThisMonth && !db.isTransaction) {
+        try {
+          const { acquireMembershipDuesMonthLock } = require('../services/billing-lane');
+          const dueMonth = serviceDateOnly(svc.scheduled_date).slice(0, 7);
+          duesCollectedThisMonth = await db.transaction(async (trx) => {
+            await acquireMembershipDuesMonthLock(trx, svc.customer_id, dueMonth);
+            // The month came from the pre-lock snapshot: a visit moved to
+            // another month since is not covered by THIS month's invoice. Not
+            // covered here → the mint path re-decides (and refuses a moved
+            // month before stamping, releasing for resume on fresh data).
+            const liveVisit = await trx('scheduled_services').where({ id: svc.id }).first('scheduled_date');
+            if (!liveVisit || serviceDateOnly(liveVisit.scheduled_date).slice(0, 7) !== dueMonth) return false;
+            return monthlyDuesCollected(trx, svc.customer_id, new Date(`${dueMonth}-15T12:00:00Z`), { excludeScheduledServiceId: svc.id });
+          });
+        } catch (e) {
+          logger.warn(`[dispatch] locked dues-coverage confirmation failed for service ${svc.id} — keeping the pre-lock verdict: ${e.message}`);
+        }
       }
     }
     const autopayCoversVisit = membershipDuesCoverVisit({
@@ -5383,6 +5416,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
     }
 
     let record;
+    // Canonical visit identity captured under the same row lock that commits
+    // the completion. It becomes the receipt for any later photo recovery,
+    // so recovery never adopts a rescheduled/reassigned row from a fresh GET.
+    let servicePhotoVisit = null;
     let turfOcrReadingId = null; // set when a gauge photo was captured → async OCR post-commit
     let linkedLawnAssessmentId = null;
     // The completion transaction's wall clock, hoisted to handler scope so
@@ -5405,6 +5442,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         } });
       }
       const resumedStructuredNotes = parseJsonObject(record.structured_notes);
+      servicePhotoVisit = resumedStructuredNotes.servicePhotoVisit || null;
       // An authorized correction can land after the packet committed its
       // records but before an effects replay. Its durable revision and notes
       // supersede the original allocation for lifecycle/tracker handling;
@@ -5811,6 +5849,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             && require('./pest-recap').recapVisitIdentityChanged(expectedVisit, lockedSvcRow, snapshotCustomerRow)) {
             throw Object.assign(new Error('visit identity changed during completion'), { code: 'visit_identity_changed' });
           }
+          servicePhotoVisit = require('./service-photos').servicePhotoVisitSnapshot(lockedSvcRow);
           // Lawn Fast Complete: the visit type the sheet opened with, re-judged on the LOCKED customer row (lawn-fast-complete.js).
           if (lawnFast != null && !isIncompleteVisit) {
             await require('./lawn-fast-complete').assertLawnFastVisitTypeUnderLock({ trx, lockedCustomer: snapshotCustomerRow, lockedSvc: lockedSvcRow, lawnFast });
@@ -6240,6 +6279,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // video-recap refusal) can ever see this visit's record without
             // the fixed-text marker: the record and the marker commit together.
             ...(reserviceFixedRecap ? { completionSmsRecapMode: ReserviceFixedRecap.MODE } : {}),
+            // Durable across a post-commit effects resume. This is the
+            // original completed visit, not whatever the mutable schedule
+            // row may describe when a failed photo upload is retried.
+            servicePhotoVisit,
             // The trace the report flow judged this record against (its
             // updated_at, or null for none): the report shows only that one
             // (treatment-zone-maps.js traceJudgedAllows).
@@ -7869,6 +7912,55 @@ async function completeScheduledService(completionInput, packetContext = null) {
           });
         }
 
+        // The "this visit mints no dues because the month is covered" verdict is
+        // CONFIRMED here, right before the status flip, under the dues-month
+        // advisory lock. It is a transaction-scoped lock (pg_try_advisory_xact_lock):
+        // it is held until THIS transaction commits or rolls back, so the skip and
+        // the commit are one step. Every writer that removes a month's coverage
+        // (a void, the cancelled-visit void, a stripping edit of the stamped line)
+        // takes the same lock before it commits: it either commits first (this re-read then sees no coverage and
+        // the closeout is refused to retry, which mints) or waits until this
+        // completion has committed (the visit is then completed and unbilled, and
+        // the void's post-commit alert, alertIfMembershipDuesCoverageReleased,
+        // names it for the office). A refund of a PAID dues invoice is the one
+        // coverage removal that does not take this lock: a refund is a payment
+        // reversal the webhook applies, not an office edit, and the invoice was
+        // already collected.
+        // A TRY, never a wait: this transaction holds visit / customer / invoice
+        // locks, so a blocking take could cycle; a busy lock is the same
+        // retryable refusal (the failed attempt keeps its idempotency key and the
+        // same-key resubmit re-runs the closeout). The lock is taken only here,
+        // after the photo uploads and the other slow work, so it is held across
+        // the status flip and commit only. A packet member runs on the packet's
+        // outer transaction (photo uploads are already done by then), so the lock
+        // is held to the packet's commit and a refusal rolls the packet back like
+        // any other member refusal; re-taking it for a second member of the same
+        // customer and month in the same transaction is a no-op.
+        // Only a visit that actually relies on the month's coverage (the dues
+        // verdict is what makes membershipDuesCoverVisit true) is checked.
+        if (duesCollectedThisMonth && autopayCoversVisit) {
+          const dueMonth = serviceDateOnly(svc.scheduled_date).slice(0, 7);
+          const { tryAcquireMembershipDuesMonthLock } = require('../services/billing-lane');
+          let confirmed = false;
+          try {
+            const liveVisit = await trx('scheduled_services').where({ id: svc.id }).first('scheduled_date');
+            confirmed = !!liveVisit
+              && serviceDateOnly(liveVisit.scheduled_date).slice(0, 7) === dueMonth
+              && await tryAcquireMembershipDuesMonthLock(trx, svc.customer_id, dueMonth)
+              && await savepointRead(trx, (k) => monthlyDuesCollected(
+                k, svc.customer_id, new Date(`${dueMonth}-15T12:00:00Z`), { excludeScheduledServiceId: svc.id },
+              ));
+          } catch (e) {
+            logger.warn(`[dispatch] locked dues-coverage commit check failed for service ${svc.id}: ${e.message}`);
+          }
+          if (!confirmed) {
+            throw Object.assign(
+              new Error('This month\'s membership dues coverage changed while completing — complete the visit again so its dues are billed.'),
+              { statusCode: 409, code: 'MEMBERSHIP_DUES_COVERAGE_CHANGED', isOperational: true },
+            );
+          }
+        }
+
         // 5. Status flip via the canonical sole-writer.
         await transitionJobStatus({
           jobId: svc.id,
@@ -9117,6 +9209,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       const responsePayload = {
         success: true,
         serviceRecordId: record.id,
+        servicePhotoVisit,
         invoiceId: null,
         invoiceTotal: null,
         completionPhotoUpload: completionPhotoUploadResult,
@@ -9647,8 +9740,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             svc.paf_held_term_id = null;
           }
         } else {
-          const heldTerm = await AnnualPrepayRenewals.pafDeferredHoldingTerm(svc, db, { throwOnError: true })
-            || await AnnualPrepayRenewals.pafDeferredHoldingTerm(svc, db, { throwOnError: true, activated: true });
+          // `claim`: a termite plan holds exactly one installation visit, so
+          // its decision is stamped under the term's lock inside the call.
+          const heldTerm = await AnnualPrepayRenewals.pafDeferredHoldingTerm(svc, db, { throwOnError: true, claim: true })
+            || await AnnualPrepayRenewals.pafDeferredHoldingTerm(svc, db, { throwOnError: true, activated: true, claim: true });
           const heldTermId = heldTerm?.id || null;
           if (String(svc.paf_held_term_id || '') !== String(heldTermId || '')) {
             await db('scheduled_services').where({ id: svc.id }).update({ paf_held_term_id: heldTermId });
@@ -11068,6 +11163,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
         setupFeeClaimInFlight = true;
       }
     }
+    // Set when the mint is refused because a concurrent plan visit's dues
+    // invoice covered the month (MEMBERSHIP_DUES_COVERED): the visit then reads
+    // exactly like one dues covered before the mint (autopayCoversVisit).
+    let membershipDuesCoveredAtMint = false;
     if (shouldInvoice) {
       try {
         if (setupFeeClaimInFlight) {
@@ -11128,6 +11227,34 @@ async function completeScheduledService(completionInput, packetContext = null) {
           sourceEstimateId: svc.source_estimate_id, hasOwnPrice: false, isCallback: svc.is_callback, serviceType: svc.service_type,
         })
           ? (trx) => refuseCoveredMemberMintInTrx(trx, svc.id)
+          : null;
+        // An unpriced membership plan visit billed at monthly_rate IS that
+        // month's dues: stamp the month on the invoice so the month's other
+        // plan visits see it covered (monthlyDuesCollected). The month is the
+        // visit's own, like the lookup's. A priced / reviewed / callback /
+        // payer / per-application / prepay visit is never dues.
+        const membershipDuesMonth = !reviewedVisitPrice && !visitIsPayerBilled && !perApplicationBilling && !annualPrepayBilling
+          && (explicitMembershipLane || (!svc.cust_billing_mode && isMembershipTier(svc.cust_waveguard_tier)))
+          && completionInvoiceIsMembershipDues({
+            estimatedPrice: svc.estimated_price,
+            isCallback: svc.is_callback,
+            perApplicationBilling,
+            perApplicationFee: svc.cust_per_application_fee,
+            monthlyRate: svc.cust_monthly_rate,
+            billingMode: svc.cust_billing_mode,
+            primaryLinePrice: svc.primary_line_price,
+          })
+          // The amount must equal today's rate, EXCEPT on a required resume whose amount
+          // was FROZEN earlier: provenance must not depend on the frozen figure still
+          // matching a rate that has since moved. Such a mint is still the month's dues
+          // (the visit's dues shape above says so), so it always asks for the stamp and
+          // the stamp helper's locked validation decides: a stale frozen amount is refused
+          // retryably (dues_amount_stale, which refreshes the frozen amount to the current
+          // rate) instead of minting an UNSTAMPED invoice the next plan visit would bill
+          // beside.
+          && ((backfillReviewMintRequired && backfillFrozenMintAmount != null)
+            || Math.round(Number(mintInvoiceAmount) * 100) === Math.round(Number(svc.cust_monthly_rate) * 100))
+          ? serviceDateOnly(svc.scheduled_date).slice(0, 7)
           : null;
         const mintOptions = {
           // The frozen money on a required resume — the exact number the
@@ -11218,6 +11345,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // where it bills is the reviewer's call (breadcrumb below).
           skipAccrual: isBackfillCompletion,
         };
+        if (membershipDuesMonth) mintOptions.membershipDuesMonth = membershipDuesMonth;
         // Serialized find-or-create for the live typed mint (pre-push Codex
         // P0, gate-removal rounds 2-4): invoices.scheduled_service_id is
         // NOT unique, and the pre-completion writers (office Charge Now
@@ -11503,6 +11631,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // #5237, refuseCoveredMemberMintInTrx): handled by its own
         // release-for-resume below, never the manual-billing bell.
         const coveredByCombined = invErr?.code === 'FIRST_APPLICATION_COVERED' && !invoice?.id;
+        // The month's dues were covered by a concurrent plan visit's invoice
+        // (or the cron) between the pre-lock decision and the mint lock — a
+        // clean refusal under the per-customer-month lock, nothing written.
+        // Take exactly the path "dues were already covered before the mint"
+        // takes: no invoice, no bell, no release-for-resume, the visit
+        // completes and its text reads as covered. Never an error.
+        const duesCoveredUnderLock = invErr?.code === 'MEMBERSHIP_DUES_COVERED' && !invoice?.id;
         // Refused before any mint because a fresh setup-fee claim on the series
         // is still in flight (see setupFeeClaimInFlight): release for resume on
         // every lane, never a finalize without the fee.
@@ -11530,7 +11665,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             serviceRecordId: record.id,
           } });
         }
-        if (!coveredByCombined && !setupFeeInFlight && backfillReviewMintRequired && !invoice?.id) {
+        if (duesCoveredUnderLock) {
+          membershipDuesCoveredAtMint = true;
+          logger.info(`[dispatch] visit ${svc.id}: membership dues for ${serviceDateOnly(svc.scheduled_date).slice(0, 7)} were covered while this completion waited on the dues lock — no second dues invoice minted`);
+        } else if (!coveredByCombined && !setupFeeInFlight && backfillReviewMintRequired && !invoice?.id) {
           logger.error(`[dispatch] REQUIRED completion-invoice mint FAILED for ${svc.id} (${isBackfillCompletion ? 'backfill review' : 'live typed one-time'}) — closeout NOT finalized: ${invErr.message}`);
           // Reprice refusal refreshes the FROZEN money (codex #3344 r5 P1):
           // the resume this release promises mints the frozen cents with
@@ -11614,6 +11752,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
             } catch (reconcileErr) {
               logger.error(`[dispatch] frozen Bill-To reconciliation FAILED for ${svc.id} — the resume re-raises the divergence and retries the reconciliation: ${reconcileErr.message}`);
             }
+          } else if (invErr?.reason === 'dues_amount_stale'
+            && Number.isInteger(invErr.currentMonthlyRateCents) && invErr.currentMonthlyRateCents > 0) {
+            // The member's monthly rate moved after the dues amount was frozen:
+            // without a refresh the resume would mint the stale frozen figure
+            // and be refused again forever. Restamp the current rate.
+            try {
+              await mergeRecordNotesKeys(record.id, { backfillMintAmountCents: invErr.currentMonthlyRateCents });
+              logger.warn(`[dispatch] frozen mint amount refreshed to ${invErr.currentMonthlyRateCents}c for ${svc.id} after a monthly-rate change — the resume bills the current dues`);
+            } catch (refreshErr) {
+              logger.error(`[dispatch] frozen dues amount refresh FAILED for ${svc.id}: ${refreshErr.message}`);
+            }
           }
           const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, invErr);
           if (!released) {
@@ -11631,6 +11780,26 @@ async function completeScheduledService(completionInput, packetContext = null) {
               : `The completion invoice could not be created — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
             code: 'backfill_invoice_mint_failed',
             ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+            serviceRecordId: record.id,
+          } });
+        }
+        // The in-lock dues-coverage re-read failed (MEMBERSHIP_DUES_COVERAGE_
+        // UNVERIFIED): nothing was written and nothing may be minted on an
+        // unknown month. Retryable on EVERY lane, like the combined-invoice
+        // refusal below — a quiet finalize would leave the month's dues
+        // unbilled with no bell. The retry re-reads coverage under the lock.
+        if ((invErr?.code === 'MEMBERSHIP_DUES_COVERAGE_UNVERIFIED' || invErr?.code === 'SCHEDULED_BILLING_SOURCE_MOVED') && !invoice?.id) {
+          logger.error(`[dispatch] visit ${svc.id}: dues coverage could not be verified under the dues lock — releasing for resume instead of minting or finalizing without the month's dues`);
+          const duesReleased = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, invErr);
+          if (!duesReleased) {
+            logger.error(`[dispatch] release-for-resume did NOT release attempt ${completionAttempt?.id} for ${svc.id} — retry blocked until the ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)}-minute stale window reclaims it`);
+          }
+          return ({ status: 503, body: {
+            error: duesReleased
+              ? 'This month\'s membership dues could not be checked — the closeout is saved but NOT finalized. Retry the closeout to bill them.'
+              : `This month's membership dues could not be checked — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
+            code: 'membership_dues_coverage_unverified',
+            ...(duesReleased ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
             serviceRecordId: record.id,
           } });
         }
@@ -11665,7 +11834,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
             serviceRecordId: record.id,
           } });
-        } else {
+        } else if (!duesCoveredUnderLock) {
           logger.error(`[dispatch] Auto-invoice failed (non-blocking): ${invErr.message}`);
           // Exception-based (CLAUDE.md rule 14): a LIVE mint failure used to
           // be a log line only — the visit completed, the customer got the
@@ -12711,12 +12880,32 @@ async function completeScheduledService(completionInput, packetContext = null) {
       && !isBackfillCompletion;
     // The completion text's pay-link terms, BEFORE the hold and the sender
     // hand-over (evaluated lazily, where the text is composed).
+    // Whether this month's dues coverage is SETTLED money (a collected payment or
+    // a paid / prepaid / processing stamped invoice), not merely an open invoice
+    // that bills the month. Lazy, read once; an unreadable lookup is "not
+    // settled" (the plain text, never a false "paid").
+    let duesCoverageSettledMemo = null;
+    const duesCoverageIsSettled = async () => {
+      if (duesCoverageSettledMemo === null) {
+        try {
+          duesCoverageSettledMemo = !!(await monthlyDuesCollected(
+            db, svc.customer_id, new Date(`${serviceDateOnly(svc.scheduled_date)}T12:00:00Z`),
+            { excludeScheduledServiceId: svc.id, openInvoiceCovers: false },
+          ));
+        } catch (e) {
+          logger.warn(`[dispatch] dues settled lookup failed for service ${svc.id}: ${e.message}`);
+          duesCoverageSettledMemo = false;
+        }
+      }
+      return duesCoverageSettledMemo;
+    };
     const completionPayLinkAllowedSansHold = () => !suppressCompletionInvoiceLink
       && includePayLink !== false
       // ADMIN-BUG-R13: the covered base needs no link, the add-ons bill does.
       && coveredVisitCollectible
       && !alreadyPaid
       && !autopayCoversVisit
+      && !membershipDuesCoveredAtMint
       // Collectible statuses only: a crash-resumed completion reloads the
       // invoice through the existing-invoice path with invoiceCreated/
       // payUrl set for any non-paid status — a 'processing' invoice (ACH
@@ -13472,10 +13661,19 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // open (account credit can still settle it above → alreadyPaid), while
         // add-ons are owed but only alerted to the office, or while a voided
         // invoice's other charges wait for the office to re-bill them.
+        // COVERED is not SETTLED: a month billed on another visit's still-open
+        // stamped dues invoice covers this visit (nothing more is billed for it),
+        // but nothing is paid, so the "you're all paid up" template is only for
+        // dues coverage that is actually settled (a paid / prepaid / processing
+        // stamped invoice or a collected payment). Autopay coverage keeps its
+        // meaning. A covered-but-open visit takes the existing no-bill
+        // service_complete text below, exactly like a visit with no invoice.
+        const duesCoverageClaimsPaid = (autopayCoversVisit || membershipDuesCoveredAtMint)
+          && (customerAutopayActive || await duesCoverageIsSettled());
         const usePaidCompletionTemplate = !(annualPrepayExtrasCollectible && !alreadyPaid) && !annualPrepayOwedUnbilled
           && (alreadyPaid
           || prepaidCovered
-          || autopayCoversVisit
+          || duesCoverageClaimsPaid
           || ['paid', 'prepaid'].includes(String(invoice?.status || '').toLowerCase()));
         // The trace/applications lookup that used to feed this call is gone
         // with the re-entry line. It existed so the SMS could apply the same
@@ -14638,6 +14836,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       && coveredVisitCollectible
       && !alreadyPaid
       && !autopayCoversVisit
+      && !membershipDuesCoveredAtMint
       && !suppressCompletionInvoiceLink
       // Third-party Bill-To: never open the in-person payment sheet for a
       // payer-billed invoice — the tech must not collect the AP's invoice from
@@ -14749,6 +14948,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     const responsePayload = {
       success: true,
       serviceRecordId: record.id,
+      servicePhotoVisit,
       invoiceId: invoice?.id || null,
       // Amount DUE (total − applied account credit) so the mobile payment sheet
       // collects/validates what Stripe/Terminal actually charge, not the pre-credit total.

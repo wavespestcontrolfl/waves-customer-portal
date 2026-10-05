@@ -177,6 +177,11 @@ describe('classifyReplay', () => {
   test('a guard-dropped parcel carries its reason, and the street miss still ranks first', () => {
     const dropped = { status: 'dropped', dropReason: 'situs_house_number_mismatch', errors: [] };
     expect(replay.classifyReplay(base({ audit: ran({ hasExactMatch: true }), point: dropped }))).toBe('point_parcel_dropped:situs_house_number_mismatch');
+    // A drop that kept the parcel as parent-parcel context is its own stop, ahead of the roll-miss stops
+    // (the storefront it exists for is normally not on the roll).
+    const keptParent = { ...dropped, parentParcel: true };
+    expect(replay.classifyReplay(base({ point: keptParent }))).toBe('parent_parcel_kept:situs_house_number_mismatch');
+    expect(replay.classifyReplay(base({ audit: ran({ streetExists: false }), point: keptParent }))).toBe('parent_parcel_kept:situs_house_number_mismatch');
     expect(replay.classifyReplay(base({ audit: ran({ streetExists: false }), point: dropped }))).toBe('address_text_miss');
     // audit gave no signal at all: the drop is the verdict
     expect(replay.classifyReplay(base({ audit: { status: 'no_signal', errors: [] }, point: dropped }))).toBe('point_parcel_dropped:situs_house_number_mismatch');
@@ -509,10 +514,13 @@ describe('summary and TSV', () => {
 
 describe('guard gates at startup', () => {
   test('names and on/off only, on exactly when the reader is (=== "true")', () => {
-    expect(replay.formatGuardGates({})).toBe('GATE_CONDO_UNIT_FOLIO=off');
-    expect(replay.formatGuardGates({ GATE_CONDO_UNIT_FOLIO: 'true', DATABASE_PUBLIC_URL: 'postgres://secret' })).toBe('GATE_CONDO_UNIT_FOLIO=on');
+    expect(replay.formatGuardGates({})).toBe('GATE_CONDO_UNIT_FOLIO=off GATE_LOOKUP_BUSINESS_IDENTITY=off GATE_COMMERCIAL_SUITE_SIZING=off');
+    expect(replay.formatGuardGates({ GATE_CONDO_UNIT_FOLIO: 'true', DATABASE_PUBLIC_URL: 'postgres://secret' })).toBe('GATE_CONDO_UNIT_FOLIO=on GATE_LOOKUP_BUSINESS_IDENTITY=off GATE_COMMERCIAL_SUITE_SIZING=off');
+    // The parent-parcel gates (address-match PR 6) are reported the same way.
+    expect(replay.formatGuardGates({ GATE_LOOKUP_BUSINESS_IDENTITY: 'true', GATE_COMMERCIAL_SUITE_SIZING: 'true' }))
+      .toBe('GATE_CONDO_UNIT_FOLIO=off GATE_LOOKUP_BUSINESS_IDENTITY=on GATE_COMMERCIAL_SUITE_SIZING=on');
     // feature-gates condoUnitFolioLive() is strict: 'TRUE' / '1' read OFF
-    expect(replay.formatGuardGates({ GATE_CONDO_UNIT_FOLIO: 'TRUE' })).toBe('GATE_CONDO_UNIT_FOLIO=off');
+    expect(replay.formatGuardGates({ GATE_CONDO_UNIT_FOLIO: 'TRUE' })).toBe('GATE_CONDO_UNIT_FOLIO=off GATE_LOOKUP_BUSINESS_IDENTITY=off GATE_COMMERCIAL_SUITE_SIZING=off');
   });
 
   test('main prints the gate line and writes lat/lng to the TSV, without touching the network', async () => {
@@ -559,8 +567,14 @@ describe('guard gates at startup', () => {
 describe('applyGisParcelGuards (extracted from lookupPropertyFromAITrio)', () => {
   const ctx = (over = {}) => ({ searchAddress: '9117 SR 99, BRADENTON, FL 34203', address: '9117 SR 99, BRADENTON, FL 34203', gisPrecision: 'rooftop', ...over });
 
+  test('the replay TSV has a column for a kept parent parcel', () => {
+    const replay = require('../scripts/property-lookup-replay');
+    expect(replay.TSV_COLUMNS).toContain('point_parent_parcel');
+    expect(replay.TSV_COLUMNS.indexOf('point_parent_parcel')).toBe(replay.TSV_COLUMNS.indexOf('point_drop_reason') + 1);
+  });
+
   test('no parcel in, nothing out', () => {
-    expect(applyGisParcelGuards(null, ctx())).toEqual({ parcel: null, parkParcelSignal: null, dropReason: null });
+    expect(applyGisParcelGuards(null, ctx())).toEqual({ parcel: null, parkParcelSignal: null, dropReason: null, parentParcel: null });
   });
 
   test('situs house number that disagrees drops the parcel (the plaza / Luxe Ave guard)', () => {

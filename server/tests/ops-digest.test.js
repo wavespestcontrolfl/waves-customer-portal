@@ -254,7 +254,7 @@ describe('deliverOpsDigest — itemKeys', () => {
     });
     const { ringGate } = mockNotifyAdmin.mock.calls[0][3];
     const conn = jest.fn(() => ({
-      where: () => conn(), whereRaw: () => conn(), orderBy: () => conn(),
+      where: () => conn(), whereRaw: () => conn(), orderBy: () => conn(), orderByRaw: () => conn(),
       first: async () => ({ metadata: { count: 5, itemKeys: ['call-1'] } }),
     }));
     conn.raw = () => ({});

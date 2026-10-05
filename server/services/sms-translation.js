@@ -27,7 +27,8 @@ const MODELS = require('../config/models');
 const { gateEnvValue } = require('../config/feature-gates');
 
 const TRIAL_TABLE = 'sms_translation_trials';
-const PROMPT_VERSION = 'sms_translation_trial_v1';
+// v2 (2026-10-03): re-service wording for the translator and the meaning check; courtesy strength is not a difference
+const PROMPT_VERSION = 'sms_translation_trial_v2';
 const MAX_TEXT = 1600;
 const TRANSLATED_SEGMENT_LIMIT = 4;
 
@@ -176,7 +177,7 @@ async function translateInbound(inbound) {
 async function translateReply({ englishReply, language }) {
   const out = await callJson(MODELS.TEXT_POLICIES.customerCopy, {
     laneId: 'sms_translation',
-    system: `Translate a text message from a pest control company into ${language}. Keep the same meaning, tone and length; do not add, drop or soften anything. Keep every number, date, price, phone number, link, email and name exactly as written, and write every number as digits (\"two\" -> 2). Write every clock time in 24-hour form (2 PM -> 14:00, 9:30 AM -> 9:30). Return only the translation. ${DATA_NOTE}`,
+    system: `Translate a text message from a pest control company into ${language}. Keep the same meaning, tone and length; do not add, drop or soften anything. Keep every number, date, price, phone number, link, email and name exactly as written, and write every number as digits (\"two\" -> 2). Write every clock time in 24-hour form (2 PM -> 14:00, 9:30 AM -> 9:30). A \"re-service\" is a return visit to treat the property again between regular visits: translate it as a return visit to treat again, never as a new or additional service, and keep \"free\" wherever the message says it is free. Return only the translation. ${DATA_NOTE}`,
     text: dataBlock(englishReply),
     jsonSchema: TRANSLATE_SCHEMA,
   });
@@ -244,7 +245,7 @@ function sameWrittenLanguage(asked, written) {
 async function meaningCheck({ englishReply, backTranslation }) {
   const out = await callJson(MODELS.TEXT_POLICIES.customerCopy, {
     laneId: 'sms_translation',
-    system: `Compare two English versions of one text message to a customer. ORIGINAL is what the company approved; BACK is a translation of the translated message. Answer same_meaning true only if BACK makes the same promises, states the same facts (days, times, prices, products, safety and timing advice, who will do what) and asks the same questions as ORIGINAL. Wording may differ. List every difference that changes meaning; an empty list when there are none. ${DATA_NOTE}`,
+    system: `Compare two English versions of one text message to a customer. ORIGINAL is what the company approved; BACK is a translation of the translated message. Answer same_meaning true only if BACK makes the same promises, states the same facts (days, times, prices, products, safety and timing advice, who will do what) and asks the same questions as ORIGINAL. Wording may differ. A "re-service" in ORIGINAL is a return visit to treat again: "re-treatment visit" or "return visit to treat again" in BACK is the same thing for that noun only, while "new service" or "another service" is not. When ORIGINAL says it is free, BACK must say so too (free, no charge, at no cost): a dropped "free" is a difference. How strongly a courtesy is worded ("sorry" / "very sorry", "thanks" / "thank you very much") is not a difference. List every difference that changes meaning; an empty list when there are none. ${DATA_NOTE}`,
     text: `ORIGINAL:\n${dataBlock(englishReply)}\n\nBACK:\n${dataBlock(backTranslation)}`,
     jsonSchema: MEANING_SCHEMA,
   });
@@ -313,14 +314,59 @@ const EMAIL_RE = /[^\s<>"'@]+@[^\s<>"'@]+\.(?:\p{L}{2,}|xn--[a-z0-9-]+)/giu;
 // Other separated runs (dates like "10/14", "14/10") compare part by part.
 const NUMBER_RE = /\d+(?:[.,:]\d+)*/g;
 // Chinese / Japanese / Korean write the hour with a suffix: 14点, 14時, 14시
-const HOUR_WORD_RE = /^\s*(?:h\b|horas?\b|heures?\b|uhr\b|[時시点點])/iu;
+// (Vietnamese "9 giờ", Haitian Creole "9 è" / "9è", Russian "9 часов")
+const HOUR_WORD_RE = /^\s*(?:h\b|horas?\b|heures?\b|uhr\b|gi\u1EDD(?!\p{L})|\u00E8(?!\p{L})|\u0447\u0430\u0441(?:\u0430\u043C|\u0430|\u043E\u0432)?(?!\p{L})|[時시点點])/iu;
 // a clock marker only: "2 horas" / "2 heures" are durations, not 2 o'clock
 const CLOCK_MARK_RE = /^\s*(?:h\b|uhr\b|[時시点點])/iu;
 const PM_RE = /^\s*(?:pm\b|p\.\s?m\.)/i;
 const AM_RE = /^\s*(?:am\b|a\.\s?m\.)/i;
 // a customer writes the half of the day their way: "2 de la tarde", "2 da tarde", "2 h du soir"
-const LOCAL_PM_RE = /^\s*(?:h\s+)?(?:de\s+la\s+(?:tarde|noche)|da\s+(?:tarde|noite)|de\s+l['\u2019]apr[eè]s-midi|du\s+soir|in\s+the\s+(?:afternoon|evening)|at\s+night)\b/i;
-const LOCAL_AM_RE = /^\s*(?:h\s+)?(?:de\s+la\s+(?:ma[nñ]ana|madrugada)|da\s+manh[aã]|du\s+matin|in\s+the\s+morning)\b/i;
+// Listed for the languages customers have texted in or the made-up test covered (Spanish, Portuguese, French,
+// Vietnamese, Haitian Creole, Russian); any other language's day-part word reads no half and holds the trial.
+// Words that name NIGHT without saying which side of midnight ("đêm", "ночи") are left out for the same reason.
+// An hour word may sit between the number and the half. A word that is only ever a clock mark ("h", Vietnamese
+// "giờ", Creole "è") may always; one that is also a DURATION ("2 horas", "2 heures", "2 часа" = 2 hours) only
+// when the number follows a clock preposition ("às 9 horas da manhã", "à 8 heures du soir", "в 2 часа дня"), so
+// "trabalham 2 horas da noite" stays a duration. Russian "дня" is also "days" ("через 2 дня"): it names the
+// afternoon only in that form.
+const END = '(?![\\p{L}\\p{N}])';
+const CLOCK_GAP = '(?:(?:h|gi\\u1EDD|\\u00E8)\\s+)?';
+const DURATION_GAP = '(?:horas?|heures?|\\u0447\\u0430\\u0441(?:\\u0430\\u043C|\\u0430|\\u043E\\u0432)?)\\s+';
+const CLOCK_PREP_RE = /(?<![\p{L}\p{N}])(?:a\s+las?|[aà]s|à|в|к)\s*$/iu;
+const PM_WORDS = [
+  'de\\s+la\\s+(?:tarde|noche)', 'da\\s+(?:tarde|noite)', "de\\s+l['\\u2019]apr[e\\u00E8]s-midi", 'du\\s+soir',
+  'in\\s+the\\s+(?:afternoon|evening)', 'at\\s+night',
+  'chi\\u1EC1u', 't\\u1ED1i',
+  'nan\\s+apr[e\\u00E8]midi', 'apr[e\\u00E8]midi', 'nan\\s+asw[e\\u00E8]', 'di\\s?swa',
+  '\\u0432\\u0435\\u0447\\u0435\\u0440\\u0430',
+].join('|');
+const AM_WORDS = [
+  'de\\s+la\\s+(?:ma[n\\u00F1]ana|madrugada)', 'da\\s+(?:manh[a\\u00E3]|madrugada)', 'du\\s+matin', 'in\\s+the\\s+morning',
+  's\\u00E1ng', 'nan\\s+maten', 'di\\s?maten', '\\u0443\\u0442\\u0440\\u0430',
+].join('|');
+const LOCAL_PM_RE = new RegExp(`^\\s*${CLOCK_GAP}(?:${PM_WORDS})${END}`, 'iu');
+const LOCAL_AM_RE = new RegExp(`^\\s*${CLOCK_GAP}(?:${AM_WORDS})${END}`, 'iu');
+const HOURS_PM_RE = new RegExp(`^\\s*${DURATION_GAP}(?:${PM_WORDS}|\\u0434\\u043D\\u044F)${END}`, 'iu');
+const HOURS_AM_RE = new RegExp(`^\\s*${DURATION_GAP}(?:${AM_WORDS})${END}`, 'iu');
+// Russian "2 часа дня", "9 часов утра", "7 часов вечера": the hour word followed by its day part is a clock
+// time on its own (a duration takes another form, "2 часа днём"), so it needs no preposition.
+const RU_HOUR_WORD = '\\u0447\\u0430\\u0441(?:\\u0430\\u043C|\\u0430|\\u043E\\u0432)?\\s+';
+const RU_PM_RE = new RegExp(`^\\s*${RU_HOUR_WORD}(?:\\u0434\\u043D\\u044F|\\u0432\\u0435\\u0447\\u0435\\u0440\\u0430)${END}`, 'iu');
+const RU_AM_RE = new RegExp(`^\\s*${RU_HOUR_WORD}\\u0443\\u0442\\u0440\\u0430${END}`, 'iu');
+function localHalf(before, after) {
+  if (LOCAL_PM_RE.test(after) || RU_PM_RE.test(after)) return 'pm';
+  if (LOCAL_AM_RE.test(after) || RU_AM_RE.test(after)) return 'am';
+  if (!CLOCK_PREP_RE.test(before)) return null;
+  return HOURS_PM_RE.test(after) ? 'pm' : (HOURS_AM_RE.test(after) ? 'am' : null);
+}
+// Vietnamese "trưa" (midday) is read by its hour: "11 giờ trưa" is 11 AM, "12 giờ trưa" and "1 giờ trưa" are PM.
+const MIDDAY_RE = new RegExp(`^\\s*${CLOCK_GAP}tr\\u01B0a${END}`, 'iu');
+function middayHalf(raw, after) {
+  if (!MIDDAY_RE.test(after)) return null;
+  const hour = Number(raw.split(':')[0]);
+  if (hour === 10 || hour === 11) return 'am';
+  return hour === 12 || hour === 1 || hour === 2 ? 'pm' : null;
+}
 // languages that name the half of the day BEFORE the number: Chinese 下午2点, Japanese 午後2時, Korean 오후 2시
 const PREFIX_PM_RE = /(?:下午|晚上|傍晚|中午|午後|夜|오후|저녁)\s*$/u;
 const PREFIX_AM_RE = /(?:上午|早上|凌晨|清晨|午前|朝|오전|새벽)\s*$/u;
@@ -404,9 +450,10 @@ function numberValues(text, { strictTimes = false } = {}) {
     // ("Oct"): it is compared as a month name through the English read-back (calendarTokens), not as a figure
     if (/^\s*[月월]/u.test(after)) continue;
     const before = str.slice(0, m.index);
+    const local = localHalf(before, after);
     const flags = {
       pm: PM_RE.test(after),
-      half: PM_RE.test(after) || LOCAL_PM_RE.test(after) || PREFIX_PM_RE.test(before) ? 'pm' : (AM_RE.test(after) || LOCAL_AM_RE.test(after) || PREFIX_AM_RE.test(before) ? 'am' : null),
+      half: PM_RE.test(after) || local === 'pm' || PREFIX_PM_RE.test(before) ? 'pm' : (AM_RE.test(after) || local === 'am' || PREFIX_AM_RE.test(before) ? 'am' : middayHalf(raw, after)),
       time: raw.includes(':') || HOUR_WORD_RE.test(after),
       // a clock time only ("14:00", "14 h", "14時"); "14 horas" is a duration and never stands in for "2 PM"
       clock: raw.includes(':') || CLOCK_MARK_RE.test(after),
@@ -534,7 +581,20 @@ function tokenParity(englishReply, translated, { strictTimes = true } = {}) {
   // strict mode (our reply): a number in words is a number ("two hours" = 2); the translator writes digits
   const en = protectedTokens(strictTimes ? require('./sms-shadow-drafter').normalizeNumberWords(String(englishReply || '')) : englishReply, { strictTimes });
   const tr = protectedTokens(translated, { strictTimes });
-  const missingDigits = diffCounts(en.digits, tr.digits);
+  // "one" is also how English says "a" ("I see one payment of $57.78" -> "Veo un pago de $57.78"): a 1 that
+  // the English wrote as the WORD may be left as the translation's article. Only that word and only that
+  // direction; a changed count ("un" -> "dos") is the read-back meaning check's to catch, and a digit the
+  // translation adds still holds.
+  // A 1 the English wrote as a DIGIT is never the one let go. Counts alone cannot tell the two apart, so the
+  // allowance is off whenever the English has a literal bare 1 - except the day of a named date ("Oct 1"),
+  // which the read-back's own date check keeps (calendarTokens compares month and day together).
+  // Strict mode (our reply) only: a customer's text is compared as written, with no allowance.
+  const raw = strictTimes ? protectedTokens(englishReply, { strictTimes }).digits : [];
+  const wordedOnes = strictTimes ? diffCounts(en.digits, raw).filter((d) => d === '1').length : 0;
+  const literalOnes = raw.filter((d) => d === '1').length;
+  const datedOnes = calendarTokens(String(englishReply || '')).filter((t) => /^md:\d+\/1$/.test(t)).length;
+  let spareOnes = literalOnes > datedOnes ? 0 : wordedOnes;
+  const missingDigits = diffCounts(en.digits, tr.digits).filter((d) => !(d === '1' && spareOnes-- > 0));
   const addedDigits = diffCounts(tr.digits, en.digits);
   const digits = strictTimes ? { missing: missingDigits, added: addedDigits } : pairTwentyFourHour(missingDigits, addedDigits, en, tr);
   const missing = [...diffCounts(en.links, tr.links), ...diffCounts(en.emails, tr.emails), ...digits.missing];
@@ -696,16 +756,44 @@ function durationFaults(englishReply, backTranslation) {
 }
 
 // A named date keeps its weekday and month: "Tuesday, Oct 14" is not "Thursday, Nov 14". Read off the English
-// read-back like durations. Capitalized names only ("march" and "sun" are words); "May" only beside a number.
+// read-back like durations, the day of the month with its month ("Oct 1" is not "October", nor "Oct 7").
+// Capitalized names only ("march" and "sun" are words); "May" only beside a number.
 const WEEKDAYS = ['Monday|Mon', 'Tuesday|Tues|Tue', 'Wednesday|Wed', 'Thursday|Thurs|Thur|Thu', 'Friday|Fri', 'Saturday|Sat', 'Sunday|Sun'];
 const MONTHS = ['January|Jan', 'February|Feb', 'March|Mar', 'April|Apr', 'May', 'June|Jun', 'July|Jul', 'August|Aug', 'September|Sept|Sep', 'October|Oct', 'November|Nov', 'December|Dec'];
+const ORDINAL_WORDS = ['first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth', 'ninth', 'tenth', 'eleventh', 'twelfth', 'thirteenth', 'fourteenth', 'fifteenth', 'sixteenth', 'seventeenth', 'eighteenth', 'nineteenth', 'twentieth'];
+const ORDINAL = `(?:(?:twenty|thirty)[-\\s](?:${ORDINAL_WORDS.slice(0, 9).join('|')})|thirtieth|${ORDINAL_WORDS.join('|')})`;
+const MONTH_NAME = `(?:${MONTHS.join('|')})`;
+function ordinalValue(word) {
+  const w = word.toLowerCase();
+  if (w === 'thirtieth') return 30;
+  const compound = /^(twenty|thirty)[-\s](.+)$/.exec(w);
+  return compound ? (compound[1] === 'twenty' ? 20 : 30) + ORDINAL_WORDS.indexOf(compound[2]) + 1 : ORDINAL_WORDS.indexOf(w) + 1;
+}
+// A read-back may word the day: "October first", "October the first", "the first of October". Only those two
+// date forms are read as a number; an ordinal that counts something else ("our first October visit") is not.
+const MONTH_THEN_ORDINAL_RE = new RegExp(`\\b(${MONTH_NAME}\\.?\\s+(?:the\\s+)?)(${ORDINAL})\\b(?!\\s+(?:\\p{Ll}+\\s+)?(?:visit|service|treatment|appointment|payment|application|invoice|charge)s?\\b)`, 'gu');
+const ORDINAL_OF_MONTH_RE = new RegExp(`\\b(${ORDINAL})(\\s+of\\s+${MONTH_NAME})\\b`, 'gi');
+function ordinalDigits(text) {
+  return text
+    .replace(ORDINAL_OF_MONTH_RE, (m, word, rest) => `${ordinalValue(word)}${rest}`)
+    .replace(MONTH_THEN_ORDINAL_RE, (m, lead, word) => `${lead}${ordinalValue(word)}`);
+}
 function calendarTokens(text) {
-  const str = asciiDigits(text);
+  const str = ordinalDigits(asciiDigits(text));
   const out = [];
   WEEKDAYS.forEach((names, i) => { for (const _ of str.matchAll(new RegExp(`\\b(?:${names})\\b\\.?`, 'g'))) out.push(`day:${i}`); });
   MONTHS.forEach((names, i) => {
     const re = names === 'May' ? /\bMay\b(?=\.?\s*\d)|(?<=\d(?:st|nd|rd|th)?\s+(?:of\s+)?)May\b/g : new RegExp(`\\b(?:${names})\\b`, 'g');
-    for (const _ of str.matchAll(re)) out.push(`month:${i + 1}`);
+    for (const m of str.matchAll(re)) {
+      out.push(`month:${i + 1}`);
+      // ...and its day with it ("Oct 1", "October 1st", "October the 1st", "1 Oct", "1st of October"): "Oct 1" is not "October"
+      const after = /^\.?\s*(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)?(?![\d:])/.exec(str.slice(m.index + m[0].length));
+      const before = /(?<![\d:])(\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?$/.exec(str.slice(0, m.index));
+      // a number that counts something ("2 October services") is not that month's day
+      const counted = /^\.?\s+(?:visit|service|treatment|appointment|payment|application|invoice|charge)s?\b/i.test(str.slice(m.index + m[0].length));
+      const day = after?.[1] || (counted ? null : before?.[1]);
+      if (day) out.push(`md:${i + 1}/${Number(day)}`);
+    }
   });
   return out;
 }

@@ -192,6 +192,9 @@ function normalizeForecastPayload(payload) {
       ms,
       time: etWallLabel(ms),
       precipitation_in: roundedNumber(precip[i], 3),
+      // Unrounded reading, for callers that compare a total with a threshold
+      // (exactTotal); dropped from the returned hourly rows.
+      precipitation_raw_in: finiteNumber(precip[i]),
       precipitation_probability_pct: roundedNumber(prob[i]),
       temperature_f: roundedNumber(temp[i], 1),
       humidity_pct: roundedNumber(rh[i]),
@@ -271,7 +274,7 @@ function usablePropertyPoint(lat, lon) {
   return lat != null && lon != null && Math.abs(lat) <= 90 && Math.abs(lon) <= 180 && !(lat === 0 && lon === 0);
 }
 
-function sliceForecast(entry, cached, { fromMs, toMs, keyLat, keyLon }) {
+function sliceForecast(entry, cached, { fromMs, toMs, keyLat, keyLon, exactTotal = false }) {
   // Instantaneous readings (temperature, humidity, wind) are the hour stamps in [from, to).
   const rows = entry.hourly.filter((r) => r.ms >= fromMs && r.ms < toMs);
   // Open-Meteo's hourly `precipitation` is "sum of the preceding hour": the value
@@ -287,12 +290,14 @@ function sliceForecast(entry, cached, { fromMs, toMs, keyLat, keyLon }) {
   // hours always align to.
   const byMs = new Map(entry.hourly.map((r) => [r.ms, r]));
   let total = 0;
+  let totalRaw = 0;
   let complete = false;
   for (let slot = Math.ceil(fromMs / HOUR_MS) * HOUR_MS + HOUR_MS; slot <= toMs; slot += HOUR_MS) {
     const r = byMs.get(slot);
     if (!r || r.precipitation_in == null) { complete = false; break; }
     complete = true;
     total += r.precipitation_in;
+    totalRaw += r.precipitation_raw_in ?? r.precipitation_in;
   }
   return {
     status: 'ok',
@@ -303,8 +308,12 @@ function sliceForecast(entry, cached, { fromMs, toMs, keyLat, keyLon }) {
     longitude: keyLon,
     window: { from: new Date(fromMs).toISOString(), to: new Date(toMs).toISOString() },
     current: entry.current,
-    hourly: rows.map(({ ms, ...rest }) => ({ ...rest, at: new Date(ms).toISOString() })),
+    hourly: rows.map(({ ms, precipitation_raw_in, ...rest }) => ({ ...rest, at: new Date(ms).toISOString() })),  
     precipitationInTotal: complete ? roundedNumber(total, 2) : null,
+    // Opt-in (exactTotal): the same total, summed from the unrounded readings
+    // and not rounded, for a threshold test. Absent otherwise, so every
+    // existing caller's result is unchanged.
+    ...(exactTotal ? { precipitationInTotalExact: complete ? totalRaw : null } : {}),
   };
 }
 
@@ -329,7 +338,7 @@ function sliceForecast(entry, cached, { fromMs, toMs, keyLat, keyLon }) {
 // the CALLER's deadline. `maxAgeMs` is how stale a cached result may be (0 =
 // always fetch, the result is still cached for others).
 async function fetchPropertyForecast({
-  latitude, longitude, from, to, timeoutMs = FORECAST_TIMEOUT_MS, maxAgeMs = FORECAST_CACHE_TTL_MS, now,
+  latitude, longitude, from, to, timeoutMs = FORECAST_TIMEOUT_MS, maxAgeMs = FORECAST_CACHE_TTL_MS, now, exactTotal = false,
 } = {}) {
   try {
     const lat = toCoordinate(latitude);
@@ -350,7 +359,7 @@ async function fetchPropertyForecast({
     const keyLon = Number(lon.toFixed(FORECAST_KEY_DECIMALS));
     const key = `${keyLat.toFixed(FORECAST_KEY_DECIMALS)},${keyLon.toFixed(FORECAST_KEY_DECIMALS)}|${standard ? 'std' : `${startDate}..${endDate}`}`;
 
-    const slice = (entry, cached) => sliceForecast(entry, cached, { fromMs, toMs, keyLat, keyLon });
+    const slice = (entry, cached) => sliceForecast(entry, cached, { fromMs, toMs, keyLat, keyLon, exactTotal });
 
     const hit = _forecastCache.get(key);
     if (hit && maxAgeMs > 0 && nowMs - hit.fetchedAtMs < maxAgeMs && nowMs >= hit.fetchedAtMs
@@ -377,6 +386,72 @@ async function fetchPropertyForecast({
     return slice(entry, false);
   } catch (err) {
     logger.warn(`[application-conditions] property forecast failed: ${err.message}`);
+    return forecastUnavailable('error');
+  }
+}
+
+// Quarter-hour rain total for a SHORT window (the rainfast breach watch, P31,
+// is the only caller). An hourly series cannot place rain inside a 60-minute
+// window that starts off the hour; Open-Meteo's minutely_15 series can (it is
+// the same model: the four quarter-hours stamped in an hour sum to that hour's
+// hourly value). Same stamping rule as the hourly series: the value stamped S is
+// the rain of the 15 minutes BEFORE S, so the total counts the slots with
+// S - 15 min >= from and S <= to: whole quarter-hours lying inside the window,
+// a lower bound. One slot with no reading, or no whole slot, reads null. The
+// total is summed from the unrounded readings and is NOT rounded. Past hours
+// only; not cached; fail closed.
+//   -> { status: 'ok', source: 'open_meteo', fetchedAt, precipitationInTotalExact }
+//    | { status: 'unavailable', reason, source: 'open_meteo', checkedAt }
+const QUARTER_MS = 15 * 60000;
+const QUARTER_MAX_WINDOW_MS = 48 * HOUR_MS;
+async function fetchPropertyRainQuarterHours({
+  latitude, longitude, from, to, timeoutMs = FORECAST_TIMEOUT_MS,
+} = {}) {
+  try {
+    const lat = toCoordinate(latitude);
+    const lon = toCoordinate(longitude);
+    if (!usablePropertyPoint(lat, lon)) return forecastUnavailable('no_coordinates');
+    const fromMs = toInstantMs(from);
+    const toMs = toInstantMs(to);
+    if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs <= fromMs || toMs - fromMs > QUARTER_MAX_WINDOW_MS) {
+      return forecastUnavailable('bad_window');
+    }
+    const url = new URL('https://api.open-meteo.com/v1/forecast');
+    url.searchParams.set('latitude', String(Number(lat.toFixed(FORECAST_KEY_DECIMALS))));
+    url.searchParams.set('longitude', String(Number(lon.toFixed(FORECAST_KEY_DECIMALS))));
+    url.searchParams.set('minutely_15', 'precipitation');
+    url.searchParams.set('start_date', etDateString(new Date(fromMs)));
+    url.searchParams.set('end_date', etDateString(new Date(toMs)));
+    url.searchParams.set('precipitation_unit', 'inch');
+    url.searchParams.set('timeformat', 'unixtime');
+    url.searchParams.set('timezone', 'America/New_York');
+    const res = await openMeteoJson(url, timeoutMs);
+    if (!res.ok) return forecastUnavailable(res.reason);
+    const block = res.payload?.minutely_15;
+    const times = Array.isArray(block?.time) ? block.time : [];
+    const values = Array.isArray(block?.precipitation) ? block.precipitation : [];
+    if (!times.length) return forecastUnavailable('bad_payload');
+    const bySlot = new Map();
+    times.forEach((seconds, i) => {
+      const ms = epochMs(seconds);
+      const v = values[i];
+      if (ms != null && typeof v === 'number' && Number.isFinite(v) && v >= 0) bySlot.set(ms, v);
+    });
+    let total = 0;
+    let complete = false;
+    for (let slot = Math.ceil((fromMs + QUARTER_MS) / QUARTER_MS) * QUARTER_MS; slot <= toMs; slot += QUARTER_MS) {
+      if (!bySlot.has(slot)) { complete = false; break; }
+      complete = true;
+      total += bySlot.get(slot);
+    }
+    return {
+      status: 'ok',
+      source: 'open_meteo',
+      fetchedAt: new Date().toISOString(),
+      precipitationInTotalExact: complete ? total : null,
+    };
+  } catch (err) {
+    logger.warn(`[application-conditions] quarter-hour rain failed: ${err.message}`);
     return forecastUnavailable('error');
   }
 }
@@ -933,6 +1008,7 @@ module.exports = {
   fetchApplicationConditions,
   fetchOpenMeteoConditions,
   fetchPropertyForecast,
+  fetchPropertyRainQuarterHours,
   etDayWindow,
   SERVICE_AREA_DEFAULT_LOCATION,
   fetchServiceWeekWeather,

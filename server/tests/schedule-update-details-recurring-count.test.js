@@ -1119,9 +1119,13 @@ describe('update-details wiring (source guards)', () => {
   test('the collective-move branch and the tech Quick Move flush the shared route-quality Set (codex #4295 r4 P2)', () => {
     const dispatchSrc = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
     expect(dispatchSrc).not.toContain('groupedQualityDates');
-    const start = dispatchSrc.indexOf('if (result.seriesMoveId) {');
-    const branch = dispatchSrc.slice(start, dispatchSrc.indexOf('return res.json({', start));
-    expect(branch).toContain('emitDispatchJobUpdate({ jobId: movedId, actorId: req.technicianId, qualityDates })');
+    // The single-visit move lives in moveVisitForStaff (shared by the route
+    // and Edit appointment); its series-widened effects are their own step
+    // and answer through moveReply.
+    const start = dispatchSrc.indexOf('async function applySeriesWidenedMoveEffects(');
+    expect(start).toBeGreaterThan(-1);
+    const branch = dispatchSrc.slice(start, dispatchSrc.indexOf('return moveReply(200, {', start));
+    expect(branch).toContain('emitDispatchJobUpdate({ jobId: movedId, actorId: actor.technicianId, qualityDates })');
     expect(branch).toContain('await flushDispatchQualityDates(qualityDates);');
     const techSrc = fs.readFileSync(path.join(__dirname, '../routes/tech-track.js'), 'utf8');
     expect(techSrc).toContain("flushDispatchQualityDates(new Set(result.qualityDates))");

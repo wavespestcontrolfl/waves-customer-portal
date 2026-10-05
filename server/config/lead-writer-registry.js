@@ -167,6 +167,16 @@ const LEAD_WRITERS = [
     identityResolver: 'existingLead',
   },
   {
+    file: 'services/lead-unverified-hold.js',
+    anchor: "const [lead] = await trx('leads').insert({",
+    context: 'holdUnverifiedLead — website form posted with no Turnstile token (customer-less hold for the office)',
+    // Inline lookup under a per-phone advisory lock: an earlier hold from the
+    // same phone inside 24 hours is reused. It never attaches to a verified
+    // or call lead: the submitter has no proven identity.
+    identityResolver: 'prior',
+    note: 'inline same-phone match on earlier unverified holds (24h); deliberately no match against verified leads',
+  },
+  {
     file: 'services/lead-estimate-link.js',
     anchor: "const [minted] = await database('leads').insert({",
     context: 'attributeSelfBooking — self-serve booking with no prior lead',

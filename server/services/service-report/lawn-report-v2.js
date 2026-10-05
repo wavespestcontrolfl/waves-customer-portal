@@ -20,6 +20,7 @@ const { lawnReportLeadLive } = featureGates;
 const { buildProgramLine } = require('./lawn-program-line');
 const { crossSeasonNote, crossSeasonNoteFromSeasons, dormancyLikely, approvedSeasonalDipRow } = require('./lawn-seasonality');
 const { photoZoneLabel } = require('../lawn-visit-input');
+const { filterByCardStatus } = require('./lawn-photo-findings');
 const { NO_OBSERVATIONS } = require('../lawn-visit-customer-copy');
 const {
   LEGACY_WATER_IN_COPY,
@@ -845,6 +846,12 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
 
   return {
     snapshot, diagnosis: displayDiagnosis, insights, water, mowing, treatment, heroPhoto, photos: photoList, photoSummary,
+    // GATE_LAWN_REPORT_PHOTO_SET (P23): only a visit with a built set carries the key.
+    ...(Array.isArray(lawnAssessment.photoSet) && lawnAssessment.photoSet.length ? { photoSet: lawnAssessment.photoSet } : {}),
+    // GATE_LAWN_REPORT_PHOTO_FINDINGS: the key (an array, empty when every finding
+    // is hidden by its category card) exists only where a block was built.
+    ...(Array.isArray(lawnAssessment.photoSet) && lawnAssessment.photoSet.length && Array.isArray(lawnAssessment.photoFindings) && lawnAssessment.photoFindings.length
+      ? { photoFindings: filterByCardStatus(lawnAssessment.photoFindings, displayDiagnosis) } : {}),
     beforeAfter, progression, progressionNote, aftercare, smsSummary, trends,
   };
 }

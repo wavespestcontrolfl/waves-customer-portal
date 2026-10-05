@@ -117,7 +117,16 @@ async function createAlert({ type, severity, techId, jobId, payload, trx } = {})
   return captured;
 }
 
-async function createAlertOnce({ type, severity, techId, jobId, payload, trx, existingPayloadSource } = {}) {
+async function createAlertOnce({
+  type,
+  severity,
+  techId,
+  jobId,
+  payload,
+  trx,
+  existingPayloadSource,
+  existingPayloadServiceRecordId,
+} = {}) {
   if (!type) {
     throw new Error('createAlertOnce: type is required');
   }
@@ -146,6 +155,9 @@ async function createAlertOnce({ type, severity, techId, jobId, payload, trx, ex
       .whereNull('resolved_at');
     if (existingPayloadSource) {
       existingQuery.whereRaw("payload->>'source' = ?", [existingPayloadSource]);
+    }
+    if (existingPayloadServiceRecordId) {
+      existingQuery.whereRaw("payload->>'serviceRecordId' = ?", [String(existingPayloadServiceRecordId)]);
     }
     const existing = await existingQuery
       .orderBy('created_at', 'desc')

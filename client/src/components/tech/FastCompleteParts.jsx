@@ -24,7 +24,9 @@ const TIP_PREVIEW_COUNT = 4;
 // Mirrors MAX_CUSTOM_TIP_CHARS (server tip-library.js): the server rejects a
 // longer line, never trims it.
 const CUSTOM_TIP_MAX_CHARS = 240;
-const MIC_PALETTE = { accent: '#e2e8f0', muted: '#334155', red: '#ef4444', card: '#1e293b' };
+// The mic on the light sheet: ink outline at rest, filled ink while it listens
+// (`red` is DictationButton's listening colour; the admin look keeps red for errors).
+const MIC_PALETTE = { accent: '#1c1917', muted: '#d6d3d1', red: '#1c1917', card: '#ffffff' };
 
 export const unitLabel = (unit) => String(unit || '').replace(/_/g, ' ');
 export const methodLabel = (value) => {
@@ -443,16 +445,20 @@ export function VisitNote({ note, onChange, onDictated, onDictationPending, serv
 
 // The tip library, read on its own: the picker is optional, so a slow or
 // failed read never holds the sheet. null until it arrives, and when the
-// read fails or the tips gate is off.
-export function useTipLibrary({ base, request }) {
+// read fails or the tips gate is off. `refreshKey` reads it again when it
+// changes (the lawn sheet passes its confirmed assessment, which re-ranks the
+// list). A re-read that FAILS keeps the tips on screen; one that answers
+// unavailable (the tips gate went off) clears them, since the server would drop
+// the pick.
+export function useTipLibrary({ base, request, refreshKey = null }) {
   const [library, setLibrary] = useState(null);
   useEffect(() => {
     let active = true;
     request(`${base}/tech-tips`)
       .then((data) => { if (active) setLibrary(data?.available === true ? data : null); })
-      .catch(() => { if (active) setLibrary(null); });
+      .catch(() => {});
     return () => { active = false; };
-  }, [base, request]);
+  }, [base, request, refreshKey]);
   return library;
 }
 
@@ -503,8 +509,11 @@ function TipOption({ tip, library, pressed, locked, onPick }) {
 // One tip per service visit, from this visit's options: a short list first,
 // the whole list behind "Show all", search across all of it, or the tech's
 // own line. Only the id (or the typed line) goes on the wire; the server
-// resolves and freezes the copy.
-export function TipSection({ library, tipId, customTip, locked, onPick, onCustom }) {
+// resolves and freezes the copy. `priorityTipIds` (optional, the tree & shrub
+// sheet's seen watch items) lifts those tips above the list under their own
+// heading, in library order; a search ignores it, and nothing is ever picked
+// for the tech.
+export function TipSection({ library, tipId, customTip, locked, onPick, onCustom, priorityTipIds }) {
   const [query, setQuery] = useState('');
   const [showAll, setShowAll] = useState(false);
   const [writing, setWriting] = useState(false);
@@ -513,7 +522,14 @@ export function TipSection({ library, tipId, customTip, locked, onPick, onCustom
     [library],
   );
   const q = query.trim().toLowerCase();
-  const { tips: visible, noMatch } = visibleTips(allTips, { query: q, showAll, tipId });
+  const priority = useMemo(() => {
+    if (!priorityTipIds?.length) return [];
+    const ids = new Set(priorityTipIds);
+    return allTips.filter((tip) => ids.has(tip.id));
+  }, [allTips, priorityTipIds]);
+  const lifted = !q && priority.length > 0;
+  const rest = lifted ? allTips.filter((tip) => !priority.includes(tip)) : allTips;
+  const { tips: visible, noMatch } = visibleTips(rest, { query: q, showAll, tipId });
   const hasPick = !!tipId || !!customTip.trim();
   const writingOwn = writing || !!customTip;
   return (
@@ -525,6 +541,17 @@ export function TipSection({ library, tipId, customTip, locked, onPick, onCustom
       <Field label="Search tips" className="tech-visit-field">
         <Input className="tech-visit-control" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="e.g. ants, porch light" />
       </Field>
+      {lifted && (
+        <>
+          <h4 className="tech-visit-muted">For what you saw today</h4>
+          <div className="tech-visit-tip-list">
+            {priority.map((tip) => (
+              <TipOption key={tip.id} tip={tip} library={library} pressed={tip.id === tipId} locked={locked} onPick={onPick} />
+            ))}
+          </div>
+          <h4 className="tech-visit-muted">Other tips</h4>
+        </>
+      )}
       <div className="tech-visit-tip-list">
         {visible.map((tip) => (
           <TipOption key={tip.id} tip={tip} library={library} pressed={tip.id === tipId} locked={locked} onPick={onPick} />
@@ -532,7 +559,7 @@ export function TipSection({ library, tipId, customTip, locked, onPick, onCustom
         {noMatch && <p className="tech-visit-muted">No tips match.</p>}
       </div>
       <div className="tech-visit-tile-grid">
-        {!q && allTips.length > TIP_PREVIEW_COUNT && (
+        {!q && rest.length > TIP_PREVIEW_COUNT && (
           <Chip disabled={locked} label={showAll ? 'Show fewer' : 'Show all'} onClick={() => setShowAll((on) => !on)} />
         )}
         {!writingOwn && <Chip disabled={locked} label="Write your own" onClick={() => setWriting(true)} />}

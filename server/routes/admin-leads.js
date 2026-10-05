@@ -2043,8 +2043,8 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
         }
       }
 
-      // ---- SLOT-OVERLAP GUARD, part 2: tech-blind conflict probe exactly as
-      // booking.js createSelfBooking, immediately before the insert — after
+      // ---- SLOT-OVERLAP GUARD, part 2: conflict probe as booking.js
+      // createSelfBooking, immediately before the insert — after
       // the converted-lead guard and DUPLICATE_VISIT dedupe above (see part 1
       // merge note). Runs for first conversions and rebooks alike. A hit is
       // ADVISORY (owner ruling 2026-08-25, same as routes/admin-schedule.js —
@@ -2060,6 +2060,11 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
           // false overlap note — same admin exclusion set every other staff
           // probe uses (one copy: scheduling/window-rules.js).
           excludeStatuses: require('../services/scheduling/window-rules').ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+          // The technician the row is inserted with below (staff-picked, no
+          // offer side): with two technicians, another technician's customer
+          // is not an overlap warning. Gate-dark (occupancy.js header);
+          // unassigned rows still warn.
+          technicianId: technicianId || null,
         });
         if (clash.length) {
           bookingWarnings.push(slotOverlapWarning(occupancyDate));

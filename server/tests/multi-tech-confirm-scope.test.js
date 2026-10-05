@@ -88,7 +88,7 @@ describe('findConflictingVisits technicianId scope', () => {
     expect(q.calls.orWhere).toContainEqual(['scheduled_services.technician_id', 'tech-b']);
   });
 
-  test('gate + capacity on but no technicianId (admin, rebooker, phone agent): tech-blind', async () => {
+  test('gate + capacity on but no technicianId (rebooker series, availability, unassigned rows): tech-blind', async () => {
     process.env.GATE_SCHEDULING_CAPACITY = 'true';
     process.env.GATE_MULTI_TECH_CONFIRM = 'true';
     const q = makeQuery(); db.mockReturnValue(q);
@@ -115,11 +115,42 @@ describe('wiring', () => {
     expect(src.slice(probeIdx, probeIdx + 700)).toContain('technicianId: technician_id || null');
   });
 
-  test('public reschedule probe opts in only via capacityPlacement (the public reschedule flag)', () => {
+  // Owner 2026-10-03, "Moves": the move probe is scoped to the technician the row is SAVED with
+  // (every caller builds target.technicianId from its own write), no longer only under
+  // capacityPlacement (which also switches on insertion placement and stays as it was). The
+  // grouped-visit mover and the tech-out preview opt out with occupancyTechBlind.
+  test('move probe scopes to target.technicianId unless the caller opts out via occupancyTechBlind', () => {
     const src = read('services/rebooker.js');
     const idx = src.indexOf('async function probeMoveConflicts');
-    const block = src.slice(idx, idx + 3200);
-    expect(block).toMatch(/options\.capacityPlacement === true && target\.technicianId\s*\?\s*\{ technicianId: target\.technicianId \}/);
+    const block = src.slice(idx, idx + 4800);
+    expect(block).toMatch(/options\.occupancyTechBlind !== true && target\.technicianId\s*\?\s*\{ technicianId: target\.technicianId \}/);
+    // The scope no longer rides capacityPlacement (insertion placement keeps its own switch).
+    expect(block).not.toContain('capacityPlacement === true && target.technicianId');
+    expect(src).toContain("options.capacityPlacement === true && placementWindowChanged && keptTechId");
+  });
+
+  test('move paths hand the probe the technician they WRITE: day options, series disclosure, unit move, tech-out, rain-out advisory', () => {
+    const rebooker = read('services/rebooker.js');
+    // Day-option builder: the visit's own technician (rain-out and the admin picker keep it).
+    const optIdx = rebooker.indexOf('async findRescheduleOptions');
+    expect(rebooker.slice(optIdx, optIdx + 9000)).toContain('technicianId: service.technician_id || null,');
+    // Series disclosure check = the follower's own technician, like the sweep probe.
+    const discIdx = rebooker.indexOf('const clash = await findConflictingVisits({', rebooker.indexOf('const needsReviewedOccurrences'));
+    expect(rebooker.slice(discIdx, discIdx + 900)).toContain('technicianId: row.technician_id || null,');
+    // A grouped unit move that names a technician keeps member probes tech-blind.
+    const groups = read('services/visit-groups.js');
+    expect(groups).toMatch(/techProbeOpts = Object\.prototype\.hasOwnProperty\.call\(options, 'technicianId'\)\s*\? \{ occupancyTechBlind: true \} : \{\}/);
+    expect(groups).toContain('...noticeOpts, ...techProbeOpts, expect: primaryExpect');
+    expect(groups).toContain('...noticeOpts, ...techProbeOpts, expect: { ...target.expect, ...optOutFence }');
+    // Tech-out's preview targets the ABSENT technician, so it stays the tech-blind selection gate.
+    expect(read('services/tech-out-auto-move.js')).toContain('previewMoveConflicts(stop.id, date, window, { occupancyTechBlind: true })');
+    // Auto-dispatch's all-day candidate read stays tech-blind (explicit null): its commit may be
+    // more permissive than the offer, never stricter.
+    expect(read('services/auto-dispatch/candidate-slots.js')).toMatch(/windowEnd: FULL_DAY_PROBE_WINDOW\.end,\s*technicianId: null,/);
+    // Rain-out's Quick Move advisory judges the same route commit probes.
+    const rain = read('services/rain-out.js');
+    expect(rain).toContain('technicianId: service.technician_id');
+    expect((rain.match(/technicianId: service\.technician_id/g) || []).length).toBe(3); // getOptions presets, checkTarget, route-scope probe
   });
 
   // Owner ruling 2026-10-03: with two technicians, staff booking or moving a
@@ -127,8 +158,9 @@ describe('wiring', () => {
   // customer. admin-schedule.js therefore passes the row's technician to its
   // advisory probes (create, recurring children/boosters, the series
   // destination guard); occupancy.js still ignores it unless the gate and
-  // capacity mode are on. The callers below were not ruled on and stay
-  // tech-blind.
+  // capacity mode are on. The same ruling covers the four callers below,
+  // whose saved row already carries a technician; the rest were not ruled on
+  // and stay tech-blind.
   test('admin create and series probes pass the row technician (advisory, gate-scoped in occupancy.js)', () => {
     const src = read('routes/admin-schedule.js');
     for (const pin of ['technicianId: insertData.technician_id || null', 'technicianId: childData.technician_id || null',
@@ -137,10 +169,71 @@ describe('wiring', () => {
     }
   });
 
+  // The slice from the call to its closing `});` must carry the pin, so a
+  // technicianId added to some OTHER probe in the file does not satisfy it.
+  const probeBlock = (src, call) => {
+    const i = src.indexOf(call);
+    expect(i).toBeGreaterThan(-1);
+    return src.slice(i, src.indexOf('});', i));
+  };
+
+  test('phone agent commit probe passes the technician the offer row is written with', () => {
+    const block = probeBlock(read('services/voice-agent/relay-booking.js'), 'const clash = await findConflictingVisits({');
+    expect(block).toContain('technicianId: insertRow.technician_id || null');
+  });
+
+  test('call follow-up re-spacing probe passes the child technician (the write CASes on it)', () => {
+    const src = read('services/call-booking-catalog.js');
+    expect(probeBlock(src, 'await findConflictingVisits({')).toContain('technicianId: k.technician_id || null');
+    expect(src).toContain('technician_id: k.technician_id ?? null,');
+  });
+
+  test('staff lead booking probe passes the technician the row is inserted with', () => {
+    const src = read('routes/admin-leads.js');
+    expect(probeBlock(src, 'const clash = await findConflictingVisits({')).toContain('technicianId: technicianId || null');
+    expect(src).toContain('technician_id: technicianId || null,');
+  });
+
+  test('completion follow-up dry-run probe passes the resolved technician; the write path is unchanged', () => {
+    const src = read('services/completion-followup-booking.js');
+    expect(probeBlock(src, 'const overlap = insertData.window_start && insertData.window_end')).toContain('technicianId: wouldTechnicianId || null');
+    // commitFollowup still probes through window-rules' probeSlotOverlap
+    // (tech-blind, runs before the inherited technician is final).
+    expect(src).toContain('await probeSlotOverlap({ trx, date,');
+  });
+
+  test('after-call booking: the picked technician is the one fenced, probed and saved', () => {
+    const src = read('services/call-recording-processor.js');
+    // Fresh insert: pick → fence → probe → insert all use bookingTechnicianId.
+    expect(src).toContain("require('./scheduling/pick-technician').pickTechnicianForVisit({");
+    expect(src).toContain('fenceBookingDay(fenceSp, { date: scheduledDate, techId: bookingTechnicianId || null })');
+    expect(src).toContain('technicianId: bookingTechnicianId || null,');
+    expect(src).toContain('technician_id: bookingTechnicianId,');
+    expect(src).not.toContain('technician_id: defaultTechnicianId,');
+    // Reused unassigned row: the pick excludes the row itself.
+    expect(src).toMatch(/excludeServiceIds: \[existing\.id\],\s+excludeCustomerId: null,/);
+    // …and reads the row's OWN day and window, not the time this call stated.
+    expect(src).toContain('date: callBookingDateOnly(existing.scheduled_date),');
+    expect(src).toContain('followUpProbeEnd(existing.window_start, existing.window_end, existing.estimated_duration_minutes)');
+    expect(src).toContain('let reuseTechId = reuseCandidateTechId;');
+    expect(src).toContain('serviceType: existing.service_type || serviceType,');
+    // A pick taken before the fence is re-made under it when the fenced read clashes.
+    expect(src).toContain('if (bookingTechnicianPicked && bookingTechnicianId && (bookingTimeConflicts.length || pickedTechnicianBlocked)) {');
+    expect(src).toContain('const repick = await pickBookingTechnician();');
+    // A picked technician's capability is re-read under the share lock at save (fresh + reused).
+    expect(src.match(/assertCapabilitiesActive\(trx, (insertData\.technician_id|reuseTechId),/g)).toHaveLength(2);
+    // The reused row's pick is re-read under the tech-day locks, excluding only that row.
+    expect(src).toContain('if (reuseTechId && reuseTechPicked && existing.window_start) {');
+    expect(src).toMatch(/technicianFreeAt\(\{\s+conn: probeSp, technicianId: reuseTechId,[^}]*excludeServiceIds: \[existing\.id\],/);
+    // Post-commit recheck judges each fresh row on its own technician.
+    expect(src).toContain('technicianId: svc.technician_id || null,');
+    expect(src).toContain('technicianId: followUpCreated.technician_id || null,');
+    expect(src).toContain('technicianId: visit.technicianId || null,');
+  });
+
   test('callers that must stay tech-blind never pass technicianId', () => {
-    for (const p of ['routes/admin-leads.js', 'services/scheduling/window-rules.js',
-      'services/availability.js', 'services/slot-reservation.js', 'services/voice-agent/relay-booking.js',
-      'services/call-booking-catalog.js', 'services/visit-groups.js', 'services/completion-followup-booking.js',
+    for (const p of ['services/scheduling/window-rules.js',
+      'services/availability.js', 'services/slot-reservation.js', 'services/visit-groups.js',
       'services/annual-prepay-renewals.js']) {
       expect(read(p)).not.toMatch(/findConflictingVisits\(\{[^}]*technicianId/s);
     }

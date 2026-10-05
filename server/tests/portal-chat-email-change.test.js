@@ -25,11 +25,13 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
+jest.mock('../services/agent-gap-reports', () => ({ recordGap: jest.fn(async () => {}) }));
 const mockCreate = jest.fn();
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({ messages: { create: mockCreate } })));
 
 const db = require('../models/db');
 const NotificationService = require('../services/notification-service');
+const { recordGap } = require('../services/agent-gap-reports');
 const assistant = require('../services/ai-assistant/assistant');
 const { portalToolsFor, executeToolCall, emailReadBackAwaitingAnswer } = require('../services/ai-assistant/tools');
 
@@ -133,6 +135,7 @@ test('confirmed after the read-back: one bell with both addresses, and the reply
   expect(headline).toBe("Customers — Change Pat Sample's email");
   expect(why).toBe('Pat Sample confirmed a new email address in portal chat');
   expect(opts.detail).toBe(`Email on file: pat.old@example.com\nNew email, confirmed by the customer in portal chat: ${NEW}\n\nCustomer's message: Yes, that is right`);
+  expect(opts.refreshOnDedupe).toBe(false);
   expect(opts).toEqual(expect.objectContaining({ bell: true, link: '/admin/customers?customerId=cust-1', dedupeKey: 'portal-chat-email-change:conv-1:pat.new@example.com' }));
   // Saved as an account change, whatever the confirming message says.
   expect(db.__bindings[0]).toContain('account_change');
@@ -227,6 +230,62 @@ test('the lane\'s fallback hand-off is saved as an account change, and only unde
   expect(db.__bindings[1]).toContain('schedule_change');
 });
 
+test('an address too long for the account beside another hand-off: that hand-off names the email request', async () => {
+  const long = `${'a'.repeat(140)}@example.com`;
+  const message = `Change my email to ${long} and quote the mosquito add-on`;
+  chat = [{ role: 'user', content: message }];
+  mockCreate.mockResolvedValueOnce({ content: [
+    { type: 'tool_use', id: 't0', name: 'escalate', input: { reason: 'wants mosquito service quoted', topic: 'add_service' } },
+    { type: 'tool_use', id: 't1', name: 'request_email_change', input: { new_email: long, customer_confirmed: false } },
+  ] });
+
+  const result = await say(message);
+
+  expect(result.escalated).toBe(true);
+  expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  const [, headline, , opts] = NotificationService.notifyAdmin.mock.calls[0];
+  expect(headline).toBe('Comms — Reply to a portal chat request');
+  expect(opts.detail).toBe(`The customer also asked to change their email, and the chat could not take the new address: it is in the message below\n\nCustomer's message: ${message}`);
+  expect(db.__bindings[0].some((value) => String(value).includes('wants mosquito service quoted. The customer also asked to change their email'))).toBe(true);
+});
+
+test('a second need handed off beside the confirmed change rides on the same bell and saved row', async () => {
+  mockCreate.mockResolvedValueOnce({ content: [
+    { type: 'tool_use', id: 't0', name: 'escalate', input: { reason: 'wants mosquito service quoted', topic: 'add_service' } },
+    { type: 'tool_use', id: 't1', name: 'request_email_change', input: { new_email: NEW, customer_confirmed: true } },
+  ] });
+
+  await say(afterReadBack('Yes, and can you quote the mosquito add-on'));
+
+  expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  const detail = NotificationService.notifyAdmin.mock.calls[0][3].detail;
+  expect(detail).toMatch(new RegExp(`confirmed by the customer in portal chat: ${NEW.replace(/\./g, '\\.')}\nThe customer also asked about adding a service: wants mosquito service quoted\n\nCustomer's message:`));
+  expect(db.__bindings[0].some((value) => String(value).includes('The customer also asked about adding a service: wants mosquito service quoted'))).toBe(true);
+  // It rewrites a bell already standing for this change; a plain confirmation does not.
+  expect(NotificationService.notifyAdmin.mock.calls[0][3].refreshOnDedupe).toBe(true);
+  // Against a standing bell that carries another request, the rewrite keeps that request.
+  const { standingRefresh } = NotificationService.notifyAdmin.mock.calls[0][3];
+  const standing = detail.replace('adding a service: wants mosquito service quoted', 'an account change: new gate code');
+  expect(standingRefresh({ detail: standing }).detail).toBe(detail.replace('\n\nCustomer', '\nThe customer also asked about an account change: new gate code\n\nCustomer'));
+  // Nothing extra on the standing bell: the plain rewrite.
+  expect(standingRefresh({ detail })).toBeNull();
+});
+
+test('an address longer than the account can hold is handed off, never read back', async () => {
+  const long = `${'a'.repeat(140)}@example.com`;
+  chat = [{ role: 'user', content: `Change it to ${long}` }];
+
+  const result = await executeToolCall('request_email_change', { new_email: long, customer_confirmed: false }, 'cust-1', [], null,
+    { emailChange: true, conversationId: 'conv-1', customerMessage: chat[0].content });
+  const fits = await executeToolCall('request_email_change', { new_email: long.slice(2), customer_confirmed: false }, 'cust-1', [], null,
+    { emailChange: true, conversationId: 'conv-1', customerMessage: `Change it to ${long.slice(2)}` });
+
+  expect(long.length).toBe(152);
+  expect(result).toEqual(expect.objectContaining({ sent: false, hand_off: true, instruction: expect.stringMatching(/longer than the account can hold/) }));
+  expect(result).not.toHaveProperty('read_back');
+  expect(fits.read_back).toBe(long.slice(2));
+});
+
 test('a confirmed change and an escalate call in one reply ring one bell, the one with the address', async () => {
   mockCreate.mockResolvedValueOnce({ content: [
     { type: 'tool_use', id: 't0', name: 'escalate', input: { reason: 'email change', topic: 'account_change' } },
@@ -237,6 +296,18 @@ test('a confirmed change and an escalate call in one reply ring one bell, the on
 
   expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
   expect(NotificationService.notifyAdmin.mock.calls[0][3].detail).toMatch(/New email, confirmed/);
+});
+
+test('another account change beside the confirmed email is carried too, and a gap is filed under its own reason', async () => {
+  mockCreate.mockResolvedValueOnce({ content: [
+    { type: 'tool_use', id: 't0', name: 'escalate', input: { reason: 'new gate code is needed on the account', topic: 'account_change', not_supported: true } },
+    { type: 'tool_use', id: 't1', name: 'request_email_change', input: { new_email: NEW, customer_confirmed: true } },
+  ] });
+
+  await say(afterReadBack('Yes, and my gate code changed too'));
+
+  expect(NotificationService.notifyAdmin.mock.calls[0][3].detail).toMatch(/The customer also asked about an account change: new gate code is needed on the account/);
+  expect(recordGap.mock.calls[0][0]).toEqual(expect.objectContaining({ summary: 'new gate code is needed on the account' }));
 });
 
 test('when the bell does not ring the customer is not told the team has it', async () => {
@@ -370,4 +441,35 @@ test.each(['PORTAL_CHAT_DEADLINE', 'ABORT_ERR', '57014', 'AbortError', 'KnexTime
       { emailChange: true, conversationId: 'conv-1', customerMessage: NEW }, turn);
   await expect(result).rejects.toBe(error);
   expect(turn.query).toHaveBeenCalledTimes(stage === 'email change customer' ? 2 : 1);
+});
+
+test('the coordinated turn path carries the same extras to the saved row, the bell and the gap', async () => {
+  const insertEscalation = jest.fn(() => ({ returning: async () => [{ id: 'esc-turn' }] }));
+  const trx = Object.assign(jest.fn((table) => {
+    if (table === 'customers') return { where: jest.fn().mockReturnThis(), whereNull: jest.fn().mockReturnThis(), first: async () => customer };
+    if (table === 'ai_escalations') return { where: () => ({ first: async () => null }), insert: insertEscalation };
+    return { where: jest.fn().mockReturnThis(), update: async () => 1, insert: () => ({ onConflict: () => ({ ignore: async () => [1] }) }) };
+  }), { transaction: async (work) => work(trx) });
+  const turn = {
+    requestRowId: 'request-row-email',
+    assertActive: jest.fn(),
+    fallbackExtras: () => ({}),
+    persistCommittedResult: jest.fn(async (_executor, result) => result),
+    rememberCommittedResult: jest.fn((result) => result),
+    transaction: async (_stage, work) => work(trx),
+  };
+  const notify = jest.spyOn(assistant, 'notifyTeamOfEscalation').mockResolvedValue(true);
+  const alsoAsked = { topic: 'add_service', reason: 'wants mosquito service quoted' };
+
+  await assistant.escalate({ id: 'conv-1', customer_id: 'cust-1', channel: 'portal_chat' }, 'Yes, and quote mosquito',
+    'Customer confirmed a new email address in portal chat', { gap: true, topic: 'account_change', newEmail: NEW, alsoAsked, turn });
+  await assistant.escalate({ id: 'conv-1', customer_id: 'cust-1', channel: 'portal_chat' }, 'quote mosquito, and my email',
+    'wants mosquito service quoted', { topic: 'add_service', emailUnchecked: true, turn });
+
+  expect(insertEscalation.mock.calls[0][0].summary).toContain('The customer also asked about adding a service: wants mosquito service quoted');
+  expect(notify.mock.calls[0][0]).toEqual(expect.objectContaining({ newEmail: NEW, alsoAsked }));
+  expect(recordGap.mock.calls[0][0]).toEqual(expect.objectContaining({ summary: 'wants mosquito service quoted' }));
+  expect(insertEscalation.mock.calls[1][0].summary).toContain('The customer also asked to change their email');
+  expect(notify.mock.calls[1][0]).toEqual(expect.objectContaining({ emailUnchecked: true }));
+  notify.mockRestore();
 });

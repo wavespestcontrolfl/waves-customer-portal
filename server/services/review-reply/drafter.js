@@ -76,7 +76,7 @@ const MODE_RULES = {
   },
 };
 
-const STOCK_PHRASE_RE = /\b(kind words|means the world|we(?:'re| are) thrilled|overjoyed|delighted to hear|made our day|thank you so much for taking the time|taking the time to (share|leave|write)|we appreciate your business|your feedback is important|we strive|pest and lawn team|down here|here in the neighborhood)\b/i;
+const STOCK_PHRASE_RE = /\b(means the world|we(?:'re| are) thrilled|overjoyed|delighted to hear|made our day|thank you so much for taking the time|taking the time to (share|leave|write)|we appreciate your business|your feedback is important|we strive|pest and lawn team|down here|here in the neighborhood)\b/i;
 const EMOJI_RE = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\u{2190}-\u{21FF}\u{2B00}-\u{2BFF}]/u;
 const URL_RE = /(?:https?:\/\/|www\.)|\b(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}\/[^\s]+|\b[a-z0-9][a-z0-9-]*\.(?:com|net|org|io|co|us|biz|info|page|app|gl|ly|me)\b/i;
 const EMAIL_RE = /[\w.+-]+@[\w-]+\.[\w.]+/;
@@ -761,6 +761,30 @@ function checkServiceClaims(ctx) {
 // complexity reason as checkServiceClaims (round-4 P2); returns a reject
 // object, or null when every experience claim (and the interaction gate) is
 // clear.
+// "kind" in a thank-you aimed at the reviewer is not a claim (owner
+// 2026-10-03). This is an ALLOWLIST of two acknowledgment shapes, each read
+// inside one clause; everything else falls through to the ordinary provenance
+// check, so adverse or counterfactual copy ("your kind words were unwanted",
+// "it would have been kind of you") is refused like any unsourced claim:
+//   1. <thank you|thanks|appreciate|grateful|thankful> ... <the|your|those|
+//      these|such> kind <words|review|note|feedback|comments|remarks|message>
+//      (names for the review itself: a referral is a separate act).
+//   2. <that is|that was|it is|it was|so|very|really|how> kind of you.
+// A negated occurrence passes only in the two affirmative idioms "can't thank
+// you enough" and "couldn't be more grateful / thankful" (codex #5788 r1-r5).
+const KIND_ACK_BEFORE_RE = /\b(?:thank\s+you|thanks|appreciate[sd]?|grateful|thankful)\b[^.!?;,]{0,30}\b(?:the|your|those|these|such)\s+(?:(?:very|truly|really|so|incredibly|extremely|most)\s+){0,2}$/;
+const KIND_REVIEW_NOUN_RE = /^kind\s+(?:words|review|note|feedback|comments?|remarks?|message)\b/;
+const KIND_OF_YOU_BEFORE_RE = /\b(?:that\s+is|that's|that\s+was|it\s+is|it's|it\s+was|so|very|really|how)\s+$/;
+const KIND_AFFIRMATIVE_IDIOM_RE = /\b(?:can't|cannot|can\s+not|couldn't|could\s+not)\s+thank\s+you\s+enough\b|\b(?:couldn't|could\s+not)\s+be\s+more\s+(?:grateful|thankful)\b/;
+function isReviewerThanksKind(bodyLower, idx, bodyNeg) {
+  const after = bodyLower.slice(idx);
+  // The clause this "kind" sits in: an idiom or lead-in in an earlier
+  // sentence never vouches for it.
+  const before = bodyLower.slice(Math.max(0, idx - 80), idx).split(/[.!?;,]/).pop();
+  if (/^kind\s+of\s+you\b/.test(after)) return KIND_OF_YOU_BEFORE_RE.test(before) && !isNegatedAt(idx, bodyNeg);
+  if (!KIND_REVIEW_NOUN_RE.test(after) || !KIND_ACK_BEFORE_RE.test(before)) return false;
+  return !isNegatedAt(idx, bodyNeg) || KIND_AFFIRMATIVE_IDIOM_RE.test(before);
+}
 function checkExperienceClaims(ctx) {
   const {
     body, grounding, reviewWords, reviewLower, canonReview, reviewNeg, canonNeg,
@@ -774,6 +798,18 @@ function checkExperienceClaims(ctx) {
     const t = term.toLowerCase().replace(/\s+/g, ' ');
     const stem = stemOf(t.replace(/[- ]/g, ' '));
     const flat = t.replace(/[- ]+/g, ' ');
+    if (t === 'kind') {
+      if (isReviewerThanksKind(bodyLower, termIdx, bodyNeg)) continue;
+      // "kind <words|note|message|...>" outside the allowlist needs the WHOLE
+      // phrase un-negated in the review: a bare "kind" there must not source
+      // "Marcus had kind words for you" or "Marcus wrote a kind note". With
+      // the phrase present, the ordinary checks below decide.
+      const kindNoun = bodyLower.slice(termIdx).match(KIND_REVIEW_NOUN_RE);
+      if (kindNoun) {
+        const phrase = kindNoun[0].replace(/\s+/g, ' ');
+        if (allOccurrencesNegated(reviewLower.replace(/\s+/g, ' '), phrase, negationIndex(reviewLower.replace(/\s+/g, ' '))) !== false) return reject('unlisted_experience_claim', phrase);
+      }
+    }
     const support = (() => {
       const lit = allOccurrencesNegated(reviewLower.replace(/[- ]+/g, ' '), flat, negationIndex(reviewLower.replace(/[- ]+/g, ' ')));
       const can = allOccurrencesNegated(canonReview, canonPhrase(t), canonNeg);
@@ -1138,7 +1174,7 @@ HARD RULES (a reply breaking any of these is discarded):
 - Never state an address, date, dollar amount, phone number, email, or link.
 - No incentives of any kind (discount, free, credit, gift, reward). Never ask for stars or for the review to be changed.
 - No safety claims ("safe", "non-toxic", "EPA"), no re-entry or drying times, no guarantees or warranties, no "best"/"#1" claims, no competitor names.
-- No emoji in the body. No em dashes. No stock phrases: "kind words", "means the world", "thrilled", "delighted to hear", "made our day", "taking the time to", "pest and lawn team", "down here", "here in the neighborhood".
+- No emoji in the body. No em dashes. No stock phrases: "means the world", "thrilled", "delighted to hear", "made our day", "taking the time to", "pest and lawn team", "down here", "here in the neighborhood".
 - Do not repeat the openings or phrasing of the recent replies you are shown.
 - Do not summarize the review back to the reviewer.
 

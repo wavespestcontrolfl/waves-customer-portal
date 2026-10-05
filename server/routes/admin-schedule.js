@@ -45,7 +45,7 @@ const {
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
-const { resolveBillingLane, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, isSiblingCoverageEligibleVisit, sameTripFirstApplicationBreakdown, collectionStateForCoveredInvoice } = require('../services/billing-lane');
+const { resolveBillingLane, isMembershipDuesShapedVisit, membershipDuesCoverVisit, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, isSiblingCoverageEligibleVisit, sameTripFirstApplicationBreakdown, collectionStateForCoveredInvoice } = require('../services/billing-lane');
 const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
 const DiscountEngine = require('../services/discount-engine');
 const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
@@ -6173,10 +6173,10 @@ router.get('/', async (req, res, next) => {
       // predict as not-collected (never widen coverage).
       let visitMonthDuesCollected = false;
       if (lane.mode === 'monthly_membership') {
-        try { duesPaidThisMonth = await monthlyDuesCollected(db, s.customer_id); } catch { duesPaidThisMonth = null; }
+        try { duesPaidThisMonth = await monthlyDuesCollected(db, s.customer_id, new Date(), { openInvoiceCovers: false }); } catch { duesPaidThisMonth = null; }
         if (!autopayActive) {
           try {
-            visitMonthDuesCollected = await monthlyDuesCollected(db, s.customer_id, new Date(`${date}T12:00:00Z`));
+            visitMonthDuesCollected = await monthlyDuesCollected(db, s.customer_id, new Date(`${date}T12:00:00Z`), { excludeScheduledServiceId: s.id });
           } catch { visitMonthDuesCollected = false; }
         }
       }
@@ -6782,10 +6782,10 @@ router.get('/week', async (req, res, next) => {
         // Visit-month dues for the prediction (see day view).
         let visitMonthDuesCollected = false;
         if (lane.mode === 'monthly_membership') {
-          try { duesPaidThisMonth = await monthlyDuesCollected(db, s.customer_id); } catch { duesPaidThisMonth = null; }
+          try { duesPaidThisMonth = await monthlyDuesCollected(db, s.customer_id, new Date(), { openInvoiceCovers: false }); } catch { duesPaidThisMonth = null; }
           if (!autopayActive) {
             try {
-              visitMonthDuesCollected = await monthlyDuesCollected(db, s.customer_id, new Date(`${dateStr}T12:00:00Z`));
+              visitMonthDuesCollected = await monthlyDuesCollected(db, s.customer_id, new Date(`${dateStr}T12:00:00Z`), { excludeScheduledServiceId: s.id });
             } catch { visitMonthDuesCollected = false; }
           }
         }
@@ -10917,6 +10917,299 @@ async function refuseCarriedStopInEditMove(ackedIds) {
   }
 }
 
+// ---- update-details: a stop shared by two or more services (a combo) -----
+//
+// update-details writes ONE row, so a date, time or technician change on a
+// shared stop would leave the other services behind. The request says how to
+// handle it (owner rulings 2026-10-03: Edit appointment can move a combo, and
+// a technician-only change asks too):
+//   comboMove 'together' — the whole stop moves or is reassigned. Everything
+//     is checked BEFORE any write (planVisitMoveForStaff: the same staff move
+//     the schedule runs, against the stop's live membership read here); the
+//     date, window and technician keys are then taken off the body, so the
+//     per-row edit below saves the other fields on the current slot; the
+//     move itself runs after that edit commits (commit()).
+//   comboMove 'separate' — the service is split off its stop here, and the
+//     rest is the ordinary single-row edit.
+// No comboMove (every other caller), a row that is not on a shared stop, or
+// a request that changes nothing about the slot: null, the handler is
+// unchanged.
+// `comboVisit` is the stop the operator was shown ({ id, memberIds,
+// liveCount, liveMemberIds }); a stop whose live services differ from it is
+// refused before anything is saved.
+function comboEditChanges(body, row) {
+  const b = body || {};
+  let intake;
+  try {
+    intake = windowIntakeFromBody(b);
+  } catch {
+    return null; // a half-cleared window is the handler's own 422
+  }
+  const dateTarget = b.scheduledDate !== undefined && b.scheduledDate !== '' ? dateOnly(b.scheduledDate) : null;
+  const start = intake.clearBoth ? null : (intake.windowStart !== undefined ? normalizeHHMM(intake.windowStart) : undefined);
+  return {
+    intake,
+    length: comboLengthChange(b, row, intake),
+    date: !!dateTarget && dateTarget !== dateOnly(row.scheduled_date),
+    start: intake.clearBoth
+      ? !!row.window_start
+      : (start !== undefined && start !== (normalizeHHMM(row.window_start) || null)),
+    technician: b.technicianId !== undefined && (b.technicianId || null) !== (row.technician_id || null),
+  };
+}
+
+// The whole-stop move keeps every service's own length.
+function comboLengthChange(body, row, intake) {
+  const posted = parseInt(body.estimatedDuration, 10);
+  if (Number.isInteger(posted) && posted > 0 && row.estimated_duration_minutes != null
+    && posted !== Number(row.estimated_duration_minutes)) return true;
+  const span = (a, z) => {
+    const [h1, m1] = String(normalizeHHMM(a) || '').split(':').map(Number);
+    const [h2, m2] = String(normalizeHHMM(z) || '').split(':').map(Number);
+    return [h1, m1, h2, m2].every(Number.isFinite) ? (h2 * 60 + m2) - (h1 * 60 + m1) : null;
+  };
+  const stored = span(row.window_start, row.window_end);
+  return stored != null && !!intake.windowStart && !!intake.windowEnd && span(intake.windowStart, intake.windowEnd) !== stored;
+}
+
+// A stop with no stored span takes the start only: each service's end is
+// derived from its own length. No time change = a date-only (or
+// technician-only) move, which keeps the stored window.
+function comboMoveWindow(row, changes) {
+  if (!changes.start) return undefined;
+  const keepsSpan = !!(row.window_start && row.window_end);
+  const end = keepsSpan && changes.intake.windowEnd ? normalizeHHMM(changes.intake.windowEnd) : null;
+  return { start: normalizeHHMM(changes.intake.windowStart), ...(end ? { end } : {}) };
+}
+
+// The stop the operator was shown against the stop as it is now. Null = the
+// same live services (or nothing was shown: an older client).
+function comboShownStopChanged(shown, live) {
+  if (shown == null) return false;
+  const ids = (v) => (Array.isArray(v) ? v.map(String).sort().join(',') : null);
+  return typeof shown !== 'object' || String(shown.id) !== String(live.id)
+    || ids(shown.liveMemberIds) !== ids(live.liveMemberIds);
+}
+
+// The split is its own committed action. Every refusal the request answers
+// after it — thrown, sent directly by the handler, or sent by the error
+// middleware — goes out through res.json, so that is where it is disclosed:
+// nobody closes on an unnoticed separation.
+function discloseComboSeparation(res) {
+  const send = res.json.bind(res);
+  res.json = (payload) => send(res.statusCode >= 400 && payload && typeof payload.error === 'string'
+    ? { ...payload, error: `This service was separated from the stop, but the other changes were not saved. ${payload.error}`, comboSeparated: true }
+    : payload);
+}
+
+// 'separate': the service leaves its stop here; the handler then runs the
+// ordinary single-row edit.
+async function separateComboService(req, row) {
+  const vg = require('../services/visit-groups');
+  try {
+    await vg.splitChild({
+      visitId: row.visit_id,
+      scheduledServiceId: row.id,
+      createdBy: `admin:${req.technicianId || 'unknown'}`,
+    });
+  } catch (err) {
+    // The split's own refusals (a frozen visit, a row that just left the
+    // stop) are the operator's to read, not a 500. Nothing was changed.
+    const known = err && (err.code === 'VISIT_SPLIT_REFUSED' || /not found|not a member/.test(String(err.message)));
+    if (known) throw Object.assign(httpError(409, `${err.message} Nothing was changed.`), { code: err.code || 'VISIT_CHANGED_RETRY' });
+    // Any other failure can come after the split committed (a connection
+    // lost on the commit's acknowledgement). Read the row: off the stop =
+    // it did commit, so carry on as separated and let that be disclosed.
+    const now = await db('scheduled_services').where({ id: row.id }).first('visit_id').catch(() => undefined);
+    if (!now || String(now.visit_id || '') === String(row.visit_id)) throw err;
+  }
+  return { separated: true };
+}
+
+const comboStopChangedError = () => Object.assign(
+  httpError(409, 'This stop changed since it was opened: a service was added, separated or closed. Reload and try again. Nothing was changed.'),
+  { code: 'VISIT_MEMBERSHIP_CHANGED' },
+);
+
+// No choice in the request, and it changes the technician: on a shared stop
+// that would reassign this one row and split the stop without anyone having
+// chosen that (the caller did not know the stop is shared, or cannot ask).
+// Refused like a date or time change; the form then shows the choice.
+async function refuseUnchosenComboReassign(req) {
+  if (req.body.technicianId === undefined) return;
+  const row = await db('scheduled_services').where({ id: req.params.id }).first('visit_id', 'technician_id');
+  if (!row || !row.visit_id || (req.body.technicianId || null) === (row.technician_id || null)) return;
+  if ((await require('../services/visit-groups').openMembers(db, row.visit_id)).length < 2) return;
+  throw Object.assign(
+    httpError(409, 'This service is grouped with another at the same stop. Choose whether the technician changes for the whole stop or this service is separated, then save again. Nothing was changed.'),
+    { code: 'VISIT_EDIT_SCHEDULE_UNSUPPORTED' },
+  );
+}
+
+// The same question inside the save's transaction, under the row's lock: a
+// row that joined a shared stop (or whose stop gained a live service) after
+// the unlocked check above must not be reassigned alone. `seenVisitId` is
+// the membership the unlocked check allowed.
+async function assertStillUnsharedForReassign(trx, serviceId, seenVisitId) {
+  const row = await trx('scheduled_services').where({ id: serviceId }).forUpdate().first('visit_id');
+  const nowVisitId = row ? (row.visit_id || null) : null;
+  const shared = !!nowVisitId && (await require('../services/visit-groups').openMembers(trx, nowVisitId)).length >= 2;
+  if (shared || String(nowVisitId || '') !== String(seenVisitId || '')) {
+    throw Object.assign(
+      httpError(409, 'This appointment was grouped with another service while saving — reload and save again.'),
+      { code: 'VISIT_CHANGED_RETRY' },
+    );
+  }
+}
+
+async function planComboEditMove(req) {
+  const body = req.body || {};
+  const choice = body.comboMove;
+  if (choice === undefined) {
+    await refuseUnchosenComboReassign(req);
+    return null;
+  }
+  if (choice !== 'together' && choice !== 'separate') {
+    throw httpError(400, "comboMove must be 'together' or 'separate'");
+  }
+  const row = await db('scheduled_services').where({ id: req.params.id })
+    .first('id', 'visit_id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'technician_id');
+  if (!row) return null;
+  const vg = require('../services/visit-groups');
+  const shared = !!row.visit_id && (await vg.openMembers(db, row.visit_id)).length >= 2;
+  if (!shared) {
+    // The operator was shown a shared stop and chose to keep it together,
+    // but it is not shared any more (separated or closed since): refuse,
+    // never move the one service as if that were the choice. 'separate' on
+    // a row already off its stop is the ordinary edit it asked for.
+    if (choice === 'together' && body.comboVisit != null) throw comboStopChangedError();
+    return null;
+  }
+  const changes = comboEditChanges(body, row);
+  if (!changes) return null;
+  if (!(changes.date || changes.start || changes.technician || changes.length)) return null;
+  const live = await vg.visitSummaryForService(db, row.id);
+  if (comboShownStopChanged(body.comboVisit, live)) throw comboStopChangedError();
+
+  if (choice === 'separate') return separateComboService(req, row);
+  return planComboTogetherMove(req, row, changes, live);
+}
+
+// The mover refuses a same-day window that has already passed, for every
+// service it touches (rebooker: sameDayWindowElapsed). Asked here first, so
+// that refusal comes before the edit is saved, not after. A technician-only
+// change keeps each service's own window, so each one is asked; a date or
+// time change is asked about the new window.
+async function comboTargetElapsed(row, changes, newDate, newWindow) {
+  const { sameDayWindowElapsed } = require('../utils/datetime-et');
+  const vg = require('../services/visit-groups');
+  const members = await vg.openMembers(db, row.visit_id);
+  if (!(changes.date || changes.start)) {
+    // A technician-only change never rewinds a visit that is under way.
+    if (members.some((m) => ['en_route', 'on_site'].includes(String(m.status)))) {
+      return 'A service on this stop is already under way, so the stop cannot be reassigned as a whole. Choose Separate to reassign only this service.';
+    }
+    return members.some((m) => sameDayWindowElapsed(newDate, m.window_end || m.window_start))
+      ? "This stop's time has already passed today, so it cannot be reassigned as a whole. Choose Separate to reassign only this service."
+      : null;
+  }
+  // Every service's own target window, as the unit mover derives it (the
+  // tapped one takes the new slot, the others shift with it): one of them
+  // can have passed when the tapped one has not.
+  const visit = await db('service_visits').where({ id: row.visit_id }).first('window_start');
+  let targets;
+  try {
+    targets = vg.planMemberTargets({
+      members,
+      primary: members.find((m) => String(m.id) === String(row.id)) || row,
+      visitWindowStart: visit?.window_start || null,
+      win: { start: newWindow?.start || null, end: newWindow?.end || null },
+      newDateStr: newDate,
+    });
+  } catch (err) {
+    if (err?.statusCode) return err.message; // the mover would refuse the same way
+    throw err;
+  }
+  return targets.some((t) => sameDayWindowElapsed(newDate, t.end || t.start))
+    ? 'That time has already passed today for a service on this stop. Pick a later time.'
+    : null;
+}
+
+// 'together': every refusal comes before any write.
+async function planComboTogetherMove(req, row, changes, shown) {
+  const body = req.body;
+  const refuse = (status, message, code) => {
+    throw Object.assign(httpError(status, `${message} Nothing was changed.`), code ? { code } : {});
+  };
+  // Only a real clear: a stop with no time posts empty bounds as an echo.
+  if (changes.intake.clearBoth && row.window_start) refuse(422, 'A shared stop keeps its time: set a start time, or choose Separate.', 'INVALID_APPOINTMENT_WINDOW');
+  if (changes.length) {
+    refuse(422, "Moving the whole stop keeps each service's length. Save the move first, or choose Separate to change this service's length.", 'COMBO_LENGTH_CHANGE');
+  }
+  if (body.propertyId !== undefined) {
+    refuse(422, 'A different address takes this service off the shared stop. Save that change on its own, or choose Separate.', 'COMBO_ADDRESS_CHANGE');
+  }
+  // Two mixes the whole-stop move cannot honor (owner ruling 2026-10-03:
+  // refuse them before anything is saved). The move reassigns THIS stop
+  // only, so a staff change for following visits would be dropped silently;
+  // and a visit made recurring in the same save would build its plan from
+  // the date the stop is leaving.
+  if (changes.technician && normalizeAssignmentScope(body.assignmentScope) !== 'this_only') {
+    refuse(422, 'Moving the whole stop changes the technician for this visit only. Set "Apply staff change to" to this appointment only, or change later visits in their own save.', 'COMBO_ASSIGNMENT_SCOPE');
+  }
+  if (changes.date && body.isRecurring === true && body.spawnRecurringChildren === true) {
+    refuse(422, 'Make this visit recurring in its own save, then move the stop: the plan is built from the visit\'s date.', 'COMBO_MAKE_RECURRING');
+  }
+  // The stored date is a Date from Postgres: normalized before validation.
+  const newDate = validScheduleDate(changes.date ? body.scheduledDate : dateOnly(row.scheduled_date));
+  if (!newDate) refuse(400, 'That date is not a current or future date.');
+  const newWindow = comboMoveWindow(row, changes);
+  const elapsed = await comboTargetElapsed(row, changes, newDate, newWindow);
+  if (elapsed) refuse(409, elapsed, 'SLOT_TAKEN');
+  // A text is about a new date or time, never a technician change alone.
+  const notifyCustomer = body.notifyCustomer === true && (changes.date || changes.start);
+  const actor = { techRole: req.techRole, technicianId: req.technicianId };
+  const { planVisitMoveForStaff, runPlannedVisitMove } = require('./admin-dispatch');
+  const planned = await planVisitMoveForStaff({
+    serviceId: row.id,
+    newDate,
+    newWindow,
+    notifyCustomer,
+    body: {
+      ...(changes.technician ? { technicianId: body.technicianId || null } : {}),
+      expectVisit: { id: shown.id, memberIds: shown.memberIds.map(String), liveCount: shown.liveCount, liveMemberIds: shown.liveMemberIds.map(String) },
+    },
+    actor,
+    sourceSurface: 'edit_modal',
+    // A technician-only change keeps the stop's date and window.
+    keepSlot: !(changes.date || changes.start),
+  });
+  if (!planned.plan) {
+    throw Object.assign(httpError(planned.status, `${planned.body.error} Nothing was changed.`), planned.body.code ? { code: planned.body.code } : {});
+  }
+  // The per-row edit below must not move, reassign or text: the move does.
+  for (const key of ['scheduledDate', 'windowStart', 'windowEnd', 'technicianId', 'assignmentScope', 'notifyCustomer']) delete req.body[key];
+  return {
+    commit: () => runPlannedVisitMove({ plan: planned.plan, serviceId: row.id, newDate, reasonCode: 'admin', notifyCustomer, actor }),
+  };
+}
+
+// The details are saved by the time the move runs, so its outcome is part of
+// the 200 answer, never an error status: `moved` (true / false / null when it
+// is not known whether the move went through) plus whatever the move
+// answered (warnings, needsAttention, notificationSent...).
+async function commitComboEditMove(plan, serviceId) {
+  try {
+    const out = await plan.commit();
+    const moved = out.status < 300 && !out.body?.needsAttention;
+    return { ...out.body, moved, ...(out.status >= 300 ? { error: out.body?.error || 'The stop was not moved.' } : {}) };
+  } catch (err) {
+    const refused = err?.statusCode >= 400 && err.statusCode < 500;
+    logger.error(`[schedule/update-details] whole-stop move after the edit ${refused ? 'was refused' : 'failed'} for ${serviceId}: ${err.message}`);
+    return { moved: refused ? false : null, error: err.message, ...(err.code ? { code: err.code } : {}) };
+  }
+}
+
 async function planCollectiveEditDateMove(req) {
   const { scheduledDate, windowStart, windowEnd, notifyCustomer } = req.body || {};
   if (scheduledDate === undefined || scheduledDate === '' || !collectiveMoveGateOn()) return null;
@@ -12782,6 +13075,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         throw httpError(422, 'Choose a saved customer address.');
       }
     }
+    // Before the series planner: a shared stop moved 'together' leaves no
+    // date on the body for it to plan.
+    const comboMovePlan = await planComboEditMove(req);
+    if (comboMovePlan?.separated) discloseComboSeparation(res);
     const seriesMovePlan = await planCollectiveEditDateMove(req);
     if (seriesMovePlan && propertyId !== undefined) {
       // An address change regroups relocated occurrences on their OLD dates
@@ -13129,15 +13426,20 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     const normalizedAssignmentScope = normalizeAssignmentScope(assignmentScope);
     let assignmentNeedsChange = false;
     let assignmentShouldRun = false;
+    let reassignSeenVisitId;
     if (hasTechnicianIdUpdate) {
       if (technicianId !== null && typeof technicianId !== 'string') {
         return res.status(400).json({ error: 'technicianId must be a UUID string or null' });
       }
       const existingAssignment = await db('scheduled_services')
         .where({ id: req.params.id })
-        .first('id', 'technician_id');
+        .first('id', 'technician_id', 'visit_id');
       if (!existingAssignment) return res.status(404).json({ error: 'Service not found' });
       assignmentNeedsChange = (existingAssignment.technician_id || null) !== requestedTechnicianId;
+      // The membership this reassignment was allowed on (planComboEditMove
+      // refused a shared stop with no choice); re-read under the row lock
+      // before the assignment writes.
+      if (assignmentNeedsChange) reassignSeenVisitId = existingAssignment.visit_id || null;
       assignmentShouldRun = assignmentNeedsChange || normalizedAssignmentScope !== 'this_only';
       if (assignmentShouldRun && req.techRole !== 'admin') {
         return res.status(403).json({ error: 'Admin access required' });
@@ -13810,7 +14112,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           throw httpError(409, 'Appointments changed while saving. Reload and choose the address again.');
         }
       }
-      if (preReadVisitId) {
+      // Also for a technician change on a row alone on its visit: joining
+      // that visit serializes on this lock, so the membership re-check
+      // before the assignment write below cannot be raced.
+      if (preReadVisitId || reassignSeenVisitId) {
         try {
           await require('../services/visit-groups').lockStopForRow(trx, req.params.id);
         } catch (lockErr) {
@@ -14111,6 +14416,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
 
       if (addressPlan) addressUpdatedIds = await applyAppointmentAddress(trx, addressPlan, req.technicianId);
 
+      if (reassignSeenVisitId !== undefined) await assertStillUnsharedForReassign(trx, req.params.id, reassignSeenVisitId);
       if (assignmentShouldRun) {
         const assignment = await assignScheduleJobs({
           jobId: req.params.id,
@@ -16281,6 +16587,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       }
     }
 
+    // A shared stop moved 'together': the edit above saved the other fields
+    // on the stop's current slot; the whole-stop move runs now and sends the
+    // one customer text itself.
+    const comboMove = comboMovePlan?.commit ? await commitComboEditMove(comboMovePlan, req.params.id) : null;
+
     // Immediate reschedule text — only when the edit actually moved the
     // visit's date/window AND the caller explicitly opted in (the Edit
     // appointment modal's "Client booking notifications" choice). The
@@ -16394,6 +16705,8 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // Advisory occupancy-overlap notes — present only when this save
       // stacked over an existing visit.
       ...(editWarnings.length ? { warnings: editWarnings } : {}),
+      ...(comboMove ? { comboMove } : {}),
+      ...(comboMovePlan?.separated ? { comboSeparated: true } : {}),
     });
   } catch (err) {
     // The in-transaction duplicate-series backstop rolled the spawn back —
@@ -16461,6 +16774,10 @@ router.post('/:id/update-details/preview', requireAdmin, async (req, res, next) 
     // without running its ack/grouped/frozen guards: those exist for the
     // actual commit (and can throw/require a disclosure round-trip),
     // never for a read-only dry run.
+    // The same mirror for a shared stop moved 'together': the save takes the
+    // date off the body before the financial planner runs (planComboEditMove;
+    // the whole-stop move commits the date afterwards, on its own).
+    if (req.body.comboMove === 'together') scheduledDate = undefined;
     if (scheduledDate !== undefined && scheduledDate !== '' && collectiveMoveGateOn()) {
       const collectiveMoveTarget = validScheduleDate(scheduledDate);
       if (collectiveMoveTarget) {
@@ -17083,6 +17400,121 @@ const { loadActiveConfig: loadPestPressureActiveConfig } = require('../services/
 // generatePrepaidReceiptForService already reports through `receipt.reason`
 // for every other refusal here, so the Mark-prepaid modal explains it the
 // same way instead of the caller crashing on an unexpected object.
+// A Charge-now / prepaid-receipt pre-mint whose amount IS a member's monthly dues
+// for an unpriced plan visit asks the mint for the dues stamp + coverage check
+// (the completion mint's own), so that invoice is visible to the month's dedupe.
+function membershipDuesMintRequest(svc, amount) {
+  if (!isMembershipDuesShapedVisit({
+    estimatedPrice: svc.estimated_price,
+    primaryLinePrice: svc.primary_line_price ?? null,
+    isCallback: svc.is_callback,
+    monthlyRate: svc.cust_monthly_rate,
+    billingMode: svc.cust_billing_mode || null,
+    waveguardTier: svc.cust_waveguard_tier,
+    amount,
+  })) return null;
+  return { month: String(svc.scheduled_date instanceof Date ? svc.scheduled_date.toISOString() : svc.scheduled_date).slice(0, 7), amount };
+}
+
+// The (customer, month) a prepayment on this visit would interact with, from an
+// UNLOCKED read of the visit and customer, or null when the month's dues would
+// not cover this visit. "Covered" is decided by THE coverage predicate
+// completion itself uses (billing-lane membershipDuesCoverVisit, with the dues
+// as the cover), not a hand-rolled price test: an unpriced plan visit AND a
+// priced RECURRING plan visit are both covered (both complete without an invoice
+// once a dues invoice bills the month), while a callback, a non-recurring priced
+// visit and a payer-billed visit are not. The caller re-verifies customer and
+// month after it holds the visit row.
+const visitMonthOf = (d) => String(d instanceof Date ? d.toISOString() : d).slice(0, 7);
+async function planVisitDuesScope(serviceId) {
+  const svc = await db('scheduled_services')
+    .where('scheduled_services.id', serviceId)
+    .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+    .select(
+      'scheduled_services.*',
+      'customers.monthly_rate as cust_monthly_rate',
+      'customers.waveguard_tier as cust_waveguard_tier',
+      'customers.billing_mode as cust_billing_mode',
+    )
+    .first();
+  if (!svc || svc.is_callback) return null;
+  let payerBilled = false;
+  try {
+    const resolved = await require('../services/payer').resolveForInvoice({ customerId: svc.customer_id, scheduledServiceId: svc.id });
+    payerBilled = !!resolved?.payerId;
+  } catch (e) {
+    logger.warn(`[schedule] prepaid dues-scope payer resolve failed for service ${svc.id}: ${e.message}`);
+  }
+  if (!membershipDuesCoverVisit({
+    visitIsPayerBilled: payerBilled,
+    perApplicationBilling: svc.cust_billing_mode === 'per_application',
+    annualPrepayBilling: svc.cust_billing_mode === 'annual_prepay',
+    customerAutopayActive: false,
+    duesCollectedThisMonth: true,
+    hasVisitPrice: Number(svc.estimated_price) >= 0.01,
+    isRecurring: svc.is_recurring,
+    waveguardTier: svc.cust_waveguard_tier,
+    monthlyRate: svc.cust_monthly_rate,
+    billingMode: svc.cust_billing_mode || null,
+  })) return null;
+  return { serviceId: svc.id, customerId: String(svc.customer_id), month: visitMonthOf(svc.scheduled_date) };
+}
+
+// The live stamped dues invoice that already bills this plan visit's month, or
+// null. A prepayment marked on such a visit has nowhere to land: the visit mints
+// no invoice of its own (the month's dues are the covering invoice), so cash or
+// Zelle recorded on the visit would sit off the payment ledger while that
+// invoice keeps dunning. Read-only (the prepaid POST itself decides under the
+// month lock, recordPrepaidUnderDuesLock).
+async function duesInvoiceCoveringPlanVisit(serviceId, conn = db) {
+  const scope = await planVisitDuesScope(serviceId);
+  if (!scope) return null;
+  const { findLiveStampedDuesInvoice } = require('../services/billing-lane');
+  return findLiveStampedDuesInvoice(conn, scope.customerId, scope.month, { excludeScheduledServiceId: scope.serviceId });
+}
+
+// Records the prepaid marker ATOMICALLY with the dues-coverage decision. For a
+// dues-shaped plan visit the whole thing is one transaction whose FIRST lock is
+// the dues-month lock (THE LOCK RULE, billing-lane.js: it holds nothing yet, so
+// it may wait): coverage is re-read under it, and only an uncovered month takes
+// the marker (the visit-row UPDATE comes after the lock, so a completion holding
+// the visit row only TRIES the month lock and a mint holding it only polls the
+// month lock: neither can wait on this transaction in a cycle). A sibling dues
+// invoice that commits first is seen by the re-read (refused); one that mints
+// after this commits is the reverse order described at the POST route. The
+// scope came from an unlocked read of the visit, so after the UPDATE the visit's
+// month and customer are re-verified (rescheduled / merged since: retryable).
+// `writeStamp(conn)` is the caller's marker UPDATE (all its row predicates).
+async function recordPrepaidUnderDuesLock(serviceId, { amount, writeStamp }) {
+  const scope = amount > 0 ? await planVisitDuesScope(serviceId) : null;
+  if (!scope) return { updated: await writeStamp(db) };
+  const { acquireMembershipDuesMonthLock, findLiveStampedDuesInvoice } = require('../services/billing-lane');
+  return db.transaction(async (trx) => {
+    await acquireMembershipDuesMonthLock(trx, scope.customerId, scope.month);
+    const covering = await findLiveStampedDuesInvoice(trx, scope.customerId, scope.month, { excludeScheduledServiceId: serviceId });
+    if (covering) return { covering };
+    const updated = await writeStamp(trx);
+    if (updated.length) {
+      const now = await trx('scheduled_services').where({ id: serviceId }).first('customer_id', 'scheduled_date');
+      if (!now || String(now.customer_id) !== scope.customerId || visitMonthOf(now.scheduled_date) !== scope.month) {
+        const err = new Error('This visit moved to another month or customer while its prepayment was being recorded — nothing was saved; retry.');
+        err.status = 409;
+        throw err;
+      }
+    }
+    return { updated };
+  });
+}
+function duesCoversPrepaidRefusal(duesInvoice) {
+  const label = duesInvoice.invoice_number || duesInvoice.id;
+  return {
+    error: `This month's membership dues are already billed on invoice ${label}, so this visit has no invoice of its own to take the payment. Record the payment on invoice ${label} instead of marking this visit prepaid.`,
+    code: 'membership_dues_invoice_covers',
+    invoice_id: duesInvoice.id,
+    invoice_number: duesInvoice.invoice_number || null,
+  };
+}
+
 async function mintOrReuseScheduledServiceInvoice(svc) {
   const InvoiceService = require('../services/invoice');
   // ONE canonical per-visit collection verdict, resolved BEFORE this visit's
@@ -17120,9 +17552,12 @@ async function mintOrReuseScheduledServiceInvoice(svc) {
     fallbackAmount: amount,
     fallbackDescription: svc.service_type || 'Service visit',
   });
-  return mintScheduledServiceInvoiceWithDeposit({
+  const duesRequest = membershipDuesMintRequest(svc, amount);
+  try {
+  return await mintScheduledServiceInvoiceWithDeposit({
     svc,
     recheckInTrx: siblingCoverageRecheckInTrx(svc),
+    ...(duesRequest ? { membershipDues: duesRequest } : {}),
     buildCreateParams: () => ({
       customerId: svc.customer_id,
       scheduledServiceId: svc.id,
@@ -17139,6 +17574,15 @@ async function mintOrReuseScheduledServiceInvoice(svc) {
       dueDate: etDateString(),
     }),
   });
+  } catch (err) {
+    // The dues stamp's own refusals read as the receipt flow's usual {reason}
+    // shape instead of an exception the Mark-prepaid modal never expects.
+    if (err?.code === 'MEMBERSHIP_DUES_COVERED') return { invoice: null, reason: 'membership_dues_covered' };
+    if (err?.code === 'MEMBERSHIP_DUES_COVERAGE_UNVERIFIED' || err?.code === 'SCHEDULED_BILLING_SOURCE_MOVED') {
+      return { invoice: null, reason: 'membership_dues_unverified' };
+    }
+    throw err;
+  }
 }
 
 // Send the branded paid receipt (email + SMS) for a fully-paid invoice, exactly
@@ -17432,6 +17876,13 @@ router.post('/:id/prepaid', async (req, res, next) => {
       );
       return res.json({ success: true, ...result });
     }
+    // A plan visit whose month a stamped dues invoice already bills takes no
+    // prepaid marker (the covered visit mints no invoice to apply the payment
+    // to): the coverage check and the marker write are ONE transaction under the
+    // dues-month lock (recordPrepaidUnderDuesLock), so a sibling dues invoice can
+    // neither slip in between them nor be missed when no receipt is requested.
+    // A refusal names the invoice the payment belongs on. A zero amount records
+    // no money and is never refused.
     // Terminal rows never take a stamp (same set the series fan-out
     // skips): a visit cancelled between the ownership read and this write
     // — including by a concurrent series cancel — must not end up holding
@@ -17440,18 +17891,22 @@ router.post('/:id/prepaid', async (req, res, next) => {
     // manual writer next to the series fan-out and the bulk action, and a
     // manual method replacing the annual one would hide paid coverage from
     // the completion billing gate (Codex #4030 r7 P1).
-    const updated = await db('scheduled_services')
-      .where({ id: req.params.id })
-      .whereNotIn('status', PREPAID_STAMP_REFUSED_STATUSES)
-      .modify(withoutAnnualCoverage)
-      .modify((q) => technicianLiveVisitFilter(req, q))
-      .update({
-        prepaid_amount: amt,
-        prepaid_method: method || null,
-        prepaid_note: note || null,
-        prepaid_at: db.fn.now(),
-      })
-      .returning(['id', 'prepaid_amount', 'prepaid_method', 'prepaid_note', 'prepaid_at']);
+    const { updated, covering: coveringDues } = await recordPrepaidUnderDuesLock(req.params.id, {
+      amount: amt,
+      writeStamp: (conn) => conn('scheduled_services')
+        .where({ id: req.params.id })
+        .whereNotIn('status', PREPAID_STAMP_REFUSED_STATUSES)
+        .modify(withoutAnnualCoverage)
+        .modify((q) => technicianLiveVisitFilter(req, q))
+        .update({
+          prepaid_amount: amt,
+          prepaid_method: method || null,
+          prepaid_note: note || null,
+          prepaid_at: db.fn.now(),
+        })
+        .returning(['id', 'prepaid_amount', 'prepaid_method', 'prepaid_note', 'prepaid_at']),
+    });
+    if (coveringDues) return res.status(409).json(duesCoversPrepaidRefusal(coveringDues));
     if (!updated.length) {
       const current = await db('scheduled_services').where({ id: req.params.id })
         .first('status', 'annual_prepay_term_id', 'prepaid_method');
@@ -17482,6 +17937,37 @@ router.post('/:id/prepaid', async (req, res, next) => {
     } else if (emailReceipt === true) {
       // Operator asked for a receipt but we won't send one — surface why.
       receipt = { sent: false, reason: decision.reason };
+    }
+    // REVERSE ORDER, receipt requested: the marker was written under the month
+    // lock while the month was uncovered, and a sibling visit's dues invoice
+    // then committed before THIS request's receipt mint (which the dues stamp
+    // refuses as already covered). The marker has nowhere to land, so it is
+    // undone here (only if it is still the one we wrote) and refused with the
+    // same message. Not dead code: the lock cannot hold across the receipt mint
+    // (it takes its own locks and may call out), and a sibling mint never looks
+    // at the marker.
+    // MARKER FIRST, a sibling's dues mint after (no receipt request): nothing
+    // re-checks here, and billing is deliberately left as it is. The prepaid plan
+    // visit mints no invoice of its own at completion (its prepaid amount covers
+    // the dues amount) and the sibling's completion mints the month's stamped dues
+    // invoice, so the month is billed ONCE but the cash on the visit is not
+    // applied to it. The MINT raises one office alert per (dues invoice, visit)
+    // asking a person to apply that cash (alertPrepaidVisitsToApplyToDuesInvoice
+    // in invoice.js, after the mint commits); no payment row or invoice change is
+    // made automatically.
+    if (receipt && receipt.reason === 'membership_dues_covered') {
+      // prepaid_at is written by now() (microseconds) but comes back as a JS
+      // Date (milliseconds): compare at millisecond precision, or the guard
+      // matches no row and the refused marker stays.
+      const undone = await db('scheduled_services')
+        .where({ id: req.params.id })
+        .whereRaw("date_trunc('milliseconds', prepaid_at) = date_trunc('milliseconds', ?::timestamptz)", [updated[0].prepaid_at])
+        .update({ prepaid_amount: null, prepaid_method: null, prepaid_note: null, prepaid_at: null });
+      if (!undone) logger.warn(`[schedule] prepaid marker on ${req.params.id} was not undone after a covered receipt mint (the marker changed since it was written)`);
+      const covering = await duesInvoiceCoveringPlanVisit(req.params.id);
+      return res.status(409).json(covering
+        ? duesCoversPrepaidRefusal(covering)
+        : { error: 'This month\'s membership dues are already billed on another invoice — record the payment there instead of marking this visit prepaid.', code: 'membership_dues_invoice_covers' });
     }
     res.json({ success: true, ...updated[0], receipt });
   } catch (err) {
@@ -17966,9 +18452,11 @@ router.post('/:id/invoice', async (req, res, next) => {
     // roll-forward — completion reuses this pre-minted invoice, so skipping the
     // credit here would strand the customer's paid deposit and collect full
     // price on top of it.
+    const duesRequest = membershipDuesMintRequest(svc, amount);
     const minted = await mintScheduledServiceInvoiceWithDeposit({
       svc,
       recheckInTrx: siblingCoverageRecheckInTrx(svc),
+      ...(duesRequest ? { membershipDues: duesRequest } : {}),
       // In-lock ownership recheck: substantial async work happens between
       // the authorized SELECT at the top of this route and the mint
       // transaction — re-verify (row-locked) that the visit is still this
@@ -27413,6 +27901,7 @@ function blackoutDateString(value) {
 // are no products a report could name: their ordinary words ("yard sign",
 // "Serviced by Waves") once banned "yard" and "Waves" from every draft of a
 // visit whose notes said "yard" (prod 2026-10-02).
+const MENTION_GENERIC_TOKENS = new Set([...CompletionRecap.REPORT_GENERIC_PRODUCT_TOKENS, ...CompletionRecap.REPORT_VOCABULARY_NAME_WORDS]);
 function catalogScreensForPrompt(catalogRows, promptText) {
   const names = [];
   const actives = [];
@@ -27421,8 +27910,13 @@ function catalogScreensForPrompt(catalogRows, promptText) {
     // By its name or its short display name. A registered alias the prompt
     // writes out is screened in the shared builder (mentionedText): aliases
     // are staff shorthand, matched whole.
+    // Neither the report screen's own generic words (the pests, "station",
+    // "trap", "yard", "care") nor the plain report words inside catalog names
+    // ("high", "contact", "monitoring") mark a product named: a note that says
+    // "cockroach" or "keep monitoring" names no "Advion Cockroach Gel Bait"
+    // or "HexPro Termite Monitoring Baiting System" (audit 2026-10-03).
     const mentioned = [...new Set([row?.name, row?.display_name].filter(Boolean))]
-      .filter((label) => CompletionRecap.containsProductName(promptText, [{ name: label }], { wholeWord: true }));
+      .filter((label) => CompletionRecap.containsProductName(promptText, [{ name: label }], { wholeWord: true, extraGenericTokens: MENTION_GENERIC_TOKENS }));
     // Its alias written out counts as naming it for its actives.
     const named = mentioned.length > 0 || (row?.aliases || []).some(promptWritesAlias);
     names.push(...mentioned);
@@ -27437,6 +27931,7 @@ function catalogScreensForPrompt(catalogRows, promptText) {
 }
 
 router._test = {
+  planComboEditMove, commitComboEditMove, comboEditChanges, comboLengthChange, discloseComboSeparation, assertStillUnsharedForReassign,
   catalogScreensForPrompt,
   siblingCoverageRefusal,
   copyActivityScore,
@@ -27568,6 +28063,9 @@ router._test = {
   planSeriesExtendDates,
   seriesExtendAnchor,
   mintOrReuseScheduledServiceInvoice,
+  duesInvoiceCoveringPlanVisit,
+  recordPrepaidUnderDuesLock,
+  duesCoversPrepaidRefusal,
   mintScheduledServiceInvoiceWithDeposit,
   runRecurringSeriesMaintenance,
   runRecurringAlertAction,
