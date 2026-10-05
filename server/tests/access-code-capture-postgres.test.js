@@ -1026,6 +1026,7 @@ postgres('access codes section', () => {
   });
 
   describe('technician visit read', () => {
+    const profile = (customerId) => trx('property_preferences').where({ customer_id: customerId }).first();
     const tech = async () => {
       const id = randomUUID();
       await trx('technicians').insert({ id, name: 'Sample Tech' });
@@ -1075,6 +1076,15 @@ postgres('access codes section', () => {
       expect(await access.accept(trx, row.id, {})).toMatchObject({ ok: false, code: 'property_required' });
       expect((await access.accept(trx, row.id, { propertyId: a.id })).row.propertyId).toBe(a.id);
       expect((await access.listForCustomer(trx, c.id)).properties).toHaveLength(2);
+    });
+
+    test('a multi-home code never fills the customer-wide profile, and the same code at another home is not a duplicate', async () => {
+      const c = await customer({ properties: 2 });
+      const [a, b] = await trx('customer_properties').where({ customer_id: c.id }).orderBy('id').select('id');
+      expect(await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: '2468', propertyId: a.id })).toMatchObject({ ok: true, profileField: null });
+      expect(await profile(c.id)).toBeUndefined();
+      expect(await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: '2468', propertyId: b.id })).toMatchObject({ ok: true });
+      expect(await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: '2468', propertyId: b.id })).toMatchObject({ ok: false, code: 'duplicate_active' });
     });
 
     test('a technician sees only what a stop needs, and only around the visit day', async () => {

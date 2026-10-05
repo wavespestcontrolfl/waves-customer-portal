@@ -756,6 +756,10 @@ async function visitFor(trx, customerId, { from, chosenId }) {
 async function fillEmptyProfileField(trx, customerId, { kind, life, code }) {
   const field = PROFILE_FIELD[kind];
   if (life !== 'standing' || !field || !code) return null;
+  // Profile fields are customer-wide and every visit of the customer reads
+  // them: a multi-home account's code stays on its own home only.
+  const homes = await trx('customer_properties').where({ customer_id: customerId, active: true }).count({ n: '*' }).first();
+  if (Number(homes?.n || 0) > 1) return null;
   const existing = await trx('property_preferences').where({ customer_id: customerId }).forUpdate().first('id', field);
   if (existing && String(existing[field] || '').trim() !== '') return null;
   const proposal = { scope_id: customerId, field, resource_id: existing ? existing.id : null };
@@ -778,9 +782,11 @@ async function visitTwin(trx, customerId, next, scheduledServiceId, exceptId = n
   return !!(await q.first('id'));
 }
 
-async function standingTwin(trx, customerId, { kind, life, value_hash: hash }, exceptId = null) {
+async function standingTwin(trx, customerId, { kind, life, value_hash: hash, property_id: home = null }, exceptId = null) {
   if (life !== 'standing') return null;
+  // The same code at another home of the customer is not a twin.
   const q = trx('customer_access_codes').where({ customer_id: customerId, kind, value_hash: hash, status: 'active', life: 'standing' })
+    .whereRaw('property_id IS NOT DISTINCT FROM ?', [home])
     .whereRaw(OWNED_SOURCE_SQL.replace(/\ba\./g, 'customer_access_codes.'));
   if (exceptId) q.whereNot('id', exceptId);
   return (await q.forUpdate().first('id', 'instructions')) || null;
@@ -842,6 +848,11 @@ async function accept(conn, id, { adminUserId = null, kind, life, code, instruct
       const next = { ...checked.value, value_hash: valueHash(checked.value.code, checked.value.instructions) };
       if (!(await sourceStillOwned(trx, row))) return fail(409, 'source_moved');
       if (!(await sourceStillSupports(trx, row))) return fail(409, 'source_changed');
+      // A standing code's home is settled first: duplicates are per home.
+      const standingHome = next.life === 'standing'
+        ? await resolveHome(trx, row.customer_id, { life: next.life, propertyId, current: row.property_id }) : null;
+      if (standingHome?.error) return fail(400, standingHome.error);
+      if (standingHome) next.property_id = standingHome.propertyId;
       const refused = await supersedeOrRefuse(trx, row.customer_id, next, { exceptId: row.id, adminUserId });
       if (refused) return refused;
       // A one-visit candidate lives 14 days from the day it was sent; one past
@@ -854,8 +865,8 @@ async function accept(conn, id, { adminUserId = null, kind, life, code, instruct
       if (visit.error) return fail(400, visit.error);
       const scheduledServiceId = visit.id;
       if (await visitTwin(trx, row.customer_id, next, scheduledServiceId, row.id)) return fail(409, 'duplicate_active');
-      const home = visit.propertyId ? { propertyId: visit.propertyId }
-        : await resolveHome(trx, row.customer_id, { life: next.life, propertyId, current: row.property_id });
+      const home = standingHome || (visit.propertyId ? { propertyId: visit.propertyId }
+        : await resolveHome(trx, row.customer_id, { life: next.life, propertyId, current: row.property_id }));
       if (home.error) return fail(400, home.error);
       const profileField = await fillEmptyProfileField(trx, row.customer_id, next);
       const edited = ['kind', 'life', 'code', 'instructions'].some((key) => (next[key] ?? null) !== (row[key] ?? null));
@@ -980,13 +991,16 @@ async function addByStaff(conn, { customerId, kind, life, code, instructions, sc
   const next = { ...checked.value, value_hash: valueHash(checked.value.code, checked.value.instructions) };
   return officeTransaction(conn, async (trx) => {
     if (!(await lockCustomer(trx, customerId))) return fail(404, 'customer_not_found');
+    const standingHome = next.life === 'standing' ? await resolveHome(trx, customerId, { life: next.life, propertyId }) : null;
+    if (standingHome?.error) return fail(400, standingHome.error);
+    if (standingHome) next.property_id = standingHome.propertyId;
     const refused = await supersedeOrRefuse(trx, customerId, next, { adminUserId });
     if (refused) return refused;
     const visit = next.life === 'visit' ? await visitFor(trx, customerId, { from: now, chosenId }) : { id: null };
     if (visit.error) return fail(400, visit.error);
     const scheduledServiceId = visit.id;
     if (await visitTwin(trx, customerId, next, scheduledServiceId)) return fail(409, 'duplicate_active');
-    const home = visit.propertyId ? { propertyId: visit.propertyId } : await resolveHome(trx, customerId, { life: next.life, propertyId });
+    const home = standingHome || (visit.propertyId ? { propertyId: visit.propertyId } : await resolveHome(trx, customerId, { life: next.life, propertyId }));
     if (home.error) return fail(400, home.error);
     const profileField = await fillEmptyProfileField(trx, customerId, next);
     const [row] = await trx('customer_access_codes').insert({
