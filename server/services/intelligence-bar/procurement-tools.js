@@ -195,7 +195,7 @@ Use for: "what's on the restock list?", "anything ordered but not received?", "s
   {
     name: 'adjust_stock',
     description: `Record a physical stock change: a restock (adds), a correction (physical count — use set_total to log "we have X on the shelf"), or damaged/lost stock (removes). Your call returns a preview; the operator confirms in the UI before anything is written. Logging a first count for an untracked product turns stock tracking ON for it — completion flows then deduct and can block on insufficient stock, so counts must be real.
-Use for: "we have 64 oz of Bifen on the shelf", "add the 2 gallons I bought today", "write off the spilled bag of Prodiamine"`,
+Use for: "we have 64 oz of Bifen on the shelf", "add the 2 gallons I bought today", "write off 2 lb of Prodiamine"`,
     input_schema: {
       type: 'object',
       properties: {
@@ -1864,23 +1864,23 @@ function parseContainerSize(text) {
   return { amount: Number(match[1]), unit: UNIT_ALIASES[normalized] || normalized };
 }
 
-// The container counts the operator stated, read only from a container phrase. The count is the number directly attached to
-// a container noun: `<number> <noun>` with only whitespace or a hyphen between ("0.5 bottle", "2 jugs", "two-jug"); the
-// number is digits/decimal or a spelled number the repo already parses. A singular noun with no number directly before it
-// ("a jug", "the spilled bag") counts as 1; a plural with none supplies no count ("some jugs"). Numbers anywhere else
-// (a "10%" concentration, product-name digits, "78 ounces") are never counts. Each phrase is its own count; phrases are not summed.
-const CONTAINER_PHRASE_RE = /\b(bottles?|jugs?|bags?|cases?|containers?|pails?|buckets?|boxes|box|cans?|tubes?|packs?|drums?)\b/gi;
-const COUNT_BEFORE_RE = new RegExp(`(?:(?<![\\d.])(\\d+(?:\\.\\d+)?)|\\b(${PERCENT_NUMBER_WORD_ALT}))[\\s-]*$`, 'i');
+// The container counts the operator stated, read only from a container phrase and failing closed. A phrase supplies a
+// count ONLY when an explicit plain number sits directly before the noun: digits with an optional decimal part, or a
+// spelled whole number the repo already parses, with only whitespace or a hyphen between. The digit match may not be
+// preceded by a digit, ".", "/" or "," ("1/2 bottle", ".5 bottle" and "1,5 bottle" give no count). Nothing is implied:
+// "a jug", "the spilled bag", "half a bottle" and "some jugs" supply no count, and the operator restates ("1 jug").
+// Each phrase is its own count; phrases are not summed.
+const CONTAINER_PHRASE_RE = /\b(?:bottles?|jugs?|bags?|cases?|containers?|pails?|buckets?|boxes|box|cans?|tubes?|packs?|drums?)\b/gi;
+const COUNT_BEFORE_RE = new RegExp(`(?:(?<![\\d./,])(\\d+(?:\\.\\d+)?)|\\b(${PERCENT_NUMBER_WORD_ALT}))[\\s-]*$`, 'i');
 function containerCounts(texts) {
   const out = [];
   for (const raw of texts || []) {
     const text = String(raw || '');
     for (const m of text.matchAll(CONTAINER_PHRASE_RE)) {
       const attached = text.slice(0, m.index).match(COUNT_BEFORE_RE);
-      if (attached) {
-        const count = attached[1] != null ? Number(attached[1]) : percentWordsToValue(attached[2]);
-        if (count > 0) out.push(count);
-      } else if (!/s$/i.test(m[1])) out.push(1);
+      if (!attached) continue;
+      const count = attached[1] != null ? Number(attached[1]) : percentWordsToValue(attached[2]);
+      if (count > 0) out.push(count);
     }
   }
   return out;

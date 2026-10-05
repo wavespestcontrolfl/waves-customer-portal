@@ -599,9 +599,8 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
     test.each([
       ['We bought 2 jugs of Taurus SC', 'fl_oz', 156],
       ['We bought two jugs of Taurus SC', 'fl_oz', 156],
-      ['We bought a jug of Taurus SC', 'fl_oz', 78],
+      ['We bought one bag of Taurus SC', 'fl_oz', 78],
       ['We bought 3 bottles of Taurus SC', 'gal', 1.828125], // 234 fl oz
-      ['Write off the spilled bag of Taurus SC', 'fl_oz', 78], // a singular container noun is one container
       ['We bought 2 jugs of Taurus SC', 'fl_oz', 155.9], // inside the 0.5% tolerance
     ])('"%s" admits %s x %s only as a whole-container conversion', async (prompt, unit, amount) => {
       setGroundingDb({ products: [TAURUS, ALPINE] });
@@ -623,9 +622,9 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
     // with no number directly before it. Numbers elsewhere (a concentration, "78 ounces") are never counts.
     test.each([
       ['Add 0.5 bottle of Taurus SC', 'fl_oz', 39],
-      ['Add a jug of Taurus SC at 10%', 'fl_oz', 78],
-      ['We got a jug and 3 bags of Taurus SC', 'fl_oz', 78], // phrases are not summed: any ONE phrase's count
-      ['We got a jug and 3 bags of Taurus SC', 'fl_oz', 234],
+      ['We bought 1 jug of Taurus SC at 10%', 'fl_oz', 78],
+      ['We got 1 jug and 3 bags of Taurus SC', 'fl_oz', 78], // phrases are not summed: any ONE phrase's count
+      ['We got 1 jug and 3 bags of Taurus SC', 'fl_oz', 234],
     ])('"%s" admits %s x %s from the container phrase count', async (prompt, unit, amount) => {
       setGroundingDb({ products: [TAURUS, ALPINE] });
       expect(await resolve(prompt, unit, { amount })).toEqual({ productId: TAURUS.id });
@@ -633,12 +632,24 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
 
     test.each([
       ['Add 0.5 bottle of Taurus SC', 'fl_oz', 78], // 0.5 bottle is not a whole bottle
-      ['Add a jug of Taurus SC at 10%', 'fl_oz', 780], // "10%" is a concentration, never ten containers
-      ['Add a jug of Taurus SC at 10%', 'fl_oz', 10],
-      ['We got a jug and 3 bags of Taurus SC', 'fl_oz', 312], // 1 + 3 summed is not a phrase count
+      ['We bought 1 jug of Taurus SC at 10%', 'fl_oz', 780], // "10%" is a concentration, never ten containers
+      ['We bought 1 jug of Taurus SC at 10%', 'fl_oz', 10],
+      ['We got 1 jug and 3 bags of Taurus SC', 'fl_oz', 312], // 1 + 3 summed is not a phrase count
     ])('"%s" refuses %s x %s: the count is not the container phrase', async (prompt, unit, amount) => {
       setGroundingDb({ products: [TAURUS, ALPINE] });
       expect(await resolve(prompt, unit, { amount })).toMatchObject({ code: 'unit_required' });
+    });
+
+    // Fail closed: no count is implied. A phrase without an explicit plain number directly before the noun supplies none, so
+    // every amount is refused, including the "correct" one, and the operator restates ("1 jug", "96 fl oz").
+    test.each([
+      'Add 1/2 bottle of Taurus SC', 'Add .5 bottle of Taurus SC', 'Add 1,5 bottle of Taurus SC', 'Add half a bottle of Taurus SC',
+      'Add a jug of Taurus SC', 'Write off the spilled bag of Taurus SC', 'Add some jugs of Taurus SC',
+    ])('"%s" supplies no count: every amount is refused', async (prompt) => {
+      for (const amount of [0.5, 1, 2, 39, 78, 156]) {
+        setGroundingDb({ products: [TAURUS, ALPINE] });
+        expect(await resolve(prompt, 'fl_oz', { amount })).toMatchObject({ code: 'unit_required' });
+      }
     });
 
     test('2 jugs of a 2.5 gal container equals 5 gal, and 640 fl oz', async () => {

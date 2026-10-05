@@ -448,7 +448,7 @@ suite('inventory UI and Intelligence Bar through shared operations', () => {
       { movementType: 'damaged_lost', quantity: 2, unit: 'lb' });
     expect(preview).toMatchObject({ stock_after: 8, low_stock_after: true });
     expect(preview.warning).toContain('low-stock');
-    const proposed = await propose('adjust_stock', fields, `write off the spilled bag of ${row.name}`);
+    const proposed = await propose('adjust_stock', fields, `write off 1 bag of ${row.name}`);
     expect((await confirm(proposed)).body.success).toBe(true);
     expect(await onHand(row.id)).toBe(8);
   }, 30000);
