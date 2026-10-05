@@ -309,4 +309,27 @@ describe('attachDriveLegs', () => {
     // The tech waits for the 13:00 member and leaves at 14:00.
     expect(services[2].driveLateMin).toBe(14 * 60 + leg - (11 * 60 + 120));
   });
+
+  it('flags a split visit whose later member misses its own window', () => {
+    const services = [
+      stop('g1', '09:00', A, { visitId: 'v1', estimatedDuration: 420, displayOrder: 0 }),
+      stop('g2', '13:00', A, { visitId: 'v1', windowEnd: '14:00', displayOrder: 1 }),
+      stop('z', '08:00', B, { displayOrder: -1 }),
+    ];
+    attachDriveLegs(services);
+    const leg = services[0].driveFromPrevMin;
+    // z ends 09:00, g1 arrives 09:00 + leg and works 7 hours; g2's 13:00
+    // window closes at 15:00.
+    expect(services[0].driveLateMin).toBe(9 * 60 + leg + 420 - (13 * 60 + 120));
+  });
+
+  it('names the customer the tech leaves last at a shared pin', () => {
+    const services = [
+      stop('a1', '09:00', A, { windowEnd: '10:00', customerName: 'Sample One', customerId: 'c1', address: '1 Sample St, Unit 1' }),
+      stop('a2', '10:00', A, { windowEnd: '11:00', customerName: 'Sample Two', customerId: 'c2', address: '1 Sample St, Unit 2' }),
+      stop('c', '12:00', C),
+    ];
+    attachDriveLegs(services);
+    expect(services[2].drivePrevName).toBe('Sample Two');
+  });
 });

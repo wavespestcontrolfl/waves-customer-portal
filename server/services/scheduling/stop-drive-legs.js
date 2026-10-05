@@ -135,14 +135,15 @@ function lateByStop(stops, legs) {
   if (upTo < 2) return new Map();
   const seq = [];
   const legIn = new Map();
-  const firstPiece = new Map();
+  // Every piece of a stop answers for its card: a later piece that misses
+  // its own promise (a split visit's 13:00 member) still makes it late.
+  const piecesOf = new Map();
   stops.slice(0, upTo).forEach((st, i) => {
+    piecesOf.set(st.legs[0].id, []);
     stopPieces(st.members).forEach((p, j) => {
       const id = `${i}:${j}`;
-      if (j === 0) {
-        firstPiece.set(st.legs[0].id, id);
-        if (i > 0) legIn.set(id, legs[i - 1]);
-      }
+      piecesOf.get(st.legs[0].id).push(id);
+      if (j === 0 && i > 0) legIn.set(id, legs[i - 1]);
       const hh = String(Math.floor(p.start / 60)).padStart(2, '0');
       const mm = String(p.start % 60).padStart(2, '0');
       seq.push({
@@ -164,7 +165,7 @@ function lateByStop(stops, legs) {
     legMinutes: (_prev, stop) => legIn.get(stop.id) ?? 0,
   });
   const lateById = new Map((sim?.arrivals || []).map((a) => [a.id, a.lateMinutes]));
-  return new Map([...firstPiece].map(([cardId, pieceId]) => [cardId, lateById.get(pieceId)]));
+  return new Map([...piecesOf].map(([cardId, ids]) => [cardId, Math.max(0, ...ids.map((id) => lateById.get(id) || 0))]));
 }
 
 // Visits the tech has not reached yet: only these can still run late.
@@ -250,7 +251,9 @@ function attachDriveLegs(services) {
     // A leg without coordinates: the day total cannot claim to be whole.
     if (leg == null) { cur.legs[0].driveLegUnknown = true; continue; }
     cur.legs[0].driveInShown = true;
-    cur.legs[0].drivePrevName = String(prev.legs[0].customerName || '').trim() || null;
+    // The tech leaves a stop after its last piece of work: name that one.
+    const lastWorked = prev.members[prev.members.length - 1];
+    cur.legs[0].drivePrevName = String(lastWorked.customerName || '').trim() || null;
   }
   const late = stops.length > 1 && hasGeo(stops[0].anchor) ? lateByStop(stops, legs) : new Map();
   for (const st of stops.slice(1)) {
