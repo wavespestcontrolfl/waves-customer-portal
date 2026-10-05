@@ -597,6 +597,22 @@ describe('ordering with the caller\'s own confirmation and the fan-out', () => {
   });
 });
 
+describe('a stale worker never closes a row it no longer holds', () => {
+  test('a STOP that restored the caller during the replay: the old run does not mark the follow-up done again', async () => {
+    let state;
+    const replay = jest.fn(async () => {
+      // The STOP lands while the replay is in flight: the restore clears the claim and re-opens the row.
+      state.optin[0].status = 'declined';
+      state.optin[0].followup_claimed_at = null;
+      return { sent: false, reason: 'not_a_recipient' };
+    });
+    const loaded = load({ rows: [row()], customer: spouse(), replay });
+    state = loaded.state;
+    await loaded.optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY });
+    expect(state.optin[0].followup_done_at).toBeNull();
+  });
+});
+
 describe('account-wide demotion', () => {
   test('a saved property\'s own "send these to me too" choice is cleared with the demotion', () => {
     const src = require('fs').readFileSync(require.resolve('../services/recipient-optin.js'), 'utf8');
@@ -613,7 +629,7 @@ describe('wiring', () => {
   });
   test('the replay claim is atomic on the row (one UPDATE ... RETURNING), never a read-then-write', () => {
     const src = read('../services/recipient-optin.js');
-    expect(src).toContain(".update({ followup_claimed_at: new Date() })\n    .returning(['phone_key', 'visit_id', 'confirmed_at', 'followup_armed_at', 'caller_demoted_at', 'fanout_confirmed_at']);");
+    expect(src).toContain(".update({ followup_claimed_at: claimedAt })\n    .returning(['phone_key', 'visit_id', 'confirmed_at', 'followup_armed_at', 'caller_demoted_at', 'fanout_confirmed_at']);");
     expect(src).toContain(".whereNull('caller_demoted_at')");
   });
 });

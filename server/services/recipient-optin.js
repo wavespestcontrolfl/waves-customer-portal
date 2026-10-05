@@ -354,12 +354,14 @@ async function noteHolderSetNotifyPrimary(h, customerId) {
 // answers a message that person just sent (another contact's unfinished row
 // rides the same run but honors the send window like a sweep retry).
 async function settleCustomerFollowUps(customerId, { replyPhoneKey = null } = {}) {
+  // This run's claim stamp: finish() only touches a row still holding it.
+  const claimedAt = new Date();
   const claimed = await db('recipient_optin')
     .where({ customer_id: customerId, status: 'confirmed' })
     .whereNotNull('visit_id')
     .whereNull('followup_done_at')
     .where((q) => q.whereNull('followup_claimed_at').orWhere('followup_claimed_at', '<', new Date(Date.now() - FOLLOWUP_CLAIM_TTL_MS)))
-    .update({ followup_claimed_at: new Date() })
+    .update({ followup_claimed_at: claimedAt })
     .returning(['phone_key', 'visit_id', 'confirmed_at', 'followup_armed_at', 'caller_demoted_at', 'fanout_confirmed_at']);
   let settled = 0;
   for (const row of claimed || []) {
@@ -369,7 +371,10 @@ async function settleCustomerFollowUps(customerId, { replyPhoneKey = null } = {}
     // either sender) so the call fan-out never sends on top of it, even where
     // the best-effort sms_log write was lost.
     const finish = (done, { texted = false } = {}) => db('recipient_optin')
-      .where({ customer_id: customerId, phone_key: row.phone_key, visit_id: row.visit_id })
+      // Fenced to THIS claim and a still-confirmed row: a STOP that restored
+      // the caller mid-run (it clears the claim and re-opens the follow-up), a
+      // re-arm or a newer worker's claim is never overwritten by a stale one.
+      .where({ customer_id: customerId, phone_key: row.phone_key, visit_id: row.visit_id, status: 'confirmed', followup_claimed_at: claimedAt })
       .update({
         followup_claimed_at: null,
         ...(done ? { followup_done_at: new Date() } : {}),
