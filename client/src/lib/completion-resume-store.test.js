@@ -20,6 +20,7 @@ import {
   deleteFastCompletionAttempt,
   getFastCompletionAttempt,
   hasFastCompletionMarker,
+  listFastCompletionMarkers,
   listFastCompletionAttempts,
   pruneFastCompletionAttempts,
   putFastCompletionAttempt,
@@ -118,10 +119,13 @@ describe("completion resume store (IndexedDB)", () => {
     expect(await putFastCompletionAttempt("svc-m", "tech-m", { body, summary: "Marked" })).toBe(true);
     expect(hasFastCompletionMarker("svc-m", "tech-m")).toBe(true);
     expect(hasFastCompletionMarker("svc-m", "tech-other")).toBe(false);
+    expect(listFastCompletionMarkers("tech-m")).toEqual(["svc-m"]);
+    expect(listFastCompletionMarkers("tech-other")).toEqual([]);
     expect(await deleteFastCompletionAttempt("svc-m", "tech-m", { ...body, technicianNotes: "Other" })).toBe(false);
     expect(hasFastCompletionMarker("svc-m", "tech-m")).toBe(true);
     expect(await deleteFastCompletionAttempt("svc-m", "tech-m", body)).toBe(true);
     expect(hasFastCompletionMarker("svc-m", "tech-m")).toBe(false);
+    expect(listFastCompletionMarkers("tech-m")).toEqual([]);
   });
 
   it("survives the legacy unmarked-body pruner in an older open tab", async () => {

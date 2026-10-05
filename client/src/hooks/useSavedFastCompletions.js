@@ -11,8 +11,21 @@ import {
   getFastCompletionAttempt,
   hasFastCompletionMarker,
   listFastCompletionAttempts,
+  listFastCompletionMarkers,
   pruneFastCompletionAttempts,
 } from '../lib/completion-resume-store';
+
+// A device read that never answers counts as unreadable after this long, so
+// the Project Report tool and a tap never wait forever (GitHub Codex P2 on
+// #5979).
+export const DEVICE_READ_TIMEOUT_MS = 5000;
+function boundedRead(read, unavailable) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(unavailable), DEVICE_READ_TIMEOUT_MS);
+    Promise.resolve(read).then((result) => resolve(result), () => resolve(unavailable))
+      .finally(() => clearTimeout(timer));
+  });
+}
 
 export const SAVED_COMPLETION_READ_NOTICE = 'Could not read the completion saved on this device. Tap to try again.';
 
@@ -71,6 +84,11 @@ export function projectReportTool({ saved, projectServices, loading, onClick }) 
   };
 }
 
+// Marker-only entries for an unreadable device: enough to list and tap.
+function markedAttempts(operatorId) {
+  return new Map(listFastCompletionMarkers(operatorId).map((serviceId) => [serviceId, { serviceId, summary: '', storedAt: 0 }]));
+}
+
 // The scan without one service's attempt: a tap's own read found it gone.
 function withoutAttempt(scan, serviceId) {
   if (!scan.attempts.has(String(serviceId))) return scan;
@@ -106,16 +124,18 @@ export default function useSavedFastCompletions({ operatorId, schedule, openShee
   // before any write.
   useEffect(() => {
     let active = true;
-    listFastCompletionAttempts(operatorId).then((result) => {
+    boundedRead(listFastCompletionAttempts(operatorId), { available: false, attempts: [] }).then((result) => {
       if (!active) return;
       // An unreadable device keeps the last list this operator had: a passing
-      // storage failure must not drop saved completions. When that list held
-      // any, it says so and the next tap scans again; a device that cannot
-      // store them at all (a private window) has none to lose and stays quiet
-      // (GitHub Codex P2 on 458cc517e5).
+      // storage failure must not drop saved completions. With no list yet (a
+      // reload), the saved markers stand in, so a completed or off-route
+      // visit is still listed to tap. When there are any, it says so and the
+      // next tap scans again; a device that cannot store them at all (a
+      // private window) has none to lose and stays quiet (GitHub Codex P2s on
+      // 458cc517e5 and #5979).
       if (!result.available) {
-        setScan((current) => (current.operatorId === operatorId ? current : { operatorId, attempts: new Map() }));
-        if (knownIds.current.size) setReadNotice(SAVED_COMPLETION_READ_NOTICE);
+        setScan((current) => (current.operatorId === operatorId ? current : { operatorId, attempts: markedAttempts(operatorId) }));
+        if (knownIds.current.size || listFastCompletionMarkers(operatorId).length) setReadNotice(SAVED_COMPLETION_READ_NOTICE);
         return;
       }
       setScan({ operatorId, attempts: new Map(result.attempts.map((attempt) => [attempt.serviceId, attempt])) });
@@ -144,7 +164,7 @@ export default function useSavedFastCompletions({ operatorId, schedule, openShee
     // Re-read at the tap: another tab or a just-closed sheet may have
     // discarded or completed the attempt since the picker was rendered.
     const result = tapOperator
-      ? await getFastCompletionAttempt(service.id, tapOperator)
+      ? await boundedRead(getFastCompletionAttempt(service.id, tapOperator), { available: false, attempt: null })
       : { attempt: null };
     if (seq !== tapSeq.current || operatorRef.current !== tapOperator) return null;
     const kind = savedCompletionKind(result.attempt);

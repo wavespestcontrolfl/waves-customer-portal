@@ -140,6 +140,24 @@ function setFastCompletionMarker(key, present) {
     else storage.removeItem(FAST_COMPLETION_MARKER_PREFIX + key);
   } catch { /* best effort */ }
 }
+// The services this operator has a marked saved row for: what a scan can
+// still list when IndexedDB cannot be read (GitHub Codex P2 on #5979).
+export function listFastCompletionMarkers(operatorId) {
+  if (!operatorId) return [];
+  const prefix = `${FAST_COMPLETION_MARKER_PREFIX}${FAST_COMPLETION_PREFIX}${String(operatorId)}:`;
+  try {
+    const storage = globalThis.localStorage;
+    if (!storage) return [];
+    const ids = [];
+    for (let index = 0; index < storage.length; index += 1) {
+      const name = storage.key(index);
+      if (name && name.startsWith(prefix) && storage.getItem(name) === "1") ids.push(name.slice(prefix.length));
+    }
+    return ids;
+  } catch {
+    return [];
+  }
+}
 export function hasFastCompletionMarker(serviceId, operatorId) {
   const key = fastCompletionAttemptKey(serviceId, operatorId);
   if (!key) return false;
