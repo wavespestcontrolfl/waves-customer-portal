@@ -576,7 +576,15 @@ async function gatherPropertySignals(context, { refreshLookup = false, persistLo
     }
   }
 
-  return { address, propertyRecord, enriched, parcelView, subdivisionMedian };
+  // The lookup's permit-plan facts (R2-B), object state only: the profile
+  // already withheld (null) or never had (undefined) the rest, and the
+  // engine never reads the raw record stamp — same rule as the median.
+  const permitFacts = enriched?.permitBuildingFacts && typeof enriched.permitBuildingFacts === 'object'
+    && Number(enriched.permitBuildingFacts.conditionedSqft) > 0
+    ? { conditionedSqft: Math.round(Number(enriched.permitBuildingFacts.conditionedSqft)), permitNo: enriched.permitBuildingFacts.permitNo || null }
+    : null;
+
+  return { address, propertyRecord, enriched, parcelView, subdivisionMedian, permitFacts };
 }
 
 // One-bell + durability: for PROMISED quotes the processor's generic
@@ -2317,7 +2325,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
   const S = origin.strings;
   const threadKey = origin.threadKey || null;
   try {
-    const { address, propertyRecord, enriched, parcelView, subdivisionMedian } = await gatherPropertySignals(context, { refreshLookup, persistLookup: !dryRun });
+    const { address, propertyRecord, enriched, parcelView, subdivisionMedian, permitFacts } = await gatherPropertySignals(context, { refreshLookup, persistLookup: !dryRun });
     result.addressUsed = address;
 
     // An ambiguous shared-phone profile must not size the draft either —
@@ -2333,6 +2341,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       customer: trustedCustomer,
       isCommercial: commercialHint(context),
       subdivisionMedian,
+      permitFacts,
     });
 
     const composed = await composeIntent(context, propertyFacts);
@@ -2375,7 +2384,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     // the extraction missed). When it differs from — or fills in — the
     // address the property signals were gathered for, re-gather; otherwise
     // the draft is priced off the wrong (or no) parcel.
-    let effectiveSignals = { propertyRecord, enriched, parcelView, subdivisionMedian };
+    let effectiveSignals = { propertyRecord, enriched, parcelView, subdivisionMedian, permitFacts };
     let addressRegathered = false;
     if (intent.address
       && (!address || !sameStreetAddress(intent.address, address) || addressAddsLocality(intent.address, address))) {
@@ -2476,6 +2485,9 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       // sized from it carry a fallback source that already routes the
       // draft to review.
       subdivisionMedian: effectiveSignals.subdivisionMedian,
+      // Same reasoning: the permit plan is the lookup's own address and a
+      // fallback source that already routes the draft to review.
+      permitFacts: effectiveSignals.permitFacts || null,
     });
     result.propertyFacts = stampBusinessScope(propertyFacts, businessVerdict);
 

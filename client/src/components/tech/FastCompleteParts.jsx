@@ -116,7 +116,8 @@ export function customerNameOf(visit, service) {
 // width. A tap on the backdrop dismisses it. `overlay` renders beside the
 // dialog (a photo manager opened over the sheet); `hiddenProps` makes the
 // dialog inert while it is up.
-export function FastCompleteFrame({ isMobile, dialogRef, titleId, onDismiss, hiddenProps, overlay, children }) {
+// `dialogClassName` (the lawn sheet): a class on the dialog, for its scoped look.
+export function FastCompleteFrame({ isMobile, dialogRef, titleId, onDismiss, hiddenProps, overlay, dialogClassName, children }) {
   const fieldPortalClass = useFieldPortalClass();
   return createPortal(
     <>
@@ -130,7 +131,7 @@ export function FastCompleteFrame({ isMobile, dialogRef, titleId, onDismiss, hid
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className={cn('tech-visit-dialog', isMobile && 'tech-visit-dialog--fullscreen')}
+        className={cn('tech-visit-dialog', isMobile && 'tech-visit-dialog--fullscreen', dialogClassName)}
         {...hiddenProps}
       >
         {children}
@@ -337,7 +338,10 @@ export function OtherProductButton({ buttonRef, locked, onClick, hasPicker, expa
 // list loaded it opens the full completion screen, as it always did.
 // `commonProducts` is the picker's "Used most" list, already without the
 // products the sheet starts with; `rows` are the products on the sheet.
-export function useProductPicker({ products, commonProducts, rows, locked, isMobile, onFullForm, onPick, line }) {
+// `inline` (the lawn sheet) also returns `inlineSearch`: a search box that
+// lives in the Products section itself and adds a product on one tap, with no
+// sheet to open. With no catalog it is null and the button's full-form hand-off stays.
+export function useProductPicker({ products, commonProducts, rows, locked, isMobile, onFullForm, onPick, line, inline = false }) {
   const buttonRef = useRef(null);
   const [open, setOpen] = useState(false);
   const hasCatalog = products.length > 0;
@@ -356,6 +360,17 @@ export function useProductPicker({ products, commonProducts, rows, locked, isMob
       onClose={() => setOpen(false)}
     />
   ) : null;
+  const inlineSearch = inline && hasCatalog ? (
+    <FastCompleteProductPicker
+      variant="inline"
+      {...(line ? { line } : {})}
+      products={products}
+      commonProducts={commonProducts}
+      onSheetIds={onSheetIds}
+      locked={locked}
+      onPick={onPick}
+    />
+  ) : null;
   const onClick = (event) => {
     if (!hasCatalog) {
       onFullForm?.();
@@ -367,6 +382,7 @@ export function useProductPicker({ products, commonProducts, rows, locked, isMob
   };
   return {
     button: { buttonRef, locked, onClick, hasPicker: hasCatalog, expanded: shown },
+    inlineSearch,
     popover: isMobile ? null : picker,
     sheet: isMobile ? picker : null,
     // What the phone sheet covers is out of reach until it closes.
@@ -376,11 +392,13 @@ export function useProductPicker({ products, commonProducts, rows, locked, isMob
 
 // The reason sits above full-width actions, so neither squeezes the other on
 // a phone or beside an extra action (`children`, e.g. "Check stock").
-export function CompleteFooter({ submission, missingReason, warn, label, onSubmit, coverProps, children }) {
+// `reasonInButton` (the lawn sheet): a short reason is the disabled button's
+// own label instead of a line above it.
+export function CompleteFooter({ submission, missingReason, warn, label, onSubmit, coverProps, children, reasonInButton = false }) {
   return (
     <footer className="tech-visit-footer tech-visit-footer--stacked" {...coverProps}>
       {submission.error && <ActionFeedback error className="tech-visit-feedback tech-visit-error-banner">{submission.error}</ActionFeedback>}
-      {missingReason && !submission.failure && (
+      {missingReason && !submission.failure && !reasonInButton && (
         <p className={cn('tech-visit-muted', warn && 'tech-visit-status--warn')} role="status">{missingReason}</p>
       )}
       <div className="tech-visit-actions">
@@ -391,7 +409,7 @@ export function CompleteFooter({ submission, missingReason, warn, label, onSubmi
           loading={submission.submitting}
           disabled={submission.failure === 'terminal' || (!!missingReason && !submission.retryPending)}
         >
-          {submission.retryPending ? 'Retry' : label}
+          {submission.retryPending ? 'Retry' : reasonInButton && missingReason && !submission.failure ? missingReason : label}
         </Button>
       </div>
     </footer>
@@ -417,7 +435,9 @@ export function ChoiceSection({ title, action, columns = 2, children }) {
 // note's box under the words; without them the note is exactly as before.
 // `onClip` (voice fill on the report flow): the mic records and the clip goes to
 // our own transcriber, which answers the words for this box.
-export function VisitNote({ note, onChange, onDictated, onDictationPending, serviceId, locked, onClip, children }) {
+// `micInside` (the lawn sheet): the mic sits in the box's bottom-right corner
+// instead of beside it, and the box keeps clear padding so words never run under it.
+export function VisitNote({ note, onChange, onDictated, onDictationPending, serviceId, locked, onClip, children, micInside = false }) {
   const noteId = useId();
   const text = (
     <Textarea
@@ -435,9 +455,20 @@ export function VisitNote({ note, onChange, onDictated, onDictationPending, serv
       <div className="tech-visit-section-head">
         <h3 className="tech-visit-section-title"><label htmlFor={noteId}>Tell me about the visit</label></h3>
       </div>
-      <div className="tech-visit-note-row">
-        <DictationButton onAppend={onDictated} onPendingChange={onDictationPending} palette={MIC_PALETTE} size={48} title="Talk about the visit" disabled={locked} uploadServiceId={serviceId} clipHandler={onClip} />
-        {children ? <div className="tech-visit-note-box">{text}{children}</div> : text}
+      <div className={cn('tech-visit-note-row', micInside && 'tech-visit-note-row--inside')}>
+        {micInside ? (
+          <>
+            {children ? <div className="tech-visit-note-box">{text}{children}</div> : text}
+            <span className="tech-visit-note-mic">
+              <DictationButton onAppend={onDictated} onPendingChange={onDictationPending} palette={MIC_PALETTE} size={40} title="Talk about the visit" disabled={locked} uploadServiceId={serviceId} clipHandler={onClip} />
+            </span>
+          </>
+        ) : (
+          <>
+            <DictationButton onAppend={onDictated} onPendingChange={onDictationPending} palette={MIC_PALETTE} size={48} title="Talk about the visit" disabled={locked} uploadServiceId={serviceId} clipHandler={onClip} />
+            {children ? <div className="tech-visit-note-box">{text}{children}</div> : text}
+          </>
+        )}
       </div>
     </section>
   );
@@ -513,7 +544,10 @@ function TipOption({ tip, library, pressed, locked, onPick }) {
 // sheet's seen watch items) lifts those tips above the list under their own
 // heading, in library order; a search ignores it, and nothing is ever picked
 // for the tech.
-export function TipSection({ library, tipId, customTip, locked, onPick, onCustom, priorityTipIds }) {
+// `quiet` (the lawn sheet): no "Search tips" label and no "Pick 1 (optional)"
+// hint; the search box keeps its name as an aria-label and the section keeps the
+// hint as its aria-description. The one-tip limit is unchanged.
+export function TipSection({ library, tipId, customTip, locked, onPick, onCustom, priorityTipIds, quiet = false }) {
   const [query, setQuery] = useState('');
   const [showAll, setShowAll] = useState(false);
   const [writing, setWriting] = useState(false);
@@ -533,14 +567,20 @@ export function TipSection({ library, tipId, customTip, locked, onPick, onCustom
   const hasPick = !!tipId || !!customTip.trim();
   const writingOwn = writing || !!customTip;
   return (
-    <section className="tech-visit-choice-section">
+    <section className="tech-visit-choice-section" {...(quiet ? { 'aria-description': 'Pick 1 (optional)' } : {})}>
       <div className="tech-visit-section-head">
         <h3 className="tech-visit-section-title">Tip for the customer</h3>
-        <span className="tech-visit-muted">{hasPick ? '1 picked' : 'Pick 1 (optional)'}</span>
+        {(!quiet || hasPick) && <span className="tech-visit-muted">{hasPick ? '1 picked' : 'Pick 1 (optional)'}</span>}
       </div>
-      <Field label="Search tips" className="tech-visit-field">
-        <Input className="tech-visit-control" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="e.g. ants, porch light" />
-      </Field>
+      {quiet ? (
+        <div className="ui-field tech-visit-field">
+          <Input className="tech-visit-control" aria-label="Search tips" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="e.g. ants, porch light" />
+        </div>
+      ) : (
+        <Field label="Search tips" className="tech-visit-field">
+          <Input className="tech-visit-control" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="e.g. ants, porch light" />
+        </Field>
+      )}
       {lifted && (
         <>
           <h4 className="tech-visit-muted">For what you saw today</h4>

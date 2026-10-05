@@ -1354,8 +1354,19 @@ cadence, visit count, cadence wording, catalog key, or an explicit tier field
 grandfathered and untouched by this gate; it only blocks a NEW self-serve
 accept from landing on the retired cadence.
 
+Lethal bronzing injection disclosure (owner ruling 2026-10-05). In GET
+`/api/estimates/:token/data` and the server-rendered estimate page, the
+`palm_injection` supplement row may carry a `scopeNote` string. It is set only
+when the palm treatment is the Lethal Bronzing Preventive OTC program
+(`pricePalmInjection` → `results.injection.scopeNote` → the supplement row);
+no other palm treatment or service row gets one. The text is fixed customer
+copy: "Each injection leaves a small permanent hole in the trunk. We offer this
+only for healthy palms or palms next to an affected palm." The card renders it
+under the treatment row. It carries no pricing, no customer data and no
+internal cost basis.
+
 Missing-contact capture (owner ruling 2026-09-27). GET
-`/api/estimates/:token/data` carries `contactGaps: { firstName, lastName, email }` —
+`/api/estimates/:token/data` carries `contactGaps: { firstName, lastName, email, phone }` —
 booleans only — while the estimate is accept-active (never on
 accepted/declined/expired/off-surface estimates or the PDF render pass).
 `lastName` is true when the estimate's `customer_name` has fewer than two
@@ -1422,6 +1433,85 @@ accept-active estimate with a contact gap always gets the React view: the
 `/estimate/` mount skips the legacy renderer and the GrowthBook holdback, and
 the `/api/estimates` mount redirects to `/estimate/:token`. No message is sent
 because of these fields.
+
+Accept-card phone capture (owner 2026-10-04, `GATE_ESTIMATE_ACCEPT_PHONE`,
+default on). `contactGaps` also carries `phone` — true only when the estimate
+has no linked customer AND no usable phone (fewer than 10 digits); always
+false with the gate off. A phone is the identity the card routes and the
+accept decide on (`/recurring-card-intent` and `/card-hold-intent` refuse a
+phone-less unlinked estimate before any card is captured; the accept creates
+the customer from the estimate's phone), so it is saved by a write of its
+own, ahead of both: `PUT /api/estimates/:token/contact-phone` with
+`{ contactPhone }` (rate-limited 5/hour per client + token; 404 with the
+gate off, for an unknown or call-side-blocked token; the accept-inactive
+answer for a terminal / expired / off-surface estimate). Responses: `200
+{ saved: true }` — the number, normalized to E.164 (`+1XXXXXXXXXX`; a
+10-digit NANP number, an 11-digit one with a leading 1 accepted), was written
+to `estimates.customer_phone` by a guarded update (still unlinked, still
+phone-less); `200 { saved: false, alreadyOnFile: true }` — the estimate
+already has a phone or a linked customer (the field is ignored entirely, not
+even validated) or a concurrent writer closed the gap first; `400
+CONTACT_PHONE_INVALID` — nothing usable was sent; `409
+CUSTOMER_CONTACT_REQUIRED` with the standing "call the Waves office" copy —
+the number already belongs to ANY live customer: NOTHING is written, and one
+Estimates bell (deduped per estimate) gives the office the typed number. A
+typed phone proves nothing about who typed it, so it never attaches the
+estimate, a saved card or a hold to an existing account, at the save or
+later. The save writes its provenance in the same statement
+(`estimates.customer_phone_typed`, migration
+`20261004230000_estimates_customer_phone_typed.js` — a column, never a key
+in `estimate_data`, because `/preferences`, `/select-tier` and `/bond`
+rewrite that whole blob from a pre-read snapshot) and advances `updated_at`,
+and the UPDATE carries the same eligibility predicates as those writes
+(status, `price_locked_at`, `archived_at`, expiry, the linkage / delivery /
+re-price / address markers, and the pre-read's `updated_at`), so a decline,
+archive, expiry or off-surface marker that lands after the pre-read refuses
+it (zero rows → the generic zero-row answer, 404 or 409 "no longer active").
+A matched number is refused only after the same guarded predicate is
+re-read (an estimate that stopped being open during the lookup gets the
+zero-row answer, never the bell or the 409). The matcher loads
+`customer_phone_typed` itself when a caller passed a projection without it
+(the slot routes' `ESTIMATE_PARK_COLUMNS` also carries it), so no reader can
+mistake a typed phone for the office's.
+The save runs in one transaction with the estimate row and the linked call
+row locked, revalidating call linkage (`staleCallLinkageReason`, as the
+decline does): a correction that lands after the pre-check answers the
+generic 404. A staff save of the estimate (`admin-estimate-persistence`)
+clears `customer_phone_typed`, also when the number is unchanged: the
+office's save is its own word for the phone. A deposit receipt to an
+unlinked estimate treats a typed phone as no phone before acceptance (the
+receipt goes by email).
+At account creation the accept passes `forceNewAccount` for a typed phone
+(never `ignorePhoneMatch`): a customer who acquired the number between the
+matcher and the account step makes `ensureCustomerAccount` fail closed
+(`PHONE_MATCH_CONFIRM`), which the accept turns into the same park.
+`matchAcceptCustomerByPhone` — the one matcher every card and accept
+route reads — treats ANY candidate as a contradiction while the estimate
+still carries that typed number (`phoneTypedByCustomer`): no match, and the
+standing B18 park answers it (`ACCEPT_NEEDS_OFFICE_REVIEW`, nothing created,
+no card captured, the office told). So a customer who acquires the number
+after the save is not reused either. A phone the office later puts on the
+estimate differs from `customer_phone_typed` and is trusted as before. A diff that lets a
+typed phone resolve to an existing customer, or that writes it when it
+matches one, is a P0. `contactPhonePreGuard` (mounted on
+`/api/estimates` in `server/index.js` BEFORE the global `/api/` limiter, like
+`mapImagePreGuard`) stamps `Cache-Control: no-cache, no-store,
+must-revalidate`, `Pragma: no-cache` and `Referrer-Policy: no-referrer` on
+EVERY response of this route — the malformed-token 404, the global and the
+route limiter's 429s and the handler's answers — and answers the gate-off
+404 there, so a dark route never reads as a 429. The 200/409 difference tells a token
+holder whether a number is a customer's; that is bounded by design (a
+non-customer number is saved and closes the gap, a customer number rings the
+office, and the limiter caps attempts). The page keeps the card step and the
+Accept button locked while `contactGaps.phone` is true and reloads `/data`
+after a save. No message is sent because of this write, and no AUTOMATED text
+goes to a typed phone before the estimate is accepted
+(`typedPhoneBlocksPreAcceptSms`: the follow-up cron and the extension reply
+skip their SMS half; email is unaffected; a staff-initiated send is the
+office's own act). After the accept the number is the customer's record and
+the accept's confirmation text goes to it, as for any estimate phone. The
+office bell for a matched number is one row per estimate, refreshed without
+re-ringing when a different number is typed.
 
 Pay-after-first-visit flag (owner ruling 2026-09-30, `GATE_PAY_AFTER_FIRST_VISIT`,
 dark). GET `/api/estimates/:token/data` carries `recurringCardPolicy.payAfterFirstVisit:
@@ -2205,7 +2295,7 @@ test is the whole rule: a non-watering string from a water or coverage finding
 date) is held to 250 visible words at derive time: a field over its own word cap
 (headline 12, why 40, applied 60, each `yourPart` task 30, next 30) is left
 out, then `why` and `applied` are nulled in that order
-until it fits (with `GATE_LAWN_REPORT_COPY_V6` live the order is `why`, `watching`, `applied`, `whatToExpect`, then `sinceLast`). The web report mounts the lead card right under the watering
+until it fits (with `GATE_LAWN_REPORT_COPY_V6` live the order is `why`, `watching`, `applied`, `whatToExpect`, then `sinceLast`; `techParagraph` goes before all of them). The web report mounts the lead card right under the watering
 banner (above the plan, nearby and review cards); the lawn section then drops
 the snapshot hero and opens with the photo strip; the follow-up card shows
 (without its "Your part" line) only when a planned follow-up's reason could
@@ -2466,6 +2556,193 @@ is no prior visit, or when the prior visit froze no memory. The sentences are
 selected at render from the frozen memory and the two visits' scores, so a
 permanent token repeats them while those inputs stand; approving an expectation
 row later adds that row's line to reports already delivered.
+
+`GATE_LAWN_TECH_PARAGRAPH` (dark, owner 2026-10-05; effective only while
+`GATE_LAWN_REPORT_LEAD` is also live; off leaves the lawn payload, the render, the
+PDF and its cache signature unchanged, key for key, with no model call and no
+read) adds ONE optional string, `reportV2.lead.techParagraph`: the "From your
+technician" paragraph, 2 to 4 sentences and at most 70 words, in the first person
+plural. It is written ONCE, at completion (`finalizeLawnReportSynthesis`,
+`lawn-report-write-gate.js`), by one model call (lane `lawn_tech_paragraph`,
+`TEXT_POLICIES.report`, ONE 15-second deadline across the whole step: record read, input gather, model call, validation and freeze; about 7.5 s for the first provider, the rest for the backup; a stage that would start after expiry does not run, a freeze already issued finishes whole (it is one atomic first-writer-wins statement, issued only after a validated paragraph), and on expiry nothing further is stored and completion goes on) from the technician's
+note (verbatim), the products applied with their stored targets, the confirmed
+scores, the technician-kept photo findings (allowlisted symptom labels with the
+read's confidence), the last visit's products, watched topics and kept findings, the
+fixed density / weed / stress progress sentences, and the report's own headline and
+watering line. It never reads the raw observation text, a price, an address or any
+customer name. The text freezes first-writer-wins under
+`structured_notes.lawnTechParagraph[assessmentId]` (its own top-level key, never
+inside `lawnReportV2`); a render only reads it, from the record the build already
+loaded, so no render calls a model, `/api/reports/:token/ask` gains no read, and
+the in-process hand-off (`reportV2.techParagraph`) is non-enumerable: the only
+payload key is `reportV2.lead.techParagraph`. The key is absent when no paragraph
+was written (no note, no product, a failed or slow call, a degraded build, or any
+rejection below) and when the lead region would run past 250 words: it is the FIRST
+field given up (`techParagraph`, then `why`, `watching`, `applied`, `whatToExpect`,
+`sinceLast`), so gate on never costs a gate-off field its place; the field cap is
+70 words (+3 label words). Code rejects the WHOLE paragraph, and stores nothing, when it names a product that
+was not applied (including last visit's), a name no input carries, or a pest,
+disease, weed or condition no input carries (a product's target list licenses only
+"protects against", never "found"); states a number other than one inside an applied
+product's own name, a date, month, amount, price, timing, promise ("will", "next
+visit", "follow up") or watering/mowing advice; says "no issues" or "all clear";
+compares color between visits or compares anything with the last visit unless a fixed
+progress sentence has the same metric (thickness, weeds or stress) and direction
+(better, same, worse, on track), judged clause by clause so a compound comparison
+needs a line for each clause; says a condition is present when the note says it
+was NOT found or only MIGHT be (negation and uncertainty are read around the term;
+a negated term may appear only as negated, an uncertain one only hedged, and a note mention that only states a treatment purpose is not a sighting); states a
+product's target or role as found, seen or present (they license a purpose claim
+only: "to protect against", "to go after"); says the photos confirmed a cause (the
+technician's note wins over the photo read); states a low-confidence photo finding
+without a hedge; says it found, saw or there is something the condition vocabulary
+does not know (fail closed, `observed_unrecognized`); uses any word that is not
+ordinary English (a fixed list in the module), a known condition, a grass or place
+word, or a word the system-built inputs carry (findings, progress, facts, targets, product names; never the note's free text) (`word_not_in_inputs`: no invented
+diagnosis, product or person can reach the customer; codes never carry the raw
+word); or fails `customerCopyViolations`, the writer-rules timing screen
+or the next-visit claim lint. The model also returns a per-sentence `sources` list
+(note / product / finding / prior / progress / fact) that the code checks
+against what each sentence names. No tip or blog suggestion is produced yet; the
+technician-screen PR that reads them adds those fields under a new prompt version.
+The web report prints it under "What we applied today" as "From your technician",
+and the PDF (`ServiceReportDocument`) prints the same text under the same label
+(`lead.techParagraph`); the SMS and email summaries are unchanged. The text is
+screened again where it is read (a frozen text that no longer passes prints
+nothing). The PDF cache signature gains `:tp=<hash of the text>` only while the
+gate is live AND a whole frozen entry exists (an unreadable record stamps a
+one-off key), so a PDF cached before the paragraph existed is never served after
+it, and a visit with none keeps its key. Known limit: the validator is strict on purpose, so it rejects any watering or
+mowing word, even a harmless one such as "dry patch", and the whole paragraph
+with it (no paragraph is the safe miss).
+
+`GATE_LAWN_LIGHTING` (dark, owner 2026-10-04; off leaves every payload key,
+sentence, prompt and stored row unchanged, key for key) is ONE rule, "no color
+claim between visits shot in different or unknown light", with six independent
+effects. Each reads the gate at call time on its own; only effect 3 needs
+`GATE_LAWN_SINCE_LAST`. The gate reader `lawnLightingLive()` is true only when
+`GATE_LAWN_LIGHTING` AND `GATE_LAWN_VISIT_ASSESSMENT` are both on: the light read
+comes only from the one-call visit assessment (`/assess` stays on the legacy
+per-photo path without it), so without that gate no run would ever store a light,
+and no effect below can run without the reader that feeds it. It adds NO payload
+key to `GET /api/reports/:token/data`; it only removes or never writes color
+wording (the one added key is `initialScores.colorHidden` on the portal route,
+effect 6). A visit assessed before the gate
+has no light read, so its light is `unknown` and its color is never compared.
+Compatible light: full sun with full sun; overcast and open shade with each other;
+mixed sun and shade, low light and unknown are never compatible. A visit's light
+comes from its usable photos whose shot has positive color weight in
+`shared/lawn-photo-shots.json` (front, back, side, untagged, and the half-weight
+shade and hot-edge shots; detail shots do not count) when the visit was read under
+the shot-list prompt, and from EVERY usable photo when it was read under the legacy
+prompt (one whole-visit color score from all photos); which prompt is decided from
+the run's own stored prompt version, never from today's gate. A mix is mixed light. Any prompt position with no stored photo row (its insert failed) or no
+light read makes the visit's light unknown.
+
+Every code path that reads the gate (`lawnLightingLive()` in
+`server/config/feature-gates.js`; nothing else reads `GATE_LAWN_LIGHTING`):
+1. `server/services/lawn-visit-assessment.js` `analyzeVisit`: the visit assessment
+   reads each photo's light under `lawn-visit-v1-lighting` /
+   `lawn-visit-v1-shot-list-lighting` and the run stores it in
+   `lawn_assessment_runs.photo_quality` (left off the technician's response). The
+   input, result, referee, run-writer and eval modules receive that decision as a
+   parameter and do not read the gate.
+2. `server/services/lawn-paired-recheck.js` `runPairedRecheck`: the background
+   paired-photo job reads under `lawn-paired-recheck-v3`, told each pair's two
+   lights; `color` is dropped from a pair in incompatible or unknown light, and an
+   item keeps `color` only when a cited compatible pair itself reported it. A
+   recheck verdict already frozen on a visit memory is first-writer-wins and is
+   never rewritten. No payload effect.
+3. `server/services/service-report/report-data.js` (the progress engine call):
+   requires `GATE_LAWN_SINCE_LAST` to matter. It only REMOVES sentences from
+   `reportV2.lead.sinceLast.lines` (live views only, `mode: 'live'`; PDF and static
+   builds never carry that block, so PDF content and its cache signature are
+   unchanged and no signature stamp rides this gate). THE RULE: the gate may only
+   REMOVE a sentence gate-off would have printed, never print a different one, and
+   a removed sentence never makes room for another. So the engine first reaches
+   exactly the gate-off state for every item and the gate then only withholds:
+   the color lines ("Color is ahead of schedule.", "Color is on track.", "Color
+   is holding steady.", "Color is behind where we expected.", "The color change
+   since then is mostly seasonal.", "It is too early to judge the color
+   response.") are withheld unless both visits have a stored, compatible light,
+   and, in compatible light, a "behind" that rests on a color move under 8 points
+   (`COLOR_NO_CHANGE_POINTS`, the category band) is withheld too (nothing is said;
+   it is never rewritten to "holding steady"). Across a cool-season change the
+   gate-off engine itself (main, #5900) already calls a color move "mostly
+   seasonal" only when it reaches the band, and reads a smaller one as its normal
+   verdict (a would-be "behind" reads "holding steady"); in compatible light the
+   gate leaves that exactly as it is, so there is nothing further to withhold. The overall
+   sentence ("Your overall lawn score is up / down since then." / "...holding
+   steady.") is first decided exactly as gate-off decides it and is kept only when
+   thickness, weeds and stress damage agree with it (up with the no-color blend up
+   a band, down with it down a band, steady with it inside the band); otherwise
+   there is none. The two per-treatment slots, the four-line limit, the 40-word cap
+   and the lead's region word budget are all sized with the withheld lines still
+   counted (`budgetLines`, a non-enumerable hand-off, never a payload key), and the
+   withheld lines are removed last. A property test pins the rule over a grid of
+   score moves, seasons, treatments, photo confidence and light combinations: the
+   gate-on lines and lead strings are always a subset of the gate-off ones. For every
+   existing customer those color lines and color-driven overall sentences stop
+   appearing on reopened reports, because the block is re-selected from the frozen
+   memory and the two visits' scores on every live view; the frozen memory entry
+   and the frozen v6 copy are never rewritten. The two lights are read once per
+   live `/data` render (one `lawn_assessment_runs` and one `lawn_assessment_photos`
+   read, only with a prior visit). `/api/reports/:token/ask` and the PDF builder
+   pass no `lawnLighting` opt-in, read nothing and treat both lights as unknown;
+   an unreadable run is unknown light (fewer sentences, never a claim).
+4. `server/services/service-report/report-copy-context.js` (the report WRITER's
+   grounding, independent of `GATE_LAWN_SINCE_LAST`): while the lawn writer is
+   generating a report's text, the "LAWN ASSESSMENT" score line's color health
+   change against the prior visit ("+N vs <date>") is given to the model only when
+   both visits' stored light is compatible AND the move is 8 points or more;
+   otherwise the writer sees today's color score alone. The other categories keep
+   their changes. This changes only the INPUT of newly generated report text (new
+   visits, and regenerations); text already generated and frozen on a visit is
+   untouched, and the public route serves stored text as before. It adds one run
+   read and one photo read to generation, not to any public route.
+5. `server/services/service-report/report-data.js` (the trend): the report's
+   "Color & Vigor" trend, `reportV2.trends.color` (rendered by `LawnTrends` in
+   `client/src/components/report/lawnV2/LawnReportV2.jsx`, "Latest reading /
+   Previous reading"), is OMITTED from the payload unless the latest visit and the
+   visit before it (the chart's last two points) are in known, compatible light.
+   Compatible on both = the series is exactly as before; the series is never
+   rebuilt or relabeled, it is whole or absent. The overall trend and the weed,
+   coverage and stress trends are raw readings and stay. This is by the `/data`
+   render only (`lawnLighting` opt-in, any mode, one shared read with effect 3);
+   `/api/reports/:token/ask` and the PDF builder read nothing. THE PDF does not
+   carry the color trend: `mode=pdf` renders `ServiceReportDocument`
+   (`ReportViewPage.jsx`), which never mounts `LawnReportV2Section` or reads
+   `reportV2.trends`, so no cached PDF changes and no cache key is re-keyed (a test
+   pins this). EFFECT AT GATE-ON: every existing customer's report loses the
+   "Color & Vigor" chart (payload key `reportV2.trends.color`) until two
+   consecutive visits have been read under the lighting prompt in compatible light.
+6. `server/routes/lawn-health.js` (the customer portal's lawn health card,
+   `GET /api/lawn-health/:customerId`): the card's "Color / Nutrients: +N from X%"
+   compares the LATEST visit with the FIRST one, so unless those two visits were
+   photographed in known, compatible light the route sets `initialScores.colorHidden:
+   true` (the only added key; the gate-off payload has none) and
+   `beforeAfter.improvement.colorHealth: null`, and `PortalPage.jsx` then shows
+   today's color alone, with no "from" and no change. Every other number in that
+   payload is a raw reading and is unchanged.
+7. `server/config/feature-gates.js` `logGateStatus` entry (`lawnLighting`): logging
+   only.
+
+What the gate does NOT cover (raw readings, unchanged; each is a score the visit
+earned, shown with its own date, not a sentence about color changing). Color is part
+of these overall numbers, so they can still move when only the light did:
+- the overall trend `reportV2.trends.overall` and the overall points on the
+  before/after slider (`reportV2.progression`, `reportV2.beforeAfter`);
+- the weed, coverage and stress trends;
+- `lawnAssessment.trend[]`, `lawnAssessment.beforeAfter.improvement.*` (including
+  `colorHealth` and `overall`) and the legacy lawn card's "Since first assessment:
+  +N overall points" (`ReportViewPage.jsx`, only when `reportV2` is absent);
+- the portal's "N pts since first visit" and "+N pts improvement" overall deltas
+  (`PortalPage.jsx`; the overall score includes color);
+- the legacy narrative's `trendDirection` (`lawn-report-narrative.js`; env-gated and
+  bypassed whenever `GATE_LAWN_REPORT_COPY_V6` is live);
+- the report-assistant answer "Current lawn health is N% overall. Breakdown: ..."
+  (`report-assistant.js` `answerTrend`): current scores only, no comparison;
+- the staff and technician screens (Intelligence Bar, `LawnVisitReview`).
 
 `GATE_LAWN_RAINFAST_WATCH` (dark; effective only while `GATE_LAWN_VISIT_MEMORY` is
 live, and the sentence prints only while `GATE_LAWN_REPORT_LEAD` is live; off
@@ -3401,8 +3678,14 @@ only `/api/webhooks/lead` / `/api/leads` persist it.
 The returned and lead-stored `enriched` profile is the admin lookup's profile
 MINUS the staff-only `subdivisionMedian` block (the plat name, county, and
 assessed-neighbor sample/range that back the admin estimator's home-size
-estimate for an unassessed vacant parcel) — `publicEnrichedProfile` strips it
-on both paths; the response otherwise describes only the requested parcel).
+estimate for an unassessed vacant parcel) and MINUS the staff-only
+`permitBuildingFacts` block (the home's own building permit number, issue/CO
+dates and plan figures behind the admin estimator's new-construction home-size
+estimate; `GATE_LOOKUP_PERMIT_FACTS`), with a story count the permit filled
+(`storiesSource: 'permit'`) returned to the default (`stories: 1`,
+`storiesSource: 'default'`) and the `homeSqFt` verify flag's prose replaced by
+the shared source-free vacant-parcel copy — `publicEnrichedProfile` strips all of
+it on both paths; the response otherwise describes only the requested parcel).
 Operational `meta.providerStatus` (credential configuration and attempted-provider
 health) is staff-only; `publicLookupMeta` removes it from every public response.
 The public `errors` array includes only the known outside-service-area verdict;
@@ -6167,6 +6450,46 @@ effective post-discount amounts (`annualAfterDiscount`/`visitsPerYear`),
 never the pre-discount list `perTreatment`.
 NOTHING is sent to the customer and no bell rings: one `activity_log` row,
 written ATOMICALLY with the estimate update, is the whole audit surface.
+Good / Better / Best offer tiers (`GATE_ESTIMATE_OFFER_TIERS`, owner
+2026-10-05; STRICT opt-in, off = every response and accept byte-identical):
+an eligible one-time-toggle estimate (`show_one_time_option`, v1 shape,
+recurring pest plus lawn and/or tree & shrub, residential, no opt-out, no
+member evidence, no manual discount) carries `pricing.offerTiers` on `/data`
+— `good` (one-time visit, `oneTimeTotal`), `better` (pest-only plan,
+`usesBundleFrequencies:true` — the bundle's own pest-only ladder) and `best`
+(the full quoted bundle with its OWN `frequencies` + `serviceCadenceCombos`,
+`pestOnly:false`, `services` as the key list, plus its own contract view for
+the page: `sections` (pricing sections), `combinedRecurring` and
+`waveGuardTier`) — plus `pricing.offerTierDefaultKey`. Served only on a
+live accept-active surface, never to a LIVE active member — judged the way the
+accept resolves the customer: the linked `customer_id`, else the prospective
+phone match (`offerTierMemberBlock`, strict, fail-closed) — and a tiered
+payload withholds the `serviceOptOut` block (no remove / add rails). A send
+snapshot or cached bundle frozen before the gate carries no tier verdict:
+under a live gate it is served with its prices untouched and the live v1
+build's tier fields grafted on (`offerTiersEvaluated` stamps a judged
+bundle so an ineligible estimate is not rebuilt on every read). `PUT /:token/accept` takes `selectedTier`: absent = today's
+behavior; an unknown value, a value on an estimate with no stored tiers, or
+a tier whose service mode disagrees with `serviceMode` is 400
+`offer_tier_unavailable`; `best` keeps the companion programs the toggle's
+companion exclusion drops (the pest-only list filters and the
+`result.recurring.services` rewrite are skipped), prices off the stored
+`best` ladder / combos, refuses `prepay_annual` (400), and is recorded as
+`estimate_data.customerSelection.offerTier`; from then on (accepted or
+price-locked row) `/data` serves the Best tier's own view — ladder, combos and
+summary, picker fields dropped, `pricing.acceptedOfferTier: 'best'` — even
+after the gate is turned off, so the recap keeps what was booked. `/available-slots` (query),
+`/find-slots` and `/reserve` (body) take `offerTier`; only `best` changes
+the visit profile (every quoted program; part of the slot-cache key), and
+only when the live gate is on, the estimate's stored bundle offers that
+tier, and the customer the accept would land on is not a LIVE active member
+(the same `offerTierMemberBlock`, fail-closed on any read error) — the same
+three facts the accept re-checks (before and again inside its transaction,
+409) — and `/reserve` re-judges all three on the LOCKED row inside the
+reservation transaction (409 `offer_tier_unavailable` when the tier is gone or
+the customer became a member), so a hold can never size a visit the accept
+refuses; the accept's reservation commit carries the resolved value.
+
 The same PUT is the priced ADD rail under `GATE_ESTIMATE_SERVICE_ADD`
 (STRICT opt-in, needs the opt-out gate; off = the `/data` `addable` stamp is
 withheld and the write refuses 400 `service_not_addable`): `included:true`

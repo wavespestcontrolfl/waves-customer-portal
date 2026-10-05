@@ -118,10 +118,19 @@ function publicEnrichedProfile(enriched) {
   // opt-in, primary review of PR #4840), so buildEnrichedProfile never sets
   // them here today — stripped anyway so a future caller of this function
   // can never leak them by accident.
-  const { subdivisionMedian, addressVerdict, suiteSize: _suiteSize, suiteBuildingTotalSqFt: _suiteBuildingTotalSqFt, unitScopedLookup: _unitScopedLookup, ...rest } = enriched;
-  if (!subdivisionMedian || !Array.isArray(rest.fieldVerifyFlags)) return rest;
-  // The homeSqFt verify flag spells the same figures out in prose — swap in
-  // the median-free vacant-parcel copy (one shared string, never a regex).
+  // permitBuildingFacts (the home's own building permit: number, plan
+  // figures; address-match R2-B, GATE_LOOKUP_PERMIT_FACTS) is staff/engine
+  // only, exactly like subdivisionMedian: stripped from the response and the
+  // lead snapshot, and a story count the permit filled (storiesSource
+  // 'permit') goes back to the default so no permit-derived figure reaches
+  // the public payload.
+  const { subdivisionMedian, permitBuildingFacts, addressVerdict, suiteSize: _suiteSize, suiteBuildingTotalSqFt: _suiteBuildingTotalSqFt, unitScopedLookup: _unitScopedLookup, ...rest } = enriched;
+  const permitStories = rest.storiesSource === 'permit';
+  if (permitStories) { rest.stories = 1; rest.storiesSource = 'default'; }
+  if ((!subdivisionMedian && !permitBuildingFacts) || !Array.isArray(rest.fieldVerifyFlags)) return rest;
+  // The homeSqFt verify flag spells the same figures out in prose (the plat
+  // median, or the permit number and plan) — swap in the source-free
+  // vacant-parcel copy (one shared string, never a regex).
   return {
     ...rest,
     fieldVerifyFlags: rest.fieldVerifyFlags.map((flag) => (

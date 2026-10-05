@@ -152,6 +152,17 @@ describe('snapshotVisitArea for untreated incomplete visits', () => {
     expect(await isolated.snapshotVisitArea({ ...input(4000), explicitVisitArea: true }, service, admin, knex, { treatmentEvidence: false }))
       .toMatchObject({ treatedSqft: 4000 });
   });
+  test('an unreviewed recorded lawn area is the default too: not frozen untreated, recorded honestly when treated', async () => {
+    const property = fixtureProperty({ property_sqft: 3100 });
+    const knex = makeKnex({ customer_properties: [property], scheduled_services: [{ id: 'svc-1', customer_id: 'cust-1' }] });
+    const service = { id: 'svc-1', service_type: 'Lawn Care' };
+    const input = { propertyId: 'prop-1', version: isolated.areaVersion(property, null), kind: 'lawn', treatedSqft: 3100 };
+    expect(await isolated.snapshotVisitArea(input, service, admin, knex, { treatmentEvidence: false })).toBeNull();
+    expect(await isolated.snapshotVisitArea({ ...input, treatedSqft: 2000 }, service, admin, knex, { treatmentEvidence: false }))
+      .toMatchObject({ treatedSqft: 2000 });
+    expect(await isolated.snapshotVisitArea(input, service, admin, knex)).toEqual({
+      propertyId: 'prop-1', kind: 'lawn', treatedSqft: 3100, propertyAreaSqft: null, measurementSource: null, reviewedAt: null });
+  });
   test('the default is recorded when products were applied (or the visit completed)', async () => {
     const { knex, service, input } = setup();
     expect(await isolated.snapshotVisitArea(input(4000), service, admin, knex)).toMatchObject({ treatedSqft: 4000 });

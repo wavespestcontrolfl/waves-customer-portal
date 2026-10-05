@@ -393,6 +393,11 @@ async function buildServiceReportV1ResponseData(service, token, {
   // only the /data render shows it, so only it pays for the city-wide
   // lawn-findings read.
   nearYou = false,
+  // OPT-IN likewise for the lawn lighting-aware color rule (GATE_LAWN_LIGHTING,
+  // owner 2026-10-04): only the /data render prints the "Since your last visit"
+  // lines, so only it reads the two visits' stored light (one run read and one
+  // photo read). The Q&A endpoint never does, so it never pays.
+  lawnLighting = false,
   // OPT-IN likewise for the lawn "What the photos showed" block (lawn photo
   // set gate): it reads the visit's assessment run. Only the /data render and
   // the direct PDF route (whose cacheability check reads the same payload) print
@@ -425,6 +430,7 @@ async function buildServiceReportV1ResponseData(service, token, {
     pestPressureConfig, staffViewer, mode, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt,
     propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, expectationFactsOut, planSummary, upcomingVisitsCard,
     nearYou,
+    lawnLighting,
     lawnPhotoFindings,
     lawnRainfastWatch,
   });
@@ -2450,6 +2456,7 @@ router.get('/:token/data', async (req, res, next) => {
         // The render path is the only consumer of the cross-sell/referral
         // keys, so it is the only caller that pays to compose them.
         mode, staffViewer, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity, composeOffers: true, planSummary: true, upcomingVisitsCard: true, nearYou: true, lawnPhotoFindings: true,
+        lawnLighting: true,
         lawnWateringCloseOut: true,
         lawnRainfastWatch: true,
       });

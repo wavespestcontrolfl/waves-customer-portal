@@ -14,7 +14,7 @@
  *  - The search is dark with the gate off and reads only the technician's
  *    own current visit.
  *  - The pick is frozen at completion for every service but WDO, termite
- *    pre-treat, lawn and tree, shrub & palm (blogPostAllowedFor, the
+ *    pre-treat, and tree, shrub & palm (blogPostAllowedFor, the
  *    search's rule too), and one that is not live is an actionable 400
  *    before any write.
  *  - The report shows a frozen post only while the gate is on.
@@ -113,8 +113,8 @@ afterEach(() => {
   jest.clearAllMocks();
 });
 
-// Owner ruling 2026-10-02: every service but WDO, termite pre-treat, lawn
-// and tree, shrub & palm.
+// Owner ruling 2026-10-02: every service but WDO, termite pre-treat and tree,
+// shrub & palm; lawn allowed 2026-10-04 (the lawn Fast Complete sheet offers it).
 describe('blogPostAllowedFor', () => {
   test.each([
     ['Quarterly Pest Control', null],
@@ -124,6 +124,7 @@ describe('blogPostAllowedFor', () => {
     ['Termite Bait Station Monitoring', { serviceKey: 'termite_bait_monitoring' }],
     ['Liquid Termite Treatment', { serviceKey: 'termite_liquid', projectType: 'termite_treatment' }],
     ['Termite Inspection', { serviceKey: 'termite_inspection' }],
+    ['Lawn Care', { serviceKey: 'lawn_care' }],
   ])('%s carries a post', (serviceType, profile) => {
     expect(blogPostAllowedFor({ serviceType, profile })).toBe(true);
   });
@@ -135,7 +136,6 @@ describe('blogPostAllowedFor', () => {
     ['Termite Pre-Treatment', { serviceKey: 'termite_pretreatment' }],
     ['WDO Inspection', null],
     ['New Construction Termite Pretreat', null],
-    ['Lawn Care', { serviceKey: 'lawn_care' }],
     ['Tree & Shrub Care', null],
     ['Palm Injection', null],
     ['Pest Control', { serviceKey: 'pest_general', requiresProject: true }],
@@ -815,7 +815,6 @@ describe('GET /:serviceId/blog-posts', () => {
   test.each([
     ['WDO Inspection (Termite Letter)', { serviceKey: 'wdo_inspection', projectType: 'wdo_inspection' }],
     ['Pre-Slab Termite Treatment', { serviceKey: 'termite_slab_pretreat', projectType: 'pre_treatment_termite_certificate' }],
-    ['Lawn Care', { serviceKey: 'lawn_care' }],
     ['Tree & Shrub Care', { serviceKey: 'tree_shrub_care' }],
   ])('%s answers unavailable, as /complete would drop the pick (owner ruling 2026-10-02)', async (serviceType, profile) => {
     process.env.GATE_REPORT_BLOG_POST = 'true';

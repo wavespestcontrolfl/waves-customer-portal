@@ -344,6 +344,8 @@ function shortDay(ymd) {
 // watering banner (rendered above the report) owns the watering task.
 // lead.sinceLast (GATE_LAWN_SINCE_LAST) is the "Since your last visit" block:
 // server-selected sentences printed as given, above what was applied today.
+// lead.techParagraph (GATE_LAWN_TECH_PARAGRAPH) is "From your technician": a
+// frozen paragraph printed as given, right under what was applied today.
 export function LawnLeadCard({ lead = {}, snapshot = {}, style = null }) {
   const status = snapshot.status || scoreStatus(snapshot.overallScore);
   const yourPart = Array.isArray(lead.yourPart) ? lead.yourPart.filter(Boolean) : [];
@@ -384,6 +386,16 @@ export function LawnLeadCard({ lead = {}, snapshot = {}, style = null }) {
           <div style={{ marginTop: 10, padding: '11px 13px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 10 }}>
             <div data-gt="eyebrow" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em' }}>What we applied today</div>
             <div style={{ fontSize: 16, color: BODY, lineHeight: 1.5, marginTop: 3 }}>{lead.applied}</div>
+          </div>
+        ) : null}
+
+        {/* GATE_LAWN_TECH_PARAGRAPH: the technician's paragraph, written once at
+            completion and frozen server-side; printed as given, right under the
+            fixed "what we applied" line. Absent key renders nothing. */}
+        {lead.techParagraph ? (
+          <div data-testid="lawn-lead-tech" style={{ marginTop: 10, padding: '11px 13px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 10 }}>
+            <div data-gt="eyebrow" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em' }}>From your technician</div>
+            <div style={{ fontSize: 16, color: BODY, lineHeight: 1.5, marginTop: 3 }}>{lead.techParagraph}</div>
           </div>
         ) : null}
 

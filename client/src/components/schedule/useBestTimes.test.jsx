@@ -236,3 +236,25 @@ it('the move choice on a shared stop rides the request, and changing it searches
   await waitFor(() => expect(scopes()).toContain('separate'));
 });
 
+
+it('prices the typed hour on every route in auto mode and drops the single-route verdict', async () => {
+  const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({
+    slots: [],
+    pickedByTech: [{ start: '13:00', fits: true, detour_minutes: 12, drive_in_minutes: 9, from_home_base: false, from_name: 'S', technician: { id: 't-b', name: 'Tech B' } }],
+  }) });
+  vi.stubGlobal('fetch', fetch);
+  const { result } = renderHook(() => useBestTimes({ date: '2035-01-02', customerId: 'fixture', compareTechsAt: '13:00' }));
+  await waitFor(() => expect(result.current.pickedByTech).toHaveLength(1));
+  expect(JSON.parse(fetch.mock.calls[0][1].body)).toMatchObject({ pickedStart: '13:00', compareTechs: true });
+  expect(result.current.pickedByTech[0]).toMatchObject({ technicianId: 't-b', detourMinutes: 12 });
+});
+
+it('never compares routes once one technician is chosen', async () => {
+  const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ slots: [] }) });
+  vi.stubGlobal('fetch', fetch);
+  renderHook(() => useBestTimes({ date: '2035-01-02', customerId: 'fixture', technicianId: 'tech', compareTechsAt: '13:00' }));
+  await waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+  const body = JSON.parse(fetch.mock.calls[0][1].body);
+  expect(body.compareTechs).toBeUndefined();
+  expect(body.pickedStart).toBeUndefined();
+});

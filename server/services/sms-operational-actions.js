@@ -15,7 +15,7 @@ const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-re
 const { hashExtractionSource, recordExtractionAttempt, shouldSkipExtraction, TERMINAL_STATUSES } = require('./data-hygiene/source-extraction-store');
 const { stalePendingExtractionProposals, findPendingExtractionProposal, upsertSensitiveProposal, findSmsExtractionProposals, buildIdempotencyKey } = require('./data-hygiene/proposal-store');
 const { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue } = require('./data-hygiene/property-preferences');
-const { VERSION, extractSmsOperations, explicitContactPreference, matchesExplicitAccessCode, statesClock } = require('./sms-operational-extractor');
+const { VERSION, extractSmsOperations, explicitContactPreference, matchesAccessCode, statesClock } = require('./sms-operational-extractor');
 const { IRRIGATION_INPUT_FIELDS } = require('./irrigation-schedule-confirmation');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { isSmsReaction } = require('./sms-intent');
@@ -247,7 +247,7 @@ function factVerdict(fact, { properties, current = {}, expectedCurrent = current
   if (fact.duration !== 'durable' || TEMPORARY_INSTRUCTION.test(`${messageBody} ${fact.quote}`)) return 'temporary_instruction';
   if (fact.field === 'contact_preference'
     && explicitContactPreference(fact.quote) !== fact.value) return 'preference_uncertain';
-  if (fact.field.endsWith('_code') && !matchesExplicitAccessCode(fact)) return 'code_uncertain';
+  if (fact.field.endsWith('_code') && !matchesAccessCode(fact, { messageBody, properties })) return 'code_uncertain';
   const maxLength = { neighborhood_gate_code: 100, property_gate_code: 100, lockbox_code: 100,
     garage_code: 100, irrigation_controller_location: 200 }[fact.field] ?? 600;
   if (fact.value.length > maxLength) return 'value_too_long';
@@ -552,7 +552,8 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
       if (prior.skip) return { skipped: 'replay_receipt_terminal', receipt_status: prior.existing.status };
       replayAppliedFields = await appliedSmsProfileFields(trx, live);
     } else if (live.operational_analysis?.version === VERSION) return { skipped: 'already_processed' };
-    const properties = await trx('customer_properties').where({ customer_id: customer.id, active: true }).select('id');
+    // The address fields feed the house-number and ZIP check of a natural-wording code at write time.
+    const properties = await trx('customer_properties').where({ customer_id: customer.id, active: true }).select('id', 'address_line1', 'zip');
     const [current = {}] = await trx('property_preferences').where({ customer_id: customer.id }).forUpdate().limit(1).select('*');
     const sender = { inbound: message.from_phone, outbound: message.to_phone }[message.direction];
     const matches = await trx('customers').whereNull('deleted_at')

@@ -32,7 +32,7 @@ const { tsWatchListLive, visitWatchMonth } = require('./tree-shrub-watch-items')
 
 const ROTATION_WINDOW_DAYS = 60;
 // Palm spacing = the shared three-calendar-month rule (owner program, #5089).
-const { palmFeedingTooSoon, PALM_SPACING_LOOKBACK_DAYS: PALM_FERTILIZER_SPACING_DAYS } = require('./tree-shrub-completion-defaults');
+const { palmFeedingTooSoon, filterTreeShrubDefaults, PALM_SPACING_LOOKBACK_DAYS: PALM_FERTILIZER_SPACING_DAYS } = require('./tree-shrub-completion-defaults');
 const HISTORY_RECORD_LIMIT = 12;
 // Same lifetime the tech portal's own photo list signs for (tech-track GET /:id/photos).
 const LAST_PHOTO_URL_TTL_SECONDS = 3600;
@@ -362,6 +362,47 @@ async function loadRecentApplications(svc, visitDate, knex) {
   );
 }
 
+// Every month card now names Snapshot and the season's palm feed (2026-10-05:
+// visits start on the signup date, so any month can host a visit). Those
+// suggestions pass the same due rules as the full form's completion defaults
+// (filterTreeShrubDefaults: Snapshot 60 days / one per quarter / annual cap;
+// palm three months; at most four a year). A failed history read holds them,
+// never suggests them unchecked.
+function dueKeyFor(row) {
+  const name = String(row?.name || '').trim();
+  if (/^snapshot\s*2\.5\s*tg\b/i.test(name)) return 'snapshot';
+  if (/^lesco\s+8-0-12\s+palm\b/i.test(name)) return 'f8012';
+  if (/^lesco\s+0-0-16\s+palm\b/i.test(name)) return 'f0016';
+  return null;
+}
+
+async function filterDueMonthProducts(entries, catalog, svc, knex, serviceId) {
+  const byId = new Map((catalog || []).map((row) => [String(row.id), row]));
+  const keyed = [];
+  const passThrough = [];
+  for (const entry of entries) {
+    const row = byId.get(String(entry.productId));
+    const key = dueKeyFor(row);
+    if (key) keyed.push({ entry, treeShrubKey: key, name: row.name });
+    else passThrough.push(entry);
+  }
+  if (!keyed.length) return { entries, holds: [] };
+  try {
+    const { entries: allowed, holds } = await filterTreeShrubDefaults({ db: knex, scheduled: svc, entries: keyed });
+    const allowedIds = new Set(allowed.map((item) => String(item.entry.productId)));
+    return {
+      entries: entries.filter((entry) => passThrough.includes(entry) || allowedIds.has(String(entry.productId))),
+      holds,
+    };
+  } catch (err) {
+    logger.warn(`[ts-fast-context] due check unavailable for ${serviceId}: ${err?.code || err?.name || 'Error'}`);
+    return {
+      entries: passThrough,
+      holds: keyed.map((item) => ({ name: item.name, reason: 'Application history is unavailable; check before applying.' })),
+    };
+  }
+}
+
 /**
  * The sheet's context for one scheduled service. `{ ok: false, reason }` only
  * for a missing service; an ineligible visit answers `eligible: false` with the
@@ -399,7 +440,10 @@ async function buildTreeShrubFastContext(serviceId, knex = db) {
     logger.warn(`[ts-fast-context] last visit unavailable for ${serviceId}: ${err?.code || err?.name || 'Error'}`);
   }
   const lastAmounts = lastAmountsByProduct(history);
-  const monthProducts = resolveMonthProducts(svc.scheduled_date, catalog).map((entry) => ({
+  const { entries: dueMonthEntries, holds: monthProductHolds } = await filterDueMonthProducts(
+    resolveMonthProducts(svc.scheduled_date, catalog), catalog, svc, knex, serviceId,
+  );
+  const monthProducts = dueMonthEntries.map((entry) => ({
     ...entry,
     ...(lastAmounts.has(String(entry.productId)) && { lastAmount: lastAmounts.get(String(entry.productId)) }),
   }));
@@ -424,6 +468,7 @@ async function buildTreeShrubFastContext(serviceId, knex = db) {
     service,
     products,
     monthProducts,
+    ...(monthProductHolds.length && { monthProductHolds }),
     lastVisit: buildLastVisit(history),
     lastVisitPhotos: await loadLastVisitPhotos(history, knex, serviceId),
     warnings,

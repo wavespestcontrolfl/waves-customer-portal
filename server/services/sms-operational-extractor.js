@@ -7,6 +7,7 @@ const { dispatchWithFallback } = require('./llm/call');
 const { COMMITMENT_KINDS, kindBelongsToParty, parseDueAt } = require('./call-commitments');
 const { parseQuotedETDeadline, parseQuotedETDay, expandWeekdayAbbreviations, etDateString, formatETDay, validCalendarDate, addETDays } = require('../utils/datetime-et');
 const { scrubPans, scrubSegments } = require('../utils/pan-scrub');
+const { gateEnvValue } = require('../config/feature-gates');
 
 // The shared proposal rule_version column is varchar(16).
 const VERSION = 'sms-ops-v22';
@@ -114,12 +115,47 @@ function isQuestionSource(source) {
   return /[?¿؟]/u.test(text) || INTERROGATIVE.test(text) || INDIRECT_INTERROGATIVE.test(text);
 }
 
+// Words that describe a missing, relational, replaced or dead code value.
+const NOT_A_CREDENTIAL = /\b(?:unknown|none|null|undefined|unsure|uncertain|unavailable|pending|missing|not|no|never|forgot(?:ten)?|forget|maybe|perhaps|same|usual|last|previous|prior|before|earlier|again|old|new|different|changed|later|soon|text|call|ask|check|see|broken|disabled|reset|removed|inactive|expired|invalid|off|down|gone|lost|stuck|jammed|dead|out|open|locked|unlocked)\b|n['’]t|^n[ /]?a$/i;
+// Owner ruling 2026-10-04: a client's access code saves from the client's own
+// wording, not only from the strict form ("Gate code is 1234" was dropped).
+// Read at call time so the flip needs no redeploy.
+const accessCodeCaptureEnabled = () => gateEnvValue('GATE_ACCESS_CODE_CAPTURE');
+// The WHOLE message must be this one sentence. Two review passes showed that a
+// list of refused words on free text never closes (a retraction, a hedge, a
+// spelled key symbol, a second number each got through in turn), so nothing
+// else may stand in the message: an optional greeting, the kind of code, a
+// credential word, the code, an optional thanks. A plain "gate" is the
+// neighborhood gate; a front, main, side or back gate is the property's own
+// gate, as call-profile-enrichment.js reads it.
+const NATURAL_ACCESS_CODE = new RegExp('^(?:(?:hi|hello|hey|good (?:morning|afternoon|evening))[,!.]?\\s+)?'
+  + '(?:(?:the|my|our)\\s+)?(?:new\\s+)?'
+  + '(?:((?:community|neighborhood|entrance)\\s+gate|gate)|((?:side|back|rear|yard|backyard|left|right|pool|front|main|property)\\s+gate)'
+  + '|(lock\\s?box|key\\s?box)|(garage(?:\\s+door)?))'
+  + '\\s+(?:code|pin|combo|key\\s?pad)\\s*(?:is\\s+|:\\s*|=\\s*|-\\s*)?([#*]?\\d{3,8}[#*]?)[.!]?'
+  + '(?:\\s+(?:thanks|thank you)[.!]?)?$', 'i');
+const NATURAL_ACCESS_FIELDS = ['neighborhood_gate_code', 'property_gate_code', 'lockbox_code', 'garage_code'];
+
+function matchesNaturalAccessCode({ field, value }, { messageBody = '', properties = [] } = {}) {
+  const match = NATURAL_ACCESS_CODE.exec(String(messageBody || '').trim().replace(/\s+/g, ' '));
+  if (!match || match[5] !== String(value || '').trim()) return false;
+  if (NATURAL_ACCESS_FIELDS[[1, 2, 3, 4].findIndex((group) => match[group])] !== field) return false;
+  // The property's own house number or ZIP is not a code.
+  const digits = match[5].replace(/\D/g, '');
+  return !properties.some((property) => (String(property.address_line1 || '').match(/^\s*(\d+)/) || [])[1] === digits
+    || String(property.zip || '').slice(0, 5) === digits);
+}
+
+function matchesAccessCode(item, context) {
+  return matchesExplicitAccessCode(item) || (accessCodeCaptureEnabled() && matchesNaturalAccessCode(item, context));
+}
+
 function matchesExplicitAccessCode({ quote, field, value }) {
   // Missing-code descriptions and relational phrases are not credentials,
   // even if the model proposes them verbatim. Preserve the empty field for
   // the real code: a multi-word value needs at least one digit or key symbol.
   const candidate = String(value || '').trim();
-  if (/\b(?:unknown|none|null|undefined|unsure|uncertain|unavailable|pending|missing|not|no|never|forgot(?:ten)?|forget|maybe|perhaps|same|usual|last|previous|prior|before|earlier|again|old|new|different|changed|later|soon|text|call|ask|check|see|broken|disabled|reset|removed|inactive|expired|invalid|off|down|gone|lost|stuck|jammed|dead|out|open|locked|unlocked)\b|n['’]t|^n[ /]?a$/i.test(candidate)) return false;
+  if (NOT_A_CREDENTIAL.test(candidate)) return false;
   if (/\s/.test(candidate) && !/[#*\d]/.test(candidate)) return false;
   if (!/[A-Za-z\d]/.test(candidate)) return false;
   // A credential is a short token (lettered lockboxes exist) or a digit/symbol
@@ -203,7 +239,7 @@ Facts:
 - Capture explicitly reported operational facts and instructions, not diagnoses or technical recommendations. Keep the customer's equipment/irrigation reports distinguished from verified findings.
 - value must be an exact substring of quote, except contact_preference which must be call, text or email. Capture only the useful operational preference, never its medical explanation.
 - For EVERY fact, quote must retain the whole CURRENT message, including every sentence and qualifier. For controller locations, notes, instructions, pet details and irrigation issues, value MUST equal quote. Never shorten a message to a standalone instruction that omits another clause. If separate topics do not belong together in the field, mark duration uncertain for staff review.
-- Codes keep their symbols. If the kind of code or its property is ambiguous, do not guess.
+- Codes keep their symbols. If the kind of code or its property is ambiguous, do not guess.${accessCodeCaptureEnabled() ? ' A plain "gate code" with no side, back or yard word is the neighborhood gate (field neighborhood_gate_code). For a code, value is the code alone with its # or * symbol.' : ''}
 - An instruction for today/one visit/vacation is visit_only, not durable. Ambiguous duration is uncertain. A change to payment, billing, ownership or communication consent is an obligation to resolve, never a profile fact.
 - property_id may identify the sole provided property. With zero or multiple properties, use null, including requests covering all properties; opaque ids alone cannot prove which address the customer means. Never infer another person's authority or merge accounts.
 
@@ -358,7 +394,7 @@ function groundExtraction(parsed, { message, properties = [], captureCommitments
   const facts = message.direction !== 'inbound' || message.message_body.length > 600 ? [] : parsed.facts.filter((item) => {
     if (!grounded(item) || item.quote.trim() !== completeSource || isQuestionSource(completeSource)) return false;
     if (item.field === 'contact_preference') return explicitContactPreference(item.quote) === item.value;
-    if (item.field.endsWith('_code')) return matchesExplicitAccessCode(item);
+    if (item.field.endsWith('_code')) return matchesAccessCode(item, { messageBody: message.message_body, properties });
     return item.value === item.quote && message.message_body.includes(item.value);
   });
   const factDropped = parsed.facts.length - facts.length;
@@ -402,4 +438,4 @@ async function extractSmsOperations(context) {
   return groundExtraction(result.json, context);
 }
 
-module.exports = { VERSION, FACT_FIELDS, SCHEMA, buildPrompt, groundExtraction, statesClock, explicitContactPreference, matchesExplicitAccessCode, stringifySmsEvidence, extractSmsOperations };
+module.exports = { VERSION, FACT_FIELDS, SCHEMA, buildPrompt, groundExtraction, statesClock, explicitContactPreference, matchesExplicitAccessCode, matchesAccessCode, matchesNaturalAccessCode, stringifySmsEvidence, extractSmsOperations };

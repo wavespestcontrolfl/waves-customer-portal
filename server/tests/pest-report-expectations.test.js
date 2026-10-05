@@ -700,3 +700,4 @@ describe('buildPestExpectations — child keys present only with content (codex 
     expect(buildPestExpectations({ applications: [] })).toBeNull();
   });
 });
+

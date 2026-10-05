@@ -44,6 +44,7 @@ const {
   COMPANY_FACTS_HEADER, BILLING_DELIMITER, exactStructureRegexSource, hasExactCompanyFacts, hasExactLabelFacts,
 } = require('./sms-company-facts');
 const { LABEL_FACTS_MARKER, LABEL_SECTION_REGEX_SRC } = require('./sms-label-facts');
+const { MISSED_VISIT_SCOPE_LINE } = require('./visit-loops-facts');
 
 const SCHEMA_VERSION = 'sms-sealed-eval.v1';
 
@@ -183,6 +184,11 @@ const VERSION_SUFFIX_FACT_MARKERS = Object.freeze({
   cflv: [COMPANY_FACTS_HEADER, LABEL_FACTS_MARKER, VISIT_LOOPS_MARKER],
   cflvp: [COMPANY_FACTS_HEADER, LABEL_FACTS_MARKER, VISIT_LOOPS_MARKER, V12_PAYMENT_OPTIONS_MARKER],
   p: [V12_PAYMENT_OPTIONS_MARKER],
+  // MISSED VISIT (#5610): the compact cumulative key — everything 'cflvp' requires plus
+  // the section's fixed MISSED VISIT scope line. An item frozen before the missed-visit
+  // read existed may hide an open miss behind "- none", so it lacks the scope line and
+  // never grades '7_m' (Codex #5610 r1 P1); a '7_m' item never grades an older identity.
+  m: [COMPANY_FACTS_HEADER, LABEL_FACTS_MARKER, VISIT_LOOPS_MARKER, V12_PAYMENT_OPTIONS_MARKER, MISSED_VISIT_SCOPE_LINE],
 });
 // the markers one suffix token requires (a list)
 function suffixTokenMarkers(token) {
@@ -295,9 +301,39 @@ function hasRenderedVisitLoops(facts) {
   const upcoming = head.split(UPCOMING_DELIMITER)[1];
   return typeof upcoming === 'string' && upcoming.includes(VISIT_LOOPS_LINE);
 }
+// The MISSED VISIT scope line, rendered on its own line inside the same UPCOMING
+// SERVICES .. BILLING span as the section header (thread text sits after BILLING and
+// never counts).
+const MISSED_SCOPE_LINE = `\n${MISSED_VISIT_SCOPE_LINE}\n`;
+function hasRenderedMissedScope(facts) {
+  const head = String(facts).split(BILLING_DELIMITER)[0];
+  const upcoming = head.split(UPCOMING_DELIMITER)[1];
+  return typeof upcoming === 'string' && upcoming.includes(MISSED_SCOPE_LINE);
+}
+// The scope line renders on EVERY '7_m' block, so contract compatibility alone never
+// proves the pool exercises the behavior the version was minted for (Codex #5610 r12
+// P1): a version carrying it also needs real MISSED VISIT cases — an item whose
+// rendered section (same span rule) lists a "- MISSED VISIT:" line.
+const MISSED_CASE_LINE = '\n- MISSED VISIT:';
+const SEALED_EVAL_MISSED_CASES_MIN = Math.max(0, envNum('SEALED_EVAL_MISSED_CASES_MIN', 3));
+function hasRenderedMissedCase(facts) {
+  const head = String(facts || '').split(BILLING_DELIMITER)[0];
+  const upcoming = head.split(UPCOMING_DELIMITER)[1];
+  return typeof upcoming === 'string' && upcoming.includes(MISSED_CASE_LINE);
+}
+const versionNeedsMissedCases = (version) => SEALED_EVAL_MISSED_CASES_MIN > 0
+  && requiredFactMarkers(version).includes(MISSED_VISIT_SCOPE_LINE);
+// { have, need } for a version that wants real MISSED VISIT cases, else null. `items`:
+// the active pool rows (facts_block).
+function missedVisitCoverage(version, items) {
+  if (!versionNeedsMissedCases(version)) return null;
+  const have = (items || []).filter((i) => itemCompatibleWith(i.facts_block, version) && hasRenderedMissedCase(i.facts_block)).length;
+  return { have, need: SEALED_EVAL_MISSED_CASES_MIN };
+}
 function factsHasMarker(factsBlock, marker) {
   const facts = String(factsBlock || '');
   if (marker === VISIT_LOOPS_MARKER) return hasRenderedVisitLoops(facts);
+  if (marker === MISSED_VISIT_SCOPE_LINE) return hasRenderedMissedScope(facts);
   // COMPANY FACTS keeps main's exact-render trust test (a header typed into a multi-line SMS proves nothing).
   if (marker === COMPANY_FACTS_HEADER) return hasExactCompanyFacts(facts);
   if (marker === LABEL_FACTS_MARKER) return hasExactLabelFacts(facts);
@@ -318,11 +354,11 @@ function compatibleWhereRaw(markers, forbidden = []) {
   const clauses = [];
   const bindings = [];
   const add = (marker, negate) => {
-    if (marker === VISIT_LOOPS_MARKER) {
-      // the twin of hasRenderedVisitLoops: the header line inside the text between the first
-      // UPCOMING SERVICES line and the first BILLING: line
+    if (marker === VISIT_LOOPS_MARKER || marker === MISSED_VISIT_SCOPE_LINE) {
+      // the twin of hasRenderedVisitLoops / hasRenderedMissedScope: the line inside the text
+      // between the first UPCOMING SERVICES line and the first BILLING: line
       clauses.push(`${negate ? 'NOT ' : ''}(position(?::text in split_part(split_part(${col}, ?::text, 1), ?::text, 2)) > 0)`);
-      bindings.push(VISIT_LOOPS_LINE, BILLING_DELIMITER, UPCOMING_DELIMITER);
+      bindings.push(marker === VISIT_LOOPS_MARKER ? VISIT_LOOPS_LINE : MISSED_SCOPE_LINE, BILLING_DELIMITER, UPCOMING_DELIMITER);
     } else if (marker === COMPANY_FACTS_HEADER || marker === LABEL_FACTS_MARKER) {
       // Exact-structure twin of hasExactCompanyFacts / hasExactLabelFacts: the
       // text before the first BILLING: line matches the same regex source.
@@ -418,10 +454,36 @@ async function sealEvalItems({ target = SEALED_EVAL_TARGET, dbi = db } = {}) {
   let remaining = target - Number(compatibleCount);
   // retired items the current contract matches come back before any new
   // draft is sealed; only the rest of the shortfall is sourced fresh
-  const reactivated = await restoreCompatibleItems({ dbi, remaining, markers, forbidden });
+  let reactivated = await restoreCompatibleItems({ dbi, remaining, markers, forbidden });
   remaining -= reactivated;
-  const activeAfterRestore = Number(activeCount) + reactivated;
-  if (remaining <= 0) {
+  let activeAfterRestore = Number(activeCount) + reactivated;
+  // Real MISSED VISIT cases the version needs (versionNeedsMissedCases) are sealed
+  // first, even past the target, until the pool holds the minimum: they are rare, and
+  // round-robin by intent alone would almost never pick one.
+  let missedShort = 0;
+  if (versionNeedsMissedCases(sealVersion)) {
+    const held = ((await dbi('sms_sealed_eval_items').where('active', true)
+      .whereRaw(compat.sql, compat.bindings).select('facts_block')) || []).filter((i) => hasRenderedMissedCase(i.facts_block)).length;
+    missedShort = Math.max(0, SEALED_EVAL_MISSED_CASES_MIN - held);
+    // Retired compatible MISSED VISIT cases come back first (a prompt rollback and
+    // return leaves them inactive, and the candidate anti-join never re-seals a
+    // source): the general restore above is capped by the pool shortfall and may
+    // have had none, or spent it on newer ordinary items (Codex #5839 r3).
+    if (missedShort > 0) {
+      const retiredMissed = ((await dbi('sms_sealed_eval_items').where('active', false)
+        .whereRaw(compat.sql, compat.bindings).orderBy('sealed_at', 'desc').select('id', 'facts_block')) || [])
+        .filter((i) => hasRenderedMissedCase(i.facts_block)).slice(0, missedShort).map((i) => i.id);
+      if (retiredMissed.length) {
+        const back = Number(await dbi('sms_sealed_eval_items').whereIn('id', retiredMissed).where('active', false).update({ active: true })) || 0;
+        if (back) logger.info(`[sealed-eval] seal: reactivated ${back} retired missed-visit case(s)`);
+        missedShort -= back;
+        reactivated += back;
+        activeAfterRestore += back;
+        remaining -= back;
+      }
+    }
+  }
+  if (remaining <= 0 && !missedShort) {
     // Codex r4: a prior run may have inserted compatible rows and then
     // failed before retiring the displaced pre-v12 ones, leaving an
     // oversized active pool that would otherwise never shrink (and trips
@@ -460,17 +522,23 @@ async function sealEvalItems({ target = SEALED_EVAL_TARGET, dbi = db } = {}) {
     .orderBy('md.created_at', 'desc');
 
   // Stratify: round-robin across intents, newest first within each.
-  const byIntent = new Map();
+  const picked = [];
+  const rest = [];
   for (const c of candidates) {
+    if (missedShort > 0 && hasRenderedMissedCase(c.facts_block)) { picked.push(c); missedShort -= 1; } else rest.push(c);
+  }
+  const byIntent = new Map();
+  for (const c of rest) {
     const key = c.intent || 'GENERAL';
     if (!byIntent.has(key)) byIntent.set(key, []);
     byIntent.get(key).push(c);
   }
-  const picked = [];
   const queues = [...byIntent.values()];
-  while (picked.length < remaining && queues.some((q) => q.length)) {
+  // the regular shortfall still applies; missed-visit cases may push the pool past it
+  const regularCap = Math.max(picked.length, remaining);
+  while (picked.length < regularCap && queues.some((q) => q.length)) {
     for (const q of queues) {
-      if (picked.length >= remaining) break;
+      if (picked.length >= regularCap) break;
       const next = q.shift();
       if (next) picked.push(next);
     }
@@ -833,6 +901,15 @@ async function createExamRun({ providerLeg, baselineRunId, triggeredBy = 'manual
   if (compatible < needed) {
     throw new Error(`no sealed coverage for ${currentVersion}: only ${compatible} of ${activeItems.length} active items ${contractLabel(currentVersion)} (need ${needed}); the rest were frozen under a different fact contract. Seal fresh items under ${currentVersion} before running this exam`);
   }
+  // Missed-visit coverage is REPORTED, never a blocker (owner 2026-10-04): a real
+  // MISSED VISIT case exists only after the office confirms a miss and that customer
+  // texts, which can take weeks, and the exam must keep grading everything else
+  // meanwhile. The run carries the count; once the pool holds the minimum the exam
+  // grades those cases like any other item.
+  const scenarioCoverage = missedVisitCoverage(currentVersion, activeItems);
+  if (scenarioCoverage && scenarioCoverage.have < scenarioCoverage.need) {
+    logger.warn(`[sealed-eval] ${currentVersion}: ${scenarioCoverage.have} of ${scenarioCoverage.need} missed-visit cases in the pool — the run grades none of that behavior yet`);
+  }
 
   // Baseline: an explicit baselineRunId must identify a COMPLETE run on the
   // SAME leg — a failed/partial baseline would compare against a fragment,
@@ -898,7 +975,7 @@ async function createExamRun({ providerLeg, baselineRunId, triggeredBy = 'manual
         triggered_by: String(triggeredBy || 'manual').slice(0, 100),
       })
       .returning('*');
-    return run;
+    return scenarioCoverage ? { ...run, missed_visit_coverage: scenarioCoverage } : run;
   } catch (err) {
     // The one-running partial unique index closes the check-then-insert race:
     // a concurrent create that slipped past the pre-check lands here instead
@@ -1290,9 +1367,16 @@ async function getSealedExamSummary({ dbi = db } = {}) {
   EXAM_LEGS.forEach((leg, i) => {
     legs[leg] = shapeRun(legRows[i]) || null;
   });
+  // Missed-visit coverage, recomputed from the pool as it is NOW (owner 2026-10-04:
+  // reported, never a blocker): a version that lists MISSED VISIT can complete its
+  // exam with none of those cases graded, and the summary must say so.
+  const coverage = versionNeedsMissedCases(currentVersion)
+    ? missedVisitCoverage(currentVersion, await dbi('sms_sealed_eval_items').where('active', true).select('facts_block'))
+    : null;
   return {
     currentVersion,
     items: { active: Number(counts?.active) || 0, total: Number(counts?.total) || 0 },
+    ...(coverage ? { missedVisitCoverage: { ...coverage, short: coverage.have < coverage.need } } : {}),
     legs,
     runs: runs.map(shapeRun),
   };
@@ -1564,6 +1648,8 @@ module.exports = {
   EXAM_LEG_ROUTES,
   SEALED_EVAL_TARGET,
   _test: {
+    hasRenderedMissedCase,
+    missedVisitCoverage,
     mcNemarExact,
     binomHalfPmf,
     parseScores,

@@ -92,6 +92,49 @@
       ],
       "summary": "lb per palm · canopy chart"
     },
+    "mnsulfate": {
+      "kind": "Plant nutrition · granules",
+      "targetTitle": "Nutrients",
+      "targets": "29% manganese (water soluble). For manganese deficiency (frizzle-top) on palms: the newest fronds come out yellow, small, withered or frizzled. Common on queen, royal, pygmy date, paurotis and coconut palms. Contains no nitrogen or phosphate, so it is allowed during the June–September blackout.",
+      "apply": "Spread evenly under the canopy. No mixing or spraying. Keep granules off pavement, masonry and painted surfaces: manganese sulfate stains them. Old frizzled fronds will not recover; judge results on new fronds in 3–6 months.",
+      "rates": [
+        [
+          "Small palms: ½–1 lb per palm",
+          "Spread under the canopy."
+        ],
+        [
+          "Medium palms: 1–3 lb per palm",
+          "Spread under the canopy."
+        ],
+        [
+          "Large palms: 3–6 lb per palm",
+          "Spread under the canopy."
+        ],
+        [
+          "Large shrubs and trees: ¼–½ lb per plant",
+          "Spread under the drip line."
+        ],
+        [
+          "Landscape beds: ¼–½ lb / 100 sq ft",
+          "⅓–⅔ cup per 100 sq ft."
+        ]
+      ],
+      "limits": [
+        "Use only on a diagnosed deficiency (frizzle-top on new fronds); the routine palm fertilizer already carries 2% manganese.",
+        "Too much manganese can bring on iron deficiency; stay inside the label size class.",
+        "Stains masonry and painted surfaces; sweep and blow off hard surfaces.",
+        "May be harmful if swallowed; avoid breathing dust; wash after use."
+      ],
+      "program": "Manganese is a supplement on its own schedule, not one of the palm feedings counted by the three-month rule.",
+      "source": "Southern Agricultural Insecticides · SA-50 Manganese Sulfate bag label",
+      "url": "https://www.domyown.com/msds/SOUTHERNAGMANGANESESULFATELABEL.pdf",
+      "name": "Manganese sulfate (Southern Ag)",
+      "equipment": [
+        "hand",
+        "push"
+      ],
+      "summary": "lb per palm · label size class"
+    },
     "mainspring": {
       "kind": "Insects · foliar spray",
       "targetTitle": "Pest targets",
@@ -169,6 +212,41 @@
       ],
       "summary": "Choose target rate"
     },
+    "tristar": {
+      "kind": "Insects · foliar spray",
+      "targetTitle": "Pest targets",
+      "targets": "Hard and soft scales (including Florida wax, euonymus, tea, and Caribbean black scale) and whiteflies. Use on live finds only: armored scale crawlers or whitefly nymphs and adults.",
+      "apply": "Cover all plant surfaces evenly. The label sets the finished spray volume by plant size. Tank mixing with a surfactant may improve control of adult whiteflies; test a small area first. Allow 6 hours before overhead irrigation.",
+      "rates": [
+        [
+          "8.5–16.5 fl oz / 100 gal",
+          "Hard and soft scales, and whiteflies. Use the higher rate when pressure is high."
+        ]
+      ],
+      "mixes": [
+        [
+          "Scale or whitefly",
+          0.085,
+          0.165
+        ]
+      ],
+      "limits": [
+        "Do not reapply more than once every 7 days.",
+        "Maximum 4 applications per calendar year; 25.3 fl oz per acre per application; 92.5 fl oz per acre per year.",
+        "Group 4A neonicotinoid: count it with Merit and Zylam in the annual 4A log.",
+        "Toxic to bees: do not apply while bees or other pollinators are actively visiting; dawn, dusk, or below 55°F lowers the risk.",
+        "Professional applicators only. Do not apply to bearing fruit trees."
+      ],
+      "source": "Cleary Chemicals · EPA 8033-106-1001 · label 62432_4, 06/29/2021 · pp. 9–12",
+      "url": "https://www.domyown.com/msds/TriStar_8_5_SL_Insecticide_Label_2022.pdf",
+      "name": "TriStar 8.5 SL",
+      "equipment": [
+        "bg",
+        "flowzone",
+        "rig"
+      ],
+      "summary": "Choose target rate"
+    },
     "tritek": {
       "kind": "Insects, mites & diseases · contact oil",
       "targetTitle": "Pest & disease targets",
@@ -229,28 +307,6 @@
         0.08
       ],
       "summary": ""
-    },
-    "talus": {
-      "kind": "Insects · use-site restriction",
-      "targetTitle": "Pest targets",
-      "pending": "Residential use is prohibited by the label currently linked by SePRO. Replacement decision needed for this program.",
-      "targets": "Immature whiteflies, scales, mealybugs, and other listed sucking insects. It is not an adulticide.",
-      "apply": "No residential application directions are offered here.",
-      "rates": [
-        [
-          "Residential rate: none",
-          "Mixing amounts have been removed from this draft."
-        ]
-      ],
-      "limits": [
-        "Do not apply in residential areas (label p. 4)."
-      ],
-      "program": "The earlier program carried Talus as a residential treatment. Keep it on hold while the program replacement is decided.",
-      "source": "SePRO · EPA 71711-21-67690 · pp. 3–4",
-      "url": "https://www.seproscientific.com/labels/talus-70df-label.pdf",
-      "name": "Talus 70DF",
-      "equipment": [],
-      "summary": "On hold"
     },
     "merit": {
       "kind": "Insects · soil drench or injection",
@@ -340,26 +396,36 @@
       ],
       "summary": "Target-specific rate"
     },
-    "headway": {
-      "kind": "Diseases · label mismatch",
-      "targetTitle": "Disease targets",
-      "pending": "The Headway liquid label found is for turfgrass. It does not establish a tree-and-shrub leaf-disease treatment.",
-      "targets": "The reviewed label lists turfgrass diseases. An ornamental product and disease-specific label are still needed for this row.",
-      "apply": "No tree-and-shrub application directions are offered here.",
+    "dipel": {
+      "kind": "Insects · foliar spray (biological)",
+      "targetTitle": "Pest targets",
+      "targets": "Young caterpillars that eat the leaves, including oleander caterpillar (oleander moth). Bt acts only on caterpillars, so it spares bees and the natural enemies that control scale and whitefly. Use on live finds only, while the caterpillars are small.",
+      "apply": "Spray the leaves the caterpillars are eating, tops and undersides. On trees, mix by the 100-gallon rate; on shrubs and beds, weigh the product for the area treated so the per-acre rate is not exceeded. Caterpillars must eat the treated leaves; they stop feeding within an hour and die in 1–3 days. Repeat while young caterpillars are still feeding.",
       "rates": [
         [
-          "Tree & Shrub rate: unconfirmed",
-          "Confirm the exact product or choose an ornamental replacement."
+          "½–1 lb / 100 gal",
+          "Ornamental and shade trees (hydraulic sprayer). In a small sprayer: 1–2 tsp per gallon."
+        ],
+        [
+          "0.5–2 lb / acre",
+          "Shrubs, flowers, bedding plants and ornamentals: about 0.2–0.7 oz of product per 1,000 sq ft treated. Measure by area, not by gallons sprayed; use at least 50 gal of mix per acre."
         ]
       ],
       "limits": [
-        "Do not transfer a turf rate to shrubs or palms."
+        "Repeat at the interval needed to keep control, usually every 3–14 days, depending on plant growth and the hatch.",
+        "Restricted-entry interval 4 hours.",
+        "Rain soon after spraying washes it off; plan for a dry window of 24–48 hours where possible.",
+        "Do not apply directly to water."
       ],
-      "source": "Syngenta · EPA 100-1216 · 02-2016 · pp. 2–4",
-      "url": "https://labelsds.com/document.php?file=Headway+Label+2-1-16.pdf&product=866",
-      "name": "Headway",
-      "equipment": [],
-      "summary": "On hold"
+      "source": "Valent BioSciences / Nufarm DiPel PRO DF · EPA 73049-39 · EPA-accepted label 2024-09-19",
+      "url": "https://www3.epa.gov/pesticides/chem_search/ppls/073049-00039-20240919.pdf",
+      "name": "DiPel PRO DF",
+      "equipment": [
+        "bg",
+        "flowzone",
+        "rig"
+      ],
+      "summary": "Trees by tank · shrubs by area"
     },
     "zylam": {
       "kind": "Insects · foliar spray",

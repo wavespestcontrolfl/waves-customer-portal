@@ -1479,6 +1479,7 @@ async function handleCombinedPaymentIntentSucceeded(paymentIntent, eventCreated 
     let reviewNotRecorded = null;
     for (const settledId of combinedSettleOutcome.invoiceIds || []) {
       try {
+        await closeOutVisitAfterPaidInvoice(piId, { invoiceId: settledId });
         await scheduleReviewAfterPaidInvoice(piId, { invoiceId: settledId });
       } catch (err) {
         if (!err.reviewNotRecorded) throw err;
@@ -2239,6 +2240,7 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
   // outer handler only after this returns). Run even when the invoice was
   // already paid so webhook retry after a mid-flight crash can recover.
   // ReviewService.create is idempotent by service_record_id.
+  await closeOutVisitAfterPaidInvoice(piId);
   await scheduleReviewAfterPaidInvoice(piId);
 
   // ── Auto-send payment receipt (SMS + email) ───────────────
@@ -2665,6 +2667,47 @@ async function mirrorSavedMethodForSucceededIntent(paymentIntent) {
       logger.error(`[stripe-webhook] Save-card persist failed for PI ${piId} (pm ${stripePmId}) — rethrowing for Stripe retry: ${err.message}`);
       throw err;
     }
+  }
+}
+
+// Invoice issued ⇒ visit completed (owner ruling 2026-09-07, behind
+// GATE_INVOICE_ISSUED_CLOSES_VISIT): a card or bank payment is money received
+// for the visit the invoice bills, the same proof the cash, check and
+// reconcile rails already close on. Before 2026-10-04 this rail never asked,
+// so an office card-on-file charge or a pay-link payment left its visit open.
+// Every Stripe invoice payment lands here (the office charge, the pay page,
+// Auto Pay, a cleared bank debit), so this is the one call for all of them.
+// The closeout decides whether the visit may close (an unstarted visit today
+// is a prepayment and stays open); a visit already completed refuses quietly.
+// A refusal, or a failure the closeout AUDITED, ends here: the visit stays
+// open and the daily paid-invoice sweep retries what is retryable. An outcome
+// with NO audit row (the invoice read here, an early read inside the
+// closeout, or the audit write itself) leaves nothing durable behind, and
+// that sweep only acts on an audit row — so it goes back to Stripe for
+// redelivery, like an unrecorded review enrollment below. The settle above is
+// status-guarded and the closeout is idempotent, so the retry re-runs safely.
+// Runs BEFORE the review step, like the reconcile route — the review
+// enrollment reads the record this closeout links.
+async function closeOutVisitAfterPaidInvoice(piId, { invoiceId = null } = {}) {
+  let out;
+  try {
+    const paid = await db('invoices')
+      .where(invoiceId ? { id: invoiceId } : { stripe_payment_intent_id: piId })
+      .whereIn('status', ['paid', 'prepaid'])
+      .first('id');
+    if (!paid) return;
+    const { closeOutVisitForIssuedInvoice } = require('../services/invoice-issued-closeout');
+    out = await closeOutVisitForIssuedInvoice({ invoiceId: paid.id, trigger: 'paid' });
+  } catch (err) {
+    logger.error(`[stripe-webhook] Paid-invoice visit closeout failed for PI ${piId} — rethrowing for Stripe retry: ${err.message}`);
+    throw err;
+  }
+  // ANY outcome that left the visit open without its audit row — a failure
+  // or a refusal alike: the sweep cannot tell a refusal of the moment
+  // (timer running, day not passed) from a final one without the row.
+  if (out && !out.closed && out.audited === false) {
+    logger.error(`[stripe-webhook] Paid-invoice visit closeout for PI ${piId} left its visit open (${out.reason}) with no audit row — rethrowing for Stripe retry`);
+    throw new Error(`paid-invoice visit closeout (${out.reason}) was not recorded for retry`);
   }
 }
 

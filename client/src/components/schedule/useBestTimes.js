@@ -15,6 +15,9 @@
 //   bestInRange — the single cheapest date+hour from `rangeFrom` through
 //                 RANGE_DAYS days out (the engine's sooner-day preference
 //                 applies). Only searched when the consumer passes rangeFrom.
+//   pickedByTech — with `compareTechsAt` (an HH:MM, all-tech searches only):
+//                 that hour on every technician's route that fits it, least
+//                 added drive first (owner 2026-10-05). Replaces `picked`.
 //
 // Summary mode (`summary: true`, the availability strip): ONE search over
 // the days around `date` (SUMMARY_BACK back, never before today, through
@@ -110,6 +113,20 @@ export function normalizeAvailability(data, { date, scopedToTech }) {
   };
 }
 
+// One row of the per-technician list for the compared hour.
+export function normalizePickedByTech(rows) {
+  if (!Array.isArray(rows)) return [];
+  return rows.filter((r) => r?.fits && r.technician?.id).map((r) => ({
+    start: r.start,
+    technicianId: r.technician.id,
+    technicianName: r.technician.name || null,
+    detourMinutes: r.detour_minutes ?? null,
+    driveInMinutes: r.drive_in_minutes ?? null,
+    fromHomeBase: r.from_home_base ?? null,
+    fromName: r.from_name || null,
+  }));
+}
+
 function normalizePicked(p, scopedToTech) {
   if (!p) return null;
   return {
@@ -144,13 +161,14 @@ function normalizeDay(day, scopedToTech) {
 export function useBestTimes({
   date, serviceId, customerId, durationMinutes, technicianId, excludeServiceIds,
   arrivalWindows = false, enabled = true, address, lat, lng, propertyId,
-  pickedStart, pickedEnd, rangeFrom, sameDayFloorMin, durationEdit = false, summary = false,
+  pickedStart, pickedEnd, rangeFrom, sameDayFloorMin, durationEdit = false, summary = false, compareTechsAt, serviceTypes,
   // Edit appointment's choice on a shared stop ('together' | 'separate'):
   // the route check answers for the move the save will make.
   moveScope,
 }) {
   const [bestTimes, setBestTimes] = useState([]);
   const [picked, setPicked] = useState(null);
+  const [pickedByTech, setPickedByTech] = useState([]);
   const [bestInRange, setBestInRange] = useState(null);
   // The last summary answer, with the request it answered: { data, requestKey, subjectKey }.
   const [answer, setAnswer] = useState(null);
@@ -168,6 +186,14 @@ export function useBestTimes({
   // is scored over the whole window, like the live conflict check.
   const pickedEndKey = /^\d{2}:\d{2}(:\d{2})?$/.test(String(pickedEnd || '')) ? String(pickedEnd).slice(0, 5) : '';
   const rangeKey = YMD.test(String(rangeFrom || '')) ? String(rangeFrom) : '';
+  // The hour to price on every route: all-tech searches with no single
+  // picked hour of their own.
+  // The booking's services, so the compared list leaves out a tech who
+  // cannot perform one of them.
+  const serviceTypesKey = (serviceTypes || []).filter(Boolean).map(String).join('\n');
+  const compareKey = !technicianId && !pickedKey && /^\d{2}:\d{2}(:\d{2})?$/.test(String(compareTechsAt || ''))
+    ? String(compareTechsAt).slice(0, 5) : '';
+
   // Who a summary is for, and exactly which request it answered. A re-check
   // for the SAME visit/customer and place keeps the previous days on screen,
   // marked stale, so the strip (and the route warning it replaces) does not
@@ -177,7 +203,7 @@ export function useBestTimes({
   const subjectKey = [serviceId, customerId, propertyId, address, lat, lng].map((v) => v ?? '').join('|');
   const requestKey = [
     enabled, date, serviceId, customerId, durationMinutes, durationEdit, technicianId, excludeKey, arrivalWindows,
-    address, lat, lng, propertyId, pickedKey, pickedEndKey, rangeKey, sameDayFloorMin, summary, moveScope,
+    address, lat, lng, propertyId, pickedKey, pickedEndKey, rangeKey, sameDayFloorMin, summary, moveScope, compareKey, serviceTypesKey,
   ].map((v) => v ?? '').join('|');
   const availability = useMemo(() => {
     if (!answer || !enabled) return null;
@@ -187,6 +213,7 @@ export function useBestTimes({
   useEffect(() => {
     setBestTimes([]);
     setPicked(null);
+    setPickedByTech([]);
     setBestInRange(null);
     if (!enabled || (!customerId && !serviceId) || !YMD.test(String(date || '')) || Date.now() < hintsGatedUntil) {
       setAvailability(null);
@@ -196,6 +223,9 @@ export function useBestTimes({
     // A held answer survives only while a summary is about to replace it.
     if (!(summary && date >= etDateString() && Date.now() >= summaryUnavailableUntil)) setAvailability(null);
     const controller = new AbortController();
+    const pickedArgs = compareKey
+      ? { pickedStart: compareKey, compareTechs: true, serviceTypes: serviceTypesKey ? serviceTypesKey.split('\n') : undefined }
+      : { pickedStart: pickedKey || undefined, pickedEnd: (pickedKey && pickedEndKey) || undefined };
     setChecking(true);
     const timer = setTimeout(async () => {
       const search = async (extra) => {
@@ -254,12 +284,12 @@ export function useBestTimes({
             dateTo: addDays(date, SUMMARY_FORWARD),
             topN: 3,
             pickedDate: date,
-            pickedStart: pickedKey || undefined,
-            pickedEnd: (pickedKey && pickedEndKey) || undefined,
+            ...pickedArgs,
           });
           if (controller.signal.aborted) return;
           const summarized = normalizeAvailability(data, { date, scopedToTech });
           if (summarized) {
+            setPickedByTech(normalizePickedByTech(data?.pickedByTech));
             setAvailability(summarized, { requestKey, subjectKey });
             setChecking(false);
             return;
@@ -273,7 +303,7 @@ export function useBestTimes({
           if (Date.now() < hintsGatedUntil) { setChecking(false); return; }
         }
         const [day, range] = await Promise.all([
-          search({ dateFrom: date, dateTo: date, topN: 3, pickedStart: pickedKey || undefined, pickedEnd: (pickedKey && pickedEndKey) || undefined }),
+          search({ dateFrom: date, dateTo: date, topN: 3, ...pickedArgs }),
           rangeKey ? search({ dateFrom: rangeKey, dateTo: addDays(rangeKey, RANGE_DAYS), topN: 1 }) : Promise.resolve(null),
         ]);
         if (controller.signal.aborted) return;
@@ -281,6 +311,7 @@ export function useBestTimes({
         const normalized = normalizeDay(day, scoped);
         setBestTimes(normalized.bestTimes);
         setPicked(normalized.picked);
+        setPickedByTech(normalizePickedByTech(day?.pickedByTech));
         setBestInRange(range?.slots?.length ? mapSlot(range.slots[0], scoped) : null);
       } catch {
         // Advisory only — a failed search just shows no hint (and drops a
@@ -290,6 +321,6 @@ export function useBestTimes({
       if (!controller.signal.aborted) setChecking(false);
     }, 300);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [enabled, date, serviceId, customerId, durationMinutes, durationEdit, technicianId, excludeKey, arrivalWindows, address, lat, lng, propertyId, pickedKey, pickedEndKey, rangeKey, sameDayFloorMin, summary, moveScope]);
-  return { bestTimes, picked, bestInRange, availability, checking };
+  }, [enabled, date, serviceId, customerId, durationMinutes, durationEdit, technicianId, excludeKey, arrivalWindows, address, lat, lng, propertyId, pickedKey, pickedEndKey, rangeKey, sameDayFloorMin, summary, moveScope, compareKey, serviceTypesKey]);
+  return { bestTimes, picked, pickedByTech, bestInRange, availability, checking };
 }
