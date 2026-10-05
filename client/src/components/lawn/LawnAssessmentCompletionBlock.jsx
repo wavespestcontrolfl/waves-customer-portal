@@ -23,6 +23,19 @@ const PILL_OUTLINE = `${PILL} !border !border-[#111111]`;
 const FIELD = "!rounded-[12px] !border !border-[#E5E5E5]";
 import { SHOTS as LAWN_SHOTS, SHOT_CAP as LAWN_SHOT_CAP, addPhotos as addLawnPhotos, assignShotZone, describeAddResult, planFileReads, shotIsFull, shotListHint } from "../../lib/lawn-photo-shots";
 
+// The lawn sheet's (compact) shot list: four named slots, one short line each
+// (owner 2026-10-05). Each maps onto an existing shot key and the server is not
+// told anything new. "Back or side" tags the back overview; a photo already
+// tagged with the side overview (or any hidden key: older visit, the generic Add
+// turf photos button) still shows in its photo tile and counts as a photo.
+// `keys` are the tags that make a slot read "(added)".
+const COMPACT_SLOTS = [
+  { key: "front", keys: ["front"], label: "Front", instruction: "Whole front lawn from the mailbox or driveway." },
+  { key: "back", keys: ["back", "side"], label: "Back or side", instruction: "Whole back lawn, or one side if gated." },
+  { key: "close_up", keys: ["close_up"], label: "Close-up", instruction: "Straight down, a foot up, typical spot." },
+  { key: "trouble", keys: ["trouble"], label: "Problem area", instruction: "Only when something looks wrong." },
+];
+
 // The four scores the tech reviews and may change until the assessment is
 // confirmed (owner ruling 2026-10-04), matching the customer report's
 // consolidated diagnosis (Density / Weeds / Color / Stress-Damage). The AI still
@@ -158,8 +171,9 @@ export default function LawnAssessmentCompletionBlock({
   // The tech's free-text visit notes (owned by CompletionPanel) — passed through
   // so the AI photo analysis can factor them in alongside the images.
   technicianNotes = "",
-  // The Fast Complete sheet's one-screen mode (owner 2026-10-04): only the
-  // four scores (the Fungus control and Thatch condition tiles never show),
+  // The Fast Complete sheet's one-screen mode (owner 2026-10-04): the shot list
+  // is the four named slots (COMPACT_SLOTS), the count is a plain "n added",
+  // no minimum-photos hint; only the four scores (the Fungus control and Thatch condition tiles never show),
   // each one the technician may change until the assessment is confirmed
   // (an input prefilled with the AI read, "AI n" under a changed one), then
   // Confirm assessment and Retake as ever. onProgress reports { photos,
@@ -529,11 +543,11 @@ export default function LawnAssessmentCompletionBlock({
             >
               Add turf photos
             </Button>
-            <span className="text-14 text-zinc-500">{photos.length}/{photoCap}</span>
+            <span className="text-14 text-zinc-500">{compact ? `${photos.length} added` : `${photos.length}/${photoCap}`}</span>
             {!modeKnown && <span role="status" data-testid="lawn-photo-mode-pending" className="text-14 text-zinc-500">Checking photo options…</span>}
           </>
         )}
-        {showGaugeReading && !compact && (
+        {showGaugeReading && (
           <>
             <span className="text-14 font-medium text-zinc-500">Lawn length</span>
             <Input
@@ -558,8 +572,8 @@ export default function LawnAssessmentCompletionBlock({
               shot's Add button brings the photo in already tagged with it. */}
           {shotList && (
             <ul data-testid="lawn-shot-list" aria-label="Lawn photo shots" className="m-0 flex list-none flex-col gap-2 p-0">
-              {LAWN_SHOTS.map((shot) => {
-                const added = photos.some((photo) => photo.zone === shot.key);
+              {(compact ? COMPACT_SLOTS : LAWN_SHOTS).map((shot) => {
+                const added = photos.some((photo) => (shot.keys || [shot.key]).includes(photo.zone));
                 return (
                   <li
                     key={shot.key}
@@ -626,7 +640,7 @@ export default function LawnAssessmentCompletionBlock({
               "since your last visit" score line needs 2+ usable photos on both
               visits (lawn-progress.js COMPARABLE_LEVELS), so a 1-photo visit
               can never show it. Analyze stays enabled at one photo. */}
-          {shotList && shotListHint(photos) && (
+          {shotList && !compact && shotListHint(photos) && (
             <div data-testid="lawn-shot-list-hint" className="text-14 leading-snug text-zinc-500">
               {shotListHint(photos)}
             </div>

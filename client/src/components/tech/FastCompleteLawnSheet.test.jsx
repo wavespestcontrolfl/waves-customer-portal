@@ -206,6 +206,12 @@ async function analyzeOnly() {
   await screen.findByLabelText('Density score');
 }
 
+// The inline product search: type, then tap the match. No sheet opens.
+async function addProductByName(name) {
+  fireEvent.change(await screen.findByLabelText('Search products'), { target: { value: name } });
+  fireEvent.click(await screen.findByRole('button', { name: new RegExp(name) }));
+}
+
 const completeButton = () => document.querySelector('.tech-visit-footer .tech-visit-complete');
 const completeCalls = () => requests.filter((r) => r.path.endsWith('/complete'));
 const confirmCalls = () => requests.filter((r) => r.path.endsWith('/lawn-assessment/confirm'));
@@ -271,16 +277,17 @@ describe('opening the sheet', () => {
 describe('the screen', () => {
   test('shows the note first, then the photos, then the products, and one Complete button', async () => {
     await openSheet();
-    expect(screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent)).toEqual(['Tell me about the visit', 'Lawn assessment', 'Products used', 'Treatment zone map']);
+    expect(screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent)).toEqual(['Tell me about the visit', 'Lawn assessment', 'Products used', 'Customer', 'Treatment zone map']);
     expect(document.querySelectorAll('.tech-visit-footer .tech-visit-complete')).toHaveLength(1);
     expect(screen.getByRole('dialog').querySelector('header h2').textContent).toBe('Complete service');
   });
 
-  test('has no Full form button, watering preview, lawn length box or area box, and asks for none of them', async () => {
-    const { request } = await openSheet({ request: makeRequest({ ctx: context({ turfHeightCapture: true }) }) });
+  test('has no Full form button, watering preview or area box, and asks for none of them', async () => {
+    const { request } = await openSheet();
     await analyze();
     expect(screen.queryByRole('button', { name: /full form/i })).toBeNull();
     expect(screen.queryByRole('heading', { name: 'Watering after this visit' })).toBeNull();
+    // The server did not ask for a lawn length: no box.
     expect(screen.queryByText('Lawn length')).toBeNull();
     expect(screen.queryByPlaceholderText('e.g. 4')).toBeNull();
     expect(screen.queryByLabelText(/Area treated|Linear feet/)).toBeNull();
@@ -301,11 +308,40 @@ describe('the screen', () => {
     expect(screen.queryByRole('button', { name: 'Confirm assessment' })).toBeNull();
   });
 
-  test('Analyze lawn works at one photo, with the guide hint showing', async () => {
+  test('Analyze lawn works at one photo, and the sheet shows no minimum-photos guide', async () => {
     await openSheet({ request: makeRequest({ ctx: ONE_TIME() }) });
     await addPhoto();
-    expect(screen.getByTestId('lawn-shot-list-hint').textContent).toMatch(/This is a guide only/);
+    expect(screen.queryByTestId('lawn-shot-list-hint')).toBeNull();
+    expect(screen.queryByText(/Aim for at least|Still needed|guide only/)).toBeNull();
     expect(screen.getByRole('button', { name: 'Analyze lawn' }).disabled).toBe(false);
+  });
+
+  test('the photo list is four named slots with one short guide each, and the count is a plain number', async () => {
+    await openSheet();
+    const slots = within(screen.getByTestId('lawn-shot-list')).getAllByRole('listitem');
+    expect(slots.map((li) => li.getAttribute('data-testid'))).toEqual(['lawn-shot-front', 'lawn-shot-back', 'lawn-shot-close_up', 'lawn-shot-trouble']);
+    expect(slots.map((li) => li.querySelector('.font-medium').textContent)).toEqual(['Front', 'Back or side', 'Close-up', 'Problem area']);
+    for (const li of slots) expect(li.querySelector('.text-zinc-500').textContent.split(/\s+/).length).toBeLessThanOrEqual(9);
+    for (const hidden of ['side', 'blade_crown', 'hot_edge', 'shade']) expect(screen.queryByTestId(`lawn-shot-${hidden}`)).toBeNull();
+    expect(screen.getByText('0 added')).toBeTruthy();
+    expect(screen.queryByText(/\/8/)).toBeNull();
+    // A slot's own Add button tags the photo with the existing key it maps to.
+    expect(screen.getByRole('button', { name: 'Add photo for Back or side' })).toBeTruthy();
+  });
+
+  test('a photo with a hidden shot key (an older visit, the generic button) still shows and counts', async () => {
+    await openSheet();
+    // The generic button adds an untagged photo; give it a hidden key from the slot menu.
+    await addPhoto();
+    expect(screen.getByText('1 added')).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('Slot for photo 1'), { target: { value: 'blade_crown' } });
+    expect(screen.getByLabelText('Slot for photo 1').value).toBe('blade_crown');
+    expect(screen.getByText('1 added')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Remove assessment photo' })).toBeTruthy();
+    // It still feeds Analyze, tagged as it was.
+    fireEvent.click(screen.getByRole('button', { name: 'Analyze lawn' }));
+    await screen.findByLabelText('Density score');
+    expect(requests.find((r) => r.path.endsWith('/lawn-assessment/assess')).body.photos[0].zone).toBe('blade_crown');
   });
 
   test('after the read: the four scores in one row, each a box with the AI read, then Confirm assessment and Retake; neither extra tile', async () => {
@@ -383,8 +419,7 @@ describe('what Complete says while it is off', () => {
     await analyze();
     await waitFor(() => expect(completeButton().textContent).toBe('Products applied required'));
     expect(completeButton().disabled).toBe(true);
-    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
-    fireEvent.click(await screen.findByText('Iron Plus'));
+    await addProductByName('Iron Plus');
     await waitFor(() => expect(completeButton().textContent).toBe('Complete service'));
     expect(completeButton().disabled).toBe(false);
   });
@@ -533,15 +568,41 @@ describe('products', () => {
     expect(within(editorFor('Talak 7.9%')).queryByRole('button', { name: /Broadcast spray|Granular|Spot treatment/ })).toBeNull();
   });
 
-  test('a visit with no planned products shows the empty state and the add control only', async () => {
+  test('a visit with no planned products shows the inline search and no empty-state text', async () => {
     const request = makeRequest({ ctx: ONE_TIME() });
     await openSheet({ request });
     expect(screen.queryByRole('group', { name: 'Talak 7.9%' })).toBeNull();
-    expect(screen.getByText('No products yet. Add what you applied.')).toBeTruthy();
-    expect(screen.getByRole('button', { name: '+ Other product' })).toBeTruthy();
+    expect(screen.queryByText(/No products yet/)).toBeNull();
+    expect(screen.getByLabelText('Search products').getAttribute('placeholder')).toBe('Search products');
+    expect(screen.queryByRole('button', { name: '+ Other product' })).toBeNull();
     expect(request.mock.calls.some(([path]) => path.includes('/treatment-plans/'))).toBe(false);
     await analyze();
     expect(completeButton().textContent).toBe('Products applied required');
+  });
+
+  test('the search sits in the Products section: typing filters the catalog in place and one tap adds the row, with no sheet opened', async () => {
+    await openSheet({ request: makeRequest({ ctx: ONE_TIME() }) });
+    const box = screen.getByLabelText('Search products');
+    expect(screen.queryByRole('dialog', { name: 'Add a product' })).toBeNull();
+    // Nothing is listed until the tech types.
+    expect(screen.queryByRole('button', { name: /Green Granules/ })).toBeNull();
+    fireEvent.change(box, { target: { value: 'granul' } });
+    expect(screen.queryByRole('button', { name: /Iron Plus/ })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /Green Granules/ }));
+    expect(screen.getAllByRole('dialog')).toHaveLength(1);
+    expect(screen.queryByRole('dialog', { name: 'Add a product' })).toBeNull();
+    expect(within(editorFor('Green Granules')).getByText(/added by you/)).toBeTruthy();
+    // The box clears for the next product, and the added one is marked as on the sheet.
+    expect(box.value).toBe('');
+    fireEvent.change(box, { target: { value: 'granul' } });
+    expect(screen.getByRole('button', { name: /Green Granules/ }).disabled).toBe(true);
+    expect(screen.getByRole('button', { name: /Green Granules/ }).textContent).toMatch(/Already on the sheet/);
+  });
+
+  test('a search with no match says so', async () => {
+    await openSheet({ request: makeRequest({ ctx: ONE_TIME() }) });
+    fireEvent.change(screen.getByLabelText('Search products'), { target: { value: 'zzzz' } });
+    expect(screen.getByText('No products match.')).toBeTruthy();
   });
 
   test('with no catalog to pick from, + Other product hands the visit to the full form instead of doing nothing', async () => {
@@ -563,8 +624,7 @@ describe('products', () => {
 
   test('a product added from the picker joins on its own default method, with Remove', async () => {
     await openSheet({ request: makeRequest({ ctx: ONE_TIME() }) });
-    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
-    fireEvent.click(await screen.findByText('Iron Plus'));
+    await addProductByName('Iron Plus');
     const editor = editorFor('Iron Plus');
     expect(within(editor).getByText(/added by you/)).toBeTruthy();
     expect(within(editor).getByText(/^Broadcast spray/)).toBeTruthy();
@@ -574,8 +634,7 @@ describe('products', () => {
 
   test('a sprayed product the tech adds goes down on the WHOLE-lawn area (the property\'s saved one), not a planned product\'s area; nobody types one', async () => {
     await openSheet();
-    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
-    fireEvent.click(await screen.findByText('Green Granules'));
+    await addProductByName('Green Granules');
     expect(within(editorFor('Green Granules')).getByText(/whole lawn, 5,000 sq ft/)).toBeTruthy();
     await analyzeAndComplete();
     expect(completeCalls()[0].body.products.find((p) => p.productId === P_GRANULE)).toMatchObject({ areaValue: 5000, areaUnit: 'sqft' });
@@ -592,8 +651,7 @@ describe('products', () => {
     // Named for what it is: never "whole lawn" for a partial area.
     expect(within(editorFor('Talak 7.9%')).getByText('Broadcast spray · planned area, 1,437.5 sq ft')).toBeTruthy();
     expect(within(editorFor('Talak 7.9%')).queryByText(/whole lawn/)).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
-    fireEvent.click(await screen.findByText('Green Granules'));
+    await addProductByName('Green Granules');
     expect(await within(editorFor('Green Granules')).findByText(/whole lawn, 5,750 sq ft/)).toBeTruthy();
     await analyzeAndComplete();
     const { body } = completeCalls()[0];
@@ -620,8 +678,7 @@ describe('products', () => {
   test('an added broadcast product with no whole-lawn area known stays held, though the planned row has its own area', async () => {
     propertyAreasAnswer = { enabled: false };
     await openSheet({ request: makeRequest({ ctx: plannedOne('spot_treatment', { treatedSqft: 1437.5, areaUnit: 'sqft' }) }) });
-    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
-    fireEvent.click(await screen.findByText('Green Granules'));
+    await addProductByName('Green Granules');
     await analyze();
     await waitFor(() => expect(footerNote()).toBe('The lawn area is not on file for Green Granules. Tell the office.'));
     expect(completeButton().disabled).toBe(true);
@@ -876,12 +933,11 @@ describe('the one-time lawn condition (a server requirement)', () => {
   test('a one-time lawn visit asks for the lawn condition, after the products, and sends it as typed findings', async () => {
     const request = makeRequest({ ctx: { ...ONE_TIME(), findingsType: 'one_time_lawn_treatment' } });
     await openSheet({ request });
-    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
-    fireEvent.click(await screen.findByText('Iron Plus'));
+    await addProductByName('Iron Plus');
     await analyze();
     await waitFor(() => expect(footerNote()).toBe('Pick the lawn condition.'));
     expect(completeButton().disabled).toBe(true);
-    expect(screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent)).toEqual(['Tell me about the visit', 'Lawn assessment', 'Products used', 'Lawn condition', 'Treatment zone map']);
+    expect(screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent)).toEqual(['Tell me about the visit', 'Lawn assessment', 'Products used', 'Lawn condition', 'Customer', 'Treatment zone map']);
     fireEvent.click(screen.getByRole('button', { name: 'Good' }));
     await waitFor(() => expect(completeButton().disabled).toBe(false));
     await submit();
@@ -917,8 +973,8 @@ describe('the one-time lawn condition (a server requirement)', () => {
 });
 
 describe('the submit body', () => {
-  test('echoes the context and sends no mowing height or watering token', async () => {
-    await openSheet({ request: makeRequest({ ctx: context({ turfHeightCapture: true }) }) });
+  test('echoes the context and sends no mowing height (not asked for) or watering token', async () => {
+    await openSheet();
     fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: 'Synthetic note' } });
     fireEvent.change(within(editorFor('Iron Plus')).getByLabelText('Iron Plus'), { target: { value: '2' } });
     await analyzeAndComplete();
@@ -933,6 +989,7 @@ describe('the submit body', () => {
     expect(body).toMatchObject({
       visitOutcome: 'completed', technicianNotes: 'Synthetic note', techTips: null,
       sendCompletionSms: true, requestReview: true, includePayLink: true, reviewTiming: 'auto',
+      customerInteraction: 'not_home_full_access',
     });
     expect(body).not.toHaveProperty('manualHeightIn');
     expect(body).not.toHaveProperty('blogPostId');
@@ -942,6 +999,22 @@ describe('the submit body', () => {
       { productId: P_IRON, applicationMethod: 'spot_treatment', totalAmount: 2, amountUnit: 'fl_oz', applicationArea: 'Front yard, Back yard, Side yards', targets: [] },
     ]);
     expect(body).not.toHaveProperty('lawnProtocolCompletion');
+  });
+
+  test('Customer is preset to not home, full access, sits after the products before the tips, and rides /complete as customerInteraction', async () => {
+    await openSheet();
+    const chips = within(screen.getByRole('heading', { name: 'Customer' }).closest('section')).getAllByRole('button');
+    expect(chips.map((b) => b.textContent)).toEqual(['Home — spoke with them', 'Not home — full access', 'Not home — partial access']);
+    expect(screen.getByRole('button', { name: 'Not home — full access' }).getAttribute('aria-pressed')).toBe('true');
+    await analyzeAndComplete();
+    expect(completeCalls()[0].body.customerInteraction).toBe('not_home_full_access');
+  });
+
+  test('a different customer choice is the one sent', async () => {
+    await openSheet();
+    fireEvent.click(screen.getByRole('button', { name: 'Home — spoke with them' }));
+    await analyzeAndComplete();
+    expect(completeCalls()[0].body.customerInteraction).toBe('tech_home_spoke_with_them');
   });
 
   test('the note typed before Analyze rides along to the photo read', async () => {
@@ -997,8 +1070,7 @@ describe('application rate on the product rows', () => {
     const catalog = [{ ...CATALOG[0], default_unit: 'fl_oz', default_rate_per_1000: 2, max_label_rate_per_1000: 1 }, CATALOG[1], CATALOG[2]];
     await openSheet({ request: makeRequest({ ctx: plannedOne('spot_treatment') }), props: { catalog } });
     fireEvent.click(within(editorFor('Talak 7.9%')).getByRole('button', { name: 'Remove' }));
-    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
-    fireEvent.click(await screen.findByText('Talak 7.9%'));
+    await addProductByName('Talak 7.9%');
     fireEvent.change(within(editorFor('Talak 7.9%')).getByLabelText('Talak 7.9%'), { target: { value: '2' } });
     await analyzeAndComplete();
     noRateKeys();
@@ -1014,7 +1086,7 @@ describe('tips from your tech', () => {
   test('sits after the products, finds a tip by keyword, and sends the pick', async () => {
     tips = lib(['Mow high', 'Dollarweed', 'Sedge']);
     await openSheet();
-    expect(screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent)).toEqual(['Tell me about the visit', 'Lawn assessment', 'Products used', 'Tip for the customer', 'Treatment zone map']);
+    expect(screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent)).toEqual(['Tell me about the visit', 'Lawn assessment', 'Products used', 'Customer', 'Tip for the customer', 'Treatment zone map']);
     fireEvent.change(await screen.findByLabelText('Search tips'), { target: { value: 'sedge' } });
     expect(screen.queryByRole('button', { name: /Mow high/ })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: /Sedge/ }));
@@ -1027,6 +1099,21 @@ describe('tips from your tech', () => {
     expect(screen.queryByLabelText('Search tips')).toBeNull();
     await analyzeAndComplete();
     expect(completeCalls()[0].body.techTips).toBeNull();
+  });
+
+  test('no "Search tips" label and no "Pick 1 (optional)" hint; the box is reachable by aria-label and one tip still caps at one', async () => {
+    tips = lib(['Mow high', 'Sedge']);
+    await openSheet();
+    const box = await screen.findByLabelText('Search tips');
+    expect(box.tagName).toBe('INPUT');
+    expect([...document.querySelectorAll('label')].some((l) => l.textContent === 'Search tips')).toBe(false);
+    expect(screen.queryByText('Pick 1 (optional)')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /Mow high/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Sedge/ }));
+    expect(screen.getByRole('button', { name: /Mow high/ }).getAttribute('aria-pressed')).toBe('false');
+    expect(screen.getByRole('button', { name: /Sedge/ }).getAttribute('aria-pressed')).toBe('true');
+    await analyzeAndComplete();
+    expect(completeCalls()[0].body.techTips).toEqual({ ids: ['tip-sedge'], custom: null });
   });
 
   test('reads the list again once the assessment settles, and keeps the tip already picked', async () => {
@@ -1064,7 +1151,7 @@ describe('the blog post for the customer', () => {
     blogAnswer = { available: true, posts: [] };
     await openSheet();
     await screen.findByRole('heading', { name: 'Blog post for the customer' });
-    expect(screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent)).toEqual(['Tell me about the visit', 'Lawn assessment', 'Products used', 'Tip for the customer', 'Blog post for the customer', 'Treatment zone map']);
+    expect(screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent)).toEqual(['Tell me about the visit', 'Lawn assessment', 'Products used', 'Customer', 'Tip for the customer', 'Blog post for the customer', 'Treatment zone map']);
   });
 
   test('a failed availability read is no section', async () => {
@@ -1084,6 +1171,15 @@ describe('the blog post for the customer', () => {
     expect(completeCalls()[0].body.blogPostId).toBe(POST.id);
   });
 
+  test('no "Search the Waves blog" label and no "Pick 1 (optional)" hint; the box is reachable by aria-label', async () => {
+    blogAnswer = { available: true, posts: [] };
+    await openSheet();
+    const box = await screen.findByLabelText('Search the Waves blog');
+    expect(box.tagName).toBe('INPUT');
+    expect([...document.querySelectorAll('label')].some((l) => l.textContent === 'Search the Waves blog')).toBe(false);
+    expect(screen.queryByText('Pick 1 (optional)')).toBeNull();
+  });
+
   test('with no pick, no blogPostId is sent', async () => {
     blogAnswer = { available: true, posts: [] };
     await openSheet();
@@ -1094,10 +1190,10 @@ describe('the blog post for the customer', () => {
 });
 
 describe('the treatment zone map', () => {
-  test('is one closed, optional row after the rest; it never blocks Complete', async () => {
+  test('is one closed row after the rest with no "Optional" hint; it never blocks Complete', async () => {
     await openSheet();
     const row = screen.getByRole('region', { name: 'Treatment zone map' });
-    expect(within(row).getByText('Optional')).toBeTruthy();
+    expect(within(row).queryByText('Optional')).toBeNull();
     expect(screen.queryByRole('dialog', { name: 'Tracer' })).toBeNull();
     await analyzeAndComplete();
     expect(completeCalls()).toHaveLength(1);
@@ -1126,6 +1222,50 @@ describe('the treatment zone map', () => {
   });
 });
 
+describe('the lawn length (the full form\'s optional mowing height box)', () => {
+  const lengthCtx = () => makeRequest({ ctx: context({ turfHeightCapture: true }) });
+
+  test('shows only when the server asks for it, in the Lawn assessment section, and is optional: Analyze, Confirm and Complete never wait for it', async () => {
+    await openSheet({ request: lengthCtx() });
+    expect(screen.getByText('Lawn length')).toBeTruthy();
+    expect(screen.getByText('inches')).toBeTruthy();
+    expect(screen.getByPlaceholderText('e.g. 4').closest('section').querySelector('h3').textContent).toBe('Lawn assessment');
+    await analyzeAndComplete();
+    // Left empty: the body carries the key as null, as the full form's does.
+    expect(completeCalls()[0].body.manualHeightIn).toBeNull();
+  });
+
+  test('a typed length rides /complete as manualHeightIn, and Analyze gets it as turfHeightIn', async () => {
+    await openSheet({ request: lengthCtx() });
+    fireEvent.change(screen.getByPlaceholderText('e.g. 4'), { target: { value: '3.5' } });
+    await analyzeAndComplete();
+    expect(requests.find((r) => r.path.endsWith('/lawn-assessment/assess')).body.turfHeightIn).toBe(3.5);
+    expect(completeCalls()[0].body.manualHeightIn).toBe(3.5);
+  });
+
+  test('the box stays after the read, and a length the server would refuse (outside 0.5 to 8 inches) holds Complete in words', async () => {
+    await openSheet({ request: lengthCtx() });
+    await analyze();
+    fireEvent.change(screen.getByPlaceholderText('e.g. 4'), { target: { value: '12' } });
+    await waitFor(() => expect(footerNote()).toBe('Lawn length must be between 0.5 and 8 inches.'));
+    expect(completeButton().disabled).toBe(true);
+    fireEvent.change(screen.getByPlaceholderText('e.g. 4'), { target: { value: '' } });
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+  });
+});
+
+describe('the note box', () => {
+  test('the mic sits inside the note\'s box, not beside it', async () => {
+    await openSheet();
+    const note = screen.getByLabelText('Tell me about the visit');
+    const row = note.closest('.tech-visit-note-row');
+    expect(row.classList.contains('tech-visit-note-row--inside')).toBe(true);
+    expect(row.querySelector('.tech-visit-note-mic')).not.toBeNull();
+    // The textarea is the row's first child: nothing to its left.
+    expect(row.firstElementChild).toBe(note);
+  });
+});
+
 describe('what the server refuses', () => {
   // [status, code, words from the server, extra body, the plain words shown]
   const TERMINAL = [
@@ -1137,8 +1277,7 @@ describe('what the server refuses', () => {
   test.each(TERMINAL)('%i %s is terminal: the words show, Complete stays off, and no full form is offered', async (status, code, serverText, extra, shown) => {
     completeErrors.push(refusal(status, code, serverText, extra));
     await openSheet({ request: makeRequest({ ctx: ONE_TIME() }) });
-    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
-    fireEvent.click(await screen.findByText('Iron Plus'));
+    await addProductByName('Iron Plus');
     await analyzeAndComplete();
     await screen.findByText(shown);
     expect(completeButton().disabled).toBe(true);

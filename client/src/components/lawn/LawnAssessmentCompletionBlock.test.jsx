@@ -40,4 +40,20 @@ describe('LawnAssessmentCompletionBlock', () => {
     expect(document.body.innerHTML).not.toMatch(/green|emerald|#16A34A|#10B981/i);
     expect(screen.getByRole('button', { name: 'Analyze lawn' }).className).toContain('bg-zinc-900');
   });
+
+  it('the full form keeps all eight shots, the 0/8 count and the minimum-photos guide; only the compact sheet trims them', async () => {
+    mount();
+    await screen.findByTestId('lawn-shot-list');
+    expect(screen.getAllByRole('listitem').filter((li) => li.getAttribute('data-testid')?.startsWith('lawn-shot-'))).toHaveLength(8);
+    expect(screen.getByText('0/8')).toBeTruthy();
+    expect(screen.getByTestId('lawn-shot-list-hint').textContent).toMatch(/Aim for at least 4 photos/);
+    cleanup();
+    mount({ compact: true });
+    await screen.findByTestId('lawn-shot-list');
+    expect(screen.getAllByRole('listitem').filter((li) => li.getAttribute('data-testid')?.startsWith('lawn-shot-'))).toHaveLength(4);
+    expect(screen.getByText('0 added')).toBeTruthy();
+    expect(screen.queryByTestId('lawn-shot-list-hint')).toBeNull();
+    // The lawn length box shows in the compact mode too, once the host asks for it.
+    expect(screen.getByText('Lawn length')).toBeTruthy();
+  });
 });
