@@ -61,6 +61,16 @@ function addressStatusFromValidation(av) {
   if (status === 'validated_accept') return { state: STATES.CONFIRMED, use };
   if (status === 'corrected') return { state: STATES.CONFIRMED, corrected: true, use };
   if (status === 'out_of_service_area') return { state: STATES.OUTSIDE_SERVICE_AREA, use };
+  // Google resolved a complete premise with nothing unconfirmed, and the ONLY
+  // open point is the county: its reverse-geocode failed or returned none.
+  // That is a provider gap, not an address problem — unavailable, so it is
+  // not remembered and the next lookup asks again. (The call pipeline keeps
+  // its own fail-closed confirm_needed for this case; nothing there changes.)
+  if (status === 'confirm_needed' && av.county == null && av.inServiceArea == null && av.hasUnconfirmed !== true
+    && (av.granularity === 'PREMISE' || av.granularity === 'SUB_PREMISE')
+    && !(Array.isArray(av.missingComponents) && av.missingComponents.length)) {
+    return { state: STATES.UNAVAILABLE, use: { business: null, residential: null } };
+  }
   // The building resolved to a premise and the ONLY thing Google misses is
   // the unit: a plaza or condo address typed without its suite.
   const missing = Array.isArray(av.missingComponents) ? av.missingComponents : [];

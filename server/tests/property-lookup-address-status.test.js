@@ -38,6 +38,19 @@ describe('addressStatusFromValidation', () => {
   });
 });
 
+describe('a county reverse-geocode failure is a provider gap, not an address verdict', () => {
+  test('confirmed premise with no county reads unavailable and is asked again, never cached as needs confirmation', async () => {
+    const noCounty = av({ status: 'confirm_needed', county: null, inServiceArea: null });
+    expect(addressStatusFromValidation(noCounty).state).toBe(STATES.UNAVAILABLE);
+    // A genuinely unconfirmed address with no county still needs confirmation.
+    expect(addressStatusFromValidation(av({ status: 'confirm_needed', county: null, inServiceArea: null, hasUnconfirmed: true })).state).toBe(STATES.NEEDS_CONFIRMATION);
+    const validate = jest.fn().mockResolvedValueOnce(noCounty).mockResolvedValueOnce(av());
+    expect((await resolveAddressStatus('100 Example St', { validate })).state).toBe(STATES.UNAVAILABLE);
+    expect((await resolveAddressStatus('100 Example St', { validate })).state).toBe(STATES.CONFIRMED);
+    expect(validate).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe('deriveStatus — Google address-use metadata', () => {
   test('carries metadata booleans, null when Google returned none', () => {
     const result = { verdict: { addressComplete: true, validationGranularity: 'PREMISE' }, address: { addressComponents: [] }, metadata: { business: true, residential: false } };
