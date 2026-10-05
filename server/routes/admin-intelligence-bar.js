@@ -1071,7 +1071,7 @@ function confirmationDisplayParams(toolName, params, preview) {
  * response's pendingActions array. Model-supplied confirmed/confirm booleans
  * are stripped before anything is stored or previewed.
  */
-async function proposePendingWrite({ toolUse, req, context, selectedLeadId = null, task = null, taskContext = null, ownerDirectVerdict = null }) {
+async function proposePendingWrite({ toolUse, req, context, selectedLeadId = null, task = null, taskContext = null, ownerDirectVerdict = null, requestStartedAt = null }) {
   const params = { ...(toolUse.input || {}) };
   delete params.confirmed;
   delete params.confirm;
@@ -1796,9 +1796,20 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     context,
     contract,
     contractHash,
+    // When this request started, on the platform-on and platform-off paths alike:
+    // a request that finishes late must not out-rank one that started later.
+    requestStartedAt,
     ...(task ? { taskId: task.id, runnerToken: task.runner_token, stepKey: PendingActions.stepKey(toolUse.name, params, preview) } : {}),
   });
 
+  // A request that finished after a newer request already replaced its card:
+  // nothing is prepared and no card is shown.
+  if (row.earlier_card_confirmed) {
+    return { failed: true, modelResult: { error: row.earlier_card_confirmed } };
+  }
+  if (row.superseded_by_newer_request) {
+    return { failed: true, modelResult: { error: 'A newer request in this conversation already replaced this proposal. Nothing was prepared and nothing was changed. Do not propose it again; tell the operator to use the newer card.' } };
+  }
   if (task && row.status !== 'pending') {
     const receipt = await PendingActions.getActionReceipt(row.id, getAdminActorId(req));
     return { failed: !receipt.success, modelResult: { outcome: receipt.outcome, result: receipt.result,
@@ -2704,6 +2715,8 @@ Use the request-time Eastern date provided on the current turn.`;
 // ─── MAIN QUERY ENDPOINT ────────────────────────────────────────
 
 async function runQuery(req, res, next) {
+  // A resumed task keeps its original start, so a late card is not ordered as the newest.
+  const requestStartedAt = IbTasks.requestStartedAt(req.ibResumedTask);
   let activeTask = null;
   try {
     const { prompt, conversationHistory = [], context: requestedContext, pageData } = req.body;
@@ -3124,6 +3137,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
               selectedLeadId: pageData?.agent_estimate_context?.lead?.id || null,
               task: activeTask,
               taskContext,
+              requestStartedAt,
               // Three or more same-tool edits that would run direct: refused
               // as a set, pointing at the bulk tool (one card). Judged on the
               // finished preview, so an edit the preview cards still reaches

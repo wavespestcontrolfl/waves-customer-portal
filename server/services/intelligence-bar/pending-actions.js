@@ -92,31 +92,172 @@ function legacyStepKey(row) {
   return paramsHash(row.tool_name, normalizeStepIds(canonical));
 }
 
-async function createPendingAction({ toolName, params, summary, requestedBy, context, contract, contractHash, taskId, stepKey: actionStepKey, runnerToken }) {
-  const persist = async trx => {
-  if (taskId) {
-    const task = await trx('ib_tasks').where({ id: taskId, actor_id: String(requestedBy), runner_token: runnerToken, state: 'running' })
-      .where('lease_expires_at', '>', trx.fn.now()).forUpdate().first('id');
-    if (!task) throw new Error('Task execution was superseded');
-    const previous = await trx('ib_pending_actions').where({ task_id: taskId, requested_by: String(requestedBy) });
-    const existing = previous.find(row => row.tool_name === toolName && row.step_key === actionStepKey)
-      || previous.find(row => row.tool_name === toolName && row.params?._ib_step_key_version !== 2 && legacyStepKey(row) === actionStepKey);
-    if (existing) return existing;
-    if (previous.some(row => row.status !== 'confirmed'
-      || !['completed', 'provider_accepted'].includes(executionOutcome(row.result)))) {
-      throw new Error('Resolve the preceding action outcome before preparing another write');
-    }
+// A newer card supersedes an older pending card only when it is the same
+// intent: same actor, same conversation (session), same tool, same target
+// record, and it re-states everything the older card would have written. An
+// allowlist, not a guess: a second text to one customer, or an edit of a
+// different field on the same lead, is a different intent and stays pending.
+const idPart = value => (value === undefined || value === null || value === '' ? null : String(value).toLowerCase());
+// One intent per rule. The key is computed from a card's STORED params, so the
+// proposal path and the confirm path always agree on it.
+//   afterConfirmed: what a NEW card for the same intent does when an earlier
+//   card for it was already confirmed and ran (or may be running).
+//     'refuse' - a second card would repeat a one-off effect (a booking): the
+//                new card is refused, the operator moves the visit instead.
+//     'allow'  - a later edit is a legitimate new edit and stays confirmable.
+const LEAD_CONTACT_FIELDS = ['first_name', 'last_name', 'phone', 'email'];
+function leadFieldsChanged(p) {
+  const approved = p._approved_changes;
+  const isSet = approved && typeof approved === 'object' && !Array.isArray(approved);
+  return LEAD_CONTACT_FIELDS.filter(f => (isSet ? approved[f] !== undefined : approved == null && p[f] !== undefined));
+}
+const SUPERSEDE_RULES = {
+  // A booking is one event: a new proposal for the same customer, catalog
+  // service and day replaces the earlier one (a changed time or price is the
+  // revision). The preview pins the resolved catalog id (_booking_service_id),
+  // so two accepted names for one service share a key; the raw name is the
+  // fallback when no catalog row was pinned.
+  create_appointment: {
+    key: p => {
+      const service = idPart(p._booking_service_id) ? `svc:${idPart(p._booking_service_id)}` : (idPart(p.service_type) ? `name:${idPart(p.service_type)}` : null);
+      const parts = [idPart(p.customer_id ?? p.customerId), service, idPart(p.scheduled_date)];
+      return parts.every(Boolean) ? parts.join('|') : null;
+    },
+    covers: () => true,
+    afterConfirmed: 'refuse',
+    confirmedMessage: 'An earlier card for this booking was already confirmed. Nothing was prepared. Tell the operator to move that visit instead of booking it again.',
+  },
+  // A lead edit replaces an earlier edit when the newer one changes ANY field
+  // the earlier one would change (their approved fields overlap). Partial
+  // overlap counts: if the older card still saved its wrong value for the shared
+  // field, the newer card's proposal-time "from" check would fail at Confirm and
+  // the correction would be lost. KNOWN COST: the older card is cancelled whole,
+  // so a field it changed that the newer card does not touch is lost with it and
+  // the operator re-asks. Disjoint fields coexist (a card for another field
+  // stays). "Changes" is the card's approved change set (params._approved_changes,
+  // { field: { from, to } }, pinned from the preview and holding only fields
+  // whose value really differs), not the raw input: a raw field that already had
+  // that value is not part of the card's effect. Rows with no approved set (older
+  // rows) fall back to the raw contact fields, with the same overlap rule. A card
+  // whose approved set is empty or malformed changes nothing (its Confirm is
+  // refused by the tool), so it is never treated as replaced and is left alone.
+  update_lead_contact: {
+    key: p => idPart(p.lead_id ?? p.leadId),
+    covers: (newer, older) => {
+      const written = leadFieldsChanged(older);
+      const covered = leadFieldsChanged(newer);
+      return written.some(f => covered.includes(f));
+    },
+    afterConfirmed: 'allow',
+  },
+};
+
+const REQUEST_STAMP = '_ib_request_started_at';
+const paramsOf = row => (typeof row.params === 'string' ? JSON.parse(row.params) : (row.params || {}));
+function intentKey(toolName, params) {
+  const rule = SUPERSEDE_RULES[toolName];
+  return rule ? rule.key(params || {}) : null;
+}
+const intentLock = (actor, toolName, key) => `ib-supersede:${actor}:${toolName}:${key}`;
+
+// WHAT "SAME INTENT" MEANS (owner-visible rule). The same operator proposing
+// the same booking (same customer, same catalog service, same day) or the same
+// lead edit again IS a replacement, whichever chat window or surface it came
+// from. A wrong cancel costs one re-ask; a missed cancel costs a double booking
+// or a wrong edit. So scope is: same actor (requested_by, set from the admin id
+// on the platform-on and platform-off paths alike) + same tool + same intent
+// key. Evidence is read from ib_pending_actions itself, never from ib_tasks, so
+// it works with GATE_IB_PLATFORM on or off. How far back a sibling counts
+// depends on its direction (see intentSiblings).
+//
+// ORDER: the card's request-start stamp (params._ib_request_started_at, set by
+// the /query route on both paths), else its created_at; ties break on
+// (created_at, id). A request that FINISHES late still carries its early start,
+// so it cannot cancel, or override, a card from a request that started later.
+//
+// LOCK: createPendingAction and claimForConfirm both take
+// pg_advisory_xact_lock(hashtextextended('ib-supersede:<actor>:<tool>:<key>'))
+// before they read or write. Lock order, everywhere: [own ib_tasks row FOR
+// UPDATE, proposals on the platform path only] -> intent advisory lock -> card
+// rows. The confirm path never touches ib_tasks, and nothing takes a card row
+// first and then waits for an advisory lock, so no cycle exists.
+//
+// Reads this card's same-intent siblings (any status) in one query, in SQL so
+// microsecond timestamps are compared exactly. The window depends on direction:
+//   NEWER siblings (a later request's card; the evidence that this card is
+//     stale): every card whose order key is after this card's, no matter how
+//     long ago this request started - a task stays resumable for 30 days. The
+//     lower bound is the index-friendly fact that a card of a later request
+//     cannot have been created before this request started:
+//     sibling.created_at >= this request's start - 1 minute. The minute only
+//     absorbs clock skew between the app (which stamps the start) and the
+//     database (which stamps created_at).
+//   OLDER siblings (cards this one replaces or repeats): created within
+//     TTL_MINUTES before this card. Pending cards expire after TTL_MINUTES, so
+//     nothing older is a live proposal, and an older confirmed card only counts
+//     as "already booked" within one card lifetime.
+const STAMP_OF = alias => `COALESCE(NULLIF(${alias}.params->>'${REQUEST_STAMP}', '')::timestamptz, ${alias}.created_at)`;
+const IS_NEWER = `(${STAMP_OF('pa')}, pa.created_at, pa.id::text) > (${STAMP_OF('o')}, o.created_at, o.id::text)`;
+async function intentSiblings(q, ownId, toolName, key) {
+  const rule = SUPERSEDE_RULES[toolName];
+  const rows = await q('ib_pending_actions as pa')
+    .join('ib_pending_actions as o', 'o.id', q.raw('?', [ownId]))
+    .whereNot('pa.id', ownId)
+    .whereRaw('pa.requested_by = o.requested_by')
+    .whereRaw('pa.tool_name = o.tool_name')
+    .where(function () {
+      this.whereRaw(`${IS_NEWER} AND pa.created_at >= ${STAMP_OF('o')} - interval '1 minute'`)
+        .orWhereRaw(`NOT (${IS_NEWER}) AND pa.created_at >= o.created_at - make_interval(mins => ${Number(TTL_MINUTES)})`);
+    })
+    .select('pa.id', 'pa.params', 'pa.status', 'pa.result', 'pa.expires_at', q.raw(`${IS_NEWER} AS newer`));
+  return rows.filter(row => rule.key(paramsOf(row)) === key).map(row => ({ ...row, params: paramsOf(row) }));
+}
+
+// Serialize with every other proposal and Confirm for this intent; the lock is
+// released at commit, after the writes made under it are visible.
+const lockIntent = (q, requestedBy, toolName, key) =>
+  q.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [intentLock(requestedBy, toolName, key)]);
+
+// Intent cards carry when their request started (see ORDER above).
+function stampRequestStart(params, requestStartedAt) {
+  const startedAt = requestStartedAt ? new Date(requestStartedAt) : null;
+  return startedAt && !Number.isNaN(startedAt.getTime()) ? { ...params, [REQUEST_STAMP]: startedAt.toISOString() } : params;
+}
+
+// Locks the running task and reads this actor's earlier cards of the task.
+// Returns the card this step already stored (a retry), or null when the step
+// is new; throws when the lease is lost or a preceding action is unresolved.
+async function loadTaskStep(trx, { taskId, requestedBy, runnerToken, toolName, stepKey: actionStepKey }) {
+  const task = await trx('ib_tasks').where({ id: taskId, actor_id: String(requestedBy), runner_token: runnerToken, state: 'running' })
+    .where('lease_expires_at', '>', trx.fn.now()).forUpdate().first('id');
+  if (!task) throw new Error('Task execution was superseded');
+  const previous = await trx('ib_pending_actions').where({ task_id: taskId, requested_by: String(requestedBy) });
+  const existing = previous.find(row => row.tool_name === toolName && row.step_key === actionStepKey)
+    || previous.find(row => row.tool_name === toolName && row.params?._ib_step_key_version !== 2 && legacyStepKey(row) === actionStepKey);
+  if (existing) return existing;
+  if (previous.some(row => row.status !== 'confirmed'
+    || !['completed', 'provider_accepted'].includes(executionOutcome(row.result)))) {
+    throw new Error('Resolve the preceding action outcome before preparing another write');
   }
-  // New step hashes include normalized UUID identity even when their canonical
-  // product/default inputs come from a preview. Old approval payloads/hashes
-  // remain untouched; the marker is server-owned and bound in new params_hash.
+  return null;
+}
+
+// The params a card stores: task step marker plus the validated task context.
+// New step hashes include normalized UUID identity even when their canonical
+// product/default inputs come from a preview. Old approval payloads/hashes
+// remain untouched; the marker is server-owned and bound in new params_hash.
+async function approvalParams(params, { taskId, toolName }) {
   if (taskId) params = { ...params, _ib_step_key_version: 2 };
-  if (params?._ib_task_context) {
-    const scope = await require('./task-context').validateRecordTarget(params, params._ib_task_context,
-      { toolName, forApproval: true });
-    if (scope.error) throw Object.assign(new Error(scope.error), { code: scope.code });
-    params = { ...params, _ib_task_context: scope };
-  }
+  if (!params?._ib_task_context) return params;
+  const scope = await require('./task-context').validateRecordTarget(params, params._ib_task_context,
+    { toolName, forApproval: true });
+  if (scope.error) throw Object.assign(new Error(scope.error), { code: scope.code });
+  return { ...params, _ib_task_context: scope };
+}
+
+// Inserts a pending card. { created: false } means a task step replay hit the
+// unique (task_id, step_key) key and `row` is the card stored earlier.
+async function insertPendingRow(trx, { toolName, params, summary, requestedBy, context, contract, contractHash, taskId, stepKey: actionStepKey }) {
   let insert = trx('ib_pending_actions').insert({
     tool_name: toolName,
     params: JSON.stringify(params || {}),
@@ -136,11 +277,68 @@ async function createPendingAction({ toolName, params, summary, requestedBy, con
   const [created] = await insert.returning('*');
   const row = created || await trx('ib_pending_actions').where({ task_id: taskId, step_key: actionStepKey, requested_by: String(requestedBy) }).first();
   if (!row) throw new Error('Pending action could not be recorded');
+  return { row, created: !!created };
+}
 
-  logger.info(`[intelligence-bar:pending] Proposed ${toolName} as pending action ${row.id}`);
+// A newer card that covers this one, in ANY status (pending, confirmed,
+// cancelled, expired): the operator has moved past this proposal.
+const supersededByNewer = (rule, siblings, params) => siblings.some(sib => sib.newer && rule.covers(sib.params, params));
+
+// An older card that already ran (or may be running): a one-off effect must not
+// be repeated by a second confirmable card.
+const repeatsConfirmedCard = (rule, siblings, params) => rule.afterConfirmed === 'refuse'
+  && siblings.some(sib => !sib.newer && sib.status === 'confirmed' && rule.covers(params, sib.params)
+    && !['failed', 'blocked'].includes(executionOutcome(sib.result)));
+
+async function cancelCards(q, ids) {
+  return q('ib_pending_actions').whereIn('id', ids).where({ status: 'pending' })
+    .update({ status: 'cancelled', updated_at: q.fn.now() });
+}
+
+// Cancels the pending cards of older requests that `params` replaces.
+async function cancelOlderCards(trx, rule, siblings, params, newRowId) {
+  const ids = siblings.filter(sib => !sib.newer && sib.status === 'pending' && rule.covers(params, sib.params)).map(sib => sib.id);
+  if (!ids.length) return;
+  const count = await cancelCards(trx, ids);
+  if (count) logger.info(`[intelligence-bar:pending] Cancelled ${count} card(s) superseded by pending action ${newRowId}`);
+}
+
+// Applies the supersession rules to a card just stored under the intent lock.
+// Returns the row to hand back to the caller (flagged when the card is not
+// confirmable): stale cards are stored cancelled, a repeated booking is removed.
+async function applySupersession(trx, row, { toolName, params }) {
+  const rule = SUPERSEDE_RULES[toolName];
+  const siblings = await intentSiblings(trx, row.id, toolName, intentKey(toolName, params));
+  if (supersededByNewer(rule, siblings, params)) {
+    await cancelCards(trx, [row.id]);
+    logger.info(`[intelligence-bar:pending] Pending action ${row.id} was already superseded by a newer request; stored cancelled`);
+    return { ...row, status: 'cancelled', superseded_by_newer_request: true };
+  }
+  if (repeatsConfirmedCard(rule, siblings, params)) {
+    await trx('ib_pending_actions').where({ id: row.id }).del();
+    logger.info(`[intelligence-bar:pending] ${toolName} refused: an earlier card for this intent was already confirmed`);
+    return { ...row, status: 'cancelled', earlier_card_confirmed: rule.confirmedMessage };
+  }
+  await cancelOlderCards(trx, rule, siblings, params, row.id);
   return row;
+}
+
+async function createPendingAction({ toolName, params, requestedBy, taskId, requestStartedAt = null, ...card }) {
+  const intent = intentKey(toolName, params);
+  if (intent) params = stampRequestStart(params, requestStartedAt);
+  const persist = async trx => {
+    if (taskId) {
+      const existing = await loadTaskStep(trx, { taskId, requestedBy, runnerToken: card.runnerToken, toolName, stepKey: card.stepKey });
+      if (existing) return existing;
+    }
+    const stored = await approvalParams(params, { taskId, toolName });
+    if (intent) await lockIntent(trx, requestedBy, toolName, intent);
+    const { row, created } = await insertPendingRow(trx, { ...card, toolName, params: stored, requestedBy, taskId });
+    const result = created && intent ? await applySupersession(trx, row, { toolName, params: stored }) : row;
+    if (result === row) logger.info(`[intelligence-bar:pending] Proposed ${toolName} as pending action ${row.id}`);
+    return result;
   };
-  return taskId ? db.transaction(persist) : persist(db);
+  return taskId || intent ? db.transaction(persist) : persist(db);
 }
 
 async function forTask(taskId, requestedBy) {
@@ -163,18 +361,40 @@ async function forTask(taskId, requestedBy) {
  */
 async function claimForConfirm(id, requestedBy, { contractHash = null } = {}) {
   const echoed = contractHash ? String(contractHash) : null;
-  const [claimed] = await db('ib_pending_actions')
+  // A card for an intent with a supersede rule claims under the intent lock and
+  // is refused when a NEWER card for the same intent exists (any status). Every
+  // other card takes the single-statement claim below, unchanged.
+  const peek = await db('ib_pending_actions').where({ id }).first('tool_name', 'params', 'requested_by', 'status', 'expires_at');
+  const key = peek && peek.status === 'pending' && String(peek.requested_by) === String(requestedBy)
+    && new Date(peek.expires_at).getTime() > Date.now() ? intentKey(peek.tool_name, paramsOf(peek)) : null;
+  if (!key) return claimRow(db, id, requestedBy, echoed);
+  const rule = SUPERSEDE_RULES[peek.tool_name];
+  return db.transaction(async (trx) => {
+    await lockIntent(trx, requestedBy, peek.tool_name, key);
+    const siblings = await intentSiblings(trx, id, peek.tool_name, key);
+    if (siblings.some(sib => sib.newer && rule.covers(sib.params, paramsOf(peek)))) {
+      await trx('ib_pending_actions').where({ id, status: 'pending', requested_by: String(requestedBy) })
+        .update({ status: 'cancelled', updated_at: trx.fn.now() });
+      logger.warn(`[intelligence-bar:pending] Confirm on ${id} refused: a newer card for the same intent exists`);
+      return { error: 'cancelled' };
+    }
+    return claimRow(trx, id, requestedBy, echoed);
+  });
+}
+
+async function claimRow(q, id, requestedBy, echoed) {
+  const [claimed] = await q('ib_pending_actions')
     .where({ id, status: 'pending', requested_by: String(requestedBy) })
-    .where('expires_at', '>', db.fn.now())
+    .where('expires_at', '>', q.fn.now())
     .where((qb) => {
       qb.whereNull('contract_hash');
       if (echoed) qb.orWhere('contract_hash', echoed);
     })
-    .update({ status: 'confirmed', consumed_at: db.fn.now(), updated_at: db.fn.now() })
+    .update({ status: 'confirmed', consumed_at: q.fn.now(), updated_at: q.fn.now() })
     .returning('*');
 
   if (!claimed) {
-    const row = await db('ib_pending_actions').where({ id }).first();
+    const row = await q('ib_pending_actions').where({ id }).first();
     if (!row) return { error: 'not_found' };
     if (String(row.requested_by) !== String(requestedBy)) return { error: 'actor_mismatch' };
     if (row.status === 'confirmed') return { error: 'already_used' };
@@ -190,7 +410,7 @@ async function claimForConfirm(id, requestedBy, { contractHash = null } = {}) {
   const params = typeof claimed.params === 'string' ? JSON.parse(claimed.params) : claimed.params;
   if (paramsHash(claimed.tool_name, params) !== claimed.params_hash) {
     // Stored payload no longer matches what the operator approved — refuse.
-    await db('ib_pending_actions').where({ id }).update({ status: 'cancelled', updated_at: db.fn.now() });
+    await q('ib_pending_actions').where({ id }).update({ status: 'cancelled', updated_at: q.fn.now() });
     logger.error(`[intelligence-bar:pending] Hash mismatch on pending action ${id} — cancelled`);
     return { error: 'hash_mismatch' };
   }
@@ -273,6 +493,8 @@ module.exports = {
   stepKey,
   stableStringify,
   createPendingAction,
+  intentKey,
+  intentLock,
   claimForConfirm,
   cancelPendingAction,
   recordResult,
