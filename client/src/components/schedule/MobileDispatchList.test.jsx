@@ -430,6 +430,21 @@ describe('MobileDispatchList drive legs', () => {
     expect(screen.getByText('~45 min drive from Sample One · ~15 min past the 2-hour arrival window').parentElement.className).toContain('text-alert-fg');
   });
 
+  it('keeps the red while another at-risk visit at the stop is not on the way', () => {
+    render(
+      <MobileDispatchList
+        mode="day"
+        date="2026-07-15"
+        services={[
+          { ...SERVICE, id: 'svc-first', status: 'en_route', customerName: 'Sample First', windowStart: '09:00', windowEnd: '10:00', driveInShown: true, drivePrevName: 'Sample One', driveFromPrevMin: 45, driveLateMin: 15, driveLateServiceIds: ['svc-first', 'svc-later'] },
+          { ...SERVICE, id: 'svc-later', status: 'confirmed', customerName: 'Sample Later', windowStart: '10:00', windowEnd: '11:00' },
+        ]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+      />,
+    );
+    expect(screen.getByText(/~15 min past the 2-hour arrival window/).parentElement.className).toContain('text-alert-fg');
+  });
+
   it('drops the red once the stop is en route', () => {
     render(
       <MobileDispatchList

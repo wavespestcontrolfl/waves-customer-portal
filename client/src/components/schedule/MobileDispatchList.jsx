@@ -173,13 +173,16 @@ function headerLabel(dateStr) {
 // nothing, never "~0 min".
 const ON_THE_WAY = new Set(['en_route', 'on_site', 'in_progress']);
 
-function DriveLine({ service }) {
+function DriveLine({ service, statusById }) {
   if (!service.driveInShown || !Number.isFinite(service.driveFromPrevMin)) return null;
-  // The server sets driveLateMin only while some work at the stop is
-  // unreached (a completed first card can sit on a stop still at risk).
-  // Marking this card en route changes its status before the next refresh
-  // clears the field, so the red drops at once.
-  const late = !ON_THE_WAY.has(service.status) && Number.isFinite(service.driveLateMin) && service.driveLateMin > 0;
+  // The server names the unreached visits that make the stop late
+  // (driveLateServiceIds; a completed first card can sit on a stop still
+  // at risk). Marking them en route changes their status before the next
+  // refresh, so the red drops once every one of them is on the way.
+  const atRisk = Array.isArray(service.driveLateServiceIds) && service.driveLateServiceIds.length
+    ? service.driveLateServiceIds : [service.id];
+  const late = Number.isFinite(service.driveLateMin) && service.driveLateMin > 0
+    && atRisk.some((id) => !ON_THE_WAY.has(statusById?.get(id) ?? service.status));
   const from = service.drivePrevName ? ` from ${service.drivePrevName}` : '';
   return (
     <div
@@ -563,6 +566,7 @@ function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtoc
     ? (freeTechs.get(hour) || []).map((id) => working.find((t) => t.id === id)).filter(Boolean)
     : null);
   const driveLabel = useMemo(() => dayDriveLabel(services || []), [services]);
+  const statusById = useMemo(() => new Map((services || []).map((s) => [s.id, s.status])), [services]);
   const today = isETToday(dateStr);
   return (
     <section>
@@ -613,7 +617,7 @@ function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtoc
       ) : (
         rows.map(({ svc, hour }) => (svc ? (
           <Fragment key={svc.id}>
-          <DriveLine service={svc} />
+          <DriveLine service={svc} statusById={statusById} />
           <AppointmentRow
             service={svc}
             onEdit={onEdit}

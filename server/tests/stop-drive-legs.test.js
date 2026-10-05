@@ -377,5 +377,6 @@ describe('attachDriveLegs', () => {
     attachDriveLegs(services);
     expect(services[1].driveInShown).toBe(true);
     expect(services[1].driveLateMin).toBeGreaterThan(0);
+    expect(services[1].driveLateServiceIds).toEqual(['open']);
   });
 });

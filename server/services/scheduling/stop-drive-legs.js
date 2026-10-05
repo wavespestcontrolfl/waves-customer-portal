@@ -84,22 +84,23 @@ function stopPieces(members) {
       chain = null;
       prevLoose = null;
       if (!byVisit.has(m.visitId)) {
-        const piece = { id: m.id, rows: [], open: false };
+        const piece = { id: m.id, rows: [], open: false, ids: [] };
         byVisit.set(m.visitId, piece);
         pieces.push(piece);
       }
       byVisit.get(m.visitId).rows.push(row);
-      if (NOT_REACHED.has(m.status)) byVisit.get(m.visitId).open = true;
+      if (NOT_REACHED.has(m.status)) { byVisit.get(m.visitId).open = true; byVisit.get(m.visitId).ids.push(m.id); }
       continue;
     }
     if (chain && coVisitPair(prevLoose, m)) {
       chain.state = advanceCoVisit(chain.state, row);
       chain.work = chain.state.coMerged;
-      if (NOT_REACHED.has(m.status)) chain.open = true;
+      if (NOT_REACHED.has(m.status)) { chain.open = true; chain.ids.push(m.id); }
     } else {
       const state = { ...startCoVisitChain(row), arrivalMin: 0 };
       state.clock = state.coMerged;
-      chain = { id: m.id, start: minutesOf(m.windowStart), work: state.coMerged, state, open: NOT_REACHED.has(m.status) };
+      const open = NOT_REACHED.has(m.status);
+      chain = { id: m.id, start: minutesOf(m.windowStart), work: state.coMerged, state, open, ids: open ? [m.id] : [] };
       pieces.push(chain);
     }
     prevLoose = m;
@@ -128,7 +129,8 @@ function stopPieces(members) {
     // each member as its own zero-drive piece, so the tech waits for 13:00.
     if (!piece.range) {
       piece.split = rows.map((r) => ({
-        id: r.id, start: minutesOf(r.window_start), work: workDuration(r), range: null, open: NOT_REACHED.has(r.status),
+        id: r.id, start: minutesOf(r.window_start), work: workDuration(r), range: null,
+        open: NOT_REACHED.has(r.status), ids: NOT_REACHED.has(r.status) ? [r.id] : [],
       }));
     }
   }
@@ -160,7 +162,7 @@ function lateByStop(stops, legs) {
     stopPieces(st.members).forEach((p, j) => {
       const id = `${i}:${j}`;
       // Only work the tech has not reached can still run late.
-      if (p.open) piecesOf.get(st.legs[0].id).push(id);
+      if (p.open) piecesOf.get(st.legs[0].id).push({ id, ids: p.ids });
       if (j === 0 && i > 0) legIn.set(id, legs[i - 1]);
       const hh = String(Math.floor(p.start / 60)).padStart(2, '0');
       const mm = String(p.start % 60).padStart(2, '0');
@@ -183,7 +185,15 @@ function lateByStop(stops, legs) {
     legMinutes: (_prev, stop) => legIn.get(stop.id) ?? 0,
   });
   const lateById = new Map((sim?.arrivals || []).map((a) => [a.id, a.lateMinutes]));
-  return new Map([...piecesOf].map(([cardId, ids]) => [cardId, Math.max(0, ...ids.map((id) => lateById.get(id) || 0))]));
+  // Per card: the largest lateness, and the unreached visits that carry it
+  // (the phone drops the red once all of them are on the way).
+  return new Map([...piecesOf].map(([cardId, pieces]) => {
+    const late = pieces.filter((p) => (lateById.get(p.id) || 0) > 0);
+    return [cardId, {
+      min: Math.max(0, ...late.map((p) => lateById.get(p.id))),
+      ids: late.flatMap((p) => p.ids),
+    }];
+  }));
 }
 
 // Visits the tech has not reached yet: only these can still run late.
@@ -222,6 +232,7 @@ function attachDriveLegs(services) {
     s.driveInShown = false;
     s.drivePrevName = null;
     s.driveLateMin = null;
+    s.driveLateServiceIds = null;
     s.driveLegUnknown = false;
   }
   // A visit group is one stop wherever its rows sort (route-model.js
@@ -278,8 +289,11 @@ function attachDriveLegs(services) {
     const first = st.legs[0];
     // The line sits on the stop's first card; any unreached piece of the
     // stop can make it late (a completed 9 AM neighbour does not hide it).
-    const min = late.get(first.id);
-    if (min > 0) first.driveLateMin = min;
+    const risk = late.get(first.id);
+    if (risk?.min > 0) {
+      first.driveLateMin = risk.min;
+      first.driveLateServiceIds = risk.ids;
+    }
   }
 }
 
