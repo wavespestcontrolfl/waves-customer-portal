@@ -228,6 +228,13 @@ describe('deterministic lines', () => {
   });
 });
 
+describe('every confirmed finding prints (Codex r4)', () => {
+  test('all five confirmed categories appear, none dropped', () => {
+    const findings = ['pest_activity', 'disease_leaf_spot', 'water_heat_mechanical_stress', 'leaf_color_vigor', 'foliage_fullness'].map((key) => ({ key, kind: 'confirmed' }));
+    expect(textFor({ technicianNote: '', findings, products: [] }, [])).toBe('Our technician confirmed signs of pest activity, leaf spot, stress, leaf color changes and thin foliage.');
+  });
+});
+
 describe('render: guards on the one free string (a catalog product name)', () => {
   test('a product name the customer-copy screen rejects drops that sentence, never the others', () => {
     const slots = { observed: [{ condition: 'scale', plant: 'hedges' }], maybe: [], confirmed: [], products: ['Safe Eco Spray'], allClear: null };
@@ -284,9 +291,13 @@ describe('the model call (extraction only)', () => {
     const out = await tech.generateTechParagraph(inputs({ technicianNote: '', landscapeCondition: 'Excellent' }));
     expect(dispatchWithFallback).not.toHaveBeenCalled();
     expect(out.paragraph).toBe('Today we applied Merit 2F and Palm Gro 8-2-12. Your landscape looked excellent today.');
-    // A note too short to carry a finding also makes no call.
-    await tech.generateTechParagraph(inputs({ technicianNote: 'ok' }));
-    expect(dispatchWithFallback).not.toHaveBeenCalled();
+  });
+
+  test('a short note is still read: "Aphids." is a full observation (Codex r4)', async () => {
+    const callModel = jest.fn(async () => ({ ok: true, json: { observations: [{ condition: 'aphids', plant: 'none' }] } }));
+    const out = await tech.generateTechParagraph(inputs({ technicianNote: 'Aphids.' }), { callModel });
+    expect(callModel).toHaveBeenCalledTimes(1);
+    expect(out.paragraph).toMatch(/^Our technician saw aphids\./);
   });
 
   test('nothing to say at all: not ok', async () => {

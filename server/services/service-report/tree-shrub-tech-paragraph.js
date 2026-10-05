@@ -46,7 +46,6 @@ const BUDGET_MS = 15 * 1000;
 const MAX_NOTE_CHARS = 1500;
 const MAX_OBSERVATIONS = 3;
 const MAX_MAYBE = 2;
-const MAX_CONFIRMED = 2;
 const MAX_PRODUCTS = 5;
 
 /**
@@ -112,6 +111,8 @@ const FINDING_LABELS = Object.freeze({
   foliage_fullness: 'thin foliage',
 });
 const FINDING_KEYS = Object.freeze(Object.keys(FINDING_LABELS));
+// Every category the technician confirmed prints (there are only five).
+const MAX_CONFIRMED = FINDING_KEYS.length;
 
 // What in the note already covers a photo category (any mention, even a negated
 // one: the note wins, so the photo adds nothing beside it).
@@ -353,7 +354,7 @@ const engine = createTechParagraphEngine({
   validateParagraph: validateExtraction,
   frozenEntryProblem,
   // No note is not a miss here: the deterministic lines need no model.
-  precheck: (inputs) => (inputs.technicianNote.length < 12 ? 'no_note' : null),
+  precheck: (inputs) => (inputs.technicianNote ? null : 'no_note'),
   // The deterministic fallback (build + atomic freeze) after a hung or failed model
   // call needs its own slice of the step's deadline.
   reserveMs: 2000,
@@ -368,7 +369,8 @@ const engine = createTechParagraphEngine({
 async function generateTechParagraph(rawInputs, deps = {}) {
   const inputs = normalizeInputs(rawInputs);
   let extractionFailed = false;
-  if (inputs.technicianNote.length >= 12) {
+  // Any note at all is read: "Aphids." is a full observation.
+  if (inputs.technicianNote) {
     const result = await engine.generateTechParagraph(inputs, deps);
     if (result.ok && result.paragraph) return result;
     // A well formed reply with nothing to say is a read of the note; every other
