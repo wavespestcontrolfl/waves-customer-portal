@@ -17673,8 +17673,14 @@ const CallRecordingProcessor = {
                 // attempt lost the savepointed follow-up insert — or a
                 // reprocess after the primary already exists — still creates
                 // the promised second treatment.
-                const ensureCallFollowUpVisit = async (primaryRow) => {
+                // `fresh`: the primary was inserted by THIS pass. Only a fresh
+                // primary gets the package visit 2 (confirmed shape, or a
+                // package-only plan nobody discussed): a reused row may have
+                // been booked as another service, moved, or closed by staff
+                // since, and its visit 2 stays with the closeout card.
+                const ensureCallFollowUpVisit = async (primaryRow, { fresh = false } = {}) => {
                   if (!callFollowUpPlan || !primaryRow?.id) return null;
+                  if (callFollowUpPlan.packageOnly && !fresh) return null;
                   // A terminal primary gets no visit 2 — reprocessing an old
                   // call whose booking since completed or was cancelled must
                   // not book a stray child off it.
@@ -17733,6 +17739,7 @@ const CallRecordingProcessor = {
                   // gets no package child here (office-confirm booking is a
                   // follow-up change), so this writer keeps the pending shape.
                   const packageFollowUp = require('../config/feature-gates').packageFollowupAutobookLive()
+                    && fresh
                     && primaryIsPackage
                     // isUnreviewedDispatchOwned, not only the pending shape: a
                     // voice booking the rebooker moved stays 'confirmed' with
@@ -19047,7 +19054,7 @@ const CallRecordingProcessor = {
                       deferConversion: streetLevelPending,
                     });
                   }
-                  followUpCreated = await ensureCallFollowUpVisit(created);
+                  followUpCreated = await ensureCallFollowUpVisit(created, { fresh: true });
                   await stampCallbackNumberHoldForCall();
                   return created;
                 }

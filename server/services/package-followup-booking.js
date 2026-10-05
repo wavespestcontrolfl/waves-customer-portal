@@ -91,6 +91,10 @@ const { parseETDateTime, addETDays, etDateString } = require('../utils/datetime-
 
 // Owner scope 2026-10-04: cockroach, flea and bed bug — the same set as
 // typed-followup-obligation TWO_TREATMENT_PACKAGE_KEYS.
+// Log tag for an error: code or name only. A driver message can carry the
+// rejected row's bound values (a customer's service address).
+const errTag = (err) => (err && (err.code || err.name)) || 'error';
+
 const PACKAGE_FOLLOWUP_SERVICE_KEYS = Object.freeze(['cockroach_control', 'flea_tick', 'bed_bug_treatment']);
 // scheduled_services.source_action is varchar(30).
 const PACKAGE_FOLLOWUP_SOURCE_ACTION = 'package_followup_auto';
@@ -183,7 +187,7 @@ async function warnOnOverlap(trx, { child, customerId, outerTrx, fenceMissed = f
       technicianId: child.technician_id || null,
     }));
   } catch (err) {
-    logger.warn(`[package-followup] overlap probe failed for child ${child.id} (booked unprobed): ${err.message}`);
+    logger.warn(`[package-followup] overlap probe failed for child ${child.id} (booked unprobed): ${errTag(err)}`);
     return;
   }
   if (!clash.length && !fenceMissed) return;
@@ -202,7 +206,7 @@ async function warnOnOverlap(trx, { child, customerId, outerTrx, fenceMissed = f
       link: `/admin/dispatch?tab=schedule&date=${child.scheduled_date}&appointment=${encodeURIComponent(child.id)}`,
     }, { dedupeKey: `package_followup_overlap:${child.id}`, metadata: { customer_id: customerId, scheduled_service_id: child.id, parent_service_id: child.parent_service_id } });
   };
-  const onFail = (err) => logger.error(`[package-followup] overlap card failed for child ${child.id}: ${err.message}`);
+  const onFail = (err) => logger.error(`[package-followup] overlap card failed for child ${child.id}: ${errTag(err)}`);
   const { commitPromiseOf } = require('../utils/trx-commit-promise');
   const committed = commitPromiseOf(outerTrx) || commitPromiseOf(trx);
   if (committed) {
@@ -283,10 +287,10 @@ async function ensurePackageFollowUpVisit({ trx, primary, cols = null } = {}) {
         const winner = await liveChildOf(trx, primary.id);
         if (winner) return winner;
       } catch (readErr) {
-        logger.warn(`[package-followup] winner read failed for ${primary.id}: ${readErr.message}`);
+        logger.warn(`[package-followup] winner read failed for ${primary.id}: ${errTag(readErr)}`);
       }
     }
-    logger.error(`[package-followup] visit 2 not booked for ${primary.id}; primary booking kept: ${err.message}`);
+    logger.error(`[package-followup] visit 2 not booked for ${primary.id}; primary booking kept: ${errTag(err)}`);
     return null;
   }
 }
@@ -328,7 +332,7 @@ async function bookInSavepoint(sp, outerTrx, primary, cols) {
     fenceMissed = !fence || !fence.acquired;
   } catch (fenceErr) {
     fenceMissed = true;
-    logger.warn(`[package-followup] day fence failed for visit 2 of ${primary.id} on ${date} (booking unfenced): ${fenceErr.message}`);
+    logger.warn(`[package-followup] day fence failed for visit 2 of ${primary.id} on ${date} (booking unfenced): ${errTag(fenceErr)}`);
   }
   // A 23505 (lost the one-live-child race) propagates: the savepoint must
   // roll back before the winner can be read (ensurePackageFollowUpVisit).
@@ -392,7 +396,7 @@ async function mirrorPrimaryAddressOntoPackageChildren({ database, estimateId } 
     );
     return (result && result.rowCount) || 0;
   } catch (err) {
-    logger.warn(`[package-followup] address mirror failed for estimate ${estimateId}: ${err.message}`);
+    logger.warn(`[package-followup] address mirror failed for estimate ${estimateId}: ${errTag(err)}`);
     return 0;
   }
 }
