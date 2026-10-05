@@ -155,6 +155,10 @@ export default function OfferTierPicker({
   disabled = false,
   estimate = null,
   change = null,
+  // Selection-aware rows for the tile the customer is on (the cadence they
+  // chose below); the other tiles are quoted at the standard schedule.
+  currentRows = null,
+  cadenceIsDefault = true,
 }) {
   const wide = useMinWidth(640);
   if (!tiers) return null;
@@ -163,12 +167,21 @@ export default function OfferTierPicker({
   const phase = change?.phase || 'idle';
   const busy = phase === 'previewing' || phase === 'committing';
   const tilesDisabled = disabled || busy;
-  const { good, better, best } = tiers;
+  const { good } = tiers;
+  const liveRows = Array.isArray(currentRows) && currentRows.length ? currentRows : null;
+  const better = selectedKey === 'better' && liveRows && liveRows.some((row) => row?.service === 'pest_control')
+    ? { ...tiers.better, rows: liveRows.filter((row) => row?.service === 'pest_control') }
+    : tiers.better;
+  const best = selectedKey === 'best' && liveRows && liveRows.length >= 2
+    ? { ...tiers.best, rows: liveRows }
+    : tiers.best;
   const betterPest = pestRow(better);
   const bestPest = pestRow(best);
   const betterPestPrice = positive(betterPest?.perApplication);
   const bestPestPrice = positive(bestPest?.perApplication);
-  const saving = betterPestPrice != null && bestPestPrice != null && bestPestPrice < betterPestPrice
+  // The saving compares two tiles; with a non-standard cadence chosen they
+  // are no longer quoted on the same schedule, so the chip steps aside.
+  const saving = cadenceIsDefault && betterPestPrice != null && bestPestPrice != null && bestPestPrice < betterPestPrice
     ? Math.round((betterPestPrice - bestPestPrice) * 100) / 100
     : null;
 
@@ -270,6 +283,11 @@ export default function OfferTierPicker({
       >
         {tiles}
       </div>
+      {!cadenceIsDefault ? (
+        <p style={{ margin: '10px 0 0', fontSize: FS.body, color: W.textCaption, lineHeight: LH.body }}>
+          Your selected option shows the schedule you chose. The other options show the standard schedule; the price updates when you switch.
+        </p>
+      ) : null}
       {phase === 'previewing' || phase === 'committing' ? (
         <div role="status" style={{ marginTop: 10, fontSize: FS.body, color: W.textBody, lineHeight: LH.body }}>
           {phase === 'previewing' ? 'Checking your price…' : 'Updating your estimate…'}

@@ -55,8 +55,17 @@ function storedRecurringKeys(estData) {
  * are the office's). Stored facts only — the save and the tool's preview
  * judge the same thing. Reasons are stable strings for tests and logs.
  */
-function offerTiersSaveEligibility({ gateOn = offerTiersGateLive(), estData = {}, commercial = false, memberEvidence = false } = {}) {
+function optOutRailGateLive() {
+  return process.env.GATE_ESTIMATE_SERVICE_OPT_OUT === 'true';
+}
+
+function offerTiersSaveEligibility({
+  gateOn = offerTiersGateLive(), railGateOn = optOutRailGateLive(), estData = {}, commercial = false, memberEvidence = false,
+} = {}) {
   if (!gateOn) return { eligible: false, reason: 'gate_off' };
+  // The picker is a view over the opt-out rail: without it the customer page
+  // can never show the tiles, so the office must not be told it offered them.
+  if (!railGateOn) return { eligible: false, reason: 'opt_out_gate_off' };
   if (commercial) return { eligible: false, reason: 'not_residential' };
   let keys;
   let member = !!memberEvidence || !!estData?.membershipSnapshot?.isExistingCustomer;
@@ -111,6 +120,7 @@ function oneTimeOptionUpdateForMixChange({
 }
 
 module.exports = {
+  optOutRailGateLive,
   oneTimeOptionUpdateForMixChange,
   COMPANION_KEY,
   COMPANION_LABEL,

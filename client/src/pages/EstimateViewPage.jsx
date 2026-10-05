@@ -7270,6 +7270,27 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     data?.pricing?.anchorOneTimePrice, cancelTierMove, resetForServiceModeChange, onPreviewRestoreService, onPreviewRemoveService,
   ]);
 
+  // Selection-aware figures for the tile the customer is on: the rows of the
+  // matched cadence combo, else of the selected pest cadence.
+  const tierCurrentRows = useMemo(() => {
+    if (!offerTiers || serviceMode === 'one_time') return null;
+    const source = Array.isArray(selectedCombo?.perServiceTreatments) && selectedCombo.perServiceTreatments.length
+      ? selectedCombo.perServiceTreatments
+      : selectedCombinedFrequency(data?.pricing, selectedFrequency)?.perServiceTreatments;
+    const rows = (Array.isArray(source) ? source : [])
+      .map((row) => ({
+        service: row?.service,
+        perApplication: Number(row?.displayPrice) > 0 ? Number(row.displayPrice) : (Number(row?.perTreatment) > 0 ? Number(row.perTreatment) : null),
+        visitsPerYear: Number(row?.visitsPerYear) || null,
+      }))
+      .filter((row) => row.service && row.perApplication != null);
+    return rows.length ? rows : null;
+  }, [offerTiers, serviceMode, selectedCombo, data?.pricing, selectedFrequency]);
+  const tierCadenceIsDefault = useMemo(() => {
+    const defaults = defaultSelectedForServices(services);
+    return services.every((section) => (selected?.[section.key] || defaults[section.key]) === defaults[section.key]);
+  }, [services, selected]);
+
   const confirmTierMove = useCallback(async () => {
     const target = pendingTier;
     const companionKey = offerTiers?.companionKey;
@@ -7287,6 +7308,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       if (target === 'good') {
         if (reloaded?.estimate?.showOneTimeOption && Number(reloaded?.pricing?.anchorOneTimePrice || 0) > 0) {
           resetForServiceModeChange('one_time');
+        } else {
+          // The move was saved (lawn care is off the estimate) but the server
+          // did not open the one-time visit — say so rather than leaving the
+          // customer on the pest plan as if they had picked it.
+          setError('The one-time visit isn\'t available on this estimate right now. Your estimate now shows the pest control plan; you can add lawn care back above, or call us and we\'ll set up a single visit.');
         }
       } else if (target === 'best' && serviceMode === 'one_time') {
         resetForServiceModeChange('recurring');
@@ -10201,6 +10227,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 // would clear the slot the request is committing.
                 disabled={ctaPhase === 'submitting'}
                 estimate={estimate}
+                // The selected tile quotes the cadence chosen below, like the
+                // price card; the other tiles stay at the standard schedule.
+                currentRows={tierCurrentRows}
+                cadenceIsDefault={tierCadenceIsDefault}
                 change={pendingTier ? {
                   phase: tierCommitting || (optOut.sectionKey === tierCompanionKey && optOut.phase === 'submitting')
                     ? 'committing'

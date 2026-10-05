@@ -17431,6 +17431,25 @@ async function buildOfferTiersBlock({ estimate, estData, pricingBundle, adminDra
   const OptOut = require('../services/estimate-service-opt-out');
   const key = OfferTiers.COMPANION_KEY;
   const sections = Array.isArray(pricingBundle?.services) ? pricingBundle.services : [];
+  // A linked customer who became an active member after the save gets no
+  // picker (strict, fail-closed): the rail's commit would refuse them, and
+  // the dry run would show new-customer prices they cannot take.
+  if (estimate.customer_id) {
+    let activeMember = true;
+    try { activeMember = !!(await isActivePlanCustomer(db, estimate.customer_id, { strict: true })); }
+    catch (_) { activeMember = true; }
+    if (activeMember) return null;
+  }
+  // The CURRENT mix must be exactly the model's: pest + lawn, or pest alone
+  // with lawn removed. A line added since the mark (the priced-add rail's
+  // mosquito, say) means "Better" would no longer be the pest plan — no
+  // picker; the page's ordinary controls stand.
+  let currentKeys;
+  try { currentKeys = OfferTiers.storedRecurringKeys(estData).slice().sort(); }
+  catch (_) { return null; }
+  const lawnRemoved = OptOut.currentlyOptedOutKeys(estData).includes(key);
+  const expectedKeys = lawnRemoved ? ['pest_control'] : ['lawn_care', 'pest_control'];
+  if (currentKeys.length !== expectedKeys.length || currentKeys.some((k, i) => k !== expectedKeys[i])) return null;
   const rowKey = (row) => recurringServiceKey({ service: row?.service ?? row?.s, name: row?.label ?? row?.name ?? row?.s });
   const perApp = (row) => {
     const net = Number(row?.displayPrice);
@@ -17440,7 +17459,7 @@ async function buildOfferTiersBlock({ estimate, estData, pricingBundle, adminDra
   let state;
   let dry;
   try {
-    if (OptOut.currentlyOptedOutKeys(estData).includes(key)) {
+    if (lawnRemoved) {
       if (OptOut.serviceOptOutRestoreBlockedKeys(estData).includes(key)) return null;
       if (OptOut.serviceOptOutBlockedByProposal(estData)
         || OptOut.serviceOptOutTierSelectionActive(estData, estimate.waveguard_tier)) return null;

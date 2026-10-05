@@ -38,19 +38,21 @@ const pestLawnData = (overrides = {}) => ({
 describe('who may be marked for tiers', () => {
   test('residential pest + lawn, no member evidence, gate on — and every refusal is named', () => {
     const data = pestLawnData();
-    expect(OfferTiers.offerTiersSaveEligibility({ gateOn: true, estData: data })).toEqual({ eligible: true, reason: null });
+    expect(OfferTiers.offerTiersSaveEligibility({ gateOn: true, railGateOn: true, estData: data })).toEqual({ eligible: true, reason: null });
     expect(OfferTiers.offerTiersSaveEligibility({ gateOn: false, estData: data }).reason).toBe('gate_off');
-    expect(OfferTiers.offerTiersSaveEligibility({ gateOn: true, estData: data, commercial: true }).reason).toBe('not_residential');
-    expect(OfferTiers.offerTiersSaveEligibility({ gateOn: true, estData: data, memberEvidence: true }).reason).toBe('member');
-    expect(OfferTiers.offerTiersSaveEligibility({ gateOn: true, estData: { ...data, membershipSnapshot: { isExistingCustomer: true } } }).reason).toBe('member');
+    // The picker is a view over the opt-out rail: without that gate the office must not be told tiers are on offer.
+    expect(OfferTiers.offerTiersSaveEligibility({ gateOn: true, railGateOn: false, estData: data }).reason).toBe('opt_out_gate_off');
+    expect(OfferTiers.offerTiersSaveEligibility({ gateOn: true, railGateOn: true, estData: data, commercial: true }).reason).toBe('not_residential');
+    expect(OfferTiers.offerTiersSaveEligibility({ gateOn: true, railGateOn: true, estData: data, memberEvidence: true }).reason).toBe('member');
+    expect(OfferTiers.offerTiersSaveEligibility({ gateOn: true, railGateOn: true, estData: { ...data, membershipSnapshot: { isExistingCustomer: true } } }).reason).toBe('member');
     const rows = (services) => ({ ...data, result: { ...data.result, recurring: { ...data.result.recurring, services } } });
     const [pest, lawn] = data.result.recurring.services;
-    expect(OfferTiers.offerTiersSaveEligibility({ gateOn: true, estData: rows([lawn]) }).reason).toBe('no_recurring_pest');
-    expect(OfferTiers.offerTiersSaveEligibility({ gateOn: true, estData: rows([pest]) }).reason).toBe('no_lawn');
+    expect(OfferTiers.offerTiersSaveEligibility({ gateOn: true, railGateOn: true, estData: rows([lawn]) }).reason).toBe('no_recurring_pest');
+    expect(OfferTiers.offerTiersSaveEligibility({ gateOn: true, railGateOn: true, estData: rows([pest]) }).reason).toBe('no_lawn');
     // Tree & shrub cannot be removed through the rail, so it is not a tier companion.
     const ts = { name: 'Tree & Shrub', service: 'tree_shrub', mo: 40, perTreatment: 80, visitsPerYear: 6 };
-    expect(OfferTiers.offerTiersSaveEligibility({ gateOn: true, estData: rows([pest, ts]) }).reason).toBe('no_lawn');
-    expect(OfferTiers.offerTiersSaveEligibility({ gateOn: true, estData: rows([pest, lawn, ts]) }).reason).toBe('other_recurring_services');
+    expect(OfferTiers.offerTiersSaveEligibility({ gateOn: true, railGateOn: true, estData: rows([pest, ts]) }).reason).toBe('no_lawn');
+    expect(OfferTiers.offerTiersSaveEligibility({ gateOn: true, railGateOn: true, estData: rows([pest, lawn, ts]) }).reason).toBe('other_recurring_services');
   });
 });
 
@@ -189,5 +191,18 @@ describe('the tile block on /data', () => {
     await expect(buildOfferTiersBlock({ ...args(), estimate: estimate({ status: 'accepted' }) })).resolves.toBeNull();
     await expect(buildOfferTiersBlock({ ...args(), mixChange: async () => ({ status: 400, body: { error: 'service_not_removable' } }) })).resolves.toBeNull();
     await expect(buildOfferTiersBlock({ ...args(), mixChange: async () => { throw new Error('recompute down'); } })).resolves.toBeNull();
+    // A line added since the mark (the priced-add rail's mosquito): "Better" would no longer be the pest plan.
+    const withMosquito = pestLawnData();
+    withMosquito.result.recurring.services.push({ name: 'Mosquito Control', service: 'mosquito', mo: 79, perTreatment: 79, visitsPerYear: 12 });
+    await expect(buildOfferTiersBlock({ ...args(), estData: withMosquito })).resolves.toBeNull();
+    // A linked customer whose membership cannot be read (no database here) fails closed.
+    await expect(buildOfferTiersBlock({ ...args(), estimate: estimate({ customer_id: '00000000-0000-0000-0000-000000000001' }) })).resolves.toBeNull();
+  });
+});
+
+describe('send path: a marked estimate leads with pest', () => {
+  test('the lead-service park keeps pest and parks lawn on a row marked for tiers, whatever the selection order', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-estimates.js'), 'utf8');
+    expect(src).toMatch(/offerTiersRequested\(estData\)\s*\n\s*&& recurringKeys\.includes\('pest_control'\)\s*\n\s*\? 'pest_control'/);
   });
 });

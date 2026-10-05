@@ -1776,7 +1776,15 @@ async function applyLeadServiceForSend(estimate, { leadShapeRef = null, preserve
       .flatMap(([key, spec]) => spec.selected.map((t) => [t, key])));
     const selectedOrder = (Array.isArray(estData.engineRequest?.selectedServices) ? estData.engineRequest.selectedServices : [])
       .map((t) => tokenToKey[String(t).toUpperCase()]).filter(Boolean);
-    const leadKey = selectedOrder.find((k) => recurringKeys.includes(k));
+    // Good / Better / Best: an estimate the office marked for tiers leads
+    // with PEST whatever the selection order (the tool lists lawn first), so
+    // lawn is the parked line and the customer lands on the pest plan with
+    // Best one tap away. Parking pest instead would leave a lawn-only quote
+    // and no picker.
+    const leadKey = require('../services/estimate-offer-tiers').offerTiersRequested(estData)
+      && recurringKeys.includes('pest_control')
+      ? 'pest_control'
+      : selectedOrder.find((k) => recurringKeys.includes(k));
     if (!leadKey) return untouched;
     const toPark = recurringKeys.filter((k) => k !== leadKey && removable.has(k));
     if (toPark.length !== 1) return untouched;

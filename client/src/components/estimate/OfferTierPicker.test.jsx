@@ -265,4 +265,26 @@ describe('OfferTierPicker', () => {
       window.matchMedia = original;
     }
   });
+
+  it('the selected tile follows the cadence chosen below; the saving chip steps aside and a note explains the other tiles', () => {
+    const monthlyRows = [
+      { service: 'pest_control', perApplication: 67.41, visitsPerYear: 12 },
+      { service: 'lawn_care', perApplication: 69.3, visitsPerYear: 9 },
+    ];
+    const { unmount } = render(
+      <OfferTierPicker tiers={tiersFixture()} selectedKey="best" onSelect={() => {}} currentRows={monthlyRows} cadenceIsDefault={false} />,
+    );
+    const best = screen.getAllByRole('radio').find((el) => /BEST/.test(el.textContent));
+    expect(best).toHaveTextContent('$67.41 + $69.30');
+    expect(screen.queryByText(/per pest application/)).not.toBeInTheDocument();
+    expect(screen.getByText(/other options show the standard schedule/i)).toBeInTheDocument();
+    unmount();
+    // Better selected: only its pest row is replaced; Best keeps the server's standard figures.
+    render(
+      <OfferTierPicker tiers={tiersFixture()} selectedKey="better" onSelect={() => {}}
+        currentRows={[{ service: 'pest_control', perApplication: 83.46, visitsPerYear: 12 }]} cadenceIsDefault={false} />,
+    );
+    const better = screen.getAllByRole('radio').find((el) => /BETTER/.test(el.textContent));
+    expect(better).toHaveTextContent('$83.46');
+  });
 });
