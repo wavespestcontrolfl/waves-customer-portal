@@ -77,21 +77,64 @@ function entryPlanned(row) {
 
 const svcTypeOf = (row) => row.service_type || row.ss_service_type || 'Unknown';
 
-/** avg_actual / job_count / avg_estimated groups. avg_estimated averages only
- *  entries that link to a scheduled row, null when none do. */
-function groupEntryStats(rows, keyFn, extra) {
+/**
+ * THE one place timer rows become physical stops. Every table on the tab
+ * (actual vs estimated, the per-tech comparison, efficiency) reads these, so
+ * none can count a stop differently from another.
+ *
+ * One stop per technician + grouped visit (visit_id), else per technician +
+ * scheduled row (job_id); an entry with no job_id is its own stop. A stop
+ * the technician paused and restarted, or timed on two members of one visit,
+ * is ONE stop: its segments' minutes are summed and its planned minutes are
+ * counted once.
+ *
+ * Returns { technician_id, tech_name, svc_type, actual_minutes,
+ * planned_minutes (null when unlinked), linked, segments }.
+ */
+function collapseEntriesToStops(entryRows) {
+  const stops = new Map();
+  let unlinked = 0;
+  for (const row of entryRows) {
+    let stopKey;
+    if (row.ss_visit_id != null) stopKey = `visit:${row.ss_visit_id}`;
+    else if (row.job_id != null) stopKey = `job:${row.job_id}`;
+    else { unlinked += 1; stopKey = `unlinked:${unlinked}`; }
+    const key = `${row.technician_id}\u0000${stopKey}`;
+    let stop = stops.get(key);
+    if (!stop) {
+      stop = {
+        technician_id: row.technician_id,
+        tech_name: row.tech_name ?? null,
+        svc_type: svcTypeOf(row),
+        actual_minutes: 0,
+        planned_minutes: null,
+        linked: row.job_id != null,
+        segments: 0,
+      };
+      stops.set(key, stop);
+    }
+    if (stop.tech_name == null && row.tech_name != null) stop.tech_name = row.tech_name;
+    stop.actual_minutes += num(row.duration_minutes);
+    stop.segments += 1;
+    if (stop.planned_minutes == null) stop.planned_minutes = entryPlanned(row);
+  }
+  return [...stops.values()];
+}
+
+/** avg_actual / job_count / avg_estimated over STOPS. avg_estimated averages
+ *  only stops that carry a plan, null when none do. */
+function groupStopStats(stops, keyFn, extra) {
   const groups = new Map();
-  for (const row of rows) {
-    const key = keyFn(row);
+  for (const stop of stops) {
+    const key = keyFn(stop);
     let g = groups.get(key);
     if (!g) {
-      g = { ...extra(row), svc_type: svcTypeOf(row), actual: 0, count: 0, est: 0, estCount: 0 };
+      g = { ...extra(stop), svc_type: stop.svc_type, actual: 0, count: 0, est: 0, estCount: 0 };
       groups.set(key, g);
     }
-    g.actual += num(row.duration_minutes);
+    g.actual += stop.actual_minutes;
     g.count += 1;
-    const planned = entryPlanned(row);
-    if (planned != null) { g.est += planned; g.estCount += 1; }
+    if (stop.planned_minutes != null) { g.est += stop.planned_minutes; g.estCount += 1; }
   }
   return [...groups.values()].map(({ actual, count, est, estCount, ...rest }) => ({
     ...rest,
@@ -101,16 +144,20 @@ function groupEntryStats(rows, keyFn, extra) {
   }));
 }
 
-function buildServiceTypeStats(rows) {
-  return groupEntryStats(rows, svcTypeOf, () => ({}))
+/** By service type, over stops linked to a scheduled row (the plan side
+ *  needs one). */
+function buildServiceTypeStats(stops) {
+  return groupStopStats(stops.filter((stop) => stop.linked), (stop) => stop.svc_type, () => ({}))
     .sort((a, b) => (a.svc_type < b.svc_type ? -1 : a.svc_type > b.svc_type ? 1 : 0));
 }
 
-function buildComparison(rows) {
-  const out = groupEntryStats(
-    rows,
-    (r) => `${r.technician_id}\u0000${svcTypeOf(r)}`,
-    (r) => ({ tech_name: r.tech_name ?? null, technician_id: r.technician_id }),
+/** By technician and service type, over every stop (unlinked ones show with
+ *  a null estimate, as before). */
+function buildComparison(stops) {
+  const out = groupStopStats(
+    stops,
+    (stop) => `${stop.technician_id}\u0000${stop.svc_type}`,
+    (stop) => ({ tech_name: stop.tech_name, technician_id: stop.technician_id }),
   );
   // ORDER BY technicians.name, svc_type: Postgres puts NULL names last.
   return out.sort((a, b) => {
@@ -124,50 +171,34 @@ function buildComparison(rows) {
 }
 
 /**
- * Per technician: budget (planned minutes of the linked, non-voided job
- * entries) over the clocked shift. shiftRows are the utilizationByTech rows
- * (technician_id, tech_name, total_shift).
+ * Per technician: budget (planned minutes of the stops done) over the
+ * clocked shift. `jobs` counts EVERY stop, linked or not, so
+ * `jobs_with_budget` shows real coverage. shiftRows: { technician_id,
+ * tech_name, total_shift }.
  */
-function buildEfficiencyByTech(entryRows, shiftRows) {
+function buildEfficiencyByTech(stops, shiftRows) {
   const techs = new Map();
   const get = (id, name) => {
     if (!techs.has(id)) {
-      techs.set(id, {
-        row: { technician_id: id, tech_name: name ?? null, budget_minutes: 0, job_minutes: 0, shift_minutes: 0, jobs: 0, jobs_with_budget: 0 },
-        seenJobs: new Set(),
-        budgetedJobs: new Set(),
-      });
+      techs.set(id, { technician_id: id, tech_name: name ?? null, budget_minutes: 0, job_minutes: 0, shift_minutes: 0, jobs: 0, jobs_with_budget: 0 });
     }
     const t = techs.get(id);
-    if (t.row.tech_name == null && name != null) t.row.tech_name = name;
+    if (t.tech_name == null && name != null) t.tech_name = name;
     return t;
   };
-  for (const entry of entryRows) {
-    const t = get(entry.technician_id, entry.tech_name);
-    // A stop worked in two segments (stop, then restart) is two time_entries
-    // rows on ONE job_id: it is one job with one budget, and both segments'
-    // minutes. An entry with no job_id is its own job.
-    // Two timers on different members of one grouped visit are still one stop.
-    const jobKey = entry.ss_visit_id != null ? `visit:${entry.ss_visit_id}`
-      : (entry.job_id != null ? `job:${entry.job_id}` : null);
-    if (jobKey == null || !t.seenJobs.has(jobKey)) {
-      t.row.jobs += 1;
-      if (jobKey) t.seenJobs.add(jobKey);
-    }
-    const planned = entryPlanned(entry);
-    if (planned == null) continue;
-    t.row.job_minutes += num(entry.duration_minutes);
-    if (jobKey == null || !t.budgetedJobs.has(jobKey)) {
-      if (jobKey) t.budgetedJobs.add(jobKey);
-      t.row.jobs_with_budget += 1;
-      t.row.budget_minutes += planned;
-    }
+  for (const stop of stops) {
+    const t = get(stop.technician_id, stop.tech_name);
+    t.jobs += 1;
+    if (stop.planned_minutes == null) continue;
+    t.jobs_with_budget += 1;
+    t.budget_minutes += stop.planned_minutes;
+    t.job_minutes += stop.actual_minutes;
   }
   for (const shift of shiftRows) {
-    get(shift.technician_id, shift.tech_name).row.shift_minutes += num(shift.total_shift);
+    get(shift.technician_id, shift.tech_name).shift_minutes += num(shift.total_shift);
   }
   return [...techs.values()]
-    .map(({ row }) => ({ ...row, shift_minutes: round1(row.shift_minutes), efficiency_pct: efficiencyPct(row.budget_minutes, row.shift_minutes) }))
+    .map((t) => ({ ...t, shift_minutes: round1(t.shift_minutes), efficiency_pct: efficiencyPct(t.budget_minutes, t.shift_minutes) }))
     .sort((x, y) => {
       if (x.tech_name == null) return 1;
       if (y.tech_name == null) return -1;
@@ -283,6 +314,7 @@ module.exports = {
   plannedMinutes,
   efficiencyPct,
   efficiencyBand,
+  collapseEntriesToStops,
   buildServiceTypeStats,
   buildComparison,
   buildEfficiencyByTech,

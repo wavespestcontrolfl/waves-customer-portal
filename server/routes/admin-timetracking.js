@@ -470,13 +470,14 @@ router.get('/analytics', requireAdmin, async (req, res, next) => {
     const now = new Date();
     const { start, end } = staffAnalyticsDateRange({ startDate, endDate }, now);
 
-    // Actual vs estimated by service type. Planned minutes come from the
-    // planners' workDuration, aggregated here (the old SQL AVG read a
-    // column that does not exist on scheduled_services).
-    let entryQuery = jobEntriesWithPlan(start, end);
+    // Every completed job timer in the range (linked to a scheduled row or
+    // not), collapsed ONCE into physical stops; each table below reads the
+    // same stops. Planned minutes come from the planners' workDuration.
+    let entryQuery = jobEntriesWithPlan(start, end, { requireJob: false });
     if (technicianId) entryQuery = entryQuery.where('time_entries.technician_id', technicianId);
-    const entryRows = await withVisitGroupMinutes(await entryQuery);
-    const serviceTypeStats = analyticsMath.buildServiceTypeStats(entryRows);
+    const stops = analyticsMath.collapseEntriesToStops(await withVisitGroupMinutes(await entryQuery));
+    // Actual vs estimated by service type (stops linked to a scheduled row).
+    const serviceTypeStats = analyticsMath.buildServiceTypeStats(stops);
 
     // Utilization by tech
     let utilQuery = db('time_entry_daily_summary')
@@ -547,7 +548,7 @@ router.get('/analytics', requireAdmin, async (req, res, next) => {
       );
     if (technicianId) shiftQuery = shiftQuery.where('time_entries.technician_id', technicianId);
     const liveShiftRows = analyticsMath.buildLiveShiftRows(await shiftQuery, now);
-    const efficiencyByTech = analyticsMath.buildEfficiencyByTech(entryRows, liveShiftRows);
+    const efficiencyByTech = analyticsMath.buildEfficiencyByTech(stops, liveShiftRows);
 
     // Booked ahead: the scheduler's own day-quality measurement for the next
     // 3 ET weeks from today — physical stops and co-visit-aware on-site
@@ -601,7 +602,7 @@ router.get('/analytics/comparison', requireAdmin, async (req, res, next) => {
     const { start, end } = staffAnalyticsDateRange({ startDate, endDate });
 
     const rows = await withVisitGroupMinutes(await jobEntriesWithPlan(start, end, { requireJob: false }));
-    const comparison = analyticsMath.buildComparison(rows);
+    const comparison = analyticsMath.buildComparison(analyticsMath.collapseEntriesToStops(rows));
 
     res.json(comparison);
   } catch (err) {

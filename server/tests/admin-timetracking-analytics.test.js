@@ -106,7 +106,7 @@ describe('analytics queries read the real planned-minutes column', () => {
   });
 
   test('response keeps the field names the Analytics tab reads', async () => {
-    mockTableRows.time_entries = [entry({ duration_minutes: 40 }), entry({ duration_minutes: 20, ss_id: 's2' })];
+    mockTableRows.time_entries = [entry({ duration_minutes: 40 }), entry({ duration_minutes: 20, ss_id: 's2', job_id: 's2' })];
     const { body } = await get('/analytics');
     expect(body.serviceTypeStats).toEqual([
       expect.objectContaining({ svc_type: 'Pest Control', avg_actual: 30, job_count: 2, avg_estimated: 60 }),
@@ -118,8 +118,25 @@ describe('analytics queries read the real planned-minutes column', () => {
   });
 
   test('an entry with no linked scheduled row has a null estimate, not a guessed one', () => {
-    const rows = [entry({ ss_id: null })];
-    expect(math.buildServiceTypeStats(rows)[0]).toEqual(expect.objectContaining({ job_count: 1, avg_estimated: null }));
+    const stops = math.collapseEntriesToStops([entry({ ss_id: null, job_id: 'j9' })]);
+    expect(math.buildServiceTypeStats(stops)[0]).toEqual(expect.objectContaining({ job_count: 1, avg_estimated: null }));
+  });
+
+  test('a paused-and-restarted stop is ONE job in actual vs estimated: 25 + 20 against 60, not two jobs', () => {
+    const stops = math.collapseEntriesToStops([
+      entry({ duration_minutes: 25, ss_estimated_duration_minutes: 60 }),
+      entry({ duration_minutes: 20, ss_estimated_duration_minutes: 60 }), // same job_id s1
+    ]);
+    expect(stops).toHaveLength(1);
+    expect(math.buildServiceTypeStats(stops)[0]).toEqual(expect.objectContaining({ job_count: 1, avg_actual: 45, avg_estimated: 60 }));
+    expect(math.buildComparison(stops)[0]).toEqual(expect.objectContaining({ job_count: 1, avg_actual: 45, avg_estimated: 60 }));
+  });
+
+  test('an unlinked job timer stays out of actual vs estimated but counts in efficiency coverage', async () => {
+    mockTableRows.time_entries = [entry(), entry({ job_id: null, ss_id: null, ss_service_type: null, service_type: 'Admin job' })];
+    const { body } = await get('/analytics');
+    expect(body.serviceTypeStats.map((r) => r.svc_type)).toEqual(['Pest Control']);
+    expect(body.efficiencyByTech[0]).toEqual(expect.objectContaining({ jobs: 2, jobs_with_budget: 1 }));
   });
 });
 
@@ -142,7 +159,7 @@ describe('efficiency math', () => {
       entry({ ss_estimated_duration_minutes: 30, duration_minutes: 40, ss_id: 's2', job_id: 's2' }),
       entry({ ss_id: null, job_id: null, duration_minutes: 15 }),
     ];
-    const [t] = math.buildEfficiencyByTech(rows, [{ technician_id: 't1', tech_name: 'Tech A', total_shift: '240' }]);
+    const [t] = math.buildEfficiencyByTech(math.collapseEntriesToStops(rows), [{ technician_id: 't1', tech_name: 'Tech A', total_shift: '240' }]);
     expect(t).toEqual(expect.objectContaining({
       budget_minutes: 120, job_minutes: 90, shift_minutes: 240, efficiency_pct: 50, jobs: 3, jobs_with_budget: 2,
     }));
@@ -152,7 +169,7 @@ describe('efficiency math', () => {
       entry({ ss_estimated_duration_minutes: 60, duration_minutes: 25 }),
       entry({ ss_estimated_duration_minutes: 60, duration_minutes: 20 }), // same job_id s1, restarted
     ];
-    const [t] = math.buildEfficiencyByTech(rows, [{ technician_id: 't1', tech_name: 'Tech A', total_shift: 120 }]);
+    const [t] = math.buildEfficiencyByTech(math.collapseEntriesToStops(rows), [{ technician_id: 't1', tech_name: 'Tech A', total_shift: 120 }]);
     expect(t).toEqual(expect.objectContaining({ budget_minutes: 60, job_minutes: 45, jobs: 1, jobs_with_budget: 1, efficiency_pct: 50 }));
   });
   test('a grouped visit budgets the whole visit, and two timers on its members are one stop', () => {
@@ -160,7 +177,7 @@ describe('efficiency math', () => {
       entry({ ss_visit_id: 'v1', ss_estimated_duration_minutes: 25, duration_minutes: 30 }),
       entry({ ss_visit_id: 'v1', ss_id: 's2', job_id: 's2', ss_estimated_duration_minutes: 20, duration_minutes: 10 }),
     ], new Map([['v1', 45]]));
-    const [t] = math.buildEfficiencyByTech(rows, [{ technician_id: 't1', tech_name: 'Tech A', total_shift: 90 }]);
+    const [t] = math.buildEfficiencyByTech(math.collapseEntriesToStops(rows), [{ technician_id: 't1', tech_name: 'Tech A', total_shift: 90 }]);
     expect(t).toEqual(expect.objectContaining({ budget_minutes: 45, job_minutes: 40, jobs: 1, jobs_with_budget: 1, efficiency_pct: 50 }));
   });
   test('the route resolves a grouped visit from every live member', async () => {
