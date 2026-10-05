@@ -1,14 +1,78 @@
 jest.mock('../services/commercial-suite-size/dbpr-food-license');
 jest.mock('../services/commercial-suite-size/web-search-leg');
+jest.mock('../services/commercial-suite-size/listing-size', () => ({
+  SOURCE: 'listing_verified_text',
+  resolveViaListing: jest.fn(async () => null),
+}));
 
 const { resolveViaDbprLicense } = require('../services/commercial-suite-size/dbpr-food-license');
 const { resolveViaWebSearch } = require('../services/commercial-suite-size/web-search-leg');
+const { resolveViaListing } = require('../services/commercial-suite-size/listing-size');
 const { resolveCommercialSuiteSize, SOURCES } = require('../services/commercial-suite-size');
 
 const ADDRESS = { street: '4400 Test Commons Pkwy E', unit: '102', zip: '00000' };
 
 beforeEach(() => {
   jest.clearAllMocks();
+});
+
+describe('resolveCommercialSuiteSize — listing rung (PR 5b) sits above the license', () => {
+  test('a listing size wins over the DBPR license for the SIZE, keeps the license\'s restaurant classification, and the web leg never runs', async () => {
+    resolveViaListing.mockResolvedValueOnce({ value: 1350, source: 'listing_verified_text', confidence: 'medium', url: 'https://www.loopnet.com/x', fetchedAt: '2026-10-05T00:00:00.000Z', evidence: [{ source: 'listing_verified_text', detail: 'public listing', url: 'https://www.loopnet.com/x' }] });
+    resolveViaDbprLicense.mockResolvedValue({ value: 1400, businessName: 'Test Taco Shop', seats: 25, evidence: [{ source: 'license_seats', detail: '25 seats' }] });
+    const result = await resolveCommercialSuiteSize({ address: ADDRESS });
+    expect(result).toMatchObject({ value: 1350, source: SOURCES.LISTING_VERIFIED_TEXT, confidence: 'medium', url: 'https://www.loopnet.com/x', businessName: 'Test Taco Shop', businessType: 'restaurant_food', licenseBacked: true, seats: 25 });
+    // The license record that justified the classification rides with the result.
+    expect(result.evidence.map((e) => e.source)).toEqual(['listing_verified_text', 'license_seats']);
+    expect(resolveViaDbprLicense).toHaveBeenCalledTimes(1);
+    expect(resolveViaWebSearch).not.toHaveBeenCalled();
+  });
+
+  test('a listing size with no license at the suite carries no classification', async () => {
+    resolveViaListing.mockResolvedValueOnce({ value: 1350, source: 'listing_verified_text', confidence: 'medium', url: 'https://www.loopnet.com/x', evidence: [] });
+    resolveViaDbprLicense.mockImplementation(async (input, opts) => { if (opts.diag) opts.diag.extractLoaded = true; return null; });
+    const result = await resolveCommercialSuiteSize({ address: ADDRESS, businessNameHint: 'Hint Co' });
+    expect(result).toMatchObject({ value: 1350, source: SOURCES.LISTING_VERIFIED_TEXT, businessName: 'Hint Co', businessType: null });
+    expect(result.licenseBacked).toBeUndefined();
+    expect(result.licenseChecked).toBe(true); // DBPR answered: no license at this suite
+    expect(resolveViaWebSearch).not.toHaveBeenCalled();
+  });
+
+  test('a listing size whose license leg failed or was skipped says so (licenseChecked false)', async () => {
+    resolveViaListing.mockResolvedValueOnce({ value: 1350, source: 'listing_verified_text', confidence: 'medium', url: 'https://www.loopnet.com/x', evidence: [] });
+    resolveViaDbprLicense.mockRejectedValueOnce(new Error('dbpr down'));
+    const failed = await resolveCommercialSuiteSize({ address: ADDRESS });
+    expect(failed).toMatchObject({ value: 1350, source: SOURCES.LISTING_VERIFIED_TEXT, licenseChecked: false });
+    // The leg returned null because the extract did not load (outage, timeout): still unchecked.
+    resolveViaListing.mockResolvedValueOnce({ value: 1350, source: 'listing_verified_text', confidence: 'medium', url: 'https://www.loopnet.com/x', evidence: [] });
+    resolveViaDbprLicense.mockImplementation(async (input, opts) => { if (opts.diag) opts.diag.extractLoaded = false; return null; });
+    expect((await resolveCommercialSuiteSize({ address: ADDRESS })).licenseChecked).toBe(false);
+  });
+
+  test('the cache-hit path (skipWebSearch) and skipListing never call the listing leg', async () => {
+    resolveViaDbprLicense.mockResolvedValue(null);
+    resolveViaWebSearch.mockResolvedValue(null);
+    await resolveCommercialSuiteSize({ address: ADDRESS, commercialRiskType: 'retail_standard' }, { skipWebSearch: true });
+    await resolveCommercialSuiteSize({ address: ADDRESS, commercialRiskType: 'retail_standard' }, { skipListing: true });
+    expect(resolveViaListing).not.toHaveBeenCalled();
+  });
+
+  test('the cache-hit path runs the listing leg only to refresh an aged-out listing stamp', async () => {
+    resolveViaDbprLicense.mockResolvedValue(null);
+    resolveViaWebSearch.mockResolvedValue(null);
+    resolveViaListing.mockResolvedValueOnce({ value: 1350, source: 'listing_verified_text', confidence: 'medium', url: 'https://www.loopnet.com/x', evidence: [] });
+    const out = await resolveCommercialSuiteSize({ address: ADDRESS }, { skipWebSearch: true, listingRefresh: true });
+    expect(resolveViaListing).toHaveBeenCalledTimes(1);
+    expect(out.source).toBe(SOURCES.LISTING_VERIFIED_TEXT);
+    expect(resolveViaWebSearch).not.toHaveBeenCalled();
+  });
+
+  test('a listing leg error falls through to the license', async () => {
+    resolveViaListing.mockRejectedValueOnce(new Error('vendor down'));
+    resolveViaDbprLicense.mockResolvedValue({ value: 1400, businessName: 'Test Taco Shop', seats: 25, evidence: [] });
+    const result = await resolveCommercialSuiteSize({ address: ADDRESS });
+    expect(result.source).toBe(SOURCES.LICENSE_SEATS);
+  });
 });
 
 describe('resolveCommercialSuiteSize — priority order (caller/tech-stated -> license -> type default)', () => {
@@ -143,7 +207,10 @@ describe('opts.deadlineAt — the lookup budget, not each leg\'s own full timeou
     // Deterministic clock: the first remainingBudgetMs() read (before DBPR)
     // sees plenty left, so DBPR runs; the second (before web search) sees
     // DBPR "consumed" all but 500ms — under MIN_LEG_REMAINING_MS (2000).
+    // The listing leg (PR 5b) reads the clock once first; it is gated off
+    // here, so it spends nothing.
     const nowSpy = jest.spyOn(Date, 'now')
+      .mockReturnValueOnce(start)
       .mockReturnValueOnce(start)
       .mockReturnValueOnce(start + 9500);
     try {
