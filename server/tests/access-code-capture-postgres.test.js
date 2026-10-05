@@ -78,7 +78,10 @@ postgres('access codes section', () => {
   };
   const found = async (customerId, extra = {}) => {
     const value = { kind: 'neighborhood_gate', code: '#4821', instructions: null, life: 'standing', ...extra };
+    // Filed like the sweep files it: tied to the customer's home when there is exactly one.
+    const homes = await trx('customer_properties').where({ customer_id: customerId, active: true }).pluck('id');
     const [row] = await trx('customer_access_codes').insert({
+      property_id: homes.length === 1 ? homes[0] : null,
       customer_id: customerId, kind: value.kind, code: value.code, instructions: value.instructions, life: value.life,
       status: 'found', source_type: 'sms', source_id: randomUUID(), source_quote: 'q', source_at: NOW,
       value_hash: access.valueHash(value.code, value.instructions),
@@ -620,11 +623,12 @@ postgres('access codes section', () => {
       expect(await access.accept(trx, second.id, {})).toEqual({ ok: false, status: 409, code: 'duplicate_active' });
       // Same text, two found rows; editing one to the other's value hits the unique index.
       const sourceId = randomUUID();
+      const [home] = await trx('customer_properties').where({ customer_id: c.id }).pluck('id');
       const a = await trx('customer_access_codes').insert({
-        customer_id: c.id, kind: 'door', code: '3000', life: 'standing', status: 'found', source_type: 'sms', source_id: sourceId, value_hash: access.valueHash('3000'),
+        customer_id: c.id, property_id: home, kind: 'door', code: '3000', life: 'standing', status: 'found', source_type: 'sms', source_id: sourceId, value_hash: access.valueHash('3000'),
       }).returning('*');
       const b = await trx('customer_access_codes').insert({
-        customer_id: c.id, kind: 'door', code: '3001', life: 'standing', status: 'found', source_type: 'sms', source_id: sourceId, value_hash: access.valueHash('3001'),
+        customer_id: c.id, property_id: home, kind: 'door', code: '3001', life: 'standing', status: 'found', source_type: 'sms', source_id: sourceId, value_hash: access.valueHash('3001'),
       }).returning('*');
       expect(await access.accept(trx, b[0].id, { code: '3000' })).toEqual({ ok: false, status: 409, code: 'duplicate' });
       expect((await trx('customer_access_codes').where({ id: b[0].id }).first()).status).toBe('found');
@@ -1138,6 +1142,24 @@ postgres('access codes section', () => {
       await trx('property_preferences').insert({ customer_id: c.id, garage_code: '2468' }).onConflict('customer_id').merge();
       expect(await access.retire(trx, first.row.id, {})).toMatchObject({ ok: true, promoted: false });
       expect((await trx('property_preferences').where({ customer_id: c.id }).first()).garage_code).toBeNull();
+    });
+
+    test('a found code that lost its home is not moved to the home that is left', async () => {
+      const c = await customer({ properties: 2 });
+      const [a, b] = await trx('customer_properties').where({ customer_id: c.id }).orderBy('id').select('id');
+      const row = await found(c.id, { kind: 'door', code: '2468' });
+      await trx('customer_properties').where({ id: a.id }).update({ active: false });
+      expect(await access.accept(trx, row.id, {})).toMatchObject({ ok: false, code: 'property_required' });
+      expect((await access.accept(trx, row.id, { propertyId: b.id })).row.propertyId).toBe(b.id);
+    });
+
+    test('on a one-home account, a code on file for a home no longer active does not hide a new find', async () => {
+      const c = await customer({ properties: 2 });
+      const [a] = await trx('customer_properties').where({ customer_id: c.id }).orderBy('id').select('id');
+      await access.addByStaff(trx, { customerId: c.id, kind: 'door', life: 'standing', code: '1234', propertyId: a.id });
+      await trx('customer_properties').where({ id: a.id }).update({ active: false });
+      await text(c.id, 'The door code is 1234');
+      expect(await sweep(stub([gateItem({ kind: 'door', code: '1234', quote: 'The door code is 1234' })]))).toMatchObject({ found: 1 });
     });
 
     test('home choices name the unit and the property label', async () => {

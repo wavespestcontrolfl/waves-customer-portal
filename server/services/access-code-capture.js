@@ -390,7 +390,7 @@ async function fileFoundItems(conn, { message }, items, receipt) {
         .leftJoin('scheduled_services as ss', 'ss.id', 'a.scheduled_service_id')
         .where('a.customer_id', customer.id).whereIn('a.status', ['found', 'active']).whereRaw(OWNED_SOURCE_SQL)
         .whereIn('a.value_hash', items.map((i) => i.value_hash))
-        .select('a.kind', 'a.value_hash', 'a.status', 'a.life', 'a.instructions', 'a.scheduled_service_id', 'a.source_at', 'a.created_at', 'ss.status as service_status'))
+        .select('a.kind', 'a.value_hash', 'a.status', 'a.life', 'a.instructions', 'a.property_id', 'a.scheduled_service_id', 'a.source_at', 'a.created_at', 'ss.status as service_status'))
         .filter((r) => isLive(r));
       // Only a live STANDING row makes a new item redundant. A visit row never
       // does: the same door code sent for a second appointment is evidence for
@@ -402,6 +402,7 @@ async function fileFoundItems(conn, { message }, items, receipt) {
       // On a multi-home account a found code may be for another home: nothing
       // already on file covers it, and the office picks its home.
       const covered = (item) => !multiHome && existing.some((r) => r.status === 'active' && r.kind === item.kind
+        && !!r.property_id && r.property_id === liveProperties[0]?.id
         && r.value_hash === item.value_hash && r.life === 'standing' && item.life === 'standing'
         && normalizeText(r.instructions) === normalizeText(item.instructions));
       toInsert = items.filter((item) => {
@@ -620,13 +621,16 @@ async function homeChoices(conn, customerIds) {
 
 // A standing code of a multi-home account must name its home, or a technician
 // at one home would get another home's code. Returns { propertyId } or { error }.
-async function resolveHome(trx, customerId, { life, propertyId, current = null }) {
+async function resolveHome(trx, customerId, { life, propertyId, current = null, explicitOnly = false }) {
   const homes = await trx('customer_properties').where({ customer_id: customerId, active: true }).pluck('id');
   if (propertyId !== undefined && propertyId !== null && propertyId !== '') {
     if (!homes.includes(propertyId)) return { error: 'invalid_property' };
     return { propertyId };
   }
   if (current && homes.includes(current)) return { propertyId: current };
+  // A found code that lost its home (or never had one) is never moved to
+  // whatever home is left: the office names it.
+  if (explicitOnly && life === 'standing') return { error: 'property_required' };
   if (homes.length === 1) return { propertyId: homes[0] };
   if (life === 'standing' && homes.length > 1) return { error: 'property_required' };
   return { propertyId: null };
@@ -875,7 +879,7 @@ async function accept(conn, id, { adminUserId = null, kind, life, code, instruct
       // A standing code's home is settled first: duplicates are per home.
       // (A one-visit code takes its visit's home, below.)
       const standingHome = next.life === 'standing'
-        ? await resolveHome(trx, row.customer_id, { life: next.life, propertyId, current: row.property_id }) : { propertyId: null };
+        ? await resolveHome(trx, row.customer_id, { life: next.life, propertyId, current: row.property_id, explicitOnly: true }) : { propertyId: null };
       if (standingHome.error) return fail(400, standingHome.error);
       next.property_id = standingHome.propertyId;
       const refused = await supersedeOrRefuse(trx, row.customer_id, next, { exceptId: row.id, adminUserId });

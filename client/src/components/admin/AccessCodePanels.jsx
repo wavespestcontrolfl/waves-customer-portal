@@ -111,7 +111,7 @@ function LifeToggle({ value, onChange, disabled }) {
 
 // kind / code / directions / life / visit: the fields a found code is edited
 // in and a staff code is typed into. `draft` and `setDraft` live in the caller.
-function CodeFields({ idPrefix, draft, setDraft, choices, busy, homes = [] }) {
+function CodeFields({ idPrefix, draft, setDraft, choices, busy, homes = [], needHome = false }) {
   const set = (key) => (event) => setDraft((d) => ({ ...d, [key]: event.target.value }));
   return (
     <div className="grid gap-2">
@@ -154,7 +154,7 @@ function CodeFields({ idPrefix, draft, setDraft, choices, busy, homes = [] }) {
           </label>
         )}
       </div>
-      {draft.life === "standing" && homes.length > 1 && (
+      {draft.life === "standing" && (homes.length > 1 || (needHome && homes.length > 0)) && (
         <label className="block">
           <Label>Home</Label>
           <Select id={`${idPrefix}-home`} value={draft.propertyId} onChange={set("propertyId")} disabled={busy}>
@@ -279,7 +279,7 @@ export function FoundCodeCard({ row, visits, homes = null, onSave, onDismiss, re
         </blockquote>
       )}
       <div className="text-ui-label text-ink-secondary">{sourceLabel(row)}</div>
-      <CodeFields idPrefix={`found-${row.id}`} draft={draft} setDraft={setDraft} choices={choices} busy={busy} homes={homeList} />
+      <CodeFields idPrefix={`found-${row.id}`} draft={draft} setDraft={setDraft} choices={choices} busy={busy} homes={homeList} needHome={!row.propertyId} />
       {error && <ActionFeedback error>{error}</ActionFeedback>}
       <div className="flex flex-wrap items-center gap-2">
         <Button size="sm" disabled={busy || !typed} onClick={() => run(() => onSave(row, bodyFromDraft(draft, row)), "Could not save the code")}>
