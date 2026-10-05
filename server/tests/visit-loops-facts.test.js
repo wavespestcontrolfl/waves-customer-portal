@@ -675,6 +675,7 @@ describe('missedVisit (a miss the office confirmed and has not settled)', () => 
     ['moved to a later window that day', { ss_window_start: '14:00:00', ss_window_end: '15:00:00' }],
     ['gone', { ss_status: null }],
     ['under way', { ss_status: 'en_route' }],
+    ['windowless (no frozen start to check a move or the promised window against)', { original_window: null, ss_window_start: null, ss_window_end: null }],
     ['complete on the tracker while its status lags', { ss_status: 'confirmed', ss_track_state: 'complete' }],
     ['cancelled on the tracker while its status lags', { ss_status: 'confirmed', ss_track_state: 'cancelled' }],
     ['live on the tracker', { ss_status: 'pending', ss_track_state: 'on_property' }],
@@ -692,6 +693,10 @@ describe('missedVisit (a miss the office confirmed and has not settled)', () => 
 
   test('nothing confirmed: no missed visit', async () => {
     expect((await run([])).out.missedVisit).toBeNull();
+  });
+
+  test('a customer reschedule REQUEST (status rescheduled, same slot) is still a miss not rebooked', async () => {
+    expect((await run([miss({ ss_status: 'rescheduled' })])).out.missedVisit).toMatchObject({ logId: 'rl-1' });
   });
 
   test('an unstarted tracker (unset or scheduled) keeps the miss listed', async () => {

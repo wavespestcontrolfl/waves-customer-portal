@@ -1367,9 +1367,16 @@ async function getSealedExamSummary({ dbi = db } = {}) {
   EXAM_LEGS.forEach((leg, i) => {
     legs[leg] = shapeRun(legRows[i]) || null;
   });
+  // Missed-visit coverage, recomputed from the pool as it is NOW (owner 2026-10-04:
+  // reported, never a blocker): a version that lists MISSED VISIT can complete its
+  // exam with none of those cases graded, and the summary must say so.
+  const coverage = versionNeedsMissedCases(currentVersion)
+    ? missedVisitCoverage(currentVersion, await dbi('sms_sealed_eval_items').where('active', true).select('facts_block'))
+    : null;
   return {
     currentVersion,
     items: { active: Number(counts?.active) || 0, total: Number(counts?.total) || 0 },
+    ...(coverage ? { missedVisitCoverage: { ...coverage, short: coverage.have < coverage.need } } : {}),
     legs,
     runs: runs.map(shapeRun),
   };

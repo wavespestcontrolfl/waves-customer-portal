@@ -176,7 +176,9 @@ async function liveRepresentatives(conn, alerts) {
 // schedule: an uncommunicated move can take the row off today while its promised
 // window is still today (the no-show detector's promisedIds path). Each alert must
 // be for an occurrence live now: today's, or yesterday's still running past midnight.
-async function loadLateAlert({ conn, deriveWindow, customerId, now }) {
+// `exclude`: the confirmed missed occurrence (MISSED VISIT owns it), left out BEFORE
+// an alert is chosen, so a delay on another visit is still reported.
+async function loadLateAlert({ conn, deriveWindow, customerId, now, exclude = null }) {
   const alerts = await conn('dispatch_alerts as a')
     .join('scheduled_services as ss', 'ss.id', 'a.job_id')
     .where('ss.customer_id', customerId)
@@ -209,6 +211,8 @@ async function loadLateAlert({ conn, deriveWindow, customerId, now }) {
     const payload = parseJson(row.payload);
     const occ = alertOccurrence(payload, row, latest.get(String(row.id)));
     if (!occ || !liveNow(occ)) continue;
+    if (exclude && exclude.visitId && String(row.id) === exclude.visitId && calendarDay(occ.date) === exclude.date
+      && hhmmToMinutes(occ.startHms) === hhmmToMinutes(exclude.windowStart)) continue;
     applicable.push({ row, payload, occ, gap: payload?.evidence === 'missing_tracking' && Number(payload?.stage) !== 2 });
   }
   const chosen = applicable.find((a) => !a.gap) || applicable[0];
@@ -462,7 +466,12 @@ async function loadMissedVisit({ conn, customerId, now, deriveWindow }) {
     // Only a visit that still has not started: an unstarted status AND tracker (the
     // tracker can lead a lagging status — under way, complete, cancelled or skipped
     // there means the visit is not waiting to be rebooked).
-    if (!NOT_STARTED_STATUSES.includes(miss.ss_status) || !trackNotStarted(miss.ss_track_state)) continue;
+    // 'rescheduled' counts as waiting too: the legacy customer reschedule request
+    // sets it while the visit keeps its old slot, and nothing is rebooked yet.
+    if (![...NOT_STARTED_STATUSES, 'rescheduled'].includes(miss.ss_status) || !trackNotStarted(miss.ss_track_state)) continue;
+    // A row with no frozen start (a windowless visit) cannot be checked for a later
+    // move or against its promised window: never listed.
+    if (!missedWindowStart(miss.original_window)) continue;
     if (settlementFromVisit(
       { status: miss.ss_status, scheduled_date: miss.ss_scheduled_date, window_start: miss.ss_window_start, window_end: miss.ss_window_end },
       { original_date: miss.original_date, original_window: miss.original_window },
@@ -631,19 +640,16 @@ async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = nul
   const pastWindow = await read('past window', null, () => findPastWindow({ ...ctx, exclude: missedVisit }));
 
   const [lateAlert, commitments] = await Promise.all([
-    read('late alert', null, () => loadLateAlert(ctx)),
+    read('late alert', null, () => loadLateAlert({ ...ctx, exclude: missedVisit })),
     strict && !withCommitments
       ? { weOwe: [], customerWaiting: [] }
       : read('commitments', { weOwe: [], customerWaiting: [] }, () => loadCommitments(ctx)),
   ]);
 
-  // A confirmed miss leaves the row unstarted, so the same occurrence can also read
-  // as a delay: the confirmed miss is the stronger fact and supersedes it (Codex
-  // #5610 r4) — the same OCCURRENCE, never just the row (r10).
-  const sameVisit = (f) => Boolean(missedVisit && missedVisit.visitId && f && String(f.visitId) === missedVisit.visitId
-    && calendarDay(f.scheduledDate) === missedVisit.date
-    && hhmmToMinutes(f.windowStart) === hhmmToMinutes(missedVisit.windowStart));
-  out.lateAlert = sameVisit(lateAlert) ? null : lateAlert;
+  // A confirmed miss leaves the row unstarted, so the same occurrence could also read
+  // as a delay or a passed window: both reads leave that occurrence out (`exclude`),
+  // so the miss is listed once and anything ELSE late or overdue still shows.
+  out.lateAlert = lateAlert;
   out.pastWindow = pastWindow;
   out.missedVisit = missedVisit;
   out.weOwe = commitments.weOwe;
