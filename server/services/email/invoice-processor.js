@@ -158,7 +158,9 @@ function expenseDescription(vendorName, invoiceNumber) {
 // would stringify to "[object Object]" for every invoice.
 function scalarInvoiceNumber(n) {
   const s = typeof n === 'string' || (typeof n === 'number' && Number.isFinite(n)) ? String(n).trim() : '';
-  return s && s.length <= INVOICE_NUMBER_MAX ? s : null;
+  // A placeholder ("unknown", "N/A", "string", "-") is no identifier.
+  if (!s || s.length > INVOICE_NUMBER_MAX || /^(unknown|n\/?a|null|none|string|tbd|-+|0+)$/i.test(s)) return null;
+  return s;
 }
 // Only a name from the domain mapping or printed on the invoice identifies
 // the merchant. A classifier guess or a sender display name can be a
@@ -166,8 +168,11 @@ function scalarInvoiceNumber(n) {
 // drive a duplicate match.
 const DEDUPE_SOURCES = new Set(['mapping', 'invoice']);
 
-function duplicateKey(vendorName, invoiceNumber, vendorSource) {
-  if (!DEDUPE_SOURCES.has(vendorSource) || !scalarInvoiceNumber(invoiceNumber)) return null;
+// The date must come from the invoice or the classifier: the today fallback
+// is the processing day, so a mailbox backfill would compare unrelated
+// historical receipts under one date.
+function duplicateKey(vendorName, invoiceNumber, vendorSource, dateFromInvoice) {
+  if (!dateFromInvoice || !DEDUPE_SOURCES.has(vendorSource) || !scalarInvoiceNumber(invoiceNumber)) return null;
   if (fullExpenseDescription(vendorName, invoiceNumber).length > 300 || String(vendorName).length > 200) return null;
   return `expense-dup:${String(vendorName).toLowerCase()}:${invoiceNumber}`;
 }
@@ -186,7 +191,7 @@ async function findDuplicateExpense(conn, vendorName, invoiceNumber, amount, inv
 // Booking phase: the AI category suggestion (outside any transaction), then
 // the duplicate check and the insert under one advisory lock. Logs carry ids
 // only: the vendor name can be a person's display name.
-async function bookExpense(email, { vendorName, vendorSource, expenseCategory, parsedInvoice, amount, invoiceNumber, invoiceDate, taxYear, quarter }) {
+async function bookExpense(email, { vendorName, vendorSource, expenseCategory, parsedInvoice, amount, invoiceNumber, invoiceDate, dateFromInvoice, taxYear, quarter }) {
   try {
     const { autoCategorizeExpense, categoryDeductibleAmount } = require('../expense-categorizer');
     // ONLY a deterministic vendor-domain mapping auto-sets the tax category.
@@ -220,7 +225,7 @@ async function bookExpense(email, { vendorName, vendorSource, expenseCategory, p
     // invoice number, so two copies of a receipt processed at the same
     // time cannot both insert. The AI suggestion above stays outside the
     // transaction: no lock is held across a model call.
-    const key = duplicateKey(vendorName, invoiceNumber, vendorSource);
+    const key = duplicateKey(vendorName, invoiceNumber, vendorSource, dateFromInvoice);
     const outcome = await db.transaction(async (trx) => {
       if (key) {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [key]);
@@ -385,7 +390,8 @@ async function processVendorInvoice(email, classification) {
 
   if (amount > 0) {
     await bookExpense(email, {
-      vendorName, vendorSource, expenseCategory, parsedInvoice, amount, invoiceNumber, invoiceDate, taxYear, quarter,
+      vendorName, vendorSource, expenseCategory, parsedInvoice, amount, invoiceNumber, invoiceDate,
+      dateFromInvoice: invoiceDate === candidateDate, taxYear, quarter,
     });
   } else {
     await db('emails').where({ id: email.id }).update({

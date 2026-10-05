@@ -150,3 +150,19 @@ test('the log lines carry ids, never the vendor name', async () => {
   expect(inserted()).toEqual(expect.objectContaining({ vendor_name: 'Pat Example' }));
   expect(logged).not.toContain('Pat Example');
 });
+
+test.each(['unknown', 'N/A', 'string', '-', '0'])('a placeholder invoice number (%s) never drives a duplicate match', async (placeholder) => {
+  mockState.duplicate = { id: 'exp-placeholder' };
+  extraction({ vendor_name: 'Example Payments', invoice_number: placeholder, invoice_date: '2026-01-15', total: 12 });
+  await processVendorInvoice({ id: 'e14', gmail_id: 'g', from_address: 'p@payments.example', subject: 'Invoice' }, { extracted: {} });
+  expect(inserted()).toEqual(expect.objectContaining({ amount: 12 }));
+  expect(mockState.lastDuplicateFilter).toBeUndefined();
+});
+
+test('a receipt with no printed date (today fallback) never drives a duplicate match', async () => {
+  mockState.duplicate = { id: 'exp-same-day' };
+  extraction({ vendor_name: 'Example Payments', invoice_number: 'TEST-0015', total: 12 });
+  await processVendorInvoice({ id: 'e15', gmail_id: 'g', from_address: 'p@payments.example', subject: 'Invoice' }, { extracted: {} });
+  expect(inserted()).toEqual(expect.objectContaining({ amount: 12 }));
+  expect(mockState.lastDuplicateFilter).toBeUndefined();
+});
