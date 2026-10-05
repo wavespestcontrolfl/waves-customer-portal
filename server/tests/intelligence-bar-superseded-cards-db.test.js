@@ -102,6 +102,67 @@ suite('IB superseded confirmation cards in isolated Postgres', () => {
     expect(await status(fix.id)).toBe('cancelled'); // replaced by the later email card
   });
 
+  test('a lead card that overlaps the newer one on any field is cancelled whole; disjoint fields coexist', async () => {
+    const change = (from, to) => ({ from, to });
+    // Older compound card: a real first_name change and a WRONG email.
+    const older = await propose('update_lead_contact', { lead_id: leadId, first_name: 'Jay', email: 'wrong@example.invalid', _approved_changes: { first_name: change(null, 'Jay'), email: change('old@example.invalid', 'wrong@example.invalid') } }, { noTask: true, startedAt: at(-5000) });
+    // Disjoint card (phone only) coexists with it.
+    const phone = await propose('update_lead_contact', { lead_id: leadId, phone: '+15550100000', _approved_changes: { phone: change(null, '+15550100000') } }, { noTask: true, startedAt: at(-4000) });
+    expect(await status(older.id)).toBe('pending');
+    // The email correction overlaps only on email; the older compound card is cancelled whole.
+    const fix = await propose('update_lead_contact', { lead_id: leadId, email: 'right@example.invalid', _approved_changes: { email: change('old@example.invalid', 'right@example.invalid') } }, { noTask: true, startedAt: at(-3000) });
+    expect(await status(older.id)).toBe('cancelled');
+    expect(await claim(older)).toEqual({ error: 'cancelled' });
+    expect(await status(phone.id)).toBe('pending');
+    const confirmed = await claim(fix);
+    expect(confirmed.action.params._approved_changes.email.to).toBe('right@example.invalid');
+    // The same overlap rule applies to rows with no approved set (raw fields).
+    const rawOlder = await propose('update_lead_contact', { lead_id: otherLeadId, first_name: 'Raw', email: 'wrong@example.invalid' }, { noTask: true, startedAt: at(-2000) });
+    await propose('update_lead_contact', { lead_id: otherLeadId, email: 'right@example.invalid' }, { noTask: true, startedAt: at(-1000) });
+    expect(await status(rawOlder.id)).toBe('cancelled');
+  });
+
+  test('a booking request started long ago and resumed after a newer card was confirmed is stored cancelled', async () => {
+    const day = '2030-04-12';
+    const minutesAgo = m => new Date(Date.now() - m * 60 * 1000);
+    // The newer request started 20 minutes ago; its card was created then and confirmed.
+    const newer = await propose('create_appointment', booking({ scheduled_date: day, time_window: '10:00 AM' }), { noTask: true, startedAt: minutesAgo(20) });
+    await db('ib_pending_actions').where({ id: newer.id }).update({ created_at: minutesAgo(20) });
+    await claim(newer);
+    // The interrupted request started 45 minutes ago (long past one card lifetime) and is resumed now.
+    const late = await propose('create_appointment', booking({ scheduled_date: day }), { noTask: true, startedAt: minutesAgo(45) });
+    expect(late.superseded_by_newer_request).toBe(true);
+    expect(await status(late.id)).toBe('cancelled');
+    expect(await status(newer.id)).toBe('confirmed');
+    // The same holds when the newer card is pending and is the only evidence.
+    const day2 = '2030-04-13';
+    const pendingNewer = await propose('create_appointment', booking({ scheduled_date: day2, time_window: '10:00 AM' }), { noTask: true, startedAt: minutesAgo(20) });
+    await db('ib_pending_actions').where({ id: pendingNewer.id }).update({ created_at: minutesAgo(20) });
+    const late2 = await propose('create_appointment', booking({ scheduled_date: day2 }), { noTask: true, startedAt: minutesAgo(45) });
+    expect(late2.superseded_by_newer_request).toBe(true);
+    expect(await status(pendingNewer.id)).toBe('pending');
+  });
+
+  test('an unrelated same-intent card from an older request hours ago does not cancel a fresh request', async () => {
+    const day = '2030-04-14';
+    const hoursAgo = h => new Date(Date.now() - h * 3600 * 1000);
+    const old = await propose('create_appointment', booking({ scheduled_date: day }), { noTask: true, startedAt: hoursAgo(3) });
+    await db('ib_pending_actions').where({ id: old.id }).update({ created_at: hoursAgo(3), expires_at: hoursAgo(2.8) });
+    const fresh = await propose('create_appointment', booking({ scheduled_date: day, time_window: '10:00 AM' }), { noTask: true, startedAt: new Date() });
+    expect(fresh.superseded_by_newer_request).toBeUndefined();
+    expect(fresh.earlier_card_confirmed).toBeUndefined();
+    expect(await status(fresh.id)).toBe('pending');
+    expect(await status(old.id)).toBe('pending'); // left alone: outside the older window, already expired
+    // An hours-old CONFIRMED card from an older request does not block a new booking either.
+    const day2 = '2030-04-15';
+    const done = await propose('create_appointment', booking({ scheduled_date: day2 }), { noTask: true, startedAt: hoursAgo(3) });
+    await claim(done);
+    await db('ib_pending_actions').where({ id: done.id }).update({ created_at: hoursAgo(3) });
+    const again = await propose('create_appointment', booking({ scheduled_date: day2 }), { noTask: true, startedAt: new Date() });
+    expect(again.earlier_card_confirmed).toBeUndefined();
+    expect(await status(again.id)).toBe('pending');
+  });
+
   test('a lead card with no approved set uses the raw fields; one with an empty set is left alone', async () => {
     const raw = await propose('update_lead_contact', { lead_id: leadId, first_name: 'Raw' }, { noTask: true, startedAt: at(-5000) });
     const empty = await propose('update_lead_contact', { lead_id: leadId, last_name: 'Empty', _approved_changes: {} }, { noTask: true, startedAt: at(-4000) });

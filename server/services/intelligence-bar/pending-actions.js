@@ -127,21 +127,26 @@ const SUPERSEDE_RULES = {
     afterConfirmed: 'refuse',
     confirmedMessage: 'An earlier card for this booking was already confirmed. Nothing was prepared. Tell the operator to move that visit instead of booking it again.',
   },
-  // A lead edit replaces an earlier edit only when it changes every field the
-  // earlier one would change ("Jay" then "Jason"); a card for another field
-  // stays. "Changes" is the card's approved change set (params._approved_changes,
+  // A lead edit replaces an earlier edit when the newer one changes ANY field
+  // the earlier one would change (their approved fields overlap). Partial
+  // overlap counts: if the older card still saved its wrong value for the shared
+  // field, the newer card's proposal-time "from" check would fail at Confirm and
+  // the correction would be lost. KNOWN COST: the older card is cancelled whole,
+  // so a field it changed that the newer card does not touch is lost with it and
+  // the operator re-asks. Disjoint fields coexist (a card for another field
+  // stays). "Changes" is the card's approved change set (params._approved_changes,
   // { field: { from, to } }, pinned from the preview and holding only fields
   // whose value really differs), not the raw input: a raw field that already had
   // that value is not part of the card's effect. Rows with no approved set (older
-  // rows) fall back to the raw contact fields. A card whose approved set is
-  // empty or malformed changes nothing (its Confirm is refused by the tool), so
-  // it is never treated as replaced and is left alone.
+  // rows) fall back to the raw contact fields, with the same overlap rule. A card
+  // whose approved set is empty or malformed changes nothing (its Confirm is
+  // refused by the tool), so it is never treated as replaced and is left alone.
   update_lead_contact: {
     key: p => idPart(p.lead_id ?? p.leadId),
     covers: (newer, older) => {
       const written = leadFieldsChanged(older);
       const covered = leadFieldsChanged(newer);
-      return written.length > 0 && written.every(f => covered.includes(f));
+      return written.some(f => covered.includes(f));
     },
     afterConfirmed: 'allow',
   },
@@ -157,13 +162,13 @@ const intentLock = (actor, toolName, key) => `ib-supersede:${actor}:${toolName}:
 
 // WHAT "SAME INTENT" MEANS (owner-visible rule). The same operator proposing
 // the same booking (same customer, same catalog service, same day) or the same
-// lead edit again within one card lifetime IS a replacement, whichever chat
-// window or surface it came from. A wrong cancel costs one re-ask; a missed
-// cancel costs a double booking or a wrong edit. So scope is: same actor
-// (requested_by, set from the admin id on the platform-on and platform-off
-// paths alike) + same tool + same intent key, among cards created within
-// TTL_MINUTES of each other. Evidence is read from ib_pending_actions itself,
-// never from ib_tasks, so it works with GATE_IB_PLATFORM on or off.
+// lead edit again IS a replacement, whichever chat window or surface it came
+// from. A wrong cancel costs one re-ask; a missed cancel costs a double booking
+// or a wrong edit. So scope is: same actor (requested_by, set from the admin id
+// on the platform-on and platform-off paths alike) + same tool + same intent
+// key. Evidence is read from ib_pending_actions itself, never from ib_tasks, so
+// it works with GATE_IB_PLATFORM on or off. How far back a sibling counts
+// depends on its direction (see intentSiblings).
 //
 // ORDER: the card's request-start stamp (params._ib_request_started_at, set by
 // the /query route on both paths), else its created_at; ties break on
@@ -178,7 +183,21 @@ const intentLock = (actor, toolName, key) => `ib-supersede:${actor}:${toolName}:
 // first and then waits for an advisory lock, so no cycle exists.
 //
 // Reads this card's same-intent siblings (any status) in one query, in SQL so
-// microsecond timestamps are compared exactly.
+// microsecond timestamps are compared exactly. The window depends on direction:
+//   NEWER siblings (a later request's card; the evidence that this card is
+//     stale): every card whose order key is after this card's, no matter how
+//     long ago this request started - a task stays resumable for 30 days. The
+//     lower bound is the index-friendly fact that a card of a later request
+//     cannot have been created before this request started:
+//     sibling.created_at >= this request's start - 1 minute. The minute only
+//     absorbs clock skew between the app (which stamps the start) and the
+//     database (which stamps created_at).
+//   OLDER siblings (cards this one replaces or repeats): created within
+//     TTL_MINUTES before this card. Pending cards expire after TTL_MINUTES, so
+//     nothing older is a live proposal, and an older confirmed card only counts
+//     as "already booked" within one card lifetime.
+const STAMP_OF = alias => `COALESCE(NULLIF(${alias}.params->>'${REQUEST_STAMP}', '')::timestamptz, ${alias}.created_at)`;
+const IS_NEWER = `(${STAMP_OF('pa')}, pa.created_at, pa.id::text) > (${STAMP_OF('o')}, o.created_at, o.id::text)`;
 async function intentSiblings(q, ownId, toolName, key) {
   const rule = SUPERSEDE_RULES[toolName];
   const rows = await q('ib_pending_actions as pa')
@@ -186,10 +205,11 @@ async function intentSiblings(q, ownId, toolName, key) {
     .whereNot('pa.id', ownId)
     .whereRaw('pa.requested_by = o.requested_by')
     .whereRaw('pa.tool_name = o.tool_name')
-    .whereRaw(`pa.created_at >= o.created_at - make_interval(mins => ${Number(TTL_MINUTES)})`)
-    .select('pa.id', 'pa.params', 'pa.status', 'pa.result', 'pa.expires_at',
-      q.raw(`(COALESCE(NULLIF(pa.params->>'${REQUEST_STAMP}', '')::timestamptz, pa.created_at), pa.created_at, pa.id::text)
-        > (COALESCE(NULLIF(o.params->>'${REQUEST_STAMP}', '')::timestamptz, o.created_at), o.created_at, o.id::text) AS newer`));
+    .where(function () {
+      this.whereRaw(`${IS_NEWER} AND pa.created_at >= ${STAMP_OF('o')} - interval '1 minute'`)
+        .orWhereRaw(`NOT (${IS_NEWER}) AND pa.created_at >= o.created_at - make_interval(mins => ${Number(TTL_MINUTES)})`);
+    })
+    .select('pa.id', 'pa.params', 'pa.status', 'pa.result', 'pa.expires_at', q.raw(`${IS_NEWER} AS newer`));
   return rows.filter(row => rule.key(paramsOf(row)) === key).map(row => ({ ...row, params: paramsOf(row) }));
 }
 
